@@ -12,6 +12,10 @@
 
 use std::path::Path;
 
+/// Re-exported so an LSP server maps severities without depending on `checker` directly, and so
+/// there is exactly ONE severity type in the tree.
+pub use crate::checker::Severity;
+
 /// A diagnostic with a **0-based** half-open range, ready to map onto an LSP `Diagnostic`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diag {
@@ -25,10 +29,13 @@ pub struct Diag {
     pub end_col: u32,
     /// Human-readable error message.
     pub message: String,
+    /// Error (squiggle, blocks the build) vs warning (advisory).
+    pub severity: Severity,
 }
 
 /// Type-check `source` as the entry module at `path` (imports resolve from disk) and return one
-/// [`Diag`] per error. A clean program yields an empty vector.
+/// [`Diag`] per diagnostic — errors AND non-fatal warnings, told apart by [`Diag::severity`]. A
+/// clean program yields an empty vector.
 ///
 /// This mirrors `chezzi check` exactly (resolve → desugar → check_graph) but feeds the **live**
 /// buffer in for the entry module, so diagnostics reflect unsaved edits while cross-module imports
@@ -45,31 +52,39 @@ pub fn diagnostics(path: &Path, source: &str) -> Vec<Diag> {
 fn diagnostics_inner(path: &Path, source: &str) -> Vec<Diag> {
     use crate::{checker, resolver};
     match resolver::build_graph_with_entry_source(path, Some(source.to_string())) {
-        // A resolve error wraps the fatal lex/parse error (or a missing/cyclic import).
+        // A resolve error wraps the fatal lex/parse error (or a missing/cyclic import) — always fatal.
         Err(e) => vec![span_diag(
             source,
             e.span.line as usize,
             e.span.col as usize,
             e.message,
+            Severity::Error,
         )],
         // M24 — the manifest-entrypoint gate is a property of the PROJECT, so the editor reports it
         // like `chezzi check` does: one derivation (`manifest::entry_fn_for`), every consumer.
-        Ok(graph) => match checker::check_graph_with_entry(
-            &graph,
-            crate::manifest::entry_fn_for(path).as_deref(),
-        ) {
-            Ok(()) => Vec::new(),
-            Err(errs) => errs
-                .into_iter()
-                .map(|e| span_diag(source, e.span.line as usize, e.span.col as usize, e.message))
-                .collect(),
-        },
+        Ok(graph) => {
+            let (res, warns) =
+                checker::check_graph_diags(&graph, crate::manifest::entry_fn_for(path).as_deref());
+            let errs = res.err().unwrap_or_default();
+            errs.into_iter()
+                .chain(warns)
+                .map(|e| {
+                    span_diag(
+                        source,
+                        e.span.line as usize,
+                        e.span.col as usize,
+                        e.message,
+                        e.severity,
+                    )
+                })
+                .collect()
+        }
     }
 }
 
 /// 1-based `(line, col)` → 0-based [`Diag`], extending the end over an identifier word at the
 /// position (so an undefined-name squiggle covers the whole name) or by one char otherwise.
-fn span_diag(source: &str, line1: usize, col1: usize, message: String) -> Diag {
+fn span_diag(source: &str, line1: usize, col1: usize, message: String, severity: Severity) -> Diag {
     let line0 = line1.saturating_sub(1) as u32;
     let col0_char = col1.saturating_sub(1);
     let end_char = word_end_col(source, line1, col1) as usize;
@@ -90,6 +105,7 @@ fn span_diag(source: &str, line1: usize, col1: usize, message: String) -> Diag {
         end_line: line0,
         end_col: to_utf16(end_char),
         message,
+        severity,
     }
 }
 

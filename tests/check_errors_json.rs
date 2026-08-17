@@ -81,6 +81,12 @@ fn resolve_error_json_is_clean_and_attributed() {
         stdout.contains("\"line\":4"),
         "must carry line 4, got: {stdout}"
     );
+    // (e) `severity` is on EVERY object a consumer can receive, the fatal path included — a key
+    // that appears only on type errors would be worse than no key at all.
+    assert!(
+        stdout.contains("\"severity\":\"error\""),
+        "fatal JSON must carry the same severity key as a type error, got: {stdout}"
+    );
 }
 
 #[test]
@@ -444,6 +450,93 @@ fn composed_interp_depth_is_bounded_globally() {
             out.status.code().is_some(),
             "chezzi {cmd} signal-crashed on the pass-2 default-splice seam — that residual went \
              from latent to LIVE; see desugar::Walker::walk_expr"
+        );
+    }
+}
+
+/// The severity channel is additive: a clean file's verdict, exit code, and empty JSON array are
+/// unchanged, and a real type error still renders byte-identically in plain text while gaining a
+/// `severity` key in JSON. (No rule emits a warning yet — this pins the cases the channel must not
+/// have regressed.)
+#[test]
+fn severity_key_is_additive_and_the_clean_case_is_unchanged() {
+    let t = TmpDir::new();
+    let clean = t.write("clean.chz", "x := 1\nprint(x)\n");
+    let bad = t.write("bad.chz", "x: int = \"s\"\nprint(x)\n");
+
+    let run = |path: &std::path::Path, json: bool| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
+        cmd.args(["check", path.to_str().unwrap()]);
+        if json {
+            cmd.arg("--errors=json");
+        }
+        cmd.output().expect("run chezzi check")
+    };
+
+    let out = run(&clean, false);
+    assert!(out.status.success(), "clean file must exit 0");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "ok: no type errors"
+    );
+
+    let out = run(&clean, true);
+    assert!(
+        out.status.success(),
+        "clean file must exit 0 under --errors=json"
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "[]");
+
+    let out = run(&bad, false);
+    assert!(!out.status.success(), "type error must exit non-zero");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("type error (line 1, col 10):") && stderr.contains("chezzi: 1 type error"),
+        "plain-text rendering must be unchanged, got: {stderr}"
+    );
+
+    let out = run(&bad, true);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stdout = stdout.trim();
+    assert!(
+        stdout.starts_with("[{\"line\":1,\"col\":10,\"severity\":\"error\",\"message\":\"")
+            && stdout.ends_with("}]"),
+        "JSON must gain a severity key in the documented position, got: {stdout}"
+    );
+}
+
+/// ONE diagnostic, ONE stream. Under `--errors=json` a checker diagnostic must be rendered exactly
+/// once, and the JSON document must appear on exactly one stream — `check` puts its single array on
+/// stdout, `run` likewise (its warnings, when a rule finally emits any, go to stderr as PLAIN TEXT
+/// instead of being folded into that array a second time). Before this was fixed, `chezzi run
+/// --errors=json` printed a warning array to stderr AND folded the same warnings into the stdout
+/// array. The warning half of this only bites once a rule warns — what is assertable today is that
+/// neither command emits a second JSON document on stderr.
+#[test]
+fn errors_json_emits_one_document_on_one_stream() {
+    let t = TmpDir::new();
+    let bad = t.write("bad.chz", "x: int = \"s\"\nprint(x)\n");
+
+    for sub in ["check", "run"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+            // Flags go BEFORE the path: for `run`, anything after it is passed to the program.
+            .args([sub, "--errors=json", bad.to_str().unwrap()])
+            .output()
+            .expect("run chezzi");
+        assert!(
+            !out.status.success(),
+            "{sub}: type error must exit non-zero"
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            stdout.matches("\"severity\":").count(),
+            1,
+            "{sub}: stdout must carry the diagnostic exactly once, got: {stdout}"
+        );
+        assert!(
+            !stderr.contains("\"severity\":"),
+            "{sub}: stderr must not carry a second JSON document, got: {stderr}"
         );
     }
 }

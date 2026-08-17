@@ -29,6 +29,849 @@ fn rejects(src: &str, needle: &str) {
     );
 }
 
+/// Type-check a source string, returning the collected WARNINGS (non-fatal diagnostics).
+fn warn_src(src: &str) -> (Vec<CheckError>, Vec<CheckError>) {
+    let tokens = lexer::tokenize(src).expect("lex should succeed");
+    let module = parser::parse(tokens).expect("parse should succeed");
+    let (res, warns) = check_diags(&module);
+    (res.err().unwrap_or_default(), warns)
+}
+
+/// Assert the source type-checks CLEAN and emits a warning containing `needle`. The clean assertion
+/// is load-bearing: without it the helper cannot tell a warning from an error, and every rule built
+/// on it would pass while emitting a hard error.
+fn warns(src: &str, needle: &str) {
+    let (errs, warns) = warn_src(src);
+    assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+    assert!(
+        warns.iter().any(|w| w.message.contains(needle)),
+        "expected a warning containing {needle:?}, got: {warns:?}"
+    );
+}
+
+/// Assert the source type-checks clean and emits NO warnings — the false-positive guard for a rule
+/// added via [`warns`].
+fn no_warn(src: &str) {
+    let (errs, warns) = warn_src(src);
+    assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+    assert!(warns.is_empty(), "expected no warnings, got: {warns:?}");
+}
+
+// ===== the severity channel (no rule emits a warning yet — Tasks 1/2 wire the first two) =====
+
+/// `warn` and `error` land in DIFFERENT vectors, share the module attribution, and render with their
+/// own prefixes. This is the whole contract the warning rules are built on: one that leaked into
+/// `errors` would fail the build, and one that rendered as `type error (...)` would be
+/// indistinguishable from a real error.
+#[test]
+fn warn_is_a_separate_non_fatal_channel() {
+    let span = Span {
+        line: 3,
+        col: 7,
+        file: 0,
+    };
+    let mut c = Checker::new();
+    c.warn(span, "hello");
+    c.error(span, "boom");
+    assert_eq!(c.errors.len(), 1);
+    assert_eq!(c.warnings.len(), 1);
+    assert_eq!(c.errors[0].severity, Severity::Error);
+    assert_eq!(c.warnings[0].severity, Severity::Warning);
+    // Byte-identical to what an error has always rendered as — hundreds of tests, the LSP and
+    // `--errors=json` all key on this string.
+    assert_eq!(c.errors[0].to_string(), "type error (line 3, col 7): boom");
+    assert_eq!(c.warnings[0].to_string(), "warning (line 3, col 7): hello");
+
+    // A warning raised while checking an imported module names it, exactly like an error.
+    c.current_module_label = Some("core.db".to_string());
+    c.warn(span, "attributed");
+    c.error(span, "attributed");
+    assert_eq!(c.warnings[1].message, "in module 'core.db': attributed");
+    assert_eq!(c.errors[1].message, "in module 'core.db': attributed");
+}
+
+/// The speculative-inference idiom — mark, run a probe re-inference, roll back — must cover the
+/// WARNING channel too. A dozen sites in the checker probe an expression only to learn its type and
+/// then discard what the probe reported, because the real path re-runs it and reports for keeps; a
+/// warning left behind by such a probe (or by an abandoned branch) double-reports. Written at the
+/// `Checker` level because no rule warns yet: with `diag_rollback` truncating `errors` alone, the
+/// first assertion below sees 2 warnings.
+#[test]
+fn diag_rollback_discards_speculative_warnings_and_keeps_the_rest() {
+    let span = Span {
+        line: 1,
+        col: 1,
+        file: 0,
+    };
+    let mut c = Checker::new();
+    // Recorded BEFORE the speculative window — must survive the rollback.
+    c.warn(span, "kept");
+    c.error(span, "kept");
+    let mark = c.diag_mark();
+    c.warn(span, "speculative");
+    c.error(span, "speculative");
+    c.diag_rollback(mark);
+    assert_eq!(
+        c.warnings.len(),
+        1,
+        "the speculative warning must be rolled back, got: {:?}",
+        c.warnings
+    );
+    assert_eq!(c.errors.len(), 1, "got: {:?}", c.errors);
+    assert_eq!(c.warnings[0].message, "kept");
+    assert_eq!(c.errors[0].message, "kept");
+    // A rollback to a mark taken on empty channels clears both.
+    let zero = Checker::new().diag_mark();
+    c.diag_rollback(zero);
+    assert!(c.warnings.is_empty() && c.errors.is_empty());
+}
+
+/// The graph entry point keeps the channels apart: warnings never reach the `Result`, and an
+/// erroring program's `Err` carries only `Severity::Error`.
+///
+/// The third case is the one that pins the PLUMBING: a warning program returns `Ok(())` **alongside a
+/// non-empty warning vec**, so replacing `check_graph_diags`' `let warnings = std::mem::take(&mut
+/// c.warnings);` with `Vec::new()` now fails here. It has to be spelled out at THIS entry point —
+/// `warns`/`no_warn` go through the single-module `check_diags`, which is a different (test-only)
+/// wire, and the CLI / LSP / test runner all land on this one.
+#[test]
+fn check_graph_diags_keeps_warnings_out_of_the_result() {
+    let t = TmpDir::new();
+
+    let clean = t.write("clean.chz", "print(1)\n");
+    let graph = crate::resolver::build_graph(&clean).expect("resolve should succeed");
+    let (res, warns) = check_graph_diags(&graph, None);
+    assert!(res.is_ok(), "clean program should check clean: {res:?}");
+    assert!(warns.is_empty(), "clean program warns: {warns:?}");
+
+    let bad = t.write("bad.chz", "x: int = \"s\"\nprint(x)\n");
+    let graph = crate::resolver::build_graph(&bad).expect("resolve should succeed");
+    let (res, warns) = check_graph_diags(&graph, None);
+    let errs = res.expect_err("should not type-check");
+    assert!(errs.iter().all(|e| e.severity == Severity::Error));
+    assert!(warns.is_empty(), "erroring program warns: {warns:?}");
+
+    let warned = t.write(
+        "warned.chz",
+        "fn g() -> Result[int, Error]:\n    return Ok(1)\nfn f():\n    g()\nf()\n",
+    );
+    let graph = crate::resolver::build_graph(&warned).expect("resolve should succeed");
+    let (res, warns) = check_graph_diags(&graph, None);
+    assert!(res.is_ok(), "a warning must not fail the check: {res:?}");
+    assert_eq!(warns.len(), 1, "got: {warns:?}");
+    assert_eq!(warns[0].severity, Severity::Warning);
+    assert!(warns[0].message.contains("is discarded"), "got: {warns:?}");
+}
+
+// ===== W8-2 — the discarded-`Result`/`Option` warning (`sig.rs`, the `StmtKind::Expr` arm) =====
+
+/// A `Result`/`Option` dropped on the floor **where it is genuinely lost** — inside a non-top-level
+/// proto, the positions filed as `docs/gaps.md` W8-2. Rust owns both carriers, marks them
+/// `#[must_use]`, and warns on the drop. Every case here still type-checks CLEAN (that is `warns`'
+/// first assertion), so the exit code is unchanged. The top-level counterpart, where the runtime
+/// checks the value itself and no warning may fire, is `a_top_level_drop_does_not_warn`.
+#[test]
+fn discarded_carrier_warns() {
+    let g = "fn g() -> Result[int, Error]:\n    return Ok(1)\n";
+    let o = "fn o() -> int?:\n    return Some(1)\n";
+    // Inside a function body — the position that is silent today.
+    warns(
+        &format!("{g}fn f():\n    g()\nf()\n"),
+        "the Result returned by 'g' is discarded",
+    );
+    warns(
+        &format!("{o}fn f():\n    o()\nf()\n"),
+        "the Option returned by 'o' is discarded",
+    );
+    // A `spawn:` block and a `defer:` block each compile to their OWN child proto, so a drop in one
+    // is swallowed even at MODULE TOP LEVEL (measured: both print the following statement and exit
+    // 0). These are the two cases an `in_fn_body`-only gate would wrongly suppress — `in_fn_body` is
+    // deliberately not set at a `spawn:` block boundary.
+    warns(
+        &format!("{g}parallel:\n    spawn:\n        g()\n"),
+        "the Result returned by 'g' is discarded",
+    );
+    warns(
+        &format!("{g}defer:\n    g()\nprint(1)\n"),
+        "the Result returned by 'g' is discarded",
+    );
+    // …and the same two nested inside a function, their neighbours.
+    warns(
+        &format!("{g}fn f():\n    parallel:\n        spawn:\n            g()\nf()\n"),
+        "the Result returned",
+    );
+    warns(
+        &format!("{g}fn f():\n    defer:\n        g()\n    print(1)\nf()\n"),
+        "the Result returned",
+    );
+    // Nested inside a function, both block kinds — the neighbours of the fn-body case above.
+    warns(
+        &format!("{g}fn f():\n    if true:\n        g()\nf()\n"),
+        "the Result returned",
+    );
+    warns(
+        &format!("{g}fn f():\n    for i in 0..1:\n        g()\nf()\n"),
+        "the Result returned",
+    );
+    // A method call names the METHOD, not the receiver expression.
+    warns(
+        "fn f():\n    xs := [1, 2]\n    xs.pop()\nf()\n",
+        "the Option returned by 'pop' is discarded",
+    );
+    // Not a call, so there is no callee to name — the message falls back to the position.
+    warns(
+        &format!("{o}fn f():\n    x := o()\n    x\nf()\n"),
+        "the Option value here is discarded",
+    );
+    // Every message carries both escapes, or it is not actionable — and for a plain `g()` callee
+    // the hint spells the call back rather than eliding it.
+    warns(
+        &format!("{g}fn f():\n    g()\nf()\n"),
+        "bind it (`r := g()`)",
+    );
+    warns(
+        &format!("{g}fn f():\n    g()\nf()\n"),
+        "discard it explicitly (`_ := g()`)",
+    );
+    // A METHOD call keeps the elision: reconstructing the receiver expression would be guesswork.
+    warns(
+        "fn f():\n    xs := [1, 2]\n    xs.pop()\nf()\n",
+        "bind it (`r := …`)",
+    );
+    // …as does a non-call carrier, which has no callee name at all.
+    warns(
+        &format!("{o}fn f():\n    x := o()\n    x\nf()\n"),
+        "bind it (`r := …`)",
+    );
+    // A hint the user cannot TYPE is worse than no hint. The spelled-back form dropped the call's
+    // ARGUMENTS, so `takes(1, "a")` suggested `r := takes()` — which is itself a type error
+    // (`'takes' expects 2 argument(s), got 0`). Only a nullary plain-name call is reproducible from
+    // the callee name alone; anything with arguments elides like the method-call case.
+    warns(
+        "fn takes(n: int, s: str) -> Result[int, Error]:\n    return Ok(n)\nfn f():\n    takes(1, \"a\")\nf()\n",
+        "bind it (`r := …`), or discard it explicitly (`_ := …`)",
+    );
+    // …and the subject still names the callee, which is what points at the culprit.
+    warns(
+        "fn takes(n: int, s: str) -> Result[int, Error]:\n    return Ok(n)\nfn f():\n    takes(1, \"a\")\nf()\n",
+        "the Result returned by 'takes' is discarded",
+    );
+}
+
+/// The scope correction. At **module top level** the runtime already checks a dropped carrier:
+/// `Op::PopExprStmt` calls `top_level_error` when its frame `is_toplevel` (`vm/exec.rs`), so an
+/// `Err`/`None` aborts the program with `unhandled error` and rc=1. Warning "is discarded" there
+/// would be factually false, and obeying it (`_ := g()`) DISABLES that check — turning a failing
+/// program into a silent rc=0. So the gate is "does this statement lower into a non-top-level
+/// proto", and the block kinds below all emit into the ENCLOSING proto.
+///
+/// Measured on the release binary with `g()` returning `Err`, each of these ABORTS with `unhandled
+/// error: E` and rc=1 — except `recover:`, where the abort is caught and surfaces as
+/// `r = Err('unhandled error: E')`. In every case the value reaches the user.
+#[test]
+fn a_top_level_drop_does_not_warn() {
+    let g = "fn g() -> Result[int, Error]:\n    return Ok(1)\n";
+    let o = "fn o() -> int?:\n    return Some(1)\n";
+    no_warn(&format!("{g}g()\n"));
+    no_warn(&format!("{o}o()\n"));
+    // Every block kind that can hold a statement WITHOUT opening a child proto.
+    no_warn(&format!("{g}if true:\n    g()\n"));
+    no_warn(&format!("{g}for i in 0..1:\n    g()\n"));
+    no_warn(&format!(
+        "{g}n := 0\nwhile n < 1:\n    n = n + 1\n    g()\n"
+    ));
+    no_warn(&format!(
+        "{g}match 1:\n    1:\n        g()\n    _:\n        pass\n"
+    ));
+    no_warn(&format!("{g}parallel:\n    g()\n"));
+    no_warn(&format!("{g}r := recover:\n    g()\n    1\nprint(r)\n"));
+    no_warn(&format!(
+        "{g}ch := Channel[int](1)\nch.send(1)\nwait:\n    v := ch.recv():\n        g()\n"
+    ));
+    // Two levels deep, still the top-level proto.
+    no_warn(&format!("{g}if true:\n    for i in 0..1:\n        g()\n"));
+}
+
+/// The escapes. `_` is an ordinary identifier in LET position (it is special-cased only in pattern
+/// position and as a `wait:` arm target), so `_ := g()` parses as a plain `StmtKind::Let` and never
+/// reaches the `StmtKind::Expr` arm at all — no special-casing in the rule, asserted rather than
+/// assumed. Binding for real is the other escape.
+#[test]
+fn a_bound_carrier_does_not_warn() {
+    let g = "fn g() -> Result[int, Error]:\n    return Ok(1)\n";
+    no_warn(&format!("{g}fn f():\n    _ := g()\nf()\n"));
+    no_warn(&format!("{g}fn f():\n    r := g()\n    print(r)\nf()\n"));
+    no_warn(&format!("{g}_ := g()\n"));
+    // The neighbours: `_` shadowed/reassigned, and `_` in the nested positions that warn above.
+    no_warn(&format!(
+        "{g}fn f():\n    if true:\n        _ := g()\nf()\n"
+    ));
+    no_warn(&format!(
+        "{g}fn f():\n    for i in 0..1:\n        _ := g()\nf()\n"
+    ));
+    // A carrier consumed by `match` / `?` is handled, not discarded.
+    no_warn(&format!(
+        "{g}fn f():\n    match g():\n        Ok(v): print(v)\n        Err(e): print(e.message())\nf()\n"
+    ));
+    no_warn(&format!(
+        "{g}fn f() -> Result[int, Error]:\n    v := g()?\n    return Ok(v)\nprint(f())\n"
+    ));
+}
+
+/// The four positions where a bare carrier expression is NOT a drop. Each is inferred off a path
+/// other than `check_stmt`'s `StmtKind::Expr` arm, and a warning in any of them would fire on
+/// correct, idiomatic code.
+#[test]
+fn a_carrier_that_is_not_discarded_does_not_warn() {
+    let g = "fn g() -> Result[int, Error]:\n    return Ok(1)\n";
+    // 1. An inline-expr body implicitly RETURNS its expression (`check_fn_body`, not `check_stmt`).
+    no_warn(&format!(
+        "{g}fn f() -> Result[int, Error]: g()\nprint(f())\n"
+    ));
+    // …and the same body written as an explicit `return`, its neighbour.
+    no_warn(&format!(
+        "{g}fn f() -> Result[int, Error]:\n    return g()\nprint(f())\n"
+    ));
+    // 2. The trailing expression of a `recover:` block IS the block's value (`infer_recover`).
+    no_warn(&format!(
+        "{g}fn f():\n    r := recover:\n        g()\n    print(r)\nf()\n"
+    ));
+    // …and its two value-tail siblings, a trailing value-`match` and a trailing value-`if`.
+    no_warn(&format!(
+        "{g}fn f(n: int):\n    r := recover:\n        match n:\n            0: g()\n            _: g()\n    print(r)\nf(0)\n"
+    ));
+    no_warn(&format!(
+        "{g}fn f(n: int):\n    r := recover:\n        if n == 0:\n            g()\n        else:\n            g()\n    print(r)\nf(0)\n"
+    ));
+    // The order matters: a carrier in a NON-final position of the same block is a real drop.
+    warns(
+        &format!("{g}fn f():\n    r := recover:\n        g()\n        1\n    print(r)\nf()\n"),
+        "the Result returned by 'g' is discarded",
+    );
+    // 3. `?` / `??` yield the UNWRAPPED payload, so the statement's type is not a carrier.
+    no_warn(&format!(
+        "{g}fn f() -> Result[int, Error]:\n    g()?\n    return Ok(2)\nprint(f())\n"
+    ));
+    no_warn("fn o() -> int?:\n    return Some(1)\nfn f():\n    o() ?? 0\nf()\n");
+    // `?.` is the exception in that family and DOES warn: optional chaining re-wraps, so
+    // `o()?.len()` is an `int?` and dropping it drops a carrier. Rust agrees (`Option::map` is
+    // `#[must_use]`). Pinned here, next to its siblings, because the shape reads like theirs.
+    warns(
+        "fn o() -> str?:\n    return Some(\"a\")\nfn f():\n    o()?.len()\nf()\n",
+        "the Option value here is discarded",
+    );
+    // 4. `defer` is its own statement arm and stays excluded on purpose — `defer f.Close()` is Go's
+    //    canonical unchecked idiom, and the corpus has 27 of them.
+    no_warn(&format!("{g}fn f():\n    defer g()\n    print(1)\nf()\n"));
+    no_warn(&format!("{g}defer g()\nprint(1)\n"));
+    // …and `spawn <call>`, the same fire-and-forget shape: a spawned task's return value is
+    // discarded by construction (measured: `parallel:\n    spawn g()` with `g()` returning `Err`
+    // prints the following statement and exits 0). Silent on purpose, like `defer`.
+    no_warn(&format!("{g}parallel:\n    spawn g()\nprint(1)\n"));
+}
+
+/// The `-> nil` / `-> bool` methods a naive "bare method call statement" rule would drown in. None of
+/// them returns a carrier, so none may warn — a false positive on `ch.send(v)` would cost the whole
+/// diagnostic its credibility.
+#[test]
+fn a_non_carrier_statement_does_not_warn() {
+    no_warn("fn f():\n    ch := Channel[int](1)\n    ch.send(1)\n    ch.close()\nf()\n");
+    no_warn("fn f():\n    s := {1, 2}\n    s.remove(1)\nf()\n"); // Set.remove -> bool
+    no_warn("fn f():\n    xs := [1]\n    xs.push(2)\n    print(xs)\nf()\n");
+    no_warn("fn f():\n    print(1)\nf()\n");
+    // A void call in the very positions that warn for a carrier.
+    no_warn("fn v():\n    print(1)\nif true:\n    v()\nfor i in 0..1:\n    v()\n");
+}
+
+/// An `Unknown`-typed expression statement stays silent: it has already produced a hard error, and a
+/// warning on top of it is cascade noise. Cannot go through `no_warn` (which requires a clean check),
+/// so it asserts on both channels directly.
+#[test]
+fn an_unknown_expression_statement_does_not_warn() {
+    let (errs, warns) = warn_src("fn f():\n    nosuch()\nf()\n");
+    assert!(!errs.is_empty(), "expected a hard error");
+    assert!(warns.is_empty(), "expected no warning, got: {warns:?}");
+}
+
+/// The rule sits inside the checker's speculative-inference machinery: a function with NO declared
+/// return type is inferred by a probe pass whose diagnostics are rolled back, then checked for real
+/// in pass 2. Reporting once is the whole contract — `diag_rollback` truncating `errors` alone (its
+/// shape before Task 0) makes this exactly 2.
+#[test]
+fn a_warning_under_return_inference_is_reported_once() {
+    let src = "fn g() -> Result[int, Error]:\n    return Ok(1)\n\
+               fn f():\n    g()\nfn h():\n    f()\nh()\n";
+    let (errs, warns) = warn_src(src);
+    assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+    assert_eq!(
+        warns.len(),
+        1,
+        "expected exactly one warning, got: {warns:?}"
+    );
+}
+
+/// Exercise the `no_warn` helper itself on the simplest clean program.
+#[test]
+fn no_warn_on_a_clean_program() {
+    no_warn("print(1)\n");
+}
+
+// ===== W8-3 — the airlock-staleness warning (a task-side write read after the join) =====
+//
+// Every shape below was MEASURED on the release binary before the rule was written; the warn/silent
+// split is that table, not a guess. Task-side write → value after the join:
+//   reassign 0 · push 0 · `xs[i]=v` 0 · `p.f=v` 1(unchanged) · `m[k]=v` 1(unchanged) ·
+//   top-level spawn 0 · implicit nursery 0 · module global 0     → LOST, warn
+//   `Shared.update` 1 · `Channel.send` 7 · `defer:` block push 1 · parent overwrite 2 → visible, silent
+//
+// The filed defect's failure mode is why it ranks: `for r in results:` over the stale empty list ran
+// ZERO iterations, so every `assert` inside was skipped and the program exited 0.
+
+/// The `docs/gaps.md` repro itself, plus the other three lvalue shapes. The warning must name the
+/// binding and cite the line of the write inside the task.
+#[test]
+fn a_task_side_write_read_after_the_join_warns() {
+    // Reassignment — the filed repro.
+    warns(
+        "fn f():\n    results: List[str] = []\n    parallel:\n        spawn:\n            results = [\"a\"]\n    print(results.len())\nf()\n",
+        "'results' is read here as its pre-`spawn:` value — a captured binding crosses the task \
+         airlock as an independent copy, so the write inside the `spawn:` block (line 5) is not \
+         visible after the join",
+    );
+    // Mutator method call.
+    warns(
+        "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    print(xs.len())\nf()\n",
+        "'xs' is read here",
+    );
+    // Index assign, read WHOLE. A captured `List` deep-copies across the airlock, so the parent's
+    // whole-value read observes the lost element write — the checker can tell, so it reports. (The
+    // granular read `xs[0]` of this same granular write declines; see the ceiling test below.)
+    warns(
+        "fn f():\n    xs := [0]\n    parallel:\n        spawn:\n            xs[0] = 9\n    print(xs)\nf()\n",
+        "'xs' is read here",
+    );
+    // Field assign — a captured struct deep-copies across the airlock too.
+    warns(
+        "struct P:\n    x: int\nfn f():\n    p := P(1)\n    parallel:\n        spawn:\n            p.x = 9\n    print(p)\nf()\n",
+        "'p' is read here",
+    );
+    // Map key assign.
+    warns(
+        "fn f():\n    m := {\"a\": 1}\n    parallel:\n        spawn:\n            m[\"a\"] = 9\n    print(m)\nf()\n",
+        "'m' is read here",
+    );
+    // The other mixed pair: a WHOLE-binding task write, read back through a projection. The whole
+    // copy is stale, so every field of it is — the checker can tell here too.
+    warns(
+        "struct P:\n    x: int\n    s: str\nfn f():\n    p := P(1, \"a\")\n    parallel:\n        spawn:\n            p = P(9, \"z\")\n    print(p.s)\nf()\n",
+        "'p' is read here",
+    );
+    // An IMPLICIT nursery (a bare `spawn:` with no `parallel:`) is the same airlock.
+    warns(
+        "fn f():\n    xs: List[int] = []\n    spawn:\n        xs.push(1)\n    print(xs.len())\nf()\n",
+        "'xs' is read here",
+    );
+}
+
+/// A taint describes ONE binding, and `spawn_stale` is keyed by bare name — so a taint recorded on a
+/// BLOCK-LOCAL SHADOW must die with that block rather than be charged to the outer binding of the
+/// same name. Both were measured warning on the pre-fix binary while printing the CORRECT answer,
+/// which is the rule's "under-warning, never over-warning" invariant negated, not a documented
+/// ceiling. `pop_scope` now drops every entry whose owning scope is the one going away.
+#[test]
+fn a_shadows_taint_is_not_charged_to_the_outer_binding() {
+    // The outer `xs` is a different list; the task wrote the SHADOW. Correctly prints 2.
+    no_warn(
+        "fn f():\n    xs := [10, 20]\n    if true:\n        xs := [1]\n        parallel:\n            spawn:\n                xs.push(99)\n    print(xs.len())\nf()\n",
+    );
+    // The outer binding is an `int` that never entered a task at all. Correctly returns 42.
+    no_warn(
+        "fn f() -> int:\n    n := 41\n    if true:\n        n := [1]\n        parallel:\n            spawn:\n                n.push(99)\n    return n + 1\nprint(f())\n",
+    );
+    // The premise cuts one way only. A read of the SHADOW, inside the shadow's own scope, is a read
+    // of the binding the task actually wrote — it still reports (measured: prints 1).
+    warns(
+        "fn f():\n    xs := [10, 20]\n    if true:\n        xs := [1]\n        parallel:\n            spawn:\n                xs.push(99)\n        print(xs.len())\nf()\n",
+        "'xs' is read here",
+    );
+    // …and an intervening block that does NOT shadow leaves the outer taint intact (measured: the
+    // read prints the stale 2). The cut is scope-keyed, not "any block boundary clears it".
+    warns(
+        "fn f():\n    xs := [10, 20]\n    if true:\n        parallel:\n            spawn:\n                xs.push(99)\n    print(xs.len())\nf()\n",
+        "'xs' is read here",
+    );
+    // A block that pops BETWEEN the task write and the read must not clear a fn-body-scope taint.
+    warns(
+        "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    if true:\n        print(\"mid\")\n    print(xs.len())\nf()\n",
+        "'xs' is read here",
+    );
+}
+
+/// The SEVENTH ceiling — a granular READ of a granular WRITE declines. The write side has always
+/// declined on this ambiguity (`note_assign_root`'s third ceiling: the checker cannot tell whether
+/// `m["b"] = 2` supersedes a task's `m["a"] = 1`); the read side was not symmetric with it, so a
+/// field-granular task write poisoned every later read of the ROOT and `print(p.name)` warned about a
+/// field nothing had written, on a program that printed the right answer. `correct > silent > wrong`:
+/// when the checker cannot tell which part, it declines.
+#[test]
+fn a_granular_read_of_a_granular_task_write_declines() {
+    // Different field. Correctly prints "bob".
+    no_warn(
+        "struct P:\n    count: int\n    name: str\nfn f(p: P):\n    parallel:\n        spawn:\n            p.count = p.count + 1\n    print(p.name)\nf(P(0, \"bob\"))\n",
+    );
+    // The decisive form: still silent once the user has applied the warning's OWN advice and carried
+    // the value out on a Channel. A warning that fires after its own fix is applied is the worst
+    // possible outcome for the rule's credibility.
+    no_warn(
+        "struct P:\n    count: int\n    name: str\nfn f(p: P, ch: Channel[int]):\n    parallel:\n        spawn:\n            p.count = p.count + 1\n            ch.send(p.count)\n    print(p.name)\n    print(ch.recv())\nf(P(0, \"bob\"), Channel[int](4))\n",
+    );
+    // Different map key — the write side's own stated example, now answered the same way on the read
+    // side. Correctly prints 7.
+    no_warn(
+        "fn f(m: Map[str, int]):\n    parallel:\n        spawn:\n            m[\"a\"] = 1\n    print(m[\"b\"])\nm := {\"a\": 0, \"b\": 7}\nf(m)\n",
+    );
+    // The decline is per-BINDING, not a blanket "inside a projection" mute: a stale `i` read within
+    // the INDEX EXPRESSION of a shielded `m[...]` still reports.
+    warns(
+        "fn f(m: Map[str, int], i: int):\n    parallel:\n        spawn:\n            m[\"a\"] = 1\n            i = 3\n    print(m[str(i)])\nm := {\"a\": 0, \"0\": 7}\nf(m, 0)\n",
+        "'i' is read here",
+    );
+    // Only a MUTATOR write is whole-container, so a granular read of one still reports: every member
+    // of `mutates_receiver` is a read-modify-write over the whole container.
+    warns(
+        "fn f():\n    xs := [0]\n    parallel:\n        spawn:\n            xs.push(9)\n    print(xs[0])\nf()\n",
+        "'xs' is read here",
+    );
+}
+
+/// At MODULE TOP LEVEL the binding is scope 0, and this is exactly where the sibling W8-2 rule stays
+/// silent because the runtime backstops it. There is NO backstop here — measured, the program prints
+/// 0 and exits 0 with nothing reported — so the rule uses `is_captured` (which includes scope 0)
+/// rather than `is_local_capture`. Same for a module global captured by a task inside a fn.
+#[test]
+fn a_task_side_write_warns_at_module_top_level_and_on_a_module_global() {
+    warns(
+        "results: List[int] = []\nparallel:\n    spawn:\n        results.push(1)\nprint(results.len())\n",
+        "'results' is read here",
+    );
+    warns(
+        "g: List[int] = []\nfn f():\n    parallel:\n        spawn:\n            g.push(1)\n    print(g.len())\nf()\n",
+        "'g' is read here",
+    );
+}
+
+/// The false-positive guard, and the highest-value case in the rule: the handle types cross the
+/// airlock BY HANDLE, so a task-side write through one IS visible after the join (measured:
+/// `Shared` 1, `Channel` 7). Telling someone their correct `Shared` code is broken is worse than the
+/// missing warning, so `mutates_receiver` is keyed on the receiver TYPE and none of them is in it.
+#[test]
+fn a_write_through_a_handle_type_never_warns() {
+    entry_no_warn(
+        "import std.concurrency\nfn f():\n    s := Shared(0)\n    parallel:\n        spawn:\n            s.update(fn(x: int) -> int: x + 1)\n    print(s.get())\nf()\n",
+    );
+    entry_no_warn(
+        "fn f():\n    ch := Channel[int](1)\n    parallel:\n        spawn:\n            ch.send(7)\n    print(ch.recv())\nf()\n",
+    );
+    entry_no_warn(
+        "import std.concurrency\nfn f():\n    s := RwShared(0)\n    parallel:\n        spawn:\n            s.set(3)\n    print(s.get())\nf()\n",
+    );
+    entry_no_warn(
+        "import std.concurrency\nfn f():\n    a := AtomicInt(0)\n    parallel:\n        spawn:\n            a.add(1)\n    print(a.load())\nf()\n",
+    );
+    // The `Shared` REWRITE of the filed repro — the very fix the warning's hint recommends must
+    // itself be silent, or the diagnostic sends the user in a circle.
+    entry_no_warn(
+        "import std.concurrency\nfn f():\n    out := Shared(0)\n    parallel:\n        spawn:\n            out.set(2)\n    print(out.get())\nf()\n",
+    );
+}
+
+/// Every "does not fire" claim, with the neighbours its premise implies (per
+/// `widening-untested-by-its-own-suite`): swap the order, add an unused statement, move the read a
+/// block deeper.
+#[test]
+fn the_airlock_warning_stays_silent_where_the_write_is_not_lost() {
+    // A `defer:` block in the PARENT runs in the parent frame and shares the enclosing cell, so its
+    // write is not a task write and taints nothing (measured: `defer: xs.push(1)` beside a later
+    // `defer: print(xs.len())` prints 1). Its task-side twin — a `defer:` nested INSIDE the `spawn:` —
+    // does warn; see `a_defer_inside_the_task_is_on_the_far_side_of_the_airlock`.
+    no_warn(
+        "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            print(1)\n    defer:\n        xs.push(1)\n    print(xs.len())\nf()\n",
+    );
+    no_warn(
+        "fn g(xs: List[int]):\n    fn inner():\n        defer:\n            xs.push(1)\n    inner()\n    print(xs.len())\ng([])\n",
+    );
+    // A task-LOCAL write (declared inside the task) is not a capture at all.
+    no_warn(
+        "fn f():\n    parallel:\n        spawn:\n            xs: List[int] = []\n            xs.push(1)\n            print(xs.len())\nf()\n",
+    );
+    // A captured write never read outside the task.
+    no_warn(
+        "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    print(1)\nf()\n",
+    );
+    // A read only INSIDE the task — the copy IS what is being read there.
+    no_warn(
+        "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n            print(xs.len())\nf()\n",
+    );
+    // A parent-side overwrite supersedes the lost write (measured: prints the parent's 2).
+    no_warn(
+        "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    xs = [5, 6]\n    print(xs.len())\nf()\n",
+    );
+    // …and a parent-side INDEX assign, which untaints before its own receiver read reports.
+    no_warn(
+        "fn f():\n    xs := [0]\n    parallel:\n        spawn:\n            xs[0] = 9\n    xs[0] = 1\n    print(xs[0])\nf()\n",
+    );
+    // A nested `fn` declared inside the task writing its OWN local.
+    no_warn(
+        "fn f():\n    parallel:\n        spawn:\n            fn h():\n                ys: List[int] = []\n                ys.push(1)\n                print(ys.len())\n            h()\n    print(1)\nf()\n",
+    );
+    // NEIGHBOUR (order swap): the read placed BEFORE the spawn is a declared ceiling — lexical order,
+    // not dataflow. Silent, and the write that follows taints nothing that is ever read.
+    no_warn(
+        "fn f():\n    xs: List[int] = []\n    print(xs.len())\n    parallel:\n        spawn:\n            xs.push(1)\nf()\n",
+    );
+    // NEIGHBOUR (no spawn at all): the same statements without the task must stay silent.
+    no_warn("fn f():\n    xs: List[int] = []\n    xs.push(1)\n    print(xs.len())\nf()\n");
+    // NEIGHBOUR (a NON-mutating method inside the task): reading a capture in a task is not a write.
+    no_warn(
+        "fn f():\n    xs := [1]\n    parallel:\n        spawn:\n            print(xs.len())\n    print(xs.len())\nf()\n",
+    );
+    // NEIGHBOUR: `unique`/`dedup`/`merge` RETURN a new collection (`std/prelude.chz`) — the near
+    // misses the mutator grep ruled out. Their result is discarded, which is fine here.
+    no_warn(
+        "fn f():\n    xs := [1, 1]\n    parallel:\n        spawn:\n            ys := xs.unique()\n            print(ys.len())\n    print(xs.len())\nf()\n",
+    );
+    // NEIGHBOUR: `str.reverse` shares a NAME with `List.reverse` but returns a new `str` — the reason
+    // `mutates_receiver` is keyed on the receiver type, not the name alone.
+    no_warn(
+        "fn f():\n    s := \"ab\"\n    parallel:\n        spawn:\n            print(s.reverse())\n    print(s)\nf()\n",
+    );
+}
+
+/// The read a block DEEPER than the spawn still reports — the taint lives on the checker, not on a
+/// scope, so an `if`/`for` body after the join is not an escape.
+#[test]
+fn a_stale_read_nested_in_a_later_block_still_warns() {
+    warns(
+        "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    if true:\n        print(xs.len())\nf()\n",
+        "'xs' is read here",
+    );
+    // The filed failure mode itself: the `for` head reads the stale (empty) list.
+    warns(
+        "fn f():\n    results: List[str] = []\n    parallel:\n        spawn:\n            results.push(\"a\")\n    for r in results:\n        print(r)\nf()\n",
+        "'results' is read here",
+    );
+}
+
+/// Reported exactly ONCE. Two ways this rule could double-report: the checker's speculative
+/// return-type inference walks a body whose diagnostics are rolled back and then walks it again for
+/// real (`diag_rollback` truncates `warnings`, and the taint is re-derived on the second walk), and a
+/// second read of the same name after the first report (the entry is consumed).
+#[test]
+fn the_airlock_warning_is_reported_exactly_once() {
+    // No declared return type on `f` → the speculative inference pass runs over this body. `zz := 99`
+    // is the NEIGHBOUR (an unused statement inserted between the write and the read): an unrelated
+    // binding in between must neither be tainted nor untaint `xs`, and the count assertion is what
+    // proves it.
+    let src = "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    zz := 99\n    print(zz)\n    print(xs.len())\n    print(xs.len())\n    n := xs.len()\n    print(n)\nf()\n";
+    let (errs, warns) = warn_src(src);
+    assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+    assert_eq!(
+        warns.len(),
+        1,
+        "expected exactly one warning, got: {warns:?}"
+    );
+}
+
+/// A COMPOUND assign in the parent reads the stale binding before it writes it (`n += 1` after a
+/// task-side `n = n + 1` measured 1, not 2), so it reports rather than silently untainting — unlike
+/// the plain `=` form, whose neighbour test above asserts silence.
+#[test]
+fn a_parent_compound_assign_reads_the_stale_value_and_warns() {
+    warns(
+        "fn f():\n    n := 0\n    parallel:\n        spawn:\n            n = n + 1\n    n += 1\n    print(n)\nf()\n",
+        "'n' is read here",
+    );
+    // Inside the task the compound assign reads the task's OWN copy — silent.
+    no_warn(
+        "fn f():\n    n := 0\n    parallel:\n        spawn:\n            n += 1\n            print(n)\nf()\n",
+    );
+}
+
+/// …and never reported ZERO times. Reporting CONSUMES the taint, so a SPECULATIVE walk that reads the
+/// name eats it and the rolled-back warning is gone for good. `ys := []` (an unrefined empty literal)
+/// makes `refine_receiver` speculatively infer `ys.push(...)`'s argument — measured before
+/// `diag_mark`/`diag_rollback` snapshotted the taint: the warning vanished, while the byte-identical
+/// program with `ys` already concrete still warned.
+#[test]
+fn a_speculative_walk_that_rolls_back_does_not_swallow_the_airlock_warning() {
+    let stale = "fn f():\n    xs: List[int] = []\n    ys := []\n    parallel:\n        spawn:\n            xs.push(1)\n    ys.push(xs.len())\n    print(ys.len())\nf()\n";
+    warns(stale, "'xs' is read here");
+    // The control: identical but for `ys` being concrete, so no speculative refine runs at all.
+    let concrete = "fn f():\n    xs: List[int] = []\n    ys: List[int] = [0]\n    parallel:\n        spawn:\n            xs.push(1)\n    ys.push(xs.len())\n    print(ys.len())\nf()\n";
+    warns(concrete, "'xs' is read here");
+    // …and still exactly once through the speculative path.
+    let (errs, warns) = warn_src(stale);
+    assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+    assert_eq!(warns.len(), 1, "expected one warning, got: {warns:?}");
+}
+
+/// One function's taint must not leak into the next: the map is taken and restored around every fn
+/// body, so a second function reading a same-named binding of its own is clean.
+#[test]
+fn the_airlock_taint_does_not_leak_across_function_bodies() {
+    no_warn(
+        "fn writer():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\nfn reader():\n    xs: List[int] = []\n    print(xs.len())\nwriter()\nreader()\n",
+    );
+}
+
+/// A body DECLARED INSIDE the task runs inside it, where the write IS visible — so it must not report,
+/// and (the double failure) must not CONSUME the entry either, or the parent's real stale read after
+/// the join goes silent. Both halves, `fn` and closure: only the `fn` half was written first, and the
+/// closure half is exactly what shipped broken (`infer_closure` cleared `in_spawn_block` without
+/// taking the taint). Measured on the pre-fix binary for the closure form: a FALSE warning at the
+/// closure body's `xs.len()`, then `1` printed inside the task and `0` after the join with nothing
+/// reported at all.
+#[test]
+fn a_body_declared_inside_the_task_neither_reports_nor_swallows_the_parents_warning() {
+    for inner in [
+        // closure
+        "            g := fn() -> int: xs.len()\n            print(g())\n",
+        // nested fn
+        "            fn h() -> int:\n                return xs.len()\n            print(h())\n",
+    ] {
+        let src = format!(
+            "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n{inner}    print(xs.len())\nf()\n"
+        );
+        let (errs, warns) = warn_src(&src);
+        assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+        assert_eq!(
+            warns.len(),
+            1,
+            "expected exactly one warning, got: {warns:?}"
+        );
+        assert!(
+            warns[0].message.contains("'xs' is read here"),
+            "wrong warning: {warns:?}"
+        );
+        // The surviving warning is the PARENT's read after the join, not the one inside the task.
+        assert_eq!(
+            warns[0].span.line,
+            src.lines().count() as u32 - 1,
+            "the warning must sit on the post-join read, got line {} of {src}",
+            warns[0].span.line
+        );
+    }
+    // NEIGHBOUR the premise implies (and the reason the taint is not dropped unconditionally): a
+    // closure declared in the PARENT reads the same stale copy the parent would — measured, `g()`
+    // returns 0 — so it must still warn.
+    warns(
+        "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    g := fn() -> int: xs.len()\n    print(g())\nf()\n",
+        "'xs' is read here",
+    );
+}
+
+/// A `defer:` block nested INSIDE a `spawn:` body is on the far side of the airlock like any other
+/// task statement — its write really is lost, so it must taint. Measured on the release binary:
+/// `spawn: defer: xs.push(1)` leaves `xs.len() == 0` after the join, and `spawn: defer: n = 5` leaves
+/// `n == 0`. The code comment and `docs/syntax.md` both claimed the opposite (that a `defer:` never
+/// reaches the write path as a task write) — a claim written without running the program.
+#[test]
+fn a_defer_inside_the_task_is_on_the_far_side_of_the_airlock() {
+    warns(
+        "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            defer:\n                xs.push(1)\n            print(1)\n    print(xs.len())\nf()\n",
+        "'xs' is read here",
+    );
+    // The reassignment spelling, which only a `defer:`/`spawn:` statement body can hold.
+    warns(
+        "fn f():\n    n := 0\n    parallel:\n        spawn:\n            defer:\n                n = 5\n            print(1)\n    print(n)\nf()\n",
+        "'n' is read here",
+    );
+}
+
+/// The two frame-shaped ceilings, asserted as under-warns so a later change that closes either one
+/// fails here loudly rather than silently widening the rule (`widening-untested-by-its-own-suite`).
+/// Both measured on the release binary: each program prints 0 — the write IS lost — with nothing
+/// reported. Ceiling 6 (`docs/syntax.md` §11b): a write made only through a closure / nested `fn`
+/// declared inside the task. Ceiling 1: a read inside a nested `fn` declared in the PARENT, whose
+/// closure twin (asserted above) does warn.
+#[test]
+fn the_two_frame_shaped_ceilings_under_warn() {
+    // Ceiling 6 — the write never leaves the nested body's frame.
+    no_warn(
+        "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            bump := fn(): xs.push(1)\n            bump()\n    print(xs.len())\nf()\n",
+    );
+    no_warn(
+        "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            fn bump():\n                xs.push(1)\n            bump()\n    print(xs.len())\nf()\n",
+    );
+    // Ceiling 1 — the read never enters the parent-side nested `fn`'s frame.
+    no_warn(
+        "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    fn g() -> int:\n        return xs.len()\n    print(g())\nf()\n",
+    );
+}
+
+/// The taint is keyed by BARE NAME, so a NEW binding of that name is a different binding and a read of
+/// it loses nothing (`scope-blind-guard-over-rejects-shadows`). Measured on the pre-fix binary: `for n
+/// in range(2):` after a task-side `n = 5` warned that the loop variable was a stale read — factually
+/// false. One case per binding form that can introduce a name into a scope; all of them route through
+/// `Checker::declare`, which is where the untaint lives.
+#[test]
+fn a_fresh_binding_of_the_name_untaints_it() {
+    let head = "fn f():\n    n: int = 0\n    parallel:\n        spawn:\n            n = 5\n";
+    for tail in [
+        // `for` loop variable — the reported repro
+        "    for n in range(2):\n        print(n)\n",
+        // `for` DESTRUCTURING target
+        "    ps := [(1, 2)]\n    for n, m in ps:\n        print(n + m)\n",
+        // block-local `:=` shadow
+        "    n := 9\n    print(n)\n",
+        // destructuring `let`
+        "    t := (7, 8)\n    n, y := t\n    print(n + y)\n",
+        // `match` payload binding
+        "    o: Option[int] = Some(3)\n    match o:\n        Some(n): print(n)\n        None:    print(0)\n",
+        // `wait:` arm binding
+        "    ch := Channel[int](1)\n    ch.send(4)\n    wait:\n        n := ch.recv(): print(n)\n",
+        // closure parameter
+        "    g := fn(n: int) -> int: n + 1\n    print(g(2))\n",
+        // nested-fn parameter
+        "    fn h(n: int) -> int:\n        return n + 1\n    print(h(2))\n",
+    ] {
+        no_warn(&format!("{head}{tail}f()\n"));
+    }
+    // NEIGHBOUR: a loop whose variable is a DIFFERENT name must still warn — the untaint is keyed on
+    // the name bound, not on "a binding happened".
+    warns(
+        "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    for i in range(2):\n        print(xs.len())\nf()\n",
+        "'xs' is read here",
+    );
+}
+
+/// A parent-side in-place MUTATOR reads the stale copy before it writes it, exactly like the compound
+/// assign `n += 1` — every method in `mutates_receiver` is a read-modify-write and the set contains no
+/// whole-container replacement (`clear` does not exist), so none of them can legitimately supersede
+/// the task's write. Measured: task `xs.push("a")` then parent `xs.push("b")` prints 1, not 2.
+#[test]
+fn a_parent_side_mutator_reads_the_stale_value_and_warns() {
+    warns(
+        "fn f():\n    xs: List[str] = []\n    parallel:\n        spawn:\n            xs.push(\"a\")\n    xs.push(\"b\")\n    print(xs.len())\nf()\n",
+        "'xs' is read here",
+    );
+    // …still exactly once: reporting consumes the entry, so the receiver read that follows is silent.
+    let (errs, warns) = warn_src(
+        "fn f():\n    xs: List[str] = []\n    parallel:\n        spawn:\n            xs.push(\"a\")\n    xs.push(\"b\")\n    print(xs.len())\nf()\n",
+    );
+    assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+    assert_eq!(warns.len(), 1, "expected one warning, got: {warns:?}");
+    // Inside the task the mutator writes the task's OWN copy — silent, as before.
+    no_warn(
+        "fn f():\n    xs: List[str] = []\n    parallel:\n        spawn:\n            xs.push(\"a\")\n            xs.push(\"b\")\n            print(xs.len())\nf()\n",
+    );
+    // NEIGHBOUR: a whole-binding overwrite genuinely supersedes and stays silent (the asymmetry that
+    // makes this rule a claim about read-modify-write, not about "any parent write").
+    no_warn(
+        "fn f():\n    xs: List[str] = []\n    parallel:\n        spawn:\n            xs.push(\"a\")\n    xs = [\"b\"]\n    print(xs.len())\nf()\n",
+    );
+}
+
 /// Type-check a source string after running the desugar pass (call normalization: named args,
 /// omitted defaults, variadic collapse — and, before W7-43, `?.`/`??` carrier lowering, which is
 /// now the CHECKER's job). Production always desugars before the checker (`resolver::build_graph`);
@@ -6680,6 +7523,17 @@ fn check_entry(src: &str) -> Vec<CheckError> {
 fn entry_ok(src: &str) {
     let errs = check_entry(src);
     assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+}
+
+/// [`no_warn`], but through `build_graph` — the only wire that resolves a native std import, so it is
+/// what a rule whose negative cases need `Shared`/`RwShared`/`Atomic` has to use.
+fn entry_no_warn(src: &str) {
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", src);
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    let (res, warns) = check_graph_diags(&graph, None);
+    assert!(res.is_ok(), "expected no type errors, got: {res:?}");
+    assert!(warns.is_empty(), "expected no warnings, got: {warns:?}");
 }
 
 /// Bug 4B — a module bind (aliased OR the un-aliased last path segment) whose name is a reserved
@@ -17710,6 +18564,33 @@ fn refine_erroring_push_arg_reports_once() {
         "got: {:?}",
         errs[0]
     );
+}
+
+#[test]
+fn refine_erroring_arg_on_unrefinable_receiver_reports_once() {
+    // Same rollback, but on the receiver kinds that fall through `refine_receiver`'s SHAPE match
+    // (only List/Set are refinable): the speculative arg-infer had already run, so a `Map`/`Option`
+    // receiver leaked its diagnostics and the real dispatch path reported them a SECOND time.
+    for src in [
+        "fn main():\n m := {}\n m.insert(nope)\nmain()",
+        "fn main():\n m := {}\n m.extend(nope)\nmain()",
+        "fn main():\n o := None\n o.insert(nope)\nmain()",
+    ] {
+        let errs = check_src(src);
+        let unknown = errs
+            .iter()
+            .filter(|e| e.message.contains("unknown name 'nope'"))
+            .count();
+        assert_eq!(
+            unknown, 1,
+            "expected exactly one 'unknown name' for {src:?}, got: {errs:?}"
+        );
+        // The real "no method" diagnostic must survive the rollback.
+        assert!(
+            errs.iter().any(|e| e.message.contains("has no method")),
+            "lost the real diagnostic for {src:?}: {errs:?}"
+        );
+    }
 }
 
 #[test]

@@ -281,9 +281,11 @@ pub fn run_tests_opts(root: &Path, opts: RunOpts) -> TestReport {
     // Tests skipped by `--filter` (threaded up from the invoke sites — discovery of names happens
     // inside the compiled program, not before).
     let mut filtered_out = 0usize;
+    // One `chezzi test` invocation prints each distinct checker warning ONCE — see `run_file`.
+    let mut seen_warnings: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for file in &files {
-        match run_file(file, &opts) {
+        match run_file(file, &opts, &mut seen_warnings) {
             Ok((mut file_outcomes, skipped)) => {
                 filtered_out += skipped;
                 let hit_non_pass = file_outcomes
@@ -545,9 +547,33 @@ fn render_json(
 /// This matches `chezzi run` (which also runs on [`crate::vm::run_file_with_entry`]'s VM-stack
 /// thread), so a `test` verdict mirrors a `run`.
 /// Returns `(per-test outcomes, count filtered out by `--filter`)` or a whole-file compile-error msg.
-fn run_file(file: &Path, opts: &RunOpts) -> Result<(Vec<Outcome>, usize), String> {
+fn run_file(
+    file: &Path,
+    opts: &RunOpts,
+    seen_warnings: &mut std::collections::HashSet<String>,
+) -> Result<(Vec<Outcome>, usize), String> {
     let graph = crate::resolver::build_graph(file).map_err(|e| e.to_string())?;
-    if let Err(errs) = crate::checker::check_graph(&graph) {
+    let (res, warns) = crate::checker::check_graph_diags(&graph, None);
+    // Advisory only — they go to stderr and change no test outcome, so a `--errors=json` run's
+    // stdout stays the machine-readable result document.
+    //
+    // Deduplicated across the whole `chezzi test` invocation: every test file is its own entry
+    // graph, so a warning in a SHARED imported module is re-checked (and would be re-printed) once
+    // per importer. The key is the declaring module's path + span + message, not `Span::file` —
+    // that id is a per-graph sequence and so differs between two files' graphs — and not the
+    // rendered line alone, since two entry modules can collide on line/col/message.
+    for w in &warns {
+        let module = graph
+            .modules
+            .iter()
+            .find(|m| m.file == w.span.file)
+            .map(|m| m.id.0.display().to_string())
+            .unwrap_or_default();
+        if seen_warnings.insert(format!("{module}|{w}")) {
+            eprintln!("{w}");
+        }
+    }
+    if let Err(errs) = res {
         // Surface the first type error (matches `chezzi check`'s headline).
         let first = errs
             .first()

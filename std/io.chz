@@ -86,8 +86,10 @@ native fn buffered(w: Writer, size: int = 8192) -> Writer
 # so a big file need not be slurped whole (unlike `read_file`/`read_bytes`, capped at 64 MiB). `Reader`
 # is a RESERVED opaque VM handle (`Ty::Reader`, NOT a nominal struct) opened read-only by `open(path)`.
 #
-# `read_line()` yields one line at a time — trailing `\n` (and a preceding `\r`) STRIPPED, `None` at
-# EOF — matching the module-level `read_line()` shape. It is `Option[str]`, NOT a `Result`: a mid-read
+# `read_line()` has THREE outcomes, not two — the `Option[str]` in the signature only spells two of
+# them. `Some(line)` (trailing `\n`, and a preceding `\r`, STRIPPED — the module-level `read_line()`
+# shape), `None` at EOF, and a recoverable FAULT on a mid-read I/O error or an undecodable line. It is
+# `Option[str]`, NOT a `Result`: a mid-read
 # I/O error or a non-UTF-8 file surfaces as a runtime FAULT pointing at `read_bytes` (mirroring
 # `read_file`'s non-UTF-8 fault); `read_bytes(n) -> Result[bytes]` is the binary + error-distinguishing
 # escape hatch (at-most-n bytes; empty bytes = EOF; `Err` on a closed reader / I/O). `close()` releases
@@ -101,6 +103,15 @@ native fn buffered(w: Writer, size: int = 8192) -> Writer
 # it never skips the bad line — draining it with `read_bytes`, or `close`, is how you move on) and
 # SELF-HEALING (a partial drain leaves a remainder that, if it decodes, becomes the next line).
 # `close()` discards the carry; a carry is never served after close nor resurrected after EOF.
+#
+# The stickiness is DELIBERATE and ancestor-checked (measured 2026-08-17 on `b"alpha\nbad\xff\xfebytes\n
+# gamma\n"`; the full transcripts are in the W8 dogfood session log). CPython 3.14 `open(...,'r')` is
+# WORSE, not better: the very first `readline()` raises `UnicodeDecodeError` — losing the valid line
+# BEFORE the bad one, because `TextIOWrapper` decodes a whole chunk — and every subsequent `readline()`
+# then returns `''`, i.e. a SILENT EOF claim over data that is still in the file. Go `bufio.Scanner`
+# advances and hands back the raw bytes, but only because a Go `string` may hold invalid UTF-8; a Chezzi
+# `str` may not, so that option does not exist here. Chezzi's fault therefore loses nothing and stays
+# loud (`correct > silent > wrong`) — do NOT "fix" it into a skip.
 #
 # `lines()` (Python `for l in f` / Go `bufio.Scanner` / Rust `BufRead::lines`) is the idiomatic method
 # form of line-streaming: a BODIED Chezzi generator method on the native handle (mixing Rust-backed

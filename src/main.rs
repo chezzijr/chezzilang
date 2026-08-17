@@ -169,13 +169,26 @@ fn cmd_check(args: &[String]) -> ExitCode {
     // up from the file — pass `None`. The entry FUNCTION is derived from the project manifest when
     // this file IS the declared entry module (`manifest::entry_fn_for`), so a static check of an
     // entry module a project cannot start reports it.
-    match type_check(&path, None, EntryGate::FromManifest) {
+    let (outcome, warns) = type_check(&path, None, EntryGate::FromManifest);
+    // `check`'s stdout IS the diagnostic document, so in machine mode the warnings ride the single
+    // array the arms below print; in plain text they precede the verdict on stderr. Exactly one of
+    // the two — the `!json` guard is what keeps a warning from being printed on both streams.
+    if !json {
+        report_check_warnings(&warns);
+    }
+    match outcome {
         CheckOutcome::Ok => {
-            println!("{}", if json { "[]" } else { "ok: no type errors" });
+            // Warnings are not errors: the verdict and the exit code are unchanged. In JSON mode
+            // they ARE the array (`[]` when there are none), so a machine consumer sees them.
+            if json {
+                println!("{}", diags_json(&warns));
+            } else {
+                println!("ok: no type errors");
+            }
             ExitCode::SUCCESS
         }
         CheckOutcome::Errors(errs) => {
-            report_check_errors(&errs, json);
+            report_check_errors(&errs, &warns, json);
             ExitCode::FAILURE
         }
         CheckOutcome::Fatal {
@@ -278,10 +291,15 @@ fn cmd_run(args: &[String]) -> ExitCode {
         Some(f) => EntryGate::Named(f),
         None => EntryGate::Script,
     };
-    match type_check(&path, root_override.as_deref(), gate) {
+    let (outcome, warns) = type_check(&path, root_override.as_deref(), gate);
+    // `run`'s stdout belongs to the PROGRAM, so a warning goes to stderr in both modes — unguarded,
+    // unlike `check` above. The `&[]` below is the other half of that decision: were the warnings
+    // also folded into the stdout array, the same diagnostic would print twice, on two streams.
+    report_check_warnings(&warns);
+    match outcome {
         CheckOutcome::Ok => {}
         CheckOutcome::Errors(errs) => {
-            report_check_errors(&errs, json);
+            report_check_errors(&errs, &[], json);
             return ExitCode::FAILURE;
         }
         CheckOutcome::Fatal {
@@ -806,7 +824,13 @@ enum CheckOutcome {
 /// `root` pins the module-graph root (the "one root per run" invariant): the bare-`chezzi run`
 /// manifest path passes `Some(root)` so the checker resolves imports against the SAME root the VM
 /// will run against; `None` (explicit `chezzi run FILE`) derives it by walking up from the file.
-fn type_check(path: &str, root: Option<&std::path::Path>, entry_fn: EntryGate<'_>) -> CheckOutcome {
+/// Returns the outcome plus the pass's non-fatal warnings (empty on a `Fatal`, which never reaches
+/// the checker).
+fn type_check(
+    path: &str,
+    root: Option<&std::path::Path>,
+    entry_fn: EntryGate<'_>,
+) -> (CheckOutcome, Vec<checker::CheckError>) {
     // Resolve + desugar + type-check on the dedicated front-end stack: the recursive AST walkers can
     // overflow the caller's (main-thread) stack on a deep-but-valid AST — see `chezzi::on_frontend_stack`.
     let path = path.to_string();
@@ -850,7 +874,7 @@ fn type_check_inner(
     path: &str,
     root: Option<&std::path::Path>,
     entry_fn: EntryGate<'_>,
-) -> CheckOutcome {
+) -> (CheckOutcome, Vec<checker::CheckError>) {
     let entry = std::path::Path::new(path);
     // M24 — the manifest-entrypoint gate reaches EVERY consumer that checks this file, not just bare
     // `chezzi run` (which passes the name it already resolved). `chezzi check src/main.chz` used to
@@ -872,19 +896,24 @@ fn type_check_inner(
     let graph = match build {
         Ok(g) => g,
         Err(e) => {
-            return CheckOutcome::Fatal {
-                text: e.to_string(),
-                message: e.message.clone(),
-                // `as usize`: widening a `Span`'s u32 line/col — lossless.
-                line: e.span.line as usize,
-                col: e.span.col as usize,
-            };
+            return (
+                CheckOutcome::Fatal {
+                    text: e.to_string(),
+                    message: e.message.clone(),
+                    // `as usize`: widening a `Span`'s u32 line/col — lossless.
+                    line: e.span.line as usize,
+                    col: e.span.col as usize,
+                },
+                Vec::new(),
+            );
         }
     };
-    match checker::check_graph_with_entry(&graph, entry_fn) {
+    let (res, warns) = checker::check_graph_diags(&graph, entry_fn);
+    let outcome = match res {
         Ok(()) => CheckOutcome::Ok,
         Err(errs) => CheckOutcome::Errors(errs),
-    }
+    };
+    (outcome, warns)
 }
 
 /// Pull the file path (first non-flag arg) and `--errors=json` out of a command's args. Returns
@@ -951,21 +980,53 @@ fn read_source(path: &str) -> Option<String> {
     }
 }
 
-/// Print type errors as plain text (default) or a JSON array (`--errors=json`).
-fn report_check_errors(errs: &[checker::CheckError], json: bool) {
+/// Render checker diagnostics as the `--errors=json` array. ONE renderer for both severities so an
+/// error and a warning can never drift in shape — they differ only in the `severity` value.
+fn diags_json(diags: &[checker::CheckError]) -> String {
+    let items: Vec<String> = diags
+        .iter()
+        .map(|d| {
+            let severity = match d.severity {
+                checker::Severity::Error => "error",
+                checker::Severity::Warning => "warning",
+            };
+            format!(
+                "{{\"line\":{},\"col\":{},\"severity\":\"{severity}\",\"message\":{}}}",
+                d.span.line,
+                d.span.col,
+                json_string(&d.message)
+            )
+        })
+        .collect();
+    format!("[{}]", items.join(","))
+}
+
+/// Print non-fatal checker warnings as plain text on **stderr**. Always plain text, even under
+/// `--errors=json`: the only caller that reaches here in machine mode is `chezzi run`, whose stdout
+/// belongs to the program and whose stderr is shared with the program's own — a JSON array there
+/// could not be parsed out of that stream anyway, and rendering one would only invite a consumer to
+/// try. The machine-readable path for warnings is `chezzi check --errors=json`, which puts them in
+/// the ONE array on stdout ([`report_check_errors`]) and never calls this.
+///
+/// Which stream carries a warning, per command, and why:
+/// * `chezzi check` — stdout IS the diagnostic document. Machine mode: the stdout array, beside the
+///   errors. Plain text: here, on stderr, above the verdict. Exactly one of the two, ever.
+/// * `chezzi run` / `chezzi test` — stdout belongs to the running program. Always here, on stderr,
+///   in both modes; the stdout array stays errors-only so nothing is reported twice.
+fn report_check_warnings(warns: &[checker::CheckError]) {
+    for w in warns {
+        eprintln!("{w}");
+    }
+}
+
+/// Print type errors as plain text (default) or a JSON array (`--errors=json`). `warns` rides the
+/// SAME json array (a machine consumer gets one document, keyed by `severity`); in plain text the
+/// caller has already put them on stderr, and the trailing count stays errors-only. Pass `&[]` from
+/// any command whose warnings already went to stderr — see [`report_check_warnings`].
+fn report_check_errors(errs: &[checker::CheckError], warns: &[checker::CheckError], json: bool) {
     if json {
-        let items: Vec<String> = errs
-            .iter()
-            .map(|e| {
-                format!(
-                    "{{\"line\":{},\"col\":{},\"message\":{}}}",
-                    e.span.line,
-                    e.span.col,
-                    json_string(&e.message)
-                )
-            })
-            .collect();
-        println!("[{}]", items.join(","));
+        let all: Vec<checker::CheckError> = warns.iter().chain(errs).cloned().collect();
+        println!("{}", diags_json(&all));
     } else {
         for e in errs {
             eprintln!("{e}");
@@ -980,13 +1041,22 @@ fn report_check_errors(errs: &[checker::CheckError], json: bool) {
 
 /// Report a fatal resolve/lex/parse error, preserving the `--errors=json` contract (valid JSON on
 /// stdout). Plain text uses `text` (the full Display rendering, with the `resolve error (...)`
-/// prefix); JSON uses the clean `message` (no embedded Display prefix) so its shape matches
-/// type-error JSON — the `in module 'X':` attribution rides along inside `message`.
+/// prefix); JSON goes through the SAME [`diags_json`] renderer as a type error, carrying the clean
+/// `message` (no embedded Display prefix) — the `in module 'X':` attribution rides along inside
+/// `message`, and the shape is identical object-for-object.
 fn report_fatal(text: &str, message: &str, line: usize, col: usize, json: bool) {
     if json {
+        // Same renderer as a type error, so `severity` is present on EVERY object a consumer can
+        // receive — a schema that carries the key only sometimes is worse than one that never does.
+        // `as u32`: a `Span`'s own width, widened to `usize` on the way in and narrowed back.
+        let span = chezzi::lexer::Span {
+            line: line as u32,
+            col: col as u32,
+            file: 0,
+        };
         println!(
-            "[{{\"line\":{line},\"col\":{col},\"message\":{}}}]",
-            json_string(message)
+            "{}",
+            diags_json(&[checker::CheckError::error(message.to_string(), span)])
         );
     } else {
         eprintln!("{text}");

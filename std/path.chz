@@ -256,7 +256,7 @@ fn normalize(p: PathLike) -> Path:
         if seg == b"..":
             n := stack.len()
             if n > 0 and stack[n - 1] != b"..":
-                stack.pop()                # resolve against a real preceding element
+                _ := stack.pop()           # resolve against a real preceding element
             elif not abs:
                 stack.push(b"..")        # relative: leading ".." is preserved
             # absolute && nothing to pop: ".." past root is dropped

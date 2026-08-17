@@ -38,8 +38,8 @@ cargo build --release    # compile (release; the VM is only fast optimized)
 # conformance run ONCE (in the lib test target). `cargo test` is the normal full command.
 cargo test                       # FULL pre-commit suite: lib unit suite + goldens + conformance + integration
 # ^ includes `tests/chezzi_threads_cli.rs`: with `--serial` gone, the standing differential is
-#   `tests/chz` (586 Chezzi behavioural tests) run at TWO worker counts (default + `CHEZZI_THREADS=2`)
-#   via the built binary, each its own process/pool. NOT a gate over the ~4150 Rust lib tests — that
+#   `tests/chz` (590 Chezzi behavioural tests) run at TWO worker counts (default + `CHEZZI_THREADS=2`)
+#   via the built binary, each its own process/pool. NOT a gate over the ~4190 Rust lib tests — that
 #   pool is ONE process-wide `OnceLock`, so forcing a count inside `cargo test --lib` either no-ops or
 #   (worse) pins the WHOLE run's pool and starves concurrently-running tests (measured: 8
 #   failures/hangs at `RUST_TEST_THREADS=4`, >54 min unfinished at `=1`) — don't re-attempt an
@@ -57,6 +57,8 @@ cargo run -- init my_proj                # scaffold a new project (chezzi.toml w
 cargo run -- tokens examples/hello.chz   # token stream (M1)
 cargo run -- ast    examples/hello.chz   # parsed AST (M2)
 cargo run -- check  examples/hello.chz   # type-check only (M4); --errors=json for machine output
+# ^ json objects are {line, col, severity, message}; severity is "error" or "warning" (a warning is
+#   non-fatal — reported, exit code unchanged)
 cargo run -- run    examples/hello.chz   # type-check + run on the VM, OS-thread engine (default, M5)
 cargo run -- run                         # no file → run the manifest [project] entrypoint (walks up for chezzi.toml)
 cargo run -- run --parallel examples/primes_parallel.chz   # accepted no-op alias (the M:N engine is the only engine)
@@ -145,6 +147,19 @@ UPDATE_EDITOR_ASSETS=1 cargo test --test editor_tmlanguage    # regenerate the V
   `parity_tests.rs`/`assert_parity*` on 2026-08-16) all run the one engine and compare against a
   **literal golden**. A helper that runs the program twice and diffs the two runs against each other proves
   nothing — give it a real expectation.
+- **A CHECKER WARNING'S GATE IS DERIVED FROM THE RUNTIME, ONE PROGRAM PER SHAPE — never from the
+  plausible-looking checker flag.** The checker has a non-fatal `Severity::Warning` channel
+  (`Checker::warn`, `warns`/`no_warn` test helpers) and a warning's whole value is that it is TRUE
+  where it fires. So before writing the predicate, enumerate the positions the rule could fire in and
+  **run each one** — the warn/silent split is a measured table, not a design. Both rules on that
+  channel got their gate wrong on the first attempt in exactly this way: W8-2's filed prescription
+  ("a discarded carrier is a compile error at top level") is false because the RUNTIME already aborts
+  there, and its recommended escape `_ := g()` turns rc=1 into rc=0; the airlock rule's filed
+  "locals only, `is_local_capture` draws exactly this line" would not have warned on its own filed
+  repro, because at module top level the binding is scope 0 (`is_captured` is the real question). Two
+  corollaries: derive the gate from an **exhaustive** enumeration of the compiler seam that decides it
+  (W8-2's is the eight `FnComp::new` sites), and when unsure **decline** — an under-warn is a ceiling
+  you can pin with a test, an over-warn teaches users to ignore the channel.
 - **CORRECTNESS IS JUDGED AGAINST THE ANCESTOR — there is no engine agreement to hide behind.**
   With one engine there is no cross-engine oracle at all, so "both engines agree" is not merely a weak
   defense, it is not available. Whenever behavior is in question, judge it against the ancestor that
@@ -168,7 +183,10 @@ exhaustive `match` + guards, closures/HOF, modules, GC, interpolation, pipe, `de
 `recover:`, `Iterator[T]`, slicing/indexing protocols, user-overloadable `==` via `Eq`,
 static protocol requirements callable through a generic bound via witness passing). **Concurrency** has landed through
 **Tier-D** (`spawn` / `parallel:` nursery, `Channel[T]`, `Shared[T]`, `Executor`, the real
-OS-thread M:N engine, netpoller + `std.net`). **4375 Rust tests** green across 21 targets (**4160** in the lib target), plus **586** Chezzi
+OS-thread M:N engine, netpoller + `std.net`). The checker also has a **non-fatal warning channel**
+(`Severity::Warning`, `"severity"` in `--errors=json`, `DiagnosticSeverity::WARNING` in the LSP) with
+two rules on it — a discarded `Result`/`Option`, and a `spawn:`-task write read after the join.
+**4406 Rust tests** green across 21 targets (**4188** in the lib target), plus **590** Chezzi
 tests green at two worker counts.
 
 ## Current focus
@@ -179,16 +197,21 @@ Right now: **pre-JIT/pre-freeze bug-hunt + drift-fix hunt** is the active phase 
 checker↔runtime, and IO drift — live ledger in `docs/gaps.md`), with **M19 — Perf track** paused
 in-progress alongside it.
 
-> **START HERE (2026-08-17): `docs/gaps.md` W8-1..W8-20 — the external dogfood pass.** 19 open rows,
+> **START HERE (2026-08-17): `docs/gaps.md` W8-1..W8-22.** **20 open rows** — W8-1, W8-3..W8-17 +
+> W8-19/W8-20 from the **external dogfood pass**, plus two DECIDED language milestones (**W8-21**
+> success-coercion at `T?`/`T!E` sinks, **W8-22** `Error` carries its origin span). **W8-18** (doc
+> drift) and **W8-2** (a discarded `Result`/`Option` now warns) are closed, as is the un-numbered
+> **airlock-trap** section — a `spawn:`-task write read after the join now warns too. The dogfood rows are
 > the first findings in this repo produced by people with **no model of the implementation**, and they
-> are disjoint from waves 1–7 (which were almost all soundness). Six are **silent wrong answers**, two
-> are the **scheduler** (`--threads=1` runs *two* workers, and the default worker count is the *slowest*
+> are disjoint from waves 1–7 (which were almost all soundness). Six were **silent wrong answers** (five
+> left), two are the **scheduler** (`--threads=1` runs *two* workers, and the default worker count is the *slowest*
 > setting — fix **W8-8 before W8-7**, because rationales elsewhere in the tree cite `CHEZZI_THREADS=1`
 > measurements that were taken two-wide), five are **diagnostics**. **None of them was reachable by the
 > standing gates** — a silent wrong answer has no assertion to fail, no gate measures performance, no
 > gate reads a message, no gate executes prose, and the FFI goldens are `#[cfg(target_os = "linux")]` so
 > `cargo test` is green on a Mac with the whole FFI surface unexercised. Read the pass's session log
-> before working any row; several share one fix.
+> before working any row; several share one fix. **And read a closed row's *prescription* before
+> re-implementing it: W8-2's filed Fix was measured wrong** — see the convention below.
 
 Both share the same bar: **behavior-preserving** on every change — a VM
 speedup that changes observable output, or that only holds at one worker count, is a bug, not a win.

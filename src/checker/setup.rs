@@ -3,10 +3,29 @@
 
 use super::*;
 
+/// A snapshot of the lengths of BOTH diagnostic channels, taken by [`Checker::diag_mark`] and undone
+/// by [`Checker::diag_rollback`]. `errors` is public within the checker because several sites also
+/// ask "did the probe ERROR?" (a cascade-suppression signal — a warning is not an error and must not
+/// answer it); `warnings` is only ever compared by the rollback itself.
+#[derive(Clone)]
+pub(super) struct DiagMark {
+    pub(super) errors: usize,
+    warnings: usize,
+    /// W8-3 — the airlock-staleness taint is SPECULATIVE STATE, not just a diagnostic: reporting a
+    /// stale read CONSUMES the entry (one warning per name). A speculative walk that reads a tainted
+    /// name therefore eats the taint, and rolling back only `warnings` leaves the real walk with
+    /// nothing to report — a silently LOST warning, the mirror of the double-report this seam already
+    /// guards (measured before the fix: `refine_receiver`'s speculative arg-infer swallowed the
+    /// warning for `ys.push(xs.len())` whenever `ys` was an unrefined empty literal). Snapshotted here
+    /// and restored wholesale, so any future speculative site gets the same protection for free.
+    spawn_stale: HashMap<String, StaleWrite>,
+}
+
 impl Checker {
     pub(super) fn new() -> Self {
         let mut c = Checker {
             errors: Vec::new(),
+            warnings: Vec::new(),
             scopes: Vec::new(),
             const_decls: Vec::new(),
             loop_vars: Vec::new(),
@@ -87,6 +106,7 @@ impl Checker {
             current_module_label: None,
             loop_depth: 0,
             capture_floors: Vec::new(),
+            spawn_stale: HashMap::new(),
             current_module_is_stdlib: false,
             net_socket_seed: None,
             net_listener_seed: None,
@@ -902,11 +922,49 @@ impl Checker {
     }
 
     pub(super) fn error(&mut self, span: Span, message: impl Into<String>) {
-        let message = match &self.current_module_label {
+        let message = self.attribute(message);
+        self.errors.push(CheckError::error(message, span));
+    }
+
+    /// A NON-FATAL diagnostic: reported alongside the errors but never in the `Err` arm, so the exit
+    /// code is unchanged. Shares `error`'s module attribution — a warning raised while checking an
+    /// imported module must name it, exactly like an error from the same position.
+    pub(super) fn warn(&mut self, span: Span, message: impl Into<String>) {
+        let message = self.attribute(message);
+        self.warnings.push(CheckError::warning(message, span));
+    }
+
+    /// Snapshot BOTH diagnostic channels for the speculative-inference idiom: mark, run a probe
+    /// re-inference, [`Checker::diag_rollback`] everything the probe emitted so the REAL path reports
+    /// it exactly once. Pair them — never truncate a channel by hand — because the pair is what keeps
+    /// the two vectors in step. `warnings` is the reason this exists: a rule that warns inside a fn
+    /// body would otherwise fire twice (return-inference pass, then pass 2) and would also fire from
+    /// speculative branches whose errors are correctly discarded.
+    pub(super) fn diag_mark(&self) -> DiagMark {
+        DiagMark {
+            errors: self.errors.len(),
+            warnings: self.warnings.len(),
+            // Empty in every program that never writes a capture inside a task, and an empty
+            // `HashMap` clone allocates nothing.
+            spawn_stale: self.spawn_stale.clone(),
+        }
+    }
+
+    /// Discard every diagnostic — error AND warning — recorded since `m`, and restore the speculative
+    /// state a discarded diagnostic consumed. See [`Checker::diag_mark`].
+    pub(super) fn diag_rollback(&mut self, m: DiagMark) {
+        self.errors.truncate(m.errors);
+        self.warnings.truncate(m.warnings);
+        self.spawn_stale = m.spawn_stale;
+    }
+
+    /// Attribute a diagnostic to the module currently being checked (graph path only). Shared by
+    /// `error` and `warn` so the two can never drift on how a cross-module diagnostic reads.
+    fn attribute(&self, message: impl Into<String>) -> String {
+        match &self.current_module_label {
             Some(label) => format!("in module '{label}': {}", message.into()),
             None => message.into(),
-        };
-        self.errors.push(CheckError { message, span });
+        }
     }
 
     /// Report each name that repeats within `items` as a "`<kind>` '`<name>`' is already defined"
@@ -1738,6 +1796,14 @@ impl Checker {
         self.loop_vars.pop();
         self.const_decls.pop();
         self.capture_table.pop();
+        // W8-3 — a taint describes ONE binding, and that binding is gone once its owning scope is.
+        // `spawn_stale` is keyed by bare name, so without this an inner shadow's taint survived the
+        // pop and was charged to the OUTER binding of the same name (see `StaleWrite`). This is the
+        // ONLY site that needs it: `rg 'scopes\.push|scopes\.pop|push_scope|pop_scope'` over `src/`
+        // shows every checker scope teardown routes through here (the other hits are `desugar`'s own
+        // `scopes`, the VM's `mn_scopes`/join `scopes`, and doc comments), so a scope-popping site
+        // added later cannot forget it — the same reason `declare` owns the re-declaration untaint.
+        self.spawn_stale.retain(|_, w| w.scope < self.scopes.len());
     }
     /// Record `name` (already declared in the current scope) as a `const T` binding.
     pub(super) fn declare_const(&mut self, name: &str) {
@@ -1776,6 +1842,24 @@ impl Checker {
         if self.scopes.len() == 1 {
             self.imported_values.remove(name);
         }
+        // W8-3 — `spawn_stale` is keyed by BARE NAME, so it says nothing about which binding it
+        // describes. A NEW binding of the name is a different binding: the task wrote the old one, and
+        // a read of the new one loses nothing. Untainting here rather than at each binding form is
+        // what makes the cut complete — every way a name enters a scope routes through `declare`
+        // (`rg 'self\.declare\('` → 21 sites: `let`/`:=`, `for` target, tuple destructuring, `match`
+        // and enum-payload bindings, `wait` bind, fn/method params, closure params, `import`), so a
+        // form added later cannot forget it. Without this the rule hit the recorded
+        // `scope-blind-guard-over-rejects-shadows` class: `for n in range(2):` after a task-side
+        // `n = 5` warned that the loop variable was a stale read, which is factually false.
+        //
+        // ponytail: the untaint is unconditional, so a shadow declared in the SAME scope as a tainted
+        // binding drops the taint permanently and a later stale read of the outer binding is missed
+        // (fourth ceiling). Under-warning, never over-warning; upgrade path is keying the map on
+        // (scope index, name) so the entry survives alongside the shadow. A BLOCK-local shadow is a
+        // different story and is no longer a ceiling: the entry now carries the owning scope index
+        // (`StaleWrite::scope`) and `pop_scope` drops it with its block, so an inner shadow's taint is
+        // never charged to the outer binding.
+        self.spawn_stale.remove(name);
     }
     pub(super) fn lookup(&self, name: &str) -> Option<Ty> {
         self.scopes.iter().rev().find_map(|s| s.get(name).cloned())
@@ -1976,6 +2060,219 @@ impl Checker {
             }
         }
         false
+    }
+
+    /// W8-3 — record (or clear) the airlock-staleness taint for the binding an assignment TARGET
+    /// writes through. The root of an lvalue chain is the binding that crosses the airlock, so
+    /// `xs[i] = v`, `p.f = v` and `a.b[0].c = v` all resolve to `xs`/`p`/`a`; a `Tuple` target is not
+    /// handled here because `check_assign` recurses into this same path once per element.
+    ///
+    /// Called at the TOP of `check_assign`, before the per-arm code infers the target's receiver: a
+    /// parent-side `xs[0] = v` must untaint *first*, so the receiver read it then performs cannot
+    /// report a write the parent has just superseded.
+    pub(super) fn note_assign_root(&mut self, target: &Expr, op: AssignOp) {
+        let Some((name, granular)) = chain_root(target) else {
+            return;
+        };
+        let name = name.clone();
+        // A COMPOUND assign is `x = x OP v` (docs/syntax.md §3) — it READS the binding
+        // too, and that read is the stale one (`n += 1` after a task-side `n = n + 1`
+        // measured 1, not 2). The plain `=` form has no such read, and any read in the
+        // RHS was already inferred (and reported) before `check_assign` was called.
+        if op != AssignOp::Eq {
+            self.report_spawn_stale_read_at(&name, target.span, granular);
+        }
+        // ponytail: a plain `=` through an INDEX/FIELD target (`m[k] = v`, `p.f = v`)
+        // untaints silently even though it too only writes PART of the stale copy —
+        // unlike the mutator site, which now reports. The asymmetry is deliberate and is
+        // the third ceiling: the write may or may not supersede the task's, and the
+        // checker cannot tell (`m["a"] = 2` after a task-side `m["a"] = 1` genuinely
+        // supersedes; `m["b"] = 2` does not), so it declines rather than emit a warning
+        // that is noise half the time. Upgrade path: constant-key tracking.
+        self.note_task_write_at(&name, target.span, granular);
+    }
+    /// W8-3 — enter a body that is its OWN frame: a nested `fn`, a closure, or the speculative
+    /// return-inference walk of either. Such a body is NOT the enclosing task (it has its own caller),
+    /// and the enclosing frame's pending airlock taint must not be visible inside it.
+    ///
+    /// The two pieces of state MUST move together, which is the whole reason this is one helper rather
+    /// than two `mem::replace`s per site: clearing `in_spawn_block` alone makes a read in the nested
+    /// body report the PARENT's pending write — a FALSE warning (the body runs inside the task, where
+    /// the write IS visible) that also CONSUMES the entry, silencing the parent's real stale read
+    /// afterwards. Measured on the pre-fix binary: `g := fn() -> int: xs.len()` inside the task warned
+    /// at the closure, printed 1 there, then printed 0 after the join with nothing reported.
+    ///
+    /// Pair with [`Checker::exit_own_frame`]. The site list is the grep
+    /// `rg 'mem::replace\(&mut self\.in_spawn_block'` — every hit that clears to `false` is one of
+    /// these; the single hit that sets `true` is the `spawn:` block itself, which must keep both.
+    ///
+    /// `is_fn_body` says whether the body is a `fn` body (its call site is ELSEWHERE, so it is never
+    /// the enclosing statement's continuation) or a CLOSURE body (an inline expression in the
+    /// enclosing frame). A fn body always drops the taint — that is what keeps one function's taint
+    /// out of the next. A closure body drops it ONLY when declared inside the task; a closure declared
+    /// in the PARENT reads the very same stale copy the parent would (measured: `g := fn() -> int:
+    /// xs.len()` after the join returns 0 AND warns), so taking the taint there would trade one false
+    /// warning for one silent wrong answer.
+    ///
+    /// ponytail: dropping the taint for a body declared INSIDE the task is the sixth ceiling — a write
+    /// made only through such a body is never tainted at all (measured: `bump := fn(): xs.push(1)` /
+    /// `fn bump(): xs.push(1)` declared in the `spawn:` and called there leaves `xs.len() == 0` after
+    /// the join, silently). It is the price of not reporting the parent's pending write inside the
+    /// nested body; under-warning, like every other ceiling. Upgrade path: propagate a call-graph
+    /// summary of each nested body's writes back to its call site instead of dropping the pair.
+    pub(super) fn enter_own_frame(
+        &mut self,
+        is_fn_body: bool,
+    ) -> (bool, Option<HashMap<String, StaleWrite>>) {
+        let was_spawn = std::mem::replace(&mut self.in_spawn_block, false);
+        let stale = (is_fn_body || was_spawn).then(|| std::mem::take(&mut self.spawn_stale));
+        (was_spawn, stale)
+    }
+    /// Restore what [`Checker::enter_own_frame`] took. 1:1 — and where it took nothing (a closure in
+    /// the parent) the taint is deliberately left as the body found it, so a report from inside the
+    /// closure stays consumed and cannot fire a second time.
+    pub(super) fn exit_own_frame(
+        &mut self,
+        (was_spawn, stale): (bool, Option<HashMap<String, StaleWrite>>),
+    ) {
+        self.in_spawn_block = was_spawn;
+        if let Some(m) = stale {
+            self.spawn_stale = m;
+        }
+    }
+    /// W8-3 — a WRITE to `name`. Inside a `spawn:` body a write to a captured local is lost at the
+    /// join (measured: reassign / `push` / `xs[i]=v` / `p.f=v` / `m[k]=v` all read back the pre-spawn
+    /// value), so taint it with the write's span; in the parent the same write SUPERSEDES any pending
+    /// taint, so drop it. The first write inside the task wins the citation.
+    ///
+    /// A `defer:` block in the PARENT is not a task write: it runs in the parent frame and shares the
+    /// enclosing cell, so its write IS visible there (measured: `defer: xs.push(1)` beside a later
+    /// `defer: print(xs.len())` prints 1), and `in_spawn_block` is false. A `defer:` block nested
+    /// INSIDE a `spawn:` body is on the far side of the airlock like any other task statement — it
+    /// does reach here with `in_spawn_block` true, and taints correctly (measured: `spawn: defer:
+    /// xs.push(1)` leaves `xs.len() == 0` after the join, and the read warns).
+    pub(super) fn note_task_write(&mut self, name: &str, span: Span) {
+        self.note_task_write_at(name, span, false);
+    }
+    /// [`Checker::note_task_write`] with the write's granularity spelled out. `granular` means the
+    /// write went through an INDEX/FIELD projection and so replaced only part of the copy — recorded
+    /// so [`Checker::report_spawn_stale_read_at`] can decline a granular read of a granular write.
+    /// The mutator-method site (`xs.push(v)`) passes `false`: every member of `mutates_receiver` is a
+    /// whole-container read-modify-write, so any read of the binding observes it.
+    pub(super) fn note_task_write_at(&mut self, name: &str, span: Span, granular: bool) {
+        if !self.in_spawn_block {
+            self.spawn_stale.remove(name);
+            return;
+        }
+        // `is_captured`, NOT `is_local_capture`: a captured module GLOBAL deep-copies into the task
+        // identically (measured: `g.push(1)` in a task leaves `g.len() == 0` after the join), and the
+        // whole `gaps.md` repro written at module TOP LEVEL — where the binding IS scope 0 — is the
+        // shape with no runtime backstop at all. The scope-0 exclusion `is_local_capture` draws exists
+        // for the READ-sendability gate (an imported module resolves per-task like a free function),
+        // which is a different question from "does this write survive the join". Tracking a global
+        // costs nothing extra here because the taint is taken/restored per fn body, so a claim never
+        // crosses a function boundary.
+        //
+        // ponytail: that per-fn scoping IS the ceiling — a global written in a task in `f` and read in
+        // `g` is not flagged. Upgrade path: a module-level pass, not this source-order walk.
+        if self.is_captured(name)
+            && let Some(scope) = self.scope_of(name)
+        {
+            self.spawn_stale
+                .entry(name.to_string())
+                .or_insert(StaleWrite {
+                    span,
+                    scope,
+                    granular,
+                });
+        }
+    }
+    /// Index into `scopes` of the scope that OWNS `name` — the same binding [`Checker::lookup`]
+    /// resolves (innermost-first). `None` if the name is unbound.
+    fn scope_of(&self, name: &str) -> Option<usize> {
+        (0..self.scopes.len())
+            .rev()
+            .find(|&i| self.scopes[i].contains_key(name))
+    }
+    /// W8-3 — a READ of `name` in the PARENT of a binding whose pending write is inside a `spawn:`
+    /// body: the read sees the pre-spawn value. Reports once (the entry is consumed) at the read span,
+    /// citing the write.
+    ///
+    /// The message says "read here as its pre-`spawn:` value" rather than "its ONLY write is inside a
+    /// `spawn:` block" because two callers reach it and the latter is false at one of them: the parent
+    /// read-modify-write sites (`xs.push(v)`, `n += 1`) are themselves writes, and what is wrong there
+    /// is the value they read *before* writing. The wording above is true at both.
+    ///
+    /// ponytail: LEXICAL order, not dataflow — a read placed textually *before* the `spawn:` is not
+    /// flagged even though the write still cannot reach it. Upgrade path: a real CFG, which this
+    /// single source-order statement walk deliberately is not.
+    pub(super) fn report_spawn_stale_read(&mut self, name: &str, span: Span) {
+        self.report_spawn_stale_read_at(name, span, false);
+    }
+    /// [`Checker::report_spawn_stale_read`] with the READ's granularity spelled out. `granular` means
+    /// the read reaches the binding through an INDEX/FIELD projection (`p.name`, `m["b"]`) rather than
+    /// observing the whole value.
+    ///
+    /// A granular read of a GRANULAR write DECLINES — this is the seventh ceiling. The write side has
+    /// always declined on exactly this ambiguity (`note_assign_root`'s third ceiling: after a task-side
+    /// `m["a"] = 1`, a parent `m["a"] = 2` supersedes it and `m["b"] = 2` does not, and the checker
+    /// cannot tell which), and the read side was NOT symmetric with it: a field-granular task write
+    /// poisoned every later read of the root, so `p.count = p.count + 1` in a task made `print(p.name)`
+    /// warn — about a field that was never written, on a program that printed the right answer. Worse,
+    /// it still warned after the user carried the value out on a Channel exactly as the message told
+    /// them to, and a warning that fires after its own fix is applied destroys trust in every other
+    /// warning. The project rule is `correct > silent > wrong`: when the checker cannot tell, it
+    /// declines. Under-warning here is the intended price — a task-side `p.count = 1` read back as
+    /// `p.count` in the parent is genuinely stale and is now missed. Upgrade path: track the written
+    /// path (constant field/key) rather than just the root, which is the same upgrade the write side's
+    /// ceiling names.
+    ///
+    /// The three mixed pairs all still report, because in each the checker CAN tell: a whole-binding
+    /// write is observed by any read of it, and a whole-binding read observes any write to it.
+    /// W8-3 — about to infer a FIELD/INDEX read `e`. If the binding it projects from carries a
+    /// GRANULAR taint, lift the entry out for the duration so the bare-`Ident` read buried inside
+    /// `infer_field`/`infer_index` cannot report (or consume) it, and hand it back to
+    /// [`Checker::unshield_granular_read`].
+    ///
+    /// Lifting the ONE entry — rather than setting a checker-wide "we're in a projection" flag — is
+    /// what keeps an unrelated binding read inside the INDEX expression (`m[k]`, where `k` is itself
+    /// stale) fully reportable. Nesting is safe: `a.b.c` shields `a` at the outer arm, the inner arm
+    /// finds nothing left to lift and restores nothing.
+    pub(super) fn shield_granular_read(&mut self, e: &Expr) -> Option<(String, StaleWrite)> {
+        let (name, _) = chain_root(e)?;
+        if !self.spawn_stale.get(name).is_some_and(|w| w.granular) {
+            return None;
+        }
+        let name = name.clone();
+        self.spawn_stale.remove_entry(&name)
+    }
+    /// Put back what [`Checker::shield_granular_read`] lifted. 1:1 — an entry consumed by a report is
+    /// never in hand here, so a genuine warning still fires exactly once.
+    pub(super) fn unshield_granular_read(&mut self, saved: Option<(String, StaleWrite)>) {
+        if let Some((name, w)) = saved {
+            self.spawn_stale.insert(name, w);
+        }
+    }
+    pub(super) fn report_spawn_stale_read_at(&mut self, name: &str, span: Span, granular: bool) {
+        if self.in_spawn_block {
+            return; // inside the task the copy IS the value being read — nothing is lost
+        }
+        if granular && self.spawn_stale.get(name).is_some_and(|w| w.granular) {
+            return; // both sides partial — which part is anyone's guess, so decline (7th ceiling)
+        }
+        let Some(write) = self.spawn_stale.remove(name) else {
+            return;
+        };
+        self.warn(
+            span,
+            format!(
+                "'{name}' is read here as its pre-`spawn:` value — a captured binding crosses the \
+                 task airlock as an independent copy, so the write inside the `spawn:` block (line \
+                 {}) is not visible after the join (carry the value out on a Channel, or use a \
+                 Shared)",
+                write.span.line
+            ),
+        );
     }
 
     /// Does `name` resolve to the MODULE scope (index 0) — i.e. is it a module-level binding rather
@@ -3282,5 +3579,29 @@ impl Checker {
         }
         visited.remove(name);
         all_ok
+    }
+}
+
+/// W8-3 — walk an lvalue-shaped chain (`xs`, `xs[i]`, `p.f`, `a.b[0].c`) down to the BINDING it
+/// reaches, and report whether the walk went through any INDEX/FIELD projection. That binding is the
+/// one that crosses the task airlock, and the flag is what the taint's granularity means on both
+/// sides: `Some(("a", true))` for `a.b[0].c`, `Some(("xs", false))` for a bare `xs`. `None` when the
+/// chain bottoms out on something that is not a name (`f().x`) — there is no binding to charge.
+///
+/// Shared by the write side ([`Checker::note_assign_root`]) and the read side (the `Field`/`Index`
+/// arms of `infer`) so the two cannot drift on what "the same binding, partially written" means —
+/// they drifting apart is exactly what made a field-granular task write poison every read of the root.
+pub(super) fn chain_root(e: &Expr) -> Option<(&String, bool)> {
+    let mut e = e;
+    let mut granular = false;
+    loop {
+        match &e.kind {
+            ExprKind::Index { obj, .. } | ExprKind::Field { obj, .. } => {
+                granular = true;
+                e = obj;
+            }
+            ExprKind::Ident(name) => return Some((name, granular)),
+            _ => return None,
+        }
     }
 }

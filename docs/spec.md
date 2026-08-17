@@ -322,12 +322,12 @@ collection/`<params>`/`<argList>` productions in [`grammar.bnf`](grammar.bnf).)
 
 **Entry model.** Programs run top-to-bottom; there is no automatic `main`. An `Err`/`None` left
 unhandled at the top level (a bare expression statement, or a top-level `?`) exits the program with
-`unhandled error: …` and a non-zero code. **Inside a function the same discarded `Result`/`Option` is
-silently thrown away** — no diagnostic at check, no fault at run, `rc=0`. This asymmetry is a known
-defect, not a design: Rust warns on the drop wherever it happens (`unused_must_use`). See
-`docs/gaps.md` **W8-2**; the intended fix is a checker diagnostic on a bare expression statement of
-`Result`/`Option` type, with `r := …` as the escape, which also makes the top-level case a compile
-error rather than a runtime one. `?` is valid at module top-level (the runtime unwinds the
+`unhandled error: …` and a non-zero code. **Inside a function — and inside a `spawn:` or `defer:`
+block, each its own frame — the same discarded `Result`/`Option` is silently thrown away** at run
+time. Those are exactly the positions `chezzi check` **warns** on (`docs/gaps.md` **W8-2**, following
+Rust's `unused_must_use`, with `r := …` / `_ := …` as the escapes); the top-level case does not warn,
+because the runtime already checks it. Note that `_ := g()` at the top level **disables** that check.
+See [`syntax.md` §9](syntax.md) for the position-by-position table. `?` is valid at module top-level (the runtime unwinds the
 propagated `Err`/`None` at the program boundary) and inside a `Result`/`Option`-returning fn — but a
 **nil-returning fn (including a `main` you write) may not use `?`**: it would silently swallow the
 error (there is no `fn main`/entrypoint exception — a fn must return `Result`/`Option`). A bare

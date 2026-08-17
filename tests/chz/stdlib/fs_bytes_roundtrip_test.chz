@@ -51,8 +51,8 @@ fn fixture(name: str) -> bytes:
 
 fn cleanup(d: bytes):
     for p in paths(fs.list_dir(d)):
-        fs.remove_file(cat(cat(d, b"/"), p.bytes()))
-    fs.remove_dir(d)
+        _ := fs.remove_file(cat(cat(d, b"/"), p.bytes()))
+    _ := fs.remove_dir(d)
 
 test fn list_dir_round_trips_a_non_utf8_name():
     d := fixture("list_dir")

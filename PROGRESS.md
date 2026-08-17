@@ -15,13 +15,16 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > here), and the strong-areas evidence, real-app timings and LOC counts stay attributed to the reporters.
 > **Three of the report's claims did NOT reproduce and are corrected in place** in `gaps.md` (the ReDoS
 > repro subject, `path.join`'s "double slash", and two diagnostics cosmetics), along with two wrong
-> line-cites of theirs. Only **W8-18 (the twelve doc-drift rows) is CLOSED — fixed in this commit**;
-> W8-1..W8-17, W8-19, W8-20 are **open** and are now the top of the pre-JIT queue.
+> line-cites of theirs. **W8-18 (the twelve doc-drift rows) was CLOSED in that commit**; **W8-2 (a
+> discarded `Result`/`Option`) and the un-numbered airlock-trap section closed 2026-08-17** on the
+> `feat/diagnostic-pass-w8-2-airlock` branch. **20 rows are open** (W8-1, W8-3..W8-17, W8-19, W8-20,
+> plus the two decided milestones W8-21/W8-22) and are the top of the pre-JIT queue.
 >
 > **The shape:** semantics are in good shape (40+ CPython differentials → **one** differing byte, `NaN`
 > casing; a 7,000-op `std.collections` fuzz → zero mismatches; `defer`/`panic`/`recover` byte-identical
-> to Go), and the layer *around* the semantics is not — **six silent wrong answers** (W8-1 interpolation
-> eats `{n}` regex quantifiers · W8-2 a discarded `Result` is fatal at top level and silent inside a fn ·
+> to Go), and the layer *around* the semantics is not — **six silent wrong answers, five still open**
+> (W8-1 interpolation
+> eats `{n}` regex quantifiers · ~~W8-2 a discarded `Result` is fatal at top level and silent inside a fn~~ **fixed** ·
 > W8-3 `Shared.set` inside `update` loses the write · W8-4 `sort_by_key` callback mutations vanish ·
 > W8-5 `json.parse` depth kills the process despite its `Result` · W8-6 `regex` `\1` silently emits
 > literal backslashes), a **scheduler whose default is its slowest setting** (W8-7; `--threads=1`
@@ -56,6 +59,210 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > string fixes: `chezzi init`'s banner advertised `entrypoint = "src.main"` (the manifest says
 > `"src.main:main"`) and recommended `chezzi run src/main.chz`, which is a **silent no-op, rc=0**.
 > Every code snippet added was executed before it was written down.
+>
+> **✅ SESSION 2026-08-17 — the diagnostic pass (`feat/diagnostic-pass-w8-2-airlock`): two warning
+> rules, one silent-wrong-answer fix, one stdlib fault-surface audit.** Branch-final gate: `cargo test`
+> **21 targets / 4406 passed / 0 failed / 3 ignored** (lib **4188/0/2**), `cargo test conformance`
+> **8/8**, clippy `--all-targets -D warnings` clean, `chezzi test tests/chz` **590 passed / 0 failed**
+> at the default worker count **and** at `CHEZZI_THREADS=2` (**zero** warning lines from the suite at
+> either count), `chezzi docs` renders. Rows closed in `docs/gaps.md`: **W8-2** and the un-numbered
+> **airlock-trap** section; **the `read_line` deferral (item 3) narrowed** to its carrier shape.
+>
+> **✅ The airlock trap warns — a `spawn:`-task write read after the join, 2026-08-17
+> (`docs/gaps.md`'s un-numbered airlock section, CLOSED).** `results = […]` inside `spawn:`, read after
+> the join, gave `for r in results:` **zero iterations** — a green test that asserted nothing. Now:
+> *"'results' is read here as its pre-`spawn:` value — a captured binding crosses the task airlock as an
+> independent copy, so the write inside the `spawn:` block (line 4) is not visible after the join (carry
+> the value out on a Channel, or use a Shared)"*, non-fatal, rc unchanged. Airlock semantics are
+> **untouched** — only the missing warning was ever at issue. **The warn/silent split is a measured
+> table, not a design:** every shape was run on the pre-rule binary and the rule follows what the parent
+> actually observed. Warn — reassign a captured local, `xs.push`, `xs[0] = 9`, `p.x = 9`, `m["a"] = 9`,
+> the module-top-level form, the implicit-nursery form, a captured module global, spawn-in-a-`for` read
+> after the loop, and the two parent-side read-modify-writes (`xs = xs + [2]`, `n += 1` — measured `1`,
+> not `2`). Silent — `Shared.update`, `Channel.send`, a **parent** `defer:` block, a task-local nested
+> `fn`, a parent overwrite that supersedes. Four hooks, no dataflow pass: the taint is recorded **once**
+> at the top of `check_assign`'s lvalue `match` (there is exactly one `check_assign`, and its `Tuple`
+> arm recurses into itself, so `xs[i] = v` / `p.f = v` / `a.b[0].c = v` all resolve to the binding that
+> crosses and a fifth arm added later is covered without an edit), once in `infer_method_call` for an
+> in-place mutator, reported in `infer_ident` at the read, and taken/restored per frame via a shared
+> `enter_own_frame`/`exit_own_frame` pair that moves `in_spawn_block` and `spawn_stale` **together** (a
+> bare `mem::replace` on one can no longer forget the other — the grep found **two** wrong sites, not the
+> one reported). `mutates_receiver` is keyed on the receiver **TYPE**, derived by grepping
+> `std/prelude.chz` rather than from memory: `clear`/`discard` do not exist in this language,
+> `unique`/`dedup`/`merge` build new collections, and `str.reverse` returns `str` while `List.reverse`
+> returns `nil` — which is *why* the key is the type. That same key is the handle-type exemption
+> (`Shared`/`RwShared`/`Atomic`/`Channel`/`Executor`/`Socket`/`Listener`/`Writer`/`Reader` are
+> `Ty::Struct` → `_ => false`), so there is no second list to keep in sync. **Two filed premises that
+> measurement inverted:** "locals only, `is_local_capture` draws exactly this line" would not have warned
+> on the filed repro itself (at module top level the binding is scope 0 — the real predicate is
+> `is_captured`), and the `defer:` claim was backwards (the **parent** `defer:` is the exempt one, its
+> write measured visible; a `defer:` nested inside `spawn:` correctly taints). **Six deliberate
+> ceilings**, all under-warns, all pinned by tests so closing one fails loudly, and all stated in three
+> places (`ponytail:` markers in `src/checker/`, `syntax.md` §11b, `concurrency.md`): no scope
+> coordinate; a partial parent-side `m[k] = v` / `p.f = v` untaints silently (it *may* supersede — per
+> `parked-is-not-stuck`, decline rather than warn on noise); a body declared inside the task is not
+> summarized back to its call site; per **frame** (a *closure* body is an expression in the parent's
+> frame and so still warns — an unconditional reset traded the false warning for a **silent wrong
+> answer**, caught by measuring the neighbour); lexical order, not dataflow; builtin containers only.
+> Two defects found in the rule's own adversarial pass and fixed in `a4aa50b3`: a speculative walk
+> **ate** the warning (reporting consumes the taint, so `diag_rollback` discarded it while the entry
+> stayed consumed — `DiagMark` now snapshots and restores `spawn_stale`, fixed at the seam so any future
+> speculative site is covered), and a parent compound assign untainted without reporting. Over-fire
+> re-verified: `Shared`/`Channel` rewrites, a 3-worker pool over a closed `Channel`, an `Executor`
+> fan-out of 10 into a `Shared` — all silent; the whole `tests/chz` suite emits **zero** warning lines
+> at both worker counts, including all 13 sites of `tests/chz/spec/airlock_shared_binding_test.chz`.
+>
+> **✅ `ord()` faults on a multi-character `str` — a silent wrong answer, 2026-08-17.** `ord("ab")`
+> returned **`97`**, rc=0 — a plausible number for input the function cannot represent, and
+> `docs/stdlib.md` documented it as though it were a design choice. Measured CPython 3.14.7:
+> `TypeError: ord() expected a character, but string of length 2 found`. Rust's `char` has no
+> 1-char-string coercion either. Now `ord() expects a 1-character str, got 2 characters`, recoverable via
+> `recover:`. The guard counts **characters, not bytes** (`s.chars()`), so `ord("é")` is still `233`
+> (1 char / 2 bytes) and `ord("éa")` faults; the empty-string message is kept verbatim so the existing
+> golden is untouched. All 15 `ord(` call sites in `std/`+`examples/` pass a single char. `chr()` was
+> measured in the same family and does **not** diverge the same way — its only difference is the lone
+> surrogate (`chr(0xD800)`: Chezzi faults, CPython yields `'\ud800'`), which is the *opposite* failure
+> mode (loud + recoverable, not silently wrong) and is unfixable without abandoning UTF-8 `str`, so it
+> is recorded as a stated divergence rather than changed. Test: `tests/chz/spec/ord_chr_test.chz` (4
+> `test fn`s, Chezzi not Rust — `recover:` + `e.message()` per the hybrid testing policy).
+>
+> **✅ The "fails without telling you" stdlib audit — DOCUMENTATION ONLY, because the measurement
+> inverted the premise, 2026-08-17.** The working assumption was that `Reader.read_line`'s **sticky**
+> UTF-8 fault (a re-read re-faults on the same retained bytes) was a defect *"because Python raises and
+> continues"*. **CPython 3.14.7, measured: it does not.** After the `UnicodeDecodeError`, every later
+> `readline()` returns `''` — an **EOF claim over data still in the file** — and it *also* loses the
+> valid line **before** the bad one (confirmed with the bad bytes past a chunk boundary, so it is not a
+> one-buffer artifact). Go's `bufio.Scanner` sails through only because a Go `string` may hold arbitrary
+> bytes, which a UTF-8-validated Chezzi `str` cannot represent. Chezzi is the **loudest and least lossy
+> of the three** and the only one where every byte stays recoverable (via `read_bytes`) — so making the
+> fault non-sticky would move it *toward* Python's silent loss, the exact inversion
+> `correct > silent > wrong` forbids. **Zero lines of `src/` changed.** What landed is the missing
+> ancestor evidence, with an explicit *"do NOT 'fix' it into a skip"*: `std/io.chz` names **three**
+> outcomes where the `Option[str]` spells two, `docs/stdlib.md` gains *"Why sticky rather than
+> skip-ahead — the ancestors, measured"*, and `tests/chz/stdlib/io_reader_carry_test.chz` gains a
+> "WHICH ANCESTOR THIS PINS" header (no assert changed — they already pinned the right behaviour).
+> Also landed: the **`-1` `index_of` hazard** documented with its measured trap in *both* languages
+> (`'hello'['hello'.find('zz')]` → `'o'` in Python, `xs[xs.index_of(9)]` → `3` here) and one correction
+> — `str.index_of` **is** Python's `str.find`, trap and all, but `List.index_of`'s `-1` has **no** Python
+> twin (`list.index` raises), so the list half is Chezzi applying one uniform shape, not inheriting one;
+> and a **14-row fault table** (Chezzi message · measured CPython behaviour · carrier alternative) at the
+> end of `docs/stdlib.md` §1 so the audit is not re-run. Twelve of the fourteen confirmed
+> ancestor-aligned; `str.join` on a non-`str` turned out to be a **static type error** here (better than
+> Python's runtime `TypeError`, so it moved out of the fault table), and `ord` was the one genuine
+> divergence — fixed above.
+>
+> **✅ Three pre-existing checker/CLI defects fixed along the way, 2026-08-17.** (1) **`refine_receiver`
+> leaked speculative diagnostics on every non-erroring exit** (`src/checker/proto.rs`): `m := {}` then
+> `m.insert(nope)` reported `unknown name 'nope'` **twice**, on the release binary, for `Map`+`insert`,
+> `Map`+`extend` and `Option`+`insert`. Its `diag_mark` had three `return`s between the mark and the
+> rollback. Fixed by restructuring so there is **no `return` between the mark and an unconditional
+> `diag_rollback`** — the speculative infer is a duplicate by construction (the real dispatch path
+> re-infers the same args), so a future exit path cannot forget one. Same restructure applied to the
+> sibling `refine_index_receiver`, which had the same forget-shaped layout. (2) `run --errors=json`
+> double-reported a warning and (3) `report_fatal` carried a duplicated JSON format string that would
+> have shipped **without** `severity` — both detailed in the severity-channel entries below.
+>
+> **✅ W8-2 — the first warning rule: a discarded `Result`/`Option`, 2026-08-17.** A bare expression
+> statement whose type is `Result`/`Option` warns *"the Result returned by 'g' is discarded — bind it
+> (`r := g()`), or discard it explicitly (`_ := g()`)"*, following Rust's `unused_must_use` (the hint
+> spells the call back for a plain-name callee; a method call keeps `r := …`). Non-fatal: the
+> program still checks clean and the exit code is unchanged. **It fires only where the value is
+> genuinely lost — inside a non-top-level proto** (a `fn` body, a `spawn:` block, a `defer:` block).
+> At **module top level** it stays silent, because `Op::PopExprStmt` already calls `top_level_error`
+> there (`vm/exec.rs`) and aborts with `unhandled error`: warning "is discarded" would be false, and
+> obeying it (`_ := g()`) *disables* that check and turns a failing program into a silent rc=0. Every
+> other block kind — `if`/`for`/`while`/`match` arm/`parallel:`/`recover:`/`wait:` arm — emits into the
+> *enclosing* proto, so at top level all of them stay silent too (measured: each aborts; inside
+> `recover:` the abort is caught and surfaces as `r = Err(…)`). Excluded on purpose: `defer f.close()`
+> (Go's canonical unchecked idiom), an inline-expr fn body and a value-block tail (both are implicit
+> returns, not drops), and `?`/`??` (which yield the unwrapped payload). `o()?.len()` *does* warn —
+> optional chaining re-wraps. `spawn g()` (the call form) is excluded like `defer` — a spawned task's
+> return value is discarded by construction. A carrier laundered through a **type parameter**
+> (`fn drop_it[T](x: T): x`) also escapes the rule: the statement's type is `T`, not a carrier —
+> measured silent, rc=0, and Rust is identical (`T` carries no `#[must_use]`). Corpus: 11 `_ :=` sites,
+> all inside `fn`/`test fn` bodies. `chezzi test` prints each distinct warning **once per invocation**
+> (each `*_test.chz` is its own entry graph, so a shared `lib.chz`'s warning used to print once per
+> importer). Docs: `syntax.md` §9 (position table), `spec.md` entry model.
+>
+> **✅ The checker has a WARNING severity, 2026-08-17 — plumbing (the rule above is its first user).** The
+> checker could report hard errors and nothing else, so the two diagnostics queued behind it
+> (`docs/gaps.md` W8-2's discarded `Result`, and the airlock trap at `gaps.md:418`) had no non-fatal
+> channel to land on. `CheckError` gains `pub severity: Severity` (`Error`/`Warning`) with
+> `CheckError::error` / `::warning` constructors; `Display` renders `warning (line N, col M): …` and
+> the error rendering is **byte-identical to before** — hundreds of tests, the LSP and `--errors=json`
+> all match on that string. `Checker` gains a `warnings` vec next to `errors` and a `warn(span, msg)`
+> beside `error(span, msg)`, both routed through one `attribute` helper so a cross-module warning takes
+> the same `in module 'X': ` prefix an error does. New entry points `checker::check_graph_diags` (and
+> its single-module test twin `check_diags`) return `(Result, Vec<CheckError>)`; `check_graph` /
+> `check_graph_with_entry` keep their exact signatures and delegate, so the ~113 existing call sites are
+> untouched. **Warnings never reach the `Err` arm — the exit code is unchanged in every case.**
+> Consumers: `chezzi check`/`run` print them to stderr in plain text, `editor::diagnostics` returns them
+> in the same `Vec<Diag>` (`Diag` gains `severity`, re-exported from the checker so there is one such
+> type in the tree) and `chezzi-lsp` maps them to `DiagnosticSeverity::WARNING`, `chezzi test` prints
+> them once before the run. **`--errors=json` gains a `severity` key** on every object (`"error"` /
+> `"warning"`, between `col` and `message`), emitted by one shared renderer (`diags_json`) that the
+> **fatal resolve/lex/parse path now goes through too** — a key present on type errors but absent on
+> parse errors would be worse for a consumer than no key at all, and that path had its own duplicated
+> format string until this commit; a warning-only `check` prints the warning array where it used to print `[]`, and the
+> genuinely clean case still prints `[]` and exits 0. Tests: the `warns` / `no_warn` helpers in
+> `src/checker/tests.rs` (`warns` asserts the program is error-FREE, or it could not tell a warning from
+> an error), a channel test asserting the `warn`/`error` split + both renderings + the attribution, a
+> `check_graph_diags` test that no warning leaks into either arm, and a CLI test pinning the unchanged
+> clean/error cases plus the new key (`tests/check_errors_json.rs`).
+>
+> **✅ …then hardened before it got a producer, same day.** Two holes, both invisible while nothing
+> warns. (1) **The speculative-rollback idiom had no `warnings` counterpart.** Nine sites in
+> `src/checker/{sig,proto,expr,pattern}.rs` mark `self.errors.len()`, run a probe re-inference, then
+> `errors.truncate(mark)` because the real path re-reports for keeps — the new vec was invisible to
+> every one of them, so the first rule that warned inside a fn body would have fired twice
+> (return-inference pass, then pass 2) and from abandoned branches too. Replaced by ONE pair,
+> `Checker::diag_mark() -> DiagMark` / `diag_rollback(m)`, covering both vecs; all nine sites route
+> through it (the four that also ask "did the probe ERROR?" read `m.errors`, since a warning must not
+> answer that question). The one mark that is NOT a rollback site (`pattern.rs`'s `closure_mark` — the
+> closure body is checked exactly once, so its diagnostics stay) keeps the raw length and says so.
+> (2) **`chezzi run --errors=json` double-reported a warning**, printing a warning array to stderr and
+> folding the same warnings into the stdout array. Routing is now stated per command and each
+> diagnostic appears once: `check`'s stdout IS the diagnostic document (machine mode → the one stdout
+> array, plain text → stderr, never both), while `run`/`test` stdout belongs to the PROGRAM (always
+> stderr, both modes, and the stdout array stays errors-only). `report_check_warnings` lost its JSON
+> branch with it — its only machine-mode caller is `run`, whose stderr is shared with the program's, so
+> a JSON array there could never be parsed back out.
+>
+> **🗳️ TWO LANGUAGE MILESTONES DECIDED, 2026-08-17 — `docs/gaps.md` W8-21 / W8-22 (not started).**
+> Both came out of the W8-2 / W8-19 discussion, and both are filed with their **rejected** alternatives.
+>
+> **W8-21 — success-coercion at a declared `T?` / `T!E` sink.** The syntax already ships (`T?` =
+> `Option[T]`, `T!E` = `Result[T,E]`, `Token::Bang` at `src/lexer/mod.rs:116`); only the coercion is
+> missing — `fn f() -> int?: return 1` is a type error today. Decided: **exactly two coercions, both on
+> the SUCCESS side** — `T`→`Some(v)`, `T`→`Ok(v)`; `None`/`Some`/`Ok`/`Err` otherwise explicit.
+> Payoff **152 sites** (102 `return Ok(` + 50 `return Some(`). **The rejected third rule is the content:**
+> `E` → `T!E` cannot land because `str` → `Error` is a **general** assignability rule here (measured:
+> `e: Error = "boom"` compiles), so every `str` satisfies both sides of a `str!` sink — **34 colliding
+> sites** (`Result[str]` ×19, `str!` ×15) for the 81 `return Err(` it would save. Ancestor survey: **nobody
+> resolves the overlap, they all make it unrepresentable** — Zig has the rule but its error side is a
+> payload-free error *set*; Swift/Kotlin/C# put errors in `throws`; **Rust refuses the coercion**
+> (measured `E0308`); **Go disambiguates by position** (measured). Zig buys it by giving up error
+> payloads, a trade Chezzi already spent on `.message()` + arbitrary `E`. Replacement is the **`!"..."`**
+> sugar — the sigil supplies the disambiguation types cannot. Cost to plan for is the **lowering**: the one
+> existing coercion (int→float) needed **13 `Op::CoerceFloat` sites + a whole `FloatAliases` table**
+> because the compiler keys on syntactic types and the checker on resolved ones (`compiler/mod.rs:360`) —
+> the `checker-superset-of-compiler` class, and `type Maybe = int?` is its exact analogue here.
+>
+> **W8-22 — give a caught `Error` its origin line/col.** Live asymmetry: an uncaught index fault prints
+> `runtime error (line 3, col 11): index 9 out of bounds (len 1)`, the same fault through `recover:` gives
+> bare `index 9 out of bounds (len 1)`. **The span already exists and is discarded at one line** —
+> `RuntimeError` carries `pub span: Span` (`src/vm/mod.rs:61`) and `src/vm/exec.rs:1392` does
+> `alloc_str(rte.message)`. And the fix is **additive, because `Error` is a PROTOCOL**
+> (`Ty::Protocol("Error", [])`, `checker/ty.rs:428`) satisfied structurally by any `message() -> str`,
+> with `str` granted intrinsically at `ty.rs:516`: the origin rides on a **new native struct satisfying
+> `Error`** that `recover:` allocates in place of the bare `str`, so **the 336 `Err("...")` sites do not
+> move** and neither does `==`. Only a *recovered* `Err`'s payload display can shift — measured exposure
+> 37 `recover:` files, 2 `.expected` goldens. Ancestors split
+> evenly (Python traceback yes / Zig debug-only / Rust + Go no), so it is a genuine choice. Recommended:
+> **construction span only** (a chain costs an alloc per `?` — 271 sites — which is why Zig gates it to
+> debug), **default rendering unchanged**, sequenced **after W8-14/W8-15** to reuse their `Span.file`
+> resolver. Settle first: `Error` as a struct vs a `str` + side table (the side table keeps `==` and
+> display byte-identical but cannot cross the task airlock — probably a false economy).
 >
 > **✅ `os.hostname() -> Option[str]`, 2026-08-17 — no more silent `""` on syscall failure.** The
 > native `hostname` (`src/native/os.rs:55`) fell back to `String::new()` on a nonzero
@@ -219,7 +426,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > Recorded with the measured Go/Python/Rust table — and with the reason each was deferred — in
 > **`docs/gaps.md`, "Considered and DEFERRED BY DECISION, 2026-08-17"**, directly under the ledger
 > table. They are deliberately NOT ledger rows: that table means "open bugs to fix now", and these are
-> settled scope decisions. Read that entry before re-deriving any of them from scratch.
+> settled scope decisions. Read that entry before re-deriving any of them from scratch. (**`read_line`
+> narrowed 2026-08-17**: only the CARRIER SHAPE is still open — the *stickiness* was measured against
+> CPython and Go and is settled as correct; see the diagnostic-pass entry above.)
 
 > **✅ The dead-engine comment/doc sweep + the self-comparison purge, 2026-08-17 (11 commits).**
 > The `--serial`/`interp` removals left ~1750 lines across the tree still describing the deleted

@@ -966,15 +966,27 @@ impl Checker {
         // (c) determine the supplied ELEMENT type from a slot-supplying mutator's args.
         // `push(x)`/`add(x)`/`insert(x)` supply the element directly; `extend(xs)` supplies a
         // list/set whose element refines ours.
-        let mark = self.errors.len();
+        // This inference is SPECULATIVE: the real dispatch path re-infers the same args, so every
+        // diagnostic emitted here is a duplicate. Roll back UNCONDITIONALLY — no `return` between
+        // the mark and the rollback, so a later exit path can't be added that forgets one. (It used
+        // to end at the shape match below, whose `_` arm leaked: `m := {}` + `m.insert(undefined_v)`
+        // reported `unknown name` twice.)
+        let mark = self.diag_mark();
         let elem = match method {
             "push" | "add" | "insert" => args.first().map(|a| self.infer_value(a)),
             "extend" => args.first().map(|a| match self.infer_value(a) {
                 Ty::List(e) | Ty::Set(e) => *e,
                 other => other,
             }),
-            _ => return,
+            _ => None,
         };
+        let arg_erred = self.errors.len() != mark.errors;
+        self.diag_rollback(mark);
+        // (d) cascade invariant: if inferring the arg itself reported an error, don't refine (the
+        // real dispatch path reports it, exactly once).
+        if arg_erred {
+            return;
+        }
         let Some(elem) = elem else { return };
         // Wrap the element into a RECEIVER-SHAPED value so the structural merge lines up the slot:
         // a list receiver merges with `list[elem]`, a set receiver with `set[elem]`. Any other
@@ -984,13 +996,6 @@ impl Checker {
             Ty::Set(_) => Ty::set(elem),
             _ => return,
         };
-        // (d) cascade invariant: if inferring the arg itself reported an error, don't refine — and
-        // roll back the speculative diagnostics so the real dispatch path (check_args) reports them
-        // exactly once. Leaving them here double-reports an erroring arg (e.g. `xs.push(undefined)`).
-        if self.errors.len() != mark {
-            self.errors.truncate(mark);
-            return;
-        }
         // A shape that is itself Unknown supplies nothing concrete; merge is a no-op, bail early.
         if shape.is_unknown() {
             return;
@@ -1035,16 +1040,20 @@ impl Checker {
         }
         // The supplied shape mirrors the receiver kind: `Map(idx, val)` for a map, `List(val)` for a
         // list (index type is the int position, irrelevant to the element slot).
-        let mark = self.errors.len();
+        // Speculative, same contract as `refine_receiver`: the real index-assign path re-infers the
+        // index and reports its diagnostics, so roll back unconditionally with no exit in between.
+        let mark = self.diag_mark();
         let shape = match &obj_ty {
-            Ty::Map(..) => Ty::map(self.infer(index), val_ty.clone()),
-            Ty::List(..) => Ty::list(val_ty.clone()),
-            _ => return,
+            Ty::Map(..) => Some(Ty::map(self.infer(index), val_ty.clone())),
+            Ty::List(..) => Some(Ty::list(val_ty.clone())),
+            _ => None,
         };
-        if self.errors.len() != mark {
-            self.errors.truncate(mark); // roll back the speculative index-infer diagnostics; the
-            return; // real index-assign path re-infers + reports them once (no double-report)
+        let index_erred = self.errors.len() != mark.errors;
+        self.diag_rollback(mark);
+        if index_erred {
+            return;
         }
+        let Some(shape) = shape else { return };
         let merged = merge_unknown(&obj_ty, &shape);
         if merged == obj_ty {
             return;

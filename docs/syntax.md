@@ -396,6 +396,71 @@ Two rules cover everything:
    forgetting `Shared` is a harmless logic bug (an isolated stale value) rather than a data race —
    Chezzi has no borrow checker to prove a shared mutation is locked, so the safe default is to copy.
 
+**The checker WARNS when that copy silently costs you a value.** A captured binding whose only write
+is inside a `spawn:` body, read again after the join, is a **non-fatal warning** on stderr naming the
+binding and citing the write's line (exit code unchanged — the semantics above are deliberate, so this
+is a warning, not an error). It exists because of the failure mode: a `for r in results:` over the
+stale (still-empty) list runs **zero** iterations, so every `assert` inside is skipped and the program
+exits `0` — a green test that tested nothing.
+
+```chezzi
+results: List[str] = []
+parallel:
+    spawn:
+        results = ["ok", "ok"]     # ← warning cites this line
+for r in results:                  # 'results' is read here as its pre-`spawn:` value
+    assert r == "ok"               # zero iterations before the warning existed
+```
+
+It covers a reassignment, a compound assign, `xs[i] = v`, `p.field = v`, `m[k] = v`, and the in-place
+container mutators (`push`/`pop`/`insert`/`remove_at`/`extend`/`sort`/`sort_by`/`sort_by_key`/
+`reverse` on a list, `remove`/`update` on a map, `add`/`remove` on a set, `push`/`pop` on a bytearray).
+It stays **silent** where the write really does survive: through a `Shared`/`RwShared`/`Atomic`/
+`AtomicInt`/`Channel`/`Executor`/`Socket`/`Listener`/`Writer`/`Reader` handle (those cross by handle),
+inside a `defer:` block **in the parent** (same frame, same cell, no airlock), when the parent
+overwrites the binding before reading it, and when the read happens only inside the task. A `defer:`
+block nested *inside* a `spawn:` body is on the far side of the airlock like any other task statement —
+its write is lost and it warns like one.
+
+A parent-side write only **supersedes** the lost one — and so silences the warning — when it replaces
+the *whole* binding (`xs = [...]`). An in-place mutator (`xs.push(v)`) and a compound assign (`n += 1`)
+both **read** the stale copy before writing it, so they warn at the write itself.
+
+Seven deliberate ceilings, all of them under-warning rather than over-warning:
+
+1. **Per frame** — the taint does not cross a `fn` boundary in either direction. A module global written
+   in a task in one function and read in another is not flagged (it *is* flagged when both happen in
+   the same body, or at module top level); and a read inside a **nested `fn` declared in the parent** is
+   likewise silent, even of a captured local whose write really was lost. The **closure** spelling of
+   the same read *does* warn, because a closure body is an expression evaluated in the parent's own
+   frame: `g := fn() -> int: xs.len()` after the join warns and returns 0, while `fn g() -> int: return
+   xs.len()` returns 0 silently.
+2. **Lexical, not dataflow** — a read placed textually *before* the `spawn:` is not flagged even though
+   the write cannot reach it either.
+3. **Builtin containers only** — a user struct method that mutates `self` (`p.bump()`) is not counted as
+   a write; nothing in the checker says which methods mutate, and treating every method as a write
+   would false-positive on every getter.
+4. **Re-declaring the name clears it** — the taint is keyed by bare name, so any *new* binding of that
+   name (a `:=`, a loop variable, a `match`/`wait:`/destructuring binding, a parameter) drops it. That
+   is what keeps a loop variable that merely *shadows* the name from being reported, at the cost of
+   missing a later stale read of the outer binding once a shadow has appeared in the same scope. The
+   taint *does* carry a scope coordinate, so a **block-local** shadow's taint dies with its block
+   rather than being charged to the outer binding of the same name.
+5. **A partial write through an index/field target** (`m[k] = v`, `p.f = v`) untaints silently, unlike a
+   mutator, because the checker cannot tell whether it supersedes the task's write (`m["a"] = 2` after a
+   task-side `m["a"] = 1` does; `m["b"] = 2` does not), and it declines rather than warn on noise.
+6. **A write made only through a closure or nested `fn` declared inside the task** is not tainted — the
+   nested body has its own frame, so `spawn: bump := fn(): xs.push(1)` then `bump()` leaves `xs.len()`
+   at 0 after the join with nothing reported (same for the `fn bump():` spelling). Dropping the taint
+   there is what stops the nested body reporting the *parent's* pending write as its own.
+7. **A partial *read* of a partial write declines**, the mirror of ceiling 5 and for the same reason: a
+   task-side `p.count = ...` read back as `p.name`, or `m["a"] = 1` read back as `m["b"]`, names a part
+   the checker cannot match up, so it stays silent — a task-side `p.count = 1` read back as `p.count`
+   is genuinely stale and is missed. The three mixed pairs all still report, because there the checker
+   *can* tell: a whole-binding write is observed by any read of it (`p.count = 1` then `print(p)`), and
+   a whole-binding write is stale in every part (`p = P(...)` then `print(p.name)`). An in-place
+   mutator (`xs.push(v)`) is a whole-container write, so `print(xs[0])` after one still warns.
+
 **Mutating a captured local.** A **closure body is a single expression** (`fn(x): expr`), so a closure
 cannot contain a reassignment statement — `fn(): n = n + 1` is a *parse error*. Three ways to write
 through a captured binding: (a) a **method call**, which *is* an expression, so a closure can mutate a
@@ -2961,21 +3026,78 @@ a bare top-level expression statement that evaluates to one (e.g. `compute()` wh
 or a top-level `?` that hits one — terminates the program with `unhandled error: <detail>` and a
 non-zero exit code. *Binding* the value handles it (`r := compute()` keeps running; inspect `r`).
 
-**But the SAME discarded call inside a function is silently swallowed** — this is an asymmetry, and a
-known defect (`docs/gaps.md` **W8-2**):
+**The SAME discarded call inside a function is silently swallowed at runtime** — the asymmetry filed
+as `docs/gaps.md` **W8-2**. The asymmetry is **real and justified**: the top-level check *is* the
+handling, so nothing is lost there. Where there is no such check the value vanishes without a trace,
+and that is exactly where `chezzi check` **warns**, following Rust (which marks both carriers
+`#[must_use]` and warns on the drop):
 
 ```chezzi
 fn g() -> Result[int, Error]: return Err("E")
+g()                    # NO warning — the runtime checks it: `unhandled error: E`, rc=1
 fn f():
-    g()                # silently discarded: check is clean, run is clean, rc=0
+    g()                # warning … the Result returned by 'g' is discarded, and rc stays 0
 f()
-g()                    # top level: runtime error … unhandled error: E, rc=1
 ```
 
-Nesting doesn't change it either way: a `g()` inside a top-level `if`/`for` still aborts, and a `g()`
-anywhere inside a function body still vanishes. Rust warns on the drop wherever it happens
-(`unused_must_use`, escape `let _ = …`); Chezzi does not warn at all yet. Until it does, **bind every
-`Result`/`Option` you mean to discard** (`_ := g()`) so the intent is on the page.
+```
+warning (line 4, col 5): the Result returned by 'g' is discarded — bind it (`r := g()`), or discard it explicitly (`_ := g()`)
+```
+
+A warning is **non-fatal**: the program still type-checks and the exit code is unchanged. The escapes
+are Rust's — *bind* the value (`r := g()`, then inspect it) or *discard it explicitly* (`_ := g()`),
+which puts the intent on the page. (The hint spells the call back only when it can be reproduced from
+the callee name alone — a plain **nullary** call like `g()`. A call **with arguments** (`takes(1, "a")`)
+and a **method call** (`xs.pop()`) both stay elided as `r := …`, because a spelled-back
+`r := takes()` would not compile; the message already names the callee, which is what points at the
+culprit.)
+
+> ⚠️ **`_ := g()` at the top level DISABLES the runtime check.** The check runs on a bare expression
+> statement; binding the value — to `_` or to anything else — is the language taking your word that
+> you have handled it. So `_ := main()` at the top of a script turns a failing `main` from `unhandled
+> error: …` + rc=1 into a silent rc=0. Write the bare call, or `match` it.
+
+**Which positions warn.** A `spawn:` block, a `defer:` block and a function body each compile to their
+own frame, so a drop inside one is invisible to the top-level check and warns — even when the block
+itself sits at module top level. Every other block — `if`, `for`, `while`, a `match` arm, `parallel:`,
+`recover:`, a `wait:` arm — runs in the *enclosing* frame, so at top level the value is still checked
+and nothing warns (inside a `recover:` the resulting abort is caught and surfaces as `r = Err(…)`).
+
+| statement at module top level | runtime | warns |
+|---|---|---|
+| `g()`, or nested in `if` / `for` / `while` / `match` / `parallel:` / `wait:` | aborts, rc=1 | no |
+| nested in `recover:` | caught → `r = Err('unhandled error: …')` | no |
+| inside a `spawn:` block or a `defer:` block | silently swallowed | **yes** |
+| anywhere inside a `fn` body | silently swallowed | **yes** |
+| `defer g()` / `spawn g()` — the **call** forms, in any position | silently swallowed | no — *deliberate*, see below |
+| the drop happens on a value typed by a **type parameter** (`fn drop_it[T](x: T): x`) | silently swallowed | no — *a known limit*, see below |
+
+The warning fires wherever the statement's own type is a carrier, so it also skips the positions where
+a bare carrier expression isn't a drop at all: an inline-expr body (`fn f() -> T!: g()`, an implicit
+return), the trailing expression of a `recover:` block or a value-`match`/value-`if` (that expression
+*is* the block's value), and `g()?` / `x ?? d` (which yield the unwrapped payload). `o()?.len()` *does*
+warn — optional chaining re-wraps, so the result is still an `Option`.
+
+**`defer` is deliberately excluded.** `defer f.close()` never warns even though `close` returns a
+`Result`: `defer f.Close()` is Go's canonical unchecked idiom and the ancestor for the statement. Bind
+it inside a wrapper function if you do want the error. The **call form** of `spawn` (`spawn g()`) is
+excluded for the same reason — a spawned task's return value is discarded by construction. Both are
+real silent swallows; both stay silent on purpose. (The **block** forms — `defer:` / `spawn:` — do
+warn: their bodies are ordinary statements, not the fire-and-forget call.)
+
+**A carrier laundered through a type parameter escapes the rule.** The warning fires on the
+*statement's own type*, so a generic that swallows its argument is invisible to it:
+
+```chezzi
+fn g() -> Result[int, Error]: return Err("E")
+fn drop_it[T](x: T):
+    x                  # type is `T`, not a carrier — NO warning
+drop_it(g())           # prints "after", rc=0; the Err is gone
+print("after")
+```
+
+This matches Rust exactly — a `T` carries no `#[must_use]`, so `fn drop_it<T>(x: T) { x; }` is silent
+there too. It is a known limit of the rule, not a defect.
 
 ### `recover:` — the panic-recovery boundary
 
@@ -4376,7 +4498,8 @@ native enum Result[T, E]:         # reserved Ty::Result — Ok(T) / Err(E)
 > module with signatures — lives in [`stdlib.md`](stdlib.md).** This section is a short orientation.
 
 Always available (no import): `print`, `range`, `int()`/`float()`/`str()`,
-`ord(s)→int` (first codepoint), `chr(n)→str` (codepoint → 1-char string), `Set()`/`Set(list)`,
+`ord(s)→int` (codepoint of a **1-character** `s`; longer or empty faults, like Python), `chr(n)→str`
+(codepoint → 1-char string), `Set()`/`Set(list)`,
 `panic(msg)` (raise a recoverable fault; see `recover:`), plus methods on the core types
 (`list`/`map`/`set`/`str`/`bytes`/`bytearray`).
 

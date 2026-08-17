@@ -351,7 +351,7 @@ impl Checker {
         sig: &FnSig,
         finalize: bool,
     ) -> Ty {
-        let mark = self.errors.len();
+        let mark = self.diag_mark();
         let saved_tps = self.enter_type_params(&decl.type_params);
         // `Self` in this body/inline-expr resolves to the enclosing type (`None` for a free fn, which
         // correctly resets an enclosing method's binding when a nested fn is inference-checked).
@@ -364,8 +364,9 @@ impl Checker {
             &mut self.in_default_provider,
             decl.name.starts_with(crate::desugar::PROVIDER_PREFIX),
         );
-        // …and a fn DECLARED inside a `spawn:` block is not itself the task (W7-48).
-        let saved_in_spawn = std::mem::replace(&mut self.in_spawn_block, false);
+        // …and a fn DECLARED inside a `spawn:` block is not itself the task (W7-48), so it also does
+        // not inherit the enclosing frame's W8-3 airlock taint (`enter_own_frame` moves the pair).
+        let saved_frame = self.enter_own_frame(true);
         let saved_flag = std::mem::replace(&mut self.inferring_ret, true);
         let saved_rets = std::mem::take(&mut self.collected_rets);
         // A generator body's `yield`s must be legal (`in_generator`) and COLLECTED (`collected_yields`)
@@ -430,15 +431,17 @@ impl Checker {
         self.current_ret = saved_ret;
         self.in_fn_body = saved_in_fn;
         self.in_default_provider = saved_in_dflt;
-        self.in_spawn_block = saved_in_spawn;
+        self.exit_own_frame(saved_frame);
         self.current_self_ty = saved_self;
         self.witness_scope = saved_witness_scope;
         self.exit_type_params(saved_tps);
         // Did the body inference itself emit an error (undefined name, bad call, …)? If so the real
         // diagnostic surfaces in pass 2, so a residual `Unknown`/conflict here is a CASCADE, not a
         // genuine un-inferable return — suppress the finalize error to avoid piling on.
-        let body_had_err = self.errors.len() > mark;
-        self.errors.truncate(mark); // discard inference-time errors; pass 2 re-reports them for real
+        let body_had_err = self.errors.len() > mark.errors;
+        // Discard inference-time diagnostics; pass 2 re-reports them for real. BOTH channels: a
+        // warning raised inside this body would otherwise be emitted here AND again in pass 2.
+        self.diag_rollback(mark);
         // A GENERATOR's return type is `Iterator[T]`, `T` inferred by strict-first-yield — NOT the
         // folded `return` branches (a generator's `return`s are bare, contributing only `Nil`). Route
         // to the dedicated helper before the value-return fold below.
@@ -2113,9 +2116,9 @@ impl Checker {
                     // read) and double-infer a Field/Index receiver. `check_assign` below is the sole
                     // validator of the target, so snapshot+truncate any errors this probe produces
                     // (mirrors the generic-arg recovery idiom).
-                    let mark = self.errors.len();
+                    let mark = self.diag_mark();
                     let target_ty = self.infer(target);
-                    self.errors.truncate(mark);
+                    self.diag_rollback(mark);
                     if matches!(target_ty, Ty::Func { .. }) {
                         self.infer_arg(value, Some(&target_ty))
                     } else {
@@ -2668,7 +2671,7 @@ impl Checker {
                             ..
                         } = &e.kind
                         {
-                            let checkpoint = self.errors.len();
+                            let checkpoint = self.diag_mark();
                             let mut bad: Vec<(Span, String)> = Vec::new();
                             if let ExprKind::Field { obj, .. } = &callee.kind {
                                 let rty = self.infer(obj);
@@ -2714,7 +2717,7 @@ impl Checker {
                                     ));
                                 }
                             }
-                            self.errors.truncate(checkpoint);
+                            self.diag_rollback(checkpoint);
                             for (sp, msg) in bad {
                                 self.error(sp, msg);
                             }
@@ -2808,7 +2811,78 @@ impl Checker {
             // `pass` — a no-op statement; nothing to check.
             StmtKind::Pass => {}
             StmtKind::Expr(e) => {
-                self.infer(e);
+                // W8-2 — warn ONLY where a dropped `Result`/`Option` is GENUINELY lost. Rust owns
+                // both types and marks them `#[must_use]`, with `let _ = …` as the escape; this is
+                // that warning, non-fatal so the exit code is unchanged.
+                //
+                // The gate is "does this statement lower into a NON-top-level proto", because
+                // `Op::PopExprStmt` runs `top_level_error` when — and only when — its frame is the
+                // top-level one (`vm/exec.rs`, `frames.last().is_toplevel`): there the value is
+                // checked and the program aborts with `unhandled error`, so nothing is lost and a
+                // "is discarded" warning would be factually FALSE. Worse, obeying it (`_ := g()`)
+                // DISABLES that check and turns a failing program into a silent rc=0.
+                //
+                // The child protos are exactly `FnComp::new(.., is_toplevel = false)` in
+                // `compiler/mod.rs`: a fn/method/ctor, a `spawn:` block, a `defer:` block, a
+                // `defer <call>`, and a closure. Of those only the first three can hold a user
+                // statement (a `defer <call>`'s body IS the call, and a closure body is a single
+                // expression), and each has its own checker flag — hence the three-way `or` below.
+                // `in_fn_body` ALONE is wrong: it is deliberately not zeroed at a `spawn:` block
+                // (see `SpawnTarget::Block` above), so at top level it stays false exactly where
+                // the swallow is real. Every other block kind — `if`/`for`/`while`/`match` arm,
+                // `parallel:`, `recover:`, a `wait:` arm — emits into the ENCLOSING proto, so at
+                // top level the runtime still checks the value (measured: all abort; inside
+                // `recover:` the abort is caught and surfaces as `r = Err(...)`).
+                //
+                // Also NOT reached by: `defer f.close()` (its own arm above — Go's canonical
+                // unchecked idiom), a `fn f(): g()` inline-expr body (an implicit return, inferred
+                // off `check_fn_body`), and a value-block's trailing expression (inferred directly
+                // by `infer_recover` / the value-`match`/`if` tails). `?`/`??`/`?.` already yield
+                // the UNWRAPPED payload, so they are not carriers here.
+                // `infer` runs FIRST and unconditionally — it is what type-checks the expression;
+                // the gate below only decides whether to warn about its type.
+                let t = self.infer(e);
+                if !(self.in_fn_body || self.in_spawn_block || self.in_defer_block) {
+                    return;
+                }
+                let carrier = match t {
+                    Ty::Result(..) => "Result",
+                    Ty::Option(_) => "Option",
+                    // `Unknown` lands here too: an already-reported expression must not cascade.
+                    _ => return,
+                };
+                // Name the callee when there is one, so the warning points at the culprit rather
+                // than at a line. The hint has to be code the user can actually TYPE, so it spells
+                // the call back only when the call is genuinely reproducible from the callee name
+                // alone — a plain NULLARY `g()`. With arguments, `format!("{name}()")` dropped them
+                // and emitted a hint that does not compile: `takes(1, "a")` suggested `r := takes()`,
+                // which is `'takes' expects 2 argument(s), got 0`. Reconstructing an argument list
+                // (or a METHOD call's receiver) from the AST would be guesswork, so both elide to
+                // `…` — the subject already names the callee, which is what points at the culprit.
+                let (subject, fix) = match &e.kind {
+                    ExprKind::Call { callee, args, .. } => match &callee.kind {
+                        ExprKind::Ident(name) => (
+                            format!("the {carrier} returned by '{name}'"),
+                            if args.is_empty() {
+                                format!("{name}()")
+                            } else {
+                                "…".to_string()
+                            },
+                        ),
+                        ExprKind::Field { name, .. } => {
+                            (format!("the {carrier} returned by '{name}'"), "…".into())
+                        }
+                        _ => (format!("the {carrier} value here"), "…".to_string()),
+                    },
+                    _ => (format!("the {carrier} value here"), "…".to_string()),
+                };
+                self.warn(
+                    e.span,
+                    format!(
+                        "{subject} is discarded — bind it (`r := {fix}`), or discard it explicitly \
+                         (`_ := {fix}`)"
+                    ),
+                );
             }
             StmtKind::Assert { cond, msg } => {
                 self.expect_bool(cond, "assert condition");
@@ -3218,6 +3292,13 @@ impl Checker {
         // task is no longer rejected: spawning deep-copies module globals per task, so the write hits
         // the task's OWN copy. Gate
         // deleted alongside the sibling method-mutation + reassign gates (see `infer_method_call`).
+        //
+        // W8-3 — but the write IS invisible to the parent, and nothing said so. Taint the root
+        // binding here (inside a task) / untaint it (in the parent) for every lvalue shape at once:
+        // this `match` is the sole lvalue dispatch, its `Tuple` arm recurses back into `check_assign`
+        // per element, and the ident/index/field arms all write THROUGH the same root binding. Done
+        // before the arms run so a parent-side `xs[0] = v` untaints ahead of its own receiver read.
+        self.note_assign_root(target, op);
         match &target.kind {
             ExprKind::Ident(name) => {
                 let Some(var_ty) = self.lookup(name) else {
@@ -3927,8 +4008,9 @@ impl Checker {
         // …and it is NOT a defer block: a `?` inside a fn declared in a defer block targets that fn.
         let saved_in_defer = std::mem::replace(&mut self.in_defer_block, false);
         // …nor a spawn block: a fn DECLARED inside a `spawn:` has its own caller, so a `?` in its
-        // body targets it normally (W7-48).
-        let saved_in_spawn = std::mem::replace(&mut self.in_spawn_block, false);
+        // body targets it normally (W7-48) — and (W8-3) the airlock-staleness taint is per-frame for
+        // the same reason. `enter_own_frame` moves the pair so neither can be reset without the other.
+        let saved_frame = self.enter_own_frame(true);
         // M24 — the witness params whose `$w:T` binding this body can reach, and the name the
         // contract's fn-half keys them under. A MODULE-LEVEL FREE fn keys on its own name; a MEMBER
         // (Task 5 — a method or static method declaring its own `[T]`) keys on `<type key>.<method>`,
@@ -4143,7 +4225,7 @@ impl Checker {
         self.loop_depth = saved_loop_depth;
         self.recover_depth = saved_recover;
         self.in_defer_block = saved_in_defer;
-        self.in_spawn_block = saved_in_spawn;
+        self.exit_own_frame(saved_frame);
         self.witness_scope = saved_witness_scope;
         self.exit_type_params(saved_tps);
     }

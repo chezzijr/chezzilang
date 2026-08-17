@@ -80,16 +80,46 @@ enum MatchKind {
     Skip,
 }
 
+/// Severity of a checker diagnostic. `Error` fails the build; `Warning` is reported and the build
+/// continues (exit code unchanged) — Rust's `unused_must_use` model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    Error,
+    Warning,
+}
+
 /// A type error, with the source span it occurred at. Mirrors `ParseError` / `RuntimeError`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CheckError {
     pub message: String,
     pub span: Span,
+    pub severity: Severity,
+}
+
+impl CheckError {
+    pub fn error(message: String, span: Span) -> Self {
+        CheckError {
+            message,
+            span,
+            severity: Severity::Error,
+        }
+    }
+
+    pub fn warning(message: String, span: Span) -> Self {
+        CheckError {
+            message,
+            span,
+            severity: Severity::Warning,
+        }
+    }
 }
 
 impl fmt::Display for CheckError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "type error ({}): {}", self.span, self.message)
+        match self.severity {
+            Severity::Error => write!(f, "type error ({}): {}", self.span, self.message),
+            Severity::Warning => write!(f, "warning ({}): {}", self.span, self.message),
+        }
     }
 }
 
@@ -736,6 +766,13 @@ struct EnumSigInfo {
 /// to be sized at.
 #[cfg(test)]
 pub fn check(module: &crate::ast::Module) -> Result<(), Vec<CheckError>> {
+    check_diags(module).0
+}
+
+/// [`check`] plus the non-fatal warnings the pass produced — the single-module twin of
+/// [`check_graph_diags`]. Warnings never affect the `Result`.
+#[cfg(test)]
+pub fn check_diags(module: &crate::ast::Module) -> (Result<(), Vec<CheckError>>, Vec<CheckError>) {
     crate::on_frontend_stack_scoped(move || {
         let mut c = Checker::new();
         // Single-module path (no graph): the always-linked std/prelude.chz was never hoisted, so seed
@@ -743,11 +780,13 @@ pub fn check(module: &crate::ast::Module) -> Result<(), Vec<CheckError>> {
         // normally).
         c.seed_native_prelude_sigs();
         c.check_module(&module.stmts, None, &[]);
-        if c.errors.is_empty() {
+        let warnings = std::mem::take(&mut c.warnings);
+        let res = if c.errors.is_empty() {
             Ok(())
         } else {
-            Err(c.errors)
-        }
+            Err(std::mem::take(&mut c.errors))
+        };
+        (res, warnings)
     })
 }
 
@@ -775,15 +814,28 @@ pub fn check_graph_with_entry(
     graph: &ModuleGraph,
     entry_fn: Option<&str>,
 ) -> Result<(), Vec<CheckError>> {
+    check_graph_diags(graph, entry_fn).0
+}
+
+/// [`check_graph_with_entry`] plus the non-fatal warnings the pass produced. Warnings never affect
+/// the `Result` — a program with warnings and no errors returns `Ok(())`. The plain entry points
+/// keep their exact signatures because ~113 test call sites depend on them; a consumer that wants to
+/// SHOW warnings (the CLI, the LSP, the test runner) calls this one instead.
+pub fn check_graph_diags(
+    graph: &ModuleGraph,
+    entry_fn: Option<&str>,
+) -> (Result<(), Vec<CheckError>>, Vec<CheckError>) {
     crate::on_frontend_stack_scoped(move || {
         let mut c = Checker::new();
         c.entry_fn = entry_fn.map(str::to_string);
         c.run_graph_pass(graph, false);
-        if c.errors.is_empty() {
+        let warnings = std::mem::take(&mut c.warnings);
+        let res = if c.errors.is_empty() {
             Ok(())
         } else {
             Err(std::mem::take(&mut c.errors))
-        }
+        };
+        (res, warnings)
     })
 }
 
@@ -1755,6 +1807,9 @@ struct Capture {
 
 struct Checker {
     errors: Vec<CheckError>,
+    /// Non-fatal diagnostics (`Severity::Warning`), collected separately so they can never reach the
+    /// `Err` arm of a check entry point and turn a warning into a build failure.
+    warnings: Vec<CheckError>,
     scopes: Vec<HashMap<String, Ty>>,
     /// Per-scope set of names bound as `for`-loop variables. Mirrors `scopes` index-for-index (a
     /// loop var is immutable — rebound fresh each iteration — so assigning to it is rejected; this
@@ -2190,6 +2245,16 @@ struct Checker {
     /// floor is a **captured** binding — read-only inside the task (assigning to it is an error).
     /// Empty outside any `spawn:` block.
     capture_floors: Vec<usize>,
+    /// W8-3 — captured LOCALS whose only write so far happened inside a `spawn:` task body, mapped to
+    /// the span of that write. A task's captures cross the airlock as an independent deep copy
+    /// (measured: every write shape below is invisible after the join — see `note_task_write`), so a
+    /// later read in the PARENT reads the pre-spawn value and the task's work is silently lost. The
+    /// entry is dropped by a parent-side write to the same name (the parent overwrote it, so the read
+    /// is fine) and by the read that reports it (one warning per name — no spam). Saved/restored
+    /// around every `fn` body so one function's taint cannot leak into the next, and keyed by BARE
+    /// NAME — so each entry carries the scope coordinate of the binding it describes (see
+    /// [`StaleWrite`]).
+    spawn_stale: HashMap<String, StaleWrite>,
     /// B3.3 (Task 2a) — per-scope side-table of the NON-SENDABLE LOCAL captures of each
     /// closure/nested-fn value declared in that scope, keyed by the bound name. Mirrors `scopes`
     /// index-for-index (pushed/popped by `push_scope`/`pop_scope`). Populated at the closure/nested-fn
@@ -2312,6 +2377,28 @@ struct Checker {
     /// (refined) type. The owning-scope index gates the finalize so an intervening inner fn/method seam
     /// can't resolve it prematurely to the still-unrefined type. Probe-gated; behavior-neutral.
     hover_pending: Option<(usize, String, HoverKind, Option<String>)>,
+}
+
+/// W8-3 — one `spawn_stale` entry: the task-side write that made a binding stale, plus the two
+/// coordinates that decide whether a later read may be charged to it.
+///
+/// `scope` is the index (into `Checker::scopes`) of the scope that OWNS the written binding, resolved
+/// at write time. The map is keyed by bare name, which says nothing about WHICH binding of that name
+/// the taint describes, so without this a taint recorded on a block-local shadow outlived that block
+/// and was charged to the OUTER binding of the same name — a FALSE warning on correct code, the exact
+/// negation of the rule's "under-warning, never over-warning" invariant (measured: an outer `xs :=
+/// [10, 20]` shadowed by `xs := [1]` inside an `if`, written only in the shadow's `spawn:`, warned at
+/// `xs.len()` and printed the correct `2`). [`Checker::pop_scope`] drops every entry whose owning
+/// scope is the one going away, so a taint dies with the binding it describes.
+///
+/// `granular` says the write went through an INDEX or FIELD projection (`p.count = v`, `m[k] = v`) and
+/// so replaced only PART of the stale copy. See [`Checker::report_spawn_stale_read`] for what the read
+/// side does with it.
+#[derive(Clone, Debug)]
+pub(super) struct StaleWrite {
+    span: Span,
+    scope: usize,
+    granular: bool,
 }
 
 mod expr;
@@ -3456,6 +3543,47 @@ const READER_METHODS: &[&str] = &["read_line", "read_bytes", "close"];
 const EXECUTOR_METHODS: &[&str] = &["submit", "shutdown", "shutdown_now"];
 const BYTES_METHODS: &[&str] = &["decode", "decode_lossy", "len"];
 const BYTEARRAY_METHODS: &[&str] = &["len", "push", "pop", "decode"];
+
+/// W8-3 — does `method` MUTATE its receiver in place (as opposed to returning a new value)? Keyed on
+/// the receiver's type as well as the name, because the same name means different things per type
+/// (`str.reverse` returns a new `str`; `List.reverse` mutates. `Shared.update`/`Map.update` likewise).
+///
+/// Enumerated from the declarations, not from memory: every entry below is a `native fn` in
+/// `std/prelude.chz` whose receiver is the mutated container —
+/// `grep -n 'native fn (push|pop|insert|remove_at|extend|sort|sort_by|sort_by_key|reverse|dedup|
+/// unique|remove|merge|update|add|clear|discard)\b' std/prelude.chz` — cross-checked against the
+/// `*_METHODS` tables above for reachability. That grep is also what rules the near-misses OUT:
+/// `unique`/`dedup`/`merge` return a fresh collection (`-> List[T]` / `-> Map[K, V]`), and `clear` /
+/// `discard` do not exist at all.
+///
+/// The handle types (`Channel`/`Shared`/`RwShared`/`Atomic`/`Executor`/`Socket`/`Listener`/`Writer`/
+/// `Reader`) are absent BY DESIGN and must stay absent: they cross the airlock by handle, so a
+/// task-side `s.update(...)` / `ch.send(v)` IS visible to the parent (measured) and warning about it
+/// would be a false alarm on correct code.
+///
+/// ponytail: builtin containers only. A USER struct method that mutates `self` (`p.bump()`) is not
+/// detected — nothing in the checker says which methods mutate, and treating every struct method as a
+/// write would false-positive on every getter. Upgrade path: a `self`-mutation summary per method.
+fn mutates_receiver(recv: &Ty, method: &str) -> bool {
+    match recv {
+        Ty::List(_) => matches!(
+            method,
+            "push"
+                | "pop"
+                | "reverse"
+                | "extend"
+                | "sort"
+                | "sort_by"
+                | "sort_by_key"
+                | "insert"
+                | "remove_at"
+        ),
+        Ty::Map(..) => matches!(method, "remove" | "update"),
+        Ty::Set(_) => matches!(method, "add" | "remove"),
+        Ty::ByteArray => matches!(method, "push" | "pop"),
+        _ => false,
+    }
+}
 
 // The bespoke `str_method_sig` / `bytes_method_sig` / `bytearray_method_sig` arms are RETIRED (phase
 // 5a-containers): every one of their FLAT sigs is now declared as a body-less `native fn` method inside a

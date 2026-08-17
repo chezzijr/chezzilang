@@ -92,6 +92,21 @@ print(counter)                     # 0  — to actually share, use a Shared[int]
 **Module globals isolate per task.** A `spawn`ed task gets its own deep copy of every
 module global (and of every captured local) — mutating one inside a task never propagates out.
 
+**The checker warns when you read the lost value.** Writing a captured binding inside a `spawn:` body
+and reading it again after the join emits a non-fatal warning naming the binding and citing the write's
+line (exit code unchanged — the isolation is deliberate). A `Shared`/`RwShared`/`Atomic`/`AtomicInt`/
+`Channel` write is silent: those cross by handle, so the write really is visible. So is a parent-side
+write that replaces the WHOLE binding (`xs = [...]`) — but not `xs.push(v)` or `n += 1`, which read the
+stale copy before writing it and so warn at the write. The rule has **seven** deliberate ceilings, every
+one of them under-warning rather than over-warning (per frame, so it neither enters nor leaves a nested
+`fn`; lexical, not dataflow; builtin containers only; keyed by bare name, so any fresh binding of the
+name clears it — though the taint carries a scope coordinate, so a *block-local* shadow's taint is never
+charged to the outer binding; a partial `m[k] = v` / `p.f = v` in the parent untaints silently; a write
+made only through a closure or nested `fn` declared *inside* the task is not tainted at all; and a
+partial *read* of a partial write declines, so a task-side `p.count = ...` read back as `p.name` is
+silent). Full rules and the reasoning for each:
+[`syntax.md` §capture](syntax.md).
+
 **The copy is taken FRESH, per task, at its `spawn` — at every depth.** A task sees the values current
 when it was spawned (the Go rule: a goroutine reads whatever a package-level var holds when `go` runs).
 So a global first initialized *after* an earlier nursery is visible, a mutation by ordinary sequential

@@ -49,7 +49,7 @@ struct Heap[T]:
             return None
         top := self.data[0]
         last := self.data[n - 1]
-        self.data.pop()
+        _ := self.data.pop()
         if n > 1:
             self.data[0] = last
             i := 0

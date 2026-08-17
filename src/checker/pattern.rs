@@ -908,9 +908,9 @@ impl Checker {
             // `self.infer(call)` below re-infers the same `obj` sub-expression and would re-report
             // them, doubling a diagnostic (e.g. an undefined receiver → two "undefined variable"s).
             // Mirrors the RwShared `read` recovery-only re-inference idiom.
-            let mark = self.errors.len();
+            let mark = self.diag_mark();
             let recv_ty = self.infer(obj);
-            self.errors.truncate(mark);
+            self.diag_rollback(mark);
             match recv_ty {
                 Ty::Channel(_) | Ty::Unknown => {}
                 other => {
@@ -1345,8 +1345,22 @@ impl Checker {
                 named,
                 type_args,
             } => self.infer_call(callee, args, named, type_args, expr.span),
-            ExprKind::Field { obj, name, .. } => self.infer_field(obj, name),
-            ExprKind::Index { obj, index } => self.infer_index(obj, index),
+            // W8-3 — a FIELD/INDEX read reaches its binding through a projection, so it observes only
+            // PART of the value. `shield_granular_read` is what makes the read side symmetric with
+            // the write side's long-standing decline on the same ambiguity; see
+            // `report_spawn_stale_read_at` for the ceiling it states.
+            ExprKind::Field { obj, name, .. } => {
+                let shield = self.shield_granular_read(expr);
+                let t = self.infer_field(obj, name);
+                self.unshield_granular_read(shield);
+                t
+            }
+            ExprKind::Index { obj, index } => {
+                let shield = self.shield_granular_read(expr);
+                let t = self.infer_index(obj, index);
+                self.unshield_granular_read(shield);
+                t
+            }
             ExprKind::Try(inner) => self.infer_try(inner, expr.span),
             // W7-43 — optional-chaining `?.` / null-coalescing `??` are CARRIER nodes: the checker
             // types the operand, picks the lowering, then clone-lowers and infers the clone. The
@@ -2069,6 +2083,12 @@ impl Checker {
             // reading it inside the task is an error — the read-side counterpart to the reassignment
             // gate. Module globals/imports are excluded (`is_local_capture`): they resolve in every
             // task like free functions, so reading an imported module here is fine.
+            // W8-3 — the mirror image: a read in the PARENT of a binding whose only write is inside a
+            // `spawn:` body. The airlock copy means that write never lands here, so the read silently
+            // sees the pre-spawn value (the filed repro's `for r in results:` ran zero iterations and
+            // skipped every assertion inside it, rc=0). Warning, not an error — the semantics are
+            // deliberate (`docs/syntax.md` §11b).
+            self.report_spawn_stale_read(name, span);
             if self.is_local_capture(name) && !self.sendable(&ty) {
                 self.error(
                     span,
@@ -4202,8 +4222,11 @@ impl Checker {
         let saved_in_dflt = std::mem::replace(&mut self.in_default_provider, false);
         // A closure DECLARED inside a `spawn:` block is not itself the task — it has a caller, so a
         // `?` in its body targets the closure's own return (W7-48). Saved/restored beside
-        // `current_ret`.
-        let saved_in_spawn = std::mem::replace(&mut self.in_spawn_block, false);
+        // `current_ret`. W8-3 — the airlock taint is per-frame for the same reason, and
+        // `enter_own_frame` moves the pair so neither can be reset without the other (this site was
+        // the one that cleared `in_spawn_block` alone: the closure body then reported the enclosing
+        // task's pending write AND ate the entry, so the parent's real stale read went silent).
+        let saved_frame = self.enter_own_frame(false);
         // A closure inside a generator is NOT itself a generator: clear the yield context so a stray
         // `yield` in the closure is diagnosed as "outside a generator", not bound to the enclosing
         // one. (Closure bodies are single expressions today, so this is a latent-invariant guard.)
@@ -4220,6 +4243,9 @@ impl Checker {
         // Mark BEFORE param binding so the free-closure finalize (below) is suppressed if EITHER an
         // un-inferable PARAM (`cannot infer type of parameter`) or the body emits a real error — a
         // residual `Unknown` return is then a cascade, not a genuine un-inferable return.
+        // NOT a speculative-rollback site (hence the raw length, not `diag_mark`): the closure body is
+        // checked exactly ONCE here, so its diagnostics — errors and any future warning alike — stay.
+        // This mark is only read, to answer "did the body error?".
         let closure_mark = self.errors.len();
         self.push_scope();
         let param_tys: Vec<Ty> = params
@@ -4297,7 +4323,7 @@ impl Checker {
         self.current_ret = saved_ret;
         self.in_fn_body = saved_in_fn;
         self.in_default_provider = saved_in_dflt;
-        self.in_spawn_block = saved_in_spawn;
+        self.exit_own_frame(saved_frame);
         self.yield_ty = saved_yield;
         self.in_generator = saved_ig;
         let ret_ty = match ret {

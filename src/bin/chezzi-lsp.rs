@@ -54,7 +54,10 @@ impl Backend {
                     start: Position::new(d.line, d.col),
                     end: Position::new(d.end_line, d.end_col),
                 },
-                severity: Some(DiagnosticSeverity::ERROR),
+                severity: Some(match d.severity {
+                    chezzi::editor::Severity::Error => DiagnosticSeverity::ERROR,
+                    chezzi::editor::Severity::Warning => DiagnosticSeverity::WARNING,
+                }),
                 source: Some("chezzi".to_string()),
                 message: d.message,
                 ..Default::default()

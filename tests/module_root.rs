@@ -293,3 +293,30 @@ fn a_witness_taking_manifest_entrypoint_is_refused_by_check_too() {
         "only the declared entrypoint module is gated; stdout:\n{stdout}\nstderr:\n{stderr}"
     );
 }
+
+// F4 — `chezzi test` checks each `*_test.chz` as its OWN entry graph, so a warning declared in a
+// SHARED imported module was re-printed once per importer (measured: one warning in `lib.chz`, two
+// importing test files → the same line twice). Each distinct diagnostic must be printed once per
+// invocation. CLI-level because the warnings go straight to the process's stderr.
+#[test]
+fn a_shared_modules_warning_prints_once_per_test_run() {
+    let t = TmpDir::new();
+    // The W8-2 discarded-carrier warning: a `Result` dropped inside a fn body.
+    t.write(
+        "lib.chz",
+        "fn g() -> Result[int, Error]:\n    return Ok(1)\nfn helper():\n    g()\n",
+    );
+    t.write(
+        "a_test.chz",
+        "import lib\n\ntest fn a():\n    assert true\n",
+    );
+    t.write(
+        "b_test.chz",
+        "import lib\n\ntest fn b():\n    assert true\n",
+    );
+
+    let (stdout, stderr, ok) = run(&t.0, &["test", "."]);
+    assert!(ok, "the suite must still pass; stdout:\n{stdout}\n{stderr}");
+    let hits = stderr.matches("is discarded").count();
+    assert_eq!(hits, 1, "one warning, printed once; stderr:\n{stderr}");
+}

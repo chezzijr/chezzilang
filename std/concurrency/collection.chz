@@ -95,7 +95,7 @@ fn _put[K: Hashable + Eq, V](m: Map[K, V], key: K, val: V) -> Map[K, V]:
     return m
 
 fn _remove[K: Hashable + Eq, V](m: Map[K, V], key: K) -> Map[K, V]:
-    m.remove(key)
+    _ := m.remove(key)
     return m
 
 # Insert `default` if `key` is absent, and capture the resulting value (the existing one, or the

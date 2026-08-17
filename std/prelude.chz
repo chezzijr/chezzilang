@@ -59,6 +59,13 @@ native struct List[T]:
     native fn pop(self) -> Option[T]
     native fn reverse(self) -> nil
     native fn contains(self, v: T) -> bool
+    # SENTINEL, NOT A CARRIER — `-1` on a miss, the shape of Python's `str.find` (`'hi'.find('zz')` is
+    # `-1`, measured). HAZARD: indexing is Python-negative, so `xs[xs.index_of(v)]` on a miss silently
+    # returns the LAST element instead of faulting — Python has the identical trap
+    # (`'hello'['hello'.find('zz')]` is `'o'`, measured). Use `position(pred) -> Option[int]` below, or
+    # `contains`, when a miss must be visible. NOTE Python's LIST twin, `list.index(x)`, raises
+    # `ValueError` rather than returning `-1`: the sentinel here is the uniform Chezzi choice across
+    # `List` and `str`, kept because changing it is a breaking API change, not because lists inherit it.
     native fn index_of(self, v: T) -> int
     native fn concat(self, other: List[T]) -> List[T]
     native fn extend(self, other: List[T]) -> nil
@@ -85,6 +92,8 @@ native struct List[T]:
     native fn take_while(self, pred: fn(T) -> bool) -> List[T]
     native fn drop_while(self, pred: fn(T) -> bool) -> List[T]
     native fn count(self, pred: fn(T) -> bool) -> int
+    # The CARRIER twin of `index_of`: a miss is `None`, not a `-1` that indexes as the last element.
+    # Reach for this (or `Map.get`, the same shape for keys) when a miss must not be silently usable.
     native fn position(self, pred: fn(T) -> bool) -> Option[int]
 
 native struct Map[K: Hashable + Eq, V]:
@@ -164,6 +173,10 @@ native struct str:
     native fn repeat(self, n: int) -> str
     native fn reverse(self) -> str
     native fn pad_left(self, width: int, fill: str) -> str
+    # SENTINEL, NOT A CARRIER — `-1` on a miss, exactly Python's `str.find`. Same hazard as
+    # `List.index_of`: `s[s.index_of(t)]` on a miss silently yields the LAST character, and Python does
+    # the same (`'hello'['hello'.find('zz')]` is `'o'`, measured). `contains` is the miss-visible check;
+    # there is no `Option` twin on `str` (`List.position` is the list one).
     native fn index_of(self, needle: str) -> int
     native fn count(self, needle: str) -> int
     native fn strip_prefix(self, prefix: str) -> str
