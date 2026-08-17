@@ -1725,9 +1725,18 @@ enum Json:
 > `RecursionError`. `stringify` has no `Result` to put an error in — a document built directly in
 > memory (no `parse` involved) that nests past the cap instead **faults** with
 > `json.stringify: exceeded max depth` (recoverable under `recover:`), the same shape CPython's
-> `json.dumps` uses (`RecursionError`). 2000 is well below the measured death point (a `[`-only
-> document with no surrounding call frames dies at nesting depth 5000 against the VM's 10 000-frame
-> cap — each level costs 2 frames), leaving headroom for caller frames above `parse`/`stringify`.
+> `json.dumps` uses (`RecursionError`).
+>
+> **Chezzi's cap is stricter than either ancestor's, and that is structural rather than a preference.**
+> Measured 2026-08-18: CPython's `json.loads` accepts nesting 50 000 and raises `RecursionError` at
+> 100 000; Go's `encoding/json` accepts 5 000 and reports `exceeded max depth` at 10 001 (its cap is
+> 10 000). Chezzi cannot reach either, because `std.json` runs *on the VM*: each nesting level costs
+> **2 VM frames** against the engine's 10 000-frame call-depth cap, so the absolute ceiling is ~5 000
+> even with zero caller frames — measured, a `[`-only document with nothing above it dies at exactly
+> that. `MAX_NEST_DEPTH = 2000` is that ceiling minus headroom for the frames a real caller has above
+> `parse`/`stringify`. Raising it trades that headroom for depth nobody has asked for; the way to
+> genuinely match Go would be an iterative parser, which is a rewrite, not a constant. Documents
+> nesting deeper than 2 000 are rejected **cleanly** — before this cap they killed the process.
 > `docs/gaps.md` **W8-5**.
 
 > **There is no `encode`/`dumps` inverse of `decode[T]`.** Serialization goes the long way: build a
