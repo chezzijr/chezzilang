@@ -471,3 +471,83 @@ fn diagnostics_round_trip() {
         "never received a publishDiagnostics with a diagnostic"
     );
 }
+
+/// Wait (5s per read, matching this file's other loops) for a `publishDiagnostics` notification whose
+/// body mentions `target_uri`, returning the full message — or `None` on the first timeout/disconnect.
+fn wait_for_uri_diagnostics(rx: &mpsc::Receiver<String>, target_uri: &str) -> Option<String> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while std::time::Instant::now() < deadline {
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(msg) => {
+                if msg.contains("textDocument/publishDiagnostics") && msg.contains(target_uri) {
+                    return Some(msg);
+                }
+            }
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+/// A5 — a cross-module error resolves onto the IMPORTED module's own URI (not the edited buffer's),
+/// and a later publish that no longer reports it sends an EMPTY diagnostics array clearing it.
+#[test]
+fn cross_module_diagnostic_publishes_to_the_imported_module_uri_and_clears_when_fixed() {
+    let (mut stdin, rx, _guard, _init_resp) = start_server();
+
+    let dir = std::env::temp_dir().join(format!("chezzi_lsp_a5_cross_{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("core")).unwrap();
+    let badmod_path = dir.join("core").join("badmod.chz");
+    std::fs::write(&badmod_path, "y: int = \"oops\"\n").unwrap();
+    // Canonicalize (matching what the resolver itself stores for an on-disk module — see
+    // `resolver::canonical_or_abs`) so this string matches byte-for-byte even if the OS temp dir
+    // resolves through a symlink.
+    let badmod_uri = format!(
+        "file://{}",
+        std::fs::canonicalize(&badmod_path).unwrap().display()
+    );
+    let app_uri = format!("file://{}/app.chz", dir.display());
+
+    // didOpen the entry buffer importing the broken module. `app.chz` is never written to disk — the
+    // LSP type-checks the LIVE text while `core.badmod` resolves from disk as usual.
+    send(
+        &mut stdin,
+        &format!(
+            r#"{{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{{"textDocument":{{"uri":"{app_uri}","languageId":"chezzi","version":1,"text":"import core.badmod\n"}}}}}}"#
+        ),
+    );
+    let first = wait_for_uri_diagnostics(&rx, &badmod_uri);
+
+    // Fix badmod.chz on disk, then re-check by re-sending the (unchanged) entry text via didChange —
+    // the resolver re-reads every imported module's source fresh on each check, so the fix is visible.
+    std::fs::write(&badmod_path, "y: int = 5\n").unwrap();
+    send(
+        &mut stdin,
+        &format!(
+            r#"{{"jsonrpc":"2.0","method":"textDocument/didChange","params":{{"textDocument":{{"uri":"{app_uri}","version":2}},"contentChanges":[{{"text":"import core.badmod\n"}}]}}}}"#
+        ),
+    );
+    let second = wait_for_uri_diagnostics(&rx, &badmod_uri);
+
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let first_msg = first.unwrap_or_else(|| {
+        panic!(
+            "never received a publishDiagnostics for the imported module's own URI ({badmod_uri})"
+        )
+    });
+    assert!(
+        first_msg.contains("\"diagnostics\":[{"),
+        "expected a non-empty diagnostics array for the imported module: {first_msg}"
+    );
+
+    let second_msg = second.unwrap_or_else(|| {
+        panic!(
+            "never received a clearing publishDiagnostics for the imported module's URI after the fix"
+        )
+    });
+    assert!(
+        second_msg.contains("\"diagnostics\":[]"),
+        "expected an EMPTY diagnostics array clearing the fixed imported module: {second_msg}"
+    );
+}

@@ -12,7 +12,7 @@
 //! Built only with the `lsp` feature (`cargo build --features lsp --bin chezzi-lsp`); the heavy async
 //! deps (tower-lsp + tokio) never touch the default build.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
@@ -39,17 +39,36 @@ struct Backend {
     client: Client,
     /// Live document text, keyed by URI. `tokio::sync::Mutex` (no extra dep) — contention is trivial.
     docs: tokio::sync::Mutex<HashMap<Url, String>>,
+    /// The set of target URIs each EDITED buffer's diagnostics were last grouped onto (including the
+    /// edited URI itself), keyed by the edited URI. Scoped per-edited-buffer (not one global set) so
+    /// that fixing one buffer's cross-module error never clears a diagnostic another open buffer is
+    /// still legitimately reporting against the same shared imported module.
+    reported: tokio::sync::Mutex<HashMap<Url, HashSet<Url>>>,
 }
 
 impl Backend {
-    /// Type-check `text` and publish the resulting diagnostics for `uri`.
+    /// Type-check `text` (the buffer at `uri`) and publish diagnostics to the URI each ACTUALLY
+    /// belongs to (`chezzi::editor::Diag::file`, mapped to a URI via `Url::from_file_path` — falling
+    /// back to the edited `uri` for an entry-module diagnostic, `None`, or a path that fails to convert,
+    /// so a diagnostic is never dropped). The edited `uri` always gets a publish, even an empty one, so
+    /// fixing the last error in the open file clears its own squiggle. Any URI this buffer's PREVIOUS
+    /// publish reported on but this one does not is cleared with an empty vector — otherwise a squiggle
+    /// in a file the user isn't editing (a cross-module error) never disappears once they fix it.
     async fn publish(&self, uri: Url, text: &str) {
         let path = uri
             .to_file_path()
             .unwrap_or_else(|_| std::path::PathBuf::from(uri.path()));
-        let diags = chezzi::editor::diagnostics(&path, text)
-            .into_iter()
-            .map(|d| Diagnostic {
+        let diags = chezzi::editor::diagnostics(&path, text);
+
+        let mut groups: HashMap<Url, Vec<Diagnostic>> = HashMap::new();
+        groups.entry(uri.clone()).or_default();
+        for d in diags {
+            let target = d
+                .file
+                .as_deref()
+                .and_then(|p| Url::from_file_path(p).ok())
+                .unwrap_or_else(|| uri.clone());
+            groups.entry(target).or_default().push(Diagnostic {
                 range: Range {
                     start: Position::new(d.line, d.col),
                     end: Position::new(d.end_line, d.end_col),
@@ -61,9 +80,27 @@ impl Backend {
                 source: Some("chezzi".to_string()),
                 message: d.message,
                 ..Default::default()
-            })
-            .collect();
-        self.client.publish_diagnostics(uri, diags, None).await;
+            });
+        }
+
+        let new_targets: HashSet<Url> = groups.keys().cloned().collect();
+        let stale: Vec<Url> = {
+            let mut reported = self.reported.lock().await;
+            let previous = reported.remove(&uri).unwrap_or_default();
+            reported.insert(uri.clone(), new_targets.clone());
+            previous
+                .into_iter()
+                .filter(|u| !new_targets.contains(u))
+                .collect()
+        };
+        for stale_uri in stale {
+            self.client
+                .publish_diagnostics(stale_uri, Vec::new(), None)
+                .await;
+        }
+        for (target, diags) in groups {
+            self.client.publish_diagnostics(target, diags, None).await;
+        }
     }
 }
 
@@ -309,6 +346,7 @@ async fn main() {
     let (service, socket) = LspService::new(|client| Backend {
         client,
         docs: tokio::sync::Mutex::new(HashMap::new()),
+        reported: tokio::sync::Mutex::new(HashMap::new()),
     });
     Server::new(stdin, stdout, socket).serve(service).await;
 }

@@ -62,6 +62,47 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `"src.main:main"`) and recommended `chezzi run src/main.chz`, which is a **silent no-op, rc=0**.
 > Every code snippet added was executed before it was written down.
 >
+> **✅ The LSP now publishes each diagnostic to the buffer it actually belongs to, 2026-08-18
+> (`feat/span-file-and-stdlib-contracts`, CLOSED — the editor-path consumer W8-15's fix note left
+> open).** As filed: `chezzi-lsp` ran the real resolve→check pipeline over the whole module graph, then
+> mapped EVERY diagnostic — including one whose `span.file` pointed at an imported module — onto the
+> entry buffer's own text and published the whole vector to the one URI just edited. Repro: `app.chz`
+> importing `core.badmod`, whose own line 1 is the type error; the editor showed a squiggle on
+> `app.chz:1:10` (the `import` line) with a range measured against `app.chz`'s characters — wrong file,
+> wrong range, and a fix in `badmod.chz` could never clear it (nothing published to its URI in the first
+> place). `editor::Diag` gained `pub file: Option<PathBuf>` (`None` = the entry buffer). `diagnostics_
+> inner`'s `Ok(graph)` arm now resolves each diagnostic's `span.file` by SCANNING `graph.modules` (never
+> indexing by id — ids are DFS pre-order, `modules` is deps-first post-order) and, for any module other
+> than the entry, reads that module's text off disk (the resolver drops source after parsing) through a
+> small `HashMap<PathBuf, String>` cache so a module with several diagnostics is read once, not once per
+> diagnostic; a read failure still reports the diagnostic as a `col..col+1` range tagged with the path —
+> never dropped, never silently re-attributed to the entry. The `Err(e)` resolve-error arm gets the same
+> treatment via `ResolveError::path` (a lex/parse failure inside an import now attributes to the
+> importED module, not the importER buffer). `chezzi-lsp`'s `Backend::publish` groups the returned
+> `Diag`s by target URI (`Diag::file` → `Url::from_file_path`, falling back to the edited URI for `None`
+> or a path that fails to convert), publishes each group, and clears any URI THIS edited buffer's
+> PREVIOUS publish reported but this one does not (`reported: Mutex<HashMap<Url, HashSet<Url>>>`, keyed
+> per EDITED buffer rather than one global set — deliberately, so fixing one buffer's cross-module error
+> can never clobber a diagnostic another open buffer is still legitimately reporting against the same
+> shared imported module; the converse — two buffers disagreeing about the same shared file's health —
+> is a known limitation of per-entry-point diagnostics with no in-repo precedent to build against, left
+> alone rather than guessed at). The edited URI always gets a publish, even an empty one, so fixing the
+> last error in the open file still clears it. Gate: `cargo test` full suite green (**4424 passed / 0
+> failed / 3 ignored**, 22 targets incl. doctests), `cargo test --features lsp --test lsp_smoke`
+> **8/8**, `cargo clippy --all-targets --features lsp -- -D warnings` clean (plus the default,
+> non-`lsp` `cargo clippy --all-targets -- -D warnings`, also clean — `editor::mod.rs` stays
+> dependency-free). Tests: `editor::tests::cross_module_diagnostic_carries_its_own_file_and_range` (a
+> real two-file fixture on disk, entry line 1 vs. the imported module's own line 1 deliberately
+> different lengths so a wrong-source range is detectable — an entry-sourced range would wrongly run
+> `end_col` to 11 instead of the correct 10), `entry_module_diagnostic_has_no_file` (negative control),
+> `resolve_error_in_an_imported_module_is_attributed_to_it` (a parse error inside the import), and
+> `tests/lsp_smoke.rs::cross_module_diagnostic_publishes_to_the_imported_module_uri_and_clears_when_
+> fixed` (a real stdio round-trip: didOpen sees the imported module's own URI get a non-empty
+> `publishDiagnostics`, then fixing the file on disk and re-sending via `didChange` gets that same URI
+> an EMPTY one). Not attempted here: installing/driving `chezzi-lsp` in a real editor (this repo's
+> convention is that the installed binary is a snapshot needing reinstall — `cargo install --path .
+> --features lsp --bin chezzi-lsp` — separately, by whoever verifies it live).
+>
 > **✅ W8-14 — every runtime stack-trace frame now names its file, 2026-08-17
 > (`feat/span-file-and-stdlib-contracts`, CLOSED).** As filed, a fault reported `runtime error (line 3,
 > col 11): …` / `at boom (called at line 3, col 5)` — no filename on the headline or any frame, worst
