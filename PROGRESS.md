@@ -147,8 +147,12 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `runtime error (line 3, col 11): index 9 out of bounds (len 1)`, the same fault through `recover:` gives
 > bare `index 9 out of bounds (len 1)`. **The span already exists and is discarded at one line** —
 > `RuntimeError` carries `pub span: Span` (`src/vm/mod.rs:61`) and `src/vm/exec.rs:1392` does
-> `alloc_str(rte.message)`. But `Error` **is** a bare `str` today, so an origin makes it a real object and
-> moves `==`, `print` shape at 336 `Err(` sites, the goldens, and airlock sendability. Ancestors split
+> `alloc_str(rte.message)`. And the fix is **additive, because `Error` is a PROTOCOL**
+> (`Ty::Protocol("Error", [])`, `checker/ty.rs:428`) satisfied structurally by any `message() -> str`,
+> with `str` granted intrinsically at `ty.rs:516`: the origin rides on a **new native struct satisfying
+> `Error`** that `recover:` allocates in place of the bare `str`, so **the 336 `Err("...")` sites do not
+> move** and neither does `==`. Only a *recovered* `Err`'s payload display can shift — measured exposure
+> 37 `recover:` files, 2 `.expected` goldens. Ancestors split
 > evenly (Python traceback yes / Zig debug-only / Rust + Go no), so it is a genuine choice. Recommended:
 > **construction span only** (a chain costs an alloc per `?` — 271 sites — which is why Zig gates it to
 > debug), **default rendering unchanged**, sequenced **after W8-14/W8-15** to reuse their `Span.file`
