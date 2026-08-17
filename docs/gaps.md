@@ -497,15 +497,32 @@ warned; the rule uses `is_captured`, not `is_local_capture`. (2) The `defer:` cl
 is the **parent** `defer:` that is exempt (its write IS visible — measured `1`), while a `defer:`
 nested inside `spawn:` is on the far side of the airlock and correctly taints.
 
-**Six deliberate ceilings, all under-warns, all pinned by tests so closing one fails loudly**
-(`ponytail:` markers in `src/checker/`, numbered list in `syntax.md` §11b, same six in
-`concurrency.md`): no scope coordinate, so an untaint from a block-local shadow is permanent; a
-partial parent-side `m[k] = v` / `p.f = v` untaints silently (it *may* supersede the task's write and
-the checker cannot tell which — `parked-is-not-stuck`: decline rather than warn on noise); a body
-declared inside the task is not summarized back to its call site; per **frame**, so the taint crosses
-no `fn` boundary in either direction (a *closure* body is an expression in the parent's frame and so
-still warns — measured, and deleting that was a true positive a first cut nearly threw away); lexical
-order, not dataflow; builtin containers only, so a user struct method that mutates `self` is invisible.
+**Seven deliberate ceilings, all under-warns, all pinned by tests so closing one fails loudly**
+(`ponytail:` markers in `src/checker/`, numbered list in `syntax.md` §11b, same seven in
+`concurrency.md`): per **frame**, so the taint crosses no `fn` boundary in either direction (a
+*closure* body is an expression in the parent's frame and so still warns — measured, and deleting that
+was a true positive a first cut nearly threw away); lexical order, not dataflow; builtin containers
+only, so a user struct method that mutates `self` is invisible; re-declaring the name clears the taint
+(which is what stops a merely-shadowing loop variable being reported — and the taint **does** carry a
+scope coordinate, so a *block-local* shadow's taint dies with its block instead of being charged to the
+outer binding); a partial parent-side `m[k] = v` / `p.f = v` untaints silently (it *may* supersede the
+task's write and the checker cannot tell which — `parked-is-not-stuck`: decline rather than warn on
+noise); a body declared inside the task is not summarized back to its call site; and, the mirror of the
+partial-write rule, **a partial read of a partial write declines** (a task-side `p.count = …` read back
+as `p.name` names a part the checker cannot match up, so `p.count` read back as `p.count` is missed —
+the three mixed pairs still report, because there it *can* tell).
+
+**The last two ceilings exist because the first cut OVER-warned, and it took an adversarial pass to
+find it.** Both shapes were false warnings on correct code: a block-local shadow's taint was charged to
+the outer binding (`xs := [10,20]`, an inner `if` block re-declaring `xs := [1]` and spawning
+`xs.push(99)`, warned at a post-block `print(xs.len())` that correctly prints **2**), and a
+field-granular write poisoned every later read of the root — including in a program that had already
+applied the fix the message recommends (task writes `p.count` **and sends it on a `Channel`**, parent
+reads only `p.name` → warned, printing the correct `bob`/`1`). A warning that fires after the user did
+exactly what it told them to do is worse than no warning. Both were caught only by two isolated
+prosecutors and a defender, not by the suite; the code comment at the time asserted the opposite
+invariant (*"Under-warning, never over-warning"*), which is precisely the shape a green suite cannot
+contradict.
 
 **Over-fire evidence, re-run on the release binary:** the `Shared` and `Channel` rewrites of the
 repro, a 3-worker pool over a closed `Channel`, an `Executor` fan-out of 10 jobs into a `Shared` — all
