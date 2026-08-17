@@ -1962,8 +1962,25 @@ Regression: `parity_tests::spawn_task_first_global_access_is_write_parity`.
 - `fs.glob("d/*")` includes dotfiles, Python's `glob` excludes them — undocumented either way.
 - `docs/stdlib.md` §`std.json` writes `decode[T](s)` as "a generic builtin", but the bare form is rejected
   (`'decode' takes no type arguments`) — the real spelling is `json.decode[T](s)`.
-- `List[<numeric newtype>].sum()` is rejected at check while `.sort()`/`.min()`/`.max()` on the same type
-  work — a post-fix asymmetry vs the 2026-07-23 numeric-newtype gap. Safe direction.
+- ~~`List[<numeric newtype>].sum()` is rejected at check while `.sort()`/`.min()`/`.max()` on the same type
+  work — a post-fix asymmetry vs the 2026-07-23 numeric-newtype gap. Safe direction.~~
+  **FIXED 2026-08-17.** `sum` now returns the NEWTYPE. Measured ancestors on `[Cents(3),Cents(1),Cents(2)]`:
+  Go `type Cents int` → `6` typed `main.Cents`, empty → `0` typed `main.Cents`; Python
+  `typing.NewType('Cents', int)` → `6` typed `int`, empty → `0` (NewType is ERASED). Chezzi's `newtype`
+  is a REAL runtime wrapper (`Obj::NewType { type_key, inner }`), so **Go governs** — and it keeps the
+  family consistent with `.sort()`/`.min()`/`.max()`. The EMPTY list is the whole mechanism: nothing at
+  runtime carries the element's `type_key` and the backend is type-blind, so the checker records a `T(0)`
+  SEED per call site in a new `NewtypeSumTable` (`src/checker/ty.rs`, keyed like `ProtoEqTable` on the
+  method-NAME token — instance #5 of the span-keyed-table aliasing class; both verdicts recorded through
+  `record_call_table_entry`, a MISS degrades to the plain numeric lowering). The compiler pushes
+  `ConstInt(0)`/`ConstFloat(0.0)` + `Op::NewType(key)` as `sum`'s one hidden argument and the VM folds from
+  it through `newtype_arith` — the same unwrap→native-checked-op→rewrap path `Cents + Cents` takes, so
+  overflow still faults `integer overflow in Add`. The admitted set is exactly the one that gets an
+  intrinsic `Add` (non-generic, numeric underlying), so a newtype OF a newtype, a generic newtype and
+  `newtype Name = str` stay rejected — consistent with `B + B` and `.min()`'s `Comparable` bound, which
+  reject them too. Tests: `tests/chz/spec/newtype_test.chz` (non-empty/empty int + float, overflow fault,
+  two-sums-one-line aliasing backstop, plain-list controls) + `src/checker/tests.rs` (return type +
+  the three rejections).
 - Embedded-protocol method through an interface value is a **clean reject at check** (`type Person has no
   method 'name'`), not accept-then-fault — confirms the wave-3 observation is safe.
 - `RwShared`/`Shared` nested same-box write (serial loses the inner write, M:N HANGS) — already tracked +

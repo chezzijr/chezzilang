@@ -191,6 +191,24 @@ pub type ListWidenKey = (CarrierKey, Option<Span>);
 /// means "widen", which is the pre-fix lowering — a missing entry can only ever under-apply the fix.
 pub type ListWidenTable = HashMap<ListWidenKey, bool>;
 
+/// Which `.sum()` call sites sum a list of a SCALAR NUMERIC NEWTYPE (`newtype Cents = int`), keyed
+/// exactly like [`CarrierKey`] (the method-NAME token — see there for why the call node's span
+/// aliases across the links of a postfix/pipe chain).
+///
+/// `Some((runtime type key, underlying-is-float))` = the compiler must push a `T(0)` SEED and pass it
+/// as `sum`'s one hidden argument, so the runtime folds through the same-newtype `+` path
+/// (unwrap → native op → rewrap) and returns `T`, matching Go's `type Cents int`. The seed is also
+/// the whole answer for an EMPTY list, which is the case this table exists for: a non-empty list
+/// carries `type_key` on element 0, an empty one carries nothing and the backend is TYPE-BLIND.
+/// `None` = an ordinary `List[int]`/`List[float]` sum, lowered exactly as before.
+///
+/// BOTH verdicts are recorded, never just the `Some` one: a `None` entry is what lets
+/// [`crate::checker::record_call_table_entry`] see an aliased key and turn it into a hard compile
+/// error instead of silently applying one site's seed to another. A lookup MISS means "plain numeric
+/// sum", which is also the pre-fix lowering — so a missing entry can only ever under-apply the fix,
+/// never mis-apply it.
+pub type NewtypeSumTable = HashMap<CarrierKey, Option<(String, bool)>>;
+
 /// Surface-only parameter labels on a function type (Swift SE-0111 keyword arguments through a
 /// function VALUE). They ride PARALLEL to a `Ty::Func`'s `params`, but participate in NO type
 /// identity: two function types differing only in labels are the SAME type (mutually assignable,

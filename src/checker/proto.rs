@@ -2511,6 +2511,50 @@ impl Checker {
         );
     }
 
+    /// The `T(0)` seed a `List[T].sum()` needs, or `None` for a plain `List[int]`/`List[float]`:
+    /// `Some((runtime type key, underlying-is-float))` exactly when `elem` is a SCALAR numeric
+    /// newtype. The predicate is deliberately the SAME one that grants a numeric newtype its
+    /// intrinsic `Add` (the `Ty::NewType` arm of [`Self::satisfies`]) — non-generic, numeric
+    /// underlying — so `sum`'s `where T: Add` bound and this seed can never disagree. A newtype OF a
+    /// newtype has a non-numeric underlying and so is `None`: it is rejected, exactly as `Cents(1) +
+    /// Cents(1)`'s outer wrapper and `.min()`'s `Comparable` bound already reject it.
+    pub(super) fn newtype_sum_seed(&self, elem: &Ty) -> Option<(String, bool)> {
+        let Ty::NewType(key, _) = elem else {
+            return None;
+        };
+        if self.newtype_is_generic(key) {
+            return None;
+        }
+        let under = self.newtype_underlying(key)?;
+        under
+            .is_numeric()
+            .then(|| (key.clone(), matches!(under, Ty::Float)))
+    }
+
+    /// Record one `.sum()` site's seed for the backend, under the same key derivation
+    /// [`Self::record_proto_eq`] uses (the method-NAME token — see [`crate::checker::CarrierKey`]).
+    pub(super) fn record_newtype_sum(
+        &mut self,
+        name_span: Span,
+        seed: Option<(String, bool)>,
+        span: Span,
+    ) {
+        let key = crate::checker::carrier_key(
+            self.graph_module_idx,
+            self.kw_frag_ctx,
+            self.kw_frag_ord,
+            name_span,
+        );
+        crate::checker::record_call_table_entry(
+            &mut self.newtype_sums,
+            &mut self.table_conflicts,
+            key,
+            seed,
+            "'.sum()' element",
+            span,
+        );
+    }
+
     /// Is a struct/enum's declared `eq` [`FnSig`] the `Eq` HOOK `==`/`!=` dispatch to, or the
     /// ordinary-method escape hatch (a generic operand)? Delegates to [`Self::eq_operand_is_hook`]
     /// (`sig.rs`) — the same predicate `validate_eq_shape` already enforced at the declaration, so a

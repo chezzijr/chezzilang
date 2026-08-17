@@ -62,6 +62,7 @@ impl Checker {
             carriers: crate::checker::CarrierTable::new(),
             proto_eq_calls: crate::checker::ProtoEqTable::new(),
             list_widen: crate::checker::ListWidenTable::new(),
+            newtype_sums: crate::checker::NewtypeSumTable::new(),
             table_conflicts: Vec::new(),
             next_opt_tmp: 0,
             witness_scope: Vec::new(),

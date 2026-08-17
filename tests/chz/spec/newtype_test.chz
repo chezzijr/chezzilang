@@ -75,3 +75,63 @@ test fn min_mod_neg_one_on_a_numeric_newtype():
     a := UserId(MIN)
     b := UserId(-1)
     assert int(a % b) == 0
+
+# ---- sum over a List[numeric newtype] returns the NEWTYPE (docs/gaps.md:1954) ----
+#
+# Go owns named scalar types: `type Cents int` sums to a `main.Cents`, and Chezzi's `newtype` is a
+# REAL runtime wrapper (not Python `NewType`'s erased alias), so `sum` re-wraps. The EMPTY list is
+# the load-bearing case — nothing at runtime carries the element's `type_key`, so the checker records
+# the `T(0)` seed and the compiler pushes it (`NewtypeSumTable`).
+
+test fn sum_int_newtype():
+    xs := [UserId(3), UserId(1), UserId(2)]
+    assert xs.sum() == UserId(6)
+    assert int(xs.sum()) == 6          # a raw-int regression cannot pass this AND the line above
+
+test fn sum_empty_int_newtype():
+    es: List[UserId] = []
+    assert es.sum() == UserId(0)
+    assert int(es.sum()) == 0
+
+test fn sum_float_newtype():
+    ys := [Score(1.5), Score(2.25)]
+    assert ys.sum() == Score(3.75)
+    assert float(ys.sum()) == 3.75
+    fs: List[Score] = []
+    assert fs.sum() == Score(0.0)
+    assert float(fs.sum()) == 0.0
+
+# The checked add is the underlying's own — `sum` must still FAULT, never wrap.
+
+test fn sum_newtype_overflow_still_faults():
+    MAX := 9223372036854775807
+    xs := [UserId(MAX), UserId(1)]
+    r := recover: xs.sum()
+    assert r != Ok(UserId(0))
+    match r:
+        Ok(v): assert false
+        Err(e): assert e.message() == "integer overflow in Add"
+
+# Two `.sum()` sites with DIFFERENT verdicts in one statement / one interpolated string: the side
+# table is keyed on the method-NAME token, so the sites cannot alias (see `CarrierKey`). An aliased
+# key would either mis-apply one site's seed or hard-error `internal:`.
+
+test fn two_sums_one_line_keep_distinct_verdicts():
+    cs := [UserId(3), UserId(1)]
+    ns := [3, 1]
+    assert "{cs.sum()} {ns.sum()}" == "UserId(4) 4"
+    assert "{ns.sum()} {cs.sum()}" == "4 UserId(4)"
+    ec: List[UserId] = []
+    en: List[int] = []
+    assert "{ec.sum()} {en.sum()}" == "UserId(0) 0"
+    assert [int(cs.sum()), ns.sum(), int(ec.sum()), en.sum()] == [4, 4, 0, 0]
+
+# Plain numeric lists are untouched.
+
+test fn sum_plain_lists_unchanged():
+    assert [1, 2, 3].sum() == 6
+    ei: List[int] = []
+    assert ei.sum() == 0
+    assert [1.5, 2.5].sum() == 4.0
+    ef: List[float] = []
+    assert ef.sum() == 0.0

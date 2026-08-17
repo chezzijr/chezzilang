@@ -7,6 +7,51 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+> **✅ `List[<numeric newtype>].sum()` works and returns the NEWTYPE, 2026-08-17 — `docs/gaps.md:1954`
+> struck.** `.sort()`/`.min()`/`.max()` on a `List[Cents]` (`newtype Cents = int`) already unwrapped the
+> newtype, but `.sum()` was gated out at check time (`sum() requires a numeric list, found List[Cents]`) —
+> a same-family asymmetry. **Decided semantics: `sum` returns `T`.** Measured ancestors: Go
+> `type Cents int` → `6` typed `main.Cents`, empty → `0` typed `main.Cents`; Python
+> `typing.NewType('Cents', int)` → `6` typed `int` (NewType is ERASED). Chezzi's `newtype` is a REAL
+> runtime wrapper (`Obj::NewType { type_key, inner }`), so **Go governs**. Measured: pre-change binary on
+> `[Cents(3),Cents(1),Cents(2)].sum()` → `type error (line 4, col 7): sum() requires a numeric list,
+> found List[Cents]`; post-change → `Cents(6)`, and an empty `List[Cents]` → `Cents(0)`.
+> **The empty list is the whole mechanism.** A non-empty list carries `type_key` on element 0; an empty
+> one carries nothing and the backend is TYPE-BLIND, so the newtype identity must be plumbed from the
+> checker. New side table **`NewtypeSumTable`** (`src/checker/ty.rs`) keyed exactly like `ProtoEqTable` —
+> the same `CarrierKey` 4-tuple on the method-NAME token, built by `crate::checker::carrier_key`, because
+> `parse_postfix` gives every link of a chain the PRIMARY expression's span (instance #5 of the repo's
+> span-keyed-table aliasing class: M24-6, W7-49, W7-43, `ListWidenKey`). **BOTH verdicts recorded**
+> through `record_call_table_entry`, so an aliased key is a hard `internal:` error, never one site's seed
+> silently applied to another; a lookup **MISS degrades to the pre-fix plain numeric lowering**, so a
+> missing entry can only under-apply. Wired through the existing plumbing (`Checker` field, `setup.rs`
+> initialiser, the `std::mem::take` hand-off tuple, the two `compile_graph`/standalone assignment sites).
+> **Lowering reuses what exists — no new opcode:** the compiler pushes `ConstInt(0)`/`ConstFloat(0.0)` +
+> `Op::NewType(key)` as `sum`'s one hidden argument, and the VM folds from that seed through
+> `newtype_arith` — the same unwrap→native-checked-op→rewrap path `Cents + Cents` takes — so overflow
+> still faults `integer overflow in Add` and the empty case falls out with no special handling (the seed
+> IS the answer). **The admitted set is exactly the one that gets an intrinsic `Add`** (non-generic,
+> numeric underlying — `Checker::newtype_sum_seed` reuses the very predicate the `Ty::NewType` arm of
+> `satisfies` uses), so `sum`'s `where T: Add` bound and the seed can never disagree. **Still rejected,
+> verified against the PRE-change binary too:** `newtype Name = str` (with or without an `add` method), a
+> plain struct with a structural `add` (`sum` needs a MONOID; `where T: Add` alone is only a semigroup —
+> that reasoning is preserved, the gate is only widened), a **generic** newtype (`newtype Box[T] = T` —
+> methods-only, no operator auto-flow) and a **newtype OF a newtype** (`newtype B = Cents`): its
+> underlying is not numeric, and `B + B` / `[B].min()`'s `Comparable` bound already reject it, so `sum`
+> stays consistent with them rather than inventing a nested seed. `xs.sum()` inside a generic
+> (`fn f[T](xs: List[T])`) keeps its pre-existing rejection, so no per-instantiation key conflict is
+> reachable. Verified working across `?.` chains, closures, `map`, `spawn`/`parallel:`, cross-module and
+> name-colliding newtypes (`money.Cents = int` vs `other.Cents = float`), and alias underlyings
+> (`type F = float; newtype R = F`). Docs: `docs/stdlib.md` `sum` row, `docs/syntax.md` (newtype numeric
+> auto-flow + the List-method cheat line), `docs/gaps.md`; the stale
+> `src/checker/expr.rs` comment naming the deleted `interp` engine corrected. Tests:
+> `tests/chz/spec/newtype_test.chz` **+6** (non-empty/empty int, float both ways, overflow fault,
+> two-sums-in-one-line/one-interpolation aliasing backstop, plain-list controls) + `src/checker/tests.rs`
+> **+3** (return type is the newtype not the underlying; the str/method, nested and generic rejections).
+> **Gate:** `cargo test --lib` **4156 → 4159 passed / 0 failed / 2 ignored**, full `cargo test` all
+> targets 0 failed, `cargo clippy --all-targets -- -D warnings` clean, `chezzi test tests/chz`
+> **576 → 582** (same at `CHEZZI_THREADS=2`).
+
 > **✅ `i64::MIN % -1` is now `0`, 2026-08-17 — `docs/gaps.md:1950` struck.** `%` at that one input used
 > to fault `integer overflow in Mod`; Go and Python both give `0`, and that IS the mathematically
 > correct remainder — Rust's `checked_rem` returns `None` there only to dodge the x86 `IDIV` hardware

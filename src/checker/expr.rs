@@ -2857,20 +2857,33 @@ impl Checker {
             Ty::List(elem) => {
                 // `sum` is harvested from `std/prelude.chz` as `sum(self) -> T where T: Add`, but the
                 // `where T: Add` bound alone is SEMIGROUP (structural `add`) and thus too broad: a plain
-                // Add-satisfying struct has no zero/identity for the EMPTY-list case, and both runtimes
-                // are numeric-only (`vm/mod.rs` do_builtin sum / `interp/builtins.rs` sum). So `sum`'s
-                // true requirement is MONOID (Add + zero), which is not a declarable protocol here; we
-                // keep this DISPATCH-TIME numeric gate as the residual that enforces it (a struct with a
-                // structural `add` still reports the numeric diagnostic, NOT check-ok/run-error). The
+                // Add-satisfying struct has no zero/identity for the EMPTY-list case, and the engine's
+                // `sum` (`vm/call.rs` do_builtin) has no way to mint one. So `sum`'s true requirement
+                // is MONOID (Add + zero), which is not a declarable protocol here; we keep this
+                // DISPATCH-TIME gate as the residual that enforces it (a struct with a structural
+                // `add` still reports the numeric diagnostic, NOT check-ok/run-error). The
                 // `where T: Add` in the decl is documentation of the necessary-but-insufficient bound.
+                //
+                // A SCALAR NUMERIC NEWTYPE (`newtype Cents = int`) is the one non-scalar that DOES
+                // have the monoid: its `+` is the underlying's native op (unwrap→add→rewrap) and its
+                // zero is `Cents(0)`, which the backend cannot mint on its own (it is type-blind, and
+                // an EMPTY list carries no element to read a `type_key` off). So the checker records
+                // the seed here and `sum` returns the NEWTYPE — Go's `type Cents int` sums to
+                // `main.Cents`, and it keeps the family consistent with `.sort()`/`.min()`/`.max()`,
+                // which already unwrap numeric newtypes. BOTH verdicts are recorded, so an aliased
+                // key is a hard error instead of one site's seed reaching another.
                 let elem = (**elem).clone();
-                if method == "sum" && !(elem.is_numeric() || elem.is_unknown()) {
-                    self.infer_all(args);
-                    self.error(
-                        span,
-                        format!("sum() requires a numeric list, found List[{elem}]"),
-                    );
-                    return Ty::Unknown;
+                if method == "sum" {
+                    let seed = self.newtype_sum_seed(&elem);
+                    if seed.is_none() && !(elem.is_numeric() || elem.is_unknown()) {
+                        self.infer_all(args);
+                        self.error(
+                            span,
+                            format!("sum() requires a numeric list, found List[{elem}]"),
+                        );
+                        return Ty::Unknown;
+                    }
+                    self.record_newtype_sum(name_span, seed, span);
                 }
                 // **W7-45**, the same dispatch-time residual one line up, for the same reason. These
                 // four have a RUNTIME of `values_equal` (`vm/call.rs` contains / index_of /

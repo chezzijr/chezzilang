@@ -6525,7 +6525,7 @@ fn list_sum_non_numeric_rejected() {
 #[test]
 fn list_sum_struct_with_add_still_rejected_at_check() {
     // SOUNDNESS (Option B): `sum` is documented `where T: Add`, but its true requirement is MONOID
-    // (Add + a zero/identity for the empty list) and both runtimes are numeric-only. A user struct
+    // (Add + a zero/identity for the empty list) and the engine's `sum` cannot mint one. A user struct
     // with a structural `add(self, o) -> Self` SATISFIES the `Add` protocol, so `where T: Add` alone
     // would wrongly admit it — the residual numeric check-time gate must STILL reject it (never
     // check-ok/run-error). This pins that the gate survives alongside the `where T: Add` annotation.
@@ -6538,6 +6538,53 @@ xs := [M(1), M(2)]
 s := xs.sum()
 ";
     rejects(src, "numeric");
+}
+
+// A SCALAR NUMERIC NEWTYPE is the one non-scalar admitted: it has the monoid (the underlying's native
+// `+`, and a `T(0)` zero the checker hands the backend as a seed). `sum` returns the NEWTYPE — Go's
+// `type Cents int` sums to `main.Cents`. Behaviour, including the empty list, is pinned in
+// `tests/chz/spec/newtype_test.chz`; these pin the check-time verdict + return type only.
+
+#[test]
+fn list_sum_numeric_newtype_returns_the_newtype() {
+    ok("newtype C = int\nxs := [C(1), C(2)]\ny: C = xs.sum()\n");
+    ok("newtype R = float\nxs: List[R] = []\ny: R = xs.sum()\n");
+    // NOT the underlying — a raw-int return would be a check-ok/run-wrong-type regression.
+    rejects("newtype C = int\nxs := [C(1)]\ny: int = xs.sum()\n", "int");
+}
+
+#[test]
+fn list_sum_non_numeric_newtype_still_rejected() {
+    // `newtype N = str` has no native `+` (the same reason it fails `where T: Add`), so `sum` on it
+    // must keep reporting the numeric diagnostic — an `add` METHOD on it is never dispatched as an
+    // operator and does not change that.
+    rejects(
+        "newtype N = str\nxs := [N(\"a\")]\ns := xs.sum()\n",
+        "numeric",
+    );
+    let with_method = "\
+newtype N = str:
+    fn add(self, o: N) -> N:
+        return N(\"x\")
+xs := [N(\"a\")]
+s := xs.sum()
+";
+    rejects(with_method, "numeric");
+}
+
+#[test]
+fn list_sum_nested_and_generic_newtype_rejected() {
+    // A newtype OF a newtype has a non-numeric underlying, so it gets no intrinsic `Add` — `B + B`
+    // and `[B].min()`'s `Comparable` bound already reject it, and `sum` stays consistent with them.
+    rejects(
+        "newtype C = int\nnewtype B = C\nxs := [B(C(1))]\ns := xs.sum()\n",
+        "numeric",
+    );
+    // A GENERIC newtype is methods-only — no native operator auto-flow even over a numeric arg.
+    rejects(
+        "newtype Box[T] = T\nxs := [Box(1)]\ns := xs.sum()\n",
+        "numeric",
+    );
 }
 
 #[test]

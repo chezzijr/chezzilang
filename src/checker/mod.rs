@@ -22,7 +22,8 @@ pub use ty::Ty;
 use ty::compatible;
 pub use ty::{
     CarrierKey, CarrierMode, CarrierTable, FnLabels, KeywordKey, KeywordTable, ListWidenKey,
-    ListWidenTable, ProtoEqTable, WitnessCallee, WitnessKey, WitnessSrc, WitnessTable,
+    ListWidenTable, NewtypeSumTable, ProtoEqTable, WitnessCallee, WitnessKey, WitnessSrc,
+    WitnessTable,
 };
 
 /// The fully-resolved C signature of one `extern` fn, computed by the checker in the defining
@@ -928,6 +929,7 @@ pub fn resolve_call_tables(
     CarrierTable,
     ProtoEqTable,
     ListWidenTable,
+    NewtypeSumTable,
     TableConflicts,
 ) {
     crate::on_frontend_stack_scoped(move || {
@@ -940,6 +942,7 @@ pub fn resolve_call_tables(
             std::mem::take(&mut c.carriers),
             std::mem::take(&mut c.proto_eq_calls),
             std::mem::take(&mut c.list_widen),
+            std::mem::take(&mut c.newtype_sums),
             std::mem::take(&mut c.table_conflicts),
         )
     })
@@ -963,6 +966,7 @@ pub fn resolve_call_tables_standalone(
     CarrierTable,
     ProtoEqTable,
     ListWidenTable,
+    NewtypeSumTable,
     TableConflicts,
 ) {
     let id = crate::resolver::ModuleId(std::path::PathBuf::from("<main>"));
@@ -1989,6 +1993,11 @@ struct Checker {
     /// re-derive it: the decision is the SLOT's element type). Recorded UNCONDITIONALLY, for the same
     /// reason [`Self::carriers`] is. See [`ListWidenTable`].
     list_widen: ListWidenTable,
+    /// Which `.sum()` sites sum a scalar-numeric-newtype list and so need a `T(0)` seed, keyed by
+    /// [`carrier_key`] on the method-name token and consumed verbatim by the compiler (which cannot
+    /// re-derive it: the decision is the ELEMENT's type, and an empty list carries none at runtime).
+    /// Recorded UNCONDITIONALLY, for the same reason [`Self::carriers`] is. See [`NewtypeSumTable`].
+    newtype_sums: NewtypeSumTable,
     /// W7-49 — side-table keys that were asked to hold two DIFFERENT decisions at once. Filled by
     /// [`record_call_table_entry`] (never by ordinary type errors) and returned alongside the three
     /// tables, because this pass DISCARDS its type errors — `self.error` would be swallowed here.

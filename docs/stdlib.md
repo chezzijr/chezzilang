@@ -91,7 +91,7 @@ fault, by contrast, is raised identically by both.)
 | `index_of` | `(x: T) -> int` | First index, or `-1`. |
 | `concat` | `(other: List[T]) -> List[T]` | Returns a **new** list. Operator form: `a + b`. |
 | `extend` | `(other: List[T]) -> nil` | *mutates* — append all of `other`. |
-| `sum` | `() -> T` | Numeric lists only (`int`→`int`). Integer sums use checked add — overflow raises a recoverable `integer overflow in Add`, never wraps; any-float lists accumulate to `float` (may reach `inf`). |
+| `sum` | `() -> T` | Numeric lists (`int`→`int`), or a list of a **scalar numeric `newtype`** — `List[Cents]` (`newtype Cents = int`) sums to `Cents`, and an **empty** one to `Cents(0)`, matching Go's `type Cents int`. Integer sums use checked add — overflow raises a recoverable `integer overflow in Add`, never wraps (the newtype path uses the underlying's same checked op); any-float lists accumulate to `float` (may reach `inf`). A newtype OF a newtype, a generic newtype and a non-numeric one (`newtype Name = str`) are rejected, exactly as their `+` is. |
 | `sort` | `() -> nil` | *mutates* — ascending. Orderable elements (`int`/`float`/`str`) or `Comparable` structs. Float `NaN` is handled by a total order (`NaN` sorts to one end), deterministic — never faults. |
 | `sort_by` | `(cmp: fn(T, T) -> int) -> nil` | *mutates* — custom comparator (`<0`, `0`, `>0`). |
 | `sort_by_key` | `(key: fn(T) -> K) -> nil` | *mutates* — sort by a derived orderable/`Comparable` key. A `NaN` float key sorts deterministically (total order, `NaN` to one end), consistent with `sort()` — never faults. |

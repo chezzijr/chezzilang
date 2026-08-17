@@ -2251,6 +2251,13 @@ a method or unwrap to operate (operator auto-flow for non-numeric underlyings is
 Mixing a newtype with its raw underlying (`Meters + 1.0`) or with a *different* newtype
 (`Meters + Seconds`) is a type error — that rejection is the whole point.
 
+The same auto-flow carries the `List` methods that need it: `.sort()`, `.min()`/`.max()` (and
+`.min_by`/`.max_by`) order a `List[Meters]` by the wrapped scalar, and `.sum()` returns the
+**newtype** — `[Cents(3), Cents(1)].sum() -> Cents(4)`, and an *empty* `List[Cents]` sums to
+`Cents(0)` (Go's `type Cents int`). Integer overflow still faults. This is the numeric auto-flow, so
+a *generic* newtype, a newtype **of** a newtype, and a `newtype Name = str` are rejected by `.sum()`
+exactly as their `+` is.
+
 A newtype may carry its own **methods** (a trailing-colon block, like a struct/enum), and satisfies
 the **non-operator** prebuilt protocols by defining the relevant method — `str(self)` (Stringable
 display override) and `hash(self)` (so it can be a `map`/`set` key — opt-in, *not* inherited from the
@@ -3345,7 +3352,8 @@ A character is just a 1-char `str` (Python-style — there is no `char` type): i
 iterate with `for c in s:` or `s.chars()`, and bridge to codepoints with `ord`/`chr`.
 
 List methods (built in): `xs.push(x)` `xs.pop()` `xs.len()` `xs.reverse()` `xs.contains(v)`
-`xs.index_of(v)` `xs.sum()` `xs.sort()` (ascending, in place); `xs.concat(ys)→list` (new list) and
+`xs.index_of(v)` `xs.sum()` (numeric, or a scalar numeric `newtype` → that newtype; empty `-> T(0)`)
+`xs.sort()` (ascending, in place); `xs.concat(ys)→list` (new list) and
 `xs.extend(ys)` (append in place, → nil); higher-order `xs.map(f)` `xs.filter(p)` `xs.fold(init, f)`;
 `xs.sort_by(fn(a, b) -> int)` — a custom comparator (negative = `a` before `b`), stable, in place;
 and `xs.sort_by_key(fn(x) -> K)` — sort by a derived key (`K` Comparable: int/float/str, or a struct

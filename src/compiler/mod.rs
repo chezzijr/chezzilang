@@ -107,13 +107,14 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     // witness params and what fills each witness at each call site. The compiler CONSUMES it — it
     // never re-derives which protocols carry a static requirement (that resolves through
     // imports/aliases/embeds, which is checker work).
-    let (kw, wt, ct, pe, lw, conflicts) = crate::checker::resolve_call_tables(graph);
+    let (kw, wt, ct, pe, lw, ns, conflicts) = crate::checker::resolve_call_tables(graph);
     reject_table_conflicts(conflicts)?;
     c.keyword_calls = kw;
     c.witnesses = wt;
     c.carriers = ct;
     c.proto_eq_calls = pe;
     c.list_widen = lw;
+    c.newtype_sums = ns;
     // Pass 0: collision pre-pass — assign runtime keys for module-scoped user types. A type name
     // declared in exactly one module keeps its BARE name (the common case → unchanged Display/print
     // output); a name declared in ≥2 modules that are BOTH in the program is disambiguated (the
@@ -184,7 +185,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     // SINGLE-RESOLVER: extern C types come from the checker's standalone pass — the SAME resolver the
     // multi-file CLI uses (no second backend resolver exists). The backend reads this table verbatim.
     c.extern_sigs = crate::checker::resolve_extern_signatures_standalone(&module.stmts);
-    let (kw, wt, ct, pe, lw, conflicts) =
+    let (kw, wt, ct, pe, lw, ns, conflicts) =
         crate::checker::resolve_call_tables_standalone(&module.stmts);
     reject_table_conflicts(conflicts)?;
     c.keyword_calls = kw;
@@ -192,6 +193,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     c.carriers = ct;
     c.proto_eq_calls = pe;
     c.list_widen = lw;
+    c.newtype_sums = ns;
     let toplevel = c.compile_module(0, module, &[], true, None)?;
     let global_slots = std::mem::take(&mut c.global_slots);
     // A synthetic module id so the run driver has something to key the namespace cache on.
@@ -314,6 +316,11 @@ struct Compiler {
     /// [`crate::checker::ListWidenTable`]), consumed verbatim: the backend is type-blind and cannot
     /// re-derive the SLOT element type that decides it. A MISS means "widen" — the pre-fix lowering.
     list_widen: crate::checker::ListWidenTable,
+    /// Which `.sum()` sites need a `T(0)` newtype SEED pushed as a hidden argument. The backend is
+    /// type-blind — an empty `List[Cents]` carries no element to read a `type_key` off — so this is
+    /// CONSUMED from the checker and never re-derived; a MISS means "plain numeric sum", which is the
+    /// pre-fix lowering. See [`crate::checker::NewtypeSumTable`].
+    newtype_sums: crate::checker::NewtypeSumTable,
     /// W7-43 — counter for the fresh `__optN` temp names the Option lowering mints, mirroring the
     /// checker's own. Frame-local and `__`-prefixed (unwritable by user code), so uniqueness within
     /// one compilation is all that is ever needed — and this makes it true by construction rather
@@ -834,6 +841,7 @@ impl Compiler {
             carriers: crate::checker::CarrierTable::new(),
             proto_eq_calls: crate::checker::ProtoEqTable::new(),
             list_widen: crate::checker::ListWidenTable::new(),
+            newtype_sums: crate::checker::NewtypeSumTable::new(),
             next_opt_tmp: 0,
             witness_locals: Vec::new(),
             pending_witnesses: Vec::new(),
@@ -4586,6 +4594,30 @@ impl Compiler {
             )) == Some(&true)
     }
 
+    /// The `T(0)` seed a `xs.sum()` site needs, per the checker's [`crate::checker::NewtypeSumTable`]
+    /// — `Some((runtime type key, underlying-is-float))` for a scalar-numeric-newtype list. A MISS,
+    /// or a recorded `None`, means the plain numeric sum (the pre-fix lowering), so a stale/absent
+    /// entry can only under-apply. Keyed on the method-NAME token, which is distinct per link of a
+    /// postfix/pipe chain (the call node's span is not — see [`crate::checker::CarrierKey`]).
+    fn newtype_sum_seed(
+        &self,
+        name: &str,
+        args: &[Expr],
+        name_span: Span,
+    ) -> Option<(String, bool)> {
+        if name != "sum" || !args.is_empty() {
+            return None;
+        }
+        self.newtype_sums
+            .get(&crate::checker::carrier_key(
+                self.current_module_idx,
+                self.kw_frag_ctx,
+                self.kw_frag_ord,
+                name_span,
+            ))?
+            .clone()
+    }
+
     fn member_witness_srcs(&self, name_span: Span) -> Option<&Vec<crate::checker::WitnessSrc>> {
         self.witnesses.calls.get(&crate::checker::witness_key(
             self.current_module_idx,
@@ -5262,6 +5294,34 @@ impl Compiler {
                     Op::CallMethod {
                         name: name.clone(),
                         argc: args.len() + w,
+                        ic,
+                    },
+                    span,
+                );
+                return Ok(());
+            }
+            // `xs.sum()` over a scalar-numeric-newtype list (`List[Cents]`): push a `Cents(0)` SEED as
+            // `sum`'s one hidden argument, so the runtime folds through the same-newtype `+` path
+            // (unwrap → native checked op → rewrap) and answers `Cents`. The seed IS the answer for an
+            // EMPTY list, which is why it must come from here: the backend is type-blind and an empty
+            // list carries no element to read a `type_key` off. The checker decided it; a miss falls
+            // through to the plain numeric lowering below.
+            if let Some((nt_key, is_float)) = self.newtype_sum_seed(name, args, *name_span) {
+                self.compile_expr(fc, obj)?;
+                fc.emit(
+                    if is_float {
+                        Op::ConstFloat(0.0)
+                    } else {
+                        Op::ConstInt(0)
+                    },
+                    span,
+                );
+                fc.emit(Op::NewType(nt_key), span);
+                let ic = self.next_method_ic();
+                fc.emit(
+                    Op::CallMethod {
+                        name: name.clone(),
+                        argc: 1,
                         ic,
                     },
                     span,

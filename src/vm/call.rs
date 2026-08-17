@@ -3045,6 +3045,34 @@ impl Vm {
                         Ok(Value::nil())
                     }
                     "sum" => {
+                        // A SCALAR NUMERIC NEWTYPE list arrives with one hidden argument: the `T(0)`
+                        // seed the compiler minted from the checker's `NewtypeSumTable` (a user cannot
+                        // spell `.sum(x)` — the harvested sig takes no parameters). Fold from it
+                        // through `newtype_arith`, the same unwrap→native-op→rewrap path `Cents +
+                        // Cents` takes, so overflow faults identically and the result is `T`. The seed
+                        // alone is the answer for an EMPTY list.
+                        if args.len() == 1 {
+                            let seed = args[0];
+                            let elems = items.clone();
+                            let mut acc = seed;
+                            for &v in &elems {
+                                acc = self.with_roots(&[Value::obj(h), acc, v], |vm| {
+                                    match (acc.as_obj(), v.as_obj()) {
+                                        (Some(ha), Some(hb)) if vm.same_newtype_keys(ha, hb) => {
+                                            vm.newtype_arith(&Op::Add, ha, hb, "Add", span)
+                                        }
+                                        _ => Err(vm.err(
+                                            format!(
+                                                "sum() expects a numeric list, got an element of type {}",
+                                                vm.type_name(v)
+                                            ),
+                                            span,
+                                        )),
+                                    }
+                                })?;
+                            }
+                            return Ok(acc);
+                        }
                         self.arity_err("sum", args, 0, span)?;
                         // Clone out so `make_int`/`box_float` (which mutate the heap) don't collide with
                         // the `items` heap borrow.
