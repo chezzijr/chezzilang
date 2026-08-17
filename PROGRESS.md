@@ -117,6 +117,38 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > branch with it — its only machine-mode caller is `run`, whose stderr is shared with the program's, so
 > a JSON array there could never be parsed back out.
 >
+> **🗳️ TWO LANGUAGE MILESTONES DECIDED, 2026-08-17 — `docs/gaps.md` W8-21 / W8-22 (not started).**
+> Both came out of the W8-2 / W8-19 discussion, and both are filed with their **rejected** alternatives.
+>
+> **W8-21 — success-coercion at a declared `T?` / `T!E` sink.** The syntax already ships (`T?` =
+> `Option[T]`, `T!E` = `Result[T,E]`, `Token::Bang` at `src/lexer/mod.rs:116`); only the coercion is
+> missing — `fn f() -> int?: return 1` is a type error today. Decided: **exactly two coercions, both on
+> the SUCCESS side** — `T`→`Some(v)`, `T`→`Ok(v)`; `None`/`Some`/`Ok`/`Err` otherwise explicit.
+> Payoff **152 sites** (102 `return Ok(` + 50 `return Some(`). **The rejected third rule is the content:**
+> `E` → `T!E` cannot land because `str` → `Error` is a **general** assignability rule here (measured:
+> `e: Error = "boom"` compiles), so every `str` satisfies both sides of a `str!` sink — **34 colliding
+> sites** (`Result[str]` ×19, `str!` ×15) for the 81 `return Err(` it would save. Ancestor survey: **nobody
+> resolves the overlap, they all make it unrepresentable** — Zig has the rule but its error side is a
+> payload-free error *set*; Swift/Kotlin/C# put errors in `throws`; **Rust refuses the coercion**
+> (measured `E0308`); **Go disambiguates by position** (measured). Zig buys it by giving up error
+> payloads, a trade Chezzi already spent on `.message()` + arbitrary `E`. Replacement is the **`!"..."`**
+> sugar — the sigil supplies the disambiguation types cannot. Cost to plan for is the **lowering**: the one
+> existing coercion (int→float) needed **13 `Op::CoerceFloat` sites + a whole `FloatAliases` table**
+> because the compiler keys on syntactic types and the checker on resolved ones (`compiler/mod.rs:360`) —
+> the `checker-superset-of-compiler` class, and `type Maybe = int?` is its exact analogue here.
+>
+> **W8-22 — give a caught `Error` its origin line/col.** Live asymmetry: an uncaught index fault prints
+> `runtime error (line 3, col 11): index 9 out of bounds (len 1)`, the same fault through `recover:` gives
+> bare `index 9 out of bounds (len 1)`. **The span already exists and is discarded at one line** —
+> `RuntimeError` carries `pub span: Span` (`src/vm/mod.rs:61`) and `src/vm/exec.rs:1392` does
+> `alloc_str(rte.message)`. But `Error` **is** a bare `str` today, so an origin makes it a real object and
+> moves `==`, `print` shape at 336 `Err(` sites, the goldens, and airlock sendability. Ancestors split
+> evenly (Python traceback yes / Zig debug-only / Rust + Go no), so it is a genuine choice. Recommended:
+> **construction span only** (a chain costs an alloc per `?` — 271 sites — which is why Zig gates it to
+> debug), **default rendering unchanged**, sequenced **after W8-14/W8-15** to reuse their `Span.file`
+> resolver. Settle first: `Error` as a struct vs a `str` + side table (the side table keeps `==` and
+> display byte-identical but cannot cross the task airlock — probably a false economy).
+>
 > **✅ `os.hostname() -> Option[str]`, 2026-08-17 — no more silent `""` on syscall failure.** The
 > native `hostname` (`src/native/os.rs:55`) fell back to `String::new()` on a nonzero
 > `libc::gethostname` return; that's a silent wrong answer, indistinguishable from a real (if absurd)

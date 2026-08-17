@@ -181,7 +181,7 @@ Right now: **pre-JIT/pre-freeze bug-hunt + drift-fix hunt** is the active phase 
 checker↔runtime, and IO drift — live ledger in `docs/gaps.md`), with **M19 — Perf track** paused
 in-progress alongside it.
 
-> **START HERE (2026-08-17): `docs/gaps.md` W8-1..W8-20 — the external dogfood pass.** 19 open rows,
+> **START HERE (2026-08-17): `docs/gaps.md` W8-1..W8-22.** 21 open rows — W8-1..W8-17 + W8-19/W8-20 from the **external dogfood pass**, plus two DECIDED language milestones (**W8-21** success-coercion at `T?`/`T!E` sinks, **W8-22** `Error` carries its origin span). The dogfood rows are
 > the first findings in this repo produced by people with **no model of the implementation**, and they
 > are disjoint from waves 1–7 (which were almost all soundness). Six are **silent wrong answers**, two
 > are the **scheduler** (`--threads=1` runs *two* workers, and the default worker count is the *slowest*
