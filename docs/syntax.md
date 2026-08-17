@@ -4486,7 +4486,8 @@ native enum Result[T, E]:         # reserved Ty::Result — Ok(T) / Err(E)
 > module with signatures — lives in [`stdlib.md`](stdlib.md).** This section is a short orientation.
 
 Always available (no import): `print`, `range`, `int()`/`float()`/`str()`,
-`ord(s)→int` (first codepoint), `chr(n)→str` (codepoint → 1-char string), `Set()`/`Set(list)`,
+`ord(s)→int` (codepoint of a **1-character** `s`; longer or empty faults, like Python), `chr(n)→str`
+(codepoint → 1-char string), `Set()`/`Set(list)`,
 `panic(msg)` (raise a recoverable fault; see `recover:`), plus methods on the core types
 (`list`/`map`/`set`/`str`/`bytes`/`bytearray`).
 

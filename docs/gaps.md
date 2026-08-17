@@ -17,7 +17,9 @@ reference programs in Python/Go/Rust. It is disjoint from waves 1–7 by constru
 soundness classes the authors already suspected; this one had no model of the implementation and so found
 **silent wrong answers, scheduler defaults, message quality, and stale prose** instead (exactly one
 soundness row in twenty). **All twenty were live while every standing gate was green**, which is the
-pass's meta-finding — see `## Session log — 2026-08-17`. Only `W8-18` (doc drift) is closed.
+pass's meta-finding — see `## Session log — 2026-08-17`. Closed so far: `W8-18` (doc drift) and
+`W8-2` (the discarded-carrier warning, 2026-08-17), the latter along with the un-numbered **airlock
+trap** section below it.
 
 **Pre-freeze bug-hunt waves:** 1–5 (2026-07-11 → 07-13), then 2026-07-18, 07-20, 07-22, three on
 07-23, and **wave 7 (2026-07-28)** — batch A swept the **host boundary** (the native/CLI seam where raw
@@ -35,12 +37,14 @@ fix applied to SOME arms of an N-way set"** — is the highest-yield remaining l
 `defer` was bypassed) and `W7-4` (two sibling closures over one captured local got separate cells across
 the airlock) were both instances of it and are **fixed** — session logs at the end of this file.
 
-## TABLE — the whole backlog at a glance, **21 OPEN ROWS** (updated 2026-08-17)
+## TABLE — the whole backlog at a glance, **20 OPEN ROWS** (updated 2026-08-17)
 
 > **Reading note (2026-08-17): the table stopped being empty.** It had zero open rows for exactly one
 > day. An **external dogfood pass** (2026-08-17 — ten developers new to Chezzi, one area each, 343
 > Chezzi programs against 45 reference programs in Python/Go/Rust, nothing taken on the docs' word)
-> filed **W8-1..W8-20**. Only **W8-18** (the doc-drift sweep) is closed. **W8-21/W8-22** are two LANGUAGE
+> filed **W8-1..W8-20**. Two are closed: **W8-18** (the doc-drift sweep) and **W8-2** (a discarded
+> `Result`/`Option` now warns — and the *prescription* filed in its Fix column turned out to be wrong on
+> its top-level half; read the row before re-implementing it). **W8-21/W8-22** are two LANGUAGE
 > milestones decided on 2026-08-17 out of the W8-2/W8-19 discussion — success-coercion at `T?`/`T!E` sinks,
 > and giving a caught `Error` its origin span — not dogfood findings; they are design decisions with the
 > ancestor survey and the rejected alternatives recorded in their rows. The rest are open and are
@@ -103,7 +107,7 @@ later edit shifts them and nobody re-numbers the whole table (`W7-27`'s was alre
 | item | gaps.md | what | why it is still open |
 |---|---|---|---|
 | **W8-1** | `:236` | **String interpolation silently eats regex quantifiers, and the docs taught the form that breaks.** `p := "\\d{4}-\\d{2}"; print(p)` → `\d4-\d2`; CPython `print("\\d{4}-\\d{2}")` → `\d{4}-\d{2}`. Interpolation is always on, so `{4}` is a hole, not a quantifier — and the result is **still a valid regex** (a digit then a literal `4`), so `regex.find` returns `Ok(None)` for every line and *nothing anywhere reports a problem*. In the reporters' log-analyzer this surfaced as `lines=0 malformed=2010` and was the longest single debugging stretch of the campaign | **DOC HALF DONE 2026-08-17**, code half open. `docs/syntax.md` §10 and `docs/stdlib.md` §`std.regex` now both say *use `r"…"`; in a normal string `{n}` is interpolation* — the drift was that §`std.regex` taught the doubled-backslash normal-string form verbatim while the raw-string advice lived in §10, far from where you are when you write a pattern. Open: the optional **lexer nudge** — warn when an interpolation hole's contents are *entirely digits*, which is never a useful expression and is exactly this bug's signature. Cheap, and it converts a silent corruption into a compile-time nudge |
-| **W8-2** | `:236` | **A discarded `Result`/`Option` is fatal at top level and silently swallowed inside a function.** `fn f(): g()` where `g() -> Result[int, Error]` returns `Err("E")` — `chezzi check` says *ok: no type errors*, `chezzi run` prints nothing about it and exits **0**. The same `g()` at module top level (including nested inside a top-level `if`/`for`) aborts with `runtime error: unhandled error: E`, rc=1. Rust warns on the drop wherever it happens (`unused_must_use`), with `let _ = …` as the escape | **Fix: a checker diagnostic on a bare expression statement whose type is `Result`/`Option`**, with the existing `r := …` / `_ := …` bind as the escape. That also **removes the asymmetry** rather than papering over it, because top level becomes a compile error instead of a runtime one — strictly better feedback in both positions. Note this row is NOT `W7-48` (the `?`-in-`spawn:` swallow); that is a different site. **Related pressure, and the reason 02-shaped programs get written:** `Option`/`Result` have **zero** methods (**W8-19**) — no `unwrap_or`, no `is_ok` — so every fallback costs a 3-line `match`, which makes correct code visibly longer than sloppy code. Fixing W8-19 reduces how often W8-2 is even reachable. Docs updated 2026-08-17 (`syntax.md` §9, `spec.md` entry model) — both previously documented only the top-level half. **Scope correction, same day: the prescription "top level becomes a compile error" above is WRONG and was not shipped.** At top level the runtime already checks the value (`Op::PopExprStmt` → `top_level_error`, `vm/exec.rs`), so a "is discarded" warning there is factually false, and obeying it (`_ := g()`) **disables** that check — a failing program silently exits 0. The warning fires only where the value is genuinely lost: inside a non-top-level proto, i.e. a `fn` body, a `spawn:` block, or a `defer:` block (each measured swallowing at module top level). `if`/`for`/`while`/`match`/`parallel:`/`recover:`/`wait:` all emit into the enclosing proto and stay silent. The asymmetry is therefore **kept and justified**, not removed |
+| ~~**W8-2**~~ | `:236` | **CLOSED 2026-08-17 — a discarded `Result`/`Option` now warns; and the Fix column filed below it was MEASURED WRONG on its top-level half and deliberately not shipped.** As filed: `fn f(): g()` where `g() -> Result[int, Error]` returns `Err("E")` — `chezzi check` said *ok: no type errors*, `chezzi run` printed nothing and exited **0**, while the same `g()` at module top level aborted with `runtime error: unhandled error: E`, rc=1. **What shipped is a WARNING, not an error** — Rust's `unused_must_use` is the governing ancestor because both carriers are `#[must_use]` there and the drop is a *lint*, not a rejection. Measured on the release binary: *warning (line 4, col 5): the Result returned by 'g' is discarded — bind it* `r := g()` *, or discard it explicitly* `_ := g()` — program still runs, rc unchanged, and `check --errors=json` carries `"severity":"warning"` | **CLOSED, and the prescription is the part to read.** The Fix as filed said *"top level becomes a compile error"*, removing the asymmetry. **That is wrong where it would fire, and was not shipped.** Measured, same program, two spellings: bare `g()` at top level → `runtime error (line 3, col 1): unhandled error: E`, **rc=1**; with the escape the warning itself recommends, `_ := g()` → prints `after`, **rc=0**. The runtime already checks a top-level drop (`Op::PopExprStmt` → `top_level_error`, `src/vm/exec.rs`), so "is discarded" is a **factually false** claim in that position and obeying it *disables the only check the program had*. The rule is therefore gated **OFF at module top level** and fires only inside a non-top-level proto that can hold a statement — a `fn` body, a `spawn:` block, a `defer:` block — each measured swallowing at top level. The gate was derived from the RUNTIME, not from a plausible checker flag: an exhaustive walk of the **eight `FnComp::new` sites** in `src/compiler/mod.rs` (only `<toplevel>` sets `is_toplevel`); `if`/`for`/`while`/`match` arm/`parallel:`/`recover:`/`wait:` arm all compile into the *enclosing* proto and were each measured aborting at top level, so all stay silent. **The asymmetry is KEPT and justified, not removed.** Measured non-fires, each pinned by a `no_warn` test: `defer f.close()` and `spawn g()` (call forms — Go's canonical unchecked idioms, see **W7-46**), an inline-expr fn body and a value-block tail (implicit returns, not drops), `?` / `??` (they yield the unwrapped payload). `o()?.len()` **does** warn — optional chaining re-wraps to `int?`. A carrier laundered through a type parameter (`fn drop_it[T](x: T): x`) escapes the rule — measured silent, rc=0 — and **Rust is identical** (`T` carries no `#[must_use]`), so that is an ancestor-aligned limit recorded in `syntax.md` §9, not a residual. Corpus: 11 `_ :=` sites, all in `fn`/`test fn` bodies. Not `W7-48` (the `?`-in-`spawn:` swallow), a different site. **The W8-19 pressure behind this row is untouched and still open:** `Option`/`Result` still have **zero** methods, so every fallback is still a 3-line `match` — fixing W8-19 is what makes W8-2-shaped code rarer, the warning only makes it visible. Docs: `syntax.md` §9 (position table), `spec.md` entry model |
 | **W8-3** | `:236` | **`Shared.set()` inside `Shared.update()` loses the write with no signal, and the docs describe behaviour the runtime does not have.** `docs/stdlib.md` said all reentrancy self-deadlocks. Measured — at the default worker count and again at `CHEZZI_THREADS=2`, identical both times (the reporters saw it at every count they tried) — it does **three** different things: `get` inside `update` **succeeds** returning the PRE-guard value (a stale read); `set` inside `update` is **silently lost, rc=0** (`Shared(10)` + nested `set(99)` under an `update(+1)` ends at **11**); `update` inside `update` / `write` inside `write` **hang forever with no deadlock report**. Same for the `RwShared` analogues; `write` nested in `read` is the one legal crossing (it persists) | Notable because the deadlock detector catches its **three other shapes in milliseconds** with better messages than Go's — this path slips past it, so the hang is the only self-reporting cell and it doesn't report either. **Two fixes, independent:** (a) the lost `set` should fault (`set on a box already write-locked by this task`) rather than be overwritten by the guard's return value — a wrong answer becoming a message; (b) the nested-guard hang should reach the deadlock verdict, which per **`parked-is-not-stuck`** means it must be built from what is *impossible* (this task holds the lock it is waiting on — that IS impossible, so it qualifies) and not from what looks idle. Doc corrected 2026-08-17 with the measured 3-row table |
 | **W8-4** | `:236` | **Mutations from a `sort_by` / `sort_by_key` callback vanish without a diagnostic.** `w := [3,1,2]`, a key fn that does `w.push(100)`, then `w.sort_by_key(bump)` → `[1, 2, 3]`, rc=0 — three pushes gone. CPython refuses: `ValueError: list modified during sort`. Same for a `pop()` in the callback | The docs **actively implied the opposite**: `stdlib.md` listed the snapshotting methods as `map`/`filter`/`fold`/`take_while`/`drop_while`/`count`/`position` and the three `sort` variants were **not on that list**, so a reader concluded they were live. Fixed in the doc 2026-08-17 (the three are named, with the CPython divergence spelled out and a worked example). **Open: which way it should resolve.** Per CLAUDE.md's own rule — when unsure, decline; never emit a confident wrong answer — **faulting like Python is the likelier answer** than documenting the silent discard, and it is a one-line guard (a mutation counter compared across the sort, exactly CPython's mechanism) |
 | **W8-5** | `:236` | **`json.parse` on deeply-nested input kills the process despite its `Result` contract.** `"[".repeat(100000) + "]".repeat(100000)` matched with a correct `Ok`/`Err` `match` → `runtime error (line 43, col 9): maximum call depth (10000) exceeded`, rc=1, and the trailing `print("still alive")` **never runs**. Go returns `exceeded max depth` and CPython raises a catchable `RecursionError`; both stay alive. Depth 2 000 parses fine, 100 000 dies — the threshold is undocumented | `std.json` is recursive-descent **in pure Chezzi**, so nesting depth in attacker-controlled input becomes recursion depth in the program: a caller that correctly matches `Ok`/`Err` still dies, which makes this a **crash/DoS on untrusted input**, not a cosmetic gap. It *is* recoverable via `recover:`, and 2026-08-17 the docs say so (`stdlib.md` §`std.json` + `examples/json_dynamic.chz`, whose "Errors come back as `Err`, never a crash" was flatly false). **Fix: a depth counter returning `Err("exceeded max depth")`**, which makes the `Result` contract **total** and needs no caller change. **SECOND SITE, found 2026-08-17 while grouping the rows and NOT in the report — `json.stringify` has the same defect and NO error channel to fix it with.** Measured: a hand-built 20 000-deep tree (`j = Json.Arr([j])` in a loop — no `parse` anywhere) → `runtime error (line 291, col 29): maximum call depth (10000) exceeded` at `std/json.chz:291`, rc=1. So a program that never touches untrusted *text* can still die on untrusted *structure*, and `stringify(j) -> str` cannot return an `Err` — closing this needs either an iterative rewrite, a `Result`-returning sibling, or a documented depth ceiling. `json.get` and `json.len` are self-recursive too (verified in source) and share the class. **A depth fix to `parse` alone leaves the serialize direction fatal, so treat W8-5 as a two-site family, not one guard.** Secondary: the frames point into stdlib source with **no filename** — `line 43, col 9` of a file the user never opened (**W8-14**) |
@@ -228,7 +232,7 @@ merged `main` binary:
 | `ch.recv()` on a closed+drained channel | **faults** `receive on a closed channel` | — | — | `v, ok := <-ch` → `0, false`, **no panic** |
 | `List.index_of(missing)` | `-1` | `list.index` **raises** `ValueError` | `iter().position` → `None` | — |
 | `str.index_of(missing)` | `-1` | `str.find` → `-1` | `str::find` → `None` | — |
-| `Reader.read_line()` non-UTF-8 | **faults** beside its `Option` | — | — | — |
+| `Reader.read_line()` non-UTF-8 | **faults** beside its `Option`, bytes retained, later lines still reachable via `read_bytes` | `readline()` raises `UnicodeDecodeError`, **loses the valid line before it**, and every later call returns `''` — a **silent EOF claim over data still in the file** (measured CPython 3.14.7, incl. with the bad bytes past a chunk boundary) | — | `bufio.Scanner` advances and never errors — but only because a Go `string` may hold arbitrary bytes | 
 
 1. **`Channel.recv()` → `Option[T]`.** `Channel` is Go-lineage and Go's close protocol is
    `v, ok := <-ch`; Chezzi faults instead. `try_recv() -> Option[T]` already exists and answers `None`
@@ -244,7 +248,18 @@ merged `main` binary:
 3. **`Reader.read_line()` → `Result[Option[str]]`.** Today `None` means EOF and a genuine failure
    (non-UTF-8, mid-read I/O error) is a **fault sitting beside** the `Option`. `docs/stdlib.md` states
    the reason outright — *"an `Option` can't carry the error"* — which is an argument for `Result`
-   wrapping the `Option`, not for a fault. Touches the whole `Reader`/`lines()` surface.
+   wrapping the `Option`, not for a fault. Touches the whole `Reader`/`lines()` surface. **Narrowed
+   2026-08-17: the CARRIER SHAPE is all that is still open — the *stickiness* half is measured and
+   settled.** A re-read after the fault re-faults on the same retained bytes rather than skipping the
+   bad line, and the ancestors say keep it: CPython raises **once** and then goes silent (`''` forever,
+   an EOF claim over data still in the file) and additionally loses the valid line *before* the bad
+   one; Go's scanner only sails past because a Go `string` may hold arbitrary bytes, which a UTF-8-
+   validated Chezzi `str` cannot represent. Chezzi is the **loudest and least lossy of the three** and
+   the only one where every byte stays recoverable. Making the fault non-sticky would move it *toward*
+   Python's silent loss — the exact inversion `correct > silent > wrong` forbids. Full measurement and
+   the "do NOT 'fix' it into a skip" note now live in `docs/stdlib.md` (§`read_line`, *"Why sticky
+   rather than skip-ahead"*), `std/io.chz`, and the header of
+   `tests/chz/stdlib/io_reader_carry_test.chz`.
 
 ## Session log — 2026-08-17 (EXTERNAL DOGFOOD PASS: 20 findings, W8-1..W8-20 — the first pass run by people who did not build this)
 
@@ -420,7 +435,7 @@ what they claim to have measured. `docs/concurrency.md`'s "safe single-thread mo
 as of this commit; the **arguments** built on it (notably the `connect`-in-`Executor` starvation case in
 `W7-59`) are **not** re-derived and remain outstanding work under W8-8.
 
-### The airlock trap that turned a real test green while it asserted nothing
+### ~~The airlock trap that turned a real test green while it asserted nothing~~ — **CLOSED 2026-08-17**
 
 Documented behaviour (`syntax.md` §11b) — a write to a captured local inside `spawn:` does not escape
 the task — but worth its own note because of the failure mode:
@@ -442,8 +457,60 @@ loop iterations=0
 The compiler **can see** a local written inside a task and read after the join. A warning there costs
 nothing and prevents the failure mode that erodes trust fastest — a green test that tested nothing.
 This is the same *correct > silent > wrong* ordering as **`parked-is-not-stuck`**, applied to a check
-rather than a verdict. Filed under W8-19's fix list rather than its own row because the airlock
-semantics are deliberate and unchanged; only the missing warning is at issue.
+rather than a verdict. Filed under W8-19's fix list rather than as its own row because the airlock
+semantics are deliberate and unchanged; only the missing warning was at issue.
+
+**CLOSED 2026-08-17 — the checker warns at the READ, and the airlock semantics are untouched.** The
+repro above, verbatim, on the release binary:
+
+```
+warning (line 5, col 10): 'results' is read here as its pre-`spawn:` value — a captured binding
+crosses the task airlock as an independent copy, so the write inside the `spawn:` block (line 4) is
+not visible after the join (carry the value out on a Channel, or use a Shared)
+iterations over 0
+rc=0
+```
+
+Non-fatal, like its W8-2 sibling; the `Shared` rewrite of the same program is **silent** and prints
+`2`. Four hooks, no dataflow pass: the taint is recorded once at the top of `check_assign`'s lvalue
+`match` (so `xs[i] = v`, `p.f = v`, `a.b[0].c = v` all resolve to the binding that actually crosses,
+and a fifth lvalue arm added later is covered without an edit), once in `infer_method_call` for an
+in-place mutator, reported at the read in `infer_ident`, and taken/restored per frame in
+`check_fn_body`.
+
+**The warn/silent split IS a measured table, not a design.** Every shape was run on the pre-rule
+binary and the rule follows what the parent actually observed after the join: reassigning a captured
+local, `xs.push`, `xs[0] = 9`, `p.x = 9`, `m["a"] = 9`, the **module-top-level** form of the repro,
+the implicit-nursery (bare `spawn:`) form, a captured module global, a spawn inside a `for` read after
+the loop, and the two parent-side read-modify-writes (`xs = xs + [2]`, `n += 1` — measured `1`, not
+`2`) all lose the write and all warn. `Shared.update`, `Channel.send`, a `defer:` block in the
+**parent**, a task-local nested `fn`, and a parent overwrite that supersedes the task's write all
+survive and stay silent. The handle-type exemption is not a second list to maintain: `mutates_receiver`
+is keyed on the receiver **type**, so `Shared`/`RwShared`/`Atomic`/`Channel`/`Executor`/`Socket`/
+`Listener`/`Writer`/`Reader` fall through — and `str.reverse` (returns `str`) vs `List.reverse`
+(returns `nil`) is exactly why the key is the type and not the name.
+
+**Two things measurement inverted while building it**, both recorded because they are what a
+re-derivation would get wrong: (1) the "locals only" line the note implied is drawn in the wrong
+place — at **module top level** the binding is scope 0, so the filed repro *verbatim* would not have
+warned; the rule uses `is_captured`, not `is_local_capture`. (2) The `defer:` claim was backwards: it
+is the **parent** `defer:` that is exempt (its write IS visible — measured `1`), while a `defer:`
+nested inside `spawn:` is on the far side of the airlock and correctly taints.
+
+**Six deliberate ceilings, all under-warns, all pinned by tests so closing one fails loudly**
+(`ponytail:` markers in `src/checker/`, numbered list in `syntax.md` §11b, same six in
+`concurrency.md`): no scope coordinate, so an untaint from a block-local shadow is permanent; a
+partial parent-side `m[k] = v` / `p.f = v` untaints silently (it *may* supersede the task's write and
+the checker cannot tell which — `parked-is-not-stuck`: decline rather than warn on noise); a body
+declared inside the task is not summarized back to its call site; per **frame**, so the taint crosses
+no `fn` boundary in either direction (a *closure* body is an expression in the parent's frame and so
+still warns — measured, and deleting that was a true positive a first cut nearly threw away); lexical
+order, not dataflow; builtin containers only, so a user struct method that mutates `self` is invisible.
+
+**Over-fire evidence, re-run on the release binary:** the `Shared` and `Channel` rewrites of the
+repro, a 3-worker pool over a closed `Channel`, an `Executor` fan-out of 10 jobs into a `Shared` — all
+silent. The whole `tests/chz` suite emits **zero** warning lines at both worker counts, including all
+13 sites of `tests/chz/spec/airlock_shared_binding_test.chz`. Nothing was silenced to get there.
 
 ### Language milestones decided out of this pass (W8-21, W8-22) — NOT dogfood findings
 
@@ -481,8 +548,9 @@ W8-14/W8-15 to reuse their `Span.file` resolver.
 
 1. **The six silent wrong answers (W8-1..W8-6).** Every one returns a plausible value; five exit 0.
    Two are one-line guards (W8-4's sort mutation, W8-3's `set` reentrancy), one is a depth counter
-   (W8-5), one is a checker rule that also **removes an asymmetry** (W8-2), and two are a doc sentence
-   plus one shared lexer/template validation (W8-1 + W8-6).
+   (W8-5), one is a checker rule (W8-2 — **done 2026-08-17**; note it did **not** remove the asymmetry
+   this list originally credited it with, and the row explains why removing it was the wrong call), and
+   two are a doc sentence plus one shared lexer/template validation (W8-1 + W8-6). **Five left.**
 2. **The scheduler: W8-8 then W8-7.** W8-8 first, because doc claims and design rationales elsewhere in
    the tree rest on measurements taken with it.
 3. ~~**The twelve doc-drift rows (W8-18).**~~ **Done in this commit** — they were the cheapest hours in
