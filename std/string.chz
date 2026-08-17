@@ -8,14 +8,11 @@
 fn is_empty(s: str) -> bool:
     return s.len() == 0
 
-# `s` repeated `n` times ("ab", 3 -> "ababab"). n <= 0 yields "".
+# `s` repeated `n` times ("ab", 3 -> "ababab"). n <= 0 yields "". A huge `n` faults recoverably
+# (`string repeat capacity overflow`) instead of exhausting memory — delegates to the native
+# `str.repeat` method, which has the same guard the O(n) concat loop here didn't.
 fn repeat(s: str, n: int) -> str:
-    out := ""
-    i := 0
-    while i < n:
-        out = out + s
-        i += 1
-    return out
+    return s.repeat(n)
 
 # `s` reversed ("hello" -> "olleh").
 fn reverse(s: str) -> str:
