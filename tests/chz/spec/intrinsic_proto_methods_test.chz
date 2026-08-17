@@ -151,9 +151,22 @@ test fn ordinary_mod_sign_unaffected():
     # overflow policy note): `%` follows the DIVIDEND's sign (Rust/C/Go), NOT Python's floored `%`
     # (which follows the divisor — measured -7 % 3 == 2, 7 % -3 == -2 in Python on this box). This task
     # must never move the sign.
+    # Literal operands pin the CONST-FOLDER, not the VM: `compiler/peephole.rs` folds `[ConstInt, Neg]`
+    # to `ConstInt(-7)` and then `[ConstInt, ConstInt, Mod]` via `checked_rem`, so these three never
+    # reach a runtime arm.
     assert 7 % 3 == 1
     assert -7 % 3 == -1
     assert 7 % -3 == 1
+    # Through LOCALS, so the three runtime `Mod` arms (`vm/arith.rs`) actually execute. Without these
+    # the whole `%` sign contract would be unpinned at runtime: swapping every `wrapping_rem` for
+    # `rem_euclid` keeps the literal asserts above green, because the folder computes them.
+    p7 := 7
+    n7 := -7
+    p3 := 3
+    n3 := -3
+    assert p7 % p3 == 1
+    assert n7 % p3 == -1
+    assert p7 % n3 == 1
 
 # ---- Hashable: the method must agree with real container hashing ----
 

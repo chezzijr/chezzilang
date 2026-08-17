@@ -4,13 +4,19 @@
 
 import std.os
 
-# `hostname()` is `Option[str]` (task-4 fix — `None` on the rare `gethostname` syscall failure, never
-# a `""` that's indistinguishable from a real hostname). The syscall doesn't fail on a healthy CI/dev
-# box, so `None` can't be forced from Chezzi; assert what IS observable here.
-test fn hostname_is_some_nonempty():
+# `hostname()` is `Option[str]`: `None` on the rare `gethostname` syscall FAILURE, where the old code
+# substituted a `""` indistinguishable from a real answer. The syscall doesn't fail on a healthy box,
+# so `None` can't be forced from Chezzi — assert the SHAPE and the `??` composition, both of which are
+# properties of the code.
+#
+# Deliberately NOT `h.len() > 0`: an empty UTS name is a legitimate `Some("")` (reproduced with
+# `unshare -Ur -u` + `sethostname("")`, where CPython's `socket.gethostname()` likewise returns `''`
+# rather than erroring). Asserting non-emptiness would gate `cargo test` on a property of the host
+# box — any container with an unset UTS name would fail the build for no code defect.
+test fn hostname_is_an_option_whose_coalesce_agrees():
     match os.hostname():
-        Some(h): assert h.len() > 0, "hostname should be a non-empty string"
-        None:    assert false, "gethostname() failed unexpectedly on this box"
+        Some(h): assert (os.hostname() ?? "<sentinel>") == h
+        None:    assert (os.hostname() ?? "<sentinel>") == "<sentinel>"
 
-test fn hostname_composes_with_coalesce():
-    assert (os.hostname() ?? "<unknown>").len() > 0
+test fn hostname_is_stable_across_calls():
+    assert (os.hostname() ?? "<sentinel>") == (os.hostname() ?? "<sentinel>")
