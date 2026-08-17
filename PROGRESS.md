@@ -17,10 +17,11 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > repro subject, `path.join`'s "double slash", and two diagnostics cosmetics), along with two wrong
 > line-cites of theirs. **W8-18 (the twelve doc-drift rows) was CLOSED in that commit**; **W8-2 (a
 > discarded `Result`/`Option`) and the un-numbered airlock-trap section closed 2026-08-17** on the
-> `feat/diagnostic-pass-w8-2-airlock` branch; **W8-14 (runtime stack traces name no file) closed
-> 2026-08-17** on `feat/span-file-and-stdlib-contracts`. **19 rows are open** (W8-1, W8-3..W8-13,
-> W8-15..W8-17, W8-19, W8-20, plus the two decided milestones W8-21/W8-22) and are the top of the
-> pre-JIT queue.
+> `feat/diagnostic-pass-w8-2-airlock` branch; **W8-14 (runtime stack traces name no file), W8-15 (both
+> `check`/`test` `--errors=json` halves), and W8-5 (`json.parse`'s and `json.stringify`'s depth aborts)
+> closed 2026-08-18** on `feat/span-file-and-stdlib-contracts`. **17 rows are open** (W8-1, W8-3, W8-4,
+> W8-6..W8-13, W8-16, W8-17, W8-19, W8-20, plus the two decided milestones W8-21/W8-22) and are the top
+> of the pre-JIT queue.
 >
 > **The shape:** semantics are in good shape (40+ CPython differentials → **one** differing byte, `NaN`
 > casing; a 7,000-op `std.collections` fuzz → zero mismatches; `defer`/`panic`/`recover` byte-identical
@@ -61,6 +62,51 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > string fixes: `chezzi init`'s banner advertised `entrypoint = "src.main"` (the manifest says
 > `"src.main:main"`) and recommended `chezzi run src/main.chz`, which is a **silent no-op, rc=0**.
 > Every code snippet added was executed before it was written down.
+>
+> **✅ Stdlib fault-contract sweep, 2026-08-18 (`feat/span-file-and-stdlib-contracts`, CLOSED) — six
+> code fixes (closing `docs/gaps.md` **W8-5** and part of **W8-17**), a 23-row second-round audit, and
+> a follow-up fix for a hang the audit itself found.** Tasks B1/B2, run concurrently with the
+> `check`/`test`/LSP file-attribution work above in the same working tree (their commit `a078a977`,
+> credited to the A5 review-fix-wave entry below, landed interleaved with these). **B1 (six fixes):**
+> (1)+(2) **`std.json` W8-5, both sites** — `parse`'s `Result` was not total (a correctly-matched
+> `Ok`/`Err` still died on deep input, `runtime error: maximum call depth exceeded`) and `stringify` had
+> no error channel to fault through cleanly at all. `Parser` gained a `depth: int` counter capped at
+> `MAX_NEST_DEPTH = 2000` (2.5× headroom below the measured death point, nesting depth 5000); past it
+> `parse` returns `Err("exceeded max depth")` — an ordinary `Result`, no VM abort — and `stringify` gets
+> a named, `recover:`-able fault (`json.stringify: exceeded max depth`) via a new `stringify_depth`
+> inner helper, replacing the same opaque VM message. Measured on the release binary,
+> `json.parse("[".repeat(100000)+"]".repeat(100000))` behind a plain `match`, no `recover:`: `err:
+> exceeded max depth` then `still alive`, rc=0 (was rc=1, `still alive` never printed). `docs/gaps.md`
+> **W8-5 CLOSED** (task C, same day). (3) **`json.len`** now faults on a scalar (`Null`/`Bool`/`Num`)
+> instead of silently returning `0`, matching CPython's `len(None)` `TypeError`. (4) **`std.string.repeat`**
+> now delegates to the capacity-guarded native `s.repeat(n)` method instead of an unbounded `.chz`
+> `while` loop — a huge `n` used to OOM the process, now `string repeat capacity overflow`, recoverable.
+> (5) **`datetime.weekday_name`** faults via `panic(...)` naming the bad value (`weekday_name: wd must
+> be 0..6 (0=Sunday), got 7`) instead of a bare `assert` that printed no operand — closes half of
+> `docs/gaps.md` **W8-13**'s complaint for this one call site (the general `assert`-prints-no-values gap
+> stays open). (6) **A missing map key's fault now names the key** (`src/vm/stmt.rs`): `key not found`
+> → `key not found: 'zz'` / `key not found: 99`, rendered through the same `stringify_nested_into`
+> helper nested containers already use. Closes `docs/gaps.md` **W8-17 sub-item (b)**. Plus a doc-only
+> fix: `math.lcm`'s doc comment claimed "never faults," true only of the private `lcm_i64` helper in
+> isolation — the exported `lcm` native fn maps its `Err` into a fault, reworded to say so. **B2
+> (second-round stdlib fault-contract audit):** measured 23 new fault rows against CPython 3.14.7 and Go
+> 1.26.6 (installed this session), added to `docs/stdlib.md`'s fault table with 19 pinned
+> `tests/chz/stdlib/fault_contracts_test.chz` tests. Found and flagged (not fixed, per that task's
+> zero-behavior-change scope) a **real latent bug**: `std.string.pad_left`'s free-function form had no
+> capacity guard and **hung** rather than faulting on a huge `width` (measured: `timeout 15` still
+> running, exit 124) — its native-method sibling already had the guard `repeat` shares. **Follow-up
+> fix, same day (`3b0d1354`):** `std.string.pad_left` now delegates to the native `s.pad_left(...)`
+> receiver method the same way `repeat` does — one line, the hand-rolled unbounded loop is gone with
+> it. Measured (release binary, `recover:`): `string.pad_left("a", i64::MAX, "x")` → `err: string pad
+> capacity overflow`, process alive, where it previously hung indefinitely. `docs/stdlib.md`'s "two
+> safety divergences" callout is now "no divergence" — both free-fn siblings fault exactly like their
+> native methods. One more follow-up (`f0a9421e`): a real-process CLI test (`tests/interactive.rs`)
+> pins `io.read_all()`'s non-UTF-8 stdin contract (`stdin: stream is not valid UTF-8`) from an actual
+> piped-bytes subprocess, not just an in-process fixture. **Net: 590 → 617 Chezzi tests** (598 after B1,
+> +19 from B2), confirmed on the release binary at the default worker count **and** `CHEZZI_THREADS=2`:
+> `617 test(s): 617 passed, 0 failed, 0 errored`. `cargo clippy --all-targets -- -D warnings` clean at
+> every stage. Full verbatim measurement tables + ancestor comparisons: session reports in the tasks'
+> own scratchpad.
 >
 > **✅ A5 review fix wave, 2026-08-18 (`feat/span-file-and-stdlib-contracts`, CLOSED) — the per-module
 > publish below (commit `d6cb3147`) shipped one Critical regression and three Important gaps; all four
