@@ -408,7 +408,7 @@ results: List[str] = []
 parallel:
     spawn:
         results = ["ok", "ok"]     # ← warning cites this line
-for r in results:                  # 'results' is read here, but its only write is inside a `spawn:` block
+for r in results:                  # 'results' is read here as its pre-`spawn:` value
     assert r == "ok"               # zero iterations before the warning existed
 ```
 
@@ -417,17 +417,24 @@ container mutators (`push`/`pop`/`insert`/`remove_at`/`extend`/`sort`/`sort_by`/
 `reverse` on a list, `remove`/`update` on a map, `add`/`remove` on a set, `push`/`pop` on a bytearray).
 It stays **silent** where the write really does survive: through a `Shared`/`RwShared`/`Atomic`/
 `AtomicInt`/`Channel`/`Executor`/`Socket`/`Listener`/`Writer`/`Reader` handle (those cross by handle),
-inside a `defer:` block (same task, no airlock), when the parent overwrites the binding before reading
-it, and when the read happens only inside the task.
+inside a `defer:` block **in the parent** (same frame, same cell, no airlock), when the parent
+overwrites the binding before reading it, and when the read happens only inside the task. A `defer:`
+block nested *inside* a `spawn:` body is on the far side of the airlock like any other task statement —
+its write is lost and it warns like one.
 
 A parent-side write only **supersedes** the lost one — and so silences the warning — when it replaces
 the *whole* binding (`xs = [...]`). An in-place mutator (`xs.push(v)`) and a compound assign (`n += 1`)
 both **read** the stale copy before writing it, so they warn at the write itself.
 
-Five deliberate ceilings, all of them under-warning rather than over-warning:
+Six deliberate ceilings, all of them under-warning rather than over-warning:
 
-1. **Per function body** — a module global written in a task in one function and read in another is not
-   flagged (it *is* flagged when both happen in the same body, or at module top level).
+1. **Per frame** — the taint does not cross a `fn` boundary in either direction. A module global written
+   in a task in one function and read in another is not flagged (it *is* flagged when both happen in
+   the same body, or at module top level); and a read inside a **nested `fn` declared in the parent** is
+   likewise silent, even of a captured local whose write really was lost. The **closure** spelling of
+   the same read *does* warn, because a closure body is an expression evaluated in the parent's own
+   frame: `g := fn() -> int: xs.len()` after the join warns and returns 0, while `fn g() -> int: return
+   xs.len()` returns 0 silently.
 2. **Lexical, not dataflow** — a read placed textually *before* the `spawn:` is not flagged even though
    the write cannot reach it either.
 3. **Builtin containers only** — a user struct method that mutates `self` (`p.bump()`) is not counted as
@@ -440,6 +447,10 @@ Five deliberate ceilings, all of them under-warning rather than over-warning:
 5. **A partial write through an index/field target** (`m[k] = v`, `p.f = v`) untaints silently, unlike a
    mutator, because the checker cannot tell whether it supersedes the task's write (`m["a"] = 2` after a
    task-side `m["a"] = 1` does; `m["b"] = 2` does not), and it declines rather than warn on noise.
+6. **A write made only through a closure or nested `fn` declared inside the task** is not tainted — the
+   nested body has its own frame, so `spawn: bump := fn(): xs.push(1)` then `bump()` leaves `xs.len()`
+   at 0 after the join with nothing reported (same for the `fn bump():` spelling). Dropping the taint
+   there is what stops the nested body reporting the *parent's* pending write as its own.
 
 **Mutating a captured local.** A **closure body is a single expression** (`fn(x): expr`), so a closure
 cannot contain a reassignment statement — `fn(): n = n + 1` is a *parse error*. Three ways to write

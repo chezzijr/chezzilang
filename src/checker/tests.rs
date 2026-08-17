@@ -421,7 +421,9 @@ fn a_task_side_write_read_after_the_join_warns() {
     // Reassignment — the filed repro.
     warns(
         "fn f():\n    results: List[str] = []\n    parallel:\n        spawn:\n            results = [\"a\"]\n    print(results.len())\nf()\n",
-        "'results' is read here, but its only write is inside a `spawn:` block (line 5)",
+        "'results' is read here as its pre-`spawn:` value — a captured binding crosses the task \
+         airlock as an independent copy, so the write inside the `spawn:` block (line 5) is not \
+         visible after the join",
     );
     // Mutator method call.
     warns(
@@ -496,7 +498,13 @@ fn a_write_through_a_handle_type_never_warns() {
 /// block deeper.
 #[test]
 fn the_airlock_warning_stays_silent_where_the_write_is_not_lost() {
-    // A `defer:` block runs in the SAME task and shares the enclosing cell (measured: visible).
+    // A `defer:` block in the PARENT runs in the parent frame and shares the enclosing cell, so its
+    // write is not a task write and taints nothing (measured: `defer: xs.push(1)` beside a later
+    // `defer: print(xs.len())` prints 1). Its task-side twin — a `defer:` nested INSIDE the `spawn:` —
+    // does warn; see `a_defer_inside_the_task_is_on_the_far_side_of_the_airlock`.
+    no_warn(
+        "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            print(1)\n    defer:\n        xs.push(1)\n    print(xs.len())\nf()\n",
+    );
     no_warn(
         "fn g(xs: List[int]):\n    fn inner():\n        defer:\n            xs.push(1)\n    inner()\n    print(xs.len())\ng([])\n",
     );
@@ -667,6 +675,45 @@ fn a_body_declared_inside_the_task_neither_reports_nor_swallows_the_parents_warn
     warns(
         "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    g := fn() -> int: xs.len()\n    print(g())\nf()\n",
         "'xs' is read here",
+    );
+}
+
+/// A `defer:` block nested INSIDE a `spawn:` body is on the far side of the airlock like any other
+/// task statement — its write really is lost, so it must taint. Measured on the release binary:
+/// `spawn: defer: xs.push(1)` leaves `xs.len() == 0` after the join, and `spawn: defer: n = 5` leaves
+/// `n == 0`. The code comment and `docs/syntax.md` both claimed the opposite (that a `defer:` never
+/// reaches the write path as a task write) — a claim written without running the program.
+#[test]
+fn a_defer_inside_the_task_is_on_the_far_side_of_the_airlock() {
+    warns(
+        "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            defer:\n                xs.push(1)\n            print(1)\n    print(xs.len())\nf()\n",
+        "'xs' is read here",
+    );
+    // The reassignment spelling, which only a `defer:`/`spawn:` statement body can hold.
+    warns(
+        "fn f():\n    n := 0\n    parallel:\n        spawn:\n            defer:\n                n = 5\n            print(1)\n    print(n)\nf()\n",
+        "'n' is read here",
+    );
+}
+
+/// The two frame-shaped ceilings, asserted as under-warns so a later change that closes either one
+/// fails here loudly rather than silently widening the rule (`widening-untested-by-its-own-suite`).
+/// Both measured on the release binary: each program prints 0 — the write IS lost — with nothing
+/// reported. Ceiling 6 (`docs/syntax.md` §11b): a write made only through a closure / nested `fn`
+/// declared inside the task. Ceiling 1: a read inside a nested `fn` declared in the PARENT, whose
+/// closure twin (asserted above) does warn.
+#[test]
+fn the_two_frame_shaped_ceilings_under_warn() {
+    // Ceiling 6 — the write never leaves the nested body's frame.
+    no_warn(
+        "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            bump := fn(): xs.push(1)\n            bump()\n    print(xs.len())\nf()\n",
+    );
+    no_warn(
+        "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            fn bump():\n                xs.push(1)\n            bump()\n    print(xs.len())\nf()\n",
+    );
+    // Ceiling 1 — the read never enters the parent-side nested `fn`'s frame.
+    no_warn(
+        "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    fn g() -> int:\n        return xs.len()\n    print(g())\nf()\n",
     );
 }
 

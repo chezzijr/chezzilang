@@ -2101,19 +2101,26 @@ impl Checker {
     /// `rg 'mem::replace\(&mut self\.in_spawn_block'` — every hit that clears to `false` is one of
     /// these; the single hit that sets `true` is the `spawn:` block itself, which must keep both.
     ///
-    /// `separate_frame` says whether the body is a `fn` body (its call site is ELSEWHERE, so it is
-    /// never the enclosing statement's continuation) or a CLOSURE body (an inline expression in the
+    /// `is_fn_body` says whether the body is a `fn` body (its call site is ELSEWHERE, so it is never
+    /// the enclosing statement's continuation) or a CLOSURE body (an inline expression in the
     /// enclosing frame). A fn body always drops the taint — that is what keeps one function's taint
     /// out of the next. A closure body drops it ONLY when declared inside the task; a closure declared
     /// in the PARENT reads the very same stale copy the parent would (measured: `g := fn() -> int:
-    /// xs.len()` after the join returns 0), so taking the taint there would trade one false warning
-    /// for one silent wrong answer.
+    /// xs.len()` after the join returns 0 AND warns), so taking the taint there would trade one false
+    /// warning for one silent wrong answer.
+    ///
+    /// ponytail: dropping the taint for a body declared INSIDE the task is the sixth ceiling — a write
+    /// made only through such a body is never tainted at all (measured: `bump := fn(): xs.push(1)` /
+    /// `fn bump(): xs.push(1)` declared in the `spawn:` and called there leaves `xs.len() == 0` after
+    /// the join, silently). It is the price of not reporting the parent's pending write inside the
+    /// nested body; under-warning, like every other ceiling. Upgrade path: propagate a call-graph
+    /// summary of each nested body's writes back to its call site instead of dropping the pair.
     pub(super) fn enter_own_frame(
         &mut self,
-        separate_frame: bool,
+        is_fn_body: bool,
     ) -> (bool, Option<HashMap<String, Span>>) {
         let was_spawn = std::mem::replace(&mut self.in_spawn_block, false);
-        let stale = (separate_frame || was_spawn).then(|| std::mem::take(&mut self.spawn_stale));
+        let stale = (is_fn_body || was_spawn).then(|| std::mem::take(&mut self.spawn_stale));
         (was_spawn, stale)
     }
     /// Restore what [`Checker::enter_own_frame`] took. 1:1 — and where it took nothing (a closure in
@@ -2133,8 +2140,12 @@ impl Checker {
     /// value), so taint it with the write's span; in the parent the same write SUPERSEDES any pending
     /// taint, so drop it. The first write inside the task wins the citation.
     ///
-    /// A `defer:` block deliberately does not reach here as a task write: it runs in the SAME task and
-    /// shares the enclosing cell (measured: visible), and `in_spawn_block` is false there.
+    /// A `defer:` block in the PARENT is not a task write: it runs in the parent frame and shares the
+    /// enclosing cell, so its write IS visible there (measured: `defer: xs.push(1)` beside a later
+    /// `defer: print(xs.len())` prints 1), and `in_spawn_block` is false. A `defer:` block nested
+    /// INSIDE a `spawn:` body is on the far side of the airlock like any other task statement — it
+    /// does reach here with `in_spawn_block` true, and taints correctly (measured: `spawn: defer:
+    /// xs.push(1)` leaves `xs.len() == 0` after the join, and the read warns).
     pub(super) fn note_task_write(&mut self, name: &str, span: Span) {
         if !self.in_spawn_block {
             self.spawn_stale.remove(name);
@@ -2155,9 +2166,14 @@ impl Checker {
             self.spawn_stale.entry(name.to_string()).or_insert(span);
         }
     }
-    /// W8-3 — a READ of `name` in the PARENT while its only write is inside a `spawn:` body: the read
-    /// sees the pre-spawn value. Reports once (the entry is consumed) at the read span, citing the
-    /// write.
+    /// W8-3 — a READ of `name` in the PARENT of a binding whose pending write is inside a `spawn:`
+    /// body: the read sees the pre-spawn value. Reports once (the entry is consumed) at the read span,
+    /// citing the write.
+    ///
+    /// The message says "read here as its pre-`spawn:` value" rather than "its ONLY write is inside a
+    /// `spawn:` block" because two callers reach it and the latter is false at one of them: the parent
+    /// read-modify-write sites (`xs.push(v)`, `n += 1`) are themselves writes, and what is wrong there
+    /// is the value they read *before* writing. The wording above is true at both.
     ///
     /// ponytail: LEXICAL order, not dataflow — a read placed textually *before* the `spawn:` is not
     /// flagged even though the write still cannot reach it. Upgrade path: a real CFG, which this
@@ -2172,9 +2188,10 @@ impl Checker {
         self.warn(
             span,
             format!(
-                "'{name}' is read here, but its only write is inside a `spawn:` block (line {}) — a \
-                 captured binding crosses the task airlock as an independent copy, so that write is \
-                 not visible after the join (carry the value out on a Channel, or use a Shared)",
+                "'{name}' is read here as its pre-`spawn:` value — a captured binding crosses the \
+                 task airlock as an independent copy, so the write inside the `spawn:` block (line \
+                 {}) is not visible after the join (carry the value out on a Channel, or use a \
+                 Shared)",
                 write.line
             ),
         );

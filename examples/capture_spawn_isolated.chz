@@ -6,9 +6,9 @@
 # isolated stale copy (a logic bug), never corruption. To share across tasks, use `Shared[T]`.
 # DO NOT "fix" this toward Go — the isolation is the memory-safety line (design §4 F1).
 #
-# THIS FILE WARNS ON PURPOSE, and that is the point of it. `print(x)` below reads a binding whose only
-# write is inside the `spawn:`, so the checker emits the W8-3 airlock-staleness warning on stderr
-# (`'x' is read here, but its only write is inside a `spawn:` block …`) — this example IS the shape the
+# THIS FILE WARNS ON PURPOSE, and that is the point of it. `print(x)` below reads the pre-`spawn:`
+# value of a binding written inside the `spawn:`, so the checker emits the W8-3 airlock-staleness
+# warning on stderr (`'x' is read here as its pre-`spawn:` value …`) — this example IS the shape the
 # warning was written to catch. The program still runs and still exits 0: the semantics are deliberate,
 # so the diagnostic is a warning, not an error. Goldens compare stdout only, so the warning does not
 # affect the expected output below. See docs/syntax.md §11b for the rule and its ceilings.

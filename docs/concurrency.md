@@ -97,10 +97,12 @@ and reading it again after the join emits a non-fatal warning naming the binding
 line (exit code unchanged — the isolation is deliberate). A `Shared`/`RwShared`/`Atomic`/`AtomicInt`/
 `Channel` write is silent: those cross by handle, so the write really is visible. So is a parent-side
 write that replaces the WHOLE binding (`xs = [...]`) — but not `xs.push(v)` or `n += 1`, which read the
-stale copy before writing it and so warn at the write. The rule has **five** deliberate ceilings, every
-one of them under-warning rather than over-warning (per function body; lexical, not dataflow; builtin
-containers only; keyed by bare name, so any fresh binding of the name clears it; and a partial `m[k] =
-v` / `p.f = v` in the parent untaints silently). Full rules and the reasoning for each:
+stale copy before writing it and so warn at the write. The rule has **six** deliberate ceilings, every
+one of them under-warning rather than over-warning (per frame, so it neither enters nor leaves a nested
+`fn`; lexical, not dataflow; builtin containers only; keyed by bare name, so any fresh binding of the
+name clears it; a partial `m[k] = v` / `p.f = v` in the parent untaints silently; and a write made only
+through a closure or nested `fn` declared *inside* the task is not tainted at all). Full rules and the
+reasoning for each:
 [`syntax.md` §capture](syntax.md).
 
 **The copy is taken FRESH, per task, at its `spawn` — at every depth.** A task sees the values current
