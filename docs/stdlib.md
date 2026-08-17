@@ -234,7 +234,7 @@ throwaway, not the box, and is silently lost. Mutate via `update` (or `set` a wh
 tasks — this is why it exists over a `get`-then-`set`, which races). **Reentrancy limit:** `f` must not
 touch the **same** box. Mutate a *different* box, or restructure so the nested step runs after `update`
 returns. What actually happens if you do is **three different things, and only one of them tells you** —
-measured, at every worker count (`docs/gaps.md` **W8-3**):
+measured at the default worker count and again at `CHEZZI_THREADS=2`, identical both times (`docs/gaps.md` **W8-3**):
 
 | from inside `s.update(f)` / `rw.write(f)` | measured |
 |---|---|
@@ -859,8 +859,11 @@ how often:
   `re.sub(pattern, repl, subject)`. Both are `str`, so swapping them type-checks.
 - **No lookaround and no backreferences** (RE2 has linear-time guarantees precisely because it drops
   them): `r"(?<=a)b"` and `r"(a)\1"` each come back `Err("regex parse error: … not supported")`.
-  Rewrite with an explicit group + `Match.groups`. The payoff is no ReDoS — `(a+)+$` over 30 `a`s is
-  ~0.01 s here vs ~24 s in CPython `re`.
+  Rewrite with an explicit group + `Match.groups`. **The payoff is no ReDoS**, and it is large: the
+  classic catastrophic-backtracking case needs a subject that *fails* to match, so `"a" * 30 + "b"`
+  against `r"(a+)+$"` measures **0.000077 s** here and **86.42 s** in CPython `re` — a factor of ~10^6.
+  (Against exactly `"a" * 30`, with no trailing `b`, both are instant: the pattern matches and never
+  backtracks. Test ReDoS with a non-matching tail or you will measure nothing.)
 - **`split` drops capture groups, Python keeps them**: `split(r"(,)", "a,b")` → `Ok(['a', 'b'])` where
   `re.split` gives `['a', ',', 'b']`. Named groups `(?<name>…)` may be *written* but there is no
   read-by-name accessor — index `Match.groups` positionally.

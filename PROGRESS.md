@@ -9,8 +9,13 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 > **📋 EXTERNAL DOGFOOD PASS filed, 2026-08-17 — `docs/gaps.md` W8-1..W8-20, and the table is no longer
 > empty.** Ten developers new to Chezzi, one area each, **343 Chezzi programs vs 45 reference programs**
-> (Python/Go/Rust), nothing taken on the docs' word. All twenty findings **re-reproduced on Linux at
-> `c197d128`** before filing. Only **W8-18 (the twelve doc-drift rows) is CLOSED — fixed in this commit**;
+> (Python/Go/Rust), nothing taken on the docs' word — their counts and darwin timings, not re-run here.
+> **Nineteen of the twenty were re-reproduced in-repo on Linux at `c197d128` before filing**; **W8-11**
+> rests on the repo owner's macOS confirmation (this is a Linux box — only its *code* facts were verified
+> here), and the strong-areas evidence, real-app timings and LOC counts stay attributed to the reporters.
+> **Three of the report's claims did NOT reproduce and are corrected in place** in `gaps.md` (the ReDoS
+> repro subject, `path.join`'s "double slash", and two diagnostics cosmetics), along with two wrong
+> line-cites of theirs. Only **W8-18 (the twelve doc-drift rows) is CLOSED — fixed in this commit**;
 > W8-1..W8-17, W8-19, W8-20 are **open** and are now the top of the pre-JIT queue.
 >
 > **The shape:** semantics are in good shape (40+ CPython differentials → **one** differing byte, `NaN`
