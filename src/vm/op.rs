@@ -619,6 +619,10 @@ pub struct ModuleProto {
     /// run driver pre-sizes the module's `slots` vector to this length and builds its name→slot
     /// index from it. Empty for native modules (their members are populated by name at run time).
     pub global_slots: Vec<String>,
+    /// The module's [`crate::lexer::Span::file`] id (`1..n`, never 0 for a graph-compiled module),
+    /// copied from `resolver::LoadedModule::file`. This is what lets a runtime diagnostic map a
+    /// `Span` back to the file it came from. `0` for the synthetic single-module compile path.
+    pub file: u32,
 }
 
 /// The whole compiled program.
@@ -739,6 +743,22 @@ impl Program {
     /// Map a module's stable id to its index in `modules` (for resolving import targets).
     pub fn module_index(&self, id: &ModuleId) -> Option<usize> {
         self.modules.iter().position(|m| &m.id == id)
+    }
+
+    /// The source path a [`crate::lexer::Span::file`] id came from, or `None` for `0`
+    /// (synthesized / standalone / not found).
+    ///
+    /// `file` ids are assigned in DFS pre-order (the resolver's one lex seam) while `modules` is
+    /// deps-first post-order — the two orders disagree in any graph with more than one import — so
+    /// this MUST scan rather than index by `file - 1`.
+    pub fn file_path(&self, file: u32) -> Option<&std::path::Path> {
+        if file == 0 {
+            return None;
+        }
+        self.modules
+            .iter()
+            .find(|m| m.file == file)
+            .map(|m| m.id.0.as_path())
     }
 
     /// M19 memory-layout lever — (re)build `struct_names` (the dense `tid`→identity-key reverse index)

@@ -141,6 +141,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
             imports: lm.imports.clone(),
             native: lm.native,
             global_slots,
+            file: lm.file,
         });
     }
     c.program.field_ic_sites = c.field_ic_next;
@@ -205,6 +206,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
         imports: Vec::new(),
         native: None,
         global_slots,
+        file: 0,
     });
     c.program.field_ic_sites = c.field_ic_next;
     c.program.method_ic_sites = c.method_ic_next;
@@ -7932,5 +7934,126 @@ mod carrier_lowering_tests {
             "struct I:\n    c: int\nstruct O:\n    b: Option[I]\nfn f() -> O!str:\n    return Ok(O(Some(I(7))))\nfn g() -> Result[Option[int], str]:\n    return Ok(f()? .b?.c)\ng()\n",
         );
         assert_eq!(ops(&prog), ops(&spaced));
+    }
+}
+
+/// A1 — `ModuleProto` carries the module's [`crate::lexer::Span::file`] id, so a compiled `Program`
+/// can map a span back to the file it came from (`Program::file_path`). Nothing observable changes
+/// yet; these are the plumbing tests later tasks build on.
+#[cfg(test)]
+mod file_id_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    struct TmpDir(PathBuf);
+    impl TmpDir {
+        fn new() -> Self {
+            let n = TMP_COUNTER.fetch_add(1, Ordering::SeqCst);
+            let dir = std::env::temp_dir().join(format!("chezzi_fid_{}_{}", std::process::id(), n));
+            std::fs::create_dir_all(&dir).unwrap();
+            TmpDir(dir)
+        }
+        fn write(&self, rel: &str, contents: &str) -> PathBuf {
+            let p = self.0.join(rel);
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&p, contents).unwrap();
+            p
+        }
+    }
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Entry imports TWO modules (`a`, `b`) that each import a further module (`c`, `d`) — so the
+    /// resolver's DFS pre-order `file` id assignment (parent parses before its imports recurse,
+    /// `resolver::mod.rs`) genuinely disagrees with `graph.modules`' deps-first post-order (a child
+    /// is PUSHED to the order vec only after it returns, i.e. before its importer). A `modules[file -
+    /// 1]` indexing bug would silently pick the wrong module here.
+    fn build_diamond() -> crate::resolver::ModuleGraph {
+        let t = TmpDir::new();
+        t.write("chezzi.toml", "[project]\nname = \"g\"\n");
+        t.write("c.chz", "fn fc() -> int:\n    return 1\n");
+        t.write(
+            "a.chz",
+            "import c\nfn fa() -> int:\n    return c.fc() + 1\n",
+        );
+        t.write("d.chz", "fn fd() -> int:\n    return 1\n");
+        t.write(
+            "b.chz",
+            "import d\nfn fb() -> int:\n    return d.fd() + 1\n",
+        );
+        let entry = t.write(
+            "main.chz",
+            "import a\nimport b\nfn main():\n    print(a.fa() + b.fb())\nmain()\n",
+        );
+        // `t` (and its files) must outlive the graph build, but the graph itself holds no file
+        // handles — dropping `t` after `build_graph` returns is fine, same as the resolver's own
+        // fixture tests.
+        crate::resolver::build_graph(&entry).expect("graph should build")
+    }
+
+    #[test]
+    fn module_protos_carry_their_graph_file_ids() {
+        let graph = build_diamond();
+        assert!(graph.modules.len() >= 5, "expected the 5 written modules");
+        let program = compile_graph(&graph).expect("compile");
+        assert_eq!(program.modules.len(), graph.modules.len());
+
+        let mut seen = std::collections::HashSet::new();
+        for (i, lm) in graph.modules.iter().enumerate() {
+            assert_eq!(
+                program.modules[i].file,
+                lm.file,
+                "module {} (index {i}) lost its graph file id",
+                lm.label()
+            );
+            assert_ne!(lm.file, 0, "module {} got sentinel file id 0", lm.label());
+            assert!(
+                seen.insert(lm.file),
+                "file id {} is not unique across modules",
+                lm.file
+            );
+        }
+    }
+
+    #[test]
+    fn file_path_resolves_by_id_not_by_index() {
+        let graph = build_diamond();
+        let program = compile_graph(&graph).expect("compile");
+
+        for lm in &graph.modules {
+            assert_eq!(
+                program.file_path(lm.file),
+                Some(lm.id.0.as_path()),
+                "file_path({}) should resolve to {}'s path — a `modules[file - 1]` index bug \
+                 returns some OTHER module's path here (pre-order file ids vs. post-order modules)",
+                lm.file,
+                lm.label()
+            );
+        }
+        assert_eq!(program.file_path(0), None, "file id 0 must never resolve");
+        assert_eq!(
+            program.file_path(99999),
+            None,
+            "an unknown file id must resolve to None, not panic"
+        );
+    }
+
+    #[test]
+    fn single_module_compile_has_no_file_id() {
+        let tokens = crate::lexer::tokenize("fn main():\n    print(1)\nmain()\n").expect("lex");
+        let module = crate::parser::parse(tokens).expect("parse");
+        let program = compile_module_standalone(&module).expect("compile");
+
+        assert_eq!(program.modules.len(), 1);
+        assert_eq!(program.modules[0].file, 0);
+        assert_eq!(program.file_path(0), None);
     }
 }
