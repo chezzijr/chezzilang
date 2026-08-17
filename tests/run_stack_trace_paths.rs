@@ -120,7 +120,15 @@ fn three_module_fault_names_each_frame_distinct_file() {
 }
 
 /// Case 3 — a fault raised from `std.flag` (`std/flag.chz`, an unregistered `get_str` flag) names
-/// `flag.chz`, never a bare `line 132` that would read as the user's own file.
+/// `flag.chz`, never a bare `line 132` that would read as the user's own file. Beyond just naming the
+/// file, this pins the *form* (F4): `render_span` relativizes a path under the process cwd and leaves
+/// one outside it absolute (`src/lexer/mod.rs::display_path`) — that is a deliberate, ancestor-matched
+/// design (CPython/Go both print absolute stdlib paths), not something to weaken. A test that only
+/// checks `contains("flag.chz:")` passes for a relative path, an absolute path, or a bare filename
+/// alike, so it is blind to a regression that flips either direction. This test therefore checks BOTH
+/// halves in one run: the std-module frame (outside the temp-dir cwd, under the compiled-in
+/// `std_root()`) must render absolute, and the project-local call-site frame (`main.chz`, under the
+/// cwd) must render relative.
 #[test]
 fn std_module_fault_names_the_std_file_not_a_bare_line() {
     let t = TmpDir::new();
@@ -131,11 +139,42 @@ fn std_module_fault_names_the_std_file_not_a_bare_line() {
     let (_stdout, stderr, ok) = run(&t.0, &["run", "main.chz"]);
     assert!(!ok, "the program must fault");
     assert!(
-        stderr.contains("flag.chz:"),
-        "headline must name flag.chz, got:\n{stderr}"
-    );
-    assert!(
         !stderr.contains("(line 132,"),
         "must not regress to a bare, unattributed line number, got:\n{stderr}"
+    );
+
+    // Headline coordinate: `runtime error (<path>:<line>:<col>): <message>` — the std module's own
+    // fault site. `t.0` (the temp-dir cwd) is never under `std_root()`, so this MUST render absolute.
+    let prefix = "runtime error (";
+    let after_prefix = stderr
+        .strip_prefix(prefix)
+        .unwrap_or_else(|| panic!("stderr must start with {prefix:?}, got:\n{stderr}"));
+    let path_end = after_prefix
+        .find(':')
+        .unwrap_or_else(|| panic!("no ':' after the headline path in:\n{stderr}"));
+    let std_path = &after_prefix[..path_end];
+    assert!(
+        std_path.starts_with('/'),
+        "a std-module fault outside the cwd must render an ABSOLUTE path, got {std_path:?} in:\n{stderr}"
+    );
+    assert!(
+        std_path.ends_with("flag.chz"),
+        "headline must name flag.chz, got {std_path:?} in:\n{stderr}"
+    );
+
+    // Frame coordinate: `at get_str (called at <path>:<line>:<col>)` — the call site, in the user's
+    // own `main.chz`, which IS under the cwd, so it MUST render relative (no leading '/').
+    let frame_prefix = "called at ";
+    let frame_idx = stderr
+        .find(frame_prefix)
+        .unwrap_or_else(|| panic!("no {frame_prefix:?} frame in:\n{stderr}"));
+    let after_frame = &stderr[frame_idx + frame_prefix.len()..];
+    let frame_path_end = after_frame
+        .find(':')
+        .unwrap_or_else(|| panic!("no ':' after the frame path in:\n{stderr}"));
+    let frame_path = &after_frame[..frame_path_end];
+    assert_eq!(
+        frame_path, "main.chz",
+        "a project-local call site under the cwd must render RELATIVE, got {frame_path:?} in:\n{stderr}"
     );
 }
