@@ -4237,7 +4237,8 @@ watchdog thread is the next seam. **Selection + output ergonomics SHIPPED (2026-
 failure), `--fail-fast` (stop at first non-pass, deterministic order), `--show-output` (surface a
 FAILING test's stdout byte-exactly, default discard; SHIPPED byte-exact 2026-08-16, matching
 `chezzi run`/`go test` — see `W6-9r` item 4), `--errors=json` (machine output mirroring `check`/`run`:
-`{tests:[{name,file,line?,status,duration_ms}],totals}`, suppresses human lines), `-q`/`-v` verbosity
+`{tests:[{name,file,line?,status,message?,duration_ms}],totals}`, suppresses human lines — `message`
+added 2026-08-18, the failure text on every non-`pass` verdict), `-q`/`-v` verbosity
 (dots vs per-line vs per-line+timing), `--color=auto|always|never` (isatty-gated tag color), and per-
 test/total timing (`-v`/json ONLY — never in default/quiet, so the byte-identity gate is untouched).
 All opt-in; **default (no-flag) output is byte-identical to before**. Still missing:
@@ -4270,7 +4271,8 @@ fixed. Revisit only if FFI-callback tests become common.
 
 ### T6. CI-friendliness — **not** a gap
 `--errors=json` works for `check`, `run`, AND `test` (test-runner machine output SHIPPED 2026-07-24,
-§3b #7 — per-test `{name,file,line?,status,duration_ms}` + totals); exit codes are correct and
+§3b #7 — per-test `{name,file,line?,status,message?,duration_ms}` + totals; `message` added
+2026-08-18); exit codes are correct and
 deliberate (type error → 1, fault → 1, `os.exit(n)` honored, stdout write failure → 1). No gap.
 
 ## Type-system / construction (adjacent, tracked in `docs/future.md §15`)
