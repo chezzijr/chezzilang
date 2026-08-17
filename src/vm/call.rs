@@ -2122,9 +2122,11 @@ impl Vm {
             return Err(e);
         }
         // Wrap while the snapshot is still rooted. Belt-and-braces, NOT load-bearing today:
-        // collection only runs at `run_until`'s instruction boundaries, never inside `Heap::alloc`,
-        // and the scan's last re-entry is already over. Kept because a shrinking comparator can leave
-        // `result` reachable ONLY through the snapshot, so if anything between here and the caller's
+        // `Heap::alloc` never collects, and the only collection boundary THIS PATH can reach is
+        // `run_until`'s instruction boundary — the scan's last re-entry is already over, and the
+        // other collection site (`Vm::sample_mem_cap`, once per task start, `sched.rs`) runs before
+        // this method call, not during it. Kept because a shrinking comparator can leave `result`
+        // reachable ONLY through the snapshot, so if anything between here and the caller's
         // `push` ever re-enters the VM, this is the order that is already correct.
         let some = self.alloc_enum("Option", "Some", vec![result]);
         self.pop(); // unroot snapshot

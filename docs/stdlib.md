@@ -668,7 +668,10 @@ bytes**, so a filename that is not valid UTF-8 round-trips (`fs.exists(fs.list_d
 `glob(pattern) -> Result[List[Path]]` (`*`/`?` in the final path component; matched over **raw
 bytes**, so an ASCII pattern still matches a non-UTF-8 filename — and `?` counts one **Unicode
 scalar** wherever the name is valid UTF-8, like Go `filepath.Match` / Python `fnmatch`, falling back
-to one byte only for a byte that begins no valid sequence) ·
+to one byte only for a byte that begins no valid sequence. `*` **matches dotfiles** — Go
+`filepath.Glob` semantics, measured: `gt/*` over a dir containing `.hidden` + `visible.txt` returns
+both. This differs from Python's `glob.glob`, which excludes dotfile matches from a bare `*` unless
+the pattern itself starts with a dot) ·
 `canonicalize(p) -> Result[Path]` — resolve symlinks + `.`/`..` against the **real filesystem** to
 an absolute real path. Unlike the purely lexical `path.normalize` (no I/O), this hits the filesystem
 and so **requires the path to exist** (`Err` on a nonexistent path) ·
@@ -1435,8 +1438,10 @@ Register: `str_flag(name, default, help)` · `bool_flag(name, default, help)` ·
 Result[List[str]]` — `Ok(positionals)` on success (folds Go's `Parse()` + `Args()` into one), a clean
 `Err` on an unknown flag / missing value / non-int (**never faults** on bad user input). Read back:
 `get_str(name) -> str` · `get_bool(name) -> bool` · `get_int(name) -> int` (the registered default
-until parse overwrites it; **panics** on an *unregistered* name — a Go-parity programmer error, not a
-user-input path) · `positionals() -> List[str]` · `usage() -> str` (Go `PrintDefaults`-style, one line
+until parse overwrites it; **panics** on an *unregistered* name — a programmer error, not a
+user-input path; closer to Python argparse's `AttributeError` on an unregistered destination than to
+Go, whose `flag.Lookup` returns `nil` for an unknown name and never panics — measured, Go 1.26) ·
+`positionals() -> List[str]` · `usage() -> str` (Go `PrintDefaults`-style, one line
 per flag in registration order).
 
 Recognised syntax (Go conventions): `--name value` / `--name=value` / `--verbose` (bool presence) /
@@ -1520,10 +1525,11 @@ enum Json:
 `as_str(j) -> Option[str]` · `as_object(j) -> Option[Map[str, Json]]` · `as_array(j) -> Option[List[Json]]` ·
 `get(j, key) -> Option[Json]` · `at(j, i) -> Option[Json]` · `len(j) -> int`.
 
-Every JSON number is stored as an f64, so `as_int` and `decode[int]` are **total** at the float→int
-boundary — neither ever saturates silently to a wildly-wrong value nor faults: a number clearly
-outside the `int` (i64) range (e.g. `1e30`, `18446744073709551615`) or non-finite yields `None` from
-`as_int` and an `Err` from `decode[int]`, and `i64::MAX` / `i64::MIN` still round-trip. **f64-model
+Every JSON number is stored as an f64, so `as_int` and `json.decode[int]` are **total** at the
+float→int boundary — neither ever saturates silently to a wildly-wrong value nor faults: a number
+clearly outside the `int` (i64) range (e.g. `1e30`, `18446744073709551615`) or non-finite yields
+`None` from `as_int` and an `Err` from `json.decode[int]`, and `i64::MAX` / `i64::MIN` still
+round-trip. **f64-model
 caveat:** because integers are held as f64 (53-bit mantissa), values within ~one ULP of `±2^63` are
 indistinguishable from the boundary — so an input that rounds to exactly `±2^63` (this includes
 `i64::MAX`/`i64::MIN` themselves and their just-out-of-range neighbours like `9223372036854775808`)
@@ -1550,9 +1556,10 @@ inside a string literal (`Err("invalid control character in string")`) and a lea
 (`01`, `007`, `-01`) with `Err("invalid number: leading zero")` — a `0` must be a lone `0`/`-0` or
 followed by `.`/`e`, matching Python's `json.loads`. (`0.5`, `0e1`, `10` stay valid.)
 
-For a known shape, `decode[T](s) -> Result[T]` (a generic builtin) deserializes straight into a
-struct / `Map[str, V]` / `List[T]` / scalar: `Option` fields accept null-or-absent, extra keys are
-ignored, and recursive/generic struct targets are rejected (use the `Json` enum for those).
+For a known shape, `json.decode[T](s) -> Result[T]` (a `std.json` member, the one type-argument
+method-call form — not a global builtin) deserializes straight into a struct / `Map[str, V]` /
+`List[T]` / scalar: `Option` fields accept null-or-absent, extra keys are ignored, and
+recursive/generic struct targets are rejected (use the `Json` enum for those).
 
 A JSON *literal in Chezzi source* clashes with string interpolation, so use a raw string
 (`r"""{"k": 1}"""`, verbatim — preferred) or double the braces (`"{{ }}"`); a bare `{…}` in a normal

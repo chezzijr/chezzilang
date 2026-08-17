@@ -932,8 +932,10 @@ fn deep_clone_all_rebuilds_at_exact_capacity() {
 /// re-entry's collections, and the returned `Some` then carries an element the source no longer
 /// contains. **Verified to discriminate**: swapping either helper's `push(<snapshot>)` for a
 /// non-rooting push turns this into *dangling GcRef (object was collected while still reachable)*.
-/// (The `Some` allocation itself cannot collect — `Heap::alloc` never GCs; collection happens only
-/// at `run_until`'s instruction boundaries, which is why the wrap-before-unroot order in
+/// (The `Some` allocation itself cannot collect — `Heap::alloc` never GCs; the only collection
+/// boundary THIS PATH can reach is `run_until`'s instruction boundary (the other collection site,
+/// `Vm::sample_mem_cap`, runs once per task start — before a method call runs, not during it, so
+/// it is unreachable from here), which is why the wrap-before-unroot order in
 /// `list_reduce_extreme`/`list_min_max_by` is belt-and-braces rather than load-bearing.)
 #[test]
 fn min_max_some_payload_survives_gc() {

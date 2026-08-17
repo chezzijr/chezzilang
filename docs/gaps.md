@@ -27,7 +27,7 @@ fix applied to SOME arms of an N-way set"** — is the highest-yield remaining l
 `defer` was bypassed) and `W7-4` (two sibling closures over one captured local got separate cells across
 the airlock) were both instances of it and are **fixed** — session logs at the end of this file.
 
-## OPEN ITEMS — the whole backlog at a glance (updated 2026-08-16)
+## TABLE — the whole backlog at a glance, ZERO OPEN ROWS (updated 2026-08-17)
 
 > **Reading note (2026-08-16).** The cooperative `--serial` engine was **removed** on this date
 > (`docs/future.md` §2b). Session logs below that measure it, compare `serial` against `M:N`, or call it
@@ -35,7 +35,10 @@ the airlock) were both instances of it and are **fixed** — session logs at the
 > point of this file. Nothing below still describes a flag you can pass. Two rows that existed only
 > because of that engine (**N10**, **N6g**) are struck; what closed each is recorded in its own row.
 
-Everything still open, roughly by severity. **No memory-unsafety is left in the ledger** — W6-8, the
+Every row below is now struck through — the table has **zero open items** (the last one, `min`/`max`
+→ `Option`, closed 2026-08-17). Kept, not deleted, as a chronological record of what was found + how
+it was fixed; a new finding gets a new row, not a resurrected old one. **No memory-unsafety is left
+in the ledger** — W6-8, the
 last one, was fixed 2026-07-27 — and as of 2026-08-04 **nothing left in the ledger aborts the host
 process**: W7-11, the last one, was fixed that day (`:4771`). Anything NOT listed here is either fixed or a safe-direction
 observation. **Wave 7 batch A (2026-07-28) adds no row** — its three host-boundary findings
@@ -1946,7 +1949,11 @@ Regression: `parity_tests::spawn_task_first_global_access_is_write_parity`.
   `NativeRet::Struct` producer names a registered key), and `rebuild_struct_names` assumes no duplicate
   `structs` key (`src/vm/op.rs:676-680` — an overwriting insert would silently leave the type name `""`).
   Traps for any future native that emits an unregistered struct name.
-- Shift error says `shift amount 64 out of range (0..64)` — 64 IS rejected, so the printed range is wrong.
+- ~~Shift error says `shift amount 64 out of range (0..64)` — 64 IS rejected, so the printed range is wrong.~~
+  **RESOLVED 2026-08-17 — not a defect.** `0..64` is end-exclusive, so it correctly describes a range
+  that rejects `64`; this matches Chezzi's own `range()`, which is end-exclusive
+  (`docs/stdlib.md:22`: "End-exclusive list of ints"), so the notation is internally consistent for a
+  Chezzi reader. `src/vm/arith.rs:906` is unchanged.
 - ~~`i64::MIN % -1` faults `integer overflow in Mod`; Go and Python both give a representable `0`.~~
   **FIXED 2026-08-17.** Measured Go 1.26 `min % -1` → `0`; Python 3 `(-9223372036854775807-1) % -1` →
   `0`. Rust's `checked_rem` returns `None` at `MIN % -1` only to dodge the x86 `IDIV` hardware trap, not
@@ -1959,9 +1966,15 @@ Regression: `parity_tests::spawn_task_first_global_access_is_write_parity`.
   `i64`), and `% 0` keeps `modulo by zero`. Tests:
   `tests/chz/spec/intrinsic_proto_methods_test.chz` (general arms + Div/zero-fault controls + sign
   pins) and `tests/chz/spec/newtype_test.chz` (the numeric-newtype arm).
-- `fs.glob("d/*")` includes dotfiles, Python's `glob` excludes them — undocumented either way.
-- `docs/stdlib.md` §`std.json` writes `decode[T](s)` as "a generic builtin", but the bare form is rejected
-  (`'decode' takes no type arguments`) — the real spelling is `json.decode[T](s)`.
+- ~~`fs.glob("d/*")` includes dotfiles, Python's `glob` excludes them — undocumented either way.~~
+  **RESOLVED 2026-08-17 — documented.** `docs/stdlib.md`'s `fs.glob` entry now states the dotfile
+  behaviour (matches Go `filepath.Glob`, diverges from Python) and cites the measured three-way
+  comparison. No code changed.
+- ~~`docs/stdlib.md` §`std.json` writes `decode[T](s)` as "a generic builtin", but the bare form is rejected
+  (`'decode' takes no type arguments`) — the real spelling is `json.decode[T](s)`.~~
+  **RESOLVED 2026-08-17 — documented.** `docs/stdlib.md`'s `std.json` section now spells it
+  `json.decode[T](s)` throughout and describes it as a `std.json` member (the one type-argument
+  method-call form), not a generic builtin. No code changed.
 - ~~`List[<numeric newtype>].sum()` is rejected at check while `.sort()`/`.min()`/`.max()` on the same type
   work — a post-fix asymmetry vs the 2026-07-23 numeric-newtype gap. Safe direction.~~
   **FIXED 2026-08-17.** `sum` now returns the NEWTYPE. Measured ancestors on `[Cents(3),Cents(1),Cents(2)]`:
