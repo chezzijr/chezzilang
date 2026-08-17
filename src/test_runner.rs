@@ -128,6 +128,17 @@ fn verdict_line(v: &Verdict) -> Option<usize> {
     }
 }
 
+/// The failure text for a verdict, if it has one (every non-`Pass` variant carries a `msg`).
+fn verdict_msg(v: &Verdict) -> Option<&str> {
+    match v {
+        Verdict::Pass => None,
+        Verdict::Fail { msg, .. }
+        | Verdict::Error { msg, .. }
+        | Verdict::OverMemory { msg }
+        | Verdict::TimedOut { msg } => Some(msg),
+    }
+}
+
 /// Wrap `s` in an ANSI color when `color` is on, else return it untouched. `code`: 32 green, 31 red,
 /// 33 yellow. Only ever called with `color == true` from a resolved-tty CLI, so a captured test
 /// harness (color defaults false) never emits an escape.
@@ -496,7 +507,7 @@ fn render_line(report: &mut Vec<u8>, o: &Outcome, opts: &RunOpts) {
     }
 }
 
-/// Build the `--errors=json` document: `{"tests":[{name,file,line?,status,duration_ms},…],"totals":{…}}`.
+/// Build the `--errors=json` document: `{"tests":[{name,file,line?,status,message?,duration_ms},…],"totals":{…}}`.
 /// Diverges from `check`/`run`'s bare array (it needs `totals`), but reuses the flag name + the
 /// suppress-all-human-output behavior for CLI consistency.
 #[allow(clippy::too_many_arguments)]
@@ -525,10 +536,13 @@ fn render_json(
             s.push_str(&format!("\"line\":{line},"));
         }
         s.push_str(&format!(
-            "\"status\":{},\"duration_ms\":{}}}",
-            json_string(verdict_status(&o.verdict)),
-            o.duration.as_millis()
+            "\"status\":{}",
+            json_string(verdict_status(&o.verdict))
         ));
+        if let Some(msg) = verdict_msg(&o.verdict) {
+            s.push_str(&format!(",\"message\":{}", json_string(msg)));
+        }
+        s.push_str(&format!(",\"duration_ms\":{}}}", o.duration.as_millis()));
     }
     s.push_str("],\"totals\":{");
     s.push_str(&format!(
@@ -3086,6 +3100,16 @@ struct Suite:
         )
     }
 
+    /// Like [`three_test_file`] plus a fourth test that raises a non-`assert` fault (`panic`), so a
+    /// caller can exercise the `error` verdict too. Appending after `gamma` keeps
+    /// `fail_fast_stops_at_first_failure` (which stops at `beta`, the second test) unaffected.
+    fn four_test_file(d: &TmpDir) -> PathBuf {
+        d.write(
+            "abcd_test.chz",
+            "test fn alpha():\n    assert true\ntest fn beta():\n    assert false, \"boom\"\ntest fn gamma():\n    assert true\ntest fn delta():\n    panic(\"kaboom\")\n",
+        )
+    }
+
     fn opts_with(f: impl FnOnce(&mut RunOpts)) -> RunOpts {
         let mut o = RunOpts::default();
         f(&mut o);
@@ -3236,7 +3260,7 @@ struct Suite:
     #[test]
     fn json_emits_parseable_per_test_and_totals() {
         let d = TmpDir::new();
-        let f = three_test_file(&d);
+        let f = four_test_file(&d);
         let report = run_tests_opts(&f, opts_with(|o| o.json = true));
         let t = &report.text;
         assert!(
@@ -3245,12 +3269,14 @@ struct Suite:
         );
         assert!(t.contains("\"status\":\"pass\""), "got:\n{t}");
         assert!(t.contains("\"status\":\"fail\""), "got:\n{t}");
+        assert!(t.contains("\"status\":\"error\""), "got:\n{t}");
         assert!(t.contains("\"duration_ms\":"), "got:\n{t}");
         assert!(t.contains("\"totals\""), "got:\n{t}");
         assert!(
             t.contains("\"failed\":1"),
             "totals must count the fail; got:\n{t}"
         );
+        assert!(t.contains("\"errored\":1"), "got:\n{t}");
         assert!(t.contains("\"passed\":2"), "got:\n{t}");
         // No human PASS/FAIL lines when json (like `check --errors=json`).
         assert!(
@@ -3264,6 +3290,68 @@ struct Suite:
         assert!(
             t.contains("\"line\":"),
             "a fail entry must carry its line; got:\n{t}"
+        );
+        // The fail entry (beta) carries its assertion text as "message" (the runtime prefixes the
+        // custom message with "assertion failed: ", per `vm/exec.rs`'s `assert` handling).
+        assert!(
+            t.contains("\"message\":\"assertion failed: boom\""),
+            "a fail entry must carry the assertion text; got:\n{t}"
+        );
+        // The error entry (delta, a `panic`) also carries "message".
+        assert!(
+            t.contains("\"message\":\"kaboom\""),
+            "an error entry must carry its fault text; got:\n{t}"
+        );
+        // Negative control: a PASS entry must carry NO "message" key at all — an implementation
+        // that unconditionally emits "message":"" would still pass every assertion above.
+        let alpha_obj_start = t.find("\"name\":\"alpha\"").expect("alpha entry present");
+        let alpha_obj_end = t[alpha_obj_start..]
+            .find('}')
+            .map(|i| alpha_obj_start + i)
+            .expect("alpha entry closes");
+        assert!(
+            !t[alpha_obj_start..alpha_obj_end].contains("\"message\""),
+            "a pass entry must carry no message key; got:\n{}",
+            &t[alpha_obj_start..alpha_obj_end]
+        );
+        // Brace-balance sanity check that the object is still well-formed with the new key added
+        // (this crate has no JSON parser dependency to parse the document with; the `starts_with('{')`
+        // assertion above plus this balance check is the existing "it still parses" proof style).
+        let opens = t.matches('{').count();
+        let closes = t.matches('}').count();
+        assert_eq!(
+            opens, closes,
+            "unbalanced braces after adding message; got:\n{t}"
+        );
+    }
+
+    /// `verdict_msg` is the single accessor `render_json` reads for the `message` key — cover all
+    /// five [`Verdict`] variants directly so `OverMemory`/`TimedOut` (no dedicated json fixture here,
+    /// per the task brief) are still proven correct by construction.
+    #[test]
+    fn verdict_msg_covers_all_variants() {
+        assert_eq!(verdict_msg(&Verdict::Pass), None);
+        assert_eq!(
+            verdict_msg(&Verdict::Fail {
+                line: 1,
+                msg: "boom".into()
+            }),
+            Some("boom")
+        );
+        assert_eq!(
+            verdict_msg(&Verdict::Error {
+                line: 1,
+                msg: "kaboom".into()
+            }),
+            Some("kaboom")
+        );
+        assert_eq!(
+            verdict_msg(&Verdict::OverMemory { msg: "oom".into() }),
+            Some("oom")
+        );
+        assert_eq!(
+            verdict_msg(&Verdict::TimedOut { msg: "slow".into() }),
+            Some("slow")
         );
     }
 

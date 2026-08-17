@@ -48,7 +48,7 @@ FLAGS:
                      file's free tests, then each suite's methods, all in declaration order).
     --show-output    Surface a FAILING test's captured stdout byte-exactly, indented under its line
                      (default: discard).
-    --errors=json    Emit ONLY a JSON document ({tests:[{name,file,line?,status,duration_ms}],totals})
+    --errors=json    Emit ONLY a JSON document ({tests:[{name,file,line?,status,message?,duration_ms}],totals})
                      for CI/editors — suppresses the human PASS/FAIL lines (mirrors `check --errors=json`).
     -q, --quiet      Dots (`.`/`F`/`E`/`M`/`T`) per test + the summary only (no per-test lines).
     -v, --verbose    Per-test lines + per-test timing (`(Nms)`) + a total (`-q`/`-v` are exclusive).

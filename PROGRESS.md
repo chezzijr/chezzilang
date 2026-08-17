@@ -111,7 +111,31 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `e.to_string()` (`ParseError`'s own `Display`, which already prefixes `parse error (...)`) instead of
 > `e.message` — the lex arm two lines up already did this correctly and said why in its comment; the
 > parse arm just hadn't matched it, one-line fix. `docs/gaps.md` W8-15's `test --errors=json` `message`
-> half and W8-17's (b)/(c)/(d) cosmetics are UNTOUCHED, still open.
+> half was closed the same day in a follow-up task — see the entry below. W8-17's (b)/(c)/(d) cosmetics
+> are UNTOUCHED, still open.
+>
+> **✅ W8-15 (test half) — `chezzi test --errors=json` now carries the failure text, 2026-08-18
+> (`feat/span-file-and-stdlib-contracts`, CLOSED — both W8-15 halves are now done).** As filed: a
+> failing test's JSON gave `{"name":"beta","file":"abc_test.chz","line":4,"status":"fail",
+> "duration_ms":0}` — a CI runner could say a test failed but not *why*, even though the text was
+> sitting right there in the `Verdict::Fail`/`Error`/`OverMemory`/`TimedOut` payload and simply never
+> got serialized. Now, measured on a throwaway fixture (`assert`-fail + `panic`) run through the
+> release binary: `{"tests":[{"name":"ok","file":"…/demo_test.chz","status":"pass","duration_ms":0},
+> {"name":"broken","file":"…/demo_test.chz","line":5,"status":"fail","message":"assertion failed: math
+> is broken","duration_ms":0},{"name":"crashes","file":"…/demo_test.chz","line":8,"status":"error",
+> "message":"deliberate crash","duration_ms":0}],"totals":{…}}` — a PASS entry carries no `message`
+> key at all (additive; not an empty string). **Fix: `test_runner::verdict_msg(v: &Verdict) ->
+> Option<&str>` added beside the existing `verdict_status`/`verdict_line` accessors** — `Pass => None`,
+> the other four variants (`Fail`/`Error`/`OverMemory`/`TimedOut`) each already carried a `msg: String`
+> field, just never read for JSON. `render_json` emits `"message":<json string>` (through the existing
+> `json_string` escaper — no hand-escaping) right after `"status"` and before `"duration_ms"` whenever
+> `verdict_msg` is `Some`. Because the accessor is total over all five `Verdict` variants,
+> `OverMemory`/`TimedOut` are correct by construction with no dedicated json fixture — covered instead
+> by a direct unit test (`verdict_msg_covers_all_variants`) over all five arms. Zero changes to the
+> human-readable render path, the totals, or the exit code. Tests: `json_emits_parseable_per_test_and_
+> totals` extended with a fourth test (`delta`, a `panic`) so the fixture exercises `error` as well as
+> `fail`/`pass`, plus a negative control that the `alpha` (pass) entry's JSON object contains no
+> `"message"` key at all (guards against an implementation that emits `"message":""` unconditionally).
 >
 > **✅ SESSION 2026-08-17 — the diagnostic pass (`feat/diagnostic-pass-w8-2-airlock`): two warning
 > rules, one silent-wrong-answer fix, one stdlib fault-surface audit.** Branch-final gate: `cargo test`
