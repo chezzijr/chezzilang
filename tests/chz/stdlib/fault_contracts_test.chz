@@ -12,8 +12,11 @@
 #     nothing for `recover:` to catch, and a test that triggered it would kill the runner.
 #   * `crypto.token_hex`/`crypto.secure_bytes`/`uuid.v4` entropy-unavailable — there is no way to force
 #     `getrandom`/`/dev/urandom` to fail from user code in this environment (an OS-level condition).
-#   * `io.read_all()` on non-UTF-8 stdin — measured by hand (`printf 'a\xffb' | chezzi run ...`), but
-#     the `chezzi test` harness has no per-test stdin-feeding mechanism to pin it here.
+#   * `io.read_all()` on non-UTF-8 stdin — the `chezzi test` harness has no per-test stdin-feeding
+#     mechanism, so it cannot be pinned HERE. It is pinned from a real process instead:
+#     `tests/interactive.rs::read_all_faults_recoverably_on_non_utf8_stdin` writes `abc\xff\xfedef`
+#     into a spawned `chezzi run` and asserts the exact message plus a valid-UTF-8 negative control.
+#     The row has a gate; it just lives in the one test file that owns process pipes.
 #
 # Run: `cargo run -- test tests/chz/`. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 
