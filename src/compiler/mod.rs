@@ -37,10 +37,10 @@ pub struct CompileError {
     pub span: Span,
 }
 
-/// The name a builtin resolves to (mirrors `interp::builtins::is_builtin` + the special `print`).
+/// The name a builtin resolves to.
 /// ROOT REDESIGN — the module key used to qualify user-type identity keys in the single-source
 /// (standalone / `<main>`) compile + run paths, where there is no module graph to derive a real
-/// label from. The three engines must agree on it (parity), so it lives here as one constant. Only
+/// label from. The checker, compiler, and VM must all agree on it, so it lives here as one constant. Only
 /// the test-only standalone paths use it (the CLI always runs the module-graph path).
 #[cfg(test)]
 pub(crate) const STANDALONE_MODULE_KEY: &str = "<main>";
@@ -85,7 +85,7 @@ enum WitnessRef {
 /// W7-49 — a checker→compiler side-table key that was asked to hold two DIFFERENT decisions stops
 /// the build. Refusing to compile is the whole point: the backend is type-blind, so an aliased key
 /// means it would apply one expression's decision to another — a silent wrong VALUE under a green
-/// `chezzi check`, identical on both engines. First conflict wins (they share one cause).
+/// `chezzi check`. First conflict wins (they share one cause).
 fn reject_table_conflicts(conflicts: crate::checker::TableConflicts) -> Result<(), CompileError> {
     match conflicts.into_iter().next() {
         Some((span, message)) => Err(CompileError { message, span }),
@@ -1400,7 +1400,7 @@ impl Compiler {
         // Uniform by-reference capture: the module top level is a real frame too. A top-level
         // `for`-loop variable (or a block-local inside a top-level `if`/`for`/`while`) captured by a
         // nested fn / closure must box into a cell — otherwise the captured raw value hits
-        // `CellLoad on a non-handle value` at runtime (check-OK / host-panic on BOTH engines). Its
+        // `CellLoad on a non-handle value` at runtime (check-OK / host-panic). Its
         // boxed-name set is computed exactly like every other fn body (`compile_fn_captured`). Names
         // that resolve as GLOBALS here (top-level `let`s / hoisted fns) are never `add_local`'d, so
         // `is_boxed_slot` never fires for them — only genuine frame locals (loop vars, block-lets) box.
@@ -1700,7 +1700,7 @@ impl Compiler {
             // see the definer. Measured before this hid the locals, `n := 100` at module level and
             // `fn f(n: int, x: str = "n={n}")`: a direct `f(3)` printed `n=100` (provider, module
             // scope) while `g := f; g(3)` printed `n=3` (prologue, callee scope) — the same default,
-            // two answers, identical on both engines. Hiding the frame's bindings for the duration of
+            // two answers. Hiding the frame's bindings for the duration of
             // this one expression makes the prologue resolve exactly as the provider does.
             let saved_locals = std::mem::take(&mut fc.locals);
             let saved_slots = fc.slot_count;
@@ -1914,7 +1914,7 @@ impl Compiler {
                 self.compile_expr(fc, expr)?;
                 // `PopExprStmt` (not `Pop`): an unhandled `Err`/`None` from a top-level expression
                 // statement exits the program (the runtime checks the frame). Use `expr.span` (not
-                // `stmt.span`) so the error location matches the serial-VM parity oracle exactly.
+                // `stmt.span`) so the error location points at the exact failing expression.
                 fc.emit(Op::PopExprStmt, expr.span);
                 Ok(())
             }
@@ -2043,11 +2043,11 @@ impl Compiler {
             // `pass` — a no-op statement; emits no bytecode.
             StmtKind::Pass => Ok(()),
             StmtKind::Assert { cond, msg } => {
-                // Lazy message evaluation, byte-identical to the serial-VM oracle (which evaluates `msg`
-                // only on failure): compile `cond`, and only on the false path compile `msg` then
+                // Lazy message evaluation — `msg` is only evaluated on failure: compile `cond`, and
+                // only on the false path compile `msg` then
                 // `Op::Assert` (which always faults). A passing assert never touches `msg`, so a
-                // side-effecting/faulting message expression behaves identically across both engines.
-                // `Op::Assert` carries `stmt.span` so the fault location matches the serial-VM parity oracle.
+                // side-effecting/faulting message expression never runs on the passing path.
+                // `Op::Assert` carries `stmt.span` so the fault location points at the `assert` statement itself.
                 self.compile_expr(fc, cond)?;
                 let to_fail = fc.emit_jump(Op::JumpIfFalse(0), stmt.span);
                 let to_end = fc.emit_jump(Op::Jump(0), stmt.span);
@@ -2066,7 +2066,7 @@ impl Compiler {
                 vars, iter, body, ..
             } => self.compile_for(fc, vars, iter, body, stmt.span),
             StmtKind::Match { scrutinee, arms } => self.compile_match(fc, scrutinee, arms, stmt.span),
-            // Concurrency C4 — sequential, run-to-completion executor (mirrors the serial-VM parity oracle).
+            // Concurrency C4 — sequential, run-to-completion executor.
             StmtKind::Parallel { body } => self.compile_parallel(fc, body, stmt.span),
             StmtKind::Spawn(target) => self.compile_spawn(fc, target, stmt.span),
             StmtKind::Wait { arms, else_block } => {
@@ -2089,8 +2089,7 @@ impl Compiler {
     ) -> Result<(), CompileError> {
         // Evaluate each arm's operands once, source order (left on the stack for the poll to re-read
         // on every re-park). A recv arm pushes ONE handle (the channel); a send arm pushes TWO (the
-        // channel THEN the value) — the exact top-to-bottom eval order Go's `select` requires, and
-        // identical bytecode on both engines ⇒ byte-identical side-effect order.
+        // channel THEN the value) — the exact top-to-bottom eval order Go's `select` requires.
         let mut is_send = Vec::with_capacity(arms.len());
         for arm in arms {
             match &arm.kind {
@@ -2560,7 +2559,7 @@ impl Compiler {
         }
     }
 
-    /// Load a name's value (local → captured → global), mirroring the serial-VM parity oracle's lookup order.
+    /// Load a name's value (local → captured → global).
     fn emit_load(&mut self, fc: &mut FnComp, name: &str, span: Span) {
         match fc.resolve_local(name) {
             // A boxed owner-side local dereferences its cell (`emit_get_named`).
@@ -2863,7 +2862,7 @@ impl Compiler {
             // `for a, b, … in xs` over a `List[(A, B, …)]`. The compiler is type-erased, so we branch
             // at RUNTIME on `IsMap` (mirroring the single-var `IsStruct` split):
             //   - map: snapshot keys + values up front and index them in lockstep (so a body that
-            //     mutates the map mid-loop can't perturb the bindings; matches the serial-VM parity oracle);
+            //     mutates the map mid-loop can't perturb the bindings);
             //   - list of tuples: index the list, then destructure each element tuple into the N
             //     loop vars via `GetField(j)` (the destructure-`:=` pattern, generalized to N).
             self.compile_expr(fc, iter)?;
@@ -3030,7 +3029,7 @@ impl Compiler {
 
         // Build the synthesized nested-loop body from the inside out, then compile only the
         // outermost `for` (which contains all the inner ones). Folding right-to-left makes clause 0
-        // the outermost loop, matching the interp's left-to-right recursion (parity).
+        // the outermost loop, matching left-to-right source order (Python comprehension semantics).
         let mut body: Vec<Stmt> = vec![innermost_stmt];
         for clause in clauses.iter().rev() {
             // Wrap in this clause's guards (each `if` filters the body; chained guards nest).
@@ -4382,7 +4381,7 @@ impl Compiler {
 
     fn compile_ident(&mut self, fc: &mut FnComp, name: &str, span: Span) {
         // A bare nullary *built-in* variant used as a value (`None`) — resolved before any env
-        // lookup, exactly like the serial-VM oracle. User variants are qualified (handled in the `Field`
+        // lookup. User variants are qualified (handled in the `Field`
         // arm), so only built-ins resolve bare here.
         if let Some(def) = self
             .variant_pair(None, name)
@@ -5545,8 +5544,8 @@ impl Compiler {
                             fc.emit(Op::CallPrint(args.len()), span);
                         } else {
                             // `print(..., sep=, end=)`: push `sep` then `end` (each the user expr or
-                            // its default str), then a dedicated op joins+terminates. Eval order
-                            // matches the serial-VM parity oracle: positional args, then sep, then end.
+                            // its default str), then a dedicated op joins+terminates. Eval order:
+                            // positional args, then sep, then end.
                             let sep = named.iter().find(|(k, _)| k == "sep").map(|(_, v)| v);
                             let end = named.iter().find(|(k, _)| k == "end").map(|(_, v)| v);
                             match sep {
@@ -7800,9 +7799,9 @@ mod back_edge_tests {
 #[cfg(test)]
 mod carrier_lowering_tests {
     //! W7-43 — `?.` on a `Result` is `?` then `.`. THE load-bearing test in the change: the two
-    //! spellings must compile to byte-identical bytecode. If that holds, the VM, the
-    //! `recover:`/`defer:`/nursery interactions and two-engine parity are green BY CONSTRUCTION —
-    //! there is no second program to disagree about.
+    //! spellings must compile to byte-identical bytecode. If that holds, the VM and the
+    //! `recover:`/`defer:`/nursery interactions are green BY CONSTRUCTION —
+    //! there is no second code path to disagree about.
     use super::*;
     use crate::vm::op::Op;
 

@@ -1360,7 +1360,7 @@ fn protocol_typed_value_still_satisfies_its_own_protocol() {
 /// `a.eq(b)` was already rejected (the instance-method dispatch path runs `enforce_bounds`); the
 /// OPERATOR routed through `may_be_equal`, which asks co-inhabitance only. Same program, two answers:
 /// `check` was clean and the run faulted with *"struct 'Tag' has no 'compare' method"* — the
-/// `checker-superset-of-compiler` class two-engine parity is structurally blind to.
+/// `checker-superset-of-compiler` class parity is structurally blind to.
 ///
 /// **Rust owns conditional conformance; measured, rustc 1.97.0** on the mirror
 /// `impl<T: Ord> PartialEq for Boxy<T>`: `error[E0369]: binary operation == cannot be applied to type
@@ -1706,7 +1706,7 @@ b := Box(Tag(2))
 /// restricting type parameter \`T\` with trait \`PartialEq\``; Go 1.26 rejects the mirror with `invalid
 /// operation: a == b (incomparable types in type set)`. Before this fix all three instances below
 /// were `ok: no type errors` and then faulted at runtime with *"struct 'Tag' has no method
-/// 'compare'"* on both engines — the checker's own `Ty::Param` arm already refused an unbounded `T`,
+/// 'compare'"* — the checker's own `Ty::Param` arm already refused an unbounded `T`,
 /// but the four use-site gates erased free params to `Ty::Unknown` first (`eq_bounds_unsatisfied_erased`,
 /// since deleted — no caller survived switching all four to the plain, non-erasing
 /// `eq_bounds_unsatisfied`), so the refusal never fired.
@@ -1928,7 +1928,7 @@ fn same[T: Eq](a: T, b: T) -> bool:
     );
     // NAME CAPTURE — the check-OK-then-run-fault the unsubstituted walk shipped: put a same-named
     // param carrying the needed bound in the CALLER's scope and the decl-site `Z` resolved against
-    // IT, so `Wrap[Tag]` was granted and `Tag.compare` faulted at runtime on both engines.
+    // IT, so `Wrap[Tag]` was granted and `Tag.compare` faulted at runtime.
     entry_rejects(
         &format!(
             "{COND}struct Wrap[Z]:\n    v: Box[Z]\nfn trick[Z: Comparable](z: Z, a: Wrap[Tag], b: Wrap[Tag]) -> bool:\n    return same(a, b)\nprint(trick(1, Wrap(Box(Tag(1))), Wrap(Box(Tag(2)))))\n"
@@ -1993,8 +1993,8 @@ fn use_it(a: N[int], b: N[int]) -> bool:
 
 /// **A DIFFERENT INSTANTIATION of a type already being walked is a different obligation.** The inner
 /// cycle guard was keyed on the bare NAME, so re-entering `R` with another argument was assumed
-/// sound and its fields were never walked — `R[int]` type-checked clean and then faulted at runtime
-/// on both engines. The bad type has to arrive by SUBSTITUTION into a field, which is why fixing the
+/// sound and its fields were never walked — `R[int]` type-checked clean and then faulted at runtime.
+/// The bad type has to arrive by SUBSTITUTION into a field, which is why fixing the
 /// substitution is what exposed this: before that, an unbound decl-site param refused it by accident.
 #[test]
 fn a_different_instantiation_of_an_in_progress_type_is_still_walked() {
@@ -2049,7 +2049,7 @@ fn use_it(a: HasIt, b: HasIt) -> bool:
 /// **A chain of DISTINCT conditional types must be walked to its true answer, and running out of
 /// budget must REFUSE.** The first cut guarded the outward hop with a fixed re-entrancy DEPTH cap
 /// that returned "sound" when exceeded — so a 16-deep chain whose innermost link genuinely fails
-/// type-checked clean and then faulted at runtime on both engines. The guard is now keyed on the
+/// type-checked clean and then faulted at runtime. The guard is now keyed on the
 /// instantiated type: distinct types never trip it, so the chain is decided correctly at depth, and
 /// the size backstop that remains refuses instead of granting.
 ///
@@ -2565,7 +2565,7 @@ fn struct_with_eq_satisfies_eq() {
     // is true of the OPERATOR and false of the BOUND: an erased `[T: Eq]` body's `a.eq(b)` still
     // dispatches BY NAME to the escape-hatch method, so its `where` clause runs unproven. Measured
     // on the release binary at that cut: BOTH programs below were `ok: no type errors` then
-    // `runtime error: struct 'Tag' has no method 'compare'` on BOTH engines — verbatim the
+    // `runtime error: struct 'Tag' has no method 'compare'` — verbatim the
     // check-OK-then-fault class W7-41/W7-45/W7-53 exist to eliminate, re-opened while closing C1.
     //
     // So the walk now proves the bounds for ANY declared `eq`, and only the HOOK shape ends the
@@ -2891,7 +2891,7 @@ fn comparable_types_equality_still_ok() {
     );
     // (9) the runtime's own CROSS-TYPE equality arms compose through the recursion, because they
     // are arms of `may_be_equal` rather than a top-level special case: `[1.0] == [1]` and
-    // `{"k": 1.0} == {"k": 1}` both print `true` on both engines (CPython agrees), so rejecting
+    // `{"k": 1.0} == {"k": 1}` both print `true` (CPython agrees), so rejecting
     // them would contradict "only a PROVABLY disjoint pair".
     entry_ok(
         "fn main():\n    a: List[float] = [1.0]\n    b: List[int] = [1]\n    print(a == b)\n    m: Map[str, float] = {\"k\": 1.0}\n    n: Map[str, int] = {\"k\": 1}\n    print(m == n)\n    t: (float, int) = (1.0, 2)\n    s: (int, int) = (1, 2)\n    print(t == s)\nmain()\n",
@@ -9042,7 +9042,7 @@ fn nested_loops_break_legal_in_both() {
 //
 // `spawn:` / `defer:` blocks ARE the reachable case of the same rule: each compiles to a fresh
 // child proto with an empty loop stack, so a `break`/`continue` lexically nested in an enclosing
-// loop but placed inside the block is illegal at runtime in both engines. The checker mirrors the
+// loop but placed inside the block is illegal at runtime. The checker mirrors the
 // fn/closure save-zero-restore of `loop_depth` across these block arms so the `break/continue
 // outside loop` guard fires at check time (was a three-way divergence: `check` passed, the VM
 // raised at runtime, the interp silently treated it as a block exit). A legitimate loop INSIDE the
@@ -11551,8 +11551,8 @@ fn match_guard_stmt_ok() {
 
 #[test]
 fn bare_ident_binding_colliding_with_variant_rejected() {
-    // `None` is a registered variant; binding it against an int would bind in the interp but trap
-    // on the VM (the compiler routes by the variant registry). Reject so all engines agree.
+    // `None` is a registered variant; binding it against an int would trap
+    // on the VM (the compiler routes by the variant registry). Reject at check time instead.
     rejects(
         "match 5:\n    None: print(\"bound\")\n",
         "is a variant name",
@@ -12049,7 +12049,7 @@ struct WO:
 
 #[test]
 fn struct_slice_wrong_bound_types_rejected() {
-    // The `Slice` protocol fixes the bounds as `slice(self, int?, int?, int?)` — both engines pass
+    // The `Slice` protocol fixes the bounds as `slice(self, int?, int?, int?)` — the VM passes
     // three `Option[int]` components. A `slice` with non-`int?` bounds (or wrong arity) must NOT
     // count as a valid `Slice` impl (would crash).
     let bad = "\
@@ -14283,7 +14283,7 @@ fn imported_module_used_in_spawn_block_ok() {
 /// same shape `defer lib.helper(3)` has always accepted, and the one Go accepts as `go pkg.F(x)`.
 /// It used to be refused with "cannot spawn on a non-sendable receiver of type module lib" because
 /// the receiver sweep asked whether the MODULE could cross the airlock. The RUNNING proof (a user
-/// module, an alias, a bare `spawn`, and a native module, on both engines) is
+/// module, an alias, a bare `spawn`, and a native module) is
 /// `tests/chz/spec/spawn_module_target_test.chz`.
 #[test]
 fn spawn_on_module_qualified_fn_ok() {
@@ -14374,7 +14374,7 @@ fn submit_protocol_capture_ok() {
 #[test]
 fn submit_capturefree_closure_ok() {
     // B3.3 (Task 2a): submitting a closure that captures a CAPTURE-FREE sibling closure is now
-    // ACCEPTED — closures cross the airlock by value (runs on both engines). A submitted closure that
+    // ACCEPTED — closures cross the airlock by value. A submitted closure that
     // captures a `ref` is still rejected (`submit_non_sendable_capture_rejected`).
     entry_ok(
         "import std.concurrency\nfn main():\n    g := fn() -> int: 1\n    ex := Executor()\n    ex.submit(fn(): print(g()))\n    ex.shutdown()\nmain()\n",
@@ -14400,7 +14400,7 @@ fn submit_captured_int_ok() {
 #[test]
 fn submit_capturefree_closure_through_nested_closure_ok() {
     // B3.3 (Task 2a): a capture-free closure reached through a NESTED closure inside a submitted task
-    // is now ACCEPTED (both closures cross by value; runs on both engines). Previously rejected under
+    // is now ACCEPTED (both closures cross by value). Previously rejected under
     // the old "Func non-sendable" rule; a nested closure that captures a `ref` is Task 2b's backstop.
     entry_ok(
         "import std.concurrency\nfn main():\n    g := fn() -> int: 1\n    ex := Executor()\n    ex.submit(fn(): print((fn() -> int: g())()))\n    ex.shutdown()\nmain()\n",
@@ -14473,7 +14473,7 @@ fn closure_returned_across_task_typechecks() {
 }
 
 // ----- G1 (B3.3b), RETIRED: these now just assert the checker ACCEPTS every shape. The read-only rule
-// was deleted in 2026-07-21 (module globals deep-copy per task on both engines, so a task write lands on
+// was deleted in 2026-07-21 (module globals deep-copy per task, so a task write lands on
 // its own copy); W6-2 then made the copy fresh per nursery. Kept as accept-regressions. -----
 
 #[test]
@@ -18433,7 +18433,7 @@ fn carry(n: int) -> Carrier:
 /// show bare names), so a `Display`-keyed in-progress stack thinks `b.H` is already being proven the
 /// moment `a.H` is, applies the coinductive assumption to a type that was never in progress, and
 /// GRANTS `Eq` to one whose field reaches an unmet `where` bound. Check-clean, then
-/// `Tag has no 'compare'` at runtime on both engines.
+/// `Tag has no 'compare'` at runtime.
 ///
 /// `Ty: PartialEq` compares the module-scoped key (`a::H`), which is why the guard holds the `Ty`
 /// itself. **The NAME is the only variable**, and the two controls below prove it: renaming the
@@ -19415,7 +19415,7 @@ fn parameterized_embed_substitutes_its_arg_into_the_item_type() {
 //
 // A protocol value erases which witness it holds, so two values of one protocol need not be the same
 // concrete type. `fn add(self, o: Self) -> Self` through a `Vecish` would hand a `W` to `V::add` —
-// `check: ok`, then `runtime error: no field 'x' on W(s=q)` on both engines. Rust states the same
+// `check: ok`, then `runtime error: no field 'x' on W(s=q)`. Rust states the same
 // rule (a `Self`-typed parameter makes a trait non-`dyn`-able) and Go bans `Self` from interfaces
 // outright, so neither ancestor admits the program. Every operator protocol's method is
 // `(self, Self) -> Self`, which is why `+ - * / % <` are all un-dispatchable on an existential; the
@@ -19716,7 +19716,7 @@ fn reserved_callables_all_have_builtin_sig() {
 /// table is the SINGLE SOURCE OF TRUTH for the four first-class universe FUNCTIONS
 /// (`print`/`ord`/`chr`/`panic`). This test locks every phase that used to hard-code these names to
 /// the table, so a future edit to one phase that silently diverges from the table (the whack-a-mole
-/// bug class this track kills) fails here instead of shipping a three-engine skew.
+/// bug class this track kills) fails here instead of shipping a silent runtime skew.
 #[test]
 fn prelude_table_is_single_source_of_truth() {
     use std::collections::BTreeSet;
@@ -21118,7 +21118,7 @@ fn closure_assign_bad_field_single_error() {
 // SOUNDNESS — a closure passed to a GENERIC `T` slot whose type param is bound ONLY by the closure
 // itself unifies `T` to `fn(Unknown) -> Unknown`; the substituted expected param type is therefore
 // `Unknown`. Binding the unannotated closure param to that `Unknown` silently (source #1) leaves the
-// call site unchecked → check-passes-then-traps at runtime on both engines. An `Unknown` expected
+// call site unchecked → check-passes-then-traps at runtime. An `Unknown` expected
 // param type must NOT count as a pin: fall through to the body scan / annotation requirement.
 #[test]
 fn closure_param_under_generic_unknown_slot_requires_annotation() {
@@ -21365,7 +21365,7 @@ fn kw_value_defaults_fill_a_trailing_gap_but_not_a_middle_one() {
 /// requires more arguments cannot be stored in it. Because the optional arity rides on the
 /// equality-neutral label wrapper, plain type equality says these two `fn(int) -> int`s are the same
 /// type — assignability has to carry the direction instead. Without it, `chezzi check` said
-/// *ok: no type errors* and both engines then faulted with
+/// *ok: no type errors* and the run then faulted with
 /// `function 'b' expects 1 argument(s), got 0`.
 ///
 /// The reverse must stay legal: a defaulted fn is strictly more permissive, so it flows into a plain
@@ -22427,7 +22427,7 @@ const GHOF_HEAD: &str = "fn ident[T](x: T) -> T:\n    return x\nfn mk[T](n: int)
 /// not determined here`) while both ancestors infer them — measured this session, Go 1.26.5 and Rust
 /// 1.97 each print `5` for `applyg(id, 5)` / `applyr(5, id)` / `twop(id, 5)`. The deferral that makes
 /// it work is the SAME one `infer_generic_method` uses for `[1,2,3].fold(0, pick)`, now on the
-/// free-fn path too; the running half (asserting the VALUE, both engines) is
+/// free-fn path too; the running half (asserting the VALUE) is
 /// `tests/chz/spec/list_test.chz`.
 #[test]
 fn a_generic_fn_argument_to_a_generic_hof_is_pinned_by_the_other_arguments() {
@@ -24668,7 +24668,7 @@ fn witness_static_call_cross_module_ok() {
 /// witness-taking callee is a legal target in the CROSS-MODULE spellings too (Go accepts the same
 /// program: `defer reset(c, "defer")` on a `func reset[T Defaulter[T]]`). The `spawn` twin agrees
 /// now: a module is a NAMESPACE, so `spawn lib.reset(...)` is a plain call, not a spawn on a
-/// non-sendable module receiver (the RUNNING proof, both engines, is
+/// non-sendable module receiver (the RUNNING proof is
 /// `tests/chz/spec/spawn_module_target_test.chz`).
 #[test]
 fn witness_fn_is_a_cross_module_defer_target_ok() {
@@ -24714,7 +24714,7 @@ fn witness_static_call_forwarding_ok() {
 /// capture entries of every closure, nested `fn`, `spawn:` block and `defer:` block, so `T.static()`
 /// inside one lowers to the same `CallStaticDyn`. The witness is a `str`, so it crosses BY VALUE —
 /// an escaping closure and the `spawn:` airlock both stay correct. The RUNNING half (that the value
-/// captured is the right type, on both engines) is `tests/chz/spec/static_witness_test.chz`.
+/// captured is the right type) is `tests/chz/spec/static_witness_test.chz`.
 #[test]
 fn witness_static_call_inside_a_nested_body_ok() {
     let head = "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\n";
@@ -26232,7 +26232,7 @@ fn a_qualified_native_constructor_is_not_a_spawn_or_defer_target_rejected() {
 
 /// …and the control the same arm must NOT touch: an ordinary native module FUNCTION is a plain call,
 /// so it stays a legal `defer` target. (That it still RUNS — the other half of check/run agreement —
-/// is `tests/chz/stdlib/math_test.chz::deferred_native_module_fn_runs`, on both engines.)
+/// is `tests/chz/stdlib/math_test.chz::deferred_native_module_fn_runs`.)
 #[test]
 fn a_native_module_function_is_a_defer_target_ok() {
     entry_ok("import std.math\nfn main():\n    defer math.abs(-3)\n    print(\"done\")\nmain()\n");

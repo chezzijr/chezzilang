@@ -469,7 +469,7 @@ test fn compare_on_nan_uses_the_total_order():
 # "a non-numeric newtype has no operator to disagree with" is true for `+`/`<` and false for `==`,
 # which every underlying defines. That reject is also a checker diagnostic
 # (`checker::tests::newtype_eq_method_rejected_at_decl`); what stays asserted here is the behavior
-# that remains — a newtype's `==` IS the underlying's equality, on both engines.
+# that remains — a newtype's `==` IS the underlying's equality.
 
 newtype Score = int:
     fn doubled(self) -> Score:
@@ -503,7 +503,7 @@ test fn numeric_newtype_operator_auto_flows_and_ordinary_methods_still_work():
 # used to satisfy it too and then faulted with `type list has no method 'next'`; it now satisfies only
 # `Iterable`, and `[S: Iterable[T], T]` is the bound that accepts everything. The reject side is a
 # checker diagnostic (`checker::tests::raw_collection_does_not_satisfy_iterator`); what is asserted here
-# is that every ACCEPTED form really works on both engines.
+# is that every ACCEPTED form really works.
 
 fn next_m[S: Iterator[T], T](it: S) -> Option[T]:
     return it.next()
@@ -558,7 +558,7 @@ test fn iterator_bound_is_cursors_iterable_bound_is_collections():
 # then refused the one operation the protocol promises (`cannot iterate over Iterable[int]`).
 # Reject side (bare `Iterable`, `for i, v in`, `.next()`, the invariance fences) is in
 # `checker::tests::iterable_type_position_*`; what is asserted here is that every accepted shape
-# really iterates, on both engines.
+# really iterates.
 
 struct Wrap:
     xs: List[int]

@@ -1,6 +1,6 @@
 # Container constructors: List[T]() / Map[K, V]() / Set[T]() turbofish + bare 0-arg forms.
-# Type args erase at runtime (an empty List[int]() is just an empty list), so the serial and M:N
-# VM engines produce identical output — this is the two-engine parity gate for the feature.
+# Type args erase at runtime (an empty List[int]() is just an empty list), so output is
+# deterministic regardless of worker count — this is the golden-output gate for the feature.
 
 # Turbofish, empty:
 a := List[int]()

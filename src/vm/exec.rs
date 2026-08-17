@@ -165,7 +165,6 @@ impl Vm {
             snapshot_cells: std::sync::Arc::new(super::fxhash::FxHashMap::default()),
             snapshot_next_id: 0,
             snapshot_builds: 0,
-            pinned_module_roots: Vec::new(),
             mn: None,
         }
     }
@@ -191,7 +190,7 @@ impl Vm {
     }
 
     /// B3.4 — set this VM's nursery cancel flag (if it runs under one), so sibling workers abort.
-    /// No-op on the cooperative engine / top-level VM (`cancel` is `None`).
+    /// No-op when this VM runs under no nursery (`cancel` is `None`) — e.g. the top-level VM.
     pub(super) fn trip_cancel(&self) {
         if let Some(c) = &self.cancel {
             c.store(true, Ordering::Relaxed);
@@ -231,8 +230,8 @@ impl Vm {
         std::mem::swap(&mut self.snapshot_memo, &mut ctx.snapshot_memo);
         // W7-4a — the snapshot rebuild map describes the SAME view, so it travels with it. Unlike the
         // two `Arc<ModuleSnapshot>`s above it IS heap-keyed (`GcRef` values), exactly like
-        // `module_objs` just above: for an M:N fiber it indexes the heap swapped below, for a
-        // cooperative one the shared heap. Either way it moves atomically with its view.
+        // `module_objs` just above: for an M:N fiber it indexes the heap swapped below, for a fiber
+        // with no heap of its own the shared heap. Either way it moves atomically with its view.
         std::mem::swap(&mut self.snapshot_rebuild, &mut ctx.snapshot_rebuild);
         // W7-4c — the snapshot cell registry is heap-keyed too (its KEYS are `GcRef`s into the heap the
         // snapshot was built from), so it travels with the same view for the same reason.
@@ -241,19 +240,22 @@ impl Vm {
         // Split them and a fiber resuming on a fresher shell re-mints ids its own registry already
         // uses, merging two unrelated bindings.
         std::mem::swap(&mut self.snapshot_next_id, &mut ctx.snapshot_next_id);
-        // D2a — an M:N fiber (`Some`) owns its heap; swap it with the host's. A cooperative fiber
-        // (`None`) shares the single `Vm::heap` (decision A), so its heap is left untouched and the
-        // cooperative engine stays byte-identical by construction. D2b — the same `Some` gate carries
-        // the fiber's remaining heap-keyed side state (out/stderr/executors/intern), so they move
-        // atomically WITH the heap their `GcRef`s index. A cooperative fiber swaps none of that.
+        // D2a — an M:N fiber (`Some`) owns its heap; swap it with the host's. A fiber with no heap of
+        // its own (`None`) shares the single `Vm::heap` (decision A), so its heap is left untouched.
+        // D2b — the same `Some` gate carries the fiber's remaining heap-keyed side state
+        // (out/stderr/executors/intern), so they move atomically WITH the heap their `GcRef`s index.
+        // A fiber with no heap of its own swaps none of that.
+        // GC: this atomicity is why a swapped-OUT `module_objs` needs no pin — it parks in `ctx`
+        // together with the heap it indexes, and `collect()` only ever walks the LIVE `self.heap`.
+        // The one production `FiberCtx` (`ReadyWorker::into_fiber`) always carries `heap: Some`.
         if let Some(ctx_heap) = ctx.heap.as_mut() {
             std::mem::swap(&mut self.heap, ctx_heap);
             std::mem::swap(&mut self.out, &mut ctx.out);
             std::mem::swap(&mut self.stderr, &mut ctx.stderr);
             std::mem::swap(&mut self.executors, &mut ctx.executors);
             // M19 Phase 3 — the intern cache's `GcRef`s index this fiber's OWN heap, so it MUST travel
-            // atomically with the heap (same heap-keyed argument as `module_objs`). A cooperative fiber
-            // (`heap: None`) never reaches here and keeps aliasing the shell's cache.
+            // atomically with the heap (same heap-keyed argument as `module_objs`). A fiber with no
+            // heap of its own (`heap: None`) never reaches here and keeps aliasing the shell's cache.
             std::mem::swap(&mut self.str_intern, &mut ctx.str_intern);
             // D6b — a mid-flight `connect` parked on writability swaps WITH its fiber (it owns the
             // connecting fd that the netpoller is watching; it must not be left on the shell where the
@@ -276,7 +278,7 @@ impl Vm {
     /// (`yield_now`). Both unwind every nested `run_until` / call site the SAME way — propagate up
     /// WITHOUT popping a result or pushing a sentinel — so every "callee paused" gate tests this, not
     /// `suspend` alone. (`yield_now` is only ever set under the M:N engine — the safepoint gates it on
-    /// `mn.is_some()` — so the cooperative engine, where it is always false, is unchanged by
+    /// `mn.is_some()` — so a run with no M:N scheduler, where it is always false, is unchanged by
     /// construction.)
     pub(super) fn paused(&self) -> bool {
         self.suspend.is_some()
@@ -409,8 +411,9 @@ impl Vm {
     // ----- experimental generators (VM-only) -----
 
     /// Swap the live execution context (frames/stack/depth/base/handlers) with a parked [`GenCtx`].
-    /// Smaller sibling of [`Vm::swap_ctx`]: a generator shares the host heap (like a cooperative
-    /// fiber, decision A) and cannot open nurseries/spawn (checker-forbidden), so none of the
+    /// Smaller sibling of [`Vm::swap_ctx`]: a generator shares the host heap (the same share-by-ref,
+    /// decision A, as a fiber with no heap of its own) and cannot open nurseries/spawn
+    /// (checker-forbidden), so none of the
     /// heap-keyed or nursery state moves.
     pub(super) fn swap_gen_ctx(&mut self, ctx: &mut GenCtx) {
         std::mem::swap(&mut self.frames, &mut ctx.frames);
@@ -551,7 +554,7 @@ impl Vm {
     }
 
     /// If `v` is an unhandled error (`Err(..)`/`None`) reaching the top level, build the runtime
-    /// error that exits the program. Mirrors `interp::top_level_error` — message must be identical.
+    /// error that exits the program.
     pub(super) fn top_level_error(&self, v: Value, span: Span) -> Option<RuntimeError> {
         let h = v.as_obj()?;
         let Obj::Enum {
@@ -904,8 +907,8 @@ impl Vm {
                     }
                     // `std.net`'s `Socket`/`Listener` are TYPE-only imports with NO runtime module-member
                     // value: a `Socket` value comes from `connect`/`listen` and the type resolves directly
-                    // to `Ty::Socket`. Skip them — the native module has no such global by design. Mirrors
-                    // the interp `bind_import` skip (parity); without it `import Socket from std.net` faults.
+                    // to `Ty::Socket`. Skip them — the native module has no such global by design;
+                    // without this, `import Socket from std.net` faults.
                     if self.module_name(target_obj) == "std.net"
                         && matches!(member.as_str(), "Socket" | "Listener")
                     {
@@ -1094,9 +1097,9 @@ impl Vm {
     pub(super) fn run_until(&mut self, base_level: usize) -> Result<(), RuntimeError> {
         // M19 — hoist the per-entry `Arc::clone(&self.program)`: borrow the program by raw
         // pointer instead of bumping the refcount. `self.program` is an immutable
-        // `Arc<Program>` set once in `Vm::new` and NEVER reassigned (cooperative `spawn` /
-        // `--parallel` workers each build their own `Vm`; `swap_ctx` swaps heap/frames/stack,
-        // not `program`), so the pointee outlives this loop and the borrow is disjoint from
+        // `Arc<Program>` set once in `Vm::new` and NEVER reassigned (M:N workers each build
+        // their own `Vm`; `swap_ctx` swaps heap/frames/stack, not `program`), so the pointee
+        // outlives this loop and the borrow is disjoint from
         // the `&mut self` fields `step` mutates (`step` only reads program data). Post-flatten
         // this entry is hit per top-level run + per native re-entry (HOF callbacks, operator
         // overloads, deferred calls) + per fiber resume — so the saved atomic shows on
@@ -1129,7 +1132,7 @@ impl Vm {
                     // every enclosing `run_until` (native re-entry) and the worker→parent fault
                     // boundary — that is what keeps the abort un-catchable by `recover:` (the Err
                     // funnel below bypasses `recover:` whenever the marker is set) and correctly
-                    // bucketed `OverMemory` on either engine.
+                    // bucketed `OverMemory`.
                     let rte = self
                         .unwind_deferred(base_level, false)
                         .map(RuntimeError::over_memory)
@@ -1146,8 +1149,8 @@ impl Vm {
             // The cancel still unwinds like an uncaught fault that bypasses `recover:` — see the
             // post-step funnel below (`self.cancelled` ⇒ `unwind_deferred(base_level, false)`).
             //
-            // D3: reduction-counting preemption (M:N-worker fibers only — a cooperative fiber, sharing
-            // the host heap, is never preempted). Decrement the budget per dispatched op; at
+            // D3: reduction-counting preemption — gated on `self.mn` (an M:N worker shell running fibers
+            // off the shared queue); a shell with no sched in scope is never preempted. Decrement the budget per dispatched op; at
             // exhaustion yield this worker so a queued sibling runs (round-robin fairness). A yielded
             // cancelled fiber observes the cancel at its next checkpoint. The
             // `native_reentry == 0` guard mirrors `recv`-park: a yield inside a native callback can't
@@ -1459,10 +1462,6 @@ impl Vm {
         // even when no in-program handle remains.
         work.extend(self.executors.iter().copied());
         work.extend(self.module_objs.iter().copied());
-        // Task 1 — the shell's REAL module_objs while swapped out for a serial child-modules window
-        // (empty otherwise). Without this a safepoint GC during the window — when live frames don't root
-        // them (the serial `Executor` exit-drain runs with empty frames) — sweeps them → UAF on restore.
-        work.extend(self.pinned_module_roots.iter().copied());
         // M19 Phase 3 — interned `ConstStr` handles are roots: they're cached for reuse across pushes
         // of the same op, so they must never be swept out from under a later push. Heap-keyed, so this
         // roots the cache for *this* heap (an M:N fiber's cache swapped in with its heap).
@@ -1556,7 +1555,7 @@ impl Vm {
 
     /// THE cancel predicate — every cancellation checkpoint (`jump_checked`'s loop back-edge,
     /// `guarded`'s native-HOF re-entry, the blocking-native offload, `chan_recv_step`, `op_wait_poll`,
-    /// [`Vm::demote_block_socket`], [`Vm::join_eager_jobs`]) asks exactly this, on BOTH engines. Two
+    /// [`Vm::demote_block_socket`], [`Vm::join_eager_jobs`]) asks exactly this. Two
     /// suppressions, both load-bearing:
     ///
     /// * `!self.cancelled` — latch: once the cancel unwind is in flight, a checkpoint inside it must
@@ -2358,7 +2357,7 @@ impl Vm {
                 // `for v in ch:` step: pop a value (parking on empty-open exactly like `recv`) and push
                 // `Some(v)`, or push `None` once the channel is closed-and-drained (the loop's clean
                 // exit). Runs at the loop top, never inside a native callback (`native_reentry == 0`),
-                // so it takes the snapshot-park / cooperative-park / fault paths — never the demote path.
+                // so it takes the snapshot-park / block-in-place / fault paths — never the demote path.
                 let v = self.pop();
                 let Some(h) = v.as_obj() else {
                     return Err(self.err("`for` over a non-channel value".to_string(), span));
@@ -2507,10 +2506,12 @@ impl Vm {
                     .unwrap_or_else(|e| e.into_inner())
                     .push(Arc::clone(&core));
                 let h = self.heap.alloc(Obj::Executor(core));
-                // Register for the program-exit auto-drain; the handle is also a GC root, so the
-                // executor's queued work survives even after every in-program handle is gone. Still
-                // the SERIAL engine's reap list (it drains through the handle, which it re-roots on
-                // the operand stack); on M:N the join goes through `exec_registry` instead.
+                // The handle is also a GC root here, so the executor's queued work survives even
+                // after every in-program handle is gone. `self.executors` is no longer itself walked
+                // to drain anything — that was the deleted `--serial` engine's own reap mechanism
+                // (draining through the handle, re-rooted on the operand stack); today it exists
+                // purely as this heap's GC root, and the program-exit join walks `exec_registry`
+                // (registered just above) instead.
                 self.executors.push(h);
                 self.push(Value::obj(h));
             }

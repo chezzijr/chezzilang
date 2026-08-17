@@ -11,7 +11,7 @@
 #
 # Chezzi used to answer the third `true` — the compiler is type-blind, so `a.eq(b)` lowered to a
 # by-name `Op::CallMethod` that the VM resolved against the receiver's own methods. A silent wrong
-# answer, identical on both engines and therefore parity-blind. See `docs/gaps.md` W7-53.
+# answer — parity-blind. See `docs/gaps.md` W7-53.
 #
 # Every struct here defines an `eq` that DISAGREES with structural equality, so each assertion can
 # only pass if dispatch went the right way.

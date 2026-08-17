@@ -2,10 +2,10 @@
 # arg, a `Channel.send`, a `Shared(...)`). The airlock serializer (`to_wire`/`from_wire`) is now
 # identity-preserving for every container arm (struct/list/map/set/tuple/enum/newtype/iter), exactly
 # as it already was for closures/cells: a self-referential value earns a per-serialization id + a
-# back-reference, so `a -> b -> a` ROUND-TRIPS across the airlock (byte-identically on the serial and
-# M:N engines) instead of overflowing the host stack. The depth cap stays only as the backstop for a
+# back-reference, so `a -> b -> a` ROUND-TRIPS across the airlock byte-identically
+# instead of overflowing the host stack. The depth cap stays only as the backstop for a
 # genuinely-unbounded ACYCLIC nest (see section 4's shallow-but-wide control). Sections 1-3 below cross
-# a LOCAL self-referential value → the `to_wire` path on both engines.
+# a LOCAL self-referential value → the `to_wire` path.
 
 import std.concurrency
 

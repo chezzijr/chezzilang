@@ -1,8 +1,8 @@
 // vm::fileio — R2 `Writer` / file-handle methods + openers. `super::*` == the `vm` module.
 // Mirrors vm::netio's Socket handle dispatch, but blocking-classified with NO netpoller/park
 // (regular files are always epoll-ready, so file writes are synchronous blocking syscalls). The
-// stdout/stderr backings route through `Vm::emit_out`/`emit_err` (the `Vm.out` parity oracle), never
-// a raw fd.
+// stdout/stderr backings route through `Vm::emit_out`/`emit_err` (`Vm.out`, what the golden test
+// suite captures), never a raw fd.
 
 use super::*;
 
@@ -47,8 +47,8 @@ impl Vm {
     }
 
     /// R2 — write `data` to a writer core. `File` → `write_all` on the `BufWriter`; `Stdout`/`Stderr` →
-    /// hand the RAW bytes to the [`Vm::emit_out_bytes`]/[`Vm::emit_err_bytes`] sink (the parity oracle
-    /// — NEVER a raw fd), which is byte-typed end to end, so `write_bytes(b"\xff\xfe")` is byte-exact
+    /// hand the RAW bytes to the [`Vm::emit_out_bytes`]/[`Vm::emit_err_bytes`] sink (`Vm.out` —
+    /// NEVER a raw fd), which is byte-typed end to end, so `write_bytes(b"\xff\xfe")` is byte-exact
     /// on the console exactly as it already was on a file (W6-9); `Buffered` → append to the in-VM
     /// buffer and drain to the inner core once it reaches `cap`. Returns the byte count on success —
     /// no backing can short-write (`write_all` / in-memory / an unbounded queue).
@@ -118,7 +118,7 @@ impl Vm {
         };
         if let Some((inner, drained)) = drain {
             // Guard the WRITE, not the flush: an empty `write_to_core` on a `Stdout`/`Stderr` inner
-            // would hand `emit_out("")` to the parity-oracle sink / stream queue.
+            // would hand `emit_out("")` to the captured `Vm.out` buffer / stream queue.
             if !drained.is_empty() {
                 self.write_to_core(&inner, &drained).map_err(from_inner)?;
             }

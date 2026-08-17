@@ -801,7 +801,7 @@ fn synthesize_providers_into(stmts: &mut Vec<Stmt>, id: &ModuleId, file: u32) {
 /// **What this scan does NOT catch, deliberately:** a cycle that leaves the provider graph. It walks
 /// provider→provider edges only, so `fn f(x: int = helper())` with `fn helper() -> int: return f()`
 /// passes it and recurses at RUNTIME instead — a clean `maximum call depth (10000) exceeded`, rc 1,
-/// identical on both engines and the same shape as CPython's `RecursionError`. Following ordinary
+/// the same shape as CPython's `RecursionError`. Following ordinary
 /// call edges too would mean deciding recursion over the whole program's call graph, which is a
 /// confident-wrong-answer risk the project declines to take (`docs/gaps.md` W7-12); the runtime
 /// fault is the documented, accepted outcome (`docs/syntax.md` §5).
@@ -2312,7 +2312,7 @@ impl Walker<'_> {
             // Not a registered callable. Named args here are unsupported (closures / builtin methods)
             // — EXCEPT the `print` builtin, which accepts `sep=`/`end=` (str expressions). For print
             // we validate the keys here and LEAVE them in `named` (un-rewritten) so the checker and
-            // both engines can read them off the Call AST.
+            // the compiler can read them off the Call AST.
             if !named.is_empty() {
                 if let ExprKind::Ident(n) = &callee.kind
                     && n == "print"
@@ -2380,8 +2380,8 @@ impl Walker<'_> {
         // A VARIADIC callable (`fn f(pre..., ...xs: T, kwonly...)`) collapses the surplus trailing
         // positionals into a synthesized `List` literal at the variadic slot, and binds the
         // keyword-only tail (everything after the variadic) from named args / defaults. After this the
-        // call is an ordinary fully-positional call, so the checker AND both engines need zero
-        // variadic-specific logic (parity by construction). This must run BEFORE the fixed-arity gates
+        // call is an ordinary fully-positional call, so the checker AND the compiler need zero
+        // variadic-specific logic (correct by construction). This must run BEFORE the fixed-arity gates
         // below (a `f(1,2,3)` into a single `List` slot is "too many" by those rules).
         // Un-gated since W7-51: the driver walks each module ONCE, so the collapse (which is not
         // idempotent — a second run would wrap the synthesized `List` in another `List`) fires
@@ -2601,7 +2601,7 @@ fn variant_pat(name: &str, bindings: Vec<Pattern>) -> Pattern {
 ///   `x?.m(args)` → `match x: Some(__optN): Some(__optN.m(args)); None: None`
 /// The scrutinee is evaluated once by `match`; the payload binds to `__opt{tmp}` (the caller owns the
 /// counter, so temps stay unique within one expression). The arm bodies and field/method access use
-/// only nodes the checker + both engines already handle.
+/// only nodes the checker + the compiler already handle.
 ///
 /// Ctx-free and free-standing on purpose: every consumer that needs this lowering must call THIS
 /// function, so the synthesized spans (and therefore the `KeywordKey`/`WitnessKey`s derived from

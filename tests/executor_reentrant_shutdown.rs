@@ -27,8 +27,8 @@
 //! measured 40/40 identical: `A\nC\nend\n`, exit 0. That is the reference this test pins against,
 //! and the reason it exists — Chezzi's `Executor` must not drift from the ancestor it models.
 //!
-//! **`A` before `C` is NOT part of that reference, and this test does not assert it.** Both engines
-//! stream a job's `print` to the real fd at the moment it runs; neither withholds it until the join,
+//! **`A` before `C` is NOT part of that reference, and this test does not assert it.** The engine
+//! streams a job's `print` to the real fd at the moment it runs; it never withholds output until the join,
 //! so two concurrent jobs interleave in COMPLETION order. CPython's 40/40 above is an artifact of
 //! jobs too short to overlap — give the same three `ThreadPoolExecutor` jobs a few million loop
 //! iterations each and submission order survives **0/30 runs** (measured, 3.14.6). Chezzi behaves

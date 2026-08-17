@@ -1,9 +1,10 @@
 // vm::stream — the CLI's STREAMING stdout/stderr sink (`HostConfig::stream`, `chezzi run` only).
-// The buffered sink (`Vm.out`/`Vm.stderr`) is untouched and stays the parity oracle.
+// The buffered sink (`Vm.out`/`Vm.stderr`) is untouched and stays what the golden test suite
+// captures and compares (`assert_golden_out`).
 //
 // A fiber must never block in `write(2)`: an M:N core worker stuck in a full-pipe write runs no
-// other fiber (the D5 invariant — see `native::Kind::Blocking`), and the serial engine's single thread
-// would stop dead. So a streamed write is a queue push (never blocks, never syscalls) and ONE
+// other fiber (the D5 invariant — see `native::Kind::Blocking`). So a streamed write is a queue push
+// (never blocks, never syscalls) and ONE
 // background thread per stream owns the real handle: one message = one `write_all` + `flush` = a
 // `print` is line-atomic across tasks, the output is UNBUFFERED (a `print(x, end="")` progress marker
 // appears immediately; a killed program keeps every byte it produced), and stdout/stderr keep
@@ -93,7 +94,7 @@ fn spawn_writer<W: Write + Send + 'static>(mut w: W, is_stdout: bool) -> Sender<
 pub(super) fn write_out(vm: &mut super::Vm, b: &[u8]) {
     debug_assert!(
         vm.host.stream,
-        "write_out on a buffered Vm — the parity oracle is Vm::out"
+        "write_out on a buffered Vm — buffered output belongs in Vm::out, not here"
     );
     vm.stdout_writes += 1;
     let tx = OUT.get_or_init(|| spawn_writer(std::io::stdout(), true));

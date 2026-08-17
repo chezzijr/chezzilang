@@ -62,7 +62,7 @@ pub enum CType {
     Ptr,
     /// A flat C struct passed/returned BY VALUE (v1: flat scalar fields only — nested structs and
     /// `str`/`owned_str` fields are rejected by the checker). `name`/`field_names` mirror the Chezzi
-    /// `struct` so a by-value RETURN lowers to a [`NativeRet::Struct`] both engines already build; the
+    /// `struct` so a by-value RETURN lowers to a [`NativeRet::Struct`] the VM already knows how to build; the
     /// libffi structure `Type` (and per-field offsets/size/alignment) is computed from `fields` at call
     /// time via [`struct_layout`] — never stored — so the platform ABI (small-struct-in-registers vs
     /// by-hidden-pointer) is libffi's, not hand-rolled. Fields are the scalar `CType` variants only
@@ -1434,7 +1434,7 @@ impl Cffi {
         }
 
         // Read each field back at its libffi offset and widen to a NativeRet scalar. The name +
-        // field_names make this a `NativeRet::Struct` both engines already lower to a native struct.
+        // field_names make this a `NativeRet::Struct` the VM already lowers to a native struct.
         // SAFETY: byte view over the 8-aligned `u64` rvalue (same lifetime/owner); reads stay within
         // `words*8` bytes (every offset is `< size <= words*8`).
         let rbytes = unsafe { std::slice::from_raw_parts(rvalue.as_ptr() as *const u8, words * 8) };

@@ -245,7 +245,7 @@ pub enum StmtKind {
     },
     /// `assert <cond>` or `assert <cond>, <msg>` — fault with the assertion's source span if `cond`
     /// is false. `cond` must be `Bool`; `msg` (if present) must be `str`. The fault message is the
-    /// custom `msg` if given, else `"assertion failed"`. Lands in both engines (parity discipline).
+    /// custom `msg` if given, else `"assertion failed"`.
     Assert { cond: Expr, msg: Option<Expr> },
     /// A bare expression used as a statement, e.g. `print(x)`.
     Expr(Expr),
@@ -322,7 +322,7 @@ pub struct NativeDecl {
     pub ret: Option<Type>,
     /// `where T: Comparable` bounds declared after the signature (empty when absent). For a native
     /// METHOD sig they name the enclosing `native struct`'s type param and are enforced at each call
-    /// site (e.g. `List.sort`'s `where T: Comparable`); parity-neutral (the engines never read it).
+    /// site (e.g. `List.sort`'s `where T: Comparable`); runtime-inert (the compiler never reads it).
     pub where_bounds: Vec<TypeParam>,
     pub span: Span,
 }
@@ -424,14 +424,14 @@ pub struct FnDecl {
     pub name: String,
     /// Source span of the function-NAME token. Purely diagnostic metadata for editor tooling (the
     /// LSP semantic-token overlay marks the decl name `function`); runtime-inert — never read by
-    /// desugar/compiler/vm/interp, so it is behavior- and parity-neutral (mirrors `Field.name_span`).
+    /// desugar/compiler/vm, so it is behavior-neutral (mirrors `Field.name_span`).
     pub name_span: Span,
     /// Generic type parameters: `fn max[T: Comparable](…)`. Empty for non-generic fns/methods.
     pub type_params: Vec<TypeParam>,
     /// `where T: Comparable` bounds declared after the signature (empty when absent). Kept SEPARATE
     /// from `type_params` by the parser; the checker (`fn_sig`) merges each entry's bounds into the
     /// matching-named `type_params` entry, so the existing generic-call bound machinery enforces them.
-    /// A where entry naming no declared type parameter is a checker error. Runtime-inert (parity-neutral).
+    /// A where entry naming no declared type parameter is a checker error. Runtime-inert (behavior-neutral).
     pub where_bounds: Vec<TypeParam>,
     pub params: Vec<Param>,
     pub ret: Option<Type>, // None ⇒ returns nothing
@@ -453,8 +453,8 @@ pub struct FnDecl {
     /// Doc-comment: the contiguous run of `#` comment lines immediately above this `fn` (blank line
     /// detaches; one leading `# ` stripped per line, lines joined with `\n`). Covers free fns AND
     /// every method / static / associated fn (they all reuse `FnDecl`). Purely informational
-    /// (surfaced on LSP hover); runtime-inert — never read by desugar/compiler/vm/interp, so it is
-    /// behavior- and parity-neutral (mirrors `name_span`).
+    /// (surfaced on LSP hover); runtime-inert — never read by desugar/compiler/vm, so it is
+    /// behavior-neutral (mirrors `name_span`).
     pub doc: Option<String>,
 }
 
@@ -505,7 +505,7 @@ pub struct Param {
     /// arguments into a fresh `List[T]`. At most one per signature; must carry an element type
     /// annotation; may not carry a default. Everything after it is keyword-only. The desugar pass
     /// collapses the surplus positionals into a `List` literal, so the function still compiles to a
-    /// single `List[T]` param slot and both engines ignore this flag.
+    /// single `List[T]` param slot and the flag goes unread after that.
     pub is_variadic: bool,
 }
 
@@ -527,8 +527,8 @@ pub struct Field {
 pub struct Variant {
     pub name: String,
     /// Source span of the variant-NAME token. Diagnostic-only (the editor records a decl-site hover
-    /// here showing the variant's ctor signature); runtime-inert and parity-neutral — never read by
-    /// desugar/compiler/vm/interp, exactly like `Field.name_span` / `FnDecl.name_span`. Synthesized
+    /// here showing the variant's ctor signature); runtime-inert — never read by
+    /// desugar/compiler/vm, exactly like `Field.name_span` / `FnDecl.name_span`. Synthesized
     /// variants (none today) should use `Span::default()`.
     pub name_span: Span,
     pub payload: Vec<Type>,
@@ -556,19 +556,19 @@ pub enum Pattern {
     /// `t` in `Cons(h, t)` or the `a`/`b` in `(a, b)`. A bare identifier at the *top* of an arm is a
     /// nullary `Variant` instead (it names a variant like `None`). The `Span` is the binding-name
     /// token's source position — diagnostic-only (the LSP records a decl-site hover there);
-    /// runtime-inert (both engines route patterns by NAME and ignore the span, like `For.var_spans`).
+    /// runtime-inert (pattern matching routes by NAME and ignores the span, like `For.var_spans`).
     Ident(String, Span),
     Variant {
         name: String,
         bindings: Vec<Pattern>,
         /// Optional `Enum.` qualifier from `case Enum.Variant:` (`None` for the bare `case Variant:`).
-        /// A pure spelling aid: validated by the checker, then ignored by both engines (variant names
+        /// A pure spelling aid: validated by the checker, then ignored at runtime (variant names
         /// are globally unique, so `name` alone still identifies the variant).
         enum_name: Option<String>,
         /// Optional leading module binder from `module.Enum.Variant:` (`None` for the bare/from-import
         /// `Enum.Variant:` form). The binder is the bound module name (last path segment or `as`
         /// alias), mirroring construction (`geo.Color.Red`). Like `enum_name`, a pure spelling aid:
-        /// the checker validates the module is bound and owns the enum, then BOTH engines ignore it
+        /// the checker validates the module is bound and owns the enum, then the runtime ignores it
         /// (the resolved variant identity is identical to the bare form, so runtime is byte-identical).
         module_name: Option<String>,
     },
@@ -900,7 +900,7 @@ pub enum ExprKind {
     Bytes(Vec<u8>),
     /// `r"..."` / `r"""..."""` — a raw-string literal: verbatim contents. NO interpolation (braces
     /// are literal) and NO escapes (`\n` is backslash-n). Its type is plain `str`; a distinct
-    /// variant only so both engines bypass the `{expr}` interpolation pass (parity by construction).
+    /// variant only so the runtime bypasses the `{expr}` interpolation pass entirely (correct by construction).
     RawStr(String),
     Bool(bool),
     Ident(String),
@@ -965,7 +965,7 @@ pub enum ExprKind {
         args: Vec<Expr>,
         /// Call-site named arguments (`f(x=1)`), parsed alongside positional `args`. The desugar pass
         /// (run in `resolver::build_graph`) resolves these against the callee's params, producing a
-        /// fully positional `args` list and clearing `named`. So the checker and both engines only
+        /// fully positional `args` list and clearing `named`. So the checker and the compiler only
         /// ever see `named` empty — they read `args` and ignore this field.
         named: Vec<(String, Expr)>,
         type_args: Vec<Type>,
@@ -977,7 +977,7 @@ pub enum ExprKind {
         /// Source span of the field NAME token (`name`), distinct from the node's `span` which (like
         /// every postfix expr) inherits the receiver's start. Purely diagnostic metadata for editor
         /// tooling (LSP hover keys field-name hovers on this true position); runtime-inert — never
-        /// read by desugar/compiler/vm/interp, so it is behavior- and parity-neutral.
+        /// read by desugar/compiler/vm, so it is behavior-neutral.
         name_span: Span,
     },
     /// `obj[index]`

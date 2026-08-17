@@ -258,7 +258,7 @@ impl Drop for EqObligation {
 /// * `grant_intrinsic` `debug_assert`s that the `(protocol, kind)` it is granting has a row here (or
 ///   in [`INTRINSIC_UNPAIRED`]) — so widening a grant to one more TYPE fails the suite;
 /// * `vm::tests::intrinsic_grants_all_have_vm_arms` type-checks AND runs a generated probe per row on
-///   both engines, so a row must be genuinely granted *and* genuinely callable.
+///   the VM, so a row must be genuinely granted *and* genuinely callable.
 ///
 /// Many-to-many on purpose: `IndexSet` contributes two methods, and `Index`/`IndexSet` share `index`.
 /// `"struct"` is a coarsening — the `Hashable` grant is only for a ZERO-FIELD struct without its own
@@ -1097,7 +1097,7 @@ impl Checker {
             // directional — see the matching arm in `compatible`. `expected` says how the slot will be
             // called, so a value requiring MORE arguments than the slot promises cannot be stored in
             // it: `h := a; h = b` over `fn a(x: int = 1)` / `fn b(x: int)` was check-clean and then
-            // `function 'b' expects 1 argument(s), got 0` at runtime, on both engines. The reverse
+            // `function 'b' expects 1 argument(s), got 0` at runtime. The reverse
             // (a defaulted fn into a plain `fn(int) -> int`) is strictly more permissive and stays legal.
             (
                 Func {
@@ -1183,7 +1183,7 @@ impl Checker {
             // The runtime's own CROSS-TYPE equality arms (`values_equal`), which is what makes these
             // pairs inhabited rather than merely assignable. They live HERE, not as a top-level
             // special case, so they compose through the recursion the same way the runtime does:
-            // `[1.0, 2.0] == [1, 2]` and `{"k": 1.0} == {"k": 1}` answer `true` on both engines
+            // `[1.0, 2.0] == [1, 2]` and `{"k": 1.0} == {"k": 1}` answer `true`
             // (CPython agrees), so rejecting them would have been a lie about "provably disjoint".
             (Int, Float) | (Float, Int) | (Bytes, ByteArray) | (ByteArray, Bytes) => true,
             // The native generic HANDLES belong here too, not on the `_ => compatible` fall-through:
@@ -1953,7 +1953,7 @@ impl Checker {
             return self.grant_intrinsic(protocol, ty);
         }
         // A ZERO-FIELD struct WITHOUT an explicit `hash(self)` method is intrinsically `Hashable`: it
-        // has no state to hash, so both engines return a constant hash for it (with `==`'s type-tag
+        // has no state to hash, so the runtime returns a constant hash for it (with `==`'s type-tag
         // guard keeping distinct empty-struct types unequal despite the hash collision). This lets
         // `struct S: pass` be used as a Set element / Map key without an explicit `hash(self)` method.
         // The `!methods.contains_key("hash")` clause MUST mirror the runtime `struct_hash` guard
@@ -2678,7 +2678,7 @@ impl Checker {
             // sendable-checked at each widening site (`assignable`). A witness that genuinely can't be
             // serialized (one carrying an FFI/native handle, or a mid-`recover:` generator) is caught
             // at the RUNTIME airlock (`ensure_crossable` over `has_handle`), which is an exhaustive,
-            // recoverable safety net identical on both engines — a checker-permissive type here is
+            // recoverable safety net — a checker-permissive type here is
             // never UB, at worst a deferred fault.
             Ty::Protocol(..) => true,
             // A first-class builtin fn value is pure code (no captured environment) — always
@@ -3098,7 +3098,7 @@ impl Checker {
                 // guard was split: `struct Box[T]` with `fn eq[U](self, o: U) -> bool where T:
                 // Comparable` fed `Box[Tag]` through `fn eqm[T: Eq](a, b) -> bool: return a.eq(b)`
                 // was `ok: no type errors` then `runtime error: struct 'Tag' has no method
-                // 'compare'` on BOTH engines — verbatim the class W7-41/W7-45/W7-53 exist to close,
+                // 'compare'` — verbatim the class W7-41/W7-45/W7-53 exist to close,
                 // re-opened in the mirror direction while closing the escape hatch's grant.
                 //
                 // So: bounds first (a `where`-less escape hatch has none, so it still costs

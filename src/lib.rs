@@ -3,7 +3,7 @@
 //! This is the real crate root: both binaries are thin shims that link this library. `src/main.rs`
 //! (the `chezzi` CLI) and `src/bin/chezzi-lsp.rs` (the LSP server) declare no front-end modules of
 //! their own — they `use chezzi::{…}`. The front-end therefore compiles **once**, and its module
-//! unit tests + the two-engine VM/interp parity tests + the grammar `conformance` suite run **once**,
+//! unit tests + the golden VM tests + the grammar `conformance` suite run **once**,
 //! here in the lib's test target (a plain `cargo test` no longer double-compiles/double-runs them).
 //!
 //! NOTE for future CLI work: `src/main.rs` is the *bin* crate, so across the crate boundary it can

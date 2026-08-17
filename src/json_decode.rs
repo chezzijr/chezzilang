@@ -1,9 +1,9 @@
 //! Type-directed JSON decoding (M8): the `TypeDescriptor` that drives `json.decode[T](s)`, built
-//! once from the target type `T` and then walked identically by both engines to coerce a parsed
+//! once from the target type `T` and then walked by the VM to coerce a parsed
 //! `Json` value into a concrete struct / map / list / scalar.
 //!
-//! The descriptor is fully self-contained — a struct target embeds its field descriptors — so an
-//! engine needs no type metadata at decode time. Recursive struct targets are therefore rejected
+//! The descriptor is fully self-contained — a struct target embeds its field descriptors — so the
+//! VM needs no type metadata at decode time. Recursive struct targets are therefore rejected
 //! (they would make the descriptor infinite); decode them via the dynamic `Json` enum instead.
 
 use crate::ast::{Field, Type};
@@ -34,8 +34,8 @@ pub enum TypeDescriptor {
     },
 }
 
-/// ROOT REDESIGN — module-aware resolution context for building a decode descriptor. Both engines
-/// implement it; it maps a syntactic struct reference (a bare `Named` or a qualified `module.Name`,
+/// ROOT REDESIGN — module-aware resolution context for building a decode descriptor. The VM
+/// implements it; it maps a syntactic struct reference (a bare `Named` or a qualified `module.Name`,
 /// resolved *in a given module*) to its program-global IDENTITY KEY + declared fields + declaring
 /// module — so nested field struct types expand in their OWN defining module's scope, never the call
 /// site's. This is why one canonical key kills the whole "decode against the wrong layout" bug class.
@@ -152,7 +152,7 @@ fn struct_descriptor(
 }
 
 /// The human-readable kind of a parsed `Json` value, named by its enum variant — used in decode
-/// error messages ("found number"). Shared so both engines word errors identically.
+/// error messages ("found number"). Single source of truth so error wording stays consistent.
 pub fn json_kind(variant: &str) -> &'static str {
     match variant {
         "Null" => "null",

@@ -1,7 +1,7 @@
 # examples/bst.chz — binary search tree: recursive struct + Option child links.
 #
 # Showcases (round-2 probe, Domain A): a SELF-REFERENTIAL struct — `Node` holds two
-# `Node?` children — built and walked recursively across both engines. Confirms recursive
+# `Node?` children — built and walked recursively. Confirms recursive
 # struct field resolution, `Option[Node]` construction (`Some(Node(...))` / `None`), in-place
 # field assignment to rebuild links (gap #2), and by-reference list accumulation.
 #

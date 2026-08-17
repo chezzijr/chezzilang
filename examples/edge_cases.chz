@@ -1,8 +1,8 @@
 # examples/edge_cases.chz — a deterministic torture test for the corners of the language.
 #
 # Every runtime fault is wrapped in `recover:` so the program runs to completion and prints a
-# stable line for each case. This pins exact output on BOTH engines (VM + interp), so it catches
-# wrong-but-agreeing behaviour, not just engine divergence. No clocks / network / args — fully
+# stable line for each case. This pins exact output against the golden, so it catches
+# wrong-but-plausible behaviour, not just a crash. No clocks / network / args — fully
 # reproducible.
 
 # A faulting thunk runner: prints "label: ok V" on success or "label: <message>" on a caught fault.

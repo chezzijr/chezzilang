@@ -1,6 +1,6 @@
 # examples/list_hof_shrink.chz — map/filter/fold over a SNAPSHOT: a callback that mutates (shrinks)
 # the receiver list does NOT perturb the iteration sequence. (Regression: VM used to index the live
-# list and panic with an out-of-bounds when a callback popped the receiver. Both engines now agree.)
+# list and panic with an out-of-bounds when a callback popped the receiver. Fixed now.)
 
 xs := [1, 2, 3, 4, 5]
 fn dbl(x: int) -> int:

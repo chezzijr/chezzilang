@@ -1391,8 +1391,7 @@ impl Vm {
     }
 
     /// `Channel[T]` methods (C2/C4): `send` (move-on-send, deep-copied in), `recv` (FIFO; empty =
-    /// deadlock fault under the sequential executor), `len`. Mirrors `interp::eval_channel_method` —
-    /// error strings byte-identical (parity-tested).
+    /// deadlock fault under the sequential executor), `len`.
     pub(super) fn channel_method(
         &mut self,
         h: GcRef,
@@ -1452,7 +1451,7 @@ impl Vm {
                 // (`native_reentry > 0`) can't snapshot-park (its host-stack loop frame is not
                 // capturable), so it DEMOTES the worker thread: block in place on the channel condvar +
                 // spin a replacement, resuming on a sibling `send` (Go's `handoffp`). Handled before
-                // `chan_recv_step` (which only covers the snapshot-park / cooperative-park / fault
+                // `chan_recv_step` (which only covers the snapshot-park / block-in-place / fault
                 // paths). `demote_recv_block` is itself closed-aware (a `close` faults the demoted recv).
                 // A `timer(ms)` channel is excluded from demote — it has no sibling sender to block on;
                 // `chan_recv_step` synthesises its value (inline-sleep to the deadline) at any reentry.
@@ -1485,7 +1484,7 @@ impl Vm {
             "try_recv" => {
                 // A1: non-blocking poll. Unlike `recv` it never touches the scheduler /
                 // `native_reentry` / `suspend` / `ip` — it always returns immediately with an
-                // `Option`: `Some(v)` if queued, `None` if empty. Mirrors `interp::eval_channel_method`.
+                // `Option`: `Some(v)` if queued, `None` if empty.
                 self.arity_err("try_recv", args, 0, span)?;
                 let core = self.channel_core(h);
                 let popped = core.q.lock().unwrap().pop();
@@ -1583,9 +1582,10 @@ impl Vm {
     /// Enqueue an already-wire-serialized message into a channel and wake any receivers — the shared
     /// tail of `send`/`try_send` (after their respective closed-channel guards). On the M:N engine the
     /// enqueue + wake of every fiber parked on this channel is atomic under the sched lock
-    /// ([`MnSched::send_wake`]) so a sibling parking concurrently can't be lost. With no scheduler
-    /// (cooperative / cross-nursery / top-level) it enqueues + notifies the core condvar (a demoted
-    /// in-callback recv) + re-adds any cooperative fiber parked on this channel.
+    /// ([`MnSched::send_wake`]) so a sibling parking concurrently can't be lost. With no scheduler in
+    /// scope (an eager `Executor` job or the top-level VM) it enqueues + notifies the core condvar (a
+    /// demoted in-callback recv) + wakes any other live sched's bucket for this channel
+    /// ([`Vm::wake_on_send`]).
     pub(super) fn channel_send_wire(&mut self, h: GcRef, w: WireValue) {
         let core = self.channel_core(h);
         // Route the enqueue+wake through whatever sched is in scope. A worker shell holds it in
@@ -1613,7 +1613,8 @@ impl Vm {
     /// that cannot park (top level with no nursery, or inside a native callback where the host stack
     /// can't be unwound), faults with the shared full-deadlock message. The space-check + enqueue is
     /// kept atomic under the sched lock (M:N: [`MnSched::send_wake_bounded`]) so concurrent senders
-    /// can't over-fill; the cooperative engine is single-thread, so a bare core-lock check suffices.
+    /// can't over-fill; with no scheduler in scope there is only one sender on its own thread, so a
+    /// bare core-lock check suffices.
     pub(super) fn chan_send_step(
         &mut self,
         h: GcRef,
@@ -1754,7 +1755,7 @@ impl Vm {
         };
         if enqueued {
             core.cv.notify_all();
-            self.wake_on_send(h); // wake a cooperative receiver parked on this channel's `recv`
+            self.wake_on_send(h); // wake a receiver parked on this channel's `recv`
         }
         enqueued
     }
@@ -1775,8 +1776,8 @@ impl Vm {
     /// Bounded-channel backpressure — after a `recv` frees a slot on a BOUNDED channel, wake any fiber
     /// parked on a full `send` to it. No-op for an unbounded channel (no sender ever parks there — the
     /// common `recv` path pays only a `cap.is_none()` check). Routes exactly like `channel_send_wire`'s
-    /// wake: an active sched (`mn` / `mn_enlist_sched`) → [`MnSched::recv_wake`]; else the cooperative
-    /// engine drains `blocked_on[key]` (`wake_on_send`) + notifies the core condvar (a demoted sender).
+    /// wake: an active sched (`mn` / `mn_enlist_sched`) → [`MnSched::recv_wake`]; else, with no
+    /// scheduler in scope, [`Vm::wake_on_send`] wakes any other live sched's bucket for this channel.
     pub(super) fn wake_senders(&mut self, h: GcRef) {
         let core = self.channel_core(h);
         if core.cap.is_none() {
@@ -1791,7 +1792,7 @@ impl Vm {
         }
     }
 
-    /// One blocking-`recv` step on the snapshot-park / cooperative-park / fault paths (NOT the
+    /// One blocking-`recv` step on the snapshot-park / block-in-place / fault paths (NOT the
     /// in-callback demote path, which `recv` handles directly). Pops a value if one is waiting,
     /// signals `ClosedEmpty` on a closed-and-drained channel, or parks the running fiber (re-rooting
     /// the receiver + rewinding `ip` so the calling op re-runs on resume, setting `suspend`). Shared
@@ -1812,12 +1813,11 @@ impl Vm {
         if self.deferring == 0 {
             self.deadline_halt(span)?;
         }
-        // CANCELLATION CHECKPOINT (engine-agnostic — the serial drain in `drain_cancelled_children`
-        // depends on it, and it replaces the two `mn`-gated checks that used to sit inside the timer
-        // and snapshot-park branches). At a `recv` checkpoint CANCEL WINS over a queued value, a
-        // tripped done-latch and a fired timer — identically on both engines. `native_reentry == 0`
-        // mirrors the park gate: inside a native callback the caller's Rust-stack state cannot be
-        // unwound here.
+        // CANCELLATION CHECKPOINT — unified here rather than duplicated (it replaces the two
+        // `mn`-gated checks that used to sit inside the timer and snapshot-park branches). At a `recv`
+        // checkpoint CANCEL WINS over a queued value, a tripped done-latch and a fired timer.
+        // `native_reentry == 0` mirrors the park gate: inside a native callback the caller's Rust-stack
+        // state cannot be unwound here.
         if self.native_reentry == 0 && self.cancel_requested() {
             self.cancelled = true;
             return Err(self.err("cancelled".to_string(), span));
@@ -1887,14 +1887,16 @@ impl Vm {
                     self.park_recv(h);
                     return Ok(RecvStep::Parked);
                 }
-                // Cooperative VM / interp / a `--parallel` callback (`native_reentry > 0`): inline-sleep
-                // to the deadline (single-thread, or an already-blocking host-stack context), synthesise.
+                // `mn.is_none()` (the top-level VM, the inline outermost-`parallel:` builder VM, or
+                // an eager `Executor` job's `Vm` — mod.rs:1101 enumerates the same three) / an M:N
+                // callback (`native_reentry > 0`): inline-sleep to the deadline (single-thread, or an
+                // already-blocking host-stack context), synthesise.
                 // Limitation (vs `sleep_ms`, which DEMOTES at `native_reentry > 0`): a `timer.recv()`
                 // reached inside a native callback under `--parallel` pins THIS worker for the timeout
                 // (no replacement is spun). Sound — siblings on the other N-1 workers still progress —
                 // but lower throughput than `sleep_ms`'s demote. Acceptable for v1; demote-reuse is a
-                // future improvement. The cooperative/interp inline-sleep blocks siblings the same way
-                // their `sleep_ms` already does (single-thread).
+                // future improvement. This inline-sleep blocks in place the same way an un-demoted
+                // `sleep_ms` already does (single-thread).
                 //
                 // W7-16 — the wait is CHUNKED, not one `thread::sleep`: this deadline is ours, so it
                 // stays a cancellation + `--timeout` checkpoint for its whole duration. Pre-fix an
@@ -1946,8 +1948,8 @@ impl Vm {
         if self.can_block_in_place() {
             return self.block_recv(&core, span);
         }
-        // A native callback on the cooperative engine: the host stack cannot be unwound to park, and
-        // there is no thread of our own to block. Fault, as before.
+        // A native callback with no thread of its own to block on: the host stack cannot be unwound
+        // to park either. Fault, as before.
         Err(self.err(EMPTY_RECV_DEADLOCK.to_string(), span))
     }
 
@@ -2352,12 +2354,12 @@ impl Vm {
     /// operand stack (`stack[base..base+n]`, source order). Poll source order: the first channel with
     /// a queued value (or a fired timer) wins → drop the handles, push the value, jump to that arm's
     /// body. A closed+empty arm is skipped. Nothing ready → run `else` (jump), else fault (all-closed)
-    /// or block: an M:N snapshot-park, an in-place condvar wait for a party that owns its OS thread
-    /// (an eager `Executor` job / top-level `main`, plus — for a TIMED wait only — either of those
-    /// inside a native callback), or the cooperative multi-channel park. A live timer arm is just
-    /// another arm on every one of those; only the cooperative fiber, which has no thread to clamp,
-    /// still inline-sleeps to the soonest deadline (`gaps.md` N10, and W7-14 for why the remaining
-    /// inline-sleep is exactly that narrow).
+    /// or block: an M:N snapshot-park, an M:N in-callback demote, or an in-place condvar wait for a
+    /// party that owns its OS thread (an eager `Executor` job / top-level `main`, plus — for a TIMED
+    /// wait only — either of those inside a native callback). A live timer arm is just another arm on
+    /// every one of those; only the inline outermost-`parallel:` builder mid-body, for which
+    /// `owns_os_thread()` is false, still inline-sleeps to the soonest deadline (`gaps.md` N10, and
+    /// W7-14 for why the remaining inline-sleep is exactly that narrow).
     pub(super) fn op_wait_poll(&mut self, meta: &WaitMeta, span: Span) -> Result<(), RuntimeError> {
         // W7-17 — `--timeout` above the cancellation checkpoint and suppressed inside a `defer`, for
         // exactly the reasons `chan_recv_step` documents at the same seam: the deadline outranks a
@@ -2607,7 +2609,7 @@ impl Vm {
             // `wait:` timer arm: measured 3004 ms under `--timeout=300`, with the post-wait statement
             // running. The deadline is OURS, so it is a checkpoint for its whole duration. N10 is
             // untouched — this still sleeps to the deadline and takes the timer arm; it just observes
-            // the halts on the way, exactly as `chan_recv_step`'s cooperative timer branch already does.
+            // the halts on the way, exactly as `chan_recv_step`'s own timer inline-sleep already does.
             self.block_until_deadline(deadline, span)?;
             self.take_wait_arm(base, Value::bool(true), meta.arm_targets[i]);
             return Ok(());
@@ -2721,7 +2723,7 @@ impl Vm {
     }
 
     /// `Shared[T]` methods (C3/C4): `get` (copies out), `set` (copies in), `update` (read-modify-write
-    /// via the re-entrant call path). Mirrors `interp::eval_shared_method`. The box is re-rooted on
+    /// via the re-entrant call path). The box is re-rooted on
     /// the operand stack across `update`'s nested call (the receiver was popped in `do_method_call`).
     pub(super) fn shared_method(
         &mut self,
@@ -2773,15 +2775,15 @@ impl Vm {
     /// `RwShared[T]` methods: `get`/`set` (read/write-guarded copy out/in), `read(f)` (SHARED read
     /// guard: clone out, drop guard, run `f`, return its result — NO write-back), `write(f)`
     /// (EXCLUSIVE write guard: a write-locked read-modify-write, the `Shared.update` shape under a
-    /// `RwLock`). Mirrors `interp::eval_rwshared_method`. As with `Shared.update`, the lock guard is
+    /// `RwLock`). As with `Shared.update`, the lock guard is
     /// dropped across the user closure (a `RwLock` guard is not reentrant) and the receiver is
     /// re-rooted on the operand stack so the nested call's GC keeps the core's contents traced (the
     /// receiver was popped off the stack in `do_method_call`). `write`'s whole RMW is serialised
-    /// across threads by a separate `update_lock` (held only under `--parallel`) — the `RwLock` write
-    /// guard alone is NOT enough because it is dropped across the closure, so two writers could clone
-    /// the same base and lose an update (same discipline as `Shared.update`). A closure that
-    /// re-acquires the SAME box's write lock (or a write inside a read) deadlocks — a documented edge,
-    /// mirroring `Shared.update`'s same-box re-entry limit.
+    /// across threads by a separate `update_lock`, held UNCONDITIONALLY for the entire RMW — the
+    /// `RwLock` write guard alone is NOT enough because it is dropped across the closure, so two
+    /// writers could clone the same base and lose an update (same discipline as `Shared.update`). A
+    /// closure that re-acquires the SAME box's write lock (or a write inside a read) deadlocks — a
+    /// documented edge, mirroring `Shared.update`'s same-box re-entry limit.
     pub(super) fn rwshared_method(
         &mut self,
         h: GcRef,
@@ -2844,9 +2846,8 @@ impl Vm {
             // `Set[E]` (len/contains/for_each/fold). Checker-gated to the recognized container head.
             // They walk the stored heap-independent `WireValue::List`/`Map`/`Set` Vec and `from_wire`
             // ONE entry per step — O(1) memory, never materializing the whole inner (what `get`/`read`
-            // do). serial ==
-            // M:N is natural: the walk reads a heap-independent wire form, so both engines see identical
-            // elements. The read-only `len`/`at`/`slice` take the shared guard only for the brief clone
+            // do). This is deterministic by construction: the walk reads a heap-independent wire form,
+            // so every reader sees identical elements. The read-only `len`/`at`/`slice` take the shared guard only for the brief clone
             // (no user code under it). `for_each`/`fold` RE-ACQUIRE the shared guard PER ELEMENT, clone
             // one wire element, DROP the guard, then run the closure — mirroring `read`'s
             // clone-out-then-drop, per element. The guard is NEVER held across the user closure (or the
@@ -3313,7 +3314,7 @@ impl Vm {
     /// `cas(expected, new) -> bool` (swap iff the box equals `expected`), `add`/`sub` (numeric RMW,
     /// returns the new value). Each is a single lock-op-unlock, so the RMW is atomic across threads —
     /// no user closure runs under the lock (unlike `Shared.update`), so no `update_lock` is needed.
-    /// Mirrors `interp::eval_atomic_method`. `add`/`sub` use the language's `checked_add`/`checked_sub`
+    /// `add`/`sub` use the language's `checked_add`/`checked_sub`
     /// (int overflow faults, like the `+`/`-` operators) and plain float arithmetic.
     pub(super) fn atomic_method(
         &mut self,
@@ -3422,7 +3423,8 @@ impl Vm {
 
     /// `AtomicInt` methods: `load`, `store`, `exchange`, `cas(expected, new) -> bool`, `add`/`sub`
     /// (returns the NEW value). Backed by a raw lock-free `AtomicI64` — every op uses `SeqCst` ordering
-    /// (matches the sequential consistency `Atomic`'s Mutex gave, so serial == M:N is byte-identical).
+    /// (matches the sequential consistency `Atomic`'s Mutex gave — every op still appears to happen
+    /// in some single global order).
     /// `add`/`sub` KEEP the i64-overflow fault via a CHECKED `compare_exchange` CAS-loop (NOT raw
     /// `fetch_add`/`fetch_sub`, which wrap silently) — error string byte-identical to `atomic_method`'s.
     pub(super) fn atomic_int_method(
@@ -3489,8 +3491,7 @@ impl Vm {
 
     /// `Executor` methods (C5/escape hatch): `submit` (enqueue a detached task closure, rejected once
     /// shut), `shutdown` (graceful — drain FIFO via the re-entrant call path), `shutdown_now` (discard
-    /// pending). Mirrors `interp::eval_executor_method` — error strings byte-identical (parity-tested).
-    /// The executor handle is re-rooted on the operand stack across the drain, and each popped task is
+    /// pending). The executor handle is re-rooted on the operand stack across the drain, and each popped task is
     /// rooted across its nested call (the receiver was popped in `do_method_call`).
     pub(super) fn executor_method(
         &mut self,
@@ -3537,18 +3538,16 @@ impl Vm {
                         span,
                     ));
                 }
-                // The task closure crosses the airlock **by value** on BOTH engines
+                // The task closure crosses the airlock **by value**
                 // (`wire_callable` → `to_wire`: proto + deep-copied captures + home index), exactly
-                // like plain `spawn` (`cross_spawn_callee`). This is the sole serial==M:N invariant:
-                // routing coop through the SAME wire path runs the generator airlock
-                // enforcement on the cooperative engine too, and isolates captures at submit time, so
-                // serial and M:N behave identically for every submitted closure. (Earlier the coop
-                // branch queued the callable's own `Handle` — captures shared by reference, bypassing
-                // `to_wire` — to mirror the tree-walk `interp` oracle; that oracle has been removed, so
-                // the by-handle preservation was pure serial-vs-M:N divergence and is retired.)
-                // Under `--parallel` a pool thread runs the closure the moment it is submitted; under
-                // the cooperative engine the inline drain (`from_wire` at `shutdown`) rebuilds an
-                // isolated closure over this same heap home. Queued captures stay rooted via the
+                // like plain `spawn` (`cross_spawn_callee`). Routing every submit through this SAME
+                // wire path runs the generator airlock enforcement uniformly, and isolates captures at
+                // submit time, for every submitted closure. (Before 2026-08-16 the since-removed
+                // engine instead queued the callable's own `Handle` — captures shared by reference,
+                // bypassing `to_wire` — to mirror the also-removed tree-walk `interp` oracle; both are
+                // gone, so the by-handle preservation was pure divergence and was retired with them.)
+                // A pool thread runs the closure the moment it is submitted — the queue never holds a
+                // pending closure to drain later. Queued captures stay rooted via the
                 // executor handle's `children()` (the `Closure` arm of `collect_core_gcrefs`) — which
                 // on M:N now roots nothing, since nothing sits in the queue.
                 let w = self.wire_callable(args[0], span)?;
@@ -3672,7 +3671,7 @@ impl Vm {
         }
     }
 
-    /// Mirrors `interp::Interp::drain_live_executors` (C5 / A2): at a clean program end, gracefully
+    /// C5 / A2 — at a clean program end, gracefully
     /// drain every `Executor` created but never explicitly `shutdown`/`shutdown_now`-ed, in creation
     /// order, reusing the shipped `shutdown` path (FIFO, run-all — every queued job runs and the
     /// lowest-submission-index fault propagates, W7-5). A hard `std.os.exit` is not drained (the

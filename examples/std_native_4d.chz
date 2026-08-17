@@ -1,6 +1,6 @@
-# Phase 4d three-engine parity golden: the five file-backed native modules
+# Phase 4d golden: the five file-backed native modules
 # (std.math / std.io / std.os / std.rand / std.fs). Every value is deterministic
-# (rand is seeded; getcwd is matched, not printed) so interp, the serial VM, and
+# (rand is seeded; getcwd is matched, not printed) so
 # the M:N OS-thread engine must produce byte-identical stdout.
 import std.math
 import std.io

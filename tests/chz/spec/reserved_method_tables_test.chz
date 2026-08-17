@@ -4,7 +4,7 @@
 # (sigs byte-match the retired arms, runtime dispatch untouched), so every assertion below must hold
 # exactly as before. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 #
-# The Channel tests stay single-task + unbounded so `recv`/for-drain never block the serial oracle.
+# The Channel tests stay single-task + unbounded so `recv`/for-drain never block the suite.
 
 # ---- Channel: send / recv / len / cap ----
 

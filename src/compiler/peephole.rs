@@ -108,7 +108,7 @@ fn try_fold_tail(out: &[Op]) -> Option<Fold> {
                     // Float Div/Mod by zero is total IEEE-754 (inf/-inf/NaN) at runtime — it no
                     // longer faults. We still bail rather than const-fold a zero divisor: not folding
                     // is always correct, and folding inf/NaN at compile time risks drifting from the
-                    // (identical, parity-checked) runtime arith path.
+                    // runtime arith path.
                     let r = match &out[m - 1] {
                         Op::Add => Some(a + b),
                         Op::Sub => Some(a - b),
@@ -353,8 +353,9 @@ mod tests {
 
     /// §6d regression — `WaitPoll`'s `arm_targets`/`else_target` are absolute jump targets and MUST
     /// be relocated like `Jump`. A fold before the arm bodies shifts their indices; without
-    /// relocation the arm target lands one or more ops past the bind prologue (the cooperative `wait`
-    /// arm-body parity bug: VM 65 vs interp 66). `[CI2, CI3, Add, WaitPoll{arms:[5,7]}, body@5..]` —
+    /// relocation the arm target lands one or more ops past the bind prologue (this is how the bug was
+    /// originally caught: the since-removed cooperative engine landed at 65, the also-since-removed
+    /// tree-walk interp at 66). `[CI2, CI3, Add, WaitPoll{arms:[5,7]}, body@5..]` —
     /// the fold removes 2 ops so the arm bodies move 5→3 and 7→5.
     fn waitpoll(arm_targets: Vec<usize>, else_target: Option<usize>) -> Op {
         let n = arm_targets.len();

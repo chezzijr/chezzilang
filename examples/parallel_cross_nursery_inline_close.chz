@@ -8,7 +8,7 @@
 #
 #   chezzi run --parallel examples/parallel_cross_nursery_inline_close.chz
 #
-# NOTE: under the cooperative engine (plain `run`) this STILL faults deadlock — case A is M:N-only.
+# NOTE: `--parallel` is an accepted no-op alias — M:N is the only engine, so plain `run` succeeds too.
 fn inner():
     spawn:
         print("inner ran")

@@ -6,7 +6,7 @@
 //! the checker and the compiler diverged on how a string is chunked, the checker could pass a
 //! program the compiler then mis-emits (or vice versa). One parser, two callers.
 //!
-//! Mirrors `interp::interpolate` (the runtime path) at compile time: `{{`/`}}` are literal braces;
+//! The compile-time chunking rule: `{{`/`}}` are literal braces;
 //! each `{ … }` is lexed + parsed as an expression (with an optional `:spec` format spec).
 //!
 //! Errors are returned as a neutral [`InterpError`] (message + span); each caller maps it to its own
@@ -32,9 +32,8 @@ pub(crate) struct InterpError {
     pub span: Span,
 }
 
-/// Split an interpolated string literal into literal/expr chunks, mirroring `interp::interpolate`
-/// (but at compile time): `{{`/`}}` are literal braces; each `{ … }` is lexed + parsed as an
-/// expression. A malformed interpolation surfaces here as an error.
+/// Split an interpolated string literal into literal/expr chunks: `{{`/`}}` are literal braces;
+/// each `{ … }` is lexed + parsed as an expression. A malformed interpolation surfaces here as an error.
 pub(crate) fn parse_interpolation(lit_tok: &StrLit, span: Span) -> Result<Vec<Chunk>, InterpError> {
     let raw: &str = lit_tok;
     // The literal's content-index → source-`Span` map, resolved ONCE for all its fragments.

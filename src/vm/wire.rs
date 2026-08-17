@@ -194,15 +194,15 @@ pub enum WireValue {
     /// An opaque C-ABI `ptr` handle crossing the airlock **by value** (the raw `usize` address). A C
     /// `void*` is heap-independent — the same address is meaningful in any worker's heap — so
     /// `from_wire` allocates a fresh `Obj::Ptr` wrapping the identical address. Holds no `GcRef`, so it
-    /// is cross-safe (`has_handle` leaves it `false` via the `_` arm) and works on the serial engine
-    /// and the M:N snapshot fast path alike.
+    /// is cross-safe (`has_handle` leaves it `false` via the `_` arm) and works on the M:N snapshot
+    /// fast path too.
     Ptr(usize),
     /// A first-class UNIVERSE builtin fn (`print`/`ord`/`chr`/`panic`) crossing the airlock **by
     /// value** — it is pure code identified only by name (no `GcRef`, no captured heap state), so
     /// `from_wire` allocates a fresh `Obj::Builtin` with the same name on the other side, meaningful
     /// in any worker. Unlike a `Func`/`Closure` (a `Handle` into this heap), it genuinely crosses an
     /// OS-thread boundary — cross-safe (`has_handle` leaves it `false` via the `_` arm), so a builtin
-    /// captured into a spawned task works on the serial AND the M:N engine alike.
+    /// captured into a spawned task works correctly on the M:N engine.
     Builtin(Box<str>),
     /// A native fn (`Obj::Native`, e.g. `math.sqrt`) carried across the airlock **by value** — it is
     /// pure code: a `fn` pointer (`Copy`, so heap-independent — the same code address is valid in any
@@ -226,8 +226,8 @@ pub enum WireValue {
     /// shared `Arc<Program>`, so it is meaningful in any worker), its captures wired recursively, and
     /// its `home` as an index into the parent's `module_objs` (resolved via `Vm::home_index` at wire
     /// time, `None` for a home not in the table) — never a heap-local `GcRef`. As of B3.3 the GENERIC
-    /// `to_wire` also produces this arm (not just `Executor.submit`), so a closure crosses as data on
-    /// every airlock (spawn args/callees, Channel/Shared, module snapshot) on both engines identically.
+    /// `to_wire` also produces this arm (not just `Executor.submit`), so a closure crosses as data the
+    /// same way on every airlock (spawn args/callees, Channel/Shared, module snapshot).
     /// `from_wire` rebuilds the closure over the worker's reconstructed home module.
     Closure {
         /// Per-serialization identity (see [`WireValue::Backref`]) — a self-capturing recursive closure
@@ -241,8 +241,8 @@ pub enum WireValue {
     /// (shared via `Arc<Program>`) + its `home` index (as [`Closure`](WireValue::Closure)), no captures.
     /// Kept DISTINCT from `Closure` on purpose — a bare fn and a closure are observationally different
     /// (`str(func)` renders `<fn NAME>`, `str(closure)` renders `<closure>`), so collapsing a func into
-    /// an empty-capture `Closure` would render `<closure>` on the M:N snapshot rebuild path while the
-    /// serial engine's live `Obj::Func` renders `<fn NAME>` — a parity divergence. Holds no `GcRef`
+    /// an empty-capture `Closure` would wrongly render `<closure>` on the M:N snapshot rebuild path,
+    /// where an uncrossed `Obj::Func` renders `<fn NAME>`. Holds no `GcRef`
     /// (`has_handle` leaves it `false`), so a bare fn crosses an OS-thread boundary cleanly.
     Func {
         proto: ProtoId,

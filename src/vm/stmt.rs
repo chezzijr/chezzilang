@@ -429,7 +429,7 @@ impl Vm {
 
     /// `obj[start:end:step]` — Python-style slice copy of a list/str, or a struct's `slice`. Each
     /// component arrives as `Nil` (omitted → `None`) or `Int`; the shared `slice::slice_indices`
-    /// resolver owns all the clamp/step/reverse math (byte-identical with the serial-VM oracle).
+    /// resolver owns all the clamp/step/reverse math.
     pub(super) fn get_slice(&mut self, span: Span) -> Result<(), RuntimeError> {
         let step = self.pop();
         let end = self.pop();
@@ -555,7 +555,6 @@ impl Vm {
         let proto = *def
             .methods
             .get(method)
-            // Wording byte-identical to `interp::call_struct_method` (the engines parity-test stdout).
             .ok_or_else(|| self.err(format!("struct '{name}' has no method '{method}'"), span))?;
         let home = self.module_objs[def.module_idx];
         // Guarded (B1): `index`/`slice`/`set_index` overloads run from native opcode handlers whose
@@ -986,7 +985,7 @@ impl Vm {
     /// `print(args…, sep=, end=)`. Stack layout on entry: `[args… , sep, end]`. Pops `end` then
     /// `sep` (both `str`, copied out so they're no longer GC roots), stringifies the `argc` user
     /// args (kept rooted on the stack across `stringify`, which can run user code + GC), joins with
-    /// `sep` and appends `end`. Byte-identical join/append semantics to the serial-VM oracle.
+    /// `sep` and appends `end`.
     pub(super) fn do_print_sep(&mut self, argc: usize, span: Span) -> Result<(), RuntimeError> {
         let end = self.pop();
         let sep = self.pop();
@@ -1412,7 +1411,7 @@ impl Vm {
     }
 
     /// `List()` → a fresh empty list (the `List[T]()` turbofish form; mirrors `Set()`); `List(it)` →
-    /// a list drained from ANY for-iterable. Mirrors `interp::Interp::builtin_list`.
+    /// a list drained from ANY for-iterable.
     pub(super) fn builtin_list(
         &mut self,
         args: &[Value],
@@ -1435,7 +1434,7 @@ impl Vm {
     }
 
     /// `Map(it)` → a map from an iterable of 2-tuples `(k, v)` (last-wins on dup keys, like the
-    /// `{k: v}` literal). Mirrors `interp::Interp::builtin_map`. A struct key's `hash()` re-enters the
+    /// `{k: v}` literal). A struct key's `hash()` re-enters the
     /// VM, so the in-flight key/value are rooted via `hash_key_rooted` while the building map is rooted.
     pub(super) fn builtin_map(
         &mut self,
@@ -1786,7 +1785,7 @@ impl Vm {
         Ok(Value::obj(self.heap.alloc(Obj::Str(s.into()))))
     }
 
-    /// `ord(s)` — codepoint of the first char of `s`. Mirrors `interp::builtins::ord` (errors too).
+    /// `ord(s)` — codepoint of the first char of `s`.
     pub(super) fn builtin_ord(
         &mut self,
         args: &[Value],
@@ -1808,7 +1807,7 @@ impl Vm {
         ))
     }
 
-    /// `chr(n)` — the 1-char str for codepoint `n`. Mirrors `interp::builtins::chr` (errors too).
+    /// `chr(n)` — the 1-char str for codepoint `n`.
     pub(super) fn builtin_chr(
         &mut self,
         args: &[Value],
@@ -1858,8 +1857,8 @@ impl Vm {
     pub(super) fn set_global_slot(&mut self, module: GcRef, slot: u32, value: Value) {
         // W6-19 — a WRITE can be a task's FIRST module-global access (`fn worker(): g = 99`), and on a
         // worker the module's slots fault in LAZILY: without this the write indexed an empty `slots` vec
-        // and PANICKED the pool thread (`index out of bounds: the len is 0`) while `--serial` printed the
-        // right answer. Rooted here (the sole slot-write helper) so both write ops and any future caller
+        // and PANICKED the pool thread (`index out of bounds: the len is 0`) while the now-removed
+        // `--serial` engine printed the right answer. Rooted here (the sole slot-write helper) so both write ops and any future caller
         // are covered; a free no-op wherever no snapshot is installed (top-level `main`).
         self.ensure_module_faulted(module);
         // W6-2 — a module-slot write invalidates the snapshot CACHE: the next `spawn` must snapshot the
@@ -1954,9 +1953,9 @@ impl Vm {
         }
     }
 
-    /// `Display` form, matching `interp::value::Value`'s `Display` exactly. Thin wrapper over the
-    /// depth-guarded worker — kept infallible so every error-message / `display_wire` caller is
-    /// unchanged; a cyclic structure renders as `<...>` here (the print path surfaces the error).
+    /// `Display` form. Thin wrapper over the depth-guarded worker — kept infallible so every
+    /// error-message / `display_wire` caller is unchanged; a cyclic structure renders as `<...>` here
+    /// (the print path surfaces the error).
     pub(super) fn display(&self, v: Value) -> String {
         self.display_guarded(v, 0)
             .unwrap_or_else(|_| "<...>".to_string())
@@ -2077,8 +2076,8 @@ impl Vm {
                 Obj::Native { name, .. } => Ok(format!("<native fn {name}>")),
                 Obj::Builtin(name) => Ok(format!("<builtin fn {name}>")),
                 Obj::Cffi(c) => Ok(format!("<extern fn {}>", c.name())),
-                // A raw address is non-deterministic (differs per run/engine), so never render it —
-                // that would break two-engine parity if a `ptr` is printed. Only null vs live (a
+                // A raw address is non-deterministic (differs per run), so never render it — a
+                // printed pointer's value would not be reproducible. Only null vs live (a
                 // deterministic distinction) is observable.
                 Obj::Ptr(a) => Ok(if *a == 0 {
                     "<ptr null>".to_string()
@@ -2353,8 +2352,8 @@ impl Vm {
     /// Protocol-aware render for `print` / `str()` / interpolation: a struct with a self-only
     /// `str(self) -> str` method (the `Stringable` protocol) dispatches to it; everything else uses
     /// the default structural repr, recursing through `stringify` so nested structs honour the
-    /// protocol too. Mirrors `interp::Interp::stringify` exactly (parity-tested). Distinct from the
-    /// `&self` `display` above, which stays the pure structural form for error/debug text.
+    /// protocol too. Distinct from the `&self` `display` above, which stays the pure structural form
+    /// for error/debug text.
     pub(super) fn stringify(
         &mut self,
         v: Value,
@@ -2496,9 +2495,9 @@ impl Vm {
             // Boxed scalars stringify identically to the inline `Int`/`Float`.
             Obj::BigInt(n) => out.push_str(&n.to_string()),
             Obj::FloatBox(f) => out.push_str(&format_float(f)),
-            // `bytes` interpolates/prints as its Python `b'...'` repr (shared helper, engine-parity).
+            // `bytes` interpolates/prints as its Python `b'...'` repr (shared helper).
             Obj::Bytes(b) => out.push_str(&crate::slice::bytes_repr(&b)),
-            // `bytearray` interpolates/prints as `bytearray(b'...')` (shared helper, engine-parity).
+            // `bytearray` interpolates/prints as `bytearray(b'...')` (shared helper).
             Obj::ByteArray(b) => out.push_str(&crate::slice::bytearray_repr(&b)),
             Obj::List(items) => {
                 out.push('[');
@@ -2677,7 +2676,7 @@ impl Vm {
                 let _ = write!(out, "<extern fn {}>", c.name());
             }
             // Channel / Shared / Executor have no protocol hook — reuse the structural `Display`
-            // (matches the serial-VM parity oracle's `stringify` catch-all falling back to `Display`).
+            // (`stringify`'s catch-all falls back to `Display` too).
             Obj::Channel(_)
             | Obj::Shared(_)
             | Obj::RwShared(_)

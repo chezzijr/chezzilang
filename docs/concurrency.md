@@ -408,10 +408,11 @@ future-style handle (memoization + readiness poll):
 - `Task.get() -> T` — block until the result lands, then return it; **memoized** (idempotent).
 - `Task.done() -> bool` — non-blocking readiness poll.
 
-Canonical shape: submit all → `shutdown()` → `.get()` each. **Parity rule:** a task's value is
-deterministic (`f()`); only its *timing* varies by engine, so `.get()` is byte-identical serial vs
-M:N **as long as you await in a fixed (submission) order**. There is deliberately **no**
-`join_next()`/select-on-completion — completion order is nondeterministic and would break parity.
+Canonical shape: submit all → `shutdown()` → `.get()` each. **Determinism rule:** a task's value is
+deterministic (`f()`); only its *timing* varies at runtime (the OS-thread workers race), so `.get()` is
+byte-identical across runs **as long as you await in a fixed (submission) order**. There is deliberately
+**no** `join_next()`/select-on-completion — completion order is nondeterministic and would break that
+determinism.
 
 ---
 
@@ -774,14 +775,16 @@ dead recv-arm ready, would spin requeue→re-poll→re-park; but an **all-dead**
 > — has no thread of its own, so it **inline-sleeps** to the soonest deadline then takes the timer arm.
 > **Known-limit (`docs/gaps.md` N10):** the inline-sleep fires
 > *before* the park, so if a **runnable sibling** could satisfy a non-timer arm, that waiter strands it
-> and takes the timer where M:N takes the sibling's `send` — a serial ≠ M:N divergence (M:N is correct). Fix
-> deferred to the post-freeze serial removal (`docs/future.md` §2b). The M:N engine (`--parallel`) must **not** inline-sleep: that would
+> and takes the timer where a party parked on a real worker thread would take the sibling's `send`
+> instead (the worker-thread behavior is correct). N10 was closed for the now-removed cooperative-fiber
+> scheduler, but this shape still lives on this surviving inline arm (`docs/future.md` §2b). A party with
+> its own worker thread (`--parallel`) must **not** inline-sleep: that would
 > pin the OS worker and strand a sibling `send` that lands mid-window. Instead it arms **one** background
 > `timer::submit_at(deadline, send_wake(true))` on the soonest timer arm's own channel (guarded by an
 > arm-once `ChannelCore.timer_armed` CAS so a re-park can't re-arm) and falls through to the normal
 > snapshot-park, so the timer is just another bucket. A waiter that OWNS ITS OS THREAD — an eager
-> `Executor` job, or the top-level `main` thread (with or without a native-callback frame under it),
-> on either engine — needs no injected wake at all: it
+> `Executor` job, or the top-level `main` thread (with or without a native-callback frame under it) —
+> needs no injected wake at all: it
 > blocks in place with the timer as one more arm and simply **clamps** its wait to the deadline, so a
 > sibling value that lands first wins and the timer is taken on the re-poll otherwise. It used to fall
 > into the cooperative inline-sleep instead (`mn == None`), which took the timer without re-reading the
@@ -812,7 +815,7 @@ dead recv-arm ready, would spin requeue→re-poll→re-park; but an **all-dead**
   requeued, because a `close()` landing in the poll→park window wakes an empty bucket and nothing will
   ever wake that key again — parking there is a stranded fiber the deadlock detector then (correctly)
   reaps as a spurious `deadlock:` fault. The all-dead requeue terminates: the re-run `WaitPoll` hits
-  `all_closed` and faults `wait: all channels closed`, matching the serial engine byte-for-byte. The
+  `all_closed` and faults `wait: all channels closed`. The
   first waker (in
   `send_wake`/`close_wake`/`cancel_drain`/`flag_deadlock`) CASes `claimed`, `take()`s the fiber, and
   removes its token from every other bucket by `Arc::ptr_eq` — all under the one lock, serialized with
@@ -821,13 +824,16 @@ dead recv-arm ready, would spin requeue→re-poll→re-park; but an **all-dead**
   `ParkedEntry::Recv` special case** (alloc-free, provably unchanged — regression test
   `vm_wait_single_arm_recv_park_unchanged_under_parallel`).
 - *A waiter with no worker loop* (the inline outermost-`parallel:` body): poll arms once in source order; first ready wins; else if `else`,
-  run it; else if any arm is timer-backed **and the waiter is a cooperative fiber** (it has no thread to
-  clamp; a party that owns its OS thread blocks in place with the timer clamped instead — W7-14),
+  run it; else if any arm is timer-backed **and the waiter has no worker loop to drive a park**
+  (`!can_block_in_place() && !timed_block`, netio.rs:2599 — a party that owns its OS thread blocks in
+  place with the timer clamped instead, `timed_block`, W7-14),
   inline-sleep to the soonest deadline and take that arm; else
-  fault (all-closed or the existing deadlock fault). Deterministic → golden parity with the M:N engine holds
-  **except** when a timer arm races a runnable sibling (`docs/gaps.md` N10): the inline-sleep runs before the
-  cooperative park, so serial takes the timer where M:N takes the sibling — a pre-freeze known-limit (M:N
-  correct). Proper fix = park first, inline-sleep the timer only when the quiesce path would idle-deadlock.
+  fault (all-closed or the existing deadlock fault). Deterministic → matches a worker-thread party's
+  behavior **except** when a timer arm races a runnable sibling (`docs/gaps.md` N10, closed for the
+  now-removed cooperative-fiber scheduler but still live here): the inline-sleep runs before the park,
+  so this no-worker-loop waiter takes the timer where a worker-thread waiter takes the sibling — a
+  known limit (the worker-thread behavior is correct). Proper fix = park first, inline-sleep the timer
+  only when the quiesce path would idle-deadlock.
 - *`native_reentry > 0`* (inside a native callback) on `--parallel`: snapshot-park is impossible — mirror
   `demote_recv_block` with a **multi-channel demote-poll** (`demote_wait_block`: register all N arm
   channels in `demoted_chans`, poll all N queues source-order under the core lock on a bounded
@@ -978,8 +984,8 @@ fn serve(tok: Token, io: Channel[str]):
 > everywhere**, inside a defer included. (`docs/gaps.md` **W7-3**.)
 >
 > **…so cleanup that blocks, blocks the teardown.** A `defer` that sleeps, waits on a socket or sends a
-> last message is *uninterruptible*: it delays the nursery join by exactly as long as it takes, on both
-> engines, with no cap (`defer time.sleep_ms(10000)` in a cancelled task = a 10s join). That is
+> last message is *uninterruptible*: it delays the nursery join by exactly as long as it takes, with no
+> cap (`defer time.sleep_ms(10000)` in a cancelled task = a 10s join). That is
 > Go's rule for a deferred function during a panic, and it is the price of "cleanup is never truncated".
 >
 > **A `defer` body cannot snapshot-PARK.** It runs during frame teardown, whose LIFO drain is host-stack
@@ -1034,9 +1040,9 @@ fn serve(tok: Token, io: Channel[str]):
 > Chezzi is the strictest of the three: it detects and reports in milliseconds. (`docs/gaps.md` **N5**,
 > closed as not-a-bug 2026-08-06 with the measured table.)
 
-**Parity-safe deadline.** A timeout's deadline is checked via `monotonic()` *at poll time* — no
-background canceller task — so a self-polling timeout loop stops on time identically on **every**
-engine. (`done()`'s deadline delivery rides the proven `timer(ms)` path, §6c.)
+**Deterministic deadline.** A timeout's deadline is checked via `monotonic()` *at poll time* — no
+background canceller task — so a self-polling timeout loop stops on time identically across runs.
+(`done()`'s deadline delivery rides the proven `timer(ms)` path, §6c.)
 
 **Cooperative contract (by design).** A token *signals* cancellation; it cannot forcibly interrupt. The
 M:N engine runs the sibling on a real OS thread, so the kernel preempts a pure-CPU loop and the cancel
@@ -1085,10 +1091,10 @@ it can be a genuine order-dependence / airlock / scheduler fault (the real prize
 **non-deterministic cross-task print order**, which `chezzi run` does not promise (§"Output ordering").
 Compare a line SET, or make the program deterministic by construction, before calling a diff a defect.
 
-> **`std.net` and the engines — exactly where a would-block socket op blocks.** A `spawn`/`parallel:`
-> fiber on the default engine parks on the netpoller (that is the whole D6 design). A socket op reached
+> **`std.net` — exactly where a would-block socket op blocks.** A `spawn`/`parallel:`
+> fiber parks on the netpoller (that is the whole D6 design). A socket op reached
 > where there is no fiber to park **blocks its thread in place** in exactly two contexts — top-level
-> `main` on the **default engine** (Go-identical: `ln.Accept()` on the main goroutine blocks until a
+> `main` (Go-identical: `ln.Accept()` on the main goroutine blocks until a
 > client arrives) and an M:N worker inside a native callback (which spins a replacement worker first).
 > Everywhere else — an eager `Executor` job — it returns `Err("<op> would block: an Executor job
 > doesn't own its thread — blocking here would starve every other job and `parallel:` nursery
@@ -1287,7 +1293,7 @@ was retired when module globals started deep-copying per task.)
   and protocol-typed spawn args cross; the erased witness rides by deep value copy).
 - **Closures / functions cross by value (B3.3).** At runtime the airlock lowers a closure or
   bare `fn` **by value** — its `proto` (shared, read-only) + its captures deep-copied recursively + its
-  home module index, never a by-reference heap handle — on **both** engines identically. So a `spawn f()`
+  home module index, never a by-reference heap handle. So a `spawn f()`
   callee whose captured environment contains a nested closure/`fn` (or is itself a bare `fn`) runs
   cleanly, its captured plain data isolated per task exactly like any other sendable. **Checker
   (landed, Task 2a):** the function type is **sendable**, so a closure crosses as data —
@@ -1417,7 +1423,7 @@ was retired when module globals started deep-copying per task.)
   boundary resumes intact; the resume path rebases each parked handler/frame `nursery_len` to the resuming
   driver's floor (a generator opens no nursery of its own, so its escape-drain must be a no-op). The two
   remaining rejected shapes are **checker-unreachable** and kept only as defensive guards that reject
-  cleanly (a graceful, byte-identical-on-both-engines `... cannot be sent across tasks` error, **never** a
+  cleanly (a graceful `... cannot be sent across tasks` error, **never** a
   panic, **never** a silent mishandle): a suspension **with a pending `defer`** (`defer` is banned inside a
   generator) and a **multi-frame** suspension (`yield` fires only in the generator's own body frame). A
   generator held as a **module global** crosses **BY VALUE too** (backlog item B): a task that reaches it
@@ -1429,15 +1435,15 @@ was retired when module globals started deep-copying per task.)
   frame-local case in ONE way: `snapshot_modules` walks **every** global of the nursery's snapshot, reached
   or not, so it must NOT eager-fault on a generator the program merely *holds*. Instead `to_snap`'s slow arm
   snapshots such a generator as an inert **`Nil` placeholder** — a task that never touches it runs **clean**,
-  and one that **reaches** it faults recoverably **at the use site** (`cannot iterate over nil`), byte-identical
- . (Fault only when reached; the frame-local crossing, by contrast, rejects eagerly at the
+  and one that **reaches** it faults recoverably **at the use site** (`cannot iterate over nil`).
+  (Fault only when reached; the frame-local crossing, by contrast, rejects eagerly at the
   `to_wire` serialize point because it crosses only the value actually sent.) (The earlier **Option-B
   reach-gate** model — which scanned each task for a *possible* reach and faulted it — is **retired**:
   by-value crossing removes the "why can a frame-local generator cross but not a module-global one?" drift.)
 - **Captured locals AND module globals are isolated copies.** Reassigning — or mutating in place
   (`.push`/`.add`/`m[k]=v`/`s.field=x`) — a captured **local** or a **module global** inside a task is
-  fine: the write lands on that task's own copy, invisible to the parent and to sibling tasks, on both
-  engines. To produce output visible to the parent, use a `Channel` or a `Shared`. (Reads are always
+  fine: the write lands on that task's own copy, invisible to the parent and to sibling tasks. To
+  produce output visible to the parent, use a `Channel` or a `Shared`. (Reads are always
   fine, and a task reads the values current when its nursery opened — [§2](#2-the-model).) *(History: a
   G1 checker rule once made both a **compile error**, because the serial engine shared the globals while
   M:N snapshotted them. Deep-copying per task removed the divergence, and the rule — and
@@ -1607,8 +1613,8 @@ supervised tasks) — Go's float-free `go` is the model both ecosystems *rejecte
 > runs on, which Go cannot report either) — are in `docs/gaps.md` `W7-12r / W7-15`.
 > **Captures cross by value:** `submit` wires the closure through the same by-value
 > airlock (`wire_callable` → `to_wire`) that `spawn` uses, so its captures are deep-copied and isolated
-> at submit time and the generator sendability enforcement runs — identically on the
-> cooperative default and `--parallel` (the capture is a copy for every submitted closure). A mutation of a
+> at submit time and the generator sendability enforcement runs — the same way regardless of worker
+> count (the capture is a copy for every submitted closure). A mutation of a
 > captured collection after the `submit` is NOT observed by the job.
 
 The sanctioned tool for "a task that **outlives its scope** / runs in the background" is **not** a
@@ -1664,9 +1670,10 @@ fn main():
 ## 9. Implementation roadmap (C1–C5)
 
 > **Historical design-log.** The `**Interp** src/interp/*` bullets below record the *original* plan,
-> which targeted the since-**removed** tree-walk interpreter. That engine no longer exists — the
-> bytecode VM is the sole engine and parity is now serial-VM (`parallel=false`) vs M:N-VM
-> (`parallel=true`). Read the `src/interp/*` references as planning history, not current paths.
+> which targeted the since-**removed** tree-walk interpreter. That engine no longer exists, and the
+> serial-VM / M:N-VM split this note used to describe is also gone — the bytecode VM on its M:N
+> scheduler is now the sole engine (`--parallel` is an accepted no-op alias). Read the `src/interp/*`
+> references as planning history, not current paths.
 
 > **B3's detailed execution plan lives in [`concurrency-b3.md`](concurrency-b3.md)** — a phased,
 > multi-session breakdown (B3.0…B3.6) with the validated shared-nothing architecture, decisions, risk
@@ -1724,8 +1731,9 @@ Ships the canonical worker/fan-out example.
   constructor; passed by handle in `deep_clone`.
 - **Tests:** cross-task increment via `Shared`; an in-task mutable struct is **not** sendable while `Shared` is.
 
-### C4 — VM parity
-Port C1–C3 to the bytecode engine (`src/vm`, `src/compiler`) — the standing parity invariant.
+### C4 — VM parity (historical)
+Port C1–C3 to the bytecode engine (`src/vm`, `src/compiler`) — at the time, checked by matching the
+tree-walk interpreter's output; the interpreter has since been removed.
 - **Heap** `src/vm/heap.rs`: `Obj::Channel(VecDeque<Value>)`, `Obj::Shared(Value)`; `children()` GC
   tracing.
 - **Ops** `src/vm/op.rs`: `EnterNursery`, `SpawnCall(argc)`, `SpawnBlock(ProtoId)`, `JoinNursery`,
@@ -1738,8 +1746,8 @@ Port C1–C3 to the bytecode engine (`src/vm`, `src/compiler`) — the standing 
   (deep-copy via heap clone); `JoinNursery` runs each pending task to completion using the **existing
   re-entrant call path** (the same one list HOFs `map`/`filter` use to call back into Chezzi).
   `core_method` arms for `Obj::Channel` / `Obj::Shared`; a VM `deep_clone` over heap objects.
-- **Tests:** every C1–C3 example runs identically under the VM (default) and `--interp` — add a
-  differential parity assertion to the golden harness.
+- **Tests (historical):** every C1–C3 example ran identically under the VM (default) and the
+  since-removed `--interp` flag; that differential assertion is gone with the interpreter.
 
 ### C5 — what's left, divided
 
@@ -1758,8 +1766,8 @@ and shippable now; Group B is gated on **B1**. The surface of `spawn` / `paralle
 
 > *Dropped from Group A, shipped in B3.6:* **A3b** (`Executor.submit` capture sendability gate). The
 > submitted closure now crosses **by value** (`wire_callable` → `to_wire`), so a
-> non-sendable capture (a live generator, a native handle) faults at submit — identically on the
-> cooperative default and `--parallel`.
+> non-sendable capture (a live generator, a native handle) faults at submit, the same way regardless
+> of worker count.
 
 **Group B — the real engine (deferred epic)**
 
@@ -1814,7 +1822,7 @@ the interp existed, a **blocking `recv` was VM-only** — under the old `--inter
 work-stealing scheduler, **complete through D6** (D0–D6 + owes #1/#2/#3; epoll/`std.net` netpoller
 landed). Blocking `recv` inside a native callback (**D5 owe #3**) is **resolved** — see below.
 
-**Cross-nursery wakeups — M:N RESOLVED, cooperative pending.** A fiber in an outer nursery being woken
+**Cross-nursery wakeups — M:N RESOLVED.** A fiber in an outer nursery being woken
 (and *run*) by an inner one (the circular outer-sibling case — `examples/parallel_cross_nursery_circular.chz`)
 is **fixed under `--parallel`** (the M:N engine): one VM-global `MnSched` with a `Vec<JoinScope>` flat
 scheduler (each nested nursery is a scope enlisted into the same global run queue, with a scope-scoped
@@ -1982,7 +1990,7 @@ engine is now a true M:N work-stealing scheduler); D6 (epoll/kqueue pollset + `s
 Concurrency work that is real but **outside the B3–B5 multicore epic**. Recorded so it isn't lost or
 reinvented; none is scheduled. (B3–B5 itself is planned in [`concurrency-b3.md`](concurrency-b3.md).)
 
-- **Cross-nursery wakeups** *(RESOLVED under `--parallel` (M:N) incl. multi-level nesting + late-spawn; cooperative-engine flatten + a few narrow limits still open — see below)*.
+- **Cross-nursery wakeups** *(RESOLVED under `--parallel` (M:N) incl. multi-level nesting + late-spawn; the cooperative-engine flatten fix is moot now that engine is removed, but a few narrow limits still open — see below)*.
   **Resolved (D0):** `wake_on_send` (`src/vm/mod.rs`) drains *every* scheduler level, so cross-level
   **wake-marking** works — a `send` in any nursery marks the blocked fiber ready wherever it parked. The
   **common case** (consumer in an *outer* nursery, producer in an *inner* one that finishes) works end to
@@ -1998,7 +2006,7 @@ reinvented; none is scheduled. (B3–B5 itself is planned in [`concurrency-b3.md
   global predicate fires unless every still-incomplete scope is merely *awaiting the builder's join*
   (a live external feeder); see `MnSched::all_incomplete_awaiting_builder`. **Independent / normal
   multi-level nesting now RUNS** (the old "2+ enlisting levels" gate is gone): any depth of nested
-  `parallel:` with sibling and late `spawn:`s matches the cooperative engine — every pending outer
+  `parallel:` with sibling and late `spawn:`s now runs correctly — every pending outer
   nursery enlists as its own scope, and a late `spawn:` into a middle nursery runs on the held flat
   sched as a fresh trailing scope via `register_scope_seeded` (atomic register+seed under one lock,
   un-latches a stale `terminate`) so the inline owner runs it — no clobber, panic, drop, or deadlock-veto
@@ -2006,10 +2014,11 @@ reinvented; none is scheduled. (B3–B5 itself is planned in [`concurrency-b3.md
   **Remaining narrow limits (revisit only if they bite real programs; full brief +
   reproductions in [`docs/cross-nursery-flat-scheduler.md`](cross-nursery-flat-scheduler.md)):**
   - **Contended shared channel across nested nurseries** — 2+ live receivers racing ONE channel across
-    nested `parallel:` scopes is concurrent-divergent BY DESIGN: under `--parallel` delivery order may
-    differ from the cooperative engine, or it may deadlock-fault. It is NOT gated and NOT special-cased;
+    nested `parallel:` scopes is concurrent-divergent BY DESIGN: under `--parallel` delivery order is
+    nondeterministic run to run, or it may deadlock-fault. It is NOT gated and NOT special-cased;
     it only must never PANIC and never HANG (completes or faults `deadlock` cleanly — see
-    `parallel_cross_nursery_contended_never_panics`). Same gap the cooperative flatten would close.
+    `parallel_cross_nursery_contended_never_panics`). The now-moot cooperative flatten (below) would
+    have closed this same gap.
   - *(Historical: the cooperative `--serial` engine serialized nested nursery levels, so the same
     program faulted `deadlock` there. That engine was removed 2026-08-16, so the promised
     "cooperative flatten" is moot.)*
@@ -2063,11 +2072,12 @@ reinvented; none is scheduled. (B3–B5 itself is planned in [`concurrency-b3.md
   **B3.6** (the `submit` arm pushes a `capture_floor` like `spawn`). See §9 Group B and
   [`concurrency-b3.md` §4 B3.6](concurrency-b3.md#4-phased-breakdown).
 
-- **Cooperative scheduler O(N²) in the per-nursery task count** — ✅ **LANDED as Tier-D D0.** The old
+- **Cooperative scheduler O(N²) in the per-nursery task count** *(historical — LANDED as Tier-D D0,
+  then this scheduler was itself removed with `--serial` on 2026-08-16)*. The old
   `pick_runnable` linear-scan-per-turn (lowest-index runnable, O(N²); measured 1k→1.4 ms, 10k→51 ms,
   20k→246 ms, 50k→2.34 s) was replaced by a per-nursery **`ready: BTreeSet`** of runnable child indices
   (lowest-index pop, O(log N) per turn → whole nursery O(N·log N); `src/vm/mod.rs` — `run_scheduler` +
   `Nursery.ready`). Byte-identical scheduling order to the old scan (lowest-index is the contract), so
-  all goldens stayed green. (Note: this was always purely the *cooperative default* engine; `--parallel`
-  uses the M:N `mn_worker_loop`, never `run_scheduler`. D0 removed the quadratic wall but is orthogonal
-  to the Tier-D per-task-cost work that makes fibers green-thread-cheap.)
+  all goldens stayed green. (Note: this was always purely the *cooperative default* engine — the piece
+  since removed; `--parallel` uses the M:N `mn_worker_loop`, which is now the only path. D0 removed the
+  quadratic wall but is orthogonal to the Tier-D per-task-cost work that makes fibers green-thread-cheap.)

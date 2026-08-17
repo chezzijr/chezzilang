@@ -352,7 +352,7 @@ impl Checker {
     /// Two passes so a `native fn`'s return type can reference the module's own `native struct` (regex's
     /// `find -> Result[Option[Match]]`): pass 1 harvests every `native struct` (into `sig.struct_defs`/
     /// `sig.types`, origin FORCED [`StructOrigin::Builtin`] — load-bearing for `imported_builtin_types`
-    /// → both engines' pure-type `bind_import` skip) and TRANSIENTLY inserts each name into
+    /// → the VM's pure-type `bind_import` skip) and TRANSIENTLY inserts each name into
     /// `self.struct_names` (so pass 2's `resolve_type` sees the bare type) AND transiently installs THIS
     /// module's harvested layout into `self.structs` (save+restore). The latter is load-bearing: this arm
     /// runs OUTSIDE `begin_module`, so `self.structs` is LEFTOVER from the previously-checked module — a
@@ -1923,9 +1923,9 @@ impl Checker {
     }
     /// Is `name` bound *below* the module-global scope (scope 0) — i.e. a local, parameter, or
     /// captured binding? The qualified enum-variant form `Enum.Variant` yields to such a binding but
-    /// NOT to a module global or function, mirroring both engines' locals-only precedence gate (VM
-    /// `resolve_local`/`captures`, interp `get_local`). Using full [`Self::lookup`] here would let a
-    /// top-level global named like the enum shadow in the checker but not the engines — a soundness
+    /// NOT to a module global or function, mirroring the VM's locals-only precedence gate
+    /// (`resolve_local`/`captures`). Using full [`Self::lookup`] here would let a
+    /// top-level global named like the enum shadow in the checker but not the VM — a soundness
     /// hole (the checker would validate a different program than the one that runs).
     pub(super) fn is_local_binding(&self, name: &str) -> bool {
         self.scopes.iter().skip(1).any(|s| s.contains_key(name))
@@ -2182,7 +2182,7 @@ impl Checker {
     /// Collect doc-comments for the module's top-level NON-fn declarations (struct/enum/protocol/
     /// newtype/type-alias names + top-level `let` bindings) into `name_docs`, keyed by simple name.
     /// Free fns and methods carry their doc on `FnSig::doc` instead (handled in `fn_sig`). Purely for
-    /// LSP hover — never consulted by checking/codegen, so it is behavior- and parity-neutral.
+    /// LSP hover — never consulted by checking/codegen, so it is behavior-neutral.
     pub(super) fn collect_docs(&mut self, stmts: &[Stmt]) {
         for s in stmts {
             match &s.kind {

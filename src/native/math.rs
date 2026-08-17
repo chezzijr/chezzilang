@@ -28,7 +28,7 @@ fn abs(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 
 /// A plain 1-arg `float -> float` intrinsic: `expect_args` then the same-named `f64` method.
 /// Out-of-domain inputs (e.g. `asin(2.0)`, `ln(-1.0)`, `sqrt(-1.0)`) return NaN, never a fault,
-/// keeping the signatures plain `float`. Same f64 op on both engines → free parity.
+/// keeping the signatures plain `float`. One `f64` op, one code path.
 macro_rules! unary_float {
     ($name:ident) => {
         fn $name(h: &mut dyn Host) -> Result<NativeRet, HostError> {
@@ -78,7 +78,7 @@ fn log(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 
 // Float predicates (IEEE-754 classification): `float -> bool`. Now that float arithmetic is total
 // (inf/NaN are values), these let user code inspect a result. Plain pass-throughs over f64's own
-// classifiers → free parity across engines (the `NativeRet::Bool` seam is already wired).
+// classifiers — plain pass-throughs, no engine bookkeeping (the `NativeRet::Bool` seam is already wired).
 
 fn is_nan(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "is_nan", 1)?;

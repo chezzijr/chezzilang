@@ -2327,7 +2327,7 @@ impl Checker {
                 // plus each variant's ctor signature at its declared-name token (`Val(int)` →
                 // "fn(int) -> Col"). Mirrors the use-site hover at `infer_variant_call`: the enum's
                 // declared `Ty::Param`s are preserved in the return type so a generic variant Displays
-                // "fn(T) -> Box[T]". Probe-gated no-op (parity-neutral), emits no error.
+                // "fn(T) -> Box[T]". Probe-gated no-op (behavior-neutral), emits no error.
                 if self.hover_probe.is_some() {
                     self.hover_record_at(*name_span, &self_ty, HoverKind::Struct, doc.clone());
                     let key = self.bare_key(name);
@@ -2568,7 +2568,7 @@ impl Checker {
                 // captured local now mutates the shared cell (A2/A3/E1); no reassign gate is needed.
                 // A `defer:` block compiles to a fresh child proto with an empty loop stack, so a
                 // `break`/`continue` lexically nested in an enclosing loop but placed here is illegal
-                // in both engines. Save-zero-restore `loop_depth` (mirroring `check_fn_body`) so the
+                // at runtime. Save-zero-restore `loop_depth` (mirroring `check_fn_body`) so the
                 // `loop_depth == 0` guard at `StmtKind::Break`/`Continue` fires at check time; a
                 // legitimate loop INSIDE the block re-increments from 0, keeping its own break legal.
                 // A `return` here can never mean anything (Chezzi has no named return values and the
@@ -2752,7 +2752,7 @@ impl Checker {
                         }
                         // A `spawn:` block compiles to a fresh child proto with an empty loop stack,
                         // so a `break`/`continue` lexically nested in an enclosing loop but placed
-                        // here is illegal in both engines. Save-zero-restore `loop_depth` (mirroring
+                        // here is illegal at runtime. Save-zero-restore `loop_depth` (mirroring
                         // `infer_closure`) so the `loop_depth == 0` guard at `StmtKind::Break`/
                         // `Continue` fires at check time; a legitimate loop INSIDE the block
                         // re-increments from 0, keeping its own break/continue legal.
@@ -3215,8 +3215,8 @@ impl Checker {
 
     pub(super) fn check_assign(&mut self, target: &Expr, op: AssignOp, val_ty: Ty, span: Span) {
         // Task 1 — an index/field-assign (`m[k]=v`, `s.field=x`) on a captured module global inside a
-        // task is no longer rejected: the serial engine now deep-copies module globals per spawned task
-        // (matching M:N), so the write hits the task's OWN copy — consistent on both engines. Gate
+        // task is no longer rejected: spawning deep-copies module globals per task, so the write hits
+        // the task's OWN copy. Gate
         // deleted alongside the sibling method-mutation + reassign gates (see `infer_method_call`).
         match &target.kind {
             ExprKind::Ident(name) => {
@@ -3249,9 +3249,8 @@ impl Checker {
                 // Uniform by-reference capture: a `spawn:` task gets its OWN per-task copy of a
                 // captured LOCAL (the airlock deep-copies its cell), so reassigning it is allowed —
                 // the write mutates the isolated copy and is NOT visible to the parent (design §4 F1,
-                // the one deliberate divergence from Go). A captured MODULE GLOBAL stays rejected: it
-                // is frozen under `--parallel`, and writing it would diverge serial (shared global)
-                // from M:N (worker's snapshot copy).
+                // the one deliberate divergence from Go). A captured MODULE GLOBAL is handled the
+                // same way — see the Task 1 note below.
                 // A `from`-imported module global is a SNAPSHOT copy of the module's value, so
                 // rebinding the bare name would write a LOCAL alias that is silently lost (the module
                 // global is unchanged, and every other module keeps its own snapshot). Reject it,
@@ -3273,9 +3272,9 @@ impl Checker {
                     return;
                 }
                 // Task 1 — reassigning a captured MODULE GLOBAL inside a task (`g = g + 1`) is no longer
-                // rejected: the serial engine now deep-copies module globals per spawned task (matching
-                // M:N), so the write mutates the task's OWN copy — invisible to the parent, consistent
-                // on both engines (exactly like a captured LOCAL, which already deep-copies). The
+                // rejected: spawning deep-copies module globals per task, so the write mutates the
+                // task's OWN copy — invisible to the parent (exactly like a captured LOCAL, which
+                // already deep-copies). The
                 // frozen-module-global gate is deleted; `Shared`/`Channel` stay the shared-state hatch.
                 // A `defer:` block runs in the SAME task (no airlock), so it shares the enclosing
                 // binding's cell — reassigning a captured local mutates the shared cell (A2/A3/E1).
@@ -3973,7 +3972,7 @@ impl Checker {
         };
         self.push_scope();
         // Editor hover: record the function's OWN signature at its decl-site name token (no-op
-        // off-probe; parity-neutral — `name_span` is runtime-inert). Covers free fns AND methods,
+        // off-probe; behavior-neutral — `name_span` is runtime-inert). Covers free fns AND methods,
         // both routed through here. For a method, `record_method_decl_hover` (called from the
         // struct/enum/newtype arm BEFORE this) already latched the receiver-stripped sig first
         // (first-hit-wins in `hover_record_at`), so this is a harmless no-op there; for a free fn
@@ -4426,7 +4425,7 @@ impl Checker {
                 let info = self.structs.get(name)?;
                 let sig = structural_impl(info.methods.get("slice")?)?;
                 // The `Slice` protocol fixes the bounds: `slice(self, int? , int?, int?) -> R`.
-                // Both engines always pass three `Option[int]` components (start/end/step, each
+                // The runtime always passes three `Option[int]` components (start/end/step, each
                 // `None` when omitted), so a non-conforming signature (wrong arity or non-`int?`
                 // bounds) is not a valid `Slice` impl — reject rather than green-light a crash.
                 let opt_int = Ty::option(Ty::Int);

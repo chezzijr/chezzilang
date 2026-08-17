@@ -1,4 +1,4 @@
-# examples/duration.chz — deterministic std.duration demo (NO clock/since/sleep; golden + parity).
+# examples/duration.chz — deterministic std.duration demo (NO clock/since/sleep; golden).
 
 import std.duration
 

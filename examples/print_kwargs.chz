@@ -2,7 +2,7 @@
 #   sep (default " ") joins the positional args; end (default "\n") is appended after.
 # This proves: the default form is unchanged, `end=""` suppresses the newline (incremental
 # output), `sep=` rejoins, both combine, and both accept runtime str expressions — all
-# byte-identical on the serial and M:N VM engines.
+# byte-identical.
 
 # default: space-joined, newline-terminated
 print("a", "b", "c")

@@ -3,7 +3,7 @@
 # Three `parallel:` blocks nested four levels deep (main → top → mid → inner), each with a sibling
 # `spawn` that prints AFTER the nested call. There are NO shared channels, so this is ordinary
 # multi-level nesting — NOT a contended-channel case. The old "2+ enlisting levels" gate wrongly
-# faulted it under --parallel; it now RUNS and matches the cooperative engine.
+# faulted it under --parallel; it now RUNS.
 #
 #   chezzi run --parallel examples/parallel_cross_nursery_multilevel.chz
 #
@@ -11,7 +11,7 @@
 # print) before that level's own sibling `spawn` runs at its join — so the flush order is the strict
 # inner→outer chain inner / mid / top / main, then `done`. Unlike the genuinely-contended cross-channel
 # case (2+ live receivers racing ONE channel across scopes), this never contends, so the order is fixed
-# and three-engine-stable. (The contended case is concurrent-divergent by design — see
+# and stable across worker counts. (The contended case is concurrent-divergent by design — see
 # docs/cross-nursery-flat-scheduler.md.)
 fn inner():
     parallel:

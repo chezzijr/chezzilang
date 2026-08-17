@@ -100,8 +100,7 @@ pub enum Op {
     /// The failing tail of `assert cond[, msg]`. The compiler tests `cond` with a preceding
     /// `JumpIfFalse` and only reaches this op when `cond` was false, so it *always* faults: pop
     /// `msg` (a str, if `has_msg`) and fault at this op's span with that message (or
-    /// `"assertion failed"`). `msg` is evaluated lazily on the failing path only — byte-identical to
-    /// the serial-VM parity oracle, which likewise evaluates `msg` solely when the assertion fails.
+    /// `"assertion failed"`). `msg` is evaluated lazily on the failing path only.
     Assert {
         has_msg: bool,
     },
@@ -130,7 +129,7 @@ pub enum Op {
     /// from `Proto::capture_names[slot]`.
     GetCaptured(u32),
 
-    // ----- arithmetic / logic (dispatch on runtime types, mirroring the serial-VM parity oracle) -----
+    // ----- arithmetic / logic (dispatch on runtime types) -----
     Add,
     Sub,
     Mul,
@@ -254,7 +253,7 @@ pub enum Op {
     /// `yield <expr>` (experimental generators) — stack top holds the yielded value. Suspends the
     /// running generator: returns control out of the generator's private `run_until` to the host's
     /// `.next()` call, leaving the frames/stack intact to resume on the next `.next()`. Only emitted
-    /// inside a generator proto (`Proto::is_generator`); never reached on the cooperative host stack.
+    /// inside a generator proto (`Proto::is_generator`); never reached on the host stack.
     Yield,
     /// `defer f(args)` — stack `[callee, arg0, …]`; pops `argc + 1` and records a deferred call on
     /// the current frame. Drained LIFO when the frame exits (return / `?` / panic).
@@ -389,8 +388,7 @@ pub enum Op {
     BuildStr(usize),
 
     // ----- iteration helpers -----
-    /// Pop an iterable; push a *clone* of its list contents (matches the serial-VM parity oracle snapshotting
-    /// `items.borrow().clone()`), erroring if not a list.
+    /// Pop an iterable; push a *clone* of its list contents, erroring if not a list.
     ListClone,
     /// Pop a list; push its length as an int.
     ArrLen,
@@ -491,8 +489,9 @@ pub enum Op {
     /// (source order; arm 0 deepest). Poll source order: the first channel with a queued value (or a
     /// fired timer) wins → pop the N handles, push the value, and jump to that arm's body target. A
     /// closed+empty arm is skipped. Nothing ready → jump to `else_target` if present; else inline-
-    /// sleep to the soonest live timer and take it; else fault (all-closed) or block (cooperative
-    /// multi-channel park: keep the handles, rewind to re-poll on wake). See `Vm::op_wait_poll`.
+    /// sleep to the soonest live timer and take it; else fault (all-closed) or block (the
+    /// multi-channel park/block-in-place path: keep the handles, rewind to re-poll on wake). See
+    /// `Vm::op_wait_poll`.
     WaitPoll(Box<WaitMeta>),
     /// `Channel[T]()` / `Channel[T](cap)` — push a fresh empty mailbox (`Obj::Channel`). The bool is
     /// `has_cap`: when `true`, a capacity int is on the operand stack (pop it; `<= 0` faults, else the

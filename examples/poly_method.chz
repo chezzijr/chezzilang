@@ -1,6 +1,6 @@
 # Polymorphic (megamorphic) method dispatch — four Shape implementors walked at one `.area()` call
 # site, plus a fifth type to overflow the 4-way method-IC into its sticky-generic slow path. The
-# small-iteration golden twin of benches/chz/poly_method.chz: pins two-engine (VM == interp) parity
+# small-iteration golden twin of benches/chz/poly_method.chz: pins golden output
 # on the N-way method-call inline cache. Each pass sums 9+8+10+7+0 = 34; prints 34 three times.
 
 protocol Shape:

@@ -14,11 +14,11 @@
 //! (`conn.read(n, timeout_ms)`, `sock.write(s, timeout_ms)`, `server.accept(timeout_ms)`): if no
 //! data / writability / connection arrives within `timeout_ms`, the op returns the existing
 //! `Result::Err` variant with message `"timeout"` (the return type is unchanged). `0` polls once
-//! (never parks); a negative saturates to `0`. This is a `--parallel`-engine feature (the fiber parks
-//! on the netpoller with a deadline); on the cooperative / top-level fallback — which has no fiber to
+//! (never parks); a negative saturates to `0`. This is a worker-shell-fiber feature (the fiber parks
+//! on the netpoller with a deadline); off a worker shell — top-level `main`, which has no fiber to
 //! park and already fails loud on would-block — a non-zero `timeout_ms` is moot (the op never parks
 //! there, so it can't time out), though a `timeout_ms == 0` would-block still surfaces `Err("timeout")`
-//! since the poll-once check precedes the engine gate. Either way the cooperative result is an `Err`.
+//! since the poll-once check precedes the engine gate. Either way the top-level result is an `Err`.
 
 use super::{Host, HostError, Kind, NativeFn, NativeRet};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};

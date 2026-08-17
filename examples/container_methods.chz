@@ -1,7 +1,7 @@
 # examples/container_methods.chz — a representative call of EVERY builtin List/Map/Set method, driving
 # the phase-5a-containers port (the method surface is file-backed in std/prelude.chz as `native struct`
 # decls mapped to the reserved Ty::List/Ty::Map/Ty::Set; ctors/literals stay compiler-wired). Output is
-# deterministic on all three engines (insertion-ordered maps/sets).
+# deterministic (insertion-ordered maps/sets).
 
 fn main():
     # --- List: len / push / pop / reverse / contains / index_of / concat / extend / sum ---

@@ -1,6 +1,6 @@
 # tests/chz/suites/collections_test.chz — TDD table for std.collections (pure-Chezzi Heap/Deque/Counter).
-# Run: `cargo run -- test tests/chz/suites/collections_test.chz`. Both engines (serial VM / --parallel M:N)
-# agree automatically (pure Chezzi). Empty-removal/peek = Option[T] (matches builtin list.pop()).
+# Run: `cargo run -- test tests/chz/suites/collections_test.chz`. Pure Chezzi, so results are
+# deterministic by construction. Empty-removal/peek = Option[T] (matches builtin list.pop()).
 
 import std.collections as col
 

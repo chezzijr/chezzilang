@@ -38,8 +38,8 @@ use crate::{lexer, parser};
 /// from any other runtime fault (OOB, div-by-zero, missing key, native fault, …). It is set `true`
 /// only by the `Op::Assert` arm; every other constructor leaves it `false` (the `Default`). The
 /// `chezzi test` runner reads it to bucket a fault as FAIL vs ERROR. It is deliberately NOT part of
-/// `Display` (which stays message+span only, byte-identical across engines) and the same fault
-/// yields the same flag on both schedulers, so parity is unaffected.
+/// `Display` (which stays message+span only) and the same fault deterministically yields the same
+/// flag every time.
 ///
 /// `is_over_memory` marks a `chezzi test --max-heap` hard-abort (the runaway-allocation guard). It is
 /// set at the abort site and FORCED onto whatever error emerges from the unwind, so it travels WITH
@@ -47,7 +47,7 @@ use crate::{lexer, parser};
 /// worker's fault crossing back to the parent. That marker (there is no per-VM flag) is what makes the
 /// abort un-catchable by `recover:` and correctly bucketed `OverMemory`: the `run_until` Err funnel
 /// bypasses `recover:` whenever it is set, and `verdict_from_fault` reads it first. Like `is_assert`,
-/// it is excluded from `Display`, so parity (error-string compare) is unaffected. Always `false` on the
+/// it is excluded from `Display`, so the error-string comparison is unaffected. Always `false` on the
 /// common path (`chezzi run`, and `--max-heap` off).
 ///
 /// `is_timed_out` marks a `chezzi test --timeout` wall-clock hard-abort. It rides the exact same
@@ -279,9 +279,9 @@ const VM_STACK_BYTES: usize = 384 * 1024 * 1024;
 
 /// Run `f` on a fresh thread with the VM's large [`VM_STACK_BYTES`] stack, returning its result.
 /// The M:N engine's cooperative recursion (and any deep user recursion) needs this stack, so the
-/// several `run_*_parallel` helpers spawn it inline. Exposed so the `chezzi test` runner's
-/// dual-engine mode can run an M:N test pass on the same footing without duplicating the spawn
-/// boilerplate. Panics in `f` propagate (the join re-panics), matching the run helpers.
+/// several `run_*_parallel` helpers spawn it inline. Exposed so the `chezzi test` runner can run
+/// its M:N test pass on the same footing without duplicating the spawn boilerplate. Panics in `f`
+/// propagate (the join re-panics), matching the run helpers.
 pub(crate) fn on_vm_stack<F, R>(f: F) -> R
 where
     F: FnOnce() -> R + Send + 'static,
@@ -769,14 +769,15 @@ pub struct Vm {
     /// M19 Phase 4 — per-call-site struct-field inline caches, indexed by the `ic` id baked into
     /// `GetField`/`SetField` ops (dense `0..program.field_ic_sites`). Holds field indices, not
     /// `GcRef`s, so it carries no heap state: never snapshotted, never swapped in [`Vm::swap_ctx`].
-    /// Cooperative fibers share one `Vm` but run sequentially (no race); `--parallel` workers each
-    /// own a separate `Vm` (no race). Each cell self-verifies, so sharing is always sound.
+    /// Safe because a worker shell's `Vm` runs one OS thread with one fiber swapped in at a time — many
+    /// fibers share the shell's `field_ic`, but never concurrently (no race). Each cell self-verifies,
+    /// so sharing is always sound.
     field_ic: Vec<IcCell>,
     /// M19 Phase 6 / N-way poly — per-call-site method inline caches, indexed by the `ic` id baked
     /// into `CallMethod` ops (dense `0..program.method_ic_sites`). Each site is an N-way
     /// [`MethodIcSite`] holding proto ids + module indices, not `GcRef`s, so it carries no heap state:
     /// never snapshotted, never swapped in [`Vm::swap_ctx`]. Same sharing argument as `field_ic` —
-    /// sequential cooperative fibers / per-worker `Vm`s, each way tid-guarded so it self-verifies.
+    /// sequential heap-less fibers / per-worker `Vm`s, each way tid-guarded so it self-verifies.
     method_ic: Vec<MethodIcSite>,
     /// M19 Tier-2 — adaptive opcode quickening (PEP 659) state, one byte per program instruction,
     /// indexed by site `quicken_base[pid] + ip`. The un-fused generic binop arms (`Add..GtEq` reached
@@ -785,7 +786,7 @@ pub struct Vm {
     /// (sticky; never re-specializes, so a polymorphic site never thrashes). Holds only state bytes
     /// (no `GcRef`, no proto/heap handle), so it is heap-independent like `field_ic`/`method_ic`:
     /// never snapshotted, never swapped in [`Vm::swap_ctx`]. Behaviour is byte-identical to the
-    /// generic path, so two-engine parity is preserved by construction.
+    /// generic (unquickened) path by construction.
     quicken: Vec<u8>,
     /// Prefix sum of per-proto `code.len()` over `program.protos` — the base offset into `quicken`
     /// for each proto, so a site id is `quicken_base[pid] + ip`. Built once in `Vm::new`; program-
@@ -863,22 +864,22 @@ pub struct Vm {
     /// suspend is pending.
     suspend: Option<GcRef>,
     /// `wait` (§6d) — the multi-channel analogue of `suspend`: the live arm-channel handles a blocking
-    /// `wait:` parked the running fiber on. Set by [`Vm::op_wait_poll`] (cooperative engine only; the
-    /// M:N engine faults a blocking `wait` for now), consumed by [`Vm::run_child`], which files the
-    /// fiber under every key so any sibling `send` re-runs the `WaitPoll` and re-polls. Mutually
-    /// exclusive with `suspend` (a fiber parks via one or the other, never both). A VM-global like
-    /// `suspend` (one fiber runs at a time).
+    /// `wait:` parked the running fiber on. Set by [`Vm::op_wait_poll`]'s M:N snapshot-park, consumed
+    /// by [`Vm::run_one_fiber`]'s dispatch (`Disp::WaitPark`), which files the fiber under every key
+    /// so any sibling `send` re-runs the `WaitPoll` and re-polls. Mutually exclusive with `suspend`
+    /// (a fiber parks via one or the other, never both). A VM-global like `suspend` (one fiber runs
+    /// at a time).
     /// Each entry is `(arm-channel handle, is_send)` so the park-gap re-check applies the right
     /// readiness predicate per arm: a recv arm wakes when its channel has a value / is closed; a SEND
     /// arm wakes when its bounded channel has a free slot (a receiver popped) / is closed.
     wait_suspend: Option<Vec<(GcRef, bool)>>,
     /// Bounded-channel backpressure — the send-side analogue of `suspend`: set by a blocking `send`
     /// on a FULL `Channel[T](cap)` running inside an active scheduler. Records the channel handle the
-    /// running fiber is waiting for SPACE on. Routed by the worker loop to [`MnSched::park_send`] (M:N)
-    /// / filed into `blocked_on` by [`Vm::run_child`] (cooperative), whose gap re-check waits for the
-    /// OPPOSITE condition of a `recv` park (space-available, not message-waiting). A sibling `recv`
-    /// that frees a slot wakes it ([`Vm::wake_senders`]). Mutually exclusive with `suspend`/
-    /// `wait_suspend` (a fiber parks via exactly one). VM-global like `suspend` (one fiber runs at once).
+    /// running fiber is waiting for SPACE on. Routed by the worker loop to [`MnSched::park_send`],
+    /// whose gap re-check waits for the OPPOSITE condition of a `recv` park (space-available, not
+    /// message-waiting). A sibling `recv` that frees a slot wakes it ([`Vm::wake_senders`]). Mutually
+    /// exclusive with `suspend`/`wait_suspend` (a fiber parks via exactly one). VM-global like
+    /// `suspend` (one fiber runs at once).
     send_suspend: Option<GcRef>,
     /// D5 — set when a blocking native call ([`crate::native::Kind::blocks`]) is reached under the M:N
     /// engine: instead
@@ -961,8 +962,8 @@ pub struct Vm {
     /// means a sibling thread's write during my native call fires MY halt — the same cross-job
     /// contamination W7-5d removed, one layer down. Per-`Vm` is the correct shape.
     stdout_writes: u64,
-    /// B3.4: the cancel flag of the `parallel:` nursery this worker `Vm` runs under (`--parallel`
-    /// only; cloned in by [`Vm::run_parallel_nursery`]). The first sibling to fault or `os.exit`
+    /// B3.4: the cancel flag of the `parallel:` nursery this worker `Vm` runs under, cloned in when
+    /// the worker is spawned (`sched.rs`). The first sibling to fault or `os.exit`
     /// sets it; every other worker observes it at a dispatch back-edge (loop top) or inside a
     /// blocking `recv`'s re-checking wait, and unwinds as the `cancelled` sentinel — so a faulted
     /// nursery aborts running siblings instead of join-then-report. `None` on the top-level VM
@@ -1030,8 +1031,8 @@ pub struct Vm {
     deferring: usize,
     /// D1 — on a `--parallel` **worker** fiber, the read-only [`ModuleSnapshot`] its `module_objs` were
     /// built from and fault into its own heap lazily, one module at a time, on first global access
-    /// ([`Vm::fault_module`]). `None` on the top-level VM, the cooperative engine, and a worker SHELL
-    /// (which runs no code of its own — every fiber brings its own view).
+    /// ([`Vm::fault_module`]). `None` on the top-level VM, a fiber with no heap of its own, and a
+    /// worker SHELL (which runs no code of its own — every fiber brings its own view).
     ///
     /// W6-2 — part of the [`FiberCtx`] swap group with `module_objs`/`module_faulted`: snapshots are
     /// per-TASK now, so a shell draining the global run queue can hold fibers from different scopes
@@ -1039,7 +1040,8 @@ pub struct Vm {
     /// replay the wrong values, so the snapshot travels WITH the fiber.
     module_snapshot: Option<Arc<ModuleSnapshot>>,
     /// D1 — parallel to `module_objs` on a worker VM: whether module `i` has been faulted in yet
-    /// (its globals replayed from `module_snapshot`). Empty on the top-level / cooperative VM.
+    /// (its globals replayed from `module_snapshot`). Empty on the top-level VM and a fiber with no
+    /// heap of its own.
     module_faulted: Vec<bool>,
     /// W6-2 — CACHE of the snapshot of THIS view's module graph, so consecutive `spawn`s (and repeated
     /// nurseries in a mutation-free program) build exactly one. Invalidated by exactly two rules:
@@ -1095,17 +1097,12 @@ pub struct Vm {
     /// `vm::tests::snapshot_cache_*`. NOT swapped per fiber — it is a per-VM statistic, not part of the
     /// module view.
     snapshot_builds: usize,
-    /// Task 1 — GC pin for the shell's REAL `module_objs` while they are swapped OUT of
-    /// `self.module_objs` during a child-modules window. `collect()` roots `self.module_objs` (the
-    /// child copy) but not the swapped-out shell modules; when the window runs with EMPTY frames
-    /// nothing else roots them, so an alloc-triggered safepoint GC would sweep them and the restore
-    /// would reinstall dangling `GcRef`s (use-after-free). Stashing them here — scanned by `collect()`
-    /// — keeps them live for the window. Empty outside such a window.
-    pinned_module_roots: Vec<GcRef>,
     /// D2b — set on an M:N **worker shell** to the scheduler of the `parallel:` nursery it is draining.
     /// `Some` flips the `recv`/`send` arms onto the park/wake protocol ([`MnSched`]) instead of the
-    /// legacy condvar-block; `None` on the cooperative engine, the top-level VM, and a prepared task
-    /// fiber's heap-only worker. Cloned onto each shell at enlistment ([`Vm::run_mn_nursery`]).
+    /// legacy condvar-block; `None` on the top-level VM, the inline outermost-`parallel:` builder VM
+    /// (see [`Vm::mn_enlist_sched`] below — there is no scheduler loop driving the inline body), and
+    /// an eager `Executor` job's `Vm` (gets neither `mn` nor `mn_enlist_sched` from `spawn_worker`).
+    /// Cloned onto each shell at enlistment ([`Vm::run_mn_nursery`]).
     mn: Option<Arc<MnSched>>,
     /// Cross-nursery flat scheduler (M:N) — count of OUTER nurseries early-enlisted into the global
     /// sched by a nested builder but not yet reduced at their own `JoinNursery`. While > 0 the
@@ -1124,7 +1121,9 @@ pub struct Vm {
     /// on every schedule-in ([`Vm::run_one_fiber`]) and decremented at the `run_until` loop-top
     /// safepoint. Live per-VM scratch (like `pending_exit`/`cancelled`), NOT part of [`FiberCtx`]:
     /// it is reset per schedule, never preserved across a park. Only consulted under the M:N engine
-    /// (`mn.is_some()`); the cooperative engine never preempts (it is the frozen parity oracle).
+    /// (`mn.is_some()`); when `mn` is `None` (the top-level VM, the inline outermost-`parallel:`
+    /// builder VM, or an eager `Executor` job's `Vm`) there is no scheduler loop driving preemption, so
+    /// it goes unused.
     reds: u32,
     /// D3 — transient signal: the safepoint set this when `reds` hit 0, asking the worker loop to
     /// requeue this fiber (round-robin) instead of treating its `run_until` return as a finish.
@@ -1132,9 +1131,8 @@ pub struct Vm {
     yield_now: bool,
     /// Experimental generators — transient signal: an `Op::Yield` set this, asking the generator's
     /// private `run_until` to return control to the host `.next()` call (the yielded value is on the
-    /// stack top). Reset by `generator_next` before each resume; never true on the cooperative host
-    /// stack, so it leaves the frozen engine byte-identical. Not swapped by `swap_ctx` (it is only
-    /// ever live across the single nested `run_until` that `generator_next` drives).
+    /// stack top). Reset by `generator_next` before each resume. Not swapped by `swap_ctx` (it is
+    /// only ever live across the single nested `run_until` that `generator_next` drives).
     gen_yielding: bool,
     /// Experimental generators — saved HOST contexts, one per generator currently executing (LIFO for
     /// nested generators). A running generator's frames/stack live in the live `Vm` fields; the host
@@ -1148,7 +1146,8 @@ pub struct Vm {
     /// D5 owe #3 (Path C) — this M:N worker shell's worker id (its `locals[wid]` slot), set at the top
     /// of [`Vm::mn_worker_loop`]. Read by [`Vm::demote_recv_block`] so a demoted worker's raw
     /// replacement thread reuses the same `wid` (safe: a demoted worker never touches `locals[wid]`
-    /// again — it exits after settling its current fiber). `0` on the cooperative engine / top-level VM.
+    /// again — it exits after settling its current fiber). `0` on the top-level VM and any fiber
+    /// with no heap of its own (`mn_worker_loop` is the only setter).
     wid: usize,
     /// D5 owe #3 (Path C) — set true the first time THIS worker thread blocks in place on a `recv`
     /// reached inside a native callback (a "thread demotion", Go's `handoffp`). Once demoted, a fresh
@@ -1242,7 +1241,7 @@ struct FiberCtx {
     /// (the normal lazy path: tasks run + reduce at this nursery's own `JoinNursery`). When `Some`, the
     /// nursery's `tasks` vec was drained (consumed into the scope), and its `JoinNursery` reduces the
     /// recorded scope's slot sub-range instead of running the tasks — preserving the per-nursery-join
-    /// flush ORDER (so three-engine parity holds for non-blocking nested spawns).
+    /// flush ORDER (so non-blocking nested spawns still flush deterministically).
     mn_scopes: Vec<Option<usize>>,
     /// TASK B — see [`Vm::nursery_defer_floors`]; carried per-fiber so a parked fiber's per-nursery
     /// defer floors travel with its `nurseries` across `swap_ctx`.
@@ -1256,15 +1255,17 @@ struct FiberCtx {
     fault_trace: Option<Vec<TraceFrame>>,
     fault_trace_depth: usize,
     /// D2a — an M:N fiber carries its OWN heap (share-nothing): `swap_ctx` swaps it with the host
-    /// `Vm::heap` when this fiber schedules in, and back out when it parks. `None` for cooperative
-    /// fibers, which all alias the single `Vm::heap` (decision A — share-by-ref), so their swap
-    /// leaves the heap untouched and the cooperative engine stays byte-identical. The `Some`/`None`
+    /// `Vm::heap` when this fiber schedules in, and back out when it parks. `None` for a fiber with
+    /// no heap of its own, which aliases the single `Vm::heap` instead (decision A — share-by-ref),
+    /// so its swap leaves the heap untouched. No production path builds a `None` fiber today
+    /// ([`Vm::into_fiber`] always passes `Some(worker.heap)`); only tests do. The `Some`/`None`
     /// discriminant also gates every D2b side-state swap below.
     heap: Option<Heap>,
     /// D2b — per-task output buffers (Decision F: each task's stdout/stderr flushes in task order at
     /// join, never interleaved live). An M:N worker shell runs many fibers in turn, so these MUST
     /// travel with the fiber rather than living on the shell `Vm`. Swapped only for M:N fibers
-    /// (`heap.is_some()`); a cooperative fiber keeps `Vec::new()` and aliases the shell's buffers.
+    /// (`heap.is_some()`); a fiber with no heap of its own keeps `Vec::new()` and aliases the shell's
+    /// buffers.
     out: Vec<u8>,
     stderr: Vec<u8>,
     /// D2b / Task 1 — the fiber's module-namespace objects + lazy-fault flags (D1). Each is a `GcRef`
@@ -1294,16 +1295,16 @@ struct FiberCtx {
     snapshot_cells: Arc<fxhash::FxHashMap<GcRef, u32>>,
     snapshot_next_id: u32,
     /// D2b — the fiber's `Executor` handles (GC roots into its own heap; same heap-keyed argument as
-    /// `module_objs`). Empty for cooperative fibers.
+    /// `module_objs`). Empty for a fiber with no heap of its own.
     executors: Vec<GcRef>,
     /// M19 Phase 3 — the fiber's `ConstStr` intern cache (GC roots into its own heap; same heap-keyed
-    /// argument as `module_objs`). Travels with `heap` across [`Vm::swap_ctx`]. Empty for cooperative
-    /// fibers (they alias the shell's cache).
+    /// argument as `module_objs`). Travels with `heap` across [`Vm::swap_ctx`]. Empty for a fiber
+    /// with no heap of its own (it aliases the shell's cache).
     str_intern: fxhash::FxHashMap<usize, GcRef>,
     /// D6b — a non-blocking `connect` parked on writability (see [`ConnectInProgress`]). Non-heap, so
     /// it carries no `GcRef` and needs no GC rooting; but it MUST travel with the fiber across the
     /// park, so it swaps in [`Vm::swap_ctx`] like the other per-fiber state. `None` unless this fiber
-    /// is mid-connect (only ever set on the M:N engine — cooperative connect blocks instead).
+    /// is mid-connect (only ever set on the M:N engine).
     pending_connect: Option<ConnectInProgress>,
     /// D6c — per-socket read/accept/write timeout marker. A socket op given a `timeout_ms` parks on
     /// the netpoller with a deadline; if that deadline elapses before the fd fires, the poll thread
@@ -1435,7 +1436,7 @@ enum Lowered {
     /// `spawn f(args)` where `f` is a first-class builtin fn value (`Obj::Builtin`) — the callee is
     /// pure code (no captures, no home), so it crosses by name and the worker re-allocs a fresh
     /// `Obj::Builtin`, mirroring `Func`. Without this arm a builtin callee hit `prepare_worker`'s
-    /// reject `_` on the M:N engine only (serial/interp dispatch it directly) — a parity divergence.
+    /// reject `_` and could not be spawned at all.
     Builtin {
         name: Box<str>,
         args: Vec<WireValue>,
@@ -1615,22 +1616,21 @@ enum SnapValue {
     Set(Vec<(u64, SnapValue)>),
 }
 
-/// B3.4 — how a `--parallel` task ended, recorded in its slot. The join (`run_parallel_nursery`)
+/// B3.4 — how a `--parallel` task ended, recorded in its slot. The join ([`Vm::reduce_task_slots`])
 /// scans these in task order: `Done`/`Exit` flush their buffered output; the lowest-index `Exit` or
 /// `Fault` propagates (an `Exit` hard-halts the parent, a `Fault` unwinds normally so an outer
 /// `recover:` can catch it); `Cancelled` is swallowed (a sibling-abort, its partial output dropped).
 /// The terminal (lowest-index propagating) `Fault` ALSO flushes its buffered output at its task-order
-/// slot — matching the cooperative/interp oracle, which writes a faulting task's partial output before
-/// the fault propagates. Higher-index racy faults and `Cancelled` still drop (no deterministic slot).
+/// slot instead of dropping it, so a faulting task's already-printed partial output survives.
+/// Higher-index racy faults and `Cancelled` still drop (no deterministic slot).
 #[derive(Debug)]
 enum TaskOutcome {
     /// Ran to completion. Its return value crossed the airlock; output flushed in task order.
     Done(WorkerResult),
     /// Observed the nursery cancel flag and unwound (a sibling faulted/exited first). Its buffered
     /// output is FLUSHED at its task-order slot, not dropped: with cancellation points a started task
-    /// always runs its prologue, so those bytes really were printed — and serial (which prints live
-    /// into the shared buffer) cannot un-print them. Dropping them here was a capture-mode-only
-    /// divergence from the serial engine's line SET.
+    /// always runs its prologue, so those bytes really were printed, and dropping them here would
+    /// silently un-print output the program genuinely produced.
     Cancelled { out: Vec<u8>, stderr: Vec<u8> },
     /// Called `std.os.exit(code)`. Buffered output is flushed, then the parent hard-halts with `code`.
     Exit {
@@ -1820,8 +1820,8 @@ struct EagerScope {
 }
 
 /// §6d M:N `wait` (select) park — ONE blocked fiber shared across the N arm-channel buckets it parks
-/// on. A `Fiber` owns its live `FiberCtx` and is NOT `Clone`, so it cannot be filed under N keys the
-/// way the cooperative engine files a cheap `usize` index; instead the single fiber lives here behind
+/// on. A `Fiber` owns its live `FiberCtx` and is NOT `Clone`, so it cannot cheaply be filed under N
+/// keys the way a plain index could be; instead the single fiber lives here behind
 /// `Mutex<Option<Fiber>>` and a refcounted `Arc<WaitPark>` token is filed in each key's bucket. The
 /// first waker to ANY key CASes `claimed` false→true; the winner `take()`s the fiber and sweeps the
 /// (now stale) token out of every OTHER key's bucket by `Arc::ptr_eq` — all under one hold of the core
@@ -2957,7 +2957,7 @@ impl MnSched {
         // that is still empty, so this re-check is the last chance to observe it; parking here strands
         // the fiber on a key nothing will ever wake and the deadlock detector (correctly) reaps it —
         // a SPURIOUS `deadlock:` fault. The requeue TERMINATES: the re-run `WaitPoll` hits `all_closed`
-        // and faults "wait: all channels closed" (what the serial engine already does), so unlike the
+        // and faults "wait: all channels closed", so unlike the
         // one-dead-among-live case there is no requeue→re-park spin.
         if !ready_now && !arms.is_empty() && !any_live {
             ready_now = true;
@@ -3685,7 +3685,7 @@ fn run_offload(
 /// timer thread, so a cancel or a `--timeout` reaches the sleeping fiber INSIDE the sleep instead of
 /// after it. Pre-fix this was one `submit_at(deadline, …)`: a nursery task sleeping 3 s ran the full
 /// 3 s through a sibling's fault at 50 ms and then printed its post-sleep line (measured 3005 ms; the
-/// existing parity fence only ever covered the *entry* checkpoint, where the fault precedes the call).
+/// existing cancellation checkpoint only ever covered the *entry* checkpoint, where the fault precedes the call).
 ///
 /// **Why re-arm rather than park where `cancel_drain` can reach it.** `cancel_drain` walks `c.parked`
 /// only, and filing this fiber there needs a claim-once token against the timer firing plus
@@ -3763,8 +3763,8 @@ impl SchedCore {
     /// dedups it so the flat slot is faulted and the fiber's SCOPE's `done` bumped exactly once.
     /// Each parked fiber's OWN buffered stdout/stderr (moved into `f.ctx.out`/`stderr` by `swap_ctx`
     /// when it parked) is carried into its `Deadlocked` slot, so `reduce_task_slots` flushes EVERY
-    /// parked buffer at its task-order slot — matching the serial engine, which printed those lines
-    /// live before the deadlock returned. A distinct `Deadlocked` outcome (not `Fault`) is what lets
+    /// parked buffer at its task-order slot — matching what a strictly sequential run would have
+    /// printed live before the deadlock returned. A distinct `Deadlocked` outcome (not `Fault`) is what lets
     /// the reduce flush ALL parked buffers here without disturbing the real-fault multi-fault path.
     fn flag_deadlock(&mut self, err: &RuntimeError) {
         let buckets: Vec<Vec<ParkedEntry>> = self.parked.drain().map(|(_, v)| v).collect();
@@ -3796,7 +3796,7 @@ impl SchedCore {
                     // `f.ctx.out` when it parked; the downstream `reduce_task_slots` flushes EVERY
                     // Deadlocked slot's buffer at its task-order slot (not just the lowest-index one,
                     // as with a real Fault), so with two-or-more parked fibers a higher-index
-                    // printer's output is preserved byte-identically to the serial engine.
+                    // printer's output is preserved byte-identically to a strictly sequential run.
                     // `task_index`/`scope_id` are Copy, read before the partial move of
                     // `f.ctx.out`/`f.ctx.stderr`.
                     let (ti, sid) = (f.task_index, f.scope_id);

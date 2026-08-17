@@ -39,7 +39,7 @@ impl Checker {
                     }
                     // A built-in variant name that ISN'T a variant of `ty` cannot be a binding: the
                     // compiler routes it by the variant registry (a `MatchArm` test), so it would trap
-                    // on the VM while the interp binds. Reject it so all engines agree.
+                    // on the VM. Reject it here at check time instead.
                     if !ty.is_unknown() {
                         self.error(span, format!("'{name}' is not a variant of {ty}"));
                         return false;
@@ -561,8 +561,8 @@ impl Checker {
                     // binding capturing the whole scrutinee value (irrefutable catch-all). The parser
                     // emits it as `Variant { bindings: [] }`; reinterpret it as a binding — UNLESS the
                     // name is a registered variant (e.g. `None`). The compiler routes by the variant
-                    // registry, so a colliding name would bind in the interp but trap on the VM; reject
-                    // it here so all engines agree. (Rename the binding to fix.)
+                    // registry, so a colliding name would trap on the VM; reject
+                    // it here at check time instead. (Rename the binding to fix.)
                     Pattern::Variant {
                         name,
                         bindings,
@@ -671,8 +671,8 @@ impl Checker {
                         );
                         // A BARE non-constructor name binding nothing is a whole-scrutinee catch-all
                         // (`other:`), mirroring the literal/tuple bare-ident path — irrefutable, closes
-                        // the match. A bare name that IS a variant collides and is rejected so all
-                        // engines agree (same rule as the `MatchKind::Literal` path).
+                        // the match. A bare name that IS a variant collides and is rejected here
+                        // (same rule as the `MatchKind::Literal` path).
                         let is_bare = enum_name.is_none() && module_name.is_none();
                         if is_bare && ctor.is_err() && bindings.is_empty() {
                             if self.variant_owners.contains_key(name)
@@ -802,7 +802,7 @@ impl Checker {
     /// only spelling for a whole-module-imported struct (the bare name isn't in scope). `Ok(())` when it
     /// names `label`; `Err(msg)` (already BARE-rendered — never the `::` identity key) otherwise. A
     /// 3-part `a.b.Point` is rejected (structs are two-level). Shared by the top-level `MatchKind::Struct`
-    /// arm and the nested-struct sub-pattern arm so both engines agree on what lowers.
+    /// arm and the nested-struct sub-pattern arm so the two lower identically.
     pub(super) fn resolve_struct_ctor(
         &self,
         label: &str,
@@ -1409,7 +1409,7 @@ impl Checker {
     /// up the binding's FINAL (refined) type and writes it to `hover_result`, so an earlier occurrence
     /// of `b` (its `b := []` decl or any use before the refining `b.push(0)`) shows `List[int]`, not
     /// `List[Unknown]`. A concrete (fully-known) type records immediately like `hover_record_at`.
-    /// Probe-gated; entirely inert off the hover probe → VM/interp parity-neutral.
+    /// Probe-gated; entirely inert off the hover probe → behavior-neutral.
     pub(super) fn hover_record_binding(
         &mut self,
         span: Span,
@@ -1467,7 +1467,7 @@ impl Checker {
     /// module)` fallback — then (1) seeds `name_docs[bind]` so a later bare (`x: T`) / generic-head
     /// (`x: T[..]`) annotation use surfaces the same doc (those arms read `name_docs`), and (2) records
     /// the import-line token hover at `name_span`. Both halves are probe-gated no-ops off the hover
-    /// probe (`name_docs` is editor-tooling-only and entry-module-scoped), so this is parity-neutral.
+    /// probe (`name_docs` is editor-tooling-only and entry-module-scoped), so this is behavior-neutral.
     pub(super) fn record_imported_type_hover(
         &mut self,
         bind: &str,
@@ -1645,7 +1645,7 @@ impl Checker {
     /// expression (or `nil`). Non-final statements are checked for their effects.
     pub(super) fn infer_recover(&mut self, block: &Block) -> Ty {
         // A `recover:` block is a value, not a control-flow target: `return`/`break`/`continue` that
-        // would escape it are rejected (both engines agree). `?` is fine — it propagates normally.
+        // would escape it are rejected. `?` is fine — it propagates normally.
         if let Some((span, kw)) = escaping_flow(block, false) {
             self.error(
                 span,
@@ -2418,10 +2418,8 @@ impl Checker {
             // bindings (the whole point of nesting). Compute before declaring this clause's vars.
             let bindings = self.for_bindings(&clause.vars, &clause.iter);
             // A comprehension materializes eagerly, but a `Channel` is a blocking iteration form whose
-            // termination depends on `close()`. Draining it into a list/set/map is out of scope and would
-            // DIVERGE between engines (the VM's `compile_comprehension` reuses the channel-aware
-            // `compile_for`, but the interp oracle's comprehension path can't iterate a channel). Reject
-            // on both engines instead — the `for v in ch:` statement form is the way to drain a channel.
+            // termination depends on `close()`. Draining it into a list/set/map is out of scope; reject
+            // it here instead — the `for v in ch:` statement form is the way to drain a channel.
             // Checked per clause so a channel in ANY clause is rejected.
             // `for_bindings` above already handled a range clause SYNTACTICALLY (a comprehension
             // over a range is sanctioned); a range is never a Channel, so skip it here — `infer`

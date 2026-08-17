@@ -1,7 +1,7 @@
 # `wait:` SEND-arms — Go-`select` symmetry: an arm `ch.send(v):` fires once the channel can accept
 # the value (bounded-with-space / unbounded / closed → faults, Go's panic analog). Selection is
 # DETERMINISTIC source order (first ready arm wins, recv OR send) — Chezzi's one principled divergence
-# from Go's random fairness, and what makes serial == M:N byte-identical. See docs/concurrency.md §6d.
+# from Go's random fairness. See docs/concurrency.md §6d.
 
 fn main():
     # --- Phase A: mixed recv + send + else at top level (single fiber; `else` keeps it non-blocking) ---
@@ -29,7 +29,7 @@ fn main():
 
     print("outbox={outbox.recv()}")   # proves phase-B's send actually queued the 2
 
-    # --- Phase B: a bounded send-arm BLOCKS until a receiver frees a slot (cross-task, both engines) ---
+    # --- Phase B: a bounded send-arm BLOCKS until a receiver frees a slot (cross-task) ---
     # Single producer → single consumer → FIFO, so the value order is deterministic; only the consumer
     # prints, so there is no concurrent-output interleave. The producer's `wait:` send-arm parks when
     # the cap-1 channel is full and wakes when the consumer's `recv` frees the slot.

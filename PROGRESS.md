@@ -158,6 +158,60 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > clippy `--all-targets -D warnings` clean, `chezzi test tests/chz` **569 → 571**, `examples/` goldens
 > byte-exact.
 
+> **✅ The dead-engine comment/doc sweep + the self-comparison purge, 2026-08-17 (11 commits).**
+> The `--serial`/`interp` removals left ~1750 lines across the tree still describing the deleted
+> engines in the present tense. Swept everything except the two dated logs (`PROGRESS.md`,
+> `docs/gaps.md`, both already guarded by the reading note above) — 112 files, +1712/−2262.
+>
+> **Three classes, and only one of them is safe to automate.** (1) *Naming drift* — the fact is about
+> the one engine; delete the name, keep the fact. (2) *A live code arm NAMED after the dead engine*
+> (`mn.is_none()`, `cancel == None`) — rename after what the code actually tests. (3) *False friends*
+> — `Python parity` / `CPython parity` / `IEEE-754 parity` (the project's stated correctness bar),
+> cooperative **cancellation**, `serialize`, `interpolation`, `interpreter` meaning the bytecode VM,
+> the live `parallel:` keyword. Editing a class-3 hit is a defect, not a cleanup.
+>
+> **The governing rule, learned the hard way: a stale comment about a deleted feature is merely moot;
+> rewording it to point at live code can make it FALSE.** Four rewrites did exactly that and were
+> caught only by review — `wake_on_send` was described as draining a `blocked_on` map that no longer
+> exists; `run_one_fiber` was given a "`mn` is `None`" case its only caller cannot produce;
+> `field_ic`'s data-race argument was restated as "a fiber owns a separate `Vm`" (a fiber owns a
+> `FiberCtx`); and the test-only `heap: None` fiber was substituted for the live `mn == None` VMs at
+> four sites. **When you cannot state what an arm does without guessing, delete the sentence.**
+>
+> **A grep count is the wrong acceptance criterion.** Correct history — "the since-removed cooperative
+> engine printed `7`, which is how it was caught" — still matches every pattern and must survive. The
+> criterion is *zero present-tense false claims*, verified by review, not by a counter. Two passes
+> reported files at "0 hits" that were still full of dead-engine claims, because the regex never
+> covered `interp::`, `serial engine`, or hyphenated `two-engine parity`.
+>
+> **The self-comparison purge — 113 tests that asserted nothing.** `assert_eq!(run_capture(src),
+> run_capture(src))` and four more spellings: the same function, the same input, compared to itself.
+> Left over from when three engines were compared. 17 were a test's *only* assertion, so those tests
+> passed unconditionally. All 113 are gone; five needed a real golden derived from the program's
+> semantics (not from pasting current output). **Two earlier passes each declared this "finished" and
+> were wrong, both times because the detector was written from the same list as the fix** — the third
+> pass worked from a structural definition and found a fifth shape (tuple-destructured `let` pairs,
+> ~62 sites) the first four patterns never covered. `run_capture_stress(src)` vs `run(src)` is NOT
+> this pattern — different configurations, and it is how missing GC roots get caught.
+>
+> **One dead guard removed:** `Vm::pinned_module_roots` was a GC root set with a decl, an init, a
+> `collect()` read — and **no writer**, its only one having gone with the serial engine's
+> child-modules window. Not merely dead: `golden_tests.rs` documented it as closing a UAF hazard, so
+> the code claimed a guard it did not have. Resolved as *the hazard was serial-only*, proven by a
+> completeness scan rather than a stress run: production has exactly three `module_objs` mutations
+> (one `mem::swap` in `swap_ctx`, two `push`es) and **no `take`/`replace`/re-assign anywhere**, so no
+> caller can open a save-and-restore window at all. A stress run cannot prove the *absence* of a
+> window; the scan can.
+>
+> Also fixed: a golden comment claiming "verified against CPython" for a sequence CPython cannot even
+> complete (`x /= 2` promotes to float, then `x &= 12` raises `TypeError`); a test pinning output
+> `chezzi run` rejects with 3 type errors; and `idx_parity`, which asserted nothing and hid a wrong
+> comment — `xs[-1]` on a 3-element list is Python-parity negative indexing, not out-of-bounds.
+>
+> Gate: `cargo test` **21 targets, 0 failed** (lib **4154/0/2**, count unchanged — assertions changed,
+> not tests), clippy `--all-targets -D warnings` clean, `chezzi test tests/chz` **569/569** at default
+> and at `CHEZZI_THREADS=2`, `chezzi docs` renders, `chezzi run --serial` → `unknown flag`.
+
 > **✅ The `--serial` engine is REMOVED, 2026-08-16 (14 commits).** The cooperative single-thread VM,
 > the `--serial` and `--check-parity` flags, the cooperative scheduler and every per-engine fork are
 > gone. **The bytecode VM on its M:N scheduler is the sole engine.** `docs/future.md` §2b is marked

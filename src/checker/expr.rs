@@ -649,7 +649,7 @@ impl Checker {
     /// pushes fewer values and cannot express a gap. (This used to be an unconditional Swift SE-0111
     /// scope-cut, "every parameter must be supplied, defaults do not apply through a value".)
     /// Eval order is slot order, matching how direct keyword calls already reorder in desugar, so
-    /// both engines observe identical argument side-effect order.
+    /// argument side-effect order stays consistent with that path.
     pub(super) fn check_value_keyword_call(
         &mut self,
         params: &[Ty],
@@ -2304,9 +2304,8 @@ impl Checker {
             _ => obj_ty,
         };
         // Task 1 — a captured module-global aggregate mutated in a task (`xs.push(v)`, …) is no longer
-        // a compile error: the serial engine now deep-copies module globals per spawned task (matching
-        // M:N), so the write hits the task's OWN copy — invisible to the parent, consistent on both
-        // engines. The old frozen-module-global gate is deleted (`Shared`/`Channel` remain the escape
+        // a compile error: spawning deep-copies module globals per task, so the write hits the task's
+        // OWN copy — invisible to the parent. The old frozen-module-global gate is deleted (`Shared`/`Channel` remain the escape
         // hatch for genuinely-shared cross-task state; they cross by shared Arc via `to_snap`).
         // A member-level turbofish (`obj.method[A, B](...)`) is only valid on a USER method that
         // declares its OWN `[U]` type params. On a builtin (`xs.len[int]()`, `xs.iter[int]()`) or a
@@ -2585,7 +2584,7 @@ impl Checker {
                     }
                     // The first param is the receiver (bound implicitly from `obj`), so the call's
                     // explicit args correspond to params[1..]. A method with NO params has no
-                    // receiver slot — both engines prepend the receiver and would error at runtime,
+                    // receiver slot — the runtime prepends the receiver and would error at runtime,
                     // so reject the call here instead. (A zero-param method is classified static
                     // above, so this `None` arm is now defensive — kept for the FnSig that omits the
                     // static flag, e.g. a protocol-derived sig.)

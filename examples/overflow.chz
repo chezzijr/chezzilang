@@ -1,5 +1,5 @@
 # Integer overflow policy: every `i64` overflow is a *recoverable panic* — never a silent wrap, never
-# a host crash. Both engines surface the identical "integer overflow in <op>" message, and `recover:`
+# a host crash. The runtime surfaces the identical "integer overflow in <op>" message, and `recover:`
 # turns it into an `Err` like any other fault. Covers the arithmetic ops, negation, division
 # (`MIN / -1`), and the natives that used to leak — `math.abs(MIN)` and `[MAX, 1].sum()`.
 import std.math

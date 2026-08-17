@@ -1,6 +1,6 @@
 # Swift-style keyword arguments through a first-class function VALUE (SE-0111 labels, surface-only).
 # A value call may supply parameters by label, in any order; the checker resolves each label to a
-# positional slot and both engines lower it to a plain positional call (identical output).
+# positional slot and the compiler lowers it to a plain positional call (identical output).
 
 fn greet(name: str, greeting: str):
     print(greeting, name)
