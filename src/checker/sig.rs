@@ -3289,7 +3289,7 @@ impl Checker {
         // this `match` is the sole lvalue dispatch, its `Tuple` arm recurses back into `check_assign`
         // per element, and the ident/index/field arms all write THROUGH the same root binding. Done
         // before the arms run so a parent-side `xs[0] = v` untaints ahead of its own receiver read.
-        self.note_assign_root(target);
+        self.note_assign_root(target, op);
         match &target.kind {
             ExprKind::Ident(name) => {
                 let Some(var_ty) = self.lookup(name) else {

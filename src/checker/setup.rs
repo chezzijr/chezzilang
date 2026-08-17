@@ -7,10 +7,18 @@ use super::*;
 /// by [`Checker::diag_rollback`]. `errors` is public within the checker because several sites also
 /// ask "did the probe ERROR?" (a cascade-suppression signal — a warning is not an error and must not
 /// answer it); `warnings` is only ever compared by the rollback itself.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct DiagMark {
     pub(super) errors: usize,
     warnings: usize,
+    /// W8-3 — the airlock-staleness taint is SPECULATIVE STATE, not just a diagnostic: reporting a
+    /// stale read CONSUMES the entry (one warning per name). A speculative walk that reads a tainted
+    /// name therefore eats the taint, and rolling back only `warnings` leaves the real walk with
+    /// nothing to report — a silently LOST warning, the mirror of the double-report this seam already
+    /// guards (measured before the fix: `refine_receiver`'s speculative arg-infer swallowed the
+    /// warning for `ys.push(xs.len())` whenever `ys` was an unrefined empty literal). Snapshotted here
+    /// and restored wholesale, so any future speculative site gets the same protection for free.
+    spawn_stale: HashMap<String, Span>,
 }
 
 impl Checker {
@@ -936,13 +944,18 @@ impl Checker {
         DiagMark {
             errors: self.errors.len(),
             warnings: self.warnings.len(),
+            // Empty in every program that never writes a capture inside a task, and an empty
+            // `HashMap` clone allocates nothing.
+            spawn_stale: self.spawn_stale.clone(),
         }
     }
 
-    /// Discard every diagnostic — error AND warning — recorded since `m`. See [`Checker::diag_mark`].
+    /// Discard every diagnostic — error AND warning — recorded since `m`, and restore the speculative
+    /// state a discarded diagnostic consumed. See [`Checker::diag_mark`].
     pub(super) fn diag_rollback(&mut self, m: DiagMark) {
         self.errors.truncate(m.errors);
         self.warnings.truncate(m.warnings);
+        self.spawn_stale = m.spawn_stale;
     }
 
     /// Attribute a diagnostic to the module currently being checked (graph path only). Shared by
@@ -2031,13 +2044,20 @@ impl Checker {
     /// Called at the TOP of `check_assign`, before the per-arm code infers the target's receiver: a
     /// parent-side `xs[0] = v` must untaint *first*, so the receiver read it then performs cannot
     /// report a write the parent has just superseded.
-    pub(super) fn note_assign_root(&mut self, target: &Expr) {
+    pub(super) fn note_assign_root(&mut self, target: &Expr, op: AssignOp) {
         let mut e = target;
         loop {
             match &e.kind {
                 ExprKind::Index { obj, .. } | ExprKind::Field { obj, .. } => e = obj,
                 ExprKind::Ident(name) => {
                     let name = name.clone();
+                    // A COMPOUND assign is `x = x OP v` (docs/syntax.md §3) — it READS the binding
+                    // too, and that read is the stale one (`n += 1` after a task-side `n = n + 1`
+                    // measured 1, not 2). The plain `=` form has no such read, and any read in the
+                    // RHS was already inferred (and reported) before `check_assign` was called.
+                    if op != AssignOp::Eq {
+                        self.report_spawn_stale_read(&name, target.span);
+                    }
                     self.note_task_write(&name, target.span);
                     return;
                 }

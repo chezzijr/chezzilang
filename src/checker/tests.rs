@@ -585,6 +585,39 @@ fn the_airlock_warning_is_reported_exactly_once() {
     );
 }
 
+/// A COMPOUND assign in the parent reads the stale binding before it writes it (`n += 1` after a
+/// task-side `n = n + 1` measured 1, not 2), so it reports rather than silently untainting — unlike
+/// the plain `=` form, whose neighbour test above asserts silence.
+#[test]
+fn a_parent_compound_assign_reads_the_stale_value_and_warns() {
+    warns(
+        "fn f():\n    n := 0\n    parallel:\n        spawn:\n            n = n + 1\n    n += 1\n    print(n)\nf()\n",
+        "'n' is read here",
+    );
+    // Inside the task the compound assign reads the task's OWN copy — silent.
+    no_warn(
+        "fn f():\n    n := 0\n    parallel:\n        spawn:\n            n += 1\n            print(n)\nf()\n",
+    );
+}
+
+/// …and never reported ZERO times. Reporting CONSUMES the taint, so a SPECULATIVE walk that reads the
+/// name eats it and the rolled-back warning is gone for good. `ys := []` (an unrefined empty literal)
+/// makes `refine_receiver` speculatively infer `ys.push(...)`'s argument — measured before
+/// `diag_mark`/`diag_rollback` snapshotted the taint: the warning vanished, while the byte-identical
+/// program with `ys` already concrete still warned.
+#[test]
+fn a_speculative_walk_that_rolls_back_does_not_swallow_the_airlock_warning() {
+    let stale = "fn f():\n    xs: List[int] = []\n    ys := []\n    parallel:\n        spawn:\n            xs.push(1)\n    ys.push(xs.len())\n    print(ys.len())\nf()\n";
+    warns(stale, "'xs' is read here");
+    // The control: identical but for `ys` being concrete, so no speculative refine runs at all.
+    let concrete = "fn f():\n    xs: List[int] = []\n    ys: List[int] = [0]\n    parallel:\n        spawn:\n            xs.push(1)\n    ys.push(xs.len())\n    print(ys.len())\nf()\n";
+    warns(concrete, "'xs' is read here");
+    // …and still exactly once through the speculative path.
+    let (errs, warns) = warn_src(stale);
+    assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+    assert_eq!(warns.len(), 1, "expected one warning, got: {warns:?}");
+}
+
 /// One function's taint must not leak into the next: the map is taken and restored around every fn
 /// body, so a second function reading a same-named binding of its own is clean.
 #[test]
