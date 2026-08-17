@@ -57,6 +57,32 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `"src.main:main"`) and recommended `chezzi run src/main.chz`, which is a **silent no-op, rc=0**.
 > Every code snippet added was executed before it was written down.
 >
+> **✅ The checker has a WARNING severity, 2026-08-17 — plumbing only, no rule uses it yet.** The
+> checker could report hard errors and nothing else, so the two diagnostics queued behind it
+> (`docs/gaps.md` W8-2's discarded `Result`, and the airlock trap at `gaps.md:418`) had no non-fatal
+> channel to land on. `CheckError` gains `pub severity: Severity` (`Error`/`Warning`) with
+> `CheckError::error` / `::warning` constructors; `Display` renders `warning (line N, col M): …` and
+> the error rendering is **byte-identical to before** — hundreds of tests, the LSP and `--errors=json`
+> all match on that string. `Checker` gains a `warnings` vec next to `errors` and a `warn(span, msg)`
+> beside `error(span, msg)`, both routed through one `attribute` helper so a cross-module warning takes
+> the same `in module 'X': ` prefix an error does. New entry points `checker::check_graph_diags` (and
+> its single-module test twin `check_diags`) return `(Result, Vec<CheckError>)`; `check_graph` /
+> `check_graph_with_entry` keep their exact signatures and delegate, so the ~113 existing call sites are
+> untouched. **Warnings never reach the `Err` arm — the exit code is unchanged in every case.**
+> Consumers: `chezzi check`/`run` print them to stderr in plain text, `editor::diagnostics` returns them
+> in the same `Vec<Diag>` (`Diag` gains `severity`, re-exported from the checker so there is one such
+> type in the tree) and `chezzi-lsp` maps them to `DiagnosticSeverity::WARNING`, `chezzi test` prints
+> them once before the run. **`--errors=json` gains a `severity` key** on every object (`"error"` /
+> `"warning"`, between `col` and `message`), emitted by one shared renderer (`diags_json`) that the
+> **fatal resolve/lex/parse path now goes through too** — a key present on type errors but absent on
+> parse errors would be worse for a consumer than no key at all, and that path had its own duplicated
+> format string until this commit; a warning-only `check` prints the warning array where it used to print `[]`, and the
+> genuinely clean case still prints `[]` and exits 0. Tests: the `warns` / `no_warn` helpers in
+> `src/checker/tests.rs` (`warns` asserts the program is error-FREE, or it could not tell a warning from
+> an error), a channel test asserting the `warn`/`error` split + both renderings + the attribution, a
+> `check_graph_diags` test that no warning leaks into either arm, and a CLI test pinning the unchanged
+> clean/error cases plus the new key (`tests/check_errors_json.rs`).
+>
 > **✅ `os.hostname() -> Option[str]`, 2026-08-17 — no more silent `""` on syscall failure.** The
 > native `hostname` (`src/native/os.rs:55`) fell back to `String::new()` on a nonzero
 > `libc::gethostname` return; that's a silent wrong answer, indistinguishable from a real (if absurd)

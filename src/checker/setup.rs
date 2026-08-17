@@ -7,6 +7,7 @@ impl Checker {
     pub(super) fn new() -> Self {
         let mut c = Checker {
             errors: Vec::new(),
+            warnings: Vec::new(),
             scopes: Vec::new(),
             const_decls: Vec::new(),
             loop_vars: Vec::new(),
@@ -902,11 +903,27 @@ impl Checker {
     }
 
     pub(super) fn error(&mut self, span: Span, message: impl Into<String>) {
-        let message = match &self.current_module_label {
+        let message = self.attribute(message);
+        self.errors.push(CheckError::error(message, span));
+    }
+
+    /// A NON-FATAL diagnostic: reported alongside the errors but never in the `Err` arm, so the exit
+    /// code is unchanged. Shares `error`'s module attribution — a warning raised while checking an
+    /// imported module must name it, exactly like an error from the same position.
+    // No rule emits one yet; the two that will (docs/gaps.md W8-2 and the airlock trap) land next.
+    #[allow(dead_code)]
+    pub(super) fn warn(&mut self, span: Span, message: impl Into<String>) {
+        let message = self.attribute(message);
+        self.warnings.push(CheckError::warning(message, span));
+    }
+
+    /// Attribute a diagnostic to the module currently being checked (graph path only). Shared by
+    /// `error` and `warn` so the two can never drift on how a cross-module diagnostic reads.
+    fn attribute(&self, message: impl Into<String>) -> String {
+        match &self.current_module_label {
             Some(label) => format!("in module '{label}': {}", message.into()),
             None => message.into(),
-        };
-        self.errors.push(CheckError { message, span });
+        }
     }
 
     /// Report each name that repeats within `items` as a "`<kind>` '`<name>`' is already defined"

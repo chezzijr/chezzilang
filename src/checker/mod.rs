@@ -80,16 +80,46 @@ enum MatchKind {
     Skip,
 }
 
+/// Severity of a checker diagnostic. `Error` fails the build; `Warning` is reported and the build
+/// continues (exit code unchanged) — Rust's `unused_must_use` model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    Error,
+    Warning,
+}
+
 /// A type error, with the source span it occurred at. Mirrors `ParseError` / `RuntimeError`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CheckError {
     pub message: String,
     pub span: Span,
+    pub severity: Severity,
+}
+
+impl CheckError {
+    pub fn error(message: String, span: Span) -> Self {
+        CheckError {
+            message,
+            span,
+            severity: Severity::Error,
+        }
+    }
+
+    pub fn warning(message: String, span: Span) -> Self {
+        CheckError {
+            message,
+            span,
+            severity: Severity::Warning,
+        }
+    }
 }
 
 impl fmt::Display for CheckError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "type error ({}): {}", self.span, self.message)
+        match self.severity {
+            Severity::Error => write!(f, "type error ({}): {}", self.span, self.message),
+            Severity::Warning => write!(f, "warning ({}): {}", self.span, self.message),
+        }
     }
 }
 
@@ -736,6 +766,13 @@ struct EnumSigInfo {
 /// to be sized at.
 #[cfg(test)]
 pub fn check(module: &crate::ast::Module) -> Result<(), Vec<CheckError>> {
+    check_diags(module).0
+}
+
+/// [`check`] plus the non-fatal warnings the pass produced — the single-module twin of
+/// [`check_graph_diags`]. Warnings never affect the `Result`.
+#[cfg(test)]
+pub fn check_diags(module: &crate::ast::Module) -> (Result<(), Vec<CheckError>>, Vec<CheckError>) {
     crate::on_frontend_stack_scoped(move || {
         let mut c = Checker::new();
         // Single-module path (no graph): the always-linked std/prelude.chz was never hoisted, so seed
@@ -743,11 +780,13 @@ pub fn check(module: &crate::ast::Module) -> Result<(), Vec<CheckError>> {
         // normally).
         c.seed_native_prelude_sigs();
         c.check_module(&module.stmts, None, &[]);
-        if c.errors.is_empty() {
+        let warnings = std::mem::take(&mut c.warnings);
+        let res = if c.errors.is_empty() {
             Ok(())
         } else {
-            Err(c.errors)
-        }
+            Err(std::mem::take(&mut c.errors))
+        };
+        (res, warnings)
     })
 }
 
@@ -775,15 +814,28 @@ pub fn check_graph_with_entry(
     graph: &ModuleGraph,
     entry_fn: Option<&str>,
 ) -> Result<(), Vec<CheckError>> {
+    check_graph_diags(graph, entry_fn).0
+}
+
+/// [`check_graph_with_entry`] plus the non-fatal warnings the pass produced. Warnings never affect
+/// the `Result` — a program with warnings and no errors returns `Ok(())`. The plain entry points
+/// keep their exact signatures because ~113 test call sites depend on them; a consumer that wants to
+/// SHOW warnings (the CLI, the LSP, the test runner) calls this one instead.
+pub fn check_graph_diags(
+    graph: &ModuleGraph,
+    entry_fn: Option<&str>,
+) -> (Result<(), Vec<CheckError>>, Vec<CheckError>) {
     crate::on_frontend_stack_scoped(move || {
         let mut c = Checker::new();
         c.entry_fn = entry_fn.map(str::to_string);
         c.run_graph_pass(graph, false);
-        if c.errors.is_empty() {
+        let warnings = std::mem::take(&mut c.warnings);
+        let res = if c.errors.is_empty() {
             Ok(())
         } else {
             Err(std::mem::take(&mut c.errors))
-        }
+        };
+        (res, warnings)
     })
 }
 
@@ -1755,6 +1807,9 @@ struct Capture {
 
 struct Checker {
     errors: Vec<CheckError>,
+    /// Non-fatal diagnostics (`Severity::Warning`), collected separately so they can never reach the
+    /// `Err` arm of a check entry point and turn a warning into a build failure.
+    warnings: Vec<CheckError>,
     scopes: Vec<HashMap<String, Ty>>,
     /// Per-scope set of names bound as `for`-loop variables. Mirrors `scopes` index-for-index (a
     /// loop var is immutable — rebound fresh each iteration — so assigning to it is rejected; this

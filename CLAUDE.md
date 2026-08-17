@@ -57,6 +57,8 @@ cargo run -- init my_proj                # scaffold a new project (chezzi.toml w
 cargo run -- tokens examples/hello.chz   # token stream (M1)
 cargo run -- ast    examples/hello.chz   # parsed AST (M2)
 cargo run -- check  examples/hello.chz   # type-check only (M4); --errors=json for machine output
+# ^ json objects are {line, col, severity, message}; severity is "error" or "warning" (a warning is
+#   non-fatal — reported, exit code unchanged)
 cargo run -- run    examples/hello.chz   # type-check + run on the VM, OS-thread engine (default, M5)
 cargo run -- run                         # no file → run the manifest [project] entrypoint (walks up for chezzi.toml)
 cargo run -- run --parallel examples/primes_parallel.chz   # accepted no-op alias (the M:N engine is the only engine)

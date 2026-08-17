@@ -29,6 +29,95 @@ fn rejects(src: &str, needle: &str) {
     );
 }
 
+/// Type-check a source string, returning the collected WARNINGS (non-fatal diagnostics).
+fn warn_src(src: &str) -> (Vec<CheckError>, Vec<CheckError>) {
+    let tokens = lexer::tokenize(src).expect("lex should succeed");
+    let module = parser::parse(tokens).expect("parse should succeed");
+    let (res, warns) = check_diags(&module);
+    (res.err().unwrap_or_default(), warns)
+}
+
+/// Assert the source type-checks CLEAN and emits a warning containing `needle`. The clean assertion
+/// is load-bearing: without it the helper cannot tell a warning from an error, and every rule built
+/// on it would pass while emitting a hard error.
+// No rule emits a warning yet — the two that will (docs/gaps.md W8-2 and the airlock trap) land next.
+#[allow(dead_code)]
+fn warns(src: &str, needle: &str) {
+    let (errs, warns) = warn_src(src);
+    assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+    assert!(
+        warns.iter().any(|w| w.message.contains(needle)),
+        "expected a warning containing {needle:?}, got: {warns:?}"
+    );
+}
+
+/// Assert the source type-checks clean and emits NO warnings — the false-positive guard for a rule
+/// added via [`warns`].
+fn no_warn(src: &str) {
+    let (errs, warns) = warn_src(src);
+    assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+    assert!(warns.is_empty(), "expected no warnings, got: {warns:?}");
+}
+
+// ===== the severity channel (no rule emits a warning yet — Tasks 1/2 wire the first two) =====
+
+/// `warn` and `error` land in DIFFERENT vectors, share the module attribution, and render with their
+/// own prefixes. This is the whole contract the warning rules are built on: one that leaked into
+/// `errors` would fail the build, and one that rendered as `type error (...)` would be
+/// indistinguishable from a real error.
+#[test]
+fn warn_is_a_separate_non_fatal_channel() {
+    let span = Span {
+        line: 3,
+        col: 7,
+        file: 0,
+    };
+    let mut c = Checker::new();
+    c.warn(span, "hello");
+    c.error(span, "boom");
+    assert_eq!(c.errors.len(), 1);
+    assert_eq!(c.warnings.len(), 1);
+    assert_eq!(c.errors[0].severity, Severity::Error);
+    assert_eq!(c.warnings[0].severity, Severity::Warning);
+    // Byte-identical to what an error has always rendered as — hundreds of tests, the LSP and
+    // `--errors=json` all key on this string.
+    assert_eq!(c.errors[0].to_string(), "type error (line 3, col 7): boom");
+    assert_eq!(c.warnings[0].to_string(), "warning (line 3, col 7): hello");
+
+    // A warning raised while checking an imported module names it, exactly like an error.
+    c.current_module_label = Some("core.db".to_string());
+    c.warn(span, "attributed");
+    c.error(span, "attributed");
+    assert_eq!(c.warnings[1].message, "in module 'core.db': attributed");
+    assert_eq!(c.errors[1].message, "in module 'core.db': attributed");
+}
+
+/// The graph entry point keeps the channels apart: warnings never reach the `Result`, and an
+/// erroring program's `Err` carries only `Severity::Error`.
+#[test]
+fn check_graph_diags_keeps_warnings_out_of_the_result() {
+    let t = TmpDir::new();
+
+    let clean = t.write("clean.chz", "print(1)\n");
+    let graph = crate::resolver::build_graph(&clean).expect("resolve should succeed");
+    let (res, warns) = check_graph_diags(&graph, None);
+    assert!(res.is_ok(), "clean program should check clean: {res:?}");
+    assert!(warns.is_empty(), "no rule warns yet, got: {warns:?}");
+
+    let bad = t.write("bad.chz", "x: int = \"s\"\nprint(x)\n");
+    let graph = crate::resolver::build_graph(&bad).expect("resolve should succeed");
+    let (res, warns) = check_graph_diags(&graph, None);
+    let errs = res.expect_err("should not type-check");
+    assert!(errs.iter().all(|e| e.severity == Severity::Error));
+    assert!(warns.is_empty(), "no rule warns yet, got: {warns:?}");
+}
+
+/// Exercise the `no_warn` helper itself on the simplest clean program.
+#[test]
+fn no_warn_on_a_clean_program() {
+    no_warn("print(1)\n");
+}
+
 /// Type-check a source string after running the desugar pass (call normalization: named args,
 /// omitted defaults, variadic collapse — and, before W7-43, `?.`/`??` carrier lowering, which is
 /// now the CHECKER's job). Production always desugars before the checker (`resolver::build_graph`);

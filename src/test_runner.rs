@@ -547,7 +547,13 @@ fn render_json(
 /// Returns `(per-test outcomes, count filtered out by `--filter`)` or a whole-file compile-error msg.
 fn run_file(file: &Path, opts: &RunOpts) -> Result<(Vec<Outcome>, usize), String> {
     let graph = crate::resolver::build_graph(file).map_err(|e| e.to_string())?;
-    if let Err(errs) = crate::checker::check_graph(&graph) {
+    let (res, warns) = crate::checker::check_graph_diags(&graph, None);
+    // Advisory only — they go to stderr and change no test outcome, so a `--errors=json` run's
+    // stdout stays the machine-readable result document.
+    for w in &warns {
+        eprintln!("{w}");
+    }
+    if let Err(errs) = res {
         // Surface the first type error (matches `chezzi check`'s headline).
         let first = errs
             .first()
