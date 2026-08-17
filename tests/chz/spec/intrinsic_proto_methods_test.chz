@@ -103,6 +103,58 @@ test fn arith_method_faults_match_operator_faults():
     assert msg_of(rm, "neg_m") == msg_of(ro, "unary -")
     assert msg_of(rm, "neg_m") == "integer overflow in negation"
 
+# ---- MIN % -1 is representable (0), unlike MIN / -1 — Task 2 fix, docs/gaps.md:1950 ----
+#
+# `i64::MIN % -1` mathematically IS `0`; Rust's `checked_rem` returns `None` there only to dodge the
+# x86 `IDIV` hardware trap, not because the answer overflows. `MIN / -1` is a REAL overflow (the true
+# quotient 2^63 doesn't fit an i64) and keeps its fault. Three runtime arms compute `%`: `fast_int_bin`
+# (both operands inline, i.e. within ±2^62), the general `arith` path (at least one boxed operand —
+# `MIN` itself is ALWAYS boxed, since `Value::INT_MIN_INLINE` is `-(2^62)`, far above `i64::MIN`, so a
+# plain local `%` and a peephole-declined constant expression both land here), and `arith_scalar` (the
+# numeric-newtype same-type path, arm 3 — see `tests/chz/spec/newtype_test.chz`). `MIN` can never be
+# an inline `Value`, so arm 1's own overflow branch is UNREACHABLE from Chezzi source — the regression
+# test below only covers arm 1 with ordinary (non-overflowing) values.
+
+test fn min_mod_neg_one_is_representable_zero():
+    MIN := -9223372036854775807 - 1
+    # plain local-variable `%` — MIN is always boxed, so this lands in the general `arith` path
+    a := MIN
+    b := -1
+    assert a % b == 0
+    # constant expression: the peephole DECLINES to fold this (`checked_rem` gives `None` there), so
+    # the runtime `%` computes it — same general `arith` path, reached via the un-fused `Op::Mod`
+    assert (-9223372036854775807 - 1) % -1 == 0
+
+test fn mod_fast_path_ordinary_values_still_correct():
+    # arm 1 (`fast_int_bin`) only ever sees operands within ±2^62 (never MIN — see the note above), so
+    # this is a regression check, not an overflow-boundary one: `wrapping_rem` must still match
+    # `checked_rem` for every representable input, run through the BinLocalLocal-fused local/local `%`.
+    total := 0
+    for i in range(1, 6):
+        x := 17
+        total = total + (x % i)
+    assert total == 17 % 1 + 17 % 2 + 17 % 3 + 17 % 4 + 17 % 5
+
+test fn min_mod_zero_and_min_div_neg_one_still_fault():
+    MIN := -9223372036854775807 - 1
+    rm := recover: MIN % 0
+    match rm:
+        Ok(_): assert false, "MIN % 0 must still fault"
+        Err(e): assert e.message() == "modulo by zero"
+    rd := recover: MIN / -1
+    match rd:
+        Ok(_): assert false, "MIN / -1 must still fault — the real overflow, unchanged"
+        Err(e): assert e.message() == "integer overflow in Div"
+
+test fn ordinary_mod_sign_unaffected():
+    # pinned against measured Go 1.26 / this project's documented policy (docs/spec.md's integer
+    # overflow policy note): `%` follows the DIVIDEND's sign (Rust/C/Go), NOT Python's floored `%`
+    # (which follows the divisor — measured -7 % 3 == 2, 7 % -3 == -2 in Python on this box). This task
+    # must never move the sign.
+    assert 7 % 3 == 1
+    assert -7 % 3 == -1
+    assert 7 % -3 == 1
+
 # ---- Hashable: the method must agree with real container hashing ----
 
 test fn hash_method_agrees_with_container_hashing():

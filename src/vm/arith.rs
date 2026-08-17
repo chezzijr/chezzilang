@@ -356,10 +356,11 @@ impl Vm {
                 if y == 0 {
                     return Err(self.err("modulo by zero".to_string(), span));
                 }
-                let n = x
-                    .checked_rem(y)
-                    .ok_or_else(|| self.err("integer overflow in Mod".to_string(), span))?;
-                self.make_int(n)
+                // `wrapping_rem` == `checked_rem` for every input except `MIN % -1`, where the true
+                // mathematical remainder IS `0` (representable) — Rust's `checked_rem` returns `None`
+                // there only to dodge the x86 `IDIV` hardware trap, not because the answer overflows.
+                // Unlike `Div`, `%` never overflows past `b == 0`.
+                self.make_int(x.wrapping_rem(y))
             }
             BinKind::Lt => Value::bool(x < y),
             BinKind::LtEq => Value::bool(x <= y),
@@ -422,7 +423,9 @@ impl Vm {
                     ));
                 }
                 Op::Div => a.checked_div(b),
-                Op::Mod => a.checked_rem(b),
+                // `wrapping_rem` never overflows past the `b == 0` guard above (see `fast_int_bin`'s
+                // `BinKind::Mod` arm) — wrap in `Some` so this shared overflow check never fires for Mod.
+                Op::Mod => Some(a.wrapping_rem(b)),
                 _ => unreachable!(),
             };
             let n = v.ok_or_else(|| self.err(format!("integer overflow in {name}"), span))?;
@@ -782,7 +785,9 @@ impl Vm {
                     return Err(self.err(format!("{kind} by zero"), span));
                 }
                 Op::Div => a.checked_div(b),
-                Op::Mod => a.checked_rem(b),
+                // `wrapping_rem` never overflows past the `b == 0` guard above (see `fast_int_bin`'s
+                // `BinKind::Mod` arm) — wrap in `Some` so this shared overflow check never fires for Mod.
+                Op::Mod => Some(a.wrapping_rem(b)),
                 _ => unreachable!(),
             };
             let n = v.ok_or_else(|| self.err(format!("integer overflow in {name}"), span))?;

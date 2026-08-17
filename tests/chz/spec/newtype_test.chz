@@ -62,3 +62,16 @@ test fn by_key_nan_float_newtype():
     ws.sort_by_key(fn(s): s)
     assert float(ws.min_by(fn(s): s) ?? Score(0.0)) == 1.0
     assert math.is_nan(float(ws.max_by(fn(s): s) ?? Score(0.0)))
+
+# ---- numeric-newtype `%` arm (`Vm::arith_scalar`, Task 2 / docs/gaps.md:1950) ----
+#
+# `MIN % -1` is the one input `checked_rem` misreports as an overflow (the true remainder IS `0`, the
+# x86 `IDIV` trap guard, not a real overflow — see `tests/chz/spec/intrinsic_proto_methods_test.chz`
+# for the general non-newtype arms). Same-type newtype arithmetic unwraps to `arith_scalar`, a THIRD,
+# separate `checked_rem` call site that needs its own fix.
+
+test fn min_mod_neg_one_on_a_numeric_newtype():
+    MIN := -9223372036854775807 - 1
+    a := UserId(MIN)
+    b := UserId(-1)
+    assert int(a % b) == 0

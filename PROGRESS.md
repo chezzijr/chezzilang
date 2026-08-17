@@ -7,6 +7,34 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+> **✅ `i64::MIN % -1` is now `0`, 2026-08-17 — `docs/gaps.md:1950` struck.** `%` at that one input used
+> to fault `integer overflow in Mod`; Go and Python both give `0`, and that IS the mathematically
+> correct remainder — Rust's `checked_rem` returns `None` there only to dodge the x86 `IDIV` hardware
+> trap, not because the answer overflows. Measured: pre-change binary on `MIN % -1` (`MIN` spelled
+> `-9223372036854775807 - 1`, the only way to write it — the lexer rejects the bare literal) →
+> `runtime error: integer overflow in Mod`; post-change → `0`. Switched `checked_rem` → `wrapping_rem`
+> (identical to `checked_rem` for every OTHER input) at the three **live runtime** `Mod` call sites in
+> `src/vm/arith.rs`: `fast_int_bin` (`BinKind::Mod`, the `BinLocalLocal`/`BinLocalConst`/quickened-`Q_INT`
+> fast path), `arith` (`Op::Mod`, the general path any boxed operand falls back to — `MIN` is always
+> boxed, since `Value::INT_MIN_INLINE` is `-(2^62)`, so a plain local `%` and a peephole-declined
+> constant expression both land here), and `arith_scalar` (`Op::Mod`, the numeric-`newtype` same-type
+> path, reached only via e.g. `UserId(MIN) % UserId(-1)`). **`fast_int_bin`'s own `Mod`-overflow branch
+> is unreachable from Chezzi source with `MIN` specifically** — its operands come only from
+> `Value::as_int_inline()`, which is `None` for any boxed value, and `MIN` can never be inline; fixed
+> anyway for consistency, regression-tested with ordinary values instead. `src/compiler/peephole.rs:95`
+> (the 4th `checked_rem` grep hit, the const-folder) is **untouched** — it already declines to fold
+> `MIN % -1` (`checked_rem` → `None` there too), and declining is always correct once the un-folded ops
+> compute the same `0` at runtime. **What did NOT change:** `MIN / -1` still faults
+> `integer overflow in Div` (a real overflow — the true quotient `2^63` doesn't fit an `i64`); `% 0`
+> still faults `modulo by zero`; the sign convention (`-7 % 3 == -1`, `7 % -3 == 1` — dividend-sign,
+> Rust/C/Go, NOT Python's floored `%`) is pinned, unchanged. Docs: `docs/spec.md`'s integer-overflow
+> policy paragraph corrected (it previously claimed `%` "trips the same `i64` checked-op overflow" as
+> `/`). Tests: `tests/chz/spec/intrinsic_proto_methods_test.chz` (general arms, Div/`%0` fault controls,
+> sign pins) + `tests/chz/spec/newtype_test.chz` (the numeric-newtype arm) — **5 new**.
+> **Gate:** `cargo test --lib` **4156 passed / 0 failed / 2 ignored** (unchanged — no new Rust tests, per
+> the hybrid-testing policy), full `cargo test` all targets 0 failed, clippy `-D warnings` clean,
+> `chezzi test tests/chz` **571 → 576**.
+
 > **✅ `List.min` / `max` / `min_by` / `max_by` return `Option[T]`, 2026-08-17 — the last OPEN row in
 > `docs/gaps.md` is struck.** All four used to FAULT on an empty list (`runtime error: min() of empty
 > list`) while their siblings `first`/`last`/`pop` returned `Option[T]`. That is mixed lineage inside

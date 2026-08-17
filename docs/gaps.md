@@ -1947,7 +1947,18 @@ Regression: `parity_tests::spawn_task_first_global_access_is_write_parity`.
   `structs` key (`src/vm/op.rs:676-680` — an overwriting insert would silently leave the type name `""`).
   Traps for any future native that emits an unregistered struct name.
 - Shift error says `shift amount 64 out of range (0..64)` — 64 IS rejected, so the printed range is wrong.
-- `i64::MIN % -1` faults `integer overflow in Mod`; Go and Python both give a representable `0`.
+- ~~`i64::MIN % -1` faults `integer overflow in Mod`; Go and Python both give a representable `0`.~~
+  **FIXED 2026-08-17.** Measured Go 1.26 `min % -1` → `0`; Python 3 `(-9223372036854775807-1) % -1` →
+  `0`. Rust's `checked_rem` returns `None` at `MIN % -1` only to dodge the x86 `IDIV` hardware trap, not
+  because the remainder overflows — the true answer IS `0`. Switched to `wrapping_rem` (identical to
+  `checked_rem` for every other input) at the three live runtime `Op::Mod`/`BinKind::Mod` call sites
+  (`src/vm/arith.rs`: `fast_int_bin`, `arith`, `arith_scalar` — the third is the numeric-newtype
+  same-type path). Left `src/compiler/peephole.rs:95`'s `checked_rem` const-folder untouched — declining
+  to fold is always correct, since the un-folded ops now compute the same `0` at runtime. `MIN / -1`
+  keeps its `integer overflow in Div` fault (a real overflow: the true quotient `2^63` doesn't fit an
+  `i64`), and `% 0` keeps `modulo by zero`. Tests:
+  `tests/chz/spec/intrinsic_proto_methods_test.chz` (general arms + Div/zero-fault controls + sign
+  pins) and `tests/chz/spec/newtype_test.chz` (the numeric-newtype arm).
 - `fs.glob("d/*")` includes dotfiles, Python's `glob` excludes them — undocumented either way.
 - `docs/stdlib.md` §`std.json` writes `decode[T](s)` as "a generic builtin", but the bare form is rejected
   (`'decode' takes no type arguments`) — the real spelling is `json.decode[T](s)`.

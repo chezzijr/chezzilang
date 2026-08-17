@@ -465,12 +465,14 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   `import std.math` / `import f from std.io`. `std.cmp` holds generic `min`/`max`/`clamp`
   (`[T: Comparable]`); `list.sort()` is likewise Comparable. (`std.math.min`/`max` were retired into
   `std.cmp`; `abs` stays native.) **Integer overflow policy:** the one integer type is `i64`; every
-  overflow — arithmetic (`+ - * / %`), left shift (`<<`, when a significant bit is shifted out),
-  negation, `MIN / -1`, `MIN % -1` (both trip the same `i64` checked-op overflow — so `MIN % -1`
-  faults rather than yielding Python's `0`), `math.abs(MIN)`, and integer `List.sum()` (checked add) —
+  overflow — arithmetic (`+ - * /`), left shift (`<<`, when a significant bit is shifted out),
+  negation, `MIN / -1`, `math.abs(MIN)`, and integer `List.sum()` (checked add) —
   is a *recoverable
   panic* (`"integer overflow in <op>"`, catchable by `recover:`), never a silent wrap and never a host
-  crash. **Float arithmetic is total IEEE-754** (the policy diverges by type): a `float` op *never*
+  crash. `%` never overflows: `MIN % -1` is representable (`0`, matching Go and Python) since a true
+  mathematical remainder always fits in the dividend's own range — only `/` can overflow at that input
+  (the true quotient `2^63` doesn't fit an `i64`). **Float arithmetic is total IEEE-754** (the policy
+  diverges by type): a `float` op *never*
   faults — `1.0/0.0` is `inf`, `-1.0/0.0` is `-inf`, `0.0/0.0` and `5.0%0.0` are `NaN`, and
   `math.sqrt(-1.0)` is `NaN`. **Float `%` is `fmod`: the sign follows the DIVIDEND** (`-7.0 % 3.0`
   is `-1.0`, `7.0 % -3.0` is `1.0`), the same rule Chezzi's integer `%` already uses and matching
