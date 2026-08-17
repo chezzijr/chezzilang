@@ -557,7 +557,7 @@ Highest → lowest. Same row = same precedence, left-associative unless noted.
 
 > This table is the contract for the Pratt parser. The relative order follows Python (comparison
 > looser than `\|` < `^` < `&` < shifts). A shift amount outside `0..64` is a runtime error. A left
-> shift (`<<`) that drops a significant bit overflows like `+ - * / %` — a recoverable
+> shift (`<<`) that drops a significant bit overflows like `+ - * /` — a recoverable
 > `integer overflow in Shl` (e.g. `1 << 63`), not a silent wrap; round-trip-safe shifts incl.
 > `-1 << 63 == INT_MIN` still succeed. `>>` never overflows.
 >

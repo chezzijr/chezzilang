@@ -912,7 +912,7 @@ impl Vm {
                         );
                     }
                     if matches!(op, Op::Shl) {
-                        // Left shift can overflow (drop high bits) like `+ - * / %`; treat
+                        // Left shift can overflow (drop high bits) like `+ - * /`; treat
                         // it as a recoverable fault, not a silent wrap. Round-trip test:
                         // `(a << b) >> b == a` holds iff no significant bit was shifted out
                         // (correct for negative operands too — `-1 << 63` round-trips).
