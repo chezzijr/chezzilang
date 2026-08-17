@@ -126,6 +126,36 @@ test fn two_sums_one_line_keep_distinct_verdicts():
     assert "{ec.sum()} {en.sum()}" == "UserId(0) 0"
     assert [int(cs.sum()), ns.sum(), int(ec.sum()), en.sum()] == [4, 4, 0, 0]
 
+# `defer`/`spawn` dispatch a member call through their OWN opcodes (`Op::DeferMethod` /
+# `Op::SpawnMethod`), not `Op::CallMethod` — three opcodes, one seed. A seed emitted at only the
+# eager one leaves these two CHECK-clean and RUN-faulting ("sum() expects a numeric list, got an
+# element of type newtype") on a non-empty list, and silently answering a raw int on an empty one.
+# LIMITATION, stated plainly: both opcodes DISCARD the result, so what these assert is the ABSENCE
+# of the fault plus clean completion — the returned VALUE is pinned by the eager tests above, which
+# is the only place it is observable at all.
+
+fn deferred_sum(xs: List[UserId], ys: List[Score]) -> int:
+    defer xs.sum()
+    defer ys.sum()
+    return xs.len() + ys.len()
+
+test fn defer_sum_newtype_does_not_fault():
+    assert deferred_sum([UserId(3), UserId(1)], [Score(1.5)]) == 3
+    ex: List[UserId] = []
+    ey: List[Score] = []
+    assert deferred_sum(ex, ey) == 0
+
+fn spawned_sum(xs: List[UserId], ys: List[Score]) -> int:
+    spawn xs.sum()
+    spawn ys.sum()
+    return xs.len() + ys.len()
+
+test fn spawn_sum_newtype_does_not_fault():
+    assert spawned_sum([UserId(3), UserId(1)], [Score(1.5)]) == 3
+    ex: List[UserId] = []
+    ey: List[Score] = []
+    assert spawned_sum(ex, ey) == 0
+
 # Plain numeric lists are untouched.
 
 test fn sum_plain_lists_unchanged():

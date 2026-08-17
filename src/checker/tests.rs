@@ -6549,8 +6549,14 @@ s := xs.sum()
 fn list_sum_numeric_newtype_returns_the_newtype() {
     ok("newtype C = int\nxs := [C(1), C(2)]\ny: C = xs.sum()\n");
     ok("newtype R = float\nxs: List[R] = []\ny: R = xs.sum()\n");
-    // NOT the underlying — a raw-int return would be a check-ok/run-wrong-type regression.
-    rejects("newtype C = int\nxs := [C(1)]\ny: int = xs.sum()\n", "int");
+    // NOT the underlying — a raw-int return would be a check-ok/run-wrong-type regression. The needle
+    // is the ASSIGNMENT diagnostic, not `"int"`: `"int"` is a substring of the PRE-change message
+    // (`sum() requires a numeric list, found List[int]`) too, so it would pass on a binary without
+    // this feature and prove nothing.
+    rejects(
+        "newtype C = int\nxs := [C(1)]\ny: int = xs.sum()\n",
+        "cannot assign C to variable of type int",
+    );
 }
 
 #[test]

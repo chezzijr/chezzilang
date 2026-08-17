@@ -3056,6 +3056,16 @@ impl Vm {
                             let elems = items.clone();
                             let mut acc = seed;
                             for &v in &elems {
+                                // BELT-AND-BRACES, not load-bearing today. `acc` is a heap value held
+                                // only in a Rust local across `newtype_arith`'s `heap.alloc`, which is
+                                // the shape `with_roots` exists for — but no collection can land here:
+                                // the only two `collect()` sites are `run_until`'s instruction boundary
+                                // (`exec.rs`) and `sample_mem_cap` (per task dispatch, `sched.rs`);
+                                // `Heap::alloc` merely bumps counters. Unlike the `values_equal_guarded`
+                                // / `hash_value` `with_roots` sites nearby, `newtype_arith` is pure
+                                // native and cannot re-enter the VM — the admitted set is exactly the
+                                // INTRINSIC-`Add` set, so there is no user `add` hook to dispatch. Kept
+                                // so the fold stays correct if a collect trigger ever moves.
                                 acc = self.with_roots(&[Value::obj(h), acc, v], |vm| {
                                     match (acc.as_obj(), v.as_obj()) {
                                         (Some(ha), Some(hb)) if vm.same_newtype_keys(ha, hb) => {

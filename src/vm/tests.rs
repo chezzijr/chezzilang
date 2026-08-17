@@ -9622,11 +9622,16 @@ fn vm_generator_struct_method() {
     assert_eq!(run(src), "5\n6\n");
 }
 
-/// `List[<numeric newtype>].sum()` folds through `newtype_arith`, which ALLOCATES a fresh
-/// `Obj::NewType` per element — so the running accumulator lives only in a Rust local between
-/// collections and must be rooted. Under GC stress (a collection at every allocation) a missing root
-/// shows up as a wrong total or a use-after-free, neither of which a Chezzi `assert` can provoke.
-/// The empty case additionally pins that the compiler-minted `T(0)` seed survives.
+/// `List[<numeric newtype>].sum()` over a 200-element list plus the empty case, run once under GC
+/// stress and once normally.
+///
+/// **This does NOT discriminate the fold's `with_roots` today** — traced: the only two `collect()`
+/// call sites are `run_until`'s instruction boundary (`exec.rs:1109`, which `gc_stress` forces) and
+/// `sample_mem_cap` (`sched.rs:2314`, per task dispatch). `Heap::alloc` only bumps counters. The fold
+/// runs entirely inside one opcode and `newtype_arith` is pure native, so no collection happens
+/// between the accumulator leaving the stack and the next `alloc`. Removing the root would keep this
+/// green. What it does cover is the fold's arithmetic and the empty case's compiler-minted `T(0)`
+/// seed under a heap that is being swept around it.
 #[test]
 fn vm_newtype_sum_fold_survives_gc_stress() {
     let src = "newtype Cents = int\nfn main():\n    xs := [Cents(i) for i in range(0, 200)]\n    print(int(xs.sum()))\n    e: List[Cents] = []\n    print(int(e.sum()))\nmain()\n";

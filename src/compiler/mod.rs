@@ -2294,6 +2294,26 @@ impl Compiler {
                     name_span,
                 } = &callee.kind
                 {
+                    // Same hidden `Cents(0)` seed the eager `Op::CallMethod` emit pushes: a spawned
+                    // member call runs through the identical `Vm::do_method_call`, so a missing seed
+                    // is a check-clean / run-faulting `List[Cents].sum()`. The seed is a plain
+                    // newtype-wrapped scalar, so it crosses `do_spawn`'s `deep_clone_all` airlock
+                    // exactly like any other spawned argument.
+                    if let Some((nt_key, is_float)) = self.newtype_sum_seed(name, args, *name_span)
+                    {
+                        self.compile_expr(fc, obj)?;
+                        fc.emit(
+                            if is_float {
+                                Op::ConstFloat(0.0)
+                            } else {
+                                Op::ConstInt(0)
+                            },
+                            call.span,
+                        );
+                        fc.emit(Op::NewType(nt_key), call.span);
+                        fc.emit(Op::SpawnMethod(name.clone(), 1), call.span);
+                        return Ok(());
+                    }
                     self.compile_expr(fc, obj)?;
                     self.compile_args(fc, args)?;
                     // M24-5: the hidden witness arguments ride LAST, exactly as they do on the eager
@@ -4475,6 +4495,25 @@ impl Compiler {
             name_span,
         } = &callee.kind
         {
+            // `defer xs.sum()` over a scalar-numeric-newtype list needs the same hidden `Cents(0)`
+            // seed the eager `Op::CallMethod` emit pushes — `Op::DeferMethod` lands in the very same
+            // `Vm::do_method_call`, so without it the fold sees a `NewType` element and faults at
+            // RUN time on a program that CHECKED clean. Method dispatch has exactly three opcodes
+            // (`CallMethod`/`DeferMethod`/`SpawnMethod`); all three consult the seed.
+            if let Some((nt_key, is_float)) = self.newtype_sum_seed(name, args, *name_span) {
+                self.compile_expr(fc, obj)?;
+                fc.emit(
+                    if is_float {
+                        Op::ConstFloat(0.0)
+                    } else {
+                        Op::ConstInt(0)
+                    },
+                    call.span,
+                );
+                fc.emit(Op::NewType(nt_key), call.span);
+                fc.emit(Op::DeferMethod(name.clone(), 1), call.span);
+                return Ok(());
+            }
             self.compile_expr(fc, obj)?;
             self.compile_args(fc, args)?;
             // M24-5: the hidden witness arguments ride LAST, exactly as on the eager `Op::CallMethod`.

@@ -48,12 +48,36 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `tests/chz/spec/newtype_test.chz` **+6** (non-empty/empty int, float both ways, overflow fault,
 > two-sums-in-one-line/one-interpolation aliasing backstop, plain-list controls) + `src/checker/tests.rs`
 > **+3** (return type is the newtype not the underlying; the str/method, nested and generic rejections)
-> + `src/vm/tests.rs` **+1** GC-STRESS (`vm_newtype_sum_fold_survives_gc_stress`: the fold allocates a
-> fresh `Obj::NewType` per element, so the running accumulator lives only in a Rust local between
-> collections — a missing root is a wrong total or a use-after-free that no Chezzi `assert` can provoke).
+> + `src/vm/tests.rs` **+1** GC-stress (`vm_newtype_sum_fold_survives_gc_stress`, which covers the fold's
+> arithmetic + the empty case's seed under a heap being swept around it — it does **not** discriminate the
+> fold's `with_roots`; see the review fix below).
+>
+> **Review fix (same day).** Three findings, all landed. **(1) Live check-OK/run-error.** Method dispatch
+> has **three** opcodes — `Op::CallMethod`, `Op::DeferMethod`, `Op::SpawnMethod` (`src/vm/op.rs`) — and the
+> seed was emitted at only the first, so `defer xs.sum()` / `spawn xs.sum()` on a `List[Cents]` CHECKED
+> clean and then faulted at run time (`sum() expects a numeric list, got an element of type newtype`); the
+> empty variant silently answered a raw `int` under a static `Cents`. The enumeration had to be over the
+> three method-dispatch OPCODES, not over the literal string `"sum"` — `DeferMethod(name.clone(), …)`
+> carries the name in a variable, so a `grep '"sum"'` could not see it. Both other branches now call the
+> same `Compiler::newtype_sum_seed`. Pinned by `tests/chz/spec/newtype_test.chz` **+2**, with the
+> limitation stated in the file: both opcodes DISCARD the result, so those two assert the ABSENCE of the
+> fault plus clean completion; the returned value stays pinned by the eager tests. A `defer`-ed overflow
+> still faults `integer overflow in Add`, so the seeded fold demonstrably runs rather than being skipped.
+> (The sibling `is_proto_eq_call` has the same blindness in `defer`/`spawn` position and is NOT a defect —
+> its fallback is an ordinary by-name `eq` dispatch; verified running, for a user struct and for `int`.)
+> **(2)** The fold's `with_roots` is **belt-and-braces, not load-bearing today** — traced: the only two
+> `collect()` sites are `run_until`'s instruction boundary (`src/vm/exec.rs`) and `sample_mem_cap` (per task
+> dispatch, `src/vm/sched.rs`), `Heap::alloc` only bumps counters, and `newtype_arith` is pure native with
+> no VM re-entry (the admitted set is exactly the intrinsic-`Add` set, so there is no user `add` hook to
+> dispatch). The root is kept as insurance; the false "a missing root shows up as a wrong total or a
+> use-after-free" claim on both the root and the test is replaced with the traced reasoning. **(3)** The
+> `rejects(…, "int")` needle in `list_sum_numeric_newtype_returns_the_newtype` also matched the PRE-change
+> message (`sum() requires a numeric list, found List[int]`), so it proved nothing — now
+> `"cannot assign C to variable of type int"`. The sibling `"numeric"` needles are correct as-is: those
+> tests assert a reject that must NOT move, so matching the pre-change message is exactly the point.
 > **Gate:** `cargo test --lib` **4156 → 4160 passed / 0 failed / 2 ignored**, full `cargo test` all
 > targets 0 failed, `cargo clippy --all-targets -- -D warnings` clean, `chezzi test tests/chz`
-> **576 → 582** (same at `CHEZZI_THREADS=2`).
+> **576 → 584** (same at `CHEZZI_THREADS=2`).
 
 > **✅ `i64::MIN % -1` is now `0`, 2026-08-17 — `docs/gaps.md:1950` struck.** `%` at that one input used
 > to fault `integer overflow in Mod`; Go and Python both give `0`, and that IS the mathematically

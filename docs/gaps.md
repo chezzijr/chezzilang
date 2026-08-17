@@ -1975,7 +1975,10 @@ Regression: `parity_tests::spawn_task_first_global_access_is_write_parity`.
   `record_call_table_entry`, a MISS degrades to the plain numeric lowering). The compiler pushes
   `ConstInt(0)`/`ConstFloat(0.0)` + `Op::NewType(key)` as `sum`'s one hidden argument and the VM folds from
   it through `newtype_arith` — the same unwrap→native-checked-op→rewrap path `Cents + Cents` takes, so
-  overflow still faults `integer overflow in Add`. The admitted set is exactly the one that gets an
+  overflow still faults `integer overflow in Add`. The seed is emitted at **all three** method-dispatch
+  opcodes (`Op::CallMethod`, `Op::DeferMethod`, `Op::SpawnMethod`), which all land in the same
+  `Vm::do_method_call`; seeding only the eager one left `defer xs.sum()` / `spawn xs.sum()` check-clean
+  and run-faulting (found in review, fixed same day). The admitted set is exactly the one that gets an
   intrinsic `Add` (non-generic, numeric underlying), so a newtype OF a newtype, a generic newtype and
   `newtype Name = str` stay rejected — consistent with `B + B` and `.min()`'s `Comparable` bound, which
   reject them too. Tests: `tests/chz/spec/newtype_test.chz` (non-empty/empty int + float, overflow fault,
