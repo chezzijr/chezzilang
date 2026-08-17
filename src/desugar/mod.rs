@@ -2581,6 +2581,10 @@ fn err(span: crate::lexer::Span, message: String) -> ResolveError {
         message,
         span,
         module: None,
+        // No `Builder`/graph in scope here to attribute a path — `build_graph_impl` fills this in
+        // from the graph it already has, by scanning for `span.file`, if still `None` when this
+        // propagates out of `desugar::run`.
+        path: None,
     }
 }
 

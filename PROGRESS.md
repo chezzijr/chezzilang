@@ -83,6 +83,36 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > accidentally correct by luck. `docs/gaps.md` W8-14 closed; `check`'s plain-text/JSON diagnostics
 > (`--errors=json` `file` key) are the next consumer of the same helper, left to **W8-15**.
 >
+> **✅ W8-15 (check half) + W8-17(a) — `check --errors=json` names its file and end range, and the
+> doubled parse-error prefix is gone, 2026-08-18 (`feat/span-file-and-stdlib-contracts`, CLOSED).** As
+> filed: a two-module graph gave `[{"line":1,"col":10,"message":"in module 'core.badmod': cannot assign
+> str to variable of type int"}]` — no `file` key, and `line`/`col` were `core/badmod.chz`'s coordinates
+> while the entry (`app.chz`) was what a consumer would have assumed; separately, a parse error printed
+> its position twice under a mislabelled prefix (`resolve error (line 1, col 4): parse error (line 1,
+> col 4): expected identifier, found '('`), carried into the JSON `message` too. Now, measured on the
+> release binary: `chezzi check app.chz --errors=json` →
+> `[{"file":"core/badmod.chz","line":1,"col":10,"end_line":1,"end_col":11,"severity":"error","message":"in
+> module 'core.badmod': cannot assign str to variable of type int"}]`; `chezzi check p.chz` → `resolve
+> error (p.chz:1:4): expected identifier, found '('` (position rendered once). `resolver::ResolveError`
+> gained `path: Option<PathBuf>`, set at every construction site from whichever module path is already
+> in scope there (the on-stack importer for any error raised while resolving an import — `import_span`
+> is always the importer's, never the not-yet-pushed target's; the enclosing module's own id for a
+> lex/parse failure in its own source), and its `Display` now renders through `lexer::render_span`
+> instead of the bare `Span`. `CheckOutcome::Fatal` carries the real `Span` (not a decomposed
+> `line`/`col`), closing the "raised before a `Program` exists" hole task A2 flagged — a resolve/lex/
+> parse error now names its file exactly like a type error does, with no `Program` in reach. `type_check`
+> gained a `Vec<(u32, PathBuf)>` return (same shape as `RunError::files`, sourced from the resolved
+> `ModuleGraph` — available EARLIER than a compiled `Program`), threaded into a new `CheckError::render`
+> (mirrors `Display`, takes a path; `Display` itself is UNCHANGED — many checker unit tests compare
+> against its bare form) and into `diags_json`'s new `file`/`end_line`/`end_col` keys. `file` is OMITTED
+> (never a claimed-wrong path) when the span's id doesn't resolve. `end_col` reuses `editor::word_end_col`
+> (made `pub`) rather than a second word-boundary scanner — 0-based, so the emitted value is `+1`. The
+> parse-error stutter's root cause: the resolver's parse-error arm built its message from
+> `e.to_string()` (`ParseError`'s own `Display`, which already prefixes `parse error (...)`) instead of
+> `e.message` — the lex arm two lines up already did this correctly and said why in its comment; the
+> parse arm just hadn't matched it, one-line fix. `docs/gaps.md` W8-15's `test --errors=json` `message`
+> half and W8-17's (b)/(c)/(d) cosmetics are UNTOUCHED, still open.
+>
 > **✅ SESSION 2026-08-17 — the diagnostic pass (`feat/diagnostic-pass-w8-2-airlock`): two warning
 > rules, one silent-wrong-answer fix, one stdlib fault-surface audit.** Branch-final gate: `cargo test`
 > **21 targets / 4406 passed / 0 failed / 3 ignored** (lib **4188/0/2**), `cargo test conformance`

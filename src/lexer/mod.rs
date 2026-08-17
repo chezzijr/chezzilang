@@ -214,8 +214,10 @@ pub fn render_span(span: Span, path: Option<&std::path::Path>) -> String {
 
 /// Relativize `p` to the process's current directory when it lives under it; otherwise return it
 /// as-is (already absolute, or relativizing failed). Never canonicalizes — that hits the filesystem
-/// and would turn a path to a since-deleted file into an error.
-fn display_path(p: &std::path::Path) -> std::path::PathBuf {
+/// and would turn a path to a since-deleted file into an error. `pub`: `--errors=json`'s `file` key
+/// (`main.rs::diags_json`) renders just the path half of what [`render_span`] renders combined, so it
+/// calls this directly rather than parsing a `path:line:col` string back apart.
+pub fn display_path(p: &std::path::Path) -> std::path::PathBuf {
     std::env::current_dir()
         .ok()
         .and_then(|cwd| p.strip_prefix(&cwd).ok())

@@ -123,6 +123,21 @@ impl fmt::Display for CheckError {
     }
 }
 
+impl CheckError {
+    /// Render for a human, attributed to `path` when one resolves — the SAME [`crate::lexer::render_span`]
+    /// single source of truth the runtime trace (`vm::format_trace`) and `--errors=json`'s `file` key
+    /// use, so all three agree on the `path:line:col` form. `Display` (above) is left as the bare
+    /// `line N, col M` form FOREVER: many checker unit tests compare against it directly, and unit
+    /// tests construct a `CheckError` with no module graph in reach to name a path from.
+    pub fn render(&self, path: Option<&std::path::Path>) -> String {
+        let pos = crate::lexer::render_span(self.span, path);
+        match self.severity {
+            Severity::Error => format!("type error ({pos}): {}", self.message),
+            Severity::Warning => format!("warning ({pos}): {}", self.message),
+        }
+    }
+}
+
 /// The dotted path an import targets, for error messages (`core.db`).
 fn module_label(import: &Import) -> String {
     let path = match import {

@@ -92,6 +92,7 @@ fn resolve_error_json_is_clean_and_attributed() {
 #[test]
 fn resolve_error_plaintext_unchanged_and_attributed() {
     let (_t, main) = missing_module_project();
+    let deep = main.parent().unwrap().join("deep.chz");
     let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
         .args(["check", main.to_str().unwrap()])
         .output()
@@ -99,11 +100,13 @@ fn resolve_error_plaintext_unchanged_and_attributed() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     let stderr = stderr.trim_end();
 
-    // Plain-text keeps the `resolve error (line N, col M):` Display prefix (byte-identical rendering),
-    // now followed by the module attribution.
+    // Plain-text keeps the `resolve error (...):` Display prefix, now naming the FILE the error is
+    // actually in (`deep.chz`, where the bad import lives) rather than the historical bare
+    // `line N, col M` — a resolve error is attributed to its owning module just like a type error.
+    let expected_prefix = format!("resolve error ({}:4:1):", deep.display());
     assert!(
-        stderr.starts_with("resolve error (line 4, col 1):"),
-        "plain text must keep the Display prefix, got: {stderr}"
+        stderr.starts_with(&expected_prefix),
+        "plain text must keep the Display prefix and name deep.chz, got: {stderr}"
     );
     assert!(
         stderr.contains("in module 'deep': cannot find module 'doesnotexist'"),
@@ -137,10 +140,15 @@ fn lex_error_carries_a_real_column() {
         .expect("run chezzi check");
     let stderr = String::from_utf8_lossy(&out.stderr);
     // The position is rendered ONCE, by the caller, from the span the seam now carries — the inner
-    // `LexError::Display` prefix would only stutter it (the interpolation seam strips it too).
+    // `LexError::Display` prefix would only stutter it (the interpolation seam strips it too). It now
+    // also names the file the lex error is in (the entry itself, single-file here).
+    let expected = format!(
+        "resolve error ({}:2:6): lex error: empty hexadecimal literal",
+        main.display()
+    );
     assert!(
-        stderr.contains("resolve error (line 2, col 6): lex error: empty hexadecimal literal"),
-        "plain text must render both axes exactly once, got: {stderr}"
+        stderr.contains(&expected),
+        "plain text must render both axes exactly once and name the file, got: {stderr}"
     );
 }
 
@@ -455,9 +463,10 @@ fn composed_interp_depth_is_bounded_globally() {
 }
 
 /// The severity channel is additive: a clean file's verdict, exit code, and empty JSON array are
-/// unchanged, and a real type error still renders byte-identically in plain text while gaining a
-/// `severity` key in JSON. (No rule emits a warning yet — this pins the cases the channel must not
-/// have regressed.)
+/// unchanged, and a real type error's plain-text message/count line are unchanged (it additionally
+/// now names its file — task A3 — but the message body and the trailing count are still there
+/// byte-for-byte) while JSON gains a `severity` key (and, since A3, `file`/`end_line`/`end_col`). (No
+/// rule emits a warning yet — this pins the cases the channel must not have regressed.)
 #[test]
 fn severity_key_is_additive_and_the_clean_case_is_unchanged() {
     let t = TmpDir::new();
@@ -490,19 +499,31 @@ fn severity_key_is_additive_and_the_clean_case_is_unchanged() {
     let out = run(&bad, false);
     assert!(!out.status.success(), "type error must exit non-zero");
     let stderr = String::from_utf8_lossy(&out.stderr);
+    // Plain-text now names the file too (`CheckError::render`, not the bare `Display`) — additive to
+    // the message content and count line, which stay byte-identical.
+    let expected_prefix = format!("type error ({}:1:10):", bad.display());
     assert!(
-        stderr.contains("type error (line 1, col 10):") && stderr.contains("chezzi: 1 type error"),
-        "plain-text rendering must be unchanged, got: {stderr}"
+        stderr.contains(&expected_prefix) && stderr.contains("chezzi: 1 type error"),
+        "plain-text rendering must name the file, got: {stderr}"
     );
 
     let out = run(&bad, true);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stdout = stdout.trim();
+    // `file` first (checked via `starts_with`, without pinning the exact canonicalized path text —
+    // `fs::canonicalize` may not be byte-identical to the literal temp path on every platform), then
+    // the fixed key order `line, col, end_line, end_col, severity, message` with their exact values —
+    // `x: int = "s"` puts the error at col 10 (the opening quote), which is not on an identifier char,
+    // so `end_col` is `col + 1` = 11.
     assert!(
-        stdout.starts_with("[{\"line\":1,\"col\":10,\"severity\":\"error\",\"message\":\"")
-            && stdout.ends_with("}]"),
-        "JSON must gain a severity key in the documented position, got: {stdout}"
+        stdout.starts_with("[{\"file\":\""),
+        "file key must be first, got: {stdout}"
     );
+    assert!(
+        stdout.contains("\"line\":1,\"col\":10,\"end_line\":1,\"end_col\":11,\"severity\":\"error\",\"message\":\""),
+        "JSON must gain file/end_line/end_col keys in the documented order, got: {stdout}"
+    );
+    assert!(stdout.ends_with("}]"), "got: {stdout}");
 }
 
 /// ONE diagnostic, ONE stream. Under `--errors=json` a checker diagnostic must be rendered exactly
@@ -539,4 +560,123 @@ fn errors_json_emits_one_document_on_one_stream() {
             "{sub}: stderr must not carry a second JSON document, got: {stderr}"
         );
     }
+}
+
+/// **W8-15/W8-17(a) — cross-module.** The exact repro from `docs/gaps.md`: a two-module graph where
+/// the entry only *imports* the module with the actual type error. Before this fix, `line`/`col` were
+/// `core/badmod.chz`'s coordinates with no `file` key at all — a consumer had no way to know that, so
+/// an LSP would underline `app.chz:1:10` (the `import` line) in the WRONG file. `file` must name the
+/// owning module (`core/badmod.chz`), never the entry (`app.chz`).
+#[test]
+fn cross_module_json_names_the_owning_file_not_the_entry() {
+    let t = TmpDir::new();
+    let app = t.write("app.chz", "import core.badmod\nfn main(): print(1)\n");
+    let badmod = t.write("core/badmod.chz", "y: int = \"oops\"\n");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .args(["check", app.to_str().unwrap(), "--errors=json"])
+        .output()
+        .expect("run chezzi check --errors=json");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stdout = stdout.trim();
+
+    let expected = format!(
+        "\"file\":\"{}\",\"line\":1,\"col\":10,\"end_line\":1,\"end_col\":11,",
+        badmod.display()
+    );
+    assert!(
+        stdout.contains(&expected),
+        "must carry badmod.chz's own file/line/col/end range, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("app.chz\""),
+        "file must name the module the error is IN, not the entry that merely imports it, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("in module 'core.badmod': cannot assign str to variable of type int"),
+        "got: {stdout}"
+    );
+}
+
+/// **W8-15/W8-17(a) — same-file.** A single-module program (no imports): `file` names the entry
+/// itself. The additive-JSON control case for the cross-module test above.
+#[test]
+fn same_file_json_names_the_entry() {
+    let t = TmpDir::new();
+    let bad = t.write("bad.chz", "x: int = \"s\"\nprint(x)\n");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .args(["check", bad.to_str().unwrap(), "--errors=json"])
+        .output()
+        .expect("run chezzi check --errors=json");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stdout = stdout.trim();
+
+    let expected = format!("\"file\":\"{}\",", bad.display());
+    assert!(
+        stdout.starts_with(&format!("[{{{expected}")),
+        "single-file check must name the entry as `file`, got: {stdout}"
+    );
+}
+
+/// **W8-15(b) — the end-range oracle.** Pins the exact `end_col` integer for a KNOWN identifier at a
+/// KNOWN column, so an off-by-one in the `word_end_col(...) + 1` conversion (0-based scanner, 1-based
+/// JSON) cannot ship silently. Fixture matches `src/editor/mod.rs`'s own `diag_type_error_pos` unit
+/// test byte-for-byte (`"a := 1\nb := zzz\n"`, undefined `zzz` at 1-based line 2 col 6): that test
+/// pins the LSP's 0-based `end_col` at 8, so the 1-based JSON value must be exactly 9.
+#[test]
+fn end_range_pins_the_exact_word_end_column() {
+    let t = TmpDir::new();
+    let f = t.write("undef.chz", "a := 1\nb := zzz\n");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .args(["check", f.to_str().unwrap(), "--errors=json"])
+        .output()
+        .expect("run chezzi check --errors=json");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stdout = stdout.trim();
+
+    assert!(
+        stdout.contains("\"line\":2,\"col\":6,\"end_line\":2,\"end_col\":9,"),
+        "must pin the exact end-of-identifier column for `zzz` (0-based word_end_col 8, +1 for \
+         1-based JSON = 9), got: {stdout}"
+    );
+}
+
+/// **The doubled-prefix bug.** A parse error used to stutter its own position: JSON's `message`
+/// embedded `ParseError`'s OWN `parse error (line N, col M): ` prefix (`e.to_string()`, not
+/// `e.message`), and plain text showed the position twice (`resolve error (line 1, col 4): parse
+/// error (line 1, col 4): ...`). `fn (): pass` triggers "expected identifier, found '('" at the
+/// anonymous function's missing name (`f`1 `n`2 ` `3 `(`4 — col 4).
+#[test]
+fn parse_error_message_is_not_doubled() {
+    let t = TmpDir::new();
+    let p = t.write("p.chz", "fn (): pass\n");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .args(["check", p.to_str().unwrap(), "--errors=json"])
+        .output()
+        .expect("run chezzi check --errors=json");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stdout = stdout.trim();
+    assert!(
+        stdout.contains("\"message\":\"expected identifier, found '('\""),
+        "JSON message must be the clean parser message with no embedded `parse error (...)` prefix, \
+         got: {stdout}"
+    );
+
+    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .args(["check", p.to_str().unwrap()])
+        .output()
+        .expect("run chezzi check");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stderr = stderr.trim_end();
+    let expected = format!(
+        "resolve error ({}:1:4): expected identifier, found '('",
+        p.display()
+    );
+    assert_eq!(
+        stderr, &expected,
+        "plain text must render the position exactly once, got: {stderr}"
+    );
 }

@@ -12,7 +12,7 @@
 // it just imports the pieces the CLI body drives. (The grammar `conformance` suite and the VM's own
 // golden tests — `src/vm/golden_tests.rs`, the single-engine replacement for the deleted
 // serial-vs-M:N parity tests — now live + run once in the lib's test target, not in this bin.)
-use chezzi::{checker, lexer, manifest, native, parser, resolver, test_runner, vm};
+use chezzi::{checker, editor, lexer, manifest, native, parser, resolver, test_runner, vm};
 
 use std::process::ExitCode;
 
@@ -169,35 +169,34 @@ fn cmd_check(args: &[String]) -> ExitCode {
     // up from the file — pass `None`. The entry FUNCTION is derived from the project manifest when
     // this file IS the declared entry module (`manifest::entry_fn_for`), so a static check of an
     // entry module a project cannot start reports it.
-    let (outcome, warns) = type_check(&path, None, EntryGate::FromManifest);
+    let (outcome, warns, files) = type_check(&path, None, EntryGate::FromManifest);
     // `check`'s stdout IS the diagnostic document, so in machine mode the warnings ride the single
     // array the arms below print; in plain text they precede the verdict on stderr. Exactly one of
     // the two — the `!json` guard is what keeps a warning from being printed on both streams.
     if !json {
-        report_check_warnings(&warns);
+        report_check_warnings(&warns, &files);
     }
     match outcome {
         CheckOutcome::Ok => {
             // Warnings are not errors: the verdict and the exit code are unchanged. In JSON mode
             // they ARE the array (`[]` when there are none), so a machine consumer sees them.
             if json {
-                println!("{}", diags_json(&warns));
+                println!("{}", diags_json(&warns, &files));
             } else {
                 println!("ok: no type errors");
             }
             ExitCode::SUCCESS
         }
         CheckOutcome::Errors(errs) => {
-            report_check_errors(&errs, &warns, json);
+            report_check_errors(&errs, &warns, &files, json);
             ExitCode::FAILURE
         }
         CheckOutcome::Fatal {
             text,
             message,
-            line,
-            col,
+            span,
         } => {
-            report_fatal(&text, &message, line, col, json);
+            report_fatal(&text, &message, span, &files, json);
             ExitCode::FAILURE
         }
     }
@@ -291,24 +290,23 @@ fn cmd_run(args: &[String]) -> ExitCode {
         Some(f) => EntryGate::Named(f),
         None => EntryGate::Script,
     };
-    let (outcome, warns) = type_check(&path, root_override.as_deref(), gate);
+    let (outcome, warns, files) = type_check(&path, root_override.as_deref(), gate);
     // `run`'s stdout belongs to the PROGRAM, so a warning goes to stderr in both modes — unguarded,
     // unlike `check` above. The `&[]` below is the other half of that decision: were the warnings
     // also folded into the stdout array, the same diagnostic would print twice, on two streams.
-    report_check_warnings(&warns);
+    report_check_warnings(&warns, &files);
     match outcome {
         CheckOutcome::Ok => {}
         CheckOutcome::Errors(errs) => {
-            report_check_errors(&errs, &[], json);
+            report_check_errors(&errs, &[], &files, json);
             return ExitCode::FAILURE;
         }
         CheckOutcome::Fatal {
             text,
             message,
-            line,
-            col,
+            span,
         } => {
-            report_fatal(&text, &message, line, col, json);
+            report_fatal(&text, &message, span, &files, json);
             return ExitCode::FAILURE;
         }
     }
@@ -801,15 +799,16 @@ enum CheckOutcome {
     Ok,
     Errors(Vec<checker::CheckError>),
     /// A resolve, lex, or parse error (the program never reaches the checker). `text` is the full
-    /// rendered message (Display, with the `resolve error (...)` prefix) used for plain-text output;
-    /// `message` is the clean message body (no Display prefix, with any `in module 'X':` attribution)
-    /// used for `--errors=json` so its shape matches type-error JSON. `line`/`col` are carried so
-    /// `--errors=json` still emits structured output.
+    /// rendered message (`ResolveError`'s `Display`, `resolve error (path:line:col): ...` when a path
+    /// resolved) used for plain-text output; `message` is the clean message body (no Display prefix,
+    /// with any `in module 'X':` attribution) used for `--errors=json` so its shape matches
+    /// type-error JSON. `span` (not a bare `line`/`col` pair) is carried so `--errors=json` can name
+    /// the file too — `report_fatal` builds a real [`checker::CheckError`] from it instead of
+    /// synthesizing `Span { file: 0, .. }`.
     Fatal {
         text: String,
         message: String,
-        line: usize,
-        col: usize,
+        span: lexer::Span,
     },
 }
 
@@ -819,13 +818,18 @@ enum CheckOutcome {
 /// `root` pins the module-graph root (the "one root per run" invariant): the bare-`chezzi run`
 /// manifest path passes `Some(root)` so the checker resolves imports against the SAME root the VM
 /// will run against; `None` (explicit `chezzi run FILE`) derives it by walking up from the file.
-/// Returns the outcome plus the pass's non-fatal warnings (empty on a `Fatal`, which never reaches
-/// the checker).
+/// Returns the outcome, the pass's non-fatal warnings (empty on a `Fatal`, which never reaches the
+/// checker), and a `Span::file` id → source path table (same shape as `vm::RunError::files`) so a
+/// caller can attribute every diagnostic's `file` key without re-deriving the module graph.
 fn type_check(
     path: &str,
     root: Option<&std::path::Path>,
     entry_fn: EntryGate<'_>,
-) -> (CheckOutcome, Vec<checker::CheckError>) {
+) -> (
+    CheckOutcome,
+    Vec<checker::CheckError>,
+    Vec<(u32, std::path::PathBuf)>,
+) {
     // Resolve + desugar + type-check on the dedicated front-end stack: the recursive AST walkers can
     // overflow the caller's (main-thread) stack on a deep-but-valid AST — see `chezzi::on_frontend_stack`.
     let path = path.to_string();
@@ -869,7 +873,11 @@ fn type_check_inner(
     path: &str,
     root: Option<&std::path::Path>,
     entry_fn: EntryGate<'_>,
-) -> (CheckOutcome, Vec<checker::CheckError>) {
+) -> (
+    CheckOutcome,
+    Vec<checker::CheckError>,
+    Vec<(u32, std::path::PathBuf)>,
+) {
     let entry = std::path::Path::new(path);
     // M24 — the manifest-entrypoint gate reaches EVERY consumer that checks this file, not just bare
     // `chezzi run` (which passes the name it already resolved). `chezzi check src/main.chz` used to
@@ -891,15 +899,23 @@ fn type_check_inner(
     let graph = match build {
         Ok(g) => g,
         Err(e) => {
+            // The resolve/lex/parse failure happens BEFORE a `Program` (or even a complete
+            // `ModuleGraph`) exists, so there is no `Program::file_path` to consult — but the
+            // resolver already attributed `e.path` at the point of failure (see
+            // `resolver::ResolveError::path`), so a one-entry table is all `diags_json`'s lookup
+            // needs. `e.span.file != 0` guards the synthesized/standalone sentinel (never a real id).
+            let files = match (&e.path, e.span.file) {
+                (Some(p), f) if f != 0 => vec![(f, p.clone())],
+                _ => Vec::new(),
+            };
             return (
                 CheckOutcome::Fatal {
                     text: e.to_string(),
                     message: e.message.clone(),
-                    // `as usize`: widening a `Span`'s u32 line/col — lossless.
-                    line: e.span.line as usize,
-                    col: e.span.col as usize,
+                    span: e.span,
                 },
                 Vec::new(),
+                files,
             );
         }
     };
@@ -908,7 +924,12 @@ fn type_check_inner(
         Ok(()) => CheckOutcome::Ok,
         Err(errs) => CheckOutcome::Errors(errs),
     };
-    (outcome, warns)
+    let files: Vec<(u32, std::path::PathBuf)> = graph
+        .modules
+        .iter()
+        .map(|m| (m.file, m.id.0.clone()))
+        .collect();
+    (outcome, warns, files)
 }
 
 /// Pull the file path (first non-flag arg) and `--errors=json` out of a command's args. Returns
@@ -975,9 +996,41 @@ fn read_source(path: &str) -> Option<String> {
     }
 }
 
+/// The source path a diagnostic's `Span::file` id names, or `None` for `0` / an id the table
+/// doesn't carry (a synthesized span, or a `Fatal` whose resolver-side attribution came back empty).
+/// Mirrors `vm::op::Program::file_path` / `vm::format_trace`'s `path_for`: `files` is small and
+/// unsorted, so this scans rather than indexes — the same "MUST scan" rule applies here too (ids are
+/// DFS pre-order, `files` here is deps-first post-order via `graph.modules`).
+fn path_for(files: &[(u32, std::path::PathBuf)], file: u32) -> Option<&std::path::Path> {
+    if file == 0 {
+        return None;
+    }
+    files
+        .iter()
+        .find(|(f, _)| *f == file)
+        .map(|(_, p)| p.as_path())
+}
+
 /// Render checker diagnostics as the `--errors=json` array. ONE renderer for both severities so an
 /// error and a warning can never drift in shape — they differ only in the `severity` value.
-fn diags_json(diags: &[checker::CheckError]) -> String {
+///
+/// `"file"` is OMITTED entirely when the span's id doesn't resolve in `files` (`span.file == 0`, or a
+/// synthesized diagnostic) — a key that is present only sometimes is bad, but a key that CLAIMS a
+/// path it hasn't got is worse: a consumer that trusts it points a squiggle at the wrong buffer.
+///
+/// `end_line` always equals `line` — every `Span` in this compiler is a point, there are no
+/// multi-line spans. `end_col` extends over the identifier word at the position (via
+/// [`chezzi::editor::word_end_col`], the SAME scanner the LSP already uses, reused rather than
+/// duplicated) so an editor's squiggle covers a whole name, not just its first character;
+/// `word_end_col` returns a 0-based column while this JSON's `line`/`col` are 1-based, so the
+/// emitted value is `word_end_col(...) + 1`. Each distinct path is read from disk AT MOST ONCE
+/// (`src_cache`) to compute this; if the read fails (e.g. a native/std module with no file on disk,
+/// or the file changed under us) `word_end_col` on an empty source falls through its own "not on an
+/// identifier char" branch, so `end_col` comes out as `col + 1` — the same fallback the brief spells
+/// out, for free, with no separate branch to keep in sync.
+fn diags_json(diags: &[checker::CheckError], files: &[(u32, std::path::PathBuf)]) -> String {
+    let mut src_cache: std::collections::HashMap<std::path::PathBuf, String> =
+        std::collections::HashMap::new();
     let items: Vec<String> = diags
         .iter()
         .map(|d| {
@@ -985,10 +1038,28 @@ fn diags_json(diags: &[checker::CheckError]) -> String {
                 checker::Severity::Error => "error",
                 checker::Severity::Warning => "warning",
             };
+            let path = path_for(files, d.span.file);
+            let file_key = match path {
+                Some(p) => {
+                    let disp = lexer::display_path(p).to_string_lossy().into_owned();
+                    format!("\"file\":{},", json_string(&disp))
+                }
+                None => String::new(),
+            };
+            let end_col = match path {
+                Some(p) => {
+                    let src = src_cache
+                        .entry(p.to_path_buf())
+                        .or_insert_with(|| std::fs::read_to_string(p).unwrap_or_default());
+                    editor::word_end_col(src, d.span.line as usize, d.span.col as usize) + 1
+                }
+                None => d.span.col + 1,
+            };
             format!(
-                "{{\"line\":{},\"col\":{},\"severity\":\"{severity}\",\"message\":{}}}",
+                "{{{file_key}\"line\":{},\"col\":{},\"end_line\":{},\"end_col\":{end_col},\"severity\":\"{severity}\",\"message\":{}}}",
                 d.span.line,
                 d.span.col,
+                d.span.line,
                 json_string(&d.message)
             )
         })
@@ -1008,9 +1079,9 @@ fn diags_json(diags: &[checker::CheckError]) -> String {
 ///   errors. Plain text: here, on stderr, above the verdict. Exactly one of the two, ever.
 /// * `chezzi run` / `chezzi test` — stdout belongs to the running program. Always here, on stderr,
 ///   in both modes; the stdout array stays errors-only so nothing is reported twice.
-fn report_check_warnings(warns: &[checker::CheckError]) {
+fn report_check_warnings(warns: &[checker::CheckError], files: &[(u32, std::path::PathBuf)]) {
     for w in warns {
-        eprintln!("{w}");
+        eprintln!("{}", w.render(path_for(files, w.span.file)));
     }
 }
 
@@ -1018,13 +1089,18 @@ fn report_check_warnings(warns: &[checker::CheckError]) {
 /// SAME json array (a machine consumer gets one document, keyed by `severity`); in plain text the
 /// caller has already put them on stderr, and the trailing count stays errors-only. Pass `&[]` from
 /// any command whose warnings already went to stderr — see [`report_check_warnings`].
-fn report_check_errors(errs: &[checker::CheckError], warns: &[checker::CheckError], json: bool) {
+fn report_check_errors(
+    errs: &[checker::CheckError],
+    warns: &[checker::CheckError],
+    files: &[(u32, std::path::PathBuf)],
+    json: bool,
+) {
     if json {
         let all: Vec<checker::CheckError> = warns.iter().chain(errs).cloned().collect();
-        println!("{}", diags_json(&all));
+        println!("{}", diags_json(&all, files));
     } else {
         for e in errs {
-            eprintln!("{e}");
+            eprintln!("{}", e.render(path_for(files, e.span.file)));
         }
         eprintln!(
             "chezzi: {} type error{}",
@@ -1035,23 +1111,27 @@ fn report_check_errors(errs: &[checker::CheckError], warns: &[checker::CheckErro
 }
 
 /// Report a fatal resolve/lex/parse error, preserving the `--errors=json` contract (valid JSON on
-/// stdout). Plain text uses `text` (the full Display rendering, with the `resolve error (...)`
-/// prefix); JSON goes through the SAME [`diags_json`] renderer as a type error, carrying the clean
-/// `message` (no embedded Display prefix) — the `in module 'X':` attribution rides along inside
-/// `message`, and the shape is identical object-for-object.
-fn report_fatal(text: &str, message: &str, line: usize, col: usize, json: bool) {
+/// stdout). Plain text uses `text` (the full `ResolveError::Display` rendering — already carries the
+/// `resolve error (path:line:col): ...` prefix, path included, when the resolver attributed one);
+/// JSON goes through the SAME [`diags_json`] renderer as a type error, carrying the clean `message`
+/// (no embedded Display prefix) and the real `span` — no more synthesizing `Span { file: 0, .. }`, so
+/// a resolve/lex/parse error names its module in JSON too, exactly like a type error does.
+fn report_fatal(
+    text: &str,
+    message: &str,
+    span: lexer::Span,
+    files: &[(u32, std::path::PathBuf)],
+    json: bool,
+) {
     if json {
         // Same renderer as a type error, so `severity` is present on EVERY object a consumer can
         // receive — a schema that carries the key only sometimes is worse than one that never does.
-        // `as u32`: a `Span`'s own width, widened to `usize` on the way in and narrowed back.
-        let span = chezzi::lexer::Span {
-            line: line as u32,
-            col: col as u32,
-            file: 0,
-        };
         println!(
             "{}",
-            diags_json(&[checker::CheckError::error(message.to_string(), span)])
+            diags_json(
+                &[checker::CheckError::error(message.to_string(), span)],
+                files
+            )
         );
     } else {
         eprintln!("{text}");
@@ -1075,6 +1155,59 @@ fn json_string(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+#[cfg(test)]
+mod diags_json_tests {
+    use super::*;
+
+    /// **W8-15/W8-17(a) — no file id.** A diagnostic whose `Span::file` is `0` (the
+    /// synthesized/standalone sentinel — see `lexer::Span`'s own doc) must emit an object with NO
+    /// `"file"` key at all, never a key claiming a path it hasn't got. This case is not reachable
+    /// through the CLI in practice: every diagnostic `chezzi check` can actually produce comes off a
+    /// resolved `ModuleGraph`, whose modules are ALWAYS assigned real (`1..n`) file ids by the
+    /// resolver's one lex seam (`resolver::Builder::parse`'s doc comment) — a `chezzi check
+    /// --errors=json` integration test cannot construct a file-less diagnostic, so this pins the
+    /// renderer directly with a synthesized `Span`, the same way `resolver`'s own unit tests construct
+    /// a synthetic single-module `ModuleGraph` with `file: 0` for the identical reason (see
+    /// `checker::resolve_extern_signatures_standalone`).
+    #[test]
+    fn omits_file_key_when_span_file_is_zero() {
+        let span = lexer::Span {
+            line: 3,
+            col: 5,
+            file: 0,
+        };
+        let diags = vec![checker::CheckError::error("boom".to_string(), span)];
+        let out = diags_json(&diags, &[]);
+        assert!(
+            !out.contains("\"file\""),
+            "a file:0 (synthesized) span must not emit a `file` key, got: {out}"
+        );
+        // The rest of the shape is still emitted — a missing `file` key is additive-absent, not a
+        // whole-object omission — with the col+1 fallback for `end_col` (no source to scan a word in).
+        assert_eq!(
+            out,
+            "[{\"line\":3,\"col\":5,\"end_line\":3,\"end_col\":6,\"severity\":\"error\",\"message\":\"boom\"}]"
+        );
+    }
+
+    /// Control case: a resolving file id DOES gain the `file` key, in the documented first position.
+    #[test]
+    fn emits_file_key_when_span_file_resolves() {
+        let span = lexer::Span {
+            line: 3,
+            col: 5,
+            file: 1,
+        };
+        let diags = vec![checker::CheckError::error("boom".to_string(), span)];
+        let files = vec![(1, std::path::PathBuf::from("/nonexistent/mod.chz"))];
+        let out = diags_json(&diags, &files);
+        assert!(
+            out.starts_with("[{\"file\":\"/nonexistent/mod.chz\","),
+            "got: {out}"
+        );
+    }
 }
 
 #[cfg(test)]

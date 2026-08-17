@@ -114,8 +114,10 @@ fn is_word(c: char) -> bool {
 }
 
 /// The 0-based end column of the word starting at 1-based `(line, col)`, or `col` (0-based) + 1 when
-/// the position is not on an identifier char.
-fn word_end_col(source: &str, line1: usize, col1: usize) -> u32 {
+/// the position is not on an identifier char. `pub`: also the `--errors=json` `end_col` renderer
+/// (`main.rs::diags_json`) reuses this rather than writing a second word-boundary scanner — its
+/// `line`/`col` are 1-based, so it adds 1 to this fn's 0-based result.
+pub fn word_end_col(source: &str, line1: usize, col1: usize) -> u32 {
     let col0 = col1.saturating_sub(1);
     let line = source.lines().nth(line1.saturating_sub(1)).unwrap_or("");
     let chars: Vec<char> = line.chars().collect();
