@@ -857,7 +857,7 @@ fn idxspec_int_map_get_hit_and_miss() {
         "m := {1: 10, 2: 20}\nprint(m[1])\nprint(m[2])\n",
         Ok("10\n20\n"),
     );
-    idx_parity("m := {1: 10}\nprint(m[99])\n", Err("key not found"));
+    idx_parity("m := {1: 10}\nprint(m[99])\n", Err("key not found: 99"));
 }
 
 #[test]
@@ -905,7 +905,10 @@ fn idxspec_non_int_map_keys_via_fallback() {
         "m := {true: 1, false: 0}\nprint(m[false])\nprint(m[true])\n",
         Ok("0\n1\n"),
     );
-    idx_parity("m := {\"a\": 1}\nprint(m[\"z\"])\n", Err("key not found"));
+    idx_parity(
+        "m := {\"a\": 1}\nprint(m[\"z\"])\n",
+        Err("key not found: 'z'"),
+    );
 }
 
 #[test]

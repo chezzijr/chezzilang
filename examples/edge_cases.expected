@@ -62,7 +62,7 @@ olleh
 list_oob: index 9 out of bounds (len 3)
 list_neg: index -100 out of bounds (len 3)
 str_oob: index 5 out of bounds (len 2)
-missing_key: key not found
+missing_key: key not found: 'nope'
 -- truthiness --
 empty
 true

@@ -50,7 +50,7 @@ here is recoverable (`r := recover: <expr>`), and the ones with a carrier siblin
 | Chezzi | Fault message | Ancestor (measured, CPython 3.14) | Carrier alternative |
 |--------|---------------|-----------------------------------|---------------------|
 | `xs[i]`, `s[i]` out of range | `index 5 out of bounds (len 3)` | `IndexError: list index out of range` / `string index out of range` | — (`first`/`last`/`get`) |
-| `m[k]`, key absent | `key not found` | `KeyError: 'zz'` | **`m.get(k) -> Option[V]`** (Python `dict.get` → `None`) |
+| `m[k]`, key absent | `key not found: 'zz'` | `KeyError: 'zz'` | **`m.get(k) -> Option[V]`** (Python `dict.get` → `None`) |
 | `xs.remove_at(i)` out of range | `index 9 out of bounds (len 3)` | `IndexError: pop index out of range` | — |
 | `xs.chunk(n)` / `xs.windows(n)`, `n <= 0` | `chunk/window size must be positive, got 0` | `ValueError: n must be at least one` (`itertools.batched`) | — |
 | `int(s)` / `float(s)` on a bad string | `int(): cannot parse 'abc' as an integer` | `ValueError: invalid literal for int() with base 10: 'abc'` | **`s.parse_int()`/`parse_float() -> Result`**, `s.to_int()/to_float() -> Option` |

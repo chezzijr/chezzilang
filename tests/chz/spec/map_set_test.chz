@@ -4,7 +4,8 @@
 # src/vm/tests.rs (map/set comprehensions + equality). Run: `cargo run -- test tests/chz/`.
 # Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 #
-# Fault-path (missing-key read / compound-assign / missing-hash) and gc-stress rooting stay in Rust.
+# Compound-assign / missing-hash fault-path and gc-stress rooting stay in Rust (`recover:` ports a
+# missing-key READ fault's message, below — see `missing_key_names_the_key`).
 
 # ---- literal, display, insertion order, dup-key-last-wins ----
 
@@ -23,6 +24,21 @@ test fn index_ops():
     assert m == {"a": 9, "b": 2, "c": 3}
     m["a"] += 5
     assert m["a"] == 14
+
+# ---- a missing-key read names the key it missed (Python `KeyError: 'zz'` shape) ----
+
+test fn missing_key_names_the_key():
+    sm := {"a": 1}
+    r1 := recover: sm["zz"]
+    match r1:
+        Ok(_): assert false, "expected a fault"
+        Err(e): assert e.message() == "key not found: 'zz'"
+
+    im := {1: 10}
+    r2 := recover: im[99]
+    match r2:
+        Ok(_): assert false, "expected a fault"
+        Err(e): assert e.message() == "key not found: 99"
 
 # ---- methods: len / has / get / keys / values ----
 

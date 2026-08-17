@@ -6933,7 +6933,7 @@ fn parity_map_missing_key_read_errors() {
     let src = "m := {\"a\": 1}\nprint(m[\"z\"])\n";
     assert_eq!(
         vm_outcome(src).unwrap_err(),
-        "runtime error (line 2, col 7): key not found",
+        "runtime error (line 2, col 7): key not found: 'z'",
         "for:\n{src}"
     );
     assert!(
@@ -6949,7 +6949,7 @@ fn parity_map_compound_assign_missing_key_errors() {
     let src = "m := {\"a\": 1}\nm[\"z\"] += 1\n";
     assert_eq!(
         vm_outcome(src).unwrap_err(),
-        "runtime error (line 2, col 1): key not found",
+        "runtime error (line 2, col 1): key not found: 'z'",
         "for:\n{src}"
     );
     assert!(
