@@ -1654,17 +1654,20 @@ enum Json:
 `parse(s) -> Result[Json]` · `stringify(j) -> str` · `is_null(j) -> bool` ·
 `as_bool(j) -> Option[bool]` · `as_float(j) -> Option[float]` · `as_int(j) -> Option[int]` ·
 `as_str(j) -> Option[str]` · `as_object(j) -> Option[Map[str, Json]]` · `as_array(j) -> Option[List[Json]]` ·
-`get(j, key) -> Option[Json]` · `at(j, i) -> Option[Json]` · `len(j) -> int`.
+`get(j, key) -> Option[Json]` · `at(j, i) -> Option[Json]` · `len(j) -> int` (faults on
+`Null`/`Bool`/`Num` — a scalar has no length, matching CPython's `len(None)` `TypeError`).
 
-> **`parse`'s `Result` is NOT total — deep nesting still kills the process.** `std.json` is
-> recursive-descent in pure Chezzi, so nesting depth in the *input* becomes recursion depth in your
-> program: `"[" * 100_000 + "]" * 100_000` blows the call-depth cap and aborts with `rc=1` even though
-> the caller matches `Ok`/`Err` correctly. Depth ~2 000 parses fine; the exact threshold is not a
-> documented contract. **Wrap `parse` in `recover:` when the input is untrusted** —
-> `r := recover: json.parse(s)` turns it into a catchable `Err("maximum call depth (10000) exceeded")`.
-> Go's `encoding/json` returns `exceeded max depth` and CPython raises a catchable `RecursionError`,
-> so this is a divergence from both ancestors, filed as `docs/gaps.md` **W8-5** (a depth counter
-> returning `Err` is the fix that makes the `Result` contract total).
+> **Nesting depth is capped at `MAX_NEST_DEPTH = 2000` on both `parse` and `stringify`.** `std.json`
+> is recursive-descent in pure Chezzi, so nesting depth becomes recursion depth in your program.
+> `parse`'s `Result` is now **total**: past the cap it returns `Err("exceeded max depth")` instead of
+> aborting the process, matching Go's `encoding/json` (`exceeded max depth`) and CPython's catchable
+> `RecursionError`. `stringify` has no `Result` to put an error in — a document built directly in
+> memory (no `parse` involved) that nests past the cap instead **faults** with
+> `json.stringify: exceeded max depth` (recoverable under `recover:`), the same shape CPython's
+> `json.dumps` uses (`RecursionError`). 2000 is well below the measured death point (a `[`-only
+> document with no surrounding call frames dies at nesting depth 5000 against the VM's 10 000-frame
+> cap — each level costs 2 frames), leaving headroom for caller frames above `parse`/`stringify`.
+> `docs/gaps.md` **W8-5**.
 
 > **There is no `encode`/`dumps` inverse of `decode[T]`.** Serialization goes the long way: build a
 > `Json.Obj`/`Json.Arr` tree by hand, then `stringify` it. A struct → JSON round-trip is therefore
