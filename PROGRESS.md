@@ -57,7 +57,23 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `"src.main:main"`) and recommended `chezzi run src/main.chz`, which is a **silent no-op, rc=0**.
 > Every code snippet added was executed before it was written down.
 >
-> **✅ The checker has a WARNING severity, 2026-08-17 — plumbing only, no rule uses it yet.** The
+> **✅ W8-2 — the first warning rule: a discarded `Result`/`Option`, 2026-08-17.** A bare expression
+> statement whose type is `Result`/`Option` warns *"the Result returned by 'g' is discarded — bind it
+> (`r := …`), or discard it explicitly (`_ := …`)"*, following Rust's `unused_must_use`. Non-fatal: the
+> program still checks clean and the exit code is unchanged. **It fires only where the value is
+> genuinely lost — inside a non-top-level proto** (a `fn` body, a `spawn:` block, a `defer:` block).
+> At **module top level** it stays silent, because `Op::PopExprStmt` already calls `top_level_error`
+> there (`vm/exec.rs`) and aborts with `unhandled error`: warning "is discarded" would be false, and
+> obeying it (`_ := g()`) *disables* that check and turns a failing program into a silent rc=0. Every
+> other block kind — `if`/`for`/`while`/`match` arm/`parallel:`/`recover:`/`wait:` arm — emits into the
+> *enclosing* proto, so at top level all of them stay silent too (measured: each aborts; inside
+> `recover:` the abort is caught and surfaces as `r = Err(…)`). Excluded on purpose: `defer f.close()`
+> (Go's canonical unchecked idiom), an inline-expr fn body and a value-block tail (both are implicit
+> returns, not drops), and `?`/`??` (which yield the unwrapped payload). `o()?.len()` *does* warn —
+> optional chaining re-wraps. Corpus: 11 `_ :=` sites, all inside `fn`/`test fn` bodies. Docs:
+> `syntax.md` §9 (position table), `spec.md` entry model.
+>
+> **✅ The checker has a WARNING severity, 2026-08-17 — plumbing (the rule above is its first user).** The
 > checker could report hard errors and nothing else, so the two diagnostics queued behind it
 > (`docs/gaps.md` W8-2's discarded `Result`, and the airlock trap at `gaps.md:418`) had no non-fatal
 > channel to land on. `CheckError` gains `pub severity: Severity` (`Error`/`Warning`) with

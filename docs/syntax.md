@@ -2961,32 +2961,51 @@ a bare top-level expression statement that evaluates to one (e.g. `compute()` wh
 or a top-level `?` that hits one — terminates the program with `unhandled error: <detail>` and a
 non-zero exit code. *Binding* the value handles it (`r := compute()` keeps running; inspect `r`).
 
-**The SAME discarded call inside a function is silently swallowed at runtime** — an asymmetry filed as
-`docs/gaps.md` **W8-2**. `chezzi check` now **warns** on the drop in both positions, following Rust
-(which marks both carriers `#[must_use]` and warns wherever they are dropped):
+**The SAME discarded call inside a function is silently swallowed at runtime** — the asymmetry filed
+as `docs/gaps.md` **W8-2**. The asymmetry is **real and justified**: the top-level check *is* the
+handling, so nothing is lost there. Where there is no such check the value vanishes without a trace,
+and that is exactly where `chezzi check` **warns**, following Rust (which marks both carriers
+`#[must_use]` and warns on the drop):
 
 ```chezzi
 fn g() -> Result[int, Error]: return Err("E")
+g()                    # NO warning — the runtime checks it: `unhandled error: E`, rc=1
 fn f():
-    g()                # warning … the Result returned by 'g' is discarded
+    g()                # warning … the Result returned by 'g' is discarded, and rc stays 0
 f()
-g()                    # same warning; at top level it is ALSO a runtime error, rc=1
 ```
 
 ```
-warning (line 3, col 5): the Result returned by 'g' is discarded — bind it (`r := …`), or discard it explicitly (`_ := …`)
+warning (line 4, col 5): the Result returned by 'g' is discarded — bind it (`r := …`), or discard it explicitly (`_ := …`)
 ```
 
 A warning is **non-fatal**: the program still type-checks and the exit code is unchanged. The escapes
 are Rust's — *bind* the value (`r := g()`, then inspect it) or *discard it explicitly* (`_ := g()`),
-which puts the intent on the page. Nesting doesn't change the runtime half either way: a `g()` inside
-a top-level `if`/`for` still aborts, and a `g()` anywhere inside a function body still vanishes.
+which puts the intent on the page.
 
-The warning fires wherever the statement's own type is a carrier, so it skips the positions where a
-bare carrier expression isn't a drop: an inline-expr body (`fn f() -> T!: g()`, an implicit return),
-the trailing expression of a `recover:` block or a value-`match`/value-`if` (that expression *is* the
-block's value), and `g()?` / `x ?? d` (which yield the unwrapped payload). `o()?.len()` *does* warn —
-optional chaining re-wraps, so the result is still an `Option`.
+> ⚠️ **`_ := g()` at the top level DISABLES the runtime check.** The check runs on a bare expression
+> statement; binding the value — to `_` or to anything else — is the language taking your word that
+> you have handled it. So `_ := main()` at the top of a script turns a failing `main` from `unhandled
+> error: …` + rc=1 into a silent rc=0. Write the bare call, or `match` it.
+
+**Which positions warn.** A `spawn:` block, a `defer:` block and a function body each compile to their
+own frame, so a drop inside one is invisible to the top-level check and warns — even when the block
+itself sits at module top level. Every other block — `if`, `for`, `while`, a `match` arm, `parallel:`,
+`recover:`, a `wait:` arm — runs in the *enclosing* frame, so at top level the value is still checked
+and nothing warns (inside a `recover:` the resulting abort is caught and surfaces as `r = Err(…)`).
+
+| statement at module top level | runtime | warns |
+|---|---|---|
+| `g()`, or nested in `if` / `for` / `while` / `match` / `parallel:` / `wait:` | aborts, rc=1 | no |
+| nested in `recover:` | caught → `r = Err('unhandled error: …')` | no |
+| inside a `spawn:` block or a `defer:` block | silently swallowed | **yes** |
+| anywhere inside a `fn` body | silently swallowed | **yes** |
+
+The warning fires wherever the statement's own type is a carrier, so it also skips the positions where
+a bare carrier expression isn't a drop at all: an inline-expr body (`fn f() -> T!: g()`, an implicit
+return), the trailing expression of a `recover:` block or a value-`match`/value-`if` (that expression
+*is* the block's value), and `g()?` / `x ?? d` (which yield the unwrapped payload). `o()?.len()` *does*
+warn — optional chaining re-wraps, so the result is still an `Option`.
 
 **`defer` is deliberately excluded.** `defer f.close()` never warns even though `close` returns a
 `Result`: `defer f.Close()` is Go's canonical unchecked idiom and the ancestor for the statement. Bind

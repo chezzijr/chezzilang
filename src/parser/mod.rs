@@ -5545,15 +5545,13 @@ mod tests {
             std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/hello.chz"))
                 .unwrap();
         let module = parse(lexer::tokenize(&src).unwrap()).expect("hello.chz should parse");
-        // greet, Point, Shape, area, safe_div, main, then the top-level `_ := main()` call —
-        // a LET, not a bare expression statement: `main` returns a `Result`, and W8-2 warns on a
-        // discarded carrier, so the example spells the explicit discard it tells readers to write.
+        // greet, Point, Shape, area, safe_div, main, then the top-level `main()` call
         assert_eq!(module.stmts.len(), 7);
         assert!(matches!(module.stmts[0].kind, StmtKind::Fn(_)));
         assert!(matches!(module.stmts[1].kind, StmtKind::Struct { .. }));
         assert!(matches!(module.stmts[2].kind, StmtKind::Enum { .. }));
         assert!(matches!(module.stmts[5].kind, StmtKind::Fn(_)));
-        assert!(matches!(module.stmts[6].kind, StmtKind::Let { .. }));
+        assert!(matches!(module.stmts[6].kind, StmtKind::Expr(_)));
     }
 
     #[test]

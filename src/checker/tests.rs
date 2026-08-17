@@ -165,10 +165,11 @@ fn check_graph_diags_keeps_warnings_out_of_the_result() {
 
 // ===== W8-2 — the discarded-`Result`/`Option` warning (`sig.rs`, the `StmtKind::Expr` arm) =====
 
-/// A `Result`/`Option` dropped on the floor. Fatal at module top level (`unhandled error`, rc=1),
-/// silently swallowed inside a function — the asymmetry filed as `docs/gaps.md` W8-2. Rust owns both
-/// carriers, marks them `#[must_use]`, and warns on the drop wherever it happens. Every case here
-/// still type-checks CLEAN (that is `warns`' first assertion), so the exit code is unchanged.
+/// A `Result`/`Option` dropped on the floor **where it is genuinely lost** — inside a non-top-level
+/// proto, the positions filed as `docs/gaps.md` W8-2. Rust owns both carriers, marks them
+/// `#[must_use]`, and warns on the drop. Every case here still type-checks CLEAN (that is `warns`'
+/// first assertion), so the exit code is unchanged. The top-level counterpart, where the runtime
+/// checks the value itself and no warning may fire, is `a_top_level_drop_does_not_warn`.
 #[test]
 fn discarded_carrier_warns() {
     let g = "fn g() -> Result[int, Error]:\n    return Ok(1)\n";
@@ -182,13 +183,25 @@ fn discarded_carrier_warns() {
         &format!("{o}fn f():\n    o()\nf()\n"),
         "the Option returned by 'o' is discarded",
     );
-    // …and at module top level, where the runtime already aborts. Same span the runtime's
-    // `unhandled error` reports, so the two diagnostics point at the same character.
-    warns(&format!("{g}g()\n"), "the Result returned by 'g'");
-    // Nested one level deeper, both block kinds — the runtime aborts here too.
-    warns(&format!("{g}if true:\n    g()\n"), "the Result returned");
+    // A `spawn:` block and a `defer:` block each compile to their OWN child proto, so a drop in one
+    // is swallowed even at MODULE TOP LEVEL (measured: both print the following statement and exit
+    // 0). These are the two cases an `in_fn_body`-only gate would wrongly suppress — `in_fn_body` is
+    // deliberately not set at a `spawn:` block boundary.
     warns(
-        &format!("{g}for i in 0..1:\n    g()\n"),
+        &format!("{g}parallel:\n    spawn:\n        g()\n"),
+        "the Result returned by 'g' is discarded",
+    );
+    warns(
+        &format!("{g}defer:\n    g()\nprint(1)\n"),
+        "the Result returned by 'g' is discarded",
+    );
+    // …and the same two nested inside a function, their neighbours.
+    warns(
+        &format!("{g}fn f():\n    parallel:\n        spawn:\n            g()\nf()\n"),
+        "the Result returned",
+    );
+    warns(
+        &format!("{g}fn f():\n    defer:\n        g()\n    print(1)\nf()\n"),
         "the Result returned",
     );
     // Nested inside a function, both block kinds — the neighbours of the fn-body case above.
@@ -211,8 +224,45 @@ fn discarded_carrier_warns() {
         "the Option value here is discarded",
     );
     // Every message carries both escapes, or it is not actionable.
-    warns(&format!("{g}g()\n"), "bind it (`r := …`)");
-    warns(&format!("{g}g()\n"), "discard it explicitly (`_ := …`)");
+    warns(&format!("{g}fn f():\n    g()\nf()\n"), "bind it (`r := …`)");
+    warns(
+        &format!("{g}fn f():\n    g()\nf()\n"),
+        "discard it explicitly (`_ := …`)",
+    );
+}
+
+/// The scope correction. At **module top level** the runtime already checks a dropped carrier:
+/// `Op::PopExprStmt` calls `top_level_error` when its frame `is_toplevel` (`vm/exec.rs`), so an
+/// `Err`/`None` aborts the program with `unhandled error` and rc=1. Warning "is discarded" there
+/// would be factually false, and obeying it (`_ := g()`) DISABLES that check — turning a failing
+/// program into a silent rc=0. So the gate is "does this statement lower into a non-top-level
+/// proto", and the block kinds below all emit into the ENCLOSING proto.
+///
+/// Measured on the release binary with `g()` returning `Err`, each of these ABORTS with `unhandled
+/// error: E` and rc=1 — except `recover:`, where the abort is caught and surfaces as
+/// `r = Err('unhandled error: E')`. In every case the value reaches the user.
+#[test]
+fn a_top_level_drop_does_not_warn() {
+    let g = "fn g() -> Result[int, Error]:\n    return Ok(1)\n";
+    let o = "fn o() -> int?:\n    return Some(1)\n";
+    no_warn(&format!("{g}g()\n"));
+    no_warn(&format!("{o}o()\n"));
+    // Every block kind that can hold a statement WITHOUT opening a child proto.
+    no_warn(&format!("{g}if true:\n    g()\n"));
+    no_warn(&format!("{g}for i in 0..1:\n    g()\n"));
+    no_warn(&format!(
+        "{g}n := 0\nwhile n < 1:\n    n = n + 1\n    g()\n"
+    ));
+    no_warn(&format!(
+        "{g}match 1:\n    1:\n        g()\n    _:\n        pass\n"
+    ));
+    no_warn(&format!("{g}parallel:\n    g()\n"));
+    no_warn(&format!("{g}r := recover:\n    g()\n    1\nprint(r)\n"));
+    no_warn(&format!(
+        "{g}ch := Channel[int](1)\nch.send(1)\nwait:\n    v := ch.recv():\n        g()\n"
+    ));
+    // Two levels deep, still the top-level proto.
+    no_warn(&format!("{g}if true:\n    for i in 0..1:\n        g()\n"));
 }
 
 /// The escapes. `_` is an ordinary identifier in LET position (it is special-cased only in pattern

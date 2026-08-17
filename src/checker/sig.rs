@@ -2810,16 +2810,38 @@ impl Checker {
             // `pass` — a no-op statement; nothing to check.
             StmtKind::Pass => {}
             StmtKind::Expr(e) => {
-                // W8-2 — a DISCARDED `Result`/`Option` is fatal at module top level (`unhandled
-                // error`, rc=1) but silently swallowed inside a function body. Rust owns both types
-                // and marks them `#[must_use]`, warning on the drop wherever it happens with
-                // `let _ = …` as the escape; this is that warning, non-fatal so the exit code is
-                // unchanged. Deliberately NOT reached by: `defer f.close()` (its own arm above —
-                // Go's canonical unchecked idiom), a `fn f(): g()` inline-expr body (an implicit
-                // return, inferred off `check_fn_body`), and a value-block's trailing expression
-                // (inferred directly by `infer_recover` / the value-`match`/`if` tails). `?`/`??`/
-                // `?.` already yield the UNWRAPPED payload, so they are not carriers here.
-                // The span is `e.span` — the same position the runtime's `unhandled error` reports.
+                // W8-2 — warn ONLY where a dropped `Result`/`Option` is GENUINELY lost. Rust owns
+                // both types and marks them `#[must_use]`, with `let _ = …` as the escape; this is
+                // that warning, non-fatal so the exit code is unchanged.
+                //
+                // The gate is "does this statement lower into a NON-top-level proto", because
+                // `Op::PopExprStmt` runs `top_level_error` when — and only when — its frame is the
+                // top-level one (`vm/exec.rs`, `frames.last().is_toplevel`): there the value is
+                // checked and the program aborts with `unhandled error`, so nothing is lost and a
+                // "is discarded" warning would be factually FALSE. Worse, obeying it (`_ := g()`)
+                // DISABLES that check and turns a failing program into a silent rc=0.
+                //
+                // The child protos are exactly `FnComp::new(.., is_toplevel = false)` in
+                // `compiler/mod.rs`: a fn/method/ctor, a `spawn:` block, a `defer:` block, a
+                // `defer <call>`, and a closure. Of those only the first three can hold a user
+                // statement (a `defer <call>`'s body IS the call, and a closure body is a single
+                // expression), and each has its own checker flag — hence the three-way `or` below.
+                // `in_fn_body` ALONE is wrong: it is deliberately not zeroed at a `spawn:` block
+                // (see `SpawnTarget::Block` above), so at top level it stays false exactly where
+                // the swallow is real. Every other block kind — `if`/`for`/`while`/`match` arm,
+                // `parallel:`, `recover:`, a `wait:` arm — emits into the ENCLOSING proto, so at
+                // top level the runtime still checks the value (measured: all abort; inside
+                // `recover:` the abort is caught and surfaces as `r = Err(...)`).
+                //
+                // Also NOT reached by: `defer f.close()` (its own arm above — Go's canonical
+                // unchecked idiom), a `fn f(): g()` inline-expr body (an implicit return, inferred
+                // off `check_fn_body`), and a value-block's trailing expression (inferred directly
+                // by `infer_recover` / the value-`match`/`if` tails). `?`/`??`/`?.` already yield
+                // the UNWRAPPED payload, so they are not carriers here.
+                if !(self.in_fn_body || self.in_spawn_block || self.in_defer_block) {
+                    self.infer(e);
+                    return;
+                }
                 let carrier = match self.infer(e) {
                     Ty::Result(..) => "Result",
                     Ty::Option(_) => "Option",
