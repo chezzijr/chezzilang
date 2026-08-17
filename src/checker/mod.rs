@@ -2251,8 +2251,10 @@ struct Checker {
     /// later read in the PARENT reads the pre-spawn value and the task's work is silently lost. The
     /// entry is dropped by a parent-side write to the same name (the parent overwrote it, so the read
     /// is fine) and by the read that reports it (one warning per name — no spam). Saved/restored
-    /// around every `fn` body so one function's taint cannot leak into the next.
-    spawn_stale: HashMap<String, Span>,
+    /// around every `fn` body so one function's taint cannot leak into the next, and keyed by BARE
+    /// NAME — so each entry carries the scope coordinate of the binding it describes (see
+    /// [`StaleWrite`]).
+    spawn_stale: HashMap<String, StaleWrite>,
     /// B3.3 (Task 2a) — per-scope side-table of the NON-SENDABLE LOCAL captures of each
     /// closure/nested-fn value declared in that scope, keyed by the bound name. Mirrors `scopes`
     /// index-for-index (pushed/popped by `push_scope`/`pop_scope`). Populated at the closure/nested-fn
@@ -2375,6 +2377,28 @@ struct Checker {
     /// (refined) type. The owning-scope index gates the finalize so an intervening inner fn/method seam
     /// can't resolve it prematurely to the still-unrefined type. Probe-gated; behavior-neutral.
     hover_pending: Option<(usize, String, HoverKind, Option<String>)>,
+}
+
+/// W8-3 — one `spawn_stale` entry: the task-side write that made a binding stale, plus the two
+/// coordinates that decide whether a later read may be charged to it.
+///
+/// `scope` is the index (into `Checker::scopes`) of the scope that OWNS the written binding, resolved
+/// at write time. The map is keyed by bare name, which says nothing about WHICH binding of that name
+/// the taint describes, so without this a taint recorded on a block-local shadow outlived that block
+/// and was charged to the OUTER binding of the same name — a FALSE warning on correct code, the exact
+/// negation of the rule's "under-warning, never over-warning" invariant (measured: an outer `xs :=
+/// [10, 20]` shadowed by `xs := [1]` inside an `if`, written only in the shadow's `spawn:`, warned at
+/// `xs.len()` and printed the correct `2`). [`Checker::pop_scope`] drops every entry whose owning
+/// scope is the one going away, so a taint dies with the binding it describes.
+///
+/// `granular` says the write went through an INDEX or FIELD projection (`p.count = v`, `m[k] = v`) and
+/// so replaced only PART of the stale copy. See [`Checker::report_spawn_stale_read`] for what the read
+/// side does with it.
+#[derive(Clone, Debug)]
+pub(super) struct StaleWrite {
+    span: Span,
+    scope: usize,
+    granular: bool,
 }
 
 mod expr;

@@ -426,7 +426,7 @@ A parent-side write only **supersedes** the lost one — and so silences the war
 the *whole* binding (`xs = [...]`). An in-place mutator (`xs.push(v)`) and a compound assign (`n += 1`)
 both **read** the stale copy before writing it, so they warn at the write itself.
 
-Six deliberate ceilings, all of them under-warning rather than over-warning:
+Seven deliberate ceilings, all of them under-warning rather than over-warning:
 
 1. **Per frame** — the taint does not cross a `fn` boundary in either direction. A module global written
    in a task in one function and read in another is not flagged (it *is* flagged when both happen in
@@ -440,10 +440,12 @@ Six deliberate ceilings, all of them under-warning rather than over-warning:
 3. **Builtin containers only** — a user struct method that mutates `self` (`p.bump()`) is not counted as
    a write; nothing in the checker says which methods mutate, and treating every method as a write
    would false-positive on every getter.
-4. **No scope coordinate** — the taint is keyed by bare name, so any *new* binding of that name (a
-   `:=`, a loop variable, a `match`/`wait:`/destructuring binding, a parameter) clears it. That is what
-   keeps a loop variable that merely *shadows* the name from being reported, at the cost of missing a
-   later stale read of the outer binding once a block-local shadow has appeared.
+4. **Re-declaring the name clears it** — the taint is keyed by bare name, so any *new* binding of that
+   name (a `:=`, a loop variable, a `match`/`wait:`/destructuring binding, a parameter) drops it. That
+   is what keeps a loop variable that merely *shadows* the name from being reported, at the cost of
+   missing a later stale read of the outer binding once a shadow has appeared in the same scope. The
+   taint *does* carry a scope coordinate, so a **block-local** shadow's taint dies with its block
+   rather than being charged to the outer binding of the same name.
 5. **A partial write through an index/field target** (`m[k] = v`, `p.f = v`) untaints silently, unlike a
    mutator, because the checker cannot tell whether it supersedes the task's write (`m["a"] = 2` after a
    task-side `m["a"] = 1` does; `m["b"] = 2` does not), and it declines rather than warn on noise.
@@ -451,6 +453,13 @@ Six deliberate ceilings, all of them under-warning rather than over-warning:
    nested body has its own frame, so `spawn: bump := fn(): xs.push(1)` then `bump()` leaves `xs.len()`
    at 0 after the join with nothing reported (same for the `fn bump():` spelling). Dropping the taint
    there is what stops the nested body reporting the *parent's* pending write as its own.
+7. **A partial *read* of a partial write declines**, the mirror of ceiling 5 and for the same reason: a
+   task-side `p.count = ...` read back as `p.name`, or `m["a"] = 1` read back as `m["b"]`, names a part
+   the checker cannot match up, so it stays silent — a task-side `p.count = 1` read back as `p.count`
+   is genuinely stale and is missed. The three mixed pairs all still report, because there the checker
+   *can* tell: a whole-binding write is observed by any read of it (`p.count = 1` then `print(p)`), and
+   a whole-binding write is stale in every part (`p = P(...)` then `print(p.name)`). An in-place
+   mutator (`xs.push(v)`) is a whole-container write, so `print(xs[0])` after one still warns.
 
 **Mutating a captured local.** A **closure body is a single expression** (`fn(x): expr`), so a closure
 cannot contain a reassignment statement — `fn(): n = n + 1` is a *parse error*. Three ways to write

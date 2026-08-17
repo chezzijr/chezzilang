@@ -443,24 +443,103 @@ fn a_task_side_write_read_after_the_join_warns() {
         "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    print(xs.len())\nf()\n",
         "'xs' is read here",
     );
-    // Index assign.
+    // Index assign, read WHOLE. A captured `List` deep-copies across the airlock, so the parent's
+    // whole-value read observes the lost element write — the checker can tell, so it reports. (The
+    // granular read `xs[0]` of this same granular write declines; see the ceiling test below.)
     warns(
-        "fn f():\n    xs := [0]\n    parallel:\n        spawn:\n            xs[0] = 9\n    print(xs[0])\nf()\n",
+        "fn f():\n    xs := [0]\n    parallel:\n        spawn:\n            xs[0] = 9\n    print(xs)\nf()\n",
         "'xs' is read here",
     );
     // Field assign — a captured struct deep-copies across the airlock too.
     warns(
-        "struct P:\n    x: int\nfn f():\n    p := P(1)\n    parallel:\n        spawn:\n            p.x = 9\n    print(p.x)\nf()\n",
+        "struct P:\n    x: int\nfn f():\n    p := P(1)\n    parallel:\n        spawn:\n            p.x = 9\n    print(p)\nf()\n",
         "'p' is read here",
     );
     // Map key assign.
     warns(
-        "fn f():\n    m := {\"a\": 1}\n    parallel:\n        spawn:\n            m[\"a\"] = 9\n    print(m[\"a\"])\nf()\n",
+        "fn f():\n    m := {\"a\": 1}\n    parallel:\n        spawn:\n            m[\"a\"] = 9\n    print(m)\nf()\n",
         "'m' is read here",
+    );
+    // The other mixed pair: a WHOLE-binding task write, read back through a projection. The whole
+    // copy is stale, so every field of it is — the checker can tell here too.
+    warns(
+        "struct P:\n    x: int\n    s: str\nfn f():\n    p := P(1, \"a\")\n    parallel:\n        spawn:\n            p = P(9, \"z\")\n    print(p.s)\nf()\n",
+        "'p' is read here",
     );
     // An IMPLICIT nursery (a bare `spawn:` with no `parallel:`) is the same airlock.
     warns(
         "fn f():\n    xs: List[int] = []\n    spawn:\n        xs.push(1)\n    print(xs.len())\nf()\n",
+        "'xs' is read here",
+    );
+}
+
+/// A taint describes ONE binding, and `spawn_stale` is keyed by bare name — so a taint recorded on a
+/// BLOCK-LOCAL SHADOW must die with that block rather than be charged to the outer binding of the
+/// same name. Both were measured warning on the pre-fix binary while printing the CORRECT answer,
+/// which is the rule's "under-warning, never over-warning" invariant negated, not a documented
+/// ceiling. `pop_scope` now drops every entry whose owning scope is the one going away.
+#[test]
+fn a_shadows_taint_is_not_charged_to_the_outer_binding() {
+    // The outer `xs` is a different list; the task wrote the SHADOW. Correctly prints 2.
+    no_warn(
+        "fn f():\n    xs := [10, 20]\n    if true:\n        xs := [1]\n        parallel:\n            spawn:\n                xs.push(99)\n    print(xs.len())\nf()\n",
+    );
+    // The outer binding is an `int` that never entered a task at all. Correctly returns 42.
+    no_warn(
+        "fn f() -> int:\n    n := 41\n    if true:\n        n := [1]\n        parallel:\n            spawn:\n                n.push(99)\n    return n + 1\nprint(f())\n",
+    );
+    // The premise cuts one way only. A read of the SHADOW, inside the shadow's own scope, is a read
+    // of the binding the task actually wrote — it still reports (measured: prints 1).
+    warns(
+        "fn f():\n    xs := [10, 20]\n    if true:\n        xs := [1]\n        parallel:\n            spawn:\n                xs.push(99)\n        print(xs.len())\nf()\n",
+        "'xs' is read here",
+    );
+    // …and an intervening block that does NOT shadow leaves the outer taint intact (measured: the
+    // read prints the stale 2). The cut is scope-keyed, not "any block boundary clears it".
+    warns(
+        "fn f():\n    xs := [10, 20]\n    if true:\n        parallel:\n            spawn:\n                xs.push(99)\n    print(xs.len())\nf()\n",
+        "'xs' is read here",
+    );
+    // A block that pops BETWEEN the task write and the read must not clear a fn-body-scope taint.
+    warns(
+        "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    if true:\n        print(\"mid\")\n    print(xs.len())\nf()\n",
+        "'xs' is read here",
+    );
+}
+
+/// The SEVENTH ceiling — a granular READ of a granular WRITE declines. The write side has always
+/// declined on this ambiguity (`note_assign_root`'s third ceiling: the checker cannot tell whether
+/// `m["b"] = 2` supersedes a task's `m["a"] = 1`); the read side was not symmetric with it, so a
+/// field-granular task write poisoned every later read of the ROOT and `print(p.name)` warned about a
+/// field nothing had written, on a program that printed the right answer. `correct > silent > wrong`:
+/// when the checker cannot tell which part, it declines.
+#[test]
+fn a_granular_read_of_a_granular_task_write_declines() {
+    // Different field. Correctly prints "bob".
+    no_warn(
+        "struct P:\n    count: int\n    name: str\nfn f(p: P):\n    parallel:\n        spawn:\n            p.count = p.count + 1\n    print(p.name)\nf(P(0, \"bob\"))\n",
+    );
+    // The decisive form: still silent once the user has applied the warning's OWN advice and carried
+    // the value out on a Channel. A warning that fires after its own fix is applied is the worst
+    // possible outcome for the rule's credibility.
+    no_warn(
+        "struct P:\n    count: int\n    name: str\nfn f(p: P, ch: Channel[int]):\n    parallel:\n        spawn:\n            p.count = p.count + 1\n            ch.send(p.count)\n    print(p.name)\n    print(ch.recv())\nf(P(0, \"bob\"), Channel[int](4))\n",
+    );
+    // Different map key — the write side's own stated example, now answered the same way on the read
+    // side. Correctly prints 7.
+    no_warn(
+        "fn f(m: Map[str, int]):\n    parallel:\n        spawn:\n            m[\"a\"] = 1\n    print(m[\"b\"])\nm := {\"a\": 0, \"b\": 7}\nf(m)\n",
+    );
+    // The decline is per-BINDING, not a blanket "inside a projection" mute: a stale `i` read within
+    // the INDEX EXPRESSION of a shielded `m[...]` still reports.
+    warns(
+        "fn f(m: Map[str, int], i: int):\n    parallel:\n        spawn:\n            m[\"a\"] = 1\n            i = 3\n    print(m[str(i)])\nm := {\"a\": 0, \"0\": 7}\nf(m, 0)\n",
+        "'i' is read here",
+    );
+    // Only a MUTATOR write is whole-container, so a granular read of one still reports: every member
+    // of `mutates_receiver` is a read-modify-write over the whole container.
+    warns(
+        "fn f():\n    xs := [0]\n    parallel:\n        spawn:\n            xs.push(9)\n    print(xs[0])\nf()\n",
         "'xs' is read here",
     );
 }

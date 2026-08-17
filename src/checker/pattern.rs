@@ -1345,8 +1345,22 @@ impl Checker {
                 named,
                 type_args,
             } => self.infer_call(callee, args, named, type_args, expr.span),
-            ExprKind::Field { obj, name, .. } => self.infer_field(obj, name),
-            ExprKind::Index { obj, index } => self.infer_index(obj, index),
+            // W8-3 — a FIELD/INDEX read reaches its binding through a projection, so it observes only
+            // PART of the value. `shield_granular_read` is what makes the read side symmetric with
+            // the write side's long-standing decline on the same ambiguity; see
+            // `report_spawn_stale_read_at` for the ceiling it states.
+            ExprKind::Field { obj, name, .. } => {
+                let shield = self.shield_granular_read(expr);
+                let t = self.infer_field(obj, name);
+                self.unshield_granular_read(shield);
+                t
+            }
+            ExprKind::Index { obj, index } => {
+                let shield = self.shield_granular_read(expr);
+                let t = self.infer_index(obj, index);
+                self.unshield_granular_read(shield);
+                t
+            }
             ExprKind::Try(inner) => self.infer_try(inner, expr.span),
             // W7-43 — optional-chaining `?.` / null-coalescing `??` are CARRIER nodes: the checker
             // types the operand, picks the lowering, then clone-lowers and infers the clone. The
