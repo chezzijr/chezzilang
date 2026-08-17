@@ -1,10 +1,10 @@
-# examples/stack_trace.chz — a runtime fault reports a stack trace: the error line, then the call
-# chain (innermost first) with the line of each call. Run it to see:
+# examples/stack_trace.chz — a runtime fault reports a stack trace: the error file:line:col, then
+# the call chain (innermost first) with the file:line:col of each call. Run it from the repo root:
 #
-#   runtime error (line 12, col 12): division by zero
-#     at divide (called at line 15, col 12)
-#     at compute (called at line 18, col 11)
-#     at main (called at line 20, col 1)
+#   runtime error (examples/stack_trace.chz:12:12): division by zero
+#     at divide (called at examples/stack_trace.chz:15:12)
+#     at compute (called at examples/stack_trace.chz:18:11)
+#     at main (called at examples/stack_trace.chz:20:1)
 #
 # (This program intentionally faults — it exits non-zero. The trace is deterministic.)
 

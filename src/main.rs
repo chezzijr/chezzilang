@@ -324,12 +324,7 @@ fn cmd_run(args: &[String]) -> ExitCode {
     let (errored, exit_code) = {
         let (_out, _err, result, code) =
             vm::run_file_with_entry(p, cfg, entry_fn.as_deref(), root_override.clone());
-        (
-            result
-                .err()
-                .map(|e| vm::format_trace(&e.message, e.span, &e.trace)),
-            code,
-        )
+        (result.err().map(|e| vm::format_trace(&e)), code)
     };
     // Drain + flush the stream writers before ANY exit path, so a trailing `print(…, end="")`, an
     // `os.exit` mid-line or a fatal trace does not lose its bytes.
@@ -1239,7 +1234,7 @@ mod init_tests {
             None,
         );
         let err = result.expect_err("missing entry function must error");
-        let msg = vm::format_trace(&err.message, err.span, &err.trace);
+        let msg = vm::format_trace(&err);
         assert!(
             msg.contains("entrypoint function `nope` not found"),
             "expected a clear not-found error; got:\n{msg}"

@@ -17,8 +17,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > repro subject, `path.join`'s "double slash", and two diagnostics cosmetics), along with two wrong
 > line-cites of theirs. **W8-18 (the twelve doc-drift rows) was CLOSED in that commit**; **W8-2 (a
 > discarded `Result`/`Option`) and the un-numbered airlock-trap section closed 2026-08-17** on the
-> `feat/diagnostic-pass-w8-2-airlock` branch. **20 rows are open** (W8-1, W8-3..W8-17, W8-19, W8-20,
-> plus the two decided milestones W8-21/W8-22) and are the top of the pre-JIT queue.
+> `feat/diagnostic-pass-w8-2-airlock` branch; **W8-14 (runtime stack traces name no file) closed
+> 2026-08-17** on `feat/span-file-and-stdlib-contracts`. **19 rows are open** (W8-1, W8-3..W8-13,
+> W8-15..W8-17, W8-19, W8-20, plus the two decided milestones W8-21/W8-22) and are the top of the
+> pre-JIT queue.
 >
 > **The shape:** semantics are in good shape (40+ CPython differentials → **one** differing byte, `NaN`
 > casing; a 7,000-op `std.collections` fuzz → zero mismatches; `defer`/`panic`/`recover` byte-identical
@@ -30,7 +32,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > literal backslashes), a **scheduler whose default is its slowest setting** (W8-7; `--threads=1`
 > actually runs **two** workers — W8-8, which invalidates every rationale in the tree citing a
 > `CHEZZI_THREADS=1` measurement), and a **diagnostics layer with no caret, no `help:`, and no "did you
-> mean" anywhere** (W8-13..W8-17).
+> mean" anywhere** (W8-13, ~~W8-14~~ fixed, W8-15..W8-17).
 >
 > **META-FINDING, and the reason this is in PROGRESS and not just gaps.md: not one of W8-1..W8-17 was
 > reachable by the standing gates.** 4375 Rust tests + 586 Chezzi tests at two worker counts + the
@@ -59,6 +61,27 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > string fixes: `chezzi init`'s banner advertised `entrypoint = "src.main"` (the manifest says
 > `"src.main:main"`) and recommended `chezzi run src/main.chz`, which is a **silent no-op, rc=0**.
 > Every code snippet added was executed before it was written down.
+>
+> **✅ W8-14 — every runtime stack-trace frame now names its file, 2026-08-17
+> (`feat/span-file-and-stdlib-contracts`, CLOSED).** As filed, a fault reported `runtime error (line 3,
+> col 11): …` / `at boom (called at line 3, col 5)` — no filename on the headline or any frame, worst
+> on a stdlib fault (`std/flag.chz:132` read as an unattributed `line 132` in the user's own file). Now,
+> measured on the release binary: `runtime error (main.chz:2:12): index 9 out of bounds (len 1)` / `at
+> boom (called at main.chz:5:5)` / `at go (called at main.chz:7:1)`, and the `std.flag` case reads
+> `runtime error (/…/std/flag.chz:132:19): flag: unregistered str flag --zz`. One rendering rule,
+> `lexer::render_span(span, path: Option<&Path>) -> String` (`path:line:col`, falling back to the
+> historical `line N, col M` when the span's `file` id doesn't resolve — never a partial path),
+> relativized to the process cwd when the path lives under it, absolute otherwise (matches rustc/tsc).
+> `RunError` gained `files: Vec<(u32, PathBuf)>` snapshotted from `Program::modules` at the run
+> boundary (using `Program::file_path`/`ModuleProto::file` landed the prior task); `format_trace`
+> changed signature to `fn(&RunError) -> String` so a caller cannot forget to pass the table. Gate:
+> `cargo test` full suite green, `cargo clippy --all-targets -D warnings` clean, plus a new CLI
+> integration test (`tests/run_stack_trace_paths.rs`) whose three-module case (entry imports `a` and
+> `b`; `a` imports `c`) is the one that actually catches a wrong id→path mapping — `file` ids are
+> DFS pre-order while `Program::modules` is deps-first post-order, so the two disagree in that graph
+> and a naive `file - 1` index would misattribute a frame even though the single-file case stays
+> accidentally correct by luck. `docs/gaps.md` W8-14 closed; `check`'s plain-text/JSON diagnostics
+> (`--errors=json` `file` key) are the next consumer of the same helper, left to **W8-15**.
 >
 > **✅ SESSION 2026-08-17 — the diagnostic pass (`feat/diagnostic-pass-w8-2-airlock`): two warning
 > rules, one silent-wrong-answer fix, one stdlib fault-surface audit.** Branch-final gate: `cargo test`

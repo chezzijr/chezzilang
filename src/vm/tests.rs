@@ -6403,7 +6403,7 @@ fn a_provider_frame_in_a_trace_is_readable() {
     let _ = std::fs::remove_dir_all(&dir);
     for (engine, r) in [("serial", res), ("M:N", pres)] {
         let e = r.expect_err("the default faults");
-        let trace = format_trace(&e.message, e.span, &e.trace);
+        let trace = format_trace(&e);
         assert!(
             trace.contains("at <default for 'x' of 'f'>"),
             "[{engine}] expected a readable provider frame, got:\n{trace}"

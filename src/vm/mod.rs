@@ -29,6 +29,7 @@ use value::{GcRef, Value, ValueView};
 use wire::{WireCallFrame, WireGenState, WireValue};
 
 use crate::ast::Span;
+use crate::lexer::render_span;
 #[cfg(test)]
 use crate::{lexer, parser};
 
@@ -145,14 +146,25 @@ pub struct RunError {
     pub message: String,
     pub span: Span,
     pub trace: Vec<TraceFrame>,
+    /// `Span::file` id → the module's source path, snapshotted from `Program::modules` at the run
+    /// boundary — the last point where the compiled program is still in hand. Empty for a run whose
+    /// program had no file ids (the synthetic single-module compile path) or that faulted before a
+    /// `Program` existed (a resolve/compile-time error) — `render_span` falls back to the historical
+    /// `line N, col M` form in either case, never a wrong or partial path.
+    pub files: Vec<(u32, std::path::PathBuf)>,
 }
 
 impl RunError {
-    fn from_error(e: RuntimeError, trace: Vec<TraceFrame>) -> Self {
+    fn from_error(
+        e: RuntimeError,
+        trace: Vec<TraceFrame>,
+        files: Vec<(u32, std::path::PathBuf)>,
+    ) -> Self {
         RunError {
             message: e.message,
             span: e.span,
             trace,
+            files,
         }
     }
     fn plain(e: RuntimeError) -> Self {
@@ -160,6 +172,7 @@ impl RunError {
             message: e.message,
             span: e.span,
             trace: Vec::new(),
+            files: Vec::new(),
         }
     }
 }
@@ -185,8 +198,19 @@ const TRACE_TAIL: usize = 10;
 /// collapsed line list still exceeds `TRACE_HEAD + TRACE_TAIL`, the head and tail collapsed lines are
 /// kept and the middle replaced by a `  … (M frames elided) …` marker. Both transforms are no-ops on
 /// small traces with distinct names, so existing exact-trace goldens are unchanged.
-pub fn format_trace(message: &str, span: Span, trace: &[TraceFrame]) -> String {
-    let mut s = format!("runtime error ({span}): {message}");
+pub fn format_trace(e: &RunError) -> String {
+    let path_for = |file: u32| {
+        e.files
+            .iter()
+            .find(|(f, _)| *f == file)
+            .map(|(_, p)| p.as_path())
+    };
+    let trace = &e.trace;
+    let mut s = format!(
+        "runtime error ({}): {}",
+        render_span(e.span, path_for(e.span.file)),
+        e.message
+    );
     // (1) Collapse consecutive same-name runs into one entry: the run's innermost `at` line plus an
     // optional `× N` marker (kept in the SAME entry so the cap below can never orphan the marker).
     let mut entries: Vec<String> = Vec::new();
@@ -197,7 +221,11 @@ pub fn format_trace(message: &str, span: Span, trace: &[TraceFrame]) -> String {
         while j < trace.len() && trace[j].function == frame.function {
             j += 1;
         }
-        let mut entry = format!("  at {} (called at {})", frame.function, frame.span);
+        let mut entry = format!(
+            "  at {} (called at {})",
+            frame.function,
+            render_span(frame.span, path_for(frame.span.file))
+        );
         let run = j - i;
         if run > 1 {
             entry.push_str(&format!("\n  … (× {} more identical frames) …", run - 1));
@@ -5123,7 +5151,15 @@ fn run_file_inner(
     }
     // The stack trace was captured at the uncaught fault (before frames unwound); attach it.
     let trace = vm.fault_trace.take().unwrap_or_default();
-    let result = result.map_err(|e| RunError::from_error(e, trace));
+    // Snapshot the file-id → path table from the compiled program while it's still in hand — this is
+    // the last point before `vm` (and its `Arc<Program>`) is consumed below.
+    let files: Vec<(u32, std::path::PathBuf)> = vm
+        .program
+        .modules
+        .iter()
+        .map(|m| (m.file, m.id.0.clone()))
+        .collect();
+    let result = result.map_err(|e| RunError::from_error(e, trace, files));
     (vm.out, vm.stderr, result, None)
 }
 
