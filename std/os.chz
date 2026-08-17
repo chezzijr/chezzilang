@@ -29,11 +29,13 @@ fn getcwd() -> Result[path.Path]:
         Ok(b): return Ok(path.Path(b))
         Err(e): return Err(e)
 
-# System queries (gaps §6). getpid/platform/hostname/temp_dir are engine-agnostic process reads;
+# System queries (gaps §6). getpid/platform/temp_dir are engine-agnostic process reads;
 # home_dir reads the HostConfig `HOME` (same source as `env`), so it's None when unset.
+# hostname is `Option[str]`: `None` on the rare `gethostname` syscall failure — a `""` fallback was
+# indistinguishable from a real, if absurd, hostname.
 native fn getpid() -> int
 native fn platform() -> str
-native fn hostname() -> str
+native fn hostname() -> Option[str]
 native fn home_dir() -> Option[str]
 # `temp_dir()` hands back a `path.Path` for the same reason `getcwd()` does (W7-8): `$TMPDIR` is raw
 # OS bytes, so decoding it would leave a path-returning API through which a U+FFFD path — one that

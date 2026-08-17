@@ -10129,7 +10129,10 @@ fn math_io_os_rand_fs_representative_sigs_exact() {
     // gaps §6 system query + mutation fns.
     assert_eq!(os.functions.get("getpid").unwrap().ret, Ty::Int);
     assert_eq!(os.functions.get("platform").unwrap().ret, Ty::Str);
-    assert_eq!(os.functions.get("hostname").unwrap().ret, Ty::Str);
+    assert_eq!(
+        os.functions.get("hostname").unwrap().ret,
+        Ty::option(Ty::Str)
+    );
     assert_eq!(
         os.functions.get("home_dir").unwrap().ret,
         Ty::option(Ty::Str)

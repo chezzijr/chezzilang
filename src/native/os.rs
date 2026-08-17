@@ -51,23 +51,27 @@ fn platform(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 }
 
 /// `hostname()` — the system hostname via `libc::gethostname` (libc is already a dep — no new one).
-/// Falls back to `""` on the rare syscall failure rather than promoting the signature to `Result`.
+/// `None` on the rare syscall failure — `Option[str]`, the same shape `env`/`home_dir` already use,
+/// rather than a `""` that's indistinguishable from a real, if absurd, hostname.
 fn hostname(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "hostname", 0)?;
     // ponytail: small unsafe libc::gethostname (same shape as cffi/net's existing libc use); a fixed
-    // 256-byte buffer covers HOST_NAME_MAX (64 on Linux), lossy-decoded, "" on nonzero return.
+    // 256-byte buffer covers HOST_NAME_MAX (64 on Linux), lossy-decoded, None on nonzero return.
     // `libc::c_char` is i8 on x86_64 but u8 on aarch64/arm — use the platform alias so the buffer
     // element type matches `gethostname`'s `*mut c_char` on every target (not just the x86_64 dev box).
     let mut buf = [0 as libc::c_char; 256];
     let name = unsafe {
         if libc::gethostname(buf.as_mut_ptr(), buf.len() - 1) != 0 {
-            String::new()
+            None
         } else {
             let cstr = std::ffi::CStr::from_ptr(buf.as_ptr());
-            cstr.to_string_lossy().into_owned()
+            Some(cstr.to_string_lossy().into_owned())
         }
     };
-    Ok(NativeRet::Str(name))
+    match name {
+        Some(v) => Ok(NativeRet::Some(Box::new(NativeRet::Str(v)))),
+        None => Ok(NativeRet::None),
+    }
 }
 
 /// `home_dir()` — the user home from the HostConfig `HOME` (the SAME source `env` reads, not

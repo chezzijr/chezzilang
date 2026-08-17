@@ -610,7 +610,7 @@ the whole remainder (so a later read in any task sees EOF), `read_char` consumes
 | `setenv` | `(key: str, value: str) -> nil` | Set an env var. Observed by both `env` and `environ`, and **visible across tasks** (the env map is shared by all M:N workers — process-global, like Python `os.environ` / Go `os.Setenv`). Writes the injected env map — **not** a child's real env; `process.cmd` still inherits the real process env. |
 | `getpid` | `() -> int` | Current process id. |
 | `platform` | `() -> str` | OS name: `"linux"` / `"macos"` / `"windows"` / … (`std::env::consts::OS`). |
-| `hostname` | `() -> str` | System hostname (`""` on the rare failure). |
+| `hostname` | `() -> Option[str]` | System hostname (`None` on the rare `gethostname` syscall failure). |
 | `home_dir` | `() -> Option[str]` | User home (`$HOME`; `None` if unset). Unix-focused. **Stays `str`** — unlike `getcwd`/`temp_dir` it reads the HostConfig env map, which is a deliberately lossy surface (see the argv/env rule above). |
 | `temp_dir` | `() -> path.Path` | System temp directory, as **raw OS bytes** wrapped in a [`path.Path`](#pathpath) (W7-8) — same reason as `getcwd`: `$TMPDIR` need not be valid UTF-8, and decoding it would leave a path-returning API that can hand back a name that names nothing. |
 | `getcwd` | `() -> Result[path.Path]` | Current working directory (real process cwd), as **raw OS bytes** wrapped in a [`path.Path`](#pathpath) (W7-8) — a non-UTF-8 cwd used to come back `U+FFFD`-substituted, naming nothing. No type argument, no turbofish. `import std.path` to name the type. |

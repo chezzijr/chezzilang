@@ -7,6 +7,17 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+> **✅ `os.hostname() -> Option[str]`, 2026-08-17 — no more silent `""` on syscall failure.** The
+> native `hostname` (`src/native/os.rs:55`) fell back to `String::new()` on a nonzero
+> `libc::gethostname` return; that's a silent wrong answer, indistinguishable from a real (if absurd)
+> hostname. Changed to the shape its own siblings `os.env`/`os.home_dir` already use: `None` on the
+> syscall failure, `Some(name)` otherwise (`std/os.chz:36` signature, `src/native/os.rs:55-76` body,
+> `Kind::Inline` unchanged — it still touches host OS state). `examples/os_info.chz:6` migrated to
+> `os.hostname() ?? "<unknown>"`. Docs: `docs/stdlib.md:613` row. The syscall doesn't fail on a healthy
+> box, so the `None` arm is a code-reading fact, not forceable from `tests/chz` — covered instead
+> by asserting `Some(...)` + non-empty + `??` composition (`tests/chz/stdlib/os_test.chz`, new file —
+> no dedicated os-module Chezzi test existed before this).
+>
 > **✅ `List[<numeric newtype>].sum()` works and returns the NEWTYPE, 2026-08-17 — `docs/gaps.md:1954`
 > struck.** `.sort()`/`.min()`/`.max()` on a `List[Cents]` (`newtype Cents = int`) already unwrapped the
 > newtype, but `.sum()` was gated out at check time (`sum() requires a numeric list, found List[Cents]`) —

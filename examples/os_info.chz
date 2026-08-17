@@ -3,7 +3,7 @@ import std.os
 
 print("pid: {os.getpid()}")
 print("platform: {os.platform()}")
-print("hostname: {os.hostname()}")
+print("hostname: {os.hostname() ?? \"<unknown>\"}")
 print("temp_dir: {os.temp_dir()}")
 print("cwd: {os.getcwd()}")
 

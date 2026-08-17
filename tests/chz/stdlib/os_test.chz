@@ -1,0 +1,16 @@
+# tests/chz/stdlib/os_test.chz — std.os module surface.
+#
+# Run: `cargo run -- test tests/chz/`. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+
+import std.os
+
+# `hostname()` is `Option[str]` (task-4 fix — `None` on the rare `gethostname` syscall failure, never
+# a `""` that's indistinguishable from a real hostname). The syscall doesn't fail on a healthy CI/dev
+# box, so `None` can't be forced from Chezzi; assert what IS observable here.
+test fn hostname_is_some_nonempty():
+    match os.hostname():
+        Some(h): assert h.len() > 0, "hostname should be a non-empty string"
+        None:    assert false, "gethostname() failed unexpectedly on this box"
+
+test fn hostname_composes_with_coalesce():
+    assert (os.hostname() ?? "<unknown>").len() > 0
