@@ -1834,6 +1834,20 @@ impl Checker {
         if self.scopes.len() == 1 {
             self.imported_values.remove(name);
         }
+        // W8-3 — `spawn_stale` is keyed by BARE NAME, so it says nothing about which binding it
+        // describes. A NEW binding of the name is a different binding: the task wrote the old one, and
+        // a read of the new one loses nothing. Untainting here rather than at each binding form is
+        // what makes the cut complete — every way a name enters a scope routes through `declare`
+        // (`rg 'self\.declare\('` → 21 sites: `let`/`:=`, `for` target, tuple destructuring, `match`
+        // and enum-payload bindings, `wait` bind, fn/method params, closure params, `import`), so a
+        // form added later cannot forget it. Without this the rule hit the recorded
+        // `scope-blind-guard-over-rejects-shadows` class: `for n in range(2):` after a task-side
+        // `n = 5` warned that the loop variable was a stale read, which is factually false.
+        //
+        // ponytail: no scope coordinate, so the untaint is permanent — a BLOCK-local `:=` shadow that
+        // goes out of scope leaves the outer binding untainted and a later stale read of it is missed.
+        // Under-warning, never over-warning; upgrade path is keying the map on (scope index, name).
+        self.spawn_stale.remove(name);
     }
     pub(super) fn lookup(&self, name: &str) -> Option<Ty> {
         self.scopes.iter().rev().find_map(|s| s.get(name).cloned())
@@ -2058,11 +2072,60 @@ impl Checker {
                     if op != AssignOp::Eq {
                         self.report_spawn_stale_read(&name, target.span);
                     }
+                    // ponytail: a plain `=` through an INDEX/FIELD target (`m[k] = v`, `p.f = v`)
+                    // untaints silently even though it too only writes PART of the stale copy —
+                    // unlike the mutator site, which now reports. The asymmetry is deliberate and is
+                    // the third ceiling: the write may or may not supersede the task's, and the
+                    // checker cannot tell (`m["a"] = 2` after a task-side `m["a"] = 1` genuinely
+                    // supersedes; `m["b"] = 2` does not), so it declines rather than emit a warning
+                    // that is noise half the time. Upgrade path: constant-key tracking.
                     self.note_task_write(&name, target.span);
                     return;
                 }
                 _ => return,
             }
+        }
+    }
+    /// W8-3 — enter a body that is its OWN frame: a nested `fn`, a closure, or the speculative
+    /// return-inference walk of either. Such a body is NOT the enclosing task (it has its own caller),
+    /// and the enclosing frame's pending airlock taint must not be visible inside it.
+    ///
+    /// The two pieces of state MUST move together, which is the whole reason this is one helper rather
+    /// than two `mem::replace`s per site: clearing `in_spawn_block` alone makes a read in the nested
+    /// body report the PARENT's pending write — a FALSE warning (the body runs inside the task, where
+    /// the write IS visible) that also CONSUMES the entry, silencing the parent's real stale read
+    /// afterwards. Measured on the pre-fix binary: `g := fn() -> int: xs.len()` inside the task warned
+    /// at the closure, printed 1 there, then printed 0 after the join with nothing reported.
+    ///
+    /// Pair with [`Checker::exit_own_frame`]. The site list is the grep
+    /// `rg 'mem::replace\(&mut self\.in_spawn_block'` — every hit that clears to `false` is one of
+    /// these; the single hit that sets `true` is the `spawn:` block itself, which must keep both.
+    ///
+    /// `separate_frame` says whether the body is a `fn` body (its call site is ELSEWHERE, so it is
+    /// never the enclosing statement's continuation) or a CLOSURE body (an inline expression in the
+    /// enclosing frame). A fn body always drops the taint — that is what keeps one function's taint
+    /// out of the next. A closure body drops it ONLY when declared inside the task; a closure declared
+    /// in the PARENT reads the very same stale copy the parent would (measured: `g := fn() -> int:
+    /// xs.len()` after the join returns 0), so taking the taint there would trade one false warning
+    /// for one silent wrong answer.
+    pub(super) fn enter_own_frame(
+        &mut self,
+        separate_frame: bool,
+    ) -> (bool, Option<HashMap<String, Span>>) {
+        let was_spawn = std::mem::replace(&mut self.in_spawn_block, false);
+        let stale = (separate_frame || was_spawn).then(|| std::mem::take(&mut self.spawn_stale));
+        (was_spawn, stale)
+    }
+    /// Restore what [`Checker::enter_own_frame`] took. 1:1 — and where it took nothing (a closure in
+    /// the parent) the taint is deliberately left as the body found it, so a report from inside the
+    /// closure stays consumed and cannot fire a second time.
+    pub(super) fn exit_own_frame(
+        &mut self,
+        (was_spawn, stale): (bool, Option<HashMap<String, Span>>),
+    ) {
+        self.in_spawn_block = was_spawn;
+        if let Some(m) = stale {
+            self.spawn_stale = m;
         }
     }
     /// W8-3 — a WRITE to `name`. Inside a `spawn:` body a write to a captured local is lost at the

@@ -364,8 +364,9 @@ impl Checker {
             &mut self.in_default_provider,
             decl.name.starts_with(crate::desugar::PROVIDER_PREFIX),
         );
-        // …and a fn DECLARED inside a `spawn:` block is not itself the task (W7-48).
-        let saved_in_spawn = std::mem::replace(&mut self.in_spawn_block, false);
+        // …and a fn DECLARED inside a `spawn:` block is not itself the task (W7-48), so it also does
+        // not inherit the enclosing frame's W8-3 airlock taint (`enter_own_frame` moves the pair).
+        let saved_frame = self.enter_own_frame(true);
         let saved_flag = std::mem::replace(&mut self.inferring_ret, true);
         let saved_rets = std::mem::take(&mut self.collected_rets);
         // A generator body's `yield`s must be legal (`in_generator`) and COLLECTED (`collected_yields`)
@@ -430,7 +431,7 @@ impl Checker {
         self.current_ret = saved_ret;
         self.in_fn_body = saved_in_fn;
         self.in_default_provider = saved_in_dflt;
-        self.in_spawn_block = saved_in_spawn;
+        self.exit_own_frame(saved_frame);
         self.current_self_ty = saved_self;
         self.witness_scope = saved_witness_scope;
         self.exit_type_params(saved_tps);
@@ -3999,13 +4000,9 @@ impl Checker {
         // …and it is NOT a defer block: a `?` inside a fn declared in a defer block targets that fn.
         let saved_in_defer = std::mem::replace(&mut self.in_defer_block, false);
         // …nor a spawn block: a fn DECLARED inside a `spawn:` has its own caller, so a `?` in its
-        // body targets it normally (W7-48).
-        let saved_in_spawn = std::mem::replace(&mut self.in_spawn_block, false);
-        // W8-3 — …and the airlock-staleness taint is per-frame: a nested fn DECLARED inside a task
-        // is checked with `in_spawn_block` false, so an enclosing task's pending taint left visible
-        // here would report against a read in a body that is not the parent's. Taken and restored
-        // 1:1, which also keeps one function's taint out of the next.
-        let saved_stale = std::mem::take(&mut self.spawn_stale);
+        // body targets it normally (W7-48) — and (W8-3) the airlock-staleness taint is per-frame for
+        // the same reason. `enter_own_frame` moves the pair so neither can be reset without the other.
+        let saved_frame = self.enter_own_frame(true);
         // M24 — the witness params whose `$w:T` binding this body can reach, and the name the
         // contract's fn-half keys them under. A MODULE-LEVEL FREE fn keys on its own name; a MEMBER
         // (Task 5 — a method or static method declaring its own `[T]`) keys on `<type key>.<method>`,
@@ -4220,8 +4217,7 @@ impl Checker {
         self.loop_depth = saved_loop_depth;
         self.recover_depth = saved_recover;
         self.in_defer_block = saved_in_defer;
-        self.in_spawn_block = saved_in_spawn;
-        self.spawn_stale = saved_stale;
+        self.exit_own_frame(saved_frame);
         self.witness_scope = saved_witness_scope;
         self.exit_type_params(saved_tps);
     }

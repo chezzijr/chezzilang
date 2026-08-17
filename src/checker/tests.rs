@@ -516,10 +516,6 @@ fn the_airlock_warning_stays_silent_where_the_write_is_not_lost() {
     no_warn(
         "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    xs = [5, 6]\n    print(xs.len())\nf()\n",
     );
-    // …and so does a parent-side MUTATION, which routes through the other taint site.
-    no_warn(
-        "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    xs.push(5)\n    print(xs.len())\nf()\n",
-    );
     // …and a parent-side INDEX assign, which untaints before its own receiver read reports.
     no_warn(
         "fn f():\n    xs := [0]\n    parallel:\n        spawn:\n            xs[0] = 9\n    xs[0] = 1\n    print(xs[0])\nf()\n",
@@ -533,8 +529,6 @@ fn the_airlock_warning_stays_silent_where_the_write_is_not_lost() {
     no_warn(
         "fn f():\n    xs: List[int] = []\n    print(xs.len())\n    parallel:\n        spawn:\n            xs.push(1)\nf()\n",
     );
-    // NEIGHBOUR (unused statement inserted between write and read): still one warning, not two, and
-    // an unrelated binding in between must not be tainted — covered by the count assertion below.
     // NEIGHBOUR (no spawn at all): the same statements without the task must stay silent.
     no_warn("fn f():\n    xs: List[int] = []\n    xs.push(1)\n    print(xs.len())\nf()\n");
     // NEIGHBOUR (a NON-mutating method inside the task): reading a capture in a task is not a write.
@@ -574,8 +568,11 @@ fn a_stale_read_nested_in_a_later_block_still_warns() {
 /// second read of the same name after the first report (the entry is consumed).
 #[test]
 fn the_airlock_warning_is_reported_exactly_once() {
-    // No declared return type on `f` → the speculative inference pass runs over this body.
-    let src = "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    print(xs.len())\n    print(xs.len())\n    n := xs.len()\n    print(n)\nf()\n";
+    // No declared return type on `f` → the speculative inference pass runs over this body. `zz := 99`
+    // is the NEIGHBOUR (an unused statement inserted between the write and the read): an unrelated
+    // binding in between must neither be tainted nor untaint `xs`, and the count assertion is what
+    // proves it.
+    let src = "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    zz := 99\n    print(zz)\n    print(xs.len())\n    print(xs.len())\n    n := xs.len()\n    print(n)\nf()\n";
     let (errs, warns) = warn_src(src);
     assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
     assert_eq!(
@@ -624,6 +621,115 @@ fn a_speculative_walk_that_rolls_back_does_not_swallow_the_airlock_warning() {
 fn the_airlock_taint_does_not_leak_across_function_bodies() {
     no_warn(
         "fn writer():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\nfn reader():\n    xs: List[int] = []\n    print(xs.len())\nwriter()\nreader()\n",
+    );
+}
+
+/// A body DECLARED INSIDE the task runs inside it, where the write IS visible — so it must not report,
+/// and (the double failure) must not CONSUME the entry either, or the parent's real stale read after
+/// the join goes silent. Both halves, `fn` and closure: only the `fn` half was written first, and the
+/// closure half is exactly what shipped broken (`infer_closure` cleared `in_spawn_block` without
+/// taking the taint). Measured on the pre-fix binary for the closure form: a FALSE warning at the
+/// closure body's `xs.len()`, then `1` printed inside the task and `0` after the join with nothing
+/// reported at all.
+#[test]
+fn a_body_declared_inside_the_task_neither_reports_nor_swallows_the_parents_warning() {
+    for inner in [
+        // closure
+        "            g := fn() -> int: xs.len()\n            print(g())\n",
+        // nested fn
+        "            fn h() -> int:\n                return xs.len()\n            print(h())\n",
+    ] {
+        let src = format!(
+            "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n{inner}    print(xs.len())\nf()\n"
+        );
+        let (errs, warns) = warn_src(&src);
+        assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+        assert_eq!(
+            warns.len(),
+            1,
+            "expected exactly one warning, got: {warns:?}"
+        );
+        assert!(
+            warns[0].message.contains("'xs' is read here"),
+            "wrong warning: {warns:?}"
+        );
+        // The surviving warning is the PARENT's read after the join, not the one inside the task.
+        assert_eq!(
+            warns[0].span.line,
+            src.lines().count() as u32 - 1,
+            "the warning must sit on the post-join read, got line {} of {src}",
+            warns[0].span.line
+        );
+    }
+    // NEIGHBOUR the premise implies (and the reason the taint is not dropped unconditionally): a
+    // closure declared in the PARENT reads the same stale copy the parent would — measured, `g()`
+    // returns 0 — so it must still warn.
+    warns(
+        "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    g := fn() -> int: xs.len()\n    print(g())\nf()\n",
+        "'xs' is read here",
+    );
+}
+
+/// The taint is keyed by BARE NAME, so a NEW binding of that name is a different binding and a read of
+/// it loses nothing (`scope-blind-guard-over-rejects-shadows`). Measured on the pre-fix binary: `for n
+/// in range(2):` after a task-side `n = 5` warned that the loop variable was a stale read — factually
+/// false. One case per binding form that can introduce a name into a scope; all of them route through
+/// `Checker::declare`, which is where the untaint lives.
+#[test]
+fn a_fresh_binding_of_the_name_untaints_it() {
+    let head = "fn f():\n    n: int = 0\n    parallel:\n        spawn:\n            n = 5\n";
+    for tail in [
+        // `for` loop variable — the reported repro
+        "    for n in range(2):\n        print(n)\n",
+        // `for` DESTRUCTURING target
+        "    ps := [(1, 2)]\n    for n, m in ps:\n        print(n + m)\n",
+        // block-local `:=` shadow
+        "    n := 9\n    print(n)\n",
+        // destructuring `let`
+        "    t := (7, 8)\n    n, y := t\n    print(n + y)\n",
+        // `match` payload binding
+        "    o: Option[int] = Some(3)\n    match o:\n        Some(n): print(n)\n        None:    print(0)\n",
+        // `wait:` arm binding
+        "    ch := Channel[int](1)\n    ch.send(4)\n    wait:\n        n := ch.recv(): print(n)\n",
+        // closure parameter
+        "    g := fn(n: int) -> int: n + 1\n    print(g(2))\n",
+        // nested-fn parameter
+        "    fn h(n: int) -> int:\n        return n + 1\n    print(h(2))\n",
+    ] {
+        no_warn(&format!("{head}{tail}f()\n"));
+    }
+    // NEIGHBOUR: a loop whose variable is a DIFFERENT name must still warn — the untaint is keyed on
+    // the name bound, not on "a binding happened".
+    warns(
+        "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    for i in range(2):\n        print(xs.len())\nf()\n",
+        "'xs' is read here",
+    );
+}
+
+/// A parent-side in-place MUTATOR reads the stale copy before it writes it, exactly like the compound
+/// assign `n += 1` — every method in `mutates_receiver` is a read-modify-write and the set contains no
+/// whole-container replacement (`clear` does not exist), so none of them can legitimately supersede
+/// the task's write. Measured: task `xs.push("a")` then parent `xs.push("b")` prints 1, not 2.
+#[test]
+fn a_parent_side_mutator_reads_the_stale_value_and_warns() {
+    warns(
+        "fn f():\n    xs: List[str] = []\n    parallel:\n        spawn:\n            xs.push(\"a\")\n    xs.push(\"b\")\n    print(xs.len())\nf()\n",
+        "'xs' is read here",
+    );
+    // …still exactly once: reporting consumes the entry, so the receiver read that follows is silent.
+    let (errs, warns) = warn_src(
+        "fn f():\n    xs: List[str] = []\n    parallel:\n        spawn:\n            xs.push(\"a\")\n    xs.push(\"b\")\n    print(xs.len())\nf()\n",
+    );
+    assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+    assert_eq!(warns.len(), 1, "expected one warning, got: {warns:?}");
+    // Inside the task the mutator writes the task's OWN copy — silent, as before.
+    no_warn(
+        "fn f():\n    xs: List[str] = []\n    parallel:\n        spawn:\n            xs.push(\"a\")\n            xs.push(\"b\")\n            print(xs.len())\nf()\n",
+    );
+    // NEIGHBOUR: a whole-binding overwrite genuinely supersedes and stays silent (the asymmetry that
+    // makes this rule a claim about read-modify-write, not about "any parent write").
+    no_warn(
+        "fn f():\n    xs: List[str] = []\n    parallel:\n        spawn:\n            xs.push(\"a\")\n    xs = [\"b\"]\n    print(xs.len())\nf()\n",
     );
 }
 

@@ -420,10 +420,26 @@ It stays **silent** where the write really does survive: through a `Shared`/`RwS
 inside a `defer:` block (same task, no airlock), when the parent overwrites the binding before reading
 it, and when the read happens only inside the task.
 
-Two deliberate ceilings: the warning is **per function body**, so a module global written in a task in
-one function and read in another is not flagged (it *is* flagged when both happen in the same body, or
-at module top level); and it is **lexical**, so a read placed textually *before* the `spawn:` is not
-flagged even though the write cannot reach it either.
+A parent-side write only **supersedes** the lost one — and so silences the warning — when it replaces
+the *whole* binding (`xs = [...]`). An in-place mutator (`xs.push(v)`) and a compound assign (`n += 1`)
+both **read** the stale copy before writing it, so they warn at the write itself.
+
+Five deliberate ceilings, all of them under-warning rather than over-warning:
+
+1. **Per function body** — a module global written in a task in one function and read in another is not
+   flagged (it *is* flagged when both happen in the same body, or at module top level).
+2. **Lexical, not dataflow** — a read placed textually *before* the `spawn:` is not flagged even though
+   the write cannot reach it either.
+3. **Builtin containers only** — a user struct method that mutates `self` (`p.bump()`) is not counted as
+   a write; nothing in the checker says which methods mutate, and treating every method as a write
+   would false-positive on every getter.
+4. **No scope coordinate** — the taint is keyed by bare name, so any *new* binding of that name (a
+   `:=`, a loop variable, a `match`/`wait:`/destructuring binding, a parameter) clears it. That is what
+   keeps a loop variable that merely *shadows* the name from being reported, at the cost of missing a
+   later stale read of the outer binding once a block-local shadow has appeared.
+5. **A partial write through an index/field target** (`m[k] = v`, `p.f = v`) untaints silently, unlike a
+   mutator, because the checker cannot tell whether it supersedes the task's write (`m["a"] = 2` after a
+   task-side `m["a"] = 1` does; `m["b"] = 2` does not), and it declines rather than warn on noise.
 
 **Mutating a captured local.** A **closure body is a single expression** (`fn(x): expr`), so a closure
 cannot contain a reassignment statement — `fn(): n = n + 1` is a *parse error*. Three ways to write

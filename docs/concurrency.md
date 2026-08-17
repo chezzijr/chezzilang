@@ -95,9 +95,12 @@ module global (and of every captured local) — mutating one inside a task never
 **The checker warns when you read the lost value.** Writing a captured binding inside a `spawn:` body
 and reading it again after the join emits a non-fatal warning naming the binding and citing the write's
 line (exit code unchanged — the isolation is deliberate). A `Shared`/`RwShared`/`Atomic`/`AtomicInt`/
-`Channel` write is silent: those cross by handle, so the write really is visible. Two ceilings: the
-warning is per function body (a global written in a task in one function and read in another is not
-flagged), and it is lexical (a read placed textually before the `spawn:` is not flagged). Full rules:
+`Channel` write is silent: those cross by handle, so the write really is visible. So is a parent-side
+write that replaces the WHOLE binding (`xs = [...]`) — but not `xs.push(v)` or `n += 1`, which read the
+stale copy before writing it and so warn at the write. The rule has **five** deliberate ceilings, every
+one of them under-warning rather than over-warning (per function body; lexical, not dataflow; builtin
+containers only; keyed by bare name, so any fresh binding of the name clears it; and a partial `m[k] =
+v` / `p.f = v` in the parent untaints silently). Full rules and the reasoning for each:
 [`syntax.md` §capture](syntax.md).
 
 **The copy is taken FRESH, per task, at its `spawn` — at every depth.** A task sees the values current

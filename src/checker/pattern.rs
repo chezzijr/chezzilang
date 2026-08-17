@@ -4208,8 +4208,11 @@ impl Checker {
         let saved_in_dflt = std::mem::replace(&mut self.in_default_provider, false);
         // A closure DECLARED inside a `spawn:` block is not itself the task — it has a caller, so a
         // `?` in its body targets the closure's own return (W7-48). Saved/restored beside
-        // `current_ret`.
-        let saved_in_spawn = std::mem::replace(&mut self.in_spawn_block, false);
+        // `current_ret`. W8-3 — the airlock taint is per-frame for the same reason, and
+        // `enter_own_frame` moves the pair so neither can be reset without the other (this site was
+        // the one that cleared `in_spawn_block` alone: the closure body then reported the enclosing
+        // task's pending write AND ate the entry, so the parent's real stale read went silent).
+        let saved_frame = self.enter_own_frame(false);
         // A closure inside a generator is NOT itself a generator: clear the yield context so a stray
         // `yield` in the closure is diagnosed as "outside a generator", not bound to the enclosing
         // one. (Closure bodies are single expressions today, so this is a latent-invariant guard.)
@@ -4306,7 +4309,7 @@ impl Checker {
         self.current_ret = saved_ret;
         self.in_fn_body = saved_in_fn;
         self.in_default_provider = saved_in_dflt;
-        self.in_spawn_block = saved_in_spawn;
+        self.exit_own_frame(saved_frame);
         self.yield_ty = saved_yield;
         self.in_generator = saved_ig;
         let ret_ty = match ret {

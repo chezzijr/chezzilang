@@ -2303,6 +2303,15 @@ impl Checker {
             && mutates_receiver(&rty, method)
         {
             let name = name.clone();
+            // W8-3 — a PARENT-side mutation reads the stale copy before it writes it, exactly like
+            // the compound assign `n += 1` in `note_assign_root`: EVERY method in `mutates_receiver`
+            // is a read-modify-write (`push`/`pop`/`sort`/`reverse`/`extend`/`insert`/`remove_at`/
+            // `remove`/`update`/`add`), and the set contains no whole-container replacement at all —
+            // `clear` does not exist in `std/prelude.chz` — so there is no member of it that could
+            // legitimately supersede the task's write. Measured: task `xs.push("a")` then parent
+            // `xs.push("b")` prints `1`, not `2`. Report BEFORE untainting; reporting consumes the
+            // entry, so the receiver read in `infer(obj)` below still yields exactly one warning.
+            self.report_spawn_stale_read(&name, obj.span);
             self.note_task_write(&name, obj.span);
         }
         let obj_ty = self.infer(obj);
