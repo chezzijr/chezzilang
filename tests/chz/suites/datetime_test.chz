@@ -85,6 +85,11 @@ test fn t_weekday():
     assert datetime.weekday_name(4) == "Thursday"
     assert datetime.weekday_name(0) == "Sunday"
     assert datetime.weekday_name(6) == "Saturday"
+    # Out-of-range faults via `panic` (not `assert`), so the message carries the offending value.
+    r := recover: datetime.weekday_name(7)
+    match r:
+        Ok(_): assert false, "expected a fault"
+        Err(e): assert e.message().contains("7"), "message must name the offending value"
 
 test fn t_now():
     # smoke: deterministic bounds only, NOT an exact value (clock-dependent).
