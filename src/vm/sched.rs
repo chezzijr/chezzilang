@@ -2615,7 +2615,7 @@ impl Vm {
         depth: usize,
         memo: &mut WireMemo,
     ) -> Result<WireValue, RuntimeError> {
-        if depth > MAX_STRUCTURAL_DEPTH {
+        if self.walk_base + depth > MAX_STRUCTURAL_DEPTH {
             return Err(self.depth_exceeded_err(Span::default()));
         }
         // W7-4: a cross-heap STORE re-emits each cell's full definition once per depth-1 subtree, so
@@ -4648,7 +4648,7 @@ impl Vm {
         depth: usize,
         memo: &mut WireMemo,
     ) -> Result<SnapValue, RuntimeError> {
-        if depth > MAX_STRUCTURAL_DEPTH {
+        if self.walk_base + depth > MAX_STRUCTURAL_DEPTH {
             return Err(self.depth_exceeded_err(Span::default()));
         }
         let h = match v.as_obj() {

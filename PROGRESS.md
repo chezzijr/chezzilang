@@ -43,6 +43,80 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > by a standing gate.** Full walk, the two non-reproductions, and the suggested fix order:
 > `docs/gaps.md` `## Session log — 2026-08-18`. Docs-only change; no code touched, gates unchanged.
 
+> **✅ W8-43 CLOSED — one structural-depth budget across nested protocol-hook re-entries, 2026-08-18
+> (`fix/shared-structural-depth-budget-and-go-cancel`).** P0: **checker-clean pure Chezzi could kill
+> the process by host stack overflow, uncatchable by `recover:`.** A user `eq`/`str` hook dispatched
+> from inside a native structural walk re-entered the VM and started a FRESH depth-0 walk, so neither
+> guard could fire — call depth stayed far below its 10 000 cap while the *product* of hook-nesting
+> depth × per-hook walk depth grew unbounded. Measured on the pre-fix release binary at `c97d24ff`,
+> `ulimit -v 12000000` (a `Leaf.eq` comparing two freshly-built 100-link chains, nested 5 000 deep,
+> the whole compare inside `recover:`): **`fatal runtime error: stack overflow, aborting`, rc=134,
+> core dumped**, and the `print("still alive")` after the `recover:` never ran. **Post-fix: `still
+> alive`, rc=0**, with a recoverable `maximum structural depth (10000) exceeded`. CPython 3.14 on the
+> same shape gives a catchable `RecursionError: Stack overflow (used 8148 kB) in comparison`, rc=0 —
+> Python is the owning ancestor for protocol semantics and its model is ONE recursion budget shared
+> across nested re-entries. The defect **defeated the stated contract of `MAX_STRUCTURAL_DEPTH`
+> itself** ("turns that into a recoverable `RuntimeError`") and was **documented as deliberate in two
+> source comments**, which is why no review questioned it; both are corrected here.
+>
+> **Fix.** New `Vm::walk_base` (`src/vm/mod.rs`, beside `native_reentry` and per-`Vm` for the
+> identical reason — a fiber cannot park while a native re-entry is on the host stack, so no other
+> fiber can observe it) holds the depth the enclosing walks already consumed. All **7**
+> `MAX_STRUCTURAL_DEPTH` comparisons now test `walk_base + depth` (`arith.rs:1415/1470/2054`,
+> `stmt.rs:1993/2453`, `sched.rs:2618/4651` — the site list was DERIVED by grep, not from memory, per
+> the W7-50 convention; the 5 that cannot themselves re-enter are edited too, because each can still
+> run *inside* a hook, and it makes the invariant self-auditing under that same grep). The **4**
+> `run_proto` dispatch sites with a live structural `depth` in scope go through a new panic-safe
+> `Vm::guarded_walk` (`src/vm/exec.rs`): the `eq` hook (`arith.rs`), and the `str` hook's `Obj::Struct`
+> / `Obj::Enum` / `Obj::NewType` arms (`stmt.rs`). Those four are exhaustive — `run_proto` is the only
+> VM re-entry primitive, and the other two call sites (`op_contains`, `Step::StructNext`) have no
+> structural `depth` in scope.
+>
+> **The `catch_unwind` in `guarded_walk` is load-bearing, not decoration.** `guarded` catches the
+> unwind, decrements `native_reentry`, and **resumes the unwind from inside itself**, so a plain
+> `self.walk_base = saved` after the call is skipped on a panic. Panics really do traverse this seam:
+> `callback_trampoline` converts an FFI-callback panic into a recoverable error, and `run_one_fiber`
+> turns a worker panic into `Disp::Finish` and **keeps the shell `Vm` alive for the next fiber** — a
+> leaked `walk_base` on a shell would make every later fiber's `==`/`str` fault spuriously.
+>
+> **Rejected alternative, and why.** Charging `depth` to `call_depth` around each hook is cheaper and
+> **wrong**: `GenCtx` carries its own `call_depth` and the generator resume swaps it, so a generator
+> driven from inside a hook would swap the charge away. A plain `Vm` field is not swapped there, which
+> is exactly right — the generator's frames are on the same host stack. For the same reason
+> `walk_base` is deliberately absent from `FiberCtx`, `GenCtx`, `Handler`, `Vm::swap_ctx` and the
+> generator ctx swap. `recover:` needs no restoration either: native walk frames unwind through Rust
+> `?`, so every `guarded_walk` on the path has already restored.
+>
+> **Not charged, deliberately:** `hash_value`/`struct_compare` (O(1) native frames per `run_proto` —
+> exactly the shape `MAX_CALL_DEPTH` already covers; charging them would double-count), and
+> `msort_indices_structs` (O(log n) native frames per call-depth level: 10 000 levels × ≤64 frames ×
+> a few hundred bytes is tens of MiB against a 384 MiB stack, so it cannot reach the host limit — the
+> ceiling and its upgrade path are recorded in a `ponytail:` comment beside the recursion).
+>
+> **Tests.** Three Chezzi tests in `tests/chz/spec/eq_protocol_containers_test.chz` — the repro
+> (RED pre-fix: `assertion failed: shared structural budget did not fire`), plus two boundary tests
+> that pin what did NOT change (a single un-nested ~9 000-level walk still succeeds; 3 legal hook
+> levels over 1 000-link chains still return a value). The repro is scaled to nesting **200**, not
+> 5 000, and the comment carries both measurements: at 5 000 it SIGABRTs, which would take the whole
+> `chz_suite_passes` gate down with it; at 200 the pre-fix binary returns `true` at rc=0, giving a
+> fast non-crashing RED that is still ~20 000 structural levels against a 10 000 budget. One Rust
+> test by necessity — `vm::tests::guarded_walk_restores_walk_base_on_panic` asserts VM-internal state
+> across a Rust unwind, which `assert` cannot express (RED with a naive post-call restore:
+> `left: 9999, right: 0`).
+>
+> **Detector note.** No standing gate could reach this: a SIGABRT has no assertion to fail. The
+> CPython differential *does* classify signal-kills as findings (since W7-33), but
+> `src/difftest/generate.rs` has no user-struct-with-protocol-method feature, so a hook-nested walk is
+> structurally outside its corpus — out of scope, not a tuning miss.
+>
+> Gates: `cargo test` **4433 passed / 0 failed / 3 ignored across 23 targets** (lib 4202 / 0 / 2),
+> `chezzi test tests/chz` **620/620** at the default worker count and **620/620** at
+> `CHEZZI_THREADS=2`, `cargo clippy --all-targets -- -D warnings` clean. Docs updated in the same
+> commit: `MAX_STRUCTURAL_DEPTH` + `VM_STACK_BYTES` sizing rationale (`src/vm/mod.rs`), the two false
+> source comments (`arith.rs`, `stmt.rs`), `checker::proto`'s `EQ_BOUNDS_MAX_NODES` note,
+> `docs/stdlib.md`, `docs/spec.md`, and `docs/gaps.md` (row `W8-43` filed already-CLOSED + a session
+> log entry).
+
 > **✅ W8-8 CLOSED — `chezzi run --threads=1` now runs exactly ONE CPU runner in BOTH the outermost
 > AND the nested eager-nursery arm, 2026-08-18 (`fix/mn-idle-policy-w8-8-w8-7`).** An OUTERMOST eager
 > nursery's runner budget is `1 (drainer) + helpers + joiner`, sized for `max(N, 2)` total slots —

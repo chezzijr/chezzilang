@@ -280,6 +280,11 @@ Index a map with `m[k]` (read/write); iterate with `for k, v in m:`.
 > `==`, so a key holding a genuine reference cycle raises the same recoverable *"maximum structural
 > depth (10000) exceeded"* fault that `a == b` does — never a silent wrong `false`. This matches
 > Python's `RecursionError` (both `a == b` and `a in s` raise). Catch it with `recover:`.
+> The 10 000 is **one budget shared across nested re-entries**, not a fresh allowance per level: a
+> user `eq`/`str` that compares or stringifies from inside its own body continues on the depth the
+> enclosing walk already consumed, exactly as CPython's single recursion budget does. Without that,
+> hook-nesting depth × per-hook walk depth is unbounded and overflows the host stack uncatchably
+> (`docs/gaps.md` **W8-43**).
 
 ### `bytes` (immutable) and `bytearray` (mutable)
 | Type | Method | Signature | Notes |

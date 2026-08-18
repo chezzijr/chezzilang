@@ -268,6 +268,18 @@ const MAX_CALL_DEPTH: usize = 10_000;
 /// (W7-55 Important 4) instead of repeating the literal — the checker's `Eq`-bound cap and the
 /// runtime's own equality depth cap must agree BY CONSTRUCTION, or the checker can grant a compare
 /// the VM then can't perform (the `checker-superset-of-compiler` soundness class).
+///
+/// **Every guard on this constant tests [`Vm::walk_base`] `+ depth`, not `depth` — that is the whole
+/// of W8-43.** The `MAX_CALL_DEPTH` / [`VM_STACK_BYTES`] co-tuning below assumes O(1) native frames
+/// per call-depth level. That holds for `run_until`, and for the `hash`/`compare` hooks (one native
+/// frame per `run_proto`). It does NOT hold for a structural walk started INSIDE a protocol hook: a
+/// user `eq`/`str` that compares or stringifies re-enters the VM, and before `walk_base` existed
+/// each re-entry restarted this counter at 0. Neither guard then fired — call depth stayed far below
+/// 10 000 while the *product* of hook-nesting depth × per-hook walk depth grew without bound — and
+/// checker-clean pure Chezzi killed the process by host stack overflow (rc=134, uncatchable by
+/// `recover:`, measured), which is exactly the outcome this constant's first paragraph promises to
+/// prevent. `walk_base` restores the O(1)-frames-per-level assumption by making the budget ONE
+/// shared allowance across the whole nest, matching CPython's single recursion budget.
 pub(crate) const MAX_STRUCTURAL_DEPTH: usize = 10_000;
 
 // M19 Tier-2 — adaptive opcode quickening (PEP 659) per-site states (see [`Vm::quicken`]).
@@ -285,7 +297,10 @@ const Q_GENERIC: u8 = 2;
 /// method re-entering via `run_proto`), so a large dedicated stack decouples the call-depth limit from
 /// the caller's thread. Co-tuned with `MAX_CALL_DEPTH` (10_000) so the depth guard fires *before* the
 /// host stack overflows: the recursive frame here is `run_until` (one per call-depth level), so a new
-/// dispatch arm that grows that frame eats into the margin. Sized at 384 MiB (256 → 384, briefly 512,
+/// dispatch arm that grows that frame eats into the margin. **That co-tuning assumes O(1) native
+/// frames per call-depth level, and a structural walk nested under a protocol hook breaks the
+/// assumption** — see [`MAX_STRUCTURAL_DEPTH`]'s note on `walk_base` (W8-43), which is what restores
+/// it. Sized at 384 MiB (256 → 384, briefly 512,
 /// back to 384 — see below) to keep headroom for per-arm growth in **debug** builds — debug frames are far larger than
 /// release, and the depth-guard test (`self_referential_stringable_hits_depth_limit`) runs in debug.
 ///
@@ -968,6 +983,30 @@ pub struct Vm {
     /// parked into a [`Fiber`], so a `recv` reached while this is `> 0` cannot suspend — it faults
     /// `deadlock` instead (B1 v1 limitation). Maintained by [`Vm::guarded`].
     native_reentry: usize,
+    /// Structural depth already consumed by the ENCLOSING structural walks on the host stack, when a
+    /// user protocol hook (`eq` / `str`) re-entered the VM from inside one. Every
+    /// [`MAX_STRUCTURAL_DEPTH`] guard tests `walk_base + depth`, so the budget is ONE shared allowance
+    /// across a chain of nested protocol-hook re-entries — CPython's model, and the only thing that
+    /// bounds the PRODUCT of hook-nesting depth × per-hook walk depth. Maintained by
+    /// [`Vm::guarded_walk`], which every `run_proto` dispatch with a live structural `depth` in scope
+    /// goes through.
+    ///
+    /// Per-`Vm`, not per-fiber, for the identical reason [`Vm::native_reentry`] is: a fiber cannot
+    /// park or yield while a native re-entry is on the host stack (every park/yield gate is
+    /// `native_reentry == 0`), so no other fiber can ever observe a non-zero value. Deliberately
+    /// absent from [`FiberCtx`], [`GenCtx`], [`Handler`], [`Vm::swap_ctx`] and the generator ctx swap
+    /// (`src/vm/exec.rs`'s `resume_generator`) — do not add it to any of them.
+    ///
+    /// The generator omission is load-bearing. The tempting cheaper alternative — charge `depth` to
+    /// [`Vm::call_depth`] around each hook — FAILS because `GenCtx` carries its own `call_depth` and
+    /// the generator resume swaps it, so a generator driven from inside a hook would swap the charge
+    /// away. A plain `Vm` field is not swapped there, which is exactly right: the generator's frames
+    /// are on the same host stack.
+    ///
+    /// `recover:` needs no restoration. Unlike `call_depth` (restored from the snapshot because
+    /// frames are heap-allocated and skipped over), native walk frames unwind through Rust `?`, so
+    /// every [`Vm::guarded_walk`] on the path has already restored by the time the handler runs.
+    walk_base: usize,
     /// While `true`, [`Vm::values_equal_guarded`] does NOT dispatch a user `eq` — it compares
     /// structurally, all the way down. Set for exactly one window: `Atomic.cas`'s compare, which runs
     /// while holding the box's value mutex, where re-entering user code could block on that same
