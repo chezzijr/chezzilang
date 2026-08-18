@@ -110,7 +110,11 @@ fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
 }
 
 /// `lcm(a,b) = |a|/gcd * |b|`, computed on magnitudes to reduce overflow risk (divide before multiply).
-/// `lcm(0,·)=0` (Python). Errs — never faults — when the representable result exceeds i64.
+/// `lcm(0,·)=0` (Python). Errs (never panics, in THIS Rust function) when the representable result
+/// exceeds i64 — but the exported `lcm` native fn below maps that `Err` into a `HostError`,
+/// i.e. a Chezzi-level FAULT. Chezzi's i64-overflow fault is consistent language-wide and recoverable
+/// via `recover:`, so this is by design, not a bug — just don't read "Errs, never faults" as a
+/// promise about the language-level `math.lcm(a, b)` call.
 fn lcm_i64(a: i64, b: i64) -> Result<i64, String> {
     if a == 0 || b == 0 {
         return Ok(0);

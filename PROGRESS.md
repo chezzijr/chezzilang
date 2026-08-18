@@ -7,6 +7,56 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+> **✅ Adversarial-review fix wave on `feat/span-file-and-stdlib-contracts`, 2026-08-18 — the LSP's
+> diagnostic publish is now atomic with its delivery, and a closed buffer can no longer be resurrected as
+> a diagnostic source.** Three isolated prosecutors reviewing the branch (the file-naming work above,
+> including the union-diagnostics landing) filed two related charges on `chezzi-lsp.rs`'s
+> `Backend::publish`: **(F1)** the union was computed under the `published` lock but the resulting
+> `client.publish_diagnostics(...)` sends happened AFTER the lock was released — since tower-lsp
+> dispatches notification handlers concurrently (vendored `tower-lsp-0.20.0/src/transport.rs`:
+> `DEFAULT_MAX_CONCURRENCY = 4`, `.buffer_unordered(...)`) and `publish_diagnostics` carries
+> `version: None` (the client can't reject a stale delivery), two publishes for buffers sharing a target
+> module could compute in one order and deliver in the other. **(F2)** `did_close` removed a URI from
+> the map and republished without it, but `did_change`/`did_open` never checked whether a URI was still
+> open before unconditionally re-`insert`ing it — a `did_change` whose diagnostics computation finished
+> after a concurrent `did_close` for the same URI would resurrect the closed buffer as a live source,
+> with nothing left to ever clear it (no future event targets a closed buffer). Fix: both bugs are one
+> design flaw, so one fix — `published: HashMap<...>` became `published: Mutex<Published>` with
+> `open: HashSet<Url>` alongside the existing per-source map; `did_open` marks a URI open BEFORE the
+> (unlocked) diagnostics computation starts, `did_close` removes it, and the decide-then-send sequence
+> (`decide_publish`/`decide_close`, factored out as pure sync fns for deterministic unit testing) now
+> runs under ONE continuous hold of the lock — declining outright (no insert, no send) for a URI no
+> longer in `open`, and holding the `tokio::sync::Mutex` across the `publish_diagnostics` awaits so
+> "last update wins" is true at the client, not just in the map (serializes diagnostic delivery — the
+> correct trade for a diagnostics server; `docs` stays a separate lock, never held alongside `published`,
+> per a still-standing earlier review). A fourth charge — that rendering an absolute path for an
+> out-of-cwd (e.g. `std/`) fault is itself an information leak — was **ruled not a defect**: both owning
+> ancestors do the same (measured: CPython prints an absolute stdlib path, Go prints an absolute path on
+> every frame); the REAL gap was that `tests/run_stack_trace_paths.rs`'s
+> `std_module_fault_names_the_std_file_not_a_bare_line` only asserted `contains("flag.chz:")`, which
+> passes for a relative, absolute, or bare-filename rendering alike — fixed test-only, now asserting BOTH
+> the std-module headline renders absolute and the project-local call-site frame renders relative, in one
+> run. Plus a trivial fifth: `src/native/math.rs`'s `lcm` comment cited a stale line number for `lcm`
+> below it (drifted from `:250` to its real `:254`) — deleted rather than corrected, since the fn name
+> alone can't rot. On the concurrency fix's own test story: a black-box stdio integration test (send
+> `didChange` immediately followed by `didClose`, no wait between, for the sole source of a shared
+> diagnostic) could NOT be made to force the adversarial interleaving on demand — measured empirically,
+> not assumed: `Server::serve` runs `read_input`/`process_server_tasks`/`print_output` as three futures
+> joined into ONE task, not one tokio task per request, and a `did_change` computing diagnostics over an
+> 80,000-line payload (a plain `chezzi check` on that shape measures ~0.5s) still always finished before
+> a `did_close` sent right after it started, across every trial — `buffer_unordered`'s cooperative
+> scheduling only yields at a real suspension point, which this path evidently never hits here. So the
+> deterministic regression coverage lives at the unit level instead —
+> `decide_publish_declines_a_uri_that_closed_first` and
+> `decide_publish_after_a_racing_close_never_resurrects_the_source` in `chezzi-lsp.rs`'s own
+> `#[cfg(test)] mod tests` construct the exact `Published` state a losing race would produce and assert
+> `decide_publish` declines, with no timing dependency (confirmed to fail against the pre-fix logic by
+> temporarily reverting the open-check and re-running); the stdio test stays as the next-best end-to-end
+> pin for the ordinary (non-adversarial) case. `editors/README.md`'s diagnostics-union paragraph gained a
+> sentence: closing a buffer always drops its contribution even if a check triggered just before the
+> close is still in flight. Gate: `cargo test` full suite green, `cargo test --features lsp --test
+> lsp_smoke` green (11 tests, one new), `cargo clippy --all-targets --features lsp -- -D warnings` clean.
+>
 > **📋 EXTERNAL DOGFOOD PASS filed, 2026-08-17 — `docs/gaps.md` W8-1..W8-20, and the table is no longer
 > empty.** Ten developers new to Chezzi, one area each, **343 Chezzi programs vs 45 reference programs**
 > (Python/Go/Rust), nothing taken on the docs' word — their counts and darwin timings, not re-run here.
@@ -17,8 +67,11 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > repro subject, `path.join`'s "double slash", and two diagnostics cosmetics), along with two wrong
 > line-cites of theirs. **W8-18 (the twelve doc-drift rows) was CLOSED in that commit**; **W8-2 (a
 > discarded `Result`/`Option`) and the un-numbered airlock-trap section closed 2026-08-17** on the
-> `feat/diagnostic-pass-w8-2-airlock` branch. **20 rows are open** (W8-1, W8-3..W8-17, W8-19, W8-20,
-> plus the two decided milestones W8-21/W8-22) and are the top of the pre-JIT queue.
+> `feat/diagnostic-pass-w8-2-airlock` branch; **W8-14 (runtime stack traces name no file), W8-15 (both
+> `check`/`test` `--errors=json` halves), and W8-5 (`json.parse`'s and `json.stringify`'s depth aborts)
+> closed 2026-08-18** on `feat/span-file-and-stdlib-contracts`. **17 rows are open** (W8-1, W8-3, W8-4,
+> W8-6..W8-13, W8-16, W8-17, W8-19, W8-20, plus the two decided milestones W8-21/W8-22) and are the top
+> of the pre-JIT queue.
 >
 > **The shape:** semantics are in good shape (40+ CPython differentials → **one** differing byte, `NaN`
 > casing; a 7,000-op `std.collections` fuzz → zero mismatches; `defer`/`panic`/`recover` byte-identical
@@ -30,7 +83,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > literal backslashes), a **scheduler whose default is its slowest setting** (W8-7; `--threads=1`
 > actually runs **two** workers — W8-8, which invalidates every rationale in the tree citing a
 > `CHEZZI_THREADS=1` measurement), and a **diagnostics layer with no caret, no `help:`, and no "did you
-> mean" anywhere** (W8-13..W8-17).
+> mean" anywhere** (W8-13, ~~W8-14~~ fixed, W8-15..W8-17).
 >
 > **META-FINDING, and the reason this is in PROGRESS and not just gaps.md: not one of W8-1..W8-17 was
 > reachable by the standing gates.** 4375 Rust tests + 586 Chezzi tests at two worker counts + the
@@ -59,6 +112,209 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > string fixes: `chezzi init`'s banner advertised `entrypoint = "src.main"` (the manifest says
 > `"src.main:main"`) and recommended `chezzi run src/main.chz`, which is a **silent no-op, rc=0**.
 > Every code snippet added was executed before it was written down.
+>
+> **✅ Stdlib fault-contract sweep, 2026-08-18 (`feat/span-file-and-stdlib-contracts`, CLOSED) — six
+> code fixes (closing `docs/gaps.md` **W8-5** and part of **W8-17**), a 23-row second-round audit, and
+> a follow-up fix for a hang the audit itself found.** Tasks B1/B2, run concurrently with the
+> `check`/`test`/LSP file-attribution work above in the same working tree (their commit `a078a977`,
+> credited to the A5 review-fix-wave entry below, landed interleaved with these). **B1 (six fixes):**
+> (1)+(2) **`std.json` W8-5, both sites** — `parse`'s `Result` was not total (a correctly-matched
+> `Ok`/`Err` still died on deep input, `runtime error: maximum call depth exceeded`) and `stringify` had
+> no error channel to fault through cleanly at all. `Parser` gained a `depth: int` counter capped at
+> `MAX_NEST_DEPTH = 2000` (2.5× headroom below the measured death point, nesting depth 5000); past it
+> `parse` returns `Err("exceeded max depth")` — an ordinary `Result`, no VM abort — and `stringify` gets
+> a named, `recover:`-able fault (`json.stringify: exceeded max depth`) via a new `stringify_depth`
+> inner helper, replacing the same opaque VM message. Measured on the release binary,
+> `json.parse("[".repeat(100000)+"]".repeat(100000))` behind a plain `match`, no `recover:`: `err:
+> exceeded max depth` then `still alive`, rc=0 (was rc=1, `still alive` never printed). `docs/gaps.md`
+> **W8-5 CLOSED** (task C, same day). (3) **`json.len`** now faults on a scalar (`Null`/`Bool`/`Num`)
+> instead of silently returning `0`, matching CPython's `len(None)` `TypeError`. (4) **`std.string.repeat`**
+> now delegates to the capacity-guarded native `s.repeat(n)` method instead of an unbounded `.chz`
+> `while` loop — a huge `n` used to OOM the process, now `string repeat capacity overflow`, recoverable.
+> (5) **`datetime.weekday_name`** faults via `panic(...)` naming the bad value (`weekday_name: wd must
+> be 0..6 (0=Sunday), got 7`) instead of a bare `assert` that printed no operand — closes half of
+> `docs/gaps.md` **W8-13**'s complaint for this one call site (the general `assert`-prints-no-values gap
+> stays open). (6) **A missing map key's fault now names the key** (`src/vm/stmt.rs`): `key not found`
+> → `key not found: 'zz'` / `key not found: 99`, rendered through the same `stringify_nested_into`
+> helper nested containers already use. Closes `docs/gaps.md` **W8-17 sub-item (b)**. Plus a doc-only
+> fix: `math.lcm`'s doc comment claimed "never faults," true only of the private `lcm_i64` helper in
+> isolation — the exported `lcm` native fn maps its `Err` into a fault, reworded to say so. **B2
+> (second-round stdlib fault-contract audit):** measured 23 new fault rows against CPython 3.14.7 and Go
+> 1.26.6 (installed this session), added to `docs/stdlib.md`'s fault table with 19 pinned
+> `tests/chz/stdlib/fault_contracts_test.chz` tests. Found and flagged (not fixed, per that task's
+> zero-behavior-change scope) a **real latent bug**: `std.string.pad_left`'s free-function form had no
+> capacity guard and **hung** rather than faulting on a huge `width` (measured: `timeout 15` still
+> running, exit 124) — its native-method sibling already had the guard `repeat` shares. **Follow-up
+> fix, same day (`3b0d1354`):** `std.string.pad_left` now delegates to the native `s.pad_left(...)`
+> receiver method the same way `repeat` does — one line, the hand-rolled unbounded loop is gone with
+> it. Measured (release binary, `recover:`): `string.pad_left("a", i64::MAX, "x")` → `err: string pad
+> capacity overflow`, process alive, where it previously hung indefinitely. `docs/stdlib.md`'s "two
+> safety divergences" callout is now "no divergence" — both free-fn siblings fault exactly like their
+> native methods. One more follow-up (`f0a9421e`): a real-process CLI test (`tests/interactive.rs`)
+> pins `io.read_all()`'s non-UTF-8 stdin contract (`stdin: stream is not valid UTF-8`) from an actual
+> piped-bytes subprocess, not just an in-process fixture. **Net: 590 → 617 Chezzi tests** (598 after B1,
+> +19 from B2), confirmed on the release binary at the default worker count **and** `CHEZZI_THREADS=2`:
+> `617 test(s): 617 passed, 0 failed, 0 errored`. `cargo clippy --all-targets -- -D warnings` clean at
+> every stage. Full verbatim measurement tables + ancestor comparisons: session reports in the tasks'
+> own scratchpad.
+>
+> **✅ A5 review fix wave, 2026-08-18 (`feat/span-file-and-stdlib-contracts`, CLOSED) — the per-module
+> publish below (commit `d6cb3147`) shipped one Critical regression and three Important gaps; all four
+> now fixed.** **F1 (Critical, regression)** — the `Err(e)` arm's entry-vs-imported guard used RAW path
+> equality (`p.as_path() != path`); `ResolveError::path` for the entry's OWN failure is
+> `canonical_or_abs(entry_abs)`, which resolves symlinks whenever the file exists, while the LSP's
+> `path` (from `uri.to_file_path()`) never touches disk — so on any project reached through a symlinked
+> component (macOS `/tmp`→`/private/tmp`, a Nix store path, a Docker bind mount) the guard wrongly took
+> the imported-module arm for the ENTRY's own error: it read a stale on-disk copy instead of the live
+> buffer and tagged `Diag::file` with the canonical path, which `publish` maps to a URI nothing is
+> listening on — the diagnostic silently vanished. Fixed by making `resolver::canonical_or_abs`
+> `pub(crate)` and normalizing both sides before comparing (one extra `stat`, same order of cost as the
+> `read_to_string` the imported-module branch already does; the `Ok(graph)` arm's numeric-file-id match
+> stays untouched, still zero canonicalize calls). Proven with a REAL symlinked directory + an entry file
+> that exists on disk with deliberately STALE content vs. a differing live buffer
+> (`editor::tests::entry_own_error_survives_a_symlinked_project_path`, `#[cfg(unix)]`) — this failed on
+> pre-fix HEAD with `file: Some(".../real/app.chz")` (should be `None`) and `end_col: 14` (should be `7`,
+> the buggy read overran into the stale text's 8-char word at the error column). **F2 (Important)** — the
+> per-edited-buffer `reported: Mutex<HashMap<Url, HashSet<Url>>>` set correctly avoided a global-clear
+> false-positive, but its residual (filed as a known limitation, not fixed, in the original task) was
+> real: two open buffers importing the same broken module, and fixing one buffer's own import sent an
+> EMPTY array to the shared module's URI even though the other still legitimately reported there — an
+> ordinary missing per-source merge, not a protocol limit. **F3 (Important)** — `did_close` only forgot
+> the closed URI's text, leaving a cross-module squiggle it was the sole source for permanently orphaned.
+> Both closed by the SAME restructure: `reported` → `published: Mutex<HashMap<Url /* source */,
+> HashMap<Url /* target */, Vec<Diagnostic>>>>`; a publish for source S replaces S's whole entry, then
+> republishes the UNION (over every source, in SORTED-uri order for determinism) for every target in
+> S's old-or-new target set — merging in whatever another open buffer still reports, and clearing a
+> target no source reports any more. `did_close` now runs the identical remove-then-republish-affected
+> step for the closed URI (which, as a side effect, also clears the closed buffer's OWN squiggle, not
+> just its cross-module ones — a free consequence of the shared merge structure, not extra code). A
+> `ponytail:` comment on `published` names the remaining ceiling: the union is a linear scan over every
+> open source per publish/close, un-indexed. **F4 (Important, docs)** — `editors/README.md` gained a
+> paragraph on cross-module diagnostics: reported in the file it belongs to, an unopened imported module
+> still gets `publishDiagnostics` for its URI, and (post-F2) a module imported from several open buffers
+> shows the union. Tests: `tests/lsp_smoke.rs::shared_imported_module_diagnostic_survives_until_the_
+> last_reporting_buffer_is_fixed` (F2 — two buffers on one shared broken module; fixing one alone by
+> dropping its import must not clear the other's), `did_close_clears_a_cross_module_diagnostic_it_was_
+> the_sole_source_for` (F3). Gate: `cargo test` full suite green, `cargo test --features lsp --test
+> lsp_smoke` **10/10** (7 pre-existing + 1 from the original A5 task + F2 + F3), `cargo clippy
+> --all-targets --features lsp -- -D warnings` clean. Full verbatim run output + before/after evidence:
+> session report in the fix-wave's scratchpad.
+>
+> **✅ The LSP now publishes each diagnostic to the buffer it actually belongs to, 2026-08-18
+> (`feat/span-file-and-stdlib-contracts`, CLOSED — the editor-path consumer W8-15's fix note left
+> open).** As filed: `chezzi-lsp` ran the real resolve→check pipeline over the whole module graph, then
+> mapped EVERY diagnostic — including one whose `span.file` pointed at an imported module — onto the
+> entry buffer's own text and published the whole vector to the one URI just edited. Repro: `app.chz`
+> importing `core.badmod`, whose own line 1 is the type error; the editor showed a squiggle on
+> `app.chz:1:10` (the `import` line) with a range measured against `app.chz`'s characters — wrong file,
+> wrong range, and a fix in `badmod.chz` could never clear it (nothing published to its URI in the first
+> place). `editor::Diag` gained `pub file: Option<PathBuf>` (`None` = the entry buffer). `diagnostics_
+> inner`'s `Ok(graph)` arm now resolves each diagnostic's `span.file` by SCANNING `graph.modules` (never
+> indexing by id — ids are DFS pre-order, `modules` is deps-first post-order) and, for any module other
+> than the entry, reads that module's text off disk (the resolver drops source after parsing) through a
+> small `HashMap<PathBuf, String>` cache so a module with several diagnostics is read once, not once per
+> diagnostic; a read failure still reports the diagnostic as a `col..col+1` range tagged with the path —
+> never dropped, never silently re-attributed to the entry. The `Err(e)` resolve-error arm gets the same
+> treatment via `ResolveError::path` (a lex/parse failure inside an import now attributes to the
+> importED module, not the importER buffer). `chezzi-lsp`'s `Backend::publish` groups the returned
+> `Diag`s by target URI (`Diag::file` → `Url::from_file_path`, falling back to the edited URI for `None`
+> or a path that fails to convert), publishes each group, and clears any URI THIS edited buffer's
+> PREVIOUS publish reported but this one does not (`reported: Mutex<HashMap<Url, HashSet<Url>>>`, keyed
+> per EDITED buffer rather than one global set — deliberately, so fixing one buffer's cross-module error
+> can never clobber a diagnostic another open buffer is still legitimately reporting against the same
+> shared imported module; the converse — two buffers disagreeing about the same shared file's health —
+> is a known limitation of per-entry-point diagnostics with no in-repo precedent to build against, left
+> alone rather than guessed at). The edited URI always gets a publish, even an empty one, so fixing the
+> last error in the open file still clears it. Gate: `cargo test` full suite green (**4424 passed / 0
+> failed / 3 ignored**, 22 targets incl. doctests), `cargo test --features lsp --test lsp_smoke`
+> **8/8**, `cargo clippy --all-targets --features lsp -- -D warnings` clean (plus the default,
+> non-`lsp` `cargo clippy --all-targets -- -D warnings`, also clean — `editor::mod.rs` stays
+> dependency-free). Tests: `editor::tests::cross_module_diagnostic_carries_its_own_file_and_range` (a
+> real two-file fixture on disk, entry line 1 vs. the imported module's own line 1 deliberately
+> different lengths so a wrong-source range is detectable — an entry-sourced range would wrongly run
+> `end_col` to 11 instead of the correct 10), `entry_module_diagnostic_has_no_file` (negative control),
+> `resolve_error_in_an_imported_module_is_attributed_to_it` (a parse error inside the import), and
+> `tests/lsp_smoke.rs::cross_module_diagnostic_publishes_to_the_imported_module_uri_and_clears_when_
+> fixed` (a real stdio round-trip: didOpen sees the imported module's own URI get a non-empty
+> `publishDiagnostics`, then fixing the file on disk and re-sending via `didChange` gets that same URI
+> an EMPTY one). Not attempted here: installing/driving `chezzi-lsp` in a real editor (this repo's
+> convention is that the installed binary is a snapshot needing reinstall — `cargo install --path .
+> --features lsp --bin chezzi-lsp` — separately, by whoever verifies it live).
+>
+> **✅ W8-14 — every runtime stack-trace frame now names its file, 2026-08-17
+> (`feat/span-file-and-stdlib-contracts`, CLOSED).** As filed, a fault reported `runtime error (line 3,
+> col 11): …` / `at boom (called at line 3, col 5)` — no filename on the headline or any frame, worst
+> on a stdlib fault (`std/flag.chz:132` read as an unattributed `line 132` in the user's own file). Now,
+> measured on the release binary: `runtime error (main.chz:2:12): index 9 out of bounds (len 1)` / `at
+> boom (called at main.chz:5:5)` / `at go (called at main.chz:7:1)`, and the `std.flag` case reads
+> `runtime error (/…/std/flag.chz:132:19): flag: unregistered str flag --zz`. One rendering rule,
+> `lexer::render_span(span, path: Option<&Path>) -> String` (`path:line:col`, falling back to the
+> historical `line N, col M` when the span's `file` id doesn't resolve — never a partial path),
+> relativized to the process cwd when the path lives under it, absolute otherwise (matches rustc/tsc).
+> `RunError` gained `files: Vec<(u32, PathBuf)>` snapshotted from `Program::modules` at the run
+> boundary (using `Program::file_path`/`ModuleProto::file` landed the prior task); `format_trace`
+> changed signature to `fn(&RunError) -> String` so a caller cannot forget to pass the table. Gate:
+> `cargo test` full suite green, `cargo clippy --all-targets -D warnings` clean, plus a new CLI
+> integration test (`tests/run_stack_trace_paths.rs`) whose three-module case (entry imports `a` and
+> `b`; `a` imports `c`) is the one that actually catches a wrong id→path mapping — `file` ids are
+> DFS pre-order while `Program::modules` is deps-first post-order, so the two disagree in that graph
+> and a naive `file - 1` index would misattribute a frame even though the single-file case stays
+> accidentally correct by luck. `docs/gaps.md` W8-14 closed; `check`'s plain-text/JSON diagnostics
+> (`--errors=json` `file` key) are the next consumer of the same helper, left to **W8-15**.
+>
+> **✅ W8-15 (check half) + W8-17(a) — `check --errors=json` names its file and end range, and the
+> doubled parse-error prefix is gone, 2026-08-18 (`feat/span-file-and-stdlib-contracts`, CLOSED).** As
+> filed: a two-module graph gave `[{"line":1,"col":10,"message":"in module 'core.badmod': cannot assign
+> str to variable of type int"}]` — no `file` key, and `line`/`col` were `core/badmod.chz`'s coordinates
+> while the entry (`app.chz`) was what a consumer would have assumed; separately, a parse error printed
+> its position twice under a mislabelled prefix (`resolve error (line 1, col 4): parse error (line 1,
+> col 4): expected identifier, found '('`), carried into the JSON `message` too. Now, measured on the
+> release binary: `chezzi check app.chz --errors=json` →
+> `[{"file":"core/badmod.chz","line":1,"col":10,"end_line":1,"end_col":11,"severity":"error","message":"in
+> module 'core.badmod': cannot assign str to variable of type int"}]`; `chezzi check p.chz` → `resolve
+> error (p.chz:1:4): expected identifier, found '('` (position rendered once). `resolver::ResolveError`
+> gained `path: Option<PathBuf>`, set at every construction site from whichever module path is already
+> in scope there (the on-stack importer for any error raised while resolving an import — `import_span`
+> is always the importer's, never the not-yet-pushed target's; the enclosing module's own id for a
+> lex/parse failure in its own source), and its `Display` now renders through `lexer::render_span`
+> instead of the bare `Span`. `CheckOutcome::Fatal` carries the real `Span` (not a decomposed
+> `line`/`col`), closing the "raised before a `Program` exists" hole task A2 flagged — a resolve/lex/
+> parse error now names its file exactly like a type error does, with no `Program` in reach. `type_check`
+> gained a `Vec<(u32, PathBuf)>` return (same shape as `RunError::files`, sourced from the resolved
+> `ModuleGraph` — available EARLIER than a compiled `Program`), threaded into a new `CheckError::render`
+> (mirrors `Display`, takes a path; `Display` itself is UNCHANGED — many checker unit tests compare
+> against its bare form) and into `diags_json`'s new `file`/`end_line`/`end_col` keys. `file` is OMITTED
+> (never a claimed-wrong path) when the span's id doesn't resolve. `end_col` reuses `editor::word_end_col`
+> (made `pub`) rather than a second word-boundary scanner — 0-based, so the emitted value is `+1`. The
+> parse-error stutter's root cause: the resolver's parse-error arm built its message from
+> `e.to_string()` (`ParseError`'s own `Display`, which already prefixes `parse error (...)`) instead of
+> `e.message` — the lex arm two lines up already did this correctly and said why in its comment; the
+> parse arm just hadn't matched it, one-line fix. `docs/gaps.md` W8-15's `test --errors=json` `message`
+> half was closed the same day in a follow-up task — see the entry below. W8-17's (b)/(c)/(d) cosmetics
+> are UNTOUCHED, still open.
+>
+> **✅ W8-15 (test half) — `chezzi test --errors=json` now carries the failure text, 2026-08-18
+> (`feat/span-file-and-stdlib-contracts`, CLOSED — both W8-15 halves are now done).** As filed: a
+> failing test's JSON gave `{"name":"beta","file":"abc_test.chz","line":4,"status":"fail",
+> "duration_ms":0}` — a CI runner could say a test failed but not *why*, even though the text was
+> sitting right there in the `Verdict::Fail`/`Error`/`OverMemory`/`TimedOut` payload and simply never
+> got serialized. Now, measured on a throwaway fixture (`assert`-fail + `panic`) run through the
+> release binary: `{"tests":[{"name":"ok","file":"…/demo_test.chz","status":"pass","duration_ms":0},
+> {"name":"broken","file":"…/demo_test.chz","line":5,"status":"fail","message":"assertion failed: math
+> is broken","duration_ms":0},{"name":"crashes","file":"…/demo_test.chz","line":8,"status":"error",
+> "message":"deliberate crash","duration_ms":0}],"totals":{…}}` — a PASS entry carries no `message`
+> key at all (additive; not an empty string). **Fix: `test_runner::verdict_msg(v: &Verdict) ->
+> Option<&str>` added beside the existing `verdict_status`/`verdict_line` accessors** — `Pass => None`,
+> the other four variants (`Fail`/`Error`/`OverMemory`/`TimedOut`) each already carried a `msg: String`
+> field, just never read for JSON. `render_json` emits `"message":<json string>` (through the existing
+> `json_string` escaper — no hand-escaping) right after `"status"` and before `"duration_ms"` whenever
+> `verdict_msg` is `Some`. Because the accessor is total over all five `Verdict` variants,
+> `OverMemory`/`TimedOut` are correct by construction with no dedicated json fixture — covered instead
+> by a direct unit test (`verdict_msg_covers_all_variants`) over all five arms. Zero changes to the
+> human-readable render path, the totals, or the exit code. Tests: `json_emits_parseable_per_test_and_
+> totals` extended with a fourth test (`delta`, a `panic`) so the fixture exercises `error` as well as
+> `fail`/`pass`, plus a negative control that the `alpha` (pass) entry's JSON object contains no
+> `"message"` key at all (guards against an implementation that emits `"message":""` unconditionally).
 >
 > **✅ SESSION 2026-08-17 — the diagnostic pass (`feat/diagnostic-pass-w8-2-airlock`): two warning
 > rules, one silent-wrong-answer fix, one stdlib fault-surface audit.** Branch-final gate: `cargo test`

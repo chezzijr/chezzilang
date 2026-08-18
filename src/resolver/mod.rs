@@ -47,11 +47,23 @@ pub struct ResolveError {
     pub message: String,
     pub span: Span,
     pub module: Option<String>,
+    /// The source file `span` is anchored in, when the builder knows it at the point of failure.
+    /// `None` only when a resolve error is raised before ANY module's path is known (unreachable in
+    /// practice — even the entry's own lex/parse error carries the entry's own path). Threaded through
+    /// so `Display` (and `--errors=json`'s `file` key, via `CheckOutcome::Fatal`) can name the file
+    /// instead of a bare `line N, col M` — a resolve/lex/parse error happens BEFORE a `Program` exists,
+    /// so `Program::file_path` isn't available yet; this is that same information, sourced earlier.
+    pub path: Option<PathBuf>,
 }
 
 impl std::fmt::Display for ResolveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "resolve error ({}): {}", self.span, self.message)
+        write!(
+            f,
+            "resolve error ({}): {}",
+            lexer::render_span(self.span, self.path.as_deref()),
+            self.message
+        )
     }
 }
 
@@ -384,7 +396,21 @@ fn build_graph_impl(
     }
     // Normalize named/default call arguments into positional ones, so the checker and the VM
     // consume an identical, already-desugared AST.
-    crate::desugar::run(&mut graph)?;
+    crate::desugar::run(&mut graph).map_err(|mut e| {
+        // Desugar has no `Builder` in scope to attribute a failure through — but the graph it failed
+        // on is right here, fully built, so a scan by `span.file` (same rule as
+        // `vm::op::Program::file_path`: ids are DFS pre-order, `modules` is deps-first post-order, so
+        // this MUST scan, never index) recovers the same path a resolve/lex/parse error would have
+        // carried.
+        if e.path.is_none() {
+            e.path = graph
+                .modules
+                .iter()
+                .find(|m| m.file == e.span.file)
+                .map(|m| m.id.0.clone());
+        }
+        e
+    })?;
     Ok(graph)
 }
 
@@ -408,6 +434,16 @@ struct Builder {
 }
 
 impl Builder {
+    /// The path of the module whose import loop we are currently inside — `on_stack.last()`, the
+    /// SAME lookup every `importer` (dotted-label) computation already does, just the path half of
+    /// the same pair. Every `ResolveError` raised while resolving an import (cannot-find-module,
+    /// cycle, too-deep, reserved-namespace, std-miss) is anchored at `import_span`, whose `file` is
+    /// always this module's — the on-stack top, never the not-yet-pushed target — so this is the ONE
+    /// path a caller in that position ever needs (`docs/gaps.md` W8-15/W8-17a).
+    fn importer_path(&self) -> Option<PathBuf> {
+        self.on_stack.last().map(|(id, _)| id.0.clone())
+    }
+
     /// The cycle + dedup + depth prologue every module load shares (normal [`visit`] AND file-backed
     /// [`visit_native_file`] — a native `std/*.chz` can `import`, so it needs the same guards or a
     /// native↔native cycle would push a dependent before its dependency and later index-panic in the
@@ -430,6 +466,7 @@ impl Builder {
                 message: format!("import cycle: {}", chain.join(" -> ")),
                 span: import_span,
                 module: Some(dotted_label(dotted)),
+                path: self.importer_path(),
             });
         }
         // Already loaded (e.g. via the other arm of a diamond).
@@ -454,6 +491,7 @@ impl Builder {
                 ),
                 span: import_span,
                 module: Some(dotted_label(dotted)),
+                path: self.importer_path(),
             });
         }
         Ok(false)
@@ -493,6 +531,7 @@ impl Builder {
                         message: prefix(&importer, std_miss_message(dotted, &miss)),
                         span: import_span,
                         module: Some(dotted_label(dotted)),
+                        path: self.importer_path(),
                     });
                 }
                 Err(StdMiss::NotStd) => {
@@ -507,11 +546,19 @@ impl Builder {
                         ),
                         span: import_span,
                         module: Some(dotted_label(dotted)),
+                        path: self.importer_path(),
                     })?
                 }
             },
         };
-        let (ast, file) = self.parse(&source, dotted)?;
+        // `id.0` (this module's own path), NOT `importer_path()`: a lex/parse failure here is in
+        // THIS module's own source, whose `file` id `parse` is about to assign — `parse` itself has
+        // no `id` in scope to attribute it (it only takes `source`/`dotted`), so the caller fills it
+        // in on the way back out.
+        let (ast, file) = self.parse(&source, dotted).map_err(|mut e| {
+            e.path = Some(id.0.clone());
+            e
+        })?;
         let resolved = self.resolve_ast_imports(id, dotted, &ast)?;
 
         self.visited.insert(id.clone(), ());
@@ -585,6 +632,7 @@ impl Builder {
                     ),
                     span,
                     module: Some(dotted_label(&path)),
+                    path: self.importer_path(),
                 });
             }
             let file = module_file(&path, &self.project_root, &self.std_root);
@@ -649,8 +697,15 @@ impl Builder {
             message: prefix(&dotted, std_miss_message(&dotted, &miss)),
             span: import_span,
             module: Some(dotted_label(&dotted)),
+            path: self.importer_path(),
         })?;
-        let (ast, file) = self.parse(&source, &dotted)?;
+        // `id.0` (this native module's own synthetic `<native:…>` id), same reasoning as `visit`'s
+        // `parse` call: a lex/parse failure in the file-backed native's OWN source belongs to it, not
+        // the importer, and `parse` itself has no `id` to attribute it with.
+        let (ast, file) = self.parse(&source, &dotted).map_err(|mut e| {
+            e.path = Some(id.0.clone());
+            e
+        })?;
         // Resolve imports (pushing each dependency to `order` first) BEFORE marking visited + pushing
         // this module — mirrors `visit`, keeping the deps-first `order` invariant and letting a cycle
         // re-entry hit `enter_module_guard`'s `on_stack` check instead of the visited early-return.
@@ -697,11 +752,20 @@ impl Builder {
                     file,
                 },
                 module: opt_label(dotted),
+                // Filled in by the caller (`visit`/`visit_native_file`), which has `id` in scope —
+                // `parse` itself does not.
+                path: None,
             })?;
         let ast = parser::parse_with_docs(tokens, comments).map_err(|e| ResolveError {
-            message: prefix(dotted, e.to_string()),
+            // `e.message`, NOT `e.to_string()`: same reason as the lex arm above — `ParseError`'s own
+            // `Display` carries its own `parse error (line N, col M): ` prefix, and the position is
+            // already on `span` below, re-rendered by the caller. Using `e.to_string()` here stuttered
+            // it: `resolve error (line 1, col 4): parse error (line 1, col 4): expected identifier,
+            // found '('`.
+            message: prefix(dotted, e.message),
             span: e.span,
             module: opt_label(dotted),
+            path: None,
         })?;
         Ok((ast, file))
     }
@@ -766,8 +830,10 @@ fn abs(p: &Path) -> PathBuf {
 }
 
 /// Canonicalize if the file exists; otherwise fall back to an absolute, lexically-normalized path
-/// (so a missing module still gets a stable id for the error path).
-fn canonical_or_abs(p: &Path) -> PathBuf {
+/// (so a missing module still gets a stable id for the error path). `pub(crate)`: also used by
+/// `editor::diagnostics_inner` to compare a resolve error's self-attributed path against the caller's
+/// raw entry path — see that call site for why a raw comparison is unsound.
+pub(crate) fn canonical_or_abs(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| normalize(&abs(p)))
 }
 

@@ -43,14 +43,22 @@ Conventions used below:
 Chezzi uses `Option`/`Result` "so the caller knows it could fail", so it is fair to ask why the calls
 below **fault** instead of returning a carrier. They were all audited on 2026-08-17 against the
 ancestor that owns them, and each one **matches** it — the reference language raises there too, so a
-carrier would be the divergence, not the fix. This table is the recorded negative result: **do not
-re-run this audit, and do not convert these to `Result` without new ancestor evidence.** Every fault
-here is recoverable (`r := recover: <expr>`), and the ones with a carrier sibling name it.
+carrier would be the divergence, not the fix. A second audit round on 2026-08-18 covered the
+remaining ~15 functions the first round hadn't reached (range/math/datetime/crypto/concurrency/json/
+flag/io/path/ffi) plus two functions that go the *other* direction — they **swallow** an error the
+owning ancestor reports — recorded in the short list right after the table. **This table is the
+recorded negative result of BOTH rounds: do not re-run either audit, and do not convert an entry to
+`Result` without new ancestor evidence.** Every fault below is recoverable (`r := recover: <expr>`)
+**except one, called out in its own row**: `ffi.load_*`/`ffi.free` on a bad pointer is a raw C
+dereference (SIGSEGV), not a Chezzi fault — nothing for `recover:` to catch. The ones with a carrier
+sibling name it. Unless a row names a different ancestor, "measured" means **CPython 3.14** (3.14.7);
+the concurrency rows are measured against **Go 1.26** (go1.26.6) instead — Chezzi's concurrency
+primitives are Go's, not Python's.
 
-| Chezzi | Fault message | Ancestor (measured, CPython 3.14) | Carrier alternative |
-|--------|---------------|-----------------------------------|---------------------|
+| Chezzi | Fault message | Ancestor (measured) | Carrier alternative |
+|--------|---------------|----------------------|---------------------|
 | `xs[i]`, `s[i]` out of range | `index 5 out of bounds (len 3)` | `IndexError: list index out of range` / `string index out of range` | — (`first`/`last`/`get`) |
-| `m[k]`, key absent | `key not found` | `KeyError: 'zz'` | **`m.get(k) -> Option[V]`** (Python `dict.get` → `None`) |
+| `m[k]`, key absent | `key not found: 'zz'` | `KeyError: 'zz'` | **`m.get(k) -> Option[V]`** (Python `dict.get` → `None`) |
 | `xs.remove_at(i)` out of range | `index 9 out of bounds (len 3)` | `IndexError: pop index out of range` | — |
 | `xs.chunk(n)` / `xs.windows(n)`, `n <= 0` | `chunk/window size must be positive, got 0` | `ValueError: n must be at least one` (`itertools.batched`) | — |
 | `int(s)` / `float(s)` on a bad string | `int(): cannot parse 'abc' as an integer` | `ValueError: invalid literal for int() with base 10: 'abc'` | **`s.parse_int()`/`parse_float() -> Result`**, `s.to_int()/to_float() -> Option` |
@@ -64,6 +72,49 @@ here is recoverable (`r := recover: <expr>`), and the ones with a carrier siblin
 | `a << n` with `n` out of range | `shift amount -1 out of range (0..64)` | `ValueError: negative shift count` | — |
 | integer overflow | `integer overflow in Add` | *(upward divergence — Python ints are arbitrary-precision; Chezzi's i64 faults recoverably rather than wrapping)* | — |
 | `crypto.secure_bytes(n)`, `n` out of range | `secure_bytes: n must be >= 0, got -1` | *(deliberate fail-closed — a crypto primitive must not silently produce fewer bytes)* | — |
+| `range(a, b, 0)`, step is zero | `range() step cannot be zero` | `ValueError: range() arg 3 must not be zero` | — |
+| `range(a, b)`, materialized length > 10,000,000 | `range() length 20000000 exceeds the maximum of 10000000` | *(no ancestor — CPython's `range` is lazy, `range(0, 20_000_000)` is legal; this is a Chezzi resource limit, not a domain error)* | — |
+| `math.lcm`/`math.gcd`/`math.abs(int)`, i64 overflow | `integer overflow in lcm` (also `in gcd` / `in abs`) | *(upward divergence — `math.gcd`/`math.lcm`/`abs` are arbitrary-precision in Python; same family as the `integer overflow` row above)* | — |
+| `math.trunc(x)`, non-finite or out of i64 range | `trunc(): NaN is out of integer range` / `trunc(): inf is out of integer range` / `trunc(): 9223372036854776000 is out of integer range` | `ValueError: cannot convert float NaN to integer` / `OverflowError: cannot convert float infinity to integer` | — |
+| `math.divmod(a, 0)` | `division by zero` | `ZeroDivisionError: division by zero` | — |
+| `[...].sum()`, i64 overflow across the fold | `integer overflow in Add` | *(upward divergence — Python's `sum()` is arbitrary-precision; same family as the `integer overflow` row above)* | — |
+| `s.repeat(n)` / `std.string.repeat(s, n)`, capacity overflow | `string repeat capacity overflow` | `OverflowError: repeated string is too long` (`"x" * n`) | — |
+| `s.pad_left(w, fill)`, empty `fill` | `pad_left: fill must not be empty` | `TypeError: The fill character must be exactly one character long` (`str.ljust`) | — |
+| `s.pad_left(w, fill)` / `string.pad_left(s, w, fill)`, huge `w` (capacity overflow) | `string pad capacity overflow` | `MemoryError` (`str.ljust` with a huge width actually tries to allocate) | — |
+| `std.string.split(s, "")` / `std.string.rsplit(s, "")` | `split: sep must not be empty` / `rsplit: sep must not be empty` | `ValueError: empty separator` | — (free-fn siblings of the `s.split("")` row above) |
+| `crypto.token_hex(n)`, `n` out of range | `token_hex: n must be >= 0, got -1` / `token_hex: n exceeds the 1048576-byte cap, got …` | `ValueError: negative argument not allowed` (`secrets.token_hex`; no upper cap in Python) | — |
+| `uuid.v4()`, OS entropy unavailable | *(not measured — no way to force `getrandom`/`/dev/urandom` to fail in this environment)* | `OSError` from `os.urandom` (same entropy source `crypto.secure_bytes`/`token_hex` share) | — |
+| `io.read_all()`, non-UTF-8 stdin | `stdin: stream is not valid UTF-8` | `UnicodeDecodeError` (`sys.stdin.read()`) | — (a mid-read I/O error is a separate, rarer fault on the same call). Its siblings `read_line`/`read_char`/`input` return `Option[str]` **and can still fault** — see `Reader` (R2b) below |
+| `path.Path.decode()`, invalid UTF-8 | `invalid UTF-8 in decode()` (inherited verbatim from `bytes.decode()` above) | `UnicodeDecodeError` | **`p.str()`** (lossy, U+FFFD-substituted, never faults — Python has no direct equivalent since `os.fsdecode` is also lossy but different substitution) |
+| `datetime.days_in_month(y, m)`, `m` outside 1..12 | `days_in_month: month out of range: 13` | `calendar.IllegalMonthError: bad month number 13; must be 1-12` | — |
+| `datetime.weekday_name(wd)`, `wd` outside 0..6 | `weekday_name: wd must be 0..6 (0=Sunday), got 7` | `IndexError: list index out of range` (`calendar.day_name[7]`) | — |
+| `datetime.fdiv(a, 0)` / `datetime.fmod(a, 0)` | `division by zero` | `ZeroDivisionError: division by zero` | — (thin wrappers over `/`/`%`, same fault as the row above) |
+| `datetime.to_uint(s)`, overflow on a long digit string | `integer overflow in Mul` | *(upward divergence — Python's `int()` is arbitrary-precision; same family as the `integer overflow` row above)* | — |
+| `Atomic[T].add`/`sub`, `AtomicInt.add`/`sub`, i64 overflow | `integer overflow in Add` / `integer overflow in Sub` | Go 1.26: **wraps**, never panics (`atomic.Int64.Add(MAX, 1)` → `MIN`, measured) — a **stated divergence** for concurrency specifically, justified by Chezzi's language-wide recoverable-overflow rule | — |
+| `Channel[T].send(v)`, closed channel | `send on a closed channel` | Go 1.26: `panic: send on closed channel` — identical | `try_send(v) -> bool` |
+| `Channel[T].recv()`, closed and drained | `receive on a closed channel` | Go 1.26: `v, ok := <-ch` returns the zero value + `false`, **no panic** — a divergence | **`try_recv() -> Option[T]`** |
+| `json.stringify(j)`, depth ceiling | `json.stringify: exceeded max depth` | CPython's `json.dumps` raises `RecursionError` on a tree built past its recursion limit | — |
+| `json.stringify(j)`, `Json.Num` holding NaN/±inf | `cannot serialize non-finite float to JSON` | CPython's `json.dumps` emits a bare `NaN`/`Infinity` (invalid JSON, no error); Go's `json.Marshal` errors `json: unsupported value: NaN` (measured) — Chezzi refuses, matching Go | — |
+| `fs.get_str`/`get_bool`/`get_int(name)` on an unregistered name | `flag: unregistered str flag --nope` (also `bool`/`int`) | CPython: `AttributeError: 'Namespace' object has no attribute 'nope'` (`argparse`); Go's `flag.Lookup` returns `nil`, no panic, and has no name-keyed typed getter at all — the Go divergence is already noted at `std/flag.chz:19-22` | — |
+| `ffi.load_*`/`ffi.load_*_at`/`ffi.free`, a dangling/misaligned/OOB (non-null) `ptr` | **SIGSEGV — not a recoverable Chezzi fault** | `ctypes`/`cgo` are identically unsafe | — (there is no carrier for undefined behavior) |
+
+The last row above is the **one entry in this whole table that is not recoverable**: every other fault
+here is catchable with `r := recover: <expr>`, but a bad `ptr` dereference in `std.ffi` is a raw C
+memory access — it segfaults the process (or silently corrupts memory) before any Chezzi fault
+machinery runs. A reader who has internalised "every fault here is recoverable" from the paragraph
+above this table must not carry that belief into FFI.
+
+Two entries go the **opposite** direction — they **swallow** an error the owning ancestor reports,
+rather than fault:
+
+* **`net.Socket.close()` / `net.Listener.close()`** return `nil` unconditionally, silently dropping any
+  flush error. CPython's `socket.close()` also returns `None` (measured); **Go's `Close() error`
+  reports it** (measured, Go 1.26) — a divergence. Contrast `io.Writer.close(self) -> Result[nil]`,
+  which gets this right.
+* **`os.setenv(key, value)`** returns `nil` unconditionally for any `key`/`value`, including one
+  Python/Go would reject (e.g. a key containing `=`) — Chezzi writes an in-process `Map`, not the real
+  OS environment, so there is nothing to validate against. Go's `os.Setenv` returns `error` there;
+  CPython raises `ValueError: illegal environment variable name` (measured) — both a divergence.
 
 One entry people expect to find here is **not** a fault at all: `",".join(xs)` on a non-`str` element
 is a **static type error** in Chezzi (`expected List[str], found List[int]`) where Python raises
@@ -81,6 +132,14 @@ opposite failure mode from the `ord` defect. Negative and `> 0x10FFFF` both faul
 `Reader.read_line()`'s non-UTF-8 fault is a fourth kind of case, documented in full in the `std.io`
 section below ("`Reader` (R2b)"): there Chezzi is deliberately **louder** than Python, which raises
 once and then silently reports EOF over data that is still in the file.
+
+`encoding.query_decode(q)` / `encoding.url_parse(u)` on a malformed percent-escape (e.g. `%FF`, which
+is not valid UTF-8) is **not a fault and not a bug**, so it does not belong in the table above:
+measured, `query_decode("a=%FF")` keeps the raw `"%FF"` text in the value rather than substituting
+anything. CPython's `urllib.parse.parse_qs("a=%FF")` substitutes U+FFFD (`{'a': ['�']}`,
+measured) — losing which byte was actually there. Chezzi's `url_parse` also keeps percent-escapes
+un-decoded at all (matching CPython's `urlsplit`, which does the same). Chezzi loses less information
+than the Python analogue; there is nothing to fix.
 
 ---
 
@@ -118,11 +177,13 @@ once and then silently reports EOF over data that is still in the file.
 The `ends_with`/`replace`/`repeat`/`reverse`/`pad_left`/`index_of`/`count`/`strip_prefix`/`strip_suffix`/`split_lines`
 methods are receiver-method aliases of the identically-named `std.string` free fns — `s.replace(a, b)` and
 `text.replace(s, a, b)` (after `import std.string as text`) are byte-identical for valid inputs; the free fns
-keep working. (Two safety divergences, both because only the native method can probe the allocator:
-`s.repeat(n)` raises a recoverable `string repeat capacity overflow` fault for a huge `n` rather than
-allocating until it aborts; and `s.pad_left(w, f)` likewise raises a recoverable `string pad capacity
-overflow` fault for a huge `w`, while the `std.string` free fn grows until the process dies. The empty-`fill`
-fault, by contrast, is raised identically by both.)
+keep working. **There is no longer any safety divergence between the two spellings** — as of 2026-08-18
+`std.string.repeat` and `std.string.pad_left` *delegate* to their native receiver methods rather than
+re-implementing the loop, so a huge `n`/`width` raises the same recoverable `string repeat capacity
+overflow` / `string pad capacity overflow` fault either way. Before that, only the native method could
+probe the allocator: the free fns grew a string in a `while` loop until the process died (`repeat`) or
+hung indefinitely (`pad_left`, measured still running at 15s). `tests/chz/stdlib/fault_contracts_test.chz`
+pins both spellings against each other so they cannot drift apart again.
 
 ### `List[T]`
 | Method | Signature | Notes |
@@ -1654,17 +1715,29 @@ enum Json:
 `parse(s) -> Result[Json]` · `stringify(j) -> str` · `is_null(j) -> bool` ·
 `as_bool(j) -> Option[bool]` · `as_float(j) -> Option[float]` · `as_int(j) -> Option[int]` ·
 `as_str(j) -> Option[str]` · `as_object(j) -> Option[Map[str, Json]]` · `as_array(j) -> Option[List[Json]]` ·
-`get(j, key) -> Option[Json]` · `at(j, i) -> Option[Json]` · `len(j) -> int`.
+`get(j, key) -> Option[Json]` · `at(j, i) -> Option[Json]` · `len(j) -> int` (faults on
+`Null`/`Bool`/`Num` — a scalar has no length, matching CPython's `len(None)` `TypeError`).
 
-> **`parse`'s `Result` is NOT total — deep nesting still kills the process.** `std.json` is
-> recursive-descent in pure Chezzi, so nesting depth in the *input* becomes recursion depth in your
-> program: `"[" * 100_000 + "]" * 100_000` blows the call-depth cap and aborts with `rc=1` even though
-> the caller matches `Ok`/`Err` correctly. Depth ~2 000 parses fine; the exact threshold is not a
-> documented contract. **Wrap `parse` in `recover:` when the input is untrusted** —
-> `r := recover: json.parse(s)` turns it into a catchable `Err("maximum call depth (10000) exceeded")`.
-> Go's `encoding/json` returns `exceeded max depth` and CPython raises a catchable `RecursionError`,
-> so this is a divergence from both ancestors, filed as `docs/gaps.md` **W8-5** (a depth counter
-> returning `Err` is the fix that makes the `Result` contract total).
+> **Nesting depth is capped at `MAX_NEST_DEPTH = 2000` on both `parse` and `stringify`.** `std.json`
+> is recursive-descent in pure Chezzi, so nesting depth becomes recursion depth in your program.
+> `parse`'s `Result` is now **total**: past the cap it returns `Err("exceeded max depth")` instead of
+> aborting the process, matching Go's `encoding/json` (`exceeded max depth`) and CPython's catchable
+> `RecursionError`. `stringify` has no `Result` to put an error in — a document built directly in
+> memory (no `parse` involved) that nests past the cap instead **faults** with
+> `json.stringify: exceeded max depth` (recoverable under `recover:`), the same shape CPython's
+> `json.dumps` uses (`RecursionError`).
+>
+> **Chezzi's cap is stricter than either ancestor's, and that is structural rather than a preference.**
+> Measured 2026-08-18: CPython's `json.loads` accepts nesting 50 000 and raises `RecursionError` at
+> 100 000; Go's `encoding/json` accepts 5 000 and reports `exceeded max depth` at 10 001 (its cap is
+> 10 000). Chezzi cannot reach either, because `std.json` runs *on the VM*: each nesting level costs
+> **2 VM frames** against the engine's 10 000-frame call-depth cap, so the absolute ceiling is ~5 000
+> even with zero caller frames — measured, a `[`-only document with nothing above it dies at exactly
+> that. `MAX_NEST_DEPTH = 2000` is that ceiling minus headroom for the frames a real caller has above
+> `parse`/`stringify`. Raising it trades that headroom for depth nobody has asked for; the way to
+> genuinely match Go would be an iterative parser, which is a rewrite, not a constant. Documents
+> nesting deeper than 2 000 are rejected **cleanly** — before this cap they killed the process.
+> `docs/gaps.md` **W8-5**.
 
 > **There is no `encode`/`dumps` inverse of `decode[T]`.** Serialization goes the long way: build a
 > `Json.Obj`/`Json.Arr` tree by hand, then `stringify` it. A struct → JSON round-trip is therefore

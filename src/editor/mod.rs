@@ -31,6 +31,11 @@ pub struct Diag {
     pub message: String,
     /// Error (squiggle, blocks the build) vs warning (advisory).
     pub severity: Severity,
+    /// The module this diagnostic belongs to, resolved from `Span::file`. `None` means the entry
+    /// buffer the caller passed in — a diagnostic with no module coordinate, or one from the entry
+    /// module itself. A consumer publishing to a URI MUST honour this: everything in a module graph
+    /// is reported through the entry's check, but only some of it belongs to the entry's buffer.
+    pub file: Option<std::path::PathBuf>,
 }
 
 /// Type-check `source` as the entry module at `path` (imports resolve from disk) and return one
@@ -53,33 +58,127 @@ fn diagnostics_inner(path: &Path, source: &str) -> Vec<Diag> {
     use crate::{checker, resolver};
     match resolver::build_graph_with_entry_source(path, Some(source.to_string())) {
         // A resolve error wraps the fatal lex/parse error (or a missing/cyclic import) — always fatal.
-        Err(e) => vec![span_diag(
-            source,
-            e.span.line as usize,
-            e.span.col as usize,
-            e.message,
-            Severity::Error,
-        )],
+        // `e.path` self-attributes the failing module (resolver::ResolveError doc): when it names some
+        // OTHER file than the entry `path` we were given, the failure is inside an IMPORTED module, and
+        // must be reported against THAT module's text, not the live entry buffer's.
+        //
+        // F1 fix (was a raw `p.as_path() != path` — a Critical regression): `e.path` for the ENTRY's own
+        // failure is `id.0 = canonical_or_abs(entry_abs)`, which resolves symlinks whenever the file
+        // exists on disk; `path` (from the LSP's `uri.to_file_path()`) never touches disk. On any project
+        // reached through a symlinked path component the two differ even though it IS the entry, so raw
+        // equality wrongly took the imported-module arm for the entry's own error — reading a stale
+        // on-disk copy instead of the live buffer, and tagging `file: Some(canonical_path)`, which
+        // `chezzi-lsp::publish` maps to a URI nothing is listening on. Normalize BOTH sides through the
+        // same `canonical_or_abs` before comparing, so the comparison is exact rather than heuristic.
+        // This arm produces exactly one diagnostic per call (and the imported-module branch already does
+        // a `std::fs::read_to_string`), so the extra `stat` here is the same order of cost, not a new one.
+        // Do NOT canonicalize elsewhere — `graph_diag` below still matches by the resolver's own numeric
+        // `Span::file` id, never by path, so it stays exempt from this filesystem hit.
+        Err(e) => match &e.path {
+            Some(p) if resolver::canonical_or_abs(p) != resolver::canonical_or_abs(path) => {
+                let mut cache = std::collections::HashMap::new();
+                vec![module_text_diag(
+                    &mut cache,
+                    p,
+                    e.span.line as usize,
+                    e.span.col as usize,
+                    e.message,
+                    Severity::Error,
+                )]
+            }
+            _ => vec![span_diag(
+                source,
+                e.span.line as usize,
+                e.span.col as usize,
+                e.message,
+                Severity::Error,
+            )],
+        },
         // M24 — the manifest-entrypoint gate is a property of the PROJECT, so the editor reports it
         // like `chezzi check` does: one derivation (`manifest::entry_fn_for`), every consumer.
         Ok(graph) => {
             let (res, warns) =
                 checker::check_graph_diags(&graph, crate::manifest::entry_fn_for(path).as_deref());
             let errs = res.err().unwrap_or_default();
+            // Distinct-module text, read from disk at most ONCE each (the resolver drops source after
+            // parsing, so there's nothing cached upstream to reuse) — a module with several diagnostics
+            // must not re-read its file per diagnostic.
+            let mut cache: std::collections::HashMap<std::path::PathBuf, Option<String>> =
+                std::collections::HashMap::new();
             errs.into_iter()
                 .chain(warns)
-                .map(|e| {
-                    span_diag(
-                        source,
-                        e.span.line as usize,
-                        e.span.col as usize,
-                        e.message,
-                        e.severity,
-                    )
-                })
+                .map(|e| graph_diag(&graph, source, &mut cache, e.span, e.message, e.severity))
                 .collect()
         }
     }
+}
+
+/// Map one checker diagnostic to a [`Diag`], resolving `span.file` through the [`resolver::ModuleGraph`]
+/// (SCANNING `graph.modules` — never indexing by id, see the module doc) so the range is computed
+/// against the OWNING module's text. The entry module (`m.id == graph.entry`), or a `span.file` that
+/// doesn't resolve in the graph at all (id `0`, or a synthesized diagnostic), uses the live `source`
+/// and `file: None` exactly as before. Any other module reads its text from disk via [`module_text_diag`].
+fn graph_diag(
+    graph: &crate::resolver::ModuleGraph,
+    source: &str,
+    cache: &mut std::collections::HashMap<std::path::PathBuf, Option<String>>,
+    span: crate::lexer::Span,
+    message: String,
+    severity: Severity,
+) -> Diag {
+    match graph.modules.iter().find(|m| m.file == span.file) {
+        Some(m) if m.id != graph.entry => module_text_diag(
+            cache,
+            &m.id.0,
+            span.line as usize,
+            span.col as usize,
+            message,
+            severity,
+        ),
+        _ => span_diag(
+            source,
+            span.line as usize,
+            span.col as usize,
+            message,
+            severity,
+        ),
+    }
+}
+
+/// A diagnostic attributed to a module OTHER than the live entry buffer: reads `path`'s text off disk
+/// once (through `cache`, keyed on the path — a module with several diagnostics is read only once) and
+/// computes the range against it, tagging [`Diag::file`] with `path`. A read failure still reports the
+/// diagnostic — never dropped, never silently re-attributed to the entry — as a `col..col+1` range,
+/// since there is no text to measure a word boundary or convert to UTF-16 against.
+fn module_text_diag(
+    cache: &mut std::collections::HashMap<std::path::PathBuf, Option<String>>,
+    path: &Path,
+    line1: usize,
+    col1: usize,
+    message: String,
+    severity: Severity,
+) -> Diag {
+    let text = cache
+        .entry(path.to_path_buf())
+        .or_insert_with(|| std::fs::read_to_string(path).ok());
+    let mut d = match text {
+        Some(t) => span_diag(t, line1, col1, message, severity),
+        None => {
+            let line0 = line1.saturating_sub(1) as u32;
+            let col0 = col1.saturating_sub(1) as u32;
+            Diag {
+                line: line0,
+                col: col0,
+                end_line: line0,
+                end_col: col0 + 1,
+                message,
+                severity,
+                file: None,
+            }
+        }
+    };
+    d.file = Some(path.to_path_buf());
+    d
 }
 
 /// 1-based `(line, col)` → 0-based [`Diag`], extending the end over an identifier word at the
@@ -106,6 +205,7 @@ fn span_diag(source: &str, line1: usize, col1: usize, message: String, severity:
         end_col: to_utf16(end_char),
         message,
         severity,
+        file: None,
     }
 }
 
@@ -114,8 +214,10 @@ fn is_word(c: char) -> bool {
 }
 
 /// The 0-based end column of the word starting at 1-based `(line, col)`, or `col` (0-based) + 1 when
-/// the position is not on an identifier char.
-fn word_end_col(source: &str, line1: usize, col1: usize) -> u32 {
+/// the position is not on an identifier char. `pub`: also the `--errors=json` `end_col` renderer
+/// (`main.rs::diags_json`) reuses this rather than writing a second word-boundary scanner — its
+/// `line`/`col` are 1-based, so it adds 1 to this fn's 0-based result.
+pub fn word_end_col(source: &str, line1: usize, col1: usize) -> u32 {
     let col0 = col1.saturating_sub(1);
     let line = source.lines().nth(line1.saturating_sub(1)).unwrap_or("");
     let chars: Vec<char> = line.chars().collect();
@@ -2234,5 +2336,168 @@ mod tests {
         let h = h.expect("hover on a module fn-value member call");
         assert_eq!(h.display, "fn() -> int");
         assert_eq!(h.kind, crate::checker::HoverKind::Func);
+    }
+
+    /// A5 — a type error inside an IMPORTED module carries its own path (not the entry's), and its
+    /// range is computed against the imported module's own text. The entry's `import core.badmod` line
+    /// (19 chars) and badmod's own line 1 (16 chars) deliberately differ — and, at the error's column,
+    /// badmod's char is a quote (not a word char, so `word_end_col` stops one past it) while the
+    /// entry's char at that same column sits mid-identifier (`core`, so it would run on) — so computing
+    /// the range against the WRONG source is detectable rather than coincidentally correct.
+    #[test]
+    fn cross_module_diagnostic_carries_its_own_file_and_range() {
+        let dir =
+            std::env::temp_dir().join(format!("chezzi_editor_a5_cross_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("core")).unwrap();
+        let badmod_path = dir.join("core").join("badmod.chz");
+        std::fs::write(&badmod_path, "y: int = \"oops\"\n").unwrap();
+        let expected_file = std::fs::canonicalize(&badmod_path).unwrap();
+        let entry = dir.join("app.chz");
+        let src = "import core.badmod\n";
+        let ds = diagnostics(&entry, src);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(ds.len(), 1, "expected exactly one diagnostic: {ds:?}");
+        let d = &ds[0];
+        assert_eq!(
+            d.file.as_deref(),
+            Some(expected_file.as_path()),
+            "diagnostic must be attributed to the imported module, not the entry"
+        );
+        assert!(d.message.contains("core.badmod"), "{}", d.message);
+        assert_eq!(d.line, 0);
+        assert_eq!(d.col, 9);
+        assert_eq!(
+            d.end_col, 10,
+            "range must come from badmod's OWN text (a quote char, not a word) — computed against \
+             the entry's text at the same column it would wrongly run to the end of 'core' (11)"
+        );
+    }
+
+    /// Negative control for the test above: a diagnostic that genuinely originates in the entry module
+    /// itself must NOT claim a module path — `Diag::file` stays `None`.
+    #[test]
+    fn entry_module_diagnostic_has_no_file() {
+        let ds = diag("a := 1\nb := zzz\n");
+        assert!(!ds.is_empty(), "undefined name should produce a diagnostic");
+        assert_eq!(
+            ds[0].file, None,
+            "an entry-module diagnostic must not claim a module path"
+        );
+    }
+
+    /// A5 — a lex/parse (resolve) error INSIDE an imported module is also attributed to that module,
+    /// not the entry buffer: the `Err(e)` arm of `diagnostics_inner` gets the same treatment as the
+    /// `Ok(graph)` arm above.
+    #[test]
+    fn resolve_error_in_an_imported_module_is_attributed_to_it() {
+        let dir = std::env::temp_dir().join(format!(
+            "chezzi_editor_a5_resolve_err_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(dir.join("core")).unwrap();
+        let badmod_path = dir.join("core").join("badmod.chz");
+        // Syntactically broken — a parse error, not a type error.
+        std::fs::write(&badmod_path, "x := = 5\n").unwrap();
+        let expected_file = std::fs::canonicalize(&badmod_path).unwrap();
+        let entry = dir.join("app.chz");
+        let src = "import core.badmod\n";
+        let ds = diagnostics(&entry, src);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(ds.len(), 1, "expected exactly one diagnostic: {ds:?}");
+        let d = &ds[0];
+        assert_eq!(
+            d.file.as_deref(),
+            Some(expected_file.as_path()),
+            "a parse error in an imported module must be attributed to it, not the entry"
+        );
+        assert_eq!(d.severity, Severity::Error);
+        // Same fixture as `diag_parse_error_pos`: col 6 (1-based) → 5 (0-based), computed off badmod's
+        // OWN line 1 ("x := = 5"), not the entry's ("import core.badmod").
+        assert_eq!(d.line, 0);
+        assert_eq!(d.col, 5);
+    }
+
+    /// F1 (Critical regression) — the `Err(e)` arm decided entry-vs-imported with RAW path equality
+    /// (`p.as_path() != path`). `e.path` for the entry's OWN parse failure is `id.0 =
+    /// canonical_or_abs(entry_abs)`, which resolves symlinks whenever the file exists; the caller's
+    /// `path` (from `uri.to_file_path()`) never does. So on a project reached through a symlinked
+    /// component the two differ even though it IS the entry, the guard wrongly takes the
+    /// imported-module arm, and the entry's own error is (a) computed against a stale on-disk read
+    /// instead of the live buffer, and (b) tagged `file: Some(canonical_path)`, which
+    /// `chezzi-lsp::publish` maps to a DIFFERENT URI than the one the editor has open — the diagnostic
+    /// is published where nothing listens and silently vanishes.
+    ///
+    /// Repro: a real symlinked directory, an entry file that EXISTS on disk with stale content, and a
+    /// live (unsaved) buffer that differs from that stale content but has a parse error at the same
+    /// structural position. `expected` is computed by running the SAME live source through an ordinary
+    /// (non-symlinked, non-existent-on-disk) path — that's what a correct implementation must also
+    /// produce for the symlinked entry: `file: None`, and a range computed from the LIVE buffer, not
+    /// the stale disk text (the disk text is deliberately built so a wrong-source read is detectable —
+    /// its char at the error column starts an 8-char word, so a buggy end_col overruns to 14 instead of
+    /// the live buffer's 7).
+    #[cfg(unix)]
+    #[test]
+    fn entry_own_error_survives_a_symlinked_project_path() {
+        use std::os::unix::fs::symlink;
+
+        let base =
+            std::env::temp_dir().join(format!("chezzi_editor_a5_symlink_{}", std::process::id()));
+        let real_dir = base.join("real");
+        let link_dir = base.join("link");
+        std::fs::create_dir_all(&real_dir).unwrap();
+
+        // Stale on-disk content: deliberately NOT what the live buffer holds, and its char at the
+        // error column (index 6) starts a long word — so misreading it produces a clearly wrong,
+        // over-long end_col instead of a merely-off-by-one one.
+        let stale_disk_src = "012345abcdefgh\n";
+        let entry_real = real_dir.join("app.chz");
+        std::fs::write(&entry_real, stale_disk_src).unwrap();
+
+        symlink(&real_dir, &link_dir).unwrap();
+        let entry_via_symlink = link_dir.join("app.chz");
+
+        // Live (unsaved) buffer: same broken-`:=` shape as `diag_parse_error_pos`'s fixture
+        // ("x := = 5"), with the identifier lengthened by one char so its error column (7, 1-based)
+        // lands on the stale disk text's word-starting index.
+        let live_src = "xx := = 5\n";
+
+        // Control: the SAME live source at an ordinary path with nothing on disk — ground truth for
+        // what the symlinked entry's diagnostic must also look like.
+        let expected = diagnostics(
+            Path::new("/nonexistent/chezzi_editor/control_app.chz"),
+            live_src,
+        );
+        let actual = diagnostics(&entry_via_symlink, live_src);
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert_eq!(
+            expected.len(),
+            1,
+            "control fixture should produce exactly one diagnostic: {expected:?}"
+        );
+        assert_eq!(
+            actual.len(),
+            1,
+            "expected exactly one diagnostic: {actual:?}"
+        );
+        let (e, a) = (&expected[0], &actual[0]);
+
+        assert_eq!(
+            a.file, None,
+            "the entry's OWN parse error must be attributed to the live buffer (file: None), not \
+             misrouted to the imported-module arm because canonicalize() resolved the symlink; got {a:?}"
+        );
+        assert_eq!(a.line, e.line);
+        assert_eq!(
+            a.col, e.col,
+            "start column must be computed from the LIVE buffer, not the stale on-disk copy"
+        );
+        assert_eq!(
+            a.end_col, e.end_col,
+            "range must be computed from the LIVE buffer, not the stale on-disk copy"
+        );
+        assert_eq!(a.message, e.message);
     }
 }

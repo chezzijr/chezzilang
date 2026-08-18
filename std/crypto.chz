@@ -30,4 +30,7 @@ native fn hmac_sha256(key: bytes, msg: bytes) -> str
 # weak/degraded bytes. `n` must be 0..=1048576 (1 MiB cap); a negative or oversized `n` faults.
 native fn secure_bytes(n: int) -> bytes
 # `n` secure random bytes, lowercase-hex encoded → a `2n`-char `str` (Python `secrets.token_hex`).
+# Same guard as `secure_bytes`: `n` must be 0..=1048576, else a recoverable fault (`token_hex: n must
+# be >= 0, got -1` / `token_hex: n exceeds the 1048576-byte cap, got …`); Python's `secrets.token_hex`
+# raises `ValueError` on negative `n` and has no upper cap.
 native fn token_hex(n: int) -> str

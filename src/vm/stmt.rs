@@ -626,7 +626,9 @@ impl Vm {
                             self.push(v);
                             Ok(())
                         }
-                        None => Err(self.err("key not found".to_string(), span)),
+                        // Int fast path: `key` is already the plain `n` popped above, so no
+                        // rendering call (and no rooting) is needed to name it.
+                        None => Err(self.err(format!("key not found: {n}"), span)),
                     };
                 }
                 _ => {}
@@ -704,7 +706,17 @@ impl Vm {
                         self.push(v);
                         Ok(())
                     }
-                    None => Err(self.err("key not found".to_string(), span)),
+                    None => {
+                        // Render the key the same way a nested container element renders (quoted
+                        // `str`, bare `int`/etc — `stringify_nested_into`), rooted across the call
+                        // since a struct/enum key's `str()` display hook can re-enter the VM and GC.
+                        self.push(key);
+                        let mut ks = String::new();
+                        let r = self.stringify_nested_into(&mut ks, key, span, 0);
+                        self.pop();
+                        r?;
+                        Err(self.err(format!("key not found: {ks}"), span))
+                    }
                 }
             }
             // A struct satisfying `Index` dispatches `obj[k]` to `index(self, k)`.

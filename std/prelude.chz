@@ -70,6 +70,9 @@ native struct List[T]:
     native fn concat(self, other: List[T]) -> List[T]
     native fn extend(self, other: List[T]) -> nil
     native fn sort(self) -> nil where T: Comparable
+    # Fold `T`'s `+` across the list (empty list -> `T`'s zero). An `int` list FAULTS `integer overflow
+    # in Add` if the running total overflows i64 — CPython's `sum()` never overflows (arbitrary
+    # precision), so this is the same upward divergence as the language-wide integer-overflow fault.
     native fn sum(self) -> T where T: Add
     native fn map[U](self, f: fn(T) -> U) -> List[U]
     native fn filter(self, p: fn(T) -> bool) -> List[T]
@@ -124,11 +127,16 @@ native struct Set[T: Hashable + Eq]:
 native struct Channel[T]:
     # `send(v)` moves `v` across the airlock (well-typed `send` is always sendable — the element type is
     # sendable-checked at the channel's construction).
+    # Faults `send on a closed channel` after `close()` (Go: `panic: send on closed channel`,
+    # identical). `try_send` is the non-faulting sibling.
     native fn send(self, v: T) -> nil
     # `try_send` is the non-blocking partner of `send` (mirrors `try_recv` vs `recv`): returns `false`
     # when the send can't proceed — the channel is CLOSED, or a BOUNDED channel is FULL — and `true`
     # once the value is queued. (An unbounded channel is never full, so its only `false` there is closed.)
     native fn try_send(self, v: T) -> bool
+    # Faults `receive on a closed channel` once closed AND drained — a distinct fault from deadlock
+    # detection. Go's `v, ok := <-ch` returns the zero value + `false` instead, no panic: a divergence.
+    # `try_recv` (below) is the non-faulting, `Option`-returning sibling.
     native fn recv(self) -> T
     native fn try_recv(self) -> Option[T]
     # `close()` marks the channel closed (idempotent); a later `send` faults, `recv` drains then faults,

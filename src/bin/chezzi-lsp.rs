@@ -12,7 +12,7 @@
 //! Built only with the `lsp` feature (`cargo build --features lsp --bin chezzi-lsp`); the heavy async
 //! deps (tower-lsp + tokio) never touch the default build.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
@@ -35,21 +35,81 @@ fn legend_token_types() -> Vec<SemanticTokenType> {
     ]
 }
 
+/// Everything a publish must decide ATOMICALLY: which buffers are open, and what each open buffer
+/// currently reports, grouped by the TARGET uri it reports on. One struct behind one lock — see
+/// `Backend::publish` — so a publish's decide-then-send sequence can never straddle a concurrent
+/// `did_open`/`did_close` for the same source (F1/F2, adversarial review 2026-08-18): tower-lsp
+/// dispatches notification handlers CONCURRENTLY (vendored `transport.rs`:
+/// `DEFAULT_MAX_CONCURRENCY = 4`, `.buffer_unordered(...)`), so two `publish()` calls whose sources
+/// share a target module could otherwise compute their unions in one order under a lock and then
+/// deliver them in the OPPOSITE order after releasing it — `publish_diagnostics` is called with
+/// `version: None`, so the client has no way to reject the stale delivery (F1). Worse, a `did_change`
+/// whose diagnostics computation (unlocked — a real type-check) finishes after a concurrent
+/// `did_close` for the same uri would, without the `open` check, re-insert the closed buffer as a live
+/// source with nothing left to ever clear it (F2).
+struct Published {
+    /// URIs the client currently considers open. `did_open` inserts (eagerly, before the diagnostics
+    /// computation — see `did_open`); `did_close` removes. `publish` consults this under the SAME lock
+    /// it sends under and DECLINES ENTIRELY — no insert, no send — for a uri no longer here, so an
+    /// in-flight computation from before a close can never resurrect it.
+    open: HashSet<Url>,
+    /// Per SOURCE buffer, the diagnostics that buffer's last check produced, grouped by TARGET uri.
+    /// A target URI is published as the UNION across every source that currently reports on it —
+    /// `publishDiagnostics` replaces a URI's whole array, so a server with cross-file diagnostics MUST
+    /// merge here or one buffer's publish silently erases another's (A5/F2: two open buffers importing
+    /// the same broken module must each keep the other's squiggle alive on that module's URI).
+    /// ponytail: the union is recomputed by a linear scan over every open source on every publish/close
+    /// — fine for an editor session's open-buffer count, not indexed. Upgrade to a target→sources
+    /// reverse index if a project with many simultaneously-open buffers on one shared broken module
+    /// ever makes this measurably slow.
+    by_source: HashMap<Url, HashMap<Url, Vec<Diagnostic>>>,
+}
+
 struct Backend {
     client: Client,
     /// Live document text, keyed by URI. `tokio::sync::Mutex` (no extra dep) — contention is trivial.
+    /// NEVER held at the same time as `published` (a previous review verified this; every call site
+    /// takes `docs` in its own scope and lets the guard drop before touching `published`, so there is
+    /// no second lock to order against the one held across sends below — see `Published`'s doc).
     docs: tokio::sync::Mutex<HashMap<Url, String>>,
+    /// See [`Published`]. Held across the `publish_diagnostics` awaits in `publish`/`did_close`
+    /// (deliberately — a `tokio::sync::Mutex` supports this): that is what makes "last update wins"
+    /// true AT THE CLIENT, not only in this map. It serializes diagnostic delivery across every open
+    /// buffer; that is the correct trade for a diagnostics server — a publish is a handful of small
+    /// JSON notifications over the same stdio pipe — not a throughput bottleneck. Do not "optimize"
+    /// this back to release-before-send; that is exactly the bug F1/F2 fixed.
+    published: tokio::sync::Mutex<Published>,
 }
 
 impl Backend {
-    /// Type-check `text` and publish the resulting diagnostics for `uri`.
+    /// Type-check `text` (the buffer at `uri`) and publish diagnostics to the URI each ACTUALLY
+    /// belongs to (`chezzi::editor::Diag::file`, mapped to a URI via `Url::from_file_path` — falling
+    /// back to the edited `uri` for an entry-module diagnostic, `None`, or a path that fails to convert,
+    /// so a diagnostic is never dropped). The edited `uri` always gets an entry, even empty, so fixing
+    /// the last error in the open file still clears its own squiggle. Replaces `uri`'s own entry in
+    /// `published`, then republishes the UNION over every source for each target `uri` used to report
+    /// on before or reports on now — merging in every other open buffer that still legitimately reports
+    /// on a shared target, and clearing a target no source reports on any more.
+    ///
+    /// The diagnostics computation above runs UNLOCKED (a real type-check, not cheap); everything from
+    /// here down — the open-check, the union recompute, and the sends — runs under one continuous hold
+    /// of `published`'s lock, so a `did_close` that completed while this computation was running is
+    /// authoritative: this call sees `uri` missing from `open` and returns without sending anything.
     async fn publish(&self, uri: Url, text: &str) {
         let path = uri
             .to_file_path()
             .unwrap_or_else(|_| std::path::PathBuf::from(uri.path()));
-        let diags = chezzi::editor::diagnostics(&path, text)
-            .into_iter()
-            .map(|d| Diagnostic {
+        let diags = chezzi::editor::diagnostics(&path, text);
+
+        let mut new_targets: HashMap<Url, Vec<Diagnostic>> = HashMap::new();
+        new_targets.entry(uri.clone()).or_default();
+        for d in diags {
+            let target = d
+                .file
+                .as_deref()
+                .and_then(|p| Url::from_file_path(p).ok())
+                .unwrap_or_else(|| uri.clone());
+            new_targets.entry(target).or_default().push(Diagnostic {
                 range: Range {
                     start: Position::new(d.line, d.col),
                     end: Position::new(d.end_line, d.end_col),
@@ -61,10 +121,86 @@ impl Backend {
                 source: Some("chezzi".to_string()),
                 message: d.message,
                 ..Default::default()
-            })
-            .collect();
-        self.client.publish_diagnostics(uri, diags, None).await;
+            });
+        }
+
+        let mut published = self.published.lock().await;
+        let Some(unions) = decide_publish(&mut published, &uri, new_targets) else {
+            return;
+        };
+        // Still holding `published` here — see the field doc on why that is deliberate (F1).
+        for (target, diags) in unions {
+            self.client.publish_diagnostics(target, diags, None).await;
+        }
     }
+}
+
+/// The pure, synchronous decision core of `Backend::publish`: given the current `Published` state and
+/// the freshly-computed `new_targets` for `uri`, either decline (`None`, `uri` no longer in `open` —
+/// F2: no insert, no mutation at all) or commit `new_targets` as `uri`'s entry and return the unions to
+/// send for every target `uri` used to report on before or reports on now.
+///
+/// Factored out of `publish` specifically so the F2 race — a `did_close` that removed `uri` from
+/// `open` before a late-finishing `publish` call reaches the same lock — is reproducible by
+/// CONSTRUCTING that `Published` state directly and calling this function, with no timing dependency.
+/// See `decide_publish_declines_a_uri_that_closed_first` in `mod tests` below; `tests/lsp_smoke.rs`
+/// documents why the end-to-end stdio harness cannot force this interleaving on demand.
+///
+/// Caller must hold `published`'s lock across both this call and the resulting sends (F1) — that
+/// discipline lives in `publish`/`did_close`, not here, since holding a lock across an `.await` isn't
+/// expressible in a plain sync fn signature.
+fn decide_publish(
+    published: &mut Published,
+    uri: &Url,
+    new_targets: HashMap<Url, Vec<Diagnostic>>,
+) -> Option<Vec<(Url, Vec<Diagnostic>)>> {
+    if !published.open.contains(uri) {
+        // Closed (or never opened) by the time this computation finished — decline outright rather
+        // than resurrecting it (F2). No insert, no send.
+        return None;
+    }
+    let old_targets = published.by_source.remove(uri).unwrap_or_default();
+    let mut affected: HashSet<Url> = old_targets.keys().cloned().collect();
+    affected.extend(new_targets.keys().cloned());
+    published.by_source.insert(uri.clone(), new_targets);
+    Some(union_targets_locked(&published.by_source, affected))
+}
+
+/// The pure, synchronous decision core of `did_close`: removes `uri` from `open` (so a racing
+/// `decide_publish` for it declines from here on) and from `by_source`, and returns the unions to send
+/// for every target `uri` used to report on. Caller must hold `published`'s lock across both this call
+/// and the resulting sends (F1), same as `decide_publish`.
+fn decide_close(published: &mut Published, uri: &Url) -> Vec<(Url, Vec<Diagnostic>)> {
+    published.open.remove(uri);
+    let old_targets = published.by_source.remove(uri).unwrap_or_default();
+    let affected: HashSet<Url> = old_targets.keys().cloned().collect();
+    union_targets_locked(&published.by_source, affected)
+}
+
+/// Compute the UNION of every source's diagnostics for each of `targets`, iterating sources in
+/// SORTED uri order so the merged array's element order is deterministic across publishes (a client
+/// must not see a shared module's diagnostics reorder on every unrelated keystroke). Caller must
+/// already hold `published`'s lock (so the read is a consistent snapshot with whatever update it just
+/// made) — takes `Published::by_source` directly rather than the whole struct, since neither caller
+/// needs `open` here.
+fn union_targets_locked(
+    by_source: &HashMap<Url, HashMap<Url, Vec<Diagnostic>>>,
+    targets: HashSet<Url>,
+) -> Vec<(Url, Vec<Diagnostic>)> {
+    let mut sources: Vec<&Url> = by_source.keys().collect();
+    sources.sort();
+    targets
+        .into_iter()
+        .map(|target| {
+            let mut merged = Vec::new();
+            for source in &sources {
+                if let Some(diags) = by_source[*source].get(&target) {
+                    merged.extend(diags.iter().cloned());
+                }
+            }
+            (target, merged)
+        })
+        .collect()
 }
 
 #[tower_lsp::async_trait]
@@ -114,6 +250,10 @@ impl LanguageServer for Backend {
         let uri = params.text_document.uri;
         let text = params.text_document.text;
         self.docs.lock().await.insert(uri.clone(), text.clone());
+        // Mark open EAGERLY, before `publish`'s (unlocked, possibly slow) diagnostics computation
+        // starts — so a `did_close` racing this open always has something to remove, and `publish`'s
+        // own open-check (not this insert) is what then declines a stale publish if the close won (F2).
+        self.published.lock().await.open.insert(uri.clone());
         self.publish(uri, &text).await;
     }
 
@@ -144,7 +284,22 @@ impl LanguageServer for Backend {
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
-        self.docs.lock().await.remove(&params.text_document.uri);
+        let uri = params.text_document.uri;
+        self.docs.lock().await.remove(&uri);
+
+        // A closed buffer stops contributing to `published` entirely: remove it from BOTH `open` and
+        // `by_source`, then republish the UNION (over the still-open sources) for every target this
+        // buffer used to report on, so a cross-module squiggle whose only source just closed is
+        // cleared instead of orphaned. Same atomic discipline as `publish` (see `Published`'s field
+        // doc): the union is computed AND sent while still holding the lock, so a concurrent `publish`
+        // for a shared target can't interleave its own compute/send with this one (F1), and removing
+        // from `open` here is what makes a racing `publish` for THIS uri decline instead of
+        // resurrecting it (F2).
+        let mut published = self.published.lock().await;
+        let unions = decide_close(&mut published, &uri);
+        for (target, diags) in unions {
+            self.client.publish_diagnostics(target, diags, None).await;
+        }
     }
 
     async fn semantic_tokens_full(
@@ -309,13 +464,134 @@ async fn main() {
     let (service, socket) = LspService::new(|client| Backend {
         client,
         docs: tokio::sync::Mutex::new(HashMap::new()),
+        published: tokio::sync::Mutex::new(Published {
+            open: HashSet::new(),
+            by_source: HashMap::new(),
+        }),
     });
     Server::new(stdin, stdout, socket).serve(service).await;
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{escape_brackets_outside_code, legend_token_types, untag_fences};
+    use super::{
+        Published, decide_close, decide_publish, escape_brackets_outside_code, legend_token_types,
+        untag_fences,
+    };
+    use std::collections::{HashMap, HashSet};
+    use tower_lsp::lsp_types::Url;
+
+    fn url(s: &str) -> Url {
+        s.parse().unwrap()
+    }
+
+    /// F2, reproduced deterministically (no timing dependency): a `did_close` that already removed
+    /// `uri` from `open` (and dropped its `by_source` entry) before a late-finishing `publish` call
+    /// reaches the lock. `decide_publish` must decline outright — return `None`, insert nothing — not
+    /// resurrect the closed buffer as a live diagnostics source.
+    #[test]
+    fn decide_publish_declines_a_uri_that_closed_first() {
+        let mut published = Published {
+            open: HashSet::new(),
+            by_source: HashMap::new(),
+        };
+        let uri = url("file:///tmp/app.chz");
+        // uri is NOT in `open` — simulating did_close having already run (or the uri never having been
+        // opened at all).
+        let mut new_targets: HashMap<Url, Vec<tower_lsp::lsp_types::Diagnostic>> = HashMap::new();
+        new_targets.insert(uri.clone(), Vec::new());
+
+        let result = decide_publish(&mut published, &uri, new_targets);
+
+        assert!(
+            result.is_none(),
+            "a publish for a uri not in `open` must decline"
+        );
+        assert!(
+            !published.by_source.contains_key(&uri),
+            "a declined publish must not insert into by_source either"
+        );
+    }
+
+    /// The exact F1/F2 race scenario, forced by direct construction: `did_open` marks `uri` open;
+    /// `did_close` then races ahead and completes (removing `uri` from `open` and from `by_source`,
+    /// exactly as `decide_close` does); only THEN does the in-flight `did_change`'s `publish` call
+    /// reach the lock with its (freshly computed, still-broken) diagnostics. It must decline — the
+    /// closed buffer must not reappear as a live source, and nothing is left to ever clear it if it did
+    /// (the bug this whole fix targets).
+    #[test]
+    fn decide_publish_after_a_racing_close_never_resurrects_the_source() {
+        let mut published = Published {
+            open: HashSet::new(),
+            by_source: HashMap::new(),
+        };
+        let uri = url("file:///tmp/app.chz");
+        let shared_target = url("file:///tmp/core/badmod.chz");
+
+        // did_open: marks open, an earlier publish already populated by_source for this source.
+        published.open.insert(uri.clone());
+        let mut first_targets: HashMap<Url, Vec<tower_lsp::lsp_types::Diagnostic>> = HashMap::new();
+        first_targets.insert(shared_target.clone(), vec![Default::default()]);
+        published.by_source.insert(uri.clone(), first_targets);
+
+        // did_close wins the race and runs to completion first.
+        let close_unions = decide_close(&mut published, &uri);
+        assert!(
+            close_unions
+                .iter()
+                .any(|(target, diags)| *target == shared_target && diags.is_empty()),
+            "did_close must clear the shared target when it was the sole source"
+        );
+        assert!(!published.open.contains(&uri));
+        assert!(!published.by_source.contains_key(&uri));
+
+        // The in-flight did_change's publish() now reaches the lock with a fresh (still-broken)
+        // diagnostics computation for the same uri.
+        let mut late_targets: HashMap<Url, Vec<tower_lsp::lsp_types::Diagnostic>> = HashMap::new();
+        late_targets.insert(shared_target.clone(), vec![Default::default()]);
+        let result = decide_publish(&mut published, &uri, late_targets);
+
+        assert!(
+            result.is_none(),
+            "a publish racing behind a completed did_close must decline, not resurrect the source"
+        );
+        assert!(
+            !published.open.contains(&uri),
+            "declining must not reopen the uri"
+        );
+        assert!(
+            !published.by_source.contains_key(&uri),
+            "declining must not reinsert the closed source's entry"
+        );
+    }
+
+    /// `decide_close` on a uri that is the SOLE source for a target clears that target to empty (not
+    /// merely absent from the returned unions) — a client must see an explicit empty array to actually
+    /// clear a previously-shown squiggle.
+    #[test]
+    fn decide_close_clears_open_and_by_source() {
+        let mut published = Published {
+            open: HashSet::new(),
+            by_source: HashMap::new(),
+        };
+        let uri = url("file:///tmp/app.chz");
+        let target = url("file:///tmp/app.chz");
+        published.open.insert(uri.clone());
+        let mut targets: HashMap<Url, Vec<tower_lsp::lsp_types::Diagnostic>> = HashMap::new();
+        targets.insert(target.clone(), vec![Default::default()]);
+        published.by_source.insert(uri.clone(), targets);
+
+        let unions = decide_close(&mut published, &uri);
+
+        assert!(!published.open.contains(&uri));
+        assert!(!published.by_source.contains_key(&uri));
+        assert!(
+            unions
+                .iter()
+                .any(|(t, diags)| *t == target && diags.is_empty()),
+            "the sole source's own target must clear to an empty array: {unions:?}"
+        );
+    }
 
     #[test]
     fn escape_brackets_outside_code_escapes_bare_type_refs() {

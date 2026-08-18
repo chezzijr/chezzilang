@@ -1130,3 +1130,67 @@ fn show_output_reports_failure_on_unwritable_stdout() {
         "no diagnostic for the failed write: {err}"
     );
 }
+
+/// `io.read_all()` on non-UTF-8 stdin faults with the exact message `docs/stdlib.md`'s fault-contract
+/// table quotes, and the fault is RECOVERABLE (`recover:` catches it, rc stays 0).
+///
+/// This lives here, not in `tests/chz/stdlib/fault_contracts_test.chz` where the rest of that table's
+/// rows are pinned, for one reason: the `chezzi test` harness has no way to feed a test its own stdin,
+/// so the contract is unassertable from inside the language. It is assertable from a real process, and
+/// this file already owns the "spawn `chezzi` and drive its pipes" machinery — so the row gets a gate
+/// rather than a note explaining why it has none.
+#[test]
+fn read_all_faults_recoverably_on_non_utf8_stdin() {
+    let t = TmpDir::new();
+    let entry = t.write(
+        "readall.chz",
+        "import std.io\n\nr := recover: io.read_all()\nmatch r:\n    Ok(v): print(\"ok len \" + str(v.len()))\n    Err(e): print(\"err: \" + e.message())\n",
+    );
+
+    // Invalid UTF-8: 0xff/0xfe can never appear in a well-formed UTF-8 stream.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .arg("run")
+        .arg(&entry)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn chezzi run");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"abc\xff\xfedef")
+        .unwrap();
+    let out = child.wait_with_output().expect("wait");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert_eq!(
+        stdout.trim(),
+        "err: stdin: stream is not valid UTF-8",
+        "message must match docs/stdlib.md's fault-contract row byte-for-byte; got: {stdout}"
+    );
+    assert!(
+        out.status.success(),
+        "the fault is recoverable, so a program that recovers it must exit 0; got {:?}",
+        out.status
+    );
+
+    // Negative control: valid UTF-8 on the same program takes the `Ok` arm, so the assertion above
+    // is not passing merely because `read_all` always faults.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .arg("run")
+        .arg(&entry)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn chezzi run");
+    child.stdin.take().unwrap().write_all(b"hello").unwrap();
+    let out = child.wait_with_output().expect("wait");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "ok len 5",
+        "valid UTF-8 stdin must reach the Ok arm"
+    );
+}

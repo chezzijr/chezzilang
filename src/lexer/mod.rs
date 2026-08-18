@@ -197,6 +197,34 @@ impl fmt::Display for Span {
     }
 }
 
+/// Render a source coordinate for a human: `path:line:col` when the span's module resolves to a
+/// path, else the historical `line N, col M`. THE single source of truth for the form — the runtime
+/// trace, the checker's plain-text diagnostics and the `--errors=json` `file` key all go through it,
+/// so they cannot drift.
+///
+/// The path is made relative to the process's current directory when it lives under it (what rustc
+/// and tsc do, and what makes the coordinate clickable in a terminal); absolute otherwise, so a
+/// `std/` or out-of-tree module is never ambiguous.
+pub fn render_span(span: Span, path: Option<&std::path::Path>) -> String {
+    match path {
+        None => format!("line {}, col {}", span.line, span.col),
+        Some(p) => format!("{}:{}:{}", display_path(p).display(), span.line, span.col),
+    }
+}
+
+/// Relativize `p` to the process's current directory when it lives under it; otherwise return it
+/// as-is (already absolute, or relativizing failed). Never canonicalizes — that hits the filesystem
+/// and would turn a path to a since-deleted file into an error. `pub`: `--errors=json`'s `file` key
+/// (`main.rs::diags_json`) renders just the path half of what [`render_span`] renders combined, so it
+/// calls this directly rather than parsing a `path:line:col` string back apart.
+pub fn display_path(p: &std::path::Path) -> std::path::PathBuf {
+    std::env::current_dir()
+        .ok()
+        .and_then(|cwd| p.strip_prefix(&cwd).ok())
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| p.to_path_buf())
+}
+
 /// A sparse map from a string literal's CONTENT char index (an index into the post-escape,
 /// delimiter-stripped payload) to that char's **physical source [`Span`]**.
 ///
@@ -3530,6 +3558,43 @@ mod tests {
         assert_eq!(
             e.to_string(),
             "lex error (line 2, col 6): empty hexadecimal literal"
+        );
+    }
+
+    /// `render_span` with no resolvable path falls back to the historical `Display` form, byte for
+    /// byte — `path == None` covers both "no table entry" and `span.file == 0` (the synthetic
+    /// single-module compile path), and neither should ever print anything but this.
+    #[test]
+    fn render_span_falls_back_without_a_path() {
+        let span = Span {
+            line: 3,
+            col: 11,
+            file: 0,
+        };
+        assert_eq!(render_span(span, None), "line 3, col 11");
+        assert_eq!(render_span(span, None), span.to_string());
+    }
+
+    /// `render_span` with a resolvable path renders `path:line:col`, relativized to the process cwd
+    /// when the path lives under it, and left absolute otherwise (so a `std/` or out-of-tree module
+    /// is never ambiguous).
+    #[test]
+    fn render_span_emits_path_line_col() {
+        let span = Span {
+            line: 6,
+            col: 5,
+            file: 1,
+        };
+        // Under the cwd: relativized.
+        let cwd = std::env::current_dir().unwrap();
+        let under = cwd.join("main.chz");
+        assert_eq!(render_span(span, Some(&under)), "main.chz:6:5");
+
+        // Not under the cwd: printed as-is (absolute).
+        let outside = std::path::Path::new("/definitely/outside/anything.chz");
+        assert_eq!(
+            render_span(span, Some(outside)),
+            "/definitely/outside/anything.chz:6:5"
         );
     }
 }

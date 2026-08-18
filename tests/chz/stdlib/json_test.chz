@@ -1,0 +1,67 @@
+# tests/chz/stdlib/json_test.chz — std.json depth guard + json.len's scalar fault.
+#
+# `parse` is recursive-descent in pure Chezzi, so nesting depth in the INPUT becomes call-stack
+# depth in the program; past `MAX_NEST_DEPTH` (2000, measured — the release binary dies at nesting
+# depth 5000 with a bare document) it now returns a clean `Err` instead of aborting the process
+# (`docs/gaps.md` W8-5). `stringify` has no `Result` to put an error in, so it faults instead, with a
+# message naming the cause. `json.len` faults on the three scalar variants instead of silently
+# returning `0`. Run: `cargo run -- test tests/chz/`. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+
+import std.json
+
+test fn parse_at_depth_limit_still_ok():
+    doc := "[".repeat(2000) + "]".repeat(2000)
+    match json.parse(doc):
+        Ok(_): assert true
+        Err(e): assert false, "expected Ok exactly at the depth limit: " + e.message()
+
+test fn parse_past_depth_limit_returns_err_and_keeps_running():
+    # No `recover:` needed here — the whole point of the fix is that the depth guard turns what
+    # used to be an uncaught VM abort into an ordinary `Err`, in-band with the `Result` contract.
+    deep := "[".repeat(2001) + "]".repeat(2001)
+    match json.parse(deep):
+        Ok(_): assert false, "expected Err past the depth limit"
+        Err(e): assert e.message() == "exceeded max depth"
+    # the program is still alive: this assertion must execute
+    assert true, "still alive"
+
+test fn parse_original_repro_stays_alive():
+    # The exact shape from docs/gaps.md W8-5's original repro (100k-deep, well past the limit).
+    huge := "[".repeat(100000) + "]".repeat(100000)
+    match json.parse(huge):
+        Ok(_): assert false, "expected Err on a 100k-deep document"
+        Err(e): assert e.message() == "exceeded max depth"
+    assert true, "still alive"
+
+test fn stringify_past_depth_limit_faults_with_own_name():
+    j := Json.Null
+    i := 0
+    while i < 2001:
+        j = Json.Arr([j])
+        i += 1
+    r := recover: json.stringify(j)
+    match r:
+        Ok(_): assert false, "expected a depth fault"
+        Err(e): assert e.message() == "json.stringify: exceeded max depth"
+    # the process survives a stringify depth fault same as a parse one
+    assert true, "still alive"
+
+test fn len_containers_count_scalars_fault():
+    assert json.len(Json.Arr([Json.Num(1.0), Json.Num(2.0)])) == 2
+    assert json.len(Json.Obj({"a": Json.Num(1.0)})) == 1
+    assert json.len(Json.Str("hi")) == 2
+
+    r1 := recover: json.len(Json.Null)
+    match r1:
+        Ok(_): assert false, "Null has no length"
+        Err(e): assert e.message() == "json.len: Null has no length"
+
+    r2 := recover: json.len(Json.Bool(true))
+    match r2:
+        Ok(_): assert false, "Bool has no length"
+        Err(e): assert e.message() == "json.len: Bool has no length"
+
+    r3 := recover: json.len(Json.Num(3.0))
+    match r3:
+        Ok(_): assert false, "Num has no length"
+        Err(e): assert e.message() == "json.len: Num has no length"

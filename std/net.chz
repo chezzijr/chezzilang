@@ -45,11 +45,15 @@ native struct Socket:
     native fn write(self, data: str, timeout_ms: int = 0) -> Result[int]
     native fn read_bytes(self, n: int, timeout_ms: int = 0) -> Result[bytes]
     native fn write_bytes(self, data: bytes, timeout_ms: int = 0) -> Result[int]
+    # `nil`, never `Result` — a flush error on close is SWALLOWED (matches CPython's `socket.close()`,
+    # also `-> None`; Go's `Close() error` reports it, a divergence). Contrast `io.Writer.close(self) ->
+    # Result[nil]`, which gets this right.
     native fn close(self) -> nil
 
 native struct Listener:
     native fn accept(self, timeout_ms: int = 0) -> Result[Socket]
     native fn addr(self) -> Result[str]
+    # Same swallow as `Socket.close` above.
     native fn close(self) -> nil
 
 native fn connect(addr: str) -> Result[Socket]

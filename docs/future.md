@@ -1274,7 +1274,9 @@ render ERROR too (whole file, before any test runs), counted separately as `file
      `-v`/`--verbose` (per-line + per-test `(Nms)` timing + a total). `-q`/`-v` are mutually exclusive.
    - `--errors=json` machine output, mirroring `chezzi check --errors=json` (same flag; suppresses the
      human lines). Shape necessarily diverges (it carries totals): `{"tests":[{name,file,line?,status,
-     duration_ms}…],"totals":{total,passed,failed,errored,over_memory,timed_out,filtered_out,file_errors}}`.
+     message?,duration_ms}…],"totals":{total,passed,failed,errored,over_memory,timed_out,filtered_out,file_errors}}`.
+     (`message` since 2026-08-18 — the failure text, present on every non-`pass` verdict and absent on
+     a pass, so a runner can say *why* a test failed and not merely that it did.)
    - Color (`--color=auto|always|never`, default auto = isatty on stdout) on the verdict tag. Resolved
      to a bool in `cmd_test`; the runner never probes the tty, so the captured (non-tty) test harness +
      the byte-identity gate never see ANSI.

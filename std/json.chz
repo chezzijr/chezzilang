@@ -16,10 +16,21 @@ enum Json:
 # ----- parsing -------------------------------------------------------------------------------
 
 # A cursor over the input's codepoints. Fields mutate in place across method calls.
+# `depth` tracks array/object nesting: `parse_value` is recursive-descent, so nesting depth in the
+# INPUT becomes call-stack depth in the program. Attacker-controlled input could otherwise recurse
+# past the VM's `maximum call depth` guard and abort the whole process — a fault `Result` can't
+# express and `recover:` can't catch after the fact. `MAX_NEST_DEPTH` keeps parsing inside that
+# budget so a too-deep document instead returns a clean `Err`. Measured on the release binary
+# (2026-08-18): a `[`-only document dies at nesting depth 5000 with no surrounding call frames (each
+# level costs 2 VM frames against the 10 000 cap); depth 2000 leaves ample headroom for caller frames
+# above `parse` and is still >6x deeper than any realistic document.
+MAX_NEST_DEPTH := 2000
+
 struct Parser:
     src: List[str]
     pos: int
     len: int
+    depth: int
 
     fn peek(self) -> str:
         if self.pos >= self.len:
@@ -165,11 +176,19 @@ struct Parser:
         return Ok(Json.Num(f))
 
     fn parse_array(self) -> Result[Json]:
+        # `?` on a nested `parse_value` propagates an `Err` straight out of the whole `parse()`
+        # call (no mid-parse recovery reuses this `Parser`), so `depth` only needs decrementing on
+        # the SUCCESS paths below — a sibling array at the same nesting level must see `depth` back
+        # where it started, not inflated by an earlier sibling's subtree.
+        self.depth += 1
+        if self.depth > MAX_NEST_DEPTH:
+            return Err("exceeded max depth")
         self.pos += 1                       # consume '['
         items := []
         self.skip_ws()
         if self.peek() == "]":
             self.pos += 1
+            self.depth -= 1
             return Ok(Json.Arr(items))
         while true:
             v := self.parse_value()?
@@ -177,16 +196,21 @@ struct Parser:
             self.skip_ws()
             c := self.bump()
             if c == "]":
+                self.depth -= 1
                 return Ok(Json.Arr(items))
             if c != ",":
                 return Err("expected ',' or ']' in array")
 
     fn parse_object(self) -> Result[Json]:
+        self.depth += 1
+        if self.depth > MAX_NEST_DEPTH:
+            return Err("exceeded max depth")
         self.pos += 1                       # consume '{'
         obj := {}
         self.skip_ws()
         if self.peek() == "}}":
             self.pos += 1
+            self.depth -= 1
             return Ok(Json.Obj(obj))
         while true:
             self.skip_ws()
@@ -201,6 +225,7 @@ struct Parser:
             self.skip_ws()
             c := self.bump()
             if c == "}}":
+                self.depth -= 1
                 return Ok(Json.Obj(obj))
             if c != ",":
                 return Err("expected ',' or '}}' in object")
@@ -219,7 +244,7 @@ fn hex_val(c: str) -> Result[int]:
 
 # Parse a JSON document into a `Json` tree. Trailing non-whitespace is an error.
 fn parse(s: str) -> Result[Json]:
-    p := Parser(s.chars(), 0, s.len())
+    p := Parser(s.chars(), 0, s.len(), 0)
     v := p.parse_value()?
     p.skip_ws()
     if p.pos < p.len:
@@ -273,7 +298,18 @@ fn num_str(f: float) -> str:
             return str(i)
     return str(f)
 
+# Serialize a `Json` tree to a JSON document. `Arr`/`Obj` recurse structurally, so a tree built
+# directly (no `parse` involved — `j = Json.Arr([j])` in a loop) can nest past the VM's `maximum
+# call depth` guard just like `parse` can (`docs/gaps.md` W8-5). Unlike `parse`, `stringify` has no
+# `Result` to put an error in and CPython's `json.dumps` also raises `RecursionError` here — so this
+# stays a fault, just a LEGIBLE one naming the cause instead of an opaque VM message pointing at a
+# `std/json.chz` line the caller never opened. Same measured depth limit as `parse` (`MAX_NEST_DEPTH`).
 fn stringify(j: Json) -> str:
+    return stringify_depth(j, 0)
+
+fn stringify_depth(j: Json, depth: int) -> str:
+    if depth > MAX_NEST_DEPTH:
+        panic("json.stringify: exceeded max depth")
     match j:
         Json.Null: return "null"
         Json.Bool(b):
@@ -288,7 +324,7 @@ fn stringify(j: Json) -> str:
             for x in xs:
                 if not first:
                     out = out + ","
-                out = out + stringify(x)
+                out = out + stringify_depth(x, depth + 1)
                 first = false
             return out + "]"
         Json.Obj(m):
@@ -297,7 +333,7 @@ fn stringify(j: Json) -> str:
             for k in m.keys():
                 if not first:
                     out = out + ","
-                out = out + escape(k) + ":" + stringify(m[k])
+                out = out + escape(k) + ":" + stringify_depth(m[k], depth + 1)
                 first = false
             return out + "}}"
 
@@ -364,10 +400,15 @@ fn at(j: Json, i: int) -> Option[Json]:
             return Some(xs[i])
         _: return None
 
-# Element count: array length, object size, or string length; 0 for scalars.
+# Element count: array length, object size, or string length. Faults on `Null`/`Bool`/`Num` — a
+# scalar has no length, and returning `0` was indistinguishable from an empty array/object/string
+# (a caller writing `if json.len(j) == 0` to mean "empty array" got `true` for a `null`). CPython's
+# `len(None)` raises `TypeError: object of type 'NoneType' has no len()`; same shape here.
 fn len(j: Json) -> int:
     match j:
         Json.Arr(xs): return xs.len()
         Json.Obj(m): return m.len()
         Json.Str(s): return s.len()
-        _: return 0
+        Json.Null: panic("json.len: Null has no length")
+        Json.Bool(_): panic("json.len: Bool has no length")
+        Json.Num(_): panic("json.len: Num has no length")

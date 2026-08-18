@@ -6438,16 +6438,16 @@ fn stack_trace_reports_call_chain_on_both_engines() {
     // Call-site lines, innermost first.
     let lines: Vec<u32> = e.trace.iter().map(|f| f.span.line).collect();
     assert_eq!(lines, vec![15, 18, 20]);
-    let vm_fmt = format_trace(&e.message, e.span, &e.trace);
+    let vm_fmt = format_trace(&e);
     assert!(
-        vm_fmt.contains("at divide (called at line 15"),
+        vm_fmt.contains("at divide (called at examples/stack_trace.chz:15"),
         "got: {vm_fmt}"
     );
 
     // Re-run: the formatted trace must be identical.
     let (_o, _er, ip_res, _) = run_file(&path);
     let ie = ip_res.expect_err("program should fault");
-    let ip_fmt = format_trace(&ie.message, ie.span, &ie.trace);
+    let ip_fmt = format_trace(&ie);
     assert_eq!(vm_fmt, ip_fmt, "engines must produce the same stack trace");
 }
 
@@ -6480,7 +6480,7 @@ fn recursion_trace_is_bounded_and_collapsed() {
         "expected a deep raw trace, got {}",
         e.trace.len()
     );
-    let fmt = format_trace(&e.message, e.span, &e.trace);
+    let fmt = format_trace(&e);
     let nlines = fmt.lines().count();
     assert!(
         nlines < 30,
@@ -6509,14 +6509,26 @@ fn recursion_trace_parity_vm_vs_interp() {
     let path = deep_recursion_fixture("parity");
     let (_o, _e, res, _) = run_file(&path);
     let e = res.expect_err("deep recursion should fault");
-    let vm_fmt = format_trace(&e.message, e.span, &e.trace);
+    let vm_fmt = format_trace(&e);
     let (_o2, _e2, ip_res, _) = run_file(&path);
     let ie = ip_res.expect_err("deep recursion should fault");
-    let ip_fmt = format_trace(&ie.message, ie.span, &ie.trace);
+    let ip_fmt = format_trace(&ie);
     assert_eq!(
         vm_fmt, ip_fmt,
         "engines must produce the same bounded/collapsed trace"
     );
+}
+
+/// Build a synthetic `RunError` for a hand-rolled trace (no real run, no real `Program` — `files`
+/// is empty, so `format_trace` falls back to the historical `line N, col M` form for every span).
+#[cfg(test)]
+fn synthetic_run_error(message: &str, span: Span, trace: Vec<TraceFrame>) -> RunError {
+    RunError {
+        message: message.to_string(),
+        span,
+        trace,
+        files: Vec::new(),
+    }
 }
 
 /// Gap #8 cap path: a deep chain of DISTINCT-named frames (no collapse possible) is still bounded
@@ -6530,7 +6542,7 @@ fn format_trace_caps_distinct_name_chain() {
             span,
         })
         .collect();
-    let vm_fmt = format_trace("boom", span, &trace);
+    let vm_fmt = format_trace(&synthetic_run_error("boom", span, trace));
     let nlines = vm_fmt.lines().count();
     // 1 header + 10 head + 1 elision marker + 10 tail = 22.
     assert_eq!(nlines, 22, "got:\n{vm_fmt}");
@@ -6547,7 +6559,7 @@ fn format_trace_caps_distinct_name_chain() {
             span,
         })
         .collect();
-    let ip_fmt = format_trace("boom", span, &ip_trace);
+    let ip_fmt = format_trace(&synthetic_run_error("boom", span, ip_trace));
     assert_eq!(vm_fmt, ip_fmt, "engines must agree on the capped trace");
 }
 
@@ -6571,7 +6583,7 @@ fn format_trace_cap_never_orphans_collapse_marker() {
             ]
         })
         .collect();
-    let vm_fmt = format_trace("boom", span, &trace);
+    let vm_fmt = format_trace(&synthetic_run_error("boom", span, trace));
     let lines: Vec<&str> = vm_fmt.lines().collect();
     assert!(
         vm_fmt.contains("frames elided"),
@@ -6599,7 +6611,7 @@ fn format_trace_cap_never_orphans_collapse_marker() {
             ]
         })
         .collect();
-    let ip_fmt = format_trace("boom", span, &ip_trace);
+    let ip_fmt = format_trace(&synthetic_run_error("boom", span, ip_trace));
     assert_eq!(
         vm_fmt, ip_fmt,
         "engines must agree on the capped collapsed trace"
@@ -6643,10 +6655,10 @@ fn deferred_fault_trace_supersedes_on_both_engines() {
         vec!["boom", "worker", "main"],
         "deferred fault's chain"
     );
-    let vm_fmt = format_trace(&e.message, e.span, &e.trace);
+    let vm_fmt = format_trace(&e);
     let (_o2, _e2, ip_res, _) = run_file(&path);
     let ie = ip_res.expect_err("should fault");
-    let ip_fmt = format_trace(&ie.message, ie.span, &ie.trace);
+    let ip_fmt = format_trace(&ie);
     assert_eq!(
         vm_fmt, ip_fmt,
         "engines must agree on a deferred-fault trace"
@@ -6921,7 +6933,7 @@ fn parity_map_missing_key_read_errors() {
     let src = "m := {\"a\": 1}\nprint(m[\"z\"])\n";
     assert_eq!(
         vm_outcome(src).unwrap_err(),
-        "runtime error (line 2, col 7): key not found",
+        "runtime error (line 2, col 7): key not found: 'z'",
         "for:\n{src}"
     );
     assert!(
@@ -6937,7 +6949,7 @@ fn parity_map_compound_assign_missing_key_errors() {
     let src = "m := {\"a\": 1}\nm[\"z\"] += 1\n";
     assert_eq!(
         vm_outcome(src).unwrap_err(),
-        "runtime error (line 2, col 1): key not found",
+        "runtime error (line 2, col 1): key not found: 'z'",
         "for:\n{src}"
     );
     assert!(

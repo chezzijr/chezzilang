@@ -83,6 +83,18 @@ Diagnostics appear automatically via `textDocument/publishDiagnostics` on open/c
 > Note: the server type-checks the **live buffer** for the file you're editing; imported modules are
 > read from disk, so an unsaved edit to an imported module isn't reflected until you save it.
 
+> Note: a diagnostic is reported in the file it actually belongs to, not always the file you just
+> edited — checking `app.chz`, which `import`s a broken `core/badmod.chz`, squiggles the error in
+> `badmod.chz`, not on the `import` line in `app.chz`. If `badmod.chz` isn't open in your editor, its
+> LSP client still receives the `publishDiagnostics` for that URI (most editors show it in a
+> diagnostics/quickfix list even for an unopened buffer). When the same broken module is imported from
+> several buffers you have open at once, its diagnostics are the UNION of what every one of those
+> buffers currently reports — fixing your import in one buffer doesn't clear the squiggle while another
+> open buffer still imports the same broken module. Closing a buffer always drops its contribution to
+> that union (even if a check triggered just before the close is still in flight when it finishes) and
+> re-publishes what's left, so a closed buffer's squiggle never lingers on a module you're no longer
+> even editing.
+
 ---
 
 ## VSCode (secondary target)

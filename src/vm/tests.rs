@@ -857,7 +857,7 @@ fn idxspec_int_map_get_hit_and_miss() {
         "m := {1: 10, 2: 20}\nprint(m[1])\nprint(m[2])\n",
         Ok("10\n20\n"),
     );
-    idx_parity("m := {1: 10}\nprint(m[99])\n", Err("key not found"));
+    idx_parity("m := {1: 10}\nprint(m[99])\n", Err("key not found: 99"));
 }
 
 #[test]
@@ -905,7 +905,10 @@ fn idxspec_non_int_map_keys_via_fallback() {
         "m := {true: 1, false: 0}\nprint(m[false])\nprint(m[true])\n",
         Ok("0\n1\n"),
     );
-    idx_parity("m := {\"a\": 1}\nprint(m[\"z\"])\n", Err("key not found"));
+    idx_parity(
+        "m := {\"a\": 1}\nprint(m[\"z\"])\n",
+        Err("key not found: 'z'"),
+    );
 }
 
 #[test]
@@ -6403,7 +6406,7 @@ fn a_provider_frame_in_a_trace_is_readable() {
     let _ = std::fs::remove_dir_all(&dir);
     for (engine, r) in [("serial", res), ("M:N", pres)] {
         let e = r.expect_err("the default faults");
-        let trace = format_trace(&e.message, e.span, &e.trace);
+        let trace = format_trace(&e);
         assert!(
             trace.contains("at <default for 'x' of 'f'>"),
             "[{engine}] expected a readable provider frame, got:\n{trace}"

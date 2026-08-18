@@ -25,7 +25,8 @@ import std.string as s
 
 # ---- floor-division helpers (Chezzi /,% truncate toward zero; we need floor for negative epochs) ----
 
-# Floor division: fdiv(-7, 2) == -4  (vs -7/2 == -3 which truncates toward zero).
+# Floor division: fdiv(-7, 2) == -4  (vs -7/2 == -3 which truncates toward zero). `b == 0` faults
+# `division by zero`, the same fault raw `/` gives — this is a thin wrapper, not a new fault site.
 fn fdiv(a: int, b: int) -> int:
     q := a / b
     # if signs differ and the truncated division left a remainder, round down by one
@@ -34,7 +35,7 @@ fn fdiv(a: int, b: int) -> int:
     return q
 
 # Floored modulo: result has the sign of `b` (always 0..b-1 for positive b).
-# fmod(-1, 7) == 6, fmod(-7, 2) == 1.
+# fmod(-1, 7) == 6, fmod(-7, 2) == 1. `b == 0` faults `division by zero` (via `fdiv`).
 fn fmod(a: int, b: int) -> int:
     return a - fdiv(a, b) * b
 
@@ -116,9 +117,13 @@ fn weekday_from_days(z: int) -> int:
 fn weekday(epoch: int) -> int:
     return weekday_from_days(fdiv(epoch, 86400))
 
-# Full English weekday name for a weekday index (0=Sunday..6=Saturday).
+# Full English weekday name for a weekday index (0=Sunday..6=Saturday). A `wd` outside 0..6 FAULTS
+# (recoverable via `recover:`) via `panic`, not `assert` — a failing `assert` prints no operand
+# values, so the caller would learn nothing about which `wd` it was (`docs/gaps.md` W8-13); `panic`
+# carries the offending value in the message.
 fn weekday_name(wd: int) -> str:
-    assert wd >= 0 and wd <= 6, "weekday_name: wd must be 0..6 (0=Sunday)"
+    if wd < 0 or wd > 6:
+        panic("weekday_name: wd must be 0..6 (0=Sunday), got " + str(wd))
     names := ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
     return names[wd]
 
@@ -195,6 +200,8 @@ fn all_digits(x: str) -> bool:
 
 # ASCII digits -> non-negative int. Caller MUST all_digits-guard first (no sign/ws handling, unlike
 # int(), which trims whitespace + accepts a leading +/- — too lenient for a fixed-width ISO field).
+# A long digit string overflows i64 and FAULTS `integer overflow in Mul` (from the `n * 10` step) —
+# CPython's `int()` never overflows (arbitrary precision), the same upward divergence as elsewhere.
 fn to_uint(x: str) -> int:
     n := 0
     for c in x:

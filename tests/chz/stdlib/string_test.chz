@@ -1,0 +1,21 @@
+# tests/chz/stdlib/string_test.chz — std.string.repeat's capacity guard.
+#
+# `string.repeat` used to be an unbounded `while`-concat loop that OOM-killed the process on a huge
+# `n`; it now delegates to the native `str.repeat` method, which has the same recoverable
+# `string repeat capacity overflow` guard as every other overflow fault in the language.
+# Run: `cargo run -- test tests/chz/`. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+
+import std.string
+
+test fn repeat_contract_unchanged():
+    assert string.repeat("ab", 3) == "ababab"
+    assert string.repeat("ab", 0) == ""
+    assert string.repeat("ab", -5) == ""
+
+test fn repeat_huge_n_faults_recoverably():
+    r := recover: string.repeat("ab", 9223372036854775807)
+    match r:
+        Ok(_): assert false, "expected a capacity fault"
+        Err(e): assert e.message() == "string repeat capacity overflow"
+    # the process is still alive afterwards
+    assert string.repeat("ab", 3) == "ababab"
