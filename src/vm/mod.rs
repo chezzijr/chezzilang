@@ -995,7 +995,7 @@ pub struct Vm {
     /// park or yield while a native re-entry is on the host stack (every park/yield gate is
     /// `native_reentry == 0`), so no other fiber can ever observe a non-zero value. Deliberately
     /// absent from [`FiberCtx`], [`GenCtx`], [`Handler`], [`Vm::swap_ctx`] and the generator ctx swap
-    /// (`src/vm/exec.rs`'s `resume_generator`) — do not add it to any of them.
+    /// ([`Vm::swap_gen_ctx`], driven by [`Vm::generator_next`]) — do not add it to any of them.
     ///
     /// The generator omission is load-bearing. The tempting cheaper alternative — charge `depth` to
     /// [`Vm::call_depth`] around each hook — FAILS because `GenCtx` carries its own `call_depth` and

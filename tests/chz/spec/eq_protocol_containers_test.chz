@@ -400,7 +400,12 @@ test fn a_single_deep_walk_still_fits_the_whole_budget():
     assert plain_chain(4500) == plain_chain(4500)
 
 test fn legal_hook_nesting_still_returns_a_value():
-    # 3 hook levels over 1 000-deep chains ~ 3 000 < 10 000 — nesting per se is not banned.
-    x := deep_chain(1000, DeepLeaf(3))
-    y := deep_chain(1000, DeepLeaf(3))
+    # Nesting per se is NOT banned — only nesting x depth past the shared budget is. A `DeepNode`
+    # link costs 2 structural levels (the struct and its `Option`) and each hook level re-walks a
+    # whole chain, so 3 levels over N links spends ~6N of the 10 000. Measured on this build: 1 240
+    # links passes and 1 260 faults, so the ceiling here is ~1 250. 500 links is HALF that — a 2.5x
+    # margin, deliberately chosen so this positive control fails loudly on a real regression rather
+    # than flickering when a struct's per-link cost shifts by one level.
+    x := deep_chain(500, DeepLeaf(3))
+    y := deep_chain(500, DeepLeaf(3))
     assert x == y

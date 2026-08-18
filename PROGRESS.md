@@ -62,8 +62,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > **Fix.** New `Vm::walk_base` (`src/vm/mod.rs`, beside `native_reentry` and per-`Vm` for the
 > identical reason — a fiber cannot park while a native re-entry is on the host stack, so no other
 > fiber can observe it) holds the depth the enclosing walks already consumed. All **7**
-> `MAX_STRUCTURAL_DEPTH` comparisons now test `walk_base + depth` (`arith.rs:1415/1470/2054`,
-> `stmt.rs:1993/2453`, `sched.rs:2618/4651` — the site list was DERIVED by grep, not from memory, per
+> `MAX_STRUCTURAL_DEPTH` comparisons now test `walk_base + depth` (`arith.rs:1415/1470/2063`,
+> `stmt.rs:1993/2456`, `sched.rs:2618/4651` — the site list was DERIVED by grep, not from memory, per
 > the W7-50 convention; the 5 that cannot themselves re-enter are edited too, because each can still
 > run *inside* a hook, and it makes the invariant self-auditing under that same grep). The **4**
 > `run_proto` dispatch sites with a live structural `depth` in scope go through a new panic-safe
