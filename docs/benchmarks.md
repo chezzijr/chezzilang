@@ -1781,44 +1781,70 @@ cubic in chain depth. Go registers into the **nearest cancellable parent only** 
 cancel time, which is O(1) per derive; per this repo's ancestor rule an unintuitive divergence from the
 owning ancestor (Go, for concurrency) is a bug, so the registry became `kids: Channel[Token]` (an O(1)
 `send`, no `update` callback at all) and `cancel()` became an explicit work-list that drains and
-recurses downward. `parent: Token?` was deleted with it — nothing reads up any more.
+recurses downward.
+
+`parent: Token?` was deleted with it, and **restored the same day** (adversarial review, findings
+A1/A2): the downward cascade `try_recv()`s children out of the registry, so a cancelling task torn
+down mid-cascade loses that subtree *permanently*. The parent link is what `cancelled()`/`reason()`
+fall back to. It is **not** where the cubic cost was — that was the every-ancestor registration — so
+`derive()` is still O(1) at the registration seam. `derive()` registers a **parent-less twin** of the
+child (same `flag`/`dl`/`kids` cores) precisely so the send does not deep-copy the ancestor chain:
+sending the child itself measured **25.6 s for 300 derives**.
 
 Measured on the release binary (same machine, `chezzi run`), a chain of n tokens built by repeated
 `derive()` plus one root `cancel()`:
 
-| n | before | **after** | Go `context.WithCancel` |
-|---|--------|-----------|-------------------------|
-| 100 | 34 ms | **0 ms** | 0.15 ms |
-| 200 | 344 ms | — | — |
-| 400 | 5 904 ms | **2 ms** | 0.08 ms |
-| 1 000 | ~90 s (test timed out at 300 s) | **19 ms** | — |
-| 10 000 | unreachable | 19 146 ms † | 2.9 ms |
+| n | before | after (no `parent`) | **after (`parent` restored)** | Go `context.WithCancel` |
+|---|--------|---------------------|-------------------------------|-------------------------|
+| 100 | 34 ms | 0 ms | **0.7 ms** | 0.15 ms |
+| 200 | 344 ms | — | — | — |
+| 400 | 5 904 ms | 2 ms | **16 ms** | 0.08 ms |
+| 1 000 | ~90 s (test timed out at 300 s) | 19 ms | **85 ms** | — |
+| 10 000 | unreachable | 19 146 ms † | — | 2.9 ms |
+
+The `parent` column's residual (~4x) is the footnote † effect, not the registration: the link makes a
+chain a *deep, rooted, GC-heap* object graph where the parent-less version's was shallow (channel
+contents are off-heap). Against the pre-fix ~90 s at n = 1 000 it is still ~1 000x, and
+`derive_chain_is_not_quadratic`'s 5 000 ms bound holds with ~59x headroom.
 
 n children of one root (fan-out), built then all cancelled:
 
-| n | before | **after** |
-|---|--------|-----------|
-| 1 000 | 53 ms | **5 ms** |
-| 2 000 | 213 ms | — |
-| 4 000 | 975 ms | **31 ms** |
-| 5 000 | — | **23 ms** |
-| 8 000 | — | **88 ms** |
+| n | before | after (no `parent`) | **after (`parent` restored)** |
+|---|--------|---------------------|-------------------------------|
+| 1 000 | 53 ms | 5 ms | **6 ms** |
+| 2 000 | 213 ms | — | — |
+| 4 000 | 975 ms | 31 ms | **33 ms** |
+| 5 000 | — | 23 ms | **27 ms** |
+| 8 000 | — | 88 ms | **81 ms** |
+
+Fan-out is depth-1, so the parent link costs nothing there — the two columns are the same measurement
+twice, which is the point.
 
 Both anti-quadratic bounds are pinned by `tests/chz/stdlib/cancel_test.chz`
 (`derive_chain_is_not_quadratic`, `wide_fanout_is_not_quadratic`) at 5 000 ms — ~250× headroom over the
 measured 19/23 ms, and the pre-fix code does not merely exceed them, it runs ~90 s.
 
-**Second bug the deletion fixed.** `parent` was a plain struct field, so the airlock encoder walked the
-whole chain: sending a token from a tree deeper than **9 990** into a `spawn` faulted with
-`maximum structural depth (10000) exceeded (cyclic data structure?)` (5 000 was fine). Parent-less, a
-`Token` encodes in O(1) at any depth — verified at depth **12 000**: the tree crosses the `spawn` and
-the far side cascades all 12 001 nodes. It also removes an O(depth) `Shared.get()` walk from every
-`cancelled()` poll (`examples/cancel_cpu.chz` polls it ~50M times).
+**The airlock depth ceiling, re-measured.** `parent` is a plain struct field, so the airlock encoder
+walks the whole chain: a token from a tree deeper than a threshold faults with
+`maximum structural depth (10000) exceeded (cyclic data structure?)` when it crosses a `spawn`. v1's
+threshold was **9 990**; the brief parent-less version had none (verified at depth 12 000); with
+`parent` restored and the registry holding parent-less twins, the boundary is now **4 999 crosses,
+5 000 faults** — two structural levels per link (the `Token` struct and the `Option`), so exactly
+`MAX_STRUCTURAL_DEPTH`. The ceiling is lower than v1's because v1's per-link cost was one level, not
+two. It is a recoverable fault at a depth no request-scoped token tree reaches, and it is the price of
+never losing a subtree to an interrupted cascade (findings A1/A2).
+
+`cancelled()` is likewise O(depth) again rather than O(1) — but the walk is now plain struct-field
+recursion, not v1's O(depth) `Shared.get()` per level. Measured per poll on a realistic shallow chain:
+**0.30 µs at depth 0, 0.58 at 1, 1.15 at 3, 1.74 at 5** — ~0.29 µs per ancestor, against 0.30 µs flat
+for the parent-less version. `examples/cancel_cpu.chz` polls it ~50M times, so a deep hot-loop token is
+the one shape where the difference is worth caring about; derive shallow, or hoist the poll.
 
 † **The residual n=10 000 cost is NOT `std.cancel`** — it is an engine-level cost of a *rooted, deep*
 live object graph, and it reproduces with no `std.cancel` involved. A plain
 `struct N: flag: Shared[bool]; dl: Channel[bool]; kids: Channel[N]` chained n deep costs 36 / 283 /
 2 518 ms at n = 2 000 / 4 000 / 8 000 **when the head is held live**, and 1 / 3 / 6 ms (linear) when it
-is not — same allocations, same sends, only the live-set shape differs. That is why the depth-12 000
-airlock crossing above is a one-off manual verification (33 s) rather than a standing test: it would be
-measuring the GC's deep-graph marking, not the cancellation model. Worth a ledger row on its own.
+is not — same allocations, same sends, only the live-set shape differs. That is why the deep-airlock
+crossings above are one-off manual verifications rather than standing tests: they would be measuring
+the GC's deep-graph marking, not the cancellation model. It is also why the `parent` column of the
+chain table sits ~4x above the parent-less one. Worth a ledger row on its own.

@@ -1797,9 +1797,11 @@ string is interpolation.
 Constructors: `manual() -> Token` · `timeout(ms: int) -> Token` · `derive(parent: Token) -> Token`.
 Registration is Go `context.WithCancel`'s: `derive()` is **O(1)** — it registers the child into its
 IMMEDIATE parent only (no ancestor walk) — and `cancel()` cascades **downward**, draining each node's
-child registry and marking every transitive descendant it reaches; `cancelled()`/`reason()` are O(1)
-reads of the token itself, and a `Token` crosses the airlock in O(1) at any tree depth (it holds no
-parent link). See `concurrency.md` for the cancellation model. Cancellation is **cooperative**: a task blocked in a
+child registry and marking every transitive descendant it reaches. A child also keeps a `parent` link
+that `cancelled()`/`reason()` fall back to, so an interrupted cascade cannot lose a subtree: those two
+are therefore **O(depth)** (0.30 µs at depth 0, ~+0.29 µs per ancestor), and a `Token` from a tree
+deeper than **4 999** faults `maximum structural depth (10000) exceeded` when it crosses the airlock.
+See `concurrency.md` for the cancellation model. Cancellation is **cooperative**: a task blocked in a
 `std.io`/`std.fs`/`std.process`/`std.request` call observes the token only once that call returns —
 those are [uninterruptible while in flight](#blocking-calls-cannot-be-interrupted).
 

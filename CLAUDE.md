@@ -38,7 +38,7 @@ cargo build --release    # compile (release; the VM is only fast optimized)
 # conformance run ONCE (in the lib test target). `cargo test` is the normal full command.
 cargo test                       # FULL pre-commit suite: lib unit suite + goldens + conformance + integration
 # ^ includes `tests/chezzi_threads_cli.rs`: with `--serial` gone, the standing differential is
-#   `tests/chz` (620 Chezzi behavioural tests) run at TWO worker counts (default + `CHEZZI_THREADS=2`)
+#   `tests/chz` (629 Chezzi behavioural tests) run at TWO worker counts (default + `CHEZZI_THREADS=2`)
 #   via the built binary, each its own process/pool. NOT a gate over the ~4190 Rust lib tests — that
 #   pool is ONE process-wide `OnceLock`, so forcing a count inside `cargo test --lib` either no-ops or
 #   (worse) pins the WHOLE run's pool and starves concurrently-running tests (measured: 8
@@ -187,7 +187,7 @@ static protocol requirements callable through a generic bound via witness passin
 OS-thread M:N engine, netpoller + `std.net`). The checker also has a **non-fatal warning channel**
 (`Severity::Warning`, `"severity"` in `--errors=json`, `DiagnosticSeverity::WARNING` in the LSP) with
 two rules on it — a discarded `Result`/`Option`, and a `spawn:`-task write read after the join.
-**4435 Rust tests** green across 23 targets (**4203** in the lib target), plus **627**
+**4435 Rust tests** green across 23 targets (**4203** in the lib target), plus **629**
 Chezzi tests green at two worker counts (up from 590 at the start of `feat/span-file-and-stdlib-contracts`).
 
 ## Current focus

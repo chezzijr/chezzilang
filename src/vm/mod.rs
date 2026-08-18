@@ -269,8 +269,12 @@ const MAX_CALL_DEPTH: usize = 10_000;
 /// runtime's own equality depth cap must agree BY CONSTRUCTION, or the checker can grant a compare
 /// the VM then can't perform (the `checker-superset-of-compiler` soundness class).
 ///
-/// **Every guard on this constant tests [`Vm::walk_base`] `+ depth`, not `depth` — that is the whole
-/// of W8-43.** The `MAX_CALL_DEPTH` / [`VM_STACK_BYTES`] co-tuning below assumes O(1) native frames
+/// **Every FAULTING guard on this constant tests [`Vm::walk_base`] `+ depth`, not `depth` — that is
+/// the whole of W8-43.** The two guards whose over-budget branch DEGRADES instead of faulting
+/// ([`Vm::cyclic_walk`] and [`Vm::snapshot_value`], the map/set key-store pair) stay on the bare
+/// `depth`: charging a degrading guard converts a stack-safety measure into a silent wrong answer
+/// (an ordinary shallow key inserted from inside a hook running at depth would be stored by
+/// reference instead of snapshotted). Only faulting guards may share the budget. The `MAX_CALL_DEPTH` / [`VM_STACK_BYTES`] co-tuning below assumes O(1) native frames
 /// per call-depth level. That holds for `run_until`, and for the `hash`/`compare` hooks (one native
 /// frame per `run_proto`). It does NOT hold for a structural walk started INSIDE a protocol hook: a
 /// user `eq`/`str` that compares or stringifies re-enters the VM, and before `walk_base` existed
@@ -984,7 +988,7 @@ pub struct Vm {
     /// `deadlock` instead (B1 v1 limitation). Maintained by [`Vm::guarded`].
     native_reentry: usize,
     /// Structural depth already consumed by the ENCLOSING structural walks on the host stack, when a
-    /// user protocol hook (`eq` / `str`) re-entered the VM from inside one. Every
+    /// user protocol hook (`eq` / `str`) re-entered the VM from inside one. Every FAULTING
     /// [`MAX_STRUCTURAL_DEPTH`] guard tests `walk_base + depth`, so the budget is ONE shared allowance
     /// across a chain of nested protocol-hook re-entries — CPython's model, and the only thing that
     /// bounds the PRODUCT of hook-nesting depth × per-hook walk depth. Maintained by

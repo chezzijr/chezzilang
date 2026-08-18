@@ -890,15 +890,38 @@ child := c.derive()              # a CHILD token — cancelled when c (or any an
 > observed by an already-derived child, *including a child that crossed the `spawn`/`parallel:`/
 > `Channel` airlock* — because the link is the `kids` channel plus each node's own `Shared` flag, which
 > cross as live cores exactly like the flat token's `flag`, in **both** directions (a task on the far
-> side of a `spawn` can `derive()` into a registry the canceller drains). A `Token` holds **no parent
-> link**, so it also encodes in O(1) across the airlock at any tree depth. A child inherits the
+> side of a `spawn` can `derive()` into a registry the canceller drains). A child inherits the
 > **tightest** deadline (the soonest absolute deadline of itself and its ancestors), *materialised into
 > its own `deadline` field* at derive time — so a timeout needs no cascade at all; a derived child of an
-> already-elapsed timeout is cancelled at once with reason `"timeout"`. `reason()` reports this token's OWN
-> state and the first cause **latches** (Go): the cascade does not overwrite a descendant whose own
-> deadline has already elapsed. (v1 phrased this as "nearest-cause-wins" because `reason()` walked up
-> the parent chain looking for one; with the parent link deleted there is nothing to be nearer than
-> self.)
+> already-elapsed timeout is cancelled at once with reason `"timeout"`. `reason()` reports the
+> **nearest** cause — this token's own state first, else the ancestor's — and the first cause
+> **latches** (Go): the cascade does not overwrite a descendant whose own deadline has already
+> elapsed, and neither does `cancel()` on the token itself (`cancel.timeout(10)`, sleep past it, then
+> `cancel()` → `"timeout"`, matching Go's `context deadline exceeded`).
+>
+> **A child also keeps a `parent` link, and that is the cascade's safety net — not a duplicate of it.**
+> The downward cascade `try_recv()`s children out of the registry, which **removes** them, so a
+> cancelling task torn down mid-cascade (a nursery sibling faults) takes the already-popped subtree
+> with it, permanently — a later `cancel()` cannot recover it, the entries are gone. Measured on a
+> 500-deep chain at `CHEZZI_THREADS=4`, one task calling `root.cancel()` while a sibling faults:
+> without the link `leaf.cancelled()` was **false** 3/3 and a second `root.cancel()` still false (387
+> of 501 tokens permanently uncancelled); with it, **true** 3/3, 0 of 501 lost. Go is not immune by
+> having the same cascade shape — Go has no way to abandon a goroutine mid-function, so
+> `cancelCtx.cancel`'s drain always completes; Chezzi's nursery teardown does abandon tasks. The link
+> is only read on the fallback path, and it is **not** what the cubic v1 cost came from (that was the
+> every-ancestor `Shared.update` registration), so `derive()` stays O(1). What it does cost:
+>
+> | | with the parent link | without it |
+> |---|---|---|
+> | `cancelled()` poll, depth 0 / 1 / 3 / 5 | **0.30 / 0.58 / 1.15 / 1.74 µs** (~0.29 µs per ancestor) | 0.30 µs at any depth |
+> | deepest token that crosses a `spawn` airlock | **4 999** (5 000 faults `maximum structural depth (10000) exceeded`) | any depth |
+> | 1 000-link chain of `derive()` + one root cancel | 85 ms | 19 ms |
+> | 8 000-wide fan-out + cancel | 81 ms | 88 ms (unaffected) |
+>
+> Only what the cascade reads is registered: `derive()` sends a **parent-less twin** of the child into
+> `kids`, sharing its `flag` / `dl` / `kids` cores. A channel send crosses the airlock and deep-copies
+> the struct, so sending the child itself would copy its whole ancestor chain — O(depth) per derive,
+> and a measured 25.6 s for 300 derives.
 >
 > *(v1 registered each new child into **every** ancestor, each insert a `Shared.update()` that copied
 > the whole list across the wire — `derive()` was cubic in chain depth (400 derives = 6.0 s, against
@@ -922,8 +945,8 @@ child := c.derive()              # a CHILD token — cancelled when c (or any an
 
 | Method | Returns | Notes |
 |--------|---------|-------|
-| `cancelled()` | `bool` | own `flag` (an ancestor cancel is *pushed* into it) OR own deadline passed. **O(1); polls, never blocks.** |
-| `reason()` | `str?` | `"cancelled"` (manual or cascaded) \| `"timeout"` (own/inherited deadline) \| `None` (live). The FIRST cause **latches**: a cascaded cancel beats a later own deadline, while an already-elapsed own deadline stays `"timeout"`. |
+| `cancelled()` | `bool` | own `flag` (an ancestor cancel is *pushed* into it) OR own deadline passed OR the `parent` chain says so. **O(depth), 0.30 µs + ~0.29 µs per ancestor; polls, never blocks.** |
+| `reason()` | `str?` | `"cancelled"` (manual or cascaded) \| `"timeout"` (own/inherited deadline) \| `None` (live). NEAREST cause wins (own first, else the ancestor's), and the FIRST cause **latches**: a cascaded cancel beats a later own deadline, while an already-elapsed own deadline stays `"timeout"` even under an explicit `cancel()`. |
 | `done()` | `Channel[bool]` | ready (recv → `true`) when done — for a `wait:` arm. Same handle every call. |
 | `cancel()` | `nil` | manual cancel, anytime, any task; idempotent; sets the cancel bit, then wakes `done()` waiters and **cascades down** — drains each node's immediate-child registry and marks every transitive descendant (work-list, not recursion). |
 | `derive()` | `Token` | a child token: cancelled when self (or an ancestor) is; tightest deadline; one-directional. **O(1)** — one send into self's registry. Also `cancel.derive(parent)`. |

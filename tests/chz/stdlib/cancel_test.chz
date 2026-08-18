@@ -159,3 +159,63 @@ test fn reason_latches_the_first_cause():
     k := q.derive()
     q.cancel()
     assert k.reason() == Some("timeout"), "an own already-elapsed deadline stays the cause under a cascade"
+    # And the SAME rule for a token's OWN cause, which the two halves above only covered for a
+    # DESCENDANT reached by the cascade. `cancel()` used to set self's flag unconditionally, so a
+    # timed-out token that was then cancelled reported "cancelled"; Go 1.26 on the paired program
+    # (`context.WithTimeout(bg, 10ms)`, sleep 50 ms, `cancel()`) prints `context deadline exceeded`.
+    # Routing self through `_mark` — it is the cancel() work-list's first pop — is what latches it.
+    own := cancel.timeout(0)
+    own.cancel()
+    assert own.reason() == Some("timeout"), "cancel() must not overwrite a token's OWN elapsed deadline"
+    assert own.cancelled(), "an elapsed-deadline token is still cancelled after cancel()"
+    # The unelapsed direction must keep working: cancel() on a live deadline reads "cancelled".
+    live := cancel.timeout(60000)
+    live.cancel()
+    assert live.reason() == Some("cancelled"), "cancel() before the deadline reads cancelled"
+
+# --- A1: an INTERRUPTED cascade must not lose a subtree ---------------------------------------------
+# `cancel()`'s work-list pops children out of `kids` with `try_recv()`, which REMOVES them from the
+# registry. If the cancelling task is torn down mid-cascade (a sibling faults, the nursery aborts),
+# every child already popped into the local `work` list dies with the task — and no later `cancel()`
+# can recover them, because the registry entries are gone. That is why `Token` keeps its `parent`
+# link and `cancelled()`/`reason()` fall back to it. Measured at CHEZZI_THREADS=4 with the link
+# deleted: `leaf.cancelled()` false 3/3, and a SECOND `root.cancel()` still false (387 of 501 tokens
+# permanently uncancelled). Go is not immune by having the same cascade shape — it has no way to
+# abandon a goroutine mid-function, so `cancelCtx.cancel`'s drain always completes.
+#
+# Post-fix this is deterministic, not probabilistic: the answer comes from the parent walk whether or
+# not the cascade finished, so there is no flake window. A run where the cascade DOES complete simply
+# under-exercises it.
+fn cancel_mid_teardown(root: Token):
+    root.cancel()
+
+fn abort_the_nursery():
+    xs := [1]
+    n := xs[9]
+    assert n == 1, "unreachable — the index above faults"
+
+test fn an_interrupted_cascade_still_reports_cancelled():
+    root := cancel.manual()
+    toks := [root]
+    cur := root
+    i := 0
+    while i < 500:
+        cur = cur.derive()
+        toks.push(cur)
+        i = i + 1
+    leaf := cur
+    r := recover:
+        parallel:
+            spawn cancel_mid_teardown(root)
+            spawn abort_the_nursery()
+    aborted := false
+    match r:
+        Ok(_):  aborted = false
+        Err(_): aborted = true
+    assert aborted, "the sibling fault must abort the nursery"
+    assert leaf.cancelled(), "the leaf of a 500-deep chain must stay cancelled after an interrupted cascade"
+    live := 0
+    for t in toks:
+        if not t.cancelled():
+            live = live + 1
+    assert live == 0, "an interrupted cascade must not lose a descendant: {live} of {toks.len()} uncancelled"

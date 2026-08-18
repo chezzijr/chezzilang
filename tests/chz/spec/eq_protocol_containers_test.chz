@@ -409,3 +409,48 @@ test fn legal_hook_nesting_still_returns_a_value():
     x := deep_chain(500, DeepLeaf(3))
     y := deep_chain(500, DeepLeaf(3))
     assert x == y
+
+# --- W8-43 adversarial-review finding B1: a DEGRADING depth guard must NOT share the budget ------
+# The map/set key-store pair (`Vm::cyclic_walk` / `Vm::snapshot_value`) does not FAULT when it runs
+# out of structural budget — it degrades to storing the key BY REFERENCE. Charging `walk_base` there
+# (the first cut of W8-43 did) pushes an ORDINARY, shallow, acyclic key into that degrade branch
+# merely because it was inserted from inside an `eq` hook running at depth, so the caller's later
+# mutation reaches the stored key — a silent wrong value, no fault. Measured on the offending
+# binary, one nesting level apart: d=4998 -> true, d=4999 -> FALSE. Both must be true.
+#
+# The two depths are the pair that differed, so this test pins the boundary, not just one side.
+# `KeyProbe`'s leaf `eq` runs at structural depth 2d+2 (a `KeyLink` costs 2 levels, `KeyBox` 1 more),
+# so d=4999 lands the hook at exactly 10 000 — the shallowest `walk_base` at which the charged guard
+# fired on a one-element `List[int]` field.
+
+struct SnapKey:
+    xs: List[int]
+
+    fn hash(self) -> int:
+        return 7
+
+struct KeyProbe:
+    n: int
+
+    fn eq(self, o: KeyProbe) -> bool:
+        k := SnapKey(xs=[1])
+        m := {k: 1}
+        k.xs.push(2)          # must NOT reach the stored key: it was snapshotted on insert
+        return m.keys()[0].xs.len() == 1
+
+struct KeyBox:
+    inner: KeyProbe
+
+struct KeyLink:
+    next: KeyLink?
+    leaf: KeyBox
+
+fn key_chain(d: int) -> KeyLink:
+    n := KeyLink(next=None, leaf=KeyBox(inner=KeyProbe(n=0)))
+    for _ in 0..d:
+        n = KeyLink(next=Some(n), leaf=KeyBox(inner=KeyProbe(n=0)))
+    return n
+
+test fn key_inserted_from_a_deep_eq_hook_is_still_snapshotted():
+    assert key_chain(4998) == key_chain(4998), "shallow map key aliased at hook depth 9998"
+    assert key_chain(4999) == key_chain(4999), "shallow map key aliased at hook depth 10000"

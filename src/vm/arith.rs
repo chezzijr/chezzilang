@@ -1412,7 +1412,14 @@ impl Vm {
         let Some(h) = v.as_obj() else {
             return false;
         };
-        if self.walk_base + depth > MAX_STRUCTURAL_DEPTH {
+        // NOT `walk_base + depth` (W8-43). This guard's over-budget branch DEGRADES (store by
+        // reference) instead of faulting, so charging the enclosing hook's consumed depth to it
+        // turns a stack-safety measure into a SILENT WRONG ANSWER: an ordinary shallow acyclic key
+        // inserted from inside an `eq`/`str` hook running at depth would be aliased rather than
+        // snapshotted, and the caller's later mutation would reach the stored key. Only the five
+        // guards whose over-budget branch FAULTS may share the budget; this one and
+        // `snapshot_value`'s must stay on the bare `depth`.
+        if depth > MAX_STRUCTURAL_DEPTH {
             return true; // over-deep: store by reference (no snapshot, no host-stack overflow)
         }
         if on_path.contains_key(&h) {
@@ -1467,7 +1474,11 @@ impl Vm {
         let Some(h) = v.as_obj() else {
             return v; // scalars
         };
-        if self.walk_base + depth > MAX_STRUCTURAL_DEPTH {
+        // NOT `walk_base + depth` — the twin of `cyclic_walk`'s guard above, and for the same
+        // reason (W8-43): this branch DEGRADES (alias the tail) rather than faults, so a charged
+        // budget silently aliases a shallow key. The two stay charged IDENTICALLY (both bare
+        // `depth`) so `store_key_by_reference` and `snapshot_key` agree on which keys are over-deep.
+        if depth > MAX_STRUCTURAL_DEPTH {
             return v; // absurdly deep (non-cyclic) key: stop copying, alias the tail (no overflow)
         }
         if let Some(&c) = visited.get(&h) {

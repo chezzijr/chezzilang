@@ -315,8 +315,9 @@ impl Vm {
     }
 
     /// [`Vm::guarded`], plus: run `f` with [`Vm::walk_base`] set to `base`, the structural depth the
-    /// ENCLOSING native walk had already consumed. Every `MAX_STRUCTURAL_DEPTH` guard tests
-    /// `walk_base + depth`, so a chain of nested `eq`/`str` hooks shares ONE 10 000 allowance instead
+    /// ENCLOSING native walk had already consumed. Every FAULTING `MAX_STRUCTURAL_DEPTH` guard tests
+    /// `walk_base + depth` (the two DEGRADING ones — the map/set key-store pair — deliberately do
+    /// not; see [`MAX_STRUCTURAL_DEPTH`]), so a chain of nested `eq`/`str` hooks shares ONE 10 000 allowance instead
     /// of each re-entry restarting at 0 — without this, hook-nesting depth × per-hook walk depth is
     /// unbounded and the process dies by host stack overflow (uncatchable, rc=134).
     ///
