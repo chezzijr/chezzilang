@@ -40,7 +40,9 @@ struct Token:
     dl: Channel[bool]      # done(): a timer channel (timeout) or a trip()-able latch channel (manual)
     kids: Channel[Token]   # IMMEDIATE children only (Go context.WithCancel) — cancel() drains + recurses
     # ponytail: an uncancelled long-lived parent still retains its children's handles (the registry only
-    # grows until cancel drains it) — unchanged from v1; tokens are request-scoped.
+    # grows until cancel drains it) — same SHAPE as v1 but HEAVIER entries: v1 retained one
+    # Channel[bool] per descendant, this retains whole Tokens (flag + dl + kids cores). Same
+    # reachability count, more bytes each; tokens are request-scoped.
 
     # True once this token is cancelled (manually or by an ancestor's cascade) or its deadline has
     # passed. O(1) — an ancestor cancel is PUSHED into this token's own flag, so there is nothing to
@@ -59,13 +61,19 @@ struct Token:
             return Some("timeout")
         return None
 
-    # Mark a DESCENDANT done: trip its done() and set its cancel bit — UNLESS its own deadline has
+    # Mark a DESCENDANT done: set its cancel bit, then trip its done() — UNLESS its own deadline has
     # already elapsed, in which case its own "timeout" cause stays nearest (Go latches the first
     # cause). cancel() sets SELF's bit unconditionally before the cascade, which is v1's behaviour.
+    # THE ORDER IS LOAD-BEARING (C5, the Go-context invariant "once done() unblocks, the token is
+    # cancelled"): trip() wakes a task parked in `wait: tok.done().recv()`, so anything the woken task
+    # must be able to observe has to be true BEFORE the trip. Tripping first is a real, measured race —
+    # 141/400 rounds read cancelled()==false at CHEZZI_THREADS=8. When the guard SKIPS flag.set the
+    # order is still safe: the skip only happens when this token's own deadline has already elapsed,
+    # so cancelled() is already true on the deadline arm. Do not swap these two lines back.
     fn _mark(self):
-        self.dl.trip()
         if self.deadline == 0.0 or time.monotonic() < self.deadline:
             self.flag.set(true)
+        self.dl.trip()
 
     # Manual cancel, callable anytime, from any task (the handle is shared). Idempotent. Trips the
     # done() channel so a sibling parked in `wait:` wakes, then cascades DOWN: drain this token's

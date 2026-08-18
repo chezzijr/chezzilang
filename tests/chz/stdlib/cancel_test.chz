@@ -37,7 +37,7 @@ test fn derive_chain_is_not_quadratic():
     root.cancel()
     d := (time.monotonic() - t0) * 1000.0
     assert leaf.cancelled(), "the leaf of a 1000-deep chain must be cancelled by a root cancel"
-    assert d < 5000.0, "1000 sequential derives + one cascade must not be quadratic: " + str(d) + "ms"
+    assert d < 5000.0, "1000 sequential derives + one cascade must not be quadratic: {d}ms"
 
 test fn wide_fanout_is_not_quadratic():
     t0 := time.monotonic()
@@ -54,7 +54,7 @@ test fn wide_fanout_is_not_quadratic():
         if not k.cancelled():
             live = live + 1
     assert live == 0, "every one of 5000 children must be cancelled, {live} were not"
-    assert d < 5000.0, "5000 derives off one root must not be quadratic: " + str(d) + "ms"
+    assert d < 5000.0, "5000 derives off one root must not be quadratic: {d}ms"
 
 test fn derive_races_cancel():
     # `cancel()` sets the flag BEFORE draining the registry and `derive()` sends BEFORE checking it,
@@ -103,3 +103,52 @@ test fn double_cancel_is_idempotent_with_children():
     assert r.cancelled(), "the root stays cancelled after a second cancel"
     assert c.cancelled(), "a child stays cancelled after the second (already-drained) cancel"
     assert g.cancelled(), "a grandchild stays cancelled after the second (already-drained) cancel"
+
+# --- C5: done() never fires before cancelled() flips ------------------------------------------------
+# `_mark` sets the cancel bit BEFORE it trips done(); trip() is what wakes a parked waiter, so the
+# flag must already be true when the waiter runs. The reverse order is a live race — measured on the
+# shipped release binary, root->mid->leaf, one task parked in `wait: leaf.done().recv()` re-reading
+# `leaf.cancelled()`: 141/400 rounds at CHEZZI_THREADS=8, 67/400 at =4, 0/400 at =2 and ~2/400 at the
+# 12-core default. The suite runs at the default and at =2, where this is near-invisible, so the
+# worker count that gives this test teeth is pinned separately by
+# `cancel_c5_gate_at_eight_workers` in `tests/chezzi_threads_cli.rs` (CHEZZI_THREADS=8, where 100
+# rounds measured 23-35 violations pre-fix, min 12 over five runs at =4).
+fn c5_waiter(leaf: Token, bad: Shared[int]):
+    wait:
+        _ := leaf.done().recv():
+            if not leaf.cancelled():
+                bad.update(fn(n): n + 1)
+
+fn c5_canceller(root: Token):
+    root.cancel()
+
+test fn cascaded_done_implies_cancelled():
+    bad := Shared(0)
+    r := 0
+    while r < 100:
+        root := cancel.manual()
+        mid := root.derive()
+        leaf := mid.derive()
+        parallel:
+            spawn c5_waiter(leaf, bad)
+            spawn c5_canceller(root)
+        r = r + 1
+    n := bad.get()
+    assert n == 0, "a task woken by a cascaded grandchild's done() must read cancelled()==true, {n} did not"
+
+test fn reason_latches_the_first_cause():
+    # A manual cancel of a parent whose deadline is still in the future pushes "cancelled" into the
+    # child's own flag, and it LATCHES there — even after that deadline passes. Go 1.26 agrees:
+    # ctx.Err() is context.Canceled in both halves.
+    p := cancel.timeout(20)
+    c := p.derive()
+    p.cancel()
+    assert c.reason() == Some("cancelled"), "a manual ancestor cancel before the deadline reads cancelled"
+    time.sleep_ms(40)
+    assert c.reason() == Some("cancelled"), "the first cause latches — the elapsed deadline must not win"
+    # The other direction: when the cascade reaches a token whose OWN deadline has already elapsed,
+    # `_mark`'s guard skips the flag, so its own "timeout" stays the cause (Go: DeadlineExceeded).
+    q := cancel.timeout(0)
+    k := q.derive()
+    q.cancel()
+    assert k.reason() == Some("timeout"), "an own already-elapsed deadline stays the cause under a cascade"

@@ -346,6 +346,28 @@ fn threads_one_serializes_nested_eager_parallel_tasks() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// C5's teeth: `std.cancel`'s "`done()` never fires before `cancelled()` flips" invariant is only
+/// OBSERVABLE at a worker count the two standing `tests/chz` runs don't cover. `_mark` used to
+/// `trip()` the done-channel before setting the cancel bit, so a task woken by a cascaded
+/// descendant's `done()` could read `cancelled() == false`. Measured on the pre-fix release binary
+/// with `cascaded_done_implies_cancelled`'s 100 rounds (root->mid->leaf, one task parked in
+/// `wait: leaf.done().recv()`): FAILS 5/5 at `CHEZZI_THREADS=8`, 5/5 at `=4`, 5/5 at this host's
+/// 12-core default — but **0/5 at `CHEZZI_THREADS=2`**. `chz_suite_passes` runs the default and
+/// `chz_suite_passes_at_a_second_worker_count` runs `=2`, so on a 1-2 core CI box the default IS 2
+/// and the gate would silently vanish. Pinning `=8` here makes it host-independent (oversubscription
+/// only increases the preemption that exposes the race).
+#[test]
+fn cancel_c5_gate_at_eight_workers() {
+    let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/chz/stdlib/cancel_test.chz");
+    let (ok, summary, out, err) = run_chz_test(&file, Some("8"), Some(120_000));
+    assert!(
+        ok,
+        "std.cancel's suite must pass at CHEZZI_THREADS=8 ({summary})\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        tail(&out),
+        tail(&err)
+    );
+}
+
 fn tail(s: &str) -> String {
     let lines: Vec<&str> = s.lines().collect();
     let start = lines.len().saturating_sub(15);

@@ -905,14 +905,20 @@ child := c.derive()              # a CHILD token — cancelled when c (or any an
 > **Retention:** a `cancel()` **drains** the registries it walks, so a cancelled subtree releases its
 > child handles. An **uncancelled** long-lived parent still retains them — there is no token-drop hook,
 > so many short-lived children derived under one long-lived parent accumulate in its `kids` channel
-> until it is itself cancelled or dropped. Unchanged from v1; tokens are request-scoped in practice.
+> until it is itself cancelled or dropped. Same shape as v1, but heavier entries — v1 retained one
+> `Channel[bool]` per descendant, this retains whole `Token`s (flag + `dl` + `kids` cores). Tokens are
+> request-scoped in practice.
+>
+> **Ordering (C5):** marking a descendant sets its cancel bit **before** it trips its `done()`, because
+> the trip is what wakes a parked `wait:`. So a task woken by any node's `done()` — its own or a
+> cascaded ancestor's — always reads `cancelled() == true`, Go's `ctx.Done()`/`ctx.Err()` contract.
 
 | Method | Returns | Notes |
 |--------|---------|-------|
 | `cancelled()` | `bool` | own `flag` (an ancestor cancel is *pushed* into it) OR own deadline passed. **O(1); polls, never blocks.** |
-| `reason()` | `str?` | `"cancelled"` (manual or cascaded) \| `"timeout"` (own/inherited deadline) \| `None` (live). Nearest cause wins and latches first. |
+| `reason()` | `str?` | `"cancelled"` (manual or cascaded) \| `"timeout"` (own/inherited deadline) \| `None` (live). The FIRST cause **latches**: a cascaded cancel beats a later own deadline, while an already-elapsed own deadline stays `"timeout"`. |
 | `done()` | `Channel[bool]` | ready (recv → `true`) when done — for a `wait:` arm. Same handle every call. |
-| `cancel()` | `nil` | manual cancel, anytime, any task; idempotent; wakes `done()` waiters, then **cascades down** — drains each node's immediate-child registry and marks every transitive descendant (work-list, not recursion). |
+| `cancel()` | `nil` | manual cancel, anytime, any task; idempotent; sets the cancel bit, then wakes `done()` waiters and **cascades down** — drains each node's immediate-child registry and marks every transitive descendant (work-list, not recursion). |
 | `derive()` | `Token` | a child token: cancelled when self (or an ancestor) is; tightest deadline; one-directional. **O(1)** — one send into self's registry. Also `cancel.derive(parent)`. |
 | `deadline_at()` | `float` | absolute monotonic secs, or `0.0` if none. |
 

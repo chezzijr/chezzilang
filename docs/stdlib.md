@@ -1795,7 +1795,11 @@ string is interpolation.
 `struct Token` with methods `cancelled() -> bool` · `reason() -> str?` · `cancel() -> nil` ·
 `done() -> Channel[bool]` (use in `wait:`) · `deadline_at() -> float` · `derive() -> Token` (linked child).
 Constructors: `manual() -> Token` · `timeout(ms: int) -> Token` · `derive(parent: Token) -> Token`.
-See `concurrency.md` for the cancellation model. Cancellation is **cooperative**: a task blocked in a
+Registration is Go `context.WithCancel`'s: `derive()` is **O(1)** — it registers the child into its
+IMMEDIATE parent only (no ancestor walk) — and `cancel()` cascades **downward**, draining each node's
+child registry and marking every transitive descendant it reaches; `cancelled()`/`reason()` are O(1)
+reads of the token itself, and a `Token` crosses the airlock in O(1) at any tree depth (it holds no
+parent link). See `concurrency.md` for the cancellation model. Cancellation is **cooperative**: a task blocked in a
 `std.io`/`std.fs`/`std.process`/`std.request` call observes the token only once that call returns —
 those are [uninterruptible while in flight](#blocking-calls-cannot-be-interrupted).
 

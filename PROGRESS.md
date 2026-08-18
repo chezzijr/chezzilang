@@ -11238,14 +11238,33 @@ tree-propagation gap. See `docs/concurrency.md` §6e.
 > which also fixes a second live bug: the airlock encoder walked that plain-struct chain, so a token
 > tree deeper than ~9 990 hit `maximum structural depth (10000) exceeded` when it crossed a `spawn`;
 > parent-less, a `Token` encodes in O(1) at any depth (verified at 12 000). Transitive `done()`,
-> one-directionality, tightest-deadline inheritance, the `"timeout"`-nearest-cause rule and the `+1 ms`
-> `done()`-margin all survive unchanged (`examples/cancel_tree.expected` is byte-for-byte identical).
+> one-directionality, tightest-deadline inheritance and the `+1 ms` `done()`-margin all survive
+> unchanged (`examples/cancel_tree.expected` is byte-for-byte identical). `reason()` **did** change,
+> deliberately: with the cause now PUSHED into each descendant's own flag there is no ancestor to
+> re-consult, so the FIRST cause **latches** instead of the nearest-at-poll-time cause winning. A child
+> of a later-deadline parent that is manually cancelled reads `"cancelled"` forever, where v1 flipped to
+> `"timeout"` once that deadline passed; a child whose OWN deadline has already elapsed when the cascade
+> reaches it still reads `"timeout"` (`_mark`'s guard skips `flag.set`). That matches the owning
+> ancestor — Go 1.26 returns `context.Canceled` in both halves of the first case and
+> `context.DeadlineExceeded` in the second. Pinned by `reason_latches_the_first_cause` in
+> `tests/chz/stdlib/cancel_test.chz`.
 > Two ordering rules make it race-free: `cancel()` sets the flag **before** it drains, and `derive()`
 > sends **before** it re-checks — measured 0 lost tokens over 30 × 400 concurrent derives, against
-> 11 505 with the derive-side check removed. New guards: `tests/chz/stdlib/cancel_test.chz` (5 tests,
-> incl. the two anti-quadratic bounds and the race) and `cancel_cascade_crosses_the_airlock` (a far-side
+> 11 505 with the derive-side check removed. A THIRD ordering rule was missed on the first cut and fixed the
+> same day: `_mark` tripped `done()` **before** setting the cancel bit, so a task woken by a cascaded
+> descendant's `done()` could read `cancelled() == false` — C5, the Go-context invariant the file's own
+> `derive()` comment quotes. v1 was structurally safe (the flag was set on the ancestor before any
+> `trip()`, and `cancelled()` recursed up to it); pushing the flag DOWN inverted the order. Measured on
+> the release binary, root→mid→leaf, 400 rounds, one task parked in `wait: leaf.done().recv()`
+> re-reading `leaf.cancelled()`: **141/400 violations at `CHEZZI_THREADS=8`, 67/400 at `=4`, 0/400 at
+> `=2`**; the fix is the two-line swap, and the same shape is 0/400 at `=4` and `=8` after it. New
+> guards: `tests/chz/stdlib/cancel_test.chz` (7 tests,
+> incl. the two anti-quadratic bounds, the race, the C5 cascade and the `reason()` latch) and `cancel_cascade_crosses_the_airlock` (a far-side
 > `derive()` reached by a near-side root `cancel()` — the registry is live across the airlock in **both**
-> directions). Retention is narrower, not gone: a `cancel()` drains what it walks, but an **uncancelled**
+> directions). C5's gate needs a PINNED worker count — the suite's two runs are the default and `=2`,
+> and `=2` shows **zero** violations, so on a 1-2 core box the default IS 2 and the gate would vanish:
+> `cancel_c5_gate_at_eight_workers` (`tests/chezzi_threads_cli.rs`) runs that one file at
+> `CHEZZI_THREADS=8` in its own process. Retention is narrower, not gone: a `cancel()` drains what it walks, but an **uncancelled**
 > long-lived parent still retains its children's handles. See `docs/benchmarks.md`.
 
 > **`Channel.recv_timeout(ms)` — attempted then reverted (2026-06-12).** A bounded-wait `recv` was
