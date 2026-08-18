@@ -859,6 +859,20 @@ pub fn collect_core_gcrefs(
 /// **Call this with NO core guard held.** `Heap::children` locks a core to read its payload, so if it
 /// drained while still holding that guard it would hold two core locks at once and the ABBA window
 /// stays open — which is exactly what a first attempt at this fix measured: unchanged at 8/40 hangs.
+///
+/// **Why dropping the guard between cores cannot UNDER-ROOT.** Splitting the walk means core X and a
+/// nested core Y are no longer read under one atomic pair of locks, so in principle a store could move
+/// a `Handle` from Y to X after X was walked and before Y is — invisible to both halves. That cannot
+/// happen for a handle belonging to the heap being marked: heaps are **per-fiber/per-worker**
+/// (`Vm::heap`, swapped by `Vm::swap_ctx`) and a collection runs **synchronously on the owning worker**
+/// from its own instruction loop (`Vm::collect` at `exec.rs`'s `should_collect()` check), so while this
+/// heap is marking, the fiber that owns it is not running user code and cannot be mid-move. Another
+/// worker concurrently moving handles is moving handles of ITS heap, which this mark does not root.
+/// What the old code bought with the second lock was cross-core atomicity that this invariant already
+/// provides — at the cost of the deadlock above. Probed as well as argued: a 400-node cyclic graph
+/// under 60k allocations, a diamond (one node reachable by two paths), and handles moved between cores
+/// under concurrent mutation all report 0 corruption on both profiles at 2/4/8 workers, with the
+/// `debug_assert` in `Heap::mark_core_payload` re-deriving the verdict on every debug-build pass.
 pub fn drain_pending_cores(
     out: &mut Vec<GcRef>,
     seen: &mut super::fxhash::FxHashSet<usize>,
