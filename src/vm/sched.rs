@@ -915,7 +915,9 @@ impl Vm {
         self.farm_outermost_eager_helpers(&sched, &cancel);
         {
             let _party = self.nursery_party_guard(&sched);
-            shell.mn_worker_loop(&sched, 0, 0);
+            if eager_joiner_runs_fibers(worker_count()) {
+                shell.mn_worker_loop(&sched, 0, 0);
+            }
             sched.wait_for_completion();
         }
         if let Some(h) = drainer {
@@ -943,7 +945,7 @@ impl Vm {
         if self.mn.is_some() || sched.outstanding_tasks() < 2 {
             return;
         }
-        for wid in 2..worker_count().max(2) {
+        for wid in eager_helper_wids(worker_count()) {
             let mut shell = self.spawn_shell(sched, cancel);
             let sched = Arc::clone(sched);
             pool::submit(Box::new(move || {
@@ -1004,7 +1006,9 @@ impl Vm {
             // `main`, which must be a counted party for that span or the process-wide verdict vetoes
             // forever. No-op on a worker shell.
             let _party = self.nursery_party_guard(&sched);
-            shell.mn_worker_loop(&sched, 0, 0);
+            if eager_joiner_runs_fibers(worker_count()) {
+                shell.mn_worker_loop(&sched, 0, 0);
+            }
             sched.wait_for_completion();
         }
         if let Some(h) = drainer {
@@ -5103,6 +5107,20 @@ impl Vm {
             }
         }
     }
+}
+
+/// W8-8 — the wid range of the pool helpers an outermost eager nursery farms. wid 0 is the inline
+/// joiner and wid 1 the raw `chezzi-eager` drainer, both unconditional threads, so helpers start at
+/// 2 and the range end is the whole runner budget.
+pub(super) fn eager_helper_wids(n: usize) -> std::ops::Range<usize> {
+    2..n.max(2)
+}
+
+/// W8-8 — the inline joiner runs fibers only when the budget has a slot left after the drainer.
+/// At `n == 1` the drainer already holds the only slot, so the joiner just waits for completion —
+/// otherwise `--threads=1` runs two CPU runners and does not serialize.
+pub(super) fn eager_joiner_runs_fibers(n: usize) -> bool {
+    n >= 2
 }
 
 /// EAGER `submit` (M:N), the atomic half — reserve this job's submission slot and hand it to the

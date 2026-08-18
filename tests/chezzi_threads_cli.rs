@@ -172,6 +172,86 @@ fn chezzi_test_cli_honors_chezzi_threads_via_a_two_worker_precondition() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// W8-8 — `--threads=1` (via `CHEZZI_THREADS=1`) must run exactly ONE CPU runner, not two. Before the
+/// fix the inline joiner ran a fiber loop ALONGSIDE the unconditional `chezzi-eager` drainer thread
+/// even at a budget of 1, so an 8x CPU workload only ran ~4.4x slower than a 1x workload (two runners
+/// splitting the work) instead of ~8x. Program A runs one CPU burn inside a `parallel:` nursery,
+/// program B runs eight copies of the same burn in one `parallel:` nursery; both timed under
+/// `CHEZZI_THREADS=1` with the SAME process pair, so the ratio can't be inflated by external load —
+/// only genuine two-runner sharing moves it. Post-fix the ratio must approach 8; pre-fix it measured
+/// ~4.0 on a debug build (docs/gaps.md W8-8 measured ~4.4 on the release binary). The burn size (150k
+/// iterations) is calibrated to ~100ms on a DEBUG build — `CARGO_BIN_EXE_chezzi` under `cargo test` is
+/// the debug binary, not `--release`.
+#[test]
+fn threads_one_serializes_cpu_bound_parallel_tasks() {
+    let dir = std::env::temp_dir().join(format!("chz-threads-w8-8-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+
+    let burn = "fn burn(n: int) -> int:\n    \
+                 x := 0\n    \
+                 i := 0\n    \
+                 while i < n:\n        \
+                 x = x + i * i - i\n        \
+                 i += 1\n    \
+                 return x\n\n";
+
+    let path_a = dir.join("burn_one.chz");
+    std::fs::write(
+        &path_a,
+        format!(
+            "{burn}fn main():\n    \
+             parallel:\n        \
+             spawn: burn(150000)\n\
+             main()\n"
+        ),
+    )
+    .expect("write program A");
+
+    let path_b = dir.join("burn_eight.chz");
+    let spawns = "        spawn: burn(150000)\n".repeat(8);
+    std::fs::write(
+        &path_b,
+        format!("{burn}fn main():\n    parallel:\n{spawns}main()\n"),
+    )
+    .expect("write program B");
+
+    let time_run = |path: &Path| -> std::time::Duration {
+        let start = std::time::Instant::now();
+        let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+            .arg("run")
+            .arg(path)
+            .env("CHEZZI_THREADS", "1")
+            .output()
+            .expect("run chezzi");
+        let elapsed = start.elapsed();
+        assert!(
+            out.status.success(),
+            "chezzi run {path:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        elapsed
+    };
+
+    let t1 = time_run(&path_a);
+    let t8 = time_run(&path_b);
+
+    // Negative control: t1 must be non-trivial, or a near-zero/near-zero ratio could pass by accident.
+    assert!(
+        t1 > std::time::Duration::from_millis(10),
+        "program A finished too fast ({t1:?}) to be a meaningful baseline — recalibrate the burn size"
+    );
+
+    let ratio = t8.as_secs_f64() / t1.as_secs_f64();
+    assert!(
+        ratio > 5.5,
+        "--threads=1 must serialize: 8x the CPU work should take close to 8x as long (t1={t1:?}, \
+         t8={t8:?}, ratio={ratio:.2}). A ratio near 4 means the inline joiner is STILL running a \
+         second fiber loop alongside the drainer at a budget of 1 (W8-8)."
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn tail(s: &str) -> String {
     let lines: Vec<&str> = s.lines().collect();
     let start = lines.len().saturating_sub(15);

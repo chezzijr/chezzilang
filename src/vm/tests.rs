@@ -18445,3 +18445,30 @@ fn chezzi_threads_env_reaches_worker_count() {
         );
     }
 }
+
+/// W8-8 — the runner-budget invariant: for every worker count `n`, the drainer (always 1) plus the
+/// farmed pool helpers (`eager_helper_wids`) plus the inline joiner (0 or 1, `eager_joiner_runs_fibers`)
+/// must sum to exactly `n`. At `n == 1` the drainer already holds the only slot, so the joiner must NOT
+/// also run a fiber loop — that was the W8-8 bug (`--threads=1` ran two CPU runners, user/real ≈ 1.91
+/// instead of ≈ 1.0). Pure-function check, no threads spawned.
+#[test]
+fn eager_runner_budget_sums_to_worker_count() {
+    for n in 1..=12usize {
+        let drainer = 1;
+        let helpers = sched::eager_helper_wids(n).len();
+        let joiner = usize::from(sched::eager_joiner_runs_fibers(n));
+        assert_eq!(
+            drainer + helpers + joiner,
+            n,
+            "runner budget mismatch at n={n}: drainer=1 + helpers={helpers} + joiner={joiner} != {n}"
+        );
+    }
+    assert!(
+        !sched::eager_joiner_runs_fibers(1),
+        "at --threads=1 the drainer already holds the only slot; the joiner must not also run fibers"
+    );
+    assert!(
+        sched::eager_joiner_runs_fibers(2),
+        "at --threads=2 there is a slot left after the drainer for the joiner"
+    );
+}

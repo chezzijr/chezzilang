@@ -7,6 +7,25 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+> **✅ W8-8 CLOSED — `chezzi run --threads=1` now runs exactly ONE CPU runner, 2026-08-18
+> (`fix/mn-idle-policy-w8-8-w8-7`).** An outermost eager nursery's runner budget is `1 (drainer) +
+> helpers + joiner`, sized for `max(N, 2)` total slots — correct for N>=2, but at N=1 the inline
+> joiner (`main`, `Vm::join_eager_nursery`/`abort_eager_nursery`) ran a full fiber loop ALONGSIDE the
+> unconditional raw `chezzi-eager` drainer thread, so `--threads=1` silently ran TWO CPU runners
+> (measured `user/real` = **1.91**, identical to `--threads=2`). Fix: two named pure functions in
+> `src/vm/sched.rs` — `eager_helper_wids(n) = 2..n.max(2)` (unchanged arithmetic, now named) and
+> `eager_joiner_runs_fibers(n) = n >= 2` — gate the inline joiner's `shell.mn_worker_loop(&sched, 0,
+> 0)` call in both outermost arms (`join_eager_nursery`, `abort_eager_nursery`); at N=1 the joiner now
+> only waits on `sched.wait_for_completion()`, which the drainer alone satisfies. Measured on the
+> release binary, same box, before/after: `--threads=1` **user/real 16.404/8.590 = 1.91 → 16.286/16.240
+> = 1.003**; `--threads=2`/`4` unchanged (1.91 / 3.08). `--threads=12`/`0` (auto) keep their high `sys`
+> column — that's W8-7 (the idle-wake broadcast), a deliberately separate follow-up; not touched here.
+> Tests: `vm::tests::eager_runner_budget_sums_to_worker_count` (pure-function invariant, n in 1..=12)
+> and `tests/chezzi_threads_cli.rs`'s `threads_one_serializes_cpu_bound_parallel_tasks` (1x vs 8x CPU
+> burn under `CHEZZI_THREADS=1`, ratio > 5.5; measured pre-fix ratio ~3.94-4.0 on a debug build, matching
+> `docs/gaps.md`'s ~4.4 release-binary measurement). `cargo test --lib` 4199/0/2, `cargo test --test
+> chezzi_threads_cli` 3/3, `cargo clippy --all-targets -- -D warnings` clean.
+
 > **✅ Adversarial-review fix wave on `feat/span-file-and-stdlib-contracts`, 2026-08-18 — the LSP's
 > diagnostic publish is now atomic with its delivery, and a closed buffer can no longer be resurrected as
 > a diagnostic source.** Three isolated prosecutors reviewing the branch (the file-naming work above,
