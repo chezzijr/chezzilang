@@ -1074,18 +1074,30 @@ faults (`docs/gaps.md` **N8/N9**): a task cancelled mid-loop emits a different *
 run, because how far it got before the cancel landed is a scheduling fact. This is **not a bug to fix**.
 (Historically the same shape *hung* on the since-removed cooperative `--serial` engine — the spinner
 never yielded, so the faulting sibling never got the thread to trip the cancel. That engine is gone;
-**`--threads=1`** is the preemption-safe low-worker mode, still the OS-thread M:N engine, where the
-kernel preempts the spinner and it faults promptly — verified 0/15 hangs.) Lifting the limit would
+**`--threads=1`** is the single-runner mode — still the OS-thread M:N engine, one CPU runner, where the
+kernel preempts the spinner and it faults promptly.) Lifting the limit would
 require teaching the cooperative scheduler to time-slice a *running* fiber (its own milestone), which
 `--threads=1` already makes unnecessary for users.
 
-> **`--threads=1` does NOT serialize — it runs TWO workers.** Measured (`docs/gaps.md` **W8-8**): 8
-> CPU-bound tasks at `--threads=1` burn 5.09 s of user time in 2.57 s wall (**1.98 cores**), byte-identical
-> to `--threads=2`; `--threads=3` gives 2.98 cores. So `--threads=1` is *not* a way to serialize a flaky
-> concurrency repro, and any claim elsewhere in these docs justified as "measured at `CHEZZI_THREADS=1`"
-> was measured **two-wide** — including the `connect`-in-`Executor` starvation argument. Related:
-> **W8-7** — worker count is *inversely* correlated with throughput on a small nursery, so the default
-> (all cores) is the slowest setting, not the fastest.
+**Re-derived 2026-08-18 on the genuinely 1-wide binary** (`docs/gaps.md` **W8-8**, below — until it
+landed, `--threads=1` silently ran two runners, so the original "0/15 hangs" was measured two-wide): the
+spinner-plus-faulting-sibling repro ran 15× → **15/15 faulted in 4–6 ms, 0 hangs, 0 timeouts**, the
+spinner never completing. `CONTEXT_REDS = 4000` reduction-budget preemption fires per dispatched op
+regardless of worker count, so one runner is enough — the argument that made deleting `--serial` safe
+now rests on a single-runner measurement.
+
+> **`--threads=N` means N CPU runners — including `N=1`.** This corrects an earlier warning here that
+> `--threads=1` did **not** serialize: it ran TWO workers (`docs/gaps.md` **W8-8**, 8 CPU-bound tasks at
+> **1.98 cores**, byte-identical to `--threads=2`). **Fixed 2026-08-18.** Measured after the fix on
+> `examples/primes_parallel.chz` (12-core Linux, cores = user/real): `--threads=1` **1.00** (was 1.91),
+> `=2` 1.91, `=4` 3.02 — matching Go `GOMAXPROCS=1` (1.00) and a 1-thread Rust fan-out (0.99) running the
+> identical workload on the same box. So `--threads=1` **is** the way to serialize a flaky concurrency
+> repro, and the claims elsewhere in these docs justified as "measured at `CHEZZI_THREADS=1`" have each
+> been re-derived on the 1-wide binary — all nine held (`docs/gaps.md`, the scheduler section of the W8
+> session log). Also fixed the same day: **W8-7** — the default worker count used to be the *slowest*
+> setting because every preemption woke every idle worker; `sys` at the default went 10.110 s → 0.009 s
+> and the default is now at parity with the best setting. Full tables: `docs/benchmarks.md`
+> §"W8-7 / W8-8 idle-worker-policy fix".
 
 ### 6c'. `Channel.trip()` — the manual level-trigger latch
 
@@ -1112,7 +1124,12 @@ diff a.txt b.txt
 ```
 
 That is exactly what the repo's own standing gate does over `tests/chz`
-(`tests/chezzi_threads_cli.rs`). A difference is a **signal to investigate**, not automatically a bug:
+(`tests/chezzi_threads_cli.rs`). **Since 2026-08-18 (`docs/gaps.md` W8-8) this recipe is strictly
+stronger than it was:** `CHEZZI_THREADS=1` and the default used to be nearer neighbours than they
+looked, because `--threads=1` really ran two runners — the two arms differed only in width, never in
+*whether* work could overlap. Now `=1` is genuinely one CPU runner (1.00 cores, vs 1.91 at `=2`), so the
+diff compares a serialized run against a concurrent one and a schedule-dependence shows up as a
+difference far more readily. A difference is a **signal to investigate**, not automatically a bug:
 it can be a genuine order-dependence / airlock / scheduler fault (the real prize), *or* simply a
 **non-deterministic cross-task print order**, which `chezzi run` does not promise (§"Output ordering").
 Compare a line SET, or make the program deterministic by construction, before calling a diff a defect.
@@ -1149,7 +1166,11 @@ Compare a line SET, or make the program deterministic by construction, before ca
 >   process-wide job pool (`CHEZZI_THREADS`, never grown on demand) and has no scheduler under it to
 >   spin a replacement, so a blocked job starves every other job and every `parallel:` nursery sharing
 >   that pool (measured at `CHEZZI_THREADS=1`, before either op refused here: an `accept` job plus a
->   later `connect` job = hang). This is the one context where **`connect` refuses too** (`W7-59`) —
+>   later `connect` job = hang). **That measurement survives W8-8 unchanged, and structurally so**
+>   (re-derived 2026-08-18): the job pool is `vm::pool`, sized straight off `worker_count()`
+>   (`src/vm/pool.rs:38-40`), whereas W8-8's phantom second runner lived in the nursery enlist/owner path
+>   — so `CHEZZI_THREADS=1` gave this pool exactly one thread before that fix and still does. Re-measured
+>   on the 1-wide binary: both ops return their `Err` in 0.006 s, rc=0, no hang. This is the one context where **`connect` refuses too** (`W7-59`) —
 >   before that it spun in place for up to 10 s, pinning a pool worker with no cancel or `--timeout`
 >   escape (measured: an outer `shutdown_now()` at 200 ms took **10 009 ms** to end the run, now
 >   **209 ms**). Use `spawn`/`parallel:` for socket work, which parks instead of blocking.

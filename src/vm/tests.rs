@@ -3944,6 +3944,31 @@ fn mnsched_yield_fiber_requeues_at_tail() {
     assert!(matches!(back.state, FiberState::Ready));
 }
 
+/// W8-7 — the liveness property `yield_fiber`'s dropped `notify_all` rests on: a yielded fiber is
+/// reachable by a **different** worker through the ordinary global-queue path, no wake required.
+/// wid 0 yields task 0 back to the tail; a SEPARATE wid (1), passing the sentinel scope (a farmed
+/// helper never self-stops), pulls it straight off the global queue via the normal `take_runnable`
+/// batch-grab — proving delivery needs no `cv.notify`. Green both before and after the removal (it
+/// pins ordering/reachability, not the notify itself); a future change that routes a yielded fiber
+/// to the yielding worker's own local ring instead of the global queue would break it.
+#[test]
+fn mnsched_yield_fiber_reachable_by_other_worker_without_wake() {
+    let sched = mk_sched(2);
+    sched.seed(vec![mk_fiber(0), mk_fiber(1)]);
+    let f0 = take_run(&sched); // wid 0 pops task 0
+    assert_eq!(f0.task_index, 0);
+    sched.yield_fiber(f0); // requeue task 0 at the global tail — no notify needed for this to work
+    // task 1 is still ahead of the requeued task 0 in the global queue.
+    match sched.take_runnable(1, 1, SENTINEL_SCOPE) {
+        Take::Run(f) => assert_eq!(f.task_index, 1),
+        Take::Stop => panic!("expected a runnable fiber, got Stop"),
+    }
+    match sched.take_runnable(1, 1, SENTINEL_SCOPE) {
+        Take::Run(f) => assert_eq!(f.task_index, 0),
+        Take::Stop => panic!("expected a runnable fiber, got Stop"),
+    }
+}
+
 /// D4/stress: a combined-churn workload that exercises EVERY new D4 path together under a
 /// watchdog — 500 consumers that block on `recv` (park + `send_wake`), 500 producers that do CPU
 /// work (reduction `yield` → global, batch-grab, work-stealing between idle workers) then `send`
@@ -4740,6 +4765,93 @@ main()
         },
         Err(_) => panic!(
             "hung — D5 owe #3 Path C deadlock detection regressed (blocked_native predicate / notify)"
+        ),
+    }
+}
+
+/// gaps.md W8-7 hang regression — DEMOTE x YIELD. A `recv` inside a native `xs.map` callback demotes
+/// the worker (`demote_recv_block` blocks it in place, spinning a REPLACEMENT thread that covers its
+/// `wid`); at demote time `runnable == 0`, so that replacement typically parks straight into
+/// `take_runnable`'s untimed `cv.wait` (mod.rs D4e). If the demoted fiber then runs long enough after
+/// `recv` returns to exhaust `CONTEXT_REDS` (4000 dispatched ops — the tail loop here does ~800k), it
+/// preempts: `Disp::Yield` -> `yield_fiber` requeues it with **no notify** (W8-7), and the demoted
+/// worker's own `mn_worker_loop` returns immediately after on `self.demoted` (`sched.rs`) without
+/// re-entering `take_runnable`. Nobody is left awake to consume the requeued fiber, and the joiner's
+/// `wait_for_completion` (also an untimed `cv.wait`) never wakes either: a hang. None of the other
+/// demote tests in this file (`d5_owe3_path_c_*`, the `wait`/`sleep_ms`/socket demote sites) catch
+/// this class because every one of them finishes its fiber in well under `CONTEXT_REDS` ops after the
+/// demote — no `Disp::Yield` ever fires on a demoted worker in that corpus, so a narrowed wake is
+/// invisible to it. CLAUDE.md's "a widening is untested by its own suite", inverted: a *narrowing* of
+/// when a wake fires is structurally untested by a corpus written before the narrowing landed.
+///
+/// Forces `worker_count(2)` for a deterministic repro (measured 2/2 hangs at `--threads=1` and
+/// `--threads=2` pre-fix; racy at `--threads=4`, where a spuriously-rechecking idle sibling can
+/// happen to grab the fiber anyway). 15 s watchdog: a regression HANGS here instead of the whole
+/// suite wedging — it must fail loud via the watchdog, not via a stuck test binary.
+#[test]
+fn w8_7_demoted_fiber_yield_after_demote_does_not_strand_replacement() {
+    struct Workers(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+    impl Drop for Workers {
+        fn drop(&mut self) {
+            crate::vm::set_worker_count(crate::vm::test_baseline_worker_count());
+        }
+    }
+    let _workers = Workers(
+        crate::vm::TEST_WORKER_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+    );
+    crate::vm::set_worker_count(2);
+
+    let src = "\
+import std.time
+import std.concurrency
+
+fn use_map(ch: Channel[int], out: Shared[int]):
+    xs := [0]
+    ys := xs.map(fn(x): ch.recv())
+    s := 0
+    i := 0
+    while i < 200000:
+        s = s + i
+        i = i + 1
+    out.set(s + ys[0])
+
+fn fill(ch: Channel[int]):
+    time.sleep_ms(50)
+    ch.send(1)
+
+fn main():
+    ch := Channel[int]()
+    out := Shared(0)
+    parallel:
+        spawn use_map(ch, out)
+        spawn fill(ch)
+    print(out.get())
+
+main()
+";
+    let entry = write_temp_chz("w8_7_demote_yield", src);
+    let run_entry = entry.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_file_with(
+            &run_entry,
+            crate::native::HostConfig::default(),
+        ));
+    });
+    let result = rx.recv_timeout(std::time::Duration::from_secs(15));
+    let _ = std::fs::remove_file(&entry);
+    match result {
+        Ok((out, _err, res, _code)) => {
+            assert!(res.is_ok(), "faulted instead of completing: {res:?}");
+            assert_eq!(out, "19999900001\n");
+        }
+        Err(_) => panic!(
+            "hung — a demoted worker's `Disp::Yield` (post-recv, CONTEXT_REDS-exhausted) left its \
+             REPLACEMENT worker stranded in an untimed `cv.wait` with no notify (gaps.md W8-7 hang \
+             regression: the departure-notify fix in `mn_worker_loop`'s `self.demoted` exit is \
+             missing or broken)"
         ),
     }
 }
@@ -18444,4 +18556,31 @@ fn chezzi_threads_env_reaches_worker_count() {
              (vm::test_baseline_worker_count) is not wired"
         );
     }
+}
+
+/// W8-8 — the runner-budget invariant: for every worker count `n`, the drainer (always 1) plus the
+/// farmed pool helpers (`eager_helper_wids`) plus the inline joiner (0 or 1, `eager_joiner_runs_fibers`)
+/// must sum to exactly `n`. At `n == 1` the drainer already holds the only slot, so the joiner must NOT
+/// also run a fiber loop — that was the W8-8 bug (`--threads=1` ran two CPU runners, user/real ≈ 1.91
+/// instead of ≈ 1.0). Pure-function check, no threads spawned.
+#[test]
+fn eager_runner_budget_sums_to_worker_count() {
+    for n in 1..=12usize {
+        let drainer = 1;
+        let helpers = sched::eager_helper_wids(n).len();
+        let joiner = usize::from(sched::eager_joiner_runs_fibers(n));
+        assert_eq!(
+            drainer + helpers + joiner,
+            n,
+            "runner budget mismatch at n={n}: drainer=1 + helpers={helpers} + joiner={joiner} != {n}"
+        );
+    }
+    assert!(
+        !sched::eager_joiner_runs_fibers(1),
+        "at --threads=1 the drainer already holds the only slot; the joiner must not also run fibers"
+    );
+    assert!(
+        sched::eager_joiner_runs_fibers(2),
+        "at --threads=2 there is a slot left after the drainer for the joiner"
+    );
 }

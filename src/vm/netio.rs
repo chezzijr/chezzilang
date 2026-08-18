@@ -2093,7 +2093,11 @@ impl Vm {
     /// - **an eager `Executor` job**: it does NOT own its thread. It runs on the bounded, process-wide
     ///   [`crate::vm::pool`] (`worker_count()`, never grows) and there is no `MnSched` here to spin a
     ///   replacement, so a blocked job starves every other job and every `parallel:` nursery sharing
-    ///   that pool — measured at `CHEZZI_THREADS=1` (an `accept` job plus a later `connect` job = hang);
+    ///   that pool — measured at `CHEZZI_THREADS=1` (an `accept` job plus a later `connect` job = hang).
+    ///   That measurement is UNAFFECTED by W8-8 (the `--threads=1` two-runner fix, 2026-08-18) and
+    ///   structurally so: [`crate::vm::pool`] is sized straight off `worker_count()`, while W8-8's extra
+    ///   runner lived in the nursery enlist/owner path in `sched.rs`. Re-derived on the 1-wide binary the
+    ///   same day: both ops return their `Err` in 0.006 s, rc=0, no hang;
     /// - **`main` inside a native callback** (`native_reentry > 0` with `mn == None`): unjudgeable by
     ///   the deadlock verdict ([`Vm::is_counted_party`]'s doc), so an unbounded block there is a hang
     ///   where a fault is the honest answer.

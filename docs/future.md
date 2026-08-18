@@ -114,7 +114,11 @@ fork, field and signature parameter. `src/vm/parity_tests.rs` and its `assert_pa
 helpers were renamed to `src/vm/golden_tests.rs` / `assert_golden_out`+`golden_entry*` once the doc
 sweep that shipped this removal flagged the old names as a leftover — every helper in it runs the one
 engine once and compares against a literal expectation. The `--threads=1` M:N mode (kernel-preempted,
-safe single-thread) covers every legitimate user need `--serial` was ever mistaken for.
+safe single-thread) covers every legitimate user need `--serial` was ever mistaken for — **measured, not
+assumed, as of 2026-08-18**: when this was written `--threads=1` silently ran two CPU runners (`W8-8`),
+and on the binary that fixed it the N8 shape (a pure-CPU spinner beside a faulting sibling — the exact
+program `--serial` hung on) was re-run 15× → **15/15 faulted in 4–6 ms, 0 hangs**, at one genuine
+runner.
 
 **One deliberate exception to "drop the per-engine forks":** `op_wait_poll`'s live-timer **inline-sleep**
 block was **KEPT**. It is not serial-only — it is still reachable on M:N by the inline
@@ -416,7 +420,11 @@ were mandatory — see the correction under them.
    drainer thread, and so the only per-nursery THREAD source left. Dropping it broke `pool.rs`'s
    documented bound that live threads stay at `N + joiners` "*regardless of `parallel:` nesting
    depth*": measured, nesting depth 7 with 128 leaves at `--threads=1` went **3 threads → 130**, which
-   also silently broke the user-facing flag. A top-level nursery has no outer worker to starve and
+   also silently broke the user-facing flag. (**Re-measured 2026-08-18** on the post-`W8-8` binary, where
+   `--threads=1` is genuinely one runner: the same shape peaks at **4 live OS threads**, two independent
+   samplers, two runs — still bounded and flat, nowhere near 130. The original "3" has no surviving repro
+   program in the tree, so the one-thread difference is methodology, not a regression; the bound this gate
+   exists to hold is intact.) A top-level nursery has no outer worker to starve and
    creates exactly one drainer per thread, so it stays unconditional.
 
 9. **`Op::EnterNursery` is `#[inline(never)]`** (`Vm::op_enter_nursery`). The arm grew from three

@@ -3209,6 +3209,12 @@ main()
 /// later `connect` job hung outright (`rc=124`); at ≥2 workers the same program passed — a
 /// pool-width-dependent hang, which is the worst possible failure mode to ship.
 ///
+/// That measurement is UNAFFECTED by W8-8 (`--threads=1` used to run two CPU runners; fixed 2026-08-18)
+/// and structurally so: `vm::pool` is sized straight off `worker_count()`, whereas W8-8's extra runner
+/// lived in the nursery enlist/owner path in `sched.rs`. So `CHEZZI_THREADS=1` gave this pool exactly one
+/// thread before that fix and still does — re-derived on the 1-wide binary the same day (`Err` in
+/// 0.006 s, rc=0, no hang).
+///
 /// The check is written as the `Err` rather than as the starvation repro on purpose: the pool width is
 /// process-global (`CHEZZI_THREADS` read once), so a width-1 test would be both flaky under the
 /// parallel test harness and a 30 s hang when it regressed. `Err`-promptly is the contract the

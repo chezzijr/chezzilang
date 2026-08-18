@@ -905,7 +905,14 @@ impl Vm {
                 // clear its `body_open` veto or a genuine nested deadlock hangs.
                 let _bodies = self.blocked_bodies_guard(true);
                 let _party = self.nursery_party_guard(&sched);
-                shell.mn_worker_loop(&sched, 0, sid);
+                // T1-fix (W8-8, nested arm) — this scope has NO drainer of its own; the OUTER scope's
+                // `chezzi-eager` drainer already drains the shared global queue (scope-blind) and
+                // cannot self-stop while `main` sits here (`scopes[0].body_open` stays true), so at a
+                // budget of one that drainer alone is the whole CPU allowance. Running the inline
+                // owner too would be a second runner. Same gate as the outermost arms below.
+                if eager_joiner_runs_fibers(worker_count()) {
+                    shell.mn_worker_loop(&sched, 0, sid);
+                }
                 sched.wait_for_scope(sid);
             }
             let slots = sched.take_scope_slots(sid);
@@ -915,7 +922,9 @@ impl Vm {
         self.farm_outermost_eager_helpers(&sched, &cancel);
         {
             let _party = self.nursery_party_guard(&sched);
-            shell.mn_worker_loop(&sched, 0, 0);
+            if eager_joiner_runs_fibers(worker_count()) {
+                shell.mn_worker_loop(&sched, 0, 0);
+            }
             sched.wait_for_completion();
         }
         if let Some(h) = drainer {
@@ -943,7 +952,7 @@ impl Vm {
         if self.mn.is_some() || sched.outstanding_tasks() < 2 {
             return;
         }
-        for wid in 2..worker_count().max(2) {
+        for wid in eager_helper_wids(worker_count()) {
             let mut shell = self.spawn_shell(sched, cancel);
             let sched = Arc::clone(sched);
             pool::submit(Box::new(move || {
@@ -991,7 +1000,10 @@ impl Vm {
             {
                 let _bodies = self.blocked_bodies_guard(true); // see `join_eager_nursery`'s nested arm
                 let _party = self.nursery_party_guard(&sched);
-                shell.mn_worker_loop(&sched, 0, sid);
+                // T1-fix (W8-8, nested arm) — same gate as `join_eager_nursery`'s nested arm above.
+                if eager_joiner_runs_fibers(worker_count()) {
+                    shell.mn_worker_loop(&sched, 0, sid);
+                }
                 sched.wait_for_scope(sid);
             }
             let slots = sched.take_scope_slots(sid);
@@ -1004,7 +1016,9 @@ impl Vm {
             // `main`, which must be a counted party for that span or the process-wide verdict vetoes
             // forever. No-op on a worker shell.
             let _party = self.nursery_party_guard(&sched);
-            shell.mn_worker_loop(&sched, 0, 0);
+            if eager_joiner_runs_fibers(worker_count()) {
+                shell.mn_worker_loop(&sched, 0, 0);
+            }
             sched.wait_for_completion();
         }
         if let Some(h) = drainer {
@@ -1789,7 +1803,41 @@ impl Vm {
             // (finished, or re-parked for another worker to resume), so this thread exits to keep the
             // net live-worker count at N. The joining thread's `wait_for_completion` holds the reduce
             // until the replacements fill every slot.
+            //
+            // gaps.md W8-7 hang regression — notify HERE, at the departure, not at `yield_fiber`'s
+            // requeue. `yield_fiber`'s no-notify argument #1 ("the yielding worker loops straight back
+            // into `take_runnable`") is false on exactly this exit: this worker does NOT loop back, it
+            // returns. The demoted fiber's replacement, spun up by `demote_recv_block` et al. at
+            // demote time, typically parked into `take_runnable`'s untimed `cv.wait` well before this
+            // point (`runnable == 0` while the demoted fiber ran) — so if the fiber the demoted thread
+            // was just running preempted on its way out (`Disp::Yield` -> `yield_fiber`, no notify),
+            // the requeued fiber has ZERO live consumers: not this thread (leaving), not the
+            // replacement (asleep, untimed). `wait_for_completion` is ALSO an untimed `cv.wait`, so the
+            // joiner never wakes either — a hang, not a slow path. All four demote entry points route
+            // here (`demote_recv_block`, `demote_wait_block`, `demote_block_sleep`,
+            // `demote_socket_enter`), so the notify must be unconditional on this exit, not shaped to
+            // any one of them. Cost: once per demoted-thread exit, not once per `CONTEXT_REDS`
+            // dispatched ops — off the hot path W8-7 is about.
+            //
+            // THE ENUMERATION `yield_fiber` CROSS-REFERENCES — every way this loop is left, and who
+            // consumes a fiber `yield_fiber` requeued without a wake. It lives here, in the code that
+            // claims to hold it, because the W8-7 hang was caused by a comment asserting a case it had
+            // not enumerated:
+            //   (a) `Take::Stop => return` (the `match` at the top). `Stop` is RETURNED BY
+            //       `take_runnable`, so a worker taking it has by definition re-entered and evaluated
+            //       the queue — it cannot be holding an unconsumed yield. Of its four sites, the
+            //       owner-stop, deadlock and W7-58 branches all `notify_all` before returning; the
+            //       `c.terminate` branch does not, which is benign because both writers of
+            //       `terminate` (`MnSched::finish`, `flag_deadlock`) `notify_all` right after setting
+            //       it, and the run is ending regardless.
+            //   (b) this `self.demoted` return — the hole, closed by the notify below.
+            //   (c) a panic is NOT an exit: `run_one_fiber` wraps its whole body in `catch_unwind` and
+            //       converts a panic into `Disp::Finish(panic_outcome(..))`, so the loop continues. The
+            //       outer `catch_unwind`s in the shells only see a panic from `take_runnable`/`park`/
+            //       `finish` themselves, which is a pre-existing scheduler-bug path (see
+            //       `eager_joiner_runs_fibers`' own hazard note).
             if self.demoted {
+                sched.cv.notify_all();
                 return;
             }
         }
@@ -5103,6 +5151,48 @@ impl Vm {
             }
         }
     }
+}
+
+/// W8-8 — the wid range of the pool helpers an outermost eager nursery farms. wid 0 is the inline
+/// joiner and wid 1 the raw `chezzi-eager` drainer, both unconditional threads, so helpers start at
+/// 2 and the range end is the whole runner budget.
+pub(super) fn eager_helper_wids(n: usize) -> std::ops::Range<usize> {
+    2..n.max(2)
+}
+
+/// W8-8 — the inline joiner runs fibers only when the budget has a slot left after the drainer.
+/// At `n == 1` the drainer already holds the only slot, so the joiner just waits for completion —
+/// otherwise `--threads=1` runs two CPU runners and does not serialize.
+///
+/// T1-fix — a hazard this gate introduces, not fixed here: at `n == 1` the joiner no longer runs any
+/// fiber loop of its own, so it is now purely a spectator waiting on the drainer thread. A panic
+/// inside `take_runnable`/`park`/`finish` itself (outside `run_one_fiber`'s own inner
+/// `catch_unwind`) is swallowed by the drainer thread's OUTER `catch_unwind`
+/// (`activate_eager_nursery`'s `spawn(move || { catch_unwind(...) })`); the thread then exits with
+/// its scope's slots unfilled, and at `n == 1` there is nothing else left to fill them, so the
+/// joiner's `wait_for_completion`/`wait_for_scope` blocks forever. Pre-W8-8 the joiner's own fiber
+/// loop covered that. At `n >= 2` the cover differs BY ARM and only one of them has a fallback: the
+/// OUTERMOST arms farm pool helpers (`farm_outermost_eager_helpers`, called from
+/// `join_eager_nursery` alone) so a dead drainer still leaves runners behind, while the NESTED arms
+/// farm nothing at all — there the joiner's own loop IS the only cover, so the window is closed at
+/// `n >= 2` purely because the gate lets that loop run. Requires a pre-existing scheduler bug to
+/// reach, so no code change here — recorded so the next reader sees the trade.
+///
+/// **And do not "restore" the old cover without reading what it actually did.** The pre-W8-8 joiner
+/// loop did not rescue the lost fiber — nothing can; its slot is gone either way. What it did was sit
+/// in `take_runnable` as an idle worker and therefore EVALUATE `is_deadlocked`, whose clause requires
+/// `parked_n > 0 || blocked_native > 0`. So the old behaviour was: a scheduler-internal panic with at
+/// least one parked sibling reported **`deadlock`** — a confidently WRONG verdict for a panicked
+/// runtime — and with no parked sibling it hung anyway (the predicate declines, and the joiner's own
+/// `take_runnable` then does the same untimed `cv.wait`). The change therefore narrows to: one
+/// wrong-verdict case becomes a hang. Per this repo's standing rule that a heuristic verdict must
+/// DECLINE rather than emit a confident wrong answer (`docs/gaps.md` W7-12, the `parked-is-not-stuck`
+/// line of cases), that is the better of two bad outcomes, not a regression to undo. The real fix is
+/// not a joiner loop — it is deciding what the scheduler should do when a worker thread panics at
+/// all, which every `catch_unwind` in this file swallows today and which is a design question wider
+/// than this gate.
+pub(super) fn eager_joiner_runs_fibers(n: usize) -> bool {
+    n >= 2
 }
 
 /// EAGER `submit` (M:N), the atomic half — reserve this job's submission slot and hand it to the

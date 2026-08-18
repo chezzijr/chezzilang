@@ -1632,3 +1632,140 @@ unfinished tasks (`Vm::farm_outermost_eager_helpers`).
 
 `docs/gaps.md` carries an open **+10.2% 120k-spawn-storm** perf residual from the earlier eager-nursery
 work; the storm win here repays it (that row is already marked CLOSED there).
+
+## W8-7 / W8-8 idle-worker-policy fix — measured against Go, Rust, and CPython ancestors (2026-08-18)
+
+`docs/gaps.md` **W8-7** (idle workers thrash instead of parking — sys time explodes as worker count
+rises) and **W8-8** (`--threads=1` silently ran two CPU runners) both landed on branch
+`fix/mn-idle-policy-w8-8-w8-7` before this measurement. Per `CLAUDE.md`'s ancestor rule ("RUN the
+reference program rather than reasoning about it"), the fix is checked here against three real
+implementations of the identical workload, not just Chezzi's own before/after.
+
+**Workload.** `examples/primes_parallel.chz`: 4 spawned tasks, trial-division prime counting over
+`[2,500k) [500k,1M) [1M,1.5M) [1.5M,2M)`, joined and summed. Twin programs — `benches/go/nursery_fanout.go`
+(`sync.WaitGroup`, `GOMAXPROCS` swept), `benches/rust/nursery_fanout.rs` (fixed N-thread fan-out over a
+shared work list, N from argv), `benches/py/nursery_fanout.py` (`ThreadPoolExecutor(max_workers=N)`) —
+all print the identical line, verified before any timing was trusted:
+
+```
+primes below 2,000,000: 148933
+```
+
+(all four — Chezzi, Go, Rust, Python — printed exactly this on this box before timing started).
+
+**Machine:** 12-core Linux, go1.26.6, rustc 1.97.1, Python 3.14.7, release binary built fresh at HEAD
+`1561bd11` via the required `systemd-run` wrapper (binary mtime confirmed newer than `src/vm/sched.rs`).
+`bash -c "TIMEFORMAT='real %3R user %3U sys %3S'; time <cmd>"` per the box's missing `/usr/bin/time`;
+`cores = user/real`. Machine was otherwise idle for every timed run (no concurrent `cargo`).
+
+**Chezzi — before the fix** (base `088c202a`, same box, same program — recorded, not re-measured here):
+
+| `--threads` | real | user | sys | cores |
+|---|---|---|---|---|
+| 1 | 8.936 | 17.053 | 0.117 | 1.91 |
+| 2 | 7.943 | 15.133 | 0.096 | 1.91 |
+| 4 | 5.742 | 17.670 | 0.384 | 3.08 |
+| 12 | 7.860 | 29.523 | 10.729 | 3.76 |
+| 0 (default) | 8.225 | 32.595 | 10.110 | 3.96 |
+
+**Chezzi — after the fix** (HEAD `1561bd11`, release binary):
+
+| `--threads` | real | user | sys | cores |
+|---|---|---|---|---|
+| 1 | 15.301 | 15.327 | 0.236 | 1.00 |
+| 2 | 8.743 | 16.733 | 0.030 | 1.91 |
+| 3 | 6.321 | 16.750 | 0.006 | 2.65 |
+| 4 | 5.594 | 16.867 | 0.008 | 3.02 |
+| 6 | 5.777 | 17.604 | 0.006 | 3.05 |
+| 8 | 5.539 | 16.880 | 0.016 | 3.05 |
+| 12 | 5.586 | 16.879 | 0.003 | 3.02 |
+| 0 (default) | 5.961 | 18.475 | 0.009 | 3.10 |
+
+Both signals the fix set out to produce are present. **W8-8:** `--threads=1` now reads **cores ≈ 1.00**
+(user ≈ real), not the ~1.91 it showed before — the phantom second runner is gone, and this is now the
+true serial baseline (real climbs to 15.3 s, because it's genuinely running on one core, not two). **W8-7:**
+sys collapses at high worker counts — 10.729 s → 0.003 s at T=12, 10.110 s → 0.009 s at T=0 — idle
+workers park instead of spinning, and `real` at T=12/T=0 drops accordingly (7.860→5.586, 8.225→5.961).
+(A second sweep of the after-fix numbers landed T=1 at 16.781/16.793/0.267 and T=12 at 5.497/16.728/0.003
+— run-to-run noise on this box of a few percent, same shape both times; the table above is the cleaner
+of two consecutive sweeps.)
+
+**Go** (`benches/go/nursery_fanout.go`, built once with `go build`, `GOMAXPROCS` swept):
+
+| `GOMAXPROCS` | real | user | sys | cores |
+|---|---|---|---|---|
+| 1 | 0.414 | 0.412 | 0.002 | 1.00 |
+| 2 | 0.222 | 0.416 | 0.002 | 1.87 |
+| 4 | 0.142 | 0.428 | 0.001 | 3.01 |
+| 12 | 0.144 | 0.433 | 0.001 | 3.01 |
+
+**Rust** (`benches/rust/nursery_fanout.rs`, built once with `rustc -O`, N-thread fan-out over a shared
+work list, N from argv):
+
+| N (threads) | real | user | sys | cores |
+|---|---|---|---|---|
+| 1 | 0.248 | 0.245 | 0.002 | 0.99 |
+| 2 | 0.132 | 0.250 | 0.001 | 1.89 |
+| 4 | 0.085 | 0.258 | 0.000 | 3.04 |
+| 12 | 0.104 | 0.318 | 0.001 | 3.06 |
+
+**Python** (`benches/py/nursery_fanout.py`, `ThreadPoolExecutor(max_workers=N)`, N from argv — **weak
+oracle for CPU work**, see below):
+
+| `max_workers` | real | user | sys | cores |
+|---|---|---|---|---|
+| 1 | 8.194 | 8.179 | 0.005 | 1.00 |
+| 2 | 8.116 | 8.087 | 0.030 | 1.00 |
+| 4 | 8.162 | 8.138 | 0.040 | 1.00 |
+| 12 | 8.028 | 8.011 | 0.036 | 1.00 |
+
+**What each ancestor settles.**
+
+- **Go**: a `GOMAXPROCS=N` really means N runners, and sys stays flat (≤0.002 s) across the whole
+  sweep — an idle Go scheduler parks, it never spins. This is the reference behaviour W8-7 targets, and
+  post-fix Chezzi's sys column is now the same shape **at T≥2** (≤0.03 s, three orders of magnitude
+  below its own pre-fix 10+ s).
+  **`T=1` is the one number that does not fit that sentence, and it is not an anomaly** — it sits at
+  0.236 s (0.267 s on the second sweep), ~8x the T≥2 figures. W8-7 is a *herd* defect: it needs idle
+  workers to wake. At `--threads=1` there are none — `farm_outermost_eager_helpers` farms
+  `2..max(1,2)` = zero helpers and the inline joiner stands down (W8-8), leaving the drainer as the
+  sole runner — so T=1 never had the herd and its sys was already the *lowest* column pre-fix (0.117 s).
+  What that leaves is the run's own baseline syscall cost, and per wall-second it is unchanged by
+  either fix: **0.117/8.936 = 0.0131 sys/s at base, 0.236/15.301 = 0.0154 sys/s now.** The absolute
+  number rose only because `--threads=1` now correctly serializes and so takes ~1.7x longer to do the
+  same work. Compare T=4, which did have a herd to lose: 0.0014 sys/s, a 10x lower *rate*, not merely
+  a lower total.
+- **Rust**: a fixed N-thread fan-out gives N runners too (cores tracks N up to the task-count ceiling,
+  same as Go), confirming `runners == N` is the ordinary cross-language expectation for a thread-pool —
+  not a Go-specific idiom Chezzi is being held to arbitrarily.
+- **Python**: wall time is flat regardless of `max_workers` (cores pinned at 1.00 throughout) — CPython
+  3.14's default GIL serializes CPU-bound threads regardless of pool size, exactly as expected, so its
+  `real`/`cores` columns carry no signal here. Its `sys` column was expected to independently
+  corroborate the W8-7 thrash signature; measured, it does **not** on this workload — sys stays low
+  (0.005–0.04 s) at every `max_workers` value, never climbing the way pre-fix Chezzi's did. Recorded as
+  measured rather than forced to fit the expectation: CPython's `ThreadPoolExecutor` apparently doesn't
+  spin its idle pool threads under the GIL the way Chezzi's pre-fix M:N pool did its idle OS workers, so
+  this run doesn't add a third confirming data point for W8-7 — it's included for completeness and as a
+  documented non-result, not evidence.
+
+**One shape-level note the two compiled ancestors share with Chezzi:** none of the four implementations
+reaches `cores ≈ 4.0` even at high worker/proc counts, despite 4 tasks. The four ranges are equal-width
+but not equal-cost — trial division is O(√n) per candidate, so the `[1.5M,2M)` task does substantially
+more work than `[2,500k)` — so parallel wall time is bounded by the single slowest task, capping useful
+parallelism at ~3.0–3.1× regardless of language or runtime. This is a property of the workload's task
+split, not a scheduler difference, and it's why Go/Rust/Chezzi all plateau in the same place (~3.0–3.1
+cores) once worker count exceeds ~4.
+
+**Absolute gap to Go**, stated plainly and not editorialised away: at the best setting for each
+(Chezzi T=8: 5.539 s real; Go `GOMAXPROCS=4`: 0.142 s real), Chezzi is **~39× slower**. At the serial
+setting (Chezzi T=1: 15.301 s; Go `GOMAXPROCS=1`: 0.414 s), Chezzi is **~37× slower**. The ratio holds
+roughly constant (37–39×) across the whole sweep — Chezzi's curve is the same *shape* as Go's and
+Rust's (steep drop from 1→~4 workers, then a flat plateau near the task-imbalance ceiling), just offset
+by a constant factor. That constant factor is a bytecode VM against ahead-of-time-compiled native code
+on a CPU-bound trial-division inner loop — exactly where an interpreter is expected to lose the most,
+and consistent with the ~1.3×–3.5× gap already tracked for single-task CPU benches in the M19 perf
+section above (this workload's inner loop — division-heavy scalar arithmetic in a tight `while` — sits
+at the harder end of that range, not a new or contradictory data point). The fix here is a scheduling
+correctness fix, not a throughput lever: it makes `--threads=N` mean what it says and stops idle workers
+from burning CPU, it does not close the interpreter-vs-native gap, which remains open perf-track work
+(`docs/future.md §4`).

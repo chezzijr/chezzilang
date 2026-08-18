@@ -3020,14 +3020,74 @@ impl MnSched {
     /// from its own local forever (which would re-introduce the D3 starvation). Decrements `running`
     /// like `park`/`finish`. Unlike `park` it touches no `parked` bucket (a yield carries no channel
     /// handle) and always requeues, so there is no park-gap/cancel re-check: a cancelled fiber requeued
-    /// here re-runs and observes the flag at the next back-edge. `notify_all` wakes an idle worker.
+    /// here re-runs and observes the flag at the next back-edge.
+    ///
+    /// gaps.md W8-7 — deliberately **no** `cv.notify` here (was `notify_all`, 22nd-of-22 site,
+    /// removed): preemption fires every `CONTEXT_REDS` dispatched ops per fiber, so with a
+    /// multi-fiber CPU-bound scope this was a `notify_all` many times a second, each waking every
+    /// idle worker into an O(W) `try_steal` probe that finds nothing and re-parks — O(W^2) mutex/futex
+    /// churn per time slice (measured: default worker count on a 12-core box was SLOWER than
+    /// `--threads=4`, 28x the sys time). No wake is needed here because the fiber this requeues almost
+    /// always already has a live consumer — with ONE hole, closed at the departure rather than here
+    /// (see below):
+    /// 1. The yielding worker itself loops straight back into `take_runnable`
+    ///    (`Vm::mn_worker_loop`, `sched.rs`). Precisely: its only exit that does NOT go through
+    ///    `take_runnable` is `self.demoted` — the other one, `Take::Stop`, is *returned by*
+    ///    `take_runnable`, so a worker taking it has already evaluated the queue and cannot be holding
+    ///    an unconsumed yield. `mn_worker_loop`'s `self.demoted` arm carries the full exit enumeration.
+    ///    `demoted` is taken when THIS worker was itself covered by a
+    ///    replacement earlier (mid-fiber, at demote time) and now leaves for good instead of looping
+    ///    back. That replacement was spun up while `runnable == 0` and typically parked into this same
+    ///    `take_runnable`'s untimed `cv.wait` well before this yield — so on the `demoted` exit no one
+    ///    is left awake, unless something notifies. Fixed at the departure, not here: `mn_worker_loop`
+    ///    now does `sched.cv.notify_all()` on the `self.demoted` return (`sched.rs`), which is where
+    ///    the actual consumer gap is — see its doc for the enumeration. (This is the gaps.md W8-7 hang
+    ///    regression fix.)
+    /// 2. The owner-scope-completing case this argument used to cite separately is **vacuous**, not a
+    ///    second live consumer: `take_runnable`'s owner-stop branch sits *after* the global batch-grab,
+    ///    so it is reachable only with the global queue already empty — the worker would have grabbed
+    ///    its own just-yielded fiber first. It cannot be the thing that leaves a yielded fiber
+    ///    unconsumed.
+    /// 3. `runnable` accounting is unchanged (still incremented under this same lock), so
+    ///    `is_deadlocked`'s `runnable == 0` predicate cannot false-fire on a yielded fiber.
+    /// 4. Ordering is unchanged (global tail), so round-robin fairness is exactly as before — pinned by
+    ///    `mnsched_yield_fiber_requeues_at_tail`, unmodified.
+    ///
+    /// Go does NOT do the same — checked against go1.26.6's `runtime/proc.go`: `goschedImpl` (the
+    /// preemption path) calls `wakep()` on EVERY preemption, which CAS-guards a single idle P awake
+    /// (`sched.nmspinning`) — a damped single wake, not no wake. But note WHAT that wake is for.
+    /// `goschedImpl`'s last line is `schedule()`, on the same M — Go's exact equivalent of this
+    /// worker's `take_runnable` re-entry — so the preempted `g` already has a consumer and `wakep` is
+    /// a **recruitment** wake, not a liveness one: it brings an idle P online now that there is one
+    /// more runnable `g` than there are runners. That is why one spinner is enough to suppress it
+    /// (`nmspinning`) and why it is gated on `mainStarted`, neither of which would make sense for a
+    /// wake the `g`'s survival depended on. So the honest comparison is NOT that Chezzi's guarantee is
+    /// stronger — both runtimes have the same always-present consumer. What Chezzi gives up by not
+    /// waking is the RECRUITMENT: Chezzi wakes ZERO times per preemption where Go wakes at most one,
+    /// so an idle Chezzi worker is never recruited mid-slice the way an idle Go P can be. That is
+    /// sound here because a preemption does not create work — it re-queues work that already had a
+    /// runner — and because the ways a fiber becomes runnable for the FIRST time all notify (`inject`,
+    /// `wake_bucket` at all four callers, the park/send/wait gap requeues, `cancel_drain`,
+    /// `complete_offload`, and the batch-grab surplus push above). Exactly one other site increments
+    /// `runnable` without notifying — `register_scope_seeded`, which seeds a nested nursery's fibers on
+    /// a LIVE sched — and it has **two callers whose safety arguments are different**, which matters
+    /// because this enumeration is the whole liveness case:
+    ///   - `Vm::run_mn_nursery_nested` (`sched.rs`, the seeding caller) is safe because it becomes the
+    ///     consumer on the very next line (`shell.mn_worker_loop(..)`) — the `yield_fiber` argument.
+    ///   - `Vm::activate_eager_nursery`'s nested-scope branch (`sched.rs`) is NOT: it returns an
+    ///     `EagerScope` with no loop after it. It is safe **only because it passes `Vec::new()`**, so
+    ///     the `fetch_add` is `+0` and nothing becomes runnable. **A future commit that seeds a
+    ///     non-empty vec there gets no notify and no consumer** — add the notify at that call site if
+    ///     you ever do.
+    ///
+    /// `seed` is a third no-notify site, but it runs pre-start. This is the sys-time collapse W8-7
+    /// measured.
     fn yield_fiber(&self, mut fiber: Fiber) {
         let mut c = self.lock();
         c.running -= 1;
         fiber.state = FiberState::Ready;
         c.global.push_back(fiber);
         self.runnable.fetch_add(1, Ordering::Relaxed); // running → ready (round-robin requeue)
-        self.cv.notify_all();
     }
 
     /// D4c — try to steal runnable work for an idle worker `wid` from a sibling's local queue. Probes

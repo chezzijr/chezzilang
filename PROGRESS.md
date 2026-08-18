@@ -7,6 +7,197 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+> **✅ W8-8 CLOSED — `chezzi run --threads=1` now runs exactly ONE CPU runner in BOTH the outermost
+> AND the nested eager-nursery arm, 2026-08-18 (`fix/mn-idle-policy-w8-8-w8-7`).** An OUTERMOST eager
+> nursery's runner budget is `1 (drainer) + helpers + joiner`, sized for `max(N, 2)` total slots —
+> correct for N>=2, but at N=1 the inline
+> joiner (`main`, `Vm::join_eager_nursery`/`abort_eager_nursery`) ran a full fiber loop ALONGSIDE the
+> unconditional raw `chezzi-eager` drainer thread, so `--threads=1` silently ran TWO CPU runners
+> (measured `user/real` = **1.91**, identical to `--threads=2`). Fix: two named pure functions in
+> `src/vm/sched.rs` — `eager_helper_wids(n) = 2..n.max(2)` (unchanged arithmetic, now named) and
+> `eager_joiner_runs_fibers(n) = n >= 2` — gate the inline joiner's `shell.mn_worker_loop(&sched, 0,
+> 0)` call in both outermost arms (`join_eager_nursery`, `abort_eager_nursery`); at N=1 the joiner now
+> only waits on `sched.wait_for_completion()`, which the drainer alone satisfies. Measured on the
+> release binary, same box, before/after: `--threads=1` **user/real 16.404/8.590 = 1.91 → 16.286/16.240
+> = 1.003**; `--threads=2`/`4` unchanged (1.91 / 3.08). `--threads=12`/`0` (auto) keep their high `sys`
+> column — that's W8-7 (the idle-wake broadcast), a deliberately separate follow-up; not touched here.
+> Tests: `vm::tests::eager_runner_budget_sums_to_worker_count` (pure-function invariant, n in 1..=12)
+> and `tests/chezzi_threads_cli.rs`'s `threads_one_serializes_cpu_bound_parallel_tasks` (1x vs 8x CPU
+> burn under `CHEZZI_THREADS=1`, ratio > 5.5; measured pre-fix ratio ~3.94-4.0 on a debug build, matching
+> `docs/gaps.md`'s ~4.4 release-binary measurement). `cargo test --lib` 4199/0/2, `cargo test --test
+> chezzi_threads_cli` 3/3, `cargo clippy --all-targets -- -D warnings` clean.
+>
+> **T1-fix follow-up, same day/branch — the fix above only covered the OUTERMOST arm; a NESTED eager
+> nursery survived at ~1.97-1.98 cores.** `Vm::activate_eager_nursery` has a third branch
+> (`src/vm/sched.rs:764`, `self.mn.is_none() && an outer eager scope is already open`) taken when a
+> `parallel:` opens while ANOTHER `parallel:` on the SAME thread (`main`) is still mid-body — e.g. a
+> `parallel:` written directly inside another `parallel:`'s body, three levels deep, or a helper
+> function containing its own `parallel:` CALLED (not `spawn`ed) from inside an outer `parallel:`
+> body. That branch returns `EagerScope { drainer: None, .. }` and relies entirely on the OUTER
+> scope's `chezzi-eager` drainer — but `join_eager_nursery`'s and `abort_eager_nursery`'s
+> `drainer.is_none()` arms (`sched.rs:908`/`996`, pre-fix) ran an UNCONDITIONAL
+> `shell.mn_worker_loop(&sched, 0, sid)` alongside that drainer, a second CPU runner at a budget of
+> one. (A `spawn: work()` does NOT hit this branch — the spawned fiber runs on a worker shell whose
+> `self.mn` is already `Some`, taking the general private-sched path, which the arm above already
+> gated.) Fix: gate both sites on the same `eager_joiner_runs_fibers(worker_count())` used for the
+> outermost arms. Test: `tests/chezzi_threads_cli.rs`'s new
+> `threads_one_serializes_nested_eager_parallel_tasks` (same 1x-vs-8x construction, `fn work():
+> parallel: ...` called synchronously from a `parallel:` body; measured pre-fix ratio ~3.73 on a debug
+> build). Measured on the release binary, four shapes, `--threads=1`, before → after cores (user/real):
+> flat 4-spawn 1.04 → 1.04 (unaffected), `parallel:` directly nested 1.98 → 1.04, three-deep 1.98 →
+> 1.04, `fn work(): parallel:` called from a `parallel:` body 1.98 → 1.04. `cargo test` full suite
+> green (22 targets, incl. `tests/chz` 617/617 at both worker counts), `cargo clippy --all-targets -- -D
+> warnings` clean.
+>
+> > **The budget identity `1 (drainer) + helpers + joiner == N` describes the OUTERMOST arm only —
+> > read `vm::tests::eager_runner_budget_sums_to_worker_count`'s name with that qualifier.** A NESTED
+> > eager scope farms no helpers at all (`farm_outermost_eager_helpers` is called from
+> > `join_eager_nursery`'s outermost arm alone), so its budget is `1 (outer drainer) + joiner` and it
+> > is **capped at 2 runners at every worker count**. Measured on the release binary at `69be64ad`,
+> > cores = user/real: flat 1.97 (T=2) · 3.93 (T=4) · 4.30 (T=8); directly nested 1.97 · 1.98 · 1.98;
+> > `fn work(): parallel:` called 1.97 · 1.98 · 1.98. **Pre-existing and untouched by W8-8** —
+> > `eager_joiner_runs_fibers(n)` is `true` for every `n >= 2`, so every T>=2 path is byte-identical to
+> > base `088c202a` — and it errs toward UNDER-subscription, which is the safe direction. It stays
+> > that way deliberately: farming the bounded pool from a nested scope is what `exec.rs:1694`'s
+> > `worker_count() >= 2` gate exists to prevent, because nesting can exhaust the fixed pool into an
+> > undetectable hang (measured, `docs/future.md:418`: depth 7 / 128 leaves went 3 threads → 130).
+> > Recorded here so it is not mistaken for a fresh idle-spin defect while W8-7 is worked.
+>
+> **Adversarial-review fix wave on `fix/mn-idle-policy-w8-8-w8-7`, 2026-08-18 — the W8-7 sys-time gate
+> was silently skipped on every CI run, and it could not have discriminated there anyway.** Two
+> isolated prosecutors filed 10 charges; the defense dismissed 6 with measurements and upheld 3.
+> **(a) The gate never ran on CI.** It skipped below 8 cores and `.github/workflows/ci.yml` uses
+> `ubuntu-latest`, so `cargo test` reported `1 passed` with zero coverage — libtest captures stderr on
+> a passing test, so the SKIP line was invisible. Worse, the skip was *load-bearing*: measured on 4
+> CPUs at the default worker count, the pre-fix binary scored sys/user **0.0018** and the post-fix
+> **0.0019** — with the threshold removed the gate would have passed a fully regressed binary.
+> **Root cause: W8-7's trigger is IDLE WORKERS, not cores**, and the gate inherited the core count.
+> Fix: drive `CHEZZI_THREADS` **explicitly** (`HERD_WORKERS = 32`, so 28 workers sit idle against the
+> fixture's 4 tasks at any core count) and recalibrate the ceiling against **both** binaries — the
+> pre-fix `088c202a` built in its own `CARGO_TARGET_DIR`, `taskset`-pinned to simulate small CI:
+>
+> | CPUs | pre-fix sys/user | post-fix sys/user |
+> |---|---|---|
+> | 2 | 0.0268 – 0.0345 | 0.0013 – 0.0019 |
+> | 4 | 0.0803 – 0.0858 | 0.0006 – 0.0029 |
+> | 12 | 0.2246 | 0.0023 |
+>
+> `MAX_SYS_OVER_USER = 0.015` is the only value with ≥1.8x margin on BOTH sides at every core count
+> down to 2; the core floor drops 8 → 2 (below that the herd cannot form at all). Test renamed
+> `many_idle_workers_do_not_thundering_herd_on_yield` — it no longer measures "the default".
+> **(b)** The `yield_fiber` no-notify enumeration said `register_scope_seeded`'s "caller becomes the
+> consumer on the very next line". True of one of its two callers; `activate_eager_nursery`'s
+> nested-scope branch returns an `EagerScope` with no loop after it and is safe **only because it
+> passes `Vec::new()`** — now stated, with the warning that seeding a non-empty vec there needs its own
+> notify.
+> **(c)** The `n == 1` panic-wedge note now records what the pre-W8-8 joiner loop actually did: it
+> could not rescue the lost fiber either, it merely sat in `take_runnable` and so evaluated
+> `is_deadlocked`, reporting **`deadlock`** — a confidently wrong verdict for a panicked runtime — when
+> a sibling happened to be parked, and hanging when none was. So the change narrows one wrong-verdict
+> case to a hang, which this repo's own "decline rather than answer wrong" rule prefers. Left as is,
+> deliberately; the real question is what the scheduler should do when a worker thread panics at all,
+> which every `catch_unwind` in `sched.rs` swallows today.
+> Dismissed with evidence: co-resident test flakiness (8/8 clean runs; 6 ratio pairs taken under a
+> continuously co-resident `tests/chz` loop gave 7.19–8.10 against a 5.5 floor), `set_worker_count(2)`
+> pinning the process pool (`eager_helper_wids(2)` is `2..2`, so that test submits zero pool jobs),
+> the ratio tests failing on fast hardware (~88% of the 7.4 ms "startup" is CPU-bound front-end that
+> scales with the host; only ~0.9 ms is fixed), and two doc-scope charges.
+
+> **✅ W8-7 CLOSED — the default worker count is no longer the slowest setting, 2026-08-18
+> (`fix/mn-idle-policy-w8-8-w8-7`).** Idle workers already parked on a true `Condvar::wait` (no spin) —
+> the row's own filed fix direction ("park instead of spin") was wrong, same class as W8-2's filed
+> prescription. The real cost was the WAKE side: `MnSched::yield_fiber` (`src/vm/mod.rs`, D3 —
+> reduction-budget preemption, fires every `CONTEXT_REDS` dispatched ops per fiber) called
+> `cv.notify_all()` on every requeue, and `MnSched.cv` had 22 `notify_all` sites and zero `notify_one`.
+> On a CPU-bound `parallel:` scope with more cores than tasks, each broadcast woke every idle worker
+> into an O(W) `try_steal` probe that found nothing and re-parked — O(W^2) mutex/futex churn per time
+> slice, tens of thousands of slices a second. Fix: delete the `notify_all` from `yield_fiber`, one
+> line, replaced with a doc comment recording the liveness argument (the yielding worker always loops
+> straight back into `take_runnable` itself; the one path that could strand a requeued fiber — its
+> owner scope completing — already broadcasts in `take_runnable`'s owner-stop branch; `runnable`
+> accounting and global-tail ordering are both unchanged, so the deadlock predicate and
+> `mnsched_yield_fiber_requeues_at_tail`'s round-robin-fairness assertion are unaffected — that test
+> stays verbatim). **Correction (see the hang-fix entry below): Go does NOT do the same** — go1.26.6's
+> `goschedImpl` calls `wakep()` on every preemption (a damped single wake, CAS-guarded on
+> `sched.nmspinning`), not no wake. And Go's wake is **recruitment, not liveness**: `goschedImpl`'s
+> last line is `schedule()` on the same M — Go's exact equivalent of the yielding worker's
+> `take_runnable` re-entry — so the preempted `g` already has a consumer, and `wakep` exists only to
+> bring an idle P online now that there is one more runnable `g` than runners (which is why one
+> spinner suppresses it, and why it is gated on `mainStarted`). So Chezzi's guarantee is not
+> *stronger* than Go's — both have the same always-present consumer. What Chezzi gives up is that
+> recruitment: it wakes zero times per preemption where Go wakes at most one, so an idle Chezzi worker
+> is never recruited mid-slice. Sound here because a preemption re-queues work that already had a
+> runner rather than creating any. Measured on the
+> release binary, `examples/primes_parallel.chz`, before → after (`real`/`user`/`sys`, sys is the
+> signature): `--threads=4` 5.742/17.670/0.384 → 5.603/17.087/0.004 (unaffected — no idle-worker herd to
+> wake there); `--threads=12` 7.860/29.523/10.729 → 5.529/16.891/0.009 (**28x → ~0 sys**, and no longer
+> slower than `--threads=4`); default (`--threads=0`, all cores) 8.225/32.595/10.110 →
+> 5.558/17.015/0.009. `--threads=1` user/real ratio stays ~1.0 (W8-8 unaffected: 17.098/17.078=1.001).
+> Tests: `vm::tests::mnsched_yield_fiber_reachable_by_other_worker_without_wake` (new — pins that a
+> yielded fiber is reachable by a DIFFERENT worker through the plain global-queue path with no notify
+> involved) and a new standalone file `tests/chezzi_threads_sys_time.rs`'s
+> `many_idle_workers_do_not_thundering_herd_on_yield` (per-child `sys`/`user` via `libc::wait4` on
+> a flat 4-task CPU-bound `parallel:`, asserts `sys < 0.03 * user` at the default worker count; RED
+> pre-fix measured ratio 0.0886-0.106 on this box's debug binary, GREEN post-fix ~0.0-0.003).
+> Deliberately its own test **target** (not folded into `tests/chezzi_threads_cli.rs`, where the brief
+> first placed it): cargo runs separate integration-test targets sequentially but `#[test]` fns within
+> one target run concurrently up to `--test-threads`, and this test's genuinely CPU-bound subprocess
+> measurably destabilized `chezzi_threads_cli.rs`'s W8-8 timing tests when they shared a target
+> (reproduced: 1 failure in 4 runs of the combined file, `threads_one_serializes_cpu_bound_parallel_tasks`
+> dropped to ratio 4.34 under its 5.5 floor; 0 failures in 7 runs once separated) — a separate target
+> sidesteps the interference without touching the W8-8 tests. `cargo test --lib` 4200/0/2, `cargo test`
+> full suite green (23 targets, incl. `tests/chz` 617/617 at both worker counts), `cargo clippy
+> --all-targets -- -D warnings` clean.
+>
+> **T2-fix — W8-7 hang-regression fix, 2026-08-18 (`fix/mn-idle-policy-w8-8-w8-7`).** Task review found
+> the deleted `notify_all` above left a Critical hang: `MnSched::yield_fiber`'s liveness argument #1
+> ("the yielding worker always loops straight back into `take_runnable`") is false on its own stated
+> exception — a demoted worker's `self.demoted` return in `Vm::mn_worker_loop` (`src/vm/sched.rs`) does
+> NOT loop back, and the replacement thread `demote_recv_block`/`demote_wait_block`/
+> `demote_block_sleep`/`demote_socket_enter` spin up at demote time typically already parked into
+> `take_runnable`'s untimed `cv.wait` (`runnable == 0` while the demoted fiber ran) before the demoted
+> fiber's own `Disp::Yield` (`CONTEXT_REDS` exhausted post-recv) requeued it with no notify — zero live
+> consumers, and `wait_for_completion`'s untimed `cv.wait` never wakes the joiner either: a hang, not a
+> slow path. Repro: a `recv` inside a native `xs.map` callback (demotes) followed by a tail loop
+> burning >`CONTEXT_REDS` ops (forces a post-demote `Disp::Yield`) hung 3/3 and 2/2 (rc=124) at `--threads=1`/`2` and
+> 1/2 at `--threads=4` on the pre-fix release binary under `timeout 10`, vs 3/3 rc=0 at every setting on
+> the pre-W8-7 base. Fix: notify at the departure, not the requeue — `mn_worker_loop`'s `self.demoted`
+> exit now does `sched.cv.notify_all()` before returning (`src/vm/sched.rs`), covering all four demote
+> entry points generically. Cost: once per demoted-thread exit, not once per `CONTEXT_REDS` dispatched
+> ops, so the W8-7 sys-time win is untouched (re-measured unchanged, see the W8-7 entry above). The
+> liveness argument on `yield_fiber`'s doc comment (`src/vm/mod.rs`) is rewritten: argument #1 now
+> names the departure fix instead of the false "already awake" claim, argument #2 (the owner-stop
+> broadcast) is marked vacuous — that branch sits after the global batch-grab, so it's only reachable
+> with the global queue already empty, which the yielded fiber's own presence there rules out — and the
+> Go comparison is corrected (see the W8-7 entry above). New regression test
+> `vm::tests::w8_7_demoted_fiber_yield_after_demote_does_not_strand_replacement` (`src/vm/tests.rs`)
+> reproduces C1 under a 15 s watchdog, forced to `worker_count(2)` for determinism; captured RED at
+> `dfac4e64` (watchdog panic, not a hang) before the fix, green after. The four existing demote tests
+> all miss this class because every one finishes its fiber in well under `CONTEXT_REDS` ops after the
+> demote, so no `Disp::Yield` ever fires on a demoted worker in that corpus — a narrowing of when a
+> wake fires, untested by a corpus written before the narrowing landed. Also: `tests/chezzi_threads_sys_time.rs`
+> now skips loudly below 8 cores (the O(idle-worker-count^2) herd the gate detects can't raise a signal
+> with too few idle workers, so the gate would go vacuous rather than fail on a fully regressed binary
+> on a small CI box) and its `use std::process::Command` is now `#[cfg(unix)]`-gated so
+> `clippy --all-targets -- -D warnings` stays clean on non-unix targets.
+>
+> **Docs sweep + branch-final gate, 2026-08-18 (`fix/mn-idle-policy-w8-8-w8-7`).** `docs/gaps.md` rows
+> **W8-7 and W8-8 are struck through and closed** (W8-7's closure records that its own filed
+> prescription — *"an idle worker must park on a condvar, not spin"* — was **measured wrong**: idle
+> workers already parked untimed; the cost was the wake side. Third instance of the read-the-closed-row's-
+> prescription convention, after W8-2). **Open W8 rows: 17 → 15** (W8-1, W8-3, W8-4, W8-6, W8-9..W8-13,
+> W8-16, W8-17, W8-19, W8-20, plus the milestones W8-21/W8-22), counted off the table. The scheduler
+> session-log section, the "Fix order" list, `docs/concurrency.md`'s `--threads=1` corrective callout,
+> `docs/stdlib.md`, `docs/future.md`, `docs/bug-discovery.md`, `CLAUDE.md` and two source doc-comments
+> (`src/vm/netio.rs`, `src/vm/golden_tests.rs` — comment-only) all carry the re-derivation: **all nine
+> claims that rested on a two-wide `CHEZZI_THREADS=1` were re-run on the genuinely 1-wide binary and
+> every one came back CONFIRMED or UNCHANGED-BY-DESIGN — none false.** Load-bearing one: the N8 shape
+> that justified deleting `--serial`, **15/15 faults in 4–6 ms, 0 hangs**. Branch-final gate: `cargo
+> test` **4432 passed / 0 failed / 3 ignored across 23 targets** (lib target 4201 passed / 0 failed /
+> 2 ignored), `cargo clippy --all-targets -- -D warnings` and `--features lsp` both clean, `cargo test
+> --features lsp --test lsp_smoke` 11/11, `chezzi test tests/chz` **617/617 at the default worker count
+> and 617/617 at `CHEZZI_THREADS=2`**, `chezzi docs` 7498 lines.
+>
 > **✅ Adversarial-review fix wave on `feat/span-file-and-stdlib-contracts`, 2026-08-18 — the LSP's
 > diagnostic publish is now atomic with its delivery, and a closed buffer can no longer be resurrected as
 > a diagnostic source.** Three isolated prosecutors reviewing the branch (the file-naming work above,
@@ -69,8 +260,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > discarded `Result`/`Option`) and the un-numbered airlock-trap section closed 2026-08-17** on the
 > `feat/diagnostic-pass-w8-2-airlock` branch; **W8-14 (runtime stack traces name no file), W8-15 (both
 > `check`/`test` `--errors=json` halves), and W8-5 (`json.parse`'s and `json.stringify`'s depth aborts)
-> closed 2026-08-18** on `feat/span-file-and-stdlib-contracts`. **17 rows are open** (W8-1, W8-3, W8-4,
-> W8-6..W8-13, W8-16, W8-17, W8-19, W8-20, plus the two decided milestones W8-21/W8-22) and are the top
+> closed 2026-08-18** on `feat/span-file-and-stdlib-contracts`; **W8-8 and W8-7 (the scheduler pair)
+> closed 2026-08-18** on `fix/mn-idle-policy-w8-8-w8-7`. **15 rows are open** (W8-1, W8-3, W8-4, W8-6,
+> W8-9..W8-13, W8-16, W8-17, W8-19, W8-20, plus the two decided milestones W8-21/W8-22) and are the top
 > of the pre-JIT queue.
 >
 > **The shape:** semantics are in good shape (40+ CPython differentials → **one** differing byte, `NaN`
@@ -80,9 +272,11 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > eats `{n}` regex quantifiers · ~~W8-2 a discarded `Result` is fatal at top level and silent inside a fn~~ **fixed** ·
 > W8-3 `Shared.set` inside `update` loses the write · W8-4 `sort_by_key` callback mutations vanish ·
 > W8-5 `json.parse` depth kills the process despite its `Result` · W8-6 `regex` `\1` silently emits
-> literal backslashes), a **scheduler whose default is its slowest setting** (W8-7; `--threads=1`
+> literal backslashes), ~~a **scheduler whose default is its slowest setting** (W8-7; `--threads=1`
 > actually runs **two** workers — W8-8, which invalidates every rationale in the tree citing a
-> `CHEZZI_THREADS=1` measurement), and a **diagnostics layer with no caret, no `help:`, and no "did you
+> `CHEZZI_THREADS=1` measurement)~~ **both fixed 2026-08-18** — the default is now at parity with the
+> best setting, `--threads=1` is 1.00 cores, and all nine `CHEZZI_THREADS=1`-based rationales were
+> re-derived on the 1-wide binary and held — and a **diagnostics layer with no caret, no `help:`, and no "did you
 > mean" anywhere** (W8-13, ~~W8-14~~ fixed, W8-15..W8-17).
 >
 > **META-FINDING, and the reason this is in PROGRESS and not just gaps.md: not one of W8-1..W8-17 was
@@ -95,8 +289,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > The detectors that did earn their keep are the ones comparing against something outside this repo —
 > which is CLAUDE.md's ancestor rule paying out, and the argument for `docs/future.md` §2b's unbuilt
 > Go-paired-programs differential. **Fix order** is in the session log; short version: the six silent
-> wrong answers, then W8-8 before W8-7, then Levenshtein suggestions, then `assert` operand values +
-> a `file` key in `--errors=json`.
+> wrong answers, then W8-8 before W8-7 (**both done 2026-08-18**), then Levenshtein suggestions, then
+> `assert` operand values + a `file` key in `--errors=json` (**done 2026-08-18**).
 >
 > **Docs fixed in this commit (W8-18, all twelve):** `import X from M` is the named-import form and
 > `from M import X` is a parse error (`syntax.md` §12, `stdlib.md`, `CLAUDE.md`, 16 `std/*.chz` headers) ·

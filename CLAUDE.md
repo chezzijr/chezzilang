@@ -187,7 +187,7 @@ static protocol requirements callable through a generic bound via witness passin
 OS-thread M:N engine, netpoller + `std.net`). The checker also has a **non-fatal warning channel**
 (`Severity::Warning`, `"severity"` in `--errors=json`, `DiagnosticSeverity::WARNING` in the LSP) with
 two rules on it — a discarded `Result`/`Option`, and a `spawn:`-task write read after the join.
-**4426 Rust tests** green across 22 targets (**4198** in the lib target), plus **617**
+**4432 Rust tests** green across 23 targets (**4201** in the lib target), plus **617**
 Chezzi tests green at two worker counts (up from 590 at the start of `feat/span-file-and-stdlib-contracts`).
 
 ## Current focus
@@ -198,26 +198,34 @@ Right now: **pre-JIT/pre-freeze bug-hunt + drift-fix hunt** is the active phase 
 checker↔runtime, and IO drift — live ledger in `docs/gaps.md`), with **M19 — Perf track** paused
 in-progress alongside it.
 
-> **START HERE (2026-08-18): `docs/gaps.md` W8-1..W8-22.** **17 open rows** — W8-1, W8-3, W8-4,
-> W8-6..W8-13, W8-16, W8-17, W8-19, W8-20 from the **external dogfood pass**, plus two DECIDED language
+> **START HERE (2026-08-18): `docs/gaps.md` W8-1..W8-22.** **15 open rows** — W8-1, W8-3, W8-4, W8-6,
+> W8-9..W8-13, W8-16, W8-17, W8-19, W8-20 from the **external dogfood pass**, plus two DECIDED language
 > milestones (**W8-21** success-coercion at `T?`/`T!E` sinks, **W8-22** `Error` carries its origin
 > span — its `Span.file` resolver dependency now exists concretely: `Program::file_path`,
 > `lexer::render_span`, `RunError::files`). **W8-18** (doc drift), **W8-2** (a discarded
 > `Result`/`Option` now warns), **W8-14** (every runtime stack-trace frame names its file), **W8-15**
-> (both `check`/`test` `--errors=json` halves), and **W8-5** (`json.parse`'s and `json.stringify`'s
-> depth aborts) are closed, as is the un-numbered **airlock-trap** section — a `spawn:`-task write read
+> (both `check`/`test` `--errors=json` halves), **W8-5** (`json.parse`'s and `json.stringify`'s
+> depth aborts), and **W8-8**/**W8-7** (the scheduler pair) are closed, as is the un-numbered
+> **airlock-trap** section — a `spawn:`-task write read
 > after the join now warns too. The dogfood rows are the first findings in this repo produced by people
 > with **no model of the implementation**, and they are disjoint from waves 1–7 (which were almost all
-> soundness). Six were **silent wrong answers** (four left), two are the **scheduler** (`--threads=1`
-> runs *two* workers, and the default worker count is the *slowest* setting — fix **W8-8 before W8-7**,
-> because rationales elsewhere in the tree cite `CHEZZI_THREADS=1` measurements that were taken
-> two-wide), five are **diagnostics** (three left: W8-13, W8-16, W8-17 — W8-17 itself has two of its
+> soundness). Six were **silent wrong answers** (four left), two were the **scheduler** and **both are
+> now fixed** (2026-08-18, `fix/mn-idle-policy-w8-8-w8-7`): `--threads=1` ran *two* CPU runners
+> (**W8-8** — now 1.00 cores, matching Go's `GOMAXPROCS=1`), and the default worker count was the
+> *slowest* setting (**W8-7** — every preemption broadcast to every idle worker; `sys` at the default
+> went 10.110 s → 0.009 s). W8-8 was fixed first because rationales elsewhere in the tree cited
+> `CHEZZI_THREADS=1` measurements that had been taken two-wide; **all nine of those were then
+> re-derived on the genuinely 1-wide binary and every one held** (CONFIRMED or UNCHANGED-BY-DESIGN,
+> none false — the walk is in `docs/gaps.md`'s W8 session log, scheduler section, and the measured
+> tables are in `docs/benchmarks.md`). Five are **diagnostics** (three left: W8-13, W8-16, W8-17 — W8-17 itself has two of its
 > four cosmetic sub-items closed). **None of them was reachable by the standing gates** — a silent
 > wrong answer has no assertion to fail, no gate measures performance, no gate reads a message, no gate
 > executes prose, and the FFI goldens are `#[cfg(target_os = "linux")]` so `cargo test` is green on a
 > Mac with the whole FFI surface unexercised. Read the pass's session log before working any row;
-> several share one fix. **And read a closed row's *prescription* before re-implementing it: W8-2's
-> filed Fix was measured wrong** — see the convention below.
+> several share one fix. **And read a closed row's *prescription* before re-implementing it: W8-2's and
+> W8-7's filed Fixes were both measured wrong** (W8-7's "an idle worker must park on a condvar, not
+> spin" described a defect the engine never had — idle workers already parked; the cost was the wake
+> side) — see the convention below.
 
 Both share the same bar: **behavior-preserving** on every change — a VM
 speedup that changes observable output, or that only holds at one worker count, is a bug, not a win.
