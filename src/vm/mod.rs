@@ -3070,9 +3070,18 @@ impl MnSched {
     /// `wake_bucket` at all four callers, the park/send/wait gap requeues, `cancel_drain`,
     /// `complete_offload`, and the batch-grab surplus push above). Exactly one other site increments
     /// `runnable` without notifying — `register_scope_seeded`, which seeds a nested nursery's fibers on
-    /// a live sched — and it is safe for this same reason: its caller becomes the consumer on the very
-    /// next line (`shell.mn_worker_loop(..)`). `seed` is a third, but it runs pre-start. This is the
-    /// sys-time collapse W8-7 measured.
+    /// a LIVE sched — and it has **two callers whose safety arguments are different**, which matters
+    /// because this enumeration is the whole liveness case:
+    ///   - `Vm::run_mn_nursery_nested` (`sched.rs`, the seeding caller) is safe because it becomes the
+    ///     consumer on the very next line (`shell.mn_worker_loop(..)`) — the `yield_fiber` argument.
+    ///   - `Vm::activate_eager_nursery`'s nested-scope branch (`sched.rs`) is NOT: it returns an
+    ///     `EagerScope` with no loop after it. It is safe **only because it passes `Vec::new()`**, so
+    ///     the `fetch_add` is `+0` and nothing becomes runnable. **A future commit that seeds a
+    ///     non-empty vec there gets no notify and no consumer** — add the notify at that call site if
+    ///     you ever do.
+    ///
+    /// `seed` is a third no-notify site, but it runs pre-start. This is the sys-time collapse W8-7
+    /// measured.
     fn yield_fiber(&self, mut fiber: Fiber) {
         let mut c = self.lock();
         c.running -= 1;

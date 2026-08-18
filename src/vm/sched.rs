@@ -5177,6 +5177,20 @@ pub(super) fn eager_helper_wids(n: usize) -> std::ops::Range<usize> {
 /// farm nothing at all — there the joiner's own loop IS the only cover, so the window is closed at
 /// `n >= 2` purely because the gate lets that loop run. Requires a pre-existing scheduler bug to
 /// reach, so no code change here — recorded so the next reader sees the trade.
+///
+/// **And do not "restore" the old cover without reading what it actually did.** The pre-W8-8 joiner
+/// loop did not rescue the lost fiber — nothing can; its slot is gone either way. What it did was sit
+/// in `take_runnable` as an idle worker and therefore EVALUATE `is_deadlocked`, whose clause requires
+/// `parked_n > 0 || blocked_native > 0`. So the old behaviour was: a scheduler-internal panic with at
+/// least one parked sibling reported **`deadlock`** — a confidently WRONG verdict for a panicked
+/// runtime — and with no parked sibling it hung anyway (the predicate declines, and the joiner's own
+/// `take_runnable` then does the same untimed `cv.wait`). The change therefore narrows to: one
+/// wrong-verdict case becomes a hang. Per this repo's standing rule that a heuristic verdict must
+/// DECLINE rather than emit a confident wrong answer (`docs/gaps.md` W7-12, the `parked-is-not-stuck`
+/// line of cases), that is the better of two bad outcomes, not a regression to undo. The real fix is
+/// not a joiner loop — it is deciding what the scheduler should do when a worker thread panics at
+/// all, which every `catch_unwind` in this file swallows today and which is a design question wider
+/// than this gate.
 pub(super) fn eager_joiner_runs_fibers(n: usize) -> bool {
     n >= 2
 }

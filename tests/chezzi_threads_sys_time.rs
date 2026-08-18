@@ -20,6 +20,30 @@
 #[cfg(unix)]
 use std::process::Command;
 
+/// W8-7 — the worker count this gate drives. NOT the default (all cores): the herd is a function of
+/// how many workers sit idle while a fiber preempts, so a gate that inherits the core count measures
+/// nothing on a small box. 32 workers against this fixture's 4 tasks leaves 28 idle at any core
+/// count, so the signal is present on CI hardware as well as a workstation. Measured below.
+#[cfg(unix)]
+const HERD_WORKERS: usize = 32;
+
+/// W8-7 — the sys/user ceiling. Calibrated against BOTH binaries (pre-fix `088c202a` built in its own
+/// `CARGO_TARGET_DIR`, and this branch's), same fixture, same debug profile, `taskset`-pinned to
+/// simulate small CI hardware:
+///
+/// | CPUs | pre-fix sys/user | post-fix sys/user |
+/// |---|---|---|
+/// | 2  | 0.0268 – 0.0345 | 0.0013 – 0.0019 |
+/// | 4  | 0.0803 – 0.0858 | 0.0006 – 0.0029 |
+/// | 12 | 0.2246          | 0.0023          |
+///
+/// 0.015 is the only value with ≥1.8x margin on BOTH sides at every core count down to 2. The
+/// previous 0.03 was calibrated at the default worker count on a 12-core box and, measured, could not
+/// discriminate at all on 4 CPUs (pre-fix 0.0018 vs post-fix 0.0019 — the herd never formed, so the
+/// gate would have passed a fully regressed binary).
+#[cfg(unix)]
+const MAX_SYS_OVER_USER: f64 = 0.015;
+
 /// Per-child wall/user/sys via `libc::wait4` on the spawned pid, rather than `Child::wait()` (which
 /// surfaces no rusage) or `getrusage(RUSAGE_CHILDREN)` (which would aggregate every child this test
 /// binary has ever reaped — contaminated by any other subprocess-spawning test sharing the process).
@@ -44,8 +68,11 @@ fn run_timed(
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
     cmd.args(args);
-    // The defect is specifically about the DEFAULT (unset) worker count — all cores.
-    cmd.env_remove("CHEZZI_THREADS");
+    // W8-7's trigger is IDLE WORKERS, not cores: every preemption used to broadcast to all W-1 of
+    // them. Driving `CHEZZI_THREADS` EXPLICITLY (rather than leaving it unset and inheriting the
+    // core count) is what makes this gate hardware-independent — see the calibration table on the
+    // test below, and `HERD_WORKERS`.
+    cmd.env("CHEZZI_THREADS", HERD_WORKERS.to_string());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
@@ -94,7 +121,7 @@ fn run_timed(
     )
 }
 
-/// W8-7 — at the DEFAULT worker count (all cores, `CHEZZI_THREADS` unset), a reduction-budget
+/// W8-7 — with many more workers than tasks (`HERD_WORKERS`, driven explicitly), a reduction-budget
 /// preemption must not thundering-herd every idle worker. A FLAT top-level `parallel:` (never
 /// nested — a nested eager scope farms no pool helpers at all and is capped at 2 runners regardless
 /// of worker count, so it would never raise this herd and would give a false green), 4 real
@@ -111,32 +138,28 @@ fn run_timed(
 /// manifests on THIS fixture at debug-binary speed is smaller in absolute terms even though it's the
 /// same bug. Measured pre-fix on this box (3 runs of this exact fixture): sys/user =
 /// 0.38/3.86=0.098, 0.30/4.19=0.072, 0.41/3.88=0.106 (RED capture: 0.339207/3.830044=0.0886, see
-/// report). Post-fix (3 runs): 0.01/3.04=0.003, 0.00/2.95=0.0, 0.00/3.32=0.0. `0.03` sits with a
-/// ~2.4x margin below the pre-fix floor and a ~9x margin above the post-fix ceiling.
+/// report). Post-fix (3 runs): 0.01/3.04=0.003, 0.00/2.95=0.0, 0.00/3.32=0.0. Those numbers were
+/// taken at the DEFAULT worker count on this 12-core box; the threshold actually shipped
+/// (`MAX_SYS_OVER_USER`) is the later cross-hardware calibration on its own doc, which supersedes
+/// them — this paragraph is kept as the dated record of how the fixture was first sized.
 #[cfg(unix)]
 #[test]
-fn default_worker_count_does_not_thundering_herd_on_yield() {
-    // M6 — the herd this gate detects is O(idle-worker-count^2): with only 4 CPU-bound tasks, a box
-    // with too few cores has no idle worker left to thundering-herd at all, so the pre-fix ratio would
-    // ALREADY sit under 0.03 with nothing broken. That makes the gate go VACUOUS rather than failing
-    // on a fully regressed binary — worse than no gate, since it looks like coverage. Skip loudly
-    // below the floor instead of asserting a threshold that can't discriminate there; 8 was chosen so
-    // 4 idle workers remain after the 4 tasks (this box measured the fix on 12 cores / 8 idle).
+fn many_idle_workers_do_not_thundering_herd_on_yield() {
+    // The herd needs at least two CPUs to form at all — on a genuine 1-vCPU box nothing runs
+    // concurrently with the waking workers, so neither binary produces a signal and a threshold
+    // there would be vacuous. Everywhere else this gate is hardware-INDEPENDENT, because it drives
+    // `CHEZZI_THREADS` explicitly (`HERD_WORKERS`) instead of inheriting the core count: measured,
+    // 28 idle workers raise the pre-fix herd on 2 CPUs just as they do on 12. The earlier shape of
+    // this test skipped below 8 cores, which meant it never ran on CI at all (`.github/workflows/
+    // ci.yml` uses `ubuntu-latest`) and did so SILENTLY, since libtest captures stderr on a passing
+    // test.
     let cores = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
-    if cores < 8 {
-        // CEILING, and it is a QUIET one: libtest CAPTURES stderr on a test that PASSES, so on a
-        // <8-core box this message is invisible and the summary still reads `1 passed` —
-        // indistinguishable from real coverage unless the run uses `--nocapture`. Stable libtest has
-        // no runtime-`ignored` escape, so this is the least-bad shape available; the alternative
-        // (assert anyway) is worse, because it would pass a fully-regressed binary. If this gate ever
-        // has to hold on small CI hardware, the fix is to move it out of libtest, not to lower the
-        // threshold.
+    if cores < 2 {
         eprintln!(
-            "SKIP: only {cores} cores available (need >= 8) — too few idle workers for the \
-             thundering-herd this gate detects to raise a signal; the pre-fix ratio would be vacuously \
-             low here, not a real pass. Visible only under `--nocapture`."
+            "SKIP: {cores} CPU — the idle-worker herd cannot form on a single CPU, so neither a \
+             regressed nor a fixed binary produces a signal here. Visible only under `--nocapture`."
         );
         return;
     }
@@ -201,9 +224,9 @@ main()\n",
 
     let ratio = sys.as_secs_f64() / user.as_secs_f64();
     assert!(
-        ratio < 0.03,
-        "default worker count must not thundering-herd on every yield_fiber preemption: \
-         sys={sys:?} user={user:?} wall={wall:?} ratio={ratio:.4} (must be < 0.03). A high ratio means \
+        ratio < MAX_SYS_OVER_USER,
+        "a worker count far above the task count must not thundering-herd on every preemption: \
+         sys={sys:?} user={user:?} wall={wall:?} ratio={ratio:.4} (must be < {MAX_SYS_OVER_USER}). A high ratio means \
          MnSched::yield_fiber is still notify_all-ing every idle worker on every reduction-budget \
          preemption (W8-7)."
     );

@@ -63,6 +63,46 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > > undetectable hang (measured, `docs/future.md:418`: depth 7 / 128 leaves went 3 threads → 130).
 > > Recorded here so it is not mistaken for a fresh idle-spin defect while W8-7 is worked.
 >
+> **Adversarial-review fix wave on `fix/mn-idle-policy-w8-8-w8-7`, 2026-08-18 — the W8-7 sys-time gate
+> was silently skipped on every CI run, and it could not have discriminated there anyway.** Two
+> isolated prosecutors filed 10 charges; the defense dismissed 6 with measurements and upheld 3.
+> **(a) The gate never ran on CI.** It skipped below 8 cores and `.github/workflows/ci.yml` uses
+> `ubuntu-latest`, so `cargo test` reported `1 passed` with zero coverage — libtest captures stderr on
+> a passing test, so the SKIP line was invisible. Worse, the skip was *load-bearing*: measured on 4
+> CPUs at the default worker count, the pre-fix binary scored sys/user **0.0018** and the post-fix
+> **0.0019** — with the threshold removed the gate would have passed a fully regressed binary.
+> **Root cause: W8-7's trigger is IDLE WORKERS, not cores**, and the gate inherited the core count.
+> Fix: drive `CHEZZI_THREADS` **explicitly** (`HERD_WORKERS = 32`, so 28 workers sit idle against the
+> fixture's 4 tasks at any core count) and recalibrate the ceiling against **both** binaries — the
+> pre-fix `088c202a` built in its own `CARGO_TARGET_DIR`, `taskset`-pinned to simulate small CI:
+>
+> | CPUs | pre-fix sys/user | post-fix sys/user |
+> |---|---|---|
+> | 2 | 0.0268 – 0.0345 | 0.0013 – 0.0019 |
+> | 4 | 0.0803 – 0.0858 | 0.0006 – 0.0029 |
+> | 12 | 0.2246 | 0.0023 |
+>
+> `MAX_SYS_OVER_USER = 0.015` is the only value with ≥1.8x margin on BOTH sides at every core count
+> down to 2; the core floor drops 8 → 2 (below that the herd cannot form at all). Test renamed
+> `many_idle_workers_do_not_thundering_herd_on_yield` — it no longer measures "the default".
+> **(b)** The `yield_fiber` no-notify enumeration said `register_scope_seeded`'s "caller becomes the
+> consumer on the very next line". True of one of its two callers; `activate_eager_nursery`'s
+> nested-scope branch returns an `EagerScope` with no loop after it and is safe **only because it
+> passes `Vec::new()`** — now stated, with the warning that seeding a non-empty vec there needs its own
+> notify.
+> **(c)** The `n == 1` panic-wedge note now records what the pre-W8-8 joiner loop actually did: it
+> could not rescue the lost fiber either, it merely sat in `take_runnable` and so evaluated
+> `is_deadlocked`, reporting **`deadlock`** — a confidently wrong verdict for a panicked runtime — when
+> a sibling happened to be parked, and hanging when none was. So the change narrows one wrong-verdict
+> case to a hang, which this repo's own "decline rather than answer wrong" rule prefers. Left as is,
+> deliberately; the real question is what the scheduler should do when a worker thread panics at all,
+> which every `catch_unwind` in `sched.rs` swallows today.
+> Dismissed with evidence: co-resident test flakiness (8/8 clean runs; 6 ratio pairs taken under a
+> continuously co-resident `tests/chz` loop gave 7.19–8.10 against a 5.5 floor), `set_worker_count(2)`
+> pinning the process pool (`eager_helper_wids(2)` is `2..2`, so that test submits zero pool jobs),
+> the ratio tests failing on fast hardware (~88% of the 7.4 ms "startup" is CPU-bound front-end that
+> scales with the host; only ~0.9 ms is fixed), and two doc-scope charges.
+
 > **✅ W8-7 CLOSED — the default worker count is no longer the slowest setting, 2026-08-18
 > (`fix/mn-idle-policy-w8-8-w8-7`).** Idle workers already parked on a true `Condvar::wait` (no spin) —
 > the row's own filed fix direction ("park instead of spin") was wrong, same class as W8-2's filed
@@ -96,7 +136,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > Tests: `vm::tests::mnsched_yield_fiber_reachable_by_other_worker_without_wake` (new — pins that a
 > yielded fiber is reachable by a DIFFERENT worker through the plain global-queue path with no notify
 > involved) and a new standalone file `tests/chezzi_threads_sys_time.rs`'s
-> `default_worker_count_does_not_thundering_herd_on_yield` (per-child `sys`/`user` via `libc::wait4` on
+> `many_idle_workers_do_not_thundering_herd_on_yield` (per-child `sys`/`user` via `libc::wait4` on
 > a flat 4-task CPU-bound `parallel:`, asserts `sys < 0.03 * user` at the default worker count; RED
 > pre-fix measured ratio 0.0886-0.106 on this box's debug binary, GREEN post-fix ~0.0-0.003).
 > Deliberately its own test **target** (not folded into `tests/chezzi_threads_cli.rs`, where the brief
