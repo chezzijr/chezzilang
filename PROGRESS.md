@@ -8,8 +8,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and no cross-engine gate; see the entry directly below.
 
 > **✅ W8-8 CLOSED — `chezzi run --threads=1` now runs exactly ONE CPU runner in BOTH the outermost
-> AND the nested eager-nursery arm, 2026-08-18 (`fix/mn-idle-policy-w8-8-w8-7`).** An outermost eager nursery's runner budget is `1 (drainer) +
-> helpers + joiner`, sized for `max(N, 2)` total slots — correct for N>=2, but at N=1 the inline
+> AND the nested eager-nursery arm, 2026-08-18 (`fix/mn-idle-policy-w8-8-w8-7`).** An OUTERMOST eager
+> nursery's runner budget is `1 (drainer) + helpers + joiner`, sized for `max(N, 2)` total slots —
+> correct for N>=2, but at N=1 the inline
 > joiner (`main`, `Vm::join_eager_nursery`/`abort_eager_nursery`) ran a full fiber loop ALONGSIDE the
 > unconditional raw `chezzi-eager` drainer thread, so `--threads=1` silently ran TWO CPU runners
 > (measured `user/real` = **1.91**, identical to `--threads=2`). Fix: two named pure functions in
@@ -47,6 +48,20 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > 1.04, `fn work(): parallel:` called from a `parallel:` body 1.98 → 1.04. `cargo test` full suite
 > green (22 targets, incl. `tests/chz` 617/617 at both worker counts), `cargo clippy --all-targets -- -D
 > warnings` clean.
+>
+> > **The budget identity `1 (drainer) + helpers + joiner == N` describes the OUTERMOST arm only —
+> > read `vm::tests::eager_runner_budget_sums_to_worker_count`'s name with that qualifier.** A NESTED
+> > eager scope farms no helpers at all (`farm_outermost_eager_helpers` is called from
+> > `join_eager_nursery`'s outermost arm alone), so its budget is `1 (outer drainer) + joiner` and it
+> > is **capped at 2 runners at every worker count**. Measured on the release binary at `69be64ad`,
+> > cores = user/real: flat 1.97 (T=2) · 3.93 (T=4) · 4.30 (T=8); directly nested 1.97 · 1.98 · 1.98;
+> > `fn work(): parallel:` called 1.97 · 1.98 · 1.98. **Pre-existing and untouched by W8-8** —
+> > `eager_joiner_runs_fibers(n)` is `true` for every `n >= 2`, so every T>=2 path is byte-identical to
+> > base `088c202a` — and it errs toward UNDER-subscription, which is the safe direction. It stays
+> > that way deliberately: farming the bounded pool from a nested scope is what `exec.rs:1694`'s
+> > `worker_count() >= 2` gate exists to prevent, because nesting can exhaust the fixed pool into an
+> > undetectable hang (measured, `docs/future.md:418`: depth 7 / 128 leaves went 3 threads → 130).
+> > Recorded here so it is not mistaken for a fresh idle-spin defect while W8-7 is worked.
 
 > **✅ Adversarial-review fix wave on `feat/span-file-and-stdlib-contracts`, 2026-08-18 — the LSP's
 > diagnostic publish is now atomic with its delivery, and a closed buffer can no longer be resurrected as

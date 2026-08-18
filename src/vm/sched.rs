@@ -5137,7 +5137,11 @@ pub(super) fn eager_helper_wids(n: usize) -> std::ops::Range<usize> {
 /// (`activate_eager_nursery`'s `spawn(move || { catch_unwind(...) })`); the thread then exits with
 /// its scope's slots unfilled, and at `n == 1` there is nothing else left to fill them, so the
 /// joiner's `wait_for_completion`/`wait_for_scope` blocks forever. Pre-W8-8 the joiner's own fiber
-/// loop covered that; at `n >= 2` the pool helpers still do. Requires a pre-existing scheduler bug to
+/// loop covered that. At `n >= 2` the cover differs BY ARM and only one of them has a fallback: the
+/// OUTERMOST arms farm pool helpers (`farm_outermost_eager_helpers`, called from
+/// `join_eager_nursery` alone) so a dead drainer still leaves runners behind, while the NESTED arms
+/// farm nothing at all — there the joiner's own loop IS the only cover, so the window is closed at
+/// `n >= 2` purely because the gate lets that loop run. Requires a pre-existing scheduler bug to
 /// reach, so no code change here — recorded so the next reader sees the trade.
 pub(super) fn eager_joiner_runs_fibers(n: usize) -> bool {
     n >= 2
