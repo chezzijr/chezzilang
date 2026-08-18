@@ -1723,8 +1723,18 @@ oracle for CPU work**, see below):
 
 - **Go**: a `GOMAXPROCS=N` really means N runners, and sys stays flat (≤0.002 s) across the whole
   sweep — an idle Go scheduler parks, it never spins. This is the reference behaviour W8-7 targets, and
-  post-fix Chezzi's sys column (≤0.03 s at every T) is now the same shape, three orders of magnitude
-  below its own pre-fix numbers (10+ s).
+  post-fix Chezzi's sys column is now the same shape **at T≥2** (≤0.03 s, three orders of magnitude
+  below its own pre-fix 10+ s).
+  **`T=1` is the one number that does not fit that sentence, and it is not an anomaly** — it sits at
+  0.236 s (0.267 s on the second sweep), ~8x the T≥2 figures. W8-7 is a *herd* defect: it needs idle
+  workers to wake. At `--threads=1` there are none — `farm_outermost_eager_helpers` farms
+  `2..max(1,2)` = zero helpers and the inline joiner stands down (W8-8), leaving the drainer as the
+  sole runner — so T=1 never had the herd and its sys was already the *lowest* column pre-fix (0.117 s).
+  What that leaves is the run's own baseline syscall cost, and per wall-second it is unchanged by
+  either fix: **0.117/8.936 = 0.0131 sys/s at base, 0.236/15.301 = 0.0154 sys/s now.** The absolute
+  number rose only because `--threads=1` now correctly serializes and so takes ~1.7x longer to do the
+  same work. Compare T=4, which did have a herd to lose: 0.0014 sys/s, a 10x lower *rate*, not merely
+  a lower total.
 - **Rust**: a fixed N-thread fan-out gives N runners too (cores tracks N up to the task-count ceiling,
   same as Go), confirming `runners == N` is the ordinary cross-language expectation for a thread-pool —
   not a Go-specific idiom Chezzi is being held to arbitrarily.
