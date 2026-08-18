@@ -894,9 +894,11 @@ child := c.derive()              # a CHILD token — cancelled when c (or any an
 > link**, so it also encodes in O(1) across the airlock at any tree depth. A child inherits the
 > **tightest** deadline (the soonest absolute deadline of itself and its ancestors), *materialised into
 > its own `deadline` field* at derive time — so a timeout needs no cascade at all; a derived child of an
-> already-elapsed timeout is cancelled at once with reason `"timeout"`. `reason()` is
-> **nearest-cause-wins**, and the first cause **latches** (Go): the cascade does not overwrite a
-> descendant whose own deadline has already elapsed.
+> already-elapsed timeout is cancelled at once with reason `"timeout"`. `reason()` reports this token's OWN
+> state and the first cause **latches** (Go): the cascade does not overwrite a descendant whose own
+> deadline has already elapsed. (v1 phrased this as "nearest-cause-wins" because `reason()` walked up
+> the parent chain looking for one; with the parent link deleted there is nothing to be nearer than
+> self.)
 >
 > *(v1 registered each new child into **every** ancestor, each insert a `Shared.update()` that copied
 > the whole list across the wire — `derive()` was cubic in chain depth (400 derives = 6.0 s, against
@@ -912,6 +914,11 @@ child := c.derive()              # a CHILD token — cancelled when c (or any an
 > **Ordering (C5):** marking a descendant sets its cancel bit **before** it trips its `done()`, because
 > the trip is what wakes a parked `wait:`. So a task woken by any node's `done()` — its own or a
 > cascaded ancestor's — always reads `cancelled() == true`, Go's `ctx.Done()`/`ctx.Err()` contract.
+> (On the one arm where the bit is *not* set — the node's own deadline had already elapsed, so the
+> latch keeps `"timeout"` — `cancelled()` is already true from the deadline itself, so the contract
+> holds there too.) Measured: the reverse order loses the race 141 times in 400 rounds at
+> `CHEZZI_THREADS=8`, and 0 at `=2` — which is why the gate is pinned at 8 workers rather than left
+> to the suite's default.
 
 | Method | Returns | Notes |
 |--------|---------|-------|

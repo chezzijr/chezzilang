@@ -3,9 +3,12 @@
 # cascades DOWN the tree. The old model registered each new child into EVERY ancestor with a
 # copy-per-`Shared.update`, which made a chain cubic (400 derives = 6.0 s) and a fan-out quadratic.
 #
-# The perf bounds below are wall-clock, but they are not timing-sensitive: the measured cost is
-# ~20 ms against a 5 000 ms assertion (250x headroom), and the pre-fix code does not merely exceed
-# them, it takes ~90 s. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+# The perf bounds below are wall-clock but hugely discriminating rather than tight: the pre-fix code
+# does not merely exceed them, it takes ~90 s against a 5 000 ms assertion. Headroom depends on the
+# config — ~20 ms release/12-core (250x), but a measured 0.92 s (chain) and 1.08 s (fan-out) in the
+# WORST config this file runs in: debug profile, 2 cores, CHEZZI_THREADS=8, 3x oversubscribed, which
+# is what `cancel_c5_gate_at_eight_workers` drives on CI. So the real floor is ~5x, not 250x.
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 # Run: `cargo run -- test tests/chz/stdlib/cancel_test.chz`
 
 import std.time
@@ -140,11 +143,15 @@ test fn reason_latches_the_first_cause():
     # A manual cancel of a parent whose deadline is still in the future pushes "cancelled" into the
     # child's own flag, and it LATCHES there — even after that deadline passes. Go 1.26 agrees:
     # ctx.Err() is context.Canceled in both halves.
-    p := cancel.timeout(20)
+    # The wall-clock budget here is NOT the sleep (sleep_ms cannot return early) — it is the window
+    # between `timeout(200)` and the cascade reaching the child. Blow that and `_mark`'s guard skips
+    # the flag and the FIRST assert reads "timeout" instead. Measured worst case 5.7 ms under 3x
+    # oversubscription on 2 cores in the debug profile, so 200 ms is a ~35x margin.
+    p := cancel.timeout(200)
     c := p.derive()
     p.cancel()
     assert c.reason() == Some("cancelled"), "a manual ancestor cancel before the deadline reads cancelled"
-    time.sleep_ms(40)
+    time.sleep_ms(240)
     assert c.reason() == Some("cancelled"), "the first cause latches — the elapsed deadline must not win"
     # The other direction: when the cascade reaches a token whose OWN deadline has already elapsed,
     # `_mark`'s guard skips the flag, so its own "timeout" stays the cause (Go: DeadlineExceeded).

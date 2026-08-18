@@ -53,7 +53,9 @@ struct Token:
         return self.deadline > 0.0 and time.monotonic() >= self.deadline
 
     # Why this token is done: "cancelled" (manual/cascaded), "timeout" (deadline), or None (still
-    # live). Nearest cause wins, and the FIRST cause latches (Go). Agrees with cancelled().
+    # live). The FIRST cause LATCHES (Go): whatever set this token's own state stays its answer. (v1
+    # said "nearest cause wins" because it walked up a parent chain to find one — with `parent` gone
+    # there is nothing to be nearer than self, so that phrasing is vestigial, not a second rule.)
     fn reason(self) -> str?:
         if self.flag.get():
             return Some("cancelled")

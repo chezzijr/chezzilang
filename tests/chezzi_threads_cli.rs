@@ -366,6 +366,15 @@ fn cancel_c5_gate_at_eight_workers() {
         tail(&out),
         tail(&err)
     );
+    // The gate is "the C5 test RAN at =8", not merely "the file passed". Without this, deleting or
+    // renaming `cascaded_done_implies_cancelled` leaves this test green and meaningless — the whole
+    // reason it exists is that `chz_suite_passes` only runs the default and =2, and =2 is
+    // structurally blind to the race (measured 0/400 violations at =2 vs 146/400 at =8).
+    assert!(
+        out.contains("PASS cascaded_done_implies_cancelled"),
+        "the C5 cascade test must actually run at CHEZZI_THREADS=8\n--- stdout ---\n{}",
+        tail(&out)
+    );
 }
 
 fn tail(s: &str) -> String {
