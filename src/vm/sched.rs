@@ -1803,7 +1803,23 @@ impl Vm {
             // (finished, or re-parked for another worker to resume), so this thread exits to keep the
             // net live-worker count at N. The joining thread's `wait_for_completion` holds the reduce
             // until the replacements fill every slot.
+            //
+            // gaps.md W8-7 hang regression — notify HERE, at the departure, not at `yield_fiber`'s
+            // requeue. `yield_fiber`'s no-notify argument #1 ("the yielding worker loops straight back
+            // into `take_runnable`") is false on exactly this exit: this worker does NOT loop back, it
+            // returns. The demoted fiber's replacement, spun up by `demote_recv_block` et al. at
+            // demote time, typically parked into `take_runnable`'s untimed `cv.wait` well before this
+            // point (`runnable == 0` while the demoted fiber ran) — so if the fiber the demoted thread
+            // was just running preempted on its way out (`Disp::Yield` -> `yield_fiber`, no notify),
+            // the requeued fiber has ZERO live consumers: not this thread (leaving), not the
+            // replacement (asleep, untimed). `wait_for_completion` is ALSO an untimed `cv.wait`, so the
+            // joiner never wakes either — a hang, not a slow path. All four demote entry points route
+            // here (`demote_recv_block`, `demote_wait_block`, `demote_block_sleep`,
+            // `demote_socket_enter`), so the notify must be unconditional on this exit, not shaped to
+            // any one of them. Cost: once per demoted-thread exit, not once per `CONTEXT_REDS`
+            // dispatched ops — off the hot path W8-7 is about.
             if self.demoted {
+                sched.cv.notify_all();
                 return;
             }
         }

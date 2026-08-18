@@ -77,7 +77,11 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > owner scope completing — already broadcasts in `take_runnable`'s owner-stop branch; `runnable`
 > accounting and global-tail ordering are both unchanged, so the deadlock predicate and
 > `mnsched_yield_fiber_requeues_at_tail`'s round-robin-fairness assertion are unaffected — that test
-> stays verbatim). Go does the same: a preempted `g` is requeued without `wakep()`. Measured on the
+> stays verbatim). **Correction (see the hang-fix entry below): Go does NOT do the same** — go1.26.6's
+> `goschedImpl` calls `wakep()` on every preemption (a damped single wake, CAS-guarded on
+> `sched.nmspinning`), not no wake. Chezzi's real analogy is that the yielding worker itself is
+> guaranteed to re-enter `take_runnable` immediately, an always-present spinner Go lacks — Chezzi wakes
+> zero times per preemption where Go wakes at most one. Measured on the
 > release binary, `examples/primes_parallel.chz`, before → after (`real`/`user`/`sys`, sys is the
 > signature): `--threads=4` 5.742/17.670/0.384 → 5.603/17.087/0.004 (unaffected — no idle-worker herd to
 > wake there); `--threads=12` 7.860/29.523/10.729 → 5.529/16.891/0.009 (**28x → ~0 sys**, and no longer
@@ -98,6 +102,38 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > sidesteps the interference without touching the W8-8 tests. `cargo test --lib` 4200/0/2, `cargo test`
 > full suite green (23 targets, incl. `tests/chz` 617/617 at both worker counts), `cargo clippy
 > --all-targets -- -D warnings` clean.
+>
+> **T2-fix — W8-7 hang-regression fix, 2026-08-18 (`fix/mn-idle-policy-w8-8-w8-7`).** Task review found
+> the deleted `notify_all` above left a Critical hang: `MnSched::yield_fiber`'s liveness argument #1
+> ("the yielding worker always loops straight back into `take_runnable`") is false on its own stated
+> exception — a demoted worker's `self.demoted` return in `Vm::mn_worker_loop` (`src/vm/sched.rs`) does
+> NOT loop back, and the replacement thread `demote_recv_block`/`demote_wait_block`/
+> `demote_block_sleep`/`demote_socket_enter` spin up at demote time typically already parked into
+> `take_runnable`'s untimed `cv.wait` (`runnable == 0` while the demoted fiber ran) before the demoted
+> fiber's own `Disp::Yield` (`CONTEXT_REDS` exhausted post-recv) requeued it with no notify — zero live
+> consumers, and `wait_for_completion`'s untimed `cv.wait` never wakes the joiner either: a hang, not a
+> slow path. Repro: a `recv` inside a native `xs.map` callback (demotes) followed by a tail loop
+> burning >`CONTEXT_REDS` ops (forces a post-demote `Disp::Yield`) hung 124/124 at `--threads=1`/`2` and
+> 1/2 at `--threads=4` on the pre-fix release binary under `timeout 10`, vs 3/3 rc=0 at every setting on
+> the pre-W8-7 base. Fix: notify at the departure, not the requeue — `mn_worker_loop`'s `self.demoted`
+> exit now does `sched.cv.notify_all()` before returning (`src/vm/sched.rs`), covering all four demote
+> entry points generically. Cost: once per demoted-thread exit, not once per `CONTEXT_REDS` dispatched
+> ops, so the W8-7 sys-time win is untouched (re-measured unchanged, see the W8-7 entry above). The
+> liveness argument on `yield_fiber`'s doc comment (`src/vm/mod.rs`) is rewritten: argument #1 now
+> names the departure fix instead of the false "already awake" claim, argument #2 (the owner-stop
+> broadcast) is marked vacuous — that branch sits after the global batch-grab, so it's only reachable
+> with the global queue already empty, which the yielded fiber's own presence there rules out — and the
+> Go comparison is corrected (see the W8-7 entry above). New regression test
+> `vm::tests::w8_7_demoted_fiber_yield_after_demote_does_not_strand_replacement` (`src/vm/tests.rs`)
+> reproduces C1 under a 15 s watchdog, forced to `worker_count(2)` for determinism; captured RED at
+> `dfac4e64` (watchdog panic, not a hang) before the fix, green after. The four existing demote tests
+> all miss this class because every one finishes its fiber in well under `CONTEXT_REDS` ops after the
+> demote, so no `Disp::Yield` ever fires on a demoted worker in that corpus — a narrowing of when a
+> wake fires, untested by a corpus written before the narrowing landed. Also: `tests/chezzi_threads_sys_time.rs`
+> now skips loudly below 8 cores (the O(idle-worker-count^2) herd the gate detects can't raise a signal
+> with too few idle workers, so the gate would go vacuous rather than fail on a fully regressed binary
+> on a small CI box) and its `use std::process::Command` is now `#[cfg(unix)]`-gated so
+> `clippy --all-targets -- -D warnings` stays clean on non-unix targets.
 >
 > **✅ Adversarial-review fix wave on `feat/span-file-and-stdlib-contracts`, 2026-08-18 — the LSP's
 > diagnostic publish is now atomic with its delivery, and a closed buffer can no longer be resurrected as

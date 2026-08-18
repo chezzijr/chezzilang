@@ -4769,6 +4769,93 @@ main()
     }
 }
 
+/// gaps.md W8-7 hang regression — DEMOTE x YIELD. A `recv` inside a native `xs.map` callback demotes
+/// the worker (`demote_recv_block` blocks it in place, spinning a REPLACEMENT thread that covers its
+/// `wid`); at demote time `runnable == 0`, so that replacement typically parks straight into
+/// `take_runnable`'s untimed `cv.wait` (mod.rs D4e). If the demoted fiber then runs long enough after
+/// `recv` returns to exhaust `CONTEXT_REDS` (4000 dispatched ops — the tail loop here does ~800k), it
+/// preempts: `Disp::Yield` -> `yield_fiber` requeues it with **no notify** (W8-7), and the demoted
+/// worker's own `mn_worker_loop` returns immediately after on `self.demoted` (`sched.rs`) without
+/// re-entering `take_runnable`. Nobody is left awake to consume the requeued fiber, and the joiner's
+/// `wait_for_completion` (also an untimed `cv.wait`) never wakes either: a hang. None of the other
+/// demote tests in this file (`d5_owe3_path_c_*`, the `wait`/`sleep_ms`/socket demote sites) catch
+/// this class because every one of them finishes its fiber in well under `CONTEXT_REDS` ops after the
+/// demote — no `Disp::Yield` ever fires on a demoted worker in that corpus, so a narrowed wake is
+/// invisible to it. CLAUDE.md's "a widening is untested by its own suite", inverted: a *narrowing* of
+/// when a wake fires is structurally untested by a corpus written before the narrowing landed.
+///
+/// Forces `worker_count(2)` for a deterministic repro (measured 2/2 hangs at `--threads=1` and
+/// `--threads=2` pre-fix; racy at `--threads=4`, where a spuriously-rechecking idle sibling can
+/// happen to grab the fiber anyway). 15 s watchdog: a regression HANGS here instead of the whole
+/// suite wedging — it must fail loud via the watchdog, not via a stuck test binary.
+#[test]
+fn w8_7_demoted_fiber_yield_after_demote_does_not_strand_replacement() {
+    struct Workers(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+    impl Drop for Workers {
+        fn drop(&mut self) {
+            crate::vm::set_worker_count(crate::vm::test_baseline_worker_count());
+        }
+    }
+    let _workers = Workers(
+        crate::vm::TEST_WORKER_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+    );
+    crate::vm::set_worker_count(2);
+
+    let src = "\
+import std.time
+import std.concurrency
+
+fn use_map(ch: Channel[int], out: Shared[int]):
+    xs := [0]
+    ys := xs.map(fn(x): ch.recv())
+    s := 0
+    i := 0
+    while i < 200000:
+        s = s + i
+        i = i + 1
+    out.set(s + ys[0])
+
+fn fill(ch: Channel[int]):
+    time.sleep_ms(50)
+    ch.send(1)
+
+fn main():
+    ch := Channel[int]()
+    out := Shared(0)
+    parallel:
+        spawn use_map(ch, out)
+        spawn fill(ch)
+    print(out.get())
+
+main()
+";
+    let entry = write_temp_chz("w8_7_demote_yield", src);
+    let run_entry = entry.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_file_with(
+            &run_entry,
+            crate::native::HostConfig::default(),
+        ));
+    });
+    let result = rx.recv_timeout(std::time::Duration::from_secs(15));
+    let _ = std::fs::remove_file(&entry);
+    match result {
+        Ok((out, _err, res, _code)) => {
+            assert!(res.is_ok(), "faulted instead of completing: {res:?}");
+            assert_eq!(out, "19999900001\n");
+        }
+        Err(_) => panic!(
+            "hung — a demoted worker's `Disp::Yield` (post-recv, CONTEXT_REDS-exhausted) left its \
+             REPLACEMENT worker stranded in an untimed `cv.wait` with no notify (gaps.md W8-7 hang \
+             regression: the departure-notify fix in `mn_worker_loop`'s `self.demoted` exit is \
+             missing or broken)"
+        ),
+    }
+}
+
 /// §6d M:N wait-in-callback DEMOTE (TDD step 8) — a blocking `wait` reached inside a native `xs.map`
 /// callback (`native_reentry > 0`) cannot snapshot-park (the HOF's loop state is on the Rust host
 /// stack), so it DEMOTES: blocks the worker in place, polling all N arm queues on a bounded backoff

@@ -17,6 +17,7 @@
 //! 5.5 floor) vs 0 failures once separated. A separate target sidesteps the interference entirely
 //! without touching the W8-8 tests (out of scope here).
 
+#[cfg(unix)]
 use std::process::Command;
 
 /// Per-child wall/user/sys via `libc::wait4` on the spawned pid, rather than `Child::wait()` (which
@@ -115,6 +116,24 @@ fn run_timed(
 #[cfg(unix)]
 #[test]
 fn default_worker_count_does_not_thundering_herd_on_yield() {
+    // M6 — the herd this gate detects is O(idle-worker-count^2): with only 4 CPU-bound tasks, a box
+    // with too few cores has no idle worker left to thundering-herd at all, so the pre-fix ratio would
+    // ALREADY sit under 0.03 with nothing broken. That makes the gate go VACUOUS rather than failing
+    // on a fully regressed binary — worse than no gate, since it looks like coverage. Skip loudly
+    // below the floor instead of asserting a threshold that can't discriminate there; 8 was chosen so
+    // 4 idle workers remain after the 4 tasks (this box measured the fix on 12 cores / 8 idle).
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    if cores < 8 {
+        eprintln!(
+            "SKIP: only {cores} cores available (need >= 8) — too few idle workers for the \
+             thundering-herd this gate detects to raise a signal; the pre-fix ratio would be vacuously \
+             low here, not a real pass"
+        );
+        return;
+    }
+
     let dir = std::env::temp_dir().join(format!("chz-threads-w8-7-sys-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let path = dir.join("primes_flat_parallel.chz");
