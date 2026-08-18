@@ -61,6 +61,15 @@ RSS is the honest number — the internal `CHEZZI_HEAP_STATS=1 peak_live_bytes` 
 under-measures (ignores off-heap `Vec`/`HashMap` capacity). Baseline table + reading:
 `docs/benchmarks.md` → "Memory baseline — Go vs Chezzi".
 
+## Scheduler ancestor references (Go / Rust / Python vs `--threads`)
+
+`go/nursery_fanout.go`, `rust/nursery_fanout.rs`, `py/nursery_fanout.py` are twins of
+`examples/primes_parallel.chz` (4-task CPU fan-out), each taking a worker-count argument
+(`GOMAXPROCS` env for Go, argv N for Rust, `max_workers` argv for Python) so a sweep lines up
+against `chezzi run --threads=N`. Used to check the M:N scheduler's idle-worker policy
+(`docs/gaps.md` W8-7/W8-8) against the owning ancestors instead of reasoning about it — see
+`docs/benchmarks.md` → "W8-7 / W8-8 idle-worker-policy fix".
+
 ## Notes
 
 - **Ratios, not absolutes.** Wall-clock depends on the machine; the chezzi-÷-python ratio
