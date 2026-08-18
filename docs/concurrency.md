@@ -878,32 +878,42 @@ t := cancel.timeout(500)         # auto-cancels 500ms after creation; also manua
 child := c.derive()              # a CHILD token — cancelled when c (or any ancestor) is
 ```
 
-> **Tree-structured (Go `context.WithCancel`).** `derive()` builds a **child** token linked to its
-> parent: cancelling or timing out the parent cancels every transitively-derived child, recursively
-> root-to-leaves, while cancelling a child **never** touches the parent (one-directional). The link is
-> **live** — a parent flip is observed by an already-derived child, *including a child that crossed the
-> `spawn`/`parallel:`/`Channel` airlock* — because the link is the parent's `Shared` flag plus a
-> `Shared` registry of descendant `done()` channels, which cross as live cores exactly like the flat
-> token's `flag`. **`done()` cascades transitively too:** `derive()` registers a child's `done()`
-> channel into **every ancestor's** registry (walking the parent chain to the root, each insert an
-> atomic `update()` so concurrent siblings don't race-lose), so a manual `cancel()` at *any* depth
-> above trips the child's `done()` directly — a grandchild parked in `wait: leaf.done()` wakes on a
-> grandparent cancel, not just on its immediate parent. A child inherits the **tightest** deadline
-> (the soonest absolute deadline of itself and its ancestors); a derived child of an already-elapsed
-> timeout is cancelled at once with reason `"timeout"`. `reason()` is **nearest-cause-wins**: the
-> child's own cause if it has one, else the inherited ancestor's. (Known v1 limit: the per-ancestor
-> registry only **grows** — there is no token-drop hook, so a long-lived ancestor that has many
-> short-lived descendants derived under it retains their `done()`-channel handles until it is itself
-> dropped. Tokens are request-scoped and short-lived in practice; a future prune-on-cancel could clear
-> the list.)
+> **Tree-structured, registered like Go's (`context.WithCancel`).** `derive()` builds a **child** token
+> linked to its parent: cancelling or timing out the parent cancels every transitively-derived child,
+> root-to-leaves, while cancelling a child **never** touches the parent (one-directional). The
+> registration is Go's: a child is sent into its **immediate** parent's `kids: Channel[Token]` registry
+> — **O(1)**, no ancestor walk — and `cancel()` cascades **down**, draining each node's registry and
+> marking every descendant it reaches (an explicit work-list, so tree depth is not call-stack depth).
+> **`done()` cascades transitively** through that same downward walk: a manual `cancel()` at *any*
+> depth above trips a grandchild's `done()`, so a task parked in `wait: leaf.done()` wakes on a
+> grandparent cancel, not just on its immediate parent. The link is **live** — a parent flip is
+> observed by an already-derived child, *including a child that crossed the `spawn`/`parallel:`/
+> `Channel` airlock* — because the link is the `kids` channel plus each node's own `Shared` flag, which
+> cross as live cores exactly like the flat token's `flag`, in **both** directions (a task on the far
+> side of a `spawn` can `derive()` into a registry the canceller drains). A `Token` holds **no parent
+> link**, so it also encodes in O(1) across the airlock at any tree depth. A child inherits the
+> **tightest** deadline (the soonest absolute deadline of itself and its ancestors), *materialised into
+> its own `deadline` field* at derive time — so a timeout needs no cascade at all; a derived child of an
+> already-elapsed timeout is cancelled at once with reason `"timeout"`. `reason()` is
+> **nearest-cause-wins**, and the first cause **latches** (Go): the cascade does not overwrite a
+> descendant whose own deadline has already elapsed.
+>
+> *(v1 registered each new child into **every** ancestor, each insert a `Shared.update()` that copied
+> the whole list across the wire — `derive()` was cubic in chain depth (400 derives = 6.0 s, against
+> Go's 0.08 ms) and quadratic in fan-out. See [`benchmarks.md`](benchmarks.md).)*
+>
+> **Retention:** a `cancel()` **drains** the registries it walks, so a cancelled subtree releases its
+> child handles. An **uncancelled** long-lived parent still retains them — there is no token-drop hook,
+> so many short-lived children derived under one long-lived parent accumulate in its `kids` channel
+> until it is itself cancelled or dropped. Unchanged from v1; tokens are request-scoped in practice.
 
 | Method | Returns | Notes |
 |--------|---------|-------|
-| `cancelled()` | `bool` | `flag` OR (deadline passed) OR any ancestor is. **Polls; never blocks.** |
-| `reason()` | `str?` | `"cancelled"` (manual) \| `"timeout"` (deadline) \| `None` (live). Nearest cause wins, else inherited. |
+| `cancelled()` | `bool` | own `flag` (an ancestor cancel is *pushed* into it) OR own deadline passed. **O(1); polls, never blocks.** |
+| `reason()` | `str?` | `"cancelled"` (manual or cascaded) \| `"timeout"` (own/inherited deadline) \| `None` (live). Nearest cause wins and latches first. |
 | `done()` | `Channel[bool]` | ready (recv → `true`) when done — for a `wait:` arm. Same handle every call. |
-| `cancel()` | `nil` | manual cancel, anytime, any task; idempotent; wakes `done()` waiters and fans out to derived children. |
-| `derive()` | `Token` | a child token: cancelled when self (or an ancestor) is; tightest deadline; one-directional. Also `cancel.derive(parent)`. |
+| `cancel()` | `nil` | manual cancel, anytime, any task; idempotent; wakes `done()` waiters, then **cascades down** — drains each node's immediate-child registry and marks every transitive descendant (work-list, not recursion). |
+| `derive()` | `Token` | a child token: cancelled when self (or an ancestor) is; tightest deadline; one-directional. **O(1)** — one send into self's registry. Also `cancel.derive(parent)`. |
 | `deadline_at()` | `float` | absolute monotonic secs, or `0.0` if none. |
 
 ```chezzi

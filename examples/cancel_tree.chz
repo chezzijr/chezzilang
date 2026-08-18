@@ -1,7 +1,8 @@
 # std.cancel — TREE PROPAGATION (parent/child derivation). A child `derive()`d from a parent is
-# cancelled when the parent (or any ancestor) is — recursively, root-to-leaves — while cancelling a
-# child never touches the parent. The link is LIVE (Shared flag + Shared registry). All cases here are
-# deterministic (manual cancel + already-elapsed timeout, same task), so this is golden on every engine.
+# cancelled when the parent (or any ancestor) is — root-to-leaves — while cancelling a child never
+# touches the parent. The link is LIVE: a child registers into its IMMEDIATE parent's `kids` channel
+# (Go `context.WithCancel`, O(1)) and `cancel()` cascades DOWN. All cases here are deterministic
+# (manual cancel + already-elapsed timeout, same task), so this is a golden.
 import std.cancel
 
 fn main():
@@ -15,7 +16,7 @@ fn main():
         Some(r): print("child reason: {r}")
         None:    print("child reason: none")
 
-    # 2. A manual ancestor cancel makes the child's done() ready (registry fan-out).
+    # 2. A manual ancestor cancel makes the child's done() ready (the downward cascade trips it).
     match c.done().try_recv():
         Some(v): print("child done ready: {v}")
         None:    print("child done not ready")
@@ -39,8 +40,8 @@ fn main():
     match leaf.reason():
         Some(r): print("grandchild reason: {r}")
         None:    print("grandchild reason: none")
-    # done() cascades TRANSITIVELY: a root cancel trips the grandchild's done() directly (it is
-    # registered into every ancestor's kids), so a task parked in `wait: leaf.done()` wakes.
+    # done() cascades TRANSITIVELY: the root's cancel drains its kids, marks each, and recurses, so
+    # the grandchild's done() is tripped too and a task parked in `wait: leaf.done()` wakes.
     match leaf.done().try_recv():
         Some(v): print("grandchild done ready: {v}")
         None:    print("grandchild done not ready")

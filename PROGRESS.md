@@ -11225,6 +11225,29 @@ guard). **Known v1 limit:** the per-ancestor registry only **grows** (no token-d
 request-scoped/short-lived, a future prune-on-cancel could clear it. Closes the `gaps.md`
 tree-propagation gap. See `docs/concurrency.md` §6e.
 
+> **RE-SHAPED TO GO'S REGISTRATION MODEL (2026-08-18).** The every-ancestor registry above is **gone**;
+> the paragraph is kept as history, and its "the link is the parent's `Shared` flag plus a `Shared`
+> registry of descendant `done()` channels" is **no longer how it works**. `derive()` now registers the
+> child into its **immediate parent only**, via a `kids: Channel[Token]` field (an O(1) `send`), and
+> `cancel()` cascades **DOWN** — an explicit work-list that drains each node's registry, marks each
+> descendant, and recurses. That is Go `context.WithCancel`'s shape, and the divergence from it was a
+> real cost: `derive()` was **cubic** in chain depth (100 → 40 ms, 400 → **6 020 ms**, 10 000
+> unreachable, against Go's 0.15 / 0.08 / 2.9 ms) because every `Shared.update()` copied the whole
+> registry list across the wire, once per ancestor. Now: 400 → **2 ms**, 1 000 → 19 ms; 5 000-wide
+> fan-out → 23 ms (was ~1.5 s). The `parent: Token?` field is **deleted** — nothing reads up any more —
+> which also fixes a second live bug: the airlock encoder walked that plain-struct chain, so a token
+> tree deeper than ~9 990 hit `maximum structural depth (10000) exceeded` when it crossed a `spawn`;
+> parent-less, a `Token` encodes in O(1) at any depth (verified at 12 000). Transitive `done()`,
+> one-directionality, tightest-deadline inheritance, the `"timeout"`-nearest-cause rule and the `+1 ms`
+> `done()`-margin all survive unchanged (`examples/cancel_tree.expected` is byte-for-byte identical).
+> Two ordering rules make it race-free: `cancel()` sets the flag **before** it drains, and `derive()`
+> sends **before** it re-checks — measured 0 lost tokens over 30 × 400 concurrent derives, against
+> 11 505 with the derive-side check removed. New guards: `tests/chz/stdlib/cancel_test.chz` (5 tests,
+> incl. the two anti-quadratic bounds and the race) and `cancel_cascade_crosses_the_airlock` (a far-side
+> `derive()` reached by a near-side root `cancel()` — the registry is live across the airlock in **both**
+> directions). Retention is narrower, not gone: a `cancel()` drains what it walks, but an **uncancelled**
+> long-lived parent still retains its children's handles. See `docs/benchmarks.md`.
+
 > **`Channel.recv_timeout(ms)` — attempted then reverted (2026-06-12).** A bounded-wait `recv` was
 > implemented with a **demote-always** shortcut (reuse `demote_recv_block` + a deadline) to avoid the
 > heavier park+timer machinery. The review panel found it **unsound at `native_reentry == 0`**: (1) a

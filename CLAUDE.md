@@ -187,7 +187,7 @@ static protocol requirements callable through a generic bound via witness passin
 OS-thread M:N engine, netpoller + `std.net`). The checker also has a **non-fatal warning channel**
 (`Severity::Warning`, `"severity"` in `--errors=json`, `DiagnosticSeverity::WARNING` in the LSP) with
 two rules on it — a discarded `Result`/`Option`, and a `spawn:`-task write read after the join.
-**4433 Rust tests** green across 23 targets (**4202** in the lib target), plus **620**
+**4434 Rust tests** green across 23 targets (**4203** in the lib target), plus **625**
 Chezzi tests green at two worker counts (up from 590 at the start of `feat/span-file-and-stdlib-contracts`).
 
 ## Current focus

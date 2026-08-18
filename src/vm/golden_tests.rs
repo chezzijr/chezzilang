@@ -5626,9 +5626,10 @@ fn cancel_cpu_aborts_early_on_mn() {
 // ===== std.cancel TREE PROPAGATION (parent/child derivation) =====
 //
 // A child token derived from a parent observes the parent's cancellation/timeout transitively
-// (root-to-leaves, one-directional). The link is LIVE (Shared flag + Shared kids registry cross
-// the airlock as live cores), so a parent flip is seen by already-derived children — including
-// children that crossed `spawn`/`parallel:`. Cancelling a child never touches the parent.
+// (root-to-leaves, one-directional). The link is LIVE (each node's `Shared` flag + the immediate
+// parent's `Channel[Token]` registry cross the airlock as live cores), so a parent cancel is pushed
+// into every already-derived descendant — including children that crossed `spawn`/`parallel:`.
+// Cancelling a child never touches the parent.
 //
 // Each test runs an inline Chezzi snippet through the real module graph (`import std.cancel`
 // needs `run_file`, not the standalone compile path). The `print`s are the assertion surface.
@@ -5692,8 +5693,8 @@ fn cancel_child_done_ready_after_parent_cancel() {
 }
 
 /// `done()` cascades TRANSITIVELY: a manual GRANDPARENT cancel makes a grandchild's `done()`
-/// channel ready, not just `cancelled()`. The grandchild's done-channel is registered into every
-/// ancestor's `kids`, so the grandparent's fan-out reaches it directly (a `wait:` waiter wakes).
+/// channel ready, not just `cancelled()`. `cancel()` drains each node's immediate-child registry and
+/// recurses down, so the grandparent's cascade reaches it (a `wait:` waiter wakes).
 #[test]
 fn cancel_grandchild_done_ready_after_grandparent_cancel() {
     let out = run_cancel_snippet(
@@ -5704,7 +5705,7 @@ fn cancel_grandchild_done_ready_after_grandparent_cancel() {
 }
 
 /// `done()` cascade reaches any depth: a manual ROOT cancel makes a great-grandchild's (depth 3)
-/// `done()` channel ready, proving the per-ancestor registration walks the whole chain to the root.
+/// `done()` channel ready, proving the downward cascade recurses through every level to the leaves.
 #[test]
 fn cancel_great_grandchild_done_ready_after_root_cancel() {
     let out = run_cancel_snippet(
@@ -5729,9 +5730,11 @@ fn cancel_child_inherits_tightest_deadline() {
 }
 
 /// The live link survives the concurrency airlock: a derived child crosses `spawn`/`parallel:`,
-/// and a parent cancel done in the parent task BEFORE the nursery is observed by the spawned task
-/// (Shared cores cross as LIVE handles, not snapshots). Deterministic on all engines: the parent
-/// already cancelled before the spawn, so the worker only polls the already-flipped flag.
+/// and a parent cancel done in the parent task BEFORE the nursery is observed by the spawned task.
+/// (The name is historical — `Token` no longer has a `parent` field. The link is the child's OWN
+/// `Shared` flag, which the parent's downward cascade already set, and it crosses as a LIVE core,
+/// not a snapshot.) Deterministic: the parent cancelled before the spawn, so the worker only polls
+/// the already-flipped flag.
 #[test]
 fn cancel_token_sendable_with_parent() {
     let src = "import std.cancel\n\nfn watch(c: Token, seen: Shared[bool]):\n    if c.cancelled():\n        seen.set(true)\n\nfn main():\n    p := cancel.manual()\n    c := p.derive()\n    seen := Shared(false)\n    p.cancel()\n    parallel:\n        spawn watch(c, seen)\n    print(\"observed cancel: {seen.get()}\")\n\nmain()\n";
@@ -5747,6 +5750,48 @@ fn cancel_derive_free_fn_form() {
         "    p := cancel.manual()\n    c := cancel.derive(p)\n    print(\"before: {c.cancelled()}\")\n    p.cancel()\n    print(\"after: {c.cancelled()}\")\n",
     );
     assert_eq!(out, "before: false\nafter: true\n");
+}
+
+/// The registration channel is live across the airlock in BOTH directions: a worker task derives a
+/// GRANDCHILD on the FAR side of a `spawn` (a `send` into the crossed child's `kids`) and parks in
+/// `wait: gk.done().recv()`, while a sibling cancels the ROOT on the near side (a drain of that same
+/// channel, two levels up). Every round must wake — the strongest liveness proof for the downward
+/// cascade, since neither half of the registry is owned by the task that reads it.
+#[test]
+fn cancel_cascade_crosses_the_airlock() {
+    let src = "import std.cancel\n\
+                   import std.time\n\
+                   fn waiter(c: Token, out: Channel[bool]):\n\
+                   \x20   gk := c.derive()\n\
+                   \x20   wait:\n\
+                   \x20       _ := gk.done().recv(): out.send(true)\n\
+                   fn canceller(root: Token):\n\
+                   \x20   time.sleep_ms(5)\n\
+                   \x20   root.cancel()\n\
+                   fn main():\n\
+                   \x20   out := Channel[bool]()\n\
+                   \x20   n := 20\n\
+                   \x20   for i in 0..n:\n\
+                   \x20       root := cancel.manual()\n\
+                   \x20       kid := root.derive()\n\
+                   \x20       parallel:\n\
+                   \x20           spawn waiter(kid, out)\n\
+                   \x20           spawn canceller(root)\n\
+                   \x20   seen := 0\n\
+                   \x20   for _ in 0..n:\n\
+                   \x20       out.recv()\n\
+                   \x20       seen = seen + 1\n\
+                   \x20   print(seen)\n\
+                   main()\n";
+    let (out, _e, res, _c) = run_parallel_watchdog(src);
+    assert!(
+        res.is_ok(),
+        "a far-side derive must be reached by a near-side cancel: {res:?}"
+    );
+    assert_eq!(
+        out, "20\n",
+        "every far-side grandchild must be woken by the near-side root cancel"
+    );
 }
 
 /// `std.cancel` tree-propagation golden (VM): `examples/cancel_tree.chz` byte-matches `.expected`.

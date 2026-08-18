@@ -1,0 +1,105 @@
+# tests/chz/stdlib/cancel_test.chz — `std.cancel`'s registration model: Go `context.WithCancel`'s
+# shape, i.e. `derive()` registers a child into its IMMEDIATE parent only (O(1)) and `cancel()`
+# cascades DOWN the tree. The old model registered each new child into EVERY ancestor with a
+# copy-per-`Shared.update`, which made a chain cubic (400 derives = 6.0 s) and a fan-out quadratic.
+#
+# The perf bounds below are wall-clock, but they are not timing-sensitive: the measured cost is
+# ~20 ms against a 5 000 ms assertion (250x headroom), and the pre-fix code does not merely exceed
+# them, it takes ~90 s. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+# Run: `cargo run -- test tests/chz/stdlib/cancel_test.chz`
+
+import std.time
+import std.cancel
+import std.concurrency
+
+# Derive `n` children (each with one grandchild) off `root` and ship every one out through a live
+# channel, so the caller can re-check them AFTER the nursery joins. Runs concurrently with a sibling
+# task cancelling `root` — the point is that no interleaving can leave a token uncancelled.
+fn derive_burst(root: Token, out: Channel[Token], n: int):
+    i := 0
+    while i < n:
+        c := root.derive()
+        out.send(c)
+        out.send(c.derive())
+        i = i + 1
+
+fn cancel_root(root: Token):
+    root.cancel()
+
+test fn derive_chain_is_not_quadratic():
+    t0 := time.monotonic()
+    root := cancel.manual()
+    leaf := root
+    i := 0
+    while i < 1000:
+        leaf = leaf.derive()
+        i = i + 1
+    root.cancel()
+    d := (time.monotonic() - t0) * 1000.0
+    assert leaf.cancelled(), "the leaf of a 1000-deep chain must be cancelled by a root cancel"
+    assert d < 5000.0, "1000 sequential derives + one cascade must not be quadratic: " + str(d) + "ms"
+
+test fn wide_fanout_is_not_quadratic():
+    t0 := time.monotonic()
+    root := cancel.manual()
+    kids := [root.derive()]
+    i := 1
+    while i < 5000:
+        kids.push(root.derive())
+        i = i + 1
+    root.cancel()
+    d := (time.monotonic() - t0) * 1000.0
+    live := 0
+    for k in kids:
+        if not k.cancelled():
+            live = live + 1
+    assert live == 0, "every one of 5000 children must be cancelled, {live} were not"
+    assert d < 5000.0, "5000 derives off one root must not be quadratic: " + str(d) + "ms"
+
+test fn derive_races_cancel():
+    # `cancel()` sets the flag BEFORE draining the registry and `derive()` sends BEFORE checking it,
+    # so for any interleaving the child is either reached by the cascade or sees an already-cancelled
+    # parent at derive time. Without the derive-side check this loses thousands of tokens.
+    bad := 0
+    r := 0
+    while r < 30:
+        root := cancel.manual()
+        out := Channel[Token]()
+        parallel:
+            spawn derive_burst(root, out, 200)
+            spawn cancel_root(root)
+        while true:
+            match out.try_recv():
+                Some(t):
+                    if not t.cancelled():
+                        bad = bad + 1
+                None:
+                    break
+        r = r + 1
+    assert bad == 0, "a derive racing a root cancel must never leave a live token, {bad} survived"
+
+test fn late_derive_from_a_cancelled_parent():
+    r := cancel.manual()
+    r.cancel()
+    c := r.derive()
+    assert c.cancelled(), "a child derived from an already-cancelled parent starts cancelled"
+    why := ""
+    match c.reason():
+        Some(s): why = s
+        None:    why = "none"
+    assert why == "cancelled", "reason must be the nearest cause: {why}"
+    ready := false
+    match c.done().try_recv():
+        Some(v): ready = v
+        None:    ready = false
+    assert ready, "a late-derived child's done() must already be ready"
+
+test fn double_cancel_is_idempotent_with_children():
+    r := cancel.manual()
+    c := r.derive()
+    g := c.derive()
+    r.cancel()
+    r.cancel()
+    assert r.cancelled(), "the root stays cancelled after a second cancel"
+    assert c.cancelled(), "a child stays cancelled after the second (already-drained) cancel"
+    assert g.cancelled(), "a grandchild stays cancelled after the second (already-drained) cancel"

@@ -1769,3 +1769,56 @@ at the harder end of that range, not a new or contradictory data point). The fix
 correctness fix, not a throughput lever: it makes `--threads=N` mean what it says and stops idle workers
 from burning CPU, it does not close the interpreter-vs-native gap, which remains open perf-track work
 (`docs/future.md §4`).
+
+---
+
+## `std.cancel` — Go's registration model: O(1) `derive()`, cascade down (2026-08-18)
+
+`Token.derive()` used to register the new child's `done()` channel into **every ancestor's** registry,
+walking the parent chain to the root, each insert a `Shared.update()` that copies the whole list across
+the off-GC-heap wire boundary both ways. That is O(depth) copies of an O(depth) list per `derive()` —
+cubic in chain depth. Go registers into the **nearest cancellable parent only** and cascades **down** at
+cancel time, which is O(1) per derive; per this repo's ancestor rule an unintuitive divergence from the
+owning ancestor (Go, for concurrency) is a bug, so the registry became `kids: Channel[Token]` (an O(1)
+`send`, no `update` callback at all) and `cancel()` became an explicit work-list that drains and
+recurses downward. `parent: Token?` was deleted with it — nothing reads up any more.
+
+Measured on the release binary (same machine, `chezzi run`), a chain of n tokens built by repeated
+`derive()` plus one root `cancel()`:
+
+| n | before | **after** | Go `context.WithCancel` |
+|---|--------|-----------|-------------------------|
+| 100 | 34 ms | **0 ms** | 0.15 ms |
+| 200 | 344 ms | — | — |
+| 400 | 5 904 ms | **2 ms** | 0.08 ms |
+| 1 000 | ~90 s (test timed out at 300 s) | **19 ms** | — |
+| 10 000 | unreachable | 19 146 ms † | 2.9 ms |
+
+n children of one root (fan-out), built then all cancelled:
+
+| n | before | **after** |
+|---|--------|-----------|
+| 1 000 | 53 ms | **5 ms** |
+| 2 000 | 213 ms | — |
+| 4 000 | 975 ms | **31 ms** |
+| 5 000 | — | **23 ms** |
+| 8 000 | — | **88 ms** |
+
+Both anti-quadratic bounds are pinned by `tests/chz/stdlib/cancel_test.chz`
+(`derive_chain_is_not_quadratic`, `wide_fanout_is_not_quadratic`) at 5 000 ms — ~250× headroom over the
+measured 19/23 ms, and the pre-fix code does not merely exceed them, it runs ~90 s.
+
+**Second bug the deletion fixed.** `parent` was a plain struct field, so the airlock encoder walked the
+whole chain: sending a token from a tree deeper than **9 990** into a `spawn` faulted with
+`maximum structural depth (10000) exceeded (cyclic data structure?)` (5 000 was fine). Parent-less, a
+`Token` encodes in O(1) at any depth — verified at depth **12 000**: the tree crosses the `spawn` and
+the far side cascades all 12 001 nodes. It also removes an O(depth) `Shared.get()` walk from every
+`cancelled()` poll (`examples/cancel_cpu.chz` polls it ~50M times).
+
+† **The residual n=10 000 cost is NOT `std.cancel`** — it is an engine-level cost of a *rooted, deep*
+live object graph, and it reproduces with no `std.cancel` involved. A plain
+`struct N: flag: Shared[bool]; dl: Channel[bool]; kids: Channel[N]` chained n deep costs 36 / 283 /
+2 518 ms at n = 2 000 / 4 000 / 8 000 **when the head is held live**, and 1 / 3 / 6 ms (linear) when it
+is not — same allocations, same sends, only the live-set shape differs. That is why the depth-12 000
+airlock crossing above is a one-off manual verification (33 s) rather than a standing test: it would be
+measuring the GC's deep-graph marking, not the cancellation model. Worth a ledger row on its own.

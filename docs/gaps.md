@@ -7715,18 +7715,20 @@ which is what made the qualified arm the single broken site.
   global; it is gone now, so the *only* thing keeping this unreachable is the M:N-only gate.) Worth a
   grep-and-mirror pass if that ever happens; not worth pre-emptively duplicating logic for a marker
   that doesn't exist yet.
-- **`std/cancel.chz` — `kids` only ever grows.** `derive()` registers a child into every ancestor's
-  `kids` list and nothing ever unlinks it. Go's `context.WithCancel` returns a `CancelFunc` precisely so
-  `defer cancel()` detaches the child from its parent; there is no detach here at all. A long-lived root
-  token with a token derived per job retains one channel per job forever, plus an O(depth) `update()`
-  read-modify-write lock per `derive()` call as the tree grows. Narrow trigger today (nothing yet derives
-  tokens at volume against one long-lived root), but a real leak shape once something does.
-- **`std/cancel.chz` — `cancelled()` recurses the parent chain at POLL time** (one `Shared.get()` per
-  level plus a `monotonic()` call), while Go pushes cancellation DOWN at `cancel()` time so `ctx.Done()`
-  is a single channel read. The push machinery already exists here — `cancel()` already fans out to
-  `kids` — it just carries a `Channel[bool]` wakeup rather than also writing the child's own `flag`.
-  Storing the child's `Shared[bool]` in the parent's registry too (not just the wakeup channel) would
-  collapse `cancelled()` to one local read, cheaper and less code than the current recursive walk.
+- **`std/cancel.chz` — `kids` only ever grows.** ~~`derive()` registers a child into every ancestor's
+  `kids` list and nothing ever unlinks it.~~ **NARROWED 2026-08-18** (`fix(cancel): register into the
+  immediate parent and cascade down, like Go's context`). The O(depth) `update()` read-modify-write per
+  `derive()` is **gone** — registration is one O(1) `send` into the immediate parent's
+  `kids: Channel[Token]` — and a `cancel()` now **drains** every registry it walks, so a cancelled
+  subtree releases its handles. What remains: there is still no `CancelFunc`-style **detach**, so an
+  **uncancelled** long-lived root with a token derived per job retains one entry per job until it is
+  itself cancelled or dropped. Narrow trigger (tokens are request-scoped), but the leak shape is real.
+- ~~**`std/cancel.chz` — `cancelled()` recurses the parent chain at POLL time**~~ — **FIXED 2026-08-18**,
+  by exactly the prescription written here: `cancel()` now pushes DOWN and writes each descendant's own
+  `flag`, so `cancelled()` is a single local `Shared.get()` (plus the `monotonic()` deadline check) at
+  any tree depth, matching Go's single-channel-read `ctx.Done()`. The `parent` field is deleted
+  entirely, which also removed an airlock structural-depth fault at tree depth >9 990. See
+  `docs/benchmarks.md` "`std.cancel` — Go's registration model".
 
 ### W7-12r / W7-15 — the process-wide quiescence detector (`future.md` §2d **step 0**) — **FIXED 2026-08-04**
 
