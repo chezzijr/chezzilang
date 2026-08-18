@@ -3944,6 +3944,31 @@ fn mnsched_yield_fiber_requeues_at_tail() {
     assert!(matches!(back.state, FiberState::Ready));
 }
 
+/// W8-7 — the liveness property `yield_fiber`'s dropped `notify_all` rests on: a yielded fiber is
+/// reachable by a **different** worker through the ordinary global-queue path, no wake required.
+/// wid 0 yields task 0 back to the tail; a SEPARATE wid (1), passing the sentinel scope (a farmed
+/// helper never self-stops), pulls it straight off the global queue via the normal `take_runnable`
+/// batch-grab — proving delivery needs no `cv.notify`. Green both before and after the removal (it
+/// pins ordering/reachability, not the notify itself); a future change that routes a yielded fiber
+/// to the yielding worker's own local ring instead of the global queue would break it.
+#[test]
+fn mnsched_yield_fiber_reachable_by_other_worker_without_wake() {
+    let sched = mk_sched(2);
+    sched.seed(vec![mk_fiber(0), mk_fiber(1)]);
+    let f0 = take_run(&sched); // wid 0 pops task 0
+    assert_eq!(f0.task_index, 0);
+    sched.yield_fiber(f0); // requeue task 0 at the global tail — no notify needed for this to work
+    // task 1 is still ahead of the requeued task 0 in the global queue.
+    match sched.take_runnable(1, 1, SENTINEL_SCOPE) {
+        Take::Run(f) => assert_eq!(f.task_index, 1),
+        Take::Stop => panic!("expected a runnable fiber, got Stop"),
+    }
+    match sched.take_runnable(1, 1, SENTINEL_SCOPE) {
+        Take::Run(f) => assert_eq!(f.task_index, 0),
+        Take::Stop => panic!("expected a runnable fiber, got Stop"),
+    }
+}
+
 /// D4/stress: a combined-churn workload that exercises EVERY new D4 path together under a
 /// watchdog — 500 consumers that block on `recv` (park + `send_wake`), 500 producers that do CPU
 /// work (reduction `yield` → global, batch-grab, work-stealing between idle workers) then `send`

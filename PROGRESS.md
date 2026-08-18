@@ -62,7 +62,43 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > > `worker_count() >= 2` gate exists to prevent, because nesting can exhaust the fixed pool into an
 > > undetectable hang (measured, `docs/future.md:418`: depth 7 / 128 leaves went 3 threads → 130).
 > > Recorded here so it is not mistaken for a fresh idle-spin defect while W8-7 is worked.
-
+>
+> **✅ W8-7 CLOSED — the default worker count is no longer the slowest setting, 2026-08-18
+> (`fix/mn-idle-policy-w8-8-w8-7`).** Idle workers already parked on a true `Condvar::wait` (no spin) —
+> the row's own filed fix direction ("park instead of spin") was wrong, same class as W8-2's filed
+> prescription. The real cost was the WAKE side: `MnSched::yield_fiber` (`src/vm/mod.rs`, D3 —
+> reduction-budget preemption, fires every `CONTEXT_REDS` dispatched ops per fiber) called
+> `cv.notify_all()` on every requeue, and `MnSched.cv` had 22 `notify_all` sites and zero `notify_one`.
+> On a CPU-bound `parallel:` scope with more cores than tasks, each broadcast woke every idle worker
+> into an O(W) `try_steal` probe that found nothing and re-parked — O(W^2) mutex/futex churn per time
+> slice, tens of thousands of slices a second. Fix: delete the `notify_all` from `yield_fiber`, one
+> line, replaced with a doc comment recording the liveness argument (the yielding worker always loops
+> straight back into `take_runnable` itself; the one path that could strand a requeued fiber — its
+> owner scope completing — already broadcasts in `take_runnable`'s owner-stop branch; `runnable`
+> accounting and global-tail ordering are both unchanged, so the deadlock predicate and
+> `mnsched_yield_fiber_requeues_at_tail`'s round-robin-fairness assertion are unaffected — that test
+> stays verbatim). Go does the same: a preempted `g` is requeued without `wakep()`. Measured on the
+> release binary, `examples/primes_parallel.chz`, before → after (`real`/`user`/`sys`, sys is the
+> signature): `--threads=4` 5.742/17.670/0.384 → 5.603/17.087/0.004 (unaffected — no idle-worker herd to
+> wake there); `--threads=12` 7.860/29.523/10.729 → 5.529/16.891/0.009 (**28x → ~0 sys**, and no longer
+> slower than `--threads=4`); default (`--threads=0`, all cores) 8.225/32.595/10.110 →
+> 5.558/17.015/0.009. `--threads=1` user/real ratio stays ~1.0 (W8-8 unaffected: 17.098/17.078=1.001).
+> Tests: `vm::tests::mnsched_yield_fiber_reachable_by_other_worker_without_wake` (new — pins that a
+> yielded fiber is reachable by a DIFFERENT worker through the plain global-queue path with no notify
+> involved) and a new standalone file `tests/chezzi_threads_sys_time.rs`'s
+> `default_worker_count_does_not_thundering_herd_on_yield` (per-child `sys`/`user` via `libc::wait4` on
+> a flat 4-task CPU-bound `parallel:`, asserts `sys < 0.03 * user` at the default worker count; RED
+> pre-fix measured ratio 0.0886-0.106 on this box's debug binary, GREEN post-fix ~0.0-0.003).
+> Deliberately its own test **target** (not folded into `tests/chezzi_threads_cli.rs`, where the brief
+> first placed it): cargo runs separate integration-test targets sequentially but `#[test]` fns within
+> one target run concurrently up to `--test-threads`, and this test's genuinely CPU-bound subprocess
+> measurably destabilized `chezzi_threads_cli.rs`'s W8-8 timing tests when they shared a target
+> (reproduced: 1 failure in 4 runs of the combined file, `threads_one_serializes_cpu_bound_parallel_tasks`
+> dropped to ratio 4.34 under its 5.5 floor; 0 failures in 7 runs once separated) — a separate target
+> sidesteps the interference without touching the W8-8 tests. `cargo test --lib` 4200/0/2, `cargo test`
+> full suite green (23 targets, incl. `tests/chz` 617/617 at both worker counts), `cargo clippy
+> --all-targets -- -D warnings` clean.
+>
 > **✅ Adversarial-review fix wave on `feat/span-file-and-stdlib-contracts`, 2026-08-18 — the LSP's
 > diagnostic publish is now atomic with its delivery, and a closed buffer can no longer be resurrected as
 > a diagnostic source.** Three isolated prosecutors reviewing the branch (the file-naming work above,

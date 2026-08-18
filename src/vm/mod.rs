@@ -3020,14 +3020,34 @@ impl MnSched {
     /// from its own local forever (which would re-introduce the D3 starvation). Decrements `running`
     /// like `park`/`finish`. Unlike `park` it touches no `parked` bucket (a yield carries no channel
     /// handle) and always requeues, so there is no park-gap/cancel re-check: a cancelled fiber requeued
-    /// here re-runs and observes the flag at the next back-edge. `notify_all` wakes an idle worker.
+    /// here re-runs and observes the flag at the next back-edge.
+    ///
+    /// gaps.md W8-7 — deliberately **no** `cv.notify` here (was `notify_all`, 22nd-of-22 site,
+    /// removed): preemption fires every `CONTEXT_REDS` dispatched ops per fiber, so with a
+    /// multi-fiber CPU-bound scope this was a `notify_all` many times a second, each waking every
+    /// idle worker into an O(W) `try_steal` probe that finds nothing and re-parks — O(W^2) mutex/futex
+    /// churn per time slice (measured: default worker count on a 12-core box was SLOWER than
+    /// `--threads=4`, 28x the sys time). No wake is needed because the fiber this requeues always
+    /// already has a live consumer:
+    /// 1. The yielding worker itself loops straight back into `take_runnable`
+    ///    (`Vm::mn_worker_loop`, `sched.rs`) — its only early exit is `self.demoted`, and a demote
+    ///    spins a replacement covering the same `wid` first. So the requeuing worker is itself already
+    ///    awake to (eventually) grab it back off the global queue.
+    /// 2. The one path that could leave a requeued fiber unconsumed — its owner scope completing while
+    ///    a differently-scoped fiber sits behind it in the global queue — already broadcasts:
+    ///    `take_runnable`'s owner-stop branch does `notify_all` before returning `Take::Stop`.
+    /// 3. `runnable` accounting is unchanged (still incremented under this same lock), so
+    ///    `is_deadlocked`'s `runnable == 0` predicate cannot false-fire on a yielded fiber.
+    /// 4. Ordering is unchanged (global tail), so round-robin fairness is exactly as before — pinned by
+    ///    `mnsched_yield_fiber_requeues_at_tail`, unmodified.
+    ///
+    /// Go does the same: a preempted `g` is requeued without `wakep()`.
     fn yield_fiber(&self, mut fiber: Fiber) {
         let mut c = self.lock();
         c.running -= 1;
         fiber.state = FiberState::Ready;
         c.global.push_back(fiber);
         self.runnable.fetch_add(1, Ordering::Relaxed); // running → ready (round-robin requeue)
-        self.cv.notify_all();
     }
 
     /// D4c — try to steal runnable work for an idle worker `wid` from a sibling's local queue. Probes
