@@ -1897,6 +1897,34 @@ Pinned by `tests/chz/spec/gc_core_graph_test.chz`, which asserts the **ratio** (
 wall-clock bound — a ratio is profile- and hardware-independent, and the two regimes separate cleanly
 (3.88 vs 1.87). Verified RED on the pre-fix binary at 3.96.
 
+**The speedup exposed a pre-existing DEADLOCK, fixed in the same branch.** The mark walk locked a
+core's payload and recursed straight into a NESTED core's lock while still holding the first, and
+`Heap::children` held the outer guard across the whole call. With a **cyclic** core graph, two workers
+marking concurrently took the same two locks in opposite orders — ABBA. Every thread parked in
+`futex_do_wait` at 0% CPU, no deadlock report, and `--timeout` cannot reach a thread blocked on a
+`Mutex`, so it presents as a silent total hang.
+
+Measured, `CHEZZI_THREADS=4`, release:
+
+| build | hangs |
+|---|---|
+| base `c97d24ff` (before any of this work) | 2/80 |
+| after the dedup speedup | **8/40** |
+| after the guard/drain split | **0/40** |
+
+It is pre-existing — the speedup widened the window rather than creating it. All three conditions are
+required: remove the cycle → 0/20; run at `CHEZZI_THREADS=1` → 0/12; remove the allocations that drive
+GC → 0/15. The fix splits the walk in two: `collect_gcrefs_structural` runs under a core's guard and
+merely QUEUES nested cores, and `drain_pending_cores` locks them one at a time after the guard drops.
+A first attempt that only restructured `collect_core_gcrefs` measured **unchanged at 8/40**, because
+`Heap::children` still held the outer guard across the drain — the caller had to be split too.
+
+Pinned by `chezzi_threads_cli::gc_mark_walk_does_not_deadlock_on_a_cyclic_core_graph`, 40 rounds sized
+off the DEBUG hang rate (12.5%, vs 20% release) for ~99.5% RED; verified RED twice pre-fix and GREEN
+three times after. It spawns and polls with a deadline rather than calling `output()` — a deadlocked
+child never closes its pipes, so `output()` wedges the test binary instead of failing it (measured on
+the first draft).
+
 **What is NOT fixed, deliberately.** A core whose payload holds another core is still conservatively
 `WS_DIRTY` (`src/vm/core.rs`, "a store on the INNER core can introduce a handle without ever touching
 this one's cache"), so its subtree is re-walked every pass and never memoized — the walk is now linear

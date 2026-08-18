@@ -6982,6 +6982,21 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > wall-clock bound, so it is profile- and hardware-independent. The regimes separate cleanly — debug
 > T=2 ratio **3.88 before vs 1.87 after** — and it was verified RED on the pre-fix binary at 3.96.
 >
+> **The speedup exposed a pre-existing ABBA DEADLOCK in the same walk, fixed here too.** The mark
+> walk locked a core's payload and recursed into a NESTED core's lock while holding the first, and
+> `Heap::children` held the outer guard across the whole call — so two workers marking a **cyclic**
+> core graph concurrently took the same two locks in opposite orders. All threads parked in
+> `futex_do_wait` at 0% CPU, no deadlock report, and `--timeout` cannot interrupt a `Mutex` wait.
+> Measured at `CHEZZI_THREADS=4`, release: base `c97d24ff` **2/80**, after the speedup **8/40**, after
+> the fix **0/40** — pre-existing, widened by the speedup. Needs all three of cycle + GC pressure +
+> `>= 2` workers (removing any one gives 0). Fix: `collect_gcrefs_structural` runs under a guard and
+> only QUEUES nested cores; `drain_pending_cores` locks them one at a time after the guard drops. A
+> first attempt that restructured only `collect_core_gcrefs` measured **unchanged at 8/40** because
+> the caller still held the outer guard — both halves had to be split. Pinned by
+> `chezzi_threads_cli::gc_mark_walk_does_not_deadlock_on_a_cyclic_core_graph` (40 rounds, sized off
+> the 12.5% DEBUG rate for ~99.5% RED; RED x2 pre-fix, GREEN x3 after). The test spawns and polls with
+> a deadline rather than using `output()`, which a deadlocked child wedges forever.
+>
 > **Deliberately not fixed:** a core whose payload holds another core is still conservatively
 > `WS_DIRTY` and re-walked every pass, never memoized. Memoizing needs a validity token every core
 > write path must bump; a missed path leaves a stale `WS_CLEAN`, the GC stops tracing a live handle,
