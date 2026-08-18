@@ -1039,7 +1039,10 @@ every other job and \`parallel:\` nursery sharing the pool. Do this socket op in
 \`parallel:\` nursery instead, where it parks rather than blocking a shared thread.")` — a job runs
 on the bounded, process-wide pool with no scheduler under it, so blocking there steals width from
 every other job and every `parallel:` nursery (measured at `CHEZZI_THREADS=1`: a 10 s pin on a
-black-hole address).
+black-hole address). That measurement is **unaffected by `W8-8`** (the `--threads=1` two-runner fix,
+2026-08-18) and structurally so — the job pool is `vm::pool`, sized straight off `worker_count()`, while
+W8-8's extra runner lived in the nursery enlist/owner path; re-derived on the 1-wide binary the same day,
+`Err` returned in 0.006 s, no hang.
 **Everywhere else `connect` blocks and succeeds** — a `spawn`/`parallel:` fiber parks on the netpoller,
 and top-level `main` blocks its thread, matching both ancestors (CPython `socket.connect` 0.1 ms,
 Go `net.Dial` 314 µs, each from the sole/main thread). `connect` is admitted where

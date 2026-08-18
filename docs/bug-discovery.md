@@ -183,7 +183,10 @@ Every finding so far falls into one of these (use as a "what am I hunting" check
      static typing) are **not** bugs; silent wrapping / UB / a runtime fault on an accepted program is.
    - **Write tiny focused `.chz` probes**, one angle each.
    - **Run `run` AND `check`**, and — for anything concurrent — run it again under `CHEZZI_THREADS=1`
-     and `CHEZZI_THREADS=2`. A verdict that changes with the worker count is a bug. Where the
+     and `CHEZZI_THREADS=2`. A verdict that changes with the worker count is a bug. (Until 2026-08-18
+     those were the **same** configuration — `--threads=1` ran two CPU runners, so this method had one
+     arm fewer than it claimed; `docs/gaps.md` **W8-8**. It now genuinely has two: 1.00 cores at `=1`
+     vs 1.91 at `=2`, `docs/benchmarks.md` §"W8-7 / W8-8 idle-worker-policy fix".) Where the
      semantics should match Python, diff against `python3`; where they should match Go, write and run
      the Go program.
    - **Evidence-gated, reproduced-only.** Each finding: minimal repro + exact command + EXPECTED (cite

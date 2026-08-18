@@ -141,6 +141,23 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > on a small CI box) and its `use std::process::Command` is now `#[cfg(unix)]`-gated so
 > `clippy --all-targets -- -D warnings` stays clean on non-unix targets.
 >
+> **Docs sweep + branch-final gate, 2026-08-18 (`fix/mn-idle-policy-w8-8-w8-7`).** `docs/gaps.md` rows
+> **W8-7 and W8-8 are struck through and closed** (W8-7's closure records that its own filed
+> prescription — *"an idle worker must park on a condvar, not spin"* — was **measured wrong**: idle
+> workers already parked untimed; the cost was the wake side. Third instance of the read-the-closed-row's-
+> prescription convention, after W8-2). **Open W8 rows: 17 → 15** (W8-1, W8-3, W8-4, W8-6, W8-9..W8-13,
+> W8-16, W8-17, W8-19, W8-20, plus the milestones W8-21/W8-22), counted off the table. The scheduler
+> session-log section, the "Fix order" list, `docs/concurrency.md`'s `--threads=1` corrective callout,
+> `docs/stdlib.md`, `docs/future.md`, `docs/bug-discovery.md`, `CLAUDE.md` and two source doc-comments
+> (`src/vm/netio.rs`, `src/vm/golden_tests.rs` — comment-only) all carry the re-derivation: **all nine
+> claims that rested on a two-wide `CHEZZI_THREADS=1` were re-run on the genuinely 1-wide binary and
+> every one came back CONFIRMED or UNCHANGED-BY-DESIGN — none false.** Load-bearing one: the N8 shape
+> that justified deleting `--serial`, **15/15 faults in 4–6 ms, 0 hangs**. Branch-final gate: `cargo
+> test` **4432 passed / 0 failed / 3 ignored across 23 targets** (lib target 4201 passed / 0 failed /
+> 2 ignored), `cargo clippy --all-targets -- -D warnings` and `--features lsp` both clean, `cargo test
+> --features lsp --test lsp_smoke` 11/11, `chezzi test tests/chz` **617/617 at the default worker count
+> and 617/617 at `CHEZZI_THREADS=2`**, `chezzi docs` 7498 lines.
+>
 > **✅ Adversarial-review fix wave on `feat/span-file-and-stdlib-contracts`, 2026-08-18 — the LSP's
 > diagnostic publish is now atomic with its delivery, and a closed buffer can no longer be resurrected as
 > a diagnostic source.** Three isolated prosecutors reviewing the branch (the file-naming work above,
@@ -203,8 +220,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > discarded `Result`/`Option`) and the un-numbered airlock-trap section closed 2026-08-17** on the
 > `feat/diagnostic-pass-w8-2-airlock` branch; **W8-14 (runtime stack traces name no file), W8-15 (both
 > `check`/`test` `--errors=json` halves), and W8-5 (`json.parse`'s and `json.stringify`'s depth aborts)
-> closed 2026-08-18** on `feat/span-file-and-stdlib-contracts`. **17 rows are open** (W8-1, W8-3, W8-4,
-> W8-6..W8-13, W8-16, W8-17, W8-19, W8-20, plus the two decided milestones W8-21/W8-22) and are the top
+> closed 2026-08-18** on `feat/span-file-and-stdlib-contracts`; **W8-8 and W8-7 (the scheduler pair)
+> closed 2026-08-18** on `fix/mn-idle-policy-w8-8-w8-7`. **15 rows are open** (W8-1, W8-3, W8-4, W8-6,
+> W8-9..W8-13, W8-16, W8-17, W8-19, W8-20, plus the two decided milestones W8-21/W8-22) and are the top
 > of the pre-JIT queue.
 >
 > **The shape:** semantics are in good shape (40+ CPython differentials → **one** differing byte, `NaN`
@@ -214,9 +232,11 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > eats `{n}` regex quantifiers · ~~W8-2 a discarded `Result` is fatal at top level and silent inside a fn~~ **fixed** ·
 > W8-3 `Shared.set` inside `update` loses the write · W8-4 `sort_by_key` callback mutations vanish ·
 > W8-5 `json.parse` depth kills the process despite its `Result` · W8-6 `regex` `\1` silently emits
-> literal backslashes), a **scheduler whose default is its slowest setting** (W8-7; `--threads=1`
+> literal backslashes), ~~a **scheduler whose default is its slowest setting** (W8-7; `--threads=1`
 > actually runs **two** workers — W8-8, which invalidates every rationale in the tree citing a
-> `CHEZZI_THREADS=1` measurement), and a **diagnostics layer with no caret, no `help:`, and no "did you
+> `CHEZZI_THREADS=1` measurement)~~ **both fixed 2026-08-18** — the default is now at parity with the
+> best setting, `--threads=1` is 1.00 cores, and all nine `CHEZZI_THREADS=1`-based rationales were
+> re-derived on the 1-wide binary and held — and a **diagnostics layer with no caret, no `help:`, and no "did you
 > mean" anywhere** (W8-13, ~~W8-14~~ fixed, W8-15..W8-17).
 >
 > **META-FINDING, and the reason this is in PROGRESS and not just gaps.md: not one of W8-1..W8-17 was
@@ -229,8 +249,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > The detectors that did earn their keep are the ones comparing against something outside this repo —
 > which is CLAUDE.md's ancestor rule paying out, and the argument for `docs/future.md` §2b's unbuilt
 > Go-paired-programs differential. **Fix order** is in the session log; short version: the six silent
-> wrong answers, then W8-8 before W8-7, then Levenshtein suggestions, then `assert` operand values +
-> a `file` key in `--errors=json`.
+> wrong answers, then W8-8 before W8-7 (**both done 2026-08-18**), then Levenshtein suggestions, then
+> `assert` operand values + a `file` key in `--errors=json` (**done 2026-08-18**).
 >
 > **Docs fixed in this commit (W8-18, all twelve):** `import X from M` is the named-import form and
 > `from M import X` is a parse error (`syntax.md` §12, `stdlib.md`, `CLAUDE.md`, 16 `std/*.chz` headers) ·
