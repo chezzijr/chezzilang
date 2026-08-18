@@ -126,10 +126,17 @@ fn default_worker_count_does_not_thundering_herd_on_yield() {
         .map(|n| n.get())
         .unwrap_or(1);
     if cores < 8 {
+        // CEILING, and it is a QUIET one: libtest CAPTURES stderr on a test that PASSES, so on a
+        // <8-core box this message is invisible and the summary still reads `1 passed` —
+        // indistinguishable from real coverage unless the run uses `--nocapture`. Stable libtest has
+        // no runtime-`ignored` escape, so this is the least-bad shape available; the alternative
+        // (assert anyway) is worse, because it would pass a fully-regressed binary. If this gate ever
+        // has to hold on small CI hardware, the fix is to move it out of libtest, not to lower the
+        // threshold.
         eprintln!(
             "SKIP: only {cores} cores available (need >= 8) — too few idle workers for the \
              thundering-herd this gate detects to raise a signal; the pre-fix ratio would be vacuously \
-             low here, not a real pass"
+             low here, not a real pass. Visible only under `--nocapture`."
         );
         return;
     }

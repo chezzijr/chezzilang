@@ -1818,6 +1818,24 @@ impl Vm {
             // `demote_socket_enter`), so the notify must be unconditional on this exit, not shaped to
             // any one of them. Cost: once per demoted-thread exit, not once per `CONTEXT_REDS`
             // dispatched ops — off the hot path W8-7 is about.
+            //
+            // THE ENUMERATION `yield_fiber` CROSS-REFERENCES — every way this loop is left, and who
+            // consumes a fiber `yield_fiber` requeued without a wake. It lives here, in the code that
+            // claims to hold it, because the W8-7 hang was caused by a comment asserting a case it had
+            // not enumerated:
+            //   (a) `Take::Stop => return` (the `match` at the top). `Stop` is RETURNED BY
+            //       `take_runnable`, so a worker taking it has by definition re-entered and evaluated
+            //       the queue — it cannot be holding an unconsumed yield. Of its four sites, the
+            //       owner-stop, deadlock and W7-58 branches all `notify_all` before returning; the
+            //       `c.terminate` branch does not, which is benign because both writers of
+            //       `terminate` (`MnSched::finish`, `flag_deadlock`) `notify_all` right after setting
+            //       it, and the run is ending regardless.
+            //   (b) this `self.demoted` return — the hole, closed by the notify below.
+            //   (c) a panic is NOT an exit: `run_one_fiber` wraps its whole body in `catch_unwind` and
+            //       converts a panic into `Disp::Finish(panic_outcome(..))`, so the loop continues. The
+            //       outer `catch_unwind`s in the shells only see a panic from `take_runnable`/`park`/
+            //       `finish` themselves, which is a pre-existing scheduler-bug path (see
+            //       `eager_joiner_runs_fibers`' own hazard note).
             if self.demoted {
                 sched.cv.notify_all();
                 return;

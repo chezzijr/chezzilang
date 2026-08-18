@@ -3031,8 +3031,11 @@ impl MnSched {
     /// always already has a live consumer — with ONE hole, closed at the departure rather than here
     /// (see below):
     /// 1. The yielding worker itself loops straight back into `take_runnable`
-    ///    (`Vm::mn_worker_loop`, `sched.rs`) — Chezzi's always-present equivalent of Go's spinning M.
-    ///    Its only early exit is `self.demoted`, taken when THIS worker was itself covered by a
+    ///    (`Vm::mn_worker_loop`, `sched.rs`). Precisely: its only exit that does NOT go through
+    ///    `take_runnable` is `self.demoted` — the other one, `Take::Stop`, is *returned by*
+    ///    `take_runnable`, so a worker taking it has already evaluated the queue and cannot be holding
+    ///    an unconsumed yield. `mn_worker_loop`'s `self.demoted` arm carries the full exit enumeration.
+    ///    `demoted` is taken when THIS worker was itself covered by a
     ///    replacement earlier (mid-fiber, at demote time) and now leaves for good instead of looping
     ///    back. That replacement was spun up while `runnable == 0` and typically parked into this same
     ///    `take_runnable`'s untimed `cv.wait` well before this yield — so on the `demoted` exit no one
@@ -3052,16 +3055,24 @@ impl MnSched {
     ///
     /// Go does NOT do the same — checked against go1.26.6's `runtime/proc.go`: `goschedImpl` (the
     /// preemption path) calls `wakep()` on EVERY preemption, which CAS-guards a single idle P awake
-    /// (`sched.nmspinning`) — a damped single wake, not no wake. Go needs that wake because it cannot
-    /// otherwise guarantee a runnable `g` has a consumer. Chezzi's actual analogy is stronger: it needs
-    /// no wake because the yielding worker itself is guaranteed to re-enter `take_runnable`
-    /// immediately (point 1) — an always-present spinner Go doesn't have — and the one place that
-    /// guarantee breaks is the departure this doc's point 1 now cross-references. The residual is
-    /// honest, not free: Chezzi wakes ZERO times per preemption where Go wakes at most one, so an idle
-    /// Chezzi worker is never recruited mid-slice the way an idle Go P can be. That's sound because
-    /// every OTHER way a fiber becomes runnable still notifies (spawn, `finish`, `send_wake`,
-    /// `complete_offload`, and the batch-grab surplus push above) — this is the sys-time collapse W8-7
-    /// measured.
+    /// (`sched.nmspinning`) — a damped single wake, not no wake. But note WHAT that wake is for.
+    /// `goschedImpl`'s last line is `schedule()`, on the same M — Go's exact equivalent of this
+    /// worker's `take_runnable` re-entry — so the preempted `g` already has a consumer and `wakep` is
+    /// a **recruitment** wake, not a liveness one: it brings an idle P online now that there is one
+    /// more runnable `g` than there are runners. That is why one spinner is enough to suppress it
+    /// (`nmspinning`) and why it is gated on `mainStarted`, neither of which would make sense for a
+    /// wake the `g`'s survival depended on. So the honest comparison is NOT that Chezzi's guarantee is
+    /// stronger — both runtimes have the same always-present consumer. What Chezzi gives up by not
+    /// waking is the RECRUITMENT: Chezzi wakes ZERO times per preemption where Go wakes at most one,
+    /// so an idle Chezzi worker is never recruited mid-slice the way an idle Go P can be. That is
+    /// sound here because a preemption does not create work — it re-queues work that already had a
+    /// runner — and because the ways a fiber becomes runnable for the FIRST time all notify (`inject`,
+    /// `wake_bucket` at all four callers, the park/send/wait gap requeues, `cancel_drain`,
+    /// `complete_offload`, and the batch-grab surplus push above). Exactly one other site increments
+    /// `runnable` without notifying — `register_scope_seeded`, which seeds a nested nursery's fibers on
+    /// a live sched — and it is safe for this same reason: its caller becomes the consumer on the very
+    /// next line (`shell.mn_worker_loop(..)`). `seed` is a third, but it runs pre-start. This is the
+    /// sys-time collapse W8-7 measured.
     fn yield_fiber(&self, mut fiber: Fiber) {
         let mut c = self.lock();
         c.running -= 1;

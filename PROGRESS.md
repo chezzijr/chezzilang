@@ -79,9 +79,15 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `mnsched_yield_fiber_requeues_at_tail`'s round-robin-fairness assertion are unaffected — that test
 > stays verbatim). **Correction (see the hang-fix entry below): Go does NOT do the same** — go1.26.6's
 > `goschedImpl` calls `wakep()` on every preemption (a damped single wake, CAS-guarded on
-> `sched.nmspinning`), not no wake. Chezzi's real analogy is that the yielding worker itself is
-> guaranteed to re-enter `take_runnable` immediately, an always-present spinner Go lacks — Chezzi wakes
-> zero times per preemption where Go wakes at most one. Measured on the
+> `sched.nmspinning`), not no wake. And Go's wake is **recruitment, not liveness**: `goschedImpl`'s
+> last line is `schedule()` on the same M — Go's exact equivalent of the yielding worker's
+> `take_runnable` re-entry — so the preempted `g` already has a consumer, and `wakep` exists only to
+> bring an idle P online now that there is one more runnable `g` than runners (which is why one
+> spinner suppresses it, and why it is gated on `mainStarted`). So Chezzi's guarantee is not
+> *stronger* than Go's — both have the same always-present consumer. What Chezzi gives up is that
+> recruitment: it wakes zero times per preemption where Go wakes at most one, so an idle Chezzi worker
+> is never recruited mid-slice. Sound here because a preemption re-queues work that already had a
+> runner rather than creating any. Measured on the
 > release binary, `examples/primes_parallel.chz`, before → after (`real`/`user`/`sys`, sys is the
 > signature): `--threads=4` 5.742/17.670/0.384 → 5.603/17.087/0.004 (unaffected — no idle-worker herd to
 > wake there); `--threads=12` 7.860/29.523/10.729 → 5.529/16.891/0.009 (**28x → ~0 sys**, and no longer
@@ -113,7 +119,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > fiber's own `Disp::Yield` (`CONTEXT_REDS` exhausted post-recv) requeued it with no notify — zero live
 > consumers, and `wait_for_completion`'s untimed `cv.wait` never wakes the joiner either: a hang, not a
 > slow path. Repro: a `recv` inside a native `xs.map` callback (demotes) followed by a tail loop
-> burning >`CONTEXT_REDS` ops (forces a post-demote `Disp::Yield`) hung 124/124 at `--threads=1`/`2` and
+> burning >`CONTEXT_REDS` ops (forces a post-demote `Disp::Yield`) hung 3/3 and 2/2 (rc=124) at `--threads=1`/`2` and
 > 1/2 at `--threads=4` on the pre-fix release binary under `timeout 10`, vs 3/3 rc=0 at every setting on
 > the pre-W8-7 base. Fix: notify at the departure, not the requeue — `mn_worker_loop`'s `self.demoted`
 > exit now does `sched.cv.notify_all()` before returning (`src/vm/sched.rs`), covering all four demote
