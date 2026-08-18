@@ -76,7 +76,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >     a channel send crosses the airlock and deep-copies, so registering the child itself would copy its
 >     whole ancestor chain: measured **25.6 s for 300 derives**, versus 0.10 s with the twin. Chain of
 >     1 000 derives + cascade: pre-branch ~90 s → 19 ms (no `parent`) → **85 ms**, against the
->     `derive_chain_beats_the_every_ancestor_registry` 5 000 ms bound (18x headroom, measured in the DEBUG profile the gate runs, not release). Fan-out is depth-1 and unchanged
+>     `derive_chain_beats_the_every_ancestor_registry` 5 000 ms bound (12.8x headroom at n=1 000, measured in the DEBUG profile the gate runs, not release). Fan-out is depth-1 and unchanged
 >     (8 000 → **81 ms** vs 88 ms). The derive-time race check reads self's OWN state, not `cancelled()`
 >     — the full walk made a 1 000-link chain 7 177 ms.
 >   * **Two consequences, stated not hidden.** `cancelled()` is **O(depth)** again: **0.30 µs at depth
@@ -6958,6 +6958,36 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `type 'tuple' is reserved (builtin)`, tuple literals unaffected. Test `user_decl_named_tuple_rejected`.
 
 ---
+
+> **GC: the mark pass over a rooted core graph was quadratic in DEPTH (2026-08-18).**
+> `collect_core_gcrefs`'s cycle-breaking `seen` was a `Vec<usize>` tested with `contains` — a linear
+> scan — so walking a D-deep chain of live cores visited D of them and each rescanned the prefix:
+> **O(D²) per mark pass**, every pass, for as long as the graph stayed rooted. `nested_core_bytes`,
+> the sibling walk in the same file, already used `FxHashSet`; this one was the outlier and it was the
+> one on the mark path. Fixed by making `seen` an `FxHashSet` (`src/vm/core.rs` `visit_core` +
+> `collect_core_gcrefs`, 3 call sites in `src/vm/heap.rs`).
+>
+> Release, a rooted `struct N { Shared, Channel[bool], Channel[N] }` chain held live across 20 000
+> unrelated allocations: depth 1 000 **63 → 9.9 ms**, 2 000 **220 → 18.3 ms**, 4 000
+> **1 164 → 39.3 ms**. Cost per doubling of depth **5.3x → 2.15x** — quadratic to linear, 30x at
+> depth 4 000. `std.cancel`'s derive chain inherited it: n=1 000 **284.7 → 67.1 ms**.
+>
+> **It was also masking a live gate defect.** `derive_chain_beats_the_every_ancestor_registry` at
+> n = 1 000 measured **4 889 ms in DEBUG at `CHEZZI_THREADS=2` against its own 5 000 ms bound** —
+> 1.02x — and failed under full-suite contention; every headroom figure in `docs/benchmarks.md` had
+> been quoted from RELEASE while the gate runs DEBUG. Post-fix the same measurement is **390 ms
+> (12.8x)**, so the gate keeps n = 1 000 instead of being scaled down to hide it.
+>
+> Pinned by `tests/chz/spec/gc_core_graph_test.chz`, asserting the **ratio** (< 2.8) rather than a
+> wall-clock bound, so it is profile- and hardware-independent. The regimes separate cleanly — debug
+> T=2 ratio **3.88 before vs 1.87 after** — and it was verified RED on the pre-fix binary at 3.96.
+>
+> **Deliberately not fixed:** a core whose payload holds another core is still conservatively
+> `WS_DIRTY` and re-walked every pass, never memoized. Memoizing needs a validity token every core
+> write path must bump; a missed path leaves a stale `WS_CLEAN`, the GC stops tracing a live handle,
+> and that is a use-after-free — precisely what `Heap::mark_core_payload`'s `debug_assert` guards.
+> The quadratic was the defect; the linear walk is the design.
+
 
 ## Current focus
 

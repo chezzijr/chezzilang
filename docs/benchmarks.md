@@ -1806,14 +1806,17 @@ The `parent` column's residual (~4x) is the footnote † effect, not the registr
 chain a *deep, rooted, GC-heap* object graph where the parent-less version's was shallow (channel
 contents are off-heap). Against the pre-fix ~90 s at n = 1 000 it is still ~1 000x.
 
-**The chain is still superlinear in depth, and the gate was re-scoped to say so.** Measured release,
-build+cancel: 125 → 2.0 ms, 250 → 6.3 ms, 500 → 35.7 ms, 1 000 → 284.7 ms — roughly 8x per doubling.
-**And every number in this section is RELEASE, while the `tests/chz` gate runs the DEBUG binary**: at
-n = 1 000 the test measured **4 889 ms in debug at `CHEZZI_THREADS=2` against its own 5 000 ms bound**
-(1.02x) and flaked under full-suite contention. The test is now `derive_chain_beats_the_every_ancestor_registry`
-at n = 400 — 275 ms debug, an 18x margin — and it pins the *registration model*, not linearity: the
-old every-ancestor registry took 5 861 ms at n = 400 in release, so it blows the bound from the
-faster profile.
+**The chain is still superlinear in depth, and the gate says so.** Measured release, build+cancel:
+125 → 2.2 ms, 250 → 4.6 ms, 500 → 16.0 ms, 1 000 → 67.1 ms. The residual is the parent link making
+`cancelled()` O(depth) plus the mark pass walking the rooted chain each time; the gate therefore pins
+the *registration model*, not linearity (`derive_chain_beats_the_every_ancestor_registry`).
+
+**Every number in this section is RELEASE, while the `tests/chz` gate runs the DEBUG binary** — quote
+headroom from debug or it means nothing. That distinction was not cosmetic here: at n = 1 000 the gate
+measured **4 889 ms in debug at `CHEZZI_THREADS=2` against its own 5 000 ms bound** (1.02x) and failed
+under full-suite contention. Fixing the GC's quadratic core-graph dedup (below) took the same
+measurement to **390 ms — a 12.8x margin** — so the gate keeps n = 1 000 rather than being scaled down
+to hide the problem.
 
 n children of one root (fan-out), built then all cancelled:
 
@@ -1830,8 +1833,8 @@ twice, which is the point.
 
 Both bounds are pinned by `tests/chz/stdlib/cancel_test.chz`
 (`derive_chain_beats_the_every_ancestor_registry`, `wide_fanout_is_not_quadratic`) at 5 000 ms. Quote
-headroom against the DEBUG profile the gate actually runs, not these release numbers: chain 275 ms
-(18x) and fan-out 665 ms (7.5x) at `CHEZZI_THREADS=2`. The pre-fix code does not merely exceed them,
+headroom against the DEBUG profile the gate actually runs, not these release numbers: chain 390 ms
+(12.8x) and fan-out 150 ms (33x) at `CHEZZI_THREADS=2`. The pre-fix code does not merely exceed them,
 it runs ~90 s.
 
 **The airlock depth ceiling, re-measured.** `parent` is a plain struct field, so the airlock encoder
@@ -1858,3 +1861,47 @@ is not — same allocations, same sends, only the live-set shape differs. That i
 crossings above are one-off manual verifications rather than standing tests: they would be measuring
 the GC's deep-graph marking, not the cancellation model. It is also why the `parent` column of the
 chain table sits ~4x above the parent-less one. Worth a ledger row on its own.
+
+
+## GC — the mark pass over a rooted graph of live cores
+
+`collect_core_gcrefs` (`src/vm/core.rs`) breaks cycles with a `seen` set. It was a `Vec<usize>` tested
+with `contains`, i.e. a linear scan, so walking a D-deep chain of cores visited D of them and each
+rescanned the whole prefix: **O(D²) per mark pass**, repeated on every pass for as long as the graph
+stayed rooted. `nested_core_bytes`, the sibling walk in the same file, already used `FxHashSet` — this
+one was the outlier, and it was the one on the mark path.
+
+Fixture: a rooted `struct N { Shared, Channel[bool], Channel[N] }` chain of the given depth, held live
+across N allocations that have nothing to do with it. All the time is the GC re-walking the graph.
+
+Release, 20 000 unrelated allocations:
+
+| rooted depth | before | after |
+|---|---|---|
+| 0 | 2.2 ms | 2.3 ms |
+| 1 000 | 63 ms | **9.9 ms** |
+| 2 000 | 220 ms | **18.3 ms** |
+| 4 000 | 1 164 ms | **39.3 ms** |
+
+Cost per doubling of depth: **5.3x → 2.15x**, i.e. quadratic → linear; 30x at depth 4 000.
+
+Debug at `CHEZZI_THREADS=2`, 4 000 allocations — the profile and worker count the gate runs at:
+
+| rooted depth | before | after |
+|---|---|---|
+| 1 000 | 314 ms | **13.8 ms** |
+| 2 000 | 1 220 ms | **25.9 ms** |
+| ratio | **3.88** | **1.87** |
+
+Pinned by `tests/chz/spec/gc_core_graph_test.chz`, which asserts the **ratio** (< 2.8), not a
+wall-clock bound — a ratio is profile- and hardware-independent, and the two regimes separate cleanly
+(3.88 vs 1.87). Verified RED on the pre-fix binary at 3.96.
+
+**What is NOT fixed, deliberately.** A core whose payload holds another core is still conservatively
+`WS_DIRTY` (`src/vm/core.rs`, "a store on the INNER core can introduce a handle without ever touching
+this one's cache"), so its subtree is re-walked every pass and never memoized — the walk is now linear
+rather than quadratic, but it is still a walk. Memoizing it needs a validity token (a store epoch or
+per-core version) that every core write path must bump, and a missed path leaves a stale `WS_CLEAN`,
+which stops the GC tracing a live handle — a use-after-free, which is exactly what the `debug_assert`
+in `Heap::mark_core_payload` exists to catch. The quadratic was the defect; the linear walk is the
+design.

@@ -841,7 +841,11 @@ pub type ExecRegistry = Arc<Mutex<Vec<Arc<ExecutorCore>>>>;
 /// be reachable *only* through its parent core (its own heap handle already swept), so its embedded
 /// handles would dangle if we stopped at the boundary. `seen` (core identities by `Arc` pointer)
 /// breaks the `Arc` reference cycles decision E warns about — a cycle is walked once, not forever.
-pub fn collect_core_gcrefs(w: &WireValue, out: &mut Vec<GcRef>, seen: &mut Vec<usize>) {
+pub fn collect_core_gcrefs(
+    w: &WireValue,
+    out: &mut Vec<GcRef>,
+    seen: &mut super::fxhash::FxHashSet<usize>,
+) {
     match w {
         WireValue::Handle(g) => out.push(*g),
         WireValue::List { items: xs, .. } | WireValue::Tuple { items: xs, .. } => {
@@ -1291,11 +1295,21 @@ pub fn value_core_bytes_deep(
 
 /// Run `f` over a not-yet-visited core (by `Arc`-pointer identity), recording it in `seen` first so a
 /// cycle back to it is a no-op. Already-seen cores are skipped.
-fn visit_core(ptr: usize, seen: &mut Vec<usize>, f: impl FnOnce(&mut Vec<usize>)) {
-    if seen.contains(&ptr) {
+fn visit_core(
+    ptr: usize,
+    seen: &mut super::fxhash::FxHashSet<usize>,
+    f: impl FnOnce(&mut super::fxhash::FxHashSet<usize>),
+) {
+    // `seen` is a SET, not a `Vec`. It was a `Vec` with a `contains` linear scan, which made the GC
+    // quadratic in the DEPTH of a rooted core graph: walking a D-deep chain visits D cores and each
+    // one rescanned the whole prefix, so every mark pass cost O(D^2). Measured on a rooted
+    // `struct N { Shared, Channel[bool], Channel[N] }` chain, 20 000 unrelated allocations:
+    // depth 1 000 = 63 ms, 2 000 = 220 ms, 4 000 = 1 164 ms (5.3x for 2x the depth). With the set:
+    // 5.7 / 8.4 / 13.5 ms. `nested_core_bytes`, the sibling walk in this file, already used
+    // `FxHashSet` — this one was the outlier, and it is the one on the mark path.
+    if !seen.insert(ptr) {
         return;
     }
-    seen.push(ptr);
     f(seen);
 }
 

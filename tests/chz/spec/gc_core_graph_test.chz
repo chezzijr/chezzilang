@@ -1,0 +1,57 @@
+# tests/chz/spec/gc_core_graph_test.chz — the GC's mark pass must stay LINEAR in the depth of a
+# rooted graph of live cores.
+#
+# `collect_core_gcrefs`'s cycle-breaking `seen` set used to be a `Vec<usize>` with a `contains`
+# linear scan, so walking a D-deep chain of cores visited D of them and each rescanned the whole
+# prefix — O(D^2) per mark pass, on every pass, for as long as the graph stayed rooted. Measured on
+# the DEBUG binary at CHEZZI_THREADS=2 (the profile the gate runs), depth 1 000 vs 2 000 with 4 000
+# unrelated allocations each: BEFORE 314 ms -> 1 220 ms, ratio 3.88; AFTER 13.8 ms -> 25.9 ms, ratio
+# 1.87. `nested_core_bytes`, the sibling walk, already used `FxHashSet`; this one was the outlier.
+#
+# The assertion is a RATIO, not a wall-clock bound: doubling the depth may at most double the work
+# (plus slack), which is profile- and hardware-independent. A wall-clock bound here would either
+# flake in debug under load or stop discriminating in release.
+# Run: `cargo run -- test tests/chz/spec/gc_core_graph_test.chz`
+
+import std.time
+import std.concurrency
+
+struct Link:
+    flag: Shared[bool]
+    dl: Channel[bool]
+    kids: Channel[Link]
+
+# A chain of `depth` links, each holding the next inside its `kids` channel, returned ROOTED at the
+# head — so the whole chain stays reachable and the mark pass must walk all of it every time.
+fn rooted_chain(depth: int) -> Link:
+    root := Link(flag=Shared(false), dl=Channel[bool](), kids=Channel[Link]())
+    cur := root
+    i := 0
+    while i < depth:
+        nxt := Link(flag=Shared(false), dl=Channel[bool](), kids=Channel[Link]())
+        cur.kids.send(nxt)
+        cur = nxt
+        i = i + 1
+    return root
+
+# Time `allocs` allocations that have NOTHING to do with the chain, while the chain is held live.
+# All this measures is what the GC spends re-walking the rooted core graph.
+fn churn_with_chain_alive(depth: int, allocs: int) -> float:
+    root := rooted_chain(depth)
+    t0 := time.monotonic()
+    j := 0
+    while j < allocs:
+        junk := [j, j + 1, j + 2]
+        j = j + 1
+    d := (time.monotonic() - t0) * 1000.0
+    # Touch the root AFTER the timed loop so it cannot be considered dead during it.
+    assert root.kids.len() >= 0, "the chain must still be rooted across the measurement"
+    return d
+
+test fn mark_pass_is_linear_in_rooted_core_depth():
+    shallow := churn_with_chain_alive(1000, 4000)
+    deep := churn_with_chain_alive(2000, 4000)
+    # Guard against a degenerate fast run making the ratio meaningless.
+    assert shallow > 0.0, "the shallow measurement must take measurable time"
+    ratio := deep / shallow
+    assert ratio < 2.8, "doubling rooted core depth must not more than double mark cost (quadratic dedup was 3.88, linear is ~1.87): got {ratio} from {shallow}ms -> {deep}ms"

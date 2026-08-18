@@ -804,7 +804,8 @@ impl Heap {
             Obj::Channel(core) => {
                 let g = core.q.lock().unwrap();
                 if g.summary().1 {
-                    let mut seen = vec![Arc::as_ptr(core) as usize];
+                    let mut seen =
+                        super::fxhash::FxHashSet::from_iter([Arc::as_ptr(core) as usize]);
                     for w in g.iter() {
                         crate::vm::core::collect_core_gcrefs(w, &mut out, &mut seen);
                     }
@@ -827,7 +828,8 @@ impl Heap {
             Obj::Executor(core) => {
                 let g = core.inner.lock().unwrap();
                 if g.summary().1 {
-                    let mut seen = vec![Arc::as_ptr(core) as usize];
+                    let mut seen =
+                        super::fxhash::FxHashSet::from_iter([Arc::as_ptr(core) as usize]);
                     for w in g.iter() {
                         crate::vm::core::collect_core_gcrefs(w, &mut out, &mut seen);
                     }
@@ -873,7 +875,7 @@ impl Heap {
                 return;
             }
         }
-        let mut seen = vec![core_id];
+        let mut seen = super::fxhash::FxHashSet::from_iter([core_id]);
         crate::vm::core::collect_core_gcrefs(w, out, &mut seen);
     }
 
