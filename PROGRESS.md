@@ -76,7 +76,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >     a channel send crosses the airlock and deep-copies, so registering the child itself would copy its
 >     whole ancestor chain: measured **25.6 s for 300 derives**, versus 0.10 s with the twin. Chain of
 >     1 000 derives + cascade: pre-branch ~90 s → 19 ms (no `parent`) → **85 ms**, against the
->     `derive_chain_is_not_quadratic` 5 000 ms bound (59x headroom). Fan-out is depth-1 and unchanged
+>     `derive_chain_beats_the_every_ancestor_registry` 5 000 ms bound (18x headroom, measured in the DEBUG profile the gate runs, not release). Fan-out is depth-1 and unchanged
 >     (8 000 → **81 ms** vs 88 ms). The derive-time race check reads self's OWN state, not `cancelled()`
 >     — the full walk made a 1 000-link chain 7 177 ms.
 >   * **Two consequences, stated not hidden.** `cancelled()` is **O(depth)** again: **0.30 µs at depth

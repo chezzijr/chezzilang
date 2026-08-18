@@ -1804,8 +1804,16 @@ Measured on the release binary (same machine, `chezzi run`), a chain of n tokens
 
 The `parent` column's residual (~4x) is the footnote † effect, not the registration: the link makes a
 chain a *deep, rooted, GC-heap* object graph where the parent-less version's was shallow (channel
-contents are off-heap). Against the pre-fix ~90 s at n = 1 000 it is still ~1 000x, and
-`derive_chain_is_not_quadratic`'s 5 000 ms bound holds with ~59x headroom.
+contents are off-heap). Against the pre-fix ~90 s at n = 1 000 it is still ~1 000x.
+
+**The chain is still superlinear in depth, and the gate was re-scoped to say so.** Measured release,
+build+cancel: 125 → 2.0 ms, 250 → 6.3 ms, 500 → 35.7 ms, 1 000 → 284.7 ms — roughly 8x per doubling.
+**And every number in this section is RELEASE, while the `tests/chz` gate runs the DEBUG binary**: at
+n = 1 000 the test measured **4 889 ms in debug at `CHEZZI_THREADS=2` against its own 5 000 ms bound**
+(1.02x) and flaked under full-suite contention. The test is now `derive_chain_beats_the_every_ancestor_registry`
+at n = 400 — 275 ms debug, an 18x margin — and it pins the *registration model*, not linearity: the
+old every-ancestor registry took 5 861 ms at n = 400 in release, so it blows the bound from the
+faster profile.
 
 n children of one root (fan-out), built then all cancelled:
 
@@ -1820,9 +1828,11 @@ n children of one root (fan-out), built then all cancelled:
 Fan-out is depth-1, so the parent link costs nothing there — the two columns are the same measurement
 twice, which is the point.
 
-Both anti-quadratic bounds are pinned by `tests/chz/stdlib/cancel_test.chz`
-(`derive_chain_is_not_quadratic`, `wide_fanout_is_not_quadratic`) at 5 000 ms — ~250× headroom over the
-measured 19/23 ms, and the pre-fix code does not merely exceed them, it runs ~90 s.
+Both bounds are pinned by `tests/chz/stdlib/cancel_test.chz`
+(`derive_chain_beats_the_every_ancestor_registry`, `wide_fanout_is_not_quadratic`) at 5 000 ms. Quote
+headroom against the DEBUG profile the gate actually runs, not these release numbers: chain 275 ms
+(18x) and fan-out 665 ms (7.5x) at `CHEZZI_THREADS=2`. The pre-fix code does not merely exceed them,
+it runs ~90 s.
 
 **The airlock depth ceiling, re-measured.** `parent` is a plain struct field, so the airlock encoder
 walks the whole chain: a token from a tree deeper than a threshold faults with
