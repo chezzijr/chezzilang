@@ -198,8 +198,10 @@ Right now: **pre-JIT/pre-freeze bug-hunt + drift-fix hunt** is the active phase 
 checker↔runtime, and IO drift — live ledger in `docs/gaps.md`), with **M19 — Perf track** paused
 in-progress alongside it.
 
-> **START HERE (2026-08-18): `docs/gaps.md` W8-1..W8-22.** **15 open rows** — W8-1, W8-3, W8-4, W8-6,
-> W8-9..W8-13, W8-16, W8-17, W8-19, W8-20 from the **external dogfood pass**, plus two DECIDED language
+> **START HERE (2026-08-18): `docs/gaps.md` W8-1..W8-42.** **35 open rows** — W8-1, W8-3, W8-4, W8-6,
+> W8-9..W8-13, W8-16, W8-17, W8-19, W8-20 from **dogfood wave 1** and **W8-23..W8-42 from wave 2**
+> (2026-08-18, nine agents; 30 findings, 27 reproduced in-repo, 20 filed, 3 folded into open rows, 2
+> NOT reproduced and recorded as such), plus two DECIDED language
 > milestones (**W8-21** success-coercion at `T?`/`T!E` sinks, **W8-22** `Error` carries its origin
 > span — its `Span.file` resolver dependency now exists concretely: `Program::file_path`,
 > `lexer::render_span`, `RunError::files`). **W8-18** (doc drift), **W8-2** (a discarded
@@ -226,6 +228,24 @@ in-progress alongside it.
 > W8-7's filed Fixes were both measured wrong** (W8-7's "an idle worker must park on a condvar, not
 > spin" described a defect the engine never had — idle workers already parked; the cost was the wake
 > side) — see the convention below.
+>
+> **Wave 2 (`W8-23..W8-42`) in one paragraph.** Seven P0s, three of which destroy or corrupt data:
+> **W8-24** `chezzi init` silently overwrites an existing `src/main.chz` at rc=0; **W8-23** mixed
+> `int`/`float` comparison runs in f64, so 4 of 6 operators are wrong above 2^53 — *and the CPython
+> differential's `MAX_BOUND` is capped at 1e12 precisely so it never looks there*, so the fix must raise
+> the cap in the same commit; **W8-35** JSON numbers round-trip through f64 (`-0.0` → `0`, a 19-digit id
+> → `9.2e+18`); **W8-26** `run` *and* `check` on a pipe execute an EMPTY program at rc=0 — which is why
+> a repro at `gaps.md:8664` silently stopped reproducing, so **any ledger row whose repro uses the pipe
+> idiom is currently unfalsifiable**; **W8-25** a closure over a module global loses it at the airlock
+> (3 at module scope, 300 in a fn, Go/Python 300). The other two P0s are **W8-3**, widened rather than
+> re-filed: a cross-task `set` racing an `update` is silently lost (Go's mutex loses nothing) and a
+> cross-box `update`-in-`update` hangs forever with `--timeout` unable to reach it — both because
+> `docs/concurrency.md:598` drops the guard *before* running the closure, two lines under `:596`'s
+> promise that concurrent writers can't lose updates. **Dedupe discipline to copy:** all 15 then-open
+> rows were re-run before wave 2 was filed (every one still reproduces), which is what caught that
+> dedupe; and two reported findings did NOT reproduce (a false-`deadlock` shape at 0/320 runs across two
+> binaries, `io.flush` losing stdout at 0/220) and are recorded with their measurements rather than
+> filed, so nobody re-chases them.
 
 Both share the same bar: **behavior-preserving** on every change — a VM
 speedup that changes observable output, or that only holds at one worker count, is a bug, not a win.

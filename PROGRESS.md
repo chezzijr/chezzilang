@@ -7,6 +7,42 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+> **📋 DOGFOOD WAVE 9 FILED, 2026-08-18 — `docs/gaps.md` `W8-23..W8-42`; open W8 rows 15 → 35.**
+> A second external pass (nine independent agents, no model of the implementation, every answer judged
+> against CPython 3.14.7 / go1.26.6 running on this box) filed 30 findings. **All 30 were re-run in-repo
+> on `main@f6f7f8c4` before anything was written down:** 27 reproduced, **20 filed as new rows**, **3
+> folded into already-open rows** (two into **W8-3**, three cosmetics + one correction into **W8-17**),
+> 1 was already documented (tuple `Hashable`, W8-19), and **2 did NOT reproduce** and are recorded with
+> their measurements instead of filed — a false-`deadlock` shape (**0 failures in 320 runs**: filed
+> program *and* a nested-nursery variant, `--threads=1/2/3/4`, on this HEAD **and** a purpose-built
+> `main@088c202a` binary, the exact commit the report names) and `io.flush` losing stdout before a crash
+> (**0/220** across three crash kinds; CPython 0/40). Four more were filed with their stated shape
+> **corrected** by the re-run — `W8-27` is worse than reported (`+=` rebinds, so every later mutation
+> through that name is lost too), `W8-40` and `W8-42` are narrower (the empty-range half agrees with
+> CPython; the fmtspec divergences are loud check-time REJECTS, not silent wrong values), and `W8-26`
+> is wider (`check` swallows a piped program too, not just `run`).
+>
+> **The dedupe is the part worth reading.** Before filing, **all 15 then-open W8 rows were re-run and
+> every one still reproduces** — that is what showed that wave 9's cross-task lost `set` and its
+> cross-box `update`-in-`update` hang are **W8-3 seen from two other axes**, not new rows. Their root
+> cause is documented as deliberate: `docs/concurrency.md:598` drops the guard **before** running the
+> closure, two lines under `:596`'s promise that concurrent writers "can't lose each other's updates".
+> That re-derivation also **invalidates half of W8-3's filed Fix** (faulting the lost `set` is right for
+> the same-task shape, wrong for the cross-task one, which must *block*) and adds an ordering
+> constraint: holding the guard makes the lock inversion MORE reachable, so W8-3's deadlock verdict has
+> to land in the same commit. Fourth instance of the read-the-closed-row's-prescription convention,
+> after W8-2, W8-7 and the airlock rule.
+>
+> **Seven P0s, three of them data-destroying or data-corrupting:** `W8-24` (`chezzi init` overwrites an
+> existing `src/main.chz`, rc=0), `W8-23` (mixed `int`/`float` comparison in f64 — 4 of 6 operators wrong
+> above 2^53, and the CPython differential's `MAX_BOUND` is capped just below where it starts),
+> `W8-35` (JSON numbers round-trip through f64: `-0.0` → `0`, a 19-digit id → `9.2e+18`), `W8-26`
+> (`run`/`check` on a pipe execute an empty program at rc=0 — which is why a repro at `gaps.md:8664`
+> silently stopped reproducing), `W8-25` (a closure over a module global loses it at the airlock: 3 at
+> module scope, 300 in a fn, Go/Python 300), plus W8-3's two new shapes. **None of the 30 was reachable
+> by a standing gate.** Full walk, the two non-reproductions, and the suggested fix order:
+> `docs/gaps.md` `## Session log — 2026-08-18`. Docs-only change; no code touched, gates unchanged.
+
 > **✅ W8-8 CLOSED — `chezzi run --threads=1` now runs exactly ONE CPU runner in BOTH the outermost
 > AND the nested eager-nursery arm, 2026-08-18 (`fix/mn-idle-policy-w8-8-w8-7`).** An OUTERMOST eager
 > nursery's runner budget is `1 (drainer) + helpers + joiner`, sized for `max(N, 2)` total slots —
