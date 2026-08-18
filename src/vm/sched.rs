@@ -905,7 +905,14 @@ impl Vm {
                 // clear its `body_open` veto or a genuine nested deadlock hangs.
                 let _bodies = self.blocked_bodies_guard(true);
                 let _party = self.nursery_party_guard(&sched);
-                shell.mn_worker_loop(&sched, 0, sid);
+                // T1-fix (W8-8, nested arm) — this scope has NO drainer of its own; the OUTER scope's
+                // `chezzi-eager` drainer already drains the shared global queue (scope-blind) and
+                // cannot self-stop while `main` sits here (`scopes[0].body_open` stays true), so at a
+                // budget of one that drainer alone is the whole CPU allowance. Running the inline
+                // owner too would be a second runner. Same gate as the outermost arms below.
+                if eager_joiner_runs_fibers(worker_count()) {
+                    shell.mn_worker_loop(&sched, 0, sid);
+                }
                 sched.wait_for_scope(sid);
             }
             let slots = sched.take_scope_slots(sid);
@@ -993,7 +1000,10 @@ impl Vm {
             {
                 let _bodies = self.blocked_bodies_guard(true); // see `join_eager_nursery`'s nested arm
                 let _party = self.nursery_party_guard(&sched);
-                shell.mn_worker_loop(&sched, 0, sid);
+                // T1-fix (W8-8, nested arm) — same gate as `join_eager_nursery`'s nested arm above.
+                if eager_joiner_runs_fibers(worker_count()) {
+                    shell.mn_worker_loop(&sched, 0, sid);
+                }
                 sched.wait_for_scope(sid);
             }
             let slots = sched.take_scope_slots(sid);
@@ -5119,6 +5129,16 @@ pub(super) fn eager_helper_wids(n: usize) -> std::ops::Range<usize> {
 /// W8-8 — the inline joiner runs fibers only when the budget has a slot left after the drainer.
 /// At `n == 1` the drainer already holds the only slot, so the joiner just waits for completion —
 /// otherwise `--threads=1` runs two CPU runners and does not serialize.
+///
+/// T1-fix — a hazard this gate introduces, not fixed here: at `n == 1` the joiner no longer runs any
+/// fiber loop of its own, so it is now purely a spectator waiting on the drainer thread. A panic
+/// inside `take_runnable`/`park`/`finish` itself (outside `run_one_fiber`'s own inner
+/// `catch_unwind`) is swallowed by the drainer thread's OUTER `catch_unwind`
+/// (`activate_eager_nursery`'s `spawn(move || { catch_unwind(...) })`); the thread then exits with
+/// its scope's slots unfilled, and at `n == 1` there is nothing else left to fill them, so the
+/// joiner's `wait_for_completion`/`wait_for_scope` blocks forever. Pre-W8-8 the joiner's own fiber
+/// loop covered that; at `n >= 2` the pool helpers still do. Requires a pre-existing scheduler bug to
+/// reach, so no code change here — recorded so the next reader sees the trade.
 pub(super) fn eager_joiner_runs_fibers(n: usize) -> bool {
     n >= 2
 }

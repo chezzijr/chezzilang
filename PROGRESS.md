@@ -7,8 +7,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
-> **✅ W8-8 CLOSED — `chezzi run --threads=1` now runs exactly ONE CPU runner, 2026-08-18
-> (`fix/mn-idle-policy-w8-8-w8-7`).** An outermost eager nursery's runner budget is `1 (drainer) +
+> **✅ W8-8 CLOSED — `chezzi run --threads=1` now runs exactly ONE CPU runner in BOTH the outermost
+> AND the nested eager-nursery arm, 2026-08-18 (`fix/mn-idle-policy-w8-8-w8-7`).** An outermost eager nursery's runner budget is `1 (drainer) +
 > helpers + joiner`, sized for `max(N, 2)` total slots — correct for N>=2, but at N=1 the inline
 > joiner (`main`, `Vm::join_eager_nursery`/`abort_eager_nursery`) ran a full fiber loop ALONGSIDE the
 > unconditional raw `chezzi-eager` drainer thread, so `--threads=1` silently ran TWO CPU runners
@@ -25,6 +25,28 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > burn under `CHEZZI_THREADS=1`, ratio > 5.5; measured pre-fix ratio ~3.94-4.0 on a debug build, matching
 > `docs/gaps.md`'s ~4.4 release-binary measurement). `cargo test --lib` 4199/0/2, `cargo test --test
 > chezzi_threads_cli` 3/3, `cargo clippy --all-targets -- -D warnings` clean.
+>
+> **T1-fix follow-up, same day/branch — the fix above only covered the OUTERMOST arm; a NESTED eager
+> nursery survived at ~1.97-1.98 cores.** `Vm::activate_eager_nursery` has a third branch
+> (`src/vm/sched.rs:764`, `self.mn.is_none() && an outer eager scope is already open`) taken when a
+> `parallel:` opens while ANOTHER `parallel:` on the SAME thread (`main`) is still mid-body — e.g. a
+> `parallel:` written directly inside another `parallel:`'s body, three levels deep, or a helper
+> function containing its own `parallel:` CALLED (not `spawn`ed) from inside an outer `parallel:`
+> body. That branch returns `EagerScope { drainer: None, .. }` and relies entirely on the OUTER
+> scope's `chezzi-eager` drainer — but `join_eager_nursery`'s and `abort_eager_nursery`'s
+> `drainer.is_none()` arms (`sched.rs:908`/`996`, pre-fix) ran an UNCONDITIONAL
+> `shell.mn_worker_loop(&sched, 0, sid)` alongside that drainer, a second CPU runner at a budget of
+> one. (A `spawn: work()` does NOT hit this branch — the spawned fiber runs on a worker shell whose
+> `self.mn` is already `Some`, taking the general private-sched path, which the arm above already
+> gated.) Fix: gate both sites on the same `eager_joiner_runs_fibers(worker_count())` used for the
+> outermost arms. Test: `tests/chezzi_threads_cli.rs`'s new
+> `threads_one_serializes_nested_eager_parallel_tasks` (same 1x-vs-8x construction, `fn work():
+> parallel: ...` called synchronously from a `parallel:` body; measured pre-fix ratio ~3.73 on a debug
+> build). Measured on the release binary, four shapes, `--threads=1`, before → after cores (user/real):
+> flat 4-spawn 1.04 → 1.04 (unaffected), `parallel:` directly nested 1.98 → 1.04, three-deep 1.98 →
+> 1.04, `fn work(): parallel:` called from a `parallel:` body 1.98 → 1.04. `cargo test` full suite
+> green (22 targets, incl. `tests/chz` 617/617 at both worker counts), `cargo clippy --all-targets -- -D
+> warnings` clean.
 
 > **✅ Adversarial-review fix wave on `feat/span-file-and-stdlib-contracts`, 2026-08-18 — the LSP's
 > diagnostic publish is now atomic with its delivery, and a closed buffer can no longer be resurrected as
