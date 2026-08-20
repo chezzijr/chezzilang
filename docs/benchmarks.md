@@ -1921,7 +1921,21 @@ A first attempt that only restructured `collect_core_gcrefs` measured **unchange
 
 Pinned by `chezzi_threads_cli::gc_mark_walk_does_not_deadlock_on_a_cyclic_core_graph`, 40 rounds sized
 off the DEBUG hang rate (12.5%, vs 20% release) for ~99.5% RED; verified RED twice pre-fix and GREEN
-three times after. It spawns and polls with a deadline rather than calling `output()` — a deadlocked
+three times after.
+
+**The first fix covered only ONE walk of the class, and adversarial review caught it.** The GC has a
+byte-accounting twin of the rooting walk — `core::nested_core_bytes` / `queue_bytes_deep` /
+`value_core_bytes_deep`, used by `--max-heap` — whose own comment says the two must stay "in lockstep".
+It was left holding a parent core's guard while locking children, so the identical deadlock survived on
+any run with a memory cap: **1/40 hangs** for `chezzi test --max-heap=100000000` at `CHEZZI_THREADS=4`
+on a cyclic core graph, against 0/20 for the same program without the cap; **0/60 after**. Same split
+applied (`*_structural` under the guard, `drain_pending_core_bytes` after), and `Heap::live_bytes`'s
+five deep arms were rescoped the way `Heap::children`'s were. **No production caller of the three
+`_deep` entry points remains** — that grep is the real invariant, and each wrapper now carries a "do
+not call under a guard" hazard note. Gated by
+`chezzi_threads_cli::max_heap_byte_walk_does_not_deadlock_on_a_cyclic_core_graph`, which is honest in
+its doc comment about being only ~60% RED (this path's pre-fix rate is 1/40 release and 0/120 debug
+standalone, though it did fail under `cargo test`'s contention). It spawns and polls with a deadline rather than calling `output()` — a deadlocked
 child never closes its pipes, so `output()` wedges the test binary instead of failing it (measured on
 the first draft).
 

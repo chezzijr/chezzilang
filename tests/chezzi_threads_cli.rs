@@ -490,6 +490,114 @@ fn gc_mark_walk_does_not_deadlock_on_a_cyclic_core_graph() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The same rule for the BYTE walk: `--max-heap`'s accounting must not hold two core locks either.
+///
+/// The rooting walk was split first (`gc_mark_walk_does_not_deadlock_on_a_cyclic_core_graph` above);
+/// its byte-accounting twin `core::nested_core_bytes` was left holding a parent core's guard while
+/// locking children, so the identical ABBA deadlock survived on any run with a memory cap. Measured
+/// pre-fix, `chezzi test --max-heap=100000000` at `CHEZZI_THREADS=4` on a cyclic core graph: **1/40
+/// hangs**, against 0/20 for the same program without the cap. Post-fix: 0/60.
+///
+/// This is the repo's "a guard must cover every site of its class" lesson applied to the fix itself —
+/// the two walks are documented as needing to stay in lockstep, and only one of them was converted.
+///
+/// Spawns and polls rather than calling `output()`, for the reason given on the sibling test.
+///
+/// **Honest about its strength:** unlike the sibling gate, this one is NOT ~99% RED. The pre-fix hang
+/// rate on this path is much lower and load-dependent — measured 1/40 release, and **0/120 debug when
+/// run standalone**, yet it did fail 1 of 3 pre-fix runs under `cargo test`, where the harness adds
+/// contention. A harsher fixture (8-node cycle with chords, 6 spawns, 4 000 iterations) did not raise
+/// the standalone debug rate either. So treat this as a cheap opportunistic catch, ~60% RED at 40
+/// rounds for 1.6 s; the real protection is structural — no site holds a core guard across another
+/// core's lock, which `grep` over the `_deep`/`_structural` entry points verifies statically, and the
+/// sibling rooting-walk gate covers the same class at a rate that IS reliable.
+#[test]
+fn max_heap_byte_walk_does_not_deadlock_on_a_cyclic_core_graph() {
+    let dir = std::env::temp_dir().join(format!("chz-gc-abba-bytes-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create fixture dir");
+    let path = dir.join("cyclic_cores_test.chz");
+    std::fs::write(
+        &path,
+        "import std.concurrency\n\
+         \n\
+         struct Link:\n    \
+             flag: Shared[bool]\n    \
+             dl: Channel[bool]\n    \
+             kids: Channel[Link]\n\
+         \n\
+         fn mk() -> Link:\n    \
+             return Link(flag=Shared(false), dl=Channel[bool](), kids=Channel[Link]())\n\
+         \n\
+         fn bump(b: bool) -> bool:\n    \
+             return not b\n\
+         \n\
+         test fn cyclic_cores_under_max_heap():\n    \
+             root := mk()\n    \
+             cur := root\n    \
+             i := 0\n    \
+             while i < 2:\n        \
+                 nxt := mk()\n        \
+                 cur.kids.send(nxt)\n        \
+                 cur = nxt\n        \
+                 i = i + 1\n    \
+             cur.kids.send(root)\n    \
+             root.kids.send(root)\n    \
+             parallel:\n        \
+                 spawn:\n            \
+                     k := 0\n            \
+                     while k < 2000:\n                \
+                         root.flag.set(k % 2 == 0)\n                \
+                         junk := [k, k + 1, k + 2]\n                \
+                         k = k + 1\n        \
+                 spawn:\n            \
+                     k := 0\n            \
+                     while k < 2000:\n                \
+                         cur.flag.update(bump)\n                \
+                         junk := {\"a\": k, \"b\": k}\n                \
+                         k = k + 1\n        \
+                 spawn:\n            \
+                     k := 0\n            \
+                     while k < 2000:\n                \
+                         junk := [[k], [k + 1]]\n                \
+                         k = k + 1\n    \
+             assert root.kids.len() >= 0, \"alive\"\n",
+    )
+    .expect("write cyclic-core test fixture");
+
+    for round in 0..40 {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+            .arg("test")
+            .arg("--max-heap=100000000")
+            .arg(&path)
+            .env("CHEZZI_THREADS", "4")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn chezzi");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let status = loop {
+            match child.try_wait().expect("try_wait") {
+                Some(st) => break Some(st),
+                None if std::time::Instant::now() >= deadline => break None,
+                None => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        };
+        let Some(status) = status else {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "round {round}: --max-heap on a cyclic core graph DEADLOCKED (no exit within 20s) - \
+                 the byte walk is holding two core locks at once again"
+            );
+        };
+        assert!(
+            status.success(),
+            "round {round}: chezzi test exited {status}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn tail(s: &str) -> String {
     let lines: Vec<&str> = s.lines().collect();
     let start = lines.len().saturating_sub(15);

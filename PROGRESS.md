@@ -6997,6 +6997,17 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > the 12.5% DEBUG rate for ~99.5% RED; RED x2 pre-fix, GREEN x3 after). The test spawns and polls with
 > a deadline rather than using `output()`, which a deadlocked child wedges forever.
 >
+> **The first fix covered only one walk of the class — adversarial review caught the other.** The
+> byte-accounting twin (`core::nested_core_bytes` / `queue_bytes_deep` / `value_core_bytes_deep`, used
+> by `--max-heap`, and documented as needing to stay "in lockstep" with the rooting walk) still held a
+> parent core's guard while locking children: **1/40 hangs** on `chezzi test --max-heap=100000000` at
+> `CHEZZI_THREADS=4` over a cyclic core graph vs 0/20 without the cap, **0/60 after** the same split.
+> `Heap::live_bytes`'s five deep arms were rescoped like `Heap::children`'s. The durable invariant is a
+> grep, not a test: **no production caller of the three `_deep` entry points remains**, and each now
+> carries a "do not call under a guard" hazard note. This is CLAUDE.md's "a guard must cover every site
+> of its class" applied to the fix itself, and it is the second time this session that fixing one site
+> of an N-way set left a sibling (the first was the `walk_base` guards).
+>
 > **Deliberately not fixed:** a core whose payload holds another core is still conservatively
 > `WS_DIRTY` and re-walked every pass, never memoized. Memoizing needs a validity token every core
 > write path must bump; a missed path leaves a stale `WS_CLEAN`, the GC stops tracing a live handle,

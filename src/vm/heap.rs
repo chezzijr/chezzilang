@@ -1018,12 +1018,24 @@ impl Heap {
                 // payload, sharing the same `cores` set so a nested core that *also* has an alias
                 // slot here is still charged exactly once, whichever way it is met first.
                 Obj::Channel(core) if include_cores && cores.insert(Arc::as_ptr(core) as usize) => {
-                    let g = core.q.lock().unwrap();
-                    if deep {
-                        crate::vm::core::queue_bytes_deep(g.summary(), g.iter(), &mut cores)
-                    } else {
-                        g.summary().0
-                    }
+                    // Guard SCOPED, drain AFTER — same rule as `children`'s arms: holding this
+                    // core's guard while the drain locks a nested one is the ABBA window that
+                    // hung `--max-heap` on a cyclic core graph (`core::drain_pending_core_bytes`).
+                    let mut pending = Vec::new();
+                    let acc = {
+                        let g = core.q.lock().unwrap();
+                        if deep {
+                            crate::vm::core::queue_bytes_structural(
+                                g.summary(),
+                                g.iter(),
+                                &mut cores,
+                                &mut pending,
+                            )
+                        } else {
+                            g.summary().0
+                        }
+                    };
+                    acc + crate::vm::core::drain_pending_core_bytes(&mut cores, &mut pending)
                 }
                 // W7-26 — BOTH payload halves. `inner` is the lazy QUEUE half (filled only by the
                 // since-removed cooperative engine); under eager `submit` it stays empty forever and
@@ -1048,15 +1060,36 @@ impl Heap {
                 Obj::Executor(core)
                     if include_cores && cores.insert(Arc::as_ptr(core) as usize) =>
                 {
+                    let mut pending = Vec::new();
                     let queued = {
                         let g = core.inner.lock().unwrap();
                         if deep {
-                            crate::vm::core::queue_bytes_deep(g.summary(), g.iter(), &mut cores)
+                            crate::vm::core::queue_bytes_structural(
+                                g.summary(),
+                                g.iter(),
+                                &mut cores,
+                                &mut pending,
+                            )
                         } else {
                             g.summary().0
                         }
                     };
-                    let g = core.eager.lock().unwrap_or_else(|e| e.into_inner());
+                    let eager = {
+                        let g = core.eager.lock().unwrap_or_else(|e| e.into_inner());
+                        if deep {
+                            crate::vm::core::queue_bytes_structural(
+                                g.summary(),
+                                g.values(),
+                                &mut cores,
+                                &mut pending,
+                            )
+                        } else {
+                            g.summary().0
+                        }
+                    };
+                    // Both guards are dropped before the drain locks anything nested.
+                    let nested =
+                        crate::vm::core::drain_pending_core_bytes(&mut cores, &mut pending);
                     // W7-26r sibling — plus the jobs this executor has DISPATCHED BUT NOT STARTED.
                     // Each is a fully built worker heap parked in the process-global pool queue,
                     // owned by no heap and so counted nowhere: 300 of them summing to 666 MB sailed
@@ -1065,20 +1098,24 @@ impl Heap {
                     // and `Relaxed` is enough — this is a size estimate sampled at a sweep, not a
                     // synchronization edge.
                     queued
+                        + eager
+                        + nested
                         + core.pending.load(std::sync::atomic::Ordering::Relaxed)
-                        + if deep {
-                            crate::vm::core::queue_bytes_deep(g.summary(), g.values(), &mut cores)
-                        } else {
-                            g.summary().0
-                        }
                 }
                 Obj::Shared(core) if include_cores && cores.insert(Arc::as_ptr(core) as usize) => {
                     if deep {
-                        crate::vm::core::value_core_bytes_deep(
-                            &core.summary,
-                            &core.v.lock().unwrap(),
-                            &mut cores,
-                        )
+                        // Guard scoped, drain after (see the `Obj::Channel` arm above).
+                        let mut pending = Vec::new();
+                        let acc = {
+                            let g = core.v.lock().unwrap();
+                            crate::vm::core::value_core_bytes_structural(
+                                &core.summary,
+                                &g,
+                                &mut cores,
+                                &mut pending,
+                            )
+                        };
+                        acc + crate::vm::core::drain_pending_core_bytes(&mut cores, &mut pending)
                     } else {
                         core.summary.bytes()
                     }
@@ -1087,22 +1124,36 @@ impl Heap {
                     if include_cores && cores.insert(Arc::as_ptr(core) as usize) =>
                 {
                     if deep {
-                        crate::vm::core::value_core_bytes_deep(
-                            &core.summary,
-                            &core.v.read().unwrap(),
-                            &mut cores,
-                        )
+                        // Guard scoped, drain after (see the `Obj::Channel` arm above).
+                        let mut pending = Vec::new();
+                        let acc = {
+                            let g = core.v.read().unwrap();
+                            crate::vm::core::value_core_bytes_structural(
+                                &core.summary,
+                                &g,
+                                &mut cores,
+                                &mut pending,
+                            )
+                        };
+                        acc + crate::vm::core::drain_pending_core_bytes(&mut cores, &mut pending)
                     } else {
                         core.summary.bytes()
                     }
                 }
                 Obj::Atomic(core) if include_cores && cores.insert(Arc::as_ptr(core) as usize) => {
                     if deep {
-                        crate::vm::core::value_core_bytes_deep(
-                            &core.summary,
-                            &core.v.lock().unwrap(),
-                            &mut cores,
-                        )
+                        // Guard scoped, drain after (see the `Obj::Channel` arm above).
+                        let mut pending = Vec::new();
+                        let acc = {
+                            let g = core.v.lock().unwrap();
+                            crate::vm::core::value_core_bytes_structural(
+                                &core.summary,
+                                &g,
+                                &mut cores,
+                                &mut pending,
+                            )
+                        };
+                        acc + crate::vm::core::drain_pending_core_bytes(&mut cores, &mut pending)
                     } else {
                         core.summary.bytes()
                     }
