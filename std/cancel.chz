@@ -12,13 +12,34 @@
 # a manual cancel of a non-polling pure-CPU sibling is preempted only because the M:N engine runs the
 # sibling on a real OS thread.
 #
-# TREE-STRUCTURED. A child token is `derive()`d from a parent (Go `context.WithCancel`): cancelling
-# or timing out the parent cancels every transitively-derived child, recursively down the tree, while
-# cancelling a child never touches the parent (one-directional, root-to-leaves). The link is LIVE — a
-# parent flip is observed by an already-derived child, including one that crossed the `spawn`/
-# `parallel:`/`Channel` airlock — because the link is the parent's `Shared` flag + `Shared` registry,
-# which cross as live cores (exactly like the flat token's `flag`). Deadlines inherit TIGHTEST-WINS:
-# a child clamps to the soonest absolute deadline of itself and its ancestors. See docs/concurrency.md §6e.
+# TREE-STRUCTURED, REGISTERED LIKE GO'S, AND ALSO PARENT-LINKED. A child token is `derive()`d from a
+# parent (Go `context.WithCancel`): cancelling or timing out the parent cancels every transitively-
+# derived child, while cancelling a child never touches the parent (one-directional, root-to-leaves).
+# The REGISTRATION is Go's: `derive()` sends the child into its IMMEDIATE parent's `kids` channel —
+# O(1), no ancestor walk — and `cancel()` cascades DOWN, draining each node's `kids` and marking every
+# descendant it reaches (an explicit work-list, so tree depth is not stack depth). Registering into
+# every ancestor instead, with a copy-per-`Shared.update`, made `derive()` cubic in chain depth (400
+# derives = 6.0 s vs Go's 0.08 ms) and quadratic in fan-out; the channel core is O(1) on both.
+#
+# The child ALSO keeps a `parent` link, and `cancelled()`/`reason()` fall back to it. That is not a
+# duplicate of the downward cascade, it is its SAFETY NET: the cascade pops children out of `kids`
+# (`try_recv` REMOVES them), so a cancelling task torn down mid-cascade takes the already-popped
+# subtree with it and those descendants would never learn — permanently, a second `cancel()` cannot
+# recover them. Measured: a 500-deep chain, `parallel:` with one task calling `root.cancel()` and a
+# sibling faulting, `leaf.cancelled()` was **false** 3/3 without the link and **true** 3/3 with it.
+# (Go is NOT immune by having the same shape — Go has no way to abandon a goroutine mid-function, so
+# `cancelCtx.cancel`'s drain always completes. Chezzi's nursery teardown does abandon tasks, so the
+# link is what stands in for that guarantee.) The link is cheap where the cubic cost actually was:
+# `derive()` stays O(1) (one `kids.send` plus one field), and the cost of the link is that
+# `cancelled()` is O(depth) and a token encodes O(depth) across the airlock — see §6e for both
+# measured numbers.
+#
+# The link is LIVE — a parent flip is observed by an already-derived child, including one that crossed
+# the `spawn`/`parallel:`/`Channel` airlock — because the link is the `kids` channel plus each node's
+# `Shared` flag, which cross as live cores (exactly like the flat token's `flag`). Deadlines inherit
+# TIGHTEST-WINS: a child clamps to the soonest absolute deadline of itself and its ancestors, and
+# `derive()` materialises it into the child's OWN `deadline`, so a timeout needs no cascade at all.
+# See docs/concurrency.md §6e.
 import std.time
 # Depend on std.concurrency explicitly (phase 4c-concurrency): the `Shared` name is usable license-free
 # in a stdlib module, but this import makes the file-backed native module a graph DEPENDENCY, so it is
@@ -27,16 +48,20 @@ import std.time
 import std.concurrency
 
 struct Token:
-    flag: Shared[bool]     # manual-cancel bit (sendable, owner-serialized)
+    flag: Shared[bool]     # cancel bit (sendable, owner-serialized)
     deadline: float        # absolute monotonic() secs; 0.0 == no deadline; checked at POLL TIME
     dl: Channel[bool]      # done(): a timer channel (timeout) or a trip()-able latch channel (manual)
-    parent: Token?         # the live derivation link (None for a root); cancelled()/reason() recurse it
-    kids: Shared[List[Channel[bool]]]  # done()-channels of ALL transitive descendants (each derive()
-                                       # registers into every ancestor) — cancel() trips each (fan-out)
+    parent: Token?         # the live derivation link (None for a root); cancelled()/reason() fall back to it
+    kids: Channel[Token]   # IMMEDIATE children only (Go context.WithCancel) — cancel() drains + recurses
+    # ponytail: an uncancelled long-lived parent still retains its children's handles (the registry only
+    # grows until cancel drains it) — same SHAPE as v1 but HEAVIER entries: v1 retained one
+    # Channel[bool] per descendant, this retains whole Tokens (flag + dl + kids cores). Same
+    # reachability count, more bytes each; tokens are request-scoped.
 
-    # True once this token is cancelled (manually) or its deadline has passed, OR any ancestor is —
-    # the cascade is transitive up the parent chain and one-directional (an ancestor never reads us).
-    # Never blocks.
+    # True once this token is cancelled (manually or by an ancestor's cascade) or its deadline has
+    # passed. O(depth): the downward cascade normally PUSHES an ancestor cancel into this token's own
+    # flag, so the common answer comes from the first line — but the parent chain is walked as the
+    # fallback, which is what makes an INTERRUPTED cascade (see the header) still correct. Never blocks.
     fn cancelled(self) -> bool:
         if self.flag.get():
             return true
@@ -46,8 +71,10 @@ struct Token:
             Some(p): return p.cancelled()
             None:    return false
 
-    # Why this token is done: "cancelled" (manual), "timeout" (deadline), or None (still live). Nearest
-    # cause wins — self's own cause first, else the inherited ancestor's. Agrees with cancelled().
+    # Why this token is done: "cancelled" (manual/cascaded), "timeout" (deadline), or None (still
+    # live). NEAREST cause wins — this token's own cause first, else the inherited ancestor's. The
+    # first cause also LATCHES (Go): once this token's own deadline has elapsed its answer stays
+    # "timeout", because `_mark`/`cancel()` skip flag.set on that arm. Agrees with cancelled().
     fn reason(self) -> str?:
         if self.flag.get():
             return Some("cancelled")
@@ -57,15 +84,45 @@ struct Token:
             Some(p): return p.reason()
             None:    return None
 
-    # Manual cancel, callable anytime, from any task (the handle is shared). Idempotent. Trips the
-    # done() channel so a sibling parked in `wait:` wakes, and fans out to EVERY transitive descendant's
-    # done() — derive() registers each descendant's done() into all of its ancestors' kids, so this one
-    # fan-out reaches grandchildren and below directly (the cascade is transitive, not immediate-only).
-    fn cancel(self):
-        self.flag.set(true)
+    # Mark a token done: set its cancel bit, then trip its done() — UNLESS its own deadline has
+    # already elapsed, in which case its own "timeout" cause stays nearest (Go latches the first
+    # cause). cancel() runs SELF through this same guard (it is the work-list's first pop), so an
+    # already-timed-out token that is then cancel()ed keeps reason() == "timeout", like Go's
+    # `context.DeadlineExceeded`; an unconditional set here reported "cancelled" instead.
+    # THE ORDER IS LOAD-BEARING (C5, the Go-context invariant "once done() unblocks, the token is
+    # cancelled"): trip() wakes a task parked in `wait: tok.done().recv()`, so anything the woken task
+    # must be able to observe has to be true BEFORE the trip. Tripping first is a real, measured race —
+    # 141/400 rounds read cancelled()==false at CHEZZI_THREADS=8. When the guard SKIPS flag.set the
+    # order is still safe: the skip only happens when this token's own deadline has already elapsed,
+    # so cancelled() is already true on the deadline arm. Do not swap these two lines back.
+    fn _mark(self):
+        if self.deadline == 0.0 or time.monotonic() < self.deadline:
+            self.flag.set(true)
         self.dl.trip()
-        for ch in self.kids.get():
-            ch.trip()
+
+    # Manual cancel, callable anytime, from any task (the handle is shared). Idempotent. Trips the
+    # done() channel so a sibling parked in `wait:` wakes, then cascades DOWN: drain this token's
+    # immediate children, mark each, and recurse into theirs, so every transitive descendant is
+    # reached. An explicit work-list, not recursion — a 12 000-deep tree would blow the call stack.
+    # SELF is the work-list's first pop, so `_mark()` runs on it BEFORE `self.kids` is drained —
+    # that ordering is what closes the derive-vs-cancel race (see derive()), and it is why there is
+    # no separate unconditional `self.flag.set(true)` here: routing self through `_mark` is what
+    # latches an already-elapsed own deadline as "timeout" instead of overwriting it with "cancelled".
+    # The cascade is EAGER, so a cancelling task torn down mid-cascade leaves the already-popped
+    # subtree unmarked — descendants stay correct anyway because cancelled()/reason() fall back to
+    # the `parent` link (header). Do not delete that link on the grounds that this loop covers it.
+    fn cancel(self):
+        work := [self]
+        while work.len() > 0:
+            match work.pop():
+                Some(t):
+                    t._mark()
+                    while true:
+                        match t.kids.try_recv():
+                            Some(k): work.push(k)
+                            None:    break
+                None:
+                    break
 
     # A channel that becomes ready (recv -> true) when this token is done. Use in a `wait:` arm.
     # Same handle every call, so re-polling in a loop is stable and a later cancel() reaches a waiter.
@@ -79,8 +136,8 @@ struct Token:
     # Derive a CHILD token linked to this one (Go `context.WithCancel`). The child is cancelled when
     # IT is cancelled OR when this token (or any ancestor) is — but cancelling the child never touches
     # this token. The child inherits the TIGHTEST deadline (the soonest of its own — none here — and
-    # this token's). Its done() fires on an ancestor timeout via its own deterministic timer (armed to
-    # the remaining deadline at derive time), and on a manual ancestor cancel via the registry fan-out.
+    # this token's), materialised into its own field, so a timeout fires without any cascade; a manual
+    # ancestor cancel reaches it through the registration below.
     fn derive(self) -> Token:
         # Tightest deadline = this token's (the child has none of its own).
         d := self.deadline
@@ -97,31 +154,35 @@ struct Token:
             if rem_ms < 0:
                 rem_ms = 0
             cdl = timer(rem_ms)
-        child := Token(flag=Shared(false), deadline=d, dl=cdl, parent=Some(self),
-                       kids=Shared([]))
-        # Register the child's done() into EVERY ancestor's kids registry — walk the parent chain up
-        # from self to the root — so a manual cancel() at ANY depth above trips this child's done()
-        # directly (the cascade is transitive, not just immediate-parent). Each registration is an
-        # ATOMIC read-modify-write via update(): two tasks deriving from the same ancestor concurrently
-        # (a shared handle across the spawn/parallel airlock) both append without a lost-update race.
-        anc := Some(self)
-        while true:
-            match anc:
-                Some(a):
-                    a.kids.update(fn(xs): xs.concat([cdl]))
-                    anc = a.parent
-                None:
-                    break
-        # If any ancestor is ALREADY cancelled at derive time, trip the child's done() now so it is
-        # ready immediately (cancelled() polls the whole parent chain).
-        if self.cancelled():
-            cdl.trip()
+        fl := Shared(false)
+        kch := Channel[Token]()
+        child := Token(flag=fl, deadline=d, dl=cdl, parent=Some(self), kids=kch)
+        # Register into the IMMEDIATE parent only (Go). O(1) — an unbounded channel send never blocks.
+        # What is registered is a PARENT-LESS TWIN of the child, sharing its `flag` / `dl` / `kids`
+        # cores. A channel send crosses the airlock and DEEP-COPIES the struct, so sending `child`
+        # itself would copy its whole ancestor chain — O(depth) per derive, quadratic over a chain, and
+        # measured at 25.6 s for 300 derives. The twin encodes in O(1) and is exactly as good for the
+        # cascade, which only ever calls `_mark()` (flag + deadline + dl) and drains `kids`: `Shared`
+        # and `Channel` cross as LIVE CORES, so marking the twin marks the child. `parent` is the one
+        # field the downward cascade never reads, which is why dropping it here costs nothing.
+        self.kids.send(Token(flag=fl, deadline=d, dl=cdl, parent=None, kids=kch))
+        # Derive-vs-cancel race: cancel() marks self BEFORE it drains (self is the work-list's first
+        # pop), and we send BEFORE we read it. So either the send landed before the drain (the cascade
+        # marks the child) or it landed after — in which case self's OWN state was already set here.
+        # This check MUST stay after the send. It reads self's own state only, NOT `cancelled()` — the
+        # parent walk would make derive() O(depth) and a 1 000-link chain quadratic (measured 7 177 ms
+        # vs 19 ms), and it buys nothing for the race, which is entirely about self's own flag.
+        # ponytail: if an ancestor's cascade was INTERRUPTED before it reached self, a child derived
+        # afterwards has cancelled() == true (the parent walk) but its done() is not tripped until
+        # someone cancels again. Widen this to the full walk only if a real waiter misses a wake.
+        if self.flag.get() or (self.deadline > 0.0 and time.monotonic() >= self.deadline):
+            child._mark()
         return child
 
 # A manually-cancellable token with no deadline. `cancel()` is the only thing that trips it.
 fn manual() -> Token:
     return Token(flag=Shared(false), deadline=0.0, dl=Channel[bool](), parent=None,
-                 kids=Shared([]))
+                 kids=Channel[Token]())
 
 # A token that auto-cancels `ms` milliseconds after creation, and is also manually cancellable. A
 # non-positive `ms` means "already expired" (cancelled() is true at once, done() fires immediately).
@@ -130,7 +191,7 @@ fn timeout(ms: int) -> Token:
     if m < 0:
         m = 0
     return Token(flag=Shared(false), deadline=time.monotonic() + float(m) / 1000.0, dl=timer(m),
-                 parent=None, kids=Shared([]))
+                 parent=None, kids=Channel[Token]())
 
 # Derive a child token from `parent` (the free-function form of `parent.derive()`, for a pipe / when
 # the parent is the obvious subject). Identical semantics: tightest deadline, live link, one-directional.

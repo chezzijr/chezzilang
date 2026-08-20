@@ -602,7 +602,10 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   cycle** faults *recoverably* on membership/key-equality (`Set.has`/`add`, `Map` get/insert/remove,
   `in`, set algebra, `List.contains`/`index_of`/`unique`/`dedup`) with `"maximum structural depth
   (10000) exceeded"` — the SAME fault `==` raises (container key-equality is defined by `==`), matching
-  Python's `RecursionError`; catch it with `recover:`.
+  Python's `RecursionError`; catch it with `recover:`. That 10 000 is ONE budget shared across nested
+  `eq`/`str` re-entries (a hook that compares from inside its own body continues on the enclosing
+  walk's depth rather than restarting at 0) — CPython's model, and what keeps hook-nesting depth ×
+  per-hook walk depth from overflowing the host stack uncatchably (`docs/gaps.md` **W8-43**).
 - **Shipped:** the scalar types `int`/`float`/`bool`/`str` now **intrinsically satisfy `Stringable`**
   (a `[T: Stringable]` generic accepts them, and the erased body's `v.str()` dispatches to the scalar
   render), closing the last inconsistency where every other scalar-friendly builtin protocol

@@ -841,80 +841,170 @@ pub type ExecRegistry = Arc<Mutex<Vec<Arc<ExecutorCore>>>>;
 /// be reachable *only* through its parent core (its own heap handle already swept), so its embedded
 /// handles would dangle if we stopped at the boundary. `seen` (core identities by `Arc` pointer)
 /// breaks the `Arc` reference cycles decision E warns about — a cycle is walked once, not forever.
-pub fn collect_core_gcrefs(w: &WireValue, out: &mut Vec<GcRef>, seen: &mut Vec<usize>) {
+pub fn collect_core_gcrefs(
+    w: &WireValue,
+    out: &mut Vec<GcRef>,
+    seen: &mut super::fxhash::FxHashSet<usize>,
+) {
+    // ONE core lock at a time — see the ABBA note on `collect_gcrefs_structural`. Callers that
+    // already hold a core's guard must NOT use this entry point: they call
+    // `collect_gcrefs_structural` under their guard, drop it, then `drain_pending_cores`.
+    let mut pending: Vec<WireValue> = Vec::new();
+    collect_gcrefs_structural(w, out, seen, &mut pending);
+    drain_pending_cores(out, seen, &mut pending);
+}
+
+/// Drain the nested cores queued by [`collect_gcrefs_structural`], locking exactly ONE at a time.
+///
+/// **Call this with NO core guard held.** `Heap::children` locks a core to read its payload, so if it
+/// drained while still holding that guard it would hold two core locks at once and the ABBA window
+/// stays open — which is exactly what a first attempt at this fix measured: unchanged at 8/40 hangs.
+///
+/// **Why dropping the guard between cores cannot UNDER-ROOT.** Splitting the walk means core X and a
+/// nested core Y are no longer read under one atomic pair of locks, so in principle a store could move
+/// a `Handle` from Y to X after X was walked and before Y is — invisible to both halves. That cannot
+/// happen for a handle belonging to the heap being marked: heaps are **per-fiber/per-worker**
+/// (`Vm::heap`, swapped by `Vm::swap_ctx`) and a collection runs **synchronously on the owning worker**
+/// from its own instruction loop (`Vm::collect` at `exec.rs`'s `should_collect()` check), so while this
+/// heap is marking, the fiber that owns it is not running user code and cannot be mid-move. Another
+/// worker concurrently moving handles is moving handles of ITS heap, which this mark does not root.
+/// What the old code bought with the second lock was cross-core atomicity that this invariant already
+/// provides — at the cost of the deadlock above. Probed as well as argued: a 400-node cyclic graph
+/// under 60k allocations, a diamond (one node reachable by two paths), and handles moved between cores
+/// under concurrent mutation all report 0 corruption on both profiles at 2/4/8 workers, with the
+/// `debug_assert` in `Heap::mark_core_payload` re-deriving the verdict on every debug-build pass.
+pub fn drain_pending_cores(
+    out: &mut Vec<GcRef>,
+    seen: &mut super::fxhash::FxHashSet<usize>,
+    pending: &mut Vec<WireValue>,
+) {
+    while let Some(core) = pending.pop() {
+        match &core {
+            WireValue::Channel(c) => {
+                let q = c.q.lock().unwrap();
+                for w in q.iter() {
+                    collect_gcrefs_structural(w, out, seen, pending);
+                }
+            }
+            WireValue::Shared(c) => {
+                let v = c.v.lock().unwrap();
+                collect_gcrefs_structural(&v, out, seen, pending);
+            }
+            WireValue::RwShared(c) => {
+                let v = c.v.read().unwrap();
+                collect_gcrefs_structural(&v, out, seen, pending);
+            }
+            WireValue::Atomic(c) => {
+                let v = c.v.lock().unwrap();
+                collect_gcrefs_structural(&v, out, seen, pending);
+            }
+            WireValue::Executor(c) => {
+                let q = c.inner.lock().unwrap();
+                for w in q.iter() {
+                    collect_gcrefs_structural(w, out, seen, pending);
+                }
+            }
+            // `pending` only ever receives the five core variants above.
+            _ => {}
+        }
+        // The guard above is dropped HERE, before the next core is locked. That is the whole fix.
+    }
+}
+
+/// The lock-free half of [`collect_core_gcrefs`]: walk one already-locked `WireValue` structurally,
+/// pushing `Handle`s into `out` and QUEUEING any nested core into `pending` instead of locking it.
+///
+/// **Never lock a core from in here.** This function runs with a core's payload guard held, and the
+/// walk used to recurse straight into a nested core's lock while holding it. With a CYCLIC core graph
+/// two workers marking concurrently then took the same two locks in opposite orders — a textbook ABBA
+/// deadlock: every thread parked in `futex_do_wait` at 0% CPU, no deadlock report, unkillable by
+/// `--timeout`. Measured on the fixture in `docs/benchmarks.md` (a `Channel` whose queued struct
+/// reaches back to it): ~20% of runs at `CHEZZI_THREADS>=2`, 0% at `=1`, 0% with the cycle removed,
+/// 0% with allocation (hence GC) removed.
+pub fn collect_gcrefs_structural(
+    w: &WireValue,
+    out: &mut Vec<GcRef>,
+    seen: &mut super::fxhash::FxHashSet<usize>,
+    pending: &mut Vec<WireValue>,
+) {
     match w {
         WireValue::Handle(g) => out.push(*g),
-        WireValue::List { items: xs, .. } | WireValue::Tuple { items: xs, .. } => {
-            xs.iter().for_each(|x| collect_core_gcrefs(x, out, seen))
-        }
+        WireValue::List { items: xs, .. } | WireValue::Tuple { items: xs, .. } => xs
+            .iter()
+            .for_each(|x| collect_gcrefs_structural(x, out, seen, pending)),
         WireValue::Map { entries, .. } => entries.iter().for_each(|(_, k, v)| {
-            collect_core_gcrefs(k, out, seen);
-            collect_core_gcrefs(v, out, seen);
+            collect_gcrefs_structural(k, out, seen, pending);
+            collect_gcrefs_structural(v, out, seen, pending);
         }),
         WireValue::Set { entries, .. } => entries
             .iter()
-            .for_each(|(_, e)| collect_core_gcrefs(e, out, seen)),
+            .for_each(|(_, e)| collect_gcrefs_structural(e, out, seen, pending)),
         WireValue::Struct { fields, .. } => fields
             .iter()
-            .for_each(|(_, v)| collect_core_gcrefs(v, out, seen)),
+            .for_each(|(_, v)| collect_gcrefs_structural(v, out, seen, pending)),
         WireValue::Enum { payload, .. } => payload
             .iter()
-            .for_each(|x| collect_core_gcrefs(x, out, seen)),
-        WireValue::NewType { inner, .. } => collect_core_gcrefs(inner, out, seen),
+            .for_each(|x| collect_gcrefs_structural(x, out, seen, pending)),
+        WireValue::NewType { inner, .. } => collect_gcrefs_structural(inner, out, seen, pending),
         // A cell queued in a channel/executor roots its inner value's handles (like `NewType`).
-        WireValue::Cell { inner, .. } => collect_core_gcrefs(inner, out, seen),
+        WireValue::Cell { inner, .. } => collect_gcrefs_structural(inner, out, seen, pending),
         // A cursor queued in a channel/executor roots its snapshot items' handles (like `List`).
-        WireValue::Iter { items, .. } => {
-            items.iter().for_each(|x| collect_core_gcrefs(x, out, seen))
-        }
+        WireValue::Iter { items, .. } => items
+            .iter()
+            .for_each(|x| collect_gcrefs_structural(x, out, seen, pending)),
         // F3 path C: a generator queued in a channel/executor crosses by value, but its backing
         // closure or a parked slot could still embed a `Handle` into the live heap — root them while
         // the generator sits in the queue (like `Closure`/`Iter`).
         WireValue::Generator { closure, state, .. } => {
             if let Some(c) = closure {
-                collect_core_gcrefs(c, out, seen);
+                collect_gcrefs_structural(c, out, seen, pending);
             }
             match state {
-                WireGenState::Pending(args) => {
-                    args.iter().for_each(|x| collect_core_gcrefs(x, out, seen))
-                }
-                WireGenState::Suspended { stack, .. } => {
-                    stack.iter().for_each(|x| collect_core_gcrefs(x, out, seen))
-                }
+                WireGenState::Pending(args) => args
+                    .iter()
+                    .for_each(|x| collect_gcrefs_structural(x, out, seen, pending)),
+                WireGenState::Suspended { stack, .. } => stack
+                    .iter()
+                    .for_each(|x| collect_gcrefs_structural(x, out, seen, pending)),
                 WireGenState::Done => {}
             }
         }
-        WireValue::Channel(core) => visit_core(Arc::as_ptr(core) as usize, seen, |s| {
-            core.q
-                .lock()
-                .unwrap()
-                .iter()
-                .for_each(|w| collect_core_gcrefs(w, out, s))
-        }),
-        WireValue::Shared(core) => visit_core(Arc::as_ptr(core) as usize, seen, |s| {
-            collect_core_gcrefs(&core.v.lock().unwrap(), out, s)
-        }),
-        WireValue::RwShared(core) => visit_core(Arc::as_ptr(core) as usize, seen, |s| {
-            collect_core_gcrefs(&core.v.read().unwrap(), out, s)
-        }),
-        WireValue::Atomic(core) => visit_core(Arc::as_ptr(core) as usize, seen, |s| {
-            collect_core_gcrefs(&core.v.lock().unwrap(), out, s)
-        }),
+        // A nested core is QUEUED, never locked here — `seen` keeps each one queued at most once,
+        // which is also what terminates a cyclic core graph. Cloning the variant is an `Arc` refcount
+        // bump, and it is what keeps the core alive between the queue and the drain.
+        WireValue::Channel(core) => {
+            if seen.insert(Arc::as_ptr(core) as usize) {
+                pending.push(w.clone());
+            }
+        }
+        WireValue::Shared(core) => {
+            if seen.insert(Arc::as_ptr(core) as usize) {
+                pending.push(w.clone());
+            }
+        }
+        WireValue::RwShared(core) => {
+            if seen.insert(Arc::as_ptr(core) as usize) {
+                pending.push(w.clone());
+            }
+        }
+        WireValue::Atomic(core) => {
+            if seen.insert(Arc::as_ptr(core) as usize) {
+                pending.push(w.clone());
+            }
+        }
         // `AtomicInt` holds a plain i64 — no heap refs to trace (identity-only wire visit).
         WireValue::AtomicInt(_) => {}
-        WireValue::Executor(core) => visit_core(Arc::as_ptr(core) as usize, seen, |s| {
-            core.inner
-                .lock()
-                .unwrap()
-                .iter()
-                .for_each(|w| collect_core_gcrefs(w, out, s))
-        }),
+        WireValue::Executor(core) => {
+            if seen.insert(Arc::as_ptr(core) as usize) {
+                pending.push(w.clone());
+            }
+        }
         // B3.6: a submitted closure queued in an `Executor` crosses by value, but its captures may
         // still embed `Handle`s into the live heap (a captured `Channel[str]`'s bytes root nothing,
         // but a captured callable would) — root them while the task sits in the queue.
         WireValue::Closure { captured, .. } => captured
             .iter()
-            .for_each(|(_, v)| collect_core_gcrefs(v, out, seen)),
+            .for_each(|(_, v)| collect_gcrefs_structural(v, out, seen, pending)),
         // B3.3a: `Str` crosses by value (owned bytes in the core) — it roots no heap object.
         // D6: a `Socket`/`Listener` core holds an OS fd + a poll key — no `WireValue`s, no `GcRef`s.
         // `bytes`/`bytearray` cross by value (owned raw bytes) — root no heap object.
@@ -1119,55 +1209,123 @@ pub fn wire_summary(w: &WireValue) -> (usize, bool) {
 ///
 /// Keep the arms in lockstep with [`collect_core_gcrefs`] and [`wire_summary`] — a new `WireValue`
 /// variant must be added to all three.
+///
+/// **Do NOT call this while holding any core's payload guard** — it drains nested cores, which locks
+/// them, and holding a second core lock is the ABBA deadlock `drain_pending_core_bytes` documents.
+/// A caller that already holds a guard calls the `_structural` half under it, drops it, then drains.
 pub fn nested_core_bytes(w: &WireValue, seen: &mut super::fxhash::FxHashSet<usize>) -> usize {
+    let mut pending: Vec<WireValue> = Vec::new();
+    let acc = nested_core_bytes_structural(w, seen, &mut pending);
+    acc + drain_pending_core_bytes(seen, &mut pending)
+}
+
+/// Bytes owned by the cores queued by the structural byte walk, locking exactly ONE at a time.
+///
+/// **Call with NO core guard held**, for the same reason as [`drain_pending_cores`]: this walk is the
+/// byte-accounting twin of the rooting walk and had the identical ABBA shape — a parent core's guard
+/// held while a child's lock was taken. It is reached through `--max-heap` (`Heap::live_bytes`'s
+/// `deep` branch), so before this split a cyclic core graph could hang the very mechanism whose job is
+/// to abort a runaway run. Measured pre-split: `chezzi test --max-heap=100000000` on a cyclic-core
+/// fixture at `CHEZZI_THREADS=4` hung 1/40 runs, versus 0/20 for the same program without the cap.
+pub fn drain_pending_core_bytes(
+    seen: &mut super::fxhash::FxHashSet<usize>,
+    pending: &mut Vec<WireValue>,
+) -> usize {
+    let mut acc = 0usize;
+    while let Some(core) = pending.pop() {
+        match &core {
+            WireValue::Channel(c) => {
+                let g = c.q.lock().unwrap();
+                acc += queue_bytes_structural(g.summary(), g.iter(), seen, pending);
+            }
+            // W7-26 — BOTH halves, each under its OWN scoped guard so the two are never held at once.
+            WireValue::Executor(c) => {
+                let queued = {
+                    let g = c.inner.lock().unwrap();
+                    queue_bytes_structural(g.summary(), g.iter(), seen, pending)
+                };
+                let eager = {
+                    let g = c.eager.lock().unwrap_or_else(|e| e.into_inner());
+                    queue_bytes_structural(g.summary(), g.values(), seen, pending)
+                };
+                acc += queued + eager;
+            }
+            WireValue::Shared(c) => {
+                let g = c.v.lock().unwrap();
+                acc += value_core_bytes_structural(&c.summary, &g, seen, pending);
+            }
+            WireValue::RwShared(c) => {
+                let g = c.v.read().unwrap();
+                acc += value_core_bytes_structural(&c.summary, &g, seen, pending);
+            }
+            WireValue::Atomic(c) => {
+                let g = c.v.lock().unwrap();
+                acc += value_core_bytes_structural(&c.summary, &g, seen, pending);
+            }
+            // `pending` only ever receives the five core variants above.
+            _ => {}
+        }
+        // Guard dropped HERE, before the next core is locked.
+    }
+    acc
+}
+
+/// The lock-free half of [`nested_core_bytes`]: walk one already-locked payload, QUEUEING nested cores
+/// into `pending` instead of locking them. **Never lock a core from in here.**
+fn nested_core_bytes_structural(
+    w: &WireValue,
+    seen: &mut super::fxhash::FxHashSet<usize>,
+    pending: &mut Vec<WireValue>,
+) -> usize {
     let mut acc = 0usize;
     match w {
         WireValue::List { items: xs, .. } | WireValue::Tuple { items: xs, .. } => {
             for x in xs {
-                acc += nested_core_bytes(x, seen);
+                acc += nested_core_bytes_structural(x, seen, pending);
             }
         }
         WireValue::Map { entries, .. } => {
             for (_, k, v) in entries {
-                acc += nested_core_bytes(k, seen) + nested_core_bytes(v, seen);
+                acc += nested_core_bytes_structural(k, seen, pending)
+                    + nested_core_bytes_structural(v, seen, pending);
             }
         }
         WireValue::Set { entries, .. } => {
             for (_, e) in entries {
-                acc += nested_core_bytes(e, seen);
+                acc += nested_core_bytes_structural(e, seen, pending);
             }
         }
         WireValue::Struct { fields, .. } => {
             for (_, v) in fields {
-                acc += nested_core_bytes(v, seen);
+                acc += nested_core_bytes_structural(v, seen, pending);
             }
         }
         WireValue::Enum { payload, .. } => {
             for x in payload {
-                acc += nested_core_bytes(x, seen);
+                acc += nested_core_bytes_structural(x, seen, pending);
             }
         }
         WireValue::NewType { inner, .. } | WireValue::Cell { inner, .. } => {
-            acc += nested_core_bytes(inner, seen)
+            acc += nested_core_bytes_structural(inner, seen, pending)
         }
         WireValue::Iter { items, .. } => {
             for x in items {
-                acc += nested_core_bytes(x, seen);
+                acc += nested_core_bytes_structural(x, seen, pending);
             }
         }
         WireValue::Generator { closure, state, .. } => {
             if let Some(c) = closure {
-                acc += nested_core_bytes(c, seen);
+                acc += nested_core_bytes_structural(c, seen, pending);
             }
             match state {
                 WireGenState::Pending(args) => {
                     for x in args {
-                        acc += nested_core_bytes(x, seen);
+                        acc += nested_core_bytes_structural(x, seen, pending);
                     }
                 }
                 WireGenState::Suspended { stack, .. } => {
                     for x in stack {
-                        acc += nested_core_bytes(x, seen);
+                        acc += nested_core_bytes_structural(x, seen, pending);
                     }
                 }
                 WireGenState::Done => {}
@@ -1175,15 +1333,14 @@ pub fn nested_core_bytes(w: &WireValue, seen: &mut super::fxhash::FxHashSet<usiz
         }
         WireValue::Closure { captured, .. } => {
             for (_, v) in captured {
-                acc += nested_core_bytes(v, seen);
+                acc += nested_core_bytes_structural(v, seen, pending);
             }
         }
         // The nested cores themselves — charge each one's payload ONCE per heap, then keep
         // recursing (a core nested two deep is just as invisible as one nested once).
         WireValue::Channel(core) => {
             if seen.insert(Arc::as_ptr(core) as usize) {
-                let g = core.q.lock().unwrap();
-                acc += queue_bytes_deep(g.summary(), g.iter(), seen);
+                pending.push(w.clone());
             }
         }
         // W7-26 — BOTH halves, exactly like `Heap::live_bytes`'s `Obj::Executor` arm. Keeping them
@@ -1194,27 +1351,22 @@ pub fn nested_core_bytes(w: &WireValue, seen: &mut super::fxhash::FxHashSet<usiz
         // eager results, reached through an `Obj::Shared` payload, was counted as 240.
         WireValue::Executor(core) => {
             if seen.insert(Arc::as_ptr(core) as usize) {
-                let queued = {
-                    let g = core.inner.lock().unwrap();
-                    queue_bytes_deep(g.summary(), g.iter(), seen)
-                };
-                let g = core.eager.lock().unwrap_or_else(|e| e.into_inner());
-                acc += queued + queue_bytes_deep(g.summary(), g.values(), seen);
+                pending.push(w.clone());
             }
         }
         WireValue::Shared(core) => {
             if seen.insert(Arc::as_ptr(core) as usize) {
-                acc += value_core_bytes_deep(&core.summary, &core.v.lock().unwrap(), seen);
+                pending.push(w.clone());
             }
         }
         WireValue::RwShared(core) => {
             if seen.insert(Arc::as_ptr(core) as usize) {
-                acc += value_core_bytes_deep(&core.summary, &core.v.read().unwrap(), seen);
+                pending.push(w.clone());
             }
         }
         WireValue::Atomic(core) => {
             if seen.insert(Arc::as_ptr(core) as usize) {
-                acc += value_core_bytes_deep(&core.summary, &core.v.lock().unwrap(), seen);
+                pending.push(w.clone());
             }
         }
         // Leaves — own no nested core. `Backref` also TERMINATES a cyclic wire graph (exactly like
@@ -1254,16 +1406,36 @@ pub fn nested_core_bytes(w: &WireValue, seen: &mut super::fxhash::FxHashSet<usiz
 /// `ponytail: one bit conflates "has a handle" with "has a nested core"` — splitting them means a
 /// third field threaded through `WireSummary` and `ChanState::push`'s tuple at every call site; do it
 /// only if a profile says this walk matters.
+///
+/// **Do NOT call this while holding any core's payload guard** — it drains nested cores, which locks
+/// them, and holding a second core lock is the ABBA deadlock `drain_pending_core_bytes` documents.
+/// A caller that already holds a guard calls the `_structural` half under it, drops it, then drains.
 pub fn queue_bytes_deep<'a>(
     summary: (usize, bool),
     msgs: impl Iterator<Item = &'a WireValue>,
     seen: &mut super::fxhash::FxHashSet<usize>,
 ) -> usize {
+    let mut pending: Vec<WireValue> = Vec::new();
+    let acc = queue_bytes_structural(summary, msgs, seen, &mut pending);
+    acc + drain_pending_core_bytes(seen, &mut pending)
+}
+
+/// The lock-free half of [`queue_bytes_deep`] — call it under the queue's guard, then drop the guard
+/// and call [`drain_pending_core_bytes`].
+pub fn queue_bytes_structural<'a>(
+    summary: (usize, bool),
+    msgs: impl Iterator<Item = &'a WireValue>,
+    seen: &mut super::fxhash::FxHashSet<usize>,
+    pending: &mut Vec<WireValue>,
+) -> usize {
     let (bytes, dirty) = summary;
     if !dirty {
         return bytes;
     }
-    bytes + msgs.map(|w| nested_core_bytes(w, seen)).sum::<usize>()
+    bytes
+        + msgs
+            .map(|w| nested_core_bytes_structural(w, seen, pending))
+            .sum::<usize>()
 }
 
 /// W6-10r — a single-value core's own bytes PLUS every core nested in its payload. Call with the
@@ -1273,30 +1445,37 @@ pub fn queue_bytes_deep<'a>(
 /// fills it during marking): every core CONSTRUCTOR leaves it `UNKNOWN`, and a core reachable only
 /// through a parent is never marked through an alias slot of its own — so without this fill it would
 /// report 0 bytes forever, which is the very hole being closed.
+///
+/// **Do NOT call this while holding any core's payload guard** — it drains nested cores, which locks
+/// them, and holding a second core lock is the ABBA deadlock `drain_pending_core_bytes` documents.
+/// A caller that already holds a guard calls the `_structural` half under it, drops it, then drains.
 pub fn value_core_bytes_deep(
     summary: &WireSummary,
     w: &WireValue,
     seen: &mut super::fxhash::FxHashSet<usize>,
+) -> usize {
+    let mut pending: Vec<WireValue> = Vec::new();
+    let acc = value_core_bytes_structural(summary, w, seen, &mut pending);
+    acc + drain_pending_core_bytes(seen, &mut pending)
+}
+
+/// The lock-free half of [`value_core_bytes_deep`] — call it under the payload guard, then drop the
+/// guard and call [`drain_pending_core_bytes`].
+pub fn value_core_bytes_structural(
+    summary: &WireSummary,
+    w: &WireValue,
+    seen: &mut super::fxhash::FxHashSet<usize>,
+    pending: &mut Vec<WireValue>,
 ) -> usize {
     if summary.state() == WS_UNKNOWN {
         summary.set(w);
     }
     let bytes = summary.bytes();
     if summary.state() == WS_DIRTY {
-        bytes + nested_core_bytes(w, seen)
+        bytes + nested_core_bytes_structural(w, seen, pending)
     } else {
         bytes
     }
-}
-
-/// Run `f` over a not-yet-visited core (by `Arc`-pointer identity), recording it in `seen` first so a
-/// cycle back to it is a no-op. Already-seen cores are skipped.
-fn visit_core(ptr: usize, seen: &mut Vec<usize>, f: impl FnOnce(&mut Vec<usize>)) {
-    if seen.contains(&ptr) {
-        return;
-    }
-    seen.push(ptr);
-    f(seen);
 }
 
 #[cfg(test)]

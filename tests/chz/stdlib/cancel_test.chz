@@ -1,0 +1,231 @@
+# tests/chz/stdlib/cancel_test.chz — `std.cancel`'s registration model: Go `context.WithCancel`'s
+# shape, i.e. `derive()` registers a child into its IMMEDIATE parent only (O(1)) and `cancel()`
+# cascades DOWN the tree. The old model registered each new child into EVERY ancestor with a
+# copy-per-`Shared.update`, which made a chain cubic (400 derives = 6.0 s) and a fan-out quadratic.
+#
+# The perf bounds below are wall-clock but hugely discriminating rather than tight: the pre-fix code
+# does not merely exceed them, it takes ~90 s against a 5 000 ms assertion. Headroom depends on the
+# config — ~20 ms release/12-core (250x), but a measured 0.92 s (chain) and 1.08 s (fan-out) in the
+# WORST config this file runs in: debug profile, 2 cores, CHEZZI_THREADS=8, 3x oversubscribed, which
+# is what `cancel_c5_gate_at_eight_workers` drives on CI. So the real floor is ~5x, not 250x.
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+# Run: `cargo run -- test tests/chz/stdlib/cancel_test.chz`
+
+import std.time
+import std.cancel
+import std.concurrency
+
+# Derive `n` children (each with one grandchild) off `root` and ship every one out through a live
+# channel, so the caller can re-check them AFTER the nursery joins. Runs concurrently with a sibling
+# task cancelling `root` — the point is that no interleaving can leave a token uncancelled.
+fn derive_burst(root: Token, out: Channel[Token], n: int):
+    i := 0
+    while i < n:
+        c := root.derive()
+        out.send(c)
+        out.send(c.derive())
+        i = i + 1
+
+fn cancel_root(root: Token):
+    root.cancel()
+
+test fn derive_chain_beats_the_every_ancestor_registry():
+    # Guards the registration model, not linearity. A chain is still superlinear in depth — the
+    # parent link makes `cancelled()` O(depth) and the mark pass walks the rooted chain each time —
+    # measured release, build+cancel: 125 -> 2.2ms, 250 -> 4.6ms, 500 -> 16.0ms, 1000 -> 67.1ms.
+    # What this pins is the CUBIC every-ancestor registry the old model had, which took 5 861 ms at
+    # n=400 in RELEASE and ~90 s at n=1 000.
+    #
+    # Headroom is quoted from the DEBUG profile at CHEZZI_THREADS=2, because that is what the gate
+    # actually runs: 390 ms against the 5 000 ms bound, a 12.8x margin. (It was 4 889 ms — 1.02x, and
+    # it flaked under suite contention — until the GC's quadratic core-graph dedup was fixed; see
+    # `tests/chz/spec/gc_core_graph_test.chz`.)
+    t0 := time.monotonic()
+    root := cancel.manual()
+    leaf := root
+    i := 0
+    while i < 1000:
+        leaf = leaf.derive()
+        i = i + 1
+    root.cancel()
+    d := (time.monotonic() - t0) * 1000.0
+    assert leaf.cancelled(), "the leaf of a 1000-deep chain must be cancelled by a root cancel"
+    assert d < 5000.0, "1000 sequential derives + one cascade must not hit the every-ancestor registry: {d}ms"
+
+test fn wide_fanout_is_not_quadratic():
+    t0 := time.monotonic()
+    root := cancel.manual()
+    kids := [root.derive()]
+    i := 1
+    while i < 5000:
+        kids.push(root.derive())
+        i = i + 1
+    root.cancel()
+    d := (time.monotonic() - t0) * 1000.0
+    live := 0
+    for k in kids:
+        if not k.cancelled():
+            live = live + 1
+    assert live == 0, "every one of 5000 children must be cancelled, {live} were not"
+    assert d < 5000.0, "5000 derives off one root must not be quadratic: {d}ms"
+
+test fn derive_races_cancel():
+    # `cancel()` sets the flag BEFORE draining the registry and `derive()` sends BEFORE checking it,
+    # so for any interleaving the child is either reached by the cascade or sees an already-cancelled
+    # parent at derive time. Without the derive-side check this loses thousands of tokens.
+    bad := 0
+    r := 0
+    while r < 30:
+        root := cancel.manual()
+        out := Channel[Token]()
+        parallel:
+            spawn derive_burst(root, out, 200)
+            spawn cancel_root(root)
+        while true:
+            match out.try_recv():
+                Some(t):
+                    if not t.cancelled():
+                        bad = bad + 1
+                None:
+                    break
+        r = r + 1
+    assert bad == 0, "a derive racing a root cancel must never leave a live token, {bad} survived"
+
+test fn late_derive_from_a_cancelled_parent():
+    r := cancel.manual()
+    r.cancel()
+    c := r.derive()
+    assert c.cancelled(), "a child derived from an already-cancelled parent starts cancelled"
+    why := ""
+    match c.reason():
+        Some(s): why = s
+        None:    why = "none"
+    assert why == "cancelled", "reason must be the nearest cause: {why}"
+    ready := false
+    match c.done().try_recv():
+        Some(v): ready = v
+        None:    ready = false
+    assert ready, "a late-derived child's done() must already be ready"
+
+test fn double_cancel_is_idempotent_with_children():
+    r := cancel.manual()
+    c := r.derive()
+    g := c.derive()
+    r.cancel()
+    r.cancel()
+    assert r.cancelled(), "the root stays cancelled after a second cancel"
+    assert c.cancelled(), "a child stays cancelled after the second (already-drained) cancel"
+    assert g.cancelled(), "a grandchild stays cancelled after the second (already-drained) cancel"
+
+# --- C5: done() never fires before cancelled() flips ------------------------------------------------
+# `_mark` sets the cancel bit BEFORE it trips done(); trip() is what wakes a parked waiter, so the
+# flag must already be true when the waiter runs. The reverse order is a live race — measured on the
+# shipped release binary, root->mid->leaf, one task parked in `wait: leaf.done().recv()` re-reading
+# `leaf.cancelled()`: 141/400 rounds at CHEZZI_THREADS=8, 67/400 at =4, 0/400 at =2 and ~2/400 at the
+# 12-core default. The suite runs at the default and at =2, where this is near-invisible, so the
+# worker count that gives this test teeth is pinned separately by
+# `cancel_c5_gate_at_eight_workers` in `tests/chezzi_threads_cli.rs` (CHEZZI_THREADS=8, where 100
+# rounds measured 23-35 violations pre-fix, min 12 over five runs at =4).
+fn c5_waiter(leaf: Token, bad: Shared[int]):
+    wait:
+        _ := leaf.done().recv():
+            if not leaf.cancelled():
+                bad.update(fn(n): n + 1)
+
+fn c5_canceller(root: Token):
+    root.cancel()
+
+test fn cascaded_done_implies_cancelled():
+    bad := Shared(0)
+    r := 0
+    while r < 100:
+        root := cancel.manual()
+        mid := root.derive()
+        leaf := mid.derive()
+        parallel:
+            spawn c5_waiter(leaf, bad)
+            spawn c5_canceller(root)
+        r = r + 1
+    n := bad.get()
+    assert n == 0, "a task woken by a cascaded grandchild's done() must read cancelled()==true, {n} did not"
+
+test fn reason_latches_the_first_cause():
+    # A manual cancel of a parent whose deadline is still in the future pushes "cancelled" into the
+    # child's own flag, and it LATCHES there — even after that deadline passes. Go 1.26 agrees:
+    # ctx.Err() is context.Canceled in both halves.
+    # The wall-clock budget here is NOT the sleep (sleep_ms cannot return early) — it is the window
+    # between `timeout(200)` and the cascade reaching the child. Blow that and `_mark`'s guard skips
+    # the flag and the FIRST assert reads "timeout" instead. Measured worst case 5.7 ms under 3x
+    # oversubscription on 2 cores in the debug profile, so 200 ms is a ~35x margin.
+    p := cancel.timeout(200)
+    c := p.derive()
+    p.cancel()
+    assert c.reason() == Some("cancelled"), "a manual ancestor cancel before the deadline reads cancelled"
+    time.sleep_ms(240)
+    assert c.reason() == Some("cancelled"), "the first cause latches — the elapsed deadline must not win"
+    # The other direction: when the cascade reaches a token whose OWN deadline has already elapsed,
+    # `_mark`'s guard skips the flag, so its own "timeout" stays the cause (Go: DeadlineExceeded).
+    q := cancel.timeout(0)
+    k := q.derive()
+    q.cancel()
+    assert k.reason() == Some("timeout"), "an own already-elapsed deadline stays the cause under a cascade"
+    # And the SAME rule for a token's OWN cause, which the two halves above only covered for a
+    # DESCENDANT reached by the cascade. `cancel()` used to set self's flag unconditionally, so a
+    # timed-out token that was then cancelled reported "cancelled"; Go 1.26 on the paired program
+    # (`context.WithTimeout(bg, 10ms)`, sleep 50 ms, `cancel()`) prints `context deadline exceeded`.
+    # Routing self through `_mark` — it is the cancel() work-list's first pop — is what latches it.
+    own := cancel.timeout(0)
+    own.cancel()
+    assert own.reason() == Some("timeout"), "cancel() must not overwrite a token's OWN elapsed deadline"
+    assert own.cancelled(), "an elapsed-deadline token is still cancelled after cancel()"
+    # The unelapsed direction must keep working: cancel() on a live deadline reads "cancelled".
+    live := cancel.timeout(60000)
+    live.cancel()
+    assert live.reason() == Some("cancelled"), "cancel() before the deadline reads cancelled"
+
+# --- A1: an INTERRUPTED cascade must not lose a subtree ---------------------------------------------
+# `cancel()`'s work-list pops children out of `kids` with `try_recv()`, which REMOVES them from the
+# registry. If the cancelling task is torn down mid-cascade (a sibling faults, the nursery aborts),
+# every child already popped into the local `work` list dies with the task — and no later `cancel()`
+# can recover them, because the registry entries are gone. That is why `Token` keeps its `parent`
+# link and `cancelled()`/`reason()` fall back to it. Measured at CHEZZI_THREADS=4 with the link
+# deleted: `leaf.cancelled()` false 3/3, and a SECOND `root.cancel()` still false (387 of 501 tokens
+# permanently uncancelled). Go is not immune by having the same cascade shape — it has no way to
+# abandon a goroutine mid-function, so `cancelCtx.cancel`'s drain always completes.
+#
+# Post-fix this is deterministic, not probabilistic: the answer comes from the parent walk whether or
+# not the cascade finished, so there is no flake window. A run where the cascade DOES complete simply
+# under-exercises it.
+fn cancel_mid_teardown(root: Token):
+    root.cancel()
+
+fn abort_the_nursery():
+    xs := [1]
+    n := xs[9]
+    assert n == 1, "unreachable — the index above faults"
+
+test fn an_interrupted_cascade_still_reports_cancelled():
+    root := cancel.manual()
+    toks := [root]
+    cur := root
+    i := 0
+    while i < 500:
+        cur = cur.derive()
+        toks.push(cur)
+        i = i + 1
+    leaf := cur
+    r := recover:
+        parallel:
+            spawn cancel_mid_teardown(root)
+            spawn abort_the_nursery()
+    aborted := false
+    match r:
+        Ok(_):  aborted = false
+        Err(_): aborted = true
+    assert aborted, "the sibling fault must abort the nursery"
+    assert leaf.cancelled(), "the leaf of a 500-deep chain must stay cancelled after an interrupted cascade"
+    live := 0
+    for t in toks:
+        if not t.cancelled():
+            live = live + 1
+    assert live == 0, "an interrupted cascade must not lose a descendant: {live} of {toks.len()} uncancelled"

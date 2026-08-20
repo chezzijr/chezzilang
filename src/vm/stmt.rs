@@ -1990,7 +1990,7 @@ impl Vm {
     /// Depth-guarded structural display. Returns `Err` (recoverable) once recursion exceeds
     /// [`MAX_STRUCTURAL_DEPTH`] — guarding cyclic data from overflowing the host stack.
     pub(super) fn display_guarded(&self, v: Value, depth: usize) -> Result<String, RuntimeError> {
-        if depth > MAX_STRUCTURAL_DEPTH {
+        if self.walk_base + depth > MAX_STRUCTURAL_DEPTH {
             return Err(self.depth_exceeded_err(Span::RUNTIME));
         }
         match v.view() {
@@ -2448,9 +2448,12 @@ impl Vm {
     ) -> Result<(), RuntimeError> {
         use std::fmt::Write as _;
         // Guard against cyclic data overflowing the host stack — turns SIGABRT into a recoverable
-        // `RuntimeError` (a `str` method re-stringifies at the *same* depth, so a non-recursive
-        // protocol hook doesn't burn the budget).
-        if depth > MAX_STRUCTURAL_DEPTH {
+        // `RuntimeError`. Tested against `walk_base + depth`: a `str` hook that stringifies from
+        // inside its BODY continues on the same shared budget rather than restarting at 0 (see
+        // `Vm::walk_base`) — without that, hook-nesting × per-hook depth is unbounded and the
+        // process dies uncatchably. The hook's RESULT is re-stringified at the *same* `depth` after
+        // `guarded_walk` restored, so a non-recursive protocol hook still doesn't burn the budget.
+        if self.walk_base + depth > MAX_STRUCTURAL_DEPTH {
             return Err(self.depth_exceeded_err(span));
         }
         if let Some(n) = self.int_val(v) {
@@ -2580,7 +2583,13 @@ impl Vm {
                     && self.program.protos[proto].arity == 1
                 {
                     let home = self.module_objs[def.module_idx];
-                    let res = self.guarded(|vm| {
+                    // The hook re-enters the VM and may start its own structural walk, so hand it
+                    // the depth this walk has already consumed — one shared budget (see
+                    // [`Vm::walk_base`]), not a fresh 10 000 per nesting level. The
+                    // `stringify_into(out, res, ...)` below runs AFTER `guarded_walk` restored, at
+                    // the outer `depth` — correct, it is the hook's RESULT, not a nested walk.
+                    let base = self.walk_base + depth;
+                    let res = self.guarded_walk(base, |vm| {
                         vm.run_proto(proto, home, None, vec![Value::obj(h)], true, false, span)
                     })?;
                     if self.is_str_value(res) {
@@ -2634,7 +2643,13 @@ impl Vm {
                     && self.program.protos[proto].arity == 1
                 {
                     let home = self.module_objs[self.enum_home_module(&key)];
-                    let res = self.guarded(|vm| {
+                    // The hook re-enters the VM and may start its own structural walk, so hand it
+                    // the depth this walk has already consumed — one shared budget (see
+                    // [`Vm::walk_base`]), not a fresh 10 000 per nesting level. The
+                    // `stringify_into(out, res, ...)` below runs AFTER `guarded_walk` restored, at
+                    // the outer `depth` — correct, it is the hook's RESULT, not a nested walk.
+                    let base = self.walk_base + depth;
+                    let res = self.guarded_walk(base, |vm| {
                         vm.run_proto(proto, home, None, vec![Value::obj(h)], true, false, span)
                     })?;
                     if self.is_str_value(res) {
@@ -2668,7 +2683,13 @@ impl Vm {
                     && self.program.protos[proto].arity == 1
                 {
                     let home = self.module_objs[self.newtype_home_module(&type_key)];
-                    let res = self.guarded(|vm| {
+                    // The hook re-enters the VM and may start its own structural walk, so hand it
+                    // the depth this walk has already consumed — one shared budget (see
+                    // [`Vm::walk_base`]), not a fresh 10 000 per nesting level. The
+                    // `stringify_into(out, res, ...)` below runs AFTER `guarded_walk` restored, at
+                    // the outer `depth` — correct, it is the hook's RESULT, not a nested walk.
+                    let base = self.walk_base + depth;
+                    let res = self.guarded_walk(base, |vm| {
                         vm.run_proto(proto, home, None, vec![Value::obj(h)], true, false, span)
                     })?;
                     if self.is_str_value(res) {

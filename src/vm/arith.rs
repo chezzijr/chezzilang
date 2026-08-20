@@ -1412,6 +1412,13 @@ impl Vm {
         let Some(h) = v.as_obj() else {
             return false;
         };
+        // NOT `walk_base + depth` (W8-43). This guard's over-budget branch DEGRADES (store by
+        // reference) instead of faulting, so charging the enclosing hook's consumed depth to it
+        // turns a stack-safety measure into a SILENT WRONG ANSWER: an ordinary shallow acyclic key
+        // inserted from inside an `eq`/`str` hook running at depth would be aliased rather than
+        // snapshotted, and the caller's later mutation would reach the stored key. Only the five
+        // guards whose over-budget branch FAULTS may share the budget; this one and
+        // `snapshot_value`'s must stay on the bare `depth`.
         if depth > MAX_STRUCTURAL_DEPTH {
             return true; // over-deep: store by reference (no snapshot, no host-stack overflow)
         }
@@ -1467,6 +1474,10 @@ impl Vm {
         let Some(h) = v.as_obj() else {
             return v; // scalars
         };
+        // NOT `walk_base + depth` — the twin of `cyclic_walk`'s guard above, and for the same
+        // reason (W8-43): this branch DEGRADES (alias the tail) rather than faults, so a charged
+        // budget silently aliases a shallow key. The two stay charged IDENTICALLY (both bare
+        // `depth`) so `store_key_by_reference` and `snapshot_key` agree on which keys are over-deep.
         if depth > MAX_STRUCTURAL_DEPTH {
             return v; // absurdly deep (non-cyclic) key: stop copying, alias the tail (no overflow)
         }
@@ -1650,6 +1661,12 @@ impl Vm {
         }
         let mut idx = idx;
         let right = idx.split_off(n / 2);
+        // ponytail: not charged to `walk_base`. This recurses natively AND calls `struct_compare`,
+        // which can re-enter user code — the same product shape as the hook-nested structural walk.
+        // Ceiling: O(log n) native frames per call-depth level (≤64 for any list that fits in
+        // memory), so 10 000 call levels × 64 frames × a few hundred bytes is tens of MiB against a
+        // 384 MiB stack — it cannot reach the host limit. Charge `walk_base` here if the sort ever
+        // recurses on something unbounded.
         let left = self.msort_indices_structs(src_h, idx, span)?;
         let right = self.msort_indices_structs(src_h, right, span)?;
         let mut out = Vec::with_capacity(n);
@@ -2041,9 +2058,12 @@ impl Vm {
     /// the identity shortcut from [`Self::elem_equal`] instead (CPython's
     /// `PyObject_RichCompareBool`), which never reaches this function for an identical pair.
     ///
-    /// `MAX_STRUCTURAL_DEPTH` is threaded through the structural recursion as before. A user `eq` that
-    /// itself compares starts a FRESH depth-0 walk in a new VM frame — bounded there by the call-depth
-    /// guard, not by this counter.
+    /// `MAX_STRUCTURAL_DEPTH` is threaded through the structural recursion, and the guard tests
+    /// `walk_base + depth` — so a user `eq` that itself compares does NOT restart at 0: it continues
+    /// on the SAME budget (see [`Vm::walk_base`]), CPython's model. Call depth alone never rescues
+    /// this: the repro that motivated the fix (W8-43) dies at hook-nesting depth ~5 000 of a 10 000
+    /// `MAX_CALL_DEPTH` cap, because each of those 5 000 levels stacks a fresh 100-frame native walk
+    /// on the host stack — the call-depth guard counts the levels, not their product.
     pub(super) fn values_equal_guarded(
         &mut self,
         l: Value,
@@ -2051,7 +2071,7 @@ impl Vm {
         depth: usize,
         span: Span,
     ) -> Result<bool, RuntimeError> {
-        if depth > MAX_STRUCTURAL_DEPTH {
+        if self.walk_base + depth > MAX_STRUCTURAL_DEPTH {
             return Err(self.depth_exceeded_err(span));
         }
         // Exact i64 equality when BOTH operands are integral (inline `Int` OR boxed `BigInt`) —
@@ -2079,7 +2099,11 @@ impl Vm {
                     .then(|| self.user_eq_method(l, r))
                     .flatten()
                 {
-                    let res = self.guarded(|vm| {
+                    // The hook re-enters the VM and may start its own structural walk, so hand it
+                    // the depth this walk has already consumed — one shared budget (see
+                    // [`Vm::walk_base`]), not a fresh 10 000 per nesting level.
+                    let base = self.walk_base + depth;
+                    let res = self.guarded_walk(base, |vm| {
                         vm.run_proto(proto, home, None, vec![l, r], true, false, span)
                     })?;
                     return match res.as_bool() {

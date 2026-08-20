@@ -1838,6 +1838,40 @@ fn guarded_restores_native_reentry_on_panic() {
 }
 
 #[test]
+fn guarded_walk_restores_walk_base_on_panic() {
+    // W8-43 twin of the above. `guarded_walk` sets `walk_base` (the structural depth the enclosing
+    // native walk already consumed) around a protocol-hook re-entry. It CANNOT restore it with a
+    // plain assignment after the call: `guarded` catches the unwind, decrements `native_reentry`,
+    // and resumes the unwind FROM INSIDE ITSELF, so anything written after `guarded(...)` is
+    // skipped on a panic. Panics really do traverse this seam (`callback_trampoline` converts an
+    // FFI-callback panic into a recoverable error; `run_one_fiber` turns a worker panic into
+    // `Disp::Finish` and keeps the shell `Vm` alive for the NEXT fiber) — a leaked `walk_base`
+    // would make every later fiber's `==`/`str` fault spuriously at "maximum structural depth".
+    let mut vm = Vm::new(Arc::new(empty_program()));
+    assert_eq!(vm.walk_base, 0);
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {})); // silence the expected panic print
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        vm.guarded_walk(9_999, |_vm| -> Result<(), RuntimeError> {
+            panic!("hook boom")
+        })
+    }));
+    std::panic::set_hook(prev);
+    assert!(
+        caught.is_err(),
+        "the panic must propagate out of guarded_walk unchanged"
+    );
+    assert_eq!(
+        vm.walk_base, 0,
+        "walk_base must return to its entry value after a panicking hook re-entry"
+    );
+    assert_eq!(
+        vm.native_reentry, 0,
+        "the inner guarded must still have restored native_reentry"
+    );
+}
+
+#[test]
 fn cursor_crosses_airlock_by_deep_copy() {
     // A cursor (`Obj::Iter`) IS sendable: `to_wire` deep-copies it (recursively wiring items +
     // carrying `pos`) into a `WireValue::Iter`, and `from_wire` rebuilds an INDEPENDENT cursor —

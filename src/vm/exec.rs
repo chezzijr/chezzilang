@@ -140,6 +140,7 @@ impl Vm {
             poll_deadline: None,
             poll_partial: None,
             native_reentry: 0,
+            walk_base: 0,
             eq_hook_off: false,
             stdout_writes: 0,
             reds: 0,             // D3 — set to CONTEXT_REDS per schedule-in (run_one_fiber)
@@ -307,6 +308,37 @@ impl Vm {
         // alias `self` across `f(self)`), so catch the unwind, decrement, then resume it unchanged.
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
         self.native_reentry -= 1;
+        match r {
+            Ok(v) => v,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
+    /// [`Vm::guarded`], plus: run `f` with [`Vm::walk_base`] set to `base`, the structural depth the
+    /// ENCLOSING native walk had already consumed. Every FAULTING `MAX_STRUCTURAL_DEPTH` guard tests
+    /// `walk_base + depth` (the two DEGRADING ones — the map/set key-store pair — deliberately do
+    /// not; see [`MAX_STRUCTURAL_DEPTH`]), so a chain of nested `eq`/`str` hooks shares ONE 10 000 allowance instead
+    /// of each re-entry restarting at 0 — without this, hook-nesting depth × per-hook walk depth is
+    /// unbounded and the process dies by host stack overflow (uncatchable, rc=134).
+    ///
+    /// The `catch_unwind` is load-bearing, not decoration: `guarded` catches the unwind, decrements
+    /// `native_reentry`, and **resumes the unwind from inside itself**, so any `self.walk_base =
+    /// saved` written AFTER the `guarded(...)` call would be skipped on a panic. Panics really do
+    /// traverse this seam — `callback_trampoline`'s `catch_unwind` converts an FFI-callback panic
+    /// into a recoverable error, and `run_one_fiber`'s turns a worker panic into `Disp::Finish` and
+    /// keeps the shell `Vm` alive for the next fiber. A leaked `walk_base` on a shell would make
+    /// every later fiber's `==`/`str` fault spuriously.
+    ///
+    /// Three exit paths, one assignment: `Ok` restores, `Err` restores (it rides inside `r`, not the
+    /// unwind), a panic restores before the re-raise.
+    pub(super) fn guarded_walk<T>(
+        &mut self,
+        base: usize,
+        f: impl FnOnce(&mut Self) -> Result<T, RuntimeError>,
+    ) -> Result<T, RuntimeError> {
+        let saved = std::mem::replace(&mut self.walk_base, base);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.guarded(f)));
+        self.walk_base = saved;
         match r {
             Ok(v) => v,
             Err(payload) => std::panic::resume_unwind(payload),

@@ -280,6 +280,11 @@ Index a map with `m[k]` (read/write); iterate with `for k, v in m:`.
 > `==`, so a key holding a genuine reference cycle raises the same recoverable *"maximum structural
 > depth (10000) exceeded"* fault that `a == b` does — never a silent wrong `false`. This matches
 > Python's `RecursionError` (both `a == b` and `a in s` raise). Catch it with `recover:`.
+> The 10 000 is **one budget shared across nested re-entries**, not a fresh allowance per level: a
+> user `eq`/`str` that compares or stringifies from inside its own body continues on the depth the
+> enclosing walk already consumed, exactly as CPython's single recursion budget does. Without that,
+> hook-nesting depth × per-hook walk depth is unbounded and overflows the host stack uncatchably
+> (`docs/gaps.md` **W8-43**).
 
 ### `bytes` (immutable) and `bytearray` (mutable)
 | Type | Method | Signature | Notes |
@@ -1790,6 +1795,12 @@ string is interpolation.
 `struct Token` with methods `cancelled() -> bool` · `reason() -> str?` · `cancel() -> nil` ·
 `done() -> Channel[bool]` (use in `wait:`) · `deadline_at() -> float` · `derive() -> Token` (linked child).
 Constructors: `manual() -> Token` · `timeout(ms: int) -> Token` · `derive(parent: Token) -> Token`.
+Registration is Go `context.WithCancel`'s: `derive()` is **O(1)** — it registers the child into its
+IMMEDIATE parent only (no ancestor walk) — and `cancel()` cascades **downward**, draining each node's
+child registry and marking every transitive descendant it reaches. A child also keeps a `parent` link
+that `cancelled()`/`reason()` fall back to, so an interrupted cascade cannot lose a subtree: those two
+are therefore **O(depth)** (0.30 µs at depth 0, ~+0.29 µs per ancestor), and a `Token` from a tree
+deeper than **4 999** faults `maximum structural depth (10000) exceeded` when it crosses the airlock.
 See `concurrency.md` for the cancellation model. Cancellation is **cooperative**: a task blocked in a
 `std.io`/`std.fs`/`std.process`/`std.request` call observes the token only once that call returns —
 those are [uninterruptible while in flight](#blocking-calls-cannot-be-interrupted).

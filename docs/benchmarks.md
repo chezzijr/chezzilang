@@ -1769,3 +1769,181 @@ at the harder end of that range, not a new or contradictory data point). The fix
 correctness fix, not a throughput lever: it makes `--threads=N` mean what it says and stops idle workers
 from burning CPU, it does not close the interpreter-vs-native gap, which remains open perf-track work
 (`docs/future.md §4`).
+
+---
+
+## `std.cancel` — Go's registration model: O(1) `derive()`, cascade down (2026-08-18)
+
+`Token.derive()` used to register the new child's `done()` channel into **every ancestor's** registry,
+walking the parent chain to the root, each insert a `Shared.update()` that copies the whole list across
+the off-GC-heap wire boundary both ways. That is O(depth) copies of an O(depth) list per `derive()` —
+cubic in chain depth. Go registers into the **nearest cancellable parent only** and cascades **down** at
+cancel time, which is O(1) per derive; per this repo's ancestor rule an unintuitive divergence from the
+owning ancestor (Go, for concurrency) is a bug, so the registry became `kids: Channel[Token]` (an O(1)
+`send`, no `update` callback at all) and `cancel()` became an explicit work-list that drains and
+recurses downward.
+
+`parent: Token?` was deleted with it, and **restored the same day** (adversarial review, findings
+A1/A2): the downward cascade `try_recv()`s children out of the registry, so a cancelling task torn
+down mid-cascade loses that subtree *permanently*. The parent link is what `cancelled()`/`reason()`
+fall back to. It is **not** where the cubic cost was — that was the every-ancestor registration — so
+`derive()` is still O(1) at the registration seam. `derive()` registers a **parent-less twin** of the
+child (same `flag`/`dl`/`kids` cores) precisely so the send does not deep-copy the ancestor chain:
+sending the child itself measured **25.6 s for 300 derives**.
+
+Measured on the release binary (same machine, `chezzi run`), a chain of n tokens built by repeated
+`derive()` plus one root `cancel()`:
+
+| n | before | after (no `parent`) | **after (`parent` restored)** | Go `context.WithCancel` |
+|---|--------|---------------------|-------------------------------|-------------------------|
+| 100 | 34 ms | 0 ms | **0.7 ms** | 0.15 ms |
+| 200 | 344 ms | — | — | — |
+| 400 | 5 904 ms | 2 ms | **16 ms** | 0.08 ms |
+| 1 000 | ~90 s (test timed out at 300 s) | 19 ms | **85 ms** | — |
+| 10 000 | unreachable | 19 146 ms † | — | 2.9 ms |
+
+The `parent` column's residual (~4x) is the footnote † effect, not the registration: the link makes a
+chain a *deep, rooted, GC-heap* object graph where the parent-less version's was shallow (channel
+contents are off-heap). Against the pre-fix ~90 s at n = 1 000 it is still ~1 000x.
+
+**The chain is still superlinear in depth, and the gate says so.** Measured release, build+cancel:
+125 → 2.2 ms, 250 → 4.6 ms, 500 → 16.0 ms, 1 000 → 67.1 ms. The residual is the parent link making
+`cancelled()` O(depth) plus the mark pass walking the rooted chain each time; the gate therefore pins
+the *registration model*, not linearity (`derive_chain_beats_the_every_ancestor_registry`).
+
+**Every number in this section is RELEASE, while the `tests/chz` gate runs the DEBUG binary** — quote
+headroom from debug or it means nothing. That distinction was not cosmetic here: at n = 1 000 the gate
+measured **4 889 ms in debug at `CHEZZI_THREADS=2` against its own 5 000 ms bound** (1.02x) and failed
+under full-suite contention. Fixing the GC's quadratic core-graph dedup (below) took the same
+measurement to **390 ms — a 12.8x margin** — so the gate keeps n = 1 000 rather than being scaled down
+to hide the problem.
+
+n children of one root (fan-out), built then all cancelled:
+
+| n | before | after (no `parent`) | **after (`parent` restored)** |
+|---|--------|---------------------|-------------------------------|
+| 1 000 | 53 ms | 5 ms | **6 ms** |
+| 2 000 | 213 ms | — | — |
+| 4 000 | 975 ms | 31 ms | **33 ms** |
+| 5 000 | — | 23 ms | **27 ms** |
+| 8 000 | — | 88 ms | **81 ms** |
+
+Fan-out is depth-1, so the parent link costs nothing there — the two columns are the same measurement
+twice, which is the point.
+
+Both bounds are pinned by `tests/chz/stdlib/cancel_test.chz`
+(`derive_chain_beats_the_every_ancestor_registry`, `wide_fanout_is_not_quadratic`) at 5 000 ms. Quote
+headroom against the DEBUG profile the gate actually runs, not these release numbers: chain 390 ms
+(12.8x) and fan-out 150 ms (33x) at `CHEZZI_THREADS=2`. The pre-fix code does not merely exceed them,
+it runs ~90 s.
+
+**The airlock depth ceiling, re-measured.** `parent` is a plain struct field, so the airlock encoder
+walks the whole chain: a token from a tree deeper than a threshold faults with
+`maximum structural depth (10000) exceeded (cyclic data structure?)` when it crosses a `spawn`. v1's
+threshold was **9 990**; the brief parent-less version had none (verified at depth 12 000); with
+`parent` restored and the registry holding parent-less twins, the boundary is now **4 999 crosses,
+5 000 faults** — two structural levels per link (the `Token` struct and the `Option`), so exactly
+`MAX_STRUCTURAL_DEPTH`. The ceiling is lower than v1's because v1's per-link cost was one level, not
+two. It is a recoverable fault at a depth no request-scoped token tree reaches, and it is the price of
+never losing a subtree to an interrupted cascade (findings A1/A2).
+
+`cancelled()` is likewise O(depth) again rather than O(1) — but the walk is now plain struct-field
+recursion, not v1's O(depth) `Shared.get()` per level. Measured per poll on a realistic shallow chain:
+**0.30 µs at depth 0, 0.58 at 1, 1.15 at 3, 1.74 at 5** — ~0.29 µs per ancestor, against 0.30 µs flat
+for the parent-less version. `examples/cancel_cpu.chz` polls it ~50M times, so a deep hot-loop token is
+the one shape where the difference is worth caring about; derive shallow, or hoist the poll.
+
+† **The residual n=10 000 cost is NOT `std.cancel`** — it is an engine-level cost of a *rooted, deep*
+live object graph, and it reproduces with no `std.cancel` involved. A plain
+`struct N: flag: Shared[bool]; dl: Channel[bool]; kids: Channel[N]` chained n deep costs 36 / 283 /
+2 518 ms at n = 2 000 / 4 000 / 8 000 **when the head is held live**, and 1 / 3 / 6 ms (linear) when it
+is not — same allocations, same sends, only the live-set shape differs. That is why the deep-airlock
+crossings above are one-off manual verifications rather than standing tests: they would be measuring
+the GC's deep-graph marking, not the cancellation model. It is also why the `parent` column of the
+chain table sits ~4x above the parent-less one. Worth a ledger row on its own.
+
+
+## GC — the mark pass over a rooted graph of live cores
+
+`collect_core_gcrefs` (`src/vm/core.rs`) breaks cycles with a `seen` set. It was a `Vec<usize>` tested
+with `contains`, i.e. a linear scan, so walking a D-deep chain of cores visited D of them and each
+rescanned the whole prefix: **O(D²) per mark pass**, repeated on every pass for as long as the graph
+stayed rooted. `nested_core_bytes`, the sibling walk in the same file, already used `FxHashSet` — this
+one was the outlier, and it was the one on the mark path.
+
+Fixture: a rooted `struct N { Shared, Channel[bool], Channel[N] }` chain of the given depth, held live
+across N allocations that have nothing to do with it. All the time is the GC re-walking the graph.
+
+Release, 20 000 unrelated allocations:
+
+| rooted depth | before | after |
+|---|---|---|
+| 0 | 2.2 ms | 2.3 ms |
+| 1 000 | 63 ms | **9.9 ms** |
+| 2 000 | 220 ms | **18.3 ms** |
+| 4 000 | 1 164 ms | **39.3 ms** |
+
+Cost per doubling of depth: **5.3x → 2.15x**, i.e. quadratic → linear; 30x at depth 4 000.
+
+Debug at `CHEZZI_THREADS=2`, 4 000 allocations — the profile and worker count the gate runs at:
+
+| rooted depth | before | after |
+|---|---|---|
+| 1 000 | 314 ms | **13.8 ms** |
+| 2 000 | 1 220 ms | **25.9 ms** |
+| ratio | **3.88** | **1.87** |
+
+Pinned by `tests/chz/spec/gc_core_graph_test.chz`, which asserts the **ratio** (< 2.8), not a
+wall-clock bound — a ratio is profile- and hardware-independent, and the two regimes separate cleanly
+(3.88 vs 1.87). Verified RED on the pre-fix binary at 3.96.
+
+**The speedup exposed a pre-existing DEADLOCK, fixed in the same branch.** The mark walk locked a
+core's payload and recursed straight into a NESTED core's lock while still holding the first, and
+`Heap::children` held the outer guard across the whole call. With a **cyclic** core graph, two workers
+marking concurrently took the same two locks in opposite orders — ABBA. Every thread parked in
+`futex_do_wait` at 0% CPU, no deadlock report, and `--timeout` cannot reach a thread blocked on a
+`Mutex`, so it presents as a silent total hang.
+
+Measured, `CHEZZI_THREADS=4`, release:
+
+| build | hangs |
+|---|---|
+| base `c97d24ff` (before any of this work) | 2/80 |
+| after the dedup speedup | **8/40** |
+| after the guard/drain split | **0/40** |
+
+It is pre-existing — the speedup widened the window rather than creating it. All three conditions are
+required: remove the cycle → 0/20; run at `CHEZZI_THREADS=1` → 0/12; remove the allocations that drive
+GC → 0/15. The fix splits the walk in two: `collect_gcrefs_structural` runs under a core's guard and
+merely QUEUES nested cores, and `drain_pending_cores` locks them one at a time after the guard drops.
+A first attempt that only restructured `collect_core_gcrefs` measured **unchanged at 8/40**, because
+`Heap::children` still held the outer guard across the drain — the caller had to be split too.
+
+Pinned by `chezzi_threads_cli::gc_mark_walk_does_not_deadlock_on_a_cyclic_core_graph`, 40 rounds sized
+off the DEBUG hang rate (12.5%, vs 20% release) for ~99.5% RED; verified RED twice pre-fix and GREEN
+three times after.
+
+**The first fix covered only ONE walk of the class, and adversarial review caught it.** The GC has a
+byte-accounting twin of the rooting walk — `core::nested_core_bytes` / `queue_bytes_deep` /
+`value_core_bytes_deep`, used by `--max-heap` — whose own comment says the two must stay "in lockstep".
+It was left holding a parent core's guard while locking children, so the identical deadlock survived on
+any run with a memory cap: **1/40 hangs** for `chezzi test --max-heap=100000000` at `CHEZZI_THREADS=4`
+on a cyclic core graph, against 0/20 for the same program without the cap; **0/60 after**. Same split
+applied (`*_structural` under the guard, `drain_pending_core_bytes` after), and `Heap::live_bytes`'s
+five deep arms were rescoped the way `Heap::children`'s were. **No production caller of the three
+`_deep` entry points remains** — that grep is the real invariant, and each wrapper now carries a "do
+not call under a guard" hazard note. Gated by
+`chezzi_threads_cli::max_heap_byte_walk_does_not_deadlock_on_a_cyclic_core_graph`, which is honest in
+its doc comment about being only ~60% RED (this path's pre-fix rate is 1/40 release and 0/120 debug
+standalone, though it did fail under `cargo test`'s contention). It spawns and polls with a deadline rather than calling `output()` — a deadlocked
+child never closes its pipes, so `output()` wedges the test binary instead of failing it (measured on
+the first draft).
+
+**What is NOT fixed, deliberately.** A core whose payload holds another core is still conservatively
+`WS_DIRTY` (`src/vm/core.rs`, "a store on the INNER core can introduce a handle without ever touching
+this one's cache"), so its subtree is re-walked every pass and never memoized — the walk is now linear
+rather than quadratic, but it is still a walk. Memoizing it needs a validity token (a store epoch or
+per-core version) that every core write path must bump, and a missed path leaves a stale `WS_CLEAN`,
+which stops the GC tracing a live handle — a use-after-free, which is exactly what the `debug_assert`
+in `Heap::mark_core_payload` exists to catch. The quadratic was the defect; the linear walk is the
+design.

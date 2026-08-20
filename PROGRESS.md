@@ -43,6 +43,147 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > by a standing gate.** Full walk, the two non-reproductions, and the suggested fix order:
 > `docs/gaps.md` `## Session log — 2026-08-18`. Docs-only change; no code touched, gates unchanged.
 
+> **✅ ADVERSARIAL REVIEW of `fix/shared-structural-depth-budget-and-go-cancel` — five findings, all
+> fixed, 2026-08-18.** Two Critical (each reproduced independently by two reviewers), one high, one
+> medium, one doc. Every RED was captured on the branch binary before the fix and re-confirmed on the
+> pre-fix `std/cancel.chz` after the tests were written.
+>
+> * **B1 (Critical, silent wrong value, introduced by this branch).** W8-43 charged `walk_base` to all
+>   **seven** `MAX_STRUCTURAL_DEPTH` guards. Two of them do not FAULT when over budget, they
+>   **DEGRADE**: `cyclic_walk` (`arith.rs`) stores a map/set key BY REFERENCE and `snapshot_value`
+>   aliases the tail. Charging them pushed an ORDINARY, shallow, acyclic key into the degrade branch
+>   whenever it was inserted from inside an `eq`/`str` hook running at depth, so the caller's later
+>   mutation reached the stored key — no fault, no assertion, wrong boolean. One program, one nesting
+>   level apart: **`4998 -> true`, `4999 -> false`**; pre-branch `true` at every depth. Both reverted to
+>   the bare `depth` (exactly pre-branch semantics, so the revert cannot introduce anything). **The rule
+>   that generalises: only a FAULTING guard may share a stack-safety budget** — a faulting guard that
+>   fires early is a visible refusal, a degrading one is a wrong answer. Pinned by
+>   `key_inserted_from_a_deep_eq_hook_is_still_snapshotted` (`tests/chz/spec/eq_protocol_containers_test.chz`)
+>   at BOTH depths.
+> * **A1 + A2 (Critical, regression against pre-branch).** `cancel()`'s work-list drains children with
+>   `kids.try_recv()`, which REMOVES them from the registry, so a cancelling task torn down mid-cascade
+>   takes the already-popped subtree with it — **permanently**: a second `root.cancel()` cannot reach
+>   them. 500-deep chain, `parallel:` with one task cancelling and a sibling faulting, at
+>   `CHEZZI_THREADS=4`: `leaf.cancelled()` **false 3/3** (387 of 501 tokens still uncancelled after a
+>   second cancel), where the pre-branch code was **true 3/3** because it walked a `parent` link.
+>   `parent: Token?` is **restored** and `cancelled()`/`reason()` fall back to it, while the O(1)
+>   immediate-parent registration and the downward cascade both stay. The `ponytail:` comment claiming
+>   "Go has the same shape" was **false** and is corrected: Go cannot abandon a goroutine mid-function,
+>   so `cancelCtx.cancel`'s drain always completes. Pinned by
+>   `an_interrupted_cascade_still_reports_cancelled`.
+>   * **The perf win survives**, because the cubic cost was the every-ancestor REGISTRATION, not the
+>     link. `derive()` registers a **parent-less TWIN** of the child (same `flag`/`dl`/`kids` cores) —
+>     a channel send crosses the airlock and deep-copies, so registering the child itself would copy its
+>     whole ancestor chain: measured **25.6 s for 300 derives**, versus 0.10 s with the twin. Chain of
+>     1 000 derives + cascade: pre-branch ~90 s → 19 ms (no `parent`) → **85 ms**, against the
+>     `derive_chain_beats_the_every_ancestor_registry` 5 000 ms bound (12.8x headroom at n=1 000, measured in the DEBUG profile the gate runs, not release). Fan-out is depth-1 and unchanged
+>     (8 000 → **81 ms** vs 88 ms). The derive-time race check reads self's OWN state, not `cancelled()`
+>     — the full walk made a 1 000-link chain 7 177 ms.
+>   * **Two consequences, stated not hidden.** `cancelled()` is **O(depth)** again: **0.30 µs at depth
+>     0, 0.58 at 1, 1.15 at 3, 1.74 at 5** (~0.29 µs/ancestor) vs 0.30 µs flat parent-less. And the
+>     airlock encoder walks the chain again — a token from a tree deeper than **4 999** faults
+>     `maximum structural depth (10000) exceeded` crossing a `spawn` (4 999 crosses, 5 000 faults; two
+>     structural levels per link). The branch's claim that deleting `parent` fixed a depth-9 990 airlock
+>     fault, and that a `Token` encodes in O(1) at any depth, is corrected everywhere it was stated
+>     (`std/cancel.chz`, `docs/concurrency.md` §6e, `docs/stdlib.md`, `docs/benchmarks.md`,
+>     `PROGRESS.md`, `docs/gaps.md`). There is no `cancel_deep_tree_crosses_the_airlock` Rust test to
+>     retire — it was never written.
+>   * The **C5 ordering fix is untouched**: `_mark` still sets the cancel bit BEFORE tripping `done()`,
+>     and `cancel_c5_gate_at_eight_workers` still gates it.
+> * **B3 (medium).** `cancel()` set its own `flag` unconditionally, bypassing `_mark`'s latch guard, so
+>   `cancel.timeout(10)` + sleep past it + `cancel()` reported `"cancelled"`; **Go 1.26 on the paired
+>   program prints `context deadline exceeded`** (measured). `cancel()` now routes SELF through `_mark`
+>   — it is the work-list's first pop, so the separate pre-set line was redundant anyway, and the
+>   invariant "`t.cancelled()` is true before `t.kids` is drained" still holds on the guarded arm via
+>   the elapsed deadline. `reason_latches_the_first_cause` extended to the token's OWN cause (both
+>   directions: elapsed → `"timeout"`, live deadline → `"cancelled"`).
+> * **B4 (low).** `CLAUDE.md:41`'s Chezzi test count was stale (620). Both counts now read the measured
+>   **629**.
+>
+> Gates: `cargo test` **4435 passed / 0 failed / 3 ignored across 23 targets** (lib 4203 / 0 / 2),
+> `chezzi test tests/chz` **629/629** at the default worker count and at `CHEZZI_THREADS=1/2/4/8`,
+> `cargo clippy --all-targets --features lsp -- -D warnings` clean, `examples/cancel_tree.chz`
+> byte-identical to its `.expected`.
+
+> **✅ W8-43 CLOSED — one structural-depth budget across nested protocol-hook re-entries, 2026-08-18
+> (`fix/shared-structural-depth-budget-and-go-cancel`).** P0: **checker-clean pure Chezzi could kill
+> the process by host stack overflow, uncatchable by `recover:`.** A user `eq`/`str` hook dispatched
+> from inside a native structural walk re-entered the VM and started a FRESH depth-0 walk, so neither
+> guard could fire — call depth stayed far below its 10 000 cap while the *product* of hook-nesting
+> depth × per-hook walk depth grew unbounded. Measured on the pre-fix release binary at `c97d24ff`,
+> `ulimit -v 12000000` (a `Leaf.eq` comparing two freshly-built 100-link chains, nested 5 000 deep,
+> the whole compare inside `recover:`): **`fatal runtime error: stack overflow, aborting`, rc=134,
+> core dumped**, and the `print("still alive")` after the `recover:` never ran. **Post-fix: `still
+> alive`, rc=0**, with a recoverable `maximum structural depth (10000) exceeded`. CPython 3.14 on the
+> same shape gives a catchable `RecursionError: Stack overflow (used 8148 kB) in comparison`, rc=0 —
+> Python is the owning ancestor for protocol semantics and its model is ONE recursion budget shared
+> across nested re-entries. The defect **defeated the stated contract of `MAX_STRUCTURAL_DEPTH`
+> itself** ("turns that into a recoverable `RuntimeError`") and was **documented as deliberate in two
+> source comments**, which is why no review questioned it; both are corrected here.
+>
+> **Fix.** New `Vm::walk_base` (`src/vm/mod.rs`, beside `native_reentry` and per-`Vm` for the
+> identical reason — a fiber cannot park while a native re-entry is on the host stack, so no other
+> fiber can observe it) holds the depth the enclosing walks already consumed. The **5 FAULTING**
+> `MAX_STRUCTURAL_DEPTH` comparisons test `walk_base + depth` (`arith.rs:2063`, `stmt.rs:1993/2456`,
+> `sched.rs:2618/4651` — the site list was DERIVED by grep, not from memory, per the W7-50 convention;
+> the ones that cannot themselves re-enter are edited too, because each can still run *inside* a hook).
+> The other **2** sites found by that grep — `arith.rs`'s `cyclic_walk` and `snapshot_value`, the
+> map/set key-store pair — were charged in the first cut and **that was a silent wrong value**: their
+> over-budget branch DEGRADES (store by reference / alias the tail) rather than faults, so charging it
+> aliased an ORDINARY shallow acyclic key merely because it was inserted from inside a hook running at
+> depth (`4998 -> true`, `4999 -> false` on one program; `true` at every depth pre-branch). Both are
+> back on the bare `depth`. **Only a FAULTING guard may share the budget.** The **4**
+> `run_proto` dispatch sites with a live structural `depth` in scope go through a new panic-safe
+> `Vm::guarded_walk` (`src/vm/exec.rs`): the `eq` hook (`arith.rs`), and the `str` hook's `Obj::Struct`
+> / `Obj::Enum` / `Obj::NewType` arms (`stmt.rs`). Those four are exhaustive — `run_proto` is the only
+> VM re-entry primitive, and the other two call sites (`op_contains`, `Step::StructNext`) have no
+> structural `depth` in scope.
+>
+> **The `catch_unwind` in `guarded_walk` is load-bearing, not decoration.** `guarded` catches the
+> unwind, decrements `native_reentry`, and **resumes the unwind from inside itself**, so a plain
+> `self.walk_base = saved` after the call is skipped on a panic. Panics really do traverse this seam:
+> `callback_trampoline` converts an FFI-callback panic into a recoverable error, and `run_one_fiber`
+> turns a worker panic into `Disp::Finish` and **keeps the shell `Vm` alive for the next fiber** — a
+> leaked `walk_base` on a shell would make every later fiber's `==`/`str` fault spuriously.
+>
+> **Rejected alternative, and why.** Charging `depth` to `call_depth` around each hook is cheaper and
+> **wrong**: `GenCtx` carries its own `call_depth` and the generator resume swaps it, so a generator
+> driven from inside a hook would swap the charge away. A plain `Vm` field is not swapped there, which
+> is exactly right — the generator's frames are on the same host stack. For the same reason
+> `walk_base` is deliberately absent from `FiberCtx`, `GenCtx`, `Handler`, `Vm::swap_ctx` and the
+> generator ctx swap. `recover:` needs no restoration either: native walk frames unwind through Rust
+> `?`, so every `guarded_walk` on the path has already restored.
+>
+> **Not charged, deliberately:** `hash_value`/`struct_compare` (O(1) native frames per `run_proto` —
+> exactly the shape `MAX_CALL_DEPTH` already covers; charging them would double-count), and
+> `msort_indices_structs` (O(log n) native frames per call-depth level: 10 000 levels × ≤64 frames ×
+> a few hundred bytes is tens of MiB against a 384 MiB stack, so it cannot reach the host limit — the
+> ceiling and its upgrade path are recorded in a `ponytail:` comment beside the recursion).
+>
+> **Tests.** Three Chezzi tests in `tests/chz/spec/eq_protocol_containers_test.chz` — the repro
+> (RED pre-fix: `assertion failed: shared structural budget did not fire`), plus two boundary tests
+> that pin what did NOT change (a single un-nested ~9 000-level walk still succeeds; 3 legal hook
+> levels over 1 000-link chains still return a value). The repro is scaled to nesting **200**, not
+> 5 000, and the comment carries both measurements: at 5 000 it SIGABRTs, which would take the whole
+> `chz_suite_passes` gate down with it; at 200 the pre-fix binary returns `true` at rc=0, giving a
+> fast non-crashing RED that is still ~20 000 structural levels against a 10 000 budget. One Rust
+> test by necessity — `vm::tests::guarded_walk_restores_walk_base_on_panic` asserts VM-internal state
+> across a Rust unwind, which `assert` cannot express (RED with a naive post-call restore:
+> `left: 9999, right: 0`).
+>
+> **Detector note.** No standing gate could reach this: a SIGABRT has no assertion to fail. The
+> CPython differential *does* classify signal-kills as findings (since W7-33), but
+> `src/difftest/generate.rs` has no user-struct-with-protocol-method feature, so a hook-nested walk is
+> structurally outside its corpus — out of scope, not a tuning miss.
+>
+> Gates: `cargo test` **4435 passed / 0 failed / 3 ignored across 23 targets** (lib 4203 / 0 / 2),
+> `chezzi test tests/chz` **629/629** at the default worker count and at `CHEZZI_THREADS=1/2/4/8`,
+> `cargo clippy --all-targets --features lsp -- -D warnings` clean. Docs updated in the same
+> commit: `MAX_STRUCTURAL_DEPTH` + `VM_STACK_BYTES` sizing rationale (`src/vm/mod.rs`), the two false
+> source comments (`arith.rs`, `stmt.rs`), `checker::proto`'s `EQ_BOUNDS_MAX_NODES` note,
+> `docs/stdlib.md`, `docs/spec.md`, and `docs/gaps.md` (row `W8-43` filed already-CLOSED + a session
+> log entry).
+
 > **✅ W8-8 CLOSED — `chezzi run --threads=1` now runs exactly ONE CPU runner in BOTH the outermost
 > AND the nested eager-nursery arm, 2026-08-18 (`fix/mn-idle-policy-w8-8-w8-7`).** An OUTERMOST eager
 > nursery's runner budget is `1 (drainer) + helpers + joiner`, sized for `max(N, 2)` total slots —
@@ -6818,6 +6959,62 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 ---
 
+> **GC: the mark pass over a rooted core graph was quadratic in DEPTH (2026-08-18).**
+> `collect_core_gcrefs`'s cycle-breaking `seen` was a `Vec<usize>` tested with `contains` — a linear
+> scan — so walking a D-deep chain of live cores visited D of them and each rescanned the prefix:
+> **O(D²) per mark pass**, every pass, for as long as the graph stayed rooted. `nested_core_bytes`,
+> the sibling walk in the same file, already used `FxHashSet`; this one was the outlier and it was the
+> one on the mark path. Fixed by making `seen` an `FxHashSet` (`src/vm/core.rs` `visit_core` +
+> `collect_core_gcrefs`, 3 call sites in `src/vm/heap.rs`).
+>
+> Release, a rooted `struct N { Shared, Channel[bool], Channel[N] }` chain held live across 20 000
+> unrelated allocations: depth 1 000 **63 → 9.9 ms**, 2 000 **220 → 18.3 ms**, 4 000
+> **1 164 → 39.3 ms**. Cost per doubling of depth **5.3x → 2.15x** — quadratic to linear, 30x at
+> depth 4 000. `std.cancel`'s derive chain inherited it: n=1 000 **284.7 → 67.1 ms**.
+>
+> **It was also masking a live gate defect.** `derive_chain_beats_the_every_ancestor_registry` at
+> n = 1 000 measured **4 889 ms in DEBUG at `CHEZZI_THREADS=2` against its own 5 000 ms bound** —
+> 1.02x — and failed under full-suite contention; every headroom figure in `docs/benchmarks.md` had
+> been quoted from RELEASE while the gate runs DEBUG. Post-fix the same measurement is **390 ms
+> (12.8x)**, so the gate keeps n = 1 000 instead of being scaled down to hide it.
+>
+> Pinned by `tests/chz/spec/gc_core_graph_test.chz`, asserting the **ratio** (< 2.8) rather than a
+> wall-clock bound, so it is profile- and hardware-independent. The regimes separate cleanly — debug
+> T=2 ratio **3.88 before vs 1.87 after** — and it was verified RED on the pre-fix binary at 3.96.
+>
+> **The speedup exposed a pre-existing ABBA DEADLOCK in the same walk, fixed here too.** The mark
+> walk locked a core's payload and recursed into a NESTED core's lock while holding the first, and
+> `Heap::children` held the outer guard across the whole call — so two workers marking a **cyclic**
+> core graph concurrently took the same two locks in opposite orders. All threads parked in
+> `futex_do_wait` at 0% CPU, no deadlock report, and `--timeout` cannot interrupt a `Mutex` wait.
+> Measured at `CHEZZI_THREADS=4`, release: base `c97d24ff` **2/80**, after the speedup **8/40**, after
+> the fix **0/40** — pre-existing, widened by the speedup. Needs all three of cycle + GC pressure +
+> `>= 2` workers (removing any one gives 0). Fix: `collect_gcrefs_structural` runs under a guard and
+> only QUEUES nested cores; `drain_pending_cores` locks them one at a time after the guard drops. A
+> first attempt that restructured only `collect_core_gcrefs` measured **unchanged at 8/40** because
+> the caller still held the outer guard — both halves had to be split. Pinned by
+> `chezzi_threads_cli::gc_mark_walk_does_not_deadlock_on_a_cyclic_core_graph` (40 rounds, sized off
+> the 12.5% DEBUG rate for ~99.5% RED; RED x2 pre-fix, GREEN x3 after). The test spawns and polls with
+> a deadline rather than using `output()`, which a deadlocked child wedges forever.
+>
+> **The first fix covered only one walk of the class — adversarial review caught the other.** The
+> byte-accounting twin (`core::nested_core_bytes` / `queue_bytes_deep` / `value_core_bytes_deep`, used
+> by `--max-heap`, and documented as needing to stay "in lockstep" with the rooting walk) still held a
+> parent core's guard while locking children: **1/40 hangs** on `chezzi test --max-heap=100000000` at
+> `CHEZZI_THREADS=4` over a cyclic core graph vs 0/20 without the cap, **0/60 after** the same split.
+> `Heap::live_bytes`'s five deep arms were rescoped like `Heap::children`'s. The durable invariant is a
+> grep, not a test: **no production caller of the three `_deep` entry points remains**, and each now
+> carries a "do not call under a guard" hazard note. This is CLAUDE.md's "a guard must cover every site
+> of its class" applied to the fix itself, and it is the second time this session that fixing one site
+> of an N-way set left a sibling (the first was the `walk_base` guards).
+>
+> **Deliberately not fixed:** a core whose payload holds another core is still conservatively
+> `WS_DIRTY` and re-walked every pass, never memoized. Memoizing needs a validity token every core
+> write path must bump; a missed path leaves a stale `WS_CLEAN`, the GC stops tracing a live handle,
+> and that is a use-after-free — precisely what `Heap::mark_core_payload`'s `debug_assert` guards.
+> The quadratic was the defect; the linear walk is the design.
+
+
 ## Current focus
 
 **Live phase (2026-07-23, engine note updated 2026-08-16):** pre-JIT/pre-freeze **bug-hunt +
@@ -11150,6 +11347,58 @@ twin), plus eight VM unit tests (`cancel_child_*`, `cancel_transitive_grandchild
 guard). **Known v1 limit:** the per-ancestor registry only **grows** (no token-drop hook); tokens are
 request-scoped/short-lived, a future prune-on-cancel could clear it. Closes the `gaps.md`
 tree-propagation gap. See `docs/concurrency.md` §6e.
+
+> **RE-SHAPED TO GO'S REGISTRATION MODEL (2026-08-18).** The every-ancestor registry above is **gone**;
+> the paragraph is kept as history, and its "the link is the parent's `Shared` flag plus a `Shared`
+> registry of descendant `done()` channels" is **no longer how it works**. `derive()` now registers the
+> child into its **immediate parent only**, via a `kids: Channel[Token]` field (an O(1) `send`), and
+> `cancel()` cascades **DOWN** — an explicit work-list that drains each node's registry, marks each
+> descendant, and recurses. That is Go `context.WithCancel`'s shape, and the divergence from it was a
+> real cost: `derive()` was **cubic** in chain depth (100 → 40 ms, 400 → **6 020 ms**, 10 000
+> unreachable, against Go's 0.15 / 0.08 / 2.9 ms) because every `Shared.update()` copied the whole
+> registry list across the wire, once per ancestor. Now: 400 → **2 ms**, 1 000 → 19 ms; 5 000-wide
+> fan-out → 23 ms (was ~1.5 s); with `parent` restored (below) 400 → **16 ms**, 1 000 → **85 ms**,
+> fan-out unchanged. The `parent: Token?` field was **deleted and then restored the same day**
+> (adversarial review A1/A2 — the cascade `try_recv()`s children OUT of the registry, so a cancelling
+> task torn down mid-cascade loses that subtree PERMANENTLY: `leaf.cancelled()` false 3/3 on a 500-deep
+> chain, still false after a second `cancel()`, 387 of 501 tokens lost). `cancelled()`/`reason()` fall
+> back to it, so it is O(depth) again (0.30 µs at depth 0, +~0.29 µs per ancestor) and the airlock
+> encoder walks the chain again: a token from a tree deeper than **4 999** hits `maximum structural
+> depth (10000) exceeded` when it crosses a `spawn` (v1's boundary was ~9 990 — one structural level
+> per link there, two now). `derive()` stays O(1) because the registry holds a **parent-less twin** of
+> the child sharing its `flag`/`dl`/`kids` cores; registering the child itself measured 25.6 s for 300
+> derives. Transitive `done()`,
+> one-directionality, tightest-deadline inheritance and the `+1 ms` `done()`-margin all survive
+> unchanged (`examples/cancel_tree.expected` is byte-for-byte identical). `reason()` keeps v1's
+> nearest-cause-wins (own state first, else the ancestor's — the `parent` fallback is back), and gains
+> a LATCH: the cause that set a token's own state stays its answer. A child of a later-deadline parent
+> that is manually cancelled reads `"cancelled"` forever, where v1 flipped to `"timeout"` once that
+> deadline passed; a token whose OWN deadline has already elapsed reads `"timeout"` whether the cascade
+> reaches it or `cancel()` is called on it directly (`_mark`'s guard skips `flag.set`, and `cancel()`
+> routes SELF through `_mark` rather than setting the flag unconditionally — adversarial-review finding
+> B3, which measured `cancel.timeout(10)` + sleep + `cancel()` reporting `"cancelled"`). That matches
+> the owning ancestor — Go 1.26 returns `context.Canceled` in both halves of the first case and
+> `context.DeadlineExceeded` in the second (`context deadline exceeded`, measured on the paired
+> program). Pinned by `reason_latches_the_first_cause` in `tests/chz/stdlib/cancel_test.chz`.
+> Two ordering rules make it race-free: `cancel()` marks self (`_mark`, the work-list's first pop)
+> **before** it drains, and `derive()` sends **before** it re-checks self's own state — measured 0 lost tokens over 30 × 400 concurrent derives, against
+> 11 505 with the derive-side check removed. A THIRD ordering rule was missed on the first cut and fixed the
+> same day: `_mark` tripped `done()` **before** setting the cancel bit, so a task woken by a cascaded
+> descendant's `done()` could read `cancelled() == false` — C5, the Go-context invariant the file's own
+> `derive()` comment quotes. v1 was structurally safe (the flag was set on the ancestor before any
+> `trip()`, and `cancelled()` recursed up to it); pushing the flag DOWN inverted the order. Measured on
+> the release binary, root→mid→leaf, 400 rounds, one task parked in `wait: leaf.done().recv()`
+> re-reading `leaf.cancelled()`: **141/400 violations at `CHEZZI_THREADS=8`, 67/400 at `=4`, 0/400 at
+> `=2`**; the fix is the two-line swap, and the same shape is 0/400 at `=4` and `=8` after it. New
+> guards: `tests/chz/stdlib/cancel_test.chz` (8 tests,
+> incl. the two anti-quadratic bounds, the race, the C5 cascade, the `reason()` latch and the
+> interrupted-cascade fallback) and `cancel_cascade_crosses_the_airlock` (a far-side
+> `derive()` reached by a near-side root `cancel()` — the registry is live across the airlock in **both**
+> directions). C5's gate needs a PINNED worker count — the suite's two runs are the default and `=2`,
+> and `=2` shows **zero** violations, so on a 1-2 core box the default IS 2 and the gate would vanish:
+> `cancel_c5_gate_at_eight_workers` (`tests/chezzi_threads_cli.rs`) runs that one file at
+> `CHEZZI_THREADS=8` in its own process. Retention is narrower, not gone: a `cancel()` drains what it walks, but an **uncancelled**
+> long-lived parent still retains its children's handles. See `docs/benchmarks.md`.
 
 > **`Channel.recv_timeout(ms)` — attempted then reverted (2026-06-12).** A bounded-wait `recv` was
 > implemented with a **demote-always** shortcut (reuse `demote_recv_block` + a deadline) to avoid the

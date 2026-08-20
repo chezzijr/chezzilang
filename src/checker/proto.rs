@@ -187,6 +187,12 @@ thread_local! {
 /// the VM compares happily (the old 160-obligation cap refused at `S160` what the runtime handled to
 /// 10 000).
 ///
+/// W8-43 widens the same gap without changing this constant: the VM's budget is now CONTEXT-DEPENDENT
+/// (a walk entered from inside an `eq`/`str` hook starts with the enclosing walk's depth already
+/// charged), so the runtime depth a given compare gets is not a fixed 10 000. Still not a
+/// `checker-superset-of-compiler` hole — an over-budget compare was already a recoverable runtime
+/// fault, never a soundness break — but the correspondence is looser than a reader might infer.
+///
 /// **`docs/gaps.md` W7-55 is closed by this.**
 const EQ_BOUNDS_MAX_NODES: usize = 50_000;
 
