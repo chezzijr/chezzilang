@@ -946,6 +946,50 @@ mod tests {
         );
     }
 
+    /// `walk` over a readable root holding an unreadable subdirectory must name the subdirectory in
+    /// the `Err`, not the root — the message is formatted at the level that actually failed.
+    #[cfg(unix)]
+    #[test]
+    fn fs_walk_error_names_the_failing_subdir_not_the_root() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TmpDir::new();
+        let root = tmp.join("wroot");
+        let sub = tmp.join("wroot/sub");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let got = walk(&mut host(&[&root])).unwrap();
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        match got {
+            NativeRet::Err(msg) => assert!(
+                msg.starts_with(sub.as_str()),
+                "expected the message to name {sub}, got {msg}"
+            ),
+            other => panic!("expected Err, got {other:?}"),
+        }
+    }
+
+    /// `walk` over an unreadable root must still name the root — the fix moves blame onto the
+    /// failing path, it must not move blame off the root.
+    #[cfg(unix)]
+    #[test]
+    fn fs_walk_unreadable_root_still_names_the_root() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TmpDir::new();
+        let root = tmp.join("wroot2");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let got = walk(&mut host(&[&root])).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        match got {
+            NativeRet::Err(msg) => assert!(
+                msg.starts_with(root.as_str()),
+                "expected the message to name {root}, got {msg}"
+            ),
+            other => panic!("expected Err, got {other:?}"),
+        }
+    }
+
     /// Overwriting an existing restrictive file must PRESERVE its mode — the rename swaps in a fresh
     /// umask-default temp inode, which would otherwise silently widen a `0o600` file to `~0o644`.
     #[cfg(unix)]
