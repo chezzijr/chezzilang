@@ -234,9 +234,8 @@ in-progress alongside it.
 > `int`/`float` comparison runs in f64, so 4 of 6 operators are wrong above 2^53 — *and the CPython
 > differential's `MAX_BOUND` is capped at 1e12 precisely so it never looks there*, so the fix must raise
 > the cap in the same commit; **W8-35** JSON numbers round-trip through f64 (`-0.0` → `0`, a 19-digit id
-> → `9.2e+18`); **W8-26** `run` *and* `check` on a pipe execute an EMPTY program at rc=0 — which is why
-> a repro at `gaps.md:8664` silently stopped reproducing, so **any ledger row whose repro uses the pipe
-> idiom is currently unfalsifiable**; **W8-25** a closure over a module global loses it at the airlock
+> → `9.2e+18`); ~~**W8-26**~~ CLOSED 2026-08-27 (TICKET-001, read-once fix) — `run` *and* `check` on a pipe used to execute an EMPTY program at rc=0 — which was why
+> a repro at `gaps.md:8664` silently stopped reproducing (now unblocked); **W8-25** a closure over a module global loses it at the airlock
 > (3 at module scope, 300 in a fn, Go/Python 300). The other two P0s are **W8-3**, widened rather than
 > re-filed: a cross-task `set` racing an `update` is silently lost (Go's mutex loses nothing) and a
 > cross-box `update`-in-`update` hangs forever with `--timeout` unable to reach it — both because

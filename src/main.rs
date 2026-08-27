@@ -161,7 +161,13 @@ fn cmd_check(args: &[String]) -> ExitCode {
     let Some((path, json)) = parse_file_and_flags("check", args) else {
         return ExitCode::FAILURE;
     };
-    if read_source(&path).is_none() {
+    let Some(source) = read_source(&path) else {
+        return ExitCode::FAILURE;
+    };
+    // A zero-byte entry is an ERROR, not an empty program — see `## Decisions` in TICKET-001: this is
+    // a deliberate divergence from CPython, confined to this CLI layer (never `resolver`/`vm`).
+    if source.is_empty() {
+        eprintln!("chezzi check: '{path}' is empty - there is no program to check");
         return ExitCode::FAILURE;
     }
 
@@ -169,7 +175,7 @@ fn cmd_check(args: &[String]) -> ExitCode {
     // up from the file — pass `None`. The entry FUNCTION is derived from the project manifest when
     // this file IS the declared entry module (`manifest::entry_fn_for`), so a static check of an
     // entry module a project cannot start reports it.
-    let (outcome, warns, files) = type_check(&path, None, EntryGate::FromManifest);
+    let (outcome, warns, files) = type_check(&path, None, EntryGate::FromManifest, Some(source));
     // `check`'s stdout IS the diagnostic document, so in machine mode the warnings ride the single
     // array the arms below print; in plain text they precede the verdict on stderr. Exactly one of
     // the two — the `!json` guard is what keeps a warning from being printed on both streams.
@@ -277,7 +283,13 @@ fn cmd_run(args: &[String]) -> ExitCode {
         apply_env_worker_count("run");
     }
 
-    if read_source(&path).is_none() {
+    let Some(source) = read_source(&path) else {
+        return ExitCode::FAILURE;
+    };
+    // A zero-byte entry is an ERROR, not an empty program — see `## Decisions` in TICKET-001: this is
+    // a deliberate divergence from CPython, confined to this CLI layer (never `resolver`/`vm`).
+    if source.is_empty() {
+        eprintln!("chezzi run: '{path}' is empty - there is no program to run");
         return ExitCode::FAILURE;
     }
 
@@ -290,7 +302,8 @@ fn cmd_run(args: &[String]) -> ExitCode {
         Some(f) => EntryGate::Named(f),
         None => EntryGate::Script,
     };
-    let (outcome, warns, files) = type_check(&path, root_override.as_deref(), gate);
+    let (outcome, warns, files) =
+        type_check(&path, root_override.as_deref(), gate, Some(source.clone()));
     // `run`'s stdout belongs to the PROGRAM, so a warning goes to stderr in both modes — unguarded,
     // unlike `check` above. The `&[]` below is the other half of that decision: were the warnings
     // also folded into the stdout array, the same diagnostic would print twice, on two streams.
@@ -320,8 +333,13 @@ fn cmd_run(args: &[String]) -> ExitCode {
     let mut cfg = native::HostConfig::from_process(prog_args);
     cfg.stream = true;
     let (errored, exit_code) = {
-        let (_out, _err, result, code) =
-            vm::run_file_with_entry(p, cfg, entry_fn.as_deref(), root_override.clone());
+        let (_out, _err, result, code) = vm::run_file_with_entry_source(
+            p,
+            cfg,
+            entry_fn.as_deref(),
+            root_override.clone(),
+            Some(source),
+        );
         (result.err().map(|e| vm::format_trace(&e)), code)
     };
     // Drain + flush the stream writers before ANY exit path, so a trailing `print(…, end="")`, an
@@ -825,6 +843,7 @@ fn type_check(
     path: &str,
     root: Option<&std::path::Path>,
     entry_fn: EntryGate<'_>,
+    entry_source: Option<String>,
 ) -> (
     CheckOutcome,
     Vec<checker::CheckError>,
@@ -845,7 +864,7 @@ fn type_check(
             (None, true) => EntryGate::Script,
             (None, false) => EntryGate::FromManifest,
         };
-        type_check_inner(&path, root.as_deref(), gate)
+        type_check_inner(&path, root.as_deref(), gate, entry_source)
     })
 }
 
@@ -873,6 +892,7 @@ fn type_check_inner(
     path: &str,
     root: Option<&std::path::Path>,
     entry_fn: EntryGate<'_>,
+    entry_source: Option<String>,
 ) -> (
     CheckOutcome,
     Vec<checker::CheckError>,
@@ -892,10 +912,11 @@ fn type_check_inner(
         EntryGate::Named(f) => Some(f),
         _ => derived.as_deref(),
     };
-    let build = match root {
-        Some(r) => resolver::build_graph_with_root(entry, r.to_path_buf()),
-        None => resolver::build_graph(entry),
-    };
+    let build = resolver::build_graph_with_entry_source_and_root(
+        entry,
+        entry_source,
+        root.map(|r| r.to_path_buf()),
+    );
     let graph = match build {
         Ok(g) => g,
         Err(e) => {

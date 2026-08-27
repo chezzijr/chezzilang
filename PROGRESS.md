@@ -7,6 +7,16 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+> **✅ W8-26 CLOSED, 2026-08-27 (TICKET-001) — the entry source is read ONCE; `chezzi run`/`check` on a
+> pipe execute the piped program instead of an empty one.** Root cause: the CLI (`main.rs::read_source`)
+> read the entry to check readability then discarded the bytes, and `resolver::build_graph` re-read the
+> same path on the VM thread — the second read of a one-shot fd (a pipe, `/dev/stdin`) returns empty, so
+> the program that ran was empty and succeeded. Fix: `resolver::build_graph_with_entry_source_and_root`
+> threads the one read into both `type_check` and `vm::run_file_with_entry_source`; on-disk callers keep
+> `build_graph`/`build_graph_with_root`/`run_file_with_entry`. A zero-byte entry is now an ERROR (rc=1),
+> a deliberate CPython divergence confined to `cmd_run`/`cmd_check`. A named FIFO used to hang; the same
+> fix closes that half too. `docs/gaps.md:8664`'s pipe-idiom repro is unblocked.
+>
 > **📋 DOGFOOD WAVE 9 FILED, 2026-08-18 — `docs/gaps.md` `W8-23..W8-42`; open W8 rows 15 → 35.**
 > A second external pass (nine independent agents, no model of the implementation, every answer judged
 > against CPython 3.14.7 / go1.26.6 running on this box) filed 30 findings. **All 30 were re-run in-repo

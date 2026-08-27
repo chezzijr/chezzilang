@@ -5113,7 +5113,7 @@ fn to_str_output((out, err, res, code): RunOutputRaw) -> RunOutput {
 /// CLI calls [`run_file_with_entry`] directly so a `module:function` entrypoint can name a function.
 #[cfg(test)]
 pub fn run_file_with(entry: &std::path::Path, cfg: crate::native::HostConfig) -> RunOutput {
-    to_str_output(run_file_engine(entry, cfg, None, None, false))
+    to_str_output(run_file_engine(entry, cfg, None, None, false, None))
 }
 
 /// Resolve, compile, and run a program from its entry path on the dedicated VM thread, then — if
@@ -5135,6 +5135,28 @@ pub fn run_file_with_entry(
     to_str_output(run_file_bytes(entry, cfg, entry_fn, root))
 }
 
+/// Like [`run_file_with_entry`], but the entry source is supplied in-memory (`Some`) instead of being
+/// re-read from disk on the VM thread. The CLI reads a one-shot fd (a pipe, `/dev/stdin`) exactly ONCE
+/// via `main.rs::read_source` and passes the bytes here — a second read of the same fd returns empty,
+/// which is the read-once fix for `chezzi run` on a pipe. `None` behaves exactly like
+/// [`run_file_with_entry`] (reads the entry from disk).
+pub fn run_file_with_entry_source(
+    entry: &std::path::Path,
+    cfg: crate::native::HostConfig,
+    entry_fn: Option<&str>,
+    root: Option<std::path::PathBuf>,
+    entry_source: Option<String>,
+) -> RunOutput {
+    to_str_output(run_file_engine(
+        entry,
+        cfg,
+        entry_fn.map(str::to_string),
+        root,
+        false,
+        entry_source,
+    ))
+}
+
 /// [`run_file_with_entry`] without the lossy decode — the entry point for any caller that needs the
 /// raw bytes (see [`RunOutputRaw`]), e.g. a byte-exact test assertion or the CPython differential.
 pub fn run_file_bytes(
@@ -5143,7 +5165,7 @@ pub fn run_file_bytes(
     entry_fn: Option<&str>,
     root: Option<std::path::PathBuf>,
 ) -> RunOutputRaw {
-    run_file_engine(entry, cfg, entry_fn.map(str::to_string), root, false)
+    run_file_engine(entry, cfg, entry_fn.map(str::to_string), root, false, None)
 }
 
 /// W7-4a — a MULTI-FILE run under GC stress (collect at every safepoint). The single-source
@@ -5157,6 +5179,7 @@ pub fn run_file_stress(entry: &std::path::Path) -> RunOutput {
         None,
         None,
         true,
+        None,
     ))
 }
 
@@ -5166,11 +5189,12 @@ fn run_file_engine(
     entry_fn: Option<String>,
     root: Option<std::path::PathBuf>,
     stress: bool,
+    entry_source: Option<String>,
 ) -> RunOutputRaw {
     let entry = entry.to_path_buf();
     std::thread::Builder::new()
         .stack_size(VM_STACK_BYTES)
-        .spawn(move || run_file_inner(&entry, cfg, entry_fn.as_deref(), root, stress))
+        .spawn(move || run_file_inner(&entry, cfg, entry_fn.as_deref(), root, stress, entry_source))
         .expect("failed to spawn VM thread")
         .join()
         .expect("VM thread panicked")
@@ -5182,11 +5206,9 @@ fn run_file_inner(
     entry_fn: Option<&str>,
     root: Option<std::path::PathBuf>,
     stress: bool,
+    entry_source: Option<String>,
 ) -> RunOutputRaw {
-    let build = match root {
-        Some(r) => crate::resolver::build_graph_with_root(entry, r),
-        None => crate::resolver::build_graph(entry),
-    };
+    let build = crate::resolver::build_graph_with_entry_source_and_root(entry, entry_source, root);
     let graph = match build {
         Ok(g) => g,
         Err(e) => {

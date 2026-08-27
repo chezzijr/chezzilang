@@ -333,6 +333,18 @@ pub fn build_graph_with_entry_source(
     build_graph_impl(entry, entry_source, None)
 }
 
+/// Like [`build_graph_with_entry_source`], but also pins the module-graph root like
+/// [`build_graph_with_root`]. The CLI needs both at once: the entry is read ONCE by
+/// `main.rs::read_source` (a one-shot fd — a pipe, `/dev/stdin` — can only be read once), and bare
+/// `chezzi run` also pins the root that located it.
+pub fn build_graph_with_entry_source_and_root(
+    entry: &Path,
+    entry_source: Option<String>,
+    root: Option<PathBuf>,
+) -> Result<ModuleGraph, ResolveError> {
+    build_graph_impl(entry, entry_source, root)
+}
+
 /// Shared body of [`build_graph`], [`build_graph_with_entry_source`], and [`build_graph_with_root`].
 /// `root_override` pins the project root (the "one root per run" invariant); `None` derives it by
 /// walking up from the entry file ([`find_root`], nearest-marker — the correct/conventional file-run
@@ -973,6 +985,22 @@ mod tests {
         let entry = graph.modules.last().unwrap();
         assert_eq!(entry.id, graph.entry);
         assert_eq!(entry.ast.stmts.len(), 1);
+    }
+
+    // 0a2. The in-memory entry wins over disk even when a root is also pinned — the shape bare
+    // `chezzi run` needs: read once, then thread the source AND the root together.
+    #[test]
+    fn entry_source_and_root_prefers_the_in_memory_entry() {
+        let d = TmpDir::new();
+        d.write("chezzi.toml", "[project]\nentrypoint = \"main\"\n");
+        let entry = d.write("main.chz", "(((\n");
+        let root = d.path("");
+        let graph =
+            build_graph_with_entry_source_and_root(&entry, Some("x := 1\n".into()), Some(root))
+                .expect("in-memory entry should resolve despite unparseable bytes on disk");
+        let entry_mod = graph.modules.last().unwrap();
+        assert_eq!(entry_mod.id, graph.entry);
+        assert_eq!(entry_mod.ast.stmts.len(), 1);
     }
 
     // 0b. With `None`, behavior is identical to build_graph (reads the entry from disk).
