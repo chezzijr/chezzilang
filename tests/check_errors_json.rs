@@ -526,6 +526,48 @@ fn severity_key_is_additive_and_the_clean_case_is_unchanged() {
     assert!(stdout.ends_with("}]"), "got: {stdout}");
 }
 
+/// TICKET-007 criterion 9 (+ 11, plain-text half): a method typo prints the source line, a caret
+/// row and a `help:` line in plain text, and a `"help"` key after `"message"` under
+/// `--errors=json`.
+#[test]
+fn near_miss_help_is_emitted() {
+    let t = TmpDir::new();
+    let bad = t.write("bad.chz", "xs := [1, 2, 3]\nxs.lenght()\n");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .args(["check", bad.to_str().unwrap()])
+        .output()
+        .expect("run chezzi check");
+    assert!(!out.status.success(), "method typo must exit non-zero");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("has no method 'lenght'"), "got: {stderr}");
+    assert!(
+        stderr.lines().any(|l| l.contains("2 | xs.lenght()")),
+        "got: {stderr}"
+    );
+    assert!(
+        stderr.lines().any(|l| l.trim_end().ends_with('^')),
+        "got: {stderr}"
+    );
+    assert!(
+        stderr.contains("help: did you mean 'len'?"),
+        "got: {stderr}"
+    );
+
+    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .args(["check", bad.to_str().unwrap(), "--errors=json"])
+        .output()
+        .expect("run chezzi check --errors=json");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stdout = stdout.trim();
+    assert!(
+        stdout.contains(
+            "\"message\":\"type List[int] has no method 'lenght'\",\"help\":\"did you mean 'len'?\""
+        ),
+        "help key must follow message, got: {stdout}"
+    );
+}
+
 /// ONE diagnostic, ONE stream. Under `--errors=json` a checker diagnostic must be rendered exactly
 /// once, and the JSON document must appear on exactly one stream — `check` puts its single array on
 /// stdout, `run` likewise (its warnings, when a rule finally emits any, go to stderr as PLAIN TEXT
