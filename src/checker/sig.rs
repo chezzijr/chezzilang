@@ -3508,12 +3508,16 @@ impl Checker {
                         });
                         match field_ty {
                             Some(ty) => self.check_assign_value(&ty, op, &val_ty, target.span),
-                            None => self.error(
-                                target.span,
-                                format!(
-                                    "cannot assign to '{name}': type {obj_ty} has no field '{name}'"
-                                ),
-                            ),
+                            None => {
+                                let names = self.field_names(sname);
+                                self.error_help(
+                                    target.span,
+                                    format!(
+                                        "cannot assign to '{name}': type {obj_ty} has no field '{name}'"
+                                    ),
+                                    suggest::did_you_mean(name, &names),
+                                )
+                            }
                         }
                     }
                     Ty::Unknown => {}

@@ -2,11 +2,6 @@
 //! Damerau-Levenshtein distance discounted by length difference — derived by measuring rustc
 //! 1.97.1's own suggestions rather than by reading rustc's source (see TICKET-007 `## Digest`).
 
-// `did_you_mean` has no caller yet — `Checker::error_help` (step 7) and the `expr.rs`/`pattern.rs`/
-// `sig.rs` call sites (steps 11-15) wire it next in this same ticket. DELETE THIS ATTRIBUTE once
-// they land — it exists only to let the scorer land and be tested on its own commit first.
-#![allow(dead_code)]
-
 /// Restricted Damerau-Levenshtein distance (insert/delete/substitute cost 1, adjacent
 /// transposition cost 1) over `char`s, bailing out early past `limit`.
 pub(super) fn edit_distance(a: &str, b: &str, limit: usize) -> Option<usize> {

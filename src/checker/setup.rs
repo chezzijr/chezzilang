@@ -197,9 +197,6 @@ impl Checker {
     /// A struct's method names, sorted. `methods` is a `HashMap`, so an unsorted list would make a
     /// near-miss suggestion on a distance tie depend on hash order — sort here, once, for every
     /// caller rather than at each call site.
-    // No caller yet — the `expr.rs`/`pattern.rs`/`sig.rs` near-miss sites (TICKET-007 steps 11-15)
-    // wire these four next in this same ticket. DELETE THIS ATTRIBUTE once they land.
-    #[allow(dead_code)]
     pub(super) fn method_names(&self, key: &str) -> Vec<String> {
         let mut names: Vec<String> = self
             .struct_shape(key)
@@ -210,7 +207,6 @@ impl Checker {
     }
 
     /// A newtype's method names, sorted (same `HashMap` ordering reason as `method_names`).
-    #[allow(dead_code)]
     pub(super) fn newtype_method_names(&self, key: &str) -> Vec<String> {
         let mut names: Vec<String> = self
             .newtype_methods_of(key)
@@ -221,7 +217,6 @@ impl Checker {
     }
 
     /// An enum's method names, sorted (same `HashMap` ordering reason as `method_names`).
-    #[allow(dead_code)]
     pub(super) fn enum_method_names(&self, key: &str) -> Vec<String> {
         let mut names: Vec<String> = self
             .enum_methods_of(key)
@@ -233,7 +228,6 @@ impl Checker {
 
     /// A struct's field names, in declaration order. `StructInfo.fields` is a `Vec`, so it is already
     /// deterministic and needs no sort.
-    #[allow(dead_code)]
     pub(super) fn field_names(&self, key: &str) -> Vec<String> {
         self.struct_shape(key)
             .map(|s| s.fields.iter().map(|(n, _)| n.clone()).collect())

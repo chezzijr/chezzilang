@@ -2264,7 +2264,12 @@ impl Checker {
             }
             NativeHandleMethod::Miss => {
                 self.infer_all(args);
-                self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                let names = self.method_names(key);
+                self.error_help(
+                    span,
+                    format!("type {obj_ty} has no method '{method}'"),
+                    suggest::did_you_mean(method, &names),
+                );
                 Ty::Unknown
             }
         }
@@ -2519,7 +2524,12 @@ impl Checker {
                     return subst(&msig.ret, &pmap);
                 }
                 self.infer_all(args);
-                self.error(span, format!("type {pname} has no method '{method}'"));
+                let names = self.protocol_method_names(pname);
+                self.error_help(
+                    span,
+                    format!("type {pname} has no method '{method}'"),
+                    suggest::did_you_mean(method, &names),
+                );
                 Ty::Unknown
             }
             // An `Iterator[T]` value (a generator result) exposes the protocol's one method,
@@ -2531,11 +2541,12 @@ impl Checker {
                     return Ty::option(targs[0].clone());
                 }
                 self.infer_all(args);
-                self.error(
+                self.error_help(
                     span,
                     format!(
                         "type {obj_ty} has no method '{method}' (an iterator only has `next()`)"
                     ),
+                    suggest::did_you_mean(method, &["next".to_string()]),
                 );
                 Ty::Unknown
             }
@@ -2669,7 +2680,12 @@ impl Checker {
                     return *ret;
                 }
                 self.infer_all(args);
-                self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                let names = self.method_names(sname);
+                self.error_help(
+                    span,
+                    format!("type {obj_ty} has no method '{method}'"),
+                    suggest::did_you_mean(method, &names),
+                );
                 Ty::Unknown
             }
             // Enum methods (name-resolved exactly like struct methods). Substitute the enum's type
@@ -2769,7 +2785,12 @@ impl Checker {
                     return ret;
                 }
                 self.infer_all(args);
-                self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                let names = self.newtype_method_names(ntkey);
+                self.error_help(
+                    span,
+                    format!("type {obj_ty} has no method '{method}'"),
+                    suggest::did_you_mean(method, &names),
+                );
                 Ty::Unknown
             }
             Ty::Enum(ename, targs) => {
@@ -2860,7 +2881,12 @@ impl Checker {
                     return ret;
                 }
                 self.infer_all(args);
-                self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                let names = self.enum_method_names(ename);
+                self.error_help(
+                    span,
+                    format!("type {obj_ty} has no method '{method}'"),
+                    suggest::did_you_mean(method, &names),
+                );
                 Ty::Unknown
             }
             // Core-type methods (M6): built-in methods on `str` and `list[T]`.
@@ -2873,7 +2899,12 @@ impl Checker {
                     return sig.ret;
                 }
                 self.infer_all(args);
-                self.error(span, format!("type str has no method '{method}'"));
+                let names = self.method_names("str");
+                self.error_help(
+                    span,
+                    format!("type str has no method '{method}'"),
+                    suggest::did_you_mean(method, &names),
+                );
                 Ty::Unknown
             }
             Ty::List(elem) => {
@@ -2975,7 +3006,12 @@ impl Checker {
                     return sig.ret;
                 }
                 self.infer_all(args);
-                self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                let names = self.method_names("List");
+                self.error_help(
+                    span,
+                    format!("type {obj_ty} has no method '{method}'"),
+                    suggest::did_you_mean(method, &names),
+                );
                 Ty::Unknown
             }
             // `bytes` core methods (immutable byte sequence): only `decode() -> str` (UTF-8).
@@ -2988,7 +3024,12 @@ impl Checker {
                     return sig.ret;
                 }
                 self.infer_all(args);
-                self.error(span, format!("type bytes has no method '{method}'"));
+                let names = self.method_names("bytes");
+                self.error_help(
+                    span,
+                    format!("type bytes has no method '{method}'"),
+                    suggest::did_you_mean(method, &names),
+                );
                 Ty::Unknown
             }
             // `bytearray` core methods (mutable buffer): `len`, `push(int)`, `pop() -> Option[int]`,
@@ -3019,7 +3060,12 @@ impl Checker {
                     return sig.ret;
                 }
                 self.infer_all(args);
-                self.error(span, format!("type bytearray has no method '{method}'"));
+                let names = self.method_names("bytearray");
+                self.error_help(
+                    span,
+                    format!("type bytearray has no method '{method}'"),
+                    suggest::did_you_mean(method, &names),
+                );
                 Ty::Unknown
             }
             Ty::Map(k, v) => {
@@ -3033,7 +3079,12 @@ impl Checker {
                     return sig.ret;
                 }
                 self.infer_all(args);
-                self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                let names = self.method_names("Map");
+                self.error_help(
+                    span,
+                    format!("type {obj_ty} has no method '{method}'"),
+                    suggest::did_you_mean(method, &names),
+                );
                 Ty::Unknown
             }
             Ty::Set(elem) => {
@@ -3048,7 +3099,12 @@ impl Checker {
                     return sig.ret;
                 }
                 self.infer_all(args);
-                self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                let names = self.method_names("Set");
+                self.error_help(
+                    span,
+                    format!("type {obj_ty} has no method '{method}'"),
+                    suggest::did_you_mean(method, &names),
+                );
                 Ty::Unknown
             }
             Ty::Channel(elem) => {
@@ -3075,7 +3131,12 @@ impl Checker {
                     return sig.ret;
                 }
                 self.infer_all(args);
-                self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                let names = self.method_names("Channel");
+                self.error_help(
+                    span,
+                    format!("type {obj_ty} has no method '{method}'"),
+                    suggest::did_you_mean(method, &names),
+                );
                 Ty::Unknown
             }
             Ty::Shared(elem) => {
@@ -3101,7 +3162,12 @@ impl Checker {
                     }
                     NativeHandleMethod::Miss => {
                         self.infer_all(args);
-                        self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                        let names = self.method_names("Shared");
+                        self.error_help(
+                            span,
+                            format!("type {obj_ty} has no method '{method}'"),
+                            suggest::did_you_mean(method, &names),
+                        );
                         Ty::Unknown
                     }
                 }
@@ -3283,7 +3349,12 @@ impl Checker {
                     }
                     NativeHandleMethod::Miss => {
                         self.infer_all(args);
-                        self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                        let names = self.method_names("RwShared");
+                        self.error_help(
+                            span,
+                            format!("type {obj_ty} has no method '{method}'"),
+                            suggest::did_you_mean(method, &names),
+                        );
                         Ty::Unknown
                     }
                 }
@@ -3321,7 +3392,12 @@ impl Checker {
                     }
                     NativeHandleMethod::Miss => {
                         self.infer_all(args);
-                        self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                        let names = self.method_names("Atomic");
+                        self.error_help(
+                            span,
+                            format!("type {obj_ty} has no method '{method}'"),
+                            suggest::did_you_mean(method, &names),
+                        );
                         Ty::Unknown
                     }
                 }
@@ -3348,7 +3424,12 @@ impl Checker {
                     }
                     NativeHandleMethod::Miss => {
                         self.infer_all(args);
-                        self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                        let names = self.method_names("AtomicInt");
+                        self.error_help(
+                            span,
+                            format!("type {obj_ty} has no method '{method}'"),
+                            suggest::did_you_mean(method, &names),
+                        );
                         Ty::Unknown
                     }
                 }
@@ -3390,7 +3471,12 @@ impl Checker {
                     }
                     NativeHandleMethod::Miss => {
                         self.infer_all(args);
-                        self.error(span, format!("type {obj_ty} has no method '{method}'"));
+                        let names = self.method_names("Executor");
+                        self.error_help(
+                            span,
+                            format!("type {obj_ty} has no method '{method}'"),
+                            suggest::did_you_mean(method, &names),
+                        );
                         Ty::Unknown
                     }
                 }
@@ -3466,9 +3552,16 @@ impl Checker {
                     return subst(&msig.ret, &map);
                 }
                 self.infer_all(args);
-                self.error(
+                let mut names: Vec<String> = bounds
+                    .iter()
+                    .flat_map(|b| self.protocol_method_names(&b.name))
+                    .collect();
+                names.sort();
+                names.dedup();
+                self.error_help(
                     span,
                     format!("type parameter {pname} has no method '{method}'"),
+                    suggest::did_you_mean(method, &names),
                 );
                 Ty::Unknown
             }

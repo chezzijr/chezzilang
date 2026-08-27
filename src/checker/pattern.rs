@@ -3159,7 +3159,12 @@ impl Checker {
                         return Ty::Unknown;
                     }
                 }
-                self.error(obj.span, format!("type {obj_ty} has no field '{name}'"));
+                let names = self.field_names(sname);
+                self.error_help(
+                    obj.span,
+                    format!("type {obj_ty} has no field '{name}'"),
+                    suggest::did_you_mean(name, &names),
+                );
                 Ty::Unknown
             }
             Ty::Module(mname) => {

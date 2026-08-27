@@ -818,9 +818,6 @@ impl Checker {
 
     /// The method names a protocol requires, own OR through any embed, flattened. Copies
     /// `protocol_method_sig_d`'s `seen` cycle guard so an embed cycle can't recurse forever.
-    // No caller yet — the `expr.rs` protocol/param near-miss sites (TICKET-007 step 13) wire this
-    // next in this same ticket. DELETE THIS ATTRIBUTE once it lands.
-    #[allow(dead_code)]
     pub(super) fn protocol_method_names(&self, pname: &str) -> Vec<String> {
         let mut seen = HashSet::new();
         let mut out = Vec::new();
