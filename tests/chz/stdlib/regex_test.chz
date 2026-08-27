@@ -1,0 +1,18 @@
+# tests/chz/stdlib/regex_test.chz — std.regex replacement-string dialect.
+#
+# Run: `cargo run -- test tests/chz/`. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+
+import std.regex
+
+test fn replace_all_dollar_group_refs_work():
+    match regex.replace_all(r"(\d+)-(\d+)", "10-20", r"$2/$1"):
+        Ok(v): assert v == "20/10"
+        Err(_): assert false, "$2/$1 is the RE2 group-ref form and must keep working"
+
+test fn replace_all_rejects_python_backslash_group_refs():
+    # RE2 (the Rust `regex` crate) has no `\1` group-ref syntax; `$1` is the only form.
+    # A replacement string containing a Python-style `\1`/`\2` must surface the dialect
+    # mismatch as an Err, not silently emit the literal backslash-digit text.
+    match regex.replace_all(r"(\d+)-(\d+)", "10-20", r"\2/\1"):
+        Ok(v): assert false, "expected a dialect-mismatch Err, got Ok('" + v + "')"
+        Err(_): assert true
