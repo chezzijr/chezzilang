@@ -1026,6 +1026,28 @@ mod tests {
     }
 
     #[test]
+    fn w8_37_fault_verdict_drops_stack_frames() {
+        // `chezzi run` on the same fault prints the callee frame:
+        //   runtime error (g.chz:4:12): index 9 out of bounds (len 1)
+        //     at boom (called at g.chz:5:5)
+        // `chezzi test` must show the same frame line for a faulting `test fn` — it currently
+        // drops it (docs/gaps.md W8-37).
+        let d = TmpDir::new();
+        let f = d.write(
+            "f37_test.chz",
+            "fn boom(xs: List[int]):\n    return xs[9]\n\ntest fn t():\n    xs := [1]\n    boom(xs)\n",
+        );
+        let report = run_tests(&f);
+        assert!(!report.passed, "report:\n{}", report.text);
+        assert!(
+            report.text.contains("at boom"),
+            "expect: report must carry the callee frame 'at boom (called at ...)' \
+             like `chezzi run` does; report:\n{}",
+            report.text
+        );
+    }
+
+    #[test]
     fn non_test_file_path_errors() {
         let d = TmpDir::new();
         let f = d.write("plain.chz", "print(\"hi\")\n");
