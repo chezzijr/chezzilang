@@ -662,6 +662,8 @@ impl Vm {
         self.reset_over_memory();
         self.quiesce.clear_exit();
         self.arm_deadline();
+        self.fault_trace = None;
+        self.fault_trace_depth = 0;
     }
 
     /// Bare `chezzi run` with a `module:function` manifest entrypoint — invoke a named top-level
@@ -815,6 +817,14 @@ impl Vm {
     /// (`b"\xff\xfe"`) reaches fd 1 unchanged, matching `chezzi run` (W6-9) and `go test`.
     pub fn take_out_bytes(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.out)
+    }
+
+    /// `chezzi test` calls this right after a failed invoke and before the next one — take + clear
+    /// the deepest-wins fault trace latch, so a passing test never inherits the previous test's
+    /// frames and a shallower later fault still captures.
+    pub fn take_fault_trace(&mut self) -> Vec<TraceFrame> {
+        self.fault_trace_depth = 0;
+        self.fault_trace.take().unwrap_or_default()
     }
 
     /// `chezzi test` — drain anything the program left running (e.g. an Executor a test forgot to

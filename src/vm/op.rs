@@ -792,6 +792,15 @@ impl Program {
             .map(|m| m.id.0.as_path())
     }
 
+    /// Snapshot every `Span::file` id to its source path — the same table
+    /// `vm::RunError::files` and `chezzi test`'s fault rendering both consume.
+    pub fn file_table(&self) -> Vec<(u32, std::path::PathBuf)> {
+        self.modules
+            .iter()
+            .map(|m| (m.file, m.id.0.clone()))
+            .collect()
+    }
+
     /// M19 memory-layout lever — (re)build `struct_names` (the dense `tid`→identity-key reverse index)
     /// from `structs`. Called once at program construction, AFTER every struct type is hoisted (tids
     /// are dense `0..structs.len()`, so a flat `Vec` placing each key at `def.tid` is gap-free).

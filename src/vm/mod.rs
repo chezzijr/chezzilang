@@ -205,12 +205,29 @@ pub fn format_trace(e: &RunError) -> String {
             .find(|(f, _)| *f == file)
             .map(|(_, p)| p.as_path())
     };
-    let trace = &e.trace;
     let mut s = format!(
         "runtime error ({}): {}",
         render_span(e.span, path_for(e.span.file)),
         e.message
     );
+    for entry in format_frames(&e.trace, &e.files) {
+        s.push('\n');
+        s.push_str(&entry);
+    }
+    s
+}
+
+/// Render a captured call trace as `at <fn> (called at <pos>)` lines: collapses consecutive
+/// same-name runs into one entry with a `× N` marker, then caps to `TRACE_HEAD` + `TRACE_TAIL`
+/// entries. The single producer both `format_trace` (`chezzi run`) and `chezzi test`'s fault
+/// rendering call, so the collapse/cap behaviour can never drift between the two.
+pub fn format_frames(trace: &[TraceFrame], files: &[(u32, std::path::PathBuf)]) -> Vec<String> {
+    let path_for = |file: u32| {
+        files
+            .iter()
+            .find(|(f, _)| *f == file)
+            .map(|(_, p)| p.as_path())
+    };
     // (1) Collapse consecutive same-name runs into one entry: the run's innermost `at` line plus an
     // optional `× N` marker (kept in the SAME entry so the cap below can never orphan the marker).
     let mut entries: Vec<String> = Vec::new();
@@ -235,25 +252,17 @@ pub fn format_trace(e: &RunError) -> String {
     }
     // (2) Cap the collapsed entries: keep head + tail entries, elide the middle. Capping whole
     // entries (not raw lines) keeps each `× N` marker attached to its `at` line across the boundary.
+    let mut out: Vec<String> = Vec::new();
     if entries.len() > TRACE_HEAD + TRACE_TAIL {
         let elided = entries.len() - TRACE_HEAD - TRACE_TAIL;
         let tail_start = entries.len() - TRACE_TAIL;
-        for entry in &entries[..TRACE_HEAD] {
-            s.push('\n');
-            s.push_str(entry);
-        }
-        s.push_str(&format!("\n  … ({elided} frames elided) …"));
-        for entry in &entries[tail_start..] {
-            s.push('\n');
-            s.push_str(entry);
-        }
+        out.extend(entries[..TRACE_HEAD].iter().cloned());
+        out.push(format!("  … ({elided} frames elided) …"));
+        out.extend(entries[tail_start..].iter().cloned());
     } else {
-        for entry in &entries {
-            s.push('\n');
-            s.push_str(entry);
-        }
+        out.extend(entries);
     }
-    s
+    out
 }
 
 /// Maximum user-function call depth — infinite recursion is a clean runtime error rather than a host
@@ -5278,12 +5287,7 @@ fn run_file_inner(
     let trace = vm.fault_trace.take().unwrap_or_default();
     // Snapshot the file-id → path table from the compiled program while it's still in hand — this is
     // the last point before `vm` (and its `Arc<Program>`) is consumed below.
-    let files: Vec<(u32, std::path::PathBuf)> = vm
-        .program
-        .modules
-        .iter()
-        .map(|m| (m.file, m.id.0.clone()))
-        .collect();
+    let files: Vec<(u32, std::path::PathBuf)> = vm.program.file_table();
     let result = result.map_err(|e| RunError::from_error(e, trace, files));
     (vm.out, vm.stderr, result, None)
 }
