@@ -15,4 +15,17 @@ test fn replace_all_rejects_python_backslash_group_refs():
     # mismatch as an Err, not silently emit the literal backslash-digit text.
     match regex.replace_all(r"(\d+)-(\d+)", "10-20", r"\2/\1"):
         Ok(v): assert false, "expected a dialect-mismatch Err, got Ok('" + v + "')"
-        Err(_): assert true
+        Err(e): assert e.message().contains("'$2'"), e.message()
+
+test fn replace_all_rejects_python_named_group_refs():
+    # Python's `\g<name>` form fails the same silent way; `${name}` is the RE2 spelling.
+    # The needle is a RAW string: in a normal string `{y}` is an interpolation hole (W8-1).
+    match regex.replace_all(r"(?<y>\d+)", "1999", r"\g<y>!"):
+        Ok(v): assert false, "expected a dialect-mismatch Err, got Ok('" + v + "')"
+        Err(e): assert e.message().contains(r"'${y}'"), e.message()
+
+test fn replace_all_keeps_a_literal_backslash_before_a_non_digit():
+    # Only backslash-digit and `\g<` are rejected; every other backslash stays literal.
+    match regex.replace_all(r"x", "x", r"\n"):
+        Ok(v): assert v == r"\n", "a backslash not before a digit stays literal, got '" + v + "'"
+        Err(e): assert false, e.message()

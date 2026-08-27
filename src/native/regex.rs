@@ -333,4 +333,53 @@ mod tests {
         // Same cached allocation: pointer-equal Rc.
         assert!(Rc::ptr_eq(&a, &b));
     }
+
+    /// W8-6: Python's `\1` is not an RE2 group reference — the crate's expander copies it through as
+    /// literal text, so this used to return a plausible `Ok("\2/\1")`.
+    #[test]
+    fn replace_all_rejects_python_backslash_group_ref() {
+        let e = do_replace_all(r"(\d+)-(\d+)", "10-20", r"\2/\1").unwrap_err();
+        assert!(e.contains(r"'\2'"), "{e}");
+        assert!(e.contains("'$2'"), "{e}");
+    }
+
+    #[test]
+    fn replace_all_rejects_python_multi_digit_group_ref() {
+        let e = do_replace_all(r"(a)", "a", r"\12").unwrap_err();
+        assert!(e.contains(r"'\12'"), "{e}");
+        assert!(e.contains("'$12'"), "{e}");
+    }
+
+    #[test]
+    fn replace_all_rejects_python_named_group_ref() {
+        let e = do_replace_all(r"(?<y>\d+)", "1999", r"\g<y>!").unwrap_err();
+        assert!(e.contains(r"'\g<y>'"), "{e}");
+        assert!(e.contains("'${y}'"), "{e}");
+    }
+
+    #[test]
+    fn replace_all_dollar_group_refs_still_work() {
+        assert_eq!(
+            do_replace_all(r"(\d+)-(\d+)", "10-20", r"$2/$1"),
+            Ok("20/10".to_string())
+        );
+    }
+
+    /// A backslash NOT before a digit or `g<` keeps its old literal meaning — the escape hatch for a
+    /// replacement that genuinely wants a backslash.
+    #[test]
+    fn replace_all_keeps_a_literal_backslash_before_a_non_digit() {
+        assert_eq!(do_replace_all(r"x", "x", r"\n"), Ok(r"\n".to_string()));
+        assert_eq!(
+            do_replace_all(r"x", "x", r"C:\tmp"),
+            Ok(r"C:\tmp".to_string())
+        );
+    }
+
+    /// Ordering: the pattern compiles first, so a bad pattern still wins over a bad replacement.
+    #[test]
+    fn bad_pattern_beats_the_replacement_check() {
+        let e = do_replace_all(r"(", "x", r"\1").unwrap_err();
+        assert!(e.contains("regex parse error"), "{e}");
+    }
 }
