@@ -106,6 +106,18 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > by a standing gate.** Full walk, the two non-reproductions, and the suggested fix order:
 > `docs/gaps.md` `## Session log — 2026-08-18`. Docs-only change; no code touched, gates unchanged.
 
+> **✅ W8-41 CLOSED, 2026-08-27 — every `chezzi` fence in the bundled docs now lexes, and a gate keeps
+> it that way.** Four documentation lines used `;` as a statement separator (`docs/stdlib.md:1369`,
+> `:1370`, `docs/syntax.md:1732`, `:1737`); `;` is not a token, so each was
+> `lex error: unexpected character ';'` — and all four shipped inside `chezzi docs`, the bundle that
+> exists to be read by a model that would then write `;` into user code. Measured pre-fix:
+> `chezzi docs | grep -c "; month: int"` printed `1`; post-fix it prints `0`. A fifth non-lexing line
+> the report never named, `docs/syntax.md:60`'s `"""say "hi""""`, was found by the new guard and
+> fixed too — CPython rejects that literal as an unterminated string, so the doc was wrong, not the
+> lexer. Gated by `tests/doc_fences_lex.rs::every_chezzi_fence_in_docs_lexes`, which derives its file
+> list from `src/main.rs`'s `include_str!("../docs/` calls so it follows the bundle automatically, plus
+> `::doc_paths_covers_the_bundled_topics`, which fails if that derivation ever yields an empty list.
+
 > **✅ W8-24 CLOSED, 2026-08-27 — chezzi init can no longer destroy a file it did not create.**
 > Pre-fix measurement: `src/main.chz` containing `fn main(): print("MY REAL PROGRAM")`, then
 > `chezzi init .` → rc=0, and `grep -c "MY REAL PROGRAM" src/main.chz` printed `0`. Post-fix: the same
