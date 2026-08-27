@@ -66,6 +66,21 @@ pub struct RunOpts {
     pub color: bool,
 }
 
+/// A fault's rendered position + call trace, shared by the `Fail`/`Error` verdicts.
+///
+/// `pos` is the `path:line:col` string [`crate::lexer::render_span`] produces — identical to what
+/// `chezzi run` prints. `line` is kept ONLY so `--errors=json`'s `line` key stays byte-unchanged
+/// (that document deliberately carries no `col`). `frames` holds the [`crate::vm::format_frames`]
+/// entries whose call span carries a real module coordinate; it is EMPTY when the fault was in the
+/// test body itself — the sole frame there is the invoke frame `Vm::invoke_test` pushes with
+/// `Span::RUNTIME`, which `fault_site` drops (`## Digest` gotcha 9).
+#[derive(Clone)]
+struct FaultSite {
+    pos: String,
+    line: usize,
+    frames: Vec<String>,
+}
+
 /// One test's verdict. `assert` is the ONE intended failure signal of a (void) `test fn`, so an
 /// `assert` fault is a `Fail`; any OTHER runtime fault (OOB, div-by-zero, missing key, native fault,
 /// a crashed setup hook) is an unexpected `Error` — the pytest FAILED-vs-ERROR distinction.
@@ -75,11 +90,11 @@ pub struct RunOpts {
 enum Verdict {
     Pass,
     Fail {
-        line: usize,
+        site: FaultSite,
         msg: String,
     },
     Error {
-        line: usize,
+        site: FaultSite,
         msg: String,
     },
     /// `chezzi test --max-heap` — the test's live heap exceeded the cap and it was hard-aborted. No
@@ -123,7 +138,7 @@ fn verdict_status(v: &Verdict) -> &'static str {
 /// The source line for a verdict, if it has a meaningful one (Fail/Error only).
 fn verdict_line(v: &Verdict) -> Option<usize> {
     match v {
-        Verdict::Fail { line, .. } | Verdict::Error { line, .. } => Some(*line),
+        Verdict::Fail { site, .. } | Verdict::Error { site, .. } => Some(site.line),
         _ => None,
     }
 }
@@ -171,12 +186,47 @@ fn json_string(s: &str) -> String {
     out
 }
 
+/// Resolve a caught fault's position + call trace. Called IMMEDIATELY after the failing invoke and
+/// before any further invoke — `Vm::take_fault_trace` drains the deepest-wins latch, so a later
+/// invoke would otherwise steal or clear it.
+///
+/// `fallback` preserves the pre-fix behaviour of naming the test file when the fault's own span
+/// carries no module coordinate (`Span::file == 0`, e.g. a synthesized span) — see `## Decisions`.
+///
+/// The captured trace always carries the invoke frame `Vm::invoke_test` (or
+/// `invoke_suite_method`/`build_suite_instance`) pushed with `Span::RUNTIME`, `file: 0`. That frame
+/// is dropped here (filtering on `span.file != 0`), NOT in `vm::format_frames`, because
+/// `chezzi run`'s trace never carries one and moving the rule into the shared renderer would change
+/// `chezzi run`'s output too.
+fn fault_site(
+    vm: &mut Vm,
+    e: &crate::vm::RuntimeError,
+    files: &[(u32, PathBuf)],
+    fallback: &Path,
+) -> FaultSite {
+    let path = files
+        .iter()
+        .find(|(f, _)| *f == e.span.file)
+        .map(|(_, p)| p.as_path())
+        .unwrap_or(fallback);
+    let trace: Vec<crate::vm::TraceFrame> = vm
+        .take_fault_trace()
+        .into_iter()
+        .filter(|f| f.span.file != 0)
+        .collect();
+    FaultSite {
+        pos: crate::lexer::render_span(e.span, Some(path)),
+        line: e.span.line as usize,
+        frames: crate::vm::format_frames(&trace, files),
+    }
+}
+
 /// Bucket a caught per-test `RuntimeError`. The `is_over_memory` marker takes priority: a `--max-heap`
 /// hard-abort is `OverMemory` regardless of what fault emerged from the unwind (a defer may fault while
 /// unwinding — the abort re-stamps the marker onto whatever propagates, and it crosses the worker→
 /// parent boundary WITH the error, so a spawned task's runaway aborts on either engine). Else an
 /// `assert` failure → `Fail`, anything else → `Error`.
-fn verdict_from_fault(e: crate::vm::RuntimeError) -> Verdict {
+fn verdict_from_fault(e: crate::vm::RuntimeError, site: FaultSite) -> Verdict {
     // `is_timed_out` checked FIRST. It is mutually exclusive with `is_over_memory` in practice (a
     // timeout trips at a loop back-edge, over-memory at a GC boundary — a single abort carries one
     // marker), so the order only fixes a nominal tie; either way the abort buckets, never FAIL/ERROR.
@@ -186,12 +236,12 @@ fn verdict_from_fault(e: crate::vm::RuntimeError) -> Verdict {
         Verdict::OverMemory { msg: e.message }
     } else if e.is_assert {
         Verdict::Fail {
-            line: e.span.line as usize,
+            site,
             msg: e.message,
         }
     } else {
         Verdict::Error {
-            line: e.span.line as usize,
+            site,
             msg: e.message,
         }
     }
@@ -448,24 +498,15 @@ fn render_line(report: &mut Vec<u8>, o: &Outcome, opts: &RunOpts) {
         Verdict::Pass => report.extend_from_slice(
             format!("{} {} ({})", paint("PASS", 32, c), o.name, o.file).as_bytes(),
         ),
-        Verdict::Fail { line, msg } => report.extend_from_slice(
-            format!(
-                "{} {} ({}:{}) {}",
-                paint("FAIL", 31, c),
-                o.name,
-                o.file,
-                line,
-                msg
-            )
-            .as_bytes(),
+        Verdict::Fail { site, msg } => report.extend_from_slice(
+            format!("{} {} ({}) {}", paint("FAIL", 31, c), o.name, site.pos, msg).as_bytes(),
         ),
-        Verdict::Error { line, msg } => report.extend_from_slice(
+        Verdict::Error { site, msg } => report.extend_from_slice(
             format!(
-                "{} {} ({}:{}) {}",
+                "{} {} ({}) {}",
                 paint("ERROR", 31, c),
                 o.name,
-                o.file,
-                line,
+                site.pos,
                 msg
             )
             .as_bytes(),
@@ -495,6 +536,14 @@ fn render_line(report: &mut Vec<u8>, o: &Outcome, opts: &RunOpts) {
         report.extend_from_slice(format!(" ({}ms)", o.duration.as_millis()).as_bytes());
     }
     report.push(b'\n');
+    let frames: &[String] = match &o.verdict {
+        Verdict::Fail { site, .. } | Verdict::Error { site, .. } => &site.frames,
+        _ => &[],
+    };
+    for frame in frames {
+        report.extend_from_slice(frame.as_bytes());
+        report.push(b'\n');
+    }
     // `--show-output`: a failing test's captured stdout, indented, for debugging (pytest show-on-fail).
     if opts.show_output && !matches!(o.verdict, Verdict::Pass) && !o.captured_out.is_empty() {
         for line in o.captured_out.split_inclusive(|&b| b == b'\n') {
@@ -577,21 +626,18 @@ fn run_file(
     // that id is a per-graph sequence and so differs between two files' graphs — and not the
     // rendered line alone, since two entry modules can collide on line/col/message.
     for w in &warns {
-        let module = graph
-            .modules
-            .iter()
-            .find(|m| m.file == w.span.file)
-            .map(|m| m.id.0.display().to_string())
+        let module = graph_path(&graph, w.span.file)
+            .map(|p| p.display().to_string())
             .unwrap_or_default();
         if seen_warnings.insert(format!("{module}|{w}")) {
-            eprintln!("{w}");
+            eprintln!("{}", w.render(graph_path(&graph, w.span.file)));
         }
     }
     if let Err(errs) = res {
         // Surface the first type error (matches `chezzi check`'s headline).
         let first = errs
             .first()
-            .map(|e| e.message.clone())
+            .map(|e| e.render(graph_path(&graph, e.span.file)))
             .unwrap_or_else(|| "type error".into());
         return Err(first);
     }
@@ -601,6 +647,17 @@ fn run_file(
     let opts = opts.clone();
 
     crate::vm::on_vm_stack(move || invoke_all(program, file_label, &opts))
+}
+
+/// The source path a `Span::file` id resolves to within `graph`'s module set — the same lookup the
+/// warning dedupe key already performs, shared so `CheckError::render`'s two callers here don't
+/// repeat the `find`.
+fn graph_path(graph: &crate::resolver::ModuleGraph, file: u32) -> Option<&Path> {
+    graph
+        .modules
+        .iter()
+        .find(|m| m.file == file)
+        .map(|m| m.id.0.as_path())
 }
 
 /// Run every `test fn` + suite in a compiled program on a fresh VM, returning per-test outcomes (or
@@ -628,6 +685,8 @@ fn invoke_all(
 
     let mut outcomes: Vec<Outcome> = Vec::new();
     let mut filtered_out = 0usize;
+    let files = program.file_table();
+    let fallback = PathBuf::from(&file_label);
 
     // Free tests, in declaration order.
     for (name, proto) in program.tests.iter() {
@@ -638,7 +697,10 @@ fn invoke_all(
         let start = Instant::now();
         let verdict = match vm.invoke_test(*proto) {
             Ok(()) => Verdict::Pass,
-            Err(e) => verdict_from_fault(e),
+            Err(e) => {
+                let site = fault_site(&mut vm, &e, &files, &fallback);
+                verdict_from_fault(e, site)
+            }
         };
         let duration = start.elapsed();
         let verdict = apply_timeout_overrun(verdict, duration, opts);
@@ -666,6 +728,8 @@ fn invoke_all(
             &mut outcomes,
             opts,
             &mut filtered_out,
+            &files,
+            &fallback,
         );
         // `--fail-fast`: stop launching further suites once one produced a non-pass.
         if opts.fail_fast && outcomes.iter().any(|o| !matches!(o.verdict, Verdict::Pass)) {
@@ -687,6 +751,7 @@ fn filtered(opts: &RunOpts, name: &str) -> bool {
 /// Drive one suite: construct the instance once, then for each test method run
 /// `before_each?` → method → `after_each?` (always, even on failure, like `defer`), with
 /// `before_all?`/`after_all?` framing the whole suite.
+#[allow(clippy::too_many_arguments)]
 fn run_suite(
     vm: &mut Vm,
     suite: &crate::vm::op::SuiteInfo,
@@ -694,12 +759,14 @@ fn run_suite(
     out: &mut Vec<Outcome>,
     opts: &RunOpts,
     filtered_out: &mut usize,
+    files: &[(u32, PathBuf)],
+    fallback: &Path,
 ) {
     let hook = |name: &str| suite.hooks.get(name).copied();
     // A whole-suite setup failure (bad ctor / before_all) is reported as one ERROR per test method —
     // but a `--filter`ed-out method is skipped (and counted), same as if it had run.
     let push_all_error =
-        |out: &mut Vec<Outcome>, filtered_out: &mut usize, line: usize, msg: &str| {
+        |out: &mut Vec<Outcome>, filtered_out: &mut usize, site: &FaultSite, msg: &str| {
             for (tname, _) in suite.tests.iter() {
                 let name = format!("{}::{}", suite.name, tname);
                 if filtered(opts, &name) {
@@ -710,7 +777,7 @@ fn run_suite(
                     name,
                     file: file.to_string(),
                     verdict: Verdict::Error {
-                        line,
+                        site: site.clone(),
                         msg: msg.to_string(),
                     },
                     duration: Duration::ZERO,
@@ -724,10 +791,11 @@ fn run_suite(
     let instance = match vm.build_suite_instance(suite.new_thunk) {
         Ok(v) => v,
         Err(e) => {
+            let site = fault_site(vm, &e, files, fallback);
             push_all_error(
                 out,
                 filtered_out,
-                e.span.line as usize,
+                &site,
                 &format!("suite construction failed: {}", e.message),
             );
             return;
@@ -739,10 +807,11 @@ fn run_suite(
     if let Some(p) = hook("before_all")
         && let Err(e) = vm.invoke_suite_method(p, instance)
     {
+        let site = fault_site(vm, &e, files, fallback);
         push_all_error(
             out,
             filtered_out,
-            e.span.line as usize,
+            &site,
             &format!("before_all failed: {}", e.message),
         );
         if let Some(ap) = hook("after_all") {
@@ -765,8 +834,9 @@ fn run_suite(
         if let Some(p) = hook("before_each")
             && let Err(e) = vm.invoke_suite_method(p, instance)
         {
+            let site = fault_site(vm, &e, files, fallback);
             verdict = Verdict::Error {
-                line: e.span.line as usize,
+                site,
                 msg: format!("before_each failed: {}", e.message),
             };
         }
@@ -775,7 +845,8 @@ fn run_suite(
         if matches!(verdict, Verdict::Pass)
             && let Err(e) = vm.invoke_suite_method(*proto, instance)
         {
-            verdict = verdict_from_fault(e);
+            let site = fault_site(vm, &e, files, fallback);
+            verdict = verdict_from_fault(e, site);
         }
         // after_each? — ALWAYS runs (even on failure, like `defer`), so the invocation must NOT be
         // short-circuited. It does not mask the original failure; only if the test passed but
@@ -785,8 +856,9 @@ fn run_suite(
             if matches!(verdict, Verdict::Pass)
                 && let Err(e) = ae
             {
+                let site = fault_site(vm, &e, files, fallback);
                 verdict = Verdict::Error {
-                    line: e.span.line as usize,
+                    site,
                     msg: format!("after_each failed: {}", e.message),
                 };
             }
@@ -3417,16 +3489,21 @@ struct Suite:
     #[test]
     fn verdict_msg_covers_all_variants() {
         assert_eq!(verdict_msg(&Verdict::Pass), None);
+        let site = FaultSite {
+            pos: "f.chz:1:1".into(),
+            line: 1,
+            frames: Vec::new(),
+        };
         assert_eq!(
             verdict_msg(&Verdict::Fail {
-                line: 1,
+                site: site.clone(),
                 msg: "boom".into()
             }),
             Some("boom")
         );
         assert_eq!(
             verdict_msg(&Verdict::Error {
-                line: 1,
+                site,
                 msg: "kaboom".into()
             }),
             Some("kaboom")
