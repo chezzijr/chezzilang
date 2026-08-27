@@ -27154,3 +27154,15 @@ fn a_dotted_static_method_is_a_spawn_or_defer_target_ok() {
         files_ok(&[lib, ("main.chz", main)]);
     }
 }
+
+/// **TICKET-008 / docs/gaps.md W8-16 — a struct failing a protocol reports differently through a
+/// value slot than through a generic bound.** Same program, same unmet requirement (`Dog` has no
+/// `name` method against `Named`): the generic-bound call names the missing method
+/// (`does not satisfy Named (missing method 'name')`), the value-slot argument call names only the
+/// two type names. Expected: the value-slot message carries the same `(missing method '...')`
+/// clause as the generic-bound one.
+#[test]
+fn protocol_mismatch_via_value_slot_names_missing_method() {
+    let src = "protocol Named:\n    fn name(self) -> str\nstruct Dog:\n    x: int\nfn viaSlot(n: Named) -> str: return n.name()\nd := Dog(1)\nviaSlot(d)\n";
+    rejects(src, "does not satisfy Named (missing method 'name')");
+}
