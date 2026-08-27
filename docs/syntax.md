@@ -3319,12 +3319,10 @@ nothing. The shared fixture is just a default-initialized field, mutated through
 **`chezzi test [path]`** — discovers and runs every `test fn` in `*_test.chz` files. `path` defaults to
 the current directory; a single `*_test.chz` file runs that file, a directory is walked recursively.
 Each test runs in isolation (one failure doesn't abort the rest); the report is
-`PASS/FAIL name (file:line) msg` plus a summary, and the exit code is non-zero if anything failed. A
-suite runs `before_all? → [before_each? → test → after_each? (always, even on failure)]* → after_all?`,
+`PASS/FAIL name (file:line:col) msg` plus a summary, and the exit code is non-zero if anything failed.
+A suite runs `before_all? → [before_each? → test → after_each? (always, even on failure)]* → after_all?`,
 constructing the suite instance once. Tests run on the **M:N OS-thread engine** (like `chezzi run`);
-`CHEZZI_THREADS` sizes its worker pool. Known
-limit: an assert that faults inside *imported* (non-test) code reports the test file's path, not the
-library file's.
+`CHEZZI_THREADS` sizes its worker pool.
 
 The dedicated native suite lives in **`tests/chz/`** (`spec/` for language behavior, `stdlib/` for
 module behavior, `suites/` for lifecycle-hook suites) — kept separate from `examples/` (print-and-golden

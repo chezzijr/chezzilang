@@ -1105,7 +1105,7 @@ run on the M:N engine (the only engine), with a `cargo test` gate `chz_suite_pas
 (`tests/chz_suite.rs`) asserting the whole suite passes and `tests/chezzi_threads_cli.rs` re-running it
 at `CHEZZI_THREADS=2`. These are the ranked follow-ups.
 
-Current semantics: `assert true`=PASS, `assert false`=FAIL (with `file:line` + message; the message is
+Current semantics: `assert true`=PASS, `assert false`=FAIL (with `file:line:col` + message; the message is
 any `str` **expression**, not just a literal — variable/interpolation/concat all work, checker-enforced
 `str`). **Any other runtime fault renders ERROR** (see item #1 below). File-level compile/type errors
 render ERROR too (whole file, before any test runs), counted separately as `file error(s)`.

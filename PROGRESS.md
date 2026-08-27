@@ -11818,6 +11818,26 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- **`chezzi test` now prints the same fault trace, line:col and warning path as `run`/`check`
+  (2026-08-27, TICKET-010, `docs/gaps.md` W8-37 closed).** Three drops, one root cause
+  (`src/test_runner.rs` rendered all three diagnostics from `message` alone): a fault lost its
+  callee frames and its col (`ERROR t (f37_test.chz:2) index 9 out of bounds (len 1)` →
+  `ERROR t (f37_test.chz:2:12) index 9 out of bounds (len 1)` plus
+  `  at boom (called at f37_test.chz:6:5)`); a checker type error in a test file lost `line:col`
+  (`ERROR h37_test.chz` / bare message → `ERROR h37_test.chz` /
+  `type error (h37_test.chz:2:14): cannot assign str to variable of type int`); a warning lost its
+  path (`warning (line 5, col 5): …` → `warning (w_test.chz:5:5): …`, so a multi-file
+  `chezzi test tests/chz` run now names which file warned). Routes through the renderers `run`/
+  `check` already use: `CheckError::render(path)` for the checker paths, and a new
+  `vm::format_frames` (extracted from `vm::format_trace`, byte-identical for `chezzi run`) plus
+  `Vm::take_fault_trace` for the fault path. A fault's captured trace always carries one spurious
+  frame — the invoke frame `Vm::invoke_test`/`invoke_suite_method`/`build_suite_instance` pushes
+  with `Span::RUNTIME` — which the new `test_runner::fault_site` drops before rendering, so a plain
+  failing `assert` renders no `  at ` line. `--errors=json` is unchanged (still `line` only, no
+  `col`/`file`). Gate: `cargo test` green (4251 lib tests + all integration targets), clippy clean,
+  `chezzi test tests/chz` at both the default and `CHEZZI_THREADS=2` worker counts — exit 0,
+  `639 test(s): 639 passed, 0 failed, 0 errored`, zero `  at ` lines. New CLI gate
+  `tests/test_diagnostics.rs` (5 cases) plus 3 `#[cfg(test)]` cases in `src/test_runner.rs`.
 - **A method/field miss now suggests a near-miss "did you mean" (2026-08-27, TICKET-007,
   `docs/gaps.md` W8-17 partially closed).** `xs.lenght()` → `type List[int] has no method 'lenght'`
   now also carries `help: did you mean 'len'?`, on every method-miss and field-miss site (native
