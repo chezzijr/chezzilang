@@ -6290,6 +6290,14 @@ fn unknown_struct_field_rejected() {
     );
 }
 
+/// TICKET-007 (docs/gaps.md W8-17): a near-miss method typo gets no "did you mean" suggestion.
+/// `len` is one edit away from the typo `lenght`, but the message names no candidate and no
+/// suggestion mechanism (no "did you mean"/"help:"/"note:").
+#[test]
+fn method_typo_suggests_near_miss() {
+    rejects("xs := [1, 2, 3]\nxs.lenght()\n", "did you mean");
+}
+
 #[test]
 fn struct_field_access_ok() {
     ok("struct P:\n    x: int\np := P(1)\nq := p.x + 1\n");
