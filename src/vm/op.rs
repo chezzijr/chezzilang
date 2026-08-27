@@ -78,6 +78,33 @@ pub const VID_ERR: u32 = 1;
 pub const VID_SOME: u32 = 2;
 pub const VID_NONE_VARIANT: u32 = 3;
 
+/// The comparison operator an `Op::Assert { cmp: Some(_), .. }` renders between its two operands.
+/// `In` is excluded — its right operand is a whole collection, so rendering it would turn a
+/// one-line fault into an unbounded dump — and `And`/`Or` never reach this carrier at all (they
+/// take the short-circuit path in the compiler, never `binary_op`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssertCmp {
+    Lt,
+    LtEq,
+    Gt,
+    GtEq,
+    Eq,
+    NotEq,
+}
+
+impl AssertCmp {
+    pub fn symbol(self) -> &'static str {
+        match self {
+            AssertCmp::Lt => "<",
+            AssertCmp::LtEq => "<=",
+            AssertCmp::Gt => ">",
+            AssertCmp::GtEq => ">=",
+            AssertCmp::Eq => "==",
+            AssertCmp::NotEq => "!=",
+        }
+    }
+}
+
 /// A single VM instruction. Operands are inline (typed), so there is no separate constant pool —
 /// strings and numbers live in the op. Jump targets are absolute indices into the proto's `code`.
 #[derive(Debug, Clone)]
@@ -100,9 +127,13 @@ pub enum Op {
     /// The failing tail of `assert cond[, msg]`. The compiler tests `cond` with a preceding
     /// `JumpIfFalse` and only reaches this op when `cond` was false, so it *always* faults: pop
     /// `msg` (a str, if `has_msg`) and fault at this op's span with that message (or
-    /// `"assertion failed"`). `msg` is evaluated lazily on the failing path only.
+    /// `"assertion failed"`). `msg` is evaluated lazily on the failing path only. When `cmp` is
+    /// `Some`, the comparison's two operand VALUES sit on the stack UNDER `msg` (duplicated before
+    /// the comparison consumed the originals), and the fault message renders both around `cmp`'s
+    /// symbol (`"assertion failed: 3 == 4"`, or with a `msg`, `"assertion failed: <msg> (3 == 4)"`).
     Assert {
         has_msg: bool,
+        cmp: Option<AssertCmp>,
     },
 
     /// Push a first-class UNIVERSE builtin FUNCTION value (`print`/`ord`/`chr`/`panic`) by name —

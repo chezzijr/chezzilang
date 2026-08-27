@@ -20,8 +20,8 @@ use crate::interpolation::{Chunk, parse_interpolation};
 use crate::native::cffi::CType;
 use crate::resolver::{ModuleGraph, ResolvedImport};
 use crate::vm::op::{
-    CapEntry, CapSrc, CffiDef, LIFECYCLE_HOOKS, ModuleProto, NO_IC, Op, Program, Proto, ProtoId,
-    StructDef, SuiteInfo, VariantDef, WaitMeta,
+    AssertCmp, CapEntry, CapSrc, CffiDef, LIFECYCLE_HOOKS, ModuleProto, NO_IC, Op, Program, Proto,
+    ProtoId, StructDef, SuiteInfo, VariantDef, WaitMeta,
 };
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -2045,6 +2045,37 @@ impl Compiler {
             // `pass` — a no-op statement; emits no bytecode.
             StmtKind::Pass => Ok(()),
             StmtKind::Assert { cond, msg } => {
+                // A comparison condition is split so the operand VALUES survive the comparison
+                // opcode: duplicate them (`Op::Dup2`) before comparing, compare the copies, and on
+                // the failing path the originals are still on the stack (under `msg`) for
+                // `Op::Assert` to render. `In` is excluded (see `assert_cmp`).
+                if let ExprKind::Binary { op, lhs, rhs } = &cond.kind
+                    && let Some(c) = assert_cmp(*op)
+                {
+                    self.compile_expr(fc, lhs)?;
+                    self.compile_expr(fc, rhs)?;
+                    fc.emit(Op::Dup2, cond.span);
+                    fc.emit(binary_op(*op), cond.span);
+                    let to_fail = fc.emit_jump(Op::JumpIfFalse(0), stmt.span);
+                    // Passing path: pop the two duplicated operands so a passing comparison assert
+                    // leaves no residue on the stack (see ## Decisions — unbounded growth in a loop).
+                    fc.emit(Op::Pop, stmt.span);
+                    fc.emit(Op::Pop, stmt.span);
+                    let to_end = fc.emit_jump(Op::Jump(0), stmt.span);
+                    fc.patch_jump(to_fail);
+                    if let Some(m) = msg {
+                        self.compile_expr(fc, m)?;
+                    }
+                    fc.emit(
+                        Op::Assert {
+                            has_msg: msg.is_some(),
+                            cmp: Some(c),
+                        },
+                        stmt.span,
+                    );
+                    fc.patch_jump(to_end);
+                    return Ok(());
+                }
                 // Lazy message evaluation — `msg` is only evaluated on failure: compile `cond`, and
                 // only on the false path compile `msg` then
                 // `Op::Assert` (which always faults). A passing assert never touches `msg`, so a
@@ -2057,7 +2088,13 @@ impl Compiler {
                 if let Some(m) = msg {
                     self.compile_expr(fc, m)?;
                 }
-                fc.emit(Op::Assert { has_msg: msg.is_some() }, stmt.span);
+                fc.emit(
+                    Op::Assert {
+                        has_msg: msg.is_some(),
+                        cmp: None,
+                    },
+                    stmt.span,
+                );
                 fc.patch_jump(to_end);
                 Ok(())
             }
@@ -5834,6 +5871,21 @@ fn method_call_stmt(obj: Expr, method: &str, args: Vec<Expr>, span: Span) -> Stm
     }
 }
 
+/// The `AssertCmp` an `assert`'s top-level condition renders, if it is a comparison. `In` is
+/// excluded — its right operand is a whole collection, so rendering it would turn a one-line fault
+/// into an unbounded dump — and `And`/`Or` never reach `binary_op` at all (short-circuit path).
+fn assert_cmp(op: BinaryOp) -> Option<AssertCmp> {
+    match op {
+        BinaryOp::Lt => Some(AssertCmp::Lt),
+        BinaryOp::LtEq => Some(AssertCmp::LtEq),
+        BinaryOp::Gt => Some(AssertCmp::Gt),
+        BinaryOp::GtEq => Some(AssertCmp::GtEq),
+        BinaryOp::Eq => Some(AssertCmp::Eq),
+        BinaryOp::NotEq => Some(AssertCmp::NotEq),
+        _ => None,
+    }
+}
+
 fn binary_op(op: BinaryOp) -> Op {
     match op {
         BinaryOp::Add => Op::Add,
@@ -8055,5 +8107,63 @@ mod file_id_tests {
         assert_eq!(program.modules.len(), 1);
         assert_eq!(program.modules[0].file, 0);
         assert_eq!(program.file_path(0), None);
+    }
+}
+
+/// W8-13 — a failing comparison `assert` splits the condition so the operand VALUES survive the
+/// comparison opcode. These pin the bytecode shape: a passing comparison assert must pop both
+/// duplicated operands (no stack growth per execution), and a non-comparison assert must keep its
+/// existing (unchanged) lowering.
+#[cfg(test)]
+mod assert_lowering_tests {
+    use super::*;
+    use crate::vm::op::Op;
+
+    fn compile(src: &str) -> crate::vm::op::Program {
+        let tokens = crate::lexer::tokenize(src).expect("lex");
+        let mut module = crate::parser::parse(tokens).expect("parse");
+        crate::desugar::run_standalone(&mut module).expect("desugar");
+        compile_module_standalone(&module).expect("compile")
+    }
+
+    fn toplevel(p: &crate::vm::op::Program) -> &crate::vm::op::Proto {
+        p.protos
+            .iter()
+            .find(|q| q.name == "<toplevel>")
+            .expect("toplevel proto")
+    }
+
+    #[test]
+    fn passing_comparison_assert_pops_both_operands() {
+        let prog = compile("i := 0\nassert i < 3\n");
+        let code = &toplevel(&prog).code;
+        let j = code
+            .iter()
+            .position(|op| matches!(op, Op::JumpIfFalse(_)))
+            .unwrap_or_else(|| panic!("no JumpIfFalse in {code:?}"));
+        assert!(matches!(code[j + 1], Op::Pop), "{code:?}");
+        assert!(matches!(code[j + 2], Op::Pop), "{code:?}");
+        assert!(matches!(code[j + 3], Op::Jump(_)), "{code:?}");
+        assert_eq!(
+            code.iter().filter(|op| matches!(op, Op::Dup2)).count(),
+            1,
+            "{code:?}"
+        );
+    }
+
+    #[test]
+    fn non_comparison_assert_keeps_the_jump_adjacent() {
+        let prog = compile("assert 4 in [1, 2, 3]\n");
+        let code = &toplevel(&prog).code;
+        let j = code
+            .iter()
+            .position(|op| matches!(op, Op::JumpIfFalse(_)))
+            .unwrap_or_else(|| panic!("no JumpIfFalse in {code:?}"));
+        assert!(matches!(code[j + 1], Op::Jump(_)), "{code:?}");
+        assert_eq!(
+            code.iter().filter(|op| matches!(op, Op::Dup2)).count(),
+            0,
+            "{code:?}"
+        );
     }
 }

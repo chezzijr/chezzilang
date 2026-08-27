@@ -1798,19 +1798,48 @@ impl Vm {
                     return Err(e);
                 }
             }
-            Op::Assert { has_msg } => {
+            Op::Assert { has_msg, cmp } => {
                 // Reached only on the failing path: the compiler emits `Op::Assert` after a
                 // `JumpIfFalse` that already consumed (and tested) `cond`, so this op always faults.
                 // `msg` (if present) was evaluated lazily just before us — `msg` is only
                 // evaluated when the assertion fails.
-                let message = if *has_msg {
-                    let m = self.pop();
-                    match self.val_str(m) {
-                        Some(s) => format!("assertion failed: {s}"),
-                        None => "assertion failed".to_string(),
-                    }
+                let extra = if *has_msg { 1 } else { 0 };
+                let n = self.stack.len();
+                let msg = if *has_msg {
+                    let m = self.stack[n - 1];
+                    self.val_str(m)
                 } else {
-                    "assertion failed".to_string()
+                    None
+                };
+                // For a comparison, the two operand VALUES sit on the stack under `msg` (duplicated
+                // by the compiler before the comparison consumed the originals). Render them around
+                // `cmp`'s symbol; keep them rooted on the operand stack until the last render
+                // finishes, since a `str` method it runs could otherwise collect them. If either
+                // render faults, drop the operand text but still return `is_assert: true` below — a
+                // faulting operand must never reclassify a failed assertion as an error.
+                let cmp_text = if let Some(c) = cmp {
+                    let l = self.stack[n - 2 - extra];
+                    let r = self.stack[n - 1 - extra];
+                    let mut s = String::new();
+                    let rendered = self
+                        .stringify_nested_into(&mut s, l, span, 0)
+                        .and_then(|()| {
+                            s.push(' ');
+                            s.push_str(c.symbol());
+                            s.push(' ');
+                            self.stringify_nested_into(&mut s, r, span, 0)
+                        });
+                    rendered.ok().map(|()| s)
+                } else {
+                    None
+                };
+                self.stack
+                    .truncate(n - extra - if cmp.is_some() { 2 } else { 0 });
+                let message = match (msg, cmp_text) {
+                    (Some(m), Some(c)) => format!("assertion failed: {m} ({c})"),
+                    (Some(m), None) => format!("assertion failed: {m}"),
+                    (None, Some(c)) => format!("assertion failed: {c}"),
+                    (None, None) => "assertion failed".to_string(),
                 };
                 // The ONE site that flags an assert failure — the `test fn` runner buckets this as
                 // FAIL, every other (`is_assert: false`) fault as ERROR.

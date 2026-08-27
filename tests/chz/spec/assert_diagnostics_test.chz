@@ -1,0 +1,16 @@
+# W8-13: a failing `assert` must show the operands (and `assert_eq`/`assert_ne` must exist).
+# Currently a failing bare `assert` reports only "assertion failed" with neither operand,
+# per docs/gaps.md W8-13.
+
+fn msg_of[T](r: Result[T, Error], where_: str) -> str:
+    match r:
+        Ok(_): assert false, where_ + " must fault"
+        Err(e): return e.message()
+    return ""
+
+test fn bare_assert_shows_operands():
+    xs := [1, 2, 3]
+    r := recover: assert xs.len() == 4
+    msg := msg_of(r, "bare assert")
+    assert msg.contains("3"), "expected the left operand 3 in: " + msg
+    assert msg.contains("4"), "expected the right operand 4 in: " + msg

@@ -1,0 +1,28 @@
+# W8-13: a failing comparison `assert` renders both operand values around the operator.
+
+fn fault_msg[T](r: Result[T, Error]) -> str:
+    match r:
+        Ok(_): return "NO FAULT"
+        Err(e): return e.message()
+    return ""
+
+test fn comparison_assert_shows_operands():
+    xs := [1, 2, 3]
+    r := recover: assert xs.len() == 4
+    assert fault_msg(r) == "assertion failed: 3 == 4"
+
+test fn comparison_assert_keeps_custom_message():
+    x := 1
+    r := recover: assert x == 2, "x must be two"
+    assert fault_msg(r) == "assertion failed: x must be two (1 == 2)"
+
+test fn non_comparison_assert_message_unchanged():
+    r := recover: assert false, "boom"
+    assert fault_msg(r) == "assertion failed: boom"
+
+test fn comparison_assert_in_a_loop_still_passes():
+    i := 0
+    while i < 3:
+        assert i < 3
+        i = i + 1
+    assert i == 3
