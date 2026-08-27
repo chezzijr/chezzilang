@@ -94,6 +94,10 @@ pub struct CheckError {
     pub message: String,
     pub span: Span,
     pub severity: Severity,
+    /// A near-miss suggestion ("did you mean 'len'?"). NEVER module-attributed: `Checker::attribute`
+    /// prefixes `in module 'X': ` onto `message` only, and a suggestion names a method or field, not
+    /// a module, so prefixing it there would read wrong.
+    pub help: Option<String>,
 }
 
 impl CheckError {
@@ -102,6 +106,7 @@ impl CheckError {
             message,
             span,
             severity: Severity::Error,
+            help: None,
         }
     }
 
@@ -110,6 +115,7 @@ impl CheckError {
             message,
             span,
             severity: Severity::Warning,
+            help: None,
         }
     }
 }
@@ -129,11 +135,18 @@ impl CheckError {
     /// use, so all three agree on the `path:line:col` form. `Display` (above) is left as the bare
     /// `line N, col M` form FOREVER: many checker unit tests compare against it directly, and unit
     /// tests construct a `CheckError` with no module graph in reach to name a path from.
+    ///
+    /// A `help` suggestion, when present, is appended on its own `help: <h>` line. `Display` stays
+    /// bare with no `help` line for the same forever-pinned reason above.
     pub fn render(&self, path: Option<&std::path::Path>) -> String {
         let pos = crate::lexer::render_span(self.span, path);
-        match self.severity {
+        let head = match self.severity {
             Severity::Error => format!("type error ({pos}): {}", self.message),
             Severity::Warning => format!("warning ({pos}): {}", self.message),
+        };
+        match &self.help {
+            Some(h) => format!("{head}\nhelp: {h}"),
+            None => head,
         }
     }
 }

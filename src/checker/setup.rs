@@ -194,6 +194,52 @@ impl Checker {
             .or_else(|| self.owning_struct_def(key))
     }
 
+    /// A struct's method names, sorted. `methods` is a `HashMap`, so an unsorted list would make a
+    /// near-miss suggestion on a distance tie depend on hash order — sort here, once, for every
+    /// caller rather than at each call site.
+    // No caller yet — the `expr.rs`/`pattern.rs`/`sig.rs` near-miss sites (TICKET-007 steps 11-15)
+    // wire these four next in this same ticket. DELETE THIS ATTRIBUTE once they land.
+    #[allow(dead_code)]
+    pub(super) fn method_names(&self, key: &str) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .struct_shape(key)
+            .map(|s| s.methods.keys().cloned().collect())
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    /// A newtype's method names, sorted (same `HashMap` ordering reason as `method_names`).
+    #[allow(dead_code)]
+    pub(super) fn newtype_method_names(&self, key: &str) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .newtype_methods_of(key)
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    /// An enum's method names, sorted (same `HashMap` ordering reason as `method_names`).
+    #[allow(dead_code)]
+    pub(super) fn enum_method_names(&self, key: &str) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .enum_methods_of(key)
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    /// A struct's field names, in declaration order. `StructInfo.fields` is a `Vec`, so it is already
+    /// deterministic and needs no sort.
+    #[allow(dead_code)]
+    pub(super) fn field_names(&self, key: &str) -> Vec<String> {
+        self.struct_shape(key)
+            .map(|s| s.fields.iter().map(|(n, _)| n.clone()).collect())
+            .unwrap_or_default()
+    }
+
     /// An enum's shape looked up by identity key in the owning module's `ModuleSig` (miss-only).
     pub(super) fn owning_enum_def(&self, key: &str) -> Option<&EnumSigInfo> {
         self.module_sigs.iter().find_map(|(mid, sig)| {
@@ -922,8 +968,21 @@ impl Checker {
     }
 
     pub(super) fn error(&mut self, span: Span, message: impl Into<String>) {
+        self.error_help(span, message, None);
+    }
+
+    /// Like `error`, plus a near-miss suggestion for a "did you mean" `help` line. `help` is never
+    /// module-attributed — only `message` passes through `attribute`.
+    pub(super) fn error_help(
+        &mut self,
+        span: Span,
+        message: impl Into<String>,
+        help: Option<String>,
+    ) {
         let message = self.attribute(message);
-        self.errors.push(CheckError::error(message, span));
+        let mut e = CheckError::error(message, span);
+        e.help = help;
+        self.errors.push(e);
     }
 
     /// A NON-FATAL diagnostic: reported alongside the errors but never in the `Err` arm, so the exit
