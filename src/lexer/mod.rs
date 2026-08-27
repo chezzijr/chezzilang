@@ -225,6 +225,30 @@ pub fn display_path(p: &std::path::Path) -> std::path::PathBuf {
         .unwrap_or_else(|| p.to_path_buf())
 }
 
+/// Render a three-line source echo for a diagnostic: a blank gutter line, the source line at
+/// `span.line`, then a caret row underlining the span's column through the end of its word (via
+/// `editor::word_end_col`, the SAME word-boundary scan `--errors=json`'s `end_col` uses — caret
+/// width and `end_col` cannot drift apart). Returns `None` when `span.line` is past the end of
+/// `source`.
+pub fn render_snippet(span: Span, source: &str) -> Option<String> {
+    let raw = source.lines().nth(span.line as usize - 1)?;
+    let text: String = raw
+        .trim_end_matches('\r')
+        .chars()
+        .map(|c| if c == '\t' { ' ' } else { c })
+        .collect();
+    let end = crate::editor::word_end_col(source, span.line as usize, span.col as usize) as usize;
+    let col0 = span.col.saturating_sub(1) as usize;
+    let width = end.saturating_sub(col0).max(1);
+    let line_no = span.line.to_string();
+    let pad = " ".repeat(line_no.len());
+    Some(format!(
+        "{pad} |\n{line_no} | {text}\n{pad} | {}{}",
+        " ".repeat(col0),
+        "^".repeat(width)
+    ))
+}
+
 /// A sparse map from a string literal's CONTENT char index (an index into the post-escape,
 /// delimiter-stripped payload) to that char's **physical source [`Span`]**.
 ///
@@ -3596,5 +3620,46 @@ mod tests {
             render_span(span, Some(outside)),
             "/definitely/outside/anything.chz:6:5"
         );
+    }
+
+    #[test]
+    fn render_snippet_draws_caret_under_span() {
+        let src = "a := 1\nprint(xs)\n";
+        let span = Span {
+            line: 2,
+            col: 7,
+            file: 0,
+        };
+        let out = render_snippet(span, src).expect("line exists");
+        assert!(out.contains("2 | print(xs)"), "got: {out}");
+        let caret_line = out.lines().last().unwrap();
+        assert_eq!(caret_line.trim_end(), caret_line);
+        assert!(caret_line.trim_end().ends_with("^^"), "got: {out}");
+    }
+
+    #[test]
+    fn render_snippet_off_end_is_none() {
+        let src = "a := 1\nb := 2\n";
+        let span = Span {
+            line: 9,
+            col: 1,
+            file: 0,
+        };
+        assert_eq!(render_snippet(span, src), None);
+    }
+
+    #[test]
+    fn render_snippet_tab_keeps_columns() {
+        let src = "\tx := 1\n";
+        let span = Span {
+            line: 1,
+            col: 2,
+            file: 0,
+        };
+        let out = render_snippet(span, src).expect("line exists");
+        assert!(out.contains("1 |  x := 1"), "got: {out}");
+        let caret_line = out.lines().last().unwrap();
+        // one leading space before the caret (col 2 == char index 1)
+        assert!(caret_line.ends_with(" ^"), "got: {out}");
     }
 }
