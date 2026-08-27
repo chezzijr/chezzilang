@@ -163,27 +163,35 @@ fn stat(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 /// strings. Each directory's entries are SORTED by name before pushing/recursing — this makes the
 /// order deterministic (`read_dir` yields filesystem-arbitrary order), which is REQUIRED for
 /// byte-identical output regardless of worker count. Pre-order: a directory is listed before its children. A symlinked directory is
-/// LISTED but NOT descended (cycle guard). An unreadable root (or subdir) returns a recoverable `Err`.
+/// LISTED but NOT descended (cycle guard). The first unreadable directory, the root or any
+/// descendant, aborts the walk with a recoverable `Err` NAMING THAT DIRECTORY (W8-39): `walk_into`
+/// formats the message at the failing level because a bare `std::io::Error` carries no path, so it
+/// must not go back to propagating one with `?`.
 fn walk(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "walk", 1)?;
     let root = arg_path(h, 0)?;
     let mut out: Vec<Vec<u8>> = Vec::new();
-    if let Err(e) = walk_into(&root, &mut out) {
-        return Ok(NativeRet::Err(format!("{}: {e}", shown(&root))));
+    if let Err(msg) = walk_into(&root, &mut out) {
+        return Ok(NativeRet::Err(msg));
     }
     let items = out.into_iter().map(NativeRet::Bytes).collect();
     Ok(NativeRet::Ok(Box::new(NativeRet::List(items))))
 }
 
 /// Recursion helper for [`walk`]: sort each directory's entries by file name, then push each entry's
-/// full path and recurse into it only if it is a real (non-symlink) directory.
-fn walk_into(dir: &Path, out: &mut Vec<Vec<u8>>) -> std::io::Result<()> {
-    let mut entries: Vec<std::fs::DirEntry> =
-        std::fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
+/// full path and recurse into it only if it is a real (non-symlink) directory. On failure, the
+/// returned message names the directory that actually failed, not `dir`'s caller.
+fn walk_into(dir: &Path, out: &mut Vec<Vec<u8>>) -> Result<(), String> {
+    let rd = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", shown(dir)))?;
+    let mut entries: Vec<std::fs::DirEntry> = rd
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(|e| format!("{}: {e}", shown(dir)))?;
     entries.sort_by_key(|e| e.file_name());
     for e in entries {
-        let ft = e.file_type()?; // does NOT follow symlinks — is_symlink is accurate
         let p = e.path();
+        let ft = e
+            .file_type()
+            .map_err(|err| format!("{}: {err}", shown(&p)))?; // does NOT follow symlinks — is_symlink is accurate
         out.push(path_bytes(&p));
         if ft.is_dir() && !ft.is_symlink() {
             walk_into(&p, out)?;
