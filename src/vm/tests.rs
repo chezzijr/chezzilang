@@ -717,6 +717,50 @@ fn assert_false_default_message() {
     assert_eq!(err.span.line, 1);
 }
 
+#[test]
+fn assert_comparison_failure_shows_both_operands() {
+    let err = run_capture("xs := [1, 2, 3]\nassert xs.len() == 4\n").unwrap_err();
+    assert_eq!(err.message, "assertion failed: 3 == 4");
+    assert_eq!(err.span.line, 2);
+    assert!(err.is_assert);
+}
+
+#[test]
+fn assert_comparison_failure_keeps_custom_msg() {
+    let err = run_capture("x := 1\nassert x == 2, \"x must be two\"\n").unwrap_err();
+    assert_eq!(err.message, "assertion failed: x must be two (1 == 2)");
+}
+
+#[test]
+fn assert_comparison_renders_every_operator() {
+    let cases = [
+        ("assert 2 < 1\n", "assertion failed: 2 < 1"),
+        ("assert 2 <= 1\n", "assertion failed: 2 <= 1"),
+        ("assert 1 > 2\n", "assertion failed: 1 > 2"),
+        ("assert 1 >= 2\n", "assertion failed: 1 >= 2"),
+        ("assert 1 != 1\n", "assertion failed: 1 != 1"),
+        (
+            "assert \"ab\" == \"ac\"\n",
+            "assertion failed: 'ab' == 'ac'",
+        ),
+    ];
+    for (src, expect) in cases {
+        assert_eq!(run_capture(src).unwrap_err().message, expect, "src: {src}");
+    }
+}
+
+#[test]
+fn assert_non_comparison_message_unchanged() {
+    assert_eq!(
+        run_capture("assert 4 in [1, 2, 3]\n").unwrap_err().message,
+        "assertion failed"
+    );
+    assert_eq!(
+        run_capture("assert false, \"boom\"\n").unwrap_err().message,
+        "assertion failed: boom"
+    );
+}
+
 // ---- M19 Phase 3: ConstStr interning + per-char alloc (correctness guards) ----
 
 #[test]

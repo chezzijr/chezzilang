@@ -244,8 +244,10 @@ pub enum StmtKind {
         span: Span,
     },
     /// `assert <cond>` or `assert <cond>, <msg>` — fault with the assertion's source span if `cond`
-    /// is false. `cond` must be `Bool`; `msg` (if present) must be `str`. The fault message is the
-    /// custom `msg` if given, else `"assertion failed"`.
+    /// is false. `cond` must be `Bool`; `msg` (if present) must be `str`. If `cond` is a comparison
+    /// (`<`/`<=`/`>`/`>=`/`==`/`!=`), the fault message renders both operand VALUES around the
+    /// operator (`assertion failed: 3 == 4`, or `assertion failed: <msg> (3 == 4)` with a `msg`).
+    /// Every other condition keeps the custom `msg` if given, else `"assertion failed"`.
     Assert { cond: Expr, msg: Option<Expr> },
     /// A bare expression used as a statement, e.g. `print(x)`.
     Expr(Expr),
