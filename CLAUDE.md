@@ -198,7 +198,7 @@ Right now: **pre-JIT/pre-freeze bug-hunt + drift-fix hunt** is the active phase 
 checker↔runtime, and IO drift — live ledger in `docs/gaps.md`), with **M19 — Perf track** paused
 in-progress alongside it.
 
-> **START HERE (2026-08-18): `docs/gaps.md` W8-1..W8-42.** **34 open rows** — W8-1, W8-3, W8-4, W8-6,
+> **START HERE (2026-08-18): `docs/gaps.md` W8-1..W8-42.** **33 open rows** — W8-1, W8-3, W8-4,
 > W8-9..W8-13, W8-16, W8-17, W8-19, W8-20 from **dogfood wave 1** and **W8-23, W8-25..W8-42 from wave 2**
 > (2026-08-18, nine agents; 30 findings, 27 reproduced in-repo, 20 filed, 3 folded into open rows, 2
 > NOT reproduced and recorded as such), plus two DECIDED language
@@ -211,7 +211,7 @@ in-progress alongside it.
 > **airlock-trap** section — a `spawn:`-task write read
 > after the join now warns too. The dogfood rows are the first findings in this repo produced by people
 > with **no model of the implementation**, and they are disjoint from waves 1–7 (which were almost all
-> soundness). Six were **silent wrong answers** (four left), two were the **scheduler** and **both are
+> soundness). Six were **silent wrong answers** (three left), two were the **scheduler** and **both are
 > now fixed** (2026-08-18, `fix/mn-idle-policy-w8-8-w8-7`): `--threads=1` ran *two* CPU runners
 > (**W8-8** — now 1.00 cores, matching Go's `GOMAXPROCS=1`), and the default worker count was the
 > *slowest* setting (**W8-7** — every preemption broadcast to every idle worker; `sys` at the default

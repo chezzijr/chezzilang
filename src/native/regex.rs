@@ -415,4 +415,20 @@ mod tests {
         let e = do_replace_all(r"(", "x", r"\1").unwrap_err();
         assert!(e.contains("regex parse error"), "{e}");
     }
+
+    /// W8-6's doc half: `docs/stdlib.md` documented the OLD `Ok('\2/\1')` result. That sentence is now
+    /// false, and prose has no other gate — this one reads the shipped file (`src/main.rs:707` compiles
+    /// the same doc into `chezzi docs`), so a revert of the fix without a revert of the doc fails here.
+    #[test]
+    fn stdlib_doc_no_longer_claims_the_old_ok_result() {
+        let doc = include_str!("../../docs/stdlib.md");
+        assert!(
+            !doc.contains(r"Ok('\\2/\\1')"),
+            "docs/stdlib.md still claims replace_all(r\"(\\d+)-(\\d+)\", \"10-20\", r\"\\2/\\1\") returns Ok"
+        );
+        assert!(
+            doc.contains("W8-6") && doc.contains("closed 2026-08-27"),
+            "docs/stdlib.md must record W8-6 as closed on 2026-08-27"
+        );
+    }
 }

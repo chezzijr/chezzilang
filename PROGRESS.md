@@ -7,6 +7,17 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+> **✅ FIXED, 2026-08-27 (TICKET-005) — `docs/gaps.md` `W8-6`: `regex.replace_all` rejects Python
+> group refs instead of silently emitting literal backslashes.** `check_replacement_dialect`
+> (`src/native/regex.rs`) runs from `do_replace_all` after the pattern compiles, so a bad pattern
+> still reports first. A backslash followed by an ASCII digit, or `\g<name>`, is now an `Err`:
+> `replace_all(r"(\d+)-(\d+)", "10-20", r"\2/\1")` → `Err("replace_all: '\2' is not a group
+> reference here — the replacement dialect is RE2 (the Rust regex crate), not Python's re; write
+> '$2' or '${2}'")`. Every other backslash stays literal (`r"\n"`, `r"C:\tmp"` unchanged), and
+> `r"$2/$1"` keeps returning `Ok('20/10')`. `.project/run-test.sh --one
+> tests/chz/stdlib/regex_test.chz::replace_all_rejects_python_backslash_group_refs` →
+> `1 test(s): 1 passed, 0 failed, 0 errored (3 filtered out)`.
+>
 > **✅ FIXED, 2026-08-27 (TICKET-003) — `docs/gaps.md` `W8-10`: `chezzi run -- <args>` now forwards
 > args after `--` in manifest mode, and file-mode now strips a literal `--` it was previously
 > forwarding through unchanged.** `cmd_run`'s arg loop (`src/main.rs`) tracks a `forwarding` bool set
@@ -469,18 +480,18 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `feat/diagnostic-pass-w8-2-airlock` branch; **W8-14 (runtime stack traces name no file), W8-15 (both
 > `check`/`test` `--errors=json` halves), and W8-5 (`json.parse`'s and `json.stringify`'s depth aborts)
 > closed 2026-08-18** on `feat/span-file-and-stdlib-contracts`; **W8-8 and W8-7 (the scheduler pair)
-> closed 2026-08-18** on `fix/mn-idle-policy-w8-8-w8-7`. **15 rows are open** (W8-1, W8-3, W8-4, W8-6,
+> closed 2026-08-18** on `fix/mn-idle-policy-w8-8-w8-7`. **14 rows are open** (W8-1, W8-3, W8-4,
 > W8-9..W8-13, W8-16, W8-17, W8-19, W8-20, plus the two decided milestones W8-21/W8-22) and are the top
 > of the pre-JIT queue.
 >
 > **The shape:** semantics are in good shape (40+ CPython differentials → **one** differing byte, `NaN`
 > casing; a 7,000-op `std.collections` fuzz → zero mismatches; `defer`/`panic`/`recover` byte-identical
-> to Go), and the layer *around* the semantics is not — **six silent wrong answers, five still open**
+> to Go), and the layer *around* the semantics is not — **six silent wrong answers, four still open**
 > (W8-1 interpolation
 > eats `{n}` regex quantifiers · ~~W8-2 a discarded `Result` is fatal at top level and silent inside a fn~~ **fixed** ·
 > W8-3 `Shared.set` inside `update` loses the write · W8-4 `sort_by_key` callback mutations vanish ·
-> W8-5 `json.parse` depth kills the process despite its `Result` · W8-6 `regex` `\1` silently emits
-> literal backslashes), ~~a **scheduler whose default is its slowest setting** (W8-7; `--threads=1`
+> W8-5 `json.parse` depth kills the process despite its `Result` · ~~W8-6 `regex` `\1` silently emits
+> literal backslashes~~ **fixed**), ~~a **scheduler whose default is its slowest setting** (W8-7; `--threads=1`
 > actually runs **two** workers — W8-8, which invalidates every rationale in the tree citing a
 > `CHEZZI_THREADS=1` measurement)~~ **both fixed 2026-08-18** — the default is now at parity with the
 > best setting, `--threads=1` is 1.00 cores, and all nine `CHEZZI_THREADS=1`-based rationales were

@@ -983,9 +983,12 @@ choice. (`docs/gaps.md` **W8-1**.)
 **The dialect is RE2 (the Rust `regex` crate), not Python's `re`.** Four differences bite in order of
 how often:
 
-- **Replacement is `$1` / `${name}`, Rust-style — Python's `\1` is NOT an escape and emits literal
-  backslashes with no error.** `replace_all(r"(\d+)-(\d+)", "10-20", r"$2/$1")` → `Ok('20/10')`;
-  the same call with `r"\2/\1"` → `Ok('\\2/\\1')`. Silent, `Ok`, plausible-looking. (**W8-6**.)
+- **Replacement is `$1` / `${name}`, Rust-style — Python's `\1` is REJECTED, not silently
+  passed through.** `replace_all(r"(\d+)-(\d+)", "10-20", r"$2/$1")` → `Ok('20/10')`; the same
+  call with `r"\2/\1"` → an `Err` naming the RE2 form (`'$2'`). A backslash not followed by a
+  digit or `g<` still stays literal, so `r"\n"` as a replacement still produces backslash-n — that
+  is the only remaining way to put a literal backslash in a replacement.
+  (**W8-6**, closed 2026-08-27.)
 - **Argument order is `(pattern, subject, repl)`** — the *replacement is last*, the reverse of
   `re.sub(pattern, repl, subject)`. Both are `str`, so swapping them type-checks.
 - **No lookaround and no backreferences** (RE2 has linear-time guarantees precisely because it drops
