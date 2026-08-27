@@ -107,7 +107,16 @@ fn diagnostics_inner(path: &Path, source: &str) -> Vec<Diag> {
                 std::collections::HashMap::new();
             errs.into_iter()
                 .chain(warns)
-                .map(|e| graph_diag(&graph, source, &mut cache, e.span, e.message, e.severity))
+                .map(|e| {
+                    // TICKET-007: a near-miss `help` suggestion has no field of its own in `Diag`, so
+                    // it rides `message` — the LSP's only text surface. `graph_diag` sees just the
+                    // combined string.
+                    let message = match &e.help {
+                        Some(h) => format!("{}\nhelp: {h}", e.message),
+                        None => e.message,
+                    };
+                    graph_diag(&graph, source, &mut cache, e.span, message, e.severity)
+                })
                 .collect()
         }
     }
@@ -1294,6 +1303,19 @@ mod tests {
         // The squiggle covers the whole `zzz` identifier (col 5..8, 0-based).
         assert_eq!(d.col, 5);
         assert_eq!(d.end_col, 8);
+    }
+
+    /// TICKET-007 criterion 14: a near-miss `help` suggestion rides the LSP's `message` field.
+    #[test]
+    fn diag_help_appended_to_message() {
+        let ds = diag("xs := [1, 2, 3]\nxs.lenght()\n");
+        assert!(!ds.is_empty(), "method typo should produce a diagnostic");
+        let d = &ds[0];
+        assert!(d.message.contains("has no method 'lenght'"), "got: {d:?}");
+        assert!(
+            d.message.contains("help: did you mean 'len'?"),
+            "got: {d:?}"
+        );
     }
 
     fn hov(src: &str, line: u32, ch: u32) -> Option<HoverInfo> {
