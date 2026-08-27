@@ -6311,6 +6311,79 @@ fn method_typo_suggests_near_miss() {
     );
 }
 
+/// TICKET-007 criterion 2: a struct field typo suggests the near-miss field name.
+#[test]
+fn field_typo_suggests_near_miss() {
+    rejects_help(
+        "struct P:\n    x: int\n    y: int\np := P(1, 2)\nq := p.z\n",
+        "has no field 'z'",
+        "did you mean",
+    );
+}
+
+/// TICKET-007 criterion 3: a user struct method typo suggests the near-miss method name.
+#[test]
+fn struct_method_typo_suggests_near_miss() {
+    rejects_help(
+        "struct T:\n    fn tick(self) -> int:\n        return 1\nt := T()\nt.tik()\n",
+        "has no method 'tik'",
+        "did you mean 'tick'",
+    );
+}
+
+/// TICKET-007 criterion 4: a field-assign typo suggests the near-miss field name too.
+#[test]
+fn field_assign_typo_suggests_near_miss() {
+    rejects_help(
+        "struct P:\n    x: int\n    y: int\np := P(1, 2)\np.zz = 3\n",
+        "cannot assign to 'zz'",
+        "did you mean",
+    );
+}
+
+/// TICKET-007 criterion 5: an unrelated method name gets no invented suggestion.
+#[test]
+fn unrelated_method_name_suggests_nothing() {
+    let errs = check_src("xs := [1, 2, 3]\nxs.qqqqq()\n");
+    let e = errs
+        .iter()
+        .find(|e| e.message.contains("has no method 'qqqqq'"))
+        .unwrap_or_else(|| panic!("expected a 'qqqqq' miss, got: {errs:?}"));
+    assert_eq!(e.help, None, "expected no suggestion, got: {e:?}");
+}
+
+/// TICKET-007 criterion 12: a newtype method typo suggests the newtype's own method.
+#[test]
+fn newtype_method_typo_suggests_near_miss() {
+    rejects_help(
+        "newtype Wrap = int:\n    fn tick(self) -> int:\n        return 1\nw := Wrap(1)\nw.tik()\n",
+        "has no method 'tik'",
+        "did you mean 'tick'",
+    );
+}
+
+/// TICKET-007 criterion 13: an enum method typo suggests the enum's own method.
+#[test]
+fn enum_method_typo_suggests_near_miss() {
+    rejects_help(
+        "enum Opt[T]:\n    Some(T)\n    None\n    fn peek(self) -> int:\n        return 1\no := Opt.Some(5)\no.pek()\n",
+        "has no method 'pek'",
+        "did you mean 'peek'",
+    );
+}
+
+/// TICKET-007 criterion 7: candidates are sorted before scoring, so a tie is deterministic. All
+/// eight methods score 1 against `aa`; without `.sort()` in `Checker::method_names` this fails in
+/// 7 runs out of 8 because `StructInfo.methods` is a `HashMap`.
+#[test]
+fn sorted_candidates_break_ties_deterministically() {
+    rejects_help(
+        "struct S:\n    fn ab(self) -> int:\n        return 1\n    fn ac(self) -> int:\n        return 1\n    fn ad(self) -> int:\n        return 1\n    fn ae(self) -> int:\n        return 1\n    fn ba(self) -> int:\n        return 1\n    fn ca(self) -> int:\n        return 1\n    fn da(self) -> int:\n        return 1\n    fn ea(self) -> int:\n        return 1\ns := S()\ns.aa()\n",
+        "has no method 'aa'",
+        "did you mean 'ab'",
+    );
+}
+
 #[test]
 fn struct_field_access_ok() {
     ok("struct P:\n    x: int\np := P(1)\nq := p.x + 1\n");
