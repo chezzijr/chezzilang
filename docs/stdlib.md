@@ -1371,8 +1371,12 @@ civil-calendar algorithms), so it is **identical across runs**. `import std.date
 
 ```chezzi
 struct DateTime:
-    year: int; month: int; day: int
-    hour: int; minute: int; second: int
+    year: int
+    month: int
+    day: int
+    hour: int
+    minute: int
+    second: int
     weekday: int    # 0=Sunday .. 6=Saturday (contractual)
 ```
 

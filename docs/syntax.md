@@ -57,7 +57,7 @@ struct Point:
 true  false   # bool
 "hello"       # str
 'hello'       # str — single quotes are equivalent to double (same escapes & interpolation)
-"""say "hi""""  # str — triple-quoted; unescaped quotes allowed inside (same escapes & interpolation)
+"""say "hi" out loud"""  # str — triple-quoted; unescaped quotes allowed inside (same escapes & interpolation)
 '''it's "ok"'''  # str — triple single-quote, equivalent
 "hi {name}"   # str with interpolation — see §10
 "emoji \u{1F600}, A=\u{41}"   # str — \u{HEX} unicode escape (1-6 hex digits)
@@ -1729,12 +1729,14 @@ struct Box[T]:
             return other
         return self.val
 
-b := Box(5); print(b.top())          # 5   — int is Comparable
+b := Box(5)
+print(b.top())                       # 5   — int is Comparable
 print(b.max2(9))                     # 9
 
 import std.net
 fn f(s: net.Socket):
-    bad := Box(s); bad.top()         # ERROR at check time: Socket does not satisfy Comparable
+    bad := Box(s)
+    bad.top()                        # ERROR at check time: Socket does not satisfy Comparable
 ```
 
 Just like a free fn's `where`, the method **body** may use the bounded operation (`<` above needs
