@@ -23,7 +23,7 @@ USAGE:
     chezzi <command> [flags] <file.chz> [program args...]
 
 COMMANDS:
-    init    [dir]    Scaffold a new Chezzi project (manifest + src)
+    init    [dir]    Scaffold a new Chezzi project (manifest + src; never overwrites)
     run     [file]   Type-check, then run on the bytecode VM (no file → manifest entrypoint)
     test    [path]   Run every `test fn` in *_test.chz files
     check   <file>   Type-check only; report errors
@@ -581,7 +581,8 @@ fn cmd_test(args: &[String]) -> ExitCode {
 }
 
 /// `chezzi init [dir]` — scaffold a new Chezzi project. `dir` defaults to the current directory;
-/// it (and any parents) are created if missing. Refuses to clobber an existing `chezzi.toml`.
+/// it (and any parents) are created if missing. Refuses to clobber an existing `chezzi.toml`;
+/// keeps any other file already present.
 fn cmd_init(args: &[String]) -> ExitCode {
     let mut dir: Option<String> = None;
     for arg in args {
@@ -600,18 +601,28 @@ fn cmd_init(args: &[String]) -> ExitCode {
     let dir = dir.unwrap_or_else(|| ".".to_string());
     let path = std::path::Path::new(&dir);
     match scaffold_project(path) {
-        Ok(()) => {
+        Ok(report) => {
             println!("chezzi: scaffolded a new project in {}", path.display());
             println!(
                 "  chezzi.toml          project manifest (entrypoint = \"src.main:main\" — drives bare `chezzi run`)"
             );
-            println!(
-                "  src/main.chz         entry script  — run with: chezzi run (from {dir}). NOTE `chezzi run {dir}/src/main.chz` runs the file's TOP LEVEL only, so it will NOT call main()",
-            );
-            println!(
-                "  src/main_test.chz    example test   — run with: chezzi test {}",
-                dir
-            );
+            match report.main {
+                Scaffolded::Created => println!(
+                    "  src/main.chz         entry script  — run with: chezzi run (from {dir}). NOTE `chezzi run {dir}/src/main.chz` runs the file's TOP LEVEL only, so it will NOT call main()",
+                ),
+                Scaffolded::Kept => println!(
+                    "  src/main.chz         kept — a file was already here, left untouched (init never overwrites)"
+                ),
+            }
+            match report.main_test {
+                Scaffolded::Created => println!(
+                    "  src/main_test.chz    example test   — run with: chezzi test {}",
+                    dir
+                ),
+                Scaffolded::Kept => println!(
+                    "  src/main_test.chz    kept — a file was already here, left untouched (init never overwrites)"
+                ),
+            }
             ExitCode::SUCCESS
         }
         Err(e) => {
@@ -621,25 +632,63 @@ fn cmd_init(args: &[String]) -> ExitCode {
     }
 }
 
+/// Whether `write_if_absent` created a file or found one already there. `init` never overwrites a
+/// file it did not create (W8-24).
+#[derive(Debug, PartialEq)]
+enum Scaffolded {
+    Created,
+    Kept,
+}
+
+/// Which scaffold files `scaffold_project` created vs. found already present.
+#[derive(Debug)]
+struct ScaffoldReport {
+    main: Scaffolded,
+    main_test: Scaffolded,
+}
+
+/// Write `body` to `path` only if `path` does not already exist. The single `create_new` open is the
+/// atomic guard against the TOCTOU race an `exists()`-then-`write` would have; no caller may
+/// reintroduce that race.
+fn write_if_absent(path: &std::path::Path, body: &str) -> Result<Scaffolded, String> {
+    use std::io::Write;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(mut f) => {
+            f.write_all(body.as_bytes())
+                .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+            Ok(Scaffolded::Created)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(Scaffolded::Kept),
+        Err(e) => Err(format!("cannot write {}: {e}", path.display())),
+    }
+}
+
 /// Write the scaffold for a new project into `dir`: a `chezzi.toml` manifest, `src/main.chz`, and an
-/// example `src/main_test.chz`. Creates `dir` (and parents) if needed; refuses to overwrite an
-/// existing `chezzi.toml` (so it never clobbers a real project). Pure filesystem work — this is the
-/// unit-testable core behind `cmd_init`. The manifest's `[project] entrypoint` is written ACTIVE
-/// (`"src.main:main"` — module path + `:function`), so a freshly-init'd project runs with a bare
-/// `chezzi run`, which calls `main` directly (no trailing call in the source needed; see
-/// `manifest::parse` + `resolve_entrypoint`).
-fn scaffold_project(dir: &std::path::Path) -> Result<(), String> {
+/// example `src/main_test.chz`. Creates `dir` (and parents) if needed; refuses on an existing
+/// `chezzi.toml` (the directory is already a project) and keeps any other file that is already there.
+/// Pure filesystem work — this is the unit-testable core behind `cmd_init`. The manifest's
+/// `[project] entrypoint` is written ACTIVE (`"src.main:main"` — module path + `:function`), so a
+/// freshly-init'd project runs with a bare `chezzi run`, which calls `main` directly (no trailing call
+/// in the source needed; see `manifest::parse` + `resolve_entrypoint`).
+fn scaffold_project(dir: &std::path::Path) -> Result<ScaffoldReport, String> {
     use std::fs;
 
     fs::create_dir_all(dir)
         .map_err(|e| format!("cannot create directory '{}': {e}", dir.display()))?;
 
     let manifest = dir.join("chezzi.toml");
-    if manifest.exists() {
-        return Err(format!(
+    let manifest_taken = || {
+        format!(
             "chezzi.toml already exists in {}; not overwriting (refusing to clobber an existing project)",
             dir.display()
-        ));
+        )
+    };
+    if manifest.exists() {
+        return Err(manifest_taken());
     }
 
     // Project name: the target dir's basename (canonicalized, so "." resolves to the current
@@ -680,8 +729,9 @@ fn scaffold_project(dir: &std::path::Path) -> Result<(), String> {
          version = \"0.1.0\"\n\
          entrypoint = \"src.main:main\"   # → src/main.chz, calls `main`; run with a bare `chezzi run`\n",
     );
-    fs::write(&manifest, manifest_body)
-        .map_err(|e| format!("cannot write {}: {e}", manifest.display()))?;
+    if write_if_absent(&manifest, &manifest_body)? == Scaffolded::Kept {
+        return Err(manifest_taken());
+    }
 
     let src = dir.join("src");
     fs::create_dir_all(&src).map_err(|e| format!("cannot create {}: {e}", src.display()))?;
@@ -696,8 +746,7 @@ fn scaffold_project(dir: &std::path::Path) -> Result<(), String> {
         fn main():\n\
         \x20   print(\"Hello from Chezzi!\")\n";
     let main_path = src.join("main.chz");
-    fs::write(&main_path, main_chz)
-        .map_err(|e| format!("cannot write {}: {e}", main_path.display()))?;
+    let main = write_if_absent(&main_path, main_chz)?;
 
     let test_chz = "# src/main_test.chz — example test.\n\
         #\n\
@@ -710,10 +759,9 @@ fn scaffold_project(dir: &std::path::Path) -> Result<(), String> {
         test fn strings():\n\
         \x20   assert \"a\" + \"b\" == \"ab\", \"string concat\"\n";
     let test_path = src.join("main_test.chz");
-    fs::write(&test_path, test_chz)
-        .map_err(|e| format!("cannot write {}: {e}", test_path.display()))?;
+    let main_test = write_if_absent(&test_path, test_chz)?;
 
-    Ok(())
+    Ok(ScaffoldReport { main, main_test })
 }
 
 /// Embedded language documentation, keyed by topic. `include_str!` paths are relative to this file
@@ -1294,6 +1342,43 @@ mod init_tests {
             contents, "# my precious work\n",
             "chezzi init overwrote an existing src/main.chz"
         );
+    }
+
+    #[test]
+    fn init_keeps_existing_main_test_chz_and_writes_the_rest() {
+        let d = TmpDir::new();
+        std::fs::create_dir_all(d.0.join("src")).unwrap();
+        std::fs::write(d.0.join("src/main_test.chz"), "# my test\n").unwrap();
+        let report = scaffold_project(&d.0).expect("scaffold should succeed");
+        let contents = std::fs::read_to_string(d.0.join("src/main_test.chz")).unwrap();
+        assert_eq!(
+            contents, "# my test\n",
+            "chezzi init overwrote an existing src/main_test.chz"
+        );
+        assert!(d.0.join("chezzi.toml").is_file(), "chezzi.toml missing");
+        assert!(d.0.join("src/main.chz").is_file(), "src/main.chz missing");
+        assert_eq!(report.main, Scaffolded::Created);
+        assert_eq!(report.main_test, Scaffolded::Kept);
+    }
+
+    #[test]
+    fn init_writes_no_byte_over_existing_sources() {
+        let d = TmpDir::new();
+        std::fs::create_dir_all(d.0.join("src")).unwrap();
+        std::fs::write(d.0.join("src/main.chz"), "x").unwrap();
+        std::fs::write(d.0.join("src/main_test.chz"), "x").unwrap();
+        scaffold_project(&d.0).expect("scaffold should succeed");
+        assert_eq!(
+            std::fs::metadata(d.0.join("src/main.chz")).unwrap().len(),
+            1
+        );
+        assert_eq!(
+            std::fs::metadata(d.0.join("src/main_test.chz"))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(d.0.join("chezzi.toml").is_file(), "chezzi.toml missing");
     }
 
     #[test]
