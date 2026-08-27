@@ -799,10 +799,11 @@ impl Checker {
                     .and_then(|l| l.as_deref())
                     .map(|s| format!("parameter '{s}'"))
                     .unwrap_or_else(|| format!("argument {}", i + 1));
+                let note = self.protocol_note(pt, &at);
                 self.error(
                     e.span,
                     format!(
-                        "{pname} of a function-value call: expected {pt}, found {at}{}",
+                        "{pname} of a function-value call: expected {pt}, found {at}{}{note}",
                         widen_note(pt, &at, e)
                     ),
                 );
@@ -1584,10 +1585,11 @@ impl Checker {
                                     && !elem.is_unknown()
                                     && !self.assignable(&t, &elem)
                                 {
+                                    let note = self.protocol_note(&t, &elem);
                                     self.error(
                                         args[0].span,
                                         format!(
-                                            "List[{t}]() expected elements of type {t}, found {elem}"
+                                            "List[{t}]() expected elements of type {t}, found {elem}{note}"
                                         ),
                                     );
                                 }
@@ -1644,10 +1646,11 @@ impl Checker {
                                     && !elem.is_unknown()
                                     && !self.assignable(&t, &elem)
                                 {
+                                    let note = self.protocol_note(&t, &elem);
                                     self.error(
                                         args[0].span,
                                         format!(
-                                            "Set[{t}]() expected elements of type {t}, found {elem}"
+                                            "Set[{t}]() expected elements of type {t}, found {elem}{note}"
                                         ),
                                     );
                                 }
@@ -1719,18 +1722,20 @@ impl Checker {
                         };
                         if let Some((tk, tv)) = &targ_kv {
                             if !tk.is_unknown() && !k.is_unknown() && !self.assignable(tk, &k) {
+                                let note = self.protocol_note(tk, &k);
                                 self.error(
                                     args[0].span,
                                     format!(
-                                        "Map[{tk}, {tv}]() expected keys of type {tk}, found {k}"
+                                        "Map[{tk}, {tv}]() expected keys of type {tk}, found {k}{note}"
                                     ),
                                 );
                             }
                             if !tv.is_unknown() && !v.is_unknown() && !self.assignable(tv, &v) {
+                                let note = self.protocol_note(tv, &v);
                                 self.error(
                                     args[0].span,
                                     format!(
-                                        "Map[{tk}, {tv}]() expected values of type {tv}, found {v}"
+                                        "Map[{tk}, {tv}]() expected values of type {tv}, found {v}{note}"
                                     ),
                                 );
                             }
@@ -3955,7 +3960,10 @@ impl Checker {
                 // The element-pin narrative is only valid for a List/Set collection receiver. The
                 // method name `add` also names `Atomic.add` (a handle), whose float mismatch must NOT
                 // show the collection hint — gate on the receiver actually being a collection.
-                let hint = if is_collection && i == 0 && matches!(name, "push" | "add" | "insert") {
+                let pnote = self.protocol_note(pt, &at);
+                let hint = if !pnote.is_empty() {
+                    pnote
+                } else if is_collection && i == 0 && matches!(name, "push" | "add" | "insert") {
                     // Only an UN-BOUND/leaked type param (not in scope here) means "un-inferred": a
                     // return-only `T` from `empty[T]()` called with nothing to bind it from. A
                     // `Ty::Param` that IS in scope (`self.type_params`) is a legitimately-bound

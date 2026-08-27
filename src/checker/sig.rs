@@ -2020,10 +2020,11 @@ impl Checker {
                             &val_ty,
                             crate::ast::untyped_int_const(value),
                         ) {
+                            let note = self.protocol_note(&expected, &val_ty);
                             self.error(
                                 value.span,
                                 format!(
-                                    "cannot assign {val_ty} to variable of type {expected}{}{}",
+                                    "cannot assign {val_ty} to variable of type {expected}{}{}{note}",
                                     widen_note(&expected, &val_ty, value),
                                     crate::checker::ty::fn_arity_note(&expected, &val_ty)
                                 ),
@@ -2266,10 +2267,11 @@ impl Checker {
                                 crate::ast::untyped_int_const(def),
                             )
                         {
+                            let note = self.protocol_note(&expected, &actual);
                             self.error(
                                 def.span,
                                 format!(
-                                    "default value for field '{}': expected {expected}, found {actual}{}",
+                                    "default value for field '{}': expected {expected}, found {actual}{}{note}",
                                     field.name,
                                     widen_note(&expected, &actual, def)
                                 ),
@@ -3586,10 +3588,11 @@ impl Checker {
         match op {
             AssignOp::Eq => {
                 if !self.assignable(target_ty, val_ty) {
+                    let note = self.protocol_note(target_ty, val_ty);
                     self.error(
                         span,
                         format!(
-                            "cannot assign {val_ty} to {target_ty}{}",
+                            "cannot assign {val_ty} to {target_ty}{}{note}",
                             crate::checker::ty::fn_arity_note(target_ty, val_ty)
                         ),
                     );
@@ -3728,10 +3731,11 @@ impl Checker {
                 if ret == Ty::Nil {
                     self.error(e.span, "function returns nothing, cannot return a value");
                 } else if !self.assignable_w(&ret, &ty, crate::ast::untyped_int_const(e)) {
+                    let note = self.protocol_note(&ret, &ty);
                     self.error(
                         e.span,
                         format!(
-                            "expected return type {ret}, found {ty}{}",
+                            "expected return type {ret}, found {ty}{}{note}",
                             widen_note(&ret, &ty, e)
                         ),
                     );
@@ -3921,7 +3925,11 @@ impl Checker {
         if let Some(elem) = self.yield_ty.clone()
             && !self.assignable(&elem, &ty)
         {
-            self.error(e.span, format!("expected yield type {elem}, found {ty}"));
+            let note = self.protocol_note(&elem, &ty);
+            self.error(
+                e.span,
+                format!("expected yield type {elem}, found {ty}{note}"),
+            );
         }
     }
 
@@ -4136,10 +4144,11 @@ impl Checker {
                 if !matches!(ty, Ty::Unknown)
                     && !self.assignable_w(&ty, &actual, crate::ast::untyped_int_const(def))
                 {
+                    let note = self.protocol_note(&ty, &actual);
                     self.error(
                         def.span,
                         format!(
-                            "default value for parameter '{}': expected {ty}, found {actual}{}",
+                            "default value for parameter '{}': expected {ty}, found {actual}{}{note}",
                             param.name,
                             widen_note(&ty, &actual, def)
                         ),
@@ -4175,10 +4184,11 @@ impl Checker {
                     self.error(e.span, "function returns nothing, cannot return a value");
                 }
             } else if !self.assignable_w(&ret, &ty, crate::ast::untyped_int_const(e)) {
+                let note = self.protocol_note(&ret, &ty);
                 self.error(
                     e.span,
                     format!(
-                        "expected return type {ret}, found {ty}{}",
+                        "expected return type {ret}, found {ty}{}{note}",
                         widen_note(&ret, &ty, e)
                     ),
                 );
