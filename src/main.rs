@@ -226,8 +226,18 @@ fn cmd_run(args: &[String]) -> ExitCode {
     // treats `--threads=4` as a program arg (path is already set), not an engine size.
     // Correct form: `chezzi run --threads=4 prog.chz`.
     let mut prog_args: Vec<String> = Vec::new();
+    // Once a bare `--` terminator is seen, every remaining arg is forwarded to the program
+    // unchanged (even one shaped like a flag), and the `--` itself is consumed, not forwarded.
+    // This applies whether or not a file path has already been set, so it covers manifest-mode
+    // `chezzi run -- --dir logs` (no path ever set) as well as `chezzi run file.chz -- --dir logs`.
+    let mut forwarding = false;
     for arg in args {
+        if forwarding {
+            prog_args.push(arg.clone());
+            continue;
+        }
         match arg.as_str() {
+            "--" => forwarding = true,
             _ if path.is_some() => prog_args.push(arg.clone()),
             "--errors=json" => json = true,
             "--parallel" => {} // accepted no-op alias — the engine is the default already
