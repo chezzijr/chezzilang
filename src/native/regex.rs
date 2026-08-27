@@ -125,8 +125,41 @@ fn do_find_all(pat: &str, s: &str) -> Result<Vec<MatchData>, String> {
         .collect())
 }
 
+/// Python's `re.sub` replacement dialect is not RE2's: `\1` and `\g<name>` are group references in
+/// Python, and mean NOTHING to the `regex` crate's expander, which copies them through as literal
+/// text — so the call returned a plausible `Ok` (`docs/gaps.md` W8-6). Reject both and name the RE2
+/// form. A backslash NOT followed by a digit or `g<` stays literal, so `r"\n"` and `r"C:\tmp"` are
+/// untouched; that is the only way left to put a backslash in a replacement, and it is deliberate.
+fn check_replacement_dialect(repl: &str) -> Result<(), String> {
+    for (i, c) in repl.bytes().enumerate() {
+        if c != b'\\' {
+            continue;
+        }
+        let rest = &repl[i + 1..];
+        if rest.starts_with(|c: char| c.is_ascii_digit()) {
+            let n: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            return Err(format!(
+                "replace_all: '\\{n}' is not a group reference here — the replacement dialect is \
+                 RE2 (the Rust regex crate), not Python's re; write '${n}' or '${{{n}}}'"
+            ));
+        }
+        let named = rest
+            .strip_prefix("g<")
+            .and_then(|a| a.find('>').map(|end| &a[..end]));
+        if let Some(name) = named {
+            return Err(format!(
+                "replace_all: '\\g<{name}>' is not a group reference here — the replacement \
+                 dialect is RE2 (the Rust regex crate), not Python's re; write '${{{name}}}'"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn do_replace_all(pat: &str, s: &str, repl: &str) -> Result<String, String> {
-    Ok(compiled(pat)?.replace_all(s, repl).into_owned())
+    let re = compiled(pat)?;
+    check_replacement_dialect(repl)?;
+    Ok(re.replace_all(s, repl).into_owned())
 }
 
 fn do_split(pat: &str, s: &str) -> Result<Vec<String>, String> {
