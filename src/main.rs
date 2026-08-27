@@ -1284,6 +1284,19 @@ mod init_tests {
     }
 
     #[test]
+    fn init_does_not_overwrite_existing_main_chz_without_manifest() {
+        let d = TmpDir::new();
+        std::fs::create_dir_all(d.0.join("src")).unwrap();
+        std::fs::write(d.0.join("src/main.chz"), "# my precious work\n").unwrap();
+        scaffold_project(&d.0).expect("scaffold should succeed");
+        let contents = std::fs::read_to_string(d.0.join("src/main.chz")).unwrap();
+        assert_eq!(
+            contents, "# my precious work\n",
+            "chezzi init overwrote an existing src/main.chz"
+        );
+    }
+
+    #[test]
     fn scaffolded_main_runs() {
         let d = TmpDir::new();
         scaffold_project(&d.0).expect("scaffold should succeed");
