@@ -3367,19 +3367,16 @@ a parsed manifest**: the toolchain reads its `[project]` keys (`name`/`version` 
 (`[section]` headers, `key = "value"` string pairs, `#` comments); an empty `chezzi.toml` is a valid
 root marker with no entrypoint.
 
-> **Manifest mode cannot forward program arguments — this blocks the CLI use case.** Program args are
-> only recognised *after* a file path, and there is **no `--` terminator**, so from a scaffolded project:
+> **Manifest mode forwards program arguments after a `--` terminator**, matching `go run . -- --dir x`
+> / `cargo run -- --dir x`:
 >
 > ```
-> $ chezzi run --dir logs      → chezzi run: unknown flag '--dir'
-> $ chezzi run -- --dir logs   → chezzi run: unknown flag '--'
+> $ chezzi run -- --dir logs   # entrypoint sees std.os.args() == ['--dir', 'logs']
 > ```
 >
-> `go run . --dir x`, `python -m pkg --dir x` and `cargo run -- --dir x` all forward. Until this is
-> fixed (`docs/gaps.md` **W8-10**), a CLI must be run in the **file** form — `chezzi run src/main.chz
-> --dir logs` — which runs the top level only, so drop the `:main` suffix from `entrypoint` and end
-> `src/main.chz` with an explicit `main()` call. Note the trap that pairs with this: the file form of a
-> `:main` project is a **silent no-op with `rc=0`** (top level runs, `main` is never called).
+> `--` is consumed, not forwarded, and the same terminator works in the **file** form too
+> (`chezzi run src/main.chz -- --dir logs`) — there it strips the `--` from what was already forwarded
+> after the path. (Fixed `docs/gaps.md` **W8-10**.)
 
 ## 10. Strings & interpolation
 

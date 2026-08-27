@@ -7,6 +7,18 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+> **✅ FIXED, 2026-08-27 (TICKET-003) — `docs/gaps.md` `W8-10`: `chezzi run -- <args>` now forwards
+> args after `--` in manifest mode, and file-mode now strips a literal `--` it was previously
+> forwarding through unchanged.** `cmd_run`'s arg loop (`src/main.rs`) tracks a `forwarding` bool set
+> by a `"--"` match arm checked ahead of every other arm; once set, every remaining arg — including
+> one shaped like a flag — goes straight to `prog_args`, regardless of whether a file `path` is
+> already set. Tests: `tests/module_root.rs::bare_run_forwards_args_after_double_dash` (the reported
+> manifest-mode symptom) and `::file_run_strips_double_dash_terminator` (the file-mode half, measured
+> newly broken during triage, not in the original report). `chezzi test` and the shared flag helper
+> share the same `unknown flag '--'` shape and are **not** fixed by this — separate ticket if needed.
+> Not renumbered here: the "open W8 rows" counts in this file and in `CLAUDE.md`'s "Current focus"
+> section are now one high pending their next sweep.
+
 > **✅ W8-26 CLOSED, 2026-08-27 (TICKET-001) — the entry source is read ONCE; `chezzi run`/`check` on a
 > pipe execute the piped program instead of an empty one.** Root cause: the CLI (`main.rs::read_source`)
 > read the entry to check readability then discarded the bytes, and `resolver::build_graph` re-read the
