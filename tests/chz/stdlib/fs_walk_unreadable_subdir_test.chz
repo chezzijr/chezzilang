@@ -1,0 +1,37 @@
+# tests/chz/stdlib/fs_walk_unreadable_subdir_test.chz — TICKET-011 / docs/gaps.md W8-39.
+#
+# `fs.walk` over a readable root containing a mode-000 subdirectory returns an `Err` that names the
+# ROOT, not the subdirectory that actually failed to read. Run: `cargo run -- test tests/chz/`.
+
+import std.fs
+import std.os
+
+fn cleanup(d: bytes, sub: bytes):
+    _ := fs.chmod(sub, 0o755)
+    _ := fs.remove_dir(sub)
+    _ := fs.remove_dir(d)
+
+test fn walk_error_names_the_unreadable_subdir_not_the_root():
+    d := os.temp_dir().str() + "/chz_w8_39_" + str(os.getpid())
+    sub := d + "/sub"
+    r1 := fs.mkdir(d)
+    match r1:
+        Ok(_): pass
+        Err(e): assert false, "mkdir root: " + e.message()
+    r2 := fs.mkdir(sub)
+    match r2:
+        Ok(_): pass
+        Err(e): assert false, "mkdir sub: " + e.message()
+    defer cleanup(d.encode(), sub.encode())
+
+    r3 := fs.chmod(sub, 0)
+    match r3:
+        Ok(_): pass
+        Err(e): assert false, "chmod sub: " + e.message()
+
+    result := fs.walk(d)
+    match result:
+        Ok(_): assert false, "walk over an unreadable subdir must fault"
+        Err(e):
+            # THE BUG: the message named `d` (the readable root), not `sub` (the path that failed).
+            assert e.message().starts_with(sub), "expected error to name the unreadable subdir " + sub + ", got: " + e.message()
