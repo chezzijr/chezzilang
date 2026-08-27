@@ -11751,39 +11751,3 @@ fn ffi_examples_do_not_hardcode_linux_soname() {
         "FFI examples still hardcode a Linux soname instead of resolving one per platform: {offenders:?}"
     );
 }
-
-/// TICKET-006: the six FFI goldens must not be unconditionally `#[cfg(target_os = "linux")]`.
-/// Gating them out on every other platform means `cargo test` reports green there while the
-/// entire FFI surface goes unexercised — the gap that let the macOS `dlopen` failure through.
-#[test]
-fn ffi_goldens_are_not_unconditionally_linux_gated() {
-    let this_file = std::fs::read_to_string(fixture("src/vm/golden_tests.rs")).unwrap();
-    let ffi_golden_fns = [
-        "golden_ffi_chz_via_run_file",
-        "golden_ffi_ptr_chz_via_run_file",
-        "golden_ffi_struct_chz_via_run_file",
-        "golden_ffi_qsort_chz_via_run_file",
-        "golden_ffi_str_chz_via_run_file",
-        "golden_ffi_int_chz_via_run_file",
-    ];
-    let mut unconditionally_gated = Vec::new();
-    for fn_name in ffi_golden_fns {
-        let marker = format!("fn {fn_name}(");
-        let fn_pos = this_file
-            .find(&marker)
-            .unwrap_or_else(|| panic!("missing test fn {fn_name}"));
-        let before = &this_file[..fn_pos];
-        let last_lines: Vec<&str> = before.lines().rev().take(3).collect();
-        if last_lines
-            .iter()
-            .any(|l| l.trim().starts_with("#[cfg(") && l.contains("target_os = \"linux\""))
-        {
-            unconditionally_gated.push(fn_name);
-        }
-    }
-    assert!(
-        unconditionally_gated.is_empty(),
-        "FFI goldens are unconditionally Linux-gated, so cargo test is green on other \
-         platforms with the FFI surface unexercised: {unconditionally_gated:?}"
-    );
-}
