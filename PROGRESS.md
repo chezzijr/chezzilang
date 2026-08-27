@@ -502,9 +502,11 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > reachable by the standing gates.** 4375 Rust tests + 586 Chezzi tests at two worker counts + the
 > CPython differential + conformance were **all green** throughout. A silent wrong answer has no
 > assertion to fail; no gate measures performance; no gate reads a *message*; no gate executes prose;
-> and W8-11 shows a detector scoped narrower than its surface (the FFI goldens are
-> `#[cfg(target_os = "linux")]`, so `cargo test` is green on a Mac with the **entire FFI surface
-> unexercised**). Carry into the freeze: **a green suite measures the assertions you thought to write.**
+> and W8-11 showed a detector scoped narrower than its surface (the FFI goldens were
+> `#[cfg(target_os = "linux")]`, so `cargo test` was green on a Mac with the **entire FFI surface
+> unexercised** — **closed 2026-08-27, TICKET-006**: `libc`/`libm` are now logical aliases the loader
+> resolves per platform, and the goldens skip loudly instead of compiling out). Carry into the freeze:
+> **a green suite measures the assertions you thought to write.**
 > The detectors that did earn their keep are the ones comparing against something outside this repo —
 > which is CLAUDE.md's ancestor rule paying out, and the argument for `docs/future.md` §2b's unbuilt
 > Go-paired-programs differential. **Fix order** is in the session log; short version: the six silent

@@ -742,7 +742,7 @@ task's line is visible before its nursery joins). Three rules follow:
   A failure on **stderr** is swallowed — it is a diagnostic channel, and a dead `2>` reader is no reason
   to kill a healthy program.
 - **All of the above covers the VM's own sink only.** Bytes an FFI call writes to the descriptor
-  itself (`extern "libc.so.6": fn puts`) are outside every guarantee here — not line-atomic against
+  itself (`extern "libc": fn puts`) are outside every guarantee here — not line-atomic against
   `print`, not unbuffered, not ordered with it, and invisible to the broken-pipe halt, so a `| head -1`
   loop of C writes never faults. `ctypes` and `cgo` behave identically (measured); see
   [`syntax.md` §12b](syntax.md).
@@ -1134,7 +1134,7 @@ Sort a Chezzi list with libc `qsort` (the full composition — alloc + `store_*`
 ```chezzi
 import std.ffi
 
-extern "libc.so.6":
+extern "libc":
     fn qsort(base: ptr, n: int, size: int, cmp: fn(ptr, ptr) -> int)
 
 fn cmp(a: ptr, b: ptr) -> int:           # qsort hands two const void* (each an int64 slot)

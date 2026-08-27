@@ -232,7 +232,9 @@
                  | "FN" "IDENT" "LPAREN" <params> "RPAREN" "ARROW" <type> "NEWLINE"
 
 # A dynamic C-ABI FFI block: a body-less list of C function signatures bound to a shared library
-# (`extern "libm.so.6":`). Each `fn` becomes a module-global callable dispatched via dlopen+libffi.
+# (`extern "libc":` — the string is a literal; `libc`/`libm` are logical aliases the loader resolves
+# per platform, any other string is a verbatim dlopen name). Each `fn` becomes a module-global
+# callable dispatched via dlopen+libffi. The production itself is unchanged.
 # v1 marshals scalars (int/float/bool/str→char*), fixed-width ints (int8..uint64), opaque `ptr`
 # (↔ void*), and a flat-scalar struct by value (a `struct` <type> named in an extern sig) — all are
 # ordinary <type> forms recognized only inside an extern sig (no new grammar).

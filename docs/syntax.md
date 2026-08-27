@@ -3966,20 +3966,22 @@ block (indentation, not braces — `{` is a map literal) lists body-less C signa
 module-global callable, bound at module init by `dlopen` + `dlsym` and dispatched at runtime via
 `libffi`. A missing library or symbol fails at startup.
 
-> **The library name is passed straight to `dlopen`, so it is PLATFORM-SPECIFIC and NOT portable.**
-> Every example below and in `examples/ffi*.chz` spells the Linux glibc names `libc.so.6` / `libm.so.6`;
-> on **macOS** those do not exist and the block dies at module init with a `dlopen` failure — use
-> `libSystem.B.dylib` (it carries both libc and libm). There is no per-platform selection syntax and no
-> `libc`-alias resolution: pick the name for the host you run on. Note the repo's FFI goldens are
-> `#[cfg(target_os = "linux")]`, so `cargo test` is **green on a Mac with the entire FFI surface
-> unexercised** — don't read a green suite as evidence FFI works there (`docs/gaps.md` **W8-11**).
+> **The library name is passed straight to `dlopen`, unless it is one of the two LOGICAL aliases
+> `libc` / `libm`.** Those two resolve to a per-platform candidate list tried in order (Linux:
+> `libc.so.6`/`libc.so`, `libm.so.6`/`libm.so`; macOS: `libSystem.B.dylib`/`libc.dylib` or
+> `libSystem.B.dylib`/`libm.dylib`; other unix: `libc.so`/`libm.so`), so `extern "libc":` and
+> `extern "libm":` work unmodified on both Linux and macOS. Every other library string still goes to
+> `dlopen` **verbatim and is PLATFORM-SPECIFIC** — there is no alias resolution for it, and picking a
+> portable name is the caller's job. The repo's FFI goldens now run on every platform where the
+> `libc`/`libm` aliases resolve, printing a `SKIP <name>: <reason>` line instead of compiling
+> themselves out where they don't (`docs/gaps.md` **W8-11**).
 
 ```chezzi
-extern "libm.so.6":         # macOS: "libSystem.B.dylib"
+extern "libm":
     fn cos(x: float) -> float
     fn sqrt(x: float) -> float
 
-extern "libc.so.6":
+extern "libc":
     fn strlen(s: str) -> int
 
 print(cos(0.0))        # 1.0
@@ -4013,7 +4015,7 @@ struct DivT:
     quot: int32
     rem: int32
 
-extern "libc.so.6":
+extern "libc":
     fn div(numer: int32, denom: int32) -> DivT
 
 r := div(17, 5)
@@ -4096,7 +4098,7 @@ faulting. Rust sets SIGPIPE to `SIG_IGN` process-wide and the loaded C library i
 disposition, so the signal a plain C program would die from never arrives either.
 
 ```chezzi
-extern "libc.so.6":
+extern "libc":
     fn puts(s: str) -> int
 
 print("chezzi-1")
@@ -4125,7 +4127,7 @@ character of difference in the declaration:
 import std.io
 import int32 from std.ffi
 
-extern "libc.so.6":
+extern "libc":
     fn puts(s: str) -> int32     # C `int` — NOT bare `int`, which is C `long`
 
 fn main():
@@ -4168,7 +4170,7 @@ it is a legitimate "creation failed" signal). The NULL sentinel and a null test 
 ```chezzi
 import null, is_null from std.ffi
 
-extern "libc.so.6":
+extern "libc":
     fn fopen(path: str, mode: str) -> ptr
     fn fclose(f: ptr) -> int
 
@@ -4211,7 +4213,7 @@ Both are **return-only** — an `owned_str`/`str?` *parameter* is rejected as *n
 used as a general type annotation*) rather than silently collapsing to `str`.
 
 ```chezzi
-extern "libc.so.6":
+extern "libc":
     fn strdup(s: str) -> owned_str   # owned malloc'd char* — copied AND freed (no leak)
     fn getenv(name: str) -> str?     # nullable — NULL → None instead of a fault
 
@@ -4286,7 +4288,7 @@ imported in the **same** module as the alias declaration.
 
 ```chezzi
 import int32, uint32, int8 from std.ffi
-extern "libc.so.6":
+extern "libc":
     fn atoi(s: str) -> int32      # parse to a C int; -1 sign-extends back to i64 -1
     fn htonl(x: uint32) -> uint32 # unsigned in+out; a high-bit result stays positive
     fn abs(x: int8) -> int8       # signed round-trip; an out-of-range param wraps (C cast)

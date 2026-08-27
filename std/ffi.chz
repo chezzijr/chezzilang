@@ -18,6 +18,11 @@
 # `Ty::Ptr`/`Ty::Int` only in a module that imported them. There is no `.chz` syntax for a bare
 # type-license name aliasing a builtin scalar, so they stay in the minimal `native_module_sig("std.ffi")`
 # arm (`sig.types.insert`), mirroring std.net's `Socket`/`Listener` and std.time's `timer`.
+#
+# `extern "libc":` / `extern "libm":` name two LOGICAL library aliases the loader (`Cffi::new`,
+# `src/native/cffi.rs`) resolves to a real shared library per platform; every other `extern` string
+# still goes to `dlopen` verbatim. This module declares no callable for that resolution — it lives
+# entirely in the loader, not in std.ffi.
 
 # --- the NULL sentinel + its test ---
 native fn null() -> ptr
