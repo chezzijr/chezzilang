@@ -320,3 +320,18 @@ fn a_shared_modules_warning_prints_once_per_test_run() {
     let hits = stderr.matches("is discarded").count();
     assert_eq!(hits, 1, "one warning, printed once; stderr:\n{stderr}");
 }
+
+// TICKET-003 — manifest-mode `chezzi run` has no file path to put program args after, so a `--`
+// terminator must exist to forward everything after it unchanged, `--` itself consumed.
+#[test]
+fn bare_run_forwards_args_after_double_dash() {
+    let t = TmpDir::new();
+    t.write("chezzi.toml", "[project]\nentrypoint = \"src.main\"\n");
+    t.write("src/main.chz", "import std.os\nprint(os.args())\n");
+    let (stdout, stderr, ok) = run(&t.0, &["run", "--", "--dir", "logs"]);
+    assert!(ok, "run should succeed; stderr:\n{stderr}");
+    assert!(
+        stdout.contains("[--dir, logs]"),
+        "-- must forward both args unchanged, and be itself consumed; stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
