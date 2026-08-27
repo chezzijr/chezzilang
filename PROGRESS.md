@@ -7,6 +7,16 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+> **✅ FIXED, 2026-08-27 (TICKET-008) — `docs/gaps.md` `W8-16`: a protocol-conformance mismatch
+> through a value slot now names the missing/wrong-signature method, matching the generic-bound
+> wording.** `Checker::protocol_note` (`src/checker/proto.rs`) is the value-slot twin of the
+> generic-bound sentence `satisfies_args` already produces; it is appended at all 14 value-slot
+> mismatch sites in `src/checker/proto.rs`, `expr.rs` and `sig.rs`. `viaSlot(d)` against `fn
+> viaSlot(n: Named)` with `Dog` missing `name` now reports `argument 1 of 'viaSlot': expected Named,
+> found Dog — type Dog does not satisfy Named (missing method 'name')`, where it used to stop after
+> `found Dog`. `.project/run-test.sh --one
+> src/checker/tests.rs::protocol_mismatch_via_value_slot_names_missing_method` passes.
+>
 > **✅ FIXED, 2026-08-27 (TICKET-005) — `docs/gaps.md` `W8-6`: `regex.replace_all` rejects Python
 > group refs instead of silently emitting literal backslashes.** `check_replacement_dialect`
 > (`src/native/regex.rs`) runs from `do_replace_all` after the pattern compiles, so a bad pattern

@@ -27248,3 +27248,98 @@ fn a_dotted_static_method_is_a_spawn_or_defer_target_ok() {
         files_ok(&[lib, ("main.chz", main)]);
     }
 }
+
+/// **TICKET-008 / docs/gaps.md W8-16 — a struct failing a protocol reports differently through a
+/// value slot than through a generic bound.** Same program, same unmet requirement (`Dog` has no
+/// `name` method against `Named`): the generic-bound call names the missing method
+/// (`does not satisfy Named (missing method 'name')`), the value-slot argument call names only the
+/// two type names. Expected: the value-slot message carries the same `(missing method '...')`
+/// clause as the generic-bound one.
+#[test]
+fn protocol_mismatch_via_value_slot_names_missing_method() {
+    let src = "protocol Named:\n    fn name(self) -> str\nstruct Dog:\n    x: int\nfn viaSlot(n: Named) -> str: return n.name()\nd := Dog(1)\nviaSlot(d)\n";
+    rejects(src, "does not satisfy Named (missing method 'name')");
+}
+
+#[test]
+fn value_slot_protocol_note_matches_the_generic_bound_wording() {
+    let src = "protocol Named:\n    fn name(self) -> str\nstruct Dog:\n    x: int\nfn viaSlot(n: Named) -> str: return n.name()\nd := Dog(1)\nviaSlot(d)\n";
+    let errs = check_src(src);
+    assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
+    assert_eq!(
+        errs[0].message,
+        "argument 1 of 'viaSlot': expected Named, found Dog \u{2014} type Dog does not satisfy Named (missing method 'name')"
+    );
+}
+
+#[test]
+fn protocol_note_reaches_every_value_slot() {
+    let prelude = "protocol Named:\n    fn name(self) -> str\nstruct Dog:\n    x: int\nstruct Holder:\n    n: Named\nd := Dog(1)\n";
+    let tails = [
+        "a: Named = d\n",
+        "h := Holder(Dog(2))\nh.n = d\n",
+        "fn f(x: Dog) -> Named: return x\n",
+        "fn f2(x: Dog) -> Named: x\n",
+        "fn g() -> Iterator[Named]:\n    yield d\n",
+        "xs := List[Named]([d])\n",
+        "ys: List[Named] = []\nys.push(d)\n",
+        "fn k(n: Named = d) -> str: return n.name()\n",
+        "struct H2:\n    n: Named = d\n",
+        "fv := viaSlot\nfn viaSlot(n: Named) -> str: return n.name()\nfv(d)\n",
+        "fv2 := viaSlot\nfn viaSlot(n: Named) -> str: return n.name()\nfv2(n=d)\n",
+        "s := Set[Named]([d])\n",
+        "mk := Map[Named, str]([(d, \"a\")])\n",
+        "mv := Map[str, Named]([(\"a\", d)])\n",
+    ];
+    for tail in tails {
+        let src = format!("{prelude}{tail}");
+        rejects(
+            &src,
+            "type Dog does not satisfy Named (missing method 'name')",
+        );
+    }
+    let src = format!("import std.concurrency\n{prelude}sh := Shared[Named](d)\n");
+    rejects(
+        &src,
+        "type Dog does not satisfy Named (missing method 'name')",
+    );
+}
+
+#[test]
+fn value_slot_protocol_note_names_a_wrong_signature() {
+    let src = "protocol Named:\n    fn name(self) -> str\nstruct Dog:\n    x: int\n    fn name(self) -> int: return 0\nfn viaSlot(n: Named) -> str: return n.name()\nd := Dog(1)\nviaSlot(d)\n";
+    rejects(
+        src,
+        "type Dog does not satisfy Named (method 'name' has the wrong signature)",
+    );
+}
+
+#[test]
+fn value_slot_protocol_note_absent_when_the_type_satisfies() {
+    let prelude = "protocol Named:\n    fn name(self) -> str\nstruct Dog:\n    x: int\n    fn name(self) -> str: return \"dog\"\nstruct Holder:\n    n: Named\nd := Dog(1)\n";
+    let tails = [
+        "a: Named = d\n",
+        "h := Holder(Dog(2))\nh.n = d\n",
+        "fn f(x: Dog) -> Named: return x\n",
+        "ys: List[Named] = []\nys.push(d)\n",
+    ];
+    for tail in tails {
+        ok(&format!("{prelude}{tail}"));
+    }
+}
+
+#[test]
+fn value_slot_protocol_note_absent_for_a_non_protocol_mismatch() {
+    let errs = check_src("x: int = \"s\"\n");
+    assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
+    assert_eq!(errs[0].message, "cannot assign str to variable of type int");
+
+    let src = "fn f(x: float): pass\ni := 1\nf(i)\n";
+    let errs = check_src(src);
+    assert!(
+        errs.iter().any(|e| e
+            .message
+            .ends_with("(a typed int never widens to float \u{2014} write float(x))")),
+        "expected a widen-note error, got: {errs:?}"
+    );
+}

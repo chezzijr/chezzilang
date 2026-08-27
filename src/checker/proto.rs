@@ -1307,6 +1307,23 @@ impl Checker {
         self.satisfies_args(ty, protocol, &[])
     }
 
+    /// The value-slot twin of the generic-bound conformance sentence (`satisfies_args`'s `Err`
+    /// string) — TICKET-008 / `docs/gaps.md` W8-16. Called only from an already-failing
+    /// `assignable` branch, so it cannot change what the checker accepts: it only appends WHY a
+    /// value slot rejected a type, when that type was rejected because it fails a protocol.
+    /// Empty when `expected` is not a protocol, and empty when `actual` DOES satisfy the
+    /// protocol — a witness that satisfies but is not sendable still reaches the error path via
+    /// `assignable`'s `sendable` check, and claiming a missing method there would be false.
+    pub(super) fn protocol_note(&self, expected: &Ty, actual: &Ty) -> String {
+        let Ty::Protocol(p, pargs) = expected else {
+            return String::new();
+        };
+        match self.satisfies_args(actual, p, pargs) {
+            Ok(()) => String::new(),
+            Err(why) => format!(" \u{2014} {why}"),
+        }
+    }
+
     /// Do a declared bound's type args (AST `Type`s) match the `required` ones (resolved `Ty`s) for a
     /// forwarded parameterized bound? Read-only — used inside `satisfies_args`. Conservative: only a
     /// *fully concrete* mismatch is rejected (so a still-generic arg like a sibling type param keeps
@@ -3381,9 +3398,10 @@ impl Checker {
             [t] => {
                 let t = t.clone();
                 if !t.is_unknown() && !inferred.is_unknown() && !self.assignable(&t, &inferred) {
+                    let note = self.protocol_note(&t, &inferred);
                     self.error(
                         span,
-                        format!("{name}[{t}]() expected element type {t}, found {inferred}"),
+                        format!("{name}[{t}]() expected element type {t}, found {inferred}{note}"),
                     );
                 }
                 t
