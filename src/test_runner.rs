@@ -1048,6 +1048,70 @@ mod tests {
     }
 
     #[test]
+    fn w8_37_fault_verdict_carries_line_and_col() {
+        // Same repro as `w8_37_fault_verdict_drops_stack_frames`; this pins the position half:
+        // the fault's own span must render as `line:col`, not `line` alone.
+        let d = TmpDir::new();
+        let f = d.write(
+            "f37_test.chz",
+            "fn boom(xs: List[int]):\n    return xs[9]\n\ntest fn t():\n    xs := [1]\n    boom(xs)\n",
+        );
+        let report = run_tests(&f);
+        assert!(!report.passed, "report:\n{}", report.text);
+        assert!(
+            report.text.contains("f37_test.chz:2:12)"),
+            "report:\n{}",
+            report.text
+        );
+        assert!(
+            !report.text.contains("f37_test.chz:2)"),
+            "report:\n{}",
+            report.text
+        );
+    }
+
+    #[test]
+    fn w8_37_file_type_error_carries_line_and_col() {
+        let d = TmpDir::new();
+        let f = d.write(
+            "h37_test.chz",
+            "test fn t():\n    x: int = \"s\"\n    assert true\n",
+        );
+        let report = run_tests(&f);
+        assert!(!report.passed, "report:\n{}", report.text);
+        assert!(
+            report.text.contains("type error ("),
+            "report:\n{}",
+            report.text
+        );
+        assert!(
+            report
+                .text
+                .contains("h37_test.chz:2:14): cannot assign str to variable of type int"),
+            "report:\n{}",
+            report.text
+        );
+    }
+
+    #[test]
+    fn w8_37_failing_assert_renders_no_frame_line() {
+        // A plain failing `assert` in the test body itself captures exactly ONE frame: the invoke
+        // frame `Vm::invoke_test` pushes with `Span::RUNTIME` (file 0). `fault_site` must drop it
+        // (`## Digest` gotchas 9 and 10), or every failing test would spuriously render
+        // `  at t (called at line 1, col 1)`.
+        let d = TmpDir::new();
+        let f = d.write("a_test.chz", "test fn t():\n    assert 1 == 2\n");
+        let report = run_tests(&f);
+        assert!(!report.passed, "report:\n{}", report.text);
+        assert!(
+            report.text.contains("a_test.chz:2:5)"),
+            "report:\n{}",
+            report.text
+        );
+        assert!(!report.text.contains("  at "), "report:\n{}", report.text);
+    }
+
+    #[test]
     fn non_test_file_path_errors() {
         let d = TmpDir::new();
         let f = d.write("plain.chz", "print(\"hi\")\n");
