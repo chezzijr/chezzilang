@@ -331,7 +331,24 @@ fn bare_run_forwards_args_after_double_dash() {
     let (stdout, stderr, ok) = run(&t.0, &["run", "--", "--dir", "logs"]);
     assert!(ok, "run should succeed; stderr:\n{stderr}");
     assert!(
-        stdout.contains("[--dir, logs]"),
+        stdout.contains("['--dir', 'logs']"),
         "-- must forward both args unchanged, and be itself consumed; stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
+// TICKET-003 boundary — file-mode already forwarded args after the path, but did NOT strip a
+// literal `--` terminator before this fix; confirm the same new arm covers file-mode too.
+#[test]
+fn file_run_strips_double_dash_terminator() {
+    let t = TmpDir::new();
+    let file = t.write("prog.chz", "import std.os\nprint(os.args())\n");
+    let (stdout, stderr, ok) = run(
+        &t.0,
+        &["run", file.to_str().unwrap(), "--", "--dir", "logs"],
+    );
+    assert!(ok, "run should succeed; stderr:\n{stderr}");
+    assert!(
+        stdout.contains("['--dir', 'logs']"),
+        "-- must be consumed in file-mode too, not forwarded literally; stdout:\n{stdout}\nstderr:\n{stderr}"
     );
 }
