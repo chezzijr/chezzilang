@@ -3277,9 +3277,17 @@ assert even_sum(10) == 20, "0..10"  # with a custom message
 
 `cond` must be `bool`; the optional `msg` must be `str` (both checker-enforced) and is evaluated
 **only on failure** (a passing assert never runs it). A passing assert is a silent no-op; a failing
-one faults like any runtime error — the fault message is `assertion failed: <msg>` when a `msg` is
-given, or just `assertion failed` otherwise — carrying the line you can see in `chezzi run` and in
-the test report. `assert` works anywhere, not just in tests.
+one faults like any runtime error, carrying the line you can see in `chezzi run` and in the test
+report. The fault message depends on `cond`'s shape:
+
+- a **comparison** (`<`, `<=`, `>`, `>=`, `==`, `!=`) renders both operand **values** around the
+  operator: `assertion failed: 3 == 4`, or `assertion failed: <msg> (3 == 4)` when a `msg` is given.
+  The source text is not shown — only the values — and `in` is excluded (its right operand can be an
+  unbounded collection).
+- every other condition keeps `assertion failed: <msg>` when a `msg` is given, or just
+  `assertion failed` otherwise.
+
+`assert` works anywhere, not just in tests.
 
 **`test fn`** — a `test` modifier before `fn` marks a test. A free `test fn` is an **independent**
 test (no parameters, returns nothing); a `test fn name(self)` **method** turns its struct into a

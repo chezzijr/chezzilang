@@ -7,6 +7,15 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+> **✅ FIXED, 2026-08-27 (TICKET-009) — `docs/gaps.md` `W8-13`: a failing comparison `assert` now
+> renders both operand values around the operator.** `assert xs.len() == 4` on a 3-element list
+> faults `assertion failed: 3 == 4` (was bare `assertion failed`); with a custom message,
+> `assertion failed: x must be two (1 == 2)`. Non-comparison asserts (`in`, bare, custom `msg`) are
+> byte-identical to before. `assert_eq`/`assert_ne` were considered and deliberately not added (see
+> the ticket's `## Decisions`). Gated by `src/vm/tests.rs::assert_comparison_*`,
+> `src/compiler/mod.rs::assert_lowering_tests` (the bytecode pins) and
+> `tests/chz/spec/assert_operand_message_test.chz`.
+>
 > **✅ FIXED, 2026-08-27 (TICKET-008) — `docs/gaps.md` `W8-16`: a protocol-conformance mismatch
 > through a value slot now names the missing/wrong-signature method, matching the generic-bound
 > wording.** `Checker::protocol_note` (`src/checker/proto.rs`) is the value-slot twin of the
