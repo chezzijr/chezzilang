@@ -175,12 +175,14 @@ fn cmd_check(args: &[String]) -> ExitCode {
     // up from the file — pass `None`. The entry FUNCTION is derived from the project manifest when
     // this file IS the declared entry module (`manifest::entry_fn_for`), so a static check of an
     // entry module a project cannot start reports it.
-    let (outcome, warns, files) = type_check(&path, None, EntryGate::FromManifest, Some(source));
+    let entry_path = std::path::Path::new(&path);
+    let (outcome, warns, files) =
+        type_check(&path, None, EntryGate::FromManifest, Some(source.clone()));
     // `check`'s stdout IS the diagnostic document, so in machine mode the warnings ride the single
     // array the arms below print; in plain text they precede the verdict on stderr. Exactly one of
     // the two — the `!json` guard is what keeps a warning from being printed on both streams.
     if !json {
-        report_check_warnings(&warns, &files);
+        report_check_warnings(&warns, &files, Some((entry_path, &source)));
     }
     match outcome {
         CheckOutcome::Ok => {
@@ -194,7 +196,7 @@ fn cmd_check(args: &[String]) -> ExitCode {
             ExitCode::SUCCESS
         }
         CheckOutcome::Errors(errs) => {
-            report_check_errors(&errs, &warns, &files, json);
+            report_check_errors(&errs, &warns, &files, json, Some((entry_path, &source)));
             ExitCode::FAILURE
         }
         CheckOutcome::Fatal {
@@ -312,16 +314,17 @@ fn cmd_run(args: &[String]) -> ExitCode {
         Some(f) => EntryGate::Named(f),
         None => EntryGate::Script,
     };
+    let entry_path = std::path::Path::new(&path);
     let (outcome, warns, files) =
         type_check(&path, root_override.as_deref(), gate, Some(source.clone()));
     // `run`'s stdout belongs to the PROGRAM, so a warning goes to stderr in both modes — unguarded,
     // unlike `check` above. The `&[]` below is the other half of that decision: were the warnings
     // also folded into the stdout array, the same diagnostic would print twice, on two streams.
-    report_check_warnings(&warns, &files);
+    report_check_warnings(&warns, &files, Some((entry_path, &source)));
     match outcome {
         CheckOutcome::Ok => {}
         CheckOutcome::Errors(errs) => {
-            report_check_errors(&errs, &[], &files, json);
+            report_check_errors(&errs, &[], &files, json, Some((entry_path, &source)));
             return ExitCode::FAILURE;
         }
         CheckOutcome::Fatal {
@@ -1134,8 +1137,12 @@ fn diags_json(diags: &[checker::CheckError], files: &[(u32, std::path::PathBuf)]
                 }
                 None => d.span.col + 1,
             };
+            let help_key = match &d.help {
+                Some(h) => format!(",\"help\":{}", json_string(h)),
+                None => String::new(),
+            };
             format!(
-                "{{{file_key}\"line\":{},\"col\":{},\"end_line\":{},\"end_col\":{end_col},\"severity\":\"{severity}\",\"message\":{}}}",
+                "{{{file_key}\"line\":{},\"col\":{},\"end_line\":{},\"end_col\":{end_col},\"severity\":\"{severity}\",\"message\":{}{help_key}}}",
                 d.span.line,
                 d.span.col,
                 d.span.line,
@@ -1144,6 +1151,45 @@ fn diags_json(diags: &[checker::CheckError], files: &[(u32, std::path::PathBuf)]
         })
         .collect();
     format!("[{}]", items.join(","))
+}
+
+/// Render one diagnostic for plain text, composed in three explicit parts (not via
+/// [`checker::CheckError::render`], which also appends `help:` — composing here keeps the snippet
+/// BETWEEN the one-line form and the help line, matching rustc's shape): first the one-line
+/// `path:line:col: message` form (the same pieces `render` uses); then a caret snippet of the
+/// source line when one is available; then a trailing `help: <h>` line when `d.help` is `Some`.
+/// `cache` maps a resolved path to its already-read source (`None` when a prior read failed, so a
+/// failed read is never retried); a pre-seeded entry — the entry module's own source, handed down
+/// from `cmd_check`/`cmd_run` per DEC-001 rather than re-read here — never reaches the
+/// `std::fs::read_to_string` fallback below.
+fn render_diag(
+    d: &checker::CheckError,
+    files: &[(u32, std::path::PathBuf)],
+    cache: &mut std::collections::HashMap<std::path::PathBuf, Option<String>>,
+) -> String {
+    let path = path_for(files, d.span.file);
+    let pos = lexer::render_span(d.span, path);
+    let kind = match d.severity {
+        checker::Severity::Error => "type error",
+        checker::Severity::Warning => "warning",
+    };
+    let mut out = format!("{kind} ({pos}): {}", d.message);
+    if let Some(p) = path {
+        let src = cache
+            .entry(p.to_path_buf())
+            .or_insert_with(|| std::fs::read_to_string(p).ok());
+        if let Some(src) = src
+            && let Some(snippet) = lexer::render_snippet(d.span, src)
+        {
+            out.push('\n');
+            out.push_str(&snippet);
+        }
+    }
+    if let Some(h) = &d.help {
+        out.push_str("\nhelp: ");
+        out.push_str(h);
+    }
+    out
 }
 
 /// Print non-fatal checker warnings as plain text on **stderr**. Always plain text, even under
@@ -1158,10 +1204,29 @@ fn diags_json(diags: &[checker::CheckError], files: &[(u32, std::path::PathBuf)]
 ///   errors. Plain text: here, on stderr, above the verdict. Exactly one of the two, ever.
 /// * `chezzi run` / `chezzi test` — stdout belongs to the running program. Always here, on stderr,
 ///   in both modes; the stdout array stays errors-only so nothing is reported twice.
-fn report_check_warnings(warns: &[checker::CheckError], files: &[(u32, std::path::PathBuf)]) {
+fn report_check_warnings(
+    warns: &[checker::CheckError],
+    files: &[(u32, std::path::PathBuf)],
+    entry: Option<(&std::path::Path, &str)>,
+) {
+    let mut cache = seed_cache(entry);
     for w in warns {
-        eprintln!("{}", w.render(path_for(files, w.span.file)));
+        eprintln!("{}", render_diag(w, files, &mut cache));
     }
+}
+
+/// A `render_diag` cache pre-seeded with the entry module's own source, when one is given. DEC-001:
+/// the entry source is read EXACTLY ONCE by `read_source` and passed down as bytes, never re-read
+/// from disk — a pipe or `/dev/stdin` returns empty on a second read, which would silently drop the
+/// caret echo for a piped entry.
+fn seed_cache(
+    entry: Option<(&std::path::Path, &str)>,
+) -> std::collections::HashMap<std::path::PathBuf, Option<String>> {
+    let mut cache = std::collections::HashMap::new();
+    if let Some((path, source)) = entry {
+        cache.insert(path.to_path_buf(), Some(source.to_string()));
+    }
+    cache
 }
 
 /// Print type errors as plain text (default) or a JSON array (`--errors=json`). `warns` rides the
@@ -1173,13 +1238,15 @@ fn report_check_errors(
     warns: &[checker::CheckError],
     files: &[(u32, std::path::PathBuf)],
     json: bool,
+    entry: Option<(&std::path::Path, &str)>,
 ) {
     if json {
         let all: Vec<checker::CheckError> = warns.iter().chain(errs).cloned().collect();
         println!("{}", diags_json(&all, files));
     } else {
+        let mut cache = seed_cache(entry);
         for e in errs {
-            eprintln!("{}", e.render(path_for(files, e.span.file)));
+            eprintln!("{}", render_diag(e, files, &mut cache));
         }
         eprintln!(
             "chezzi: {} type error{}",
