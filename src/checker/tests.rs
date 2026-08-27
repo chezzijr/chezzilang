@@ -29,6 +29,16 @@ fn rejects(src: &str, needle: &str) {
     );
 }
 
+/// Like `rejects`, plus asserting the SAME error's `help` contains `help_needle`.
+fn rejects_help(src: &str, msg_needle: &str, help_needle: &str) {
+    let errs = check_src(src);
+    assert!(
+        errs.iter().any(|e| e.message.contains(msg_needle)
+            && e.help.as_deref().is_some_and(|h| h.contains(help_needle))),
+        "expected an error containing {msg_needle:?} with help containing {help_needle:?}, got: {errs:?}"
+    );
+}
+
 /// Type-check a source string, returning the collected WARNINGS (non-fatal diagnostics).
 fn warn_src(src: &str) -> (Vec<CheckError>, Vec<CheckError>) {
     let tokens = lexer::tokenize(src).expect("lex should succeed");
@@ -6290,12 +6300,15 @@ fn unknown_struct_field_rejected() {
     );
 }
 
-/// TICKET-007 (docs/gaps.md W8-17): a near-miss method typo gets no "did you mean" suggestion.
-/// `len` is one edit away from the typo `lenght`, but the message names no candidate and no
-/// suggestion mechanism (no "did you mean"/"help:"/"note:").
+/// TICKET-007 (docs/gaps.md W8-17): a near-miss method typo gets a "did you mean" suggestion in
+/// the error's `help` field. `len` is one edit away from the typo `lenght`.
 #[test]
 fn method_typo_suggests_near_miss() {
-    rejects("xs := [1, 2, 3]\nxs.lenght()\n", "did you mean");
+    rejects_help(
+        "xs := [1, 2, 3]\nxs.lenght()\n",
+        "has no method 'lenght'",
+        "did you mean 'len'",
+    );
 }
 
 #[test]
