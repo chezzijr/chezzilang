@@ -848,7 +848,9 @@ value with no import, but to name the type you must `import std.fs` (or `import 
 `walk(p) -> Result[List[Path]]` — recursively list **every** entry (files + dirs) strictly under
 `p` as full paths, in a **deterministic** order: each directory's entries are sorted by name,
 a directory is listed before its children (pre-order). A **symlinked directory is listed but not
-descended** (cycle guard). `Err` on an unreadable root. (The sorted order is required for
+descended** (cycle guard). `Err` on the first unreadable directory, the root or any descendant —
+the message names that directory, not the root you passed in — and the walk stops there with no
+partial listing, since the return is `Result[List[Path]]`. (The sorted order is required for
 determinism.)
 
 **Mutations** (all `Result[nil]` — a permission-denied / missing-parent failure is a catchable `Err`,

@@ -7,6 +7,17 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+> **✅ FIXED, 2026-08-27 (TICKET-011) — `docs/gaps.md` `W8-39`: `fs.walk`'s `Err` names the
+> directory that actually failed.** `walk_into` (`src/native/fs.rs`) now returns `Result<(), String>`
+> and formats `"{path}: {io_error}"` at the level that failed — `read_dir` and the entry `collect`
+> blame the directory being read, `file_type` blames the entry's own path — instead of `walk`
+> reporting its `root` argument for a failure several levels down. An unreadable or missing root
+> still names the root; the walk still aborts at the first unreadable directory (no partial listing).
+> `docs/stdlib.md` corrected in the same change. Gated by two new `src/native/fs.rs` tests,
+> `fs_walk_error_names_the_failing_subdir_not_the_root` and
+> `fs_walk_unreadable_root_still_names_the_root`, plus the committed repro
+> `tests/chz/stdlib/fs_walk_unreadable_subdir_test.chz`.
+
 > **✅ FIXED, 2026-08-27 (TICKET-009) — `docs/gaps.md` `W8-13`: a failing comparison `assert` now
 > renders both operand values around the operator.** `assert xs.len() == 4` on a 3-element list
 > faults `assertion failed: 3 == 4` (was bare `assertion failed`); with a custom message,
