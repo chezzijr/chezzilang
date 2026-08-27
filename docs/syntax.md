@@ -3358,7 +3358,10 @@ nothing is auto-called. Running an explicit file (`chezzi run src/main.chz`) is 
 **`chezzi init [dir]`** scaffolds a new project (`dir` defaults to the current directory, created if
 missing): a `chezzi.toml` manifest, `src/main.chz` (a `fn main():` — **no** trailing call, since the
 scaffolded `entrypoint = "src.main:main"` calls it), and an example `src/main_test.chz` with
-`test fn`s. It refuses to overwrite an existing `chezzi.toml`. The manifest is **both a root marker and
+`test fn`s. **It never overwrites a file that is already there.** An existing `chezzi.toml` is a hard refusal
+(the directory is already a project — nothing is written, exit 1); an existing `src/main.chz` or
+`src/main_test.chz` is kept as-is, reported as `kept`, and only the missing files are written
+(exit 0) — the shape `cargo init` and `go mod init` have. The manifest is **both a root marker and
 a parsed manifest**: the toolchain reads its `[project]` keys (`name`/`version` metadata, and
 **`entrypoint`**, scaffolded active as `"src.main:main"`). It is a tiny fixed-schema reader
 (`[section]` headers, `key = "value"` string pairs, `#` comments); an empty `chezzi.toml` is a valid

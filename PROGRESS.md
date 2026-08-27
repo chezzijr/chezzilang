@@ -53,6 +53,15 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > by a standing gate.** Full walk, the two non-reproductions, and the suggested fix order:
 > `docs/gaps.md` `## Session log — 2026-08-18`. Docs-only change; no code touched, gates unchanged.
 
+> **✅ W8-24 CLOSED, 2026-08-27 — chezzi init can no longer destroy a file it did not create.**
+> Pre-fix measurement: `src/main.chz` containing `fn main(): print("MY REAL PROGRAM")`, then
+> `chezzi init .` → rc=0, and `grep -c "MY REAL PROGRAM" src/main.chz` printed `0`. Post-fix: the same
+> setup keeps `src/main.chz` untouched, still writes `chezzi.toml` and `src/main_test.chz`, and exits 0.
+> Every scaffold write now goes through one `write_if_absent` helper built on
+> `OpenOptions::create_new(true)` — an atomic guard, not an `exists()`-then-`write` race. Gated by
+> `init_tests::init_does_not_overwrite_existing_main_chz_without_manifest`,
+> `init_tests::init_writes_no_byte_over_existing_sources`, and `tests/init_no_clobber.rs`.
+
 > **✅ ADVERSARIAL REVIEW of `fix/shared-structural-depth-budget-and-go-cancel` — five findings, all
 > fixed, 2026-08-18.** Two Critical (each reproduced independently by two reviewers), one high, one
 > medium, one doc. Every RED was captured on the branch binary before the fix and re-confirmed on the
