@@ -1224,7 +1224,11 @@ fn seed_cache(
 ) -> std::collections::HashMap<std::path::PathBuf, Option<String>> {
     let mut cache = std::collections::HashMap::new();
     if let Some((path, source)) = entry {
-        cache.insert(path.to_path_buf(), Some(source.to_string()));
+        // The KEY must be the one `render_diag` looks up: `path_for` reports the module id, which
+        // the resolver built with `canonical_or_abs`. Seeding the raw CLI path instead misses for
+        // every non-canonical spelling (`chezzi check bad.chz`, a named FIFO), and the miss falls
+        // through to `read_to_string` — a SECOND open of a one-shot fd, which DEC-001 forbids.
+        cache.insert(resolver::canonical_or_abs(path), Some(source.to_string()));
     }
     cache
 }

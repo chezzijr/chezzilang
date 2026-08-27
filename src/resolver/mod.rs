@@ -845,7 +845,11 @@ fn abs(p: &Path) -> PathBuf {
 /// (so a missing module still gets a stable id for the error path). `pub(crate)`: also used by
 /// `editor::diagnostics_inner` to compare a resolve error's self-attributed path against the caller's
 /// raw entry path — see that call site for why a raw comparison is unsound.
-pub(crate) fn canonical_or_abs(p: &Path) -> PathBuf {
+/// The module key for a path: what [`ModuleId`] holds, and therefore what `path_for`
+/// reports for a diagnostic's file. ANY cache keyed by module path must build its key with
+/// this, or it silently misses for every non-canonical spelling of the same file — which is
+/// how `render_diag`'s pre-seeded entry source came to be re-read from disk (TICKET-007).
+pub fn canonical_or_abs(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| normalize(&abs(p)))
 }
 

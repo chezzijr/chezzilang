@@ -166,3 +166,75 @@ fn run_on_a_named_fifo_executes_the_program() {
     );
     assert_eq!(code, 0);
 }
+
+/// `chezzi check` on a named FIFO must render its DIAGNOSTIC — caret and all — and terminate.
+///
+/// `run_on_a_named_fifo_executes_the_program` above only covers a program that SUCCEEDS, so it
+/// never reaches the diagnostic renderer. That is the gap this test closes: `render_diag`'s source
+/// cache is pre-seeded with the entry bytes precisely so the caret echo never re-opens a one-shot
+/// fd, but the seed is only reachable if it is keyed the way the LOOKUP keys it —
+/// `resolver::canonical_or_abs`, the module id `path_for` reports. Keyed on the raw CLI path
+/// instead, this hangs: `canonicalize` SUCCEEDS for a named FIFO (unlike `/dev/stdin`, where it
+/// fails and the two spellings coincidentally agree), the keys diverge, the cache misses, and
+/// `read_to_string` opens the FIFO a second time with no live writer.
+///
+/// Same load-bearing order as above: spawn the child FIRST, then open the writer.
+#[cfg(unix)]
+#[test]
+fn check_on_a_named_fifo_renders_the_caret() {
+    let t = TmpDir::new();
+    let fifo = t.path("bad.chz");
+    let status = Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("run mkfifo");
+    assert!(status.success(), "mkfifo failed");
+
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let watchdog = std::thread::spawn(move || {
+        if rx.recv_timeout(std::time::Duration::from_secs(30)).is_err() {
+            eprintln!("check_on_a_named_fifo_renders_the_caret: timed out");
+            std::process::abort();
+        }
+    });
+
+    // RELATIVE path, run from the temp dir. That is the whole point: for an ABSOLUTE, already
+    // canonical path the raw spelling and `canonical_or_abs` agree, the buggy key works by
+    // accident, and this test would pass against the defect it exists to catch.
+    let child = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .current_dir(&t.0)
+        .arg("check")
+        .arg("bad.chz")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn chezzi");
+
+    let mut writer = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&fifo)
+        .expect("open fifo for writing");
+    writer
+        .write_all(b"xs := [1, 2, 3]\nprint(xs.lenght())\n")
+        .expect("write program to fifo");
+    drop(writer);
+
+    let out = child.wait_with_output().expect("wait chezzi");
+    let _ = tx.send(());
+    watchdog.join().expect("watchdog thread panicked");
+
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let all = format!("{stdout}{stderr}");
+    let code = out.status.code().expect("exited with a status (no signal)");
+    assert!(
+        all.contains("has no method 'lenght'"),
+        "expected the type error, got stdout={stdout:?} stderr={stderr:?} code={code}"
+    );
+    assert!(
+        all.contains("print(xs.lenght())"),
+        "expected the caret snippet to echo the source line from the SEEDED entry bytes (a cache \
+         miss re-reads the FIFO and drops it), got stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert_eq!(code, 1, "a type error must exit 1");
+}
