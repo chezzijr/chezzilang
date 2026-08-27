@@ -11723,3 +11723,67 @@ fn reserved_receiver_method_turbofish_run_parity() {
     let src = "print([1, 2, 3].map[int](fn(x): x * 2))\n";
     assert_golden_out(src, "[2, 4, 6]\n");
 }
+
+/// TICKET-006: every FFI example must resolve its C library name per-platform (via a
+/// `std.ffi` helper), not hardcode the Linux soname `libc.so.6`/`libm.so.6`. Hardcoding the
+/// Linux name is exactly what makes each example `dlopen`-fail on macOS. This does not run
+/// on macOS; it pins the source-text fact that reproduces the reported failure everywhere.
+#[test]
+fn ffi_examples_do_not_hardcode_linux_soname() {
+    let examples = [
+        "examples/ffi.chz",
+        "examples/ffi_ptr.chz",
+        "examples/ffi_int.chz",
+        "examples/ffi_qsort.chz",
+        "examples/ffi_qualified.chz",
+        "examples/ffi_str.chz",
+        "examples/ffi_struct.chz",
+    ];
+    let mut offenders = Vec::new();
+    for rel in examples {
+        let src = std::fs::read_to_string(fixture(rel)).unwrap();
+        if src.contains("libc.so.6") || src.contains("libm.so.6") {
+            offenders.push(rel);
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "FFI examples still hardcode a Linux soname instead of resolving one per platform: {offenders:?}"
+    );
+}
+
+/// TICKET-006: the six FFI goldens must not be unconditionally `#[cfg(target_os = "linux")]`.
+/// Gating them out on every other platform means `cargo test` reports green there while the
+/// entire FFI surface goes unexercised — the gap that let the macOS `dlopen` failure through.
+#[test]
+fn ffi_goldens_are_not_unconditionally_linux_gated() {
+    let this_file = std::fs::read_to_string(fixture("src/vm/golden_tests.rs")).unwrap();
+    let ffi_golden_fns = [
+        "golden_ffi_chz_via_run_file",
+        "golden_ffi_ptr_chz_via_run_file",
+        "golden_ffi_struct_chz_via_run_file",
+        "golden_ffi_qsort_chz_via_run_file",
+        "golden_ffi_str_chz_via_run_file",
+        "golden_ffi_int_chz_via_run_file",
+    ];
+    let mut unconditionally_gated = Vec::new();
+    for fn_name in ffi_golden_fns {
+        let marker = format!("fn {fn_name}(");
+        let fn_pos = this_file
+            .find(&marker)
+            .unwrap_or_else(|| panic!("missing test fn {fn_name}"));
+        let before = &this_file[..fn_pos];
+        let last_lines: Vec<&str> = before.lines().rev().take(3).collect();
+        if last_lines
+            .iter()
+            .any(|l| l.trim().starts_with("#[cfg(") && l.contains("target_os = \"linux\""))
+        {
+            unconditionally_gated.push(fn_name);
+        }
+    }
+    assert!(
+        unconditionally_gated.is_empty(),
+        "FFI goldens are unconditionally Linux-gated, so cargo test is green on other \
+         platforms with the FFI surface unexercised: {unconditionally_gated:?}"
+    );
+}
