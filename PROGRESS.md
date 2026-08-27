@@ -11799,6 +11799,22 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- **A method/field miss now suggests a near-miss "did you mean" (2026-08-27, TICKET-007,
+  `docs/gaps.md` W8-17 partially closed).** `xs.lenght()` → `type List[int] has no method 'lenght'`
+  now also carries `help: did you mean 'len'?`, on every method-miss and field-miss site (native
+  handle, struct, newtype, enum, protocol, type-param bound). `CheckError` gained a `help: Option
+  <String>` field (never module-attributed), scored by `src/checker/suggest.rs`'s restricted
+  Damerau-Levenshtein distance discounted for length difference — derived by MEASURING rustc
+  1.97.1's own suggestions (`lenght`→`len` needs the discount; plain Levenshtein's distance is 3
+  against a limit of 2) rather than reading rustc's source. `Checker::method_names`/
+  `field_names`/etc. sort every `HashMap`-backed candidate table before scoring, so a distance tie
+  picks the same candidate on every run. `chezzi check`/`chezzi run` now also echo a three-line caret
+  snippet of the source line (`lexer::render_snippet`, reusing `editor::word_end_col` for the caret
+  width) before the `help:` line; the caret survives a piped/`/dev/stdin` entry because the entry
+  source is threaded down rather than re-read (DEC-001). `--errors=json` gained a `"help"` key
+  (after `"message"`, omitted when absent) and the LSP appends `help: <h>` to the diagnostic
+  message. Out of scope (recorded in `docs/gaps.md` W8-17): error codes; a suggestion for an unknown
+  variable, a module member, or an enum variant miss.
 - **A bare generic fn passed to a GENERIC hof is now INFERRED, the way Go and Rust infer it
   (2026-08-15).** The leftover the entry below named: the deferral it built lived only on
   `infer_generic_method`, so when the fn-typed slot belonged to a **generic free fn** the callee's own
