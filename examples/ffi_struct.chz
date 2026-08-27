@@ -9,9 +9,9 @@ struct DivT:
     quot: int32
     rem: int32
 
-# LINUX library name — on macOS use "libSystem.B.dylib" (docs/syntax.md §12b).
+# `libc` is a LOGICAL library name the loader resolves per host (docs/syntax.md §12b).
 
-extern "libc.so.6":
+extern "libc":
     fn div(numer: int32, denom: int32) -> DivT
 
 r: DivT = div(17, 5)

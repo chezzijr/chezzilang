@@ -9949,12 +9949,16 @@ fn golden_qualified_static_chz_matches_expected_and_interp() {
 
 /// Qualified-FFI-width golden: `examples/ffi_qualified.chz` declares `extern fn abs(ffi.int32) ->
 /// ffi.int32` — a QUALIFIED width name in an extern signature. `resolve_ctype_d` maps it to the
-/// SAME `CType::Int32` the bare `int32` resolves to, so the C ABI marshalling is identical. Linux-
-/// only (needs libc.so.6); drives `run_file` (extern decls need the module-graph) and asserts
-/// byte-identical output. FFI is layout-dependent, hence a real C call rather than a unit assert.
+/// SAME `CType::Int32` the bare `int32` resolves to, so the C ABI marshalling is identical. Runs
+/// wherever the `libc`/`libm` aliases resolve, otherwise prints a SKIP line naming the reason;
+/// drives `run_file` (extern decls need the module-graph) and asserts byte-identical output. FFI is
+/// layout-dependent, hence a real C call rather than a unit assert.
 #[test]
-#[cfg(target_os = "linux")]
-fn golden_ffi_qualified_chz_matches_expected_and_interp() {
+fn golden_ffi_qualified_chz_via_run_file() {
+    if let Some(why) = crate::native::cffi::platform_c_library_missing() {
+        eprintln!("SKIP golden_ffi_qualified_chz_via_run_file: {why}");
+        return;
+    }
     let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let path = base.join("examples/ffi_qualified.chz");
     let expected = std::fs::read_to_string(base.join("examples/ffi_qualified.expected")).unwrap();
@@ -9964,8 +9968,6 @@ fn golden_ffi_qualified_chz_matches_expected_and_interp() {
         vm_out, expected,
         "vm output drifted from ffi_qualified.expected"
     );
-    let (_ip_out, _e2, ip_res, _) = run_file(&path);
-    ip_res.expect("ffi_qualified.chz should run on the interp");
 }
 
 /// Inline-expr fn body golden: `examples/inline_fn.chz` exercises Option A (inline-only) — a

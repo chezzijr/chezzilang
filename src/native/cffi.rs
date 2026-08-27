@@ -770,6 +770,49 @@ pub struct Cffi {
     free_addr: Option<usize>,
 }
 
+/// Resolves a LOGICAL library name (`"libc"`/`"libm"`) to a per-platform candidate list, tried in
+/// order by [`Cffi::new`]. `None` means `lib` is not a logical name -- `dlopen` it verbatim. `Some`
+/// with an empty `Vec` means `lib` is a logical name with no known library on this platform.
+///
+/// `libc.so`/`libm.so` are glibc **linker scripts**, not ELF (`dlopen` rejects them), so on Linux
+/// the versioned soname is tried first and the unversioned name is a last-resort fallback for musl
+/// and other unices.
+pub fn resolve_lib_candidates(lib: &str) -> Option<Vec<&'static str>> {
+    match lib {
+        "libc" => Some(if cfg!(target_os = "linux") {
+            vec!["libc.so.6", "libc.so"]
+        } else if cfg!(target_os = "macos") {
+            vec!["libSystem.B.dylib", "libc.dylib"]
+        } else if cfg!(unix) {
+            vec!["libc.so"]
+        } else {
+            vec![]
+        }),
+        "libm" => Some(if cfg!(target_os = "linux") {
+            vec!["libm.so.6", "libm.so"]
+        } else if cfg!(target_os = "macos") {
+            vec!["libSystem.B.dylib", "libm.dylib"]
+        } else if cfg!(unix) {
+            vec!["libm.so"]
+        } else {
+            vec![]
+        }),
+        _ => None,
+    }
+}
+
+/// `Some(reason)` when `libc`/`libm` resolve to no known library on this platform (see
+/// [`resolve_lib_candidates`]); `None` otherwise. Used by FFI goldens to skip loudly instead of
+/// compiling themselves out.
+pub fn platform_c_library_missing() -> Option<&'static str> {
+    match resolve_lib_candidates("libc") {
+        Some(c) if c.is_empty() => {
+            Some("this platform has no libc/libm alias (see native::cffi::resolve_lib_candidates)")
+        }
+        _ => None,
+    }
+}
+
 impl Cffi {
     /// `dlopen(lib)` + `dlsym(sym_name)`, capturing the marshalling signature. Errors (library not
     /// found, symbol missing) surface as a [`HostError`] the engine maps to a runtime error.
@@ -781,9 +824,38 @@ impl Cffi {
     ) -> Result<Self, HostError> {
         // SAFETY: dlopen of an arbitrary shared library. The caller (the `extern "lib":` author)
         // is responsible for naming a real library; we surface any loader error rather than UB.
-        let library = unsafe { Library::new(lib) }.map_err(|e| HostError {
-            message: format!("cannot load library '{lib}': {e}"),
-        })?;
+        let library = match resolve_lib_candidates(lib) {
+            None => unsafe { Library::new(lib) }.map_err(|e| HostError {
+                message: format!("cannot load library '{lib}': {e}"),
+            })?,
+            Some(candidates) if candidates.is_empty() => {
+                return Err(HostError {
+                    message: format!(
+                        "cannot load library '{lib}': no shared library is known for this logical name on this platform"
+                    ),
+                });
+            }
+            Some(candidates) => {
+                let mut attempts = Vec::new();
+                let mut loaded = None;
+                for cand in &candidates {
+                    match unsafe { Library::new(cand) } {
+                        Ok(lib) => {
+                            loaded = Some(lib);
+                            break;
+                        }
+                        Err(e) => attempts.push(format!("{cand} ({e})")),
+                    }
+                }
+                loaded.ok_or_else(|| HostError {
+                    message: format!(
+                        "cannot load library '{lib}' (tried {}): {}",
+                        candidates.join(", "),
+                        attempts.join("; ")
+                    ),
+                })?
+            }
+        };
         let addr = {
             // SAFETY: dlsym of a named symbol in the just-loaded library. We do not deref the
             // pointer here; it is only invoked later via libffi with the checker-verified signature.
@@ -1825,6 +1897,17 @@ mod tests {
             "{}",
             err.message
         );
+    }
+
+    #[test]
+    fn alias_candidate_order_puts_the_versioned_soname_first() {
+        assert!(resolve_lib_candidates("libapply.so").is_none());
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                resolve_lib_candidates("libc"),
+                Some(vec!["libc.so.6", "libc.so"])
+            );
+        }
     }
 
     #[test]

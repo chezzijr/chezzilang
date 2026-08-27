@@ -5807,10 +5807,13 @@ fn golden_cancel_tree_via_run_file() {
 
 /// C-ABI FFI golden: the `extern "lib":` block calls
 /// `cos`/`sqrt` (libm) and `strlen` (libc) via dlopen+libffi on the VM, byte-matches `.expected`.
-/// Linux-only (needs libm/libc).
+/// Runs wherever the `libc`/`libm` aliases resolve; otherwise prints a SKIP line naming the reason.
 #[test]
-#[cfg(target_os = "linux")]
 fn golden_ffi_chz_via_run_file() {
+    if let Some(why) = crate::native::cffi::platform_c_library_missing() {
+        eprintln!("SKIP golden_ffi_chz_via_run_file: {why}");
+        return;
+    }
     let path = fixture("examples/ffi.chz");
     let expected = std::fs::read_to_string(fixture("examples/ffi.expected")).unwrap();
     let (out, _err, res, _) = run_file(&path);
@@ -5821,10 +5824,13 @@ fn golden_ffi_chz_via_run_file() {
 /// C-ABI opaque `ptr` handle golden: the `extern "lib":`
 /// block opens a libc `FILE*` (`fopen -> ptr`), hands the handle back to `fclose`, and detects a
 /// NULL handle via `std.ffi.is_null` / `== std.ffi.null()`. Byte-matches `.expected`.
-/// Linux-only (needs libc).
+/// Runs wherever the `libc`/`libm` aliases resolve; otherwise prints a SKIP line naming the reason.
 #[test]
-#[cfg(target_os = "linux")]
 fn golden_ffi_ptr_chz_via_run_file() {
+    if let Some(why) = crate::native::cffi::platform_c_library_missing() {
+        eprintln!("SKIP golden_ffi_ptr_chz_via_run_file: {why}");
+        return;
+    }
     let path = fixture("examples/ffi_ptr.chz");
     let expected = std::fs::read_to_string(fixture("examples/ffi_ptr.expected")).unwrap();
     let (out, _err, res, _) = run_file(&path);
@@ -5837,10 +5843,14 @@ fn golden_ffi_ptr_chz_via_run_file() {
 /// struct BY VALUE — to a Chezzi `struct DivT{quot, rem}`. `div(17, 5) == {3, 2}` (pure, always
 /// present). Byte-matches `.expected`. The `--parallel`/M:N engine is NOT driven here; the returned
 /// `NativeRet::Struct` already crosses the M:N airlock by the same deep-copy std.regex uses, so the
-/// path is exercised, just not by this golden. Linux-only.
+/// path is exercised, just not by this golden. Runs wherever the `libc`/`libm` aliases resolve;
+/// otherwise prints a SKIP line naming the reason.
 #[test]
-#[cfg(target_os = "linux")]
 fn golden_ffi_struct_chz_via_run_file() {
+    if let Some(why) = crate::native::cffi::platform_c_library_missing() {
+        eprintln!("SKIP golden_ffi_struct_chz_via_run_file: {why}");
+        return;
+    }
     let path = fixture("examples/ffi_struct.chz");
     let expected = std::fs::read_to_string(fixture("examples/ffi_struct.expected")).unwrap();
     let (out, _err, res, _) = run_file(&path);
@@ -5851,11 +5861,15 @@ fn golden_ffi_struct_chz_via_run_file() {
 /// CAPSTONE C-buffer FFI golden: sort a Chezzi list
 /// with libc `qsort`, composing `ffi.alloc` + `store_int64_at` + a Chezzi `qsort` comparator
 /// callback (`load_int64` both `const void*` sides) + `load_int64_at` read-back + `defer ffi.free`.
-/// The marquee proof that callbacks + deref + alloc all compose. Byte-matches `.expected`. Linux-only
-/// (needs libc); the fixed 8-byte int64 stride matches the comparator on every LP64 unix.
+/// The marquee proof that callbacks + deref + alloc all compose. Byte-matches `.expected`. Runs
+/// wherever the `libc`/`libm` aliases resolve, otherwise prints a SKIP line naming the reason; the
+/// fixed 8-byte int64 stride matches the comparator on every LP64 unix.
 #[test]
-#[cfg(target_os = "linux")]
 fn golden_ffi_qsort_chz_via_run_file() {
+    if let Some(why) = crate::native::cffi::platform_c_library_missing() {
+        eprintln!("SKIP golden_ffi_qsort_chz_via_run_file: {why}");
+        return;
+    }
     let path = fixture("examples/ffi_qsort.chz");
     let expected = std::fs::read_to_string(fixture("examples/ffi_qsort.expected")).unwrap();
     let (out, _err, res, _) = run_file(&path);
@@ -5876,10 +5890,14 @@ fn golden_ffi_qsort_chz_via_run_file() {
 
 /// C-ABI deeper `str` returns golden: `strdup -> owned_str`
 /// (owned `char*` copied into a Chezzi `str` AND freed) and `getenv -> str?` (NULL → `None`). Byte-
-/// matches `.expected`. Linux-only.
+/// matches `.expected`. Runs wherever the `libc`/`libm` aliases resolve; otherwise prints a SKIP
+/// line naming the reason.
 #[test]
-#[cfg(target_os = "linux")]
 fn golden_ffi_str_chz_via_run_file() {
+    if let Some(why) = crate::native::cffi::platform_c_library_missing() {
+        eprintln!("SKIP golden_ffi_str_chz_via_run_file: {why}");
+        return;
+    }
     let path = fixture("examples/ffi_str.chz");
     let expected = std::fs::read_to_string(fixture("examples/ffi_str.expected")).unwrap();
     let (out, _err, res, _) = run_file(&path);
@@ -5889,12 +5907,22 @@ fn golden_ffi_str_chz_via_run_file() {
 
 /// C-ABI fixed-width integer marshalling golden: `atoi
 /// -> int32` (sign-extend), `htonl(uint32) -> uint32` (zero-extend, high-bit positive), `abs(int8)
-/// -> int8` (signed round-trip + param truncation per a C cast). Byte-matches `.expected`. Linux-only
-/// (needs libc).
-// The example's `htonl` lines encode little-endian oracles, so the golden is LE-gated.
+/// -> int8` (signed round-trip + param truncation per a C cast). Byte-matches `.expected`. Runs
+/// wherever the `libc`/`libm` aliases resolve; otherwise prints a SKIP line naming the reason.
+// The example's `htonl` lines encode little-endian oracles, so the golden skips at runtime on a
+// big-endian host instead of `#[cfg]`-gating.
 #[test]
-#[cfg(all(target_os = "linux", target_endian = "little"))]
 fn golden_ffi_int_chz_via_run_file() {
+    if let Some(why) = crate::native::cffi::platform_c_library_missing() {
+        eprintln!("SKIP golden_ffi_int_chz_via_run_file: {why}");
+        return;
+    }
+    if cfg!(target_endian = "big") {
+        eprintln!(
+            "SKIP golden_ffi_int_chz_via_run_file: the example's htonl oracles are little-endian"
+        );
+        return;
+    }
     let path = fixture("examples/ffi_int.chz");
     let expected = std::fs::read_to_string(fixture("examples/ffi_int.expected")).unwrap();
     let (out, _err, res, _) = run_file(&path);

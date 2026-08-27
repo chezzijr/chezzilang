@@ -1,10 +1,11 @@
-# LINUX library names. On macOS swap every `libc.so.6`/`libm.so.6` for `libSystem.B.dylib`
-# (dlopen takes the name verbatim — see docs/syntax.md §12b).
-extern "libm.so.6":
+# `libc`/`libm` are LOGICAL names the loader resolves to this host's real C library (glibc's
+# versioned sonames on Linux, `libSystem.B.dylib` on macOS). Any other name goes to `dlopen`
+# verbatim — see docs/syntax.md §12b.
+extern "libm":
     fn cos(x: float) -> float
     fn sqrt(x: float) -> float
 
-extern "libc.so.6":
+extern "libc":
     fn strlen(s: str) -> int
 
 print(cos(0.0))

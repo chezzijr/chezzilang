@@ -12,9 +12,9 @@
 # `const void*` slots line up with the stored elements on every LP64 unix.
 import std.ffi
 
-# LINUX library name — on macOS use "libSystem.B.dylib" (docs/syntax.md §12b).
+# `libc` is a LOGICAL library name the loader resolves per host (docs/syntax.md §12b).
 
-extern "libc.so.6":
+extern "libc":
     fn qsort(base: ptr, n: int, size: int, cmp: fn(ptr, ptr) -> int)
 
 # The comparator C hands two `const void*` (each pointing at one int64 slot). Return -1/0/1 instead
