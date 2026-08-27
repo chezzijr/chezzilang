@@ -1807,6 +1807,27 @@ mod tests {
     }
 
     #[test]
+    fn logical_libc_alias_loads() {
+        assert!(Cffi::new("libc", "strlen", vec![CType::Str], Some(CType::Int)).is_ok());
+    }
+
+    #[test]
+    fn logical_libm_alias_loads() {
+        assert!(Cffi::new("libm", "sqrt", vec![CType::Float], Some(CType::Float)).is_ok());
+    }
+
+    #[test]
+    fn non_alias_library_name_passes_through_verbatim() {
+        let err = Cffi::new("libdoesnotexist.so.999", "cos", vec![], None).unwrap_err();
+        assert!(
+            err.message
+                .contains("cannot load library 'libdoesnotexist.so.999'"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
     fn cffi_is_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Cffi>();
