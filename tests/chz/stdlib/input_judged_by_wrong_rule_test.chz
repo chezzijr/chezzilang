@@ -1,0 +1,78 @@
+# tests/chz/stdlib/input_judged_by_wrong_rule_test.chz — four std modules judge input by the wrong
+# rule (docs/gaps.md W8-9, W8-38, W8-12, W8-33).
+#
+# (a) `duration.parse` bounds by DIGIT COUNT not value: a 12-digit hour count overflows i64 ms but is
+# accepted, while a 13-digit ms count that fits i64 comfortably is rejected.
+# (b) `flag.FlagSet.parse` accumulates positionals across calls instead of resetting per call.
+# (c) `datetime.parse_iso8601` rejects minute-precision time, basic/compact date+time, and a
+# colon-less UTC offset — all of which CPython's `fromisoformat` accepts.
+# (d) `fs.glob` silently returns `Ok([])` on a POSIX character class instead of matching or Err'ing.
+# Run: `cargo run -- test tests/chz/stdlib/input_judged_by_wrong_rule_test.chz`
+
+import std.duration
+import std.flag
+import std.datetime
+import std.fs
+import std.os
+
+test fn duration_parse_bounds_by_value_not_digit_count():
+    # 12 digits * 3_600_000 ms/h overflows i64 ms; expect an Err, not Ok.
+    r := duration.parse("100000000000h")
+    match r:
+        Err(_): assert true
+        Ok(d): assert false, "expected out-of-range Err, got Ok(" + d.to_string() + ")"
+    # 13 digits of milliseconds is still well within i64 ms; expect Ok, not Err.
+    r2 := duration.parse("2562047788015ms")
+    match r2:
+        Ok(_): assert true
+        Err(e): assert false, "expected Ok, got Err(" + e.message() + ")"
+
+test fn flagset_parse_resets_positionals_per_call():
+    fs := flag.new()
+    r1 := fs.parse(["a"])
+    match r1:
+        Ok(pos): assert pos == ["a"]
+        Err(e): assert false, "unexpected Err(" + e.message() + ")"
+    r2 := fs.parse(["b"])
+    match r2:
+        Ok(pos): assert pos == ["b"]
+        Err(e): assert false, "unexpected Err(" + e.message() + ")"
+
+test fn datetime_parse_iso8601_accepts_cpython_forms():
+    r1 := datetime.parse_iso8601("2024-01-01T12:34")
+    match r1:
+        Ok(_): assert true
+        Err(e): assert false, "minute-precision: " + e.message()
+    r2 := datetime.parse_iso8601("20240101T123456Z")
+    match r2:
+        Ok(_): assert true
+        Err(e): assert false, "basic/compact: " + e.message()
+    r3 := datetime.parse_iso8601("2024-01-01T12:34:56+0530")
+    match r3:
+        Ok(_): assert true
+        Err(e): assert false, "colonless offset: " + e.message()
+
+fn cleanup_glob_dir(d: bytes):
+    _ := fs.remove_dir(d)
+
+test fn fs_glob_does_not_silently_drop_character_classes():
+    d := os.temp_dir().str() + "/chz_w8_33_" + str(os.getpid())
+    r1 := fs.mkdir(d)
+    match r1:
+        Ok(_): pass
+        Err(e): assert false, "mkdir: " + e.message()
+    defer cleanup_glob_dir(d.encode())
+
+    r2 := fs.atomic_write(d + "/a.c", "")
+    match r2:
+        Ok(_): pass
+        Err(e): assert false, "write a.c: " + e.message()
+    r3 := fs.atomic_write(d + "/b.h", "")
+    match r3:
+        Ok(_): pass
+        Err(e): assert false, "write b.h: " + e.message()
+
+    r := fs.glob(d + "/*.[ch]")
+    match r:
+        Ok(matches): assert matches.len() > 0, "expected matches for [ch] class, got Ok([])"
+        Err(_): assert true
