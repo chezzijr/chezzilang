@@ -56,11 +56,32 @@ struct Parser:
             else:
                 return
 
+    # The message with the exact spot in the input it was raised at appended: ` at line L column C
+    # (char N)` — CPython's `json.loads` shape. Uses the CURRENT position.
+    fn at(self, msg: str) -> str:
+        return self.at_pos(msg, self.pos)
+
+    fn at_pos(self, msg: str, pos: int) -> str:
+        p := pos
+        if p > self.len:
+            p = self.len
+        if p < 0:
+            p = 0
+        line := 1
+        col := 1
+        for i in 0..p:
+            if self.src[i] == "\n":
+                line += 1
+                col = 1
+            else:
+                col += 1
+        return msg + " at line " + str(line) + " column " + str(col) + " (char " + str(pos) + ")"
+
     fn parse_value(self) -> Result[Json]:
         self.skip_ws()
         c := self.peek()
         if c == "":
-            return Err("unexpected end of input")
+            return Err(self.at("unexpected end of input"))
         if c == "{{":
             return self.parse_object()
         if c == "[":
@@ -76,12 +97,12 @@ struct Parser:
             return self.parse_lit("null", Json.Null)
         if c == "-" or (c >= "0" and c <= "9"):
             return self.parse_number()
-        return Err("unexpected character '" + c + "'")
+        return Err(self.at("unexpected character '" + c + "'"))
 
     fn parse_lit(self, word: str, val: Json) -> Result[Json]:
         for expected in word:
             if self.bump() != expected:
-                return Err("invalid literal, expected '" + word + "'")
+                return Err(self.at_pos("invalid literal, expected '" + word + "'", self.pos - 1))
         return Ok(val)
 
     fn parse_string(self) -> Result[str]:
@@ -89,7 +110,7 @@ struct Parser:
         out := ""
         while true:
             if self.pos >= self.len:
-                return Err("unterminated string")
+                return Err(self.at("unterminated string"))
             c := self.bump()
             if c == "\"":
                 return Ok(out)
@@ -105,10 +126,10 @@ struct Parser:
                     "b": out = out + chr(8)
                     "f": out = out + chr(12)
                     "u": out = out + self.parse_unicode()?
-                    _: return Err("invalid escape '\\" + e + "'")
+                    _: return Err(self.at_pos("invalid escape '\\" + e + "'", self.pos - 1))
             elif ord(c) < 32:
                 # RFC-8259: raw control chars U+0000..U+001F must be `\u`-escaped, never literal.
-                return Err("invalid control character in string")
+                return Err(self.at_pos("invalid control character in string", self.pos - 1))
             else:
                 out = out + c
 
@@ -117,21 +138,24 @@ struct Parser:
         hi := self.parse_hex4()?
         if hi >= 55296 and hi <= 56319:                 # high surrogate
             if self.bump() != "\\" or self.bump() != "u":
-                return Err("expected low surrogate")
+                return Err(self.at("expected low surrogate"))
             lo := self.parse_hex4()?
             if lo < 56320 or lo > 57343:
-                return Err("invalid low surrogate")
+                return Err(self.at("invalid low surrogate"))
             cp := 65536 + (hi - 55296) * 1024 + (lo - 56320)
             return Ok(chr(cp))
         if hi >= 56320 and hi <= 57343:
-            return Err("unexpected low surrogate")
+            return Err(self.at("unexpected low surrogate"))
         return Ok(chr(hi))
 
     fn parse_hex4(self) -> Result[int]:
         n := 0
         for i in 0..4:
-            d := hex_val(self.bump())?
-            n = n * 16 + d
+            c := self.bump()
+            match hex_val(c):
+                Ok(d): n = n * 16 + d
+                # `hex_val` is a free fn with no `self`, so the location wraps here instead.
+                Err(m): return Err(self.at_pos(m.message(), self.pos - 1))
         return Ok(n)
 
     fn parse_number(self) -> Result[Json]:
@@ -146,11 +170,11 @@ struct Parser:
             self.pos += 1
             int_digits += 1
         if int_digits == 0:
-            return Err("invalid number: expected a digit")
+            return Err(self.at_pos("invalid number: expected a digit", start))
         # RFC-8259: the integer part is either a single `0` or a nonzero digit followed by more —
         # a leading `0` before another digit (`01`, `007`) is invalid.
         if zero_first and int_digits > 1:
-            return Err("invalid number: leading zero")
+            return Err(self.at_pos("invalid number: leading zero", start))
         # An integer-shaped numeral stays integer-shaped until a `.`/`e`/`E` proves otherwise.
         is_int := true
         if self.peek() == ".":
@@ -161,7 +185,7 @@ struct Parser:
                 self.pos += 1
                 frac += 1
             if frac == 0:
-                return Err("invalid number: digits required after '.'")
+                return Err(self.at("invalid number: digits required after '.'"))
         if self.peek() == "e" or self.peek() == "E":
             is_int = false
             self.pos += 1
@@ -172,7 +196,7 @@ struct Parser:
                 self.pos += 1
                 exp += 1
             if exp == 0:
-                return Err("invalid number: digits required in exponent")
+                return Err(self.at("invalid number: digits required in exponent"))
         raw := ""
         for i in start..self.pos:
             raw = raw + self.src[i]
@@ -190,7 +214,7 @@ struct Parser:
         # refuse to serialize. `f - f` is `0.0` for every finite `f` and NaN for a non-finite one.
         # (Underflow like `1e-400` → `0.0` is finite and stays accepted.)
         if f - f != 0.0:
-            return Err("invalid number: value out of range")
+            return Err(self.at_pos("invalid number: value out of range", start))
         return Ok(Json.Num(f))
 
     fn parse_array(self) -> Result[Json]:
@@ -217,7 +241,7 @@ struct Parser:
                 self.depth -= 1
                 return Ok(Json.Arr(items))
             if c != ",":
-                return Err("expected ',' or ']' in array")
+                return Err(self.at_pos("expected ',' or ']' in array", self.pos - 1))
 
     fn parse_object(self) -> Result[Json]:
         self.depth += 1
@@ -233,11 +257,11 @@ struct Parser:
         while true:
             self.skip_ws()
             if self.peek() != "\"":
-                return Err("expected string key in object")
+                return Err(self.at("expected string key in object"))
             key := self.parse_string()?
             self.skip_ws()
             if self.bump() != ":":
-                return Err("expected ':' after object key")
+                return Err(self.at_pos("expected ':' after object key", self.pos - 1))
             v := self.parse_value()?
             obj[key] = v
             self.skip_ws()
@@ -246,7 +270,7 @@ struct Parser:
                 self.depth -= 1
                 return Ok(Json.Obj(obj))
             if c != ",":
-                return Err("expected ',' or '}}' in object")
+                return Err(self.at_pos("expected ',' or '}}' in object", self.pos - 1))
 
 fn is_digit(c: str) -> bool:
     return c >= "0" and c <= "9"
@@ -266,7 +290,7 @@ fn parse(s: str) -> Result[Json]:
     v := p.parse_value()?
     p.skip_ws()
     if p.pos < p.len:
-        return Err("trailing characters after JSON value")
+        return Err(p.at("trailing characters after JSON value"))
     return Ok(v)
 
 # ----- serializing ---------------------------------------------------------------------------

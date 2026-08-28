@@ -22,3 +22,16 @@ test fn parse_keeps_integers_exact():
     match json.decode[int]("9223372036854775000"):
         Ok(n): assert n == 9223372036854775000
         Err(e): assert false, "expected Ok: " + e.message()
+
+test fn parse_error_names_the_exact_spot():
+    match json.parse(r'{"a": 1,
+ "b": }'):
+        Ok(_): assert false, "expected a parse Err"
+        Err(e): assert e.message() == "unexpected character '}}' at line 2 column 7 (char 15)"
+    match json.parse("[1, 2,]"):
+        Ok(_): assert false, "expected a parse Err"
+        Err(e): assert e.message() == "unexpected character ']' at line 1 column 7 (char 6)"
+    deep := "[".repeat(2001) + "]".repeat(2001)
+    match json.parse(deep):
+        Ok(_): assert false, "expected Err past the depth limit"
+        Err(e): assert e.message() == "exceeded max depth"
