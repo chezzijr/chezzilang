@@ -18375,6 +18375,47 @@ fn scalar_cast_rejects_aggregate_arg() {
 }
 
 #[test]
+fn scalar_cast_rejects_struct_enum_fn_arg() {
+    // W8-31: int/float/bool over a struct, enum or fn value is outside the scalar-cast domain,
+    // same as an aggregate, and always faults at runtime (`{cast}() cannot convert struct`). The
+    // checker's allow-list already rejects List/Map/Set/tuple but omits struct/enum/fn — this pins
+    // the missing arms.
+    rejects(
+        "struct P:\n    x: int\nfn main():\n    print(int(P(1)))\nmain()\n",
+        "cannot convert struct",
+    );
+    rejects(
+        "enum Color:\n    Red\n    Green\nfn main():\n    print(float(Color.Red))\nmain()\n",
+        "cannot convert",
+    );
+    rejects(
+        "fn g():\n    pass\nfn main():\n    print(bool(g))\nmain()\n",
+        "cannot convert",
+    );
+}
+
+#[test]
+fn ok_nil_cannot_be_spelled() {
+    // W8-30: `Result[nil, E]` is returned all over the stdlib but there is no way to CONSTRUCT its
+    // success value — `Ok(nil)` should type-check (the exact spelling is a `## Decisions` call for
+    // the implementation stage; `Ok(nil)` is the reported shape). Today it fails checking with
+    // "unknown name 'nil'" instead, so `ok()` fails here until a spelling is wired.
+    ok("fn f() -> Result[nil, str]:\n    return Ok(nil)\nfn main():\n    pass\nmain()\n");
+}
+
+#[test]
+fn match_unreachable_arm_after_wildcard_not_warned() {
+    // W8-40: a `match` arm made unreachable by an earlier `_` wildcard is silently accepted today
+    // (no diagnostic at all) — rustc rejects the analogous shape with `unreachable pattern`. This
+    // pins the fix: `warns` requires a clean type-check PLUS a matching warning, so it fails today
+    // because the checker emits no warning at all for this shape.
+    warns(
+        "fn main():\n    x := 1\n    match x:\n        _:\n            print(\"any\")\n        1:\n            print(\"one\")\nmain()\n",
+        "unreachable",
+    );
+}
+
+#[test]
 fn newtype_str_underlying_unwrap_ok() {
     // For newtype N = str, str(n) unwraps to the inner str.
     ok(
