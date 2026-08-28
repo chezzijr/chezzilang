@@ -1301,19 +1301,25 @@ impl Checker {
     /// substituted with its instantiated type args first (concrete for a scalar newtype — trivial).
     /// A non-newtype arg is left to the normal permissive cast. (`str` is handled separately — it is
     /// dual cast+display, never rejected.)
-    /// Reject a scalar cast (`int`/`float`/`bool`) applied to an AGGREGATE arg (`List`/`Map`/`Set`/
-    /// `tuple`) at check time. The scalar-cast domain is `int`/`float`/`bool`/`str` (`spec.md`); an
-    /// aggregate is outside it and — unlike a `struct` (whose structural `Convert` witnessing is a
-    /// documented deferral) — can NEVER carry a conversion, so the runtime always faults
+    /// Reject a scalar cast (`int`/`float`/`bool`) applied to an arg OUTSIDE the scalar-cast domain
+    /// at check time. The domain is `int`/`float`/`bool`/`str` (`spec.md`); `List`/`Map`/`Set`/tuple/
+    /// struct/enum/function are all outside it and always fault at runtime — `Vm::builtin_int` /
+    /// `builtin_float` / `builtin_bool` (`src/vm/stmt.rs:1695`, `:1735`, `:1772`) handle only inline
+    /// scalars, `Obj::Str` and `Obj::NewType`, then fall through to the error
     /// (`{cast}() cannot convert List`). Catching it here turns a check-OK-then-run-fault into a
     /// clean compile error (the value a statically-typed language adds over Python's runtime `TypeError`).
-    pub(super) fn reject_aggregate_scalar_cast(&mut self, cast: &str, arg: &Expr) {
+    /// `Ty::Option`, `Ty::Result` and `Ty::Bytes` are left OUT of this reject deliberately — see
+    /// `## Decisions` in TICKET-017; each is the same hole, still open.
+    pub(super) fn reject_non_scalar_cast(&mut self, cast: &str, arg: &Expr) {
         let aty = self.infer_value(arg);
         let kind = match aty {
             Ty::List(_) => "List",
             Ty::Map(..) => "Map",
             Ty::Set(_) => "Set",
             Ty::Tuple(_) => "tuple",
+            Ty::Struct(..) => "struct",
+            Ty::Enum(..) => "enum",
+            Ty::Func { .. } | Ty::BuiltinFn { .. } => "function",
             _ => return,
         };
         self.error(
@@ -1487,7 +1493,7 @@ impl Checker {
             "int" => {
                 self.check_arity("int", 1, args, span);
                 if let Some(a) = args.first() {
-                    self.reject_aggregate_scalar_cast("int", a);
+                    self.reject_non_scalar_cast("int", a);
                     self.check_newtype_cast_unwrap("int", a, Ty::Int);
                 }
                 self.infer_all(args);
@@ -1496,7 +1502,7 @@ impl Checker {
             "float" => {
                 self.check_arity("float", 1, args, span);
                 if let Some(a) = args.first() {
-                    self.reject_aggregate_scalar_cast("float", a);
+                    self.reject_non_scalar_cast("float", a);
                     self.check_newtype_cast_unwrap("float", a, Ty::Float);
                 }
                 self.infer_all(args);
@@ -1509,7 +1515,7 @@ impl Checker {
                 // valid truthiness input), so no newtype-mismatch check here. But an AGGREGATE arg
                 // is outside the domain and faults at runtime — reject it at check.
                 if let Some(a) = args.first() {
-                    self.reject_aggregate_scalar_cast("bool", a);
+                    self.reject_non_scalar_cast("bool", a);
                 }
                 self.infer_all(args);
                 Some(Ty::Bool)
