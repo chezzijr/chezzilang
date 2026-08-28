@@ -18724,13 +18724,11 @@ fn cmp_int_f64_is_exact_at_the_i64_and_2_53_boundaries() {
     }
 }
 
-/// TICKET-016 / W8-3 arm 2 — `update` nested inside `update` on the SAME `Shared` box must not hang
-/// undetected: `docs/concurrency.md:598` drops the value lock before running the closure but holds
-/// `update_lock` for the whole RMW, so the nested `update`'s `update_lock.lock()` blocks forever on a
-/// real `std::sync::Mutex` the scheduler's deadlock detector never sees (it only watches channel/park
-/// state). 5 s watchdog: a `recv_timeout` `Err` proves the hang; today it always times out.
+/// TICKET-016 / W8-3 arm 2 — `update` nested inside `update` on the SAME `Shared` box must FAULT
+/// (deadlock: self-held guard) instead of hanging undetected. Planning's decision: a same-box
+/// re-entry is the length-1 wait-for cycle, so it faults; only a genuine hang would time out.
 #[test]
-fn ticket_016_shared_update_nested_in_update_hangs_undetected() {
+fn ticket_016_shared_update_nested_in_update_faults() {
     let src = "\
 s := Shared(10)
 fn bump(v: int) -> int:
@@ -18750,19 +18748,17 @@ print(s.get())
     });
     let result = rx.recv_timeout(std::time::Duration::from_secs(5));
     let _ = std::fs::remove_file(&entry);
+    let (_out, _err, res, _code) =
+        result.expect("expected update-in-update to return within 5s (fault), not hang");
     assert!(
-        result.is_err(),
-        "expected `update` nested in `update` on the same Shared box to hang undetected \
-         (W8-3), but it returned within 5s: {result:?}"
+        res.is_err(),
+        "expected `update` nested in `update` on the same Shared box to fault (W8-3), got {res:?}"
     );
 }
 
-/// TICKET-016 / W8-3 arm 1 — a `set` nested inside `update` on the SAME `Shared` box is silently
-/// lost: `update` snapshots the pre-guard value into `cur` before running the closure, then
-/// unconditionally overwrites the box with the closure's return (computed from the stale `cur`) —
-/// so the nested `s.set(99)` is clobbered with no error, no warning, rc=0. Expected final value is
-/// non-deterministic across a real fix (planning's call), but 11 (10+1, `set(99)` fully discarded) is
-/// the one currently-guaranteed-wrong, currently-silent answer this test pins as broken.
+/// TICKET-016 / W8-3 arm 1 — a `set` nested inside `update` on the SAME `Shared` box must FAULT
+/// (deadlock: self-held guard) instead of being silently overwritten by `update`'s post-closure
+/// write-back.
 #[test]
 fn ticket_016_shared_update_nested_set_silently_lost() {
     let src = "\
@@ -18774,14 +18770,223 @@ s.update(bump)
 print(s.get())
 ";
     let entry = write_temp_chz("ticket016_update_nested_set", src);
-    let (out, _err, res, _code) = run_file_with(&entry, crate::native::HostConfig::default());
+    let (_out, _err, res, _code) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_file(&entry);
-    assert!(res.is_ok(), "run faulted: {res:?}");
-    assert_ne!(
-        out, "11\n",
-        "expected the nested `set(99)` to not be silently discarded (W8-3), but got the \
-         stale-overwrite value 11 with no error"
+    let e = res.expect_err("expected a fault, got ok");
+    assert!(
+        e.message.contains("already holds the update guard"),
+        "expected the fault message to name the self-held guard, got: {}",
+        e.message
     );
+}
+
+/// TICKET-016 / W8-3 — a cross-task `set` racing an in-flight `update` on a DIFFERENT task must
+/// BLOCK behind the guard and land, not be silently lost (Go's mutex loses nothing).
+#[test]
+fn ticket_016_cross_task_set_racing_update_is_not_lost() {
+    let src = "\
+import std.concurrency
+import std.time
+s := Shared(0)
+fn slow(x: int) -> int:
+    time.sleep_ms(300)
+    return x + 1
+parallel:
+    spawn: s.update(slow)
+    spawn:
+        time.sleep_ms(100)
+        s.set(100)
+print(\"s = {s.get()}\")
+";
+    let entry = write_temp_chz("ticket016_cross_task_set_race", src);
+    let (out, err, res, _code) = run_file_with(&entry, crate::native::HostConfig::default());
+    let _ = std::fs::remove_file(&entry);
+    assert!(res.is_ok(), "run faulted: {res:?} err={err}");
+    assert_eq!(
+        out, "s = 100\n",
+        "expected the cross-task set to block and land: {out:?}"
+    );
+}
+
+/// TICKET-016 / W8-3 — an AB-BA wait-for CYCLE across two `Shared` boxes must fault, not hang
+/// undetected. A 200ms sleep before each nested `update` forces the cycle to form.
+#[test]
+fn ticket_016_cross_box_update_cycle_faults() {
+    let src = "\
+import std.concurrency
+import std.time
+a := Shared(1)
+b := Shared(2)
+fn bumpb(x: int) -> int:
+    time.sleep_ms(200)
+    b.update(fn(y: int) -> int: y + 1)
+    return x + 1
+fn bumpa(y: int) -> int:
+    time.sleep_ms(200)
+    a.update(fn(x: int) -> int: x + 1)
+    return y + 1
+parallel:
+    spawn: a.update(bumpb)
+    spawn: b.update(bumpa)
+print(\"done\")
+";
+    let entry = write_temp_chz("ticket016_cross_box_cycle", src);
+    let run_entry = entry.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_file_with(
+            &run_entry,
+            crate::native::HostConfig::default(),
+        ));
+    });
+    let result = rx.recv_timeout(std::time::Duration::from_secs(15));
+    let _ = std::fs::remove_file(&entry);
+    let (_out, _err, res, _code) =
+        result.expect("expected the AB-BA cycle to fault within 15s, not hang");
+    assert!(
+        res.is_err(),
+        "expected an AB-BA wait-for cycle to fault, got {res:?}"
+    );
+}
+
+/// TICKET-016 / W8-3 — the no-false-fault control: two tasks that each update a DIFFERENT box with
+/// no cycle must complete normally, not be reported as a deadlock.
+#[test]
+fn ticket_016_cross_box_update_without_cycle_still_runs() {
+    let src = "\
+import std.concurrency
+a := Shared(1)
+b := Shared(2)
+fn bumpb(x: int) -> int:
+    b.update(fn(y: int) -> int: y + 1)
+    return x + 1
+fn bumpa(y: int) -> int:
+    a.update(fn(x: int) -> int: x + 1)
+    return y + 1
+parallel:
+    spawn: a.update(bumpb)
+    spawn: b.update(bumpa)
+print(\"done\")
+";
+    let entry = write_temp_chz("ticket016_cross_box_no_cycle", src);
+    let (out, err, res, _code) = run_file_with(&entry, crate::native::HostConfig::default());
+    let _ = std::fs::remove_file(&entry);
+    assert!(res.is_ok(), "run faulted: {res:?} err={err}");
+    assert_eq!(
+        out, "done\n",
+        "expected the no-cycle case to complete: {out:?}"
+    );
+}
+
+/// TICKET-016 / W8-3 — `get` inside `update` stays legal and reads the pre-guard value; it must not
+/// be made to take the update guard.
+#[test]
+fn ticket_016_get_inside_update_still_reads_pre_guard_value() {
+    let src = "\
+s := Shared(10)
+fn peek(v: int) -> int:
+    print(s.get())
+    return v + 1
+s.update(peek)
+print(s.get())
+";
+    let entry = write_temp_chz("ticket016_get_inside_update", src);
+    let (out, err, res, _code) = run_file_with(&entry, crate::native::HostConfig::default());
+    let _ = std::fs::remove_file(&entry);
+    assert!(res.is_ok(), "run faulted: {res:?} err={err}");
+    assert_eq!(out, "10\n11\n", "expected 10 then 11: {out:?}");
+}
+
+/// TICKET-016 / W8-3 — `write` nested in `read` is the one legal `RwShared` crossing and must still
+/// persist.
+#[test]
+fn ticket_016_rwshared_write_inside_read_still_persists() {
+    let src = "\
+r := RwShared(5)
+fn peek(v: int) -> int:
+    r.write(fn(y: int) -> int: y + 100)
+    return v
+print(r.read(peek))
+print(r.read(fn(v: int) -> int: v))
+";
+    let entry = write_temp_chz("ticket016_rwshared_write_in_read", src);
+    let (out, err, res, _code) = run_file_with(&entry, crate::native::HostConfig::default());
+    let _ = std::fs::remove_file(&entry);
+    assert!(res.is_ok(), "run faulted: {res:?} err={err}");
+    assert_eq!(out, "5\n105\n", "expected 5 then 105: {out:?}");
+}
+
+/// TICKET-016 / W8-25 — the module-global closure crossing INTO a `spawn:` (the `Lowered::Closure`
+/// wire form, not `WireValue`) must carry the airlock snapshot.
+#[test]
+fn ticket_016_closure_over_module_global_crossing_into_spawn() {
+    let src = "\
+import std.concurrency
+n := 1
+f := fn(x: int) -> int: x * n
+n = 100
+parallel:
+    spawn: print(f(3))
+";
+    let entry = write_temp_chz("ticket016_global_into_spawn", src);
+    let (out, err, res, _code) = run_file_with(&entry, crate::native::HostConfig::default());
+    let _ = std::fs::remove_file(&entry);
+    assert!(res.is_ok(), "run faulted: {res:?} err={err}");
+    assert_eq!(out, "300\n", "expected 300: {out:?}");
+}
+
+/// TICKET-016 / W8-25 — a crossed closure that READS AND WRITES the same module global must keep
+/// the written slot a late load: `Proto::global_free` excludes any slot the closure tree writes, so
+/// the snapshot can never go stale.
+#[test]
+fn ticket_016_closure_over_module_global_written_by_closure_stays_late() {
+    let src = "\
+import std.concurrency
+n := 1
+ch := Channel[fn(int) -> int]()
+fn outer() -> fn(int) -> int:
+    fn f(x: int) -> int:
+        n = n + x
+        return n
+    return f
+parallel:
+    spawn:
+        n = 100
+        ch.send(outer())
+g := ch.recv()
+print(g(3))
+";
+    let entry = write_temp_chz("ticket016_global_read_write", src);
+    let (out, err, res, _code) = run_file_with(&entry, crate::native::HostConfig::default());
+    let _ = std::fs::remove_file(&entry);
+    assert!(res.is_ok(), "run faulted: {res:?} err={err}");
+    assert_eq!(
+        out, "4\n",
+        "expected 4 (late load, not the snapshot 103): {out:?}"
+    );
+}
+
+/// TICKET-016 / W8-25 — a closure NESTED inside a crossed closure must also see the airlock
+/// snapshot: `Compiler::fill_global_free`'s fixpoint follows `Op::MakeClosure`/`Op::SpawnBlock`, and
+/// `Op::MakeClosure` clones the parent's `gsnap` into the child it creates.
+#[test]
+fn ticket_016_closure_over_module_global_read_by_nested_closure() {
+    let src = "\
+import std.concurrency
+n := 1
+ch := Channel[fn(int) -> int]()
+parallel:
+    spawn:
+        n = 100
+        ch.send(fn(x: int) -> int: x * (fn() -> int: n)())
+g := ch.recv()
+print(g(3))
+";
+    let entry = write_temp_chz("ticket016_global_nested_closure", src);
+    let (out, err, res, _code) = run_file_with(&entry, crate::native::HostConfig::default());
+    let _ = std::fs::remove_file(&entry);
+    assert!(res.is_ok(), "run faulted: {res:?} err={err}");
+    assert_eq!(out, "300\n", "expected 300: {out:?}");
 }
 
 /// TICKET-016 / W8-25 — a closure's reference to a MODULE GLOBAL is a late global load, not a
