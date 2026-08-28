@@ -43,6 +43,9 @@ pub struct CapEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinKind {
     Add,
+    /// Behaves as `Add` except that two `Obj::List` operands extend the LEFT list in place and
+    /// yield that same handle, instead of allocating a new list.
+    AddInPlace,
     Sub,
     Mul,
     Div,
@@ -162,6 +165,9 @@ pub enum Op {
 
     // ----- arithmetic / logic (dispatch on runtime types) -----
     Add,
+    /// Behaves as `Add` except that two `Obj::List` operands extend the LEFT list in place and
+    /// yield that same handle, instead of allocating a new list. Used to lower `xs += ys`.
+    AddInPlace,
     Sub,
     Mul,
     Div,

@@ -8623,6 +8623,39 @@ fn superinstruction_loop_sum_correct() {
 }
 
 #[test]
+fn compound_assign_lowers_to_inc_local_end_to_end() {
+    // `Op::AddInPlace` must not cost the M19 superinstructions: `i += 1` still fuses to
+    // `Op::IncLocal`, and `total += i` still fuses to `Op::BinLocalLocal{AddInPlace}`.
+    let src = "fn main():\n    total := 0\n    i := 0\n    while i < 5:\n        total += i\n        i += 1\n    print(total)\nmain()";
+    let module = parser::parse(lexer::tokenize(src).unwrap()).unwrap();
+    let program = crate::compiler::compile_module_standalone(&module).unwrap();
+    let main_proto = program
+        .protos
+        .iter()
+        .find(|p| p.name == "main")
+        .expect("a `main` proto exists");
+    assert!(
+        main_proto
+            .code
+            .iter()
+            .any(|op| matches!(op, Op::IncLocal { delta: 1, .. })),
+        "expected an IncLocal in {:?}",
+        main_proto.code
+    );
+    assert!(
+        main_proto.code.iter().any(|op| matches!(
+            op,
+            Op::BinLocalLocal {
+                kind: crate::vm::op::BinKind::AddInPlace,
+                ..
+            }
+        )),
+        "expected a BinLocalLocal{{AddInPlace}} in {:?}",
+        main_proto.code
+    );
+}
+
+#[test]
 fn superinstruction_div_mod_by_zero_via_locals() {
     // BinLocalLocal fast path must raise the same message as `arith`.
     assert_eq!(
@@ -16050,8 +16083,9 @@ fn collection_operators_eval_correct() {
     );
 }
 
-/// Compound-assign forms (`+= *= |= &= ^= -=`) of the collection operators lower through the
-/// same opcodes as the binary forms, so they must produce identical values.
+/// Compound-assign forms of the collection operators must produce identical values to the binary
+/// forms. `*=`, `|=`, `&=`, `^=` and `-=` lower through their plain binary opcode; `+=` lowers to
+/// `Op::AddInPlace`, which extends a `List` in place instead of allocating a new one (W8-27).
 #[test]
 fn collection_compound_assign_eval_correct() {
     let cases = [

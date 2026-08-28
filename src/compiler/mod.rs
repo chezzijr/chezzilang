@@ -2450,7 +2450,7 @@ impl Compiler {
                 Some(bin) => {
                     self.emit_load(fc, name, span);
                     self.compile_expr(fc, value)?;
-                    fc.emit(binary_op(bin), span);
+                    fc.emit(compound_op(op, bin), span);
                     self.emit_store(fc, name, span);
                 }
             },
@@ -2468,7 +2468,7 @@ impl Compiler {
                         target.span,
                     );
                     self.compile_expr(fc, value)?;
-                    fc.emit(binary_op(bin), span);
+                    fc.emit(compound_op(op, bin), span);
                 } else {
                     self.compile_expr(fc, value)?;
                 }
@@ -2491,7 +2491,7 @@ impl Compiler {
                     fc.emit(Op::Dup2, span);
                     fc.emit(Op::GetIndex, target.span);
                     self.compile_expr(fc, value)?;
-                    fc.emit(binary_op(bin), span);
+                    fc.emit(compound_op(op, bin), span);
                 } else {
                     self.compile_expr(fc, value)?;
                 }
@@ -5905,6 +5905,17 @@ fn assert_cmp(op: BinaryOp) -> Option<AssertCmp> {
         BinaryOp::Eq => Some(AssertCmp::Eq),
         BinaryOp::NotEq => Some(AssertCmp::NotEq),
         _ => None,
+    }
+}
+
+/// Compound-assignment lowering for one binop: `+=` lowers to `Op::AddInPlace` (extends a `List`
+/// in place at runtime; `arith_in_place` falls through to `Op::Add` for every other type), every
+/// other compound form (`*=`, `-=`, the set/bit forms) lowers through its plain binary opcode.
+fn compound_op(op: AssignOp, bin: BinaryOp) -> Op {
+    if matches!(op, AssignOp::PlusEq) {
+        Op::AddInPlace
+    } else {
+        binary_op(bin)
     }
 }
 

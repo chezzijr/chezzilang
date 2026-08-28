@@ -325,7 +325,8 @@ impl Vm {
         // Arithmetic is computed in true i64 (overflow still faults past i64), then `make_int` boxes
         // any result outside ±2^62 — the inline↔box fork, invisible to the program.
         let v = match kind {
-            BinKind::Add => {
+            // An inline int is never a list, so `AddInPlace` behaves exactly as `Add` here.
+            BinKind::Add | BinKind::AddInPlace => {
                 let n = x
                     .checked_add(y)
                     .ok_or_else(|| self.err("integer overflow in Add".to_string(), span))?;
@@ -389,7 +390,37 @@ impl Vm {
             BinKind::LtEq => self.compare_op(&Op::LtEq, span),
             BinKind::Gt => self.compare_op(&Op::Gt, span),
             BinKind::GtEq => self.compare_op(&Op::GtEq, span),
+            BinKind::AddInPlace => self.arith_in_place(span),
         }
+    }
+
+    /// `Op::AddInPlace`'s runtime dispatch, lowered from `xs += ys`. Extends the LEFT list in
+    /// place when both operands are `Obj::List`, and falls through to `Op::Add` otherwise — the
+    /// decision is made here, at runtime, because the compiler is type-blind. Reads both operands
+    /// off the stack WITHOUT popping them first, so they stay GC-rooted across `heap.get_mut`; the
+    /// non-list path hands the untouched stack straight to `arith`, which pops in its own order.
+    pub(super) fn arith_in_place(&mut self, span: Span) -> Result<(), RuntimeError> {
+        let n = self.stack.len();
+        let l = self.stack[n - 2];
+        let r = self.stack[n - 1];
+        if let (Some(lh), Some(rh)) = (l.as_obj(), r.as_obj())
+            && matches!(self.heap.get(lh), Obj::List(_))
+            && matches!(self.heap.get(rh), Obj::List(_))
+        {
+            // Snapshot the right side's elements FIRST so `xs += xs` (self-extend) terminates,
+            // mirroring `extend`'s comment (src/vm/call.rs).
+            let Obj::List(right) = self.heap.get(rh) else {
+                unreachable!()
+            };
+            let appended = right.clone();
+            let Obj::List(left) = self.heap.get_mut(lh) else {
+                unreachable!()
+            };
+            left.extend(appended);
+            self.pop();
+            return Ok(());
+        }
+        self.arith(&Op::Add, span)
     }
 
     pub(super) fn arith(&mut self, op: &Op, span: Span) -> Result<(), RuntimeError> {
@@ -1633,6 +1664,11 @@ impl Vm {
                 return Err(e);
             }
         };
+        if let Err(e) = self.sort_mutation_check(src_h, snap_h, "sort", span) {
+            self.pop(); // unroot snapshot
+            self.pop(); // unroot source
+            return Err(e);
+        }
         // No comparator calls remain, so no GC: read the rooted snapshot and write the result back.
         let reordered: Vec<Value> = match self.heap.get(snap_h) {
             Obj::List(v) => order.iter().map(|&i| v[i]).collect(),

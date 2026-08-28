@@ -1988,6 +1988,34 @@ impl Vm {
         }
     }
 
+    /// A sort callback must not mutate the list being sorted (W8-4): the list is a `Result`-less
+    /// snapshot-and-write-back, so a mutation the write-back would erase is a contract violation,
+    /// not something to discard silently. Compares the live list at `src_h` to the rooted snapshot
+    /// at `snap_h` by raw `Value` word (`Value`'s derived `PartialEq` is bit equality — NaN-safe,
+    /// and it catches a length change AND a same-length element write). Call this immediately
+    /// before the write-back, at all three sort call sites.
+    pub(super) fn sort_mutation_check(
+        &mut self,
+        src_h: GcRef,
+        snap_h: GcRef,
+        method: &str,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        let changed = match (self.heap.get(src_h), self.heap.get(snap_h)) {
+            (Obj::List(cur), Obj::List(snap)) => cur != snap,
+            _ => true,
+        };
+        if changed {
+            return Err(self.err(
+                format!(
+                    "list modified during '{method}' -- a sort callback must not mutate the list being sorted"
+                ),
+                span,
+            ));
+        }
+        Ok(())
+    }
+
     /// `xs.sort_by(cmp)` — stable in-place sort driven by a Chezzi comparator `fn(T, T) -> int`
     /// (negative = a before b, positive = a after b, zero = equal). The comparator re-enters the VM
     /// and may GC, so we never hold the elements in an unrooted Rust `Vec`: the source list stays
@@ -2035,6 +2063,11 @@ impl Vm {
                 return Err(e);
             }
         };
+        if let Err(e) = self.sort_mutation_check(src_h, snap_h, "sort_by", span) {
+            self.pop(); // unroot snapshot
+            self.pop(); // unroot source
+            return Err(e);
+        }
         // No comparator calls remain, so no GC: read the rooted snapshot and write the result back.
         let reordered: Vec<Value> = match self.heap.get(snap_h) {
             Obj::List(v) => order.iter().map(|&i| v[i]).collect(),
@@ -2174,6 +2207,12 @@ impl Vm {
                 return Err(e);
             }
         };
+        if let Err(e) = self.sort_mutation_check(src_h, snap_h, "sort_by_key", span) {
+            self.pop(); // unroot keys
+            self.pop(); // unroot snapshot
+            self.pop(); // unroot source
+            return Err(e);
+        }
         // No extractor/compare calls remain, so no GC: reorder the snapshot and write back.
         let reordered: Vec<Value> = match self.heap.get(snap_h) {
             Obj::List(v) => order.iter().map(|&i| v[i]).collect(),

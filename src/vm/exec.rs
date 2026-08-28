@@ -1275,6 +1275,11 @@ impl Vm {
                     crate::vm::op::BinKind::Add,
                     span,
                 ),
+                Op::AddInPlace => self.q_arith(
+                    self.quicken_base[pid] as usize + ip,
+                    crate::vm::op::BinKind::AddInPlace,
+                    span,
+                ),
                 Op::Sub => self.q_arith(
                     self.quicken_base[pid] as usize + ip,
                     crate::vm::op::BinKind::Sub,
@@ -1920,6 +1925,7 @@ impl Vm {
                 }
             }
             Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod => self.arith(op, span)?,
+            Op::AddInPlace => self.arith_in_place(span)?,
             Op::Neg => {
                 let v = self.pop();
                 let r = self.neg_value(v, span)?;

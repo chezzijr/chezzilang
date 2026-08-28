@@ -1802,13 +1802,17 @@ fn sort_by_stable_by_key_parity() {
 }
 
 #[test]
-fn sort_by_comparator_mutates_list_parity() {
-    // A comparator that mutates an element being sorted must behave identically.
-    // Both sort a snapshot taken at call time and overwrite the list with the sorted result, so
-    // the in-comparator `xs[0] = 100` is discarded.
+fn sort_by_comparator_mutating_the_list_faults() {
+    // The in-comparator `xs[0] = 100` is now detected against the rooted snapshot and faulted,
+    // matching CPython's `ValueError: list modified during sort` — never discarded.
     let src = "xs := [3, 1, 2]\nfn cmp(a: int, b: int) -> int:\n    xs[0] = 100\n    return a - b\nxs.sort_by(cmp)\nprint(xs)\n";
-    assert_golden_out(src, "[1, 2, 3]\n");
-    assert_eq!(vm_outcome(src).unwrap(), "[1, 2, 3]\n");
+    assert!(
+        vm_outcome(src)
+            .unwrap_err()
+            .contains("list modified during 'sort_by'"),
+        "{:?}",
+        vm_outcome(src)
+    );
 }
 
 #[test]

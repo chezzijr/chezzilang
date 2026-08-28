@@ -23,6 +23,7 @@ use crate::vm::op::{BinKind, Op};
 fn bin_kind(op: &Op) -> Option<BinKind> {
     Some(match op {
         Op::Add => BinKind::Add,
+        Op::AddInPlace => BinKind::AddInPlace,
         Op::Sub => BinKind::Sub,
         Op::Mul => BinKind::Mul,
         Op::Div => BinKind::Div,
@@ -174,11 +175,10 @@ fn try_fuse_tail(out: &[Op]) -> Option<Fold> {
     // ----- IncLocal: [BinLocalConst{slot, val, Add}, SetLocal(slot)] → IncLocal{slot, val} -----
     if m >= 2
         && let Op::SetLocal(s2) = out[m - 1]
-        && let Op::BinLocalConst {
-            slot,
-            val,
-            kind: BinKind::Add,
-        } = out[m - 2]
+        && let Op::BinLocalConst { slot, val, kind } = out[m - 2]
+        // The fused right operand is always a `ConstInt` (see the `BinLocalConst` fusion below),
+        // which is never a list, so `AddInPlace` collapses identically to `Add` here.
+        && matches!(kind, BinKind::Add | BinKind::AddInPlace)
         && slot == s2
     {
         return Some(Fold {
@@ -516,6 +516,46 @@ mod tests {
                         a: 0,
                         b: 1,
                         kind: BinKind::Add
+                    },
+                    Op::SetLocal(0)
+                ]
+            ),
+            "got {out:?}"
+        );
+    }
+
+    #[test]
+    fn compound_add_still_fuses_to_inc_local() {
+        // `i += 1` lowers to `Op::AddInPlace`, not `Op::Add`; it must still collapse to IncLocal.
+        let out = opt(vec![
+            Op::GetLocal(1),
+            Op::ConstInt(1),
+            Op::AddInPlace,
+            Op::SetLocal(1),
+        ]);
+        assert!(
+            matches!(out.as_slice(), [Op::IncLocal { slot: 1, delta: 1 }]),
+            "got {out:?}"
+        );
+    }
+
+    #[test]
+    fn compound_add_of_two_locals_fuses() {
+        // `total += i` (load 0, load 1, AddInPlace, store 0) fuses to BinLocalLocal + store.
+        let out = opt(vec![
+            Op::GetLocal(0),
+            Op::GetLocal(1),
+            Op::AddInPlace,
+            Op::SetLocal(0),
+        ]);
+        assert!(
+            matches!(
+                out.as_slice(),
+                [
+                    Op::BinLocalLocal {
+                        a: 0,
+                        b: 1,
+                        kind: BinKind::AddInPlace
                     },
                     Op::SetLocal(0)
                 ]
