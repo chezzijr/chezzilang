@@ -743,6 +743,20 @@ impl Checker {
         false
     }
 
+    /// W8-40: warn on a `match` arm made unreachable by an earlier arm. `dead` is `has_wildcard` READ
+    /// ONE ARM LATER — `has_wildcard` already means "an earlier arm was irrefutable AND unguarded"
+    /// (see the three call sites), so a guarded catch-all (`_ if c:`) never silences a later arm: its
+    /// guard may fail at runtime, so every arm after it stays live. Range subsumption (`0..10` then
+    /// `5`) is deliberately out of scope — the exhaustiveness walk has no interval arithmetic.
+    fn warn_unreachable_arm(&mut self, dead: bool, span: Span) {
+        if dead {
+            self.warn(
+                span,
+                "unreachable match arm: an earlier arm already matches every value".to_string(),
+            );
+        }
+    }
+
     /// Report a non-exhaustive match.
     /// - Variants mode: missing variants, unless a `_` wildcard was seen.
     /// - Literal mode: int/str/bool literal domains are open, so a `_` wildcard is *required*
@@ -943,6 +957,10 @@ impl Checker {
         let mut covered = std::collections::HashSet::new();
         let mut has_wildcard = false;
         for arm in arms {
+            self.warn_unreachable_arm(
+                has_wildcard,
+                arm.body.first().map_or(scrutinee.span, |s| s.span),
+            );
             // PERSISTENT refine-on-first-use (see `check_block`): a STATEMENT-`match` arm mirrors an
             // if/else statement body — a refine-on-first-use pin of an OUTER empty collection inside
             // one arm PERSISTS across sibling arms and past the match (Option B: a cross-arm element-
@@ -993,6 +1011,7 @@ impl Checker {
         // the list/map `literal_numeric_mix` peephole the compiler coerces on — see `branch_widen`).
         let mix = crate::compiler::literal_numeric_mix(arms.iter().map(|a| &a.body));
         for arm in arms {
+            self.warn_unreachable_arm(has_wildcard, arm.body.span);
             // Flow-sensitivity barrier (see `check_block`): expression-`match` arms run
             // conditionally too — refinement inside one arm must not leak across arms or past it.
             let snap = self.snapshot_refinable();
@@ -1759,6 +1778,10 @@ impl Checker {
         let mut result: Option<Ty> = None;
         let mut uniform = true;
         for arm in arms {
+            self.warn_unreachable_arm(
+                has_wildcard,
+                arm.body.first().map_or(scrutinee.span, |s| s.span),
+            );
             let irref = self.bind_match_arm(
                 &arm.pattern,
                 &kind,
