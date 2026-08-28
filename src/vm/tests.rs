@@ -18723,3 +18723,122 @@ fn cmp_int_f64_is_exact_at_the_i64_and_2_53_boundaries() {
         );
     }
 }
+
+/// TICKET-016 / W8-3 arm 2 — `update` nested inside `update` on the SAME `Shared` box must not hang
+/// undetected: `docs/concurrency.md:598` drops the value lock before running the closure but holds
+/// `update_lock` for the whole RMW, so the nested `update`'s `update_lock.lock()` blocks forever on a
+/// real `std::sync::Mutex` the scheduler's deadlock detector never sees (it only watches channel/park
+/// state). 5 s watchdog: a `recv_timeout` `Err` proves the hang; today it always times out.
+#[test]
+fn ticket_016_shared_update_nested_in_update_hangs_undetected() {
+    let src = "\
+s := Shared(10)
+fn bump(v: int) -> int:
+    s.update(fn(w: int) -> int: w + 1)
+    return v + 1
+s.update(bump)
+print(s.get())
+";
+    let entry = write_temp_chz("ticket016_update_in_update", src);
+    let run_entry = entry.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_file_with(
+            &run_entry,
+            crate::native::HostConfig::default(),
+        ));
+    });
+    let result = rx.recv_timeout(std::time::Duration::from_secs(5));
+    let _ = std::fs::remove_file(&entry);
+    assert!(
+        result.is_err(),
+        "expected `update` nested in `update` on the same Shared box to hang undetected \
+         (W8-3), but it returned within 5s: {result:?}"
+    );
+}
+
+/// TICKET-016 / W8-3 arm 1 — a `set` nested inside `update` on the SAME `Shared` box is silently
+/// lost: `update` snapshots the pre-guard value into `cur` before running the closure, then
+/// unconditionally overwrites the box with the closure's return (computed from the stale `cur`) —
+/// so the nested `s.set(99)` is clobbered with no error, no warning, rc=0. Expected final value is
+/// non-deterministic across a real fix (planning's call), but 11 (10+1, `set(99)` fully discarded) is
+/// the one currently-guaranteed-wrong, currently-silent answer this test pins as broken.
+#[test]
+fn ticket_016_shared_update_nested_set_silently_lost() {
+    let src = "\
+s := Shared(10)
+fn bump(v: int) -> int:
+    s.set(99)
+    return v + 1
+s.update(bump)
+print(s.get())
+";
+    let entry = write_temp_chz("ticket016_update_nested_set", src);
+    let (out, _err, res, _code) = run_file_with(&entry, crate::native::HostConfig::default());
+    let _ = std::fs::remove_file(&entry);
+    assert!(res.is_ok(), "run faulted: {res:?}");
+    assert_ne!(
+        out, "11\n",
+        "expected the nested `set(99)` to not be silently discarded (W8-3), but got the \
+         stale-overwrite value 11 with no error"
+    );
+}
+
+/// TICKET-016 / W8-25 — a closure's reference to a MODULE GLOBAL is a late global load, not a
+/// capture, so it is neither moved nor copied at the `parallel:`/`spawn:` airlock: a live cross-heap
+/// read of one cell from two heaps. At module scope the closure crossed through the `Channel` sees
+/// the RECEIVER's un-mutated global cell (`n=1`) instead of the sender's write (`n=100`), so
+/// `f(3)` prints `3` instead of Go/CPython's `300`. The identical body inside `fn main()` (over a
+/// LOCAL, which the airlock does copy) already prints `300` — see
+/// `ticket_016_closure_over_local_in_fn_crosses_airlock_correctly` for the contrast.
+#[test]
+fn ticket_016_closure_over_module_global_loses_value_at_airlock() {
+    let src = "\
+import std.concurrency
+
+n := 1
+ch := Channel[fn(int) -> int]()
+parallel:
+    spawn:
+        n = 100
+        ch.send(fn(x: int) -> int: x * n)
+f := ch.recv()
+print(f(3))
+";
+    let entry = write_temp_chz("ticket016_global_capture", src);
+    let (out, _err, res, _code) = run_file_with(&entry, crate::native::HostConfig::default());
+    let _ = std::fs::remove_file(&entry);
+    assert!(res.is_ok(), "run faulted: {res:?}");
+    assert_eq!(
+        out, "300\n",
+        "expected a closure's module-global reference to see the pre-airlock write (300, \
+         matching Go/CPython), got {out:?} — the current bug reads the receiver's stale global (W8-25)"
+    );
+}
+
+/// TICKET-016 / W8-25 contrast — the identical shape over a captured LOCAL (not a module global)
+/// already crosses the airlock correctly: the airlock copies a captured local by value, so the
+/// closure's `n` is fixed at capture/copy time and the receiver sees the sender's write.
+#[test]
+fn ticket_016_closure_over_local_in_fn_crosses_airlock_correctly() {
+    let src = "\
+import std.concurrency
+
+fn main():
+    n := 1
+    ch := Channel[fn(int) -> int]()
+    parallel:
+        spawn:
+            n = 100
+            ch.send(fn(x: int) -> int: x * n)
+    f := ch.recv()
+    print(f(3))
+
+main()
+";
+    let entry = write_temp_chz("ticket016_local_capture", src);
+    let (out, _err, res, _code) = run_file_with(&entry, crate::native::HostConfig::default());
+    let _ = std::fs::remove_file(&entry);
+    assert!(res.is_ok(), "run faulted: {res:?}");
+    assert_eq!(out, "300\n", "captured-local shape regressed: {out:?}");
+}
