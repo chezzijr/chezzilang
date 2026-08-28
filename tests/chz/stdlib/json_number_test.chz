@@ -2,6 +2,11 @@
 # json.encode (docs/gaps.md W8-35, W8-36, W8-20; TICKET-013). Run: `cargo run -- test tests/chz/`.
 
 import std.json
+import std.math
+
+struct Pt:
+    x: int
+    y: str
 
 test fn parse_keeps_integers_exact():
     match json.parse("9223372036854775000"):
@@ -35,3 +40,25 @@ test fn parse_error_names_the_exact_spot():
     match json.parse(deep):
         Ok(_): assert false, "expected Err past the depth limit"
         Err(e): assert e.message() == "exceeded max depth"
+
+test fn encode_covers_the_value_shapes():
+    assert json.encode(42) == "42"
+    assert json.encode(9223372036854775000) == "9223372036854775000"
+    assert json.encode(1.5) == "1.5"
+    assert json.encode(3.0) == "3.0"
+    assert json.encode(true) == "true"
+    assert json.encode([1, 2, 3]) == "[1,2,3]"
+    assert json.encode({"a": 1}) == "{{\"a\":1}}"
+    assert json.encode(Pt(1, "b")) == "{{\"x\":1,\"y\":\"b\"}}"
+
+test fn encode_faults_on_a_non_encodable_value():
+    res: Result[int] = Ok(1)
+    r1 := recover: json.encode(res)
+    match r1:
+        Ok(_): assert false, "expected a Result to fault"
+        Err(e): assert e.message() == "json.encode: cannot encode a Result"
+
+    r2 := recover: json.encode(math.nan)
+    match r2:
+        Ok(_): assert false, "expected a non-finite float to fault"
+        Err(e): assert e.message() == "cannot serialize non-finite float to JSON"

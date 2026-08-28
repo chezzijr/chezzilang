@@ -311,6 +311,11 @@ pub enum Op {
     /// errored, the `Err` passes through; otherwise the inner `Json` is coerced against the
     /// descriptor (→ `Ok(value)` or `Err(msg)`).
     JsonDecode(crate::json_decode::TypeDescriptor),
+    /// `json.encode(x)`'s runtime seam (`std/json.chz`'s bodyless `native fn _to_json`). Pops one
+    /// runtime value and pushes the `Json` enum tree that `std.json`'s own `stringify` then renders
+    /// — `encode` is `stringify(_to_json(x))` in Chezzi, so number/string formatting have exactly
+    /// one implementation.
+    JsonToValue,
 
     // ----- construction -----
     NewList(usize),

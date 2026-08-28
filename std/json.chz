@@ -17,6 +17,21 @@ enum Json:
     Arr(List[Json])
     Obj(Map[str, Json])
 
+# Opcode-backed runtime seam for `encode`, exactly like `std.time.timer` — the compiler lowers this
+# bare call to `Op::JsonToValue` at its one call site below. Module-private: the module-export pass
+# has no `StmtKind::Native` arm, so `json._to_json` is unreachable from user code. `std.json`
+# deliberately stays a NON-native module (`harvest_native_module` has no pass for a plain `enum` or
+# a plain `struct`, and this module declares both), so this is the seam instead of a native member.
+native fn _to_json(x: Any) -> Json
+
+# The `dumps`-shaped inverse of `decode[T]` (docs/gaps.md W8-20): `encode(x)` walks a struct/list/
+# map/scalar value into `Json` and serializes it in one call, so `decode[T](encode(x))` gives back
+# `x`. An int encodes as `Json.Int` and never passes through f64 (the W8-35 split this ticket also
+# fixes). A non-encodable value (a `Result`, a non-`Option` enum, a function, …) faults recoverably;
+# see `_to_json`'s runtime walk (`Vm::json_of`) for the exact fault messages.
+fn encode(x: Any) -> str:
+    return stringify(_to_json(x))
+
 # ----- parsing -------------------------------------------------------------------------------
 
 # A cursor over the input's codepoints. Fields mutate in place across method calls.

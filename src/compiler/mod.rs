@@ -284,6 +284,12 @@ struct Compiler {
     /// The CURRENT module's index, set at the top of `compile_module` — the home module whose
     /// locally-declared types use its own `type_keys` entry.
     current_module_idx: usize,
+    /// The module index that declared `std/json.chz`'s bodyless `native fn _to_json` (set once, in
+    /// `hoist_types`, which runs over every module before any `compile_module`). `None` if
+    /// `std.json` is not part of this compile. Gates the bare-call `_to_json(...)` lowering to
+    /// `Op::JsonToValue` so a user module cannot spell that name and hijack the opcode — a user
+    /// module can't declare `native fn` at all, so the name is otherwise self-scoping too.
+    json_to_value_home: Option<usize>,
     /// The CURRENT module's bare-resolvable type names → their runtime key: locally-declared types
     /// plus `from`-imported ones (rebuilt per `compile_module`). The bare struct/enum constructor
     /// only fires for a name in this set — a type merely present in the global `program.structs`
@@ -836,6 +842,7 @@ impl Compiler {
             static_methods: std::collections::HashSet::new(),
             imported_modules: HashMap::new(),
             current_module_idx: 0,
+            json_to_value_home: None,
             bare_types: HashMap::new(),
             extern_sigs: crate::checker::ExternTable::new(),
             keyword_calls: crate::checker::KeywordTable::new(),
@@ -1162,6 +1169,12 @@ impl Compiler {
                 StmtKind::NewType { name, .. } => {
                     let key = self.type_key(module_idx, name);
                     self.program.newtype_home.insert(key, module_idx);
+                }
+                // `std/json.chz`'s bodyless `native fn _to_json` — record its home module so the
+                // bare-call lowering (mirroring the `timer` arm) can gate on it. Runs in pass 1
+                // (every module) before pass 2 compiles any module's bare calls.
+                StmtKind::Native(d) if d.name == "_to_json" => {
+                    self.json_to_value_home = Some(module_idx);
                 }
                 _ => {}
             }
@@ -5560,6 +5573,15 @@ impl Compiler {
             if name == "timer" {
                 self.compile_args(fc, args)?;
                 fc.emit(Op::NewTimer, span);
+                return Ok(());
+            }
+            // `_to_json(x)` — `json.encode`'s runtime seam, a bodyless `native fn` declared only in
+            // `std/json.chz` (`json_to_value_home` names that module). The gate is what keeps a
+            // user's own `_to_json` (which cannot exist — a user module can't declare `native fn`
+            // at all) from ever being hijacked here.
+            if name == "_to_json" && self.json_to_value_home == Some(self.current_module_idx) {
+                self.compile_args(fc, args)?;
+                fc.emit(Op::JsonToValue, span);
                 return Ok(());
             }
             // C5: `Executor()` → a fresh work queue (checker validated 0 args).

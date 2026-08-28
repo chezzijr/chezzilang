@@ -2079,6 +2079,9 @@ impl Vm {
                 let desc = desc.clone();
                 self.json_decode(&desc, span)?;
             }
+            Op::JsonToValue => {
+                self.json_to_value(span)?;
+            }
             Op::NewList(n) => {
                 let at = self.stack.len() - *n;
                 let items: Vec<Value> = self.stack.split_off(at);

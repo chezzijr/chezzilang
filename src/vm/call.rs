@@ -810,6 +810,129 @@ impl Vm {
         }
     }
 
+    /// Depth cap for `json.encode`'s runtime walk (`json_of`) — independent of `stringify`'s own
+    /// cap in `std/json.chz`, which only guards a `Json` tree that already exists. A Chezzi struct
+    /// is a reference value and may be cyclic, so this is what stops `json.encode` on one from
+    /// recursing forever. Tied to `std/json.chz`'s `MAX_NEST_DEPTH`.
+    const JSON_ENCODE_MAX_DEPTH: usize = 2000;
+
+    /// `Op::JsonToValue`: pop one runtime value, push the `Json` tree that `std.json`'s own
+    /// `stringify` then renders — `json.encode(x)` is `stringify(_to_json(x))` in Chezzi.
+    pub(super) fn json_to_value(&mut self, span: Span) -> Result<(), RuntimeError> {
+        let v = self.pop();
+        match self.json_of(v, 0) {
+            Ok(jv) => {
+                self.push(jv);
+                Ok(())
+            }
+            Err(msg) => Err(self.err(msg, span)),
+        }
+    }
+
+    /// Build a `Json.<variant>` enum value, keyed by `Program::variants[("Json", variant)]` (the
+    /// runtime key `std.json` registers itself under — bare, since it stays a non-native module).
+    /// A missing key means `std.json` was never loaded, e.g. `json._to_json` reached through some
+    /// other module.
+    fn json_variant(&mut self, variant: &str, payload: Vec<Value>) -> Result<Value, String> {
+        let variant_id = self
+            .program
+            .variants
+            .get(&("Json".to_string(), variant.to_string()))
+            .map(|d| d.variant_id)
+            .ok_or_else(|| "json.encode: std.json is not loaded".to_string())?;
+        Ok(Value::obj(self.heap.alloc(Obj::Enum {
+            variant_id,
+            payload,
+        })))
+    }
+
+    /// The runtime walk behind `json.encode`: a `Value` -> the `Json` tree that mirrors its shape.
+    /// Accumulates children into a plain `Vec<Value>`/`MapData`, same allocation idiom as
+    /// `coerce_json` (no new rooting scheme).
+    fn json_of(&mut self, v: Value, depth: usize) -> Result<Value, String> {
+        use crate::vm::op::{VID_ERR, VID_NONE_VARIANT, VID_OK, VID_SOME};
+        if depth > Self::JSON_ENCODE_MAX_DEPTH {
+            return Err("json.encode: exceeded max depth".to_string());
+        }
+        match v.view() {
+            ValueView::Nil => self.json_variant("Null", Vec::new()),
+            ValueView::Bool(b) => self.json_variant("Bool", vec![Value::bool(b)]),
+            ValueView::Int(n) => self.json_variant("Int", vec![Value::int(n)]),
+            ValueView::Obj(h) => match self.heap.get(h).clone() {
+                Obj::FloatBox(f) => {
+                    let fv = self.box_float(f);
+                    self.json_variant("Num", vec![fv])
+                }
+                Obj::BigInt(n) => {
+                    let iv = self.make_int(n);
+                    self.json_variant("Int", vec![iv])
+                }
+                Obj::Str(s) => {
+                    let sv = self.alloc_str(s.to_string());
+                    self.json_variant("Str", vec![sv])
+                }
+                Obj::List(items) | Obj::Tuple(items) => {
+                    let mut out = Vec::with_capacity(items.len());
+                    for it in items {
+                        out.push(self.json_of(it, depth + 1)?);
+                    }
+                    let lv = Value::obj(self.heap.alloc(Obj::List(out)));
+                    self.json_variant("Arr", vec![lv])
+                }
+                Obj::Map(m) => {
+                    let mut out = MapData::default();
+                    for (hk, k, val) in m.entries {
+                        if self.val_str(k).is_none() {
+                            return Err(format!(
+                                "json.encode: object keys must be str, found {}",
+                                self.type_name(k)
+                            ));
+                        }
+                        let jv = self.json_of(val, depth + 1)?;
+                        out.push(hk, k, jv);
+                    }
+                    let mv = Value::obj(self.heap.alloc(Obj::Map(out)));
+                    self.json_variant("Obj", vec![mv])
+                }
+                Obj::Struct { tid, fields } => {
+                    let key = self.struct_name_of_tid(tid).to_string();
+                    let field_names = self
+                        .program
+                        .structs
+                        .get(&key)
+                        .map(|d| d.fields.clone())
+                        .unwrap_or_default();
+                    let field_vals: Vec<Value> = fields.as_slice().to_vec();
+                    let mut out = MapData::default();
+                    for (fname, fval) in field_names.into_iter().zip(field_vals) {
+                        let key_v = self.alloc_str(fname);
+                        let hk = self.scalar_hash(key_v);
+                        let jv = self.json_of(fval, depth + 1)?;
+                        out.push(hk, key_v, jv);
+                    }
+                    let mv = Value::obj(self.heap.alloc(Obj::Map(out)));
+                    self.json_variant("Obj", vec![mv])
+                }
+                Obj::Enum {
+                    variant_id,
+                    payload,
+                } => {
+                    let (ty, _) = self.enum_names(variant_id);
+                    if ty == "Json" {
+                        return Ok(v);
+                    }
+                    match variant_id {
+                        VID_SOME => self.json_of(payload[0], depth + 1),
+                        VID_NONE_VARIANT => self.json_variant("Null", Vec::new()),
+                        VID_OK | VID_ERR => Err("json.encode: cannot encode a Result".to_string()),
+                        _ => Err(format!("json.encode: cannot encode enum {ty}")),
+                    }
+                }
+                _ => Err(format!("json.encode: cannot encode {}", self.type_name(v))),
+            },
+        }
+    }
+
     /// The owned text of a str value, else `None`.
     pub(super) fn val_str(&self, v: Value) -> Option<String> {
         let h = v.as_obj()?;
