@@ -1,0 +1,24 @@
+# tests/chz/stdlib/json_number_test.chz — std.json's Json.Int/Num split, located parse errors and
+# json.encode (docs/gaps.md W8-35, W8-36, W8-20; TICKET-013). Run: `cargo run -- test tests/chz/`.
+
+import std.json
+
+test fn parse_keeps_integers_exact():
+    match json.parse("9223372036854775000"):
+        Ok(j): assert json.stringify(j) == "9223372036854775000"
+        Err(e): assert false, "expected Ok: " + e.message()
+    match json.parse("-0.0"):
+        Ok(j): assert json.stringify(j) == "-0.0"
+        Err(e): assert false, "expected Ok: " + e.message()
+    match json.parse("1.0"):
+        Ok(j): assert json.stringify(j) == "1.0"
+        Err(e): assert false, "expected Ok: " + e.message()
+    match json.parse("1"):
+        Ok(j): assert json.stringify(j) == "1"
+        Err(e): assert false, "expected Ok: " + e.message()
+    match json.parse("-0"):
+        Ok(j): assert json.stringify(j) == "0"
+        Err(e): assert false, "expected Ok: " + e.message()
+    match json.decode[int]("9223372036854775000"):
+        Ok(n): assert n == 9223372036854775000
+        Err(e): assert false, "expected Ok: " + e.message()

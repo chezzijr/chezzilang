@@ -674,6 +674,12 @@ impl Vm {
         };
         match desc {
             D::Int => {
+                // `Json.Int` carries its exact i64 payload (TICKET-013, W8-35) — take it directly,
+                // never through f64, so a 19-digit id decodes byte-exact.
+                if variant == "Int" {
+                    let n = self.int_val(payload[0]).ok_or_else(|| mismatch("int"))?;
+                    return Ok(self.make_int(n));
+                }
                 let f = self
                     .json_num(&variant, &payload)
                     .ok_or_else(|| mismatch("int"))?;
@@ -789,9 +795,9 @@ impl Vm {
         }
     }
 
-    /// The `f64` of a JSON `Num`, else `None`.
+    /// The `f64` of a JSON `Num` or `Int`, else `None`.
     pub(super) fn json_num(&self, variant: &str, payload: &[Value]) -> Option<f64> {
-        if variant == "Num" {
+        if variant == "Num" || variant == "Int" {
             payload.first().and_then(|&v| {
                 if v.is_float() {
                     Some(self.float_of(v))

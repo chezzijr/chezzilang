@@ -8,6 +8,10 @@
 enum Json:
     Null
     Bool(bool)
+    # An integer-shaped numeral stays an integer end-to-end (docs/gaps.md W8-35): Chezzi has no
+    # bignum, so this covers the i64 window; a numeral outside it falls back to `Num`.
+    Int(int)
+    # A fractional or exponent-form numeral, or an integer numeral outside the i64 window.
     Num(float)
     Str(str)
     Arr(List[Json])
@@ -147,7 +151,10 @@ struct Parser:
         # a leading `0` before another digit (`01`, `007`) is invalid.
         if zero_first and int_digits > 1:
             return Err("invalid number: leading zero")
+        # An integer-shaped numeral stays integer-shaped until a `.`/`e`/`E` proves otherwise.
+        is_int := true
         if self.peek() == ".":
+            is_int = false
             self.pos += 1
             frac := 0
             while is_digit(self.peek()):
@@ -156,6 +163,7 @@ struct Parser:
             if frac == 0:
                 return Err("invalid number: digits required after '.'")
         if self.peek() == "e" or self.peek() == "E":
+            is_int = false
             self.pos += 1
             if self.peek() == "+" or self.peek() == "-":
                 self.pos += 1
@@ -168,6 +176,14 @@ struct Parser:
         raw := ""
         for i in start..self.pos:
             raw = raw + self.src[i]
+        if is_int:
+            match raw.to_int():
+                Some(i): return Ok(Json.Int(i))
+                # Outside the i64 window: Chezzi has no bignum, so fall back to the lossy f64 path.
+                None: return self.num_float(raw, start)
+        return self.num_float(raw, start)
+
+    fn num_float(self, raw: str, start: int) -> Result[Json]:
         f := float(raw)
         # Go's `encoding/json` rejects a numeral that overflows f64 (`1e400` → +inf) AT DECODE, so we
         # never manufacture a `Json.Num(inf/-inf/NaN)` that our own `stringify` (num_str) would then
@@ -283,21 +299,17 @@ fn escape(s: str) -> str:
             out = out + c
     return out + "\""
 
-# Render a float the way JSON expects: whole numbers print without a trailing ".0". Only round-trip
-# through `int` for magnitudes safely inside i64 AND the exact-integer float range (~2^53); larger
-# values (or non-integers) print via `str(f)` directly, so `int(f)` can never overflow and abort.
+# Render a `Json.Num` float. `Json.Int` (a separate variant) covers the integer case, so a `Num`
+# always renders as a float — CPython prints `3.0` for `json.dumps(3.0)` and `3` for
+# `json.dumps(3)`; the same split holds here since `str(f)` matches CPython's `repr(f)` shape.
 fn num_str(f: float) -> str:
     # Standard JSON has no NaN/Infinity. A non-finite float (NaN / +inf / -inf) can never round-trip
     # through valid JSON (Chezzi's own `json.parse` rejects the bare tokens), so FAULT loudly rather
     # than emit malformed output. `f - f` is `0.0` for every finite `f` and NaN for non-finite `f`
     # (inf-inf, -inf - -inf and NaN-NaN are all NaN), and NaN != 0.0 — so this fires iff `f` is
-    # non-finite, independently of the ±9e15 int-collapse range below (1e300 is finite and passes).
+    # non-finite.
     if f - f != 0.0:
         panic("cannot serialize non-finite float to JSON")
-    if f > -9000000000000000.0 and f < 9000000000000000.0:
-        i := int(f)
-        if float(i) == f:
-            return str(i)
     return str(f)
 
 # Serialize a `Json` tree to a JSON document. `Arr`/`Obj` recurse structurally, so a tree built
@@ -318,6 +330,7 @@ fn stringify_depth(j: Json, depth: int) -> str:
             if b:
                 return "true"
             return "false"
+        Json.Int(i): return str(i)
         Json.Num(n): return num_str(n)
         Json.Str(s): return escape(s)
         Json.Arr(xs):
@@ -354,11 +367,13 @@ fn as_bool(j: Json) -> Option[bool]:
 
 fn as_float(j: Json) -> Option[float]:
     match j:
+        Json.Int(i): return Some(float(i))
         Json.Num(n): return Some(n)
         _: return None
 
 fn as_int(j: Json) -> Option[int]:
     match j:
+        Json.Int(i): return Some(i)
         Json.Num(n):
             # JSON stores every number as f64; `int()` faults on out-of-range/non-finite. Keep
             # this a total function: gate on the i64 window and return None when unrepresentable.
@@ -413,4 +428,5 @@ fn len(j: Json) -> int:
         Json.Str(s): return s.len()
         Json.Null: panic("json.len: Null has no length")
         Json.Bool(_): panic("json.len: Bool has no length")
+        Json.Int(_): panic("json.len: Int has no length")
         Json.Num(_): panic("json.len: Num has no length")

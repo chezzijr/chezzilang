@@ -157,6 +157,7 @@ pub fn json_kind(variant: &str) -> &'static str {
     match variant {
         "Null" => "null",
         "Bool" => "bool",
+        "Int" => "number",
         "Num" => "number",
         "Str" => "string",
         "Arr" => "array",

@@ -1415,7 +1415,7 @@ fn json_leading_zero_numbers_are_errors_parity() {
     );
     assert_eq!(
         out,
-        "ERR\nERR\nERR\nERR\nERR\nOK 0\nOK 0\nOK 0.5\nOK 10\nOK 0\n"
+        "ERR\nERR\nERR\nERR\nERR\nOK 0\nOK 0\nOK 0.5\nOK 10\nOK 0.0\n"
     );
 }
 
@@ -1475,10 +1475,11 @@ fn json_stringify_finite_roundtrip_unchanged_parity() {
     let out = golden_entry(
         "import std.json\ndoc := Json.Arr([Json.Num(3.0), Json.Num(1.5), Json.Num(1e300), Json.Num(0.0 - 2.5), Json.Str(\"hi\"), Json.Obj({\"k\": Json.Num(42.0)})])\ns := json.stringify(doc)\nprint(s)\nmatch json.parse(s):\n    Ok(v): print(\"roundtrip \" + json.stringify(v))\n    Err(e): print(\"ERR \" + e.message())\n",
     );
-    // 1e300 is FINITE but far outside the ±9e15 int-collapse range: it must stringify normally
-    // (via `str(f)`), NOT fault. `str(1e300)` renders in scientific notation (CPython repr parity,
-    // exponent >= 16): `1e+300`.
-    let line = "[3,1.5,1e+300,-2.5,\"hi\",{\"k\":42}]".to_string();
+    // 1e300 is FINITE and far outside the i64 window: it must stringify normally (via `str(f)`),
+    // NOT fault. `str(1e300)` renders in scientific notation (CPython repr parity, exponent >= 16):
+    // `1e+300`. Every `Json.Num` here is float-shaped, so `num_str` renders `str(f)` verbatim — a
+    // `Num` always keeps its trailing `.0` (TICKET-013, W8-35's `Json.Int` split).
+    let line = "[3.0,1.5,1e+300,-2.5,\"hi\",{\"k\":42.0}]".to_string();
     assert_eq!(out, format!("{line}\nroundtrip {line}\n"));
 }
 
