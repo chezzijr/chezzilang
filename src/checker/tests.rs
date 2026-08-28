@@ -18444,6 +18444,59 @@ fn match_unreachable_arm_after_wildcard_not_warned() {
 }
 
 #[test]
+fn match_unreachable_arm_table() {
+    // W8-40: every arm after a prior unguarded irrefutable arm is unreachable, not just the
+    // `_`-then-literal shape. Table measured in TICKET-017 `## Digest`.
+    warns(
+        "enum C:\n    Red\n    Green\nfn main():\n    c := C.Red\n    match c:\n        _:\n            print(\"any\")\n        C.Red:\n            print(\"red\")\nmain()\n",
+        "unreachable",
+    );
+    warns(
+        "fn main():\n    x := 1\n    match x:\n        _:\n            print(\"a\")\n        _:\n            print(\"b\")\nmain()\n",
+        "unreachable",
+    );
+    warns(
+        "fn main():\n    x := 1\n    match x:\n        _:\n            print(\"a\")\n        n:\n            print(n)\nmain()\n",
+        "unreachable",
+    );
+    warns(
+        "fn main():\n    x := 1\n    match x:\n        n:\n            print(n)\n        1:\n            print(\"one\")\nmain()\n",
+        "unreachable",
+    );
+    warns(
+        "fn main():\n    o: Option[int] = Some(1)\n    match o:\n        _:\n            print(\"any\")\n        Some(v):\n            print(v)\nmain()\n",
+        "unreachable",
+    );
+    warns(
+        "fn main():\n    x := 1\n    r := match x:\n        _: \"any\"\n        1: \"one\"\n    print(r)\nmain()\n",
+        "unreachable",
+    );
+    warns(
+        "fn main():\n    t := (1, 2)\n    match t:\n        (a, b):\n            print(a)\n        (1, 2):\n            print(\"onetwo\")\nmain()\n",
+        "unreachable",
+    );
+    warns(
+        "fn main():\n    x := 1\n    match x:\n        1 | _:\n            print(\"a\")\n        2:\n            print(\"b\")\nmain()\n",
+        "unreachable",
+    );
+}
+
+#[test]
+fn match_reachable_arms_do_not_warn() {
+    // W8-40 neighbours: a literal-then-wildcard, a guarded catch-all, and range subsumption all
+    // stay silent — see `## Decisions`.
+    no_warn(
+        "fn main():\n    x := 1\n    match x:\n        1:\n            print(\"one\")\n        _:\n            print(\"other\")\nmain()\n",
+    );
+    no_warn(
+        "fn main():\n    x := 1\n    c := true\n    match x:\n        _ if c:\n            print(\"a\")\n        1:\n            print(\"b\")\n        _:\n            print(\"c\")\nmain()\n",
+    );
+    no_warn(
+        "fn main():\n    x := 5\n    match x:\n        0..10:\n            print(\"lo\")\n        5:\n            print(\"five\")\n        _:\n            print(\"hi\")\nmain()\n",
+    );
+}
+
+#[test]
 fn newtype_str_underlying_unwrap_ok() {
     // For newtype N = str, str(n) unwraps to the inner str.
     ok(
