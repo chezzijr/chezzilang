@@ -11,6 +11,8 @@
 #   --verbose         # a bool flag is presence => true
 #   --verbose=false   # ...or set explicitly
 #   --                # terminator: every later token is a positional, even if it starts with `-`
+#   --help / -h       # returns Err("flag: help requested\n" + usage()) unless the caller registered
+#                      # their own `help`/`h` flag, in which case that registration wins (Go's rule)
 # A leading run of dashes is stripped, so a flag named `n` answers to BOTH `-n` and `--n` (a
 # deliberate v1 simplification vs strict Go, which registers each spelling separately — add explicit
 # short-alias params only if a real need appears). A lone `-` (len 1) is a positional.
@@ -20,6 +22,10 @@
 # analogue is Python's `argparse`, which raises `AttributeError` from `getattr(args, name)` on an
 # unregistered destination. (NOT Go-parity: Go's `flag.Lookup` on an unknown name returns `nil`, no
 # panic, and has no name-keyed typed getter at all — measured, Go 1.26.)
+#
+# `--help`/`-h` return the `ContinueOnError` analog of Go's `ErrHelp`: no printing, no exit, just an
+# `Err` the caller can match on. `parse` REPLACES the positionals on every call (Go `FlagSet.Parse`),
+# but never resets flag VALUES — those persist across calls, matching Go.
 #
 # ponytail: v1 scope is str/bool/int + long/short + `=`-form + positionals + `--` + a usage line.
 # Deferred (add when a real need appears): required-flag enforcement, subcommands, duplicate-
@@ -59,6 +65,10 @@ struct FlagSet:
     # `Parse()` + `Args()` into one), or a clean `Err` on an unknown flag / missing value / non-int.
     # Never faults on bad input.
     fn parse(self, args: List[str]) -> Result[List[str]]:
+        # Go's FlagSet.Parse REPLACES the positionals on every call. Rebind (never `.clear()`): `pos`
+        # is a reference value, so `clear()` would retroactively empty the list a PREVIOUS call
+        # already handed back via `Ok(self.pos)`.
+        self.pos = []
         only_pos := false
         i := 0
         n := args.len()
@@ -87,7 +97,13 @@ struct FlagSet:
                 kind := ""
                 match self.kind.get(name):
                     Some(k): kind = k
-                    None: return Err("unknown flag --" + name)
+                    None:
+                        # Checked in the UNREGISTERED arm so a user-registered `help`/`h` flag wins,
+                        # matching Go. Returns an Err (ContinueOnError analog of Go's ErrHelp) — it
+                        # never prints or exits, leaving that choice to the caller.
+                        if name == "help" or name == "h":
+                            return Err("flag: help requested\n" + self.usage())
+                        return Err("unknown flag --" + name)
                 if kind == "bool":
                     if has_inline:
                         # Go strconv.ParseBool accepted set (matches Go flag.Bool).
