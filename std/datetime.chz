@@ -182,12 +182,18 @@ fn to_string(dt: DateTime) -> str:
 
 # ---- ISO-8601 / RFC-3339 parsing (string -> DateTime; the inverse of to_iso8601) ----
 #
-# Accepts "YYYY-MM-DD" (date-only, midnight), "YYYY-MM-DDTHH:MM:SS" (naive == UTC), an optional
-# '.fff' fractional part (validated then TRUNCATED — DateTime.second is an int, no sub-second storage),
-# and an optional trailing 'Z' or '+HH:MM' / '-HH:MM' offset (normalized to UTC, per RFC-3339 / Go
-# time.Parse). Date and time may be separated by 'T' (to_iso8601) or ' ' (to_string), matching Python
-# datetime.fromisoformat. A malformed / out-of-range string is a clean Err — never a fault/abort.
-# Round-trips: parse_iso8601(to_iso8601(dt)) == dt (weekday included, rebuilt via from_epoch).
+# Accepts a date of "YYYY-MM-DD" or the ISO BASIC "YYYYMMDD" (date-only, midnight); a time of
+# "HH:MM:SS", "HH:MM" (minute precision, seconds default 0), "HHMMSS" or "HHMM" (compact); an
+# optional '.fff' fractional part (validated then TRUNCATED — DateTime.second is an int, no
+# sub-second storage); and an optional trailing 'Z', '+HH:MM'/'-HH:MM', or the colonless
+# '+HHMM'/'-HHMM' offset (normalized to UTC, per RFC-3339 / Go time.Parse). Date and time may be
+# separated by 'T' (to_iso8601) or ' ' (to_string). A malformed / out-of-range string is a clean
+# Err — never a fault/abort. Round-trips: parse_iso8601(to_iso8601(dt)) == dt (weekday included,
+# rebuilt via from_epoch).
+#
+# This is a SUBSET of CPython 3.14.7's `datetime.fromisoformat`, not a match. Measured forms
+# CPython still accepts that this parser does not: hour-only time ("T12"), a "+HH" offset, a
+# "+HH:MM:SS" offset, and ISO week dates ("2024W011").
 
 # True iff x is one or more ASCII digits (no sign, no whitespace) — strict guard before any to_uint.
 fn all_digits(x: str) -> bool:
@@ -237,7 +243,11 @@ fn parse_iso8601(input: str) -> Result[DateTime]:
         dp = dp[1:]
     dc := dp.split("-")
     if dc.len() != 3:
-        return Err("date must be YYYY-MM-DD, got '" + date_part + "'")
+        # Accept the ISO BASIC form too (no dashes): YYYYMMDD, all digits, exactly 8 characters.
+        if dc.len() == 1 and dp.len() == 8 and all_digits(dp):
+            dc = [dp[0:4], dp[4:6], dp[6:8]]
+        else:
+            return Err("date must be YYYY-MM-DD or YYYYMMDD, got '" + date_part + "'")
     if not all_digits(dc[0]):
         return Err("invalid year '" + dc[0] + "'")
     # Enforce the year's WIDTH like every other field (month/day/… go through `field2`'s exact-2).
@@ -275,10 +285,15 @@ fn parse_iso8601(input: str) -> Result[DateTime]:
                 pi = s.index_of(tp, "-")
                 sign = -1
             if pi >= 0:
-                oc := tp[pi + 1 :].split(":")
+                otxt := tp[pi + 1 :]
+                oc := otxt.split(":")
                 tp = tp[0:pi]
                 if oc.len() != 2:
-                    return Err("offset must be +HH:MM / -HH:MM")
+                    # Accept the colonless form too: +HHMM / -HHMM, exactly 4 digits.
+                    if oc.len() == 1 and otxt.len() == 4 and all_digits(otxt):
+                        oc = [otxt[0:2], otxt[2:4]]
+                    else:
+                        return Err("offset must be +HH:MM / +HHMM (or the '-' forms)")
                 oh := field2(oc[0])?
                 om := field2(oc[1])?
                 if oh > 23 or om > 59:
@@ -292,10 +307,19 @@ fn parse_iso8601(input: str) -> Result[DateTime]:
             tp = fc[0]
         elif fc.len() != 1:
             return Err("malformed fractional seconds")
-        # 3c. HH:MM:SS
+        # 3c. HH:MM:SS, HH:MM (minute precision), HHMMSS or HHMM (compact forms)
         tc := tp.split(":")
-        if tc.len() != 3:
-            return Err("time must be HH:MM:SS, got '" + time_part + "'")
+        if tc.len() == 1:
+            if tp.len() == 6 and all_digits(tp):
+                tc = [tp[0:2], tp[2:4], tp[4:6]]
+            elif tp.len() == 4 and all_digits(tp):
+                tc = [tp[0:2], tp[2:4], "00"]
+            else:
+                return Err("time must be HH:MM[:SS] or HHMM[SS], got '" + time_part + "'")
+        elif tc.len() == 2:
+            tc = [tc[0], tc[1], "00"]
+        elif tc.len() != 3:
+            return Err("time must be HH:MM[:SS] or HHMM[SS], got '" + time_part + "'")
         hh = field2(tc[0])?
         mm = field2(tc[1])?
         ss = field2(tc[2])?
