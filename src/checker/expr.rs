@@ -1955,7 +1955,18 @@ impl Checker {
             }
             // Generic built-in constructors for Result / Option.
             // `Ok(x)`: success type known, error type open (unifies with the declared `E`).
-            "Ok" => Some(Ty::result_e(self.one_arg(name, args, span), Ty::Unknown)),
+            // Zero-arg `Ok()` is the spelling of `Result[nil, E]`'s success value (`## Decisions`,
+            // TICKET-017) — `check_arity` is skipped so it never faults on 0 args. The matching
+            // lowering is the `Op::Nil` + `Op::NewEnum` branch in `src/compiler/mod.rs`; keep both in
+            // sync.
+            "Ok" => Some(Ty::result_e(
+                if args.is_empty() {
+                    Ty::Nil
+                } else {
+                    self.one_arg(name, args, span)
+                },
+                Ty::Unknown,
+            )),
             "Some" => Some(Ty::option(self.one_arg(name, args, span))),
             // `Err(x)`: error type known (`typeof x`), success type open.
             "Err" => Some(Ty::result_e(Ty::Unknown, self.one_arg(name, args, span))),

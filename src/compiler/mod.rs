@@ -5666,6 +5666,21 @@ impl Compiler {
                 .and_then(|k| self.program.variants.get(&k))
             {
                 let variant_id = def.variant_id;
+                // Zero-arg `Ok()` is `Result[nil, E]`'s success value (checker arm:
+                // `src/checker/expr.rs`, the `"Ok"` case) — synthesize the `nil` payload `Op::NewEnum`
+                // expects, since `Ok`'s registered arity stays 1.
+                if name == "Ok" && args.is_empty() {
+                    fc.emit(Op::Nil, span);
+                    fc.emit(
+                        Op::NewEnum {
+                            variant: name.clone(),
+                            variant_id,
+                            argc: 1,
+                        },
+                        span,
+                    );
+                    return Ok(());
+                }
                 self.compile_args(fc, args)?;
                 fc.emit(
                     Op::NewEnum {
