@@ -11768,6 +11768,23 @@ fn parallel_many_spawns_cheap_and_correct() {
     );
 }
 
+/// W8-34: `List.unique()` is O(N^2) (`seq_slot` linear-scans `out` per element) — 80k ints /
+/// 40k distinct took 8.47s wall on the release binary vs CPython's `dict.fromkeys` at 2.1ms
+/// on the same box. A *loose* wall-clock ceiling on a scaled-down input is a smoke guard that
+/// the algorithm is hash-set-backed (O(N)), not a precise perf assertion.
+#[test]
+fn unique_is_not_quadratic() {
+    let src = "fn main():\n    xs := List[int]()\n    i := 0\n    while i < 20000:\n        xs.push(i % 10000)\n        i = i + 1\n    ys := xs.unique()\n    print(ys.len())\nmain()\n";
+    let start = std::time::Instant::now();
+    let out = run(src);
+    let elapsed = start.elapsed();
+    assert_eq!(out, "10000\n");
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "unique() on 20000 ints (10000 distinct) took {elapsed:?} (>2s ceiling) -- O(N^2) regression"
+    );
+}
+
 /// B3.6: a submitted closure capturing a plain value (`int`) observes it **by value** across the
 /// airlock — exercises the `WireValue::Closure` capture round-trip (not just the shared-`Arc` handle
 /// path the golden's `Channel` capture takes). Auto-drained at program exit; the
