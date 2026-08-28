@@ -1,0 +1,13 @@
+# tests/chz/spec/mixed_int_float_compare_test.chz — mixed int/float comparison above 2^53 is exact.
+#
+# `int`/`int` comparison already compares exactly (ccbd3c4). The MIXED int/float arm still routes
+# both operands through `as_f64`, which is lossy above 2^53 and disagrees with CPython 3.14.7.
+# W8-23. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+
+test fn mixed_int_float_compare_above_2_53():
+    id := 9007199254740993          # 2^53 + 1
+    approx := 9007199254740992.0
+    assert (id == approx) == false
+    assert (id > approx) == true
+    assert (id <= approx) == false
+    assert (id != approx) == true
