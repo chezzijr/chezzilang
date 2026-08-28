@@ -11,3 +11,42 @@ test fn mixed_int_float_compare_above_2_53():
     assert (id > approx) == true
     assert (id <= approx) == false
     assert (id != approx) == true
+
+test fn mixed_int_float_compare_at_i64_max():
+    a := 9223372036854775807
+    b := 9223372036854775808.0
+    assert (a == b) == false
+    assert (a != b) == true
+    assert (a < b) == true
+    assert (a <= b) == true
+    assert (a > b) == false
+    assert (a >= b) == false
+
+test fn mixed_int_float_compare_float_on_the_left():
+    f := 9007199254740992.0
+    i := 9007199254740993
+    assert (f == i) == false
+    assert (f != i) == true
+    assert (f < i) == true
+    assert (f >= i) == false
+
+test fn mixed_int_float_compare_negative_and_2_54():
+    assert (-9007199254740993 == -9007199254740992.0) == false
+    assert (-9007199254740993 < -9007199254740992.0) == true
+    assert (18014398509481985 == 18014398509481984.0) == false
+    assert (18014398509481985 > 18014398509481984.0) == true
+
+test fn mixed_int_float_compare_small_nan_and_inf_unchanged():
+    inf := 1.0 / 0.0
+    ninf := 0.0 - inf
+    nan := 0.0 / 0.0
+    assert (3 == 3.0) == true
+    assert (0 == -0.0) == true
+    assert (5 < inf) == true
+    assert (5 > ninf) == true
+    assert (5 == nan) == false
+    assert (5 != nan) == true
+    assert (5 < nan) == false
+    assert (5 > nan) == false
+    assert (3 < 3.5) == true
+    assert (-4 < -3.5) == true

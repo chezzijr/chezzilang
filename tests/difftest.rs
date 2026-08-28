@@ -177,6 +177,47 @@ fn p0_shim_mixed_float_div_zero_divisor() {
     }
 }
 
+/// A mixed `int`/`float` comparison above 2^53 (W8-23): the int side is not exactly representable
+/// as an f64, so a comparison that routes it through `as_f64` collapses distinct integers to one
+/// float and disagrees with CPython's exact `float_richcompare`. Covers all six operators over
+/// two boundary pairs: `2^53+1` vs `2^53` (the smallest divergence) and `i64::MAX` vs `2^63` (the
+/// largest representable int against the float it rounds up to).
+#[test]
+fn p0_mixed_int_float_compare_above_2_53() {
+    let cfg = config();
+    let ops = [
+        BinOp::Eq,
+        BinOp::Ne,
+        BinOp::Lt,
+        BinOp::Le,
+        BinOp::Gt,
+        BinOp::Ge,
+    ];
+    let pairs = [
+        (9007199254740993i64, 9007199254740992.0f64),
+        (9223372036854775807i64, 9223372036854775808.0f64),
+    ];
+    for (i, f) in pairs {
+        for op in ops {
+            let prog = Program {
+                funcs: vec![],
+                main: vec![Stmt::Print(vec![Expr::Bin {
+                    op,
+                    ty: Ty::Bool,
+                    l: Box::new(Expr::IntLit(i)),
+                    r: Box::new(Expr::FloatLit(f)),
+                }])],
+            };
+            let (outcome, chz, py) = run::run_program(&cfg, &prog);
+            assert!(
+                matches!(outcome, Outcome::Match | Outcome::AllowListed(_)),
+                "{i:?} {op:?} {f}: {}",
+                difftest::describe(0, &outcome, &chz, &py)
+            );
+        }
+    }
+}
+
 /// Float `%` is `fmod` in Chezzi — sign follows the DIVIDEND (`docs/spec.md`) — and total (never
 /// faults), same two properties `p0_shim_float_div_signed_zero` pins for `/`. Two things a careless
 /// edit would break, both pinned here:
@@ -1153,5 +1194,21 @@ fn gen_emits_tuple() {
             |s| matches!(s, Stmt::Unpack { .. }),
         ),
         "generator never emitted a tuple"
+    );
+}
+
+/// W8-23: proves the generator can straddle 2^53, the value this ticket raised `MAX_BOUND` for.
+/// Raising the cap alone exercises nothing (every prior leaf stayed under 100); this checks the
+/// `big_int_leaf` half actually reaches the magnitude the raised cap now allows.
+#[test]
+fn gen_emits_int_above_2_53() {
+    assert!(
+        emits(
+            feat_floats(),
+            400,
+            |e| matches!(e, Expr::IntLit(n) if n.unsigned_abs() > (1u64 << 53)),
+            |_| false
+        ),
+        "generator never emitted an int literal above 2^53"
     );
 }
