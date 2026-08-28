@@ -346,3 +346,63 @@ test fn sort_by_key_rejects_mutation_during_sort():
     match r:
         Ok(_): assert false, "sort_by_key silently dropped a mutation during sort instead of faulting"
         Err(_): assert true
+
+# ---- W8-27 / W8-4 follow-up coverage: += through more alias shapes, and sort faulting on
+# both a plain element write and a struct's compare re-entering a mutation ----
+
+w84_ns := [W84N(2), W84N(1)]
+
+struct W84Box:
+    xs: List[int]
+
+struct W84N:
+    n: int
+    fn compare(self, o: W84N) -> int:
+        w84_ns.push(W84N(0))
+        return self.n - o.n
+    fn eq(self, o: W84N) -> bool:
+        return self.n == o.n
+
+test fn compound_assign_extends_through_a_map_value():
+    inner := [1]
+    m := {"k": inner}
+    m["k"] += [2]
+    assert inner == [1, 2], "map value"
+
+test fn compound_assign_extends_through_a_struct_field():
+    inner := [1]
+    b := W84Box(inner)
+    b.xs += [2]
+    assert inner == [1, 2], "field"
+
+test fn compound_assign_self_extend_terminates():
+    xs := [1, 2]
+    xs += xs
+    assert xs == [1, 2, 1, 2]
+
+test fn compound_assign_on_scalars_and_str_is_unchanged():
+    i := 1
+    i += 2
+    assert i == 3
+    s := "a"
+    s += "b"
+    assert s == "ab"
+    a := [1]
+    b := a + [2]
+    assert a == [1]
+
+test fn sort_by_rejects_an_element_write_during_sort():
+    xs := [3, 1, 2]
+    fn cmp(a: int, b: int) -> int:
+        xs[0] = 100
+        return a - b
+    r := recover: xs.sort_by(cmp)
+    match r:
+        Ok(_): assert false, "element write during sort_by did not fault"
+        Err(e): assert e.message().contains("list modified during 'sort_by'"), e.message()
+
+test fn sort_rejects_mutation_from_a_struct_compare():
+    r := recover: w84_ns.sort()
+    match r:
+        Ok(_): assert false, "struct sort with a mutating compare did not fault"
+        Err(e): assert e.message().contains("list modified during 'sort'"), e.message()
