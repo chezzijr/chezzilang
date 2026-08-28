@@ -18664,3 +18664,28 @@ fn eager_runner_budget_sums_to_worker_count() {
         "at --threads=2 there is a slot left after the drainer for the joiner"
     );
 }
+
+#[test]
+fn cmp_int_f64_is_exact_at_the_i64_and_2_53_boundaries() {
+    use std::cmp::Ordering::{Equal, Greater, Less};
+    let cases: &[(i64, f64, Option<std::cmp::Ordering>)] = &[
+        (9007199254740993, 9007199254740992.0, Some(Greater)),
+        (9223372036854775807, 9223372036854775808.0, Some(Less)),
+        (i64::MIN, -9223372036854775808.0, Some(Equal)),
+        (i64::MIN, -9223372036854777856.0, Some(Greater)),
+        (5, f64::INFINITY, Some(Less)),
+        (5, f64::NEG_INFINITY, Some(Greater)),
+        (5, f64::NAN, None),
+        (3, 3.0, Some(Equal)),
+        (0, -0.0, Some(Equal)),
+        (3, 3.5, Some(Less)),
+        (-4, -3.5, Some(Less)),
+    ];
+    for (v, w, expected) in cases.iter().copied() {
+        assert_eq!(
+            super::arith::cmp_int_f64(v, w),
+            expected,
+            "cmp_int_f64({v}, {w})"
+        );
+    }
+}

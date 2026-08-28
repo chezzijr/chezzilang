@@ -20,12 +20,18 @@ use super::rng::Rng;
 
 const LEAF_INT_MAX: i64 = 100;
 const PARAM_BOUND: i128 = 1000;
-const MAX_BOUND: i128 = 1_000_000_000_000; // 10^12, far under i64::MAX (~9.2e18)
-// ^ Also load-bearing for `gen_float`'s int↔float mixing: 10^12 is well under `2^53 ≈ 9.007e15`,
-//   the largest integer magnitude an `f64` represents exactly, so every int this generator can
-//   produce converts to `f64` exactly and Chezzi/CPython agree bit-for-bit on a mixed node.
-//   Raising this past `2^53` makes mixed arithmetic a genuine precision divergence — re-check
-//   `gen_int_float_pair`'s premise before raising it.
+const MAX_BOUND: i128 = 1 << 55; // 2^55, deliberately ABOVE 2^53 (W8-23) and 256x under i64::MAX
+// ^ The cap sits above `2^53` on purpose so the generator can straddle it (see `big_int_leaf`
+//   below and `gen_int_float_pair`). Mixed ARITHMETIC still agrees above `2^53`: both languages
+//   convert the int operand to binary64 with the SAME rounding (measured, CPython 3.14.7:
+//   `9007199254740993 + 0.5` gives `9007199254740992.0` on both sides). Mixed COMPARISON now
+//   agrees too — the VM compares an int against a float exactly via `cmp_int_f64` (TICKET-014),
+//   never by coercing the int through f64. Two invariants replace the old "stay under 2^53" one,
+//   both load-bearing: every int LEAF magnitude stays at or under `MAX_BOUND` (`gen_assign`'s
+//   `vbound.min(MAX_BOUND)` silently under-tracks anything bigger, and an under-tracked bound is
+//   an i64-overflow fault in Chezzi that Python bignums absorb — a false finding), and
+//   `MAX_BOUND` stays far under `i64::MAX` so a tracked sum cannot overflow.
+const BIG_INT_LEAF_BASE: i64 = 1 << 53;
 const LOOP_CAP: i64 = 20;
 const MAX_EXPR_DEPTH: usize = 3;
 
@@ -654,6 +660,22 @@ impl Gen {
         }
     }
 
+    /// A `2^53`-straddling int leaf (W8-23): magnitude `BIG_INT_LEAF_BASE` or `2 *
+    /// BIG_INT_LEAF_BASE`, jittered by `range_i64(-3, 3)`, sign randomized. Tops out at
+    /// `2^54 + 3`, safely under `MAX_BOUND` (`2^55`). Safe only because no loop trip count,
+    /// container index or slice bound is ever drawn from `gen_int` — each of those draws from
+    /// `Rng` directly, so this magnitude can never become a trip count or an out-of-range index.
+    fn big_int_leaf(&mut self) -> i64 {
+        let base = if self.rng.chance(0.5) {
+            BIG_INT_LEAF_BASE
+        } else {
+            BIG_INT_LEAF_BASE * 2
+        };
+        let jitter = self.rng.range_i64(-3, 3);
+        let n = base + jitter;
+        if self.rng.chance(0.5) { -n } else { n }
+    }
+
     fn gen_int(&mut self, depth: usize) -> (Expr, i128) {
         let at_leaf = depth >= MAX_EXPR_DEPTH;
         // When building an in-loop accumulator delta, only loop-stable (reserved) int vars are
@@ -670,6 +692,10 @@ impl Gen {
             if !int_vars.is_empty() && self.rng.chance(0.5) {
                 let i = *self.rng.choice(&int_vars);
                 return (Expr::Var(self.scope[i].name.clone()), self.scope[i].bound);
+            }
+            if self.rng.chance(0.15) {
+                let n = self.big_int_leaf();
+                return (Expr::IntLit(n), n.unsigned_abs() as i128);
             }
             let n = self.rng.range_i64(-LEAF_INT_MAX, LEAF_INT_MAX);
             return (Expr::IntLit(n), n.unsigned_abs() as i128);
@@ -1038,7 +1064,14 @@ impl Gen {
     /// discipline — `gen_int` still restricts leaves to reserved loop-stable vars, `gen_float`
     /// still refuses float vars — regardless of which function is the caller.
     fn gen_int_float_pair(&mut self, depth: usize) -> (Expr, Expr) {
-        let (i, _) = self.gen_int(depth);
+        // This is the one seam where an int meets a float, so it is where a big leaf must reach
+        // 2^53+ magnitudes (W8-23) — `gen_int`'s own 0.15 chance is diluted here by var, composite
+        // and call leaves, so a direct draw at 0.5 is what actually exercises the boundary.
+        let i = if self.rng.chance(0.5) {
+            Expr::IntLit(self.big_int_leaf())
+        } else {
+            self.gen_int(depth).0
+        };
         let f = self.gen_float(depth);
         if self.rng.chance(0.5) { (i, f) } else { (f, i) }
     }

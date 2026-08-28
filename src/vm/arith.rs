@@ -1710,12 +1710,21 @@ impl Vm {
         {
             return self.compare(l, *inner);
         }
-        // Both integral (inline or boxed) → exact i64 order; else both numeric → f64 (NaN → None).
+        // Both integral (inline or boxed) → exact i64 order. The both-integral arm above has
+        // already returned, so at most one side of a mixed numeric pair is integral here — the
+        // other side is always a boxed float (`is_numeric` is int | float | integral), so
+        // `cmp_int_f64` compares the int exactly instead of coercing it through f64 (NaN → None).
         if self.is_integral(l) && self.is_integral(r) {
             return Some(self.int_of(l).cmp(&self.int_of(r)));
         }
+        if self.is_integral(l) && self.is_numeric(r) {
+            return cmp_int_f64(self.int_of(l), self.float_of(r));
+        }
+        if self.is_integral(r) && self.is_numeric(l) {
+            return cmp_int_f64(self.int_of(r), self.float_of(l)).map(|o| o.reverse());
+        }
         if self.is_numeric(l) && self.is_numeric(r) {
-            return self.as_f64(l).partial_cmp(&self.as_f64(r));
+            return self.float_of(l).partial_cmp(&self.float_of(r));
         }
         match (l.view(), r.view()) {
             (ValueView::Obj(ha), ValueView::Obj(hb)) => {
@@ -2075,15 +2084,27 @@ impl Vm {
             return Err(self.depth_exceeded_err(span));
         }
         // Exact i64 equality when BOTH operands are integral (inline `Int` OR boxed `BigInt`) —
-        // Python parity. MUST precede the numeric arm below, which compares via `as_f64` — lossy for
-        // `|i64| > 2^53` (distinct ints round to one f64). The canonical-rep invariant (inline XOR
-        // boxed) makes this correct across kinds: an inline int and a boxed big-int are never equal.
+        // Python parity. MUST precede the mixed arm below: the both-integral arm has already
+        // returned there, so at most one side of a mixed numeric pair is integral, and the other
+        // side is always a boxed float. The canonical-rep invariant (inline XOR boxed) makes this
+        // correct across kinds: an inline int and a boxed big-int are never equal.
         if self.is_integral(l) && self.is_integral(r) {
             return Ok(self.int_of(l) == self.int_of(r));
         }
-        // Cross-type numeric (`1 == 1.0`) and float==float compare via f64.
+        // Mixed int/float (`1 == 1.0` above 2^53) compares exactly via `cmp_int_f64`, never `as_f64`.
+        if self.is_integral(l) && self.is_numeric(r) {
+            return Ok(
+                cmp_int_f64(self.int_of(l), self.float_of(r)) == Some(std::cmp::Ordering::Equal)
+            );
+        }
+        if self.is_integral(r) && self.is_numeric(l) {
+            return Ok(
+                cmp_int_f64(self.int_of(r), self.float_of(l)) == Some(std::cmp::Ordering::Equal)
+            );
+        }
+        // float==float compares via f64 (so `nan == nan` stays `false`).
         if self.is_numeric(l) && self.is_numeric(r) {
-            return Ok(self.as_f64(l) == self.as_f64(r));
+            return Ok(self.float_of(l) == self.float_of(r));
         }
         match (l.view(), r.view()) {
             (ValueView::Bool(a), ValueView::Bool(b)) => Ok(a == b),
@@ -2343,4 +2364,28 @@ impl Vm {
     }
 
     // ----- calls -----
+}
+
+/// Exact `int` vs `float` comparison, CPython's `float_richcompare` rule: no int-to-f64 coercion,
+/// so no i64 above 2^53 collapses onto another. The `w >= 2^63`/`w < -2^63` tests MUST precede the
+/// `floor(w) as i64` cast: a Rust float-to-int cast saturates, so `9223372036854775808.0 as i64` is
+/// `i64::MAX`, and a cast-first version would wrongly answer `i64::MAX == 2^63` as equal. `-2^63`
+/// stays on the exact path below: `i64::MIN` is exactly representable as an f64.
+pub(super) fn cmp_int_f64(v: i64, w: f64) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    if w.is_nan() {
+        return None;
+    }
+    if w >= 9223372036854775808.0 {
+        return Some(Ordering::Less);
+    }
+    if w < -9223372036854775808.0 {
+        return Some(Ordering::Greater);
+    }
+    let fl = w.floor();
+    let fi = fl as i64;
+    Some(match v.cmp(&fi) {
+        Ordering::Equal if w > fl => Ordering::Less,
+        other => other,
+    })
 }
