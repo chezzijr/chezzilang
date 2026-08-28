@@ -1,0 +1,16 @@
+# tests/chz/stdlib/json_encode_test.chz — std.json is missing json.encode[T], the dumps-shaped
+# inverse of json.decode[T] (docs/gaps.md W8-20). Kept in its own file: the missing member is a
+# compile-time type error, so it would otherwise block every other test in this file from running.
+
+import std.json
+
+struct Point:
+    x: int
+    y: int
+
+test fn encode_round_trips_through_decode():
+    p := Point(1, 2)
+    s := json.encode(p)
+    match json.decode[Point](s):
+        Ok(p2): assert p2.x == 1 and p2.y == 2
+        Err(e): assert false, "expected Ok: " + e.message()

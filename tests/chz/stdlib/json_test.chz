@@ -65,3 +65,22 @@ test fn len_containers_count_scalars_fault():
     match r3:
         Ok(_): assert false, "Num has no length"
         Err(e): assert e.message() == "json.len: Num has no length"
+
+test fn stringify_round_trips_negative_zero_and_large_int():
+    # W8-35 — numbers go through f64, so -0.0 loses its sign and a 19-digit
+    # integer leaves in exponent form instead of round-tripping byte-exact
+    # (docs/gaps.md W8-35; CPython and Go both round-trip these).
+    match json.parse("-0.0"):
+        Ok(j): assert json.stringify(j) == "-0.0"
+        Err(e): assert false, "expected Ok: " + e.message()
+    match json.parse("9223372036854775000"):
+        Ok(j): assert json.stringify(j) == "9223372036854775000"
+        Err(e): assert false, "expected Ok: " + e.message()
+
+test fn parse_error_names_a_location():
+    # W8-36 — a json.parse error carries no line/column/offset, so a failure
+    # in a large document locates nothing (docs/gaps.md W8-36).
+    match json.parse(r'{"a": 1,
+ "b": }'):
+        Ok(_): assert false, "expected a parse Err"
+        Err(e): assert e.message().contains("line") and e.message().contains("column")
