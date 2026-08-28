@@ -7,6 +7,41 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+> **✅ FIXED, 2026-08-28 (TICKET-012) — `docs/gaps.md` `W8-9`: `duration.parse` bounds magnitude by
+> VALUE, not digit count.** `_num_ms` (`std/duration.chz`) now checks `intpart_value > i64_max /
+> unit_ms` per unit instead of `intpart.len() > 12`, so `"2562047788015ms"` (13 digits, fits) is `Ok`
+> and `"2562047788016h"` (13 digits, does not fit) is `Err`; a summed fraction that would overflow the
+> per-unit bound (`"2562047788015.9h"`) stays a clean `Err` too. `Duration.to_string` special-cases
+> `i64::MIN` (whose negation faults) so `parse(millis(ms).to_string())` round-trips at both `int`
+> extremes. Gated by `tests/chz/stdlib/input_judged_by_wrong_rule_test.chz`'s
+> `duration_parse_bounds_by_value_not_digit_count` and `duration_round_trips_the_int_extremes`.
+
+> **✅ FIXED, 2026-08-28 (TICKET-012) — `docs/gaps.md` `W8-38`: `std.flag` resets positionals per
+> call and wires `--help`/`-h`.** `FlagSet.parse` rebinds `self.pos = []` as its first statement
+> (never `.clear()`, since `pos` is a reference value a previous caller may still hold), and the
+> unregistered-flag arm now returns `Err("flag: help requested\n" + usage())` for `--help`/`-h`
+> unless the caller registered their own `help`/`h` flag, which wins (Go's rule). Gated by
+> `flagset_parse_resets_positionals_per_call` and `flagset_help_flag_reaches_usage` in
+> `tests/chz/stdlib/input_judged_by_wrong_rule_test.chz`, plus `examples/flag_demo.chz`'s new
+> `--help` demo.
+
+> **✅ FIXED, 2026-08-28 (TICKET-012) — `docs/gaps.md` `W8-12`: `datetime.parse_iso8601` widened to
+> three CPython-accepted forms.** `parse_iso8601` (`std/datetime.chz`) now accepts minute-precision
+> time (`"...T12:34"`), the ISO basic/compact date+time form (`"20240101T123456Z"`), and a
+> colon-less UTC offset (`"+0530"`). It remains a documented SUBSET of CPython 3.14.7's
+> `fromisoformat` (hour-only time, a bare `+HH`/`+HH:MM:SS` offset, and ISO week dates are still
+> `Err`). Gated by `datetime_parse_iso8601_accepts_cpython_forms` in
+> `tests/chz/stdlib/input_judged_by_wrong_rule_test.chz`.
+
+> **✅ FIXED, 2026-08-28 (TICKET-012) — `docs/gaps.md` `W8-33`: `fs.glob` supports POSIX character
+> classes and rejects a malformed pattern.** `wildcard_match` (`src/native/fs.rs`) now matches
+> `[abc]`/`[a-z]`/`[^abc]` classes (the Go `filepath.Match` dialect); `glob` validates the pattern
+> with the new `check_pattern` before reading the directory, returning `Err("bad pattern: ...")` on
+> a malformed class instead of a silent `Ok([])`. `[` is now a metacharacter. Gated by
+> `fs_glob_does_not_silently_drop_character_classes` in
+> `tests/chz/stdlib/input_judged_by_wrong_rule_test.chz` and new `src/native/fs.rs` unit tests
+> (`wildcard_matches_posix_character_classes`, `check_pattern_rejects_a_malformed_class`).
+
 > **✅ FIXED, 2026-08-27 (TICKET-011) — `docs/gaps.md` `W8-39`: `fs.walk`'s `Err` names the
 > directory that actually failed.** `walk_into` (`src/native/fs.rs`) now returns `Result<(), String>`
 > and formats `"{path}: {io_error}"` at the level that failed — `read_dir` and the entry `collect`

@@ -827,13 +827,20 @@ bytes**, so a filename that is not valid UTF-8 round-trips (`fs.exists(fs.list_d
 **Queries:** `list_dir(p) -> Result[List[Path]]` (entry names, sorted by raw bytes) ·
 `exists(p) -> bool` ·
 `is_file(p) -> bool` · `is_dir(p) -> bool` · `size(p) -> Result[int]` ·
-`glob(pattern) -> Result[List[Path]]` (`*`/`?` in the final path component; matched over **raw
-bytes**, so an ASCII pattern still matches a non-UTF-8 filename — and `?` counts one **Unicode
-scalar** wherever the name is valid UTF-8, like Go `filepath.Match` / Python `fnmatch`, falling back
-to one byte only for a byte that begins no valid sequence. `*` **matches dotfiles** — Go
-`filepath.Glob` semantics, measured: `gt/*` over a dir containing `.hidden` + `visible.txt` returns
-both. This differs from Python's `glob.glob`, which excludes dotfile matches from a bare `*` unless
-the pattern itself starts with a dot) ·
+`glob(pattern) -> Result[List[Path]]` — the Go `filepath.Match` dialect: `*` (any run), `?` (single
+char), and POSIX character classes `[abc]`/`[a-z]`/`[^abc]`, all in the **final** path component
+only — no recursive `**`, no brace expansion, no escape character (this matcher has never had one,
+and adding one would change what every existing `*`/`?` pattern containing a backslash matches).
+`[` is a **metacharacter**: a pattern that meant a literal `[` before now opens a class. A malformed
+`[...]` class is an `Err` carrying `"bad pattern"`, validated **before** the directory is read, so
+the verdict never depends on whether the directory exists — `Ok([])` never again means "your pattern
+was not understood". Matched over **raw bytes**, so an ASCII pattern still matches a non-UTF-8
+filename — and `?`/a class's single character count one **Unicode scalar** wherever the name is
+valid UTF-8, like Go `filepath.Match` / Python `fnmatch`, falling back to one byte only for a byte
+that begins no valid sequence. `*` **matches dotfiles** — Go `filepath.Glob` semantics, measured:
+`gt/*` over a dir containing `.hidden` + `visible.txt` returns both. This differs from Python's
+`glob.glob`, which excludes dotfile matches from a bare `*` unless the pattern itself starts with a
+dot) ·
 `canonicalize(p) -> Result[Path]` — resolve symlinks + `.`/`..` against the **real filesystem** to
 an absolute real path. Unlike the purely lexical `path.normalize` (no I/O), this hits the filesystem
 and so **requires the path to exist** (`Err` on a nonexistent path) ·
@@ -1400,7 +1407,7 @@ struct DateTime:
 | `to_date_string` | `(dt) -> str` | `"YYYY-MM-DD"`. |
 | `to_time_string` | `(dt) -> str` | `"HH:MM:SS"`. |
 | `to_string` | `(dt) -> str` | `std.time.format` style `"YYYY-MM-DD HH:MM:SS"`. |
-| `parse_iso8601` | `(s: str) -> Result[DateTime]` | The **inverse** of `to_iso8601`: parse ISO-8601 / RFC-3339 — a **strict SUBSET** of Python's `datetime.fromisoformat`, which is looser: three common forms Python accepts are an `Err` here — `"2024-01-01T12:34"` (no seconds), `"20240101T123456Z"` (basic/compact format), and `"+0530"` (offset without a colon). Only the accepted-forms list that follows is a contract. Accepts `"YYYY-MM-DD"` (date-only, midnight), `"YYYY-MM-DDTHH:MM:SS"` (naive == UTC), a `'T'` **or** `' '` date/time separator, an optional trailing `'Z'` or `'+HH:MM'`/`'-HH:MM'` offset (**normalized to UTC**, per Go `time.Parse`), and an optional `.fff` fractional part (**validated then truncated** — `DateTime.second` is an int, no sub-second storage). Malformed or out-of-range fields (month 13, day 32, hour 25, second 60, non-digits, wrong widths) are a **clean `Err`**, never a fault. Every field is **width-checked**: month/day/time are exactly 2 digits and the year is **4+** digits (mirroring `to_iso8601`, which pads to 4 and emits more for an extended year) — so `"24-01-01"` is an `Err`, not year 24. Round-trips: `parse_iso8601(to_iso8601(dt)) == dt` for every year of 9 digits or fewer (a wider year — only reachable from an epoch near the `int` limit — exceeds the parser's overflow bound and `Err`s). |
+| `parse_iso8601` | `(s: str) -> Result[DateTime]` | The **inverse** of `to_iso8601`: parse ISO-8601 / RFC-3339 — a SUBSET of Python's `datetime.fromisoformat`, not a match. Accepts `"YYYY-MM-DD"` **or** the ISO basic `"YYYYMMDD"` (date-only, midnight); a time of `"HH:MM:SS"`, `"HH:MM"` (minute precision, seconds default 0), `"HHMMSS"` or `"HHMM"` (compact); a `'T'` **or** `' '` date/time separator; an optional trailing `'Z'`, `'+HH:MM'`/`'-HH:MM'`, or the colonless `'+HHMM'`/`'-HHMM'` offset (**normalized to UTC**, per Go `time.Parse`); and an optional `.fff` fractional part (**validated then truncated** — `DateTime.second` is an int, no sub-second storage). Malformed or out-of-range fields (month 13, day 32, hour 25, second 60, non-digits, wrong widths) are a **clean `Err`**, never a fault. Every field is **width-checked**: month/day/time are exactly 2 digits and the year is **4+** digits (mirroring `to_iso8601`, which pads to 4 and emits more for an extended year) — so `"24-01-01"` is an `Err`, not year 24. Round-trips: `parse_iso8601(to_iso8601(dt)) == dt` for every year of 9 digits or fewer (a wider year — only reachable from an epoch near the `int` limit — exceeds the parser's overflow bound and `Err`s). **CPython 3.14.7 still accepts more than this**, measured: hour-only time (`"...T12"`), a `"+HH"` offset, a `"+HH:MM:SS"` offset, and ISO week dates (`"2024W011"`) are all `Err` here. |
 | `add_seconds` | `(epoch, n) -> int` | `epoch + n`. |
 | `add_days` | `(epoch, n) -> int` | `epoch + n*86400` (negative `n` subtracts). |
 | `diff_seconds` | `(a, b) -> int` | `a - b`. |
@@ -1612,14 +1619,12 @@ plain struct over a single int of **milliseconds**.
   optional leading `+`/`-`, one or more `<number><unit>` groups (units `h`/`m`/`s`/`ms`, unordered and
   summed), decimal magnitudes (`"1.5h"`, `".5s"`, `"0.25s"`), and a bare `"0"`. Malformed input (empty,
   no unit, unknown unit, multiple dots, trailing dot, oversized magnitude) is a **clean `Err`**, never a
-  fault. Round-trips exactly (`parse(d.to_string())` ⇒ `d`) for every magnitude the parser accepts —
-  **but the accept bound is a DIGIT COUNT, not a value, so the round-trip breaks at the `int` extremes
-  and the bound is unit-blind.** The guard is `intpart.len() > 12` (`std/duration.chz:142`), sized for
-  the worst unit (`h`, ×3 600 000) and applied to every unit, so `"100000000000h"` (12 digits,
-  3.6e17 ms) is `Ok` while the five-orders-smaller `"2562047788015ms"` (13 digits, 2.5e12 ms) is
-  `Err("duration out of range")`. Consequently `parse(millis(i64::MAX).to_string())` — whose text is
-  `"2562047788015h12m55.807s"` — `Err`s. Go's `time.ParseDuration` round-trips
-  `time.Duration(math.MaxInt64)` fine. (`docs/gaps.md` **W8-9**.)
+  fault. A magnitude is accepted iff the WHOLE duration fits `i64` milliseconds, checked per unit — so
+  `"2562047788015ms"` (2.5e12 ms) and `"100000000000h"` (3.6e17 ms) are both `Ok`, while
+  `"2562047788016h"` (9223372036857600000 ms, above `i64::MAX`) is `Err("duration out of range")`.
+  Round-trips exactly (`parse(d.to_string())` ⇒ `d`) for every magnitude the parser accepts, now
+  including both `int` extremes: `parse(millis(i64::MAX).to_string())` and
+  `parse(millis(i64::MIN).to_string())` both round-trip.
 - **`since(start: float) -> Duration`** — elapsed since a `time.monotonic()` reading (imports native
   `std.time`; floors to whole ms). **`sleep(d: Duration)`** — delegates to native `sleep_ms`.
 
@@ -1655,9 +1660,14 @@ per flag in registration order).
 
 Recognised syntax (Go conventions): `--name value` / `--name=value` / `--verbose` (bool presence) /
 `--verbose=false` (explicit; the `=`-value accepts Go's `strconv.ParseBool` set —
-`1 t T TRUE true True` / `0 f F FALSE false False`) / `--` terminator (every later token is a positional). A leading run of
+`1 t T TRUE true True` / `0 f F FALSE false False`) / `--` terminator (every later token is a positional) /
+`--help` and `-h` (returns `Err("flag: help requested\n" + usage())` — the `ContinueOnError` analog of
+Go's `ErrHelp`; never prints or exits). A user-registered `help`/`h` flag wins over the built-in
+handling, matching Go. A leading run of
 dashes is stripped, so a flag named `n` answers to **both** `-n` and `--n` — a deliberate v1
 simplification vs strict Go (which registers each spelling separately); a lone `-` is a positional.
+`parse` **replaces** the positionals on every call (Go `FlagSet.Parse`), but never resets flag
+**values** — those persist across calls, matching Go.
 Deferred (not built): required-flag enforcement, subcommands, duplicate-registration detection.
 
 ### `std.log` — leveled logging
