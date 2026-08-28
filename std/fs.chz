@@ -81,10 +81,13 @@ fn stat(p: PathLike) -> Result[FileInfo]:
 fn walk(p: PathLike) -> Result[List[path.Path]]:
     return _wrap_many(_walk(p.as_path()))
 
-# glob matches `*`/`?` in the FINAL component only. The pattern is matched over raw BYTES, so an ASCII
-# pattern still matches a non-UTF-8 filename. `?` consumes one Unicode SCALAR wherever the name is
-# valid UTF-8 (Go `filepath.Match` / Python `fnmatch` both count characters) and falls back to one raw
-# byte only for a byte that begins no valid sequence — where "one character" has no meaning.
+# glob matches the Go `filepath.Match` dialect (`*`, `?`, `[abc]`, `[a-z]`, `[^abc]`) in the FINAL
+# component only — no recursive `**`, no brace expansion, no escape character. `[` is a
+# metacharacter; a malformed `[...]` class is an Err carrying "bad pattern", never a silent `Ok([])`.
+# The pattern is matched over raw BYTES, so an ASCII pattern still matches a non-UTF-8 filename. `?`
+# and a class's single character consume one Unicode SCALAR wherever the name is valid UTF-8 (Go
+# `filepath.Match` / Python `fnmatch` both count characters) and fall back to one raw byte only for a
+# byte that begins no valid sequence — where "one character" has no meaning.
 fn glob(pattern: PathLike) -> Result[List[path.Path]]:
     return _wrap_many(_glob(pattern.as_path()))
 

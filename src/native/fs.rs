@@ -1,9 +1,10 @@
 //! `std.fs` — filesystem queries + mutations (M8), extending `std.io`'s whole-file read/write.
 //!
 //! `list_dir` returns entry names (not full paths), sorted for determinism. `exists`/`is_file`/
-//! `is_dir` are booleans; `size` returns the byte length as a `Result[int]`. `glob` supports the
-//! common `*` (any run) and `?` (single char) wildcards in the **final** path component only — no
-//! `**`, no brace expansion (a focused, dependency-free matcher).
+//! `is_dir` are booleans; `size` returns the byte length as a `Result[int]`. `glob` is the Go
+//! `filepath.Match` dialect — `*` (any run), `?` (single char), `[abc]`/`[a-z]`/`[^abc]` character
+//! classes — in the **final** path component only: no `**`, no brace expansion, no escape character.
+//! A malformed `[...]` class is an `Err` carrying "bad pattern", not a silent `Ok([])`.
 //!
 //! Mutations (each `Result[nil]`, recoverable fault on error): `mkdir` (recursive, idempotent),
 //! `remove_file`, `remove_dir` (empty-only — no recursive `rm -rf`), `rename`, `copy` (file), and
@@ -281,6 +282,11 @@ fn glob(h: &mut dyn Host) -> Result<NativeRet, HostError> {
         Some(i) => (&pattern[..i], &pattern[i + 1..]),
         None => (b".", &pattern[..]),
     };
+    // W8-33 — a bad pattern is wrong regardless of whether the directory exists; `Ok([])` must never
+    // again mean "your pattern was not understood".
+    if let Err(msg) = check_pattern(pat) {
+        return Ok(NativeRet::Err(format!("{shown_pat}: {msg}")));
+    }
     let scan: &[u8] = if dir.is_empty() { b"/" } else { dir };
     let rd = match std::fs::read_dir(bytes_path(scan)) {
         Ok(rd) => rd,
@@ -460,39 +466,120 @@ fn utf8_len_at(n: &[u8], i: usize) -> usize {
     }
 }
 
-/// Match a single path component against a `*`/`?` wildcard. `*` matches any run of bytes (including
-/// empty), `?` matches exactly one character; every other byte is literal. Uses the classic greedy
-/// two-pointer algorithm with a single backtrack mark — linear-ish, no exponential blowup on
-/// adversarial patterns like `*a*a*a…b`.
+/// Parse a `[...]` character class starting at `p[i]` (`p[i] == b'['`). Returns
+/// `(index just past the closing ']', negated?, [(lo, hi), ...])`, or `None` on a malformed class
+/// (unterminated, or empty after an optional leading `^`).
+///
+/// Entries compare as byte slices, which IS code-point order for valid UTF-8. A `]` in first
+/// position (right after `[` or `[^`) is a literal, matching Go and bash. There is deliberately NO
+/// escape character — this matcher has never had one, and adding it would change what every
+/// existing `*`/`?` pattern containing a backslash matches.
+type ClassResult<'a> = Option<(usize, bool, Vec<(&'a [u8], &'a [u8])>)>;
+
+fn class_at(p: &[u8], i: usize) -> ClassResult<'_> {
+    let mut j = i + 1;
+    let neg = j < p.len() && p[j] == b'^';
+    if neg {
+        j += 1;
+    }
+    let mut items: Vec<(&[u8], &[u8])> = Vec::new();
+    loop {
+        if j >= p.len() {
+            return None; // unterminated
+        }
+        if p[j] == b']' && !items.is_empty() {
+            return Some((j + 1, neg, items));
+        }
+        let lo_len = utf8_len_at(p, j);
+        let lo = &p[j..j + lo_len];
+        j += lo_len;
+        let mut hi = lo;
+        if j < p.len() && p[j] == b'-' && j + 1 < p.len() && p[j + 1] != b']' {
+            j += 1;
+            let hi_len = utf8_len_at(p, j);
+            hi = &p[j..j + hi_len];
+            j += hi_len;
+        }
+        if lo > hi {
+            return None;
+        }
+        items.push((lo, hi));
+    }
+}
+
+/// Reject a malformed `[` character class anywhere in `pat` — validated BEFORE `read_dir` so the
+/// verdict does not depend on whether the directory exists. `Ok([])` must never mean "your pattern
+/// was not understood".
+fn check_pattern(pat: &[u8]) -> Result<(), String> {
+    let mut i = 0;
+    while i < pat.len() {
+        if pat[i] == b'[' {
+            match class_at(pat, i) {
+                Some((next, _, _)) => i = next,
+                None => return Err("bad pattern: malformed '[' character class".to_string()),
+            }
+        } else {
+            i += utf8_len_at(pat, i);
+        }
+    }
+    Ok(())
+}
+
+/// Match a single path component against a `*`/`?`/`[...]` wildcard (Go `filepath.Match` dialect).
+/// `*` matches any run of bytes (including empty), `?` matches exactly one character, `[abc]`/
+/// `[a-z]`/`[^abc]` matches one character against a POSIX character class; every other byte is
+/// literal. Uses the classic greedy two-pointer algorithm with a single backtrack mark — linear-ish,
+/// no exponential blowup on adversarial patterns like `*a*a*a…b`.
 ///
 /// W7-8 — matching is over BYTES, not a decoded string: a filename need not be valid UTF-8 at all, and
-/// decoding it first is exactly the bug this closes. `?` still consumes one **Unicode scalar** wherever
-/// the name actually is valid UTF-8 (Go's `filepath.Match` and Python's `fnmatch` both count
-/// characters, and drifting from them would be its own bug — see [`utf8_len_at`]); it falls back to one
-/// byte only for a byte that begins no valid sequence, which is the only rule defined there at all.
+/// decoding it first is exactly the bug this closes. `?` and a class's single character still consume
+/// one **Unicode scalar** wherever the name actually is valid UTF-8 (Go's `filepath.Match` and
+/// Python's `fnmatch` both count characters, and drifting from them would be its own bug — see
+/// [`utf8_len_at`]); both fall back to one byte only for a byte that begins no valid sequence, which
+/// is the only rule defined there at all.
 fn wildcard_match(pat: &[u8], name: &[u8]) -> bool {
     let p = pat;
     let n = name;
     let (mut pi, mut ni) = (0, 0);
     let (mut star, mut mark) = (None, 0);
     while ni < n.len() {
-        if pi < p.len() && p[pi] == b'?' {
-            pi += 1;
-            ni += utf8_len_at(n, ni); // one CHARACTER, like Python/Go
-        } else if pi < p.len() && p[pi] == n[ni] {
-            pi += 1;
-            ni += 1;
+        let step: Option<(usize, usize)> = if pi < p.len() && p[pi] == b'?' {
+            Some((pi + 1, utf8_len_at(n, ni)))
+        } else if pi < p.len() && p[pi] == b'[' {
+            match class_at(p, pi) {
+                Some((next, neg, items)) => {
+                    let cl = utf8_len_at(n, ni);
+                    let ch = &n[ni..ni + cl];
+                    let hit = items.iter().any(|&(lo, hi)| lo <= ch && ch <= hi) != neg;
+                    if hit { Some((next, cl)) } else { None }
+                }
+                None => None,
+            }
         } else if pi < p.len() && p[pi] == b'*' {
             star = Some(pi);
             mark = ni;
             pi += 1;
-        } else if let Some(s) = star {
-            // Backtrack: the last `*` swallows one more character.
-            pi = s + 1;
-            mark += 1;
-            ni = mark;
+            continue;
+        } else if pi < p.len() && p[pi] == n[ni] {
+            Some((pi + 1, 1))
         } else {
-            return false;
+            None
+        };
+        match step {
+            Some((next_pi, consumed)) => {
+                pi = next_pi;
+                ni += consumed;
+            }
+            None => {
+                if let Some(s) = star {
+                    // Backtrack: the last `*` swallows one more character.
+                    pi = s + 1;
+                    mark += 1;
+                    ni = mark;
+                } else {
+                    return false;
+                }
+            }
         }
     }
     while pi < p.len() && p[pi] == b'*' {
@@ -702,6 +789,23 @@ mod tests {
         std::fs::write(&file, "x").unwrap();
         let under_file = tmp.join("file/sub");
         assert!(is_err(mkdir(&mut host(&[&under_file])).unwrap()));
+    }
+
+    #[test]
+    fn wildcard_matches_posix_character_classes() {
+        assert!(wildcard_match(b"*.[ch]", b"a.c"));
+        assert!(wildcard_match(b"*.[ch]", b"b.h"));
+        assert!(!wildcard_match(b"*.[ch]", b"c.txt"));
+        assert!(wildcard_match(b"[a-c]x", b"bx"));
+        assert!(!wildcard_match(b"[^a-c]x", b"bx"));
+        assert!(wildcard_match(b"[]a]", b"]"));
+        assert!(!wildcard_match(b"[abc]", b""));
+    }
+
+    #[test]
+    fn check_pattern_rejects_a_malformed_class() {
+        assert!(check_pattern(b"*.[ch").is_err());
+        assert!(check_pattern(b"*.[ch]").is_ok());
     }
 
     #[test]
