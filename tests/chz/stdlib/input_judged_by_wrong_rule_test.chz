@@ -16,16 +16,40 @@ import std.fs
 import std.os
 
 test fn duration_parse_bounds_by_value_not_digit_count():
-    # 12 digits * 3_600_000 ms/h overflows i64 ms; expect an Err, not Ok.
-    r := duration.parse("100000000000h")
+    # 13 digits of milliseconds is well within i64 ms; expect Ok, not Err.
+    r := duration.parse("2562047788015ms")
     match r:
-        Err(_): assert true
-        Ok(d): assert false, "expected out-of-range Err, got Ok(" + d.to_string() + ")"
-    # 13 digits of milliseconds is still well within i64 ms; expect Ok, not Err.
-    r2 := duration.parse("2562047788015ms")
+        Ok(_): assert true
+        Err(e): assert false, "expected Ok, got Err(" + e.message() + ")"
+    # 12 digits of hours is 3.6e17 ms, which FITS i64 ms; expect Ok, not Err.
+    r2 := duration.parse("100000000000h")
     match r2:
         Ok(_): assert true
         Err(e): assert false, "expected Ok, got Err(" + e.message() + ")"
+    # 13 digits of hours is 9223372036857600000 ms, which does NOT fit i64 ms; expect Err.
+    r3 := duration.parse("2562047788016h")
+    match r3:
+        Err(_): assert true
+        Ok(d): assert false, "expected out-of-range Err, got Ok(" + d.to_string() + ")"
+    # 24 digits of ms is grossly out of range; must be a clean Err, never an overflow fault.
+    r4 := duration.parse("999999999999999999999999ms")
+    match r4:
+        Err(_): assert true
+        Ok(d): assert false, "expected out-of-range Err, got Ok(" + d.to_string() + ")"
+    # whole=9223372036854000000ms + frac=3240000ms sums above i64::MAX; must stay a clean Err.
+    r5 := duration.parse("2562047788015.9h")
+    match r5:
+        Err(_): assert true
+        Ok(d): assert false, "expected out-of-range Err, got Ok(" + d.to_string() + ")"
+
+test fn duration_round_trips_the_int_extremes():
+    i64max := 9223372036854775807
+    i64min := -9223372036854775807 - 1
+    for ms in [i64max, i64min]:
+        d := duration.millis(ms)
+        match duration.parse(d.to_string()):
+            Ok(g): assert g.as_millis() == ms, "roundtrip failed for " + str(ms)
+            Err(e): assert false, "roundtrip Err for " + str(ms) + ": " + e.message()
 
 test fn flagset_parse_resets_positionals_per_call():
     fs := flag.new()
@@ -37,6 +61,21 @@ test fn flagset_parse_resets_positionals_per_call():
     match r2:
         Ok(pos): assert pos == ["b"]
         Err(e): assert false, "unexpected Err(" + e.message() + ")"
+
+test fn flagset_help_flag_reaches_usage():
+    fs := flag.new()
+    fs.str_flag("name", "world", "who to greet")
+    expected := "flag: help requested\n  --name (str) default=world: who to greet"
+    for arg in ["--help", "-h"]:
+        match fs.parse([arg]):
+            Err(e): assert e.message() == expected, "unexpected message: " + e.message()
+            Ok(pos): assert false, "expected Err(help requested), got Ok(" + str(pos) + ")"
+
+    owns_help := flag.new()
+    owns_help.bool_flag("help", false, "my own help")
+    match owns_help.parse(["--help"]):
+        Ok(_): assert owns_help.get_bool("help") == true
+        Err(e): assert false, "user-registered help flag should win, got Err(" + e.message() + ")"
 
 test fn datetime_parse_iso8601_accepts_cpython_forms():
     r1 := datetime.parse_iso8601("2024-01-01T12:34")
@@ -51,8 +90,19 @@ test fn datetime_parse_iso8601_accepts_cpython_forms():
     match r3:
         Ok(_): assert true
         Err(e): assert false, "colonless offset: " + e.message()
+    match datetime.parse_iso8601("2024-01-01T12:34"):
+        Ok(d): assert datetime.to_epoch(d) == 1704112440
+        Err(e): assert false, "minute-precision epoch: " + e.message()
+    match datetime.parse_iso8601("20240101T123456Z"):
+        Ok(d): assert datetime.to_epoch(d) == 1704112496
+        Err(e): assert false, "basic/compact epoch: " + e.message()
+    match datetime.parse_iso8601("2024-01-01T12:34:56+0530"):
+        Ok(d): assert datetime.to_epoch(d) == 1704092696
+        Err(e): assert false, "colonless offset epoch: " + e.message()
 
-fn cleanup_glob_dir(d: bytes):
+fn cleanup_glob_dir(d: str):
+    _ := fs.remove_file(d + "/a.c")
+    _ := fs.remove_file(d + "/b.h")
     _ := fs.remove_dir(d)
 
 test fn fs_glob_does_not_silently_drop_character_classes():
@@ -61,7 +111,7 @@ test fn fs_glob_does_not_silently_drop_character_classes():
     match r1:
         Ok(_): pass
         Err(e): assert false, "mkdir: " + e.message()
-    defer cleanup_glob_dir(d.encode())
+    defer cleanup_glob_dir(d)
 
     r2 := fs.atomic_write(d + "/a.c", "")
     match r2:
@@ -74,5 +124,15 @@ test fn fs_glob_does_not_silently_drop_character_classes():
 
     r := fs.glob(d + "/*.[ch]")
     match r:
-        Ok(matches): assert matches.len() > 0, "expected matches for [ch] class, got Ok([])"
-        Err(_): assert true
+        Ok(matches): assert matches.len() == 2, "expected 2 matches for [ch] class, got " + str(matches.len())
+        Err(e): assert false, "unexpected Err: " + e.message()
+
+    rneg := fs.glob(d + "/*.[^c]")
+    match rneg:
+        Ok(matches): assert matches.len() == 1, "expected 1 match for [^c] class, got " + str(matches.len())
+        Err(e): assert false, "unexpected Err: " + e.message()
+
+    rbad := fs.glob(d + "/*.[ch")
+    match rbad:
+        Err(e): assert e.message().contains("bad pattern"), "unexpected message: " + e.message()
+        Ok(matches): assert false, "expected Err for malformed pattern, got Ok(" + str(matches) + ")"
