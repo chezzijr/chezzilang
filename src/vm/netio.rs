@@ -174,6 +174,36 @@ impl Vm {
     core_accessor!(atomic_core, Atomic, AtomicCore);
     core_accessor!(atomic_int_core, AtomicInt, AtomicIntCore);
 
+    /// TICKET-016 (W8-3) — take the process-global update guard for a `Shared`/`RwShared` box
+    /// identified by `key` (its core's stable `Arc` address), bracketed by the demote-in-place
+    /// pair so a blocking wait does not starve the pool. Faults with a specific message for a
+    /// self-held re-entry (a nested `set`/`update`/`write` on the SAME box inside its own closure)
+    /// vs. a longer cross-task/cross-box wait-for cycle (e.g. AB-BA).
+    pub(super) fn take_update_guard(
+        &mut self,
+        key: usize,
+        what: &str,
+        span: Span,
+    ) -> Result<core::UpdateGuard, RuntimeError> {
+        self.demote_enter(what, span)?;
+        let result = acquire_update_guard(key, self.guard_token);
+        self.demote_exit();
+        result.map_err(|cycle| match cycle {
+            GuardCycle::SelfHeld => self.err(
+                "deadlock: this task already holds the update guard on this Shared box — a \
+                 nested set/update/write on the same box inside its own update/write closure"
+                    .to_string(),
+                span,
+            ),
+            GuardCycle::Cycle => self.err(
+                "deadlock: two or more tasks each hold a Shared/RwShared update guard the \
+                 other is waiting for (a lock cycle)"
+                    .to_string(),
+                span,
+            ),
+        })
+    }
+
     /// `AtomicInt(v)` — pop the int init, wrap it in a fresh lock-free `Arc<AtomicIntCore>`. The checker
     /// guarantees the single arg is an int; a boxed BigInt is narrowed via `int_of`. `#[inline(never)]`
     /// so its locals stay out of `step`'s (recursion-path) stack frame.
@@ -2747,21 +2777,26 @@ impl Vm {
             "set" => {
                 self.arity_err("set", args, 1, span)?;
                 let w = self.to_wire_crossable(args[0], span)?;
-                self.shared_core(h).store(w);
+                let core = self.shared_core(h);
+                let key = Arc::as_ptr(&core) as usize;
+                let _guard = self.take_update_guard(key, "a Shared update guard", span)?;
+                core.store(w);
                 Ok(Value::nil())
             }
             "update" => {
                 self.arity_err("update", args, 1, span)?;
                 let f = args[0];
                 let core = self.shared_core(h);
-                // B3.3-threads: serialise the whole read-modify-write so concurrent OS-thread updates
-                // can't lose each other (Shared[T]'s core contract). The value lock `v` is still held
-                // only briefly — read here, write at the end — so the closure may freely re-enter
-                // `get`/`set` (or `update` on a *different* box). A closure that re-enters `update` on
-                // the SAME box deadlocks: a documented edge (it could only lose-update before). The
+                // TICKET-016 (W8-3): the whole read-modify-write is serialised across threads by the
+                // box's update guard, taken via the process-global wait-for graph (`core.rs`) instead
+                // of a bare `Mutex` — so a same-box re-entry FAULTS (the length-1 cycle) instead of
+                // hanging, and a cross-box wait cycle faults instead of hanging undetected. The value
+                // lock `v` is still held only briefly — read here, write at the end — so the closure
+                // may freely re-enter `get` (or `update` on a *different*, non-cyclic box). The
                 // handle is re-rooted on the operand stack so the nested call's GC keeps the core's
                 // contents traced (the receiver was popped off the stack in `do_method_call`).
-                let _serialise = core.update_lock.lock().unwrap();
+                let key = Arc::as_ptr(&core) as usize;
+                let _guard = self.take_update_guard(key, "a Shared update guard", span)?;
                 let w = core.v.lock().unwrap().clone();
                 let cur = self.from_wire(w);
                 self.push(Value::obj(h));
@@ -2805,7 +2840,10 @@ impl Vm {
             "set" => {
                 self.arity_err("set", args, 1, span)?;
                 let w = self.to_wire_crossable(args[0], span)?;
-                self.rwshared_core(h).store(w);
+                let core = self.rwshared_core(h);
+                let key = Arc::as_ptr(&core) as usize;
+                let _guard = self.take_update_guard(key, "a RwShared update guard", span)?;
+                core.store(w);
                 Ok(Value::nil())
             }
             "read" => {
@@ -2826,15 +2864,14 @@ impl Vm {
                 self.arity_err("write", args, 1, span)?;
                 let f = args[0];
                 let core = self.rwshared_core(h);
-                // Serialise the whole read-modify-write so concurrent OS-thread writes can't lose each
-                // other (the box's contract, exactly like `Shared.update`). The `RwLock` write guard
-                // alone is NOT enough: it must be DROPPED across the user closure (not reentrant), so
-                // two `write`s could clone the same base and lose an update — hence a separate
-                // `update_lock` held for the entire RMW. The value lock `v` is taken only briefly (read
-                // here, write at the end), so the closure may freely re-enter `get`/`set`/`read` (or
-                // `write` on a *different* box). The handle is re-rooted on the operand stack so the
-                // nested call's GC keeps the core's contents traced.
-                let _serialise = core.update_lock.lock().unwrap();
+                // TICKET-016 (W8-3): the whole read-modify-write is serialised across threads by the
+                // box's update guard (the process-global wait-for graph in `core.rs`), exactly like
+                // `Shared.update`. The `RwLock` write guard alone is NOT enough: it must be DROPPED
+                // across the user closure (not reentrant), so two `write`s could clone the same base
+                // and lose an update. `get`/`read` never take this guard, so `write` nested in `read`
+                // still persists; a same-box `write`/`set` re-entry FAULTS instead of hanging.
+                let key = Arc::as_ptr(&core) as usize;
+                let _guard = self.take_update_guard(key, "a RwShared update guard", span)?;
                 let w = core.v.write().unwrap().clone();
                 let cur = self.from_wire(w);
                 self.push(Value::obj(h));

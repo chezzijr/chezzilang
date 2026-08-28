@@ -17,8 +17,9 @@ pub mod value;
 pub mod wire;
 
 use core::{
-    AtomicCore, AtomicIntCore, Backing, ChannelCore, ExecRegistry, ExecutorCore, ListenerCore,
-    ReaderCore, RwSharedCore, SharedCore, SocketCore, WriterCore,
+    AtomicCore, AtomicIntCore, Backing, ChannelCore, ExecRegistry, ExecutorCore, GuardCycle,
+    ListenerCore, ReaderCore, RwSharedCore, SharedCore, SocketCore, WriterCore,
+    acquire_update_guard,
 };
 use heap::{Fields, Heap, MapData, ModuleData, Obj, SetData};
 use op::{CapEntry, CapSrc, NO_IC, Op, Program, ProtoId, TID_NONE, WaitMeta};
@@ -996,6 +997,12 @@ pub struct Vm {
     /// parked into a [`Fiber`], so a `recv` reached while this is `> 0` cannot suspend — it faults
     /// `deadlock` instead (B1 v1 limitation). Maintained by [`Vm::guarded`].
     native_reentry: usize,
+    /// TICKET-016 (W8-3) — this VM's task identity in the process-global `Shared`/`RwShared` update
+    /// guard registry. Sound as a TASK identity only because a fiber cannot park while
+    /// `native_reentry > 0` (see that field): the fiber holding a guard cannot be swapped off this
+    /// `Vm`, so no second task can ever observe or inherit this token. Assigned once at construction
+    /// from a process-wide counter.
+    pub guard_token: u64,
     /// Structural depth already consumed by the ENCLOSING structural walks on the host stack, when a
     /// user protocol hook (`eq` / `str`) re-entered the VM from inside one. Every FAULTING
     /// [`MAX_STRUCTURAL_DEPTH`] guard tests `walk_base + depth`, so the budget is ONE shared allowance

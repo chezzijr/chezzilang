@@ -1675,10 +1675,25 @@ impl Vm {
     /// recv/sleep demote also uses — one spawn + one eventual exit per demoted thread). On OS-refuse, un-roll
     /// the accounting and fault cleanly so the join still completes. Mirrors [`Vm::demote_block_sleep`] 1–2.
     pub(super) fn demote_socket_enter(&mut self, span: Span) -> Result<(), RuntimeError> {
-        let sched =
-            Arc::clone(self.mn.as_ref().expect(
-                "demote_socket_enter called with no active M:N scheduler (self.mn is None)",
-            ));
+        self.demote_enter("a socket op", span)
+    }
+
+    /// D5 owe #3 Path C (#3 socket half) — exit the in-callback socket demote: un-account `inflight →
+    /// running` (the `+1` is essential — the fiber's next dispatch does `running -= 1`, which would
+    /// underflow without this restore). Mirrors [`Vm::demote_block_sleep`] step 4.
+    pub(super) fn demote_socket_exit(&mut self) {
+        self.demote_exit();
+    }
+
+    /// TICKET-016 (W8-3) generalisation of the demote bracket: "I am about to block in place" for any
+    /// in-callback blocking op, not just a socket op. `what` names the op in the OS-thread-limit fault
+    /// message. A no-op when `self.mn` is `None` (a top-level `Shared.set`/`update` with no nursery),
+    /// so a guard wait outside any nursery neither starves a pool nor panics on the `.expect` the
+    /// socket-only version used to carry.
+    pub(super) fn demote_enter(&mut self, what: &str, span: Span) -> Result<(), RuntimeError> {
+        let Some(sched) = self.mn.as_ref().map(Arc::clone) else {
+            return Ok(());
+        };
         {
             let mut c = sched.lock();
             c.running -= 1;
@@ -1693,9 +1708,10 @@ impl Vm {
                 sched.inflight.fetch_sub(1, Ordering::Relaxed);
                 drop(c);
                 return Err(self.err(
-                    "a socket op inside a native callback could not demote the worker (OS thread limit \
-                     reached) — reduce concurrent in-callback blocking or raise the thread limit"
-                        .to_string(),
+                    format!(
+                        "{what} inside a native callback could not demote the worker (OS thread limit \
+                         reached) — reduce concurrent in-callback blocking or raise the thread limit"
+                    ),
                     span,
                 ));
             }
@@ -1704,14 +1720,12 @@ impl Vm {
         Ok(())
     }
 
-    /// D5 owe #3 Path C (#3 socket half) — exit the in-callback socket demote: un-account `inflight →
-    /// running` (the `+1` is essential — the fiber's next dispatch does `running -= 1`, which would
-    /// underflow without this restore). Mirrors [`Vm::demote_block_sleep`] step 4.
-    pub(super) fn demote_socket_exit(&mut self) {
-        let sched =
-            Arc::clone(self.mn.as_ref().expect(
-                "demote_socket_exit called with no active M:N scheduler (self.mn is None)",
-            ));
+    /// TICKET-016 (W8-3) generalisation of the demote-exit bracket — see [`Vm::demote_enter`]. A
+    /// no-op when `self.mn` is `None`.
+    pub(super) fn demote_exit(&mut self) {
+        let Some(sched) = self.mn.as_ref().map(Arc::clone) else {
+            return;
+        };
         let mut c = sched.lock();
         c.running += 1;
         sched.inflight.fetch_sub(1, Ordering::Relaxed);

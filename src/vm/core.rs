@@ -14,10 +14,107 @@
 
 use super::value::GcRef;
 use super::wire::{WireGenState, WireValue};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
+use std::time::Duration;
+
+/// TICKET-016 (W8-3) — the process-global wait-for graph behind every `Shared`/`RwShared` update
+/// guard. `owner` maps a box's stable identity (`Arc::as_ptr(..) as usize`) to the task token
+/// currently holding its guard; `waiting` maps a blocked task's token to the key it wants. A guard
+/// acquire walks `waiting`/`owner` alternately from the requester: a walk that returns to the
+/// requester is a wait-for cycle (self-held is the length-1 case), which faults instead of blocking.
+#[derive(Default)]
+struct GuardGraph {
+    owner: HashMap<usize, u64>,
+    waiting: HashMap<u64, usize>,
+}
+
+fn guard_registry() -> &'static (Mutex<GuardGraph>, Condvar) {
+    static REGISTRY: OnceLock<(Mutex<GuardGraph>, Condvar)> = OnceLock::new();
+    REGISTRY.get_or_init(|| (Mutex::new(GuardGraph::default()), Condvar::new()))
+}
+
+/// Why a guard acquire refused to block: a wait-for cycle exists. `SelfHeld` is the length-1 case
+/// (the requester already owns `key`, e.g. a nested `set`/`update`/`write` on the same box inside its
+/// own closure); `Cycle` is a longer cross-task/cross-box cycle (e.g. AB-BA).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardCycle {
+    SelfHeld,
+    Cycle,
+}
+
+/// RAII handle for a held update guard (TICKET-016 / W8-3): dropping it releases the box's guard and
+/// wakes every task waiting on the registry, so a cycle formed after registration is still found.
+pub struct UpdateGuard {
+    key: usize,
+}
+
+impl Drop for UpdateGuard {
+    fn drop(&mut self) {
+        release_update_guard(self.key);
+    }
+}
+
+/// Take the update guard for the `Shared`/`RwShared` box identified by `key`, as task `me`. Blocks
+/// while the box is held by a healthy other task; returns `Err` immediately when the wait-for walk
+/// from `me` finds a cycle (never blocks into a cycle it can already see).
+pub fn acquire_update_guard(key: usize, me: u64) -> Result<UpdateGuard, GuardCycle> {
+    let (mtx, cv) = guard_registry();
+    let mut g = mtx.lock().unwrap();
+    loop {
+        match g.owner.get(&key).copied() {
+            None => {
+                g.owner.insert(key, me);
+                g.waiting.remove(&me);
+                return Ok(UpdateGuard { key });
+            }
+            Some(owner) if owner == me => {
+                return Err(GuardCycle::SelfHeld);
+            }
+            Some(_) => {
+                g.waiting.insert(me, key);
+                if wait_for_cycle(&g, me) {
+                    g.waiting.remove(&me);
+                    return Err(GuardCycle::Cycle);
+                }
+                let (guard, _timeout) = cv.wait_timeout(g, Duration::from_millis(50)).unwrap();
+                g = guard;
+            }
+        }
+    }
+}
+
+/// Walk `waiting` -> `owner` -> `waiting` -> ... from `start`, bounded by the number of owned boxes
+/// plus one hop: a walk that revisits `start` is a wait-for cycle.
+fn wait_for_cycle(g: &GuardGraph, start: u64) -> bool {
+    let mut cur = start;
+    let max_hops = g.owner.len() + 1;
+    for _ in 0..max_hops {
+        let Some(&want) = g.waiting.get(&cur) else {
+            return false;
+        };
+        let Some(&owner) = g.owner.get(&want) else {
+            return false;
+        };
+        if owner == start {
+            return true;
+        }
+        cur = owner;
+    }
+    false
+}
+
+/// Release the update guard held on `key` and wake every waiter, so a cycle that formed after this
+/// registration (or the newly-freed key) is re-checked.
+pub fn release_update_guard(key: usize) {
+    let (mtx, cv) = guard_registry();
+    let mut g = mtx.lock().unwrap();
+    g.owner.remove(&key);
+    drop(g);
+    cv.notify_all();
+}
 
 /// `Channel[T]` core (B3.1): the shared mailbox, a FIFO of wire-form messages. `send` locks +
 /// `push_back`; `recv`/`try_recv` lock + `pop_front`; `len` locks + len. `cap` is `None` for an
@@ -143,20 +240,23 @@ impl ChanState {
     }
 }
 
-/// `Shared[T]` core (B3.1): the one box every task reaches. `get` locks + clones out; `set` locks +
-/// overwrites; `update` reads out (value lock dropped so the closure can re-enter), runs the user fn,
-/// then writes back.
+/// `Shared[T]` core (B3.1): the one box every task reaches. `get` locks + clones out; `set` and
+/// `update` each take the box's process-global update guard (TICKET-016 / W8-3,
+/// [`super::core::acquire_update_guard`]) before touching `v`.
 ///
 /// B3.3-threads: `update`'s read-modify-write must be **atomic across threads** — that is the entire
 /// promise of `Shared[T]` ("the single owner serialises writes, so the torn-write race is
-/// unrepresentable"). The value lock `v` cannot be held across the user closure (it would deadlock a
-/// closure that re-enters `get`/`set` on the same box — `Mutex` is not reentrant), so a **separate**
-/// `update_lock` serialises whole updates: held for the entire RMW, while `v` is still locked only
-/// for the brief read and the brief write-back.
+/// unrepresentable"), and `set` must not be able to silently clobber a write an in-flight `update`'s
+/// closure made — so `set` takes the SAME guard `update` does. The value lock `v` cannot be held
+/// across the user closure (it would deadlock a closure that re-enters `get` on the same box —
+/// `Mutex` is not reentrant), so the update guard — not `v` — is what serialises the whole RMW: held
+/// for the entire operation, while `v` is still locked only for the brief read and the brief
+/// write-back. A same-box `set`/`update` re-entry inside `update`'s own closure is the guard
+/// registry's length-1 wait-for cycle and FAULTS; a cross-task contender BLOCKS until the guard
+/// frees; a genuine cross-box wait-for cycle (AB-BA) FAULTS instead of hanging.
 #[derive(Debug, Default)]
 pub struct SharedCore {
     pub v: Mutex<WireValue>,
-    pub update_lock: Mutex<()>,
     /// W6-7/W6-10 — cached GC summary of `v`. MUST be re-`set` under `v`'s lock by every store.
     pub summary: WireSummary,
 }
@@ -181,22 +281,22 @@ impl SharedCore {
 /// `RwShared[T]` core: the read-write counterpart to [`SharedCore`]. The value lives behind a
 /// `RwLock` instead of a `Mutex`, so MANY concurrent `read` guards (or ONE exclusive `write` guard)
 /// can be held at once — the point of the type is that read-heavy workloads scale. `read(f)` takes a
-/// SHARED read guard, clones the value out, drops the guard, then runs `f` (no write-back). `write(f)`
-/// (and `set`) take the EXCLUSIVE write guard.
+/// SHARED read guard, clones the value out, drops the guard, then runs `f` (no write-back) — `read`
+/// never takes the update guard. `write(f)` and `set` each take the box's process-global update guard
+/// (TICKET-016 / W8-3, [`super::core::acquire_update_guard`]) before touching `v`.
 ///
 /// `write`'s read-modify-write must be **atomic across threads** (the box's contract, exactly like
-/// `Shared.update`). The value lock `v` cannot be held across the user closure (a `RwLock` write guard
-/// is not reentrant — it would deadlock a closure that re-enters `get`/`set`/`read` on the same box),
-/// so a **separate** `update_lock` serialises whole writes: held for the entire RMW, while `v` is
-/// taken only for the brief read-out and the brief write-back. The
-/// `RwLock` alone is NOT enough — because the write guard is dropped across the closure, two
-/// concurrent `write`s could otherwise clone the same base value and lose an update. A `--parallel`
-/// closure that re-enters `write` on the SAME box still deadlocks (a documented
-/// edge, mirroring `Shared.update`); a write-inside-a-read on the same box likewise deadlocks.
+/// `Shared.update`), and `set` must not be able to silently clobber an in-flight `write`'s closure —
+/// so `set` takes the SAME guard `write` does. The value lock `v` cannot be held across the user
+/// closure (a `RwLock` write guard is not reentrant — it would deadlock a closure that re-enters
+/// `get`/`read` on the same box), so the update guard — not `v` — serialises the whole RMW: held for
+/// the entire operation, while `v` is taken only for the brief read-out and the brief write-back. A
+/// same-box `set`/`write` re-entry inside `write`'s own closure FAULTS (the guard registry's
+/// length-1 wait-for cycle); `write` nested in `read` still persists (`read` never takes the guard); a
+/// genuine cross-box wait-for cycle FAULTS instead of hanging.
 #[derive(Debug, Default)]
 pub struct RwSharedCore {
     pub v: RwLock<WireValue>,
-    pub update_lock: Mutex<()>,
     /// W6-7/W6-10 — cached GC summary of `v`. MUST be re-`set` under `v`'s write lock by every store.
     pub summary: WireSummary,
 }

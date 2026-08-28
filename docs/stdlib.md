@@ -355,21 +355,23 @@ byte-identical across runs.
 (the value lives off the GC heap so it can cross threads): mutating it — `s.get().push(x)` — changes a
 throwaway, not the box, and is silently lost. Mutate via `update` (or `set` a whole new value). Same for
 `RwShared`/`Atomic`; *unlike* a plain in-task `struct` field, whose reads alias the live value but can't cross a spawn.
-`update(f)` runs `f` **under the box's exclusive write lock** (read-modify-write is atomic against other
-tasks — this is why it exists over a `get`-then-`set`, which races). **Reentrancy limit:** `f` must not
-touch the **same** box. Mutate a *different* box, or restructure so the nested step runs after `update`
-returns. What actually happens if you do is **three different things, and only one of them tells you** —
-measured at the default worker count and again at `CHEZZI_THREADS=2`, identical both times (`docs/gaps.md` **W8-3**):
+`update(f)` runs `f` **under the box's process-global update guard** (read-modify-write is atomic
+against other tasks — this is why it exists over a `get`-then-`set`, which races); `set` takes the
+same guard, so a cross-task `set` racing an in-flight `update` **blocks** and lands rather than being
+overwritten. **Reentrancy limit:** `f` must not touch the **same** box's guard. What actually happens
+if you do — measured at the default worker count and again at `CHEZZI_THREADS=2`, identical both times
+(`docs/gaps.md` **W8-3**, fixed TICKET-016):
 
-| from inside `s.update(f)` / `rw.write(f)` | measured |
+| from inside `s.update(f)` / `rw.write(f)` | behaviour |
 |---|---|
-| `s.get()` (or `rw.read(g)`) | **succeeds, returning the PRE-guard value** — a stale read, no signal |
-| `s.set(x)` | **the write is SILENTLY LOST, `rc=0`** — the guard's own return value overwrites it (`Shared(10)` + `set(99)` nested in an `update(+1)` ends at **11**) |
-| `s.update(g)` / `rw.write(g)` — the same guard nested | **hangs forever**, and the deadlock detector does **not** report it (it catches its other three shapes in ms) |
+| `s.get()` (or `rw.read(g)`) | **succeeds, returning the PRE-guard value** — a stale read, by design; `get`/`read` never take the guard |
+| `s.set(x)` — same box | **faults**: `"deadlock: this task already holds the update guard on this Shared box"` |
+| `s.update(g)` / `rw.write(g)` — same box | **faults** the same way, instead of hanging undetected |
 
-Only the third is the documented self-deadlock. The first two are why this is a limit you must respect
-rather than one the runtime enforces for you. (`rw.write` nested inside `rw.read` is the one legal
-crossing — it takes the write lock and persists.)
+A cross-task `set`/`update`/`write` contending for the SAME box from a *different*, healthy task
+BLOCKS behind the guard rather than faulting; only a genuine wait-for cycle (same-box re-entry, or a
+longer AB-BA cycle across boxes) faults. (`rw.write` nested inside `rw.read` is the one legal same-box
+crossing — `read` never takes the guard, so the nested `write` persists.)
 
 ### `RwShared[T]` — cross-task read-write cell (many readers OR one writer)
 `get() -> T` · `set(x: T) -> nil` · `read(f: fn(T) -> R) -> R` (shared read guard; returns `f`'s
@@ -1515,9 +1517,10 @@ unpinned `Map[Unknown, Unknown]` local, which the empty-collection rule flags; a
 in addition to `import std.concurrency.collection` (the latter, a len-3 submodule, does **not** license
 the bare `RwShared` ctor — only the whole-module `import std.concurrency` does).
 
-**Reentrancy:** like raw `RwShared`, a `read`/`write` closure must not re-enter the **same** box. Every
-wrapper method is flat (no nested locking), so user code is safe as long as it does not call a wrapper
-method from inside another wrapper's closure.
+**Reentrancy:** like raw `RwShared`, a `write` closure that re-enters the **same** box's update guard
+FAULTS (TICKET-016 / W8-3), instead of hanging or silently losing the inner write. Every wrapper
+method is flat (no nested locking), so user code hits this only if it calls a wrapper method from
+inside another wrapper's closure over the same box.
 
 **`ConcurrentMap[K: Hashable + Eq, V]`** — thread-safe map over `RwShared[Map[K, V]]`. `get`/`contains`/
 `len`/`snapshot` are **concurrent reads**; `set`/`remove`/`get_or_insert` take the **exclusive write

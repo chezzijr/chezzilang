@@ -594,15 +594,21 @@ fn total(r: RwShared[Map[str, int]]) -> int:
 | `write` | `write(self, f: fn(T) -> T) -> nil` | **exclusive** write guard: `Shared.update` under the write lock — read-modify-write, store `f`'s return |
 
 `write`'s read-modify-write is atomic across threads (the box's contract, exactly like
-`Shared.update`): under `--parallel` the whole `write` is serialised so concurrent writers can't lose
-each other's updates. `read` and `write` copy the value out of the lock and **drop the guard before
-running the closure** (a `RwLock` guard is not reentrant), so a closure may freely re-enter
-`get`/`set`/`read`/`write` on a **different** box.
+`Shared.update`): under `--parallel` the whole `write`/`set` is serialised by the box's **update
+guard** (a process-wide wait-for graph, not a bare lock) so concurrent writers can't lose each other's
+updates — a `set` racing an in-flight `write` **blocks** behind the guard and lands, it is never
+silently overwritten. `read` and `write` still copy the value out of the `RwLock` and **drop that
+value lock before running the closure** (the `RwLock` guard is not reentrant), so a closure may freely
+re-enter `get`/`read` — or `write`/`set` on a **different** box.
 
-> **Reentrancy limit (same class as `Shared.update`):** a closure passed to `read`/`write` that
-> re-acquires the **same** `RwShared`'s **write** lock — `write` inside `read`/`write`, or `set` inside
-> `write` under `--parallel` — **deadlocks/UB**. Don't re-enter the same box's writer from within its
-> own `read`/`write` callback. (Re-entering a *different* box, or a same-box `read`/`get`, is fine.)
+> **Reentrancy fault (same class as `Shared.update`):** a closure passed to `write` (or `set`) that
+> re-acquires the **same** `RwShared`'s update guard — `write` or `set` inside `write` — is the guard
+> registry's length-1 wait-for cycle and **faults** (`"already holds the update guard"`), instead of
+> hanging or silently losing the inner write. A genuine cross-box wait-for cycle (e.g. two boxes each
+> written from inside the other's closure) faults the same way instead of hanging undetected; two
+> tasks that merely contend for different boxes are not a cycle and still complete normally. `write`
+> nested in `read` is the one legal same-box reentrancy — `get`/`read` never take the update guard, so
+> they still read the pre-guard value and cannot fault or deadlock.
 
 `RwShared` vs `Shared`: reach for `RwShared` when reads vastly outnumber writes (concurrent readers
 matter); reach for `Shared` when access is write-heavy or you don't need concurrent reads (one lock is

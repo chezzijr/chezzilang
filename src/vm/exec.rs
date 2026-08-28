@@ -140,6 +140,11 @@ impl Vm {
             poll_deadline: None,
             poll_partial: None,
             native_reentry: 0,
+            guard_token: {
+                static GUARD_TOKENS: std::sync::atomic::AtomicU64 =
+                    std::sync::atomic::AtomicU64::new(0);
+                GUARD_TOKENS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+            },
             walk_base: 0,
             eq_hook_off: false,
             stdout_writes: 0,

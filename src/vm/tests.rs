@@ -18883,6 +18883,7 @@ print(\"done\")
 #[test]
 fn ticket_016_get_inside_update_still_reads_pre_guard_value() {
     let src = "\
+import std.concurrency
 s := Shared(10)
 fn peek(v: int) -> int:
     print(s.get())
@@ -18902,6 +18903,7 @@ print(s.get())
 #[test]
 fn ticket_016_rwshared_write_inside_read_still_persists() {
     let src = "\
+import std.concurrency
 r := RwShared(5)
 fn peek(v: int) -> int:
     r.write(fn(y: int) -> int: y + 100)
