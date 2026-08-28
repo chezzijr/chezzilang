@@ -199,11 +199,11 @@ Right now: **pre-JIT/pre-freeze bug-hunt + drift-fix hunt** is the active phase 
 checker↔runtime, and IO drift — live ledger in `docs/gaps.md`), with **M19 — Perf track** paused
 in-progress alongside it.
 
-> **START HERE (2026-08-18): `docs/gaps.md` W8-1..W8-42.** **16 open rows** — W8-1, W8-3, W8-4,
+> **START HERE (2026-08-18): `docs/gaps.md` W8-1..W8-42.** **18 open rows** — W8-1, W8-3, W8-4,
 > W8-17, W8-19 from **dogfood wave 1** and **W8-23, W8-25, W8-27, W8-28, W8-29,
 > W8-30, W8-31, W8-32, W8-34, W8-40, W8-42 from wave 2**
 > (2026-08-18, nine agents; 30 findings, 27 reproduced in-repo, 20 filed, 3 folded into open rows, 2
-> NOT reproduced and recorded as such), including two DECIDED language
+> NOT reproduced and recorded as such), plus two DECIDED language
 > milestones, **W8-21** and **W8-22** (**W8-21** success-coercion at `T?`/`T!E` sinks, **W8-22**
 > `Error` carries its origin span — its `Span.file` resolver dependency now exists concretely:
 > `Program::file_path`, `lexer::render_span`, `RunError::files`). **W8-18** (doc drift), **W8-2** (a discarded
