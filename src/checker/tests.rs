@@ -18386,12 +18386,27 @@ fn scalar_cast_rejects_struct_enum_fn_arg() {
     );
     rejects(
         "enum Color:\n    Red\n    Green\nfn main():\n    print(float(Color.Red))\nmain()\n",
-        "cannot convert",
+        "float() cannot convert enum",
     );
     rejects(
         "fn g():\n    pass\nfn main():\n    print(bool(g))\nmain()\n",
-        "cannot convert",
+        "bool() cannot convert function",
     );
+    rejects(
+        "fn main():\n    f := print\n    print(bool(f))\nmain()\n",
+        "cannot convert function",
+    );
+}
+
+#[test]
+fn scalar_cast_still_accepts_scalars_newtypes_and_str() {
+    // W8-31 neighbours: the scalar-cast domain (int/float/bool/str) must stay untouched by the
+    // struct/enum/fn reject — a newtype, a generic type param, and str-casting a struct/enum all
+    // stay clean.
+    ok("struct P:\n    x: int\nfn main():\n    print(str(P(1)))\nmain()\n");
+    ok("enum C:\n    Red\nfn main():\n    print(str(C.Red))\nmain()\n");
+    ok("fn conv[T](x: T) -> int:\n    return int(x)\nfn main():\n    print(conv(1))\nmain()\n");
+    ok("newtype N = int\nfn main():\n    n := N(3)\n    print(int(n))\nmain()\n");
 }
 
 #[test]
