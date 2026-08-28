@@ -7,6 +7,23 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+> **✅ FIXED, 2026-08-29 (TICKET-015) — `docs/gaps.md` `W8-27`/`W8-4`: `+=` on a `List` extends in
+> place, and a mutating sort callback faults instead of vanishing.** A new `Op::AddInPlace` replaces
+> `Op::Add` in `Compiler::compile_assign`'s `PlusEq` lowering; `Vm::arith_in_place` extends the LEFT
+> list in place when both operands are `Obj::List` (the decision is made at runtime — the compiler is
+> type-blind — and falls through to plain `Add` otherwise), so `fn add(xs: List[int]): xs += [9]`
+> now mutates the caller's list instead of rebinding a copy. `Op::AddInPlace` is also a `BinKind`
+> variant so the `IncLocal`/`BinLocalLocal` M19 superinstructions keep fusing `i += 1` /
+> `total += i`. Separately, `Vm::sort_mutation_check` compares the live list to the rooted pre-sort
+> snapshot by raw `Value` word immediately before the write-back, at all three sort call sites
+> (`list_sort_by`/`list_sort_by_key` in `src/vm/call.rs`, `list_sort_structs` in `src/vm/arith.rs`);
+> a change now faults with `list modified during '<method>' -- a sort callback must not mutate the
+> list being sorted`, matching CPython's `ValueError: list modified during sort`. Gated by
+> `tests/chz/spec/list_test.chz` (8 new tests), `src/compiler/peephole.rs`'s
+> `compound_add_still_fuses_to_inc_local`/`compound_add_of_two_locals_fuses`,
+> `src/vm/tests.rs::compound_assign_lowers_to_inc_local_end_to_end`, and
+> `src/vm/golden_tests.rs::sort_by_comparator_mutating_the_list_faults`.
+
 > **✅ FIXED, 2026-08-28 (TICKET-014) — `docs/gaps.md` `W8-23`: a mixed `int`/`float` comparison now
 > compares exactly, never through `as_f64`.** `Vm::compare` (backs `<`/`>`/`<=`/`>=`) and
 > `Vm::values_equal_guarded` (backs `==`/`!=`), both `src/vm/arith.rs`, route the mixed arm through

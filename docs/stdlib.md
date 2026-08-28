@@ -197,9 +197,9 @@ pins both spellings against each other so they cannot drift apart again.
 | `concat` | `(other: List[T]) -> List[T]` | Returns a **new** list. Operator form: `a + b`. |
 | `extend` | `(other: List[T]) -> nil` | *mutates* — append all of `other`. |
 | `sum` | `() -> T` | Numeric lists (`int`→`int`), or a list of a **scalar numeric `newtype`** — `List[Cents]` (`newtype Cents = int`) sums to `Cents`, and an **empty** one to `Cents(0)`, matching Go's `type Cents int`. Integer sums use checked add — overflow raises a recoverable `integer overflow in Add`, never wraps (the newtype path uses the underlying's same checked op); any-float lists accumulate to `float` (may reach `inf`). A newtype OF a newtype, a generic newtype and a non-numeric one (`newtype Name = str`) are rejected, exactly as their `+` is. |
-| `sort` | `() -> nil` | *mutates* — ascending. Orderable elements (`int`/`float`/`str`) or `Comparable` structs. Float `NaN` is handled by a total order (`NaN` sorts to one end), deterministic — never faults. |
-| `sort_by` | `(cmp: fn(T, T) -> int) -> nil` | *mutates* — custom comparator (`<0`, `0`, `>0`). |
-| `sort_by_key` | `(key: fn(T) -> K) -> nil` | *mutates* — sort by a derived orderable/`Comparable` key. A `NaN` float key sorts deterministically (total order, `NaN` to one end), consistent with `sort()` — never faults. |
+| `sort` | `() -> nil` | *mutates* — ascending. Orderable elements (`int`/`float`/`str`) or `Comparable` structs. Float `NaN` is handled by a total order (`NaN` sorts to one end), deterministic. Faults if the callback mutates the receiver (only reachable via a `Comparable` struct's `compare`). |
+| `sort_by` | `(cmp: fn(T, T) -> int) -> nil` | *mutates* — custom comparator (`<0`, `0`, `>0`). Faults if the callback mutates the receiver. |
+| `sort_by_key` | `(key: fn(T) -> K) -> nil` | *mutates* — sort by a derived orderable/`Comparable` key. A `NaN` float key sorts deterministically (total order, `NaN` to one end), consistent with `sort()`. Faults if the callback mutates the receiver. |
 | `map` | `(f: fn(T) -> U) -> List[U]` | Returns a new list. |
 | `filter` | `(pred: fn(T) -> bool) -> List[T]` | Returns a new list. |
 | `fold` | `(init: U, f: fn(U, T) -> U) -> U` | Left fold. |
@@ -228,25 +228,30 @@ pins both spellings against each other so they cannot drift apart again.
 > `ValueError` instead — the `-1` here is Chezzi applying one uniform shape to `List` and `str`, not
 > `List` inheriting Python's.)
 
-The predicate/callback methods — `map`/`filter`/`fold`/`take_while`/`drop_while`/`count`/`position`,
-**and `sort`/`sort_by`/`sort_by_key`** — iterate over a **snapshot** of the receiver's elements taken at
-call time: a callback that mutates the receiver (e.g. `xs.pop()`/`xs.push(..)`) does not change the
-iteration sequence (and never faults). Same as comprehensions and Python `map`/`filter`, **and a
-deliberate divergence from Python for the three `sort` variants**, which detect the mutation and raise
-`ValueError: list modified during sort`. In Chezzi the pushes/pops a comparator makes are **discarded
-when the sort writes the reordered snapshot back**, silently and with `rc=0`:
+The predicate/callback methods — `map`/`filter`/`fold`/`take_while`/`drop_while`/`count`/`position` —
+iterate over a **snapshot** of the receiver's elements taken at call time: a callback that mutates the
+receiver (e.g. `xs.pop()`/`xs.push(..)`) does not change the iteration sequence, and never faults. Same
+as comprehensions and Python `map`/`filter`. These methods return a value and write nothing back, so a
+callback's mutation of the receiver survives; there is nothing to discard.
+
+The three `sort` variants also sort a snapshot, but they then **write the reordered result back** —
+so a callback's mutation of the receiver would otherwise vanish with no diagnostic. That is a contract
+violation, not a silent no-op: `sort`/`sort_by`/`sort_by_key` **fault** if the callback mutates the
+receiver during the sort, matching CPython's `ValueError: list modified during sort`:
 
 ```chezzi
 w := [3, 1, 2]
 fn bump(x: int) -> int:
-    w.push(100)         # three pushes — all lost
+    w.push(100)
     return x
-w.sort_by_key(bump)
-print(w)                # [1, 2, 3]   (CPython: ValueError)
+r := recover: w.sort_by_key(bump)
+match r:
+    Err(e): print(e.message())   # list modified during 'sort_by_key' -- a sort callback must not
+                                  # mutate the list being sorted
+    Ok(_): assert false
 ```
 
-Keep callbacks pure; if you need both, sort a copy and merge after. (`docs/gaps.md` **W8-4** — the
-divergence is filed, not settled: "fault like Python" is the likelier resolution.)
+Keep callbacks pure; if you need both, sort a copy and merge after.
 
 ### `Map[K, V]`
 | Method | Signature | Notes |

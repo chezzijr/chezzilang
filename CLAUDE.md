@@ -199,8 +199,8 @@ Right now: **pre-JIT/pre-freeze bug-hunt + drift-fix hunt** is the active phase 
 checker↔runtime, and IO drift — live ledger in `docs/gaps.md`), with **M19 — Perf track** paused
 in-progress alongside it.
 
-> **START HERE (2026-08-18): `docs/gaps.md` W8-1..W8-42.** **17 open rows** — W8-1, W8-3, W8-4,
-> W8-17, W8-19 from **dogfood wave 1** and **W8-25, W8-27, W8-28, W8-29,
+> **START HERE (2026-08-18): `docs/gaps.md` W8-1..W8-42.** **15 open rows** — W8-1, W8-3,
+> W8-17, W8-19 from **dogfood wave 1** and **W8-25, W8-28, W8-29,
 > W8-30, W8-31, W8-32, W8-34, W8-40, W8-42 from wave 2**
 > (2026-08-18, nine agents; 30 findings, 27 reproduced in-repo, 20 filed, 3 folded into open rows, 2
 > NOT reproduced and recorded as such), plus two DECIDED language
@@ -210,8 +210,10 @@ in-progress alongside it.
 > `Result`/`Option` now warns), **W8-14** (every runtime stack-trace frame names its file), **W8-15**
 > (both `check`/`test` `--errors=json` halves), **W8-5** (`json.parse`'s and `json.stringify`'s
 > depth aborts), **W8-24** (init never overwrites a file it did not create),
-> **W8-20**/**W8-35**/**W8-36** (std.json -- encode, the Int split, located parse errors), and
-> **W8-8**/**W8-7** (the scheduler pair) are closed, as is the un-numbered
+> **W8-20**/**W8-35**/**W8-36** (std.json -- encode, the Int split, located parse errors),
+> **W8-8**/**W8-7** (the scheduler pair), and **W8-4**/**W8-27** (2026-08-29, TICKET-015 — a
+> mutating sort callback now faults instead of vanishing, and `+=` extends a `List` in place instead
+> of copying and rebinding) are closed, as is the un-numbered
 > **airlock-trap** section — a `spawn:`-task write read
 > after the join now warns too. The dogfood rows are the first findings in this repo produced by people
 > with **no model of the implementation**, and they are disjoint from waves 1–7 (which were almost all

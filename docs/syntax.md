@@ -650,8 +650,17 @@ Highest → lowest. Same row = same precedence, left-associative unless noted.
 > - `Set[T] | Set[T]` → union (= `.union`), `& ` → intersection (= `.intersection`), `-` → difference
 >   (= `.difference`), `^` → symmetric-difference (no method form). Result preserves insertion order.
 >
-> The compound-assign forms work too: `xs += ys` / `xs *= n` (list), `s |= t` / `s &= t` / `s ^= t` /
-> `s -= t` (set) — identical to the binary form.
+> The compound-assign forms work too, but `+=` is the odd one out: `xs += ys` EXTENDS the receiver
+> **in place** and every alias sees it, matching CPython's `list.__iadd__` — it does not rebind the
+> local to a fresh list. `xs *= n` (list) and the set forms `s |= t` / `s &= t` / `s ^= t` / `s -= t`
+> still build a new collection and rebind, identical to their binary form. That asymmetry is
+> deliberate: `xs + ys` and `xs * n` always copy; only `+=` mutates.
+>
+>     fn add(xs: List[int]):
+>         xs += [9]
+>     ys := [1]
+>     add(ys)
+>     print(ys)        # [1, 9] — the caller's list, mutated through the parameter
 >
 > Plain bitwise (`& ^ | << >>`) on **int** operands is unchanged; `<< >>` are int-only (no set form),
 > and a float operand is still a type error.
