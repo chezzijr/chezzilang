@@ -18412,10 +18412,23 @@ fn scalar_cast_still_accepts_scalars_newtypes_and_str() {
 #[test]
 fn ok_nil_cannot_be_spelled() {
     // W8-30: `Result[nil, E]` is returned all over the stdlib but there is no way to CONSTRUCT its
-    // success value — `Ok(nil)` should type-check (the exact spelling is a `## Decisions` call for
-    // the implementation stage; `Ok(nil)` is the reported shape). Today it fails checking with
-    // "unknown name 'nil'" instead, so `ok()` fails here until a spelling is wired.
-    ok("fn f() -> Result[nil, str]:\n    return Ok(nil)\nfn main():\n    pass\nmain()\n");
+    // success value. Per `## Decisions` the chosen spelling is zero-arg `Ok()`, not `Ok(nil)` — `nil`
+    // has no expression form (`infer_value` rejects any `Ty::Nil` operand as "returns no value").
+    // Until the zero-arg checker arm lands, `Ok()` fails arity checking instead.
+    ok("fn f() -> Result[nil, str]:\n    return Ok()\nfn main():\n    pass\nmain()\n");
+}
+
+#[test]
+fn ok_zero_arg_is_result_nil() {
+    // W8-30: zero-arg `Ok()` constructs `Result[nil, E]`'s success value; a mismatched declared `T`
+    // (here `int`) is still rejected.
+    ok(
+        "fn f() -> Result[nil, str]:\n    return Ok()\nfn g() -> Result[nil, str]:\n    return Err(\"boom\")\nfn main():\n    print(f())\n    print(g())\nmain()\n",
+    );
+    rejects(
+        "fn f() -> Result[int, str]:\n    return Ok()\nfn main():\n    pass\nmain()\n",
+        "Result",
+    );
 }
 
 #[test]

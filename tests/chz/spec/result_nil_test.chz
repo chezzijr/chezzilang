@@ -1,0 +1,13 @@
+# W8-30: `Result[nil, E]`'s success value is spelled zero-arg `Ok()` — see TICKET-017 `## Decisions`.
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+fn done() -> Result[nil, str]:
+    return Ok()
+
+test fn ok_zero_arg_constructs_a_result_nil():
+    r := done()
+    assert str(r) == "Ok(nil)"
+    match r:
+        Ok(_):
+            assert true
+        Err(e):
+            assert false
