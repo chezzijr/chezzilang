@@ -42,6 +42,21 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `tests/chz/stdlib/input_judged_by_wrong_rule_test.chz` and new `src/native/fs.rs` unit tests
 > (`wildcard_matches_posix_character_classes`, `check_pattern_rejects_a_malformed_class`).
 
+> **✅ FIXED, 2026-08-28 (TICKET-013) — `docs/gaps.md` `W8-35`/`W8-36`/`W8-20`: `std.json` keeps an
+> integer exact, locates its parse errors, and gains `encode`.** A new `Json.Int(int)` variant holds
+> an integer-shaped numeral parsed through `to_int` (no f64); `Json.Num(float)` now holds only
+> fractional/exponent numerals, and `num_str` is plain `str(f)` so a `Num` always renders as a float
+> (`json.stringify(json.parse("-0.0").unwrap())` → `-0.0`, a 19-digit id round-trips exact instead of
+> `9.223372036854775e+18`). Every `Parser` `Err` in `std/json.chz` gains a `Parser.at`/`at_pos`
+> location suffix (` at line L column C (char N)`, CPython's shape), except the two
+> `exceeded max depth` returns, which stay unlocated to match CPython's bare `RecursionError` and to
+> keep the pinned `tests/chz/stdlib/json_test.chz` assertions true. `json.encode(x) -> str` lands as
+> the `dumps`-shaped inverse of `decode[T]`: `stringify(_to_json(x))`, where `_to_json` is a new
+> opcode-backed (`Op::JsonToValue`) `native fn` whose runtime walk (`Vm::json_of`) lives in
+> `src/vm/call.rs`, mirroring the `std.time.timer` seam so `std.json` stays a non-native module.
+> Gated by `tests/chz/stdlib/json_number_test.chz` (new) and `tests/chz/stdlib/json_encode_test.chz`
+> (`encode_round_trips_through_decode`, previously a file error).
+
 > **✅ FIXED, 2026-08-27 (TICKET-011) — `docs/gaps.md` `W8-39`: `fs.walk`'s `Err` names the
 > directory that actually failed.** `walk_into` (`src/native/fs.rs`) now returns `Result<(), String>`
 > and formats `"{path}: {io_error}"` at the level that failed — `read_dir` and the entry `collect`

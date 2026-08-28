@@ -199,9 +199,9 @@ Right now: **pre-JIT/pre-freeze bug-hunt + drift-fix hunt** is the active phase 
 checker↔runtime, and IO drift — live ledger in `docs/gaps.md`), with **M19 — Perf track** paused
 in-progress alongside it.
 
-> **START HERE (2026-08-18): `docs/gaps.md` W8-1..W8-42.** **19 open rows** — W8-1, W8-3, W8-4,
-> W8-17, W8-19, W8-20 from **dogfood wave 1** and **W8-23, W8-25, W8-27, W8-28, W8-29,
-> W8-30, W8-31, W8-32, W8-34, W8-35, W8-36, W8-40, W8-42 from wave 2**
+> **START HERE (2026-08-18): `docs/gaps.md` W8-1..W8-42.** **16 open rows** — W8-1, W8-3, W8-4,
+> W8-17, W8-19 from **dogfood wave 1** and **W8-23, W8-25, W8-27, W8-28, W8-29,
+> W8-30, W8-31, W8-32, W8-34, W8-40, W8-42 from wave 2**
 > (2026-08-18, nine agents; 30 findings, 27 reproduced in-repo, 20 filed, 3 folded into open rows, 2
 > NOT reproduced and recorded as such), including two DECIDED language
 > milestones, **W8-21** and **W8-22** (**W8-21** success-coercion at `T?`/`T!E` sinks, **W8-22**
@@ -209,7 +209,9 @@ in-progress alongside it.
 > `Program::file_path`, `lexer::render_span`, `RunError::files`). **W8-18** (doc drift), **W8-2** (a discarded
 > `Result`/`Option` now warns), **W8-14** (every runtime stack-trace frame names its file), **W8-15**
 > (both `check`/`test` `--errors=json` halves), **W8-5** (`json.parse`'s and `json.stringify`'s
-> depth aborts), **W8-24** (init never overwrites a file it did not create), and **W8-8**/**W8-7** (the scheduler pair) are closed, as is the un-numbered
+> depth aborts), **W8-24** (init never overwrites a file it did not create),
+> **W8-20**/**W8-35**/**W8-36** (std.json -- encode, the Int split, located parse errors), and
+> **W8-8**/**W8-7** (the scheduler pair) are closed, as is the un-numbered
 > **airlock-trap** section — a `spawn:`-task write read
 > after the join now warns too. The dogfood rows are the first findings in this repo produced by people
 > with **no model of the implementation**, and they are disjoint from waves 1–7 (which were almost all
@@ -235,8 +237,9 @@ in-progress alongside it.
 > **W8-24** (**FIXED 2026-08-27**) `chezzi init` silently overwrote an existing `src/main.chz` at rc=0; **W8-23** mixed
 > `int`/`float` comparison runs in f64, so 4 of 6 operators are wrong above 2^53 — *and the CPython
 > differential's `MAX_BOUND` is capped at 1e12 precisely so it never looks there*, so the fix must raise
-> the cap in the same commit; **W8-35** JSON numbers round-trip through f64 (`-0.0` → `0`, a 19-digit id
-> → `9.2e+18`); ~~**W8-26**~~ CLOSED 2026-08-27 (TICKET-001, read-once fix) — `run` *and* `check` on a pipe used to execute an EMPTY program at rc=0 — which was why
+> the cap in the same commit; ~~**W8-35**~~ CLOSED 2026-08-28 (TICKET-013, the Int/Num split) — JSON
+> numbers used to round-trip through f64 (`-0.0` → `0`, a 19-digit id → `9.2e+18`);
+> ~~**W8-26**~~ CLOSED 2026-08-27 (TICKET-001, read-once fix) — `run` *and* `check` on a pipe used to execute an EMPTY program at rc=0 — which was why
 > a repro at `gaps.md:8664` silently stopped reproducing (now unblocked); **W8-25** a closure over a module global loses it at the airlock
 > (3 at module scope, 300 in a fn, Go/Python 300). The other two P0s are **W8-3**, widened rather than
 > re-filed: a cross-task `set` racing an `update` is silently lost (Go's mutex loses nothing) and a

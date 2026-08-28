@@ -1734,16 +1734,17 @@ something an adversary must not guess — see the `std.rand` **Security** note a
 enum Json:
     Null
     Bool(bool)
+    Int(int)
     Num(float)
     Str(str)
     Arr(List[Json])
     Obj(Map[str, Json])
 ```
-`parse(s) -> Result[Json]` · `stringify(j) -> str` · `is_null(j) -> bool` ·
+`parse(s) -> Result[Json]` · `stringify(j) -> str` · `encode(x) -> str` · `is_null(j) -> bool` ·
 `as_bool(j) -> Option[bool]` · `as_float(j) -> Option[float]` · `as_int(j) -> Option[int]` ·
 `as_str(j) -> Option[str]` · `as_object(j) -> Option[Map[str, Json]]` · `as_array(j) -> Option[List[Json]]` ·
 `get(j, key) -> Option[Json]` · `at(j, i) -> Option[Json]` · `len(j) -> int` (faults on
-`Null`/`Bool`/`Num` — a scalar has no length, matching CPython's `len(None)` `TypeError`).
+`Null`/`Bool`/`Num`/`Int` — a scalar has no length, matching CPython's `len(None)` `TypeError`).
 
 > **Nesting depth is capped at `MAX_NEST_DEPTH = 2000` on both `parse` and `stringify`.** `std.json`
 > is recursive-descent in pure Chezzi, so nesting depth becomes recursion depth in your program.
@@ -1766,21 +1767,30 @@ enum Json:
 > nesting deeper than 2 000 are rejected **cleanly** — before this cap they killed the process.
 > `docs/gaps.md` **W8-5**.
 
-> **There is no `encode`/`dumps` inverse of `decode[T]`.** Serialization goes the long way: build a
-> `Json.Obj`/`Json.Arr` tree by hand, then `stringify` it. A struct → JSON round-trip is therefore
-> asymmetric (`decode[T]` one line in, hand-built variants out) — `docs/gaps.md` **W8-20**.
+> **`encode(x) -> str` is the `dumps`-shaped inverse of `decode[T]`** (`docs/gaps.md` **W8-20**):
+> `decode[T](encode(x))` gives back `x`. It accepts nil, bool, int, float, str, `List`, tuple, `Map`
+> with `str` keys, a struct (in declaration field order), `Some(v)`/`None`, and an already-built
+> `Json` value (passed through unchanged). It **faults** — recoverably, catchable under `recover:` —
+> on a `Result` (`json.encode: cannot encode a Result`), on any other enum
+> (`json.encode: cannot encode enum <name>`), and on any other object
+> (`json.encode: cannot encode <type>`). It carries its own nesting-depth cap of 2 000, independent of
+> `stringify`'s: a struct is a reference value and may be cyclic, so the cap guards the walk itself
+> rather than a tree that already exists.
 
-Every JSON number is stored as an f64, so `as_int` and `json.decode[int]` are **total** at the
-float→int boundary — neither ever saturates silently to a wildly-wrong value nor faults: a number
-clearly outside the `int` (i64) range (e.g. `1e30`, `18446744073709551615`) or non-finite yields
-`None` from `as_int` and an `Err` from `json.decode[int]`, and `i64::MAX` / `i64::MIN` still
-round-trip. **f64-model
-caveat:** because integers are held as f64 (53-bit mantissa), values within ~one ULP of `±2^63` are
-indistinguishable from the boundary — so an input that rounds to exactly `±2^63` (this includes
-`i64::MAX`/`i64::MIN` themselves and their just-out-of-range neighbours like `9223372036854775808`)
-decodes to `i64::MAX`/`i64::MIN` rather than `Err`/`None`. This residual is inherent to the f64 JSON
-number model, not a saturation of arbitrary large values. `as_int` truncates a fractional number
-(`as_int(2.5)` → `Some(2)`).
+An integer-shaped JSON numeral inside the i64 window decodes to `Json.Int` and round-trips
+byte-exact — `as_int` and `json.decode[int]` read it directly, never through f64, so a 19-digit id
+or primary key survives intact. A numeral outside that window (or a fractional/exponent numeral)
+falls back to `Json.Num` (an f64) because Chezzi has no bignum; **`as_int` and `json.decode[int]`
+stay total at that fallback's float→int boundary** — neither ever saturates silently to a
+wildly-wrong value nor faults: a number clearly outside the `int` (i64) range (e.g. `1e30`,
+`18446744073709551615`) or non-finite yields `None` from `as_int` and an `Err` from
+`json.decode[int]`, and `i64::MAX` / `i64::MIN` still round-trip. **f64-model caveat (applies only to
+the `Json.Num` fallback):** because a fallback integer is held as f64 (53-bit mantissa), values
+within ~one ULP of `±2^63` are indistinguishable from the boundary — so an input that rounds to
+exactly `±2^63` (this includes `i64::MAX`/`i64::MIN` themselves and their just-out-of-range
+neighbours like `9223372036854775808`) decodes to `i64::MAX`/`i64::MIN` rather than `Err`/`None`.
+This residual is inherent to the f64 model, not a saturation of arbitrary large values. `as_int`
+truncates a fractional number (`as_int(2.5)` → `Some(2)`).
 
 **Non-finite floats:** standard JSON has no `NaN`/`Infinity`, so `stringify` **faults** — recoverable,
 catchable under `recover:` — with the message `cannot serialize non-finite float to JSON` when a
@@ -1788,18 +1798,25 @@ catchable under `recover:` — with the message `cannot serialize non-finite flo
 `encoding/json` policy (error out) rather than Python's non-standard `NaN`/`Infinity` tokens: it never
 emits malformed output that Chezzi's own `parse` would reject. Symmetrically, `parse` **rejects at
 decode** any numeral whose magnitude overflows f64 to a non-finite value (`1e400` → +inf,
-`-1e400` → -inf): it returns `Err("invalid number: value out of range")` rather than manufacturing a
-`Json.Num(inf)` that `stringify` would then refuse — so `parse`→`stringify` round-trips for every
-value `parse` accepts. Finite floats of any magnitude (including e.g. `1e300`, far outside the
-int-collapse range) parse and stringify normally and round-trip; underflow to `0.0` (`1e-400`) is
-finite and stays accepted.
+`-1e400` → -inf) with an `invalid number: value out of range` error (located, see below) rather than
+manufacturing a `Json.Num(inf)` that `stringify` would then refuse — so `parse`→`stringify`
+round-trips for every value `parse` accepts. Finite floats of any magnitude (including e.g. `1e300`,
+far outside the i64 window) parse and stringify normally and round-trip; underflow to `0.0`
+(`1e-400`) is finite and stays accepted.
 
 **Control chars & number grammar (RFC-8259):** `stringify` `\u00XX`-escapes control characters
 `U+0000..U+001F` that lack a shorthand escape (the Go `encoding/json` policy) rather than emitting the
 raw byte, so its output is always valid JSON. Symmetrically `parse` **rejects** a raw control char
-inside a string literal (`Err("invalid control character in string")`) and a leading-zero integer
-(`01`, `007`, `-01`) with `Err("invalid number: leading zero")` — a `0` must be a lone `0`/`-0` or
-followed by `.`/`e`, matching Python's `json.loads`. (`0.5`, `0e1`, `10` stay valid.)
+inside a string literal (an `invalid control character in string` error, located) and a leading-zero
+integer (`01`, `007`, `-01`) with an `invalid number: leading zero` error (located) — a `0` must be a
+lone `0`/`-0` or followed by `.`/`e`, matching Python's `json.loads`. (`0.5`, `0e1`, `10` stay valid.)
+
+**Located parse errors:** every `parse` `Err` names where it stopped — `<message> at line L column C
+(char N)`, CPython's exact shape. `json.parse` on the two-line document `{"a": 1,\n "b": }` returns
+`Err("unexpected character '}' at line 2 column 7 (char 15)")` — the same position CPython's
+`json.loads` names on that document (`Expecting value: ...`). The one deliberate exception: the two
+`exceeded max depth` returns carry no location, matching CPython's bare `RecursionError` (which also
+carries none).
 
 For a known shape, `json.decode[T](s) -> Result[T]` (a `std.json` member, the one type-argument
 method-call form — not a global builtin) deserializes straight into a struct / `Map[str, V]` /
