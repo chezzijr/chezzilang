@@ -187,7 +187,8 @@ static protocol requirements callable through a generic bound via witness passin
 **Tier-D** (`spawn` / `parallel:` nursery, `Channel[T]`, `Shared[T]`, `Executor`, the real
 OS-thread M:N engine, netpoller + `std.net`). The checker also has a **non-fatal warning channel**
 (`Severity::Warning`, `"severity"` in `--errors=json`, `DiagnosticSeverity::WARNING` in the LSP) with
-two rules on it — a discarded `Result`/`Option`, and a `spawn:`-task write read after the join.
+three rules on it — a discarded `Result`/`Option`, a `spawn:`-task write read after the join, and a
+`match` arm made unreachable by an earlier unguarded irrefutable arm.
 **4452 Rust tests** green across 26 targets (**4204** in the lib target), plus **646**
 Chezzi tests green at two worker counts (up from 590 at the start of `feat/span-file-and-stdlib-contracts`).
 
@@ -199,9 +200,9 @@ Right now: **pre-JIT/pre-freeze bug-hunt + drift-fix hunt** is the active phase 
 checker↔runtime, and IO drift — live ledger in `docs/gaps.md`), with **M19 — Perf track** paused
 in-progress alongside it.
 
-> **START HERE (2026-08-18): `docs/gaps.md` W8-1..W8-42.** **15 open rows** — W8-1, W8-3,
+> **START HERE (2026-08-18): `docs/gaps.md` W8-1..W8-42.** **12 open rows** — W8-1, W8-3,
 > W8-17, W8-19 from **dogfood wave 1** and **W8-25, W8-28, W8-29,
-> W8-30, W8-31, W8-32, W8-34, W8-40, W8-42 from wave 2**
+> W8-32, W8-34, W8-42 from wave 2**
 > (2026-08-18, nine agents; 30 findings, 27 reproduced in-repo, 20 filed, 3 folded into open rows, 2
 > NOT reproduced and recorded as such), plus two DECIDED language
 > milestones, **W8-21** and **W8-22** (**W8-21** success-coercion at `T?`/`T!E` sinks, **W8-22**

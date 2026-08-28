@@ -7,6 +7,22 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+> **✅ FIXED, 2026-08-29 (TICKET-017) — `docs/gaps.md` `W8-31`/`W8-30`/`W8-40`: `int()`/`float()`/
+> `bool()` reject a struct/enum/function argument at check time, `Ok()` (zero-arg) spells
+> `Result[nil, E]`'s success value, and an unreachable `match` arm now warns.** `Checker::
+> reject_non_scalar_cast` (`src/checker/expr.rs`, renamed from `reject_aggregate_scalar_cast`) gained
+> `Ty::Struct`/`Ty::Enum`/`Ty::Func`+`Ty::BuiltinFn` arms, turning a check-OK-then-runtime-fault into a
+> compile error; `Ty::Option`/`Ty::Result`/`Ty::Bytes` are the same hole and stay open (see the
+> ticket's `## Decisions`). The checker's `"Ok"` arm special-cases zero args to
+> `Ty::result_e(Ty::Nil, Ty::Unknown)` without calling `one_arg`/`check_arity`; the compiler emits
+> `Op::Nil` then `Op::NewEnum { argc: 1 }`, so `Ok`'s registered arity stays 1 and nothing else in the
+> VM changes. A new `Checker::warn_unreachable_arm` fires at all three arm-list loops
+> (`check_match`/`infer_match`/`infer_recover_tail_match`), reading each loop's existing
+> `has_wildcard` one arm later — never at the or-pattern recursion — so a guarded catch-all and range
+> subsumption both stay silent. Gated by `src/checker/tests.rs` (cast rejects + accepted neighbours,
+> `ok_zero_arg_is_result_nil`, the 8-warn/3-silent match reachability table) and
+> `tests/chz/spec/result_nil_test.chz`.
+
 > **✅ FIXED, 2026-08-29 (TICKET-015) — `docs/gaps.md` `W8-27`/`W8-4`: `+=` on a `List` extends in
 > place, and a mutating sort callback faults instead of vanishing.** A new `Op::AddInPlace` replaces
 > `Op::Add` in `Compiler::compile_assign`'s `PlusEq` lowering; `Vm::arith_in_place` extends the LEFT

@@ -535,7 +535,7 @@ All of these are clean compile-time rejects, never a check-OK/run-fault.
 | `Map[K, V]` | `{"a": 1}` | insertion-ordered hash map; `K` is any `Hashable` type |
 | `Set[T]` | `{1, 2, 3}` | deduped, insertion-ordered hash set; `T` any `Hashable` type; empty is `Set()` |
 | `tuple` | `(1, "a")` | fixed-arity, immutable |
-| `Result[T, E]` | `Ok(x)` / `Err(e)` | §9; shorthand `T!E`, or `T!` (E = `Error`) |
+| `Result[T, E]` | `Ok(x)` / `Ok()` / `Err(e)` | §9; shorthand `T!E`, or `T!` (E = `Error`); `Ok()` (zero-arg) is `Result[nil, E]`'s success value |
 | `Option[T]` | `Some(x)` / `None` | §9; shorthand `T?` |
 
 > **Naming.** The three builtin containers spell their type **and** constructor in PascalCase —
@@ -2864,6 +2864,12 @@ then `E.A(n)` — without a "duplicate arm" error.) An exact-duplicate **literal
 the same guard carve-out (`1 if c:` then `1:` is legal). (Range *subsumption* — a literal inside an
 earlier covering range — is not yet flagged.)
 
+**Unreachable arm.** An arm placed after an earlier *unguarded, irrefutable* arm is dead code — the
+earlier arm already matches every value the scrutinee can have. This is a non-fatal `Severity::Warning`
+(`unreachable match arm: an earlier arm already matches every value`), not an error: the exit code is
+unchanged. A *guarded* catch-all (`_ if c:`) does not trigger it, since its guard may fail at runtime,
+so arms after it stay live; range subsumption (`0..10:` then `5:`) is not yet flagged either.
+
 **Matching on an unannotated closure parameter.** An unannotated closure param is now *inferred* to a
 concrete type from its context (see "Closure-parameter inference" above), so `fn(x): match x: E.A: …;
 E.B: …` resolves `x: E` and is checked like any typed scrutinee — the call site is enforced
@@ -2955,6 +2961,17 @@ fn calc() -> Result[int]:
     x := safe_div(10, 2)?     # '?' unwraps Ok, or returns the Err from THIS function
     y := safe_div(x, 0)?      # if Err, calc() returns that Err immediately
     return Ok(x + y)
+```
+
+**`Result[nil, E]`'s success value.** There is no `nil` expression — `nil` only means "returns no
+value" — so a `Result` with no payload is constructed with zero-arg `Ok()`, not `Ok(nil)`:
+
+```chezzi
+fn f() -> Result[nil, str]:
+    return Ok()
+
+fn main():
+    print(f())      # Ok(nil)
 ```
 
 **The `Error` type (Go-style).** `E` defaults to the built-in `Error` protocol — one method,
