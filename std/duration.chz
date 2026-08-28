@@ -49,6 +49,10 @@ struct Duration:
     fn to_string(self) -> str:
         if self.ms == 0:
             return "0s"
+        if self.ms == -9223372036854775807 - 1:
+            # -i64::MIN is unrepresentable (the one magnitude _fmt_pos can't receive); this literal
+            # is _fmt_pos's own output for it.
+            return "-2562047788015h12m55.808s"
         if self.ms < 0:
             return "-" + _fmt_pos(-self.ms)
         return _fmt_pos(self.ms)
@@ -119,6 +123,18 @@ fn _to_uint(x: str) -> int:
         n = n * 10 + (ord(c) - 48)
     return n
 
+# ASCII digits -> non-negative int, clean Err instead of an i64-overflow fault. Caller MUST
+# _all_digits-guard first. An oversized digit string (e.g. 24 nines) must not fault `n * 10`.
+fn _to_uint_checked(x: str) -> Result[int]:
+    i64_max := 9223372036854775807
+    n := 0
+    for c in x:
+        d := ord(c) - 48
+        if n > (i64_max - d) / 10:
+            return Err("duration out of range '" + x + "'")
+        n = n * 10 + d
+    return Ok(n)
+
 # Convert one magnitude token ("1", "1.5", ".5", "0.25") in the given unit (ms per unit) to millis,
 # flooring any sub-ms fraction. Clean Err on malformed input or i64-overflow-sized magnitudes.
 fn _num_ms(numstr: str, unit_ms: int) -> Result[int]:
@@ -134,16 +150,17 @@ fn _num_ms(numstr: str, unit_ms: int) -> Result[int]:
         return Err("malformed number '" + numstr + "'")
     if parts.len() == 2 and frac == "":
         return Err("malformed number '" + numstr + "'")
-    # Bound the integer part BEFORE the *unit_ms multiply: an oversized magnitude would overflow i64
-    # (a fault, not the clean Err the contract requires). 12 digits * 3_600_000 stays < i64::MAX.
     if intpart != "":
         if not _all_digits(intpart):
             return Err("malformed number '" + numstr + "'")
-        if intpart.len() > 12:
-            return Err("duration out of range '" + numstr + "'")
     whole := 0
     if intpart != "":
-        whole = _to_uint(intpart) * unit_ms
+        # Bound the VALUE (not the digit count) against i64 ms, per unit: a magnitude fits iff
+        # v <= i64_max / unit_ms, so 13 digits of ms passes while 13 digits of h does not.
+        v := _to_uint_checked(intpart)?
+        if v > 9223372036854775807 / unit_ms:
+            return Err("duration out of range '" + numstr + "'")
+        whole = v * unit_ms
     frac_ms := 0
     if frac != "":
         if not _all_digits(frac):
@@ -157,6 +174,11 @@ fn _num_ms(numstr: str, unit_ms: int) -> Result[int]:
         for _c in fd:
             denom = denom * 10
         frac_ms = unit_ms * _to_uint(fd) / denom
+    # The per-unit bound above admits v == i64_max / unit_ms, leaving only i64_max % unit_ms ms of
+    # headroom while frac_ms can reach unit_ms - 1 — so the sum can still overflow (e.g.
+    # "2562047788015.9h"); both operands are non-negative, so i64_max - whole cannot overflow.
+    if frac_ms > 9223372036854775807 - whole:
+        return Err("duration out of range '" + numstr + "'")
     return Ok(whole + frac_ms)
 
 # Parse a Go-style duration string -> Duration. Accepts an optional leading '+'/'-', one or more
@@ -179,6 +201,7 @@ fn parse(input: str) -> Result[Duration]:
         return Ok(Duration(0))
     total := 0
     i64_max := 9223372036854775807   # i64::MAX — the ms range ceiling (Chezzi has no int-max const)
+    i64_min := -9223372036854775807 - 1   # i64::MIN — unrepresentable via a positive negate
     while i < n:
         # 1. magnitude: ASCII digits and at most one '.'
         start := i
@@ -211,14 +234,22 @@ fn parse(input: str) -> Result[Duration]:
         else:
             return Err("unknown unit '" + unit + "' in '" + input + "'")
         part := _num_ms(numstr, unit_ms)?
-        # `total` and `part` are both >= 0 here; guard the SUM against i64 overflow (the per-token
-        # bound in _num_ms only caps ONE magnitude — summing several oversized groups still overflows,
-        # which would be a fault, not the clean Err the contract requires). MAX - total >= part is safe.
-        if part > i64_max - total:
-            return Err("duration out of range '" + input + "'")
-        total = total + part
-    if neg:
-        total = -total
+        # `part` is always >= 0. Accumulate NEGATIVELY when the sign is '-': the negative ms range
+        # reaches one further than the positive one (i64::MIN has no positive counterpart), so
+        # summing into a positive total and negating at the end can never represent it. `total -
+        # i64_min` is safe only while `total < 0` (which the `neg` branch always keeps true), which
+        # is why `total == 0` is its own arm.
+        if neg:
+            if total == 0:
+                total = -part
+            else:
+                if part > total - i64_min:
+                    return Err("duration out of range '" + input + "'")
+                total = total - part
+        else:
+            if part > i64_max - total:
+                return Err("duration out of range '" + input + "'")
+            total = total + part
     return Ok(Duration(total))
 
 # ---- clock convenience (imports native std.time; NOT part of the deterministic round-trip surface) ----
