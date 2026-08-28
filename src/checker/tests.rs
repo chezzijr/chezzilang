@@ -18418,6 +18418,33 @@ fn scalar_cast_rejects_struct_enum_fn_arg() {
 }
 
 #[test]
+fn scalar_cast_rejects_option_result_bytes_bytearray_shared_arg() {
+    // TICKET-020: the residual half of W8-31 — Option/Result/bytes/ByteArray/Shared are their own
+    // `Ty` variants (not `Ty::Enum`), so TICKET-017's enum arm doesn't catch them. Same shape as
+    // struct/enum/fn: check-OK today, then a runtime fault (`{cast}() cannot convert {kind}`).
+    rejects(
+        "fn main():\n    x := Some(1)\n    print(int(x))\nmain()\n",
+        "int() cannot convert enum",
+    );
+    rejects(
+        "fn main():\n    r: Result[int, str] = Ok(1)\n    print(int(r))\nmain()\n",
+        "int() cannot convert enum",
+    );
+    rejects(
+        "fn main():\n    print(int(b\"ab\"))\nmain()\n",
+        "int() cannot convert bytes",
+    );
+    rejects(
+        "fn main():\n    print(int(bytearray([1, 2])))\nmain()\n",
+        "int() cannot convert bytearray",
+    );
+    rejects(
+        "import std.concurrency\nfn main():\n    print(int(Shared(1)))\nmain()\n",
+        "int() cannot convert Shared",
+    );
+}
+
+#[test]
 fn scalar_cast_still_accepts_scalars_newtypes_and_str() {
     // W8-31 neighbours: the scalar-cast domain (int/float/bool/str) must stay untouched by the
     // struct/enum/fn reject — a newtype, a generic type param, and str-casting a struct/enum all
