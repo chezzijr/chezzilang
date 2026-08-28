@@ -7,6 +7,19 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+> **✅ FIXED, 2026-08-28 (TICKET-014) — `docs/gaps.md` `W8-23`: a mixed `int`/`float` comparison now
+> compares exactly, never through `as_f64`.** `Vm::compare` (backs `<`/`>`/`<=`/`>=`) and
+> `Vm::values_equal_guarded` (backs `==`/`!=`), both `src/vm/arith.rs`, route the mixed arm through
+> the new `cmp_int_f64(i64, f64)` free fn — CPython's `float_richcompare` rule — so an i64 above 2^53
+> is compared against the float's exact value instead of being coerced through f64 first. As filed:
+> `9007199254740993 == 9007199254740992.0` gave `true` (CPython: `False`); re-measured `false`.
+> `src/difftest/generate.rs`'s `MAX_BOUND` rises from `1e12` to `1 << 55` in the same commit, plus a
+> new `big_int_leaf` that straddles 2^53 — raising the cap alone would have exercised nothing, since
+> every prior leaf stayed under 100. Gated by `tests/chz/spec/mixed_int_float_compare_test.chz` (5
+> tests), `tests/difftest.rs::p0_mixed_int_float_compare_above_2_53`,
+> `tests/difftest.rs::gen_emits_int_above_2_53`, and
+> `src/vm/tests.rs::cmp_int_f64_is_exact_at_the_i64_and_2_53_boundaries`.
+
 > **✅ FIXED, 2026-08-28 (TICKET-012) — `docs/gaps.md` `W8-9`: `duration.parse` bounds magnitude by
 > VALUE, not digit count.** `_num_ms` (`std/duration.chz`) now checks `intpart_value > i64_max /
 > unit_ms` per unit instead of `intpart.len() > 12`, so `"2562047788015ms"` (13 digits, fits) is `Ok`

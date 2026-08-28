@@ -517,8 +517,9 @@ printing, and equality would false-positive on that routine, harmless shape (`ga
   ("needs a coercion model in the IR") was wrong: `Bin`'s `ty` is already the result type, so a
   mixed node renders correctly through both emitters with no IR change. `gen_float`'s composite
   arm and `gen_bool`'s float-comparison arm each mix in an int operand (0.3 chance), side
-  randomized so both `int op float` and `float op int` are generated; `MAX_BOUND` staying under
-  `2^53` keeps every mixed comparison exact. **`Mod`** landed 2026-08-08, the last unreached float
+  randomized so both `int op float` and `float op int` are generated; `MAX_BOUND` now straddles
+  `2^53` (`W8-23`, TICKET-014) and the VM compares an int against a float exactly, so mixed
+  comparison stays correct without capping the bound. **`Mod`** landed 2026-08-08, the last unreached float
   operator: `gen_float` emits it beside `Div`, same no-non-zero-divisor discipline, and rides the
   same `op` variable the mixing arm already uses so mixed int↔float `%` comes for free. Chezzi's
   float `%` is `fmod` — sign of the DIVIDEND, matching Rust/Go, diverging deliberately from

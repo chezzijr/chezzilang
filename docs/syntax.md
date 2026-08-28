@@ -2055,8 +2055,10 @@ statically typed, so it follows mypy's `--strict-equality`, Go, and Rust here. T
 stricter, different question (it forbids write-through aliasing, and `==` never writes). So
 everything the runtime can genuinely compare stays legal:
 
-* the runtime's cross-type pairs — a mixed `int`/`float` (`1 == 1.0`) and `bytes` vs `bytearray`
-  (content-equal, Python parity) — **at any depth**, so `[1.0] == [1]` and `{"k": 1.0} == {"k": 1}`
+* the runtime's cross-type pairs — a mixed `int`/`float` (`1 == 1.0`, and `<`/`<=`/`>`/`>=` between
+  them) compares EXACTLY (CPython's rule), never by coercing the int through f64, so an integer
+  above 2^53 never collapses onto a nearby float — and `bytes` vs `bytearray` (content-equal, Python
+  parity) — **at any depth**, so `[1.0] == [1]` and `{"k": 1.0} == {"k": 1}`
   compile and answer `true`, exactly as in Python;
 * a **protocol existential against a type that conforms to it** (`sh: Shape` vs a `Sq`, an `Error` vs
   your error struct, in either operand order);

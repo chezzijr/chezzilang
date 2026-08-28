@@ -199,8 +199,8 @@ Right now: **pre-JIT/pre-freeze bug-hunt + drift-fix hunt** is the active phase 
 checker↔runtime, and IO drift — live ledger in `docs/gaps.md`), with **M19 — Perf track** paused
 in-progress alongside it.
 
-> **START HERE (2026-08-18): `docs/gaps.md` W8-1..W8-42.** **18 open rows** — W8-1, W8-3, W8-4,
-> W8-17, W8-19 from **dogfood wave 1** and **W8-23, W8-25, W8-27, W8-28, W8-29,
+> **START HERE (2026-08-18): `docs/gaps.md` W8-1..W8-42.** **17 open rows** — W8-1, W8-3, W8-4,
+> W8-17, W8-19 from **dogfood wave 1** and **W8-25, W8-27, W8-28, W8-29,
 > W8-30, W8-31, W8-32, W8-34, W8-40, W8-42 from wave 2**
 > (2026-08-18, nine agents; 30 findings, 27 reproduced in-repo, 20 filed, 3 folded into open rows, 2
 > NOT reproduced and recorded as such), plus two DECIDED language
@@ -234,10 +234,11 @@ in-progress alongside it.
 > side) — see the convention below.
 >
 > **Wave 2 (`W8-23..W8-42`) in one paragraph.** Seven P0s, three of which destroy or corrupt data:
-> **W8-24** (**FIXED 2026-08-27**) `chezzi init` silently overwrote an existing `src/main.chz` at rc=0; **W8-23** mixed
-> `int`/`float` comparison runs in f64, so 4 of 6 operators are wrong above 2^53 — *and the CPython
-> differential's `MAX_BOUND` is capped at 1e12 precisely so it never looks there*, so the fix must raise
-> the cap in the same commit; ~~**W8-35**~~ CLOSED 2026-08-28 (TICKET-013, the Int/Num split) — JSON
+> **W8-24** (**FIXED 2026-08-27**) `chezzi init` silently overwrote an existing `src/main.chz` at rc=0;
+> ~~**W8-23**~~ CLOSED 2026-08-28 (TICKET-014) — mixed `int`/`float` comparison ran in f64, so 4 of 6
+> operators were wrong above 2^53; fixed via the new exact `cmp_int_f64`, and the CPython
+> differential's `MAX_BOUND` raised past 2^53 in the same commit so the gate now looks there;
+> ~~**W8-35**~~ CLOSED 2026-08-28 (TICKET-013, the Int/Num split) — JSON
 > numbers used to round-trip through f64 (`-0.0` → `0`, a 19-digit id → `9.2e+18`);
 > ~~**W8-26**~~ CLOSED 2026-08-27 (TICKET-001, read-once fix) — `run` *and* `check` on a pipe used to execute an EMPTY program at rc=0 — which was why
 > a repro at `gaps.md:8664` silently stopped reproducing (now unblocked); **W8-25** a closure over a module global loses it at the airlock
