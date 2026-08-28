@@ -1,0 +1,7 @@
+# W8-28: the Pratt-parser precedence table in docs/syntax.md §4 omits `??`, so its real binding
+# power is unpinned. `m.get("a") ?? 0 + 1` currently parses as `m.get("a") ?? (0 + 1)` (giving 1)
+# instead of Python's `(m.get("a") ?? 0) + 1` (giving 2).
+
+test fn null_coalesce_binds_tighter_than_plus():
+    m := {"a": 1}
+    assert (m.get("a") ?? 0 + 1) == 2

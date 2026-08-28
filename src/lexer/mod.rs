@@ -2623,6 +2623,13 @@ mod tests {
     }
 
     #[test]
+    fn leading_zero_decimal_literal_rejected() {
+        // W8-29: `0755` must not silently lex as decimal 755 — CPython/rustc both reject a
+        // leading-zero decimal literal outright.
+        assert!(tokenize("0755").is_err(), "leading-zero decimal literal");
+    }
+
+    #[test]
     fn bad_radix_digit_errors() {
         assert!(tokenize("0xG").is_err(), "non-hex digit");
         assert!(tokenize("0b2").is_err(), "non-binary digit");

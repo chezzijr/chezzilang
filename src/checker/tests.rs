@@ -1105,6 +1105,13 @@ fn interpolation_spec_valid_and_generic_ok() {
     ok("fn show[T](v: T) -> str:\n    return \"{v:.2f}\"\nfn main():\n    pass\n");
 }
 
+#[test]
+fn interpolation_spec_grouping_accepted() {
+    // W8-42: CPython accepts `,` as a thousands-grouping type char in a format spec; Chezzi
+    // rejects it outright. `{n:,}` is the highest-priority of the five missing spec forms.
+    ok("n: int = 1000\nprint(\"{n:,}\")\n");
+}
+
 // ===== compound assignment (*= /= %= &= |= ^= <<= >>=) =====
 
 #[test]

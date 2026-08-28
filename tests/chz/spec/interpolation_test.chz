@@ -145,3 +145,9 @@ test fn doubled_braces_adjacent_to_a_fragment_render():
     assert "{{ {n} }}" == "{{ 7 }}"
     assert "{n}}}" == "7}}"
     assert "{{{n}" == "{{7"
+
+test fn a_bare_int_literal_hole_does_not_eat_a_regex_quantifier():
+    # W8-1: interpolation is always on, so `{4}` in a would-be regex pattern is read as a hole
+    # and silently rendered as digits instead of surviving as a literal `{4}` quantifier.
+    p := "\\d{4}-\\d{2}"
+    assert p == r"\d{4}-\d{2}"
