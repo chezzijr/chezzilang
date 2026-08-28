@@ -324,3 +324,25 @@ test fn a_generic_fn_argument_to_a_generic_hof():
     assert applyg(gid, 5) * 2 == 10
     assert applyg(gid, "s").upper() == "S"
     assert twop(gtext, 5).upper() == "5"
+
+# ---- W8-27: `+=` on a List must mutate in place through an aliased name, not rebind it ----
+
+test fn compound_assign_extends_in_place_through_alias():
+    fn add(xs: List[int]):
+        xs += [9]
+        xs.push(7)
+    ys := [1]
+    add(ys)
+    assert ys == [1, 9, 7], "+= must mutate List in place like push, not rebind the local"
+
+# ---- W8-4: a sort_by_key callback that mutates the list being sorted must fault, not vanish ----
+
+test fn sort_by_key_rejects_mutation_during_sort():
+    w := [3, 1, 2]
+    fn bump(x: int) -> int:
+        w.push(100)
+        return x
+    r := recover: w.sort_by_key(bump)
+    match r:
+        Ok(_): assert false, "sort_by_key silently dropped a mutation during sort instead of faulting"
+        Err(_): assert true
