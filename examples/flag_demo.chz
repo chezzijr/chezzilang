@@ -53,3 +53,11 @@ match b.parse(["--count", "abc"]):
 # ----- usage() -----
 print("--- usage ---")
 print(fs.usage())
+
+# ----- --help -----
+h := flag.new()
+h.str_flag("name", "world", "who to greet")
+print("--- help ---")
+match h.parse(["--help"]):
+    Ok(p): print("unexpected ok")
+    Err(e): print(e.message())

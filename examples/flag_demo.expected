@@ -12,3 +12,6 @@ err: flag --count: cannot parse 'abc' as an integer
   --name (str) default=alice: who to greet
   --count (int) default=3: how many times
   --verbose (bool) default=true: chatty output
+--- help ---
+flag: help requested
+  --name (str) default=world: who to greet
