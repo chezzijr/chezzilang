@@ -620,27 +620,33 @@ Highest → lowest. Same row = same precedence, left-associative unless noted.
 
 | Level | Operators | Notes |
 |-------|-----------|-------|
-| 1 | `f(x)` `a.b` `a[i]` | call, field access, index |
+| 1 | `f(x)` `a.b` `a[i]` `a?.b` | call, field access, index, optional chaining |
 | 2 | `?` | error propagation (postfix, §9) |
-| 3 | `not` `-` (unary) | |
-| 4 | `*` `/` `%` | `*` also list repeat: `[0] * 3` (and `3 * [0]`, commutative) |
-| 5 | `+` `-` | `+` also list concat: `[1,2] + [3,4]`; `-` also set difference: `a - b` |
-| 6 | `..` | range (end-exclusive) |
-| 7 | `<<` `>>` | bitwise shift (int-only) |
-| 8 | `&` | bitwise and (int) / set intersection (`Set[T]`) |
-| 9 | `^` | bitwise xor (int) / set symmetric-difference (`Set[T]`) |
-| 10 | `\|` | bitwise or (int) / set union (`Set[T]`) |
-| 11 | `<` `<=` `>` `>=` | |
-| 12 | `==` `!=` `in` | `in` = membership, yields `bool` (see below) |
-| 13 | `and` | |
-| 14 | `or` | |
-| 15 | `\|>` | pipe (§11), left-assoc |
+| 3 | `-` (unary) | |
+| 4 | `??` | null-coalescing, RIGHT-associative, Option-only (see below) |
+| 5 | `*` `/` `%` | `*` also list repeat: `[0] * 3` (and `3 * [0]`, commutative) |
+| 6 | `+` `-` | `+` also list concat: `[1,2] + [3,4]`; `-` also set difference: `a - b` |
+| 7 | `..` | range (end-exclusive) |
+| 8 | `<<` `>>` | bitwise shift (int-only) |
+| 9 | `&` | bitwise and (int) / set intersection (`Set[T]`) |
+| 10 | `^` | bitwise xor (int) / set symmetric-difference (`Set[T]`) |
+| 11 | `\|` | bitwise or (int) / set union (`Set[T]`) |
+| 12 | `<` `<=` `>` `>=` | |
+| 13 | `==` `!=` `in` | `in` = membership, yields `bool` (see below) |
+| 14 | `not` (prefix) | looser than the comparisons, tighter than `and` (Python's grammar) |
+| 15 | `and` | |
+| 16 | `or` | |
+| 17 | `\|>` | pipe (§11), left-assoc |
 
 > This table is the contract for the Pratt parser. The relative order follows Python (comparison
 > looser than `\|` < `^` < `&` < shifts). A shift amount outside `0..64` is a runtime error. A left
 > shift (`<<`) that drops a significant bit overflows like `+ - * /` — a recoverable
 > `integer overflow in Shl` (e.g. `1 << 63`), not a silent wrap; round-trip-safe shifts incl.
 > `-1 << 63 == INT_MIN` still succeed. `>>` never overflows.
+>
+> `??` binds tighter than every binary operator, so `m.get("a") ?? 0 + 1` is
+> `(m.get("a") ?? 0) + 1`, yielding `2`. `not` binds looser than the comparisons, so `not x in xs`
+> is `not (x in xs)`, while `1 + not y` is a parse error — write `1 + (not y)` instead.
 >
 > **Collection operators.** `+ *` and `& ^ |` also operate on collections, with behaviour identical
 > to the equivalent methods (so a mismatched element type is a type error, same as the method form):
@@ -3424,18 +3430,18 @@ print("sum: {a + b}")             # any expression
 print("brace: {{not interpolated}}")   # '{{' / '}}' = literal braces
 ```
 
-> **Interpolation is ALWAYS on, which silently eats regex quantifiers.** `"\\d{4}-\\d{2}"` is not the
-> pattern you typed — `{4}` and `{2}` are interpolation holes, so the string is `\d4-\d2`. That is still
-> a *valid* regex (a digit then a literal `4`), so it compiles, matches nothing, and reports nothing:
+> **Interpolation is ALWAYS on, but a hole whose whole text is digits renders literally, so a regex
+> quantifier survives.** `"\\d{4}-\\d{2}"` is the pattern you typed: `{4}` and `{2}` are all-digit
+> holes, so they render as `{4}` and `{2}` rather than interpolating, matching CPython:
 >
 > ```chezzi
-> print("\\d{4}-\\d{2}")     # \d4-\d2      (python3: \d{4}-\d{2})
-> print(r"\d{4}-\d{2}")      # \d{4}-\d{2}  ← use this
+> print("\\d{4}-\\d{2}")     # \d{4}-\d{2}  (python3: \d{4}-\d{2})
+> print(r"\d{4}-\d{2}")      # \d{4}-\d{2}
 > ```
 >
-> **Use a raw string `r"…"` for anything containing `{n}`** — regexes above all, but also format
-> templates and JSON fragments. Doubling the brace (`"\\d{{4}}"`) works too but reads worse.
-> (`docs/gaps.md` **W8-1**.)
+> A raw string `r"…"` is still the recommended spelling for a regex or anything else with
+> backslashes, since it keeps *every* backslash literal too, not just the braces. Doubling the
+> brace (`"\\d{{4}}"`) works too but reads worse. (`docs/gaps.md` **W8-1**.)
 
 **Quote styles.** A string may be delimited by `"…"` or `'…'`; the two are fully interchangeable —
 same `str` type, same escapes, same interpolation. Inside a double-quoted string `'` is a literal
@@ -3515,7 +3521,7 @@ literal brace inside it is still doubled (`'a}}b'` above is the key `a}b`).
 `{expr:spec}`. The mini-language is a coherent subset:
 
 ```
-{expr:[[fill]align][sign][0][width][.precision][type]}
+{expr:[[fill]align][sign][0][width][grouping][.precision][type]}
 ```
 
 ```chezzi
@@ -3532,6 +3538,8 @@ print("{255:b} {255:o}")  # binary / octal             → "11111111 377"
 print("{12345.678:.2e}")  # scientific (signed 2-digit exp) → "1.23e+04"
 print("{5:+d}")           # force a leading '+'         → "+5"
 print("{greeting:.5}")    # string precision truncates → "hello"
+print("{1234567:,}")      # thousands grouping         → "1,234,567"
+print("{1234567:_}")      # underscore grouping        → "1_234_567"
 ```
 
 - **align**: `<` left, `>` right, `^` center; an optional **fill** char may precede it (default space).
@@ -3540,6 +3548,11 @@ print("{greeting:.5}")    # string precision truncates → "hello"
 - **`0`**: zero-pad numerics to *width* (the sign stays ahead of the zeros).
 - **width**: minimum field width. **Capped at 4096** — a larger width (e.g. `{x:>9999999999}`) is a
   parse error, *not* a multi-gigabyte allocation.
+- **grouping**: `,` or `_` separates every three digits of the integer part (`,` → `1,234,567`;
+  `_` → `1_234_567`); `_` also groups `x`/`X`/`b`/`o` output in fours (`{0xfffff:_x}` → `f_ffff`).
+  `,` is rejected with those four type chars, and both are rejected on a string. Combined with
+  zero-pad, the digit count widens so the field never starts with a separator (`{1000:08,}` →
+  `"0,001,000"`, nine chars for a width of eight — matching CPython).
 - **precision** `.N`: float decimals; on a **string** it **truncates** to N chars (Python parity);
   also capped at 4096.
 - **type**: `d` int · `f` fixed float · `x`/`X` hex · `b` binary · `o` octal · `e`/`E` scientific

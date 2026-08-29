@@ -1,0 +1,9 @@
+# W8-42: `{x:,}`/`{x:_}` digit-group separators, the most-requested slot of the mini-language.
+
+test fn grouping_formats_like_cpython():
+    assert "{1000:,}" == "1,000"
+    assert "{1000:_}" == "1_000"
+    assert "{-1234567:,}" == "-1,234,567"
+    assert "{1000:08,}" == "0,001,000"
+    assert "{1234.5678:,.2f}" == "1,234.57"
+    assert "{1000:>9,}" == "    1,000"

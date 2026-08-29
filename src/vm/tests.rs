@@ -1654,7 +1654,9 @@ fn calls_preserve_arg_order_nesting_and_result_slot() {
 fn fstring_and_str_render_all_value_shapes() {
     // P2 characterization: locks the exact BuildStr / stringify output across every value
     // shape before the stringify-into-buffer refactor (separators, braces, nesting, hooks).
-    assert_eq!(run("print(\"{1} {2.5} {true}\")\n"), "1 2.5 true\n");
+    // W8-1: `{1}` is a bare-digit hole, which now renders as literal text (see
+    // `interpolation.rs`'s digit-hole rule), not as an interpolated `1`.
+    assert_eq!(run("print(\"{1} {2.5} {true}\")\n"), "{1} 2.5 true\n");
     assert_eq!(run("x := 42\nprint(\"i={x}\")\n"), "i=42\n");
     assert_eq!(run("print(\"{[1, 2, 3]}\")\n"), "[1, 2, 3]\n");
     assert_eq!(run("print(\"{(1, 2)}\")\n"), "(1, 2)\n");

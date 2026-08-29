@@ -1452,6 +1452,23 @@ impl Lexer {
         }
 
         let num: String = word.into_iter().filter(|c| *c != '_').collect();
+        if !is_float
+            && num.len() > 1
+            && num.starts_with('0')
+            && num.chars().any(|c| ('1'..='9').contains(&c))
+        {
+            let trimmed = num.trim_start_matches('0');
+            let msg = if num.chars().all(|c| ('0'..='7').contains(&c)) {
+                format!(
+                    "leading zeros in a decimal integer literal are not permitted; write 0o{trimmed} for octal or {trimmed} for decimal"
+                )
+            } else {
+                format!(
+                    "leading zeros in a decimal integer literal are not permitted; write {trimmed} for decimal"
+                )
+            };
+            return Err(self.error_at(start, &msg));
+        }
         if is_float {
             let v = num
                 .parse::<f64>()
@@ -2630,6 +2647,27 @@ mod tests {
     }
 
     #[test]
+    fn leading_zero_message_names_the_octal_fix() {
+        let err = tokenize("0755").unwrap_err();
+        assert_eq!(
+            err.message,
+            "leading zeros in a decimal integer literal are not permitted; write 0o755 for octal or 755 for decimal"
+        );
+        let err = tokenize("0999").unwrap_err();
+        assert_eq!(
+            err.message,
+            "leading zeros in a decimal integer literal are not permitted; write 999 for decimal"
+        );
+    }
+
+    #[test]
+    fn leading_zero_rule_accepts_zeros_floats_and_radix() {
+        for src in ["0", "00", "0_0", "0.5", "0755.5", "0755e2", "0o755", "0x1f"] {
+            assert!(tokenize(src).is_ok(), "expected {src} to lex ok");
+        }
+    }
+
+    #[test]
     fn bad_radix_digit_errors() {
         assert!(tokenize("0xG").is_err(), "non-hex digit");
         assert!(tokenize("0b2").is_err(), "non-binary digit");
@@ -2644,10 +2682,8 @@ mod tests {
     #[test]
     fn bare_zero_still_decimal() {
         assert_eq!(kinds("0"), vec![Token::Int(0), Token::Newline, Token::Eof]);
-        assert_eq!(
-            kinds("007"),
-            vec![Token::Int(7), Token::Newline, Token::Eof]
-        );
+        // W8-29: `007` is now a rejected leading-zero decimal literal, same class as `0755`.
+        assert!(tokenize("007").is_err());
     }
 
     #[test]

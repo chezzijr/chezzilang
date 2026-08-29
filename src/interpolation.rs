@@ -55,9 +55,6 @@ pub(crate) fn parse_interpolation(lit_tok: &StrLit, span: Span) -> Result<Vec<Ch
                 lit.push('}');
             }
             '{' => {
-                if !lit.is_empty() {
-                    chunks.push(Chunk::Lit(std::mem::take(&mut lit)));
-                }
                 // Scan to the fragment's CLOSING `}` with the same state machine
                 // `fmtspec::split_spec` uses one line below: a `}` inside a `"`/`'` string literal
                 // or nested inside `([{` is part of the expression, NOT the terminator. Without
@@ -124,6 +121,20 @@ pub(crate) fn parse_interpolation(lit_tok: &StrLit, span: Span) -> Result<Vec<Ch
                         message: "unterminated '{' in interpolated string".to_string(),
                         span: map.at(raw.chars().count()),
                     });
+                }
+                // A hole whose whole text is ASCII digits (`{4}`, never `{ 4 }` or `{42:06}`,
+                // which still have surrounding whitespace or a spec) renders as literal text, not
+                // an interpolation — always-on interpolation would otherwise silently eat a regex
+                // quantifier like `\d{4}`. Push it onto the RUNNING `lit` (not a fresh chunk) so a
+                // digit-hole-only string keeps the compiler's one-chunk `ConstStr` fast path.
+                if !inner.is_empty() && inner.chars().all(|c| c.is_ascii_digit()) {
+                    lit.push('{');
+                    lit.push_str(&inner);
+                    lit.push('}');
+                    continue;
+                }
+                if !lit.is_empty() {
+                    chunks.push(Chunk::Lit(std::mem::take(&mut lit)));
                 }
                 // Split on the first top-level `:` into (expr, spec); a `:` inside brackets/quotes
                 // (e.g. `{m["a:b"]}`, slices `a[1:2]`) is NOT a separator. Spec parse errors are

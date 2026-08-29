@@ -489,13 +489,11 @@
 # never absorbed into the body it sits outside of.
 <pipeExpr> ::= <orExpr> | <pipeExpr> "PIPE" <pipeCall>
 <pipeCall> ::= <postfix> "LPAREN" "RPAREN" | <postfix> "LPAREN" <exprList> "RPAREN"
-<orExpr>   ::= <coalesceExpr> | <orExpr> "OR" <coalesceExpr>
-# null-coalescing `??` (gap): looser than `and`/comparisons, tighter than `or`. RIGHT-associative
-# (`a ?? b ?? c` = `a ?? (b ?? c)`) — modeled by right-recursion. `??` is Option-ONLY; it SURVIVES
-# desugar and the CHECKER lowers it to a `match` (a `Result` lhs is one error, never a silent discard
-# of the error payload).
-<coalesceExpr> ::= <andExpr> | <andExpr> "QUESTIONQUESTION" <coalesceExpr>
-<andExpr>  ::= <eqExpr>  | <andExpr> "AND" <eqExpr>
+<orExpr>   ::= <andExpr> | <orExpr> "OR" <andExpr>
+<andExpr>  ::= <notExpr> | <andExpr> "AND" <notExpr>
+# `not` (gap): sits between `and` and the comparisons, matching Python — `not x in xs` is
+# `not (x in xs)`, and `1 + not y` is a parse error (`not` no longer reaches into the unary tier).
+<notExpr>  ::= <eqExpr> | "NOT" <notExpr>
 # `in` membership sits at the equality level (same precedence as `==`/`!=`); yields a bool.
 <eqExpr>   ::= <relExpr> | <eqExpr> "EQEQ" <relExpr> | <eqExpr> "NOTEQ" <relExpr> | <eqExpr> "IN" <relExpr>
 <relExpr>  ::= <bitOrExpr>
@@ -511,9 +509,14 @@
 <shiftExpr> ::= <rangeExpr>  | <shiftExpr> "SHL" <rangeExpr> | <shiftExpr> "SHR" <rangeExpr>
 <rangeExpr>::= <addExpr> | <rangeExpr> "DOTDOT" <addExpr>
 <addExpr>  ::= <mulExpr> | <addExpr> "PLUS" <mulExpr> | <addExpr> "MINUS" <mulExpr>
-<mulExpr>  ::= <unary>
-             | <mulExpr> "STAR" <unary> | <mulExpr> "SLASH" <unary> | <mulExpr> "PERCENT" <unary>
-<unary>    ::= <postfix> | "NOT" <unary> | "MINUS" <unary>
+<mulExpr>  ::= <coalesceExpr>
+             | <mulExpr> "STAR" <coalesceExpr> | <mulExpr> "SLASH" <coalesceExpr> | <mulExpr> "PERCENT" <coalesceExpr>
+# null-coalescing `??` (gap): binds tighter than every binary operator and looser than unary `-`
+# and the postfix chain. RIGHT-associative (`a ?? b ?? c` = `a ?? (b ?? c)`) — modeled by
+# right-recursion. `??` is Option-ONLY; it SURVIVES desugar and the CHECKER lowers it to a `match`
+# (a `Result` lhs is one error, never a silent discard of the error payload).
+<coalesceExpr> ::= <unary> | <unary> "QUESTIONQUESTION" <coalesceExpr>
+<unary>    ::= <postfix> | "MINUS" <unary>
 
 # postfix chain: calls, field access, indexing, the `?` try operator, explicit call-site type
 # arguments `name[Type, …](args)`, and the scoped `.decode[Type](arg)` form (JSON decode). The

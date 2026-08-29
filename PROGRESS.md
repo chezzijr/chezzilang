@@ -7,6 +7,29 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+> **✅ FIXED, 2026-08-29 (TICKET-018) — `docs/gaps.md` `W8-1`/`W8-28`/`W8-29`: leading-zero decimal
+> literals are rejected, `not` and `??` are retuned, and a bare-digit interpolation hole is
+> literal.** **W8-29:** `0755` is now a lex error (`src/lexer/mod.rs::number`) naming the fix —
+> `leading zeros in a decimal integer literal are not permitted; write 0o755 for octal or 755 for
+> decimal` — matching CPython/rustc; `0`, `00`, `0_0`, a leading-zero float/exponent, and every
+> `0x`/`0b`/`0o` literal are unaffected. **W8-28:** `not` moved out of the unary tier in
+> `src/parser/mod.rs` and now sits between `and` and the comparisons (Python's grammar, gated by a
+> new `NOT_BP = 6`), so `not x in xs` is `not (x in xs)` instead of `(not x) in xs`; `??`'s binding
+> power moved from `(4, 4)` to `(25, 25)`, tighter than every binary operator, so
+> `m.get("a") ?? 0 + 1` is `(m.get("a") ?? 0) + 1` (`2`) instead of `m.get("a") ?? (0 + 1)` (`1`).
+> `docs/grammar.bnf` and `docs/syntax.md` §4's 17-row table are the updated contract; `1 + not y` is
+> now a parse error, pinned by `tests/corpus/reject/not_in_tight_position.chz`. **W8-1:** a hole in
+> an interpolated string whose whole text is ASCII digits (`{4}`) now renders as literal text
+> instead of interpolating (`src/interpolation.rs::parse_interpolation`), so
+> `"\\d{4}-\\d{2}"` keeps its regex quantifiers; `{ 4 }` and `{42:06}` still interpolate. **Also
+> landed, `W8-42` (partial — grouping only, the row stays open):** `,`/`_` digit-group separators in
+> the `{x:spec}` mini-language (`src/fmtspec.rs`), matching CPython's zero-pad-overshoot and
+> radix-grouping behaviour, measured against `python3` for every rendered pair.
+> Full gate re-run at the fix, `.project/run-test.sh` (no args): `EXIT: 0`, lib target
+> `4288 passed; 0 failed; 2 ignored`, every other target `0 failed`. `./target/debug/chezzi test
+> tests/chz`: `672 test(s): 672 passed, 0 failed, 0 errored`. `docs/gaps.md`'s open-row counter:
+> `10` before this ticket, `7` after (DEC-011).
+
 > **✅ FIXED, 2026-08-29 (TICKET-016) — `docs/gaps.md` `W8-3`/`W8-25`: `Shared`/`RwShared` reentrancy
 > no longer loses a write or hangs undetected, and a closure over a module global no longer loses the
 > global's value at the airlock.** **W8-3:** a process-global wait-for-graph update guard

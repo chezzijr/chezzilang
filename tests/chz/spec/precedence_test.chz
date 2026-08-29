@@ -5,3 +5,13 @@
 test fn null_coalesce_binds_tighter_than_plus():
     m := {"a": 1}
     assert (m.get("a") ?? 0 + 1) == 2
+
+# W8-28: `not` used to sit in the unary tier, so `not x in xs` parsed as `(not x) in xs` — a type
+# error, since `not` expects `bool`. It now binds looser than the comparisons (Python's grammar),
+# so `not x in xs` is `not (x in xs)`.
+test fn not_binds_looser_than_membership_and_comparison():
+    xs := [1, 2, 3]
+    x := 5
+    assert (not x in xs) == true
+    assert (not 1 == 2) == true
+    assert ((not true) and false) == false

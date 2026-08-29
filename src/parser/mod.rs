@@ -2387,7 +2387,24 @@ impl Parser {
         // children so their fold-depths accumulate here, restore `max`-combined on the way out.
         let outer_fold = self.fold_depth;
         self.fold_depth = 0;
-        let mut lhs = self.parse_unary()?;
+        // `not` sits between `and` and the comparisons (Python's grammar), not in the unary tier,
+        // so `not x in xs` is `not (x in xs)` and `1 + not y` is a parse error. Gated on `min_bp`
+        // rather than a token check alone, so `not` still parses in every loose position (an `if`
+        // condition, an `and`/`or` operand, a call argument, the operand of another `not`).
+        let mut lhs = if matches!(self.peek(), Token::Not) && min_bp <= NOT_BP {
+            let not_span = self.cur_span();
+            self.advance();
+            let expr = self.parse_bp(NOT_BP)?;
+            Expr {
+                kind: ExprKind::Unary {
+                    op: UnaryOp::Not,
+                    expr: Box::new(expr),
+                },
+                span: not_span,
+            }
+        } else {
+            self.parse_unary()?
+        };
         let mut chain = 0usize;
         while let Some((op, l_bp, r_bp)) = infix_op(self.peek()) {
             if l_bp < min_bp {
@@ -2473,7 +2490,6 @@ impl Parser {
         }
         let span = self.cur_span();
         let op = match self.peek() {
-            Token::Not => Some(UnaryOp::Not),
             Token::Minus => Some(UnaryOp::Neg),
             _ => None,
         };
@@ -3202,6 +3218,10 @@ fn is_compound_assign(tok: &Token) -> bool {
     )
 }
 
+/// Binding power of prefix `not`, gating `parse_bp`'s `min_bp <= NOT_BP` check. It sits between
+/// `and` (5) and the comparisons (7), matching Python: `not x in xs` is `not (x in xs)`.
+const NOT_BP: u8 = 6;
+
 fn infix_op(tok: &Token) -> Option<(InfixOp, u8, u8)> {
     use BinaryOp::*;
     use InfixOp::*;
@@ -3212,10 +3232,6 @@ fn infix_op(tok: &Token) -> Option<(InfixOp, u8, u8)> {
         // is threaded into the call on its right. Left-associative (`a |> f |> g` = `(a|>f)|>g`).
         Token::Pipe => (Pipe, 1),
         Token::Or => (Bin(Or), 3),
-        // Null-coalescing `??`: looser than `and`/comparisons, tighter than `or`. RIGHT-associative
-        // (`a ?? b ?? c` = `a ?? (b ?? c)`) — the one exception to the `l+1` left-assoc rule below,
-        // so it returns early with equal left/right binding powers.
-        Token::QuestionQuestion => return Some((Coalesce, 4, 4)),
         Token::And => (Bin(And), 5),
         Token::EqEq => (Bin(Eq), 7),
         Token::NotEq => (Bin(NotEq), 7),
@@ -3237,6 +3253,11 @@ fn infix_op(tok: &Token) -> Option<(InfixOp, u8, u8)> {
         Token::Star => (Bin(Mul), 23),
         Token::Slash => (Bin(Div), 23),
         Token::Percent => (Bin(Mod), 23),
+        // Null-coalescing `??`: binds tighter than every binary operator and looser than unary
+        // `-` and the postfix chain, so `a ?? b + 1` is `(a ?? b) + 1`. RIGHT-associative
+        // (`a ?? b ?? c` = `a ?? (b ?? c)`) — the one exception to the `l+1` left-assoc rule
+        // above, so it returns early with equal left/right binding powers.
+        Token::QuestionQuestion => return Some((Coalesce, 25, 25)),
         _ => return None,
     };
     Some((op, l, l + 1))

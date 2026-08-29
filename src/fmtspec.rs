@@ -39,6 +39,8 @@ pub struct FormatSpec {
     /// `0` flag — zero-pad numerics to `width` (with the sign kept ahead of the zeros).
     pub zero_pad: bool,
     pub width: usize,
+    /// `,` or `_` digit-group separator (CPython slot order: `[width][grouping][.precision][type]`).
+    pub group: Option<char>,
     pub precision: Option<usize>,
     pub ty: Option<char>,
 }
@@ -51,6 +53,7 @@ impl Default for FormatSpec {
             sign: false,
             zero_pad: false,
             width: 0,
+            group: None,
             precision: None,
             ty: None,
         }
@@ -156,6 +159,12 @@ pub fn parse(spec: &str) -> Result<FormatSpec, String> {
         out.width = width;
     }
 
+    // [grouping] — `,` or `_`, CPython's slot between width and precision.
+    if i < chars.len() && matches!(chars[i], ',' | '_') {
+        out.group = Some(chars[i]);
+        i += 1;
+    }
+
     // [.precision]
     if i < chars.len() && chars[i] == '.' {
         i += 1;
@@ -223,7 +232,40 @@ fn is_type(c: char) -> bool {
 pub fn apply(spec: &FormatSpec, arg: FmtArg, out: &mut String) -> Result<(), String> {
     // 1) base render → `body`, plus an optional sign prefix that zero-padding must keep ahead of
     //    the inserted zeros. `is_numeric` gates the `0` flag and align defaulting.
-    let (sign_prefix, body, is_numeric) = render_base(spec, arg)?;
+    let (sign_prefix, mut body, is_numeric) = render_base(spec, arg)?;
+
+    // 1b) grouping (`,`/`_`): insert a separator every `size` digits of the LEADING digit run —
+    // hex under `x`/`X` (so `format(1048575,'_x')` groups `f_ffff`), decimal otherwise (`b`/`o`
+    // bodies are already digits). An empty run (`NaN`, `inf`) is left untouched. Zero-pad plus
+    // grouping may OVERSHOOT `width` on purpose (CPython: `{1000:08,}` is `0,001,000`, nine chars
+    // for a width of eight) — the digit count grows until it covers the requested width, it is
+    // never trimmed back down.
+    if let Some(sep) = spec.group {
+        let size = if matches!(spec.ty, Some('x') | Some('X') | Some('b') | Some('o')) {
+            4
+        } else {
+            3
+        };
+        let is_digit: fn(char) -> bool = if matches!(spec.ty, Some('x') | Some('X')) {
+            |c| c.is_ascii_hexdigit()
+        } else {
+            |c| c.is_ascii_digit()
+        };
+        let digit_end = body.find(|c| !is_digit(c)).unwrap_or(body.len());
+        let (digits, tail) = body.split_at(digit_end);
+        if !digits.is_empty() {
+            let mut want = digits.chars().count();
+            if spec.zero_pad && is_numeric && spec.align.is_none() {
+                let target = spec
+                    .width
+                    .saturating_sub(sign_prefix.chars().count() + tail.chars().count());
+                while want + want.saturating_sub(1) / size < target {
+                    want += 1;
+                }
+            }
+            body = group_digits(digits, want, sep, size) + tail;
+        }
+    }
 
     // 2) zero-pad: pad the numeric body with leading zeros to `width` (after the sign).
     if spec.zero_pad && is_numeric && spec.align.is_none() {
@@ -276,6 +318,27 @@ pub fn apply(spec: &FormatSpec, arg: FmtArg, out: &mut String) -> Result<(), Str
     Ok(())
 }
 
+/// Insert `sep` every `size` digits from the right of `digits`, left-padding with `'0'` first so
+/// the result has at least `want` digits. `want` never exceeds the parse-capped `MAX_FIELD`, so
+/// the allocation stays bounded.
+fn group_digits(digits: &str, want: usize, sep: char, size: usize) -> String {
+    let n = digits.len().max(want);
+    let pad = n - digits.len();
+    let digit_bytes = digits.as_bytes();
+    let mut out = String::with_capacity(n + n / size);
+    for k in 0..n {
+        if k > 0 && (n - k).is_multiple_of(size) {
+            out.push(sep);
+        }
+        if k < pad {
+            out.push('0');
+        } else {
+            out.push(digit_bytes[k - pad] as char);
+        }
+    }
+    out
+}
+
 /// `n` copies of `fill`. `n <= MAX_FIELD` always (width is capped at parse time), so this never
 /// allocates pathologically.
 fn push_fill(out: &mut String, fill: char, n: usize) {
@@ -307,6 +370,16 @@ pub fn spec_valid_for_scalar(spec: &FormatSpec, kind: ScalarKind) -> Result<(), 
             {
                 return Err("format spec: precision not allowed on an integer".to_string());
             }
+            // `,` groups in threes and clashes with radix output; `_` groups `x`/`X`/`b`/`o` in
+            // fours instead (CPython: `format(1048575,'_x')` is `f_ffff`), so only `,` is rejected.
+            if spec.group == Some(',')
+                && matches!(spec.ty, Some(t) if matches!(t, 'x' | 'X' | 'b' | 'o'))
+            {
+                let t = spec.ty.unwrap();
+                return Err(format!(
+                    "format spec: grouping ',' not valid with type '{t}'"
+                ));
+            }
             Ok(())
         }
         // A float takes f/e/%/(none); the integer/radix type chars are rejected.
@@ -324,6 +397,11 @@ pub fn spec_valid_for_scalar(spec: &FormatSpec, kind: ScalarKind) -> Result<(), 
             }
             if spec.zero_pad {
                 return Err("format spec: zero-pad '0' not allowed on a string".to_string());
+            }
+            if let Some(sep) = spec.group {
+                return Err(format!(
+                    "format spec: grouping '{sep}' not allowed on a string"
+                ));
             }
             if let Some(t) = spec.ty {
                 return Err(format!("format spec: type '{t}' not valid for a string"));
@@ -724,5 +802,67 @@ mod tests {
         );
         // `if` as a leading substring of an identifier is not the keyword — still splits normally.
         assert_eq!(split_spec("iffy:>5"), ("iffy", Some(">5")));
+    }
+
+    #[test]
+    fn grouping_parses_in_the_cpython_slot() {
+        let s = parse(",").unwrap();
+        assert_eq!(s.group, Some(','));
+
+        let s = parse("_").unwrap();
+        assert_eq!(s.group, Some('_'));
+
+        let s = parse("010,.2f").unwrap();
+        assert!(s.zero_pad);
+        assert_eq!(s.width, 10);
+        assert_eq!(s.group, Some(','));
+        assert_eq!(s.precision, Some(2));
+        assert_eq!(s.ty, Some('f'));
+
+        let s = parse("_>9").unwrap();
+        assert_eq!(s.fill, '_');
+        assert_eq!(s.align, Some(Align::Right));
+        assert_eq!(s.group, None);
+
+        let err = parse(",,").unwrap_err();
+        assert_eq!(err, "format spec: unknown type char ','");
+    }
+
+    #[test]
+    fn grouping_validity_matches_cpython() {
+        let p = |s: &str| parse(s).unwrap();
+        assert!(
+            spec_valid_for_scalar(&p(","), ScalarKind::Str)
+                .unwrap_err()
+                .contains("grouping ',' not allowed on a string")
+        );
+        assert!(
+            spec_valid_for_scalar(&p(",x"), ScalarKind::Int)
+                .unwrap_err()
+                .contains("grouping ',' not valid with type 'x'")
+        );
+        assert!(spec_valid_for_scalar(&p(","), ScalarKind::Int).is_ok());
+        assert!(spec_valid_for_scalar(&p(","), ScalarKind::Float).is_ok());
+        assert!(spec_valid_for_scalar(&p("_x"), ScalarKind::Int).is_ok());
+    }
+
+    #[test]
+    fn grouping_renders_like_cpython() {
+        assert_eq!(ok_apply(",", FmtArg::Int(1000)), "1,000");
+        assert_eq!(ok_apply("_", FmtArg::Int(1000)), "1_000");
+        assert_eq!(ok_apply(",", FmtArg::Int(-1234567)), "-1,234,567");
+        assert_eq!(ok_apply("08,", FmtArg::Int(1000)), "0,001,000");
+        assert_eq!(ok_apply("06,", FmtArg::Int(1000)), "01,000");
+        assert_eq!(ok_apply("010,", FmtArg::Int(1000)), "00,001,000");
+        assert_eq!(ok_apply("012,", FmtArg::Int(1000)), "0,000,001,000");
+        assert_eq!(ok_apply("09,", FmtArg::Int(-1000)), "-0,001,000");
+        assert_eq!(ok_apply("05,", FmtArg::Int(0)), "0,000");
+        assert_eq!(ok_apply(">9,", FmtArg::Int(1000)), "    1,000");
+        assert_eq!(ok_apply("+,", FmtArg::Int(1000)), "+1,000");
+        assert_eq!(ok_apply("012,.1f", FmtArg::Float(1234.5)), "00,001,234.5");
+        assert_eq!(ok_apply(",.2f", FmtArg::Float(1234.5678)), "1,234.57");
+        assert_eq!(ok_apply(",", FmtArg::Float(1e20)), "1e+20");
+        assert_eq!(ok_apply("_x", FmtArg::Int(1048575)), "f_ffff");
+        assert_eq!(ok_apply("_b", FmtArg::Int(255)), "1111_1111");
     }
 }

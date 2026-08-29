@@ -1,0 +1,4 @@
+# rule: notExpr
+# expect: unexpected 'not' in expression
+fn main():
+    x := 1 + not y

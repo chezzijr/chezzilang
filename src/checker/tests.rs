@@ -1112,6 +1112,18 @@ fn interpolation_spec_grouping_accepted() {
     ok("n: int = 1000\nprint(\"{n:,}\")\n");
 }
 
+#[test]
+fn interpolation_spec_grouping_rejects_what_cpython_rejects() {
+    rejects(
+        "s: str = \"abc\"\nprint(\"{s:,}\")\n",
+        "format spec: grouping ',' not allowed on a string",
+    );
+    rejects(
+        "n: int = 1000\nprint(\"{n:,x}\")\n",
+        "format spec: grouping ',' not valid with type 'x'",
+    );
+}
+
 // ===== compound assignment (*= /= %= &= |= ^= <<= >>=) =====
 
 #[test]

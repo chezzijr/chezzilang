@@ -990,11 +990,11 @@ is `""`).
 `split(pattern, subject) -> Result[List[str]]`. A bad pattern is `Err`.
 
 **Write patterns as RAW strings — `r"\d{4}"`, not `"\\d{4}"`.** Interpolation is always on in a normal
-string, so `{4}` is an interpolation **hole**, not a quantifier: `"\\d{4}-\\d{2}"` becomes `\d4-\d2`,
-which is still a *valid* regex (a digit then a literal `4`), so it compiles, matches nothing, and
-reports no problem anywhere. In `r"…"` a backslash is literal and braces are inert, which is also why
-this is the one place the doubled-backslash form (`"\\d+"`, `"\\."`) is a trap rather than a style
-choice. (`docs/gaps.md` **W8-1**.)
+string, but a hole whose whole text is digits (like `{4}`) renders literally rather than
+interpolating, so `"\\d{4}-\\d{2}"` keeps its quantifiers: `\d{4}-\d{2}`. A raw string is still the
+recommended spelling for a pattern, because it also keeps every backslash literal — in `"\\d+"` the
+doubled backslash is still a trap next to `r"\d+"`, even though the brace half of the trap is gone.
+(`docs/gaps.md` **W8-1**.)
 
 **The dialect is RE2 (the Rust `regex` crate), not Python's `re`.** Four differences bite in order of
 how often:
