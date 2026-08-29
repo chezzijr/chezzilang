@@ -1827,6 +1827,13 @@ getting strictly larger) rather than by walking to the cap (`docs/gaps.md` **W7-
 satisfies a protocol by *having* the methods — there is no `implements` declaration. `Self` inside
 a signature refers to the conforming type.
 
+A built-in `List`/`Map`/`Set`/`str`/`bytes`/`bytearray` satisfies a USER-declared protocol the same
+structural way, out of its own method table: `protocol Sized: fn len(self) -> int` is satisfied by
+`[1,2,3]`, `{"a": 1}`, `{1, 2}`, `"abc"`, `b"ab"` and `bytearray(b"ab")` alike (`docs/gaps.md`
+**W8-32**). The three bare scalars (`int`/`float`/`bool`) have no methods, so they satisfy only an
+empty protocol. The concurrency/net handles (`Channel`, `Shared`, `RwShared`, `Atomic`, `Executor`,
+`Socket`, `Listener`, `Writer`, `Reader`) are excluded — they do not witness a user protocol.
+
 `Self` is also usable in an **inherent** `struct`/`enum`/`newtype` method's signature and body
 (param type, return type, local annotation), where it names the enclosing type — `fn dup(self) ->
 Self` inside `struct P` returns a `P`, and for a generic `Box[T]` it carries the receiver's own type
@@ -3854,7 +3861,8 @@ fn fetch_all(urls: List[str]):
   `protocol Comparable:` is likewise rejected `reserved (builtin)`). Their SHAPE (method sigs + embeds)
   is file-backed in `std/prelude.chz` as plain `protocol` decls (phase 5c) — a drift-guarded mirror of
   the Rust seed — but protocol CONFORMANCE (`int`/`float` satisfying `Add`/`Comparable`/`Neg` intrinsically
-  with no method; `Iterator` via `iter_elem`; structural satisfaction for user structs) and OPERATOR
+  with no method; `Iterator` via `iter_elem`; structural satisfaction for user structs and the
+  built-in collections) and OPERATOR
   BINDING (`+`→`add`, `<`→`compare`, `for`→`Iterator`, `[]`→`Index`, `[:]`→`Slice`) stay Rust-wired.
   (All 21 are file-backed — the 20 above plus `Any` (the top type, reserved the same way): `Any` is
   `protocol Any:` + `pass` (empty), and

@@ -983,6 +983,18 @@ The intrinsic grants and their methods are: `Comparable`→`compare`, `Eq`→`eq
 `Slice`→`slice`, `Add`/`Sub`/`Mul`/`Div`/`Mod`→`add`/`sub`/`mul`/`div`/`mod`, `Neg`→`neg`. A type that
 DEFINES the method always gets its own (intrinsic dispatch is a resolution fallback, never a shadow).
 
+**A NATIVE-TABLE witness is a different grant from an intrinsic one, for a USER protocol.** A
+built-in (`List`/`Map`/`Set`/`str`/`bytes`/`bytearray`) satisfying a user-declared protocol
+(`docs/gaps.md` **W8-32**) does not go through the intrinsic-grant table above: there is no
+`(protocol, method, kind)` row to add, because a user protocol's name can never key one. Instead the
+witness is a REAL native method the direct-call path already type-checks and the VM already
+dispatches by name (e.g. `List.len`, `List.sort`) — the checker reuses that method's own harvested
+signature (receiver prepended) as the witness, enforcing the SAME dispatch-time gates a direct call
+would (`List.sum` needs a numeric element; `List.sort` enforces its own `where T: Comparable`; a
+method carrying its own `[U]` type params, like `List.map`, cannot witness at all). No VM change is
+needed: an erased or protocol-typed call to that method lowers to the identical by-name dispatch a
+concrete call uses.
+
 `a.compare(b)` on a **NaN** operand never faults: it answers the same **total order** `sort()` /
 `sort_by_key` / `.min()` / `.max()` use (`f64::total_cmp`, NaN deterministically at one end), while
 `<`/`<=`/`>`/`>=` stay IEEE (every NaN comparison is `false`). So there is ONE order shared by

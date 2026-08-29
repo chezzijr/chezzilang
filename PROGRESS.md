@@ -46,7 +46,12 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `Vm::type_name` (`src/vm/stmt.rs`) — `Ty::Option`/`Ty::Result` both report `enum` since both are
 > `Obj::Enum` at runtime. `Ty::Protocol` and `Ty::Module` stay excluded (see the ticket's
 > `## Decisions`): a module deserves its own diagnostic, and a protocol existential could hold a
-> scalar once `docs/gaps.md` W8-32 lands.
+> scalar once `docs/gaps.md` W8-32 lands. **`docs/gaps.md` W8-32 landed 2026-08-30 (TICKET-024);
+> the `Ty::Protocol` arm here was re-checked and needs no change** — it already excludes
+> `Ty::Protocol` (never rejects it), so a protocol existential now witnessing a user protocol out of
+> a built-in's method table cannot turn this arm into a false positive, and an existential holding a
+> scalar under a non-empty protocol was already unreachable (the three bare scalars have no method
+> table, TICKET-024's gotcha 3).
 
 > **✅ FIXED, 2026-08-29 (TICKET-022) — `docs/gaps.md` W8-42: `{x:spec}` now accepts the four
 > remaining CPython-accepted forms.** `src/fmtspec.rs` alone: the `#` alternate form
