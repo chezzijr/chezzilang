@@ -18851,23 +18851,27 @@ print(\"done\")
     );
 }
 
-/// TICKET-016 / W8-3 — the no-false-fault control: two tasks that each update a DIFFERENT box with
-/// no cycle must complete normally, not be reported as a deadlock.
+/// TICKET-016 / W8-3 — the no-false-fault control: two tasks that each touch a DISJOINT pair of
+/// boxes, sharing NO box between them, must complete normally, not be reported as a deadlock. The
+/// two tasks must not nest into each other's box — that IS a cycle and is covered by
+/// `ticket_016_cross_box_update_cycle_faults`.
 #[test]
 fn ticket_016_cross_box_update_without_cycle_still_runs() {
     let src = "\
 import std.concurrency
 a := Shared(1)
 b := Shared(2)
+c := Shared(3)
+d := Shared(4)
 fn bumpb(x: int) -> int:
     b.update(fn(y: int) -> int: y + 1)
     return x + 1
-fn bumpa(y: int) -> int:
-    a.update(fn(x: int) -> int: x + 1)
-    return y + 1
+fn bumpd(x: int) -> int:
+    d.update(fn(y: int) -> int: y + 1)
+    return x + 1
 parallel:
     spawn: a.update(bumpb)
-    spawn: b.update(bumpa)
+    spawn: c.update(bumpd)
 print(\"done\")
 ";
     let entry = write_temp_chz("ticket016_cross_box_no_cycle", src);
