@@ -1588,6 +1588,10 @@ impl Checker {
             Ty::NewType(self.type_key(mid, name), args.to_vec())
         } else if let Some(asig) = sig.type_aliases.get(name) {
             asig.body.clone()
+        } else if sig.protocol_defs.contains_key(name) {
+            // Permissive mirror of `resolve_type`'s qualified protocol arm: no arity error and no
+            // static-ctor gate — the mutable resolver owns both diagnostics.
+            Ty::Protocol(name.to_string(), args.to_vec())
         } else if sig.types.contains(name) {
             // Mirror `resolve_type`'s qualified builtin branch on the READ-ONLY export path (so an
             // EXPORTED `type S = concurrency.Shared[int]` / `newtype MyS[T] = concurrency.Shared[T]`

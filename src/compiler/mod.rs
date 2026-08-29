@@ -921,6 +921,12 @@ impl Compiler {
                             .insert((idx, name.clone()), format!("{}::{name}", mkeys[idx]));
                     }
                 }
+                // A protocol has NO runtime representation, so only its NAME is registered — for
+                // `Vm::bind_import`'s skip — deliberately NOT `module_types`/`type_keys`, which key
+                // runtime LAYOUTS a protocol never has.
+                if let StmtKind::Protocol { name, .. } = &s.kind {
+                    self.program.type_names.insert(name.clone());
+                }
             }
         }
     }

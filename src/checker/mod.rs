@@ -737,6 +737,19 @@ struct ModuleSig {
     /// (so the alias is unlicensed): an importer must reject it with "unknown type" — the width can't
     /// be laundered through an unlicensed alias.
     type_aliases: HashMap<String, AliasSig>,
+    /// Protocol definitions this module declares. A protocol's whole shape already lives in one
+    /// `ProtocolInfo` record (unlike a struct/enum, spread over several maps), so this wraps it
+    /// rather than re-listing its fields.
+    protocol_defs: HashMap<String, ProtocolSigInfo>,
+}
+
+/// A protocol's exported shape inside a `ModuleSig`: the checker's own `ProtocolInfo`, plus the
+/// decl docstring (ferried across the module boundary for an importer's hover, like
+/// `StructInfo::doc`).
+#[derive(Clone)]
+struct ProtocolSigInfo {
+    info: ProtocolInfo,
+    doc: Option<String>,
 }
 
 /// An exported type alias inside a `ModuleSig`: its body RESOLVED in the defining module's scope,

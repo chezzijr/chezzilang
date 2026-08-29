@@ -1880,6 +1880,32 @@ impl Checker {
                     // a static-ctor protocol out of value position (`import a; c: a.Foo`).
                     let body = asig.body.clone();
                     self.reject_static_protocol_value(body, span)
+                } else if let Some(pdef) = sig.protocol_defs.get(name) {
+                    // Mirrors the bare generic-protocol arm: arity is checked only when args are
+                    // WRITTEN, so a bare `shapes.Container` stays legal as an unbound existential —
+                    // exactly like the bare `Container` spelling — while `shapes.Container[int, str]`
+                    // is still caught.
+                    if !resolved.is_empty() && pdef.info.type_params.len() != resolved.len() {
+                        self.error(
+                            span,
+                            format!(
+                                "type '{module}.{name}' expects {} type argument(s), got {}",
+                                pdef.info.type_params.len(),
+                                resolved.len()
+                            ),
+                        );
+                    }
+                    if self.protocol_has_static_method(name) {
+                        self.error(
+                            span,
+                            format!(
+                                "protocol '{module}.{name}' has a static method and can only be used as a bound, not a value type"
+                            ),
+                        );
+                        Ty::Unknown
+                    } else {
+                        Ty::Protocol(name.clone(), resolved)
+                    }
                 } else if sig.types.contains(name) {
                     // An opaque/native builtin TYPE reached by qualified path (`concurrency.Shared[int]`,
                     // `net.Socket`, `ffi.int32`/`ffi.ptr`). These names live ONLY in their owning std

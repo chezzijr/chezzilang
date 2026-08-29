@@ -1746,6 +1746,19 @@ impl Checker {
                                     self.ffi_alias_ok.insert(bind.clone());
                                 }
                             }
+                        } else if let Some(pdef) = sig.protocol_defs.get(member) {
+                            // A protocol carries no runtime value and no layout, so registering the
+                            // exported shape under the BIND name is the whole binding — there is no
+                            // key/table pair to inject like a struct/enum/newtype.
+                            self.protocols.insert(bind.clone(), pdef.info.clone());
+                            self.record_imported_type_hover(
+                                bind,
+                                *name_span,
+                                &Ty::Protocol(bind.clone(), Vec::new()),
+                                pdef.doc.as_deref(),
+                                "protocol",
+                                path,
+                            );
                         }
                     } else {
                         self.error(
@@ -1870,6 +1883,23 @@ impl Checker {
                                 licensed,
                                 unlicensed_width,
                                 ctype,
+                            },
+                        );
+                    }
+                }
+                StmtKind::Protocol { name, .. } => {
+                    // A reserved protocol is never exported: `prebuilt_protocols` stays the live
+                    // source for its 21 names (mirrored, drift-guarded, in `std/prelude.chz`), so
+                    // exporting it here would put a second, sig-borne copy into `sig.types`.
+                    if !is_reserved_protocol(name)
+                        && let Some(info) = self.protocols.get(name)
+                    {
+                        sig.types.insert(name.clone());
+                        sig.protocol_defs.insert(
+                            name.clone(),
+                            ProtocolSigInfo {
+                                info: info.clone(),
+                                doc: self.name_docs.get(name).cloned(),
                             },
                         );
                     }
