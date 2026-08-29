@@ -226,6 +226,51 @@ impl Checker {
         names
     }
 
+    /// An enum's variant names, in declaration order. `self.enums` values are already a `Vec`, so no
+    /// sort — declaration order is what the enum's own docs show.
+    #[allow(dead_code)]
+    pub(super) fn variant_names(&self, ekey: &str) -> Vec<String> {
+        self.enums.get(ekey).cloned().unwrap_or_default()
+    }
+
+    /// A module's member names (functions + values), sorted — both tables backing this are
+    /// `HashMap`s, so an unsorted list would make a near-miss suggestion depend on hash order.
+    #[allow(dead_code)]
+    pub(super) fn module_member_names(&self, mname: &str) -> Vec<String> {
+        let Some(sig) = self
+            .imported_modules
+            .get(mname)
+            .and_then(|id| self.module_sigs.get(id))
+        else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = sig
+            .functions
+            .keys()
+            .chain(sig.values.keys())
+            .cloned()
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// Every name currently in scope (locals across the scope chain, plus top-level functions),
+    /// sorted — `self.scopes`/`self.functions` are `HashMap`s, so an unsorted list would make a
+    /// near-miss suggestion depend on hash order.
+    pub(super) fn in_scope_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .scopes
+            .iter()
+            .flat_map(|sc| sc.keys())
+            .chain(self.functions.keys())
+            .cloned()
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
     /// A struct's field names, in declaration order. `StructInfo.fields` is a `Vec`, so it is already
     /// deterministic and needs no sort.
     pub(super) fn field_names(&self, key: &str) -> Vec<String> {

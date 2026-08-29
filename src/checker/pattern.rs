@@ -2296,7 +2296,12 @@ impl Checker {
             );
             return Ty::Unknown;
         }
-        self.error(span, format!("unknown name '{name}'"));
+        let names = self.in_scope_names();
+        self.error_help(
+            span,
+            format!("unknown name '{name}'"),
+            suggest::did_you_mean(name, &names),
+        );
         Ty::Unknown
     }
 
