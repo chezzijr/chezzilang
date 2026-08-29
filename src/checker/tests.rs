@@ -969,6 +969,14 @@ fn widen_int_default_into_float_param_accepted() {
     ok("fn g(a: float = 3) -> float:\n    return a\n");
 }
 
+/// TICKET-025 / W8-21: implicit success-coercion at a declared `T?`/`T!E` sink is not implemented
+/// yet, so a bare success value at those sinks is still a type error instead of coercing to
+/// `Some(v)`/`Ok(v)`.
+#[test]
+fn bare_value_coerces_at_option_sink() {
+    ok("fn f() -> int?:\n    return 1\nfn main():\n    pass\n");
+}
+
 /// Lossy / wrong-direction conversions MUST stay type errors (the widen arm is one-way Float←Int only).
 #[test]
 fn widen_float_into_int_still_rejected() {
