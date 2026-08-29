@@ -207,9 +207,10 @@ in-progress alongside it.
 > now renders literally, `not` now sits between `and` and the comparisons, and `??` now binds
 > tighter than every binary operator)
 > (2026-08-18, nine agents; 30 findings, 27 reproduced in-repo, 20 filed, 3 folded into open rows, 2
-> NOT reproduced and recorded as such), plus one still-open DECIDED language
-> milestone, **W8-22** (`Error` carries its origin span — its `Span.file` resolver dependency now
-> exists concretely: `Program::file_path`, `lexer::render_span`, `RunError::files`). **W8-21**
+> NOT reproduced and recorded as such). Both DECIDED language milestones are now closed: **W8-22**
+> (2026-08-30, TICKET-026 — a caught `Error` now carries its origin via `e.line()`/`e.col()`/
+> `e.file()`, stamped at the three `recover:` boundaries into a `GcRef`-keyed side table on `Heap`)
+> and **W8-21**
 > (2026-08-30, TICKET-025 — a bare success value at a declared `T?`/`T!E` return sink now coerces to
 > `Some(v)`/`Ok(v)`), **W8-18** (doc drift), **W8-2** (a discarded
 > `Result`/`Option` now warns), **W8-14** (every runtime stack-trace frame names its file), **W8-15**

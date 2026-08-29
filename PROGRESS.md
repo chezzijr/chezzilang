@@ -1195,7 +1195,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > a JSON array there could never be parsed back out.
 >
 > **🗳️ TWO LANGUAGE MILESTONES DECIDED, 2026-08-17 — `docs/gaps.md` W8-21 (CLOSED 2026-08-30,
-> TICKET-025) / W8-22 (not started).** Both came out of the W8-2 / W8-19 discussion, and both are
+> TICKET-025) / W8-22 (CLOSED 2026-08-30, TICKET-026).** Both came out of the W8-2 / W8-19 discussion, and both are
 > filed with their **rejected** alternatives.
 >
 > **W8-21 — success-coercion at a declared `T?` / `T!E` sink.** The syntax already ships (`T?` =
@@ -1215,21 +1215,21 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > because the compiler keys on syntactic types and the checker on resolved ones (`compiler/mod.rs:360`) —
 > the `checker-superset-of-compiler` class, and `type Maybe = int?` is its exact analogue here.
 >
-> **W8-22 — give a caught `Error` its origin line/col.** Live asymmetry: an uncaught index fault prints
-> `runtime error (line 3, col 11): index 9 out of bounds (len 1)`, the same fault through `recover:` gives
-> bare `index 9 out of bounds (len 1)`. **The span already exists and is discarded at one line** —
-> `RuntimeError` carries `pub span: Span` (`src/vm/mod.rs:61`) and `src/vm/exec.rs:1392` does
-> `alloc_str(rte.message)`. And the fix is **additive, because `Error` is a PROTOCOL**
-> (`Ty::Protocol("Error", [])`, `checker/ty.rs:428`) satisfied structurally by any `message() -> str`,
-> with `str` granted intrinsically at `ty.rs:516`: the origin rides on a **new native struct satisfying
-> `Error`** that `recover:` allocates in place of the bare `str`, so **the 336 `Err("...")` sites do not
-> move** and neither does `==`. Only a *recovered* `Err`'s payload display can shift — measured exposure
-> 37 `recover:` files, 2 `.expected` goldens. Ancestors split
-> evenly (Python traceback yes / Zig debug-only / Rust + Go no), so it is a genuine choice. Recommended:
-> **construction span only** (a chain costs an alloc per `?` — 271 sites — which is why Zig gates it to
-> debug), **default rendering unchanged**, sequenced **after W8-14/W8-15** to reuse their `Span.file`
-> resolver. Settle first: `Error` as a struct vs a `str` + side table (the side table keeps `==` and
-> display byte-identical but cannot cross the task airlock — probably a false economy).
+> **✅ W8-22 — a caught `Error` now carries its origin line/col/file, CLOSED 2026-08-30 (TICKET-026).**
+> `e.line() -> int?`, `e.col() -> int?`, `e.file() -> str?` read the fault's origin span, stamped at the
+> three `recover:` boundaries. **The prescription this milestone's own row recommended — a new native
+> struct replacing the `Err` payload — was measured wrong before implementation and was NOT built:** it
+> breaks `e == "boom"` and the `Err('...')` repr two suite tests assert
+> (`tests/chz/spec/repr_test.chz:64`, `tests/chz/spec/cancel_defer_recover_test.chz:25`). **Shipped
+> instead: the payload stays `Obj::Str`; the origin rides in a `GcRef`-keyed side table on `Heap`**
+> (`err_spans: FxHashMap<u32, Span>`), pruned in `Heap::sweep`'s free branch since the key is a reused
+> slot index. The accessors are a checker-side special case on the bare `Ty::Protocol("Error", [])`
+> receiver — not added to `ProtocolInfo::methods`, which would un-satisfy every struct error type that
+> has only `message()`. An error with no recorded span (a user `Err("...")`, a struct error, anything
+> crossing a task airlock) answers `None`, never the `recover:` site. The 336 `Err("...")` sites do not
+> move, and neither does `==` or display. Verified end to end: the caught form of a fault that
+> uncaught prints `runtime error (/tmp/w822.chz:3:15): ...` reports `Some(3)`/`Some(15)`/
+> `Some('/tmp/w822.chz')` when caught.
 >
 > **✅ `os.hostname() -> Option[str]`, 2026-08-17 — no more silent `""` on syscall failure.** The
 > native `hostname` (`src/native/os.rs:55`) fell back to `String::new()` on a nonzero

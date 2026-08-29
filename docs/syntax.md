@@ -3013,7 +3013,7 @@ fn query() -> Row!DbErr:        # Result[Row, DbErr]
 
 match query():
     Ok(row): use(row)
-    Err(e):  print(e.message())   # on a default `Error`, only message() is available
+    Err(e):  print(e.message())   # message(), line(), col() and file() are all available
 ```
 
 `Option[T]` (shorthand `T?`) is the same shape for "maybe absent": `Some(v)` / `None`, also usable with `?`.
@@ -3215,6 +3215,13 @@ match r:
     Ok(v):  print(v)
     Err(e): print("recovered: {e.message()}")   # → recovered: boom
 ```
+
+**A fault caught by `recover:` carries its origin.** `e.line() -> int?`, `e.col() -> int?` and
+`e.file() -> str?` read where the fault was raised — the same coordinate an uncaught fault prints
+(`runtime error (file:line:col): message`). A user-constructed `Err("...")` reached as a plain value
+(not via `recover:`) carries none of these — `line()`/`col()`/`file()` are all `None` on it, and so are
+they on any error still in flight through a `?` propagation, since only `recover:` (and a `defer`-fault
+boundary) stamps the origin.
 
 ### `defer` — block-scoped cleanup  (M16)
 

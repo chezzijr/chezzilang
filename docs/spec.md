@@ -986,6 +986,11 @@ The intrinsic grants and their methods are: `Comparable`→`compare`, `Eq`→`eq
 `Slice`→`slice`, `Add`/`Sub`/`Mul`/`Div`/`Mod`→`add`/`sub`/`mul`/`div`/`mod`, `Neg`→`neg`. A type that
 DEFINES the method always gets its own (intrinsic dispatch is a resolution fallback, never a shadow).
 
+`line()`/`col()`/`file()` are callable through the `Error` existential (W8-22) but are **not**
+`Error` satisfaction requirements — only `message()` is. Adding them to the requirement set would
+un-satisfy every struct error type that has only `message()`; they are a checker-side special case
+on the bare `Error` receiver instead.
+
 **A NATIVE-TABLE witness is a different grant from an intrinsic one, for a USER protocol.** A
 built-in (`List`/`Map`/`Set`/`str`/`bytes`/`bytearray`) satisfying a user-declared protocol
 (`docs/gaps.md` **W8-32**) does not go through the intrinsic-grant table above: there is no
