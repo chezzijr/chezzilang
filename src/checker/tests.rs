@@ -27881,3 +27881,21 @@ fn enum_variant_miss_carets_the_variant_name_ticket_021() {
         "expected the caret at col 8 (under 'Redd'), got: {errs:?}"
     );
 }
+
+// TICKET-024 -- W8-32: `satisfies_args_d`'s final match falls to `_ => Err(...)` for any `Ty`
+// that is not Struct/Enum/NewType/Param/Protocol, so a built-in `List[int]` can never satisfy a
+// USER protocol even though the checker's own method table (`self.list_methods` / equivalent)
+// already answers `len()` for it on a direct call. Reproduces docs/gaps.md W8-32 verbatim.
+#[test]
+fn builtin_list_satisfies_user_protocol_with_matching_method_ticket_024() {
+    let src = "protocol Sized:\n    fn len(self) -> int\n\nfn total(x: Sized) -> int:\n    return x.len()\n\nfn main():\n    print(total([1,2,3]))\n";
+    ok(src);
+}
+
+// TICKET-024 negative neighbour: a built-in that genuinely lacks the method must still be
+// rejected, naming the missing method -- this must keep passing once the widening lands.
+#[test]
+fn builtin_int_missing_protocol_method_still_rejected_ticket_024() {
+    let src = "protocol Sized:\n    fn len(self) -> int\n\nfn total(x: Sized) -> int:\n    return x.len()\n\nfn main():\n    print(total(1))\n";
+    rejects(src, "does not satisfy Sized");
+}
