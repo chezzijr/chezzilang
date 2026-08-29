@@ -1124,6 +1124,18 @@ fn interpolation_spec_grouping_rejects_what_cpython_rejects() {
     );
 }
 
+#[test]
+fn interpolation_spec_w8_42_missing_forms_accepted() {
+    // W8-42: CPython accepts these four spec forms (`#x` alternate form, `g` general float,
+    // `=` sign-aware fill, leading-space sign); Chezzi's checker still rejects them all at check
+    // time with "format spec: unknown type char '<c>'". This is the coverage gap, not a
+    // soundness bug — each `ok` call is expected to pass once the forms are implemented.
+    ok("n: int = 255\nprint(\"{n:#x}\")\n");
+    ok("f: float = 1234.5\nprint(\"{f:g}\")\n");
+    ok("n: int = 42\nprint(\"{n:=10}\")\n");
+    ok("n: int = 42\nprint(\"{n: d}\")\n");
+}
+
 // ===== compound assignment (*= /= %= &= |= ^= <<= >>=) =====
 
 #[test]
