@@ -235,7 +235,6 @@ impl Checker {
 
     /// A module's member names (functions + values), sorted — both tables backing this are
     /// `HashMap`s, so an unsorted list would make a near-miss suggestion depend on hash order.
-    #[allow(dead_code)]
     pub(super) fn module_member_names(&self, mname: &str) -> Vec<String> {
         let Some(sig) = self
             .imported_modules

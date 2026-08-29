@@ -2506,7 +2506,12 @@ impl Checker {
                     None => {}
                 }
                 self.infer_all(args);
-                self.error(span, format!("module '{mname}' has no member '{method}'"));
+                let names = self.module_member_names(mname);
+                self.error_help(
+                    name_span,
+                    format!("module '{mname}' has no member '{method}'"),
+                    suggest::did_you_mean(method, &names),
+                );
                 Ty::Unknown
             }
             // A protocol existential (e.g. `Error`, or a parameterized `Container[int]`): the

@@ -1368,9 +1368,13 @@ impl Checker {
             // PART of the value. `shield_granular_read` is what makes the read side symmetric with
             // the write side's long-standing decline on the same ambiguity; see
             // `report_spawn_stale_read_at` for the ceiling it states.
-            ExprKind::Field { obj, name, .. } => {
+            ExprKind::Field {
+                obj,
+                name,
+                name_span,
+            } => {
                 let shield = self.shield_granular_read(expr);
-                let t = self.infer_field(obj, name);
+                let t = self.infer_field(obj, name, *name_span);
                 self.unshield_granular_read(shield);
                 t
             }
@@ -3003,7 +3007,7 @@ impl Checker {
         }
     }
 
-    pub(super) fn infer_field(&mut self, obj: &Expr, name: &str) -> Ty {
+    pub(super) fn infer_field(&mut self, obj: &Expr, name: &str, name_span: Span) -> Ty {
         // A too-deep qualified-path mistake (`std.net.Socket(0)`, `std.concurrency.Shared(0)`,
         // `std.concurrency.collection.Counter(...)`): the receiver `obj` is the BARE first segment of
         // an imported dotted module path (`std`) — never a bound name — and `name` is the NEXT segment.
@@ -3232,7 +3236,12 @@ impl Checker {
                 match member {
                     Some(Some(ty)) => ty,
                     _ => {
-                        self.error(obj.span, format!("module '{mname}' has no member '{name}'"));
+                        let names = self.module_member_names(mname);
+                        self.error_help(
+                            name_span,
+                            format!("module '{mname}' has no member '{name}'"),
+                            suggest::did_you_mean(name, &names),
+                        );
                         Ty::Unknown
                     }
                 }
