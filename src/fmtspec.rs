@@ -37,6 +37,8 @@ pub struct FormatSpec {
     /// The sign char written before the digits: `'+'`, `'-'` or `' '`. `None` means the default
     /// (a leading `-` on negatives only, nothing on non-negatives).
     pub sign: Option<char>,
+    /// `#` alternate form — a radix prefix on `x`/`X`/`o`/`b`, a forced decimal point on a float.
+    pub alt: bool,
     /// `0` flag — zero-pad numerics to `width` (with the sign kept ahead of the zeros).
     pub zero_pad: bool,
     pub width: usize,
@@ -52,6 +54,7 @@ impl Default for FormatSpec {
             fill: ' ',
             align: None,
             sign: None,
+            alt: false,
             zero_pad: false,
             width: 0,
             group: None,
@@ -139,6 +142,12 @@ pub fn parse(spec: &str) -> Result<FormatSpec, String> {
     // [sign]
     if i < chars.len() && matches!(chars[i], '+' | '-' | ' ') {
         out.sign = Some(chars[i]);
+        i += 1;
+    }
+
+    // [#] alternate form.
+    if i < chars.len() && chars[i] == '#' {
+        out.alt = true;
         i += 1;
     }
 
@@ -396,6 +405,9 @@ pub fn spec_valid_for_scalar(spec: &FormatSpec, kind: ScalarKind) -> Result<(), 
             if let Some(c) = spec.sign {
                 return Err(format!("format spec: sign '{c}' not allowed on a string"));
             }
+            if spec.alt {
+                return Err("format spec: alternate form '#' not allowed on a string".to_string());
+            }
             if spec.zero_pad {
                 return Err("format spec: zero-pad '0' not allowed on a string".to_string());
             }
@@ -441,7 +453,18 @@ fn render_int(spec: &FormatSpec, n: i64) -> Result<(String, String, bool), Strin
         Some('%') => return render_float(spec, n as f64),
         Some(_) => unreachable!("validity checked by spec_valid_for_scalar"),
     };
-    Ok((sign_prefix(neg, spec.sign), body, true))
+    let radix = if spec.alt {
+        match spec.ty {
+            Some('x') => "0x",
+            Some('X') => "0X",
+            Some('o') => "0o",
+            Some('b') => "0b",
+            _ => "",
+        }
+    } else {
+        ""
+    };
+    Ok((sign_prefix(neg, spec.sign) + radix, body, true))
 }
 
 fn render_float(spec: &FormatSpec, x: f64) -> Result<(String, String, bool), String> {
@@ -452,25 +475,51 @@ fn render_float(spec: &FormatSpec, x: f64) -> Result<(String, String, bool), Str
     let neg = !x.is_nan() && x.is_sign_negative() && (x != 0.0 || x.is_sign_negative());
     let mag = x.abs();
     let body = match spec.ty {
-        Some('f') | None => match spec.precision {
-            Some(p) => format!("{mag:.*}", p),
-            // Bare `{f:>10}` etc. with no type/precision keeps the canonical Python repr.
-            None => repr_float(mag),
-        },
+        Some('f') | None => {
+            let s = match spec.precision {
+                Some(p) => format!("{mag:.*}", p),
+                // Bare `{f:>10}` etc. with no type/precision keeps the canonical Python repr.
+                None => repr_float(mag),
+            };
+            if spec.alt { force_point(s) } else { s }
+        }
         // `{:e}`/`{:E}`: Python default precision 6, exponent always signed + 2-digit padded.
         Some('e') | Some('E') => {
             let p = spec.precision.unwrap_or(6);
             let marker = if spec.ty == Some('E') { 'E' } else { 'e' };
-            normalize_exp(&format!("{mag:.*e}", p), marker)
+            let s = normalize_exp(&format!("{mag:.*e}", p), marker);
+            if spec.alt { force_point(s) } else { s }
         }
         Some('%') => {
             let scaled = mag * 100.0;
             let p = spec.precision.unwrap_or(6);
-            format!("{scaled:.*}%", p)
+            let s = format!("{scaled:.*}", p);
+            let s = if spec.alt { force_point(s) } else { s };
+            s + "%"
         }
         Some(_) => unreachable!("validity checked by spec_valid_for_scalar"),
     };
     Ok((sign_prefix(neg, spec.sign), body, true))
+}
+
+/// `#` alternate form on a float: force a decimal point when the value renders with none. Returns
+/// `s` unchanged when the mantissa carries no digit (`inf`, `-inf`, `NaN` must never gain a point)
+/// or already has a point.
+fn force_point(s: String) -> String {
+    let (mant, marker_exp) = if let Some((m, e)) = s.split_once('e') {
+        (m, Some(('e', e)))
+    } else if let Some((m, e)) = s.split_once('E') {
+        (m, Some(('E', e)))
+    } else {
+        (s.as_str(), None)
+    };
+    if !mant.bytes().any(|b| b.is_ascii_digit()) || mant.contains('.') {
+        return s;
+    }
+    match marker_exp {
+        Some((marker, e)) => format!("{mant}.{marker}{e}"),
+        None => format!("{mant}."),
+    }
 }
 
 fn render_str(spec: &FormatSpec, s: &str) -> Result<(String, String, bool), String> {
@@ -861,6 +910,40 @@ mod tests {
         assert_eq!(parse(" d").unwrap().sign, Some(' '));
         assert_eq!(parse("+d").unwrap().sign, Some('+'));
         assert_eq!(parse("d").unwrap().sign, None);
+    }
+
+    #[test]
+    fn alternate_form_matches_cpython() {
+        assert_eq!(ok_apply("#x", FmtArg::Int(255)), "0xff");
+        assert_eq!(ok_apply("#X", FmtArg::Int(255)), "0XFF");
+        assert_eq!(ok_apply("#o", FmtArg::Int(255)), "0o377");
+        assert_eq!(ok_apply("#b", FmtArg::Int(255)), "0b11111111");
+        assert_eq!(ok_apply("#x", FmtArg::Int(-255)), "-0xff");
+        assert_eq!(ok_apply("#x", FmtArg::Int(0)), "0x0");
+        assert_eq!(ok_apply("#010x", FmtArg::Int(255)), "0x000000ff");
+        assert_eq!(ok_apply("#10x", FmtArg::Int(255)), "      0xff");
+        assert_eq!(ok_apply("#d", FmtArg::Int(255)), "255");
+        assert_eq!(ok_apply("#", FmtArg::Int(255)), "255");
+        assert_eq!(ok_apply("#_x", FmtArg::Int(1048575)), "0xf_ffff");
+        assert_eq!(ok_apply("#012_x", FmtArg::Int(1048575)), "0x0_000f_ffff");
+        assert_eq!(ok_apply("#_b", FmtArg::Int(255)), "0b1111_1111");
+        // fill `#`, not alternate form
+        assert_eq!(ok_apply("#<8x", FmtArg::Int(255)), "ff######");
+        assert_eq!(ok_apply("#", FmtArg::Float(2.0)), "2.0");
+        assert_eq!(ok_apply("#.0f", FmtArg::Float(0.5)), "0.");
+        assert_eq!(ok_apply("#.0e", FmtArg::Float(1.5)), "2.e+00");
+        assert_eq!(ok_apply("#.0%", FmtArg::Float(0.5)), "50.%");
+        // non-finite: `#` must never add a point
+        assert_eq!(ok_apply("#f", FmtArg::Float(f64::INFINITY)), "inf");
+        assert_eq!(ok_apply("#e", FmtArg::Float(f64::INFINITY)), "inf");
+        assert_eq!(ok_apply("#%", FmtArg::Float(f64::INFINITY)), "inf%");
+        assert_eq!(ok_apply("#f", FmtArg::Float(f64::NEG_INFINITY)), "-inf");
+        assert_eq!(
+            ok_apply("#010f", FmtArg::Float(f64::INFINITY)),
+            "0000000inf"
+        );
+        // CPython prints `nan`; the casing is the documented divergence (Gotcha 5)
+        assert_eq!(ok_apply("#f", FmtArg::Float(f64::NAN)), "NaN");
     }
 
     #[test]
