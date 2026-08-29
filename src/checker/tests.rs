@@ -18447,6 +18447,53 @@ fn scalar_cast_rejects_option_result_bytes_bytearray_shared_arg() {
 }
 
 #[test]
+fn scalar_cast_rejects_handle_family_arg() {
+    // TICKET-020: the same hole for the Channel/Shared handle family DEC-017 named as one unit.
+    // `Channel` is a global reserved name (`rejects` resolves it); the rest are import-gated
+    // (`entry_rejects`, which goes through `build_graph`).
+    rejects(
+        "fn f(x: Channel[int]):\n    print(int(x))\nfn main():\n    pass\nmain()\n",
+        "int() cannot convert Channel",
+    );
+    entry_rejects(
+        "import std.concurrency\nfn f(x: Atomic[int]):\n    print(float(x))\nfn main():\n    pass\nmain()\n",
+        "float() cannot convert Atomic",
+    );
+    entry_rejects(
+        "import std.concurrency\nfn f(x: AtomicInt):\n    print(bool(x))\nfn main():\n    pass\nmain()\n",
+        "bool() cannot convert AtomicInt",
+    );
+    entry_rejects(
+        "import std.concurrency\nfn f(x: RwShared[int]):\n    print(int(x))\nfn main():\n    pass\nmain()\n",
+        "int() cannot convert RwShared",
+    );
+    entry_rejects(
+        "import std.concurrency\nfn f(x: Executor):\n    print(int(x))\nfn main():\n    pass\nmain()\n",
+        "int() cannot convert Executor",
+    );
+    entry_rejects(
+        "import std.net\nfn f(x: Socket):\n    print(int(x))\nfn main():\n    pass\nmain()\n",
+        "int() cannot convert Socket",
+    );
+    entry_rejects(
+        "import std.net\nfn f(x: Listener):\n    print(int(x))\nfn main():\n    pass\nmain()\n",
+        "int() cannot convert Listener",
+    );
+    entry_rejects(
+        "import std.io\nfn f(x: Writer):\n    print(int(x))\nfn main():\n    pass\nmain()\n",
+        "int() cannot convert Writer",
+    );
+    entry_rejects(
+        "import std.io\nfn f(x: Reader):\n    print(int(x))\nfn main():\n    pass\nmain()\n",
+        "int() cannot convert Reader",
+    );
+    entry_rejects(
+        "import std.ffi\nfn f(x: ptr):\n    print(int(x))\nfn main():\n    pass\nmain()\n",
+        "int() cannot convert ptr",
+    );
+}
+
+#[test]
 fn scalar_cast_still_accepts_the_payload_of_a_rejected_kind() {
     // TICKET-020: the rule is "the CONTAINER type is outside the cast domain" — its payload must
     // stay inside it, or the reject fires on the wrong thing.
