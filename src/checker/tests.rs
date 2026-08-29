@@ -18438,7 +18438,9 @@ fn scalar_cast_rejects_option_result_bytes_bytearray_shared_arg() {
         "fn main():\n    print(int(bytearray([1, 2])))\nmain()\n",
         "int() cannot convert bytearray",
     );
-    rejects(
+    // `Shared` is import-gated, so only `entry_rejects` (which goes through `build_graph`)
+    // resolves it; `rejects` is single-module and reports `unknown type 'Shared'` instead.
+    entry_rejects(
         "import std.concurrency\nfn main():\n    print(int(Shared(1)))\nmain()\n",
         "int() cannot convert Shared",
     );
