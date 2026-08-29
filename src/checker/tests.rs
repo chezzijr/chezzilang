@@ -26035,6 +26035,19 @@ fn protocol_is_still_not_a_value() {
     );
 }
 
+/// TICKET-027: two unrelated modules that each declare the SAME protocol name must coexist, exactly
+/// like two modules each declaring the same struct name. `hoist_protocol` keys `self.protocols` on
+/// the bare name instead of a module-qualified key, so the second module's declaration is rejected
+/// as a duplicate even though it lives in a different module.
+#[test]
+fn same_protocol_name_in_two_modules_does_not_conflict() {
+    files_ok(&[
+        ("a.chz", "protocol Drawable:\n    fn draw(self) -> str\n"),
+        ("b.chz", "protocol Drawable:\n    fn draw(self) -> str\n"),
+        ("main.chz", "import a\nimport b\nprint(1)\n"),
+    ]);
+}
+
 // ===== W7-24 — an interpolation fragment is a normalized call site like any other =====
 
 /// Named args / defaults / variadic sweeping reach a call inside `"{…}"`. Before `desugar` parsed
