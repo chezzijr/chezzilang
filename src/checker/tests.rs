@@ -27629,3 +27629,16 @@ fn module_in_value_position_is_accepted_ticket_021() {
         "expected a module-in-value-position error, but the checker accepted it clean"
     );
 }
+
+// TICKET-021 item (d): `int(io)` on a module is accepted at check time and faults at runtime
+// instead ("int() cannot convert module"). Same underlying hole as the test above, pinned with
+// the ticket's own repro shape.
+#[test]
+fn int_cast_on_module_is_accepted_at_check_time_ticket_021() {
+    let src = "import std.io\nprint(int(io))\n";
+    let errs = check_entry(src);
+    assert!(
+        !errs.is_empty(),
+        "expected int(io) to be rejected at check time, but the checker accepted it clean"
+    );
+}
