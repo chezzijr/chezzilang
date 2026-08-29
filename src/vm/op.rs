@@ -604,6 +604,13 @@ pub struct Proto {
     /// `GetCaptured` home-global fallback + closure error messages); the hot read is a pure
     /// `captured[slot]` index. Empty for non-closure protos. Mirrors [`StructDef::fields`].
     pub capture_names: Vec<String>,
+    /// TICKET-016 (W8-25) — the home-module `let`-bound global slots this proto's body, or any
+    /// closure proto nested inside it (via `Op::MakeClosure`/`Op::SpawnBlock`), READS and NEVER
+    /// WRITES. Computed once by `Compiler::fill_global_free` as a whole-program bytecode post-pass.
+    /// The airlock snapshot-copies exactly these slots onto a crossing closure
+    /// (`Obj::Closure.gsnap`); a slot the closure tree writes is excluded so a snapshot can never go
+    /// stale. Empty for a proto that never crosses a heap boundary as a closure.
+    pub global_free: Vec<u32>,
 }
 
 /// A struct type's runtime shape (program-global). `module_idx` identifies the module that defined

@@ -1881,9 +1881,26 @@ impl Vm {
                 self.stack[at] = v;
             }
             Op::GetGlobalSlot(slot) => {
-                let home = self.frames.last().unwrap().home;
-                self.ensure_module_faulted(home); // D1: lazily reconstruct the worker's home module
-                let v = self.global_slot(home, *slot);
+                let frame = self.frames.last().unwrap();
+                let (home, closure) = (frame.home, frame.closure);
+                // TICKET-016 (W8-25): a closure crossing the airlock carries a by-value snapshot of
+                // its free home-module globals (`Proto::global_free`) — consult it first, so a
+                // crossed closure sees the pre-airlock value instead of the receiving task's own
+                // copy of the global. A closure that never crossed (`gsnap: None`) falls through to
+                // the ordinary live read unchanged.
+                let snapped = closure.and_then(|h| match self.heap.get(h) {
+                    Obj::Closure { gsnap: Some(g), .. } => {
+                        g.iter().find(|(s, _)| *s == *slot).map(|(_, v)| *v)
+                    }
+                    _ => None,
+                });
+                let v = match snapped {
+                    Some(v) => v,
+                    None => {
+                        self.ensure_module_faulted(home); // D1: lazily reconstruct the worker's home module
+                        self.global_slot(home, *slot)
+                    }
+                };
                 self.push(v);
             }
             Op::DefineGlobalSlot(slot) => {
@@ -2273,10 +2290,17 @@ impl Vm {
                     };
                     captured.push(v);
                 }
+                // TICKET-016 (W8-25): a closure created inside a crossed closure inherits its
+                // parent's global snapshot, so a nested closure keeps reading the same values.
+                let gsnap = enclosing.and_then(|h| match self.heap.get(h) {
+                    Obj::Closure { gsnap, .. } => gsnap.clone(),
+                    _ => None,
+                });
                 let h = self.heap.alloc(Obj::Closure {
                     proto: *proto,
                     captured,
                     home,
+                    gsnap,
                 });
                 self.push(Value::obj(h));
             }

@@ -149,6 +149,9 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     c.program.rebuild_struct_names();
     c.build_eq_hooks();
     c.build_provider_table()?;
+    // TICKET-016 (W8-25): one whole-program bytecode post-pass computing which home-module `let`
+    // globals each proto's closure tree reads and never writes — the airlock snapshot set.
+    c.fill_global_free();
     Ok(c.program)
 }
 
@@ -284,6 +287,15 @@ struct Compiler {
     /// The CURRENT module's index, set at the top of `compile_module` — the home module whose
     /// locally-declared types use its own `type_keys` entry.
     current_module_idx: usize,
+    /// TICKET-016 (W8-25) — every `(module_idx, slot)` a top-level `let` binds, across every module.
+    /// Filled by `collect_globals`'s third pass. `Compiler::fill_global_free` intersects a proto's
+    /// read set against this so only `let`-bound globals are ever snapshot-copied at the airlock —
+    /// top-level `fn`s, imports, `native fn`s and `extern` fns stay late loads.
+    let_global_slots: std::collections::HashSet<(usize, u32)>,
+    /// TICKET-016 (W8-25) — `proto_module[p]` is the module index that owns proto `p`, pushed
+    /// alongside `program.protos.push` in `Compiler::finish` (the one push site in the tree). Lets
+    /// `fill_global_free` resolve `let_global_slots` membership per proto.
+    proto_module: Vec<usize>,
     /// The module index that declared `std/json.chz`'s bodyless `native fn _to_json` (set once, in
     /// `hoist_types`, which runs over every module before any `compile_module`). `None` if
     /// `std.json` is not part of this compile. Gates the bare-call `_to_json(...)` lowering to
@@ -842,6 +854,8 @@ impl Compiler {
             static_methods: std::collections::HashSet::new(),
             imported_modules: HashMap::new(),
             current_module_idx: 0,
+            let_global_slots: std::collections::HashSet::new(),
+            proto_module: Vec::new(),
             json_to_value_home: None,
             bare_types: HashMap::new(),
             extern_sigs: crate::checker::ExternTable::new(),
@@ -1017,6 +1031,7 @@ impl Compiler {
     /// `native fn`s are module globals too, see the `StmtKind::Native` arm below.
     fn collect_globals(
         &mut self,
+        module_idx: usize,
         imports: &[ResolvedImport],
         stmts: &[Stmt],
         native: Option<&'static str>,
@@ -1085,6 +1100,10 @@ impl Compiler {
             if let StmtKind::Let { names, .. } = &stmt.kind {
                 for name in names {
                     add(name.clone(), &mut self.globals, &mut self.global_slots);
+                    // TICKET-016 (W8-25): record this top-level `let` binding's slot as a candidate
+                    // for airlock snapshot-copying (subject to `fill_global_free`'s write exclusion).
+                    let slot = self.globals[name];
+                    self.let_global_slots.insert((module_idx, slot));
                 }
             }
         }
@@ -1193,7 +1212,7 @@ impl Compiler {
     ) -> Result<ProtoId, CompileError> {
         // M19 Phase 2b: assign a stable slot to every module global before emitting any code, so
         // forward references (method/fn bodies, imports used before their line) resolve to a slot.
-        self.collect_globals(imports, &module.stmts, native);
+        self.collect_globals(module_idx, imports, &module.stmts, native);
         // Module-scoped types: record this module's index + its imported module bindings, so a
         // qualified `geo.Point(...)` resolves to the right module's runtime key.
         self.current_module_idx = module_idx;
@@ -1783,6 +1802,9 @@ impl Compiler {
         let pid = self.program.protos.len();
         // M19: peephole pass — const-fold + superinstruction fusion, with jump relocation.
         let (code, lines) = peephole::optimize(fc.code, fc.lines);
+        // TICKET-016 (W8-25): record this proto's owning module BEFORE the push, so `proto_module`
+        // and `program.protos` stay index-aligned for `fill_global_free`.
+        self.proto_module.push(self.current_module_idx);
         self.program.protos.push(Proto {
             name: fc.name,
             arity: fc.arity,
@@ -1795,8 +1817,68 @@ impl Compiler {
             is_test: fc.is_test,
             // Lever #3: cold-path capture-name metadata in slot order (empty for non-closures).
             capture_names: fc.captured_names,
+            // TICKET-016 (W8-25): filled by `fill_global_free`'s whole-program post-pass.
+            global_free: Vec::new(),
         });
         pid
+    }
+
+    /// TICKET-016 (W8-25) — one whole-program bytecode post-pass: for every proto, compute the
+    /// home-module `let`-bound global slots its body (or any closure proto nested inside it via
+    /// `Op::MakeClosure`/`Op::SpawnBlock`) reads and never writes, and stamp it onto
+    /// `Proto::global_free`. This is what the airlock snapshot-copies onto a crossing closure.
+    fn fill_global_free(&mut self) {
+        let n = self.program.protos.len();
+        let mut reads: Vec<std::collections::HashSet<u32>> = vec![Default::default(); n];
+        let mut writes: Vec<std::collections::HashSet<u32>> = vec![Default::default(); n];
+        let mut children: Vec<Vec<ProtoId>> = vec![Vec::new(); n];
+        for (p, proto) in self.program.protos.iter().enumerate() {
+            for op in &proto.code {
+                match op {
+                    Op::GetGlobalSlot(s) => {
+                        reads[p].insert(*s);
+                    }
+                    Op::SetGlobalSlot(s) | Op::DefineGlobalSlot(s) => {
+                        writes[p].insert(*s);
+                    }
+                    Op::MakeClosure(q, _) | Op::SpawnBlock(q, _) => {
+                        children[p].push(*q);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // Fixpoint: union each child's reads/writes into its parent until a full sweep is a no-op.
+        loop {
+            let mut changed = false;
+            for p in 0..n {
+                for &child in &children[p] {
+                    let (before_r, before_w) = (reads[p].len(), writes[p].len());
+                    let child_reads = reads[child].clone();
+                    let child_writes = writes[child].clone();
+                    reads[p].extend(child_reads);
+                    writes[p].extend(child_writes);
+                    if reads[p].len() != before_r || writes[p].len() != before_w {
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        for p in 0..n {
+            let module_idx = self.proto_module[p];
+            let mut free: Vec<u32> = reads[p]
+                .iter()
+                .filter(|s| !writes[p].contains(s))
+                .filter(|s| self.let_global_slots.contains(&(module_idx, **s)))
+                .copied()
+                .collect();
+            free.sort_unstable();
+            free.dedup();
+            self.program.protos[p].global_free = free;
+        }
     }
 
     // ----- statements -----

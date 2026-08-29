@@ -1102,9 +1102,16 @@ pub fn collect_gcrefs_structural(
         // B3.6: a submitted closure queued in an `Executor` crosses by value, but its captures may
         // still embed `Handle`s into the live heap (a captured `Channel[str]`'s bytes root nothing,
         // but a captured callable would) — root them while the task sits in the queue.
-        WireValue::Closure { captured, .. } => captured
-            .iter()
-            .for_each(|(_, v)| collect_gcrefs_structural(v, out, seen, pending)),
+        WireValue::Closure {
+            captured, globals, ..
+        } => {
+            captured
+                .iter()
+                .for_each(|(_, v)| collect_gcrefs_structural(v, out, seen, pending));
+            globals
+                .iter()
+                .for_each(|(_, v)| collect_gcrefs_structural(v, out, seen, pending));
+        }
         // B3.3a: `Str` crosses by value (owned bytes in the core) — it roots no heap object.
         // D6: a `Socket`/`Listener` core holds an OS fd + a poll key — no `WireValue`s, no `GcRef`s.
         // `bytes`/`bytearray` cross by value (owned raw bytes) — root no heap object.
@@ -1256,10 +1263,15 @@ pub fn wire_summary(w: &WireValue) -> (usize, bool) {
                 WireGenState::Done => {}
             }
         }
-        WireValue::Closure { captured, .. } => captured.iter().for_each(|(n, v)| {
-            acc.0 += n.len();
-            walk(&mut acc, v);
-        }),
+        WireValue::Closure {
+            captured, globals, ..
+        } => {
+            captured.iter().for_each(|(n, v)| {
+                acc.0 += n.len();
+                walk(&mut acc, v);
+            });
+            globals.iter().for_each(|(_, v)| walk(&mut acc, v));
+        }
         // A nested core: conservatively dirty (a store on the INNER core can introduce a handle
         // without ever touching this one's cache), and the walk stops here.
         WireValue::Channel(_)
@@ -1431,8 +1443,13 @@ fn nested_core_bytes_structural(
                 WireGenState::Done => {}
             }
         }
-        WireValue::Closure { captured, .. } => {
+        WireValue::Closure {
+            captured, globals, ..
+        } => {
             for (_, v) in captured {
+                acc += nested_core_bytes_structural(v, seen, pending);
+            }
+            for (_, v) in globals {
                 acc += nested_core_bytes_structural(v, seen, pending);
             }
         }

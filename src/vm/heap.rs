@@ -352,6 +352,12 @@ pub enum Obj {
         proto: ProtoId,
         captured: Vec<Value>,
         home: GcRef,
+        /// TICKET-016 (W8-25) — the airlock's by-value snapshot of this closure's home-module `let`
+        /// globals named by `Proto::global_free` (slot, value), in slot order. `None` for a closure
+        /// that never crossed a heap boundary; `Op::GetGlobalSlot` consults this before falling back
+        /// to a live module read (`vm/exec.rs`). An `Arc` so sibling closures created inside a crossed
+        /// one share it without copying.
+        gsnap: Option<std::sync::Arc<Vec<(u32, Value)>>>,
     },
     /// A module namespace: its name + top-level bindings. M19 Phase 2b — globals are stored
     /// slot-indexed (`slots[i]` for compile-time slot `i`) for hash-free `GetGlobalSlot` reads; the
@@ -465,7 +471,15 @@ fn obj_bytes_shallow(obj: &Obj) -> usize {
         Obj::List(v) | Obj::Tuple(v) => v.capacity() * std::mem::size_of::<Value>(),
         Obj::Struct { fields, .. } => fields.heap_bytes(),
         Obj::Enum { payload, .. } => payload.capacity() * std::mem::size_of::<Value>(),
-        Obj::Closure { captured, .. } => captured.capacity() * std::mem::size_of::<Value>(),
+        Obj::Closure {
+            captured, gsnap, ..
+        } => {
+            captured.capacity() * std::mem::size_of::<Value>()
+                + gsnap
+                    .as_ref()
+                    .map(|g| g.len() * std::mem::size_of::<(u32, Value)>())
+                    .unwrap_or(0)
+        }
         Obj::Module(m) => m.slots.capacity() * std::mem::size_of::<Value>(),
         // Map/Set: entries + the index cost; approximate by entries backing only.
         Obj::Map(m) => m.entries.capacity() * std::mem::size_of::<(u64, Value, Value)>(),
@@ -777,8 +791,16 @@ impl Heap {
             // A boxed local's cell: the inner value may be a heap object — trace it (like `NewType`).
             Obj::Cell(v) => push(v),
             Obj::Func { home, .. } => out.push(*home),
-            Obj::Closure { captured, home, .. } => {
+            Obj::Closure {
+                captured,
+                home,
+                gsnap,
+                ..
+            } => {
                 captured.iter().for_each(&mut push);
+                if let Some(g) = gsnap {
+                    g.iter().for_each(|(_, v)| push(v));
+                }
                 out.push(*home);
             }
             Obj::Module(m) => m.slots.iter().for_each(&mut push),

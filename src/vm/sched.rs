@@ -230,10 +230,17 @@ impl Vm {
         // also holds crosses under that global's id — see `do_spawn`.
         let pin = self.pin_snapshot(span)?;
         let (captured, cell_ids) = self.deep_clone_all(captured, span)?;
+        // TICKET-016 (W8-25): a `spawn:` block created inside a crossed closure inherits its
+        // parent's global snapshot, mirroring `Op::MakeClosure`.
+        let gsnap = enclosing.and_then(|h| match self.heap.get(h) {
+            Obj::Closure { gsnap, .. } => gsnap.clone(),
+            _ => None,
+        });
         let h = self.heap.alloc(Obj::Closure {
             proto,
             captured,
             home,
+            gsnap,
         });
         self.register_task(
             PendingCall::Call {
@@ -2603,6 +2610,34 @@ impl Vm {
     /// (carrying a placeholder `Span{0,0}` that airlock callers re-stamp with the real site via
     /// `to_wire_at`/`deep_clone`/`ensure_snapshot`). Every other arm is infallible (the `?` only
     /// forwards the generator error up through container recursion).
+    /// TICKET-016 (W8-25) — build the by-value snapshot of `proto`'s free home-module globals
+    /// (`Proto::global_free`), in slot order. Prefers an existing `gsnap` entry for a slot (a closure
+    /// being forwarded from one worker to another carries its own already-resolved values); falls
+    /// back to reading `home`'s module slots directly. Omits a slot that resolves to neither, rather
+    /// than faulting — `&self` only, so this cannot fault-in a module via `ensure_module_faulted`.
+    pub(super) fn closure_global_snapshot(
+        &self,
+        proto: ProtoId,
+        home: GcRef,
+        gsnap: &Option<std::sync::Arc<Vec<(u32, Value)>>>,
+    ) -> Vec<(u32, Value)> {
+        let free = &self.program.protos[proto].global_free;
+        let mut out = Vec::with_capacity(free.len());
+        for &slot in free {
+            let v = gsnap
+                .as_ref()
+                .and_then(|g| g.iter().find(|(s, _)| *s == slot).map(|(_, v)| *v))
+                .or_else(|| match self.heap.get(home) {
+                    Obj::Module(m) => m.slots.get(slot as usize).copied(),
+                    _ => None,
+                });
+            if let Some(v) = v {
+                out.push((slot, v));
+            }
+        }
+        out
+    }
+
     pub(super) fn to_wire(&self, v: Value) -> Result<WireValue, RuntimeError> {
         // Fresh memo per root — correct for a SINGLE-root crossing (`Channel.send`, a `Shared` store).
         // A crossing whose roots belong together (a `spawn`'s args, a `spawn:` block's captures, one
@@ -2681,6 +2716,7 @@ impl Vm {
                     proto,
                     captured,
                     home,
+                    gsnap,
                 } => {
                     if let Some(&id) = memo.path.get(&h) {
                         WireValue::Backref(id)
@@ -2695,12 +2731,21 @@ impl Vm {
                             let name = names.get(i).cloned().unwrap_or_default();
                             wcap.push((name.into_boxed_str(), w));
                         }
+                        // TICKET-016 (W8-25) — the airlock's by-value snapshot of this closure's free
+                        // home-module globals, wired through the same memo as the captures.
+                        let free_globals = self.closure_global_snapshot(*proto, *home, gsnap);
+                        let mut wglobals = Vec::with_capacity(free_globals.len());
+                        for (slot, gv) in free_globals {
+                            let w = self.to_wire_depth(gv, depth + 1, memo)?;
+                            wglobals.push((slot, w));
+                        }
                         memo.path.remove(&h);
                         WireValue::Closure {
                             id,
                             proto: *proto,
                             captured: wcap,
                             home: self.home_index(*home),
+                            globals: wglobals,
                         }
                     }
                 }
@@ -3473,6 +3518,7 @@ impl Vm {
                 proto,
                 captured,
                 home,
+                globals,
             } => {
                 let home = self.worker_home(home);
                 let n = captured.len();
@@ -3480,13 +3526,31 @@ impl Vm {
                     proto,
                     captured: vec![Value::nil(); n],
                     home,
+                    gsnap: None,
                 });
                 rebuild.insert(id, h);
                 // Lever #3: rebuild positionally — push values in wire (slot) order, discard the
                 // carried names (they live in `proto.capture_names`). `to_wire` emits in slot order.
                 let cap = self.rebuild_items(captured, rebuild, |(_k, w)| w);
+                // TICKET-016 (W8-25): rebuild the free-global snapshot, re-pairing each value with its
+                // slot; `None` when the closure carried none (never crossed, or `global_free` empty).
+                let mut gsnap_entries = Vec::with_capacity(globals.len());
+                for (slot, w) in globals {
+                    let v = self.from_wire_memo(w, rebuild);
+                    gsnap_entries.push((slot, v));
+                }
+                let gsnap = if gsnap_entries.is_empty() {
+                    None
+                } else {
+                    Some(std::sync::Arc::new(gsnap_entries))
+                };
                 match self.heap.get_mut(h) {
-                    Obj::Closure { captured, .. } => *captured = cap,
+                    Obj::Closure {
+                        captured, gsnap: g, ..
+                    } => {
+                        *captured = cap;
+                        *g = gsnap;
+                    }
                     _ => unreachable!("placeholder was alloc'd as Obj::Closure"),
                 }
                 Value::obj(h)
@@ -3813,9 +3877,14 @@ impl Vm {
                             proto,
                             captured,
                             home,
+                            gsnap: _,
                         } => {
                             // Lever #3: captures are positional; carry names from the proto in slot
-                            // order so the wire format (Vec<(name, value)>) is unchanged.
+                            // order so the wire format (Vec<(name, value)>) is unchanged. TICKET-016
+                            // (W8-25): this is the DIRECT spawn callee — no `globals` snapshot here,
+                            // see the `Lowered::Closure` doc comment (its home module is already
+                            // covered by `pin_snapshot`). A nested closure captured here still gets
+                            // its own `gsnap` through `to_wire_memo_at`'s `WireValue::Closure` arm.
                             let names = self.program.protos[proto].capture_names.clone();
                             let mut wcap = Vec::with_capacity(captured.len());
                             for (i, v) in captured.into_iter().enumerate() {
@@ -3929,10 +3998,14 @@ impl Vm {
                 let args = self.rebuild_items(args, rb, |w| w);
                 // Lever #3: rebuild positionally (slot order), discarding the carried names.
                 let cap = self.rebuild_items(captured, rb, |(_k, w)| w);
+                // TICKET-016 (W8-25): no `globals` snapshot for the direct spawn callee — see the
+                // `Lowered::Closure` doc comment. A crossed captured closure's own `gsnap` was already
+                // rebuilt inside `cap` via `from_wire_memo`'s `WireValue::Closure` arm.
                 let callee = Value::obj(self.heap.alloc(Obj::Closure {
                     proto,
                     captured: cap,
                     home,
+                    gsnap: None,
                 }));
                 (ReadyCall::Invoke { callee, args }, span)
             }
@@ -4697,7 +4770,7 @@ impl Vm {
             Obj::BigInt(n) => SnapValue::Wire(WireValue::Int(n)),
             Obj::FloatBox(f) => SnapValue::Wire(WireValue::Float(f)),
             Obj::Func { proto, home } => SnapValue::Func { proto, home: self.home_index(home) },
-            Obj::Closure { proto, captured, home } => {
+            Obj::Closure { proto, captured, home, gsnap } => {
                 // Lever #3: positional captures — carry names from the proto in slot order. A recursive
                 // local `fn` (self-cell cycle) reaches this slow arm ONLY if it ALSO embeds a residual
                 // `Module` handle (else `to_wire` succeeds with no handle and it rides the
@@ -4714,7 +4787,13 @@ impl Vm {
                 for (i, cv) in captured.iter().enumerate() {
                     snapped.push((names.get(i).cloned().unwrap_or_default(), self.to_snap_depth(*cv, depth + 1, memo)?));
                 }
-                SnapValue::Closure { proto, captured: snapped, home: self.home_index(home) }
+                // TICKET-016 (W8-25): snapshot the closure's free home-module globals the same way.
+                let free_globals = self.closure_global_snapshot(proto, home, &gsnap);
+                let mut gsnapped = Vec::with_capacity(free_globals.len());
+                for (slot, gv) in free_globals {
+                    gsnapped.push((slot, self.to_snap_depth(gv, depth + 1, memo)?));
+                }
+                SnapValue::Closure { proto, captured: snapped, home: self.home_index(home), globals: gsnapped }
             }
             // An import alias bound to another module obj.
             Obj::Module(m) => match self.home_index(h) {
@@ -5041,6 +5120,7 @@ impl Vm {
                 proto,
                 captured,
                 home,
+                globals,
             } => {
                 let whome = self.worker_home(*home);
                 // Lever #3: rebuild positionally (slot order), discarding the carried names.
@@ -5048,10 +5128,21 @@ impl Vm {
                     .iter()
                     .map(|(_k, cv)| self.replay_snap(cv, rb))
                     .collect();
+                // TICKET-016 (W8-25): rebuild the free-global snapshot, re-paired with its slot.
+                let gsnap_entries: Vec<(u32, Value)> = globals
+                    .iter()
+                    .map(|(slot, gv)| (*slot, self.replay_snap(gv, rb)))
+                    .collect();
+                let gsnap = if gsnap_entries.is_empty() {
+                    None
+                } else {
+                    Some(std::sync::Arc::new(gsnap_entries))
+                };
                 Value::obj(self.heap.alloc(Obj::Closure {
                     proto: *proto,
                     captured: cap,
                     home: whome,
+                    gsnap,
                 }))
             }
             SnapValue::ModuleAlias(idx) => Value::obj(self.module_objs[*idx]),

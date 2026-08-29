@@ -236,6 +236,10 @@ pub enum WireValue {
         proto: ProtoId,
         captured: Vec<(Box<str>, WireValue)>,
         home: Option<usize>,
+        /// TICKET-016 (W8-25) — the airlock's by-value snapshot of this closure's home-module `let`
+        /// globals named by `Proto::global_free`, `(slot, wired value)` pairs. `from_wire` rebuilds
+        /// this into `Obj::Closure.gsnap`.
+        globals: Vec<(u32, WireValue)>,
     },
     /// B3.3 — a BARE function (`Obj::Func`) carried across the airlock **by value**: its `proto`
     /// (shared via `Arc<Program>`) + its `home` index (as [`Closure`](WireValue::Closure)), no captures.
@@ -347,7 +351,12 @@ impl WireValue {
             // B3.6: a closure crosses by value, but a *captured* value could itself embed a `Handle`
             // (e.g. a captured closure crossing as a nested `Closure` whose own captures aren't
             // cross-safe) — recurse so the invariant stays honest.
-            WireValue::Closure { captured, .. } => captured.iter().any(|(_, v)| v.has_handle()),
+            WireValue::Closure {
+                captured, globals, ..
+            } => {
+                captured.iter().any(|(_, v)| v.has_handle())
+                    || globals.iter().any(|(_, v)| v.has_handle())
+            }
             // A cell follows its inner value: a cell over pure data stays on the snapshot fast path;
             // a cell embedding a handle takes the slow path so its handle is deep-copied.
             WireValue::Cell { inner, .. } => inner.has_handle(),
@@ -463,9 +472,15 @@ impl WireValue {
                     }
                     walk(inner, defined, known)
                 }
-                WireValue::Closure { id, captured, .. } => {
+                WireValue::Closure {
+                    id,
+                    captured,
+                    globals,
+                    ..
+                } => {
                     defined.insert(*id);
                     captured.iter().all(|(_, v)| walk(v, defined, known))
+                        && globals.iter().all(|(_, v)| walk(v, defined, known))
                 }
                 // No id of its own, but its backing closure and parked slots can carry a `Backref`.
                 WireValue::Generator { closure, state, .. } => {

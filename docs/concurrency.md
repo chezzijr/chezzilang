@@ -1351,9 +1351,9 @@ a residual of this milestone.
 
 **The model — spawning a task copies its environment (fork-like).** A `spawn`ed task does not share the
 parent's heap. It receives its **own isolated copy** of everything it captures — captured locals are
-deep-copied, module globals are snapshot-copied per task (fresh at its `spawn`, [§2](#2-the-model))
-— much like a forked child copies the parent's address space. Two deliberate differences from a real
-`fork`:
+deep-copied, module globals are snapshot-copied per task (fresh at its `spawn`, [§2](#2-the-model)) — and a **closure**'s own references to its home module's globals are likewise snapshot-copied
+onto the closure at the airlock (TICKET-016 / W8-25 — see the closures bullet below) — much like a
+forked child copies the parent's address space. Two deliberate differences from a real `fork`:
 1. It copies only the **reachable captured environment**, not the whole heap.
 2. **Explicit concurrency handles cross by SHARED reference, not by copy** — `Channel`, `Shared`,
    `RwShared`, `Atomic`, `Executor`, and the socket/reader/writer handles carry their one underlying
@@ -1392,7 +1392,15 @@ was retired when module globals started deep-copying per task.)
   and protocol-typed spawn args cross; the erased witness rides by deep value copy).
 - **Closures / functions cross by value (B3.3).** At runtime the airlock lowers a closure or
   bare `fn` **by value** — its `proto` (shared, read-only) + its captures deep-copied recursively + its
-  home module index, never a by-reference heap handle. So a `spawn f()`
+  home module index, never a by-reference heap handle. **A closure's references to its home module's
+  `let`-bound globals are snapshot-copied at the airlock too (TICKET-016 / W8-25)**, alongside its
+  captures: `Proto::global_free` names every such global the closure's body (or a closure nested inside
+  it) reads and never writes, and the airlock copies exactly those slots' values onto the crossing
+  closure. A global the closure itself **writes** is excluded from that set and stays a **late load**
+  against whichever task's own module copy calls it — a module-level `let` binding is otherwise still a
+  late load in-task (matching CPython), so a write to it AFTER a closure is created is visible to a
+  later same-task call; only the value **crossing an airlock** is pinned. Top-level `fn`s, imports,
+  `native fn`s and `extern` fns are unaffected and stay late loads always. So a `spawn f()`
   callee whose captured environment contains a nested closure/`fn` (or is itself a bare `fn`) runs
   cleanly, its captured plain data isolated per task exactly like any other sendable. **Checker
   (landed, Task 2a):** the function type is **sendable**, so a closure crosses as data —

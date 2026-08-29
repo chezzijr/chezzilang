@@ -8120,6 +8120,7 @@ fn worker_fixture(code: Vec<Op>) -> (Vm, PendingCall) {
         is_generator: false,
         is_test: false,
         capture_names: Vec::new(),
+        global_free: Vec::new(),
     };
     let program = Program {
         protos: vec![proto],
@@ -8135,6 +8136,7 @@ fn worker_fixture(code: Vec<Op>) -> (Vm, PendingCall) {
         proto: 0,
         captured: Default::default(),
         home,
+        gsnap: None,
     });
     (
         vm,

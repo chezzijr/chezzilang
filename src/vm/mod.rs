@@ -1507,6 +1507,16 @@ struct WorkerResult {
 /// home is a standalone module not in `module_objs` (the unit-test fixtures), which falls back to a
 /// fresh empty home.
 enum Lowered {
+    // TICKET-016 (W8-25): NOT given a `globals` snapshot field, unlike `WireValue::Closure` and
+    // `SnapValue::Closure` — this IS the direct spawn callee (a `spawn:` block or `spawn f(..)`),
+    // whose home module is already comprehensively covered by `pin_snapshot`'s whole-module
+    // `ModuleSnapshot` (built and shared BEFORE this crossing). Giving it its own independent
+    // `gsnap` re-wires any global closure value it reads (e.g. a module-level `let` holding another
+    // closure) through a SEPARATE `WireMemo`, splitting a `Cell` two crossings must share — measured
+    // regression: `airlock_cross_module_shared_binding_is_one_cell` and its `w74b` siblings split a
+    // shared cell / spuriously rejected a module handle when this was added. A closure reached as a
+    // NESTED VALUE (a capture, a `Channel.send`, or inside the module snapshot itself) still gets its
+    // own `gsnap` via the `WireValue`/`SnapValue` arms, which is what W8-25's actual repros need.
     Closure {
         proto: ProtoId,
         captured: Vec<(String, WireValue)>,
@@ -1627,6 +1637,9 @@ enum SnapValue {
         proto: ProtoId,
         captured: Vec<(String, SnapValue)>,
         home: Option<usize>,
+        /// TICKET-016 (W8-25) — the airlock's by-value snapshot of this closure's free home-module
+        /// globals (`Proto::global_free`), `(slot, snapped value)` pairs.
+        globals: Vec<(u32, SnapValue)>,
     },
     /// An import-alias global bound to another module — replays to the worker's `module_objs[idx]`
     /// (the pre-alloced module obj, which faults its own globals lazily — no eager cascade).
