@@ -2978,7 +2978,12 @@ impl Checker {
                         .variants
                         .contains_key(&(ekey.clone(), name.to_string()))
                 {
-                    self.error(span, format!("enum '{en}' has no variant '{name}'"));
+                    let names = self.variant_names(&ekey);
+                    self.error_help(
+                        span,
+                        format!("enum '{en}' has no variant '{name}'"),
+                        suggest::did_you_mean(name, &names),
+                    );
                     return;
                 }
                 // The qualifier must name the scrutinee's own enum. (Skipped when the scrutinee enum
@@ -3065,7 +3070,12 @@ impl Checker {
                     return Ty::Unknown;
                 }
                 None => {
-                    self.error(obj.span, format!("enum '{ename}' has no variant '{name}'"));
+                    let names = edef.variant_names.clone();
+                    self.error_help(
+                        name_span,
+                        format!("enum '{ename}' has no variant '{name}'"),
+                        suggest::did_you_mean(name, &names),
+                    );
                     return Ty::Unknown;
                 }
             }
@@ -3113,7 +3123,12 @@ impl Checker {
                     return Ty::Unknown;
                 }
                 None => {
-                    self.error(obj.span, format!("enum '{ename}' has no variant '{name}'"));
+                    let names = self.variant_names(&ekey);
+                    self.error_help(
+                        name_span,
+                        format!("enum '{ename}' has no variant '{name}'"),
+                        suggest::did_you_mean(name, &names),
+                    );
                     return Ty::Unknown;
                 }
             }
@@ -3152,7 +3167,12 @@ impl Checker {
                     return Ty::Unknown;
                 }
                 None => {
-                    self.error(obj.span, format!("enum '{tname}' has no variant '{name}'"));
+                    let names = self.variant_names(&ekey);
+                    self.error_help(
+                        name_span,
+                        format!("enum '{tname}' has no variant '{name}'"),
+                        suggest::did_you_mean(name, &names),
+                    );
                     return Ty::Unknown;
                 }
             }
