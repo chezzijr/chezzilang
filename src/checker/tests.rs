@@ -27897,5 +27897,85 @@ fn builtin_list_satisfies_user_protocol_with_matching_method_ticket_024() {
 #[test]
 fn builtin_int_missing_protocol_method_still_rejected_ticket_024() {
     let src = "protocol Sized:\n    fn len(self) -> int\n\nfn total(x: Sized) -> int:\n    return x.len()\n\nfn main():\n    print(total(1))\n";
-    rejects(src, "does not satisfy Sized");
+    rejects(
+        src,
+        "type int does not satisfy Sized (missing method 'len')",
+    );
+}
+
+// TICKET-024: Map/Set/str/bytes/bytearray each witness the same user protocol out of their own
+// harvested `native struct` method table -- not just List.
+#[test]
+fn builtin_map_set_str_bytes_satisfy_user_protocol_ticket_024() {
+    ok(
+        "protocol Sized:\n    fn len(self) -> int\n\nfn total(x: Sized) -> int:\n    return x.len()\n\nfn main():\n    print(total({\"a\": 1}))\n",
+    );
+    ok(
+        "protocol Sized:\n    fn len(self) -> int\n\nfn total(x: Sized) -> int:\n    return x.len()\n\nfn main():\n    print(total({1, 2}))\n",
+    );
+    ok(
+        "protocol Sized:\n    fn len(self) -> int\n\nfn total(x: Sized) -> int:\n    return x.len()\n\nfn main():\n    print(total(\"abc\"))\n",
+    );
+    ok(
+        "protocol Sized:\n    fn len(self) -> int\n\nfn total(x: Sized) -> int:\n    return x.len()\n\nfn main():\n    print(total(b\"ab\"))\n",
+    );
+    ok(
+        "protocol Sized:\n    fn len(self) -> int\n\nfn total(x: Sized) -> int:\n    return x.len()\n\nfn main():\n    print(total(bytearray(b\"ab\")))\n",
+    );
+}
+
+// TICKET-024: the same widening works through a generic bound, both the `[T: Sized]` and
+// `where T: Sized` spellings.
+#[test]
+fn builtin_satisfies_user_protocol_through_generic_bound_ticket_024() {
+    ok(
+        "protocol Sized:\n    fn len(self) -> int\n\nfn total[T: Sized](x: T) -> int:\n    return x.len()\n\nfn main():\n    print(total([1,2,3]))\n",
+    );
+    ok(
+        "protocol Sized:\n    fn len(self) -> int\n\nfn total[T](x: T) -> int where T: Sized:\n    return x.len()\n\nfn main():\n    print(total([1,2,3]))\n",
+    );
+}
+
+// TICKET-024: a native method whose SIGNATURE doesn't match the requirement is refused, not
+// silently widened -- and the handle ceiling (no method table at all) still falls to the bare
+// catch-all message.
+#[test]
+fn builtin_user_protocol_shape_mismatch_rejected_ticket_024() {
+    rejects(
+        "protocol Sized:\n    fn len(self) -> str\n\nfn total(x: Sized) -> str:\n    return x.len()\n\nfn main():\n    print(total([1,2,3]))\n",
+        "type List[int] does not satisfy Sized (method 'len' has the wrong signature)",
+    );
+    rejects(
+        "protocol Pushy:\n    fn push(self, v: int) -> nil\n\nfn total(x: Pushy):\n    x.push(1)\n\nfn main():\n    xs: List[str] = []\n    total(xs)\n",
+        "type List[str] does not satisfy Pushy (method 'push' has the wrong signature)",
+    );
+    rejects(
+        "protocol Mapper:\n    fn map(self, f: fn(int) -> int) -> List[int]\n\nfn total(x: Mapper):\n    x.map(fn(v: int) -> int: v)\n\nfn main():\n    total([1,2,3])\n",
+        "type List[int] does not satisfy Mapper (native method 'map' is generic and cannot witness a protocol requirement)",
+    );
+    rejects(
+        "import std.concurrency\n\nprotocol Sized:\n    fn len(self) -> int\n\nfn total(x: Sized) -> int:\n    return x.len()\n\nfn main():\n    c := Channel[int](1)\n    print(total(c))\n",
+        "type Channel[int] does not satisfy Sized",
+    );
+}
+
+// TICKET-024: a native method's dispatch-time residual (a `where` bound on the receiver's own
+// element type, or a numeric-only gate) is enforced through the protocol path exactly as it is
+// on a direct call.
+#[test]
+fn builtin_native_method_gates_bound_protocol_satisfaction_ticket_024() {
+    ok(
+        "protocol Sortable:\n    fn sort(self) -> nil\n\nfn srt(x: Sortable):\n    x.sort()\n\nfn main():\n    xs := [3,1,2]\n    srt(xs)\n",
+    );
+    rejects(
+        "struct Foo:\n    v: int\n\nprotocol Sortable:\n    fn sort(self) -> nil\n\nfn srt(x: Sortable):\n    x.sort()\n\nfn main():\n    xs: List[Foo] = [Foo(v=1)]\n    srt(xs)\n",
+        "type List[Foo] does not satisfy Sortable (method 'sort' requires Foo: Comparable)",
+    );
+    ok(
+        "protocol Summable:\n    fn sum(self) -> int\n\nfn total(x: Summable) -> int:\n    return x.sum()\n\nfn main():\n    print(total([1,2,3]))\n",
+    );
+    rejects(
+        "newtype Cents = int\n\nprotocol SumC:\n    fn sum(self) -> Cents\n\nfn total(x: SumC) -> Cents:\n    return x.sum()\n\nfn main():\n    xs: List[Cents] = [Cents(1), Cents(2)]\n    print(total(xs))\n",
+        "type List[Cents] does not satisfy SumC (native method 'sum' needs a numeric element type)",
+    );
 }

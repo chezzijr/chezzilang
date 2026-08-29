@@ -270,6 +270,13 @@ impl Drop for EqObligation {
 /// `"struct"` is a coarsening — the `Hashable` grant is only for a ZERO-FIELD struct without its own
 /// `hash`, and the `Iterable`/`Iterator` grants only for a struct with `iter`/`next` — so the probe
 /// receiver for that kind is one struct that satisfies all three at once.
+///
+/// **Stays reserved-protocol-only.** A built-in witnessing a USER protocol (TICKET-024, W8-32,
+/// `Checker::satisfies_native`) is a DIFFERENT kind of grant — it goes through
+/// [`Grant::no_intrinsic_method`], not this table, because a user protocol's bare name can never be
+/// a row key here (every row key is one of the ~20 [`RESERVED_PROTOCOLS`](super::RESERVED_PROTOCOLS)
+/// names), and the method behind that grant is a REAL native method with a runtime arm already, not
+/// a promise this ratchet needs to police.
 pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, &str)] = &[
     // Comparable — int/float/str scalars + a numeric newtype (its `<` unwraps to the underlying).
     ("Comparable", "compare", "int"),
@@ -409,10 +416,17 @@ impl Grant {
     /// a real user method or nothing at all: the `Ty::Unknown` don't-cascade guard, an empty
     /// (top-type) protocol, a pure-embed bundle (each embed grants its own methods and is registered
     /// separately), a `Ty::Param` forwarding to its declared bounds, a protocol existential matching
-    /// itself, and structural satisfaction via a user method table.
+    /// itself, structural satisfaction via a user method table, and — a FOURTH case, TICKET-024,
+    /// W8-32 — a built-in (`List`/`Map`/`Set`/`str`/`bytes`/`bytearray`, or a scalar with no method
+    /// table) witnessing a USER protocol out of its own harvested `native struct` method table
+    /// (`Checker::satisfies_native`). That fourth case is still the right constructor even though the
+    /// method IS callable: the method is a real native `fn` the direct-call path already type-checks
+    /// and the VM already dispatches by name, so it needs no NEW runtime arm and no
+    /// `INTRINSIC_PROTO_METHODS` row — unlike this table's rows, it carries no promise about a method
+    /// with no code behind it.
     ///
-    /// If the arm you are writing makes a BUILT-IN satisfy a protocol with no user method behind it,
-    /// this is the WRONG constructor — use [`Checker::grant_intrinsic`] and add the row.
+    /// If the arm you are writing makes a BUILT-IN satisfy a RESERVED protocol with no user method
+    /// behind it, this is the WRONG constructor — use [`Checker::grant_intrinsic`] and add the row.
     fn no_intrinsic_method() -> Self {
         Grant(())
     }
@@ -459,6 +473,28 @@ impl Checker {
             // still excludes `"protocol"` (no row registered), so this does not widen anything but Eq.
             Ty::Protocol(..) => "protocol",
             _ => "?",
+        }
+    }
+
+    /// The `self.structs` key a built-in's harvested `native struct` method table sits under, for
+    /// the ONE receiver kinds a USER protocol may witness against (TICKET-024, W8-32) — `None` for
+    /// everything else (handles, tuples, `Option`/`Result`, functions), which keeps falling to the
+    /// catch-all message. The three scalars have no `self.structs` entry (`std/prelude.chz:29-31`
+    /// declares them `native ctor` only), so routing them here anyway reaches an empty table and
+    /// IMPROVES the message: "type int does not satisfy Sized (missing method 'len')" instead of
+    /// the bare clause.
+    fn native_witness_key(ty: &Ty) -> Option<&'static str> {
+        match ty {
+            Ty::List(_) => Some("List"),
+            Ty::Map(..) => Some("Map"),
+            Ty::Set(_) => Some("Set"),
+            Ty::Str => Some("str"),
+            Ty::Bytes => Some("bytes"),
+            Ty::ByteArray => Some("bytearray"),
+            Ty::Int => Some("int"),
+            Ty::Float => Some("float"),
+            Ty::Bool => Some("bool"),
+            _ => None,
         }
     }
 
@@ -2189,6 +2225,18 @@ impl Checker {
                 Err(format!("type {ty} does not satisfy {protocol}"))
             };
         }
+        // A built-in witnesses a USER protocol out of its own harvested `native struct` method
+        // table (TICKET-024, W8-32) -- reserved protocols are excluded because each already has a
+        // hand-written intrinsic arm above whose grant is a W6-3 promise about a method with no
+        // user code behind it; routing them through the native table too would silently re-decide
+        // conformance for every built-in (`Set.add` sits one signature check from witnessing `Add`).
+        if !is_reserved_protocol(protocol)
+            && let Some(key) = Self::native_witness_key(ty)
+        {
+            return self
+                .satisfies_native(ty, protocol, args, pinfo, key)
+                .map(|()| Grant::no_intrinsic_method());
+        }
         match ty {
             Ty::Struct(sname, _) => {
                 // MISS-ONLY identity-key fallback (gap #4): a named-fn-imported factory result carries
@@ -2271,6 +2319,28 @@ impl Checker {
             }
             _ => Err(format!("type {ty} does not satisfy {protocol}")),
         }
+    }
+
+    /// A native method's DISPATCH-TIME residual that a `FnSig` alone can't express (TICKET-024,
+    /// W8-32) — mirrors the two gates `src/checker/expr.rs` applies at `Ty::List`'s direct-call arm
+    /// (`:2981`'s numeric-`sum` gate, `:3001`'s `eq_bounds_unsatisfied` gate for
+    /// `contains`/`index_of`/`dedup`/`unique`), reused rather than re-derived so a protocol-erased
+    /// call can't type-check where a direct call would fault. No other covered built-in
+    /// (`Map`/`Set`/`str`/`bytes`/`bytearray`) has one. `Some(reason)` refuses; `None` defers to the
+    /// ordinary signature match.
+    fn native_dispatch_residual(&self, ty: &Ty, method: &str) -> Option<String> {
+        let Ty::List(elem) = ty else { return None };
+        if method == "sum" {
+            return (!elem.is_numeric() && !elem.is_unknown())
+                .then(|| "native method 'sum' needs a numeric element type".to_string());
+        }
+        if matches!(method, "contains" | "index_of" | "dedup" | "unique") {
+            let why = self.eq_bounds_unsatisfied(elem)?;
+            return Some(format!(
+                "native method '{method}' compares List elements for equality — {why}"
+            ));
+        }
+        None
     }
 
     /// Structural conformance check shared by the struct and enum arms of [`satisfies_args`]: a type
@@ -2398,6 +2468,54 @@ impl Checker {
             }
         }
         Ok(())
+    }
+
+    /// Does a built-in (`List`/`Map`/`Set`/`str`/`bytes`/`bytearray`, or a scalar with no method
+    /// table) satisfy a USER protocol out of its own harvested `native struct` method table
+    /// (TICKET-024, W8-32)? `key` is [`Checker::native_witness_key`]'s answer for `ty`.
+    ///
+    /// The receiver param is PREPENDED to each harvested sig before it reaches
+    /// [`Checker::satisfies_methods`] — load-bearing, not cosmetic: `harvest_native_fn_sig` strips
+    /// the leading bare `self` (`src/checker/setup.rs:673-717`) while a protocol requirement keeps
+    /// it as a `Ty::Unknown` `params[0]` (`src/checker/setup.rs:887-894`), and `method_matches`
+    /// (`src/checker/mod.rs`) compares `params.len()` first. Without the prepend every requirement
+    /// is refused as `(method '<name>' has the wrong signature)`.
+    fn satisfies_native(
+        &self,
+        ty: &Ty,
+        protocol: &str,
+        args: &[Ty],
+        pinfo: &ProtocolInfo,
+        key: &str,
+    ) -> Result<(), String> {
+        let native_methods = self.structs.get(key).map(|i| &i.methods);
+        let mut table: HashMap<String, FnSig> = HashMap::new();
+        for (mname, _) in &pinfo.methods {
+            let Some(sig) = native_methods.and_then(|m| m.get(mname)) else {
+                continue; // left out of the table -- satisfies_methods reports "(missing method ...)"
+            };
+            if !sig.type_params.is_empty() {
+                return Err(format!(
+                    "type {ty} does not satisfy {protocol} (native method '{mname}' is generic \
+                     and cannot witness a protocol requirement)"
+                ));
+            }
+            if let Some(why) = self.native_dispatch_residual(ty, mname) {
+                return Err(format!("type {ty} does not satisfy {protocol} ({why})"));
+            }
+            let mut params = Vec::with_capacity(sig.params.len() + 1);
+            params.push(ty.clone());
+            params.extend(sig.params.iter().cloned());
+            table.insert(
+                mname.clone(),
+                FnSig {
+                    params,
+                    min_params: sig.min_params + 1,
+                    ..sig.clone()
+                },
+            );
+        }
+        self.satisfies_methods(ty, protocol, args, pinfo, &table)
     }
 
     /// Result type of an overloaded arithmetic operator (`+`/`-`/`*`) on two operands of the *same*
@@ -3381,8 +3499,24 @@ impl Checker {
                         .collect()
                 })
                 .unwrap_or_default(),
+            // Built-in containers (TICKET-024, W8-32): binds a harvested native sig's `Ty::Param`
+            // (e.g. `List[T]`'s `T`) to this instantiation's element type, from the SAME harvested
+            // `StructInfo` `native_handle_method` reads — never a hardcoded "T"/"K"/"V" — so a
+            // rename in `std/prelude.chz` can't silently unbind the substitution.
+            Ty::List(e) => self.builtin_param_map("List", &[(**e).clone()]),
+            Ty::Set(e) => self.builtin_param_map("Set", &[(**e).clone()]),
+            Ty::Map(k, v) => self.builtin_param_map("Map", &[(**k).clone(), (**v).clone()]),
             _ => HashMap::new(),
         }
+    }
+
+    /// Shared by [`Checker::nominal_param_map`]'s built-in-container arms: zips `targs` against
+    /// `self.structs[key]`'s own declared type params.
+    fn builtin_param_map(&self, key: &str, targs: &[Ty]) -> HashMap<String, Ty> {
+        self.structs
+            .get(key)
+            .map(|info| struct_param_map(info, targs))
+            .unwrap_or_default()
     }
 
     /// Resolve the element type of a value-first concurrency box (`Shared`/`RwShared`/`Atomic`) from
