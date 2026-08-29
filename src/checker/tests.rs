@@ -18447,6 +18447,26 @@ fn scalar_cast_rejects_option_result_bytes_bytearray_shared_arg() {
 }
 
 #[test]
+fn scalar_cast_still_accepts_the_payload_of_a_rejected_kind() {
+    // TICKET-020: the rule is "the CONTAINER type is outside the cast domain" — its payload must
+    // stay inside it, or the reject fires on the wrong thing.
+    ok("fn main():\n    x := Some(1)\n    print(str(x))\n    print(int(x ?? 0))\nmain()\n");
+    ok(
+        "fn take(r: Result[int, str]) -> int:\n    match r:\n        Ok(v):\n            return int(v)\n        Err(e):\n            return 0\nfn main():\n    r: Result[int, str] = Ok(1)\n    print(take(r))\n    print(str(r))\nmain()\n",
+    );
+    ok("fn main():\n    print(int(b\"ab\"[0]))\n    print(str(b\"ab\"))\nmain()\n");
+    ok(
+        "fn main():\n    ba := bytearray([1, 2])\n    print(int(ba[0]))\n    print(str(ba))\nmain()\n",
+    );
+    entry_ok(
+        "import std.concurrency\nfn main():\n    s := Shared(1)\n    print(int(s.get()))\n    print(str(s))\nmain()\n",
+    );
+    entry_ok(
+        "import std.concurrency\nfn main():\n    a := Atomic(1)\n    ai := AtomicInt(1)\n    rw := RwShared(1)\n    print(int(a.load()))\n    print(int(ai.load()))\n    print(int(rw.get()))\nmain()\n",
+    );
+}
+
+#[test]
 fn scalar_cast_still_accepts_scalars_newtypes_and_str() {
     // W8-31 neighbours: the scalar-cast domain (int/float/bool/str) must stay untouched by the
     // struct/enum/fn reject — a newtype, a generic type param, and str-casting a struct/enum all
