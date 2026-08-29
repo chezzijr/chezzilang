@@ -25758,6 +25758,39 @@ fn module_missing_member_call_message_unchanged() {
     );
 }
 
+/// TICKET-023: a `protocol` declared in one module is unreachable from another module, by either
+/// crossing spelling. `ModuleSig` has no `protocol_defs` field (unlike `struct_defs`/`enum_defs`/
+/// `newtype_defs`), so a qualified `shapes.Drawable` bound reports "has no type" even though the
+/// protocol is declared and importable structurally within its own module.
+#[test]
+fn protocol_reachable_via_qualified_path() {
+    files_ok(&[
+        (
+            "shapes.chz",
+            "protocol Drawable:\n    fn draw(self) -> str\n",
+        ),
+        (
+            "main.chz",
+            "import shapes\nfn describe(d: shapes.Drawable) -> str:\n    return d.draw()\n",
+        ),
+    ]);
+}
+
+/// Same gap via the `from`-import spelling.
+#[test]
+fn protocol_reachable_via_named_import() {
+    files_ok(&[
+        (
+            "shapes.chz",
+            "protocol Drawable:\n    fn draw(self) -> str\n",
+        ),
+        (
+            "main.chz",
+            "import Drawable from shapes\nfn describe(d: Drawable) -> str:\n    return d.draw()\n",
+        ),
+    ]);
+}
+
 // ===== W7-24 — an interpolation fragment is a normalized call site like any other =====
 
 /// Named args / defaults / variadic sweeping reach a call inside `"{…}"`. Before `desugar` parsed
