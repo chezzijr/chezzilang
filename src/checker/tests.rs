@@ -5862,6 +5862,17 @@ fn infer_expr_non_error_payload_not_laundered() {
 }
 
 #[test]
+fn caught_error_has_no_location_accessor() {
+    // W8-22: a caught `Error` carries no line/col/file today. `message()` exists (intrinsic
+    // structural satisfaction of `Error` by `str`), but there is no accessor for the fault's
+    // origin span, so `e.line()` is rejected at check time.
+    rejects(
+        "fn boom() -> int!:\n    xs := [1]\n    return Ok(xs[9])\nfn main():\n    r := recover: boom()\n    match r:\n        Ok(v): print(v)\n        Err(e): print(e.line())\n",
+        "type Error has no method 'line'",
+    );
+}
+
+#[test]
 fn infer_return_non_error_payload_preserved_no_over_reject() {
     // NO OVER-REJECTION (adversarial-review): forwarding a `Result` whose E does NOT satisfy `Error`
     // must still type-check — the inferred E is kept concrete (`MyErr`), not forced to `Error` (which
