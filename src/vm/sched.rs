@@ -96,6 +96,16 @@ struct WireMemo {
     /// through a non-preservable node → reject (never duplicate). Removed on DFS exit, so a generator
     /// revisited off-stack (an acyclic DAG alias) is deep-copied independently, like the containers.
     gens_on_stack: super::fxhash::FxHashSet<GcRef>,
+    /// TICKET-016 (W8-25) review finding — true for the whole walk `snapshot_modules` runs to build a
+    /// NEW TASK'S OWN COPY of every module global (`ensure_snapshot`/`fault_module`), including the
+    /// `try_wire_speculative` fast path it takes through `to_wire_depth`. That walk moves a closure
+    /// and the globals it reads into the SAME replay, together, so a `WireValue::Closure`/
+    /// `SnapValue::Closure` built under it must not freeze a `gsnap` at the snapshot's pre-write
+    /// value — the closure keeps doing a live `Op::GetGlobalSlot` read against its own task's module
+    /// copy instead. False on every other path that reaches `to_wire_depth` (`Channel.send`,
+    /// `spawn`'s arg/capture crossing, `Shared`/`RwShared` stores), where the sender's write already
+    /// happened before the value crosses and a snapshot is the only correct answer.
+    module_replay: bool,
 }
 
 impl WireMemo {
@@ -2732,12 +2742,18 @@ impl Vm {
                             wcap.push((name.into_boxed_str(), w));
                         }
                         // TICKET-016 (W8-25) — the airlock's by-value snapshot of this closure's free
-                        // home-module globals, wired through the same memo as the captures.
-                        let free_globals = self.closure_global_snapshot(*proto, *home, gsnap);
-                        let mut wglobals = Vec::with_capacity(free_globals.len());
-                        for (slot, gv) in free_globals {
-                            let w = self.to_wire_depth(gv, depth + 1, memo)?;
-                            wglobals.push((slot, w));
+                        // home-module globals, wired through the same memo as the captures. Skipped
+                        // under `memo.module_replay` — see that field's doc: this closure and `home`'s
+                        // globals are moving together into one task's own module copy, not crossing
+                        // from a different task's heap, so a live read must win instead.
+                        let mut wglobals = Vec::new();
+                        if !memo.module_replay {
+                            let free_globals = self.closure_global_snapshot(*proto, *home, gsnap);
+                            wglobals.reserve(free_globals.len());
+                            for (slot, gv) in free_globals {
+                                let w = self.to_wire_depth(gv, depth + 1, memo)?;
+                                wglobals.push((slot, w));
+                            }
                         }
                         memo.path.remove(&h);
                         WireValue::Closure {
@@ -4547,6 +4563,9 @@ impl Vm {
             // W7-4c — MONOTONIC across builds, so an id from a superseded snapshot can never collide
             // with one from this build (a stale seed then simply misses; see `Vm::snapshot_next_id`).
             next_id,
+            // TICKET-016 (W8-25) review finding — this whole walk moves a closure and the module
+            // globals it reads together into one task's own copy; see the field doc.
+            module_replay: true,
             ..WireMemo::default()
         };
         for &pm in &self.module_objs {
@@ -4787,12 +4806,17 @@ impl Vm {
                 for (i, cv) in captured.iter().enumerate() {
                     snapped.push((names.get(i).cloned().unwrap_or_default(), self.to_snap_depth(*cv, depth + 1, memo)?));
                 }
-                // TICKET-016 (W8-25): snapshot the closure's free home-module globals the same way.
-                let free_globals = self.closure_global_snapshot(proto, home, &gsnap);
-                let mut gsnapped = Vec::with_capacity(free_globals.len());
-                for (slot, gv) in free_globals {
-                    gsnapped.push((slot, self.to_snap_depth(gv, depth + 1, memo)?));
-                }
+                // TICKET-016 (W8-25) review finding — this `SnapValue` form is the PER-TASK whole
+                // module snapshot (`ensure_snapshot`/`fault_module`): `home`'s globals move into the
+                // new task's own module copy in the SAME replay as this closure, so `f` must keep
+                // doing a live `Op::GetGlobalSlot` read against that copy rather than freezing a
+                // `gsnap` at the snapshot's pre-write value — the whole snapshot predates every
+                // spawned task's own writes, unlike an actual airlock crossing (`WireValue::Closure`,
+                // `Lowered::Closure`), where the sender's write already happened before it sends.
+                // A stale `_ = gsnap` avoids an unused-field warning without pretending it feeds this
+                // arm.
+                let _ = gsnap;
+                let gsnapped: Vec<(u32, SnapValue)> = Vec::new();
                 SnapValue::Closure { proto, captured: snapped, home: self.home_index(home), globals: gsnapped }
             }
             // An import alias bound to another module obj.
