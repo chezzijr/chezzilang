@@ -27646,3 +27646,52 @@ fn int_cast_on_module_is_accepted_at_check_time_ticket_021() {
         "expected int(io) to be rejected at check time, but the checker accepted it clean"
     );
 }
+
+// TICKET-021: legal module-qualifier reads (never a value on their own) stay clean under the
+// module-in-value-position reject — the rule must fire only when the module itself is the value.
+#[test]
+fn module_qualifier_positions_stay_clean_ticket_021() {
+    entry_ok(
+        "import std.math\nfn main():\n    x := math.pi\n    print(x)\n    print(math.abs(-3))\n    parallel:\n        spawn math.abs(-3)\nmain()\n",
+    );
+}
+
+// TICKET-021 (Gotcha 3): a cast arm used to infer its argument up to three times, so a diagnostic
+// raised inside `infer_value` printed once per inference. Pin it printing exactly once.
+#[test]
+fn cast_argument_diagnostic_prints_once_ticket_021() {
+    let errs = check_src("print(int(nope))\n");
+    let matching: Vec<_> = errs
+        .iter()
+        .filter(|e| e.message.contains("unknown name 'nope'"))
+        .collect();
+    assert_eq!(
+        matching.len(),
+        1,
+        "expected exactly one 'unknown name' error, got: {errs:?}"
+    );
+}
+
+// TICKET-021: the module-member-miss caret now spans the MEMBER name, not the module name.
+#[test]
+fn module_member_miss_carets_the_member_name_ticket_021() {
+    let src = "import std.json\nprint(json.encodee(\"x\"))\n";
+    let errs = check_entry(src);
+    assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
+    assert_eq!(
+        errs[0].span.col, 12,
+        "expected the caret at col 12 (under 'encodee'), got: {errs:?}"
+    );
+}
+
+// TICKET-021: the enum-variant-miss caret now spans the VARIANT name, not the enum name.
+#[test]
+fn enum_variant_miss_carets_the_variant_name_ticket_021() {
+    let src = "enum C:\n    Red\n    Green\nc := C.Redd\n";
+    let errs = check_src(src);
+    assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
+    assert_eq!(
+        errs[0].span.col, 8,
+        "expected the caret at col 8 (under 'Redd'), got: {errs:?}"
+    );
+}
