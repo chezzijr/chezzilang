@@ -27580,3 +27580,52 @@ fn value_slot_protocol_note_absent_for_a_non_protocol_mismatch() {
         "expected a widen-note error, got: {errs:?}"
     );
 }
+
+// TICKET-021: an unknown variable near a real one gets no "did you mean" help, unlike a
+// method/field typo (see the `suggest.rs` near-miss suite above).
+#[test]
+fn unknown_variable_gets_no_did_you_mean_ticket_021() {
+    let src = "count := 3\nprint(coutn)\n";
+    rejects_help(src, "unknown name 'coutn'", "did you mean 'count'");
+}
+
+// TICKET-021: an unknown module member near a real one gets no "did you mean" help.
+#[test]
+fn unknown_module_member_gets_no_did_you_mean_ticket_021() {
+    let src =
+        "import std.math\nfn main():\n    print(math.sqrt(4.0))\n    print(math.sqrtt(4.0))\n";
+    let errs = check_entry(src);
+    assert!(
+        errs.iter().any(
+            |e| e.message.contains("module 'math' has no member 'sqrtt'")
+                && e.help
+                    .as_deref()
+                    .is_some_and(|h| h.contains("did you mean 'sqrt'"))
+        ),
+        "expected an error containing \"module 'math' has no member 'sqrtt'\" with help \
+         containing \"did you mean 'sqrt'\", got: {errs:?}"
+    );
+}
+
+// TICKET-021: an unknown enum variant near a real one gets no "did you mean" help.
+#[test]
+fn unknown_enum_variant_gets_no_did_you_mean_ticket_021() {
+    let src = "enum Color:\n    Red\n    Green\n    Blue\nc := Color.Bluee\n";
+    rejects_help(
+        src,
+        "enum 'Color' has no variant 'Bluee'",
+        "did you mean 'Blue'",
+    );
+}
+
+// TICKET-021: a bare module bind used in value position (not called, not dotted) is silently
+// accepted at check time instead of being rejected.
+#[test]
+fn module_in_value_position_is_accepted_ticket_021() {
+    let src = "import std.math\nx := math\nprint(x)\n";
+    let errs = check_entry(src);
+    assert!(
+        !errs.is_empty(),
+        "expected a module-in-value-position error, but the checker accepted it clean"
+    );
+}
