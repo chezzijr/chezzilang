@@ -12,6 +12,7 @@ use super::core::{
 use super::fxhash::FxHashMap;
 use super::op::ProtoId;
 use super::value::{GcRef, Value};
+use crate::lexer::Span;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -575,6 +576,11 @@ pub struct Heap {
     /// object-count trigger cannot see those bytes, so without this nobody ever samples the cap.
     /// Cleared by `sweep()`.
     force_collect: bool,
+    /// W8-22 — the origin span of a caught error, keyed on the RAW SLOT INDEX of the `Err`
+    /// payload's `GcRef`. The key is a reused index (`alloc` pops off `free`), so `sweep()`'s free
+    /// branch is what makes this table sound: leaving an entry behind would hand a dead error's
+    /// coordinates to whatever `alloc` reuses the slot for next.
+    err_spans: FxHashMap<u32, Span>,
 }
 
 impl Default for Heap {
@@ -592,6 +598,7 @@ impl Default for Heap {
             mem_cap: 0,
             over_cap: false,
             force_collect: false,
+            err_spans: FxHashMap::default(),
         }
     }
 }
@@ -938,6 +945,19 @@ impl Heap {
         (seen, pending)
     }
 
+    /// Stamp `r`'s origin span (W8-22), overwriting any prior entry for its slot.
+    pub fn set_err_span(&mut self, r: GcRef, span: Span) {
+        self.err_spans.insert(r.0, span);
+    }
+
+    /// The origin span stamped on `r`, or `None` if it was never stamped (a user-constructed
+    /// `Err`, a struct error, or a slot swept since the stamp). Returns `Span` by value: `Span` is
+    /// `Copy`, so the borrow of `self.err_spans` ends here rather than outliving a caller's
+    /// subsequent `alloc`/`alloc_str`.
+    pub fn err_span(&self, r: GcRef) -> Option<Span> {
+        self.err_spans.get(&r.0).copied()
+    }
+
     /// Free every unmarked object and clear all marks for the next cycle. Resets the allocation
     /// counter and grows the next-collection threshold relative to the surviving set.
     pub fn sweep(&mut self) {
@@ -948,6 +968,7 @@ impl Heap {
                 } else {
                     self.slots[idx].obj = None;
                     self.free.push(idx as u32);
+                    self.err_spans.remove(&(idx as u32));
                     self.live -= 1;
                 }
             }
@@ -2088,5 +2109,33 @@ mod iter_obj_tests {
         // `get` PANICS on a collected slot ("dangling GcRef"), so this line is the assertion: a
         // value live ONLY through a core payload must survive the sweep.
         assert!(matches!(h.get(kept), Obj::Str(s) if s.as_str() == "kept"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// W8-22: a swept slot's stamped span must not leak to whatever `alloc` reuses the index for.
+    #[test]
+    fn heap_err_span_is_dropped_when_its_slot_is_swept() {
+        let mut h = Heap::new();
+        let r = h.alloc(Obj::Str("boom".into()));
+        let sp = Span {
+            line: 7,
+            col: 3,
+            file: 1,
+        };
+        h.set_err_span(r, sp);
+        assert_eq!(h.err_span(r), Some(sp));
+
+        // Unmarked, so `sweep` frees it.
+        h.sweep();
+        assert_eq!(h.err_span(r), None);
+
+        // The freed index gets reused; the new occupant must not inherit the dead span.
+        let r2 = h.alloc(Obj::Str("fresh".into()));
+        assert_eq!(r2, r, "test assumes the freed slot is reused");
+        assert_eq!(h.err_span(r2), None);
     }
 }
