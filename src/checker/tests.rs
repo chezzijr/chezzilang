@@ -15260,21 +15260,23 @@ fn spawn_on_module_qualified_fn_ok() {
     entry_ok("import std.math\nfn main():\n    spawn math.abs(-3)\nmain()\n");
 }
 
-/// NON-REGRESSION for the fix above: the receiver sweep still refuses a GENUINE non-sendable
-/// receiver. The skip is keyed on the resolved type being exactly `Ty::Module` — a container that
-/// merely holds a module (the only non-sendable leaf the type system still has) is unaffected, and
-/// so is a local that SHADOWS the module name, which resolves to its own type and stays a receiver.
-/// Both messages are byte-identical to the pre-fix binary's.
+/// NON-REGRESSION for the fix above, RE-PINNED for TICKET-021: `Ty::Module` is now rejected one
+/// level up, by the module-in-value-position rule in `Checker::infer_value` — a module can no
+/// longer reach a container or a local at all, so all four programs below now fail at the module
+/// READ (`[math]` / `math := math`) rather than at the spawn receiver sweep. The receiver sweep
+/// itself is unchanged and NOT dead code — it still guards any future non-sendable `Ty`; if you add
+/// one, restore a real receiver case here. The four programs stay byte-identical to the pre-TICKET-021
+/// binary's so the sweep is re-exercised the moment it becomes reachable again.
 #[test]
 fn spawn_on_non_sendable_receiver_still_rejected() {
     entry_rejects(
         "import std.math\nfn main():\n    xs := [math]\n    parallel:\n        spawn xs.clear()\nmain()\n",
-        "cannot spawn on a non-sendable receiver of type List[module math]",
+        "module 'math' is not a value",
     );
     // A local SHADOWING the module name is a real receiver, not a namespace.
     entry_rejects(
         "import std.math\nfn main():\n    math := [math]\n    parallel:\n        spawn math.clear()\nmain()\n",
-        "cannot spawn on a non-sendable receiver of type List[module math]",
+        "module 'math' is not a value",
     );
     // …and so is a local BOUND to the module (`m := math`): the type is `Ty::Module`, but the head
     // is a value, not a namespace, so the compiler lowers a `SpawnMethod` on the module HANDLE and
@@ -15282,18 +15284,20 @@ fn spawn_on_non_sendable_receiver_still_rejected() {
     // `chezzi check` and fault at run time instead.
     entry_rejects(
         "import std.math\nfn main():\n    m := math\n    parallel:\n        spawn m.abs(-3)\nmain()\n",
-        "cannot spawn on a non-sendable receiver of type module math",
+        "module 'math' is not a value",
     );
     // Same shape re-bound under the module's OWN name — the skip must resolve the SCOPE, not just
     // the spelling.
     entry_rejects(
         "import std.math\nfn main():\n    math := math\n    parallel:\n        spawn math.abs(-3)\nmain()\n",
-        "cannot spawn on a non-sendable receiver of type module math",
+        "module 'math' is not a value",
     );
 }
 
-/// NON-REGRESSION for the fix above: the ARGUMENT sweep is untouched — a non-sendable value handed
-/// to a spawned call is still refused, as a bare module and inside a container alike.
+/// NON-REGRESSION for the fix above: the ARGUMENT sweep is untouched for a BARE module — a
+/// non-sendable value handed directly to a spawned call is still refused there. The container case
+/// (TICKET-021 RE-PINNED): `Ty::Module` no longer reaches a container at all (the module-value read
+/// itself now errors), so `xs := [math]` fails at the read, not at the argument sweep.
 #[test]
 fn spawn_non_sendable_argument_still_rejected() {
     entry_rejects(
@@ -15302,7 +15306,7 @@ fn spawn_non_sendable_argument_still_rejected() {
     );
     entry_rejects(
         "import std.math\nfn take(m: int) -> int:\n    return m\nfn main():\n    xs := [math]\n    parallel:\n        spawn take(xs)\nmain()\n",
-        "cannot pass a non-sendable value of type List[module math] to a spawned task",
+        "module 'math' is not a value",
     );
 }
 
