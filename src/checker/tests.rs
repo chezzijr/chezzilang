@@ -1065,6 +1065,22 @@ fn success_coercion_never_decides_an_inference() {
     );
 }
 
+/// W8-21 regression — a nested ANNOTATED fn inside an un-annotated one is body-checked on every
+/// speculative `infer_returns` pass (`check_fn_body`'s comment at the `inferring_ret` reset), and a
+/// forward-declared callee is `Unknown` on an early pass, concrete once its own sig resolves. Without
+/// rolling back `ret_coerce` on `diag_rollback`, the early pass's `NoWrap` verdict survived past its
+/// speculative walk and conflicted with the later `WrapSome` the real walk recorded for the same
+/// span, turning a valid program into a hard `internal:` compile error. Runs the real pipeline
+/// (`run_capture`), not just `check_src`: the conflict fires in `compile`, past the checker.
+#[test]
+fn success_coercion_survives_a_speculative_return_inference_pass() {
+    let out = crate::vm::run_capture(
+        "fn outer():\n    fn g() -> int?:\n        return h()\n    print(g())\n\nfn h(): 1\n\nouter()\n",
+    )
+    .expect("should run clean, not hit the return-coercion table conflict");
+    assert_eq!(out, "Some(1)\n");
+}
+
 /// Lossy / wrong-direction conversions MUST stay type errors (the widen arm is one-way Float←Int only).
 #[test]
 fn widen_float_into_int_still_rejected() {

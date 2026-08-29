@@ -19,6 +19,15 @@ pub(super) struct DiagMark {
     /// warning for `ys.push(xs.len())` whenever `ys` was an unrefined empty literal). Snapshotted here
     /// and restored wholesale, so any future speculative site gets the same protection for free.
     spawn_stale: HashMap<String, StaleWrite>,
+    /// W8-21 — a nested ANNOTATED fn inside an un-annotated one is body-checked for real
+    /// (`check_fn_body:4065`'s comment) on every speculative `infer_fn_ret` pass, and a forward-declared
+    /// callee can be `Unknown` on an early pass and concrete on a later one — so the SAME return span
+    /// can record two different verdicts across passes, which `record_call_table_entry` turns into a
+    /// hard `internal:` error on a valid program. `ret_coerce` is DECIDED state exactly like
+    /// `spawn_stale`, not a diagnostic, so it needs the same snapshot-and-restore: the one true
+    /// recording happens on the real (non-speculative) `check_stmt` walk, once every callee sig is
+    /// settled.
+    ret_coerce: crate::checker::RetCoerceTable,
 }
 
 impl Checker {
@@ -1046,6 +1055,7 @@ impl Checker {
             // Empty in every program that never writes a capture inside a task, and an empty
             // `HashMap` clone allocates nothing.
             spawn_stale: self.spawn_stale.clone(),
+            ret_coerce: self.ret_coerce.clone(),
         }
     }
 
@@ -1055,6 +1065,7 @@ impl Checker {
         self.errors.truncate(m.errors);
         self.warnings.truncate(m.warnings);
         self.spawn_stale = m.spawn_stale;
+        self.ret_coerce = m.ret_coerce;
     }
 
     /// Attribute a diagnostic to the module currently being checked (graph path only). Shared by
