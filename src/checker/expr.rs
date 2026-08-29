@@ -1327,6 +1327,16 @@ impl Checker {
             Ty::Bytes => "bytes",
             Ty::ByteArray => "bytearray",
             Ty::Shared(_) => "Shared",
+            Ty::Channel(_) => "Channel",
+            Ty::Atomic(_) => "Atomic",
+            Ty::AtomicInt => "AtomicInt",
+            Ty::RwShared(_) => "RwShared",
+            Ty::Executor => "Executor",
+            Ty::Socket => "Socket",
+            Ty::Listener => "Listener",
+            Ty::Writer => "Writer",
+            Ty::Reader => "Reader",
+            Ty::Ptr => "ptr",
             _ => return,
         };
         self.error(
