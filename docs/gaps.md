@@ -56,7 +56,7 @@ fix applied to SOME arms of an N-way set"** — is the highest-yield remaining l
 `defer` was bypassed) and `W7-4` (two sibling closures over one captured local got separate cells across
 the airlock) were both instances of it and are **fixed** — session logs at the end of this file.
 
-## TABLE — the whole backlog at a glance, **7 OPEN ROWS** (updated 2026-08-29)
+## TABLE — the whole backlog at a glance, **6 OPEN ROWS** (updated 2026-08-29)
 
 > **Reading note (2026-08-17): the table stopped being empty.** It had zero open rows for exactly one
 > day. An **external dogfood pass** (2026-08-17 — ten developers new to Chezzi, one area each, 343
