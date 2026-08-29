@@ -50,3 +50,15 @@ while i < 3:
     price := prices[i]
     print("{name:<8}{qty:>5}{price:>8.2f}")
     i = i + 1
+
+# --- alternate form / general format / sign-aware fill / space sign ---
+print("alt-x   = {255:#x}")
+print("alt-b   = {255:#b}")
+print("alt-pad = {255:#010x}")
+print("gen1    = {1234.5:g}")
+print("gen2    = {1234567.0:g}")
+print("genG    = {1.2345e-05:G}")
+print("padeq   = {42:=10}")
+print("padzero = {-42:=010}")
+print("spc-pos = {42: d}")
+print("spc-neg = {-42: d}")

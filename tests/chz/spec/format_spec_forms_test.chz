@@ -1,0 +1,41 @@
+# W8-42: the four remaining format-spec forms CPython accepts and Chezzi's checker used to reject
+# outright at check time — the `#` alternate form, `g`/`G` general float, `=` sign-aware fill, and
+# a leading-space (or explicit `-`) sign.
+
+test fn alternate_form_matches_cpython():
+    assert "{255:#x}" == "0xff"
+    assert "{255:#o}" == "0o377"
+    assert "{255:#b}" == "0b11111111"
+    assert "{-255:#x}" == "-0xff"
+    assert "{255:#010x}" == "0x000000ff"
+
+test fn general_format_matches_cpython():
+    assert "{1234.5:g}" == "1234.5"
+    assert "{1234567.0:g}" == "1.23457e+06"
+    assert "{1e-05:g}" == "1e-05"
+    assert "{1.2345e-05:G}" == "1.2345E-05"
+    assert "{255:#g}" == "255.000"
+
+test fn pad_align_matches_cpython():
+    assert "{42:=10}" == "        42"
+    assert "{-42:=10}" == "-       42"
+    assert "{42:=+10}" == "+       42"
+    assert "{-42:=010}" == "-000000042"
+    assert "{1234567:=+012,}" == "+001,234,567"
+    assert "{1000:=08,}" == "0,001,000"
+    assert "{1000:*=08,}" == "***1,000"
+
+test fn space_sign_matches_cpython():
+    assert "{42: d}" == " 42"
+    assert "{-42: d}" == "-42"
+    assert "{1.5: .2f}" == " 1.50"
+    assert "{-42: 010}" == "-000000042"
+
+test fn non_finite_forms_keep_their_shape():
+    zero := 0.0
+    big := 1.0 / zero
+    assert "{big:#f}" == "inf"
+    assert "{big:#e}" == "inf"
+    assert "{big:#g}" == "inf"
+    assert "{big:#%}" == "inf%"
+    assert "{big:=10}" == "       inf"

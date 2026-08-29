@@ -23,3 +23,13 @@ trunc = hello
 apple       3    0.50
 banana     12    0.25
 fig       100    1.00
+alt-x   = 0xff
+alt-b   = 0b11111111
+alt-pad = 0x000000ff
+gen1    = 1234.5
+gen2    = 1.23457e+06
+genG    = 1.2345E-05
+padeq   =         42
+padzero = -000000042
+spc-pos =  42
+spc-neg = -42
