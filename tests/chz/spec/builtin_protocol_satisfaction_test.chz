@@ -1,0 +1,44 @@
+# W8-32 / TICKET-024: a built-in (List/Map/Set/str/bytes/bytearray) now satisfies a USER protocol
+# out of its own harvested native method table, both through a protocol-typed param and a generic
+# bound, and a where-bounded native method (List.sort's `where T: Comparable`) still runs correctly
+# when dispatched through a protocol.
+
+protocol Sized:
+    fn len(self) -> int
+
+protocol Sortable:
+    fn sort(self) -> nil
+
+protocol Has:
+    fn contains(self, v: int) -> bool
+
+fn total(x: Sized) -> int:
+    return x.len()
+
+fn srt(x: Sortable):
+    x.sort()
+
+fn has_it(x: Has, v: int) -> bool:
+    return x.contains(v)
+
+fn total_b[T: Sized](x: T) -> int:
+    return x.len()
+
+test fn list_satisfies_sized():
+    assert total([1, 2, 3]) == 3
+
+test fn map_set_str_satisfy_sized():
+    assert total({"a": 1, "b": 2}) == 2
+    assert total({1, 2, 3}) == 3
+    assert total("abc") == 3
+
+test fn generic_bound_accepts_a_builtin():
+    assert total_b([1, 2, 3, 4]) == 4
+
+test fn where_bounded_native_method_runs_through_a_protocol():
+    xs := [3, 1, 2]
+    srt(xs)
+    assert xs == [1, 2, 3]
+
+test fn native_method_with_an_argument_runs_through_a_protocol():
+    assert has_it([1, 2, 3], 2)
