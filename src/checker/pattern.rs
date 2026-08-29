@@ -1260,6 +1260,14 @@ impl Checker {
     /// as does a fn/closure RETURN expr (returning nil just makes a void fn — not "using nil").
     pub(super) fn infer_value(&mut self, expr: &Expr) -> Ty {
         let ty = self.infer(expr);
+        if let Ty::Module(m) = &ty {
+            let m = m.clone();
+            self.error(
+                expr.span,
+                format!("module '{m}' is not a value — a module is only a qualifier, write '{m}.<member>'"),
+            );
+            return Ty::Unknown;
+        }
         if ty == Ty::Nil {
             self.error(
                 expr.span,
