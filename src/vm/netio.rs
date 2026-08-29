@@ -185,9 +185,17 @@ impl Vm {
         what: &str,
         span: Span,
     ) -> Result<core::UpdateGuard, RuntimeError> {
-        self.demote_enter(what, span)?;
-        let result = acquire_update_guard(key, self.guard_token);
-        self.demote_exit();
+        let result =
+            match acquire_update_guard_within(key, self.guard_token, Some(GUARD_DEMOTE_BUDGET)) {
+                Ok(Some(guard)) => Ok(guard),
+                Err(cycle) => Err(cycle),
+                Ok(None) => {
+                    self.demote_enter(what, span)?;
+                    let blocked = acquire_update_guard(key, self.guard_token);
+                    self.demote_exit();
+                    blocked
+                }
+            };
         result.map_err(|cycle| match cycle {
             GuardCycle::SelfHeld => self.err(
                 "deadlock: this task already holds the update guard on this Shared box — a \

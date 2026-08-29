@@ -19080,3 +19080,29 @@ main()
     assert!(res.is_ok(), "run faulted: {res:?}");
     assert_eq!(out, "300\n", "captured-local shape regressed: {out:?}");
 }
+
+/// TICKET-016 — a bounded acquire returns `Ok(None)` on timeout instead of blocking, still detects
+/// self-held re-entry, and hands the guard over once it is free.
+#[test]
+fn ticket_016_bounded_update_guard_acquire_yields_instead_of_blocking() {
+    let key = usize::MAX - 9001;
+    let budget = Some(std::time::Duration::from_millis(5));
+    let held = acquire_update_guard_within(key, u64::MAX - 1, budget)
+        .expect("a free box must not report a cycle")
+        .expect("a free box must hand the guard over");
+    assert!(matches!(
+        acquire_update_guard_within(key, u64::MAX - 1, budget),
+        Err(GuardCycle::SelfHeld)
+    ));
+    let t0 = std::time::Instant::now();
+    assert!(matches!(
+        acquire_update_guard_within(key, u64::MAX - 2, budget),
+        Ok(None)
+    ));
+    assert!(t0.elapsed() < std::time::Duration::from_millis(500));
+    drop(held);
+    assert!(matches!(
+        acquire_update_guard_within(key, u64::MAX - 2, budget),
+        Ok(Some(_))
+    ));
+}

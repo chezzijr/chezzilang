@@ -57,10 +57,34 @@ impl Drop for UpdateGuard {
     }
 }
 
+/// TICKET-016 — `GUARD_DEMOTE_BUDGET` is how long a guard acquire waits IN PLACE on its worker before
+/// paying for a replacement OS thread. `Vm::demote_enter` spawns one OS thread per demoting worker
+/// shell, so an unconditional demote on every guarded `set`/`update`/`write` made 50 000 one-`update`
+/// fibers exhaust a 32 768-task ceiling and never finish. Measured budgets on that test
+/// (`TasksMax=32768`): 0 ms still peaks at 1091 threads, 1 ms at 35, 5 ms at 19.
+pub const GUARD_DEMOTE_BUDGET: Duration = Duration::from_millis(5);
+
 /// Take the update guard for the `Shared`/`RwShared` box identified by `key`, as task `me`. Blocks
 /// while the box is held by a healthy other task; returns `Err` immediately when the wait-for walk
 /// from `me` finds a cycle (never blocks into a cycle it can already see).
 pub fn acquire_update_guard(key: usize, me: u64) -> Result<UpdateGuard, GuardCycle> {
+    match acquire_update_guard_within(key, me, None) {
+        Ok(Some(g)) => Ok(g),
+        Ok(None) => unreachable!("an unbounded update-guard acquire cannot time out"),
+        Err(cycle) => Err(cycle),
+    }
+}
+
+/// Bounded/unbounded acquire of the update guard for `key`, as task `me`. With `budget: None` this
+/// blocks exactly like [`acquire_update_guard`]. With `budget: Some(d)`, once `d` has elapsed without
+/// acquiring the guard it returns `Ok(None)` instead of continuing to block, so the caller can pay for
+/// a worker demotion only when the wait is actually long.
+pub fn acquire_update_guard_within(
+    key: usize,
+    me: u64,
+    budget: Option<Duration>,
+) -> Result<Option<UpdateGuard>, GuardCycle> {
+    let deadline = budget.map(|d| std::time::Instant::now() + d);
     let (mtx, cv) = guard_registry();
     let mut g = mtx.lock().unwrap();
     loop {
@@ -68,18 +92,29 @@ pub fn acquire_update_guard(key: usize, me: u64) -> Result<UpdateGuard, GuardCyc
             None => {
                 g.owner.insert(key, me);
                 g.waiting.remove(&me);
-                return Ok(UpdateGuard { key });
+                return Ok(Some(UpdateGuard { key }));
             }
             Some(owner) if owner == me => {
+                g.waiting.remove(&me);
                 return Err(GuardCycle::SelfHeld);
             }
             Some(_) => {
+                let left = match deadline {
+                    None => Duration::from_millis(50),
+                    Some(d) => match d.checked_duration_since(std::time::Instant::now()) {
+                        None => {
+                            g.waiting.remove(&me);
+                            return Ok(None);
+                        }
+                        Some(l) => l.min(Duration::from_millis(50)),
+                    },
+                };
                 g.waiting.insert(me, key);
                 if wait_for_cycle(&g, me) {
                     g.waiting.remove(&me);
                     return Err(GuardCycle::Cycle);
                 }
-                let (guard, _timeout) = cv.wait_timeout(g, Duration::from_millis(50)).unwrap();
+                let (guard, _timeout) = cv.wait_timeout(g, left).unwrap();
                 g = guard;
             }
         }

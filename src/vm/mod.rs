@@ -17,9 +17,9 @@ pub mod value;
 pub mod wire;
 
 use core::{
-    AtomicCore, AtomicIntCore, Backing, ChannelCore, ExecRegistry, ExecutorCore, GuardCycle,
-    ListenerCore, ReaderCore, RwSharedCore, SharedCore, SocketCore, WriterCore,
-    acquire_update_guard,
+    AtomicCore, AtomicIntCore, Backing, ChannelCore, ExecRegistry, ExecutorCore,
+    GUARD_DEMOTE_BUDGET, GuardCycle, ListenerCore, ReaderCore, RwSharedCore, SharedCore,
+    SocketCore, WriterCore, acquire_update_guard, acquire_update_guard_within,
 };
 use heap::{Fields, Heap, MapData, ModuleData, Obj, SetData};
 use op::{CapEntry, CapSrc, NO_IC, Op, Program, ProtoId, TID_NONE, WaitMeta};
