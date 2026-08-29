@@ -7,6 +7,38 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+> **✅ FIXED, 2026-08-29 (TICKET-016) — `docs/gaps.md` `W8-3`/`W8-25`: `Shared`/`RwShared` reentrancy
+> no longer loses a write or hangs undetected, and a closure over a module global no longer loses the
+> global's value at the airlock.** **W8-3:** a process-global wait-for-graph update guard
+> (`Vm::acquire_update_guard`/`release_update_guard`, `src/vm/core.rs`) now serialises `Shared.set`/
+> `.update` and `RwShared.set`/`.write` by box identity (`Arc::as_ptr`); a same-box `set`/`update`/
+> `write` re-entry FAULTS (`deadlock: this task already holds the update guard on this Shared box`)
+> instead of silently losing the nested write (was `11`, now the fault; `get`/`read` stay guard-free
+> and still read the pre-guard value, `write` nested in `read` still persists), a cross-task `set`
+> racing an `update` now BLOCKS and lands (`s = 100`, matching Go, was `s = 1`), and a genuine
+> cross-box wait cycle now FAULTS (`deadlock: two or more tasks each hold a Shared/RwShared update
+> guard the other is waiting for`) instead of hanging at rc=124 with `--timeout` unable to reach it.
+> `Vm::demote_enter`/`demote_exit` (`src/vm/sched.rs`, generalised from the socket-only
+> `demote_socket_enter`/`_exit`) keep a blocking guard wait from starving the worker pool.
+> `docs/concurrency.md:596-605` and the `docs/stdlib.md` reentrancy table are corrected to match.
+> **W8-25:** a closure's reference to its home module's `let`-bound globals is now snapshot-copied at
+> the airlock, the same way a captured local already was — `Compiler::fill_global_free` (a
+> whole-program bytecode post-pass) names every free global slot a closure tree reads and never
+> writes into `Proto::global_free`; `Obj::Closure.gsnap` carries the by-value snapshot through all
+> three cross-heap forms (`WireValue::Closure`, `Lowered::Closure`, `SnapValue::Closure`);
+> `Op::GetGlobalSlot` consults `gsnap` before falling back to a live read. As filed: `n := 1; f :=
+> fn(x): x * n`, a `spawn:` writes `n = 100` then sends `f` over a `Channel`, the receiver calls
+> `f(3)` — gave `3`, now `300`, matching the `fn main()` case and Go/CPython. A slot the closure
+> itself writes stays excluded (a read-and-write closure still gives `4`, not the stale `103`).
+> Review caught one more shape the first pass missed: a SPAWNED TASK'S OWN write to a module global
+> must stay visible to a module-level closure it CALLS without ever crossing a channel — the per-task
+> whole-module snapshot replay (`ensure_snapshot`/`fault_module`, which moves a closure and the
+> globals it reads into one task's own copy together) must never freeze a `gsnap`, fixed by a
+> `WireMemo::module_replay` flag that suppresses `gsnap` on exactly that replay path (`src/vm/
+> sched.rs`). Gated by 12 tests in `src/vm/tests.rs` (`ticket_016_*`, `cargo test --lib ticket_016`)
+> plus `obj_iter_within_size_cap`/`slot_element_is_64b` (the `gsnap` field kept `size_of::<Obj>()`
+> at 64).
+
 > **✅ FIXED, 2026-08-29 (TICKET-017) — `docs/gaps.md` `W8-31`/`W8-30`/`W8-40`: `int()`/`float()`/
 > `bool()` reject a struct/enum/function argument at check time, `Ok()` (zero-arg) spells
 > `Result[nil, E]`'s success value, and an unreachable `match` arm now warns.** `Checker::
