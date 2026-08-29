@@ -548,6 +548,14 @@ and `T!` for `Result[T, Error]` (E defaults to the built-in `Error` protocol). E
 `List[int]?`, `int!` (= `Result[int, Error]`), `int!DbErr` (= `Result[int, DbErr]`). Pure spelling —
 `Some`/`None`/`Ok`/`Err`, `match`, and `?` behave exactly as on the long forms.
 
+**Success-coercion.** At a declared `T?`/`T!E` return sink (a `fn`'s or closure's own `-> T?`/`-> T!E`,
+including its inline-expr body), a bare success value implicitly coerces: `T -> T?` gives `Some(v)`,
+`T -> T!E` gives `Ok(v)` — and a bare `return` at a `Result[nil, E]` sink gives `Ok()`. `None`, `Some`,
+`Ok` and every `Err` stay explicit; a value that is ALREADY an `Option`/`Result` is never re-wrapped
+(`Option[Option[int]]: return Some(1)` still needs `Some(Some(1))`); the coercion never chains onto the
+separate int→float widen (`float?: return 1` is still an error); and it declines at a sink mentioning a
+type parameter, and inside a synthesized default-argument provider.
+
 **One-way `int`→`float` widening — an UNTYPED CONSTANT only (Go's rule).** An untyped int **constant**
 expression adapts to a `float` context and is converted to a real `f64`. A **typed** `int` **value**
 never implicitly converts — write `float(x)`. The reverse (`float`→`int`) is always a type error (lossy).

@@ -191,6 +191,31 @@ pub type ListWidenKey = (CarrierKey, Option<Span>);
 /// means "widen", which is the pre-fix lowering — a missing entry can only ever under-apply the fix.
 pub type ListWidenTable = HashMap<ListWidenKey, bool>;
 
+/// W8-21 — which implicit success-coercion, if any, a declared `T?`/`T!E` return sink applies to a
+/// bare success value, keyed exactly like [`CarrierKey`]. This is the checker-to-backend contract:
+/// the compiler is TYPE-BLIND (it sees `decl.ret`'s syntactic annotation but not whether the returned
+/// expression is already a carrier), so it cannot re-derive this decision and must consume it
+/// verbatim.
+///
+/// `NoWrap` and a lookup MISS are deliberately IDENTICAL — both mean "lower exactly as before the
+/// fix" — so a missing entry can only ever under-apply the coercion, never mis-apply it. BOTH
+/// verdicts are recorded at the three fn-body sinks (never just the wrap one) so
+/// [`crate::checker::record_call_table_entry`] can turn an aliased key into a hard error instead of
+/// silently applying one site's verdict to another; the closure sink records ONLY a wrap verdict,
+/// because a closure body can be inferred more than once for the same span.
+///
+/// `WrapOkNil` is the bare-`return`-at-`Result[nil, E]` case: its caller must emit `Op::Nil` before
+/// the wrap, exactly like a written `Ok()` (DEC-017).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RetCoerce {
+    NoWrap,
+    WrapSome,
+    WrapOk,
+    WrapOkNil,
+}
+
+pub type RetCoerceTable = HashMap<CarrierKey, RetCoerce>;
+
 /// Which `.sum()` call sites sum a list of a SCALAR NUMERIC NEWTYPE (`newtype Cents = int`), keyed
 /// exactly like [`CarrierKey`] (the method-NAME token — see there for why the call node's span
 /// aliases across the links of a postfix/pipe chain).

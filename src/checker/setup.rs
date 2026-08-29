@@ -63,6 +63,7 @@ impl Checker {
             in_generator: false,
             in_fn_body: false,
             in_default_provider: false,
+            ret_declared: false,
             in_defer_block: false,
             in_spawn_block: false,
             collected_yields: Vec::new(),
@@ -82,6 +83,7 @@ impl Checker {
             proto_eq_calls: crate::checker::ProtoEqTable::new(),
             list_widen: crate::checker::ListWidenTable::new(),
             newtype_sums: crate::checker::NewtypeSumTable::new(),
+            ret_coerce: crate::checker::RetCoerceTable::new(),
             table_conflicts: Vec::new(),
             next_opt_tmp: 0,
             witness_scope: Vec::new(),
@@ -1129,6 +1131,7 @@ impl Checker {
         self.current_ret = Ty::Nil;
         self.in_fn_body = false;
         self.in_default_provider = false;
+        self.ret_declared = false;
         self.inferring_ret = false;
         self.collected_rets.clear();
         self.current_module_label = label;

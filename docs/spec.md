@@ -36,7 +36,10 @@ Closest existing cousins (read, don't copy): **Crystal**, **Nim**.
 **Core:** `int float bool str`, `List[T]`, `Map[K,V]`, `Set[T]`, `tuple`, `fn`, `struct`, `enum`,
 `if/else`, `for/while`, `Result[T, E]` & `Option[T]` + `?`, closures (`fn(x): x*2`), built-in generics
 (`List`/`Map`/`Set`/`Result`). `Result[T, E]` is two-param: `T!` = `Result[T, Error]`, `T!E` =
-`Result[T, E]`, `T?` = `Option[T]` (E defaults to the built-in `Error` protocol).
+`Result[T, E]`, `T?` = `Option[T]` (E defaults to the built-in `Error` protocol). A bare success value
+returned at a declared `T?`/`T!E` sink implicitly coerces to `Some(v)`/`Ok(v)` (`docs/syntax.md`
+"Success-coercion"); `None`/`Some`/`Ok`/`Err` stay explicit and a value already a carrier is never
+re-wrapped.
 
 **Included:**
 - **Pattern matching** — `match` on enums (also int/str/bool + tuple + **struct** scrutinees),

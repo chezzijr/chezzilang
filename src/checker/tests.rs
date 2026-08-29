@@ -977,6 +977,94 @@ fn bare_value_coerces_at_option_sink() {
     ok("fn f() -> int?:\n    return 1\nfn main():\n    pass\n");
 }
 
+/// W8-21 — the same coercion on the `T!E` (Result) side of a declared sink.
+#[test]
+fn bare_value_coerces_at_result_sink() {
+    ok("fn f() -> int!:\n    return 1\nfn main():\n    pass\n");
+}
+
+/// W8-21 — a bare `return` at a `Result[nil, E]` sink coerces to DEC-017's zero-arg `Ok()`.
+#[test]
+fn bare_return_coerces_at_result_nil_sink() {
+    ok("fn f() -> Result[nil, str]:\n    return\nfn main():\n    pass\n");
+}
+
+/// W8-21 — the coercion applies at a closure's declared return sink too, both for a closure literal
+/// and for a fn's own inline-expr body.
+#[test]
+fn bare_value_coerces_at_a_closure_sink() {
+    ok("c := fn() -> int?: 1\nprint(c())\n");
+    ok("fn f() -> int?: 1\nprint(f())\n");
+}
+
+/// W8-21 exclusion — a value that is ALREADY a carrier is never re-wrapped.
+#[test]
+fn success_coercion_never_rewraps_a_carrier() {
+    rejects(
+        "fn f() -> Option[Option[int]]:\n    return Some(1)\n",
+        "expected return type",
+    );
+    rejects(
+        "fn f() -> Result[Option[int], str]:\n    return None\n",
+        "expected return type",
+    );
+}
+
+/// W8-21 exclusion — the coercion never chains onto the separate int->float widen.
+#[test]
+fn success_coercion_does_not_chain_onto_int_float() {
+    rejects("fn f() -> float?:\n    return 1\n", "expected return type");
+}
+
+/// W8-21 exclusion — a sink mentioning a type param declines (rule c: `ty_fully_concrete`).
+#[test]
+fn success_coercion_declines_a_generic_sink() {
+    rejects(
+        "fn f[T](x: T) -> T?:\n    return x\n",
+        "expected return type",
+    );
+}
+
+/// W8-21 — explicit carriers stay legal and unaffected by the coercion.
+#[test]
+fn success_coercion_keeps_explicit_carriers() {
+    ok(
+        "fn a() -> int?:\n    return None\nfn b() -> int?:\n    return Some(2)\nfn c() -> int!str:\n    return Err(\"x\")\nfn main():\n    pass\n",
+    );
+}
+
+/// W8-21 exclusion — the coercion fires ONLY at return sinks, never at a `let`, an argument, or a
+/// struct field default.
+#[test]
+fn success_coercion_is_return_sinks_only() {
+    rejects("x: int? = 1\nprint(x)\n", "cannot assign");
+    rejects("fn t(x: int?) -> int:\n    return 0\nt(1)\n", "argument 1");
+    rejects(
+        "struct S:\n    n: int? = 1\nfn main():\n    pass\n",
+        "default value for field",
+    );
+}
+
+/// W8-21 exclusion — a synthesized default-argument provider is structurally a return sink but must
+/// stay excluded (its decl-site default keeps its own diagnostic, unaffected).
+#[test]
+fn success_coercion_declines_in_a_default_provider() {
+    rejects(
+        "fn g() -> int:\n    return 5\nfn f(x: int? = g()) -> int:\n    return 0\nf()\n",
+        "default value for parameter",
+    );
+}
+
+/// W8-21 exclusion — the coercion never decides an un-annotated return-type inference: two branches
+/// of conflicting shape (`Option[?]` vs `int`) still fail to infer.
+#[test]
+fn success_coercion_never_decides_an_inference() {
+    rejects(
+        "fn f():\n    if true:\n        return None\n    return 1\nf()\n",
+        "cannot infer return type",
+    );
+}
+
 /// Lossy / wrong-direction conversions MUST stay type errors (the widen arm is one-way Float←Int only).
 #[test]
 fn widen_float_into_int_still_rejected() {

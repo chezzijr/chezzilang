@@ -22,8 +22,8 @@ pub use ty::Ty;
 use ty::compatible;
 pub use ty::{
     CarrierKey, CarrierMode, CarrierTable, FnLabels, KeywordKey, KeywordTable, ListWidenKey,
-    ListWidenTable, NewtypeSumTable, ProtoEqTable, WitnessCallee, WitnessKey, WitnessSrc,
-    WitnessTable,
+    ListWidenTable, NewtypeSumTable, ProtoEqTable, RetCoerce, RetCoerceTable, WitnessCallee,
+    WitnessKey, WitnessSrc, WitnessTable,
 };
 
 /// The fully-resolved C signature of one `extern` fn, computed by the checker in the defining
@@ -1023,6 +1023,7 @@ pub fn resolve_call_tables(
     ProtoEqTable,
     ListWidenTable,
     NewtypeSumTable,
+    RetCoerceTable,
     TableConflicts,
 ) {
     crate::on_frontend_stack_scoped(move || {
@@ -1036,6 +1037,7 @@ pub fn resolve_call_tables(
             std::mem::take(&mut c.proto_eq_calls),
             std::mem::take(&mut c.list_widen),
             std::mem::take(&mut c.newtype_sums),
+            std::mem::take(&mut c.ret_coerce),
             std::mem::take(&mut c.table_conflicts),
         )
     })
@@ -1060,6 +1062,7 @@ pub fn resolve_call_tables_standalone(
     ProtoEqTable,
     ListWidenTable,
     NewtypeSumTable,
+    RetCoerceTable,
     TableConflicts,
 ) {
     let id = crate::resolver::ModuleId(std::path::PathBuf::from("<main>"));
@@ -1199,6 +1202,18 @@ pub fn list_widen_key(
     origin: Option<Span>,
 ) -> crate::checker::ListWidenKey {
     (carrier_key(module_idx, frag_ctx, frag_ord, span), origin)
+}
+
+/// W8-21 — build the [`RetCoerceTable`] key for one return-sink success-coercion decision: a plain
+/// [`carrier_key`] on the returned value's own span. The checker's record site and the compiler's
+/// lookup site call this one helper so they can never disagree on the key.
+pub fn ret_coerce_key(
+    module_idx: usize,
+    frag_ctx: Span,
+    frag_ord: usize,
+    span: Span,
+) -> crate::checker::CarrierKey {
+    carrier_key(module_idx, frag_ctx, frag_ord, span)
 }
 
 /// M24 Task 5 — the span component of a call site's [`WitnessKey`], from the CALLEE and the call
@@ -1975,6 +1990,13 @@ struct Checker {
     /// generic "returns int, not Result" wording would name a return type the user never wrote.
     /// Saved/restored 1:1 beside `current_ret` at every fn/closure boundary.
     in_default_provider: bool,
+    /// W8-21 — true while checking (or inferring the return of) a fn/closure body whose return type
+    /// is DECLARED (a `fn`'s `decl.ret.is_some()`, always true for a closure with an explicit `->`).
+    /// The sole gate for the success-coercion sinks: an UN-annotated sink has no `T?`/`T!E` to coerce
+    /// into (`sig.ret` there is inferred FROM the body, so gating on it would be circular). Reset to
+    /// `false` at module top level. Saved/restored 1:1 beside `current_ret` at every fn/closure
+    /// boundary.
+    ret_declared: bool,
     /// True while checking statements lexically inside a `defer:` BLOCK (reset across nested
     /// fn/closure boundaries, like `recover_depth`). A `?` here is DISCARDED at the block boundary
     /// (`syntax.md`: "a `?` short-circuit inside the block is discarded — a cleanup body has no
@@ -2094,6 +2116,11 @@ struct Checker {
     /// re-derive it: the decision is the ELEMENT's type, and an empty list carries none at runtime).
     /// Recorded UNCONDITIONALLY, for the same reason [`Self::carriers`] is. See [`NewtypeSumTable`].
     newtype_sums: NewtypeSumTable,
+    /// W8-21 — which implicit success-coercion, if any, each declared `T?`/`T!E` return sink applies,
+    /// keyed by [`ret_coerce_key`] on the returned value's own span and consumed verbatim by the
+    /// compiler (which cannot re-derive it: the decision is whether the returned expression is
+    /// already a carrier). See [`RetCoerceTable`].
+    ret_coerce: RetCoerceTable,
     /// W7-49 — side-table keys that were asked to hold two DIFFERENT decisions at once. Filled by
     /// [`record_call_table_entry`] (never by ordinary type errors) and returned alongside the three
     /// tables, because this pass DISCARDS its type errors — `self.error` would be swallowed here.

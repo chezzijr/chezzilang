@@ -7,6 +7,20 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+> **✅ CLOSED, 2026-08-30 (TICKET-025, W8-21) — implicit success-coercion at a declared `T?`/`T!E`
+> return sink.** A bare success value now coerces: `T -> T?` gives `Some(v)`, `T -> T!E` gives
+> `Ok(v)`, and a bare `return` at `Result[nil, E]` gives DEC-017's zero-arg `Ok()`. The checker
+> records the verdict into a new `RetCoerceTable` (the `ListWidenTable` pattern, keyed like
+> `CarrierTable`) at four sinks — `check_return`'s value and bare arms, the inline-expr body, and the
+> closure body — and the type-blind compiler consumes it verbatim at its four matching lowering sites
+> (`src/compiler/mod.rs`'s `emit_ret_coerce`), emitting the same `Op::NewEnum` pair a written
+> `Some(v)`/`Ok(v)` would. `None`/`Some`/`Ok`/`Err` stay explicit; a value already a carrier is never
+> re-wrapped; the coercion never chains onto the int→float widen; a sink mentioning a type parameter
+> or `Unknown` declines; and a synthesized default-argument provider is excluded. `docs/gaps.md`'s
+> rejected third rule (`E -> T!E`) stays rejected — `str -> Error` remains a general assignability
+> grant, unchanged. `tests/chz/spec/success_coercion_test.chz` proves the runtime value, not just
+> checker acceptance.
+>
 > **✅ FIXED, 2026-08-29 (TICKET-023) — a `protocol` now crosses a module boundary like every other
 > declaration.** `ModuleSig` gains a `protocol_defs: HashMap<String, ProtocolSigInfo>` field
 > (`src/checker/mod.rs`), fed by a new `Protocol` arm in `capture_sig` (`src/checker/setup.rs`, gated
@@ -1180,8 +1194,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > branch with it — its only machine-mode caller is `run`, whose stderr is shared with the program's, so
 > a JSON array there could never be parsed back out.
 >
-> **🗳️ TWO LANGUAGE MILESTONES DECIDED, 2026-08-17 — `docs/gaps.md` W8-21 / W8-22 (not started).**
-> Both came out of the W8-2 / W8-19 discussion, and both are filed with their **rejected** alternatives.
+> **🗳️ TWO LANGUAGE MILESTONES DECIDED, 2026-08-17 — `docs/gaps.md` W8-21 (CLOSED 2026-08-30,
+> TICKET-025) / W8-22 (not started).** Both came out of the W8-2 / W8-19 discussion, and both are
+> filed with their **rejected** alternatives.
 >
 > **W8-21 — success-coercion at a declared `T?` / `T!E` sink.** The syntax already ships (`T?` =
 > `Option[T]`, `T!E` = `Result[T,E]`, `Token::Bang` at `src/lexer/mod.rs:116`); only the coercion is

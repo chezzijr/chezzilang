@@ -1339,6 +1339,71 @@ impl Checker {
         self.assignable(expected, actual)
     }
 
+    /// W8-21 — which implicit success-coercion (if any) a bare value of type `ty` gets at a declared
+    /// return sink of type `ret`. `None` means "no coercion" — the caller keeps its existing
+    /// `assignable`/`assignable_w` diagnostic unchanged.
+    ///
+    /// Order matters: `assignable` first (rule a — an already-legal return is never coerced), then
+    /// "already a carrier" (never re-wrap `Option[Option[T]]`/`Result[Option[T],E]`), then
+    /// `ty_fully_concrete(ret)` (rule c — a generic sink `T?` declines). The wrap arms use plain
+    /// `assignable`, NEVER `assignable_w` (rule b — no chaining onto int→float:
+    /// `float?: return 1` must keep erroring).
+    pub(super) fn ret_coerce_mode(&self, ret: &Ty, ty: &Ty) -> Option<crate::checker::RetCoerce> {
+        if self.assignable(ret, ty) {
+            return None;
+        }
+        if matches!(ty, Ty::Option(_) | Ty::Result(..)) {
+            return None;
+        }
+        if !crate::checker::ty_fully_concrete(ret) {
+            return None;
+        }
+        match ret {
+            Ty::Option(inner) if self.assignable(inner, ty) => {
+                Some(crate::checker::RetCoerce::WrapSome)
+            }
+            Ty::Result(t, _) if self.assignable(t, ty) => Some(crate::checker::RetCoerce::WrapOk),
+            _ => None,
+        }
+    }
+
+    /// W8-21 — the bare-`return`-at-`Result[nil, E]` case: DEC-017's zero-arg `Ok()`. `None` for every
+    /// other declared sink, including `Option[nil]` (there is no zero-arg `Some()`, so a bare `return`
+    /// there keeps its existing `expected a return value of type Option[nil]` error).
+    pub(super) fn ret_coerce_bare(&self, ret: &Ty) -> Option<crate::checker::RetCoerce> {
+        if let Ty::Result(t, _) = ret
+            && **t == Ty::Nil
+            && crate::checker::ty_fully_concrete(ret)
+        {
+            return Some(crate::checker::RetCoerce::WrapOkNil);
+        }
+        None
+    }
+
+    /// W8-21 — record one return-sink coercion verdict into [`crate::checker::RetCoerceTable`],
+    /// keyed on `span` (the returned value's own span). `mode: None` records `NoWrap`, deliberately
+    /// identical to a lookup miss (see [`crate::checker::RetCoerce`]).
+    pub(super) fn record_ret_coerce(
+        &mut self,
+        span: Span,
+        mode: Option<crate::checker::RetCoerce>,
+    ) {
+        let key = crate::checker::ret_coerce_key(
+            self.graph_module_idx,
+            self.kw_frag_ctx,
+            self.kw_frag_ord,
+            span,
+        );
+        crate::checker::record_call_table_entry(
+            &mut self.ret_coerce,
+            &mut self.table_conflicts,
+            key,
+            mode.unwrap_or(crate::checker::RetCoerce::NoWrap),
+            "return-coercion",
+            span,
+        );
+    }
+
     pub(super) fn satisfies(&self, ty: &Ty, protocol: &str) -> Result<(), String> {
         self.satisfies_args(ty, protocol, &[])
     }

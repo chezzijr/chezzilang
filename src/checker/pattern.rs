@@ -4399,7 +4399,18 @@ impl Checker {
         let ret_ty = match ret {
             Some(t) => {
                 let declared = self.resolve_type(t, body.span);
-                if !self.assignable(&declared, &body_ty) {
+                // W8-21 — same coercion as a `fn`'s declared return sink. Records ONLY a wrap
+                // verdict, and only outside the generic-arg unification prepass: a closure body can
+                // be inferred more than once for the same span (this prepass, and the HOF loop-back),
+                // and a second, different verdict for one span would turn a valid program into a hard
+                // `internal:` error via `record_call_table_entry`.
+                let mode = self.ret_coerce_mode(&declared, &body_ty);
+                if let Some(m) = mode
+                    && !self.generic_arg_prepass
+                {
+                    self.record_ret_coerce(body.span, Some(m));
+                }
+                if mode.is_none() && !self.assignable(&declared, &body_ty) {
                     self.error(
                         body.span,
                         format!(

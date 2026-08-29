@@ -1,0 +1,35 @@
+# W8-21: implicit success-coercion at a declared `T?`/`T!E` return sink (TICKET-025). A bare success
+# value coerces to `Some(v)`/`Ok(v)` — proves the VALUE, not just the checker's acceptance.
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+fn opt() -> int?:
+    return 1
+
+fn res() -> int!:
+    return 1
+
+fn resnil() -> Result[nil, str]:
+    return
+
+fn inline_opt() -> str?: "hi"
+
+fn none_stays() -> int?:
+    return None
+
+test fn bare_value_coerces_to_some_at_an_option_sink():
+    assert str(opt()) == "Some(1)"
+
+test fn bare_value_coerces_to_ok_at_a_result_sink():
+    assert str(res()) == "Ok(1)"
+
+test fn bare_return_coerces_to_ok_at_a_result_nil_sink():
+    assert str(resnil()) == "Ok(nil)"
+
+test fn bare_value_coerces_at_an_inline_expr_body():
+    assert str(inline_opt()) == "Some('hi')"
+
+test fn explicit_none_stays_unaffected():
+    assert str(none_stays()) == "None"
+
+test fn bare_value_coerces_at_a_closure_sink():
+    c := fn() -> int?: 1
+    assert str(c()) == "Some(1)"

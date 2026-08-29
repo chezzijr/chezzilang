@@ -357,6 +357,7 @@ impl Checker {
         // correctly resets an enclosing method's binding when a nested fn is inference-checked).
         let saved_self = std::mem::replace(&mut self.current_self_ty, self_ty.clone());
         let saved_ret = std::mem::replace(&mut self.current_ret, Ty::Unknown);
+        let saved_ret_decl = std::mem::replace(&mut self.ret_declared, false);
         // In a fn body during return inference (mirrors `check_fn_body`): a `?` here targets this
         // body, not module top-level. Saved/restored beside `current_ret`.
         let saved_in_fn = std::mem::replace(&mut self.in_fn_body, true);
@@ -429,6 +430,7 @@ impl Checker {
         self.in_generator = saved_ig;
         self.inferring_ret = saved_flag;
         self.current_ret = saved_ret;
+        self.ret_declared = saved_ret_decl;
         self.in_fn_body = saved_in_fn;
         self.in_default_provider = saved_in_dflt;
         self.exit_own_frame(saved_frame);
@@ -3760,27 +3762,48 @@ impl Checker {
                 };
                 if ret == Ty::Nil {
                     self.error(e.span, "function returns nothing, cannot return a value");
-                } else if !self.assignable_w(&ret, &ty, crate::ast::untyped_int_const(e)) {
-                    let note = self.protocol_note(&ret, &ty);
-                    self.error(
-                        e.span,
-                        format!(
-                            "expected return type {ret}, found {ty}{}{note}",
-                            widen_note(&ret, &ty, e)
-                        ),
-                    );
-                } else if let ExprKind::Ident(name) = &e.kind
-                    && !contains_unknown_in_slot(&ret)
-                {
-                    // PART A: returning a bare empty-collection binding into a CONCRETE collection
-                    // return type constrains its element type (the typed-return false-positive guard,
-                    // one binding away from the direct-literal `return []`). Drop its pending
-                    // annotation requirement.
-                    self.drop_empty_site(name);
+                } else {
+                    // W8-21 — a bare success value at a declared `T?`/`T!E` sink coerces to
+                    // `Some(v)`/`Ok(v)`. Gated on `ret_declared` (an inferred sink has nothing to
+                    // coerce into) and `!in_default_provider` (a synthesized default provider is
+                    // structurally a return sink but must stay excluded — see `## Decisions`).
+                    let mode = if self.ret_declared && !self.in_default_provider {
+                        self.ret_coerce_mode(&ret, &ty)
+                    } else {
+                        None
+                    };
+                    self.record_ret_coerce(e.span, mode);
+                    if mode.is_some() {
+                    } else if !self.assignable_w(&ret, &ty, crate::ast::untyped_int_const(e)) {
+                        let note = self.protocol_note(&ret, &ty);
+                        self.error(
+                            e.span,
+                            format!(
+                                "expected return type {ret}, found {ty}{}{note}",
+                                widen_note(&ret, &ty, e)
+                            ),
+                        );
+                    } else if let ExprKind::Ident(name) = &e.kind
+                        && !contains_unknown_in_slot(&ret)
+                    {
+                        // PART A: returning a bare empty-collection binding into a CONCRETE collection
+                        // return type constrains its element type (the typed-return false-positive
+                        // guard, one binding away from the direct-literal `return []`). Drop its
+                        // pending annotation requirement.
+                        self.drop_empty_site(name);
+                    }
                 }
             }
             None => {
-                if ret != Ty::Nil {
+                // W8-21 — a bare `return` at a `Result[nil, E]` sink coerces to DEC-017's zero-arg
+                // `Ok()`. See `ret_coerce_bare`.
+                let mode = if self.ret_declared && !self.in_default_provider {
+                    self.ret_coerce_bare(&ret)
+                } else {
+                    None
+                };
+                self.record_ret_coerce(span, mode);
+                if mode.is_none() && ret != Ty::Nil {
                     self.error(span, format!("expected a return value of type {ret}"));
                 }
             }
@@ -3988,6 +4011,9 @@ impl Checker {
             }
         }
         let saved_ret = std::mem::replace(&mut self.current_ret, sig.ret.clone());
+        // W8-21 — is this sink DECLARED? Gates the success-coercion sinks: an un-annotated fn's
+        // `sig.ret` is INFERRED from the body, so gating on it would be circular.
+        let saved_ret_decl = std::mem::replace(&mut self.ret_declared, decl.ret.is_some());
         // Inside a fn body now: a `?` on a `Nil`-returning body must be REJECTED (would swallow the
         // Err/None), unlike module top-level where `Nil` accepts either. Saved/restored beside
         // `current_ret`.
@@ -4213,15 +4239,26 @@ impl Checker {
                 if ty != Ty::Nil && !ty.is_unknown() {
                     self.error(e.span, "function returns nothing, cannot return a value");
                 }
-            } else if !self.assignable_w(&ret, &ty, crate::ast::untyped_int_const(e)) {
-                let note = self.protocol_note(&ret, &ty);
-                self.error(
-                    e.span,
-                    format!(
-                        "expected return type {ret}, found {ty}{}{note}",
-                        widen_note(&ret, &ty, e)
-                    ),
-                );
+            } else {
+                // W8-21 — same coercion as `check_return`'s value arm; an inline-expr body implicitly
+                // returns its single expression.
+                let mode = if decl.ret.is_some() && !self.in_default_provider {
+                    self.ret_coerce_mode(&ret, &ty)
+                } else {
+                    None
+                };
+                self.record_ret_coerce(e.span, mode);
+                if mode.is_none() && !self.assignable_w(&ret, &ty, crate::ast::untyped_int_const(e))
+                {
+                    let note = self.protocol_note(&ret, &ty);
+                    self.error(
+                        e.span,
+                        format!(
+                            "expected return type {ret}, found {ty}{}{note}",
+                            widen_note(&ret, &ty, e)
+                        ),
+                    );
+                }
             }
         } else {
             for stmt in &decl.body {
@@ -4256,6 +4293,7 @@ impl Checker {
         self.finalize_hover_pending();
         self.pop_scope();
         self.current_ret = saved_ret;
+        self.ret_declared = saved_ret_decl;
         self.in_fn_body = saved_in_fn;
         self.in_default_provider = saved_in_dflt;
         self.current_self_ty = saved_self;

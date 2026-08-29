@@ -107,7 +107,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     // witness params and what fills each witness at each call site. The compiler CONSUMES it — it
     // never re-derives which protocols carry a static requirement (that resolves through
     // imports/aliases/embeds, which is checker work).
-    let (kw, wt, ct, pe, lw, ns, conflicts) = crate::checker::resolve_call_tables(graph);
+    let (kw, wt, ct, pe, lw, ns, rc, conflicts) = crate::checker::resolve_call_tables(graph);
     reject_table_conflicts(conflicts)?;
     c.keyword_calls = kw;
     c.witnesses = wt;
@@ -115,6 +115,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     c.proto_eq_calls = pe;
     c.list_widen = lw;
     c.newtype_sums = ns;
+    c.ret_coerce = rc;
     // Pass 0: collision pre-pass — assign runtime keys for module-scoped user types. A type name
     // declared in exactly one module keeps its BARE name (the common case → unchanged Display/print
     // output); a name declared in ≥2 modules that are BOTH in the program is disambiguated (the
@@ -189,7 +190,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     // SINGLE-RESOLVER: extern C types come from the checker's standalone pass — the SAME resolver the
     // multi-file CLI uses (no second backend resolver exists). The backend reads this table verbatim.
     c.extern_sigs = crate::checker::resolve_extern_signatures_standalone(&module.stmts);
-    let (kw, wt, ct, pe, lw, ns, conflicts) =
+    let (kw, wt, ct, pe, lw, ns, rc, conflicts) =
         crate::checker::resolve_call_tables_standalone(&module.stmts);
     reject_table_conflicts(conflicts)?;
     c.keyword_calls = kw;
@@ -198,6 +199,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     c.proto_eq_calls = pe;
     c.list_widen = lw;
     c.newtype_sums = ns;
+    c.ret_coerce = rc;
     let toplevel = c.compile_module(0, module, &[], true, None)?;
     let global_slots = std::mem::take(&mut c.global_slots);
     // A synthetic module id so the run driver has something to key the namespace cache on.
@@ -341,6 +343,11 @@ struct Compiler {
     /// CONSUMED from the checker and never re-derived; a MISS means "plain numeric sum", which is the
     /// pre-fix lowering. See [`crate::checker::NewtypeSumTable`].
     newtype_sums: crate::checker::NewtypeSumTable,
+    /// W8-21 — which implicit success-coercion (if any) each declared `T?`/`T!E` return sink applies
+    /// to its bare success value, consumed verbatim: the backend is type-blind and cannot re-derive
+    /// whether the returned expression is already a carrier. A MISS means `NoWrap` — the pre-fix
+    /// lowering. See [`crate::checker::RetCoerceTable`].
+    ret_coerce: crate::checker::RetCoerceTable,
     /// W7-43 — counter for the fresh `__optN` temp names the Option lowering mints, mirroring the
     /// checker's own. Frame-local and `__`-prefixed (unwritable by user code), so uniqueness within
     /// one compilation is all that is ever needed — and this makes it true by construction rather
@@ -865,6 +872,7 @@ impl Compiler {
             proto_eq_calls: crate::checker::ProtoEqTable::new(),
             list_widen: crate::checker::ListWidenTable::new(),
             newtype_sums: crate::checker::NewtypeSumTable::new(),
+            ret_coerce: crate::checker::RetCoerceTable::new(),
             next_opt_tmp: 0,
             witness_locals: Vec::new(),
             pending_witnesses: Vec::new(),
@@ -1667,6 +1675,7 @@ impl Compiler {
             if fc.ret_is_float {
                 fc.emit(Op::CoerceFloat, e.span);
             }
+            self.emit_ret_coerce(&mut fc, e.span)?;
             fc.emit(Op::Return, e.span);
             return Ok(self.finish(fc));
         }
@@ -2097,8 +2106,12 @@ impl Compiler {
                         if fc.ret_is_float {
                             fc.emit(Op::CoerceFloat, e.span);
                         }
+                        self.emit_ret_coerce(fc, e.span)?;
                     }
-                    None => fc.emit(Op::Nil, stmt.span),
+                    None => {
+                        fc.emit(Op::Nil, stmt.span);
+                        self.emit_ret_coerce(fc, stmt.span)?;
+                    }
                 }
                 fc.emit(Op::Return, stmt.span);
                 Ok(())
@@ -4796,6 +4809,44 @@ impl Compiler {
             .clone()
     }
 
+    /// W8-21 — emit the `Op::NewEnum` wrap a declared `T?`/`T!E` return sink's success-coercion
+    /// verdict calls for, over a value already on the stack (`WrapOkNil` additionally needs
+    /// `Op::Nil` pushed by its caller BEFORE this runs — mirrors the written zero-arg `Ok()` site
+    /// above). A miss or `NoWrap` is a no-op: the pre-fix lowering.
+    fn emit_ret_coerce(&mut self, fc: &mut FnComp, span: Span) -> Result<(), CompileError> {
+        let key = crate::checker::ret_coerce_key(
+            self.current_module_idx,
+            self.kw_frag_ctx,
+            self.kw_frag_ord,
+            span,
+        );
+        let name = match self.ret_coerce.get(&key) {
+            None | Some(crate::checker::RetCoerce::NoWrap) => return Ok(()),
+            Some(crate::checker::RetCoerce::WrapSome) => "Some",
+            Some(crate::checker::RetCoerce::WrapOk | crate::checker::RetCoerce::WrapOkNil) => "Ok",
+        };
+        let variant_id = self
+            .variant_pair(None, name)
+            .and_then(|k| self.program.variants.get(&k))
+            .map(|def| def.variant_id)
+            .ok_or_else(|| CompileError {
+                message: format!(
+                    "internal: no '{name}' variant registered for a return-site success-coercion \
+                     -- the type-checker and the backend disagree"
+                ),
+                span,
+            })?;
+        fc.emit(
+            Op::NewEnum {
+                variant: name.to_string(),
+                variant_id,
+                argc: 1,
+            },
+            span,
+        );
+        Ok(())
+    }
+
     fn member_witness_srcs(&self, name_span: Span) -> Option<&Vec<crate::checker::WitnessSrc>> {
         self.witnesses.calls.get(&crate::checker::witness_key(
             self.current_module_idx,
@@ -5896,6 +5947,7 @@ impl Compiler {
         // Uniform by-reference capture: box any param captured by a nested closure (after coercion).
         self.emit_box_param_prologue(&mut child, params);
         self.compile_expr(&mut child, body)?;
+        self.emit_ret_coerce(&mut child, body.span)?;
         child.emit(Op::Return, span);
         let pid = self.finish(child);
 
