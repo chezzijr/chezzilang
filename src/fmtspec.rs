@@ -26,6 +26,8 @@ pub enum Align {
     Left,
     Right,
     Center,
+    /// `=` sign-aware fill: pad between the sign and the digits.
+    Pad,
 }
 
 /// A parsed format spec. A default (all-`None`/`false`) spec renders the base value with no padding
@@ -128,10 +130,12 @@ pub fn parse(spec: &str) -> Result<FormatSpec, String> {
     let mut out = FormatSpec::default();
     let chars: Vec<char> = spec.chars().collect();
     let mut i = 0;
+    let mut fill_explicit = false;
 
     // [[fill]align] — an align char at position 0 or 1. If char 1 is an align, char 0 is the fill.
     if chars.len() >= 2 && is_align(chars[1]) {
         out.fill = chars[0];
+        fill_explicit = true;
         out.align = Some(to_align(chars[1]));
         i = 2;
     } else if !chars.is_empty() && is_align(chars[0]) {
@@ -151,9 +155,14 @@ pub fn parse(spec: &str) -> Result<FormatSpec, String> {
         i += 1;
     }
 
-    // [0] zero-pad flag (a leading zero before the width digits).
+    // [0] zero-pad flag (a leading zero before the width digits). Under `=` align, `0` also sets
+    // the fill to `'0'` unless an explicit fill was already written — CPython's (fill `'0'`, align
+    // `'='`) pair.
     if i < chars.len() && chars[i] == '0' {
         out.zero_pad = true;
+        if out.align == Some(Align::Pad) && !fill_explicit {
+            out.fill = '0';
+        }
         i += 1;
     }
 
@@ -220,7 +229,7 @@ fn bump(acc: usize, c: char, what: &str) -> Result<usize, String> {
 }
 
 fn is_align(c: char) -> bool {
-    matches!(c, '<' | '>' | '^')
+    matches!(c, '<' | '>' | '^' | '=')
 }
 
 fn to_align(c: char) -> Align {
@@ -228,6 +237,7 @@ fn to_align(c: char) -> Align {
         '<' => Align::Left,
         '>' => Align::Right,
         '^' => Align::Center,
+        '=' => Align::Pad,
         _ => unreachable!(),
     }
 }
@@ -243,6 +253,13 @@ pub fn apply(spec: &FormatSpec, arg: FmtArg, out: &mut String) -> Result<(), Str
     // 1) base render → `body`, plus an optional sign prefix that zero-padding must keep ahead of
     //    the inserted zeros. `is_numeric` gates the `0` flag and align defaulting.
     let (sign_prefix, mut body, is_numeric) = render_base(spec, arg)?;
+
+    // CPython's (fill `'0'`, align `'='`) pair: zero-fill applies under the bare `0` flag (no
+    // explicit align) OR under an explicit `=` align whose fill is `'0'` (`parse` already sets that
+    // fill from the `0` flag when no fill was written explicitly).
+    let zero_fill = is_numeric
+        && ((spec.zero_pad && spec.align.is_none())
+            || (spec.align == Some(Align::Pad) && spec.fill == '0'));
 
     // 1b) grouping (`,`/`_`): insert a separator every `size` digits of the LEADING digit run —
     // hex under `x`/`X` (so `format(1048575,'_x')` groups `f_ffff`), decimal otherwise (`b`/`o`
@@ -265,7 +282,7 @@ pub fn apply(spec: &FormatSpec, arg: FmtArg, out: &mut String) -> Result<(), Str
         let (digits, tail) = body.split_at(digit_end);
         if !digits.is_empty() {
             let mut want = digits.chars().count();
-            if spec.zero_pad && is_numeric && spec.align.is_none() {
+            if zero_fill {
                 let target = spec
                     .width
                     .saturating_sub(sign_prefix.chars().count() + tail.chars().count());
@@ -323,6 +340,11 @@ pub fn apply(spec: &FormatSpec, arg: FmtArg, out: &mut String) -> Result<(), Str
             push_fill(out, spec.fill, left);
             out.push_str(&full);
             push_fill(out, spec.fill, right);
+        }
+        Align::Pad => {
+            out.push_str(&sign_prefix);
+            push_fill(out, spec.fill, pad);
+            out.push_str(&body);
         }
     }
     Ok(())
@@ -407,6 +429,9 @@ pub fn spec_valid_for_scalar(spec: &FormatSpec, kind: ScalarKind) -> Result<(), 
             }
             if spec.alt {
                 return Err("format spec: alternate form '#' not allowed on a string".to_string());
+            }
+            if spec.align == Some(Align::Pad) {
+                return Err("format spec: '=' alignment not allowed on a string".to_string());
             }
             if spec.zero_pad {
                 return Err("format spec: zero-pad '0' not allowed on a string".to_string());
@@ -854,6 +879,27 @@ mod tests {
         );
         // `if` as a leading substring of an identifier is not the keyword — still splits normally.
         assert_eq!(split_spec("iffy:>5"), ("iffy", Some(">5")));
+    }
+
+    #[test]
+    fn pad_align_matches_cpython() {
+        assert_eq!(ok_apply("=10", FmtArg::Int(42)), "        42");
+        assert_eq!(ok_apply("=10", FmtArg::Int(-42)), "-       42");
+        assert_eq!(ok_apply("=+10", FmtArg::Int(42)), "+       42");
+        assert_eq!(ok_apply("*=10", FmtArg::Int(-42)), "-*******42");
+        assert_eq!(ok_apply("=010", FmtArg::Int(-42)), "-000000042");
+        assert_eq!(ok_apply("0=10", FmtArg::Int(42)), "0000000042");
+        // fill `=`, align `^`
+        assert_eq!(ok_apply("=^10", FmtArg::Int(42)), "====42====");
+        assert_eq!(ok_apply("=10", FmtArg::Float(f64::INFINITY)), "       inf");
+        assert_eq!(ok_apply("=+012,", FmtArg::Int(1234567)), "+001,234,567");
+        assert_eq!(ok_apply("=012,", FmtArg::Int(-1234567)), "-001,234,567");
+        // the four values that discriminate the overshoot rule
+        assert_eq!(ok_apply("=08,", FmtArg::Int(1000)), "0,001,000");
+        assert_eq!(ok_apply("0=8,", FmtArg::Int(1000)), "0,001,000");
+        assert_eq!(ok_apply("*=08,", FmtArg::Int(1000)), "***1,000");
+        assert_eq!(ok_apply("=8,", FmtArg::Int(1000)), "   1,000");
+        assert_eq!(ok_apply("=09,", FmtArg::Int(-1000)), "-0,001,000");
     }
 
     #[test]
