@@ -11342,10 +11342,16 @@ fn vm_wait_blocks_then_wakes_on_second_channel() {
 /// The multi-channel park SWEEP: a consumer parks on {a, b}, a `send` to `a` wakes it and it
 /// finishes — then a later `send` to `b` must NOT re-wake the now-done fiber (its stale `b`
 /// registration was swept on resume). Without the sweep this re-schedules a `Done` fiber → panic.
+/// `run` is `run_capture`, so this races the same three producers as the parallel twin below;
+/// only membership in `{"1\n", "2\n"}` is guaranteed, not a specific arm.
 #[test]
 fn vm_wait_sweeps_other_buckets_after_waking() {
     let src = "fn consumer(a: Channel[int], b: Channel[int]):\n    wait:\n        v := a.recv(): print(v)\n        w := b.recv(): print(w)\nfn p_a(a: Channel[int]):\n    a.send(1)\nfn p_b(b: Channel[int]):\n    b.send(2)\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    parallel:\n        spawn consumer(a, b)\n        spawn p_a(a)\n        spawn p_b(b)\nmain()\n";
-    assert_eq!(run(src), "1\n");
+    let last = run(src);
+    assert!(
+        last == "1\n" || last == "2\n",
+        "unexpected sweep output: {last:?}"
+    );
 }
 
 /// A `wait` `=` arm to a Field/Index lvalue (the custom `emit_wait_assign` stash-and-reload path):
@@ -11390,8 +11396,8 @@ fn vm_wait_blocks_then_wakes_on_second_channel_parallel() {
 /// token was swept under the sched lock). Without the sweep this re-schedules a Done fiber → panic.
 /// Two real-thread producers race, so EITHER arm may win — the sweep's guarantee is structural (no
 /// panic, no hang), NOT a specific value; assert the run completes cleanly with a valid value, and
-/// loop to exercise both orderings + the post-done send. The plain (no-scheduler) run is deterministic
-/// (source order ⇒ "1\n"); only `--parallel` races.
+/// loop to exercise both orderings + the post-done send. `run` is `run_capture` too, so it races
+/// exactly like the loop above it; only membership is asserted, not a specific arm.
 #[test]
 fn vm_wait_sweeps_other_buckets_after_waking_parallel() {
     let src = "fn consumer(a: Channel[int], b: Channel[int]):\n    wait:\n        v := a.recv(): print(v)\n        w := b.recv(): print(w)\nfn p_a(a: Channel[int]):\n    a.send(1)\nfn p_b(b: Channel[int]):\n    b.send(2)\nfn main():\n    a := Channel[int]()\n    b := Channel[int]()\n    parallel:\n        spawn consumer(a, b)\n        spawn p_a(a)\n        spawn p_b(b)\nmain()\n";
@@ -11404,7 +11410,11 @@ fn vm_wait_sweeps_other_buckets_after_waking_parallel() {
             "unexpected sweep output: {out:?}"
         );
     }
-    assert_eq!(run(src), "1\n"); // plain (no-scheduler) run is deterministic (source-order poll)
+    let last = run(src);
+    assert!(
+        last == "1\n" || last == "2\n",
+        "unexpected sweep output: {last:?}"
+    );
 }
 
 /// M:N wait-park: a wait-parked fiber with a LIVE sibling that will send must take the arm and
