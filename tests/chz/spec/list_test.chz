@@ -120,6 +120,17 @@ test fn unique_dedup():
     u := xs.unique()
     assert xs == [3, 1, 3, 2, 1], "unique() does not mutate"
 
+test fn unique_agrees_with_element_equality():
+    assert [3, 1, 3, 2, 1].unique() == [3, 1, 2], "first-seen order"
+    assert ["a", "b", "a"].unique() == ["a", "b"]
+    assert [true, false, true].unique() == [true, false]
+    assert [0.0, -0.0].unique() == [0.0], "0.0 and -0.0 are equal, so they must hash together"
+    big := 9007199254740993
+    near := 9007199254740992
+    assert [big, near, big].unique() == [big, near], "two ints that collide as f64 stay distinct"
+    nested: List[List[int]] = [[1], [1], [2]]
+    assert nested.unique().len() == 2, "a non-hashable element falls back to the scan"
+
 # ---- chunk / windows ----
 
 test fn chunk_windows():

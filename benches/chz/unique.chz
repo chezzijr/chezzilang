@@ -1,0 +1,11 @@
+# Bench: List.unique(), 500000 ints, 250000 distinct (W8-34). Prints 250000.
+
+fn main():
+    xs := []
+    i := 0
+    while i < 500000:
+        xs.push(i % 250000)
+        i += 1
+    print(xs.unique().len())
+
+main()

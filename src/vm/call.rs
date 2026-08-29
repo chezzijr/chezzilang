@@ -3372,9 +3372,33 @@ impl Vm {
                                         out.push(v);
                                     }
                                 }
+                            } else if items.iter().all(|&v| vm.is_flat_hash_key(v)) {
+                                // W8-34: every element is a flat scalar key, so dedupe through a hash
+                                // index in one pass instead of a linear scan per element. The gate is
+                                // all-or-nothing over the WHOLE list, never per-element: `bytes ==
+                                // bytearray` is content-equal, so mixing would let an indexed `bytes`
+                                // and a scanned `bytearray` of equal content both survive. A bucket hit
+                                // is still confirmed by `elem_equal` — the hash only picks candidates,
+                                // the compare remains the verdict (DEC-014).
+                                let mut seen = SetData::default();
+                                for &v in &items {
+                                    let hv = vm.scalar_hash(v);
+                                    let mut dup = false;
+                                    for &p in seen.candidates(hv) {
+                                        if vm.elem_equal(seen.entries[p].1, v, 0, span)? {
+                                            dup = true;
+                                            break;
+                                        }
+                                    }
+                                    if !dup {
+                                        seen.push(hv, v);
+                                    }
+                                }
+                                out = seen.entries.iter().map(|&(_, v)| v).collect();
                             } else {
                                 // Remove ALL duplicates, first-occurrence order (Python `dict.fromkeys`).
-                                // ponytail: O(n^2) linear scan, swap to a hash_key-backed set if a hot path needs O(n).
+                                // Fallback for any non-flat element (container, Struct/Enum/NewType,
+                                // ByteArray) — same O(n^2) scan as before the hash-index fast path above.
                                 for &v in &items {
                                     if vm.seq_slot(&out, v, span)?.is_none() {
                                         out.push(v);

@@ -1289,6 +1289,22 @@ impl Vm {
         }
     }
 
+    /// Whether `v` is a flat scalar hash key: inline `Int`/`Bool`/`Nil`, a Float-tagged box, or
+    /// `Obj::Str`/`Obj::Bytes`/`Obj::BigInt`. `Struct`/`Enum`/`NewType` are excluded because their
+    /// `hash`/`eq` re-enter the VM and `unique()` requires no `hash` at all; `ByteArray` is excluded
+    /// because `bytes == bytearray` is content-equal; containers are excluded because `hash_value`
+    /// faults on them.
+    #[inline]
+    pub(super) fn is_flat_hash_key(&self, v: Value) -> bool {
+        match v.as_obj() {
+            None => true,
+            Some(h) => matches!(
+                self.heap.get(h),
+                Obj::Str(_) | Obj::Bytes(_) | Obj::BigInt(_)
+            ),
+        }
+    }
+
     /// Dispatch a struct key's user `hash(self) -> int`, returning its `i64` as a `u64`. Mirrors
     /// [`struct_compare`] (re-entrant via `run_proto`).
     pub(super) fn struct_hash(&mut self, v: Value, span: Span) -> Result<u64, RuntimeError> {
