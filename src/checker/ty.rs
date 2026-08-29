@@ -653,7 +653,9 @@ impl fmt::Display for Ty {
             Ty::Reader => write!(f, "Reader"),
             Ty::Ptr => write!(f, "ptr"),
             Ty::Protocol(n, args) => {
-                write!(f, "{n}")?;
+                // `n` is the qualified IDENTITY key (`<module-key>::Name`, TICKET-027); user-facing
+                // diagnostics must render the BARE display name, matching the struct/enum treatment.
+                write!(f, "{}", crate::compiler::bare_display(n))?;
                 if !args.is_empty() {
                     write!(f, "[")?;
                     for (i, a) in args.iter().enumerate() {

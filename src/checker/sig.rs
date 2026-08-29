@@ -158,13 +158,15 @@ impl Checker {
             labels,
             params,
             ret,
-            type_params: merged,
+            // TICKET-027: a stored bound must cross a module boundary keyed, not bare, so a whole-module
+            // import re-spells it correctly against the importer's own `Checker::protocols`.
+            type_params: self.key_param_bounds(&merged),
             // A method's OWN `[U]` where-bounds are merged into `type_params` above (enforced via the
             // ordinary generic-call path). `where_bounds` carries only CONDITIONAL-METHOD receiver
             // bounds — a `where` naming the enclosing type's param — enforced at the struct/enum/newtype
             // method-call dispatch arms against the receiver's concrete type arg (mirrors native sigs,
             // e.g. `List[T].sort`'s `where T: Comparable`). Empty for a free fn or a plain method.
-            where_bounds: receiver_bounds,
+            where_bounds: self.key_param_bounds(&receiver_bounds),
             is_static,
             doc: decl.doc.clone(),
             // M24 — computed HERE (the one site with the declaration's body in hand) so every
@@ -887,7 +889,7 @@ impl Checker {
     /// gated the same way. Ordinary instance-method protocols (all `is_static == false`) return `false`
     /// and stay usable as value existentials (`c: Container[int]`).
     pub(super) fn protocol_has_static_method(&self, n: &str) -> bool {
-        let Some(p) = self.protocols.get(n) else {
+        let Some(p) = self.protocol_shape(n) else {
             return false;
         };
         if p.methods.iter().any(|(_, s)| s.is_static) {
@@ -1564,7 +1566,7 @@ impl Checker {
                     // A protocol name used as a value type (existential), e.g. `Error`. BUT a protocol
                     // with a STATIC method requirement (`Convert`-style static ctor) is witnessable only
                     // by a static method — a VALUE can't invoke it — so it is BOUND-ONLY, rejected here.
-                    _ if self.protocols.contains_key(n) => {
+                    _ if self.protocol_shape(n).is_some() => {
                         if self.protocol_has_static_method(n) {
                             self.error(
                                 span,
@@ -1574,7 +1576,7 @@ impl Checker {
                             );
                             Ty::Unknown
                         } else {
-                            Ty::Protocol(n.clone(), Vec::new())
+                            Ty::Protocol(self.protocol_key(n), Vec::new())
                         }
                     }
                     _ => {
@@ -1747,10 +1749,10 @@ impl Checker {
                     // existential. Conformance is witnessed at every store/pass boundary (via
                     // `assignable` → `satisfies_args`); the args are then erased at runtime. Mirrors
                     // the struct/enum parameterized arms above.
-                    _ if self.protocols.contains_key(n) => {
+                    _ if self.protocol_shape(n).is_some() => {
                         let resolved: Vec<Ty> =
                             args.iter().map(|a| self.resolve_type(a, span)).collect();
-                        let nparams = self.protocols.get(n).map_or(0, |p| p.type_params.len());
+                        let nparams = self.protocol_shape(n).map_or(0, |p| p.type_params.len());
                         if nparams != resolved.len() {
                             self.error(
                                 span,
@@ -1771,7 +1773,7 @@ impl Checker {
                             );
                             Ty::Unknown
                         } else {
-                            Ty::Protocol(n.clone(), resolved)
+                            Ty::Protocol(self.protocol_key(n), resolved)
                         }
                     }
                     // A user-defined generic newtype instantiated with type arguments: `Stack[int]`.
@@ -1897,7 +1899,7 @@ impl Checker {
                             ),
                         );
                     }
-                    if self.protocol_has_static_method(name) {
+                    if self.protocol_has_static_method(&self.type_key(&mid, name)) {
                         self.error(
                             span,
                             format!(
@@ -1906,7 +1908,7 @@ impl Checker {
                         );
                         Ty::Unknown
                     } else {
-                        Ty::Protocol(name.clone(), resolved)
+                        Ty::Protocol(self.type_key(&mid, name), resolved)
                     }
                 } else if sig.types.contains(name) {
                     // An opaque/native builtin TYPE reached by qualified path (`concurrency.Shared[int]`,
@@ -2457,7 +2459,7 @@ impl Checker {
                 ..
             } => {
                 if self.hover_probe.is_some() {
-                    let ty = Ty::Protocol(name.clone(), Vec::new());
+                    let ty = Ty::Protocol(self.protocol_key(name), Vec::new());
                     self.hover_record_at(*name_span, &ty, HoverKind::Struct, doc.clone());
                 }
             }
@@ -4458,8 +4460,7 @@ impl Checker {
         };
         let sig = self.protocol_method_sig(p, method)?;
         let mut map: HashMap<String, Ty> = self
-            .protocols
-            .get(p)?
+            .protocol_shape(p)?
             .type_params
             .iter()
             .cloned()
@@ -4486,7 +4487,7 @@ impl Checker {
         // struct/enum, which `op_contains` already dispatches, so this is a checker-only widening.
         if let Ty::Param(pname) = ty {
             for b in self.type_params.get(pname)? {
-                let Some(pinfo) = self.protocols.get(&b.name) else {
+                let Some(pinfo) = self.protocol_shape(&b.name) else {
                     continue;
                 };
                 // Own `contains` OR one an embed requires (`protocol Bag: Contains[int]`).

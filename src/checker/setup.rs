@@ -161,6 +161,58 @@ impl Checker {
             .unwrap_or_else(|| name.to_string())
     }
 
+    /// The runtime key for a protocol name: unchanged (bare) for a [`RESERVED_PROTOCOLS`] member,
+    /// else [`Checker::bare_key`] (mirrors the struct/enum treatment, TICKET-027).
+    pub(super) fn protocol_key(&self, name: &str) -> String {
+        if is_reserved_protocol(name) {
+            name.to_string()
+        } else {
+            self.bare_key(name)
+        }
+    }
+
+    /// A protocol's shape looked up by identity key in the OWNING module's `ModuleSig` (miss-only
+    /// fallback for [`Checker::protocol_shape`]). Mirrors [`Checker::owning_struct_def`].
+    pub(super) fn owning_protocol_def(&self, key: &str) -> Option<&ProtocolInfo> {
+        self.module_sigs.iter().find_map(|(mid, sig)| {
+            sig.protocol_defs
+                .iter()
+                .find_map(|(name, info)| (self.type_key(mid, name) == key).then_some(&info.info))
+        })
+    }
+
+    /// A protocol's shape by a source-written name or a key carried on a `Ty::Protocol`: keys the
+    /// argument first (a no-op if it is already a key), then the local `self.protocols` table, else
+    /// the owning module's `ModuleSig` (TICKET-027).
+    pub(super) fn protocol_shape(&self, name_or_key: &str) -> Option<&ProtocolInfo> {
+        let key = self.protocol_key(name_or_key);
+        self.protocols
+            .get(&key)
+            .or_else(|| self.owning_protocol_def(&key))
+    }
+
+    /// Clone `bs` with each [`Bound::name`] re-spelled to its protocol key (TICKET-027 — a stored
+    /// bound must cross a module boundary keyed, not bare).
+    pub(super) fn key_bounds(&self, bs: &[Bound]) -> Vec<Bound> {
+        bs.iter()
+            .map(|b| Bound {
+                name: self.protocol_key(&b.name),
+                args: b.args.clone(),
+            })
+            .collect()
+    }
+
+    /// Clone `tps` with each [`TypeParam::bounds`] re-spelled via [`Checker::key_bounds`]
+    /// (TICKET-027).
+    pub(super) fn key_param_bounds(&self, tps: &[TypeParam]) -> Vec<TypeParam> {
+        tps.iter()
+            .map(|tp| TypeParam {
+                bounds: self.key_bounds(&tp.bounds),
+                ..tp.clone()
+            })
+            .collect()
+    }
+
     // --- member-resolution fallback by the value's OWN module-scoped identity key ---
     //
     // User types are MODULE-SCOPED: their per-module shape tables (`self.structs` / `self.enums` +
@@ -1180,7 +1232,9 @@ impl Checker {
                 if let StmtKind::Struct { name, .. }
                 | StmtKind::Enum { name, .. }
                 | StmtKind::NewType { name, .. }
-                | StmtKind::TypeAlias { name, .. } = &s.kind
+                | StmtKind::TypeAlias { name, .. }
+                | StmtKind::Protocol { name, .. } = &s.kind
+                    && !(matches!(s.kind, StmtKind::Protocol { .. }) && is_reserved_protocol(name))
                 {
                     let key = self.type_key(mid, name);
                     self.bare_types.insert(name.clone(), key);
@@ -1762,13 +1816,15 @@ impl Checker {
                             }
                         } else if let Some(pdef) = sig.protocol_defs.get(member) {
                             // A protocol carries no runtime value and no layout, so registering the
-                            // exported shape under the BIND name is the whole binding — there is no
-                            // key/table pair to inject like a struct/enum/newtype.
-                            self.protocols.insert(bind.clone(), pdef.info.clone());
+                            // exported shape under its declaring-module KEY (TICKET-027) plus a
+                            // bare-visible entry under the BIND name is the whole binding.
+                            let key = self.type_key(&imp.target, member);
+                            self.protocols.insert(key.clone(), pdef.info.clone());
+                            self.bare_types.insert(bind.clone(), key.clone());
                             self.record_imported_type_hover(
                                 bind,
                                 *name_span,
-                                &Ty::Protocol(bind.clone(), Vec::new()),
+                                &Ty::Protocol(key, Vec::new()),
                                 pdef.doc.as_deref(),
                                 "protocol",
                                 path,
@@ -1906,7 +1962,7 @@ impl Checker {
                     // source for its 21 names (mirrored, drift-guarded, in `std/prelude.chz`), so
                     // exporting it here would put a second, sig-borne copy into `sig.types`.
                     if !is_reserved_protocol(name)
-                        && let Some(info) = self.protocols.get(name)
+                        && let Some(info) = self.protocol_shape(name)
                     {
                         sig.types.insert(name.clone());
                         sig.protocol_defs.insert(
@@ -2870,7 +2926,9 @@ impl Checker {
                     self.structs.insert(
                         key,
                         StructInfo {
-                            type_params: type_params.clone(),
+                            // TICKET-027: re-spell each stored bound to a protocol KEY so it crosses a
+                            // module boundary correctly.
+                            type_params: self.key_param_bounds(type_params),
                             fields,
                             methods,
                             origin,
@@ -2973,8 +3031,9 @@ impl Checker {
                     }
                     self.exit_type_params(saved);
                     self.enums.insert(key.clone(), names);
+                    // TICKET-027: re-spell each stored bound to a protocol KEY.
                     self.enum_type_params
-                        .insert(key.clone(), type_params.clone());
+                        .insert(key.clone(), self.key_param_bounds(type_params));
                     self.enum_methods.insert(key, method_sigs);
                 }
                 StmtKind::NewType {
@@ -3115,8 +3174,9 @@ impl Checker {
                         .collect();
                     self.current_self_ty = saved_self;
                     self.exit_type_params(saved);
+                    // TICKET-027: re-spell each stored bound to a protocol KEY.
                     self.newtype_type_params
-                        .insert(key.clone(), type_params.clone());
+                        .insert(key.clone(), self.key_param_bounds(type_params));
                     self.newtype_defs.insert(key, (under_ty, method_sigs));
                 }
                 StmtKind::Extern { fns, .. } => {

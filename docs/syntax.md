@@ -1696,6 +1696,8 @@ subscript with no following call (`obj.items[0]`, `m.data[k]`) is always an ordi
 
 ## 7b. Generics & protocols  (M7)
 
+A protocol must be imported to be used in another module -- `import Drawable from shapes` or the qualified `shapes.Drawable`.
+
 **Generic functions** take type parameters in `[…]` after the name. A parameter may carry a
 **bound** — a protocol the instantiating type must satisfy. Type arguments are normally **inferred**
 from the call, but may be **given explicitly** at the call site: `id[int](42)` and the struct form

@@ -5369,13 +5369,13 @@ fn witness_cross_module_runs_both_engines() {
     // `reset` — so a type declared in the ENTRY module reaches its `default()` across TWO boundaries.
     std::fs::write(
         dir.join("mid.chz"),
-        "import lib\nimport reset from lib\n\nfn twice[U: Default](x: U) -> U:\n    return reset(lib.reset(x))\n",
+        "import lib\nimport reset, Default from lib\n\nfn twice[U: Default](x: U) -> U:\n    return reset(lib.reset(x))\n",
     )
     .unwrap();
     let entry = dir.join("main.chz");
     std::fs::write(
         &entry,
-        "import lib\nimport mid\nimport reset from lib\nimport reset as again from lib\n\nstruct Local:\n    k: str\n    fn default() -> Local:\n        return Local(\"loc\")\n\nfn mine[T: Default](x: T) -> T:\n    return T.default()\n\nfn fwd[U: Default](x: U) -> U:\n    return lib.reset(x)\n\nfn main():\n    print(lib.reset(lib.Counter(1)).n)\n    print(reset(lib.Counter(1)).n)\n    print(again(lib.Counter(1)).n)\n    print(lib.reset[lib.Counter](lib.Counter(1)).n)\n    print(reset(Local(\"x\")).k)\n    print(mine(lib.Counter(1)).n)\n    print(fwd(lib.Counter(1)).n)\n    print(fwd(Local(\"y\")).k)\n    print(mid.twice(Local(\"z\")).k)\n    print(mid.twice(lib.Counter(1)).n)\nmain()\n",
+        "import lib\nimport mid\nimport reset, Default from lib\nimport reset as again from lib\n\nstruct Local:\n    k: str\n    fn default() -> Local:\n        return Local(\"loc\")\n\nfn mine[T: Default](x: T) -> T:\n    return T.default()\n\nfn fwd[U: Default](x: U) -> U:\n    return lib.reset(x)\n\nfn main():\n    print(lib.reset(lib.Counter(1)).n)\n    print(reset(lib.Counter(1)).n)\n    print(again(lib.Counter(1)).n)\n    print(lib.reset[lib.Counter](lib.Counter(1)).n)\n    print(reset(Local(\"x\")).k)\n    print(mine(lib.Counter(1)).n)\n    print(fwd(lib.Counter(1)).n)\n    print(fwd(Local(\"y\")).k)\n    print(mid.twice(Local(\"z\")).k)\n    print(mid.twice(lib.Counter(1)).n)\nmain()\n",
     )
     .unwrap();
     let graph = crate::resolver::build_graph(&entry).expect("resolve");
@@ -5580,7 +5580,7 @@ fn m24_2_a_parameter_shadowing_a_user_module_keeps_the_witness() {
     let entry = dir.join("main.chz");
     std::fs::write(
         &entry,
-        "import lib\nimport Counter, Holder from lib\n\
+        "import lib\nimport Counter, Holder, Default from lib\n\
          fn outer[T: Default](v: T, lib: Holder) -> int:\n    z := T.default()\n    \
          f := fn(): lib.build[T](v)\n    g := f()\n    return 14\n\
          print(outer(Counter(1), Holder(2)))\n",

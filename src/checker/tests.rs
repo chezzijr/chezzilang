@@ -26048,6 +26048,176 @@ fn same_protocol_name_in_two_modules_does_not_conflict() {
     ]);
 }
 
+/// TICKET-027: two modules each declaring `Drawable` are distinct types once keyed. A struct that
+/// satisfies `a.Drawable` (has `draw`) must be accepted against a bound importing `a`'s `Drawable`
+/// and rejected against a bound importing `b`'s `Drawable` (which additionally requires `paint`).
+#[test]
+fn two_modules_same_protocol_name_are_distinct_types() {
+    let a = ("a.chz", "protocol Drawable:\n    fn draw(self) -> str\n");
+    let b = ("b.chz", "protocol Drawable:\n    fn paint(self) -> str\n");
+    let dot = "struct Dot:\n    n: int\n    fn draw(self) -> str:\n        return \"dot\"\n";
+    files_ok(&[
+        a,
+        (
+            "main.chz",
+            &format!(
+                "import Drawable from a\n{dot}\nfn show[T: Drawable](x: T):\n    print(x.draw())\nshow(Dot(1))\n"
+            ),
+        ),
+    ]);
+    files_reject(
+        &[
+            b,
+            (
+                "main.chz",
+                &format!(
+                    "import Drawable from b\n{dot}\nfn show[T: Drawable](x: T):\n    print(x.draw())\nshow(Dot(1))\n"
+                ),
+            ),
+        ],
+        "does not satisfy Drawable",
+    );
+}
+
+/// TICKET-027: keying closes a leak -- a bare, unimported protocol name no longer resolves across a
+/// module boundary. Before this change the table was program-global, so `import a` alone made `a`'s
+/// `Drawable` visible bare in `main.chz`.
+#[test]
+fn protocol_is_not_visible_bare_without_an_import() {
+    files_reject(
+        &[
+            ("a.chz", "protocol Drawable:\n    fn draw(self) -> str\n"),
+            (
+                "main.chz",
+                "import a\nfn f(d: Drawable) -> str:\n    return d.draw()\n",
+            ),
+        ],
+        "unknown type 'Drawable'",
+    );
+}
+
+/// TICKET-027 ceiling pin: the dup guard must stay re-keyed, not deleted -- a SAME-module
+/// redeclaration is still an error.
+#[test]
+fn same_module_duplicate_protocol_is_still_an_error() {
+    files_reject(
+        &[(
+            "main.chz",
+            "protocol Drawable:\n    fn draw(self) -> str\n\nprotocol Drawable:\n    fn draw(self) -> str\n",
+        )],
+        "protocol 'Drawable' is already defined",
+    );
+}
+
+/// TICKET-027 ceiling pin: a reserved protocol bound needs no import in ANY module -- the 21
+/// `RESERVED_PROTOCOLS` are never keyed.
+#[test]
+fn reserved_protocol_bound_needs_no_import_in_any_module() {
+    files_ok(&[
+        ("a.chz", "fn pick[T: Eq](x: T, y: T) -> T:\n    return x\n"),
+        ("b.chz", "fn pick[T: Eq](x: T, y: T) -> T:\n    return x\n"),
+        ("main.chz", "import a\nimport b\nprint(1)\n"),
+    ]);
+}
+
+/// TICKET-027 ceiling pin: a qualified protocol with a transitively-embedded static requirement
+/// stays bound-only. This pins that step 10's fix re-identifies the protocol by KEY rather than
+/// re-implementing `protocol_has_static_method`'s embed flatten.
+#[test]
+fn qualified_embed_static_requirement_stays_bound_only() {
+    files_reject(
+        &[
+            ("shapes.chz", "protocol MakeInt:\n    Convert[int]\n"),
+            (
+                "main.chz",
+                "import shapes\nfn f(m: shapes.MakeInt) -> int:\n    return 1\n",
+            ),
+        ],
+        "has a static method and can only be used as a bound",
+    );
+}
+
+/// TICKET-027 ceiling pin (step 15 funnel: `StructInfo::type_params`): a generic struct's stored
+/// protocol bound must cross an import re-spelled to a key, not bare.
+#[test]
+fn imported_generic_struct_with_a_user_protocol_bound_still_checks() {
+    let lib = (
+        "lib.chz",
+        "protocol Describable:\n    fn describe(self) -> str\n\nstruct Box[T: Describable]:\n    v: T\n",
+    );
+    files_ok(&[
+        lib,
+        (
+            "main.chz",
+            "import Box from lib\n\nstruct Dot:\n    n: int\n    fn describe(self) -> str:\n        return \"dot\"\n\nfn main():\n    b := Box[Dot](Dot(1))\n    print(b.v.describe())\nmain()\n",
+        ),
+    ]);
+    files_reject(
+        &[
+            lib,
+            (
+                "main.chz",
+                "import Box from lib\n\nstruct Dot:\n    n: int\n\nfn main():\n    b := Box[Dot](Dot(1))\n    print(b.v.n)\nmain()\n",
+            ),
+        ],
+        "does not satisfy Describable",
+    );
+}
+
+/// TICKET-027 ceiling pin (step 15 funnel: `enum_type_params`): a generic enum's stored protocol
+/// bound must cross an import re-spelled to a key, not bare.
+#[test]
+fn imported_generic_enum_with_a_user_protocol_bound_still_checks() {
+    let lib = (
+        "lib.chz",
+        "protocol Describable:\n    fn describe(self) -> str\n\nenum Eb[T: Describable]:\n    Empty\n    Has(T)\n",
+    );
+    files_ok(&[
+        lib,
+        (
+            "main.chz",
+            "import Eb from lib\n\nstruct Dot:\n    n: int\n    fn describe(self) -> str:\n        return \"dot\"\n\nfn main():\n    e: Eb[Dot] = Eb.Has(Dot(1))\n    print(1)\nmain()\n",
+        ),
+    ]);
+    files_reject(
+        &[
+            lib,
+            (
+                "main.chz",
+                "import Eb from lib\n\nstruct Dot:\n    n: int\n\nfn main():\n    e: Eb[Dot] = Eb.Has(Dot(1))\n    print(1)\nmain()\n",
+            ),
+        ],
+        "does not satisfy Describable",
+    );
+}
+
+/// TICKET-027 ceiling pin (step 15 funnel: `newtype_type_params`): a generic newtype's stored
+/// protocol bound must cross an import re-spelled to a key, not bare.
+#[test]
+fn imported_generic_newtype_with_a_user_protocol_bound_still_checks() {
+    let lib = (
+        "lib.chz",
+        "protocol Describable:\n    fn describe(self) -> str\n\nnewtype Stack[T: Describable] = List[T]\n",
+    );
+    files_ok(&[
+        lib,
+        (
+            "main.chz",
+            "import Stack from lib\n\nstruct Dot:\n    n: int\n    fn describe(self) -> str:\n        return \"dot\"\n\nfn main():\n    s: Stack[Dot] = Stack([Dot(1)])\n    print(1)\nmain()\n",
+        ),
+    ]);
+    files_reject(
+        &[
+            lib,
+            (
+                "main.chz",
+                "import Stack from lib\n\nstruct Dot:\n    n: int\n\nfn main():\n    s: Stack[Dot] = Stack([Dot(1)])\n    print(1)\nmain()\n",
+            ),
+        ],
+        "does not satisfy Describable",
+    );
+}
+
 // ===== W7-24 — an interpolation fragment is a normalized call site like any other =====
 
 /// Named args / defaults / variadic sweeping reach a call inside `"{…}"`. Before `desugar` parsed
@@ -26199,12 +26369,12 @@ fn witness_static_call_cross_module_ok() {
     ]);
     // …and a forwarding LOCAL generic feeding an IMPORTED one: the caller's own `$w:U` local fills
     // the imported callee's slot, so forwarding crosses the boundary too (both spellings). The bound
-    // names the IMPORTED protocol, which a whole-module import makes usable bare.
+    // names the IMPORTED protocol — TICKET-027 module-scopes it, so it must now be imported by name.
     files_ok(&[
         lib,
         (
             "main.chz",
-            "import lib\nimport reset from lib\nfn twice[U: Default](x: U) -> U:\n    return reset(lib.reset(x))\nfn main():\n    print(twice(lib.Counter(9)).n)\nmain()\n",
+            "import lib\nimport reset, Default from lib\nfn twice[U: Default](x: U) -> U:\n    return reset(lib.reset(x))\nfn main():\n    print(twice(lib.Counter(9)).n)\nmain()\n",
         ),
     ]);
     // the REVERSE direction — a LOCAL type witnessing an IMPORTED generic's bound (its identity key
@@ -26213,7 +26383,7 @@ fn witness_static_call_cross_module_ok() {
         lib,
         (
             "main.chz",
-            "import lib\nimport reset from lib\nstruct Local:\n    k: str\n    fn default() -> Local:\n        return Local(\"loc\")\nfn mine[T: Default](x: T) -> T:\n    return T.default()\nfn main():\n    print(reset(Local(\"x\")).k)\n    print(mine(lib.Counter(1)).n)\nmain()\n",
+            "import lib\nimport reset, Default from lib\nstruct Local:\n    k: str\n    fn default() -> Local:\n        return Local(\"loc\")\nfn mine[T: Default](x: T) -> T:\n    return T.default()\nfn main():\n    print(reset(Local(\"x\")).k)\n    print(mine(lib.Counter(1)).n)\nmain()\n",
         ),
     ]);
 }
@@ -26989,7 +27159,7 @@ fn witness_forwarding_into_an_imported_callee_ok() {
         WITNESS_LIB,
         (
             "main.chz",
-            "import lib\nimport lib as alias\nimport mk from lib\nfn qfwd[T: Default](x: T) -> T:\n    return lib.mk(x)\nfn afwd[T: Default](x: T) -> T:\n    return alias.mk(x)\nfn bfwd[T: Default](x: T) -> T:\n    return mk(x)\nfn main():\n    print(qfwd(lib.Counter(1)).n)\n    print(afwd(lib.Counter(1)).n)\n    print(bfwd(lib.Counter(1)).n)\nmain()\n",
+            "import lib\nimport lib as alias\nimport mk, Default from lib\nfn qfwd[T: Default](x: T) -> T:\n    return lib.mk(x)\nfn afwd[T: Default](x: T) -> T:\n    return alias.mk(x)\nfn bfwd[T: Default](x: T) -> T:\n    return mk(x)\nfn main():\n    print(qfwd(lib.Counter(1)).n)\n    print(afwd(lib.Counter(1)).n)\n    print(bfwd(lib.Counter(1)).n)\nmain()\n",
         ),
     ]);
     // a charged fn loses its value position — the proof the qualified forward really was charged
@@ -26998,7 +27168,7 @@ fn witness_forwarding_into_an_imported_callee_ok() {
             WITNESS_LIB,
             (
                 "main.chz",
-                "import lib\nfn qfwd[T: Default](x: T) -> T:\n    return lib.mk(x)\nfn main():\n    g := qfwd\n    print(1)\nmain()\n",
+                "import lib\nimport Default from lib\nfn qfwd[T: Default](x: T) -> T:\n    return lib.mk(x)\nfn main():\n    g := qfwd\n    print(1)\nmain()\n",
             ),
         ],
         "cannot be used as a function value",
@@ -27067,7 +27237,7 @@ fn witness_forwarding_module_half_matches_the_exact_callee_ok() {
             lib,
             (
                 "main.chz",
-                "import lib\nfn qfwd[T: LibDefault](x: T) -> T:\n    return lib.reset(x)\nfn main():\n    g := qfwd\n    print(1)\nmain()\n",
+                "import lib\nimport LibDefault from lib\nfn qfwd[T: LibDefault](x: T) -> T:\n    return lib.reset(x)\nfn main():\n    g := qfwd\n    print(1)\nmain()\n",
             ),
         ],
         "cannot be used as a function value",

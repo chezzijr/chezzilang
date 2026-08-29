@@ -2538,8 +2538,7 @@ impl Checker {
                 }
                 let found = self.protocol_method_sig(pname, method).map(|msig| {
                     let ptps = self
-                        .protocols
-                        .get(pname)
+                        .protocol_shape(pname)
                         .map(|p| p.type_params.clone())
                         .unwrap_or_default();
                     (msig, ptps)
@@ -3581,8 +3580,7 @@ impl Checker {
                     // resolves to `int` in the caller.
                     let mut map = HashMap::from([("Self".to_string(), obj_ty.clone())]);
                     let ptps = self
-                        .protocols
-                        .get(&proto.name)
+                        .protocol_shape(&proto.name)
                         .map(|p| p.type_params.clone())
                         .unwrap_or_default();
                     for (pname, parg) in ptps.iter().zip(&proto.args) {
@@ -4289,7 +4287,7 @@ impl Checker {
     pub(super) fn check_bounds(&mut self, bounds: &[Bound], param: &str, span: Span) {
         let mut seen_iterator = false;
         for b in bounds {
-            let Some(arity) = self.protocols.get(&b.name).map(|p| p.type_params.len()) else {
+            let Some(arity) = self.protocol_shape(&b.name).map(|p| p.type_params.len()) else {
                 // A `where T: <scalar>` equality bound (int/float/bool/str/…) — not a protocol, but a
                 // valid constraint pinning `T` to exactly that scalar type. It takes no type args.
                 if Self::scalar_bound_ty(&b.name).is_some() {

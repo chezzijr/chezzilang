@@ -7,6 +7,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- A user protocol name is module-scoped like a struct: two modules may each declare `protocol Drawable`, and a bare unimported protocol name no longer resolves (TICKET-027).
+
 > **✅ CLOSED, 2026-08-30 (TICKET-025, W8-21) — implicit success-coercion at a declared `T?`/`T!E`
 > return sink.** A bare success value now coerces: `T -> T?` gives `Some(v)`, `T -> T!E` gives
 > `Ok(v)`, and a bare `return` at `Result[nil, E]` gives DEC-017's zero-arg `Ok()`. The checker

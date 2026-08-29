@@ -560,7 +560,8 @@ impl Checker {
             }
             return;
         }
-        if self.protocols.contains_key(name) {
+        let key = self.bare_key(name);
+        if self.protocols.contains_key(&key) {
             self.error(span, format!("protocol '{name}' is already defined"));
         }
         // A protocol's own type param may not be named after a reserved builtin type (`protocol
@@ -619,11 +620,11 @@ impl Checker {
             .collect();
         self.type_params = saved; // restore
         self.protocols.insert(
-            name.to_string(),
+            key,
             ProtocolInfo {
                 type_params: type_params.iter().map(|tp| tp.name.clone()).collect(),
                 methods: sigs,
-                embeds: embeds.to_vec(),
+                embeds: self.key_bounds(embeds),
             },
         );
     }
@@ -647,7 +648,7 @@ impl Checker {
         }
         // Each embed must name a real protocol.
         for emb in embeds {
-            if !self.protocols.contains_key(&emb.name) {
+            if self.protocol_shape(&emb.name).is_none() {
                 self.error(
                     span,
                     format!("unknown protocol '{}' embedded in '{name}'", emb.name),
@@ -776,7 +777,7 @@ impl Checker {
             if path.iter().any(|p| p == &emb.name) {
                 return (required, true, conflict);
             }
-            let Some(pinfo) = self.protocols.get(&emb.name).cloned() else {
+            let Some(pinfo) = self.protocol_shape(&emb.name).cloned() else {
                 continue; // unknown embed already errored in validate_protocol_embeds
             };
             if !seen.insert(emb.name.clone()) {
@@ -829,7 +830,7 @@ impl Checker {
         if !seen.insert(pname.to_string()) {
             return None;
         }
-        let pinfo = self.protocols.get(pname)?;
+        let pinfo = self.protocol_shape(pname)?;
         if let Some((_, sig)) = pinfo.methods.iter().find(|(n, _)| n == method) {
             return Some(sig.clone());
         }
@@ -839,8 +840,7 @@ impl Checker {
             };
             // The recovered sig is spelled in `emb.name`'s params; re-spell it in ours.
             let etps = self
-                .protocols
-                .get(&emb.name)
+                .protocol_shape(&emb.name)
                 .map(|p| p.type_params.clone())
                 .unwrap_or_default();
             let map: HashMap<String, Ty> = etps
@@ -872,7 +872,7 @@ impl Checker {
         if !seen.insert(pname.to_string()) {
             return;
         }
-        let Some(pinfo) = self.protocols.get(pname) else {
+        let Some(pinfo) = self.protocol_shape(pname) else {
             return;
         };
         out.extend(pinfo.methods.iter().map(|(n, _)| n.clone()));
@@ -890,7 +890,7 @@ impl Checker {
     /// (`Self` is not a protocol type param, so no substitution can introduce or remove it), which
     /// is why `flatten_embed_methods` is enough and the re-spelling walk is not needed.
     pub(super) fn protocol_self_param_method(&self, p: &str) -> Option<String> {
-        let pinfo = self.protocols.get(p)?;
+        let pinfo = self.protocol_shape(p)?;
         if let Some((n, _)) = pinfo
             .methods
             .iter()
@@ -1457,7 +1457,9 @@ impl Checker {
             return false;
         }
         // Direct: the bound names the required protocol with matching args.
-        if bound_name == protocol && self.bound_args_match(bound_args, required) {
+        if self.protocol_key(bound_name) == self.protocol_key(protocol)
+            && self.bound_args_match(bound_args, required)
+        {
             return true;
         }
         // Subsumption: every `Iterator[T]` IS `Iterable[T]` (its `iter()` returns self).
@@ -1468,7 +1470,7 @@ impl Checker {
             return true;
         }
         // Transitive: any embed of the bound's protocol provides it.
-        if let Some(pinfo) = self.protocols.get(bound_name) {
+        if let Some(pinfo) = self.protocol_shape(bound_name) {
             return pinfo
                 .embeds
                 .iter()
@@ -1514,13 +1516,13 @@ impl Checker {
         if !seen.insert(key) {
             return false;
         }
-        if p == protocol
+        if self.protocol_key(p) == self.protocol_key(protocol)
             && pargs.len() == required.len()
             && pargs.iter().zip(required).all(|(x, y)| compatible(x, y))
         {
             return true;
         }
-        let Some(pinfo) = self.protocols.get(p) else {
+        let Some(pinfo) = self.protocol_shape(p) else {
             return false;
         };
         let map: HashMap<String, Ty> = pinfo
@@ -1583,7 +1585,9 @@ impl Checker {
                 _ if self.struct_names.contains(n) => Ty::strukt(self.bare_key(n)),
                 _ if self.enum_names.contains(n) => Ty::Enum(self.bare_key(n), Vec::new()),
                 _ if self.newtype_names.contains(n) => Ty::NewType(self.bare_key(n), Vec::new()),
-                _ if self.protocols.contains_key(n) => Ty::Protocol(n.clone(), Vec::new()),
+                _ if self.protocol_shape(n).is_some() => {
+                    Ty::Protocol(self.protocol_key(n), Vec::new())
+                }
                 _ => Ty::Unknown,
             },
             Type::Generic(n, args, ..) => match (n.as_str(), args.as_slice()) {
@@ -1633,8 +1637,8 @@ impl Checker {
                 // A parameterized protocol used as a value type (`Container[int]`). Mint the carried
                 // args so the read-only resolver no longer silent-accepts it as `Unknown` (which would
                 // erase the witness). Mirrors the mutable `resolve_type` protocol arm.
-                _ if self.protocols.contains_key(n) => Ty::Protocol(
-                    n.clone(),
+                _ if self.protocol_shape(n).is_some() => Ty::Protocol(
+                    self.protocol_key(n),
                     args.iter()
                         .map(|a| self.resolve_ty_ro_d(a, depth + 1))
                         .collect(),
@@ -1692,7 +1696,7 @@ impl Checker {
         } else if sig.protocol_defs.contains_key(name) {
             // Permissive mirror of `resolve_type`'s qualified protocol arm: no arity error and no
             // static-ctor gate — the mutable resolver owns both diagnostics.
-            Ty::Protocol(name.to_string(), args.to_vec())
+            Ty::Protocol(self.type_key(mid, name), args.to_vec())
         } else if sig.types.contains(name) {
             // Mirror `resolve_type`'s qualified builtin branch on the READ-ONLY export path (so an
             // EXPORTED `type S = concurrency.Shared[int]` / `newtype MyS[T] = concurrency.Shared[T]`
@@ -1949,7 +1953,11 @@ impl Checker {
         args: &[Ty],
         seen: &mut HashSet<String>,
     ) -> Result<Grant, String> {
-        let Some(pinfo) = self.protocols.get(protocol) else {
+        // TICKET-027: `protocol` may carry a module-qualified KEY (e.g. from a re-keyed stored
+        // bound); every user-facing message below renders the BARE name, matching `Ty::Protocol`'s
+        // own `Display`.
+        let protocol_display = crate::compiler::bare_display(protocol);
+        let Some(pinfo) = self.protocol_shape(protocol) else {
             // A `where T: <scalar>` EQUALITY bound: the name is a concrete scalar type, not a
             // protocol, so it constrains `ty` to be EXACTLY that type (e.g. `trip()`'s `where T: bool`).
             if let Some(expected) = Self::scalar_bound_ty(protocol) {
@@ -1965,10 +1973,10 @@ impl Checker {
                 return match ty {
                     Ty::Unknown => Ok(Grant::no_intrinsic_method()),
                     _ if ok => Ok(Grant::no_intrinsic_method()),
-                    _ => Err(format!("expected {protocol}[...], found {ty}")),
+                    _ => Err(format!("expected {protocol_display}[...], found {ty}")),
                 };
             }
-            return Err(format!("unknown protocol '{protocol}'"));
+            return Err(format!("unknown protocol '{protocol_display}'"));
         };
         if let Ty::Unknown = ty {
             return Ok(Grant::no_intrinsic_method()); // don't cascade
@@ -2219,14 +2227,16 @@ impl Checker {
                     }
                     match self.index_kv(ty) {
                         Some((k, v)) => vec![k, v],
-                        None => return Err(format!("type {ty} does not satisfy {protocol}")),
+                        None => {
+                            return Err(format!("type {ty} does not satisfy {protocol_display}"));
+                        }
                     }
                 }
             };
             // Any args the bound supplied must match what the built-in actually provides.
             for (want, got) in args.iter().zip(&provided) {
                 if !want.is_unknown() && !got.is_unknown() && !compatible(want, got) {
-                    return Err(format!("type {ty} does not satisfy {protocol}"));
+                    return Err(format!("type {ty} does not satisfy {protocol_display}"));
                 }
             }
             return self.grant_intrinsic(protocol, ty);
@@ -2264,7 +2274,7 @@ impl Checker {
             {
                 Ok(Grant::no_intrinsic_method())
             } else {
-                Err(format!("type {ty} does not satisfy {protocol}"))
+                Err(format!("type {ty} does not satisfy {protocol_display}"))
             };
         }
         // The numeric operator protocols are satisfied intrinsically by int/float (their `+ - * / %`
@@ -2287,7 +2297,7 @@ impl Checker {
             return if matched {
                 Ok(Grant::no_intrinsic_method())
             } else {
-                Err(format!("type {ty} does not satisfy {protocol}"))
+                Err(format!("type {ty} does not satisfy {protocol_display}"))
             };
         }
         // A built-in witnesses a USER protocol out of its own harvested `native struct` method
@@ -2310,7 +2320,7 @@ impl Checker {
                 // structurally-conforming value is spuriously rejected at a protocol bound (the same
                 // three-import-forms inconsistency the member-access fix already closed).
                 let Some(info) = self.struct_shape(sname) else {
-                    return Err(format!("type {ty} does not satisfy {protocol}"));
+                    return Err(format!("type {ty} does not satisfy {protocol_display}"));
                 };
                 self.satisfies_methods(ty, protocol, args, pinfo, &info.methods)
                     .map(|()| Grant::no_intrinsic_method())
@@ -2322,7 +2332,7 @@ impl Checker {
                 // MISS-ONLY identity-key fallback (gap #4): resolve a named-fn-imported enum value's
                 // method table from the owning `ModuleSig` on a local-table miss (see the struct arm).
                 let Some(methods) = self.enum_methods_of(ename) else {
-                    return Err(format!("type {ty} does not satisfy {protocol}"));
+                    return Err(format!("type {ty} does not satisfy {protocol_display}"));
                 };
                 self.satisfies_methods(ty, protocol, args, pinfo, methods)
                     .map(|()| Grant::no_intrinsic_method())
@@ -2372,17 +2382,17 @@ impl Checker {
                     protocol,
                     "Add" | "Sub" | "Mul" | "Div" | "Mod" | "Neg" | "Comparable"
                 ) {
-                    return Err(format!("type {ty} does not satisfy {protocol}"));
+                    return Err(format!("type {ty} does not satisfy {protocol_display}"));
                 }
                 // MISS-ONLY identity-key fallback (gap #4): resolve a named-fn-imported newtype value's
                 // method table from the owning `ModuleSig` on a local-table miss (see the struct arm).
                 let Some(methods) = self.newtype_methods_of(ntkey) else {
-                    return Err(format!("type {ty} does not satisfy {protocol}"));
+                    return Err(format!("type {ty} does not satisfy {protocol_display}"));
                 };
                 self.satisfies_methods(ty, protocol, args, pinfo, methods)
                     .map(|()| Grant::no_intrinsic_method())
             }
-            _ => Err(format!("type {ty} does not satisfy {protocol}")),
+            _ => Err(format!("type {ty} does not satisfy {protocol_display}")),
         }
     }
 
@@ -2420,6 +2430,8 @@ impl Checker {
         pinfo: &ProtocolInfo,
         methods: &HashMap<String, FnSig>,
     ) -> Result<(), String> {
+        // TICKET-027: `protocol` may carry a module-qualified KEY — render the BARE name in messages.
+        let protocol_display = crate::compiler::bare_display(protocol);
         let pmap: HashMap<String, Ty> = pinfo
             .type_params
             .iter()
@@ -2443,8 +2455,7 @@ impl Checker {
             // the requirement's do, and only the requirement side is `Self`-bound by `method_matches`.
             Ty::Protocol(name, targs) => {
                 let mut m: HashMap<String, Ty> = self
-                    .protocols
-                    .get(name)
+                    .protocol_shape(name)
                     .map(|p| {
                         p.type_params
                             .iter()
@@ -2513,8 +2524,9 @@ impl Checker {
                                 bound.args.iter().map(|a| self.resolve_ty_ro(a)).collect();
                             if self.satisfies_args(concrete, &bound.name, &bargs).is_err() {
                                 return Err(format!(
-                                    "type {ty} does not satisfy {protocol} (method '{mname}' requires {}: {})",
-                                    concrete, bound.name
+                                    "type {ty} does not satisfy {protocol_display} (method '{mname}' requires {}: {})",
+                                    concrete,
+                                    crate::compiler::bare_display(&bound.name)
                                 ));
                             }
                         }
@@ -2522,12 +2534,12 @@ impl Checker {
                 }
                 Some(_) => {
                     return Err(format!(
-                        "type {ty} does not satisfy {protocol} (method '{mname}' has the wrong signature)"
+                        "type {ty} does not satisfy {protocol_display} (method '{mname}' has the wrong signature)"
                     ));
                 }
                 None => {
                     return Err(format!(
-                        "type {ty} does not satisfy {protocol} (missing method '{mname}')"
+                        "type {ty} does not satisfy {protocol_display} (missing method '{mname}')"
                     ));
                 }
             }
@@ -2553,6 +2565,8 @@ impl Checker {
         pinfo: &ProtocolInfo,
         key: &str,
     ) -> Result<(), String> {
+        // TICKET-027: `protocol` may carry a module-qualified KEY — render the BARE name in messages.
+        let protocol_display = crate::compiler::bare_display(protocol);
         let native_methods = self.structs.get(key).map(|i| &i.methods);
         let mut table: HashMap<String, FnSig> = HashMap::new();
         for (mname, _) in &pinfo.methods {
@@ -2561,12 +2575,14 @@ impl Checker {
             };
             if !sig.type_params.is_empty() {
                 return Err(format!(
-                    "type {ty} does not satisfy {protocol} (native method '{mname}' is generic \
+                    "type {ty} does not satisfy {protocol_display} (native method '{mname}' is generic \
                      and cannot witness a protocol requirement)"
                 ));
             }
             if let Some(why) = self.native_dispatch_residual(ty, mname) {
-                return Err(format!("type {ty} does not satisfy {protocol} ({why})"));
+                return Err(format!(
+                    "type {ty} does not satisfy {protocol_display} ({why})"
+                ));
             }
             let mut params = Vec::with_capacity(sig.params.len() + 1);
             params.push(ty.clone());
@@ -3992,13 +4008,16 @@ impl Checker {
             // signature for it — the invented `fn {method}(...) -> Self` was simply wrong for a
             // requirement returning anything else. rustc does the same ("the following trait defines
             // an item `tag`, perhaps you need to restrict type parameter `Item` with it").
-            let mut hosts: Vec<&String> = self
+            // `p` is the qualified IDENTITY key (`<module-key>::Name`, TICKET-027); render the BARE
+            // display name in this advice, matching every other protocol-name diagnostic.
+            let mut hosts: Vec<String> = self
                 .protocols
                 .keys()
                 .filter(|p| {
                     self.protocol_method_sig(p, method)
                         .is_some_and(|s| s.is_static)
                 })
+                .map(|p| crate::compiler::bare_display(p))
                 .collect();
             hosts.sort();
             let advice = match hosts.first() {
@@ -4034,8 +4053,7 @@ impl Checker {
         // ⇒ `S ↦ int`), so a requirement `fn convert(x: S) -> Self` types as `(int) -> T`.
         let mut map = HashMap::from([("Self".to_string(), Ty::Param(tname.to_string()))]);
         let ptps = self
-            .protocols
-            .get(&bound.name)
+            .protocol_shape(&bound.name)
             .map(|p| p.type_params.clone())
             .unwrap_or_default();
         for (pn, parg) in ptps.iter().zip(&bound.args) {

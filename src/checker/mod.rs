@@ -1260,7 +1260,10 @@ impl Checker {
                     if let StmtKind::Struct { name, .. }
                     | StmtKind::Enum { name, .. }
                     | StmtKind::NewType { name, .. }
-                    | StmtKind::TypeAlias { name, .. } = &s.kind
+                    | StmtKind::TypeAlias { name, .. }
+                    | StmtKind::Protocol { name, .. } = &s.kind
+                        && !(matches!(s.kind, StmtKind::Protocol { .. })
+                            && is_reserved_protocol(name))
                     {
                         c.type_keys.insert(
                             (lm.id.clone(), name.clone()),
