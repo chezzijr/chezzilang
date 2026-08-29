@@ -50,9 +50,9 @@ Closest existing cousins (read, don't copy): **Crystal**, **Nim**.
   enums may share a variant name (`Color.Red` / `Light.Red`). The built-in `Ok`/`Err`/`Some`/`None`
   (Result/Option) stay bare.
 - **String interpolation** — `"hi {name}, sum {a+b}"`. First-class; string ops are a UX priority.
-  Supports Python-style **format specifiers** after a `:` — `{expr:[[fill]align][sign][0][width][.precision][type]}`,
+  Supports Python-style **format specifiers** after a `:` — `{expr:[[fill]align][sign][#][0][width][.precision][type]}`,
   e.g. `{name:>10}` (right-align width 10), `{f:.2f}` (2 decimals), `{n:04d}` (zero-pad), `{pct:.1%}`
-  (percent), `{255:x}` (hex). Type chars: `d f x X b o e E %` (`e`/`E` scientific, CPython-style: default
+  (percent), `{255:x}` (hex). Type chars: `d f x X b o e E g G %` (`e`/`E` scientific, CPython-style: default
   precision 6, exponent signed + zero-padded to ≥2 digits). Plain float `str()`/`print()` also matches
   CPython `repr` (scientific when the decimal exponent is `< -4` or `>= 16`). **Width and precision are capped at 4096**
   (a larger spec is a parse error — never a giant allocation). String `.N` truncates; an unknown type

@@ -37,6 +37,17 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `## Decisions`): a module deserves its own diagnostic, and a protocol existential could hold a
 > scalar once `docs/gaps.md` W8-32 lands.
 
+> **✅ FIXED, 2026-08-29 (TICKET-022) — `docs/gaps.md` W8-42: `{x:spec}` now accepts the four
+> remaining CPython-accepted forms.** `src/fmtspec.rs` alone: the `#` alternate form
+> (`#x`/`#X`/`#o`/`#b`, plus a decimal point forced on a float, guarded against non-finite values),
+> the `g`/`G` general float format, `=` sign-aware fill (`Align::Pad`, extending DEC-018's grouping
+> overshoot to the `(fill '0', align '=')` pair), and a leading-space sign, plus the explicit `-`
+> sign in the same slot. `{f:d}` (a `d` type char on a float) stays a deliberate **static** reject
+> per this ticket's `## Decisions`, where CPython raises at runtime. Two pre-existing divergences
+> stay open: `format(1.5,'f')` renders `1.500000` in CPython against Chezzi's `1.5`, and the `0`
+> flag under an explicit `<`/`>`/`^` align renders zero-padded in CPython against Chezzi's
+> space-padded output.
+
 > **✅ FIXED, 2026-08-29 (TICKET-019) — `docs/gaps.md` W8-34: `List.unique()` is one pass over a
 > hash index.** `Vm::is_flat_hash_key` (`src/vm/arith.rs`) gates the `"unique"` arm in
 > `src/vm/call.rs` all-or-nothing over the whole list: when every element is a flat scalar key it

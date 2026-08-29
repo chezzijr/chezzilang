@@ -3521,7 +3521,7 @@ literal brace inside it is still doubled (`'a}}b'` above is the key `a}b`).
 `{expr:spec}`. The mini-language is a coherent subset:
 
 ```
-{expr:[[fill]align][sign][0][width][grouping][.precision][type]}
+{expr:[[fill]align][sign][#][0][width][grouping][.precision][type]}
 ```
 
 ```chezzi
@@ -3540,11 +3540,24 @@ print("{5:+d}")           # force a leading '+'         → "+5"
 print("{greeting:.5}")    # string precision truncates → "hello"
 print("{1234567:,}")      # thousands grouping         → "1,234,567"
 print("{1234567:_}")      # underscore grouping        → "1_234_567"
+print("{255:#x}")         # alternate form: radix prefix → "0xff"
+print("{1234567.0:g}")    # general format              → "1.23457e+06"
+print("{42:=10}")         # sign-aware fill              → "        42"
+print("{42: d}")          # leading-space sign           → " 42"
 ```
 
-- **align**: `<` left, `>` right, `^` center; an optional **fill** char may precede it (default space).
-  Numbers default to right-align, everything else to left.
-- **sign**: `+` forces a leading `+` on non-negative numbers (numeric only).
+- **align**: `<` left, `>` right, `^` center, `=` sign-aware fill; an optional **fill** char may
+  precede it (default space). Numbers default to right-align, everything else to left. `=` pads
+  *between* the sign and the digits (`{-42:=10}` → `"-       42"`) rather than before the sign; it
+  is numeric-only and rejected on a string. With the `0` flag, or with `0` written as an explicit
+  fill, `=` pads with zeros and widens the grouped digit run exactly as the bare `0` flag does
+  (`{1000:=08,}` → `"0,001,000"`).
+- **sign**: `+` forces a leading `+` on non-negative numbers, a leading space (` `) leaves a space
+  in its place (`{42: d}` → `" 42"`), and `-` is the default (no-op). All three are numeric-only.
+- **`#` alternate form**: on `x`/`X`/`o`/`b` it prefixes the radix marker `0x`/`0X`/`0o`/`0b`
+  (`{255:#x}` → `"0xff"`); on a float it forces a decimal point even with no fractional digits
+  (`{0.5:#.0f}` → `"0."`), except on a non-finite value, where it is a no-op (`{x:#f}` on infinity
+  stays `"inf"`); it is a no-op on `d`; it is rejected on a string.
 - **`0`**: zero-pad numerics to *width* (the sign stays ahead of the zeros).
 - **width**: minimum field width. **Capped at 4096** — a larger width (e.g. `{x:>9999999999}`) is a
   parse error, *not* a multi-gigabyte allocation.
@@ -3557,7 +3570,9 @@ print("{1234567:_}")      # underscore grouping        → "1_234_567"
   also capped at 4096.
 - **type**: `d` int · `f` fixed float · `x`/`X` hex · `b` binary · `o` octal · `e`/`E` scientific
   (default precision 6, exponent always signed and zero-padded to ≥2 digits, e.g. `1.234568e+05`) ·
-  `%` percent (×100 then `%`). A float type char (`f`/`e`/`E`/`%`) promotes an int.
+  `g`/`G` general format (fixed-point when the decimal exponent falls in `-4..precision`, scientific
+  otherwise; trailing zeros stripped unless `#`; default precision 6, minimum 1) ·
+  `%` percent (×100 then `%`). A float type char (`f`/`e`/`E`/`g`/`G`/`%`) promotes an int.
 
 A **bare** `{expr}` (or `{expr:}` with an empty spec) renders a whole float with a trailing `.0` —
 e.g. `5.0`. An **unknown type char** or trailing junk in the spec is a **parse error**. A
