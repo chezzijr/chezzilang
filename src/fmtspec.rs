@@ -243,7 +243,10 @@ fn to_align(c: char) -> Align {
 }
 
 fn is_type(c: char) -> bool {
-    matches!(c, 'd' | 'f' | 'x' | 'X' | 'b' | 'o' | 'e' | 'E' | '%')
+    matches!(
+        c,
+        'd' | 'f' | 'x' | 'X' | 'b' | 'o' | 'e' | 'E' | '%' | 'g' | 'G'
+    )
 }
 
 /// Render `arg` per `spec` into `out`. Type/precision mismatches (e.g. `{s:d}`, `{s:.2f}`, zero-pad
@@ -395,10 +398,13 @@ pub enum ScalarKind {
 pub fn spec_valid_for_scalar(spec: &FormatSpec, kind: ScalarKind) -> Result<(), String> {
     match kind {
         // Precision on an integer is meaningful only via a float type char; every parse-allowed type
-        // char (d/x/X/b/o and the f/e/% promoters) is otherwise valid for an int.
+        // char (d/x/X/b/o and the f/e/%/g/G promoters) is otherwise valid for an int.
         ScalarKind::Int => {
             if spec.precision.is_some()
-                && !matches!(spec.ty, Some('f') | Some('e') | Some('E') | Some('%'))
+                && !matches!(
+                    spec.ty,
+                    Some('f') | Some('e') | Some('E') | Some('%') | Some('g') | Some('G')
+                )
             {
                 return Err("format spec: precision not allowed on an integer".to_string());
             }
@@ -476,6 +482,7 @@ fn render_int(spec: &FormatSpec, n: i64) -> Result<(String, String, bool), Strin
         Some('e') => return render_float(spec, n as f64),
         Some('E') => return render_float(spec, n as f64),
         Some('%') => return render_float(spec, n as f64),
+        Some('g') | Some('G') => return render_float(spec, n as f64),
         Some(_) => unreachable!("validity checked by spec_valid_for_scalar"),
     };
     let radix = if spec.alt {
@@ -522,9 +529,53 @@ fn render_float(spec: &FormatSpec, x: f64) -> Result<(String, String, bool), Str
             let s = if spec.alt { force_point(s) } else { s };
             s + "%"
         }
+        Some('g') | Some('G') => render_g(mag, spec),
         Some(_) => unreachable!("validity checked by spec_valid_for_scalar"),
     };
     Ok((sign_prefix(neg, spec.sign), body, true))
+}
+
+/// The `g`/`G` general float format: fixed-point when the decimal exponent (taken AFTER rounding to
+/// `p` significant digits) falls in `-4..p`, scientific otherwise; trailing zeros stripped unless
+/// `#`. Default precision 6, minimum 1.
+fn render_g(mag: f64, spec: &FormatSpec) -> String {
+    if !mag.is_finite() {
+        return format!("{mag}");
+    }
+    let p = spec.precision.unwrap_or(6).max(1);
+    let e = format!("{mag:.*e}", p - 1);
+    let (_, exp_s) = e.split_once('e').expect("scientific format always has 'e'");
+    let exp: i32 = exp_s.parse().expect("Rust exponent is always a valid i32");
+    let body = if (-4..p as i32).contains(&exp) {
+        format!("{mag:.*}", (p as i32 - 1 - exp).max(0) as usize)
+    } else {
+        normalize_exp(&e, if spec.ty == Some('G') { 'E' } else { 'e' })
+    };
+    if spec.alt {
+        force_point(body)
+    } else {
+        strip_g_zeros(body)
+    }
+}
+
+/// Trim trailing zeros (then a trailing bare `.`) off `s`'s mantissa, leaving any exponent suffix
+/// untouched. A mantissa with no `.` is returned unchanged (nothing to trim).
+fn strip_g_zeros(s: String) -> String {
+    let (mant, marker_exp) = if let Some((m, e)) = s.split_once('e') {
+        (m, Some(('e', e)))
+    } else if let Some((m, e)) = s.split_once('E') {
+        (m, Some(('E', e)))
+    } else {
+        (s.as_str(), None)
+    };
+    if !mant.contains('.') {
+        return s;
+    }
+    let trimmed = mant.trim_end_matches('0').trim_end_matches('.');
+    match marker_exp {
+        Some((marker, e)) => format!("{trimmed}{marker}{e}"),
+        None => trimmed.to_string(),
+    }
 }
 
 /// `#` alternate form on a float: force a decimal point when the value renders with none. Returns
@@ -849,6 +900,13 @@ mod tests {
         assert!(spec_valid_for_scalar(&p(".3"), ScalarKind::Str).is_ok());
         assert!(spec_valid_for_scalar(&p("x"), ScalarKind::Int).is_ok());
         assert!(spec_valid_for_scalar(&p(".2f"), ScalarKind::Int).is_ok()); // int promoted by float type
+        assert!(spec_valid_for_scalar(&p("g"), ScalarKind::Float).is_ok());
+        assert!(spec_valid_for_scalar(&p(".3g"), ScalarKind::Int).is_ok());
+        assert!(
+            spec_valid_for_scalar(&p("g"), ScalarKind::Str)
+                .unwrap_err()
+                .contains("type 'g' not valid for a string")
+        );
     }
 
     #[test]
@@ -879,6 +937,43 @@ mod tests {
         );
         // `if` as a leading substring of an identifier is not the keyword — still splits normally.
         assert_eq!(split_spec("iffy:>5"), ("iffy", Some(">5")));
+    }
+
+    #[test]
+    fn general_format_matches_cpython() {
+        assert_eq!(ok_apply("g", FmtArg::Float(1234.5)), "1234.5");
+        assert_eq!(ok_apply("g", FmtArg::Float(1234567.0)), "1.23457e+06");
+        assert_eq!(ok_apply("g", FmtArg::Float(0.0001234)), "0.0001234");
+        assert_eq!(ok_apply("g", FmtArg::Float(1e-5)), "1e-05");
+        assert_eq!(ok_apply("g", FmtArg::Float(1e15)), "1e+15");
+        assert_eq!(ok_apply("g", FmtArg::Float(1e16)), "1e+16");
+        assert_eq!(ok_apply("g", FmtArg::Float(999999.0)), "999999");
+        assert_eq!(ok_apply("g", FmtArg::Float(1000000.0)), "1e+06");
+        assert_eq!(ok_apply("g", FmtArg::Float(999999.5)), "1e+06");
+        assert_eq!(ok_apply("g", FmtArg::Float(999999.4)), "999999");
+        assert_eq!(ok_apply("g", FmtArg::Float(0.0)), "0");
+        assert_eq!(ok_apply("g", FmtArg::Float(-0.0)), "-0");
+        assert_eq!(ok_apply("g", FmtArg::Int(255)), "255");
+        assert_eq!(ok_apply(".2g", FmtArg::Float(1234.5)), "1.2e+03");
+        assert_eq!(ok_apply(".0g", FmtArg::Float(1234.5)), "1e+03");
+        assert_eq!(ok_apply(".0g", FmtArg::Float(0.5)), "0.5");
+        assert_eq!(ok_apply(".4g", FmtArg::Float(9.9999)), "10");
+        assert_eq!(ok_apply(".5g", FmtArg::Float(99999.9)), "1e+05");
+        assert_eq!(ok_apply(".16g", FmtArg::Float(1e15)), "1000000000000000");
+        assert_eq!(ok_apply("G", FmtArg::Float(1.2345e-5)), "1.2345E-05");
+        assert_eq!(ok_apply(",g", FmtArg::Float(1234.5)), "1,234.5");
+        assert_eq!(ok_apply("_g", FmtArg::Float(1234.5)), "1_234.5");
+        assert_eq!(ok_apply(",g", FmtArg::Float(1234567.0)), "1.23457e+06");
+        assert_eq!(ok_apply("#g", FmtArg::Int(255)), "255.000");
+        assert_eq!(ok_apply("#g", FmtArg::Float(123456.0)), "123456.");
+        assert_eq!(ok_apply("#.0g", FmtArg::Float(1234.0)), "1.e+03");
+        assert_eq!(ok_apply("#.0g", FmtArg::Float(1.0)), "1.");
+        assert_eq!(ok_apply("#g", FmtArg::Float(0.0)), "0.00000");
+        assert_eq!(ok_apply("#g", FmtArg::Float(1e20)), "1.00000e+20");
+        assert_eq!(ok_apply("g", FmtArg::Float(f64::INFINITY)), "inf");
+        assert_eq!(ok_apply("#g", FmtArg::Float(f64::INFINITY)), "inf");
+        // CPython prints `NAN`; Gotcha 5 casing divergence
+        assert_eq!(ok_apply("G", FmtArg::Float(f64::NAN)), "NaN");
     }
 
     #[test]

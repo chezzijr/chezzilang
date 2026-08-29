@@ -1152,6 +1152,15 @@ fn interpolation_spec_pad_align_rejected_on_a_string() {
 }
 
 #[test]
+fn interpolation_spec_general_format_rejected_on_a_string() {
+    rejects(
+        "s: str = \"hi\"\nprint(\"{s:g}\")\n",
+        "type 'g' not valid for a string",
+    );
+    ok("f: float = 1234.5\nprint(\"{f:g}\")\n");
+}
+
+#[test]
 fn interpolation_spec_w8_42_missing_forms_accepted() {
     // W8-42: CPython accepts these four spec forms (`#x` alternate form, `g` general float,
     // `=` sign-aware fill, leading-space sign); Chezzi's checker still rejects them all at check
