@@ -7,6 +7,26 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+> **✅ FIXED, 2026-08-29 (TICKET-021) — `docs/gaps.md` W8-17 (residual): an unknown variable, a
+> module-member miss and an enum-variant miss now get the same "did you mean" `help` a method/field
+> miss already had, and a module used in value position is now its own check-time diagnostic
+> instead of a check-clean runtime fault.** Three new candidate-list helpers
+> (`Checker::variant_names`/`module_member_names`/`in_scope_names`, `src/checker/setup.rs`) feed
+> `suggest::did_you_mean` at the three miss sites; the four `infer_field` value-form misses (module
+> member + three enum-variant shapes) now caret the offending NAME via `ExprKind::Field.name_span`
+> instead of the receiver. `Checker::infer_value` (`src/checker/pattern.rs`) — the one seam every
+> value position passes through — now rejects `Ty::Module` the same way it already rejects
+> `Ty::Nil`, closing TICKET-020's deliberately-deferred `Ty::Module` exclusion from
+> `reject_non_scalar_cast` with the module's OWN diagnostic (`module 'io' is not a value — a module
+> is only a qualifier, write 'io.<member>'`) rather than folding it into the cast message. A cast
+> arm (`int`/`float`/`bool`) now infers its argument exactly once instead of up to three times, so
+> the new `infer_value` diagnostic — and any diagnostic already inside the argument — prints once,
+> not three times (`print(int(nope))` used to print `unknown name 'nope'` three times). `Ty::Module`
+> is now unreachable inside a container or a local, which retires the only source-reachable probe of
+> the spawn non-sendable RECEIVER sweep; the two affected tests are re-pinned on the new error rather
+> than deleted, so the sweep is re-exercised the moment another non-sendable `Ty` lands. Error codes
+> remain the only open half of W8-17.
+
 > **✅ FIXED, 2026-08-29 (TICKET-020) — `docs/gaps.md` W8-31 (residual): `int()`/`float()`/`bool()`
 > now reject an `Option`, `Result`, `bytes`, `bytearray`, `Shared`, `Channel`, `Atomic`, `AtomicInt`,
 > `RwShared`, `Executor`, `Socket`, `Listener`, `Writer`, `Reader` or `ptr` argument at check time,

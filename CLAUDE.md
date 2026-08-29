@@ -60,7 +60,8 @@ cargo run -- check  examples/hello.chz   # type-check only (M4); --errors=json f
 # ^ json objects are {file?, line, col, end_line, end_col, severity, message, help?}; `file` is
 #   OMITTED when the span has no module coordinate (never a claimed-wrong path); severity is "error"
 #   or "warning" (a warning is non-fatal — reported, exit code unchanged); `help` is a "did you mean
-#   '<name>'?" near-miss suggestion on a method/field miss, OMITTED when there is none
+#   '<name>'?" near-miss suggestion on a method/field/unknown-name/module-member/enum-variant miss,
+#   OMITTED when there is none
 cargo run -- run    examples/hello.chz   # type-check + run on the VM, OS-thread engine (default, M5)
 cargo run -- run                         # no file → run the manifest [project] entrypoint (walks up for chezzi.toml)
 cargo run -- run --parallel examples/primes_parallel.chz   # accepted no-op alias (the M:N engine is the only engine)
