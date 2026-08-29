@@ -11,6 +11,56 @@ justify lives in **[`future.md §4`](future.md)**; the scheduled work is roadmap
 > They are kept as the record of what was measured at the time; they are not reproducible on today's
 > binary, and "serial == M:N parity green" in an older section means the gate that existed then.
 
+## W8-34 — List.unique() is one pass over a hash index — 2026-08-29
+
+`List.unique()`'s `"unique"` arm called `seq_slot` (a linear scan of the growing output) once per
+element — O(N^2). When every element is a flat scalar key (inline `Int`/`Bool`/`Nil`, a Float-tagged
+box, or `Obj::Str`/`Obj::Bytes`/`Obj::BigInt`, gated by the new `Vm::is_flat_hash_key`, all-or-nothing
+over the whole list) it now dedupes through a local `SetData` hash index in one pass, taking its
+insertion-ordered `entries` as the output; any non-flat element (container, `Struct`/`Enum`/`NewType`,
+`ByteArray`) falls back to the old scan, unchanged. Behaviour-preserving: every bucket hit is still
+confirmed by `elem_equal` -> `values_equal_guarded` (DEC-014), so a hash collision costs a compare,
+never a wrong answer.
+
+Pre-fix side of both measurements below is `/tmp/chezzi-pre-w8-34`, the release binary built at
+`2455bcdc` (before this change).
+
+Permanent bench (`benches/chz/unique.chz` / `benches/py/unique.py`, 500 000 ints / 250 000 distinct,
+post-fix binary vs CPython):
+
+```
+Benchmark 1: ./target/release/chezzi run benches/chz/unique.chz
+  Time (mean ± σ):     105.4 ms ±   2.5 ms    [User: 91.4 ms, System: 13.3 ms]
+  Range (min … max):   102.8 ms … 115.9 ms    28 runs
+
+Benchmark 2: python3 benches/py/unique.py
+  Time (mean ± σ):      81.7 ms ±   1.7 ms    [User: 63.0 ms, System: 17.9 ms]
+  Range (min … max):    79.3 ms …  86.9 ms    37 runs
+
+Summary
+  python3 benches/py/unique.py ran
+    1.29 ± 0.04 times faster than ./target/release/chezzi run benches/chz/unique.chz
+```
+
+Ticket's own repro (W8-34's filed scale, 80 000 ints / 40 000 distinct), pre-fix vs post-fix binary:
+
+```
+Benchmark 1: /tmp/chezzi-pre-w8-34 run /tmp/w8-34-repro.chz
+  Time (mean ± σ):      8.540 s ±  0.096 s    [User: 8.504 s, System: 0.007 s]
+  Range (min … max):    8.476 s …  8.650 s    3 runs
+
+Benchmark 2: ./target/release/chezzi run /tmp/w8-34-repro.chz
+  Time (mean ± σ):      20.2 ms ±   0.2 ms    [User: 15.6 ms, System: 4.4 ms]
+  Range (min … max):    19.9 ms …  20.4 ms    3 runs
+
+Summary
+  ./target/release/chezzi run /tmp/w8-34-repro.chz ran
+  423.47 ± 7.06 times faster than /tmp/chezzi-pre-w8-34 run /tmp/w8-34-repro.chz
+```
+
+423x on the ticket's own scale (8.540s -> 20.2ms). The result is unchanged in both runs (`250000` and
+`40000` respectively) — only the cost changed.
+
 ## Serial-engine removal — 2026-08-16 — behaviour-preserving, one measured regression
 
 The `--serial` engine, the `--check-parity` flag, the cooperative scheduler and every per-engine fork

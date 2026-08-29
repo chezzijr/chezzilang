@@ -209,7 +209,7 @@ pins both spellings against each other so they cannot drift apart again.
 | `reversed` | `() -> List[T]` | Returns a **new** reversed list — the receiver is untouched (contrast in-place `reverse`). |
 | `insert` | `(i: int, x: T) -> nil` | *mutates* — insert `x` before index `i`. Python-clamped: `i > len` appends, negatives are length-relative and clamp to `0`; never faults. |
 | `remove_at` | `(i: int) -> T` | *mutates* — remove & return the element at index `i` (Python-relative negatives). A true out-of-range index **faults** (`index {i} out of bounds (len {n})`). |
-| `unique` | `() -> List[T]` | Returns a **new** list with all duplicates removed, first-occurrence order preserved (Python `dict.fromkeys`). Structural equality; never mutates the receiver. |
+| `unique` | `() -> List[T]` | Returns a **new** list with all duplicates removed, first-occurrence order preserved (Python `dict.fromkeys`). Structural equality; never mutates the receiver. One pass over a hash index when every element is a flat scalar key; a container, `bytearray`, or user-`eq` element falls back to a linear scan with the same result. |
 | `dedup` | `() -> List[T]` | Returns a **new** list collapsing only **consecutive** duplicate runs (Rust `Vec::dedup`) — non-adjacent duplicates survive. |
 | `chunk` | `(n: int) -> List[List[T]]` | Consecutive fixed-size chunks (final chunk short if `len` not divisible). `n <= 0` **faults** (`chunk size must be positive, got {n}`). |
 | `windows` | `(n: int) -> List[List[T]]` | Sliding windows of size `n` (Rust `slice::windows`). `n > len` yields an **empty** list; `n <= 0` **faults** (`window size must be positive, got {n}`). |

@@ -200,8 +200,8 @@ Right now: **pre-JIT/pre-freeze bug-hunt + drift-fix hunt** is the active phase 
 checker↔runtime, and IO drift — live ledger in `docs/gaps.md`), with **M19 — Perf track** paused
 in-progress alongside it.
 
-> **START HERE (2026-08-18): `docs/gaps.md` W8-1..W8-42.** **7 open rows** — W8-17,
-> W8-19 from **dogfood wave 1** and **W8-32, W8-34, W8-42 from wave 2**
+> **START HERE (2026-08-18): `docs/gaps.md` W8-1..W8-42.** **6 open rows** — W8-17,
+> W8-19 from **dogfood wave 1** and **W8-32, W8-42 from wave 2**
 > (**W8-1**, **W8-28**, **W8-29** closed 2026-08-29, TICKET-018 — a bare-digit interpolation hole
 > now renders literally, `not` now sits between `and` and the comparisons, and `??` now binds
 > tighter than every binary operator)
@@ -219,7 +219,8 @@ in-progress alongside it.
 > of copying and rebinding), and **W8-3**/**W8-25** (2026-08-29, TICKET-016 — a same-box `Shared`/
 > `RwShared` re-entry now faults and a cross-task racing write blocks and lands instead of losing the
 > write, and a closure's module-global reference is now snapshot-copied at the airlock like a
-> captured local) are closed, as is the un-numbered
+> captured local), and **W8-34** (2026-08-29, TICKET-019 — List.unique() is one pass over a hash
+> index) are closed, as is the un-numbered
 > **airlock-trap** section — a `spawn:`-task write read
 > after the join now warns too. The dogfood rows are the first findings in this repo produced by people
 > with **no model of the implementation**, and they are disjoint from waves 1–7 (which were almost all

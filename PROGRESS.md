@@ -7,6 +7,16 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+> **✅ FIXED, 2026-08-29 (TICKET-019) — `docs/gaps.md` W8-34: `List.unique()` is one pass over a
+> hash index.** `Vm::is_flat_hash_key` (`src/vm/arith.rs`) gates the `"unique"` arm in
+> `src/vm/call.rs` all-or-nothing over the whole list: when every element is a flat scalar key it
+> dedupes through a local `SetData` hash index in one pass, taking its insertion-ordered `entries`
+> as the output; any non-flat element (container, `Struct`/`Enum`/`NewType`, `ByteArray`) falls back
+> to the pre-existing linear scan. Every bucket hit is still confirmed by `elem_equal`, so the change
+> is behaviour-preserving. Measured: the ticket's 80 000/40 000-distinct repro went from 8.540 s to
+> 20.2 ms (~423×); the new permanent bench pair (`benches/chz/unique.chz` / `benches/py/unique.py`,
+> 500 000/250 000 distinct) now runs 1.29× CPython's time instead of quadratically worse.
+
 > **✅ FIXED, 2026-08-29 (TICKET-018) — `docs/gaps.md` `W8-1`/`W8-28`/`W8-29`: leading-zero decimal
 > literals are rejected, `not` and `??` are retuned, and a bare-digit interpolation hole is
 > literal.** **W8-29:** `0755` is now a lex error (`src/lexer/mod.rs::number`) naming the fix —
