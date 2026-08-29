@@ -7,6 +7,16 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+> **✅ FIXED, 2026-08-29 (TICKET-020) — `docs/gaps.md` W8-31 (residual): `int()`/`float()`/`bool()`
+> now reject an `Option`, `Result`, `bytes`, `bytearray`, `Shared`, `Channel`, `Atomic`, `AtomicInt`,
+> `RwShared`, `Executor`, `Socket`, `Listener`, `Writer`, `Reader` or `ptr` argument at check time,
+> closing the residual half of W8-31 that TICKET-017 left open.** `Checker::reject_non_scalar_cast`
+> (`src/checker/expr.rs`) now matches 23 `Ty` variants under 20 kind words re-derived from
+> `Vm::type_name` (`src/vm/stmt.rs`) — `Ty::Option`/`Ty::Result` both report `enum` since both are
+> `Obj::Enum` at runtime. `Ty::Protocol` and `Ty::Module` stay excluded (see the ticket's
+> `## Decisions`): a module deserves its own diagnostic, and a protocol existential could hold a
+> scalar once `docs/gaps.md` W8-32 lands.
+
 > **✅ FIXED, 2026-08-29 (TICKET-019) — `docs/gaps.md` W8-34: `List.unique()` is one pass over a
 > hash index.** `Vm::is_flat_hash_key` (`src/vm/arith.rs`) gates the `"unique"` arm in
 > `src/vm/call.rs` all-or-nothing over the whole list: when every element is a flat scalar key it
@@ -98,8 +108,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `Result[nil, E]`'s success value, and an unreachable `match` arm now warns.** `Checker::
 > reject_non_scalar_cast` (`src/checker/expr.rs`, renamed from `reject_aggregate_scalar_cast`) gained
 > `Ty::Struct`/`Ty::Enum`/`Ty::Func`+`Ty::BuiltinFn` arms, turning a check-OK-then-runtime-fault into a
-> compile error; `Ty::Option`/`Ty::Result`/`Ty::Bytes` are the same hole and stay open (see the
-> ticket's `## Decisions`). The checker's `"Ok"` arm special-cases zero args to
+> compile error; `Ty::Option`/`Ty::Result`/`Ty::Bytes` were the same hole and stayed open — closed by
+> TICKET-020 (see below). The checker's `"Ok"` arm special-cases zero args to
 > `Ty::result_e(Ty::Nil, Ty::Unknown)` without calling `one_arg`/`check_arity`; the compiler emits
 > `Op::Nil` then `Op::NewEnum { argc: 1 }`, so `Ok`'s registered arity stays 1 and nothing else in the
 > VM changes. A new `Checker::warn_unreachable_arm` fires at all three arm-list loops

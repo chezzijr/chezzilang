@@ -931,8 +931,10 @@ coercion, and keep newtypes nominally distinct so a conversion is always visible
 | `str(x)` | **anything** → `str` | never fails — the `Stringable` display cast (`print`/interpolation use the same path) |
 | `ord(s)` / `chr(n)` | `str` ↔ codepoint `int` | narrow, single-purpose |
 
-`int()`/`float()`/`bool()` **reject** a `List`/`Map`/`Set`/tuple/struct/enum/function argument at
-CHECK time — outside the domain above, and the runtime always faults, so the checker catches it early.
+`int()`/`float()`/`bool()` **reject** a `List`/`Map`/`Set`/tuple/struct/enum/function/`Option`/
+`Result`/`bytes`/`bytearray`/`Shared`/`Channel`/`Atomic`/`AtomicInt`/`RwShared`/`Executor`/`Socket`/
+`Listener`/`Writer`/`Reader`/`ptr` argument at CHECK time — outside the domain above, and the runtime
+always faults, so the checker catches it early.
 
 **Safe (non-faulting) string parse** — return `Option` instead of faulting: `s.to_int() -> int?`,
 `s.to_float() -> float?` (`None` on bad input). Their error-message-carrying siblings return a
