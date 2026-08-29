@@ -18939,6 +18939,35 @@ parallel:
     assert_eq!(out, "300\n", "expected 300: {out:?}");
 }
 
+/// TICKET-016 / W8-25 review finding — a spawned task's OWN write to a module global must stay
+/// visible to a module-level closure it calls, when that closure never crosses a channel or spawn
+/// boundary at all (it existed before the `parallel:` block and is called from inside the same
+/// task that wrote the global). The per-task module snapshot (`ensure_snapshot`/`fault_module`)
+/// replicates every module global — including `f` — into the task's own module copy; `f` must keep
+/// doing a live `Op::GetGlobalSlot` read against that copy, not carry a `gsnap` frozen at the
+/// snapshot's pre-write value.
+#[test]
+fn ticket_016_spawned_task_own_write_visible_to_module_closure_it_calls() {
+    let src = "\
+import std.concurrency
+n := 1
+f := fn(x: int) -> int: x * n
+parallel:
+    spawn:
+        n = 100
+        print(f(3))
+";
+    let entry = write_temp_chz("ticket016_spawn_own_write_visible", src);
+    let (out, err, res, _code) = run_file_with(&entry, crate::native::HostConfig::default());
+    let _ = std::fs::remove_file(&entry);
+    assert!(res.is_ok(), "run faulted: {res:?} err={err}");
+    assert_eq!(
+        out, "300\n",
+        "expected the spawned task's own write to n to be visible to f (300, matching Go/CPython), \
+         got {out:?}"
+    );
+}
+
 /// TICKET-016 / W8-25 — a crossed closure that READS AND WRITES the same module global must keep
 /// the written slot a late load: `Proto::global_free` excludes any slot the closure tree writes, so
 /// the snapshot can never go stale.
