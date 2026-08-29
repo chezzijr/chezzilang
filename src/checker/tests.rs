@@ -5861,15 +5861,17 @@ fn infer_expr_non_error_payload_not_laundered() {
     );
 }
 
+// TICKET-026 -- W8-22. THE NAME RECORDS THE BUG, NOT THE ASSERTION. A caught `Error` carries no
+// line/col/file today, so `e.line()` is rejected with `type Error has no method 'line'`. This test
+// asserts the FIXED behaviour, so it is RED until the three location accessors land. Do not rename
+// it: the ticket's `test_file` selects it by this exact string. Both helpers are called because
+// `ok()` keys types bare while `entry_ok()` keys them module-prefixed, so an `ok()`-only test can
+// pass while the CLI still rejects.
 #[test]
 fn caught_error_has_no_location_accessor() {
-    // W8-22: a caught `Error` carries no line/col/file today. `message()` exists (intrinsic
-    // structural satisfaction of `Error` by `str`), but there is no accessor for the fault's
-    // origin span, so `e.line()` is rejected at check time.
-    rejects(
-        "fn boom() -> int!:\n    xs := [1]\n    return Ok(xs[9])\nfn main():\n    r := recover: boom()\n    match r:\n        Ok(v): print(v)\n        Err(e): print(e.line())\n",
-        "type Error has no method 'line'",
-    );
+    let src = "fn boom() -> int!:\n    xs := [1]\n    return Ok(xs[9])\nfn main():\n    r := recover: boom()\n    match r:\n        Ok(v): print(v)\n        Err(e): print(e.line())\n";
+    ok(src);
+    entry_ok(src);
 }
 
 #[test]
