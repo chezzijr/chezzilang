@@ -349,6 +349,27 @@ fn named_fn_import_factory_struct_method_runtime() {
     assert_eq!(out, "11\n");
 }
 
+/// TICKET-023: a named import of a PROTOCOL binds at runtime. `golden_file_entry` runs no checker,
+/// so this pins the `program.type_names` half: without it `Vm::bind_import` faults "module 'shapes'
+/// has no member 'Drawable'" trying to bind a runtime global for a name with no runtime value.
+#[test]
+fn protocol_named_import_binds_at_runtime() {
+    let out = golden_file_entry(
+        &[
+            (
+                "shapes.chz",
+                "protocol Drawable:\n    fn draw(self) -> str\n",
+            ),
+            (
+                "main.chz",
+                "import Drawable from shapes\nstruct Circle:\n    r: int\n    fn draw(self) -> str:\n        return \"circle\"\nfn render(d: Drawable) -> str:\n    return d.draw()\nprint(render(Circle(1)))\n",
+            ),
+        ],
+        "main.chz",
+    );
+    assert_eq!(out, "circle\n");
+}
+
 /// Stdlib: `import manual from std.cancel; manual().cancelled()` runs (documented
 /// Token API reachable off a named-imported factory result).
 #[test]

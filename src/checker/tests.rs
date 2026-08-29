@@ -25791,6 +25791,111 @@ fn protocol_reachable_via_named_import() {
     ]);
 }
 
+/// A named import may rename the protocol; the bind name is what resolves.
+#[test]
+fn protocol_named_import_alias_binds_the_protocol() {
+    files_ok(&[
+        (
+            "shapes.chz",
+            "protocol Drawable:\n    fn draw(self) -> str\n",
+        ),
+        (
+            "main.chz",
+            "import Drawable as D from shapes\nfn describe(d: D) -> str:\n    return d.draw()\n",
+        ),
+    ]);
+}
+
+/// A qualified generic protocol mirrors the bare form: a bare qualified reference is an unbound
+/// existential (no arity check), a written arg count must match, and a wrong count still errors.
+#[test]
+fn protocol_generic_qualified_arity_mirrors_the_bare_form() {
+    let shapes = (
+        "shapes.chz",
+        "protocol Container[T]:\n    fn get(self) -> T\n",
+    );
+    files_ok(&[
+        shapes,
+        (
+            "main.chz",
+            "import shapes\nfn f(c: shapes.Container[int]) -> int:\n    return c.get()\n",
+        ),
+    ]);
+    files_ok(&[
+        shapes,
+        (
+            "main.chz",
+            "import shapes\nfn f(c: shapes.Container) -> int:\n    return 1\n",
+        ),
+    ]);
+    files_reject(
+        &[
+            shapes,
+            (
+                "main.chz",
+                "import shapes\nfn f(c: shapes.Container[int, str]) -> int:\n    return 1\n",
+            ),
+        ],
+        "expects 1 type argument(s), got 2",
+    );
+}
+
+/// A protocol with a static requirement stays bound-only across the qualified spelling too.
+#[test]
+fn protocol_with_a_static_method_stays_bound_only_when_qualified() {
+    files_reject(
+        &[
+            (
+                "shapes.chz",
+                "protocol Maker:\n    fn make(x: int) -> int\n",
+            ),
+            (
+                "main.chz",
+                "import shapes\nfn f(m: shapes.Maker) -> int:\n    return 1\n",
+            ),
+        ],
+        "has a static method and can only be used as a bound",
+    );
+}
+
+/// Exporting a protocol must not widen the module surface for a name that isn't declared.
+#[test]
+fn protocol_export_does_not_widen_a_missing_member() {
+    let shapes = (
+        "shapes.chz",
+        "protocol Drawable:\n    fn draw(self) -> str\n",
+    );
+    files_reject(
+        &[shapes, ("main.chz", "import Nope from shapes\n")],
+        "module 'shapes' has no member 'Nope'",
+    );
+    files_reject(
+        &[
+            shapes,
+            (
+                "main.chz",
+                "import shapes\nfn f(x: shapes.Nope) -> int:\n    return 1\n",
+            ),
+        ],
+        "module 'shapes' has no type 'Nope'",
+    );
+}
+
+/// A protocol still carries no runtime value, even when reached across a module boundary.
+#[test]
+fn protocol_is_still_not_a_value() {
+    files_reject(
+        &[
+            (
+                "shapes.chz",
+                "protocol Drawable:\n    fn draw(self) -> str\n",
+            ),
+            ("main.chz", "import shapes\nd := shapes.Drawable(1)\n"),
+        ],
+        "module 'shapes' has no member 'Drawable'",
+    );
+}
+
 // ===== W7-24 — an interpolation fragment is a normalized call site like any other =====
 
 /// Named args / defaults / variadic sweeping reach a call inside `"{…}"`. Before `desugar` parsed
