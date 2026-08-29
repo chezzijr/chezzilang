@@ -610,6 +610,12 @@ re-enter `get`/`read` — or `write`/`set` on a **different** box.
 > nested in `read` is the one legal same-box reentrancy — `get`/`read` never take the update guard, so
 > they still read the pre-guard value and cannot fault or deadlock.
 
+> **A guard wait does not cost an OS thread unless it is long.** A contended `set`/`update`/`write`
+> waits in place on its worker for up to 5 ms (`GUARD_DEMOTE_BUDGET`, `src/vm/core.rs`) before it
+> demotes the worker and spawns one replacement OS thread — almost every wait is microseconds, so
+> almost none pays for a thread. Demoting on every acquire instead made 50 000 one-`update` fibers
+> exhaust a 32 768-task ceiling and never finish (TICKET-016).
+
 `RwShared` vs `Shared`: reach for `RwShared` when reads vastly outnumber writes (concurrent readers
 matter); reach for `Shared` when access is write-heavy or you don't need concurrent reads (one lock is
 simpler).

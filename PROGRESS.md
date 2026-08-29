@@ -35,9 +35,30 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > whole-module snapshot replay (`ensure_snapshot`/`fault_module`, which moves a closure and the
 > globals it reads into one task's own copy together) must never freeze a `gsnap`, fixed by a
 > `WireMemo::module_replay` flag that suppresses `gsnap` on exactly that replay path (`src/vm/
-> sched.rs`). Gated by 12 tests in `src/vm/tests.rs` (`ticket_016_*`, `cargo test --lib ticket_016`)
+> sched.rs`). Gated by 14 tests in `src/vm/tests.rs` (`ticket_016_*`, `cargo test --lib ticket_016`)
 > plus `obj_iter_within_size_cap`/`slot_element_is_64b` (the `gsnap` field kept `size_of::<Obj>()`
 > at 64).
+>
+> **Regression fixed the same day.** `take_update_guard` (`src/vm/netio.rs`) called `demote_enter`
+> before EVERY guarded write, and `demote_enter` spawns one OS thread per demoting worker shell
+> (`src/vm/sched.rs`), so 50 000 fibers each doing one `s.update` exhausted a 32 768-task ceiling and
+> never finished (`fibers_scale_ready_queue_not_quadratic`, was exiting 101 after 888.83s with "could
+> not demote the worker"). Fix: `acquire_update_guard_within` (`src/vm/core.rs`) splits the acquire
+> into a bounded phase — wait in place on the worker for `GUARD_DEMOTE_BUDGET` (5ms) — and an
+> unbounded phase that only then demotes; `take_update_guard` tries the bounded phase first and falls
+> through to the old unbounded/demoting path on timeout. Pinned by
+> `ticket_016_bounded_update_guard_acquire_yields_instead_of_blocking`. Also corrected:
+> `ticket_016_cross_box_update_without_cycle_still_runs` used to run a genuine AB-BA program (two
+> spawns nesting into each other's box), so it was flaky under load; it now runs two tasks on
+> disjoint box pairs (`a`/`b` and `c`/`d`), verified green on 20 consecutive runs. And
+> `docs/gaps.md:59`'s header claimed 12 open rows against its own 10-row table; corrected to 10.
+> Full gate re-run at the fix, `.project/run-test.sh` (no args): `EXIT: 0`, lib target
+> `4280 passed; 0 failed; 2 ignored`, every other target `0 failed`. `cargo clippy --all-targets --
+> -D warnings`: `Finished` with no `warning:` lines. `CHEZZI_THREADS=2 cargo run --quiet --bin chezzi
+> -- test tests/chz`: `667 test(s): 667 passed, 0 failed, 0 errored`. Baselines re-measured
+> immediately before the fix: `--one fibers_scale_ready_queue_not_quadratic` alone still exited `101`
+> after `855.63s` with `could not demote the worker`; after the fix the same command exits `0` in
+> `0.61s`.
 
 > **✅ FIXED, 2026-08-29 (TICKET-017) — `docs/gaps.md` `W8-31`/`W8-30`/`W8-40`: `int()`/`float()`/
 > `bool()` reject a struct/enum/function argument at check time, `Ok()` (zero-arg) spells
