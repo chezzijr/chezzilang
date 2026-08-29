@@ -1308,8 +1308,9 @@ impl Checker {
     /// scalars, `Obj::Str` and `Obj::NewType`, then fall through to the error
     /// (`{cast}() cannot convert List`). Catching it here turns a check-OK-then-run-fault into a
     /// clean compile error (the value a statically-typed language adds over Python's runtime `TypeError`).
-    /// `Ty::Option`, `Ty::Result` and `Ty::Bytes` are left OUT of this reject deliberately — see
-    /// `## Decisions` in TICKET-017; each is the same hole, still open.
+    /// Also covers `Ty::Option`/`Ty::Result` (both `Obj::Enum` at runtime, so both report `enum`),
+    /// `Ty::Bytes`, `Ty::ByteArray`, and the `Shared`/`Channel` handle family (TICKET-020).
+    /// `Ty::Protocol` and `Ty::Module` stay excluded — see `## Decisions` in TICKET-020.
     pub(super) fn reject_non_scalar_cast(&mut self, cast: &str, arg: &Expr) {
         let aty = self.infer_value(arg);
         let kind = match aty {
@@ -1320,6 +1321,12 @@ impl Checker {
             Ty::Struct(..) => "struct",
             Ty::Enum(..) => "enum",
             Ty::Func { .. } | Ty::BuiltinFn { .. } => "function",
+            // `Option`/`Result` are their own `Ty` variants, not `Ty::Enum`, but both are
+            // `Obj::Enum` at runtime, so `Vm::type_name` renders both as `enum`.
+            Ty::Option(_) | Ty::Result(..) => "enum",
+            Ty::Bytes => "bytes",
+            Ty::ByteArray => "bytearray",
+            Ty::Shared(_) => "Shared",
             _ => return,
         };
         self.error(
