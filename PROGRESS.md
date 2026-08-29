@@ -7,6 +7,17 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+> **✅ FIXED, 2026-08-29 (TICKET-023) — a `protocol` now crosses a module boundary like every other
+> declaration.** `ModuleSig` gains a `protocol_defs: HashMap<String, ProtocolSigInfo>` field
+> (`src/checker/mod.rs`), fed by a new `Protocol` arm in `capture_sig` (`src/checker/setup.rs`, gated
+> on `!is_reserved_protocol` so `std/prelude.chz`'s 21 builtin protocols stay unexported). Four
+> resolution sites read it: the named-import member chain and the qualified `Type::Qualified` arm
+> (both `src/checker/setup.rs`/`src/checker/sig.rs`), its read-only mirror `resolve_qualified_ro`
+> (`src/checker/proto.rs`), and `Compiler::assign_type_keys` (`src/compiler/mod.rs`), which registers
+> the protocol's NAME (only) into `program.type_names` so `Vm::bind_import` doesn't fault at runtime.
+> `mod.Named` and `import Named from mod` (with or without `as`) both resolve now; a qualified generic
+> bound (`[T: mod.Named]`) still does not parse — unchanged, out of scope.
+>
 > **✅ FIXED, 2026-08-29 (TICKET-021) — `docs/gaps.md` W8-17 (residual): an unknown variable, a
 > module-member miss and an enum-variant miss now get the same "did you mean" `help` a method/field
 > miss already had, and a module used in value position is now its own check-time diagnostic

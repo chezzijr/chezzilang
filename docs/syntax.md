@@ -2279,12 +2279,11 @@ and bare `Container` are three distinct, non-interchangeable types (exact-arg ma
 value type stays an existential with unbound params, so a struct whose method returns a concrete type
 does **not** conform to it — supply the args (`Container[int]`) to use it as a value.
 
-> **Protocols are module-local (by design, pre-freeze).** A `protocol` defined in one module cannot be
-> reached from another in *any* form: not as a qualified type (`mod.Named`), not via bare-import
-> (`import Named from mod` — a `struct`/`enum`/`newtype` bare-imports, a protocol does not), and not as
-> a generic bound (`[T: mod.Named]` — the bound grammar is bare-identifier-only). Use a protocol only
-> within its defining module; share cross-module contracts via a concrete type or a function parameter.
-> (Cross-module protocol *export* is a possible future milestone, not a current feature.)
+> **A protocol crosses a module boundary like any other declaration.** Both `mod.Named` (qualified) and
+> `import Named from mod` (with or without an `as` rename) resolve, exactly as they already do for a
+> `struct`/`enum`/`newtype`/`type` alias. One limit remains: a qualified generic BOUND (`[T: mod.Named]`)
+> still does not parse — the bound grammar is bare-identifier-only — so import the protocol by name and
+> write the bare form (`import Named from mod` then `[T: Named]`).
 
 The prebuilt **`Iterable[T]`** and **`Iterator[T]`** are parameterized bounds with extra magic: they
 **recover** `T` from the iterand's element (by unifying it), rather than requiring it written out. `T`
