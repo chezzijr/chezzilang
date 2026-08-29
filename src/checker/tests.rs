@@ -5872,6 +5872,20 @@ fn caught_error_has_no_location_accessor() {
     let src = "fn boom() -> int!:\n    xs := [1]\n    return Ok(xs[9])\nfn main():\n    r := recover: boom()\n    match r:\n        Ok(v): print(v)\n        Err(e): print(e.line())\n";
     ok(src);
     entry_ok(src);
+
+    let src_col = "fn boom() -> int!:\n    xs := [1]\n    return Ok(xs[9])\nfn main():\n    r := recover: boom()\n    match r:\n        Ok(v): print(v)\n        Err(e): print(e.col())\n";
+    entry_ok(src_col);
+
+    let src_file = "fn boom() -> int!:\n    xs := [1]\n    return Ok(xs[9])\nfn main():\n    r := recover: boom()\n    match r:\n        Ok(v): print(v)\n        Err(e): print(e.file())\n";
+    entry_ok(src_file);
+
+    // `line()` returns `int?`: a declared `int?` binding must accept it.
+    let src_typed = "fn boom() -> int!:\n    xs := [1]\n    return Ok(xs[9])\nfn main():\n    r := recover: boom()\n    match r:\n        Ok(v): print(v)\n        Err(e):\n            x: int? = e.line()\n            print(x)\n";
+    entry_ok(src_typed);
+
+    // The accessors take 0 arguments; arity is still enforced.
+    let src_arity = "fn boom() -> int!:\n    xs := [1]\n    return Ok(xs[9])\nfn main():\n    r := recover: boom()\n    match r:\n        Ok(v): print(v)\n        Err(e): print(e.line(1))\n";
+    entry_rejects(src_arity, "expects 0 argument(s)");
 }
 
 #[test]

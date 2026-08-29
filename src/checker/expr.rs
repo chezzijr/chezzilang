@@ -2525,6 +2525,17 @@ impl Checker {
             // protocol's own methods AND everything its embeds require are callable (M22 — the
             // embed set is flattened at every use site, not just at a bound).
             Ty::Protocol(pname, pargs) => {
+                // W8-22 — `line()`/`col()`/`file()` on a bare `Error` existential read the fault's
+                // origin span (stamped by `recover:`, absent on a user-constructed `Err`). These are
+                // NOT `Error` protocol requirements: `ProtocolInfo::methods` is the SATISFACTION set
+                // (`satisfies_methods` demands every entry), so adding them there would un-satisfy
+                // every struct error type that has only `message()`. Special-cased here instead,
+                // matching the hardcoded `Iterator`/`next` arm just below.
+                if pname == "Error" && pargs.is_empty() && matches!(method, "line" | "col" | "file")
+                {
+                    self.check_args(method, &[], args, span);
+                    return Ty::option(if method == "file" { Ty::Str } else { Ty::Int });
+                }
                 let found = self.protocol_method_sig(pname, method).map(|msig| {
                     let ptps = self
                         .protocols
@@ -2575,7 +2586,10 @@ impl Checker {
                     return subst(&msig.ret, &pmap);
                 }
                 self.infer_all(args);
-                let names = self.protocol_method_names(pname);
+                let mut names = self.protocol_method_names(pname);
+                if pname == "Error" && pargs.is_empty() {
+                    names.extend(["line", "col", "file"].iter().map(|s| s.to_string()));
+                }
                 self.error_help(
                     span,
                     format!("type {pname} has no method '{method}'"),
