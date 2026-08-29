@@ -189,7 +189,11 @@ impl Vm {
                     match self.drain_frame_to(h.defer_len) {
                         Some(e) if self.pending_exit.is_some() => return Err(e),
                         Some(e) => {
+                            let sp = e.span;
                             let msg = self.alloc_str(e.message);
+                            if let Some(mh) = msg.as_obj() {
+                                self.heap.set_err_span(mh, sp);
+                            }
                             let err = self.alloc_enum("Result", "Err", vec![msg]);
                             self.push(err);
                         }
@@ -197,7 +201,11 @@ impl Vm {
                             // No recover-block defer fault, but a parallel-body defer faulted: that
                             // becomes the recover's `Err` (Go semantics — a defer fault supersedes).
                             Some(e) => {
+                                let sp = e.span;
                                 let msg = self.alloc_str(e.message);
+                                if let Some(mh) = msg.as_obj() {
+                                    self.heap.set_err_span(mh, sp);
+                                }
                                 let err = self.alloc_enum("Result", "Err", vec![msg]);
                                 self.push(err);
                             }

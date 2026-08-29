@@ -1441,7 +1441,15 @@ impl Vm {
                         }
                         // Convert the fault message (a `str`, i.e. an `Error`) into `Err(msg)`; the
                         // boundary's `done` label receives a ready `Result`.
+                        let sp = rte.span;
                         let msg = self.alloc_str(rte.message);
+                        // W8-22 — stamp the fault's origin on the message handle so `e.line()` etc.
+                        // can read it back later. `msg` is always a fresh `Obj::Str`
+                        // (`alloc_str` allocates one per call), so this can never alias an
+                        // unrelated string's span.
+                        if let Some(mh) = msg.as_obj() {
+                            self.heap.set_err_span(mh, sp);
+                        }
                         let err = self.alloc_enum("Result", "Err", vec![msg]);
                         self.push(err);
                     }
