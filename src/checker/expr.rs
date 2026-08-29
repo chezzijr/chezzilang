@@ -1311,8 +1311,7 @@ impl Checker {
     /// Also covers `Ty::Option`/`Ty::Result` (both `Obj::Enum` at runtime, so both report `enum`),
     /// `Ty::Bytes`, `Ty::ByteArray`, and the `Shared`/`Channel` handle family (TICKET-020).
     /// `Ty::Protocol` and `Ty::Module` stay excluded — see `## Decisions` in TICKET-020.
-    pub(super) fn reject_non_scalar_cast(&mut self, cast: &str, arg: &Expr) {
-        let aty = self.infer_value(arg);
+    pub(super) fn reject_non_scalar_cast(&mut self, cast: &str, aty: &Ty, span: Span) {
         let kind = match aty {
             Ty::List(_) => "List",
             Ty::Map(..) => "Map",
@@ -1340,22 +1339,27 @@ impl Checker {
             _ => return,
         };
         self.error(
-            arg.span,
+            span,
             format!(
                 "{cast}() cannot convert {kind} — its argument must be int, float, bool, or str"
             ),
         );
     }
 
-    pub(super) fn check_newtype_cast_unwrap(&mut self, cast: &str, arg: &Expr, target: Ty) {
-        let aty = self.infer_value(arg);
+    pub(super) fn check_newtype_cast_unwrap(
+        &mut self,
+        cast: &str,
+        aty: &Ty,
+        span: Span,
+        target: Ty,
+    ) {
         if matches!(aty, Ty::NewType(..))
-            && let Some(under) = self.newtype_unwrap_target(&aty)
+            && let Some(under) = self.newtype_unwrap_target(aty)
             && !matches!(under, Ty::Unknown)
             && !compatible(&target, &under)
         {
             self.error(
-                arg.span,
+                span,
                 format!(
                     "{cast}() cannot unwrap newtype {aty} (its underlying type is {under}, not {target})"
                 ),
@@ -1510,19 +1514,21 @@ impl Checker {
             "int" => {
                 self.check_arity("int", 1, args, span);
                 if let Some(a) = args.first() {
-                    self.reject_non_scalar_cast("int", a);
-                    self.check_newtype_cast_unwrap("int", a, Ty::Int);
+                    let aty = self.infer_value(a);
+                    self.reject_non_scalar_cast("int", &aty, a.span);
+                    self.check_newtype_cast_unwrap("int", &aty, a.span, Ty::Int);
                 }
-                self.infer_all(args);
+                self.infer_all(args.get(1..).unwrap_or(&[]));
                 Some(Ty::Int)
             }
             "float" => {
                 self.check_arity("float", 1, args, span);
                 if let Some(a) = args.first() {
-                    self.reject_non_scalar_cast("float", a);
-                    self.check_newtype_cast_unwrap("float", a, Ty::Float);
+                    let aty = self.infer_value(a);
+                    self.reject_non_scalar_cast("float", &aty, a.span);
+                    self.check_newtype_cast_unwrap("float", &aty, a.span, Ty::Float);
                 }
-                self.infer_all(args);
+                self.infer_all(args.get(1..).unwrap_or(&[]));
                 Some(Ty::Float)
             }
             "bool" => {
@@ -1532,9 +1538,10 @@ impl Checker {
                 // valid truthiness input), so no newtype-mismatch check here. But an AGGREGATE arg
                 // is outside the domain and faults at runtime — reject it at check.
                 if let Some(a) = args.first() {
-                    self.reject_non_scalar_cast("bool", a);
+                    let aty = self.infer_value(a);
+                    self.reject_non_scalar_cast("bool", &aty, a.span);
                 }
-                self.infer_all(args);
+                self.infer_all(args.get(1..).unwrap_or(&[]));
                 Some(Ty::Bool)
             }
             "str" => {
