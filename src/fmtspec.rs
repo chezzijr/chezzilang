@@ -34,8 +34,9 @@ pub enum Align {
 pub struct FormatSpec {
     pub fill: char,
     pub align: Option<Align>,
-    /// Force a leading `+` on non-negative numbers.
-    pub sign: bool,
+    /// The sign char written before the digits: `'+'`, `'-'` or `' '`. `None` means the default
+    /// (a leading `-` on negatives only, nothing on non-negatives).
+    pub sign: Option<char>,
     /// `0` flag — zero-pad numerics to `width` (with the sign kept ahead of the zeros).
     pub zero_pad: bool,
     pub width: usize,
@@ -50,7 +51,7 @@ impl Default for FormatSpec {
         FormatSpec {
             fill: ' ',
             align: None,
-            sign: false,
+            sign: None,
             zero_pad: false,
             width: 0,
             group: None,
@@ -136,8 +137,8 @@ pub fn parse(spec: &str) -> Result<FormatSpec, String> {
     }
 
     // [sign]
-    if i < chars.len() && chars[i] == '+' {
-        out.sign = true;
+    if i < chars.len() && matches!(chars[i], '+' | '-' | ' ') {
+        out.sign = Some(chars[i]);
         i += 1;
     }
 
@@ -392,8 +393,8 @@ pub fn spec_valid_for_scalar(spec: &FormatSpec, kind: ScalarKind) -> Result<(), 
         },
         // A string takes only fill/align/width/precision — no sign, no zero-pad, no type char.
         ScalarKind::Str => {
-            if spec.sign {
-                return Err("format spec: sign '+' not allowed on a string".to_string());
+            if let Some(c) = spec.sign {
+                return Err(format!("format spec: sign '{c}' not allowed on a string"));
             }
             if spec.zero_pad {
                 return Err("format spec: zero-pad '0' not allowed on a string".to_string());
@@ -483,13 +484,15 @@ fn render_str(spec: &FormatSpec, s: &str) -> Result<(String, String, bool), Stri
     Ok((String::new(), body, false))
 }
 
-fn sign_prefix(neg: bool, force_plus: bool) -> String {
+fn sign_prefix(neg: bool, sign: Option<char>) -> String {
     if neg {
         "-".to_string()
-    } else if force_plus {
-        "+".to_string()
     } else {
-        String::new()
+        match sign {
+            Some('+') => "+".to_string(),
+            Some(' ') => " ".to_string(),
+            _ => String::new(),
+        }
     }
 }
 
@@ -592,7 +595,7 @@ mod tests {
         assert_eq!(s.ty, Some('f'));
 
         let s = parse("+d").unwrap();
-        assert!(s.sign);
+        assert_eq!(s.sign, Some('+'));
         assert_eq!(s.ty, Some('d'));
 
         // Empty spec → default (acts like no spec).
@@ -844,6 +847,20 @@ mod tests {
         assert!(spec_valid_for_scalar(&p(","), ScalarKind::Int).is_ok());
         assert!(spec_valid_for_scalar(&p(","), ScalarKind::Float).is_ok());
         assert!(spec_valid_for_scalar(&p("_x"), ScalarKind::Int).is_ok());
+    }
+
+    #[test]
+    fn sign_slot_matches_cpython() {
+        assert_eq!(ok_apply(" d", FmtArg::Int(42)), " 42");
+        assert_eq!(ok_apply(" d", FmtArg::Int(-42)), "-42");
+        assert_eq!(ok_apply(" ", FmtArg::Int(42)), " 42");
+        assert_eq!(ok_apply(" 010", FmtArg::Int(-42)), "-000000042");
+        assert_eq!(ok_apply(" .2f", FmtArg::Float(1.5)), " 1.50");
+        assert_eq!(ok_apply("-d", FmtArg::Int(42)), "42");
+        assert_eq!(ok_apply("-d", FmtArg::Int(-42)), "-42");
+        assert_eq!(parse(" d").unwrap().sign, Some(' '));
+        assert_eq!(parse("+d").unwrap().sign, Some('+'));
+        assert_eq!(parse("d").unwrap().sign, None);
     }
 
     #[test]
