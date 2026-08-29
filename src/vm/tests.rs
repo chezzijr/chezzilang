@@ -19139,3 +19139,25 @@ fn ticket_016_bounded_update_guard_acquire_yields_instead_of_blocking() {
         Ok(Some(_))
     ));
 }
+
+/// W8-22: an error with no recorded span answers `None`, never a guess. A user-constructed
+/// `Err("boom")` was never stamped by `recover:`, and a struct error's only requirement is
+/// `message()` — neither carries an origin.
+#[test]
+fn caught_error_location_is_nil_without_a_recorded_span() {
+    // A user-constructed `Err(...)` returned as a plain value (no fault, so no `recover:`
+    // boundary ever runs) was never stamped.
+    let src = "fn a() -> int!:\n    return Err(\"boom\")\nfn main():\n    match a():\n        Ok(v): print(v)\n        Err(e):\n            print(e.line())\n            print(e.col())\n            print(e.file())\nmain()\n";
+    assert_eq!(run(src), "None\nNone\nNone\n");
+
+    let src_struct = "struct MyErr:\n    code: int\n    fn message(self) -> str:\n        return \"code {self.code}\"\nfn b() -> int!:\n    return Err(MyErr(7))\nfn main():\n    match b():\n        Ok(v): print(v)\n        Err(e): print(e.line())\nmain()\n";
+    assert_eq!(run(src_struct), "None\n");
+}
+
+/// W8-22: a fault caught by `recover:` carries the ORIGIN of the fault, not the `recover:` site.
+/// The uncaught form of this source faults at line 3 col 15 (`xs[9]`).
+#[test]
+fn caught_error_carries_the_fault_origin_span() {
+    let src = "fn boom() -> int!:\n    xs := [1]\n    return Ok(xs[9])\nfn main():\n    r := recover: boom()\n    match r:\n        Ok(v): print(v)\n        Err(e):\n            print(e.line())\n            print(e.col())\nmain()\n";
+    assert_eq!(run(src), "Some(3)\nSome(15)\n");
+}

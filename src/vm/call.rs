@@ -2612,6 +2612,16 @@ impl Vm {
         args: &[Value],
         span: Span,
     ) -> Result<Option<Value>, RuntimeError> {
+        // W8-22 — `line()`/`col()`/`file()` through the `Error` existential, for every receiver
+        // that is NOT a `str` (a struct/enum/newtype error whose only requirement is `message()`).
+        // This hook is miss-only and already runs from the struct arm, the enum arm, the newtype
+        // arm and the catch-all, so a user error type that DEFINES its own `line()` still gets that
+        // method instead of this blanket answer. A non-`str` `Error` never carries a stamped span
+        // (only the three `recover:` boundaries stamp one, and only on the `Obj::Str` payload they
+        // allocate), so the honest answer here is always `None`.
+        if args.is_empty() && matches!(method, "line" | "col" | "file") {
+            return Ok(Some(self.alloc_enum("Option", "None", Vec::new())));
+        }
         // `Add`/`Sub`/`Mul`/`Div`/`Mod` → the binary-arith primitive (which itself routes a
         // same-newtype pair through `newtype_arith`, so the numeric-newtype grant lands here too).
         let bin = match method {
@@ -2822,6 +2832,39 @@ impl Vm {
                     "message" => {
                         self.arity_err("message", args, 0, span)?;
                         Ok(self.alloc_str(s.to_string()))
+                    }
+                    // W8-22 — `line()`/`col()`: the fault's origin span, stamped on this handle at
+                    // one of the three `recover:` boundaries. `None` for a user-constructed
+                    // `Err("...")`, which was never stamped. `sp` is bound BEFORE any allocation so
+                    // the immutable `heap` borrow ends first (`Span` is `Copy`).
+                    "line" | "col" => {
+                        self.arity_err(method, args, 0, span)?;
+                        let sp = self.heap.err_span(h);
+                        Ok(match sp {
+                            Some(sp) => {
+                                let n = if method == "line" { sp.line } else { sp.col };
+                                self.alloc_enum("Option", "Some", vec![Value::int(n as i64)])
+                            }
+                            None => self.alloc_enum("Option", "None", Vec::new()),
+                        })
+                    }
+                    // W8-22 — `file()`: the origin span's file resolved to a display path, same
+                    // text `lexer::render_span` prints for an uncaught fault. `None` when there is
+                    // no stamped span, or the span's file has no coordinate (`file` 0).
+                    "file" => {
+                        self.arity_err("file", args, 0, span)?;
+                        let path = self.heap.err_span(h).and_then(|sp| {
+                            self.program.file_path(sp.file).map(|p| {
+                                crate::lexer::display_path(p).to_string_lossy().into_owned()
+                            })
+                        });
+                        Ok(match path {
+                            Some(p) => {
+                                let s = self.alloc_str(p);
+                                self.alloc_enum("Option", "Some", vec![s])
+                            }
+                            None => self.alloc_enum("Option", "None", Vec::new()),
+                        })
                     }
                     "split" => {
                         self.arity_err("split", args, 1, span)?;
