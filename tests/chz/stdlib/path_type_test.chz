@@ -13,6 +13,13 @@ import std.fs
 import std.io
 import std.os
 
+test fn ctor_takes_a_str_like_every_other_path_fn():
+    assert path.Path("/a/b") == path.Path(b"/a/b")
+    assert path.Path("/a/b").str() == "/a/b"
+    assert path.Path("/a/b").bytes() == b"/a/b"
+    assert path.is_abs(path.Path("/a/b"))
+    assert path.Path(path.Path("/a/b")).bytes() == b"/a/b"
+
 test fn path_bytes_is_exact():
     assert path.Path(b"A\xffB.txt").bytes() == b"A\xffB.txt"
     assert path.Path(b"ok").bytes() == b"ok"

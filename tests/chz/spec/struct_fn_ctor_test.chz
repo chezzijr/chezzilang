@@ -1,0 +1,21 @@
+# tests/chz/spec/struct_fn_ctor_test.chz — a module-level `fn` named after a struct in the same
+# module REPLACES that struct's field-derived constructor, at every call site where the fn is in
+# scope (TICKET-029). Inside that fn's own body the struct name is still the raw field constructor.
+
+import std.path
+import Path from std.path
+
+struct Tag:
+    raw: bytes
+
+fn Tag(s: str) -> Tag:
+    return Tag(s.encode())
+
+test fn module_fn_named_after_the_struct_is_the_constructor():
+    assert Tag("hi").raw == b"hi"
+
+test fn from_imported_ctor_fn_wins_in_the_importing_module():
+    assert Path("/a/b").bytes() == b"/a/b"
+
+test fn whole_module_std_import_keeps_the_bare_field_ctor():
+    assert path.Path(b"/a/b").bytes() == b"/a/b"

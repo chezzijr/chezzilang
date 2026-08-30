@@ -10572,6 +10572,51 @@ fn path_ctor_accepts_str_like_every_other_path_fn() {
 }
 
 #[test]
+fn path_ctor_still_takes_bytes() {
+    // TICKET-029 — the fix must not break the pre-existing bytes spelling.
+    entry_ok("import std.path\nfn main():\n    p := path.Path(b\"/a/b\")\n    print(p.str())\n");
+}
+
+#[test]
+fn path_ctor_rejects_a_non_pathlike() {
+    // TICKET-029 — the new fn ctor still names PathLike, not bytes, in its rejection.
+    let errs = check_entry("import std.path\nfn main():\n    p := path.Path(3)\n");
+    assert_eq!(errs.len(), 1, "expected one error, got: {errs:?}");
+    assert!(
+        errs[0].message.contains("argument 1 of 'Path'")
+            && errs[0].message.contains("expected PathLike"),
+        "got: {}",
+        errs[0].message
+    );
+}
+
+#[test]
+fn path_value_still_satisfies_pathlike() {
+    // TICKET-029 — a Path built through the fn ctor still satisfies PathLike structurally.
+    entry_ok(
+        "import std.path\nimport std.fs\nfn main():\n    p := path.Path(b\"/a\")\n    print(fs.exists(p))\n",
+    );
+}
+
+#[test]
+fn path_from_imported_ctor_is_usable_as_a_type() {
+    // TICKET-029 — a colliding from-import must bind both the fn (call) and the type (annotation).
+    entry_ok(
+        "import Path from std.path\nfn main():\n    p: Path = Path(\"/a/b\")\n    print(p.bytes())\n",
+    );
+}
+
+#[test]
+fn path_from_import_still_reserves_the_name_against_a_user_struct() {
+    // TICKET-029 — the Builtin-origin reservation must still be bound for a colliding from-import
+    // even though std.path now also has a same-named fn.
+    entry_rejects(
+        "import Path from std.path\nstruct Path:\n    x: int\nfn main():\n    print(1)\nmain()\n",
+        "type 'Path' is already defined",
+    );
+}
+
+#[test]
 fn native_fs_mutations_typecheck_as_result_nil() {
     entry_ok(
         "import std.fs\nfn main():\n    match fs.mkdir(\"d\"):\n        Ok(_): print(\"made\")\n        Err(e): print(e)\n    match fs.append(\"f\", \"x\"):\n        Ok(_): print(\"app\")\n        Err(e): print(e)\n    match fs.rename(\"a\", \"b\"):\n        Ok(_): print(\"ren\")\n        Err(e): print(e)\n    match fs.copy(\"a\", \"b\"):\n        Ok(_): print(\"cp\")\n        Err(e): print(e)\n    match fs.remove_file(\"f\"):\n        Ok(_): print(\"rmf\")\n        Err(e): print(e)\n    match fs.remove_dir(\"d\"):\n        Ok(_): print(\"rmd\")\n        Err(e): print(e)\n",
