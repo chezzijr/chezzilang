@@ -3937,6 +3937,29 @@ fn fetch_all(urls: List[str]):
   so `fs.exists("x")`, `fs.exists(b"x")` and `fs.exists(p)` all work with no annotation. It is what
   lets a non-UTF-8 filename reach a syscall byte-exactly instead of through a `str` that cannot
   represent it — see `docs/stdlib.md` §`std.fs` / `path.Path`.
+
+  **Why these 21 are global, and why a NEW shared protocol should not be.** Twenty of them are
+  reachable from SYNTAX, so no import could ever be required for them: the operator protocols
+  (`Eq`→`==`, `Comparable`→`<`, `Add`/`Sub`/`Mul`/`Div`/`Mod`/`Neg`→the arithmetic operators,
+  `Arithmetic` the bundle over four of them), indexing (`Index`→`xs[i]`, `IndexSet`→`xs[i] = v`,
+  `Slice`→`xs[a:b]`), iteration (`Iterator`/`Iterable`→`for`), membership (`Contains`→`in`),
+  construction through a bound (`Convert`→`T.convert(...)`), rendering and keys (`Stringable`→
+  interpolation, `Hashable`→a map key), errors (`Error`→`!` and `recover:`), and `Any` (the top type).
+  A user cannot import their way to `==` or `in`, so each of those must resolve with no import in
+  every module.
+  **`PathLike` is the one exception, and it is global for HISTORICAL reasons rather than that one.**
+  No syntax reaches it — it is a shared library type that `std.path`, `std.fs`, `std.io` and `std.os`
+  all take in argument position, and before 2026-08-30 a protocol could not cross a module boundary
+  at all (TICKET-023) nor be declared by two modules (TICKET-027), so "global" was the only thing a
+  shared protocol could be. It stays where it is deliberately: an audit on 2026-08-30 priced the move
+  into `std.path` at 47 mentions across 8 files for no behavioural gain, which is not a trade worth
+  making while nothing collides.
+  **The rule for anything NEW:** a protocol that does not back syntax belongs in the module that owns
+  it, declared as an ordinary `protocol` and imported by its consumers (`import PathLike from
+  std.path`) — the same convention `CLAUDE.md` already applies to types, ctors and fns, and now
+  possible for protocols too. Adding a name to `RESERVED_PROTOCOLS` is a one-way ratchet: it also
+  changes `is_reserved_protocol`, which gates the export skip (TICKET-023), built-in protocol
+  satisfaction (TICKET-024) and the module-scoped keying short-circuit (TICKET-027) at once.
 - **`wait:` (select)** — race several channel `recv`s AND `send`s; the first ready arm wins (deterministic
   source-order priority, not Go's random fairness). `wait:` then arms: recv `v := ch.recv():` (or
   `result = ch.recv():` / `_ := ch.recv():`), **send** `ch.send(v):` (a bare `.send()`, binds nothing —
