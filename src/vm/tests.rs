@@ -2255,6 +2255,18 @@ fn bounded_channel_zero_cap_faults_both_engines() {
     }
 }
 
+/// Go's `make(chan T)` (no capacity arg) is the RENDEZVOUS channel: unbuffered, synchronous
+/// handoff. Chezzi's identical no-arg spelling `Channel[T]()` means the opposite — an UNBOUNDED
+/// FIFO where `send` never blocks (`docs/concurrency.md:372`). The natural cap-0 spelling that
+/// would mean "rendezvous" here, `Channel[T](0)`, is instead a runtime fault. So there is no way
+/// to spell a rendezvous channel in Chezzi at all (TICKET-028).
+#[test]
+fn rendezvous_channel_cap_zero_should_construct() {
+    let src = "c := Channel[int](0)\nprint(c.cap())\n";
+    let out = run(src);
+    assert_eq!(out, "0\n");
+}
+
 /// `try_send` on a FULL bounded channel returns `false` (not true — the old unbounded contract);
 /// after a `recv` frees a slot it returns `true`. Single fiber, so fully deterministic on both.
 #[test]
