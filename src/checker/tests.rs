@@ -28373,8 +28373,7 @@ fn builtin_native_method_gates_bound_protocol_satisfaction_ticket_024() {
 // TICKET-030: a struct has no `copy()` — the only way to duplicate one is to retype every field.
 #[test]
 fn struct_copy_method_missing_ticket_030() {
-    rejects(
-        "struct P:\n    x: int\n\nfn main():\n    p := P(1)\n    print(p.copy())\n",
-        "type P has no method 'copy'",
-    );
+    // DEC-026: the NAME states the bug, the BODY asserts the FIX. This is RED until the intrinsic
+    // `copy()` lands in `Checker::infer_method_call`'s `Ty::Struct` arm.
+    ok("struct P:\n    x: int\n\nfn main():\n    p := P(1)\n    q: P = p.copy()\n    print(q)\n");
 }
