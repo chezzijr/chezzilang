@@ -42,6 +42,7 @@ impl Checker {
             module_global_lets: std::collections::HashSet::new(),
             functions: HashMap::new(),
             local_fn_names: std::collections::HashSet::new(),
+            raw_ctor_owner: None,
             fn_reads: std::collections::HashSet::new(),
             structs: HashMap::new(),
             protocols: prebuilt_protocols(),
@@ -150,6 +151,21 @@ impl Checker {
             .get(name)
             .cloned()
             .unwrap_or_else(|| name.to_string())
+    }
+
+    /// Bind a from-imported struct name into every namespace a colliding fn import must ALSO reach
+    /// (TICKET-029) — a colliding from-import binds both, so this is called from both the struct
+    /// branch and the fn branch of the `Import::From` loop. Registers the layout, makes the name
+    /// bare-visible as a TYPE (`struct_names`/`bare_types`), and — for a Builtin-origin std struct —
+    /// reserves the bind name against a same-named user `struct` decl (`imported_builtin_types`),
+    /// else a user layout could silently overwrite a native shape.
+    fn bind_imported_struct_name(&mut self, bind: &str, key: &str, info: &StructInfo) {
+        self.structs.insert(key.to_string(), info.clone());
+        self.struct_names.insert(bind.to_string());
+        self.bare_types.insert(bind.to_string(), key.to_string());
+        if info.origin == StructOrigin::Builtin {
+            self.imported_builtin_types.insert(bind.to_string());
+        }
     }
 
     /// The module-scoped runtime key for a type `name` declared in module `mid` (bare unless a genuine
@@ -1568,6 +1584,13 @@ impl Checker {
                                 fsig.doc.clone(),
                             );
                         }
+                        // TICKET-029 — a name that is BOTH a fn and a struct in the source module
+                        // (e.g. `fn Path` beside `struct Path`) must bind the TYPE too, or the bind
+                        // name is unusable as an annotation and a Builtin-origin reservation is lost.
+                        if let Some(info) = sig.struct_defs.get(member).cloned() {
+                            let key = self.type_key(&imp.target, member);
+                            self.bind_imported_struct_name(bind, &key, &info);
+                        }
                     } else if let Some(vty) = sig.values.get(member) {
                         // Editor hover (decl-site): record the imported value's type at the bound name.
                         if self.hover_probe.is_some() {
@@ -1717,15 +1740,7 @@ impl Checker {
                             // signatures + a value's `Ty`), and make it BARE-VISIBLE under the bind
                             // name via `struct_names`/`bare_types` so `S(...)`/`x: S` resolve here.
                             let key = self.type_key(&imp.target, member);
-                            self.structs.insert(key.clone(), info.clone());
-                            self.struct_names.insert(bind.clone());
-                            self.bare_types.insert(bind.clone(), key.clone());
-                            // Same soundness gate as the whole-module path: a Builtin-origin std
-                            // struct imported by name reserves its BIND name against a same-named user
-                            // `struct` decl (else accept-then-trap on the native shape mismatch).
-                            if info.origin == StructOrigin::Builtin {
-                                self.imported_builtin_types.insert(bind.clone());
-                            }
+                            self.bind_imported_struct_name(bind, &key, info);
                             // Editor hover (Tier C): the imported type's doc — its own decl docstring
                             // carried across the boundary, else a `kind (from module)` fallback. Seed
                             // `name_docs[bind]` so a later bare/annotation/generic-head use surfaces it

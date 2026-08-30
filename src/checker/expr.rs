@@ -100,6 +100,7 @@ impl Checker {
                 && let Some(mid) = self.imported_modules.get(mname).cloned()
                 && let Some(sig) = self.module_sigs.get(&mid).cloned()
                 && let Some(info) = sig.struct_defs.get(name)
+                && !sig.functions.contains_key(name)
             {
                 let key = self.type_key(&mid, name);
                 return self
@@ -2022,6 +2023,8 @@ impl Checker {
                 // unknown-name path (with an import hint).
                 if self.struct_names.contains(name)
                     && let key = self.bare_key(name)
+                    && (self.raw_ctor_owner.as_deref() == Some(key.as_str())
+                        || !self.functions.contains_key(name))
                     && let Some((tps, fields)) = self
                         .structs
                         .get(&key)

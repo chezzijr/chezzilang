@@ -277,6 +277,15 @@ struct Compiler {
     /// `module_idx → its declared user type names` (struct/enum/alias). Drives the collision detection
     /// and resolves a qualified `geo.X` to the right module's key.
     module_types: Vec<std::collections::HashSet<String>>,
+    /// `module_idx → its declared top-level fn names` (TICKET-029). Twin of `module_types`, filled in
+    /// the same per-module AST loop: lets `ctor_shadowed` decide, from one predicate the checker
+    /// mirrors, whether a module-level fn named after a same-module struct wins over the
+    /// field-derived constructor.
+    module_fns: Vec<std::collections::HashSet<String>>,
+    /// `Some(key)` while compiling the body of a module-level fn whose name shadows a same-module
+    /// struct ctor (TICKET-029) — mirrors the checker's `raw_ctor_owner`. There, and only there, the
+    /// bare name still emits `Op::NewStruct` instead of a recursive call.
+    raw_ctor_owner: Option<String>,
     /// STATIC (associated) methods, keyed `"{type_runtime_key}\u{1}{method}"` — a struct/enum method
     /// whose first param is not `self` (the "no self ⇒ static" rule). Populated in `hoist_types` (all
     /// types across all modules are seen there before any body compiles), so a `Type.method(...)` call
@@ -858,6 +867,8 @@ impl Compiler {
             method_ic_next: 0,
             type_keys: HashMap::new(),
             module_types: Vec::new(),
+            module_fns: Vec::new(),
+            raw_ctor_owner: None,
             static_methods: std::collections::HashSet::new(),
             imported_modules: HashMap::new(),
             current_module_idx: 0,
@@ -893,6 +904,7 @@ impl Compiler {
     /// type members) and `module_types` (per-module declared names, deps-first).
     fn assign_type_keys(&mut self, graph: &ModuleGraph) {
         self.module_types = vec![std::collections::HashSet::new(); graph.modules.len()];
+        self.module_fns = vec![std::collections::HashSet::new(); graph.modules.len()];
         let mkeys = crate::resolver::module_keys(graph);
         for (idx, lm) in graph.modules.iter().enumerate() {
             if let Some(nat) = lm.native {
@@ -935,6 +947,11 @@ impl Compiler {
                 if let StmtKind::Protocol { name, .. } = &s.kind {
                     self.program.type_names.insert(name.clone());
                 }
+                // TICKET-029 — a module-level fn named after a same-module struct wins over its
+                // field-derived ctor; `ctor_shadowed` reads this set from both emit sites.
+                if let StmtKind::Fn(decl) = &s.kind {
+                    self.module_fns[idx].insert(decl.name.clone());
+                }
             }
         }
     }
@@ -946,6 +963,21 @@ impl Compiler {
             .get(&(module_idx, name.to_string()))
             .cloned()
             .unwrap_or_else(|| name.to_string())
+    }
+
+    /// Is `name` shadowed by a module-level fn of the same name (TICKET-029)? True for a name
+    /// declared as a fn in the CURRENT module, or `from`-imported as a fn from its declaring module
+    /// (`imported_fns` then also carries a type binding for it — see the `Import::From` loop). Mirrors
+    /// the checker's `Checker::functions.contains_key`; both halves must read the SAME predicate or a
+    /// check-clean program lowers to the wrong opcode.
+    fn ctor_shadowed(&self, name: &str) -> bool {
+        self.module_fns
+            .get(self.current_module_idx)
+            .is_some_and(|f| f.contains(name))
+            || self
+                .imported_fns
+                .get(name)
+                .is_some_and(|(t, m)| self.module_fns.get(*t).is_some_and(|f| f.contains(m)))
     }
 
     /// The TYPE name + module-scoped identity key of a QUALIFIED declaration-site turbofish head —
@@ -1272,6 +1304,17 @@ impl Compiler {
                                 .get(tidx)
                                 .is_some_and(|t| t.contains(member))
                             {
+                                // TICKET-029 — a name that is BOTH a type and a fn in the source
+                                // module (`fn Path` beside `struct Path`) binds BOTH tables: the
+                                // fn table is what `ctor_shadowed` reads to redirect a call.
+                                if self
+                                    .module_fns
+                                    .get(tidx)
+                                    .is_some_and(|f| f.contains(member))
+                                {
+                                    self.imported_fns
+                                        .insert(bind.clone(), (tidx, member.clone()));
+                                }
                                 let key = self.type_key(tidx, member);
                                 self.bare_types.insert(bind, key);
                             } else {
@@ -1463,7 +1506,20 @@ impl Compiler {
                     .get(&(module_idx, decl.name.clone()))
                     .cloned()
                     .unwrap_or_default();
+                // TICKET-029 — inside this fn's own body, if it shadows a same-named struct ctor, the
+                // bare name is still the RAW field constructor (else `fn Path(...): return Path(...)`
+                // is infinite recursion). Mirrors the checker's `raw_ctor_owner` save/restore.
+                let saved_raw = if self.ctor_shadowed(&decl.name) {
+                    self.bare_types
+                        .get(&decl.name)
+                        .cloned()
+                        .map(|k| self.raw_ctor_owner.replace(k))
+                        .unwrap_or_else(|| self.raw_ctor_owner.clone())
+                } else {
+                    self.raw_ctor_owner.clone()
+                };
                 let pid = self.compile_fn(decl, false)?;
+                self.raw_ctor_owner = saved_raw;
                 // A hidden default-argument provider is reachable from a module that cannot name it
                 // (`Op::MakeFuncIn`); record where it lives so `build_provider_table` can resolve it.
                 if decl.name.starts_with(crate::desugar::PROVIDER_PREFIX) {
@@ -5275,6 +5331,7 @@ impl Compiler {
                     .module_types
                     .get(tidx)
                     .is_some_and(|t| t.contains(name))
+                && !self.module_fns.get(tidx).is_some_and(|f| f.contains(name))
             {
                 let key = self.type_key(tidx, name);
                 if self.program.structs.contains_key(&key) {
@@ -5793,6 +5850,8 @@ impl Compiler {
             // `from`-imported FUNCTION of the same name).
             if let Some(struct_key) = self.bare_types.get(name).cloned()
                 && self.program.structs.contains_key(&struct_key)
+                && (self.raw_ctor_owner.as_deref() == Some(struct_key.as_str())
+                    || !self.ctor_shadowed(name))
             {
                 self.compile_ctor_args(fc, &struct_key, args)?;
                 fc.emit(Op::NewStruct(struct_key, args.len()), span);

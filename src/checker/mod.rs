@@ -1962,6 +1962,11 @@ struct Checker {
     /// this concrete binding never fires for it. Saved/restored via `mem::replace` at the method-sig
     /// hoist sites and at `infer_fn_ret`/`check_fn_body` entry (from their `self_ty` argument).
     current_self_ty: Option<Ty>,
+    /// `Some(key)` while checking the body of a module-level `fn` whose name equals a struct
+    /// declared in the same module (TICKET-029) — `key` is that struct's runtime key. There, and
+    /// only there, the bare struct name is the RAW field constructor rather than a recursive call to
+    /// this fn. Every other body inherits the flag (closures/nested fns), like `current_self_ty`.
+    raw_ctor_owner: Option<String>,
     /// `Some(T)` while checking a generator function body whose declared return is `Iterator[T]` —
     /// the element type each `yield` must produce. `None` outside a generator, so a stray `yield`
     /// is diagnosed. Saved/restored across nested fn/closure boundaries like `current_ret`.

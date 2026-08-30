@@ -358,6 +358,17 @@ impl Checker {
         // `Self` in this body/inline-expr resolves to the enclosing type (`None` for a free fn, which
         // correctly resets an enclosing method's binding when a nested fn is inference-checked).
         let saved_self = std::mem::replace(&mut self.current_self_ty, self_ty.clone());
+        // TICKET-029 — inside a module-level fn's own body that shadows a same-named struct ctor,
+        // the bare struct name is the RAW field constructor (else `fn Path(...): return Path(...)`
+        // is infinite recursion). Every other body inherits the flag, like `current_self_ty`.
+        let saved_raw = if self_ty.is_none()
+            && self.local_fn_names.contains(&decl.name)
+            && self.struct_names.contains(&decl.name)
+        {
+            self.raw_ctor_owner.replace(self.bare_key(&decl.name))
+        } else {
+            self.raw_ctor_owner.clone()
+        };
         let saved_ret = std::mem::replace(&mut self.current_ret, Ty::Unknown);
         let saved_ret_decl = std::mem::replace(&mut self.ret_declared, false);
         // In a fn body during return inference (mirrors `check_fn_body`): a `?` here targets this
@@ -437,6 +448,7 @@ impl Checker {
         self.in_default_provider = saved_in_dflt;
         self.exit_own_frame(saved_frame);
         self.current_self_ty = saved_self;
+        self.raw_ctor_owner = saved_raw;
         self.witness_scope = saved_witness_scope;
         self.exit_type_params(saved_tps);
         // Did the body inference itself emit an error (undefined name, bad call, …)? If so the real
@@ -4030,6 +4042,15 @@ impl Checker {
         // `Self` in this method body resolves to the enclosing type (`None` for a free fn / nested fn,
         // which resets an enclosing method's binding). Restored below beside `current_ret`.
         let saved_self = std::mem::replace(&mut self.current_self_ty, self_ty.clone());
+        // TICKET-029 — same raw-ctor escape as `infer_fn_ret`, see there.
+        let saved_raw = if self_ty.is_none()
+            && self.local_fn_names.contains(&decl.name)
+            && self.struct_names.contains(&decl.name)
+        {
+            self.raw_ctor_owner.replace(self.bare_key(&decl.name))
+        } else {
+            self.raw_ctor_owner.clone()
+        };
         // A generator (`is_generator`, i.e. its body contains `yield`) has return type `Iterator[T]` —
         // either declared explicitly (`-> Iterator[T]`) or INFERRED by strict-first-yield (stored back
         // into `sig.ret` by `infer_generator_ret`). Recover `T` as the per-yield element type. The `_`
@@ -4299,6 +4320,7 @@ impl Checker {
         self.in_fn_body = saved_in_fn;
         self.in_default_provider = saved_in_dflt;
         self.current_self_ty = saved_self;
+        self.raw_ctor_owner = saved_raw;
         self.yield_ty = saved_yield;
         self.in_generator = saved_ig;
         self.inferring_ret = saved_inferring;

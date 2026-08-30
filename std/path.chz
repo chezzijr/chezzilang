@@ -30,6 +30,12 @@
 # `as_path` makes it satisfy `PathLike` STRUCTURALLY, so `fs.exists(p)` takes it directly — which is
 # what keeps the natural spelling off the lossy `fs.exists(p.str())` route.
 # There is no `bytearray` conversion method: `bytearray(p.bytes())` already works.
+# TICKET-029 — every `PathLike` (str, bytes, bytearray, another `Path`), normalized to raw OS
+# bytes via `as_path()`, so `Path("/a/b")` and `Path(b"/a/b")` are the same value. Inside THIS
+# body the bare `Path(...)` is still the raw field constructor — the one place it stays reachable.
+fn Path(p: PathLike) -> Path:
+    return Path(p.as_path())
+
 struct Path:
     raw: bytes
 
