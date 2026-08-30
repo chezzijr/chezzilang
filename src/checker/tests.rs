@@ -28377,3 +28377,52 @@ fn struct_copy_method_missing_ticket_030() {
     // `copy()` lands in `Checker::infer_method_call`'s `Ty::Struct` arm.
     ok("struct P:\n    x: int\n\nfn main():\n    p := P(1)\n    q: P = p.copy()\n    print(q)\n");
 }
+
+#[test]
+fn struct_copy_rejects_an_argument() {
+    rejects(
+        "struct P:\n    x: int\n\nfn main():\n    p := P(1)\n    print(p.copy(1))\n",
+        "'copy' expects 0 argument(s), got 1",
+    );
+}
+
+#[test]
+fn struct_copy_returns_the_receiver_type() {
+    rejects(
+        "struct P:\n    x: int\n\nfn main():\n    p := P(1)\n    n: int = p.copy()\n    print(n)\n",
+        "cannot assign P to variable of type int",
+    );
+}
+
+#[test]
+fn struct_copy_is_not_on_an_enum() {
+    rejects(
+        "enum E:\n    A\n    B\n\nfn main():\n    e := E.A\n    print(e.copy())\n",
+        "type E has no method 'copy'",
+    );
+}
+
+#[test]
+fn struct_copy_is_not_on_a_newtype() {
+    rejects(
+        "newtype N = int\n\nfn main():\n    n := N(1)\n    print(n.copy())\n",
+        "type N has no method 'copy'",
+    );
+}
+
+#[test]
+fn struct_copy_does_not_witness_a_user_protocol() {
+    rejects(
+        "protocol Dup:\n    fn copy(self) -> int\n\nstruct P:\n    x: int\n\nfn take(d: Dup) -> int:\n    return d.copy()\n\nfn main():\n    print(take(P(1)))\n",
+        "type P does not satisfy Dup (missing method 'copy')",
+    );
+}
+
+#[test]
+fn struct_copy_is_suggested_on_a_near_miss() {
+    rejects_help(
+        "struct P:\n    x: int\n\nfn main():\n    p := P(1)\n    print(p.cpy())\n",
+        "type P has no method 'cpy'",
+        "did you mean 'copy'?",
+    );
+}
