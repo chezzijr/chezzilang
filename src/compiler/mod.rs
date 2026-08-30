@@ -5331,10 +5331,11 @@ impl Compiler {
                     .module_types
                     .get(tidx)
                     .is_some_and(|t| t.contains(name))
-                && !self.module_fns.get(tidx).is_some_and(|f| f.contains(name))
             {
                 let key = self.type_key(tidx, name);
-                if self.program.structs.contains_key(&key) {
+                if self.program.structs.contains_key(&key)
+                    && !self.module_fns.get(tidx).is_some_and(|f| f.contains(name))
+                {
                     self.compile_ctor_args(fc, &key, args)?;
                     fc.emit(Op::NewStruct(key, args.len()), span);
                     return Ok(());
