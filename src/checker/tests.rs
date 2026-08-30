@@ -28426,3 +28426,14 @@ fn struct_copy_is_suggested_on_a_near_miss() {
         "did you mean 'copy'?",
     );
 }
+
+#[test]
+fn struct_copy_field_wins_over_the_intrinsic_and_stays_uncallable() {
+    // A non-fn field named `copy` (review finding on `3faa6948`): the fn-typed-field fallback
+    // matches only `Ty::Func`, so `copy: int` must NOT fall through to the intrinsic arm — that
+    // was accepted at check time and then faulted at runtime with "'{}' is not callable".
+    rejects(
+        "struct S:\n    copy: int\n\nfn main():\n    s := S(7)\n    print(s.copy())\n",
+        "has no method 'copy'",
+    );
+}

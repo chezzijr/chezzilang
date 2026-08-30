@@ -2749,9 +2749,16 @@ impl Checker {
                 // TICKET-030 — every struct gets an intrinsic, MISS-ONLY `copy()`: it is checked here
                 // only after the declared-method lookup and the fn-typed-field fallback above both
                 // failed, so a struct declaring its own `copy` or holding a fn-typed `copy` field keeps
-                // it. Returns the receiver type UNCHANGED (not just `sname`), so a generic struct's
-                // type arguments survive. Mirrors the runtime arm in `Vm::do_method_call`.
-                if method == "copy" && self.struct_shape(sname).is_some() {
+                // it. Also miss-only against a NON-fn field named `copy` — the fn-typed-field fallback
+                // above only matches `Ty::Func`, so a plain `copy: int` field falls through to here;
+                // without this guard the checker accepts `s.copy()` but the VM's field fallback faults
+                // with "'{}' is not callable" (review finding on `3faa6948`). Returns the receiver type
+                // UNCHANGED (not just `sname`), so a generic struct's type arguments survive. Mirrors
+                // the runtime arm in `Vm::do_method_call`.
+                let has_copy_field = self
+                    .struct_shape(sname)
+                    .is_some_and(|info| info.fields.iter().any(|(f, _)| f == "copy"));
+                if method == "copy" && self.struct_shape(sname).is_some() && !has_copy_field {
                     self.check_args(method, &[], args, span);
                     return obj_ty.clone();
                 }
