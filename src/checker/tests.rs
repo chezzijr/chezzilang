@@ -10564,6 +10564,14 @@ fn native_fs_list_dir_returns_result_list_path() {
 }
 
 #[test]
+fn path_ctor_accepts_str_like_every_other_path_fn() {
+    // TICKET-029 — every free fn in std.path takes PathLike (str/bytes/bytearray/Path), but the
+    // struct's auto-generated ctor demands `raw: bytes` exactly, so `path.Path("/a/b")` rejects
+    // while `path.join(["/a/b"])` and `path.is_abs("/a/b")` accept the same literal.
+    entry_ok("import std.path\nfn main():\n    p := path.Path(\"/a/b\")\n    print(p.str())\n");
+}
+
+#[test]
 fn native_fs_mutations_typecheck_as_result_nil() {
     entry_ok(
         "import std.fs\nfn main():\n    match fs.mkdir(\"d\"):\n        Ok(_): print(\"made\")\n        Err(e): print(e)\n    match fs.append(\"f\", \"x\"):\n        Ok(_): print(\"app\")\n        Err(e): print(e)\n    match fs.rename(\"a\", \"b\"):\n        Ok(_): print(\"ren\")\n        Err(e): print(e)\n    match fs.copy(\"a\", \"b\"):\n        Ok(_): print(\"cp\")\n        Err(e): print(e)\n    match fs.remove_file(\"f\"):\n        Ok(_): print(\"rmf\")\n        Err(e): print(e)\n    match fs.remove_dir(\"d\"):\n        Ok(_): print(\"rmd\")\n        Err(e): print(e)\n",
