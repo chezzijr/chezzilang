@@ -1524,6 +1524,29 @@ match Email.parse("a@b"):
     Err(m): print(m)
 ```
 
+**A module-level `fn` named after a struct in the same module replaces its positional
+constructor** (TICKET-029) — this is different from a static method (which lives *inside* the
+struct body and is called `Type.method(...)`, never `Type(...)`):
+
+```chezzi
+struct Path:
+    raw: bytes
+
+fn Path(p: PathLike) -> Path:      # module-level, same name as the struct
+    return Path(p.as_path())       # inside THIS body only, Path(...) is still the raw field ctor
+
+p := Path("/a/b")                  # calls the fn, not the field ctor
+```
+
+The fn wins wherever it is in scope: bare in the declaring module, `import Path from m` then
+`Path(args)`, and `m.Path(args)`. Inside the fn's own body the bare name is the one place the raw
+field constructor is still reachable — without that escape, a normalizing ctor like the one above
+would recurse forever. A **whole-module** `import std.x` licenses the module's type names bare but
+never its functions, so the bare spelling there still calls the field ctor (`import std.path` then
+`Path(b"...")` builds raw). A **nested** fn may still not be named after a same-module struct ctor
+(see the v1 limits above) — only a **module-level** fn can win, because it is hoisted into a global
+slot the backend can dispatch through.
+
 **Enums** get static methods too (e.g. a `from_str(s) -> Option[Color]`). For an enum, a **variant**
 name **always wins** over a static-method name on `Enum.x` — so a variant and a static method may
 **not** share a name (a collision is a declaration-time error). This keeps `Color.Red` always the

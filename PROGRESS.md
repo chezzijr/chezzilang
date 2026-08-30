@@ -7,6 +7,27 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **A module-level `fn` named after a struct in the same module now replaces its positional field
+  constructor (TICKET-029), and `path.Path` uses it to take a `PathLike`.** Every free fn in
+  `std.path` already took `str`/`bytes`/`bytearray`/`Path` via `PathLike`, but `Path`'s own
+  auto-generated ctor demanded `raw: bytes` exactly — `path.Path("/a/b")` rejected while
+  `path.join(["/a/b"])` accepted the same literal. `std/path.chz` now declares `fn Path(p: PathLike)
+  -> Path: return Path(p.as_path())` immediately before `struct Path`; that fn wins bare, `from`-imported,
+  and qualified, everywhere it's in scope — except inside its own body, the one place the bare name
+  stays the raw field ctor (else infinite recursion). A whole-module `import std.path` still licenses
+  only the bare TYPE name, never the fn, so `Path(b"…")` there keeps building raw. This closes a
+  soundness hole, not just a papercut: before the fix, a from-imported name colliding with a same-named
+  module fn (`import Q from lib2` where `lib2` declares both `struct Q` and `fn Q`) type-checked
+  against the FN but the compiler lowered it as `Op::NewStruct` — the fn body never ran and a `bytes`
+  field silently held a `str`. Both phases now decide the redirect from one shared predicate: checker
+  `Checker::functions`/`raw_ctor_owner`, compiler `Compiler::ctor_shadowed` over a new `module_fns`
+  table + its own `raw_ctor_owner`. A colliding `from`-import now binds BOTH the fn and the type
+  (`Checker::bind_imported_struct_name`), so `import Path from std.path` plus `p: Path` still resolves,
+  and the Builtin-origin reservation against a colliding user `struct` is preserved. No existing `.chz`
+  program in the repo declares a struct and a same-named module fn together, so nothing else changes
+  meaning; `std.path`'s own ~20 bare/qualified `Path(...)` call sites re-lower through the fn with
+  identical values (one extra call hop).
+
 - A user protocol name is module-scoped like a struct: two modules may each declare `protocol Drawable`, and a bare unimported protocol name no longer resolves (TICKET-027).
 
 - **Rendezvous `Channel[T](0)` (TICKET-028, 2026-08-30, closes `docs/gaps.md` W8-19's rendezvous-Channel sub-item).** `Channel[T](0)` used to fault (capacity must be strictly positive); it now constructs a rendezvous channel — Go's `make(chan T)` — whose `send` blocks until a receiver is already waiting. `Channel[T]()` is UNCHANGED (stays unbounded); this divergence from Go's rendezvous no-arg `make(chan T)` is now named in `docs/concurrency.md` and `docs/stdlib.md`. `cap()` now reports `-1` for unbounded (was `0` — `0` now means rendezvous), `0` for rendezvous, the bound for bounded. Mechanism: a `recv_waiting` count on `ChanState`, maintained by an RAII `RecvWait` guard armed at every receiver-wait site and dropped when the receiver's fiber next RUNS (errs high, never low — an under-count would false-`deadlock`); bucket wakes are kind-selective (`WakeKind::Send` wakes only parked senders + `wait:` send-arm tokens, gated per-token by `WaitPark::send_keys` to avoid a `wait:` recv-arm pair livelock).

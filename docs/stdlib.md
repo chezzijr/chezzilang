@@ -1367,8 +1367,9 @@ An **ordinary Chezzi struct** over the raw OS bytes (`raw: bytes`). It is what `
 | `as_path` | `(self) -> bytes` | `PathLike` conformance. |
 
 `Path` is DISPLAY (`str`) vs CONVERSION (`decode`) split on purpose — Rust makes the same split (its
-`Path` implements no `Display`). Construct one directly with `path.Path(b"…")`; convert to a mutable
-buffer with `bytearray(p.bytes())` (there is no `bytearray` method).
+`Path` implements no `Display`). The constructor takes any `PathLike` (`str`, `bytes`, `bytearray`,
+another `Path`) — `path.Path("/a/b")` and `path.Path(b"/a/b")` build the same value (TICKET-029);
+convert to a mutable buffer with `bytearray(p.bytes())` (there is no `bytearray` method).
 
 > **Residual hazard, documented not prevented:** `fs.exists(p.str())` on a non-UTF-8 path re-creates
 > the W7-8 bug by hand — the lossy display names a *different* (usually nonexistent) file. It is

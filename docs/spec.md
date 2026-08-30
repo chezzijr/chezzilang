@@ -45,6 +45,9 @@ re-wrapped.
 - **Pattern matching** — `match` on enums (also int/str/bool + tuple + **struct** scrutinees),
   exhaustiveness-checked. A struct destructures **positionally** (`Point(x, y)` binds the fields in
   declaration order); a struct has one constructor, so a lone all-binding arm is irrefutable (no `_`).
+  (A module-level `fn` named after the struct **replaces** that positional constructor at every call
+  site where the fn is in scope, TICKET-029 — `docs/syntax.md` §7a; a `match` pattern still
+  destructures the struct's fields directly, never through the fn.)
   Nested patterns (incl. nested nullary variants like `Some(None)`) + **or-patterns** (`p1 | p2`; every
   alternative must bind the same variables; a full enum or-pattern is exhaustive without `_`, but the
   open int/str/bool domains — including `true | false` — still require a `_`). User-enum variants are
