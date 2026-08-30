@@ -201,7 +201,7 @@ Right now: **pre-JIT/pre-freeze bug-hunt + drift-fix hunt** is the active phase 
 checker↔runtime, and IO drift — live ledger in `docs/gaps.md`), with **M19 — Perf track** paused
 in-progress alongside it.
 
-> **START HERE (2026-08-18): `docs/gaps.md` W8-1..W8-42.** **3 open rows** — W8-17,
+> **START HERE (2026-08-18): `docs/gaps.md` W8-1..W8-42.** **2 open rows** — W8-17,
 > W8-19 from **dogfood wave 1** (its struct-copy sub-item landed 2026-08-30, TICKET-030, but the
 > bundle row stays open for its remaining sub-items) (W8-32 from wave 2 closed 2026-08-30, TICKET-024)
 > (**W8-1**, **W8-28**, **W8-29** closed 2026-08-29, TICKET-018 — a bare-digit interpolation hole

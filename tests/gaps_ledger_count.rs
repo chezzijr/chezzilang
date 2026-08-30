@@ -49,3 +49,22 @@ fn open_row_counters_agree_with_the_gaps_table() {
          re-derive it with: grep -c '^| \\*\\*W8-' docs/gaps.md"
     );
 }
+
+/// A row whose text already says CLOSED must have a STRUCK id, or it keeps counting as open.
+/// W8-21 shipped in TICKET-025 and said "CLOSED 2026-08-30" in its own prose while its id stayed
+/// `| **W8-21** |`, so all three counters agreed at 3 when the real answer was 2 — agreement is not
+/// correctness when every source counts the same stale row.
+#[test]
+fn a_row_that_says_closed_is_struck() {
+    let gaps = read("docs/gaps.md");
+    let stale: Vec<&str> = gaps
+        .lines()
+        .filter(|l| l.starts_with("| **W8-"))
+        .filter(|l| l.get(..400).unwrap_or(l).contains("CLOSED"))
+        .map(|l| l.split('|').nth(1).unwrap_or(l).trim())
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "these rows say CLOSED but their id is not struck, so they still count as open: {stale:?}"
+    );
+}
