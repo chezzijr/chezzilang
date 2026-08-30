@@ -11841,3 +11841,25 @@ fn ffi_goldens_are_not_unconditionally_linux_gated() {
          platforms with the FFI surface unexercised: {unconditionally_gated:?}"
     );
 }
+
+/// TICKET-029 review fix — a qualified `module.N(args)` where `N` is a NEWTYPE (not a struct) must
+/// still build the newtype even when the module also declares a same-named `fn N`. The checker's
+/// newtype arm (`src/checker/expr.rs:112`) never gates on a colliding fn, so the compiler's emit
+/// site must not either: pre-fix, `Compiler::ctor_shadowed` sat on the OUTER guard
+/// (`src/compiler/mod.rs:5334`) and disabled `Op::NewType` too, so this call fell through to a call
+/// of `fn N` — the fn's `FN RAN` print below would appear, and it would fault taking `.len()` of an
+/// int argument, because the checker never checked the call against the fn's `str` parameter.
+#[test]
+fn qualified_newtype_ctor_not_shadowed_by_colliding_module_fn() {
+    let out = golden_file_entry(
+        &[
+            (
+                "lib.chz",
+                "newtype N = int\nfn N(s: str) -> N:\n    print(\"FN RAN\")\n    return N(s.len())\n",
+            ),
+            ("main.chz", "import lib\nv := lib.N(5)\nprint(v)\n"),
+        ],
+        "main.chz",
+    );
+    assert_eq!(out, "N(5)\n", "fn N must not run; got: {out:?}");
+}

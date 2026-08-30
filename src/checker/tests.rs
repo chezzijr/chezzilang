@@ -10617,6 +10617,21 @@ fn path_from_import_still_reserves_the_name_against_a_user_struct() {
 }
 
 #[test]
+fn qualified_newtype_call_ignores_a_colliding_module_fn() {
+    // TICKET-029 review fix — a module-level fn named after a same-module NEWTYPE (not a struct)
+    // must NOT shadow the qualified `module.Name(args)` newtype constructor: the checker's newtype
+    // arm (`src/checker/expr.rs:112`) never gates on `sig.functions`, so the compiler's qualified
+    // emit site must agree and keep emitting `Op::NewType`, not fall through to a call of `fn N`.
+    files_ok(&[
+        (
+            "lib.chz",
+            "newtype N = int\nfn N(s: str) -> N:\n    return N(s.len())\n",
+        ),
+        ("main.chz", "import lib\nv := lib.N(5)\nprint(v)\n"),
+    ]);
+}
+
+#[test]
 fn native_fs_mutations_typecheck_as_result_nil() {
     entry_ok(
         "import std.fs\nfn main():\n    match fs.mkdir(\"d\"):\n        Ok(_): print(\"made\")\n        Err(e): print(e)\n    match fs.append(\"f\", \"x\"):\n        Ok(_): print(\"app\")\n        Err(e): print(e)\n    match fs.rename(\"a\", \"b\"):\n        Ok(_): print(\"ren\")\n        Err(e): print(e)\n    match fs.copy(\"a\", \"b\"):\n        Ok(_): print(\"cp\")\n        Err(e): print(e)\n    match fs.remove_file(\"f\"):\n        Ok(_): print(\"rmf\")\n        Err(e): print(e)\n    match fs.remove_dir(\"d\"):\n        Ok(_): print(\"rmd\")\n        Err(e): print(e)\n",
