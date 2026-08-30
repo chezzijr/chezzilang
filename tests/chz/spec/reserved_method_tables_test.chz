@@ -10,7 +10,7 @@
 
 test fn channel_send_recv_len_cap():
     ch := Channel[int]()
-    assert ch.cap() == 0, "unbounded channel cap is 0"
+    assert ch.cap() == -1, "unbounded channel cap is -1"
     ch.send(1)
     ch.send(2)
     assert ch.len() == 2

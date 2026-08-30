@@ -352,31 +352,41 @@ the airlock, never live in two heaps at once.
 
 ```chezzi
 ch := Channel[str]()       # construct; capitalized like Shared[T] / Option[T]. Unbounded FIFO.
+rch := Channel[int](0)     # RENDEZVOUS: send blocks until a receiver is already waiting (Go's make(chan T))
 bch := Channel[int](2)     # BOUNDED: holds ≤2 queued messages; a 3rd `send` blocks until a `recv` frees a slot
 ch.send(x)                 # x moved/copied OUT of the sender's heap → channel queue
 v := ch.recv()             # value reconstructed IN the receiver's heap
 opt := ch.try_recv()       # non-blocking poll: Some(v) if queued, None if empty
 n := ch.len()              # current queued count
-c := bch.cap()             # capacity: 2 here; 0 for an unbounded Channel[T]()
+c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0); -1 for an unbounded Channel[T]()
 ```
 
 | Method | Signature | Notes |
 |--------|-----------|-------|
-| `send` | `send(self, v: T) -> nil` | enqueue (move/copy at the airlock); sender can't reuse a moved value. On a **bounded** channel a `send` **blocks/parks** while the queue is at capacity (backpressure), resuming once a `recv` frees a slot — the send-side mirror of a blocking `recv` |
-| `try_send` | `try_send(self, v: T) -> bool` | **non-blocking** send: `true` once queued, `false` if the send can't proceed — the channel is **closed**, or a **bounded** channel is **full**. Never blocks/parks |
+| `send` | `send(self, v: T) -> nil` | enqueue (move/copy at the airlock); sender can't reuse a moved value. On a **bounded** channel a `send` **blocks/parks** while the queue is at capacity (backpressure), resuming once a `recv` frees a slot — the send-side mirror of a blocking `recv`. On a **rendezvous** channel (`cap == 0`) a `send` blocks until a receiver is already waiting, exactly like a bounded `send` at capacity 0 conceptually would, except capacity 0 is otherwise inexpressible as `queue.len() < cap` |
+| `try_send` | `try_send(self, v: T) -> bool` | **non-blocking** send: `true` once queued, `false` if the send can't proceed — the channel is **closed**, a **bounded** channel is **full**, or a **rendezvous** channel has no receiver already waiting. Never blocks/parks |
 | `recv` | `recv(self) -> T` | dequeue (FIFO); blocking surface (see below) |
 | `try_recv` | `try_recv(self) -> T?` | **non-blocking** poll (A1): `Some(v)` if queued, `None` if empty — never blocks, never faults, never suspends a fiber. Drain a mailbox without guarding on `len()` |
 | `len`  | `len(self) -> int` | queued count — use to guard a `recv` |
-| `cap`  | `cap(self) -> int` | capacity: the bound passed to `Channel[T](cap)`, or `0` for an unbounded `Channel[T]()` |
+| `cap`  | `cap(self) -> int` | capacity: `-1` for an unbounded `Channel[T]()`, `0` for a rendezvous `Channel[T](0)`, or the bound passed to `Channel[T](cap)` |
 
-- **`Channel[T]()` is an unbounded FIFO** — `send` never blocks. **`Channel[T](cap)`** (`cap > 0`; a
-  `cap <= 0` is a runtime fault) is a **bounded** FIFO: a `send` blocks/parks once `cap` messages are
-  queued and resumes when a `recv` frees a slot (Go's buffered channel). Backpressure changes *which*
-  task runs *when*, never the value sequence a consumer sees, so a bounded channel gives the same value
-  sequence at every worker count, by the same argument as a blocking `recv`. A full `send` with no possible consumer
-  (top level, no nursery, or inside a native callback) is a **deadlock fault**, not a silent over-fill.
+- **Three shapes: unbounded, rendezvous, bounded.** `Channel[T]()` is an **unbounded FIFO** — `send`
+  never blocks. `Channel[T](0)` is a **rendezvous** channel — `send` blocks until a receiver is
+  already waiting (Go's `make(chan T)`; `try_send` declines with no waiting receiver). `Channel[T](cap)`
+  (`cap > 0`; a negative `cap` is a runtime fault) is a **bounded** FIFO: a `send` blocks/parks once
+  `cap` messages are queued and resumes when a `recv` frees a slot (Go's buffered channel).
+  Backpressure changes *which* task runs *when*, never the value sequence a consumer sees, so a
+  bounded or rendezvous channel gives the same value sequence at every worker count, by the same
+  argument as a blocking `recv`. A full/rendezvous `send` with no possible consumer (top level, no
+  nursery, or inside a native callback) is a **deadlock fault**, not a silent over-fill or hang.
   As with `try_recv`, `try_send`'s full-vs-not decision under multi-sender contention is nondeterministic
   — the same class as `try_recv`'s `None`-vs-`Some` under contention; it is not "fixed".
+- **DIVERGENCE from Go: `Channel[T]()` is NOT `make(chan T)`.** Go's no-argument channel is the
+  rendezvous shape; Chezzi's no-argument `Channel[T]()` is UNBOUNDED instead, and this is
+  DELIBERATE — see `## Decisions` in TICKET-028. A Go programmer porting `make(chan T)` should write
+  `Channel[T](0)`, not `Channel[T]()`. Reach for `Channel[T](cap)` or `Channel[T](0)` by default: an
+  unbounded channel is what lets a producer outrun a consumer with no backpressure at all — the bug
+  class a bounded/rendezvous default shape exists to prevent.
 - **`recv` on an empty channel BLOCKS** until a sibling sends. It faults `recv on an empty channel:
   deadlock` only when the run is provably stuck — every counted party blocked with no satisfiable
   wait — which is Go's own detector (`fatal error: all goroutines are asleep - deadlock!`). Since

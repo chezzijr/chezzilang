@@ -1447,6 +1447,11 @@ struct Fiber {
     /// `RuntimeError`) before continuing past the `Call`. `None` except in the brief window between a
     /// blocking-pool completion and the fiber's next schedule-in.
     resume_native: Option<Result<crate::native::NativeRet, RuntimeError>>,
+    /// TICKET-028 — armed [`crate::vm::core::RecvWait`] guards held while this fiber waits as a
+    /// receiver. Cleared (dropped) as the FIRST statement of [`Vm::run_one_fiber`], i.e. when this
+    /// fiber next RUNS rather than when it is woken — see `ChanState::recv_waiting`'s doc comment for
+    /// why the count must err high rather than low.
+    recv_waits: Vec<crate::vm::core::RecvWait>,
 }
 
 // D2a — a `Fiber` now carries its own `Heap` (via `FiberCtx::heap`), and D2b parks fibers across
@@ -1933,9 +1938,26 @@ struct WaitPark {
     fiber: Mutex<Option<Fiber>>,
     /// Every bucket key this token was filed under — the sweep set the winner removes itself from.
     keys: Vec<usize>,
+    /// TICKET-028 — the subset of `keys` whose arm is a SEND arm. A `WakeKind::Send` wake (a
+    /// receiver arriving on a rendezvous channel) claims this token ONLY when the woken key is in
+    /// here, because two `wait:` fibers each holding a RECV arm on one cap-0 channel would otherwise
+    /// claim each other's tokens forever — a hot livelock that never quiesces, so `deadlock` never
+    /// fires and the program hangs burning CPU.
+    send_keys: Vec<usize>,
     /// Wake-once gate: the first waker to win the CAS owns the fiber; all later wakers see it set and
     /// drop their (stale) token. Distinct from `parked_n` (a fiber count, not a key count).
     claimed: AtomicBool,
+}
+
+/// TICKET-028 — which parked entries a bucket wake may claim. `All` is every existing wake site's
+/// behaviour, unchanged. `Send` is a rendezvous-channel receiver arriving: it must wake parked
+/// SENDERS without waking parked receivers, else a receiver re-runs `recv`, finds nothing, and
+/// re-parks (a livelock). There is no `Recv` kind — no caller needs one, and a never-constructed
+/// enum variant is `dead_code` under `cargo clippy -- -D warnings`.
+#[derive(Clone, Copy, PartialEq)]
+enum WakeKind {
+    All,
+    Send,
 }
 
 /// gaps.md W7-56 — every `MnSched` alive in this run, by `Weak` (see [`Vm::sched_registry`] for why
@@ -1953,6 +1975,10 @@ pub(super) type SchedRegistry = Arc<Mutex<Vec<std::sync::Weak<MnSched>>>>;
 enum ParkedEntry {
     Recv(Fiber),
     Wait(Arc<WaitPark>),
+    /// TICKET-028 — a fiber parked on a rendezvous `send` (`cap == Some(0)`). Filed by
+    /// `MnSched::park_send` instead of `Recv` so a receiver's `WakeKind::Send` wake can requeue only
+    /// this variant (plus matching `Wait` tokens) without waking a parked receiver in the same bucket.
+    Send(Fiber),
 }
 
 struct MnSched {
@@ -2287,6 +2313,7 @@ impl SchedCore {
     fn scope_has_undrained_park(&self, sid: usize) -> bool {
         self.parked.values().flatten().any(|e| match e {
             ParkedEntry::Recv(f) => f.scope_id == sid,
+            ParkedEntry::Send(f) => f.scope_id == sid,
             ParkedEntry::Wait(wp) => wp
                 .fiber
                 .lock()
@@ -2889,7 +2916,9 @@ impl MnSched {
     /// re-run `recv` and pop, or unwind on the cancel back-edge) instead of parking. Lock order is
     /// core-OUTER, channel-`q`-INNER everywhere (`send_wake` matches), so there is no ABBA cycle.
     /// No `cv` notify on the park path: parking creates no runnable work; an all-parked deadlock is
-    /// detected by this worker's next `take_runnable` (`running == 0`).
+    /// detected by this worker's next `take_runnable` (`running == 0`). EXCEPT the rendezvous
+    /// (`cap == Some(0)`) case (TICKET-028): arming this receiver's `RecvWait` can make a parked
+    /// SENDER runnable, so that one path does wake, under this same lock hold.
     fn park(&self, key: usize, core: &Arc<ChannelCore>, mut fiber: Fiber) {
         let mut c = self.lock();
         c.running -= 1;
@@ -2914,30 +2943,44 @@ impl MnSched {
             self.runnable.fetch_add(1, Ordering::Relaxed); // running → ready (requeued)
             self.cv.notify_all();
         } else {
+            // TICKET-028 — arm the receiver-presence guard, then (rendezvous only) wake any parked
+            // SENDER, both BEFORE the filing: a sender woken while `recv_waiting` is still 0 would
+            // re-park immediately. Both happen under this same lock hold `c` — moving the wake out
+            // from under it opens a false-`deadlock` window (see `## Decisions`).
+            fiber.recv_waits.push(crate::vm::core::RecvWait::arm(core));
+            if core.cap == Some(0) {
+                self.wake_bucket(&mut c, key, WakeKind::Send);
+            }
             fiber.state = FiberState::Blocked; // running → parked: runnable unchanged
             c.parked
                 .entry(key)
                 .or_default()
                 .push(ParkedEntry::Recv(fiber));
             c.parked_n += 1;
+            if core.cap == Some(0) {
+                drop(c);
+                self.cv.notify_all();
+                core.cv.notify_all();
+                self.wake_parent_chain(key, WakeKind::Send);
+            }
         }
     }
 
     /// Bounded-channel backpressure — the send-side twin of [`MnSched::park`]. The running fiber
-    /// blocked on a `send` into a FULL bounded channel; park it in `key`'s bucket (as an ordinary
-    /// [`ParkedEntry::Recv`] — the bucket is homogeneous per-instant since a bounded channel is never
-    /// simultaneously full and empty, so no new entry variant is needed). The gap re-check is the
-    /// OPPOSITE of `park`'s: requeue `Ready` if a concurrent `recv` freed a SLOT (space available), the
-    /// channel was `close`d (the re-run faults "send on a closed channel"), or the scope was cancelled;
-    /// else park. `core.cap` is `Some` here by construction. Lock order core-OUTER / q-INNER matches
-    /// `park`. A freed slot wakes this fiber via [`MnSched::recv_wake`] (called from every bounded pop).
+    /// blocked on a `send` into a FULL bounded channel; park it in `key`'s bucket, filed as
+    /// [`ParkedEntry::Send`] (TICKET-028 — at cap 0 the bucket is NOT homogeneous per-instant: a
+    /// cap-0 channel is simultaneously empty and full, so a parked sender and a parked receiver can
+    /// share a bucket, and a receiver's `WakeKind::Send` wake must be able to tell them apart). The
+    /// gap re-check is the OPPOSITE of `park`'s: requeue `Ready` if a concurrent `recv` freed a SLOT
+    /// (space available), the channel was `close`d (the re-run faults "send on a closed channel"), or
+    /// the scope was cancelled; else park. Lock order core-OUTER / q-INNER matches `park`. A freed
+    /// slot wakes this fiber via [`MnSched::recv_wake`] (called from every pop).
     fn park_send(&self, key: usize, core: &Arc<ChannelCore>, mut fiber: Fiber) {
         let mut c = self.lock();
         c.running -= 1;
-        let cap = core.cap.expect("park_send on an unbounded channel");
         let (space, closed) = {
             let g = core.q.lock().unwrap_or_else(|e| e.into_inner());
-            (g.len() < cap, g.closed)
+            (g.has_send_slot(core.cap), g.closed)
         };
         let cancelled = c.scopes[fiber.scope_id].cancel.load(Ordering::Relaxed);
         if space || closed || cancelled {
@@ -2950,7 +2993,7 @@ impl MnSched {
             c.parked
                 .entry(key)
                 .or_default()
-                .push(ParkedEntry::Recv(fiber));
+                .push(ParkedEntry::Send(fiber));
             c.parked_n += 1;
         }
     }
@@ -2960,28 +3003,22 @@ impl MnSched {
     /// space and over-fill. Returns `true` if the value was enqueued (space was free), `false` if the
     /// channel was full (the value is dropped — the caller re-serializes it on its send re-run after
     /// parking). Same lock discipline / wake fan-out as [`MnSched::send_wake`] on the enqueue path.
-    fn send_wake_bounded(
-        &self,
-        key: usize,
-        core: &Arc<ChannelCore>,
-        w: WireValue,
-        cap: usize,
-    ) -> bool {
+    fn send_wake_bounded(&self, key: usize, core: &Arc<ChannelCore>, w: WireValue) -> bool {
         // W6-7/W6-10 — summarise the message BEFORE taking core lock A: `wire_summary` is
         // O(payload), and this critical section serializes every fiber's park/wake/finish.
         let sum = crate::vm::core::wire_summary(&w);
         let mut c = self.lock();
         {
             let mut q = core.q.lock().unwrap_or_else(|e| e.into_inner());
-            if q.len() >= cap {
+            if !q.has_send_slot(core.cap) {
                 return false; // full — caller parks (both guards drop on return)
             }
             q.push(sum, w);
         }
-        self.wake_bucket(&mut c, key);
+        self.wake_bucket(&mut c, key, WakeKind::All);
         drop(c);
         self.cv.notify_all();
-        self.wake_parent_chain(key);
+        self.wake_parent_chain(key, WakeKind::All);
         core.cv.notify_all();
         true
     }
@@ -2993,7 +3030,17 @@ impl MnSched {
     /// The woken senders race for the one slot; losers re-park (the documented multi-sender
     /// nondeterminism). No-op fan-out cost is bounded by the (usually 0 or 1) parked senders.
     fn recv_wake(&self, key: usize, core: &Arc<ChannelCore>) {
-        self.close_wake(key, core);
+        let kind = if core.cap == Some(0) {
+            WakeKind::Send
+        } else {
+            WakeKind::All
+        };
+        let mut c = self.lock();
+        self.wake_bucket(&mut c, key, kind);
+        drop(c);
+        self.cv.notify_all();
+        core.cv.notify_all();
+        self.wake_parent_chain(key, kind);
     }
 
     /// §6d M:N multi-channel `wait` park — the N-key generalization of [`MnSched::park`]. The running
@@ -3006,7 +3053,9 @@ impl MnSched {
     /// parking — else strand-forever. Otherwise allocate ONE `Arc<WaitPark>` holding the fiber and file
     /// a clone of the token in every arm's bucket; `parked_n += 1` (one fiber, not N tokens). Lock
     /// order core-OUTER / channel-`q`-INNER matches `park`, so no ABBA; no `cv` notify on the park path
-    /// (parking creates no runnable work — an all-parked deadlock is caught by the next `take_runnable`).
+    /// (parking creates no runnable work — an all-parked deadlock is caught by the next `take_runnable`),
+    /// EXCEPT a RECV arm on a rendezvous (`cap == Some(0)`) channel (TICKET-028): arming that arm's
+    /// `RecvWait` can make a parked SENDER runnable, so that case does wake, under this same lock hold.
     fn park_wait(&self, arms: Vec<(usize, Arc<ChannelCore>, bool)>, mut fiber: Fiber) {
         let mut c = self.lock();
         c.running -= 1;
@@ -3029,7 +3078,7 @@ impl MnSched {
                         // SEND arm: ready with a FREE slot (bounded below cap, or unbounded) OR on
                         // close (the send then FAULTS, matching op_wait_poll's ready-then-fault).
                         // A full bounded send arm is never dead — a receiver frees a slot.
-                        (g.closed || core.cap.is_none_or(|cap| g.len() < cap), false)
+                        (g.closed || g.has_send_slot(core.cap), false)
                     } else {
                         // RECV arm: ready ONLY with a queued value (a closed channel still drains its
                         // buffered messages). A closed+EMPTY non-timer recv arm is DEAD — nothing can
@@ -3070,10 +3119,36 @@ impl MnSched {
             return;
         }
         fiber.state = FiberState::Blocked; // running → parked: runnable unchanged
+        // TICKET-028 — arm a RecvWait per RECV arm, then wake any parked SENDER on a rendezvous arm —
+        // both BEFORE the filing loop below, and BEFORE `fiber` moves into `wp`. Ordered before filing
+        // because a `wait:` holding BOTH a send arm and a recv arm on the SAME cap-0 key would
+        // otherwise put that key in its own `send_keys` and its own `WakeKind::Send` wake could claim
+        // its own just-filed token — a self-requeue spin.
+        for (_, arm_core, is_send) in &arms {
+            if !*is_send {
+                fiber
+                    .recv_waits
+                    .push(crate::vm::core::RecvWait::arm(arm_core));
+            }
+        }
+        let rendezvous: Vec<usize> = arms
+            .iter()
+            .filter(|(_, arm_core, is_send)| !*is_send && arm_core.cap == Some(0))
+            .map(|(k, _, _)| *k)
+            .collect();
+        for &k in &rendezvous {
+            self.wake_bucket(&mut c, k, WakeKind::Send);
+        }
         let keys: Vec<usize> = arms.iter().map(|(k, _, _)| *k).collect();
+        let send_keys: Vec<usize> = arms
+            .iter()
+            .filter(|(_, _, is_send)| *is_send)
+            .map(|(k, _, _)| *k)
+            .collect();
         let wp = Arc::new(WaitPark {
             fiber: Mutex::new(Some(fiber)),
             keys: keys.clone(),
+            send_keys,
             claimed: AtomicBool::new(false),
         });
         for key in keys {
@@ -3083,6 +3158,18 @@ impl MnSched {
                 .push(ParkedEntry::Wait(Arc::clone(&wp)));
         }
         c.parked_n += 1; // ONE fiber, regardless of arm count
+        if !rendezvous.is_empty() {
+            drop(c);
+            self.cv.notify_all();
+            for (_, arm_core, is_send) in &arms {
+                if !*is_send && arm_core.cap == Some(0) {
+                    arm_core.cv.notify_all();
+                }
+            }
+            for k in rendezvous {
+                self.wake_parent_chain(k, WakeKind::Send);
+            }
+        }
     }
 
     /// D3 — the running fiber exhausted its reduction budget; requeue it at the TAIL of the **global**
@@ -3223,19 +3310,39 @@ impl MnSched {
     ///   OTHER `wp.keys` bucket (by `Arc::ptr_eq`) under this same lock hold, so a later `send`/`close`
     ///   to a swept channel can never re-wake the now-moved fiber. A loser sees `claimed` already set
     ///   and drops the stale token (no double-wake, no panic). All under the one core-lock hold.
-    fn wake_bucket(&self, c: &mut SchedCore, key: usize) {
+    fn wake_bucket(&self, c: &mut SchedCore, key: usize, kind: WakeKind) {
         let Some(entries) = c.parked.remove(&key) else {
             return;
         };
+        let mut keep: Vec<ParkedEntry> = Vec::new();
         for entry in entries {
             match entry {
-                ParkedEntry::Recv(mut f) => {
+                ParkedEntry::Recv(f) => {
+                    if kind == WakeKind::Send {
+                        // TICKET-028 — a rendezvous receiver-arrival wake must not wake a parked
+                        // receiver in the same bucket (livelock guard); leave it parked.
+                        keep.push(ParkedEntry::Recv(f));
+                        continue;
+                    }
+                    c.parked_n -= 1;
+                    self.runnable.fetch_add(1, Ordering::Relaxed); // parked → ready
+                    let mut f = f;
+                    f.state = FiberState::Ready;
+                    c.global.push_back(f);
+                }
+                ParkedEntry::Send(mut f) => {
                     c.parked_n -= 1;
                     self.runnable.fetch_add(1, Ordering::Relaxed); // parked → ready
                     f.state = FiberState::Ready;
                     c.global.push_back(f);
                 }
                 ParkedEntry::Wait(wp) => {
+                    if kind == WakeKind::Send && !wp.send_keys.contains(&key) {
+                        // TICKET-028 — this token's arm on `key` is a RECV arm, not a SEND arm; a
+                        // `WakeKind::Send` wake must not claim it (the pair-spin guard).
+                        keep.push(ParkedEntry::Wait(wp));
+                        continue;
+                    }
                     // CAS the wake-once gate: only the winner takes the fiber + sweeps.
                     if wp
                         .claimed
@@ -3273,6 +3380,9 @@ impl MnSched {
                 }
             }
         }
+        if !keep.is_empty() {
+            c.parked.insert(key, keep);
+        }
     }
 
     /// gaps.md B5 — after waking this sched's own `parked` bucket for `key`, walk the `parent_wake`
@@ -3284,10 +3394,10 @@ impl MnSched {
     /// this runs, and `parent_wake` points strictly UPWARD, so no two sched cores are ever held at
     /// once (no ABBA). `wake_bucket` bumps the ancestor's own `runnable`, requeuing the parent's
     /// receiver onto its home queue; an over-wake (empty queue → re-park) is the tolerated pattern.
-    fn wake_parent_chain(&self, key: usize) {
+    fn wake_parent_chain(&self, key: usize, kind: WakeKind) {
         let mut p = self.parent_wake.clone();
         while let Some(anc) = p {
-            anc.wake_key(key);
+            anc.wake_key(key, kind);
             p = anc.parent_wake.clone();
         }
     }
@@ -3296,9 +3406,9 @@ impl MnSched {
     /// [`MnSched::wake_parent_chain`], also used by the W7-56 registry walk in [`Vm::wake_on_send`]
     /// (an eager `Executor` job holds no sched, so it reaches a parked fiber only this way). Takes
     /// the core lock itself, so the caller must hold NO sched core lock and no `ChannelCore::q`.
-    fn wake_key(&self, key: usize) {
+    fn wake_key(&self, key: usize, kind: WakeKind) {
         let mut c = self.lock();
-        self.wake_bucket(&mut c, key);
+        self.wake_bucket(&mut c, key, kind);
         drop(c);
         self.cv.notify_all();
     }
@@ -3311,12 +3421,12 @@ impl MnSched {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(sum, w);
-        self.wake_bucket(&mut c, key);
+        self.wake_bucket(&mut c, key, WakeKind::All);
         drop(c);
         self.cv.notify_all();
         // gaps.md B5 — also wake a receiver parked on this channel in an ANCESTOR (parent) nursery's
         // sched (eager nested nursery only; no-op otherwise). Value is already queued above.
-        self.wake_parent_chain(key);
+        self.wake_parent_chain(key, WakeKind::All);
         // D5 owe #3 (Path C) — also wake any worker thread DEMOTED on this channel (blocked in place
         // on `core.cv` after a `recv` inside a native callback). Snapshot-parked fibers are requeued
         // above + woken via `self.cv`; a demoted thread instead waits on the channel's OWN condvar, so
@@ -3333,13 +3443,13 @@ impl MnSched {
     /// `send_wake`; `core.cv.notify_all` also wakes any thread DEMOTED on this channel.
     fn close_wake(&self, key: usize, core: &Arc<ChannelCore>) {
         let mut c = self.lock();
-        self.wake_bucket(&mut c, key);
+        self.wake_bucket(&mut c, key, WakeKind::All);
         drop(c);
         self.cv.notify_all();
         core.cv.notify_all();
         // gaps.md B5 — a close from inside an eager body must also wake a receiver ranging over this
         // channel in an ANCESTOR nursery so it observes the close and ends (no-op for ordinary scheds).
-        self.wake_parent_chain(key);
+        self.wake_parent_chain(key, WakeKind::All);
     }
 
     /// Record a finished fiber's outcome in its FLAT slot, bump its SCOPE's done, drop it from
@@ -3465,6 +3575,15 @@ impl MnSched {
                             c.global.push_back(f);
                         } else {
                             keep.push(ParkedEntry::Recv(f)); // a sibling scope's park — leave it.
+                        }
+                    }
+                    ParkedEntry::Send(mut f) => {
+                        if f.scope_id == scope_id {
+                            drained += 1;
+                            f.state = FiberState::Ready;
+                            c.global.push_back(f);
+                        } else {
+                            keep.push(ParkedEntry::Send(f)); // a sibling scope's park — leave it.
                         }
                     }
                     ParkedEntry::Wait(wp) => {
@@ -3932,6 +4051,7 @@ impl SchedCore {
             for entry in v {
                 let fiber = match entry {
                     ParkedEntry::Recv(f) => Some(f),
+                    ParkedEntry::Send(f) => Some(f),
                     ParkedEntry::Wait(wp) => {
                         if wp
                             .claimed
@@ -4185,6 +4305,7 @@ impl ReadyWorker {
             scope_id,
             span,
             resume_native: None,
+            recv_waits: Vec::new(),
         }
     }
 }

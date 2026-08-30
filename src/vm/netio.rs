@@ -1480,7 +1480,7 @@ impl Vm {
                     // Bounded: the space-check + enqueue MUST be atomic (same path as blocking `send`),
                     // or two concurrent `try_send`s both see space and over-fill past `cap`. Returns
                     // `false` when full — non-blocking, so decline (never parks).
-                    Some(cap) => Ok(Value::bool(self.enqueue_bounded(h, &core, cap, w))),
+                    Some(_) => Ok(Value::bool(self.enqueue_bounded(h, &core, w))),
                 }
             }
             "recv" => {
@@ -1607,11 +1607,12 @@ impl Vm {
                 let n = self.channel_core(h).q.lock().unwrap().len();
                 Ok(Value::int(n as i64))
             }
-            // `cap()` reports the channel's capacity: `Channel[T](n)` → `n`; unbounded `Channel[T]()` → 0.
+            // `cap()` reports the channel's capacity: `-1` for unbounded `Channel[T]()`, `0` for
+            // rendezvous `Channel[T](0)`, `n` for bounded `Channel[T](n)`.
             "cap" => {
                 self.arity_err("cap", args, 0, span)?;
-                let cap = self.channel_core(h).cap.unwrap_or(0);
-                Ok(Value::int(cap as i64))
+                let cap = self.channel_core(h).cap.map_or(-1i64, |c| c as i64);
+                Ok(Value::int(cap))
             }
             _ => Err(self.err(format!("type Channel has no method '{method}'"), span)),
         }
@@ -1661,11 +1662,11 @@ impl Vm {
         span: Span,
     ) -> Result<SendStep, RuntimeError> {
         let core = self.channel_core(h);
-        let Some(cap) = core.cap else {
+        if core.cap.is_none() {
             // Unbounded — never blocks. Byte-identical to the historical `send`.
             self.channel_send_wire(h, w);
             return Ok(SendStep::Sent);
-        };
+        }
         // Bounded. A fiber woken by `cancel_drain` (its scope faulted) must fault here rather than
         // re-park (mirrors `chan_recv_step`'s checkpoint). `native_reentry == 0` gates it exactly as
         // the park gate does — inside a callback the host stack can't be unwound.
@@ -1684,7 +1685,7 @@ impl Vm {
             // First attempt OUTSIDE the party registration: `submit_result`'s cap-1 result channel
             // always has space, so every such job would otherwise register as blocked on its last
             // instruction and hand the verdict a free (if satisfiable) party.
-            if self.enqueue_bounded(h, &core, cap, w.clone()) {
+            if self.enqueue_bounded(h, &core, w.clone()) {
                 return Ok(SendStep::Sent);
             }
             loop {
@@ -1697,7 +1698,7 @@ impl Vm {
                 // parked at the instant it made progress, which is a false deadlock.
                 let party = self.block_party_guard(quiesce::PartyWait::Send(Arc::clone(&core)));
                 self.block_wait_tick(&core, FULL_SEND_DEADLOCK, span, |g| {
-                    g.len() < cap || g.closed
+                    g.has_send_slot(core.cap) || g.closed
                 })?;
                 drop(party);
                 // W7-13r(c) — a `close()` while we are blocked means this send can NEVER complete, so
@@ -1731,7 +1732,7 @@ impl Vm {
                 // the_close` (the drain-then-close shape) and
                 // `eager_send_blocked_on_a_full_channel_faults_when_the_channel_is_closed` (the hang).
                 // Swapping these two blocks fails the first and passes the second.
-                if self.enqueue_bounded(h, &core, cap, w.clone()) {
+                if self.enqueue_bounded(h, &core, w.clone()) {
                     return Ok(SendStep::Sent);
                 }
                 if core.q.lock().unwrap_or_else(|e| e.into_inner()).closed {
@@ -1742,7 +1743,7 @@ impl Vm {
         // Atomic space-check + enqueue + receiver-wake (shared with `try_send` — see
         // [`Vm::enqueue_bounded`]). On success the value is delivered; on `false` the channel was full
         // and we decide how to block.
-        if self.enqueue_bounded(h, &core, cap, w) {
+        if self.enqueue_bounded(h, &core, w) {
             return Ok(SendStep::Sent);
         }
         // FULL. Inside a native callback the caller's host-stack loop frame is not capturable, so we
@@ -1774,17 +1775,16 @@ impl Vm {
         &mut self,
         h: GcRef,
         core: &Arc<ChannelCore>,
-        cap: usize,
         w: WireValue,
     ) -> bool {
         if let Some(sched) = self.mn.clone().or_else(|| self.mn_enlist_sched.clone()) {
             let key = self.channel_core_ptr(h);
-            return sched.send_wake_bounded(key, core, w, cap);
+            return sched.send_wake_bounded(key, core, w);
         }
         let sum = crate::vm::core::wire_summary(&w); // OFF-LOCK — see `ChanState::push`
         let enqueued = {
             let mut g = core.q.lock().unwrap();
-            if g.len() < cap {
+            if g.has_send_slot(core.cap) {
                 g.push(sum, w);
                 true
             } else {
@@ -1818,15 +1818,22 @@ impl Vm {
     /// scheduler in scope, [`Vm::wake_on_send`] wakes any other live sched's bucket for this channel.
     pub(super) fn wake_senders(&mut self, h: GcRef) {
         let core = self.channel_core(h);
+        self.wake_senders_core(&core);
+    }
+
+    /// Same as [`Vm::wake_senders`], keyed on an already-held `core` rather than a heap handle — the
+    /// entry point for a caller that only has the `Arc<ChannelCore>` (TICKET-028's receiver-wait
+    /// sites, which never allocated a `GcRef` for their key).
+    pub(super) fn wake_senders_core(&mut self, core: &Arc<ChannelCore>) {
         if core.cap.is_none() {
             return;
         }
         if let Some(sched) = self.mn.clone().or_else(|| self.mn_enlist_sched.clone()) {
-            let key = self.channel_core_ptr(h);
-            sched.recv_wake(key, &core);
+            let key = Arc::as_ptr(core) as usize;
+            sched.recv_wake(key, core);
         } else {
             core.cv.notify_all();
-            self.wake_on_send(h);
+            self.wake_on_send_key(Arc::as_ptr(core) as usize);
         }
     }
 
@@ -2375,6 +2382,13 @@ impl Vm {
             // and the run faulted 6/10. The inverse costs nothing: an unregistered party makes
             // `blocked < live`, which only DECLINES a verdict (a delayed fault, never a wrong one).
             let _party = self.block_party_guard(quiesce::PartyWait::Recv(Arc::clone(core)));
+            // TICKET-028 — arm this loop's receiver-presence guard, then (rendezvous only) wake any
+            // parked sender. Arm-then-wake, both inside the loop body, so every poll-timeout iteration
+            // re-arms before it re-wakes.
+            let _recv = crate::vm::core::RecvWait::arm(core);
+            if core.cap == Some(0) {
+                self.wake_senders_core(core);
+            }
             // Ready == the same three settle conditions the loop head consumes, in the same order, so
             // the wait cannot sleep through a state the next iteration would immediately take (W7-13).
             //
@@ -2450,7 +2464,7 @@ impl Vm {
                         self.channel_send_wire(h, w);
                         true
                     }
-                    Some(cap) => self.enqueue_bounded(h, &core, cap, w),
+                    Some(_) => self.enqueue_bounded(h, &core, w),
                 };
                 if sent {
                     self.take_wait_send_arm(base, meta.arm_targets[i]);
@@ -2675,6 +2689,22 @@ impl Vm {
                 .map(|&(h, is_send)| (self.channel_core(h), is_send))
                 .collect();
             let _party = self.block_party_guard(quiesce::PartyWait::Wait(arms));
+            // TICKET-028 — arm a RecvWait per RECV arm on a rendezvous channel, then wake any parked
+            // sender on those channels now that the guards are live. `arms` was moved into the party
+            // guard above, so the cores are re-read from `keys`.
+            let rendezvous: Vec<GcRef> = keys
+                .iter()
+                .filter(|(_, is_send)| !*is_send)
+                .map(|(h, _)| *h)
+                .filter(|h| self.channel_core(*h).cap == Some(0))
+                .collect();
+            let _recvs: Vec<crate::vm::core::RecvWait> = rendezvous
+                .iter()
+                .map(|h| crate::vm::core::RecvWait::arm(&self.channel_core(*h)))
+                .collect();
+            for h in &rendezvous {
+                self.wake_senders(*h);
+            }
             self.block_halt_check(EMPTY_WAIT_DEADLOCK, span)?;
             // W7-13r(a) — this used to be a bare `thread::sleep(DEMOTE_POLL_BACKOFF)`, so EVERY wake
             // cost a full tick no matter how fast the value arrived. There are N arm condvars and no

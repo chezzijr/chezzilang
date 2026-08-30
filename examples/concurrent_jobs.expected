@@ -37,7 +37,7 @@
   PASS p4.for_drain               = 6
   PASS p4.try_recv_none           = 0
   PASS p4.bounded_cap             = 2
-  PASS p4.unbounded_cap           = 0
+  PASS p4.unbounded_cap           = -1
   PASS p4.bounded_send_ok         = 1
   PASS p4.bounded_full_reject     = 0
   PASS p4.bounded_after_recv      = 1

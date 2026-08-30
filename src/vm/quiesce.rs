@@ -19,6 +19,10 @@
 //! "unfeedable", which no progress counter or debounce window could (see `gaps.md` W7-12's rejected
 //! experiment, and the `parked-is-not-stuck` lesson).
 //!
+//! TICKET-028 — a rendezvous `Channel[T](0)` is simultaneously empty AND full (`queue.len() < cap`
+//! is `0 < 0`, always false), so its send side is judged against `ChanState::recv_waiting`, never
+//! against `cap` — see [`ChanState::has_send_slot`](super::core::ChanState::has_send_slot).
+//!
 //! # Counted parties, and why the count is sound
 //!
 //! `live = 1 (the main thread) + Σ ExecutorCore::outstanding` over the run's [`ExecRegistry`].
@@ -141,7 +145,7 @@ impl PartyWait {
             // — W7-13r(c)).
             PartyWait::Send(core) => {
                 let g = core.q.lock().unwrap_or_else(|e| e.into_inner());
-                core.cap.is_none_or(|c| g.len() < c) || g.closed
+                g.has_send_slot(core.cap) || g.closed
             }
             // `Vm::op_wait_poll`, arm kind by arm kind: a RECV arm is ready on a queued value or a
             // `trip()` latch — NOT on `closed`, which the poll SKIPS — while a SEND arm is ready on
@@ -150,7 +154,7 @@ impl PartyWait {
             PartyWait::Wait(arms) => arms.iter().any(|(core, is_send)| {
                 let g = core.q.lock().unwrap_or_else(|e| e.into_inner());
                 if *is_send {
-                    core.cap.is_none_or(|c| g.len() < c) || g.closed
+                    g.has_send_slot(core.cap) || g.closed
                 } else {
                     !g.is_empty()
                         || core.done_latch.load(std::sync::atomic::Ordering::Relaxed)

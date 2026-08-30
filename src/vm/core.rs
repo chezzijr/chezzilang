@@ -171,9 +171,11 @@ pub fn release_update_guard(key: usize) {
 pub struct ChannelCore {
     pub q: Mutex<ChanState>,
     pub cv: Condvar,
-    /// Bounded-channel capacity: `None` = unbounded (`send` never blocks); `Some(n>0)` = a bounded
-    /// FIFO whose `send` parks the fiber once `n` messages are queued and whose `try_send` returns
-    /// `false` when full. Immutable after construction (set once by `Op::NewChannel`).
+    /// Bounded-channel capacity: `None` = unbounded (`send` never blocks); `Some(0)` = rendezvous
+    /// (TICKET-028) — the send side is judged against `recv_waiting`, never against `cap`, because a
+    /// cap-0 channel is simultaneously empty and full; `Some(n>0)` = a bounded FIFO whose `send` parks
+    /// the fiber once `n` messages are queued and whose `try_send` returns `false` when full.
+    /// Immutable after construction (set once by `Op::NewChannel`).
     pub cap: Option<usize>,
     /// `timer(ms)` timeout channel: `Some(deadline)` iff this channel was built by `timer`. It is
     /// **level-triggered** — `recv` yields `true` on any call at/after the deadline (the typical use
@@ -226,6 +228,14 @@ pub struct ChanState {
     /// only when the queue empties, so it is conservative (over-walk = safe) and self-healing.
     dirty: bool,
     pub closed: bool,
+    /// Count of receivers currently WAITING on this channel (TICKET-028). Read only when `cap` is
+    /// `Some(0)`: the rendezvous send-ready predicate is `queue.len() < recv_waiting`. Maintained by
+    /// [`RecvWait`], armed at every receiver-wait site and dropped when the receiver's fiber next
+    /// RUNS (not when it is woken), so this count errs HIGH by design — an over-count lets one
+    /// rendezvous `send` enqueue without blocking (a momentary Go divergence); an under-count parks a
+    /// sender nothing can wake (a false `deadlock` fault on a healthy program, the unacceptable
+    /// direction).
+    pub recv_waiting: usize,
 }
 
 impl ChanState {
@@ -272,6 +282,40 @@ impl ChanState {
     /// Cached GC summary of the queued messages: `(approximate owned bytes, can-root-a-heap-object)`.
     pub fn summary(&self) -> (usize, bool) {
         (self.bytes, self.dirty)
+    }
+
+    /// Send-side readiness (TICKET-028). `None` = unbounded, always ready. `Some(0)` = rendezvous:
+    /// ready only while fewer messages are queued than receivers are waiting. `Some(n)` = bounded:
+    /// ready while under capacity.
+    pub fn has_send_slot(&self, cap: Option<usize>) -> bool {
+        match cap {
+            None => true,
+            Some(0) => self.queue.len() < self.recv_waiting,
+            Some(n) => self.queue.len() < n,
+        }
+    }
+}
+
+/// RAII receiver-presence marker for a rendezvous channel (TICKET-028). `arm` increments
+/// `ChanState::recv_waiting` under `core.q`; `Drop` decrements it, also under `core.q`. Both take
+/// ONLY `core.q`, so both are legal everywhere under the core-OUTER / q-INNER lock order. The count
+/// errs HIGH by design: see the doc comment on [`ChanState::recv_waiting`].
+#[derive(Debug)]
+pub struct RecvWait(std::sync::Arc<ChannelCore>);
+
+impl RecvWait {
+    pub fn arm(core: &std::sync::Arc<ChannelCore>) -> Self {
+        let mut g = core.q.lock().unwrap_or_else(|e| e.into_inner());
+        g.recv_waiting += 1;
+        drop(g);
+        RecvWait(std::sync::Arc::clone(core))
+    }
+}
+
+impl Drop for RecvWait {
+    fn drop(&mut self) {
+        let mut g = self.0.q.lock().unwrap_or_else(|e| e.into_inner());
+        g.recv_waiting = g.recv_waiting.saturating_sub(1);
     }
 }
 

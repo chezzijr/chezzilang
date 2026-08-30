@@ -2232,39 +2232,40 @@ fn parallel_recv_blocks_until_send_wakes_it() {
 
 // ----- bounded Channel[T](cap): capacity + backpressure -----
 
-/// `cap()` reports the bound (`Channel[T](n)` → n) or 0 for unbounded — identical.
+/// `cap()` reports the bound (`Channel[T](n)` → n) or -1 for unbounded.
 #[test]
 fn bounded_channel_cap_method_both_engines() {
     let src = "b := Channel[int](3)\nprint(b.cap())\nu := Channel[int]()\nprint(u.cap())\n";
     let out = run(src);
-    assert_eq!(out, "3\n0\n");
+    assert_eq!(out, "3\n-1\n");
 }
 
-/// `Channel[T](0)` / a negative capacity is a runtime fault (cap must be > 0), with
-/// the byte-identical message.
+/// A NEGATIVE capacity is a runtime fault (cap must be >= 0). `0` now constructs a rendezvous
+/// channel (TICKET-028), so it is no longer part of this fault's repro set.
 #[test]
-fn bounded_channel_zero_cap_faults_both_engines() {
-    for src in [
-        "c := Channel[int](0)\nprint(c.len())\n",
-        "c := Channel[int](-1)\nprint(c.len())\n",
-    ] {
-        let e = run_err(src);
-        assert!(e.contains("Channel capacity must be > 0"), "serial: {e}");
-        let ep = run_capture(src).expect_err("M:N should fault").message;
-        assert_eq!(e, ep, "serial and M:N fault text must match");
-    }
+fn negative_channel_cap_faults() {
+    let src = "c := Channel[int](-1)\nprint(c.len())\n";
+    let e = run_err(src);
+    assert!(e.contains("Channel capacity must be >= 0"), "serial: {e}");
+    let ep = run_capture(src).expect_err("M:N should fault").message;
+    assert_eq!(e, ep, "serial and M:N fault text must match");
 }
 
-/// Go's `make(chan T)` (no capacity arg) is the RENDEZVOUS channel: unbuffered, synchronous
-/// handoff. Chezzi's identical no-arg spelling `Channel[T]()` means the opposite — an UNBOUNDED
-/// FIFO where `send` never blocks (`docs/concurrency.md:372`). The natural cap-0 spelling that
-/// would mean "rendezvous" here, `Channel[T](0)`, is instead a runtime fault. So there is no way
-/// to spell a rendezvous channel in Chezzi at all (TICKET-028).
+/// `Channel[T](0)` is Chezzi's rendezvous channel (Go's `make(chan T)`), while `Channel[T]()`
+/// keeps its existing UNBOUNDED meaning (TICKET-028).
 #[test]
 fn rendezvous_channel_cap_zero_should_construct() {
     let src = "c := Channel[int](0)\nprint(c.cap())\n";
     let out = run(src);
     assert_eq!(out, "0\n");
+}
+
+/// A negative capacity still faults after TICKET-028's `n < 0` widening.
+#[test]
+fn rendezvous_negative_cap_still_faults() {
+    let src = "c := Channel[int](-1)\nprint(c.len())\n";
+    let e = run_err(src);
+    assert!(e.contains("Channel capacity must be >= 0"), "{e}");
 }
 
 /// `try_send` on a FULL bounded channel returns `false` (not true — the old unbounded contract);
@@ -2962,6 +2963,7 @@ fn mk_fiber(task_index: usize) -> Fiber {
         scope_id: 0,
         span: Span::RUNTIME,
         resume_native: None,
+        recv_waits: Vec::new(),
     }
 }
 /// An UNSTARTED fiber (`Pending`) — what `inject`/`seed` require so `run_one_fiber` runs the task
@@ -2979,14 +2981,126 @@ fn mk_pending_fiber(task_index: usize) -> Fiber {
         scope_id: 0,
         span: Span::RUNTIME,
         resume_native: None,
+        recv_waits: Vec::new(),
     }
 }
 fn empty_core() -> Arc<ChannelCore> {
     Arc::new(ChannelCore::default())
 }
+/// A rendezvous (cap-0) channel core (TICKET-028).
+fn cap0_core() -> Arc<ChannelCore> {
+    Arc::new(ChannelCore {
+        cap: Some(0),
+        ..Default::default()
+    })
+}
 fn core_key(core: &Arc<ChannelCore>) -> usize {
     Arc::as_ptr(core) as usize
 }
+/// TICKET-028 — a `WakeKind::Send` wake on a cap-0 channel requeues a parked SENDER without waking
+/// a parked receiver sharing the same bucket. Pins the pair-spin guard's other half.
+#[test]
+fn rendezvous_bucket_wake_is_kind_selective() {
+    let sched = mk_sched(2);
+    let core = cap0_core();
+    let key = core_key(&core);
+    sched.seed(vec![mk_fiber(0), mk_fiber(1)]);
+    let f0 = take_run(&sched);
+    let f1 = take_run(&sched);
+    {
+        let mut c = sched.lock();
+        c.parked.entry(key).or_default().push(ParkedEntry::Send(f0));
+        c.parked.entry(key).or_default().push(ParkedEntry::Recv(f1));
+        c.parked_n += 2;
+        c.running -= 2;
+    }
+    sched.recv_wake(key, &core);
+    assert_eq!(sched.lock().parked_n, 1);
+    assert_eq!(take_run(&sched).task_index, 0);
+    assert!(matches!(sched.lock().parked[&key][0], ParkedEntry::Recv(_)));
+}
+
+/// TICKET-028 — `MnSched::park` on a rendezvous channel arms `RecvWait` and wakes a parked sender,
+/// all under its own lock hold.
+#[test]
+fn rendezvous_park_wakes_a_parked_sender_in_one_lock_hold() {
+    let sched = mk_sched(2);
+    let core = cap0_core();
+    let key = core_key(&core);
+    sched.seed(vec![mk_fiber(0), mk_fiber(1)]);
+    let f0 = take_run(&sched);
+    let f1 = take_run(&sched);
+    {
+        let mut c = sched.lock();
+        c.parked.entry(key).or_default().push(ParkedEntry::Send(f0));
+        c.parked_n += 1;
+        c.running -= 1;
+    }
+    sched.park(key, &core, f1);
+    assert_eq!(sched.lock().parked_n, 1);
+    assert_eq!(
+        core.q
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .recv_waiting,
+        1
+    );
+    assert_eq!(take_run(&sched).task_index, 0);
+    assert!(matches!(sched.lock().parked[&key][0], ParkedEntry::Recv(_)));
+}
+
+/// TICKET-028 — the pair-spin guard: two `wait:` fibers each holding ONE recv arm on the same
+/// cap-0 channel must NOT wake each other (that would livelock forever with no `deadlock` fault).
+#[test]
+fn rendezvous_wait_recv_arms_do_not_wake_each_other() {
+    let sched = mk_sched(2);
+    let core = cap0_core();
+    let key = core_key(&core);
+    sched.seed(vec![mk_fiber(0), mk_fiber(1)]);
+    let f0 = take_run(&sched);
+    let f1 = take_run(&sched);
+    sched.park_wait(vec![(key, Arc::clone(&core), false)], f0);
+    sched.park_wait(vec![(key, Arc::clone(&core), false)], f1);
+    assert_eq!(sched.lock().parked_n, 2);
+    assert_eq!(sched.runnable.load(Ordering::Relaxed), 0);
+}
+
+/// TICKET-028 — a `send` on a rendezvous `Channel[int](0)` blocks until a receiver is already
+/// waiting, and the run completes rather than false-`deadlock`ing.
+#[test]
+fn rendezvous_send_blocks_until_a_receiver_arrives() {
+    let src = "\
+fn main():
+    ch := Channel[int](0)
+    parallel:
+        spawn:
+            i := 0
+            while i < 3:
+                ch.send(i)
+                print(\"sent {i}\")
+                i = i + 1
+        spawn:
+            i := 0
+            while i < 3:
+                v := ch.recv()
+                print(\"got {v}\")
+                i = i + 1
+
+main()
+";
+    let out = run_capture(src).expect("rendezvous send/recv should not deadlock");
+    for i in 0..3 {
+        assert!(
+            out.contains(&format!("sent {i}")),
+            "missing 'sent {i}' in {out:?}"
+        );
+        assert!(
+            out.contains(&format!("got {i}")),
+            "missing 'got {i}' in {out:?}"
+        );
+    }
+}
+
 fn take_run(s: &MnSched) -> Fiber {
     // tick=1 → not a periodic-global-check schedule, so the normal own-local-then-global order
     // applies (what the existing unit tests assert).

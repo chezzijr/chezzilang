@@ -339,16 +339,23 @@ These types come from the language/runtime; see [`concurrency.md`](concurrency.m
 > unchanged; the bare-after-import spelling stays fully supported.
 
 ### `Channel[T]` — FIFO mailbox
-`Channel[T]()` is an **unbounded** FIFO (`send` never blocks); `Channel[T](cap)` (`cap > 0`) is a
-**bounded** FIFO whose `send` **blocks/parks** while `cap` messages are queued and resumes once a `recv`
-frees a slot (Go's buffered channel; a full `send` with no possible consumer is a deadlock fault, not an
-over-fill). Methods: `send(x: T) -> nil` · `try_send(x: T) -> bool` (`false` = closed **or** full — never
+Three shapes: `Channel[T]()` is an **unbounded** FIFO (`send` never blocks); `Channel[T](0)` is a
+**rendezvous** channel — `send` blocks until a receiver is already waiting (Go's `make(chan T)`);
+`Channel[T](cap)` (`cap > 0`) is a **bounded** FIFO whose `send` **blocks/parks** while `cap` messages
+are queued and resumes once a `recv` frees a slot (Go's buffered channel; a full/rendezvous `send`
+with no possible consumer is a deadlock fault, not an over-fill or a hang). Methods: `send(x: T) -> nil`
+· `try_send(x: T) -> bool` (`false` = closed, full, **or** rendezvous with no waiting receiver — never
 blocks) · `recv() -> T` · `try_recv() -> Option[T]` · `close() -> nil` ·
 `trip() -> nil` (permanent level-trigger latch — **`Channel[bool]` only**, gated by `where T: bool`, since
 it always delivers `true`; the primitive behind `std.cancel`'s `done()`) · `len() -> int` · `cap() -> int`
-(the bound, or `0` for unbounded). Iterate received values with `for v in ch:` (ends when closed and drained). Backpressure only
-changes *which* task runs *when*, never the value sequence a consumer sees — bounded channels are
-byte-identical across runs.
+(`-1` for unbounded, `0` for rendezvous, the bound otherwise). Iterate received values with
+`for v in ch:` (ends when closed and drained). Backpressure only changes *which* task runs *when*,
+never the value sequence a consumer sees — bounded/rendezvous channels are byte-identical across runs.
+
+**DIVERGENCE from Go: `Channel[T]()` is NOT `make(chan T)`.** Go's no-argument channel is rendezvous;
+Chezzi's is UNBOUNDED — deliberate (TICKET-028), since the standard library and existing programs
+depend on the no-arg form never blocking. Port Go's `make(chan T)` to `Channel[T](0)`, not
+`Channel[T]()`.
 
 ### `Shared[T]` — cross-task shared cell
 `get() -> T` · `set(x: T) -> nil` · `update(f: fn(T) -> T) -> nil`. `get` is a **snapshot copy out**

@@ -373,7 +373,7 @@ fn main():
     _ := bc.recv()                         # free a slot
     bs4 := bc.try_send(4)                  # fits again
     check("p4.bounded_cap", bc.cap(), 2)
-    check("p4.unbounded_cap", Channel[int]().cap(), 0)
+    check("p4.unbounded_cap", Channel[int]().cap(), -1)
     check("p4.bounded_send_ok", b2i(bs1), 1)
     check("p4.bounded_full_reject", b2i(bs3), 0)
     check("p4.bounded_after_recv", b2i(bs4), 1)

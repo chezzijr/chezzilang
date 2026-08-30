@@ -2546,9 +2546,9 @@ impl Vm {
                 let cap = if *has_cap {
                     let cap_v = self.pop();
                     let n = self.int_of(cap_v);
-                    if n <= 0 {
+                    if n < 0 {
                         return Err(self.err(
-                            "Channel capacity must be > 0 (use Channel[T]() for an unbounded channel)"
+                            "Channel capacity must be >= 0 (0 = a rendezvous channel; omit the argument for an unbounded channel)"
                                 .to_string(),
                             span,
                         ));

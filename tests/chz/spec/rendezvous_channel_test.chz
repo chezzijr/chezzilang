@@ -1,0 +1,46 @@
+# TICKET-028 — `Channel[T](0)` is Chezzi's rendezvous channel (Go's `make(chan T)`), while
+# `Channel[T]()` keeps its existing UNBOUNDED meaning. `cap()` reports -1 for unbounded, 0 for
+# rendezvous, the bound for bounded.
+import std.concurrency
+
+test fn rendezvous_cap_is_zero_and_unbounded_is_minus_one():
+    assert Channel[int](0).cap() == 0
+    assert Channel[int]().cap() == -1
+
+test fn rendezvous_try_send_declines_with_no_receiver():
+    assert Channel[int](0).try_send(1) == false
+    assert Channel[int]().try_send(1) == true
+
+test fn rendezvous_send_hands_off_to_a_waiting_receiver():
+    ch := Channel[int](0)
+    total := Shared(0)
+    parallel:
+        spawn:
+            i := 0
+            while i < 5:
+                ch.send(i)
+                i = i + 1
+        spawn:
+            i := 0
+            while i < 5:
+                v := ch.recv()
+                total.update(fn(t: int) -> int: t + v)
+                i = i + 1
+    assert total.get() == 10
+
+test fn rendezvous_send_never_queues_ahead():
+    ch := Channel[int](0)
+    max_len := Shared(0)
+    parallel:
+        spawn:
+            i := 0
+            while i < 5:
+                ch.send(i)
+                max_len.update(fn(m: int) -> int: if ch.len() > m: ch.len() else: m)
+                i = i + 1
+        spawn:
+            i := 0
+            while i < 5:
+                ch.recv()
+                i = i + 1
+    assert max_len.get() <= 1

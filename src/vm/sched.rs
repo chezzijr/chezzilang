@@ -1118,6 +1118,12 @@ impl Vm {
             sched.cv.notify_all();
             tok
         };
+        // TICKET-028 — arm this demoted receiver's presence guard for the whole block loop, then
+        // (rendezvous only) wake any parked sender now that the guard is live.
+        let _recv = crate::vm::core::RecvWait::arm(&core);
+        if core.cap == Some(0) {
+            self.wake_senders_core(&core);
+        }
         // 2. Spin up a replacement worker ONCE per demoted thread (covers this `wid` while we block).
         //    Subsequent re-entries of this loop on the SAME thread (a callback that recvs repeatedly)
         //    reuse the already-spawned coverage — one spawn + one eventual exit per demoted thread.
@@ -1290,6 +1296,17 @@ impl Vm {
             sched.cv.notify_all();
             tok
         };
+        // TICKET-028 — every arm reaching this fn is a RECV arm; arm one RecvWait per arm, then wake
+        // any parked sender on a rendezvous arm now that the guards are live.
+        let _recvs: Vec<crate::vm::core::RecvWait> = arms
+            .iter()
+            .map(|(_, core)| crate::vm::core::RecvWait::arm(core))
+            .collect();
+        for (_, core) in &arms {
+            if core.cap == Some(0) {
+                self.wake_senders_core(core);
+            }
+        }
         // Un-account helper: reverse step 1 (called on every exit path), caller holds core lock A.
         let un_account = |c: &mut SchedCore| {
             c.running += 1;
@@ -1879,6 +1896,9 @@ impl Vm {
     /// reads), then swap the context back out. The run is panic-guarded so a worker-VM panic becomes a
     /// task `Fault` (keeps the loop alive + the slot filled — the join can't hang).
     pub(super) fn run_one_fiber(&mut self, fiber: &mut Fiber, span: Span) -> Disp {
+        // TICKET-028 — drop any armed `RecvWait` guards now that this fiber is RUNNING again, not
+        // when it was woken. See `ChanState::recv_waiting`'s doc comment for why.
+        fiber.recv_waits.clear();
         self.swap_ctx(&mut fiber.ctx);
         // Cross-nursery flat scheduler — RE-POINT the shell's `self.cancel` to THIS fiber's SCOPE cancel
         // on every swap-in. One shell runs fibers from MULTIPLE scopes off the global queue; the
@@ -2259,6 +2279,12 @@ impl Vm {
     /// bucket on every live `MnSched`.
     pub(super) fn wake_on_send(&mut self, h: GcRef) {
         let key = self.channel_core_ptr(h);
+        self.wake_on_send_key(key);
+    }
+
+    /// Same as [`Vm::wake_on_send`], keyed directly (TICKET-028 — a caller holding only the
+    /// `Arc<ChannelCore>`, never a `GcRef`, still needs this registry walk).
+    pub(super) fn wake_on_send_key(&mut self, key: usize) {
         // W7-56 — this VM has no sched in scope (that is the only branch that calls here), but the
         // RUN may: an eager `Executor` job's `Vm` gets neither `mn` nor `mn_enlist_sched` from
         // `spawn_worker`, so its `send`/`close` notified the channel condvar and nothing else, while
@@ -2282,7 +2308,7 @@ impl Vm {
                 g.retain(|w| w.strong_count() > 0);
                 drop(g);
                 for s in live {
-                    s.wake_key(key);
+                    s.wake_key(key, WakeKind::All);
                 }
             }
         }

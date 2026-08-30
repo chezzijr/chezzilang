@@ -9,6 +9,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 - A user protocol name is module-scoped like a struct: two modules may each declare `protocol Drawable`, and a bare unimported protocol name no longer resolves (TICKET-027).
 
+- **Rendezvous `Channel[T](0)` (TICKET-028, 2026-08-30, closes `docs/gaps.md` W8-19's rendezvous-Channel sub-item).** `Channel[T](0)` used to fault (capacity must be strictly positive); it now constructs a rendezvous channel — Go's `make(chan T)` — whose `send` blocks until a receiver is already waiting. `Channel[T]()` is UNCHANGED (stays unbounded); this divergence from Go's rendezvous no-arg `make(chan T)` is now named in `docs/concurrency.md` and `docs/stdlib.md`. `cap()` now reports `-1` for unbounded (was `0` — `0` now means rendezvous), `0` for rendezvous, the bound for bounded. Mechanism: a `recv_waiting` count on `ChanState`, maintained by an RAII `RecvWait` guard armed at every receiver-wait site and dropped when the receiver's fiber next RUNS (errs high, never low — an under-count would false-`deadlock`); bucket wakes are kind-selective (`WakeKind::Send` wakes only parked senders + `wait:` send-arm tokens, gated per-token by `WaitPark::send_keys` to avoid a `wait:` recv-arm pair livelock).
+
 > **✅ CLOSED, 2026-08-30 (TICKET-025, W8-21) — implicit success-coercion at a declared `T?`/`T!E`
 > return sink.** A bare success value now coerces: `T -> T?` gives `Some(v)`, `T -> T!E` gives
 > `Ok(v)`, and a bare `return` at `Result[nil, E]` gives DEC-017's zero-arg `Ok()`. The checker
@@ -5989,8 +5991,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 > **✅ CONCURRENCY (2026-07-22, `auto-task/bounded-channel-pmap`) — BOUNDED `Channel[T](cap)` +
 > `pmap`/`pmap_limited` stdlib helpers.** *(1) Bounded channel:* `Channel[T]()` stays unbounded (`send`
-> never blocks — byte-identical to before); `Channel[T](cap)` (`cap > 0`; `cap <= 0` is a runtime fault
-> `"Channel capacity must be > 0"`) is a bounded FIFO whose `send` **blocks/parks** while `cap` messages
+> never blocks — byte-identical to before); `Channel[T](cap)` (`cap > 0`; a negative `cap` is a runtime
+> fault `"Channel capacity must be >= 0"` — `cap == 0` became the rendezvous shape in TICKET-028) is a
+> bounded FIFO whose `send` **blocks/parks** while `cap` messages
 > are queued and resumes on a `recv` freeing a slot (Go's buffered channel). New surface: `cap() -> int`
 > (0 for unbounded); `try_send` now returns `false` on **full OR closed** (was closed-only). Only
 > `send`/`try_send` changed — `recv`/`try_recv`/`close`/`for`-drain/`trip`/`len` untouched. The send-park
