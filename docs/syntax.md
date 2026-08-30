@@ -1476,11 +1476,30 @@ q.x = 99
 print(p.x)              # 99  — one object, two names (CPython prints 99; Go would print 3)
 ```
 
-There is **no `copy`/`clone`** — duplicate by re-constructing (`Point(p.x, p.y)`). The one place a
-struct *is* snapshotted is as a `Map`/`Set` **key** or a `Set` **element** (see §"Keys are value types
-(Go model)" under Maps) — so keys are the language's single value-semantics island; everything else is
-by reference. A `spawn:`/`parallel:` boundary is a third model again: values cross **by copy** through
-the airlock (§11b).
+Every struct has an intrinsic `copy()` returning a **shallow** duplicate. Each field's *value* is
+copied, so a `List`/`Map`/`Set`, nested-struct, or handle field is referenced by **both** structs
+afterward — exactly like Python's `copy.copy` and unlike `copy.deepcopy`, which Chezzi does not have.
+A struct declaring its own `copy` method, or holding a fn-typed `copy` field, keeps it. A struct holding
+a `Channel`, `Shared`, or `Socket` copies fine and shares the handle.
+
+```chezzi
+struct P:
+    x: int
+    tag: str = "none"
+
+p := P(1, "hi")
+print(P(p.x))            # P(x=1, tag='none')  -- a hand-written duplicate drops the field
+print(p.copy())           # P(x=1, tag='hi')    -- copy() carries every field
+
+q := p.copy()
+q.x = 99
+print(p.x)                # 1  -- independent instances
+```
+
+The one place a struct *is* snapshotted is as a `Map`/`Set` **key** or a `Set` **element** (see
+§"Keys are value types (Go model)" under Maps) — so keys are the language's single value-semantics
+island; everything else is by reference. A `spawn:`/`parallel:` boundary is a third model again:
+values cross **by copy** through the airlock (§11b).
 
 **Methods are not first-class values.** `p.dist` is not an expression — a method exists only to be
 **called** (`p.dist()`); there is no bound-method value. To pass one around, wrap it in a closure:

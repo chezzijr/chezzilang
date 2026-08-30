@@ -190,7 +190,7 @@ OS-thread M:N engine, netpoller + `std.net`). The checker also has a **non-fatal
 (`Severity::Warning`, `"severity"` in `--errors=json`, `DiagnosticSeverity::WARNING` in the LSP) with
 three rules on it — a discarded `Result`/`Option`, a `spawn:`-task write read after the join, and a
 `match` arm made unreachable by an earlier unguarded irrefutable arm.
-**4582 Rust tests** green across 28 targets (**4324** in the lib target), plus **683**
+**4620 Rust tests** green across 28 targets (**4362** in the lib target), plus **707**
 Chezzi tests green at two worker counts (up from 590 at the start of `feat/span-file-and-stdlib-contracts`).
 
 ## Current focus
@@ -202,7 +202,8 @@ checker↔runtime, and IO drift — live ledger in `docs/gaps.md`), with **M19 �
 in-progress alongside it.
 
 > **START HERE (2026-08-18): `docs/gaps.md` W8-1..W8-42.** **3 open rows** — W8-17,
-> W8-19 from **dogfood wave 1** (W8-32 from wave 2 closed 2026-08-30, TICKET-024)
+> W8-19 from **dogfood wave 1** (its struct-copy sub-item landed 2026-08-30, TICKET-030, but the
+> bundle row stays open for its remaining sub-items) (W8-32 from wave 2 closed 2026-08-30, TICKET-024)
 > (**W8-1**, **W8-28**, **W8-29** closed 2026-08-29, TICKET-018 — a bare-digit interpolation hole
 > now renders literally, `not` now sits between `and` and the comparisons, and `??` now binds
 > tighter than every binary operator)
