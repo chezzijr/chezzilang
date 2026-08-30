@@ -28369,3 +28369,12 @@ fn builtin_native_method_gates_bound_protocol_satisfaction_ticket_024() {
         "type List[Cents] does not satisfy SumC (native method 'sum' needs a numeric element type)",
     );
 }
+
+// TICKET-030: a struct has no `copy()` — the only way to duplicate one is to retype every field.
+#[test]
+fn struct_copy_method_missing_ticket_030() {
+    rejects(
+        "struct P:\n    x: int\n\nfn main():\n    p := P(1)\n    print(p.copy())\n",
+        "type P has no method 'copy'",
+    );
+}
