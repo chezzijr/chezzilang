@@ -1536,6 +1536,19 @@ impl Vm {
                     self.push(recv);
                     return Ok(());
                 }
+                // TICKET-030 — every struct gets an intrinsic, MISS-ONLY `copy()`: it is reached only
+                // after the declared-method lookup and the fn-typed-field fallback above both failed,
+                // for the same precedence reason as the checker's arm. `fields` is already the OWNED
+                // clone taken at the top of this match (`self.heap.get(h).clone()`), so allocating a
+                // new `Obj::Struct` from the same `tid` and `fields` copies each field's VALUE while a
+                // heap field (a `List`/`Map`/`Channel`/nested struct) is SHARED — a shallow copy.
+                // `Heap::alloc` never collects (the only safepoint is the top of `run_until`'s dispatch
+                // loop), so no rooting is needed between the `alloc` and the `push`.
+                if method == "copy" && args.is_empty() {
+                    let dup = self.heap.alloc(Obj::Struct { tid, fields });
+                    self.push(Value::obj(dup));
+                    return Ok(());
+                }
                 // ROOT REDESIGN — render the BARE display name (not the identity key) in the error.
                 // Resolved BEFORE the W6-3 fallback below so the `name` borrow of `self` ends here.
                 let display = self

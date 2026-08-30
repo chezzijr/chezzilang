@@ -2746,8 +2746,24 @@ impl Checker {
                     self.check_args(method, &params, args, span);
                     return *ret;
                 }
+                // TICKET-030 — every struct gets an intrinsic, MISS-ONLY `copy()`: it is checked here
+                // only after the declared-method lookup and the fn-typed-field fallback above both
+                // failed, so a struct declaring its own `copy` or holding a fn-typed `copy` field keeps
+                // it. Returns the receiver type UNCHANGED (not just `sname`), so a generic struct's
+                // type arguments survive. Mirrors the runtime arm in `Vm::do_method_call`.
+                if method == "copy" && self.struct_shape(sname).is_some() {
+                    self.check_args(method, &[], args, span);
+                    return obj_ty.clone();
+                }
                 self.infer_all(args);
-                let names = self.method_names(sname);
+                // TICKET-030 — DEC-007: a `HashMap`-drawn candidate list must be sorted before scoring
+                // so a distance tie doesn't depend on hash order. `copy` is callable on every struct,
+                // so it belongs in this near-miss set. Do NOT add it to `Checker::method_names` itself:
+                // 14 call sites share that helper, including `method_names("str")` and
+                // `method_names("List")`, neither of which has a `copy()`.
+                let mut names = self.method_names(sname);
+                names.push("copy".to_string());
+                names.sort();
                 self.error_help(
                     span,
                     format!("type {obj_ty} has no method '{method}'"),
