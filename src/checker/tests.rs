@@ -1873,6 +1873,38 @@ fn a_return_only_type_param_nothing_binds_is_reported_at_the_call() {
     ok(&format!("{BOX}z: str = Box(1).make()\n"));
 }
 
+/// The deferral gate must be exactly the shape the hand-off machinery pins — NO WIDER. An
+/// `Unknown` that nothing pins and nothing demands an annotation for is a silent hole, because
+/// `Unknown` is universally assignable: any value read out of it satisfies any annotation.
+///
+/// Both shapes below were rejected before the deferral existed and are regressions the first cut
+/// shipped by gating on the broader `contains_unknown_in_slot` (which also accepts a
+/// `Struct`/`Enum`/`Tuple`/`Result` type argument) instead of `is_unrefined_empty_coll`.
+#[test]
+fn the_deferral_gate_is_no_wider_than_refine_on_first_use() {
+    // A STRUCT-shaped return: nothing pins `Box[Unknown]`'s argument, so the first cut let
+    // `s: str = b.v[0]` type-check while `s` actually held an int — check-clean, then
+    // `cannot apply Add to str and int` at RUNTIME.
+    rejects(
+        "struct Box[T]:\n    v: List[T]\nfn mk[T]() -> Box[T]:\n    return Box([])\nb := mk()\nb.v.push(1)\ns: str = b.v[0]\n",
+        "cannot infer type parameter T for 'mk'",
+    );
+
+    // A BOUNDED param is never deferred either: `enforce_bounds` has already run with the param
+    // unbound, and the later pin goes through `repin`, which re-checks no bound — so the first cut
+    // accepted `int` for a `T: Show` and ran, printing `[1]`.
+    rejects(
+        "protocol Show:\n    fn show(self) -> str\nfn empty[T: Show]() -> List[T]:\n    return []\nxs := empty()\nxs.push(1)\n",
+        "cannot infer type parameter T for 'empty'",
+    );
+
+    // …while the shape the machinery DOES pin still defers. In practice that is `List` alone: the
+    // predicate also admits `Set`/`Map`, but a generic producer of either cannot be DECLARED without
+    // a `Hashable` bound on the element/key ("Set element type must implement Hashable, found T"),
+    // and a bounded param is never deferred by the rule above.
+    ok("fn empty[T]() -> List[T]:\n    return []\nxs := empty()\nxs.push(1)\n");
+}
+
 /// The deferral must NEVER produce a bare `Ty::Unknown`. `Unknown` is universally assignable, so a
 /// bare-return degrade silently accepts every downstream use — the exact regression a previous
 /// review caught and reverted for `fn first[U](xs: List[U]) -> U`. `contains_unknown_in_slot` is the
@@ -1908,6 +1940,16 @@ fn an_unbound_param_in_parameter_position_keeps_its_own_diagnostic() {
 /// A DECL-SITE default copy is checked once at the declaration, where the enclosing generic's params
 /// are not bound yet; the expression's real home is the provider / the splice at each call. Firing
 /// the return-only rule there rejected a declaration that is correct at every real call site.
+///
+/// **What this test does and does not prove.** The exemption IS load-bearing here — without it this
+/// program reports `cannot infer type parameter T for 'mkl'`. But it can only be exercised in a
+/// shape where `mkl`'s own param and `G`'s param share the NAME `T`: alpha-renaming `mkl[T]` to
+/// `mkl[Z]` makes it fail on a DIFFERENT, pre-existing check (`default value for parameter 'xs':
+/// expected List[G[T]], found List[G[Z]]`), because the decl-site copy compares the declared type
+/// against the default's un-substituted type with no hint seeding. Every name-coincidence-free
+/// variant hits that same pre-existing wall (measured on a non-generic enclosing fn and on a field
+/// default). So this asserts the exemption, not the absence of that capture — see `docs/gaps.md`
+/// W8-45, which records the capture separately and measures it identical before this change.
 #[test]
 fn a_decl_site_default_is_exempt_from_the_return_only_rule() {
     ok_desugared(

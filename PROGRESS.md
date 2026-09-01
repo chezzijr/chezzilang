@@ -27,9 +27,11 @@ Single source of truth for "what am I doing next." Update after every work sessi
   context W7-51 had to neutralize for `?`, for the same reason. Contexts measured silent: a
   generic-fn value passed as an argument, a closure body that is a nested generic call, an argument
   sink, a return sink, a `match`-arm sink, a struct-field sink at construction, and a turbofish.
-  **Known ceiling, unchanged:** an annotation still does not reach through a collection literal
-  (`a: List[List[int]] = [empty()]`), so that now reports the un-inferable `T` too — the program was
-  already rejected there, and the new message names the fix.
+  **Known ceiling, unchanged:** an annotation still does not reach through a collection literal, so
+  `a: List[List[int]] = [empty()]` is not pinned by its annotation — measured, it type-checks and
+  prints `[[]]`, the inner element type never resolved. (An earlier draft of this entry claimed it
+  "now reports the un-inferable `T`" and "was already rejected there"; both halves were false and are
+  corrected here.)
   **The late-use direction is now closed too (same row), and it needed no new inference engine.**
   Chezzi already had refine-on-first-use pinning for an `Unknown` in a container SLOT — that is why
   `xs := []` then `xs.push(1)` has always worked. A generic producer simply never reached it: an

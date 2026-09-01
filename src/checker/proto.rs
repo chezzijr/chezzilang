@@ -4666,19 +4666,30 @@ impl Checker {
         // `xs := empty()` / `xs.push(1)` now infers `List[int]`, matching both Rust (which infers
         // from the later use) and Chezzi's own `xs := []` / `xs.push(1)`.
         //
-        // `contains_unknown_in_slot` is the exact line to cut on, and it already answers the
-        // dangerous case: a BARE `Unknown` returns false ("bare sentinel — never refine"). That
-        // matters because `Unknown` is universally assignable, so degrading a bare return
-        // (`fn make[U]() -> U`) would silently accept every downstream use — the precise regression
-        // a previous review caught and reverted for `fn first[U](xs: List[U]) -> U`, where
-        // `first([]) + 1` must stay `cannot apply + to U and int`. That shape never reaches here
-        // anyway (`U` is in a parameter slot, excluded above); this guard is what keeps the
-        // return-only bare case, `z := make()`, a hard error.
+        // **The gate must be exactly the shape the hand-off machinery pins — no wider.**
+        // `Ty::Unknown` is universally assignable, so an `Unknown` that nothing ever pins and
+        // nothing ever demands an annotation for is a silent hole: any value read out of it
+        // type-checks against any annotation. Refine-on-first-use pins, and `empty_coll_sites`
+        // requires an annotation for, exactly `Checker::is_unrefined_empty_coll` — a `List`/`Set`
+        // with a DIRECT `Unknown` element, or a `Map` with a direct `Unknown` key/value.
+        //
+        // The first cut used the broader `contains_unknown_in_slot`, which also accepts a
+        // `Struct`/`Enum`/`Tuple`/`Result` type argument. Nothing pins those, so
+        // `struct Box[T]: v: List[T]` / `fn mk[T]() -> Box[T]` / `b := mk()` / `b.v.push(1)` let
+        // `s: str = b.v[0]` type-check while `s` held an int — check-clean, then
+        // `cannot apply Add to str and int` at runtime. Measured rejected before this rule existed.
+        //
+        // A param carrying a declared BOUND is never deferred either: `enforce_bounds` has already
+        // run by this point with the param unbound, and the later pin goes through `repin`, which
+        // re-checks no bound — so `fn empty[T: Show]() -> List[T]` / `xs := empty()` / `xs.push(1)`
+        // would accept `int` for a `T: Show`. Also measured rejected before.
         let mut probe = sub.clone();
         for tp in &unbound {
             probe.insert(tp.name.clone(), Ty::Unknown);
         }
-        if contains_unknown_in_slot(&subst(ret, &probe)) {
+        if unbound.iter().all(|tp| tp.bounds.is_empty())
+            && Self::is_unrefined_empty_coll(&subst(ret, &probe))
+        {
             *sub = probe;
             return;
         }
