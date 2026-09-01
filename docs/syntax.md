@@ -835,7 +835,23 @@ xs.push(1)         # pins it: List[int]
 A generic empty producer is indistinguishable from the literal in both directions: a conflicting
 second `push` is rejected, and with no pinning use at all you get the literal's own error
 (`cannot infer element type of empty collection`). Only a parameter that IS the whole return type
-(`fn make[U]() -> U`) is refused at the call — there is no slot to defer into.
+(`fn make[U]() -> U`) is refused at the call — there is no slot to defer into. A producer whose
+parameter carries a bound is refused too: the bound is checked before the element type could be
+pinned, and nothing re-checks it afterwards.
+
+**What counts as the pinning use.** A `push`/`add`/`insert`, an `m[k] = v`, *and* passing the
+binding into a fully concrete parameter — all three pin it:
+
+```
+fn addstr(xs: List[str]):
+    xs.push("a")
+
+xs := []
+addstr(xs)      # pins List[str]
+xs.push(1)      # rejected: expected str, found int
+```
+
+A generic parameter (`fn ident[T](xs: List[T])`) pins nothing — `T` says nothing about the element.
 
 **Inline-expr body implicitly returns (Option A, inline-only).** A named function written in the
 **inline** form (`fn a(): <stmt>` — the body on the *same line* after `:`) whose single statement is a

@@ -101,3 +101,15 @@ test fn the_generic_producer_matches_the_literal():
     b := []
     b.push(7)
     assert a == b
+
+fn take_strs(xs: List[str]) -> int:
+    return xs.len()
+
+test fn passing_into_a_concrete_parameter_pins_the_element():
+    # Passing an unrefined empty collection into a concrete slot is a USE, so it pins the element
+    # exactly as a first `push` would — a later, agreeing push is fine and the list stays homogeneous.
+    xs := []
+    assert take_strs(xs) == 0
+    xs.push("a")
+    xs.push("b")
+    assert xs == ["a", "b"]

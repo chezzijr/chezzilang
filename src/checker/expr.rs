@@ -4137,6 +4137,23 @@ impl Checker {
                 && let ExprKind::Ident(name) = &arg.kind
             {
                 self.drop_empty_site(name);
+                // …and PIN it, the third refine-on-first-use site beside `refine_receiver`
+                // (`push`/`add`) and `refine_index_receiver` (`m[k]=v`). Dropping the annotation
+                // requirement WITHOUT fixing the element type left the binding's `Unknown` slot
+                // open, so a LATER constraining use pinned a different type and built a
+                // heterogeneous collection with nothing to report it: measured, `xs := []` /
+                // `addstr(xs)` (a `List[str]` parameter) / `xs.push(1)` / `ys: List[int] = xs` was
+                // check-clean and RAN, printing `['a', 1]`. Passing into a concrete slot IS a use,
+                // so it pins exactly like the first `push` does.
+                if !self.is_captured(name)
+                    && let Some(bt) = self.lookup(name)
+                    && contains_unknown_in_slot(&bt)
+                {
+                    let merged = merge_unknown(&bt, pt);
+                    if merged != bt {
+                        self.repin(name, merged);
+                    }
+                }
             }
             if let Some(pt) = params.get(i)
                 && !self.assignable_w(pt, &at, widen)

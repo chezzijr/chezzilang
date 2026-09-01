@@ -1873,6 +1873,62 @@ fn a_return_only_type_param_nothing_binds_is_reported_at_the_call() {
     ok(&format!("{BOX}z: str = Box(1).make()\n"));
 }
 
+/// **Passing an unrefined empty collection into a CONCRETE parameter is a USE, so it PINS.** It was
+/// already recognised as one — the call site dropped the binding's pending annotation requirement —
+/// but it never fixed the element type, leaving the `Unknown` slot open for a LATER use to pin
+/// something else. Measured on the pre-fix binary, check-clean at rc=0 and printing `['a', 1]`:
+///
+/// ```text
+/// fn addstr(xs: List[str]): xs.push("a")
+/// xs := []          # List[Unknown]
+/// addstr(xs)        # assignable through Unknown -- dropped the requirement, pinned nothing
+/// xs.push(1)        # pinned int
+/// ys: List[int] = xs   # accepted; ys actually holds ['a', 1]
+/// ```
+///
+/// This is the third refine-on-first-use site, beside `refine_receiver` (`push`/`add`) and
+/// `refine_index_receiver` (`m[k]=v`), and it reuses the gate already in place there: a fully
+/// concrete parameter type, an assignable argument, and a bare identifier.
+#[test]
+fn passing_an_empty_collection_into_a_concrete_parameter_pins_it() {
+    const ADDSTR: &str = "fn addstr(xs: List[str]):\n    xs.push(\"a\")\n";
+
+    // The hole, on the bare literal (where it predates every generic-inference change)…
+    rejects(
+        &format!("{ADDSTR}xs := []\naddstr(xs)\nxs.push(1)\nys: List[int] = xs\n"),
+        "expected str, found int",
+    );
+    // …and on a generic empty producer, which reaches the same machinery.
+    rejects(
+        &format!(
+            "fn empty[T]() -> List[T]:\n    return []\n{ADDSTR}xs := empty()\naddstr(xs)\nxs.push(1)\nys: List[int] = xs\n"
+        ),
+        "expected str, found int",
+    );
+
+    // A CONSISTENT later use is untouched — pinning must not reject agreement.
+    ok(&format!("{ADDSTR}xs := []\naddstr(xs)\nxs.push(\"b\")\n"));
+
+    // A GENERIC parameter is not concrete, so it must NOT pin — `T` says nothing about the element.
+    ok(
+        "fn ident[T](xs: List[T]) -> List[T]:\n    return xs\nxs := []\ny := ident(xs)\nxs.push(1)\n",
+    );
+
+    // A protocol-element parameter and a Map both keep working.
+    ok(
+        "protocol Show:\n    fn show(self) -> str\nfn showall(xs: List[Show]) -> int:\n    return xs.len()\nxs := []\nn := showall(xs)\n",
+    );
+    ok("fn f(m: Map[str, int]) -> int:\n    return m.len()\nm := {}\nn := f(m)\nm[\"a\"] = 1\n");
+
+    // NARROWING, deliberate: two conflicting concrete uses of one empty binding are now rejected.
+    // Measured accepted before (ran, printed `[]`). Rust refuses the same shape — one `Vec` cannot be
+    // both `Vec<String>` and `Vec<i32>` — and it is the same "first use pins" rule two pushes follow.
+    rejects(
+        "fn a(xs: List[str]) -> int:\n    return xs.len()\nfn b(xs: List[int]) -> int:\n    return xs.len()\nxs := []\np := a(xs)\nq := b(xs)\n",
+        "expected List[int], found List[str]",
+    );
+}
+
 /// The deferral gate must be exactly the shape the hand-off machinery pins — NO WIDER. An
 /// `Unknown` that nothing pins and nothing demands an annotation for is a silent hole, because
 /// `Unknown` is universally assignable: any value read out of it satisfies any annotation.
