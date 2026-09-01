@@ -7,6 +7,28 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **Constraining an empty collection now PINS its element type, at every site (W8-46).** Dropping a
+  binding's *cannot infer element type* requirement without fixing the element left the `Unknown` slot
+  open for a LATER use to pin something else, and **seven** routes built a heterogeneous collection
+  check-clean at rc=0: an `if`/`match` VALUE arm (`['a', 1]`), a generic call whose parameter a sibling
+  argument made concrete (`['x', 1]`), an annotated `let` sink (`['a']`), a concrete `return` sink
+  (`['a', 1]`), a whole-binding reassign (`[1, 2, 'a']`), a value escape nested in a literal
+  (`[['a']]`), and an escape into a typed field (`['a']`). W8-45's review measured its own
+  *root cause and fix, one site* claim FALSE; routes 5–7 came from enumerating the seam rather than
+  re-reading the filed list. **Fix: `drop_empty_site` takes a REQUIRED shape and pins in the same
+  operation** — the required parameter is the enforcement, the way `native::Kind`'s third element is —
+  plus `Checker::constrain_empty_arg`, now wired into both generic call paths (neither routes through
+  `check_args*`). The arg gate had to tighten to `ty_fully_concrete`: `Ty::Param` is not `Ty::Unknown`,
+  so the first cut pinned a binding to a rigid `List[T]`. **The value arm's fix is a DELETION** —
+  snapshotting the sites alongside the binding types does not fix it (measured: still `['a', 1]`, the
+  constraining use is simply forgotten); `snapshot_refinable`/`restore_refinable` are gone and a
+  value-arm pin persists exactly like statement position. Narrowing measured on the pre-fix binary:
+  two CONFLICTING concrete uses across sibling value arms now reject (`if`, `match`, and `Map`),
+  agreeing arms and later consistent uses still run. **Ceiling, deliberately open:** an un-annotated
+  alias (`c := b`) has no sink to pin from, so the requirement moves and the two names pin
+  independently over one runtime list — closing it needs alias-identity tracking, which would falsely
+  reject a rebound alias. `docs/gaps.md` **W8-46**; `docs/syntax.md` updated.
+
 - **A return-only type parameter that nothing binds is now reported AT THE CALL (W8-45).** `fn
   empty[T]() -> List[T]` called as `xs := empty()`, and `fn make[U]() -> U` called as `z := make()`,
   used to type-check: `T`/`U` leaked as a rigid `Ty::Param`. Rust refuses both — `E0282: type

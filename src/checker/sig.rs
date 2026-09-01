@@ -2109,15 +2109,20 @@ impl Checker {
                 {
                     // PART A: binding a bare empty-collection ident into a CONCRETE-typed annotated
                     // let (`c: List[int] = b`) constrains `b`'s element type — drop its pending
-                    // requirement (the typed-binding false-positive guard, one binding away from the
-                    // direct-literal `b: List[int] = []`). Gated on the annotation being fully
-                    // concrete so `c: List[?] = b` does not spuriously satisfy the requirement.
-                    self.drop_empty_site(src);
+                    // requirement AND pin the element from the annotation (the typed-binding
+                    // false-positive guard, one binding away from the direct-literal
+                    // `b: List[int] = []`). Gated on the annotation being fully concrete so
+                    // `c: List[?] = b` does not spuriously satisfy the requirement. Dropping WITHOUT
+                    // pinning was measured check-clean at rc=0: `xs := []` / `ys: List[int] = xs` /
+                    // `xs.push("a")` printed `['a']` through a `List[int]`-typed binding.
+                    self.drop_empty_site(src, Some(&declared));
                 }
                 // An empty binding read as the let VALUE escapes into the new binding (alias `c := b`
-                // or nested `c := [b]`) — drop the source's pending site (the alias records its own if
-                // it stays unrefined). Runs for every binding kind; only an active site is affected.
-                self.drop_value_escape_sites(value);
+                // or nested `c := [b]`) — drop the source's pending site, pinning from the DECLARED
+                // sink where there is one (an un-annotated `c := b` has nothing concrete, so the
+                // requirement just moves to the alias, which records its own if it stays unrefined).
+                // Runs for every binding kind; only an active site is affected.
+                self.drop_value_escape_sites(value, Some(&declared));
                 // EDITOR HOVER: the let-binding target (`x` in `x := …`) is a NAME, not an `Expr` the
                 // probe visits during `infer`; record it here. The statement span starts at the first
                 // binding name, so it is that token's position (single-name let — the common case).
@@ -2171,9 +2176,23 @@ impl Checker {
                     self.infer_value(value)
                 };
                 // An empty binding read as the assignment VALUE escapes into the target slot (`c = b`,
-                // `bx.items = b`) — drop the source's pending empty-collection site, mirroring the
-                // typed-binding-value guard for `c: List[int] = b`. Covers every target shape.
-                self.drop_value_escape_sites(value);
+                // `bx.items = b`) — drop the source's pending empty-collection site AND pin from the
+                // TARGET's type, mirroring the typed-binding-value guard for `c: List[int] = b`.
+                // Covers every target shape. The target type is probed speculatively (mark/rollback,
+                // the same idiom the closure branch above uses — inferring an lvalue as an rvalue
+                // would otherwise run read-side gates and double-infer a Field/Index receiver), and
+                // only when a site is actually pending, so the ordinary assignment path is untouched.
+                // Dropping WITHOUT pinning was measured check-clean at rc=0: `b := []` /
+                // `bx.items = b` (field `List[int]`) / `b.push("a")` printed `['a']`.
+                let sink = if self.empty_coll_sites.is_empty() {
+                    None
+                } else {
+                    let mark = self.diag_mark();
+                    let t = self.infer(target);
+                    self.diag_rollback(mark);
+                    Some(t)
+                };
+                self.drop_value_escape_sites(value, sink.as_ref());
                 self.check_assign(target, *op, val_ty, span);
             }
             StmtKind::Fn(decl) => {
@@ -3417,11 +3436,12 @@ impl Checker {
                 // its element type — clear the pending annotation requirement (the binding IS
                 // constrained, just not through the two refine-on-first-use mutator gates). Gated on the
                 // value being fully concrete (`!contains_unknown_in_slot`) so reassigning ANOTHER empty
-                // literal (`b = []`, still `List[Unknown]`) does NOT drop the requirement. No re-pin —
-                // the binding's stored type is intentionally left permissive (behavior-preserving;
-                // matches base, which never narrowed on plain `=`).
+                // literal (`b = []`, still `List[Unknown]`) does NOT drop the requirement. It PINS
+                // from that value too: leaving the stored type permissive was not
+                // behavior-preserving, it was the hole — measured check-clean at rc=0, `b := []` /
+                // `b = [1, 2]` / `b.push("a")` printed `[1, 2, 'a']`.
                 if !contains_unknown_in_slot(&val_ty) {
-                    self.drop_empty_site(name);
+                    self.drop_empty_site(name, Some(&val_ty));
                 }
             }
             // `xs[i] = v` — only lists are mutable by index. Strings are immutable; other types
@@ -3805,8 +3825,11 @@ impl Checker {
                         // PART A: returning a bare empty-collection binding into a CONCRETE collection
                         // return type constrains its element type (the typed-return false-positive
                         // guard, one binding away from the direct-literal `return []`). Drop its
-                        // pending annotation requirement.
-                        self.drop_empty_site(name);
+                        // pending annotation requirement AND pin from the return type — dropping
+                        // alone was measured check-clean at rc=0: `zs := []` /
+                        // `fn give() -> List[str]: return zs` / `s := give()` / `s.push("a")` /
+                        // `zs.push(1)` printed `['a', 1]`.
+                        self.drop_empty_site(name, Some(&ret));
                     }
                 }
             }

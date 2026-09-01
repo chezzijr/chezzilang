@@ -1012,9 +1012,8 @@ impl Checker {
         let mix = crate::compiler::literal_numeric_mix(arms.iter().map(|a| &a.body));
         for arm in arms {
             self.warn_unreachable_arm(has_wildcard, arm.body.span);
-            // Flow-sensitivity barrier (see `check_block`): expression-`match` arms run
-            // conditionally too — refinement inside one arm must not leak across arms or past it.
-            let snap = self.snapshot_refinable();
+            // No refine-on-first-use barrier here: a pin made in a value arm PERSISTS, exactly like
+            // statement position. See the note above `Checker::is_unrefined_empty_coll`.
             let irref = self.bind_match_arm(
                 &arm.pattern,
                 &kind,
@@ -1029,7 +1028,6 @@ impl Checker {
             self.expected_hint = hint.clone();
             let t = self.infer(&arm.body);
             self.pop_scope();
-            self.restore_refinable(snap);
             let t = Self::branch_widen(&arm.body, t, mix);
             result = Some(self.unify_branch(result, t, arm.body.span));
         }
@@ -1074,12 +1072,10 @@ impl Checker {
         // the compiler's `compile_if_expr` — see `branch_widen`).
         let mix = inherited_mix.unwrap_or_else(|| crate::compiler::if_chain_numeric_mix(then, els));
         self.expect_bool(cond, "if condition");
-        // Flow-sensitivity barrier (see `check_block`): the two branch expressions run
-        // conditionally — refinement inside one must not leak into the other or past the `if`.
-        let snap = self.snapshot_refinable();
+        // No refine-on-first-use barrier here: a pin made in a branch VALUE persists, exactly like
+        // statement position. See the note above `Checker::is_unrefined_empty_coll`.
         self.expected_hint = hint.clone();
         let t_then = self.infer(then);
-        self.restore_refinable(snap.clone());
         self.expected_hint = hint;
         // A nested-`IfElse` `els` is the `elif` tail — recurse DIRECTLY, threading the head's mix; any
         // other `els` is the final leaf, inferred normally.
@@ -1094,7 +1090,6 @@ impl Checker {
             self.infer(els)
         };
         self.expected_hint = None;
-        self.restore_refinable(snap);
         let t_then = Self::branch_widen(then, t_then, mix);
         let t_els = Self::branch_widen(els, t_els, mix);
         let acc = self.unify_branch(None, t_then, then.span);

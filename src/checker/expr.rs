@@ -4095,6 +4095,41 @@ impl Checker {
         );
     }
 
+    /// PART A — passing a bare empty-collection binding (`b := []`) into a CONCRETE collection
+    /// parameter (`f(xs: List[int])`) CONSTRAINS its element type: the requirement is dropped and
+    /// the element pinned in one operation, the third refine-on-first-use site beside
+    /// [`Self::refine_receiver`] (`push`/`add`) and [`Self::refine_index_receiver`] (`m[k]=v`).
+    /// Passing into a concrete slot IS a use, so it pins exactly like the first `push`.
+    ///
+    /// Gated on the parameter being fully concrete so a generic (`fn ident[T](xs: List[T])`) or
+    /// un-inferred slot pins nothing, and on the argument actually fitting so a mismatch keeps its
+    /// ordinary diagnostic. Lives here rather than inline in `check_args_range_decl` because the
+    /// GENERIC call paths never reach that function — `infer_generic_call` /
+    /// `infer_generic_method` match arguments with `unify` directly — so a parameter made concrete
+    /// by a SIBLING argument pinned nothing: measured, `fn move_first[T](a: List[T], b: List[T])`
+    /// called `move_first(["x"], xs)` then `xs.push(1)` printed `['x', 1]`, check-clean at rc=0.
+    pub(super) fn constrain_empty_arg(&mut self, arg: &Expr, pt: &Ty) {
+        let ExprKind::Ident(name) = &arg.kind else {
+            return;
+        };
+        // FULLY concrete — no `Ty::Unknown` AND no `Ty::Param`, nested too. The weaker
+        // `!contains_unknown_in_slot` was enough while only `check_args_range_decl` called this (a
+        // non-generic callee's params carry no `Ty::Param`), but the generic paths hand over a
+        // SUBSTITUTED slot that can still be `List[T]` with `T` free — and pinning to that made the
+        // binding rigidly `List[T]`: measured, `fn ident[T](xs: List[T])` called `ident(xs)` then
+        // `xs.push(1)` reported *expected T, found int* on a program that must pin nothing.
+        if !ty_fully_concrete(pt) {
+            return;
+        }
+        let Some(bt) = self.lookup(name) else {
+            return;
+        };
+        if !self.assignable(pt, &bt) {
+            return;
+        }
+        self.drop_empty_site(name, Some(pt));
+    }
+
     #[allow(clippy::too_many_arguments)] // params + their pre-substitution twins + arity + span + flags
     fn check_args_range_decl(
         &mut self,
@@ -4131,29 +4166,8 @@ impl Checker {
             // requirement (the spec's typed-parameter false-positive guard, one binding away from the
             // direct-literal `f([])` form). Gated on the param being a fully-concrete type so an
             // un-inferred / generic slot does not spuriously satisfy the requirement.
-            if let Some(pt) = params.get(i)
-                && !contains_unknown_in_slot(pt)
-                && self.assignable_w(pt, &at, widen)
-                && let ExprKind::Ident(name) = &arg.kind
-            {
-                self.drop_empty_site(name);
-                // …and PIN it, the third refine-on-first-use site beside `refine_receiver`
-                // (`push`/`add`) and `refine_index_receiver` (`m[k]=v`). Dropping the annotation
-                // requirement WITHOUT fixing the element type left the binding's `Unknown` slot
-                // open, so a LATER constraining use pinned a different type and built a
-                // heterogeneous collection with nothing to report it: measured, `xs := []` /
-                // `addstr(xs)` (a `List[str]` parameter) / `xs.push(1)` / `ys: List[int] = xs` was
-                // check-clean and RAN, printing `['a', 1]`. Passing into a concrete slot IS a use,
-                // so it pins exactly like the first `push` does.
-                if !self.is_captured(name)
-                    && let Some(bt) = self.lookup(name)
-                    && contains_unknown_in_slot(&bt)
-                {
-                    let merged = merge_unknown(&bt, pt);
-                    if merged != bt {
-                        self.repin(name, merged);
-                    }
-                }
+            if let Some(pt) = params.get(i) {
+                self.constrain_empty_arg(arg, pt);
             }
             if let Some(pt) = params.get(i)
                 && !self.assignable_w(pt, &at, widen)

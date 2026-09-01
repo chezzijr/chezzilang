@@ -2093,41 +2093,24 @@ impl Checker {
         }
         None
     }
-    /// Snapshot every in-scope binding whose type still carries an `Unknown` in a slot position (a
-    /// refinable empty-collection / nullary-variant / None producer), recording its OWNING scope
-    /// index, name, and current type. Paired with [`Self::restore_refinable`]. Refine-on-first-use is
-    /// now PERSISTENT scope-wide first-use pinning, so the STATEMENT-position sites
-    /// (`check_block`/for-loop/`check_match`) no longer snapshot/restore — a pin there persists. These
-    /// helpers remain in use by the EXPRESSION-position arms (`infer_if_else`/`infer_match`): a value-
-    /// arm produces a VALUE, so a pin in one value-arm must not leak to a sibling value-arm or it
-    /// would corrupt branch value inference. We snapshot the OWNING scope index — not the innermost
-    /// block scope — so restoring reverts the exact binding `repin` wrote, even when the receiver was
-    /// declared in an outer scope.
-    pub(super) fn snapshot_refinable(&self) -> Vec<(usize, String, Ty)> {
-        let mut snap = Vec::new();
-        for (i, scope) in self.scopes.iter().enumerate() {
-            for (name, ty) in scope {
-                if contains_unknown_in_slot(ty) {
-                    snap.push((i, name.clone(), ty.clone()));
-                }
-            }
-        }
-        snap
-    }
-    /// Restore the bindings captured by [`Self::snapshot_refinable`], reverting any in-arm refinement
-    /// so each EXPRESSION-position value-arm refines independently from the pre-arm type (kept only
-    /// at `infer_if_else`/`infer_match`; statement-position pins now persist). Writes back by (scope
-    /// index, name); a snapshotted scope that was already popped is skipped (binding gone, nothing to
-    /// revert).
-    pub(super) fn restore_refinable(&mut self, snap: Vec<(usize, String, Ty)>) {
-        for (i, name, ty) in snap {
-            if let Some(scope) = self.scopes.get_mut(i)
-                && scope.contains_key(&name)
-            {
-                scope.insert(name, ty);
-            }
-        }
-    }
+    /// NOTE — there is NO flow-sensitivity barrier around an `if`/`match` VALUE arm any more.
+    /// `snapshot_refinable`/`restore_refinable` used to revert refine-on-first-use pins made inside a
+    /// value arm, on the theory that a pin must not leak to a sibling arm. That was the last hole in
+    /// the pin: a constraining USE in a value arm dropped the binding's annotation requirement (which
+    /// was never snapshotted) while its pin WAS reverted, so a later use pinned a different type —
+    /// measured check-clean at rc=0, `xs := []` / `n := if 1 < 2: addstr(xs) else: 0` (a `List[str]`
+    /// parameter) / `xs.push(1)` / `ys: List[int] = xs` printed `['a', 1]`, while the STATEMENT
+    /// spelling was correctly rejected. Snapshotting BOTH halves does not fix it either — it just
+    /// forgets the constraining use entirely and lets the later push win.
+    ///
+    /// Value arms now pin persistently, exactly like statement position (`docs/syntax.md`'s
+    /// scope-wide first-use rule). A value arm is a single expression, so the only refinement that
+    /// can occur in one is `constrain_empty_arg` (a call taking the binding) — `push`/`add` and
+    /// `m[k]=v` are statements and cannot appear there. The consequence, measured on the pre-fix
+    /// binary and newly rejected: two CONFLICTING concrete uses across sibling value arms
+    /// (`y := if c: f(xs) else: g(xs)` with `f: List[str]`, `g: List[int]`, and the `match` twin),
+    /// which is the same rule two conflicting pushes already followed and which Rust also refuses.
+    /// AGREEING arms, an arm-only use, and an arm followed by a consistent later use all still run.
     /// PART A — is `t` an empty collection type whose own DIRECT element/key/value slot is still a bare
     /// `Unknown` (the shape produced by an un-constrained empty literal: `[]`→`List[Unknown]`,
     /// `{}`→`Map[Unknown,Unknown]`, `Set()`→`Set[Unknown]`)? The slot must be DIRECTLY `Unknown`, not
@@ -2146,13 +2129,34 @@ impl Checker {
     /// its pending empty-collection requirement. Resolves `name`'s OWNING scope (reverse walk, like
     /// `repin`) and drops only that binding's site, so an inner-scope shadow of the same name does not
     /// clear an outer binding's requirement.
-    pub(super) fn drop_empty_site(&mut self, name: &str) {
+    pub(super) fn drop_empty_site(&mut self, name: &str, shape: Option<&Ty>) {
         let owner = (0..self.scopes.len())
             .rev()
             .find(|&i| self.scopes[i].contains_key(name));
         if let Some(owner) = owner {
             self.empty_coll_sites
                 .retain(|(o, n, _)| !(*o == owner && n == name));
+        }
+        // …and PIN, in the SAME operation. `shape` is REQUIRED (not a second method) so a new site
+        // cannot silently do half of this: dropping the annotation requirement WITHOUT fixing the
+        // element type leaves the binding's `Unknown` slot open for a LATER use to pin something
+        // else, and nothing reports the heterogeneous collection that results. Measured on
+        // `140c7041`, six routes of this one class, each `ok: no type errors` at rc=0 — a value arm
+        // (`['a', 1]`), a sibling-argument generic call (`['x', 1]`), an annotated-let sink
+        // (`['a']`), a `return` sink (`['a', 1]`), a plain reassign (`[1, 2, 'a']`) and an alias
+        // (`[1, 'a']`). `None` means the site genuinely has nothing concrete in hand — the
+        // requirement MOVES to another binding, or the site pins itself below under its own gates;
+        // every `None` call states which.
+        if let Some(shape) = shape
+            && !contains_unknown_in_slot(shape)
+            && !self.is_captured(name)
+            && let Some(bt) = self.lookup(name)
+            && contains_unknown_in_slot(&bt)
+        {
+            let merged = merge_unknown(&bt, shape);
+            if merged != bt {
+                self.repin(name, merged);
+            }
         }
     }
     /// PART A — an empty-collection binding READ AS A VALUE that ESCAPES into another binding or
@@ -2165,23 +2169,49 @@ impl Checker {
     /// (a call arg like `print(b)`) is intentionally NOT covered — that case must still require the
     /// annotation. The alias binding itself, if left unrefined, records its own site, so the
     /// requirement moves rather than vanishes (no new false-negative).
-    pub(super) fn drop_value_escape_sites(&mut self, value: &Expr) {
+    /// `sink` is the type the value flows INTO — the annotated binding's declared type, or the
+    /// assignment target's. It is projected onto each escaping ident (the element type for a
+    /// list/set literal, the positional slot for a tuple, key/value for a map) and pins there, so a
+    /// typed sink cannot drop the requirement and leave the slot open. Measured before that:
+    /// `b := []` / `c: List[List[int]] = [b]` / `b.push("a")` printed `[['a']]`, and
+    /// `bx.items = b` (field of type `List[int]`) then `b.push("a")` printed `['a']` — both
+    /// check-clean at rc=0. `None` (an UN-annotated alias `c := b`) still just moves the requirement.
+    pub(super) fn drop_value_escape_sites(&mut self, value: &Expr, sink: Option<&Ty>) {
         match &value.kind {
-            ExprKind::Ident(name) => self.drop_empty_site(name),
-            ExprKind::List(elems, _) | ExprKind::Set(elems) | ExprKind::Tuple(elems) => {
+            ExprKind::Ident(name) => self.drop_empty_site(name, sink),
+            ExprKind::List(elems, _) | ExprKind::Set(elems) => {
+                let elem = match sink {
+                    Some(Ty::List(e) | Ty::Set(e)) => Some((**e).clone()),
+                    _ => None,
+                };
                 for e in elems {
                     if let ExprKind::Ident(n) = &e.kind {
-                        self.drop_empty_site(n);
+                        self.drop_empty_site(n, elem.as_ref());
+                    }
+                }
+            }
+            ExprKind::Tuple(elems) => {
+                for (i, e) in elems.iter().enumerate() {
+                    if let ExprKind::Ident(n) = &e.kind {
+                        let slot = match sink {
+                            Some(Ty::Tuple(ts)) => ts.get(i),
+                            _ => None,
+                        };
+                        self.drop_empty_site(n, slot);
                     }
                 }
             }
             ExprKind::Map(pairs) => {
+                let (kt, vt) = match sink {
+                    Some(Ty::Map(k, v)) => (Some((**k).clone()), Some((**v).clone())),
+                    _ => (None, None),
+                };
                 for (k, v) in pairs {
                     if let ExprKind::Ident(n) = &k.kind {
-                        self.drop_empty_site(n);
+                        self.drop_empty_site(n, kt.as_ref());
                     }
                     if let ExprKind::Ident(n) = &v.kind {
-                        self.drop_empty_site(n);
+                        self.drop_empty_site(n, vt.as_ref());
                     }
                 }
             }

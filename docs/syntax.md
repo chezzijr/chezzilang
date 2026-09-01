@@ -3825,24 +3825,37 @@ defining `compare`), stable, in place.
 > `b += [1]`, `a, b = [1], [2]`), or passing/returning it into a concrete collection sink — a typed
 > binding, a typed function parameter (`f(b)` where the param is `List[int]`), or a typed `return`. The
 > direct-literal forms (`f([])`, `return []`, `c: List[int] = []`) likewise leave no un-inferred slot, so
-> those never error. A binding is *also* considered constrained — so it does not error — once it **escapes
+> those never error. **Every one of these constraining uses also PINS the element type**, exactly like the
+> first `push` — being constrained and being pinned are one operation, never one without the other. So
+> `b := []` / `f(b)` (param `List[str]`) / `b.push(1)` is a type error, and so are the reassign
+> (`b = [1, 2]` then `b.push("a")`), the typed sink (`c: List[int] = b` then `b.push("a")`), the typed
+> `return`, and the same shapes reached through a **generic** call whose parameter a sibling argument
+> made concrete (`move_first(["x"], b)` on `fn move_first[T](a: List[T], b: List[T])`). A *generic* sink
+> pins nothing — `fn ident[T](xs: List[T])` says nothing about the element — and neither does one whose
+> own element type is still un-inferred.
+> A binding is *also* considered constrained — so it does not error — once it **escapes
 > as a value** into another binding or structure: an alias (`c := b`), a plain or field assignment
 > (`c = b`, `bx.items = b`), or nesting in a collection literal (`c := [b]`); the requirement then moves
 > to the new binding (which records its own if *it* stays unrefined) rather than firing a false positive.
+> Where that sink is **typed**, the escape pins through it too: `bx.items = b` with a `List[int]` field,
+> and `c: List[List[int]] = [b]` through the annotation's element type.
 > (Reassigning *another* empty — `b = []` — does not constrain it; the requirement
 > stands. A terminal read that does not escape — `print(b)`, `b.len()` — likewise does not constrain it.) The
 > `Hashable` key/element ban applies the moment the type is concrete (and a non-Hashable key/element
 > like a `float` is rejected at the insertion site even on an empty `{}`/`Set()`). The pin is
 > **persistent** (scope-wide first-use pinning): the first mutating op fixes the element type for the
-> binding's whole scope, even across sibling `if`/`else`/statement-`match` arms and a loop body — so
+> binding's whole scope, even across sibling `if`/`else`/`match` arms and a loop body — so
 > building a heterogeneous collection split across branches/arms is a type error, exactly like the
 > literal `[1, "s"]`. `xs := []; if c: xs.push(1) else: xs.push("s")` is **rejected**. This accepts a
 > sound zero-trip over-approximation: `xs := []; for i in []: xs.push(1); xs.push("s")` rejects even
-> though the loop body never runs. Limitations: refinement fires only on a **simple-variable** receiver
-> (`obj.field.push(…)` / `xss[0].push(…)` are not refined — annotate those), and the one remaining
-> uncaught sliver is a differently-typed push done as a *side effect* inside sibling **if-EXPRESSION /
-> match-EXPRESSION** value-arms (value-arms refine independently so branch value inference stays
-> correct; rare, since a value-arm is a single expression and the mutating ops are statements).
+> though the loop body never runs. **if-EXPRESSION / match-EXPRESSION value arms pin persistently too**,
+> on the same rule: `y := if c: f(xs) else: g(xs)` with `f` taking `List[str]` and `g` taking `List[int]`
+> is rejected, because one binding cannot be both. Limitations: refinement fires only on a
+> **simple-variable** receiver (`obj.field.push(…)` / `xss[0].push(…)` are not refined — annotate
+> those), and the one remaining uncaught sliver is an **un-annotated alias**: `c := b` has no concrete
+> sink to pin from, so the requirement moves to `c` and the two names are then pinned independently
+> while sharing one runtime list (`b := []; c := b; c.push(1); b.push("s")` is accepted). Annotate
+> either binding to close it.
 >
 > Because the pin is **scope-wide** (not source-order forward), a **non-pinning** use of the binding
 > that appears *before* the pinning op still sees the resolved element type — the checker resolves the

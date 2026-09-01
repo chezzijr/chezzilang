@@ -1929,6 +1929,120 @@ fn passing_an_empty_collection_into_a_concrete_parameter_pins_it() {
     );
 }
 
+/// DROP-AND-PIN IS ONE OPERATION. `drop_empty_site` clears a binding's pending
+/// "cannot infer element type" requirement; three of its call sites also PINNED the element type and
+/// the rest did not, which left the binding's `Unknown` slot open for a LATER use to pin something
+/// else. Every route below was measured on `140c7041` as `ok: no type errors` at rc=0 while the
+/// program built a heterogeneous collection — the suite that passed then could not test any of them,
+/// because each is a NEW rejection (`widening-untested-by-its-own-suite`). The measured pre-fix
+/// output is quoted per case.
+#[test]
+fn every_constraining_use_pins_the_element_type() {
+    const ADDSTR: &str = "fn addstr(xs: List[str]) -> int:\n    xs.push(\"a\")\n    return 1\n";
+
+    // (1) A VALUE ARM. `restore_refinable` reverted the pin but never the drop, so the two halves
+    // came apart; the STATEMENT spelling was already rejected. Pre-fix: `['a', 1]`.
+    rejects(
+        &format!(
+            "{ADDSTR}xs := []\nn := if 1 < 2: addstr(xs) else: 0\nxs.push(1)\nys: List[int] = xs\n"
+        ),
+        "expected str, found int",
+    );
+
+    // (2) A GENERIC call whose parameter a SIBLING argument made concrete. Neither generic path
+    // routes through `check_args_range_decl`, so nothing pinned. Pre-fix: `['x', 1]`.
+    rejects(
+        "fn move_first[T](a: List[T], b: List[T]):\n    b.push(a[0])\nxs := []\nmove_first([\"x\"], xs)\nxs.push(1)\n",
+        "expected str, found int",
+    );
+
+    // (3) An ANNOTATED LET sink. Pre-fix: `ys` printed `['a']` through a `List[int]` binding.
+    rejects(
+        "xs := []\nys: List[int] = xs\nxs.push(\"a\")\n",
+        "expected int, found str",
+    );
+
+    // (4) A concrete RETURN sink. Pre-fix: `['a', 1]`.
+    rejects(
+        "zs := []\nfn give() -> List[str]:\n    return zs\ns := give()\ns.push(\"a\")\nzs.push(1)\n",
+        "expected str, found int",
+    );
+
+    // (5) A whole-binding REASSIGN supplying a concrete value. The old comment called leaving the
+    // type permissive "behavior-preserving"; it was the hole. Pre-fix: `[1, 2, 'a']`.
+    rejects(
+        "b := []\nb = [1, 2]\nb.push(\"a\")\n",
+        "expected int, found str",
+    );
+
+    // (6) A value ESCAPE nested in a literal, projected through the annotation's ELEMENT type.
+    // Pre-fix: `[['a']]`.
+    rejects(
+        "b := []\nc: List[List[int]] = [b]\nb.push(\"a\")\n",
+        "expected int, found str",
+    );
+
+    // (7) A value escape into a typed FIELD, projected through the assignment TARGET's type.
+    // Pre-fix: `['a']`.
+    rejects(
+        "struct Bx:\n    items: List[int]\nb := []\nbx := Bx([1])\nbx.items = b\nb.push(\"a\")\n",
+        "expected int, found str",
+    );
+
+    // CEILING, measured and deliberately not closed: an UN-ANNOTATED alias. `c := b` has no concrete
+    // sink to pin from, so the requirement legitimately MOVES to `c` (`docs/syntax.md`) and the two
+    // bindings are then pinned independently while sharing one runtime list — `[1, 'a']`, unchanged
+    // by everything above. Closing it needs alias-identity tracking, which would newly REJECT a
+    // rebound alias (`c := b` then `c = [1, 2]` then `b.push("a")`) — a false rejection is worse than
+    // this missing one. Neither ancestor settles it for us: Rust forbids the shape outright (`let c
+    // = b` MOVES), Python has no static element type at all.
+    ok("b := []\nc := b\nc.push(1)\nb.push(\"a\")\n");
+}
+
+/// A pin made inside an `if`/`match` VALUE arm now PERSISTS, exactly like statement position — the
+/// flow-sensitivity barrier that used to revert it is gone. That is a NARROWING, so every row here
+/// was run on the pre-fix binary first: the two `rejects` were `ok: no type errors`, and each `ok`
+/// still runs and prints what it printed before.
+#[test]
+fn a_value_arm_pin_persists_like_statement_position() {
+    const F: &str = "fn f(xs: List[str]) -> int:\n    return xs.len()\n";
+    const G: &str = "fn g(xs: List[int]) -> int:\n    return xs.len()\n";
+
+    // Two CONFLICTING concrete uses across sibling value arms — the same rule two conflicting
+    // pushes already follow, and the one Rust applies (a `Vec` cannot be both `Vec<String>` and
+    // `Vec<i32>`). The `if` spelling…
+    rejects(
+        &format!("{F}{G}xs := []\nc := true\ny := if c: f(xs) else: g(xs)\n"),
+        "expected List[int], found List[str]",
+    );
+    // …and the `match` spelling, which reverted through the same helper.
+    rejects(
+        &format!("{F}{G}xs := []\nk := 1\ny := match k:\n    1: f(xs)\n    _: g(xs)\n"),
+        "expected List[int], found List[str]",
+    );
+    // A `Map` binding takes the identical route.
+    rejects(
+        "fn f(m: Map[str, int]) -> int:\n    return m.len()\nfn g(m: Map[str, str]) -> int:\n    return m.len()\nm := {}\nc := true\ny := if c: f(m) else: g(m)\n",
+        "expected Map[str, str], found Map[str, int]",
+    );
+
+    // AGREEING arms are untouched — pinning must not reject agreement.
+    ok(&format!(
+        "{F}fn g2(xs: List[str]) -> int:\n    return 0\nxs := []\nc := true\ny := if c: f(xs) else: g2(xs)\n"
+    ));
+    // A use in ONE arm only, with no later use, still satisfies the requirement.
+    ok(&format!(
+        "{F}xs := []\nc := true\ny := if c: f(xs) else: 0\n"
+    ));
+    // …and a CONSISTENT later use after the arm pinned it.
+    ok(&format!(
+        "{F}xs := []\nc := true\ny := if c: f(xs) else: 0\nxs.push(\"a\")\n"
+    ));
+    ok(&format!(
+        "{F}xs := []\nk := 1\ny := match k:\n    1: f(xs)\n    _: 0\nxs.push(\"a\")\n"
+    ));
+}
+
 /// The deferral gate must be exactly the shape the hand-off machinery pins — NO WIDER. An
 /// `Unknown` that nothing pins and nothing demands an annotation for is a silent hole, because
 /// `Unknown` is universally assignable: any value read out of it satisfies any annotation.

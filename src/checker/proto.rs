@@ -1021,8 +1021,12 @@ impl Checker {
         // supplies the element only via a mutator (`acc := []` outside, `acc.push(1)` captured) still
         // drops the site — the element WAS supplied, so requiring an annotation would be wrong. A
         // no-op when no site exists (`drop_empty_site` only removes a matching `(owner, name)`).
+        // `None`: this site pins ITSELF below, after its own gates (the cascade guard on an
+        // erroring argument, the receiver-shape match, and the `Set` Hashable ban) — the drop must
+        // run FIRST for the captured-binding reason just stated, so the two halves cannot be one
+        // call here.
         if matches!(method, "push" | "add" | "insert" | "extend") && !args.is_empty() {
-            self.drop_empty_site(name);
+            self.drop_empty_site(name, None);
         }
         // Skip captured bindings: mirror the airlock reassignment ban — refine is a checker-side
         // narrowing, but skipping it here keeps behavior aligned and avoids a confusing diagnostic.
@@ -1105,7 +1109,9 @@ impl Checker {
         // PART A: an index-assign (`m[k]=v` / `xs[i]=v`) constrains this binding — clear any pending
         // empty-collection annotation requirement (BEFORE the speculative-index-infer truncate-return,
         // mirroring `refine_receiver`, so an erroring key like `m[undefined_k]=1` still drops the site).
-        self.drop_empty_site(name);
+        // `None` for the same reason as `refine_receiver`: this site pins itself below, after the
+        // speculative index-infer's cascade guard.
+        self.drop_empty_site(name, None);
         if val_ty.is_unknown() {
             return;
         }
@@ -4583,6 +4589,20 @@ impl Checker {
         // The SAME reporter the method path calls, so `applyg(ident, 5)` and `[1,2,3].fold(0, pick)`
         // get one answer from one derivation.
         self.report_undetermined_generic_fn_value_args(args, &sig.params, &subst_map, span);
+        // PART A — the empty-collection pin, at the LAST moment the substitution can still change.
+        // Neither generic path routes through `check_args_range_decl`, so a bare empty binding passed
+        // into a parameter that a SIBLING argument made concrete used to pin nothing: measured
+        // check-clean at rc=0, `fn move_first[T](a: List[T], b: List[T])` called
+        // `move_first(["x"], xs)` then `xs.push(1)` printed `['x', 1]`. Running it here — after every
+        // recovery — is what makes the sibling-argument case work; `constrain_empty_arg` is a no-op
+        // on a slot still carrying a `Ty::Param` or an `Unknown`, so a genuinely generic parameter
+        // (`fn ident[T](xs: List[T])`) still pins nothing.
+        for (i, arg) in args.iter().enumerate() {
+            if let Some(decl) = sig.params.get(i) {
+                let want = subst(decl, &subst_map);
+                self.constrain_empty_arg(arg, &want);
+            }
+        }
         // M24 — half two of the static-witness contract, recorded LAST: `recover_return_only_params`
         // above can still bind a param that `enforce_bounds` never saw, so anything earlier would
         // read a param as un-determined that the call actually pins.
@@ -4913,6 +4933,20 @@ impl Checker {
         // design: `[1,2,3].fold(0, pick)` is pinned by the accumulator, argument ZERO, while `pick` is
         // argument one.
         self.report_undetermined_generic_fn_value_args(args, expected, &mmap, span);
+        // PART A — the empty-collection pin, at the LAST moment the substitution can still change.
+        // Neither generic path routes through `check_args_range_decl`, so a bare empty binding passed
+        // into a parameter that a SIBLING argument made concrete used to pin nothing: measured
+        // check-clean at rc=0, `fn move_first[T](a: List[T], b: List[T])` called
+        // `move_first(["x"], xs)` then `xs.push(1)` printed `['x', 1]`. Running it here — after every
+        // recovery — is what makes the sibling-argument case work; `constrain_empty_arg` is a no-op
+        // on a slot still carrying a `Ty::Param` or an `Unknown`, so a genuinely generic parameter
+        // (`fn ident[T](xs: List[T])`) still pins nothing.
+        for (i, arg) in args.iter().enumerate() {
+            if let Some(decl) = expected.get(i) {
+                let want = subst(decl, &mmap);
+                self.constrain_empty_arg(arg, &want);
+            }
+        }
         // M24 Task 5 — half two of the static-witness contract for a MEMBER-declared type param,
         // recorded LAST for the same reason the free-fn path does it last (`recover_return_only_params`
         // can still bind a param nothing else saw). The receiver's own type args are already
