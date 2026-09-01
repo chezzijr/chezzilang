@@ -4,6 +4,32 @@
 use super::*;
 
 impl Checker {
+    /// The decl-site copy of a default is checked BEFORE any call, so a generic provider's own
+    /// binders are still FREE in `actual` (`fn mkl[Z]() -> List[G[Z]]` used as a default for
+    /// `List[G[T]]` yields `List[G[Z]]`). Those binders are universally quantified there — the
+    /// default's real home is the provider, or the splice at each call, where the enclosing generic
+    /// IS bound — so resolve them AGAINST THE SLOT rather than comparing them by name.
+    ///
+    /// Without this the comparison passed only when the two sides happened to SPELL a binder the
+    /// same: measured, `mkl[T]` against `G[T]` was accepted while the alpha-renamed `mkl[Z]` gave
+    /// *default value for parameter 'xs': expected List[G[T]], found List[G[Z]]* — one declaration,
+    /// two verdicts. Alpha-renaming must never change meaning.
+    ///
+    /// `unify` treats every `Ty::Param` on its PATTERN side as a variable, so passing `actual` as
+    /// the pattern freshens ALL of its binders in one step — no gensym pass needed, and no way to
+    /// miss one. It is one-directional: nothing on the DECLARED side is rewritten, so a genuinely
+    /// wrong default (`n: int = "x"`, or a provider whose return cannot fill the slot) still fails
+    /// the assignability check at the call site of this helper, unchanged.
+    fn resolve_default_binders(&self, declared: &Ty, actual: Ty) -> Ty {
+        let mut map: HashMap<String, Ty> = HashMap::new();
+        unify(&actual, declared, &mut map);
+        if map.is_empty() {
+            actual
+        } else {
+            subst(&actual, &map)
+        }
+    }
+
     /// Build a function's signature, resolving param/return annotations. `self` (an un-annotated
     /// first param of a method) is left for `check_fn_body` to bind to the struct type. The decl's
     /// generic `type_params` are installed (so `T` in annotations resolves to `Ty::Param("T")`) and
@@ -2328,6 +2354,7 @@ impl Checker {
                         let fhint = ty_fully_concrete(&expected).then(|| expected.clone());
                         let saved_dsd = std::mem::replace(&mut self.decl_site_default, true);
                         let actual = self.infer_arg(def, fhint.as_ref());
+                        let actual = self.resolve_default_binders(&expected, actual);
                         self.decl_site_default = saved_dsd;
                         if !matches!(expected, Ty::Unknown)
                             && !self.assignable_w(
@@ -4250,19 +4277,20 @@ impl Checker {
                 // fn(int) -> int = ident)` on a generic `ident[T]` was *'ident' is generic and T is
                 // not determined here* and now runs.
                 //
-                // **Only when the declared type is FULLY CONCRETE.** A declared type carrying the
-                // ENCLOSING generic's free `Ty::Param` makes `unify` bind the provider's binder to a
-                // foreign one by structural position, and the verdict then depends on what the two
-                // sides happen to SPELL their params: measured, `fn g[U](x: U, f: fn(U) -> U =
+                // **Only when the declared type is FULLY CONCRETE.** Seeding a declared type that
+                // carries the ENCLOSING generic's free `Ty::Param` makes the generic-fn-VALUE pin
+                // (`try_pin_generic_fn_value_arg`) decline — its result is not fully concrete — and
+                // fall back to comparing the rigid un-substituted type, whose verdict then depends on
+                // what the two sides happen to SPELL: measured, `fn g[U](x: U, f: fn(U) -> U =
                 // ident)` on `fn ident[U](x: U) -> U` was accepted while the alpha-renamed
                 // `fn ident[T](x: T) -> T` gave *default value for parameter 'f': expected fn(U) ->
-                // U, found fn(T) -> T* — the same name capture `method_matches` refuses, reintroduced
-                // one seam over. Closing THAT needs binder freshening, which the checker has no
-                // machinery for; until then this declines rather than guessing, and the pre-existing
-                // capture in the un-seeded comparison stays open and recorded (`docs/gaps.md` W8-44).
+                // U, found fn(T) -> T*, and the true diagnostic was deleted. Both spellings now
+                // report that true diagnostic instead. The provider-CALL capture this used to be the
+                // only cure for is handled properly below, by `resolve_default_binders`.
                 let hint = ty_fully_concrete(&ty).then(|| ty.clone());
                 let saved_dsd = std::mem::replace(&mut self.decl_site_default, true);
                 let actual = self.infer_arg(def, hint.as_ref());
+                let actual = self.resolve_default_binders(&ty, actual);
                 self.decl_site_default = saved_dsd;
                 self.current_ret = saved_ret;
                 self.in_fn_body = saved_in_fn;

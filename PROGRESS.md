@@ -44,10 +44,15 @@ Single source of truth for "what am I doing next." Update after every work sessi
   binds the provider's param — **but only when the declared type is FULLY CONCRETE.** Adversarial
   review measured the un-gated version reintroducing the very capture (1) closes: with it,
   `fn g[U](x: U, f: fn(U) -> U = ident)` was accepted for `ident[U]` and rejected for the
-  alpha-renamed `ident[T]`, and the true diagnostic was deleted. So the `mkl[Z]` capture stays
-  OPEN — closing it needs binder freshening the checker has no machinery for, and an honest error
-  beats a name-dependent acceptance. The concrete half is kept: `fn run(x: int, f: fn(int) -> int =
-  ident)` on a generic `ident[T]` now runs instead of *T is not determined here*. Review also found
+  alpha-renamed `ident[T]`, and the true diagnostic was deleted. The concrete half is kept
+  (`fn run(x: int, f: fn(int) -> int = ident)` on a generic `ident[T]` now runs instead of *T is not
+  determined here*), and the `mkl[Z]` capture is closed **by freshening** instead:
+  `Checker::resolve_default_binders` passes the default's inferred type as `unify`'s PATTERN, and
+  `unify` treats every `Ty::Param` there as a variable — so every binder is freshened in one step,
+  with no gensym pass, no list to enumerate and no site to miss. One-directional, so a wrong default
+  still fails the unchanged assignability check. `mkl[T]` and `mkl[Z]` now both run, and the field
+  twin agrees across spellings. Ceiling recorded: the decl-site copy still does not enforce the
+  provider's own `where` bound (pre-existing on both spellings; a direct call does enforce it). Review also found
   a fourth un-recovered witness shape — a protocol EXISTENTIAL (`p: Produces[int]`) — now closed with
   the same recipe `satisfies_methods` uses. `docs/gaps.md` **W8-44**; `docs/syntax.md` documents the
   witness rule.

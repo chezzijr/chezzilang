@@ -2431,25 +2431,71 @@ fn an_unbound_param_in_parameter_position_keeps_its_own_diagnostic() {
 /// are not bound yet; the expression's real home is the provider / the splice at each call. Firing
 /// the return-only rule there rejected a declaration that is correct at every real call site.
 ///
-/// **What this test does and does not prove.** The exemption IS load-bearing — without it this
-/// program reports `cannot infer type parameter T for 'mkl'`. But it can only be exercised where
-/// `mkl`'s own param and `G`'s param share the NAME `T`: alpha-renaming `mkl[T]` to `mkl[Z]` fails on
-/// a DIFFERENT, pre-existing check (`default value for parameter 'xs': expected List[G[T]], found
-/// List[G[Z]]`), because the decl-site copy compares the declared type against the default's
-/// un-substituted type.
+/// A DECL-SITE default copy is checked once at the declaration, where the enclosing generic's params
+/// are not bound yet; the expression's real home is the provider / the splice at each call. Firing
+/// the return-only rule there rejected a declaration that is correct at every real call site.
 ///
-/// Seeding the declared type as a hint DOES fix that — and was measured to reintroduce the very name
-/// capture `method_matches` refuses, one seam over: with the hint, `fn g[U](x: U, f: fn(U) -> U =
-/// ident)` was accepted for `fn ident[U]` and rejected for the alpha-renamed `fn ident[T]`, because
-/// `unify` binds the provider's binder to the enclosing generic's free `Ty::Param` by position and
-/// the verdict then turns on what each side SPELLS its params. So the hint is gated on the declared
-/// type being FULLY CONCRETE (no free param to capture), which keeps the real improvement — see
-/// `a_concrete_decl_site_default_is_pinned_by_its_slot` — and leaves this capture open. Closing it
-/// needs binder freshening, which the checker has no machinery for; `docs/gaps.md` W8-44 records it.
+/// The exemption IS load-bearing — without it this reports `cannot infer type parameter for 'mkl'`.
+/// It is asserted with the provider's own binder named BOTH ways: the decl-site comparison used to be
+/// by NAME, so `mkl[T]` against `G[T]` was accepted while the alpha-renamed `mkl[Z]` gave *default
+/// value for parameter 'xs': expected List[G[T]], found List[G[Z]]*. See
+/// `a_decl_site_default_binder_is_alpha_renameable`.
 #[test]
 fn a_decl_site_default_is_exempt_from_the_return_only_rule() {
+    for own in ["T", "Z"] {
+        ok_desugared(&format!(
+            "struct G[T]:\n    v: T\n    fn tot[U](self, u: U, xs: List[Self] = mkl()) -> int:\n        return xs.len()\nfn mkl[{own}]() -> List[G[{own}]]:\n    return []\nfn main():\n    print(G(1).tot(2))\n"
+        ));
+    }
+}
+
+/// **A generic provider's own binders are universally quantified at the decl site**, so the
+/// comparison there must resolve them against the SLOT, never match them by spelling. It used to
+/// match by spelling: one declaration, two verdicts, decided by a letter.
+///
+/// `unify` treats every `Ty::Param` on its PATTERN side as a variable, so passing the default's
+/// inferred type as the pattern freshens all of its binders at once — no gensym pass, and no way to
+/// miss one. It stays one-directional, so nothing on the declared side is rewritten and a genuinely
+/// wrong default still fails (`a_decl_site_default_is_still_type_checked`).
+#[test]
+fn a_decl_site_default_binder_is_alpha_renameable() {
+    // PARAMETER default. Measured before: `T` → `ok`, `Z` → *expected List[G[T]], found List[G[Z]]*.
+    for own in ["T", "Z"] {
+        ok_desugared(&format!(
+            "struct G[T]:\n    v: T\n    fn tot[U](self, u: U, xs: List[G[T]] = mkl()) -> int:\n        return xs.len()\nfn mkl[{own}]() -> List[G[{own}]]:\n    return []\nfn main():\n    print(G(1).tot(2))\n"
+        ));
+    }
+    // FIELD default, same seam: both spellings must reach the SAME verdict. (That verdict is a
+    // separate, pre-existing limitation — a generic struct's provider-defaulted field is not
+    // optional in the positional ctor — measured identical for `T` on both binaries; what this
+    // pins is that the two spellings AGREE, which they did not before.)
+    let field = |own: &str| {
+        format!(
+            "struct G[T]:\n    v: T\nfn mkl[{own}]() -> List[G[{own}]]:\n    return []\nstruct Holder[T]:\n    n: int\n    items: List[G[T]] = mkl()\nfn main():\n    h := Holder(1)\n    print(h.items.len())\n"
+        )
+    };
+    let msgs: Vec<String> = ["T", "Z"]
+        .iter()
+        .map(|own| {
+            check_src(&field(own))
+                .iter()
+                .map(|e| e.message.clone())
+                .collect::<Vec<_>>()
+                .join(" | ")
+        })
+        .collect();
+    assert_eq!(
+        msgs[0], msgs[1],
+        "alpha-renaming the provider's binder changed the verdict: {msgs:?}"
+    );
+
+    // CEILING, measured and pre-existing on BOTH spellings: the decl-site copy does not enforce the
+    // provider's own `where` bound, so `fn mkl[Z: Show]() -> List[G[Z]]` defaulting a `List[G[T]]`
+    // is accepted even though nothing shows `T: Show`. A DIRECT call is correctly rejected
+    // (*type int does not satisfy Show*), and the binder is return-only so the provider body has no
+    // value to call the bound method on — a missing rejection, never a wrong value.
     ok_desugared(
-        "struct G[T]:\n    v: T\n    fn tot[U](self, u: U, xs: List[Self] = mkl()) -> int:\n        return xs.len()\nfn mkl[T]() -> List[G[T]]:\n    return []\nfn main():\n    print(G(1).tot(2))\n",
+        "protocol Show:\n    fn show(self) -> str\nstruct G[T]:\n    v: T\nfn mkl[Z: Show]() -> List[G[Z]]:\n    return []\nstruct H[T]:\n    fn tot(self, xs: List[G[T]] = mkl()) -> int:\n        return xs.len()\nfn main():\n    print(H[int]().tot())\n",
     );
 }
 
