@@ -3829,7 +3829,11 @@ defining `compare`), stable, in place.
 > driven onto each element, so a literal whose elements have differing concrete types is accepted as long
 > as **every** element is assignable to the declared element type (each satisfies the protocol / `Any`);
 > only when some element does *not* fit the declared type does the usual `list elements differ` error
-> fire. (An `= []` empty binding plus later `.push` also works and is equally valid.)
+> fire. It reaches each element as that element's **own** expected type, so a generic call in element
+> position is pinned by the slot it fills — `a: List[List[int]] = [empty()]` on
+> `fn empty[T]() -> List[T]` binds `T = int`. The same holds for a `Map` literal's key and value
+> columns and a `Set` literal's elements.
+> (An `= []` empty binding plus later `.push` also works and is equally valid.)
 > A **never-constrained** empty — one that nothing ever pins or constrains (e.g. `b := []` that is only
 > *read* into an untyped sink: `print(b)`, `b.len()`) — is a **static error**: `cannot infer element type
 > of empty collection; add a type annotation`. Annotate it (`b: List[int] = []`, `m: Map[str,int] = {}`,

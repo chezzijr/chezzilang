@@ -7,6 +7,18 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **An annotation now reaches THROUGH a collection literal onto each element (W8-45's last ceiling) —
+  and that ceiling was hiding a silent wrong answer.** An element carrying an `Unknown` laundered the
+  whole literal, so `a: List[List[int]] = [empty(), ["x"]]` was check-clean at rc=0 and `a[1][0] + 1`
+  faulted at run time with *cannot apply Add to str and int* — while the same literal WITHOUT the
+  generic call was already correctly rejected. The `Map` twin was identical. The declared element type
+  is now driven onto each item as that item's own `expected_hint`, so a generic call in element
+  position is pinned by the slot it fills; `Map`'s and `Set`'s arms did not even consume the outer
+  hint before, so it leaked into the first entry. Every other expected-type-directed position was run
+  before and after and is unchanged: annotated `let`, `List[E]` call argument, variadic pack, struct
+  ctor argument, declared `return`, `List[Any]`, int→float widening, protocol element slot.
+  `docs/gaps.md` **W8-45**.
+
 - **Two name captures closed: a generic method can no longer witness a protocol, and a decl-site
   default seeds its declared type (W8-44's residuals).** Both were alpha-renaming violations — the
   name a binder happens to have decided whether a program compiled. (1) `method_matches` never

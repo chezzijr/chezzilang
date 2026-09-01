@@ -1317,11 +1317,21 @@ impl Checker {
             ExprKind::Tuple(items) => {
                 Ty::Tuple(items.iter().map(|e| self.infer_value(e)).collect())
             }
-            ExprKind::Map(entries) => self.infer_map(
-                entries,
-                elem_hint == Some(crate::ast::ElemFloatHint::MapValue),
-            ),
-            ExprKind::Set(elems) => self.infer_set(elems),
+            // Same `take()`-then-project contract as the `List` arm above. Without the `take()` the
+            // OUTER `Map[str, List[int]]` stayed in the slot and was consumed — wasted — by the first
+            // entry's own inference.
+            ExprKind::Map(entries) => {
+                let hint = self.expected_hint.take();
+                self.infer_map(
+                    entries,
+                    elem_hint == Some(crate::ast::ElemFloatHint::MapValue),
+                    hint.as_ref(),
+                )
+            }
+            ExprKind::Set(elems) => {
+                let hint = self.expected_hint.take();
+                self.infer_set(elems, hint.as_ref())
+            }
             ExprKind::Comprehension {
                 kind,
                 key,
@@ -2362,7 +2372,35 @@ impl Checker {
         // value satisfies the empty `Any` protocol. Falls back to bottom-up inference when `E` is not
         // satisfied-by-all, preserving the existing "list elements differ" diagnostic + numeric
         // (int→float) widening for a genuinely mistyped literal.
-        let mut tys: Vec<Ty> = items.iter().map(|it| self.infer_value(it)).collect();
+        // EXPECTED-TYPE PROPAGATION: drive the declared ELEMENT type onto each item, so a generic
+        // call in element position is pinned by the slot it fills (`a: List[List[int]] =
+        // [empty()]` binds `empty`'s `T` to `int`). The `take()` at the `ExprKind::List` arm stops
+        // the OUTER `List[List[int]]` leaking into an element unchanged; handing each item its own
+        // element type is the correct hop, not that leak, and `infer_if_else_chain` already
+        // re-installs a hint per arm the same way.
+        //
+        // Not cosmetic: an `Unknown`-carrying element used to LAUNDER the whole literal. Measured
+        // before, `a: List[List[int]] = [empty(), ["x"]]` was check-clean at rc=0 — the `all()` gate
+        // below passed the `List[Unknown]` element, bottom-up then found `List[Unknown]` compatible
+        // with `List[str]`, and the literal typed as `List[List[Unknown]]`, assignable to anything —
+        // so `a[1][0] + 1` reached the runtime as *cannot apply Add to str and int*. The same
+        // literal WITHOUT the generic call (`[["x"]]`) was correctly rejected.
+        let elem_expected = match expected {
+            Some(Ty::List(e)) if !e.is_unknown() => Some((**e).clone()),
+            _ => None,
+        };
+        let mut tys: Vec<Ty> = items
+            .iter()
+            .map(|it| match &elem_expected {
+                Some(e) => {
+                    self.expected_hint = Some(e.clone());
+                    let t = self.infer_value(it);
+                    self.expected_hint = None;
+                    t
+                }
+                None => self.infer_value(it),
+            })
+            .collect();
         // Element widening runs FIRST, so the widened element type is what BOTH the expected-type
         // path and the bottom-up path see — the compiler's peephole coerces the same items regardless
         // of the slot, so the checker must not disagree with it in a variadic / un-annotated slot.
@@ -2402,10 +2440,23 @@ impl Checker {
 
     /// Infer the type of a map literal `{k: v, …}`. Keys must share one (hashable) type, values
     /// another; heterogeneity and non-hashable keys are errors. Empty `{}` → `map[?, ?]`.
-    pub(super) fn infer_set(&mut self, elems: &[Expr]) -> Ty {
+    pub(super) fn infer_set(&mut self, elems: &[Expr], expected: Option<&Ty>) -> Ty {
+        // Drive the declared ELEMENT type onto each item, exactly as `infer_list` does.
+        let elem_expected = match expected {
+            Some(Ty::Set(e)) if !e.is_unknown() => Some((**e).clone()),
+            _ => None,
+        };
         let mut elem = Ty::Unknown;
         for e in elems {
-            let et = self.infer_value(e);
+            let et = match &elem_expected {
+                Some(x) => {
+                    self.expected_hint = Some(x.clone());
+                    let t = self.infer_value(e);
+                    self.expected_hint = None;
+                    t
+                }
+                None => self.infer_value(e),
+            };
             if !et.is_unknown()
                 && let Some(why) = self.key_ty_reject(&et)
             {
@@ -2420,14 +2471,33 @@ impl Checker {
         Ty::set(elem)
     }
 
-    pub(super) fn infer_map(&mut self, entries: &[(Expr, Expr)], hint: bool) -> Ty {
+    pub(super) fn infer_map(
+        &mut self,
+        entries: &[(Expr, Expr)],
+        hint: bool,
+        expected: Option<&Ty>,
+    ) -> Ty {
+        // Drive the declared KEY and VALUE types onto each entry, exactly as `infer_list` does — and
+        // for the same reason: an `Unknown`-carrying value laundered the whole literal. Measured
+        // before, `m: Map[str, List[int]] = {"k": empty(), "j": ["x"]}` was check-clean at rc=0 and
+        // `m["j"][0] + 1` reached the runtime as *cannot apply Add to str and int*.
+        let (key_expected, val_expected) = match expected {
+            Some(Ty::Map(k, v)) => (
+                (!k.is_unknown()).then(|| (**k).clone()),
+                (!v.is_unknown()).then(|| (**v).clone()),
+            ),
+            _ => (None, None),
+        };
         // Infer keys+values in source order first (so the widen gate can see the whole VALUE column),
         // then run the homogeneity checks in that same order — diagnostics are unchanged.
         let mut key_tys: Vec<Ty> = Vec::with_capacity(entries.len());
         let mut val_tys: Vec<Ty> = Vec::with_capacity(entries.len());
         for (k, v) in entries {
+            self.expected_hint = key_expected.clone();
             key_tys.push(self.infer_value(k));
+            self.expected_hint = val_expected.clone();
             val_tys.push(self.infer_value(v));
+            self.expected_hint = None;
         }
         // One-way int→float widening on the VALUE column only (keys are never float — not Hashable).
         self.elem_widen(entries.iter().map(|(_, v)| v), &mut val_tys, hint);

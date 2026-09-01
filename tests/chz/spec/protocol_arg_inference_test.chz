@@ -152,3 +152,26 @@ test fn an_embedded_protocol_supplies_the_recovered_arg():
     # re-spelled in `Q`'s vocabulary rather than matching by name coincidence.
     v := use_q(IntProducer())
     assert v + 1 == 8
+
+# ---- an annotation reaches THROUGH a collection literal onto each element ----
+
+fn empty_list[E]() -> List[E]:
+    return []
+
+test fn an_annotation_pins_a_generic_call_in_element_position():
+    # The declared ELEMENT type is driven onto each item, so `empty_list()` is pinned by the slot it
+    # fills instead of returning an `Unknown`-cored list that laundered the whole literal.
+    a: List[List[int]] = [empty_list()]
+    a[0].push(1)
+    a[0].push(2)
+    assert a == [[1, 2]]
+
+    m: Map[str, List[int]] = {"k": empty_list()}
+    m["k"].push(9)
+    assert m["k"] == [9]
+
+    # Agreement across a heterogeneous-looking literal is still fine: every element is assignable to
+    # the declared element type.
+    b: List[List[int]] = [empty_list(), [3], []]
+    assert b.len() == 3
+    assert b[1] == [3]

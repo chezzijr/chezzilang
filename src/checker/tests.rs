@@ -1736,6 +1736,65 @@ fn use_q[S, T: Q[S]](x: T) -> S:
     );
 }
 
+/// An annotation REACHES THROUGH a collection literal onto each element. It did not, and the gap was
+/// not merely a missing inference: an element whose type carried an `Unknown` laundered the WHOLE
+/// literal, because the expected-type gate passes an `Unknown`-carrying element and the bottom-up
+/// fallback then finds it compatible with anything. Both silent wrong answers below were measured
+/// check-clean at rc=0 and faulted at run time.
+#[test]
+fn an_annotation_reaches_through_a_collection_literal() {
+    const EMPTY: &str = "fn empty[T]() -> List[T]:\n    return []\n";
+
+    // `a[1][0] + 1` was `ok: no type errors`, then *cannot apply Add to str and int* at run time.
+    // Note the SAME literal without the generic call (`[["x"]]`) was already correctly rejected —
+    // the `empty()` element is what laundered it.
+    rejects(
+        &format!("{EMPTY}a: List[List[int]] = [empty(), [\"x\"]]\nn := a[1][0] + 1\n"),
+        "list elements differ",
+    );
+    // The `Map` twin, identical mechanism: *cannot apply Add to str and int* at run time.
+    rejects(
+        &format!(
+            "{EMPTY}m: Map[str, List[int]] = {{\"k\": empty(), \"j\": [\"x\"]}}\nn := m[\"j\"][0] + 1\n"
+        ),
+        "map values differ",
+    );
+    // …and the `Set` twin, which reaches it through the element hint rather than a homogeneity check.
+    rejects(
+        "fn one[T](x: T) -> T:\n    return x\ns: Set[int] = {one(\"a\")}\n",
+        "cannot assign Set[str] to variable of type Set[int]",
+    );
+
+    // The AGREEING shapes must be untouched — this is a hint, not a new rejection rule.
+    ok(&format!("{EMPTY}a: List[List[int]] = [empty()]\n"));
+    ok(&format!(
+        "{EMPTY}m: Map[str, List[int]] = {{\"k\": empty()}}\n"
+    ));
+    ok("fn one[T](x: T) -> T:\n    return x\ns: Set[int] = {one(1), one(2)}\n");
+
+    // Every other expected-type-directed position, measured unchanged: the `Any` top type (whose
+    // element widen is deliberately suppressed), int→float widening in both a list and a map value
+    // column, a protocol element slot, a struct ctor argument, a declared return, and the
+    // synthesized variadic pack.
+    ok("xs: List[Any] = [1, \"a\", true]\n");
+    ok("xs: List[float] = [1, 2, 2.5]\n");
+    ok("m: Map[str, float] = {\"a\": 1, \"b\": 2.5}\n");
+    ok(
+        "protocol Show:\n    fn show(self) -> str\nstruct A:\n    n: int\n    fn show(self) -> str:\n        return \"a\"\nstruct B:\n    fn show(self) -> str:\n        return \"b\"\nxs: List[Show] = [A(1), B()]\n",
+    );
+    ok("struct Bag:\n    items: List[int]\nb := Bag([1, 2])\n");
+    ok("fn mk() -> List[List[int]]:\n    return [[1], []]\n");
+    // (the variadic pack is synthesized by desugar, so this one needs the desugaring helper)
+    ok_desugared(
+        "fn f(...xs: int) -> int:\n    return xs.len()\nfn main():\n    print(f(1, 2, 3))\n",
+    );
+    // A genuinely mistyped literal keeps its own diagnostic.
+    rejects(
+        "a: List[List[int]] = [[\"x\"]]\n",
+        "cannot assign List[List[str]] to variable of type List[List[int]]",
+    );
+}
+
 /// A GENERIC method cannot witness a protocol requirement. Its signature is spelled in binders that
 /// exist in no scope the requirement can see, so `method_matches` was comparing two independently
 /// scoped `Ty::Param`s by their NAME STRING — and alpha-renaming, which must never change meaning,
