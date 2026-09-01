@@ -1734,6 +1734,33 @@ fn use_q[S, T: Q[S]](x: T) -> S:
         ),
         "missing method 'produce'",
     );
+
+    // A protocol EXISTENTIAL witnesses out of the protocol's own requirement signatures. Measured
+    // before: `cannot infer type parameter R for 'produce_as'`, while the annotated spelling ran.
+    const EXIST: &str = "protocol Produces[R]:
+    fn produce(self) -> R
+
+struct IntProducer:
+    fn produce(self) -> int:
+        return 7
+
+fn produce_as[R, T: Produces[R]](x: T) -> R:
+    return x.produce()
+
+p: Produces[int] = IntProducer()
+";
+    ok(&format!(
+        "{EXIST}n := produce_as(p) + 1
+"
+    ));
+    // …and the recovered `R` is the CONCRETE carried arg, not a hole.
+    rejects(
+        &format!(
+            "{EXIST}s: str = produce_as(p)
+"
+        ),
+        "cannot assign int to variable of type str",
+    );
 }
 
 /// An annotation REACHES THROUGH a collection literal onto each element. It did not, and the gap was
@@ -1743,19 +1770,19 @@ fn use_q[S, T: Q[S]](x: T) -> S:
 /// check-clean at rc=0 and faulted at run time.
 #[test]
 fn an_annotation_reaches_through_a_collection_literal() {
-    const EMPTY: &str = "fn empty[T]() -> List[T]:\n    return []\n";
+    const EMPTY: &str = "fn empty_list[E]() -> List[E]:\n    return []\n";
 
     // `a[1][0] + 1` was `ok: no type errors`, then *cannot apply Add to str and int* at run time.
     // Note the SAME literal without the generic call (`[["x"]]`) was already correctly rejected —
     // the `empty()` element is what laundered it.
     rejects(
-        &format!("{EMPTY}a: List[List[int]] = [empty(), [\"x\"]]\nn := a[1][0] + 1\n"),
+        &format!("{EMPTY}a: List[List[int]] = [empty_list(), [\"x\"]]\nn := a[1][0] + 1\n"),
         "list elements differ",
     );
     // The `Map` twin, identical mechanism: *cannot apply Add to str and int* at run time.
     rejects(
         &format!(
-            "{EMPTY}m: Map[str, List[int]] = {{\"k\": empty(), \"j\": [\"x\"]}}\nn := m[\"j\"][0] + 1\n"
+            "{EMPTY}m: Map[str, List[int]] = {{\"k\": empty_list(), \"j\": [\"x\"]}}\nn := m[\"j\"][0] + 1\n"
         ),
         "map values differ",
     );
@@ -1766,9 +1793,9 @@ fn an_annotation_reaches_through_a_collection_literal() {
     );
 
     // The AGREEING shapes must be untouched — this is a hint, not a new rejection rule.
-    ok(&format!("{EMPTY}a: List[List[int]] = [empty()]\n"));
+    ok(&format!("{EMPTY}a: List[List[int]] = [empty_list()]\n"));
     ok(&format!(
-        "{EMPTY}m: Map[str, List[int]] = {{\"k\": empty()}}\n"
+        "{EMPTY}m: Map[str, List[int]] = {{\"k\": empty_list()}}\n"
     ));
     ok("fn one[T](x: T) -> T:\n    return x\ns: Set[int] = {one(1), one(2)}\n");
 
@@ -1792,6 +1819,40 @@ fn an_annotation_reaches_through_a_collection_literal() {
     rejects(
         "a: List[List[int]] = [[\"x\"]]\n",
         "cannot assign List[List[str]] to variable of type List[List[int]]",
+    );
+
+    // The hint must reach through a `T?` / `T!E` sink too — a bare literal there coerces to
+    // `Some(v)`/`Ok(v)` (W8-21), so the carrier's PAYLOAD is the literal's real expected type.
+    // Measured before the unwrap, check-clean at rc=0 and faulting at run time:
+    rejects(
+        &format!(
+            "{EMPTY}fn mk() -> List[List[int]]?:\n    return [empty_list(), [\"x\"]]\nfn go() -> int?:\n    xs := mk()?\n    return xs[1][0] + 1\n"
+        ),
+        "list elements differ",
+    );
+    // …and it un-breaks a FALSE REJECTION that predates the propagation: a protocol element slot
+    // behind a carrier was *list elements differ: C vs S* where the bare slot accepts it.
+    ok(
+        "protocol Shape:\n    fn area(self) -> int\nstruct C:\n    fn area(self) -> int:\n        return 1\nstruct S:\n    fn area(self) -> int:\n        return 2\nfn opt() -> List[Shape]?:\n    return [C(), S()]\n",
+    );
+
+    // CEILING, measured and deliberately not closed: the hint only reaches an element that CONSUMES
+    // it, so one method call away the same literal still launders. `[empty_list().reversed(), ["x"]]`
+    // at a `List[List[int]]` slot is check-clean and faults at run time. Closing it means reporting
+    // per ELEMENT instead of falling through to bottom-up homogeneity, which moves the diagnostic for
+    // every mistyped literal from the assignment to the element — 10 existing messages, so it is its
+    // own change with its own neighbour table. Pinned here so the day it changes, this says so.
+    ok(&format!(
+        "{EMPTY}a: List[List[int]] = [empty_list().reversed(), [\"x\"]]\n"
+    ));
+
+    // CEILING, second: the int→float element widen does not reach through a carrier, because its
+    // hint travels on a SEPARATE channel with a checker twin (`float_elem_hint_ty`) and a compiler
+    // twin (`Compiler::elem_hint`) that must move together — unwrapping only one would let the
+    // checker widen while the backend did not, an int under a static float list.
+    rejects(
+        "fn f() -> List[float]?:\n    return [1, 2]\n",
+        "expected return type Option[List[float]], found List[int]",
     );
 }
 
@@ -2370,25 +2431,47 @@ fn an_unbound_param_in_parameter_position_keeps_its_own_diagnostic() {
 /// are not bound yet; the expression's real home is the provider / the splice at each call. Firing
 /// the return-only rule there rejected a declaration that is correct at every real call site.
 ///
-/// The exemption IS load-bearing: without it this program reports `cannot infer type parameter T for
-/// 'mkl'`. It is now exercised with the provider's own param named DIFFERENTLY from the struct's
-/// (`mkl[Z]` against `G[T]`) — which is the point. The decl-site copy used to compare the declared
-/// type against the default's UN-substituted type with no hint seeding, so `mkl[Z]` failed on
-/// `default value for parameter 'xs': expected List[G[T]], found List[G[Z]]` and only the
-/// name-coincidence spelling could be tested. The declared type is now seeded as an expected-type
-/// hint, so `seed_from_hint` binds the provider's own param and alpha-renaming no longer decides
-/// whether a correct declaration compiles. Both spellings are asserted.
+/// **What this test does and does not prove.** The exemption IS load-bearing — without it this
+/// program reports `cannot infer type parameter T for 'mkl'`. But it can only be exercised where
+/// `mkl`'s own param and `G`'s param share the NAME `T`: alpha-renaming `mkl[T]` to `mkl[Z]` fails on
+/// a DIFFERENT, pre-existing check (`default value for parameter 'xs': expected List[G[T]], found
+/// List[G[Z]]`), because the decl-site copy compares the declared type against the default's
+/// un-substituted type.
+///
+/// Seeding the declared type as a hint DOES fix that — and was measured to reintroduce the very name
+/// capture `method_matches` refuses, one seam over: with the hint, `fn g[U](x: U, f: fn(U) -> U =
+/// ident)` was accepted for `fn ident[U]` and rejected for the alpha-renamed `fn ident[T]`, because
+/// `unify` binds the provider's binder to the enclosing generic's free `Ty::Param` by position and
+/// the verdict then turns on what each side SPELLS its params. So the hint is gated on the declared
+/// type being FULLY CONCRETE (no free param to capture), which keeps the real improvement — see
+/// `a_concrete_decl_site_default_is_pinned_by_its_slot` — and leaves this capture open. Closing it
+/// needs binder freshening, which the checker has no machinery for; `docs/gaps.md` W8-44 records it.
 #[test]
 fn a_decl_site_default_is_exempt_from_the_return_only_rule() {
-    let src = |own: &str| {
-        format!(
-            "struct G[T]:\n    v: T\n    fn tot[U](self, u: U, xs: List[Self] = mkl()) -> int:\n        return xs.len()\nfn mkl[{own}]() -> List[G[{own}]]:\n    return []\nfn main():\n    print(G(1).tot(2))\n"
-        )
-    };
-    // The historical spelling, where the provider and the struct happen to share the name `T`…
-    ok_desugared(&src("T"));
-    // …and the alpha-renamed twin, which is the same declaration and must compile identically.
-    ok_desugared(&src("Z"));
+    ok_desugared(
+        "struct G[T]:\n    v: T\n    fn tot[U](self, u: U, xs: List[Self] = mkl()) -> int:\n        return xs.len()\nfn mkl[T]() -> List[G[T]]:\n    return []\nfn main():\n    print(G(1).tot(2))\n",
+    );
+}
+
+/// A decl-site default whose declared type is FULLY CONCRETE is pinned by that slot: a generic fn
+/// value there is instantiated instead of reported. Measured before: *'ident' is generic and T is not
+/// determined here*; after, the program runs and prints `5`.
+///
+/// The companion refusal — a declared type carrying a FREE param must NOT be seeded — is what keeps
+/// the verdict independent of binder names. Both spellings below report the same thing.
+#[test]
+fn a_concrete_decl_site_default_is_pinned_by_its_slot() {
+    ok_desugared(
+        "fn ident[T](x: T) -> T:\n    return x\n\nfn run(x: int, f: fn(int) -> int = ident) -> int:\n    return f(x)\n\nfn main():\n    print(run(5))\n",
+    );
+    for own in ["U", "T"] {
+        rejects(
+            &format!(
+                "fn ident[{own}](x: {own}) -> {own}:\n    return x\nfn g[U](x: U, f: fn(U) -> U = ident) -> U:\n    return f(x)\nn := g(1)\n"
+            ),
+            "is generic and",
+        );
+    }
 }
 
 /// A decl-site default is still CHECKED — seeding the declared type as a hint must not turn the
@@ -2407,6 +2490,12 @@ fn a_decl_site_default_is_still_type_checked() {
     rejects(
         "struct G[T]:\n    v: T\nfn mkl[Z]() -> List[G[Z]]:\n    return []\nfn f(xs: List[int] = mkl()) -> int:\n    return xs.len()\n",
         "default value for parameter 'xs'",
+    );
+    // A CONCRETE slot pins the provider rather than rubber-stamping it: a wrong element type there
+    // is still a mismatch even though the hint bound the provider's own param.
+    rejects(
+        "fn mkl[Z]() -> List[Z]:\n    return []\nfn f(xs: List[int] = mkl()) -> int:\n    return xs.len()\nfn g(ys: List[str] = mkl()) -> int:\n    return f(ys)\n",
+        "expected List[int], found List[str]",
     );
 }
 

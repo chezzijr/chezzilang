@@ -788,8 +788,9 @@ free function and on a method alike. Three cases reach it, each measured:
 | no requirement method mentions the param | `protocol Tagged[R]: fn tag(self) -> str` |
 
 That is the only case left. The witness may be a **builtin** (`take([1, 2, 3])` against `Popper[R]`
-infers `R = int?` with no annotation) and the parameter may come from an **embedded** protocol (a
-`protocol Q[S]` whose body is the embed line `Produces[S]`, used as `[T: Q[S]]`, recovers `S` — the
+infers `R = int?` with no annotation), a **protocol existential** (a value annotated `Produces[int]`
+recovers `R = int` from the args it carries), and the parameter may come from an **embedded** protocol
+(a `protocol Q[S]` whose body is the embed line `Produces[S]`, used as `[T: Q[S]]`, recovers `S` — the
 embedded signature is re-spelled in `Q`'s own type-param vocabulary, so the two need not share a name).
 
 A **generic method** behaves identically — the recovery runs there, and a result annotation pins the
@@ -3832,7 +3833,12 @@ defining `compare`), stable, in place.
 > fire. It reaches each element as that element's **own** expected type, so a generic call in element
 > position is pinned by the slot it fills — `a: List[List[int]] = [empty()]` on
 > `fn empty[T]() -> List[T]` binds `T = int`. The same holds for a `Map` literal's key and value
-> columns and a `Set` literal's elements.
+> columns and a `Set` literal's elements, and it reaches through a `T?` / `T!E` sink (where a bare
+> literal coerces to `Some(v)` / `Ok(v)`) onto the carrier's payload. Two limits: the hint reaches an
+> element that **consumes** it, so a literal one method call away
+> (`[empty().reversed(), ["x"]]`) is not caught; and the int→float element widen travels on its own
+> channel and does **not** reach through a carrier, so `fn f() -> List[float]?: return [1, 2]` is
+> rejected where the bare `-> List[float]` sink would widen.
 > (An `= []` empty binding plus later `.push` also works and is equally valid.)
 > A **never-constrained** empty — one that nothing ever pins or constrains (e.g. `b := []` that is only
 > *read* into an untyped sink: `print(b)`, `b.len()`) — is a **static error**: `cannot infer element type

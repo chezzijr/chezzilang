@@ -17,6 +17,15 @@ Single source of truth for "what am I doing next." Update after every work sessi
   hint before, so it leaked into the first entry. Every other expected-type-directed position was run
   before and after and is unchanged: annotated `let`, `List[E]` call argument, variadic pack, struct
   ctor argument, declared `return`, `List[Any]`, int→float widening, protocol element slot.
+  **Adversarial review then found the first cut too narrow in one sink shape:** the hint stopped at a
+  `T?`/`T!E` CARRIER, so the same launder survived at `fn mk() -> List[List[int]]?`. Fixed by
+  unwrapping to the carrier's payload, which also un-breaks two pre-existing false rejections
+  (`fn opt() -> List[Shape]?: return [C(), S()]`, and `xs: List[Any]? = [...]` going from 3 errors to
+  the 1 true one). **Two ceilings recorded, both pinned by tests:** the hint only reaches an element
+  that CONSUMES it, so `[empty().reversed(), ["x"]]` still launders — the root fix (report per
+  element instead of falling through to bottom-up) was implemented and measured to move 10 existing
+  diagnostics, so it is its own change; and the int→float widen has a checker twin and a compiler
+  twin that must move together, so it does not reach through a carrier either.
   `docs/gaps.md` **W8-45**.
 
 - **Two name captures closed: a generic method can no longer witness a protocol, and a decl-site
@@ -32,9 +41,16 @@ Single source of truth for "what am I doing next." Update after every work sessi
   (2) Both decl-site default checks called `infer` with no expected type, so `fn mkl[Z]() -> List[G[Z]]`
   used as a default for `List[G[T]]` failed on the un-substituted comparison and only the
   name-coincidence spelling `mkl[T]` worked. They now go through `infer_arg`, so `seed_from_hint`
-  binds the provider's param. A false rejection fell out with it: `fn run(x: int, f: fn(int) -> int =
-  ident)` on a generic `ident[T]` now runs instead of *T is not determined here*. `docs/gaps.md`
-  **W8-44**; `docs/syntax.md` documents the witness rule.
+  binds the provider's param — **but only when the declared type is FULLY CONCRETE.** Adversarial
+  review measured the un-gated version reintroducing the very capture (1) closes: with it,
+  `fn g[U](x: U, f: fn(U) -> U = ident)` was accepted for `ident[U]` and rejected for the
+  alpha-renamed `ident[T]`, and the true diagnostic was deleted. So the `mkl[Z]` capture stays
+  OPEN — closing it needs binder freshening the checker has no machinery for, and an honest error
+  beats a name-dependent acceptance. The concrete half is kept: `fn run(x: int, f: fn(int) -> int =
+  ident)` on a generic `ident[T]` now runs instead of *T is not determined here*. Review also found
+  a fourth un-recovered witness shape — a protocol EXISTENTIAL (`p: Produces[int]`) — now closed with
+  the same recipe `satisfies_methods` uses. `docs/gaps.md` **W8-44**; `docs/syntax.md` documents the
+  witness rule.
 
 - **A parameterized protocol bound now recovers its type args from a BUILTIN witness and through an
   EMBEDDED protocol (W8-44's last two residuals).** `take([1, 2, 3])` against

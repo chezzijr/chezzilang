@@ -3891,8 +3891,27 @@ impl Checker {
         // nothing: measured, `take([1, 2, 3])` against `protocol Popper[R]: fn pop(self) -> R` gave
         // *cannot infer type parameter R for 'take'* where the struct-witness twin infers it.
         let native_table;
+        let proto_table;
         let methods = match self.nominal_method_table(ty) {
             Some(m) => m,
+            // A protocol EXISTENTIAL witnesses out of the protocol's own requirement signatures —
+            // the recipe `satisfies_methods`'s `Ty::Protocol` arm already uses. Without this a value
+            // annotated with the bound's own protocol recovered nothing: measured,
+            // `p: Produces[int] = IntProducer()` then `produce_as(p)` gave *cannot infer type
+            // parameter R for 'produce_as'* while the annotated `v: int = produce_as(p)` ran.
+            // `protocol_method_sig` walks embeds and re-spells them, so an existential of an
+            // EMBEDDING protocol witnesses here too.
+            None if matches!(ty, Ty::Protocol(..)) => {
+                let Ty::Protocol(pname, _) = ty else {
+                    return None;
+                };
+                proto_table = self
+                    .protocol_method_names(pname)
+                    .into_iter()
+                    .filter_map(|m| Some((m.clone(), self.protocol_method_sig(pname, &m)?)))
+                    .collect::<HashMap<String, FnSig>>();
+                &proto_table
+            }
             None => {
                 let key = Self::native_witness_key(ty)?;
                 let native = self.structs.get(key).map(|i| &i.methods)?;
@@ -3923,7 +3942,18 @@ impl Checker {
                 &native_table
             }
         };
-        let tymap = self.nominal_param_map(ty);
+        // An existential's own params bind to its carried args, and its sigs spell `Self` exactly as
+        // the requirement's do — so `Self` goes in the ACTUAL side's map too, mirroring
+        // `satisfies_methods`. `nominal_param_map` returns an empty map for `Ty::Protocol`.
+        let mut tymap = self.nominal_param_map(ty);
+        if let Ty::Protocol(pname, targs) = ty {
+            if let Some(pi) = self.protocol_shape(pname) {
+                for (n, a) in pi.type_params.iter().zip(targs) {
+                    tymap.insert(n.clone(), a.clone());
+                }
+            }
+            tymap.insert("Self".to_string(), ty.clone());
+        }
         let selfmap = HashMap::from([("Self".to_string(), ty.clone())]);
         let mut pmap: HashMap<String, Ty> = HashMap::new();
         // Own methods AND those pulled in through an EMBED, transitively. `pinfo.methods` alone

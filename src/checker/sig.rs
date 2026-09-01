@@ -2323,9 +2323,11 @@ impl Checker {
                 for field in fields {
                     if let Some(def) = &field.default {
                         let expected = self.resolve_type(&field.ty, def.span);
-                        // Same hint seeding as the parameter default above, for the same reason.
+                        // Same hint seeding as the parameter default above, and the same
+                        // fully-concrete gate for the same name-capture reason.
+                        let fhint = ty_fully_concrete(&expected).then(|| expected.clone());
                         let saved_dsd = std::mem::replace(&mut self.decl_site_default, true);
-                        let actual = self.infer_arg(def, Some(&expected));
+                        let actual = self.infer_arg(def, fhint.as_ref());
                         self.decl_site_default = saved_dsd;
                         if !matches!(expected, Ty::Unknown)
                             && !self.assignable_w(
@@ -4243,15 +4245,24 @@ impl Checker {
                     self.current_ret = Ty::Nil;
                     self.in_fn_body = false;
                 }
-                // Seed the declared type as an expected-type hint so a generic PROVIDER call
-                // (`= mkl()` on `fn mkl[Z]() -> List[G[Z]]`) pins its own params from the slot it
-                // fills, via `seed_from_hint`. Without it the check compared the declared type
-                // against the provider's UN-substituted return, and the comparison passed only when
-                // the two happened to spell their type params with the same LETTER: renaming
-                // `mkl[T]` to `mkl[Z]` turned a declaration that is correct at every real call into
-                // *default value for parameter 'xs': expected List[G[T]], found List[G[Z]]*.
+                // Seed the declared type as an expected-type hint so a generic PROVIDER call pins its
+                // own params from the slot it fills, via `seed_from_hint` — `fn run(x: int, f:
+                // fn(int) -> int = ident)` on a generic `ident[T]` was *'ident' is generic and T is
+                // not determined here* and now runs.
+                //
+                // **Only when the declared type is FULLY CONCRETE.** A declared type carrying the
+                // ENCLOSING generic's free `Ty::Param` makes `unify` bind the provider's binder to a
+                // foreign one by structural position, and the verdict then depends on what the two
+                // sides happen to SPELL their params: measured, `fn g[U](x: U, f: fn(U) -> U =
+                // ident)` on `fn ident[U](x: U) -> U` was accepted while the alpha-renamed
+                // `fn ident[T](x: T) -> T` gave *default value for parameter 'f': expected fn(U) ->
+                // U, found fn(T) -> T* — the same name capture `method_matches` refuses, reintroduced
+                // one seam over. Closing THAT needs binder freshening, which the checker has no
+                // machinery for; until then this declines rather than guessing, and the pre-existing
+                // capture in the un-seeded comparison stays open and recorded (`docs/gaps.md` W8-44).
+                let hint = ty_fully_concrete(&ty).then(|| ty.clone());
                 let saved_dsd = std::mem::replace(&mut self.decl_site_default, true);
-                let actual = self.infer_arg(def, Some(&ty));
+                let actual = self.infer_arg(def, hint.as_ref());
                 self.decl_site_default = saved_dsd;
                 self.current_ret = saved_ret;
                 self.in_fn_body = saved_in_fn;

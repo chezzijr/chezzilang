@@ -1306,7 +1306,10 @@ impl Checker {
                 // arg, a return position — or the synthesized variadic list). `take()` so the
                 // hint drives THIS literal's element type and never leaks into a nested element
                 // call. `None` keeps the ordinary bottom-up inference.
-                let hint = self.expected_hint.take();
+                let hint = self
+                    .expected_hint
+                    .take()
+                    .map(|t| Self::sink_payload(&t).clone());
                 // The backend is type-blind: hand it this literal's widen verdict rather than let it
                 // re-derive the slot's element type. One record site ⇒ every position an expected
                 // `List[E]` reaches a literal (annotated `let`, call arg, struct ctor arg, the
@@ -1321,7 +1324,10 @@ impl Checker {
             // OUTER `Map[str, List[int]]` stayed in the slot and was consumed — wasted — by the first
             // entry's own inference.
             ExprKind::Map(entries) => {
-                let hint = self.expected_hint.take();
+                let hint = self
+                    .expected_hint
+                    .take()
+                    .map(|t| Self::sink_payload(&t).clone());
                 self.infer_map(
                     entries,
                     elem_hint == Some(crate::ast::ElemFloatHint::MapValue),
@@ -1329,7 +1335,10 @@ impl Checker {
                 )
             }
             ExprKind::Set(elems) => {
-                let hint = self.expected_hint.take();
+                let hint = self
+                    .expected_hint
+                    .take()
+                    .map(|t| Self::sink_payload(&t).clone());
                 self.infer_set(elems, hint.as_ref())
             }
             ExprKind::Comprehension {
@@ -2355,6 +2364,28 @@ impl Checker {
         }
     }
 
+    /// A bare collection literal at a `T?` / `T!E` sink coerces to `Some(v)` / `Ok(v)` (W8-21), so the
+    /// literal's real expected type is the carrier's PAYLOAD, not the carrier. Without this unwrap the
+    /// element hint stopped at the carrier and nothing reached the items — the same laundering the
+    /// expected-type propagation exists to close, just one sink shape further out. Measured before:
+    /// `fn mk() -> List[List[int]]?: return [empty_list(), ["x"]]` was check-clean at rc=0 and
+    /// `xs[1][0] + 1` faulted at run time, while the identical body at a bare `-> List[List[int]]`
+    /// was correctly rejected. It also un-breaks two FALSE REJECTIONS that predate the propagation:
+    /// `fn opt() -> List[Shape]?: return [C(), S()]` was *list elements differ: C vs S* where the
+    /// bare `-> List[Shape]` accepts it, and `xs: List[float]? = [1, 2]` was *cannot assign
+    /// List[int] to variable of type List[float]?* where the bare annotation widens.
+    ///
+    /// Terminates: every step strictly descends into a smaller type.
+    fn sink_payload(t: &Ty) -> &Ty {
+        let mut cur = t;
+        loop {
+            match cur {
+                Ty::Option(inner) | Ty::Result(inner, _) => cur = inner,
+                _ => return cur,
+            }
+        }
+    }
+
     pub(super) fn infer_list(
         &mut self,
         items: &[Expr],
@@ -2416,6 +2447,22 @@ impl Checker {
                 hint == Some(crate::ast::ElemFloatHint::Elem),
             );
         }
+        // RESIDUAL, measured and deliberately not closed here. This gate is all-or-nothing: one
+        // element that is not assignable abandons the expected path entirely and falls through to the
+        // bottom-up homogeneity below, where an `Unknown`-CORED sibling launders the whole literal
+        // (`compatible(List[Unknown], List[str])` is true, so nothing fires and the literal types as
+        // `List[List[Unknown]]`, assignable to anything). Driving the element hint onto each item
+        // closes this whenever the item CONSUMES the hint, but one method call away it does not:
+        // `a: List[List[int]] = [empty().reversed(), ["x"]]` then `a[1][0] + 1` is check-clean at
+        // rc=0 and faults at run time with *cannot apply Add to str and int* (measured, and identical
+        // before the hint existed — pre-existing, not introduced by it).
+        //
+        // The fix is to report per ELEMENT here instead of falling through. That was implemented and
+        // measured: it closes the hole, but it MOVES the diagnostic for a mistyped literal from the
+        // assignment to the element, changing 10 existing expected messages across comprehensions,
+        // `concat`/`extend`, `str.join`, protocol nesting and the float-widen family. Each of those is
+        // a user-visible message that needs its own before/after derivation, so it is its own change
+        // with its own neighbour table rather than a tail-end edit here. `docs/gaps.md` W8-45.
         if let Some(Ty::List(e)) = expected
             && !e.is_unknown()
             && !items.is_empty()
