@@ -2538,6 +2538,15 @@ impl Checker {
                         }
                     }
                 }
+                // Name the REAL reason when the witness is generic, rather than blaming a signature
+                // that is otherwise correct — the same message `satisfies_native` gives for a generic
+                // native method. See `method_matches` for why a generic method cannot witness.
+                Some(actual) if !actual.type_params.is_empty() => {
+                    return Err(format!(
+                        "type {ty} does not satisfy {protocol_display} (method '{mname}' is generic \
+                         and cannot witness a protocol requirement)"
+                    ));
+                }
                 Some(_) => {
                     return Err(format!(
                         "type {ty} does not satisfy {protocol_display} (method '{mname}' has the wrong signature)"

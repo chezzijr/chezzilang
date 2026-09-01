@@ -2312,6 +2312,15 @@ and unary `-` an embedded `Neg`. A protocol value also **satisfies the protocols
 assignment. Type arguments stay **invariant** throughout: a `Container[str]` value never satisfies
 `Container[int]`, embedded or not.
 
+**A witness method may not be generic.** A method that declares its own type params (`fn show[U](self)
+-> str`) cannot satisfy a protocol requirement: its signature is spelled in binders that exist in no
+scope the requirement can see, so matching them would compare two independently-scoped names by
+spelling and alpha-renaming would change whether the program compiles. Chezzi reports *method '…' is
+generic and cannot witness a protocol requirement*, for user types and builtins alike. Rust refuses
+the identical shape (`E0049: method has 1 type parameter but its trait declaration has 0`). Take the
+parameter on the protocol instead (`protocol Show[U]: fn show(self) -> U`), which is inferred from
+the witness.
+
 **Object safety — `Self` in a parameter position.** A protocol value erases which type it holds, so
 two values of one protocol need not be the same witness — `a + b` over `a: Vecish, b: Vecish` could
 hand a `W` to `V`'s `add`. A method whose signature **takes** `Self` is therefore not usable where

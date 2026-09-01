@@ -1736,6 +1736,75 @@ fn use_q[S, T: Q[S]](x: T) -> S:
     );
 }
 
+/// A GENERIC method cannot witness a protocol requirement. Its signature is spelled in binders that
+/// exist in no scope the requirement can see, so `method_matches` was comparing two independently
+/// scoped `Ty::Param`s by their NAME STRING — and alpha-renaming, which must never change meaning,
+/// did. Rust refuses the same shape outright (`E0049: method 'show' has 1 type parameter but its
+/// trait declaration has 0`, measured), and `satisfies_native` has always refused it for builtins.
+#[test]
+fn a_generic_method_cannot_witness_a_protocol() {
+    // THE CAPTURE. Measured before this rule: the first spelling was `ok: no type errors` and the
+    // second — differing ONLY in the witness method's own binder name — was rejected.
+    let src = |own: &str| {
+        format!(
+            "\
+protocol Sink[U]:
+    fn put(self, v: U) -> int
+
+struct GS:
+    fn put[{own}](self, v: {own}) -> int:
+        return 1
+
+fn use_sink[U, T: Sink[U]](x: T) -> int:
+    return 0
+
+n := use_sink(GS())
+"
+        )
+    };
+    for own in ["U", "W"] {
+        rejects(
+            &src(own),
+            "method 'put' is generic and cannot witness a protocol requirement",
+        );
+    }
+
+    // The cost of the narrowing, stated: a generic method witnessing a NON-parameterized protocol
+    // used to check clean and print `g`. Rust rejects the identical program with E0049, so this is
+    // drift removed, not a feature lost.
+    rejects(
+        "\
+protocol Show:
+    fn show(self) -> str
+
+struct G:
+    fn show[U](self) -> str:
+        return \"g\"
+
+fn render[T: Show](x: T) -> str:
+    return x.show()
+
+s := render(G())
+",
+        "method 'show' is generic and cannot witness a protocol requirement",
+    );
+
+    // …and a NON-generic witness of the same shape is untouched.
+    ok("\
+protocol Show:
+    fn show(self) -> str
+
+struct G:
+    fn show(self) -> str:
+        return \"g\"
+
+fn render[T: Show](x: T) -> str:
+    return x.show()
+
+s := render(G())
+");
+}
+
 /// The inference diagnostic's gate is a PROBE, not a structural test. In each of these `R` is also
 /// un-inferred, but the method cannot conform for ANY instantiation — so "add a result annotation"
 /// is advice that does not work (measured: annotating each of these still fails), and the true
@@ -1818,11 +1887,9 @@ y := p(Bad())
 /// generic method as a witness outright, for exactly this reason; this is that policy on the
 /// recovery side.
 ///
-/// NOTE the separate, PRE-EXISTING bug this test deliberately does not assert away: when the
-/// caller's own type param happens to share the witness's name, `method_matches` compares the two
-/// `Ty::Param("U")`s as equal and the program conforms. That capture lives in the conformance
-/// check, not in the recovery — measured identical with the recovery call sites disabled — and
-/// narrowing it is its own change. See `docs/gaps.md` W8-44.
+/// The matching capture in the CONFORMANCE check is now closed too, so a generic witness is refused
+/// outright and this call's diagnostic names that reason instead of the downstream inference miss.
+/// Both are correct; the conformance one is the true cause. See `a_generic_method_cannot_witness_a_protocol`.
 #[test]
 fn a_generic_witness_method_recovers_nothing() {
     const SRC: &str = "\
@@ -1836,13 +1903,15 @@ struct G:
 fn produce_as[R, T: Produces[R]](x: T) -> R:
     return x.produce()
 ";
-    // With nothing else to pin `R`, the recovery must leave it free rather than bind it to `G`'s
-    // own `U` — so this reports the inference failure, never a type mentioning a foreign binder.
+    // The recovery must leave `R` free rather than bind it to `G`'s own `U`; the conformance check
+    // then refuses the generic witness and names THAT as the cause. What this test really guards is
+    // the line below — no diagnostic may mention a binder from a scope the caller cannot see.
     let errs = check_src(&format!("{SRC}\ny := produce_as(G())\n"));
     assert!(
-        errs.iter()
-            .any(|e| e.message.contains("cannot infer type parameter R")),
-        "expected the inference failure, got: {errs:?}"
+        errs.iter().any(|e| e
+            .message
+            .contains("is generic and cannot witness a protocol requirement")),
+        "expected the generic-witness refusal, got: {errs:?}"
     );
     for e in &errs {
         assert!(
@@ -2242,19 +2311,43 @@ fn an_unbound_param_in_parameter_position_keeps_its_own_diagnostic() {
 /// are not bound yet; the expression's real home is the provider / the splice at each call. Firing
 /// the return-only rule there rejected a declaration that is correct at every real call site.
 ///
-/// **What this test does and does not prove.** The exemption IS load-bearing here — without it this
-/// program reports `cannot infer type parameter T for 'mkl'`. But it can only be exercised in a
-/// shape where `mkl`'s own param and `G`'s param share the NAME `T`: alpha-renaming `mkl[T]` to
-/// `mkl[Z]` makes it fail on a DIFFERENT, pre-existing check (`default value for parameter 'xs':
-/// expected List[G[T]], found List[G[Z]]`), because the decl-site copy compares the declared type
-/// against the default's un-substituted type with no hint seeding. Every name-coincidence-free
-/// variant hits that same pre-existing wall (measured on a non-generic enclosing fn and on a field
-/// default). So this asserts the exemption, not the absence of that capture — see `docs/gaps.md`
-/// W8-45, which records the capture separately and measures it identical before this change.
+/// The exemption IS load-bearing: without it this program reports `cannot infer type parameter T for
+/// 'mkl'`. It is now exercised with the provider's own param named DIFFERENTLY from the struct's
+/// (`mkl[Z]` against `G[T]`) — which is the point. The decl-site copy used to compare the declared
+/// type against the default's UN-substituted type with no hint seeding, so `mkl[Z]` failed on
+/// `default value for parameter 'xs': expected List[G[T]], found List[G[Z]]` and only the
+/// name-coincidence spelling could be tested. The declared type is now seeded as an expected-type
+/// hint, so `seed_from_hint` binds the provider's own param and alpha-renaming no longer decides
+/// whether a correct declaration compiles. Both spellings are asserted.
 #[test]
 fn a_decl_site_default_is_exempt_from_the_return_only_rule() {
-    ok_desugared(
-        "struct G[T]:\n    v: T\n    fn tot[U](self, u: U, xs: List[Self] = mkl()) -> int:\n        return xs.len()\nfn mkl[T]() -> List[G[T]]:\n    return []\nfn main():\n    print(G(1).tot(2))\n",
+    let src = |own: &str| {
+        format!(
+            "struct G[T]:\n    v: T\n    fn tot[U](self, u: U, xs: List[Self] = mkl()) -> int:\n        return xs.len()\nfn mkl[{own}]() -> List[G[{own}]]:\n    return []\nfn main():\n    print(G(1).tot(2))\n"
+        )
+    };
+    // The historical spelling, where the provider and the struct happen to share the name `T`…
+    ok_desugared(&src("T"));
+    // …and the alpha-renamed twin, which is the same declaration and must compile identically.
+    ok_desugared(&src("Z"));
+}
+
+/// A decl-site default is still CHECKED — seeding the declared type as a hint must not turn the
+/// check into a rubber stamp. Each of these is a genuinely wrong-typed default and stays rejected.
+#[test]
+fn a_decl_site_default_is_still_type_checked() {
+    rejects(
+        "fn f(n: int = \"x\") -> int:\n    return n\n",
+        "default value for parameter 'n'",
+    );
+    rejects(
+        "struct S:\n    n: int = \"x\"\n",
+        "default value for field 'n'",
+    );
+    // A generic provider whose return genuinely cannot fill the slot is still caught, hint or not.
+    rejects(
+        "struct G[T]:\n    v: T\nfn mkl[Z]() -> List[G[Z]]:\n    return []\nfn f(xs: List[int] = mkl()) -> int:\n    return xs.len()\n",
+        "default value for parameter 'xs'",
     );
 }
 
@@ -24354,25 +24447,26 @@ fn bare_unpinned_generic_fn_value_rejected_at_the_binding() {
             "a ONE-element literal is not an empty collection: {errs:?}"
         );
     }
-    // The message must stay TRUE in positions that carry a concrete type Chezzi does not thread into
-    // `expected_hint` (a parameter DEFAULT value), and in positions with no binding to annotate at all
-    // (`print`). Neither may claim "nothing determines T" or tell the user to annotate a binding.
-    for src in [
+    // A parameter DEFAULT now DOES carry its declared type into `expected_hint`, so a generic fn
+    // value there is pinned by the slot it fills rather than reported. Measured: this program went
+    // from *'ident' is generic and T is not determined here* to running and printing `5`.
+    ok(
         "fn ident[T](x: T) -> T:\n    return x\n\nfn run(x: int, f: fn(int) -> int = ident) -> int:\n    return f(x)\n\nfn main():\n    print(run(5))\n",
-        "fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    print(ident)\n",
-    ] {
-        let joined = check_src(src)
+    );
+    // The message must still stay TRUE in a position with no binding to annotate at all (`print`):
+    // it may not claim "nothing determines T" or tell the user to annotate a binding.
+    let joined =
+        check_src("fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    print(ident)\n")
             .iter()
             .map(|e| e.message.clone())
             .collect::<Vec<_>>()
             .join(" | ");
-        assert!(
-            joined.contains("T is not determined here")
-                && !joined.contains("nothing here determines")
-                && !joined.contains("annotate the binding"),
-            "the message must not claim more than it knows: {joined}"
-        );
-    }
+    assert!(
+        joined.contains("T is not determined here")
+            && !joined.contains("nothing here determines")
+            && !joined.contains("annotate the binding"),
+        "the message must not claim more than it knows: {joined}"
+    );
     // A DEFAULTED parameter must not be advertised with a stricter arity than a plain fn read gives:
     // `fn rep[T](x: T, n: int = 2)` suggests `fn(<T>, int) -> str`, which must still accept `g(1)`.
     let joined = check_src(

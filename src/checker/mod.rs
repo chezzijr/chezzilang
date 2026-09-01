@@ -3251,6 +3251,25 @@ fn method_matches(proto: &FnSig, actual: &FnSig, self_ty: &Ty) -> bool {
     if !actual.witness_params.is_empty() {
         return false;
     }
+    // A GENERIC method cannot witness a protocol requirement. Its signature is spelled in terms of
+    // its OWN type params, which exist in no scope the requirement can see — so comparing them here
+    // compares two independently-scoped binders by their NAME STRING (`ty.rs`'s
+    // `(Param(a), Param(b)) => a == b`), and alpha-renaming changes meaning. Measured: `protocol
+    // Sink[U]: fn put(self, v: U)` witnessed by `fn put[U](self, v: U)` from a caller
+    // `fn use_sink[U, T: Sink[U]](x: T)` is `ok: no type errors`; renaming ONLY the method's own `U`
+    // to `W` makes it *type GS does not satisfy Sink (method 'put' has the wrong signature)*.
+    // Freshening the binders instead gives the identical verdict — a fresh name never equals the
+    // requirement's param — so refusing IS the semantics, just stated honestly.
+    //
+    // Rust is the owning ancestor and refuses the same shape outright: `trait Show { fn show(&self)
+    // -> String; }` with `impl Show for G { fn show<U>(&self) -> String }` is `E0049: method 'show'
+    // has 1 type parameter but its trait declaration has 0`. `satisfies_native` has always applied
+    // this to builtins ("native method '…' is generic and cannot witness a protocol requirement");
+    // this is the same policy for user types, and `recover_bound_args_from` already skips such a
+    // method on the recovery side for the same reason.
+    if !actual.type_params.is_empty() {
+        return false;
+    }
     let map = HashMap::from([("Self".to_string(), self_ty.clone())]);
     proto
         .params

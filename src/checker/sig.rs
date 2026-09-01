@@ -2323,8 +2323,9 @@ impl Checker {
                 for field in fields {
                     if let Some(def) = &field.default {
                         let expected = self.resolve_type(&field.ty, def.span);
+                        // Same hint seeding as the parameter default above, for the same reason.
                         let saved_dsd = std::mem::replace(&mut self.decl_site_default, true);
-                        let actual = self.infer(def);
+                        let actual = self.infer_arg(def, Some(&expected));
                         self.decl_site_default = saved_dsd;
                         if !matches!(expected, Ty::Unknown)
                             && !self.assignable_w(
@@ -4242,8 +4243,15 @@ impl Checker {
                     self.current_ret = Ty::Nil;
                     self.in_fn_body = false;
                 }
+                // Seed the declared type as an expected-type hint so a generic PROVIDER call
+                // (`= mkl()` on `fn mkl[Z]() -> List[G[Z]]`) pins its own params from the slot it
+                // fills, via `seed_from_hint`. Without it the check compared the declared type
+                // against the provider's UN-substituted return, and the comparison passed only when
+                // the two happened to spell their type params with the same LETTER: renaming
+                // `mkl[T]` to `mkl[Z]` turned a declaration that is correct at every real call into
+                // *default value for parameter 'xs': expected List[G[T]], found List[G[Z]]*.
                 let saved_dsd = std::mem::replace(&mut self.decl_site_default, true);
-                let actual = self.infer(def);
+                let actual = self.infer_arg(def, Some(&ty));
                 self.decl_site_default = saved_dsd;
                 self.current_ret = saved_ret;
                 self.in_fn_body = saved_in_fn;

@@ -7,6 +7,23 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **Two name captures closed: a generic method can no longer witness a protocol, and a decl-site
+  default seeds its declared type (W8-44's residuals).** Both were alpha-renaming violations — the
+  name a binder happens to have decided whether a program compiled. (1) `method_matches` never
+  inspected the witness's own `type_params`, so a caller's `Ty::Param("U")` and a method's own `[U]`
+  compared equal by NAME: `protocol Sink[U]: fn put(self, v: U)` witnessed by `fn put[U](self, v: U)`
+  was `ok: no type errors`, and renaming only the method's `U` to `W` rejected it. It now refuses any
+  generic witness — the policy `satisfies_native` already applied to builtins — with a message naming
+  the real reason. Rust refuses the identical shape (`E0049`), so this is drift removed; the cost is
+  that a generic method witnessing a non-parameterized protocol no longer compiles, and a sweep of
+  every `.chz` in `examples/`/`tests/`/`std/`/`benches/` found **zero** newly-rejected files.
+  (2) Both decl-site default checks called `infer` with no expected type, so `fn mkl[Z]() -> List[G[Z]]`
+  used as a default for `List[G[T]]` failed on the un-substituted comparison and only the
+  name-coincidence spelling `mkl[T]` worked. They now go through `infer_arg`, so `seed_from_hint`
+  binds the provider's param. A false rejection fell out with it: `fn run(x: int, f: fn(int) -> int =
+  ident)` on a generic `ident[T]` now runs instead of *T is not determined here*. `docs/gaps.md`
+  **W8-44**; `docs/syntax.md` documents the witness rule.
+
 - **A parameterized protocol bound now recovers its type args from a BUILTIN witness and through an
   EMBEDDED protocol (W8-44's last two residuals).** `take([1, 2, 3])` against
   `protocol Popper[R]: fn pop(self) -> R` used to say *cannot infer type parameter R for 'take'*; it
