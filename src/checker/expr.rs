@@ -4187,7 +4187,7 @@ impl Checker {
                         )
                     } else {
                         format!(
-                            " (the collection's element type was pinned to {expected} by an earlier {name}; annotate the binding, e.g. `List[<protocol>] = []`, for a mixed/protocol collection)"
+                            " (the collection's element type was already pinned to {expected} by an earlier use; annotate the binding, e.g. `List[<protocol>] = []`, for a mixed/protocol collection)"
                         )
                     }
                 } else {

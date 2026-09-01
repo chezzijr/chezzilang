@@ -853,6 +853,11 @@ xs.push(1)      # rejected: expected str, found int
 
 A generic parameter (`fn ident[T](xs: List[T])`) pins nothing — `T` says nothing about the element.
 
+Pinning does not yet reach every use: a call in an `if`/`match` **value arm**, an argument to a
+**generic** function, and assignment into an annotated binding (`ys: List[int] = xs`) all still leave
+the element type open. Annotate the binding when you need certainty — `docs/gaps.md` W8-45 records
+the measured cases.
+
 **Inline-expr body implicitly returns (Option A, inline-only).** A named function written in the
 **inline** form (`fn a(): <stmt>` — the body on the *same line* after `:`) whose single statement is a
 **bare expression** implicitly **returns that expression's value** — exactly like a closure

@@ -108,8 +108,16 @@ fn take_strs(xs: List[str]) -> int:
 test fn passing_into_a_concrete_parameter_pins_the_element():
     # Passing an unrefined empty collection into a concrete slot is a USE, so it pins the element
     # exactly as a first `push` would — a later, agreeing push is fine and the list stays homogeneous.
+    # NOTE: agreeing uses alone do NOT test the pin (they pass whether or not it happens); the
+    # element type is READ BACK below, which is what a missing pin would get wrong.
     xs := []
     assert take_strs(xs) == 0
     xs.push("a")
     xs.push("b")
     assert xs == ["a", "b"]
+    # Read the pinned element in a str-only position: without the pin the element type would come
+    # from the first push instead of the parameter, and this is where that difference shows.
+    joined := ""
+    for v in xs:
+        joined = joined + v.upper()
+    assert joined == "AB"
