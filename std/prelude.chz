@@ -330,7 +330,7 @@ protocol IndexSet[K, V]:
     fn set_index(self, k: K, v: V) -> nil
 
 # Python-style slicing: three `int?` (Option[int]) components (start/end/step), each None when omitted;
-# both engines always pass all three explicitly. `R` is the slice result type, recovered at call sites.
+# the VM always passes all three explicitly. `R` is the slice result type, recovered at call sites.
 protocol Slice[R]:
     fn slice(self, start: int?, end: int?, step: int?) -> R
 

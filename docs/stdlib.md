@@ -384,8 +384,9 @@ crossing — `read` never takes the guard, so the nested `write` persists.)
 `get() -> T` · `set(x: T) -> nil` · `read(f: fn(T) -> R) -> R` (shared read guard; returns `f`'s
 result, no write-back) · `write(f: fn(T) -> T) -> nil` (exclusive write guard; `Shared.update` under
 the write lock). Reach for it over `Shared` when reads dominate. Same reentrancy limit as
-`Shared.update`, with the same three measured outcomes (see the table above): a nested `write` inside
-`write` hangs, a nested `read`/`get` reads the pre-guard value, a nested `set` is silently lost.
+`Shared.update`, with the same three measured outcomes (see the table above): a nested `write` or
+`set` on the same box faults through the update-guard deadlock detector, while a nested `read`/`get`
+reads the pre-guard value.
 Constructed
 value-first: `RwShared(v)`; an optional turbofish pins (and is checked against) the element type —
 `RwShared[T](v)` (a mismatch like `RwShared[str](0)` is a type error).

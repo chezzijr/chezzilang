@@ -4,12 +4,11 @@
 //! stack-overflow). Bug-discovery lever #1 (`docs/bug-discovery.md`).
 //!
 //! Self-contained, no `crate::` references, so the same sources compile into both the
-//! `tests/panicfuzz.rs` CI gate and the `src/bin/panicfuzz.rs` long-runner via `#[path]` (the crate
-//! has no `[lib]`). This is a SUBPROCESS harness, not in-process `catch_unwind`, because (a) the
-//! crate is binary-only by design (no `[lib]` to link) and (b) shelling out catches more crash
-//! classes — notably **stack overflow**, the most likely deep-parser crash — which `catch_unwind`
-//! cannot. It is a stable, dependency-free stand-in for `cargo-fuzz` (no nightly / rustup /
-//! cargo-fuzz in this environment).
+//! `tests/panicfuzz.rs` CI gate and the `src/bin/panicfuzz.rs` long-runner via `#[path]`. Chezzi now
+//! has a library crate (`src/lib.rs`), so an in-process target is technically possible; this remains
+//! a SUBPROCESS harness because shelling out catches more crash classes — notably **stack overflow**,
+//! the most likely deep-parser crash — which `catch_unwind` cannot. It is a stable, dependency-free
+//! stand-in for `cargo-fuzz` (no nightly / rustup / cargo-fuzz in this environment).
 //!
 //! `dead_code` is allowed module-wide: the two consumers (the test gate and the fuzz bin) exercise
 //! different subsets of this shared toolkit.

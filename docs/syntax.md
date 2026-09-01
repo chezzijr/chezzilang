@@ -1306,7 +1306,7 @@ List([5, 6, 7].iter())     # [5, 6, 7]   (a cursor IS an Iterator[T], so List()/
 # so a partial `for … break` then leaves the remainder for a later `next()`/`List()`. A cursor IS sendable across
 # `spawn` — it crosses the airlock as a deep copy, like a `list`. `Iterable` / `Iterator` are reserved type names.
 
-# `yield` / generators (run on both VM engines; a live frame-local generator IS sendable across a task airlock — it crosses by value as an independent deep copy of its execution state, incl. one suspended mid-`recover:`; only a module-GLOBAL generator is reach-gated). Any fn that
+# `yield` / generators (run on the sole M:N VM engine; a live frame-local generator IS sendable across a task airlock — it crosses by value as an independent deep copy of its execution state, incl. one suspended mid-`recover:`; only a module-GLOBAL generator is reach-gated). Any fn that
 # uses `yield` is a generator: calling it returns a suspendable iterator, not a value. It runs lazily,
 # suspending at each `yield` and resuming on the next `.next()`. The `-> Iterator[T]` annotation is
 # OPTIONAL — with no return type the element type `T` is inferred from the FIRST `yield`

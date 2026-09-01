@@ -1,5 +1,5 @@
 # examples/collections.chz — golden showcase for std.collections (pure-Chezzi Heap/Deque/Counter).
-# Print-based; identical stdout across interp / VM / --parallel (pure Chezzi).
+# Print-based; deterministic stdout at every worker count (pure Chezzi).
 
 import std.collections as col
 

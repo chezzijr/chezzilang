@@ -2,8 +2,8 @@
 #
 # A pure-Chezzi dogfood module: NO native Rust, NO seam. The only system dependency is the clock —
 # `std.time.now() -> int` (Unix epoch SECONDS, UTC). Everything else is pure integer arithmetic
-# (Howard Hinnant's branch-free civil-calendar algorithms), so it is identical across all three
-# engines (interp / VM / --parallel).
+# (Howard Hinnant's branch-free civil-calendar algorithms), so it is deterministic at every worker
+# count on the sole M:N engine.
 #
 # ===== CONTRACT (read this — these are load-bearing semantics) =====
 # * UTC-ONLY (v1). There is NO timezone or DST handling and NO tz database. Every DateTime is UTC.

@@ -1577,7 +1577,7 @@ was retired when module globals started deep-copying per task.)
   b.next = a`, a list holding itself) is deep-copied **identity-preservingly**: every container +
   closure/cell node earns a per-serialization `id`, a back-edge becomes a `WireValue::Backref(id)`, and
   the receiver ties the knot — so the copy on the other side is an independent cyclic value with the same
-  shape (like Python's `deepcopy`, which memoizes). **Byte-identical on the serial and M:N engines.** The
+  shape (like Python's `deepcopy`, which memoizes). This is the contract on the sole M:N engine. The
   depth-guard (`MAX_STRUCTURAL_DEPTH = 10000`, the same bound the display / `==` paths use) now fires
   **only** for a genuinely >10000-deep **acyclic** nest — a **recoverable** `maximum structural depth
   (10000) exceeded (cyclic data structure?)` fault, re-stamped with the real airlock site and catchable

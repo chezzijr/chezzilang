@@ -2,7 +2,7 @@
 #
 # A dogfood module: parse/format are plain string-scanning over the core str primitives
 # (indexing s[i:i+1], len, concat, join) plus std.string.replace/index_of for the quote-doubling
-# in format. Identical across all engines (interp / VM / --parallel) — pure compute, no IO.
+# in format. Deterministic at every worker count — pure compute, no IO.
 #
 # ===== CONTRACT (load-bearing semantics) =====
 # * SEPARATOR: comma. Fields are separated by `,`, records by CRLF or LF (parse accepts both;

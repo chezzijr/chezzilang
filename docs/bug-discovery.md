@@ -45,7 +45,7 @@ The remedy is twofold and is the core of this strategy:
 - **Grammar conformance** — `docs/grammar.bnf` is executed and differential-tested against the parser (`src/conformance.rs`, `tests/corpus/`, `cargo test conformance`). Syntax-level only — not semantics.
 - **CPython bench harness** — `benches/run.chz` runs paired programs in `benches/chz/` (Chezzi) and `benches/py/` (Python) and compares **timing**. The paired programs seeded the output-differential oracle below.
 - **CPython differential oracle** — ✅ **built** (lever #2). `src/difftest/` generates random semantically-equivalent programs, renders each as both Chezzi and Python, runs both, and diffs stdout. Wired as the `tests/difftest.rs` CI gate (fixed seed range, reproducible) and the `src/bin/difffuzz` long-runner. See "Differential oracle" below.
-- **Front-end panic-fuzzer** — ✅ **built** (lever #1). `src/panicfuzz/` feeds adversarial / malformed inputs to `chezzi check` (lexer + parser + checker) under a wall-clock timeout and flags any Rust panic or signal crash. A stable, dependency-free **subprocess** harness (a stand-in for `cargo-fuzz`, which is unavailable here: no nightly + no `[lib]`). Wired as the `tests/panicfuzz.rs` CI gate (seeds `0..2000`) and the `src/bin/panicfuzz` long-runner. See "Panic-fuzz harness" below.
+- **Front-end panic-fuzzer** — ✅ **built** (lever #1). `src/panicfuzz/` feeds adversarial / malformed inputs to `chezzi check` (lexer + parser + checker) under a wall-clock timeout and flags any Rust panic or signal crash. A stable, dependency-free **subprocess** harness (a stand-in for `cargo-fuzz`, which is unavailable here: no nightly / rustup / cargo-fuzz). Wired as the `tests/panicfuzz.rs` CI gate (seeds `0..2000`) and the `src/bin/panicfuzz` long-runner. See "Panic-fuzz harness" below.
 - **DSA known-answer harness** — ✅ **built**. `judge/` runs hand-written competitive-programming solutions (`judge/problems/<slug>/solution.chz`) against known-correct CSES answers — a third oracle that catches *shared wrongness* invisible to both the VM's own implementation and CPython. The harness itself is written in Chezzi (`judge/run.chz`). See "DSA known-answer harness" below.
 - **Adversarial review pipeline** — `auto-task` (prosecute→defend→judge) + `post-merge-gate`. Good at vetting a *known* change; not a *discovery* tool.
 
@@ -53,7 +53,7 @@ The remedy is twofold and is the core of this strategy:
 
 | Technique | Who uses it | What it catches | Fit for Chezzi |
 |---|---|---|---|
-| **Coverage-guided fuzzing** (libFuzzer/AFL) | Rust `cargo fuzz`; SQLite `dbsqlfuzz`; JS `Fuzzilli` | parser/checker **panics** on malformed input (should be clean errors, not Rust crashes) | ✅ **built** as a subprocess panic-fuzzer (`src/panicfuzz/`) — `cargo-fuzz` unavailable here (no nightly + no `[lib]`) |
+| **Coverage-guided fuzzing** (libFuzzer/AFL) | Rust `cargo fuzz`; SQLite `dbsqlfuzz`; JS `Fuzzilli` | parser/checker **panics** on malformed input (should be clean errors, not Rust crashes) | ✅ **built** as a subprocess panic-fuzzer (`src/panicfuzz/`) — `cargo-fuzz` is unavailable in this environment, and the subprocess boundary catches signal crashes too |
 | **Differential vs reference impl** | GCC/LLVM (CSmith vs `-O0`/`-O3`); JS engines cross-tested | **shared** semantic bugs — wrong output both engines agree on | ⭐ Python-feel + CPython harness already exists |
 | **Metamorphic / EMI** | GCC/LLVM (Equivalence-Modulo-Inputs, 400+ bugs) | optimizer bugs: behavior-preserving transforms that change output | peephole/const-fold on==off, `x`→`(x)`, dead-code inject |
 | **Property-based** (proptest / Hypothesis) | CPython, Rust | invariant violations: `parse∘print==id`, idempotence, roundtrips | compiler pipeline |
@@ -76,10 +76,11 @@ cases.
    *the pipeline never crashes — malformed input yields a clean diagnostic, never a Rust panic /
    `unwrap` / index out-of-bounds / arithmetic overflow / stack overflow / signal kill.* Implemented
    as a **stable, dependency-free subprocess harness** (a hand-rolled stand-in for `cargo-fuzz`),
-   not `cargo-fuzz` itself, because this environment has **no nightly / rustup / cargo-fuzz** and the
-   crate is **binary-only (no `[lib]`)** to link a fuzz target against — and shelling out catches
-   **more** crash classes than in-process `catch_unwind` (notably stack overflow, the most likely
-   deep-parser crash). The single highest-yield mechanical lever for a Rust-hosted language.
+   not `cargo-fuzz` itself, because this environment has **no nightly / rustup / cargo-fuzz**.
+   Chezzi now has a library crate (`src/lib.rs`), so an in-process target is technically possible;
+   the subprocess design remains valuable because it catches **more** crash classes than in-process
+   `catch_unwind` (notably stack overflow, the most likely deep-parser crash). The single
+   highest-yield mechanical lever for a Rust-hosted language.
 2. **Differential vs CPython.** ✅ **Built** — `src/difftest/` (see "Differential oracle" below). The
    external oracle that defeats the shared-bug blind spot: it would flag `sum()` overflow and `nan <`
    immediately. The documented intentional divergences are handled *structurally* by a Python
@@ -238,8 +239,9 @@ kill-on-timeout subprocess machinery) and is wired via a `#[path]` include into 
 **Why a hand-rolled subprocess harness instead of `cargo-fuzz`.** Three constraints decided the
 architecture:
 - **No nightly / rustup / cargo-fuzz** in this environment — `cargo-fuzz` is unavailable.
-- **The crate is binary-only (no `[lib]`)** by design, so there is nothing to link an in-process
-  fuzz target / `libFuzzer` harness against.
+- **Chezzi now has a library crate** (`src/lib.rs`), so an in-process fuzz target is technically
+  possible. The existing harness predates that split and deliberately retains a process boundary
+  for the stronger crash classification below.
 - **Shelling out catches more crash classes** than in-process `catch_unwind`: a subprocess detects a
   **signal kill** (SIGSEGV / SIGABRT / **stack overflow** — the most likely deep-parser crash, which
   `catch_unwind` cannot intercept) as an exit code of `None`, *and* a Rust panic via the `panicked

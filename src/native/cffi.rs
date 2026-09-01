@@ -1,7 +1,7 @@
 //! Dynamic C-ABI FFI (v1): the runtime machinery behind an `extern "lib":` block. A [`Cffi`]
 //! wraps a `dlopen`'d shared library, a resolved symbol address, and the C signature (as
 //! [`CType`]s), and exposes `call(&mut dyn Host)` — reusing the engine-neutral [`Host`]/[`NativeRet`]
-//! seam (`src/native/mod.rs`) so both VM schedulers (serial + M:N) produce identical output.
+//! seam (`src/native/mod.rs`) used by the sole M:N VM engine.
 //!
 //! v1 marshals scalars: `int` (i64 ↔ C `long`), `float` (f64 ↔ C `double`), `bool`
 //! (↔ C `_Bool`, 1 byte 0/1), and `str` (Chezzi str → null-terminated `const char*`; a borrowed `char*` return

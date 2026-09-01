@@ -1,7 +1,7 @@
 # std.collections — pure-Chezzi single-threaded generic data structures.
 #
 # A pure-Chezzi dogfood module: NO native Rust, NO seam. Three generic structs over T built on the
-# builtin `list`/`map`, so they are identical across all three engines (interp / VM / --parallel).
+# builtin `list`/`map`, deterministic at every worker count on the sole M:N engine.
 #
 # ===== EMPTY SEMANTICS (load-bearing, consistent across all three types) =====
 # Every removal/peek returns Option[T] — Heap.pop/peek, Deque.pop_front/pop_back/peek_front/peek_back.
