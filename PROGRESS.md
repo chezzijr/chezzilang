@@ -7,6 +7,21 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **A parameterized protocol bound now recovers its type args from a BUILTIN witness and through an
+  EMBEDDED protocol (W8-44's last two residuals).** `take([1, 2, 3])` against
+  `protocol Popper[R]: fn pop(self) -> R` used to say *cannot infer type parameter R for 'take'*; it
+  now runs and gives `Some(3)`. Same for a param supplied by an embed (`protocol Q[S]` whose body is
+  the embed line `Produces[S]`). Both were honest messages with working escapes — no wrong answers,
+  just an annotation neither ancestor asks for. The builtin fix rebuilds the native method table with
+  the **receiver prepended**, exactly as `satisfies_native` does (native sigs have the bare `self`
+  stripped, so without it the arity test is off by one and nothing is recovered); the embed fix reuses
+  `protocol_method_names`/`protocol_method_sig`, which are already transitive, cycle-guarded, and
+  re-spell an embedded signature in the owner's type-param vocabulary — tested with the params
+  deliberately named differently, since a name-coincidence version would prove nothing. W8-44's
+  neighbour table re-run and unchanged: a missing method, a wrong arity, a wrong param type and a
+  non-conforming builtin each still report their own true message alone. `docs/gaps.md` **W8-44**;
+  `docs/syntax.md`'s residual table is now one row.
+
 - **Constraining an empty collection now PINS its element type, at every site (W8-46).** Dropping a
   binding's *cannot infer element type* requirement without fixing the element left the `Unknown` slot
   open for a LATER use to pin something else, and **seven** routes built a heterogeneous collection

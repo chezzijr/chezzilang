@@ -1597,8 +1597,9 @@ struct Wrapper:
 /// the ORIGINAL false `has the wrong signature` message, or nothing at all with the param left free.
 #[test]
 fn the_method_path_matches_the_free_fn_path_on_every_shape() {
-    // (a) recovery misses (builtin witness) -> the ANNOTATION now pins `R`, as on a free fn.
-    //     Measured before: `wrong signature` PLUS `cannot assign R to variable of type Option[int]`.
+    // (a) a BUILTIN witness. The annotation pins `R` here, as on a free fn (measured before that:
+    //     `wrong signature` PLUS `cannot assign R to variable of type Option[int]`) — and since the
+    //     recovery now reads the native method table too, the UN-annotated spelling works as well.
     ok("\
 protocol Popper[R]:
     fn pop(self) -> R
@@ -1606,6 +1607,14 @@ struct W:
     fn take[R, T: Popper[R]](self, x: T) -> R:
         return x.pop()
 v: int? = W().take([1, 2, 3])
+");
+    ok("\
+protocol Popper[R]:
+    fn pop(self) -> R
+struct W:
+    fn take[R, T: Popper[R]](self, x: T) -> R:
+        return x.pop()
+v := W().take([1, 2, 3])
 ");
 
     // (b) nothing can reach `R` -> NAME it, rather than reporting `ok: no type errors` with `R` free.
@@ -1656,6 +1665,74 @@ struct W:
             "{P}struct ArityBad:\n    fn produce(self, extra: int) -> int:\n        return 7\ny := W().go(ArityBad())\n"
         ),
         "method 'produce' has the wrong signature",
+    );
+}
+
+/// The bound-arg recovery reaches a BUILTIN witness and an EMBEDDED protocol. Both used to give an
+/// honest `cannot infer R` with working escapes — no wrong answers, but an annotation the ancestor
+/// does not ask for. Each `ok` below was measured as that error before.
+#[test]
+fn the_bound_arg_recovery_reaches_builtin_and_embedded_witnesses() {
+    const POPPER: &str = "\
+protocol Popper[R]:
+    fn pop(self) -> R
+
+fn take[R, T: Popper[R]](x: T) -> R:
+    return x.pop()
+";
+    // A builtin conforms through the native table, whose sigs have the RECEIVER STRIPPED; the
+    // recovery rebuilds it prepended, the way `satisfies_native` does. Without that the arity test
+    // is off by one and nothing is recovered.
+    ok(&format!("{POPPER}v := take([1, 2, 3])\n"));
+    ok(&format!("{POPPER}v := take([\"a\"])\n"));
+    // A builtin that genuinely does not conform still reports its own true message, alone.
+    let only = |src: &str, needle: &str| {
+        let errs = check_src(src);
+        assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
+        assert!(
+            errs[0].message.contains(needle),
+            "expected {needle:?}: {errs:?}"
+        );
+        assert!(
+            !errs[0].message.contains("cannot infer type parameter"),
+            "the un-inferred param is not the cause here: {errs:?}"
+        );
+    };
+    only(&format!("{POPPER}v := take(1)\n"), "missing method 'pop'");
+    only(
+        &format!("{POPPER}v := take(\"abc\")\n"),
+        "missing method 'pop'",
+    );
+
+    // An EMBEDDED protocol supplies the requirement. The embed's param is named `S` where the
+    // embedded protocol names it `R`, so this passes only if `protocol_method_sig` re-spelled the
+    // signature in `Q`'s vocabulary — a name-coincidence version would prove nothing.
+    const EMBED: &str = "\
+protocol Produces[R]:
+    fn produce(self) -> R
+
+protocol Q[S]:
+    Produces[S]
+
+struct IntProducer:
+    fn produce(self) -> int:
+        return 7
+
+fn use_q[S, T: Q[S]](x: T) -> S:
+    return x.produce()
+";
+    ok(&format!("{EMBED}v := use_q(IntProducer())\n"));
+    // …and the recovered `S` is the CONCRETE `int`, not a universally-assignable hole.
+    rejects(
+        &format!("{EMBED}v: str = use_q(IntProducer())\n"),
+        "cannot assign int to variable of type str",
+    );
+    // A type that does not satisfy the EMBEDDED requirement still reports that, alone.
+    only(
+        &format!(
+            "{EMBED}struct NoProduce:\n    fn other(self) -> int:\n        return 1\nv := use_q(NoProduce())\n"
+        ),
+        "missing method 'produce'",
     );
 }
 

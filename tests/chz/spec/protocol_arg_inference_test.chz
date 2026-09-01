@@ -121,3 +121,34 @@ test fn passing_into_a_concrete_parameter_pins_the_element():
     for v in xs:
         joined = joined + v.upper()
     assert joined == "AB"
+
+# ---- the recovery reaches a BUILTIN witness and an EMBEDDED protocol ----
+
+protocol Popper[R]:
+    fn pop(self) -> R
+
+fn take[R, T: Popper[R]](x: T) -> R:
+    return x.pop()
+
+test fn a_builtin_witnesses_a_parameterized_bound():
+    # `List` conforms through the native table, which has the receiver STRIPPED — the recovery
+    # rebuilds it with the receiver prepended, the way `satisfies_native` does. Without that the
+    # arity test is off by one and this call was `cannot infer type parameter R for 'take'`.
+    v := take([1, 2, 3])
+    assert v == Some(3)
+    s := take(["a", "b"])
+    assert s == Some("b")
+
+protocol Q[S]:
+    Produces[S]
+
+fn use_q[S, T: Q[S]](x: T) -> S:
+    return x.produce()
+
+test fn an_embedded_protocol_supplies_the_recovered_arg():
+    # `Q[S]` requires nothing itself — `produce` comes from the EMBED. The recovery used to walk
+    # only a protocol's OWN methods, so `S` was never pinned. The embed's param is deliberately
+    # named `S` where the embedded protocol names it `R`, so this passes only if the signature is
+    # re-spelled in `Q`'s vocabulary rather than matching by name coincidence.
+    v := use_q(IntProducer())
+    assert v + 1 == 8

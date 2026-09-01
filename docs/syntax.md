@@ -786,17 +786,22 @@ free function and on a method alike. Three cases reach it, each measured:
 | the bound arg is not recovered when… | example |
 |---|---|
 | no requirement method mentions the param | `protocol Tagged[R]: fn tag(self) -> str` |
-| the witness is a **builtin**, not a struct/enum/newtype | `take([1, 2, 3])` against `Popper[R]` — annotate `v: int? = …` |
-| the param comes from an **embedded** protocol | `protocol Q[R]: Produces[R]` used as `[T: Q[R]]` |
 
-A **generic method** behaves identically — a result annotation pins the parameter there too:
+That is the only case left. The witness may be a **builtin** (`take([1, 2, 3])` against `Popper[R]`
+infers `R = int?` with no annotation) and the parameter may come from an **embedded** protocol (a
+`protocol Q[S]` whose body is the embed line `Produces[S]`, used as `[T: Q[S]]`, recovers `S` — the
+embedded signature is re-spelled in `Q`'s own type-param vocabulary, so the two need not share a name).
+
+A **generic method** behaves identically — the recovery runs there, and a result annotation pins the
+parameter there too:
 
 ```
 struct W:
     fn take[R, T: Popper[R]](self, x: T) -> R:
         return x.pop()
 
-v: int? = W().take([1, 2, 3])   # Some(3)
+v := W().take([1, 2, 3])        # Some(3) — inferred
+v2: int? = W().take([1, 2, 3])  # Some(3) — or pinned by the annotation
 ```
 
 A method that could not conform for *any* instantiation (wrong arity, wrong parameter type, missing

@@ -3874,12 +3874,61 @@ impl Checker {
         if pinfo.type_params.is_empty() {
             return None;
         }
-        let methods = self.nominal_method_table(ty)?;
+        // A BUILTIN witness (`List`/`Map`/`Set`/`str`/…) has no nominal method table — it conforms
+        // through `satisfies_native`, whose table is built inline from `self.structs` with the
+        // RECEIVER PREPENDED (`harvest_native_fn_sig` strips the leading bare `self`, while a
+        // protocol requirement keeps it as `params[0]`). Rebuild exactly that table here, or the
+        // arity test below rejects every native method by one and the recovery silently returns
+        // nothing: measured, `take([1, 2, 3])` against `protocol Popper[R]: fn pop(self) -> R` gave
+        // *cannot infer type parameter R for 'take'* where the struct-witness twin infers it.
+        let native_table;
+        let methods = match self.nominal_method_table(ty) {
+            Some(m) => m,
+            None => {
+                let key = Self::native_witness_key(ty)?;
+                let native = self.structs.get(key).map(|i| &i.methods)?;
+                native_table = native
+                    .iter()
+                    .filter(|(mname, sig)| {
+                        // Same two refusals `satisfies_native` makes: a generic native method cannot
+                        // witness at all, and one whose dispatch cannot reach this receiver is not a
+                        // witness either. Both SKIP here rather than erroring — this is a recovery,
+                        // and the conformance check reports for real a few lines later.
+                        sig.type_params.is_empty()
+                            && self.native_dispatch_residual(ty, mname).is_none()
+                    })
+                    .map(|(mname, sig)| {
+                        let mut params = Vec::with_capacity(sig.params.len() + 1);
+                        params.push(ty.clone());
+                        params.extend(sig.params.iter().cloned());
+                        (
+                            mname.clone(),
+                            FnSig {
+                                params,
+                                min_params: sig.min_params + 1,
+                                ..sig.clone()
+                            },
+                        )
+                    })
+                    .collect::<HashMap<String, FnSig>>();
+                &native_table
+            }
+        };
         let tymap = self.nominal_param_map(ty);
         let selfmap = HashMap::from([("Self".to_string(), ty.clone())]);
         let mut pmap: HashMap<String, Ty> = HashMap::new();
-        for (mname, msig) in &pinfo.methods {
-            let Some(actual) = methods.get(mname) else {
+        // Own methods AND those pulled in through an EMBED, transitively. `pinfo.methods` alone
+        // never walked `pinfo.embeds`, so a param supplied by an embedded protocol recovered
+        // nothing: measured, `protocol Q[R]:` + an embed line `Produces[R]`, used as `[T: Q[R]]`,
+        // gave *cannot infer type parameter R for 'use_q'*. `protocol_method_names` /
+        // `protocol_method_sig` are the existing pair for this — cycle-guarded, and the sig comes
+        // back RE-SPELLED in this protocol's own type-param vocabulary (`embed_arg_tys`), so
+        // `Q[S]: Produces[S]` binds `S`, not the embedded protocol's `R`.
+        for mname in self.protocol_method_names(protocol) {
+            let Some(msig) = self.protocol_method_sig(protocol, &mname) else {
+                continue;
+            };
+            let Some(actual) = methods.get(&mname) else {
                 continue;
             };
             if msig.params.len() != actual.params.len() || msig.is_static != actual.is_static {
