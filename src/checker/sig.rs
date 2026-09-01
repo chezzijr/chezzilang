@@ -2301,7 +2301,9 @@ impl Checker {
                 for field in fields {
                     if let Some(def) = &field.default {
                         let expected = self.resolve_type(&field.ty, def.span);
+                        let saved_dsd = std::mem::replace(&mut self.decl_site_default, true);
                         let actual = self.infer(def);
+                        self.decl_site_default = saved_dsd;
                         if !matches!(expected, Ty::Unknown)
                             && !self.assignable_w(
                                 &expected,
@@ -4214,7 +4216,9 @@ impl Checker {
                     self.current_ret = Ty::Nil;
                     self.in_fn_body = false;
                 }
+                let saved_dsd = std::mem::replace(&mut self.decl_site_default, true);
                 let actual = self.infer(def);
+                self.decl_site_default = saved_dsd;
                 self.current_ret = saved_ret;
                 self.in_fn_body = saved_in_fn;
                 // One-way int→float widening (scalar sink): a `float` param accepts an int default,

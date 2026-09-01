@@ -1998,6 +1998,14 @@ struct Checker {
     /// generic "returns int, not Result" wording would name a return type the user never wrote.
     /// Saved/restored 1:1 beside `current_ret` at every fn/closure boundary.
     in_default_provider: bool,
+    /// True while checking the DECL-SITE copy of a parameter/field default (`fn f(x: T = expr())`,
+    /// `struct S: f: T = expr()`). That copy exists only to catch a wrong-typed default at the
+    /// declaration; the expression's real home is the synthesized provider (or the splice at each
+    /// call), where the enclosing generic's params are actually bound. So a diagnostic whose whole
+    /// premise is "nothing can bind this here" must stay silent — the same reason W7-51 neutralized
+    /// `current_ret`/`in_fn_body` around this copy for `?`. Read by
+    /// [`Checker::report_uninferable_result_params`]. Saved/restored 1:1 around each copy.
+    decl_site_default: bool,
     /// W8-21 — true while checking (or inferring the return of) a fn/closure body whose return type
     /// is DECLARED (a `fn`'s `decl.ret.is_some()`, always true for a closure with an explicit `->`).
     /// The sole gate for the success-coercion sinks: an UN-annotated sink has no `T?`/`T!E` to coerce

@@ -73,6 +73,7 @@ impl Checker {
             in_generator: false,
             in_fn_body: false,
             in_default_provider: false,
+            decl_site_default: false,
             ret_declared: false,
             in_defer_block: false,
             in_spawn_block: false,

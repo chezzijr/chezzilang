@@ -7,6 +7,34 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **A return-only type parameter that nothing binds is now reported AT THE CALL (W8-45).** `fn
+  empty[T]() -> List[T]` called as `xs := empty()`, and `fn make[U]() -> U` called as `z := make()`,
+  used to type-check: `T`/`U` leaked as a rigid `Ty::Param`. Rust refuses both — `E0282: type
+  annotations needed` — and now so does Chezzi, on the free-fn AND the generic-method path, with the
+  same wording the parameterized-bound rule uses. **The leak was never unsound**, which is why it
+  survived: every typed USE already errored (`z + 1` → *cannot apply + to U and int*, `takes_int(z)`
+  → *expected int, found U*, `xs.push(1)` → a message that already said "bind it at the construction
+  site"). What slipped through was a value never used in a typed position, and blame landing
+  downstream of the call that actually needed the annotation.
+  **The gate is RETURN-ONLY and DECL-SITE-EXEMPT, both derived by running the contexts rather than
+  from the rule's shape.** A param that also sits in a PARAMETER slot is excluded: `tag([])` leaves
+  `U` unbound because an empty literal binds nothing, but each later `push` already reports it and
+  already names the construction site, so firing would add a third error saying the same thing. And
+  a DECL-SITE default copy (`fn tot[U](self, xs: List[Self] = mkl())`, a field default) is exempt via
+  the new `Checker::decl_site_default` — that copy exists only to catch a wrong-typed default at the
+  declaration, and the expression's real home is the provider or the splice at each call site, where
+  the enclosing generic IS bound; the first cut rejected that declaration outright. This is the same
+  context W7-51 had to neutralize for `?`, for the same reason. Contexts measured silent: a
+  generic-fn value passed as an argument, a closure body that is a nested generic call, an argument
+  sink, a return sink, a `match`-arm sink, a struct-field sink at construction, and a turbofish.
+  **Known ceiling, unchanged:** an annotation still does not reach through a collection literal
+  (`a: List[List[int]] = [empty()]`), so that now reports the un-inferable `T` too — the program was
+  already rejected there, and the new message names the fix.
+  **Still divergent from Rust and NOT closed:** `xs := empty()` followed by `xs.push(1)` — Rust
+  infers `T` from the later use, Chezzi rejects, because Chezzi resolves each statement instead of
+  deferring unification whole-body. Closing that is deferred type-variable resolution, its own
+  milestone.
+
 - **A parameterized protocol bound now INFERS its type args from the type that witnesses it
   (W8-44).** For `fn produce_as[R, T: Produces[R]](x: T) -> R`, the call `produce_as(IntProducer())`
   binds `T = IntProducer` from the argument and now recovers `R = int` from `IntProducer.produce`'s

@@ -804,6 +804,26 @@ entirely) keeps its own conformance message instead — annotating would not hel
 method recovers nothing either: its signature is written in terms of its own type parameters, which
 mean nothing at the call site.
 
+**A return-only type parameter must be pinnable.** If a type parameter appears only in the return
+type and nothing at the call binds it, the call is rejected there rather than leaking an un-inferable
+type onto the value — the same rule Rust applies (`E0282: type annotations needed`):
+
+```
+fn empty[T]() -> List[T]:
+    return []
+
+xs := empty()              # cannot infer type parameter T for 'empty';
+                           # add a result annotation or explicit type arguments
+xs: List[int] = empty()    # ok
+xs := empty[int]()         # ok
+```
+
+Any sink that really does pin it counts, not just a `let` annotation — an argument slot
+(`takes(empty())`), a declared return (`return empty()`), a `match` arm, and a struct field at
+construction all pin it. The rule is *return-only*: a parameter that also appears in a value
+parameter has its own diagnostic (`tag([])` reports at each later `push`, naming the construction
+site). A parameter default is exempt where it is declared — it is re-checked where it is spliced.
+
 **Inline-expr body implicitly returns (Option A, inline-only).** A named function written in the
 **inline** form (`fn a(): <stmt>` — the body on the *same line* after `:`) whose single statement is a
 **bare expression** implicitly **returns that expression's value** — exactly like a closure

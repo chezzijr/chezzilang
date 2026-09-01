@@ -4590,7 +4590,77 @@ impl Checker {
             let wparams = sig.witness_params.clone();
             self.record_witness_call(name, &wparams, &subst_map, key_span, span, recv);
         }
+        self.report_uninferable_result_params(
+            name,
+            &sig.params,
+            &sig.ret,
+            &sig.type_params,
+            &subst_map,
+            span,
+        );
         subst(&sig.ret, &subst_map)
+    }
+
+    /// A type parameter that appears in the RETURN type and is still unbound after every inference
+    /// source has run is un-inferable at this call site: nothing downstream can pin it, so the value
+    /// carries a rigid `Ty::Param` incompatible with every concrete type. Rust refuses the same
+    /// shape up front — `fn make<U>() -> U; let z = make();` is `E0282: type annotations needed`,
+    /// and `let xs = empty();` on `fn empty<T>() -> Vec<T>` is `E0282 … for Vec<_>`.
+    ///
+    /// Reported at the CONSTRUCTION site rather than left to leak. The leak was never unsound —
+    /// every typed USE of the value already errored (`z + 1` → *cannot apply + to U and int*,
+    /// `xs.push(1)` → a message that already said "bind it at the construction site") — but a value
+    /// never used in a typed position slipped through entirely, and the blame landed downstream of
+    /// the call that actually needed the annotation.
+    ///
+    /// **Where this must stay silent, derived by running each context, not from its shape.** A
+    /// DECL-SITE default copy (`fn f(x: T = mkl())`, `struct S: f: T = mkl()`) is checked once at the
+    /// declaration purely to catch a wrong-typed default; the expression's real home is the
+    /// synthesized provider or the splice at each call, where the enclosing generic IS bound. Firing
+    /// there rejected `fn tot[U](self, xs: List[Self] = mkl())` — a declaration correct at every real
+    /// call site. Same context W7-51 had to neutralize for `?`, for the same reason.
+    fn report_uninferable_result_params(
+        &mut self,
+        name: &str,
+        params: &[Ty],
+        ret: &Ty,
+        tps: &[TypeParam],
+        sub: &HashMap<String, Ty>,
+        span: Span,
+    ) {
+        if self.decl_site_default {
+            return;
+        }
+        let wanted: std::collections::HashSet<String> =
+            tps.iter().map(|tp| tp.name.clone()).collect();
+        let mut in_ret = Vec::new();
+        ty_collect_params(ret, Some(&wanted), &mut in_ret);
+        // RETURN-ONLY: a param that also appears in a PARAMETER slot is a different rule with a
+        // different, already-tuned diagnostic. `fn tag[U](xs: List[U]) -> List[U]` called `tag([])`
+        // leaves `U` unbound (an empty literal binds nothing), but each later `x.push(v)` already
+        // reports it AND already names the fix — "the collection's element type is the un-inferred
+        // type parameter U; bind it at the construction site with a turbofish or annotation". Firing
+        // here too would add a third error saying the same thing. This rule owns only the case with
+        // no parameter to blame at all.
+        let mut in_params = Vec::new();
+        for p in params {
+            ty_collect_params(p, Some(&wanted), &mut in_params);
+        }
+        // Declaration order, so a multi-param signature reads left-to-right.
+        for tp in tps {
+            if in_ret.contains(&tp.name)
+                && !in_params.contains(&tp.name)
+                && !sub.contains_key(&tp.name)
+            {
+                self.error(
+                    span,
+                    format!(
+                        "cannot infer type parameter {} for '{name}'; add a result annotation or explicit type arguments",
+                        tp.name
+                    ),
+                );
+            }
+        }
     }
 
     /// Infer a generic *method*'s own type parameters from the call arguments. `params`/`ret` are the
@@ -4774,6 +4844,9 @@ impl Checker {
                 );
             }
         }
+        // …and the general return-only case, same rule and same wording as the free-fn path: a param
+        // in the return that nothing bound is un-inferable here, bound or not.
+        self.report_uninferable_result_params(method, expected, ret, mtps, &mmap, span);
         // The receiver must still match its declared type AFTER substitution. Without this, a method
         // type param in receiver position (`fn m[U](self: U)`) turbofished to a contradicting type
         // (`b.m[str]()` on a `Box[int]`) is unchecked — `unify` silently drops the conflict once `[str]`

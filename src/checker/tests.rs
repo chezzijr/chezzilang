@@ -1558,8 +1558,9 @@ y := produce_as(IntProducer(), \"hello\")
         "method 'produce' has the wrong signature",
     );
 
-    // Not a general ban on calls whose result type stays free.
-    ok("fn empty[T]() -> List[T]:\n    return []\nxs := empty()\n");
+    // Not a general ban on a free result param — it just has to be pinnable, and here it is.
+    ok("fn empty[T]() -> List[T]:\n    return []\nxs: List[int] = empty()\n");
+    ok("fn empty[T]() -> List[T]:\n    return []\nxs := empty[int]()\n");
 }
 
 /// The same recovery on the generic-METHOD path, which has no `seed_from_hint` — before this,
@@ -1820,6 +1821,74 @@ struct IntP:
         )),
         1,
         "the probe duplicated the bound-arg diagnostic"
+    );
+}
+
+/// A type param that appears ONLY in the return and that nothing binds is un-inferable AT THE CALL,
+/// so say so there instead of leaking a rigid `Ty::Param` and blaming whatever touches the value
+/// next. Rust refuses the identical shapes — `fn make<U>() -> U; let z = make();` and
+/// `fn empty<T>() -> Vec<T>; let xs = empty();` are both `E0282: type annotations needed`.
+///
+/// The leak was never UNSOUND (every typed use already errored: `z + 1` gave *cannot apply + to U
+/// and int*), but a value never used in a typed position slipped through with no diagnostic at all.
+#[test]
+fn a_return_only_type_param_nothing_binds_is_reported_at_the_call() {
+    const EMPTY: &str = "fn empty[T]() -> List[T]:\n    return []\n";
+    const MAKE: &str = "fn make[U]() -> U:\n    return make()\n";
+
+    rejects(
+        &format!("{EMPTY}xs := empty()\n"),
+        "cannot infer type parameter T for 'empty'",
+    );
+    rejects(
+        &format!("{MAKE}z := make()\n"),
+        "cannot infer type parameter U for 'make'",
+    );
+
+    // Both escapes, and every sink that really does pin it, stay silent.
+    ok(&format!("{EMPTY}xs: List[int] = empty()\n"));
+    ok(&format!("{EMPTY}xs := empty[int]()\n"));
+    ok(&format!("{MAKE}z: str = make()\n"));
+    ok(&format!(
+        "{EMPTY}fn takes(xs: List[int]) -> int:\n    return xs.len()\ny := takes(empty())\n"
+    ));
+    ok(&format!(
+        "{EMPTY}fn get() -> List[int]:\n    return empty()\n"
+    ));
+
+    // The METHOD path reaches the same verdict.
+    const BOX: &str =
+        "struct Box[T]:\n    v: T\n    fn make[U](self) -> U:\n        return self.make()\n";
+    rejects(
+        &format!("{BOX}z := Box(1).make()\n"),
+        "cannot infer type parameter U for 'make'",
+    );
+    ok(&format!("{BOX}z: str = Box(1).make()\n"));
+}
+
+/// The rule owns ONLY the return-only case. A param that also sits in a PARAMETER slot has its own
+/// tuned diagnostic which already names the construction site, and must not be double-reported:
+/// `tag([])` leaves `U` unbound (an empty literal binds nothing) and each later `push` reports it.
+#[test]
+fn an_unbound_param_in_parameter_position_keeps_its_own_diagnostic() {
+    let errs = check_entry(
+        "fn tag[U](xs: List[U]) -> List[U]:\n    return xs\nfn main():\n    x := tag([])\n    x.push(\"hello\")\n    x.push(42)\n",
+    );
+    assert_eq!(errs.len(), 2, "expected exactly two errors, got: {errs:?}");
+    assert!(
+        errs.iter()
+            .all(|e| e.message.contains("un-inferred type parameter U")),
+        "the return-only rule must not add a third error here: {errs:?}"
+    );
+}
+
+/// A DECL-SITE default copy is checked once at the declaration, where the enclosing generic's params
+/// are not bound yet; the expression's real home is the provider / the splice at each call. Firing
+/// the return-only rule there rejected a declaration that is correct at every real call site.
+#[test]
+fn a_decl_site_default_is_exempt_from_the_return_only_rule() {
+    ok_desugared(
+        "struct G[T]:\n    v: T\n    fn tot[U](self, u: U, xs: List[Self] = mkl()) -> int:\n        return xs.len()\nfn mkl[T]() -> List[G[T]]:\n    return []\nfn main():\n    print(G(1).tot(2))\n",
     );
 }
 
