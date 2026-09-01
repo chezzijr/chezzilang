@@ -3825,8 +3825,10 @@ defining `compare`), stable, in place.
 > `b += [1]`, `a, b = [1], [2]`), or passing/returning it into a concrete collection sink — a typed
 > binding, a typed function parameter (`f(b)` where the param is `List[int]`), or a typed `return`. The
 > direct-literal forms (`f([])`, `return []`, `c: List[int] = []`) likewise leave no un-inferred slot, so
-> those never error. **Every one of these constraining uses also PINS the element type**, exactly like the
-> first `push` — being constrained and being pinned are one operation, never one without the other. So
+> those never error. **Every constraining use with a CONCRETE sink also PINS the element type**, exactly
+> like the first `push` — for those, being constrained and being pinned are one operation. (The one
+> exception is the un-annotated alias below, which has no concrete sink to pin from; it is the last
+> remaining hole in the rule.) So
 > `b := []` / `f(b)` (param `List[str]`) / `b.push(1)` is a type error, and so are the reassign
 > (`b = [1, 2]` then `b.push("a")`), the typed sink (`c: List[int] = b` then `b.push("a")`), the typed
 > `return`, and the same shapes reached through a **generic** call whose parameter a sibling argument
@@ -3854,8 +3856,24 @@ defining `compare`), stable, in place.
 > **simple-variable** receiver (`obj.field.push(…)` / `xss[0].push(…)` are not refined — annotate
 > those), and the one remaining uncaught sliver is an **un-annotated alias**: `c := b` has no concrete
 > sink to pin from, so the requirement moves to `c` and the two names are then pinned independently
-> while sharing one runtime list (`b := []; c := b; c.push(1); b.push("s")` is accepted). Annotate
-> either binding to close it.
+> while sharing one runtime list. This is not merely a mixed print — the two static types disagree
+> about a value they share, so it reaches a typed parameter and faults at run time:
+>
+> ```
+> fn addstr(xs: List[str]) -> str:
+>     return xs[0].upper()
+> b := []
+> c := b            # alias: the requirement moves to `c`, `b` is left unpinned
+> c.push(1)         # pins `c` to List[int]; `b` is still List[Unknown]
+> print(addstr(b))  # ok: no type errors — then at run time:
+>                   # runtime error: type int has no method 'upper'
+> ```
+>
+> **Annotate either binding to close it** (`b: List[int] = []`, or `c: List[int] = b`) — an annotated
+> sink pins through the alias. Closing it in the checker needs alias-identity tracking, which would
+> newly reject a rebound alias (`c := b` then `c = [1, 2]` then `b.push("a")`); a false rejection is
+> worse than this missing one, and neither ancestor settles it (Rust forbids the shape outright —
+> `let c = b` moves — and Python has no static element type at all).
 >
 > Because the pin is **scope-wide** (not source-order forward), a **non-pinning** use of the binding
 > that appears *before* the pinning op still sees the resolved element type — the checker resolves the

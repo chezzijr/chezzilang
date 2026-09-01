@@ -2104,9 +2104,12 @@ impl Checker {
     /// forgets the constraining use entirely and lets the later push win.
     ///
     /// Value arms now pin persistently, exactly like statement position (`docs/syntax.md`'s
-    /// scope-wide first-use rule). A value arm is a single expression, so the only refinement that
-    /// can occur in one is `constrain_empty_arg` (a call taking the binding) — `push`/`add` and
-    /// `m[k]=v` are statements and cannot appear there. The consequence, measured on the pre-fix
+    /// scope-wide first-use rule). `m[k]=v` is a statement and cannot appear in a value arm at all;
+    /// `xs.push(1)` CAN be written there and does reach `refine_receiver`, but it returns nil, so
+    /// such a program is rejected either way (*expression returns no value (nil) and cannot be used
+    /// as a value*) — removing the barrier changes which diagnostic it gets, not whether it is
+    /// accepted. The only refinement that can change an ACCEPTED program in a value arm is therefore
+    /// `constrain_empty_arg` (a call taking the binding). The consequence, measured on the pre-fix
     /// binary and newly rejected: two CONFLICTING concrete uses across sibling value arms
     /// (`y := if c: f(xs) else: g(xs)` with `f: List[str]`, `g: List[int]`, and the `match` twin),
     /// which is the same rule two conflicting pushes already followed and which Rust also refuses.
@@ -2147,11 +2150,20 @@ impl Checker {
         // (`[1, 'a']`). `None` means the site genuinely has nothing concrete in hand — the
         // requirement MOVES to another binding, or the site pins itself below under its own gates;
         // every `None` call states which.
+        // The BINDING gate is `is_unrefined_empty_coll`, NOT the broader `contains_unknown_in_slot`:
+        // this whole mechanism is scoped to the three empty literal containers, and the wider
+        // predicate also matches `Option[Unknown]` (`o := None`) and a nullary generic enum variant
+        // (`e := Box.Empty`) — values that record no site, ask for no annotation, and are meant to
+        // stay permissive. Pinning them turned correct programs into errors: measured on the wider
+        // gate, `e := Box.Empty` / `a: Box[int] = e` / `b: Box[str] = e` reported *cannot assign
+        // Box[int] to variable of type Box[str]* where it used to run, and the `o := None` twin the
+        // same. Same rule as the W8-45 deferral gate — the hand-off gate must be the shape the
+        // receiving machinery handles, never a superset that merely looks related.
         if let Some(shape) = shape
             && !contains_unknown_in_slot(shape)
             && !self.is_captured(name)
             && let Some(bt) = self.lookup(name)
-            && contains_unknown_in_slot(&bt)
+            && Self::is_unrefined_empty_coll(&bt)
         {
             let merged = merge_unknown(&bt, shape);
             if merged != bt {
@@ -2169,6 +2181,35 @@ impl Checker {
     /// (a call arg like `print(b)`) is intentionally NOT covered — that case must still require the
     /// annotation. The alias binding itself, if left unrefined, records its own site, so the
     /// requirement moves rather than vanishes (no new false-negative).
+    /// Does `value` read a bare binding that is STILL an unrefined empty collection, in one of the
+    /// positions [`Self::drop_value_escape_sites`] covers? Gates the assignment arm's speculative
+    /// target-type probe. It must be a property of THIS statement and nothing else: gating on
+    /// `empty_coll_sites.is_empty()` instead reads as a perf shortcut but decides SEMANTICS —
+    /// whether the assignment pins its source — so acceptance depended on an unrelated binding
+    /// elsewhere in the file. Measured on that gate, two programs differing only in where an
+    /// unrelated `z.push(1)` sits: with it BEFORE the assignment, rc=0; with it AFTER, *cannot
+    /// assign Option[str] to variable of type Option[int]*, rc=1.
+    pub(super) fn escapes_unrefined_empty(&self, value: &Expr) -> bool {
+        let refinable = |n: &String| {
+            self.lookup(n)
+                .is_some_and(|t| Self::is_unrefined_empty_coll(&t))
+        };
+        match &value.kind {
+            ExprKind::Ident(name) => refinable(name),
+            ExprKind::List(elems, _) | ExprKind::Set(elems) | ExprKind::Tuple(elems) => {
+                elems.iter().any(|e| match &e.kind {
+                    ExprKind::Ident(n) => refinable(n),
+                    _ => false,
+                })
+            }
+            ExprKind::Map(pairs) => pairs.iter().any(|(k, v)| {
+                matches!(&k.kind, ExprKind::Ident(n) if refinable(n))
+                    || matches!(&v.kind, ExprKind::Ident(n) if refinable(n))
+            }),
+            _ => false,
+        }
+    }
+
     /// `sink` is the type the value flows INTO — the annotated binding's declared type, or the
     /// assignment target's. It is projected onto each escaping ident (the element type for a
     /// list/set literal, the positional slot for a tuple, key/value for a map) and pins there, so a

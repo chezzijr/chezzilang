@@ -1992,11 +1992,65 @@ fn every_constraining_use_pins_the_element_type() {
     // CEILING, measured and deliberately not closed: an UN-ANNOTATED alias. `c := b` has no concrete
     // sink to pin from, so the requirement legitimately MOVES to `c` (`docs/syntax.md`) and the two
     // bindings are then pinned independently while sharing one runtime list — `[1, 'a']`, unchanged
-    // by everything above. Closing it needs alias-identity tracking, which would newly REJECT a
-    // rebound alias (`c := b` then `c = [1, 2]` then `b.push("a")`) — a false rejection is worse than
-    // this missing one. Neither ancestor settles it for us: Rust forbids the shape outright (`let c
-    // = b` MOVES), Python has no static element type at all.
+    // by everything above. It is NOT benign: the two static types disagree about a shared value, so
+    // it reaches a typed parameter and faults at run time — `fn addstr(xs: List[str]) -> str: return
+    // xs[0].upper()` called on the unpinned half is `ok: no type errors` and then *type int has no
+    // method 'upper'*. Closing it needs alias-identity tracking, which would newly REJECT a rebound
+    // alias (`c := b` then `c = [1, 2]` then `b.push("a")`) — a false rejection is worse than this
+    // missing one. Neither ancestor settles it for us: Rust forbids the shape outright (`let c = b`
+    // MOVES), Python has no static element type at all. ANNOTATING either binding closes it, and
+    // that escape is pinned below.
     ok("b := []\nc := b\nc.push(1)\nb.push(\"a\")\n");
+    // The documented escape must actually work: an annotated sink pins THROUGH the alias.
+    rejects(
+        "b := []\nc: List[int] = b\nc.push(1)\nb.push(\"a\")\n",
+        "expected int, found str",
+    );
+
+    // A pin whose shape is an ILLEGAL `Set` element drops `refine_receiver`'s duplicate Hashable
+    // report (that report is `merged == obj_ty` by the time `add` runs). Measured across every shape
+    // that can reach it — annotated sink, typed parameter, typed return — an illegal `Set[float]`
+    // cannot be SPELLED without erroring at the spelling site, so the fact is always still reported
+    // (twice, at the annotation); what is lost is a third copy, never the only one.
+    rejects(
+        "s := Set()\nc: Set[float] = s\ns.add(1.5)\n",
+        "must implement Hashable",
+    );
+}
+
+/// The pin's BINDING gate is `is_unrefined_empty_coll`, not the broader `contains_unknown_in_slot`.
+/// The wider predicate also matches `Option[Unknown]` (`o := None`) and a nullary generic enum
+/// variant (`e := Box.Empty`) — values that record no empty-collection site, ask for no annotation,
+/// and must stay permissive. Every program here RAN before this rule existed and must keep running;
+/// the first cut of the rule rejected all of them.
+#[test]
+fn the_pin_does_not_reach_a_none_or_a_nullary_enum_variant() {
+    const BOX: &str = "enum Box[T]:\n    Empty\n    Full(T)\n";
+
+    // Two differently-instantiated annotated sinks off one nullary variant.
+    ok(&format!(
+        "{BOX}e := Box.Empty\na: Box[int] = e\nb: Box[str] = e\n"
+    ));
+    ok("o := None\na: int? = o\nb: str? = o\n");
+    // …and through the ARGUMENT path, where the wide gate was pre-existing: this shape was rejected
+    // BEFORE any of this work, with the same false *expected Box[str], found Box[int]*.
+    ok(&format!(
+        "{BOX}fn f(b: Box[int]) -> int:\n    return 1\nfn g(b: Box[str]) -> int:\n    return 2\ne := Box.Empty\np := f(e)\nq := g(e)\n"
+    ));
+    // A `return` sink and a reassign, the other two shapes that gained a pin.
+    ok(&format!(
+        "{BOX}fn mk() -> Box[int]:\n    e := Box.Empty\n    return e\nfn mk2() -> Box[str]:\n    e := Box.Empty\n    return e\n"
+    ));
+}
+
+/// Whether an assignment PINS its source must be a property of that statement alone. Gating the
+/// target-type probe on `empty_coll_sites.is_empty()` read as a perf shortcut but decided semantics:
+/// these two programs differ only in WHERE an unrelated `z.push(1)` sits, and on that gate the second
+/// was rejected (*cannot assign Option[str] to variable of type Option[int]*) while the first ran.
+#[test]
+fn an_assignment_pin_does_not_depend_on_an_unrelated_binding() {
+    ok("z := []\no := None\nt: str? = None\nz.push(1)\nt = o\na: int? = o\n");
+    ok("z := []\no := None\nt: str? = None\nt = o\nz.push(1)\na: int? = o\n");
 }
 
 /// A pin made inside an `if`/`match` VALUE arm now PERSISTS, exactly like statement position — the

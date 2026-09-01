@@ -27,7 +27,17 @@ Single source of truth for "what am I doing next." Update after every work sessi
   agreeing arms and later consistent uses still run. **Ceiling, deliberately open:** an un-annotated
   alias (`c := b`) has no sink to pin from, so the requirement moves and the two names pin
   independently over one runtime list — closing it needs alias-identity tracking, which would falsely
-  reject a rebound alias. `docs/gaps.md` **W8-46**; `docs/syntax.md` updated.
+  reject a rebound alias — and it is not benign: the two static types disagree about a shared value,
+  so it reaches a `List[str]` parameter and faults at run time. `docs/syntax.md` carries that repro and
+  the annotation escape. **Adversarial review (2 prosecutors) on the shipped commit found 3 real
+  defects, all fixed:** the pin's binding gate was the broad `contains_unknown_in_slot`, so
+  `e := Box.Empty` / `a: Box[int] = e` / `b: Box[str] = e` (and the `None` twin) went from running to
+  rejected — the same too-wide-gate mistake W8-45(a) made, fixed the same way, and the fix also closes
+  that false rejection on the pre-existing argument path; the assign arm's probe was gated on
+  `empty_coll_sites.is_empty()`, a perf shortcut that decided SEMANTICS (moving an unrelated
+  `z.push(1)` flipped acceptance); and the barrier-removal note's justifying claim was false.
+  A prosecutor swept every `.chz` in `examples/`/`tests/`/`std/`/`benches/` pre-vs-post: zero diffs.
+  `docs/gaps.md` **W8-46**.
 
 - **A return-only type parameter that nothing binds is now reported AT THE CALL (W8-45).** `fn
   empty[T]() -> List[T]` called as `xs := empty()`, and `fn make[U]() -> U` called as `z := make()`,

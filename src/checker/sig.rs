@@ -2181,10 +2181,13 @@ impl Checker {
                 // Covers every target shape. The target type is probed speculatively (mark/rollback,
                 // the same idiom the closure branch above uses — inferring an lvalue as an rvalue
                 // would otherwise run read-side gates and double-infer a Field/Index receiver), and
-                // only when a site is actually pending, so the ordinary assignment path is untouched.
+                // only when THIS statement's value actually reads an unrefined empty binding
+                // (`escapes_unrefined_empty` — a property of this statement alone, never of what some
+                // other binding elsewhere in the file happens to be), so the ordinary assignment path
+                // is untouched.
                 // Dropping WITHOUT pinning was measured check-clean at rc=0: `b := []` /
                 // `bx.items = b` (field `List[int]`) / `b.push("a")` printed `['a']`.
-                let sink = if self.empty_coll_sites.is_empty() {
+                let sink = if !self.escapes_unrefined_empty(value) {
                     None
                 } else {
                     let mark = self.diag_mark();
