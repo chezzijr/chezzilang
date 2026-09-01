@@ -754,6 +754,61 @@ branch order. The one remaining gap: an annotation does **not** yet reach a gene
 literal* (`a: List[Heap[int]] = [Heap([], fn(x, y): x < y)]`) — annotate the closure params or use a
 turbofish there.
 
+**A parameterized protocol bound infers its type args from the type that satisfies it.** In
+`fn produce_as[R, T: Produces[R]](x: T) -> R`, the call `produce_as(IntProducer())` binds `T` from
+the argument and then recovers `R` from `IntProducer.produce`'s own return type — no annotation
+needed, exactly as an `Iterator[T]` bound has always recovered `T`:
+
+```
+protocol Produces[R]:
+    fn produce(self) -> R
+
+struct IntProducer:
+    fn produce(self) -> int:
+        return 7
+
+fn produce_as[R, T: Produces[R]](x: T) -> R:
+    return x.produce()
+
+x := produce_as(IntProducer())   # R = int
+```
+
+Conformance is structural, so a type has exactly one method of a given name and the witnessing
+signature is unique — there is no ambiguity to resolve. Every protocol param is recovered
+independently (`Pair[A, B]` pins both), and the recovery runs on a generic **method** too.
+Precedence is turbofish > arguments > this recovery > a result annotation, and a recovered type
+that disagrees with what an argument already pinned is discarded — the mismatch is still reported.
+
+Where the recovery cannot reach, a **free function** says so — `cannot infer type parameter R for
+'produce_as'; add a result annotation or explicit type arguments` — and both escapes work. Three
+cases reach it, each measured:
+
+| the bound arg is not recovered when… | example |
+|---|---|
+| no requirement method mentions the param | `protocol Tagged[R]: fn tag(self) -> str` |
+| the witness is a **builtin**, not a struct/enum/newtype | `take([1, 2, 3])` against `Popper[R]` — annotate `v: int? = …` |
+| the param comes from an **embedded** protocol | `protocol Q[R]: Produces[R]` used as `[T: Q[R]]` |
+
+**On a generic method these three cases behave differently, and only a turbofish rescues them.**
+A method call has no result-annotation seeding at all, so an annotation cannot pin the parameter
+and the inference message is not reported there either. Measured, where the free-function twin
+either runs or names the parameter:
+
+```
+struct W:
+    fn take[R, T: Popper[R]](self, x: T) -> R:
+        return x.pop()
+
+v: int? = W().take([1, 2, 3])   # type List[int] does not satisfy Popper (method 'pop' has the
+                                # wrong signature) + cannot assign R to variable of type Option[int]
+v := W().take[int?, List[int]]([1, 2, 3])   # ok
+```
+
+A method that could not conform for *any* instantiation (wrong arity, wrong parameter type, missing
+entirely) keeps its own conformance message instead — annotating would not help it. A **generic**
+method recovers nothing either: its signature is written in terms of its own type parameters, which
+mean nothing at the call site.
+
 **Inline-expr body implicitly returns (Option A, inline-only).** A named function written in the
 **inline** form (`fn a(): <stmt>` — the body on the *same line* after `:`) whose single statement is a
 **bare expression** implicitly **returns that expression's value** — exactly like a closure

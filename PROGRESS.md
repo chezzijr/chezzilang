@@ -7,6 +7,38 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **A parameterized protocol bound now INFERS its type args from the type that witnesses it
+  (W8-44).** For `fn produce_as[R, T: Produces[R]](x: T) -> R`, the call `produce_as(IntProducer())`
+  binds `T = IntProducer` from the argument and now recovers `R = int` from `IntProducer.produce`'s
+  own return type, so it compiles and runs where it used to be rejected — with the *false* message
+  `type IntProducer does not satisfy Produces (method 'produce' has the wrong signature)`, blaming a
+  method that is perfectly valid for `Produces[int]`. Rust infers the identical program and only
+  gives up on a genuine multi-impl ambiguity (`E0283`) that Chezzi cannot have: conformance here is
+  STRUCTURAL, so a type has exactly one method of a given name and therefore exactly one witnessing
+  signature. This **generalizes a recovery the tree already had twice**, hardcoded — `recover_iter_elems`
+  (`Iterator`/`Iterable`) and `recover_index_args` (`Index`/`IndexSet`/`Slice`); the new
+  `recover_protocol_args` does the same job for any user protocol by unifying its requirement
+  signatures against the witnessing methods. It runs on **both** the free-fn and the generic-method
+  path, and the method path gains the most: it has no `seed_from_hint`, so before this a result
+  annotation could not pin `R` there either (`y: int = w.produce_as(…)` reported the false
+  conformance error *plus* `cannot assign R to variable of type int`) and only turbofish worked.
+  **The fallback DIAGNOSTIC is free-fn-only, by the scoping decision for this change** — so where
+  the recovery misses on a method call (the three residuals below) the old false conformance message
+  is still what prints, and only a turbofish rescues it. Measured and recorded in `docs/gaps.md`
+  W8-44 rather than fixed here: closing it honestly needs `seed_from_hint` on the method path too,
+  which is an inference change, because otherwise the message's "add a result annotation" half is
+  advice that does not work there.
+  Precedence is unchanged — turbofish > arguments > recovery > annotation — and a recovered type
+  that disagrees with an existing binding is dropped, so the existing diagnostic still fires.
+  The inference **diagnostic** stays as the fallback for what recovery cannot reach — three measured
+  cases: a protocol param no requirement method mentions, a **builtin** witness (`nominal_method_table`
+  covers struct/enum/newtype only), and a param that comes from an **embedded** protocol — but its
+  gate is now a **probe**, not a structural test: the
+  candidates are bound to a hole and `enforce_bounds` is asked whether the bound conforms *given*
+  that hole. Measured, the structural test alone is too wide — a wrong ARITY or a wrong PARAM type
+  leaves the param un-inferred too, and there `add a result annotation` is advice that does not work,
+  so those keep their own true message alone. Checker-only; no runtime or type-erasure change.
+
 - **A module-level `fn` named after a struct in the same module now replaces its positional field
   constructor (TICKET-029), and `path.Path` uses it to take a `PathLike`.** Every free fn in
   `std.path` already took `str`/`bytes`/`bytearray`/`Path` via `PathLike`, but `Path`'s own

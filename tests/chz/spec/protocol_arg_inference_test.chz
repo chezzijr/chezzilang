@@ -1,0 +1,60 @@
+# A parameterized protocol bound's type args are recovered from the type that witnesses it, so
+# `fn produce_as[R, T: Produces[R]](x: T) -> R` no longer needs an annotation to pin `R` — this
+# generalizes the recovery that `Iterator[T]` / `Index[K, V]` bounds already had. Rust infers the
+# same program (`impl Produces<i32> for IntProducer`); Chezzi used to reject it, blaming the
+# perfectly valid `produce` for having "the wrong signature".
+
+protocol Produces[R]:
+    fn produce(self) -> R
+
+protocol Pair[A, B]:
+    fn first(self) -> A
+    fn second(self) -> B
+
+struct IntProducer:
+    fn produce(self) -> int:
+        return 7
+
+struct StrProducer:
+    fn produce(self) -> str:
+        return "hi"
+
+struct P:
+    fn first(self) -> int:
+        return 1
+    fn second(self) -> str:
+        return "two"
+
+struct Wrapper:
+    fn produce_as[R, T: Produces[R]](self, x: T) -> R:
+        return x.produce()
+
+fn produce_as[R, T: Produces[R]](x: T) -> R:
+    return x.produce()
+
+fn first_of[A, B, T: Pair[A, B]](x: T) -> A:
+    return x.first()
+
+fn second_of[A, B, T: Pair[A, B]](x: T) -> B:
+    return x.second()
+
+test fn recovers_the_bound_arg_from_the_witnessing_method():
+    # The result is the CONCRETE type, not an Unknown that merely stops the complaint — the
+    # arithmetic and the str method are what a laundered Unknown would sail through.
+    assert produce_as(IntProducer()) + 1 == 8
+    assert produce_as(StrProducer()).upper() == "HI"
+
+test fn recovers_every_param_independently():
+    assert first_of(P()) + 1 == 2
+    assert second_of(P()).len() == 3
+
+test fn recovery_also_works_on_the_generic_method_path():
+    # This path has no annotation-seeding at all, so before the recovery only turbofish worked
+    # here — a result annotation could not pin `R`.
+    w := Wrapper()
+    assert w.produce_as(IntProducer()) * 2 == 14
+    assert w.produce_as(StrProducer()).len() == 2
+
+test fn explicit_type_arguments_still_win():
+    assert produce_as[int, IntProducer](IntProducer()) == 7
+    assert Wrapper().produce_as[str, StrProducer](StrProducer()) == "hi"

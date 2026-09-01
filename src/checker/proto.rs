@@ -3829,6 +3829,148 @@ impl Checker {
         }
     }
 
+    /// The parameterized bounds whose type args are recovered by a dedicated extractor above
+    /// (`recover_iter_elems` / `recover_index_args`). They read the arg straight off the concrete
+    /// type (`iter_elem`, `index_kv`, `slice_result`) instead of unifying method signatures, so the
+    /// general recovery below must not re-derive them.
+    fn has_direct_arg_recovery(name: &str) -> bool {
+        matches!(
+            name,
+            "Iterator" | "Iterable" | "Index" | "IndexSet" | "Slice"
+        )
+    }
+
+    /// The structural method table a NOMINAL user type witnesses a protocol with — the same three
+    /// tables `satisfies_args_d`'s struct/enum/newtype arms feed to `satisfies_methods`, including
+    /// their miss-only identity-key fallbacks (gap #4). A builtin/native or existential witness
+    /// returns `None`: those satisfy through `satisfies_native` / `protocol_method_sig`, whose
+    /// signatures are not the user method table this recovery unifies against.
+    fn nominal_method_table(&self, ty: &Ty) -> Option<&HashMap<String, FnSig>> {
+        match ty {
+            Ty::Struct(k, _) => self.struct_shape(k).map(|i| &i.methods),
+            Ty::Enum(k, _) => self.enum_methods_of(k),
+            Ty::NewType(k, _) => self.newtype_methods_of(k),
+            _ => None,
+        }
+    }
+
+    /// Recover a user protocol's OWN type args from a concrete witnessing type, by unifying each
+    /// requirement signature against the actual method that witnesses it. Returns one slot per
+    /// protocol type param, in declaration order; `None` where nothing pinned it.
+    ///
+    /// Unification is one-directional — only the REQUIREMENT side carries `Ty::Param`, so nothing
+    /// the user wrote can be rewritten, and a genuinely non-conforming method recovers nothing (an
+    /// arity or static-ness mismatch skips the method entirely, exactly as `method_matches` would
+    /// reject it). `Self` is bound to the candidate and the receiving type's own params are
+    /// substituted into the actual, mirroring `satisfies_methods` so the two agree on what "matches".
+    fn recover_bound_args_from(&self, ty: &Ty, protocol: &str) -> Option<Vec<Option<Ty>>> {
+        let pinfo = self.protocol_shape(protocol)?;
+        if pinfo.type_params.is_empty() {
+            return None;
+        }
+        let methods = self.nominal_method_table(ty)?;
+        let tymap = self.nominal_param_map(ty);
+        let selfmap = HashMap::from([("Self".to_string(), ty.clone())]);
+        let mut pmap: HashMap<String, Ty> = HashMap::new();
+        for (mname, msig) in &pinfo.methods {
+            let Some(actual) = methods.get(mname) else {
+                continue;
+            };
+            if msig.params.len() != actual.params.len() || msig.is_static != actual.is_static {
+                continue;
+            }
+            // A GENERIC witness method must recover nothing: its signature is spelled in terms of
+            // its OWN type params, which exist in no scope the caller can see, so binding one into
+            // the call's substitution is name capture — `fn produce[U](self) -> List[U]` witnessing
+            // `Produces[R]` would pin `R = List[U]`, and that `U` then accidentally matches (or
+            // fails to match) whatever the CALLER happens to have named `U`. Measured pre-fix:
+            // renaming the struct's own `U` to `W` flipped the program from compiling to
+            // `expected List[U], found List[W]` — alpha-renaming must never change meaning.
+            // `satisfies_native` already refuses a generic method as a witness outright
+            // (proto.rs, "native method '…' is generic and cannot witness a protocol requirement");
+            // this is the same policy on the recovery side.
+            if !actual.type_params.is_empty() {
+                continue;
+            }
+            for (p, a) in msig.params.iter().zip(&actual.params) {
+                unify(&subst(p, &selfmap), &subst(a, &tymap), &mut pmap);
+            }
+            unify(
+                &subst(&msig.ret, &selfmap),
+                &subst(&actual.ret, &tymap),
+                &mut pmap,
+            );
+        }
+        Some(
+            pinfo
+                .type_params
+                .iter()
+                .map(|n| pmap.get(n).cloned())
+                .collect(),
+        )
+    }
+
+    /// Recover a USER protocol bound's type args from the type parameter's inferred binding — the
+    /// general case of `recover_iter_elems`/`recover_index_args`, which hardcode `Iterator`/`Index`
+    /// and read their arg off the concrete type directly.
+    ///
+    /// `fn produce_as[R, T: Produces[R]](x: T) -> R` binds `T = IntProducer` from the argument, and
+    /// `R` then falls out of `IntProducer.produce`'s own return type. Rust infers the identical
+    /// program (`impl Produces<i32> for IntProducer`), and gives up only on a genuine multi-impl
+    /// ambiguity (`E0283`) that Chezzi cannot have: conformance here is STRUCTURAL, so a type has
+    /// exactly one method of a given name and therefore exactly one witnessing signature. Without
+    /// this, `enforce_bounds` compared against `Produces[R]` with `R` still free and blamed the
+    /// perfectly valid `produce` for having "the wrong signature".
+    ///
+    /// Only a param still FREE is bound, so turbofish and argument unification keep precedence. A
+    /// recovered type that DISAGREES with an existing binding is deliberately dropped rather than
+    /// reported: the existing binding is the one the user wrote, and `enforce_bounds` below still
+    /// rejects it with its own message.
+    pub(super) fn recover_protocol_args(
+        &mut self,
+        tps: &[TypeParam],
+        sub: &mut HashMap<String, Ty>,
+        span: Span,
+    ) {
+        // This pass is SPECULATIVE — it only decides what to bind — but `resolve_bound_arg` reports
+        // into the diagnostic channels, and `enforce_bounds` re-resolves the very same bound args
+        // straight after. Without the rollback a bad bound arg is reported twice per call site
+        // (measured: `T: Produces[Bogus]` printed `unknown type 'Bogus'` twice). Roll back through
+        // the paired helpers rather than truncating a channel by hand, so `warnings` stays in step.
+        let mark = self.diag_mark();
+        let mut binds: Vec<(Ty, Ty)> = Vec::new();
+        for tp in tps {
+            let Some(concrete) = sub.get(&tp.name).cloned() else {
+                continue;
+            };
+            for b in &tp.bounds {
+                if b.args.is_empty() || Self::has_direct_arg_recovery(&b.name) {
+                    continue;
+                }
+                let Some(recovered) = self.recover_bound_args_from(&concrete, &b.name) else {
+                    continue;
+                };
+                for (arg, rec) in b.args.iter().zip(recovered) {
+                    let Some(rec) = rec else {
+                        continue;
+                    };
+                    binds.push((self.resolve_bound_arg(arg, tps, span), rec));
+                }
+            }
+        }
+        self.diag_rollback(mark);
+        for (arg_ty, recovered) in binds {
+            // Bind only a still-free param, and never launder `Unknown` into one (a residual Unknown
+            // in a type param is a type-check bypass). A pinned param keeps what pinned it.
+            if let Ty::Param(n) = arg_ty
+                && !recovered.is_unknown()
+                && !sub.contains_key(&n)
+            {
+                sub.insert(n, recovered);
+            }
+        }
+    }
+
     /// Enforce each type parameter's declared protocol bounds against its inferred binding. A
     /// parameterized bound (`Container[int]`) supplies type args, resolved here (sibling params in
     /// scope) and checked structurally with the protocol's params substituted.
@@ -4187,6 +4329,73 @@ impl Checker {
         }
     }
 
+    /// PROBE for a result-only type parameter that another parameter's protocol bound needs, and
+    /// bind each candidate to `Unknown` so the caller can ask whether the bound is satisfiable
+    /// *given a hole there*. Returns the candidates in declaration order; the caller decides
+    /// whether they are the real cause (see the call site in `infer_generic_call`).
+    ///
+    /// `recover_protocol_args` has already pinned every param recoverable from a witnessing
+    /// method, so reaching here means the bound genuinely supplied nothing. Expected-result and
+    /// explicit-type-argument inference have also run. Params mentioned by an argument slot are
+    /// excluded because the closure-return loop-back later in the call may still recover them.
+    ///
+    /// The `Unknown` binding is load-bearing, not cleanup: `method_matches` compares through
+    /// `compatible`, where `Unknown` is a wildcard, so it turns the follow-up `enforce_bounds`
+    /// into exactly the question "would this conform if the param were inferable?".
+    fn probe_uninferable_dependent_result_params(
+        &mut self,
+        sig: &FnSig,
+        sub: &mut HashMap<String, Ty>,
+        span: Span,
+    ) -> Vec<String> {
+        let wanted: std::collections::HashSet<String> =
+            sig.type_params.iter().map(|tp| tp.name.clone()).collect();
+        let mut in_result = Vec::new();
+        ty_collect_params(&sig.ret, Some(&wanted), &mut in_result);
+        let mut in_params = Vec::new();
+        for param in &sig.params {
+            ty_collect_params(param, Some(&wanted), &mut in_params);
+        }
+
+        let candidates: std::collections::HashSet<String> = in_result
+            .into_iter()
+            .filter(|n| !in_params.contains(n) && !sub.contains_key(n))
+            .collect();
+        if candidates.is_empty() {
+            return Vec::new();
+        }
+
+        // Same speculative-pass rollback as `recover_protocol_args`: `resolve_bound_arg` REPORTS,
+        // and `enforce_bounds` re-resolves these very args immediately after, so without the mark a
+        // bad bound arg is printed twice on the call-site span. This helper is the second of the two
+        // pre-`enforce_bounds` passes that resolve bound args; both need the pair.
+        let mark = self.diag_mark();
+        let mut needed_by_bound = Vec::new();
+        for tp in &sig.type_params {
+            if !sub.get(&tp.name).is_some_and(|ty| !ty.is_unknown()) {
+                continue;
+            }
+            for bound in &tp.bounds {
+                for arg in &bound.args {
+                    let resolved = self.resolve_bound_arg(arg, &sig.type_params, span);
+                    ty_collect_params(&resolved, Some(&candidates), &mut needed_by_bound);
+                }
+            }
+        }
+        self.diag_rollback(mark);
+
+        // Preserve declaration order and probe each independently if multiple result params feed
+        // parameterized bounds.
+        let mut probed = Vec::new();
+        for tp in &sig.type_params {
+            if needed_by_bound.contains(&tp.name) {
+                sub.insert(tp.name.clone(), Ty::Unknown);
+                probed.push(tp.name.clone());
+            }
+        }
+        probed
+    }
+
     /// Type-check a call to a generic function: infer each type parameter from the arguments,
     /// enforce the declared bounds, and substitute into the return type. Shared by the bare callee
     /// (local or `from`-imported) and the module-qualified one (`m.f(...)`) — M24's witness record is
@@ -4298,6 +4507,10 @@ impl Checker {
         // element), then enforce every declared bound against its inferred binding.
         self.recover_iter_elems(&sig.type_params, &mut subst_map, span);
         self.recover_index_args(&sig.type_params, &mut subst_map, span);
+        // …and the same recovery for a USER parameterized bound (`T: Produces[R]` pins `R` from the
+        // bound type's own `produce`), so it no longer needs an annotation the way `Iterator[T]`
+        // never did.
+        self.recover_protocol_args(&sig.type_params, &mut subst_map, span);
         // Expected-type checking-mode: a `let`/return/param annotation seeds any type param the args
         // left FREE by unifying the declared RETURN type (already `Ty::Param`-bearing) against the
         // hint — so `xs: List[int] = empty()` pins a return-only `T`, and the deadlock probe below
@@ -4328,7 +4541,27 @@ impl Checker {
             &mut subst_map,
             span,
         );
+        // An un-inferred type param and a genuinely non-conforming method BOTH surface as a bound
+        // failure, and only one of them is the user's problem — so decide which by measurement, not
+        // by the shape of the signature. Bind the candidates to a hole, then ask `enforce_bounds`:
+        // if the bound conforms with the hole, the missing inference IS the cause; if it still
+        // fails, the method could not conform for ANY instantiation and its own message is the true
+        // one. Measured, the structural test alone is too wide — a wrong ARITY or a wrong PARAM
+        // type leaves the param un-inferred too, and there "add a result annotation" is advice that
+        // does not work (`docs/gaps.md` W8-43's neighbour table).
+        let probed = self.probe_uninferable_dependent_result_params(sig, &mut subst_map, span);
+        let before = self.errors.len();
         self.enforce_bounds(&sig.type_params, &subst_map, span);
+        if self.errors.len() == before {
+            for pname in probed {
+                self.error(
+                    span,
+                    format!(
+                        "cannot infer type parameter {pname} for '{name}'; add a result annotation or explicit type arguments"
+                    ),
+                );
+            }
+        }
         // Each argument must match its parameter's substituted type (catches a type param used in
         // two positions with conflicting types, e.g. `max(1, "x")`), AND recover a return-only type
         // param from an inferable closure/fn body (Bug D's loop-back, now shared with the method
@@ -4495,6 +4728,10 @@ impl Checker {
         // Recover element types from `Iterator[T]` bounds, then enforce every declared bound.
         self.recover_iter_elems(mtps, &mut mmap, span);
         self.recover_index_args(mtps, &mut mmap, span);
+        // Same user-parameterized-bound recovery as the free-fn path. It matters MORE here: this
+        // path has no `seed_from_hint`, so before the recovery a `[R, T: Produces[R]]` METHOD could
+        // not be pinned by a result annotation either — only turbofish worked.
+        self.recover_protocol_args(mtps, &mut mmap, span);
         self.enforce_bounds(mtps, &mmap, span);
         // The receiver must still match its declared type AFTER substitution. Without this, a method
         // type param in receiver position (`fn m[U](self: U)`) turbofished to a contradicting type

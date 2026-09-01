@@ -1487,6 +1487,294 @@ fn generic_call_with_mismatched_type_args_rejected() {
 }
 
 #[test]
+fn parameterized_protocol_bound_infers_its_arg_from_the_witnessing_method() {
+    const SRC: &str = "\
+protocol Produces[R]:
+    fn produce(self) -> R
+
+struct IntProducer:
+    fn produce(self) -> int:
+        return 7
+
+fn produce_as[R, T: Produces[R]](x: T) -> R:
+    return x.produce()
+";
+
+    // `T` binds to `IntProducer` from the argument; `R` must then fall out of `IntProducer.produce`'s
+    // own return type, exactly as Rust infers `impl Produces<i32> for IntProducer` with no
+    // annotation. This used to blame the perfectly valid `produce` for a "wrong signature".
+    ok(&format!("{SRC}\nx := produce_as(IntProducer())\n"));
+
+    // …and `R` must be the CONCRETE `int`, not an `Unknown` that merely stops the complaint — the
+    // `+ 1` is what a laundered `Unknown` would sail through.
+    ok(&format!("{SRC}\nx := produce_as(IntProducer()) + 1\n"));
+
+    // The pre-existing escapes keep working, and keep precedence over the recovery.
+    ok(&format!(
+        "{SRC}\nx: int = produce_as(IntProducer())\ny := produce_as[int, IntProducer](IntProducer())\n"
+    ));
+
+    // Every protocol param is recovered independently, including one no argument mentions.
+    ok("\
+protocol Pair[A, B]:
+    fn first(self) -> A
+    fn second(self) -> B
+
+struct P:
+    fn first(self) -> int:
+        return 1
+    fn second(self) -> str:
+        return \"s\"
+
+fn both[A, B, T: Pair[A, B]](x: T) -> A:
+    return x.first()
+y := both(P()) + 1
+");
+
+    // `StrProducer` genuinely satisfies `Produces[str]`, so the conformance is REAL and the error
+    // belongs to the annotation, not to `produce`. Rust reports the identical shape on the same
+    // program — `expected i32, found String` (E0308), not a trait error — where Chezzi used to
+    // blame `produce` for a "wrong signature". Recovering `R` is what moved the blame to the truth.
+    rejects(
+        &format!(
+            "{SRC}\nstruct StrProducer:\n    fn produce(self) -> str:\n        return \"no\"\nx: int = produce_as(StrProducer())\n"
+        ),
+        "cannot assign str to variable of type int",
+    );
+
+    // An explicit binding wins over the recovery: `R` is pinned to `str` by `seed`, so the
+    // recovered `int` is dropped and the real conformance failure is still reported.
+    rejects(
+        "\
+protocol Produces[R]:
+    fn produce(self) -> R
+struct IntProducer:
+    fn produce(self) -> int:
+        return 7
+fn produce_as[R, T: Produces[R]](x: T, seed: R) -> R:
+    return x.produce()
+y := produce_as(IntProducer(), \"hello\")
+",
+        "method 'produce' has the wrong signature",
+    );
+
+    // Not a general ban on calls whose result type stays free.
+    ok("fn empty[T]() -> List[T]:\n    return []\nxs := empty()\n");
+}
+
+/// The same recovery on the generic-METHOD path, which has no `seed_from_hint` — before this,
+/// even a result annotation could not pin `R` there (`y: int = w.produce_as(…)` reported BOTH a
+/// false "wrong signature" and "cannot assign R to variable of type int"); only turbofish worked.
+#[test]
+fn parameterized_protocol_bound_infers_its_arg_on_the_method_path() {
+    const SRC: &str = "\
+protocol Produces[R]:
+    fn produce(self) -> R
+
+struct IntProducer:
+    fn produce(self) -> int:
+        return 7
+
+struct Wrapper:
+    fn produce_as[R, T: Produces[R]](self, x: T) -> R:
+        return x.produce()
+";
+    ok(&format!(
+        "{SRC}\ny := Wrapper().produce_as(IntProducer()) + 1\n"
+    ));
+    ok(&format!(
+        "{SRC}\ny: int = Wrapper().produce_as(IntProducer())\n"
+    ));
+    ok(&format!(
+        "{SRC}\ny := Wrapper().produce_as[int, IntProducer](IntProducer())\n"
+    ));
+}
+
+/// The inference diagnostic's gate is a PROBE, not a structural test. In each of these `R` is also
+/// un-inferred, but the method cannot conform for ANY instantiation — so "add a result annotation"
+/// is advice that does not work (measured: annotating each of these still fails), and the true
+/// conformance error must be the ONLY one reported. A structural gate reads green on the tests
+/// above while getting every one of these wrong.
+#[test]
+fn uninferred_protocol_param_never_masks_a_real_conformance_failure() {
+    const P: &str = "\
+protocol Produces[R]:
+    fn produce(self) -> R
+
+fn produce_as[R, T: Produces[R]](x: T) -> R:
+    return x.produce()
+";
+    let only = |src: &str, needle: &str| {
+        let errs = check_src(src);
+        assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
+        assert!(
+            errs[0].message.contains(needle),
+            "expected {needle:?}, got: {errs:?}"
+        );
+        assert!(
+            !errs[0].message.contains("cannot infer type parameter"),
+            "the un-inferred param is not the cause here: {errs:?}"
+        );
+    };
+
+    // The method is absent entirely.
+    only(
+        &format!(
+            "{P}\nstruct NoMethod:\n    fn other(self) -> int:\n        return 7\ny := produce_as(NoMethod())\n"
+        ),
+        "missing method 'produce'",
+    );
+
+    // Wrong ARITY — no instantiation of `R` can fix it.
+    only(
+        &format!(
+            "{P}\nstruct ArityBad:\n    fn produce(self, extra: int) -> int:\n        return 7\ny := produce_as(ArityBad())\n"
+        ),
+        "method 'produce' has the wrong signature",
+    );
+
+    // Wrong PARAM type, with `R` still only in return position.
+    only(
+        "\
+protocol Conv[R]:
+    fn conv(self, k: str) -> R
+struct C:
+    fn conv(self, k: int) -> int:
+        return 7
+fn go[R, T: Conv[R]](x: T) -> R:
+    return x.conv(\"a\")
+y := go(C())
+",
+        "method 'conv' has the wrong signature",
+    );
+
+    // A non-parameterized protocol is untouched by any of this.
+    only(
+        "\
+protocol Show:
+    fn show(self) -> str
+struct Bad:
+    fn show(self) -> int:
+        return 1
+fn p[T: Show](x: T) -> str:
+    return x.show()
+y := p(Bad())
+",
+        "method 'show' has the wrong signature",
+    );
+}
+
+/// A GENERIC witness method must recover NOTHING. Its signature is spelled in terms of its own
+/// type params, which exist in no scope the caller can see, so binding one into the call's
+/// substitution is name capture: measured on the first cut, `fn produce[U](self) -> List[U]`
+/// witnessing `Produces[R]` pinned `R = List[U]` and that `U` leaked out as `expected List[U],
+/// found List[W]` — a binder present in no caller scope. `satisfies_native` already refuses a
+/// generic method as a witness outright, for exactly this reason; this is that policy on the
+/// recovery side.
+///
+/// NOTE the separate, PRE-EXISTING bug this test deliberately does not assert away: when the
+/// caller's own type param happens to share the witness's name, `method_matches` compares the two
+/// `Ty::Param("U")`s as equal and the program conforms. That capture lives in the conformance
+/// check, not in the recovery — measured identical with the recovery call sites disabled — and
+/// narrowing it is its own change. See `docs/gaps.md` W8-44.
+#[test]
+fn a_generic_witness_method_recovers_nothing() {
+    const SRC: &str = "\
+protocol Produces[R]:
+    fn produce(self) -> R
+
+struct G:
+    fn produce[U](self) -> List[U]:
+        return []
+
+fn produce_as[R, T: Produces[R]](x: T) -> R:
+    return x.produce()
+";
+    // With nothing else to pin `R`, the recovery must leave it free rather than bind it to `G`'s
+    // own `U` — so this reports the inference failure, never a type mentioning a foreign binder.
+    let errs = check_src(&format!("{SRC}\ny := produce_as(G())\n"));
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("cannot infer type parameter R")),
+        "expected the inference failure, got: {errs:?}"
+    );
+    for e in &errs {
+        assert!(
+            !e.message.contains("List[U]"),
+            "leaked the witness method's own binder into the call site: {e:?}"
+        );
+    }
+}
+
+/// BOTH pre-`enforce_bounds` passes resolve the bound args speculatively — they only decide what to
+/// bind/probe — so neither may leave diagnostics behind for `enforce_bounds` to report a second time.
+/// Measured on the first cut: a bad bound arg printed `unknown type 'Bogus'` twice on the SAME
+/// call-site span.
+///
+/// The two cases below are NOT redundant, and the first version of this test had only the second.
+/// `recover_protocol_args` runs on every call; the PROBE runs only when the signature has a
+/// result-only type param, so a `-> int` signature exercises one pass and silently skips the other.
+/// That is exactly how the first fix shipped with the probe's duplicate still live and this test
+/// green — a widening is untested by its own suite unless the test hits every pass it widened.
+#[test]
+fn neither_speculative_pass_duplicates_bound_arg_diagnostics() {
+    let at_call_site = |src: &str| -> usize {
+        let errs = check_src(src);
+        let n = errs
+            .iter()
+            .filter(|e| e.message.contains("Bogus") && e.span.line == 8)
+            .count();
+        assert!(
+            n > 0,
+            "expected the bad bound arg at the call site: {errs:?}"
+        );
+        n
+    };
+    const HEAD: &str = "\
+protocol Produces[R]:
+    fn produce(self) -> R
+struct IntP:
+    fn produce(self) -> int:
+        return 1
+";
+    // (a) recovery pass only — no result-only type param, so the probe never runs.
+    assert_eq!(
+        at_call_site(&format!(
+            "{HEAD}fn go[T: Produces[Bogus]](x: T) -> int:\n    return 1\ny := go(IntP())\n"
+        )),
+        1,
+        "recovery pass duplicated the bound-arg diagnostic"
+    );
+    // (b) recovery pass AND the probe — `R` is result-only, which is what turns the probe on.
+    assert_eq!(
+        at_call_site(&format!(
+            "{HEAD}fn go[R, T: Produces[Bogus]](x: T) -> R:\n    return x.produce()\ny := go(IntP())\n"
+        )),
+        1,
+        "the probe duplicated the bound-arg diagnostic"
+    );
+}
+
+/// The residual the diagnostic still owns: a protocol param named by NO requirement method, so
+/// there is nothing to recover it from and the bound conforms with a hole in it.
+#[test]
+fn protocol_param_no_method_mentions_reports_the_inference_failure() {
+    rejects(
+        "\
+protocol Tagged[R]:
+    fn tag(self) -> str
+struct S:
+    fn tag(self) -> str:
+        return \"s\"
+fn go[R, T: Tagged[R]](x: T) -> R:
+    return x.tag()
+y := go(S())
+",
+        "cannot infer type parameter R for 'go'; add a result annotation or explicit type arguments",
+    );
+}
+
+#[test]
 fn unbounded_generic_passthrough_ok() {
     ok("fn first[T](a: T, b: T) -> T:\n    return a\nx := first(1, 2)\ny := first(\"a\", \"b\")\n");
 }
@@ -18201,15 +18489,16 @@ fn documented_iterable_bound_forms_unchanged() {
 
 /// THE EDGE, fenced in both directions. A struct with ONLY `iter` (no `next`):
 /// - under an `[S: Iterable[T], T]` BOUND, `T` is still not recovered (the documented known limit —
-///   `iter_elem` is None for it and only `struct_iterable_elem` sees it; unchanged by this fix);
+///   `iter_elem` is None for it and only `struct_iterable_elem` sees it); the rejection now names
+///   that unresolved `T` rather than falsely blaming the valid `iter` signature;
 /// - passed to a param ANNOTATED `Iterable[int]` it now WORKS, because the annotation is the source
 ///   of truth for `T` and the runtime drives it through the same `IterableToCursor` conversion.
 #[test]
 fn iter_only_struct_bound_recovery_still_not_total() {
-    // BOUND position: element type not recovered -> still rejects (the documented shape).
+    // BOUND position: element type not recovered -> still rejects, now on the actual inference gap.
     rejects(
         "struct Wrap:\n    xs: List[int]\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn to_list[S: Iterable[T], T](xs: S) -> List[T]:\n    out := []\n    for x in xs:\n        out.push(x)\n    return out\nfn main():\n    print(to_list(Wrap([1, 2])))\nmain()\n",
-        "type Wrap does not satisfy Iterable",
+        "cannot infer type parameter T for 'to_list'",
     );
     // …and the concrete-arg workaround the docs prescribe still works.
     ok(
