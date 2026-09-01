@@ -30,10 +30,21 @@ Single source of truth for "what am I doing next." Update after every work sessi
   **Known ceiling, unchanged:** an annotation still does not reach through a collection literal
   (`a: List[List[int]] = [empty()]`), so that now reports the un-inferable `T` too — the program was
   already rejected there, and the new message names the fix.
-  **Still divergent from Rust and NOT closed:** `xs := empty()` followed by `xs.push(1)` — Rust
-  infers `T` from the later use, Chezzi rejects, because Chezzi resolves each statement instead of
-  deferring unification whole-body. Closing that is deferred type-variable resolution, its own
-  milestone.
+  **The late-use direction is now closed too (same row), and it needed no new inference engine.**
+  Chezzi already had refine-on-first-use pinning for an `Unknown` in a container SLOT — that is why
+  `xs := []` then `xs.push(1)` has always worked. A generic producer simply never reached it: an
+  un-inferable return param leaked a rigid `Ty::Param` instead. So when the unbound param sits in a
+  slot, it is now filled with `Unknown`, making `fn empty[T]() -> List[T]` produce **exactly** the
+  type `[]` produces — after which the existing machinery does the rest. `xs := empty()` /
+  `xs.push(1)` now infers `List[int]`, matching Rust; a conflicting second push still rejects; and
+  with no later use it gets the literal's own *cannot infer element type of empty collection* error,
+  so producer and literal are now indistinguishable in both directions.
+  **The cut is `contains_unknown_in_slot`, and it is load-bearing:** it answers `false` for a BARE
+  `Unknown` ("bare sentinel — never refine"), which is what keeps `fn make[U]() -> U` a hard error.
+  A bare degrade would be unsound — `Unknown` is universally assignable, so every downstream use
+  would be silently accepted, the exact regression a previous review caught and reverted for
+  `fn first[U](xs: List[U]) -> U` (`first([]) + 1` must stay *cannot apply + to U and int*, and is
+  pinned by a test).
 
 - **A parameterized protocol bound now INFERS its type args from the type that witnesses it
   (W8-44).** For `fn produce_as[R, T: Produces[R]](x: T) -> R`, the call `produce_as(IntProducer())`

@@ -824,6 +824,19 @@ construction all pin it. The rule is *return-only*: a parameter that also appear
 parameter has its own diagnostic (`tag([])` reports at each later `push`, naming the construction
 site). A parameter default is exempt where it is declared — it is re-checked where it is spliced.
 
+The example above is the **bare** case — `List[T]` is a container, so it is deferred instead, and a
+**later statement** can pin it exactly as it can for an empty literal:
+
+```
+xs := empty()      # List[Unknown] so far — same as `xs := []`
+xs.push(1)         # pins it: List[int]
+```
+
+A generic empty producer is indistinguishable from the literal in both directions: a conflicting
+second `push` is rejected, and with no pinning use at all you get the literal's own error
+(`cannot infer element type of empty collection`). Only a parameter that IS the whole return type
+(`fn make[U]() -> U`) is refused at the call — there is no slot to defer into.
+
 **Inline-expr body implicitly returns (Option A, inline-only).** A named function written in the
 **inline** form (`fn a(): <stmt>` — the body on the *same line* after `:`) whose single statement is a
 **bare expression** implicitly **returns that expression's value** — exactly like a closure

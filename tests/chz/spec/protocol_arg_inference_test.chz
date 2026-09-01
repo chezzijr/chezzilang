@@ -78,3 +78,26 @@ test fn a_result_annotation_pins_the_param_on_the_method_path():
 test fn method_and_free_fn_agree():
     assert produce_as(IntProducer()) == Taker().take(IntProducer())
     assert produce_as(StrProducer()) == Taker().take(StrProducer())
+
+fn empty_of[T]() -> List[T]:
+    return []
+
+test fn a_generic_empty_producer_is_pinned_by_a_later_use():
+    # `T` cannot be bound AT the call, but the result is `List[Unknown]` — the same type `[]`
+    # produces — so the next statement pins the element, exactly as it does for a bare literal.
+    # Rust infers the identical program from the later use.
+    xs := empty_of()
+    xs.push(1)
+    xs.push(2)
+    assert xs == [1, 2]
+
+    ys := empty_of()
+    ys.push("a")
+    assert ys == ["a"]
+
+test fn the_generic_producer_matches_the_literal():
+    a := empty_of()
+    a.push(7)
+    b := []
+    b.push(7)
+    assert a == b

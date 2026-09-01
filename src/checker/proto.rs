@@ -4595,7 +4595,7 @@ impl Checker {
             &sig.params,
             &sig.ret,
             &sig.type_params,
-            &subst_map,
+            &mut subst_map,
             span,
         );
         subst(&sig.ret, &subst_map)
@@ -4625,7 +4625,7 @@ impl Checker {
         params: &[Ty],
         ret: &Ty,
         tps: &[TypeParam],
-        sub: &HashMap<String, Ty>,
+        sub: &mut HashMap<String, Ty>,
         span: Span,
     ) {
         if self.decl_site_default {
@@ -4647,19 +4647,50 @@ impl Checker {
             ty_collect_params(p, Some(&wanted), &mut in_params);
         }
         // Declaration order, so a multi-param signature reads left-to-right.
-        for tp in tps {
-            if in_ret.contains(&tp.name)
-                && !in_params.contains(&tp.name)
-                && !sub.contains_key(&tp.name)
-            {
-                self.error(
-                    span,
-                    format!(
-                        "cannot infer type parameter {} for '{name}'; add a result annotation or explicit type arguments",
-                        tp.name
-                    ),
-                );
-            }
+        let unbound: Vec<&TypeParam> = tps
+            .iter()
+            .filter(|tp| {
+                in_ret.contains(&tp.name)
+                    && !in_params.contains(&tp.name)
+                    && !sub.contains_key(&tp.name)
+            })
+            .collect();
+        if unbound.is_empty() {
+            return;
+        }
+
+        // DEFER instead of rejecting when the result is a REFINABLE shape — the param sits in a
+        // container SLOT, so filling it with `Unknown` produces exactly what an empty literal
+        // produces (`fn empty[T]() -> List[T]` ⇒ `List[Unknown]`, the same type as `[]`), and the
+        // existing refine-on-first-use pinning then lets a LATER statement fix the element type:
+        // `xs := empty()` / `xs.push(1)` now infers `List[int]`, matching both Rust (which infers
+        // from the later use) and Chezzi's own `xs := []` / `xs.push(1)`.
+        //
+        // `contains_unknown_in_slot` is the exact line to cut on, and it already answers the
+        // dangerous case: a BARE `Unknown` returns false ("bare sentinel — never refine"). That
+        // matters because `Unknown` is universally assignable, so degrading a bare return
+        // (`fn make[U]() -> U`) would silently accept every downstream use — the precise regression
+        // a previous review caught and reverted for `fn first[U](xs: List[U]) -> U`, where
+        // `first([]) + 1` must stay `cannot apply + to U and int`. That shape never reaches here
+        // anyway (`U` is in a parameter slot, excluded above); this guard is what keeps the
+        // return-only bare case, `z := make()`, a hard error.
+        let mut probe = sub.clone();
+        for tp in &unbound {
+            probe.insert(tp.name.clone(), Ty::Unknown);
+        }
+        if contains_unknown_in_slot(&subst(ret, &probe)) {
+            *sub = probe;
+            return;
+        }
+
+        for tp in unbound {
+            self.error(
+                span,
+                format!(
+                    "cannot infer type parameter {} for '{name}'; add a result annotation or explicit type arguments",
+                    tp.name
+                ),
+            );
         }
     }
 
@@ -4846,7 +4877,7 @@ impl Checker {
         }
         // …and the general return-only case, same rule and same wording as the free-fn path: a param
         // in the return that nothing bound is un-inferable here, bound or not.
-        self.report_uninferable_result_params(method, expected, ret, mtps, &mmap, span);
+        self.report_uninferable_result_params(method, expected, ret, mtps, &mut mmap, span);
         // The receiver must still match its declared type AFTER substitution. Without this, a method
         // type param in receiver position (`fn m[U](self: U)`) turbofished to a contradicting type
         // (`b.m[str]()` on a `Box[int]`) is unchecked — `unify` silently drops the conflict once `[str]`

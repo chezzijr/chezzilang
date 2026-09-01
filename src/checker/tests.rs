@@ -1836,14 +1836,21 @@ fn a_return_only_type_param_nothing_binds_is_reported_at_the_call() {
     const EMPTY: &str = "fn empty[T]() -> List[T]:\n    return []\n";
     const MAKE: &str = "fn make[U]() -> U:\n    return make()\n";
 
-    rejects(
-        &format!("{EMPTY}xs := empty()\n"),
-        "cannot infer type parameter T for 'empty'",
-    );
+    // A BARE return-only param is a hard error: filling it would produce a bare `Ty::Unknown`, which
+    // `assignable` treats as universally assignable, so every downstream use would be silently
+    // accepted. Rust agrees — `fn make<U>() -> U; let z = make();` is `E0282`.
     rejects(
         &format!("{MAKE}z := make()\n"),
         "cannot infer type parameter U for 'make'",
     );
+
+    // A param in a container SLOT is DEFERRED instead: the result is `List[Unknown]`, the very same
+    // type `[]` produces, so the producer is now indistinguishable from the literal in BOTH
+    // directions — a later use pins it, and with no use at all it gets the literal's own error.
+    ok(&format!("{EMPTY}xs := empty()\nxs.push(1)\n"));
+    for src in [format!("{EMPTY}xs := empty()\n"), "xs := []\n".to_string()] {
+        rejects(&src, "cannot infer element type of empty collection");
+    }
 
     // Both escapes, and every sink that really does pin it, stay silent.
     ok(&format!("{EMPTY}xs: List[int] = empty()\n"));
@@ -1856,7 +1863,7 @@ fn a_return_only_type_param_nothing_binds_is_reported_at_the_call() {
         "{EMPTY}fn get() -> List[int]:\n    return empty()\n"
     ));
 
-    // The METHOD path reaches the same verdict.
+    // The METHOD path reaches the same verdict on the bare case.
     const BOX: &str =
         "struct Box[T]:\n    v: T\n    fn make[U](self) -> U:\n        return self.make()\n";
     rejects(
@@ -1864,6 +1871,22 @@ fn a_return_only_type_param_nothing_binds_is_reported_at_the_call() {
         "cannot infer type parameter U for 'make'",
     );
     ok(&format!("{BOX}z: str = Box(1).make()\n"));
+}
+
+/// The deferral must NEVER produce a bare `Ty::Unknown`. `Unknown` is universally assignable, so a
+/// bare-return degrade silently accepts every downstream use — the exact regression a previous
+/// review caught and reverted for `fn first[U](xs: List[U]) -> U`. `contains_unknown_in_slot` is the
+/// cut, and it answers `false` for a bare sentinel by design.
+#[test]
+fn deferring_never_degrades_a_bare_return_to_unknown() {
+    entry_rejects(
+        "fn first[U](xs: List[U]) -> U:\n    return xs[0]\nfn main():\n    x := first([])\n    print(x + 1)\n",
+        "cannot apply + to U and int",
+    );
+    entry_rejects(
+        "fn make[U]() -> U:\n    return make()\nfn main():\n    z := make()\n    print(z + 1)\n",
+        "cannot infer type parameter U for 'make'",
+    );
 }
 
 /// The rule owns ONLY the return-only case. A param that also sits in a PARAMETER slot has its own
@@ -19676,20 +19699,23 @@ fn heterogeneous_struct_list_unannotated_rejected() {
 }
 
 #[test]
-fn leaked_param_push_emits_uninferred_param_msg() {
-    // `empty[T]()` has a return-only type param T with nothing to infer it from, so `xs` is
-    // `List[<unbound Param T>]`. The FIRST push then mismatches. The diagnostic must NOT use the
-    // wrong "earlier push" narrative (this is the first push) and must accurately point at the
-    // un-inferred type parameter / construction-site fix.
-    let errs = check_src("fn empty[T]() -> List[T]:\n return []\nxs := empty()\nxs.push(5)\n");
-    assert!(
-        errs.iter()
-            .any(|e| e.message.contains("un-inferred type parameter")),
-        "expected the un-inferred-param message, got: {errs:?}"
+fn a_generic_empty_producer_is_pinned_by_a_later_use() {
+    // `empty[T]()` has a return-only `T` nothing can bind AT THE CALL — but the result is
+    // `List[Unknown]`, the very same type the `[]` literal produces, so refine-on-first-use pins the
+    // element from the LATER statement. This program used to be an error whose message merely
+    // described the leak well; Rust compiles the identical shape (`let mut xs = empty();
+    // xs.push(1);` infers `Vec<i32>`), and `xs := []` / `xs.push(1)` has always worked in Chezzi.
+    ok("fn empty[T]() -> List[T]:\n return []\nxs := empty()\nxs.push(5)\n");
+
+    // …and the pin is REAL, not a wildcard: a second, conflicting push is still rejected, with the
+    // "pinned by an earlier push" narrative that is now accurate (there really was an earlier one).
+    let errs = check_src(
+        "fn empty[T]() -> List[T]:\n return []\nxs := empty()\nxs.push(\"a\")\nxs.push(5)\n",
     );
     assert!(
-        !errs.iter().any(|e| e.message.contains("earlier")),
-        "must not use the 'earlier push' narrative, got: {errs:?}"
+        errs.iter()
+            .any(|e| e.message.contains("expected str, found int")),
+        "the first use must pin the element type, got: {errs:?}"
     );
 }
 
