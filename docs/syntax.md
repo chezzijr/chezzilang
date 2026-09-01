@@ -779,9 +779,9 @@ independently (`Pair[A, B]` pins both), and the recovery runs on a generic **met
 Precedence is turbofish > arguments > this recovery > a result annotation, and a recovered type
 that disagrees with what an argument already pinned is discarded — the mismatch is still reported.
 
-Where the recovery cannot reach, a **free function** says so — `cannot infer type parameter R for
-'produce_as'; add a result annotation or explicit type arguments` — and both escapes work. Three
-cases reach it, each measured:
+Where the recovery cannot reach, the checker says so — `cannot infer type parameter R for
+'produce_as'; add a result annotation or explicit type arguments` — and both escapes work, on a
+free function and on a method alike. Three cases reach it, each measured:
 
 | the bound arg is not recovered when… | example |
 |---|---|
@@ -789,19 +789,14 @@ cases reach it, each measured:
 | the witness is a **builtin**, not a struct/enum/newtype | `take([1, 2, 3])` against `Popper[R]` — annotate `v: int? = …` |
 | the param comes from an **embedded** protocol | `protocol Q[R]: Produces[R]` used as `[T: Q[R]]` |
 
-**On a generic method these three cases behave differently, and only a turbofish rescues them.**
-A method call has no result-annotation seeding at all, so an annotation cannot pin the parameter
-and the inference message is not reported there either. Measured, where the free-function twin
-either runs or names the parameter:
+A **generic method** behaves identically — a result annotation pins the parameter there too:
 
 ```
 struct W:
     fn take[R, T: Popper[R]](self, x: T) -> R:
         return x.pop()
 
-v: int? = W().take([1, 2, 3])   # type List[int] does not satisfy Popper (method 'pop' has the
-                                # wrong signature) + cannot assign R to variable of type Option[int]
-v := W().take[int?, List[int]]([1, 2, 3])   # ok
+v: int? = W().take([1, 2, 3])   # Some(3)
 ```
 
 A method that could not conform for *any* instantiation (wrong arity, wrong parameter type, missing

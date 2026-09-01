@@ -1590,6 +1590,74 @@ struct Wrapper:
     ));
 }
 
+/// The method path reaches the same verdict as the free-fn path on every shape — it now has BOTH
+/// halves the free-fn path had: `seed_from_hint` (so a result annotation can pin a return-only
+/// param) and the probe-gated inference diagnostic. Before, a recovery miss on a method call printed
+/// the ORIGINAL false `has the wrong signature` message, or nothing at all with the param left free.
+#[test]
+fn the_method_path_matches_the_free_fn_path_on_every_shape() {
+    // (a) recovery misses (builtin witness) -> the ANNOTATION now pins `R`, as on a free fn.
+    //     Measured before: `wrong signature` PLUS `cannot assign R to variable of type Option[int]`.
+    ok("\
+protocol Popper[R]:
+    fn pop(self) -> R
+struct W:
+    fn take[R, T: Popper[R]](self, x: T) -> R:
+        return x.pop()
+v: int? = W().take([1, 2, 3])
+");
+
+    // (b) nothing can reach `R` -> NAME it, rather than reporting `ok: no type errors` with `R` free.
+    rejects(
+        "\
+protocol Tagged[R]:
+    fn tag(self) -> str
+struct S:
+    fn tag(self) -> str:
+        return \"s\"
+struct W:
+    fn go[R, T: Tagged[R]](self, x: T) -> R:
+        return self.go(x)
+y := W().go(S())
+",
+        "cannot infer type parameter R for 'go'; add a result annotation or explicit type arguments",
+    );
+
+    // (c) the too-wide-gate neighbours, on this path too: `R` is un-inferred in each, but the method
+    //     cannot conform for ANY instantiation, so the true message must be the ONLY one.
+    let only = |src: &str, needle: &str| {
+        let errs = check_src(src);
+        assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
+        assert!(
+            errs[0].message.contains(needle),
+            "expected {needle:?}: {errs:?}"
+        );
+        assert!(
+            !errs[0].message.contains("cannot infer type parameter"),
+            "the un-inferred param is not the cause here: {errs:?}"
+        );
+    };
+    const P: &str = "\
+protocol Produces[R]:
+    fn produce(self) -> R
+struct W:
+    fn go[R, T: Produces[R]](self, x: T) -> R:
+        return x.produce()
+";
+    only(
+        &format!(
+            "{P}struct NoMethod:\n    fn other(self) -> int:\n        return 7\ny := W().go(NoMethod())\n"
+        ),
+        "missing method 'produce'",
+    );
+    only(
+        &format!(
+            "{P}struct ArityBad:\n    fn produce(self, extra: int) -> int:\n        return 7\ny := W().go(ArityBad())\n"
+        ),
+        "method 'produce' has the wrong signature",
+    );
+}
+
 /// The inference diagnostic's gate is a PROBE, not a structural test. In each of these `R` is also
 /// un-inferred, but the method cannot conform for ANY instantiation — so "add a result annotation"
 /// is advice that does not work (measured: annotating each of these still fails), and the true
@@ -22237,14 +22305,28 @@ const RETURN_ONLY_PARAM_DEFS: &str =
     "struct Box[T]:\n    v: T\n    fn make[U](self) -> U:\n        return self.make()\n";
 
 #[test]
-fn return_only_method_type_param_stays_uninferable_rejected() {
-    // `U` appears ONLY in `-> U`, in no parameter → un-inferable → assigning the result to a concrete
-    // type must be REJECTED (naming the un-inferable `U`). An unconditional degrade wrongly accepted.
+fn return_only_method_type_param_is_pinned_by_the_annotation() {
+    // `U` appears ONLY in `-> U`, in no parameter — so no ARGUMENT can bind it, but a result
+    // annotation can, and now does: the method path gained `seed_from_hint`, which the free-fn path
+    // has always had (`ys: List[str] = geo.empty_list()`).
+    //
+    // This assertion was inverted until then: it required `cannot assign U to variable of type str`,
+    // encoding the method path's MISSING hint as if it were intended semantics. Rust is the owning
+    // ancestor for generics and settles it — `impl<T> Box<T> { fn make<U>(&self) -> U }` with
+    // `let z: String = b.make();` COMPILES, and only the unannotated `let z = b.make();` is refused
+    // (`E0282: type annotations needed`).
+    entry_ok(&format!(
+        "{RETURN_ONLY_PARAM_DEFS}fn main():\n    b := Box(1)\n    z: str = b.make()\n    print(z)\n"
+    ));
+
+    // The guard this test really exists for is intact: `U` is pinned to the CONCRETE `str`, not
+    // degraded to `Unknown` (which `assignable` treats as universally assignable and which would let
+    // a wrong static type escape onto the value). `str + 1` is what an `Unknown` would sail through.
     entry_rejects(
         &format!(
-            "{RETURN_ONLY_PARAM_DEFS}fn main():\n    b := Box(1)\n    z: str = b.make()\n    print(z)\n"
+            "{RETURN_ONLY_PARAM_DEFS}fn main():\n    b := Box(1)\n    z: str = b.make()\n    print(z + 1)\n"
         ),
-        "cannot assign U to variable of type str",
+        "cannot apply + to str and int",
     );
 }
 

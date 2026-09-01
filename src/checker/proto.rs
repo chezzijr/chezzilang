@@ -4620,6 +4620,11 @@ impl Checker {
         min_params: usize,
         key_span: Span,
         span: Span,
+        // The enclosing `let`/annotation's expected type, same role as on the free-fn path: it pins
+        // a type param that appears ONLY in the return. Threaded here so `v: int? = w.take(xs)`
+        // solves `R` — before this the method path had no hint at all, so a result annotation could
+        // not pin a return-only param and only a turbofish worked.
+        hint: Option<&Ty>,
     ) -> Ty {
         // The first parameter is the receiver (bound from `obj`). A method with NO params has no
         // receiver slot — reject, mirroring the non-generic path.
@@ -4732,7 +4737,43 @@ impl Checker {
         // path has no `seed_from_hint`, so before the recovery a `[R, T: Produces[R]]` METHOD could
         // not be pinned by a result annotation either — only turbofish worked.
         self.recover_protocol_args(mtps, &mut mmap, span);
+        // Expected-type checking-mode, after the recoveries so precedence stays
+        // turbofish > arguments > recovery > annotation (`seed_from_hint` only fills a param still
+        // FREE). The free-fn path has done this all along; the method path had no hint plumbed to
+        // it, which is why `v: int? = w.take(xs)` used to report a false conformance error PLUS
+        // `cannot assign R to variable of type Option[int]`.
+        seed_from_hint(hint, ret, &mut mmap);
+        // …and the same probe-gated inference diagnostic as the free-fn path, so a recovery miss
+        // names the un-inferable param instead of blaming the witnessing method's signature. The
+        // gate is the `enforce_bounds` error-count delta: bind the candidates to a hole, and report
+        // only if the bound conforms GIVEN that hole (a method that could not conform for ANY
+        // instantiation keeps its own true message instead).
+        // The probe reads only `params` / `ret` / `type_params`; the rest is inert padding.
+        let msig = FnSig {
+            params: expected.to_vec(),
+            labels: Vec::new(),
+            ret: ret.clone(),
+            type_params: mtps.to_vec(),
+            where_bounds: Vec::new(),
+            min_params: expected.len(),
+            is_static: false,
+            doc: None,
+            witness_params: Vec::new(),
+            variadic: None,
+        };
+        let probed = self.probe_uninferable_dependent_result_params(&msig, &mut mmap, span);
+        let before = self.errors.len();
         self.enforce_bounds(mtps, &mmap, span);
+        if self.errors.len() == before {
+            for pname in probed {
+                self.error(
+                    span,
+                    format!(
+                        "cannot infer type parameter {pname} for '{method}'; add a result annotation or explicit type arguments"
+                    ),
+                );
+            }
+        }
         // The receiver must still match its declared type AFTER substitution. Without this, a method
         // type param in receiver position (`fn m[U](self: U)`) turbofished to a contradicting type
         // (`b.m[str]()` on a `Box[int]`) is unchecked — `unify` silently drops the conflict once `[str]`

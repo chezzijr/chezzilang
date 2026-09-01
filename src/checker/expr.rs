@@ -2251,6 +2251,9 @@ impl Checker {
         type_args: &[Ty],
         args: &[Expr],
         span: Span,
+        // Forwarded to the generic solver for the same reason as everywhere else on this path: a
+        // harvested native method carrying its own `[U]` may have it only in the return type.
+        hint: Option<&Ty>,
     ) -> NativeHandleMethod {
         let Some(sig) = self.native_handle_method(key, method, targs) else {
             return NativeHandleMethod::Miss;
@@ -2276,6 +2279,7 @@ impl Checker {
                 sig.min_params.saturating_add(1),
                 name_span,
                 span,
+                hint,
             ));
         }
         NativeHandleMethod::Concrete(sig)
@@ -2305,6 +2309,8 @@ impl Checker {
             type_args,
             args,
             span,
+            // No enclosing annotation reaches this fixed-arity native path.
+            None,
         ) {
             NativeHandleMethod::Generic(t) => t,
             NativeHandleMethod::Concrete(sig) => {
@@ -2680,7 +2686,7 @@ impl Checker {
                     if !mtps.is_empty() {
                         return self.infer_generic_method(
                             method, &params, &ret, &mtps, &mwitness, &obj_ty, type_args, args,
-                            mminp, name_span, span,
+                            mminp, name_span, span, hint,
                         );
                     }
                     // The first param is the receiver (bound implicitly from `obj`), so the call's
@@ -2849,7 +2855,7 @@ impl Checker {
                     if !mtps.is_empty() {
                         return self.infer_generic_method(
                             method, &params, &ret, &mtps, &mwitness, &obj_ty, type_args, args,
-                            mminp, name_span, span,
+                            mminp, name_span, span, hint,
                         );
                     }
                     match params.split_first() {
@@ -2945,7 +2951,7 @@ impl Checker {
                     if !mtps.is_empty() {
                         return self.infer_generic_method(
                             method, &params, &ret, &mtps, &mwitness, &obj_ty, type_args, args,
-                            mminp, name_span, span,
+                            mminp, name_span, span, hint,
                         );
                     }
                     match params.split_first() {
@@ -3085,6 +3091,7 @@ impl Checker {
                             sig.min_params.saturating_add(1),
                             name_span,
                             span,
+                            hint,
                         );
                     }
                     self.check_args_range_coll(method, &sig.params, sig.min_params, args, span);
@@ -3244,6 +3251,7 @@ impl Checker {
                     type_args,
                     args,
                     span,
+                    hint,
                 ) {
                     NativeHandleMethod::Generic(t) => t,
                     NativeHandleMethod::Concrete(sig) => {
@@ -3323,6 +3331,7 @@ impl Checker {
                         usize::MAX, // synthesized builtin sig: exact arity
                         name_span,
                         span,
+                        hint,
                     )
                 };
                 let func = |params: Vec<Ty>| Ty::Func {
@@ -3418,6 +3427,7 @@ impl Checker {
                     type_args,
                     args,
                     span,
+                    hint,
                 ) {
                     NativeHandleMethod::Generic(t) => t,
                     NativeHandleMethod::Concrete(sig) => {
@@ -3472,6 +3482,7 @@ impl Checker {
                         type_args,
                         args,
                         span,
+                        hint,
                     )
                 };
                 match resolved {
@@ -3506,6 +3517,7 @@ impl Checker {
                     type_args,
                     args,
                     span,
+                    hint,
                 ) {
                     NativeHandleMethod::Generic(t) => t,
                     NativeHandleMethod::Concrete(sig) => {
@@ -3541,6 +3553,7 @@ impl Checker {
                     type_args,
                     args,
                     span,
+                    hint,
                 ) {
                     NativeHandleMethod::Generic(t) => t,
                     NativeHandleMethod::Concrete(sig) => {

@@ -22,12 +22,19 @@ Single source of truth for "what am I doing next." Update after every work sessi
   path, and the method path gains the most: it has no `seed_from_hint`, so before this a result
   annotation could not pin `R` there either (`y: int = w.produce_as(…)` reported the false
   conformance error *plus* `cannot assign R to variable of type int`) and only turbofish worked.
-  **The fallback DIAGNOSTIC is free-fn-only, by the scoping decision for this change** — so where
-  the recovery misses on a method call (the three residuals below) the old false conformance message
-  is still what prints, and only a turbofish rescues it. Measured and recorded in `docs/gaps.md`
-  W8-44 rather than fixed here: closing it honestly needs `seed_from_hint` on the method path too,
-  which is an inference change, because otherwise the message's "add a result annotation" half is
-  advice that does not work there.
+  **The method path is now at full parity, gaining both halves the free-fn path had.** It had NO
+  expected-type seeding at all, so a result annotation could not pin a return-only param there —
+  `hint` is now threaded into `infer_generic_method` (6 call sites in `src/checker/expr.rs`) and
+  `seed_from_hint` runs after the recoveries, keeping precedence turbofish > arguments > recovery >
+  annotation. The probe-gated diagnostic is wired in there too, so a recovery miss NAMES the
+  un-inferable param instead of printing the original false conformance message (measured before:
+  `v: int? = W().take([1,2,3])` gave *wrong signature* + *cannot assign R to variable of type
+  Option[int]*, and an unreachable param gave `ok: no type errors` with `R` left free). One
+  pre-existing assertion inverted as a result: `return_only_method_type_param_stays_uninferable_rejected`
+  required `z: str = b.make()` to be REJECTED, which encoded the missing hint as if it were intended
+  semantics — Rust compiles the identical program and refuses only the UNANNOTATED `let z = b.make();`
+  (`E0282`), so the test now asserts the annotation pins it, and keeps its real guard (the param is
+  the concrete `str`, not a universally-assignable `Unknown`) via a `str + 1` probe.
   Precedence is unchanged — turbofish > arguments > recovery > annotation — and a recovered type
   that disagrees with an existing binding is dropped, so the existing diagnostic still fires.
   The inference **diagnostic** stays as the fallback for what recovery cannot reach — three measured
