@@ -10573,7 +10573,7 @@ position a chain has. (Free side-fix: `lower_carrier_option`'s synthesized `Fiel
 carrier's real `name_span`, so `a?.m(c)?.n(c)` no longer collides two distinct witness calls on one
 `WitnessKey`.)
 
-**`??` stays `Option`-only — deliberately, and now with ONE accurate error.** Reasons: it has no
+**`??` stays `Option`-only — deliberately, and now with ONE accurate error.** **SUPERSEDED 2026-09-02 (TICKET-039): `??` now also accepts a `Result`, discarding the error payload, on the owner's decision.** The "no ancestor supports it" reason below was the one measured wrong — Rust has no coalescing *operator*, but it does have the same explicit discard as a method (`r.unwrap_or(0)` compiles and yields `0`), so the ancestor supports the CAPABILITY and only the spelling differs. The rest of this paragraph and its measured error are the historical record of the decision this reversed. Reasons as filed: it has no
 spaced alternative spelling, so there was no whitespace trap to remove — only a new operator meaning to
 invent; no ancestor supports it (Rust deliberately has no coalescing operator; Swift/Kotlin/C#'s is
 Optional-only, in languages with no `Result`); and it would silently discard an error payload, which
