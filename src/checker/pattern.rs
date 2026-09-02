@@ -3305,7 +3305,10 @@ impl Checker {
             Ty::Tuple(elems) => match name.parse::<usize>() {
                 Ok(i) if i < elems.len() => elems[i].clone(),
                 _ => {
-                    self.error(obj.span, format!("tuple {obj_ty} has no element '.{name}'"));
+                    self.error(
+                        name_span,
+                        format!("tuple {obj_ty} has no element '.{name}'"),
+                    );
                     Ty::Unknown
                 }
             },
@@ -3323,7 +3326,7 @@ impl Checker {
                     // typed `Ty::Unknown`, which laundered types (the `?` unified with anything).
                     if info.methods.contains_key(name) {
                         self.error(
-                            obj.span,
+                            name_span,
                             format!(
                                 "type {obj_ty} has no field '{name}' ('{name}' is a method — methods \
                                  are not values: call it (`x.{name}(…)`) or wrap it (`fn(): x.{name}()`))"
@@ -3334,7 +3337,7 @@ impl Checker {
                 }
                 let names = self.field_names(sname);
                 self.error_help(
-                    obj.span,
+                    name_span,
                     format!("type {obj_ty} has no field '{name}'"),
                     suggest::did_you_mean(name, &names),
                 );
@@ -3389,7 +3392,7 @@ impl Checker {
             }
             Ty::Unknown => Ty::Unknown,
             other => {
-                self.error(obj.span, format!("type {other} has no field '{name}'"));
+                self.error(name_span, format!("type {other} has no field '{name}'"));
                 Ty::Unknown
             }
         }

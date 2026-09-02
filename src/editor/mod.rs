@@ -1318,6 +1318,18 @@ mod tests {
         );
     }
 
+    /// W8-17 — the LSP squiggle covers the member NAME, not the receiver. `lenght` is a 6-char
+    /// token starting at 0-based col 3 (1-based col 10, JSON `end_col` 16 minus one at each end).
+    #[test]
+    fn diag_member_miss_squiggles_the_member_name() {
+        let ds = diag("xs := [1, 2, 3]\nxs.lenght()\n");
+        assert!(!ds.is_empty(), "method typo should produce a diagnostic");
+        let d = &ds[0];
+        assert_eq!(d.line, 1);
+        assert_eq!(d.col, 3);
+        assert_eq!(d.end_col, 9);
+    }
+
     fn hov(src: &str, line: u32, ch: u32) -> Option<HoverInfo> {
         hover(
             Path::new("/nonexistent/chezzi_editor/buf.chz"),

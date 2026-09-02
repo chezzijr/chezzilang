@@ -9714,6 +9714,44 @@ fn unknown_method_span_covers_member_name_not_receiver() {
     );
 }
 
+/// W8-17 — the member-miss caret lands on the member NAME at every checker site of that class:
+/// method-miss (`expr.rs`), struct/tuple field-miss and the method-read-as-field arm (`pattern.rs`),
+/// and the assign-target field-miss (`sig.rs`).
+#[test]
+fn member_miss_span_covers_the_name_at_every_site() {
+    let cases: &[(&str, (u32, u32))] = &[
+        ("x := 1\nx.frob()\n", (2, 3)),
+        ("t := (1, \"a\")\nprint(t.5)\n", (2, 9)),
+        (
+            "struct Point:\n    x: int\n    fn get(self) -> int:\n        return self.x\np := Point(1)\nq := p.get\n",
+            (6, 8),
+        ),
+        (
+            "struct Point:\n    x: int\np := Point(1)\np.nope = 2\n",
+            (4, 3),
+        ),
+        (
+            "import std.net\n\nfn run(l: net.Listener):\n    s := l.accpet()\n",
+            (4, 12),
+        ),
+        ("s := \"ab\"\nprint(s.uper())\n", (2, 9)),
+        ("m := {\"a\": 1}\nprint(m.keyz())\n", (2, 9)),
+    ];
+    for (src, want) in cases {
+        let errs = check_entry(src);
+        assert_eq!(
+            errs.len(),
+            1,
+            "expected exactly one error for {src:?}, got: {errs:?}"
+        );
+        assert_eq!(
+            (errs[0].span.line, errs[0].span.col),
+            *want,
+            "wrong caret for {src:?}: {errs:?}"
+        );
+    }
+}
+
 /// BLOCKER 1 — cross-module struct: an imported type's error must still render BARE (`Point`), not
 /// the qualified key (`dep::Point`). Uses a two-file graph so the struct carries `<mkey>::Point`.
 #[test]

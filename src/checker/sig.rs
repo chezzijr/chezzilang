@@ -3591,7 +3591,12 @@ impl Checker {
             }
             // `p.x = v` — only data fields of a struct are assignable (not methods, not module
             // members). `infer_field` would accept those, so check the field kind here.
-            ExprKind::Field { obj, name, .. } => {
+            ExprKind::Field {
+                obj,
+                name,
+                name_span,
+                ..
+            } => {
                 let obj_ty = self.infer(obj);
                 match &obj_ty {
                     Ty::Struct(sname, targs) => {
@@ -3606,7 +3611,7 @@ impl Checker {
                             None => {
                                 let names = self.field_names(sname);
                                 self.error_help(
-                                    target.span,
+                                    *name_span,
                                     format!(
                                         "cannot assign to '{name}': type {obj_ty} has no field '{name}'"
                                     ),

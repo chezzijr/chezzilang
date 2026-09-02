@@ -722,3 +722,26 @@ fn parse_error_message_is_not_doubled() {
         "plain text must render the position exactly once, got: {stderr}"
     );
 }
+
+/// W8-17 — the member-miss JSON span's WIDTH covers the member name, not just its start column.
+/// `lenght` is 6 chars starting at 1-based col 10, so `end_col` must be 16.
+#[test]
+fn member_miss_json_spans_the_member_name() {
+    let t = TmpDir::new();
+    let p = t.write("m.chz", "xs := [1, 2, 3]\nprint(xs.lenght())\n");
+    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .args(["check", p.to_str().unwrap(), "--errors=json"])
+        .output()
+        .expect("run chezzi check --errors=json");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stdout = stdout.trim();
+
+    assert!(
+        stdout.contains("\"line\":2,\"col\":10,\"end_line\":2,\"end_col\":16"),
+        "span must cover 'lenght' (col 10..16), got: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"help\":\"did you mean 'len'?\""),
+        "help must still suggest 'len', got: {stdout}"
+    );
+}

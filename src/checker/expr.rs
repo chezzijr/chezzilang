@@ -2328,7 +2328,7 @@ impl Checker {
                 self.infer_all(args);
                 let names = self.method_names(key);
                 self.error_help(
-                    span,
+                    name_span,
                     format!("type {obj_ty} has no method '{method}'"),
                     suggest::did_you_mean(method, &names),
                 );
@@ -2606,7 +2606,7 @@ impl Checker {
                     names.extend(["line", "col", "file"].iter().map(|s| s.to_string()));
                 }
                 self.error_help(
-                    span,
+                    name_span,
                     format!("type {pname} has no method '{method}'"),
                     suggest::did_you_mean(method, &names),
                 );
@@ -2622,7 +2622,7 @@ impl Checker {
                 }
                 self.infer_all(args);
                 self.error_help(
-                    span,
+                    name_span,
                     format!(
                         "type {obj_ty} has no method '{method}' (an iterator only has `next()`)"
                     ),
@@ -2785,7 +2785,7 @@ impl Checker {
                 names.push("copy".to_string());
                 names.sort();
                 self.error_help(
-                    span,
+                    name_span,
                     format!("type {obj_ty} has no method '{method}'"),
                     suggest::did_you_mean(method, &names),
                 );
@@ -2890,7 +2890,7 @@ impl Checker {
                 self.infer_all(args);
                 let names = self.newtype_method_names(ntkey);
                 self.error_help(
-                    span,
+                    name_span,
                     format!("type {obj_ty} has no method '{method}'"),
                     suggest::did_you_mean(method, &names),
                 );
@@ -2986,7 +2986,7 @@ impl Checker {
                 self.infer_all(args);
                 let names = self.enum_method_names(ename);
                 self.error_help(
-                    span,
+                    name_span,
                     format!("type {obj_ty} has no method '{method}'"),
                     suggest::did_you_mean(method, &names),
                 );
@@ -3004,7 +3004,7 @@ impl Checker {
                 self.infer_all(args);
                 let names = self.method_names("str");
                 self.error_help(
-                    span,
+                    name_span,
                     format!("type str has no method '{method}'"),
                     suggest::did_you_mean(method, &names),
                 );
@@ -3112,7 +3112,7 @@ impl Checker {
                 self.infer_all(args);
                 let names = self.method_names("List");
                 self.error_help(
-                    span,
+                    name_span,
                     format!("type {obj_ty} has no method '{method}'"),
                     suggest::did_you_mean(method, &names),
                 );
@@ -3130,7 +3130,7 @@ impl Checker {
                 self.infer_all(args);
                 let names = self.method_names("bytes");
                 self.error_help(
-                    span,
+                    name_span,
                     format!("type bytes has no method '{method}'"),
                     suggest::did_you_mean(method, &names),
                 );
@@ -3166,7 +3166,7 @@ impl Checker {
                 self.infer_all(args);
                 let names = self.method_names("bytearray");
                 self.error_help(
-                    span,
+                    name_span,
                     format!("type bytearray has no method '{method}'"),
                     suggest::did_you_mean(method, &names),
                 );
@@ -3185,7 +3185,7 @@ impl Checker {
                 self.infer_all(args);
                 let names = self.method_names("Map");
                 self.error_help(
-                    span,
+                    name_span,
                     format!("type {obj_ty} has no method '{method}'"),
                     suggest::did_you_mean(method, &names),
                 );
@@ -3205,7 +3205,7 @@ impl Checker {
                 self.infer_all(args);
                 let names = self.method_names("Set");
                 self.error_help(
-                    span,
+                    name_span,
                     format!("type {obj_ty} has no method '{method}'"),
                     suggest::did_you_mean(method, &names),
                 );
@@ -3237,7 +3237,7 @@ impl Checker {
                 self.infer_all(args);
                 let names = self.method_names("Channel");
                 self.error_help(
-                    span,
+                    name_span,
                     format!("type {obj_ty} has no method '{method}'"),
                     suggest::did_you_mean(method, &names),
                 );
@@ -3269,7 +3269,7 @@ impl Checker {
                         self.infer_all(args);
                         let names = self.method_names("Shared");
                         self.error_help(
-                            span,
+                            name_span,
                             format!("type {obj_ty} has no method '{method}'"),
                             suggest::did_you_mean(method, &names),
                         );
@@ -3458,7 +3458,7 @@ impl Checker {
                         self.infer_all(args);
                         let names = self.method_names("RwShared");
                         self.error_help(
-                            span,
+                            name_span,
                             format!("type {obj_ty} has no method '{method}'"),
                             suggest::did_you_mean(method, &names),
                         );
@@ -3502,7 +3502,7 @@ impl Checker {
                         self.infer_all(args);
                         let names = self.method_names("Atomic");
                         self.error_help(
-                            span,
+                            name_span,
                             format!("type {obj_ty} has no method '{method}'"),
                             suggest::did_you_mean(method, &names),
                         );
@@ -3535,7 +3535,7 @@ impl Checker {
                         self.infer_all(args);
                         let names = self.method_names("AtomicInt");
                         self.error_help(
-                            span,
+                            name_span,
                             format!("type {obj_ty} has no method '{method}'"),
                             suggest::did_you_mean(method, &names),
                         );
@@ -3583,7 +3583,7 @@ impl Checker {
                         self.infer_all(args);
                         let names = self.method_names("Executor");
                         self.error_help(
-                            span,
+                            name_span,
                             format!("type {obj_ty} has no method '{method}'"),
                             suggest::did_you_mean(method, &names),
                         );
@@ -3668,7 +3668,7 @@ impl Checker {
                 names.sort();
                 names.dedup();
                 self.error_help(
-                    span,
+                    name_span,
                     format!("type parameter {pname} has no method '{method}'"),
                     suggest::did_you_mean(method, &names),
                 );
@@ -3680,7 +3680,7 @@ impl Checker {
             }
             other => {
                 self.infer_all(args);
-                self.error(span, format!("type {other} has no method '{method}'"));
+                self.error(name_span, format!("type {other} has no method '{method}'"));
                 Ty::Unknown
             }
         }
