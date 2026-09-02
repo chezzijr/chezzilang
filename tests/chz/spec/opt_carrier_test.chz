@@ -12,9 +12,10 @@
 # the spaced spelling is the oracle (see `docs/gaps.md` W7-43, project memory
 # "a widening is untested by its own suite").
 #
-# Option semantics for `?.` are UNCHANGED (`Some`/`None` short-circuit, no flattening) and `??`
-# stays Option-only — both are re-pinned here because the carrier now survives desugar and is
-# lowered twice (checker + compiler) instead of once.
+# Option semantics for `?.` are UNCHANGED (`Some`/`None` short-circuit, no flattening) — re-pinned
+# here because the carrier now survives desugar and is lowered twice (checker + compiler) instead
+# of once. `??` takes both carriers (TICKET-039): `Option` unwraps to the payload, `Result` unwraps
+# and discards the error, like Rust's `unwrap_or`.
 #
 # Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 import std.concurrency
@@ -172,13 +173,46 @@ test fn option_of_option_is_not_flattened():
     n := Some(Holder(None))
     assert "{n?.maybe}" == "Some(None)"
 
-test fn null_coalesce_stays_option_only():
+test fn null_coalesce_on_option_unwraps_or_falls_back():
     o := Some(5)
     assert (o ?? 0) == 5
     n: Option[int] = None
     assert (n ?? 0) == 0
     # right-associative, and two carriers in one expression get distinct temps
     assert ((n ?? 0) + (o ?? 0)) == 5
+
+fn rq(ok: bool) -> int!str:
+    if ok:
+        return Ok(3)
+    return Err("boom")
+
+fn ores(v: bool) -> Option[int!str]:
+    if v:
+        return Some(Ok(1))
+    return None
+
+test fn null_coalesce_on_a_result_discards_the_error():
+    assert (rq(false) ?? 0) == 0
+    assert (rq(true) ?? 0) == 3
+
+test fn null_coalesce_result_equals_the_hand_written_match():
+    m := match rq(false):
+        Ok(v): v
+        Err(_): 0
+    assert (rq(false) ?? 0) == m
+
+test fn nested_coalesce_mixes_option_and_result_modes():
+    fb: int!str = Ok(7)
+    e: int!str = Err("x")
+    assert ((ores(true) ?? fb) ?? 0) == 1
+    assert ((ores(false) ?? fb) ?? 0) == 7
+    assert ((ores(false) ?? e) ?? 0) == 0
+
+fn with_result_default(v: int = rq(false) ?? 42) -> int:
+    return v
+
+test fn result_coalesce_in_a_spliced_default():
+    assert with_result_default() == 42
 
 # ---- 6: `?.` on a Result inside `recover:` ----
 #
