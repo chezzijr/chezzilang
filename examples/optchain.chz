@@ -3,7 +3,8 @@
 #   `?.` on an Option -> a `match`: None short-circuits, Some(v) applies the access and re-wraps.
 #   `?.` on a Result  -> `?` then `.`: propagate the Err, then access the unwrapped value. Identical
 #                        to the spaced spelling `x? .f`, and subject to the same return-kind rule.
-# `??` is Option-ONLY — a Result carries an error that must be handled, so `r ?? d` is an error.
+# `??` takes both carriers: on an Option it unwraps `Some(v)` to `v`; on a Result it unwraps
+# `Ok(v)` to `v` and DISCARDS the `Err` payload (Rust's `unwrap_or`, not `?`).
 
 struct Profile:
     name: str
@@ -70,8 +71,12 @@ fn shout(ok: bool) -> Result[bool, str]:
 
 print(shout(true))         # Ok(true)
 
-# `??` is Option-only, so there is no `fetch(true)?.len() ?? 0` — that is an error on the `??`
-# (`fetch(true)?.len()` is already an int). Use `match` when you want a fallback, not propagation.
+# `?.` on a Result still propagates with `?`, while `??` discards: `fetch(true)?.len() ?? 0` is
+# still an error, because `fetch(true)?.len()` is already an int, not a carrier.
 match fetch(false):
     Ok(s):  print(s.len())
     Err(e): print("fell back: {e}")   # fell back: offline
+
+# `??` on a Result: unwrap Ok, or discard the Err and fall back.
+print(fetch(true) ?? "none")   # payload
+print(fetch(false) ?? "none")  # none
