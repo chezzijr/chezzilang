@@ -25,3 +25,73 @@ test fn task_get_on_a_faulted_job_reports_the_job_error_not_deadlock():
         Ok(_): assert false, "get() on a faulted job must not return Ok"
         Err(e): assert not e.message().contains("deadlock"), e.message()
     assert t0.done(), "done() must be true once the faulted job has finished"
+
+fn ok_job() -> int:
+    return 42
+
+test fn raw_submit_result_on_a_faulted_job_does_not_report_deadlock():
+    ex := Executor()
+    c := ex.submit_result(bad)
+    r := recover: ex.shutdown()
+    match r:
+        Ok(_): assert false, "the faulting job must propagate out of shutdown()"
+        Err(e): assert e.message().contains("job failed"), e.message()
+    g := recover: c.recv()
+    match g:
+        Ok(_): assert false, "recv() on a faulted job's channel must not return Ok"
+        Err(e):
+            assert not e.message().contains("deadlock"), e.message()
+            assert e.message().contains("closed"), e.message()
+
+test fn a_successful_task_is_unchanged_by_the_fault_path():
+    ex := Executor()
+    t := submit_task(ex, ok_job)
+    ex.shutdown()
+    assert t.done(), "done() must be true after a successful job"
+    assert t.get() == 42, "get() must return the job's value"
+    assert t.get() == 42, "get() must be memoized"
+
+    ex2 := Executor()
+    ch := ex2.submit_result(fn() -> int: 7)
+    ex2.shutdown()
+    assert ch.len() == 1, "the result channel must carry the value"
+    assert ch.recv() == 7, "recv() must return the value"
+
+test fn a_faulted_tasks_error_is_memoized():
+    ex := Executor()
+    t := submit_task(ex, bad)
+    r := recover: ex.shutdown()
+    match r:
+        Ok(_): assert false, "the faulting job must propagate out of shutdown()"
+        Err(_): pass
+    g1 := recover: t.get()
+    g2 := recover: t.get()
+    match g1:
+        Ok(_): assert false, "first get() on a faulted job must not return Ok"
+        Err(e):
+            assert e.message().contains("job failed"), e.message()
+            assert not e.message().contains("closed"), e.message()
+    match g2:
+        Ok(_): assert false, "second get() on a faulted job must not return Ok"
+        Err(e):
+            assert e.message().contains("job failed"), e.message()
+            assert not e.message().contains("closed"), e.message()
+
+test fn a_faulted_jobs_origin_is_the_users_panic_site_never_the_stdlib():
+    ex := Executor()
+    t0 := submit_task(ex, bad)
+    r := recover: ex.shutdown()
+    match r:
+        Ok(_): assert false, "the faulting job must propagate out of shutdown()"
+        Err(e):
+            match e.file():
+                Some(path): assert path.ends_with("task_fault_test.chz"), path
+                None: assert false, "shutdown()'s error must carry the user's panic site"
+            assert e.line() == Some(14), "shutdown()'s error must point at bad()'s panic line"
+    g := recover: t0.get()
+    match g:
+        Ok(_): assert false, "get() on a faulted job must not return Ok"
+        Err(e):
+            assert e.file() == None, "Task.get()'s error crosses an airlock and must answer None"
+            assert e.line() == None, "Task.get()'s error must answer None for line()"
+            assert e.col() == None, "Task.get()'s error must answer None for col()"
