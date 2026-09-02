@@ -2262,6 +2262,47 @@ fn passing_an_empty_collection_into_a_concrete_parameter_pins_it() {
     );
 }
 
+/// TICKET-032 A1 — the pending-empty-collection table is keyed by NAME, not by the runtime list, so
+/// `c := b` moves the pin requirement to `c` alone: `c.push(1)` satisfies it for `c`, but `b` stays
+/// `List[Unknown]`, which is assignable to `List[str]`. Measured on `b87db7d7`: `chezzi check` says
+/// `ok: no type errors`, then `chezzi run` faults `type int has no method 'upper'`.
+#[test]
+fn an_alias_of_an_empty_collection_binding_pins_independently() {
+    rejects(
+        "fn addstr(xs: List[str]):\n    for s in xs:\n        print(s.upper())\nb := []\nc := b\nc.push(1)\naddstr(b)\n",
+        "expected List[str], found List[int]",
+    );
+
+    // The neighbour a naive fix must not break: a REBOUND alias (`c = b`, not `c := b`) is a
+    // different list at runtime, so each of `b`/`c` may still pin independently.
+    ok("b := []\nc := b\nc = [1, 2]\nb.push(\"a\")\nprint(b)\nprint(c)\n");
+}
+
+/// TICKET-032 A2 — `infer_list`'s expected-type gate is all-or-nothing: one element assignable to the
+/// expected type and one that is not (an `Unknown`-cored empty-collection producer) abandons the
+/// expected-type path, falls through to bottom-up homogeneity, and `compatible(List[Unknown],
+/// List[str])` is true there, laundering the whole literal to `List[List[Unknown]]`. Measured on
+/// `b87db7d7`: `chezzi check` says `ok: no type errors`, then `chezzi run` faults `cannot apply Add to
+/// str and int`. `infer_map` (`m: Map[str, List[int]] = {...}`) carries the identical gate.
+#[test]
+fn a_list_or_map_literal_with_one_unrefined_empty_producer_element_is_not_laundered() {
+    const EMPTY_FN: &str = "fn empty[T]() -> List[T]:\n    xs: List[T] = []\n    return xs\n";
+
+    rejects(
+        &format!(
+            "{EMPTY_FN}a: List[List[int]] = [empty().reversed(), [\"x\"]]\nprint(a[1][0] + 1)\n"
+        ),
+        "expected",
+    );
+
+    rejects(
+        &format!(
+            "{EMPTY_FN}m: Map[str, List[int]] = {{\"k\": empty().reversed(), \"j\": [\"x\"]}}\nprint(m[\"j\"][0] + 1)\n"
+        ),
+        "expected",
+    );
+}
+
 /// DROP-AND-PIN IS ONE OPERATION. `drop_empty_site` clears a binding's pending
 /// "cannot infer element type" requirement; three of its call sites also PINNED the element type and
 /// the rest did not, which left the binding's `Unknown` slot open for a LATER use to pin something
