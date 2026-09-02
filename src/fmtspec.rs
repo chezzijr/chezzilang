@@ -1106,4 +1106,17 @@ mod tests {
         assert_eq!(ok_apply("_x", FmtArg::Int(1048575)), "f_ffff");
         assert_eq!(ok_apply("_b", FmtArg::Int(255)), "1111_1111");
     }
+
+    #[test]
+    fn f_type_char_never_uses_scientific_notation() {
+        assert_eq!(
+            ok_apply("f", FmtArg::Float(1e16)),
+            "10000000000000000.000000"
+        );
+    }
+
+    #[test]
+    fn zero_flag_survives_explicit_align() {
+        assert_eq!(ok_apply(">08", FmtArg::Int(42)), "00000042");
+    }
 }
