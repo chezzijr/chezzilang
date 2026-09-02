@@ -114,6 +114,37 @@ fn resolve_error_plaintext_unchanged_and_attributed() {
     );
 }
 
+/// TICKET-044: an annotated `let` with a non-Hashable Map key/Set element must report the mistake
+/// once, not twice, in both `--errors=json` and plain text.
+#[test]
+fn annotated_let_reports_one_diagnostic_per_mistake() {
+    let t = TmpDir::new();
+    let path = t.write("dup.chz", "m: Map[float, str] = {}\n");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .args(["check", path.to_str().unwrap(), "--errors=json"])
+        .output()
+        .expect("run chezzi check --errors=json");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stdout = stdout.trim();
+    assert_eq!(
+        stdout.matches("\"message\":").count(),
+        1,
+        "expected exactly one message, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("Map key type must implement Hashable"),
+        "got: {stdout}"
+    );
+
+    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .args(["check", path.to_str().unwrap()])
+        .output()
+        .expect("run chezzi check");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("chezzi: 1 type error"), "got: {stderr}");
+}
+
 /// A LEX error carries a real COLUMN through the resolver seam, in JSON and in plain text alike
 /// (`docs/gaps.md` M24-7). The seam used to hardcode `col: 1`, so the LSP squiggle and the JSON
 /// both landed on the start of the line rather than on the offending character.

@@ -3333,6 +3333,60 @@ fn two_distinct_hashable_violations_both_report() {
     );
 }
 
+#[test]
+fn annotated_let_unknown_type_reports_exactly_once() {
+    // Regression for TICKET-044: the duplication is not Hashable-specific. Any diagnostic
+    // `resolve_type` emits while resolving an annotated `let` was doubled.
+    let errs = check_src("x: Nope = 1\n");
+    let matching: Vec<_> = errs
+        .iter()
+        .filter(|e| e.message.contains("unknown type 'Nope'"))
+        .collect();
+    assert_eq!(
+        matching.len(),
+        1,
+        "expected exactly one unknown-type diagnostic, got: {errs:?}"
+    );
+}
+
+#[test]
+fn non_hashable_annotation_in_a_re_walked_body_reports_exactly_once() {
+    // The checker walks a fn body more than once (generic-argument prepass, `infer_fn_ret`,
+    // DEC-033). Neither re-walk should add another copy of the diagnostic.
+    let sources = [
+        "fn g[T](x: T):\n    m: Map[float, str] = {}\n\ng(1)\n",
+        "fn h():\n    m: Map[float, str] = {}\n    return 1\n\nprint(h())\n",
+    ];
+    for src in sources {
+        let errs = check_src(src);
+        let matching: Vec<_> = errs
+            .iter()
+            .filter(|e| e.message.contains("Map key type must implement Hashable"))
+            .collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "expected exactly one Hashable diagnostic for {src:?}, got: {errs:?}"
+        );
+    }
+}
+
+#[test]
+fn annotation_and_ctor_each_report_their_own_hashable_error() {
+    // Two distinct occurrences in one statement (the annotation and the constructor's own type
+    // argument) must both survive; a fix that dedupes by message or span must not swallow either.
+    let errs = check_src("s: Set[(int, int)] = Set[(int, int)]()\n");
+    let cols: Vec<u32> = errs
+        .iter()
+        .filter(|e| {
+            e.message
+                .contains("Set element type must implement Hashable")
+        })
+        .map(|e| e.span.col)
+        .collect();
+    assert_eq!(cols, vec![1u32, 22]);
+}
+
 // ----- Hashable protocol (M10-G2: bound; M10 map-model: wired to map/set keys) -----
 
 #[test]
