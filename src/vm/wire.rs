@@ -240,6 +240,13 @@ pub enum WireValue {
         /// globals named by `Proto::global_free`, `(slot, wired value)` pairs. `from_wire` rebuilds
         /// this into `Obj::Closure.gsnap`.
         globals: Vec<(u32, WireValue)>,
+        /// TICKET-041(b) — the `ModuleData.origin` of the module view `globals` was snapshotted
+        /// from, `None` when `home` did not resolve to a module. `from_wire` compares this against
+        /// the receiving view's own origin: equal means the crossing landed back on the SAME module
+        /// view, so `globals` must NOT be installed as a frozen `gsnap` — the closure should keep
+        /// reading that global LIVE. A plain scalar: it roots nothing and carries no `GcRef`, so the
+        /// GC-rooting walk and the `has_handle` walk need no change for it.
+        home_origin: Option<u64>,
     },
     /// B3.3 — a BARE function (`Obj::Func`) carried across the airlock **by value**: its `proto`
     /// (shared via `Arc<Program>`) + its `home` index (as [`Closure`](WireValue::Closure)), no captures.

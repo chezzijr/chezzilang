@@ -1418,7 +1418,14 @@ was retired when module globals started deep-copying per task.)
   closure. A global the closure itself **writes** is excluded from that set and stays a **late load**
   against whichever task's own module copy calls it — a module-level `let` binding is otherwise still a
   late load in-task (matching CPython), so a write to it AFTER a closure is created is visible to a
-  later same-task call; only the value **crossing an airlock** is pinned. Top-level `fn`s, imports,
+  later same-task call; only the value **crossing an airlock** is pinned.
+  TICKET-041 narrows "crossing an airlock" further: the snapshot is only installed when the crossing
+  lands the closure on a **different module view** than it started on (tracked by a per-allocation
+  `ModuleData.origin`, compared to the sender's `WireValue::Closure.home_origin`). A crossing that
+  returns to the SAME module view — e.g. a same-task `Channel.send`/`.recv()` round trip — installs
+  nothing, so the closure keeps reading that global LIVE, matching the measured CPython `direct : 126`
+  / `module xs: [1, 9]` and Go `direct : 126` / `module xs: [1 9]` (2026-09-03); before this fix the
+  value was frozen at the first crossing (`direct : 3` / `module xs: [1]`). Top-level `fn`s, imports,
   `native fn`s and `extern` fns are unaffected and stay late loads always. So a `spawn f()`
   callee whose captured environment contains a nested closure/`fn` (or is itself a bare `fn`) runs
   cleanly, its captured plain data isolated per task exactly like any other sendable. **Checker
@@ -1534,7 +1541,16 @@ was retired when module globals started deep-copying per task.)
   `GeneratorCore` on the receiver, so advancing one copy never affects the other (like a cursor, but
   carrying frozen execution state, not a plain snapshot). Every parked slot is wired recursively, so a
   **non-sendable parked slot** still **rejects at the crossing** — a slot is checked at serialize time,
-  so there is no under-gate. Two reject shapes: a
+  so there is no under-gate.
+  TICKET-041 — a generator crossed **WHILE it is running** (its own body calls `Channel.send`/
+  `Atomic.store`/etc. on a value holding the generator) is now a third reject shape: `generator_next`
+  parks a `GenState::Done` placeholder in the heap object for the DURATION of the resume, so the
+  serializer would otherwise read that placeholder verbatim and hand the receiver a copy that reports
+  itself as already exhausted. The airlock now faults instead with
+  `a running generator cannot be sent across tasks`, matching CPython's `copy.deepcopy(gen)` on a
+  running generator, which raises `TypeError: cannot pickle 'generator' object` (measured 2026-09-03).
+  A **parked** (not currently resuming) generator is unaffected and still crosses by value as above.
+  Two more reject shapes, both pre-existing: a
   genuinely-unbounded >10000-deep **acyclic** nest held live across a `yield` trips the `maximum
   structural depth …` depth cap; a value **cycle** threaded *through* the generator's own parked frame
   (the generator carries no wire id, so it can't back-reference) is caught by re-entering the same

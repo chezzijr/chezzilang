@@ -7,6 +7,20 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **The airlock stopped serializing stale state (TICKET-041): a running generator now faults instead
+  of crossing as a silently-exhausted copy, and a same-task closure round trip stopped freezing its
+  module globals.** (a) A generator crossed WHILE it was running (via `Channel.send`/`Atomic.store`/
+  a module-global snapshot) serialized `generator_next`'s in-flight `GenState::Done` placeholder
+  verbatim, handing the receiver a copy that reported itself exhausted; `to_wire_depth`'s
+  `Obj::Generator` arm now rejects it with `a running generator cannot be sent across tasks`, the same
+  oracle `generator_next`'s own re-entrancy guard already applies. (b) `closure_global_snapshot`'s
+  `gsnap` installed unconditionally, so a closure's module-global reads froze at the FIRST airlock
+  crossing and never refreshed — even on a same-task `Channel` round trip that changes no module view
+  at all (`direct : 3` instead of the live `126`). Fixed with a new per-allocation `ModuleData.origin`
+  + `WireValue::Closure.home_origin`, compared in `from_wire_memo`: a `gsnap` installs only when the
+  crossing lands on a genuinely different module view; a same-view round trip reads the global live.
+  Both measured against CPython/Go (`direct : 126`, `module xs: [1, 9]` / `[1 9]`). Re-measured:
+  `cargo test --lib` unaffected passing count + 4 new tests, `cargo test` green, `cargo clippy` clean.
 - **A bare `spawn` inside a `recover:` block now opens the enclosing implicit nursery instead of
   faulting (TICKET-040).** `stmt_has_bare_spawn`'s catch-all never walked a statement's expressions,
   so `ExprKind::Recover`'s `Block` was invisible to the M-C pre-scan — a `recover:` at module top

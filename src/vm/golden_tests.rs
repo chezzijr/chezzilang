@@ -2394,6 +2394,31 @@ print("direct : {k(3)}")
 }
 
 #[test]
+fn airlock_same_task_closure_round_trip_mutates_module_list_in_place() {
+    // TICKET-041(b), data-loss variant. An in-place write to a module-global container from a
+    // same-task channel-round-tripped closure must land, matching CPython's measured
+    // `module xs: [1, 9]` (2026-09-03). Before the fix the frozen `gsnap` made the write vanish
+    // (`module xs: [1]`), because the closure mutated its OWN snapshot copy of `xs` instead of the
+    // live module slot.
+    let src = r#"
+xs := [1]
+fn mk() -> fn() -> nil:
+    fn f():
+        xs.push(9)
+    return f
+ch := Channel[fn() -> nil](2)
+ch.send(mk())
+ch.recv()()
+print("module xs: {xs}")
+"#;
+    let out = golden_entry(src);
+    assert_eq!(
+        out, "module xs: [1, 9]\n",
+        "a same-task channel round trip must mutate the module global in place: {out:?}"
+    );
+}
+
+#[test]
 fn generator_guard_clears_on_every_unwind_path() {
     // The guard is the VM's existing `active_generators` root list, pushed on resume and popped on
     // EVERY exit path — so it is self-clearing and can never poison a generator as permanently

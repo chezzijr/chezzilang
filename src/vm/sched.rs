@@ -2651,6 +2651,15 @@ impl Vm {
     /// being forwarded from one worker to another carries its own already-resolved values); falls
     /// back to reading `home`'s module slots directly. Omits a slot that resolves to neither, rather
     /// than faulting — `&self` only, so this cannot fault-in a module via `ensure_module_faulted`.
+    ///
+    /// TICKET-041(b) — this preference is KEPT as-is. After `from_wire_memo`'s `same_view` gate, a
+    /// `gsnap` exists only on a closure that already crossed into a genuinely different module view,
+    /// so the preference can no longer freeze a same-view value. It still decides one case this
+    /// ticket does not settle: a closure forwarded A→B→C, where B wrote the global itself — B's own
+    /// live write vs. A's inherited snapshot. Neither reference language poses that question (both
+    /// have exactly one module object), so there is no oracle for it, and inverting the preference
+    /// blind risks regressing a forward whose live slot is the STALER of the two. Don't change this
+    /// without first building that three-hop repro and measuring it (see `## Decisions`, TICKET-041).
     pub(super) fn closure_global_snapshot(
         &self,
         proto: ProtoId,
@@ -2782,12 +2791,20 @@ impl Vm {
                             }
                         }
                         memo.path.remove(&h);
+                        // TICKET-041(b) — the sender's view identity, so the receiver can tell a
+                        // same-view round trip (install nothing, read the global live) from a
+                        // genuine cross-task crossing (install `globals` as a frozen `gsnap`).
+                        let home_origin = match self.heap.get(*home) {
+                            Obj::Module(m) => Some(m.origin),
+                            _ => None,
+                        };
                         WireValue::Closure {
                             id,
                             proto: *proto,
                             captured: wcap,
                             home: self.home_index(*home),
                             globals: wglobals,
+                            home_origin,
                         }
                     }
                 }
@@ -3575,6 +3592,7 @@ impl Vm {
                 captured,
                 home,
                 globals,
+                home_origin,
             } => {
                 let home = self.worker_home(home);
                 let n = captured.len();
@@ -3595,7 +3613,19 @@ impl Vm {
                     let v = self.from_wire_memo(w, rebuild);
                     gsnap_entries.push((slot, v));
                 }
-                let gsnap = if gsnap_entries.is_empty() {
+                // TICKET-041(b) — a `gsnap` exists to serve a receiver whose module VIEW differs from
+                // the sender's; installing it unconditionally froze a same-view round trip's global at
+                // the first crossing (`direct : 3` instead of the live `126`, measured pre-fix). Compare
+                // the sender's `home_origin` against the receiving view's own origin: equal means this
+                // crossing landed back on the SAME module object, so the closure must keep reading that
+                // global with a LIVE `Op::GetGlobalSlot`, not a frozen snapshot.
+                let same_view = home_origin.is_some()
+                    && home_origin
+                        == match self.heap.get(home) {
+                            Obj::Module(m) => Some(m.origin),
+                            _ => None,
+                        };
+                let gsnap = if same_view || gsnap_entries.is_empty() {
                     None
                 } else {
                     Some(std::sync::Arc::new(gsnap_entries))
