@@ -2,10 +2,35 @@
 # `Channel[T]()` keeps its existing UNBOUNDED meaning. `cap()` reports -1 for unbounded, 0 for
 # rendezvous, the bound for bounded.
 import std.concurrency
+import std.time
 
 test fn rendezvous_cap_is_zero_and_unbounded_is_minus_one():
     assert Channel[int](0).cap() == 0
     assert Channel[int]().cap() == -1
+
+# TICKET-042(b) — a channel's stored capacity above 2^62 wraps through the 63-bit inline `Value::int`
+# encoding instead of boxing, so `cap()` returns a negative sentinel for a channel that is BOUNDED.
+test fn cap_does_not_wrap_above_2_pow_62():
+    assert Channel[int](4611686018427387904).cap() == 4611686018427387904
+
+# TICKET-042(a) — `try_recv` polls only the internal queue, which is always empty on a rendezvous
+# channel (cap 0), so it can never see a sender that is already parked waiting to hand off. The
+# value is unambiguously deliverable: a plain blocking `recv()` right after takes it.
+test fn try_recv_sees_a_parked_rendezvous_sender():
+    rz := Channel[int](0)
+    got := Shared(-1)
+    parallel:
+        spawn: rz.send(7)
+        spawn:
+            time.sleep_ms(150)
+            match rz.try_recv():
+                Some(v): got.set(v)
+                None:
+                    got.set(-1)
+                    # bug present: the value is still parked with the sender — drain it with a
+                    # blocking recv so the nursery can finish instead of deadlocking.
+                    rz.recv()
+    assert got.get() == 7, "try_recv missed a parked rendezvous sender"
 
 test fn rendezvous_try_send_declines_with_no_receiver():
     assert Channel[int](0).try_send(1) == false
