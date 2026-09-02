@@ -1609,10 +1609,11 @@ impl Vm {
             }
             // `cap()` reports the channel's capacity: `-1` for unbounded `Channel[T]()`, `0` for
             // rendezvous `Channel[T](0)`, `n` for bounded `Channel[T](n)`.
+            // A capacity above 2^62 boxes as `Obj::BigInt` (`Value::int` would wrap).
             "cap" => {
                 self.arity_err("cap", args, 0, span)?;
                 let cap = self.channel_core(h).cap.map_or(-1i64, |c| c as i64);
-                Ok(Value::int(cap))
+                Ok(self.make_int(cap))
             }
             _ => Err(self.err(format!("type Channel has no method '{method}'"), span)),
         }

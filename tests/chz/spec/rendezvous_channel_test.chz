@@ -13,6 +13,9 @@ test fn rendezvous_cap_is_zero_and_unbounded_is_minus_one():
 test fn cap_does_not_wrap_above_2_pow_62():
     assert Channel[int](4611686018427387904).cap() == 4611686018427387904
 
+test fn cap_reports_int_max():
+    assert Channel[int](9223372036854775807).cap() == 9223372036854775807
+
 # TICKET-042(a) — `try_recv` polls only the internal queue, which is always empty on a rendezvous
 # channel (cap 0), so it can never see a sender that is already parked waiting to hand off. The
 # value is unambiguously deliverable: a plain blocking `recv()` right after takes it.
