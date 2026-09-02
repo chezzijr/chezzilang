@@ -15105,6 +15105,14 @@ fn null_coalesce_on_result_one_error() {
 }
 
 #[test]
+fn null_coalesce_result_discards_error_ticket_039() {
+    // TICKET-039: `??` should give Result the same explicit-discard fallback Option has
+    // (Rust: `r.unwrap_or(0)`). Currently `??` is Option-only, so this type-checks clean
+    // only once a Result form lands.
+    ok_desugared("fn g() -> int!str:\n    return Err(\"boom\")\nr := g()\nx := r ?? 0\nprint(x)\n");
+}
+
+#[test]
 fn null_coalesce_on_a_non_carrier_one_error() {
     let errs = check_desugared("x := 5\ny := x ?? 0\n");
     assert_eq!(errs.len(), 1, "exactly one error, got: {errs:?}");
