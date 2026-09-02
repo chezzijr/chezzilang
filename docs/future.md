@@ -801,8 +801,9 @@ only one engine**, so nothing here constrains the remaining steps 1–4.
    `a ?? b`. Originally lowered to a `match` by the desugar pass (zero checker/engine code); **W7-43
    (2026-08-11) moved that decision to the checker** — the carriers now survive desugar, the checker
    picks the lowering by operand type (`Option` → `match`; `Result` → `?` then `.`, identical to the
-   spaced `x? .f`) and records it in a `CarrierTable` the compiler reads. `??` stays Option-only.
-   Still zero VM code: the `Result` path emits the `Op::Try` the spaced form already emitted.
+   spaced `x? .f`) and records it in a `CarrierTable` the compiler reads. **TICKET-039 (2026-09-02)
+   widened `??` to a `Result`**: it discards the error via an `Ok`/`Err(_)` match, Rust's
+   `unwrap_or`. Still zero new VM code: both paths lower to ops the engine already runs.
    `examples/optchain.chz`.
 7. ~~**Tuple-destructuring `for` (+ `enumerate` / `zip`)**~~ — **DONE.** `for a, b in List[(A,B)]`
    (N-var over `List[tupleN]`); VM splits map vs list-of-tuples at runtime on a new `Op::IsMap`.

@@ -513,8 +513,9 @@
              | <mulExpr> "STAR" <coalesceExpr> | <mulExpr> "SLASH" <coalesceExpr> | <mulExpr> "PERCENT" <coalesceExpr>
 # null-coalescing `??` (gap): binds tighter than every binary operator and looser than unary `-`
 # and the postfix chain. RIGHT-associative (`a ?? b ?? c` = `a ?? (b ?? c)`) — modeled by
-# right-recursion. `??` is Option-ONLY; it SURVIVES desugar and the CHECKER lowers it to a `match`
-# (a `Result` lhs is one error, never a silent discard of the error payload).
+# right-recursion. `??` takes an `Option` OR a `Result` (TICKET-039); it SURVIVES desugar and the
+# CHECKER picks `lower_carrier_option` or `lower_carrier_result_coalesce` from the operand's type
+# (the `Result` form discards the error, like Rust's `unwrap_or`).
 <coalesceExpr> ::= <unary> | <unary> "QUESTIONQUESTION" <coalesceExpr>
 <unary>    ::= <postfix> | "MINUS" <unary>
 

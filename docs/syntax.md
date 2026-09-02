@@ -637,7 +637,7 @@ Highest → lowest. Same row = same precedence, left-associative unless noted.
 | 1 | `f(x)` `a.b` `a[i]` `a?.b` | call, field access, index, optional chaining |
 | 2 | `?` | error propagation (postfix, §9) |
 | 3 | `-` (unary) | |
-| 4 | `??` | null-coalescing, RIGHT-associative, Option-only (see below) |
+| 4 | `??` | null-coalescing, RIGHT-associative, Option or Result (see below) |
 | 5 | `*` `/` `%` | `*` also list repeat: `[0] * 3` (and `3 * [0]`, commutative) |
 | 6 | `+` `-` | `+` also list concat: `[1,2] + [3,4]`; `-` also set difference: `a - b` |
 | 7 | `..` | range (end-exclusive) |
@@ -1070,6 +1070,8 @@ consequences are worth writing down, because each is a rule you can hit:
    works, where it used to be rejected — `fn f(x: int!str = Ok(getr()?.len()))` compiles, and returns
    `4` on the `Ok` path and the `Err` unchanged on the other. Option-mode `?.` and `??` never
    propagated, so both are unaffected (`x: Option[int] = geto()?.len()`, `x: int = geto() ?? 0`).
+   `??` on a `Result` also never propagates — it DISCARDS the error, so a default containing
+   `getr() ?? 0` is still legal where `getr()?` is not.
 2. **A default always resolves in the module that DECLARES it — including where the caller cannot
    name that module.** Because a method call is resolved by *name* before types are known, a method
    default declared in module `a` can be reached from a module `z` that never imports `a`; a
@@ -3233,20 +3235,21 @@ Because the `Result` form is try-then-**dot**, not a chain of tries, it does **n
 a nested carrier: with `a: Option[X]` and `a.b: Result[Y, E]`, `a?.b?.c` is an `Option[Result[Y, E]]`
 followed by a field access on a `Result` — an error, and correctly so.
 
-**Null-coalescing `??` is `Option`-only.** `a ?? b` returns `a`'s inner value if `Some`, else `b`; it
-is **right-associative** (`a ?? b ?? c` = `a ?? (b ?? c)`). It is deliberately *not* extended to
-`Result`: a `Result` carries an error payload `??` would silently discard, and no ancestor offers the
-combination (Rust has no coalescing operator; Swift/Kotlin/C#'s is Optional-only, in languages with no
-`Result`). `??` on a `Result` is one error pointing at `match`:
+**Null-coalescing `??` takes an `Option` or a `Result` (TICKET-039).** `a ?? b` yields `a`'s inner
+value if `Some(v)`/`Ok(v)`, else `b`; it is **right-associative** (`a ?? b ?? c` = `a ?? (b ?? c)`).
+On a `Result`, the `Err` payload is **discarded** — exactly Rust's `Result::unwrap_or` — never
+propagated: `?.` on a `Result` still propagates with `?`, `??` discards. The discard does **not**
+warn: `??` is itself the acknowledgement, and the W8-2 discarded-carrier rule already excludes `?`,
+`??` and `?.` because they yield the unwrapped payload, not the carrier. Nothing is required of the
+error type `E` — Chezzi is GC'd and runs no destructor on the dropped value. The remaining
+diagnostic is on a non-carrier operand:
 
 ```
-'??' applies to an Option, found Result[str, str] — a Result carries an error that must be handled:
-use a match with Ok/Err arms
+'??' applies to an Option or a Result, found int
 ```
 
-**Migration note.** `f()?.len() ?? 0` on a `Result` is now an error on the **`??`**: `f()?.len()` is
-already an `int`, and `??` takes an `Option`. Drop the `?? 0` (the `?` propagates), or `match` the
-`Result` if you want a fallback instead of propagation.
+`f()?.len() ?? 0` on a `Result` is still an error on the **`??`**: `f()?.len()` is already an `int`,
+not a carrier, regardless of the widening.
 
 Both operators require the two chars **adjacent** (`x?.f`, `a ?? b`); on a **non-carrier** operand
 `?.` is one error, `'?.' applies to an Option or a Result, found int`.

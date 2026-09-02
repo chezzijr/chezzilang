@@ -1083,8 +1083,8 @@ src/
   ast/          # node definitions
   desugar/      # AST → AST lowering (pipe, comprehensions, defaults, interpolation).
                 #   `?.`/`??` are NOT lowered here — they survive to the checker, which picks the
-                #   lowering by operand type and calls `lower_carrier_option`/`lower_carrier_try`
-                #   (the compiler then calls the same two functions).
+                #   lowering by operand type and calls `lower_carrier_option`/`lower_carrier_try`/
+                #   `lower_carrier_result_coalesce` (the compiler then calls the same functions).
   checker/      # type inference + checking
   compiler/     # AST → bytecode
   vm/           # stack machine (the sole engine; M:N scheduler)

@@ -69,9 +69,9 @@ fn a_row_that_says_closed_is_struck() {
     );
 }
 
-/// The W8-19 row's `Option`/`Result`-methods sub-item is DECLINED (TICKET-037): `??` already covers
-/// the `Option` half, so the row must record the decline the same way its global-helpers sub-item
-/// does, plus the measured `Result` caveat `??` does not cover.
+/// The W8-19 row's `Option`/`Result`-methods sub-item: the `Option` half is DECLINED (TICKET-037,
+/// `??` already covers it), and the `Result` half CLOSED (TICKET-039, `??` now covers it too via a
+/// discarding lowering).
 #[test]
 fn w8_19_option_result_sub_item_is_declined() {
     let gaps = read("docs/gaps.md");
@@ -84,7 +84,7 @@ fn w8_19_option_result_sub_item_is_declined() {
         "W8-19 row must record the Option/Result methods sub-item as DECLINED"
     );
     assert!(
-        row.contains("'??' applies to an Option"),
-        "W8-19 row must record the measured Result caveat: '??' applies to an Option"
+        row.contains("TICKET-039"),
+        "W8-19 row must record that the Result half closed under TICKET-039"
     );
 }
