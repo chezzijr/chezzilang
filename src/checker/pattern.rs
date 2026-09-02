@@ -2448,27 +2448,25 @@ impl Checker {
                 hint == Some(crate::ast::ElemFloatHint::Elem),
             );
         }
-        // RESIDUAL, measured and deliberately not closed here. This gate is all-or-nothing: one
-        // element that is not assignable abandons the expected path entirely and falls through to the
-        // bottom-up homogeneity below, where an `Unknown`-CORED sibling launders the whole literal
-        // (`compatible(List[Unknown], List[str])` is true, so nothing fires and the literal types as
-        // `List[List[Unknown]]`, assignable to anything). Driving the element hint onto each item
-        // closes this whenever the item CONSUMES the hint, but one method call away it does not:
-        // `a: List[List[int]] = [empty().reversed(), ["x"]]` then `a[1][0] + 1` is check-clean at
-        // rc=0 and faults at run time with *cannot apply Add to str and int* (measured, and identical
-        // before the hint existed — pre-existing, not introduced by it).
-        //
-        // The fix is to report per ELEMENT here instead of falling through. That was implemented and
-        // measured: it closes the hole, but it MOVES the diagnostic for a mistyped literal from the
-        // assignment to the element, changing 10 existing expected messages across comprehensions,
-        // `concat`/`extend`, `str.join`, protocol nesting and the float-widen family. Each of those is
-        // a user-visible message that needs its own before/after derivation, so it is its own change
-        // with its own neighbour table rather than a tail-end edit here. `docs/gaps.md` W8-45.
+        // TICKET-032 A2 — CLOSED. This gate used to be all-or-nothing: one element not assignable to
+        // `e` abandoned the expected path entirely and fell through to the bottom-up homogeneity
+        // below, where an `Unknown`-CORED sibling laundered the whole literal (`compatible(List[
+        // Unknown], List[str])` is true, so nothing fired and the literal typed as `List[List[
+        // Unknown]]`, assignable to anything) — measured, `a: List[List[int]] = [empty().reversed(),
+        // ["x"]]` then `a[1][0] + 1` was check-clean at rc=0 and faulted at run time with *cannot
+        // apply Add to str and int*. Reporting per ELEMENT instead of falling through closes it: the
+        // diagnostic moves from the assignment to the offending element (DEC-036 licenses the caret
+        // move; DEC-007, which forbade it, is superseded). Returning the DECLARED element type
+        // unconditionally is what suppresses the old assignment-level cascade.
         if let Some(Ty::List(e)) = expected
             && !e.is_unknown()
             && !items.is_empty()
-            && tys.iter().all(|t| t.is_unknown() || self.assignable(e, t))
         {
+            for (t, item) in tys.iter().zip(items) {
+                if !t.is_unknown() && !self.assignable(e, t) {
+                    self.error(item.span, format!("list element: expected {e}, found {t}"));
+                }
+            }
             return Ty::list((**e).clone());
         }
         // Bottom-up homogeneity over the (possibly widened) item types. A mixed literal the gate did
@@ -2549,6 +2547,17 @@ impl Checker {
         }
         // One-way int→float widening on the VALUE column only (keys are never float — not Hashable).
         self.elem_widen(entries.iter().map(|(_, v)| v), &mut val_tys, hint);
+        // TICKET-032 A2 — CLOSED, the `infer_list` twin: an expected key/value type is reported per
+        // ENTRY instead of falling through to bottom-up homogeneity, closing the same
+        // `Unknown`-cored-sibling launder (`m: Map[str, List[int]] = {"k": empty().reversed(), "j":
+        // ["x"]}` was check-clean pre-fix, then faulted at run time). `None` (no concrete expected
+        // key/value) keeps the existing accumulate-then-`compatible` homogeneity check verbatim.
+        if entries.is_empty() {
+            return Ty::map(
+                key_expected.unwrap_or(Ty::Unknown),
+                val_expected.unwrap_or(Ty::Unknown),
+            );
+        }
         let mut key = Ty::Unknown;
         let mut value = Ty::Unknown;
         for (((k_expr, v_expr), kt), vt) in entries.iter().zip(&key_tys).zip(&val_tys) {
@@ -2558,18 +2567,36 @@ impl Checker {
             {
                 self.error(k_expr.span, format!("map key type {why}"));
             }
-            if key.is_unknown() {
-                key = kt;
-            } else if !kt.is_unknown() && !compatible(&key, &kt) {
-                self.error(k_expr.span, format!("map keys differ: {key} vs {kt}"));
+            match &key_expected {
+                Some(ke) => {
+                    if !kt.is_unknown() && !self.assignable(ke, &kt) {
+                        self.error(k_expr.span, format!("map key: expected {ke}, found {kt}"));
+                    }
+                }
+                None => {
+                    if key.is_unknown() {
+                        key = kt.clone();
+                    } else if !kt.is_unknown() && !compatible(&key, &kt) {
+                        self.error(k_expr.span, format!("map keys differ: {key} vs {kt}"));
+                    }
+                }
             }
-            if value.is_unknown() {
-                value = vt;
-            } else if !vt.is_unknown() && !compatible(&value, &vt) {
-                self.error(v_expr.span, format!("map values differ: {value} vs {vt}"));
+            match &val_expected {
+                Some(ve) => {
+                    if !vt.is_unknown() && !self.assignable(ve, &vt) {
+                        self.error(v_expr.span, format!("map value: expected {ve}, found {vt}"));
+                    }
+                }
+                None => {
+                    if value.is_unknown() {
+                        value = vt.clone();
+                    } else if !vt.is_unknown() && !compatible(&value, &vt) {
+                        self.error(v_expr.span, format!("map values differ: {value} vs {vt}"));
+                    }
+                }
             }
         }
-        Ty::map(key, value)
+        Ty::map(key_expected.unwrap_or(key), val_expected.unwrap_or(value))
     }
 
     /// Infer a comprehension's type. Walks each `for` clause in order (first outermost): binds the
@@ -2585,6 +2612,12 @@ impl Checker {
         elem: &Expr,
         clauses: &[CompClause],
     ) -> Ty {
+        // TICKET-032 A2 — a comprehension is a hint BARRIER: without taking `expected_hint` here, the
+        // outer sink type reaches a clause ITERAND too, and `ys: List[int] = [y for xs in [[1, 2],
+        // [3]] for y in xs]` false-rejects (the iterand then types as `List[int]` against a
+        // `List[List[int]]` value). Measured on a scratch implementation of this fix: with the take,
+        // that program is `ok: no type errors`.
+        let _outer_hint = self.expected_hint.take();
         self.push_scope();
         for clause in clauses {
             // `for_bindings` infers the iter IN the current scope, so later clauses see earlier

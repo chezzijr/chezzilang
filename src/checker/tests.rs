@@ -1087,7 +1087,10 @@ fn widen_float_into_int_still_rejected() {
     rejects("y: int = 2.3\nprint(y)\n", "cannot assign");
     rejects("fn h(p: int):\n    print(p)\nh(2.3)\n", "expected");
     rejects("fn f() -> int:\n    return 2.3\n", "expected return type");
-    rejects("zs: List[int] = [1, 2.3]\nprint(zs)\n", "cannot assign");
+    rejects(
+        "zs: List[int] = [1, 2.3]\nprint(zs)\n",
+        "list element: expected int, found float",
+    );
     rejects("n: int = 0\nn = 2.3\nprint(n)\n", "cannot assign");
     rejects(
         "fn k(a: int = 2.3):\n    print(a)\nk()\n",
@@ -1104,15 +1107,15 @@ fn widen_float_into_int_still_rejected() {
 fn widen_compound_float_positions_rejected() {
     rejects(
         "xs: List[List[float]] = [[1]]\nprint(xs)\n",
-        "cannot assign",
+        "list element: expected float, found int",
     );
     rejects(
         "m: Map[str, List[float]] = {\"a\": [1]}\nprint(m)\n",
-        "cannot assign",
+        "list element: expected float, found int",
     );
     rejects(
         "xs: List[Map[str, float]] = [{\"a\": 1}]\nprint(xs)\n",
-        "cannot assign",
+        "map value: expected float, found int",
     );
     rejects("o: float? = Some(3)\nprint(o)\n", "cannot assign");
     rejects("r: float! = Ok(3)\nprint(r)\n", "cannot assign");
@@ -1777,14 +1780,14 @@ fn an_annotation_reaches_through_a_collection_literal() {
     // the `empty()` element is what laundered it.
     rejects(
         &format!("{EMPTY}a: List[List[int]] = [empty_list(), [\"x\"]]\nn := a[1][0] + 1\n"),
-        "list elements differ",
+        "list element: expected int, found str",
     );
     // The `Map` twin, identical mechanism: *cannot apply Add to str and int* at run time.
     rejects(
         &format!(
             "{EMPTY}m: Map[str, List[int]] = {{\"k\": empty_list(), \"j\": [\"x\"]}}\nn := m[\"j\"][0] + 1\n"
         ),
-        "map values differ",
+        "list element: expected int, found str",
     );
     // …and the `Set` twin, which reaches it through the element hint rather than a homogeneity check.
     rejects(
@@ -1818,7 +1821,7 @@ fn an_annotation_reaches_through_a_collection_literal() {
     // A genuinely mistyped literal keeps its own diagnostic.
     rejects(
         "a: List[List[int]] = [[\"x\"]]\n",
-        "cannot assign List[List[str]] to variable of type List[List[int]]",
+        "list element: expected int, found str",
     );
 
     // The hint must reach through a `T?` / `T!E` sink too — a bare literal there coerces to
@@ -1828,7 +1831,7 @@ fn an_annotation_reaches_through_a_collection_literal() {
         &format!(
             "{EMPTY}fn mk() -> List[List[int]]?:\n    return [empty_list(), [\"x\"]]\nfn go() -> int?:\n    xs := mk()?\n    return xs[1][0] + 1\n"
         ),
-        "list elements differ",
+        "list element: expected int, found str",
     );
     // …and it un-breaks a FALSE REJECTION that predates the propagation: a protocol element slot
     // behind a carrier was *list elements differ: C vs S* where the bare slot accepts it.
@@ -1836,15 +1839,13 @@ fn an_annotation_reaches_through_a_collection_literal() {
         "protocol Shape:\n    fn area(self) -> int\nstruct C:\n    fn area(self) -> int:\n        return 1\nstruct S:\n    fn area(self) -> int:\n        return 2\nfn opt() -> List[Shape]?:\n    return [C(), S()]\n",
     );
 
-    // CEILING, measured and deliberately not closed: the hint only reaches an element that CONSUMES
-    // it, so one method call away the same literal still launders. `[empty_list().reversed(), ["x"]]`
-    // at a `List[List[int]]` slot is check-clean and faults at run time. Closing it means reporting
-    // per ELEMENT instead of falling through to bottom-up homogeneity, which moves the diagnostic for
-    // every mistyped literal from the assignment to the element — 10 existing messages, so it is its
-    // own change with its own neighbour table. Pinned here so the day it changes, this says so.
-    ok(&format!(
-        "{EMPTY}a: List[List[int]] = [empty_list().reversed(), [\"x\"]]\n"
-    ));
+    // CEILING CLOSED (TICKET-032 A2): the hint used to reach only an element that CONSUMES it, so
+    // one method call away the same literal laundered. Reporting per ELEMENT instead of falling
+    // through to bottom-up homogeneity closes it.
+    rejects(
+        &format!("{EMPTY}a: List[List[int]] = [empty_list().reversed(), [\"x\"]]\n"),
+        "list element: expected int, found str",
+    );
 
     // CEILING, second (TICKET-033): the int→float element widen does not reach through a carrier,
     // because the license is computed from the SINK TYPE before `sink_payload` unwraps it — a
@@ -1853,7 +1854,7 @@ fn an_annotation_reaches_through_a_collection_literal() {
     // deliberate.
     rejects(
         "fn f() -> List[float]?:\n    return [1, 2]\n",
-        "expected return type Option[List[float]], found List[int]",
+        "list element: expected float, found int",
     );
 }
 
@@ -1895,15 +1896,15 @@ fn element_widen_reaches_every_argument_and_return_sink() {
 fn element_widen_still_declines_carrier_nested_and_erased_sinks() {
     rejects(
         "fn f() -> List[float]?:\n    return [1, 2]\n",
-        "expected return type Option[List[float]], found List[int]",
+        "list element: expected float, found int",
     );
     rejects(
         "fn f(xs: List[float]?):\n    print(xs)\nfn main():\n    f([1, 2])\n",
-        "argument 1 of 'f': expected Option[List[float]], found List[int]",
+        "list element: expected float, found int",
     );
     rejects(
         "fn f(xs: List[List[float]]):\n    print(xs)\nfn main():\n    f([[1, 2]])\n",
-        "argument 1 of 'f'",
+        "list element: expected float, found int",
     );
     rejects(
         "xs: List[int] = [1, 2]\nfn f(zs: List[float]):\n    print(zs)\nfn main():\n    xs = [1, 2]\n    f(xs)\n",
@@ -1911,15 +1912,15 @@ fn element_widen_still_declines_carrier_nested_and_erased_sinks() {
     );
     entry_rejects(
         "fn f(...zs: float):\n    print(zs)\nfn main():\n    f(1, 2)\n",
-        "argument 1 of 'f': expected List[float], found List[int]",
+        "list element: expected float, found int",
     );
     rejects(
         "fn f(xs: List[float] = [1, 2]):\n    print(xs)\n",
-        "default value for parameter 'xs'",
+        "list element: expected float, found int",
     );
     rejects(
         "struct S:\n    v: List[float] = [1, 2]\n",
-        "default value for field 'v'",
+        "list element: expected float, found int",
     );
 }
 
@@ -2396,6 +2397,25 @@ fn a_list_or_map_literal_with_one_unrefined_empty_producer_element_is_not_launde
         ),
         "expected",
     );
+}
+
+/// TICKET-032 A2 — the two NON-literal shapes `infer_list`/`infer_map`'s per-element/per-entry loop
+/// is the only guard for: an element/value that is a plain IDENT reading an already-typed binding
+/// (not a literal), so `infer_list`'s own inner recursion into a nested literal never runs. Both
+/// measured `ok: no type errors` at `6365d13a`, then faulting at run time with *cannot apply Add to
+/// str and int* at `:4:6`.
+#[test]
+fn a_literal_element_is_reported_against_the_declared_element_type() {
+    rejects(
+        "other := [\"x\"]\na: List[List[int]] = [empty_list().reversed(), other]\nfn empty_list() -> List[int]:\n    return []\n",
+        "list element: expected List[int], found List[str]",
+    );
+    rejects(
+        "other := [\"x\"]\nm: Map[str, List[int]] = {\"k\": empty_list().reversed(), \"j\": other}\nfn empty_list() -> List[int]:\n    return []\n",
+        "map value: expected List[int], found List[str]",
+    );
+    // gotcha 1: the comprehension hint barrier — the outer sink type must not reach a clause iterand.
+    ok("ys: List[int] = [y for xs in [[1, 2], [3]] for y in xs]\n");
 }
 
 /// DROP-AND-PIN IS ONE OPERATION. `drop_empty_site` clears a binding's pending
@@ -8843,7 +8863,10 @@ fn str_join_takes_list_of_str_returns_str() {
 
 #[test]
 fn str_join_rejects_list_of_int() {
-    rejects("r := \",\".join([1, 2])\n", "argument 1 of 'join'");
+    rejects(
+        "r := \",\".join([1, 2])\n",
+        "list element: expected str, found int",
+    );
 }
 
 #[test]
@@ -9064,7 +9087,7 @@ fn list_extend_returns_nil() {
 fn list_concat_element_type_checked() {
     rejects(
         "xs := [1, 2]\nys := xs.concat([\"a\"])\n",
-        "argument 1 of 'concat'",
+        "list element: expected int, found str",
     );
 }
 
@@ -9072,7 +9095,7 @@ fn list_concat_element_type_checked() {
 fn list_extend_element_type_checked() {
     rejects(
         "xs := [1, 2]\nxs.extend([\"a\"])\n",
-        "argument 1 of 'extend'",
+        "list element: expected int, found str",
     );
 }
 
@@ -25738,7 +25761,7 @@ fn param_protocol_nesting_accepts_and_wrong_rejects() {
     );
     rejects(
         "protocol Container[T]:\n    fn get(self, i: int) -> T\nstruct Bag:\n    fn get(self, i: int) -> int:\n        return 7\nfn h(xs: List[Container[str]]) -> int:\n    return 0\nfn main():\n    h([Bag()])\n",
-        "expected List[Container[str]], found List[Bag]",
+        "list element: expected Container[str], found Bag",
     );
 }
 
@@ -26432,7 +26455,7 @@ const WIDEN_NOTE: &str = "a typed int never widens to float — write float(x)";
 fn widen_v1_nonconst_int_element_in_float_list_param_rejected() {
     entry_rejects(
         "fn f(xs: List[float]) -> float:\n    return xs[0] / 2\nfn main():\n    a := 1\n    print(f([a, 2.5]))\n",
-        "list elements differ: int vs float",
+        "list element: expected float, found int",
     );
 }
 
@@ -26457,7 +26480,7 @@ fn widen_annotated_list_const_int_with_float_var_ok() {
 fn widen_v3_nonconst_int_map_value_rejected() {
     entry_rejects(
         "fn f(m: Map[str, float]) -> float:\n    return m[\"k\"] / 2\nfn main():\n    a := 1\n    print(f({\"k\": a, \"j\": 2.5}))\n",
-        "map values differ: int vs float",
+        "map value: expected float, found int",
     );
 }
 
@@ -26466,7 +26489,7 @@ fn widen_v3_nonconst_int_map_value_rejected() {
 fn widen_nonconst_int_element_in_float_list_return_rejected() {
     entry_rejects(
         "fn mk() -> List[float]:\n    a := 1\n    return [a, 2.5]\nfn main():\n    print(mk())\n",
-        "list elements differ: int vs float",
+        "list element: expected float, found int",
     );
 }
 
@@ -26475,7 +26498,7 @@ fn widen_nonconst_int_element_in_float_list_return_rejected() {
 fn widen_nonconst_int_element_in_float_list_field_rejected() {
     entry_rejects(
         "struct P:\n    v: List[float]\nfn main():\n    a := 1\n    p := P([a, 2.5])\n    print(p.v)\n",
-        "list elements differ: int vs float",
+        "list element: expected float, found int",
     );
 }
 
@@ -26486,7 +26509,7 @@ fn widen_nonconst_int_element_in_float_list_field_rejected() {
 fn widen_nonconst_int_into_float_channel_rejected() {
     entry_rejects(
         "fn main():\n    ch := Channel[List[float]]()\n    a := 1\n    ch.send([a, 2.5])\n    print(ch.recv())\n",
-        "list elements differ: int vs float",
+        "list element: expected float, found int",
     );
 }
 
@@ -26505,7 +26528,7 @@ fn widen_proof_int_overflow_under_float_rejected() {
 fn widen_proof_unsorted_float_list_rejected() {
     entry_rejects(
         "fn mk() -> List[float]:\n    a := 1\n    return [a, 2.5, 0.5]\nfn main():\n    xs := mk()\n    xs.sort()\n    print(xs)\n",
-        "list elements differ: int vs float",
+        "list element: expected float, found int",
     );
 }
 
@@ -26574,12 +26597,12 @@ fn widen_let_hint_does_not_leak_into_nested_literal() {
     // argument (the compiler `take()`s its hint at the same point, so it would not coerce there).
     entry_rejects(
         "fn g(ys: List[float]) -> float:\n    return ys[0]\nfn main():\n    a := 1\n    xs: List[float] = [g([a, 2.5]), 1.0]\n    print(xs)\n",
-        "list elements differ: int vs float",
+        "list element: expected float, found int",
     );
     // a nested collection literal keeps its own (un-licensed) inference
     entry_rejects(
         "fn main():\n    a := 1\n    xs: List[List[float]] = [[a, 2.5]]\n    print(xs)\n",
-        "list elements differ: int vs float",
+        "list element: expected float, found int",
     );
 }
 
@@ -26687,7 +26710,7 @@ fn widen_collection_alias_annotation_now_widens() {
 fn widen_variadic_float_param_all_int_consts_rejected_known_limit() {
     entry_rejects(
         "fn f(...zs: float):\n    print(zs)\nf(1, 2)\n",
-        "expected List[float], found List[int]",
+        "list element: expected float, found int",
     );
     entry_ok("fn f(...zs: float):\n    print(zs)\nf(1, 2.5)\n");
 }
