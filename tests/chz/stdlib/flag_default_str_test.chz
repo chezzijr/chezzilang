@@ -1,0 +1,15 @@
+# tests/chz/stdlib/flag_default_str_test.chz — TICKET-046(a): `--help` reports the parsed value,
+# not the registered default.
+#
+# `default_str` (std/flag.chz) reads the live `self.ints`/`self.strs`/`self.bools` maps, which
+# `parse` overwrites — there is no separate defaults map. Go's `flag.PrintDefaults` reads
+# `Flag.DefValue`, captured once at registration; measured `flag.NewFlagSet` with `ContinueOnError`.
+
+import std.flag as flag
+
+test fn help_after_parse_reports_the_registered_default_not_the_parsed_value():
+    fs := flag.new()
+    fs.int_flag("count", 1, "how many")
+    match fs.parse(["--count", "3", "--help"]):
+        Err(e): assert e.message().contains("default=1"), e.message()
+        Ok(_): assert false, "--help must return Err(help requested)"

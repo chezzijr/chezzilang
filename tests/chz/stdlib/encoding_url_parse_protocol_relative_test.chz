@@ -1,0 +1,13 @@
+# tests/chz/stdlib/encoding_url_parse_protocol_relative_test.chz — TICKET-046(c): `url_parse` must
+# split a protocol-relative URL (`//host/path`) into host+path.
+#
+# Measured: Go `url.Parse("//h/p")` -> host="h" path="/p"; Python `urlsplit("//h/p")` ->
+# netloc='h', path='/p'.
+
+import std.encoding as enc
+
+test fn url_parse_splits_protocol_relative_host_and_path():
+    parts := enc.url_parse("//h/p")
+    assert parts["host"] == "h", str(parts)
+    assert parts["path"] == "/p", str(parts)
+    assert parts["scheme"] == "", str(parts)
