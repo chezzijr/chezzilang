@@ -58,9 +58,9 @@ test fn the_lowest_index_fault_wins_not_the_first_to_fail():
 
 test fn a_later_jobs_result_survives_an_earlier_fault():
     # THE headline W7-5 defect, and the only test here that is red on BOTH engines pre-fix. The
-    # mechanism on M:N is a cancel window: `submit_result` lowers to `submit(fn(): ch.send(f()))`, so a
-    # worker can finish `f()` — its side effects land — and then observe the sibling's cancel at the
-    # next back-edge, BEFORE the wrapper's `ch.send` runs. The work is paid for and the result is lost.
+    # mechanism on M:N is a cancel window: `submit_result` lowers to `submit(fn(): run_outcome(f, out, err))`,
+    # so a worker can finish `f()` — its side effects land — and then observe the sibling's cancel at the
+    # next back-edge, BEFORE `run_outcome`'s `out.send` runs. The work is paid for and the result is lost.
     ex := Executor()
     ex.submit(blow_up)
     ch := ex.submit_result(fn() -> int: 7)

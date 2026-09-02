@@ -88,5 +88,22 @@ native struct Executor:
     # `Channel[T]` that carries its result. The primitive `submit_task`/`Task[T]` wraps.
     fn submit_result[T](self, f: fn() -> T) -> Channel[T]:
         ch := Channel[T](1)
-        self.submit(fn(): ch.send(f()))
+        self.submit_outcome(f, ch, Channel[str](1))
         return ch
+
+    # A faulted job's outcome is always observable one way or the other: a value into `out`, or on
+    # a fault the message into `err`, `out` CLOSED, and the fault re-raised (so `shutdown()` still
+    # reports it).
+    fn submit_outcome[T](self, f: fn() -> T, out: Channel[T], err: Channel[str]):
+        self.submit(fn(): run_outcome(f, out, err))
+
+# Chezzi closures are single-expression only, so a multi-statement job body must be a named
+# top-level fn the lambda calls.
+fn run_outcome[T](f: fn() -> T, out: Channel[T], err: Channel[str]):
+    r := recover: f()
+    match r:
+        Ok(v): out.send(v)
+        Err(e):
+            err.send(e.message())
+            out.close()
+            panic(e.message())

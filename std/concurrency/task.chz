@@ -13,7 +13,9 @@
 # parity. Await your tasks in the order you submitted them (or any fixed order) and both engines agree.
 #
 # MODEL: `submit_task` wraps the closure so it sends its result into a private cap-1 channel, then
-# hands you a `Task` over that channel. Like a bare `Executor.submit`, the work STARTS at the submit
+# hands you a `Task` over that channel. It also routes the job through `Executor.submit_outcome`,
+# so a job fault's message lands on a side error channel and the result channel is CLOSED rather
+# than left forever empty. Like a bare `Executor.submit`, the work STARTS at the submit
 # and is waited for by `shutdown()` (or the program-exit join). The canonical shape is: submit every
 # task, `shutdown()`, then
 # `.get()` each. Calling `.get()` BEFORE `shutdown()` is the one shape to avoid — there is no runnable
@@ -25,33 +27,50 @@ import std.concurrency
 # and cheap to call repeatedly; `done()` polls whether the result has landed without consuming it.
 struct Task[T]:
     ch: Channel[T]
+    err: Channel[str]
     cached: Option[T]
+    failed: Option[str]
 
-    # Block until the task's result is available, then return it. Idempotent: the first call `recv`s the
-    # one-shot channel and caches the value; later calls return the cache (no second `recv`, which would
-    # block forever on the now-empty channel).
+    # Block until the task's result is available, then return it, or re-raise the job's fault.
+    # Idempotent: the first call `recv`s the one-shot channel (or catches the fault) and caches the
+    # outcome; later calls replay the cache instead of a second `recv`, which would fault
+    # `receive on a closed channel` once the job has faulted.
     fn get(self) -> T:
         match self.cached:
-            Some(v):
-                return v
-            None:
-                v := self.ch.recv()
+            Some(v): return v
+            None: pass
+        match self.failed:
+            Some(m): panic(m)
+            None: pass
+        r := recover: self.ch.recv()
+        match r:
+            Ok(v):
                 self.cached = Some(v)
                 return v
+            Err(e):
+                match self.err.try_recv():
+                    Some(m):
+                        self.failed = Some(m)
+                        panic(m)
+                    None:
+                        panic(e.message())
 
-    # True once the result is available (already fetched, or sitting in the channel). Never blocks.
+    # True once the job has finished, faulted or not. Never blocks.
     fn done(self) -> bool:
         match self.cached:
-            Some(_):
-                return true
-            None:
-                return self.ch.len() > 0
+            Some(_): return true
+            None: pass
+        match self.failed:
+            Some(_): return true
+            None: pass
+        return self.ch.len() > 0 or self.err.len() > 0
 
 # Submit `f` to `ex` for detached execution and return a `Task[T]` handle for its result. The work
 # starts at the submit and is waited for by `shutdown()` (or exit); `task.get()` then yields `f()`'s
-# value. Await the handles AFTER `shutdown()`, in a fixed (e.g. submission) order, to stay
-# byte-identical across engines.
+# value, or re-raises the job's fault. Await the handles AFTER `shutdown()`, in a fixed (e.g.
+# submission) order, to stay byte-identical across engines.
 fn submit_task[T](ex: Executor, f: fn() -> T) -> Task[T]:
-    # `Executor.submit_result` IS this primitive: submit `f` and hand back a cap-1 `Channel[T]` that
-    # carries its one result. `Task` just adds memoization/`done()` over that channel.
-    return Task(ch=ex.submit_result(f), cached=None)
+    ch := Channel[T](1)
+    err := Channel[str](1)
+    ex.submit_outcome(f, ch, err)
+    return Task(ch=ch, err=err, cached=None, failed=None)
