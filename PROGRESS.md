@@ -64,8 +64,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
   true *cannot apply + to T and int*. Ceiling recorded: a BINARY default cannot hand the single-slot
   hint to both operands, so `= mkl() + mkl()` is still spelling-dependent (a false rejection, never a
   wrong value; the bound is enforced on both). Review also surfaced a pre-existing defect, filed as
-  **W8-47**: a generic struct's provider-defaulted field is not optional in the positional ctor. Review also found
-  a fourth un-recovered witness shape — a protocol EXISTENTIAL (`p: Produces[int]`) — now closed with
+  **W8-47** and CLOSED 2026-09-02 (TICKET-035) — the generic free fn's `min_params` arity gate and
+  the generic struct's forwarded-turbofish provider, two separate mechanisms behind one symptom.
+  Review also found a fourth un-recovered witness shape — a protocol EXISTENTIAL (`p: Produces[int]`) — now closed with
   the same recipe `satisfies_methods` uses. `docs/gaps.md` **W8-44**; `docs/syntax.md` documents the
   witness rule.
 

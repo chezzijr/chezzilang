@@ -1089,17 +1089,24 @@ consequences are worth writing down, because each is a rule you can hit:
    parameter: *"the default for 'x' of 'f' is cyclic: evaluating it requires evaluating the default for
    'x' of 'f' again"*. Mutual and indirect provider cycles are caught the same way.
 4. **A `Self`-typed parameter's default gets a provider on a non-generic host, and the inline clone
-   on a generic one.** A provider is a free top-level `fn` declared `-> <the parameter's type>`, and
-   `Self` names the receiver type, which a free fn cannot spell (see *"`Self`"* below). On a
-   **non-generic** host `Self` names exactly one concrete type, so it is substituted for that type in
-   the provider's declared return type and the default behaves like any other: `fn combine(self,
-   other: Self = mkq())` — and any default whose type merely mentions `Self`, like `List[Self]` —
-   resolves in its defining module. On a **generic** host `Self` is `Q[T]`, whose `T` is still unbound
-   in a free fn, so no provider can be written for it — the **callee** fills it instead, from a
-   prologue compiled into the declaring module where `Self` and `T` are both in scope, and the call
-   site simply omits the argument. The same route covers a default whose type or expression mentions
-   an enclosing **type parameter** and one whose expression literally spells `Self` (`= Self.mk()`).
-   So every non-literal default resolves in its definer, whichever route it takes.
+   on a generic one; a struct FIELD's default has no callee at all.** A provider is a free top-level
+   `fn` declared `-> <the parameter's type>`, and `Self` names the receiver type, which a free fn
+   cannot spell (see *"`Self`"* below). On a **non-generic** host `Self` names exactly one concrete
+   type, so it is substituted for that type in the provider's declared return type and the default
+   behaves like any other: `fn combine(self, other: Self = mkq())` — and any default whose type
+   merely mentions `Self`, like `List[Self]` — resolves in its defining module.
+
+   A **parameter** whose type mentions an enclosing type parameter (or, on a generic host, `Self`)
+   has a callee to fall back on: the **callee** fills it from a prologue compiled into the declaring
+   module, where the type parameter and `Self` are both in scope, and the call site simply omits the
+   argument. A **struct field** in the same shape has no such callee — a constructor call lowers
+   straight to an allocation sized by the arguments the call site pushes, with no prologue that could
+   fill a missing trailing one. So instead the field's provider is made GENERIC in the struct's own
+   type parameters, and a ctor call fills it by forwarding its own explicit type arguments to that
+   provider: `struct Holder[T]: n: int, items: List[G[T]] = mkl()` called `Holder[int](1)` runs, but
+   `Holder(1)` (no turbofish to forward) or a call on a struct whose type parameter carries a bound
+   (nothing to forward the bound's witness to) both keep the field required. So every non-literal
+   default resolves in its definer, whichever route it takes.
 
    The one shape that cannot: a **keyword** call that supplies a later parameter while omitting an
    earlier callee-filled one (`G(1).m(k=3)` over `fn m(self, xs: List[Self] = mkl(), k: int = 9)`).
