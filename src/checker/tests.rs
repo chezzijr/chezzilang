@@ -29970,3 +29970,15 @@ fn struct_copy_field_wins_over_the_intrinsic_and_stays_uncallable() {
         "has no method 'copy'",
     );
 }
+
+#[test]
+fn binary_op_hint_reaches_only_the_left_operand_ticket_034() {
+    // TICKET-034: `expected_hint` is a single `take()`d slot (src/checker/expr.rs:33), so a
+    // binary expr in a hinted position hands it to the LEFT operand only. The right operand's
+    // generic call then can't be pinned, even though the annotation determines both sides.
+    // Fix (per-operand re-install, matching infer_if_else_chain / infer_list) must make this
+    // program type-check clean.
+    ok(
+        "struct G[T]:\n    v: T\n\nfn mkl[T]() -> List[G[T]]:\n    xs: List[G[T]] = []\n    return xs\n\nfn use[Z]():\n    xs: List[G[Z]] = mkl() + mkl()\n    print(xs.len())\n\nuse[int]()\n",
+    );
+}
