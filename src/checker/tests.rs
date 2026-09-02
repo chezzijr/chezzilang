@@ -1856,6 +1856,18 @@ fn an_annotation_reaches_through_a_collection_literal() {
     );
 }
 
+/// TICKET-033: the int->float ELEMENT widen fires only at an annotated `let`. The same widen must
+/// also fire at a call argument, a `return`, and a struct ctor argument — the SCALAR widen is
+/// already accepted at all three. Currently all three wrongly reject: `float_elem_hint_ty`'s
+/// checker-side widen and its compiler twin `Compiler::elem_hint` are installed at exactly one
+/// site, `StmtKind::Let`. This test asserts the CORRECT (fixed) behavior, so it fails today.
+#[test]
+fn ticket_033_element_widen_missing_at_non_let_sinks() {
+    ok("fn f(xs: List[float]):\n    print(xs)\nfn main():\n    f([1, 2])\n");
+    ok("fn f() -> List[float]:\n    return [1, 2]\n");
+    ok("struct S:\n    v: List[float]\nfn main():\n    S([1, 2])\n");
+}
+
 /// A GENERIC method cannot witness a protocol requirement. Its signature is spelled in binders that
 /// exist in no scope the requirement can see, so `method_matches` was comparing two independently
 /// scoped `Ty::Param`s by their NAME STRING — and alpha-renaming, which must never change meaning,
