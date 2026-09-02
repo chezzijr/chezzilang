@@ -2512,6 +2512,51 @@ fn a_decl_site_default_binder_is_alpha_renameable() {
     ok_desugared(&format!(
         "{SHOW}fn mkl[Z]() -> List[G[Z]]:\n    return []\nstruct H[T: Show]:\n    fn tot(self, xs: List[G[T]] = mkl()) -> int:\n        return xs.len()\nfn main():\n    print(H[A]().tot())\n"
     ));
+
+    // The provider need not be the WHOLE default. The first cut gated the seed on
+    // `matches!(def.kind, ExprKind::Call { .. })` — a syntactic test where the rule is about the
+    // TYPE — so a call inside anything fell back to the spelling-matched comparison. Both of these
+    // were spelling-dependent then: `= idl(mkl())` gave `ok` for `mkl[T]` and *expected List[G[T]],
+    // found List[G[Z]]* for `mkl[Z]`, and the wrapped BOUND shape went unenforced.
+    const NEST: &str =
+        "struct G[T]:\n    v: T\nfn idl[A](xs: List[A]) -> List[A]:\n    return xs\n";
+    for own in ["T", "Z"] {
+        ok_desugared(&format!(
+            "{NEST}fn mkl[{own}]() -> List[G[{own}]]:\n    return []\nstruct H[T]:\n    fn tot(self, xs: List[G[T]] = idl(mkl())) -> int:\n        return xs.len()\nfn main():\n    print(H[int]().tot())\n"
+        ));
+        // …and a slice of the provider call, the other non-tail position.
+        ok_desugared(&format!(
+            "struct G[T]:\n    v: T\nfn mkl[{own}]() -> List[G[{own}]]:\n    return []\nstruct H[T]:\n    fn tot(self, xs: List[G[T]] = mkl()[0:0]) -> int:\n        return xs.len()\nfn main():\n    print(H[int]().tot())\n"
+        ));
+        // The wrapped BOUND shape is enforced now too — it was accepted before, on both spellings.
+        rejects(
+            &format!(
+                "{SHOW}fn mkl[{own}: Show]() -> List[G[{own}]]:\n    return []\nstruct H[T]:\n    fn tot(self, xs: List[G[T]] = mkl() + mkl()) -> int:\n        return xs.len()\n"
+            ),
+            "type T does not satisfy Show",
+        );
+    }
+
+    // A CLOSURE default at a free-param slot now gets the slot as its hint, so its params bind from
+    // it and the TRUE error surfaces instead of a cascade: measured before, *cannot infer type of
+    // parameter 'y'; add a type annotation*; now *cannot apply + to T and int*, which is the real
+    // problem (`T` has no `Add`).
+    rejects(
+        "fn f[T](x: T, g: fn(T) -> T = fn(y): y + 1) -> T:\n    return g(x)\n",
+        "cannot apply + to T and int",
+    );
+
+    // CEILING, measured: `expected_hint` is a SINGLE slot drained by the first consumer, so in a
+    // BINARY default each operand cannot get it — the first `mkl()` is pinned from the slot and the
+    // second keeps spelling its own binder, and the operands then disagree. `= mkl() + mkl()` is
+    // `ok` for `mkl[T]` and *cannot apply + to List[G[T]] and List[G[Z]]* for `mkl[Z]`. A false
+    // rejection on one spelling, never a wrong value; the bound IS enforced on both (above).
+    // Closing it means re-installing the hint per binary OPERAND the way `infer_if_else_chain` does
+    // per arm, which changes inference for every binary expression in a hinted position — its own
+    // change with its own neighbour table.
+    ok_desugared(
+        "struct G[T]:\n    v: T\nfn mkl[T]() -> List[G[T]]:\n    return []\nstruct H[T]:\n    fn tot(self, xs: List[G[T]] = mkl() + mkl()) -> int:\n        return xs.len()\nfn main():\n    print(H[int]().tot())\n",
+    );
 }
 
 /// A decl-site default whose declared type is FULLY CONCRETE is pinned by that slot: a generic fn

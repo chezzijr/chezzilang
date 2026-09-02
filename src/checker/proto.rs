@@ -5092,7 +5092,7 @@ impl Checker {
     /// The gate both halves of the argument-position rule share: is `arg` a BARE reference to a
     /// same-module GENERIC fn — an identifier not shadowed by an in-scope binding (`lookup` None)?
     /// Mirrors `infer_ident`'s Scope A gate exactly. Returns the name and a clone of its signature.
-    fn bare_generic_fn_value_arg(&self, arg: &Expr) -> Option<(String, FnSig)> {
+    pub(super) fn bare_generic_fn_value_arg(&self, arg: &Expr) -> Option<(String, FnSig)> {
         let ExprKind::Ident(name) = &arg.kind else {
             return None;
         };

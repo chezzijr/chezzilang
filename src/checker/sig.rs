@@ -4,6 +4,31 @@
 use super::*;
 
 impl Checker {
+    /// The seed at the decl-site default resolves a provider's binders only where the hint actually
+    /// REACHES — it is a single slot, drained by the first consumer, so in `idl(mkl())` the outer
+    /// call takes it and the inner provider keeps spelling its own `Z`. This is the compare-time
+    /// backstop: pass the default's final inferred type as `unify`'s PATTERN, which treats every
+    /// `Ty::Param` on that side as a variable and so freshens ALL remaining binders in one step — no
+    /// gensym pass, no list to enumerate, no site to miss. One-directional: nothing on the DECLARED
+    /// side is rewritten, so a genuinely wrong default still fails the assignability check.
+    ///
+    /// **It is not redundant with the seed, and was briefly deleted as if it were.** The two cover
+    /// different halves: the seed makes the binding exist INSIDE the call, which is the only way
+    /// `enforce_bounds` can see it; this makes the final COMPARISON independent of spelling even when
+    /// the hint never arrived. Measured with only the seed: `xs: List[G[T]] = idl(mkl())` was `ok`
+    /// for `mkl[T]` and *default value for parameter 'xs': expected List[G[T]], found List[G[Z]]* for
+    /// `mkl[Z]`. The battery that pronounced this redundant contained only BARE provider calls, where
+    /// the hint always arrives — `widening-untested-by-its-own-suite`, applied to a deletion.
+    fn resolve_default_binders(&self, declared: &Ty, actual: Ty) -> Ty {
+        let mut map: HashMap<String, Ty> = HashMap::new();
+        unify(&actual, declared, &mut map);
+        if map.is_empty() {
+            actual
+        } else {
+            subst(&actual, &map)
+        }
+    }
+
     /// Build a function's signature, resolving param/return annotations. `self` (an un-annotated
     /// first param of a method) is left for `check_fn_body` to bind to the struct type. The decl's
     /// generic `type_params` are installed (so `T` in annotations resolves to `Ty::Param("T")`) and
@@ -2323,14 +2348,13 @@ impl Checker {
                 for field in fields {
                     if let Some(def) = &field.default {
                         let expected = self.resolve_type(&field.ty, def.span);
-                        // Same hint seeding as the parameter default above, and the same
-                        // fully-concrete gate for the same name-capture reason.
                         // Same seeding, same gate, same reasons as the parameter default above.
                         let fseed = ty_fully_concrete(&expected)
-                            || matches!(def.kind, ExprKind::Call { .. });
+                            || self.bare_generic_fn_value_arg(def).is_none();
                         let fhint = fseed.then(|| expected.clone());
                         let saved_dsd = std::mem::replace(&mut self.decl_site_default, true);
                         let actual = self.infer_arg(def, fhint.as_ref());
+                        let actual = self.resolve_default_binders(&expected, actual);
                         self.decl_site_default = saved_dsd;
                         if !matches!(expected, Ty::Unknown)
                             && !self.assignable_w(
@@ -4248,47 +4272,41 @@ impl Checker {
                     self.current_ret = Ty::Nil;
                     self.in_fn_body = false;
                 }
-                // Seed the declared type as an expected-type hint so a generic PROVIDER call pins its
-                // own params from the slot it fills, via `seed_from_hint` — `fn run(x: int, f:
-                // fn(int) -> int = ident)` on a generic `ident[T]` was *'ident' is generic and T is
-                // not determined here* and now runs.
-                //
-                // **Only when the declared type is FULLY CONCRETE.** Seeding a declared type that
-                // carries the ENCLOSING generic's free `Ty::Param` makes the generic-fn-VALUE pin
-                // (`try_pin_generic_fn_value_arg`) decline — its result is not fully concrete — and
-                // fall back to comparing the rigid un-substituted type, whose verdict then depends on
-                // what the two sides happen to SPELL: measured, `fn g[U](x: U, f: fn(U) -> U =
-                // ident)` on `fn ident[U](x: U) -> U` was accepted while the alpha-renamed
-                // `fn ident[T](x: T) -> T` gave *default value for parameter 'f': expected fn(U) ->
-                // U, found fn(T) -> T*, and the true diagnostic was deleted. Both spellings now
-                // report that true diagnostic instead. The provider-CALL capture this used to be the
                 // **A generic provider's own binders are universally quantified here.** The
                 // decl-site copy runs before any call, so `fn mkl[Z]() -> List[G[Z]]` used as a
                 // default for `List[G[T]]` comes back still spelling `Z`. Seeding the declared type
                 // as the hint is what resolves them: `seed_from_hint` unifies the provider's return
-                // against the slot, binding `Z := T` — and, because that binding now EXISTS,
+                // against the slot, binding `Z := T` — and, because that binding then EXISTS,
                 // `enforce_bounds` inside the call can finally check it.
                 //
-                // Seeded for a CALL — the provider shape — even when the slot carries a free param,
-                // and for any FULLY CONCRETE slot. NOT for a bare generic fn VALUE at a non-concrete
-                // slot: there `try_pin_generic_fn_value_arg` declines (its result is not fully
-                // concrete) and falls back to comparing the rigid un-substituted type, whose verdict
-                // then depends on what the two sides happen to SPELL — measured, `fn g[U](x: U, f:
-                // fn(U) -> U = ident)` was accepted for `fn ident[U]` and rejected for the
-                // alpha-renamed `fn ident[T]`, with the true diagnostic deleted. Both spellings now
-                // report that true diagnostic instead.
-                //
                 // Without the seed the comparison matched binders by NAME: `mkl[T]` against `G[T]`
-                // was accepted and the alpha-renamed `mkl[Z]` gave *default value for parameter
-                // 'xs': expected List[G[T]], found List[G[Z]]* — one declaration, two verdicts — and
-                // the provider's own `where` bound was never enforced at all, so
-                // `fn mkl[Z: Show]() -> List[G[Z]]` defaulting a `List[G[T]]` was accepted with
-                // nothing showing `T: Show` (both spellings, measured), while the SAME call written
-                // out was correctly rejected.
-                let seed = ty_fully_concrete(&ty) || matches!(def.kind, ExprKind::Call { .. });
+                // was accepted while the alpha-renamed `mkl[Z]` gave *default value for parameter
+                // 'xs': expected List[G[T]], found List[G[Z]]* — one declaration, two verdicts,
+                // decided by a letter — and the provider's own `where` bound was never enforced at
+                // all, so `fn mkl[Z: Show]() -> List[G[Z]]` defaulting a `List[G[T]]` was accepted
+                // with nothing showing `T: Show` (both spellings, measured), while the SAME call
+                // written out was correctly rejected.
+                //
+                // **The gate names the ONE shape that must be EXCLUDED, never the shapes that work.**
+                // A first cut gated on `matches!(def.kind, ExprKind::Call { .. })` — the provider
+                // shape — which is a SYNTACTIC test where the rule is about the TYPE: any call inside
+                // anything skipped the seed and fell back to the spelling-matched comparison, so
+                // `= mkl() + mkl()` still gave `ok` for `mkl[T]` and the mismatch for `mkl[Z]`, and
+                // its `where` bound went unenforced while the bare `= mkl()` twin was correctly
+                // rejected — same declaration, opposite verdicts, decided by a wrapper.
+                //
+                // The one shape that genuinely must not be seeded is a BARE GENERIC FN VALUE at a
+                // non-concrete slot (`f: fn(U) -> U = ident`): there `try_pin_generic_fn_value_arg`
+                // declines — its result is not fully concrete — and falls back to comparing the rigid
+                // un-substituted type, whose verdict then depends on what the two sides SPELL.
+                // Measured, that shape was accepted for `fn ident[U]` and rejected for the
+                // alpha-renamed `fn ident[T]`, with the true diagnostic deleted; excluded, both
+                // spellings report the true *'ident' is generic and … is not determined here*.
+                let seed = ty_fully_concrete(&ty) || self.bare_generic_fn_value_arg(def).is_none();
                 let hint = seed.then(|| ty.clone());
                 let saved_dsd = std::mem::replace(&mut self.decl_site_default, true);
                 let actual = self.infer_arg(def, hint.as_ref());
+                let actual = self.resolve_default_binders(&ty, actual);
                 self.decl_site_default = saved_dsd;
                 self.current_ret = saved_ret;
                 self.in_fn_body = saved_in_fn;

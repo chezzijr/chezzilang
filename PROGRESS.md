@@ -46,17 +46,25 @@ Single source of truth for "what am I doing next." Update after every work sessi
   `fn g[U](x: U, f: fn(U) -> U = ident)` was accepted for `ident[U]` and rejected for the
   alpha-renamed `ident[T]`, and the true diagnostic was deleted. The concrete half is kept
   (`fn run(x: int, f: fn(int) -> int = ident)` on a generic `ident[T]` now runs instead of *T is not
-  determined here*), and the `mkl[Z]` capture is closed by **seeding the declared type for a CALL
-  default too** — `seed_from_hint` unifies the provider's return against the slot, binding `Z := T`
-  inside the call. `mkl[T]` and `mkl[Z]` now both run, and the field twin agrees across spellings.
-  **That also closed an accept-without-enforce nothing else could reach:** the provider's own `where`
-  bound was never checked at the decl site, because `enforce_bounds` ran with `Z` still free — so
+  determined here*), and the `mkl[Z]` capture is closed by **two complementary halves**: SEED the
+  declared type as the hint, so `seed_from_hint` binds `Z := T` inside `infer_generic_call` — that
+  placement is the point, since it is the only way `enforce_bounds` can see the binding — plus a
+  compare-time backstop (`resolve_default_binders`) for the shapes the single-slot hint never reaches,
+  which passes the default's final type as `unify`'s pattern and so freshens every remaining binder at
+  once. **Half 1 also closed an accept-without-enforce nothing else could reach:** the provider's own
+  `where` bound was never checked at the decl site, because `enforce_bounds` ran with `Z` still free —
   `fn mkl[Z: Show]() -> List[G[Z]]` defaulting a `List[G[T]]` was accepted with nothing showing
-  `T: Show` (both spellings), while the same call written out was rejected. Seeding creates the
-  binding, so the existing `enforce_bounds` now fires with no new code. A first cut used a
-  `resolve_default_binders` helper (passing the default's type as `unify`'s pattern, which freshens
-  every binder at once); it was deleted before ship — measured redundant once the seed lands, and one
-  mechanism beats two. Review also found
+  `T: Show` (both spellings), while the same call written out was rejected.
+  **Adversarial review caught two wrong cuts, both fixed:** the backstop was deleted as "redundant"
+  on a battery of BARE provider calls only, and `= idl(mkl())` promptly went spelling-dependent again
+  (`widening-untested-by-its-own-suite` applies to deletions); and the seed's gate was keyed on
+  SYNTAX (`ExprKind::Call`) rather than the property it states, so `= mkl() + mkl()` skipped it and
+  its bound went unenforced. The gate now names the ONE shape to EXCLUDE — a bare generic fn value —
+  which also fixed a closure default (`= fn(y): y + 1` at a `fn(T) -> T` slot) from a cascade to the
+  true *cannot apply + to T and int*. Ceiling recorded: a BINARY default cannot hand the single-slot
+  hint to both operands, so `= mkl() + mkl()` is still spelling-dependent (a false rejection, never a
+  wrong value; the bound is enforced on both). Review also surfaced a pre-existing defect, filed as
+  **W8-47**: a generic struct's provider-defaulted field is not optional in the positional ctor. Review also found
   a fourth un-recovered witness shape — a protocol EXISTENTIAL (`p: Produces[int]`) — now closed with
   the same recipe `satisfies_methods` uses. `docs/gaps.md` **W8-44**; `docs/syntax.md` documents the
   witness rule.
