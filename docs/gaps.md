@@ -919,9 +919,11 @@ shape is **construction span only, default rendering unchanged**, reusing `Progr
    `chezzi test` loop — the project's *preferred* test form had the worst failure output. (The `file`
    key in `--errors=json` this item originally paired W8-13 with — **W8-15** — is done too: both the
    `check` and `test` halves closed 2026-08-18, on this branch.)
-6. **W8-19's affordances, multi-statement closures first** — the `Option`/`Result`-methods sub-item
-   was DECLINED 2026-09-02; closures now retire the `t.0`-in-a-closure workaround and unblock the
-   comparator shape that pushed three named fns into one app.
+6. **W8-19's affordances, `path.join` accepting `PathLike` first** — the `Option`/`Result`-methods
+   sub-item was DECLINED 2026-09-02; the row's own ranked order puts closures and the global helpers
+   ahead of it, but both are routed elsewhere (closures to their own milestone ticket, global helpers
+   declined), leaving `path.join` as the next-ranked still-open W8-19 sub-item, alongside tuple
+   `Hashable`, the un-selectable `Listener`, and statement-only `recover:`.
 
 ### Verdict as reported
 
