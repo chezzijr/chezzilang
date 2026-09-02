@@ -4,32 +4,6 @@
 use super::*;
 
 impl Checker {
-    /// The decl-site copy of a default is checked BEFORE any call, so a generic provider's own
-    /// binders are still FREE in `actual` (`fn mkl[Z]() -> List[G[Z]]` used as a default for
-    /// `List[G[T]]` yields `List[G[Z]]`). Those binders are universally quantified there — the
-    /// default's real home is the provider, or the splice at each call, where the enclosing generic
-    /// IS bound — so resolve them AGAINST THE SLOT rather than comparing them by name.
-    ///
-    /// Without this the comparison passed only when the two sides happened to SPELL a binder the
-    /// same: measured, `mkl[T]` against `G[T]` was accepted while the alpha-renamed `mkl[Z]` gave
-    /// *default value for parameter 'xs': expected List[G[T]], found List[G[Z]]* — one declaration,
-    /// two verdicts. Alpha-renaming must never change meaning.
-    ///
-    /// `unify` treats every `Ty::Param` on its PATTERN side as a variable, so passing `actual` as
-    /// the pattern freshens ALL of its binders in one step — no gensym pass needed, and no way to
-    /// miss one. It is one-directional: nothing on the DECLARED side is rewritten, so a genuinely
-    /// wrong default (`n: int = "x"`, or a provider whose return cannot fill the slot) still fails
-    /// the assignability check at the call site of this helper, unchanged.
-    fn resolve_default_binders(&self, declared: &Ty, actual: Ty) -> Ty {
-        let mut map: HashMap<String, Ty> = HashMap::new();
-        unify(&actual, declared, &mut map);
-        if map.is_empty() {
-            actual
-        } else {
-            subst(&actual, &map)
-        }
-    }
-
     /// Build a function's signature, resolving param/return annotations. `self` (an un-annotated
     /// first param of a method) is left for `check_fn_body` to bind to the struct type. The decl's
     /// generic `type_params` are installed (so `T` in annotations resolves to `Ty::Param("T")`) and
@@ -2351,10 +2325,12 @@ impl Checker {
                         let expected = self.resolve_type(&field.ty, def.span);
                         // Same hint seeding as the parameter default above, and the same
                         // fully-concrete gate for the same name-capture reason.
-                        let fhint = ty_fully_concrete(&expected).then(|| expected.clone());
+                        // Same seeding, same gate, same reasons as the parameter default above.
+                        let fseed = ty_fully_concrete(&expected)
+                            || matches!(def.kind, ExprKind::Call { .. });
+                        let fhint = fseed.then(|| expected.clone());
                         let saved_dsd = std::mem::replace(&mut self.decl_site_default, true);
                         let actual = self.infer_arg(def, fhint.as_ref());
-                        let actual = self.resolve_default_binders(&expected, actual);
                         self.decl_site_default = saved_dsd;
                         if !matches!(expected, Ty::Unknown)
                             && !self.assignable_w(
@@ -4286,11 +4262,33 @@ impl Checker {
                 // `fn ident[T](x: T) -> T` gave *default value for parameter 'f': expected fn(U) ->
                 // U, found fn(T) -> T*, and the true diagnostic was deleted. Both spellings now
                 // report that true diagnostic instead. The provider-CALL capture this used to be the
-                // only cure for is handled properly below, by `resolve_default_binders`.
-                let hint = ty_fully_concrete(&ty).then(|| ty.clone());
+                // **A generic provider's own binders are universally quantified here.** The
+                // decl-site copy runs before any call, so `fn mkl[Z]() -> List[G[Z]]` used as a
+                // default for `List[G[T]]` comes back still spelling `Z`. Seeding the declared type
+                // as the hint is what resolves them: `seed_from_hint` unifies the provider's return
+                // against the slot, binding `Z := T` — and, because that binding now EXISTS,
+                // `enforce_bounds` inside the call can finally check it.
+                //
+                // Seeded for a CALL — the provider shape — even when the slot carries a free param,
+                // and for any FULLY CONCRETE slot. NOT for a bare generic fn VALUE at a non-concrete
+                // slot: there `try_pin_generic_fn_value_arg` declines (its result is not fully
+                // concrete) and falls back to comparing the rigid un-substituted type, whose verdict
+                // then depends on what the two sides happen to SPELL — measured, `fn g[U](x: U, f:
+                // fn(U) -> U = ident)` was accepted for `fn ident[U]` and rejected for the
+                // alpha-renamed `fn ident[T]`, with the true diagnostic deleted. Both spellings now
+                // report that true diagnostic instead.
+                //
+                // Without the seed the comparison matched binders by NAME: `mkl[T]` against `G[T]`
+                // was accepted and the alpha-renamed `mkl[Z]` gave *default value for parameter
+                // 'xs': expected List[G[T]], found List[G[Z]]* — one declaration, two verdicts — and
+                // the provider's own `where` bound was never enforced at all, so
+                // `fn mkl[Z: Show]() -> List[G[Z]]` defaulting a `List[G[T]]` was accepted with
+                // nothing showing `T: Show` (both spellings, measured), while the SAME call written
+                // out was correctly rejected.
+                let seed = ty_fully_concrete(&ty) || matches!(def.kind, ExprKind::Call { .. });
+                let hint = seed.then(|| ty.clone());
                 let saved_dsd = std::mem::replace(&mut self.decl_site_default, true);
                 let actual = self.infer_arg(def, hint.as_ref());
-                let actual = self.resolve_default_binders(&ty, actual);
                 self.decl_site_default = saved_dsd;
                 self.current_ret = saved_ret;
                 self.in_fn_body = saved_in_fn;

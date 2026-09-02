@@ -46,13 +46,17 @@ Single source of truth for "what am I doing next." Update after every work sessi
   `fn g[U](x: U, f: fn(U) -> U = ident)` was accepted for `ident[U]` and rejected for the
   alpha-renamed `ident[T]`, and the true diagnostic was deleted. The concrete half is kept
   (`fn run(x: int, f: fn(int) -> int = ident)` on a generic `ident[T]` now runs instead of *T is not
-  determined here*), and the `mkl[Z]` capture is closed **by freshening** instead:
-  `Checker::resolve_default_binders` passes the default's inferred type as `unify`'s PATTERN, and
-  `unify` treats every `Ty::Param` there as a variable — so every binder is freshened in one step,
-  with no gensym pass, no list to enumerate and no site to miss. One-directional, so a wrong default
-  still fails the unchanged assignability check. `mkl[T]` and `mkl[Z]` now both run, and the field
-  twin agrees across spellings. Ceiling recorded: the decl-site copy still does not enforce the
-  provider's own `where` bound (pre-existing on both spellings; a direct call does enforce it). Review also found
+  determined here*), and the `mkl[Z]` capture is closed by **seeding the declared type for a CALL
+  default too** — `seed_from_hint` unifies the provider's return against the slot, binding `Z := T`
+  inside the call. `mkl[T]` and `mkl[Z]` now both run, and the field twin agrees across spellings.
+  **That also closed an accept-without-enforce nothing else could reach:** the provider's own `where`
+  bound was never checked at the decl site, because `enforce_bounds` ran with `Z` still free — so
+  `fn mkl[Z: Show]() -> List[G[Z]]` defaulting a `List[G[T]]` was accepted with nothing showing
+  `T: Show` (both spellings), while the same call written out was rejected. Seeding creates the
+  binding, so the existing `enforce_bounds` now fires with no new code. A first cut used a
+  `resolve_default_binders` helper (passing the default's type as `unify`'s pattern, which freshens
+  every binder at once); it was deleted before ship — measured redundant once the seed lands, and one
+  mechanism beats two. Review also found
   a fourth un-recovered witness shape — a protocol EXISTENTIAL (`p: Produces[int]`) — now closed with
   the same recipe `satisfies_methods` uses. `docs/gaps.md` **W8-44**; `docs/syntax.md` documents the
   witness rule.

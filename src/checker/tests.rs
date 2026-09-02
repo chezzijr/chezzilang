@@ -2453,9 +2453,9 @@ fn a_decl_site_default_is_exempt_from_the_return_only_rule() {
 /// comparison there must resolve them against the SLOT, never match them by spelling. It used to
 /// match by spelling: one declaration, two verdicts, decided by a letter.
 ///
-/// `unify` treats every `Ty::Param` on its PATTERN side as a variable, so passing the default's
-/// inferred type as the pattern freshens all of its binders at once — no gensym pass, and no way to
-/// miss one. It stays one-directional, so nothing on the declared side is rewritten and a genuinely
+/// Seeding the declared type as the hint resolves them — `seed_from_hint` unifies the provider's
+/// return against the slot — and, because the binding then EXISTS, `enforce_bounds` inside the call
+/// can finally check the provider's own `where` bound, which nothing checked before. A genuinely
 /// wrong default still fails (`a_decl_site_default_is_still_type_checked`).
 #[test]
 fn a_decl_site_default_binder_is_alpha_renameable() {
@@ -2489,14 +2489,29 @@ fn a_decl_site_default_binder_is_alpha_renameable() {
         "alpha-renaming the provider's binder changed the verdict: {msgs:?}"
     );
 
-    // CEILING, measured and pre-existing on BOTH spellings: the decl-site copy does not enforce the
-    // provider's own `where` bound, so `fn mkl[Z: Show]() -> List[G[Z]]` defaulting a `List[G[T]]`
-    // is accepted even though nothing shows `T: Show`. A DIRECT call is correctly rejected
-    // (*type int does not satisfy Show*), and the binder is return-only so the provider body has no
-    // value to call the bound method on — a missing rejection, never a wrong value.
-    ok_desugared(
-        "protocol Show:\n    fn show(self) -> str\nstruct G[T]:\n    v: T\nfn mkl[Z: Show]() -> List[G[Z]]:\n    return []\nstruct H[T]:\n    fn tot(self, xs: List[G[T]] = mkl()) -> int:\n        return xs.len()\nfn main():\n    print(H[int]().tot())\n",
-    );
+    // The provider's own `where` BOUND is enforced now that the binding exists. Before, nothing
+    // checked it on EITHER spelling — `fn mkl[Z: Show]() -> List[G[Z]]` defaulting a `List[G[T]]`
+    // was accepted with nothing showing `T: Show`, while the SAME call written out was correctly
+    // rejected (*type int does not satisfy Show*). Both spellings are asserted.
+    const SHOW: &str = "protocol Show:\n    fn show(self) -> str\nstruct A:\n    fn show(self) -> str:\n        return \"a\"\nstruct G[T]:\n    v: T\n";
+    for own in ["T", "Z"] {
+        rejects(
+            &format!(
+                "{SHOW}fn mkl[{own}: Show]() -> List[G[{own}]]:\n    return []\nstruct H[T]:\n    fn tot(self, xs: List[G[T]] = mkl()) -> int:\n        return xs.len()\n"
+            ),
+            "type T does not satisfy Show",
+        );
+    }
+    // …and the escape works: give the ENCLOSING param the bound and it compiles and runs. Both of
+    // these were rejected before, by the name capture.
+    ok_desugared(&format!(
+        "{SHOW}fn mkl[Z: Show]() -> List[G[Z]]:\n    return []\nstruct H[T: Show]:\n    fn tot(self, xs: List[G[T]] = mkl()) -> int:\n        return xs.len()\nfn main():\n    print(H[A]().tot())\n"
+    ));
+    // An UNBOUNDED provider under a bounded enclosing param is fine — the bound is the provider's
+    // to demand, not to inherit.
+    ok_desugared(&format!(
+        "{SHOW}fn mkl[Z]() -> List[G[Z]]:\n    return []\nstruct H[T: Show]:\n    fn tot(self, xs: List[G[T]] = mkl()) -> int:\n        return xs.len()\nfn main():\n    print(H[A]().tot())\n"
+    ));
 }
 
 /// A decl-site default whose declared type is FULLY CONCRETE is pinned by that slot: a generic fn
