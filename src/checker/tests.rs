@@ -2626,6 +2626,29 @@ fn a_decl_site_default_binder_is_alpha_renameable() {
     );
 }
 
+/// W8-47 -- a non-inline default whose slot type mentions a type parameter is refused as arity-
+/// filling even when the binder is already PINNED by an explicit turbofish. `min_callable_params`
+/// treats the trailing defaulted param as required whenever its declared type mentions a struct/fn
+/// type parameter, with no exception for a call site that pins the binder some other way (turbofish
+/// or an earlier argument). This is the ctor half of the pair; `w8_47_free_fn_default_arity_is_
+/// binder_blind` is the free-fn half.
+///
+/// Measured before this fix: both `Holder[int](1)` (turbofish-pinned) and `Holder(1)` (unpinned) are
+/// rejected identically with *Holder() expects 2 argument(s), got 1*.
+#[test]
+fn w8_47_struct_ctor_default_arity_is_binder_blind() {
+    let src = "struct G[T]:\n    v: T\nfn mkl[T]() -> List[G[T]]:\n    xs: List[G[T]] = []\n    return xs\nstruct Holder[T]:\n    n: int\n    items: List[G[T]] = mkl()\nfn main():\n    h := Holder[int](1)\n    print(h.n)\nmain()\n";
+    ok(src);
+}
+
+/// W8-47 -- the free-fn half of the same defect: `fn conv[T](a: int, b: List[T] = mkl())` called as
+/// `conv[int](1)`, binder pinned by turbofish, is rejected the same as the unpinned `conv(1)`.
+#[test]
+fn w8_47_free_fn_default_arity_is_binder_blind() {
+    let src = "struct G[T]:\n    v: T\nfn mkl[T]() -> List[G[T]]:\n    xs: List[G[T]] = []\n    return xs\nfn conv[T](a: int, b: List[G[T]] = mkl()) -> int:\n    return a\nfn main():\n    print(conv[int](1))\nmain()\n";
+    ok(src);
+}
+
 /// A decl-site default whose declared type is FULLY CONCRETE is pinned by that slot: a generic fn
 /// value there is instantiated instead of reported. Measured before: *'ident' is generic and T is not
 /// determined here*; after, the program runs and prints `5`.
