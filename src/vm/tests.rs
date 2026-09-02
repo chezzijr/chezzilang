@@ -9118,6 +9118,20 @@ fn top_level_try_err_reports_real_line() {
     assert_eq!(e.span.line, 3, "expected the `?` line, got {}", e.span.line);
 }
 
+#[test]
+fn bare_discarded_result_call_at_top_level_does_not_abort() {
+    // TICKET-038: a bare `Result`-returning call at module top level, with its value neither
+    // bound nor `?`-propagated, is expected to behave like Rust's `#[must_use]` lint on an
+    // ignored `Result` — warn (checker, not asserted here) and keep running, rc=0 — not abort
+    // the program. It currently aborts with `unhandled error`.
+    let src = "\
+fn g() -> Result[int, str]:
+    return Err(\"boom\")
+g()
+print(\"after\")";
+    assert_eq!(run_capture(src).unwrap(), "after\n");
+}
+
 /// L3-1: a pure-panic assertion helper with NO return annotation (`fn boom(): panic(...)`) now
 /// type-checks (infers `-> nil`) — verify the CALLER runs and FAULTS with the panic message on
 /// BOTH engines, and that a `recover:`-wrapped call yields `Err("x")`.
