@@ -12434,6 +12434,14 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- **An annotated `let` now reports one diagnostic per mistake, not two (2026-09-03, TICKET-044).**
+  `m: Map[float, str] = {}` printed `chezzi: 2 type errors`; now `chezzi: 1 type error`. Root cause:
+  `check_stmt`'s single-name `let` arm (`src/checker/sig.rs`) resolved the type annotation TWICE — once
+  to seed `expected_hint`, once to compute `declared` — and `resolve_type` reports diagnostics
+  (`unknown type 'X'`, the Map-key/Set-element Hashable ban) as a side effect of resolving, so every
+  diagnostic it emitted was doubled. Fixed by resolving the annotation once into a local and reading it
+  at both sites. Covers every diagnostic `resolve_type` emits, not only Hashable: `x: Nope = 1` went
+  from two `unknown type 'Nope'` errors to one.
 - **A binary operator in a hinted position now hands the expected type to BOTH operands, not just the
   left (2026-09-02, TICKET-034).** `infer_binary` (`src/checker/pattern.rs`) re-installs the single
   `expected_hint` slot per operand, matching the hop `infer_if_else_chain` already makes per branch.

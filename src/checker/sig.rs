@@ -2025,16 +2025,25 @@ impl Checker {
                 ..
             } => {
                 let is_const = *is_const;
+                // `resolve_type` REPORTS as a side effect of resolving (`unknown type 'X'`, the
+                // Map-key/Set-element Hashable ban at `sig.rs:1753-1767`), so the annotation must be
+                // resolved exactly once per statement or every diagnostic it emits doubles. A
+                // destructuring `let` cannot carry an annotation (`a, b: T = ...` is the parse error
+                // `expected '=' after a multi-target assignment list`), so `names.len() == 1` holds
+                // whenever `ty` is `Some`. `hover_record_at` is first-write-wins, so the second call
+                // this replaces never contributed a hover record.
+                let annotated: Option<Ty> = match ty {
+                    Some(t) if names.len() == 1 => Some(self.resolve_type(t, span)),
+                    _ => None,
+                };
                 // A closure bound to a `fn`-typed annotation is inferred in checking-mode (source #1):
                 // resolve the annotation first so its unannotated params bind to the slot's param
                 // types. Only the single-name, `fn`-typed case (destructuring never binds one).
                 // Otherwise ordinary bottom-up inference.
-                let val_ty = match ty {
-                    Some(t)
-                        if names.len() == 1 && matches!(value.kind, ExprKind::Closure { .. }) =>
-                    {
-                        let expected = self.resolve_type(t, span);
+                let val_ty = match &annotated {
+                    Some(expected) if matches!(value.kind, ExprKind::Closure { .. }) => {
                         if matches!(expected, Ty::Func { .. }) {
+                            let expected = expected.clone();
                             self.infer_arg(value, Some(&expected))
                         } else {
                             self.infer_value(value)
@@ -2046,8 +2055,7 @@ impl Checker {
                     // Heap([], fn(x, y): x < y)` pins `T=int`, which then pins the comparator's
                     // params. `infer_call` clears the hint, but pair the set with an immediate clear
                     // so a non-call value never leaks it into the next statement.
-                    Some(t) if names.len() == 1 => {
-                        let expected = self.resolve_type(t, span);
+                    Some(expected) => {
                         // One-way int→float ELEMENT widening: a `List[float]` / `Map[_, float]`
                         // annotation licenses the literal's untyped-int-constant elements to widen —
                         // TICKET-033 — derived from the RESOLVED `Ty`, so a whole-collection alias
@@ -2060,14 +2068,14 @@ impl Checker {
                         // ride this channel: it is derived from `expected_hint` at the literal itself,
                         // so it holds at every slot position, not just an annotated `let`. See
                         // `crate::checker::any_elem_slot` / `ListWidenTable`.)
-                        self.float_elem_hint = float_elem_hint_ty(&expected);
-                        self.expected_hint = Some(expected);
+                        self.float_elem_hint = float_elem_hint_ty(expected);
+                        self.expected_hint = Some(expected.clone());
                         let vt = self.infer_value(value);
                         self.float_elem_hint = None;
                         self.expected_hint = None;
                         vt
                     }
-                    _ => self.infer_value(value),
+                    None => self.infer_value(value),
                 };
                 if names.len() > 1 {
                     // destructuring let `a, b := expr` — `expr` must be a tuple of matching arity.
@@ -2075,9 +2083,8 @@ impl Checker {
                     return;
                 }
                 let name = &names[0];
-                let declared = match ty {
-                    Some(t) => {
-                        let expected = self.resolve_type(t, span);
+                let declared = match annotated {
+                    Some(expected) => {
                         if !self.assignable_w(
                             &expected,
                             &val_ty,
