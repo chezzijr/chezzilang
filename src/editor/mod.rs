@@ -841,7 +841,7 @@ fn overlay_expr(expr: &crate::ast::Expr, map: &mut std::collections::HashMap<(us
             }
         }
         ExprKind::Unary { expr, .. } => overlay_expr(expr, map),
-        ExprKind::Binary { lhs, rhs, .. } | ExprKind::NullCoalesce { lhs, rhs } => {
+        ExprKind::Binary { lhs, rhs, .. } | ExprKind::NullCoalesce { lhs, rhs, .. } => {
             overlay_expr(lhs, map);
             overlay_expr(rhs, map);
         }

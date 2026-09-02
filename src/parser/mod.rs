@@ -2414,6 +2414,7 @@ impl Parser {
             if self.depth + self.fold_depth + chain > MAX_AST_DEPTH {
                 return Err(self.err("expression nested too deeply".to_string()));
             }
+            let op_span = self.cur_span();
             self.advance(); // the operator
             let rhs = self.parse_bp(r_bp)?;
             let span = lhs.span;
@@ -2437,6 +2438,7 @@ impl Parser {
                     kind: ExprKind::NullCoalesce {
                         lhs: Box::new(lhs),
                         rhs: Box::new(rhs),
+                        op_span,
                     },
                     span,
                 },
@@ -4403,7 +4405,7 @@ mod tests {
     fn parses_null_coalesce_right_assoc() {
         // `a ?? b ?? c` = `a ?? (b ?? c)`.
         match let_value("x := a ?? b ?? c\n").kind {
-            ExprKind::NullCoalesce { lhs, rhs } => {
+            ExprKind::NullCoalesce { lhs, rhs, .. } => {
                 assert!(matches!(lhs.kind, ExprKind::Ident(ref n) if n == "a"));
                 assert!(
                     matches!(rhs.kind, ExprKind::NullCoalesce { .. }),
@@ -4515,12 +4517,40 @@ mod tests {
     fn opt_chain_binds_tighter_than_coalesce() {
         // `y?.f ?? z` = `(y?.f) ?? z`.
         match let_value("x := y?.f ?? z\n").kind {
-            ExprKind::NullCoalesce { lhs, rhs } => {
+            ExprKind::NullCoalesce { lhs, rhs, .. } => {
                 assert!(matches!(lhs.kind, ExprKind::OptChain { .. }));
                 assert!(matches!(rhs.kind, ExprKind::Ident(ref n) if n == "z"));
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn null_coalesce_op_span_is_the_operator_token_not_the_lhs() {
+        // `(a ?? b) ?? c`: both nodes share `a`'s `Expr::span` (parse_bp reuses `lhs.span`, and
+        // `(e)` grouping keeps the inner span), but their `op_span`s must differ — that's the real
+        // `CarrierKey` coordinate.
+        let outer = let_value("x := (a ?? b) ?? c\n");
+        let ExprKind::NullCoalesce {
+            lhs: outer_lhs,
+            op_span: outer_op_span,
+            ..
+        } = outer.kind
+        else {
+            panic!("{:?}", outer.kind);
+        };
+        let ExprKind::NullCoalesce {
+            op_span: inner_op_span,
+            ..
+        } = outer_lhs.kind
+        else {
+            panic!("{:?}", outer_lhs.kind);
+        };
+        assert_eq!(outer.span, outer_lhs.span, "both nodes share lhs's span");
+        assert_ne!(
+            outer_op_span, inner_op_span,
+            "each '??' needs its own op_span"
+        );
     }
 
     #[test]

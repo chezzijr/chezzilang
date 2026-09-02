@@ -1330,7 +1330,7 @@ fn walk_idents_and_types(e: &Expr, f: &mut impl FnMut(&str), tf: &mut impl FnMut
                 c.type_args.iter().for_each(&mut *tf);
             }
         }
-        ExprKind::NullCoalesce { lhs, rhs } => {
+        ExprKind::NullCoalesce { lhs, rhs, .. } => {
             walk_idents_and_types(lhs, f, tf);
             walk_idents_and_types(rhs, f, tf);
         }
@@ -2064,7 +2064,7 @@ impl Walker<'_> {
             // TYPE, which only the checker has. Walk the children like any other node, then
             // normalize the `?.` call part explicitly (see `normalize_opt_call` — the carrier no
             // longer becomes a `Call` here, so `walk_expr`'s tail can't do it).
-            ExprKind::NullCoalesce { lhs, rhs } => {
+            ExprKind::NullCoalesce { lhs, rhs, .. } => {
                 self.walk_expr(lhs)?;
                 self.walk_expr(rhs)?;
             }
@@ -2697,7 +2697,7 @@ pub fn lower_carrier_option(expr: &mut Expr, tmp: usize) {
     let c = format!("__opt{tmp}");
     let kind = std::mem::replace(&mut expr.kind, ExprKind::Bool(false));
     expr.kind = match kind {
-        ExprKind::NullCoalesce { lhs, rhs } => ExprKind::Match {
+        ExprKind::NullCoalesce { lhs, rhs, .. } => ExprKind::Match {
             scrutinee: lhs,
             arms: vec![
                 MatchExprArm {
@@ -3381,7 +3381,7 @@ mod tests {
             "fn g(x: int, y: int = 7) -> int?:\n    return Some(x)\nx := g(1) ?? g(2, y=9)\n",
         );
         match last_let_value(&stmts).kind {
-            ExprKind::NullCoalesce { lhs, rhs } => {
+            ExprKind::NullCoalesce { lhs, rhs, .. } => {
                 let args_of = |e: &Expr| -> usize {
                     let ExprKind::Call { args, named, .. } = &e.kind else {
                         panic!("expected a Call, got {:?}", e.kind)

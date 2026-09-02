@@ -1029,13 +1029,19 @@ pub enum ExprKind {
         /// `Some(args)` ⇒ method call `obj?.name(args)`; `None` ⇒ field access `obj?.name`.
         call: Option<OptCall>,
     },
-    /// Null-coalescing `lhs ?? rhs`. `lhs` is an `Option[T]`: `Some(v)` ⇒ `v`, `None` ⇒ `rhs`.
-    /// A **carrier** node that survives desugar (W7-43) and is lowered to a `Match` by the checker
-    /// and the compiler via `desugar::lower_carrier_option`. Option-ONLY: `??` on a `Result` is one
-    /// clear error, never a silent discard of the error payload.
+    /// Null-coalescing `lhs ?? rhs`. `lhs` is an `Option[T]` or a `Result[T, E]`: `Some(v)`/`Ok(v)`
+    /// ⇒ `v`, `None`/`Err(_)` ⇒ `rhs` (the `Result` form discards the error, like Rust's
+    /// `unwrap_or`). A **carrier** node that survives desugar (W7-43) and is lowered to a `Match` by
+    /// the checker and the compiler via `desugar::lower_carrier_option` or
+    /// `desugar::lower_carrier_result_coalesce`.
     NullCoalesce {
         lhs: Box<Expr>,
         rhs: Box<Expr>,
+        /// The `??` token's own span — the carrier's `CarrierKey` coordinate. NEVER use
+        /// `Expr::span` for this: `parse_bp` reuses `lhs.span` for every infix node and `(e)`
+        /// grouping keeps the inner span, so in `(a ?? b) ?? c` both `NullCoalesce` nodes share
+        /// `a`'s `Expr::span` and one key would collide two different carrier modes.
+        op_span: Span,
     },
     /// `module.decode[Type](arg)` — type-directed JSON decode (M8). `obj` is the json-module
     /// expression (so the engine can reach its `parse`), `ty` is the target type to decode into,
@@ -1188,7 +1194,7 @@ pub fn expr_recover_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
             }
         }
         ExprKind::Unary { expr, .. } => go(expr),
-        ExprKind::Binary { lhs, rhs, .. } | ExprKind::NullCoalesce { lhs, rhs } => {
+        ExprKind::Binary { lhs, rhs, .. } | ExprKind::NullCoalesce { lhs, rhs, .. } => {
             go(lhs);
             go(rhs);
         }

@@ -6575,7 +6575,7 @@ fn find_boundary_free_expr(e: &Expr, out: &mut HashSet<String>) {
             find_boundary_free_expr(elem, out);
         }
         ExprKind::Unary { expr, .. } | ExprKind::Try(expr) => find_boundary_free_expr(expr, out),
-        ExprKind::Binary { lhs, rhs, .. } | ExprKind::NullCoalesce { lhs, rhs } => {
+        ExprKind::Binary { lhs, rhs, .. } | ExprKind::NullCoalesce { lhs, rhs, .. } => {
             find_boundary_free_expr(lhs, out);
             find_boundary_free_expr(rhs, out);
         }
@@ -7069,7 +7069,7 @@ pub(crate) fn free_names_expr(e: &Expr, bound: &HashSet<String>, out: &mut FreeN
             free_names_expr(elem, &b, out);
         }
         ExprKind::Unary { expr, .. } | ExprKind::Try(expr) => free_names_expr(expr, bound, out),
-        ExprKind::Binary { lhs, rhs, .. } | ExprKind::NullCoalesce { lhs, rhs } => {
+        ExprKind::Binary { lhs, rhs, .. } | ExprKind::NullCoalesce { lhs, rhs, .. } => {
             free_names_expr(lhs, bound, out);
             free_names_expr(rhs, bound, out);
         }
@@ -7219,7 +7219,7 @@ fn collect_frame_binds_expr(e: &Expr, out: &mut HashSet<String>) {
             collect_frame_binds_expr(elem, out);
         }
         ExprKind::Unary { expr, .. } | ExprKind::Try(expr) => collect_frame_binds_expr(expr, out),
-        ExprKind::Binary { lhs, rhs, .. } | ExprKind::NullCoalesce { lhs, rhs } => {
+        ExprKind::Binary { lhs, rhs, .. } | ExprKind::NullCoalesce { lhs, rhs, .. } => {
             collect_frame_binds_expr(lhs, out);
             collect_frame_binds_expr(rhs, out);
         }
