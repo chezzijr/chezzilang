@@ -7435,6 +7435,24 @@ fn stmt_has_bare_spawn(s: &Stmt) -> bool {
     }
 }
 
+#[cfg(test)]
+mod recover_nursery_prescan_tests {
+    //! TICKET-040: `stmt_has_bare_spawn`'s catch-all does not descend into `ExprKind::Recover`'s
+    //! `Block`, so a bare `spawn` inside a `recover:` body never triggers `Op::EnterNursery` and
+    //! faults at runtime with "spawn must be inside a parallel: block".
+    use crate::vm::run_capture;
+
+    #[test]
+    fn spawn_inside_recover_block_runs() {
+        let src = "r := recover:\n    spawn: print(\"task\")\n    1\nprint(\"r={r}\")\n";
+        let out = run_capture(src).expect("program should run without a top-level fault");
+        assert!(
+            out.contains("task"),
+            "expected the spawned task to run and print 'task', got: {out:?}"
+        );
+    }
+}
+
 struct FnComp {
     name: String,
     arity: usize,
