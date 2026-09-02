@@ -2635,10 +2635,15 @@ fn a_decl_site_default_binder_is_alpha_renameable() {
 ///
 /// Measured before this fix: both `Holder[int](1)` (turbofish-pinned) and `Holder(1)` (unpinned) are
 /// rejected identically with *Holder() expects 2 argument(s), got 1*.
+///
+/// Uses `ok_desugared`, not `ok`: `ok`/`check_src` runs `lexer` + `parser` + `check` and SKIPS
+/// desugar, which production always runs (`resolver::build_graph`). This defect's ctor half lives in
+/// `desugar`'s slot-fill loop, so under `check_src` every defaulted field is unfilled and this test
+/// cannot express the fix at all.
 #[test]
 fn w8_47_struct_ctor_default_arity_is_binder_blind() {
     let src = "struct G[T]:\n    v: T\nfn mkl[T]() -> List[G[T]]:\n    xs: List[G[T]] = []\n    return xs\nstruct Holder[T]:\n    n: int\n    items: List[G[T]] = mkl()\nfn main():\n    h := Holder[int](1)\n    print(h.n)\nmain()\n";
-    ok(src);
+    ok_desugared(src);
 }
 
 /// W8-47 -- the free-fn half of the same defect: `fn conv[T](a: int, b: List[T] = mkl())` called as
@@ -2662,6 +2667,46 @@ fn w8_47_a_witness_taking_callee_keeps_its_full_arity() {
         "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(7)\nfn conv[T: Default](a: int, b: List[T] = List()) -> T:\n    return T.default()\nfn f[T: Default](x: T) -> T:\n    return conv(1)\n",
         "conv() expects 2 argument(s), got 1",
     );
+}
+
+/// W8-47 -- an UNPINNED generic ctor default is still refused: `normalize_call` has no type
+/// arguments to forward, so `desugar` never splices the field's provider and the field stays
+/// required. Measured before this fix: `Holder() expects 2 argument(s), got 1`. The wording matches
+/// Rust's `error[E0282]: type annotations needed for Holder<_>` on the same shape.
+///
+/// Goes red if step 11's `call_targs.len() != *tps` guard is dropped (the splice would happen,
+/// giving `cannot infer type parameter T for 'mkl'` instead) or if step 14's message is dropped
+/// (the error would stay `Holder() expects 2 argument(s), got 1`).
+#[test]
+fn w8_47_an_unpinned_generic_ctor_default_is_still_refused() {
+    let src = "struct G[T]:\n    v: T\nfn mkl[T]() -> List[G[T]]:\n    xs: List[G[T]] = []\n    return xs\nstruct Holder[T]:\n    n: int\n    items: List[G[T]] = mkl()\nfn main():\n    h := Holder(1)\n    print(h.n)\nmain()\n";
+    rejects_desugared(src, "cannot infer type parameter T for 'Holder'");
+}
+
+/// W8-47 -- a BOUNDED struct type parameter keeps today's callee-filled refusal even with a
+/// turbofish: a generic provider carrying the bound would raise a witness question `dflt_for` cannot
+/// answer before types exist. "Add explicit type arguments" would be FALSE advice here — the
+/// turbofish is already written and does not help — so this deliberately keeps the plain arity
+/// message instead of the W8-45-style wording.
+///
+/// Goes red if step 8's `otps.iter().all(|t| t.bounds.is_empty())` condition is dropped, because the
+/// bounded field would then be spliced.
+#[test]
+fn w8_47_a_bounded_struct_type_param_keeps_the_callee_filled_refusal() {
+    let src = "protocol Show:\n    fn show(self) -> str\nstruct G[T]:\n    v: T\nfn mkl[T]() -> List[G[T]]:\n    xs: List[G[T]] = []\n    return xs\nstruct Holder[T: Show]:\n    n: int\n    items: List[G[T]] = mkl()\nfn main():\n    h := Holder[int](1)\n    print(h.n)\nmain()\n";
+    rejects_desugared(src, "Holder() expects 2 argument(s), got 1");
+}
+
+/// W8-47's `?` widening: giving a generic struct field a provider means the provider BODY is now
+/// judged for a `?` in the default, which the field decl-site copy never did (DEC-025). Measured
+/// before this fix: `ok: no type errors`.
+///
+/// Goes red if step 9 stops emitting a provider for a `Dflt::GenericProvider` field, because the
+/// field decl-site copy alone accepts the `?`.
+#[test]
+fn a_try_in_a_generic_struct_field_default_is_now_judged_by_its_provider() {
+    let src = "struct G[T]:\n    v: T\nfn mkl[T]() -> List[G[T]]!str:\n    return Err(\"no\")\nstruct Holder[T]:\n    n: int\n    items: List[G[T]] = mkl()?\nfn main():\n    h := Holder[int](1)\n    print(h.n)\nmain()\n";
+    rejects_desugared(src, "a default expression cannot propagate with");
 }
 
 /// A decl-site default whose declared type is FULLY CONCRETE is pinned by that slot: a generic fn

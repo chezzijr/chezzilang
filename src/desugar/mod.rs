@@ -141,6 +141,16 @@ enum Dflt {
     /// that cannot be (a keyword call supplying a LATER parameter), which is refused rather than
     /// silently cloned.
     CalleeFilled,
+    /// A STRUCT FIELD default whose declared type mentions the struct's own (unbounded) type
+    /// parameters. Unlike `CalleeFilled`, a ctor has no callee to fill it from: `Op::NewStruct`
+    /// takes its field count from the call site. So the provider is made GENERIC in the struct's
+    /// type parameters (`tps` is their count), and the call site must forward its own turbofish to
+    /// it — a ctor call with no turbofish, or a partial one, keeps the field required instead.
+    GenericProvider {
+        module: ModuleId,
+        name: String,
+        tps: usize,
+    },
 }
 
 /// Is `e` a **self-contained literal** — an expression that can be cloned into any number of call
@@ -213,6 +223,7 @@ fn dflt_for(
     self_ty: Option<&str>,
     module: &ModuleId,
     name: String,
+    field_owner_tps: Option<&[crate::ast::TypeParam]>,
 ) -> Dflt {
     if is_inline_default(d) {
         return Dflt::Inline(d.clone());
@@ -237,6 +248,22 @@ fn dflt_for(
         unbound.push("Self".to_string());
     }
     if crate::checker::type_mentions_any(ty, &unbound) {
+        if let Some(otps) = field_owner_tps {
+            let self_name = "Self".to_string();
+            let otp_names: Vec<String> = otps.iter().map(|t| t.name.clone()).collect();
+            if !otps.is_empty()
+                && otps.iter().all(|t| t.bounds.is_empty())
+                && crate::checker::type_mentions_any(ty, &otp_names)
+                && !crate::checker::type_mentions_any(ty, std::slice::from_ref(&self_name))
+                && !expr_mentions_type_param(d, std::slice::from_ref(&self_name))
+            {
+                return Dflt::GenericProvider {
+                    module: module.clone(),
+                    name,
+                    tps: otps.len(),
+                };
+            }
+        }
         return Dflt::CalleeFilled;
     }
     // The EXPRESSION channel keeps `Self` unbound either way: rewriting `Self` inside the provider's
@@ -607,13 +634,18 @@ fn build_registries(graph: &ModuleGraph) -> HashMap<ModuleId, ModReg> {
 /// `is_test: false` keeps providers out of `chezzi test` discovery. Every span is the default
 /// expression's own, so a diagnostic inside the body points at the text the user actually wrote, in
 /// the module they wrote it in.
-fn provider_fn(name: String, ret: Type, default: Expr) -> Stmt {
+fn provider_fn(
+    name: String,
+    type_params: Vec<crate::ast::TypeParam>,
+    ret: Type,
+    default: Expr,
+) -> Stmt {
     let span = default.span;
     Stmt {
         kind: StmtKind::Fn(crate::ast::FnDecl {
             name,
             name_span: span,
-            type_params: Vec::new(),
+            type_params,
             where_bounds: Vec::new(),
             params: Vec::new(),
             ret: Some(ret),
@@ -652,13 +684,19 @@ fn push_param_providers(
             self_ty,
             id,
             provider_name(file, Slot::Param, owner, &p.name),
+            None,
         ) {
             let ty =
                 p.ty.clone()
                     .expect("a provider default has a declared type");
             // The SAME substitution `dflt_for` classified against, so the emitted provider's declared
             // return type and the decision to emit one can never disagree.
-            out.push(provider_fn(name, subst_self_ty(&ty, self_ty), d.clone()));
+            out.push(provider_fn(
+                name,
+                Vec::new(),
+                subst_self_ty(&ty, self_ty),
+                d.clone(),
+            ));
         }
     }
 }
@@ -713,15 +751,27 @@ fn synthesize_providers_into(stmts: &mut Vec<Stmt>, id: &ModuleId, file: u32) {
                 let stps: Vec<String> = type_params.iter().map(|t| t.name.clone()).collect();
                 for f in fields {
                     let Some(d) = &f.default else { continue };
-                    if let Dflt::Provider { name: pn, .. } = dflt_for(
+                    match dflt_for(
                         d,
                         Some(&f.ty),
                         &stps,
                         None,
                         id,
                         provider_name(file, Slot::Field, name, &f.name),
+                        Some(type_params),
                     ) {
-                        new_fns.push(provider_fn(pn, f.ty.clone(), d.clone()));
+                        Dflt::Provider { name: pn, .. } => {
+                            new_fns.push(provider_fn(pn, Vec::new(), f.ty.clone(), d.clone()));
+                        }
+                        Dflt::GenericProvider { name: pn, .. } => {
+                            new_fns.push(provider_fn(
+                                pn,
+                                type_params.clone(),
+                                f.ty.clone(),
+                                d.clone(),
+                            ));
+                        }
+                        _ => {}
                     }
                 }
                 for mth in methods {
@@ -926,6 +976,7 @@ fn method_spec(
                     self_ty_for(owner_type, &stps),
                     id,
                     provider_name(file, Slot::Param, &owner, &p.name),
+                    None,
                 )
             }),
             is_variadic: p.is_variadic,
@@ -1367,6 +1418,7 @@ fn collect_module_reg(stmts: &[Stmt], id: &ModuleId, file: u32) -> ModReg {
                                     None,
                                     id,
                                     provider_name(file, Slot::Param, &decl.name, &p.name),
+                                    None,
                                 )
                             }),
                             is_variadic: p.is_variadic,
@@ -1395,6 +1447,7 @@ fn collect_module_reg(stmts: &[Stmt], id: &ModuleId, file: u32) -> ModReg {
                                     None,
                                     id,
                                     provider_name(file, Slot::Field, name, &f.name),
+                                    Some(type_params),
                                 )
                             }),
                             is_variadic: false,
@@ -2122,6 +2175,7 @@ impl Walker<'_> {
         d: &Dflt,
         site: Span,
         out: &mut Vec<Expr>,
+        targs: &[Type],
     ) -> Result<(), ResolveError> {
         match d {
             // Never reached: `normalize_call` handles this by NOT calling here (the argument is
@@ -2163,6 +2217,24 @@ impl Walker<'_> {
                         args: Vec::new(),
                         named: Vec::new(),
                         type_args: Vec::new(),
+                    },
+                    span: site,
+                });
+            }
+            // A generic struct field's provider, called with the ctor's own turbofish forwarded — the
+            // same two resolution paths as `Dflt::Provider`, since only the callee ident differs.
+            Dflt::GenericProvider { module, name, .. } => {
+                if module != self.ctx.own_id && self.ctx.deps.contains(module) {
+                    self.needed
+                        .entry(name.clone())
+                        .or_insert_with(|| (module.clone(), site));
+                }
+                out.push(Expr {
+                    kind: ExprKind::Call {
+                        callee: Box::new(ident_expr(name, site)),
+                        args: Vec::new(),
+                        named: Vec::new(),
+                        type_args: targs.to_vec(),
                     },
                     span: site,
                 });
@@ -2229,7 +2301,7 @@ impl Walker<'_> {
             callee,
             args,
             named,
-            ..
+            type_args,
         } = &expr.kind
         else {
             return Ok(());
@@ -2239,6 +2311,10 @@ impl Walker<'_> {
         // callee's own token — the one component that stays distinct per link of a pipe/postfix chain,
         // where the CALL span does not.
         let pack_origin = crate::checker::witness_key_span(callee, span);
+        // The call's own turbofish, forwarded to a `Dflt::GenericProvider` splice below — a generic
+        // struct ctor's field default is generic in the STRUCT's type parameters, so its provider call
+        // needs the same type arguments the ctor call itself carries.
+        let call_targs: Vec<Type> = type_args.clone();
 
         // Resolve a free function / struct ctor / module-qualified callee (clone the spec so we can
         // then mutate `expr`).
@@ -2400,7 +2476,7 @@ impl Walker<'_> {
                 match supplied {
                     Some(e) => out.push(e),
                     None => match &pspec.default {
-                        Some(d) => self.splice_default(d, span, &mut out)?,
+                        Some(d) => self.splice_default(d, span, &mut out, &call_targs)?,
                         None => {
                             return Err(err(
                                 span,
@@ -2445,7 +2521,7 @@ impl Walker<'_> {
                 if let Some(e) = kw.remove(&pspec.name) {
                     out.push(e);
                 } else if let Some(d) = &pspec.default {
-                    self.splice_default(d, span, &mut out)?;
+                    self.splice_default(d, span, &mut out, &call_targs)?;
                 } else {
                     return Err(err(
                         span,
@@ -2514,9 +2590,15 @@ impl Walker<'_> {
                 Some(e) => out.push(Some(e)),
                 None => match &params[i].default {
                     Some(Dflt::CalleeFilled) => out.push(None),
+                    // A ctor call with no turbofish, or a partial one, cannot forward the field's
+                    // provider its type arguments: keep the field required (today's short call and
+                    // today's refusal) instead of splicing an under-pinned provider call.
+                    Some(Dflt::GenericProvider { tps, .. }) if call_targs.len() != *tps => {
+                        out.push(None)
+                    }
                     Some(d) => {
                         let mut one = Vec::new();
-                        self.splice_default(d, span, &mut one)?;
+                        self.splice_default(d, span, &mut one, &call_targs)?;
                         out.extend(one.into_iter().map(Some));
                     }
                     None => {

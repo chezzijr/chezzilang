@@ -424,6 +424,7 @@ impl Checker {
             methods: HashMap::new(),
             origin: StructOrigin::Builtin,
             doc: None,
+            defaulted_fields: Vec::new(),
         };
         // The LAYOUT stays globally present (so field access on a native return — `regex.find(...)
         // .text`, `request.get(...).status`, `process.run(...).code` — resolves import-free via
@@ -580,6 +581,7 @@ impl Checker {
                     methods: HashMap::new(),
                     origin: StructOrigin::Builtin,
                     doc: None,
+                    defaulted_fields: Vec::new(),
                 };
                 sig.struct_defs.insert(name.clone(), info.clone());
                 sig.types.insert(name.clone());
@@ -831,6 +833,7 @@ impl Checker {
                     methods: table,
                     origin: StructOrigin::Builtin,
                     doc: None,
+                    defaulted_fields: Vec::new(),
                 });
             }
         }
@@ -2979,6 +2982,11 @@ impl Checker {
                             );
                         }
                     }
+                    let defaulted_fields: Vec<String> = fields
+                        .iter()
+                        .filter(|f| f.default.is_some())
+                        .map(|f| f.name.clone())
+                        .collect();
                     let fields: Vec<(String, Ty)> = fields
                         .iter()
                         .map(|f| (f.name.clone(), self.resolve_type(&f.ty, s.span)))
@@ -3022,6 +3030,7 @@ impl Checker {
                             // Decl docstring is attached later in `capture_sig` (from `name_docs`),
                             // only for the module's exported sig; the in-checker layout doesn't need it.
                             doc: None,
+                            defaulted_fields,
                         },
                     );
                 }

@@ -679,6 +679,10 @@ struct StructInfo {
     /// from `name_docs` so it crosses the module boundary to an importer's hover. Editor-only; `None`
     /// for a builtin/native struct and until `capture_sig` populates it. Never read by checking/codegen.
     doc: Option<String>,
+    /// Names of the fields carrying a declared default, in declaration order. Recorded because the
+    /// ctor arity check cannot otherwise tell an omitted DEFAULTED field from a missing required
+    /// argument (W8-47).
+    defaulted_fields: Vec<String>,
 }
 
 /// A protocol's required method signatures, in declaration order. `Self` appears as `Ty::Param("Self")`

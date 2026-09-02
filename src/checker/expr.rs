@@ -1209,9 +1209,15 @@ impl Checker {
             return Ty::strukt(key.to_string());
         }
         let arg_tys = self.infer_generic_arg_tys(args);
-        if arg_tys.len() != field_tys.len() {
-            self.check_arity(name, field_tys.len(), args, span);
-        }
+        self.check_ctor_arity(
+            name,
+            &tps,
+            &info.fields,
+            &info.defaulted_fields,
+            targs,
+            args,
+            span,
+        );
         let mut sub = self.seed_targs(name, &tps, targs, span);
         for (decl, actual) in field_tys.iter().zip(&arg_tys) {
             unify(decl, actual, &mut sub);
@@ -2025,10 +2031,13 @@ impl Checker {
                     && let key = self.bare_key(name)
                     && (self.raw_ctor_owner.as_deref() == Some(key.as_str())
                         || !self.functions.contains_key(name))
-                    && let Some((tps, fields)) = self
-                        .structs
-                        .get(&key)
-                        .map(|i| (i.type_params.clone(), i.fields.clone()))
+                    && let Some((tps, fields, defaulted)) = self.structs.get(&key).map(|i| {
+                        (
+                            i.type_params.clone(),
+                            i.fields.clone(),
+                            i.defaulted_fields.clone(),
+                        )
+                    })
                 {
                     let field_tys: Vec<Ty> = fields.iter().map(|(_, t)| t.clone()).collect();
                     if tps.is_empty() {
@@ -2040,9 +2049,7 @@ impl Checker {
                     // when given, else are inferred by unifying the declared field types (which
                     // contain the struct's `Ty::Param`s) against the argument types.
                     let arg_tys = self.infer_generic_arg_tys(args);
-                    if arg_tys.len() != field_tys.len() {
-                        self.check_arity(name, field_tys.len(), args, span);
-                    }
+                    self.check_ctor_arity(name, &tps, &fields, &defaulted, targs, args, span);
                     let mut sub = self.seed_targs(name, &tps, targs, span);
                     for (decl, actual) in field_tys.iter().zip(&arg_tys) {
                         unify(decl, actual, &mut sub);
@@ -4245,6 +4252,55 @@ impl Checker {
                 format!("{name}() expects {n} argument(s), got {}", args.len()),
             );
         }
+    }
+
+    /// A generic struct ctor's arity check (W8-47). `desugar` already declined to splice a
+    /// `GenericProvider`-defaulted field when the call carries no turbofish (or a mismatched one),
+    /// so `args` is genuinely short here. An UNBOUNDED owner type parameter with every omitted
+    /// trailing field defaulted is a binder-inference problem, not a missing-argument one — report
+    /// that instead of the plain arity message, naming the FIRST omitted field and the first type
+    /// parameter its type mentions. Anything else falls through to `check_arity`.
+    #[allow(clippy::too_many_arguments)] // ctor shape (tps/fields/defaulted) + call args + span
+    pub(super) fn check_ctor_arity(
+        &mut self,
+        name: &str,
+        tps: &[TypeParam],
+        fields: &[(String, Ty)],
+        defaulted: &[String],
+        targs: &[Ty],
+        args: &[Expr],
+        span: Span,
+    ) {
+        if args.len() == fields.len() {
+            return;
+        }
+        if targs.is_empty()
+            && args.len() < fields.len()
+            && !tps.is_empty()
+            && tps.iter().all(|tp| tp.bounds.is_empty())
+        {
+            let wanted: std::collections::HashSet<String> =
+                tps.iter().map(|tp| tp.name.clone()).collect();
+            let all_defaulted = fields[args.len()..]
+                .iter()
+                .all(|(fname, _)| defaulted.iter().any(|d| d == fname));
+            if all_defaulted {
+                for (fname, fty) in &fields[args.len()..] {
+                    let mut got = Vec::new();
+                    ty_collect_params(fty, Some(&wanted), &mut got);
+                    if let Some(tp) = got.first() {
+                        self.error(
+                            span,
+                            format!(
+                                "cannot infer type parameter {tp} for '{name}'; the default for field '{fname}' can only be filled with explicit type arguments, e.g. {name}[int](...)"
+                            ),
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+        self.check_arity(name, fields.len(), args, span);
     }
 
     pub(super) fn expect_bool(&mut self, e: &Expr, ctx: &str) {

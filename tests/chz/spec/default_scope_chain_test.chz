@@ -359,3 +359,27 @@ test fn a_static_methods_default_is_filled():
 test fn an_instance_method_still_drops_its_receiver_slot():
     # The neighbour the fix must not disturb: an instance method's explicit args still start at 1.
     assert Q(1).combine() == 6, "got {Q(1).combine()}"
+
+struct W847G[T]:
+    v: T
+
+fn w847_mkl[T]() -> List[W847G[T]]:
+    xs: List[W847G[T]] = []
+    return xs
+
+struct W847Holder[T]:
+    n: int
+    items: List[W847G[T]] = w847_mkl()
+
+# W8-47 -- a generic struct's provider-defaulted field is optional in a turbofished ctor.
+test fn a_generic_structs_provider_defaulted_field_is_optional_with_a_turbofish():
+    h := W847Holder[int](1)
+    assert h.n == 1, "got {h.n}"
+    assert h.items.len() == 0, "got {h.items.len()}"
+
+fn w847_conv[T](a: int, b: List[W847G[T]] = w847_mkl()) -> int:
+    return a + b.len()
+
+# W8-47 -- a generic fn's callee-filled default may be omitted when the binder is pinned by turbofish.
+test fn a_generic_fns_callee_filled_default_may_be_omitted():
+    assert w847_conv[int](1) == 1, "got {w847_conv[int](1)}"

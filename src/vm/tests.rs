@@ -6111,6 +6111,35 @@ fn a_cross_module_default_resolves_in_its_definer_not_the_caller() {
     );
 }
 
+/// W8-47 — a generic struct's field default is a provider generic in the struct's own type
+/// parameters, resolved in its DECLARING module: `lib.Holder[int](1)` forwards its turbofish to
+/// `lib`'s provider, whose body runs in `lib`'s namespace.
+#[test]
+fn a_generic_structs_field_default_resolves_in_its_declaring_module() {
+    let dir = std::env::temp_dir().join(format!("chezzi_w847_ctor_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("lib.chz"),
+        "struct G[T]:\n    v: T\nfn mkl[T]() -> List[G[T]]:\n    xs: List[G[T]] = []\n    return xs\nstruct Holder[T]:\n    n: int\n    items: List[G[T]] = mkl()\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.chz");
+    std::fs::write(
+        &entry,
+        "import lib\nh := lib.Holder[int](1)\nprint(h.n)\nprint(h.items.len())\n",
+    )
+    .unwrap();
+    let graph = crate::resolver::build_graph(&entry).expect("resolve");
+    if let Err(errs) = crate::checker::check_graph(&graph) {
+        let _ = std::fs::remove_dir_all(&dir);
+        panic!("program must type-check, got: {errs:?}");
+    }
+    let (vo, _ve, vr, _vc) = run_file(&entry);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(vr.is_ok(), "VM faulted: {vr:?}");
+    assert_eq!(vo, "1\n0\n", "got {vo:?}");
+}
+
 /// W7-51 (2/3) — a default that CALLS a function the definer declares and the caller never imports.
 /// `b1307258`: `type error (line 3, col 15): unknown name 'cval'`. Python: `3`.
 #[test]
