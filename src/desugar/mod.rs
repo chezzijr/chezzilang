@@ -2775,6 +2775,39 @@ pub fn lower_carrier_option(expr: &mut Expr, tmp: usize) {
     };
 }
 
+/// Lower a `NullCoalesce` carrier (in place) to the **Result-discard** lowering:
+///   `r ?? b` → `match r: Ok(__optN): __optN; Err(_): b`
+/// The `Err` arm binds NOTHING — `Pattern::Wildcard` — so the error payload is discarded. This is
+/// Rust's `Result::unwrap_or`, not `?`: it never propagates. Nothing is required of `E`, because
+/// Chezzi is GC'd and has no destructor to run on the dropped value.
+///
+/// Distinct from [`lower_carrier_try`], which also applies to a `Result` operand but PROPAGATES the
+/// error with `?`. Collapsing the two into one `CarrierMode` would let `?.`'s propagation reach a
+/// `??`.
+pub fn lower_carrier_result_coalesce(expr: &mut Expr, tmp: usize) {
+    let span = expr.span;
+    let c = format!("__opt{tmp}");
+    let kind = std::mem::replace(&mut expr.kind, ExprKind::Bool(false));
+    let ExprKind::NullCoalesce { lhs, rhs, .. } = kind else {
+        unreachable!("lower_carrier_result_coalesce applies to '??' only");
+    };
+    expr.kind = ExprKind::Match {
+        scrutinee: lhs,
+        arms: vec![
+            MatchExprArm {
+                pattern: variant_pat("Ok", vec![Pattern::Ident(c.clone(), Span::default())]),
+                guard: None,
+                body: ident_expr(&c, span),
+            },
+            MatchExprArm {
+                pattern: variant_pat("Err", vec![Pattern::Wildcard]),
+                guard: None,
+                body: *rhs,
+            },
+        ],
+    };
+}
+
 /// Lower an `OptChain` carrier (in place) to the **Result** lowering — `?` then `.`:
 ///   `x?.field`   → `x?.field`      i.e. `Field { obj: Try(x), … }`
 ///   `x?.m(args)` → `x?.m(args)`    i.e. `Call { callee: Field { obj: Try(x), … }, … }`
@@ -2784,7 +2817,8 @@ pub fn lower_carrier_option(expr: &mut Expr, tmp: usize) {
 /// span — which is what the carrier already holds. That equality is the whole point: the two
 /// spellings must produce byte-identical ASTs, diagnostics and bytecode.
 ///
-/// `NullCoalesce` never reaches here — `??` stays Option-only.
+/// `NullCoalesce` never reaches here: `?.` on a `Result` propagates with `?`, while `??` on a
+/// `Result` discards via [`lower_carrier_result_coalesce`].
 pub fn lower_carrier_try(expr: &mut Expr) {
     let span = expr.span;
     let kind = std::mem::replace(&mut expr.kind, ExprKind::Bool(false));
@@ -2795,7 +2829,9 @@ pub fn lower_carrier_try(expr: &mut Expr) {
         call,
     } = kind
     else {
-        unreachable!("lower_carrier_try applies to `?.` only; `??` is Option-only");
+        unreachable!(
+            "lower_carrier_try applies to '?.' only; '??' on a Result uses lower_carrier_result_coalesce"
+        );
     };
     let field = Expr {
         kind: ExprKind::Field {
@@ -3506,6 +3542,29 @@ mod tests {
                 file: 0
             }
         );
+    }
+
+    #[test]
+    fn lower_carrier_result_coalesce_builds_ok_err_arms() {
+        let stmts = desugar_ok("fn g() -> int!str:\n    return Ok(1)\nx := g() ?? 0\n");
+        let mut e = last_let_value(&stmts);
+        lower_carrier_result_coalesce(&mut e, 0);
+        let ExprKind::Match { arms, .. } = &e.kind else {
+            panic!("expected a Match, got {:?}", e.kind)
+        };
+        assert_eq!(arms.len(), 2);
+        let Pattern::Variant { name, bindings, .. } = &arms[0].pattern else {
+            panic!("expected a variant pattern, got {:?}", arms[0].pattern)
+        };
+        assert_eq!(name, "Ok");
+        assert_eq!(bindings.len(), 1);
+        assert!(matches!(&bindings[0], Pattern::Ident(n, _) if n == "__opt0"));
+        let Pattern::Variant { name, bindings, .. } = &arms[1].pattern else {
+            panic!("expected a variant pattern, got {:?}", arms[1].pattern)
+        };
+        assert_eq!(name, "Err");
+        assert_eq!(bindings.len(), 1);
+        assert!(matches!(&bindings[0], Pattern::Wildcard));
     }
 
     #[test]

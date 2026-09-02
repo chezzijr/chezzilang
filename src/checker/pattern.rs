@@ -1415,7 +1415,9 @@ impl Checker {
             ExprKind::OptChain { obj, name_span, .. } => {
                 self.infer_opt_chain(expr, obj, *name_span, expr.span)
             }
-            ExprKind::NullCoalesce { lhs, .. } => self.infer_null_coalesce(expr, lhs, expr.span),
+            ExprKind::NullCoalesce { lhs, op_span, .. } => {
+                self.infer_null_coalesce(expr, lhs, *op_span)
+            }
             ExprKind::DecodeCall { obj, ty, arg } => self.infer_decode(obj, ty, arg, expr.span),
             ExprKind::Closure { params, ret, body } => {
                 // No expected type at the generic `infer` seam — free-closure inference (sources
@@ -3692,7 +3694,13 @@ impl Checker {
     /// settled mode; only `Option`-vs-`Try` is a genuine disagreement. Treating the provisional
     /// value as a decision rejected ordinary two-unannotated-helper and `xs.map(fn(a): a?.len())`
     /// programs — measured, and caught only by adversarial review after a fully green suite.
-    fn record_carrier(&mut self, key: crate::checker::CarrierKey, mode: CarrierMode, span: Span) {
+    fn record_carrier(
+        &mut self,
+        key: crate::checker::CarrierKey,
+        mode: CarrierMode,
+        span: Span,
+        op: &str,
+    ) {
         if mode == CarrierMode::Unknown {
             // Provisional: never displaces a settled decision, and never reports one.
             self.carriers.entry(key).or_insert(CarrierMode::Unknown);
@@ -3708,7 +3716,7 @@ impl Checker {
             &mut self.table_conflicts,
             key,
             mode,
-            "'?.' lowering",
+            &format!("'{op}' lowering"),
             span,
         );
     }
@@ -3860,7 +3868,7 @@ impl Checker {
         );
         match &t {
             Ty::Result(..) => {
-                self.record_carrier(key, CarrierMode::Try, span);
+                self.record_carrier(key, CarrierMode::Try, span, "?.");
                 let mut c = carrier.clone();
                 let scratch = self.scratch_operand(t.clone());
                 if let ExprKind::OptChain { obj, .. } = &mut c.kind {
@@ -3872,7 +3880,7 @@ impl Checker {
                 r
             }
             Ty::Option(..) => {
-                self.record_carrier(key, CarrierMode::Option, span);
+                self.record_carrier(key, CarrierMode::Option, span, "?.");
                 let mut c = carrier.clone();
                 let scratch = self.scratch_operand(t.clone());
                 if let ExprKind::OptChain { obj, .. } = &mut c.kind {
@@ -3888,11 +3896,11 @@ impl Checker {
             // The operand already errored (its diagnostic stands, un-truncated) — adding a second
             // one here would be the cascade `Ty::Unknown` exists to suppress.
             Ty::Unknown => {
-                self.record_carrier(key, CarrierMode::Unknown, span);
+                self.record_carrier(key, CarrierMode::Unknown, span, "?.");
                 Ty::Unknown
             }
             other => {
-                self.record_carrier(key, CarrierMode::Unknown, span);
+                self.record_carrier(key, CarrierMode::Unknown, span, "?.");
                 self.error(
                     span,
                     format!("'?.' applies to an Option or a Result, found {other}"),
@@ -3902,16 +3910,23 @@ impl Checker {
         }
     }
 
-    /// W7-43 — infer a `??` carrier. Option-ONLY: `??` has no spaced alternative spelling (so there
-    /// is no whitespace trap to remove, only a new operator meaning to invent), no ancestor supports
-    /// it on a `Result`, and coalescing a `Result` would silently discard its error payload. Because
-    /// everything that reaches the compiler is therefore an `Option` (or already-rejected), `??`
-    /// needs no [`crate::checker::CarrierTable`] entry and no compiler decision.
-    pub(super) fn infer_null_coalesce(&mut self, carrier: &Expr, lhs: &Expr, span: Span) -> Ty {
+    /// W7-43 — infer a `??` carrier. `??` accepts BOTH carriers: `Option` unwraps `Some(v)` to `v`,
+    /// `Result` unwraps `Ok(v)` to `v` and DISCARDS the `Err` payload (Rust's `unwrap_or`, not `?`).
+    /// The decision is recorded under `op_span`, never `Expr::span`: `parse_bp` reuses `lhs.span`
+    /// for every infix node and `(e)` grouping keeps the inner span, so in `(a ?? b) ?? c` both
+    /// `NullCoalesce` nodes would otherwise share one key.
+    pub(super) fn infer_null_coalesce(&mut self, carrier: &Expr, lhs: &Expr, op_span: Span) -> Ty {
         // Same operand-scratch shape as `infer_opt_chain`, same reason.
         let t = self.infer_value(lhs);
+        let key = crate::checker::carrier_key(
+            self.graph_module_idx,
+            self.kw_frag_ctx,
+            self.kw_frag_ord,
+            op_span,
+        );
         match &t {
             Ty::Option(..) => {
+                self.record_carrier(key, CarrierMode::Option, op_span, "??");
                 let mut c = carrier.clone();
                 let scratch = self.scratch_operand(t.clone());
                 if let ExprKind::NullCoalesce { lhs, .. } = &mut c.kind {
@@ -3924,22 +3939,30 @@ impl Checker {
                 self.pop_scope();
                 r
             }
-            Ty::Unknown => Ty::Unknown,
-            // No `unwrap_or` suggestion: `Result`/`Option` carry ZERO methods (`std/prelude.chz`).
-            // No inline `match` spelling either — expression-`match` is indentation-based here, and
-            // every suggested spelling must be one that actually parses.
             Ty::Result(..) => {
-                self.error(
-                    span,
-                    format!(
-                        "'??' applies to an Option, found {t} — a Result carries an error that \
-                         must be handled: use a match with Ok/Err arms"
-                    ),
-                );
+                self.record_carrier(key, CarrierMode::ResultCoalesce, op_span, "??");
+                let mut c = carrier.clone();
+                let scratch = self.scratch_operand(t.clone());
+                if let ExprKind::NullCoalesce { lhs, .. } = &mut c.kind {
+                    **lhs = scratch;
+                }
+                let tmp = self.next_opt_tmp;
+                self.next_opt_tmp += 1;
+                crate::desugar::lower_carrier_result_coalesce(&mut c, tmp);
+                let r = self.infer(&c);
+                self.pop_scope();
+                r
+            }
+            Ty::Unknown => {
+                self.record_carrier(key, CarrierMode::Unknown, op_span, "??");
                 Ty::Unknown
             }
             other => {
-                self.error(span, format!("'??' applies to an Option, found {other}"));
+                self.record_carrier(key, CarrierMode::Unknown, op_span, "??");
+                self.error(
+                    op_span,
+                    format!("'??' applies to an Option or a Result, found {other}"),
+                );
                 Ty::Unknown
             }
         }

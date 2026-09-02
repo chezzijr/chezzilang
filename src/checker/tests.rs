@@ -15061,7 +15061,8 @@ fn defer_block_new_binding_and_nonsendable_read_ok() {
 // ===== optional chaining `?.` + null-coalescing `??` =====
 //
 // The carrier survives desugar (W7-43); the checker picks the lowering from the operand's type —
-// `match Some/None` for an Option, `?` then `.` for a Result. `??` stays Option-only.
+// `match Some/None` for an Option, `?` then `.` for a Result. `??` takes both carriers (TICKET-039):
+// `Option` unwraps to the payload, `Result` unwraps and DISCARDS the error (Rust's `unwrap_or`).
 
 #[test]
 fn null_coalesce_some_picks_value() {
@@ -15075,31 +15076,25 @@ fn null_coalesce_result_type() {
 }
 
 #[test]
-fn null_coalesce_lhs_must_be_option() {
-    // `??` is Option-ONLY. This test used to pass an EMPTY needle to `rejects_desugared`, i.e. it
-    // asserted only "some error happened" — which is precisely how W7-43's three bogus
-    // Option-variant errors survived undetected for so long. Pin the real message AND the count.
-    let errs = check_desugared("r := Ok(5)\nx := r ?? 0\n");
-    assert_eq!(errs.len(), 1, "exactly one error, got: {errs:?}");
-    assert!(
-        errs[0]
-            .message
-            .contains("'??' applies to an Option, found Result[int]"),
-        "got: {errs:?}"
-    );
+fn null_coalesce_lhs_may_be_a_result() {
+    // OLD expectation (pre-TICKET-039): `r ?? 0` on a `Result` was one error,
+    // "'??' applies to an Option, found Result[int]". TICKET-039 widened `??` to accept a `Result`,
+    // discarding the error like Rust's `unwrap_or`.
+    ok_desugared("r := Ok(5)\nx := r ?? 0\n");
 }
 
 #[test]
 fn null_coalesce_on_result_one_error() {
-    // The full W7-43 message: `??` names ITSELF and points at the handling the Result needs — it
-    // must not silently discard the error payload, and it gets no new semantics on a Result.
-    let errs = check_desugared("fn f() -> str!str:\n    return Ok(\"hi\")\nx := f() ?? \"d\"\n");
+    // OLD expectation (pre-TICKET-039): the full W7-43 message, "'??' applies to an Option, found
+    // Result[str, str] — a Result carries an error that must be handled: use a match with Ok/Err
+    // arms". TICKET-039's `Result` arm now type-checks `f() ?? "d"` against `f()`'s `Ok` payload —
+    // this is the branch-compatibility check the old uniform rejection MASKED.
+    let errs = check_desugared("fn f() -> int!str:\n    return Ok(5)\nx := f() ?? \"d\"\n");
     assert_eq!(errs.len(), 1, "exactly one error, got: {errs:?}");
     assert!(
-        errs[0].message.contains(
-            "'??' applies to an Option, found Result[str, str] — a Result carries an error that \
-             must be handled: use a match with Ok/Err arms"
-        ),
+        errs[0]
+            .message
+            .contains("branches have incompatible types: int and str"),
         "got: {errs:?}"
     );
 }
@@ -15113,13 +15108,24 @@ fn null_coalesce_result_discards_error_ticket_039() {
 }
 
 #[test]
+fn null_coalesce_nested_option_over_result_keeps_two_modes() {
+    // `(o() ?? fb) ?? 0`: the inner `??`'s operand is `Option[int!str]` (Option mode), the outer's
+    // operand is `int!str` (ResultCoalesce mode). Both nodes share `a`'s `Expr::span` — this is the
+    // program that hard-errors under an `internal:` CompileError if the two carriers shared one
+    // `CarrierKey` instead of being keyed on `op_span`.
+    ok_desugared(
+        "fn o() -> Option[int!str]:\n    return None\nfb: int!str = Ok(7)\nx := (o() ?? fb) ?? 0\n",
+    );
+}
+
+#[test]
 fn null_coalesce_on_a_non_carrier_one_error() {
     let errs = check_desugared("x := 5\ny := x ?? 0\n");
     assert_eq!(errs.len(), 1, "exactly one error, got: {errs:?}");
     assert!(
         errs[0]
             .message
-            .contains("'??' applies to an Option, found int"),
+            .contains("'??' applies to an Option or a Result, found int"),
         "got: {errs:?}"
     );
 }

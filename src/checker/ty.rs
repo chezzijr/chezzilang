@@ -129,13 +129,17 @@ pub enum CarrierMode {
     Option,
     /// Operand is a `Result[T, E]` — `?` then `.`, byte-identical to the spaced `x? .f` spelling.
     Try,
+    /// `??` operand is a `Result[T, E]` — `match x: Ok(__optN): __optN; Err(_): rhs`, discarding the
+    /// error. Rust's `unwrap_or`, not `?`: distinct from [`CarrierMode::Try`], which PROPAGATES.
+    ResultCoalesce,
     /// The operand did not type, or is not a carrier at all. The checker already reported it; the
     /// entry exists only so the compiler's "absent = the two halves disagree" fault stays loud.
     Unknown,
 }
 
-/// W7-43 — the checker's per-`?.`-carrier lowering decision, keyed by [`CarrierKey`]. `??` is
-/// Option-only, so an `ExprKind::NullCoalesce` never gets an entry: there is no decision to record.
+/// W7-43 — the checker's per-carrier lowering decision, keyed by [`CarrierKey`]. Since TICKET-039
+/// a `??` carrier IS recorded too, keyed on `op_span` (the `??` token's own span — never
+/// `Expr::span`, which aliases in `(a ?? b) ?? c`).
 pub type CarrierTable = HashMap<CarrierKey, CarrierMode>;
 
 /// W7-53 I1′ — which dispatch each `.eq(x)` call site takes, keyed exactly like [`CarrierKey`] (the

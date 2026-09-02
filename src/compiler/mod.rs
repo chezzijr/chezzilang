@@ -4236,11 +4236,42 @@ impl Compiler {
             // as the equivalent hand-written spelling does. Same house pattern as `DecodeCall`
             // below. `lower_carrier_*` are the SAME functions the checker lowered with, on the same
             // input, so spans (and therefore every table key derived from them) cannot drift.
-            ExprKind::NullCoalesce { .. } => {
-                // `??` is Option-only (the checker rejects everything else), so there is nothing to
-                // look up and no decision to make.
+            ExprKind::NullCoalesce { op_span, .. } => {
+                let key = crate::checker::carrier_key(
+                    self.current_module_idx,
+                    self.kw_frag_ctx,
+                    self.kw_frag_ord,
+                    *op_span,
+                );
                 let mut c = expr.clone();
-                crate::desugar::lower_carrier_option(&mut c, self.next_opt_tmp());
+                // Same discipline as the `?.` arm below: a missing entry is a hard error, never a
+                // default. Silently picking the `Option` lowering for a `Result` operand would emit
+                // `Some`/`None` arms against an `Ok`/`Err` value — a wrong runtime VALUE SHAPE under
+                // a green `chezzi check`.
+                match self.carriers.get(&key) {
+                    Some(crate::checker::CarrierMode::ResultCoalesce) => {
+                        crate::desugar::lower_carrier_result_coalesce(&mut c, self.next_opt_tmp())
+                    }
+                    Some(
+                        crate::checker::CarrierMode::Option | crate::checker::CarrierMode::Unknown,
+                    ) => crate::desugar::lower_carrier_option(&mut c, self.next_opt_tmp()),
+                    Some(crate::checker::CarrierMode::Try) => {
+                        return Err(CompileError {
+                            message: "internal: a '?.' lowering was recorded for a '??' — the \
+                                      type-checker and the backend disagree about this expression"
+                                .to_string(),
+                            span: expr.span,
+                        });
+                    }
+                    None => {
+                        return Err(CompileError {
+                            message: "internal: no lowering recorded for this '??' — the \
+                                      type-checker and the backend disagree about this expression"
+                                .to_string(),
+                            span: expr.span,
+                        });
+                    }
+                }
                 self.compile_expr(fc, &c)?;
             }
             ExprKind::OptChain { name_span, .. } => {
@@ -4263,6 +4294,14 @@ impl Compiler {
                     Some(
                         crate::checker::CarrierMode::Option | crate::checker::CarrierMode::Unknown,
                     ) => crate::desugar::lower_carrier_option(&mut c, self.next_opt_tmp()),
+                    Some(crate::checker::CarrierMode::ResultCoalesce) => {
+                        return Err(CompileError {
+                            message: "internal: a '??' lowering was recorded for a '?.' — the \
+                                      type-checker and the backend disagree about this expression"
+                                .to_string(),
+                            span: expr.span,
+                        });
+                    }
                     None => {
                         return Err(CompileError {
                             message: "internal: no lowering recorded for this '?.' — the \
