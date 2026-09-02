@@ -2302,6 +2302,67 @@ main()
 }
 
 #[test]
+fn airlock_crossed_running_generator_stays_live_not_exhausted() {
+    // TICKET-041(a). `generator_next` parks `GenState::Done` as a placeholder in the heap object
+    // for the DURATION of a resume (`src/vm/exec.rs:497`), so a generator crossed through the
+    // airlock (here: `Channel.send`) WHILE it is running serializes via `to_wire_depth`'s
+    // `Obj::Generator` arm, which reads that placeholder verbatim (`src/vm/sched.rs:3037`) and
+    // hands the receiver a copy that reports itself as already exhausted. The original generator
+    // is unaffected and still yields 1 then 2; the crossed copy must not silently report `None`
+    // for a value it never produced.
+    let src = r#"
+struct H:
+    g: Iterator[int]?
+h := H(None)
+ch := Channel[H](1)
+fn gen() -> Iterator[int]:
+    ch.send(h)
+    yield 1
+    yield 2
+g := gen()
+h.g = Some(g)
+print("orig", g.next())
+match ch.recv().g:
+    Some(x): print("copy", x.next(), x.next())
+    None: print("none")
+"#;
+    let out = golden_entry(src);
+    assert_eq!(
+        out, "orig Some(1)\ncopy Some(2) Some(3)\n",
+        "the crossed copy must observe the same live generator state as the original: {out:?}"
+    );
+}
+
+#[test]
+fn airlock_crossed_closure_reads_module_global_live_same_task() {
+    // TICKET-041(b). `closure_global_snapshot` prefers an existing `gsnap` entry over the live
+    // module slot (`src/vm/sched.rs:2662-2669`), so a closure's snapshot of its module-global
+    // reads is frozen at the FIRST crossing and never refreshed — even on a same-task round trip
+    // through `Channel.send`/`.recv()` where no task boundary is ever crossed. Calling the SAME
+    // closure value directly (no crossing) and via the channel round trip must answer identically:
+    // both must observe the post-crossing write `n = 42`, since the write happens strictly before
+    // either call.
+    let src = r#"
+n := 1
+fn mk() -> fn(int) -> int:
+    fn r(x: int) -> int:
+        return x * n
+    return r
+ch := Channel[fn(int) -> int](2)
+ch.send(mk())
+k := ch.recv()
+n = 42
+print("direct : {k(3)}")
+"#;
+    let out = golden_entry(src);
+    assert_eq!(
+        out, "direct : 126\n",
+        "a closure round-tripped through a same-task channel must read the module global LIVE, \
+         not a value frozen at the first crossing: {out:?}"
+    );
+}
+
+#[test]
 fn generator_guard_clears_on_every_unwind_path() {
     // The guard is the VM's existing `active_generators` root list, pushed on resume and popped on
     // EVERY exit path — so it is self-clearing and can never poison a generator as permanently
