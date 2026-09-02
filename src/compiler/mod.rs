@@ -141,6 +141,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
             toplevel,
             imports: lm.imports.clone(),
             native: lm.native,
+            std: lm.is_std(),
             global_slots,
             file: lm.file,
         });
@@ -210,6 +211,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
         toplevel,
         imports: Vec::new(),
         native: None,
+        std: false,
         global_slots,
         file: 0,
     });

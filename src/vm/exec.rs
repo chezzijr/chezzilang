@@ -1448,10 +1448,10 @@ impl Vm {
                         // W8-22 — stamp the fault's origin on the message handle so `e.line()` etc.
                         // can read it back later. `msg` is always a fresh `Obj::Str`
                         // (`alloc_str` allocates one per call), so this can never alias an
-                        // unrelated string's span.
-                        if let Some(mh) = msg.as_obj() {
-                            self.heap.set_err_span(mh, sp);
-                        }
+                        // unrelated string's span. A stdlib-raised span is not stamped
+                        // (TICKET-045): the coordinate would name a `std/` file the user never
+                        // wrote.
+                        self.stamp_err_span(msg, sp);
                         let err = self.alloc_enum("Result", "Err", vec![msg]);
                         self.push(err);
                     }

@@ -191,9 +191,7 @@ impl Vm {
                         Some(e) => {
                             let sp = e.span;
                             let msg = self.alloc_str(e.message);
-                            if let Some(mh) = msg.as_obj() {
-                                self.heap.set_err_span(mh, sp);
-                            }
+                            self.stamp_err_span(msg, sp);
                             let err = self.alloc_enum("Result", "Err", vec![msg]);
                             self.push(err);
                         }
@@ -203,9 +201,7 @@ impl Vm {
                             Some(e) => {
                                 let sp = e.span;
                                 let msg = self.alloc_str(e.message);
-                                if let Some(mh) = msg.as_obj() {
-                                    self.heap.set_err_span(mh, sp);
-                                }
+                                self.stamp_err_span(msg, sp);
                                 let err = self.alloc_enum("Result", "Err", vec![msg]);
                                 self.push(err);
                             }
@@ -1028,6 +1024,24 @@ impl Vm {
         Ok(())
     }
 
+    /// Stamps a caught fault's origin onto its message string, unless the fault was raised inside
+    /// the stdlib itself (a coordinate the user cannot act on).
+    pub(super) fn stamp_err_span(&mut self, msg: Value, sp: Span) {
+        if let Some(mh) = msg.as_obj()
+            && !self.program.file_is_std(sp.file)
+        {
+            self.heap.set_err_span(mh, sp);
+        }
+    }
+
+    /// The origin a `panic(msg)` re-raise should use: the stamp `msg` carries, if any, else `span`
+    /// (the `panic` call site itself).
+    pub(super) fn panic_origin(&self, arg: Option<Value>, span: Span) -> Span {
+        arg.and_then(|v| v.as_obj())
+            .and_then(|h| self.heap.err_span(h))
+            .unwrap_or(span)
+    }
+
     pub(super) fn do_builtin(
         &mut self,
         name: &str,
@@ -1050,7 +1064,8 @@ impl Vm {
                 },
                 None => String::new(),
             };
-            return Err(self.err(message, span));
+            let sp = self.panic_origin(args.first().copied(), span);
+            return Err(self.err(message, sp));
         }
         let result = match name {
             "range" => self.builtin_range(&args, span)?,

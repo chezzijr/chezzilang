@@ -189,7 +189,8 @@ impl Vm {
                                 },
                                 None => String::new(),
                             };
-                            Err(self.err(message, span))
+                            let sp = self.panic_origin(args.first().copied(), span);
+                            Err(self.err(message, sp))
                         }
                         _ => unreachable!("non-first-class builtin {name} reached invoke_value"),
                     },
@@ -2841,10 +2842,17 @@ impl Vm {
                         self.arity_err("trim", args, 0, span)?;
                         Ok(self.alloc_str(s.trim().to_string()))
                     }
-                    // `str` conforms to `Error`: `message()` returns the string itself.
+                    // `str` conforms to `Error`: `message()` returns the string itself. It copies
+                    // the receiver's stamped origin onto the fresh string it allocates
+                    // (TICKET-045), so a `panic(e.message())` re-raise can still recover it.
                     "message" => {
                         self.arity_err("message", args, 0, span)?;
-                        Ok(self.alloc_str(s.to_string()))
+                        let sp = self.heap.err_span(h);
+                        let out = self.alloc_str(s.to_string());
+                        if let (Some(sp), Some(oh)) = (sp, out.as_obj()) {
+                            self.heap.set_err_span(oh, sp);
+                        }
+                        Ok(out)
                     }
                     // W8-22 — `line()`/`col()`: the fault's origin span, stamped on this handle at
                     // one of the three `recover:` boundaries. `None` for a user-constructed

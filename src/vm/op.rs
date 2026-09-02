@@ -660,6 +660,9 @@ pub struct ModuleProto {
     /// `Some(name)` for a native std module (`std.math` etc., M6c): its globals are Rust
     /// `NativeFn`s injected at run time, and its (empty) `toplevel` is never executed.
     pub native: Option<&'static str>,
+    /// Whether this module is stdlib source. A fault raised inside the stdlib itself carries a
+    /// coordinate the user cannot act on, so the `recover:` boundaries do not stamp it.
+    pub std: bool,
     /// M19 Phase 2b — global names in compile-time slot order (slot `i` ⇒ `global_slots[i]`). The
     /// run driver pre-sizes the module's `slots` vector to this length and builds its name→slot
     /// index from it. Empty for native modules (their members are populated by name at run time).
@@ -788,6 +791,12 @@ impl Program {
     /// Map a module's stable id to its index in `modules` (for resolving import targets).
     pub fn module_index(&self, id: &ModuleId) -> Option<usize> {
         self.modules.iter().position(|m| &m.id == id)
+    }
+
+    /// Whether a [`crate::lexer::Span::file`] id belongs to a stdlib module. Scans for the same
+    /// reason `file_path` does: `file` ids are DFS pre-order, `modules` is deps-first post-order.
+    pub fn file_is_std(&self, file: u32) -> bool {
+        file != 0 && self.modules.iter().any(|m| m.file == file && m.std)
     }
 
     /// The source path a [`crate::lexer::Span::file`] id came from, or `None` for `0`
