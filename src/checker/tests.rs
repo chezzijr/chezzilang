@@ -3283,6 +3283,56 @@ fn float_still_rejected_as_set_element() {
     );
 }
 
+#[test]
+fn non_hashable_map_key_reports_exactly_once() {
+    // TICKET-044: `resolve_type` on a single-name annotated `let` ran twice (once to seed the
+    // expected-type hint, once for the declared type), so `key_ty_reject` fired twice for one
+    // annotation and the diagnostic was byte-identically duplicated.
+    let errs = check_src("m: Map[float, str] = {}\n");
+    let matching: Vec<_> = errs
+        .iter()
+        .filter(|e| e.message.contains("Map key type must implement Hashable"))
+        .collect();
+    assert_eq!(
+        matching.len(),
+        1,
+        "expected exactly one Hashable diagnostic, got: {errs:?}"
+    );
+}
+
+#[test]
+fn non_hashable_set_element_reports_exactly_once() {
+    let errs = check_src("s: Set[(int, int)] = Set()\n");
+    let matching: Vec<_> = errs
+        .iter()
+        .filter(|e| {
+            e.message
+                .contains("Set element type must implement Hashable")
+        })
+        .collect();
+    assert_eq!(
+        matching.len(),
+        1,
+        "expected exactly one Hashable diagnostic, got: {errs:?}"
+    );
+}
+
+#[test]
+fn two_distinct_hashable_violations_both_report() {
+    // Guard against a fix that dedupes too aggressively: two genuinely different violations must
+    // still produce two diagnostics.
+    let errs = check_src("a: Map[float, str] = {}\nb: Map[float, int] = {}\n");
+    let matching: Vec<_> = errs
+        .iter()
+        .filter(|e| e.message.contains("Map key type must implement Hashable"))
+        .collect();
+    assert_eq!(
+        matching.len(),
+        2,
+        "expected two Hashable diagnostics (one per statement), got: {errs:?}"
+    );
+}
+
 // ----- Hashable protocol (M10-G2: bound; M10 map-model: wired to map/set keys) -----
 
 #[test]
