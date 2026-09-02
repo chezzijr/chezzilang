@@ -345,7 +345,9 @@ Three shapes: `Channel[T]()` is an **unbounded** FIFO (`send` never blocks); `Ch
 are queued and resumes once a `recv` frees a slot (Go's buffered channel; a full/rendezvous `send`
 with no possible consumer is a deadlock fault, not an over-fill or a hang). Methods: `send(x: T) -> nil`
 · `try_send(x: T) -> bool` (`false` = closed, full, **or** rendezvous with no waiting receiver — never
-blocks) · `recv() -> T` · `try_recv() -> Option[T]` · `close() -> nil` ·
+blocks) · `recv() -> T` ·
+`try_recv() -> Option[T]` (`Some(v)` if queued, `None` if empty, or a value handed over by a parked rendezvous sender)
+· `close() -> nil` ·
 `trip() -> nil` (permanent level-trigger latch — **`Channel[bool]` only**, gated by `where T: bool`, since
 it always delivers `true`; the primitive behind `std.cancel`'s `done()`) · `len() -> int` · `cap() -> int`
 (`-1` for unbounded, `0` for rendezvous, the bound otherwise). Iterate received values with

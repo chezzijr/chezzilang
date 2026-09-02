@@ -7,6 +7,24 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **A rendezvous channel's `try_recv`/`wait:` now sees a value a sender has already parked to hand
+  off, and `cap()` no longer wraps above 2^62 (TICKET-042).** (a) `try_recv` polled only `core.q`,
+  always empty on a rendezvous channel — a parked sender's value was invisible to any poll, though a
+  blocking `recv` right after took it with no scheduling change. Fixed Go's `sudog` way: a rendezvous
+  `send` now DEPOSITS its wire value into `core.q` (a new `ChanState::deposit`/`withdraw`/
+  `withdraw_all_deposits`/`msg_len`, `Obj::Channel`/`WireValue::Channel`-keyed handle states
+  `DEPOSIT_QUEUED`/`TAKEN`/`WITHDRAWN`) before it parks, on BOTH sender paths — the M:N fiber park
+  (`chan_send_step`/`MnSched::park_send`, plus a new `MnSched::deposit_wake`) and block-in-place
+  (`main`/an eager `Executor` job). `close()` withdraws every deposit (Go: the parked value is not
+  delivered); `len()`/`print(channel)` exclude deposits (Go: `len: 0` with a parked sender);
+  `has_send_slot` counts them; the deadlock verdict's `PartyWait::Send` learns the deposit so a
+  sender whose value was already taken is never falsely faulted. (b) `cap()` built its result with
+  the 63-bit inline `Value::int` instead of `Vm::make_int`, so a capacity above 2^62 wrapped to a
+  negative sentinel indistinguishable from unbounded (`-1`) release-build only (`Value::int`'s range
+  check is a `debug_assert`) — now boxes as `Obj::BigInt`. 6 new Chezzi tests
+  (`tests/chz/spec/rendezvous_channel_test.chz`, 12 total) + 1 new Rust unit test. Re-measured:
+  `cargo test` 4436 lib tests passed (up from 4425), `./target/release/chezzi test tests/chz` 748
+  passed at both `CHEZZI_THREADS=1`/`=8` (up from 742), `cargo clippy` clean.
 - **The airlock stopped serializing stale state (TICKET-041): a running generator now faults instead
   of crossing as a silently-exhausted copy, and a same-task closure round trip stopped freezing its
   module globals.** (a) A generator crossed WHILE it was running (via `Channel.send`/`Atomic.store`/

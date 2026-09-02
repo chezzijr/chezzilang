@@ -354,7 +354,8 @@ the airlock, never live in two heaps at once.
 
 ```chezzi
 ch := Channel[str]()       # construct; capitalized like Shared[T] / Option[T]. Unbounded FIFO.
-rch := Channel[int](0)     # RENDEZVOUS: send blocks until a receiver is already waiting (Go's make(chan T))
+rch := Channel[int](0)     # RENDEZVOUS: send blocks until a receiver is already waiting (Go's make(chan T)),
+                            # but a parked sender's value is visible to try_recv/wait: polls, not just recv
 bch := Channel[int](2)     # BOUNDED: holds ≤2 queued messages; a 3rd `send` blocks until a `recv` frees a slot
 ch.send(x)                 # x moved/copied OUT of the sender's heap → channel queue
 v := ch.recv()             # value reconstructed IN the receiver's heap
@@ -365,10 +366,10 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
 
 | Method | Signature | Notes |
 |--------|-----------|-------|
-| `send` | `send(self, v: T) -> nil` | enqueue (move/copy at the airlock); the sender MAY keep using the value — the crossing copies, so its later writes are simply not seen by the receiver. On a **bounded** channel a `send` **blocks/parks** while the queue is at capacity (backpressure), resuming once a `recv` frees a slot — the send-side mirror of a blocking `recv`. On a **rendezvous** channel (`cap == 0`) a `send` blocks until a receiver is already waiting, exactly like a bounded `send` at capacity 0 conceptually would, except capacity 0 is otherwise inexpressible as `queue.len() < cap` |
+| `send` | `send(self, v: T) -> nil` | enqueue (move/copy at the airlock); the sender MAY keep using the value — the crossing copies, so its later writes are simply not seen by the receiver. On a **bounded** channel a `send` **blocks/parks** while the queue is at capacity (backpressure), resuming once a `recv` frees a slot — the send-side mirror of a blocking `recv`. On a **rendezvous** channel (`cap == 0`) a `send` blocks until a receiver is already waiting, exactly like a bounded `send` at capacity 0 conceptually would, except capacity 0 is otherwise inexpressible as `queue.len() < cap` — on a rendezvous channel the parked sender publishes its value to the channel, so a poll can take it; `len()` still reports 0 |
 | `try_send` | `try_send(self, v: T) -> bool` | **non-blocking** send: `true` once queued, `false` if the send can't proceed — the channel is **closed**, a **bounded** channel is **full**, or a **rendezvous** channel has no receiver already waiting. Never blocks/parks |
 | `recv` | `recv(self) -> T` | dequeue (FIFO); blocking surface (see below) |
-| `try_recv` | `try_recv(self) -> T?` | **non-blocking** poll (A1): `Some(v)` if queued, `None` if empty — never blocks, never faults, never suspends a fiber. Drain a mailbox without guarding on `len()` |
+| `try_recv` | `try_recv(self) -> T?` | **non-blocking** poll (A1): `Some(v)` if queued, `None` if empty, or a value handed over by a parked rendezvous sender — never blocks, never faults, never suspends a fiber. Drain a mailbox without guarding on `len()` |
 | `len`  | `len(self) -> int` | queued count — use to guard a `recv` |
 | `cap`  | `cap(self) -> int` | capacity: `-1` for an unbounded `Channel[T]()`, `0` for a rendezvous `Channel[T](0)`, or the bound passed to `Channel[T](cap)` |
 
@@ -409,7 +410,9 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
 - **`try_recv() -> T?` is shipped (A1).** The non-blocking sibling of `recv`: it
   pops-or-returns-`None` and never blocks, faults, or suspends a fiber. With B1/B2's blocking `recv`, a fiber
   can also drain a mailbox's residue after a blocking `recv` resumes. `recv -> T` stays primary; reach
-  for `try_recv` to poll without guarding on `len()`.
+  for `try_recv` to poll without guarding on `len()`. On a rendezvous channel, `try_recv` also takes a
+  value handed over by a parked rendezvous sender — matching Go's `select`/`default` against a parked
+  sender — and the same is true of a `wait:` recv arm.
 
 ### 5a. `std.concurrency.pmap` — scoped parallel map (the ergonomic wrapper)
 
