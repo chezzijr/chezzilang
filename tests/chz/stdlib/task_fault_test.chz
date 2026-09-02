@@ -1,0 +1,27 @@
+# tests/chz/stdlib/task_fault_test.chz — TICKET-045.
+#
+# A faulted job's `Task.get()` must surface the job's own error, not a deadlock, and `Task.done()`
+# must become true once the job has finished (faulted or not). See docs/gaps.md / TICKET-045.
+#
+# Reference — CPython `concurrent.futures.ThreadPoolExecutor` (the owning ancestor for the Executor
+# family), measured: `shutdown()` does not raise; `future.result()` re-raises the job's own exception;
+# `future.done()` is `True` once the job has finished.
+
+import std.concurrency
+import submit_task from std.concurrency.task
+
+fn bad() -> int:
+    panic("job failed")
+
+test fn task_get_on_a_faulted_job_reports_the_job_error_not_deadlock():
+    ex := Executor()
+    t0 := submit_task(ex, bad)
+    r := recover: ex.shutdown()
+    match r:
+        Ok(_): assert false, "the faulting job must propagate out of shutdown()"
+        Err(e): assert e.message().contains("job failed"), e.message()
+    g := recover: t0.get()
+    match g:
+        Ok(_): assert false, "get() on a faulted job must not return Ok"
+        Err(e): assert not e.message().contains("deadlock"), e.message()
+    assert t0.done(), "done() must be true once the faulted job has finished"
