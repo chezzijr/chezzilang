@@ -4154,7 +4154,25 @@ impl Checker {
             );
         }
         for (i, arg) in args.iter().enumerate() {
+            // TICKET-033 — a call/method/ctor/keyword argument is also a sink the int→float
+            // ELEMENT widen reaches: license it from the DECLARED param slot, the element twin of
+            // the scalar `widen` gate below. `widen` itself is false for a builtin-method argument
+            // (keeps those un-widened); the `ExprKind::List(_, Some(_))` skip is the synthesized
+            // variadic pack, whose all-int decline `docs/spec.md` documents; the `declared` gate is
+            // the element twin of the scalar check at `widen && declared…== Some(&Ty::Float)` below
+            // — a substituted generic param list must not license a slot the backend erased.
+            self.float_elem_hint = if widen
+                && !matches!(arg.kind, ExprKind::List(_, Some(_)))
+                && declared.is_none_or(|d| {
+                    d.get(i).and_then(float_elem_hint_ty)
+                        == params.get(i).and_then(float_elem_hint_ty)
+                }) {
+                params.get(i).and_then(float_elem_hint_ty)
+            } else {
+                None
+            };
             let at = self.infer_arg(arg, params.get(i));
+            self.float_elem_hint = None;
             // The widen license: the sink must be an untyped int CONSTANT *and* — for a substituted
             // param list — the slot must have been DECLARED `float` (not a type param the backend
             // erased). `declared: None` ⇒ `params` are the declared types (the ordinary case).

@@ -1846,10 +1846,11 @@ fn an_annotation_reaches_through_a_collection_literal() {
         "{EMPTY}a: List[List[int]] = [empty_list().reversed(), [\"x\"]]\n"
     ));
 
-    // CEILING, second: the int→float element widen does not reach through a carrier, because its
-    // hint travels on a SEPARATE channel with a checker twin (`float_elem_hint_ty`) and a compiler
-    // twin (`Compiler::elem_hint`) that must move together — unwrapping only one would let the
-    // checker widen while the backend did not, an int under a static float list.
+    // CEILING, second (TICKET-033): the int→float element widen does not reach through a carrier,
+    // because the license is computed from the SINK TYPE before `sink_payload` unwraps it — a
+    // `List[float]?` sink resolves to `Ty::Option(..)`, on which `float_elem_hint_ty` answers `None`
+    // by construction, never `Ty::List(Float)`. `docs/spec.md` and `docs/syntax.md` document this as
+    // deliberate.
     rejects(
         "fn f() -> List[float]?:\n    return [1, 2]\n",
         "expected return type Option[List[float]], found List[int]",
@@ -1866,6 +1867,60 @@ fn ticket_033_element_widen_missing_at_non_let_sinks() {
     ok("fn f(xs: List[float]):\n    print(xs)\nfn main():\n    f([1, 2])\n");
     ok("fn f() -> List[float]:\n    return [1, 2]\n");
     ok("struct S:\n    v: List[float]\nfn main():\n    S([1, 2])\n");
+}
+
+/// TICKET-033: every remaining position a slot type reaches a literal also licenses the widen — a
+/// method argument, a desugared keyword argument, the `Map[str, float]` twin at each sink, and a
+/// whole-collection alias sink.
+#[test]
+fn element_widen_reaches_every_argument_and_return_sink() {
+    ok(
+        "struct S:\n    fn m(self, xs: List[float]):\n        print(xs)\nfn main():\n    S().m([1, 2])\n",
+    );
+    // keyword calls only desugar under the harvest pass (`harvest_keywords`), which `check_graph`
+    // runs and the bare `check()` `ok()` helper does not — use `entry_ok`.
+    entry_ok(
+        "fn f(xs: List[float], n: int):\n    print(xs, n)\nfn main():\n    f(n = 1, xs = [1, 2])\n",
+    );
+    ok("fn f(m: Map[str, float]):\n    print(m)\nfn main():\n    f({\"a\": 1})\n");
+    ok("struct S:\n    v: Map[str, float]\nfn main():\n    S({\"a\": 1})\n");
+    ok("fn f() -> Map[str, float]:\n    return {\"a\": 1}\n");
+    ok("type LF = List[float]\nfn f(xs: LF):\n    print(xs)\nfn main():\n    f([1, 2])\n");
+}
+
+/// TICKET-033: a carrier (`List[float]?`), a nested element (`List[List[float]]`), an erased
+/// generic-param slot, a reassignment and a decl-site default all stay declined — the widen only
+/// licenses the sink types `float_elem_hint_ty` maps directly, computed BEFORE any carrier unwrap.
+#[test]
+fn element_widen_still_declines_carrier_nested_and_erased_sinks() {
+    rejects(
+        "fn f() -> List[float]?:\n    return [1, 2]\n",
+        "expected return type Option[List[float]], found List[int]",
+    );
+    rejects(
+        "fn f(xs: List[float]?):\n    print(xs)\nfn main():\n    f([1, 2])\n",
+        "argument 1 of 'f': expected Option[List[float]], found List[int]",
+    );
+    rejects(
+        "fn f(xs: List[List[float]]):\n    print(xs)\nfn main():\n    f([[1, 2]])\n",
+        "argument 1 of 'f'",
+    );
+    rejects(
+        "xs: List[int] = [1, 2]\nfn f(zs: List[float]):\n    print(zs)\nfn main():\n    xs = [1, 2]\n    f(xs)\n",
+        "expected List[float]",
+    );
+    entry_rejects(
+        "fn f(...zs: float):\n    print(zs)\nfn main():\n    f(1, 2)\n",
+        "argument 1 of 'f': expected List[float], found List[int]",
+    );
+    rejects(
+        "fn f(xs: List[float] = [1, 2]):\n    print(xs)\n",
+        "default value for parameter 'xs'",
+    );
+    rejects(
+        "struct S:\n    v: List[float] = [1, 2]\n",
+        "default value for field 'v'",
+    );
 }
 
 /// A GENERIC method cannot witness a protocol requirement. Its signature is spelled in binders that
@@ -26333,18 +26388,16 @@ fn widen_generic_method_param_at_float_rejected() {
     );
 }
 
-/// A collection type spelled through an ALIAS (`type LF = List[float]`) is NOT an element-widening
-/// hint: the backend's `float_elem_hint` matches the SYNTACTIC `List[…]`/`Map[…]` shape only, so it
-/// would emit no `Op::CoerceFloat` for the elements. The checker must key its own hint on the same
-/// syntactic shape (an aliased ELEMENT — `List[F]` with `type F = float` — still widens: the backend
-/// resolves float aliases at the element).
+/// TICKET-033 — a collection type spelled through an ALIAS (`type LF = List[float]`) now widens too.
+/// Before TICKET-033 this was rejected: the backend's `float_elem_hint` matched the SYNTACTIC
+/// `List[…]`/`Map[…]` shape only, so a whole-collection alias slipped past it. The recorded
+/// `ElemWiden` verdict (`ListWidenTable`) removes that reason — the checker now licenses the widen
+/// from the RESOLVED slot type, and the backend consumes the verdict verbatim instead of re-deriving
+/// it from syntax, so it no longer needs to see through the alias.
 #[test]
-fn widen_collection_alias_annotation_rejected() {
-    entry_rejects("type LF = List[float]\nxs: LF = [1, 2]\n", "cannot assign");
-    entry_rejects(
-        "type MF = Map[str, float]\nm: MF = {\"k\": 1}\n",
-        "cannot assign",
-    );
+fn widen_collection_alias_annotation_now_widens() {
+    entry_ok("type LF = List[float]\nxs: LF = [1, 2]\nprint(xs)\n");
+    entry_ok("type MF = Map[str, float]\nm: MF = {\"k\": 1}\nprint(m)\n");
     // the ELEMENT spelled through an alias keeps working (the backend's `is_float` is alias-aware)
     entry_ok("type F = float\nxs: List[F] = [1, 2.5]\nprint(xs)\n");
 }

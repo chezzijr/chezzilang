@@ -2046,25 +2046,17 @@ impl Checker {
                         let expected = self.resolve_type(t, span);
                         // One-way int→float ELEMENT widening: a `List[float]` / `Map[_, float]`
                         // annotation licenses the literal's untyped-int-constant elements to widen —
-                        // and it is exactly the annotation the COMPILER reads (`float_elem_hint`) to
-                        // emit `Op::CoerceFloat` for them, so checker and backend agree. The backend
-                        // matches the SYNTACTIC `List[…]`/`Map[…]` shape (resolving only the ELEMENT
-                        // through float aliases), so gate on that same shape here: a whole-collection
-                        // alias (`type LF = List[float]`) resolves to `Ty::List(Float)` but is NOT a
-                        // hint the backend can see — licensing it would leave an un-coerced `Int` under
-                        // a static `float`. Set ONLY here (never for a call arg / return: the compiler
-                        // has no annotation there); `infer_kind` `take()`s it so nothing nested
-                        // inherits the license.
+                        // TICKET-033 — derived from the RESOLVED `Ty`, so a whole-collection alias
+                        // (`type LF = List[float]`) is now a type context too: the verdict RIDES
+                        // `ListWidenTable` to the backend (`record_list_widen`/`record_map_widen`)
+                        // rather than the compiler re-deriving it from the syntactic shape, so an
+                        // alias the compiler cannot see through is no longer a reason to decline.
+                        // `infer_kind` `take()`s it so nothing nested inherits the license.
                         // (The opposite verdict — a `List[Any]` slot SUPPRESSING the widen — does not
                         // ride this channel: it is derived from `expected_hint` at the literal itself,
                         // so it holds at every slot position, not just an annotated `let`. See
                         // `crate::checker::any_elem_slot` / `ListWidenTable`.)
-                        self.float_elem_hint = match t {
-                            crate::ast::Type::Generic(n, ..) if n == "List" || n == "Map" => {
-                                float_elem_hint_ty(&expected)
-                            }
-                            _ => None,
-                        };
+                        self.float_elem_hint = float_elem_hint_ty(&expected);
                         self.expected_hint = Some(expected);
                         let vt = self.infer_value(value);
                         self.float_elem_hint = None;
@@ -3824,8 +3816,21 @@ impl Checker {
                     // `fn mk() -> Heap[int]: return Heap([], fn(x, y): x < y)` pins `T=int`. `unify`
                     // no-ops on a `Nil` (void) ret, so setting it unconditionally is safe; pair with
                     // an immediate clear so a non-call return value never leaks the hint.
+                    //
+                    // TICKET-033 — a `return` is also a sink the int→float ELEMENT widen reaches:
+                    // license it from the RESOLVED return type, same as the `let` path, gated on
+                    // `!in_default_provider` like the coercion above it (a synthesized default
+                    // provider is structurally a return sink but must stay excluded). Computed from
+                    // `ret` BEFORE any carrier unwrap, so `-> List[float]?` stays declined by
+                    // construction (`float_elem_hint_ty` answers `None` for `Ty::Option(..)`).
+                    self.float_elem_hint = if self.in_default_provider {
+                        None
+                    } else {
+                        float_elem_hint_ty(&ret)
+                    };
                     self.expected_hint = Some(ret.clone());
                     let t = self.infer(e);
+                    self.float_elem_hint = None;
                     self.expected_hint = None;
                     t
                 };

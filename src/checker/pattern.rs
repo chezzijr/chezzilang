@@ -1314,7 +1314,7 @@ impl Checker {
                 // re-derive the slot's element type. One record site ⇒ every position an expected
                 // `List[E]` reaches a literal (annotated `let`, call arg, struct ctor arg, the
                 // synthesized variadic pack, `return`) is served by one channel.
-                self.record_list_widen(expr.span, items, *origin, hint.as_ref());
+                self.record_list_widen(expr.span, items, *origin, hint.as_ref(), elem_hint);
                 self.infer_list(items, hint.as_ref(), elem_hint)
             }
             ExprKind::Tuple(items) => {
@@ -1328,6 +1328,7 @@ impl Checker {
                     .expected_hint
                     .take()
                     .map(|t| Self::sink_payload(&t).clone());
+                self.record_map_widen(expr.span, entries, elem_hint);
                 self.infer_map(
                     entries,
                     elem_hint == Some(crate::ast::ElemFloatHint::MapValue),
@@ -3689,7 +3690,31 @@ impl Checker {
         items: &[Expr],
         origin: Option<Span>,
         expected: Option<&Ty>,
+        license: Option<crate::ast::ElemFloatHint>,
     ) {
+        // TICKET-033 — a non-`let` sink (a call argument, a struct ctor argument, a `return`)
+        // licenses the SAME int→float widen the `let` path grants, checked BEFORE the
+        // settled-slot decline/default branch below so a licensed sink always wins.
+        if license == Some(crate::ast::ElemFloatHint::Elem)
+            && items.iter().any(crate::ast::untyped_int_const)
+        {
+            let key = crate::checker::list_widen_key(
+                self.graph_module_idx,
+                self.kw_frag_ctx,
+                self.kw_frag_ord,
+                span,
+                origin,
+            );
+            crate::checker::record_call_table_entry(
+                &mut self.list_widen,
+                &mut self.table_conflicts,
+                key,
+                crate::checker::ElemWiden::Widen(crate::ast::ElemFloatHint::Elem),
+                "list element-widening",
+                span,
+            );
+            return;
+        }
         if !matches!(expected, Some(Ty::List(e)) if !e.is_unknown())
             || !crate::compiler::literal_numeric_mix(items.iter())
         {
@@ -3702,12 +3727,51 @@ impl Checker {
             span,
             origin,
         );
+        let value = if crate::checker::any_elem_slot(expected) {
+            crate::checker::ElemWiden::Decline
+        } else {
+            crate::checker::ElemWiden::Default
+        };
         crate::checker::record_call_table_entry(
             &mut self.list_widen,
             &mut self.table_conflicts,
             key,
-            crate::checker::any_elem_slot(expected),
+            value,
             "list element-widening",
+            span,
+        );
+    }
+
+    /// TICKET-033 — the [`Self::record_list_widen`] sibling for a `Map[_, float]` sink: records
+    /// `Widen(MapValue)` when `license` says this literal's VALUE column is licensed to widen at a
+    /// non-`let` sink and at least one value is an untyped int constant. No `Decline`/`Default` twin:
+    /// a `Map` slot has no `Any`-value suppression case to record (unlike `any_elem_slot`'s `List`).
+    fn record_map_widen(
+        &mut self,
+        span: Span,
+        entries: &[(Expr, Expr)],
+        license: Option<crate::ast::ElemFloatHint>,
+    ) {
+        if license != Some(crate::ast::ElemFloatHint::MapValue)
+            || !entries
+                .iter()
+                .any(|(_, v)| crate::ast::untyped_int_const(v))
+        {
+            return;
+        }
+        let key = crate::checker::list_widen_key(
+            self.graph_module_idx,
+            self.kw_frag_ctx,
+            self.kw_frag_ord,
+            span,
+            None,
+        );
+        crate::checker::record_call_table_entry(
+            &mut self.list_widen,
+            &mut self.table_conflicts,
+            key,
+            crate::checker::ElemWiden::Widen(crate::ast::ElemFloatHint::MapValue),
+            "map value-widening",
             span,
         );
     }

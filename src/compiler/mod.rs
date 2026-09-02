@@ -3966,15 +3966,20 @@ impl Compiler {
                 // element type is invisible here), and it is looked up under the SAME
                 // `literal_numeric_mix` gate the checker recorded it under, so the two cannot drift.
                 // A miss = widen, the pre-fix lowering.
-                let annotated = elem_hint == Some(crate::ast::ElemFloatHint::Elem);
+                let verdict = self.list_widen.get(&crate::checker::list_widen_key(
+                    self.current_module_idx,
+                    self.kw_frag_ctx,
+                    self.kw_frag_ord,
+                    expr.span,
+                    *origin,
+                ));
+                let annotated = elem_hint == Some(crate::ast::ElemFloatHint::Elem)
+                    || verdict
+                        == Some(&crate::checker::ElemWiden::Widen(
+                            crate::ast::ElemFloatHint::Elem,
+                        ));
                 let peephole = literal_numeric_mix(items.iter())
-                    && self.list_widen.get(&crate::checker::list_widen_key(
-                        self.current_module_idx,
-                        self.kw_frag_ctx,
-                        self.kw_frag_ord,
-                        expr.span,
-                        *origin,
-                    )) != Some(&true);
+                    && verdict != Some(&crate::checker::ElemWiden::Decline);
                 for it in items {
                     self.compile_expr(fc, it)?;
                     if annotated || (peephole && crate::ast::untyped_int_const(it)) {
@@ -3994,7 +3999,18 @@ impl Compiler {
                 // Push `[k0, v0, k1, v1, …]`, then build the map (last duplicate key wins at runtime).
                 // One-way int→float widening on the VALUE position only (keys are never float): the
                 // `Map[_, float]` annotation, or the constant peephole over the value column.
-                let annotated = elem_hint == Some(crate::ast::ElemFloatHint::MapValue);
+                let verdict = self.list_widen.get(&crate::checker::list_widen_key(
+                    self.current_module_idx,
+                    self.kw_frag_ctx,
+                    self.kw_frag_ord,
+                    expr.span,
+                    None,
+                ));
+                let annotated = elem_hint == Some(crate::ast::ElemFloatHint::MapValue)
+                    || verdict
+                        == Some(&crate::checker::ElemWiden::Widen(
+                            crate::ast::ElemFloatHint::MapValue,
+                        ));
                 let peephole = literal_numeric_mix(entries.iter().map(|(_, v)| v));
                 for (k, v) in entries {
                     self.compile_expr(fc, k)?;

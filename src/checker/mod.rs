@@ -21,9 +21,9 @@ use std::fmt;
 pub use ty::Ty;
 use ty::compatible;
 pub use ty::{
-    CarrierKey, CarrierMode, CarrierTable, FnLabels, KeywordKey, KeywordTable, ListWidenKey,
-    ListWidenTable, NewtypeSumTable, ProtoEqTable, RetCoerce, RetCoerceTable, WitnessCallee,
-    WitnessKey, WitnessSrc, WitnessTable,
+    CarrierKey, CarrierMode, CarrierTable, ElemWiden, FnLabels, KeywordKey, KeywordTable,
+    ListWidenKey, ListWidenTable, NewtypeSumTable, ProtoEqTable, RetCoerce, RetCoerceTable,
+    WitnessCallee, WitnessKey, WitnessSrc, WitnessTable,
 };
 
 /// The fully-resolved C signature of one `extern` fn, computed by the checker in the defining

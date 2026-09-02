@@ -847,7 +847,7 @@ pub fn untyped_int_const(e: &Expr) -> bool {
 /// `List[float]` → `Elem`, `Map[_, float]` → `MapValue`. Shared by the checker (which licenses the
 /// widen) and the compiler (which emits `Op::CoerceFloat` for it) so they cannot drift.
 /// (`Set[float]` is impossible — float is not Hashable — so it is intentionally not handled.)
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ElemFloatHint {
     /// `List[float]` — widen every element.
     Elem,

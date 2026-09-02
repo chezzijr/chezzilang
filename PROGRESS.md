@@ -12312,6 +12312,22 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- **The int→float ELEMENT widen now reaches a call argument, a method argument, a struct constructor
+  argument and a `return`, not just an annotated `let` (2026-09-02, TICKET-033).** Before: only
+  `xs: List[float] = [1, 2]` widened; `f([1, 2])`, `return [1, 2]` at `-> List[float]`, and
+  `S([1, 2])` at a `List[float]` field all wrongly rejected `List[int]`, though their SCALAR twins
+  (`f(1)`, `return 1`, `S(1)`) were already accepted. Fix: the checker's per-literal verdict
+  (`ListWidenTable`'s value widened from `bool` to `ElemWiden { Decline, Default, Widen(hint) }`) now
+  rides to the type-blind backend from every sink, not just the `let`'s syntactic annotation — the
+  license is installed at `check_args_range_decl` (covers call/method/ctor/keyword args through one
+  seam) and `check_return`, both computed from the RESOLVED sink type via `float_elem_hint_ty`. Two
+  side effects, both deliberate: a whole-collection alias (`type LF = List[float]`) is now a type
+  context too (the verdict travels on the table instead of requiring the backend to see through the
+  alias), and `List[float]?`/nested/erased/default sinks stay declined — the license reads the sink
+  type BEFORE any carrier unwrap. Gate: `cargo test` green (4397 lib tests, up from 4394 + the ticket's
+  own previously-failing pinned test), `chezzi test tests/chz/spec/float_elem_widen_sinks_test.chz`
+  (6 new tests, all RUN the widened value, not just check-clean), `cargo clippy -- -D warnings` clean.
+  `docs/spec.md`/`docs/syntax.md` updated in the same commit.
 - **`chezzi test` now prints the same fault trace, line:col and warning path as `run`/`check`
   (2026-08-27, TICKET-010, `docs/gaps.md` W8-37 closed).** Three drops, one root cause
   (`src/test_runner.rs` rendered all three diagnostics from `message` alone): a fault lost its

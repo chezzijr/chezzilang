@@ -189,7 +189,33 @@ pub type ListWidenKey = (CarrierKey, Option<Span>);
 /// recorded where it does fire, so [`crate::checker::record_call_table_entry`] can turn an aliased
 /// key into a hard error instead of silently applying one literal's verdict to another. A lookup MISS
 /// means "widen", which is the pre-fix lowering — a missing entry can only ever under-apply the fix.
-pub type ListWidenTable = HashMap<ListWidenKey, bool>;
+pub type ListWidenTable = HashMap<ListWidenKey, ElemWiden>;
+
+/// TICKET-033 — the verdict [`ListWidenTable`] carries for one mixed-numeric collection literal.
+///
+/// `Decline` is the old `true`: an `Any` element/value slot SUPPRESSES the widen the peephole would
+/// otherwise do (see [`crate::checker::any_elem_slot`]). `Default` is the old `false`: recorded only
+/// so [`crate::checker::record_call_table_entry`] still turns an aliased key into a hard error instead
+/// of letting one literal's `Decline` silently reach another. `Widen(h)` is new: this literal sits at a
+/// sink OUTSIDE the annotated `let` (a call argument, a struct constructor argument, a `return`) whose
+/// element/value type is `float`, so the checker licenses the SAME int→float widen the `let` path
+/// already grants — the backend has no annotation to re-derive this from at those sinks, so it must be
+/// carried, exactly like DEC-025's `RetCoerceTable`.
+///
+/// `Decline` and `Widen` never override each other: a `List` literal only ever records `Widen(Elem)` or
+/// the `Decline`/`Default` pair, a `Map` literal only ever records `Widen(MapValue)` or that pair —
+/// each backend arm tests only its own variant, so a cross-kind key collision (impossible in practice,
+/// since a `List` and a `Map` literal cannot share a span) would be inert, never a silent widen. A
+/// lookup MISS means "widen", the pre-fix lowering (unchanged from the old `bool` table).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ElemWiden {
+    /// An `Any` element/value slot: suppress the peephole widen entirely.
+    Decline,
+    /// Recorded only to keep an aliased key loud; carries no widen decision of its own.
+    Default,
+    /// This literal's element/value type is licensed to widen at this (non-`let`) sink.
+    Widen(crate::ast::ElemFloatHint),
+}
 
 /// W8-21 — which implicit success-coercion, if any, a declared `T?`/`T!E` return sink applies to a
 /// bare success value, keyed exactly like [`CarrierKey`]. This is the checker-to-backend contract:

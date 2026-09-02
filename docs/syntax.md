@@ -571,8 +571,11 @@ An untyped int constant adapts at every value-DEFINITION sink: a typed binding (
 type), a `float` parameter DEFAULT (`fn g(a: float = 3)`), a `-> float` return, a `float` struct field
 (`P(3)` for `v: float`), and a **mixed-numeric-constant** collection literal — a list/map literal with ≥1
 untyped float constant infers `List[float]` / `Map[_, float]` and coerces its untyped int constants
-(`[1, 2.3]`, `[1, -2.5]`, `[1 + 1, 2.5]`), as does an annotated `xs: List[float] = [1, f]` /
-`m: Map[str, float] = {"a": 1}` / `xs: List[float] = [1, 2]` (the annotation is the type CONTEXT). A
+(`[1, 2.3]`, `[1, -2.5]`, `[1 + 1, 2.5]`). The ELEMENT of a mixed-numeric-CONSTANT collection widens at
+the same set of sinks the scalar rule does (TICKET-033): an annotated `xs: List[float] = [1, f]` /
+`m: Map[str, float] = {"a": 1}` / `xs: List[float] = [1, 2]` (the annotation is the type CONTEXT), a
+`List[float]`/`Map[_, float]` call argument, method argument, struct constructor argument, and a
+`-> List[float]`/`-> Map[_, float]` return. A
 `float` sink spelled through a type ALIAS (`type F = float`; `x: F = 1`, `fn g(z: F)`, `v: F`) is a float
 sink like any other. Because the conversion is real, the value behaves as a float everywhere —
 `x: float = 3` makes `x / 2 == 1.5` (float division), not `1`. The mixed-type arithmetic / comparison
@@ -587,9 +590,11 @@ that declaration is what the backend coerces from — not exceptions):
 - A **generic-erased** slot never widens: a method param declared as the type variable (`fn set(self, x: T)`
   on a `Box[float]`) is `T` at runtime, so `b.set(1)` is an error — write `b.set(1.0)`. A param declared
   `float` on the same generic struct adapts normally.
-- A collection annotation must be SPELLED as one: `xs: List[float] = [1, 2]` adapts, but through a
-  whole-collection alias (`type LF = List[float]`; `xs: LF = [1, 2]`) it does not (write `[1.0, 2.0]`).
-  An aliased ELEMENT is fine — `type F = float`; `xs: List[F] = [1, 2]`.
+- A whole-collection alias IS a type context (TICKET-033): `type LF = List[float]`; `xs: LF = [1, 2]`
+  adapts exactly like the un-aliased spelling, because the checker now licenses the widen from the
+  RESOLVED slot type and hands the verdict to the (still type-blind) backend, rather than requiring the
+  backend to see through the alias itself. An aliased ELEMENT is fine either way —
+  `type F = float`; `xs: List[F] = [1, 2]`.
 - A **variadic** `float` param (`fn f(...zs: float)`) adapts its untyped int constants only when an
   untyped float constant sibling is present (`f(1, 2.5)` ✓, `f(1, 2)` ✗ — write `f(1.0, 2.0)`): the args
   are packed into a `List[float]` the callee prologue cannot coerce.
@@ -616,8 +621,9 @@ element never widens, annotated or not: `a := 1; xs: List[float] = [a, 2.3]` is 
 Anti-lossy cases stay type errors: `y: int = 2.3`, `fn f() -> int: return 2.3`, a `float` into a
 `List[int]`, and an `int`→`float` into a **newtype** (nominal — no widening across its boundary).
 Widening is **scalar-or-element-at-the-sink** — a nested / type-argument float slot is NOT widened:
-`List[List[float]] = [[1]]`, `float? = Some(3)`, `float! = Ok(3)`, and a non-literal RHS
-(`List[float] = f()`) all stay type errors; write explicit floats (`[[1.0]]`, `Some(3.0)`) or a literal.
+`List[List[float]] = [[1]]`, `float? = Some(3)`, `float! = Ok(3)`,
+`fn f() -> List[float]?: return [1, 2]`, and a non-literal RHS (`List[float] = f()`) all stay type
+errors; write explicit floats (`[[1.0]]`, `Some(3.0)`) or a literal.
 One further scoped restriction: a plain
 reassignment `x = 3` to a `float`-declared local is rejected (a reassignment target is type-blind, like
 `p.x = 3`).
@@ -3836,9 +3842,11 @@ defining `compare`), stable, in place.
 > columns and a `Set` literal's elements, and it reaches through a `T?` / `T!E` sink (where a bare
 > literal coerces to `Some(v)` / `Ok(v)`) onto the carrier's payload. Two limits: the hint reaches an
 > element that **consumes** it, so a literal one method call away
-> (`[empty().reversed(), ["x"]]`) is not caught; and the int→float element widen travels on its own
-> channel and does **not** reach through a carrier, so `fn f() -> List[float]?: return [1, 2]` is
-> rejected where the bare `-> List[float]` sink would widen.
+> (`[empty().reversed(), ["x"]]`) is not caught; and the int→float element widen (TICKET-033: now
+> reaches an annotated `let`, a call argument, a method argument, a struct constructor argument and a
+> `return` alike) is computed from the SINK type before `sink_payload` unwraps a carrier, so
+> `fn f() -> List[float]?: return [1, 2]` stays rejected even though the bare `-> List[float]` sink
+> widens.
 > (An `= []` empty binding plus later `.push` also works and is equally valid.)
 > A **never-constrained** empty — one that nothing ever pins or constrains (e.g. `b := []` that is only
 > *read* into an untyped sink: `print(b)`, `b.len()`) — is a **static error**: `cannot infer element type

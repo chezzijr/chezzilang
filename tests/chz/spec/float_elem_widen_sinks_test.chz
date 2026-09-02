@@ -1,0 +1,53 @@
+# tests/chz/spec/float_elem_widen_sinks_test.chz — TICKET-033: the int->float ELEMENT widen must
+# RUN, not just check-clean, at every non-`let` sink it now reaches: a call argument, a `return`, a
+# struct constructor argument, a method argument, and the `Map[str, float]` twin. `xs[0] / 2 == 0.5`
+# fails if a widened slot still holds a runtime `Int` even if `str()`'s rendering ever changes.
+
+struct Box:
+    v: List[float]
+
+    fn m(self, xs: List[float]) -> List[float]:
+        return xs
+
+fn take_list(xs: List[float]) -> List[float]:
+    return xs
+
+fn take_map(m: Map[str, float]) -> Map[str, float]:
+    return m
+
+fn give_list() -> List[float]:
+    return [1, 2]
+
+fn give_map() -> Map[str, float]:
+    return {"a": 1}
+
+test fn call_argument_widens():
+    xs := take_list([1, 2])
+    assert str(xs) == "[1.0, 2.0]"
+    assert xs[0] / 2 == 0.5
+
+test fn return_widens():
+    xs := give_list()
+    assert str(xs) == "[1.0, 2.0]"
+    assert xs[0] / 2 == 0.5
+
+test fn struct_ctor_argument_widens():
+    b := Box([1, 2])
+    assert str(b.v) == "[1.0, 2.0]"
+    assert b.v[0] / 2 == 0.5
+
+test fn method_argument_widens():
+    b := Box([3, 4])
+    xs := b.m([1, 2])
+    assert str(xs) == "[1.0, 2.0]"
+    assert xs[0] / 2 == 0.5
+
+test fn map_call_argument_widens():
+    m := take_map({"a": 1})
+    assert str(m) == "{{'a': 1.0}}"
+    assert m["a"] / 2 == 0.5
+
+test fn map_return_widens():
+    m := give_map()
+    assert str(m) == "{{'a': 1.0}}"
+    assert m["a"] / 2 == 0.5
