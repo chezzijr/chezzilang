@@ -3404,7 +3404,10 @@ match r:
 (`runtime error (file:line:col): message`). A user-constructed `Err("...")` reached as a plain value
 (not via `recover:`) carries none of these — `line()`/`col()`/`file()` are all `None` on it, and so are
 they on any error still in flight through a `?` propagation, since only `recover:` (and a `defer`-fault
-boundary) stamps the origin.
+boundary) stamps the origin. `panic(e.message())` **re-raises at the origin `e` carries**, not at the
+`panic` call's own line — a re-raise never moves the coordinate. And a fault **raised inside the
+stdlib itself** is never stamped, so `line()`/`col()`/`file()` answer `None` for it rather than
+naming a `std/` file the user never wrote.
 
 ### `defer` — block-scoped cleanup  (M16)
 

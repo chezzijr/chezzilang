@@ -437,10 +437,16 @@ Bare `Executor.submit(f)` is fire-and-forget — nothing comes back. The result-
 future-style handle (memoization + readiness poll):
 
 - `submit_task[T](ex, f) -> Task[T]` — submit `f` detached, get a handle (builds over
-  `ex.submit_result(f)`). The work starts at the `submit` and is waited for by `shutdown()` (or the
-  program-exit join). Read the result AFTER that call.
-- `Task.get() -> T` — block until the result lands, then return it; **memoized** (idempotent).
-- `Task.done() -> bool` — non-blocking readiness poll.
+  `ex.submit_outcome(f, out, err)`). The work starts at the `submit` and is waited for by
+  `shutdown()` (or the program-exit join). Read the result AFTER that call.
+- `Task.get() -> T` — block until the result lands, then return it; **memoized** (idempotent). If
+  the job faulted, `.get()` re-raises the job's own error message (CPython's `Future.result()`
+  shape, measured: `result raised: RuntimeError job failed` / `done= True`) — `shutdown()` still
+  raises the job's fault too, and its error keeps the job's own origin (`e.file()`/`line()`/`col()`
+  point at the user's `panic` site). `.get()`'s re-raised error crosses a task airlock, so it
+  answers `None` for `file()`/`line()`/`col()` instead.
+- `Task.done() -> bool` — non-blocking readiness poll; `true` once the job has finished, faulted or
+  not.
 
 Canonical shape: submit all → `shutdown()` → `.get()` each. **Determinism rule:** a task's value is
 deterministic (`f()`); only its *timing* varies at runtime (the OS-thread workers race), so `.get()` is

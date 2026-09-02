@@ -448,8 +448,13 @@ then wait — Java `shutdownNow`; a job with no cancellation point still finishe
 waiting a timer, or parked in a nested `Executor` join is ended** — see `concurrency.md`
 §cancellation points) ·
 `submit_result[T](f: fn() -> T) -> Channel[T]` — submit `f` and get back a cap-1 `Channel[T]` carrying
-its result (`.recv()` it **after** `shutdown()`). This is the result-returning primitive
+its result (`.recv()` it **after** `shutdown()`). If the job faults, the channel is **CLOSED** rather
+than left empty forever — `.recv()` then faults `receive on a closed channel` instead of deadlocking,
+and `shutdown()` still raises the job's own fault. This is the result-returning primitive
 `std.concurrency.task.submit_task` / `Task[T]` wraps.
+`submit_outcome[T](f: fn() -> T, out: Channel[T], err: Channel[str]) -> nil` — the lower-level
+primitive `submit_result` builds on: submit `f`, send its value into `out` on success, or on a fault
+send the message into `err`, close `out`, and re-raise (so `shutdown()` still reports it).
 
 **Jobs do not print in submission order, and `shutdown()` does not withhold their output.** Under
 `chezzi run` a job's `print` reaches stdout the moment it runs, so concurrent jobs interleave in
@@ -1586,8 +1591,8 @@ gap that bare `Executor.submit(f)` is fire-and-forget (returns nothing).
 | item | signature | semantics |
 | --- | --- | --- |
 | `submit_task` | `submit_task[T](ex: Executor, f: fn() -> T) -> Task[T]` | submit `f` to `ex` for detached execution and get a handle for its result. The work STARTS at the submit and is waited for by `shutdown()` (or the program-exit join). |
-| `Task.get` | `get(self) -> T` | block until the result is available, then return it. **Memoized** — idempotent, safe to call repeatedly (a second call returns the cache, not a second `recv`). |
-| `Task.done` | `done(self) -> bool` | whether the result has landed yet. Never blocks. |
+| `Task.get` | `get(self) -> T` | block until the result is available, then return it, or re-raise the job's own fault message if the job faulted. **Memoized** — idempotent, safe to call repeatedly (a second call returns the cached value or re-raises the cached fault, not a second `recv`). |
+| `Task.done` | `done(self) -> bool` | `true` once the job has finished, faulted or not. Never blocks. |
 
 Canonical shape: submit every task, `shutdown()`, then `.get()` each. **Determinism rule:** a `Task`'s
 value is deterministic (it is `f()`); only *when* it runs varies at runtime (the OS-thread workers race)

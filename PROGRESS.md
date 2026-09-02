@@ -7,6 +7,28 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **A faulted `Executor` job no longer deadlocks its result handle; `Task.get()` re-raises the job's
+  own error at its own origin, and a re-raise never claims a false coordinate (TICKET-045).**
+  `submit_result[T]` used to lower to `self.submit(fn(): ch.send(f()))`, so a faulted `f()` never
+  reached `ch.send` — the cap-1 channel was never written and never closed, and `Task.done()`'s
+  `ch.len() > 0` poll could never become true. Fixed via a new `Executor.submit_outcome(f, out,
+  err)` both producers route through: its job body (`std/concurrency.chz`'s new `run_outcome`)
+  recovers the fault, sends `e.message()` into a side `Channel[str]`, closes `out`, and re-raises via
+  `panic(e.message())` so `shutdown()` still reports the job. `Task[T]` (`std/concurrency/task.chz`)
+  gained `err`/`failed` fields; `Task.get()` on a faulted job re-raises the job's message (memoized,
+  matching CPython `Future.result()`: measured `result raised: RuntimeError job failed` / `done=
+  True`), and `Task.done()` polls both channels. Five Rust files (`src/vm/{op,stmt,exec,call}.rs`,
+  `src/compiler/mod.rs`) keep the origin honest: `e.message()` copies its receiver's stamped span
+  onto the string it
+  returns, and `panic(msg)` raises at that stamp when `msg` carries one — so `shutdown()`'s error
+  still points at the user's own `panic` line (measured byte-identical pre/post:
+  `file=Some('/tmp/t45/origin.chz') line=Some(4) col=Some(5)`). `Task.get()`'s error crosses a
+  channel airlock (DEC-026 forbids serializing a span onto the wire), so its `file()`/`line()`/
+  `col()` answer `None` rather than naming `std/concurrency/task.chz` — a new `ModuleProto.std` +
+  `Program::file_is_std` skip the stamp for any fault raised inside stdlib source. 4 new Chezzi tests
+  (`tests/chz/stdlib/task_fault_test.chz`, 5 total). Re-measured: `cargo test --lib` 4445 passed (0
+  new — no Rust test added), `./target/debug/chezzi test tests/chz` 752 passed, 0 failed at default,
+  `CHEZZI_THREADS=1`, and `CHEZZI_THREADS=2`, `cargo clippy --all-targets` clean.
 - **`{x:f}` is fixed-point at CPython's default precision 6 and the `0` flag now survives an
   explicit align (TICKET-043, supersedes DEC-022).** Two `src/fmtspec.rs` seam fixes. (a) `f` used
   to share `render_float`'s no-type arm and inherited `repr_float`'s scientific crossover: `{1e16:f}`
