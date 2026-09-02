@@ -2159,10 +2159,26 @@ impl Checker {
                     };
                     self.hover_record_binding(span, &declared, name, HoverKind::Local, doc);
                 }
+                // TICKET-032 A1 — an un-annotated alias (`c := b`) records no concrete sink, so the
+                // pending requirement legitimately MOVES to `c`; link the two names so a later pin on
+                // EITHER reaches both. Computed here (before `declare` moves `declared`) and linked
+                // BELOW `declare`: `declare`'s own untaint would otherwise delete a link recorded
+                // above it.
+                let alias_src = if let ExprKind::Ident(src) = &value.kind
+                    && Self::is_unrefined_empty_coll(&declared)
+                {
+                    Some(src.clone())
+                } else {
+                    None
+                };
                 self.reject_redeclare(name, &declared, span);
                 self.declare(name, declared);
                 if is_const {
                     self.declare_const(name);
+                }
+                if let Some(src) = alias_src {
+                    let sc = self.scopes.len() - 1;
+                    self.link_empty_alias(sc, name, &src);
                 }
                 // B3.3 (Task 2a): a closure bound to a name records its non-sendable LOCAL captures
                 // keyed by the binding, so a later `spawn <name>()` (or `spawn f(<name>)`) rejects a
@@ -2218,6 +2234,26 @@ impl Checker {
                 };
                 self.drop_value_escape_sites(value, sink.as_ref());
                 self.check_assign(target, *op, val_ty, span);
+                // TICKET-032 A1 — `c = b` (both still unrefined empty collections) is a whole-binding
+                // ALIAS, exactly like `c := b`: link the two names so a later pin on either reaches
+                // both. Recorded BELOW `check_assign`, whose funnel unlink (Ident arm) just broke any
+                // pair `c` was previously in — a link recorded above it would be deleted immediately.
+                // Gated on `Eq` and on both sides being a bare `Ident`: the Tuple arm passes each
+                // target its positional `Ty`, not an `Expr`, so `c, d = b, 0` is structurally
+                // unlinkable here and stays a deliberate ceiling (an under-pin, never a false one).
+                if *op == AssignOp::Eq
+                    && let ExprKind::Ident(n) = &target.kind
+                    && let ExprKind::Ident(src) = &value.kind
+                    && self
+                        .lookup(n)
+                        .is_some_and(|t| Self::is_unrefined_empty_coll(&t))
+                    && self
+                        .lookup(src)
+                        .is_some_and(|t| Self::is_unrefined_empty_coll(&t))
+                    && let Some(sc) = self.owning_scope(n)
+                {
+                    self.link_empty_alias(sc, n, src);
+                }
             }
             StmtKind::Fn(decl) => {
                 if decl.is_test {
@@ -3460,6 +3496,17 @@ impl Checker {
                 // targets are handled in their own arms below, where the receiver IS inferred).
                 self.hover_record_at(target.span, &var_ty, HoverKind::Local, None);
                 self.check_assign_value(&var_ty, op, &val_ty, target.span);
+                // TICKET-032 A1 — a whole-binding (re)assignment rebinds `name` to a DIFFERENT runtime
+                // object, breaking any alias pair naming it. `+=` on a `List` is the one exception
+                // (DEC-015): it extends IN PLACE and yields the SAME handle, so the pair survives.
+                // `*=` and the set compound forms still rebind. Placed here, OUTSIDE the
+                // `!contains_unknown_in_slot` guard below (so `c = []` also breaks the pair) and ABOVE
+                // `drop_empty_site` (so no pin propagates across a pair this statement just broke).
+                // This is the FUNNEL: the Tuple arm recurses into this Ident arm per element with
+                // `AssignOp::Eq`, so this one placement covers every target spelling.
+                if op != AssignOp::PlusEq {
+                    self.unlink_empty_alias(name);
+                }
                 // PART A: a whole-binding (re)assignment / compound-assign / tuple-assign element that
                 // supplies a CONCRETE-typed value into an unrefined empty-collection binding constrains
                 // its element type — clear the pending annotation requirement (the binding IS

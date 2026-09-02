@@ -137,6 +137,7 @@ impl Checker {
             hover_result: None,
             name_docs: HashMap::new(),
             empty_coll_sites: Vec::new(),
+            empty_coll_aliases: Vec::new(),
             hover_pending: None,
         };
         c.seed_stdlib_structs();
@@ -2020,6 +2021,13 @@ impl Checker {
         // `scopes`, the VM's `mn_scopes`/join `scopes`, and doc comments), so a scope-popping site
         // added later cannot forget it — the same reason `declare` owns the re-declaration untaint.
         self.spawn_stale.retain(|_, w| w.scope < self.scopes.len());
+        // TICKET-032 A1 — a pair describes TWO bindings; both are gone once the scope owning either
+        // one is. Scope indices are REUSED (every top-level fn body is index 1, and 21 of 23
+        // `push_scope` sites have no finalize seam), so an undrained pair false-pins a same-named
+        // binding in the next fn body or the next `if` body. `pop_scope` is the drain site, not
+        // `finalize_empty_coll_sites`, because only `pop_scope` runs at all 23 push sites.
+        self.empty_coll_aliases
+            .retain(|(a, b)| a.0 < self.scopes.len() && b.0 < self.scopes.len());
     }
     /// Record `name` (already declared in the current scope) as a `const T` binding.
     pub(super) fn declare_const(&mut self, name: &str) {
@@ -2058,6 +2066,14 @@ impl Checker {
         if self.scopes.len() == 1 {
             self.imported_values.remove(name);
         }
+        // TICKET-032 A1 — a re-declaration (`:=` shadowing a live binding in the same scope) is a
+        // FRESH runtime list, not a mutation: measured, `b := []` / `c := b` / `b := []` / `c.push(1)`
+        // / `b.push("a")` runs printing `['a']` then `[1]` (Python prints `['a'] [1] False` for
+        // `b, c, b is c`). This is the fourth untaint in this same list, alongside `loop_vars` /
+        // `const_decls` / `imported_values`. It must sit HERE, not at the link site: `declare`
+        // resolves the owning scope AFTER its own insert, so a block-scope shadow untaints only the
+        // INNER binding and an outer pair survives.
+        self.unlink_empty_alias(name);
         // W8-3 — `spawn_stale` is keyed by BARE NAME, so it says nothing about which binding it
         // describes. A NEW binding of the name is a different binding: the task wrote the old one, and
         // a read of the new one loses nothing. Untainting here rather than at each binding form is
@@ -2090,11 +2106,92 @@ impl Checker {
     pub(super) fn repin(&mut self, name: &str, ty: Ty) -> Option<usize> {
         for i in (0..self.scopes.len()).rev() {
             if self.scopes[i].contains_key(name) {
-                self.scopes[i].insert(name.to_string(), ty);
+                self.scopes[i].insert(name.to_string(), ty.clone());
+                self.propagate_alias_pin(i, name, &ty);
                 return Some(i);
             }
         }
         None
+    }
+    /// TICKET-032 A1 — resolve `name`'s OWNING scope (the reverse walk `repin`/`drop_empty_site`
+    /// already spell inline).
+    pub(super) fn owning_scope(&self, name: &str) -> Option<usize> {
+        (0..self.scopes.len())
+            .rev()
+            .find(|&i| self.scopes[i].contains_key(name))
+    }
+    /// TICKET-032 A1 — record that `alias` (in `alias_scope`) and `src` name the SAME runtime
+    /// collection. Self-referential and duplicate pairs are dropped.
+    pub(super) fn link_empty_alias(&mut self, alias_scope: usize, alias: &str, src: &str) {
+        let Some(src_scope) = self.owning_scope(src) else {
+            return;
+        };
+        let a = (alias_scope, alias.to_string());
+        let b = (src_scope, src.to_string());
+        if a == b {
+            return;
+        }
+        if self
+            .empty_coll_aliases
+            .iter()
+            .any(|(x, y)| (x, y) == (&a, &b) || (x, y) == (&b, &a))
+        {
+            return;
+        }
+        self.empty_coll_aliases.push((a, b));
+    }
+    /// TICKET-032 A1 — a whole-binding reassignment or re-declaration of `name` breaks every pair
+    /// naming it: the binding no longer denotes the same runtime object its former partners do.
+    pub(super) fn unlink_empty_alias(&mut self, name: &str) {
+        if self.empty_coll_aliases.is_empty() {
+            return;
+        }
+        let Some(scope) = self.owning_scope(name) else {
+            return;
+        };
+        let key = (scope, name.to_string());
+        self.empty_coll_aliases
+            .retain(|(a, b)| *a != key && *b != key);
+    }
+    /// TICKET-032 A1 — `(scope, name)` was just repinned to `ty`; propagate that pin across every pair
+    /// reachable from it (transitive, via a `seen` list) to every partner still satisfying
+    /// `is_unrefined_empty_coll`. `repin` is the SINGLE funnel every empty-collection pin goes through
+    /// (`drop_empty_site`, `refine_receiver`, `refine_index_receiver`), so this one call site covers
+    /// every route.
+    pub(super) fn propagate_alias_pin(&mut self, scope: usize, name: &str, ty: &Ty) {
+        if self.empty_coll_aliases.is_empty() {
+            return;
+        }
+        let mut seen = vec![(scope, name.to_string())];
+        let mut frontier = vec![(scope, name.to_string())];
+        while let Some(cur) = frontier.pop() {
+            let partners: Vec<(usize, String)> = self
+                .empty_coll_aliases
+                .iter()
+                .filter_map(|(a, b)| {
+                    if *a == cur {
+                        Some(b.clone())
+                    } else if *b == cur {
+                        Some(a.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for p in partners {
+                if seen.contains(&p) {
+                    continue;
+                }
+                seen.push(p.clone());
+                if let Some(partner_ty) = self.scopes[p.0].get(&p.1)
+                    && Self::is_unrefined_empty_coll(partner_ty)
+                {
+                    let merged = merge_unknown(partner_ty, ty);
+                    self.scopes[p.0].insert(p.1.clone(), merged);
+                    frontier.push(p);
+                }
+            }
+        }
     }
     /// NOTE — there is NO flow-sensitivity barrier around an `if`/`match` VALUE arm any more.
     /// `snapshot_refinable`/`restore_refinable` used to revert refine-on-first-use pins made inside a

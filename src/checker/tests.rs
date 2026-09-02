@@ -2278,6 +2278,101 @@ fn an_alias_of_an_empty_collection_binding_pins_independently() {
     ok("b := []\nc := b\nc = [1, 2]\nb.push(\"a\")\nprint(b)\nprint(c)\n");
 }
 
+/// TICKET-032 A1 — every accepted/rejected form of the pin group, one program per shape (`##
+/// Digest`'s measured table). Each `rejects` was measured `ok: no type errors` pre-fix; each `ok`
+/// stays accepted post-fix.
+#[test]
+fn an_empty_collection_alias_group_pins_together() {
+    // Pin-on-SOURCE: `b.push(1)` pins `b`, must reach `c` too.
+    rejects(
+        "fn addstr(xs: List[str]):\n    for s in xs:\n        print(s.upper())\nb := []\nc := b\nb.push(1)\naddstr(c)\n",
+        "expected List[str], found List[int]",
+    );
+
+    // Transitive chain: `b := []` / `c := b` / `d := c`, pin on `d`, reaches `b`.
+    rejects(
+        "fn addstr(xs: List[str]):\n    for s in xs:\n        print(s.upper())\nb := []\nc := b\nd := c\nd.push(1)\naddstr(b)\n",
+        "expected List[str], found List[int]",
+    );
+
+    // Reassign-alias: `c := []` / `c = b` (whole-binding alias via `=`, not `:=`), pin on `c`.
+    rejects(
+        "fn addstr(xs: List[str]):\n    for s in xs:\n        print(s.upper())\nb := []\nc := []\nc = b\nc.push(1)\naddstr(b)\n",
+        "expected List[str], found List[int]",
+    );
+
+    // False-rejection guard: the SOURCE rebinds (`b = [1, 2]`), so the pair breaks; a str push on the
+    // alias `c` must stay accepted.
+    ok("b := []\nc := b\nb = [1, 2]\nc.push(\"a\")\nprint(b)\nprint(c)\n");
+
+    // An unused alias still reports exactly one "add an annotation" error, unchanged.
+    rejects(
+        "b := []\nc := b\nprint(c)\n",
+        "cannot infer element type of empty collection",
+    );
+
+    // `+=` on a List extends IN PLACE and keeps the SAME handle (DEC-015): the pair survives, so
+    // `c += [1]` then a str push on `b` rejects.
+    rejects(
+        "b := []\nc := b\nc += [1]\nb.push(\"a\")\n",
+        "expected int, found str",
+    );
+
+    // `*=` REBINDS (DEC-015): the pair breaks, so `c *= 2` then `c.push(1)` then a str push on `b`
+    // stays accepted.
+    ok("b := []\nc := b\nc *= 2\nc.push(1)\nb.push(\"a\")\nprint(b)\nprint(c)\n");
+
+    // The Set or-equals compound form REBINDS too: the pair breaks.
+    ok("b := Set()\nc := b\nc |= Set([1])\nc.add(2)\nb.add(\"a\")\nprint(b)\nprint(c)\n");
+}
+
+/// TICKET-032 A1 — a pin group must not outlive its scope: `empty_coll_aliases` is keyed by
+/// `(scope_idx, name)`, and scope indices are REUSED (every top-level fn body is index 1; two
+/// sibling `if` bodies share one index too). Without the `pop_scope` drain, a pair recorded in one
+/// scope false-pins a same-named binding in the next.
+#[test]
+fn an_alias_pin_group_does_not_outlive_its_scope() {
+    ok(
+        "fn f():\n    b := []\n    c := b\n    c.push(1)\nfn g():\n    b := []\n    c := []\n    c.push(\"a\")\n    b.push(1)\nf()\ng()\n",
+    );
+
+    ok(
+        "if 1 < 2:\n    x := []\n    y := x\n    y.push(1)\nif 1 < 2:\n    x := []\n    y := []\n    y.push(\"a\")\n    x.push(1)\n",
+    );
+}
+
+/// TICKET-032 A1 — a same-scope re-declaration (`:=` shadowing a live binding) is a fresh runtime
+/// list, so it must leave its old pin group; an inner-scope SHADOW must not break an OUTER pair.
+#[test]
+fn a_redeclared_binding_leaves_its_alias_pin_group() {
+    // Re-declaration: `b := []` a second time is a fresh list, so the pair with `c` breaks.
+    ok("b := []\nc := b\nb := []\nc.push(1)\nb.push(\"a\")\nprint(b)\nprint(c)\n");
+
+    // Block-scope shadow: the inner `if` body's `b := []` is a DIFFERENT binding; the outer pair
+    // (`c`/outer `b`) must survive.
+    rejects(
+        "fn addstr(xs: List[str]):\n    for s in xs:\n        print(s.upper())\nb := []\nc := b\nif 1 < 2:\n    b := []\n    b.push(\"a\")\nc.push(1)\naddstr(b)\n",
+        "expected List[str], found List[int]",
+    );
+}
+
+/// TICKET-032 A1 — a TUPLE target rebinds every `Ident` inside it (`c, d = [1, 2], 3`), so it must
+/// leave the pin group exactly like a plain `c = [1, 2]`. The tuple-spelled LINK (`c, d = b, 0`)
+/// stays a deliberate CEILING (an under-pin, never a false rejection).
+#[test]
+fn a_tuple_target_reassignment_leaves_its_alias_pin_group() {
+    // Tuple rebind of the ALIAS: the pair breaks, so a str push on `b` stays accepted.
+    ok("b := []\nc := b\nd := 0\nc, d = [1, 2], 3\nb.push(\"a\")\nprint(b)\nprint(c)\nprint(d)\n");
+
+    // Tuple rebind of the SOURCE: the pair breaks, so a str push on `c` stays accepted.
+    ok("b := []\nc := b\nd := 0\nb, d = [1, 2], 3\nc.push(\"a\")\nprint(b)\nprint(c)\nprint(d)\n");
+
+    // CEILING: a tuple-spelled LINK (`c, d = b, 0`) records no pair — pinning `c` does not reach `b`.
+    ok(
+        "fn addstr(xs: List[str]):\n    for s in xs:\n        print(s.upper())\nb := []\nc := []\nd := 0\nc, d = b, 0\nc.push(1)\naddstr(b)\n",
+    );
+}
+
 /// TICKET-032 A2 — `infer_list`'s expected-type gate is all-or-nothing: one element assignable to the
 /// expected type and one that is not (an `Unknown`-cored empty-collection producer) abandons the
 /// expected-type path, falls through to bottom-up homogeneity, and `compatible(List[Unknown],
@@ -2363,18 +2458,15 @@ fn every_constraining_use_pins_the_element_type() {
         "expected int, found str",
     );
 
-    // CEILING, measured and deliberately not closed: an UN-ANNOTATED alias. `c := b` has no concrete
-    // sink to pin from, so the requirement legitimately MOVES to `c` (`docs/syntax.md`) and the two
-    // bindings are then pinned independently while sharing one runtime list — `[1, 'a']`, unchanged
-    // by everything above. It is NOT benign: the two static types disagree about a shared value, so
-    // it reaches a typed parameter and faults at run time — `fn addstr(xs: List[str]) -> str: return
-    // xs[0].upper()` called on the unpinned half is `ok: no type errors` and then *type int has no
-    // method 'upper'*. Closing it needs alias-identity tracking, which would newly REJECT a rebound
-    // alias (`c := b` then `c = [1, 2]` then `b.push("a")`) — a false rejection is worse than this
-    // missing one. Neither ancestor settles it for us: Rust forbids the shape outright (`let c = b`
-    // MOVES), Python has no static element type at all. ANNOTATING either binding closes it, and
-    // that escape is pinned below.
-    ok("b := []\nc := b\nc.push(1)\nb.push(\"a\")\n");
+    // CEILING CLOSED (TICKET-032 A1) — an UN-ANNOTATED alias now joins the source's PIN GROUP: `c :=
+    // b` has no concrete sink to pin from, so pinning `c` now propagates to `b` too, and this program
+    // rejects. A REBOUND alias (`c := b` then `c = [1, 2]` then `b.push("a")`) stays accepted — the
+    // pair breaks on a whole-binding rebind, never a false rejection; see
+    // `an_alias_of_an_empty_collection_binding_pins_independently`.
+    rejects(
+        "b := []\nc := b\nc.push(1)\nb.push(\"a\")\n",
+        "expected int, found str",
+    );
     // The documented escape must actually work: an annotated sink pins THROUGH the alias.
     rejects(
         "b := []\nc: List[int] = b\nc.push(1)\nb.push(\"a\")\n",

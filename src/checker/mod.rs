@@ -2458,6 +2458,12 @@ struct Checker {
     /// `finalize_empty_coll_sites` errors on any site whose binding STILL carries `Unknown`-in-slot
     /// (never refined → no element type could be inferred → require an annotation).
     empty_coll_sites: Vec<(usize, String, Span)>,
+    /// TICKET-032 A1 — pairs of `(owning_scope_idx, name)` that name the SAME runtime collection (an
+    /// un-annotated alias, `c := b`). `repin` propagates a pin across every pair reachable from the
+    /// binding it just repinned, so pinning either name pins both. A whole-binding reassignment or
+    /// re-declaration of either name breaks the pair (unlinked in `check_assign`'s Ident arm and in
+    /// `declare`), so a rebound alias is never falsely rejected.
+    empty_coll_aliases: Vec<((usize, String), (usize, String))>,
     /// PART B — retroactive hover: when the hover probe lands on an occurrence of a binding whose
     /// recorded type still carries `Unknown`-in-slot (a not-yet-refined empty collection), we stash the
     /// binding's `(owning_scope_idx, name, kind, doc)` here INSTEAD of locking `hover_result`, then at
