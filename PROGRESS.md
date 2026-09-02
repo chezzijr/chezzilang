@@ -7,6 +7,19 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **`??` now accepts a `Result`, discarding the error (TICKET-039, `docs/gaps.md` W8-19, supersedes
+  DEC-037).** `r ?? 0` used to be one error, `'??' applies to an Option, found Result[int, str] — a
+  Result carries an error that must be handled: use a match with Ok/Err arms`; it now lowers to
+  `match r: Ok(__optN): __optN; Err(_): 0` — Rust's `r.unwrap_or(0)`. New `CarrierMode::ResultCoalesce`
+  (`src/checker/ty.rs`) and `desugar::lower_carrier_result_coalesce`, distinct from `CarrierMode::Try`
+  (`?.` on a `Result` still PROPAGATES with `?`; `??` DISCARDS). `ExprKind::NullCoalesce` gained its
+  own `op_span` field — the `??` token's own span, never `Expr::span` — because `parse_bp` reuses
+  `lhs.span` and `(e)` grouping keeps the inner span, so `(a ?? b) ?? c` would otherwise alias two
+  different carrier modes under one `CarrierKey`. Decided: the discard does **not** warn (`??` is
+  itself the acknowledgement, matching the existing silent `Option` form and W8-2's carrier
+  exclusion), and nothing is required of `E` (Chezzi is GC'd, no destructor to run). The `Option`-
+  methods decline from DEC-037/TICKET-037 survives unchanged.
+
 - **A bare discarded `Result`/`Option` at module top level no longer aborts; the W8-2 checker warning
   is the only check and now fires there too (TICKET-038, `docs/gaps.md` W8-2).** Reverses the
   top-level exemption recorded 2026-08-17: `Op::PopExprStmt`'s top-level abort (`src/vm/exec.rs`) is
@@ -3157,7 +3170,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > surfaces for zero benefit, since the checker must decide statically anyway (the expression's type is
 > `T` vs `Option[T]`).
 >
-> **`??` stays Option-only**, now with ONE accurate error — `'??' applies to an Option, found
+> **`??` stays Option-only** (superseded 2026-09-02, TICKET-039 — `??` now also accepts a `Result`,
+> discarding the error), now with ONE accurate error — `'??' applies to an Option, found
 > Result[str, str] — a Result carries an error that must be handled: use a match with Ok/Err arms`. It
 > has no spaced alternative to rescue, no ancestor offers it (Rust has no coalescing operator;
 > Swift/Kotlin/C#'s is Optional-only, in languages with no `Result`), and it would silently discard an
