@@ -123,10 +123,6 @@ pub enum Op {
     False,
     Nil,
     Pop,
-    /// Pop the value of a *statement-level* expression. If the current frame is the module top
-    /// level and the value is an unhandled `Err`/`None`, the program exits with that error;
-    /// otherwise it is discarded like `Pop`. (Emitted for expression statements.)
-    PopExprStmt,
     /// The failing tail of `assert cond[, msg]`. The compiler tests `cond` with a preceding
     /// `JumpIfFalse` and only reaches this op when `cond` was false, so it *always* faults: pop
     /// `msg` (a str, if `has_msg`) and fault at this op's span with that message (or

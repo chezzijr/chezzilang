@@ -977,7 +977,7 @@ fn stderr_write_bytes_is_byte_exact() {
     let t = TmpDir::new();
     let entry = t.write(
         "main.chz",
-        "import std.io\n\nw := io.stderr()\nw.write_bytes(b\"\\xff\\xfe\")\n",
+        "import std.io\n\nw := io.stderr()\n_ := w.write_bytes(b\"\\xff\\xfe\")\n",
     );
     let (out, err, status) = run_bytes(&entry);
     assert!(status.success(), "exit: {status:?}");

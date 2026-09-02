@@ -43,4 +43,4 @@ fn main() -> int!:
     print("div: {r}")
     return Ok(0)
 
-main()
+main()?

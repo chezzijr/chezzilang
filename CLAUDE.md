@@ -156,8 +156,9 @@ UPDATE_EDITOR_ASSETS=1 cargo test --test editor_tmlanguage    # regenerate the V
   where it fires. So before writing the predicate, enumerate the positions the rule could fire in and
   **run each one** — the warn/silent split is a measured table, not a design. Both rules on that
   channel got their gate wrong on the first attempt in exactly this way: W8-2's filed prescription
-  ("a discarded carrier is a compile error at top level") is false because the RUNTIME already aborts
-  there, and its recommended escape `_ := g()` turns rc=1 into rc=0; the airlock rule's filed
+  ("a discarded carrier is a compile error at top level") was false because the RUNTIME then aborted
+  there, and its recommended escape `_ := g()` turned rc=1 into rc=0 — TICKET-038 later reversed the
+  runtime abort itself for exactly that reason, so the warning fires at top level too now; the airlock rule's filed
   "locals only, `is_local_capture` draws exactly this line" would not have warned on its own filed
   repro, because at module top level the binding is scope 0 (`is_captured` is the real question). Two
   corollaries: derive the gate from an **exhaustive** enumeration of the compiler seam that decides it

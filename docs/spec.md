@@ -326,13 +326,12 @@ optional trailing comma is accepted before the closer (`[1, 2,]` ≡ `[1, 2]`); 
 an error. `(x)` is grouping; `(x,)` is a one-element tuple. (See [`syntax.md` §2](syntax.md) and the
 collection/`<params>`/`<argList>` productions in [`grammar.bnf`](grammar.bnf).)
 
-**Entry model.** Programs run top-to-bottom; there is no automatic `main`. An `Err`/`None` left
-unhandled at the top level (a bare expression statement, or a top-level `?`) exits the program with
-`unhandled error: …` and a non-zero code. **Inside a function — and inside a `spawn:` or `defer:`
-block, each its own frame — the same discarded `Result`/`Option` is silently thrown away** at run
-time. Those are exactly the positions `chezzi check` **warns** on (`docs/gaps.md` **W8-2**, following
-Rust's `unused_must_use`, with `r := …` / `_ := …` as the escapes); the top-level case does not warn,
-because the runtime already checks it. Note that `_ := g()` at the top level **disables** that check.
+**Entry model.** Programs run top-to-bottom; there is no automatic `main`. Only a top-level `?` that
+hits an `Err`/`None`, or a manifest `module:function` entrypoint whose entry fn *returns* `Err`/`None`,
+exits the program with `unhandled error: …` and a non-zero code. **A bare discarded `Result`/`Option` —
+at module top level, inside a function, or inside a `spawn:`/`defer:` block — is silently thrown away**
+at run time, in every position alike. Those are exactly the positions `chezzi check` **warns** on
+(`docs/gaps.md` **W8-2**, following Rust's `unused_must_use`, with `r := …` / `_ := …` as the escapes).
 See [`syntax.md` §9](syntax.md) for the position-by-position table. `?` is valid at module top-level (the runtime unwinds the
 propagated `Err`/`None` at the program boundary) and inside a `Result`/`Option`-returning fn — but a
 **nil-returning fn (including a `main` you write) may not use `?`**: it would silently swallow the

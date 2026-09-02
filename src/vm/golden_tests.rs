@@ -4983,46 +4983,40 @@ const PROGRAMS: &[(&str, Result<&str, &str>)] = &[
         "print(\"hi\".frob(1 / 0))",
         Err("runtime error (line 1, col 17): division by zero"),
     ),
-    // ----- entry model: no auto-main; unhandled top-level Err/None exits -----
+    // ----- entry model: no auto-main; a top-level `?` exits, a bare discarded Err/None does not -----
     ("fn main():\n    print(\"hi\")", Ok("")), // main defined but never called → no output
-    (
-        "Err(\"boom\")",
-        Err("runtime error (line 1, col 1): unhandled error: boom"),
-    ), // bare top-level Err → unhandled error
+    ("Err(\"boom\")", Ok("")), // bare top-level Err → discarded, W8-2 warns, no exit
     (
         "x := Err(\"oops\")?",
         Err("runtime error (line 1, col 6): unhandled error: oops"),
     ), // top-level `?` Err → unhandled error
-    (
-        "fn g() -> Option[int]:\n    return None\ng()",
-        Err("runtime error (line 3, col 1): unhandled error: None"),
-    ), // bare None → unhandled error
+    ("fn g() -> Option[int]:\n    return None\ng()", Ok("")), // bare None → discarded, no exit
     (
         "fn f() -> Result[int]:\n    return Err(\"x\")\nr := f()\nprint(\"handled\")",
         Ok("handled\n"),
     ), // Err bound = handled → no exit
     (
         "fn main():\n    print(\"before\")\n    x := Err(\"boom\")?\n    print(\"after\")\nmain()",
-        Err("runtime error (line 5, col 1): unhandled error: boom"),
-    ), // partial output then exit
+        Ok("before\n"),
+    ), // `?` inside main, main() itself is a bare discarded drop → no exit
     // a user enum shadowing `Err` is a normal value: bare one must NOT exit, `?` must reject it
     (
         "enum Signal:\n    Err(int)\n    Quiet\nErr(5)\nprint(\"made it\")",
-        Err("runtime error (line 4, col 1): unhandled error: 5"),
+        Ok("made it\n"),
     ),
     (
         "enum Signal:\n    Err(int)\n    Quiet\nfn f() -> int:\n    x := Err(5)?\n    return x\nf()",
-        Err("runtime error (line 7, col 1): unhandled error: 5"),
-    ),
+        Ok(""),
+    ), // f() -> int is not a carrier type: no runtime check, no W8-2 warning either
     // unhandled top-level error INSIDE a top-level block (interp: call_depth 0, VM: is_toplevel)
     (
         "if true:\n    Err(\"boom\")\nprint(\"after\")",
-        Err("runtime error (line 2, col 5): unhandled error: boom"),
-    ), // bare Err in `if` → exit, no "after"
+        Ok("after\n"),
+    ), // bare Err in `if` → discarded, no exit
     (
         "for i in 0..1:\n    Err(\"x\")\nprint(\"after\")",
-        Err("runtime error (line 2, col 5): unhandled error: x"),
-    ), // bare Err in `for` → exit
+        Ok("after\n"),
+    ), // bare Err in `for` → discarded, no exit
     (
         "fn d() -> Result[int]:\n    return Err(\"z\")\nif true:\n    x := d()?\n    print(x)",
         Err("runtime error (line 4, col 10): unhandled error: z"),

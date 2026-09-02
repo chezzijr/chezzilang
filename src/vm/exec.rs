@@ -887,7 +887,7 @@ impl Vm {
 
         // Run the module body once. No module auto-runs `main` — it's an ordinary function the
         // program calls itself (scripting-language model). An unhandled `Err`/`None` reaching the
-        // top level (via `PopExprStmt` or a top-level `?`) exits during this call.
+        // top level via a top-level `?` exits during this call; a bare dropped value does not.
         self.run_proto(
             m.toplevel,
             mod_obj,
@@ -1816,15 +1816,6 @@ impl Vm {
             Op::Nil => self.push(Value::nil()),
             Op::Pop => {
                 self.pop();
-            }
-            Op::PopExprStmt => {
-                let v = self.pop();
-                // An unhandled `Err`/`None` at the top level exits the program.
-                if self.frames.last().unwrap().is_toplevel
-                    && let Some(e) = self.top_level_error(v, span)
-                {
-                    return Err(e);
-                }
             }
             Op::Assert { has_msg, cmp } => {
                 // Reached only on the failing path: the compiler emits `Op::Assert` after a

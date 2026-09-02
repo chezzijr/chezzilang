@@ -2080,10 +2080,10 @@ impl Compiler {
             StmtKind::Assign { target, op, value } => self.compile_assign(fc, target, *op, value, stmt.span),
             StmtKind::Expr(expr) => {
                 self.compile_expr(fc, expr)?;
-                // `PopExprStmt` (not `Pop`): an unhandled `Err`/`None` from a top-level expression
-                // statement exits the program (the runtime checks the frame). Use `expr.span` (not
-                // `stmt.span`) so the error location points at the exact failing expression.
-                fc.emit(Op::PopExprStmt, expr.span);
+                // An expression statement's value is discarded like any other pop; the checker's
+                // W8-2 warning is the only check on a dropped carrier now. Use `expr.span` (not
+                // `stmt.span`) so a fault inside the expression still points at the expression.
+                fc.emit(Op::Pop, expr.span);
                 Ok(())
             }
             // Top-level fns are hoisted; struct/enum/import are no-ops at execution time. A `fn`
@@ -7444,9 +7444,8 @@ struct FnComp {
 }
 
 impl FnComp {
-    /// A NEW `is_toplevel = false` proto that can hold a user statement needs a matching checker
-    /// flag in the W8-2 discarded-carrier gate (`src/checker/sig.rs`, the `StmtKind::Expr` arm):
-    /// its statements are invisible to `Op::PopExprStmt`'s top-level check, so the drop is silent.
+    /// A NEW `is_toplevel = false` proto needs no W8-2 checker flag: the discarded-carrier warning
+    /// (`src/checker/sig.rs`, the `StmtKind::Expr` arm) fires on every proto now, top level included.
     fn new(name: String, arity: usize, is_toplevel: bool) -> Self {
         FnComp {
             name,

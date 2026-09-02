@@ -12102,9 +12102,11 @@ fn parallel_return_escape_leaves_clean_nursery_stack() {
 /// (the since-removed interp engine already dropped it on `?`; the report now emits identically).
 #[test]
 fn parallel_try_escape_leaves_clean_nursery_stack() {
+    // `main()?`, not a bare `main()`: a bare top-level drop no longer aborts, so the `?` is
+    // what keeps the program faulting.
     let src = "fn noop():\n    0\n\
                    fn boom() -> int!:\n    return Err(\"x\")\n\
-                   fn main() -> int!:\n    parallel:\n        spawn noop()\n        y := boom()?\n        print(y)\n    Ok(0)\nmain()\n";
+                   fn main() -> int!:\n    parallel:\n        spawn noop()\n        y := boom()?\n        print(y)\n    Ok(0)\nmain()?\n";
     let (vm_out, nursery_depth) = run_capture_nursery_len(src);
     assert!(vm_out.is_err(), "the uncaught ? faults the program");
     assert_eq!(
@@ -12206,9 +12208,11 @@ fn parallel_recover_scoped_try_orders_report_after_body_defer() {
 /// returns to 0 (no leak). White-box depth check.
 #[test]
 fn parallel_try_escape_cancels_pending_silently() {
+    // `main()?`, not a bare `main()`: a bare top-level drop no longer aborts, so the `?` is
+    // what keeps the program faulting.
     let src = "fn side():\n    0\n\
                    fn boom() -> int!:\n    return Err(\"x\")\n\
-                   fn main() -> int!:\n    parallel:\n        spawn side()\n        y := boom()?\n        print(y)\n    Ok(0)\nmain()\n";
+                   fn main() -> int!:\n    parallel:\n        spawn side()\n        y := boom()?\n        print(y)\n    Ok(0)\nmain()?\n";
     let (vm_out, depth) = run_capture_nursery_len(src);
     assert!(vm_out.is_err(), "the uncaught ? faults the program");
     assert_eq!(

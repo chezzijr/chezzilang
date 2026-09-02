@@ -3251,20 +3251,21 @@ already an `int`, and `??` takes an `Option`. Drop the `?? 0` (the `?` propagate
 Both operators require the two chars **adjacent** (`x?.f`, `a ?? b`); on a **non-carrier** operand
 `?.` is one error, `'?.' applies to an Option or a Result, found int`.
 
-**Unhandled errors at the top level exit the program.** An `Err`/`None` that reaches the top level —
-a bare top-level expression statement that evaluates to one (e.g. `compute()` whose result is `Err`),
-or a top-level `?` that hits one — terminates the program with `unhandled error: <detail>` and a
-non-zero exit code. *Binding* the value handles it (`r := compute()` keeps running; inspect `r`).
+**Unhandled errors only exit the program at a `?` or a manifest entrypoint's return.** A top-level `?`
+that hits an `Err`/`None` terminates the program with `unhandled error: <detail>` and a non-zero exit
+code; so does a manifest `module:function` entrypoint whose entry fn *returns* `Err`/`None`. A **bare**
+top-level expression statement that evaluates to `Err`/`None` (e.g. `compute()` whose result is `Err`)
+does **not** exit — the value is discarded, same as inside a function. *Binding* the value handles it
+too (`r := compute()` keeps running; inspect `r`).
 
-**The SAME discarded call inside a function is silently swallowed at runtime** — the asymmetry filed
-as `docs/gaps.md` **W8-2**. The asymmetry is **real and justified**: the top-level check *is* the
-handling, so nothing is lost there. Where there is no such check the value vanishes without a trace,
-and that is exactly where `chezzi check` **warns**, following Rust (which marks both carriers
+**A discarded `Result`/`Option` is silently swallowed at runtime, in every position** — closed as
+`docs/gaps.md` **W8-2**. There is no runtime check on a drop anywhere, so the value vanishes without a
+trace, and that is exactly where `chezzi check` **warns**, following Rust (which marks both carriers
 `#[must_use]` and warns on the drop):
 
 ```chezzi
 fn g() -> Result[int, Error]: return Err("E")
-g()                    # NO warning — the runtime checks it: `unhandled error: E`, rc=1
+g()                    # warning … the Result returned by 'g' is discarded, and rc stays 0
 fn f():
     g()                # warning … the Result returned by 'g' is discarded, and rc stays 0
 f()
@@ -3282,23 +3283,14 @@ and a **method call** (`xs.pop()`) both stay elided as `r := …`, because a spe
 `r := takes()` would not compile; the message already names the callee, which is what points at the
 culprit.)
 
-> ⚠️ **`_ := g()` at the top level DISABLES the runtime check.** The check runs on a bare expression
-> statement; binding the value — to `_` or to anything else — is the language taking your word that
-> you have handled it. So `_ := main()` at the top of a script turns a failing `main` from `unhandled
-> error: …` + rc=1 into a silent rc=0. Write the bare call, or `match` it.
+**Which positions warn.** The warning fires on any statement-expression whose type is a carrier, in
+*every* position — a bare statement, nested in `if`/`for`/`while`/`match`/`parallel:`/`recover:`/
+`wait:`, inside a `spawn:` block, inside a `defer:` block, inside a function body — module top level
+included, since the runtime no longer checks a top-level drop.
 
-**Which positions warn.** A `spawn:` block, a `defer:` block and a function body each compile to their
-own frame, so a drop inside one is invisible to the top-level check and warns — even when the block
-itself sits at module top level. Every other block — `if`, `for`, `while`, a `match` arm, `parallel:`,
-`recover:`, a `wait:` arm — runs in the *enclosing* frame, so at top level the value is still checked
-and nothing warns (inside a `recover:` the resulting abort is caught and surfaces as `r = Err(…)`).
-
-| statement at module top level | runtime | warns |
+| statement position | runtime | warns |
 |---|---|---|
-| `g()`, or nested in `if` / `for` / `while` / `match` / `parallel:` / `wait:` | aborts, rc=1 | no |
-| nested in `recover:` | caught → `r = Err('unhandled error: …')` | no |
-| inside a `spawn:` block or a `defer:` block | silently swallowed | **yes** |
-| anywhere inside a `fn` body | silently swallowed | **yes** |
+| any statement position, including module top level | value discarded, rc unchanged | **yes** |
 | `defer g()` / `spawn g()` — the **call** forms, in any position | silently swallowed | no — *deliberate*, see below |
 | the drop happens on a value typed by a **type parameter** (`fn drop_it[T](x: T): x`) | silently swallowed | no — *a known limit*, see below |
 

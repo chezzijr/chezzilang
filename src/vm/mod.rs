@@ -466,8 +466,8 @@ struct CallFrame {
     /// Whether this frame counts toward the call-depth limit (user calls do; module toplevels
     /// don't).
     counted: bool,
-    /// Module toplevel frame — an `Err`/`None` unhandled here (a `?` or a bare expression
-    /// statement) is a top-level unhandled error that exits the program.
+    /// Module toplevel frame — a `?` unhandled here is a top-level unhandled error that exits the
+    /// program; a bare expression statement's value is discarded (`chezzi check` warns, W8-2).
     is_toplevel: bool,
     /// Calls registered by `defer` in this frame, in source order. Drained LIFO when the frame
     /// exits (return / `?` / panic). Receiver/args are evaluated at the `defer` statement and held

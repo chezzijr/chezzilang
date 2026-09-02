@@ -7,6 +7,24 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **A bare discarded `Result`/`Option` at module top level no longer aborts; the W8-2 checker warning
+  is the only check and now fires there too (TICKET-038, `docs/gaps.md` W8-2).** Reverses the
+  top-level exemption recorded 2026-08-17: `Op::PopExprStmt`'s top-level abort (`src/vm/exec.rs`) is
+  deleted, and the checker's three-way `in_fn_body || in_spawn_block || in_defer_block` gate
+  (`src/checker/sig.rs`) is deleted, so the warning fires on every dropped carrier, top level
+  included. Before: bare `g()` at top level where `g()` returns `Err` was `runtime error (x.chz:3:1):
+  unhandled error: boom`, rc=1. After: the W8-2 warning on stderr, the following statement's output on
+  stdout, rc=**0**. Grounds: all three owning ancestors exit 0 on a dropped error value (Rust warns,
+  Go's compiler is silent, Python raises only on `raise`), and the old net caught exactly one spelling
+  — `r := g()` and `_ := g()` already both exited 0 — so the warning's own recommended escape changed
+  the exit code. A top-level `?` (`src/vm/stmt.rs`) and a manifest entrypoint's returned `Err`/`None`
+  (`Vm::invoke_entrypoint`) still abort, unchanged. `Op::PopExprStmt` is deleted outright (not kept as
+  a `Pop` synonym); `examples/hello.chz`'s `main()` becomes `main()?` to keep its abort-on-failure
+  behavior. One accepted narrowing: a value that looks like a carrier at run time (a user `enum`
+  shadowing `Err`) but whose statement's declared type is not one now exits 0 with no diagnostic at
+  all, where the runtime check used to catch it regardless of declared type — accepted because the
+  warning channel is type-driven by design.
+
 - **An un-annotated alias of an unrefined empty collection now pins with the binding it aliases, and
   a list/map literal element now reports against the declared element type instead of laundering
   (TICKET-032, `docs/gaps.md` W8-45/W8-46).** A1: `c := b` used to move the pending pin requirement to
@@ -1381,7 +1399,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > double-reported a warning and (3) `report_fatal` carried a duplicated JSON format string that would
 > have shipped **without** `severity` — both detailed in the severity-channel entries below.
 >
-> **✅ W8-2 — the first warning rule: a discarded `Result`/`Option`, 2026-08-17.** A bare expression
+> **✅ W8-2 — the first warning rule: a discarded `Result`/`Option`, 2026-08-17. [SUPERSEDED
+> 2026-09-02, TICKET-038 — the top-level exemption this note describes is reversed; the warning now
+> fires at module top level too, see the session entry near the top of this file.]** A bare expression
 > statement whose type is `Result`/`Option` warns *"the Result returned by 'g' is discarded — bind it
 > (`r := g()`), or discard it explicitly (`_ := g()`)"*, following Rust's `unused_must_use` (the hint
 > spells the call back for a plain-name callee; a method call keeps `r := …`). Non-fatal: the

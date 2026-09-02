@@ -178,8 +178,8 @@ fn check_graph_diags_keeps_warnings_out_of_the_result() {
 /// A `Result`/`Option` dropped on the floor **where it is genuinely lost** — inside a non-top-level
 /// proto, the positions filed as `docs/gaps.md` W8-2. Rust owns both carriers, marks them
 /// `#[must_use]`, and warns on the drop. Every case here still type-checks CLEAN (that is `warns`'
-/// first assertion), so the exit code is unchanged. The top-level counterpart, where the runtime
-/// checks the value itself and no warning may fire, is `a_top_level_drop_does_not_warn`.
+/// first assertion), so the exit code is unchanged. The top-level counterpart, which now warns
+/// too since the runtime no longer checks a top-level drop, is `a_top_level_drop_warns`.
 #[test]
 fn discarded_carrier_warns() {
     let g = "fn g() -> Result[int, Error]:\n    return Ok(1)\n";
@@ -268,38 +268,52 @@ fn discarded_carrier_warns() {
     );
 }
 
-/// The scope correction. At **module top level** the runtime already checks a dropped carrier:
-/// `Op::PopExprStmt` calls `top_level_error` when its frame `is_toplevel` (`vm/exec.rs`), so an
-/// `Err`/`None` aborts the program with `unhandled error` and rc=1. Warning "is discarded" there
-/// would be factually false, and obeying it (`_ := g()`) DISABLES that check — turning a failing
-/// program into a silent rc=0. So the gate is "does this statement lower into a non-top-level
-/// proto", and the block kinds below all emit into the ENCLOSING proto.
+/// The scope correction, reversed by TICKET-038. **Module top level** used to be exempt because the
+/// runtime checked a dropped carrier there (the top-level pop opcode's check, since deleted); warning "is
+/// discarded" would have been factually false, and obeying it (`_ := g()`) DISABLED that check —
+/// turning a failing program into a silent rc=0. The runtime no longer checks a top-level drop at
+/// all, so the warning is now the ONLY check on it, and it fires in every position, top level
+/// included — there is no longer a "does this statement lower into a non-top-level proto" gate.
 ///
-/// Measured on the release binary with `g()` returning `Err`, each of these ABORTS with `unhandled
-/// error: E` and rc=1 — except `recover:`, where the abort is caught and surfaces as
-/// `r = Err('unhandled error: E')`. In every case the value reaches the user.
+/// Measured on the release binary with `g()` returning `Err`, each of these now WARNS on stderr and
+/// exits **0**, printing whatever follows — the runtime abort is gone.
 #[test]
-fn a_top_level_drop_does_not_warn() {
+fn a_top_level_drop_warns() {
     let g = "fn g() -> Result[int, Error]:\n    return Ok(1)\n";
     let o = "fn o() -> int?:\n    return Some(1)\n";
-    no_warn(&format!("{g}g()\n"));
-    no_warn(&format!("{o}o()\n"));
+    warns(&format!("{g}g()\n"), "is discarded — bind it");
+    warns(&format!("{o}o()\n"), "is discarded — bind it");
     // Every block kind that can hold a statement WITHOUT opening a child proto.
-    no_warn(&format!("{g}if true:\n    g()\n"));
-    no_warn(&format!("{g}for i in 0..1:\n    g()\n"));
-    no_warn(&format!(
-        "{g}n := 0\nwhile n < 1:\n    n = n + 1\n    g()\n"
-    ));
-    no_warn(&format!(
-        "{g}match 1:\n    1:\n        g()\n    _:\n        pass\n"
-    ));
-    no_warn(&format!("{g}parallel:\n    g()\n"));
-    no_warn(&format!("{g}r := recover:\n    g()\n    1\nprint(r)\n"));
-    no_warn(&format!(
-        "{g}ch := Channel[int](1)\nch.send(1)\nwait:\n    v := ch.recv():\n        g()\n"
-    ));
+    warns(&format!("{g}if true:\n    g()\n"), "is discarded — bind it");
+    warns(
+        &format!("{g}for i in 0..1:\n    g()\n"),
+        "is discarded — bind it",
+    );
+    warns(
+        &format!("{g}n := 0\nwhile n < 1:\n    n = n + 1\n    g()\n"),
+        "is discarded — bind it",
+    );
+    warns(
+        &format!("{g}match 1:\n    1:\n        g()\n    _:\n        pass\n"),
+        "is discarded — bind it",
+    );
+    warns(
+        &format!("{g}parallel:\n    g()\n"),
+        "is discarded — bind it",
+    );
+    warns(
+        &format!("{g}r := recover:\n    g()\n    1\nprint(r)\n"),
+        "is discarded — bind it",
+    );
+    warns(
+        &format!("{g}ch := Channel[int](1)\nch.send(1)\nwait:\n    v := ch.recv():\n        g()\n"),
+        "is discarded — bind it",
+    );
     // Two levels deep, still the top-level proto.
-    no_warn(&format!("{g}if true:\n    for i in 0..1:\n        g()\n"));
+    warns(
+        &format!("{g}if true:\n    for i in 0..1:\n        g()\n"),
+        "is discarded — bind it",
+    );
 }
 
 /// The escapes. `_` is an ordinary identifier in LET position (it is special-cased only in pattern
