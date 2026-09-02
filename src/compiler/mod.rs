@@ -6061,7 +6061,19 @@ impl Compiler {
         self.emit_float_param_prologue(&mut child, params);
         // Uniform by-reference capture: box any param captured by a nested closure (after coercion).
         self.emit_box_param_prologue(&mut child, params);
+        // M-C (TICKET-040): a closure body is its own function body — a nested bare `spawn` (incl.
+        // one reached through a `recover:`) binds to the closure's *own* implicit nursery, joined
+        // when the closure body returns. Mirrors the `spawn:`-block gate above.
+        let implicit = expr_has_bare_spawn(body);
+        if implicit {
+            child.has_implicit_nursery = true;
+            child.emit(Op::EnterNursery, span);
+            child.nursery_scopes += 1;
+        }
         self.compile_expr(&mut child, body)?;
+        if implicit {
+            child.nursery_scopes -= 1;
+        }
         self.emit_ret_coerce(&mut child, body.span)?;
         child.emit(Op::Return, span);
         let pid = self.finish(child);
@@ -7412,26 +7424,158 @@ pub(crate) fn block_has_bare_spawn(stmts: &[Stmt]) -> bool {
     stmts.iter().any(stmt_has_bare_spawn)
 }
 
+/// The expression-side counterpart to [`stmt_has_bare_spawn`]: does this expression contain a bare
+/// `spawn` statement reachable through an `ExprKind::Recover` block? Exhaustive over `ExprKind` with
+/// NO wildcard arm, so a future block-carrying expression form is a compile error here rather than
+/// another silent hole. `Closure` is a BOUNDARY, not a recursion: a `spawn` inside a closure body
+/// binds to the closure's own implicit nursery (gated separately at its compile site), never to the
+/// enclosing frame's.
+fn expr_has_bare_spawn(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Closure { .. } => false,
+        ExprKind::Recover(block) => block_has_bare_spawn(block),
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Str(_)
+        | ExprKind::Bytes(_)
+        | ExprKind::RawStr(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Ident(_)
+        | ExprKind::TypeApply { .. } => false,
+        ExprKind::Interp(chunks) => chunk_exprs(chunks).into_iter().any(expr_has_bare_spawn),
+        ExprKind::List(es, _) | ExprKind::Tuple(es) | ExprKind::Set(es) => {
+            es.iter().any(expr_has_bare_spawn)
+        }
+        ExprKind::Map(pairs) => pairs
+            .iter()
+            .any(|(k, v)| expr_has_bare_spawn(k) || expr_has_bare_spawn(v)),
+        ExprKind::Comprehension {
+            key, elem, clauses, ..
+        } => {
+            clauses
+                .iter()
+                .any(|c| expr_has_bare_spawn(&c.iter) || c.guards.iter().any(expr_has_bare_spawn))
+                || key.as_deref().is_some_and(expr_has_bare_spawn)
+                || expr_has_bare_spawn(elem)
+        }
+        ExprKind::Unary { expr, .. } | ExprKind::Try(expr) => expr_has_bare_spawn(expr),
+        ExprKind::Binary { lhs, rhs, .. } | ExprKind::NullCoalesce { lhs, rhs, .. } => {
+            expr_has_bare_spawn(lhs) || expr_has_bare_spawn(rhs)
+        }
+        ExprKind::Range { start, end } => expr_has_bare_spawn(start) || expr_has_bare_spawn(end),
+        ExprKind::Call {
+            callee,
+            args,
+            named,
+            ..
+        } => {
+            expr_has_bare_spawn(callee)
+                || args.iter().any(expr_has_bare_spawn)
+                || named.iter().any(|(_, v)| expr_has_bare_spawn(v))
+        }
+        ExprKind::Field { obj, .. } => expr_has_bare_spawn(obj),
+        ExprKind::OptChain { obj, call, .. } => {
+            expr_has_bare_spawn(obj)
+                || call.as_ref().is_some_and(|c| {
+                    c.args.iter().any(expr_has_bare_spawn)
+                        || c.named.iter().any(|(_, v)| expr_has_bare_spawn(v))
+                })
+        }
+        ExprKind::Index { obj, index } => expr_has_bare_spawn(obj) || expr_has_bare_spawn(index),
+        ExprKind::Slice {
+            obj,
+            start,
+            end,
+            step,
+        } => {
+            expr_has_bare_spawn(obj)
+                || [start, end, step]
+                    .into_iter()
+                    .flatten()
+                    .any(|o| expr_has_bare_spawn(o))
+        }
+        ExprKind::DecodeCall { obj, arg, .. } => {
+            expr_has_bare_spawn(obj) || expr_has_bare_spawn(arg)
+        }
+        ExprKind::Match { scrutinee, arms } => {
+            expr_has_bare_spawn(scrutinee)
+                || arms.iter().any(|a| {
+                    a.guard.as_ref().is_some_and(expr_has_bare_spawn)
+                        || expr_has_bare_spawn(&a.body)
+                })
+        }
+        ExprKind::IfElse { cond, then, els } => {
+            expr_has_bare_spawn(cond) || expr_has_bare_spawn(then) || expr_has_bare_spawn(els)
+        }
+    }
+}
+
 fn stmt_has_bare_spawn(s: &Stmt) -> bool {
     match &s.kind {
         StmtKind::Spawn(_) => true,
         // Boundaries: spawns here do not belong to the enclosing implicit nursery.
         StmtKind::Parallel { .. } | StmtKind::Fn(_) => false,
-        // Recurse through ordinary control flow.
+        // Recurse through ordinary control flow, also walking each header expression.
+        StmtKind::Let { value, .. } => expr_has_bare_spawn(value),
+        StmtKind::Assign { target, value, .. } => {
+            expr_has_bare_spawn(target) || expr_has_bare_spawn(value)
+        }
+        StmtKind::Return(v) => v.as_ref().is_some_and(expr_has_bare_spawn),
+        StmtKind::Yield(e) => expr_has_bare_spawn(e),
+        StmtKind::Assert { cond, msg } => {
+            expr_has_bare_spawn(cond) || msg.as_ref().is_some_and(expr_has_bare_spawn)
+        }
+        StmtKind::Expr(e) => expr_has_bare_spawn(e),
         StmtKind::If {
             branches,
             else_block,
         } => {
-            branches.iter().any(|(_, b)| block_has_bare_spawn(b))
+            branches
+                .iter()
+                .any(|(c, b)| expr_has_bare_spawn(c) || block_has_bare_spawn(b))
                 || else_block.as_ref().is_some_and(|b| block_has_bare_spawn(b))
         }
-        StmtKind::For { body, .. } | StmtKind::While { body, .. } => block_has_bare_spawn(body),
-        StmtKind::Match { arms, .. } => arms.iter().any(|a| block_has_bare_spawn(&a.body)),
+        StmtKind::For { iter, body, .. } => expr_has_bare_spawn(iter) || block_has_bare_spawn(body),
+        StmtKind::While { cond, body } => expr_has_bare_spawn(cond) || block_has_bare_spawn(body),
+        StmtKind::Match { scrutinee, arms } => {
+            expr_has_bare_spawn(scrutinee)
+                || arms.iter().any(|a| {
+                    a.guard.as_ref().is_some_and(expr_has_bare_spawn)
+                        || block_has_bare_spawn(&a.body)
+                })
+        }
         StmtKind::Wait { arms, else_block } => {
-            arms.iter().any(|a| block_has_bare_spawn(&a.body))
-                || else_block.as_ref().is_some_and(|b| block_has_bare_spawn(b))
+            arms.iter().any(|a| {
+                let header = match &a.kind {
+                    WaitArmKind::Recv { target, chan } => {
+                        expr_has_bare_spawn(chan)
+                            || matches!(target, WaitTarget::Assign(t) if expr_has_bare_spawn(t))
+                    }
+                    WaitArmKind::Send { call } => expr_has_bare_spawn(call),
+                };
+                header || block_has_bare_spawn(&a.body)
+            }) || else_block.as_ref().is_some_and(|b| block_has_bare_spawn(b))
         }
-        _ => false,
+        // Boundaries / non-expression-carrying: a struct/enum declaration's field defaults compile
+        // in a different frame (their own gate, if any). `Defer(DeferTarget::Block)` is gated at its
+        // own compile site (`:4716`) since it runs in its own frame; `Defer(DeferTarget::Call)`'s
+        // arguments compile EAGERLY in this (parent) frame (`compile_receiverless_target`, `:5070`)
+        // and are NOT walked here — a bare `spawn` inside a `recover:` nested in a deferred call's
+        // argument stays ungated (known residual, not exercised by this ticket's tests).
+        StmtKind::Defer(_)
+        | StmtKind::Struct { .. }
+        | StmtKind::Protocol { .. }
+        | StmtKind::Enum { .. }
+        | StmtKind::TypeAlias { .. }
+        | StmtKind::NewType { .. }
+        | StmtKind::Break
+        | StmtKind::Continue
+        | StmtKind::Pass
+        | StmtKind::Import(_)
+        | StmtKind::Extern { .. }
+        | StmtKind::Native(_)
+        | StmtKind::NativeStruct { .. }
+        | StmtKind::NativeEnum { .. } => false,
     }
 }
 
@@ -7449,6 +7593,70 @@ mod recover_nursery_prescan_tests {
         assert!(
             out.contains("task"),
             "expected the spawned task to run and print 'task', got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn spawn_inside_recover_in_a_fn_value_position_runs() {
+        let src = "fn f() -> int:\n    r := recover:\n        spawn: print(\"7\")\n        1\n    return 7\nf()\n";
+        let out = run_capture(src).expect("program should run without a top-level fault");
+        assert_eq!(
+            out, "7\n",
+            "expected stdout to be the single line '7', got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn spawn_inside_recover_in_a_struct_field_default_runs() {
+        let src = "struct S:\n    n: Result[int] = recover:\n        spawn: print(\"d\")\n        1\ns := S()\nprint(\"{s.n}\")\n";
+        let out = run_capture(src).expect("program should run without a top-level fault");
+        assert!(
+            out.contains("d"),
+            "expected the spawned task to run and print 'd', got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn spawn_inside_recover_survives_a_caught_fault() {
+        let src = "fn main2():\n    r := recover:\n        spawn: print(\"t5\")\n        x := 1 / 0\n        print(\"{x}\")\n        1\n    print(\"r5={r}\")\nmain2()\n";
+        let out = run_capture(src).expect("program should run without a top-level fault");
+        assert!(
+            out.contains("r5=Err('division by zero')"),
+            "expected stdout to contain r5=Err('division by zero'), got: {out:?}"
+        );
+        assert!(
+            out.contains("t5"),
+            "expected the spawned task to still run and print 't5', got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_recover_without_a_bare_spawn_opens_no_nursery() {
+        let tokens = crate::lexer::tokenize("r := recover:\n    1\n").expect("lex");
+        let module = crate::parser::parse(tokens).expect("parse");
+        let prog = super::compile_module_standalone(&module).expect("compile");
+        assert!(
+            prog.protos.iter().all(|p| !p.has_implicit_nursery),
+            "expected no proto to carry an implicit nursery for a recover: with no bare spawn"
+        );
+    }
+
+    #[test]
+    fn a_spawn_in_a_closure_body_recover_gates_only_the_closure() {
+        let src = "r := recover:\n    f := fn() -> Result[int]: recover:\n        spawn: print(\"9\")\n        1\n    1\n";
+        let tokens = crate::lexer::tokenize(src).expect("lex");
+        let module = crate::parser::parse(tokens).expect("parse");
+        let prog = super::compile_module_standalone(&module).expect("compile");
+        let gated: Vec<&str> = prog
+            .protos
+            .iter()
+            .filter(|p| p.has_implicit_nursery)
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(
+            gated,
+            vec!["<closure>"],
+            "expected exactly one proto gated, named '<closure>', got: {gated:?}"
         );
     }
 }

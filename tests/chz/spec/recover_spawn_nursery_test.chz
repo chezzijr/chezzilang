@@ -1,0 +1,32 @@
+# tests/chz/spec/recover_spawn_nursery_test.chz — TICKET-040: a bare `spawn` inside a `recover:`
+# block must bind to the ENCLOSING frame's implicit nursery (fn body, or closure body), not fault
+# with "spawn must be inside a parallel: block". `compile_recover` compiles the `recover:` block
+# INLINE into the enclosing frame, so there is no `recover:`-owned nursery — the spawned task joins
+# whichever frame's nursery already owns the `recover:`. Gated by `chz_suite_passes`
+# (`tests/chz_suite.rs`).
+import std.concurrency
+
+fn recover_with_spawn(ch: Channel[int]) -> Result[int]:
+    r := recover:
+        spawn: ch.send(7)
+        1
+    return r
+
+test fn spawn_inside_recover_in_a_fn_body_runs():
+    ch := Channel[int]()
+    r := recover_with_spawn(ch)
+    match r:
+        Ok(v): assert v == 1
+        Err(e): assert false, "recover: returned Err instead of running the task: {e.message()}"
+    assert ch.recv() == 7
+
+test fn spawn_inside_recover_in_a_closure_body_runs():
+    ch := Channel[int]()
+    f := fn() -> Result[int]: recover:
+        spawn: ch.send(9)
+        1
+    r := f()
+    match r:
+        Ok(v): assert v == 1
+        Err(e): assert false, "recover: returned Err instead of running the task: {e.message()}"
+    assert ch.recv() == 9

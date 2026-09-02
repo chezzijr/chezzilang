@@ -7,6 +7,16 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **A bare `spawn` inside a `recover:` block now opens the enclosing implicit nursery instead of
+  faulting (TICKET-040).** `stmt_has_bare_spawn`'s catch-all never walked a statement's expressions,
+  so `ExprKind::Recover`'s `Block` was invisible to the M-C pre-scan — a `recover:` at module top
+  level, in a fn/method body, or in a struct field default silently swallowed its task's fault
+  (`spawn must be inside a parallel: block`). Fixed with a new exhaustive `expr_has_bare_spawn`
+  (`src/compiler/mod.rs`) feeding `stmt_has_bare_spawn`'s now-exhaustive `match`, plus a standalone
+  gate at the closure compile site (`compile_closure`) since a closure body opens its own implicit
+  nursery and was previously ungated for any bare spawn at all. Re-measured:
+  `cargo test --lib recover_nursery_prescan_tests` 6 passed, 0 failed (was 1 failed);
+  `./target/release/chezzi test tests/chz` 740 passed, 0 failed at both worker counts (up from 738).
 - **`??` now accepts a `Result`, discarding the error (TICKET-039, `docs/gaps.md` W8-19, supersedes
   DEC-037).** `r ?? 0` used to be one error, `'??' applies to an Option, found Result[int, str] — a
   Result carries an error that must be handled: use a match with Ok/Err arms`; it now lowers to

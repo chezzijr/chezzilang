@@ -240,8 +240,10 @@ This is **structured concurrency**, the modern consensus that postdates Go: Pyth
   The join is a **completion** barrier and nothing more: it guarantees the task is *done* by the
   dedent/`return`, never that it could not have started (and printed) earlier.
 - **Function-boundary rule (the safety invariant).** A `spawn` binds to a nursery **within its own
-  function** — it can **never** reach an enclosing function's or the module's nursery. This is what
-  stops a task spawned in `fn worker()` from outliving `worker`'s return:
+  function** — it can **never** reach an enclosing function's or the module's nursery. A closure body
+  counts as a function body for this rule, so a `spawn` in a closure never reaches the enclosing
+  frame's nursery, even when the `spawn` sits inside a `recover:` nested in the closure (TICKET-040).
+  This is what stops a task spawned in `fn worker()` from outliving `worker`'s return:
 
   ```chezzi
   fn worker():
@@ -1989,7 +1991,10 @@ enlist atomic — see §11 below and [`docs/cross-nursery-flat-scheduler.md`](cr
     byte-identical bytecode to pre-M-C. Implemented as a single join site — the compiler emits the
     opening `Op::EnterNursery` and flags the `Proto`; the VM's `do_return` joins for `return`/`?`/end.
     Implementation: `src/{checker,compiler,vm}`; tests in `vm::tests::implicit_nursery_*` +
-    `examples/implicit_nursery.chz`.
+    `examples/implicit_nursery.chz`. The pre-scan descends into `recover:` bodies, the one
+    expression form carrying a statement block (`compiler::expr_has_bare_spawn`), so a bare `spawn`
+    reached through a `recover:` still gates its enclosing frame; a closure body opens its own
+    implicit nursery at its own closure compile site, never the enclosing frame's (TICKET-040).
 - **Real concurrency (C5):** the Tier-A cooperative scheduler and/or Tier-C OS threads — true
   multicore and mid-flight task communication, behind the unchanged surface.
 - **The `Executor` escape hatch (C5):** the separately-owned work queue for tasks that must outlive
