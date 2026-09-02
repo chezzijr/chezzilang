@@ -12335,6 +12335,15 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- **A binary operator in a hinted position now hands the expected type to BOTH operands, not just the
+  left (2026-09-02, TICKET-034).** `infer_binary` (`src/checker/pattern.rs`) re-installs the single
+  `expected_hint` slot per operand, matching the hop `infer_if_else_chain` already makes per branch.
+  Fixes eight positions (annotated `let`, `return`, a non-generic call/ctor argument, a `List`
+  element, an `if` else-arm, a `match` arm, and a chain of concats) across nine operators (`+ - * /
+  % | & ^` and comparison). Does not fix an argument of a GENERIC callee (`infer_generic_arg_tys`
+  gets no hint at all) or `??` (`ExprKind::NullCoalesce`, not a `BinaryOp`) — both stay open. One
+  visible consequence: a concat at a `List[Any]` element slot is now accepted and renders like its
+  literal twin, matching CPython (`[1] + ["a"]` prints `[1, 'a']`).
 - **The int→float ELEMENT widen now reaches a call argument, a method argument, a struct constructor
   argument and a `return`, not just an annotated `let` (2026-09-02, TICKET-033).** Before: only
   `xs: List[float] = [1, 2]` widened; `f([1, 2])`, `return [1, 2]` at `-> List[float]`, and

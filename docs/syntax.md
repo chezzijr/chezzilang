@@ -756,7 +756,11 @@ fills type params the *arguments* leave free, so an explicit turbofish or a conc
 wins over it (an argument that pins `T` differently from the annotation is the usual mismatch error).
 When the bound value is an `if`/`match` *expression*, the annotation reaches **every** branch
 (`h: Heap[int] = if rev: Heap([], fn(x, y): x > y) else: Heap([], fn(x, y): x < y)`), independent of
-branch order. The one remaining gap: an annotation does **not** yet reach a generic ctor nested inside a *container
+branch order. The annotation likewise
+reaches BOTH operands of a binary operator, so `xs: List[G[int]] = mkl() + mkl()` pins a generic call
+on the right-hand side by the same slot as one on the left. One visible consequence: a concat at a
+`List[Any]` element slot is now accepted and renders like the equivalent literal (`c: List[Any] = [1]
++ ["a"]` prints `[1, 'a']`, as CPython does). The one remaining gap: an annotation does **not** yet reach a generic ctor nested inside a *container
 literal* (`a: List[Heap[int]] = [Heap([], fn(x, y): x < y)]`) — annotate the closure params or use a
 turbofish there.
 

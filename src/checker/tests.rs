@@ -2778,17 +2778,15 @@ fn a_decl_site_default_binder_is_alpha_renameable() {
         "cannot apply + to T and int",
     );
 
-    // CEILING, measured: `expected_hint` is a SINGLE slot drained by the first consumer, so in a
-    // BINARY default each operand cannot get it — the first `mkl()` is pinned from the slot and the
-    // second keeps spelling its own binder, and the operands then disagree. `= mkl() + mkl()` is
-    // `ok` for `mkl[T]` and *cannot apply + to List[G[T]] and List[G[Z]]* for `mkl[Z]`. A false
-    // rejection on one spelling, never a wrong value; the bound IS enforced on both (above).
-    // Closing it means re-installing the hint per binary OPERAND the way `infer_if_else_chain` does
-    // per arm, which changes inference for every binary expression in a hinted position — its own
-    // change with its own neighbour table.
-    ok_desugared(
-        "struct G[T]:\n    v: T\nfn mkl[T]() -> List[G[T]]:\n    return []\nstruct H[T]:\n    fn tot(self, xs: List[G[T]] = mkl() + mkl()) -> int:\n        return xs.len()\nfn main():\n    print(H[int]().tot())\n",
-    );
+    // TICKET-034 closed this ceiling by re-installing the hint per binary OPERAND (`infer_binary`,
+    // src/checker/pattern.rs), the same hop `infer_if_else_chain` makes per arm. Before it: `mkl[T]`
+    // was `ok`, `mkl[Z]` reported *cannot apply + to List[G[T]] and List[G[Z]]* — the first `mkl()`
+    // took the slot and the second kept spelling its own binder. Both spellings now agree.
+    for own in ["T", "Z"] {
+        ok_desugared(&format!(
+            "struct G[T]:\n    v: T\nfn mkl[{own}]() -> List[G[{own}]]:\n    return []\nstruct H[T]:\n    fn tot(self, xs: List[G[T]] = mkl() + mkl()) -> int:\n        return xs.len()\nfn main():\n    print(H[int]().tot())\n"
+        ));
+    }
 }
 
 /// W8-47 -- a non-inline default whose slot type mentions a type parameter is refused as arity-
@@ -29981,4 +29979,100 @@ fn binary_op_hint_reaches_only_the_left_operand_ticket_034() {
     ok(
         "struct G[T]:\n    v: T\n\nfn mkl[T]() -> List[G[T]]:\n    xs: List[G[T]] = []\n    return xs\n\nfn use[Z]():\n    xs: List[G[Z]] = mkl() + mkl()\n    print(xs.len())\n\nuse[int]()\n",
     );
+}
+
+#[test]
+fn binary_op_hint_reaches_both_operands_in_every_hinted_position() {
+    // TICKET-034: the fix re-installs `expected_hint` per operand, so a generic call on the
+    // RIGHT side of a binary op is pinned in every hinted position, not just the left.
+    const PRELUDE: &str = "struct G[T]:\n    v: T\nfn mkl[T]() -> List[G[T]]:\n    ys: List[G[T]] = []\n    return ys\nfn takeI(xs: List[G[int]]) -> int:\n    return xs.len()\nstruct SI:\n    xs: List[G[int]]\n";
+    // annotated `let`
+    ok(&format!(
+        "{PRELUDE}fn use[Z]():\n    a: List[G[Z]] = mkl() + mkl()\n    print(a.len())\nuse[int]()\n"
+    ));
+    // `return`
+    ok(&format!(
+        "{PRELUDE}fn ret[Z]() -> List[G[Z]]:\n    return mkl() + mkl()\nprint(ret[int]().len())\n"
+    ));
+    // non-generic call argument
+    ok(&format!(
+        "{PRELUDE}fn use[Z]():\n    print(takeI(mkl() + mkl()))\nuse[int]()\n"
+    ));
+    // struct-ctor argument
+    ok(&format!(
+        "{PRELUDE}fn use[Z]():\n    print(SI(mkl() + mkl()).xs.len())\nuse[int]()\n"
+    ));
+    // List element
+    ok(&format!(
+        "{PRELUDE}fn use[Z]():\n    d: List[List[G[Z]]] = [mkl() + mkl()]\n    print(d.len())\nuse[int]()\n"
+    ));
+    // if else-arm
+    ok(&format!(
+        "{PRELUDE}fn use[Z](c: bool):\n    e: List[G[Z]] = if c: mkl() else: mkl() + mkl()\n    print(e.len())\nuse[int](true)\n"
+    ));
+    // match arm
+    ok(&format!(
+        "{PRELUDE}fn use[Z](k: int):\n    f: List[G[Z]] = match k:\n        0: mkl() + mkl()\n        _: mkl()\n    print(f.len())\nuse[int](0)\n"
+    ));
+    // chain
+    ok(&format!(
+        "{PRELUDE}fn use[Z]():\n    a: List[G[Z]] = mkl() + mkl() + mkl()\n    print(a.len())\nuse[int]()\n"
+    ));
+
+    // operator column: arithmetic overloads on Box[T]
+    const BOX_PRELUDE: &str = "struct Box[T]:\n    v: T\n    fn add(self, o: Box[T]) -> Box[T]:\n        return self\n    fn sub(self, o: Box[T]) -> Box[T]:\n        return self\n    fn mul(self, o: Box[T]) -> Box[T]:\n        return self\n    fn div(self, o: Box[T]) -> Box[T]:\n        return self\n    fn mod(self, o: Box[T]) -> Box[T]:\n        return self\nfn mkb[T]() -> Box[T]:\n    return mkb[T]()\n";
+    for op in ["+", "-", "*", "/", "%"] {
+        ok(&format!(
+            "{BOX_PRELUDE}fn use[Z]():\n    a: Box[Z] = mkb() {op} mkb()\n    print(1)\nuse[int]()\n"
+        ));
+    }
+
+    // operator column: set operators on Set[H[T]]
+    const SET_PRELUDE: &str = "struct H[T: Eq]:\n    v: T\n    fn hash(self) -> int:\n        return 1\nfn mks[T: Eq]() -> Set[H[T]]:\n    return mks[T]()\n";
+    for op in ["|", "&", "^", "-"] {
+        ok(&format!(
+            "{SET_PRELUDE}fn use[Z: Eq]():\n    a: Set[H[Z]] = mks() {op} mks()\n    print(1)\nuse[int]()\n"
+        ));
+    }
+}
+
+#[test]
+fn binary_op_hint_neighbours_unchanged() {
+    // Four cells whose verdict AND message are unchanged by TICKET-034's fix — passes both
+    // before and after step 5's re-install. `pick() == false` is the load-bearing one: it pins
+    // that the re-install stays UNIFORM over every operator (never filtered to arithmetic-only),
+    // since this cell's left operand already relies on the hint reaching a comparison.
+    rejects(
+        "xs := [1, 2] + [\"a\"]\nprint(xs)\n",
+        "cannot apply + to List[int] and List[str]",
+    );
+    rejects(
+        "q := [1] + [2, 2.5]\nprint(q)\n",
+        "cannot apply + to List[int] and List[float]",
+    );
+    ok("fn takeF(xs: List[float]) -> int:\n    return xs.len()\nprint(takeF([2]))\n");
+    ok(
+        "fn pick[T]() -> T:\n    return pick[T]()\nfn use():\n    b: bool = pick() == false\n    print(b)\n",
+    );
+}
+
+#[test]
+fn binary_op_hint_does_not_widen_an_int_literal_into_a_float_slot() {
+    // PRE-fix message: `cannot apply + to List[float] and List[int]`. This cell must stay
+    // rejected after the fix, with its message moving to the per-element form — the hint reaching
+    // the right operand must never license the int->float widen. If it does, the program is
+    // accepted and raises no error at all.
+    rejects(
+        "b: List[float] = [1.0] + [2]\nprint(b)\n",
+        "list element: expected float, found int",
+    );
+}
+
+#[test]
+fn binary_op_hint_widens_an_any_slot_concat() {
+    // Three programs rejected before the fix (each `cannot apply + to List[Any] and ...`) become
+    // `ok` once the right-hand literal sees the List[Any] slot too.
+    ok("fn main():\n    c: List[Any] = [1] + [\"a\"]\n    print(c)\nmain()\n");
+    ok("fn main():\n    p: List[Any] = [1] + [2, 2.5]\n    print(p)\nmain()\n");
+    ok("fn main():\n    r: List[Any] = [1, \"a\"] + [2]\n    print(r)\nmain()\n");
 }

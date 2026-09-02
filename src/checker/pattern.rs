@@ -2699,8 +2699,19 @@ impl Checker {
 
     pub(super) fn infer_binary(&mut self, op: BinaryOp, lhs: &Expr, rhs: &Expr) -> Ty {
         use BinaryOp::*;
+        // `infer_call` drains the single `expected_hint` slot via `take()` (src/checker/expr.rs:33),
+        // so without re-installing it the second-inferred operand loses the hint a generic call
+        // there would need to pin its type parameter. Same hop `infer_if_else_chain` makes per
+        // branch (src/checker/pattern.rs:1077-1079) and `infer_list` makes per element (:2426-2432).
+        // Uniform over every operator, deliberately: `b: bool = pick() == false` already relies on
+        // the hint reaching a comparison's LEFT operand, so filtering by operator would narrow an
+        // accepted program.
+        let hint = self.expected_hint.take();
+        self.expected_hint = hint.clone();
         let l = self.infer_value(lhs);
+        self.expected_hint = hint;
         let r = self.infer_value(rhs);
+        self.expected_hint = None;
         let either_unknown = l.is_unknown() || r.is_unknown();
         match op {
             And | Or => {

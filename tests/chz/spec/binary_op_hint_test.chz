@@ -1,0 +1,30 @@
+# A binary operator in a hinted position now hands the expected type to BOTH operands, not just
+# the left — TICKET-034. A generic call on the right of a concat is pinned by the same slot the
+# left operand already used, and a concat at a `List[Any]` element slot is now accepted, rendering
+# identically to the equivalent literal (CPython does the same).
+
+struct G[T]:
+    v: T
+
+fn mkl[T]() -> List[G[T]]:
+    xs: List[G[T]] = []
+    return xs
+
+fn concat_in_generic[Z]() -> int:
+    xs: List[G[Z]] = mkl() + mkl()
+    return xs.len()
+
+test fn a_generic_call_on_the_right_of_a_concat_is_pinned():
+    assert concat_in_generic[int]() == 0
+
+test fn an_any_slot_concat_renders_like_its_str_literal_twin():
+    a: List[Any] = [1] + ["a"]
+    b: List[Any] = [1, "a"]
+    assert str(a) == "[1, 'a']"
+    assert str(a) == str(b)
+
+test fn an_any_slot_concat_renders_like_its_float_literal_twin():
+    c: List[Any] = [1] + [2, 2.5]
+    d: List[Any] = [1, 2, 2.5]
+    assert str(c) == "[1, 2, 2.5]"
+    assert str(c) == str(d)
