@@ -1747,11 +1747,20 @@ impl Vm {
                         Arc::clone(&core),
                         Some(Arc::clone(&handle)),
                     ));
-                    self.block_wait_tick(&core, FULL_SEND_DEADLOCK, span, |g| {
+                    if let Err(e) = self.block_wait_tick(&core, FULL_SEND_DEADLOCK, span, |g| {
                         handle.load(Ordering::Relaxed) != crate::vm::core::DEPOSIT_QUEUED
                             || g.has_send_slot(core.cap)
                             || g.closed
-                    })?;
+                    }) {
+                        // TICKET-042a — a deadline/cancel/exit/deadlock fault unwinds out of this
+                        // loop. The deposit must not outlive the send that faulted, or a later
+                        // `try_recv`/`recv` delivers a value from a send that never completed.
+                        core.q
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .withdraw(&handle);
+                        return Err(e);
+                    }
                     drop(party);
                     match handle.load(Ordering::Relaxed) {
                         crate::vm::core::DEPOSIT_TAKEN => return Ok(SendStep::Sent),

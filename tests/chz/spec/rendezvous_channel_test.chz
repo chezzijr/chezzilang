@@ -166,3 +166,12 @@ test fn try_recv_sees_a_blocked_in_place_rendezvous_sender():
     rz.send(7)
     ex.shutdown()
     assert got.get() == 7, "try_recv must see a block-in-place rendezvous sender"
+
+# TICKET-042(a) review finding — a block-in-place rendezvous deposit must be WITHDRAWN when the
+# send itself faults, or a later poll delivers a value from a send that never completed. `main` is
+# the sole party on this channel, so the deadlock verdict fires on the first tick (deterministic).
+test fn a_deadlocked_rendezvous_send_withdraws_its_deposit():
+    rz := Channel[int](0)
+    r := recover: rz.send(7)
+    assert fault_msg(r) != "NO FAULT", "a lone sender on a rendezvous channel must deadlock"
+    assert rz.try_recv() == None, "a faulted send must not leave its value takeable"
