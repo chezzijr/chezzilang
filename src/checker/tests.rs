@@ -9692,6 +9692,28 @@ fn error_messages_render_bare_struct_enum_name() {
     assert_eq!(errs[0].message, "type Color has no field 'nope'");
 }
 
+/// W8-17 — an unknown-method/unknown-field diagnostic's span must cover the MEMBER NAME token, not
+/// the receiver. Pre-fix, `xs.lenght()` carets `xs` (col 7, 2 chars) instead of `lenght` (col 10,
+/// 6 chars); same defect on the field form (`p.z` carets `p`).
+#[test]
+fn unknown_method_span_covers_member_name_not_receiver() {
+    let errs = check_entry("xs := [1, 2, 3]\nprint(xs.lenght())\n");
+    assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
+    assert_eq!(
+        (errs[0].span.line, errs[0].span.col),
+        (2, 10),
+        "caret must land on 'lenght', not the receiver 'xs': {errs:?}"
+    );
+
+    let errs = check_entry("struct Point:\n    x: int\np := Point(1)\nprint(p.nope)\n");
+    assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
+    assert_eq!(
+        (errs[0].span.line, errs[0].span.col),
+        (4, 9),
+        "caret must land on 'nope', not the receiver 'p': {errs:?}"
+    );
+}
+
 /// BLOCKER 1 — cross-module struct: an imported type's error must still render BARE (`Point`), not
 /// the qualified key (`dep::Point`). Uses a two-file graph so the struct carries `<mkey>::Point`.
 #[test]
