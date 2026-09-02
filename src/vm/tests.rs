@@ -2965,6 +2965,7 @@ fn mk_fiber(task_index: usize) -> Fiber {
         span: Span::RUNTIME,
         resume_native: None,
         recv_waits: Vec::new(),
+        send_deposit: None,
     }
 }
 /// An UNSTARTED fiber (`Pending`) — what `inject`/`seed` require so `run_one_fiber` runs the task
@@ -2983,6 +2984,7 @@ fn mk_pending_fiber(task_index: usize) -> Fiber {
         span: Span::RUNTIME,
         resume_native: None,
         recv_waits: Vec::new(),
+        send_deposit: None,
     }
 }
 fn empty_core() -> Arc<ChannelCore> {

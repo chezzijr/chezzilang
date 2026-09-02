@@ -555,6 +555,7 @@ mod tests {
             span: Span::RUNTIME,
             resume_native: None,
             recv_waits: Vec::new(),
+            send_deposit: None,
         }
     }
 

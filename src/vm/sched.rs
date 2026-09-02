@@ -1933,6 +1933,7 @@ impl Vm {
         // (heap is swapped in) and push it below so the suspended `Call` completes and dispatch
         // continues past it.
         let resume_native = fiber.resume_native.take();
+        self.send_deposit = fiber.send_deposit.take();
         let disp = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // D5 — lower + push the offloaded native's result before resuming, so the operand stack
             // holds what the `Call` would have pushed and `run_until` continues correctly. The `Err`
@@ -2053,6 +2054,7 @@ impl Vm {
             }
         }))
         .unwrap_or_else(|p| Disp::Finish(self.panic_outcome(p, span)));
+        fiber.send_deposit = self.send_deposit.take();
         self.swap_ctx(&mut fiber.ctx);
         disp
     }

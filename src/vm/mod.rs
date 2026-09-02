@@ -24,7 +24,7 @@ use core::{
 use heap::{Fields, Heap, MapData, ModuleData, Obj, SetData};
 use op::{CapEntry, CapSrc, NO_IC, Op, Program, ProtoId, TID_NONE, WaitMeta};
 use std::os::fd::AsRawFd;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use value::{GcRef, Value, ValueView};
 use wire::{WireCallFrame, WireGenState, WireValue};
@@ -938,6 +938,12 @@ pub struct Vm {
     /// exclusive with `suspend`/`wait_suspend` (a fiber parks via exactly one). VM-global like
     /// `suspend` (one fiber runs at once).
     send_suspend: Option<GcRef>,
+    /// TICKET-042a — the deposit handle a rendezvous `send` (cap 0) published into `core.q` before
+    /// parking (channel key = `Arc::as_ptr(&core) as usize`, handle = the `Arc<AtomicU8>` from
+    /// [`crate::vm::core::ChanState::deposit`]). Carried across parks like `send_suspend`, but
+    /// separately: a re-park after a deposit is already queued must NOT re-deposit. See
+    /// [`crate::vm::core::DEPOSIT_QUEUED`]/`DEPOSIT_TAKEN`/`DEPOSIT_WITHDRAWN`.
+    send_deposit: Option<(usize, Arc<AtomicU8>)>,
     /// D5 — set when a blocking native call ([`crate::native::Kind::blocks`]) is reached under the M:N
     /// engine: instead
     /// of running inline (pinning the worker), `invoke_native` records the call here and returns a
@@ -1452,6 +1458,8 @@ struct Fiber {
     /// fiber next RUNS rather than when it is woken — see `ChanState::recv_waiting`'s doc comment for
     /// why the count must err high rather than low.
     recv_waits: Vec<crate::vm::core::RecvWait>,
+    /// TICKET-042a — this fiber's carried [`Vm::send_deposit`] while it is not the running fiber.
+    send_deposit: Option<(usize, Arc<AtomicU8>)>,
 }
 
 // D2a — a `Fiber` now carries its own `Heap` (via `FiberCtx::heap`), and D2b parks fibers across
@@ -2983,7 +2991,20 @@ impl MnSched {
             (g.has_send_slot(core.cap), g.closed)
         };
         let cancelled = c.scopes[fiber.scope_id].cancel.load(Ordering::Relaxed);
-        if space || closed || cancelled {
+        // TICKET-042a — an outstanding rendezvous deposit overrides the ordinary space re-check: a
+        // transient free slot must not requeue a fiber whose deposit is still `DEPOSIT_QUEUED` (that
+        // spins), and a taken/withdrawn deposit must requeue regardless of `space` so the fiber can
+        // observe the outcome on its next `chan_send_step` re-run.
+        let deposited = fiber
+            .send_deposit
+            .as_ref()
+            .map(|(_, d)| d.load(Ordering::Relaxed));
+        let ready = match deposited {
+            Some(crate::vm::core::DEPOSIT_TAKEN) | Some(crate::vm::core::DEPOSIT_WITHDRAWN) => true,
+            Some(crate::vm::core::DEPOSIT_QUEUED) => closed || cancelled,
+            _ => space || closed || cancelled,
+        };
+        if ready {
             fiber.state = FiberState::Ready;
             c.global.push_back(fiber);
             self.runnable.fetch_add(1, Ordering::Relaxed); // running → ready (requeued, re-checks space)
@@ -2996,6 +3017,20 @@ impl MnSched {
                 .push(ParkedEntry::Send(fiber));
             c.parked_n += 1;
         }
+    }
+
+    /// TICKET-042a — wake receivers after a rendezvous sender deposited its value into `core.q`
+    /// (`ChanState::deposit`, called by `Vm::chan_send_step` before it parks). No enqueue here — the
+    /// value is already queued as a deposit; this is [`Self::send_wake_bounded`]'s wake-fan-out tail
+    /// with no push. `WakeKind::All` (not `Send`) because the wake follows a QUEUED value: a woken
+    /// receiver should POP it, not re-park waiting for one.
+    fn deposit_wake(&self, key: usize, core: &Arc<ChannelCore>) {
+        let mut c = self.lock();
+        self.wake_bucket(&mut c, key, WakeKind::All);
+        drop(c);
+        self.cv.notify_all();
+        self.wake_parent_chain(key, WakeKind::All);
+        core.cv.notify_all();
     }
 
     /// Bounded-channel `send` when the queue may be at capacity: the space-check + enqueue + wake of
@@ -4306,6 +4341,7 @@ impl ReadyWorker {
             span,
             resume_native: None,
             recv_waits: Vec::new(),
+            send_deposit: None,
         }
     }
 }

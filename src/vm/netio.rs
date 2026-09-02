@@ -1556,7 +1556,15 @@ impl Vm {
             "close" => {
                 self.arity_err("close", args, 0, span)?;
                 let core = self.channel_core(h);
-                core.q.lock().unwrap().closed = true;
+                {
+                    let mut g = core.q.lock().unwrap();
+                    g.closed = true;
+                    // TICKET-042a — withdraw every parked rendezvous sender's deposit under the same
+                    // lock hold that sets `closed`. Go measures that a parked sender's value is NOT
+                    // delivered once the channel is closed; the woken sender's `chan_send_step`
+                    // re-run reads `DEPOSIT_WITHDRAWN` and faults `send on a closed channel`.
+                    g.withdraw_all_deposits();
+                }
                 // Same routing as `channel_send_wire`: an inline outermost-`parallel:` builder VM
                 // (`self.mn == None`) closing a channel must wake enlisted, parked receivers via the
                 // held `mn_enlist_sched`, not just the local condvar. (Cross-nursery flat scheduler #2.)
@@ -1604,7 +1612,9 @@ impl Vm {
             }
             "len" => {
                 self.arity_err("len", args, 0, span)?;
-                let n = self.channel_core(h).q.lock().unwrap().len();
+                // TICKET-042a — excludes queued deposits (a parked rendezvous sender's not-yet-taken
+                // value): Go measures `len: 0` on an unbuffered channel with a parked sender.
+                let n = self.channel_core(h).q.lock().unwrap().msg_len();
                 Ok(Value::int(n as i64))
             }
             // `cap()` reports the channel's capacity: `-1` for unbounded `Channel[T]()`, `0` for
@@ -1663,6 +1673,37 @@ impl Vm {
         span: Span,
     ) -> Result<SendStep, RuntimeError> {
         let core = self.channel_core(h);
+        // TICKET-042a — this fiber re-runs `send` after being woken while its rendezvous value sat
+        // deposited in `core.q` (see `ChanState::deposit`). Read the deposit's outcome instead of
+        // re-entering the ordinary send path, which would enqueue a SECOND copy.
+        if let Some((key, handle)) = self.send_deposit.clone()
+            && key == Arc::as_ptr(&core) as usize
+        {
+            match handle.load(Ordering::Relaxed) {
+                crate::vm::core::DEPOSIT_TAKEN => {
+                    self.send_deposit = None;
+                    return Ok(SendStep::Sent);
+                }
+                crate::vm::core::DEPOSIT_WITHDRAWN => {
+                    self.send_deposit = None;
+                    return Err(self.err(CLOSED_SEND.to_string(), span));
+                }
+                _ /* DEPOSIT_QUEUED */ => {
+                    if self.native_reentry == 0 && self.cancel_requested() {
+                        core.q
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .withdraw(&handle);
+                        self.send_deposit = None;
+                        self.cancelled = true;
+                        return Err(self.err("cancelled".to_string(), span));
+                    }
+                    // Still queued and not cancelled — re-park without depositing again.
+                    self.park_send(h, orig);
+                    return Ok(SendStep::Parked);
+                }
+            }
+        }
         if core.cap.is_none() {
             // Unbounded — never blocks. Byte-identical to the historical `send`.
             self.channel_send_wire(h, w);
@@ -1743,7 +1784,9 @@ impl Vm {
         }
         // Atomic space-check + enqueue + receiver-wake (shared with `try_send` — see
         // [`Vm::enqueue_bounded`]). On success the value is delivered; on `false` the channel was full
-        // and we decide how to block.
+        // and we decide how to block. Rendezvous (cap 0) keeps a clone: if this attempt fails we still
+        // need the wire form to deposit it below.
+        let deposit_w = (core.cap == Some(0)).then(|| w.clone());
         if self.enqueue_bounded(h, &core, w) {
             return Ok(SendStep::Sent);
         }
@@ -1755,6 +1798,24 @@ impl Vm {
         }
         // A real M:N WORKER snapshot-parks: the worker loop drives `send_suspend` → `Disp::SendPark`.
         if self.mn.is_some() {
+            // TICKET-042a — a rendezvous send (cap 0) DEPOSITS its value into `core.q` before it
+            // parks (Go's `sudog` model), so a non-blocking poll (`try_recv`, a `wait:` `else` arm)
+            // can take it. A `cap > 0` full send keeps the historical value-dropping park: the
+            // buffer being full means a poll already finds a value, so depositing there would
+            // over-fill past `cap`.
+            if let Some(w) = deposit_w {
+                let sum = crate::vm::core::wire_summary(&w);
+                let handle = core
+                    .q
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .deposit(sum, w);
+                self.send_deposit = Some((Arc::as_ptr(&core) as usize, Arc::clone(&handle)));
+                if let Some(sched) = self.mn.clone() {
+                    let key = self.channel_core_ptr(h);
+                    sched.deposit_wake(key, &core);
+                }
+            }
             self.park_send(h, orig);
             return Ok(SendStep::Parked);
         }

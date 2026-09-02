@@ -4,6 +4,12 @@
 import std.concurrency
 import std.time
 
+fn fault_msg[T](r: Result[T, Error]) -> str:
+    match r:
+        Ok(_): return "NO FAULT"
+        Err(e): return e.message()
+    return ""
+
 test fn rendezvous_cap_is_zero_and_unbounded_is_minus_one():
     assert Channel[int](0).cap() == 0
     assert Channel[int]().cap() == -1
@@ -72,3 +78,73 @@ test fn rendezvous_send_never_queues_ahead():
                 ch.recv()
                 i = i + 1
     assert max_len.get() <= 1
+
+# TICKET-042(a) — a `wait:` recv arm polls exactly like `try_recv` under the hood; it must take a
+# parked rendezvous sender's value too, matching Go's `select`/`default` on the same shape.
+test fn wait_else_takes_a_parked_rendezvous_sender():
+    rz := Channel[int](0)
+    got := Shared(-1)
+    parallel:
+        spawn: rz.send(7)
+        spawn:
+            time.sleep_ms(150)
+            wait:
+                v := rz.recv(): got.set(v)
+                else: got.set(-1)
+    assert got.get() == 7, "wait: recv arm must take a parked rendezvous sender's value"
+
+# TICKET-042(a) — a deposit is invisible to `len()`, matching Go's `len: 0` on an unbuffered
+# channel with a parked sender.
+test fn len_is_zero_while_a_rendezvous_sender_is_parked():
+    rz := Channel[int](0)
+    observed_len := Shared(-1)
+    parallel:
+        spawn: rz.send(7)
+        spawn:
+            time.sleep_ms(150)
+            observed_len.set(rz.len())
+            rz.recv()
+    assert observed_len.get() == 0, "len() must exclude a parked rendezvous sender's deposit"
+
+# TICKET-042(a) — a taken deposit must not re-enter the normal send path and enqueue a second
+# copy: a second `try_recv` right after the first must see nothing.
+test fn a_parked_rendezvous_value_is_delivered_exactly_once():
+    rz := Channel[int](0)
+    first_some := Shared(false)
+    first_val := Shared(-1)
+    second_none := Shared(false)
+    parallel:
+        spawn: rz.send(7)
+        spawn:
+            time.sleep_ms(150)
+            match rz.try_recv():
+                Some(v):
+                    first_some.set(true)
+                    first_val.set(v)
+                None: first_some.set(false)
+            match rz.try_recv():
+                Some(_): second_none.set(false)
+                None: second_none.set(true)
+    assert first_some.get(), "the first try_recv must take the deposit"
+    assert first_val.get() == 7
+    assert second_none.get(), "a second try_recv must not see the same deposit again"
+
+# TICKET-042(a) — `close()` must withdraw a parked sender's deposit before anyone takes it. Go
+# measured: the sender panics `send on closed channel` and a later receive sees nothing.
+test fn close_withdraws_a_parked_rendezvous_senders_value():
+    rz := Channel[int](0)
+    sender_result := Shared("NO FAULT")
+    after_close_none := Shared(false)
+    parallel:
+        spawn:
+            r := recover: rz.send(7)
+            sender_result.set(fault_msg(r))
+        spawn:
+            time.sleep_ms(150)
+            rz.close()
+            time.sleep_ms(150)
+            match rz.try_recv():
+                Some(_): after_close_none.set(false)
+                None: after_close_none.set(true)
+    assert sender_result.get() == "send on a closed channel"
+    assert after_close_none.get(), "try_recv after close must not see a withdrawn deposit"
