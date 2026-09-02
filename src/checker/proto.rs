@@ -4510,7 +4510,9 @@ impl Checker {
         hint: Option<&Ty>,
         recv: WitnessCallee,
     ) -> Ty {
-        if args.len() != sig.params.len() {
+        // `sig.min_params` is `ast::min_callable_params`, which returns `params.len()` whenever the
+        // sig carries witness params or is variadic, so a witness-taking callee keeps its full arity.
+        if !(sig.min_params..=sig.params.len()).contains(&args.len()) {
             self.check_arity(name, sig.params.len(), args, span);
         }
         // A bare same-module GENERIC fn read as an ARGUMENT here is NOT the final word on its type:

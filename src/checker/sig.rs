@@ -1203,14 +1203,18 @@ impl Checker {
     ///   scalar literals and ident-headed calls, and `None` / `[]` / `{}` are neither (a scalar
     ///   literal would fit only a slot whose `w` is already pinned to that scalar). So
     ///   `closed_arg_heads` is `None`, and `call_forwards_a_witness` never reaches this clause; and
-    /// * the callee-filled alternative — a NON-inline default, which stays out of the call site — is
-    ///   refused for such a slot altogether: `fn conv[T](a: int, b: List[T] = List())` called as
-    ///   `conv(1)` is `conv() expects 2 argument(s), got 1`, while the identical default on a
-    ///   `List[int]` slot is accepted and runs.
+    /// * the callee-filled alternative — a NON-inline default, which stays out of the call site — no
+    ///   longer refuses a short call BY ITSELF (W8-47): `fn conv[T](a: int, b: List[T] = List())`
+    ///   called as `conv(1)` is `ok: no type errors`, since `T` carries no witness. What still
+    ///   refuses the WITNESS-taking shape is `ast::min_callable_params`, which returns
+    ///   `sig.params.len()` (not the shrunk count) whenever the sig carries witness params or is
+    ///   variadic: `fn conv[T: Default](a: int, b: List[T] = List())` called as `conv(1)` inside a
+    ///   witness-taking caller stays `conv() expects 2 argument(s), got 1`.
     ///
-    /// A change to either — splicing moved after the hoist, or that arity refusal lifted — re-opens
-    /// the hole silently. The defaulted-parameter case in
-    /// `witness_forwarding_still_charges_every_unpinned_shape_rejected` is the pin.
+    /// A change to either — splicing moved after the hoist, or `min_callable_params`'s witness-params
+    /// early return deleted — re-opens the hole silently. The defaulted-parameter case in
+    /// `witness_forwarding_still_charges_every_unpinned_shape_rejected` is the pin, alongside
+    /// `w8_47_a_witness_taking_callee_keeps_its_full_arity`.
     fn ty_param_in_params(sig: &FnSig, w: &str) -> bool {
         let probe: HashMap<String, Ty> = [(w.to_string(), Ty::Unknown)].into_iter().collect();
         sig.params.iter().any(|p| subst(p, &probe) != *p)

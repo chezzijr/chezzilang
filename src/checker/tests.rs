@@ -2649,6 +2649,21 @@ fn w8_47_free_fn_default_arity_is_binder_blind() {
     ok(src);
 }
 
+/// W8-47's free-fn fix reads `sig.min_params`, computed by `ast::min_callable_params`. That fn
+/// returns `params.len()` (the FULL arity, no shrink) whenever the sig carries witness params, so a
+/// witness-taking callee keeps its exact arity refusal even though its trailing default is
+/// callee-filled. Pin: `conv() expects 2 argument(s), got 1` must still fire here.
+///
+/// Goes red if step 2's gate is widened to ignore `sig.min_params`, or if
+/// `min_callable_params`'s `has_witness_params` early return is deleted.
+#[test]
+fn w8_47_a_witness_taking_callee_keeps_its_full_arity() {
+    rejects_desugared(
+        "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(7)\nfn conv[T: Default](a: int, b: List[T] = List()) -> T:\n    return T.default()\nfn f[T: Default](x: T) -> T:\n    return conv(1)\n",
+        "conv() expects 2 argument(s), got 1",
+    );
+}
+
 /// A decl-site default whose declared type is FULLY CONCRETE is pinned by that slot: a generic fn
 /// value there is instantiated instead of reported. Measured before: *'ident' is generic and T is not
 /// determined here*; after, the program runs and prints `5`.
