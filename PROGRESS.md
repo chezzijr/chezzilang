@@ -7,6 +7,14 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **A member-miss diagnostic now carets the member NAME, not the receiver (TICKET-036, `docs/gaps.md`
+  W8-17's caret sub-item).** `src/checker/expr.rs` (20 `has no method` sites), `src/checker/pattern.rs`
+  (4 `infer_field` sites) and `src/checker/sig.rs` (the assign-target field miss) all passed the
+  whole-call or receiver span to their error while `name_span` — the method/field-name token's own
+  span — was already an in-scope parameter; all 25 sites now pass `name_span`. `xs.lenght()` moves
+  from `2:7` to `2:10`, and `--errors=json` now reports `"end_col":16`. The W8-17 row stays OPEN for
+  its five remaining cosmetics ((c) through (g)) plus error codes.
+
 - **An annotation now reaches THROUGH a collection literal onto each element (W8-45's last ceiling) —
   and that ceiling was hiding a silent wrong answer.** An element carrying an `Unknown` laundered the
   whole literal, so `a: List[List[int]] = [empty(), ["x"]]` was check-clean at rc=0 and `a[1][0] + 1`
