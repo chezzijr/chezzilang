@@ -2374,6 +2374,18 @@ fn a_tuple_target_reassignment_leaves_its_alias_pin_group() {
     );
 }
 
+/// TICKET-032 A1 review fix — `propagate_alias_pin` must not cross the `spawn:`/`Executor.submit`
+/// airlock: `refine_receiver`, `refine_index_receiver` and `drop_empty_site` each decline to repin a
+/// CAPTURED binding, and propagation must decline the same way for a captured PARTNER. `c := b`
+/// inside the task body is scope-1 (at the capture floor, not below it) so it repins freely; without
+/// the guard the pin then propagates onto the outer, captured `b`. The task holds its own deep copy
+/// of `b`, so `b` at the parent is still `[]` at run time and a rejection is false. Measured pre-fix
+/// (review finding 1): `ok: no type errors` becomes *argument 1 of 'push': expected int, found str*.
+#[test]
+fn an_alias_pin_group_does_not_cross_the_spawn_capture_boundary() {
+    ok("b := []\nspawn:\n    c := b\n    c.push(1)\nb.push(\"a\")\n");
+}
+
 /// TICKET-032 A2 — `infer_list`'s expected-type gate is all-or-nothing: one element assignable to the
 /// expected type and one that is not (an `Unknown`-cored empty-collection producer) abandons the
 /// expected-type path, falls through to bottom-up homogeneity, and `compatible(List[Unknown],

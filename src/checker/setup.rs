@@ -2183,6 +2183,13 @@ impl Checker {
                     continue;
                 }
                 seen.push(p.clone());
+                // TICKET-032 review fix — decline a CAPTURED partner, same guard as
+                // `drop_empty_site`/`refine_receiver`/`refine_index_receiver`. A `spawn:`/
+                // `Executor.submit` task holds its own deep copy of a captured binding, so writing a
+                // pin into it here would reject a parent-side use the task's copy can never affect.
+                if self.is_captured(&p.1) {
+                    continue;
+                }
                 if let Some(partner_ty) = self.scopes[p.0].get(&p.1)
                     && Self::is_unrefined_empty_coll(partner_ty)
                 {
