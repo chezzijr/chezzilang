@@ -54,7 +54,7 @@
 //! runs many programs concurrently in ONE process, and a process-global registry would let one run's
 //! blocked parties be counted against another run's.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::core::{ChannelCore, ExecRegistry};
@@ -67,8 +67,11 @@ use super::core::{ChannelCore, ExecRegistry};
 pub(super) enum PartyWait {
     /// A single blocking `recv` on an empty channel.
     Recv(Arc<ChannelCore>),
-    /// A `send` blocked on a full bounded channel.
-    Send(Arc<ChannelCore>),
+    /// A `send` blocked on a full bounded channel. The second field is `Some(handle)` for a
+    /// block-in-place rendezvous sender that has DEPOSITED its value (TICKET-042a) — its wait is
+    /// also over once that deposit is taken/withdrawn, even with no free slot (a cap-0 channel's
+    /// `has_send_slot` does not track a deposit already claimed).
+    Send(Arc<ChannelCore>, Option<Arc<AtomicU8>>),
     /// A `wait:` over N arms — an OR-edge (§2d's table): ready on ANY arm. `is_send` marks a SEND
     /// arm, which is ready on free space rather than on a value.
     ///
@@ -143,9 +146,13 @@ impl PartyWait {
             }
             // The blocking `send` loop settles on free space, or on `closed` (it faults `CLOSED_SEND`
             // — W7-13r(c)).
-            PartyWait::Send(core) => {
+            PartyWait::Send(core, deposit) => {
                 let g = core.q.lock().unwrap_or_else(|e| e.into_inner());
-                g.has_send_slot(core.cap) || g.closed
+                deposit
+                    .as_ref()
+                    .is_some_and(|d| d.load(Ordering::Relaxed) != super::core::DEPOSIT_QUEUED)
+                    || g.has_send_slot(core.cap)
+                    || g.closed
             }
             // `Vm::op_wait_poll`, arm kind by arm kind: a RECV arm is ready on a queued value or a
             // `trip()` latch — NOT on `closed`, which the poll SKIPS — while a SEND arm is ready on

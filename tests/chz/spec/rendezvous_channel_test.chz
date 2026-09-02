@@ -10,6 +10,12 @@ fn fault_msg[T](r: Result[T, Error]) -> str:
         Err(e): return e.message()
     return ""
 
+fn poll_after_delay(rz: Channel[int], got: Shared[int]):
+    time.sleep_ms(150)
+    match rz.try_recv():
+        Some(v): got.set(v)
+        None: got.set(-1)
+
 test fn rendezvous_cap_is_zero_and_unbounded_is_minus_one():
     assert Channel[int](0).cap() == 0
     assert Channel[int]().cap() == -1
@@ -148,3 +154,15 @@ test fn close_withdraws_a_parked_rendezvous_senders_value():
                 None: after_close_none.set(true)
     assert sender_result.get() == "send on a closed channel"
     assert after_close_none.get(), "try_recv after close must not see a withdrawn deposit"
+
+# TICKET-042(a) — the BLOCK-IN-PLACE sender path (an eager `Executor` job, or `main` blocked in a
+# rendezvous send with no scheduler under it) must publish its value too, exactly like the M:N
+# park path. Measured before the fix: `job try_recv: None` then `job recv: 7`.
+test fn try_recv_sees_a_blocked_in_place_rendezvous_sender():
+    rz := Channel[int](0)
+    got := Shared(-1)
+    ex := Executor()
+    ex.submit(fn(): poll_after_delay(rz, got))
+    rz.send(7)
+    ex.shutdown()
+    assert got.get() == 7, "try_recv must see a block-in-place rendezvous sender"

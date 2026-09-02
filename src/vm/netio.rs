@@ -1730,6 +1730,38 @@ impl Vm {
             if self.enqueue_bounded(h, &core, w.clone()) {
                 return Ok(SendStep::Sent);
             }
+            // TICKET-042a — a rendezvous (cap 0) block-in-place sender DEPOSITS its value too, same
+            // as the M:N park path, so a sibling `try_recv`/`wait:` poll can take it. Deposited once;
+            // the wait loop below re-checks the deposit's own state instead of re-depositing.
+            if core.cap == Some(0) {
+                let sum = crate::vm::core::wire_summary(&w);
+                let handle = core
+                    .q
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .deposit(sum, w);
+                self.wake_on_send(h);
+                core.cv.notify_all();
+                loop {
+                    let party = self.block_party_guard(quiesce::PartyWait::Send(
+                        Arc::clone(&core),
+                        Some(Arc::clone(&handle)),
+                    ));
+                    self.block_wait_tick(&core, FULL_SEND_DEADLOCK, span, |g| {
+                        handle.load(Ordering::Relaxed) != crate::vm::core::DEPOSIT_QUEUED
+                            || g.has_send_slot(core.cap)
+                            || g.closed
+                    })?;
+                    drop(party);
+                    match handle.load(Ordering::Relaxed) {
+                        crate::vm::core::DEPOSIT_TAKEN => return Ok(SendStep::Sent),
+                        crate::vm::core::DEPOSIT_WITHDRAWN => {
+                            return Err(self.err(CLOSED_SEND.to_string(), span));
+                        }
+                        _ => continue, // still queued — a stray wake, keep waiting
+                    }
+                }
+            }
             loop {
                 // Ready == a slot freed up OR the channel closed. The retry below is still the one
                 // atomic `enqueue_bounded`, so a racing sender that takes the slot first just
@@ -1738,7 +1770,8 @@ impl Vm {
                 // The party registration is scoped to the WAIT only — see the same rule spelled out in
                 // [`Vm::block_recv`]: a party still registered while its retry succeeds is counted as
                 // parked at the instant it made progress, which is a false deadlock.
-                let party = self.block_party_guard(quiesce::PartyWait::Send(Arc::clone(&core)));
+                let party =
+                    self.block_party_guard(quiesce::PartyWait::Send(Arc::clone(&core), None));
                 self.block_wait_tick(&core, FULL_SEND_DEADLOCK, span, |g| {
                     g.has_send_slot(core.cap) || g.closed
                 })?;

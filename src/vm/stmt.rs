@@ -2118,7 +2118,11 @@ impl Vm {
                 } else {
                     "<ptr>".to_string()
                 }),
-                Obj::Channel(core) => Ok(format!("Channel(len={})", core.q.lock().unwrap().len())),
+                // TICKET-042a — `msg_len`, not the raw queue length: a parked rendezvous sender's
+                // deposit stays invisible here too, matching `Channel.len()`.
+                Obj::Channel(core) => {
+                    Ok(format!("Channel(len={})", core.q.lock().unwrap().msg_len()))
+                }
                 // B3.1: the box holds the wire form; render it directly (`display` is `&self` and
                 // cannot `from_wire`, which allocates — `display_wire` is the read-only equivalent).
                 Obj::Shared(core) => Ok(format!(
@@ -2288,7 +2292,8 @@ impl Vm {
                 format!("{display}({})", self.display_wire(inner))
             }
             WireValue::Channel(core) => {
-                format!("Channel(len={})", core.q.lock().unwrap().len())
+                // TICKET-042a — see the `Obj::Channel` arm above.
+                format!("Channel(len={})", core.q.lock().unwrap().msg_len())
             }
             WireValue::Shared(core) => {
                 format!("Shared({})", self.display_wire(&core.v.lock().unwrap()))
