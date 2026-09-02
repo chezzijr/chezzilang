@@ -6810,6 +6810,30 @@ fn a_provider_frame_in_a_trace_is_readable() {
     }
 }
 
+/// TICKET-048 (W8-14 residual) — a nursery-deadlock fault's headline must name a real file and
+/// position, not the placeholder `Span::RUNTIME` used at `run_mn_nursery_outermost`'s
+/// `DEADLOCK_MSG` sites (`sched.rs:503`, `:800`). It currently renders `line 1, col 1` with no file,
+/// unlike an ordinary in-task fault one line away, which renders the true `path:line:col`.
+#[test]
+fn nursery_deadlock_headline_has_a_real_position() {
+    let dir = std::env::temp_dir().join(format!("chezzi_t048_deadlock_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.chz");
+    std::fs::write(
+        &entry,
+        "ch := Channel[int](1)\nfn main():\n    parallel:\n        spawn:\n            for i in range(5): ch.send(i)\n        spawn: print(ch.recv())\nmain()\n",
+    )
+    .unwrap();
+    let (_o, _e, res, _c) = run_file(&entry);
+    let _ = std::fs::remove_dir_all(&dir);
+    let e = res.expect_err("the deadlock must fault");
+    let trace = format_trace(&e);
+    assert!(
+        !trace.starts_with("runtime error (line 1, col 1):"),
+        "expected a real file/position on the deadlock headline, got:\n{trace}"
+    );
+}
+
 /// W7-51 — a cross-module default is still evaluated PER CALL (Chezzi's documented divergence from
 /// Python's evaluate-at-def-time), and the counter it bumps is the DEFINER's, reached through the
 /// provider's `home` module rather than the caller's namespace.
