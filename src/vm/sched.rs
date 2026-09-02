@@ -2998,6 +2998,20 @@ impl Vm {
                 // frame); a mid-`recover:` handler, a pending `defer`, or >1 parked frame is a HARD ARM
                 // rejected cleanly below (never mis-serialized).
                 Obj::Generator(g) => {
+                    // TICKET-041(a) — `generator_next` parks `GenState::Done` as a placeholder in the
+                    // heap object for the DURATION of a resume (`src/vm/exec.rs:510`), so a generator
+                    // crossed WHILE it is running would otherwise serialize that placeholder verbatim
+                    // and hand the receiver a copy that reports itself as already exhausted. Reject at
+                    // the serializer instead: the same oracle `generator_next`'s own re-entrancy guard
+                    // already applies (`src/vm/exec.rs:497`, "generator already running"). CPython
+                    // agrees — `copy.deepcopy(gen)` on a running generator raises
+                    // `TypeError: cannot pickle 'generator' object` (measured 2026-09-03).
+                    if self.active_generators.contains(&h) {
+                        return Err(self.err(
+                            "a running generator cannot be sent across tasks".to_string(),
+                            Span::default(),
+                        ));
+                    }
                     // The SOLE remaining non-identity-preserved container: a generator's parked frame
                     // holds no `WireValue` id, so it can't be a `Backref` target. With the containers now
                     // identity-preserved, a cycle re-entering THIS generator no longer trips the depth cap
@@ -4498,6 +4512,7 @@ impl Vm {
             name: "<worker>".into(),
             slots: Vec::new(),
             index: Default::default(),
+            origin: crate::vm::heap::next_module_origin(),
         })))
     }
 
@@ -4851,7 +4866,12 @@ impl Vm {
                 // A module not in `module_objs` (shouldn't occur for a bound import) — encode inline,
                 // in slot order so replay rebuilds matching slots.
                 None => {
-                    let ModuleData { name, slots, index } = *m;
+                    let ModuleData {
+                        name,
+                        slots,
+                        index,
+                        origin: _,
+                    } = *m;
                     let mut globals = Vec::new();
                     for (k, mv) in module_slot_pairs(&slots, &index) {
                         globals.push((k, self.to_snap_depth(mv, depth + 1, memo)?));
@@ -5042,6 +5062,7 @@ impl Vm {
                 name: m.name.clone(),
                 slots: Vec::new(),
                 index: std::collections::HashMap::new(),
+                origin: crate::vm::heap::next_module_origin(),
             })));
             self.module_objs.push(wm);
         }
@@ -5201,6 +5222,7 @@ impl Vm {
                     name: name.clone(),
                     slots: Vec::new(),
                     index: std::collections::HashMap::new(),
+                    origin: crate::vm::heap::next_module_origin(),
                 })));
                 for (k, gv) in globals {
                     let val = self.replay_snap(gv, rb);

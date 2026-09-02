@@ -2304,12 +2304,14 @@ main()
 #[test]
 fn airlock_crossed_running_generator_stays_live_not_exhausted() {
     // TICKET-041(a). `generator_next` parks `GenState::Done` as a placeholder in the heap object
-    // for the DURATION of a resume (`src/vm/exec.rs:497`), so a generator crossed through the
+    // for the DURATION of a resume (`src/vm/exec.rs:510`), so a generator crossed through the
     // airlock (here: `Channel.send`) WHILE it is running serializes via `to_wire_depth`'s
-    // `Obj::Generator` arm, which reads that placeholder verbatim (`src/vm/sched.rs:3037`) and
-    // hands the receiver a copy that reports itself as already exhausted. The original generator
-    // is unaffected and still yields 1 then 2; the crossed copy must not silently report `None`
-    // for a value it never produced.
+    // `Obj::Generator` arm, which used to read that placeholder verbatim and hand the receiver a
+    // copy that reports itself as already exhausted. A running generator's heap state describes
+    // nothing true mid-resume, so the airlock now rejects the crossing outright — the same oracle
+    // `generator_next`'s own re-entrancy guard already applies (`src/vm/exec.rs:497`) — rather than
+    // hand back a silently-wrong copy. CPython agrees: `copy.deepcopy(gen)` on a running generator
+    // raises `TypeError: cannot pickle 'generator' object`.
     let src = r#"
 struct H:
     g: Iterator[int]?
@@ -2326,10 +2328,39 @@ match ch.recv().g:
     Some(x): print("copy", x.next(), x.next())
     None: print("none")
 "#;
-    let out = golden_entry(src);
-    assert_eq!(
-        out, "orig Some(1)\ncopy Some(2) Some(3)\n",
-        "the crossed copy must observe the same live generator state as the original: {out:?}"
+    let out = golden_entry_fault(src);
+    assert!(
+        out.contains("a running generator cannot be sent across tasks"),
+        "expected the running-generator fault message, got: {out:?}"
+    );
+}
+
+#[test]
+fn airlock_running_generator_atomic_store_faults() {
+    // TICKET-041(a), second vehicle. The guard lives in `to_wire_depth` (the shared serializer), not
+    // in `Channel.send` itself, so an `Atomic.store` crossing of a running generator must fault
+    // identically to the channel vehicle above.
+    let src = r#"
+import std.concurrency
+struct H:
+    g: Iterator[int]?
+h := H(None)
+a := Atomic(H(None))
+fn gen() -> Iterator[int]:
+    a.store(h)
+    yield 1
+    yield 2
+g := gen()
+h.g = Some(g)
+print("orig", g.next())
+match a.load().g:
+    Some(x): print("copy", x.next(), x.next())
+    None: print("none")
+"#;
+    let out = golden_entry_fault(src);
+    assert!(
+        out.contains("a running generator cannot be sent across tasks"),
+        "expected the running-generator fault message, got: {out:?}"
     );
 }
 

@@ -16,6 +16,7 @@ use crate::lexer::Span;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A single key's position(s) in `entries`. Numeric keys hash injectively (`(n as f64).to_bits()`),
 /// so the overwhelmingly common case is a single candidate — [`Pos::One`] inlines it with **zero
@@ -156,6 +157,17 @@ pub struct ModuleData {
     pub name: Box<str>,
     pub slots: Vec<Value>,
     pub index: HashMap<Box<str>, u32>,
+    /// The identity of THIS module copy. Every `Obj::Module` allocation mints a fresh one via
+    /// [`next_module_origin`]; an origin is never copied into a new allocation. Lets an airlock
+    /// crossing tell a same-view round trip from a genuine cross-task hop (TICKET-041).
+    pub origin: u64,
+}
+
+static MODULE_ORIGIN: AtomicU64 = AtomicU64::new(1);
+
+/// Mints a fresh, process-global module-view id for a new `ModuleData` allocation.
+pub fn next_module_origin() -> u64 {
+    MODULE_ORIGIN.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Struct field storage: ≤3 fields inline (no second heap alloc), more spill to a boxed slice.

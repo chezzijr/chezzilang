@@ -2071,6 +2071,7 @@ fn wire_passes_by_reference_objects_as_same_handle() {
         name: "m".into(),
         slots: Vec::new(),
         index: Default::default(),
+        origin: crate::vm::heap::next_module_origin(),
     })));
     let v = Value::obj(m);
     let w = vm.to_wire(v).expect("by-ref object should serialize");
@@ -8288,6 +8289,7 @@ fn worker_fixture(code: Vec<Op>) -> (Vm, PendingCall) {
         name: "<test>".into(),
         slots: Vec::new(),
         index: Default::default(),
+        origin: crate::vm::heap::next_module_origin(),
     })));
     let clo = vm.heap.alloc(Obj::Closure {
         proto: 0,

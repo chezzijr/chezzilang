@@ -854,6 +854,7 @@ impl Vm {
             name: m.label.clone().into_boxed_str(),
             slots: vec![Value::nil(); m.global_slots.len()],
             index,
+            origin: crate::vm::heap::next_module_origin(),
         })));
         debug_assert_eq!(self.module_objs.len(), idx);
         self.module_objs.push(mod_obj);
