@@ -21,6 +21,20 @@ Single source of truth for "what am I doing next." Update after every work sessi
   `map value:`) and `infer_comprehension` takes `expected_hint` at entry so the outer sink cannot leak
   into a clause iterand.
 
+- **W8-19's `Option`/`Result`-methods sub-item is DECLINED, recorded with its measured spellings
+  (TICKET-037, `docs/gaps.md` W8-19).** The row ranked `Option`/`Result` methods as its top fix and
+  nothing blocked a re-file. Measured, every `Option` affordance it names already has a spelling:
+  `unwrap_or` IS `??` (`o ?? 0` -> `3`, `n ?? 0` -> `0`), `is_some` is `o != None`, `is_none` is
+  `o == None`, and the general form is a `match` — CPython spells the comparisons the same way
+  (`x is None` / `x is not None`), so they are ancestor-faithful rather than workarounds. The method
+  form stays absent (`o.unwrap_or(0)` is *type Option[int] has no method 'unwrap_or'*) and that is
+  ACCEPTED, not a gap. **The `Result` half is the recorded residual and is NOT covered by that
+  argument:** `??` deliberately refuses a `Result` (*'??' applies to an Option, found Result[int]*),
+  and `?` propagates rather than substituting — at module top level `v := f()?` type-checks and then
+  aborts (*unhandled error: boom*, rc=1) — so a `Result` fallback is still a `match`. The row stays
+  OPEN and unstruck for tuple `Hashable`, `path.join` on `PathLike`, the un-selectable `Listener`,
+  statement-only `recover:` and multi-statement closures; no open-row counter moves.
+
 - **A member-miss diagnostic now carets the member NAME, not the receiver (TICKET-036, `docs/gaps.md`
   W8-17's caret sub-item).** `src/checker/expr.rs` (20 `has no method` sites), `src/checker/pattern.rs`
   (4 `infer_field` sites) and `src/checker/sig.rs` (the assign-target field miss) all passed the
