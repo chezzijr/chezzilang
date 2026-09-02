@@ -1785,9 +1785,11 @@ enum Json:
 > `docs/gaps.md` **W8-5**.
 
 > **`encode(x) -> str` is the `dumps`-shaped inverse of `decode[T]`** (`docs/gaps.md` **W8-20**):
-> `decode[T](encode(x))` gives back `x`. It accepts nil, bool, int, float, str, `List`, tuple, `Map`
+> `decode[T](encode(x))` gives back `x`. It accepts bool, int, float, str, `List`, tuple, `Map`
 > with `str` keys, a struct (in declaration field order), `Some(v)`/`None`, and an already-built
-> `Json` value (passed through unchanged). It **faults** — recoverably, catchable under `recover:` —
+> `Json` value (passed through unchanged). (There is no bare `nil` *value* to pass — `nil` is a type
+> spelling only, and `json.encode(nil)` is `unknown name 'nil'`; the JSON null you get back out is
+> `Json.Null`, produced by `None`.) It **faults** — recoverably, catchable under `recover:` —
 > on a `Result` (`json.encode: cannot encode a Result`), on any other enum
 > (`json.encode: cannot encode enum <name>`), and on any other object
 > (`json.encode: cannot encode <type>`). It carries its own nesting-depth cap of 2 000, independent of

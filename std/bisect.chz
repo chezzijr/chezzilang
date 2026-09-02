@@ -42,8 +42,9 @@ fn bisect_right[T: Comparable](xs: List[T], x: T) -> int:
 fn bisect[T: Comparable](xs: List[T], x: T) -> int:
     return bisect_right(xs, x)
 
-# Insert `x` into `xs` before any equal elements, keeping it sorted. O(n) grow-then-shift (List has no
-# native insert), same cost as Python's `insort`.
+# Insert `x` into `xs` before any equal elements, keeping it sorted. O(n) grow-then-shift, same cost
+# as Python's `insort`. (`List.insert` exists and would do the same shift; the hand-rolled loop is
+# kept only because it is already here and equally O(n).)
 fn insort_left[T: Comparable](xs: List[T], x: T):
     i := bisect_left(xs, x)
     xs.push(x)

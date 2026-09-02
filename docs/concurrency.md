@@ -363,7 +363,7 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
 
 | Method | Signature | Notes |
 |--------|-----------|-------|
-| `send` | `send(self, v: T) -> nil` | enqueue (move/copy at the airlock); sender can't reuse a moved value. On a **bounded** channel a `send` **blocks/parks** while the queue is at capacity (backpressure), resuming once a `recv` frees a slot — the send-side mirror of a blocking `recv`. On a **rendezvous** channel (`cap == 0`) a `send` blocks until a receiver is already waiting, exactly like a bounded `send` at capacity 0 conceptually would, except capacity 0 is otherwise inexpressible as `queue.len() < cap` |
+| `send` | `send(self, v: T) -> nil` | enqueue (move/copy at the airlock); the sender MAY keep using the value — the crossing copies, so its later writes are simply not seen by the receiver. On a **bounded** channel a `send` **blocks/parks** while the queue is at capacity (backpressure), resuming once a `recv` frees a slot — the send-side mirror of a blocking `recv`. On a **rendezvous** channel (`cap == 0`) a `send` blocks until a receiver is already waiting, exactly like a bounded `send` at capacity 0 conceptually would, except capacity 0 is otherwise inexpressible as `queue.len() < cap` |
 | `try_send` | `try_send(self, v: T) -> bool` | **non-blocking** send: `true` once queued, `false` if the send can't proceed — the channel is **closed**, a **bounded** channel is **full**, or a **rendezvous** channel has no receiver already waiting. Never blocks/parks |
 | `recv` | `recv(self) -> T` | dequeue (FIFO); blocking surface (see below) |
 | `try_recv` | `try_recv(self) -> T?` | **non-blocking** poll (A1): `Some(v)` if queued, `None` if empty — never blocks, never faults, never suspends a fiber. Drain a mailbox without guarding on `len()` |
@@ -399,9 +399,10 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
       ch.send(1)
   print(ch.recv())     # 1
   ```
-- **Move-on-send** = Go's O(1) send cost without Go's sharing (the sender can't touch the value after
-  — the checker enforces it, like a Rust channel). Deep-copy is the fallback when the sender wants to
-  keep its copy.
+- **Move-on-send** = Go's send without Go's sharing. Nothing is *enforced* — there is no Rust-style
+  move checker here, and a sender that keeps using the value it sent is legal and safe: the crossing
+  deep-copies, so the two sides simply stop being the same object. Measured: `ch.send(xs)` then
+  `xs.push(3)` leaves the sender with `[1, 2, 3]` and hands the receiver `[1, 2]`.
 - **Channels are themselves sendable** — pass a `Channel` over a `Channel` for reply channels.
 - **`try_recv() -> T?` is shipped (A1).** The non-blocking sibling of `recv`: it
   pops-or-returns-`None` and never blocks, faults, or suspends a fiber. With B1/B2's blocking `recv`, a fiber

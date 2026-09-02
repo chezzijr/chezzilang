@@ -2703,15 +2703,23 @@ scalar renders exactly as `str(v)` does. (Like the other intrinsic protocols, th
 a direct `(5).str()` on a concrete scalar is still a compile error — use the free `str(5)` builtin.)
 
 **Every intrinsic grant is callable, and equals its operator form.** The same holds for *all* the
-protocols a built-in satisfies intrinsically, not just `Stringable`: inside an erased `[T: P]` body (or
-through a protocol-typed value like `x: Hashable = 5`) you may call `a.add(b)`/`a.sub(b)`/`a.mul(b)`/
+protocols a built-in satisfies intrinsically, not just `Stringable`: inside an erased `[T: P]` body you
+may call `a.add(b)`/`a.sub(b)`/`a.mul(b)`/
 `a.div(b)`/`a.mod(b)`/`a.neg()` on `int`/`float`/a numeric `newtype`, `a.compare(b)`, `x.hash()` on
 `int`/`str`/`bytes`/`bool`/a zero-field struct, and `c.index(k)`/`c.set_index(k, v)`/`c.slice(s, e, st)`
 on `list`/`map`/`str`/`bytes`/`bytearray`. Each is **defined as** the operator form — `a.add(b)` ≡
 `a + b` (same overflow / divide-by-zero fault), `c.index(k)` ≡ `c[k]` (negative indexing and the same
 out-of-bounds message), `c.slice(Some(0), Some(2), None)` ≡ `c[0:2]` (the three components are `int?`),
 `x.hash()` is exactly the hash `x` gets as a map/set key. A type that defines the method itself always
-gets its own. Still bound-only, and with two documented exceptions (`docs/gaps.md` W6-3b/d):
+gets its own.
+
+**Through a protocol-typed VALUE (`x: Hashable = 5`) only the grants that take no `Self` argument are
+callable** — `neg()`, `str()`, `hash()`, `index(k)`. `add`/`sub`/`mul`/`div`/`mod`/`compare` all take a
+`Self` parameter, and a protocol value has erased which type it holds, so the checker rejects them:
+`method 'add' is not callable through the protocol value Add — ... Bind the receiver with a generic
+parameter instead: `[T: Add]``. Inside an erased `[T: P]` body every grant above is callable.
+
+Still bound-only, and with two documented exceptions (`docs/gaps.md` W6-3b/d):
 `Iterator`'s `next` on a *raw* collection faults (no cursor position — use `for`, or `.iter()` for a real
 cursor); and a numeric `newtype` that DEFINES `add`/`compare`/… gets its own method from `a.add(b)` while
 `a + b` keeps auto-flowing to the underlying's native op, so the two spellings disagree for that type
@@ -4049,8 +4057,8 @@ fn fetch_all(urls: List[str]):
   `ch.close()`, `ch.try_send(v) -> bool` (safe `send` — `false` if closed, never faults). After
   `close()`: `send` faults, `recv` drains then faults, `try_send` returns `false`. Drain a channel to
   completion with **`for v in ch:`** — it blocks per value and ends cleanly once closed-and-drained
-  (Go's `for v := range ch`). Values **move/copy** across the boundary; the sender can't reuse a sent
-  value.
+  (Go's `for v := range ch`). Values **move/copy** across the boundary; the sender may keep using the value it sent — the
+  crossing copies, so its later writes are simply not seen by the receiver.
 - **`Shared[T]`** (`import std.concurrency`) — the cross-task mutable box: `s.get()` / `s.set(v)`
   / `s.update(fn(x): ...)`, synchronized and **sendable**. For an in-task mutable value to close over
   or mutate through, use a plain one-field `struct` (a struct is a shared reference). The mutation
