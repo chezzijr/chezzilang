@@ -3844,6 +3844,48 @@ fn demoted_channel_registry_is_refcounted_for_two_fibers_on_one_channel() {
     );
 }
 
+/// TICKET-042a: `ChanState::deposit` (a rendezvous sender's published-but-not-yet-taken value) is
+/// counted by `len()` but excluded by `msg_len()`; `pop` marks a taken deposit's handle
+/// `DEPOSIT_TAKEN`, and `withdraw_all_deposits` (close()'s job) marks a still-queued one
+/// `DEPOSIT_WITHDRAWN` and clears it out.
+#[test]
+fn chan_state_deposit_is_taken_by_pop_and_withdrawn_by_close() {
+    let mut cs = crate::vm::core::ChanState::default();
+    let h1 = cs.deposit(
+        crate::vm::core::wire_summary(&WireValue::Int(7)),
+        WireValue::Int(7),
+    );
+    let h2 = cs.deposit(
+        crate::vm::core::wire_summary(&WireValue::Int(9)),
+        WireValue::Int(9),
+    );
+    assert_eq!(cs.len(), 2);
+    assert_eq!(cs.msg_len(), 0);
+    assert!(cs.summary().0 > 0);
+
+    let popped = cs.pop();
+    assert!(matches!(popped, Some(WireValue::Int(7))));
+    assert_eq!(
+        h1.load(Ordering::Relaxed),
+        crate::vm::core::DEPOSIT_TAKEN,
+        "a popped deposit's handle reads DEPOSIT_TAKEN"
+    );
+    assert_eq!(
+        h2.load(Ordering::Relaxed),
+        crate::vm::core::DEPOSIT_QUEUED,
+        "the still-queued deposit's handle is unchanged"
+    );
+
+    cs.withdraw_all_deposits();
+    assert_eq!(
+        h2.load(Ordering::Relaxed),
+        crate::vm::core::DEPOSIT_WITHDRAWN,
+        "close() withdraws every still-queued deposit"
+    );
+    assert_eq!(cs.len(), 0);
+    assert_eq!(cs.summary(), (0, false));
+}
+
 /// D6: `poll_park_offload` hands a fiber whose socket op `WouldBlock`ed to the netpoller —
 /// running→inflight — so a socket-parked fiber is accounted as in-flight (it WILL be woken by the
 /// OS) and vetoes a false deadlock, exactly like a blocking-pool offload. Uses a real loopback fd

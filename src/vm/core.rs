@@ -209,6 +209,21 @@ pub struct ChannelCore {
 /// TOCTOU gap (check empty, then close happens, then park) that could strand a parked fiber. Once
 /// `closed`: `send`/`try_send` are rejected, `recv` drains then faults, and `for v in ch:` ends once
 /// drained. `close()` wakes every parked/demoted receiver via `cv` + the scheduler.
+#[derive(Debug, Clone)]
+enum EntryKind {
+    Msg,
+    Deposit(Arc<AtomicU8>),
+}
+
+/// States a [`EntryKind::Deposit`] handle can read (TICKET-042a — Go's `sudog` model: a rendezvous
+/// `send` publishes its value into the queue, marked as a deposit, before it parks, so a poll
+/// (`try_recv`, `wait:`'s `else` arm) can take it with no change to the poll itself).
+pub const DEPOSIT_QUEUED: u8 = 0;
+/// A `pop` took this deposit's value normally (the taker owns it now).
+pub const DEPOSIT_TAKEN: u8 = 1;
+/// `close()` withdrew this deposit before anyone took it (Go: the parked value is not delivered).
+pub const DEPOSIT_WITHDRAWN: u8 = 2;
+
 #[derive(Debug, Default)]
 pub struct ChanState {
     /// PRIVATE on purpose (W6-7/W6-10): every mutation must go through [`push`](Self::push) /
@@ -220,7 +235,7 @@ pub struct ChanState {
     /// Each message carries its own [`wire_summary`] byte count so `pop` is O(1): these queues are
     /// popped under the GLOBAL `MnSched` lock (`sched.rs` demote paths), and re-deriving the count
     /// on removal would put an O(payload) walk in that critical section.
-    queue: VecDeque<(usize, WireValue)>,
+    queue: VecDeque<(usize, EntryKind, WireValue)>,
     /// Approximate owned bytes of the queued messages (see [`wire_summary`]) — the off-heap storage
     /// `Heap::live_bytes` could not see before W6-10.
     bytes: usize,
@@ -228,6 +243,11 @@ pub struct ChanState {
     /// only when the queue empties, so it is conservative (over-walk = safe) and self-healing.
     dirty: bool,
     pub closed: bool,
+    /// Count of queued entries that are [`EntryKind::Deposit`]s rather than ordinary messages
+    /// (TICKET-042a). Subtracted out of [`len`](Self::len) by [`msg_len`](Self::msg_len) so a
+    /// deposit — a rendezvous sender's published-but-not-yet-taken value — stays invisible to
+    /// `Channel.len()`, matching Go's `len: 0` on an unbuffered channel with a parked sender.
+    deposits: usize,
     /// Count of receivers currently WAITING on this channel (TICKET-028). Read only when `cap` is
     /// `Some(0)`: the rendezvous send-ready predicate is `queue.len() < recv_waiting`. Maintained by
     /// [`RecvWait`], armed at every receiver-wait site and dropped when the receiver's fiber next
@@ -248,11 +268,28 @@ impl ChanState {
     pub fn push(&mut self, sum: (usize, bool), w: WireValue) {
         self.bytes += sum.0;
         self.dirty |= sum.1;
-        self.queue.push_back((sum.0, w));
+        self.queue.push_back((sum.0, EntryKind::Msg, w));
+    }
+
+    /// Enqueue a rendezvous sender's value as a deposit (TICKET-042a) instead of an ordinary
+    /// message, and return the handle a poll/park/close observes it through. See
+    /// [`EntryKind::Deposit`]'s states.
+    pub fn deposit(&mut self, sum: (usize, bool), w: WireValue) -> Arc<AtomicU8> {
+        self.bytes += sum.0;
+        self.dirty |= sum.1;
+        let handle = Arc::new(AtomicU8::new(DEPOSIT_QUEUED));
+        self.queue
+            .push_back((sum.0, EntryKind::Deposit(Arc::clone(&handle)), w));
+        self.deposits += 1;
+        handle
     }
 
     pub fn pop(&mut self) -> Option<WireValue> {
-        let (b, w) = self.queue.pop_front()?;
+        let (b, kind, w) = self.queue.pop_front()?;
+        if let EntryKind::Deposit(h) = kind {
+            h.store(DEPOSIT_TAKEN, Ordering::Relaxed);
+            self.deposits -= 1;
+        }
         self.bytes = self.bytes.saturating_sub(b);
         if self.queue.is_empty() {
             self.bytes = 0;
@@ -261,14 +298,63 @@ impl ChanState {
         Some(w)
     }
 
+    /// Withdraw the one queued deposit matching `handle` (TICKET-042a) — used by a re-parking
+    /// sender to pull its own not-yet-taken deposit back out before re-depositing, and by a
+    /// cancelled sender. `Arc::ptr_eq` identifies the entry: two deposits never share a handle.
+    pub fn withdraw(&mut self, handle: &Arc<AtomicU8>) {
+        let Some(pos) = self.queue.iter().position(
+            |(_, kind, _)| matches!(kind, EntryKind::Deposit(h) if Arc::ptr_eq(h, handle)),
+        ) else {
+            return;
+        };
+        let (b, _, _) = self.queue.remove(pos).unwrap();
+        handle.store(DEPOSIT_WITHDRAWN, Ordering::Relaxed);
+        self.deposits -= 1;
+        self.bytes = self.bytes.saturating_sub(b);
+        if self.queue.is_empty() {
+            self.bytes = 0;
+            self.dirty = false;
+        }
+    }
+
+    /// Withdraw every queued deposit (TICKET-042a) — `close()`'s job: Go measures that a parked
+    /// sender's value is NOT delivered once the channel is closed.
+    pub fn withdraw_all_deposits(&mut self) {
+        if self.deposits == 0 {
+            return;
+        }
+        let mut freed = 0;
+        self.queue.retain(|(b, kind, _)| match kind {
+            EntryKind::Deposit(h) => {
+                h.store(DEPOSIT_WITHDRAWN, Ordering::Relaxed);
+                freed += b;
+                false
+            }
+            EntryKind::Msg => true,
+        });
+        self.deposits = 0;
+        self.bytes = self.bytes.saturating_sub(freed);
+        if self.queue.is_empty() {
+            self.bytes = 0;
+            self.dirty = false;
+        }
+    }
+
     pub fn clear(&mut self) {
         self.queue.clear();
         self.bytes = 0;
         self.dirty = false;
+        self.deposits = 0;
     }
 
     pub fn len(&self) -> usize {
         self.queue.len()
+    }
+
+    /// Message-visible length (TICKET-042a): [`len`](Self::len) minus queued deposits, so a
+    /// parked rendezvous sender's not-yet-taken value stays invisible to `Channel.len()`.
+    pub fn msg_len(&self) -> usize {
+        self.queue.len() - self.deposits
     }
 
     pub fn is_empty(&self) -> bool {
@@ -276,7 +362,7 @@ impl ChanState {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &WireValue> {
-        self.queue.iter().map(|(_, w)| w)
+        self.queue.iter().map(|(_, _, w)| w)
     }
 
     /// Cached GC summary of the queued messages: `(approximate owned bytes, can-root-a-heap-object)`.
