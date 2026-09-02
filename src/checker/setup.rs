@@ -2122,7 +2122,16 @@ impl Checker {
     }
     /// TICKET-032 A1 — record that `alias` (in `alias_scope`) and `src` name the SAME runtime
     /// collection. Self-referential and duplicate pairs are dropped.
+    ///
+    /// TICKET-032 review fix — decline the pair if EITHER name is captured across a `spawn:`/
+    /// `Executor.submit` floor: a task holds its own deep copy of a captured binding
+    /// (`is_captured`), so "same runtime collection" is false at exactly that boundary and the pair
+    /// must never be recorded, not merely left unpropagated. Same guard shape as
+    /// `drop_empty_site`/`refine_receiver`/`refine_index_receiver`.
     pub(super) fn link_empty_alias(&mut self, alias_scope: usize, alias: &str, src: &str) {
+        if self.is_captured(alias) || self.is_captured(src) {
+            return;
+        }
         let Some(src_scope) = self.owning_scope(src) else {
             return;
         };
