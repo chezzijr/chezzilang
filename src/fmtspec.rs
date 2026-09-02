@@ -155,12 +155,15 @@ pub fn parse(spec: &str) -> Result<FormatSpec, String> {
         i += 1;
     }
 
-    // [0] zero-pad flag (a leading zero before the width digits). Under `=` align, `0` also sets
-    // the fill to `'0'` unless an explicit fill was already written — CPython's (fill `'0'`, align
-    // `'='`) pair.
+    // [0] zero-pad flag (a leading zero before the width digits). The `0` flag sets the fill to
+    // `'0'` unless an explicit fill was already written, under EVERY align — matching CPython's
+    // `parse_internal_render_format_spec`. It defaults the align to `=` only when no align was
+    // written at all; `apply` encodes that default itself (`align.is_none()`) rather than `parse`
+    // mutating `out.align` here, because a string's zero-pad reject must still report
+    // `zero-pad '0' not allowed on a string`, not `'=' alignment not allowed on a string`.
     if i < chars.len() && chars[i] == '0' {
         out.zero_pad = true;
-        if out.align == Some(Align::Pad) && !fill_explicit {
+        if !fill_explicit {
             out.fill = '0';
         }
         i += 1;
@@ -507,14 +510,21 @@ fn render_float(spec: &FormatSpec, x: f64) -> Result<(String, String, bool), Str
     let neg = !x.is_nan() && x.is_sign_negative() && (x != 0.0 || x.is_sign_negative());
     let mag = x.abs();
     let body = match spec.ty {
-        Some('f') | None => {
-            let s = match spec.precision {
-                Some(p) => format!("{mag:.*}", p),
-                // Bare `{f:>10}` etc. with no type/precision keeps the canonical Python repr.
-                None => repr_float(mag),
-            };
+        // Fixed-point at CPython's default precision 6. This must NEVER emit scientific notation
+        // and must not share the no-type `repr_float` path below.
+        Some('f') => {
+            let s = format!("{mag:.*}", spec.precision.unwrap_or(6));
             if spec.alt { force_point(s) } else { s }
         }
+        // No type char: with a precision, CPython's general format plus `Py_DTSF_ADD_DOT_0`
+        // (`render_general(add_dot_0 = true)`); with none, plain `repr` — no precision at all.
+        None => match spec.precision {
+            Some(p) => render_general(mag, p, 'e', spec.alt, true),
+            None => {
+                let s = repr_float(mag);
+                if spec.alt { force_point(s) } else { s }
+            }
+        },
         // `{:e}`/`{:E}`: Python default precision 6, exponent always signed + 2-digit padded.
         Some('e') | Some('E') => {
             let p = spec.precision.unwrap_or(6);
@@ -535,27 +545,45 @@ fn render_float(spec: &FormatSpec, x: f64) -> Result<(String, String, bool), Str
     Ok((sign_prefix(neg, spec.sign), body, true))
 }
 
+/// The general float format shared by `g`/`G` (`add_dot_0 = false`) and a bare `.N` precision with
+/// no type char (`add_dot_0 = true`, CPython's `Py_DTSF_ADD_DOT_0`): fixed-point when the decimal
+/// exponent (taken AFTER rounding to `p` significant digits) falls in `-4..hi`, scientific
+/// otherwise; trailing zeros stripped unless `#`. Default precision 6, minimum 1. `add_dot_0` lowers
+/// the scientific crossover by one exponent (`hi = p - 1` instead of `p`) and appends a trailing
+/// `.0` to an integral fixed-point result.
+fn render_general(mag: f64, precision: usize, marker: char, alt: bool, add_dot_0: bool) -> String {
+    if !mag.is_finite() {
+        return format!("{mag}");
+    }
+    let p = precision.max(1);
+    let e = format!("{mag:.*e}", p - 1);
+    let (_, exp_s) = e.split_once('e').expect("scientific format always has 'e'");
+    let exp: i32 = exp_s.parse().expect("Rust exponent is always a valid i32");
+    let hi = if add_dot_0 { p as i32 - 1 } else { p as i32 };
+    let use_exp = !(-4..hi).contains(&exp);
+    let body = if use_exp {
+        normalize_exp(&e, marker)
+    } else {
+        format!("{mag:.*}", (p as i32 - 1 - exp).max(0) as usize)
+    };
+    let body = if alt {
+        force_point(body)
+    } else {
+        strip_g_zeros(body)
+    };
+    if add_dot_0 && !use_exp && !body.contains('.') {
+        body + ".0"
+    } else {
+        body
+    }
+}
+
 /// The `g`/`G` general float format: fixed-point when the decimal exponent (taken AFTER rounding to
 /// `p` significant digits) falls in `-4..p`, scientific otherwise; trailing zeros stripped unless
 /// `#`. Default precision 6, minimum 1.
 fn render_g(mag: f64, spec: &FormatSpec) -> String {
-    if !mag.is_finite() {
-        return format!("{mag}");
-    }
-    let p = spec.precision.unwrap_or(6).max(1);
-    let e = format!("{mag:.*e}", p - 1);
-    let (_, exp_s) = e.split_once('e').expect("scientific format always has 'e'");
-    let exp: i32 = exp_s.parse().expect("Rust exponent is always a valid i32");
-    let body = if (-4..p as i32).contains(&exp) {
-        format!("{mag:.*}", (p as i32 - 1 - exp).max(0) as usize)
-    } else {
-        normalize_exp(&e, if spec.ty == Some('G') { 'E' } else { 'e' })
-    };
-    if spec.alt {
-        force_point(body)
-    } else {
-        strip_g_zeros(body)
-    }
+    let marker = if spec.ty == Some('G') { 'E' } else { 'e' };
+    render_general(mag, spec.precision.unwrap_or(6), marker, spec.alt, false)
 }
 
 /// Trim trailing zeros (then a trailing bare `.`) off `s`'s mantissa, leaving any exponent suffix
@@ -1113,10 +1141,63 @@ mod tests {
             ok_apply("f", FmtArg::Float(1e16)),
             "10000000000000000.000000"
         );
+        assert_eq!(ok_apply("f", FmtArg::Float(2.5)), "2.500000");
+        assert_eq!(ok_apply("f", FmtArg::Float(1e-7)), "0.000000");
+        assert_eq!(ok_apply("f", FmtArg::Int(3)), "3.000000");
+        assert_eq!(ok_apply("f", FmtArg::Float(-2.5)), "-2.500000");
+        assert_eq!(
+            ok_apply("f", FmtArg::Float(1e17)),
+            "100000000000000000.000000"
+        );
+        assert_eq!(ok_apply(".2f", FmtArg::Float(1e16)), "10000000000000000.00");
+        assert_eq!(ok_apply(".0f", FmtArg::Float(2.5)), "2");
+        assert_eq!(ok_apply("#.0f", FmtArg::Float(0.5)), "0.");
+        assert_eq!(ok_apply("f", FmtArg::Float(f64::INFINITY)), "inf");
+        assert_eq!(ok_apply("#f", FmtArg::Float(f64::INFINITY)), "inf");
+        assert_eq!(ok_apply("f", FmtArg::Float(f64::NAN)), "NaN");
+        assert_eq!(ok_apply("012,f", FmtArg::Float(1234.5)), "1,234.500000");
+    }
+
+    #[test]
+    fn no_type_precision_matches_cpython() {
+        assert_eq!(ok_apply(".3", FmtArg::Float(123.456)), "1.23e+02");
+        assert_eq!(ok_apply(".3", FmtArg::Float(2.5)), "2.5");
+        assert_eq!(ok_apply(".3", FmtArg::Float(0.0)), "0.0");
+        assert_eq!(ok_apply(".6", FmtArg::Float(100.0)), "100.0");
+        assert_eq!(ok_apply(".6", FmtArg::Float(1234.5678)), "1234.57");
+        assert_eq!(ok_apply(".1", FmtArg::Float(2.5)), "2e+00");
+        assert_eq!(ok_apply(".0", FmtArg::Float(2.5)), "2e+00");
+        assert_eq!(ok_apply(".3", FmtArg::Float(1e16)), "1e+16");
+        assert_eq!(ok_apply(".3", FmtArg::Float(1e-7)), "1e-07");
+        assert_eq!(ok_apply(".10", FmtArg::Float(999999.5)), "999999.5");
+        assert_eq!(ok_apply(".3", FmtArg::Float(999999.5)), "1e+06");
+        assert_eq!(ok_apply("#.6", FmtArg::Float(100.0)), "100.000");
+        assert_eq!(ok_apply(".3", FmtArg::Float(f64::INFINITY)), "inf");
+        assert_eq!(ok_apply("", FmtArg::Float(5.0)), "5.0");
+        assert_eq!(ok_apply(">8.3", FmtArg::Float(123.456)), "1.23e+02");
     }
 
     #[test]
     fn zero_flag_survives_explicit_align() {
         assert_eq!(ok_apply(">08", FmtArg::Int(42)), "00000042");
+        assert_eq!(ok_apply("08", FmtArg::Int(42)), "00000042");
+        assert_eq!(ok_apply("<08", FmtArg::Int(42)), "42000000");
+        assert_eq!(ok_apply("^08", FmtArg::Int(42)), "00042000");
+        assert_eq!(ok_apply(">08", FmtArg::Int(-42)), "00000-42");
+        assert_eq!(ok_apply("<08", FmtArg::Int(-42)), "-4200000");
+        assert_eq!(ok_apply("^08", FmtArg::Int(-42)), "00-42000");
+        assert_eq!(ok_apply("=08", FmtArg::Int(-42)), "-0000042");
+        assert_eq!(ok_apply("*>08", FmtArg::Int(42)), "******42");
+        assert_eq!(ok_apply("0>8", FmtArg::Int(-42)), "00000-42");
+        assert_eq!(ok_apply(">+08", FmtArg::Int(42)), "00000+42");
+        assert_eq!(ok_apply(">08x", FmtArg::Int(42)), "0000002a");
+        assert_eq!(ok_apply("#>08x", FmtArg::Int(42)), "######2a");
+        assert_eq!(ok_apply(">08,", FmtArg::Int(1000)), "0001,000");
+        assert_eq!(ok_apply("<08,", FmtArg::Int(1000)), "1,000000");
+        assert_eq!(ok_apply("^08,", FmtArg::Int(-1000)), "0-1,0000");
+        assert_eq!(ok_apply(">08.2f", FmtArg::Float(-2.5)), "000-2.50");
+        assert_eq!(ok_apply(">010f", FmtArg::Float(-2.5)), "0-2.500000");
+        assert_eq!(ok_apply("<08.1f", FmtArg::Float(-2.5)), "-2.50000");
+        assert_eq!(ok_apply(">08.2f", FmtArg::Int(-42)), "00-42.00");
     }
 }

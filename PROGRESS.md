@@ -7,6 +7,15 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **`{x:f}` is fixed-point at CPython's default precision 6 and the `0` flag now survives an
+  explicit align (TICKET-043, supersedes DEC-022).** Two `src/fmtspec.rs` seam fixes. (a) `f` used
+  to share `render_float`'s no-type arm and inherited `repr_float`'s scientific crossover: `{1e16:f}`
+  was `1e+16`, is now `10000000000000000.000000`; `{123.456:.3}` (a `.N` precision with no type char)
+  was `123.456`, is now `1.23e+02` via a new `render_general(add_dot_0)` extracted from `render_g` (a
+  thin wrapper over it) — CPython's general format plus `Py_DTSF_ADD_DOT_0`. (b) `parse`'s `0` flag
+  set the fill to `'0'` only under `=` align; `{42:>08}` was six spaces then `42`, is now
+  `00000042`. Measured 0 diffs post-fix against CPython 3.14.7 over a 131,648-case int grid and a
+  314,496-case float grid.
 - **A rendezvous channel's `try_recv`/`wait:` now sees a value a sender has already parked to hand
   off, and `cap()` no longer wraps above 2^62 (TICKET-042).** (a) `try_recv` polled only `core.q`,
   always empty on a rendezvous channel — a parked sender's value was invisible to any poll, though a
@@ -399,10 +408,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > the `g`/`G` general float format, `=` sign-aware fill (`Align::Pad`, extending DEC-018's grouping
 > overshoot to the `(fill '0', align '=')` pair), and a leading-space sign, plus the explicit `-`
 > sign in the same slot. `{f:d}` (a `d` type char on a float) stays a deliberate **static** reject
-> per this ticket's `## Decisions`, where CPython raises at runtime. Two pre-existing divergences
-> stay open: `format(1.5,'f')` renders `1.500000` in CPython against Chezzi's `1.5`, and the `0`
-> flag under an explicit `<`/`>`/`^` align renders zero-padded in CPython against Chezzi's
-> space-padded output.
+> per this ticket's `## Decisions`, where CPython raises at runtime. Both divergences CLOSED
+> 2026-09-03 (TICKET-043): `{x:f}` now defaults its precision to 6 and never emits scientific
+> notation, and the `0` flag now sets the fill under an explicit `<`/`>`/`^` align, superseding
+> DEC-022's deliberate-divergence paragraph.
 
 > **✅ FIXED, 2026-08-29 (TICKET-019) — `docs/gaps.md` W8-34: `List.unique()` is one pass over a
 > hash index.** `Vm::is_flat_hash_key` (`src/vm/arith.rs`) gates the `"unique"` arm in

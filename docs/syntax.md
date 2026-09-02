@@ -3762,7 +3762,11 @@ print("{42: d}")          # leading-space sign           → " 42"
   (`{255:#x}` → `"0xff"`); on a float it forces a decimal point even with no fractional digits
   (`{0.5:#.0f}` → `"0."`), except on a non-finite value, where it is a no-op (`{x:#f}` on infinity
   stays `"inf"`); it is a no-op on `d`; it is rejected on a string.
-- **`0`**: zero-pad numerics to *width* (the sign stays ahead of the zeros).
+- **`0`**: sets the fill to `'0'` unless an explicit fill was written, under EVERY align, and
+  defaults the align to `=` only when no align was written at all (the sign stays ahead of the
+  zeros under `=`). `{42:08}` and `{42:>08}` both give `"00000042"`; `{42:<08}` gives `"42000000"`;
+  `{42:^08}` gives `"00042000"`; `{-42:08}` gives `"-0000042"` against `{-42:>08}`'s `"00000-42"`;
+  and `{42:*>08}` gives `"******42"` because an explicit fill beats the flag.
 - **width**: minimum field width. **Capped at 4096** — a larger width (e.g. `{x:>9999999999}`) is a
   parse error, *not* a multi-gigabyte allocation.
 - **grouping**: `,` or `_` separates every three digits of the integer part (`,` → `1,234,567`;
@@ -3772,14 +3776,18 @@ print("{42: d}")          # leading-space sign           → " 42"
   `"0,001,000"`, nine chars for a width of eight — matching CPython).
 - **precision** `.N`: float decimals; on a **string** it **truncates** to N chars (Python parity);
   also capped at 4096.
-- **type**: `d` int · `f` fixed float · `x`/`X` hex · `b` binary · `o` octal · `e`/`E` scientific
+- **type**: `d` int · `f` fixed float (default precision 6, NEVER scientific — `{1e16:f}` gives
+  `"10000000000000000.000000"`) · `x`/`X` hex · `b` binary · `o` octal · `e`/`E` scientific
   (default precision 6, exponent always signed and zero-padded to ≥2 digits, e.g. `1.234568e+05`) ·
   `g`/`G` general format (fixed-point when the decimal exponent falls in `-4..precision`, scientific
   otherwise; trailing zeros stripped unless `#`; default precision 6, minimum 1) ·
   `%` percent (×100 then `%`). A float type char (`f`/`e`/`E`/`g`/`G`/`%`) promotes an int.
 
 A **bare** `{expr}` (or `{expr:}` with an empty spec) renders a whole float with a trailing `.0` —
-e.g. `5.0`. An **unknown type char** or trailing junk in the spec is a **parse error**. A
+e.g. `5.0`. A `.N` precision with **no type char** is CPython's general format, not fixed-point:
+`{123.456:.3}` gives `"1.23e+02"` and `{100.0:.6}` gives `"100.0"`. It differs from `g` in two ways:
+the scientific crossover sits one exponent lower, and an integral fixed-point result keeps its
+trailing `.0`. An **unknown type char** or trailing junk in the spec is a **parse error**. A
 **type/value mismatch** (e.g. `{name:d}` on a string, `{x:.2f}` on a string, `{x:d}` on a float,
 `{x:.3d}` precision on an int, zero-pad on a non-number) is now **caught at compile time by `chezzi
 check`** whenever the value's static type is a **concrete scalar** (`int`/`float`/`str`/`bool`) — a

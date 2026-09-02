@@ -39,3 +39,23 @@ test fn non_finite_forms_keep_their_shape():
     assert "{big:#g}" == "inf"
     assert "{big:#%}" == "inf%"
     assert "{big:=10}" == "       inf"
+
+test fn fixed_point_f_matches_cpython():
+    x := 2.5
+    big := 1e16
+    tiny := 1e-7
+    assert "{x:f}" == "2.500000"
+    assert "{big:f}" == "10000000000000000.000000"
+    assert "{tiny:f}" == "0.000000"
+    assert "{3:f}" == "3.000000"
+    assert "{123.456:.3}" == "1.23e+02"
+    assert "{100.0:.6}" == "100.0"
+
+test fn zero_flag_survives_align_matches_cpython():
+    n := 42
+    assert "{n:>08}" == "00000042"
+    assert "{n:08}" == "00000042"
+    assert "{n:<08}" == "42000000"
+    assert "{n:^08}" == "00042000"
+    assert "{n:*>08}" == "******42"
+    assert "{1000:>08,}" == "0001,000"

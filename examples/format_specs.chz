@@ -62,3 +62,12 @@ print("padeq   = {42:=10}")
 print("padzero = {-42:=010}")
 print("spc-pos = {42: d}")
 print("spc-neg = {-42: d}")
+
+# --- fixed-point f, no-type precision, and the 0 flag under an explicit align ---
+big := 1e16
+print("fixed   = {2.5:f}")
+print("fixed16 = {big:f}")
+print("gen-nt  = {123.456:.3}")
+print("zpad>   = {42:>08}")
+print("zpad<   = {42:<08}")
+print("zpad^   = {42:^08}")
