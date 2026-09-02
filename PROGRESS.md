@@ -7,6 +7,20 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **An un-annotated alias of an unrefined empty collection now pins with the binding it aliases, and
+  a list/map literal element now reports against the declared element type instead of laundering
+  (TICKET-032, `docs/gaps.md` W8-45/W8-46).** A1: `c := b` used to move the pending pin requirement to
+  `c` alone, so `c.push(1)` then a typed `addstr(b)` was `ok: no type errors` and faulted at run time
+  with *type int has no method 'upper'*. A new `(scope, name)`-keyed `empty_coll_aliases` pin group
+  (drained at `pop_scope`, untainted at `declare`, unlinked in `check_assign`'s funnel) propagates a
+  pin across an alias pair; a whole-binding reassignment or re-declaration of either name still breaks
+  it, so a rebound alias is never falsely rejected. A2: `infer_list`/`infer_map`'s expected-type gate
+  used to be all-or-nothing, so one `Unknown`-cored sibling laundered the whole literal
+  (`a: List[List[int]] = [empty().reversed(), ["x"]]` faulted at run time with *cannot apply Add to
+  str and int*); both now report per element/entry (`list element: expected T, found U`, `map key:`/
+  `map value:`) and `infer_comprehension` takes `expected_hint` at entry so the outer sink cannot leak
+  into a clause iterand.
+
 - **A member-miss diagnostic now carets the member NAME, not the receiver (TICKET-036, `docs/gaps.md`
   W8-17's caret sub-item).** `src/checker/expr.rs` (20 `has no method` sites), `src/checker/pattern.rs`
   (4 `infer_field` sites) and `src/checker/sig.rs` (the assign-target field miss) all passed the

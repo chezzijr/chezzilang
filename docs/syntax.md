@@ -3842,18 +3842,21 @@ defining `compare`), stable, in place.
 > true]` for the top type). The annotation is **expected-type-directed**: the declared element type is
 > driven onto each element, so a literal whose elements have differing concrete types is accepted as long
 > as **every** element is assignable to the declared element type (each satisfies the protocol / `Any`);
-> only when some element does *not* fit the declared type does the usual `list elements differ` error
-> fire. It reaches each element as that element's **own** expected type, so a generic call in element
-> position is pinned by the slot it fills — `a: List[List[int]] = [empty()]` on
+> an element that does *not* fit is reported against the declared element type directly: `list element: expected T, found U` (a `Map` literal's columns report `map key: expected K, found L` / `map value: expected V, found W`).
+> This holds even through a chained method call the hint never itself resolves through
+> (`a: List[List[int]] = [empty().reversed(), ["x"]]` reports `list element: expected List[int], found
+> List[str]`; TICKET-032 closed this — the diagnostic MOVES from the assignment to the offending
+> element, the same shape rustc's E0308 takes on `let a: Vec<Vec<i32>> = vec![Vec::new(), vec!["x"]];`,
+> which carets the element with `expected i32, found &str`). It reaches each element as that element's
+> **own** expected type, so a generic call in
+> element position is pinned by the slot it fills — `a: List[List[int]] = [empty()]` on
 > `fn empty[T]() -> List[T]` binds `T = int`. The same holds for a `Map` literal's key and value
 > columns and a `Set` literal's elements, and it reaches through a `T?` / `T!E` sink (where a bare
-> literal coerces to `Some(v)` / `Ok(v)`) onto the carrier's payload. Two limits: the hint reaches an
-> element that **consumes** it, so a literal one method call away
-> (`[empty().reversed(), ["x"]]`) is not caught; and the int→float element widen (TICKET-033: now
-> reaches an annotated `let`, a call argument, a method argument, a struct constructor argument and a
-> `return` alike) is computed from the SINK type before `sink_payload` unwraps a carrier, so
-> `fn f() -> List[float]?: return [1, 2]` stays rejected even though the bare `-> List[float]` sink
-> widens.
+> literal coerces to `Some(v)` / `Ok(v)`) onto the carrier's payload. One limit remains: the int→float
+> element widen (TICKET-033: now reaches an annotated `let`, a call argument, a method argument, a
+> struct constructor argument and a `return` alike) is computed from the SINK type before
+> `sink_payload` unwraps a carrier, so `fn f() -> List[float]?: return [1, 2]` stays rejected even
+> though the bare `-> List[float]` sink widens.
 > (An `= []` empty binding plus later `.push` also works and is equally valid.)
 > A **never-constrained** empty — one that nothing ever pins or constrains (e.g. `b := []` that is only
 > *read* into an untyped sink: `print(b)`, `b.len()`) — is a **static error**: `cannot infer element type
@@ -3865,9 +3868,9 @@ defining `compare`), stable, in place.
 > binding, a typed function parameter (`f(b)` where the param is `List[int]`), or a typed `return`. The
 > direct-literal forms (`f([])`, `return []`, `c: List[int] = []`) likewise leave no un-inferred slot, so
 > those never error. **Every constraining use with a CONCRETE sink also PINS the element type**, exactly
-> like the first `push` — for those, being constrained and being pinned are one operation. (The one
-> exception is the un-annotated alias below, which has no concrete sink to pin from; it is the last
-> remaining hole in the rule.) So
+> like the first `push` — for those, being constrained and being pinned are one operation. (An
+> un-annotated alias has no concrete sink to pin from, so the requirement instead MOVES, and joins a pin
+> group with the source binding — see below.) So
 > `b := []` / `f(b)` (param `List[str]`) / `b.push(1)` is a type error, and so are the reassign
 > (`b = [1, 2]` then `b.push("a")`), the typed sink (`c: List[int] = b` then `b.push("a")`), the typed
 > `return`, and the same shapes reached through a **generic** call whose parameter a sibling argument
@@ -3893,26 +3896,33 @@ defining `compare`), stable, in place.
 > on the same rule: `y := if c: f(xs) else: g(xs)` with `f` taking `List[str]` and `g` taking `List[int]`
 > is rejected, because one binding cannot be both. Limitations: refinement fires only on a
 > **simple-variable** receiver (`obj.field.push(…)` / `xss[0].push(…)` are not refined — annotate
-> those), and the one remaining uncaught sliver is an **un-annotated alias**: `c := b` has no concrete
-> sink to pin from, so the requirement moves to `c` and the two names are then pinned independently
-> while sharing one runtime list. This is not merely a mixed print — the two static types disagree
-> about a value they share, so it reaches a typed parameter and faults at run time:
+> those). An **un-annotated alias** (`c := b`, or a whole-binding `c = b` where both sides are still
+> unrefined) has no concrete sink to pin from, so the requirement moves to `c` and the two names join a
+> **pin group**: pinning either name reaches both, because Python owns aliasing here and Chezzi follows
+> its measured behavior — `b = []; c = b; c.append(1)` prints `[1] [1] True` for `b, c, b is c`, and
+> the checker's pin group IS that `b is c`.
 >
 > ```
 > fn addstr(xs: List[str]) -> str:
 >     return xs[0].upper()
 > b := []
-> c := b            # alias: the requirement moves to `c`, `b` is left unpinned
-> c.push(1)         # pins `c` to List[int]; `b` is still List[Unknown]
-> print(addstr(b))  # ok: no type errors — then at run time:
->                   # runtime error: type int has no method 'upper'
+> c := b            # alias: joins b's pin group
+> c.push(1)         # pins c to List[int] — b is pinned too
+> print(addstr(b))  # type error: argument 1 of 'addstr': expected List[str], found List[int]
 > ```
 >
-> **Annotate either binding to close it** (`b: List[int] = []`, or `c: List[int] = b`) — an annotated
-> sink pins through the alias. Closing it in the checker needs alias-identity tracking, which would
-> newly reject a rebound alias (`c := b` then `c = [1, 2]` then `b.push("a")`); a false rejection is
-> worse than this missing one, and neither ancestor settles it (Rust forbids the shape outright —
-> `let c = b` moves — and Python has no static element type at all).
+> A **whole-binding reassignment or re-declaration** of either name breaks the pair — the binding no
+> longer names the same runtime object its former partner does — exactly like a rebind breaks Python's
+> `is` identity: `b = []; c = b; c = [1, 2]; b.append("a")` prints `[1, 'a'] [1, 2] False` for
+> `b, c, b is c`, and Chezzi's twin (`b := []` / `c := b` / `c = [1, 2]` / `b.push("a")`) stays
+> `ok: no type errors`, printing `['a']` then `[1, 2]`. The same holds for a **re-declaration**
+> (`b := []` / `c := b` / `b := []` / `c.push(1)` / `b.push("a")` — the second `b := []` is a fresh
+> list, so it stays `ok: no type errors`, printing `['a']` then `[1]`; Python prints `['a'] [1] False`
+> for the twin), and for a **tuple-target** rebind (`c, d = [1, 2], 3` breaks `c`'s pair, same as
+> `c = [1, 2]`). `+=` on a `List` is the one exception: it extends in place and keeps the same handle,
+> so the pair survives `c += [1]`; `*=` and the set compound forms (e.g. `|=`) rebind and break it, like
+> any other reassignment. A tuple-**spelled** link (`c, d = b, 0`) is a known ceiling: it
+> records no pair, so pinning `c` does not reach `b` there.
 >
 > Because the pin is **scope-wide** (not source-order forward), a **non-pinning** use of the binding
 > that appears *before* the pinning op still sees the resolved element type — the checker resolves the
