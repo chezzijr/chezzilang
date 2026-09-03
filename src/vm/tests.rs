@@ -6832,6 +6832,62 @@ fn nursery_deadlock_headline_has_a_real_position() {
         !trace.starts_with("runtime error (line 1, col 1):"),
         "expected a real file/position on the deadlock headline, got:\n{trace}"
     );
+    assert!(
+        trace.contains("main.chz:3:5"),
+        "expected the headline to name the parallel: keyword's position, got:\n{trace}"
+    );
+}
+
+/// TICKET-048 — a bare `spawn` inside a fn body opens an IMPLICIT nursery with no keyword of its
+/// own; its deadlock headline must name the fn body's first statement, not `line 1, col 1`.
+#[test]
+fn implicit_fn_nursery_deadlock_headline_names_the_body_start() {
+    let dir = std::env::temp_dir().join(format!("chezzi_t048_implicit_fn_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.chz");
+    std::fs::write(
+        &entry,
+        "fn main():\n    a := Channel[int]()\n    spawn: a.recv()\n    spawn: a.recv()\nmain()\n",
+    )
+    .unwrap();
+    let (_o, _e, res, _c) = run_file(&entry);
+    let _ = std::fs::remove_dir_all(&dir);
+    let e = res.expect_err("the deadlock must fault");
+    let trace = format_trace(&e);
+    assert!(
+        !trace.starts_with("runtime error (line 1, col 1):"),
+        "expected a real file/position on the deadlock headline, got:\n{trace}"
+    );
+    assert!(
+        trace.contains("main.chz:2:5"),
+        "expected the headline to name the body's first statement, got:\n{trace}"
+    );
+}
+
+/// TICKET-048 — a bare `spawn` at module top level opens an IMPLICIT nursery with no keyword of
+/// its own; its deadlock headline must name the module's first statement, not `line 1, col 1`.
+#[test]
+fn implicit_module_nursery_deadlock_headline_names_the_first_statement() {
+    let dir = std::env::temp_dir().join(format!("chezzi_t048_implicit_mod_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.chz");
+    std::fs::write(
+        &entry,
+        "# a comment line\n\na := Channel[int]()\nspawn: a.recv()\nspawn: a.recv()\n",
+    )
+    .unwrap();
+    let (_o, _e, res, _c) = run_file(&entry);
+    let _ = std::fs::remove_dir_all(&dir);
+    let e = res.expect_err("the deadlock must fault");
+    let trace = format_trace(&e);
+    assert!(
+        !trace.starts_with("runtime error (line 1, col 1):"),
+        "expected a real file/position on the deadlock headline, got:\n{trace}"
+    );
+    assert!(
+        trace.contains("main.chz:3:1"),
+        "expected the headline to name the module's first statement, got:\n{trace}"
+    );
 }
 
 /// W7-51 — a cross-module default is still evaluated PER CALL (Chezzi's documented divergence from
@@ -14470,11 +14526,15 @@ print(\"after\")
              correctly declines (pool.rs risk G3)",
     );
     let _ = std::fs::remove_file(&entry);
-    let msg = res
-        .expect_err("every party is joining an executor that owes work")
-        .message;
+    let err = res.expect_err("every party is joining an executor that owes work");
+    let msg = err.message.clone();
     assert!(msg.contains("deadlock"), "fault was: {msg}");
     assert!(!out.contains("after"), "the join must not return: {out:?}");
+    assert_ne!(
+        err.span.file, 0,
+        "the join-deadlock headline must name a file, got {:?}",
+        err.span
+    );
 }
 
 /// A job that shuts down the executor it is running under leaves that core's submission slots
