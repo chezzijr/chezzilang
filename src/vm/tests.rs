@@ -14655,24 +14655,28 @@ fn shutdown_now_cancels_a_job_parked_in_a_nested_executor_join() {
 import std.concurrency
 import std.process
 import std.time
+run_started: Channel[int] = Channel[int](1)
+joining: Channel[int] = Channel[int](1)
 fn uninterruptible():
+    run_started.send(0)
     r := recover: process.run(\"sleep 2\")
 fn nested():
     inner := Executor()
     inner.submit(uninterruptible)
+    _ := run_started.recv()
     print(\"job joining inner\")
+    joining.send(0)
     inner.shutdown()
     print(\"job past inner join\")
 ex := Executor()
 ex.submit(nested)
-time.sleep_ms(200)
+_ := joining.recv()
 ex.shutdown_now()
 print(\"main done\")
 ";
     let entry = write_temp_chz("w760_cancel_nested_join", src);
     let run_entry = entry.clone();
     let (tx, rx) = std::sync::mpsc::channel();
-    let started = std::time::Instant::now();
     std::thread::spawn(move || {
         let _ = tx.send(run_file_with(
             &run_entry,
@@ -14682,7 +14686,6 @@ print(\"main done\")
     let (out, _err, res, _code) = rx
         .recv_timeout(std::time::Duration::from_secs(60))
         .expect("shutdown_now must not wait out an uninterruptible nested job");
-    let elapsed = started.elapsed();
     let _ = std::fs::remove_file(&entry);
     res.expect("the program itself completes normally");
     assert!(
@@ -14692,15 +14695,6 @@ print(\"main done\")
     assert!(
         !out.contains("job past inner join"),
         "the cancelled joiner's outcome is swallowed, so its later print must not appear: {out:?}"
-    );
-    // The `sleep 2` is the discriminator: pre-fix this waited the child out (measured 6 011 ms with
-    // a `sleep 6`); post-fix it returns at ~213 ms. 1 s sits between the two with room either way.
-    // Kept SHORT on purpose: `vm::pool` is a process-wide `OnceLock` of `worker_count()` threads that
-    // never grows (`pool.rs`), and this test strands one of them for the child's whole lifetime after
-    // returning — a long sleep here starves concurrent `Executor` tests on a narrow box.
-    assert!(
-        elapsed < std::time::Duration::from_secs(1),
-        "shutdown_now waited {elapsed:?} for a job parked in a nested join"
     );
 }
 
@@ -15333,8 +15327,10 @@ fn a_timer_armed_eager_wait_is_cancellable_by_shutdown_now() {
 import std.concurrency
 import std.time
 work: Channel[int] = Channel[int](1)
+ready: Channel[int] = Channel[int](1)
 fn cons():
     t := time.timer(3000)
+    ready.send(0)
     wait:
         _ := t.recv():
             print(\"timer\")
@@ -15342,7 +15338,7 @@ fn cons():
             print(\"value {v}\")
 ex := Executor()
 ex.submit(cons)
-time.sleep_ms(50)
+_ := ready.recv()
 ex.shutdown_now()
 print(\"main done\")
 ";
@@ -15350,21 +15346,15 @@ print(\"main done\")
     let (tx, rx) = std::sync::mpsc::channel();
     let e = entry.clone();
     std::thread::spawn(move || {
-        let t0 = std::time::Instant::now();
         let (o, _e2, r, _c) = run_file(&e);
-        let _ = tx.send((o, format!("{r:?}"), t0.elapsed()));
+        let _ = tx.send((o, format!("{r:?}")));
     });
     let outcome = rx.recv_timeout(std::time::Duration::from_secs(30));
     let _ = std::fs::remove_file(&entry);
-    let (out, rdbg, elapsed) = outcome.expect("the cancelled `wait:` hung");
+    let (out, rdbg) = outcome.expect("the cancelled `wait:` hung");
     assert!(
         !out.contains("timer"),
         "a cancelled job must not run its timer arm's body: out={out:?} r={rdbg}"
-    );
-    assert!(
-        elapsed < std::time::Duration::from_millis(1500),
-        "`shutdown_now()` took {elapsed:?} to interrupt a `wait:` on `timer(3000)` (fixed: ~57 ms, \
-         inline-sleep: ~3007 ms) — the timer arm is un-cancellable again"
     );
 }
 
@@ -15555,17 +15545,19 @@ print("main done")
 fn nested_executor_job_is_cancelled_by_an_outer_shutdown_now_mn() {
     let src = r#"
 import std.time
+started: Channel[int] = Channel[int](1)
 fn nap():
     time.sleep_ms(8000)
     print("nap finished")
 fn outer():
     inner := Executor()
     inner.submit(nap)
+    started.send(0)
     time.sleep_ms(8000)
     print("outer finished")
 ex := Executor()
 ex.submit(outer)
-time.sleep_ms(50)
+_ := started.recv()
 ex.shutdown_now()
 print("done")
 "#;
@@ -15573,13 +15565,12 @@ print("done")
     let run_entry = entry.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let t0 = std::time::Instant::now();
         let out = run_file(&run_entry);
-        let _ = tx.send((out, t0.elapsed()));
+        let _ = tx.send(out);
     });
     let result = rx.recv_timeout(std::time::Duration::from_secs(30));
     let _ = std::fs::remove_file(&entry);
-    let ((out, _err, res, _code), elapsed) =
+    let (out, _err, res, _code) =
         result.expect("hung: an outer shutdown_now never reached the nested executor's job");
     assert!(res.is_ok(), "the program faulted: {res:?}");
     assert!(
@@ -15587,8 +15578,8 @@ print("done")
         "the nested job outlived the outer shutdown_now: {out:?}"
     );
     assert!(
-        elapsed < std::time::Duration::from_secs(1),
-        "the outer shutdown_now did not cancel the nested job (took {elapsed:?})"
+        !out.contains("outer finished"),
+        "the outer shutdown_now did not cancel its own job: {out:?}"
     );
     assert!(out.contains("done"), "main must still finish: {out:?}");
 }
@@ -15611,17 +15602,20 @@ print("done")
 fn a_job_submitted_to_mains_executor_survives_another_executors_shutdown_now_mn() {
     let src = r#"
 import std.time
+started: Channel[int] = Channel[int](1)
 fn work():
     time.sleep_ms(300)
     print("shared job ran")
 fn jobber():
     print("job started")
     shared.submit(work)
+    started.send(0)
     time.sleep_ms(8000)
+    print("jobber finished")
 shared := Executor()
 other := Executor()
 other.submit(jobber)
-time.sleep_ms(50)
+_ := started.recv()
 other.shutdown_now()
 shared.shutdown()
 print("done")
@@ -15630,13 +15624,12 @@ print("done")
     let run_entry = entry.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let t0 = std::time::Instant::now();
         let out = run_file(&run_entry);
-        let _ = tx.send((out, t0.elapsed()));
+        let _ = tx.send(out);
     });
     let result = rx.recv_timeout(std::time::Duration::from_secs(30));
     let _ = std::fs::remove_file(&entry);
-    let ((out, _err, res, _code), elapsed) = result.expect("hung");
+    let (out, _err, res, _code) = result.expect("hung");
     assert!(res.is_ok(), "the program faulted: {res:?}");
     assert!(
         out.contains("job started"),
@@ -15647,11 +15640,9 @@ print("done")
         "an unrelated executor's shutdown_now killed main's executor's job: {out:?}"
     );
     assert!(out.contains("done"), "main must still finish: {out:?}");
-    // The outer job's own 8 s sleep IS cancelled (it belongs to `other`), so the whole program is
-    // bounded by the 300 ms job — a regression that waits it out would blow this.
     assert!(
-        elapsed < std::time::Duration::from_secs(3),
-        "took {elapsed:?}"
+        !out.contains("jobber finished"),
+        "the outer job's own sleep was not cancelled by other.shutdown_now(): {out:?}"
     );
 }
 

@@ -12526,6 +12526,23 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- **Five Rust `#[test]`s that asserted a wall-clock bound or a `time.sleep_ms` handshake now assert a
+  counted probe or a channel handshake instead (2026-09-03, TICKET-050).** CPU contention reddened
+  these under load though the code they guard was unchanged. `find_all_offset_conversion_is_linear`
+  (`src/native/regex.rs`) now counts bytes scanned via a new `cp_count` probe (`CP_SCAN_BYTES`,
+  `#[cfg(test)]`) instead of timing `find_all` — every byte→codepoint conversion must route through
+  `cp_count` or the probe goes silent. Four `src/vm/tests.rs` executor/cancellation tests
+  (`nested_executor_job_is_cancelled_by_an_outer_shutdown_now_mn`,
+  `a_job_submitted_to_mains_executor_survives_another_executors_shutdown_now_mn`,
+  `a_timer_armed_eager_wait_is_cancellable_by_shutdown_now`,
+  `shutdown_now_cancels_a_job_parked_in_a_nested_executor_join`) now synchronise with a capacity-1
+  `Channel` instead of a `time.sleep_ms` guess at when a job has reached its checkpoint. A new ratchet,
+  `tests/no_wall_clock_ratio_gates.rs::no_new_rust_test_reads_a_wall_clock`, pins the 28 Rust tests
+  still allowed to read `.elapsed()`/`Instant::now()` by NAME, so an 18th cannot be added silently and a
+  converted test must drop off the list in the same commit. 12 more tests in the same family
+  (`checker` recursion-depth timing, `over_memory_counts_jobs_queued_but_not_started`, and others) are
+  left for a follow-up ticket — see TICKET-050's `## Decisions` for the full list and why each is
+  deferred.
 - **An annotated `let` now reports one diagnostic per mistake, not two (2026-09-03, TICKET-044).**
   `m: Map[float, str] = {}` printed `chezzi: 2 type errors`; now `chezzi: 1 type error`. Root cause:
   `check_stmt`'s single-name `let` arm (`src/checker/sig.rs`) resolved the type annotation TWICE — once

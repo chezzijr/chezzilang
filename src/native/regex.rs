@@ -71,6 +71,23 @@ struct CpCursor {
     cp: i64,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Bytes fed to `cp_count` this test (TICKET-050). Every byte→codepoint conversion must route
+    /// through `cp_count` — a caller that writes `seg.chars().count()` inline disarms
+    /// `find_all_offset_conversion_is_linear`'s probe (DEC-049's key-type rule).
+    static CP_SCAN_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Codepoint count of `seg`, the sole primitive a byte→codepoint conversion may use. Charges the
+/// scanned byte length to `CP_SCAN_BYTES` under `#[cfg(test)]` so a from-zero rescan (rather than a
+/// forward-only cursor) is visible to a test as an O(n²) byte count, not just a wall clock.
+fn cp_count(seg: &str) -> i64 {
+    #[cfg(test)]
+    CP_SCAN_BYTES.with(|c| c.set(c.get() + seg.len()));
+    seg.chars().count() as i64
+}
+
 impl CpCursor {
     fn new() -> Self {
         CpCursor { byte: 0, cp: 0 }
@@ -80,7 +97,7 @@ impl CpCursor {
     /// boundary — the `regex` crate's spans over a `&str` are char-aligned).
     fn at(&mut self, s: &str, to: usize) -> i64 {
         debug_assert!(to >= self.byte, "CpCursor must advance forward");
-        self.cp += s[self.byte..to].chars().count() as i64;
+        self.cp += cp_count(&s[self.byte..to]);
         self.byte = to;
         self.cp
     }
@@ -299,19 +316,23 @@ mod tests {
 
     /// The byte→codepoint conversion must be LINEAR in the subject across a whole `find_all`, not a
     /// from-zero prefix rescan per match (that is O(n·m) — a document scan turns into a hang).
-    /// 200k matches over a 400k-char subject: ~8e10 byte steps if quadratic (measured 2.9s in a debug
-    /// build, and it grows with the square), ~400k if linear (measured ~0.1s, allocs dominating).
+    /// A forward-only cursor scans each of the subject's 399_999 bytes at most once; a from-zero
+    /// rescan per span instead scans 79999800000 (measured by reverting `CpCursor::at` to
+    /// `cp_count(&s[..to])`, TICKET-050 step 3). Counted, not timed — a wall-clock bound here
+    /// measures the machine under load, not the code (TICKET-050).
     #[test]
     fn find_all_offset_conversion_is_linear() {
         let subj = "a ".repeat(200_000);
-        let t = std::time::Instant::now();
+        CP_SCAN_BYTES.with(|c| c.set(0));
         let ms = do_find_all("a", &subj).unwrap();
-        let dt = t.elapsed();
+        let scanned = CP_SCAN_BYTES.with(|c| c.get());
         assert_eq!(ms.len(), 200_000);
         assert_eq!((ms[199_999].start, ms[199_999].end), (399_998, 399_999));
-        assert!(
-            dt < std::time::Duration::from_secs(1),
-            "find_all offset conversion looks quadratic: {dt:?}"
+        assert_eq!(
+            scanned, 399_999,
+            "find_all offset conversion looks quadratic: scanned {scanned} bytes, expected 399_999 \
+             (a forward-only cursor scans each subject byte at most once; a from-zero rescan per \
+             span scans 79999800000)"
         );
     }
 
