@@ -13,9 +13,10 @@
 # piping yet, so the `< case.in` shell redirection feeds the case input.)
 #
 # Usage (from the repo root, after `cargo build --release`):
-#   ./target/release/chezzi run judge/run.chz            # all problems
-#   ./target/release/chezzi run judge/run.chz <slug>     # one problem
-# Exits non-zero if any case fails.
+#   ./target/release/chezzi run judge/run.chz                   # all problems
+#   ./target/release/chezzi run judge/run.chz <slug>            # one problem
+#   ./target/release/chezzi run judge/run.chz --samples-only    # committed samples only (the cargo gate)
+# Exits non-zero if any case fails. `CHEZZI_BIN` overrides the binary under test.
 
 import std.io
 import std.fs
@@ -47,7 +48,7 @@ fn norm_lines(s: str) -> List[str]:
     for l in s.split_lines():
         out.push(l.trim())
     while out.len() > 0 and out[out.len() - 1] == "":
-        out.pop()
+        _ := out.pop()
     return out
 
 fn first_diff(got: List[str], want: List[str]) -> str:
@@ -72,12 +73,21 @@ fn first_line(s: str) -> str:
         return ls[0]
     return ""
 
-# All `.in` case paths for a slug: committed samples first, then downloaded full suite.
-fn case_inputs(slug: str) -> List[str]:
-    ins := []
-    for pat in ["judge/problems/{slug}/samples/*.in", "judge/data/{slug}/*.in"]:
+# All `.in` case paths for a slug: committed samples first, then the generated/downloaded suite
+# (skipped when `samples_only`, so the cargo gate sees exactly the committed cases).
+# `fs.glob` hands back `List[path.Path]` (W7-8), and every consumer below - the shell command
+# string, `strip_suffix`, the printed verdict - is `str`, so each entry is rendered once here
+# with the lossy, never-faulting `Path.str()`.
+fn case_inputs(slug: str, samples_only: bool) -> List[str]:
+    ins: List[str] = []
+    pats := ["judge/problems/{slug}/samples/*.in"]
+    if not samples_only:
+        pats.push("judge/data/{slug}/*.in")
+    for pat in pats:
         match fs.glob(pat):
-            Ok(paths): ins.extend(paths)
+            Ok(paths):
+                for p in paths:
+                    ins.push(p.str())
             Err(e):    ins.extend([])
     return ins
 
@@ -107,7 +117,10 @@ fn find_problems(only: str) -> List[str]:
     out := []
     match fs.list_dir("judge/problems"):
         Ok(names):
-            for name in names:
+            for entry in names:
+                # `fs.list_dir` hands back `List[path.Path]`; the slug is compared and
+                # interpolated as `str`, so render it once here.
+                name := entry.str()
                 if only != "" and name != only:
                     continue
                 if fs.is_file("judge/problems/{name}/solution.chz"):
@@ -117,12 +130,17 @@ fn find_problems(only: str) -> List[str]:
     return out
 
 fn main():
-    chezzi := "./target/release/chezzi"
+    # `CHEZZI_BIN` lets the cargo gate point the harness at the binary cargo just built
+    # (`target/debug/chezzi` under a plain `cargo test`); the release build stays the default.
+    chezzi := os.env("CHEZZI_BIN") ?? "./target/release/chezzi"
     timeout_s := 10
     only := ""
-    args := os.args()
-    if args.len() > 0:
-        only = args[0]
+    samples_only := false
+    for a in os.args():
+        if a == "--samples-only":
+            samples_only = true
+        else:
+            only = a
 
     problems := find_problems(only)
     if problems.len() == 0:
@@ -135,7 +153,7 @@ fn main():
 
     for slug in problems:
         sol := "judge/problems/{slug}/solution.chz"
-        inputs := case_inputs(slug)
+        inputs := case_inputs(slug, samples_only)
         if inputs.len() == 0:
             skipped += 1
             print("SKIP  {slug}  (no cases — commit samples/ or run: python3 judge/generate.py {slug})")
