@@ -288,16 +288,20 @@ fn glob(h: &mut dyn Host) -> Result<NativeRet, HostError> {
         return Ok(NativeRet::Err(format!("{shown_pat}: {msg}")));
     }
     let scan: &[u8] = if dir.is_empty() { b"/" } else { dir };
+    // Go `filepath.Glob` ignores I/O errors reading directories (measured Go 1.26.6:
+    // `Glob("nope/*")`, `Glob("noperm/*")` and `Glob("plain.txt/*")` all give `[] err=<nil>`), and
+    // its `readDirNames` discards the per-entry `Readdirnames` error the same way. `check_pattern`
+    // above still runs first (DEC-012): only these two I/O arms change.
     let rd = match std::fs::read_dir(bytes_path(scan)) {
         Ok(rd) => rd,
-        Err(e) => return Ok(NativeRet::Err(format!("{shown_pat}: {e}"))),
+        Err(_) => return Ok(NativeRet::Ok(Box::new(NativeRet::List(Vec::new())))),
     };
     let has_slash = pattern.contains(&b'/');
     let mut hits: Vec<Vec<u8>> = Vec::new();
     for entry in rd {
         let name = match entry {
             Ok(e) => path_bytes(Path::new(&e.file_name())),
-            Err(e) => return Ok(NativeRet::Err(format!("{shown_pat}: {e}"))),
+            Err(_) => continue,
         };
         if wildcard_match(pat, &name) {
             // Re-attach the directory prefix the caller wrote, so results are usable paths.
