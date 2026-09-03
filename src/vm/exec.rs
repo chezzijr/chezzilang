@@ -2610,6 +2610,7 @@ impl Vm {
                         true => self.scope_ancestors(),
                         false => Vec::new(),
                     },
+                    created_at: span,
                     ..Default::default()
                 });
                 // Heap-independent registration for the program-exit join (W7-5b) — this is the one

@@ -4312,7 +4312,11 @@ impl Vm {
     /// A joiner running inside a nursery task is NOT a counted party and so does not register: a
     /// sibling task may be the very producer the blocked job needs (pinned by
     /// `executor_job_keeps_waiting_when_shutdown_runs_beside_a_live_producer`).
-    pub(super) fn join_eager_jobs(&mut self, core: &Arc<ExecutorCore>) -> Result<(), RuntimeError> {
+    pub(super) fn join_eager_jobs(
+        &mut self,
+        core: &Arc<ExecutorCore>,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
         // A JOIN NEVER WAITS FOR ITSELF. When this thread is an eager job OF THIS CORE — a job that
         // calls `ex.shutdown()`/`ex.shutdown_now()` on the executor it is running under — its own
         // slot is one of the `outstanding` below and stays so until it returns from here. Waiting
@@ -4382,13 +4386,13 @@ impl Vm {
                 // on a verdict this thread might then discard as stale. Checked on every wake, not
                 // only a timed-out one: they are free, and a notified wake is as good a moment as
                 // any to notice the run is over.
-                if let Err(e) = self.deadline_halt(Span::RUNTIME) {
+                if let Err(e) = self.deadline_halt(span) {
                     bail = Some(e);
                     break;
                 }
                 if self.cancel_requested() {
                     self.cancelled = true;
-                    bail = Some(self.err("cancelled".to_string(), Span::RUNTIME));
+                    bail = Some(self.err("cancelled".to_string(), span));
                     break;
                 }
                 // The deadlock verdict keeps BOTH of its old gates: only on a timed-out wait (a
@@ -4405,7 +4409,7 @@ impl Vm {
                 // Re-check under the re-taken lock: a job may have finished in the gap, which is
                 // progress and makes the verdict stale.
                 if verdict && g.outstanding() > slack {
-                    bail = Some(self.err(JOIN_DEADLOCK_MSG.to_string(), Span::RUNTIME));
+                    bail = Some(self.err(JOIN_DEADLOCK_MSG.to_string(), span));
                     break;
                 }
             }

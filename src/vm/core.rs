@@ -14,6 +14,7 @@
 
 use super::value::GcRef;
 use super::wire::{WireGenState, WireValue};
+use crate::lexer::Span;
 use std::collections::{HashMap, VecDeque};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
@@ -1077,6 +1078,11 @@ pub struct ExecutorCore {
     /// core whose join just reported a deadlock would undo the "last chance to ask" reasoning in
     /// `join_eager_jobs`. Only the self-join promises someone else will reduce, so only it marks.
     pub unreduced: AtomicBool,
+    /// TICKET-048 — the source span of the `Op::NewExecutor` that built this core. The program-exit
+    /// drain (`Vm::drain_live_executors`) joins this executor from no source position of its own, so
+    /// its `JOIN_DEADLOCK_MSG` fault names the `Executor()` call instead of claiming a false
+    /// `line 1, col 1`.
+    pub created_at: Span,
 }
 
 /// Every `ExecutorCore` created during one run, in creation order — the list the program-exit join

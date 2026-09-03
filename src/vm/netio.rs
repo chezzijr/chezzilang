@@ -3819,7 +3819,7 @@ impl Vm {
                 // which is what lets a job blocked on a channel only THIS caller could have filled
                 // fault instead of hanging both of us forever. Nothing to arm here any more: the
                 // verdict is process-wide, so it no longer matters WHICH join a thread is in.
-                self.join_eager_jobs(&core)?;
+                self.join_eager_jobs(&core, span)?;
                 Ok(Value::nil())
             }
             "shutdown_now" => {
@@ -3847,7 +3847,7 @@ impl Vm {
                 // Cancelled jobs are swallowed by `reduce_task_slots` (their output still flushes
                 // at their slot), so this raises a fault only if a job genuinely faulted before
                 // the trip landed.
-                self.join_eager_jobs(&core)?;
+                self.join_eager_jobs(&core, span)?;
                 Ok(Value::nil())
             }
             _ => Err(self.err(format!("type Executor has no method '{method}'"), span)),
@@ -3896,7 +3896,9 @@ impl Vm {
                 .map(Arc::clone);
             let Some(core) = next else { break };
             core.inner.lock().unwrap_or_else(|e| e.into_inner()).shut = true;
-            self.join_eager_jobs(&core)?;
+            // TICKET-048 — the program-exit drain has no call site of its own, so it names where
+            // this Executor was created.
+            self.join_eager_jobs(&core, core.created_at)?;
             if self.pending_exit.is_some() {
                 break; // a joined job called os.exit — hard halt, stop joining
             }
