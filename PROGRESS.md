@@ -7,6 +7,23 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **A nursery-deadlock or Executor-join-deadlock fault headline no longer claims a false
+  `line 1, col 1` (W8-14 residual, TICKET-048).** Three sites raised `DEADLOCK_MSG`/
+  `JOIN_DEADLOCK_MSG` with `Span::RUNTIME` — `run_mn_nursery_outermost` and `activate_eager_nursery`
+  in `src/vm/sched.rs`, and `Vm::join_eager_jobs` (also reached by `pmap_limited(xs, f, 0)`) — so
+  each fault's headline rendered `line 1, col 1` with no file even though the frame below it named a
+  real position. Fixed by threading a real span to each raise site: a new `Vm::nursery_spans` stack
+  (lockstep with `Vm::nurseries`, also carried in `FiberCtx` and swapped in `swap_ctx`) carries the
+  span of the construct that opened each nursery — the `parallel:` keyword, or (for a bare-`spawn`
+  implicit nursery, which has no keyword of its own) the first statement of the block it covers, at
+  the two `Op::EnterNursery` emit sites in `src/compiler/mod.rs` that used to pass `Span::RUNTIME`.
+  `ExecutorCore` gained a `created_at: Span` field, set at `Op::NewExecutor`, so
+  `Vm::drain_live_executors` — the program-exit drain, which has no call site of its own to name —
+  can pass it to `join_eager_jobs`; the two `Executor`-method call sites pass their own call span
+  instead. Before: `runtime error (line 1, col 1): deadlock: ...`. After, on the ticket's repro:
+  `runtime error (/tmp/t048/d3.chz:3:5): deadlock: ...`. Gate: `cargo test` 4714 passed / 0 failed
+  across 30 targets (up from 4711 across 30, `chz_suite_passes` and
+  `chz_suite_passes_at_a_second_worker_count` both green); `cargo clippy -- -D warnings` clean.
 - **`judge/run.chz` — the DSA known-answer bug-finding harness — bit-rotted silently against
   `std.fs`'s `Path`-returning `glob`/`list_dir`, and had no gate to catch it (TICKET-047).**
   `case_inputs` and `find_problems` still treated `fs.glob`/`fs.list_dir` entries as `str`, so
