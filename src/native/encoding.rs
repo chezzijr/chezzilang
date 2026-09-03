@@ -354,10 +354,16 @@ fn url_parse(h: &mut dyn Host) -> Result<NativeRet, HostError> {
         }
         None => String::new(),
     };
-    let (scheme, host, port, path) = match rest.find("://") {
-        Some(idx) => {
-            let scheme = rest[..idx].to_string();
-            let after = &rest[idx + 3..];
+    // A protocol-relative URL (`//host/path`, no scheme) also has an authority to split — measured
+    // Go 1.26.6 `url.Parse` and CPython 3.14.7 `urlsplit` agree: `//h/p` -> host "h", path "/p".
+    // `///p` follows CPython here (empty host, path "/p"), not Go's RFC-3986 special case that keeps
+    // `///p` whole in path — see ## Decisions.
+    let after_scheme = match rest.find("://") {
+        Some(idx) => Some((rest[..idx].to_string(), &rest[idx + 3..])),
+        None => rest.strip_prefix("//").map(|a| (String::new(), a)),
+    };
+    let (scheme, host, port, path) = match after_scheme {
+        Some((scheme, after)) => {
             let (authority, path) = match after.find('/') {
                 Some(p) => (&after[..p], after[p..].to_string()),
                 None => (after, String::new()),
@@ -682,5 +688,18 @@ mod tests {
         assert_eq!(field(&scheme_less, "port"), "");
         assert_eq!(field(&scheme_less, "path"), "/local");
         assert_eq!(field(&scheme_less, "query"), "y=2");
+
+        // Protocol-relative `//host/path` — measured Go 1.26.6 `url.Parse` and CPython 3.14.7
+        // `urlsplit` agree: host="h", path="/p".
+        let proto_rel = up("//h/p");
+        assert_eq!(field(&proto_rel, "host"), "h");
+        assert_eq!(field(&proto_rel, "path"), "/p");
+        assert_eq!(field(&proto_rel, "scheme"), "");
+
+        // The `//` form inherits the SAME last-`:` userinfo ceiling as the `scheme://` form
+        // (measured today: `http://u:pw@h/p` gives host `u`, port `pw@h`).
+        let proto_rel_userinfo = up("//u:pw@h/p");
+        assert_eq!(field(&proto_rel_userinfo, "host"), "u");
+        assert_eq!(field(&proto_rel_userinfo, "port"), "pw@h");
     }
 }

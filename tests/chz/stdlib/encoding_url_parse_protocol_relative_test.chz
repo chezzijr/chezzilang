@@ -11,3 +11,30 @@ test fn url_parse_splits_protocol_relative_host_and_path():
     assert parts["host"] == "h", str(parts)
     assert parts["path"] == "/p", str(parts)
     assert parts["scheme"] == "", str(parts)
+
+test fn url_parse_protocol_relative_edge_shapes():
+    p1 := enc.url_parse("//h")
+    assert p1["host"] == "h", str(p1)
+    assert p1["path"] == "", str(p1)
+
+    p2 := enc.url_parse("//h:8080/p?x=1#f")
+    assert p2["host"] == "h", str(p2)
+    assert p2["port"] == "8080", str(p2)
+    assert p2["path"] == "/p", str(p2)
+    assert p2["query"] == "x=1", str(p2)
+    assert p2["fragment"] == "f", str(p2)
+
+    # Follows CPython `urlsplit("///p")` (netloc='', path='/p'), not Go's `url.Parse` special case
+    # (which keeps `///p` whole in path) — see ## Decisions.
+    p3 := enc.url_parse("///p")
+    assert p3["host"] == "", str(p3)
+    assert p3["path"] == "/p", str(p3)
+
+    # The unchanged `//`-less-scheme ceiling.
+    p4 := enc.url_parse("mailto:x")
+    assert p4["scheme"] == "", str(p4)
+    assert p4["path"] == "mailto:x", str(p4)
+
+    # A `//` that is not at the start is plain path text.
+    p5 := enc.url_parse("a//b")
+    assert p5["path"] == "a//b", str(p5)
