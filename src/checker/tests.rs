@@ -28378,6 +28378,19 @@ fn witness_static_call_forwarding_ok() {
     );
 }
 
+/// TICKET-056 — the explicit-turbofish spelling of a static-call forward
+/// (`inner[T](n)`) is rejected even though `T` is declared by the enclosing
+/// FUNCTION (`outer`) and the call site is directly in that body — exactly
+/// the condition the diagnostic says carries a witness. `CallSite` (unlike
+/// `MemberCall`) has no `type_args` field, so `call_forwards_a_witness`
+/// cannot see the turbofish and never charges `outer`'s `T`.
+#[test]
+fn witness_static_call_forwarding_via_turbofish_ok() {
+    entry_ok(
+        "protocol Mk:\n    fn make(n: int) -> Self\n    fn val(self) -> int\nstruct B:\n    n: int\n    fn make(n: int) -> B:\n        return B(n * 10)\n    fn val(self) -> int:\n        return self.n\nfn inner[T: Mk](n: int) -> int:\n    return T.make(n).val()\nfn outer[T: Mk](n: int) -> int:\n    return inner[T](n)\nfn main():\n    print(outer[B](4))\nmain()\n",
+    );
+}
+
 /// M24 Task 4 — the `$w:T` binding REACHES a nested body: `with_witness_captures` appends it to the
 /// capture entries of every closure, nested `fn`, `spawn:` block and `defer:` block, so `T.static()`
 /// inside one lowers to the same `CallStaticDyn`. The witness is a `str`, so it crosses BY VALUE —
