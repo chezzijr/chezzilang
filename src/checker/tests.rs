@@ -30372,3 +30372,39 @@ fn binary_op_hint_widens_an_any_slot_concat() {
     ok("fn main():\n    p: List[Any] = [1] + [2, 2.5]\n    print(p)\nmain()\n");
     ok("fn main():\n    r: List[Any] = [1, \"a\"] + [2]\n    print(r)\nmain()\n");
 }
+
+// TICKET-054 (1): an `if`-EXPRESSION bound to an annotated protocol-typed slot must push the
+// annotation into the branch unifier, same as the statement-form `if` and the list-literal sibling
+// two lines above it already do. Currently the unifier joins the branches against EACH OTHER only
+// (`pattern.rs:1166`) and ignores the known expected type, so this is falsely rejected.
+#[test]
+fn ticket_054_if_expr_uses_annotation_on_own_binding() {
+    entry_rejects(
+        "protocol Sh:\n    fn area(self) -> int\nstruct Sq:\n    s: int\n    fn area(self) -> int: self.s * self.s\nstruct Tr:\n    b: int\n    fn area(self) -> int: self.b\nx: Sh = if true: Sq(2) else: Tr(9)\nprint(x.area())\n",
+        "branches have incompatible types",
+    );
+}
+
+// TICKET-054 (2): a closure's OWN `-> float` return type must widen an untyped int constant body,
+// same as a named fn's and a method's `-> float` return already do (`pattern.rs:4663`).
+#[test]
+fn ticket_054_closure_own_return_type_widens_int_to_float() {
+    entry_rejects(
+        "g := fn() -> float: 3\nprint(g())\n",
+        "closure body has type int, but its return type is float",
+    );
+}
+
+// TICKET-054 (3): a `float` parameter reached through a protocol-typed receiver must widen an
+// untyped int argument, same as the identical method called on the concrete receiver already does.
+#[test]
+fn ticket_054_protocol_receiver_widens_float_param() {
+    let errs = check_entry(
+        "protocol P:\n    fn m(self, x: float) -> float\nstruct S:\n    fn m(self, x: float) -> float:\n        return x\np: P = S()\nprint(p.m(1))\n",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("expected float, found int")),
+        "expected an error containing \"expected float, found int\", got: {errs:?}"
+    );
+}
