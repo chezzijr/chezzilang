@@ -17,8 +17,8 @@ match fs.parse(["--name", "alice", "--count=3", "--verbose", "--", "--extra", "p
     Err(e):
         print("parse failed: {e.message()}")
 
-# Unregistered flags/values before parse read their registered default.
-print("default name = {fs.get_str(\"name\")}")   # still "alice" after the parse above
+# get_* reads the LIVE value; usage() reads the registered default
+print("live name = {fs.get_str(\"name\")}")   # still "alice" after the parse above
 
 # bool `=`-form accepts the Go strconv.ParseBool set (1/t/T/TRUE/True, 0/f/F/FALSE/False).
 v1 := flag.new()

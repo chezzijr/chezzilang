@@ -35,6 +35,7 @@ struct FlagSet:
     names: List[str]        # registration order → deterministic usage()
     kind: Map[str, str]     # name -> "str" | "bool" | "int" (also the "is registered?" set)
     help: Map[str, str]     # name -> help text
+    defs: Map[str, str]     # name -> the default RENDERED at registration (the Go Flag.DefValue analog); parse never writes it
     strs: Map[str, str]     # str values (seeded with the default at registration)
     bools: Map[str, bool]
     ints: Map[str, int]
@@ -46,6 +47,7 @@ struct FlagSet:
         self.kind[name] = "str"
         self.help[name] = help
         self.strs[name] = default
+        self.defs[name] = default
 
     # Register a bool flag (presence => true) with a default value and help text.
     fn bool_flag(self, name: str, default: bool, help: str):
@@ -53,6 +55,7 @@ struct FlagSet:
         self.kind[name] = "bool"
         self.help[name] = help
         self.bools[name] = default
+        self.defs[name] = str(default)
 
     # Register an int flag with a default value and help text.
     fn int_flag(self, name: str, default: int, help: str):
@@ -60,6 +63,7 @@ struct FlagSet:
         self.kind[name] = "int"
         self.help[name] = help
         self.ints[name] = default
+        self.defs[name] = str(default)
 
     # Parse `args` into the registered flags. Returns `Ok(positionals)` on success (folding Go's
     # `Parse()` + `Args()` into one), or a clean `Err` on an unknown flag / missing value / non-int.
@@ -163,22 +167,17 @@ struct FlagSet:
     fn positionals(self) -> List[str]:
         return self.pos
 
-    # The default value of `name` (of kind `kind`) rendered as a string, for `usage()`.
+    # The default value REGISTERED for `name` (of kind `kind`), never the parsed value, rendered as
+    # a string for `usage()` (the Go `Flag.DefValue` analog — captured once at registration).
     fn default_str(self, name: str, kind: str) -> str:
-        if kind == "str":
-            match self.strs.get(name):
-                Some(v): return v
-                None: return ""
-        if kind == "int":
-            match self.ints.get(name):
-                Some(v): return str(v)
-                None: return "0"
-        match self.bools.get(name):
-            Some(v):
-                if v:
-                    return "true"
+        match self.defs.get(name):
+            Some(v): return v
+            None:
+                if kind == "str":
+                    return ""
+                if kind == "int":
+                    return "0"
                 return "false"
-            None: return "false"
 
     # A Go-`PrintDefaults`-style help block: one line per registered flag, in registration order.
     fn usage(self) -> str:
@@ -197,4 +196,4 @@ struct FlagSet:
 
 # Construct a fresh, empty FlagSet.
 fn new() -> FlagSet:
-    return FlagSet([], {}, {}, {}, {}, {}, [])
+    return FlagSet([], {}, {}, {}, {}, {}, {}, [])

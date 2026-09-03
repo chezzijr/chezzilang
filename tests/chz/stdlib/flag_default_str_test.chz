@@ -13,3 +13,30 @@ test fn help_after_parse_reports_the_registered_default_not_the_parsed_value():
     match fs.parse(["--count", "3", "--help"]):
         Err(e): assert e.message().contains("default=1"), e.message()
         Ok(_): assert false, "--help must return Err(help requested)"
+
+test fn usage_reports_the_registered_default_for_every_kind_after_a_parse():
+    fs := flag.new()
+    fs.str_flag("name", "world", "who")
+    fs.int_flag("count", 1, "how many")
+    fs.bool_flag("verbose", false, "chatty")
+    match fs.parse(["--name", "alice", "--count=3", "--verbose"]):
+        Ok(_): pass
+        Err(e): assert false, "unexpected Err(" + e.message() + ")"
+    u := fs.usage()
+    assert u.contains("--name (str) default=world:"), u
+    assert u.contains("--count (int) default=1:"), u
+    assert u.contains("--verbose (bool) default=false:"), u
+    assert not u.contains("default=alice"), u
+    assert fs.get_str("name") == "alice", fs.get_str("name")
+
+test fn flags_are_still_parsed_after_the_first_positional():
+    fs := flag.new()
+    fs.str_flag("name", "world", "who")
+    # Measured Go 1.26.6: `Parse` stops at the first non-flag, leaving `name` at "world" and
+    # `Args() = [a --name x b]`. Measured CPython 3.14.7 `argparse.parse_known_args(["a","--name",
+    # "x","b"])` gives `(Namespace(name='x'), ['a', 'b'])` — this parser keeps CPython's behaviour
+    # deliberately (see ## Decisions).
+    match fs.parse(["a", "--name", "x", "b"]):
+        Ok(pos): assert pos == ["a", "b"], str(pos)
+        Err(e): assert false, "unexpected Err(" + e.message() + ")"
+    assert fs.get_str("name") == "x", fs.get_str("name")
