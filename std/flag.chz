@@ -5,7 +5,7 @@
 # Go `flag.Parse(os.Args[1:])` analog). Read values back with `get_str`/`get_bool`/`get_int`, the
 # leftover positionals with `positionals()`, and print a Go-`PrintDefaults`-style help with `usage()`.
 #
-# Recognised syntax (Go conventions):
+# Recognised syntax (Go conventions, with the one documented divergence below):
 #   --name value      # str/int consume the NEXT token
 #   --name=value      # or an inline `=` value
 #   --verbose         # a bool flag is presence => true
@@ -16,6 +16,12 @@
 # A leading run of dashes is stripped, so a flag named `n` answers to BOTH `-n` and `--n` (a
 # deliberate v1 simplification vs strict Go, which registers each spelling separately — add explicit
 # short-alias params only if a real need appears). A lone `-` (len 1) is a positional.
+#
+# Divergence from Go, deliberate: flags are still recognised AFTER the first positional.
+# `parse(["a", "--name", "x", "b"])` is `Ok(["a", "b"])` with `name = "x"`. Measured Go 1.26.6 stops
+# at the first non-flag, leaving `name` unchanged and `Args() = [a --name x b]`. Measured CPython
+# 3.14.7 `argparse.parse_known_args` does NOT stop there either — it matches this parser. Adopting
+# Go's rule would silently stop parsing flags that working programs pass today, with no error.
 #
 # Bad USER input never faults: an unknown flag, a missing value, or a non-int for an int flag all
 # return a clean `Err`. `get_*` on an UNREGISTERED name is a programmer error and panics — the closer

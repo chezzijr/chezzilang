@@ -856,7 +856,13 @@ and adding one would change what every existing `*`/`?` pattern containing a bac
 `[` is a **metacharacter**: a pattern that meant a literal `[` before now opens a class. A malformed
 `[...]` class is an `Err` carrying `"bad pattern"`, validated **before** the directory is read, so
 the verdict never depends on whether the directory exists — `Ok([])` never again means "your pattern
-was not understood". Matched over **raw bytes**, so an ASCII pattern still matches a non-UTF-8
+was not understood". A directory that does not exist, cannot be read, or is not a directory at all —
+after the pattern has already validated — yields `Ok([])`, not `Err`: measured Go 1.26.6
+`filepath.Glob("nope/*")`, `Glob("noperm/*")` (mode 000) and `Glob("plain.txt/*")` all return
+`[] err=<nil>`, and its docs say "Glob ignores file system errors such as I/O errors reading
+directories"; measured CPython 3.14.7 `glob.glob` also returns `[]` in all three cases. This is the
+opposite of `fs.walk`, which deliberately aborts at the first unreadable directory (see the
+`fs.walk` entry below and DEC-011). Matched over **raw bytes**, so an ASCII pattern still matches a non-UTF-8
 filename — and `?`/a class's single character count one **Unicode scalar** wherever the name is
 valid UTF-8, like Go `filepath.Match` / Python `fnmatch`, falling back to one byte only for a byte
 that begins no valid sequence. `*` **matches dotfiles** — Go `filepath.Glob` semantics, measured:
@@ -1219,9 +1225,14 @@ Reversible text codecs. Every function takes a `str` and operates on its **UTF-8
   keys `scheme`, `host`, `port`, `path`, `query`, `fragment` (missing components → `""`). It does **not**
   percent-decode the components (matching Python `urlsplit` / Go `net/url` — call `url_decode` /
   `query_decode` on the pieces you need). `port` is a **string** (`""` when absent — the map is
-  str→str, the Go `url.Port()` / Python analog). Best-effort, never faults. Ceilings: the last-`:`
+  str→str, the Go `url.Port()` / Python analog). Best-effort, never faults. A **protocol-relative**
+  URL (`//host/path`, no scheme) also splits its authority: `url_parse("//h/p")` gives `host="h"`,
+  `path="/p"`, matching measured Go 1.26.6 `url.Parse` and CPython 3.14.7 `urlsplit`; with a port,
+  `url_parse("//h:8080/p")` gives `host="h"`, `port="8080"`, `path="/p"`. Ceilings: the last-`:`
   host:port split folds userinfo (`user:pass@host`) and IPv6 (`[::1]:8080`) into `host`, and a `//`-less
-  scheme (`mailto:x`) lands the remainder in `path`.
+  scheme (`mailto:x`) lands the remainder in `path` — both apply equally to the `scheme://` and bare
+  `//` forms. `url_parse("///p")` follows CPython (`host=""`, `path="/p"`), not Go's RFC-3986 special
+  case which keeps `///p` whole in `path` — CPython is the ancestor for scripting/stdlib feel.
 
 **Seam note:** the `str` members UTF-8-validate their decoded output, so a non-UTF-8 result is an `Err`
 (that is the *str* contract, not a limitation). Arbitrary binary round-trips through
@@ -1680,7 +1691,17 @@ until parse overwrites it; **panics** on an *unregistered* name — a programmer
 user-input path; closer to Python argparse's `AttributeError` on an unregistered destination than to
 Go, whose `flag.Lookup` returns `nil` for an unknown name and never panics — measured, Go 1.26) ·
 `positionals() -> List[str]` · `usage() -> str` (Go `PrintDefaults`-style, one line
-per flag in registration order).
+per flag in registration order — prints the value **registered** as each flag's default, the Go
+`Flag.DefValue` analog, never the parsed value: measured Go 1.26.6 still prints `how many (default 1)`
+from `PrintDefaults` after `Parse(["--count","3"])`).
+
+`std.flag` deliberately keeps parsing flags **after** the first positional, diverging from Go:
+`fs.parse(["a", "--name", "x", "b"])` gives `Ok(["a", "b"])` with `name = "x"`. Measured Go 1.26.6
+`flag.FlagSet.Parse` stops at the first non-flag, leaving `name` unchanged and `Args() = [a --name x
+b]`. Measured CPython 3.14.7 `argparse.parse_known_args(["a","--name","x","b"])` gives
+`(Namespace(name='x'), ['a', 'b'])`, which is what this parser does. This is a deliberate divergence,
+not a bug: adopting Go's rule would silently stop parsing flags that working programs pass today, with
+no error or diagnostic.
 
 Recognised syntax (Go conventions): `--name value` / `--name=value` / `--verbose` (bool presence) /
 `--verbose=false` (explicit; the `=`-value accepts Go's `strconv.ParseBool` set —

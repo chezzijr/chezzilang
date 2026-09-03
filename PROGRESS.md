@@ -7,6 +7,21 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **Three std modules fixed to match their owning ancestor: `std.flag` usage(), `fs.glob` on a
+  missing directory, `encoding.url_parse` on a protocol-relative URL (TICKET-046).** `std/flag.chz`'s
+  `default_str` used to read the live `strs`/`ints`/`bools` maps `parse` overwrites; a new `defs` map,
+  written only by the three `*_flag` registrars, now backs `usage()`'s reported default (the Go
+  `Flag.DefValue` analog). `src/native/fs.rs`'s `glob` used to turn a `read_dir`/per-entry I/O error
+  into `Err`; both arms now swallow to `Ok([])`, matching Go `filepath.Glob`'s documented "ignores
+  file system errors" — still AFTER `check_pattern` (DEC-012), so a malformed pattern stays `Err`.
+  `src/native/encoding.rs`'s `url_parse` only reached its authority split via `rest.find("://")`; a
+  `strip_prefix("//")` fallback now also splits a protocol-relative `//host/path`, following CPython
+  on the `///p` edge case per the reference-ancestor rule. Also decided and documented (not changed):
+  `std.flag` keeps parsing flags after the first positional (CPython `argparse` behaviour), diverging
+  from Go on purpose — `docs/stdlib.md` and the `std/flag.chz` header now say so. Gate: `cargo test`
+  4707 passed / 0 failed; `cargo clippy -- -D warnings` clean; `chezzi test tests/chz` 765 passed / 0
+  failed at both the default and `CHEZZI_THREADS=2` worker counts.
+
 - **A faulted `Executor` job no longer deadlocks its result handle; `Task.get()` re-raises the job's
   own error at its own origin, and a re-raise never claims a false coordinate (TICKET-045).**
   `submit_result[T]` used to lower to `self.submit(fn(): ch.send(f()))`, so a faulted `f()` never
