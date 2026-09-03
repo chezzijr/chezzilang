@@ -790,8 +790,11 @@ only one engine**, so nothing here constrains the remaining steps 1–4.
    frame **local** is now
    sendable across a task airlock **BY VALUE** (F3 path C — deep-copied + rebuilt on the receiver, parked
    slots checked sendable at serialize time; mid-`recover:` / pending-`defer` / multi-frame suspensions
-   reject cleanly). A **module-global** generator is not serialized by value — it stays reach-gated + a
-   poison snapshot on M:N. The adapter-struct pattern stays the default for lazy streaming.
+   reject cleanly). A **module-global** generator is serialized by value as well: the reach-gate +
+   poison-snapshot model was **RETIRED 2026-07-21** (`docs/concurrency-b3.md:314`), and
+   `src/vm/golden_tests.rs:9260` pins the by-value behaviour. A generator crossing WHILE RUNNING
+   is a clean fault (DEC-041); a module global holding one still snapshots as an inert `Nil` that
+   faults only when a task reaches it. The adapter-struct pattern stays the default for lazy streaming.
 4. ~~**List concat + map merge**~~ — **DONE.** Method-based: list `.concat`/`.extend`, map
    `.merge`/`.update` (concat/merge new, extend/update mutate). No new syntax; spread/unpack stays
    dropped. `examples/concat_merge.chz`.

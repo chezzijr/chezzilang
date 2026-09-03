@@ -1882,7 +1882,13 @@ Registration is Go `context.WithCancel`'s: `derive()` is **O(1)** — it registe
 IMMEDIATE parent only (no ancestor walk) — and `cancel()` cascades **downward**, draining each node's
 child registry and marking every transitive descendant it reaches. A child also keeps a `parent` link
 that `cancelled()`/`reason()` fall back to, so an interrupted cascade cannot lose a subtree: those two
-are therefore **O(depth)** (0.30 µs at depth 0, ~+0.29 µs per ancestor), and a `Token` from a tree
+are therefore at best **O(depth)** — and measured end to end they are **QUADRATIC** in depth:
+0.53 µs at depth 0, 19 µs at 25, 56 µs at 50, 178 µs at 100, 622 µs at 200, 2360 µs at 400
+(2026-09-03, release binary; 1 000 polls per depth). The ancestor walk is O(depth), but the chain is
+a deep rooted GC-heap graph the mark pass re-walks, so the per-ancestor cost itself grows with depth
+— see `benchmarks.md` "The chain is still superlinear in depth". A deep `derive()` chain polled in a
+CPU loop degrades quadratically; Go's `ctx.Err()` is flat O(1) at every depth (measured 0.0026 µs at
+depth 0 and at depth 1 000). A `Token` from a tree
 deeper than **4 999** faults `maximum structural depth (10000) exceeded` when it crosses the airlock.
 See `concurrency.md` for the cancellation model. Cancellation is **cooperative**: a task blocked in a
 `std.io`/`std.fs`/`std.process`/`std.request` call observes the token only once that call returns —

@@ -602,10 +602,10 @@ each other; `Shared`'s `get`/`update` serialise *every* access.
 
 ```chezzi
 fn put(r: RwShared[Map[str, int]], k: str, v: int):
-    r.write(fn(m): insert(m, k, v))      # exclusive write lock
+    r.write(fn(m): m.merge({k: v}))      # exclusive write lock
 
 fn total(r: RwShared[Map[str, int]]) -> int:
-    return r.read(fn(m): sum_values(m))  # shared read lock (concurrent with other readers)
+    return r.read(fn(m): m.values().sum())  # shared read lock (concurrent with other readers)
 ```
 
 | Method | Signature | Notes |
@@ -979,7 +979,7 @@ child := c.derive()              # a CHILD token — cancelled when c (or any an
 
 | Method | Returns | Notes |
 |--------|---------|-------|
-| `cancelled()` | `bool` | own `flag` (an ancestor cancel is *pushed* into it) OR own deadline passed OR the `parent` chain says so. **O(depth), 0.30 µs + ~0.29 µs per ancestor; polls, never blocks.** |
+| `cancelled()` | `bool` | own `flag` (an ancestor cancel is *pushed* into it) OR own deadline passed OR the `parent` chain says so. **Measured QUADRATIC in depth, not linear: 0.53 µs at depth 0, 178 µs at 100, 2360 µs at 400 (2026-09-03, release). The ancestor walk is O(depth); the rooted chain is also re-walked by the GC mark pass — see `benchmarks.md` "The chain is still superlinear in depth". Go's `ctx.Err()` is flat O(1) at every depth. Polls, never blocks.** |
 | `reason()` | `str?` | `"cancelled"` (manual or cascaded) \| `"timeout"` (own/inherited deadline) \| `None` (live). NEAREST cause wins (own first, else the ancestor's), and the FIRST cause **latches**: a cascaded cancel beats a later own deadline, while an already-elapsed own deadline stays `"timeout"` even under an explicit `cancel()`. |
 | `done()` | `Channel[bool]` | ready (recv → `true`) when done — for a `wait:` arm. Same handle every call. |
 | `cancel()` | `nil` | manual cancel, anytime, any task; idempotent; sets the cancel bit, then wakes `done()` waiters and **cascades down** — drains each node's immediate-child registry and marks every transitive descendant (work-list, not recursion). |

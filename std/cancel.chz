@@ -31,8 +31,11 @@
 # `cancelCtx.cancel`'s drain always completes. Chezzi's nursery teardown does abandon tasks, so the
 # link is what stands in for that guarantee.) The link is cheap where the cubic cost actually was:
 # `derive()` stays O(1) (one `kids.send` plus one field), and the cost of the link is that
-# `cancelled()` is O(depth) and a token encodes O(depth) across the airlock — see §6e for both
-# measured numbers.
+# `cancelled()` walks O(depth) ancestors and a token encodes O(depth) across the airlock — see §6e
+# for both measured numbers. NOTE the walk is not the whole cost: measured end to end `cancelled()`
+# is QUADRATIC in depth (0.53 µs at depth 0, 178 µs at 100, 2360 µs at 400 — 2026-09-03, release),
+# because the rooted chain is also re-walked by the GC mark pass. `docs/benchmarks.md:1859` records
+# that and its cause; do not quote a per-ancestor constant measured at depth <= 5.
 #
 # The link is LIVE — a parent flip is observed by an already-derived child, including one that crossed
 # the `spawn`/`parallel:`/`Channel` airlock — because the link is the `kids` channel plus each node's
