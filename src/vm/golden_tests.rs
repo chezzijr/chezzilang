@@ -2394,6 +2394,57 @@ print("direct : {k(3)}")
 }
 
 #[test]
+fn airlock_forwarded_closure_reads_forwarders_write_not_the_first_senders_snapshot() {
+    // TICKET-051. `closure_global_snapshot` (src/vm/sched.rs:2684-2690) prefers an EXISTING
+    // `gsnap` entry over a live read of `home`'s module slot. That preference is meant to carry
+    // a closure's already-resolved values forward through a chain of crossings (see the
+    // `closure_global_snapshot` doc comment). But `to_wire_depth`'s `Obj::Closure` arm treats a
+    // forward (task B re-sending a closure it received from task A) as its OWN "genuine
+    // crossing" (task B's `home_origin` differs from task C's view, so `from_wire_memo`
+    // installs a fresh `gsnap` rather than reusing task B's) -- yet the VALUES that snapshot is
+    // built from are still A's frozen ones, because `closure_global_snapshot` never re-reads
+    // task B's own (live, since-written) module slot. Task B's write to `n` therefore lands in
+    // NO copy the forwarded closure can ever reach: not A's frozen snapshot (never touched by
+    // B), not B's own live module slot (the preference skips it), and not C's own fresh module
+    // slot (C never wrote it) -- a third, permanently unreachable copy.
+    //
+    // A -> B: real cross-task crossing, installs a snapshot of A's `n` (1).
+    // B writes n = 999 to ITS OWN module copy, then forwards the SAME closure B -> C: this is
+    // also a genuine crossing (a different module view), so by `closure_global_snapshot`'s own
+    // "a genuine crossing installs a fresh snapshot of the CURRENT globals" rule it should carry
+    // B's n = 999, not A's stale n = 1.
+    let src = r#"
+n := 1
+fn mk() -> fn(int) -> int:
+    fn r(x: int) -> int:
+        return x * n
+    return r
+
+ch1 := Channel[fn(int) -> int](1)
+ch2 := Channel[fn(int) -> int](1)
+res := Channel[int](1)
+
+parallel:
+    spawn: ch1.send(mk())
+    spawn:
+        k := ch1.recv()
+        n = 999
+        ch2.send(k)
+    spawn:
+        k2 := ch2.recv()
+        res.send(k2(3))
+
+print("result: {res.recv()}")
+"#;
+    let out = golden_entry(src);
+    assert_eq!(
+        out, "result: 2997\n",
+        "the forwarding task's own write to the module global must be visible in what it \
+         forwards, not the first sender's stale snapshot: {out:?}"
+    );
+}
+
+#[test]
 fn airlock_same_task_closure_round_trip_mutates_module_list_in_place() {
     // TICKET-041(b), data-loss variant. An in-place write to a module-global container from a
     // same-task channel-round-tripped closure must land, matching CPython's measured
