@@ -846,7 +846,7 @@ impl Heap {
                 // Walk the queue under the guard, but DRAIN the nested cores after dropping it —
                 // holding this guard while locking a nested core is the ABBA window (see
                 // `core::drain_pending_cores`).
-                let mut seen = super::fxhash::FxHashSet::from_iter([Arc::as_ptr(core) as usize]);
+                let mut seen = crate::vm::core::SeenCores::with(Arc::as_ptr(core) as usize);
                 let mut pending = Vec::new();
                 {
                     let g = core.q.lock().unwrap();
@@ -888,7 +888,7 @@ impl Heap {
             Obj::AtomicInt(_) => {}
             Obj::Executor(core) => {
                 // Same guard-then-drain split as `Obj::Channel` above.
-                let mut seen = super::fxhash::FxHashSet::from_iter([Arc::as_ptr(core) as usize]);
+                let mut seen = crate::vm::core::SeenCores::with(Arc::as_ptr(core) as usize);
                 let mut pending = Vec::new();
                 {
                     let g = core.inner.lock().unwrap();
@@ -928,10 +928,7 @@ impl Heap {
         summary: &crate::vm::core::WireSummary,
         core_id: usize,
         out: &mut Vec<GcRef>,
-    ) -> (
-        super::fxhash::FxHashSet<usize>,
-        Vec<crate::vm::wire::WireValue>,
-    ) {
+    ) -> (crate::vm::core::SeenCores, Vec<crate::vm::wire::WireValue>) {
         use crate::vm::core::{WS_CLEAN, WS_DIRTY};
         let state = summary.state();
         debug_assert!(
@@ -939,16 +936,16 @@ impl Heap {
             "stale CLEAN core summary — a store path failed to refresh it (would under-root the GC)"
         );
         if state == WS_CLEAN {
-            return (super::fxhash::FxHashSet::default(), Vec::new());
+            return (crate::vm::core::SeenCores::default(), Vec::new());
         }
         if state != WS_DIRTY {
             // UNKNOWN: one walk fills the cache (and the `--max-heap` byte count).
             summary.set(w);
             if summary.state() == WS_CLEAN {
-                return (super::fxhash::FxHashSet::default(), Vec::new());
+                return (crate::vm::core::SeenCores::default(), Vec::new());
             }
         }
-        let mut seen = super::fxhash::FxHashSet::from_iter([core_id]);
+        let mut seen = crate::vm::core::SeenCores::with(core_id);
         let mut pending = Vec::new();
         crate::vm::core::collect_gcrefs_structural(w, out, &mut seen, &mut pending);
         // Handed BACK to the caller rather than drained here: the caller still holds this core's

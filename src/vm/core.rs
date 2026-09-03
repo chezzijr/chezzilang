@@ -1103,6 +1103,64 @@ pub struct ExecutorCore {
 /// "reap only those alive at exit" snapshot has always been push-only too.
 pub type ExecRegistry = Arc<Mutex<Vec<Arc<ExecutorCore>>>>;
 
+/// A core's `Arc` pointer identity, for the mark walk's visited-core set. `PartialEq`/`Hash` are
+/// hand-written rather than derived so the `#[cfg(test)]` probe counter in each has exactly one place
+/// to live (TICKET-049) — see [`SeenCores`].
+#[derive(Clone, Copy, Eq, Debug)]
+pub struct CoreId(pub usize);
+
+impl PartialEq for CoreId {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl std::hash::Hash for CoreId {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        self.0.hash(h);
+    }
+}
+
+/// The mark walk's visited-core set. The ONE membership operation (`insert`) lives at this single
+/// site so a linear-scan revert — deliberately measured at TICKET-049 step 7 — is a one-line edit
+/// here, not a six-site rewrite across every `WireValue` core arm.
+#[derive(Default, Debug)]
+pub struct SeenCores(super::fxhash::FxHashSet<CoreId>);
+
+impl SeenCores {
+    /// Build a set already containing `ptr` (the mark walk's own core, seeded before it walks its
+    /// payload).
+    pub fn with(ptr: usize) -> Self {
+        let mut s = Self::default();
+        s.insert(ptr);
+        s
+    }
+
+    /// Insert `ptr`; `true` iff it was not already present (same contract as `HashSet::insert`).
+    pub fn insert(&mut self, ptr: usize) -> bool {
+        self.0.insert(CoreId(ptr))
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// TICKET-049 — count of `CoreId::eq`/`CoreId::hash` calls, i.e. identity-comparison probes the
+    /// mark walk's dedup performs. Thread-local because `cargo test --lib` runs ~4 448 tests
+    /// concurrently at `RUST_TEST_THREADS=4`, and a process-global counter would be polluted by any
+    /// other test marking a core on another thread at the same time.
+    static CORE_PROBES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub fn probe_reset() {
+    CORE_PROBES.with(|c| c.set(0));
+}
+
+#[cfg(test)]
+pub fn probes() -> u64 {
+    CORE_PROBES.with(|c| c.get())
+}
+
 /// B3.1 GC support — collect every `GcRef` reachable from a core's wire contents into `out`, so the
 /// heap's `children()` can keep those heap objects rooted. A core's `WireValue`s can still carry
 /// `Handle(GcRef)`s into the live heap (an `Executor` queues `Closure` handles — closures can't cross
@@ -1112,11 +1170,7 @@ pub type ExecRegistry = Arc<Mutex<Vec<Arc<ExecutorCore>>>>;
 /// be reachable *only* through its parent core (its own heap handle already swept), so its embedded
 /// handles would dangle if we stopped at the boundary. `seen` (core identities by `Arc` pointer)
 /// breaks the `Arc` reference cycles decision E warns about — a cycle is walked once, not forever.
-pub fn collect_core_gcrefs(
-    w: &WireValue,
-    out: &mut Vec<GcRef>,
-    seen: &mut super::fxhash::FxHashSet<usize>,
-) {
+pub fn collect_core_gcrefs(w: &WireValue, out: &mut Vec<GcRef>, seen: &mut SeenCores) {
     // ONE core lock at a time — see the ABBA note on `collect_gcrefs_structural`. Callers that
     // already hold a core's guard must NOT use this entry point: they call
     // `collect_gcrefs_structural` under their guard, drop it, then `drain_pending_cores`.
@@ -1146,7 +1200,7 @@ pub fn collect_core_gcrefs(
 /// `debug_assert` in `Heap::mark_core_payload` re-deriving the verdict on every debug-build pass.
 pub fn drain_pending_cores(
     out: &mut Vec<GcRef>,
-    seen: &mut super::fxhash::FxHashSet<usize>,
+    seen: &mut SeenCores,
     pending: &mut Vec<WireValue>,
 ) {
     while let Some(core) = pending.pop() {
@@ -1195,7 +1249,7 @@ pub fn drain_pending_cores(
 pub fn collect_gcrefs_structural(
     w: &WireValue,
     out: &mut Vec<GcRef>,
-    seen: &mut super::fxhash::FxHashSet<usize>,
+    seen: &mut SeenCores,
     pending: &mut Vec<WireValue>,
 ) {
     match w {
