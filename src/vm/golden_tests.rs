@@ -2394,6 +2394,46 @@ print("direct : {k(3)}")
 }
 
 #[test]
+fn airlock_nested_closure_created_after_the_tasks_own_write_reads_stale_value() {
+    // TICKET-051, Shape B (the sharpest of the ticket's four measured shapes). `n := 1`,
+    // a factory returns a closure nested two levels deep (`outer` -> `inner`) that reads
+    // module global `n`. The receiving task calls `ch.recv()`, WRITES `n = 100` to its own
+    // module copy, and only THEN builds the nested closure `inner` by calling `o()` -- so
+    // `inner` never crosses any airlock and is created strictly after the write. `Op::MakeClosure`
+    // still clones the OUTER closure's `gsnap` (frozen at the ORIGINAL `Channel.send`, when
+    // `n` was still 1) onto `inner` (src/vm/exec.rs:2297-2302), so `inner()` reads the stale `1`
+    // while a plain read of `n` in the same task correctly sees the write, `100`. Go 1.26.5 and
+    // CPython (both threaded equivalents) print `100` for both.
+    let src = r#"
+n := 1
+res := Channel[int](4)
+fn mk() -> fn() -> fn() -> int:
+    fn outer() -> fn() -> int:
+        fn inner() -> int:
+            return n
+        return inner
+    return outer
+ch := Channel[fn() -> fn() -> int](1)
+parallel:
+    spawn:
+        o := ch.recv()
+        n = 100
+        d := o()
+        res.send(d())
+        res.send(n)
+    ch.send(mk())
+print("nested closure sees : {res.recv()}")
+print("plain global read   : {res.recv()}")
+"#;
+    let out = golden_entry(src);
+    assert_eq!(
+        out, "nested closure sees : 100\nplain global read   : 100\n",
+        "a closure created AFTER the task's own write, crossing no airlock, must read that \
+         write like any other late load: {out:?}"
+    );
+}
+
+#[test]
 fn airlock_forwarded_closure_reads_forwarders_write_not_the_first_senders_snapshot() {
     // TICKET-051. `closure_global_snapshot` (src/vm/sched.rs:2684-2690) prefers an EXISTING
     // `gsnap` entry over a live read of `home`'s module slot. That preference is meant to carry
