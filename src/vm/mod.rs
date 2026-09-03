@@ -885,6 +885,11 @@ pub struct Vm {
     /// only THEN run the recover block's own defers — matching the interp, whose `exec_parallel`
     /// reports after the body's `exec_scoped_block` has already drained its defers.
     nursery_defer_floors: Vec<usize>,
+    /// TICKET-048 — parallel to [`Vm::nurseries`] (same length, pushed and popped in lockstep): the
+    /// source span of the construct that OPENED each nursery — the `parallel:` keyword, or the first
+    /// statement of an implicit nursery's block. Read when building the `DEADLOCK_MSG` fault so its
+    /// headline names a real `path:line:col` instead of `Span::RUNTIME`.
+    nursery_spans: Vec<Span>,
     /// Per-connection spawn — parallel to [`Vm::nurseries`] (lockstep): `Some` for an eager nursery
     /// (entered under `--parallel` inside a fiber), `None` for a lazy/top-level one. A `spawn` whose
     /// innermost nursery is eager injects its handler fiber straight into the scope's sched (runs
@@ -1339,6 +1344,9 @@ struct FiberCtx {
     /// TASK B — see [`Vm::nursery_defer_floors`]; carried per-fiber so a parked fiber's per-nursery
     /// defer floors travel with its `nurseries` across `swap_ctx`.
     nursery_defer_floors: Vec<usize>,
+    /// TICKET-048 — see [`Vm::nursery_spans`]; carried per-fiber so a parked fiber's spans travel
+    /// with its nurseries across `swap_ctx`.
+    nursery_spans: Vec<Span>,
     /// Per-connection spawn — parallel to [`Vm::nurseries`] (same length, pushed/popped in lockstep):
     /// `Some` for an EAGER nursery (one entered under `--parallel` inside a live fiber, `mn.is_some()`)
     /// holding the live inner [`MnSched`] a `spawn` in this body injects handlers into; `None` for a

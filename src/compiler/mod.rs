@@ -1591,7 +1591,16 @@ impl Compiler {
         let implicit = block_has_bare_spawn(&module.stmts);
         if implicit {
             fc.has_implicit_nursery = true;
-            fc.emit(Op::EnterNursery, Span::RUNTIME);
+            // TICKET-048 — an implicit nursery has no keyword of its own, so it carries the span of
+            // the first statement of the block it covers; the deadlock headline renders this.
+            fc.emit(
+                Op::EnterNursery,
+                module
+                    .stmts
+                    .first()
+                    .map(|s| s.span)
+                    .unwrap_or(Span::RUNTIME),
+            );
             fc.nursery_scopes += 1;
         }
         self.compile_block_flat(&mut fc, &module.stmts)?;
@@ -1743,7 +1752,12 @@ impl Compiler {
         let implicit = block_has_bare_spawn(&decl.body);
         if implicit {
             fc.has_implicit_nursery = true;
-            fc.emit(Op::EnterNursery, Span::RUNTIME);
+            // TICKET-048 — an implicit nursery has no keyword of its own, so it carries the span of
+            // the first statement of the block it covers; the deadlock headline renders this.
+            fc.emit(
+                Op::EnterNursery,
+                decl.body.first().map(|s| s.span).unwrap_or(Span::RUNTIME),
+            );
             fc.nursery_scopes += 1;
         }
         self.compile_block_scoped(&mut fc, &decl.body)?;

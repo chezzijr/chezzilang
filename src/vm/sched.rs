@@ -356,9 +356,11 @@ impl Vm {
             return; // nothing escaped past the join (e.g. normal fall-through already popped it)
         }
         while self.nurseries.len() > from_len {
-            // All four stacks pop TOGETHER, unconditionally — `nurseries`, `nursery_defer_floors`,
-            // `mn_scopes` and `eager_scheds` are lockstep, and the enlisted arm below `continue`s.
+            // All five stacks pop TOGETHER, unconditionally — nurseries, nursery_defer_floors,
+            // nursery_spans, mn_scopes and eager_scheds are lockstep, and the enlisted arm below
+            // continues.
             self.nursery_defer_floors.pop();
+            self.nursery_spans.pop();
             let mn_scope = self.mn_scopes.pop().flatten(); // Some if early-enlisted
             let eager = self.eager_scheds.pop().flatten(); // Some if this nursery is eager
             self.nurseries.pop(); // unstarted tasks — dropped, never run (see the doc above)
@@ -383,6 +385,9 @@ impl Vm {
         // Consume this nursery's tasks (FIFO). Popping the entry now (as the old drain did at the
         // end) keeps the parent's `Handler::nursery_len` accounting correct on a later fault.
         self.nursery_defer_floors.pop(); // keep the parallel floor stack in lockstep with `nurseries`
+        // TICKET-048 — lockstep with `nurseries`: the span of the parallel: construct this join is
+        // about.
+        let nursery_span = self.nursery_spans.pop().unwrap_or(Span::RUNTIME);
         let mn_scope = self.mn_scopes.pop().flatten(); // lockstep — Some if early-enlisted
         let tasks = self.nurseries.pop().unwrap_or_default();
         // Per-connection spawn — pop the eager scope in lockstep. An eager nursery injected its tasks
@@ -417,7 +422,7 @@ impl Vm {
         // D2b: run the tasks as lightweight M:N fibers on the OS-thread pool (park-on-`recv`). This is
         // the only engine — the cooperative scheduler that used to live here was deleted with
         // `--serial` (`docs/future.md` §2b).
-        self.run_mn_nursery(tasks)
+        self.run_mn_nursery(tasks, nursery_span)
     }
 
     /// D2b — the `--parallel` M:N engine: run a nursery's tasks as **lightweight fibers parked on
@@ -448,7 +453,11 @@ impl Vm {
     /// [`MnSched::take_runnable`] (no barrier-confirm needed under a single coordinator). Residual
     /// hangs (decision D): deadlocks spanning nurseries or involving `Executor` work — `MnSched.parked`
     /// is per-nursery, so a cross-nursery `send` delivers the message but does not wake across scheds.
-    pub(super) fn run_mn_nursery(&mut self, tasks: Vec<QueuedTask>) -> Result<(), RuntimeError> {
+    pub(super) fn run_mn_nursery(
+        &mut self,
+        tasks: Vec<QueuedTask>,
+        nursery_span: Span,
+    ) -> Result<(), RuntimeError> {
         // Cross-nursery flat scheduler — the OUTERMOST nursery (`self.mn.is_none()`) builds the ONE
         // global sched + farms helpers; a NESTED nursery (`self.mn.is_some()`) REUSES it (register a
         // scope, enlist into the same global run queue, run its inline owner scope-scoped). Because the
@@ -469,7 +478,7 @@ impl Vm {
         match (self.mn.clone(), self.mn_enlist_sched.clone()) {
             (Some(sched), _) => self.run_mn_nursery_nested(&sched, tasks),
             (None, Some(held)) => self.run_mn_nursery_nested(&held, tasks),
-            (None, None) => self.run_mn_nursery_outermost(tasks),
+            (None, None) => self.run_mn_nursery_outermost(tasks, nursery_span),
         }
     }
 
@@ -488,6 +497,7 @@ impl Vm {
     pub(super) fn run_mn_nursery_outermost(
         &mut self,
         tasks: Vec<QueuedTask>,
+        nursery_span: Span,
     ) -> Result<(), RuntimeError> {
         let total = tasks.len();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -500,7 +510,7 @@ impl Vm {
                     .into_fiber(i, 0),
             );
         }
-        let deadlock_err = self.err(DEADLOCK_MSG.to_string(), Span::RUNTIME);
+        let deadlock_err = self.err(DEADLOCK_MSG.to_string(), nursery_span);
         // Worker count must account for the early-enlisted OUTER scopes' tasks too (case-A: `main`'s `O`),
         // so a multi-task inner nursery + outer siblings still gets real parallelism. We don't yet know
         // the outer totals here, so size to a reasonable upper bound (core count) capped by total work
@@ -769,7 +779,7 @@ impl Vm {
     /// created, so the caller falls back to the lazy queue-at-join path: an eager scope with no
     /// drainer has NO worker at all between `EnterNursery` and `JoinNursery`, so a body that blocks
     /// (an accept loop) would hang outright.
-    pub(super) fn activate_eager_nursery(&mut self) -> Option<EagerScope> {
+    pub(super) fn activate_eager_nursery(&mut self, nursery_span: Span) -> Option<EagerScope> {
         // §2c1 — a NESTED eager nursery on THIS thread joins the enclosing scope's sched as a new
         // SCOPE instead of building a private sibling sched. Two private scheds cannot wake each
         // other (`send_wake` scans its own sched then `wake_parent_chain`, strictly upward), which is
@@ -797,7 +807,7 @@ impl Vm {
             });
         }
         let cancel = Arc::new(AtomicBool::new(false));
-        let deadlock_err = self.err(DEADLOCK_MSG.to_string(), Span::RUNTIME);
+        let deadlock_err = self.err(DEADLOCK_MSG.to_string(), nursery_span);
         // wid 0 = inline join worker, wid 1 = the dedicated raw drainer below, wids 2.. = the pool
         // helpers `join_eager_nursery` farms for an OUTERMOST scope. `MnSched::new` allocates the
         // per-worker local queues up front (`locals: (0..nworkers)`), so the count must be sized here

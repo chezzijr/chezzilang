@@ -18800,6 +18800,7 @@ fn a_carried_snapshot_build_error_is_raised_at_task_preparation() {
     vm.nurseries.push(Vec::new());
     vm.mn_scopes.push(None);
     vm.nursery_defer_floors.push(0);
+    vm.nursery_spans.push(span);
     vm.eager_scheds.push(None);
     vm.nurseries[0].push(QueuedTask {
         call: PendingCall::Call {

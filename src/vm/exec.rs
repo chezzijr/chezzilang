@@ -126,6 +126,7 @@ impl Vm {
             mn_enlist_sched: None,
             eager_scheds: Vec::new(),
             nursery_defer_floors: Vec::new(),
+            nursery_spans: Vec::new(),
             executors: Vec::new(),
             exec_registry: Arc::new(Mutex::new(Vec::new())),
             sched_registry: Arc::new(Mutex::new(Vec::new())), // W7-56
@@ -219,6 +220,7 @@ impl Vm {
             &mut self.nursery_defer_floors,
             &mut ctx.nursery_defer_floors,
         );
+        std::mem::swap(&mut self.nursery_spans, &mut ctx.nursery_spans);
         std::mem::swap(&mut self.eager_scheds, &mut ctx.eager_scheds);
         std::mem::swap(&mut self.fault_trace, &mut ctx.fault_trace);
         std::mem::swap(&mut self.fault_trace_depth, &mut ctx.fault_trace_depth);
@@ -1713,7 +1715,7 @@ impl Vm {
     /// runs, minima non-overlapping), the same shape `W7-57` measured at +4.5% on this same bench.
     /// `#[inline(never)]` keeps the arm one call instruction.
     #[inline(never)]
-    fn op_enter_nursery(&mut self) {
+    fn op_enter_nursery(&mut self, span: Span) {
         // W6-2 — invalidation rule 2: a nursery's tasks must see module globals as of THIS open,
         // and a global holding a mutable aggregate can have been mutated IN PLACE (`q.push(1)`,
         // `m[k] = v`, `p.x = 1`) since the cached snapshot was built, with no module-slot write
@@ -1731,6 +1733,7 @@ impl Vm {
         // the body's defers before the nursery reclaim (see `nursery_defer_floors`).
         let floor = self.frames.last().map(|f| f.deferred.len()).unwrap_or(0);
         self.nursery_defer_floors.push(floor);
+        self.nursery_spans.push(span);
         // §2c1 — EVERY nursery on the M:N engine activates an EAGER sched NOW, so a `spawn`
         // in the body injects a LIVE fiber that runs concurrently with the rest of the body.
         // That is Go's `go f()`: the task starts at the `spawn`, and the join keeps its own
@@ -1757,7 +1760,7 @@ impl Vm {
         // `flatten` — `activate_eager_nursery` returns `None` if the OS refuses its drainer
         // thread, which falls back to the lazy queue-at-join path rather than leaving a
         // worker-less eager scope that would hang a blocking body.
-        let scope = eager.then(|| self.activate_eager_nursery()).flatten();
+        let scope = eager.then(|| self.activate_eager_nursery(span)).flatten();
         self.eager_scheds.push(scope);
     }
 
@@ -2523,7 +2526,7 @@ impl Vm {
                 };
                 return Err(self.err(format!("no match arm for variant '{variant}'"), span));
             }
-            Op::EnterNursery => self.op_enter_nursery(),
+            Op::EnterNursery => self.op_enter_nursery(span),
             Op::JoinNursery => self.join_nursery()?,
             // TASK B — `break`/`continue` leaving a `parallel:` scope: cancel its
             // tasks and pop exactly that one level (the compiler emits one per escaped scope).
