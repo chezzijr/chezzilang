@@ -4165,6 +4165,35 @@ fn g(x: int) -> int:
     );
 }
 
+/// **TICKET-053 — the `Eq` grant for a protocol-typed receiver (`("Eq", "eq", "protocol")`,
+/// `src/checker/proto.rs:321`) ignores the WITNESS's own `where` bound.** Laundering a `Box[Tag]`
+/// (Tag is not `Comparable`) through a `Tagged`-typed slot before comparing skips the same-shape
+/// direct-comparison rejection `eq_operator_enforces_the_receivers_eq_where_bounds` pins above.
+/// Measured on the release binary at 5b2a7937: `chezzi check` reports `ok: no type errors` and
+/// `chezzi run` prints `true` then `false` — the unsatisfied `eq`'s own body answer, not a
+/// structural fallback (structural `==` on the same values is `false`). Expected, matching the
+/// direct-comparison rejection above: the assignment `a: Tagged = Box(Tag(1))` is refused, naming
+/// the unsatisfied bound. Currently FAILS — the checker grants `Eq` to `Ty::Protocol`
+/// unconditionally, without checking the witness's `eq` bound.
+#[test]
+fn eq_where_bound_is_unenforced_through_a_protocol_slot() {
+    const SRC: &str = "\
+protocol Tagged:
+    fn tag(self) -> int
+struct Tag:
+    n: int
+struct Box[T]:
+    v: T
+    fn tag(self) -> int:
+        return 0
+    fn eq(self, o: Box[T]) -> bool where T: Comparable:
+        return true
+a: Tagged = Box(Tag(1))
+b: Tagged = Box(Tag(2))
+";
+    entry_rejects(&format!("{SRC}print(a == b)\n"), "Tag: Comparable");
+}
+
 /// **W7-45 — the `List` builtins whose runtime is `values_equal`, and `in`.** W7-41 closed the hole
 /// for the OPERATOR; `contains`/`index_of`/`dedup`/`unique`/`in` reach the same `values_equal` with a
 /// signature validated by `assignable` (or, for `in`, by `compatible`) alone, so the guard was never
