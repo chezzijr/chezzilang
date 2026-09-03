@@ -41,6 +41,19 @@ test fn parse_error_names_the_exact_spot():
         Ok(_): assert false, "expected Err past the depth limit"
         Err(e): assert e.message() == "exceeded max depth"
 
+test fn multi_char_token_errors_name_the_token_start():
+    # TICKET-057: a multi-character token's Err must name where the token STARTED, matching
+    # CPython's json.loads, not where the scanner stopped. `"hello (unterminated) starts at
+    # char 0; CPython: "Unterminated string starting at: line 1 column 1 (char 0)".
+    match json.parse(r'"hello'):
+        Ok(_): assert false, "expected a parse Err"
+        Err(e): assert e.message() == "unterminated string at line 1 column 1 (char 0)"
+    # `nll` (bad `null` literal) starts at char 14; CPython: "Expecting value: line 1 column 15
+    # (char 14)".
+    match json.parse(r'{"a": 1, "b": nll}'):
+        Ok(_): assert false, "expected a parse Err"
+        Err(e): assert e.message() == "invalid literal, expected 'null' at line 1 column 15 (char 14)"
+
 test fn encode_covers_the_value_shapes():
     assert json.encode(42) == "42"
     assert json.encode(9223372036854775000) == "9223372036854775000"
