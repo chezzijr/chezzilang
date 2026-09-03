@@ -1943,9 +1943,13 @@ Debug at `CHEZZI_THREADS=2`, 4 000 allocations — the profile and worker count 
 | 2 000 | 1 220 ms | **25.9 ms** |
 | ratio | **3.88** | **1.87** |
 
-Pinned by `tests/chz/spec/gc_core_graph_test.chz`, which asserts the **ratio** (< 2.8), not a
-wall-clock bound — a ratio is profile- and hardware-independent, and the two regimes separate cleanly
-(3.88 vs 1.87). Verified RED on the pre-fix binary at 3.96.
+Pinned by `vm::core::tests::mark_walk_dedup_is_linear_in_core_chain_depth` (TICKET-049), which counts
+`CoreId` hash and comparison probes over a 1 000/2 000-deep rooted core chain rather than timing it — a
+wall-clock ratio of two `time.monotonic()` samples (the gate's original form) amplified scheduler noise
+without bound and flaked ~1 run in 8 under 32-way CPU oversubscription. Measured: the hash-set dedup
+gives 2854 → 5694 probes (ratio **1.9951**), a reverted linear scan gives 499500 → 1999000 probes
+(ratio **4.0020**); the test's bound (`deep * 10 < shallow * 28`, i.e. < 2.8) sits strictly between the
+two with no clock involved.
 
 **The speedup exposed a pre-existing DEADLOCK, fixed in the same branch.** The mark walk locked a
 core's payload and recursed straight into a NESTED core's lock while still holding the first, and

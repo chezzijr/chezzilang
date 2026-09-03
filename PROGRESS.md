@@ -7,6 +7,22 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **The GC mark-walk's O(D²)-vs-O(D) core-graph dedup gate divided two wall-clock samples and
+  flaked under load (TICKET-049).** `tests/chz/spec/gc_core_graph_test.chz` asserted
+  `deep / shallow < 2.8` on two ~10 ms `time.monotonic()` samples; the noise in the two samples is
+  uncorrelated and the smaller one is the denominator, so CPU load amplifies the quotient without
+  bound. Measured: 3 failures in 25 runs under 32 concurrent busy-loops, worst
+  `got 8.157102984533584 from 10.457949ms -> 85.306567ms`. Replaced with
+  `vm::core::tests::mark_walk_dedup_is_linear_in_core_chain_depth`, which counts identity-comparison
+  probes on a new `CoreId` newtype (its `PartialEq`/`Hash` each bump a `#[cfg(test)]`-gated
+  thread-local counter) over a 1 000/2 000-deep rooted core chain, instead of timing anything: hash-set
+  dedup 2854 → 5694 probes (ratio **1.9951**), a reverted linear-scan dedup 499500 → 1999000 probes
+  (ratio **4.0020**) — same bound (< 2.8), no clock. A new gate, `tests/no_wall_clock_ratio_gates.rs`,
+  forbids any `tests/chz` test that divides two `time.monotonic()` samples, so this class can't
+  recur. Under the same 32-way load, 25/25 consecutive runs of the replacement test passed. Gate:
+  `cargo test` 0 failed across every target, `chz_suite_passes` and
+  `chz_suite_passes_at_a_second_worker_count` both green; `cargo clippy --all-targets -- -D warnings`
+  clean.
 - **A nursery-deadlock or Executor-join-deadlock fault headline no longer claims a false
   `line 1, col 1` (W8-14 residual, TICKET-048).** Three sites raised `DEADLOCK_MSG`/
   `JOIN_DEADLOCK_MSG` with `Span::RUNTIME` — `run_mn_nursery_outermost` and `activate_eager_nursery`
@@ -7725,6 +7741,17 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > Pinned by `tests/chz/spec/gc_core_graph_test.chz`, asserting the **ratio** (< 2.8) rather than a
 > wall-clock bound, so it is profile- and hardware-independent. The regimes separate cleanly — debug
 > T=2 ratio **3.88 before vs 1.87 after** — and it was verified RED on the pre-fix binary at 3.96.
+> **TICKET-049 (2026-09-03) replaced this gate**, because a ratio of two `time.monotonic()` samples is
+> still wall-clock and still amplifies scheduler noise without bound — measured 3 failures in 25 runs
+> under 32-way CPU oversubscription, worst `got 8.157102984533584 from 10.457949ms -> 85.306567ms`.
+> The replacement, `vm::core::tests::mark_walk_dedup_is_linear_in_core_chain_depth`, counts `CoreId`
+> hash/comparison probes over a 1 000/2 000-deep rooted core chain: hash-set dedup 2854 → 5694
+> (ratio **1.9951**), a reverted linear scan 499500 → 1999000 (ratio **4.0020**) — same bound (< 2.8),
+> no clock. `tests/chz/spec/gc_core_graph_test.chz` is deleted; a new gate,
+> `tests/no_wall_clock_ratio_gates.rs`, forbids any `tests/chz` test that divides two
+> `time.monotonic()` samples. Full `cargo test` gate: 0 failed, including `chz_suite_passes` and
+> `chz_suite_passes_at_a_second_worker_count`; 25/25 consecutive runs of the replacement test passed
+> under the same 32-way load.
 >
 > **The speedup exposed a pre-existing ABBA DEADLOCK in the same walk, fixed here too.** The mark
 > walk locked a core's payload and recursed into a NESTED core's lock while holding the first, and
