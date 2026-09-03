@@ -8801,6 +8801,18 @@ fn duplicate_function_is_reported() {
 }
 
 #[test]
+fn struct_and_same_named_free_fn_is_reported() {
+    // TICKET-055: a struct constructor and a free fn share one call namespace, but neither hoist
+    // arm checks the other's name table, so the pair is accepted and the struct becomes
+    // unconstructible (the fn wins the call). Every sibling collision (fn/fn, struct/struct,
+    // enum-variant/fn, field/method) already rejects; this pairing must too.
+    rejects(
+        "struct S:\n    n: int\nfn S(n: int) -> int:\n    return n * 2\n",
+        "S",
+    );
+}
+
+#[test]
 fn variant_name_shared_across_enums_is_allowed() {
     // Variants are scoped under their enum (keyed by `(enum, variant)`), so two enums may share a
     // variant name. Each is reached via its qualified form (`A.X` / `B.X`).
