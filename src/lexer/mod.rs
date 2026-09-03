@@ -3617,6 +3617,19 @@ mod tests {
         }
     }
 
+    /// A leading UTF-8 BOM (`U+FEFF`) is a file-entry artifact from Windows/VS Code editors, not
+    /// source text — Python and Go both strip a leading one. Chezzi currently lexes it as an
+    /// ordinary character and faults (TICKET-058).
+    #[test]
+    fn leading_bom_is_not_a_lex_error() {
+        let toks = tokenize("\u{feff}print(1)\n");
+        assert!(
+            toks.is_ok(),
+            "expected a leading BOM to be stripped, got {:?}",
+            toks.err()
+        );
+    }
+
     /// …and the `Display` carries both axes, exactly like every other diagnostic in the compiler
     /// (`impl Display for Span` is `line {}, col {}`).
     #[test]
