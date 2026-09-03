@@ -1111,12 +1111,21 @@ pub struct CoreId(pub usize);
 
 impl PartialEq for CoreId {
     fn eq(&self, other: &Self) -> bool {
+        // TICKET-049 — charging the probe HERE, in the key type, means every dedup implementation
+        // (`contains`, `iter().any()`, a hand-written loop) is charged alike; a counter bumped only
+        // inside `SeenCores::insert` would stay green through a revert to a linear scan.
+        #[cfg(test)]
+        CORE_PROBES.with(|c| c.set(c.get() + 1));
         self.0 == other.0
     }
 }
 
 impl std::hash::Hash for CoreId {
     fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        // TICKET-049 — see the comment on `eq`: charging here too means a hash-set dedup is charged
+        // once per insert attempt, matching a linear scan's once-per-comparison charge.
+        #[cfg(test)]
+        CORE_PROBES.with(|c| c.set(c.get() + 1));
         self.0.hash(h);
     }
 }
@@ -1889,6 +1898,45 @@ mod tests {
         let got = std::fs::read(&path).unwrap();
         let _ = std::fs::remove_file(&path);
         assert_eq!(got, b"abc", "a nested buffered chain must drop-flush");
+    }
+
+    /// TICKET-049 — the mark walk's dedup cost must scale linearly with rooted core depth, never
+    /// quadratically: charge one probe per `CoreId` comparison (`CoreId::eq`/`hash`), never a
+    /// wall-clock sample. Doubling depth must not more than double the probe count; a linear-scan
+    /// dedup (measured ratio ~4.0) would fail this, a hash-set dedup (measured ratio ~2.0) passes.
+    #[test]
+    fn mark_walk_dedup_is_linear_in_core_chain_depth() {
+        fn chain(depth: usize) -> WireValue {
+            let mut w = WireValue::Nil;
+            for _ in 0..depth {
+                let core: Arc<ChannelCore> = Arc::new(ChannelCore::default());
+                let sum = wire_summary(&w);
+                core.q.lock().unwrap().push(sum, w);
+                w = WireValue::Channel(core);
+            }
+            w
+        }
+
+        fn probe_cost(depth: usize) -> u64 {
+            let w = chain(depth);
+            probe_reset();
+            let mut out = Vec::new();
+            let mut seen = SeenCores::default();
+            collect_core_gcrefs(&w, &mut out, &mut seen);
+            probes()
+        }
+
+        let shallow = probe_cost(1000);
+        let deep = probe_cost(2000);
+        assert!(
+            shallow > 0,
+            "the dedup must charge a probe per visited core"
+        );
+        assert!(
+            deep * 10 < shallow * 28,
+            "doubling rooted core depth must not more than double the mark walk's dedup cost (a \
+             linear scan is ~4.0, the hash set ~2.0): got {shallow} probes -> {deep} probes"
+        );
     }
 }
 
