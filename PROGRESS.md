@@ -7,6 +7,17 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **`judge/run.chz` — the DSA known-answer bug-finding harness — bit-rotted silently against
+  `std.fs`'s `Path`-returning `glob`/`list_dir`, and had no gate to catch it (TICKET-047).**
+  `case_inputs` and `find_problems` still treated `fs.glob`/`fs.list_dir` entries as `str`, so
+  `chezzi check judge/run.chz` failed with 3 type errors and a discarded-`Option` warning that
+  nothing in the repo exercised. Fixed both seams to render `Path` to `str` once via `.str()`, bound
+  the discarded `out.pop()`, added `--samples-only` (bounds the sweep to the 12 committed cases) and
+  `CHEZZI_BIN` (points the harness at the binary under test instead of a stale `./target/release/chezzi`).
+  New gate `tests/judge.rs` runs on every `cargo test`: `4711` Rust tests pass across `30` targets
+  (up from `4707` across `30`), `765` Chezzi tests still pass at both worker counts, and the full
+  318-case sweep (`cargo test --release --test judge -- --ignored`, after `python3 judge/generate.py`)
+  passes clean.
 - **Three std modules fixed to match their owning ancestor: `std.flag` usage(), `fs.glob` on a
   missing directory, `encoding.url_parse` on a protocol-relative URL (TICKET-046).** `std/flag.chz`'s
   `default_str` used to read the live `strs`/`ints`/`bools` maps `parse` overwrites; a new `defs` map,

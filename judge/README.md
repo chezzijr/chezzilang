@@ -12,7 +12,11 @@ construction subset (no overflow, no recursion). The harness itself is written i
 cargo build --release
 ./target/release/chezzi run judge/run.chz                  # all problems
 ./target/release/chezzi run judge/run.chz weird_algorithm  # one problem
+./target/release/chezzi run judge/run.chz --samples-only    # committed samples only (the cargo gate)
 ```
+
+`tests/judge.rs` gates the harness on every `cargo test` (type-check + the committed samples);
+`cargo test --release --test judge -- --ignored` runs the full downloaded suite.
 
 Verdicts: `PASS` · `WRONG` (prints first differing line) · `FAULT` (Chezzi runtime error + exit code) ·
 `PANIC` (Rust host panic — a Chezzi bug for certain) · `TIME` (timeout). A problem with no cases is

@@ -613,8 +613,8 @@ plus a fast path for large stress inputs). `judge/generate.py` feeds the same in
 self-contained Chezzi-vs-Python differential. The oracle uses a *different algorithm* than the solution
 (e.g. union-find vs flood-fill, sequence-enumeration vs DP) so an agreeing pair can't be hiding a shared
 bug. Seeded with 12 problems (11 CSES + 1 Codeforces) spanning loop/bigint, Set, Map, DP+mod, grid
-flood-fill, string iteration, modular loops, sort+i64, and 2^n recursion; 300+ generated + edge cases
-run clean.
+flood-fill, string iteration, modular loops, sort+i64, and 2^n recursion; 318 committed + generated
+cases run clean.
 
 How to run:
 
@@ -623,8 +623,11 @@ cargo build --release
 python3 judge/generate.py [--count N]                      # synthesize in-domain cases (no download)
 ./target/release/chezzi run judge/run.chz                  # all problems (samples + generated cases)
 ./target/release/chezzi run judge/run.chz weird_algorithm  # one problem
+./target/release/chezzi run judge/run.chz --samples-only    # committed samples only (the cargo gate)
 python3 judge/fetch_problem.py <url> [slug]                # scaffold a new problem from its statement
 ```
+
+`tests/judge.rs` gates the harness on every `cargo test` (type-check + the committed samples).
 
 A non-`PASS` verdict on a vetted solution is a candidate bug: minimize the failing `.in`, then land a
 failing-then-green unit test per the repo's TDD flow before fixing. Verdicts: `PASS` / `WRONG` (prints
