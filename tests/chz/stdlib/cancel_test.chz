@@ -39,7 +39,7 @@ test fn derive_chain_beats_the_every_ancestor_registry():
     # Headroom is quoted from the DEBUG profile at CHEZZI_THREADS=2, because that is what the gate
     # actually runs: 390 ms against the 5 000 ms bound, a 12.8x margin. (It was 4 889 ms — 1.02x, and
     # it flaked under suite contention — until the GC's quadratic core-graph dedup was fixed; see
-    # `tests/chz/spec/gc_core_graph_test.chz`.)
+    # `vm::core::tests::mark_walk_dedup_is_linear_in_core_chain_depth`.)
     t0 := time.monotonic()
     root := cancel.manual()
     leaf := root
