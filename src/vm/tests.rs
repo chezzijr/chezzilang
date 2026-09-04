@@ -14552,13 +14552,26 @@ print(\"after\")
 /// `closer` runs its OWN self-join (`ex.shutdown()`) synchronously on the worker thread that
 /// dispatched it, and that join waits for siblings `A`/`C`. A blocked eager job now hands its pool
 /// slot to a replacement (TICKET-052), so `closer`'s join no longer starves `A`/`C` of a thread.
-/// Watchdogged so a genuine hang times out with a diagnosis instead of stalling the whole suite.
+///
+/// **No watchdog (TICKET-059).** The regression FAILS an assertion (measured 10/10 pre-fix) rather
+/// than hanging, so a channel-receive deadline never catches the defect -- only a starved host, which
+/// needs at least 2 free pool threads. Measured `taskset -c 0` (1 CPU): `test result: FAILED. 0
+/// passed; 1 failed; ... finished in 60.00s`, the watchdog expiring, not an assertion. The skip below
+/// checks that host precondition directly instead.
 #[test]
 fn a_self_shut_executor_still_has_its_slots_reduced_at_program_exit() {
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(run_capture(
-            "
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    if cores < 2 || crate::vm::worker_count() < 2 {
+        eprintln!(
+            "SKIP: {cores} CPU -- closer's self-join needs 2 free pool threads (pool.rs risk G3)"
+        );
+        return;
+    }
+
+    let out = run_capture(
+        "
 import std.concurrency
 ex := Executor()
 done := Channel[int]()
@@ -14571,12 +14584,8 @@ ex.submit(fn(): print(\"C\"))
 done.recv()
 print(\"end\")
 ",
-        ));
-    });
-    let out = rx
-        .recv_timeout(std::time::Duration::from_secs(60))
-        .expect("a job shutting down its own executor must not hang")
-        .expect("a job shutting down its own executor is healthy — see the self-join fix");
+    )
+    .expect("a job shutting down its own executor is healthy — see the self-join fix");
     // `end` first: `main` prints it before the exit drain, which is what then flushes the slots.
     // A before C is the W7-5c per-slot flush on the buffered sink, in SUBMISSION order — that half
     // IS ordered, unlike the streamed `chezzi run` path (see `EagerState`'s doc).
@@ -14586,10 +14595,8 @@ print(\"end\")
     );
 
     // The same hand-off carries FAULTS: a swallowed one exits 0 on a program that failed.
-    let (tx2, rx2) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx2.send(run_program(
-            "
+    let (_out, res) = run_program(
+        "
 import std.concurrency
 ex := Executor()
 done := Channel[int]()
@@ -14602,11 +14609,7 @@ ex.submit(boom)
 ex.submit(closer)
 done.recv()
 ",
-        ));
-    });
-    let (_out, res) = rx2
-        .recv_timeout(std::time::Duration::from_secs(60))
-        .expect("a job shutting down its own executor must not hang");
+    );
     let msg = res
         .expect_err("the sibling job's assertion failure must reach the run, not be dropped")
         .message;

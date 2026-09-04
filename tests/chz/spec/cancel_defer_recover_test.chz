@@ -5,10 +5,12 @@
 # nursery cancel — while a `recover:` OUTSIDE the defer still must NOT defeat the cancel, and the
 # pending cancel must resume travelling up once the defer body finishes.
 #
-# Asserts on a Shared accumulator read AFTER the join (never inter-task print order), and uses a
-# sleeping sibling + a blocking `recv` (never a busy loop — N8). Gated by
-# `chz_suite_passes` (`tests/chz_suite.rs`).
-import std.time
+# Asserts on a Shared accumulator read AFTER the join (never inter-task print order). Orders the
+# defer-owning task's blocking recv against its sibling's fault with a channel HANDSHAKE (never a
+# sleep -- DEC-050, TICKET-059): the defer-owning task sends `ready` immediately before its
+# blocking call (the last cancellation checkpoint before it parks), and the sibling receives it
+# before panicking, so the sibling can never fault before the defer-owning task has parked. Gated
+# by `chz_suite_passes` (`tests/chz_suite.rs`).
 import std.concurrency
 
 # (a) THE FIX: a `recover:` inside a cancelled task's defer body catches, so the rest of the defer
@@ -17,6 +19,7 @@ test fn recover_inside_defer_of_cancelled_task_catches():
     log := Shared("")
     outer := recover:
         ch := Channel[int]()
+        ready := Channel[int]()
         parallel:
             spawn:
                 defer:
@@ -24,9 +27,10 @@ test fn recover_inside_defer_of_cancelled_task_catches():
                     r := recover: panic("cleanup step 1 failed")
                     assert "{r}" == "Err('cleanup step 1 failed')"
                     log.update(fn(s: str) -> str: s + "B")
+                ready.send(1)
                 _ := ch.recv()
             spawn:
-                time.sleep_ms(20)
+                _ := ready.recv()
                 panic("sibling-fault")
         0
     assert log.get() == "AB", "log={log.get()} outer={outer}"
@@ -37,15 +41,17 @@ test fn recover_inside_defer_of_cancelled_task_catches():
 test fn recover_outside_defer_cannot_defeat_cancel():
     log := Shared("")
     ch := Channel[int]()
+    ready := Channel[int]()
     outer := recover:
         parallel:
             spawn:
                 defer:
                     log.update(fn(s: str) -> str: s + "D")
+                ready.send(1)
                 r := recover: ch.recv()
                 log.update(fn(s: str) -> str: s + "X")
             spawn:
-                time.sleep_ms(20)
+                _ := ready.recv()
                 panic("sibling-fault")
         0
     assert log.get() == "D", "log={log.get()} outer={outer}"
@@ -59,6 +65,7 @@ test fn recover_outside_defer_cannot_defeat_cancel():
 test fn recover_outside_defer_cannot_catch_a_fault_raised_inside_it():
     log := Shared("")
     ch := Channel[int]()
+    ready := Channel[int]()
     outer := recover:
         parallel:
             spawn:
@@ -67,9 +74,10 @@ test fn recover_outside_defer_cannot_catch_a_fault_raised_inside_it():
                     xs: List[int] = []
                     _ := xs[9]                                   # faults INSIDE the defer body
                     log.update(fn(s: str) -> str: s + "NOPE")    # must never run
+                ready.send(1)
                 _ := ch.recv()
             spawn:
-                time.sleep_ms(20)
+                _ := ready.recv()
                 panic("sibling-fault")
         0
     assert log.get() == "E", "log={log.get()} outer={outer}"
@@ -79,6 +87,7 @@ test fn recover_outside_defer_cannot_catch_a_fault_raised_inside_it():
 test fn faulting_defer_does_not_swallow_lifo_next():
     log := Shared("")
     ch := Channel[int]()
+    ready := Channel[int]()
     outer := recover:
         parallel:
             spawn:
@@ -87,9 +96,10 @@ test fn faulting_defer_does_not_swallow_lifo_next():
                 defer:
                     log.update(fn(s: str) -> str: s + "2")
                     panic("boom in defer")
+                ready.send(1)
                 _ := ch.recv()
             spawn:
-                time.sleep_ms(20)
+                _ := ready.recv()
                 panic("sibling-fault")
         0
     assert log.get() == "21", "log={log.get()} outer={outer}"
