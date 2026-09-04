@@ -568,7 +568,10 @@ each naming the fix (`a typed int never widens to float — write float(x)`).
 
 An untyped int constant adapts at every value-DEFINITION sink: a typed binding (`x: float = 1 + 2` →
 `3.0`), a `float` function / method parameter (coerced at the CALLEE prologue, from the DECLARED param
-type), a `float` parameter DEFAULT (`fn g(a: float = 3)`), a `-> float` return, a `float` struct field
+type, including one reached through a protocol-typed receiver or a bound type parameter -- every
+witness must declare that same `float`, so the witness's own prologue does the coercion), a `float`
+parameter DEFAULT (`fn g(a: float = 3)`), a `-> float` return, including a closure's own
+(`g := fn() -> float: 3`), a `float` struct field
 (`P(3)` for `v: float`), and a **mixed-numeric-constant** collection literal — a list/map literal with ≥1
 untyped float constant infers `List[float]` / `Map[_, float]` and coerces its untyped int constants
 (`[1, 2.3]`, `[1, -2.5]`, `[1 + 1, 2.5]`). The ELEMENT of a mixed-numeric-CONSTANT collection widens at
@@ -3161,7 +3164,13 @@ constant** branch beside a float **constant** sibling branch widens to `float` (
 → `float`; `match n: 0: 1; _: 2.5` → `float`), the exact `literal_numeric_mix` peephole the list literal
 `[1, 2.5]` uses (the compiler emits `Op::CoerceFloat` on the int branch, so it is a real float, never an
 `int` under a `float`). A **typed** int branch (a variable, a call) does NOT adapt — `a := 5; if c: a
-else: 2.5` is a type error (write `float(a)`), same as a typed int element in a mixed list. This is a
+else: 2.5` is a type error (write `float(a)`), same as a typed int element in a mixed list. Branches
+that disagree with each other but are each assignable to a statically known expected type at the
+position — an annotated binding, a call argument, a declared return — take that expected type instead
+(`x: Sh = if true: Sq(2) else: Tr(9)`, where `Sh` is a protocol both `Sq` and `Tr` satisfy). With NO
+expected type the branches must still agree, so `x := if true: Sq(2) else: Tr(9)` stays `branches have
+incompatible types: Sq and Tr`. The expected type is matched with plain assignability, so it never
+licenses the int-to-float widen — `x: float = if c: 1 else: 2` stays an error. This is a
 property of the if/match EXPRESSION and is distinct from multi-`return` inference (which still conflicts
 on `int`/`float` — annotate `-> float`). When every branch is an `Ok(…)` (no `Err`
 branch pins the error type), an **unannotated** `if`/`match`-expression's `Result` error slot defaults
