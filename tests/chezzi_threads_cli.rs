@@ -11,8 +11,9 @@
 //! size) or, if it happens to run first, permanently pins the WHOLE test binary's pool to that count
 //! for the rest of the run. Measured (task-5b brief): whole-process `CHEZZI_THREADS=2 cargo test`
 //! under `RUST_TEST_THREADS=4` starved 4 concurrently-running tests contending for 2 pool workers (8
-//! failures/hangs — exactly the tests already annotated "needs ≥2 free pool threads", pool risk G3,
-//! `docs/gaps.md` W7-12r); `RUST_TEST_THREADS=1` took >54 minutes without finishing. A subprocess
+//! failures/hangs — exactly the tests then annotated "needs ≥2 free pool threads", pool risk G3,
+//! `docs/gaps.md` W7-12r; TICKET-052 closed that residual, and those annotations are retired).
+//! `RUST_TEST_THREADS=1` took >54 minutes without finishing. A subprocess
 //! gets its own process, so its own freshly-sized pool — same reason `executor_reentrant_shutdown.rs`
 //! / `executor_results_not_retained.rs` already run the built binary instead of calling in-process.
 //!
@@ -112,19 +113,21 @@ fn chz_suite_passes_at_a_second_worker_count() {
 }
 
 /// The causal proof that `CHEZZI_THREADS` actually reaches the pool through the `chezzi test` CLI
-/// path specifically (not merely `vm::worker_count()` in the lib test binary). Uses the exact "needs
-/// ≥2 free pool threads" shape documented in `docs/gaps.md` (pool risk G3): a bounded channel already
-/// full, one `Executor` job blocked trying to send into it, a second job that must close the channel
-/// to unblock the first. `Vm::mn_join`'s eager dispatch means the first job PERMANENTLY holds its
-/// pool thread (no replacement spin — a documented v1 hazard, not a bug), so:
-/// - at 1 worker, the closer can never be dispatched → genuine hang (bounded here by `--timeout`, so
+/// path specifically (not merely `vm::worker_count()` in the lib test binary). TICKET-052 made a
+/// BLOCKED pool thread yield its slot to a replacement, so a shape that starves on a blocking wait
+/// (the channel-close precondition this test used before TICKET-052) no longer starves — it now
+/// dispatches the closer through the replacement worker at every count, including 1. A CPU SPIN never
+/// blocks, so it never yields a slot: one job spins on a flag it can only see change from a second
+/// job, and only a second POOL THREAD — not a replacement, since nothing here ever blocks — can run
+/// that second job. So:
+/// - at 1 worker, the setter can never be dispatched → genuine hang (bounded here by `--timeout`, so
 ///   this test cannot itself wedge the runner);
-/// - at ≥2 workers, the closer runs on the second, the blocked send observes the close and faults
-///   `send on a closed channel` — fast (measured: single-digit ms).
+/// - at ≥2 workers, the setter runs on the second thread, flips the flag, and the spinning job's loop
+///   exits — fast (measured: single-digit ms).
 ///
 /// A dropped/no-op env read would make ALL THREE runs behave like the default (>=2 cores on any CI
-/// box) — i.e. all three would fault fast, none would time out. Seeing the 1-worker run actually
-/// time out is the proof the knob has power, not just that something passed twice.
+/// box) — i.e. all three would pass fast, none would time out. Seeing the 1-worker run actually time
+/// out is the proof the knob has power, not just that something passed twice.
 #[test]
 fn chezzi_test_cli_honors_chezzi_threads_via_a_two_worker_precondition() {
     let dir = std::env::temp_dir().join(format!("chz-threads-cli-{}", std::process::id()));
@@ -134,38 +137,42 @@ fn chezzi_test_cli_honors_chezzi_threads_via_a_two_worker_precondition() {
         &path,
         "import std.concurrency\n\n\
          test fn needs_two_workers():\n    \
-         ch := Channel[int](1)\n    \
-         ch.send(0)\n    \
+         flag := AtomicInt(0)\n    \
+         fn waiter():\n        \
+         while flag.load() == 0:\n            \
+         pass\n    \
+         fn setter():\n        \
+         flag.store(1)\n    \
          ex := Executor()\n    \
-         ex.submit(fn(): ch.send(1))\n    \
-         ex.submit(fn(): ch.close())\n    \
+         ex.submit(waiter)\n    \
+         ex.submit(setter)\n    \
          ex.shutdown()\n    \
          assert true\n",
     )
     .expect("write program");
 
-    // Default (auto — >=2 workers on any real box): the second job gets its own pool thread and
-    // closes the channel; the blocked send faults immediately. Bounded to 5s as a smoke guard, not
+    // Default (auto — >=2 workers on any real box): the setter gets its own pool thread and flips
+    // the flag; the spinning waiter observes it and returns. Bounded to 5s as a smoke guard, not
     // because this run is expected to need it.
     let (_, summary, out, _) = run_chz_test(&path, None, Some(5_000));
     assert!(
-        summary.contains("1 errored") && out.contains("send on a closed channel"),
-        "default worker count should fault fast on the closed channel, not hang: {summary}\n{out}"
+        summary.contains(" passed, 0 failed, 0 errored"),
+        "default worker count should pass fast on the CPU-spin precondition, not hang: {summary}\n{out}"
     );
 
     // CHEZZI_THREADS=2: same shape, explicit count instead of auto.
     let (_, summary, out, _) = run_chz_test(&path, Some("2"), Some(5_000));
     assert!(
-        summary.contains("1 errored") && out.contains("send on a closed channel"),
-        "CHEZZI_THREADS=2 should fault fast on the closed channel, not hang: {summary}\n{out}"
+        summary.contains(" passed, 0 failed, 0 errored"),
+        "CHEZZI_THREADS=2 should pass fast on the CPU-spin precondition, not hang: {summary}\n{out}"
     );
 
-    // CHEZZI_THREADS=1: the closer can never be dispatched — this must TIME OUT, not fault and not
-    // pass. If it instead faults fast (or passes), the env var never reached the pool.
+    // CHEZZI_THREADS=1: the setter can never be dispatched — this must TIME OUT, not pass. If it
+    // instead passes fast, the env var never reached the pool.
     let (_, summary, out, _) = run_chz_test(&path, Some("1"), Some(2_000));
     assert!(
         summary.contains("1 timed out"),
-        "CHEZZI_THREADS=1 must starve the two-worker precondition and TIME OUT — a fault or a pass \
+        "CHEZZI_THREADS=1 must starve the two-worker CPU-spin precondition and TIME OUT — a pass \
          here means CHEZZI_THREADS did not reach chezzi test's pool: {summary}\n{out}"
     );
 
