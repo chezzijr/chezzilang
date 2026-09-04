@@ -1282,3 +1282,16 @@ test fn a_builtin_member_call_does_not_charge_its_caller():
     # and the witnessed methods whose names they collide with still work
     assert Bin(1).get[Counter]().n == 0
     assert Sink(1).push[Tag]().s == "none"
+
+# TICKET-056 — an explicit turbofish forward (`t56_mk_tag[T]()`) charges `t56_fwd`'s own `T` even
+# though `T` occurs in neither `t56_fwd`'s parameter types nor its return type. Two different answers
+# for `Counter` vs `Tag` prove the forwarded witness is the OUTERMOST concrete type, not a constant.
+fn t56_mk_tag[T: Tagged]() -> int:
+    return T.tag()
+
+fn t56_fwd[T: Tagged](k: int) -> int:
+    return t56_mk_tag[T]() + k
+
+test fn a_turbofish_forward_carries_the_outer_witness():
+    assert t56_fwd[Counter](10) == 11
+    assert t56_fwd[Tag](10) == 13

@@ -7,6 +7,24 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **An explicit turbofish forward was rejected even though its enclosing FUNCTION declared the type
+  parameter it forwarded (TICKET-056).** `fn outer[T: Mk](n: int) -> int: return inner[T](n)` called
+  as `outer[B](4)` errored "no hidden type witness for 'T' is reachable at this call site", though
+  Rust's `outer::<B>(4)` under the direct translation prints `40` (`rustc -O`, measured 2026-09-03).
+  Root cause: `witness_params_of`'s filter (`src/checker/sig.rs`) charged `outer` for `T` only when
+  `T` occurred in a parameter type or the return type (`ty_param_in_sig`) — a fence meant for the
+  INFERRED call channel, where an uncharged param really is undeterminable. An explicit turbofish at
+  the caller determines `T` with no argument at all, so the fence was wrongly refusing a program that
+  is perfectly determinable. Fixed by adding a `turbofished` disjunct that bypasses the fence whenever
+  a call site's own type arguments name a static-bounded candidate (`turbofish_charges`, matched
+  against candidates only — a turbofish naming a concrete type is not a forward). Four positions now
+  charge identically: the free-fn repro, an enclosing MEMBER declarer, a member CALLEE turbofish, and
+  the forward inside a nested `fn` or closure. Two shapes stay refused: a TYPE-declared param (the
+  concrete type is erased once a value exists) and an unbounded param (ordinary bound failure). The
+  witness-unreachable diagnostic is now split on who DECLARED the type parameter, so a
+  function-declared `T` that still can't reach its witness (a LOCAL-carried member forward, `v := x`
+  then `h.build(v)`) gets a message naming a working turbofish spelling instead of the enclosing-TYPE
+  lecture.
 - **An eager `Executor` job that blocks pinned its pool thread, hanging K blocked jobs plus one
   unblocker forever (TICKET-052).** An eager job runs a whole `Vm` on a bounded pool thread with
   `mn == None`, and `worker_loop` never returned, so blocking on a `Channel`, a `Shared`/`RwShared`
@@ -3664,11 +3682,11 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > alone (the second cut) charged `sink.push(x)` where `sink: List[T]` — a BUILTIN `List.push` with no
 > witness parameter to receive anything — so `fn label[T: Default](x: T, sink: List[T])` lost its
 > function-value position and a program that had compiled stopped compiling. ANDed, `m.get("a")` fails
-> the first and `xs.push(x)` fails the second, and both cost their enclosing generic nothing. Two shapes stay refused on purpose: a `T` in neither a
-> parameter nor the return type — that fence (`ty_param_in_sig`) answers the same on the free-fn
-> channel and lifting it needs types the hoist does not have — and an argument whose `T` arrives
-> through a LOCAL rather than a parameter (`v := x` then `h.build(v)`), which a per-call-site rule
-> cannot see; the turbofish (`h.build[T](v)`) always charges and is the spelling to reach for.
+> the first and `xs.push(x)` fails the second, and both cost their enclosing generic nothing. One shape
+> stays refused on purpose: an argument whose `T` arrives through a LOCAL rather than a parameter
+> (`v := x` then `h.build(v)`), which a per-call-site rule cannot see; the turbofish (`h.build[T](v)`)
+> always charges and is the spelling to reach for (TICKET-056, 2026-09-04: an EXPLICIT turbofish now
+> charges even when its `T` occurs in neither a parameter type nor the return type of its own fn).
 > **The hoist fixpoint now re-derives `FnSig::min_params` wherever it writes `witness_params`
 > (2026-08-15).** `min_params` is DERIVED from the witness set through `ast::min_callable_params` —
 > the one predicate the compiler also sizes `Proto::min_arity` with — but only the mid-hoist SEED was

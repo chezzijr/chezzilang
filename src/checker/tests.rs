@@ -28436,6 +28436,33 @@ fn witness_forwarding_via_turbofish_unbounded_param_rejected() {
     );
 }
 
+/// TICKET-056 — the witness-unreachable diagnostic is now split on who DECLARED the type parameter.
+/// A LOCAL-carried member forward (`v := x` then `h.build(v)`, `v` is not a parameter so it is not
+/// charged) is the one shape that still reaches the guard with a function-declared `T`, and gets the
+/// new message naming a working turbofish spelling. A TYPE-declared param keeps the old message.
+#[test]
+fn witness_unreachable_names_the_declarer_of_the_type_param() {
+    let function_declared = "protocol Mk:\n    fn make(n: int) -> Self\n    fn val(self) -> int\nstruct B:\n    n: int\n    fn make(n: int) -> B:\n        return B(n * 10)\n    fn val(self) -> int:\n        return self.n\nstruct Host:\n    k: int\n    fn build[U: Mk](self, y: U) -> int:\n        return U.make(1).val()\nfn outer[T: Mk](x: T, h: Host) -> int:\n    v := x\n    return h.build(v)\nfn main():\n    print(1)\nmain()\n";
+    let errs = check_entry(function_declared);
+    assert!(
+        errs.iter().any(|e| e
+            .message
+            .contains("IS declared by the enclosing function or member")),
+        "expected the function-declared message, got: {errs:?}"
+    );
+    assert!(
+        !errs
+            .iter()
+            .any(|e| e.message.contains("A type parameter of an enclosing TYPE")),
+        "the function-declared shape must not get the TYPE-declared message, got: {errs:?}"
+    );
+
+    entry_rejects(
+        "protocol Mk:\n    fn make(n: int) -> Self\n    fn val(self) -> int\nstruct B:\n    n: int\n    fn make(n: int) -> B:\n        return B(n * 10)\n    fn val(self) -> int:\n        return self.n\nfn inner[T: Mk](n: int) -> int:\n    return T.make(n).val()\nstruct Bx[T: Mk]:\n    v: int\n    fn go(self) -> int:\n        return inner[T](self.v)\nfn main():\n    print(1)\nmain()\n",
+        "A type parameter of an enclosing TYPE",
+    );
+}
+
 /// M24 Task 4 — the `$w:T` binding REACHES a nested body: `with_witness_captures` appends it to the
 /// capture entries of every closure, nested `fn`, `spawn:` block and `defer:` block, so `T.static()`
 /// inside one lowers to the same `CallStaticDyn`. The witness is a `str`, so it crosses BY VALUE —

@@ -1844,14 +1844,14 @@ call an ordinary builtin from inside a static-bounded generic — `m.get("a")` f
 condition, and `xs.push(x)` with `x: T` on a `List[T]` fails the second, since `List.push` is a
 builtin that can take no witness.
 
-Two shapes are still refused for want of a charge. First, the same fence as on the free-fn channel:
-a `T` that occurs in **neither** a parameter type nor the return type of its own fn is never charged
-for a forward (`fn f[T: Default](h: Holder, k: int) -> int: q := h.mk[T](); return k`, and the
-free-fn `q := empty[T]()` equally), because a charge whose type no argument can determine would make
-the fn uncallable. Second, a member forward whose `T` reaches the argument through a **local** rather
-than a parameter (`v := x` then `h.build(v)`) — the call site alone cannot see where `v` got its
-type. Give `T` a place in the signature, spell the member turbofish (`h.build[T](v)`, always
-charged), or construct through it directly (`T.default()`, charged regardless).
+One shape is still refused for want of a charge: a member forward whose `T` reaches the argument
+through a **local** rather than a parameter (`v := x` then `h.build(v)`) — the call site alone cannot
+see where `v` got its type. An **explicit turbofish**, in either call syntax, always charges even when
+`T` occurs in **neither** a parameter type nor the return type of its own fn — `h.build[T](v)` and a
+free-fn call like `empty[T]()` both charge their enclosing fn's `T` now, and that fn's own call sites
+must then pin `T` themselves (`outer[SomeType](...)`). For the local-carried shape, give `T` a place
+in the signature, spell the member turbofish (`h.build[T](v)`, always charged), or construct through
+it directly (`T.default()`, charged regardless).
 
 A type parameter **SHADOWS a same-named declaration for its whole body, in every position** — the
 annotation `x: Item`, the static call `Item.tag()`, the type-level turbofish `Item[int].tag()`, the

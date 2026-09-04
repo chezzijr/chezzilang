@@ -4473,6 +4473,29 @@ impl Checker {
                         unreachable!("guarded by the arm's own pattern")
                     };
                     let p = p.clone();
+                    if !self.witness_scope.contains(&p)
+                        && self.enclosing_type_declaring(&p).is_none()
+                        && self.type_params.contains_key(&p)
+                    {
+                        let pin = match &recv {
+                            WitnessCallee::Free => format!("`{name}[{p}](...)`"),
+                            WitnessCallee::Dotted(prefix) => format!("`{prefix}.{name}[{p}](...)`"),
+                            WitnessCallee::Member => format!("`<receiver>.{name}[{p}](...)`"),
+                        };
+                        self.error(
+                            span,
+                            format!(
+                                "type parameter '{w}' of '{name}' is bound to {p}, which is still \
+                                 abstract here. '{p}' IS declared by the enclosing function or \
+                                 member, so a hidden type witness for it exists in this frame — but \
+                                 this call site does not carry it: the forwarding walk reads '{p}' \
+                                 only from an explicit type argument, or from an argument naming a \
+                                 parameter of this function annotated with '{p}'. Write the type \
+                                 argument ({pin}), which always forwards the enclosing witness"
+                            ),
+                        );
+                        return;
+                    }
                     if !self.witness_scope.contains(&p) {
                         self.error(
                             span,
