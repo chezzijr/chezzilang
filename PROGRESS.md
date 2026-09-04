@@ -25,7 +25,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
   surfaces closed with it: `tests/chezzi_threads_cli.rs`'s `CHEZZI_THREADS` causal-proof test swapped
   its channel-close starvation vehicle for a CPU spin (a spin never blocks, so it never yields — the
   only shape left that still needs a second worker), and ten stale "needs ≥2 free pool threads" notes
-  in `src/vm/tests.rs` were retired. `docs/gaps.md`'s "Bounded-pool starvation" residual is closed.
+  in `src/vm/tests.rs` were retired. `docs/gaps.md`'s "Bounded-pool starvation" residual is closed. A
+  third surface went with them — `test_runner::tests::over_memory_counts_jobs_queued_but_not_started`
+  needs 60 jobs to sit QUEUED to trip an 8 MB `--max-heap`, which a `sleep_ms` body no longer achieves,
+  so its job body is now a CPU spin on a shared absolute deadline.
 - **A crossing closure's frozen module-global snapshot let one module global denote two objects
   inside one task (TICKET-051).** `Obj::Closure.gsnap` froze a closure's free home-module globals at
   the airlock and `Op::GetGlobalSlot` preferred it over the live slot, so a closure's read of a
