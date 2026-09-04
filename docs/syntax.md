@@ -26,6 +26,9 @@ struct Point:
 ```
 
 - **Blocks = indentation** (spaces only; tabs are a lex error). A block opens after a `:` line.
+- **Source encoding:** files are UTF-8. A single byte-order mark (`U+FEFF`) at the very start of a
+  file is stripped, as CPython and Go do, so a file saved by a Windows editor or VS Code runs
+  unchanged; a `U+FEFF` anywhere else, including a second one at the start, stays a lex error.
 - **Logical lines** end at a newline. Blank / comment-only lines are ignored.
 - **Identifiers:** letter or `_`, then letters/digits/`_`. Case-sensitive.
 - **Doc-comments:** any plain `#` line(s) *immediately above* a declaration (`fn`/method, `struct`,

@@ -12599,6 +12599,12 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- **A leading UTF-8 byte-order mark (`U+FEFF`) is now stripped instead of a lex error (2026-09-05,
+  TICKET-058).** `Lexer::new`/`Lexer::new_file` strip at most one leading `U+FEFF`, matching CPython
+  and Go; a second BOM or a mid-file BOM stays a lex error, and an interpolation fragment re-lexed via
+  `Lexer::new_in` never strips. Every raw-source consumer that indexes by a lexer `(line, col)` —
+  `--errors=json`'s `end_col`, the plain-text caret snippet, and the editor's `hover`/semantic-token
+  columns — strips once at its own use site so the two never drift apart.
 - **`json.parse`'s multi-character token errors now name where the token STARTED, not where the scan
   stopped (2026-09-04, TICKET-057).** Four sites in `std/json.chz`: `parse_lit` (a bad
   `true`/`false`/`null` now names the word's first letter), `parse_string` (an unterminated string
