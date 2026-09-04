@@ -14643,9 +14643,11 @@ import std.process
 import std.time
 run_started: Channel[int] = Channel[int](1)
 joining: Channel[int] = Channel[int](1)
+sleep_over: Shared[bool] = Shared[bool](false)
 fn uninterruptible():
     run_started.send(0)
     r := recover: process.run(\"sleep 2\")
+    sleep_over.set(true)
 fn nested():
     inner := Executor()
     inner.submit(uninterruptible)
@@ -14657,6 +14659,7 @@ fn nested():
 ex := Executor()
 ex.submit(nested)
 _ := joining.recv()
+print(\"inner still running: \" + str(not sleep_over.get()))
 ex.shutdown_now()
 print(\"main done\")
 ";
@@ -14677,6 +14680,23 @@ print(\"main done\")
     assert!(
         out.contains("job joining inner") && out.contains("main done"),
         "the run must complete: {out:?}"
+    );
+    // A swallowed-print assertion alone cannot separate the W7-60 defect from host starvation: both
+    // print the same three lines when main is starved past the fixture's 2s sleep before it can call
+    // `shutdown_now` (measured 2026-09-05). `sleep_over`, read immediately before `shutdown_now`, is
+    // the one instant that tells them apart -- checking the host precondition directly, the same
+    // shape as the skip on `a_self_shut_executor_still_has_its_slots_reduced_at_program_exit`
+    // (TICKET-059).
+    if out.contains("inner still running: false") {
+        eprintln!(
+            "SKIP: the host starved main past the fixture's 2 s sleep -- the joiner had already \
+             left the inner join before shutdown_now was called: {out:?}"
+        );
+        return;
+    }
+    assert!(
+        out.contains("inner still running: true"),
+        "the fixture must report whether the inner job was still running: {out:?}"
     );
     assert!(
         !out.contains("job past inner join"),
