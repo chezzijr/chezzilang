@@ -2485,6 +2485,117 @@ print("result: {res.recv()}")
 }
 
 #[test]
+fn airlock_receiving_tasks_own_write_beats_an_arriving_closures_global() {
+    // TICKET-051. A closure arriving from another task must not clobber the receiving task's own
+    // write to the same module global. Task A writes `n = 5` before receiving a closure over `n`
+    // from task B (which never wrote `n`). Go 1.26.6 and CPython 3.14.7 both print `5` and `5`
+    // (measured 2026-09-04). Chezzi prints `1` then `5` today: the arriving closure's frozen
+    // `gsnap` (captured at `mk()`'s call, before A's write) wins over A's own later write.
+    let src = r#"
+n := 1
+ch := Channel[fn() -> int](1)
+res := Channel[int](2)
+
+fn mk() -> fn() -> int:
+    fn r() -> int:
+        return n
+    return r
+
+parallel:
+    spawn:
+        n = 5
+        k := ch.recv()
+        res.send(k())
+        res.send(n)
+    spawn:
+        ch.send(mk())
+
+print("closure sees : {res.recv()}")
+print("task read    : {res.recv()}")
+"#;
+    let out = golden_entry(src);
+    assert_eq!(
+        out, "closure sees : 5\ntask read    : 5\n",
+        "the receiving task's own write to a module global must beat an arriving closure's stale \
+         value for that same global: {out:?}"
+    );
+}
+
+#[test]
+fn airlock_arriving_closure_loses_to_the_receiving_views_own_assignment() {
+    // TICKET-051. Same shape as `airlock_receiving_tasks_own_write_beats_an_arriving_closures_global`
+    // but with a top-level `n = 7` inserted before the nursery, so the SENDING task's slot is
+    // `carried` (inherited through its snapshot) and only the receive-side `assigned` skip can
+    // save the receiver's own later write. Go 1.26.6 and CPython 3.14.7 both print `5` and `5`
+    // (measured 2026-09-04, `/tmp/t051p/guard2.chz`).
+    let src = r#"
+n := 1
+n = 7
+ch := Channel[fn() -> int](1)
+res := Channel[int](2)
+
+fn mk() -> fn() -> int:
+    fn r() -> int:
+        return n
+    return r
+
+parallel:
+    spawn:
+        n = 5
+        k := ch.recv()
+        res.send(k())
+        res.send(n)
+    spawn:
+        ch.send(mk())
+
+print("closure sees : {res.recv()}")
+print("task read    : {res.recv()}")
+"#;
+    let out = golden_entry(src);
+    assert_eq!(
+        out, "closure sees : 5\ntask read    : 5\n",
+        "the receive side must skip a slot the receiving view assigned itself even when the \
+         sender's value is merely carried, not directly assigned: {out:?}"
+    );
+}
+
+#[test]
+fn airlock_arriving_closure_does_not_clobber_the_receivers_in_place_push() {
+    // TICKET-051. A slot no ancestor ever assigned must NOT be installed from an arriving
+    // closure, because the receiving task may have mutated its copy in place (`xs.push(9)`),
+    // which no slot write records. Go 1.26.6 and CPython 3.14.7 both print length `2`
+    // (measured 2026-09-04, `/tmp/t051p/xspush.chz`). Chezzi prints `[1, 9] len 1` today.
+    let src = r#"
+import std.concurrency
+
+xs := [1]
+ch := Channel[fn() -> int](1)
+res := Channel[str](1)
+
+fn mk() -> fn() -> int:
+    fn r() -> int:
+        return xs.len()
+    return r
+
+parallel:
+    spawn:
+        xs.push(9)
+        k := ch.recv()
+        res.send("{xs} len {k()}")
+    spawn:
+        ch.send(mk())
+
+print(res.recv())
+"#;
+    let out = golden_entry(src);
+    assert_eq!(
+        out, "[1, 9] len 2\n",
+        "an arriving closure's global that no ancestor ever assigned must not replace the \
+         receiver's in-place mutation of that same value: {out:?}"
+    );
+}
+
+#[test]
 fn airlock_same_task_closure_round_trip_mutates_module_list_in_place() {
     // TICKET-041(b), data-loss variant. An in-place write to a module-global container from a
     // same-task channel-round-tripped closure must land, matching CPython's measured
