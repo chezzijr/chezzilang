@@ -1222,8 +1222,11 @@ Compare a line SET, or make the program deterministic by construction, before ca
 > Everywhere else — an eager `Executor` job — it returns `Err("<op> would block: an Executor job
 > doesn't own its thread — blocking here would starve every other job and `parallel:` nursery
 > sharing the pool. Do this socket op inside `spawn:` or a `parallel:` nursery instead, where it
-> parks rather than blocking a shared thread.")`, and that is deliberate rather than an unfinished
-> corner. **The op set is `accept`/`read`/`read_bytes`/
+> parks rather than blocking a shared thread.")`. TICKET-052 gave the job pool a yield bracket (a
+> blocked job now hands its thread to a replacement), so this refusal no longer rests on starvation
+> — it survives because widening it would change what these ops RETURN on a would-block fd (a hang
+> instead of this `Err`), which is deliberate rather than an unfinished corner. **The op set is
+> `accept`/`read`/`read_bytes`/
 > `write`; `connect` joins it ONLY inside an eager `Executor` job** — those four wait on a Chezzi peer
 > fiber that can only run on the very thread they would block, whereas a `connect` handshake is
 > completed by the kernel and starves no chezzi party, so top-level `main` blocks it and succeeds, as
@@ -1243,14 +1246,14 @@ Compare a line SET, or make the program deterministic by construction, before ca
 >
 
 > - **Inside an eager `Executor` job**: a job does not own its thread — it runs on the bounded,
->   process-wide job pool (`CHEZZI_THREADS`, never grown on demand) and has no scheduler under it to
->   spin a replacement, so a blocked job starves every other job and every `parallel:` nursery sharing
->   that pool (measured at `CHEZZI_THREADS=1`, before either op refused here: an `accept` job plus a
->   later `connect` job = hang). **That measurement survives W8-8 unchanged, and structurally so**
->   (re-derived 2026-08-18): the job pool is `vm::pool`, sized straight off `worker_count()`
->   (`src/vm/pool.rs:38-40`), whereas W8-8's phantom second runner lived in the nursery enlist/owner path
->   — so `CHEZZI_THREADS=1` gave this pool exactly one thread before that fix and still does. Re-measured
->   on the 1-wide binary: both ops return their `Err` in 0.006 s, rc=0, no hang. This is the one context where **`connect` refuses too** (`W7-59`) —
+>   process-wide job pool (`CHEZZI_THREADS`, never grown on demand). Before TICKET-052 a blocked job
+>   had no scheduler under it to spin a replacement and starved every other job and every `parallel:`
+>   nursery sharing that pool (measured at `CHEZZI_THREADS=1`, before either op refused here: an
+>   `accept` job plus a later `connect` job = hang). **TICKET-052 closed that starvation** — a blocked
+>   job now hands its pool thread to a replacement worker (`pool::yield_slot`) — but `accept`/`read`/
+>   `write` still refuse rather than block: widening them would change what they RETURN on a
+>   would-block fd (a hang instead of the `Err` below), a separate behaviour change TICKET-052 does
+>   not make. This is the one context where **`connect` refuses too** (`W7-59`) —
 >   before that it spun in place for up to 10 s, pinning a pool worker with no cancel or `--timeout`
 >   escape (measured: an outer `shutdown_now()` at 200 ms took **10 009 ms** to end the run, now
 >   **209 ms**). Use `spawn`/`parallel:` for socket work, which parks instead of blocking.
@@ -1682,6 +1685,13 @@ supervised tasks) — Go's float-free `go` is the model both ecosystems *rejecte
 > propagates out of `shutdown()`. A faulting job costs its own result, never a sibling's work. This
 > matches Python's `ThreadPoolExecutor` / Java's `ExecutorService` / Go's `errgroup`, none of which
 > abort siblings by default.
+>
+> **TICKET-052 — a blocked job no longer pins its pool thread.** A job blocking on a `Channel`, a
+> `Shared`/`RwShared` guard, `time.sleep_ms`/a timer wait, or a nested `Executor`'s `shutdown()` join
+> now hands its pool thread to a freshly spawned replacement worker and RETIRES when the job ends, so
+> the live pool count stays at `worker_count()` plus the number of jobs blocked right now. Before this,
+> a bounded pool of K jobs plus one unblocker could hang forever at K >= pool size, including at the
+> default worker count on ordinary code — fixed for every shape above; see `src/vm/pool.rs`.
 >
 > **The queue did not go away** — the shared pool has one, and a submitted job waits in it when every
 > worker is busy. What changed is *who drains it and when*: continuously by pool workers, rather than

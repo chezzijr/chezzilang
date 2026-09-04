@@ -7,6 +7,25 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **An eager `Executor` job that blocks pinned its pool thread, hanging K blocked jobs plus one
+  unblocker forever (TICKET-052).** An eager job runs a whole `Vm` on a bounded pool thread with
+  `mn == None`, and `worker_loop` never returned, so blocking on a `Channel`, a `Shared`/`RwShared`
+  guard, `time.sleep_ms`/a timer, or a nested `Executor`'s `shutdown()` join held the thread until the
+  job ended — the failing condition was simply K >= pool size, reproducing at the DEFAULT worker count
+  on ordinary code, not only at `--threads=1`. Fixed by giving `src/vm/pool.rs` a yield bracket: a job
+  about to block in place hands its slot to a freshly spawned replacement worker
+  (`pool::yield_slot`), and its own thread retires (`worker_loop` returns) once the job ends, so live
+  threads stay at `worker_count()` plus the number of jobs blocked right now — gated on
+  `self.mn.is_none()` so an M:N worker shell (which already compensates through `demote_enter`) never
+  double-spawns. Wired at three call sites: `Vm::block_halt_check`, `demote_enter`'s `mn.is_none()`
+  arm, and the `Executor` join loop. 6 new subprocess tests in
+  `tests/executor_blocking_job_pins_pool_thread.rs` (consumer-then-producer, 13 consumers plus a
+  feeder at the default count, depth-13 nested executors, a blocked guard plus a blocked recv, six
+  overlapping sleeps, and a `/proc/self/status` thread-count retirement check). Two regression
+  surfaces closed with it: `tests/chezzi_threads_cli.rs`'s `CHEZZI_THREADS` causal-proof test swapped
+  its channel-close starvation vehicle for a CPU spin (a spin never blocks, so it never yields — the
+  only shape left that still needs a second worker), and ten stale "needs ≥2 free pool threads" notes
+  in `src/vm/tests.rs` were retired. `docs/gaps.md`'s "Bounded-pool starvation" residual is closed.
 - **A crossing closure's frozen module-global snapshot let one module global denote two objects
   inside one task (TICKET-051).** `Obj::Closure.gsnap` froze a closure's free home-module globals at
   the airlock and `Op::GetGlobalSlot` preferred it over the live slot, so a closure's read of a

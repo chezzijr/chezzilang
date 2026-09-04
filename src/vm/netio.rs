@@ -2238,15 +2238,12 @@ impl Vm {
     ///   client arrives, and until this landed the hello-world TCP server was unwritable (the old gate
     ///   was `mn.is_some()`, which means "worker shell", not "parallel is on").
     ///
-    /// Everything else keeps the immediate `Err`, and each exclusion is a MEASURED hang, not caution:
-    /// - **an eager `Executor` job**: it does NOT own its thread. It runs on the bounded, process-wide
-    ///   [`crate::vm::pool`] (`worker_count()`, never grows) and there is no `MnSched` here to spin a
-    ///   replacement, so a blocked job starves every other job and every `parallel:` nursery sharing
-    ///   that pool — measured at `CHEZZI_THREADS=1` (an `accept` job plus a later `connect` job = hang).
-    ///   That measurement is UNAFFECTED by W8-8 (the `--threads=1` two-runner fix, 2026-08-18) and
-    ///   structurally so: [`crate::vm::pool`] is sized straight off `worker_count()`, while W8-8's extra
-    ///   runner lived in the nursery enlist/owner path in `sched.rs`. Re-derived on the 1-wide binary the
-    ///   same day: both ops return their `Err` in 0.006 s, rc=0, no hang;
+    /// Everything else keeps the immediate `Err`. **An eager `Executor` job** is excluded not because
+    /// it starves the pool — TICKET-052 gave [`crate::vm::pool`] a yield bracket (`pool::yield_slot`),
+    /// so a blocked job now hands its thread to a replacement and no longer starves a sibling — but
+    /// because widening `accept`/`read`/`write` to block in place changes what those ops RETURN on a
+    /// would-block fd (a hang instead of the `Err` this arm keeps returning), which is a separate
+    /// behaviour change TICKET-052 does not make;
     /// - **`main` inside a native callback** (`native_reentry > 0` with `mn == None`): unjudgeable by
     ///   the deadlock verdict ([`Vm::is_counted_party`]'s doc), so an unbounded block there is a hang
     ///   where a fault is the honest answer.

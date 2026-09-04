@@ -1549,11 +1549,12 @@ impl Vm {
     ///   own private sleep-spin, deleted by `W7-59`, which now routes it here like the other four; they
     ///   were simply left behind (the repo's recurring fixed-some-arms-of-an-N-way-set finding, W7-22).
     ///
-    /// **Not, deliberately: an eager `Executor` job.** It does not own its thread — it runs on the
-    /// bounded process-wide [`crate::vm::pool`] — so blocking in place there starves the peer that would
-    /// make the fd ready. Measured as a permanent hang when a first attempt at this widening let it in;
-    /// it keeps the loud `Err`. (The since-removed cooperative engine was excluded for the same reason:
-    /// it ran every fiber on one thread.)
+    /// **Not, deliberately: an eager `Executor` job.** TICKET-052 gave a blocked eager job's pool
+    /// thread to a replacement worker, so the STARVATION argument above no longer holds — but the
+    /// carve-out survives regardless, because widening `accept`/`read`/`write` to block in place would
+    /// change what those ops RETURN on a would-block fd (a hang instead of the loud `Err` this arm
+    /// keeps), which is a separate behaviour change TICKET-052 does not make. (The since-removed
+    /// cooperative engine was excluded for the original reason: it ran every fiber on one thread.)
     ///
     /// **`connect` is deliberately admitted even though it is a wait a non-thread-owning party can
     /// reach** (`W7-59`): the starvation argument above is about waiting on a CHEZZI peer fiber,

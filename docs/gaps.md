@@ -7898,14 +7898,13 @@ gate was already green. None by reasoning:
   waits untimed, so a hypothetical cycle in which *every* party is a `Join` has nobody to form the
   verdict. Needs `main` → job → executor → job → executor → `main`, all joins and no channel block.
   Rare enough to decline rather than add a polling joiner and a fault message for it.
-* **Bounded-pool starvation hangs, and it bounds two of the acceptance tests.** A job reserved but
-  never dispatched (pool full of blocked jobs) counts live forever, so the verdict declines — correct
-  by the error-direction table, and it hung before too (`pool.rs` risk G3, pre-existing). Measured:
-  shapes (a) and (b) fault at `--threads=4` and hang at `--threads=1`, because the second job never
-  gets a thread. So `two_blocked_jobs_in_one_executor_fault_instead_of_hanging` and
-  `two_executors_deadlocking_each_other_fault` **need ≥2 free pool threads** and say so in their
-  watchdog messages; a single-core host would see them time out. Shapes (c) and (d) are fine at one
-  thread.
+* ~~Bounded-pool starvation~~ **CLOSED — TICKET-052 (2026-09).** A blocked pool thread now
+  hands its slot to a replacement worker (`pool::yield_slot`) and retires when its job ends, so a job
+  reserved but never dispatched now gets a thread instead of counting live forever. Widened beyond the
+  two named acceptance-test shapes at filing: it also hangs at the DEFAULT worker count on ordinary
+  code (a K-consumer `Executor` with K >= pool size), and on N-deep nested `Executor` joins — both now
+  fixed too. `two_blocked_jobs_in_one_executor_fault_instead_of_hanging` and
+  `two_executors_deadlocking_each_other_fault` no longer need a second free pool thread.
 * **Partial deadlock is still out of reach** — a subset stuck while the rest of the program runs on.
   That is §2d step 3 (AND-OR knot detection) and always was; step 0 buys TOTAL quiescence only, exactly
   as Go's own rule does.

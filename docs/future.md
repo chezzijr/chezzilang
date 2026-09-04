@@ -152,11 +152,14 @@ already the right machinery and is what jobs are now dispatched onto.
 - **D1 — Lifetime: detached, joined at program exit.** Shipped. A2 is reworded from "run the backlog
   nobody ran" to "wait for in-flight work".
 - **D2 — Concurrency: shared process pool, no size parameter.** Shipped; `Executor()` stays zero-arg.
-  **Accepted known limits:** executor jobs hold pool threads for their whole lifetime and can starve
-  nurseries; the old parent-participation mitigation is gone with the batch join; and a job that calls
-  `shutdown()` on an executor (its own, or another) blocks a pool thread while it waits — self-join
-  hangs, exactly as Python's `shutdown(wait=True)` from inside a worker does. `Executor(max_workers)`
-  stays an additive door if it bites.
+  **Accepted known limits:** the old parent-participation mitigation is gone with the batch join.
+  TICKET-052 (2026-09) closed the starvation limit this row used to accept: a job blocking on a
+  `Channel`, a `Shared`/`RwShared` guard, `time.sleep_ms`/a timer, or a nested `Executor` join now
+  yields its pool thread to a freshly spawned replacement worker and retires when the job ends —
+  including a job that calls `shutdown()` on an executor (its own, or another), so a self-join no
+  longer hangs a starved pool either. The cost is one extra OS thread per job concurrently blocked
+  this way; an OS-refused replacement degrades to the old in-place block rather than faulting the job.
+  `Executor(max_workers)` stays an additive door if it bites.
 - **D3 — `--serial` is unchanged.** Shipped. The divergence is observable only between `submit` and
   `shutdown()`; the test-shape rule is **assert after `shutdown()`, never between**.
 - **D4 — `shutdown()` waits for queued and running.** Shipped. `shutdown_now()` drops work that has not
