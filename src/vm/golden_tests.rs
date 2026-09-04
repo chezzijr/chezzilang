@@ -2596,6 +2596,76 @@ print(res.recv())
 }
 
 #[test]
+fn airlock_closure_carries_a_global_its_sender_only_inherited() {
+    // TICKET-051 regression guard, passes BEFORE any fix on purpose. The rejected "assigned-only"
+    // send filter fails this case: the SENDING task never itself assigns `n`, it only inherits
+    // main's `n = 7` write through the module snapshot taken at its spawn. Chezzi, Go 1.26.6 and
+    // CPython 3.14.7 all print `7` (measured 2026-09-04, `/tmp/t051p/c1.chz`).
+    let src = r#"
+import std.concurrency
+
+n := 1
+ch := Channel[fn() -> int](1)
+res := Channel[int](1)
+
+fn mk() -> fn() -> int:
+    fn r() -> int:
+        return n
+    return r
+
+parallel:
+    spawn: res.send(ch.recv()())
+    n = 7
+    spawn: ch.send(mk())
+
+print("closure sees : {res.recv()}")
+"#;
+    let out = golden_entry(src);
+    assert_eq!(
+        out, "closure sees : 7\n",
+        "a closure sent by a task that only inherited a write through its snapshot, never \
+         assigned it itself, must still carry that write: {out:?}"
+    );
+}
+
+#[test]
+fn airlock_forwarded_closure_without_its_own_write_carries_the_first_senders_value() {
+    // TICKET-051 regression guard. Task A writes `n = 999` and sends a closure over `n`. Task B
+    // only forwards the closure without writing `n` itself. Task C receives it and must still see
+    // A's write via B's install-then-forward: `999 * 3 = 2997`.
+    let src = r#"
+n := 1
+fn mk() -> fn(int) -> int:
+    fn r(x: int) -> int:
+        return x * n
+    return r
+
+ch1 := Channel[fn(int) -> int](1)
+ch2 := Channel[fn(int) -> int](1)
+res := Channel[int](1)
+
+parallel:
+    spawn:
+        n = 999
+        ch1.send(mk())
+    spawn:
+        k := ch1.recv()
+        ch2.send(k)
+    spawn:
+        k2 := ch2.recv()
+        res.send(k2(3))
+
+print("result: {res.recv()}")
+"#;
+    let out = golden_entry(src);
+    assert_eq!(
+        out, "result: 2997\n",
+        "a task that only forwards a closure without writing the global itself must still carry \
+         the value it received: {out:?}"
+    );
+}
+
+#[test]
 fn airlock_same_task_closure_round_trip_mutates_module_list_in_place() {
     // TICKET-041(b), data-loss variant. An in-place write to a module-global container from a
     // same-task channel-round-tripped closure must land, matching CPython's measured
