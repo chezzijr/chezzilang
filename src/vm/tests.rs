@@ -13605,11 +13605,8 @@ ch.send(42)
 /// Depends on EAGER dispatch: under the lazy queue-at-`submit` model (decision D3) this program
 /// faults for an unrelated reason, so it would be no evidence about anything this change touches.
 ///
-/// **Needs ≥2 free pool threads.** With one, the second job is reserved but never dispatched, so it
-/// counts toward `live` while never registering as blocked and the verdict correctly declines — the
-/// bounded-pool starvation hazard `pool.rs` documents (risk G3), unchanged by this detector and
-/// verified at `--threads=1` on the CLI. Same constraint as
-/// `eager_send_blocked_on_a_full_channel_faults_when_the_channel_is_closed`.
+/// A blocked eager job now hands its pool slot to a replacement (TICKET-052), so this shape no
+/// longer needs a second free pool thread — the second job dispatches at `--threads=1` too.
 ///
 /// Watchdogged — the failure mode is a hang, which would stall the suite rather than fail it.
 #[test]
@@ -13625,11 +13622,9 @@ ex.shutdown()
     std::thread::spawn(move || {
         let _ = tx.send(run_capture(src));
     });
-    let mn = rx.recv_timeout(std::time::Duration::from_secs(60)).expect(
-        "two jobs deadlocked in one executor must fault, not hang — or this host has <2 free \
-             pool threads, in which case the second job is queued-but-undispatched and the verdict \
-             correctly declines (pool.rs risk G3)",
-    );
+    let mn = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("two jobs deadlocked in one executor must fault, not hang");
     let msg = mn
         .expect_err("both jobs wait on a channel nobody can fill — a deadlock")
         .message;
@@ -13649,8 +13644,9 @@ ex.shutdown()
 /// producer in y still vetoes while a deadlocked one does not. Go reports this program (measured,
 /// rc=2); CPython hangs.
 ///
-/// M:N-only, for the same D3 reason as the test above, and it needs ≥2 free pool threads for the same
-/// reason too. Watchdogged.
+/// M:N-only, for the same D3 reason as the test above. A blocked eager job now hands its pool slot
+/// to a replacement (TICKET-052), so this shape no longer needs a second free pool thread.
+/// Watchdogged.
 #[test]
 fn two_executors_deadlocking_each_other_fault() {
     let src = r#"
@@ -14485,13 +14481,8 @@ print(\"done\")
 /// The barrier is still load-bearing: without it `ex.submit` races `ex.shutdown()` and a job can be
 /// dispatched after `main` has already drained, or rejected by the `shut` flag the first job sets.
 ///
-/// **Needs ≥2 free pool threads.** The two-job shape above needs both jobs RUNNING at once, where
-/// cut 3's one-job shape needed only one — and `pool.rs` is a fixed-size pool with no grow-on-stall
-/// (risk G3). With one free thread the second job is reserved but never dispatched, so it counts
-/// toward `live` while never registering as blocked, the verdict correctly declines, and this test
-/// times out after 60 s with a diagnosis that has nothing to do with the detector. Same constraint
-/// as `two_blocked_jobs_in_one_executor_fault_instead_of_hanging` and
-/// `two_executors_deadlocking_each_other_fault`; verified at `--threads=1` on the CLI.
+/// A blocked eager job now hands its pool slot to a replacement (TICKET-052), so this shape no
+/// longer needs a second free pool thread — both jobs dispatch at `--threads=1` too.
 ///
 /// M:N-only + watchdogged for the reasons on the tests above.
 #[test]
@@ -14523,11 +14514,9 @@ print(\"after\")
             crate::native::HostConfig::default(),
         ));
     });
-    let (out, _err, res, _code) = rx.recv_timeout(std::time::Duration::from_secs(60)).expect(
-        "a cycle of executor joins must fault, not hang — or this host has <2 free pool \
-             threads, in which case the second job is queued-but-undispatched and the verdict \
-             correctly declines (pool.rs risk G3)",
-    );
+    let (out, _err, res, _code) = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("a cycle of executor joins must fault, not hang");
     let _ = std::fs::remove_file(&entry);
     let err = res.expect_err("every party is joining an executor that owes work");
     let msg = err.message.clone();
@@ -14560,13 +14549,10 @@ print(\"after\")
 /// Measured on the pre-fix binary: the first program captured `"end\n"` (A and C silently lost,
 /// 10/10) and the second exited **Ok** with the sibling's assertion failure swallowed.
 ///
-/// **Needs ≥2 free pool threads.** `closer` runs its OWN self-join (`ex.shutdown()`) synchronously
-/// on the worker thread that dispatched it, and that join waits for siblings `A`/`C`. With one free
-/// pool thread, `closer` occupies the only worker and `A`/`C` are queued-but-never-dispatched — the
-/// same `pool.rs` risk G3 bounded-pool starvation the sibling `Executor` deadlock tests already
-/// document — so the join never returns and this test hangs rather than failing. Measured: `taskset
-/// -c 0` (1 CPU) still running at 120 s; `taskset -c 0,1` (2 CPUs) passes in 0.00 s. Watchdogged so a
-/// starved host times out with a diagnosis instead of stalling the whole suite.
+/// `closer` runs its OWN self-join (`ex.shutdown()`) synchronously on the worker thread that
+/// dispatched it, and that join waits for siblings `A`/`C`. A blocked eager job now hands its pool
+/// slot to a replacement (TICKET-052), so `closer`'s join no longer starves `A`/`C` of a thread.
+/// Watchdogged so a genuine hang times out with a diagnosis instead of stalling the whole suite.
 #[test]
 fn a_self_shut_executor_still_has_its_slots_reduced_at_program_exit() {
     let (tx, rx) = std::sync::mpsc::channel();
@@ -14589,11 +14575,7 @@ print(\"end\")
     });
     let out = rx
         .recv_timeout(std::time::Duration::from_secs(60))
-        .expect(
-            "a job shutting down its own executor must not hang — or this host has <2 free \
-             pool threads, in which case closer's self-join occupies the only worker and A/C are \
-             queued-but-undispatched (pool.rs risk G3)",
-        )
+        .expect("a job shutting down its own executor must not hang")
         .expect("a job shutting down its own executor is healthy — see the self-join fix");
     // `end` first: `main` prints it before the exit drain, which is what then flushes the slots.
     // A before C is the W7-5c per-slot flush on the buffered sink, in SUBMISSION order — that half
@@ -14622,11 +14604,9 @@ done.recv()
 ",
         ));
     });
-    let (_out, res) = rx2.recv_timeout(std::time::Duration::from_secs(60)).expect(
-        "a job shutting down its own executor must not hang — or this host has <2 free pool \
-             threads, in which case closer's self-join occupies the only worker and boom is \
-             queued-but-undispatched (pool.rs risk G3)",
-    );
+    let (_out, res) = rx2
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("a job shutting down its own executor must not hang");
     let msg = res
         .expect_err("the sibling job's assertion failure must reach the run, not be dropped")
         .message;
@@ -14832,10 +14812,9 @@ ex.shutdown()
 /// reason that has nothing to do with this fix, on the PRE-fix binary. Waiting for `ready` makes the
 /// first `send` provably succeed, so the fault can only come from the blocked second one.
 ///
-/// **Needs ≥2 free pool threads**, like every two-job eager program: a blocked eager job holds its
-/// pool thread (no replacement spin), so at `--threads=1` `closer` is never dispatched and this
-/// program hangs — before AND after this fix, and equally on `main`. See `pool.rs`'s "Known v1
-/// hazard". The 30 s guard below turns that into a clear failure rather than a hung suite.
+/// A blocked eager job now hands its pool slot to a replacement (TICKET-052), so `closer` dispatches
+/// at `--threads=1` too. The 30 s guard below turns a genuine hang into a clear failure rather than
+/// a hung suite.
 ///
 /// **Depends on real interleaving.** Under the lazy queue-at-`submit` model both jobs are queued and
 /// the drain runs them one at a time, so `blocker` would fault `FULL_SEND_DEADLOCK` before `closer`
@@ -14877,9 +14856,8 @@ ex.submit(closer)
         Ok(v) => v,
         // Two very different causes, so do not accuse the bug by default.
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!(
-            "no result in 30 s: either the W7-13r(c) hang is back (a blocked eager `send` not \
-             observing `close()`), or this run had <2 free pool threads and `closer` was never \
-             dispatched"
+            "no result in 30 s: the W7-13r(c) hang is back (a blocked eager `send` not observing \
+             `close()`)"
         ),
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
             panic!("the VM thread panicked — see the panic above this one")
@@ -14966,10 +14944,7 @@ print(done.recv())
     });
     let outcome = rx.recv_timeout(std::time::Duration::from_secs(60));
     let _ = std::fs::remove_file(&entry);
-    let (out, rdbg, failed, elapsed) = outcome.expect(
-        "300 `wait:` wakeups did not finish in 60 s — either a hang, or <2 free pool threads (see \
-         the note on `eager_send_blocked_on_a_full_channel_faults_when_the_channel_is_closed`)",
-    );
+    let (out, rdbg, failed, elapsed) = outcome.expect("300 `wait:` wakeups did not finish in 60 s");
     assert!(!failed, "the program must succeed: out={out:?} r={rdbg}");
     assert_eq!(
         out, "44850\n",
@@ -15034,10 +15009,8 @@ print(out.recv())
     });
     let outcome = rx.recv_timeout(std::time::Duration::from_secs(30));
     let _ = std::fs::remove_file(&entry);
-    let (out, rdbg, failed) = outcome.expect(
-        "a `wait:` with one closed arm hung — either the dead arm is being waited on as if live, or \
-         <2 free pool threads",
-    );
+    let (out, rdbg, failed) = outcome
+        .expect("a `wait:` with one closed arm hung — the dead arm is being waited on as if live");
     assert!(!failed, "the live arm must be taken: out={out:?} r={rdbg}");
     assert_eq!(
         out, "7\n",
@@ -15093,10 +15066,7 @@ ex.shutdown()
     });
     let outcome = rx.recv_timeout(std::time::Duration::from_secs(30));
     let _ = std::fs::remove_file(&entry);
-    let (out, rdbg, failed) = outcome.expect(
-        "no result in 30 s — either a hang, or this run had <2 free pool threads (see the sibling \
-         test's note)",
-    );
+    let (out, rdbg, failed) = outcome.expect("no result in 30 s — a hang");
     assert!(
         !failed,
         "a send whose slot was freed by a `recv` must COMPLETE, as Go does — faulting here is the \
@@ -15176,10 +15146,7 @@ ex.shutdown()
     });
     let outcome = rx.recv_timeout(std::time::Duration::from_secs(60));
     let _ = std::fs::remove_file(&entry);
-    let (out, rdbg, failed, elapsed) = outcome.expect(
-        "the eager `wait:` hung — or there were <2 free pool threads (see the note on \
-         `eager_send_blocked_on_a_full_channel_faults_when_the_channel_is_closed`)",
-    );
+    let (out, rdbg, failed, elapsed) = outcome.expect("the eager `wait:` hung");
     assert!(!failed, "the program must succeed: out={out:?} r={rdbg}");
     assert_eq!(
         out, "value 9\n",
