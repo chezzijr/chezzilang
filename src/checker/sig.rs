@@ -970,7 +970,9 @@ impl Checker {
     ///   recorded for it; and
     /// * the param must actually OCCUR in this fn's own signature ([`Self::ty_param_in_sig`]). A
     ///   param that appears in neither a parameter type nor the return type can never be bound to
-    ///   anything at a call site, so it can never be the thing forwarded.
+    ///   anything at an INFERRED call site, so it can never be the thing forwarded there. An EXPLICIT
+    ///   TURBOFISH at the caller (`outer[B](4)`) is a separate spelling that determines the param with
+    ///   no argument at all, so it bypasses this fence ([`turbofish_charges`]).
     ///
     /// Because forwarding is transitive (`a` forwards into `b` which constructs), this answer depends
     /// on OTHER fns' answers, and a fn is hoisted before its callees. [`Checker::hoist`] therefore
@@ -1027,17 +1029,27 @@ impl Checker {
         // unpinnable `get`/`push` poison that name for every member call in every static-bounded
         // generic, and the call-site half alone charged a BUILTIN `sink.push(x)` that has no witness
         // parameter to receive anything.
-        let forwards = walk
-            .calls
-            .iter()
-            .any(|c| self.call_forwards_a_witness(c, decl))
-            || walk
-                .member_calls
-                .iter()
-                .any(|c| self.member_call_forwards_a_witness(c, decl, &cands));
+        let mut forwards = false;
+        let mut turbofished: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for c in &walk.calls {
+            if self.call_forwards_a_witness(c, decl) {
+                forwards = true;
+                turbofish_charges(&c.type_args, &cands, &mut turbofished);
+            }
+        }
+        for c in &walk.member_calls {
+            if self.member_call_forwards_a_witness(c, decl, &cands) {
+                forwards = true;
+                turbofish_charges(&c.type_args, &cands, &mut turbofished);
+            }
+        }
         cands
             .into_iter()
-            .filter(|t| mentioned.contains(t) || (forwards && Self::ty_param_in_sig(decl, t, true)))
+            .filter(|t| {
+                mentioned.contains(t)
+                    || turbofished.contains(t)
+                    || (forwards && Self::ty_param_in_sig(decl, t, true))
+            })
             .collect()
     }
 
@@ -1148,7 +1160,8 @@ impl Checker {
     /// only charge an unrelated `T`. What this still cannot see is a `T` that reaches the argument
     /// through something other than a parameter — a LOCAL (`v := x` then `h.make(v)`), a field, a
     /// call result — which is refused with "no hidden type witness for 'T' is reachable at this call
-    /// site"; the turbofish (`h.make[T](v)`) is the spelling that always charges.
+    /// site"; the turbofish (`h.make[T](v)`) is the spelling that always charges, whether or not
+    /// `decl`'s own `T` occurs in `decl`'s signature ([`turbofish_charges`] bypasses that fence).
     fn member_call_forwards_a_witness(
         &self,
         c: &crate::compiler::MemberCall,
@@ -5295,4 +5308,21 @@ fn ty_mentions(ty: &crate::ast::Type, t: &str) -> bool {
         }
         crate::ast::Type::Tuple(items) => items.iter().any(|i| ty_mentions(i, t)),
     }
+}
+
+/// M24 — charge every static-bounded CANDIDATE (`cands`) that an explicit turbofish (`type_args`)
+/// names, into `out`. Only candidates are matched, never every in-scope name: a turbofish naming a
+/// concrete type is not a forward, and charging for one would cost the enclosing fn its
+/// function-value position for nothing.
+fn turbofish_charges(
+    type_args: &[crate::ast::Type],
+    cands: &[String],
+    out: &mut std::collections::HashSet<String>,
+) {
+    out.extend(
+        cands
+            .iter()
+            .filter(|t| type_args.iter().any(|ty| ty_mentions(ty, t)))
+            .cloned(),
+    );
 }

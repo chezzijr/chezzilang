@@ -28391,6 +28391,51 @@ fn witness_static_call_forwarding_via_turbofish_ok() {
     );
 }
 
+/// TICKET-056 — the turbofish forward now charges from every position it can be written in: the
+/// enclosing declarer can be a MEMBER, the CALLEE can be a member turbofish, and the forward can sit
+/// inside a nested `fn` or a closure. All four share the `Mk` preamble above.
+#[test]
+fn witness_forwarding_via_turbofish_from_every_position_ok() {
+    let head = "protocol Mk:\n    fn make(n: int) -> Self\n    fn val(self) -> int\nstruct B:\n    n: int\n    fn make(n: int) -> B:\n        return B(n * 10)\n    fn val(self) -> int:\n        return self.n\nfn inner[T: Mk](n: int) -> int:\n    return T.make(n).val()\n";
+    // (a) the enclosing declarer is a MEMBER
+    entry_ok(&format!(
+        "{head}struct Host:\n    k: int\n    fn go[T: Mk](self, n: int) -> int:\n        return inner[T](n)\nfn main():\n    print(Host(1).go[B](4))\nmain()\n"
+    ));
+    // (b) the CALLEE is a member turbofish
+    entry_ok(&format!(
+        "{head}struct Host:\n    k: int\n    fn build[T: Mk](self, n: int) -> int:\n        return T.make(n).val()\nfn outer[T: Mk](h: Host, n: int) -> int:\n    return h.build[T](n)\nfn main():\n    print(outer[B](Host(1), 4))\nmain()\n"
+    ));
+    // (c) the forward sits inside a nested `fn`
+    entry_ok(&format!(
+        "{head}fn outer[T: Mk](n: int) -> int:\n    fn nest(m: int) -> int:\n        return inner[T](m)\n    return nest(n)\nfn main():\n    print(outer[B](4))\nmain()\n"
+    ));
+    // (d) the forward sits inside a closure
+    entry_ok(&format!(
+        "{head}fn outer[T: Mk](n: int) -> int:\n    f := fn(m: int) -> int: inner[T](m)\n    return f(n)\nfn main():\n    print(outer[B](4))\nmain()\n"
+    ));
+}
+
+/// TICKET-056 — the widening cannot reach a TYPE-declared param: `static_bounded_type_params` reads
+/// `decl.type_params`, which for a member `go(self)` with no `[T]` of its own is empty, so
+/// `witness_params_of` returns before the turbofish charge runs.
+#[test]
+fn witness_forwarding_via_turbofish_of_an_enclosing_type_param_rejected() {
+    entry_rejects(
+        "protocol Mk:\n    fn make(n: int) -> Self\n    fn val(self) -> int\nstruct B:\n    n: int\n    fn make(n: int) -> B:\n        return B(n * 10)\n    fn val(self) -> int:\n        return self.n\nfn inner[T: Mk](n: int) -> int:\n    return T.make(n).val()\nstruct Bx[T: Mk]:\n    v: int\n    fn go(self) -> int:\n        return inner[T](self.v)\nfn main():\n    print(1)\nmain()\n",
+        "A type parameter of an enclosing TYPE",
+    );
+}
+
+/// TICKET-056 — an unbounded `T` is not a candidate at all, so a turbofish naming it is charged
+/// nothing and the failure stays the ordinary bound failure.
+#[test]
+fn witness_forwarding_via_turbofish_unbounded_param_rejected() {
+    entry_rejects(
+        "protocol Mk:\n    fn make(n: int) -> Self\n    fn val(self) -> int\nstruct B:\n    n: int\n    fn make(n: int) -> B:\n        return B(n * 10)\n    fn val(self) -> int:\n        return self.n\nfn inner[T: Mk](n: int) -> int:\n    return T.make(n).val()\nfn outer[T](n: int) -> int:\n    return inner[T](n)\nfn main():\n    print(outer[B](4))\nmain()\n",
+        "does not satisfy",
+    );
+}
+
 /// M24 Task 4 — the `$w:T` binding REACHES a nested body: `with_witness_captures` appends it to the
 /// capture entries of every closure, nested `fn`, `spawn:` block and `defer:` block, so `T.static()`
 /// inside one lowers to the same `CallStaticDyn`. The witness is a `str`, so it crosses BY VALUE —

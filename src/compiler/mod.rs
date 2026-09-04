@@ -6842,6 +6842,8 @@ pub(crate) struct CallSite {
     /// turbofish (`f[T](1)` names the caller's own type param), an identifier, a field read, an
     /// operator — anything whose type this syntactic walk cannot pin.
     pub closed_arg_heads: Option<Vec<String>>,
+    /// The call's explicit type arguments (`f[T](n)` → `[T]`); empty for an inferred call.
+    pub type_args: Vec<crate::ast::Type>,
 }
 
 /// Record `f(…)` / `m.f(…)` on `out`. A callee that is neither a free name nor a free name's field
@@ -6880,6 +6882,7 @@ fn record_call_site(
         module,
         name,
         closed_arg_heads: closed_arg_heads(args, named, type_args, bound),
+        type_args: type_args.to_vec(),
     });
 }
 
