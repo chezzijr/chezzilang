@@ -8810,6 +8810,25 @@ fn struct_ctor_is_replaced_by_a_same_module_fn() {
 }
 
 #[test]
+fn newtype_ctor_is_replaced_by_a_same_module_fn() {
+    // TICKET-055: DEC-029 covers a struct's field ctor; the newtype wrapping ctor must follow the
+    // same rule -- a colliding module-level fn wins bare too. Before the fix this typed `N(3)`
+    // against the newtype's `int` underlying instead of `fn N(s: str)` and emitted no diagnostic.
+    rejects(
+        "newtype N = int\nfn N(s: str) -> N:\n    return N(s.len())\nv := N(3)\n",
+        "argument 1 of 'N': expected str, found int",
+    );
+}
+
+#[test]
+fn newtype_raw_ctor_survives_inside_the_shadowing_fn_body() {
+    // TICKET-055: DEC-029's escape hatch (`raw_ctor_owner`) must extend to newtype -- inside the
+    // shadowing fn's own body the bare name is still the raw wrapping ctor, or this is infinite
+    // recursion.
+    ok("newtype N = int\nfn N(s: str) -> N:\n    return N(s.len())\nprint(N(\"abc\"))\n");
+}
+
+#[test]
 fn variant_name_shared_across_enums_is_allowed() {
     // Variants are scoped under their enum (keyed by `(enum, variant)`), so two enums may share a
     // variant name. Each is reached via its qualified form (`A.X` / `B.X`).

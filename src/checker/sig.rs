@@ -388,7 +388,7 @@ impl Checker {
         // is infinite recursion). Every other body inherits the flag, like `current_self_ty`.
         let saved_raw = if self_ty.is_none()
             && self.local_fn_names.contains(&decl.name)
-            && self.struct_names.contains(&decl.name)
+            && (self.struct_names.contains(&decl.name) || self.newtype_names.contains(&decl.name))
         {
             self.raw_ctor_owner.replace(self.bare_key(&decl.name))
         } else {
@@ -4153,7 +4153,7 @@ impl Checker {
         // TICKET-029 — same raw-ctor escape as `infer_fn_ret`, see there.
         let saved_raw = if self_ty.is_none()
             && self.local_fn_names.contains(&decl.name)
-            && self.struct_names.contains(&decl.name)
+            && (self.struct_names.contains(&decl.name) || self.newtype_names.contains(&decl.name))
         {
             self.raw_ctor_owner.replace(self.bare_key(&decl.name))
         } else {

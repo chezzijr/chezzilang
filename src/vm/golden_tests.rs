@@ -12224,6 +12224,31 @@ fn ffi_goldens_are_not_unconditionally_linux_gated() {
     );
 }
 
+/// TICKET-055 — DEC-029's rule (a module-level fn replaces a same-named struct's field ctor) must
+/// cover the newtype wrapping ctor too. Bare, same module: `fn N` wins.
+#[test]
+fn module_fn_named_after_a_newtype_wins() {
+    let out =
+        golden_entry("newtype N = int\nfn N(n: int) -> int:\n    return n * 3\nprint(N(2))\n");
+    assert_eq!(
+        out, "6\n",
+        "the fn must win, not the newtype ctor; got: {out:?}"
+    );
+}
+
+/// TICKET-055 — DEC-029's escape hatch: inside the shadowing fn's own body, the bare name still
+/// resolves to the raw wrapping ctor.
+#[test]
+fn newtype_raw_ctor_inside_the_shadowing_fn_body() {
+    let out = golden_entry(
+        "newtype N = int\nfn N(s: str) -> N:\n    return N(s.len())\nprint(N(\"abc\"))\n",
+    );
+    assert_eq!(
+        out, "N(3)\n",
+        "the raw ctor must survive inside the fn body; got: {out:?}"
+    );
+}
+
 /// TICKET-029 review fix — a qualified `module.N(args)` where `N` is a NEWTYPE (not a struct) must
 /// still build the newtype even when the module also declares a same-named `fn N`. The checker's
 /// newtype arm (`src/checker/expr.rs:112`) never gates on a colliding fn, so the compiler's emit

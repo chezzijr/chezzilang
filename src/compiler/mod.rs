@@ -5932,6 +5932,8 @@ impl Compiler {
             // ctor — only a BARE-resolvable newtype in THIS module — keyed by its runtime key.
             if let Some(nt_key) = self.bare_types.get(name).cloned()
                 && self.program.newtype_home.contains_key(&nt_key)
+                && (self.raw_ctor_owner.as_deref() == Some(nt_key.as_str())
+                    || !self.ctor_shadowed(name))
             {
                 self.compile_args(fc, args)?;
                 fc.emit(Op::NewType(nt_key), span);

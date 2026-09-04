@@ -2006,8 +2006,11 @@ impl Checker {
                 // newtype. Mirrors the single-field struct ctor; only a BARE-resolvable newtype. A
                 // generic newtype (`Stack([1,2])` / turbofish `Stack[int]([])`) infers/takes its type
                 // args via `infer_newtype_call`.
-                if self.newtype_names.contains(name) {
-                    let key = self.bare_key(name);
+                if self.newtype_names.contains(name)
+                    && let key = self.bare_key(name)
+                    && (self.raw_ctor_owner.as_deref() == Some(key.as_str())
+                        || !self.functions.contains_key(name))
+                {
                     let under = self
                         .newtype_defs
                         .get(&key)
