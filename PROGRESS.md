@@ -12569,6 +12569,31 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- **Three positions that hold a statically known expected type now push it into the position instead
+  of inferring bottom-up and comparing after (2026-09-04, TICKET-054).** All three falsely rejected a
+  program every ancestor accepts. (1) An `if`/`match`-EXPRESSION bound to an annotated protocol-typed
+  slot (`x: Sh = if true: Sq(2) else: Tr(9)`) is now accepted: `Checker::unify_branch`
+  (`src/checker/pattern.rs`) takes the branch position's `expected_hint` and, on a `compatible`
+  mismatch, accepts the fold if the hint is `assignable` from both branches — read only through plain
+  `assignable`, never `assignable_w` (DEC-034), so it licenses no int→float widen and an un-annotated
+  mismatch still reports `branches have incompatible types: … and …`. (2) A closure's own `-> float`
+  return now widens an untyped int body (`g := fn() -> float: 3`) exactly like a named fn's: the
+  checker half swaps `assignable` for `assignable_w` with the `untyped_int_const` license
+  (`Checker::infer_closure`), and the paired compiler half sets `FnComp::ret_is_float` in
+  `compile_closure` from the closure's own declared `ret` and emits `Op::CoerceFloat` before the
+  return coerce — a checker-only fix would have left a runtime `Int` under a static `float`. (3) A
+  `float` parameter reached through a protocol-typed receiver or a bound generic type parameter now
+  widens the same as the identical method on a concrete receiver: the `Ty::Protocol` and `Ty::Param`
+  method-call arms (`src/checker/expr.rs`) now route through `check_args_subst` with the
+  PRE-substitution declared params, the same call the concrete-struct arm already makes, so the widen
+  license keys on the declared slot the witness's own prologue coerces. Two programs outside the
+  three repros change verdict as a result: `x: Any = if c: 1 else: "a"` is now accepted (`Any` is the
+  empty top protocol, matching the existing `List[Any]` concat precedent), and a protocol method
+  requiring `List[float]` now accepts a `List[int]` argument, carrying DEC-033's element license.
+  `cargo test --lib` is `4471 passed; 0 failed; 2 ignored` (was 4462); `chezzi test tests/chz` is
+  `766 passed, 0 failed, 0 errored` (was 761, +5 in the new
+  `tests/chz/spec/expected_type_sinks_test.chz`, which asserts the RUNTIME values so a checker-only
+  regression on sink 2 would still fail it via `/ 2`).
 - **A witness's unmet `eq` `where` bound is now refused at the erasure into a protocol slot, not
   laundered through it (2026-09-04, TICKET-053).** `a: Tagged = Box(Tag(1))` (`Box`'s `eq` requires
   `Tag: Comparable`, which `Tag` doesn't provide) was `ok: no type errors` then printed the
