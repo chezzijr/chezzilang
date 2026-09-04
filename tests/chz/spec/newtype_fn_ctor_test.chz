@@ -1,0 +1,20 @@
+# tests/chz/spec/newtype_fn_ctor_test.chz — DEC-029's rule (a module-level `fn` named after a
+# struct in the same module REPLACES that struct's field-derived constructor) covers a `newtype`'s
+# wrapping constructor the same way (TICKET-055). Inside the shadowing fn's own body, the bare name
+# is still the raw wrapping ctor.
+
+newtype Cents = int
+
+fn Cents(s: str) -> Cents:
+    return Cents(s.len())
+
+newtype Plain = int
+
+test fn module_fn_named_after_the_newtype_is_the_constructor():
+    assert int(Cents("abcd")) == 4
+
+test fn the_shadowing_fn_body_still_reaches_the_raw_wrapping_ctor():
+    assert int(Cents("")) == 0
+
+test fn a_newtype_without_a_colliding_fn_keeps_its_wrapping_ctor():
+    assert int(Plain(7)) == 7
