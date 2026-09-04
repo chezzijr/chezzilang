@@ -30502,3 +30502,15 @@ fn ticket_054_closure_float_return_alias_and_hof() {
     entry_ok("type F = float\ng := fn() -> F: 3\nprint(g())\n");
     entry_ok("xs := [1, 2]\nprint(xs.map(fn(x) -> float: 3))\n");
 }
+
+// TICKET-054 step 4: sink-3's widen must reach a bound generic type parameter (not only a
+// protocol-typed receiver), and must carry DEC-033's element license (a `List[float]` requirement).
+#[test]
+fn ticket_054_protocol_and_bound_receiver_widen_more_spellings() {
+    entry_ok(
+        "protocol P:\n    fn m(self, x: float) -> float\nstruct S:\n    fn m(self, x: float) -> float:\n        return x\nfn viabound[T: P](t: T) -> float:\n    return t.m(1)\nprint(viabound(S()))\n",
+    );
+    entry_ok(
+        "protocol Q:\n    fn n(self, xs: List[float]) -> float\nstruct S:\n    fn n(self, xs: List[float]) -> float:\n        return xs[0]\nq: Q = S()\nprint(q.n([1, 2]))\n",
+    );
+}

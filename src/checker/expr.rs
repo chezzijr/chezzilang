@@ -2597,7 +2597,12 @@ impl Checker {
                         .iter()
                         .map(|t| subst(t, &pmap))
                         .collect();
-                    self.check_args(method, &expected, args, span);
+                    // The widen license keys on the PRE-substitution declared slot: a requirement
+                    // declared `float` adapts because the WITNESS's own prologue emits
+                    // `Op::CoerceFloat` from that same declared `float`, while one declared as a
+                    // protocol type parameter (`T`) stays generic-erased and does not widen.
+                    let declared: Vec<Ty> = msig.params.get(1..).unwrap_or(&[]).to_vec();
+                    self.check_args_subst(method, &expected, &declared, expected.len(), args, span);
                     return subst(&msig.ret, &pmap);
                 }
                 self.infer_all(args);
@@ -3637,7 +3642,15 @@ impl Checker {
                         Some((_recv, rest)) => rest.iter().map(|t| subst(t, &map)).collect(),
                         None => Vec::new(),
                     };
-                    self.check_args(method, &expected, args, span);
+                    // The widen license keys on the PRE-substitution declared slot: a requirement
+                    // declared `float` adapts because the WITNESS's own prologue emits
+                    // `Op::CoerceFloat` from that same declared `float`, while one declared as a
+                    // protocol type parameter (`T`) stays generic-erased and does not widen.
+                    let declared: Vec<Ty> = msig
+                        .params
+                        .split_first()
+                        .map_or_else(Vec::new, |(_recv, rest)| rest.to_vec());
+                    self.check_args_subst(method, &expected, &declared, expected.len(), args, span);
                     // `Iterator[T].next()` yields `Option[T]` — its return is the bound's element arg,
                     // not `Self` (the registered placeholder). Resolve the arg with sibling params in
                     // scope (we're inside the bounded type's own generic context).
