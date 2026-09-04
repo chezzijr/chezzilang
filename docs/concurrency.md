@@ -1379,8 +1379,9 @@ a residual of this milestone.
 
 **The model — spawning a task copies its environment (fork-like).** A `spawn`ed task does not share the
 parent's heap. It receives its **own isolated copy** of everything it captures — captured locals are
-deep-copied, module globals are snapshot-copied per task (fresh at its `spawn`, [§2](#2-the-model)) — and a **closure**'s own references to its home module's globals are likewise snapshot-copied
-onto the closure at the airlock (TICKET-016 / W8-25 — see the closures bullet below) — much like a
+deep-copied, module globals are snapshot-copied per task (fresh at its `spawn`, [§2](#2-the-model)) — and a **closure**'s own references to its home module's globals are likewise installed into the
+receiving task's own module copy at the airlock (TICKET-016 / W8-25, TICKET-051 — see the closures
+bullet below) — much like a
 forked child copies the parent's address space. Two deliberate differences from a real `fork`:
 1. It copies only the **reachable captured environment**, not the whole heap.
 2. **Explicit concurrency handles cross by SHARED reference, not by copy** — `Channel`, `Shared`,
@@ -1420,22 +1421,26 @@ was retired when module globals started deep-copying per task.)
   and protocol-typed spawn args cross; the erased witness rides by deep value copy).
 - **Closures / functions cross by value (B3.3).** At runtime the airlock lowers a closure or
   bare `fn` **by value** — its `proto` (shared, read-only) + its captures deep-copied recursively + its
-  home module index, never a by-reference heap handle. **A closure's references to its home module's
-  `let`-bound globals are snapshot-copied at the airlock too (TICKET-016 / W8-25)**, alongside its
-  captures: `Proto::global_free` names every such global the closure's body (or a closure nested inside
-  it) reads and never writes, and the airlock copies exactly those slots' values onto the crossing
-  closure. A global the closure itself **writes** is excluded from that set and stays a **late load**
-  against whichever task's own module copy calls it — a module-level `let` binding is otherwise still a
-  late load in-task (matching CPython), so a write to it AFTER a closure is created is visible to a
-  later same-task call; only the value **crossing an airlock** is pinned.
-  TICKET-041 narrows "crossing an airlock" further: the snapshot is only installed when the crossing
-  lands the closure on a **different module view** than it started on (tracked by a per-allocation
-  `ModuleData.origin`, compared to the sender's `WireValue::Closure.home_origin`). A crossing that
-  returns to the SAME module view — e.g. a same-task `Channel.send`/`.recv()` round trip — installs
-  nothing, so the closure keeps reading that global LIVE, matching the measured CPython `direct : 126`
-  / `module xs: [1, 9]` and Go `direct : 126` / `module xs: [1 9]` (2026-09-03); before this fix the
-  value was frozen at the first crossing (`direct : 3` / `module xs: [1]`). Top-level `fn`s, imports,
-  `native fn`s and `extern` fns are unaffected and stay late loads always. So a `spawn f()`
+  home module index, never a by-reference heap handle. **A closure carries no private copy of its
+  home module's `let`-bound globals; the airlock installs its free globals into the RECEIVING task's
+  own module copy (TICKET-016 / W8-25, TICKET-051)**, alongside its captures: `Proto::global_free`
+  names every such global the closure's body (or a closure nested inside it) reads and never writes,
+  and the airlock installs the sending view's value for exactly those slots — provided the sending
+  view's own lineage (its own assignment, an ancestor snapshot, or an earlier install) actually
+  descends from a write to that slot, and provided the RECEIVING view has not itself already assigned
+  that slot (its own later write always wins). Installing rather than freezing means **inside one
+  task, one module global denotes one object**: a closure's read of the slot and the task's own
+  read always agree, because both now read the SAME copy. A global the closure itself **writes** is
+  excluded from `global_free` and stays a plain **late load** against whichever task's own module
+  copy calls it — a module-level `let` binding is otherwise still a late load in-task (matching
+  CPython), so a write to it AFTER a closure is created is visible to a later same-task call.
+  TICKET-041 narrows "crossing an airlock" further: the install is skipped entirely when the crossing
+  lands the closure on the SAME module view it started on (tracked by a per-allocation
+  `ModuleData.origin`, compared to the sender's `WireValue::Closure.home_origin`) — e.g. a same-task
+  `Channel.send`/`.recv()` round trip — so the closure keeps reading that global LIVE, matching the
+  measured CPython `direct : 126` / `module xs: [1, 9]` and Go `direct : 126` / `module xs: [1 9]`
+  (2026-09-03). Top-level `fn`s, imports, `native fn`s and `extern` fns are unaffected and stay late
+  loads always. So a `spawn f()`
   callee whose captured environment contains a nested closure/`fn` (or is itself a bare `fn`) runs
   cleanly, its captured plain data isolated per task exactly like any other sendable. **Checker
   (landed, Task 2a):** the function type is **sendable**, so a closure crosses as data —
@@ -1591,14 +1596,21 @@ was retired when module globals started deep-copying per task.)
   `to_wire` serialize point because it crosses only the value actually sent.) (The earlier **Option-B
   reach-gate** model — which scanned each task for a *possible* reach and faulted it — is **retired**:
   by-value crossing removes the "why can a frame-local generator cross but not a module-global one?" drift.)
-- **Captured locals AND module globals are isolated copies.** Reassigning — or mutating in place
-  (`.push`/`.add`/`m[k]=v`/`s.field=x`) — a captured **local** or a **module global** inside a task is
-  fine: the write lands on that task's own copy, invisible to the parent and to sibling tasks. To
-  produce output visible to the parent, use a `Channel` or a `Shared`. (Reads are always
-  fine, and a task reads the values current when its nursery opened — [§2](#2-the-model).) *(History: a
-  G1 checker rule once made both a **compile error**, because the serial engine shared the globals while
-  M:N snapshotted them. Deep-copying per task removed the divergence, and the rule — and
-  its partially-covered indirect forms — was retired with it.)*
+- **Captured locals AND module globals are isolated copies — with one narrow, deliberate exception.**
+  Reassigning — or mutating in place (`.push`/`.add`/`m[k]=v`/`s.field=x`) — a captured **local** or a
+  **module global** inside a task is fine: the write lands on that task's own copy, invisible to the
+  parent and to sibling tasks. To produce output visible to the parent, use a `Channel` or a `Shared`.
+  (Reads are always fine, and a task reads the values current when its nursery opened —
+  [§2](#2-the-model).) **The exception (TICKET-051): a task's assignment to a module global becomes
+  visible to whoever later RECEIVES A CLOSURE over that global**, because the airlock installs the
+  sending task's value into the receiving task's own module copy (see the closures bullet above) — the
+  owning ancestors' answer (Go and CPython each have exactly one global object, so the write is always
+  visible), and what keeps the closures-bullet invariant true inside a receiving task. It
+  never lets one task see another task's write any other way — only a value that actually rides a
+  closure across an airlock carries it. *(History: a G1 checker rule once made both a
+  **compile error**, because the serial engine shared the globals while M:N snapshotted them.
+  Deep-copying per task removed the divergence, and the rule — and its partially-covered indirect
+  forms — was retired with it.)*
 - **Cyclic sendables round-trip (identity-preserving copy).** The airlock copies a sendable by a
   structural deep walk (`spawn` arg / `Channel.send` / `Shared(...)` / worker return / module-global
   snapshot). A value that is sendable-by-type but contains a **reference cycle** (e.g. `a.next = b;

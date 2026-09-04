@@ -7,6 +7,27 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **A crossing closure's frozen module-global snapshot let one module global denote two objects
+  inside one task (TICKET-051).** `Obj::Closure.gsnap` froze a closure's free home-module globals at
+  the airlock and `Op::GetGlobalSlot` preferred it over the live slot, so a closure's read of a
+  module global could disagree with the SAME task's own read of that global: a closure created after
+  the task's own write still read the stale value (Shape B: `nested closure sees : 1` where Go/CPython
+  both give `100`), an arriving closure's stale value beat the receiving task's own later write
+  (`closure sees : 1` where Go/CPython give `5`), and a forwarded closure (A→B→C) missed the
+  forwarding task B's own write (`result: 3` where Go/CPython give `2997`). Fixed by deleting
+  `Obj::Closure.gsnap` entirely: the airlock now installs a crossing closure's free globals directly
+  into the RECEIVING task's own module copy (`Vm::install_global_slot`, called from
+  `from_wire_memo`'s `WireValue::Closure` arm), filtered on the SEND side by two new per-view bit
+  vectors on `ModuleData` — `assigned` (this view wrote the slot itself) and `carried` (this view's
+  value for the slot descends from a write, by itself or an ancestor) — and skipped on the RECEIVE
+  side when the receiving view already assigned that slot itself (its own later write always wins).
+  `Op::GetGlobalSlot` is now a single live read; there is no snapshot left to prefer. 5 new Chezzi
+  golden tests in `src/vm/golden_tests.rs` (3 reproductions, 2 regression guards for shapes the fix
+  must not break — a slot only ever inherited, never directly assigned, must still cross; a slot no
+  ancestor ever assigned must NOT clobber a receiver's in-place mutation of that same value). Gate:
+  `cargo test --lib -- airlock_` 63 passed / 0 failed, `cargo test --lib -- ticket_016_` unaffected
+  (14 passed / 0 failed), `obj_iter_within_size_cap`/`slot_element_is_64b` still 64B, `grep -rn gsnap
+  src/ | wc -l` 0 (was 56), `cargo clippy -- -D warnings` clean.
 - **The GC mark-walk's O(D²)-vs-O(D) core-graph dedup gate divided two wall-clock samples and
   flaked under load (TICKET-049).** `tests/chz/spec/gc_core_graph_test.chz` asserted
   `deep / shallow < 2.8` on two ~10 ms `time.monotonic()` samples; the noise in the two samples is
