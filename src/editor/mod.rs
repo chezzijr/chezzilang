@@ -413,7 +413,7 @@ pub fn semantic_tokens(source: &str) -> Vec<SemTok> {
 
 fn semantic_tokens_inner(source: &str) -> Vec<SemTok> {
     use crate::lexer::{self, Token};
-    let source = lexer::strip_bom(source);
+    let source = crate::lexer::strip_bom(source);
     let chars: Vec<char> = source.chars().collect();
     let line_starts = line_start_offsets(&chars);
     let toks = match lexer::tokenize(source) {
