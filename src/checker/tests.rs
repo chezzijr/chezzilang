@@ -30400,3 +30400,75 @@ fn ticket_054_protocol_receiver_widens_float_param() {
     );
     assert!(errs.is_empty(), "expected no errors, got: {errs:?}");
 }
+
+// TICKET-054 step 1: neighbours the sink-1 fix must NOT move. The branch-unifier hint must be
+// consulted only through plain `assignable`, never `assignable_w`, and only on a mismatch (never
+// folded into the accumulator), and an un-annotated branch must still require agreement.
+#[test]
+fn ticket_054_if_expr_hint_never_widens_or_launders() {
+    entry_rejects(
+        "x: float = if true: 1 else: 2\n",
+        "cannot assign int to variable of type float",
+    );
+    entry_rejects(
+        "n := 3\nx: float = if true: n else: 2.5\n",
+        "branches have incompatible types: int and float",
+    );
+    entry_rejects(
+        "x: int = if true: \"a\" else: \"b\"\n",
+        "cannot assign str to variable of type int",
+    );
+    entry_rejects(
+        "protocol Sh:\n    fn area(self) -> int\nstruct Sq:\n    s: int\n    fn area(self) -> int: self.s * self.s\nx: Sh = if true: Sq(2) else: 5\n",
+        "branches have incompatible types: Sq and int",
+    );
+    entry_rejects(
+        "protocol Sh:\n    fn area(self) -> int\nstruct Sq:\n    s: int\n    fn area(self) -> int: self.s * self.s\nstruct Tr:\n    b: int\n    fn area(self) -> int: self.b\nx := if true: Sq(2) else: Tr(9)\n",
+        "branches have incompatible types: Sq and Tr",
+    );
+    entry_rejects(
+        "protocol Sh:\n    fn area(self) -> int\nstruct Sq:\n    s: int\n    fn area(self) -> int: self.s * self.s\nstruct Tr:\n    b: int\n    fn area(self) -> int: self.b\nx := match 1:\n    1: Sq(2)\n    _: Tr(9)\n",
+        "branches have incompatible types: Sq and Tr",
+    );
+}
+
+// TICKET-054 step 1: sink-2 neighbours the fix must NOT move. A genuine mismatch, an alias-free
+// plain `int`, a value/int-param body, `-> Option[float]`, and the sibling `Option[int]` widen.
+#[test]
+fn ticket_054_closure_float_return_neighbours() {
+    entry_rejects(
+        "g := fn() -> float: \"s\"\nprint(g())\n",
+        "closure body has type str",
+    );
+    entry_rejects(
+        "n := 3\ng := fn() -> float: n\nprint(g())\n",
+        "closure body has type int",
+    );
+    entry_rejects(
+        "g := fn(a: int) -> float: a\nprint(g(3))\n",
+        "closure body has type int",
+    );
+    entry_rejects(
+        "g := fn() -> float?: 3\nprint(g())\n",
+        "closure body has type int, but its return type is Option[float]",
+    );
+    entry_ok("g := fn() -> int?: 3\nprint(g())\n");
+}
+
+// TICKET-054 step 1: sink-3 neighbours the fix must NOT move. A typed int, a str, and a
+// generic-erased `G[T]` parameter must all stay rejected.
+#[test]
+fn ticket_054_protocol_float_param_neighbours() {
+    entry_rejects(
+        "protocol P:\n    fn m(self, x: float) -> float\nstruct S:\n    fn m(self, x: float) -> float:\n        return x\np: P = S()\nn := 3\nprint(p.m(n))\n",
+        "expected float, found int",
+    );
+    entry_rejects(
+        "protocol P:\n    fn m(self, x: float) -> float\nstruct S:\n    fn m(self, x: float) -> float:\n        return x\np: P = S()\nprint(p.m(\"a\"))\n",
+        "expected float, found str",
+    );
+    entry_rejects(
+        "protocol G[T]:\n    fn m(self, x: T) -> T\nstruct SG:\n    fn m(self, x: float) -> float:\n        return x\ng: G[float] = SG()\nprint(g.m(1))\n",
+        "expected float, found int",
+    );
+}
