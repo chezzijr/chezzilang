@@ -12599,6 +12599,15 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- **`json.parse`'s multi-character token errors now name where the token STARTED, not where the scan
+  stopped (2026-09-04, TICKET-057).** Four sites in `std/json.chz`: `parse_lit` (a bad
+  `true`/`false`/`null` now names the word's first letter), `parse_string` (an unterminated string
+  now names its opening quote), and `parse_number`'s fraction and exponent branches (a malformed `.`/
+  `e`/`E` now names that character; the exponent site captures a named position rather than
+  `self.pos - 1`, since it may also consume a `+`/`-` sign). Measured against CPython 3.14.7 over a
+  1086-document mutation sweep, position mismatches fall from 242 to 26 of the 918 documents both
+  implementations reject; the 26 residual are CPython 3.14's own trailing-comma diagnostics, left
+  diverging on purpose alongside an invalid string escape and `invalid number: leading zero`.
 - **Three positions that hold a statically known expected type now push it into the position instead
   of inferring bottom-up and comparing after (2026-09-04, TICKET-054).** All three falsely rejected a
   program every ancestor accepts. (1) An `if`/`match`-EXPRESSION bound to an annotated protocol-typed

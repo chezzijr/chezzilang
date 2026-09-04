@@ -1858,12 +1858,18 @@ inside a string literal (an `invalid control character in string` error, located
 integer (`01`, `007`, `-01`) with an `invalid number: leading zero` error (located) — a `0` must be a
 lone `0`/`-0` or followed by `.`/`e`, matching Python's `json.loads`. (`0.5`, `0e1`, `10` stay valid.)
 
-**Located parse errors:** every `parse` `Err` names where it stopped — `<message> at line L column C
-(char N)`, CPython's exact shape. `json.parse` on the two-line document `{"a": 1,\n "b": }` returns
-`Err("unexpected character '}' at line 2 column 7 (char 15)")` — the same position CPython's
-`json.loads` names on that document (`Expecting value: ...`). The one deliberate exception: the two
+**Located parse errors:** every `parse` `Err` names a position — `<message> at line L column C
+(char N)`, CPython's exact shape. A single-character error names that character; a multi-character
+token error names where the TOKEN BEGAN, not where the scan stopped: an unterminated string names its
+opening quote, a bad `true`/`false`/`null` names the word's first letter, a malformed fraction names its
+`.`, a malformed exponent names its `e`/`E`. `json.parse` on the two-line document `{"a": 1,\n "b": }`
+returns `Err("unexpected character '}' at line 2 column 7 (char 15)")`, matching the position CPython's
+`json.loads` gives on that document (`Expecting value: ...`). The one deliberate exception: the two
 `exceeded max depth` returns carry no location, matching CPython's bare `RecursionError` (which also
-carries none).
+carries none). Three families still diverge from CPython 3.14 on purpose: its trailing-comma
+diagnostics point at the comma where Chezzi points at the bracket, an invalid string escape names the
+escape character where CPython names the backslash, and `invalid number: leading zero` names the
+numeral's start where CPython names its second digit.
 
 For a known shape, `json.decode[T](s) -> Result[T]` (a `std.json` member, the one type-argument
 method-call form — not a global builtin) deserializes straight into a struct / `Map[str, V]` /

@@ -115,17 +115,21 @@ struct Parser:
         return Err(self.at("unexpected character '" + c + "'"))
 
     fn parse_lit(self, word: str, val: Json) -> Result[Json]:
+        start := self.pos
         for expected in word:
             if self.bump() != expected:
-                return Err(self.at_pos("invalid literal, expected '" + word + "'", self.pos - 1))
+                return Err(self.at_pos("invalid literal, expected '" + word + "'", start))
         return Ok(val)
 
     fn parse_string(self) -> Result[str]:
+        open_quote := self.pos
         self.pos += 1                       # consume the opening quote
         out := ""
         while true:
             if self.pos >= self.len:
-                return Err(self.at("unterminated string"))
+                # The OPENING quote: CPython's json.loads and docs/gaps.md M24-7 both point an
+                # unterminated delimiter at its opener.
+                return Err(self.at_pos("unterminated string", open_quote))
             c := self.bump()
             if c == "\"":
                 return Ok(out)
@@ -194,15 +198,18 @@ struct Parser:
         is_int := true
         if self.peek() == ".":
             is_int = false
+            dot := self.pos
             self.pos += 1
             frac := 0
             while is_digit(self.peek()):
                 self.pos += 1
                 frac += 1
             if frac == 0:
-                return Err(self.at("invalid number: digits required after '.'"))
+                return Err(self.at_pos("invalid number: digits required after '.'", dot))
         if self.peek() == "e" or self.peek() == "E":
             is_int = false
+            # The e/E itself, not self.pos - 1: this branch may consume a '+'/'-' sign after it.
+            exp_at := self.pos
             self.pos += 1
             if self.peek() == "+" or self.peek() == "-":
                 self.pos += 1
@@ -211,7 +218,7 @@ struct Parser:
                 self.pos += 1
                 exp += 1
             if exp == 0:
-                return Err(self.at("invalid number: digits required in exponent"))
+                return Err(self.at_pos("invalid number: digits required in exponent", exp_at))
         raw := ""
         for i in start..self.pos:
             raw = raw + self.src[i]
