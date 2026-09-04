@@ -54,6 +54,52 @@ test fn multi_char_token_errors_name_the_token_start():
         Ok(_): assert false, "expected a parse Err"
         Err(e): assert e.message() == "invalid literal, expected 'null' at line 1 column 15 (char 14)"
 
+test fn number_shape_errors_name_the_token_start():
+    # TICKET-057: a malformed fraction/exponent names the `.`/`e` it started at, not where the
+    # scanner stopped. Positions are CPython 3.14.7's own, measured 2026-09-04.
+    match json.parse("[1.]"):
+        Ok(_): assert false, "expected a parse Err"
+        Err(e): assert e.message() == "invalid number: digits required after '.' at line 1 column 3 (char 2)"
+    match json.parse("[1.5e]"):
+        Ok(_): assert false, "expected a parse Err"
+        Err(e): assert e.message() == "invalid number: digits required in exponent at line 1 column 5 (char 4)"
+    # The sign case: the exponent site must not derive its position from `self.pos - 1`, since
+    # this branch also consumes an optional `+`/`-` after the `e`.
+    match json.parse("[1.5e+]"):
+        Ok(_): assert false, "expected a parse Err"
+        Err(e): assert e.message() == "invalid number: digits required in exponent at line 1 column 5 (char 4)"
+    match json.parse("[fals]"):
+        Ok(_): assert false, "expected a parse Err"
+        Err(e): assert e.message() == "invalid literal, expected 'false' at line 1 column 2 (char 1)"
+    match json.parse("[tru]"):
+        Ok(_): assert false, "expected a parse Err"
+        Err(e): assert e.message() == "invalid literal, expected 'true' at line 1 column 2 (char 1)"
+
+test fn single_char_token_error_positions_do_not_move():
+    # TICKET-057: these single-character error positions are unaffected by the fix and must stay
+    # byte-identical, measured on the pre-fix release binary 2026-09-04.
+    match json.parse(""):
+        Ok(_): assert false, "expected a parse Err"
+        Err(e): assert e.message() == "unexpected end of input at line 1 column 1 (char 0)"
+    match json.parse(r'{"a" 1}'):
+        Ok(_): assert false, "expected a parse Err"
+        Err(e): assert e.message() == "expected ':' after object key at line 1 column 6 (char 5)"
+    match json.parse("[1, 2] x"):
+        Ok(_): assert false, "expected a parse Err"
+        Err(e): assert e.message() == "trailing characters after JSON value at line 1 column 8 (char 7)"
+    match json.parse("[@]"):
+        Ok(_): assert false, "expected a parse Err"
+        Err(e): assert e.message() == "unexpected character '@' at line 1 column 2 (char 1)"
+    match json.parse("[-]"):
+        Ok(_): assert false, "expected a parse Err"
+        Err(e): assert e.message() == "invalid number: expected a digit at line 1 column 2 (char 1)"
+    match json.parse("[01]"):
+        Ok(_): assert false, "expected a parse Err"
+        Err(e): assert e.message() == "invalid number: leading zero at line 1 column 2 (char 1)"
+    match json.parse("[1e400]"):
+        Ok(_): assert false, "expected a parse Err"
+        Err(e): assert e.message() == "invalid number: value out of range at line 1 column 2 (char 1)"
+
 test fn encode_covers_the_value_shapes():
     assert json.encode(42) == "42"
     assert json.encode(9223372036854775000) == "9223372036854775000"
