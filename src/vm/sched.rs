@@ -1727,8 +1727,19 @@ impl Vm {
     /// message. A no-op when `self.mn` is `None` (a top-level `Shared.set`/`update` with no nursery),
     /// so a guard wait outside any nursery neither starves a pool nor panics on the `.expect` the
     /// socket-only version used to carry.
+    /// TICKET-052 — hand this thread's pool slot to a replacement worker before blocking in place.
+    /// A no-op on an M:N worker shell (`self.mn.is_some()`): those already compensate through
+    /// [`Vm::demote_enter`], and yielding here too would spawn two replacements for one block.
+    pub(super) fn yield_pool_slot(&self, budget: Option<std::time::Duration>) {
+        if self.mn.is_some() {
+            return;
+        }
+        crate::vm::pool::yield_slot(budget);
+    }
+
     pub(super) fn demote_enter(&mut self, what: &str, span: Span) -> Result<(), RuntimeError> {
         let Some(sched) = self.mn.as_ref().map(Arc::clone) else {
+            self.yield_pool_slot(None);
             return Ok(());
         };
         {
@@ -4343,6 +4354,7 @@ impl Vm {
         let slots = {
             let mut g = core.eager.lock().unwrap_or_else(|e| e.into_inner());
             while g.outstanding() > slack {
+                self.yield_pool_slot(Some(DEMOTE_POLL_BACKOFF));
                 let (next, timed) = core
                     .eager_cv
                     .wait_timeout(g, DEMOTE_POLL_BACKOFF)

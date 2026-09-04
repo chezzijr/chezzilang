@@ -2405,6 +2405,9 @@ impl Vm {
         if self.is_counted_party() && self.quiesce.quiesced(&self.exec_registry) {
             return Err(self.err(deadlock_msg.to_string(), span));
         }
+        // TICKET-052 — an eager `Executor` job (`mn.is_none()`) about to wait another tick hands its
+        // pool thread to a replacement, so the job that would unblock it can still get a thread.
+        self.yield_pool_slot(Some(DEMOTE_POLL_BACKOFF));
         Ok(())
     }
 
