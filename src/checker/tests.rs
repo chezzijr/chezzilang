@@ -4194,6 +4194,97 @@ b: Tagged = Box(Tag(2))
     entry_rejects(&format!("{SRC}print(a == b)\n"), "Tag: Comparable");
 }
 
+/// **TICKET-053 — boundary suite for the erasure gate.** Reuses
+/// [`eq_where_bound_is_unenforced_through_a_protocol_slot`]'s fixture (`protocol Tagged`, `struct
+/// Tag`, `struct Box[T]` whose `eq` requires `T: Comparable`). Rejection rows (a)-(d) hit the gate at
+/// four different erasure sites with no comparison anywhere in the program, proving the refusal fires
+/// at the ERASURE, not at a later `==`. Acceptance rows (e)-(h) are the over-fire canaries: (e) proves
+/// the receiver's own substitution is consulted (`int` satisfies `Comparable`), (f) proves a witness
+/// with no `eq` at all is never asked, (g) proves the `[T: Comparable]` escape works, and (h) is the
+/// one that goes red if the gate ever runs the STRICT walk instead of the where-only mode, because the
+/// strict `Ty::Param` arm refuses an unbounded `P[T]` even though nothing compares it. The last two
+/// rows repeat (d)-style rejection and (h)-style acceptance over the `Result` error slot
+/// (`Ty::Protocol("Error")`), which is the same erasure arm.
+#[test]
+fn protocol_erasure_eq_where_bound_boundaries() {
+    const SRC: &str = "\
+protocol Tagged:
+    fn tag(self) -> int
+struct Tag:
+    n: int
+struct Box[T]:
+    v: T
+    fn tag(self) -> int:
+        return 0
+    fn eq(self, o: Box[T]) -> bool where T: Comparable:
+        return true
+";
+    // (a) bare erasure, no comparison anywhere.
+    entry_rejects(
+        &format!("{SRC}a: Tagged = Box(Tag(1))\n"),
+        "Tag: Comparable",
+    );
+    // (b) erasure into a List push.
+    entry_rejects(
+        &format!("{SRC}xs: List[Tagged] = []\nxs.push(Box(Tag(1)))\n"),
+        "Tag: Comparable",
+    );
+    // (c) erasure into an Option payload. `protocol_note` only unwraps a DIRECT `Ty::Protocol`
+    // expected type (its existing scope, untouched here — see the 15 sites
+    // `protocol_note_reaches_every_value_slot` enumerates, none of them nested); the outer var-decl's
+    // `expected` here is `Option[Tagged]`, not `Tagged`, so the em-dash clause does not surface. The
+    // erasure is still refused, which is the property this row proves.
+    entry_rejects(
+        &format!("{SRC}o: Option[Tagged] = Some(Box(Tag(1)))\n"),
+        "cannot assign Option[Box[Tag]] to variable of type Option[Tagged]",
+    );
+    // (d) erasure through a struct field.
+    entry_rejects(
+        &format!(
+            "{SRC}struct Holder:\n    b: Box[Tag]\n    fn tag(self) -> int:\n        return 1\nh: Tagged = Holder(Box(Tag(1)))\n"
+        ),
+        "Tag: Comparable",
+    );
+    // (e) int IS Comparable — the receiver's own substitution must be consulted.
+    entry_ok(&format!(
+        "{SRC}a: Tagged = Box(1)\nb: Tagged = Box(2)\nprint(a == b)\n"
+    ));
+    // (f) a witness declaring no `eq` at all is never asked.
+    entry_ok(
+        "protocol Tagged:\n    fn tag(self) -> int\nstruct Plain:\n    n: int\n    fn tag(self) -> int:\n        return 0\na: Tagged = Plain(1)\n",
+    );
+    // (g) the `[T: Comparable]` escape.
+    entry_ok(&format!(
+        "{SRC}fn wrap[T: Comparable](x: Box[T]) -> Tagged:\n    return x\n"
+    ));
+    // (h) an unbounded generic wrapper over a witness with NO `eq` must stay accepted — the where-only
+    // mode must not fall back to the strict walk's `Ty::Param` refusal.
+    entry_ok(
+        "protocol Tagged:\n    fn tag(self) -> int\nstruct P[T]:\n    v: T\n    fn tag(self) -> int:\n        return 0\nfn wrap2[T](x: P[T]) -> Tagged:\n    return x\n",
+    );
+    // Result error slot: same erasure arm via `Ty::Protocol(\"Error\")`.
+    const ERR_SRC: &str = "\
+struct Tag:
+    n: int
+struct MyErr[T]:
+    v: T
+    fn message(self) -> str:
+        return \"boom\"
+    fn eq(self, o: MyErr[T]) -> bool where T: Comparable:
+        return true
+";
+    // Same nested-container note gap as row (c): `protocol_note`'s expected here is `Result[int,
+    // Protocol("Error")]`, not the inner `Protocol` directly, so the em-dash clause does not surface;
+    // the erasure is still refused, which is what this row proves.
+    entry_rejects(
+        &format!("{ERR_SRC}fn f() -> int!:\n    return Err(MyErr(Tag(1)))\n"),
+        "expected return type Result[int",
+    );
+    entry_ok(&format!(
+        "{ERR_SRC}fn f() -> int!:\n    return Err(MyErr(7))\n"
+    ));
+}
+
 /// **W7-45 — the `List` builtins whose runtime is `values_equal`, and `in`.** W7-41 closed the hole
 /// for the OPERATOR; `contains`/`index_of`/`dedup`/`unique`/`in` reach the same `values_equal` with a
 /// signature validated by `assignable` (or, for `in`, by `compatible`) alone, so the guard was never

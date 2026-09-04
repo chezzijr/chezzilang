@@ -76,6 +76,16 @@ thread_local! {
     /// `main::P` means something different each time.
     static EQ_BOUNDS_PROVEN: std::cell::RefCell<Vec<Ty>> =
         const { std::cell::RefCell::new(Vec::new()) };
+
+    /// **TICKET-053 — the WHERE-ONLY memo, kept separate from [`EQ_BOUNDS_PROVEN`] on purpose.** A
+    /// `None` from the where-only walk ([`Checker::eq_where_bounds_unsatisfied`]) is a WEAKER proof
+    /// than a strict `None`: it means only "no `eq` `where` bound reachable from `ty` is provably
+    /// unmet", not "this type's equality is sound to reach" (an invisible shape or an unbounded
+    /// `Ty::Param` both answer `None` here, where the strict walk would refuse). Writing a where-only
+    /// result into `EQ_BOUNDS_PROVEN` would hand the next strict `==` in the same query an unproven
+    /// grant, so the two memos never mix. Reset alongside `EQ_BOUNDS_PROVEN`, same rule, same reason.
+    static EQ_WHERE_PROVEN: std::cell::RefCell<Vec<Ty>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// **THE termination guard for the `Eq` walk: a cumulative SIZE BUDGET over the in-progress path.**
@@ -1160,7 +1170,16 @@ impl Checker {
             // witness — in practice one reaching `Ty::Module` (near-unconstructible). A witness that
             // carries an FFI/native handle is checker-sendable (its `Ty::Func`/handle type is
             // sendable) and rejected at the RUNTIME airlock instead (`ensure_crossable`), not here.
-            (Protocol(p, pargs), a) => self.satisfies_args(a, p, pargs).is_ok() && self.sendable(a),
+            // TICKET-053: the erasure hands `a` the unconditional intrinsic `Eq` grant for a
+            // protocol receiver (the `INTRINSIC_PROTO_METHODS` row above), so the witness's own
+            // conditional `eq` must be discharged HERE — the same
+            // place `satisfies_methods` (`:2510`) discharges the `Comparable` sibling's — because
+            // this is the last point the concrete witness is visible before it is erased.
+            (Protocol(p, pargs), a) => {
+                self.satisfies_args(a, p, pargs).is_ok()
+                    && self.sendable(a)
+                    && self.eq_where_bounds_unsatisfied(a).is_none()
+            }
             // `Option`/`Result` are IMMUTABLE carriers — covariant element assignment stays sound
             // (no write-through alias), so they keep recursing via `assignable`. `List`/`Set`/`Map`
             // and user generic `Struct`/`Enum` are MUTABLE, by-reference containers: covariant type
@@ -1426,7 +1445,14 @@ impl Checker {
             return String::new();
         };
         match self.satisfies_args(actual, p, pargs) {
-            Ok(()) => String::new(),
+            Ok(()) => match self.eq_where_bounds_unsatisfied(actual) {
+                // TICKET-053: the third rejection ground `assignable` now checks — conformance and
+                // sendability both hold, but the witness's own `eq` carries an unmet `where` bound.
+                // Same producer (`eq_where_unsatisfied`) the direct-comparison path already uses, so
+                // this never fabricates a reason DEC-008 didn't already prove true.
+                Some(why) => format!(" \u{2014} {why}"),
+                None => String::new(),
+            },
             Err(why) => format!(" \u{2014} {why}"),
         }
     }
@@ -3222,7 +3248,29 @@ impl Checker {
         if EQ_BOUNDS_IN_PROGRESS.with(|s| s.borrow().is_empty()) {
             EQ_BOUNDS_PROVEN.with(|m| m.borrow_mut().clear());
         }
-        self.eq_bounds_unsatisfied_rec(ty)
+        self.eq_bounds_unsatisfied_rec(ty, true)
+    }
+
+    /// **TICKET-053 — the WHERE-BOUND-ONLY half of [`Self::eq_bounds_unsatisfied`], for the erasure
+    /// gate in `Checker::assignable`'s protocol arm.** `None` here is NOT the strict grant: it means
+    /// "no `eq` `where` bound reachable from `ty` is provably unmet", not "this type's equality is
+    /// sound to reach". The strict walk also refuses an invisible shape and an unbounded `Ty::Param`
+    /// — both mean "cannot prove", not "unsound" — and at an erasure site refusing on those would
+    /// reject programs that can never fault (a witness with no `eq` compares structurally, and
+    /// structural equality is always defined). Measured before this gate existed:
+    /// `fn wrap[T](x: Box[T]) -> Tagged: return x` was `ok: no type errors` rc=0.
+    ///
+    /// Declines outright (`None`) while an outer query is already in progress, rather than sharing
+    /// [`EQ_BOUNDS_IN_PROGRESS`]'s cycle guard with the strict walk: no user-visible erasure site is
+    /// ever asked from inside the `eq` walk itself, so the two modes never need to interleave, and
+    /// keeping them apart means a where-only decline can never be mistaken for a strict one further
+    /// up an in-progress stack.
+    pub(super) fn eq_where_bounds_unsatisfied(&self, ty: &Ty) -> Option<String> {
+        if !EQ_BOUNDS_IN_PROGRESS.with(|s| s.borrow().is_empty()) {
+            return None;
+        }
+        EQ_WHERE_PROVEN.with(|m| m.borrow_mut().clear());
+        self.eq_bounds_unsatisfied_rec(ty, false)
     }
 
     /// Enter `ty` on [`EQ_BOUNDS_IN_PROGRESS`] — the single cycle guard, used by BOTH levels of the
@@ -3238,7 +3286,7 @@ impl Checker {
     /// * `Err(Some(_))` — out of budget, so REFUSE. A `None` here is consumed as a GRANT by
     ///   `satisfies_args_d`, and a grant is a promise the runtime must honour, so "I could not
     ///   finish the proof" must never be spelled the same way as "I finished it and it is sound".
-    fn enter_eq_obligation(ty: &Ty) -> Result<EqObligation, Option<String>> {
+    fn enter_eq_obligation(ty: &Ty, strict: bool) -> Result<EqObligation, Option<String>> {
         // The exact-match cycle guard, unchanged and unrelated to the budget below: it reads the O(1)
         // `EQ_BOUNDS_IN_PROGRESS_SEEN` index rather than scanning the `Vec` (see that thread-local's
         // doc for why the two never drift), and a hit is the COINDUCTIVE assumption, not a decline.
@@ -3253,7 +3301,15 @@ impl Checker {
         let nodes = Self::ty_nodes(ty);
         let total = EQ_BOUNDS_IN_PROGRESS_NODES.with(|n| n.get()) + nodes;
         if total > EQ_BOUNDS_MAX_NODES {
-            return Err(Some(Self::eq_budget_refusal(ty)));
+            // TICKET-053: a budget refusal means "could not prove", never "this bound is unmet" — in
+            // the strict walk that must still fail closed (`Some`, a REFUSAL consumed as a grant would
+            // be unsound), but the where-only mode is not proving soundness, only looking for an
+            // UNMET bound, so running out of budget here is a decline, not a rejection.
+            return Err(if strict {
+                Some(Self::eq_budget_refusal(ty))
+            } else {
+                None
+            });
         }
         EQ_BOUNDS_IN_PROGRESS.with(|s| s.borrow_mut().push(ty.clone()));
         EQ_BOUNDS_IN_PROGRESS_SEEN.with(|seen| seen.borrow_mut().insert(ty.clone()));
@@ -3320,19 +3376,24 @@ impl Checker {
     /// Walk the MEMBERS of a nominal `ty` (fields / payloads / underlying) under the shared cycle
     /// guard, memoizing a sound result. Every nominal arm funnels through here, so neither entering
     /// the guard nor the memo bookkeeping can be forgotten at a call site.
-    fn walk_eq_members(&self, ty: &Ty, members: &[Ty]) -> Option<String> {
-        if EQ_BOUNDS_PROVEN.with(|m| m.borrow().contains(ty)) {
-            return None; // proven sound earlier in this query, unconditionally
+    fn walk_eq_members(&self, ty: &Ty, members: &[Ty], strict: bool) -> Option<String> {
+        let memo = if strict {
+            &EQ_BOUNDS_PROVEN
+        } else {
+            &EQ_WHERE_PROVEN
+        };
+        if memo.with(|m| m.borrow().contains(ty)) {
+            return None; // proven sound (or where-clean) earlier in this query, unconditionally
         }
-        let _guard = match Self::enter_eq_obligation(ty) {
+        let _guard = match Self::enter_eq_obligation(ty, strict) {
             Err(verdict) => return verdict,
             Ok(g) => g,
         };
         let hit = members
             .iter()
-            .find_map(|m| self.eq_bounds_unsatisfied_rec(m));
+            .find_map(|m| self.eq_bounds_unsatisfied_rec(m, strict));
         if hit.is_none() {
-            EQ_BOUNDS_PROVEN.with(|m| m.borrow_mut().push(ty.clone()));
+            memo.with(|m| m.borrow_mut().push(ty.clone()));
         }
         hit
     }
@@ -3340,18 +3401,30 @@ impl Checker {
     /// [`Self::eq_bounds_unsatisfied`]'s recursive body. The cycle guard is the shared thread-local,
     /// entered by [`Self::walk_eq_members`], NOT a `stack` parameter — the walk and the outward hop
     /// through `satisfies` are the same recursion and must not keep two disagreeing views of it.
-    fn eq_bounds_unsatisfied_rec(&self, ty: &Ty) -> Option<String> {
+    fn eq_bounds_unsatisfied_rec(&self, ty: &Ty, strict: bool) -> Option<String> {
         let any = |s: &Self, ts: &[Ty]| -> Option<String> {
-            ts.iter().find_map(|t| s.eq_bounds_unsatisfied_rec(t))
+            ts.iter()
+                .find_map(|t| s.eq_bounds_unsatisfied_rec(t, strict))
+        };
+        // TICKET-053: a table miss / unresolvable shape means "cannot prove", which the STRICT walk
+        // must refuse (its caller reads `None` as a grant) but the WHERE-ONLY walk must decline —
+        // it is not proving soundness, only looking for an unmet `where` bound, and a shape it cannot
+        // see cannot name one.
+        let invisible = |ty: &Ty| -> Option<String> {
+            if strict {
+                Some(Self::shape_invisible(ty))
+            } else {
+                None
+            }
         };
         match ty {
-            Ty::List(t) | Ty::Set(t) | Ty::Option(t) => self.eq_bounds_unsatisfied_rec(t),
+            Ty::List(t) | Ty::Set(t) | Ty::Option(t) => self.eq_bounds_unsatisfied_rec(t, strict),
             Ty::Map(k, v) => self
-                .eq_bounds_unsatisfied_rec(k)
-                .or_else(|| self.eq_bounds_unsatisfied_rec(v)),
+                .eq_bounds_unsatisfied_rec(k, strict)
+                .or_else(|| self.eq_bounds_unsatisfied_rec(v, strict)),
             Ty::Result(t, e) => self
-                .eq_bounds_unsatisfied_rec(t)
-                .or_else(|| self.eq_bounds_unsatisfied_rec(e)),
+                .eq_bounds_unsatisfied_rec(t, strict)
+                .or_else(|| self.eq_bounds_unsatisfied_rec(e, strict)),
             Ty::Tuple(elems) => any(self, elems),
             Ty::Struct(name, args) => {
                 // The BUILT-IN cursor is a `Ty::Struct` the struct tables know nothing about, so the
@@ -3365,7 +3438,7 @@ impl Checker {
                 // carries its owning module's identity key and injects nothing locally (gap #4), so
                 // a bare-table read finds no fields and the walk would silently skip them.
                 let Some(info) = self.struct_shape(name) else {
-                    return Some(Self::shape_invisible(ty));
+                    return invisible(ty);
                 };
                 // A declared `eq` has its `where` bounds checked WHATEVER its shape — but only the
                 // HOOK shape ends the walk here.
@@ -3401,7 +3474,7 @@ impl Checker {
                 // the CALLER's lexical scope answered for it) — one bug, both directions.
                 let map = struct_param_map(info, args);
                 let fields: Vec<Ty> = info.fields.iter().map(|(_, f)| subst(f, &map)).collect();
-                self.walk_eq_members(ty, &fields)
+                self.walk_eq_members(ty, &fields, strict)
             }
             Ty::Enum(name, args) => {
                 // Bounds-then-hook, exactly as the struct arm above — see its comment for why a
@@ -3421,9 +3494,9 @@ impl Checker {
                 // Same two fixes as the struct arm: instantiated payloads, and the owning-module
                 // fallback `self.variants` alone does not have.
                 let Some(payloads) = self.enum_payloads_of(name, args) else {
-                    return Some(Self::shape_invisible(ty));
+                    return invisible(ty);
                 };
-                self.walk_eq_members(ty, &payloads)
+                self.walk_eq_members(ty, &payloads, strict)
             }
             Ty::NewType(name, _) => {
                 // Declaring `eq` on a newtype is a decl-site error, so the method arm is only ever
@@ -3437,9 +3510,9 @@ impl Checker {
                     .newtype_underlying(name)
                     .map(|u| subst(&u, &self.nominal_param_map(ty)));
                 let Some(under) = under else {
-                    return Some(Self::shape_invisible(ty));
+                    return invisible(ty);
                 };
-                self.walk_eq_members(ty, std::slice::from_ref(&under))
+                self.walk_eq_members(ty, std::slice::from_ref(&under), strict)
             }
             // A free type PARAMETER reached inside the walk must carry `Eq` among its declared
             // bounds. `may_be_equal` treats a `Param` as ERASED (`[T] == [T]` compiles once, with
@@ -3461,7 +3534,14 @@ impl Checker {
             // `Map`/`Set` arms) where `where` does not exist at all (`<whereClause>` is `fn`/`native
             // fn`-only, `docs/grammar.bnf`) — `struct Reg[K: Hashable] where K: Eq:` is a PARSE
             // error. So the message must name both spellings rather than assume a fn body.
-            Ty::Param(_) => self.satisfies(ty, "Eq").err().map(|_| {
+            // TICKET-053: the where-only mode declines here too. An unbounded `T` reached through an
+            // erasure gate — `fn wrap[T](x: Box[T]) -> Tagged` — is never compared unless `Box`'s own
+            // `eq` names a `where T: ...` bound, and that case is already caught above by
+            // `eq_where_unsatisfied` on `Box`'s hook before this arm is ever reached for `T` itself.
+            // Refusing an unbounded `T` here in where-only mode would reject working generic code
+            // that never compares anything (Gotcha 1: measured `ok: no type errors` rc=0 before this
+            // gate existed).
+            Ty::Param(_) if strict => self.satisfies(ty, "Eq").err().map(|_| {
                 format!(
                     "{ty} is not bounded by Eq (add an `Eq` bound to {ty}: `[{ty}: Eq]`, or `where {ty}: Eq` on a fn)"
                 )
