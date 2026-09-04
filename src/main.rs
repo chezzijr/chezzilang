@@ -1133,7 +1133,11 @@ fn diags_json(diags: &[checker::CheckError], files: &[(u32, std::path::PathBuf)]
                     let src = src_cache
                         .entry(p.to_path_buf())
                         .or_insert_with(|| std::fs::read_to_string(p).unwrap_or_default());
-                    editor::word_end_col(src, d.span.line as usize, d.span.col as usize) + 1
+                    editor::word_end_col(
+                        lexer::strip_bom(src),
+                        d.span.line as usize,
+                        d.span.col as usize,
+                    ) + 1
                 }
                 None => d.span.col + 1,
             };
@@ -1179,7 +1183,7 @@ fn render_diag(
             .entry(p.to_path_buf())
             .or_insert_with(|| std::fs::read_to_string(p).ok());
         if let Some(src) = src
-            && let Some(snippet) = lexer::render_snippet(d.span, src)
+            && let Some(snippet) = lexer::render_snippet(d.span, lexer::strip_bom(src))
         {
             out.push('\n');
             out.push_str(&snippet);

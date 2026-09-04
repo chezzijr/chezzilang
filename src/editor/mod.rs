@@ -193,6 +193,7 @@ fn module_text_diag(
 /// 1-based `(line, col)` → 0-based [`Diag`], extending the end over an identifier word at the
 /// position (so an undefined-name squiggle covers the whole name) or by one char otherwise.
 fn span_diag(source: &str, line1: usize, col1: usize, message: String, severity: Severity) -> Diag {
+    let source = crate::lexer::strip_bom(source);
     let line0 = line1.saturating_sub(1) as u32;
     let col0_char = col1.saturating_sub(1);
     let end_char = word_end_col(source, line1, col1) as usize;
@@ -267,6 +268,7 @@ pub struct HoverInfo {
 /// binding / field-name at that token. `None` when the cursor is off any symbol, the program fails to
 /// resolve/check, or the position carries no type (operators, keywords, desugared `?.`/`??`).
 pub fn hover(path: &Path, source: &str, line: u32, character: u32) -> Option<HoverInfo> {
+    let source = crate::lexer::strip_bom(source);
     // Reverse the UTF-16 column to a char column on the cursor's line.
     let line_str = source.lines().nth(line as usize)?;
     let char_col = utf16_to_char_col(line_str, character);
@@ -411,6 +413,7 @@ pub fn semantic_tokens(source: &str) -> Vec<SemTok> {
 
 fn semantic_tokens_inner(source: &str) -> Vec<SemTok> {
     use crate::lexer::{self, Token};
+    let source = lexer::strip_bom(source);
     let chars: Vec<char> = source.chars().collect();
     let line_starts = line_start_offsets(&chars);
     let toks = match lexer::tokenize(source) {
@@ -1337,6 +1340,27 @@ mod tests {
             line,
             ch,
         )
+    }
+
+    #[test]
+    fn hover_through_a_leading_bom_finds_the_number_token() {
+        let h = hov("\u{feff}x := 12345\n", 0, 7).expect("hover on int through a leading BOM");
+        assert_eq!(h.display, "int");
+    }
+
+    #[test]
+    fn semantic_tokens_ignore_a_leading_bom() {
+        let src = "x := 12345\ns := \"ab\" # c\n";
+        assert_eq!(
+            semantic_tokens(&format!("\u{feff}{src}")),
+            semantic_tokens(src)
+        );
+    }
+
+    #[test]
+    fn diag_columns_are_counted_from_the_first_visible_char_after_a_bom() {
+        let ds = diag("\u{feff}print(nope)\n");
+        assert_eq!((ds[0].line, ds[0].col, ds[0].end_col), (0, 6, 10));
     }
 
     #[test]
