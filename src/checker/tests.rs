@@ -8801,15 +8801,12 @@ fn duplicate_function_is_reported() {
 }
 
 #[test]
-fn struct_and_same_named_free_fn_is_reported() {
-    // TICKET-055: a struct constructor and a free fn share one call namespace, but neither hoist
-    // arm checks the other's name table, so the pair is accepted and the struct becomes
-    // unconstructible (the fn wins the call). Every sibling collision (fn/fn, struct/struct,
-    // enum-variant/fn, field/method) already rejects; this pairing must too.
-    rejects(
-        "struct S:\n    n: int\nfn S(n: int) -> int:\n    return n * 2\n",
-        "S",
-    );
+fn struct_ctor_is_replaced_by_a_same_module_fn() {
+    // TICKET-055: this pair is DEC-029, not a collision. A module-level `fn S` beside `struct S`
+    // deliberately replaces the struct's field ctor at every in-scope call site -- shipped as
+    // `std/path.chz:36`'s public `fn Path(p: PathLike) -> Path`. The human confirmed on 2026-09-04
+    // that the ticket's original "reject the pair" premise was false.
+    ok("struct S:\n    n: int\nfn S(n: int) -> int:\n    return n * 2\nprint(S(3))\n");
 }
 
 #[test]
