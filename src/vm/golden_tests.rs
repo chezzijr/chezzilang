@@ -12249,24 +12249,23 @@ fn newtype_raw_ctor_inside_the_shadowing_fn_body() {
     );
 }
 
-/// TICKET-029 review fix — a qualified `module.N(args)` where `N` is a NEWTYPE (not a struct) must
-/// still build the newtype even when the module also declares a same-named `fn N`. The checker's
-/// newtype arm (`src/checker/expr.rs:112`) never gates on a colliding fn, so the compiler's emit
-/// site must not either: pre-fix, `Compiler::ctor_shadowed` sat on the OUTER guard
-/// (`src/compiler/mod.rs:5334`) and disabled `Op::NewType` too, so this call fell through to a call
-/// of `fn N` — the fn's `FN RAN` print below would appear, and it would fault taking `.len()` of an
-/// int argument, because the checker never checked the call against the fn's `str` parameter.
+/// TICKET-055 — supersedes the TICKET-029 review's opposite pin. DEC-029's `m.S(args)` clause
+/// covers a newtype exactly like a struct: a qualified `module.N(args)` where `N` is a NEWTYPE
+/// (not a struct) IS shadowed by a same-module `fn N`, same as the struct case. The old doc comment
+/// on this test recorded that the review aligned the compiler to the checker's then-ungated newtype
+/// arm; the checker arm is now gated too (TICKET-055), so the fn winning is the continuation of that
+/// review fix, not a reversal of it.
 #[test]
-fn qualified_newtype_ctor_not_shadowed_by_colliding_module_fn() {
+fn qualified_newtype_ctor_is_shadowed_by_colliding_module_fn() {
     let out = golden_file_entry(
         &[
             (
                 "lib.chz",
-                "newtype N = int\nfn N(s: str) -> N:\n    print(\"FN RAN\")\n    return N(s.len())\n",
+                "newtype N = int\nfn N(n: int) -> N:\n    print(\"FN RAN\")\n    return N(n * 2)\n",
             ),
             ("main.chz", "import lib\nv := lib.N(5)\nprint(v)\n"),
         ],
         "main.chz",
     );
-    assert_eq!(out, "N(5)\n", "fn N must not run; got: {out:?}");
+    assert_eq!(out, "FN RAN\nN(10)\n", "fn N must run; got: {out:?}");
 }

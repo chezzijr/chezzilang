@@ -5435,7 +5435,9 @@ impl Compiler {
                 }
                 // `module.NewType(args)` → qualified newtype constructor; emit `Op::NewType` keyed
                 // by the target module's runtime key (mirrors the bare newtype ctor below).
-                if self.program.newtype_home.contains_key(&key) {
+                if self.program.newtype_home.contains_key(&key)
+                    && !self.module_fns.get(tidx).is_some_and(|f| f.contains(name))
+                {
                     self.compile_args(fc, args)?;
                     fc.emit(Op::NewType(key), span);
                     return Ok(());

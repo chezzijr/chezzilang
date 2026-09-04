@@ -114,6 +114,7 @@ impl Checker {
                 && let Some(mid) = self.imported_modules.get(mname).cloned()
                 && let Some(sig) = self.module_sigs.get(&mid).cloned()
                 && let Some(info) = sig.newtype_defs.get(name)
+                && !sig.functions.contains_key(name)
             {
                 let key = self.type_key(&mid, name);
                 let under = info.underlying.clone();

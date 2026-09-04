@@ -12441,18 +12441,22 @@ fn path_from_import_still_reserves_the_name_against_a_user_struct() {
 }
 
 #[test]
-fn qualified_newtype_call_ignores_a_colliding_module_fn() {
-    // TICKET-029 review fix — a module-level fn named after a same-module NEWTYPE (not a struct)
-    // must NOT shadow the qualified `module.Name(args)` newtype constructor: the checker's newtype
-    // arm (`src/checker/expr.rs:112`) never gates on `sig.functions`, so the compiler's qualified
-    // emit site must agree and keep emitting `Op::NewType`, not fall through to a call of `fn N`.
-    files_ok(&[
-        (
-            "lib.chz",
-            "newtype N = int\nfn N(s: str) -> N:\n    return N(s.len())\n",
-        ),
-        ("main.chz", "import lib\nv := lib.N(5)\nprint(v)\n"),
-    ]);
+fn qualified_newtype_call_is_replaced_by_a_colliding_module_fn() {
+    // TICKET-055 — supersedes the TICKET-029 review's opposite pin. DEC-029's `m.S(args)` clause
+    // covers a newtype exactly like a struct: a module-level fn named after a same-module NEWTYPE
+    // DOES shadow the qualified `module.Name(args)` newtype constructor. The old pin only matched
+    // the checker's then-ungated newtype arm; the checker arm is now gated too, so both halves agree
+    // on the fn winning.
+    files_reject(
+        &[
+            (
+                "lib.chz",
+                "newtype N = int\nfn N(s: str) -> N:\n    return N(s.len())\n",
+            ),
+            ("main.chz", "import lib\nv := lib.N(5)\nprint(v)\n"),
+        ],
+        "argument 1 of 'N': expected str, found int",
+    );
 }
 
 #[test]
