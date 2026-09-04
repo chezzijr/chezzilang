@@ -1,0 +1,63 @@
+# TICKET-054: three positions hold a statically known expected type at the position -- an
+# annotation on a binding, a closure's own declared return, a protocol's declared parameter type --
+# and used to ignore it, falsely rejecting a program every ancestor accepts. These assert the
+# RUNTIME value, not just that the checker accepts: a checker-only fix would leave an `Int` under a
+# static `float`, and `/ 2` makes that visible (an un-coerced `Int` yields `1`/`0`, not `1.5`/`0.5`).
+
+protocol Sh:
+    fn area(self) -> int
+
+struct Sq:
+    s: int
+    fn area(self) -> int: self.s * self.s
+
+struct Tr:
+    b: int
+    fn area(self) -> int: self.b
+
+test fn if_expr_annotation_picks_protocol_slot():
+    x: Sh = if true: Sq(2) else: Tr(9)
+    assert x.area() == 4
+    y: Sh = if false: Sq(2) else: Tr(9)
+    assert y.area() == 9
+    z: Sh = match 1:
+        1: Sq(3)
+        _: Tr(4)
+    assert z.area() == 9
+
+test fn closure_own_float_return_widens():
+    g := fn() -> float: 3
+    assert g() == 3.0
+    assert g() / 2 == 1.5
+
+type F = float
+
+test fn closure_float_return_through_alias_widens():
+    h := fn() -> F: 3
+    assert h() / 2 == 1.5
+
+protocol P:
+    fn m(self, x: float) -> float
+
+struct S:
+    fn m(self, x: float) -> float:
+        return x
+
+fn viabound[T: P](t: T) -> float:
+    return t.m(1)
+
+test fn protocol_receiver_widens_float_arg():
+    p: P = S()
+    assert p.m(1) / 2 == 0.5
+    assert viabound(S()) / 2 == 0.5
+
+protocol Q:
+    fn n(self, xs: List[float]) -> float
+
+struct SQ:
+    fn n(self, xs: List[float]) -> float:
+        return xs[0]
+
+test fn protocol_receiver_widens_float_list_element():
+    q: Q = SQ()
+    assert q.n([1, 2]) / 2 == 0.5
