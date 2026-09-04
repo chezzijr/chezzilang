@@ -460,6 +460,18 @@ Single source of truth for "what am I doing next." Update after every work sessi
   meaning; `std.path`'s own ~20 bare/qualified `Path(...)` call sites re-lower through the fn with
   identical values (one extra call hop).
 
+- **DEC-029's fn-replaces-ctor rule now covers `newtype` too (TICKET-055).** A module-level `fn N`
+  named after a same-module `newtype N` was the lone outlier of the three hosts — `struct`/`enum`
+  already let the fn win, but the newtype ctor won instead, and worse, the checker and compiler
+  disagreed on the QUALIFIED (`m.N(args)`) and `from`-imported spellings, so a check-clean program
+  could lower a `str` into a newtype declared `= int`. Four gate sites are now consistent: checker
+  bare and qualified (`src/checker/expr.rs`), compiler bare and qualified (`src/compiler/mod.rs`),
+  all deciding from the same `raw_ctor_owner`/`ctor_shadowed` predicate the struct arms use. The
+  in-body raw-ctor escape (`src/checker/sig.rs`) now covers a newtype owner too. A colliding
+  `from`-import binds both namespaces via the new `Checker::bind_imported_newtype_name`, the newtype
+  twin of `bind_imported_struct_name`. No `.chz` file in the repo pairs a `newtype` name with a
+  same-file fn, so nothing else changes meaning.
+
 - A user protocol name is module-scoped like a struct: two modules may each declare `protocol Drawable`, and a bare unimported protocol name no longer resolves (TICKET-027).
 
 - **Intrinsic struct `copy()` (TICKET-030, 2026-08-30, closes `docs/gaps.md` W8-19's struct-copy sub-item — the row itself stays open).** Every struct now has a SHALLOW `copy()`: each field's value is copied, so a `List`/`Map`/`Set`/nested-struct/handle field is shared afterward, matching Python's `copy.copy` (there is no `deepcopy()`). It is an intrinsic method resolved MISS-ONLY — after the declared-method lookup and the fn-typed-field fallback — in `Checker::infer_method_call`'s `Ty::Struct` arm (`src/checker/expr.rs`) and `Vm::do_method_call`'s `Obj::Struct` arm (`src/vm/call.rs`), so a struct declaring its own `copy` or holding a fn-typed `copy` field keeps it. Enums and newtypes get nothing.

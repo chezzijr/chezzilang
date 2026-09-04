@@ -1702,6 +1702,19 @@ never its functions, so the bare spelling there still calls the field ctor (`imp
 (see the v1 limits above) — only a **module-level** fn can win, because it is hoisted into a global
 slot the backend can dispatch through.
 
+**The same rule covers a `newtype`** (TICKET-055) — a module-level `fn` named after a same-module
+`newtype` replaces its wrapping constructor, bare, `from`-imported, and qualified, with the same
+in-body raw-ctor escape:
+
+```chezzi
+newtype Cents = int
+
+fn Cents(s: str) -> Cents:         # module-level, same name as the newtype
+    return Cents(s.len())          # inside THIS body only, Cents(...) is still the raw wrapping ctor
+
+c := Cents("abcd")                 # calls the fn, not the wrapping ctor — int(c) == 4
+```
+
 **Enums** get static methods too (e.g. a `from_str(s) -> Option[Color]`). For an enum, a **variant**
 name **always wins** over a static-method name on `Enum.x` — so a variant and a static method may
 **not** share a name (a collision is a declaration-time error). This keeps `Color.Red` always the
