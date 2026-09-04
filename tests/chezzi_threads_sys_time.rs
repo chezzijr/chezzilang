@@ -18,7 +18,8 @@
 //! without touching the W8-8 tests (out of scope here).
 
 #[cfg(unix)]
-use std::process::Command;
+#[path = "support/child_rusage.rs"]
+mod child_rusage;
 
 /// W8-7 — the worker count this gate drives. NOT the default (all cores): the herd is a function of
 /// how many workers sit idle while a fiber preempts, so a gate that inherits the core count measures
@@ -43,83 +44,6 @@ const HERD_WORKERS: usize = 32;
 /// gate would have passed a fully regressed binary).
 #[cfg(unix)]
 const MAX_SYS_OVER_USER: f64 = 0.015;
-
-/// Per-child wall/user/sys via `libc::wait4` on the spawned pid, rather than `Child::wait()` (which
-/// surfaces no rusage) or `getrusage(RUSAGE_CHILDREN)` (which would aggregate every child this test
-/// binary has ever reaped — contaminated by any other subprocess-spawning test sharing the process).
-/// stdout/stderr are drained on background threads before the blocking `wait4` call, so a chatty
-/// child can't deadlock on a full pipe buffer while we wait.
-// `wait4` IS the reap (it's `waitpid` + rusage in one syscall) — clippy can't see that, only that
-// `Child::wait()`/`.output()` was never called on `child`.
-#[allow(clippy::zombie_processes)]
-#[cfg(unix)]
-fn run_timed(
-    args: &[&str],
-) -> (
-    std::time::Duration,
-    std::time::Duration,
-    std::time::Duration,
-    std::process::ExitStatus,
-    String,
-) {
-    use std::io::Read;
-    use std::os::unix::process::ExitStatusExt;
-    use std::process::Stdio;
-
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
-    cmd.args(args);
-    // W8-7's trigger is IDLE WORKERS, not cores: every preemption used to broadcast to all W-1 of
-    // them. Driving `CHEZZI_THREADS` EXPLICITLY (rather than leaving it unset and inheriting the
-    // core count) is what makes this gate hardware-independent — see the calibration table on the
-    // test below, and `HERD_WORKERS`.
-    cmd.env("CHEZZI_THREADS", HERD_WORKERS.to_string());
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-
-    let wall_start = std::time::Instant::now();
-    let mut child = cmd.spawn().expect("spawn chezzi");
-    let pid = child.id() as libc::pid_t;
-
-    let mut stdout_pipe = child.stdout.take().expect("stdout piped");
-    let mut stderr_pipe = child.stderr.take().expect("stderr piped");
-    let stdout_reader = std::thread::spawn(move || {
-        let mut s = String::new();
-        let _ = stdout_pipe.read_to_string(&mut s);
-        s
-    });
-    let stderr_reader = std::thread::spawn(move || {
-        let mut s = String::new();
-        let _ = stderr_pipe.read_to_string(&mut s);
-        s
-    });
-
-    let mut status: libc::c_int = 0;
-    let mut rusage: libc::rusage = unsafe { std::mem::zeroed() };
-    // SAFETY: `pid` was just returned by `child.id()` for a process we own and have not yet waited
-    // on; `&mut status`/`&mut rusage` are valid, appropriately-sized out-params for the call.
-    let ret = unsafe { libc::wait4(pid, &mut status, 0, &mut rusage) };
-    assert_eq!(ret, pid, "wait4({pid}) failed");
-    let wall = wall_start.elapsed();
-
-    let stdout = stdout_reader.join().expect("stdout reader thread");
-    let _stderr = stderr_reader.join().expect("stderr reader thread");
-
-    let user = std::time::Duration::new(
-        rusage.ru_utime.tv_sec as u64,
-        (rusage.ru_utime.tv_usec as u32) * 1000,
-    );
-    let sys = std::time::Duration::new(
-        rusage.ru_stime.tv_sec as u64,
-        (rusage.ru_stime.tv_usec as u32) * 1000,
-    );
-    (
-        wall,
-        user,
-        sys,
-        std::process::ExitStatus::from_raw(status),
-        stdout,
-    )
-}
 
 /// W8-7 — with many more workers than tasks (`HERD_WORKERS`, driven explicitly), a reduction-budget
 /// preemption must not thundering-herd every idle worker. A FLAT top-level `parallel:` (never
@@ -204,7 +128,12 @@ main()\n",
     )
     .expect("write program");
 
-    let (wall, user, sys, status, stdout) = run_timed(&["run", path.to_str().unwrap()]);
+    // W8-7's trigger is IDLE WORKERS, not cores: every preemption used to broadcast to all W-1 of
+    // them. Driving `CHEZZI_THREADS` EXPLICITLY (rather than leaving it unset and inheriting the
+    // core count) is what makes this gate hardware-independent — measured, 28 idle workers raise the
+    // pre-fix herd on 2 CPUs just as they do on 12.
+    let (wall, user, sys, status, stdout) =
+        child_rusage::run_timed(&["run", path.to_str().unwrap()], &HERD_WORKERS.to_string());
 
     assert!(
         status.success(),

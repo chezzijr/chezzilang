@@ -67,28 +67,22 @@ fn no_chz_test_divides_two_wall_clock_samples() {
 /// A name may join the list, but only deliberately, in the commit that adds the clock, with the
 /// reason in that commit message. A test converted to a counted measure must be DELETED from the
 /// list in the same commit that converts it.
-const CLOCK_READING_TESTS: [&str; 28] = [
+const CLOCK_READING_TESTS: [&str; 19] = [
     "a_chezzi_hang_python_survives_is_a_finding",
     "a_cyclic_shared_field_type_graph_is_also_walked_once_per_type",
     "a_shared_field_type_graph_is_walked_once_per_type",
     "a_sleeping_nursery_task_is_cancelled_mid_flight_by_a_sibling_fault",
     "a_slow_but_healthy_job_at_the_exit_drain_is_untouched",
-    "a_top_level_wait_timer_arm_loses_to_an_eager_job",
-    "a_wait_timer_arm_in_a_native_callback_loses_to_a_sibling_value",
-    "an_eager_wait_block_is_woken_by_its_arm_not_by_the_poll_timeout",
-    "an_eager_wait_timer_arm_loses_to_a_sibling_value",
-    "connect_inside_an_executor_job_errs_instead_of_pinning_a_pool_worker",
     "d5_blocking_sleeps_run_concurrently_not_serialized",
     "d5_owe3_path_c_sleep_in_callback_demotes_frees_worker",
     "deadline_past_fires_immediately",
     "fibers_scale_ready_queue_not_quadratic",
     "parallel_many_spawns_cheap_and_correct",
     "parity_blocking_native_is_an_entry_cancellation_checkpoint_on_both_engines",
-    "polymorphic_recursion_is_refused_in_bounded_time_by_growth_detection",
-    "polymorphic_recursion_through_a_func_type_argument_is_refused_in_bounded_time",
     "rwshared_view_over_shared_bindings_is_not_quadratic",
-    "threads_one_serializes_cpu_bound_parallel_tasks",
-    "threads_one_serializes_nested_eager_parallel_tasks",
+    // threads_one_serializes_cpu_bound_parallel_tasks / _nested_eager_parallel_tasks (TICKET-059):
+    // both now read the clock in tests/support/child_rusage.rs, not in their own bodies -- same
+    // precedent as many_idle_workers_do_not_thundering_herd_on_yield, never listed here.
     "ticket_016_bounded_update_guard_acquire_yields_instead_of_blocking",
     "timeout_aborts_a_joiner_whose_job_has_no_checkpoint",
     "timeout_aborts_a_netpoller_parked_test",
@@ -97,6 +91,107 @@ const CLOCK_READING_TESTS: [&str; 28] = [
     "timer_many_all_fire_on_one_thread",
     "unique_is_not_quadratic",
 ];
+
+/// This file's own name, for the whole-file scans below to skip. Every gate in this file holds the
+/// thing it bans as a string literal, so a scan wide enough to be useful reaches its own source
+/// (measured 2026-09-05: `SELF-FLAG: div_duration_f64( present` and a self-flag on
+/// `NON_WALL_CLOCK_DURATION_RATIOS`'s own entry). Nothing in this file times anything, so skipping it
+/// by name costs nothing real (TICKET-059).
+const GATE_FILE: &str = "no_wall_clock_ratio_gates.rs";
+
+/// A `.rs` file : line-text pair that divides two wall-clock-shaped `Duration` accessors but is NOT a
+/// wall-clock ratio -- `tests/chezzi_threads_sys_time.rs`'s `sys.as_secs_f64() / user.as_secs_f64()`
+/// divides two CPU-TIME samples taken from ONE `wait4` rusage call, so a busy box slows numerator and
+/// denominator identically and cannot amplify the quotient the way two wall-clock samples can
+/// (TICKET-049's own escape hatch: "A future timing test that genuinely needs a division must change
+/// this test and say why in the same commit"). Matched by the expression's TEXT, not a line number, so
+/// the entry survives an edit above it and breaks if the expression itself changes.
+const NON_WALL_CLOCK_DURATION_RATIOS: [(&str, &str); 1] = [(
+    "tests/chezzi_threads_sys_time.rs",
+    "let ratio = sys.as_secs_f64() / user.as_secs_f64();",
+)];
+
+/// Every `path:line: text` under `src/` and `tests/` that divides two `Duration`-shaped wall-clock
+/// samples -- the RUST half of TICKET-049's ratio ban (the original scanned only `tests/chz`).
+///
+/// WHOLE-FILE, not `#[test]`-body: `tests/chezzi_threads_sys_time.rs` keeps its clock read inside a
+/// helper fn (`child_rusage::run_timed`), so a body-only scan would miss it. Joins each file's
+/// non-comment lines with a space and collapses whitespace runs to one, so a division split across two
+/// source lines is still caught. Flags a `/` (never `//`) that has one of `as_secs_f64()`,
+/// `as_secs_f32()`, `as_millis()`, `as_micros()`, `as_nanos()` within 60 characters on BOTH sides, or a
+/// file that calls `div_duration_f64(`; a flag is exempt when the file's
+/// [`NON_WALL_CLOCK_DURATION_RATIOS`] entry appears inside its 121-character window.
+fn wall_clock_ratio_lines() -> Vec<String> {
+    let mut files = Vec::new();
+    files_with_ext(Path::new("src"), "rs", &mut files);
+    files_with_ext(Path::new("tests"), "rs", &mut files);
+    let accessors = [
+        "as_secs_f64()",
+        "as_secs_f32()",
+        "as_millis()",
+        "as_micros()",
+        "as_nanos()",
+    ];
+    let mut bad = Vec::new();
+    for path in &files {
+        if path.file_name().is_some_and(|n| n == GATE_FILE) {
+            continue;
+        }
+        let text =
+            fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let display = path.display().to_string();
+        let allow = NON_WALL_CLOCK_DURATION_RATIOS
+            .iter()
+            .find(|(f, _)| display.ends_with(f))
+            .map(|(_, expr)| *expr);
+        let joined: String = text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.starts_with("//"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let collapsed = joined.split_whitespace().collect::<Vec<_>>().join(" ");
+        let chars: Vec<char> = collapsed.chars().collect();
+        for i in 0..chars.len() {
+            if chars[i] != '/' || chars.get(i + 1) == Some(&'/') {
+                continue;
+            }
+            let start = i.saturating_sub(60);
+            let end = (i + 60).min(chars.len());
+            let before: String = chars[start..i].iter().collect();
+            let after: String = chars[i..end].iter().collect();
+            let window: String = chars[start..end].iter().collect();
+            if let Some(expr) = allow
+                && window.contains(expr)
+            {
+                continue;
+            }
+            if accessors.iter().any(|a| before.contains(a))
+                && accessors.iter().any(|a| after.contains(a))
+            {
+                bad.push(format!("{display}: {window}"));
+            }
+        }
+        if collapsed.contains("div_duration_f64(") && allow != Some("div_duration_f64(") {
+            bad.push(format!("{display}: div_duration_f64( present"));
+        }
+    }
+    bad
+}
+
+#[test]
+fn no_rust_test_divides_two_wall_clock_samples() {
+    let bad = wall_clock_ratio_lines();
+    assert!(
+        bad.is_empty(),
+        "a Rust test that divides two wall-clock samples amplifies scheduler noise without bound, \
+         the same way TICKET-049 banned it in tests/chz -- count the work instead, or assert a bound \
+         with headroom on one sample. If the division is over two CPU-time samples from a single \
+         rusage call (immune to that amplification), add it to NON_WALL_CLOCK_DURATION_RATIOS and say \
+         why in the same commit:\n{}",
+        bad.join("\n")
+    );
+}
 
 /// The name of every `#[test]` fn under `src` and `tests` whose body holds a `.elapsed()` line.
 ///
@@ -155,13 +250,14 @@ fn clock_reading_tests() -> BTreeSet<String> {
 
 /// TICKET-050 named twelve tests it deliberately left on `CLOCK_READING_TESTS` for a follow-up
 /// (TICKET-059) to convert. This pins that follow-up: red while any of the twelve is still listed,
-/// green once each is converted and its name removed.
+/// green once each is converted and its name removed. `stack_trace_reports_call_chain` replaces
+/// `stack_trace_reports_call_chain_on_both_engines` here because TICKET-059 step 9 renamed it.
 const TICKET_050_DEFERRED_TESTS: [&str; 12] = [
     "polymorphic_recursion_is_refused_in_bounded_time_by_growth_detection",
     "polymorphic_recursion_through_a_func_type_argument_is_refused_in_bounded_time",
     "over_memory_counts_jobs_queued_but_not_started",
     "connect_inside_an_executor_job_errs_instead_of_pinning_a_pool_worker",
-    "stack_trace_reports_call_chain_on_both_engines",
+    "stack_trace_reports_call_chain",
     "a_top_level_wait_timer_arm_loses_to_an_eager_job",
     "a_wait_timer_arm_in_a_native_callback_loses_to_a_sibling_value",
     "an_eager_wait_block_is_woken_by_its_arm_not_by_the_poll_timeout",

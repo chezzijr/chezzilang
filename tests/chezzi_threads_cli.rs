@@ -35,6 +35,22 @@
 use std::path::Path;
 use std::process::Command;
 
+#[cfg(unix)]
+#[path = "support/child_rusage.rs"]
+mod child_rusage;
+
+/// W8-8's serialization gates (TICKET-059) bound child CPU against child WALL on ONE run, rather than
+/// dividing two wall-clock samples from two separate runs: at `CHEZZI_THREADS=1` a single runner
+/// cannot exceed 1.00 cores whatever else the machine is doing, so contention can only lower this
+/// measure, never raise it past the ceiling. The headroom above 1.00 is deliberate — see the tests'
+/// own doc for the measured bands that set it.
+#[cfg(unix)]
+const MAX_CORES_AT_ONE_WORKER: f64 = 1.20;
+/// Three runs per fixture, failing if ANY run exceeds [`MAX_CORES_AT_ONE_WORKER`] — raises detection
+/// without averaging away a transient second runner.
+#[cfg(unix)]
+const SERIALIZATION_RUNS: usize = 3;
+
 /// Run `chezzi test <path>`, optionally forcing `CHEZZI_THREADS`, with an optional `--timeout=N`ms
 /// bound (so a genuine "needs more workers than we gave it" hang can't wedge the test binary).
 /// Returns `(exit_success, summary_line, full_stdout, stderr)`.
@@ -192,6 +208,7 @@ fn chezzi_test_cli_honors_chezzi_threads_via_a_two_worker_precondition() {
 /// ~4.0 on a debug build (docs/gaps.md W8-8 measured ~4.4 on the release binary). The burn size (150k
 /// iterations) is calibrated to ~100ms on a DEBUG build — `CARGO_BIN_EXE_chezzi` under `cargo test` is
 /// the debug binary, not `--release`.
+#[cfg(unix)]
 #[test]
 fn threads_one_serializes_cpu_bound_parallel_tasks() {
     let dir = std::env::temp_dir().join(format!("chz-threads-w8-8-{}", std::process::id()));
@@ -205,18 +222,6 @@ fn threads_one_serializes_cpu_bound_parallel_tasks() {
                  i += 1\n    \
                  return x\n\n";
 
-    let path_a = dir.join("burn_one.chz");
-    std::fs::write(
-        &path_a,
-        format!(
-            "{burn}fn main():\n    \
-             parallel:\n        \
-             spawn: burn(150000)\n\
-             main()\n"
-        ),
-    )
-    .expect("write program A");
-
     let path_b = dir.join("burn_eight.chz");
     let spawns = "        spawn: burn(150000)\n".repeat(8);
     std::fs::write(
@@ -225,39 +230,28 @@ fn threads_one_serializes_cpu_bound_parallel_tasks() {
     )
     .expect("write program B");
 
-    let time_run = |path: &Path| -> std::time::Duration {
-        let start = std::time::Instant::now();
-        let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
-            .arg("run")
-            .arg(path)
-            .env("CHEZZI_THREADS", "1")
-            .output()
-            .expect("run chezzi");
-        let elapsed = start.elapsed();
+    for run in 0..SERIALIZATION_RUNS {
+        let (wall, user, sys, status, stdout) =
+            child_rusage::run_timed(&["run", path_b.to_str().unwrap()], "1");
         assert!(
-            out.status.success(),
-            "chezzi run {path:?} failed: {}",
-            String::from_utf8_lossy(&out.stderr)
+            status.success(),
+            "chezzi run {path_b:?} failed (run {run}): {stdout}"
         );
-        elapsed
-    };
-
-    let t1 = time_run(&path_a);
-    let t8 = time_run(&path_b);
-
-    // Negative control: t1 must be non-trivial, or a near-zero/near-zero ratio could pass by accident.
-    assert!(
-        t1 > std::time::Duration::from_millis(10),
-        "program A finished too fast ({t1:?}) to be a meaningful baseline — recalibrate the burn size"
-    );
-
-    let ratio = t8.as_secs_f64() / t1.as_secs_f64();
-    assert!(
-        ratio > 5.5,
-        "--threads=1 must serialize: 8x the CPU work should take close to 8x as long (t1={t1:?}, \
-         t8={t8:?}, ratio={ratio:.2}). A ratio near 4 means the inline joiner is STILL running a \
-         second fiber loop alongside the drainer at a budget of 1 (W8-8)."
-    );
+        let cpu = user + sys;
+        // Negative control: cpu must be non-trivial, or a near-zero/near-zero ratio could pass by
+        // accident. Measured 1.34-1.48 s.
+        assert!(
+            cpu > std::time::Duration::from_millis(500),
+            "program B finished too fast (cpu={cpu:?}, run {run}) to be a meaningful measurement — \
+             recalibrate the burn size"
+        );
+        assert!(
+            cpu <= wall.mul_f64(MAX_CORES_AT_ONE_WORKER),
+            "--threads=1 must run at most one CPU runner (run {run}): cpu={cpu:?} wall={wall:?} \
+             (cpu must be <= wall * {MAX_CORES_AT_ONE_WORKER}). A second runner means the inline \
+             joiner is running a second fiber loop alongside the drainer at a budget of 1 (W8-8)."
+        );
+    }
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -274,6 +268,7 @@ fn threads_one_serializes_cpu_bound_parallel_tasks() {
 /// budget of one. Same construction as `threads_one_serializes_cpu_bound_parallel_tasks`: one burn vs
 /// eight, both under `CHEZZI_THREADS=1`, ratio must clear 5.5 (measured pre-fix ~3.9 on this debug
 /// binary, ~1.97 cores on the release binary per the review).
+#[cfg(unix)]
 #[test]
 fn threads_one_serializes_nested_eager_parallel_tasks() {
     let dir = std::env::temp_dir().join(format!("chz-threads-w8-8-nested-{}", std::process::id()));
@@ -287,23 +282,12 @@ fn threads_one_serializes_nested_eager_parallel_tasks() {
                  i += 1\n    \
                  return x\n\n";
 
-    let path_a = dir.join("nested_burn_one.chz");
-    std::fs::write(
-        &path_a,
-        format!(
-            "{burn}fn work():\n    \
-             parallel:\n        \
-             spawn: burn(150000)\n\n\
-             fn main():\n    \
-             parallel:\n        \
-             work()\n\
-             main()\n"
-        ),
-    )
-    .expect("write program A");
-
+    // 16 spawns, not 8: measured, at 8 one reverted run in eleven read 0.755 cores -- inside the
+    // healthy band, because the nested arm's second runner is the inline joiner, which covers less
+    // of the run than the flat arm's pool helpers do. At 16 the reverted band is 1.131-1.697 with no
+    // overlap.
     let path_b = dir.join("nested_burn_eight.chz");
-    let spawns = "        spawn: burn(150000)\n".repeat(8);
+    let spawns = "        spawn: burn(150000)\n".repeat(16);
     std::fs::write(
         &path_b,
         format!(
@@ -316,39 +300,28 @@ fn threads_one_serializes_nested_eager_parallel_tasks() {
     )
     .expect("write program B");
 
-    let time_run = |path: &Path| -> std::time::Duration {
-        let start = std::time::Instant::now();
-        let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
-            .arg("run")
-            .arg(path)
-            .env("CHEZZI_THREADS", "1")
-            .output()
-            .expect("run chezzi");
-        let elapsed = start.elapsed();
+    for run in 0..SERIALIZATION_RUNS {
+        let (wall, user, sys, status, stdout) =
+            child_rusage::run_timed(&["run", path_b.to_str().unwrap()], "1");
         assert!(
-            out.status.success(),
-            "chezzi run {path:?} failed: {}",
-            String::from_utf8_lossy(&out.stderr)
+            status.success(),
+            "chezzi run {path_b:?} failed (run {run}): {stdout}"
         );
-        elapsed
-    };
-
-    let t1 = time_run(&path_a);
-    let t8 = time_run(&path_b);
-
-    assert!(
-        t1 > std::time::Duration::from_millis(10),
-        "program A finished too fast ({t1:?}) to be a meaningful baseline — recalibrate the burn size"
-    );
-
-    let ratio = t8.as_secs_f64() / t1.as_secs_f64();
-    assert!(
-        ratio > 5.5,
-        "--threads=1 must serialize a NESTED eager parallel: too: 8x the CPU work should take close \
-         to 8x as long (t1={t1:?}, t8={t8:?}, ratio={ratio:.2}). A ratio well under 8 (measured ~3.9 \
-         pre-fix on a debug build) means the nested scope's inline join loop is STILL running \
-         alongside the outer scope's drainer at a budget of 1 (W8-8, nested arm)."
-    );
+        let cpu = user + sys;
+        // Negative control. Measured 2.81-2.94 s.
+        assert!(
+            cpu > std::time::Duration::from_millis(1500),
+            "program B finished too fast (cpu={cpu:?}, run {run}) to be a meaningful measurement — \
+             recalibrate the burn size"
+        );
+        assert!(
+            cpu <= wall.mul_f64(MAX_CORES_AT_ONE_WORKER),
+            "--threads=1 must serialize a NESTED eager parallel: too (run {run}): cpu={cpu:?} \
+             wall={wall:?} (cpu must be <= wall * {MAX_CORES_AT_ONE_WORKER}). A second runner means \
+             the nested scope's inline join loop is STILL running alongside the outer scope's drainer \
+             at a budget of 1 (W8-8, nested arm)."
+        );
+    }
 
     let _ = std::fs::remove_dir_all(&dir);
 }
