@@ -21,9 +21,9 @@ use std::fmt;
 pub use ty::Ty;
 use ty::compatible;
 pub use ty::{
-    CarrierKey, CarrierMode, CarrierTable, ElemWiden, FnLabels, KeywordKey, KeywordTable,
-    ListWidenKey, ListWidenTable, NewtypeSumTable, ProtoEqTable, RetCoerce, RetCoerceTable,
-    WitnessCallee, WitnessKey, WitnessSrc, WitnessTable,
+    ArgFloatWidenTable, CarrierKey, CarrierMode, CarrierTable, ElemWiden, FnLabels, KeywordKey,
+    KeywordTable, ListWidenKey, ListWidenTable, NewtypeSumTable, ProtoEqTable, RetCoerce,
+    RetCoerceTable, WitnessCallee, WitnessKey, WitnessSrc, WitnessTable,
 };
 
 /// The fully-resolved C signature of one `extern` fn, computed by the checker in the defining
@@ -1028,6 +1028,7 @@ pub fn resolve_call_tables(
     ListWidenTable,
     NewtypeSumTable,
     RetCoerceTable,
+    ArgFloatWidenTable,
     TableConflicts,
 ) {
     crate::on_frontend_stack_scoped(move || {
@@ -1042,6 +1043,7 @@ pub fn resolve_call_tables(
             std::mem::take(&mut c.list_widen),
             std::mem::take(&mut c.newtype_sums),
             std::mem::take(&mut c.ret_coerce),
+            std::mem::take(&mut c.arg_float_widen),
             std::mem::take(&mut c.table_conflicts),
         )
     })
@@ -1067,6 +1069,7 @@ pub fn resolve_call_tables_standalone(
     ListWidenTable,
     NewtypeSumTable,
     RetCoerceTable,
+    ArgFloatWidenTable,
     TableConflicts,
 ) {
     let id = crate::resolver::ModuleId(std::path::PathBuf::from("<main>"));
@@ -1212,6 +1215,18 @@ pub fn list_widen_key(
 /// [`carrier_key`] on the returned value's own span. The checker's record site and the compiler's
 /// lookup site call this one helper so they can never disagree on the key.
 pub fn ret_coerce_key(
+    module_idx: usize,
+    frag_ctx: Span,
+    frag_ord: usize,
+    span: Span,
+) -> crate::checker::CarrierKey {
+    carrier_key(module_idx, frag_ctx, frag_ord, span)
+}
+
+/// TICKET-054 review fix — build the [`ArgFloatWidenTable`] key for one call argument: a plain
+/// [`carrier_key`] on the argument's own span. The checker's record site and the compiler's lookup
+/// site call this one helper so they can never disagree on the key.
+pub fn arg_float_widen_key(
     module_idx: usize,
     frag_ctx: Span,
     frag_ord: usize,
@@ -2141,6 +2156,10 @@ struct Checker {
     /// compiler (which cannot re-derive it: the decision is whether the returned expression is
     /// already a carrier). See [`RetCoerceTable`].
     ret_coerce: RetCoerceTable,
+    /// TICKET-054 review fix — which call-argument literals a `Ty::Protocol`/`Ty::Param` (or
+    /// concrete-struct) dispatch must widen int→float AT THE CALL SITE, keyed by
+    /// [`arg_float_widen_key`] on the argument's own span. See [`ArgFloatWidenTable`].
+    arg_float_widen: ArgFloatWidenTable,
     /// W7-49 — side-table keys that were asked to hold two DIFFERENT decisions at once. Filled by
     /// [`record_call_table_entry`] (never by ordinary type errors) and returned alongside the three
     /// tables, because this pass DISCARDS its type errors — `self.error` would be swallowed here.

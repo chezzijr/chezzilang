@@ -28,6 +28,11 @@ pub(super) struct DiagMark {
     /// recording happens on the real (non-speculative) `check_stmt` walk, once every callee sig is
     /// settled.
     ret_coerce: crate::checker::RetCoerceTable,
+    /// TICKET-054 review fix — a call argument's widen verdict is recorded inside a fn body too (a
+    /// method call's args are checked wherever the call appears), so it is exposed to the SAME
+    /// speculative-recheck hazard `ret_coerce` documents just above: snapshot-and-restore, not a
+    /// diagnostic.
+    arg_float_widen: crate::checker::ArgFloatWidenTable,
 }
 
 impl Checker {
@@ -95,6 +100,7 @@ impl Checker {
             list_widen: crate::checker::ListWidenTable::new(),
             newtype_sums: crate::checker::NewtypeSumTable::new(),
             ret_coerce: crate::checker::RetCoerceTable::new(),
+            arg_float_widen: crate::checker::ArgFloatWidenTable::new(),
             table_conflicts: Vec::new(),
             next_opt_tmp: 0,
             witness_scope: Vec::new(),
@@ -1129,6 +1135,7 @@ impl Checker {
             // `HashMap` clone allocates nothing.
             spawn_stale: self.spawn_stale.clone(),
             ret_coerce: self.ret_coerce.clone(),
+            arg_float_widen: self.arg_float_widen.clone(),
         }
     }
 
@@ -1139,6 +1146,7 @@ impl Checker {
         self.warnings.truncate(m.warnings);
         self.spawn_stale = m.spawn_stale;
         self.ret_coerce = m.ret_coerce;
+        self.arg_float_widen = m.arg_float_widen;
     }
 
     /// Attribute a diagnostic to the module currently being checked (graph path only). Shared by

@@ -1433,6 +1433,28 @@ impl Checker {
         );
     }
 
+    /// TICKET-054 review fix — record one call-argument's call-site widen verdict into
+    /// [`crate::checker::ArgFloatWidenTable`], keyed on `span` (the argument's own span). Called for
+    /// EVERY argument `check_args_subst` reaches (both `true` and `false`), so an aliased key —
+    /// two call sites sharing one spliced-default argument span — becomes a hard compile error
+    /// instead of silently applying one site's verdict to the other.
+    pub(super) fn record_arg_float_widen(&mut self, span: Span, widen: bool) {
+        let key = crate::checker::arg_float_widen_key(
+            self.graph_module_idx,
+            self.kw_frag_ctx,
+            self.kw_frag_ord,
+            span,
+        );
+        crate::checker::record_call_table_entry(
+            &mut self.arg_float_widen,
+            &mut self.table_conflicts,
+            key,
+            widen,
+            "argument float widen",
+            span,
+        );
+    }
+
     pub(super) fn satisfies(&self, ty: &Ty, protocol: &str) -> Result<(), String> {
         self.satisfies_args(ty, protocol, &[])
     }

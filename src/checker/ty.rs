@@ -246,6 +246,22 @@ pub enum RetCoerce {
 
 pub type RetCoerceTable = HashMap<CarrierKey, RetCoerce>;
 
+/// TICKET-054 review fix — whether one call ARGUMENT's untyped int literal must be widened to float
+/// AT THE CALL SITE, keyed exactly like [`RetCoerceTable`] on the argument's own span. Needed for a
+/// call reached through [`crate::checker::Checker::check_args_subst`] — a `Ty::Protocol`/`Ty::Param`
+/// dispatch resolves to WHICHEVER witness's proto the runtime struct tag names, and that witness's
+/// own declared param may be a generic `T` (erased, no `Op::CoerceFloat` in its prologue) even where
+/// the protocol requirement and every OTHER witness declare the slot literally `float`. The checker
+/// cannot see which witness backs a given protocol value, so it cannot trust the callee's prologue
+/// here and must coerce the argument itself, before the dynamic dispatch. (A concrete `Ty::Struct`
+/// receiver also routes through `check_args_subst`; there the callee IS statically known, so its own
+/// prologue already coerces and this is a harmless duplicate `Op::CoerceFloat`.) BOTH `true` and
+/// `false` are recorded (never skipped), so `record_call_table_entry` turns an aliased key — a
+/// spliced default argument reused at two call sites — into a hard compile error instead of silently
+/// applying one site's verdict to another. A lookup MISS means "no call-site coercion", the pre-fix
+/// lowering — this can only ever under-apply, never mis-apply.
+pub type ArgFloatWidenTable = HashMap<CarrierKey, bool>;
+
 /// Which `.sum()` call sites sum a list of a SCALAR NUMERIC NEWTYPE (`newtype Cents = int`), keyed
 /// exactly like [`CarrierKey`] (the method-NAME token — see there for why the call node's span
 /// aliases across the links of a postfix/pipe chain).

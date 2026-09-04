@@ -4199,6 +4199,15 @@ impl Checker {
             let widen = widen
                 && crate::ast::untyped_int_const(arg)
                 && declared.is_none_or(|d| d.get(i) == Some(&Ty::Float));
+            // TICKET-054 review fix — `declared: Some(_)` is exactly `check_args_subst`'s calls: a
+            // struct/protocol/bound-generic method dispatch, where the runtime witness the backend
+            // actually calls may declare this param generically (erased, no prologue coercion) even
+            // where THIS `declared` slot reads `float`. Record the call-site verdict so the compiler
+            // coerces the literal itself instead of trusting the callee's prologue. See
+            // `Checker::record_arg_float_widen` and `ArgFloatWidenTable`.
+            if declared.is_some() {
+                self.record_arg_float_widen(arg.span, widen);
+            }
             // PART A: passing a bare empty-collection binding (`b := []`) into a CONCRETE collection
             // parameter (`f(xs: List[int])`) constrains its element type — clear the pending annotation
             // requirement (the spec's typed-parameter false-positive guard, one binding away from the

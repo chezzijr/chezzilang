@@ -568,8 +568,12 @@ each naming the fix (`a typed int never widens to float — write float(x)`).
 
 An untyped int constant adapts at every value-DEFINITION sink: a typed binding (`x: float = 1 + 2` →
 `3.0`), a `float` function / method parameter (coerced at the CALLEE prologue, from the DECLARED param
-type, including one reached through a protocol-typed receiver or a bound type parameter -- every
-witness must declare that same `float`, so the witness's own prologue does the coercion), a `float`
+type, including one reached through a protocol-typed receiver or a bound type parameter -- the
+REQUIREMENT'S declared slot licenses this, not the actual witness's: a generic witness (`struct
+S[T]` satisfying `fn m(self, x: float)` via `T=float`) declares its own param `T`, so its prologue
+does NOT coerce, and the checker cannot see which witness a protocol value holds. So this one
+argument is instead coerced at the CALL SITE, before the dynamic dispatch -- sound for every witness,
+and a harmless duplicate on a concrete receiver whose own prologue also coerces), a `float`
 parameter DEFAULT (`fn g(a: float = 3)`), a `-> float` return, including a closure's own
 (`g := fn() -> float: 3`), a `float` struct field
 (`P(3)` for `v: float`), and a **mixed-numeric-constant** collection literal — a list/map literal with ≥1

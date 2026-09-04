@@ -107,7 +107,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     // witness params and what fills each witness at each call site. The compiler CONSUMES it — it
     // never re-derives which protocols carry a static requirement (that resolves through
     // imports/aliases/embeds, which is checker work).
-    let (kw, wt, ct, pe, lw, ns, rc, conflicts) = crate::checker::resolve_call_tables(graph);
+    let (kw, wt, ct, pe, lw, ns, rc, afw, conflicts) = crate::checker::resolve_call_tables(graph);
     reject_table_conflicts(conflicts)?;
     c.keyword_calls = kw;
     c.witnesses = wt;
@@ -116,6 +116,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     c.list_widen = lw;
     c.newtype_sums = ns;
     c.ret_coerce = rc;
+    c.arg_float_widen = afw;
     // Pass 0: collision pre-pass — assign runtime keys for module-scoped user types. A type name
     // declared in exactly one module keeps its BARE name (the common case → unchanged Display/print
     // output); a name declared in ≥2 modules that are BOTH in the program is disambiguated (the
@@ -191,7 +192,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     // SINGLE-RESOLVER: extern C types come from the checker's standalone pass — the SAME resolver the
     // multi-file CLI uses (no second backend resolver exists). The backend reads this table verbatim.
     c.extern_sigs = crate::checker::resolve_extern_signatures_standalone(&module.stmts);
-    let (kw, wt, ct, pe, lw, ns, rc, conflicts) =
+    let (kw, wt, ct, pe, lw, ns, rc, afw, conflicts) =
         crate::checker::resolve_call_tables_standalone(&module.stmts);
     reject_table_conflicts(conflicts)?;
     c.keyword_calls = kw;
@@ -201,6 +202,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     c.list_widen = lw;
     c.newtype_sums = ns;
     c.ret_coerce = rc;
+    c.arg_float_widen = afw;
     let toplevel = c.compile_module(0, module, &[], true, None)?;
     let global_slots = std::mem::take(&mut c.global_slots);
     // A synthetic module id so the run driver has something to key the namespace cache on.
@@ -359,6 +361,11 @@ struct Compiler {
     /// whether the returned expression is already a carrier. A MISS means `NoWrap` — the pre-fix
     /// lowering. See [`crate::checker::RetCoerceTable`].
     ret_coerce: crate::checker::RetCoerceTable,
+    /// TICKET-054 review fix — which call arguments must widen int→float AT THE CALL SITE (a
+    /// `Ty::Protocol`/`Ty::Param` dispatch's actual witness may declare the param generically, so its
+    /// own prologue cannot be trusted), consumed verbatim by [`Compiler::compile_args`]. A MISS means
+    /// no call-site coercion — the pre-fix lowering. See [`crate::checker::ArgFloatWidenTable`].
+    arg_float_widen: crate::checker::ArgFloatWidenTable,
     /// W7-43 — counter for the fresh `__optN` temp names the Option lowering mints, mirroring the
     /// checker's own. Frame-local and `__`-prefixed (unwritable by user code), so uniqueness within
     /// one compilation is all that is ever needed — and this makes it true by construction rather
@@ -886,6 +893,7 @@ impl Compiler {
             list_widen: crate::checker::ListWidenTable::new(),
             newtype_sums: crate::checker::NewtypeSumTable::new(),
             ret_coerce: crate::checker::RetCoerceTable::new(),
+            arg_float_widen: crate::checker::ArgFloatWidenTable::new(),
             next_opt_tmp: 0,
             witness_locals: Vec::new(),
             pending_witnesses: Vec::new(),
@@ -4872,12 +4880,26 @@ impl Compiler {
         Ok(())
     }
 
-    /// Compile a positional argument list onto the stack (no float-field coercion — that is the
+    /// Compile a positional argument list onto the stack (no struct-field coercion — that is the
     /// struct-ctor-only job of [`compile_ctor_args`]). Replaces the flat `for a in args { compile_expr }`
     /// loop repeated at every non-struct call/variant/static/defer emit site.
+    ///
+    /// TICKET-054 review fix — after each argument, consult [`Self::arg_float_widen`] and emit a
+    /// call-site `Op::CoerceFloat` when the checker recorded `true` for that argument's own span. A
+    /// miss or `false` is a no-op — the pre-fix lowering — so this widens no call this table was
+    /// never populated for (every path but [`crate::checker::Checker::check_args_subst`]).
     fn compile_args(&mut self, fc: &mut FnComp, args: &[Expr]) -> Result<(), CompileError> {
         for a in args {
             self.compile_expr(fc, a)?;
+            let key = crate::checker::arg_float_widen_key(
+                self.current_module_idx,
+                self.kw_frag_ctx,
+                self.kw_frag_ord,
+                a.span,
+            );
+            if self.arg_float_widen.get(&key) == Some(&true) {
+                fc.emit(Op::CoerceFloat, a.span);
+            }
         }
         Ok(())
     }

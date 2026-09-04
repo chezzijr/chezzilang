@@ -12585,15 +12585,25 @@ branch names) is in the git log.
   `float` parameter reached through a protocol-typed receiver or a bound generic type parameter now
   widens the same as the identical method on a concrete receiver: the `Ty::Protocol` and `Ty::Param`
   method-call arms (`src/checker/expr.rs`) now route through `check_args_subst` with the
-  PRE-substitution declared params, the same call the concrete-struct arm already makes, so the widen
-  license keys on the declared slot the witness's own prologue coerces. Two programs outside the
-  three repros change verdict as a result: `x: Any = if c: 1 else: "a"` is now accepted (`Any` is the
-  empty top protocol, matching the existing `List[Any]` concat precedent), and a protocol method
-  requiring `List[float]` now accepts a `List[int]` argument, carrying DEC-033's element license.
-  `cargo test --lib` is `4471 passed; 0 failed; 2 ignored` (was 4462); `chezzi test tests/chz` is
-  `766 passed, 0 failed, 0 errored` (was 761, +5 in the new
-  `tests/chz/spec/expected_type_sinks_test.chz`, which asserts the RUNTIME values so a checker-only
-  regression on sink 2 would still fail it via `/ 2`).
+  PRE-substitution declared params, the same call the concrete-struct arm already makes. Two programs
+  outside the three repros change verdict as a result: `x: Any = if c: 1 else: "a"` is now accepted
+  (`Any` is the empty top protocol, matching the existing `List[Any]` concat precedent), and a
+  protocol method requiring `List[float]` now accepts a `List[int]` argument, carrying DEC-033's
+  element license.
+  **Review-fail follow-up (2026-09-04): the sink-3 scalar widen was keyed on the PROTOCOL's declared
+  slot, not the actual runtime witness's.** A GENERIC-struct witness (`struct S[T]` with
+  `fn m(self, x: T) -> T`, satisfying `fn m(self, x: float)` via `T=float`) declares its own param
+  `T`, not `float`, so its own prologue never emits `Op::CoerceFloat` — `p: P = S(1.0)` then `p.m(1)`
+  left a runtime `Int` under a static `float` (measured: `p.m(1) / 2` printed `0`, not `0.5`), while
+  the concrete receiver correctly rejected the same call. Fixed by moving the coercion to the CALL
+  SITE for any argument `check_args_subst` licenses: a new checker→compiler side table
+  (`ArgFloatWidenTable`, keyed exactly like `RetCoerceTable` on the argument's own span) records the
+  widen verdict per argument, and `Compiler::compile_args` emits `Op::CoerceFloat` right after the
+  argument when the table says so — sound regardless of which witness the dynamic dispatch calls, and
+  a harmless duplicate on a concrete receiver whose own prologue also coerces. `cargo test --lib` is
+  `4471 passed; 0 failed; 2 ignored` (was 4462, +1 net for the review-fail regression test — 10 added,
+  9 already counted); `chezzi test tests/chz` is `767 passed, 0 failed, 0 errored` (was 761, +6 in
+  `tests/chz/spec/expected_type_sinks_test.chz`, which asserts RUNTIME values via `/ 2`).
 - **A witness's unmet `eq` `where` bound is now refused at the erasure into a protocol slot, not
   laundered through it (2026-09-04, TICKET-053).** `a: Tagged = Box(Tag(1))` (`Box`'s `eq` requires
   `Tag: Comparable`, which `Tag` doesn't provide) was `ok: no type errors` then printed the

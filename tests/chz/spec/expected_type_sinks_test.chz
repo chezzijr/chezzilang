@@ -61,3 +61,18 @@ struct SQ:
 test fn protocol_receiver_widens_float_list_element():
     q: Q = SQ()
     assert q.n([1, 2]) / 2 == 0.5
+
+# Review-fail fix — a GENERIC struct witness declares its own param as the type parameter `T`, not
+# literally `float`, so its own prologue never emits `Op::CoerceFloat`. The widen must happen at the
+# CALL SITE (before the dynamic protocol dispatch), or this divides an un-coerced Int and gets 0.
+protocol P2:
+    fn m2(self, x: float) -> float
+
+struct GS[T]:
+    v: T
+    fn m2(self, x: T) -> T:
+        return x
+
+test fn protocol_receiver_widens_float_arg_through_generic_witness():
+    p2: P2 = GS(1.0)
+    assert p2.m2(1) / 2 == 0.5

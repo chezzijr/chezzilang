@@ -30514,3 +30514,22 @@ fn ticket_054_protocol_and_bound_receiver_widen_more_spellings() {
         "protocol Q:\n    fn n(self, xs: List[float]) -> float\nstruct S:\n    fn n(self, xs: List[float]) -> float:\n        return xs[0]\nq: Q = S()\nprint(q.n([1, 2]))\n",
     );
 }
+
+// TICKET-054 review fix — a GENERIC struct witness (`struct GS[T]` with `fn m2(self, x: T) -> T`)
+// satisfying a protocol requirement declared `x: float` DECLARES its own param `T`, so its own
+// prologue emits no `Op::CoerceFloat`. The checker must still accept this call (`entry_ok` here),
+// but the RUNTIME value is what review-fail-caught: see the `.chz` sibling test in
+// `tests/chz/spec/expected_type_sinks_test.chz`, which divides the result and would see an
+// un-coerced `Int` (`0`, not `0.5`) before this fix. This test only pins the checker half.
+#[test]
+fn ticket_054_protocol_receiver_widens_through_generic_witness() {
+    entry_ok(
+        "protocol P2:\n    fn m2(self, x: float) -> float\nstruct GS[T]:\n    v: T\n    fn m2(self, x: T) -> T:\n        return x\np2: P2 = GS(1.0)\nprint(p2.m2(1))\n",
+    );
+    // The DIRECT (non-protocol) call to the same generic witness must still reject — the concrete
+    // receiver's own declared `T` is what the backend actually calls, and `T` is generic-erased.
+    entry_rejects(
+        "protocol G:\n    fn m2(self, x: float) -> float\nstruct GS[T]:\n    v: T\n    fn m2(self, x: T) -> T:\n        return x\ns := GS(1.0)\nprint(s.m2(1))\n",
+        "argument 1 of 'm2': expected float, found int",
+    );
+}
