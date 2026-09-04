@@ -153,6 +153,44 @@ fn clock_reading_tests() -> BTreeSet<String> {
     found
 }
 
+/// TICKET-050 named twelve tests it deliberately left on `CLOCK_READING_TESTS` for a follow-up
+/// (TICKET-059) to convert. This pins that follow-up: red while any of the twelve is still listed,
+/// green once each is converted and its name removed.
+const TICKET_050_DEFERRED_TESTS: [&str; 12] = [
+    "polymorphic_recursion_is_refused_in_bounded_time_by_growth_detection",
+    "polymorphic_recursion_through_a_func_type_argument_is_refused_in_bounded_time",
+    "over_memory_counts_jobs_queued_but_not_started",
+    "connect_inside_an_executor_job_errs_instead_of_pinning_a_pool_worker",
+    "stack_trace_reports_call_chain_on_both_engines",
+    "a_top_level_wait_timer_arm_loses_to_an_eager_job",
+    "a_wait_timer_arm_in_a_native_callback_loses_to_a_sibling_value",
+    "an_eager_wait_block_is_woken_by_its_arm_not_by_the_poll_timeout",
+    "an_eager_wait_timer_arm_loses_to_a_sibling_value",
+    "d4e_wake_parked_workers_from_true_sleep",
+    "eager_send_blocked_on_a_full_channel_faults_when_the_channel_is_closed",
+    "try_recv_drains_residue_after_blocking_recv_resumes",
+];
+
+#[test]
+fn ticket_050_deferred_tests_have_left_the_wall_clock_allowlist() {
+    let allowed: BTreeSet<String> = CLOCK_READING_TESTS
+        .iter()
+        .map(|s| String::from(*s))
+        .collect();
+    let still_listed: Vec<&str> = TICKET_050_DEFERRED_TESTS
+        .iter()
+        .copied()
+        .filter(|name| allowed.contains(*name))
+        .collect();
+    assert!(
+        still_listed.is_empty(),
+        "TICKET-050 deferred these twelve tests to a follow-up (TICKET-059) instead of converting \
+         them off a wall clock; they must be converted to a counted probe, a handshake, or an \
+         event count and removed from CLOCK_READING_TESTS, not left on the allowlist \
+         indefinitely.\nstill on CLOCK_READING_TESTS: {still_listed:?}"
+    );
+}
+
 #[test]
 fn no_new_rust_test_reads_a_wall_clock() {
     let found = clock_reading_tests();
