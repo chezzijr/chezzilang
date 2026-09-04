@@ -12460,6 +12460,23 @@ fn qualified_newtype_call_is_replaced_by_a_colliding_module_fn() {
 }
 
 #[test]
+fn from_imported_newtype_ctor_fn_wins_and_binds_the_type() {
+    // TICKET-055 — the newtype twin of DEC-029's "a colliding from-import binds BOTH namespaces".
+    // `import N from lib` must bind the fn (so `N("abcd")` types against `fn N(s: str)`) AND the
+    // type (so `v: N = ...` resolves), same as `bind_imported_struct_name` does for a struct.
+    files_ok(&[
+        (
+            "lib.chz",
+            "newtype N = int\nfn N(s: str) -> N:\n    return N(s.len())\n",
+        ),
+        (
+            "main.chz",
+            "import N from lib\nv: N = N(\"abcd\")\nprint(v)\n",
+        ),
+    ]);
+}
+
+#[test]
 fn native_fs_mutations_typecheck_as_result_nil() {
     entry_ok(
         "import std.fs\nfn main():\n    match fs.mkdir(\"d\"):\n        Ok(_): print(\"made\")\n        Err(e): print(e)\n    match fs.append(\"f\", \"x\"):\n        Ok(_): print(\"app\")\n        Err(e): print(e)\n    match fs.rename(\"a\", \"b\"):\n        Ok(_): print(\"ren\")\n        Err(e): print(e)\n    match fs.copy(\"a\", \"b\"):\n        Ok(_): print(\"cp\")\n        Err(e): print(e)\n    match fs.remove_file(\"f\"):\n        Ok(_): print(\"rmf\")\n        Err(e): print(e)\n    match fs.remove_dir(\"d\"):\n        Ok(_): print(\"rmd\")\n        Err(e): print(e)\n",

@@ -176,6 +176,22 @@ impl Checker {
         }
     }
 
+    /// Bind a from-imported newtype name into every namespace a colliding fn import must ALSO reach
+    /// (TICKET-055, the newtype twin of [`Checker::bind_imported_struct_name`]) — a colliding
+    /// from-import binds both, so this is called from both the newtype branch and the fn branch of
+    /// the `Import::From` loop. Registers the underlying type + methods, and makes the name
+    /// bare-visible as a TYPE (`newtype_names`/`bare_types`).
+    fn bind_imported_newtype_name(&mut self, bind: &str, key: &str, ntdef: &NewTypeSigInfo) {
+        self.newtype_defs.insert(
+            key.to_string(),
+            (ntdef.underlying.clone(), ntdef.methods.clone()),
+        );
+        self.newtype_type_params
+            .insert(key.to_string(), ntdef.type_params.clone());
+        self.newtype_names.insert(bind.to_string());
+        self.bare_types.insert(bind.to_string(), key.to_string());
+    }
+
     /// The module-scoped runtime key for a type `name` declared in module `mid` (bare unless a genuine
     /// cross-module clash disambiguated it in [`check_graph`]). Mirrors the compiler's `type_key`.
     pub(super) fn type_key(&self, mid: &ModuleId, name: &str) -> String {
@@ -1604,6 +1620,12 @@ impl Checker {
                             let key = self.type_key(&imp.target, member);
                             self.bind_imported_struct_name(bind, &key, &info);
                         }
+                        // TICKET-055 — the newtype twin: `fn N` beside `newtype N` (e.g. `Cents`)
+                        // must bind the TYPE too, or `v: N` is unusable after the fn wins the call.
+                        if let Some(ntdef) = sig.newtype_defs.get(member).cloned() {
+                            let key = self.type_key(&imp.target, member);
+                            self.bind_imported_newtype_name(bind, &key, &ntdef);
+                        }
                     } else if let Some(vty) = sig.values.get(member) {
                         // Editor hover (decl-site): record the imported value's type at the bound name.
                         if self.hover_probe.is_some() {
@@ -1795,18 +1817,11 @@ impl Checker {
                                 "enum",
                                 path,
                             );
-                        } else if let Some(ntdef) = sig.newtype_defs.get(member) {
+                        } else if let Some(ntdef) = sig.newtype_defs.get(member).cloned() {
                             // A user newtype imported by name: inject its underlying + methods under
                             // the declaring module's runtime key; expose it bare under the bind name.
                             let key = self.type_key(&imp.target, member);
-                            self.newtype_defs.insert(
-                                key.clone(),
-                                (ntdef.underlying.clone(), ntdef.methods.clone()),
-                            );
-                            self.newtype_type_params
-                                .insert(key.clone(), ntdef.type_params.clone());
-                            self.newtype_names.insert(bind.clone());
-                            self.bare_types.insert(bind.clone(), key.clone());
+                            self.bind_imported_newtype_name(bind, &key, &ntdef);
                             self.record_imported_type_hover(
                                 bind,
                                 *name_span,

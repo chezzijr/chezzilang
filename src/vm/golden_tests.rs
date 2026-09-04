@@ -12269,3 +12269,23 @@ fn qualified_newtype_ctor_is_shadowed_by_colliding_module_fn() {
     );
     assert_eq!(out, "FN RAN\nN(10)\n", "fn N must run; got: {out:?}");
 }
+
+/// TICKET-055 — the newtype twin of DEC-029's from-import binding rule: `import N from lib` binds
+/// BOTH the fn (call) and the type (annotation) namespaces, mirroring `bind_imported_struct_name`.
+#[test]
+fn from_imported_newtype_ctor_fn_wins() {
+    let out = golden_file_entry(
+        &[
+            (
+                "lib.chz",
+                "newtype N = int\nfn N(s: str) -> N:\n    return N(s.len())\n",
+            ),
+            (
+                "main.chz",
+                "import N from lib\nv: N = N(\"abcd\")\nprint(v)\n",
+            ),
+        ],
+        "main.chz",
+    );
+    assert_eq!(out, "N(4)\n", "the fn must build the newtype; got: {out:?}");
+}
