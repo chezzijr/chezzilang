@@ -4674,7 +4674,9 @@ impl Checker {
                 {
                     self.record_ret_coerce(body.span, Some(m));
                 }
-                if mode.is_none() && !self.assignable(&declared, &body_ty) {
+                if mode.is_none()
+                    && !self.assignable_w(&declared, &body_ty, crate::ast::untyped_int_const(body))
+                {
                     self.error(
                         body.span,
                         format!(

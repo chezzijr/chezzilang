@@ -30493,3 +30493,12 @@ fn ticket_054_if_expr_hint_accepts_every_expected_type_spelling() {
         "protocol Sh:\n    fn area(self) -> int\nstruct Sq:\n    s: int\n    fn area(self) -> int: self.s * self.s\nstruct Tr:\n    b: int\n    fn area(self) -> int: self.b\nxs: List[Sh] = [Sq(2), Tr(9)]\nprint(xs[1].area())\n",
     );
 }
+
+// TICKET-054 step 3: sink-2's checker AND compiler halves land together. A closure's own `-> float`
+// return widens an untyped int constant reached through a `type` alias, and a HOF callback closure
+// widens the same way.
+#[test]
+fn ticket_054_closure_float_return_alias_and_hof() {
+    entry_ok("type F = float\ng := fn() -> F: 3\nprint(g())\n");
+    entry_ok("xs := [1, 2]\nprint(xs.map(fn(x) -> float: 3))\n");
+}

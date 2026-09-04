@@ -4374,8 +4374,8 @@ impl Compiler {
                 })?;
                 fc.emit(Op::JsonDecode(desc), expr.span);
             }
-            ExprKind::Closure { params, body, .. } => {
-                self.compile_closure(fc, params, body, expr.span)?
+            ExprKind::Closure { params, ret, body } => {
+                self.compile_closure(fc, params, ret.as_ref(), body, expr.span)?
             }
             ExprKind::Match { scrutinee, arms } => {
                 self.compile_match_expr(fc, scrutinee, arms, expr.span)?
@@ -6039,6 +6039,7 @@ impl Compiler {
         &mut self,
         fc: &mut FnComp,
         params: &[crate::ast::Param],
+        ret: Option<&crate::ast::Type>,
         body: &Expr,
         span: Span,
     ) -> Result<(), CompileError> {
@@ -6069,11 +6070,18 @@ impl Compiler {
         // Uniform by-reference capture (Task A): this closure's own boxed-name set (unwired).
         child.boxed_names = captured_names_of_closure(body, params);
         child.captured_names = captured_names;
+        // One-way int→float widening: a closure's OWN `-> float` return type coerces its body,
+        // exactly like a named fn's declared return (`:1711`). A closure body is always a single
+        // expression (never a block), so one `Op::CoerceFloat` before `emit_ret_coerce` below covers
+        // every closure.
+        child.ret_is_float = ret.is_some_and(|t| {
+            self.float_aliases
+                .is_float(self.current_module_idx, t, &self.float_shadow)
+        });
         for p in params {
             child.add_local(p.name.clone());
         }
-        // A `float`-typed closure param coerces at the prologue, like a named-fn param. (A closure
-        // declares no return type, so there is no return-coercion here.)
+        // A `float`-typed closure param coerces at the prologue, like a named-fn param.
         self.emit_float_param_prologue(&mut child, params);
         // Uniform by-reference capture: box any param captured by a nested closure (after coercion).
         self.emit_box_param_prologue(&mut child, params);
@@ -6089,6 +6097,9 @@ impl Compiler {
         self.compile_expr(&mut child, body)?;
         if implicit {
             child.nursery_scopes -= 1;
+        }
+        if child.ret_is_float {
+            child.emit(Op::CoerceFloat, body.span);
         }
         self.emit_ret_coerce(&mut child, body.span)?;
         child.emit(Op::Return, span);
