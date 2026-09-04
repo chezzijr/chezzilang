@@ -14892,18 +14892,19 @@ ex.submit(closer)
 /// timeout — the trick `demote_wait_block` already used for the same N-arms-no-single-condvar problem,
 /// which is why the earlier "this needs a new multi-channel wait primitive" note was wrong.
 ///
-/// 300 blocking `wait:` wakeups, release binary, same answer (`44850`) both ways:
-///
-/// | | before | after |
-/// |---|---|---|
-/// | wall clock | 1020 / 733 / 1102 ms | **5 / 5 / 5 ms** |
-///
-/// ~200×, because the old path paid a tick per wakeup and the new one pays a tick only when arm 0 is
-/// not the one that fires. The bound below is deliberately far above the fixed timing and far below
-/// the broken one, so it discriminates without flaking under a loaded suite. Mutation-verified
-/// in-process (stub the wait back to a blind poll): **0.01 s green vs 1.55 s red**.
+/// 300 blocking `wait:` wakeups must each block on arm 0's condvar and none of them may sleep its
+/// whole tick with arm 0 already ready (TICKET-059: `WAIT_ARM0_BLOCKS` / `WAIT_ARM0_SLEPT_WHILE_READY`
+/// replace a wall-clock bound, which was NOT redundant — measured, a blind `thread::sleep(tick)`
+/// revert still prints `44850` and passes every output assertion, only the timing failed
+/// (`took 1.552389135s`), so the counted floor is what actually catches a reverted wakeup path: it
+/// falls from 300 to 0. `WAIT_ARM0_SLEPT_WHILE_READY` is zero by construction on a healthy build
+/// (`wait_timeout_while` re-checks the predicate under the guard before returning) and reads 3 under a
+/// plain `wait_timeout` revert (W7-13's own defect).
 #[test]
 fn an_eager_wait_block_is_woken_by_its_arm_not_by_the_poll_timeout() {
+    let blocks0 = crate::vm::netio::WAIT_ARM0_BLOCKS.load(std::sync::atomic::Ordering::Relaxed);
+    let stalls0 =
+        crate::vm::netio::WAIT_ARM0_SLEPT_WHILE_READY.load(std::sync::atomic::Ordering::Relaxed);
     // The `gate` handshake is what makes this test exercise the path at all: `cons` announces that it
     // is about to block, and only then does `prod` send. Without it `prod` races ahead, every `wait:`
     // finds its value already queued, and the block branch is never reached — measured: the vacuous
@@ -14938,22 +14939,31 @@ print(done.recv())
     let (tx, rx) = std::sync::mpsc::channel();
     let e = entry.clone();
     std::thread::spawn(move || {
-        let t0 = std::time::Instant::now();
         let (o, _e2, r, _c) = run_file(&e);
-        let _ = tx.send((o, format!("{r:?}"), r.is_err(), t0.elapsed()));
+        let _ = tx.send((o, format!("{r:?}"), r.is_err()));
     });
     let outcome = rx.recv_timeout(std::time::Duration::from_secs(60));
     let _ = std::fs::remove_file(&entry);
-    let (out, rdbg, failed, elapsed) = outcome.expect("300 `wait:` wakeups did not finish in 60 s");
+    let (out, rdbg, failed) = outcome.expect("300 `wait:` wakeups did not finish in 60 s");
     assert!(!failed, "the program must succeed: out={out:?} r={rdbg}");
     assert_eq!(
         out, "44850\n",
         "every arm value must still be received exactly once"
     );
+    let blocks =
+        crate::vm::netio::WAIT_ARM0_BLOCKS.load(std::sync::atomic::Ordering::Relaxed) - blocks0;
+    let stalls = crate::vm::netio::WAIT_ARM0_SLEPT_WHILE_READY
+        .load(std::sync::atomic::Ordering::Relaxed)
+        - stalls0;
     assert!(
-        elapsed < std::time::Duration::from_millis(400),
-        "300 eager `wait:` wakeups took {elapsed:?} (fixed: ~5 ms, blind-poll: ~700-1100 ms) — the \
-         eager `wait:` block is sleeping through its wakeups again"
+        blocks >= 250,
+        "300 gated handoffs must each block on arm 0's condvar; got {blocks} (measured 300 fixed, 0 \
+         under a blind thread::sleep)"
+    );
+    assert_eq!(
+        stalls, 0,
+        "an eager `wait:` slept its whole tick with arm 0 already ready -- the W7-13 lost wakeup is \
+         back (measured 0 fixed, 3 under a plain wait_timeout)"
     );
 }
 
@@ -15101,12 +15111,11 @@ ex.shutdown()
 /// thread and can simply clamp the in-place wait to the deadline. Mutation-verified: with the gate
 /// reverted, each of these tests reads `timer`.
 ///
-/// **Why `timer(3000)` here when the bug reproduces at 300 ms.** The discriminator is the OUTPUT, not
-/// the clock — `value 9` vs `timer` — and a wall-clock bound tight enough to separate 56 ms from
-/// 306 ms flakes under a loaded suite (measured: these tests failed a full concurrent `--lib` run at
-/// ~2.2 s elapsed while asserting < 250 ms, and passed in isolation). Pushing the deadline to 3 s
-/// makes the *answer* itself robust to a 3 s stall, and leaves a loose 1.5 s bound that still
-/// separates fixed (~56 ms) from broken (~3007 ms) with 20× headroom either side.
+/// **Why `timer(3000)` here when the bug reproduces at 300 ms, and why the discriminator is the
+/// OUTPUT rather than a wall-clock bound (TICKET-059).** `value 9` vs `timer` is byte-exact and needs
+/// no threshold. Measured: reverting `op_wait_poll`'s inline-sleep gate (`src/vm/netio.rs`) to the
+/// pre-W7-14 `if let Some((i, deadline)) = soonest {` makes all three of this test's family read
+/// `left: "timer"` verbatim.
 ///
 /// The `gate` handshake orders the two jobs so the producer's 50 ms starts only after the consumer
 /// has entered its `wait:` — without it a producer that races ahead leaves the value already queued
@@ -15140,22 +15149,16 @@ ex.shutdown()
     let (tx, rx) = std::sync::mpsc::channel();
     let e = entry.clone();
     std::thread::spawn(move || {
-        let t0 = std::time::Instant::now();
         let (o, _e2, r, _c) = run_file(&e);
-        let _ = tx.send((o, format!("{r:?}"), r.is_err(), t0.elapsed()));
+        let _ = tx.send((o, format!("{r:?}"), r.is_err()));
     });
     let outcome = rx.recv_timeout(std::time::Duration::from_secs(60));
     let _ = std::fs::remove_file(&entry);
-    let (out, rdbg, failed, elapsed) = outcome.expect("the eager `wait:` hung");
+    let (out, rdbg, failed) = outcome.expect("the eager `wait:` hung");
     assert!(!failed, "the program must succeed: out={out:?} r={rdbg}");
     assert_eq!(
         out, "value 9\n",
         "the 50 ms value must beat the 3 s timer arm (W7-14: the inline-sleep took the timer)"
-    );
-    assert!(
-        elapsed < std::time::Duration::from_millis(1500),
-        "the wait took {elapsed:?} (fixed: ~56 ms, inline-sleep: ~3007 ms) — the timer arm is being \
-         slept to again even though the value arrived first"
     );
 }
 
@@ -15194,13 +15197,12 @@ ex.shutdown()
     let (tx, rx) = std::sync::mpsc::channel();
     let e = entry.clone();
     std::thread::spawn(move || {
-        let t0 = std::time::Instant::now();
         let (o, _e2, r, _c) = run_file(&e);
-        let _ = tx.send((o, format!("{r:?}"), r.is_err(), t0.elapsed()));
+        let _ = tx.send((o, format!("{r:?}"), r.is_err()));
     });
     let outcome = rx.recv_timeout(std::time::Duration::from_secs(60));
     let _ = std::fs::remove_file(&entry);
-    let (out, rdbg, failed, elapsed) = outcome.expect("the top-level `wait:` hung");
+    let (out, rdbg, failed) = outcome.expect("the top-level `wait:` hung");
     assert!(
         !failed,
         "the program must succeed — a timer arm must veto the deadlock verdict: out={out:?} r={rdbg}"
@@ -15208,10 +15210,6 @@ ex.shutdown()
     assert_eq!(
         out, "value 9\n",
         "the 50 ms value must beat the 3 s timer arm on the `main` thread too (W7-14)"
-    );
-    assert!(
-        elapsed < std::time::Duration::from_millis(1500),
-        "the wait took {elapsed:?} (fixed: ~56 ms, inline-sleep: ~3007 ms)"
     );
 }
 
@@ -15257,22 +15255,17 @@ ex.shutdown()
     let (tx, rx) = std::sync::mpsc::channel();
     let e = entry.clone();
     std::thread::spawn(move || {
-        let t0 = std::time::Instant::now();
         let (o, _e2, r, _c) = run_file(&e);
-        let _ = tx.send((o, format!("{r:?}"), r.is_err(), t0.elapsed()));
+        let _ = tx.send((o, format!("{r:?}"), r.is_err()));
     });
     let outcome = rx.recv_timeout(std::time::Duration::from_secs(60));
     let _ = std::fs::remove_file(&entry);
-    let (out, rdbg, failed, elapsed) = outcome.expect("the in-callback `wait:` hung");
+    let (out, rdbg, failed) = outcome.expect("the in-callback `wait:` hung");
     assert!(!failed, "the program must succeed: out={out:?} r={rdbg}");
     assert_eq!(
         out, "value 9\n",
         "a `main` thread inside a native callback owns its OS thread too — the 50 ms value must beat \
          the 3 s timer arm there as well (W7-14, adversarial-review round)"
-    );
-    assert!(
-        elapsed < std::time::Duration::from_millis(1500),
-        "the wait took {elapsed:?} (fixed: ~57 ms, inline-sleep: ~3008 ms)"
     );
 }
 

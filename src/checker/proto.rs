@@ -40,6 +40,14 @@ thread_local! {
     /// *classifier* of "is this shape non-terminating" was deleted in favour of it.
     static EQ_BOUNDS_IN_PROGRESS_NODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 
+    /// Test-only counter of SUCCESSFUL [`Checker::enter_eq_obligation`] pushes -- how much bounded
+    /// work a growth-refusal walk did before it was refused. Per-THREAD like the guard above, so it
+    /// must be read inside the same `crate::on_frontend_stack_scoped` closure the checker itself runs
+    /// in (`check_graph_diags` spawns a fresh thread whose thread-locals start at zero); reading it on
+    /// the test's own thread measures nothing (TICKET-059).
+    #[cfg(test)]
+    static EQ_OBLIGATION_ENTRIES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+
     /// Types already proven sound during the CURRENT outermost query — the memo that makes the walk
     /// linear instead of exponential. The guard above is PATH-based: it stops a type being re-entered
     /// while it is on the stack, but says nothing about one already finished and popped. So a struct
@@ -3343,7 +3351,21 @@ impl Checker {
         EQ_BOUNDS_IN_PROGRESS.with(|s| s.borrow_mut().push(ty.clone()));
         EQ_BOUNDS_IN_PROGRESS_SEEN.with(|seen| seen.borrow_mut().insert(ty.clone()));
         EQ_BOUNDS_IN_PROGRESS_NODES.with(|n| n.set(total));
+        #[cfg(test)]
+        EQ_OBLIGATION_ENTRIES.with(|c| c.set(c.get() + 1));
         Ok(EqObligation(nodes))
+    }
+
+    /// Test-only: reset [`EQ_OBLIGATION_ENTRIES`] to 0 for the current thread (TICKET-059).
+    #[cfg(test)]
+    pub(super) fn reset_eq_obligation_entries() {
+        EQ_OBLIGATION_ENTRIES.with(|c| c.set(0));
+    }
+
+    /// Test-only: read [`EQ_OBLIGATION_ENTRIES`] for the current thread (TICKET-059).
+    #[cfg(test)]
+    pub(super) fn eq_obligation_entries() -> u64 {
+        EQ_OBLIGATION_ENTRIES.with(|c| c.get())
     }
 
     /// Total node count of `t` — how big a `Ty` is, counting itself and every child it carries. The
@@ -3358,7 +3380,7 @@ impl Checker {
     /// can't be part of the hazard", which is exactly the assumption that must never be made silently
     /// — and being the SIZE METRIC of a resource budget rather than an input to a shape classifier is
     /// what makes exhaustiveness here sufficient as well as necessary.
-    fn ty_nodes(t: &Ty) -> usize {
+    pub(super) fn ty_nodes(t: &Ty) -> usize {
         match t {
             // Genuine leaves: no `Ty` children to visit.
             Ty::Int

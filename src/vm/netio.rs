@@ -114,6 +114,24 @@ pub(crate) static BLOCK_WAITS: std::sync::atomic::AtomicU64 = std::sync::atomic:
 pub(crate) static BLOCK_WAITS_SLEPT_WHILE_READY: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+/// The eager `wait:` twin of [`BLOCK_WAITS`] — test-only instrumentation of how many times
+/// `op_wait_poll`'s blocking arm-0 wait ran, process-wide. A COVERAGE floor for
+/// [`WAIT_ARM0_SLEPT_WHILE_READY`], never a measurement, for the same reason `BLOCK_WAITS` isn't:
+/// libtest runs the whole lib suite in one process, so a concurrent test's waits also land here.
+/// Only ever read as a delta, and only ever compared with `>=` (TICKET-059).
+#[cfg(test)]
+pub(crate) static WAIT_ARM0_BLOCKS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// The eager `wait:` twin of [`BLOCK_WAITS_SLEPT_WHILE_READY`] — a `wait_timeout_while` that slept its
+/// whole tick and yet found arm 0 already ready when it woke, i.e. a lost wakeup. Zero by
+/// construction on a healthy build for the same reason as its sibling: `wait_timeout_while`
+/// re-evaluates the predicate under the guard before returning. Only ever compared with `== 0`
+/// (TICKET-059).
+#[cfg(test)]
+pub(crate) static WAIT_ARM0_SLEPT_WHILE_READY: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 /// W7-17 — end a timer park EARLY, because the run's `--timeout` expired before the timer's own
 /// deadline. Used by both `timer(ms)` park sites ([`Vm::chan_recv_step`]'s timer branch and
 /// [`Vm::op_wait_poll`]'s timer arm), whose jobs are otherwise armed for their own deadline.
@@ -2865,15 +2883,27 @@ impl Vm {
             let tick = soonest.map_or(DEMOTE_POLL_BACKOFF, |(_, d)| {
                 DEMOTE_POLL_BACKOFF.min(d.saturating_duration_since(std::time::Instant::now()))
             });
-            let q = first.q.lock().unwrap_or_else(|e| e.into_inner());
-            let _ = first.cv.wait_timeout_while(q, tick, |g| {
-                let ready = if is_send0 {
+            let arm0_ready = |g: &mut crate::vm::core::ChanState| {
+                if is_send0 {
                     cap0.is_none_or(|c| g.len() < c) || g.closed
                 } else {
                     !g.is_empty() || first.done_latch.load(Ordering::Relaxed)
-                };
-                !ready
-            });
+                }
+            };
+            let q = first.q.lock().unwrap_or_else(|e| e.into_inner());
+            #[cfg_attr(not(test), allow(unused_mut))]
+            let (mut guard, waited) = first
+                .cv
+                .wait_timeout_while(q, tick, |g| !arm0_ready(g))
+                .unwrap_or_else(|e| e.into_inner());
+            #[cfg(test)]
+            {
+                WAIT_ARM0_BLOCKS.fetch_add(1, Ordering::Relaxed);
+                if waited.timed_out() && arm0_ready(&mut guard) {
+                    WAIT_ARM0_SLEPT_WHILE_READY.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            drop((guard, waited));
             self.frames.last_mut().unwrap().ip -= 1;
             return Ok(());
         }

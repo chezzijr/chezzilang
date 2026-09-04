@@ -5146,8 +5146,7 @@ fn use_it(a: Pair[Pair[Pair[int]]], b: Pair[Pair[Pair[int]]]) -> bool:
 /// (`docs/gaps.md` W7-55) only shows up if the walk is left to grow the `Ty` all the way to the cap.
 #[test]
 fn polymorphic_recursion_is_refused_in_bounded_time_by_growth_detection() {
-    let start = std::time::Instant::now();
-    entry_rejects(
+    let (errs, entries) = eq_obligations_for(
         "\
 struct N[T]:
     v: T
@@ -5157,12 +5156,15 @@ fn same[T: Eq](a: T, b: T) -> bool:
 fn use_it(a: N[int], b: N[int]) -> bool:
     return same(a, b)
 ",
-        "nests too deeply",
     );
-    let elapsed = start.elapsed();
     assert!(
-        elapsed < std::time::Duration::from_millis(500),
-        "growth detection should refuse at depth ~2, not walk to the depth cap: took {elapsed:?}"
+        errs.iter().any(|e| e.message.contains("nests too deeply")),
+        "expected an error containing \"nests too deeply\", got: {errs:?}"
+    );
+    assert!(
+        entries <= 400,
+        "growth must be refused by the node budget in bounded work: took {entries} obligations \
+         (measured 314 on 2026-09-04)"
     );
 }
 
@@ -5216,8 +5218,20 @@ fn use_it(a: Wrapper[str], b: Wrapper[str]) -> bool:
 /// just as fast as the `List[T]` shape.
 #[test]
 fn polymorphic_recursion_through_a_func_type_argument_is_refused_in_bounded_time() {
-    let start = std::time::Instant::now();
-    entry_rejects(
+    // This assertion must come FIRST: a fail-open `ty_nodes` arm makes the walk below not terminate
+    // (measured: killed at 900s, `signal: 15, SIGTERM`), so nothing placed after `eq_obligations_for`
+    // can ever fire on that regression. Placed first, the same revert fails in 0.00s instead.
+    assert_eq!(
+        Checker::ty_nodes(&Ty::Func {
+            params: vec![Ty::List(Box::new(Ty::Int))],
+            ret: Box::new(Ty::Int),
+            labels: FnLabels::default(),
+        }),
+        4,
+        "ty_nodes must charge a Func's params and return type; a fail-open arm makes polymorphic \
+         recursion through a fn type invisible to the budget"
+    );
+    let (errs, entries) = eq_obligations_for(
         "\
 struct N[T]:
     v: T
@@ -5227,13 +5241,15 @@ fn same[T: Eq](a: T, b: T) -> bool:
 fn use_it(a: N[int], b: N[int]) -> bool:
     return same(a, b)
 ",
-        "nests too deeply",
     );
-    let elapsed = start.elapsed();
     assert!(
-        elapsed < std::time::Duration::from_millis(500),
-        "growth through a Func type argument should refuse in bounded work, not walk to the depth \
-         cap: took {elapsed:?}"
+        errs.iter().any(|e| e.message.contains("nests too deeply")),
+        "expected an error containing \"nests too deeply\", got: {errs:?}"
+    );
+    assert!(
+        entries <= 300,
+        "growth through a Func type argument must be refused by the node budget in bounded work: \
+         took {entries} obligations (measured 223 on 2026-09-04)"
     );
 }
 
@@ -9582,6 +9598,24 @@ fn check_entry(src: &str) -> Vec<CheckError> {
         Ok(()) => Vec::new(),
         Err(e) => e,
     }
+}
+
+/// Type-check an entry program and report how many [`Checker::enter_eq_obligation`] entries the
+/// `Eq`-growth walk made -- the counted-work replacement for a wall-clock bound (TICKET-059). Inlines
+/// [`check_graph_diags`]'s body inside its own `on_frontend_stack_scoped` closure, the same workaround
+/// `stack_probe_frontend_walker_depth` uses for `checker::check`: the entry counter is thread-local,
+/// and that fn spawns a fresh 1 GiB thread whose thread-locals start at zero, so reading the counter on
+/// the test's own thread would always measure 0.
+fn eq_obligations_for(src: &str) -> (Vec<CheckError>, u64) {
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", src);
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    crate::on_frontend_stack_scoped(move || {
+        Checker::reset_eq_obligation_entries();
+        let mut c = Checker::new();
+        c.run_graph_pass(&graph, false);
+        (c.errors, Checker::eq_obligation_entries())
+    })
 }
 
 fn entry_ok(src: &str) {

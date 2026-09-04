@@ -3717,7 +3717,6 @@ fn main():
 main()
 "
     .to_string();
-    let started = std::time::Instant::now();
     let out = run_net_timeout_watchdog("connect_in_executor_job", &src);
     assert_eq!(
         out,
@@ -3726,13 +3725,11 @@ main()
         op inside `spawn:` or a `parallel:` nursery instead, where it parks rather than \
         blocking a shared thread.\ndone\n"
     );
-    // The Err is the contract; this is the property it exists for. The pre-fix path took the full
-    // 10 s cap, so any threshold well under it distinguishes the two without racing a slow box.
-    assert!(
-        started.elapsed() < std::time::Duration::from_secs(5),
-        "a black-hole connect in an eager job pinned a pool worker for {:?}",
-        started.elapsed()
-    );
+    // The byte-exact assertion above is the discriminator (TICKET-059): reverting `net.connect`'s
+    // eager gate at `src/vm/netio.rs` (`} else if self.eager_core.is_some() {` back to `} else if
+    // false {`) makes it read `left: "ERR:timeout"` followed by `done` (measured 2026-09-04), not a
+    // timing bound -- the pre-fix path pins a pool worker for the full 10 s connect cap, which
+    // `run_net_timeout_watchdog`'s own 30 s watchdog is wide enough to let complete rather than hang.
 }
 
 /// B1 — an incomplete codepoint left over when the peer CLOSES (`b"ok\xC3"` ⇒ `error_len() == None`,
@@ -6912,10 +6909,12 @@ fn golden_optchain_via_run_file() {
 }
 
 /// Runtime stack trace: a faulting nested call reports the error line + the call chain (innermost
-/// first) with each call's line. Asserted on the VM, and the interp must produce the IDENTICAL
-/// formatted trace (frames carry the same call-site spans).
+/// first) with each call's line, and its formatted rendering matches a literal golden. Asserts
+/// against that golden rather than a SECOND run of the same file (TICKET-059): with `--serial`
+/// deleted 2026-08-16 there is only one engine, so running the file twice and diffing the two traces
+/// against each other proves nothing (`CLAUDE.md`'s one-engine rule).
 #[test]
-fn stack_trace_reports_call_chain_on_both_engines() {
+fn stack_trace_reports_call_chain() {
     let path = fixture("examples/stack_trace.chz");
     let (_out, _err, res, _) = run_file(&path);
     let e = res.expect_err("program should fault");
@@ -6926,16 +6925,12 @@ fn stack_trace_reports_call_chain_on_both_engines() {
     let lines: Vec<u32> = e.trace.iter().map(|f| f.span.line).collect();
     assert_eq!(lines, vec![15, 18, 20]);
     let vm_fmt = format_trace(&e);
-    assert!(
-        vm_fmt.contains("at divide (called at examples/stack_trace.chz:15"),
-        "got: {vm_fmt}"
+    assert_eq!(
+        vm_fmt,
+        "runtime error (examples/stack_trace.chz:12:12): division by zero\n  at divide (called at \
+         examples/stack_trace.chz:15:12)\n  at compute (called at examples/stack_trace.chz:18:11)\n  \
+         at main (called at examples/stack_trace.chz:20:1)"
     );
-
-    // Re-run: the formatted trace must be identical.
-    let (_o, _er, ip_res, _) = run_file(&path);
-    let ie = ip_res.expect_err("program should fault");
-    let ip_fmt = format_trace(&ie);
-    assert_eq!(vm_fmt, ip_fmt, "engines must produce the same stack trace");
 }
 
 /// Helper: write deep-infinite-recursion source to a temp file and return its path. The recursion
