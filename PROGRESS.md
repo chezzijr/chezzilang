@@ -12599,6 +12599,12 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- **TICKET-050's seven deferred wall-clock tests are converted to counted measures, the Rust ratio
+  ban now scans all of `src/`+`tests/`, both W8-8 serialization gates bound child CPU against child
+  wall on one run instead of dividing two wall-clock samples, the wall-clock allowlist is down to 19,
+  a sleep used to order two events is now ratcheted in both Rust and chz, and the W7-60 nested-join
+  cancel test now skips instead of failing when the host starves its 2s window (2026-09-05,
+  TICKET-059).**
 - **A leading UTF-8 byte-order mark (`U+FEFF`) is now stripped instead of a lex error (2026-09-05,
   TICKET-058).** `Lexer::new`/`Lexer::new_file` strip at most one leading `U+FEFF`, matching CPython
   and Go; a second BOM or a mid-file BOM stays a lex error, and an interpolation fragment re-lexed via
