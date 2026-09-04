@@ -236,16 +236,17 @@ pub enum WireValue {
         proto: ProtoId,
         captured: Vec<(Box<str>, WireValue)>,
         home: Option<usize>,
-        /// TICKET-016 (W8-25) — the airlock's by-value snapshot of this closure's home-module `let`
-        /// globals named by `Proto::global_free`, `(slot, wired value)` pairs. `from_wire` rebuilds
-        /// this into `Obj::Closure.gsnap`.
+        /// TICKET-016 (W8-25) / TICKET-051 — the airlock's by-value snapshot of this closure's
+        /// home-module `let` globals named by `Proto::global_free`, `(slot, wired value)` pairs.
+        /// `from_wire` installs each pair into the RECEIVING view's own module copy (skipping a
+        /// slot the receiving view already assigned itself).
         globals: Vec<(u32, WireValue)>,
         /// TICKET-041(b) — the `ModuleData.origin` of the module view `globals` was snapshotted
         /// from, `None` when `home` did not resolve to a module. `from_wire` compares this against
         /// the receiving view's own origin: equal means the crossing landed back on the SAME module
-        /// view, so `globals` must NOT be installed as a frozen `gsnap` — the closure should keep
-        /// reading that global LIVE. A plain scalar: it roots nothing and carries no `GcRef`, so the
-        /// GC-rooting walk and the `has_handle` walk need no change for it.
+        /// view, so `globals` must NOT be installed at all — the closure should keep reading that
+        /// global LIVE. A plain scalar: it roots nothing and carries no `GcRef`, so the GC-rooting
+        /// walk and the `has_handle` walk need no change for it.
         home_origin: Option<u64>,
     },
     /// B3.3 — a BARE function (`Obj::Func`) carried across the airlock **by value**: its `proto`

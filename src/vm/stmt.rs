@@ -1924,6 +1924,52 @@ impl Vm {
         }
     }
 
+    /// TICKET-051 — the write path for a task's OWN explicit assignment to a module global
+    /// (`Op::SetGlobalSlot`). Marks `assigned` AND `carried` for `slot` on top of the plain write,
+    /// so `install_global_slot` on this or a later view knows this write must never be clobbered
+    /// by an arriving closure's stale value.
+    pub(super) fn assign_global_slot(&mut self, module: GcRef, slot: u32, value: Value) {
+        self.set_global_slot(module, slot, value);
+        if let Obj::Module(m) = self.heap.get_mut(module) {
+            let i = slot as usize;
+            if m.assigned.len() <= i {
+                m.assigned.resize(i + 1, false);
+            }
+            if m.carried.len() <= i {
+                m.carried.resize(i + 1, false);
+            }
+            m.assigned[i] = true;
+            m.carried[i] = true;
+        }
+    }
+
+    /// TICKET-051 — the airlock's write path: installs an arriving closure's value for `slot` into
+    /// the RECEIVING view, unless that view already assigned the slot itself. Returns `false` (and
+    /// writes nothing) when `module` has no such slot (a hand-built fixture with an empty module) or
+    /// the receiving view already assigned it; the receiving view's own write always wins. On a
+    /// successful install marks `carried` (never `assigned`: this view did not write it itself),
+    /// which is what lets a forwarding task's `closure_global_snapshot` carry the value onward.
+    pub(super) fn install_global_slot(&mut self, module: GcRef, slot: u32, value: Value) -> bool {
+        self.ensure_module_faulted(module);
+        let ok = matches!(
+            self.heap.get(module),
+            Obj::Module(m) if (slot as usize) < m.slots.len()
+                && !m.assigned.get(slot as usize).copied().unwrap_or(false)
+        );
+        if !ok {
+            return false;
+        }
+        self.set_global_slot(module, slot, value);
+        if let Obj::Module(m) = self.heap.get_mut(module) {
+            let i = slot as usize;
+            if m.carried.len() <= i {
+                m.carried.resize(i + 1, false);
+            }
+            m.carried[i] = true;
+        }
+        true
+    }
+
     /// Define (or overwrite) a global by name. M19 Phase 2b — if `name` already has a slot (the
     /// common case: the run driver pre-sized + indexed the module from `global_slots`, so imports
     /// and `DefineGlobalSlot` targets are already present) the value lands in that slot; otherwise a

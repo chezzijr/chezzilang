@@ -2072,6 +2072,8 @@ fn wire_passes_by_reference_objects_as_same_handle() {
         slots: Vec::new(),
         index: Default::default(),
         origin: crate::vm::heap::next_module_origin(),
+        assigned: Vec::new(),
+        carried: Vec::new(),
     })));
     let v = Value::obj(m);
     let w = vm.to_wire(v).expect("by-ref object should serialize");
@@ -8414,12 +8416,13 @@ fn worker_fixture(code: Vec<Op>) -> (Vm, PendingCall) {
         slots: Vec::new(),
         index: Default::default(),
         origin: crate::vm::heap::next_module_origin(),
+        assigned: Vec::new(),
+        carried: Vec::new(),
     })));
     let clo = vm.heap.alloc(Obj::Closure {
         proto: 0,
         captured: Default::default(),
         home,
-        gsnap: None,
     });
     (
         vm,
@@ -19272,8 +19275,8 @@ parallel:
 /// boundary at all (it existed before the `parallel:` block and is called from inside the same
 /// task that wrote the global). The per-task module snapshot (`ensure_snapshot`/`fault_module`)
 /// replicates every module global — including `f` — into the task's own module copy; `f` must keep
-/// doing a live `Op::GetGlobalSlot` read against that copy, not carry a `gsnap` frozen at the
-/// snapshot's pre-write value.
+/// doing a live `Op::GetGlobalSlot` read against that copy, not a value installed frozen at the
+/// snapshot's pre-write state.
 #[test]
 fn ticket_016_spawned_task_own_write_visible_to_module_closure_it_calls() {
     let src = "\
@@ -19329,7 +19332,8 @@ print(g(3))
 
 /// TICKET-016 / W8-25 — a closure NESTED inside a crossed closure must also see the airlock
 /// snapshot: `Compiler::fill_global_free`'s fixpoint follows `Op::MakeClosure`/`Op::SpawnBlock`, and
-/// `Op::MakeClosure` clones the parent's `gsnap` into the child it creates.
+/// a nested closure created inside a crossed one shares the parent's home module view, so the
+/// airlock's install (into that view's own module copy) is visible to it too.
 #[test]
 fn ticket_016_closure_over_module_global_read_by_nested_closure() {
     let src = "\

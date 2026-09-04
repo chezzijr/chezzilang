@@ -858,6 +858,8 @@ impl Vm {
             slots: vec![Value::nil(); m.global_slots.len()],
             index,
             origin: crate::vm::heap::next_module_origin(),
+            assigned: Vec::new(),
+            carried: Vec::new(),
         })));
         debug_assert_eq!(self.module_objs.len(), idx);
         self.module_objs.push(mod_obj);
@@ -1885,26 +1887,13 @@ impl Vm {
                 self.stack[at] = v;
             }
             Op::GetGlobalSlot(slot) => {
-                let frame = self.frames.last().unwrap();
-                let (home, closure) = (frame.home, frame.closure);
-                // TICKET-016 (W8-25): a closure crossing the airlock carries a by-value snapshot of
-                // its free home-module globals (`Proto::global_free`) — consult it first, so a
-                // crossed closure sees the pre-airlock value instead of the receiving task's own
-                // copy of the global. A closure that never crossed (`gsnap: None`) falls through to
-                // the ordinary live read unchanged.
-                let snapped = closure.and_then(|h| match self.heap.get(h) {
-                    Obj::Closure { gsnap: Some(g), .. } => {
-                        g.iter().find(|(s, _)| *s == *slot).map(|(_, v)| *v)
-                    }
-                    _ => None,
-                });
-                let v = match snapped {
-                    Some(v) => v,
-                    None => {
-                        self.ensure_module_faulted(home); // D1: lazily reconstruct the worker's home module
-                        self.global_slot(home, *slot)
-                    }
-                };
+                let home = self.frames.last().unwrap().home;
+                // TICKET-051: one module global denotes one object inside one task. A crossing
+                // closure's free globals are installed into the RECEIVING view's own module copy at
+                // the airlock (`from_wire_memo`'s `WireValue::Closure` arm), so a plain live read
+                // always agrees with a closure's read of the same slot.
+                self.ensure_module_faulted(home); // D1: lazily reconstruct the worker's home module
+                let v = self.global_slot(home, *slot);
                 self.push(v);
             }
             Op::DefineGlobalSlot(slot) => {
@@ -1915,7 +1904,7 @@ impl Vm {
             Op::SetGlobalSlot(slot) => {
                 let v = self.pop();
                 let home = self.frames.last().unwrap().home;
-                self.set_global_slot(home, *slot, v);
+                self.assign_global_slot(home, *slot, v);
             }
             Op::GetCaptured(slot) => {
                 // Lever #3: hot path is a pure `captured[slot]` index — no string hash. The slot is
@@ -2294,17 +2283,10 @@ impl Vm {
                     };
                     captured.push(v);
                 }
-                // TICKET-016 (W8-25): a closure created inside a crossed closure inherits its
-                // parent's global snapshot, so a nested closure keeps reading the same values.
-                let gsnap = enclosing.and_then(|h| match self.heap.get(h) {
-                    Obj::Closure { gsnap, .. } => gsnap.clone(),
-                    _ => None,
-                });
                 let h = self.heap.alloc(Obj::Closure {
                     proto: *proto,
                     captured,
                     home,
-                    gsnap,
                 });
                 self.push(Value::obj(h));
             }

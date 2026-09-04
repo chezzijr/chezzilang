@@ -603,9 +603,11 @@ pub struct Proto {
     /// TICKET-016 (W8-25) — the home-module `let`-bound global slots this proto's body, or any
     /// closure proto nested inside it (via `Op::MakeClosure`/`Op::SpawnBlock`), READS and NEVER
     /// WRITES. Computed once by `Compiler::fill_global_free` as a whole-program bytecode post-pass.
-    /// The airlock snapshot-copies exactly these slots onto a crossing closure
-    /// (`Obj::Closure.gsnap`); a slot the closure tree writes is excluded so a snapshot can never go
-    /// stale. Empty for a proto that never crosses a heap boundary as a closure.
+    /// The airlock installs exactly these slots' values into the RECEIVING view's own module copy
+    /// (TICKET-051, `Vm::closure_global_snapshot`/`from_wire_memo`'s `WireValue::Closure` arm); a
+    /// slot the closure tree writes is excluded so an install can never clobber the receiving
+    /// task's own later write to that same slot. Empty for a proto that never crosses a heap
+    /// boundary as a closure.
     pub global_free: Vec<u32>,
 }
 

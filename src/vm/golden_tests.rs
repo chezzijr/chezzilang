@@ -2366,9 +2366,8 @@ match a.load().g:
 
 #[test]
 fn airlock_crossed_closure_reads_module_global_live_same_task() {
-    // TICKET-041(b). `closure_global_snapshot` prefers an existing `gsnap` entry over the live
-    // module slot (`src/vm/sched.rs:2662-2669`), so a closure's snapshot of its module-global
-    // reads is frozen at the FIRST crossing and never refreshed — even on a same-task round trip
+    // TICKET-041(b), historical. Before the fix, a closure's snapshot of its module-global reads
+    // was frozen at the FIRST crossing and never refreshed — even on a same-task round trip
     // through `Channel.send`/`.recv()` where no task boundary is ever crossed. Calling the SAME
     // closure value directly (no crossing) and via the channel round trip must answer identically:
     // both must observe the post-crossing write `n = 42`, since the write happens strictly before
@@ -2399,9 +2398,9 @@ fn airlock_nested_closure_created_after_the_tasks_own_write_reads_stale_value() 
     // a factory returns a closure nested two levels deep (`outer` -> `inner`) that reads
     // module global `n`. The receiving task calls `ch.recv()`, WRITES `n = 100` to its own
     // module copy, and only THEN builds the nested closure `inner` by calling `o()` -- so
-    // `inner` never crosses any airlock and is created strictly after the write. `Op::MakeClosure`
-    // still clones the OUTER closure's `gsnap` (frozen at the ORIGINAL `Channel.send`, when
-    // `n` was still 1) onto `inner` (src/vm/exec.rs:2297-2302), so `inner()` reads the stale `1`
+    // `inner` never crosses any airlock and is created strictly after the write. Before the fix,
+    // `Op::MakeClosure` still cloned the OUTER closure's frozen global snapshot (taken at the
+    // ORIGINAL `Channel.send`, when `n` was still 1) onto `inner`, so `inner()` read the stale `1`
     // while a plain read of `n` in the same task correctly sees the write, `100`. Go 1.26.5 and
     // CPython (both threaded equivalents) print `100` for both.
     let src = r#"
@@ -2435,17 +2434,17 @@ print("plain global read   : {res.recv()}")
 
 #[test]
 fn airlock_forwarded_closure_reads_forwarders_write_not_the_first_senders_snapshot() {
-    // TICKET-051. `closure_global_snapshot` (src/vm/sched.rs:2684-2690) prefers an EXISTING
-    // `gsnap` entry over a live read of `home`'s module slot. That preference is meant to carry
-    // a closure's already-resolved values forward through a chain of crossings (see the
-    // `closure_global_snapshot` doc comment). But `to_wire_depth`'s `Obj::Closure` arm treats a
-    // forward (task B re-sending a closure it received from task A) as its OWN "genuine
-    // crossing" (task B's `home_origin` differs from task C's view, so `from_wire_memo`
-    // installs a fresh `gsnap` rather than reusing task B's) -- yet the VALUES that snapshot is
-    // built from are still A's frozen ones, because `closure_global_snapshot` never re-reads
-    // task B's own (live, since-written) module slot. Task B's write to `n` therefore lands in
-    // NO copy the forwarded closure can ever reach: not A's frozen snapshot (never touched by
-    // B), not B's own live module slot (the preference skips it), and not C's own fresh module
+    // TICKET-051, historical. Before the fix, `closure_global_snapshot` preferred an existing
+    // frozen snapshot entry over a live read of `home`'s module slot. That preference was meant to
+    // carry a closure's already-resolved values forward through a chain of crossings. But
+    // `to_wire_depth`'s `Obj::Closure` arm treated a forward (task B re-sending a closure it
+    // received from task A) as its OWN "genuine crossing" (task B's `home_origin` differs from
+    // task C's view, so `from_wire_memo` installed a fresh frozen snapshot rather than reusing
+    // task B's) -- yet the VALUES that snapshot was built from were still A's frozen ones, because
+    // `closure_global_snapshot` never re-read task B's own (live, since-written) module slot. Task
+    // B's write to `n` therefore landed in NO copy the forwarded closure could ever reach: not A's
+    // frozen snapshot (never touched by B), not B's own live module slot (the preference skipped
+    // it), and not C's own fresh module
     // slot (C never wrote it) -- a third, permanently unreachable copy.
     //
     // A -> B: real cross-task crossing, installs a snapshot of A's `n` (1).
@@ -2489,8 +2488,8 @@ fn airlock_receiving_tasks_own_write_beats_an_arriving_closures_global() {
     // TICKET-051. A closure arriving from another task must not clobber the receiving task's own
     // write to the same module global. Task A writes `n = 5` before receiving a closure over `n`
     // from task B (which never wrote `n`). Go 1.26.6 and CPython 3.14.7 both print `5` and `5`
-    // (measured 2026-09-04). Chezzi prints `1` then `5` today: the arriving closure's frozen
-    // `gsnap` (captured at `mk()`'s call, before A's write) wins over A's own later write.
+    // (measured 2026-09-04). Before the fix Chezzi printed `1` then `5`: the arriving closure's
+    // frozen snapshot (captured at `mk()`'s call, before A's write) won over A's own later write.
     let src = r#"
 n := 1
 ch := Channel[fn() -> int](1)
@@ -2669,9 +2668,9 @@ print("result: {res.recv()}")
 fn airlock_same_task_closure_round_trip_mutates_module_list_in_place() {
     // TICKET-041(b), data-loss variant. An in-place write to a module-global container from a
     // same-task channel-round-tripped closure must land, matching CPython's measured
-    // `module xs: [1, 9]` (2026-09-03). Before the fix the frozen `gsnap` made the write vanish
-    // (`module xs: [1]`), because the closure mutated its OWN snapshot copy of `xs` instead of the
-    // live module slot.
+    // `module xs: [1, 9]` (2026-09-03). Before the fix the frozen global snapshot made the write
+    // vanish (`module xs: [1]`), because the closure mutated its OWN snapshot copy of `xs` instead
+    // of the live module slot.
     let src = r#"
 xs := [1]
 fn mk() -> fn() -> nil:
