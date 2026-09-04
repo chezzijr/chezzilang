@@ -30472,3 +30472,24 @@ fn ticket_054_protocol_float_param_neighbours() {
         "expected float, found int",
     );
 }
+
+// TICKET-054 step 2: the sink-1 fix must accept every expected-type spelling, not only the `if`
+// binding form the triage test covers -- the `match`-expression form, a `return match`, a call
+// argument, and `Any` (DEC-034's existing `List[Any]` precedent extended to a scalar branch mix).
+#[test]
+fn ticket_054_if_expr_hint_accepts_every_expected_type_spelling() {
+    entry_ok(
+        "protocol Sh:\n    fn area(self) -> int\nstruct Sq:\n    s: int\n    fn area(self) -> int: self.s * self.s\nstruct Tr:\n    b: int\n    fn area(self) -> int: self.b\nz: Sh = match 1:\n    1: Sq(3)\n    _: Tr(4)\nprint(z.area())\n",
+    );
+    entry_ok(
+        "protocol Sh:\n    fn area(self) -> int\nstruct Sq:\n    s: int\n    fn area(self) -> int: self.s * self.s\nstruct Tr:\n    b: int\n    fn area(self) -> int: self.b\nfn pick(n: int) -> Sh:\n    return match n:\n        0: Sq(3)\n        _: Tr(4)\nprint(pick(0).area())\n",
+    );
+    entry_ok(
+        "protocol Sh:\n    fn area(self) -> int\nstruct Sq:\n    s: int\n    fn area(self) -> int: self.s * self.s\nstruct Tr:\n    b: int\n    fn area(self) -> int: self.b\nfn f(s: Sh):\n    print(s.area())\nf(if true: Sq(2) else: Tr(9))\n",
+    );
+    // DEC-034 gotcha 7: Any is the empty top protocol; x: Any = 1 and y: Any = \"a\" both run today.
+    entry_ok("x: Any = if true: 1 else: \"a\"\nprint(x)\n");
+    entry_ok(
+        "protocol Sh:\n    fn area(self) -> int\nstruct Sq:\n    s: int\n    fn area(self) -> int: self.s * self.s\nstruct Tr:\n    b: int\n    fn area(self) -> int: self.b\nxs: List[Sh] = [Sq(2), Tr(9)]\nprint(xs[1].area())\n",
+    );
+}

@@ -1029,7 +1029,7 @@ impl Checker {
             let t = self.infer(&arm.body);
             self.pop_scope();
             let t = Self::branch_widen(&arm.body, t, mix);
-            result = Some(self.unify_branch(result, t, arm.body.span));
+            result = Some(self.unify_branch(result, t, arm.body.span, hint.as_ref()));
         }
         self.expected_hint = None;
         self.check_exhaustive(&kind, &covered, has_wildcard, scrutinee.span);
@@ -1076,7 +1076,7 @@ impl Checker {
         // statement position. See the note above `Checker::is_unrefined_empty_coll`.
         self.expected_hint = hint.clone();
         let t_then = self.infer(then);
-        self.expected_hint = hint;
+        self.expected_hint = hint.clone();
         // A nested-`IfElse` `els` is the `elif` tail — recurse DIRECTLY, threading the head's mix; any
         // other `els` is the final leaf, inferred normally.
         let t_els = if let ExprKind::IfElse {
@@ -1092,8 +1092,8 @@ impl Checker {
         self.expected_hint = None;
         let t_then = Self::branch_widen(then, t_then, mix);
         let t_els = Self::branch_widen(els, t_els, mix);
-        let acc = self.unify_branch(None, t_then, then.span);
-        let res = self.unify_branch(Some(acc), t_els, els.span);
+        let acc = self.unify_branch(None, t_then, then.span, hint.as_ref());
+        let res = self.unify_branch(Some(acc), t_els, els.span, hint.as_ref());
         if had_hint {
             res
         } else {
@@ -1153,13 +1153,31 @@ impl Checker {
 
     /// Fold one branch's type into a match/if expression's running result type. The first concrete
     /// branch sets the type; a later incompatible branch is a real error (and yields `Unknown` to
-    /// suppress cascades). `Unknown` branches never override a concrete result.
-    pub(super) fn unify_branch(&mut self, acc: Option<Ty>, t: Ty, span: Span) -> Ty {
+    /// suppress cascades). `Unknown` branches never override a concrete result. `hint` is the
+    /// statically known expected type at this position (an annotated binding, a call argument, a
+    /// declared return) — it is read ONLY on a `compatible` mismatch, and ONLY through `assignable`,
+    /// never folded into the accumulator (so an existing diagnostic like `Sq and int` stays that,
+    /// not `Sh and int`) and never through `assignable_w` (DEC-034: routing the int→float widen
+    /// through `expected_hint` here would leave a runtime `Int` under a static `float`, since no
+    /// backend coerce is keyed on the hint for this fold).
+    pub(super) fn unify_branch(
+        &mut self,
+        acc: Option<Ty>,
+        t: Ty,
+        span: Span,
+        hint: Option<&Ty>,
+    ) -> Ty {
         match acc {
             None => t,
             Some(prev) => {
                 if compatible(&prev, &t) {
                     if prev.is_unknown() { t } else { prev }
+                } else if let Some(h) = hint
+                    && ty_fully_concrete(h)
+                    && self.assignable(h, &prev)
+                    && self.assignable(h, &t)
+                {
+                    h.clone()
                 } else {
                     self.error(
                         span,
