@@ -198,16 +198,14 @@ fn chezzi_test_cli_honors_chezzi_threads_via_a_two_worker_precondition() {
 /// W8-8 — `--threads=1` (via `CHEZZI_THREADS=1`) must run exactly ONE CPU runner, not two. Before the
 /// fix the inline joiner ran a fiber loop ALONGSIDE the unconditional `chezzi-eager` drainer thread
 /// even at a budget of 1, so an 8x CPU workload only ran ~4.4x slower than a 1x workload (two runners
-/// splitting the work) instead of ~8x. Program A runs one CPU burn inside a `parallel:` nursery,
-/// program B runs eight copies of the same burn in one `parallel:` nursery, both timed under
-/// `CHEZZI_THREADS=1`. The two runs are sequential, not concurrent, so a load spike landing on one and
-/// not the other can shift the ratio — but not by enough to explain a pass at the 5.5 threshold:
-/// T1-fix's review measured, under 16 concurrent CPU spinners on a 12-core box, ratios of 7.19 / 7.32 /
-/// 7.03 against an idle-box baseline of 7.71 / 7.50 / 8.04 — well clear of 5.5 either way. Post-fix the
-/// ratio must approach 8; pre-fix it measured
-/// ~4.0 on a debug build (docs/gaps.md W8-8 measured ~4.4 on the release binary). The burn size (150k
-/// iterations) is calibrated to ~100ms on a DEBUG build — `CARGO_BIN_EXE_chezzi` under `cargo test` is
-/// the debug binary, not `--release`.
+/// splitting the work) instead of ~8x. Program B runs eight copies of `burn(75000)` in one `parallel:`
+/// nursery under `CHEZZI_THREADS=1`; each run measures child CPU time (`user + sys` via `wait4`
+/// rusage) against child wall time, asserting `cpu <= wall * MAX_CORES_AT_ONE_WORKER` — a single
+/// `--threads=1` runner cannot exceed 1.00 cores, so a healthy binary can never trip this, while a
+/// second CPU runner (the pre-fix defect) pushes `cpu` well past `wall`. Measured under load average
+/// 28.9 on a 12-core box, four runs each: fixed 0.776-0.946 cores, pre-fix-reverted 1.267-1.771 cores.
+/// The burn size (75k iterations) is what every measured band and the negative control below were
+/// taken at — `CARGO_BIN_EXE_chezzi` under `cargo test` is the debug binary, not `--release`.
 #[cfg(unix)]
 #[test]
 fn threads_one_serializes_cpu_bound_parallel_tasks() {
@@ -223,7 +221,7 @@ fn threads_one_serializes_cpu_bound_parallel_tasks() {
                  return x\n\n";
 
     let path_b = dir.join("burn_eight.chz");
-    let spawns = "        spawn: burn(150000)\n".repeat(8);
+    let spawns = "        spawn: burn(75000)\n".repeat(8);
     std::fs::write(
         &path_b,
         format!("{burn}fn main():\n    parallel:\n{spawns}main()\n"),
@@ -265,9 +263,12 @@ fn threads_one_serializes_cpu_bound_parallel_tasks() {
 /// `self.mn` is already `Some`, which takes the private-sched general path — already correctly gated.)
 /// `join_eager_nursery`'s `drainer.is_none()` arm ran an unconditional
 /// `shell.mn_worker_loop(&sched, 0, sid)` alongside the outer drainer — a second CPU runner at a
-/// budget of one. Same construction as `threads_one_serializes_cpu_bound_parallel_tasks`: one burn vs
-/// eight, both under `CHEZZI_THREADS=1`, ratio must clear 5.5 (measured pre-fix ~3.9 on this debug
-/// binary, ~1.97 cores on the release binary per the review).
+/// budget of one. Same construction and the same `cpu <= wall * MAX_CORES_AT_ONE_WORKER` check as
+/// `threads_one_serializes_cpu_bound_parallel_tasks`, but nested: 16 spawns of `burn(75000)`. Measured
+/// under load average 28.9 on a 12-core box, four runs each: fixed 0.687-0.855 cores, pre-fix-reverted
+/// 1.131-1.697 cores. 16 spawns, not 8: at 8 one reverted run in eleven read 0.755 cores, inside the
+/// healthy band, because the nested arm's second runner is the inline joiner, which covers less of the
+/// run than the flat arm's pool helpers do.
 #[cfg(unix)]
 #[test]
 fn threads_one_serializes_nested_eager_parallel_tasks() {
@@ -287,7 +288,7 @@ fn threads_one_serializes_nested_eager_parallel_tasks() {
     // of the run than the flat arm's pool helpers do. At 16 the reverted band is 1.131-1.697 with no
     // overlap.
     let path_b = dir.join("nested_burn_eight.chz");
-    let spawns = "        spawn: burn(150000)\n".repeat(16);
+    let spawns = "        spawn: burn(75000)\n".repeat(16);
     std::fs::write(
         &path_b,
         format!(
@@ -308,9 +309,10 @@ fn threads_one_serializes_nested_eager_parallel_tasks() {
             "chezzi run {path_b:?} failed (run {run}): {stdout}"
         );
         let cpu = user + sys;
-        // Negative control. Measured 2.81-2.94 s.
+        // Negative control. Measured 1.30-1.44 s at burn(75000)x16 on this box (re-measured
+        // 2026-09-05; the plan's "2.81-2.94 s" figure was taken at the pre-review burn(150000)).
         assert!(
-            cpu > std::time::Duration::from_millis(1500),
+            cpu > std::time::Duration::from_millis(900),
             "program B finished too fast (cpu={cpu:?}, run {run}) to be a meaningful measurement — \
              recalibrate the burn size"
         );
