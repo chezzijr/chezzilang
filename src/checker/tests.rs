@@ -4283,6 +4283,46 @@ struct MyErr[T]:
     entry_ok(&format!(
         "{ERR_SRC}fn f() -> int!:\n    return Err(MyErr(7))\n"
     ));
+
+    // TICKET-053 step 8: the three shapes `tests/chz/spec/eq_protocol_existential_test.chz` used to
+    // pin as RUNTIME faults (`recover:` + a message check) no longer compile at all, since
+    // `x: Sized_ = Box(Tag(1), "x")` is refused at the erasure. CLAUDE.md puts a compile-time
+    // REJECTION in the Rust suite, so these are compile-time rows here instead, over that file's own
+    // `Sized_`/`Tag`/`Box[T]` fixture.
+    const SIZED_SRC: &str = "\
+protocol Sized_:
+    fn size(self) -> int
+struct Tag:
+    n: int
+    fn size(self) -> int:
+        return self.n
+struct Box[T]:
+    val: T
+    tag: str
+    fn eq(self, o: Box[T]) -> bool where T: Comparable:
+        return self.val.compare(o.val) == 0
+    fn size(self) -> int:
+        return 1
+";
+    // was: `protocol_typed_operator_eq_faults_on_an_unsatisfied_witness`.
+    entry_rejects(
+        &format!("{SIZED_SRC}x: Sized_ = Box(Tag(1), \"x\")\n"),
+        "Tag: Comparable",
+    );
+    // was: `protocol_typed_contains_faults_on_an_unsatisfied_witness`.
+    entry_rejects(
+        &format!(
+            "{SIZED_SRC}x: Sized_ = Box(Tag(1), \"x\")\ny: Sized_ = Box(Tag(2), \"y\")\nxs: List[Sized_] = [x]\nxs.contains(y)\n"
+        ),
+        "Tag: Comparable",
+    );
+    // was: `a_generic_eq_bound_faults_on_an_unsatisfied_witness_same_as_the_operator`.
+    entry_rejects(
+        &format!(
+            "{SIZED_SRC}fn generic_eq[T: Eq](a: T, b: T) -> bool:\n    return a == b\nx: Sized_ = Box(Tag(1), \"x\")\ny: Sized_ = Box(Tag(2), \"y\")\ngeneric_eq(x, y)\n"
+        ),
+        "Tag: Comparable",
+    );
 }
 
 /// **W7-45 — the `List` builtins whose runtime is `values_equal`, and `in`.** W7-41 closed the hole
