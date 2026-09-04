@@ -230,6 +230,12 @@ pub fn display_path(p: &std::path::Path) -> std::path::PathBuf {
 /// `editor::word_end_col`, the SAME word-boundary scan `--errors=json`'s `end_col` uses — caret
 /// width and `end_col` cannot drift apart). Returns `None` when `span.line` is past the end of
 /// `source`.
+/// Removes at most one leading U+FEFF; a second BOM and a mid-file BOM stay lex errors, matching
+/// CPython measured 2026-09-03.
+pub fn strip_bom(source: &str) -> &str {
+    source.strip_prefix('\u{feff}').unwrap_or(source)
+}
+
 pub fn render_snippet(span: Span, source: &str) -> Option<String> {
     let raw = source.lines().nth(span.line as usize - 1)?;
     let text: String = raw
@@ -679,13 +685,13 @@ pub struct Lexer {
 
 impl Lexer {
     pub fn new(source: &str) -> Self {
-        Lexer::new_in(source, 0, None)
+        Lexer::new_in(strip_bom(source), 0, None)
     }
 
     /// Like [`Lexer::new`] but stamps every emitted span with the module id `file` (see
     /// [`Span::file`]). `0` is identical to [`Lexer::new`].
     pub fn new_file(source: &str, file: u32) -> Self {
-        Lexer::new_in(source, file, None)
+        Lexer::new_in(strip_bom(source), file, None)
     }
 
     fn new_in(source: &str, file: u32, origin: Option<(std::sync::Arc<PosMap>, usize)>) -> Self {
@@ -3627,6 +3633,45 @@ mod tests {
             toks.is_ok(),
             "expected a leading BOM to be stripped, got {:?}",
             toks.err()
+        );
+    }
+
+    /// A BOM anywhere but the very start of the file is program text, not a file-entry artifact —
+    /// CPython raises the same `SyntaxError` on a mid-file BOM (measured 2026-09-03).
+    #[test]
+    fn a_mid_file_bom_is_still_a_lex_error() {
+        let e = tokenize("print(\n\u{feff}x)\n").expect_err("mid-file BOM must still lex-error");
+        assert_eq!((e.line, e.col), (2, 1));
+    }
+
+    /// Only the FIRST leading BOM is a file-entry artifact; a second one stays a lex error, so the
+    /// strip must be `strip_prefix` (removes exactly one), never `trim_start_matches`.
+    #[test]
+    fn a_second_leading_bom_is_still_a_lex_error() {
+        let e = tokenize("\u{feff}\u{feff}print(1)\n")
+            .expect_err("a second leading BOM must still lex-error");
+        assert_eq!((e.line, e.col), (1, 1));
+    }
+
+    /// `tokenize_frag` re-lexes an in-memory interpolation fragment, not a file — a BOM there is
+    /// program text a user typed inside `{...}`, so it must stay a lex error even though the file
+    /// that contains it was stripped once at entry.
+    #[test]
+    fn an_interpolation_fragment_keeps_its_bom_error() {
+        let src = "s = \"{\u{feff}x}\"\n";
+        let lit = tokenize(src)
+            .unwrap()
+            .into_iter()
+            .find_map(|t| match t.kind {
+                Token::Str(s) => Some(s),
+                _ => None,
+            })
+            .expect("one str token");
+        let map = lit.map.clone().expect("a braced literal carries a map");
+        let frag = tokenize_frag("\u{feff}x", map, 1);
+        assert!(
+            frag.is_err(),
+            "expected the fragment's own BOM to stay a lex error, got {frag:?}"
         );
     }
 
