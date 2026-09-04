@@ -3863,8 +3863,12 @@ fn builtin_function_value_satisfies_eq_by_identity() {
 /// `[T: Eq]` bound fed a protocol-typed value answered *does not satisfy Eq* — one relation, two
 /// answers. **Go, measured, 1.26** (`comparable` was widened in 1.20 to admit interface types):
 /// `func eqg[T comparable](a, b T) bool { return a == b }` fed two `Sized` interface values compiles
-/// and runs; fed an uncomparable witness it compiles and panics at the comparison, matching the
-/// runtime-fault shape `tests/chz/spec/eq_protocol_existential_test.chz` pins.
+/// and runs; fed an uncomparable witness it compiles and panics at the comparison. TICKET-053:
+/// Chezzi's own shape for an uncomparable (unsatisfied-`where`) witness is no longer a runtime fault —
+/// the erasure into the protocol slot is refused at COMPILE time instead (`Checker::assignable`'s
+/// protocol arm) — so `tests/chz/spec/eq_protocol_existential_test.chz` now pins only the SATISFIED
+/// half of this relation; the unsatisfied half moved to
+/// `checker::tests::protocol_erasure_eq_where_bound_boundaries`.
 const SIZED_PRELUDE: &str = "\
 protocol Sized_:
     fn size(self) -> int

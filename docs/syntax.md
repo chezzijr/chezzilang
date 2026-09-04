@@ -1969,20 +1969,36 @@ newtype underlyings), `x in xs`, and the builtins whose runtime is `values_equal
 own message naming the site (*contains() compares List[Box[Tag]] elements for equality — …*,
 *map key type Box[Tag]'s `eq` requires …*).
 
-**A protocol-typed (existential) operand or element defers the same bound check to runtime, by
-design, not by gap.** Protocols are Go-style interfaces, and comparing two protocol-typed values is
-exactly Go's `interface{} == interface{}`: the checker cannot know which concrete witness inhabits
-the protocol at a given site (existentials are erased), so it compiles the comparison and the
-comparison faults cleanly, at the point it runs, if that witness's `eq` turns out unsatisfied — the
-same shape as Go's own `panic: runtime error: comparing uncomparable type …` (`docs/gaps.md`
-**W7-52**, resolved 2026-08-12 as ancestor-correct). `Ty::Protocol` also satisfies a `[T: Eq]` BOUND
-now, agreeing with the bare `==` on the identical spelling (`fn generic_eq[T: Eq](a: T, b: T) -> bool:
-return a == b` fed two protocol-typed values, or `.eq()` directly) — matching Go 1.20+'s widened
-`comparable`, which likewise admits an interface type and panics the same way at the comparison if
-the witness cannot be compared. Every OTHER protocol still correctly rejects a protocol-typed value
-that does not structurally provide it (`[T: Stringable]`/`[T: Hashable]`/… over `Sized_` all reject);
-`Eq` is the one protocol this applies to, because `Eq`-satisfaction is defined as exactly what `==`
-already accepts, and `==` already accepted a protocol-typed operand.
+**An UNMET `eq` `where` bound is refused where the value is ERASED into the protocol slot, not at the
+comparison — TICKET-053.** Chezzi can see the concrete witness at the point it is assigned into a
+protocol-typed slot (a `let`, a field, a `List`/`Option`/`Result` element, a return), so a witness
+whose own `eq` cannot be satisfied for this instantiation is rejected THERE, at compile time, naming
+the bound:
+
+```
+protocol Tagged: fn tag(self) -> int
+struct Box[T]:
+    v: T
+    fn eq(self, o: Box[T]) -> bool where T: Comparable: return true
+a: Tagged = Box(Tag(1))  →  type error: cannot assign Box[Tag] to variable of type Tagged
+                             — Box[Tag]'s `eq` requires Tag: Comparable
+```
+
+The escape is the same one direct comparison already uses: `fn wrap[T: Comparable](x: Box[T]) ->
+Tagged` compiles. **A protocol-typed (existential) operand whose witness's `eq` bound DOES hold still
+defers the comparison itself to runtime, by design, not by gap** — protocols are Go-style interfaces,
+and comparing two protocol-typed values is exactly Go's `interface{} == interface{}`: the checker
+cannot know which concrete witness inhabits the protocol at the comparison site (existentials are
+erased there), so it compiles the comparison and dispatches to the witness's `eq`, the same shape as
+Go's own interface `==` deferring to the dynamic type (`docs/gaps.md` **W7-52**, resolved 2026-08-12
+as ancestor-correct; amended 2026-09-04, TICKET-053, for the unmet-bound half above). `Ty::Protocol`
+also satisfies a `[T: Eq]` BOUND now, agreeing with the bare `==` on the identical spelling (`fn
+generic_eq[T: Eq](a: T, b: T) -> bool: return a == b` fed two protocol-typed values, or `.eq()`
+directly) — matching Go 1.20+'s widened `comparable`, which likewise admits an interface type. Every
+OTHER protocol still correctly rejects a protocol-typed value that does not structurally provide it
+(`[T: Stringable]`/`[T: Hashable]`/… over `Sized_` all reject); `Eq` is the one protocol this applies
+to, because `Eq`-satisfaction is defined as exactly what `==` already accepts, and `==` already
+accepted a protocol-typed operand.
 
 **A generic body that compares its own type parameter must bound it by `Eq`, at the DEFINITION —
 matching both owning ancestors.** `fn f[T](a: T, b: T) -> bool: return a == b` rejects at `f`'s own

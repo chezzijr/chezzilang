@@ -308,7 +308,11 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, &str)] = &[
     // exception, and a deliberately open one: a protocol-typed (existential) value's `==` DEFERS to
     // its concrete witness at runtime, exactly as Go's interface `==` defers to the dynamic type and
     // panics if that type is uncomparable — so this row grants the CHECK and the witness settles the
-    // ANSWER, cleanly faulting when it can't (W7-52). No other protocol row exists for `"protocol"`:
+    // ANSWER (W7-52). TICKET-053: that runtime defer is now only reached for a witness whose OWN `eq`
+    // has no unmet `where` bound — `Checker::assignable`'s protocol arm refuses the erasure itself
+    // when one is unmet, so this row's promise now covers only the erased `[T: Eq]` body / a satisfied
+    // witness's `==`, never an unsatisfied witness's (that never reaches the runtime at all). No other
+    // protocol row exists for `"protocol"`:
     // `[T: Stringable]`/`[T: Hashable]`/… at `T = <protocol>` all still reject, because `Eq` is the one
     // protocol whose grant means exactly what `==` already accepts, and `==` already accepts a
     // protocol-typed operand (`may_be_equal`'s `(Protocol, Protocol)`/`(Protocol, concrete)` arms).
@@ -3223,8 +3227,11 @@ impl Checker {
     ///
     /// # THIS PREDICATE FAILS CLOSED. `None` IS A GRANT.
     ///
-    /// The sole caller ([`Self::satisfies_args_d`]'s D1 arm) turns `None` into
-    /// [`Self::grant_intrinsic`] — a PROMISE that the runtime can dispatch `eq` on this receiver. So
+    /// TICKET-053 added a second, WEAKER mode of this same walk —
+    /// [`Self::eq_where_bounds_unsatisfied`], for the erasure gate in `Checker::assignable`'s protocol
+    /// arm — but this method (the strict mode, called with `strict = true`) keeps its original single
+    /// caller: [`Self::satisfies_args_d`]'s D1 arm turns `None` into [`Self::grant_intrinsic`] — a
+    /// PROMISE that the runtime can dispatch `eq` on this receiver. So
     /// every path that cannot finish the proof — a table miss, an unresolvable shape, the
     /// in-progress budget — must return `Some`, never `None`. Reading `None` as "the safe default"
     /// is backwards here, and shipped three check-OK-then-runtime-fault holes when it was: this is
@@ -3558,7 +3565,11 @@ impl Checker {
             // through — the D1 gate above now classifies `Ty::Protocol` as kind `"protocol"` instead
             // of refusing it, so this `None` is the grant, and the runtime witness is what actually
             // answers `eq`/faults, exactly as Go's interface `==` defers to the dynamic type. Same
-            // hole, same reason, as `reaches_user_eq`'s.
+            // hole, same reason, as `reaches_user_eq`'s. TICKET-053: this `None` is no longer the
+            // WHOLE story for the erasure-into-a-protocol-slot shape — `Checker::assignable`'s
+            // protocol arm now closes the hole one step earlier, at the erasure itself, via
+            // [`Self::eq_where_bounds_unsatisfied`], so an unsatisfied witness is refused there and
+            // never reaches this arm's runtime defer at all.
             _ => None,
         }
     }

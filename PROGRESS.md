@@ -12569,6 +12569,19 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- **A witness's unmet `eq` `where` bound is now refused at the erasure into a protocol slot, not
+  laundered through it (2026-09-04, TICKET-053).** `a: Tagged = Box(Tag(1))` (`Box`'s `eq` requires
+  `Tag: Comparable`, which `Tag` doesn't provide) was `ok: no type errors` then printed the
+  unconditional `("Eq", "eq", "protocol")` grant's own answer — a hole reaching an `Option[Tagged]`
+  payload, a `[T: Eq]` bound and a struct field too. `Checker::assignable`'s protocol arm
+  (`src/checker/proto.rs`) now also checks a new where-bound-only mode of the existing `eq` walk
+  (`eq_where_bounds_unsatisfied`, kept apart from the strict walk's memo since a where-only `None` is a
+  weaker proof) and refuses the erasure, naming the bound (``Box[Tag]'s `eq` requires Tag:
+  Comparable``) through `protocol_note`. Three `tests/chz/spec/eq_protocol_existential_test.chz` tests
+  that pinned this as a RUNTIME fault no longer compile and moved to
+  `checker::tests::protocol_erasure_eq_where_bound_boundaries` as compile-time rejections; `docs/gaps.md`
+  W7-52 and `docs/syntax.md` are corrected — the erasure gate is Rust's compile-time model, not Go's
+  runtime one.
 - **Five Rust `#[test]`s that asserted a wall-clock bound or a `time.sleep_ms` handshake now assert a
   counted probe or a channel handshake instead (2026-09-03, TICKET-050).** CPU contention reddened
   these under load though the code they guard was unchanged. `find_all_offset_conversion_is_linear`
