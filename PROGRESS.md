@@ -76,6 +76,34 @@ Single source of truth for "what am I doing next." Update after every work sessi
   `runtime error (repro.chz:4:1): deadlock: every task in this parallel: block is blocked on a
   channel it cannot proceed on (an empty recv() or a full send()) and no sibling can unblock it — the
   nursery cannot progress`, rc=1, measured at both worker counts.
+- **TICKET-065 (2026-09-05) — two checker false rejections fixed (`docs/gaps.md` W10-2, W10-4).**
+  (1) A `match` on `bool` with both `true` and `false` arms and no `_` was `non-exhaustive match: add
+  a `_` arm` — `check_exhaustive`'s `MatchKind::Literal` arm treated `bool` like the infinite `int`/
+  `str` domains. Fixed with `bool_domain_closed` (`src/checker/pattern.rs`), OR-ed into `has_wildcard`
+  in the three arm loops (`check_match`/`infer_match`/`infer_recover_tail_match`) rather than
+  special-cased inside `check_exhaustive` — the same flag feeds `warn_unreachable_arm`, so a trailing
+  `_` after both literals now warns `unreachable match arm`, matching rustc. **Reverses the
+  2026-06-13 "one rule preserved" choice** recorded above (`p1 | p2` entry): `true | false` now
+  closes the domain too, by the same `covered`-threading mechanism as two separate arms —
+  `bool_or_not_exhaustive` flipped to `bool_or_pattern_closes_the_domain`/`ok`. (2) A LOCAL `type`
+  alias (`type F = E`) was unusable outside type position — `F.A(5)`, a variant pattern `F.A(n):`,
+  `Q(1)`/`Q.zero()` on a struct alias, and a generic alias's static call all gave a false `unknown
+  name`/`no variant` error. Fixed with three alias-head helpers (`alias_enum_head`/
+  `alias_struct_head`/`alias_newtype_head`, `src/checker/setup.rs`) built on the existing read-only
+  `resolve_ty_ro`, threaded into four checker call sites (`src/checker/expr.rs`,
+  `src/checker/pattern.rs`) that each carry the alias's pinned type arguments (so `type IS =
+  Box[str]; IS.of(3)` still infers against `Box[str]`, not `Box[int]`) — plus a checker-side
+  `bare_types` collision found while verifying on the CLI: a graph-mode module registers a `type`
+  alias's OWN name into `bare_types` under a dead `<module>::F` key, which shadowed the alias
+  fallback in `check_pattern_qualifier` until alias resolution was checked first. On the COMPILER
+  side (`src/compiler/mod.rs`), one `bare_types` re-point after the per-module population loop walks
+  the alias chain and points `bare_types[alias]` at the aliased type's real runtime key, fixing the
+  four lowering sites (`enum_bare_key`, `struct_key_of_pattern`, the bare newtype/struct ctors) with
+  no site-specific change. Scope is deliberately LOCAL (`self.aliases`) only in both halves — a
+  `from`-imported alias and a qualified `m.F.A(5)` stay unsupported, since the compiler cannot reach
+  the defining module's alias body during `compile_module`. `cargo test --lib checker::`: 2066
+  passed/2 failed (this ticket's committed repros) before, 2086 passed/0 failed after (18 new tests:
+  8 bool-exhaustiveness + 1 flipped, 7 alias, 2 pre-existing repros now green).
 - **Bug-hunt wave 10 (2026-09-05) — 26 confirmed findings, `W10-1..W10-26` in `docs/gaps.md`, filed as
   TICKET-060..069 (pipeline queue, unattended overnight). Landed so far: TICKET-060 (W10-6, W10-8 — a `str` arg's C buffer is retained when a `ptr` can point back into it; first callback fault wins) and TICKET-061 (W10-7, W10-14 — void callbacks, extern fns exported as module members), and TICKET-062 (W10-16, W10-1 — a child fault outranks the owner's deadlock verdict; main blocks in place inside a native re-entry), each re-verified on the merged release binary at both worker counts.** Same six domains as wave 9, ~400 probes;
   every candidate re-run on the release binary at two worker counts, 30 → 26 confirmed. Headline: a

@@ -1,0 +1,38 @@
+# W10-4: a LOCAL `type` alias resolves in expression AND pattern position — a variant ctor, a
+# variant pattern, a struct/newtype ctor, a static method call, and a generic instantiation's static
+# method — not just type position. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+
+enum E:
+    A(int)
+    B
+
+struct P:
+    x: int
+    fn zero() -> P:
+        return P(0)
+
+struct Box[T]:
+    v: T
+    fn of(v: T) -> Box[T]:
+        return Box(v)
+
+type F = E
+type Q = P
+type IB = Box[int]
+
+test fn alias_variant_pattern():
+    y: F = E.A(5)
+    match y:
+        F.A(n): assert n == 5
+        F.B: assert false
+
+test fn alias_variant_ctor():
+    assert F.A(7) == E.A(7)
+    assert F.B == E.B
+
+test fn alias_struct_ctor_and_static():
+    assert Q(1).x == 1
+    assert Q.zero().x == 0
+
+test fn alias_generic_static():
+    assert IB.of(3).v == 3

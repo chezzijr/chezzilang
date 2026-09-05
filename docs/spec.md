@@ -49,8 +49,8 @@ re-wrapped.
   site where the fn is in scope, TICKET-029 — `docs/syntax.md` §7a; a `match` pattern still
   destructures the struct's fields directly, never through the fn.)
   Nested patterns (incl. nested nullary variants like `Some(None)`) + **or-patterns** (`p1 | p2`; every
-  alternative must bind the same variables; a full enum or-pattern is exhaustive without `_`, but the
-  open int/str/bool domains — including `true | false` — still require a `_`). User-enum variants are
+  alternative must bind the same variables; a full enum or-pattern is exhaustive without `_`, and so is
+  `true | false` on a bool scrutinee — the open int/str domains still require a `_`). User-enum variants are
   **scoped under their enum** and must be written **qualified** as `Enum.Variant` (value, constructor,
   or `match` arm); a bare user-variant name is a compile error. Because variants are per-enum, two
   enums may share a variant name (`Color.Red` / `Light.Red`). The built-in `Ok`/`Err`/`Some`/`None`

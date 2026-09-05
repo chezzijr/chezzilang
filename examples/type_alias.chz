@@ -21,3 +21,7 @@ print(label(u))
 
 scores: Score = {"ada": 10, "bo": 7}
 print(scores["ada"] + scores["bo"])
+
+type Uid = User
+u2 := Uid(7, "bo")     # alias in expression (ctor) position
+print(label(u2))

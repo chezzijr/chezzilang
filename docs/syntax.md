@@ -2582,6 +2582,32 @@ type Scores = Map[str, int]
 uid: UserId = 7        # UserId and int are the same type
 ```
 
+An alias of an enum or struct also resolves in EXPRESSION and PATTERN position — a variant/struct
+constructor, a static method call, and a variant pattern all resolve through it — not just type
+position:
+
+```chezzi
+enum E:
+    A(int)
+    B
+struct P:
+    x: int
+    fn zero() -> P:
+        return P(0)
+type F = E
+type Q = P
+F.A(5)            # variant ctor
+match F.A(5):
+    F.A(n): print(n)   # variant pattern
+    F.B: print("b")
+Q(1)               # struct ctor
+Q.zero()           # static method
+```
+
+This hop is LOCAL only — an alias of a `from`-imported type works, but a `from`-imported ALIAS itself
+(`from m import F` where `m` declares `type F = E`) is not yet usable this way, and neither is a
+qualified `m.F.A(5)`.
+
 **Newtypes** (`newtype Name = <type>`, M21) are the *distinct-type* counterpart to a transparent
 `type` alias: `Name` wraps the underlying type but is a **separate, nominal** type that does NOT
 silently mix with the raw underlying (Go's "defined type" model). The point is to catch accidental
@@ -3037,8 +3063,10 @@ match safe_div(10, 2):
     Err(e): print("failed: {e}")
 ```
 
-A scrutinee can also be an **int/str/bool** (literal arms + a required `_` wildcard), a **tuple**, or
-a **struct** (destructured positionally — see below). Patterns **nest**: a variant payload, tuple
+A scrutinee can also be an **int/str** (literal arms, always needing a `_` wildcard), a **bool**
+(exhaustive once unguarded `true` and `false` arms both appear, no `_` needed — an `_` after both then
+warns as unreachable), a **tuple**, or a **struct** (destructured positionally — see below). Patterns
+**nest**: a variant payload, tuple
 element, or struct field may itself be a binding, a literal, a wildcard, a tuple, a struct, or another
 variant — including a **nested nullary variant** like the `None` in `Some(None)` (a refutable variant
 match, not a binding).
