@@ -2613,15 +2613,24 @@ fn a_carrier_write_that_agrees_with_its_pin_is_accepted() {
     ok("x := None\ny: Option[str] = x\nspawn:\n    x = Some(1)\nprint(y)\n");
 }
 
-/// A write REPINS the binding, so a later read is checked against the NEW payload type, and the
-/// binding's method surface (`unwrap`) resolves after a write instead of staying `Option[?]`.
+/// A write REPINS the binding, so a later read is checked against the NEW payload type and a `match`
+/// arm binds a CONCRETE payload instead of staying `Option[?]`.
+/// `Option` has NO methods in this language, debug-asserted at `src/checker/setup.rs:930`, so an
+/// `unwrap()` call never resolves on a pinned binding either.
+/// The read-side evidence is therefore a `match` arm, never a method call.
 #[test]
 fn a_carrier_write_repins_the_binding_for_later_reads() {
     rejects(
         "x := None\nx = Some(1)\ny: Option[str] = x\nprint(y)\n",
         "cannot assign Option[int] to variable of type Option[str]",
     );
-    ok("x := None\nx = Some(1)\nprint(x.unwrap() + 1)\n");
+    rejects(
+        "x := None\nx = Some(1)\nmatch x:\n    Some(v):\n        print(v + \"s\")\n    None:\n        print(0)\n",
+        "cannot apply + to int and str",
+    );
+    ok(
+        "x := None\nx = Some(1)\nmatch x:\n    Some(v):\n        print(v + 1)\n    None:\n        print(0)\n",
+    );
 }
 
 /// Whether an assignment PINS its source must be a property of that statement alone. Gating the

@@ -477,11 +477,16 @@ test fn a_carrier_inside_a_closure_argument_still_lowers():
 
 # ---- 15: TICKET-064 — a write after the first constraining use pins the payload ----
 #
-# `x := None` was a checker rejection for `x.unwrap()` before the fix (`type Option[?] has no
-# method 'unwrap'`), because a never-written binding stayed at `Option[Unknown]` forever. A write
-# now REPINS the binding to the concrete payload type it wrote, so the method surface resolves.
+# A write REPINS the binding to the concrete payload type it wrote, so a later `match` arm binds a
+# concrete payload instead of `Option[Unknown]`. This file runs the SHAPE; the checker verdict lives
+# in `src/checker/tests.rs::a_carrier_write_repins_the_binding_for_later_reads`.
 
 test fn a_written_none_carries_its_payload_type():
     x := None
     x = Some(1)
-    assert x.unwrap() + 1 == 2
+    match x:
+        Some(v):
+            assert v + 1 == 2, "got {v}"
+        None:
+            assert false, "x was written to Some(1)"
+    assert (x ?? 0) + 1 == 2, "got {x ?? 0}"
