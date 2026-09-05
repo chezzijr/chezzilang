@@ -72,22 +72,13 @@ fn count(s: str, sub: str) -> int:
             i += 1
     return n
 
-# Replace every non-overlapping occurrence of `old` in `s` with `new`, left to right. An empty
-# `old` returns `s` unchanged (replacing it would loop forever). Replaced text is never re-scanned.
+# Replace every non-overlapping occurrence of `old` in `s` with `new`, left to right. Delegates to
+# the native `str.replace` receiver method (`src/vm/call.rs:2978`), the same move `repeat` and
+# `pad_left` made on 2026-08-18: the native arm already returns `s` unchanged for an empty `old`
+# (`src/vm/call.rs:2982`), where CPython's `str.replace("", X)` would interleave, so both spellings
+# stay byte-identical. Replaced text is never re-scanned.
 fn replace(s: str, old: str, new: str) -> str:
-    m := old.len()
-    if m == 0:
-        return s
-    out := ""
-    i := 0
-    while i < s.len():
-        if i + m <= s.len() and s[i : i + m] == old:
-            out = out + new
-            i += m
-        else:
-            out = out + s[i]
-            i += 1
-    return out
+    return s.replace(old, new)
 
 # Remove `p` from the front of `s` if present, else return `s` unchanged.
 fn strip_prefix(s: str, p: str) -> str:
