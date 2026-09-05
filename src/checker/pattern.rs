@@ -757,10 +757,23 @@ impl Checker {
         }
     }
 
+    /// `bool` is the ONE closed literal domain — `int`/`str` are infinite and still need a `_`.
+    /// `covered` only ever receives an UNGUARDED arm's key (see the `else if !guarded` gate above),
+    /// so a guarded `true if c:` never closes the domain. Feeds `has_wildcard` in the three arm
+    /// loops, which is also what `warn_unreachable_arm` reads one arm later — closing the domain
+    /// this way both removes the false rejection and warns on a following `_`, matching rustc.
+    fn bool_domain_closed(kind: &MatchKind, covered: &std::collections::HashSet<String>) -> bool {
+        matches!(kind, MatchKind::Literal(Ty::Bool))
+            && covered.contains("lit:btrue")
+            && covered.contains("lit:bfalse")
+    }
+
     /// Report a non-exhaustive match.
     /// - Variants mode: missing variants, unless a `_` wildcard was seen.
-    /// - Literal mode: int/str/bool literal domains are open, so a `_` wildcard is *required*
-    ///   (we do NOT special-case `true`+`false` closing the bool domain — keeping one rule).
+    /// - Literal mode: int/str literal domains are open, so a `_` wildcard is *required*. `bool`'s
+    ///   two-value domain is closed by unguarded `true` and `false` arms (see `bool_domain_closed`),
+    ///   which reach here as `has_wildcard` — so a bool match covering both values takes the
+    ///   early `has_wildcard` return above and never reaches this arm.
     /// - Skip mode: un-inferable scrutinee, no exhaustiveness check.
     pub(super) fn check_exhaustive(
         &mut self,
@@ -981,6 +994,7 @@ impl Checker {
                 self.expect_bool(guard, "match guard");
             }
             has_wildcard |= irref && arm.guard.is_none();
+            has_wildcard |= Self::bool_domain_closed(&kind, &covered);
             for stmt in &arm.body {
                 self.check_stmt(stmt);
             }
@@ -1025,6 +1039,7 @@ impl Checker {
                 self.expect_bool(guard, "match guard");
             }
             has_wildcard |= irref && arm.guard.is_none();
+            has_wildcard |= Self::bool_domain_closed(&kind, &covered);
             self.expected_hint = hint.clone();
             let t = self.infer(&arm.body);
             self.pop_scope();
@@ -1840,6 +1855,7 @@ impl Checker {
                 self.expect_bool(guard, "match guard");
             }
             has_wildcard |= irref && arm.guard.is_none();
+            has_wildcard |= Self::bool_domain_closed(&kind, &covered);
             // `match_tail_is_value` guarantees a non-empty body with a trailing `Expr`.
             let (last, init) = arm
                 .body

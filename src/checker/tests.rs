@@ -8257,6 +8257,63 @@ fn w10_4_type_alias_resolves_in_enum_variant_pattern() {
 }
 
 #[test]
+fn bool_match_expression_both_arms_no_wildcard_is_exhaustive() {
+    ok("b := true\nx := match b:\n    true: 1\n    false: 2\n");
+}
+
+#[test]
+fn bool_match_one_arm_without_wildcard_still_rejected() {
+    rejects(
+        "b := true\nmatch b:\n    true: print(\"t\")\n",
+        "non-exhaustive match: add a `_` arm",
+    );
+}
+
+#[test]
+fn bool_match_guarded_true_arm_does_not_close_domain() {
+    rejects(
+        "b := true\nmatch b:\n    true if b: print(\"t\")\n    false: print(\"f\")\n",
+        "non-exhaustive match: add a `_` arm",
+    );
+}
+
+#[test]
+fn bool_match_wildcard_after_both_literals_warns() {
+    warns(
+        "b := true\nmatch b:\n    true: print(\"t\")\n    false: print(\"f\")\n    _: print(\"o\")\n",
+        "unreachable match arm",
+    );
+}
+
+#[test]
+fn bool_match_binding_arm_after_both_literals_warns() {
+    warns(
+        "b := true\nmatch b:\n    true: print(\"t\")\n    false: print(\"f\")\n    other: print(other)\n",
+        "unreachable match arm",
+    );
+}
+
+#[test]
+fn bool_match_both_literals_no_extra_arm_no_warn() {
+    no_warn("b := true\nmatch b:\n    true: print(\"t\")\n    false: print(\"f\")\n");
+}
+
+#[test]
+fn bool_match_guarded_true_then_wildcard_no_warn() {
+    no_warn(
+        "b := true\nmatch b:\n    true if b: print(\"t\")\n    false: print(\"f\")\n    _: print(\"o\")\n",
+    );
+}
+
+#[test]
+fn int_match_two_literals_without_wildcard_still_rejected() {
+    rejects(
+        "n := 1\nmatch n:\n    0: print(\"z\")\n    1: print(\"o\")\n",
+        "non-exhaustive match: add a `_` arm",
+    );
+}
+
+#[test]
 fn match_expression_int_float_const_mix_widens() {
     ok("x := match true:\n    true: 1\n    _: 2.5\ny := x + 0.5\n");
 }
@@ -17846,13 +17903,13 @@ fn enum_or_pattern_exhaustive_without_wildcard() {
 }
 
 #[test]
-fn bool_or_not_exhaustive() {
-    // `true | false` does NOT close the bool domain — a `_` is still required (resolved decision:
-    // one rule, no bool special-case). Asserts the existing exhaustiveness rule is preserved.
-    rejects(
-        "b := true\nmatch b:\n    true | false: print(\"b\")\n",
-        "non-exhaustive",
-    );
+fn bool_or_pattern_closes_the_domain() {
+    // `true | false` closes the bool domain by the SAME mechanism as two separate arms: the
+    // or-pattern arm threads `covered` through every alternative (src/checker/pattern.rs:348), so
+    // both `lit:btrue` and `lit:bfalse` land in `covered` here. rustc accepts
+    // `match b { true | false => .. }`, so this is not a special case, just the same rule applied
+    // to an or-pattern's alternatives.
+    ok("b := true\nmatch b:\n    true | false: print(\"b\")\n");
 }
 
 #[test]
