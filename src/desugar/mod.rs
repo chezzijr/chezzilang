@@ -3043,6 +3043,18 @@ mod tests {
         );
     }
 
+    // TICKET-066 W10-17: a named argument for a parameter that PRECEDES a variadic is falsely
+    // rejected as "missing required argument", even though it IS supplied. Named args work with no
+    // variadic present (`missing_required_with_named_errors` above passes), and a post-variadic
+    // keyword param works too; only a PRE-variadic named param is broken.
+    #[test]
+    fn named_arg_before_variadic_is_not_missing() {
+        desugar_ok("fn f(a: int, ...rest: int) -> int:\n    return a + rest.len()\nr := f(a=1)\n");
+        desugar_ok(
+            "fn g(a: int, b: int, ...r: int) -> int:\n    return a + b + r.len()\nr1 := g(1, b=2)\nr2 := g(b=2, a=1)\n",
+        );
+    }
+
     #[test]
     fn named_on_value_call_left_intact_for_checker() {
         // Swift-style keyword args through a function VALUE: a value call (Ident/expr callee) carrying

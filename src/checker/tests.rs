@@ -30969,3 +30969,32 @@ fn ticket_054_protocol_receiver_widens_through_generic_witness() {
         "argument 1 of 'm2': expected float, found int",
     );
 }
+
+// TICKET-066 W10-3: a module-qualified turbofish on a NULLARY enum variant (no call) is falsely
+// rejected. `Box[int].Full(1)` (a call) and the un-qualified `Box[int].Empty` (via `import Box from
+// lib`) both work; only the qualified no-call bare-member shape falls into the index path and
+// reports "module 'lib' has no member 'Box'".
+#[test]
+fn ticket_066_qualified_turbofish_nullary_variant() {
+    files_ok(&[
+        ("lib.chz", "enum Box[T]:\n    Full(T)\n    Empty\n"),
+        (
+            "main.chz",
+            "import lib\nx := lib.Box[int].Empty\nprint(x)\n",
+        ),
+    ]);
+}
+
+// TICKET-066 W10-17: a named argument for a parameter that PRECEDES a variadic. See the desugar
+// test `named_arg_before_variadic_is_not_missing` (src/desugar/mod.rs) — the false rejection is
+// raised by desugar, before the checker ever sees the call.
+
+// TICKET-066 W10-20: docs/syntax.md:1503 and docs/spec.md:314 claim `fn(): nil` is a no-op closure.
+// There is NO working spelling of an empty closure today: the documented one fails with "unknown
+// name 'nil'" (there is no value-level `nil`), and the natural alternative `fn(): pass` fails too
+// ("unexpected 'pass' in expression" -- a single-line closure body must be an expression). This
+// pins the fix's target: at least ONE spelling must compile and call as a no-op.
+#[test]
+fn ticket_066_noop_closure_has_no_working_spelling() {
+    entry_ok("f := fn(): pass\nf()\n");
+}
