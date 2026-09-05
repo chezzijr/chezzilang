@@ -162,16 +162,50 @@ impl Checker {
             .unwrap_or_else(|| name.to_string())
     }
 
-    /// Resolve a LOCAL (`self.aliases`) type alias's body, read-only. Only aliases declared by a
-    /// `type` statement IN THIS MODULE hop — never `imported_alias_tys` (a `from`-imported alias):
-    /// the compiler cannot reach the defining module's alias body during `compile_module`, so hopping
-    /// there in the checker alone would accept a program the compiler can't lower. A cyclic alias
-    /// resolves to `Ty::Unknown` through `resolve_ty_ro`'s depth-64 cap, so callers below yield `None`
-    /// on a cycle and `resolve_type`'s `recursive type alias` stays the only cycle diagnostic.
+    /// Resolve a LOCAL (`self.aliases`) type alias's body, read-only, to a nominal (struct/enum/
+    /// newtype) head — mirrors the compiler's `bare_types` re-point in `compile_module`
+    /// (`src/compiler/mod.rs:1341-1368`) EXACTLY, because that re-point is what makes the resolved
+    /// name lowerable. That walk only ever follows a `Type::Named`/`Type::Generic` head through a
+    /// chain of LOCAL aliases, capped at 64, so this does too: a `Type::Qualified` body (`type P =
+    /// geo.Point`) stops immediately (`None`), and a from-imported alias name is never chased (the
+    /// walk only re-enters `self.aliases`, never `imported_alias_tys`) — hopping either would accept
+    /// a program the compiler can't lower (a review-caught check-OK-then-compile-miss, TICKET-065). A
+    /// cyclic alias also yields `None`: the checker already rejects it as `recursive type alias`
+    /// (`resolve_type`), which stays the only cycle diagnostic.
     pub(super) fn alias_body_ty(&self, name: &str) -> Option<Ty> {
-        self.aliases
-            .get(name)
-            .map(|b| self.resolve_ty_ro(&b.clone()))
+        let mut head = name.to_string();
+        let mut targs: Vec<Ty>;
+        let mut depth = 0;
+        loop {
+            let body = self.aliases.get(&head)?;
+            match body {
+                Type::Named { name: n, .. } => {
+                    head = n.clone();
+                    targs = Vec::new();
+                }
+                Type::Generic(n, args, ..) => {
+                    head = n.clone();
+                    targs = args.iter().map(|a| self.resolve_ty_ro(a)).collect();
+                }
+                _ => return None,
+            }
+            depth += 1;
+            if depth > 64 {
+                return None;
+            }
+            if !self.aliases.contains_key(&head) {
+                break;
+            }
+        }
+        if self.struct_names.contains(&head) {
+            Some(Ty::Struct(self.bare_key(&head), targs))
+        } else if self.enum_names.contains(&head) {
+            Some(Ty::Enum(self.bare_key(&head), targs))
+        } else if self.newtype_names.contains(&head) {
+            Some(Ty::NewType(self.bare_key(&head), targs))
+        } else {
+            None
+        }
     }
 
     /// An alias whose body is an enum instantiation: `(identity key, pinned type args)`. `None` for

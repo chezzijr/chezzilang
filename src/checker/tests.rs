@@ -8301,6 +8301,34 @@ fn alias_variant_typo_names_the_alias() {
     );
 }
 
+/// TICKET-065 review finding: an alias of a QUALIFIED type (`type P = geo.Point`) must stay
+/// unresolved in expression position — the compiler's `bare_types` re-point only chases a
+/// `Type::Named`/`Type::Generic` head, never `Type::Qualified`, so accepting this here would be
+/// check-OK-then-compile-miss.
+#[test]
+fn alias_of_qualified_type_is_not_a_constructor() {
+    files_reject(
+        &[
+            ("geo.chz", "struct Point:\n    x: int\n    y: int\n"),
+            ("main.chz", "import geo\ntype P = geo.Point\nx := P(1, 2)\n"),
+        ],
+        "unknown name 'P'",
+    );
+}
+
+/// TICKET-065 review finding: an alias of a QUALIFIED enum (`type F = geo.E`) must stay
+/// unresolved in a variant call — same reasoning as `alias_of_qualified_type_is_not_a_constructor`.
+#[test]
+fn alias_of_qualified_enum_variant_is_not_resolved() {
+    files_reject(
+        &[
+            ("geo.chz", "enum E:\n    A(int)\n"),
+            ("main.chz", "import geo\ntype F = geo.E\nz := F.A(5)\n"),
+        ],
+        "unknown name 'F'",
+    );
+}
+
 #[test]
 fn bool_match_expression_both_arms_no_wildcard_is_exhaustive() {
     ok("b := true\nx := match b:\n    true: 1\n    false: 2\n");
