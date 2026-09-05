@@ -905,6 +905,10 @@ pub enum ExprKind {
     /// variant only so the runtime bypasses the `{expr}` interpolation pass entirely (correct by construction).
     RawStr(String),
     Bool(bool),
+    /// `fn(): pass` — the no-op closure body. Produced ONLY by `Parser::parse_closure`; `pass`
+    /// stays statement-only everywhere else (`StmtKind::Pass`). Types as `Ty::Nil`, lowers to
+    /// `Op::Nil` — a leaf, byte-identical at runtime to any other nil-valued expression.
+    Pass,
     Ident(String),
     /// `[a, b, c]` — plus the node's ORIGIN, which is `None` for every list the user wrote and
     /// `Some(callee_key_span)` for the ONE synthesized list in the compiler: the variadic argument
@@ -1163,6 +1167,7 @@ pub fn expr_recover_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
         | ExprKind::Bytes(_)
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_)
+        | ExprKind::Pass
         | ExprKind::Ident(_)
         // A type-application head carries only `Type`s (no sub-expressions, no recover blocks).
         | ExprKind::TypeApply { .. } => {}

@@ -1250,7 +1250,8 @@ fn walk_idents_and_types(e: &Expr, f: &mut impl FnMut(&str), tf: &mut impl FnMut
         | ExprKind::Float(_)
         | ExprKind::Bytes(_)
         | ExprKind::RawStr(_)
-        | ExprKind::Bool(_) => {}
+        | ExprKind::Bool(_)
+        | ExprKind::Pass => {}
         // A type-application head names a TYPE (not a value reference); its args are `Type`s.
         ExprKind::TypeApply { args, .. } => args.iter().for_each(tf),
         // A fragment identifier IS a reference (`"{a}"` reads `a`), so descend. Reached once
@@ -2115,7 +2116,8 @@ impl Walker<'_> {
             | ExprKind::RawStr(_)
             // A type-application head holds only `Type`s — nothing to walk; the checker consumes it.
             | ExprKind::TypeApply { .. }
-            | ExprKind::Bool(_) => {}
+            | ExprKind::Bool(_)
+            | ExprKind::Pass => {}
         }
 
         // Now normalize this node if it is a resolvable call.
@@ -2468,11 +2470,51 @@ impl Walker<'_> {
             };
             let mut positional: Vec<Option<Expr>> =
                 std::mem::take(args).into_iter().map(Some).collect();
+            let np = positional.len();
             let named_list = std::mem::take(named);
             let mut out: Vec<Expr> = Vec::with_capacity(params.len());
-            // Pre-variadic slots (indices 0..v): one positional each, else its default, else error.
+            // Bind named args BEFORE filling pre-variadic slots, exactly like the non-variadic path:
+            // a name for a pre-variadic parameter (idx < v) binds it, just as CPython does. Only the
+            // variadic slot itself (idx == v) is unnameable (it collects the positional surplus); a
+            // keyword-only tail slot (idx > v) goes to `kw`, unchanged.
+            let mut pre_kw: HashMap<usize, Expr> = HashMap::new();
+            let mut kw: HashMap<String, Expr> = HashMap::new();
+            for (n, e) in named_list {
+                match params.iter().position(|p| p.name == n) {
+                    None => return Err(err(span, format!("unknown named argument '{n}'"))),
+                    Some(idx) if idx == v => {
+                        return Err(err(
+                            span,
+                            format!(
+                                "argument '{n}' is the variadic parameter and cannot be passed by name (it collects the surplus positionals)"
+                            ),
+                        ));
+                    }
+                    Some(idx) if idx < v => {
+                        if idx < np {
+                            return Err(err(
+                                span,
+                                format!("argument '{n}' specified both positionally and by name"),
+                            ));
+                        }
+                        if pre_kw.insert(idx, e).is_some() {
+                            return Err(err(span, format!("duplicate named argument '{n}'")));
+                        }
+                    }
+                    Some(_) => {
+                        if kw.insert(n.clone(), e).is_some() {
+                            return Err(err(span, format!("duplicate named argument '{n}'")));
+                        }
+                    }
+                }
+            }
+            // Pre-variadic slots (indices 0..v): one positional each, else a name, else its default,
+            // else error.
             for (i, pspec) in params.iter().enumerate().take(v) {
-                let supplied = positional.get_mut(i).and_then(Option::take);
+                let supplied = positional
+                    .get_mut(i)
+                    .and_then(Option::take)
+                    .or_else(|| pre_kw.remove(&i));
                 match supplied {
                     Some(e) => out.push(e),
                     None => match &pspec.default {
@@ -2496,27 +2538,6 @@ impl Walker<'_> {
                 kind: ExprKind::List(elems, Some(pack_origin)),
                 span,
             });
-            // Keyword-only tail (indices v+1..): named args may name ONLY these slots. Naming the
-            // variadic itself or a pre-variadic slot is an error (they are positional).
-            let mut kw: HashMap<String, Expr> = HashMap::new();
-            for (n, e) in named_list {
-                match params.iter().position(|p| p.name == n) {
-                    None => return Err(err(span, format!("unknown named argument '{n}'"))),
-                    Some(idx) if idx <= v => {
-                        return Err(err(
-                            span,
-                            format!(
-                                "argument '{n}' is positional (it is at or before the variadic parameter) and cannot be passed by name"
-                            ),
-                        ));
-                    }
-                    Some(_) => {
-                        if kw.insert(n.clone(), e).is_some() {
-                            return Err(err(span, format!("duplicate named argument '{n}'")));
-                        }
-                    }
-                }
-            }
             for pspec in params.iter().skip(v + 1) {
                 if let Some(e) = kw.remove(&pspec.name) {
                     out.push(e);
@@ -3052,6 +3073,24 @@ mod tests {
         desugar_ok("fn f(a: int, ...rest: int) -> int:\n    return a + rest.len()\nr := f(a=1)\n");
         desugar_ok(
             "fn g(a: int, b: int, ...r: int) -> int:\n    return a + b + r.len()\nr1 := g(1, b=2)\nr2 := g(b=2, a=1)\n",
+        );
+    }
+
+    #[test]
+    fn named_arg_at_or_after_the_variadic_is_rejected() {
+        assert!(
+            desugar_err(
+                "fn f(a: int, ...rest: int) -> int:\n    return a + rest.len()\nr := f(1, rest=2)\n"
+            )
+            .message
+            .contains("is the variadic parameter and cannot be passed by name")
+        );
+        assert!(
+            desugar_err(
+                "fn f(a: int, ...rest: int) -> int:\n    return a + rest.len()\nr := f(1, a=2)\n"
+            )
+            .message
+            .contains("specified both positionally and by name")
         );
     }
 

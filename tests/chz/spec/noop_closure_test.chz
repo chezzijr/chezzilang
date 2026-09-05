@@ -1,0 +1,13 @@
+# TICKET-066 W10-20: docs promised `fn(): nil` as a no-op closure spelling; neither that nor the
+# natural alternative `fn(): pass` compiled. `fn(): pass` is now the working spelling.
+fn run(g: fn() -> nil):
+    g()
+
+test fn noop_closure_calls_without_effect():
+    f := fn(): pass
+    f()
+    assert true, "reaching here proves the call did not fault"
+
+test fn noop_closure_accepted_where_a_fn_param_is_expected():
+    run(fn(): pass)
+    assert true, "a `fn(): pass` value satisfies a `fn()` parameter and calls as a no-op"

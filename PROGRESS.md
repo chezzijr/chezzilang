@@ -76,6 +76,32 @@ Single source of truth for "what am I doing next." Update after every work sessi
   `runtime error (repro.chz:4:1): deadlock: every task in this parallel: block is blocked on a
   channel it cannot proceed on (an empty recv() or a full send()) and no sibling can unblock it — the
   nursery cannot progress`, rc=1, measured at both worker counts.
+- **TICKET-066 (2026-09-05) — three parser/desugar false rejections fixed (`docs/gaps.md` W10-3,
+  W10-17, W10-20).** (1) A module-qualified turbofish on a NULLARY variant used as a VALUE
+  (`mod.Box[int].Empty`, no call) reported `module 'lib' has no member 'Box'` — a whole-module import
+  keys the enum into `self.enums`/`self.variants` under `type_key(mid, name)` but never into the bare
+  `enum_names` visibility set, and the checker's `type_apply_head` gate
+  (`src/checker/pattern.rs`) tested only the bare set. Fixed by widening the gate to also test
+  `self.enums.contains_key(&ekey)`, plus a matching lowering branch in `Compiler::compile_expr`'s
+  `ExprKind::Field` arm keyed by `qualified_turbofish_key` (`src/compiler/mod.rs`). (2) A named
+  argument for a parameter that PRECEDES a variadic (`fn f(a, ...rest): …` then `f(a=1)`) false-
+  rejected as `missing required argument 'a'` — `desugar::normalize_call`'s variadic branch filled
+  pre-variadic slots from positionals before reading `named`. Fixed by binding named args BEFORE
+  the pre-variadic fill loop, exactly like the non-variadic path; only the variadic slot itself is
+  now unnameable, matching CPython (measured 3.14.7: `f(a=1)` → `1`, `g(1, b=2)` → `3`,
+  `g(b=2, a=1)` → `3`). (3) There was no working no-op closure spelling: the previously-documented
+  form using a bare `nil` value failed (no value-level `nil`), and the natural alternative
+  `fn(): pass` was a parse error. Fixed by
+  a new leaf `ExprKind::Pass`, produced only by `Parser::parse_closure`, typed `Ty::Nil`
+  (`Checker::infer_kind`), lowered to `Op::Nil` (`Compiler::compile_expr`) — 9 non-exhaustive-match
+  compile errors across `src/checker/pattern.rs`, `src/compiler/mod.rs` (5 sites),
+  `src/desugar/mod.rs` (2 sites) and `src/editor/mod.rs` fixed as leaf `|` arms. `docs/grammar.bnf`'s
+  `<closure>` production now allows a `<closureBody> ::= <expr> | "PASS"`, and
+  `tests/corpus/accept/closures.chz` gained a `fn(): pass` line so `cargo test conformance` covers it.
+  `docs/syntax.md`/`docs/spec.md` now name `fn(): pass` as the no-op closure spelling instead of the
+  previous broken form. `cargo test --lib`: 4537 passed/0 failed before (repro-only), 4541 passed/0
+  failed after (4 new checker/desugar/parser tests); `cargo test` green at both worker counts;
+  `cargo test conformance` and `cargo clippy -- -D warnings` clean.
 - **TICKET-065 (2026-09-05) — two checker false rejections fixed (`docs/gaps.md` W10-2, W10-4).**
   (1) A `match` on `bool` with both `true` and `false` arms and no `_` was `non-exhaustive match: add
   a `_` arm` — `check_exhaustive`'s `MatchKind::Literal` arm treated `bool` like the infinite `int`/
@@ -8455,9 +8481,10 @@ collided with `pass`-as-variable + `protocol pass:`). Three roles off the single
 - **No-op statement (`StmtKind::Pass`):** modeled on `Break`/`Continue` — parse arm, checker no-op arm,
   compiler emits NOTHING, interp returns `Flow::Normal`, desugar/editor no-op arms. Valid in every
   statement-block position (fn/method body, if/elif/else, for/while, statement-match arm, concurrency
-  blocks). A lone-`pass` fn body == a lone-`return` body (falls off end → nil). Statement-only (not
-  valid in a closure / expression-match arm — those are single-expression positions; a no-op closure
-  is `fn(): nil`). Two-engine byte-identical (compiles to no bytecode).
+  blocks). A lone-`pass` fn body == a lone-`return` body (falls off end → nil). Statement-only, not
+  valid in an expression-match arm (a single-expression position) — EXCEPT a closure body right
+  after `:` (`fn(): pass`, `ExprKind::Pass`, TICKET-066), which is the no-op closure spelling: typed
+  `Ty::Nil`, lowered to `Op::Nil`. Two-engine byte-identical (compiles to no bytecode).
 - **Empty protocol body:** `protocol Foo:` + a SOLE `pass` line = zero methods/embeds → an accept-all
   TOP type (structural ⇒ every type satisfies it). REUSES the existing empty-protocol short-circuit in
   `satisfies_args_d`; NO satisfaction change. A user empty protocol behaves byte-identically to `Any`

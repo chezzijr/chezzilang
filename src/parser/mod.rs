@@ -3085,7 +3085,16 @@ impl Parser {
             None
         };
         self.expect(&Token::Colon)?;
-        let body = self.parse_expr()?;
+        let body = if self.check(&Token::Pass) {
+            let pass_span = self.cur_span();
+            self.advance();
+            Expr {
+                kind: ExprKind::Pass,
+                span: pass_span,
+            }
+        } else {
+            self.parse_expr()?
+        };
         Ok(Expr {
             kind: ExprKind::Closure {
                 params,
@@ -3302,6 +3311,17 @@ mod tests {
         };
         assert_eq!(d.body.len(), 1);
         assert_eq!(d.body[0].kind, StmtKind::Pass);
+    }
+
+    #[test]
+    fn closure_body_pass_parses() {
+        let StmtKind::Let { value, .. } = only("f := fn(): pass\n") else {
+            panic!("expected a let");
+        };
+        let ExprKind::Closure { body, .. } = value.kind else {
+            panic!("expected a closure");
+        };
+        assert_eq!(body.kind, ExprKind::Pass);
     }
 
     #[test]

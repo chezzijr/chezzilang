@@ -4002,6 +4002,7 @@ impl Compiler {
             ExprKind::Int(n) => fc.emit(Op::ConstInt(*n), expr.span),
             ExprKind::Float(x) => fc.emit(Op::ConstFloat(*x), expr.span),
             ExprKind::Bool(b) => fc.emit(if *b { Op::True } else { Op::False }, expr.span),
+            ExprKind::Pass => fc.emit(Op::Nil, expr.span),
             ExprKind::Str(raw) => self.compile_str(fc, raw, expr.span)?,
             // The desugared form: fragments are already-parsed, already-normalized children.
             ExprKind::Interp(chunks) => self.compile_interp(fc, chunks, expr.span)?,
@@ -4188,6 +4189,27 @@ impl Compiler {
                         .is_some_and(|d| d.arity == 0)
                 {
                     let variant_id = self.variant_id_of_key(&ekey, name);
+                    fc.emit(
+                        Op::NewEnum {
+                            variant: name.clone(),
+                            variant_id,
+                            argc: 0,
+                        },
+                        expr.span,
+                    );
+                    return Ok(());
+                }
+                // `mod.Type[T…].Variant` (nullary, module-qualified declaration-site turbofish
+                // value form) → construct the variant. Byte-identical to the bare and unqualified-
+                // turbofish forms above; only the key lookup differs (module-qualified).
+                if let Some((_, key)) = self.qualified_turbofish_key(fc, &obj.kind)
+                    && self
+                        .program
+                        .variants
+                        .get(&(key.clone(), name.clone()))
+                        .is_some_and(|d| d.arity == 0)
+                {
+                    let variant_id = self.variant_id_of_key(&key, name);
                     fc.emit(
                         Op::NewEnum {
                             variant: name.clone(),
@@ -6684,6 +6706,7 @@ fn find_boundary_free_expr(e: &Expr, out: &mut HashSet<String>) {
         | ExprKind::Bytes(_)
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_)
+        | ExprKind::Pass
         | ExprKind::Ident(_)
         | ExprKind::TypeApply { .. } => {}
         ExprKind::List(es, _) | ExprKind::Tuple(es) | ExprKind::Set(es) => {
@@ -6967,6 +6990,7 @@ fn closed_expr(e: &Expr, bound: &HashSet<String>, heads: &mut Vec<String>) -> bo
         ExprKind::Int(_)
         | ExprKind::Float(_)
         | ExprKind::Bool(_)
+        | ExprKind::Pass
         | ExprKind::Str(_)
         | ExprKind::RawStr(_)
         | ExprKind::Interp(_)
@@ -7182,6 +7206,7 @@ pub(crate) fn free_names_expr(e: &Expr, bound: &HashSet<String>, out: &mut FreeN
         | ExprKind::Bytes(_)
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_)
+        | ExprKind::Pass
         | ExprKind::TypeApply { .. } => {}
         ExprKind::List(es, _) | ExprKind::Tuple(es) | ExprKind::Set(es) => {
             es.iter().for_each(|x| free_names_expr(x, bound, out))
@@ -7330,6 +7355,7 @@ fn collect_frame_binds_expr(e: &Expr, out: &mut HashSet<String>) {
         | ExprKind::Bytes(_)
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_)
+        | ExprKind::Pass
         | ExprKind::Ident(_)
         | ExprKind::TypeApply { .. } => {}
         ExprKind::List(es, _) | ExprKind::Tuple(es) | ExprKind::Set(es) => {
@@ -7525,6 +7551,7 @@ fn expr_has_bare_spawn(e: &Expr) -> bool {
         | ExprKind::Bytes(_)
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_)
+        | ExprKind::Pass
         | ExprKind::Ident(_)
         | ExprKind::TypeApply { .. } => false,
         ExprKind::Interp(chunks) => chunk_exprs(chunks).into_iter().any(expr_has_bare_spawn),

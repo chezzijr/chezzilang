@@ -30985,6 +30985,17 @@ fn ticket_066_qualified_turbofish_nullary_variant() {
     ]);
 }
 
+#[test]
+fn ticket_066_qualified_turbofish_unknown_variant_names_the_enum() {
+    files_reject(
+        &[
+            ("lib.chz", "enum Box[T]:\n    Full(T)\n    Empty\n"),
+            ("main.chz", "import lib\nx := lib.Box[int].Nope\nprint(x)\n"),
+        ],
+        "enum 'Box' has no variant 'Nope'",
+    );
+}
+
 // TICKET-066 W10-17: a named argument for a parameter that PRECEDES a variadic. See the desugar
 // test `named_arg_before_variadic_is_not_missing` (src/desugar/mod.rs) — the false rejection is
 // raised by desugar, before the checker ever sees the call.
@@ -30997,4 +31008,23 @@ fn ticket_066_qualified_turbofish_nullary_variant() {
 #[test]
 fn ticket_066_noop_closure_has_no_working_spelling() {
     entry_ok("f := fn(): pass\nf()\n");
+}
+
+// TICKET-066 W10-20 boundary: `pass` is legal ONLY as a closure body, right after `:`. It stays
+// statement-only everywhere else in expression position, including a closure whose return type
+// does not accept `nil`.
+#[test]
+fn ticket_066_pass_stays_statement_only_outside_a_closure_body() {
+    let toks = lexer::tokenize("x := pass\n").expect("lex should succeed");
+    let err = parser::parse(toks).expect_err("expected a parse error");
+    assert!(
+        err.message.contains("unexpected 'pass' in expression"),
+        "got: {}",
+        err.message
+    );
+
+    rejects(
+        "f := fn() -> int: pass\n",
+        "closure body has type nil, but its return type is int",
+    );
 }

@@ -1503,7 +1503,8 @@ for x in xs:
 ```
 
 `pass` is a **statement**, not an expression, so it is not valid where a single expression is
-expected — a closure (`fn(): …`) or an expression-position `match` arm. A no-op closure is `fn(): nil`.
+expected — an expression-position `match` arm. The one exception is a closure body right after
+`:` (`fn(): pass`), which is the no-op closure spelling.
 
 **(2) An empty-body marker for `protocol` and `struct`.** Protocol and struct bodies hold
 *declarations* (method signatures / fields), not statements, so a **sole** `pass` line there means

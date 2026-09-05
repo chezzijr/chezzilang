@@ -1,0 +1,7 @@
+enum Box[T]:
+    Full(T)
+    Empty
+
+enum Plain:
+    A
+    B

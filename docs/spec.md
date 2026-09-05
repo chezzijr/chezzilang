@@ -311,7 +311,7 @@ main()                                 # no auto-entry — `main` is a normal fn
 is a no-op valid in any statement position (empty fn/method body, `if`/`for`/`while` body, statement
 `match` arm, concurrency block) — a lone-`pass` body is identical to a lone `return` (runs, falls off
 the end, returns `nil`). It is statement-only, so it is not valid in a closure or an expression-match
-arm (a no-op closure is `fn(): nil`). As the **sole line** of a `protocol` or `struct` body it is an
+arm, EXCEPT a closure body right after `:` (`fn(): pass` is the no-op closure spelling). As the **sole line** of a `protocol` or `struct` body it is an
 empty-body marker: `protocol Name:` + `pass` is a zero-method **accept-all top type** (structural ⇒
 satisfied by every type — this is how `Any` itself is defined, and any user empty protocol behaves
 identically), and `struct Name:` + `pass` is a **zero-field struct** whose ctor `Name()` takes no args

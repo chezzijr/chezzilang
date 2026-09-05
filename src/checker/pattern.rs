@@ -1333,6 +1333,7 @@ impl Checker {
             ExprKind::RawStr(_) => Ty::Str, // verbatim `str`, no interpolation to check
             ExprKind::Bytes(_) => Ty::Bytes,
             ExprKind::Bool(_) => Ty::Bool,
+            ExprKind::Pass => Ty::Nil,
             ExprKind::Ident(name) => self.infer_ident(name, expr.span),
             ExprKind::List(items, origin) => {
                 // Consume any expected-type hint (a `List[E]` slot: an annotated `let`, a call
@@ -3388,10 +3389,13 @@ impl Checker {
         }
         // `Type[T…].Variant` used as a VALUE (no call) — the declaration-site turbofish on a nullary
         // variant: `Box[int].Empty`. Mirrors the bare `Enum.Variant` value form above, but returns
-        // the EXPLICIT type args (resolved), not `Unknown`. Both carriers (single-arg `Index`,
-        // multi-arg `TypeApply`) converge through `type_apply_head`.
+        // the EXPLICIT type args (resolved), not `Unknown`. Three carriers converge through
+        // `type_apply_head`: single-arg `Index`, multi-arg `TypeApply`, and the module-qualified
+        // form `Index{Field{Ident(mod), Type}, idx}` (`mod.Box[int]`) — a whole-module import keys
+        // that one into `self.enums`/`self.variants` under `type_key(mid, name)`, never into the
+        // bare `enum_names` visibility set, so the gate must also test the keyed table.
         if let Some((tname, ekey, type_exprs)) = self.type_apply_head(obj)
-            && self.enum_names.contains(&tname)
+            && (self.enum_names.contains(&tname) || self.enums.contains_key(&ekey))
         {
             let resolved: Vec<Ty> = type_exprs
                 .iter()

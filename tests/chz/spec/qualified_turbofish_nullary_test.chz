@@ -1,0 +1,15 @@
+# TICKET-066 W10-3: `mod.Box[int].Empty` (module-qualified turbofish on a NULLARY variant,
+# no call) used to false-reject with "module 'lib' has no member 'Box'" + "unknown name 'int'".
+import qualified_turbofish_nullary_lib
+
+test fn qualified_turbofish_nullary_variant_value():
+    x := qualified_turbofish_nullary_lib.Box[int].Empty
+    assert str(x) == "Empty", "unexpected: " + str(x)
+
+test fn qualified_turbofish_payload_call_still_works():
+    x := qualified_turbofish_nullary_lib.Box[int].Full(1)
+    assert str(x) == "Full(1)", "unexpected: " + str(x)
+
+test fn unqualified_nullary_variant_still_works():
+    x := qualified_turbofish_nullary_lib.Plain.A
+    assert str(x) == "A", "unexpected: " + str(x)

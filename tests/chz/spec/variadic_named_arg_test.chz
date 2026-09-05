@@ -1,0 +1,20 @@
+# TICKET-066 W10-17: a named argument for a parameter that PRECEDES a variadic used to
+# false-reject with "missing required argument 'a'". CPython 3.14.7 measured: f(a=1) -> 1,
+# g(1, b=2) -> 3, g(b=2, a=1) -> 3.
+fn f(a: int, ...rest: int) -> int:
+    return a + rest.len()
+
+fn g(a: int, b: int, ...r: int) -> int:
+    return a + b + r.len()
+
+test fn named_arg_binds_pre_variadic_param():
+    assert f(a=1) == 1, "expected 1, got " + str(f(a=1))
+
+test fn named_arg_binds_pre_variadic_param_with_positional_before_it():
+    assert g(1, b=2) == 3, "expected 3, got " + str(g(1, b=2))
+
+test fn named_args_in_reverse_order():
+    assert g(b=2, a=1) == 3, "expected 3, got " + str(g(b=2, a=1))
+
+test fn all_positional_still_works():
+    assert f(1, 2, 3) == 3, "expected 3, got " + str(f(1, 2, 3))

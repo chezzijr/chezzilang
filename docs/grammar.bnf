@@ -692,10 +692,14 @@
 # caught runtime fault). Reuses <block> (inline or indented).
 <recoverExpr> ::= "RECOVER" <block>
 
-<closure> ::= "FN" "LPAREN" "RPAREN" "COLON" <expr>
-            | "FN" "LPAREN" <params> "RPAREN" "COLON" <expr>
-            | "FN" "LPAREN" "RPAREN" "ARROW" <type> "COLON" <expr>
-            | "FN" "LPAREN" <params> "RPAREN" "ARROW" <type> "COLON" <expr>
+<closure> ::= "FN" "LPAREN" "RPAREN" "COLON" <closureBody>
+            | "FN" "LPAREN" <params> "RPAREN" "COLON" <closureBody>
+            | "FN" "LPAREN" "RPAREN" "ARROW" <type> "COLON" <closureBody>
+            | "FN" "LPAREN" <params> "RPAREN" "ARROW" <type> "COLON" <closureBody>
+
+# `PASS` is the no-op closure body (`fn(): pass`) — legal ONLY here, never in statement position
+# inside the closure's own body (which is a single expression, not a block).
+<closureBody> ::= <expr> | "PASS"
 
 <exprList> ::= <expr> | <expr> "COMMA" <exprList>
 
