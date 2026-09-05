@@ -3160,11 +3160,21 @@ impl Checker {
                 // value). Error messages keep the bare `en`.
                 let ekey = match module_ekey {
                     Some(k) => k,
-                    None => match self.bare_types.get(en) {
-                        Some(k) => k.clone(),
-                        None => match scrut_enum {
-                            Some(s) if crate::compiler::bare_display(s) == *en => s.to_string(),
-                            _ => en.to_string(),
+                    // `en` may be a LOCAL `type` alias of an enum (`type F = E`). Checked BEFORE
+                    // `bare_types`: a graph-mode module registers EVERY top-level type decl —
+                    // including a `type` alias — into `bare_types` under its OWN dead identity key
+                    // (`<module>::F`, a key no value carries — Gotcha 2's compiler-side twin), so a
+                    // `bare_types.get(en)` hit for an alias name would resolve to that dead key
+                    // instead of the aliased enum's real one. Its type arguments are discarded here —
+                    // the scrutinee already supplies those.
+                    None => match self.alias_enum_head(en) {
+                        Some((k, _)) => k,
+                        None => match self.bare_types.get(en) {
+                            Some(k) => k.clone(),
+                            None => match scrut_enum {
+                                Some(s) if crate::compiler::bare_display(s) == *en => s.to_string(),
+                                _ => en.to_string(),
+                            },
                         },
                     },
                 };
@@ -3297,6 +3307,48 @@ impl Checker {
                 ),
                 obj.span,
             );
+        }
+        // `Alias.Variant` used as a value: a LOCAL `type` alias of an enum dotted with one of its
+        // nullary variants. Mirrors the `Enum.Variant`-as-value block below, arm for arm, but keys
+        // on the alias's resolved identity + its pinned type arguments (`head_targs`) instead of
+        // `enum_type_params`'s count alone — a bare alias of a generic enum leaves the args Unknown,
+        // same as the bare-enum path.
+        if let ExprKind::Ident(aname) = &obj.kind
+            && !self.is_local_binding(aname)
+            && let Some((ekey, head_targs)) = self.alias_enum_head(aname)
+        {
+            let resolved = self
+                .variants
+                .get(&(ekey.clone(), name.to_string()))
+                .cloned();
+            match resolved {
+                Some(v) if v.payload.is_empty() => {
+                    let nparams = self.enum_type_params.get(&ekey).map_or(0, |t| t.len());
+                    return if head_targs.len() == nparams {
+                        Ty::Enum(ekey, head_targs)
+                    } else {
+                        Ty::Enum(ekey, vec![Ty::Unknown; nparams])
+                    };
+                }
+                Some(_) => {
+                    self.error(
+                        obj.span,
+                        format!(
+                            "variant '{name}' of enum '{aname}' carries a payload; construct it as {aname}.{name}(...)"
+                        ),
+                    );
+                    return Ty::Unknown;
+                }
+                None => {
+                    let names = self.variant_names(&ekey);
+                    self.error_help(
+                        name_span,
+                        format!("enum '{aname}' has no variant '{name}'"),
+                        suggest::did_you_mean(name, &names),
+                    );
+                    return Ty::Unknown;
+                }
+            }
         }
         // `Enum.Variant` used as a value: a bare *unbound* name that is an enum, dotted with one of
         // its nullary variants — sugar for the bare `Variant`. A real binding (struct/tuple/local

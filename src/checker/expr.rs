@@ -244,6 +244,48 @@ impl Checker {
                     span,
                 );
             }
+            // `Alias.Variant(args)` / `Alias.method(args)` — a LOCAL `type` alias of an enum or
+            // struct dotted with a member. VARIANT-FIRST, mirroring the `type_apply_head` arm below:
+            // look up the variant on the alias's resolved identity key first, falling back to a
+            // static call. `head_targs` (the alias body's pinned type arguments) is threaded through
+            // both, so `type IS = Box[str]; IS.of(3)` still infers against `Box[str]`, not `Box[int]`.
+            if let ExprKind::Ident(aname) = &obj.kind
+                && !self.is_local_binding(aname)
+                && let Some((key, head_targs)) = self
+                    .alias_enum_head(aname)
+                    .or_else(|| self.alias_struct_head(aname))
+            {
+                if let Some(v) = self.variants.get(&(key.clone(), name.to_string())).cloned() {
+                    if !targs.is_empty() {
+                        self.infer_all(args);
+                        self.error(
+                            span,
+                            format!("variant '{name}' of '{aname}' takes no method type arguments"),
+                        );
+                        return Ty::Unknown;
+                    }
+                    return self.infer_variant_call(
+                        &v,
+                        name,
+                        args,
+                        &head_targs,
+                        *name_span,
+                        span,
+                        expected,
+                    );
+                }
+                return self.infer_static_call(
+                    &key,
+                    aname,
+                    name,
+                    args,
+                    &head_targs,
+                    &targs,
+                    *name_span,
+                    span,
+                    expected,
+                );
+            }
             // `Enum.Variant(args)` — qualified payload-variant constructor. Same gate as the nullary
             // value form in `infer_field`: an unbound enum name dotted with one of its variants. The
             // bare-written enum name is gated by `enum_names` (bare visibility) and resolved to its
@@ -2007,11 +2049,28 @@ impl Checker {
                 // newtype. Mirrors the single-field struct ctor; only a BARE-resolvable newtype. A
                 // generic newtype (`Stack([1,2])` / turbofish `Stack[int]([])`) infers/takes its type
                 // args via `infer_newtype_call`.
-                if self.newtype_names.contains(name)
-                    && let key = self.bare_key(name)
+                if (self.newtype_names.contains(name) || self.alias_newtype_head(name).is_some())
+                    && let (key, head_targs) = self
+                        .alias_newtype_head(name)
+                        .unwrap_or_else(|| (self.bare_key(name), Vec::new()))
                     && (self.raw_ctor_owner.as_deref() == Some(key.as_str())
                         || !self.functions.contains_key(name))
                 {
+                    if !head_targs.is_empty() && !targs.is_empty() {
+                        self.infer_all(args);
+                        self.error(
+                            span,
+                            format!(
+                                "type alias '{name}' already fixes its type arguments; write the aliased type to pass your own"
+                            ),
+                        );
+                        return Some(Ty::Unknown);
+                    }
+                    let targs = if targs.is_empty() {
+                        head_targs.as_slice()
+                    } else {
+                        targs
+                    };
                     let under = self
                         .newtype_defs
                         .get(&key)
@@ -2031,8 +2090,10 @@ impl Checker {
                 // lives in `self.structs` for `m.S(...)`/field access, but its name is NOT in
                 // `struct_names`, so bare `S(...)` is not a constructor — it falls through to the
                 // unknown-name path (with an import hint).
-                if self.struct_names.contains(name)
-                    && let key = self.bare_key(name)
+                if (self.struct_names.contains(name) || self.alias_struct_head(name).is_some())
+                    && let (key, head_targs) = self
+                        .alias_struct_head(name)
+                        .unwrap_or_else(|| (self.bare_key(name), Vec::new()))
                     && (self.raw_ctor_owner.as_deref() == Some(key.as_str())
                         || !self.functions.contains_key(name))
                     && let Some((tps, fields, defaulted)) = self.structs.get(&key).map(|i| {
@@ -2043,6 +2104,21 @@ impl Checker {
                         )
                     })
                 {
+                    if !head_targs.is_empty() && !targs.is_empty() {
+                        self.infer_all(args);
+                        self.error(
+                            span,
+                            format!(
+                                "type alias '{name}' already fixes its type arguments; write the aliased type to pass your own"
+                            ),
+                        );
+                        return Some(Ty::Unknown);
+                    }
+                    let targs = if targs.is_empty() {
+                        head_targs.as_slice()
+                    } else {
+                        targs
+                    };
                     let field_tys: Vec<Ty> = fields.iter().map(|(_, t)| t.clone()).collect();
                     if tps.is_empty() {
                         // Struct ctor float fields are coerced per-field by the `NewStruct` site.

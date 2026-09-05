@@ -8257,6 +8257,51 @@ fn w10_4_type_alias_resolves_in_enum_variant_pattern() {
 }
 
 #[test]
+fn alias_resolves_in_struct_ctor_and_static_call() {
+    ok(
+        "struct P:\n    x: int\n    fn zero() -> P:\n        return P(0)\ntype Q = P\nprint(Q(1), Q.zero())\n",
+    );
+}
+
+#[test]
+fn alias_resolves_in_enum_variant_ctor_and_value() {
+    ok("enum E:\n    A(int)\n    B\ntype F = E\nz := F.A(7)\nw := F.B\nprint(z, w)\n");
+}
+
+#[test]
+fn alias_of_generic_instantiation_resolves_static_call() {
+    ok(
+        "struct Box[T]:\n    v: T\n    fn of(v: T) -> Box[T]:\n        return Box(v)\ntype IB = Box[int]\nprint(IB.of(3))\n",
+    );
+}
+
+#[test]
+fn alias_of_generic_pins_its_type_arguments() {
+    rejects(
+        "struct Box[T]:\n    v: T\n    fn of(v: T) -> Box[T]:\n        return Box(v)\ntype IS = Box[str]\nx := IS.of(3)\n",
+        "expected",
+    );
+}
+
+#[test]
+fn alias_of_scalar_is_not_a_constructor() {
+    rejects("type M = int\nx := M(5)\n", "unknown name 'M'");
+}
+
+#[test]
+fn alias_cycle_still_rejected() {
+    rejects("type A = B\ntype B = A\nx: A = 1\n", "recursive type alias");
+}
+
+#[test]
+fn alias_variant_typo_names_the_alias() {
+    rejects(
+        "enum E:\n    A(int)\ntype F = E\nz := F.Nope\n",
+        "enum 'F' has no variant 'Nope'",
+    );
+}
+
+#[test]
 fn bool_match_expression_both_arms_no_wildcard_is_exhaustive() {
     ok("b := true\nx := match b:\n    true: 1\n    false: 2\n");
 }

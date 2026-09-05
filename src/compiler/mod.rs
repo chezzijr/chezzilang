@@ -1338,6 +1338,35 @@ impl Compiler {
                 }
             }
         }
+        // Re-point every LOCAL `type` alias's `bare_types` entry at the runtime key its body's HEAD
+        // ultimately names, instead of the dead `<module>::<alias>` key the loop above minted (the
+        // compiler is type-blind, so `module_types` registered the alias NAME like any other type —
+        // this is what lets `enum_bare_key`/`struct_key_of_pattern`/the bare newtype+struct ctors
+        // lower an alias with no change of their own). Walks a chain of aliases (`type A = B; type B
+        // = C`), capped at 64 — the checker already rejects a genuine cycle, so this cap only
+        // terminates walking an otherwise-ill-typed program that reaches here anyway.
+        let alias_bodies: std::collections::HashMap<String, Type> =
+            alias_decls(&module.stmts).into_iter().collect();
+        for (name, body) in &alias_bodies {
+            let mut head = match body {
+                Type::Named { name: n, .. } => n.clone(),
+                Type::Generic(n, ..) => n.clone(),
+                _ => continue,
+            };
+            let mut depth = 0;
+            while depth < 64 {
+                match alias_bodies.get(&head) {
+                    Some(Type::Named { name: n, .. }) | Some(Type::Generic(n, ..)) => {
+                        head = n.clone();
+                        depth += 1;
+                    }
+                    _ => break,
+                }
+            }
+            if let Some(key) = self.bare_types.get(&head).cloned() {
+                self.bare_types.insert(name.clone(), key);
+            }
+        }
         // Compile struct methods first, recording their proto ids + this module as their home.
         for stmt in &module.stmts {
             if let StmtKind::Struct {

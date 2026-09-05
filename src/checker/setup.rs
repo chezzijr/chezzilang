@@ -162,6 +162,44 @@ impl Checker {
             .unwrap_or_else(|| name.to_string())
     }
 
+    /// Resolve a LOCAL (`self.aliases`) type alias's body, read-only. Only aliases declared by a
+    /// `type` statement IN THIS MODULE hop — never `imported_alias_tys` (a `from`-imported alias):
+    /// the compiler cannot reach the defining module's alias body during `compile_module`, so hopping
+    /// there in the checker alone would accept a program the compiler can't lower. A cyclic alias
+    /// resolves to `Ty::Unknown` through `resolve_ty_ro`'s depth-64 cap, so callers below yield `None`
+    /// on a cycle and `resolve_type`'s `recursive type alias` stays the only cycle diagnostic.
+    pub(super) fn alias_body_ty(&self, name: &str) -> Option<Ty> {
+        self.aliases
+            .get(name)
+            .map(|b| self.resolve_ty_ro(&b.clone()))
+    }
+
+    /// An alias whose body is an enum instantiation: `(identity key, pinned type args)`. `None` for
+    /// an alias of a non-enum body (a scalar alias like `type M = int` keeps its existing "not a
+    /// constructor" error) or a cycle.
+    pub(super) fn alias_enum_head(&self, name: &str) -> Option<(String, Vec<Ty>)> {
+        match self.alias_body_ty(name)? {
+            Ty::Enum(k, targs) => Some((k, targs)),
+            _ => None,
+        }
+    }
+
+    /// An alias whose body is a struct instantiation: `(identity key, pinned type args)`.
+    pub(super) fn alias_struct_head(&self, name: &str) -> Option<(String, Vec<Ty>)> {
+        match self.alias_body_ty(name)? {
+            Ty::Struct(k, targs) => Some((k, targs)),
+            _ => None,
+        }
+    }
+
+    /// An alias whose body is a newtype instantiation: `(identity key, pinned type args)`.
+    pub(super) fn alias_newtype_head(&self, name: &str) -> Option<(String, Vec<Ty>)> {
+        match self.alias_body_ty(name)? {
+            Ty::NewType(k, targs) => Some((k, targs)),
+            _ => None,
+        }
+    }
+
     /// Bind a from-imported struct name into every namespace a colliding fn import must ALSO reach
     /// (TICKET-029) — a colliding from-import binds both, so this is called from both the struct
     /// branch and the fn branch of the `Import::From` loop. Registers the layout, makes the name

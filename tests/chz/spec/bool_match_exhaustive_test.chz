@@ -1,0 +1,21 @@
+# W10-2: a `match` on `bool` covering both `true` and `false` is exhaustive without a `_` arm,
+# matching rustc. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+
+test fn bool_match_statement_both_arms():
+    fn f(c: bool) -> str:
+        match c:
+            true: return "t"
+            false: return "f"
+    assert f(true) == "t"
+    assert f(false) == "f"
+
+test fn bool_match_expression_both_arms():
+    x := match true:
+        true: 1
+        false: 2
+    assert x == 1
+
+test fn bool_or_pattern_arm():
+    y := match false:
+        true | false: 9
+    assert y == 9
