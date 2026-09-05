@@ -38,7 +38,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   `cargo test --lib` was 4493 passed/2 failed/2 ignored before, 4498 passed/0 failed/2 ignored after
   (5 new tests: an over-widening guard, 3 new RED repros, 1 new mechanism test).
 - **Bug-hunt wave 10 (2026-09-05) — 26 confirmed findings, `W10-1..W10-26` in `docs/gaps.md`, filed as
-  TICKET-060..069 (pipeline queue, unattended overnight).** Same six domains as wave 9, ~400 probes;
+  TICKET-060..069 (pipeline queue, unattended overnight). Landed so far: TICKET-060 (W10-6, W10-8 — a `str` arg's C buffer is retained when a `ptr` can point back into it; first callback fault wins) and TICKET-061 (W10-7, W10-14 — void callbacks, extern fns exported as module members), each re-verified on the merged release binary at both worker counts.** Same six domains as wave 9, ~400 probes;
   every candidate re-run on the release binary at two worker counts, 30 → 26 confirmed. Headline: a
   **P0 FFI use-after-free** (W10-6, a `ptr` returned into a `str` arg dangles), a child fault MASKED by
   the owner's deadlock verdict (W10-16), `x := None` never pinned (W10-5, the write shape W8-46's
