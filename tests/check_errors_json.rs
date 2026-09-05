@@ -601,11 +601,10 @@ fn near_miss_help_is_emitted() {
 
 /// ONE diagnostic, ONE stream. Under `--errors=json` a checker diagnostic must be rendered exactly
 /// once, and the JSON document must appear on exactly one stream — `check` puts its single array on
-/// stdout, `run` likewise (its warnings, when a rule finally emits any, go to stderr as PLAIN TEXT
-/// instead of being folded into that array a second time). Before this was fixed, `chezzi run
-/// --errors=json` printed a warning array to stderr AND folded the same warnings into the stdout
-/// array. The warning half of this only bites once a rule warns — what is assertable today is that
-/// neither command emits a second JSON document on stderr.
+/// stdout, `run` likewise, folding its warnings into that SAME stdout array rather than rendering
+/// them a second time as plain text on stderr. This fixture carries an error and no warning, so its
+/// assertions below are unaffected by that fold; what they pin is that neither command emits a
+/// second JSON document on stderr.
 #[test]
 fn errors_json_emits_one_document_on_one_stream() {
     let t = TmpDir::new();

@@ -33,7 +33,8 @@ COMMANDS:
     help             Show this message
 
 FLAGS:
-    --errors=json    Emit type errors as JSON (for `check` / `run`)
+    --errors=json    Emit type errors AND warnings as JSON (for `check` / `run`); on `run` the array
+                     is stdout's FIRST line, followed by the program's own output
     --parallel       Accepted no-op alias (`run` only) — the engine is the default already
     --threads=N      Worker threads for the engine (0 = all cores; env: CHEZZI_THREADS)
     --max-heap=N     (`test`) Hard-abort any test whose live heap exceeds N bytes — a runaway-alloc
@@ -317,14 +318,21 @@ fn cmd_run(args: &[String]) -> ExitCode {
     let entry_path = std::path::Path::new(&path);
     let (outcome, warns, files) =
         type_check(&path, root_override.as_deref(), gate, Some(source.clone()));
-    // `run`'s stdout belongs to the PROGRAM, so a warning goes to stderr in both modes — unguarded,
-    // unlike `check` above. The `&[]` below is the other half of that decision: were the warnings
-    // also folded into the stdout array, the same diagnostic would print twice, on two streams.
-    report_check_warnings(&warns, &files, Some((entry_path, &source)));
+    // In JSON mode `run`'s warnings ride the one stdout array, the same shape `check --errors=json`
+    // uses, since stdout's first line is always the document a consumer reads. In plain text they
+    // stay on stderr, printed here unguarded, ahead of the program's own output. A `Fatal` below is
+    // raised before the checker runs, so `warns` is always empty in that arm.
+    if !json {
+        report_check_warnings(&warns, &files, Some((entry_path, &source)));
+    }
     match outcome {
-        CheckOutcome::Ok => {}
+        CheckOutcome::Ok => {
+            if json {
+                println!("{}", diags_json(&warns, &files));
+            }
+        }
         CheckOutcome::Errors(errs) => {
-            report_check_errors(&errs, &[], &files, json, Some((entry_path, &source)));
+            report_check_errors(&errs, &warns, &files, json, Some((entry_path, &source)));
             return ExitCode::FAILURE;
         }
         CheckOutcome::Fatal {
@@ -1196,18 +1204,18 @@ fn render_diag(
     out
 }
 
-/// Print non-fatal checker warnings as plain text on **stderr**. Always plain text, even under
-/// `--errors=json`: the only caller that reaches here in machine mode is `chezzi run`, whose stdout
-/// belongs to the program and whose stderr is shared with the program's own — a JSON array there
-/// could not be parsed out of that stream anyway, and rendering one would only invite a consumer to
-/// try. The machine-readable path for warnings is `chezzi check --errors=json`, which puts them in
-/// the ONE array on stdout ([`report_check_errors`]) and never calls this.
+/// Print non-fatal checker warnings as plain text on **stderr**. Called only in plain-text mode; in
+/// `--errors=json` mode the caller folds warnings into the stdout array instead ([`diags_json`] /
+/// [`report_check_errors`]) and never calls this.
 ///
-/// Which stream carries a warning, per command, and why:
+/// Which stream/format carries a warning, per command, and why:
 /// * `chezzi check` — stdout IS the diagnostic document. Machine mode: the stdout array, beside the
 ///   errors. Plain text: here, on stderr, above the verdict. Exactly one of the two, ever.
-/// * `chezzi run` / `chezzi test` — stdout belongs to the running program. Always here, on stderr,
-///   in both modes; the stdout array stays errors-only so nothing is reported twice.
+/// * `chezzi run` — machine mode: the stdout array, as stdout's FIRST line, ahead of the program's
+///   own output. Plain text: here, on stderr, in both modes, since the program's own stdout can't
+///   carry a second document.
+/// * `chezzi test` — always here, on stderr, in both modes; `test`'s own JSON document
+///   (`--errors=json`) is a report of test outcomes, not of checker diagnostics.
 fn report_check_warnings(
     warns: &[checker::CheckError],
     files: &[(u32, std::path::PathBuf)],
@@ -1239,8 +1247,7 @@ fn seed_cache(
 
 /// Print type errors as plain text (default) or a JSON array (`--errors=json`). `warns` rides the
 /// SAME json array (a machine consumer gets one document, keyed by `severity`); in plain text the
-/// caller has already put them on stderr, and the trailing count stays errors-only. Pass `&[]` from
-/// any command whose warnings already went to stderr — see [`report_check_warnings`].
+/// caller has already put them on stderr, and the trailing count stays errors-only.
 fn report_check_errors(
     errs: &[checker::CheckError],
     warns: &[checker::CheckError],
