@@ -7,6 +7,19 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-060 (2026-09-05) — two FFI defects fixed (`docs/gaps.md` W10-6).** (1) A `ptr` returned
+  into a `str` arg's marshalled `CString` used to dangle the instant the extern call returned (the
+  buffer was freed unconditionally at the end of `Cffi::call`); `libc.strchr("hello world", 32)` then
+  printed heap-layout-dependent garbage (measured: `_int8`, `int64`, `uint64_at`, `ptr_at`) instead of
+  `" world"`. Fixed by retaining (leaking, keyed by content) a `str` arg's C buffer whenever the call
+  could hand a pointer back into it — a `ptr` return that aliases the argument, or any `ptr` param that
+  may be a C out-param (`strtol`'s `endptr`). (2) `callback_trampoline` used to overwrite
+  `*ctx.fault` on every C-side re-invocation and never stop re-entering the engine, so a callback that
+  faulted on its first call (libc `qsort` compares 15 times for 10 elements regardless) re-raised the
+  LAST fault instead of the first — `count` measured 15, not 1. Fixed with a first-fault-wins guard:
+  the trampoline now short-circuits to a zeroed result once `ctx.fault` is set, and both fault stores
+  keep the value already there. `cargo test --lib native::cffi::` was 43 passed/2 failed before, 50
+  passed/0 failed after (5 new RED tests + 2 new mechanism tests).
 - **Bug-hunt wave 10 (2026-09-05) — 26 confirmed findings, `W10-1..W10-26` in `docs/gaps.md`, filed as
   TICKET-060..069 (pipeline queue, unattended overnight).** Same six domains as wave 9, ~400 probes;
   every candidate re-run on the release binary at two worker counts, 30 → 26 confirmed. Headline: a

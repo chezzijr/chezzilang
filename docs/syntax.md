@@ -4455,7 +4455,11 @@ print(apply(10, fn(n: int) -> int: n * n))   # C runs f(10) -> 100, then returns
 If the Chezzi callback faults (or panics), the error is **re-raised** as the extern call's own error
 (recoverable via `recover:`) — stronger than CPython `ctypes`, which swallows it to stderr and returns
 `0`. The callback runs identically on every run, and it fires on the calling thread
-under `--parallel` (no cross-thread hand-off).
+under `--parallel` (no cross-thread hand-off). If C invokes the callback again after it has already
+faulted (e.g. `qsort` keeps comparing after its comparator faults), the **FIRST** fault is the one
+re-raised — later invocations run no Chezzi code and return a zeroed value instead. C's own loop still
+runs to completion regardless (Chezzi cannot unwind through C frames the way Go `cgo` does, so only
+the Chezzi side of it stops).
 
 **A callback C STORES is not supported — and says so, loudly.** The trampoline is only valid for the
 duration of the extern call that received it. If C keeps the pointer (`signal`, `atexit`, GLib/GTK,
@@ -4721,6 +4725,13 @@ whose module you never imported (`Match`) are not callable, so nothing shadows t
 - **`char*` ownership:** a plain `str` return is **borrowed** (copied, never `free`d — a `malloc`'d
   return leaks). Declare it **`owned_str`** to transfer ownership: Chezzi copies then frees it with libc
   `free` (no leak). Only libc `free` is supported — a custom/user-named deallocator is **deferred**.
+- **a str argument's C buffer is retained for as long as the program runs** whenever the extern call
+  could hand a pointer back into it — a `ptr` return that aliases the argument (`strchr`), or any `ptr`
+  parameter that may be a C out-param (`strtol`'s `endptr`). Retention is keyed by the argument's text,
+  so calling the same string in a loop retains **one** buffer, not one per call. A C function that
+  **writes** through a `str` parameter (`strtok`) must instead be given an `ffi.alloc`'d `ptr` — a
+  retained buffer is restored to its original bytes on the next lookup, but Chezzi `str` values are
+  immutable and the C-level mutation is otherwise silently lost on reuse.
 - **No `--parallel` serialization:** extern calls are **not** serialized; calling a **non-reentrant** C
   function (`strtok`, `gmtime`/`localtime`, `setlocale`, static-buffer APIs) from multiple workers
   **races at the C level**. Use thread-safe/reentrant C only under `--parallel`.
