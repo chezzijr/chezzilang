@@ -2267,10 +2267,11 @@ mod tests {
 
     /// Compile a tiny C fixture to a `.so` in a unique temp dir and return its path. The fixture
     /// exports `int apply(int x, int (*f)(int)) { return f(x) + 1; }`,
-    /// `double applyd(double x, double (*f)(double)) { return f(x); }`, and
+    /// `double applyd(double x, double (*f)(double)) { return f(x); }`,
     /// `int apply2(int (*f)(int), int x) { return f(x) + 1; }` (callback-FIRST, for the not-last
-    /// arg path) — enough to round-trip an int and a float callback synchronously. Built with the
-    /// system `cc` (the same toolchain the FFI
+    /// arg path), and `void each(int n, void (*f)(long)) { ... }` (a void-returning callback, the
+    /// commonest C callback shape) — enough to round-trip an int and a float callback synchronously.
+    /// Built with the system `cc` (the same toolchain the FFI
     /// tests already require: a unix LP64 host with libc/libm); a `cc` failure `panic!`s the test
     /// loudly rather than silently skipping (matching how `dlopen` failures are asserted, not skipped).
     fn build_callback_so() -> std::path::PathBuf {
@@ -2295,6 +2296,7 @@ int apply2(int (*f)(int), int x) { return f(x) + 1; }
    to a static instance the Chezzi side then reads field-by-field via the load builtins. */
 struct R { int32_t a; int64_t b; double c; };
 void* mkrec(void) { static struct R r = { -3, 70000, 2.5 }; return &r; }
+void each(int n, void (*f)(long)) { for (long i = 0; i < n; i++) f(i); }
 "#,
         )
         .expect("write apply.c");
@@ -2671,6 +2673,19 @@ void* mkrec(void) { static struct R r = { -3, 70000, 2.5 }; return &r; }
         );
         let out = crate::vm::run_capture(&src).expect("run");
         assert_eq!(out, "101\n");
+    }
+
+    #[test]
+    fn callback_void_return_runs() {
+        // TICKET-061 W10-7: a callback param whose return is `nil` (void) — the commonest C
+        // callback shape (foreach/twalk-style). `each(3, show)` prints "0", "1", "2".
+        let so = build_callback_so();
+        let src = format!(
+            "extern \"{}\":\n    fn each(n: int, f: fn(int) -> nil)\n\nfn show(i: int):\n    print(i)\n\neach(3, show)\n",
+            so.to_str().unwrap()
+        );
+        let out = crate::vm::run_capture(&src).expect("run");
+        assert_eq!(out, "0\n1\n2\n");
     }
 
     #[test]

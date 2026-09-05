@@ -17963,6 +17963,16 @@ fn extern_callback_void_return_accepted() {
 }
 
 #[test]
+fn extern_callback_nil_param_still_rejected() {
+    // The widening is on the callback's RETURN slot only — a `nil` callback PARAM has no `CType`
+    // lowering and must stay rejected.
+    rejects(
+        "extern \"libt.so\":\n    fn each(n: int, f: fn(nil) -> int)\n",
+        "not C-marshallable",
+    );
+}
+
+#[test]
 fn extern_callback_nested_callback_rejected() {
     // A nested callback (a callback param taking a callback) is not supported (v1) — rejected.
     rejects(
@@ -21734,6 +21744,16 @@ fn extern_fn_reachable_as_module_member() {
     files_ok(&[
         ("c.chz", "extern \"libc\":\n    fn strlen(s: str) -> int\n"),
         ("main.chz", "import c\nprint(c.strlen(\"abc\"))\n"),
+    ]);
+}
+
+#[test]
+fn extern_fn_reachable_via_from_import() {
+    // TICKET-061 W10-14: the `import strlen from c` spelling must resolve too — same `capture_sig`
+    // gap as the whole-module form above.
+    files_ok(&[
+        ("c.chz", "extern \"libc\":\n    fn strlen(s: str) -> int\n"),
+        ("main.chz", "import strlen from c\nprint(strlen(\"abc\"))\n"),
     ]);
 }
 

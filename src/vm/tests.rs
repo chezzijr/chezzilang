@@ -5458,6 +5458,39 @@ fn extern_cross_module_alias_runs() {
     assert_eq!(vm_out, "5\n");
 }
 
+/// TICKET-061 W10-14: an extern fn is a module-global callable and exports like any other top-level
+/// `fn` — both `c.strlen(...)` and `import strlen from c` must resolve and run. `run_file` alone
+/// skips the checker (a compiler/runtime-only helper), so this asserts `check_graph` succeeds FIRST
+/// (a checker-superset guard) — otherwise the runtime member binding could mask a checker still
+/// rejecting the program (which is exactly what `chezzi run` would see). Linux-only (needs
+/// libc.so.6).
+#[test]
+#[cfg(target_os = "linux")]
+fn extern_fn_is_an_importable_module_member_runs() {
+    let dir = std::env::temp_dir().join(format!("chezzi_vm_ffi_member_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("c.chz"),
+        "extern \"libc.so.6\":\n    fn strlen(s: str) -> int\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.chz");
+    std::fs::write(
+        &entry,
+        "import c\nimport strlen from c\nprint(c.strlen(\"abc\"))\nprint(strlen(\"abcd\"))\n",
+    )
+    .unwrap();
+    let graph = crate::resolver::build_graph(&entry).expect("resolve");
+    if let Err(errs) = crate::checker::check_graph(&graph) {
+        let _ = std::fs::remove_dir_all(&dir);
+        panic!("program must type-check, got: {errs:?}");
+    }
+    let (out, _e, res, _) = run_file(&entry);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(res.is_ok(), "faulted: {res:?}");
+    assert_eq!(out, "3\n4\n");
+}
+
 /// Module-qualified enum-variant patterns (`geo.Color.Red`) in match arms, symmetric with
 /// construction. The module binder is validated by the checker then dropped — the runtime matches
 /// purely by the bare enum/variant identity, byte-for-byte against the golden. Covers:
