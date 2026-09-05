@@ -1015,3 +1015,41 @@ test fn hof_completes():
         assert_eq!(status, 0, "{label}: clean run (out: {out:?})");
     }
 }
+
+// ===== TICKET-063: `--timeout` cannot reach a task parked on a channel while a sibling waits on
+// that box's `Shared.update` guard (W10-15) =====
+//
+// `run_capped_timed` panics with "hung for >{secs}s" if the CHILD process outlives its own wall-clock
+// bound, which is exactly the must-fix half of W10-15: `chezzi test --timeout=500` should self-report
+// `TIMED-OUT` within its own budget and exit, never rely on an external watchdog to kill it.
+#[test]
+fn timeout_reaches_a_guard_waiter_parked_behind_a_recv() {
+    let t = TmpDir::new();
+    let entry = t.write(
+        "guard_waiter_test.chz",
+        r#"import std.concurrency
+
+test fn guard_waiter_hangs():
+    s := Shared(0)
+    ch := Channel[int]()
+    parallel:
+        spawn:
+            s.update(fn(x: int) -> int: x + ch.recv())
+        spawn:
+            s.set(5)
+"#,
+    );
+    // 10s wall-clock bound on the CHILD process: well over the 500ms cap, so a correct runner
+    // finishes in well under a second. If the runner cannot self-terminate, `run_capped_timed`
+    // panics with "hung for >10s" instead of returning — that panic message IS the reproduction.
+    let (_status, out, elapsed) = run_capped_timed(&["test", "--timeout=500"], &entry, 10);
+    assert!(
+        out.contains("TIMED-OUT guard_waiter_hangs"),
+        "the runner's own --timeout=500 must reach a task parked behind a recv() while a sibling \
+         waits on the same box's Shared.update guard: {out:?}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "the cap fired promptly, took {elapsed:?}: {out:?}"
+    );
+}
