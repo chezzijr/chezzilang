@@ -809,13 +809,22 @@ fn invoke_all(
             continue;
         }
         let start = Instant::now();
-        let verdict = match vm.invoke_test(*proto) {
+        let mark = vm.exec_registry_mark();
+        let mut verdict = match vm.invoke_test(*proto) {
             Ok(()) => Verdict::Pass,
             Err(e) => {
                 let site = fault_site(&mut vm, &e, &files, &fallback);
                 verdict_from_fault(e, site)
             }
         };
+        // Join this test's own detached executors (A2). A fault here upgrades a `Pass` only — a
+        // test that already failed keeps its own bucket, and its jobs are still joined either way.
+        if let Err(e) = vm.reap_executors_since(mark)
+            && matches!(verdict, Verdict::Pass)
+        {
+            let site = fault_site(&mut vm, &e, &files, &fallback);
+            verdict = verdict_from_fault(e, site);
+        }
         let duration = start.elapsed();
         let verdict = apply_timeout_overrun(verdict, duration, opts);
         let out = vm.take_out_bytes(); // stdout: discarded unless `--show-output` (kept reusable either way)
@@ -943,6 +952,7 @@ fn run_suite(
             continue;
         }
         let start = Instant::now();
+        let mark = vm.exec_registry_mark();
         let mut verdict = Verdict::Pass;
         // before_each? — a failure is the test's failure (the method is skipped); after_each still
         // runs. A hook crash is setup failure → ERROR-class.
@@ -977,6 +987,14 @@ fn run_suite(
                     msg: format!("after_each failed: {}", e.message),
                 };
             }
+        }
+        // Join this test's own detached executors (A2), same policy as the free-test loop: a fault
+        // here upgrades a `Pass` only.
+        if let Err(e) = vm.reap_executors_since(mark)
+            && matches!(verdict, Verdict::Pass)
+        {
+            let site = fault_site(vm, &e, files, fallback);
+            verdict = verdict_from_fault(e, site);
         }
         let duration = start.elapsed();
         let verdict = apply_timeout_overrun(verdict, duration, opts);
@@ -1028,7 +1046,14 @@ fn run_after_all(
         return;
     };
     let start = Instant::now();
+    let mark = vm.exec_registry_mark();
     let result = vm.invoke_suite_method(p, instance);
+    // A drain fault folds into this row only when the hook itself did not already fault — the hook's
+    // own fault takes priority, same as the per-test policy: whichever failure says more wins.
+    let result = match result {
+        Ok(_) => vm.reap_executors_since(mark),
+        Err(e) => Err(e),
+    };
     let duration = start.elapsed();
     let captured = vm.take_out_bytes();
     let captured_stderr = vm.take_err_bytes();
@@ -3890,6 +3915,42 @@ struct Suite:
         assert!(
             report.text.contains("\"file_errors\":1"),
             "totals.file_errors must still count 1; report:\n{}",
+            report.text
+        );
+    }
+
+    #[test]
+    fn a_tests_detached_executor_is_joined_and_faults_the_test() {
+        let d = TmpDir::new();
+        let f = d.write(
+            "f7_test.chz",
+            "import std.concurrency\n\nfn boom() -> int:\n    return [1][9]\n\n\
+             test fn t():\n    ex := concurrency.Executor()\n    ex.submit(boom)\n    assert true\n",
+        );
+        let report = run_tests(&f);
+        assert!(report.text.contains("ERROR t"), "report:\n{}", report.text);
+        assert!(
+            report.text.contains("index 9 out of bounds (len 1)"),
+            "report:\n{}",
+            report.text
+        );
+        assert!(!report.passed, "report:\n{}", report.text);
+    }
+
+    #[test]
+    fn an_executor_created_before_the_first_test_is_not_joined_by_it() {
+        let d = TmpDir::new();
+        let f = d.write(
+            "shared_ex_test.chz",
+            "import std.concurrency\n\nex := concurrency.Executor()\n\n\
+             test fn one():\n    ex.submit(fn() -> int: 1)\n    assert true\n\n\
+             test fn two():\n    ex.submit(fn() -> int: 2)\n    assert true\n",
+        );
+        let report = run_tests(&f);
+        assert!(report.passed, "report:\n{}", report.text);
+        assert!(
+            !report.text.contains("shut-down Executor"),
+            "report:\n{}",
             report.text
         );
     }

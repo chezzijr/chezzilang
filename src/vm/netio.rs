@@ -3959,6 +3959,15 @@ impl Vm {
     /// caller gates on `pending_exit`); a task that calls `os.exit` mid-drain stops the remaining
     /// drain.
     pub(super) fn drain_live_executors(&mut self) -> Result<(), RuntimeError> {
+        self.drain_live_executors_from(0)
+    }
+
+    /// Like [`Vm::drain_live_executors`], but skips the first `from` registry entries. `from` is a
+    /// registry index taken earlier (e.g. [`Vm::exec_registry_mark`]) and is safe to reuse across
+    /// this whole drain: `exec_registry`'s one mutation is an append (`push`), so indices never shift.
+    /// This is what lets a per-test drain join only the executors ITS test created, leaving one built
+    /// at module top level or in `before_all` alive for the tests that follow.
+    pub(super) fn drain_live_executors_from(&mut self, from: usize) -> Result<(), RuntimeError> {
         if self.pending_exit.is_some() {
             return Ok(());
         }
@@ -3987,6 +3996,7 @@ impl Vm {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .iter()
+                .skip(from)
                 .find(|c| {
                     !c.inner.lock().unwrap_or_else(|e| e.into_inner()).shut
                         || c.unreduced.load(std::sync::atomic::Ordering::Acquire)

@@ -849,6 +849,24 @@ impl Vm {
         let _ = self.drain_live_executors();
     }
 
+    /// The current length of `exec_registry` — a mark of "every `Executor` created so far". Safe to
+    /// take before a test's invoke and reuse after it: the registry is append-only (its one mutation
+    /// is the `push` in `Vm::submit`'s ctor path), so an index taken here never shifts.
+    pub fn exec_registry_mark(&self) -> usize {
+        self.exec_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
+    }
+
+    /// The per-test A2 join: drain (join) only the executors created SINCE `mark`, i.e. by the test
+    /// that took it. An executor built at module top level or in `before_all` sits before every
+    /// mark and is left alive for the tests that follow — draining from `0` instead would mark it
+    /// `shut` after the first test, and the next test's `submit` on it would fault.
+    pub fn reap_executors_since(&mut self, mark: usize) -> Result<(), RuntimeError> {
+        self.drain_live_executors_from(mark)
+    }
+
     pub(super) fn run_module(&mut self, idx: usize) -> Result<(), RuntimeError> {
         let m = self.program.modules[idx].clone();
         // M19 Phase 2b: pre-size the namespace to the compiler's slot count and build its name→slot
