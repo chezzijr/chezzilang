@@ -30,8 +30,12 @@ impl Drop for TmpDir {
 }
 
 fn run_test(args: &[&str]) -> (String, String) {
+    run_cmd("test", args)
+}
+
+fn run_cmd(subcommand: &str, args: &[&str]) -> (String, String) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
-    cmd.arg("test");
+    cmd.arg(subcommand);
     cmd.args(args);
     let out = cmd.output().expect("spawn chezzi");
     (
@@ -143,5 +147,57 @@ fn faulting_after_all_errors_the_suite() {
     assert!(
         stdout.contains("after_all boom"),
         "expected the after_all fault to be reported, got: {stdout}"
+    );
+}
+
+/// W10-11: `io.eprint` output in a test must be captured to stderr, same policy as stdout, under
+/// `--show-output`.
+#[test]
+fn eprint_output_is_captured_under_show_output() {
+    let t = TmpDir::new();
+    let entry = t.write(
+        "ep_test.chz",
+        "import std.io\n\ntest fn t():\n    io.eprint(\"diag to stderr\")\n    assert false\n",
+    );
+    let (_stdout, stderr) = run_test(&["--show-output", entry.to_str().unwrap()]);
+    assert!(
+        stderr.contains("diag to stderr"),
+        "expected captured stderr to include the io.eprint output, got: {stderr}"
+    );
+}
+
+/// W10-12: a test's detached `Executor` must be joined at the end of the test (or suite); a job
+/// faulting there must turn the test into an ERROR.
+#[test]
+fn detached_executor_is_joined_and_faults_error_the_test() {
+    let t = TmpDir::new();
+    let entry = t.write(
+        "f7_test.chz",
+        "import std.concurrency\n\nfn boom() -> int:\n    return [1][9]\n\ntest fn t():\n    ex := concurrency.Executor()\n    ex.submit(boom)\n    assert true\n",
+    );
+    let (stdout, _stderr) = run_test(&[entry.to_str().unwrap()]);
+    assert!(
+        stdout.contains("index 9 out of bounds (len 1)"),
+        "expected the detached executor's job fault to error the test, got: {stdout}"
+    );
+}
+
+/// W10-13: `run --errors=json` must emit warnings in the same JSON shape `check --errors=json`
+/// does, not as human text on stderr.
+#[test]
+fn run_errors_json_emits_warnings_as_json() {
+    let t = TmpDir::new();
+    let entry = t.write(
+        "f8.chz",
+        "fn g() -> int!str:\n    return Ok(1)\n\ng()\nprint(\"ran\")\n",
+    );
+    let (stdout, stderr) = run_cmd("run", &["--errors=json", entry.to_str().unwrap()]);
+    assert!(
+        stdout.contains("\"severity\":\"warning\""),
+        "expected the warning in the JSON document on stdout, stdout: {stdout}, stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("warning ("),
+        "warning should not be rendered as human text on stderr, stderr: {stderr}"
     );
 }
