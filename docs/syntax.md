@@ -4001,6 +4001,18 @@ defining `compare`), stable, in place.
 > with `cannot infer element type of empty collection` (above) — not with a spurious `does not satisfy
 > Comparable`/`Add`.
 
+> **Carrier payload typing (`None` and a nullary enum variant).** A never-written `x := None` or
+> `e := Box.Empty` stays permissive across differently-typed READS: `a: Box[int] = e` then
+> `b: Box[str] = e` is still `ok: no type errors`. The first constraining use — an annotated sink, a
+> typed argument, a typed `return`, a `??` with a typed right-hand side, or a `Some(v)`/`Variant(v)`
+> write — records a pin. A later WRITE that disagrees with the pin is a type error:
+> `x := None` / `y: Option[str] = x` / `x = Some(1)` is `cannot assign Option[int] to 'x' -- its
+> payload was pinned to Option[str] by an earlier use`. A write also REPINS the binding, so every
+> later read sees the written payload and a `match` arm binds a concrete `v`. The escapes are an
+> annotation at the declaration (`x: Option[int] = None`) or a re-declaration. `Result[T, E]` is
+> deliberately NOT covered: its two slots are routinely filled by different statements (`Ok(1)` then
+> `Err("e")`).
+
 Map methods: `m.get(k)→V?` `m.has(k)` `m.keys()` `m.values()` `m.remove(k)` `m.len()`;
 `m.merge(n)→map` (new map, `n` wins on a key clash) and `m.update(n)` (write `n` into `m` in place,
 → nil); `m[k]` reads (errors on a missing key), `m[k] = v` inserts/updates. Iterate with `for k in m`
