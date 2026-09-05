@@ -122,6 +122,25 @@ pub fn acquire_update_guard_within(
     }
 }
 
+/// TICKET-063 — satisfiability mirror of [`acquire_update_guard_within`]: answers whether an acquire
+/// of `key` by task `me`, issued right now, would NOT block (free, or `me` already holds it, or the
+/// wait-for walk from `me` finds a cycle). Change the two together.
+///
+/// The cycle arm answers `false` between polls, not `true`: `acquire_update_guard_within` removes
+/// `me` from `waiting` before it returns `Ok(None)` (see its deadline arm above), so once a bounded
+/// acquire has given up, `wait_for_cycle` finds no entry for `me` and this fn reports "not
+/// satisfiable" even on a real cycle. That is the safe direction — the nursery deadlock judge then
+/// reports `deadlock` where a `GuardCycle` fault was one poll away, never the reverse.
+pub fn guard_wait_satisfiable(key: usize, me: u64) -> bool {
+    let (mtx, _cv) = guard_registry();
+    let g = mtx.lock().unwrap();
+    match g.owner.get(&key) {
+        None => true,
+        Some(&o) if o == me => true,
+        Some(_) => wait_for_cycle(&g, me),
+    }
+}
+
 /// Walk `waiting` -> `owner` -> `waiting` -> ... from `start`, bounded by the number of owned boxes
 /// plus one hop: a walk that revisits `start` is a wait-for cycle.
 fn wait_for_cycle(g: &GuardGraph, start: u64) -> bool {

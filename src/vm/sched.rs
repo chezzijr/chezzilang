@@ -1780,6 +1780,73 @@ impl Vm {
         sched.inflight.fetch_sub(1, Ordering::Relaxed);
     }
 
+    /// TICKET-063 — enter a `Shared`/`RwShared` update-guard wait. Unlike [`Vm::demote_enter`] (which
+    /// accounts `inflight`, correct for its socket/sleep callers), this accounts the wait
+    /// `blocked_native` and registers `(key, guard_token)` on `SchedCore::guard_waits`, because a
+    /// guard wait has no promised external progress source — it returns only when the owner (one of
+    /// the parties the deadlock predicate is already judging) releases. With `self.mn` `None` (no
+    /// nursery), keeps DEC-052's `demote_enter` path — its `mn.is_none()` arm's immediate
+    /// `yield_pool_slot(None)` stays unchanged — and returns `Ok(None)`.
+    pub(super) fn guard_wait_enter(
+        &mut self,
+        key: usize,
+        what: &str,
+        span: Span,
+    ) -> Result<Option<u64>, RuntimeError> {
+        let Some(sched) = self.mn.as_ref().map(Arc::clone) else {
+            self.demote_enter(what, span)?;
+            return Ok(None);
+        };
+        let tok = {
+            let mut c = sched.lock();
+            c.running -= 1;
+            sched.blocked_native.fetch_add(1, Ordering::Relaxed);
+            c.register_guard_wait(key, self.guard_token);
+            let tok = c.watch_demoted_cancel(self.demote_cancel_flags());
+            drop(c);
+            sched.cv.notify_all();
+            tok
+        };
+        if !self.demoted {
+            if !self.spawn_replacement_worker(&sched, self.wid) {
+                let mut c = sched.lock();
+                c.running += 1;
+                sched.blocked_native.fetch_sub(1, Ordering::Relaxed);
+                c.unregister_guard_wait(key, self.guard_token);
+                c.unwatch_demoted_cancel(tok);
+                drop(c);
+                return Err(self.err(
+                    format!(
+                        "{what} inside a native callback could not demote the worker (OS thread \
+                         limit reached) — reduce concurrent in-callback blocking or raise the \
+                         thread limit"
+                    ),
+                    span,
+                ));
+            }
+            self.demoted = true;
+        }
+        Ok(Some(tok))
+    }
+
+    /// TICKET-063 — exit a guard wait entered via [`Vm::guard_wait_enter`]. `tok` is the value that
+    /// call returned: with `self.mn` `None` mirrors [`Vm::demote_exit`] (`tok` is `None`); otherwise
+    /// un-accounts `blocked_native`, unregisters the guard wait and stops watching cancel — `tok` is
+    /// always `Some` here because `guard_wait_enter` returns `Some` on every path that takes this arm.
+    pub(super) fn guard_wait_exit(&mut self, key: usize, tok: Option<u64>) {
+        let Some(sched) = self.mn.as_ref().map(Arc::clone) else {
+            self.demote_exit();
+            return;
+        };
+        let mut c = sched.lock();
+        c.running += 1;
+        sched.blocked_native.fetch_sub(1, Ordering::Relaxed);
+        c.unregister_guard_wait(key, self.guard_token);
+        c.unwatch_demoted_cancel(
+            tok.expect("an M:N guard wait always carries a cancel-watch token"),
+        );
+    }
+
     /// D5 owe #3 (Path C) — spawn a fresh OS thread running a replacement M:N worker shell over the
     /// same scheduler, reusing the demoting worker's `wid`. A RAW thread ([`VM_STACK_BYTES`] stack,
     /// like the pool), NOT a `pool::submit` job: the bounded pool is fixed-size, so a blocked-in-callback

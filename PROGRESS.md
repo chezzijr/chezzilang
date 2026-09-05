@@ -57,6 +57,25 @@ Single source of truth for "what am I doing next." Update after every work sessi
   `tests/chz/spec/nursery_fault_verdict_test.chz` (6 tests, both worker counts). `cargo test --lib`:
   4507 passed/0 failed/2 ignored (the 2 RED-then-GREEN tests already committed by triage are counted
   in that total); `chezzi test tests/chz`: 780 passed/0 failed (774 pre-existing + the 6 new).
+- **TICKET-063 (2026-09-05) — a `Shared`/`RwShared` update-guard waiter now counts as a blocked
+  party, so the deadlock verdict and `--timeout` both reach it (`docs/gaps.md` W10-15).** A guard wait
+  longer than `GUARD_DEMOTE_BUDGET` was accounted `inflight` via `Vm::demote_enter`, which promises
+  external progress a guard wait does not have (it returns only when the owner — one of the parties
+  already being judged — releases), so one guard waiter vetoed the process-wide deadlock verdict
+  forever: a task parked on `ch.recv()` inside a `Shared.update` closure, plus a sibling waiting on
+  that same box's guard, hung (rc=124) instead of faulting. Fixed with a separate accounting bracket,
+  `Vm::guard_wait_enter`/`guard_wait_exit` (`src/vm/sched.rs`), that counts the wait `blocked_native`
+  and registers it on the new `SchedCore::guard_waits`; `core::guard_wait_satisfiable`
+  (`src/vm/core.rs`) closes the release-then-park race so a live program is never false-faulted. The
+  wait itself is now a `DEMOTE_POLL_BACKOFF` poll loop (`Vm::guard_wait_block`, `src/vm/netio.rs`)
+  running the same two rungs every other blocking-in-place site runs: `Vm::block_halt_check` (so
+  `--timeout`, cancel and `os.exit` reach a guard waiter) and the `is_deadlocked` self-detect
+  (so a genuine deadlock fires without depending on a separate idle party). `PartyWait::Guard`
+  (`src/vm/quiesce.rs`) extends the same fix to an `Executor` job and the inline nursery body waiting
+  on a guard. Post-fix the repro's output is byte-identical to the single-spawn control:
+  `runtime error (repro.chz:4:1): deadlock: every task in this parallel: block is blocked on a
+  channel it cannot proceed on (an empty recv() or a full send()) and no sibling can unblock it — the
+  nursery cannot progress`, rc=1, measured at both worker counts.
 - **Bug-hunt wave 10 (2026-09-05) — 26 confirmed findings, `W10-1..W10-26` in `docs/gaps.md`, filed as
   TICKET-060..069 (pipeline queue, unattended overnight). Landed so far: TICKET-060 (W10-6, W10-8 — a `str` arg's C buffer is retained when a `ptr` can point back into it; first callback fault wins) and TICKET-061 (W10-7, W10-14 — void callbacks, extern fns exported as module members), and TICKET-062 (W10-16, W10-1 — a child fault outranks the owner's deadlock verdict; main blocks in place inside a native re-entry), each re-verified on the merged release binary at both worker counts.** Same six domains as wave 9, ~400 probes;
   every candidate re-run on the release binary at two worker counts, 30 → 26 confirmed. Headline: a

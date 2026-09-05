@@ -118,6 +118,18 @@ pub(super) enum PartyWait {
     /// boolean captured at registration is `quiesce.rs`'s build-bug #1 all over again (a stale party
     /// state read against fresh channel state), which measured 6/10 false faults.
     Nursery(Arc<super::MnSched>),
+    /// TICKET-063 — a thread blocked waiting for a `Shared`/`RwShared` update guard (the box's core
+    /// identity, the waiting task's token). Covers a guard wait reached by the top-level/eager body
+    /// itself, e.g. `main` running `s.update(f)` where `f` runs `parallel: spawn: s.update(...)`; the
+    /// M:N-worker-side guard wait is registered separately, on `SchedCore::guard_waits`.
+    ///
+    /// The `usize` is the box core's `Arc` address — aliasing-safe because the party holding this wait
+    /// also holds a live handle to that box (a `GcRef`/task token pinning it) for the whole lifetime of
+    /// the wait, so the address cannot be reused underneath it.
+    ///
+    /// Lock order: P (this registry) then G (the guard registry, `core::guard_wait_satisfiable`'s own
+    /// lock) — below `SchedCore` (A) exactly like every other arm here, and G is a leaf so no ABBA.
+    Guard(usize, u64),
 }
 
 impl PartyWait {
@@ -197,6 +209,8 @@ impl PartyWait {
                 let c = sched.lock();
                 !sched.is_deadlocked_ignoring_jobs(&c)
             }
+            // TICKET-063 — mirrors `SchedCore::guard_waits`' veto in `is_deadlocked_ignoring_jobs`.
+            PartyWait::Guard(key, me) => super::core::guard_wait_satisfiable(*key, *me),
         }
     }
 }

@@ -19,7 +19,7 @@ pub mod wire;
 use core::{
     AtomicCore, AtomicIntCore, Backing, ChannelCore, ExecRegistry, ExecutorCore,
     GUARD_DEMOTE_BUDGET, GuardCycle, ListenerCore, ReaderCore, RwSharedCore, SharedCore,
-    SocketCore, WriterCore, acquire_update_guard, acquire_update_guard_within,
+    SocketCore, WriterCore, acquire_update_guard_within, guard_wait_satisfiable,
 };
 use heap::{Fields, Heap, MapData, ModuleData, Obj, SetData};
 use op::{CapEntry, CapSrc, NO_IC, Op, Program, ProtoId, TID_NONE, WaitMeta};
@@ -2218,6 +2218,13 @@ struct SchedCore {
     /// Reusing that peek killed a live consumer 12 runs in 12 on `Channel[int](1)` with the sender in
     /// the body. `PartyWait::satisfiable` already answers both directions, so it is what is stored.
     body_waits: Vec<Arc<crate::vm::quiesce::PartyWait>>,
+    /// TICKET-063 — every worker currently parked in [`Vm::guard_wait_block`]'s poll loop, as
+    /// `(guard key, task token)`. A guard wait is accounted `blocked_native`, which the counter-only
+    /// predicate treats as a parked party with no promised progress, so without this list one live
+    /// guard waiter would be judged deadlocked the instant it and every counted party quiesce even
+    /// though the owner may release the guard a moment later. `is_deadlocked_ignoring_jobs` vetoes
+    /// while `core::guard_wait_satisfiable` says any entry could acquire right now.
+    guard_waits: Vec<(usize, u64)>,
 }
 
 impl SchedCore {
@@ -2359,6 +2366,25 @@ impl SchedCore {
             .1 += 1;
     }
 
+    /// TICKET-063 — register a worker parked in [`Vm::guard_wait_block`]'s poll loop. Caller holds
+    /// core lock A.
+    fn register_guard_wait(&mut self, key: usize, me: u64) {
+        self.guard_waits.push((key, me));
+    }
+
+    /// TICKET-063 — unregister a guard wait (resumed / faulted / settled). Removes the first matching
+    /// entry only, so two waiters on the same key never clobber each other's registration. Caller
+    /// holds core lock A.
+    fn unregister_guard_wait(&mut self, key: usize, me: u64) {
+        if let Some(i) = self
+            .guard_waits
+            .iter()
+            .position(|&(k, m)| k == key && m == me)
+        {
+            self.guard_waits.swap_remove(i);
+        }
+    }
+
     /// N4 (demoted half) — start watching a demoted fiber's cancel flags. `flags` is `Vm::cancel`
     /// followed by `Vm::cancel_outer` and is passed EMPTY when a cancel could not wake this fiber
     /// anyway (it is already unwinding, or it is blocked inside a `defer` — `cancel_requested()`'s
@@ -2446,6 +2472,7 @@ impl MnSched {
                 demote_cancel_watch: std::collections::HashMap::new(),
                 next_demote_tok: 0,
                 body_waits: Vec::new(),
+                guard_waits: Vec::new(),
             }),
             cv: Condvar::new(),
             deadlock_err,
@@ -3885,6 +3912,16 @@ impl MnSched {
         if c.demoted_chans
             .values()
             .any(|(core, _)| !core.q.lock().unwrap_or_else(|e| e.into_inner()).is_empty())
+        {
+            return false;
+        }
+        // TICKET-063 — the same race for a guard waiter (`SchedCore::guard_waits`): the owner may have
+        // released the `Shared`/`RwShared` update guard and then parked microseconds before this
+        // quiesce, in which case the waiter's own next poll would already succeed. A-then-G, below the
+        // A-then-Q order above — the guard registry is a leaf lock, so no ABBA.
+        if c.guard_waits
+            .iter()
+            .any(|&(key, me)| guard_wait_satisfiable(key, me))
         {
             return false;
         }

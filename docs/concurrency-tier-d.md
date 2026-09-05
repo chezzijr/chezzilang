@@ -239,8 +239,10 @@ void fn-type param `fn(T)` doesn't parse yet — use a bare `for`).
 
 **Path C LANDED (the intrinsically-native islands).** A blocking `recv`/`sleep_ms`/socket op reached
 inside a native callback (`native_reentry > 0`) under `--parallel` no longer faults — the worker thread
-**demotes**: accounts the op as a 5th fiber state (`blocked_native` for recv / `inflight` for
-sleep+socket), spins up **one raw replacement OS thread** (`spawn_replacement_worker`, net-zero worker
+**demotes**: accounts the op as a 5th fiber state (`blocked_native` for recv AND for a `Shared`/
+`RwShared` update-guard wait — TICKET-063 — / `inflight` for sleep+socket, which retain a promised
+external progress source a guard wait does not have), spins up **one raw replacement OS thread**
+(`spawn_replacement_worker`, net-zero worker
 count — Go's `handoffp`), and **blocks in place** (`ChannelCore.cv` for recv, `thread::sleep` for sleep,
 `wait_fd_ready`/`libc::poll` for sockets), resuming in place on a sibling's `send`/readiness. The narrow
 deadlock false-positive (#1) was resolved by registering each demoted fiber's channel and vetoing the
@@ -266,8 +268,13 @@ avoids it structurally with no shared locks). chezzi's rule mirrors BEAM's: **do
 that needs the same `Shared` box** — `update` is a fast RMW, never park inside it. `update` is kept
 deliberately: it is the only atomic read-modify-write, so removing it for bare `get`/`set` would
 reintroduce a silent lost-update race (a worse, non-local footgun than this narrow same-box deadlock).
-Future: this may be surfaced via a `share` binding modifier and/or a
-lint/runtime fault to turn the silent hang loud.
+This same-box shape stays a silent hang: no sender exists at all here (`f` itself needs the guard it
+already holds), so there is nothing for the process-wide deadlock verdict to distinguish from a live
+in-progress `update`. **TICKET-063 landed the adjacent GLOBAL case**, where a guard waiter and its
+recv-blocked feeder are each waiting on a genuinely different, uninvolved party: a `Shared`/`RwShared`
+update-guard wait is now accounted `blocked_native` (a counted, judgeable party) rather than
+`inflight` (which vetoed the verdict unconditionally), so a hold-and-wait with no possible feeder now
+faults `deadlock` like the global case already did before any guard was involved.
 
 ### D6 — epoll / kqueue pollset + minimal `std.net` (TCP) *(Go netpoller)* — ✅ LANDED (D6a–D6c)
 

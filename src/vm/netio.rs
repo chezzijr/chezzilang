@@ -207,12 +207,7 @@ impl Vm {
             match acquire_update_guard_within(key, self.guard_token, Some(GUARD_DEMOTE_BUDGET)) {
                 Ok(Some(guard)) => Ok(guard),
                 Err(cycle) => Err(cycle),
-                Ok(None) => {
-                    self.demote_enter(what, span)?;
-                    let blocked = acquire_update_guard(key, self.guard_token);
-                    self.demote_exit();
-                    blocked
-                }
+                Ok(None) => self.guard_wait_block(key, what, span)?,
             };
         result.map_err(|cycle| match cycle {
             GuardCycle::SelfHeld => self.err(
@@ -228,6 +223,52 @@ impl Vm {
                 span,
             ),
         })
+    }
+
+    /// TICKET-063 — the unbounded half of [`Vm::take_update_guard`], reached once the 5 ms bounded
+    /// acquire has given up. Accounts the wait `blocked_native` (never `inflight` — a guard wait has
+    /// no promised external progress; see `SchedCore::guard_waits`' doc), registers this thread as a
+    /// blocked party so the process-wide verdict can see it, and polls
+    /// [`Vm::block_halt_check`] every [`super::DEMOTE_POLL_BACKOFF`] so `--timeout`, cancel and
+    /// `os.exit` reach a guard waiter exactly like every other blocking-in-place site. The counters
+    /// are un-accounted via `guard_wait_exit` on every exit path (no `?` before that call).
+    fn guard_wait_block(
+        &mut self,
+        key: usize,
+        what: &str,
+        span: Span,
+    ) -> Result<Result<core::UpdateGuard, GuardCycle>, RuntimeError> {
+        let tok = self.guard_wait_enter(key, what, span)?;
+        let _party = self.block_party_guard(quiesce::PartyWait::Guard(key, self.guard_token));
+        let out = loop {
+            match acquire_update_guard_within(
+                key,
+                self.guard_token,
+                Some(super::DEMOTE_POLL_BACKOFF),
+            ) {
+                Ok(Some(g)) => break Ok(Ok(g)),
+                Err(cycle) => break Ok(Err(cycle)),
+                Ok(None) => {}
+            }
+            if let Err(e) = self.block_halt_check(super::DEADLOCK_MSG, span) {
+                break Err(e);
+            }
+            if let Some(sched) = self.mn.as_ref().map(Arc::clone) {
+                let mut c = sched.lock();
+                if c.terminate {
+                    drop(c);
+                    break Err(sched.deadlock_err.clone());
+                }
+                if sched.is_deadlocked(&c) {
+                    c.flag_deadlock(&sched.deadlock_err);
+                    drop(c);
+                    sched.cv.notify_all();
+                    break Err(sched.deadlock_err.clone());
+                }
+            }
+        };
+        self.guard_wait_exit(key, tok);
+        out
     }
 
     /// `AtomicInt(v)` — pop the int init, wrap it in a fresh lock-free `Arc<AtomicIntCore>`. The checker

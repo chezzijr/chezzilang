@@ -19292,6 +19292,111 @@ print(\"done\")
     );
 }
 
+/// TICKET-063 (W10-15) — a `Shared` update guard waiter parked behind a sibling's blocking `recv`
+/// must fault `deadlock`, not hang forever. The waiter holds no scheduler of its own progress
+/// promise (the recv it feeds never arrives), and `s.update`'s guard wait used to be accounted
+/// `inflight` — which vetoes the deadlock verdict unconditionally — so this hung before the fix.
+#[test]
+fn ticket_063_guard_waiter_behind_a_recv_faults_deadlock() {
+    let src = "\
+import std.concurrency
+s := Shared(0)
+ch := Channel[int]()
+parallel:
+    spawn:
+        s.update(fn(x: int) -> int: x + ch.recv())
+    spawn:
+        s.set(5)
+print(\"never\")
+";
+    let entry = write_temp_chz("ticket063_guard_waiter_behind_recv", src);
+    let run_entry = entry.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_file_with(
+            &run_entry,
+            crate::native::HostConfig::default(),
+        ));
+    });
+    let result = rx.recv_timeout(std::time::Duration::from_secs(15));
+    let _ = std::fs::remove_file(&entry);
+    let (_out, _err, res, _code) =
+        result.expect("expected the guard waiter to fault within 15s, not hang");
+    let msg = res
+        .as_ref()
+        .err()
+        .map(|e| e.message.clone())
+        .unwrap_or_default();
+    assert!(msg.contains("deadlock"), "expected \"deadlock\" in {msg:?}");
+}
+
+/// TICKET-063 — the same shape as `ticket_063_guard_waiter_behind_a_recv_faults_deadlock`, but the
+/// WAITER is the inline nursery body itself rather than a spawned sibling. Without
+/// `Vm::block_party_guard` marking the body blocked, `SchedCore::any_body_injecting` vetoes the
+/// deadlock predicate forever for this shape.
+#[test]
+fn ticket_063_guard_waiter_in_the_nursery_body_faults_deadlock() {
+    let src = "\
+import std.concurrency
+s := Shared(0)
+ch := Channel[int]()
+parallel:
+    spawn:
+        s.update(fn(x: int) -> int: x + ch.recv())
+    s.set(5)
+print(\"never\")
+";
+    let entry = write_temp_chz("ticket063_guard_waiter_in_body", src);
+    let run_entry = entry.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_file_with(
+            &run_entry,
+            crate::native::HostConfig::default(),
+        ));
+    });
+    let result = rx.recv_timeout(std::time::Duration::from_secs(15));
+    let _ = std::fs::remove_file(&entry);
+    let (_out, _err, res, _code) =
+        result.expect("expected the guard waiter to fault within 15s, not hang");
+    assert!(res.is_err(), "expected a deadlock fault, got {res:?}");
+}
+
+/// TICKET-063 — the no-false-fault control: a guard waiter that COULD be fed by a live sibling must
+/// not be faulted. `time.sleep_ms(100)` orders spawn 2's `s.set(5)` behind spawn 1's guard acquire
+/// (copying `ticket_016_cross_task_set_racing_update_is_not_lost`'s race-forcing pattern), and
+/// spawn 3's 150ms sleep keeps the 100ms sleep comfortably under it, so the holder receives `7`
+/// from spawn 3, stores it, releases the guard, and `s.set(5)` lands last — the only reachable
+/// output is `s = 5`. `ticket_016_cross_task_set_racing_update_is_not_lost` is the second control: a
+/// guard waiter behind a 300ms sleeping holder must still print `s = 100`.
+#[test]
+fn ticket_063_guard_waiter_is_not_faulted_while_a_sibling_can_feed_the_holder() {
+    let src = "\
+import std.concurrency
+import std.time
+s := Shared(0)
+ch := Channel[int]()
+parallel:
+    spawn:
+        s.update(fn(x: int) -> int: x + ch.recv())
+    spawn:
+        time.sleep_ms(100)
+        s.set(5)
+    spawn:
+        time.sleep_ms(150)
+        ch.send(7)
+print(\"s = {s.get()}\")
+";
+    let entry = write_temp_chz("ticket063_guard_waiter_fed_by_sibling", src);
+    let (out, err, res, _code) = run_file_with(&entry, crate::native::HostConfig::default());
+    let _ = std::fs::remove_file(&entry);
+    assert!(res.is_ok(), "run faulted: {res:?} err={err}");
+    assert_eq!(
+        out, "s = 5\n",
+        "expected the holder to settle at 5: {out:?}"
+    );
+}
+
 /// TICKET-016 / W8-3 — the no-false-fault control: two tasks that each touch a DISJOINT pair of
 /// boxes, sharing NO box between them, must complete normally, not be reported as a deadlock. The
 /// two tasks must not nest into each other's box — that IS a cycle and is covered by
@@ -19551,6 +19656,35 @@ fn ticket_016_bounded_update_guard_acquire_yields_instead_of_blocking() {
         acquire_update_guard_within(key, u64::MAX - 2, budget),
         Ok(Some(_))
     ));
+}
+
+/// TICKET-063 — `guard_wait_satisfiable` answers the same three outcomes `acquire_update_guard_within`
+/// would, without acquiring.
+#[test]
+fn ticket_063_guard_wait_satisfiable_answers_the_acquire_outcome() {
+    let key = usize::MAX - 9002;
+    let holder = u64::MAX - 11;
+    let other = u64::MAX - 12;
+    assert!(
+        crate::vm::core::guard_wait_satisfiable(key, holder),
+        "an unowned key must be satisfiable"
+    );
+    let held = acquire_update_guard_within(key, holder, Some(std::time::Duration::from_millis(5)))
+        .expect("a free box must not report a cycle")
+        .expect("a free box must hand the guard over");
+    assert!(
+        crate::vm::core::guard_wait_satisfiable(key, holder),
+        "the holder itself must be satisfiable"
+    );
+    assert!(
+        !crate::vm::core::guard_wait_satisfiable(key, other),
+        "another task must not be satisfiable while the holder holds it"
+    );
+    drop(held);
+    assert!(
+        crate::vm::core::guard_wait_satisfiable(key, other),
+        "once the held guard is dropped the other task must be satisfiable again"
+    );
 }
 
 /// W8-22: an error with no recorded span answers `None`, never a guess. A user-constructed
