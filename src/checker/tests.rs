@@ -2555,6 +2555,18 @@ fn the_pin_does_not_reach_a_none_or_a_nullary_enum_variant() {
     ));
 }
 
+/// TICKET-064 — a WRITE between two constraining reads of a `None`/nullary-enum binding must be
+/// caught. `is_unrefined_empty_coll` deliberately stays permissive for a never-written `None`
+/// (see the test above), but once the FIRST constraining use pins a concrete payload type, a later
+/// `Some(<other type>)` write must be rejected, exactly like the `[]`/`List` twin already is.
+#[test]
+fn a_write_after_the_first_constraining_use_pins_the_payload() {
+    rejects(
+        "x := None\ny: Option[str] = x\nx = Some(1)\nz: Option[str] = x\nprint(z)\n",
+        "",
+    );
+}
+
 /// Whether an assignment PINS its source must be a property of that statement alone. Gating the
 /// target-type probe on `empty_coll_sites.is_empty()` read as a perf shortcut but decided semantics:
 /// these two programs differ only in WHERE an unrelated `z.push(1)` sits, and on that gate the second
