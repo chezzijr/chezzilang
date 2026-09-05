@@ -13,12 +13,12 @@ import std.time
 # ~0.85s debug / pre-fix on this branch; a linear builder does it in well under 100ms. The bound
 # below is wall-clock but hugely discriminating, not tight (same convention as cancel_test.chz).
 test fn replace_large_input_is_not_quadratic():
-    n := 8000
+    n := 100000
     t0 := time.monotonic()
     r := string.replace("x".repeat(n), "x", "y")
     d := time.monotonic() - t0
     assert r == "y".repeat(n)
-    assert d < 0.3, "string.replace({n} chars) took {d}s, expected < 0.3s"
+    assert d < 2.0, "string.replace({n} chars) took {d}s, expected < 2.0s"
 
 test fn repeat_contract_unchanged():
     assert string.repeat("ab", 3) == "ababab"

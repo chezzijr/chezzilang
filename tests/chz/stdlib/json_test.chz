@@ -16,7 +16,7 @@ import std.time
 # well under 200ms. The bound below is wall-clock but hugely discriminating, not tight (same
 # convention as cancel_test.chz).
 test fn parse_large_string_is_not_quadratic():
-    n := 40000
+    n := 100000
     doc := "\"" + "x".repeat(n) + "\""
     t0 := time.monotonic()
     r := json.parse(doc)
@@ -27,12 +27,12 @@ test fn parse_large_string_is_not_quadratic():
     assert d < 0.5, "json.parse({n}-char string) took {d}s, expected < 0.5s"
 
 test fn stringify_large_string_is_not_quadratic():
-    n := 40000
+    n := 100000
     t0 := time.monotonic()
     out := json.stringify(Json.Str("x".repeat(n)))
     d := time.monotonic() - t0
     assert out.len() == n + 2
-    assert d < 0.3, "json.stringify({n}-char string) took {d}s, expected < 0.3s"
+    assert d < 0.5, "json.stringify({n}-char string) took {d}s, expected < 0.5s"
 
 test fn parse_at_depth_limit_still_ok():
     doc := "[".repeat(2000) + "]".repeat(2000)
