@@ -814,9 +814,7 @@ fn run_suite(
             &site,
             &format!("before_all failed: {}", e.message),
         );
-        if let Some(ap) = hook("after_all") {
-            let _ = vm.invoke_suite_method(ap, instance);
-        }
+        run_after_all(vm, suite, instance, file, out, opts, files, fallback);
         let _ = vm.take_out_bytes();
         return;
     }
@@ -885,9 +883,47 @@ fn run_suite(
     }
 
     // after_all? — runs after the last test method.
-    if let Some(p) = hook("after_all") {
-        let _ = vm.invoke_suite_method(p, instance);
-        let _ = vm.take_out_bytes();
+    run_after_all(vm, suite, instance, file, out, opts, files, fallback);
+}
+
+/// Run a suite's `after_all` hook, if it has one, and push its fault as its own `<Suite>::after_all`
+/// error row when it faults (never an upgrade of the last test's verdict — CPython's `tearDownClass`
+/// reports the same way: a separate error entry, the suite's own methods still counted as run).
+/// A no-op when the suite has no `after_all`.
+#[allow(clippy::too_many_arguments)]
+fn run_after_all(
+    vm: &mut Vm,
+    suite: &crate::vm::op::SuiteInfo,
+    instance: crate::vm::value::Value,
+    file: &str,
+    out: &mut Vec<Outcome>,
+    opts: &RunOpts,
+    files: &[(u32, PathBuf)],
+    fallback: &Path,
+) {
+    let Some(p) = suite.hooks.get("after_all").copied() else {
+        return;
+    };
+    let start = Instant::now();
+    let result = vm.invoke_suite_method(p, instance);
+    let duration = start.elapsed();
+    let captured = vm.take_out_bytes();
+    if let Err(e) = result {
+        let site = fault_site(vm, &e, files, fallback);
+        out.push(Outcome {
+            name: format!("{}::after_all", suite.name),
+            file: file.to_string(),
+            verdict: Verdict::Error {
+                site,
+                msg: format!("after_all failed: {}", e.message),
+            },
+            duration,
+            captured_out: if opts.show_output {
+                captured
+            } else {
+                Vec::new()
+            },
+        });
     }
 }
 
@@ -3623,6 +3659,37 @@ struct Suite:
         );
         assert!(
             report.text.contains("PASS Suite::second"),
+            "report:\n{}",
+            report.text
+        );
+    }
+
+    #[test]
+    fn after_all_fault_is_reported_as_its_own_error_row() {
+        let d = TmpDir::new();
+        let f = d.write(
+            "aa_test.chz",
+            "struct S:\n    fn after_all(self):\n        panic(\"after_all boom\")\n\n    \
+             test fn one(self):\n        assert true\n",
+        );
+        let report = run_tests(&f);
+        assert!(
+            !report.passed,
+            "a faulting after_all must fail the run; report:\n{}",
+            report.text
+        );
+        assert!(
+            report.text.contains("ERROR S::after_all"),
+            "report:\n{}",
+            report.text
+        );
+        assert!(
+            report.text.contains("after_all boom"),
+            "report:\n{}",
+            report.text
+        );
+        assert!(
+            report.text.contains("1 errored"),
             "report:\n{}",
             report.text
         );
