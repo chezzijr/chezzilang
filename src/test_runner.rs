@@ -346,7 +346,7 @@ pub fn run_tests_opts(root: &Path, opts: RunOpts) -> TestReport {
     let mut outcomes: Vec<Outcome> = Vec::new();
     // A compile/type/resolve error fails a whole file before any test runs. Collected (not rendered
     // inline) so the JSON path can suppress the human `ERROR <file>` lines.
-    let mut file_error_msgs: Vec<(String, String)> = Vec::new();
+    let mut file_error_msgs: Vec<(String, FileError)> = Vec::new();
     // Tests skipped by `--filter` (threaded up from the invoke sites — discovery of names happens
     // inside the compiled program, not before).
     let mut filtered_out = 0usize;
@@ -366,8 +366,8 @@ pub fn run_tests_opts(root: &Path, opts: RunOpts) -> TestReport {
                     break;
                 }
             }
-            Err(msg) => {
-                file_error_msgs.push((file.display().to_string(), msg));
+            Err(fe) => {
+                file_error_msgs.push((file.display().to_string(), fe));
                 if opts.fail_fast {
                     break;
                 }
@@ -429,8 +429,8 @@ pub fn run_tests_opts(root: &Path, opts: RunOpts) -> TestReport {
 
     let mut report = Vec::new();
     // File-level errors first (unchanged position + shape).
-    for (file, msg) in &file_error_msgs {
-        report.extend_from_slice(format!("ERROR {file}\n  {msg}\n").as_bytes());
+    for (file, fe) in &file_error_msgs {
+        report.extend_from_slice(format!("ERROR {file}\n  {}\n", fe.rendered).as_bytes());
     }
 
     match opts.verbosity {
@@ -588,9 +588,36 @@ fn render_line(report: &mut Vec<u8>, o: &Outcome, opts: &RunOpts) {
 /// Diverges from `check`/`run`'s bare array (it needs `totals`), but reuses the flag name + the
 /// suppress-all-human-output behavior for CLI consistency.
 #[allow(clippy::too_many_arguments)]
+/// One whole-file diagnostic (resolve/check/compile/init failure) that stopped a `*_test.chz` file
+/// before any test ran. Carries both renderings: `rendered` for the human `ERROR <file>` line,
+/// `message`/`file`/`line`/`col`/`help` for `--errors=json`'s `file_errors` array. `file`/`line`/`col`
+/// are `None` when the failure has no module coordinate (never a claimed-wrong one — DEC-048).
+struct FileError {
+    rendered: String,
+    message: String,
+    file: Option<String>,
+    line: Option<u32>,
+    col: Option<u32>,
+    help: Option<String>,
+}
+
+/// Build a [`FileError`] from the checker's first error. `path` is the module the error is anchored
+/// in, when known.
+fn file_error_from_check(e: &crate::checker::CheckError, path: Option<&Path>) -> FileError {
+    FileError {
+        rendered: e.render(path),
+        message: e.message.clone(),
+        file: path.map(|p| crate::lexer::display_path(p).to_string_lossy().into_owned()),
+        line: Some(e.span.line),
+        col: Some(e.span.col),
+        help: e.help.clone(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_json(
     outcomes: &[Outcome],
-    file_error_msgs: &[(String, String)],
+    file_error_msgs: &[(String, FileError)],
     total: usize,
     passed: usize,
     failed: usize,
@@ -621,6 +648,27 @@ fn render_json(
         }
         s.push_str(&format!(",\"duration_ms\":{}}}", o.duration.as_millis()));
     }
+    s.push_str("],\"file_errors\":[");
+    for (i, (_, fe)) in file_error_msgs.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push('{');
+        if let Some(file) = &fe.file {
+            s.push_str(&format!("\"file\":{},", json_string(file)));
+        }
+        if let (Some(line), Some(col)) = (fe.line, fe.col) {
+            s.push_str(&format!("\"line\":{line},\"col\":{col},"));
+        }
+        s.push_str(&format!(
+            "\"severity\":\"error\",\"message\":{}",
+            json_string(&fe.message)
+        ));
+        if let Some(help) = &fe.help {
+            s.push_str(&format!(",\"help\":{}", json_string(help)));
+        }
+        s.push('}');
+    }
     s.push_str("],\"totals\":{");
     s.push_str(&format!(
         "\"total\":{total},\"passed\":{passed},\"failed\":{failed},\"errored\":{errored},\
@@ -637,13 +685,23 @@ fn render_json(
 /// before faulting recoverably, which overflows the 8 MB main thread but not the 384 MB VM stack.
 /// This matches `chezzi run` (which also runs on [`crate::vm::run_file_with_entry`]'s VM-stack
 /// thread), so a `test` verdict mirrors a `run`.
-/// Returns `(per-test outcomes, count filtered out by `--filter`)` or a whole-file compile-error msg.
+/// Returns `(per-test outcomes, count filtered out by `--filter`)` or a whole-file [`FileError`].
 fn run_file(
     file: &Path,
     opts: &RunOpts,
     seen_warnings: &mut std::collections::HashSet<String>,
-) -> Result<(Vec<Outcome>, usize), String> {
-    let graph = crate::resolver::build_graph(file).map_err(|e| e.to_string())?;
+) -> Result<(Vec<Outcome>, usize), FileError> {
+    let graph = crate::resolver::build_graph(file).map_err(|e| FileError {
+        rendered: e.to_string(),
+        message: e.message.clone(),
+        file: e
+            .path
+            .as_deref()
+            .map(|p| crate::lexer::display_path(p).to_string_lossy().into_owned()),
+        line: Some(e.span.line),
+        col: Some(e.span.col),
+        help: None,
+    })?;
     let (res, warns) = crate::checker::check_graph_diags(&graph, None);
     // Advisory only — they go to stderr and change no test outcome, so a `--errors=json` run's
     // stdout stays the machine-readable result document.
@@ -665,11 +723,27 @@ fn run_file(
         // Surface the first type error (matches `chezzi check`'s headline).
         let first = errs
             .first()
-            .map(|e| e.render(graph_path(&graph, e.span.file)))
-            .unwrap_or_else(|| "type error".into());
-        return Err(first);
+            .map(|e| file_error_from_check(e, graph_path(&graph, e.span.file)));
+        return Err(first.unwrap_or(FileError {
+            rendered: "type error".into(),
+            message: "type error".into(),
+            file: None,
+            line: None,
+            col: None,
+            help: None,
+        }));
     }
-    let program = crate::compiler::compile_graph(&graph).map_err(|e| e.message)?;
+    let program = crate::compiler::compile_graph(&graph).map_err(|e| {
+        let path = graph_path(&graph, e.span.file);
+        FileError {
+            rendered: e.message.clone(),
+            message: e.message.clone(),
+            file: path.map(|p| crate::lexer::display_path(p).to_string_lossy().into_owned()),
+            line: Some(e.span.line),
+            col: Some(e.span.col),
+            help: None,
+        }
+    })?;
     let program: Arc<Program> = Arc::new(program);
     let file_label = file.display().to_string();
     let opts = opts.clone();
@@ -695,8 +769,9 @@ fn invoke_all(
     program: Arc<Program>,
     file_label: String,
     opts: &RunOpts,
-) -> Result<(Vec<Outcome>, usize), String> {
+) -> Result<(Vec<Outcome>, usize), FileError> {
     let mut vm = Vm::for_program(Arc::clone(&program));
+    let files = program.file_table();
     // `--max-heap` cap (0 = off). Per-test reset of the over-memory latch is VM-side (in each invoke
     // entry point), so `run_suite` needs no cap threading — the VM is already configured.
     vm.set_max_heap(opts.max_heap);
@@ -705,15 +780,26 @@ fn invoke_all(
     vm.set_timeout(opts.timeout_ms);
     // Initialize the module(s): run top-levels once so globals/functions/structs exist.
     if let Err(e) = vm.init_for_tests() {
-        return Err(format!(
+        let rendered = format!(
             "error initializing test module: {} (line {})",
             e.message, e.span.line
-        ));
+        );
+        let path = files
+            .iter()
+            .find(|(f, _)| *f == e.span.file)
+            .map(|(_, p)| p);
+        return Err(FileError {
+            message: format!("error initializing test module: {}", e.message),
+            rendered,
+            file: path.map(|p| crate::lexer::display_path(p).to_string_lossy().into_owned()),
+            line: path.map(|_| e.span.line),
+            col: path.map(|_| e.span.col),
+            help: None,
+        });
     }
 
     let mut outcomes: Vec<Outcome> = Vec::new();
     let mut filtered_out = 0usize;
-    let files = program.file_table();
     let fallback = PathBuf::from(&file_label);
 
     // Free tests, in declaration order.
@@ -3768,6 +3854,43 @@ struct Suite:
             passing.stderr_bytes.is_empty(),
             "a PASSing test's stderr stays discarded (show-on-failure); got: {:?}",
             passing.stderr_bytes
+        );
+    }
+
+    #[test]
+    fn json_carries_the_file_level_diagnostic() {
+        let d = TmpDir::new();
+        let f = d.write(
+            "a_test.chz",
+            "x: int = \"s\"\n\ntest fn one():\n    assert true\n",
+        );
+        let report = run_tests_opts(&f, opts_with(|o| o.json = true));
+        assert!(
+            report.text.contains("\"file_errors\":[{"),
+            "report:\n{}",
+            report.text
+        );
+        assert!(
+            report.text.contains("\"severity\":\"error\""),
+            "report:\n{}",
+            report.text
+        );
+        assert!(
+            report.text.contains("\"line\":1,\"col\":10"),
+            "report:\n{}",
+            report.text
+        );
+        assert!(
+            report
+                .text
+                .contains("cannot assign str to variable of type int"),
+            "report:\n{}",
+            report.text
+        );
+        assert!(
+            report.text.contains("\"file_errors\":1"),
+            "totals.file_errors must still count 1; report:\n{}",
+            report.text
         );
     }
 }
