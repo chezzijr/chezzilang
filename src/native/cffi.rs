@@ -2282,6 +2282,44 @@ void* mkrec(void) { static struct R r = { -3, 70000, 2.5 }; return &r; }
     }
 
     #[test]
+    fn faulting_callback_is_invoked_only_once_per_extern_call() {
+        // TICKET-060: libc `qsort` calls the comparator repeatedly regardless of the FIRST
+        // invocation's result. A callback that faults on its first call must not be re-entered by
+        // later invocations from the same `qsort` -- one fault is enough to abandon the extern call.
+        // As currently implemented, `callback_trampoline` stashes only the LAST fault and keeps
+        // re-entering the engine on every subsequent C-side callback invocation, so `count` is the
+        // number of comparisons `qsort` performs (15 for this 10-element input), not 1.
+        let src = [
+            "import std.ffi",
+            "extern \"libc\":",
+            "    fn qsort(base: ptr, n: int, size: int, cmp: fn(ptr, ptr) -> int)",
+            "count := 0",
+            "fn cmp(a: ptr, b: ptr) -> int:",
+            "    count += 1",
+            "    return 1 / 0",
+            "data := [5, 2, 9, 1, 7, 3, 8, 4, 6, 0]",
+            "n := data.len()",
+            "buf := ffi.alloc(n * 8)",
+            "defer ffi.free(buf)",
+            "for i in range(n):",
+            "    ffi.store_int64_at(buf, i * 8, data[i])",
+            "r := recover: qsort(buf, n, 8, cmp)",
+            "print(count)",
+            "print(r)",
+            "",
+        ]
+        .join("\n");
+        let entry = write_deref_chz(&src);
+        let (out, _e, res, _) = crate::vm::run_file(&entry);
+        let _ = std::fs::remove_file(&entry);
+        assert!(res.is_ok(), "faulted: {res:?}");
+        assert_eq!(
+            out, "1\nErr('division by zero')\n",
+            "the comparator must fault exactly once, not be re-invoked by qsort's later comparisons"
+        );
+    }
+
+    #[test]
     fn callback_panic_is_caught_and_reraised() {
         // A callback that PANICS must be caught by the trampoline's catch_unwind (no unwind into the
         // C frames / abort) and re-raised as the extern call's error.
