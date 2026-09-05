@@ -268,13 +268,16 @@ avoids it structurally with no shared locks). chezzi's rule mirrors BEAM's: **do
 that needs the same `Shared` box** — `update` is a fast RMW, never park inside it. `update` is kept
 deliberately: it is the only atomic read-modify-write, so removing it for bare `get`/`set` would
 reintroduce a silent lost-update race (a worse, non-local footgun than this narrow same-box deadlock).
-This same-box shape stays a silent hang: no sender exists at all here (`f` itself needs the guard it
-already holds), so there is nothing for the process-wide deadlock verdict to distinguish from a live
-in-progress `update`. **TICKET-063 landed the adjacent GLOBAL case**, where a guard waiter and its
-recv-blocked feeder are each waiting on a genuinely different, uninvolved party: a `Shared`/`RwShared`
-update-guard wait is now accounted `blocked_native` (a counted, judgeable party) rather than
-`inflight` (which vetoed the verdict unconditionally), so a hold-and-wait with no possible feeder now
-faults `deadlock` like the global case already did before any guard was involved.
+**TICKET-063 landed the fix for this same-box shape too.** A `Shared`/`RwShared` update-guard wait is
+now accounted `blocked_native` (a counted, judgeable party) rather than `inflight` (which vetoed the
+verdict unconditionally). The sender that `f`'s `recv` is waiting on needs that same box's guard to
+send, and it is now a registered guard waiter itself, so the process-wide verdict sees `f` parked on
+the recv and the sender parked on the guard `f` already holds — a hold-and-wait with no possible
+feeder — and faults `deadlock`. The self-re-entrant reading (`f` itself re-enters `update` on the same
+box, needing the guard it already holds) faults `GuardCycle::SelfHeld` instead (TICKET-016), a
+separate, immediate check. The rule **don't block on a value that needs the same `Shared` box** still
+stands wherever a live feeder — one that does not itself need this box's guard — keeps the program
+running: that case is not a deadlock and the verdict does not fire on it.
 
 ### D6 — epoll / kqueue pollset + minimal `std.net` (TCP) *(Go netpoller)* — ✅ LANDED (D6a–D6c)
 
