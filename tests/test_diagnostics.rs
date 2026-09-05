@@ -113,3 +113,35 @@ fn json_document_is_unchanged_by_the_coordinate_fix() {
     assert!(stdout.contains("\"line\":2"), "stdout: {stdout}");
     assert!(!stdout.contains("\"col\""), "stdout: {stdout}");
 }
+
+/// W10-9: a file-level type error must be reflected as data in the `--errors=json` document, not
+/// just as an opaque `file_errors` count with the diagnostic dropped.
+#[test]
+fn file_level_error_appears_in_json() {
+    let t = TmpDir::new();
+    let entry = t.write(
+        "a_test.chz",
+        "x: int = \"s\"\n\ntest fn one():\n    assert true\n",
+    );
+    let (stdout, _stderr) = run_test(&["--errors=json", entry.to_str().unwrap()]);
+    assert!(
+        stdout.contains("cannot assign str"),
+        "expected the file-level type error message in the JSON document, got: {stdout}"
+    );
+}
+
+/// W10-10: a faulting `after_all` hook must fail the suite (ERROR-class), matching `before_all`/
+/// `before_each`/`after_each`.
+#[test]
+fn faulting_after_all_errors_the_suite() {
+    let t = TmpDir::new();
+    let entry = t.write(
+        "aa_test.chz",
+        "struct S:\n    fn after_all(self):\n        panic(\"after_all boom\")\n\n    test fn one(self):\n        assert true\n",
+    );
+    let (stdout, _stderr) = run_test(&[entry.to_str().unwrap()]);
+    assert!(
+        stdout.contains("after_all boom"),
+        "expected the after_all fault to be reported, got: {stdout}"
+    );
+}
