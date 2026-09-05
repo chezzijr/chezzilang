@@ -281,13 +281,14 @@ fn sleep_synchronised_tests() -> BTreeSet<String> {
 /// rejected it (the walk returns 68). Obtain it by compiling once with an empty array and copying
 /// the "sleeps but is not listed" list `no_new_rust_test_sleeps_to_order_two_events` reports,
 /// verbatim, the same way `stack_trace_reports_call_chain`'s golden was obtained.
-const SLEEP_SYNCHRONISED_TESTS: [&str; 69] = [
+const SLEEP_SYNCHRONISED_TESTS: [&str; 70] = [
     "a_bailed_join_stops_its_jobs_from_starting_new_work",
     "a_cancelled_siblings_defer_runs_whole_on_both_engines",
     "a_finished_executor_job_lets_the_genuine_nursery_deadlock_fire",
     "a_finished_jobs_output_survives_a_timeout_bail",
     "a_job_submitted_to_mains_executor_survives_another_executors_shutdown_now_mn",
-    "a_leaked_jobs_exit_aborts_whichever_test_is_running_and_the_run_continues",
+    "a_leaked_job_from_a_top_level_executor_still_aborts_a_later_test",
+    "a_leaked_jobs_exit_is_attributed_to_the_test_that_leaked_it",
     "a_live_timer_still_delivers_under_a_generous_timeout",
     "a_normally_completing_nursery_is_untouched_without_an_exit",
     "a_nursery_judge_re_asks_the_verdict_when_a_party_registers_later",

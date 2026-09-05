@@ -857,20 +857,24 @@ struct S:
     );
 }
 
-/// W7-57 review, prosecutor 2 charge 2 — DOCUMENTED CEILING, pinned so it cannot drift silently.
+/// W7-57 review, prosecutor 2 charge 2 -- re-pinned by TICKET-067 (`docs/gaps.md` W10-12).
 ///
-/// A `test fn` leaks an `Executor` job that `os.exit`s 400 ms later, i.e. during a LATER test. What
-/// happens today: the test that happens to be running when the exit lands is aborted with `exit`, the
-/// run then CONTINUES, and the process status is the ordinary "1 errored" — not 3.
+/// A `test fn` leaks an `Executor` job that `os.exit`s 400 ms later. Since TICKET-067 the A2 join is
+/// scoped PER TEST (`Vm::exec_registry_mark` / `Vm::reap_executors_since`), so the leaking test joins
+/// the executor IT created before returning: it waits out the 400 ms and takes the `exit` itself. The
+/// run then CONTINUES -- `pending_exit` is reset per invocation -- and the status is the runner's
+/// ordinary "1 errored", not the leaked 3. Measured: `ERROR a_leaks_a_job (leak_test.chz:1:1) exit`.
 ///
-/// That attribution is admittedly arbitrary (`b_loops` did nothing wrong). It is kept rather than
-/// re-plumbed because the alternative — a run-level halt verdict — is a `test_runner` redesign (a new
-/// verdict kind, an rc policy, `--fail-fast` interaction) that belongs in its own change, and because
-/// what is here is strictly better than what it replaced: pre-W7-57 the leaked exit was invisible and
-/// the file reported `2 passed`, rc=0. This test pins the real behaviour by name so that "one
-/// arbitrary test errors" is a decision on record, not an accident.
+/// Before TICKET-067 the join ran once per FILE, so the exit landed on whichever LATER test happened
+/// to be running (`ERROR b_loops`) -- an arbitrary attribution this test pinned as a documented
+/// ceiling. That shape survives only where no test owns the executor, and it moved to
+/// `a_leaked_job_from_a_top_level_executor_still_aborts_a_later_test`.
+///
+/// `b_loops` is a 2 M-iteration loop, not the 60 M it used to be (23.1 s to 1.2 s, measured): it no
+/// longer has to be in flight when the exit lands, and is kept only as the "a later test runs
+/// untouched" control.
 #[test]
-fn a_leaked_jobs_exit_aborts_whichever_test_is_running_and_the_run_continues() {
+fn a_leaked_jobs_exit_is_attributed_to_the_test_that_leaked_it() {
     let t = TmpDir::new();
     let entry = t.write(
         "leak_test.chz",
@@ -889,6 +893,77 @@ test fn a_leaks_a_job():
 
 test fn b_loops():
     i := 0
+    while i < 2000000:
+        i = i + 1
+    assert i == 2000000
+
+test fn c_after():
+    assert 2 == 2
+"#,
+    );
+    let (status, out) = run_capped_sub("test", &entry, 60);
+    assert!(
+        out.lines()
+            .any(|l| l.starts_with("ERROR a_leaks_a_job (") && l.ends_with(") exit")),
+        "the leaking test joins its own executor and takes the exit: {out:?}"
+    );
+    assert!(
+        out.contains("PASS b_loops"),
+        "a later test is untouched by it: {out:?}"
+    );
+    assert!(
+        out.contains("PASS c_after"),
+        "and the run CONTINUES past it -- the reset is per-invocation: {out:?}"
+    );
+    assert!(
+        out.contains("3 test(s): 2 passed, 0 failed, 1 errored"),
+        "{out:?}"
+    );
+    assert_eq!(
+        status, 1,
+        "the status is the runner's ordinary failure code, NOT the leaked 3: {out:?}"
+    );
+}
+
+/// TICKET-067 (`docs/gaps.md` W10-12) -- the DOCUMENTED CEILING that survives the per-test A2 join.
+///
+/// `shared_ex` is built at the `_test.chz` MODULE TOP LEVEL, so it sits below every test's registry
+/// mark and no test joins it. `a_leaks_a_job` returns at once, and the leaked job's `os.exit(3)`
+/// 400 ms later aborts whichever LATER test is running -- here `b_loops`, whose 60 M-iteration loop
+/// needs ~22 s in a debug build, so the exit always lands inside it. The run continues and the status
+/// is the runner's ordinary 1. Measured: `PASS a_leaks_a_job`, then
+/// `ERROR b_loops (toplevel_leak_test.chz:17:11) exit`, then `PASS c_after`, then
+/// `3 test(s): 2 passed, 0 failed, 1 errored`, rc=1, whole file 0.44 s.
+///
+/// The attribution is arbitrary (`b_loops` did nothing wrong) and is kept rather than re-plumbed: a
+/// run-level halt verdict is a `test_runner` redesign (a new verdict kind, an rc policy, a
+/// `--fail-fast` interaction) that belongs in its own change.
+///
+/// It is also the end-to-end fence for the mark: drain from registry index 0 instead and this goes
+/// red, because `a_leaks_a_job` would join `shared_ex` and take the `exit` itself while `b_loops`
+/// passed. `test_runner::tests::an_executor_created_before_the_first_test_is_not_joined_by_it` pins
+/// the other half -- a shared executor must still accept a `submit` from a later test.
+#[test]
+fn a_leaked_job_from_a_top_level_executor_still_aborts_a_later_test() {
+    let t = TmpDir::new();
+    let entry = t.write(
+        "toplevel_leak_test.chz",
+        r#"import std.concurrency
+import std.time
+import std.os
+
+shared_ex := Executor()
+
+fn bail():
+    time.sleep_ms(400)
+    os.exit(3)
+
+test fn a_leaks_a_job():
+    shared_ex.submit(bail)
+    assert 1 == 1
+
+test fn b_loops():
+    i := 0
     while i < 60000000:
         i = i + 1
     assert i == 60000000
@@ -898,14 +973,18 @@ test fn c_after():
 "#,
     );
     let (status, out) = run_capped_sub("test", &entry, 60);
-    assert!(out.contains("PASS a_leaks_a_job"), "{out:?}");
     assert!(
-        out.contains("ERROR b_loops"),
+        out.contains("PASS a_leaks_a_job"),
+        "the test does not own the executor, so it does not join it: {out:?}"
+    );
+    assert!(
+        out.lines()
+            .any(|l| l.starts_with("ERROR b_loops (") && l.ends_with(") exit")),
         "the in-flight test absorbs the leaked exit: {out:?}"
     );
     assert!(
         out.contains("PASS c_after"),
-        "and the run CONTINUES past it — the reset is per-invocation: {out:?}"
+        "and the run CONTINUES past it -- the reset is per-invocation: {out:?}"
     );
     assert_eq!(
         status, 1,
