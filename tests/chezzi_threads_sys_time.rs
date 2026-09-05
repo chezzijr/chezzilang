@@ -11,11 +11,16 @@
 //! block completes before the next starts), but multiple `#[test]` fns WITHIN one target run
 //! concurrently up to `--test-threads`. This test spawns a genuinely CPU-bound 4-task `parallel:`
 //! subprocess that consumes ~4 real cores for about a second; putting it in the same file as
-//! `chezzi_threads_cli.rs`'s W8-8 timing tests (which assert a >5.5x serialization ratio) measurably
-//! destabilized them under `RUST_TEST_THREADS=4` — reproduced directly: 1 failure in 4 runs of the
-//! combined file (`threads_one_serializes_cpu_bound_parallel_tasks` dropped to ratio 4.34, under its
-//! 5.5 floor) vs 0 failures once separated. A separate target sidesteps the interference entirely
-//! without touching the W8-8 tests (out of scope here).
+//! `chezzi_threads_cli.rs`'s W8-8 timing tests measurably destabilized them under
+//! `RUST_TEST_THREADS=4` — reproduced directly: 1 failure in 4 runs of the combined file vs 0 once
+//! separated. **That evidence is DATED (pre-TICKET-059) and its numbers no longer describe the
+//! gate it cites:** the W8-8 tests then asserted a two-sample `t8/t1 > 5.5` ratio, and the observed
+//! failure was that ratio dropping to 4.34. TICKET-059 replaced it with a one-sided
+//! `cpu <= wall * MAX_CORES_AT_ONE_WORKER` from `wait4` child rusage, which contention can only
+//! LOWER — so a CPU-hungry neighbour can no longer push those tests red the way this note describes.
+//! The separation is kept anyway (this file still burns ~4 real cores for about a second, and a
+//! separate target costs nothing), but do not cite the 4.34 measurement as a live reason: re-measure
+//! before concluding anything about merging the files.
 
 #[cfg(unix)]
 #[path = "support/child_rusage.rs"]
