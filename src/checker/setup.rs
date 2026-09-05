@@ -144,6 +144,7 @@ impl Checker {
             name_docs: HashMap::new(),
             empty_coll_sites: Vec::new(),
             empty_coll_aliases: Vec::new(),
+            carrier_pins: Vec::new(),
             hover_pending: None,
         };
         c.seed_stdlib_structs();
@@ -2063,6 +2064,10 @@ impl Checker {
         // `finalize_empty_coll_sites`, because only `pop_scope` runs at all 23 push sites.
         self.empty_coll_aliases
             .retain(|(a, b)| a.0 < self.scopes.len() && b.0 < self.scopes.len());
+        // TICKET-064 — `carrier_pins` is a second `(scope_idx, name)`-keyed table (DEC-032's rule):
+        // scope indices are REUSED (module scope is 0, every top-level fn body is index 1), so an
+        // undrained entry would false-pin a same-named binding in the next fn.
+        self.carrier_pins.retain(|(k, _)| k.0 < self.scopes.len());
     }
     /// Record `name` (already declared in the current scope) as a `const T` binding.
     pub(super) fn declare_const(&mut self, name: &str) {
@@ -2109,6 +2114,13 @@ impl Checker {
         // resolves the owning scope AFTER its own insert, so a block-scope shadow untaints only the
         // INNER binding and an outer pair survives.
         self.unlink_empty_alias(name);
+        // TICKET-064 — a re-declaration of `name` is a FRESH binding: DEC-032's rule that a
+        // `(scope_idx, name)`-keyed table is untainted at `declare` (because scope indices are
+        // reused) applies to `carrier_pins` exactly like it does to `empty_coll_aliases` above.
+        if let Some(scope) = self.owning_scope(name) {
+            let key = (scope, name.to_string());
+            self.carrier_pins.retain(|(k, _)| *k != key);
+        }
         // W8-3 — `spawn_stale` is keyed by BARE NAME, so it says nothing about which binding it
         // describes. A NEW binding of the name is a different binding: the task wrote the old one, and
         // a read of the new one loses nothing. Untainting here rather than at each binding form is
@@ -2272,6 +2284,51 @@ impl Checker {
     /// empty list) — its direct slot is `List[Unknown]`, so it is NOT an empty collection and must not
     /// be flagged. This also DELIBERATELY excludes `Option[Unknown]` (`x := None`) and nullary-enum
     /// producers (`Box[Unknown]`): the requirement is scoped to the three literal container kinds.
+    /// TICKET-064 — is `t` a carrier (`None`/nullary-enum-variant) that has never been pinned? A
+    /// `Ty::Option` counts when its payload slot is `Unknown`; a `Ty::Enum` counts when it carries at
+    /// least one type argument and EVERY argument is `Unknown` (a PARTIALLY concrete carrier like
+    /// `Result[int, Unknown]` is deliberately excluded — see `## Decisions`, `Result` is out of scope).
+    pub(super) fn is_unpinned_carrier(t: &Ty) -> bool {
+        match t {
+            Ty::Option(p) => p.is_unknown(),
+            Ty::Enum(_, args) => !args.is_empty() && args.iter().all(|a| a.is_unknown()),
+            _ => false,
+        }
+    }
+    /// TICKET-064 — do `a` and `b` name the SAME carrier (so a pin recorded from one is comparable to
+    /// a write of the other)? Two `Option`s always match; two `Enum`s match when their names and
+    /// argument counts agree.
+    pub(super) fn same_carrier_shape(a: &Ty, b: &Ty) -> bool {
+        match (a, b) {
+            (Ty::Option(_), Ty::Option(_)) => true,
+            (Ty::Enum(na, aa), Ty::Enum(nb, ab)) => na == nb && aa.len() == ab.len(),
+            _ => false,
+        }
+    }
+    /// TICKET-064 — record that `name`'s carrier payload was pinned to `ty` by a constraining use.
+    /// First constraining use wins: an existing entry for `name`'s owning scope is never overwritten,
+    /// because `drop_empty_site`'s doc comment states this fn must never REPIN a carrier binding (a
+    /// REPIN of the TABLE would re-break the read-only shape `## Decisions` states must stay
+    /// permissive). Declines silently if `name` has no owning scope (already gone).
+    pub(super) fn pin_carrier_use(&mut self, name: &str, ty: &Ty) {
+        let Some(scope) = self.owning_scope(name) else {
+            return;
+        };
+        let key = (scope, name.to_string());
+        if self.carrier_pins.iter().any(|(k, _)| *k == key) {
+            return;
+        }
+        self.carrier_pins.push((key, ty.clone()));
+    }
+    /// TICKET-064 — the payload type `name`'s FIRST constraining use recorded, if any.
+    pub(super) fn carrier_pin(&self, name: &str) -> Option<Ty> {
+        let scope = self.owning_scope(name)?;
+        let key = (scope, name.to_string());
+        self.carrier_pins
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, t)| t.clone())
+    }
     pub(super) fn is_unrefined_empty_coll(t: &Ty) -> bool {
         match t {
             Ty::List(e) | Ty::Set(e) => e.is_unknown(),
@@ -2283,6 +2340,12 @@ impl Checker {
     /// its pending empty-collection requirement. Resolves `name`'s OWNING scope (reverse walk, like
     /// `repin`) and drops only that binding's site, so an inner-scope shadow of the same name does not
     /// clear an outer binding's requirement.
+    ///
+    /// TICKET-064 — this is also the constraining-use FUNNEL for the carrier pin: four of its five
+    /// sink shapes (annotated let, typed argument, typed return, value escape) call this fn with the
+    /// sink type in hand, so the pin record below covers them all in one place. It must never REPIN a
+    /// carrier binding (only `check_assign`'s write path does that) — W8-46 measured that as a false
+    /// rejection of the read-only shape (`e := Box.Empty` / `a: Box[int] = e` / `b: Box[str] = e`).
     pub(super) fn drop_empty_site(&mut self, name: &str, shape: Option<&Ty>) {
         let owner = (0..self.scopes.len())
             .rev()
@@ -2320,6 +2383,19 @@ impl Checker {
             if merged != bt {
                 self.repin(name, merged);
             }
+        }
+        // TICKET-064 — record the carrier pin from this same constraining use, when `name`'s binding
+        // is an unpinned `None`/nullary-enum carrier and `shape` is a fully concrete instance of the
+        // SAME carrier. `pin_carrier_use` itself is first-use-wins, so calling it again on a later
+        // sink is a no-op.
+        if let Some(shape) = shape
+            && ty_fully_concrete(shape)
+            && !self.is_captured(name)
+            && let Some(bt) = self.lookup(name)
+            && Self::is_unpinned_carrier(&bt)
+            && Self::same_carrier_shape(&bt, shape)
+        {
+            self.pin_carrier_use(name, shape);
         }
     }
     /// PART A — an empty-collection binding READ AS A VALUE that ESCAPES into another binding or

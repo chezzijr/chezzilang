@@ -2483,6 +2483,13 @@ struct Checker {
     /// re-declaration of either name breaks the pair (unlinked in `check_assign`'s Ident arm and in
     /// `declare`), so a rebound alias is never falsely rejected.
     empty_coll_aliases: Vec<((usize, String), (usize, String))>,
+    /// TICKET-064 — the payload type a `None`/nullary-enum-variant binding was pinned to by its
+    /// FIRST constraining use (an annotated sink, a typed argument, a typed `return`, a `??` with a
+    /// typed right-hand side, or a `Some(v)`/`Variant(v)` write). Keyed by `(owning_scope_idx, name)`,
+    /// like `empty_coll_sites`/`empty_coll_aliases`. A READ is never checked against this table — only
+    /// a later WRITE is, so a never-written binding stays permissive across differently-typed reads
+    /// (W8-46's surviving half).
+    carrier_pins: Vec<((usize, String), Ty)>,
     /// PART B — retroactive hover: when the hover probe lands on an occurrence of a binding whose
     /// recorded type still carries `Unknown`-in-slot (a not-yet-refined empty collection), we stash the
     /// binding's `(owning_scope_idx, name, kind, doc)` here INSTEAD of locking `hover_result`, then at

@@ -3955,6 +3955,20 @@ impl Checker {
                 crate::desugar::lower_carrier_option(&mut c, tmp);
                 let r = self.infer(&c);
                 self.pop_scope();
+                // TICKET-064 — `??`'s typed right-hand side is a constraining use of `lhs`, but it
+                // never reaches the `drop_empty_site` funnel (only the annotated/argument/return
+                // sinks do), so it needs its own carrier-pin record. Must sit AFTER `pop_scope` so
+                // `owning_scope` resolves against the real scope stack, not the scratch-operand scope
+                // pushed above.
+                if let ExprKind::Ident(n) = &lhs.kind
+                    && !r.is_unknown()
+                    && ty_fully_concrete(&r)
+                    && self
+                        .lookup(n)
+                        .is_some_and(|bt| Self::is_unpinned_carrier(&bt))
+                {
+                    self.pin_carrier_use(n, &Ty::Option(Box::new(r.clone())));
+                }
                 r
             }
             Ty::Result(..) => {

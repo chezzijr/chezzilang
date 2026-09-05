@@ -3509,6 +3509,34 @@ impl Checker {
                 if op != AssignOp::PlusEq {
                     self.unlink_empty_alias(name);
                 }
+                // TICKET-064 — a WRITE to a `None`/nullary-enum carrier is checked against its
+                // first-constraining-use pin. Must run BEFORE `drop_empty_site` below, which would
+                // otherwise record the very pin this statement is checked against — recording it
+                // first would let every write "agree" with itself. A READ is never checked this way
+                // (`## Decisions`); only `=` writes with a fully concrete, same-shape value reach
+                // this. On agreement (or no pin yet) the write also REPINS the binding, which is what
+                // makes a later READ sound (a `match` arm binds a concrete payload) while a
+                // never-written carrier stays permissive.
+                if op == AssignOp::Eq
+                    && Self::is_unpinned_carrier(&var_ty)
+                    && Self::same_carrier_shape(&var_ty, &val_ty)
+                    && ty_fully_concrete(&val_ty)
+                    && !self.is_captured(name)
+                {
+                    if let Some(pin) = self.carrier_pin(name)
+                        && !self.assignable(&pin, &val_ty)
+                    {
+                        self.error(
+                            target.span,
+                            format!(
+                                "cannot assign {val_ty} to '{name}' -- its payload was pinned to {pin} by an earlier use"
+                            ),
+                        );
+                    } else {
+                        self.pin_carrier_use(name, &val_ty);
+                        self.repin(name, val_ty.clone());
+                    }
+                }
                 // PART A: a whole-binding (re)assignment / compound-assign / tuple-assign element that
                 // supplies a CONCRETE-typed value into an unrefined empty-collection binding constrains
                 // its element type — clear the pending annotation requirement (the binding IS
