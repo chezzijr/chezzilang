@@ -17954,6 +17954,15 @@ fn extern_callback_nonscalar_ret_part_rejected() {
 }
 
 #[test]
+fn extern_callback_void_return_accepted() {
+    // TICKET-061 W10-7: a callback param's return is `nil` (void) — the commonest C callback shape
+    // (foreach/twalk-style). Must be accepted like the top-level extern-fn return-slot `allow_void`
+    // case; the checker currently rejects a `nil` callback RETURN even though it accepts `nil` as
+    // the extern fn's own return type.
+    ok("extern \"libt.so\":\n    fn each(n: int, f: fn(int) -> nil)\n");
+}
+
+#[test]
 fn extern_callback_nested_callback_rejected() {
     // A nested callback (a callback param taking a callback) is not supported (v1) — rejected.
     rejects(
@@ -21714,6 +21723,18 @@ fn check_files(files: &[(&str, &str)]) -> Vec<CheckError> {
         Ok(()) => Vec::new(),
         Err(e) => e,
     }
+}
+
+#[test]
+fn extern_fn_reachable_as_module_member() {
+    // TICKET-061 W10-14: an extern fn is a module-global callable (docs/syntax.md) and functions
+    // export by default, but `capture_sig` has no `StmtKind::Extern` arm, so it never lands in
+    // `sig.functions` — an importer sees "module 'c' has no member 'strlen'" even though `c.chz`
+    // declares `extern fn strlen`.
+    files_ok(&[
+        ("c.chz", "extern \"libc\":\n    fn strlen(s: str) -> int\n"),
+        ("main.chz", "import c\nprint(c.strlen(\"abc\"))\n"),
+    ]);
 }
 
 fn files_reject(files: &[(&str, &str)], needle: &str) {
