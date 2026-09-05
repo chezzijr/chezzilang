@@ -48,7 +48,8 @@ FLAGS:
     --fail-fast      Stop at the first non-pass verdict (deterministic order: sorted files, then each
                      file's free tests, then each suite's methods, all in declaration order).
     --show-output    Surface a FAILING test's captured stdout byte-exactly, indented under its line
-                     (default: discard).
+                     (default: discard). Its captured stderr goes to fd 2 instead, as one block per
+                     test.
     --errors=json    Emit ONLY a JSON document ({tests:[{name,file,line?,status,message?,duration_ms}],totals})
                      for CI/editors — suppresses the human PASS/FAIL lines (mirrors `check --errors=json`).
     -q, --quiet      Dots (`.`/`F`/`E`/`M`/`T`) per test + the summary only (no per-test lines).
@@ -593,6 +594,11 @@ fn cmd_test(args: &[String]) -> ExitCode {
         };
         eprintln!("chezzi test: {why}");
         return ExitCode::FAILURE;
+    }
+    // fd 2 is diagnostic-only: a failed write here does not change the verdict, unlike the fd 1
+    // report write above.
+    if !report.stderr_bytes.is_empty() {
+        let _ = std::io::Write::write_all(&mut std::io::stderr(), &report.stderr_bytes);
     }
     if report.passed {
         ExitCode::SUCCESS

@@ -25,6 +25,9 @@ pub struct TestReport {
     // ponytail: a second copy of `bytes`; make it a `Cow` accessor if a report ever gets large.
     /// The byte-exact report the CLI writes to fd 1 (`--show-output` can carry non-UTF-8).
     pub bytes: Vec<u8>,
+    /// A failing test's captured stderr (`io.eprint`), under `--show-output` — never mixed into
+    /// `bytes`/`text`, since that would change every string-matching consumer of the stdout report.
+    pub stderr_bytes: Vec<u8>,
     pub passed: bool,
 }
 
@@ -122,6 +125,9 @@ struct Outcome {
     duration: Duration,
     /// The test's captured stdout — kept ONLY when `--show-output` is on (else empty, discarded).
     captured_out: Vec<u8>,
+    /// The test's captured stderr (`io.eprint`) — kept ONLY when `--show-output` is on, same policy
+    /// as `captured_out`.
+    captured_err: Vec<u8>,
 }
 
 /// The JSON status token for a verdict (mirrors `--errors=json` on `check`/`run` for CI consumers).
@@ -322,6 +328,7 @@ pub fn run_tests_opts(root: &Path, opts: RunOpts) -> TestReport {
             return TestReport {
                 bytes: text.clone().into_bytes(),
                 text,
+                stderr_bytes: Vec::new(),
                 passed: false,
             };
         }
@@ -331,6 +338,7 @@ pub fn run_tests_opts(root: &Path, opts: RunOpts) -> TestReport {
         return TestReport {
             bytes: text.clone().into_bytes(),
             text,
+            stderr_bytes: Vec::new(),
             passed: false,
         };
     }
@@ -414,6 +422,7 @@ pub fn run_tests_opts(root: &Path, opts: RunOpts) -> TestReport {
         return TestReport {
             bytes: text.clone().into_bytes(),
             text,
+            stderr_bytes: Vec::new(),
             passed,
         };
     }
@@ -483,9 +492,28 @@ pub fn run_tests_opts(root: &Path, opts: RunOpts) -> TestReport {
     }
     report.push(b'\n');
 
+    // `--show-output`'s stderr half: one block per non-pass test with captured stderr, appended to
+    // fd 2 (never mixed into `report`/`bytes`, which stay the stdout document).
+    let mut stderr_bytes = Vec::new();
+    if opts.show_output {
+        for o in &outcomes {
+            if matches!(o.verdict, Verdict::Pass) || o.captured_err.is_empty() {
+                continue;
+            }
+            stderr_bytes.extend_from_slice(
+                format!("--- captured stderr: {} ({}) ---\n", o.name, o.file).as_bytes(),
+            );
+            stderr_bytes.extend_from_slice(&o.captured_err);
+            if !o.captured_err.ends_with(b"\n") {
+                stderr_bytes.push(b'\n');
+            }
+        }
+    }
+
     TestReport {
         text: String::from_utf8_lossy(&report).into_owned(),
         bytes: report,
+        stderr_bytes,
         passed,
     }
 }
@@ -705,6 +733,7 @@ fn invoke_all(
         let duration = start.elapsed();
         let verdict = apply_timeout_overrun(verdict, duration, opts);
         let out = vm.take_out_bytes(); // stdout: discarded unless `--show-output` (kept reusable either way)
+        let err = vm.take_err_bytes();
         let non_pass = !matches!(verdict, Verdict::Pass);
         outcomes.push(Outcome {
             name: name.clone(),
@@ -712,6 +741,7 @@ fn invoke_all(
             verdict,
             duration,
             captured_out: if opts.show_output { out } else { Vec::new() },
+            captured_err: if opts.show_output { err } else { Vec::new() },
         });
         if opts.fail_fast && non_pass {
             vm.reap_after_tests();
@@ -782,6 +812,7 @@ fn run_suite(
                     },
                     duration: Duration::ZERO,
                     captured_out: Vec::new(),
+                    captured_err: Vec::new(),
                 });
             }
         };
@@ -864,6 +895,7 @@ fn run_suite(
         let duration = start.elapsed();
         let verdict = apply_timeout_overrun(verdict, duration, opts);
         let captured = vm.take_out_bytes();
+        let captured_stderr = vm.take_err_bytes();
         let non_pass = !matches!(verdict, Verdict::Pass);
         out.push(Outcome {
             name,
@@ -872,6 +904,11 @@ fn run_suite(
             duration,
             captured_out: if opts.show_output {
                 captured
+            } else {
+                Vec::new()
+            },
+            captured_err: if opts.show_output {
+                captured_stderr
             } else {
                 Vec::new()
             },
@@ -908,6 +945,7 @@ fn run_after_all(
     let result = vm.invoke_suite_method(p, instance);
     let duration = start.elapsed();
     let captured = vm.take_out_bytes();
+    let captured_stderr = vm.take_err_bytes();
     if let Err(e) = result {
         let site = fault_site(vm, &e, files, fallback);
         out.push(Outcome {
@@ -920,6 +958,11 @@ fn run_after_all(
             duration,
             captured_out: if opts.show_output {
                 captured
+            } else {
+                Vec::new()
+            },
+            captured_err: if opts.show_output {
+                captured_stderr
             } else {
                 Vec::new()
             },
@@ -3692,6 +3735,39 @@ struct Suite:
             report.text.contains("1 errored"),
             "report:\n{}",
             report.text
+        );
+    }
+
+    #[test]
+    fn show_output_surfaces_failing_stderr() {
+        let d = TmpDir::new();
+        let f = d.write(
+            "ep_test.chz",
+            "import std.io\n\ntest fn boom():\n    io.eprint(\"diag to stderr\")\n    assert false\n",
+        );
+        let shown = run_tests_opts(&f, opts_with(|o| o.show_output = true));
+        assert!(
+            String::from_utf8_lossy(&shown.stderr_bytes).contains("diag to stderr"),
+            "--show-output must surface a failing test's captured stderr; stderr_bytes: {:?}",
+            shown.stderr_bytes
+        );
+        // Control: default discards it.
+        let hidden = run_tests(&f);
+        assert!(
+            hidden.stderr_bytes.is_empty(),
+            "default must discard captured stderr; got: {:?}",
+            hidden.stderr_bytes
+        );
+        // Control: a passing test leaves stderr_bytes empty even under --show-output.
+        let ok = d.write(
+            "epok_test.chz",
+            "import std.io\n\ntest fn ok():\n    io.eprint(\"quiet\")\n    assert true\n",
+        );
+        let passing = run_tests_opts(&ok, opts_with(|o| o.show_output = true));
+        assert!(
+            passing.stderr_bytes.is_empty(),
+            "a PASSing test's stderr stays discarded (show-on-failure); got: {:?}",
+            passing.stderr_bytes
         );
     }
 }

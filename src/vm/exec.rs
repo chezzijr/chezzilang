@@ -827,6 +827,13 @@ impl Vm {
         std::mem::take(&mut self.out)
     }
 
+    /// The stderr twin of [`Vm::take_out_bytes`] — take + clear whatever a test printed via
+    /// `io.eprint`. `chezzi test --show-output` writes this straight to fd 2, the way `go test`
+    /// passes a test's stderr straight through.
+    pub fn take_err_bytes(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.stderr)
+    }
+
     /// `chezzi test` calls this right after a failed invoke and before the next one — take + clear
     /// the deepest-wins fault trace latch, so a passing test never inherits the previous test's
     /// frames and a shallower later fault still captures.
