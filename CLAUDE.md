@@ -202,7 +202,18 @@ Right now: **pre-JIT/pre-freeze bug-hunt + drift-fix hunt** is the active phase 
 checker↔runtime, and IO drift — live ledger in `docs/gaps.md`), with **M19 — Perf track** paused
 in-progress alongside it.
 
-> **START HERE (2026-08-18): `docs/gaps.md` W8-1..W8-47.** **2 open rows** — W8-17 and
+> **START HERE (2026-09-05): `docs/gaps.md` — 3 open rows, `W8-17`, `W8-19` and `W9-9`.**
+> **Bug-hunt wave 9 (2026-09-03/05) closed `W9-1..W9-8`** — all eight fixed, merged and re-verified on
+> the merged binary (TICKET-051..058); read its session log before working this area, and read
+> **`W9-5`** before filing anything about a name collision: that ticket's premise contradicted an
+> ACTIVE decision (DEC-029) and would have deleted a shipped `std.path` API. `W9-9` is the one still
+> open — the wall-clock ratchet scans only `tests/chz`, so it has never reached Rust integration tests
+> (TICKET-059, approved). Two standing lessons from the wave: the mechanical oracles found **nothing**
+> across 23 000 panic-fuzz and 13 000 differential seeds, so every finding came from a hand-built
+> program judged against a RUN Go/Rust/CPython reference; and a flake comparison must be sampled so a
+> ~5% rate cannot read as `0/30` — one did, and nearly blocked a correct fix.
+>
+> **Historical (2026-08-18): `docs/gaps.md` W8-1..W8-47.** **2 open rows** — W8-17 and
 > W8-19 from **dogfood wave 1** (W8-19's struct-copy sub-item landed 2026-08-30, TICKET-030, but the
 > bundle row stays open for its remaining sub-items) (W8-32 from wave 2 closed 2026-08-30, TICKET-024)
 > (**W8-1**, **W8-28**, **W8-29** closed 2026-08-29, TICKET-018 — a bare-digit interpolation hole

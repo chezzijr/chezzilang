@@ -7,6 +7,33 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **Bug-hunt wave 9 (2026-09-03/05) — 8 findings, all 8 fixed, merged and post-merge verified; ledger
+  rows `W9-1..W9-9` in `docs/gaps.md`.** Six agents over disjoint domains, ~450 probe programs, each
+  finding re-run on the release binary before filing and each fix re-run on the MERGED binary rather
+  than trusted from its gate. Three silent wrong answers (`W9-1` a crossed closure kept a private
+  third copy of the module globals, so one global denoted two objects inside one task; `W9-3` an unmet
+  `eq` `where`-bound was laundered through a protocol slot and ANSWERED where Rust rejects and Go
+  panics; `W9-5` `newtype` disagreed with DEC-029), one silent hang at the DEFAULT worker count
+  (`W9-2` a blocking `Executor` job pinned its pool thread — 13 consumers + 1 feeder on 12 cores,
+  rc=124, where `GOMAXPROCS=1` Go completes), three false rejections of programs the ancestors accept
+  (`W9-4`, `W9-6`, `W9-8`), and one wrong-position family (`W9-7` `json.parse` named where the scan
+  stopped, not where the token began: 44 of 274 malformed documents disagreed with CPython, split
+  exactly by single- vs multi-character token).
+  **The mechanical oracles found nothing** — 23 000 panic-fuzz seeds, 13 000 CPython-differential
+  seeds, the FFI goldens, and ~3 500 curated stdlib differential cases were all clean beyond their CI
+  ranges. Every one of the eight came from a hand-built adversarial program judged against a RUN
+  reference program in Go, Rust or CPython. That is the wave's finding above the findings, and it
+  repeats W8's: **a green suite measures the assertions you thought to write.**
+  Two process corrections are recorded in the `docs/gaps.md` W9 session log because both cost real
+  time: one filed ticket's premise contradicted an ACTIVE decision record (DEC-029) and would have
+  deleted a shipped `std.path` API — the planning stage caught it, not the hunt; and a subagent's
+  `0/30`-on-base flake measurement reversed under a 40-sample re-run (`branch 3/40, main 2/40`),
+  which would otherwise have blocked a correct fix on a race it had not introduced.
+  **`W9-9` stays open** (TICKET-059, approved 2026-09-05): `tests/no_wall_clock_ratio_gates.rs` scans
+  only `Path::new("tests/chz")`, so TICKET-049's ratio ban and TICKET-050's allowlist have never
+  reached Rust integration tests or `src/` `#[cfg(test)]` modules. Three tests in that blind spot
+  blocked four unrelated tickets during this wave.
+
 - **An explicit turbofish forward was rejected even though its enclosing FUNCTION declared the type
   parameter it forwarded (TICKET-056).** `fn outer[T: Mk](n: int) -> int: return inner[T](n)` called
   as `outer[B](4)` errored "no hidden type witness for 'T' is reachable at this call site", though
