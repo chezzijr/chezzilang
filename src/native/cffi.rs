@@ -2340,6 +2340,96 @@ void* mkrec(void) { static struct R r = { -3, 70000, 2.5 }; return &r; }
     }
 
     #[test]
+    fn first_callback_fault_is_the_one_reraised() {
+        // TICKET-060: `callback_trampoline` currently overwrites `*ctx.fault` on every invocation, so
+        // C's later re-invocations (qsort keeps comparing after the comparator already faulted)
+        // clobber the first fault with the last one. Each invocation here raises a DIFFERENT index
+        // error (`count` grows every call), so the re-raised message pins down which invocation won.
+        let src = [
+            "import std.ffi",
+            "extern \"libc\":",
+            "    fn qsort(base: ptr, n: int, size: int, cmp: fn(ptr, ptr) -> int)",
+            "count := 0",
+            "fn cmp(a: ptr, b: ptr) -> int:",
+            "    count += 1",
+            "    return [1][count + 4]",
+            "data := [5, 2, 9, 1, 7, 3, 8, 4, 6, 0]",
+            "n := data.len()",
+            "buf := ffi.alloc(n * 8)",
+            "defer ffi.free(buf)",
+            "for i in range(n):",
+            "    ffi.store_int64_at(buf, i * 8, data[i])",
+            "r := recover: qsort(buf, n, 8, cmp)",
+            "print(r)",
+            "",
+        ]
+        .join("\n");
+        let entry = write_deref_chz(&src);
+        let (out, _e, res, _) = crate::vm::run_file(&entry);
+        let _ = std::fs::remove_file(&entry);
+        assert!(res.is_ok(), "faulted: {res:?}");
+        assert_eq!(
+            out, "Err('index 5 out of bounds (len 1)')\n",
+            "the FIRST callback fault must be the one re-raised, not the last"
+        );
+    }
+
+    #[test]
+    fn ptr_returned_into_a_str_arg_survives_a_later_extern_call() {
+        // TICKET-060: a ptr returned into a str arg's C buffer must outlive not just the call that
+        // returned it, but subsequent extern calls too (each of which allocates + frees its own
+        // marshalled `str` args, potentially reusing the freed slot).
+        let src = [
+            "import std.ffi",
+            "import int32 from std.ffi",
+            "extern \"libc\":",
+            "    fn strchr(s: str, c: int32) -> ptr",
+            "    fn strlen(s: str) -> int",
+            "p := strchr(\"ticket 060 alpha beta\", 32)",
+            "print(strlen(\"a fresh allocation to churn the heap after the call\") > 0)",
+            "print(strlen(\"and a second one, longer than the first by some margin\") > 0)",
+            "print(ffi.load_str(p))",
+            "",
+        ]
+        .join("\n");
+        let entry = write_deref_chz(&src);
+        let (out, _e, res, _) = crate::vm::run_file(&entry);
+        let _ = std::fs::remove_file(&entry);
+        assert!(res.is_ok(), "faulted: {res:?}");
+        assert_eq!(
+            out, "true\ntrue\n 060 alpha beta\n",
+            "a ptr returned into a str arg must survive later extern calls, not just the call that returned it"
+        );
+    }
+
+    #[test]
+    fn interior_ptr_written_into_a_ptr_out_param_survives_the_call() {
+        // TICKET-060: a `ptr` PARAM may be a C out-param the callee writes an interior pointer into
+        // (strtol's endptr) -- that pointer must remain valid after the call returns too.
+        let src = [
+            "import std.ffi",
+            "import int32 from std.ffi",
+            "extern \"libc\":",
+            "    fn strtol(s: str, endptr: ptr, base: int32) -> int",
+            "buf := ffi.alloc(8)",
+            "defer ffi.free(buf)",
+            "r := strtol(\"  -0x1fzz\", buf, 16)",
+            "print(r)",
+            "print(ffi.load_str(ffi.load_ptr(buf)))",
+            "",
+        ]
+        .join("\n");
+        let entry = write_deref_chz(&src);
+        let (out, _e, res, _) = crate::vm::run_file(&entry);
+        let _ = std::fs::remove_file(&entry);
+        assert!(res.is_ok(), "faulted: {res:?}");
+        assert_eq!(
+            out, "-31\nzz\n",
+            "an interior pointer written into a ptr out-param must survive the call"
+        );
+    }
+
+    #[test]
     fn callback_panic_is_caught_and_reraised() {
         // A callback that PANICS must be caught by the trampoline's catch_unwind (no unwind into the
         // C frames / abort) and re-raised as the extern call's error.
