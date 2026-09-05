@@ -2561,10 +2561,67 @@ fn the_pin_does_not_reach_a_none_or_a_nullary_enum_variant() {
 /// `Some(<other type>)` write must be rejected, exactly like the `[]`/`List` twin already is.
 #[test]
 fn a_write_after_the_first_constraining_use_pins_the_payload() {
+    const BOX: &str = "enum Box[T]:\n    Empty\n    Full(T)\n";
+
+    // (a) the primary repro.
     rejects(
         "x := None\ny: Option[str] = x\nx = Some(1)\nz: Option[str] = x\nprint(z)\n",
-        "",
+        "cannot assign Option[int] to 'x'",
     );
+    // (b) the `??` fault twin.
+    rejects(
+        "x := None\na: str = x ?? \"s\"\nx = Some(1)\nb: str = x ?? \"t\"\nprint(b.len())\n",
+        "cannot assign Option[int] to 'x'",
+    );
+    // (c) write-then-write, no annotated sink between them.
+    rejects(
+        "x := None\nx = Some(1)\nx = Some(\"s\")\nprint(x)\n",
+        "cannot assign Option[str] to Option[int]",
+    );
+    // (d) the Box twin.
+    rejects(
+        &format!(
+            "{BOX}e := Box.Empty\na: Box[int] = e\ne = Box.Full(\"s\")\nb: Box[int] = e\nprint(b)\n"
+        ),
+        "cannot assign Box[str] to 'e'",
+    );
+    // (e) the Box write-then-write.
+    rejects(
+        &format!("{BOX}e := Box.Empty\ne = Box.Full(1)\ne = Box.Full(\"s\")\nprint(e)\n"),
+        "cannot assign Box[str] to Box[int]",
+    );
+    // (f) the typed-argument sink.
+    rejects(
+        "fn f(o: Option[str]) -> int:\n    return 1\nx := None\nn := f(x)\nx = Some(1)\nprint(n)\n",
+        "cannot assign Option[int] to 'x'",
+    );
+}
+
+/// A carrier write that AGREES with its first-constraining-use pin stays accepted, and the escapes
+/// (re-declaration, an annotation at declaration, a `spawn:` task's own copy) all stay permissive.
+#[test]
+fn a_carrier_write_that_agrees_with_its_pin_is_accepted() {
+    ok("x := None\ny: Option[str] = x\nx = Some(\"a\")\nz: Option[str] = x\nprint(z)\n");
+    ok("x := None\nx = Some(1)\ny: Option[int] = x\nprint(y)\n");
+    // A `None` write is not concrete and pins nothing.
+    ok("x := None\nx = None\ny: Option[str] = x\nprint(y)\n");
+    // Re-declaration escapes the earlier pin.
+    ok("x := None\ny: Option[str] = x\nx := None\nx = Some(1)\nprint(x)\n");
+    // An annotation at the declaration escapes the pin mechanism entirely.
+    ok("x: Option[int] = None\nx = Some(1)\nprint(x)\n");
+    // A `spawn:` task writes its own copy; the airlock declines to pin the outer binding.
+    ok("x := None\ny: Option[str] = x\nspawn:\n    x = Some(1)\nprint(y)\n");
+}
+
+/// A write REPINS the binding, so a later read is checked against the NEW payload type, and the
+/// binding's method surface (`unwrap`) resolves after a write instead of staying `Option[?]`.
+#[test]
+fn a_carrier_write_repins_the_binding_for_later_reads() {
+    rejects(
+        "x := None\nx = Some(1)\ny: Option[str] = x\nprint(y)\n",
+        "cannot assign Option[int] to variable of type Option[str]",
+    );
+    ok("x := None\nx = Some(1)\nprint(x.unwrap() + 1)\n");
 }
 
 /// Whether an assignment PINS its source must be a property of that statement alone. Gating the

@@ -474,3 +474,14 @@ test fn a_carrier_inside_a_closure_argument_still_lowers():
     # (b) the closure param is Unknown during the generic-arg pre-pass
     xs := [Some("ab"), Some("cde")]
     assert xs.map(fn(a): a?.len()) == [Some(2), Some(3)], "got {xs.map(fn(a): a?.len())}"
+
+# ---- 15: TICKET-064 — a write after the first constraining use pins the payload ----
+#
+# `x := None` was a checker rejection for `x.unwrap()` before the fix (`type Option[?] has no
+# method 'unwrap'`), because a never-written binding stayed at `Option[Unknown]` forever. A write
+# now REPINS the binding to the concrete payload type it wrote, so the method surface resolves.
+
+test fn a_written_none_carries_its_payload_type():
+    x := None
+    x = Some(1)
+    assert x.unwrap() + 1 == 2
