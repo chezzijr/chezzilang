@@ -121,7 +121,11 @@ Single source of truth for "what am I doing next." Update after every work sessi
   taken before each test's invoke, `Vm::reap_executors_since(mark)` (a new `from`-indexed
   `drain_live_executors_from`) called after, upgrading only a still-`Pass` verdict — an executor built
   at module top level or in `before_all` sits before every mark and is left alive for later tests, so
-  it is still joined only at file end. (5) `chezzi run --errors=json` emitted a checker warning as
+  it is still joined only at file end. The same scoping moves a leaked `os.exit`: a job a test leaks
+  now errors THAT test instead of aborting whichever later test was running, and
+  `tests/exit_status.rs` re-pins both halves
+  (`a_leaked_jobs_exit_is_attributed_to_the_test_that_leaked_it`,
+  `a_leaked_job_from_a_top_level_executor_still_aborts_a_later_test`). (5) `chezzi run --errors=json` emitted a checker warning as
   human text on stderr while `check --errors=json` emitted the same shape as JSON — reversing the
   deliberate `src/main.rs:1199-1210` design comment: warnings now fold into the one stdout array
   (stdout's first line, `[]` when clean), ahead of the program's own output; plain-text `run` is

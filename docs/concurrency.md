@@ -1779,6 +1779,10 @@ supervised tasks) — Go's float-free `go` is the model both ecosystems *rejecte
 > (`Vm::exec_registry_mark`/`reap_executors_since`): draining from `0` on every test would mark a
 > shared top-level/`before_all` executor `shut` after the first test that ran, and the next test's
 > `submit` on it would fault `submit on a shut-down Executor`.
+> The same scoping decides which test a LEAKED `std.os.exit` lands on: a job a test leaks errors THAT
+> test (the run continues, rc=1), while a job leaked through an executor the test did not create is
+> still absorbed by whichever later test is running when the exit fires. `tests/exit_status.rs` pins
+> both halves by name.
 > **Blocking inside a job, and the deadlock verdict (`future.md` §2d step 0, 2026-08-04).** An eager
 > job has no scheduler to park a fiber into, and neither does the top-level `main` thread, so both
 > BLOCK IN PLACE on an empty `recv` / full `send` / `wait:` — they no longer read "I have no scheduler"
