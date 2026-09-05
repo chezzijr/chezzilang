@@ -20,8 +20,8 @@ Conventions used below:
 |----------|-----------|-------|
 | `print` | `print(...args: Any, sep: str = " ", end: str = "\n") -> nil` | Write each argument (any type) to stdout. Variadic — declared as `native fn print(...args: Any, sep, end)` in `std/prelude.chz`; `Any` is the top type so every value is accepted. The args are joined by `sep` (default `" "`) and `end` (default `"\n"`) is appended after — both `str` keyword-only (the only builtin that takes named arguments). `print("a", end="")` emits `a` with no newline (incremental output); `print("a","b", sep="-", end="!")` emits `a-b!`. The **value form** (`p := print`) is a fixed 1-arg call (see `syntax.md`). |
 | `range` | `range(end)` / `range(start, end)` / `range(start, end, step) -> List[int]` | End-exclusive list of ints. `step` is a non-zero int: positive counts up, negative counts down (e.g. `range(10, 0, -1)` → `10,9,…,1`). A wrong-direction step or `start == end` gives `[]`; `step == 0` is a recoverable fault. Capped at 10M elements. |
-| `int` | `int(x) -> int` | Convert from `int`/`float`/`bool`/`str` (parses a string; truncates a float). Bad string raises (recoverable) — for `None`-on-failure use `s.to_int() -> int?`. Rejects a `List`/`Map`/`Set`/tuple/struct/enum/function/`Option`/`Result`/`bytes`/`bytearray`/`Shared`/`Channel`/`Atomic`/`AtomicInt`/`RwShared`/`Executor`/`Socket`/`Listener`/`Writer`/`Reader`/`ptr` argument at CHECK time. |
-| `float` | `float(x) -> float` | Convert from `float`/`int`/`str`. Bad string raises — for `None`-on-failure use `s.to_float() -> float?`. Rejects a `List`/`Map`/`Set`/tuple/struct/enum/function/`Option`/`Result`/`bytes`/`bytearray`/`Shared`/`Channel`/`Atomic`/`AtomicInt`/`RwShared`/`Executor`/`Socket`/`Listener`/`Writer`/`Reader`/`ptr` argument at CHECK time. |
+| `int` | `int(x) -> int` | Convert from `int`/`float`/`bool`/`str` (parses a string; truncates a float). A string parse accepts PEP-515 single underscores between digits (`"1_000"` → `1000`), mirroring the lexer's numeric-literal rule. Bad string raises (recoverable) — for `None`-on-failure use `s.to_int() -> int?`. Rejects a `List`/`Map`/`Set`/tuple/struct/enum/function/`Option`/`Result`/`bytes`/`bytearray`/`Shared`/`Channel`/`Atomic`/`AtomicInt`/`RwShared`/`Executor`/`Socket`/`Listener`/`Writer`/`Reader`/`ptr` argument at CHECK time. |
+| `float` | `float(x) -> float` | Convert from `float`/`int`/`str`. A string parse accepts PEP-515 single underscores between digits (`"1_0.5"` → `10.5`). Bad string raises — for `None`-on-failure use `s.to_float() -> float?`. Rejects a `List`/`Map`/`Set`/tuple/struct/enum/function/`Option`/`Result`/`bytes`/`bytearray`/`Shared`/`Channel`/`Atomic`/`AtomicInt`/`RwShared`/`Executor`/`Socket`/`Listener`/`Writer`/`Reader`/`ptr` argument at CHECK time. |
 | `bool` | `bool(x) -> bool` | Truthiness cast (never faults on a scalar). `int`: `0` → `false`, else `true`. `float`: `0.0`/`-0.0` → `false`, `NaN` → `true` (Python parity), else `true`. `bool`: identity. `str`: `""` → `false`, else `true` (non-empty is truthy — **not** a parse, so `bool(" ")` is `true`). Rejects a `List`/`Map`/`Set`/tuple/struct/enum/function/`Option`/`Result`/`bytes`/`bytearray`/`Shared`/`Channel`/`Atomic`/`AtomicInt`/`RwShared`/`Executor`/`Socket`/`Listener`/`Writer`/`Reader`/`ptr` argument at CHECK time. |
 | `str` | `str(x) -> str` | Stringify an `int`/`float`/`bool` (and more — see the `Stringable` protocol in `syntax.md`). Scalars (`int`/`float`/`bool`/`str`) also intrinsically satisfy the `Stringable` protocol, so `[T: Stringable]` generics accept them. A string NESTED inside a container / struct field / enum payload renders as its Python `repr` — quoted and escaped (`str(["a", "b"])` is `['a', 'b']`) — while a bare string stays its own characters (`str("a")` is `a`). See `syntax.md` §"A nested `str` is quoted". |
 | `ord` | `ord(s) -> int` | Unicode codepoint of `s`, which must be exactly **one character** (`ord("é")` → 233; `ord("ab")` faults, like Python). |
@@ -167,10 +167,10 @@ than the Python analogue; there is nothing to fix.
 | `strip_prefix` | `(p: str) -> str` | Remove `p` from the front if present, else unchanged. |
 | `strip_suffix` | `(p: str) -> str` | Remove `p` from the end if present, else unchanged. |
 | `split_lines` | `() -> List[str]` | Split on `"\n"`. |
-| `to_int` | `() -> int?` | Safe parse (trims first): `Some(n)` or `None` on bad input. |
-| `to_float` | `() -> float?` | Safe parse (trims first): `Some(f)` or `None` on bad input. |
-| `parse_int` | `() -> Result[int, str]` | Result-returning parse (trims first): `Ok(n)` or `Err(msg)` carrying a human-readable parse-error message. The error-message sibling of `to_int`. |
-| `parse_float` | `() -> Result[float, str]` | Result-returning parse (trims first): `Ok(f)` or `Err(msg)`. The error-message sibling of `to_float`. |
+| `to_int` | `() -> int?` | Safe parse (trims first, accepts PEP-515 underscores between digits): `Some(n)` or `None` on bad input. |
+| `to_float` | `() -> float?` | Safe parse (trims first, accepts PEP-515 underscores between digits): `Some(f)` or `None` on bad input. |
+| `parse_int` | `() -> Result[int, str]` | Result-returning parse (trims first, accepts PEP-515 underscores between digits): `Ok(n)` or `Err(msg)` carrying a human-readable parse-error message. The error-message sibling of `to_int`. |
+| `parse_float` | `() -> Result[float, str]` | Result-returning parse (trims first, accepts PEP-515 underscores between digits): `Ok(f)` or `Err(msg)`. The error-message sibling of `to_float`. |
 | `encode` | `() -> bytes` | UTF-8 encode. |
 | `message` | `() -> str` | Returns self — lets a bare `str` satisfy the `Error` protocol. |
 
@@ -895,7 +895,8 @@ determinism.)
 **Mutations** (all `Result[nil]` — a permission-denied / missing-parent failure is a catchable `Err`,
 never a panic):
 `mkdir(path) -> Result[nil]` — create a directory **recursively** (like `mkdir -p`: missing parents
-are created, an existing dir is a no-op/idempotent) ·
+are created, an existing dir is a no-op/idempotent); an **empty path is an `Err`** (`No such file or
+directory`) ·
 `remove_file(path) -> Result[nil]` — delete a file (`Err` if missing or a directory) ·
 `remove_dir(path) -> Result[nil]` — delete an **empty** directory; **non-recursive** (`Err` on a
 non-empty dir — there is intentionally no silent `rm -rf`) ·
@@ -1331,8 +1332,9 @@ The case fns are ASCII-guaranteed; exotic full-Unicode case-folding follows Rust
   accepted). A double-quote-wrapped field may contain commas, CR, LF and escaped quotes (`""` inside a
   quoted field → one literal `"`). Leading/trailing spaces are significant (never trimmed). A trailing
   record separator produces **no** spurious empty final record. Empty input → `[]`. A blank interior
-  line → a single-empty-field record `[""]` (this differs from Python's `csv`, which maps a blank line
-  to `[]` — chosen so `parse(format(rows)) == rows` holds).
+  line → an **empty** record `[]`, matching CPython `csv.reader` — a record holding one field that is
+  itself empty (`[""]`) is spelled on the wire as a quoted empty field (`""`), which `format` emits and
+  `parse` reads back distinctly from a bare blank line.
 - **Bare quotes (W7-10).** A `"` opens a quoted field **only at FIELD START**. Anywhere else it is an
   ordinary character kept **literally**: `parse("a,b\"c")` → `[["a", "b\"c"]]`,
   `parse("a,b\"c\"d")` → `[["a", "b\"c\"d"]]`, `parse("a,b\"\"c")` → `[["a", "b\"\"c"]]` — **two**
@@ -1345,10 +1347,12 @@ The case fns are ASCII-guaranteed; exotic full-Unicode case-folding follows Rust
   are doubled. Each record is **terminated** by CRLF (`\r\n`, per RFC 4180) — not separator-joined —
   so `format([["a","b"]])` == `"a,b\r\n"`; `parse` accepts CRLF or LF either way. `format([])` → `""`.
 - **Round-trip guarantee:** `parse(format(rows)) == rows` is **total** — proven for rows covering every
-  hard case (embedded comma, escaped quote, embedded newline, empty field, unicode) **including** a sole
-  or trailing all-empty record `[""]` (`format([[""]])` == `"\r\n"`, `parse("\r\n")` == `[[""]]`).
-  CRLF-*termination* (vs joining) plus parse's "a trailing separator yields no spurious record" rule is
-  what makes the empty-record case round-trip.
+  hard case (embedded comma, escaped quote, embedded newline, empty field, unicode) **including** an
+  empty record `[]` and a sole or trailing single-empty-field record `[""]`: `format([[]])` == `"\r\n"`
+  and `parse("\r\n")` == `[[]]`, while `format([[""]])` == `"\"\"\r\n"` and `parse("\"\"\r\n")` ==
+  `[[""]]`. CRLF-*termination* (vs joining), parse's "a trailing separator yields no spurious record"
+  rule, and quoting a sole empty field are what keep the two empty shapes distinct on the wire and make
+  the round-trip total — this now matches CPython's `csv` exactly instead of diverging from it.
 - **Deferred v1 follow-ups** (YAGNI): streaming/Reader-based parsing, header→`Map` row mapping, and a
   custom-delimiter/TSV `parse_sep(text, sep)`.
 
@@ -1374,7 +1378,7 @@ The table's `-> str` examples show the value of `.str()` on the returned `Path`.
 | `split` | `(p: PathLike) -> (Path, Path)` | `(dirname(p), basename(p))` as a 2-tuple, so `d, b := path.split(p)`. `split("a/b/")` → `("a/b", "")`. |
 | `ext` | `(p: PathLike) -> Path` | Final extension of the basename, **including the leading dot**. A leading-dot-only hidden file has **no** ext, and only the basename is inspected: `ext("a/b.tar.gz")` → `".gz"`, `ext("a.txt")` → `".txt"`, `ext("README")` → `""`, `ext(".bashrc")` → `""`, `ext("a.")` → `"."`, `ext("dir.d/file")` → `""`. |
 | `stem` | `(p: PathLike) -> Path` | `basename` with its `ext` removed: `stem("a/b.tar.gz")` → `"b.tar"`, `stem(".bashrc")` → `".bashrc"`, `stem("a.txt")` → `"a"`. |
-| `with_ext` | `(p: PathLike, e: PathLike) -> Path` | Replace the final ext with `e`; `e` is normalized to exactly one leading dot when non-empty (`"md"` ≡ `".md"`), `""` strips it: `with_ext("a/b.txt", ".md")` → `"a/b.md"`, `with_ext("a/b", ".md")` → `"a/b.md"`, `with_ext("a/b.txt", "")` → `"a/b"`. |
+| `with_ext` | `(p: PathLike, e: PathLike) -> Path` | Replace the final ext with `e`; `e` is normalized to exactly one leading dot when non-empty (`"md"` ≡ `".md"`), a run of leading dots collapses to one (`"..d"` → `".d"`), `""` strips it: `with_ext("a/b.txt", ".md")` → `"a/b.md"`, `with_ext("a/b", ".md")` → `"a/b.md"`, `with_ext("a/b.txt", "")` → `"a/b"`. **Faults** on an extension that is all dots or contains `/` (CPython `PurePath.with_suffix` raises `ValueError: Invalid suffix` there). |
 | `normalize` | `(p: PathLike) -> Path` | Go `path.Clean` lexical clean (no filesystem): collapse `//`, drop `.`, resolve `..` against the preceding real element. `""` → `"."`; leading `..` is **preserved** on a relative path but a `..` past root on an **absolute** path is dropped. `normalize("/")` → `"/"`, `normalize("//")` → `"/"`, `normalize("..")` → `".."`, `normalize("a/b/../c")` → `"a/c"`, `normalize("a/./b")` → `"a/b"`, `normalize("a/b/")` → `"a/b"`, `normalize("./a")` → `"a"`, `normalize("/..")` → `"/"`, `normalize("/a/../../b")` → `"/b"`, `normalize("a/../../b")` → `"../b"`. |
 | `join` | `[T](parts: List[T]) -> Path where T: PathLike` | **Go `path.Join` style** (NOT Python's absolute-resets-earlier behavior): drop empty parts, join with `/`, then `normalize`. All-empty → `""`: `join(["a","b","c"])` → `"a/b/c"`, `join(["a/","b"])` → `"a/b"`, `join(["","b"])` → `"b"`, `join([])` → `""`, `join(["a","","c"])` → `"a/c"`, `join(["/a","b"])` → `"/a/b"`. **Generic over the element type, not `List[PathLike]`** — Chezzi containers are invariant, so a `List[PathLike]` parameter would take a list *literal* and nothing else (no `List[str]` variable, not even `fs.list_dir`'s own `List[Path]`). Any **homogeneous** list works: `path.join(xs)` for `xs: List[str]`, `path.join(names)` for `names: List[Path]`. A *heterogeneous* literal (`[a_path, "sub"]`) has no single element type and is rejected at the literal, as for any other list. |
 
@@ -1627,9 +1631,12 @@ and would break that determinism.
 `eq`" rule was dropped 2026-08-11; see `docs/gaps.md` **W7-41**. Its `compare` is **total on floats**: a `NaN` operand
 returns an ordering int (never a fault), using the same total order `List.sort()`/`sort_by_key`/`min`/
 `max` use (`f64::total_cmp`, `NaN` to one end). The `<`/`<=`/`>`/`>=` *operators* stay IEEE (`false` for
-every `NaN` comparison) — that is the one divergence. These three `std.cmp` fns are written with `<`, so
-they follow the **operator** rule, not the total order: with a `NaN` argument `min`/`max` return whichever
-side the `false` comparison selects and `clamp` likewise — filter `NaN` first if that matters.
+every `NaN` comparison) — that is the one divergence. `min` and `max` are written with `<`, so they
+follow the **operator** rule, not the total order: on a non-`<` tie both return the **first** argument
+(Python's rule), so a `NaN` operand propagates from the left (`min(nan, 1.0)` and `max(nan, 1.0)` are
+both `nan`; `min(1.0, nan)` and `max(1.0, nan)` are both `1.0`) — filter `NaN` first if that matters.
+`clamp` **faults** (`cmp.clamp: inverted bounds (lo > hi)`) when `lo > hi`, matching Rust `clamp`'s panic
+there; `lo == hi` is not inverted and clamps to that single point.
 
 ### `std.bisect` — binary search & sorted-insert (Python `bisect`)
 Over an ascending-sorted `List[T: Comparable]` (compares with `<` → dispatches through `Comparable`).

@@ -7,6 +7,26 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-069 (2026-09-06) — six stdlib/render contract violations fixed (`docs/gaps.md`
+  W10-18, W10-21, W10-23..26).** `cmp.min` was second-wins on a non-`<` tie while `cmp.max` was
+  first-wins; `min` now mirrors `max`'s shape so both return the first argument on a tie
+  (Python's rule — a `NaN` operand propagates from the left), and `clamp` now faults
+  `cmp.clamp: inverted bounds (lo > hi)` instead of silently returning a wrong value.
+  `fs.mkdir("")` returned `Ok(nil)` and created nothing (`create_dir_all("")` is `Ok(())` in Rust
+  std); it now errors like every sibling in `src/native/fs.rs`. `csv.format`/`csv.parse` were not
+  mutual inverses over the empty shapes — both halves changed together: `format` quotes a
+  single-empty-field record as `""`, and `parse` now maps a blank line to an empty record `[]`
+  (CPython `csv` parity, reversing a prior deliberate divergence); `examples/csv.expected`'s
+  `sole_fmt` moved 2 → 4. `path.with_ext` did not collapse a run of leading dots and never
+  rejected an invalid extension; it now collapses `"..d"` to `".d"` and faults on an all-dots or
+  `/`-bearing extension, matching CPython `PurePath.with_suffix`. A 1-tuple rendered as `(1)`
+  instead of `(1,)` in both tuple renderers (`src/vm/stmt.rs`'s `str()`/`print` path and its
+  error-message path). `int()`/`float()`/`to_int`/`to_float`/`parse_int`/`parse_float` rejected
+  PEP-515 underscores the lexer already accepted (`"1_000"`); a new `strip_num_underscores`
+  (`src/vm/mod.rs`) mirroring the lexer's flanking-digit rule is now called by all six sites.
+  Landed as three commits (tests, fix, docs) per DEC-006; `cargo test` green at both worker
+  counts, `cargo clippy -- -D warnings` clean.
+
 - **TICKET-068 (2026-09-06) — three quadratic stdlib builders fixed (`docs/gaps.md` W10-22).**
   `std/json.chz`'s `Parser.parse_string`, `parse_number`'s `raw`, `escape`, and `stringify_depth`'s
   `Json.Arr`/`Json.Obj` arms built their output with `out = out + c` per codepoint (O(n) copy each,

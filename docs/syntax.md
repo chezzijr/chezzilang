@@ -170,7 +170,8 @@ t := (
 ```
 
 A parenthesised expression is grouping; a trailing comma makes a tuple, so **`(x)` is just `x`**
-while **`(x,)` is a one-element tuple**.
+while **`(x,)` is a one-element tuple** — and it RENDERS with the comma too: `print((1,))` writes
+`(1,)`, as in Python.
 
 **Tuple elements are read positionally with `.0`, `.1`, … (Rust's spelling), never `t[0]`.** The index
 must be a literal — it is part of the type, not a runtime value — and tuples are **immutable**, so
