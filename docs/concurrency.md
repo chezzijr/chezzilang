@@ -2105,7 +2105,9 @@ blocks. The Chezzi analogue is the `native_reentry` sites.)
   (`std/iter.chz` `map`/`filter`/`fold`/`reduce`, like BEAM's `Enum.map`) so a `recv` in their callback
   *parks* normally; **Path C** Go-`handoffp`-demotes the fiber to a thread for the intrinsically-native
   islands (a `recv`/`sleep_ms`/socket op / `wait` reached inside a Rust callback) instead of faulting.
-  (Path B stackful was rejected.) Residual: a `recv` with no possible sender still *correctly* deadlocks.
+  (Path B stackful was rejected.) Residual (split by TICKET-062, W10-1): for a spawned fiber a `recv`
+  with no possible sender is still the *correct* deadlock, but `main` inside a native re-entry now
+  blocks in place instead and *hangs* rather than faulting, since nothing can judge it.
   The same fiddly bit Go's runtime wrestles with for cgo. See [`concurrency-tier-d.md` § "D5 owe #3"].
 - **Correct lock-free work-stealing + pollset wake-ups + preemption.** Preemption is the *easy* part
   here: reduction-style cooperative yield — check a "should-yield" flag at back-edges, reusing the
@@ -2222,10 +2224,14 @@ reinvented; none is scheduled. (B3–B5 itself is planned in [`concurrency-b3.md
   `map`/`filter`/`fold`/`reduce`, like BEAM's `Enum.map`) so their callback `recv` *parks* normally
   (`d5_owe3_recv_in_iter_map_callback_parks`); **Path C** Go-`handoffp`-demotes the fiber to a thread
   for the intrinsically-native islands (`d5_owe3_path_c_*_demotes`). Path B (stackful) rejected.
-  Residual: a `recv` with no possible sender still *correctly* deadlocks
-  (`d5_owe3_path_c_recv_in_callback_no_sender_still_deadlocks`). The lone surviving same-box hazard is
-  `Shared.update`'s hold-and-wait (won't-fix by design, separate). Details in
-  [`concurrency-tier-d.md` § "D5 owe #3"](concurrency-tier-d.md).
+  **TICKET-062 (W10-1):** the top-level `main` task inside a native re-entry now also blocks in place
+  (`can_block_in_place` widened from `is_counted_party` to `owns_os_thread`), instead of taking the
+  "fault, as before" arm main used to fall to. Residual, split by party: a **spawned fiber**'s `recv`
+  with no possible sender is still the *correct* deadlock
+  (`d5_owe3_path_c_recv_in_callback_no_sender_still_deadlocks`); **`main`** in that same shape now
+  *hangs* instead, because it blocks without registering and the verdict declines to judge it. The lone
+  surviving same-box hazard is `Shared.update`'s hold-and-wait (won't-fix by design, separate). Details
+  in [`concurrency-tier-d.md` § "D5 owe #3"](concurrency-tier-d.md).
 
 - **`Channel.close()` + closed-channel semantics** — **LANDED** (branch
   `feat/channel-close`). The natural complement to B1/B2's blocking `recv`: a consumer looping past the

@@ -248,6 +248,16 @@ predicate if any has a queued value. **Path B (stackful fibers) rejected** — a
 (unsafe stack switching, memory-per-fiber, native re-entrancy re-audit); A + C deliver the same
 observable behaviour at a fraction of the risk.
 
+**TICKET-062 (W10-1) — the `mn == None` main-task case needs no demote.** Path C's demote exists
+because a worker thread inside a `parallel:` nursery cannot simply block: it would starve the pool
+of a thread and, before this ticket, `can_block_in_place` excluded it from blocking at all
+(`is_counted_party` requires `native_reentry == 0`), so it faulted `deadlock` instead. The top-level
+`main` task has neither problem: it owns its OS thread outright (`mn == None`, `mn_enlist_sched ==
+None`), so it can block on the channel condvar directly — no replacement worker to spin up. Widening
+`can_block_in_place` from `is_counted_party` to `owns_os_thread` admits exactly this case; `main`
+blocks in place and registers no party, so the process-wide verdict declines to judge it rather than
+asserting a wrong `deadlock`.
+
 **`Shared.update` same-box hold-and-wait — WON'T FIX by design.** `update(f)` holds the box's lock
 across `f`; if `f` blocks on a `recv` needing the **same** box, any such sender deadlocks. This is the
 classic hold-and-wait-while-blocking deadlock *every* language with locks + blocking hits (Go detects

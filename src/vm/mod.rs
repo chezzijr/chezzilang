@@ -3705,6 +3705,22 @@ impl MnSched {
         (base..base + total).map(|i| c.slots[i].take()).collect()
     }
 
+    /// TICKET-062 (W10-16) — peek at ONE scope's slots for the lowest-index recorded `Fault`, without
+    /// taking any slot. `MnSched::finish` writes a slot and bumps `scopes[sid].done` under this SAME
+    /// lock, so a fault this call sees is final: the join still reduces every slot afterward exactly
+    /// as if this peek never ran.
+    fn scope_fault(&self, scope_id: usize) -> Option<RuntimeError> {
+        let c = self.lock();
+        let (base, total) = {
+            let s = &c.scopes[scope_id];
+            (s.base_index, s.total)
+        };
+        c.slots[base..base + total].iter().find_map(|s| match s {
+            Some(TaskOutcome::Fault { err, .. }) => Some(err.clone()),
+            _ => None,
+        })
+    }
+
     /// Cross-nursery flat scheduler — block until ONE scope's slots are all filled (`done == total` for
     /// that scope). The inline owner returns from `mn_worker_loop` the instant its scope completes, so
     /// this is a non-blocking re-check in the common case; it parks only if a demoted replacement is

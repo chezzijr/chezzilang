@@ -37,6 +37,26 @@ Single source of truth for "what am I doing next." Update after every work sessi
   `main.chz`'s `print(c.strlen("abc"))` and `print(strlen("abcd"))` print `3` then `4`, rc=0.
   `cargo test --lib` was 4493 passed/2 failed/2 ignored before, 4498 passed/0 failed/2 ignored after
   (5 new tests: an over-widening guard, 3 new RED repros, 1 new mechanism test).
+- **TICKET-062 (2026-09-05) — two scheduler-verdict defects fixed (`docs/gaps.md` W10-16, W10-1).**
+  (1) A child task's fault used to surface as the nursery OWNER's synthesized `deadlock`: `spawn:
+  panic("task died")` while the owner sat parked in `ch.recv()` reported `recv on an empty channel:
+  deadlock` — `task died` never shown, though a parked SIBLING (not the owner) already surfaced the
+  fault correctly. `reduce_task_slots` already ranks `Exit > Fault > Deadlocked` for sibling slots
+  (`src/vm/sched.rs:2150-2158`), but the owner's own body error never passes through that reduce.
+  Fixed with a new rung in `block_halt_check` (`src/vm/netio.rs`, above the deadlock rung) that
+  returns the lowest-index `Fault` recorded on a `parallel:` scope open on this thread, via the new
+  `MnSched::scope_fault` (`src/vm/mod.rs`) and `Vm::owned_nursery_fault` (`src/vm/netio.rs`).
+  (2) `main` blocking on a channel op inside a native re-entry (a generator resume, a `list.map`/
+  `Shared.update` callback, a `test fn` body) used to fault `deadlock` even with a live sibling ready
+  to send — `can_block_in_place` folded `is_counted_party`, which requires `native_reentry == 0`.
+  Widened `can_block_in_place` from `is_counted_party` to `owns_os_thread`, so `main` now blocks in
+  place there instead, without registering as a party (the verdict declines to judge it). Subsumed
+  `op_wait_poll`'s now-dead `timed_block` term into the same widened `can_block_in_place()` check.
+  Accepted residual: `main` blocked in a native re-entry with no possible sender and no faulted
+  sibling now HANGS instead of faulting `deadlock` (`chezzi test --timeout` still reaches it). Added
+  `tests/chz/spec/nursery_fault_verdict_test.chz` (6 tests, both worker counts). `cargo test --lib`:
+  4507 passed/0 failed/2 ignored (the 2 RED-then-GREEN tests already committed by triage are counted
+  in that total); `chezzi test tests/chz`: 780 passed/0 failed (774 pre-existing + the 6 new).
 - **Bug-hunt wave 10 (2026-09-05) — 26 confirmed findings, `W10-1..W10-26` in `docs/gaps.md`, filed as
   TICKET-060..069 (pipeline queue, unattended overnight). Landed so far: TICKET-060 (W10-6, W10-8 — a `str` arg's C buffer is retained when a `ptr` can point back into it; first callback fault wins) and TICKET-061 (W10-7, W10-14 — void callbacks, extern fns exported as module members), each re-verified on the merged release binary at both worker counts.** Same six domains as wave 9, ~400 probes;
   every candidate re-run on the release binary at two worker counts, 30 → 26 confirmed. Headline: a

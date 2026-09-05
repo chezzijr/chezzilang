@@ -2238,8 +2238,17 @@ impl Vm {
     /// the only thing a callback frame forbids. That second case is deliberately WIDER than
     /// [`Vm::is_counted_party`] — it blocks without registering, so the verdict simply declines to
     /// judge it (a hang, the safe direction), rather than the fault it would otherwise take.
+    ///
+    /// TICKET-062 (W10-1) widened this from [`Vm::is_counted_party`] to [`Vm::owns_os_thread`]: the
+    /// extra admitted shape is `main` inside a native re-entry (`mn == None`, `mn_enlist_sched ==
+    /// None`, `native_reentry > 0` — a generator resume, a `list.map`/`Shared.update` callback, a
+    /// `test fn` body). Such a party blocks WITHOUT registering, exactly like the eager-callback case
+    /// above, so the verdict declines to judge it rather than asserting a wrong `deadlock`.
+    /// [`Vm::is_counted_party`] itself is deliberately NOT widened: `src/vm/quiesce.rs`'s live-count
+    /// argument requires a party inside a native call to stay live-and-unregistered, so registering it
+    /// here would delete that veto and turn a genuine uncounted sender into a false deadlock.
     fn can_block_in_place(&self) -> bool {
-        self.eager_core.is_some() || self.is_counted_party()
+        self.eager_core.is_some() || self.owns_os_thread()
     }
 
     /// May a would-block socket op BLOCK ITS THREAD in place ([`Vm::demote_block_socket`]) instead of
@@ -2271,6 +2280,19 @@ impl Vm {
     pub(super) fn may_block_socket_in_place(&self) -> bool {
         (self.mn.is_some() && self.native_reentry > 0)
             || (self.eager_core.is_none() && self.is_counted_party())
+    }
+
+    /// TICKET-062 (W10-16) — the lowest-index `Fault` recorded by a task of a `parallel:` nursery open
+    /// on THIS thread, innermost scope first. `.rev()` because `eager_scheds` is innermost-LAST, the
+    /// same walk [`Vm::blocked_bodies_guard_with`] uses. A nursery OWNER blocked in its own body never
+    /// passes through `reduce_task_slots`'s `Exit > Fault > Deadlocked` precedence
+    /// (`src/vm/sched.rs:2150-2158`), so this restores that precedence for the owner.
+    pub(super) fn owned_nursery_fault(&self) -> Option<RuntimeError> {
+        self.eager_scheds
+            .iter()
+            .flatten()
+            .rev()
+            .find_map(|s| s.sched.scope_fault(s.scope))
     }
 
     /// Register this thread as a blocked party for as long as the returned guard lives, so the
@@ -2408,6 +2430,16 @@ impl Vm {
         // `reduce_task_slots` encodes, and what makes a `recv`-blocked `main` report the exit code
         // instead of a "deadlock" that is really somebody else's exit.
         if let Some(e) = self.run_exit_err(span) {
+            return Err(e);
+        }
+        // TICKET-062 (W10-16) — a sibling task's recorded fault outranks the synthesized deadlock
+        // verdict for a `parallel:` nursery OWNER, applying `reduce_task_slots`'s `Exit > Fault >
+        // Deadlocked` precedence (`src/vm/sched.rs:2150-2158`) here too: the owner's own body never
+        // passes through that reduce, so without this rung its child's fault never reaches it and the
+        // owner reports a synthesized `deadlock` instead. Deliberately NOT gated on
+        // `is_counted_party()` — a recorded fault is a fact, not a heuristic verdict, so it needs no
+        // judgeability.
+        if let Some(e) = self.owned_nursery_fault() {
             return Err(e);
         }
         // The process-wide deadlock verdict (`future.md` §2d step 0), checked LAST so the two real
@@ -2760,26 +2792,22 @@ impl Vm {
         // `self.mn` — does not port here and does not need to: it exists to wake a fiber that has no
         // thread, and this party IS a thread.
         //
-        // `timed_block` is deliberately WIDER than [`Vm::can_block_in_place`], and only for a TIMED
-        // wait. `can_block_in_place` folds in [`Vm::is_counted_party`], which requires
-        // `native_reentry == 0`, so the top-level `main` thread inside any native callback (a list
-        // HOF, `Shared.update`, an FFI callback) is excluded from it — that exclusion is about a
-        // deadlock verdict being unable to JUDGE such a party, not about whether it may block, and it
-        // left W7-14 alive on that path (measured `timer` @ 308 ms with a value at 50 ms). A live
-        // timer arm removes the risk the exclusion guards: this wait provably ENDS at the deadline, so
-        // blocking on it cannot hang even though nothing will register or judge it. Without a timer
-        // arm the exclusion still stands and the fault below is the honest answer.
-        let timed_block = soonest.is_some() && self.owns_os_thread();
+        // TICKET-062 (W10-1) widened [`Vm::can_block_in_place`] from [`Vm::is_counted_party`] to
+        // [`Vm::owns_os_thread`], so it now already admits every party this rung used to add a
+        // separate `timed_block` term for: the top-level `main` thread inside a native callback blocks
+        // in place unconditionally, not only when a live timer arm bounds the wait. The old
+        // `timed_block` term (`soonest.is_some() && self.owns_os_thread()`) is therefore always implied
+        // by `can_block_in_place()` and has been deleted.
+        //
         // The one caller left after `--serial`'s removal: the INLINE outermost-`parallel:` builder
-        // mid-body (`mn == None`, `mn_enlist_sched == Some` — so `owns_os_thread()` is false and it is
-        // neither `can_block_in_place` nor `timed_block`) with no eager `Executor` core. It has no
-        // worker loop to drive a park, so a live timer arm inline-sleeps to the soonest deadline and
-        // takes it — the alternative is the all-parties-blocked fault below, which would be wrong here.
-        // `gaps.md` N10 (the COOPERATIVE fiber that inline-slept past a runnable sibling) is closed by
-        // construction: that fiber no longer exists.
+        // mid-body (`mn == None`, `mn_enlist_sched == Some`, so `owns_os_thread()` and
+        // `can_block_in_place()` are both false) with no eager `Executor` core. It has no worker loop
+        // to drive a park, so a live timer arm inline-sleeps to the soonest deadline and takes it — the
+        // alternative is the all-parties-blocked fault below, which would be wrong here. `gaps.md` N10
+        // (the COOPERATIVE fiber that inline-slept past a runnable sibling) is closed by construction:
+        // that fiber no longer exists.
         if let Some((i, deadline)) = soonest
             && !self.can_block_in_place()
-            && !timed_block
         {
             // W7-17 — CHUNKED, not a bare `thread::sleep`: this is the one inline-sleep W7-16 missed
             // (its four seams were `invoke_native`, `chan_recv_step`'s timer branch, the M:N timer
@@ -2792,13 +2820,12 @@ impl Vm {
             self.take_wait_arm(base, Value::bool(true), meta.arm_targets[i]);
             return Ok(());
         }
-        // A party that owns its OS thread — an eager `Executor` job, or the top-level `main` thread —
-        // blocks instead of declaring a deadlock, like the empty-`recv` and full-`send` cases, then
-        // REWINDs so the dispatch loop re-runs this `WaitPoll` and re-polls every arm. Rewinding
-        // rather than looping in place also means the halts land on the ordinary back-edge checkpoint.
-        // `timed_block` (W7-14, above) admits one more waiter here — `main` inside a native callback —
-        // and ONLY when a live timer arm makes the block provably finite.
-        if self.can_block_in_place() || timed_block {
+        // A party that owns its OS thread — an eager `Executor` job, or the top-level `main` thread,
+        // now including one inside a native callback (TICKET-062, W10-1) — blocks instead of declaring
+        // a deadlock, like the empty-`recv` and full-`send` cases, then REWINDs so the dispatch loop
+        // re-runs this `WaitPoll` and re-polls every arm. Rewinding rather than looping in place also
+        // means the halts land on the ordinary back-edge checkpoint.
+        if self.can_block_in_place() {
             // Registered FIRST, before the halt check, so this party counts ITSELF as blocked; after
             // it, a lone `wait:`-blocked party would forever see `blocked < live` and never fault.
             // The registration is an OR-set over every arm (§2d's OR-edge: ready on ANY arm is

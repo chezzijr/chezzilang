@@ -1,0 +1,72 @@
+# TICKET-062 (W10-16 / W10-1) — a child task's fault must outrank the synthesized `deadlock`
+# verdict for a `parallel:` nursery OWNER blocked in a channel op, and `main` blocked on a channel
+# op inside a native re-entry (generator resume, `list.map`/`Shared.update` callback) must block in
+# place instead of faulting `deadlock` while a sibling is still alive to send/receive.
+import std.concurrency
+
+test fn owner_parked_recv_reports_the_child_fault():
+    ch := Channel[int]()
+    r := recover:
+        parallel:
+            spawn:
+                panic("task died")
+            ch.recv()
+    match r:
+        Ok(_): assert false, "expected the child fault, got Ok"
+        Err(e): assert e.message() == "task died", "got: {e.message()}"
+
+test fn owner_parked_wait_reports_the_child_fault():
+    ch := Channel[int]()
+    r := recover:
+        parallel:
+            spawn:
+                panic("task died")
+            wait:
+                v := ch.recv(): print(v)
+    match r:
+        Ok(_): assert false, "expected the child fault, got Ok"
+        Err(e): assert e.message() == "task died", "got: {e.message()}"
+
+test fn owner_blocked_bounded_send_reports_the_child_fault():
+    ch := Channel[int](1)
+    r := recover:
+        parallel:
+            spawn:
+                panic("task died")
+            ch.send(1)
+            ch.send(2)
+    match r:
+        Ok(_): assert false, "expected the child fault, got Ok"
+        Err(e): assert e.message() == "task died", "got: {e.message()}"
+
+test fn main_recv_in_a_native_map_callback_with_a_live_sender():
+    ch := Channel[int]()
+    parallel:
+        spawn: ch.send(66)
+        assert [1].map(fn(x: int) -> int: x + ch.recv()) == [67]
+
+test fn main_recv_in_a_shared_update_closure_with_a_live_sender():
+    ch := Channel[int]()
+    s := Shared(0)
+    parallel:
+        spawn: ch.send(7)
+        s.update(fn(x: int) -> int: x + ch.recv())
+    assert s.get() == 7
+
+test fn main_recv_in_a_generator_resume_with_live_sender():
+    ch := Channel[int]()
+    fn g():
+        while true:
+            v := ch.recv()
+            if v < 0:
+                return
+            yield v
+    out := []
+    parallel:
+        spawn:
+            for i in 0..3:
+                ch.send(i)
+            ch.send(-1)
+        for x in g():
+            out.push(x)
+    assert out == [0, 1, 2]
