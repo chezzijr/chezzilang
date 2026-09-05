@@ -5,7 +5,11 @@
 //!
 //! v1 marshals scalars: `int` (i64 ↔ C `long`), `float` (f64 ↔ C `double`), `bool`
 //! (↔ C `_Bool`, 1 byte 0/1), and `str` (Chezzi str → null-terminated `const char*`; a borrowed `char*` return
-//! is copied immediately into an owned Chezzi str, never freed). Plus the bidirectional fixed-width
+//! is copied immediately into an owned Chezzi str, never freed). A `str` arg's marshalled C buffer is
+//! RETAINED (leaked, keyed by content) instead of freed whenever the call could hand a pointer back
+//! into it — a `ptr` return that aliases the argument, or any `ptr` parameter that may be a C
+//! out-param (`RETAINED_STR_ARGS`, `retain_aliasing_str_args`) — so such a pointer stays valid past
+//! the call that produced it. Plus the bidirectional fixed-width
 //! integers `int8`/`int16`/`int32`/`int64`/`uint8`/`uint16`/`uint32`/`uint64` ([`CType::Int8`]..
 //! [`CType::UInt64`]) for C `int32_t`/`uint32_t`/… — distinct from `int` (C `long`); a param truncates
 //! the i64 to the C width (wrapping, C-cast), a return sign-/zero-extends back to i64. Plus opaque
@@ -35,8 +39,10 @@
 //! - libffi's `Cif` is `!Send` (raw pointers, no `unsafe impl Send`), so it is **not** stored;
 //!   the cheap `Cif::new` (`prep_cif`) is rebuilt per call from the `Send` [`CType`] signature.
 
+use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_void};
 use std::mem::ManuallyDrop;
+use std::sync::{Mutex, OnceLock};
 
 use libffi::middle::{Cif, CodePtr, Type, arg};
 use libloading::Library;
@@ -475,6 +481,90 @@ const CROSS_THREAD_MSG: &[u8] =
     b"chezzi FFI: callback invoked from a thread other than the one that \
 made the extern call; stored/cross-thread callbacks are not supported\n";
 
+/// Marshalled `str`-arg C buffers a `ptr` may still point into after their `Cffi::call` returned
+/// (TICKET-060). Chezzi has no lifetime for a `ptr` (it is never auto-freed), so there is no owner to
+/// attach the buffer to — retention means LEAKING it on purpose, for as long as the process runs.
+/// Keyed by the NUL-terminated byte content rather than per-call: a loop marshalling the same string
+/// retains ONE buffer, not one per call. The value is a `usize` (the buffer's address as an integer,
+/// not a pointer) so the table stays `Send`.
+static RETAINED_STR_ARGS: OnceLock<Mutex<HashMap<Vec<u8>, usize>>> = OnceLock::new();
+
+fn retained_table() -> &'static Mutex<HashMap<Vec<u8>, usize>> {
+    RETAINED_STR_ARGS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Look up a previously retained buffer by its NUL-terminated content. A C fn that WRITES through a
+/// `str` param (`strtok`) mutates the shared buffer in place, but Chezzi `str` is immutable, so a
+/// reuse that finds the buffer mutated is restored to `with_nul` here, under the table lock.
+fn retained_lookup(with_nul: &[u8]) -> Option<*const std::os::raw::c_char> {
+    let table = retained_table().lock().unwrap_or_else(|e| e.into_inner());
+    let addr = *table.get(with_nul)?;
+    // SAFETY: `addr` was produced by `retain_cstring` from a `CString::into_raw()` that is never
+    // `from_raw`'d, so the allocation is live for the process's lifetime; `with_nul.len()` matches
+    // the length recorded when it was inserted (the map key IS `with_nul`'s bytes).
+    unsafe {
+        let cur = std::slice::from_raw_parts(addr as *const u8, with_nul.len());
+        if cur != with_nul {
+            std::ptr::copy_nonoverlapping(with_nul.as_ptr(), addr as *mut u8, with_nul.len());
+        }
+    }
+    Some(addr as *const std::os::raw::c_char)
+}
+
+/// Retain a marshalled `str` arg's `CString` forever, keyed by its content. Leaks the allocation `cs`
+/// already owns — the pointer C may still hold into it — on purpose; it is never `from_raw`'d back.
+fn retain_cstring(cs: CString) -> *const std::os::raw::c_char {
+    let key = cs.as_bytes_with_nul().to_vec();
+    let p = cs.into_raw();
+    // An already-occupied entry means another call already retained this same content; this extra
+    // buffer is simply leaked, untracked (still a correct pointer, just not the one future lookups
+    // will hit).
+    retained_table()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(key)
+        .or_insert(p as usize);
+    p as *const std::os::raw::c_char
+}
+
+/// Collect every `ptr` address reachable in a [`NativeRet`] result: a bare [`NativeRet::Ptr`], or one
+/// nested inside `Ok`/`Some`/a by-value struct's fields (a `ptr` also reaches the program as a struct
+/// FIELD via `read_field`'s `CType::Ptr` arm).
+fn collect_ptr_addrs(r: &NativeRet, out: &mut Vec<usize>) {
+    match r {
+        NativeRet::Ptr(a) => out.push(*a),
+        NativeRet::Ok(b) | NativeRet::Some(b) => collect_ptr_addrs(b, out),
+        NativeRet::Struct { fields, .. } => {
+            for (_, v) in fields {
+                collect_ptr_addrs(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Retrospectively retain any `str`-arg `CString` a returned `ptr` aliases into. A `ptr` RETURN is
+/// judged after the fact (not eagerly, like a `ptr` PARAM): only an address that actually falls
+/// inside one of this call's marshalled buffers retains that buffer, so a `ptr`-plus-`str` shape with
+/// no aliasing (`fopen(path: str, mode: str) -> ptr`) retains nothing.
+fn retain_aliasing_str_args(ret: &NativeRet, cstrings: &mut [Option<CString>]) {
+    let mut addrs = Vec::new();
+    collect_ptr_addrs(ret, &mut addrs);
+    if addrs.is_empty() {
+        return;
+    }
+    for slot in cstrings.iter_mut() {
+        let Some(cs) = slot else { continue };
+        let base = cs.as_ptr() as usize;
+        // The NUL terminator itself is a legal target (`strchr(s, 0)`); one byte past it is not.
+        let end = base + cs.as_bytes_with_nul().len();
+        if addrs.iter().any(|&a| a >= base && a < end) {
+            let cs = slot.take().expect("checked Some above");
+            retain_cstring(cs);
+        }
+    }
+}
+
 /// `write(2)` the WHOLE buffer, retrying a short count, `EINTR` and `EAGAIN`. Async-signal-safe (no
 /// allocation, no lock, no Rust stdio). A single bare `write` loses the message outright on a
 /// non-blocking fd 2 (an inherited-`O_NONBLOCK` tty, a CI harness) or on any signal arriving
@@ -624,6 +714,18 @@ unsafe extern "C" fn callback_trampoline(
     // SAFETY: `ctx.ret` points at the live callback return CType.
     let ret_ct: &CType = unsafe { &*ctx.ret };
 
+    // TICKET-060: this extern call is already doomed once a fault is stashed -- its error is
+    // re-raised when `ffi_call` returns -- but C does not know that and keeps calling (libc `qsort`
+    // performs 15 comparisons for a 10-element input, not 1). No Chezzi code may run after the FIRST
+    // fault, so short-circuit here with a zeroed result. C's own loop still runs regardless: Chezzi
+    // cannot unwind through C frames the way Go cgo does, so only the Chezzi side of it stops.
+    // SAFETY: `ctx.fault` is live per the `armed` + owner-thread guards above; only the owning thread
+    // touches it.
+    if unsafe { (*ctx.fault).is_some() } {
+        unsafe { write_c_result(result, ret_ct, &NativeRet::Int(0)) };
+        return;
+    }
+
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // Read each incoming C scalar arg into a NativeRet.
         let mut native_args: Vec<NativeRet> = Vec::with_capacity(params.len());
@@ -654,7 +756,12 @@ unsafe extern "C" fn callback_trampoline(
             // SAFETY: `ctx.fault` points into `Cffi::call`'s live `Box<Option<HostError>>` out-slot
             // (heap, freed when that call returns — the poison guard above is what keeps a
             // post-return invocation from writing through it).
-            unsafe { *ctx.fault = Some(host_err) };
+            // TICKET-060: the FIRST fault is the one re-raised -- don't overwrite an existing one.
+            unsafe {
+                if (*ctx.fault).is_none() {
+                    *ctx.fault = Some(host_err);
+                }
+            }
         }
         Err(panic_payload) => {
             // SAFETY: zero the result so C unwinds with a defined value (no panic into C frames).
@@ -665,11 +772,14 @@ unsafe extern "C" fn callback_trampoline(
                 .or_else(|| panic_payload.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "callback panicked".to_string());
             // SAFETY: as above — the boxed fault out-slot is live for the duration of the call.
+            // TICKET-060: the FIRST fault is the one re-raised -- don't overwrite an existing one.
             unsafe {
-                *ctx.fault = Some(HostError {
-                    message: format!("callback panicked: {msg}"),
-                })
-            };
+                if (*ctx.fault).is_none() {
+                    *ctx.fault = Some(HostError {
+                        message: format!("callback panicked: {msg}"),
+                    });
+                }
+            }
         }
     }
 }
@@ -945,7 +1055,10 @@ impl Cffi {
         let mut float_args: Vec<f64> = Vec::new();
         // C `_Bool` args are one byte (0/1); the `u8` backing matches the `_Bool` ffi_type.
         let mut bool_args: Vec<u8> = Vec::new();
-        let mut cstrings: Vec<CString> = Vec::new();
+        // A `None` slot means a retained buffer whose pointer is already filled in `ptr_args`
+        // (TICKET-060) -- either because a lookup found an existing one for this content, or because
+        // this arg is eagerly retained (see `out_param_risk` below).
+        let mut cstrings: Vec<Option<CString>> = Vec::new();
         let mut ptr_args: Vec<*const std::os::raw::c_char> = Vec::new();
         // Raw `void*` handles (Chezzi `ptr` args) — plain addresses, stable once pushed.
         let mut void_args: Vec<*mut c_void> = Vec::new();
@@ -1004,6 +1117,12 @@ impl Cffi {
             Callback(usize),
         }
         let mut slots: Vec<Slot> = Vec::with_capacity(self.params.len());
+        // A `ptr` PARAM may be a C out-param the callee writes an interior pointer into (`strtol`'s
+        // endptr): that write is invisible afterwards, because we can neither size nor safely read
+        // the user's buffer, so any `str` arg alongside a `ptr` param is retained EAGERLY rather than
+        // judged retrospectively like a `ptr` return.
+        let out_param_risk = self.params.iter().any(|p| matches!(p, CType::Ptr))
+            && self.params.iter().any(|p| matches!(p, CType::Str));
         for (i, p) in self.params.iter().enumerate() {
             match p {
                 CType::Int => {
@@ -1029,8 +1148,16 @@ impl Cffi {
                             self.name
                         ),
                     })?;
-                    cstrings.push(cs);
-                    ptr_args.push(std::ptr::null());
+                    if let Some(p) = retained_lookup(cs.as_bytes_with_nul()) {
+                        cstrings.push(None);
+                        ptr_args.push(p);
+                    } else if out_param_risk {
+                        cstrings.push(None);
+                        ptr_args.push(retain_cstring(cs));
+                    } else {
+                        cstrings.push(Some(cs));
+                        ptr_args.push(std::ptr::null());
+                    }
                     slots.push(Slot::Ptr(cstrings.len() - 1));
                 }
                 CType::Ptr => {
@@ -1230,10 +1357,13 @@ impl Cffi {
             }
         }
 
-        // Fill the pointer args now that `cstrings` won't move again.
+        // Fill the pointer args now that `cstrings` won't move again. A `None` slot's `ptr_args` entry
+        // was already filled (a retained/looked-up buffer) at the `CType::Str` arm above.
         for slot in &slots {
-            if let Slot::Ptr(idx) = slot {
-                ptr_args[*idx] = cstrings[*idx].as_ptr();
+            if let Slot::Ptr(idx) = slot
+                && let Some(cs) = &cstrings[*idx]
+            {
+                ptr_args[*idx] = cs.as_ptr();
             }
         }
 
@@ -1277,6 +1407,9 @@ impl Cffi {
         }) = &self.ret
         {
             let r = self.call_struct_return(&cif, code, &ffi_args, name, field_names, fields);
+            if let Ok(v) = &r {
+                retain_aliasing_str_args(v, &mut cstrings);
+            }
             // A callback fired during the call may have stashed a fault; re-raise it over the result.
             // Read the fault BEFORE dropping the closures, then drop (poisons + leaks an armed one).
             if let Some(err) = callback_fault.take() {
@@ -1443,6 +1576,9 @@ impl Cffi {
                 }
             }
         };
+        // Retain (leak) any `str`-arg buffer a returned `ptr` aliases into, BEFORE the drop below --
+        // a retained slot is already `None` there (TICKET-060), so this outlives that drop by design.
+        retain_aliasing_str_args(&ret, &mut cstrings);
         // `cstrings` / `struct_bufs` (and the other storage) are dropped here, after the call returns
         // — never before. The callback closures are dropped last (an armed one is poisoned + leaked,
         // NOT freed — see `CallbackClosure::drop`) — also only after the call.
@@ -2278,6 +2414,74 @@ void* mkrec(void) { static struct R r = { -3, 70000, 2.5 }; return &r; }
             err.message.contains("callback deliberately failed"),
             "{}",
             err.message
+        );
+    }
+
+    #[test]
+    fn a_str_arg_is_retained_only_when_a_pointer_can_come_back() {
+        // `strlen` never hands back a pointer into its `str` arg -- retaining it would be a pure
+        // leak with no correctness benefit, so nothing should land in the retention table.
+        let f = Cffi::new("libc.so.6", "strlen", vec![CType::Str], Some(CType::Int))
+            .expect("dlopen strlen");
+        let key = "TICKET-060 not retained probe";
+        let mut host = MockHost::default().string(key);
+        assert_eq!(f.call(&mut host), Ok(NativeRet::Int(key.len() as i64)));
+        let mut with_nul = key.as_bytes().to_vec();
+        with_nul.push(0);
+        assert!(
+            retained_lookup(&with_nul).is_none(),
+            "strlen never returns a pointer into its str arg -- nothing should be retained"
+        );
+
+        // `strchr` CAN hand back a pointer into its `str` arg. It must be retained, and keyed by
+        // content: two calls marshalling the SAME text must retain and return the SAME buffer.
+        let g = Cffi::new(
+            "libc.so.6",
+            "strchr",
+            vec![CType::Str, CType::Int32],
+            Some(CType::Ptr),
+        )
+        .expect("dlopen strchr");
+        let key2 = "TICKET-060 retained probe";
+        let mut host2 = MockHost::default().string(key2).int(32);
+        let r1 = g.call(&mut host2).expect("strchr call 1");
+        let mut with_nul2 = key2.as_bytes().to_vec();
+        with_nul2.push(0);
+        assert!(
+            retained_lookup(&with_nul2).is_some(),
+            "strchr can return a pointer into its str arg -- it must be retained"
+        );
+        let mut host3 = MockHost::default().string(key2).int(32);
+        let r2 = g.call(&mut host3).expect("strchr call 2");
+        assert_eq!(
+            r1, r2,
+            "two calls marshalling the same text must retain and return the SAME buffer, not one per call"
+        );
+    }
+
+    #[test]
+    fn a_c_fn_that_writes_through_a_str_arg_does_not_poison_the_retained_buffer() {
+        // `strtok` WRITES a NUL into its retained buffer to punch the token boundary. Chezzi `str` is
+        // immutable, so a later call marshalling the SAME literal must see the ORIGINAL bytes, not
+        // the mutated ones -- `retained_lookup` restores the buffer on a mismatch.
+        let src = [
+            "import std.ffi",
+            "extern \"libc\":",
+            "    fn strtok(s: str, d: str) -> ptr",
+            "    fn strlen(s: str) -> int",
+            "p := strtok(\"uv,wx\", \",\")",
+            "print(ffi.load_str(p))",
+            "print(strlen(\"uv,wx\"))",
+            "",
+        ]
+        .join("\n");
+        let entry = write_deref_chz(&src);
+        let (out, _e, res, _) = crate::vm::run_file(&entry);
+        let _ = std::fs::remove_file(&entry);
+        assert!(res.is_ok(), "faulted: {res:?}");
+        assert_eq!(
+            out, "uv\n5\n",
+            "a str arg mutated by the C callee must be restored before the next call reuses it"
         );
     }
 
