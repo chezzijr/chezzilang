@@ -39,3 +39,81 @@ test fn int_accepts_pep515_underscores():
     match r:
         Ok(v): assert v == 1000, "int(\"1_000\") value"
         Err(e): assert false, "int(\"1_000\") should not fault, got " + e.message()
+
+test fn cmp_max_first_wins_on_tie_like_python():
+    nan := 0.0 / 0.0
+    assert str(cmp.max(-0.0, 0.0)) == "-0.0", "cmp.max(-0.0, 0.0)"
+    assert cmp.max(nan, 1.0) != cmp.max(nan, 1.0), "cmp.max(nan, 1.0) should be NaN"
+    assert cmp.max(1.0, nan) == 1.0, "cmp.max(1.0, nan)"
+    assert str(cmp.min(0.0, -0.0)) == "0.0", "cmp.min(0.0, -0.0)"
+    assert cmp.min(1.0, nan) == 1.0, "cmp.min(1.0, nan)"
+    assert str(cmp.min(-0.0, 0.0)) == "-0.0", "cmp.min(-0.0, 0.0)"
+
+test fn cmp_clamp_faults_on_inverted_bounds():
+    r := recover: cmp.clamp(5, 10, 1)
+    match r:
+        Ok(_): assert false, "clamp should fault"
+        Err(e): assert e.message() == "cmp.clamp: inverted bounds (lo > hi)", "clamp fault message"
+    assert cmp.clamp(5, 1, 10) == 5, "clamp(5, 1, 10)"
+    assert cmp.clamp(15, 0, 10) == 10, "clamp(15, 0, 10)"
+    assert cmp.clamp(-4, 0, 10) == 0, "clamp(-4, 0, 10)"
+    assert cmp.clamp(3, 3, 3) == 3, "clamp(3, 3, 3) is not inverted"
+
+test fn fs_mkdir_empty_path_message():
+    match fs.mkdir(""):
+        Ok(_): assert false, "mkdir empty should be Err"
+        Err(e): assert e.message() == ": No such file or directory (os error 2)", "mkdir empty message"
+    match fs.mkdir("."):
+        Ok(_): pass
+        Err(e): assert false, "mkdir . must stay Ok: " + e.message()
+
+test fn csv_format_quotes_a_sole_empty_field():
+    assert csv.format([[""]]).len() == 4, "csv.format([[\"\"]]) length"
+    assert csv.format([[]]).len() == 2, "csv.format([[]]) length"
+
+test fn csv_round_trip_is_total_over_the_empty_shapes():
+    rows: List[List[str]] = [["a"], [], [""], ["", ""], ["b", "c"]]
+    assert csv.parse(csv.format(rows)) == rows, "csv round trip over mixed empty shapes"
+    assert csv.parse(csv.format([[]])) == [[]], "csv round trip [[]]"
+    assert csv.parse(csv.format([[""]])) == [[""]], "csv round trip [[\"\"]]"
+
+test fn path_with_ext_rejects_an_invalid_extension():
+    r1 := recover: path.with_ext("a.b", ".")
+    match r1:
+        Ok(_): assert false, "with_ext(a.b, .) should fault"
+        Err(e): assert e.message() == "with_ext: invalid extension: '.'", "with_ext(a.b, .) message"
+    r2 := recover: path.with_ext("a.b", "/x")
+    match r2:
+        Ok(_): assert false, "with_ext(a.b, /x) should fault"
+        Err(e): assert e.message() == "with_ext: invalid extension: '/x'", "with_ext(a.b, /x) message"
+    r3 := recover: path.with_ext("a.b", "..")
+    match r3:
+        Ok(_): assert false, "with_ext(a.b, ..) should fault"
+        Err(e): assert e.message() == "with_ext: invalid extension: '..'", "with_ext(a.b, ..) message"
+    assert str(path.with_ext("a.b", "")) == "a", "with_ext(a.b, \"\")"
+    assert str(path.with_ext("a.b", "md")) == "a.md", "with_ext(a.b, md)"
+    assert str(path.with_ext("a.b", ".md")) == "a.md", "with_ext(a.b, .md)"
+    assert str(path.with_ext("a.b", ".tar.gz")) == "a.tar.gz", "with_ext(a.b, .tar.gz)"
+
+test fn one_tuple_renders_with_trailing_comma_nested():
+    assert str(((1,),)) == "((1,),)", "str(((1,),))"
+    assert str([(1,)]) == "[(1,)]", "str([(1,)])"
+    assert str(("a",)) == "('a',)", "str((\"a\",))"
+    assert str((1, 2)) == "(1, 2)", "str((1, 2)) unchanged"
+    assert str([1]) == "[1]", "str([1]) list unchanged"
+
+test fn numeric_underscores_follow_pep515():
+    assert int("1_000") == 1000, "int(1_000)"
+    assert float("1_0.5") == 10.5, "float(1_0.5)"
+    assert float("1e1_0") == 1e10, "float(1e1_0)"
+    assert float(".5_5") == 0.55, "float(.5_5)"
+    assert int("12_34_56") == 123456, "int(12_34_56)"
+    assert int(" 1_000 ") == 1000, "int( 1_000 )"
+    assert "1_0".to_int() == Some(10), "to_int(1_0)"
+    assert "1_0.5".to_float() == Some(10.5), "to_float(1_0.5)"
+    assert "1__0".to_int() == None, "to_int(1__0) rejected"
+    assert "_1".to_int() == None, "to_int(_1) rejected"
+    assert "1_".to_int() == None, "to_int(1_) rejected"
+    assert "1_.5".to_float() == None, "to_float(1_.5) rejected"
+    assert "1._5".to_float() == None, "to_float(1._5) rejected"
+    assert "1_e5".to_float() == None, "to_float(1_e5) rejected"
