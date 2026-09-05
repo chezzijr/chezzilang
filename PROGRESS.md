@@ -102,6 +102,32 @@ Single source of truth for "what am I doing next." Update after every work sessi
   previous broken form. `cargo test --lib`: 4537 passed/0 failed before (repro-only), 4541 passed/0
   failed after (4 new checker/desugar/parser tests); `cargo test` green at both worker counts;
   `cargo test conformance` and `cargo clippy -- -D warnings` clean.
+- **TICKET-067 (2026-09-06) — five test-runner/diagnostic defects fixed (`docs/gaps.md` W10-9..
+  W10-13).** (1) `chezzi test --errors=json` used to drop a whole-file diagnostic (resolve/check/
+  compile/init failure) entirely — `render_json` emitted only `file_errors.len()`, never the message.
+  Fixed with a new `FileError` type carrying both renderings (human + JSON) from all four producers
+  (`build_graph`'s `ResolveError`, the checker's first error, `compile_graph`'s `CompileError`,
+  `invoke_all`'s init error) and a new top-level `file_errors` array in the JSON document, keyed like
+  `check --errors=json` minus `end_line`/`end_col`. (2) A faulting `after_all` hook was silently
+  ignored (`PASS`, rc=0) at both its call sites in `run_suite` (`let _ = …`). Fixed with a new
+  `run_after_all` helper wired at both sites, pushing a `<Suite>::after_all` ERROR row — its own row,
+  never an upgrade of the last test's verdict, matching CPython's `tearDownClass`. (3) `io.eprint`
+  inside a test was discarded even under `--show-output` — `Vm.stderr` already buffered it but had no
+  `take_out_bytes` twin. Fixed with `Vm::take_err_bytes`, a new `Outcome.captured_err` /
+  `TestReport.stderr_bytes`, and `cmd_test` writing it to fd 2 as one `--- captured stderr: <name>
+  (<file>) ---` block per failing test — never mixed into the fd 1 report. (4) `chezzi test` ran the
+  A2 program-exit `Executor` join once per FILE (`invoke_all`, `let _ =`), so a test whose detached
+  executor's job faulted still reported `PASS`. Fixed with a per-test scope: `Vm::exec_registry_mark`
+  taken before each test's invoke, `Vm::reap_executors_since(mark)` (a new `from`-indexed
+  `drain_live_executors_from`) called after, upgrading only a still-`Pass` verdict — an executor built
+  at module top level or in `before_all` sits before every mark and is left alive for later tests, so
+  it is still joined only at file end. (5) `chezzi run --errors=json` emitted a checker warning as
+  human text on stderr while `check --errors=json` emitted the same shape as JSON — reversing the
+  deliberate `src/main.rs:1199-1210` design comment: warnings now fold into the one stdout array
+  (stdout's first line, `[]` when clean), ahead of the program's own output; plain-text `run` is
+  unchanged. `cargo test --lib`: 4541 passed/0 failed before, 4546 passed/0 failed after (5 new
+  `test_runner`/`vm::exec` tests); `chezzi test tests/chz`: 797 passed/0 failed/0 errored at both the
+  default and `CHEZZI_THREADS=2` worker counts; `cargo clippy -- -D warnings` clean.
 - **TICKET-065 (2026-09-05) — two checker false rejections fixed (`docs/gaps.md` W10-2, W10-4).**
   (1) A `match` on `bool` with both `true` and `false` arms and no `_` was `non-exhaustive match: add
   a `_` arm` — `check_exhaustive`'s `MatchKind::Literal` arm treated `bool` like the infinite `int`/

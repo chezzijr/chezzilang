@@ -1770,6 +1770,15 @@ supervised tasks) — Go's float-free `go` is the model both ecosystems *rejecte
 > already erroring). This holds for an executor created **inside a task** too, which it did not before
 > (`docs/gaps.md` **W7-5b**): the join walks a heap-independent registry of executor cores shared by
 > every worker, rather than the per-`Vm` handle list that died with its task's heap.
+> **Under `chezzi test` (2026-09-06, TICKET-067/W10-12), the A2 join is scoped per test.** An executor
+> created inside a `test fn` (or a suite method) is joined at the end of THAT test, and a job fault
+> there errors the test, the same class of failure as an assertion in the body. An executor created at
+> a `*_test.chz` module top level or in a suite's `before_all` belongs to no test, so it is joined only
+> at the end of the FILE, unattributed and best-effort (`Vm::reap_after_tests`) — the same as the plain
+> program-exit join above. The scoping is a registry-length mark taken before the test's invoke
+> (`Vm::exec_registry_mark`/`reap_executors_since`): draining from `0` on every test would mark a
+> shared top-level/`before_all` executor `shut` after the first test that ran, and the next test's
+> `submit` on it would fault `submit on a shut-down Executor`.
 > **Blocking inside a job, and the deadlock verdict (`future.md` §2d step 0, 2026-08-04).** An eager
 > job has no scheduler to park a fiber into, and neither does the top-level `main` thread, so both
 > BLOCK IN PLACE on an empty `recv` / full `send` / `wait:` — they no longer read "I have no scheduler"

@@ -63,6 +63,8 @@ cargo run -- check  examples/hello.chz   # type-check only (M4); --errors=json f
 #   '<name>'?" near-miss suggestion on a method/field/unknown-name/module-member/enum-variant miss,
 #   OMITTED when there is none
 cargo run -- run    examples/hello.chz   # type-check + run on the VM, OS-thread engine (default, M5)
+# ^ --errors=json puts warnings AND errors in the one check-shaped array, as stdout's FIRST line,
+#   ahead of the program's own output; plain-text `run` keeps warnings on stderr, unchanged
 cargo run -- run                         # no file → run the manifest [project] entrypoint (walks up for chezzi.toml)
 cargo run -- run --parallel examples/primes_parallel.chz   # accepted no-op alias (the M:N engine is the only engine)
 cargo run -- run --threads=4 examples/primes_parallel.chz  # size the OS-thread pool (0/omitted = all cores; env CHEZZI_THREADS)
