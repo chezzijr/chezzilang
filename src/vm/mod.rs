@@ -5001,6 +5001,29 @@ fn format_float(x: f64) -> String {
     crate::fmtspec::repr_float(x)
 }
 
+/// PEP-515: strip single underscores between digits from a numeric string before a Rust `parse`,
+/// so `int()`/`float()`/`to_int`/`to_float`/`parse_int`/`parse_float` agree with the lexer, which
+/// already accepts `1_000` and rejects `1__0`/`_1`/`1_` (`src/lexer/mod.rs:1447`'s predicate).
+/// Returns `None` when an `'_'` is not flanked by an ASCII digit on both sides.
+fn strip_num_underscores(s: &str) -> Option<std::borrow::Cow<'_, str>> {
+    if !s.contains('_') {
+        return Some(std::borrow::Cow::Borrowed(s));
+    }
+    let chars: Vec<char> = s.chars().collect();
+    for (i, &c) in chars.iter().enumerate() {
+        if c == '_' {
+            let prev_ok = i > 0 && chars[i - 1].is_ascii_digit();
+            let next_ok = chars.get(i + 1).is_some_and(|n| n.is_ascii_digit());
+            if !(prev_ok && next_ok) {
+                return None;
+            }
+        }
+    }
+    Some(std::borrow::Cow::Owned(
+        chars.into_iter().filter(|c| *c != '_').collect(),
+    ))
+}
+
 // ===== entry points =====
 
 /// W6-9 — the CAPTURE boundary. The buffered sink is BYTES (so `Writer.write_bytes` reaches an

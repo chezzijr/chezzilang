@@ -340,9 +340,18 @@ pub(crate) fn bytes_path(b: &[u8]) -> std::path::PathBuf {
 
 /// Create a directory, recursively (like `mkdir -p`): missing parents are created and an existing
 /// directory is a no-op (idempotent). Faults only on a real error (e.g. a parent component is a file).
+/// An EMPTY path is an `Err`: `create_dir_all("")` returns `Ok(())` in Rust std (measured), which
+/// made `mkdir("")` a silent no-op, while every sibling here (`remove_dir("")`) already reports
+/// ENOENT.
 fn mkdir(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "mkdir", 1)?;
     let path = arg_path(h, 0)?;
+    if path.as_os_str().is_empty() {
+        return Ok(NativeRet::Err(format!(
+            "{}: No such file or directory (os error 2)",
+            shown(&path)
+        )));
+    }
     match std::fs::create_dir_all(&path) {
         Ok(()) => Ok(NativeRet::Ok(Box::new(NativeRet::Nil))),
         Err(e) => Ok(NativeRet::Err(format!("{}: {e}", shown(&path)))),

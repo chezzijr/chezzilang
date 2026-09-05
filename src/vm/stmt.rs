@@ -1699,9 +1699,10 @@ impl Vm {
             match self.heap.get(h) {
                 Obj::Str(s) => {
                     let s = s.to_string();
-                    return match s.trim().parse::<i64>() {
-                        Ok(n) => Ok(self.make_int(n)),
-                        Err(_) => {
+                    return match strip_num_underscores(s.trim()).and_then(|t| t.parse::<i64>().ok())
+                    {
+                        Some(n) => Ok(self.make_int(n)),
+                        None => {
                             Err(self.err(format!("int(): cannot parse '{s}' as an integer"), span))
                         }
                     };
@@ -1739,9 +1740,10 @@ impl Vm {
             match self.heap.get(h) {
                 Obj::Str(s) => {
                     let s = s.to_string();
-                    return match s.trim().parse::<f64>() {
-                        Ok(f) => Ok(self.box_float(f)),
-                        Err(_) => {
+                    return match strip_num_underscores(s.trim()).and_then(|t| t.parse::<f64>().ok())
+                    {
+                        Some(f) => Ok(self.box_float(f)),
+                        None => {
                             Err(self.err(format!("float(): cannot parse '{s}' as a float"), span))
                         }
                     };
@@ -2089,11 +2091,18 @@ impl Vm {
                     Ok(format!("[{}]", parts.join(", ")))
                 }
                 Obj::Tuple(items) => {
-                    let mut parts = Vec::with_capacity(items.len());
+                    let n = items.len();
+                    let mut parts = Vec::with_capacity(n);
                     for v in items {
                         parts.push(self.display_guarded(*v, depth + 1)?);
                     }
-                    Ok(format!("({})", parts.join(", ")))
+                    // A 1-tuple renders `(1,)` — the trailing comma is what distinguishes it from a
+                    // parenthesised scalar, as in Python's repr.
+                    if n == 1 {
+                        Ok(format!("({},)", parts.join(", ")))
+                    } else {
+                        Ok(format!("({})", parts.join(", ")))
+                    }
                 }
                 Obj::Map(m) => {
                     let mut parts = Vec::with_capacity(m.entries.len());
@@ -2610,6 +2619,11 @@ impl Vm {
             Obj::Tuple(items) => {
                 out.push('(');
                 self.stringify_seq_into(out, &items, span, depth + 1)?;
+                // A 1-tuple renders `(1,)` — the trailing comma is what distinguishes it from a
+                // parenthesised scalar, as in Python's repr.
+                if items.len() == 1 {
+                    out.push(',');
+                }
                 out.push(')');
             }
             Obj::Map(m) => {

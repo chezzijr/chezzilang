@@ -56,7 +56,7 @@ fn main():
     # Trailing separator -> no spurious final record.
     io.print("trail_rows: " + str(csv.parse("a,b\r\n").len()))   # 1
 
-    # Blank interior line -> a single-empty-field record.
+    # Blank interior line -> an EMPTY record (CPython csv.reader).
     io.print("blank_mid: " + str(csv.parse("a\n\nb").len()))     # 3
 
     # format([]) -> "".
@@ -68,7 +68,7 @@ fn main():
     io.print("trail_rt: " + str(eq2(trail, csv.parse(csv.format(trail)))))   # true
     # SOLE empty record round-trips too.
     sole: List[List[str]] = [[""]]
-    io.print("sole_fmt: " + str(csv.format(sole).len()))         # 2  (== "\r\n")
+    io.print("sole_fmt: " + str(csv.format(sole).len()))         # 4  (== "\"\"\r\n")
     io.print("sole_rt: " + str(eq2(sole, csv.parse(csv.format(sole)))))      # true
 
     # Perf sanity: a 20k-field row parses fast (would hang under the old O(n^2) per-char slice).

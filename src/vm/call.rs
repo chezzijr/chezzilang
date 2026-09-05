@@ -3132,34 +3132,34 @@ impl Vm {
                     // gap #7: safe numeric parse — None on bad input (trims like int()/float()).
                     "to_int" => {
                         self.arity_err("to_int", args, 0, span)?;
-                        match s.trim().parse::<i64>() {
-                            Ok(n) => {
+                        match strip_num_underscores(s.trim()).and_then(|t| t.parse::<i64>().ok()) {
+                            Some(n) => {
                                 let nv = self.make_int(n);
                                 Ok(self.alloc_enum("Option", "Some", vec![nv]))
                             }
-                            Err(_) => Ok(self.alloc_enum("Option", "None", vec![])),
+                            None => Ok(self.alloc_enum("Option", "None", vec![])),
                         }
                     }
                     "to_float" => {
                         self.arity_err("to_float", args, 0, span)?;
-                        match s.trim().parse::<f64>() {
-                            Ok(f) => {
+                        match strip_num_underscores(s.trim()).and_then(|t| t.parse::<f64>().ok()) {
+                            Some(f) => {
                                 let fv = self.box_float(f);
                                 Ok(self.alloc_enum("Option", "Some", vec![fv]))
                             }
-                            Err(_) => Ok(self.alloc_enum("Option", "None", vec![])),
+                            None => Ok(self.alloc_enum("Option", "None", vec![])),
                         }
                     }
                     // Result-returning parse siblings of to_int/to_float — carry a human-readable
                     // Err(msg) instead of None (trims first, like int()/float()/to_int/to_float).
                     "parse_int" => {
                         self.arity_err("parse_int", args, 0, span)?;
-                        match s.trim().parse::<i64>() {
-                            Ok(n) => {
+                        match strip_num_underscores(s.trim()).and_then(|t| t.parse::<i64>().ok()) {
+                            Some(n) => {
                                 let nv = self.make_int(n);
                                 Ok(self.alloc_enum("Result", "Ok", vec![nv]))
                             }
-                            Err(_) => {
+                            None => {
                                 let msg =
                                     self.alloc_str(format!("cannot parse '{s}' as an integer"));
                                 Ok(self.alloc_enum("Result", "Err", vec![msg]))
@@ -3168,12 +3168,12 @@ impl Vm {
                     }
                     "parse_float" => {
                         self.arity_err("parse_float", args, 0, span)?;
-                        match s.trim().parse::<f64>() {
-                            Ok(f) => {
+                        match strip_num_underscores(s.trim()).and_then(|t| t.parse::<f64>().ok()) {
+                            Some(f) => {
                                 let fv = self.box_float(f);
                                 Ok(self.alloc_enum("Result", "Ok", vec![fv]))
                             }
-                            Err(_) => {
+                            None => {
                                 let msg = self.alloc_str(format!("cannot parse '{s}' as a float"));
                                 Ok(self.alloc_enum("Result", "Err", vec![msg]))
                             }

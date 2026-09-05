@@ -6,20 +6,25 @@
 # This replaces the old numeric-only `std.math.min`/`max` (the gap-#12 ad-hoc int/float overload)
 # with one real, extensible implementation.
 
-# The larger of `a` and `b`. On a tie (neither is smaller) returns the first argument, `a`.
+# The larger of `a` and `b`. On a tie (neither is smaller) returns the first argument, `a`
+# — matches `min`, and is Python's rule, so a `NaN` operand propagates.
 fn max[T: Comparable](a: T, b: T) -> T:
     if a < b:
         return b
     return a
 
-# The smaller of `a` and `b`. On a tie returns the second argument, `b`.
+# The smaller of `a` and `b`. On a tie (neither is smaller) returns the first argument, `a`
+# — Python's rule, so a `NaN` operand propagates.
 fn min[T: Comparable](a: T, b: T) -> T:
-    if a < b:
-        return a
-    return b
+    if b < a:
+        return b
+    return a
 
-# `x` clamped to the inclusive range `[lo, hi]` (assumes `lo <= hi`).
+# `x` clamped to the inclusive range `[lo, hi]`. Faults when `lo > hi` (Rust `clamp` panics there
+# too).
 fn clamp[T: Comparable](x: T, lo: T, hi: T) -> T:
+    if hi < lo:
+        panic("cmp.clamp: inverted bounds (lo > hi)")
     if x < lo:
         return lo
     if hi < x:

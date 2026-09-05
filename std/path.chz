@@ -227,12 +227,21 @@ fn stem(p: PathLike) -> Path:
     return Path(b[0 : b.len() - e.len()])
 
 # Replace the final extension of `p` with `e`. `e` is normalized to exactly one leading dot when
-# non-empty ("md" and ".md" both yield ".md"); an empty `e` strips the extension.
+# non-empty ("md" and ".md" both yield ".md"); a run of leading dots collapses to one ("..d" -> ".d");
+# an empty `e` strips the extension. Faults on an extension that is all dots or contains a path
+# separator (CPython `PurePath.with_suffix` raises `ValueError: Invalid suffix` there).
 #   with_ext("a/b.txt", ".md") -> "a/b.md" · with_ext("a/b", ".md") -> "a/b.md" ·
 #   with_ext("a/b.txt", "") -> "a/b" · with_ext("a/b.txt", "md") -> "a/b.md"
 fn with_ext(p: PathLike, e: PathLike) -> Path:
-    ne := e.as_path()
-    if ne.len() > 0 and ne[0] != DOT:
+    raw := e.as_path()
+    ne := raw
+    if ne.len() > 0:
+        k := 0
+        while k < ne.len() and ne[k] == DOT:
+            k += 1
+        ne = ne[k : ne.len()]
+        if ne.len() == 0 or _last_idx(ne, SEP) >= 0:
+            panic("with_ext: invalid extension: '" + Path(raw).str() + "'")
         ne = _cat(b".", ne)
     d := dirname(p).bytes()
     newbase := _cat(stem(p).bytes(), ne)

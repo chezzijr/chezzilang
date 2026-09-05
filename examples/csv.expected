@@ -9,6 +9,6 @@ trail_rows: 1
 blank_mid: 3
 fmt_empty: ''
 trail_rt: true
-sole_fmt: 2
+sole_fmt: 4
 sole_rt: true
 big_fields: 20001

@@ -17,11 +17,12 @@
 # * SPACES are significant — never trimmed (leading/trailing spaces are ordinary chars).
 # * A trailing record separator does NOT produce a spurious empty final record.
 # * EMPTY input -> [] (empty list); format([]) -> "".
-# * BLANK line -> a single-empty-field record [""] (this is what round-trips through format's field
-#   model). NOTE: this differs from Python's csv, which maps a blank line to [] (an empty record) —
-#   chosen so parse(format(rows)) == rows holds.
-# * ROUND-TRIP is TOTAL: format TERMINATES each record with CRLF (not separator-joins), so a sole or
-#   trailing empty record `[""]` round-trips too (format([[""]]) == "\r\n", parse("\r\n") == [[""]]).
+# * BLANK line -> an EMPTY record [] (CPython csv.reader parity). format encodes a
+#   single-empty-field record `[""]` as a quoted empty field (`""`) so the two shapes stay distinct
+#   on the wire — this is what makes the round-trip below total.
+# * ROUND-TRIP is TOTAL: format TERMINATES each record with CRLF (not separator-joins), and quotes a
+#   single-empty-field record as `""`, so format([[]]) == "\r\n" / parse("\r\n") == [[]], while
+#   format([[""]]) == "\"\"\r\n" / parse("\"\"\r\n") == [[""]] — parse(format(rows)) == rows always.
 #
 # ponytail: no streaming/Reader, no header->Map mapping, no custom-delimiter/TSV arg (v1 YAGNI).
 # A `sep` param would thread through both the parser branch and needs_quote and complicate the
@@ -75,7 +76,8 @@ fn parse(text: str) -> List[List[str]]:
                 field_start = true
                 i += 1
             elif c == "\r":
-                row.push("".join(field))
+                if started:
+                    row.push("".join(field))
                 field = []
                 rows.push(row)
                 row = []
@@ -86,7 +88,8 @@ fn parse(text: str) -> List[List[str]]:
                 else:
                     i += 1
             elif c == "\n":
-                row.push("".join(field))
+                if started:
+                    row.push("".join(field))
                 field = []
                 rows.push(row)
                 row = []
@@ -122,6 +125,9 @@ fn format(rows: List[List[str]]) -> str:
         fields: List[str] = []
         for field in row:
             fields.push(quote_field(field))
-        parts.push(",".join(fields))
+        if row.len() == 1 and row[0] == "":
+            parts.push("\"\"")
+        else:
+            parts.push(",".join(fields))
         parts.push("\r\n")
     return "".join(parts)
