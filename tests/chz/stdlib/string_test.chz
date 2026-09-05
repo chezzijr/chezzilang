@@ -6,6 +6,19 @@
 # Run: `cargo run -- test tests/chz/`. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 
 import std.string
+import std.time
+
+# `replace` built its output with `out = out + c` per codepoint (O(n) copy each), so it is O(n^2)
+# in the length of the haystack (W10-22, TICKET-068). 8 000 x's replaced one-for-one measured
+# ~0.85s debug / pre-fix on this branch; a linear builder does it in well under 100ms. The bound
+# below is wall-clock but hugely discriminating, not tight (same convention as cancel_test.chz).
+test fn replace_large_input_is_not_quadratic():
+    n := 8000
+    t0 := time.monotonic()
+    r := string.replace("x".repeat(n), "x", "y")
+    d := time.monotonic() - t0
+    assert r == "y".repeat(n)
+    assert d < 0.3, "string.replace({n} chars) took {d}s, expected < 0.3s"
 
 test fn repeat_contract_unchanged():
     assert string.repeat("ab", 3) == "ababab"
