@@ -124,33 +124,41 @@ struct Parser:
     fn parse_string(self) -> Result[str]:
         open_quote := self.pos
         self.pos += 1                       # consume the opening quote
-        out := ""
+        parts: List[str] = []
+        run := self.pos
         while true:
             if self.pos >= self.len:
                 # The OPENING quote: CPython's json.loads and docs/gaps.md M24-7 both point an
                 # unterminated delimiter at its opener.
                 return Err(self.at_pos("unterminated string", open_quote))
-            c := self.bump()
+            c := self.src[self.pos]
             if c == "\"":
-                return Ok(out)
+                if run < self.pos:
+                    parts.push("".join(self.src[run : self.pos]))
+                self.pos += 1
+                return Ok("".join(parts))
             if c == "\\":
+                if run < self.pos:
+                    parts.push("".join(self.src[run : self.pos]))
+                self.pos += 1
                 e := self.bump()
                 match e:
-                    "\"": out = out + "\""
-                    "\\": out = out + "\\"
-                    "/": out = out + "/"
-                    "n": out = out + "\n"
-                    "t": out = out + "\t"
-                    "r": out = out + "\r"
-                    "b": out = out + chr(8)
-                    "f": out = out + chr(12)
-                    "u": out = out + self.parse_unicode()?
+                    "\"": parts.push("\"")
+                    "\\": parts.push("\\")
+                    "/": parts.push("/")
+                    "n": parts.push("\n")
+                    "t": parts.push("\t")
+                    "r": parts.push("\r")
+                    "b": parts.push(chr(8))
+                    "f": parts.push(chr(12))
+                    "u": parts.push(self.parse_unicode()?)
                     _: return Err(self.at_pos("invalid escape '\\" + e + "'", self.pos - 1))
+                run = self.pos
             elif ord(c) < 32:
                 # RFC-8259: raw control chars U+0000..U+001F must be `\u`-escaped, never literal.
-                return Err(self.at_pos("invalid control character in string", self.pos - 1))
+                return Err(self.at_pos("invalid control character in string", self.pos))
             else:
-                out = out + c
+                self.pos += 1
 
     # A `\uXXXX` escape, combining a high+low surrogate pair into one codepoint.
     fn parse_unicode(self) -> Result[str]:
@@ -219,9 +227,7 @@ struct Parser:
                 exp += 1
             if exp == 0:
                 return Err(self.at_pos("invalid number: digits required in exponent", exp_at))
-        raw := ""
-        for i in start..self.pos:
-            raw = raw + self.src[i]
+        raw := "".join(self.src[start : self.pos])
         if is_int:
             match raw.to_int():
                 Some(i): return Ok(Json.Int(i))
@@ -322,28 +328,41 @@ fn escape(s: str) -> str:
     # / RFC-8259 policy); emitting the raw byte would produce invalid JSON that `json.parse`
     # (and Python) reject as an "invalid control character".
     hex := "0123456789abcdef"
-    out := "\""
-    for c in s:
+    cs := s.chars()
+    end := cs.len()
+    parts: List[str] = ["\""]
+    run := 0
+    i := 0
+    while i < end:
+        c := cs[i]
         n := ord(c)
-        if c == "\"":
-            out = out + "\\\""
-        elif c == "\\":
-            out = out + "\\\\"
-        elif n == 10:
-            out = out + "\\n"
-        elif n == 9:
-            out = out + "\\t"
-        elif n == 13:
-            out = out + "\\r"
-        elif n == 8:
-            out = out + "\\b"
-        elif n == 12:
-            out = out + "\\f"
-        elif n < 32:
-            out = out + "\\u00" + hex[n / 16] + hex[n % 16]
+        if n >= 32 and c != "\"" and c != "\\":
+            i += 1
         else:
-            out = out + c
-    return out + "\""
+            if run < i:
+                parts.push("".join(cs[run : i]))
+            if c == "\"":
+                parts.push("\\\"")
+            elif c == "\\":
+                parts.push("\\\\")
+            elif n == 10:
+                parts.push("\\n")
+            elif n == 9:
+                parts.push("\\t")
+            elif n == 13:
+                parts.push("\\r")
+            elif n == 8:
+                parts.push("\\b")
+            elif n == 12:
+                parts.push("\\f")
+            else:
+                parts.push("\\u00" + hex[n / 16] + hex[n % 16])
+            i += 1
+            run = i
+    if run < end:
+        parts.push("".join(cs[run : end]))
+    parts.push("\"")
+    return "".join(parts)
 
 # Render a `Json.Num` float. `Json.Int` (a separate variant) covers the integer case, so a `Num`
 # always renders as a float — CPython prints `3.0` for `json.dumps(3.0)` and `3` for
@@ -380,23 +399,27 @@ fn stringify_depth(j: Json, depth: int) -> str:
         Json.Num(n): return num_str(n)
         Json.Str(s): return escape(s)
         Json.Arr(xs):
-            out := "["
+            parts: List[str] = ["["]
             first := true
             for x in xs:
                 if not first:
-                    out = out + ","
-                out = out + stringify_depth(x, depth + 1)
+                    parts.push(",")
+                parts.push(stringify_depth(x, depth + 1))
                 first = false
-            return out + "]"
+            parts.push("]")
+            return "".join(parts)
         Json.Obj(m):
-            out := "{{"
+            parts: List[str] = ["{{"]
             first := true
             for k in m.keys():
                 if not first:
-                    out = out + ","
-                out = out + escape(k) + ":" + stringify_depth(m[k], depth + 1)
+                    parts.push(",")
+                parts.push(escape(k))
+                parts.push(":")
+                parts.push(stringify_depth(m[k], depth + 1))
                 first = false
-            return out + "}}"
+            parts.push("}}")
+            return "".join(parts)
 
 # ----- accessors -----------------------------------------------------------------------------
 # (Enums can't carry methods yet, so these are free functions: `json.as_int(j)`.)

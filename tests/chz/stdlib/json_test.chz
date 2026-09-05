@@ -10,13 +10,18 @@
 import std.json
 import std.time
 
-# `parse_string` and the stringify escape path build output with `out = out + c` per codepoint
-# (O(n) copy each), so both are O(n^2) in string length (W10-22, TICKET-068). 40 000 x's measured
-# ~0.79s (parse) / ~0.38s (stringify) debug / pre-fix on this branch; a linear builder does both in
-# well under 200ms. The bound below is wall-clock but hugely discriminating, not tight (same
+# `parse_string` and the stringify escape path used to build output with `out = out + c` per
+# codepoint (O(n) copy each), so both were O(n^2) in string length (W10-22, TICKET-068), fixed by
+# building into a `List[str]` and calling `"".join` once. The bound is sized for the DEBUG profile:
+# `cargo test` runs `tests/chz` in-process against the debug library (`tests/chz_suite.rs:24`),
+# where the fixed path is slower than release. At n=150 000, measured 2026-09-06: release base
+# 6.390s / 6.377s, release fixed 0.0925s / 0.0713s, debug fixed 0.731s / 0.569s -- so `< 2.0s`
+# clears the fixed debug run with headroom while the pre-fix release binary still misses it 3x
+# over. n=200 000 is deliberately avoided: the pre-fix release binary did not finish a 200 000-char
+# parse in 600s. The bound below is wall-clock but hugely discriminating, not tight (same
 # convention as cancel_test.chz).
 test fn parse_large_string_is_not_quadratic():
-    n := 100000
+    n := 150000
     doc := "\"" + "x".repeat(n) + "\""
     t0 := time.monotonic()
     r := json.parse(doc)
@@ -24,15 +29,15 @@ test fn parse_large_string_is_not_quadratic():
     match r:
         Ok(_): assert true
         Err(e): assert false, "expected Ok: " + e.message()
-    assert d < 0.5, "json.parse({n}-char string) took {d}s, expected < 0.5s"
+    assert d < 2.0, "json.parse({n}-char string) took {d}s, expected < 2.0s"
 
 test fn stringify_large_string_is_not_quadratic():
-    n := 100000
+    n := 150000
     t0 := time.monotonic()
     out := json.stringify(Json.Str("x".repeat(n)))
     d := time.monotonic() - t0
     assert out.len() == n + 2
-    assert d < 0.5, "json.stringify({n}-char string) took {d}s, expected < 0.5s"
+    assert d < 2.0, "json.stringify({n}-char string) took {d}s, expected < 2.0s"
 
 test fn parse_at_depth_limit_still_ok():
     doc := "[".repeat(2000) + "]".repeat(2000)
