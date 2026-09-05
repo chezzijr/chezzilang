@@ -2320,6 +2320,26 @@ void* mkrec(void) { static struct R r = { -3, 70000, 2.5 }; return &r; }
     }
 
     #[test]
+    fn str_arg_backing_cstring_must_outlive_a_ptr_returned_into_it() {
+        // TICKET-060: `Cffi::call` frees the `CString` marshalled for a `str` param when the extern
+        // call returns (`cstrings`, built at the `CType::Str` arm, dropped at the end of `call`). Any
+        // C fn that returns a pointer INTO its `str` argument (`strchr` here) hands Chezzi a `ptr`
+        // that dangles the instant `call` returns -- `ffi.load_str` on it then reads freed memory.
+        // The corrupted content is heap-layout-dependent (varies run to run, confirmed non-`" world"`
+        // over 10+ runs), so this asserts against the CORRECT value with a fixed custom message
+        // rather than the (unstable) garbage `Cffi::call` currently produces.
+        let src = "import std.ffi\nimport int32 from std.ffi\nextern \"libc\":\n    fn strchr(s: str, c: int32) -> ptr\np := strchr(\"hello world\", 32)\nprint(ffi.load_str(p))\n";
+        let entry = write_deref_chz(src);
+        let (out, _e, res, _) = crate::vm::run_file(&entry);
+        let _ = std::fs::remove_file(&entry);
+        assert!(res.is_ok(), "faulted: {res:?}");
+        assert_eq!(
+            out, " world\n",
+            "a ptr returned into a str argument must not dangle once the extern call returns"
+        );
+    }
+
+    #[test]
     fn callback_panic_is_caught_and_reraised() {
         // A callback that PANICS must be caught by the trampoline's catch_unwind (no unwind into the
         // C frames / abort) and re-raised as the extern call's error.
