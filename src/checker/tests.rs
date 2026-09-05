@@ -8238,6 +8238,25 @@ fn if_expression_int_float_const_mix_widens() {
 }
 
 #[test]
+fn w10_2_bool_match_both_arms_no_wildcard_is_exhaustive() {
+    // W10-2: `bool` has exactly two values; a match with both `true` and `false` arms is
+    // exhaustive without a `_`, like Rust's `match c { true => .., false => .. }`. The checker's
+    // literal-exhaustiveness path currently treats `bool` like `int`/`str` (infinite domain) and
+    // always demands a `_`, which is false for `bool`.
+    ok(
+        "fn f(c: bool) -> str:\n    match c:\n        true: return \"t\"\n        false: return \"f\"\n",
+    );
+}
+
+#[test]
+fn w10_4_type_alias_resolves_in_enum_variant_pattern() {
+    // W10-4: a `type` alias must be usable in pattern position, not just type position.
+    ok(
+        "enum E:\n    A(int)\n    B\ntype F = E\ny: F = E.A(5)\nmatch y:\n    F.A(n): print(n)\n    F.B: print(\"b\")\n",
+    );
+}
+
+#[test]
 fn match_expression_int_float_const_mix_widens() {
     ok("x := match true:\n    true: 1\n    _: 2.5\ny := x + 0.5\n");
 }
