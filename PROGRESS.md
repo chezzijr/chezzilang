@@ -7,6 +7,14 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **Bug-hunt wave 10 (2026-09-05) — 26 confirmed findings, `W10-1..W10-26` in `docs/gaps.md`, filed as
+  TICKET-060..069 (pipeline queue, unattended overnight).** Same six domains as wave 9, ~400 probes;
+  every candidate re-run on the release binary at two worker counts, 30 → 26 confirmed. Headline: a
+  **P0 FFI use-after-free** (W10-6, a `ptr` returned into a `str` arg dangles), a child fault MASKED by
+  the owner's deadlock verdict (W10-16), `x := None` never pinned (W10-5, the write shape W8-46's
+  read-only measurement missed), five test-runner PASS/diagnostic-loss rows (W10-9..13), and quadratic
+  `std.json`/`std.string.replace` builders (W10-22). W10-19 documented in place; regex dialect list
+  gained its fifth RE2 difference. Read the wave-10 session log in `docs/gaps.md` before working any row.
 - **Bug-hunt wave 9 (2026-09-03/05) — 8 findings, all 8 fixed, merged and post-merge verified; ledger
   rows `W9-1..W9-9` in `docs/gaps.md`.** Six agents over disjoint domains, ~450 probe programs, each
   finding re-run on the release binary before filing and each fix re-run on the MERGED binary rather

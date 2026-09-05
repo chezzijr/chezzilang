@@ -1017,7 +1017,7 @@ recommended spelling for a pattern, because it also keeps every backslash litera
 doubled backslash is still a trap next to `r"\d+"`, even though the brace half of the trap is gone.
 (`docs/gaps.md` **W8-1**.)
 
-**The dialect is RE2 (the Rust `regex` crate), not Python's `re`.** Four differences bite in order of
+**The dialect is RE2 (the Rust `regex` crate), not Python's `re`.** Five differences bite in order of
 how often:
 
 - **Replacement is `$1` / `${name}`, Rust-style — Python's `\1` is REJECTED, not silently
@@ -1038,6 +1038,9 @@ how often:
 - **`split` drops capture groups, Python keeps them**: `split(r"(,)", "a,b")` → `Ok(['a', 'b'])` where
   `re.split` gives `['a', ',', 'b']`. Named groups `(?<name>…)` may be *written* but there is no
   read-by-name accessor — index `Match.groups` positionally.
+- **An empty match abutting the previous match is dropped** (RE2/Go/Rust rule): `find_all(r"a*", "baaa")`
+  → `['', 'aaa']` where Python gives `['', 'aaa', '']`; `replace_all(r"a*", "baaab", "-")` → `-b-b-` vs
+  Python's `-b--b-`; and `a$` does not match before a trailing `\n` (Python's `$` does). (W10, 2026-09-05.)
 
 ### `std.request`
 Returns use `struct Response { status: int, body: str, headers: Map[str, str] }` (header names

@@ -202,7 +202,8 @@ Right now: **pre-JIT/pre-freeze bug-hunt + drift-fix hunt** is the active phase 
 checker↔runtime, and IO drift — live ledger in `docs/gaps.md`), with **M19 — Perf track** paused
 in-progress alongside it.
 
-> **START HERE (2026-09-05): `docs/gaps.md` — 3 open rows, `W8-17`, `W8-19` and `W9-9`.**
+> **START HERE (2026-09-05): `docs/gaps.md` — 29 open rows: `W8-17`, `W8-19`, `W9-9`, and bug-hunt wave 10's
+> `W10-1..W10-26` (TICKET-060..069 queued in the pipeline; read the wave-10 session log first).**
 > **Bug-hunt wave 9 (2026-09-03/05) closed `W9-1..W9-8`** — all eight fixed, merged and re-verified on
 > the merged binary (TICKET-051..058); read its session log before working this area, and read
 > **`W9-5`** before filing anything about a name collision: that ticket's premise contradicted an

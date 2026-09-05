@@ -1382,6 +1382,9 @@ for k in m.keys():         # runs ONCE. Chezzi: 1 visit, m.len() ends at 2, rc=0
 # The snapshot means the mutation is SAFE (no fault, no aliasing bug) — it is just INVISIBLE to this
 # loop. Collect the additions and apply them after the loop if you need to see them. Same rule for a
 # `.iter()` cursor (below) and for the callback methods listed under "snapshotting" in stdlib.md.
+# The snapshot holds the element VALUES, not the slots: overwriting an existing slot in the body
+# (`xs[2] = 30`, `m["b"] = 99`) is likewise invisible to this loop, while mutating a struct element
+# in place (`ps[1].v = 20`) IS visible. CPython and Go both read `xs[i]` live here (W10-19).
 
 # A user struct is iterable too: give it `next(self) -> Option[T]` and `for` drives it lazily,
 # calling next() each step until it returns None (so an infinite iterator + `break` terminates).
