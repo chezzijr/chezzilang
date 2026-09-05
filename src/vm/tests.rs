@@ -5022,6 +5022,104 @@ main()
     }
 }
 
+/// gaps.md W10-16 — a child task's fault must outrank a synthesized `Deadlocked` verdict for the
+/// nursery OWNER parked on a channel `recv`, exactly as `reduce_task_slots` already ranks
+/// `Exit` > `Fault` > `Deadlocked` for SIBLING slots (W7-47). Today the owner-parked path bypasses
+/// that ranking: the owner's parked `recv` synthesizes `deadlock` and the child's real fault
+/// (`task died`) never surfaces. Go (`panic: task died`) is the oracle.
+#[test]
+fn w10_16_owner_parked_recv_reports_child_fault_not_deadlock() {
+    let src = "\
+fn main():
+    ch := Channel[int]()
+    parallel:
+        spawn:
+            panic(\"task died\")
+        print(ch.recv())
+
+main()
+";
+    let entry = write_temp_chz("w10_16_owner_parked", src);
+    let run_entry = entry.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_file_with(
+            &run_entry,
+            crate::native::HostConfig::default(),
+        ));
+    });
+    let result = rx.recv_timeout(std::time::Duration::from_secs(30));
+    let _ = std::fs::remove_file(&entry);
+    match result {
+        Ok((_out, _err, res, _code)) => match res {
+            Err(e) => {
+                let s = format!("{e:?}");
+                assert!(
+                    s.contains("task died"),
+                    "owner-parked recv should report the child's fault \"task died\", got: {s}"
+                );
+                assert!(
+                    !s.contains("deadlock"),
+                    "owner-parked recv should not synthesize deadlock when a sibling faulted, got: {s}"
+                );
+            }
+            Ok(()) => panic!("w10_16: expected the child's fault to propagate, program succeeded"),
+        },
+        Err(_) => panic!("hung — w10_16 owner-parked-recv-vs-child-fault regressed"),
+    }
+}
+
+/// gaps.md W10-1 — a main-task `recv` inside a native re-entry (here: a generator resume) must not
+/// fault `deadlock` while a live sibling can still send. `can_block_in_place` (`src/vm/netio.rs`)
+/// requires `is_counted_party`, which requires `native_reentry == 0`, so main-in-callback falls to
+/// the "fault, as before" arm even though the sender is alive. Go (main goroutine pulling through a
+/// closure) prints `0 1 2`. The no-sender case (`d5_owe3_path_c_recv_in_callback_no_sender_still_deadlocks`)
+/// must stay green — a genuinely unsendable recv must still fault deadlock.
+#[test]
+fn w10_1_main_recv_in_generator_resume_with_live_sender_does_not_deadlock() {
+    let src = "\
+fn g(ch: Channel[int]):
+    while true:
+        v := ch.recv()
+        if v < 0:
+            return
+        yield v
+
+fn main():
+    ch := Channel[int]()
+    parallel:
+        spawn:
+            for i in 0..3:
+                ch.send(i)
+            ch.send(-1)
+        for x in g(ch):
+            print(x)
+
+main()
+";
+    let entry = write_temp_chz("w10_1_main_recv_in_gen", src);
+    let run_entry = entry.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_file_with(
+            &run_entry,
+            crate::native::HostConfig::default(),
+        ));
+    });
+    let result = rx.recv_timeout(std::time::Duration::from_secs(30));
+    let _ = std::fs::remove_file(&entry);
+    match result {
+        Ok((out, _err, res, _code)) => {
+            assert!(
+                res.is_ok(),
+                "main recv inside generator resume faulted with a live sender: {res:?}"
+            );
+            assert_eq!(out, "0\n1\n2\n");
+        }
+        Err(_) => panic!("hung — w10_1 main-recv-in-native-reentry regressed"),
+    }
+}
+
 /// gaps.md W8-7 hang regression — DEMOTE x YIELD. A `recv` inside a native `xs.map` callback demotes
 /// the worker (`demote_recv_block` blocks it in place, spinning a REPLACEMENT thread that covers its
 /// `wid`); at demote time `runnable == 0`, so that replacement typically parks straight into
