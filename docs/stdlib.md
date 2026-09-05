@@ -183,7 +183,11 @@ re-implementing the loop, so a huge `n`/`width` raises the same recoverable `str
 overflow` / `string pad capacity overflow` fault either way. Before that, only the native method could
 probe the allocator: the free fns grew a string in a `while` loop until the process died (`repeat`) or
 hung indefinitely (`pad_left`, measured still running at 15s). `tests/chz/stdlib/fault_contracts_test.chz`
-pins both spellings against each other so they cannot drift apart again.
+pins both spellings against each other so they cannot drift apart again. As of 2026-09-06, `replace`
+delegates too (TICKET-068 — its hand-written loop was quadratic on two axes: `out = out + ...` and a
+per-position codepoint-vector re-collect on `s[i : i + m]`). The empty-`old` rule (`replace(s, "", x)`
+returns `s` unchanged) now lives ONLY in the native arm (`src/vm/call.rs:2982`), so editing that arm to
+match CPython's interleaving behavior changes both spellings, and `std/csv.chz`'s quote-doubling with it.
 
 ### `List[T]`
 | Method | Signature | Notes |

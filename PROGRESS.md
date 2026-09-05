@@ -7,6 +7,19 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-068 (2026-09-06) — three quadratic stdlib builders fixed (`docs/gaps.md` W10-22).**
+  `std/json.chz`'s `Parser.parse_string`, `parse_number`'s `raw`, `escape`, and `stringify_depth`'s
+  `Json.Arr`/`Json.Obj` arms built their output with `out = out + c` per codepoint (O(n) copy each,
+  O(n^2) overall); all four now build into a `List[str]` and call `"".join` once. `std/string.chz`'s
+  `replace` had a second quadratic axis (`s[i : i + m]` re-collects the whole codepoint vector per
+  position) and now delegates to the native `str.replace` (`src/vm/call.rs:2978`), the same move
+  `repeat`/`pad_left` made 2026-08-18. Measured at 100 000 chars, release: `json.parse` 2.807s →
+  0.0615s, `json.stringify` 1.497s → 0.0488s, `string.replace` 11.625s → 0.0000224s. The two json
+  wall-clock ratchets in `tests/chz/stdlib/json_test.chz` re-sized from n=100 000/`<0.5s` to
+  n=150 000/`<2.0s`: `cargo test` runs `tests/chz` against the DEBUG library
+  (`tests/chz_suite.rs:24`), where the fixed parse is ~8x slower than release, so the original
+  release-sized bound had only 2.6% margin there.
+
 - **TICKET-060 (2026-09-05) — two FFI defects fixed (`docs/gaps.md` W10-6).** (1) A `ptr` returned
   into a `str` arg's marshalled `CString` used to dangle the instant the extern call returned (the
   buffer was freed unconditionally at the end of `Cffi::call`); `libc.strchr("hello world", 32)` then

@@ -11,6 +11,33 @@ justify lives in **[`future.md §4`](future.md)**; the scheduled work is roadmap
 > They are kept as the record of what was measured at the time; they are not reproducible on today's
 > binary, and "serial == M:N parity green" in an older section means the gate that existed then.
 
+## W10-22 — std.json and std.string.replace build output with a join, not per-codepoint concat — 2026-09-06
+
+`std/json.chz` (`parse_string`, `parse_number`'s `raw`, `escape`, `stringify_depth`'s `Arr`/`Obj`
+arms) and `std/string.chz`'s `replace` built their output with `out = out + c` inside a
+per-codepoint loop — an O(n) copy per iteration, O(n^2) overall. `replace` had a second quadratic
+axis: `s[i : i + m]` re-collects the whole codepoint vector per position (`src/vm/stmt.rs:473`).
+The fix builds into a `List[str]` and calls `"".join` once (`json.chz`, matching the existing
+`std/csv.chz:127` pattern); `replace` delegates to the native `str.replace` (`src/vm/call.rs:2978`),
+the same move `repeat`/`pad_left` made 2026-08-18.
+
+Measured on this box, base vs fixed, seconds:
+
+| n | path | release base | release fixed | debug base | debug fixed |
+|---|---|---|---|---|---|
+| 100 000 | `json.parse` | 2.807 | 0.0615 | 3.510 | 0.487 |
+| 100 000 | `json.stringify` | 1.497 | 0.0488 | 2.710 | 0.385 |
+| 100 000 | `string.replace` | 11.625 | 0.0000224 | 131.614 | 0.00098 |
+| 150 000 | `json.parse` | 6.390 | 0.0925 | 7.806 | 0.731 |
+| 150 000 | `json.stringify` | 6.377 | 0.0713 | 5.591 | 0.569 |
+| 200 000 | `json.parse` | >600 s, killed rc=143 | 0.123 | not measured | 0.992 |
+| 1 000 000 | `json.parse` | not measured | 0.6015 | not measured | 4.893 |
+| 1 000 000 | `json.stringify` | not measured | 0.4744 | not measured | 3.851 |
+
+Release base `json.parse` of a 200 000-char string did not finish under a 600 s cap and was killed
+(rc=143); the fixed path takes 0.123 s. Output is byte-identical base vs fixed over a 25-document
+JSON differential plus 20 `string.replace` cases, verified with `diff` (exit 0, no output).
+
 ## W8-34 — List.unique() is one pass over a hash index — 2026-08-29
 
 `List.unique()`'s `"unique"` arm called `seq_slot` (a linear scan of the growing output) once per
