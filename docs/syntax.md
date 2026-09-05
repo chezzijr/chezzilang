@@ -4365,7 +4365,9 @@ FFI-width license).
 Call C functions in a shared library directly, with full static type-checking. An `extern "lib":`
 block (indentation, not braces — `{` is a map literal) lists body-less C signatures; each becomes a
 module-global callable, bound at module init by `dlopen` + `dlsym` and dispatched at runtime via
-`libffi`. A missing library or symbol fails at startup.
+`libffi`. A missing library or symbol fails at startup. An extern fn exports like any other top-level
+`fn` — `mod.name(...)` and `import name from mod` both resolve it, and the binding is a first-class
+value like any other module member.
 
 > **The library name is passed straight to `dlopen`, unless it is one of the two LOGICAL aliases
 > `libc` / `libm`.** Those two resolve to a per-platform candidate list tried in order (Linux:
@@ -4442,7 +4444,9 @@ deferred to a later version.
 **Sync scalar callbacks (`fn(...)` extern params).** Pass a Chezzi closure to C as a C function
 pointer C calls *back* synchronously, during the extern call. Declare the param with the **existing**
 function-type spelling — `fn(scalars) -> scalar` (no new syntax) — restricted to C scalars
-(`int`/`float`/`bool`/`ptr`/`int8`..`uint64`; no `str`, struct, or nested callback):
+(`int`/`float`/`bool`/`ptr`/`int8`..`uint64`; no `str`, struct, or nested callback). The callback's
+**return** may also be `nil` (void, `fn(int) -> nil`) — the `foreach`/`twalk`-style shape, matching
+Python `ctypes.CFUNCTYPE(None, ...)` — while every **param** must still be a C scalar:
 
 ```chezzi
 extern "libapply.so":

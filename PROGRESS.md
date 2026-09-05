@@ -20,6 +20,23 @@ Single source of truth for "what am I doing next." Update after every work sessi
   the trampoline now short-circuits to a zeroed result once `ctx.fault` is set, and both fault stores
   keep the value already there. `cargo test --lib native::cffi::` was 43 passed/2 failed before, 50
   passed/0 failed after (5 new RED tests + 2 new mechanism tests).
+- **TICKET-061 (2026-09-05) — two FFI checker defects fixed (`docs/gaps.md` W10-7, W10-14).**
+  (1) A void-returning callback param (`fn(int) -> nil`) was rejected as not C-marshallable even
+  though `-> nil` was already accepted on the extern fn's own return; `assert_marshallable`'s callback
+  arm now accepts `nil` for the callback's RETURN slot only (a `nil` PARAM stays rejected — no `CType`
+  lowering exists for it), `resolve_ctype_d`'s `Type::Func` arm and `CType::Callback.ret` both became
+  `Option<Box<...>>` (`None` = void, mirroring `Cffi::ret`), and `callback_trampoline` now routes every
+  write into libffi's result buffer (four sites: ok, host-error, panic, and the TICKET-060
+  already-faulted short-circuit) through one gating closure that writes nothing for a void callback.
+  Measured: `extern "<libt.so>": fn each(n: int, f: fn(int) -> nil)` + `each(3, show)` prints `0\n1\n2\n`,
+  rc=0. (2) An extern fn was never reachable as a module member — `c.strlen(...)` and
+  `import strlen from c` both gave `module 'c' has no member 'strlen'` — because `capture_sig` had no
+  `StmtKind::Extern` arm; the runtime binding already existed (an extern fn is a module global like
+  any `fn`), so this was checker-only. Fixed with one arm mirroring the `StmtKind::Fn` case, writing
+  only `sig.functions`. Measured: `c.chz` declares `extern "libc.so.6": fn strlen(s: str) -> int`;
+  `main.chz`'s `print(c.strlen("abc"))` and `print(strlen("abcd"))` print `3` then `4`, rc=0.
+  `cargo test --lib` was 4493 passed/2 failed/2 ignored before, 4498 passed/0 failed/2 ignored after
+  (5 new tests: an over-widening guard, 3 new RED repros, 1 new mechanism test).
 - **Bug-hunt wave 10 (2026-09-05) — 26 confirmed findings, `W10-1..W10-26` in `docs/gaps.md`, filed as
   TICKET-060..069 (pipeline queue, unattended overnight).** Same six domains as wave 9, ~400 probes;
   every candidate re-run on the release binary at two worker counts, 30 → 26 confirmed. Headline: a
