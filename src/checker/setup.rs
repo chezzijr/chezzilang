@@ -1897,6 +1897,18 @@ impl Checker {
                         sig.functions.insert(decl.name.clone(), fsig.clone());
                     }
                 }
+                // An extern fn is a module global exactly like a top-level `fn` (the compiler binds
+                // it into the module's global slot: `src/compiler/mod.rs` reserves the slot and emits
+                // `MakeCffi` + `DefineGlobalSlot`), so it exports the same way — `c.strlen` /
+                // `import strlen from c` resolve through `sig.functions`, never `sig.types`/`values`
+                // (an extern fn is not a type, so it must not enter the ctor-shadowing path).
+                StmtKind::Extern { fns, .. } => {
+                    for ef in fns {
+                        if let Some(fsig) = self.functions.get(&ef.name) {
+                            sig.functions.insert(ef.name.clone(), fsig.clone());
+                        }
+                    }
+                }
                 StmtKind::Let {
                     names, is_const, ..
                 } => {
@@ -3912,17 +3924,21 @@ impl Checker {
         if ok {
             return;
         }
-        // A sync scalar callback (callbacks #4): a function-typed PARAM whose every param and its
-        // return is a C scalar (`int`/`float`/`bool`/`ptr`; widths resolve to those). PARAM-ONLY — a
-        // function-typed RETURN (`allow_void`) is rejected (no C marshalling for a returned function
-        // pointer in v1). A non-scalar part (str/struct/nested callback/void return) falls through to
-        // the uniform error below, which names the offending function type.
+        // A sync scalar callback (callbacks #4): a function-typed PARAM whose every param is a C
+        // scalar (`int`/`float`/`bool`/`ptr`; widths resolve to those). PARAM-ONLY — a function-typed
+        // RETURN (`allow_void`) is rejected (no C marshalling for a returned function pointer in v1).
+        // A non-scalar part (str/struct/nested callback) falls through to the uniform error below,
+        // which names the offending function type.
+        //
+        // The callback's own RETURN slot additionally accepts `nil` (void) — mirroring the top-level
+        // `allow_void` split above, but scoped to the return only: a `nil` callback PARAM has no
+        // `CType` lowering and would panic the backend's `ctype_of`, so it stays rejected.
         if let Ty::Func { params, ret, .. } = ty
             && !allow_void
         {
             let part_ok =
                 |t: &Ty| matches!(t, Ty::Int | Ty::Float | Ty::Bool | Ty::Ptr | Ty::Unknown);
-            if params.iter().all(part_ok) && part_ok(ret) {
+            if params.iter().all(part_ok) && (part_ok(ret) || matches!(**ret, Ty::Nil)) {
                 return;
             }
         }

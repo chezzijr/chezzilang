@@ -116,7 +116,10 @@ pub enum CType {
     /// plain `void*` to libffi, so `ffi_type` is `Type::pointer()`.
     Callback {
         params: Vec<CType>,
-        ret: Box<CType>,
+        /// `None` means VOID (`-> nil`), exactly like [`Cffi::ret`] — there is no `CType::Void`
+        /// variant (see that field's doc). `callback_trampoline` must skip EVERY `write_c_result`
+        /// site when this is `None`: libffi documents a void closure's result buffer as garbage.
+        ret: Option<Box<CType>>,
     },
 }
 
@@ -466,7 +469,9 @@ struct TrampolineCtx<'h> {
     host: Option<*mut (dyn Host + 'h)>,
     arg_index: usize,
     params: *const [CType],
-    ret: *const CType,
+    /// `None` means the callback's return is VOID — the trampoline must not write into libffi's
+    /// result buffer at all (see [`CType::Callback`]'s `ret` doc).
+    ret: Option<*const CType>,
     fault: *mut Option<HostError>,
 }
 
@@ -711,8 +716,20 @@ unsafe extern "C" fn callback_trampoline(
     };
     // SAFETY: `ctx.params` is a slice pointer into the live `Cffi`'s signature (valid for the call).
     let params: &[CType] = unsafe { &*ctx.params };
-    // SAFETY: `ctx.ret` points at the live callback return CType.
-    let ret_ct: &CType = unsafe { &*ctx.ret };
+    // SAFETY: `ctx.ret` (when `Some`) points at the live callback return CType. `None` means the
+    // callback's return is VOID.
+    let ret_ct: Option<&CType> = ctx.ret.map(|p| unsafe { &*p });
+    // Every write into libffi's result buffer for this call MUST go through this closure: a void
+    // callback (`ret_ct: None`) writes NOTHING — libffi documents that buffer as garbage for a void
+    // closure. One closure, one gate, for all four outcomes below (already-faulted short-circuit,
+    // ok, host-error, panic).
+    let write = |v: &NativeRet| {
+        if let Some(ct) = ret_ct {
+            // SAFETY: `result` is libffi's rvalue buffer (>= register width, aligned); `ct` is the
+            // declared return width.
+            unsafe { write_c_result(result, ct, v) };
+        }
+    };
 
     // TICKET-060: this extern call is already doomed once a fault is stashed -- its error is
     // re-raised when `ffi_call` returns -- but C does not know that and keeps calling (libc `qsort`
@@ -722,7 +739,7 @@ unsafe extern "C" fn callback_trampoline(
     // SAFETY: `ctx.fault` is live per the `armed` + owner-thread guards above; only the owning thread
     // touches it.
     if unsafe { (*ctx.fault).is_some() } {
-        unsafe { write_c_result(result, ret_ct, &NativeRet::Int(0)) };
+        write(&NativeRet::Int(0));
         return;
     }
 
@@ -746,13 +763,11 @@ unsafe extern "C" fn callback_trampoline(
 
     match outcome {
         Ok(Ok(v)) => {
-            // SAFETY: `result` is libffi's rvalue buffer (>= register width, aligned); `ret_ct` is the
-            // declared return width.
-            unsafe { write_c_result(result, ret_ct, &v) };
+            write(&v);
         }
         Ok(Err(host_err)) => {
-            // SAFETY: zero the result so C unwinds with a defined value.
-            unsafe { write_c_result(result, ret_ct, &NativeRet::Int(0)) };
+            // Zero the result so C unwinds with a defined value.
+            write(&NativeRet::Int(0));
             // SAFETY: `ctx.fault` points into `Cffi::call`'s live `Box<Option<HostError>>` out-slot
             // (heap, freed when that call returns — the poison guard above is what keeps a
             // post-return invocation from writing through it).
@@ -764,8 +779,8 @@ unsafe extern "C" fn callback_trampoline(
             }
         }
         Err(panic_payload) => {
-            // SAFETY: zero the result so C unwinds with a defined value (no panic into C frames).
-            unsafe { write_c_result(result, ret_ct, &NativeRet::Int(0)) };
+            // Zero the result so C unwinds with a defined value (no panic into C frames).
+            write(&NativeRet::Int(0));
             let msg = panic_payload
                 .downcast_ref::<&str>()
                 .map(|s| s.to_string())
@@ -1247,7 +1262,7 @@ impl Cffi {
                         host: None,
                         arg_index: i,
                         params: params.as_slice() as *const [CType],
-                        ret: ret.as_ref() as *const CType,
+                        ret: ret.as_deref().map(|r| r as *const CType),
                         fault: fault_ptr,
                     });
                     // The closure's own CIF (callback signature). libffi stores a raw pointer to this
@@ -1257,7 +1272,10 @@ impl Cffi {
                     // (a by-value `Cif` here dangled that pointer → SIGSEGV in `classify_argument`).
                     let cb_cif = Box::new(Cif::new(
                         params.iter().map(|p| p.ffi_type()),
-                        ret.ffi_type(),
+                        match ret {
+                            Some(r) => r.ffi_type(),
+                            None => Type::void(),
+                        },
                     ));
                     // NOT `libffi::low::closure_alloc()`: on failure `ffi_closure_alloc` returns NULL
                     // WITHOUT writing the code pointer, and that wrapper `assume_init()`s the
@@ -1726,6 +1744,7 @@ mod tests {
     /// How a [`MockHost`] callback slot reacts when the C side invokes it (drives the callback
     /// trampoline tests without an engine): a pure scalar transform, an explicit `HostError`, or a
     /// Rust panic (to exercise the trampoline's `catch_unwind` + re-raise fault rule).
+    #[derive(Clone, Copy)]
     enum CbBehavior {
         /// `f(int) -> int`: double the int arg, +1 (so the C fixture's `f(x)+1` is testable end-to-end).
         DoubleIntPlusOne,
@@ -1735,6 +1754,8 @@ mod tests {
         ReturnsError,
         /// Panic in the callback body — `catch_unwind` must catch it and re-raise a fault, not abort.
         Panics,
+        /// `f(int) -> nil`: collect the int arg into `MockHost.collected`, return `Nil` (void).
+        VoidCollect,
     }
 
     /// A standalone `Host` over fixed args, for unit-testing the FFI marshalling in isolation.
@@ -1748,6 +1769,8 @@ mod tests {
         structs: Vec<Vec<NativeRet>>,
         /// Callback args: each is a [`CbBehavior`] the host's `invoke_callback` applies to the C args.
         callbacks: Vec<CbBehavior>,
+        /// Where `CbBehavior::VoidCollect` pushes each int arg it is invoked with.
+        collected: Vec<i64>,
         // Each arg names which vec + index it lives in.
         kinds: Vec<(char, usize)>,
     }
@@ -1825,7 +1848,8 @@ mod tests {
             args: &[NativeRet],
         ) -> Result<NativeRet, HostError> {
             let (_, idx) = self.kinds[arg_index];
-            match &self.callbacks[idx] {
+            let b = self.callbacks[idx];
+            match b {
                 CbBehavior::DoubleIntPlusOne => match args.first() {
                     Some(NativeRet::Int(n)) => Ok(NativeRet::Int(n * 2 + 1)),
                     other => Err(HostError {
@@ -1842,6 +1866,15 @@ mod tests {
                     message: "callback deliberately failed".into(),
                 }),
                 CbBehavior::Panics => panic!("callback deliberately panicked"),
+                CbBehavior::VoidCollect => match args.first() {
+                    Some(NativeRet::Int(n)) => {
+                        self.collected.push(*n);
+                        Ok(NativeRet::Nil)
+                    }
+                    other => Err(HostError {
+                        message: format!("callback expected int, got {other:?}"),
+                    }),
+                },
             }
         }
         fn arg_str_map(&mut self, _i: usize) -> Result<Vec<(String, String)>, HostError> {
@@ -2326,7 +2359,7 @@ void each(int n, void (*f)(long)) { for (long i = 0; i < n; i++) f(i); }
                 CType::Int32,
                 CType::Callback {
                     params: vec![CType::Int32],
-                    ret: Box::new(CType::Int32),
+                    ret: Some(Box::new(CType::Int32)),
                 },
             ],
             Some(CType::Int32),
@@ -2352,7 +2385,7 @@ void each(int n, void (*f)(long)) { for (long i = 0; i < n; i++) f(i); }
             vec![
                 CType::Callback {
                     params: vec![CType::Int32],
-                    ret: Box::new(CType::Int32),
+                    ret: Some(Box::new(CType::Int32)),
                 },
                 CType::Int32,
             ],
@@ -2376,7 +2409,7 @@ void each(int n, void (*f)(long)) { for (long i = 0; i < n; i++) f(i); }
                 CType::Float,
                 CType::Callback {
                     params: vec![CType::Float],
-                    ret: Box::new(CType::Float),
+                    ret: Some(Box::new(CType::Float)),
                 },
             ],
             Some(CType::Float),
@@ -2400,7 +2433,7 @@ void each(int n, void (*f)(long)) { for (long i = 0; i < n; i++) f(i); }
                 CType::Int32,
                 CType::Callback {
                     params: vec![CType::Int32],
-                    ret: Box::new(CType::Int32),
+                    ret: Some(Box::new(CType::Int32)),
                 },
             ],
             Some(CType::Int32),
@@ -2647,7 +2680,7 @@ void each(int n, void (*f)(long)) { for (long i = 0; i < n; i++) f(i); }
                 CType::Int32,
                 CType::Callback {
                     params: vec![CType::Int32],
-                    ret: Box::new(CType::Int32),
+                    ret: Some(Box::new(CType::Int32)),
                 },
             ],
             Some(CType::Int32),
@@ -2673,6 +2706,29 @@ void each(int n, void (*f)(long)) { for (long i = 0; i < n; i++) f(i); }
         );
         let out = crate::vm::run_capture(&src).expect("run");
         assert_eq!(out, "101\n");
+    }
+
+    #[test]
+    fn callback_void_return_writes_no_result() {
+        // TICKET-061: a void-returning callback (`ret: None`) must write NOTHING into libffi's
+        // result buffer — `each`'s `f` param collects each int arg and returns `Nil`.
+        let so = build_callback_so();
+        let f = Cffi::new(
+            so.to_str().unwrap(),
+            "each",
+            vec![
+                CType::Int32,
+                CType::Callback {
+                    params: vec![CType::Int64],
+                    ret: None,
+                },
+            ],
+            None,
+        )
+        .expect("dlopen each");
+        let mut host = MockHost::default().int(3).callback(CbBehavior::VoidCollect);
+        assert_eq!(f.call(&mut host), Ok(NativeRet::Nil));
+        assert_eq!(host.collected, vec![0, 1, 2]);
     }
 
     #[test]

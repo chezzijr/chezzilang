@@ -1831,10 +1831,16 @@ impl Checker {
                 }
                 _ => None,
             },
-            // A sync scalar callback param (callbacks #4): `fn(scalars...) -> scalar` lowers to
-            // `CType::Callback`. Every part must lower to a C SCALAR (`is_scalar`) — a non-scalar
-            // part (str/struct/nested callback) yields `None`, so the marshal gate rejects it cleanly.
-            // (Param-only; a function-typed RETURN is rejected by `assert_marshallable`, never lowered.)
+            // A sync scalar callback param (callbacks #4): `fn(scalars...) -> scalar` (or `-> nil`)
+            // lowers to `CType::Callback`. Every param must lower to a C SCALAR (`is_scalar`) — a
+            // non-scalar part (str/struct/nested callback) yields `None`, so the marshal gate rejects
+            // it cleanly. (Param-only; a function-typed RETURN is rejected by `assert_marshallable`,
+            // never lowered.)
+            //
+            // The return is `Option<Box<CType>>`, exactly like `Cffi::ret`: `None` means VOID. A
+            // non-scalar return (e.g. `str`) is already rejected by `assert_marshallable` before this
+            // runs, so a `None` reaching here in a program that checks clean can only be `nil` (or a
+            // transparent alias to it) — never a silently-dropped scalar.
             Type::Func { params, ret, .. } => {
                 let mut cparams = Vec::with_capacity(params.len());
                 for p in params {
@@ -1844,13 +1850,14 @@ impl Checker {
                     }
                     cparams.push(cp);
                 }
-                let cret = self.resolve_ctype_d(ret, depth + 1)?;
-                if !cret.is_scalar() {
-                    return None;
-                }
+                let cret = match self.resolve_ctype_d(ret, depth + 1) {
+                    Some(c) if c.is_scalar() => Some(Box::new(c)),
+                    Some(_) => return None,
+                    None => None,
+                };
                 Some(CType::Callback {
                     params: cparams,
-                    ret: Box::new(cret),
+                    ret: cret,
                 })
             }
             // RETURN-ONLY nullable `char*` (`str?` / `owned_str?`): the inner type decides
