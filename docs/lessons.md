@@ -5,6 +5,8 @@
 > that produced it, and where to look. Newest ledger detail lives in [`gaps.md`](gaps.md); the hunt
 > strategy in [`bug-discovery.md`](bug-discovery.md). **Read the section for the area you are about
 > to touch before you touch it** — most of these shipped fully green the first time.
+> Every claim here was re-verified against the release binary at `54be64f8` on 2026-09-06 (named
+> symbols grepped, repros re-run); a fact with a date is the state on that date.
 
 ---
 
@@ -145,9 +147,12 @@ the freeze.
   `import X from M` + `struct X` must be a clean "already defined" error. A struct-returning native
   threads through four fixed lists (`std/M.chz` decl, compiler layout array, `seed_stdlib_structs`,
   `types_by_name`), field order load-bearing.
-- **`Eq` satisfaction is scalars-only, so any guard that asks `satisfies(_, "Eq")` over-rejects**
-  (`Box([1,2]) == Box([1,2])` was legal and became an error). W7-41 stays open until `Eq` agrees with
-  structural `==`; the reverted attempt's three traps are in the ledger row.
+- **A guard that asks `satisfies(_, "Eq")` is only as right as the `Eq` grant — widen the grant
+  FIRST.** W7-41's first cut (2026-08-10) added the `eq`-bound guard while `Eq` was still scalars-only,
+  so `Box([1,2]) == Box([1,2])` went from `true` to an error, fully green; reverted. The fix that
+  landed (2026-08-11) widened `Eq` to everything structural `==` accepts, *then* installed the guard.
+  Three fixture traps are in the `gaps.md` row: an `eq` body of `self.val == o.val` never exhibits the
+  bug, `[a].contains(a)` hits the identity shortcut, and a payload-derived `hash` passes regardless.
 - **A parallel filtered `cargo test --lib <filter>` is not a trustworthy pass/fail signal** for checker
   graph tests — they share process-global state and collide when scheduled together. Gate on the full
   `--lib` run or add `--test-threads=1`.
@@ -170,11 +175,12 @@ the freeze.
   un-gated into a garbage cross-heap `GcRef` — genuine UB. Every new cross-heap store goes through
   `to_wire_crossable`, never bare `to_wire_at`. A missed *runtime* guard is UB; a missed checker
   widening is at worst an uglier error.
-- **Closures cross by value iff every capture is sendable** (Rust `Send` model). A captured-local `ref`
-  at a direct `spawn` is a compile error; one reaching the airlock indirectly is a loud runtime fault —
-  and that fault may live **only** in the `Obj::Closure` capture arms of `to_wire`/`to_snap`. A
-  module-global `ref` (`counter: ref int = 0`) is a read-only snapshot and must never be gated; the
-  general-arm and reach-gate attempts both broke it.
+- **Closures cross by value iff every capture is sendable** (Rust `Send` model). The only runtime
+  non-sendables today are `Obj::Module` and a generator inside a value cycle (`ref`/`Ref[T]` were
+  removed entirely, 2026-07-19). The scoping lesson survives them: when something must be
+  non-sendable, fault it **only** in the `Obj::Closure` capture arms of `to_wire`/`to_snap`, never in the
+  general struct/snapshot path — a module-global read from a spawned task is a read-only snapshot, and
+  the general-arm and reach-gate attempts both faulted it.
 - **Capture is free-variable, by reference.** A superset capture is safe; a subset silently breaks. The
   analyzer is exhaustive over every `ExprKind` with no `_` arm, and the same analyzer drives
   cell-boxing, so a gap would already crash existing closures.
@@ -242,12 +248,15 @@ the freeze.
   verify the actual got-vs-want `Ty` before asserting a wall.
 - **The native seam is scalar/str/map-shaped.** Generic `list[T]` cannot cross; generic helpers are
   pure-Chezzi in a `std/*.chz` calling native scalars. Concrete `list[str]` crosses by cloning the
-  `map[str,str]` triad through all hosts. A native module name short-circuits a same-named `.chz`.
+  `map[str,str]` triad through both hosts (`VmHost`, `OffloadHost`). A native module can be
+  file-backed: `std/<M>.chz` loads alongside native dispatch (`is_file_backed_native`).
 - **Type args go where the generic is declared** (`Box[int].Has(5)`, `obj.m[U](x)`); the old
   `Enum.Variant[T]` gliding is removed. The parser cannot tell `Box[int].make[U](x)` from
   `value[i].field[k](x)`; only the checker can, by reinterpretation — never a parser steal.
-- **Static protocol requirements via dictionary passing are shelved**; a factory closure is the working
-  alternative. A no-`self` protocol requirement is declarable but a dead marker.
+- **Static protocol requirements (`T.default()` through a `[T: Default]` bound) shipped as M24 via
+  witness passing** after two dictionary-passing attempts were rejected for the checker-accept vs
+  compiler-lower boundary drifting apart. Remaining ceiling: a type-declared `T` in a method body
+  (`docs/syntax.md`, "static requirements").
 
 ## 6. Test infrastructure
 
@@ -266,7 +275,7 @@ the freeze.
 - **A wall-clock perf repro must be red on the *release* binary the gate builds.** A quadratic path is
   ~10× cheaper in release; 8 000 chars / 0.3 s passed on base. Size inputs at 100k+, one absolute
   bound, never a ratio of two clock samples (`tests/no_wall_clock_ratio_gates.rs` bans that).
-- **`live_bytes` under-measures a `Value`-size change** (it sums 88 B per `Obj` slot and ignores the
+- **`live_bytes` under-measures a `Value`-size change** (it sums 64 B per `Obj` slot and ignores the
   operand stack). Gate value-model changes on bench deltas and peak RSS.
 - **The CPython differential's integer-bound tracking must follow a value across every seam** (loop
   back-edge, call boundary), or a Chezzi overflow fault reads as a false-positive "bug". Both leaks

@@ -193,7 +193,7 @@ OS-thread M:N engine, netpoller + `std.net`). The checker also has a **non-fatal
 (`Severity::Warning`, `"severity"` in `--errors=json`, `DiagnosticSeverity::WARNING` in the LSP) with
 three rules on it — a discarded `Result`/`Option`, a `spawn:`-task write read after the join, and a
 `match` arm made unreachable by an earlier unguarded irrefutable arm.
-**Rust tests** green across every target (**4458** in the lib target), plus **761**
+**Rust tests** green across every target (**4458** in the lib target), plus **814**
 Chezzi tests green at two worker counts (up from 590 at the start of `feat/span-file-and-stdlib-contracts`).
 
 ## Current focus
