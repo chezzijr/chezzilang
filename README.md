@@ -20,6 +20,7 @@ fn main():
 - [`docs/spec.md`](docs/spec.md) — full language design
 - [`docs/syntax.md`](docs/syntax.md) — syntax cheat-sheet (every construct, by example)
 - [`docs/concurrency.md`](docs/concurrency.md) — concurrency design (`spawn` / `parallel:` / channels)
+- [`docs/lessons.md`](docs/lessons.md) — hard-won engineering rules (what green gates cannot see, checker/airlock/test traps) — read before contributing
 
 ## Design at a glance
 
