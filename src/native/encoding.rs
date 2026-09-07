@@ -330,12 +330,51 @@ fn decode_field(raw: &str) -> String {
     }
 }
 
+/// A URL scheme is `[A-Za-z][A-Za-z0-9+.-]*` (RFC 3986 §3.1), anchored at position 0. Any LATER
+/// `://` therefore has a prefix containing `/` or `:`, which this rejects — so `rest.find("://")`
+/// plus this filter is a complete anchored-scheme test, no scan loop needed.
+fn is_scheme(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
+}
+
+/// Split an authority (`userinfo@host:port`) into `(host, port)`. Userinfo is dropped, split on the
+/// LAST `@` — measured Go `url.Parse("http://a@b@c/x").Host` is `"c"`, CPython `.hostname` is `'c'`.
+/// An IPv6 host (`[::1]`) keeps its brackets in `host`, and only a `:port` AFTER the closing bracket
+/// splits off — measured Go `url.Parse("http://[::1]:8080/a").Host` is `"[::1]:8080"`. Otherwise the
+/// LAST `:` splits host/port, same as before this fix, just no longer confused by userinfo.
+fn split_authority(authority: &str) -> (String, String) {
+    let host_port = match authority.rfind('@') {
+        Some(at) => &authority[at + 1..],
+        None => authority,
+    };
+    if let Some(rest) = host_port.strip_prefix('[')
+        && let Some(end) = rest.find(']')
+    {
+        let host = &host_port[..end + 2];
+        let after = &host_port[end + 2..];
+        let port = after.strip_prefix(':').unwrap_or("");
+        return (host.to_string(), port.to_string());
+    }
+    match host_port.rfind(':') {
+        Some(c) => (host_port[..c].to_string(), host_port[c + 1..].to_string()),
+        None => (host_port.to_string(), String::new()),
+    }
+}
+
 /// `url_parse(u: str) -> Map[str, str]` — LEXICAL URL decomposition into keys `scheme`, `host`,
 /// `port`, `path`, `query`, `fragment` (fixed order). NO percent-decoding of components (Python
 /// `urlsplit` / Go `net/url` leave them encoded). Missing components → `""` (port is a STRING, `""`
 /// when absent, since the map is str→str — Go `url.Port()` / Python analog). Best-effort, never faults.
-/// ponytail: the last-`:` host:port split folds userinfo (`user:pass@host`) and IPv6 (`[::1]:8080`)
-/// into `host`, and a `//`-less scheme (`mailto:x`) lands the remainder in `path` — documented ceilings.
+/// Landed contract: userinfo (`user:pass@host`) is DROPPED, not folded into `host`/`port` — a
+/// `host` allowlist can no longer see attacker-controlled userinfo (measured Go/CPython, see
+/// `## Decisions`). IPv6 brackets stay in `host` unstripped (`host` mirrors Go's `URL.Host` minus the
+/// port, never CPython's `.hostname`). The scheme is lowercased; `host` keeps its original case. A
+/// `//`-less scheme (`mailto:x`) still lands the remainder in `path` — unchanged ceiling.
 fn url_parse(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "url_parse", 1)?;
     let u = h.arg_str(0)?;
@@ -358,8 +397,8 @@ fn url_parse(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     // Go 1.26.6 `url.Parse` and CPython 3.14.7 `urlsplit` agree: `//h/p` -> host "h", path "/p".
     // `///p` follows CPython here (empty host, path "/p"), not Go's RFC-3986 special case that keeps
     // `///p` whole in path — see ## Decisions.
-    let after_scheme = match rest.find("://") {
-        Some(idx) => Some((rest[..idx].to_string(), &rest[idx + 3..])),
+    let after_scheme = match rest.find("://").filter(|&idx| is_scheme(&rest[..idx])) {
+        Some(idx) => Some((rest[..idx].to_ascii_lowercase(), &rest[idx + 3..])),
         None => rest.strip_prefix("//").map(|a| (String::new(), a)),
     };
     let (scheme, host, port, path) = match after_scheme {
@@ -368,10 +407,7 @@ fn url_parse(h: &mut dyn Host) -> Result<NativeRet, HostError> {
                 Some(p) => (&after[..p], after[p..].to_string()),
                 None => (after, String::new()),
             };
-            let (host, port) = match authority.rfind(':') {
-                Some(c) => (authority[..c].to_string(), authority[c + 1..].to_string()),
-                None => (authority.to_string(), String::new()),
-            };
+            let (host, port) = split_authority(authority);
             (scheme, host, port, path)
         }
         None => (
