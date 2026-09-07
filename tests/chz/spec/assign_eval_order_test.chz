@@ -15,3 +15,71 @@ test fn index_assign_evaluates_rhs_before_target():
         return i - 1
     xs[bump()] = xs[bump()] + 10
     assert xs == [1, 11, 3]
+
+struct Box:
+    v: int
+
+test fn index_assign_evaluates_the_rhs_before_the_index():
+    log: List[str] = []
+    xs := [0, 0]
+    fn k() -> int:
+        log.push("K")
+        return 0
+    fn g() -> int:
+        log.push("G")
+        return 5
+    xs[k()] = g()
+    assert log == ["G", "K"]
+    assert xs == [5, 0]
+
+test fn field_assign_evaluates_the_rhs_before_the_object():
+    log: List[str] = []
+    b := Box(0)
+    fn obj() -> Box:
+        log.push("OBJ")
+        return b
+    fn rhs() -> int:
+        log.push("RHS")
+        return 7
+    obj().v = rhs()
+    assert log == ["RHS", "OBJ"]
+    assert b.v == 7
+
+test fn map_key_assign_evaluates_the_rhs_before_the_key():
+    log: List[str] = []
+    m: Map[str, int] = {}
+    fn key() -> str:
+        log.push("KEY")
+        return "a"
+    fn rhs() -> int:
+        log.push("RHS")
+        return 1
+    m[key()] = rhs()
+    assert log == ["RHS", "KEY"]
+    assert m["a"] == 1
+
+test fn compound_index_assign_keeps_the_index_before_the_rhs():
+    log: List[str] = []
+    xs := [1, 2]
+    fn k() -> int:
+        log.push("K")
+        return 0
+    fn g() -> int:
+        log.push("G")
+        return 5
+    xs[k()] += g()
+    assert log == ["K", "G"]
+    assert xs == [6, 2]
+
+test fn tuple_assign_keeps_the_whole_rhs_before_every_target():
+    log: List[str] = []
+    xs := [1, 2]
+    fn k() -> int:
+        log.push("K")
+        return 0
+    fn g() -> int:
+        log.push("G")
+        return 5
+    xs[k()], xs[1] = g(), 9
+    assert log == ["G", "K"]
+    assert xs == [5, 9]
