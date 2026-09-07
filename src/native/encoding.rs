@@ -696,10 +696,33 @@ mod tests {
         assert_eq!(field(&proto_rel, "path"), "/p");
         assert_eq!(field(&proto_rel, "scheme"), "");
 
-        // The `//` form inherits the SAME last-`:` userinfo ceiling as the `scheme://` form
-        // (measured today: `http://u:pw@h/p` gives host `u`, port `pw@h`).
+        // The authority splits on the LAST `@` first, so userinfo (`u:pw`) is dropped rather than
+        // folded into `host`/`port` -- measured Go `url.Parse("//u:pw@h/p").Host` is `"h"`, CPython
+        // `urlsplit("//u:pw@h/p").hostname` is `"h"`.
         let proto_rel_userinfo = up("//u:pw@h/p");
-        assert_eq!(field(&proto_rel_userinfo, "host"), "u");
-        assert_eq!(field(&proto_rel_userinfo, "port"), "pw@h");
+        assert_eq!(field(&proto_rel_userinfo, "host"), "h");
+        assert_eq!(field(&proto_rel_userinfo, "port"), "");
+
+        // Only the LAST `@` matters -- measured Go `url.Parse("http://a@b@c/x").Host` is `"c"`.
+        let userinfo_multi_at = up("http://a@b@c/x");
+        assert_eq!(field(&userinfo_multi_at, "host"), "c");
+        assert_eq!(field(&userinfo_multi_at, "port"), "");
+
+        // IPv6 brackets stay in `host`; only a `:port` AFTER the closing bracket splits off --
+        // measured Go `url.Parse("http://[::1]:8080/a").Host` is `"[::1]:8080"`.
+        let ipv6_with_port = up("http://[::1]:8080/a");
+        assert_eq!(field(&ipv6_with_port, "host"), "[::1]");
+        assert_eq!(field(&ipv6_with_port, "port"), "8080");
+
+        // A scheme separator must be anchored at position 0 -- `://x` has an empty scheme candidate,
+        // which fails `is_scheme`, so the whole string is the path.
+        let bare_separator = up("://x");
+        assert_eq!(field(&bare_separator, "scheme"), "");
+        assert_eq!(field(&bare_separator, "path"), "://x");
+
+        // A trailing bare `:` with nothing after it is an empty (but present) port field, split off.
+        let empty_port = up("http://h:/p");
+        assert_eq!(field(&empty_port, "host"), "h");
+        assert_eq!(field(&empty_port, "port"), "");
     }
 }

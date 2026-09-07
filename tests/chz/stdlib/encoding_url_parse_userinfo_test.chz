@@ -11,3 +11,18 @@ import std.encoding as enc
 test fn url_parse_splits_userinfo_before_port():
     parts := enc.url_parse("http://example.com:pw@evil.com/x")
     assert parts["host"] == "evil.com", str(parts)
+
+test fn url_parse_keeps_ipv6_brackets_and_splits_only_a_port_after_the_bracket():
+    parts := enc.url_parse("http://[::1]:8080/a")
+    assert parts["host"] == "[::1]", str(parts)
+    assert parts["port"] == "8080", str(parts)
+
+test fn url_parse_treats_an_unanchored_scheme_separator_as_path():
+    parts := enc.url_parse("/p/a://b")
+    assert parts["scheme"] == "", str(parts)
+    assert parts["path"] == "/p/a://b", str(parts)
+
+test fn url_parse_lowercases_the_scheme_and_leaves_the_host_alone():
+    parts := enc.url_parse("HTTPS://EXAMPLE.COM/x")
+    assert parts["scheme"] == "https", str(parts)
+    assert parts["host"] == "EXAMPLE.COM", str(parts)
