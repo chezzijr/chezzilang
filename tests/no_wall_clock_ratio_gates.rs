@@ -72,7 +72,7 @@ fn no_chz_test_divides_two_wall_clock_samples() {
 /// A name may join the list, but only deliberately, in the commit that adds the clock, with the
 /// reason in that commit message. A test converted to a counted measure must be DELETED from the
 /// list in the same commit that converts it.
-const CLOCK_READING_TESTS: [&str; 19] = [
+const CLOCK_READING_TESTS: [&str; 20] = [
     "a_chezzi_hang_python_survives_is_a_finding",
     "a_cyclic_shared_field_type_graph_is_also_walked_once_per_type",
     "a_shared_field_type_graph_is_walked_once_per_type",
@@ -85,6 +85,11 @@ const CLOCK_READING_TESTS: [&str; 19] = [
     "parallel_many_spawns_cheap_and_correct",
     "parity_blocking_native_is_an_entry_cancellation_checkpoint_on_both_engines",
     "rwshared_view_over_shared_bindings_is_not_quadratic",
+    // TICKET-072: `s[i]` collects a fresh `Vec<char>` of the whole string per subscript, so an
+    // index loop is O(n^2). The cost is a per-operation allocation the VM counts nowhere, so there
+    // is no counted measure to use; the bound is one absolute ceiling, the same shape
+    // `unique_is_not_quadratic` above already uses for the same class of defect.
+    "string_index_loop_is_not_quadratic",
     // threads_one_serializes_cpu_bound_parallel_tasks / _nested_eager_parallel_tasks (TICKET-059):
     // both now read the clock in tests/support/child_rusage.rs, not in their own bodies -- same
     // precedent as many_idle_workers_do_not_thundering_herd_on_yield, never listed here.
