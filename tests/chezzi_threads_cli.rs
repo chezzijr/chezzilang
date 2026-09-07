@@ -417,11 +417,16 @@ fn threads_eight_scales_nested_eager_parallel_tasks_in_body() {
             "program finished too fast (cpu={cpu:?}, run {run}) to be a meaningful measurement — \
              recalibrate the burn size"
         );
-        let cores = cpu.as_secs_f64() / wall.as_secs_f64();
+        // A multiplication, never a quotient of the CPU sample and the wall sample: dividing two
+        // differently-sourced duration samples amplifies scheduler noise without bound, which
+        // `no_rust_test_divides_two_wall_clock_samples` bans repo-wide (TICKET-049). This is the
+        // same bound in the form the two W8-8 gates above already use, mirrored from an upper
+        // bound to a lower one: `cpu <= wall * MAX_CORES_AT_ONE_WORKER` there, `cpu >= wall *
+        // MIN_CORES_AT_EIGHT_WORKERS_NESTED` here.
         assert!(
-            cores >= MIN_CORES_AT_EIGHT_WORKERS_NESTED,
+            cpu >= wall.mul_f64(MIN_CORES_AT_EIGHT_WORKERS_NESTED),
             "a parallel: nested in a nursery BODY must scale with --threads (run {run}): \
-             cores={cores:.2} (cpu={cpu:?} wall={wall:?}), expected >= \
+             cpu={cpu:?} wall={wall:?}, expected cpu >= wall * \
              {MIN_CORES_AT_EIGHT_WORKERS_NESTED} at CHEZZI_THREADS=8. A nested eager join never \
              farms the bounded pool (only the outermost arm does), so it is pinned to the outer \
              drainer + inline joiner regardless of --threads (TICKET-073a)."

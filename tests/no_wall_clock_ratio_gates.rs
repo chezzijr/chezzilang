@@ -290,7 +290,7 @@ fn sleep_synchronised_tests() -> BTreeSet<String> {
 /// rejected it (the walk returns 68). Obtain it by compiling once with an empty array and copying
 /// the "sleeps but is not listed" list `no_new_rust_test_sleeps_to_order_two_events` reports,
 /// verbatim, the same way `stack_trace_reports_call_chain`'s golden was obtained.
-const SLEEP_SYNCHRONISED_TESTS: [&str; 70] = [
+const SLEEP_SYNCHRONISED_TESTS: [&str; 71] = [
     "a_bailed_join_stops_its_jobs_from_starting_new_work",
     "a_cancelled_siblings_defer_runs_whole_on_both_engines",
     "a_finished_executor_job_lets_the_genuine_nursery_deadlock_fire",
@@ -353,6 +353,12 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 70] = [
     "submit_to_an_executor_whose_creating_job_was_cancelled_faults_mn",
     "submit_to_mains_own_executor_after_an_unrelated_shutdown_now_runs_mn",
     "the_deadline_does_not_truncate_a_defer_whose_recv_can_complete",
+    // TICKET-073b. Its sleep is a SAMPLING INTERVAL, not a happens-before edge: the test polls
+    // `/proc/<pid>/task` for the peak live-thread count while the child runs, and a peak has no
+    // channel, counted probe or latch that can report it -- the child never observes the sampler.
+    // A channel receive would be the wrong shape too: the count must be read repeatedly DURING the
+    // run, not once at a synchronisation point.
+    "threads_stay_bounded_for_a_nursery_nested_in_a_spawned_task",
     "ticket_016_cross_box_update_cycle_faults",
     "ticket_016_cross_task_set_racing_update_is_not_lost",
     "ticket_063_guard_waiter_is_not_faulted_while_a_sibling_can_feed_the_holder",
