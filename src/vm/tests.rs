@@ -12231,6 +12231,25 @@ fn unique_is_not_quadratic() {
     );
 }
 
+/// TICKET-072: `s[i]` collects a fresh `Vec<char>` of the WHOLE string per subscript
+/// (`src/vm/stmt.rs:665`), so an index loop over a string is O(n^2) instead of O(n). Measured on
+/// the release binary at 86eb23dd: n=10000 took 0.142s vs CPython's 0.0019s, n=40000 took 1.678s
+/// (220x CPython) -- a clean 4x-per-doubling signature, not CPython's 2x. This debug-build repro
+/// uses a smaller n so it stays fast once fixed; a loose wall-clock ceiling is a smoke guard that
+/// the per-index cost stopped scaling with `len(s)`, not a precise perf assertion.
+#[test]
+fn string_index_loop_is_not_quadratic() {
+    let src = "fn main():\n    n := 8000\n    s := \"a\".repeat(n)\n    c := 0\n    i := 0\n    while i < n:\n        if s[i] == \"a\": c = c + 1\n        i = i + 1\n    print(c)\nmain()\n";
+    let start = std::time::Instant::now();
+    let out = run(src);
+    let elapsed = start.elapsed();
+    assert_eq!(out, "8000\n");
+    assert!(
+        elapsed < std::time::Duration::from_millis(800),
+        "indexing an 8000-char string 8000 times took {elapsed:?} (>800ms ceiling) -- O(n^2) regression"
+    );
+}
+
 /// B3.6: a submitted closure capturing a plain value (`int`) observes it **by value** across the
 /// airlock — exercises the `WireValue::Closure` capture round-trip (not just the shared-`Arc` handle
 /// path the golden's `Channel` capture takes). Auto-drained at program exit; the
