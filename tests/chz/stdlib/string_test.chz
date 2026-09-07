@@ -32,3 +32,17 @@ test fn repeat_huge_n_faults_recoverably():
         Err(e): assert e.message() == "string repeat capacity overflow"
     # the process is still alive afterwards
     assert string.repeat("ab", 3) == "ababab"
+
+# `trim` claims Rust's Unicode `White_Space` class; CPython's `str.strip()` also strips the four
+# C0 separator controls U+001C..U+001F even though they aren't `White_Space`. Chezzi does not.
+test fn trim_strips_c0_information_separators():
+    s := "\u{1c}42\u{1c}"
+    assert s.trim().len() == 2, "len=" + str(s.trim().len())
+
+# `split_lines` on a CRLF string must not leave a trailing CR on each line, matching Python's
+# `str.splitlines()` and this stdlib's own `io.Reader.lines()`.
+test fn split_lines_strips_crlf():
+    xs := string.split_lines("a\r\nb\r\n")
+    assert xs.len() == 2, "len=" + str(xs.len())
+    assert xs[0] == "a", xs[0]
+    assert xs[1] == "b", xs[1]
