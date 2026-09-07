@@ -2028,3 +2028,35 @@ per-core version) that every core write path must bump, and a missed path leaves
 which stops the GC tracing a live handle — a use-after-free, which is exactly what the `debug_assert`
 in `Heap::mark_core_payload` exists to catch. The quadratic was the defect; the linear walk is the
 design.
+
+## TICKET-072 — ASCII-cached `s[i]`/`s[a:b]` and borrow-only `str` methods (2026-09-08)
+
+Two hot-path defects in `Obj::Str` dispatch, both O(n) per operation on a receiver of length n:
+`get_index`/`get_slice` re-collected a `Vec<char>` of the whole string per subscript
+(`src/vm/stmt.rs:665` index, `:473` slice), and `core_method` cloned the whole receiver
+(`src/vm/call.rs:2826`, now the `let s = s.to_string();` below the new borrow-only block) before
+dispatching ANY `str` method. Fix: `ChzStr` records ASCII-ness once at construction (`HeapAscii`
+variant), so an ASCII string's `s[i]`/`s[a:b]` is O(1) per subscript by indexing bytes directly; and
+`len`/`starts_with`/`ends_with`/`contains`/`index_of` answer under the `&Obj` borrow, before the
+clone. Non-ASCII index/slice is UNCHANGED — still O(n) per operation, the pre-change `Vec<char>`
+code kept verbatim as the fallback arm.
+
+Release binary, `main` (`c1f657b8`) vs this branch, same box, `uptime` beside each run
+(load average 3.0–3.9 throughout):
+
+`s[i]` in a loop, `while i < n: if s[i] == "a": ...`, one process per n:
+
+| n     | main      | this branch |
+|-------|-----------|-------------|
+| 10000 | 0.127 s   | 0.012 s     |
+| 20000 | 0.445 s   | 0.015 s     |
+| 40000 | 1.610 s   | 0.020 s     |
+
+`main`'s times roughly quadruple per doubling (0.127 → 0.445 → 1.610, ratios 3.5×/3.6×), confirming
+the O(n²) defect; this branch's ASCII fast path stays near-flat (0.012 → 0.015 → 0.020 s).
+
+`s[i:i+1]` in the same shape (all three n in one process): main `2.148 s` total vs branch `0.029 s`
+total. 60000 `s.starts_with("a")` calls on a 1 MB ASCII string: main `3.873 s` vs branch `0.025 s`.
+
+Non-ASCII index/slice is unchanged by this ticket — a non-ASCII `s[i]`/`s[a:b]` still runs the
+pre-change `Vec<char>` collect per operation.

@@ -7,6 +7,17 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-072 (2026-09-08) — `s[i]`/`s[a:b]` were O(n) per operation, and every `str` method
+  cloned its whole receiver before dispatch.** `get_index`/`get_slice` re-collected a `Vec<char>` of
+  the whole string per subscript (`src/vm/stmt.rs:665`/`:473`), so an index loop was O(n²)
+  (measured release: `s[i]` at n=40000 took 1.610s vs 0.020s after); `core_method`'s `Obj::Str` arm
+  cloned the receiver before EVERY method (`src/vm/call.rs:2826`), so `len`/`starts_with`/
+  `ends_with`/`contains`/`index_of` were O(len(s)) (measured: 60000 `starts_with` calls on a 1MB
+  string, 3.873s → 0.025s). Fixed by recording ASCII-ness once at `ChzStr` construction (a third
+  `HeapAscii(Box<str>)` variant — `size_of::<ChzStr>()` stays 24), so an all-ASCII string indexes and
+  slices in O(1) per operation (a byte index IS a codepoint index), and moving the five borrow-only
+  `str` methods above the clone. Non-ASCII index/slice is unchanged, still O(n) per operation, by
+  decision — the `Vec<char>` collect is kept verbatim as the fallback arm. See `docs/benchmarks.md`.
 - **TICKET-071 (2026-09-07) — an empty `List[float].sum()` returned int `0` at runtime under a
   static `float`.** The compiler picked the fold's accumulator kind from the RUNTIME elements
   (`elems.iter().any(|v| v.is_float())`), and an empty list has none, so `(s + 1) / 2` answered `0`

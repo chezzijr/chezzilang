@@ -228,8 +228,10 @@ the freeze.
   raising `VM_STACK_BYTES`: it is reserved per M:N worker.
 - **Opt-in caps whose measure is per-heap or wall-clock are non-comparable across execution contexts.**
   Do not design one expecting two contexts to agree.
-- **Pure-Chezzi scanners must pre-collect codepoints.** `text[i:i+1]` re-collects the whole `Vec<char>`
-  per call (O(n²)); `field = field + c` is O(k²). `std.csv` hung on a 20k-field row. Verify with a
+- **A pure-Chezzi scanner over non-ASCII text must pre-collect its codepoints.** As of TICKET-072,
+  `text[i:i+1]` is O(1) per call for an ALL-ASCII `text` (`ChzStr` caches ASCII-ness at
+  construction); a non-ASCII `text` still re-collects the whole `Vec<char>` per call (O(n²)).
+  `field = field + c` is still O(k²) regardless. `std.csv` hung on a 20k-field row. Verify with a
   large-input timing test.
 
 ## 5. Native surface and stdlib

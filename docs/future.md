@@ -1455,7 +1455,9 @@ The original M5 baseline was ~4–6.5× over the then-existing (now-removed) tre
   cost), but was kept: cheaper hot path, VM-only ⇒ behavior-preserving.
 - ✅ **Kill per-call clones in `invoke_value`** — *landed M19 Phase 1*: matches on `&Obj` (no whole-
   `Obj` / closure-`HashMap` clone) and drops the arity-check `name.clone()`. Cut `fib` −17%, `list`
-  −22%.
+  −22%. The one miss: `core_method`'s `Obj::Str` arm still cloned its whole receiver before EVERY
+  method dispatch — closed by TICKET-072 (2026-09-08), which moved the five borrow-only methods
+  (`len`/`starts_with`/`ends_with`/`contains`/`index_of`) above the clone.
 - ✅ **Pass call args as a stack slice (no per-call `Vec`)** — *landed M19 Phase 2*: `do_call`'s
   `Func`/`Closure` fast path runs in place over the args already on the operand stack (`copy_within`
   drops the callee from beneath them), skipping the `split_off` `Vec` alloc + the re-push in
