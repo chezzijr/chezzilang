@@ -7,6 +7,20 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-075 (2026-09-08) — an unrelated struct's defaulted method spliced into a protocol-typed
+  call before the arity check, so `x.f(2)` through `x: P` was rejected as `'f' expects 1
+  argument(s), got 2`.** `normalize_call` fell back to the program-wide name-keyed method table
+  whenever the receiver's struct type was unknown (any protocol-typed or `[T: P]`-bounded receiver),
+  with no check that the matched struct satisfied the protocol; its trailing default then spliced
+  onto the call. Fixed by filtering that fallback: for a protocol-typed/bounded receiver, candidates
+  are narrowed to structs whose method declares the SAME explicit parameter count as the protocol's
+  own — a necessary condition for satisfaction, so no genuine witness is ever dropped. New `ProtoReg`
+  registry + `Ctx::find_proto`/`proto_method_arity` + `Walker::local_proto` in `src/desugar/mod.rs`;
+  five tests in `src/checker/tests.rs`. The permissive dual (a witness's default filling an
+  UNDECLARED protocol parameter, e.g. `x.f(1)` through `protocol P: fn f(self,a,b)` and
+  `struct A: fn f(self,a,b=10)`) is the shipped W7-51 feature and is deliberately left open — see
+  `docs/syntax.md`'s default-resolution list, item 6. `cargo test` green, `cargo clippy -- -D
+  warnings` clean.
 - **TICKET-073 (2026-09-08) — a `parallel:` nested inside another nursery scaled wrong two
   different ways.** Nested in a nursery BODY it was pinned to 2 CPU runners regardless of
   `--threads`; nested in a spawned TASK it leaked one raw OS thread per open nursery (a depth-7 tree

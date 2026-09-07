@@ -1145,6 +1145,18 @@ consequences are worth writing down, because each is a rule you can hit:
    the same shape as CPython's `RecursionError` on the equivalent program. A documented limit, not a
    defect: the compile-time check sees provider→provider edges, and this cycle's edge runs through
    `mk`.
+6. **A call through a protocol-typed or protocol-bounded receiver only borrows a default from a
+   witness whose method declares the SAME number of parameters as the protocol does.** A candidate
+   whose explicit parameter count DIFFERS from the protocol's contributes no defaults to the call, so
+   an unrelated struct's defaulted trailing parameter never changes whether the call compiles: given
+   `protocol P: fn f(self, a: int)` and an unrelated `struct Deco: fn f(self, a: int, b: int = 10)`,
+   `fn use1(x: P) -> int: return x.f(2)` compiles whether or not `Deco` exists, because `Deco`'s count
+   (2) differs from `P.f`'s (1). A candidate whose count MATCHES still lends its default through the
+   protocol receiver, even when the protocol itself declares none for that parameter — this is the
+   surprising direction: `protocol P: fn f(self, a: int, b: int)` (no default) with
+   `struct A: fn f(self, a: int, b: int = 10)` and `x: P = A(100)` accepts `x.f(1)` and prints `111`,
+   reading `A`'s default for `b` through the protocol-typed receiver, exactly as it would through a
+   direct `A`-typed one.
 
 A default may also be a **variadic call** (`fn f(a: int = sum_all(1, 2), ...xs: int, tail: int =
 sum_all(3, 4))`), in the pre-variadic slot and in the keyword-only tail alike; that shape used to be

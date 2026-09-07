@@ -344,6 +344,22 @@ fn tp_names(decl: &crate::ast::FnDecl, extra: &[String]) -> Vec<String> {
     v
 }
 
+/// A type-parameter name → its FIRST declared bound name, for `owner_type_params` (an enclosing
+/// struct/enum/native-struct's own params; empty for a free fn) plus `method`'s own `type_params`
+/// and `where_bounds`. TICKET-075 — lets [`Walker::annot_proto_ty`] resolve a `[T: P]`-bound
+/// receiver's protocol the same way it resolves a directly `P`-typed one.
+fn tp_bounds_of(
+    owner_type_params: &[TypeParam],
+    method: &crate::ast::FnDecl,
+) -> HashMap<String, String> {
+    owner_type_params
+        .iter()
+        .chain(method.type_params.iter())
+        .chain(method.where_bounds.iter())
+        .filter_map(|tp| tp.bounds.first().map(|b| (tp.name.clone(), b.name.clone())))
+        .collect()
+}
+
 /// A callable's parameter (or struct field), in declaration order, with its optional
 /// default. Cloned out of the AST so the per-module registry is independent of the graph we mutate.
 /// `PartialEq` lets us decide whether several same-named struct methods share one binding shape.
@@ -404,6 +420,16 @@ fn is_builtin_method(name: &str) -> bool {
     BUILTIN_METHODS.contains(&name)
 }
 
+/// One module's protocols: for each protocol name, the EXPLICIT parameter count of each of its
+/// methods (`self` dropped, exactly like [`method_spec`]) plus its embedded (super-)protocol names.
+/// TICKET-075 — lets a protocol-typed receiver's method call filter the name-keyed fallback down to
+/// candidates whose declared arity could actually satisfy the protocol.
+#[derive(Default)]
+struct ProtoReg {
+    arity: HashMap<String, usize>,
+    embeds: Vec<String>,
+}
+
 /// Free functions and struct constructors declared by one module.
 #[derive(Default)]
 struct ModReg {
@@ -413,6 +439,8 @@ struct ModReg {
     /// Lets a struct-returning-fn-call receiver (`mk().apply(r)`) resolve its method by receiver
     /// type pre-type, exactly like a named-local or ctor-call receiver.
     fn_ret_struct: HashMap<String, String>,
+    /// This module's own protocols, keyed by name (see [`ProtoReg`]).
+    protos: HashMap<String, ProtoReg>,
 }
 
 impl ModReg {
@@ -488,6 +516,7 @@ pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
             ctx,
             scopes: Vec::new(),
             local_struct: Vec::new(),
+            local_proto: Vec::new(),
             needed: std::collections::BTreeMap::new(),
             depth: 0,
         };
@@ -605,6 +634,7 @@ pub fn run_standalone(module: &mut Module) -> Result<(), ResolveError> {
         ctx,
         scopes: Vec::new(),
         local_struct: Vec::new(),
+        local_proto: Vec::new(),
         needed: std::collections::BTreeMap::new(),
         depth: 0,
     };
@@ -1456,6 +1486,20 @@ fn collect_module_reg(stmts: &[Stmt], id: &ModuleId, file: u32) -> ModReg {
                         .collect(),
                 );
             }
+            StmtKind::Protocol {
+                name,
+                methods,
+                embeds,
+                ..
+            } => {
+                let mut preg = ProtoReg::default();
+                for m in methods {
+                    let skip = usize::from(m.params.first().is_some_and(|p| p.name == "self"));
+                    preg.arity.insert(m.name.clone(), m.params.len() - skip);
+                }
+                preg.embeds = embeds.iter().map(|b| b.name.clone()).collect();
+                reg.protos.insert(name.clone(), preg);
+            }
             _ => {}
         }
     }
@@ -1513,6 +1557,57 @@ impl Ctx<'_> {
         let target = self.aliases.get(alias)?;
         self.regs.get(target).and_then(|r| r.callable(name))
     }
+
+    /// Resolve a bare protocol name to the module that declares it: own module first, then a
+    /// `from`-imported name. Mirrors [`Self::resolve_bare`].
+    fn find_proto(&self, name: &str) -> Option<(ModuleId, String)> {
+        if self
+            .regs
+            .get(self.own_id)
+            .is_some_and(|r| r.protos.contains_key(name))
+        {
+            return Some((self.own_id.clone(), name.to_string()));
+        }
+        let target = self.bare_from.get(name)?;
+        self.regs
+            .get(target)
+            .is_some_and(|r| r.protos.contains_key(name))
+            .then(|| (target.clone(), name.to_string()))
+    }
+
+    /// Resolve a module-qualified protocol name (`alias.P`). Mirrors [`Self::resolve_qualified`].
+    fn find_proto_qualified(&self, alias: &str, name: &str) -> Option<(ModuleId, String)> {
+        let target = self.aliases.get(alias)?;
+        self.regs
+            .get(target)
+            .is_some_and(|r| r.protos.contains_key(name))
+            .then(|| (target.clone(), name.to_string()))
+    }
+
+    /// The EXPLICIT parameter count `proto::method` declares, searching `proto`'s embeds
+    /// (breadth-first, within `home` only) when `proto` itself does not declare `method`. `None` for
+    /// an unknown protocol, an unresolvable embed, or a method no reachable protocol declares — the
+    /// caller then leaves the name-keyed fallback unfiltered, never refusing the call.
+    fn proto_method_arity(&self, home: &ModuleId, proto: &str, method: &str) -> Option<usize> {
+        let mut visited: HashSet<String> = HashSet::new();
+        let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+        queue.push_back(proto.to_string());
+        while let Some(p) = queue.pop_front() {
+            if !visited.insert(p.clone()) {
+                continue;
+            }
+            let Some(preg) = self.regs.get(home).and_then(|r| r.protos.get(&p)) else {
+                continue;
+            };
+            if let Some(n) = preg.arity.get(method) {
+                return Some(*n);
+            }
+            for embed in &preg.embeds {
+                queue.push_back(embed.clone());
+            }
+        }
+        None
+    }
 }
 
 struct Walker<'a> {
@@ -1523,6 +1618,11 @@ struct Walker<'a> {
     /// `recv.m(args)` resolve `m`'s param defaults/variadic against the receiver's *actual* struct (so
     /// a sibling struct's same-named method does not derail the decision).
     local_struct: Vec<HashMap<String, String>>,
+    /// Per-scope map of a LOCAL name to the protocol it was annotated as, `name → (declaring module,
+    /// protocol name)` (parallel to `scopes`, like `local_struct`). Populated by a protocol-typed or
+    /// protocol-bounded parameter and a protocol-typed `let`. TICKET-075 — lets a method call
+    /// `recv.m(args)` filter the name-keyed fallback to candidates the protocol's own arity admits.
+    local_proto: Vec<HashMap<String, (ModuleId, String)>>,
     /// Providers in OTHER modules this module's call sites now call, `name → (declaring module,
     /// first call site)`. Drained into synthetic `from` imports after the walk. A `BTreeMap` so the
     /// drain order is the (globally unique) provider name — import order feeds the compiler's
@@ -1547,11 +1647,13 @@ impl Walker<'_> {
     fn push_scope(&mut self) {
         self.scopes.push(HashSet::new());
         self.local_struct.push(HashMap::new());
+        self.local_proto.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.local_struct.pop();
+        self.local_proto.pop();
     }
 
     /// Record that LOCAL `name` holds a value of struct type `sname`, in the innermost scope.
@@ -1559,6 +1661,25 @@ impl Walker<'_> {
         if let Some(top) = self.local_struct.last_mut() {
             top.insert(name.to_string(), sname.to_string());
         }
+    }
+
+    /// Record that LOCAL `name` holds a value typed (or bounded) as protocol `proto`, declared in
+    /// module `home`, in the innermost scope. TICKET-075 sibling of [`Self::bind_local_struct`].
+    fn bind_local_proto(&mut self, name: &str, home: ModuleId, proto: String) {
+        if let Some(top) = self.local_proto.last_mut() {
+            top.insert(name.to_string(), (home, proto));
+        }
+    }
+
+    /// The protocol a local receiver `name` was annotated/bounded as (innermost wins). TICKET-075
+    /// sibling of [`Self::local_struct_ty`].
+    fn local_proto_ty(&self, name: &str) -> Option<&(ModuleId, String)> {
+        for (vars, protos) in self.scopes.iter().zip(self.local_proto.iter()).rev() {
+            if vars.contains(name) {
+                return protos.get(name);
+            }
+        }
+        None
     }
 
     /// If `ty` names a struct known to this module (a bare `Type::Named` or a `Type::Generic` head
@@ -1578,15 +1699,42 @@ impl Walker<'_> {
             .map(|_| name.clone())
     }
 
+    /// If `ty` names a protocol reachable from this module, return `(declaring module, protocol
+    /// name)` — so a protocol-typed or protocol-bounded receiver records what to filter the
+    /// name-keyed method fallback against. `tp_bounds` maps a type-parameter name to its FIRST bound
+    /// name (the `[T: P]` case), checked before the type is resolved as a protocol name directly (the
+    /// `x: P` case). TICKET-075 sibling of [`Self::annot_struct_ty`].
+    fn annot_proto_ty(
+        &self,
+        ty: &Type,
+        tp_bounds: &HashMap<String, String>,
+    ) -> Option<(ModuleId, String)> {
+        match ty {
+            Type::Named { name, .. } => {
+                if let Some(bound) = tp_bounds.get(name) {
+                    return self.ctx.find_proto(bound);
+                }
+                self.ctx.find_proto(name)
+            }
+            Type::Generic(name, ..) => self.ctx.find_proto(name),
+            Type::Qualified { module, name, .. } => self.ctx.find_proto_qualified(module, name),
+            _ => None,
+        }
+    }
+
     /// Bind a function/method parameter into the current scope, additionally recording its receiver
     /// struct type when the annotation names a known struct — so a typed-parameter receiver
     /// (`fn f(x: A): x.m(...)`) resolves through [`Self::receiver_struct_ty`] like a let-bound local.
-    fn bind_param(&mut self, p: &Param) {
+    /// `tp_bounds` is the owner+method's type-parameter-name → first-bound-name map (the `[T: P]`
+    /// case); TICKET-075 also records a protocol annotation/bound, mirroring the struct case.
+    fn bind_param(&mut self, p: &Param, tp_bounds: &HashMap<String, String>) {
         self.bind(&p.name);
-        if let Some(ty) = &p.ty
-            && let Some(sname) = self.annot_struct_ty(ty)
-        {
-            self.bind_local_struct(&p.name, &sname);
+        if let Some(ty) = &p.ty {
+            if let Some(sname) = self.annot_struct_ty(ty) {
+                self.bind_local_struct(&p.name, &sname);
+            } else if let Some((home, proto)) = self.annot_proto_ty(ty, tp_bounds) {
+                self.bind_local_proto(&p.name, home, proto);
+            }
         }
     }
 
@@ -1659,6 +1807,17 @@ impl Walker<'_> {
         }
     }
 
+    /// The `(declaring module, protocol name)` a method-call receiver `obj` was annotated/bounded
+    /// as, when knowable pre-type — the protocol-typed sibling of [`Self::receiver_struct_ty`],
+    /// covering only a named local (a protocol has no ctor-call or struct-returning-fn receiver
+    /// shape). TICKET-075.
+    fn receiver_proto(&self, obj: &Expr) -> Option<(ModuleId, String)> {
+        match &obj.kind {
+            ExprKind::Ident(recv) if self.is_local(recv) => self.local_proto_ty(recv).cloned(),
+            _ => None,
+        }
+    }
+
     /// Walk a block in its own lexical scope (sequential `let`s bind into this scope).
     fn walk_block(&mut self, stmts: &mut Block) -> Result<(), ResolveError> {
         self.push_scope();
@@ -1691,11 +1850,25 @@ impl Walker<'_> {
                 } else {
                     None
                 };
+                // TICKET-075: a protocol-typed `let` (`x: P = w`) records the same annotation a
+                // protocol-typed param would, so a later method call on `x` filters the name-keyed
+                // fallback like it does for a param receiver. Guarded on the annotation NOT naming a
+                // genuine struct (`struct_ty` above accepts any bare `Type::Named` without checking
+                // the registry, so it is not itself a safe guard here).
+                let proto_ty = if names.len() == 1
+                    && ty.as_ref().is_some_and(|t| self.annot_struct_ty(t).is_none())
+                {
+                    ty.as_ref().and_then(|t| self.annot_proto_ty(t, &HashMap::new()))
+                } else {
+                    None
+                };
                 self.walk_expr(value)?;
                 for n in names.iter() {
                     self.bind(n);
                 }
-                if let Some(sname) = struct_ty {
+                if let Some((home, proto)) = proto_ty {
+                    self.bind_local_proto(&names[0], home, proto);
+                } else if let Some(sname) = struct_ty {
                     self.bind_local_struct(&names[0], &sname);
                 }
             }
@@ -1715,15 +1888,19 @@ impl Walker<'_> {
                     }
                 }
                 // Nested/top-level function body: params are a fresh scope.
+                let tp_bounds = tp_bounds_of(&[], decl);
                 self.push_scope();
                 for p in &decl.params {
-                    self.bind_param(p);
+                    self.bind_param(p, &tp_bounds);
                 }
                 self.walk_block(&mut decl.body)?;
                 self.pop_scope();
             }
             StmtKind::Struct {
-                fields, methods, ..
+                type_params,
+                fields,
+                methods,
+                ..
             } => {
                 // Field defaults: normalize the decl-site copy like param defaults (outside any
                 // scope; they reference no field, per `validate_defaults`).
@@ -1738,9 +1915,10 @@ impl Walker<'_> {
                             self.walk_expr(d)?;
                         }
                     }
+                    let tp_bounds = tp_bounds_of(type_params, m);
                     self.push_scope();
                     for p in &m.params {
-                        self.bind_param(p);
+                        self.bind_param(p, &tp_bounds);
                     }
                     self.walk_block(&mut m.body)?;
                     self.pop_scope();
@@ -1830,16 +2008,26 @@ impl Walker<'_> {
             }
             // Enum AND newtype method bodies (and param defaults) are rewritten exactly like a
             // struct's; neither has fields to splice.
-            StmtKind::Enum { methods, .. } | StmtKind::NewType { methods, .. } => {
+            StmtKind::Enum {
+                type_params,
+                methods,
+                ..
+            }
+            | StmtKind::NewType {
+                type_params,
+                methods,
+                ..
+            } => {
                 for m in methods.iter_mut() {
                     for p in m.params.iter_mut() {
                         if let Some(d) = &mut p.default {
                             self.walk_expr(d)?;
                         }
                     }
+                    let tp_bounds = tp_bounds_of(type_params, m);
                     self.push_scope();
                     for p in &m.params {
-                        self.bind_param(p);
+                        self.bind_param(p, &tp_bounds);
                     }
                     self.walk_block(&mut m.body)?;
                     self.pop_scope();
@@ -1848,16 +2036,21 @@ impl Walker<'_> {
             // A `native struct`'s BODIED Chezzi methods ARE compiled to bytecode, so their bodies +
             // param defaults must be desugared exactly like an enum/struct method (default/named-arg
             // normalization, `ref` lowering). The bodyless `native fn` sigs alongside them have nothing.
-            StmtKind::NativeStruct { bodied_methods, .. } => {
+            StmtKind::NativeStruct {
+                type_params,
+                bodied_methods,
+                ..
+            } => {
                 for m in bodied_methods.iter_mut() {
                     for p in m.params.iter_mut() {
                         if let Some(d) = &mut p.default {
                             self.walk_expr(d)?;
                         }
                     }
+                    let tp_bounds = tp_bounds_of(type_params, m);
                     self.push_scope();
                     for p in &m.params {
-                        self.bind_param(p);
+                        self.bind_param(p, &tp_bounds);
                     }
                     self.walk_block(&mut m.body)?;
                     self.pop_scope();
@@ -2366,7 +2559,31 @@ impl Walker<'_> {
                 } else {
                     match self.ctx.methods.get(name.as_str()) {
                         Some(cands) if !cands.is_empty() => {
-                            if cands.iter().all(|c| *c == cands[0]) {
+                            // TICKET-075: when the receiver is typed (or bounded) as a protocol,
+                            // narrow the name-keyed candidates to those whose EXPLICIT parameter
+                            // count matches the protocol's own arity for this method — an exact
+                            // count is a necessary condition for satisfying the protocol, so this
+                            // can never drop a candidate that could have been the real receiver.
+                            // Either lookup missing (unknown protocol, unresolvable embed, or a
+                            // method no reachable protocol declares) leaves `cands` untouched.
+                            let filtered: Vec<Vec<PSpec>>;
+                            let cands: &[Vec<PSpec>] =
+                                match self.receiver_proto(obj).and_then(|(home, proto)| {
+                                    self.ctx.proto_method_arity(&home, &proto, name)
+                                }) {
+                                    Some(n) => {
+                                        filtered = cands
+                                            .iter()
+                                            .filter(|c| c.len() == n)
+                                            .cloned()
+                                            .collect();
+                                        &filtered
+                                    }
+                                    None => cands,
+                                };
+                            if cands.is_empty() {
+                                None
+                            } else if cands.iter().all(|c| *c == cands[0]) {
                                 Some(cands[0].clone())
                             } else if !named.is_empty() {
                                 return Err(err(

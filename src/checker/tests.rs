@@ -31039,3 +31039,49 @@ fn ticket_075_unrelated_struct_default_does_not_splice_into_protocol_call() {
         "protocol P:\n    fn f(self, a: int) -> int\nstruct Deco:\n    z: int\n    fn f(self, a: int, b: int = 10) -> int:\n        return a + b\nfn use(x: P) -> int:\n    return x.f(2)\n",
     );
 }
+
+// TICKET-075: a `[T: P]` bound receiver takes the same name-keyed fallback as a plain protocol-typed
+// receiver, so it must be filtered the same way.
+#[test]
+fn ticket_075_a_bound_receiver_does_not_splice_an_unrelated_structs_default() {
+    ok_desugared(
+        "protocol P:\n    fn f(self, a: int) -> int\nstruct Deco:\n    z: int\n    fn f(self, a: int, b: int = 10) -> int:\n        return a + b\nfn use1[T: P](x: T) -> int:\n    return x.f(2)\n",
+    );
+}
+
+// TICKET-075: a `let`-annotated protocol-typed local (`x: P = w`) resolves to `None` in
+// `receiver_struct_ty` exactly like a bare param, so it must be filtered too.
+#[test]
+fn ticket_075_a_let_annotated_protocol_local_does_not_splice_an_unrelated_structs_default() {
+    ok_desugared(
+        "protocol P:\n    fn f(self, a: int) -> int\nstruct Deco:\n    z: int\n    fn f(self, a: int, b: int = 10) -> int:\n        return a + b\nfn use1(w: P) -> int:\n    x: P = w\n    return x.f(2)\n",
+    );
+}
+
+// TICKET-075 ceiling: a witness whose method declares the SAME explicit parameter count as the
+// protocol still lends its default through a protocol receiver -- this is the shipped W7-51 path
+// and must not regress.
+#[test]
+fn ticket_075_a_matching_witnesss_default_still_fills_a_protocol_call() {
+    ok_desugared(
+        "protocol P:\n    fn f(self, a: int) -> int\nstruct W:\n    v: int\n    fn f(self, a: int = 7) -> int:\n        return self.v + a\nfn use1(x: P) -> int:\n    return x.f()\n",
+    );
+}
+
+// TICKET-075 ceiling: a named argument still binds through a protocol receiver.
+#[test]
+fn ticket_075_a_named_argument_still_binds_through_a_protocol_receiver() {
+    ok_desugared(
+        "protocol P:\n    fn f(self, a: int) -> int\nstruct W:\n    v: int\n    fn f(self, a: int) -> int:\n        return self.v + a\nfn use1(x: P) -> int:\n    return x.f(a=2)\n",
+    );
+}
+
+// TICKET-075 ceiling: a genuine over-arity call through a protocol receiver is still rejected --
+// the filter must not swallow real arity errors.
+#[test]
+fn ticket_075_a_genuine_over_arity_protocol_call_is_still_rejected() {
+    rejects_desugared(
+        "protocol P:\n    fn f(self, a: int) -> int\nstruct W:\n    v: int\n    fn f(self, a: int) -> int:\n        return self.v + a\nfn use1(x: P) -> int:\n    return x.f(2, 3)\n",
+        "'f' expects 1 argument(s), got 2",
+    );
+}
