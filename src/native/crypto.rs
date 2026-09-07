@@ -45,7 +45,7 @@ fn sha256_digest(msg: &[u8]) -> [u8; 32] {
     }
     data.extend_from_slice(&bit_len.to_be_bytes());
 
-    for block in data.chunks_exact(64) {
+    for block in data.as_chunks::<64>().0 {
         let mut w = [0u32; 64];
         for (i, word) in w.iter_mut().take(16).enumerate() {
             *word = u32::from_be_bytes([
@@ -122,7 +122,7 @@ fn sha1_digest(msg: &[u8]) -> [u8; 20] {
     }
     data.extend_from_slice(&bit_len.to_be_bytes());
 
-    for block in data.chunks_exact(64) {
+    for block in data.as_chunks::<64>().0 {
         let mut w = [0u32; 80];
         for (i, word) in w.iter_mut().take(16).enumerate() {
             *word = u32::from_be_bytes([
@@ -280,7 +280,7 @@ fn sha512_digest(msg: &[u8]) -> [u8; 64] {
     }
     data.extend_from_slice(&bit_len.to_be_bytes());
 
-    for block in data.chunks_exact(128) {
+    for block in data.as_chunks::<128>().0 {
         let mut w = [0u64; 80];
         for (i, word) in w.iter_mut().take(16).enumerate() {
             *word = u64::from_be_bytes([
@@ -376,7 +376,7 @@ fn md5_digest(msg: &[u8]) -> [u8; 16] {
     }
     data.extend_from_slice(&bit_len.to_le_bytes());
 
-    for block in data.chunks_exact(64) {
+    for block in data.as_chunks::<64>().0 {
         let mut m = [0u32; 16];
         for (i, word) in m.iter_mut().enumerate() {
             *word = u32::from_le_bytes([
