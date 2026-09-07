@@ -183,6 +183,11 @@ test fn contains_index_of_sum():
     assert [1, 2].index_of(9) == -1, "not found is -1"
     assert [1, 2, 3, 4].sum() == 10
 
+test fn empty_float_list_sum_is_float():
+    ef: List[float] = []
+    s := ef.sum()
+    assert (s + 1) / 2 == 0.5, "empty List[float].sum() must be float 0.0, not int 0"
+
 test fn reverse_mutates():
     xs := [3, 1, 2]
     xs.reverse()
