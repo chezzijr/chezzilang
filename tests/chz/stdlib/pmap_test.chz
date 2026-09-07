@@ -1,0 +1,14 @@
+# tests/chz/stdlib/pmap_test.chz — std.concurrency.pmap module surface.
+#
+# Run: `cargo run -- test tests/chz/`. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+
+import pmap_limited from std.concurrency.pmap
+
+# `limit <= 0` deadlocks internally (`docs/stdlib.md:1599` already documents this as a known
+# `limit > 0` requirement). The caller's mistake must fault as the caller's mistake — naming
+# `limit` — not surface as an internal stdlib deadlock trace.
+test fn pmap_limited_rejects_non_positive_limit():
+    r := recover: pmap_limited([1, 2, 3], fn(x): x, 0)
+    match r:
+        Ok(_):  assert false, "expected a Err naming the bad limit"
+        Err(e): assert e.message().contains("limit"), e.message()
