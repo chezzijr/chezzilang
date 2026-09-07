@@ -2987,7 +2987,7 @@ coherent method family:
   |---|---|---|
   | `.first()` / `.last()` / `.pop()` | `None` | `Option[T]` |
   | **`.min()` / `.max()`** | **faults** | **`T`** |
-  | `.sum()` | `0` (identity) | `T` |
+  | `.sum()` | `0` / `0.0` (identity, per the element type) | `T` |
   | `[i]` index | faults (OOB) | `T` |
 
   `min`/`max` are the SAME category as `first`/`last`/`pop` — "return an element of the collection,

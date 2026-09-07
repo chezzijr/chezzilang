@@ -7,6 +7,15 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-071 (2026-09-07) — an empty `List[float].sum()` returned int `0` at runtime under a
+  static `float`.** The compiler picked the fold's accumulator kind from the RUNTIME elements
+  (`elems.iter().any(|v| v.is_float())`), and an empty list has none, so `(s + 1) / 2` answered `0`
+  where Python answers `0.5`. Fixed by widening the existing newtype-seed mechanism: the checker's
+  `SumSeedTable` now records a `SumSeed::Float` verdict for a `List[float]` `.sum()` site alongside
+  its existing newtype verdict, and the compiler pushes a bare `Op::ConstFloat(0.0)` as `sum`'s hidden
+  seed argument at all three method-dispatch opcodes (`Op::CallMethod`/`Op::DeferMethod`/
+  `Op::SpawnMethod`), so the VM's `sum` arm reads a float seed's tag as "fold in f64". An empty
+  `List[int]` and every newtype case are unchanged.
 - **TICKET-070 (2026-09-08) — `std.encoding.url_parse` misreported the host on four URL shapes.**
   It split the authority on the LAST `:` with no `@`-split first, so `http://example.com:pw@evil.com/x`
   gave `host="example.com"` — a security bypass for any `host` allowlist. Fixed: userinfo is dropped,
