@@ -1,0 +1,51 @@
+# tests/chz/spec/string_index_slice_test.chz — TICKET-072: `s[i]`/`s[a:b]` gained an ASCII fast
+# path (a byte index IS a codepoint index for an all-ASCII string); non-ASCII stays codepoint-based
+# and unchanged. Every expectation here is a CPython 3.14.7 value run for the ticket.
+#
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+
+test fn ascii_index_and_slice():
+    s := "abcdef"
+    assert s[0] == "a"
+    assert s[-1] == "f"
+    assert s[1:3] == "bc"
+    assert s[::-1] == "fedcba"
+    assert s[::2] == "ace"
+
+test fn non_ascii_index_is_by_codepoint_not_byte():
+    assert "héllo"[1] == "é"
+    assert "日本語"[2] == "語"
+    assert "日本語"[-1] == "語"
+    # byte-indexing this string at 2 would land inside "é"'s 2-byte encoding and return 0xA9.
+    assert "aé b"[2] == " "
+
+test fn non_ascii_slice_is_by_codepoint():
+    assert "日本語"[1:3] == "本語"
+    assert "日本語"[::-1] == "語本日"
+    assert "aé b"[1:3] == "é "
+
+test fn index_out_of_bounds_faults():
+    r := recover: "abc"[5]
+    match r:
+        Ok(_): assert false, "expected a fault"
+        Err(e): assert e.message() == "index 5 out of bounds (len 3)"
+
+test fn str_methods_count_codepoints_not_bytes():
+    assert "héllo".len() == 5
+    assert "héllo".index_of("llo") == 2
+    assert "日本語".index_of("語") == 2
+    assert "héllo".starts_with("hé")
+    assert "héllo".ends_with("llo")
+    assert "héllo".contains("é")
+    assert "abc".index_of("z") == -1
+    assert "abc".index_of("") == 0
+
+# `INLINE_CAP` is 22 bytes, so both strings below are heap-stored; `mixed` takes the non-ASCII arm.
+test fn inline_to_heap_boundary_is_correct():
+    long := "a".repeat(23)
+    assert long[22] == "a"
+    assert long.len() == 23
+    mixed := "é" + "a".repeat(22)
+    assert mixed[1] == "a"
+    assert mixed.len() == 23
+    assert mixed[0] == "é"
