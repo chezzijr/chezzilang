@@ -188,6 +188,12 @@ test fn empty_float_list_sum_is_float():
     s := ef.sum()
     assert (s + 1) / 2 == 0.5, "empty List[float].sum() must be float 0.0, not int 0"
 
+test fn sum_of_a_filter_that_emptied_a_float_list():
+    prices := [10.0, 20.0, 25.0]
+    disc := prices.filter(fn(p: float) -> bool: p > 100.0)
+    assert (disc.sum() + 1) / 2 == 0.5, "a filtered-empty List[float] must still sum to float"
+    assert (prices.sum() + 1) / 2 == 28.0
+
 test fn reverse_mutates():
     xs := [3, 1, 2]
     xs.reverse()

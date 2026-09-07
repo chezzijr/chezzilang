@@ -10,6 +10,7 @@ import std.math
 
 newtype UserId = int
 newtype Score = float
+type FloatAlias = float
 
 # ---- sort orders a List[newtype=int] by the wrapped scalar ----
 
@@ -162,6 +163,30 @@ test fn sum_plain_lists_unchanged():
     assert [1, 2, 3].sum() == 6
     ei: List[int] = []
     assert ei.sum() == 0
+    assert (ei.sum() + 1) / 2 == 0
     assert [1.5, 2.5].sum() == 4.0
     ef: List[float] = []
     assert ef.sum() == 0.0
+    assert (ef.sum() + 1) / 2 == 0.5     # `0 == 0.0` is TRUE, so only this pins the TYPE
+
+# The ELEMENT TYPE decides `sum`'s numeric kind, because an empty list carries no element to read it
+# off.
+
+test fn sum_empty_float_list_is_float():
+    ef: List[float] = []
+    assert (ef.sum() + 1) / 2 == 0.5
+    assert "{ef.sum()}" == "0.0"
+
+test fn sum_empty_float_list_through_a_float_alias():
+    xs: List[FloatAlias] = []
+    assert (xs.sum() + 1) / 2 == 0.5
+
+test fn sum_empty_float_map_values_is_float():
+    m: Map[str, float] = {}
+    assert (m.values().sum() + 1) / 2 == 0.5
+
+test fn two_empty_sums_one_line_keep_distinct_verdicts():
+    ef: List[float] = []
+    en: List[int] = []
+    assert "{ef.sum()} {en.sum()}" == "0.0 0"
+    assert "{en.sum()} {ef.sum()}" == "0 0.0"
