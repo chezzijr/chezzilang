@@ -202,6 +202,15 @@ a, b = b, a            # tuple swap — multi-target assignment, see below
 - **Local inference:** inside function bodies you rarely write types — `:=` infers.
 - **Explicit annotation** (`name: T = ...`) is allowed anywhere and **required on function signatures** (§5).
 
+**Evaluation order -- the right-hand side runs first (Python semantics).** In `place = value`,
+`value` is evaluated **before** the target's own sub-expressions: before `obj` and `i` in
+`obj[i] = value`, before `obj` in `obj.f = value`, and before `k` in `m[k] = value`. So
+`xs[bump()] = xs[bump()] + 10` on `[1, 2, 3]`, with a `bump` returning `0` then `1`, gives
+`[1, 11, 3]` -- CPython's answer. **Compound** assignment is the one that touches the target
+first, because `x OP= v` is `x = x OP v` and the read is part of the right-hand side:
+`xs[k()] += g()` calls `k` then `g`, which is Python's order too. **Multi-target** assignment
+evaluates the whole right-hand side first. Both are described below.
+
 **Compound assignment.** `x OP= v` is exactly `x = x OP v`, on variables, list elements, struct
 fields, and map values. The full set is `+= -= *= /= %=` (numeric; `+=` also concatenates `str`)
 and `&= |= ^= <<= >>=` (int-only, mirroring the bitwise operators). Because `x OP= v` is `x = x OP

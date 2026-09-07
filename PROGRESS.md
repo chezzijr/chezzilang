@@ -51,6 +51,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   position 0 (`is_scheme` filter), so `/p/a://b` no longer loses its path; the scheme is lowercased,
   the host keeps its case. `host` still mirrors Go's `URL.Host` minus the port, never CPython's
   `.hostname` — see `docs/stdlib.md`.
+- **TICKET-074 (2026-09-07) -- plain `=` on an index/field/key target now evaluates the RHS first (Python order).** `xs[bump()] = xs[bump()] + 10` on `[1, 2, 3]` printed `[12, 2, 3]` and now prints `[1, 11, 3]`, matching CPython 3.14.7; the order probes moved `K, G` to `G, K` for `xs[k()] = g()`, `OBJ, RHS` to `RHS, OBJ` for `obj().v = rhs()`, and `KEY, RHS` to `RHS, KEY` for `m[key()] = rhs()`. `compile_assign`'s plain-`=` Field and Index arms now compile the value first and reuse `emit_assign_value_first`, the stash-and-reload helper the `wait` `=` arm already had (renamed from `emit_wait_assign`). The compound (`+=`) and multi-target arms are unchanged -- both already matched Python, and two ceiling tests now pin them. Landed as three commits (tests, fix, docs) per DEC-006; `cargo test` green, `cargo clippy -- -D warnings` clean.
 - **TICKET-069 (2026-09-06) — six stdlib/render contract violations fixed (`docs/gaps.md`
   W10-18, W10-21, W10-23..26).** `cmp.min` was second-wins on a non-`<` tie while `cmp.max` was
   first-wins; `min` now mirrors `max`'s shape so both return the first argument on a tie
