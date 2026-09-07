@@ -72,7 +72,7 @@ fn no_chz_test_divides_two_wall_clock_samples() {
 /// A name may join the list, but only deliberately, in the commit that adds the clock, with the
 /// reason in that commit message. A test converted to a counted measure must be DELETED from the
 /// list in the same commit that converts it.
-const CLOCK_READING_TESTS: [&str; 20] = [
+const CLOCK_READING_TESTS: [&str; 21] = [
     "a_chezzi_hang_python_survives_is_a_finding",
     "a_cyclic_shared_field_type_graph_is_also_walked_once_per_type",
     "a_shared_field_type_graph_is_walked_once_per_type",
@@ -85,6 +85,10 @@ const CLOCK_READING_TESTS: [&str; 20] = [
     "parallel_many_spawns_cheap_and_correct",
     "parity_blocking_native_is_an_entry_cancellation_checkpoint_on_both_engines",
     "rwshared_view_over_shared_bindings_is_not_quadratic",
+    // TICKET-072: `core_method`'s `Obj::Str` arm used to clone the whole receiver `String` before
+    // dispatching any method, so a borrow-only method like `starts_with` cost O(len(s)) per call.
+    // The cost is a Rust-side `String` clone the VM counts nowhere, so there is no counted measure.
+    "str_method_dispatch_does_not_clone_the_receiver",
     // TICKET-072: `s[i]` collects a fresh `Vec<char>` of the whole string per subscript, so an
     // index loop is O(n^2). The cost is a per-operation allocation the VM counts nowhere, so there
     // is no counted measure to use; the bound is one absolute ceiling, the same shape

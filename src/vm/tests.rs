@@ -12250,6 +12250,24 @@ fn string_index_loop_is_not_quadratic() {
     );
 }
 
+/// TICKET-072: `core_method`'s `Obj::Str` arm used to `to_string()` (clone) the whole receiver
+/// before dispatching ANY method, so a borrow-only method like `starts_with` cost O(len(s)) per
+/// call. The cost is a Rust-side `String` clone the VM counts nowhere, so there is no counted
+/// measure to gate on instead of a wall clock (see `CLOCK_READING_TESTS` in
+/// `tests/no_wall_clock_ratio_gates.rs`).
+#[test]
+fn str_method_dispatch_does_not_clone_the_receiver() {
+    let src = "fn main():\n    s := \"a\".repeat(1000000)\n    c := 0\n    i := 0\n    while i < 60000:\n        if s.starts_with(\"a\"): c = c + 1\n        i = i + 1\n    print(c)\nmain()\n";
+    let start = std::time::Instant::now();
+    let out = run(src);
+    let elapsed = start.elapsed();
+    assert_eq!(out, "60000\n");
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "60000 starts_with calls on a 1MB string took {elapsed:?} (>2s ceiling) -- the receiver is still being cloned per call"
+    );
+}
+
 /// B3.6: a submitted closure capturing a plain value (`int`) observes it **by value** across the
 /// airlock — exercises the `WireValue::Closure` capture round-trip (not just the shared-`Arc` handle
 /// path the golden's `Channel` capture takes). Auto-drained at program exit; the

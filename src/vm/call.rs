@@ -2824,12 +2824,44 @@ impl Vm {
         };
         match self.heap.get(h) {
             Obj::Str(s) => {
-                let s = s.to_string();
+                // Borrow-only dispatch: these five methods return an `int`/`bool` and allocate
+                // nothing, so they answer under the `&Obj` borrow instead of paying the clone
+                // below. Anything that allocates, re-enters the VM, or needs `&mut self` must
+                // stay under the clone (TICKET-072).
                 match method {
                     "len" => {
                         self.arity_err("len", args, 0, span)?;
-                        Ok(Value::int(s.chars().count() as i64))
+                        return Ok(Value::int(s.char_len() as i64));
                     }
+                    "starts_with" | "ends_with" | "contains" => {
+                        self.arity_err(method, args, 1, span)?;
+                        let sub = str_arg(self, 0)?;
+                        let hit = match method {
+                            "starts_with" => s.starts_with(sub.as_str()),
+                            "ends_with" => s.ends_with(sub.as_str()),
+                            _ => s.contains(sub.as_str()),
+                        };
+                        return Ok(Value::bool(hit));
+                    }
+                    "index_of" => {
+                        self.arity_err("index_of", args, 1, span)?;
+                        let sub = str_arg(self, 0)?;
+                        if sub.is_empty() {
+                            return Ok(Value::int(0));
+                        }
+                        return Ok(match s.find(sub.as_str()) {
+                            Some(byte) => Value::int(if s.ascii_bytes().is_some() {
+                                byte as i64
+                            } else {
+                                s[..byte].chars().count() as i64
+                            }),
+                            None => Value::int(-1),
+                        });
+                    }
+                    _ => {}
+                }
+                let s = s.to_string();
+                match method {
                     "upper" => {
                         self.arity_err("upper", args, 0, span)?;
                         Ok(self.alloc_str(s.to_uppercase()))
@@ -2906,14 +2938,6 @@ impl Vm {
                         let cs: Vec<Value> = s.chars().map(|c| self.alloc_char(c)).collect();
                         Ok(Value::obj(self.heap.alloc(Obj::List(cs))))
                     }
-                    "starts_with" => {
-                        self.arity_err("starts_with", args, 1, span)?;
-                        Ok(Value::bool(s.starts_with(str_arg(self, 0)?.as_str())))
-                    }
-                    "contains" => {
-                        self.arity_err("contains", args, 1, span)?;
-                        Ok(Value::bool(s.contains(str_arg(self, 0)?.as_str())))
-                    }
                     // `encode() -> bytes`: UTF-8 encode (str is UTF-8 internally; copy the bytes out
                     // into a new immutable `bytes`). Always succeeds — no fault path. UTF-8 only.
                     "encode" => {
@@ -2971,10 +2995,6 @@ impl Vm {
                     // gap #1 (minimal subset): receiver methods forwarding to the `std.string` free
                     // fns. Pure native Rust, byte-identical to the std.string codepoint-loop oracle
                     // (see std/string.chz) and to the interp arms.
-                    "ends_with" => {
-                        self.arity_err("ends_with", args, 1, span)?;
-                        Ok(Value::bool(s.ends_with(str_arg(self, 0)?.as_str())))
-                    }
                     "replace" => {
                         self.arity_err("replace", args, 2, span)?;
                         let old = str_arg(self, 0)?;
@@ -3078,19 +3098,6 @@ impl Vm {
                                 Ok(self.alloc_str(out))
                             }
                             None => Err(self.err("string pad capacity overflow".to_string(), span)),
-                        }
-                    }
-                    "index_of" => {
-                        self.arity_err("index_of", args, 1, span)?;
-                        let sub = str_arg(self, 0)?;
-                        // std.string: empty -> 0; otherwise the CODEPOINT index (not byte offset).
-                        if sub.is_empty() {
-                            Ok(Value::int(0))
-                        } else {
-                            match s.find(sub.as_str()) {
-                                Some(byte) => Ok(Value::int(s[..byte].chars().count() as i64)),
-                                None => Ok(Value::int(-1)),
-                            }
                         }
                     }
                     "count" => {
