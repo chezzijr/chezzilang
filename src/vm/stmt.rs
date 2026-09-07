@@ -469,12 +469,21 @@ impl Vm {
                     .map_err(|m| self.err(m.to_string(), span))?;
                 Sliced::List(idxs.iter().map(|&i| items[i]).collect())
             }
-            Obj::Str(string) => {
-                let chars: Vec<char> = string.chars().collect();
-                let idxs = crate::slice::slice_indices(s, e, st, chars.len())
-                    .map_err(|m| self.err(m.to_string(), span))?;
-                Sliced::Str(idxs.iter().map(|&i| chars[i]).collect())
-            }
+            // ASCII arm: a byte index IS a codepoint index. The `None` arm is the pre-change
+            // code verbatim and stays O(n) per slice for non-ASCII text.
+            Obj::Str(string) => match string.ascii_bytes() {
+                Some(b) => {
+                    let idxs = crate::slice::slice_indices(s, e, st, b.len())
+                        .map_err(|m| self.err(m.to_string(), span))?;
+                    Sliced::Str(idxs.iter().map(|&i| b[i] as char).collect())
+                }
+                None => {
+                    let chars: Vec<char> = string.chars().collect();
+                    let idxs = crate::slice::slice_indices(s, e, st, chars.len())
+                        .map_err(|m| self.err(m.to_string(), span))?;
+                    Sliced::Str(idxs.iter().map(|&i| chars[i]).collect())
+                }
+            },
             // `bytes[a:b:c]` slices over BYTE offsets and yields a new `bytes` (open bounds / step /
             // reverse / negative all via the shared `slice_indices`, exactly like list/str).
             Obj::Bytes(b) => {
