@@ -2060,3 +2060,8 @@ total. 60000 `s.starts_with("a")` calls on a 1 MB ASCII string: main `3.873 s` v
 
 Non-ASCII index/slice is unchanged by this ticket — a non-ASCII `s[i]`/`s[a:b]` still runs the
 pre-change `Vec<char>` collect per operation.
+
+**Construction-time cost check.** Every heap-string constructor now runs an `is_ascii()` scan
+(O(n), once, at construction) to pick `HeapAscii` vs `Heap`. `benches/run.chz`'s `str` bench (500k
+f-string interpolations + one `join`, all ASCII) is the closest existing bench to this cost: main
+`0.271 s` vs this branch `0.252 s`, same box, load average ~1.4–2.5 — no regression.
