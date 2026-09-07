@@ -34,5 +34,8 @@ native fn query_encode(params: Map[str, str]) -> str
 native fn query_decode(q: str) -> Map[str, str]
 # `url_parse(u) -> Map[str, str]` — LEXICAL split into keys scheme/host/port/path/query/fragment
 # (missing → ""). NO percent-decoding of components (Python `urlsplit` / Go `net/url` leave them
-# encoded); `port` is a STRING ("" when absent). Best-effort, never faults.
+# encoded); `port` is a STRING ("" when absent). Best-effort, never faults. Userinfo
+# (`user:pass@host`) is DROPPED, split on the last `@` -- never folded into host/port. IPv6 brackets
+# stay in `host` unstripped. A scheme separator (`://`) must be anchored at position 0, or the whole
+# string is `path`. The scheme is lowercased; `host` keeps its original case.
 native fn url_parse(u: str) -> Map[str, str]

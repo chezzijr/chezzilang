@@ -7,6 +7,14 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-070 (2026-09-08) — `std.encoding.url_parse` misreported the host on four URL shapes.**
+  It split the authority on the LAST `:` with no `@`-split first, so `http://example.com:pw@evil.com/x`
+  gave `host="example.com"` — a security bypass for any `host` allowlist. Fixed: userinfo is dropped,
+  split on the LAST `@` (measured Go `url.Parse` / CPython `urlsplit`); IPv6 brackets stay in `host`
+  and only a `:port` after the closing `]` splits off; a scheme separator (`://`) must be anchored at
+  position 0 (`is_scheme` filter), so `/p/a://b` no longer loses its path; the scheme is lowercased,
+  the host keeps its case. `host` still mirrors Go's `URL.Host` minus the port, never CPython's
+  `.hostname` — see `docs/stdlib.md`.
 - **TICKET-069 (2026-09-06) — six stdlib/render contract violations fixed (`docs/gaps.md`
   W10-18, W10-21, W10-23..26).** `cmp.min` was second-wins on a non-`<` tie while `cmp.max` was
   first-wins; `min` now mirrors `max`'s shape so both return the first argument on a tie

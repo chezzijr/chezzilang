@@ -1236,10 +1236,19 @@ Reversible text codecs. Every function takes a `str` and operates on its **UTF-8
   str→str, the Go `url.Port()` / Python analog). Best-effort, never faults. A **protocol-relative**
   URL (`//host/path`, no scheme) also splits its authority: `url_parse("//h/p")` gives `host="h"`,
   `path="/p"`, matching measured Go 1.26.6 `url.Parse` and CPython 3.14.7 `urlsplit`; with a port,
-  `url_parse("//h:8080/p")` gives `host="h"`, `port="8080"`, `path="/p"`. Ceilings: the last-`:`
-  host:port split folds userinfo (`user:pass@host`) and IPv6 (`[::1]:8080`) into `host`, and a `//`-less
-  scheme (`mailto:x`) lands the remainder in `path` — both apply equally to the `scheme://` and bare
-  `//` forms. `url_parse("///p")` follows CPython (`host=""`, `path="/p"`), not Go's RFC-3986 special
+  `url_parse("//h:8080/p")` gives `host="h"`, `port="8080"`, `path="/p"`. Userinfo (`user:pass@host`)
+  is **dropped**, split on the LAST `@` — `url_parse("http://example.com:pw@evil.com/x")` gives
+  `host="evil.com"`, matching Go/CPython; it is never folded into `host`/`port` (a security bypass for
+  any `host` allowlist that used to see attacker-controlled userinfo instead). IPv6 brackets stay in
+  `host` (`host` mirrors Go's `URL.Host` minus the port, never CPython's bracket-stripping,
+  lowercasing `.hostname`); only a `:port` after the closing `]` splits off, so
+  `url_parse("http://[::1]:8080/a")` gives `host="[::1]"`, `port="8080"`. The scheme separator
+  (`://`) must be ANCHORED at position 0 of the remaining string (an RFC-3986 scheme is
+  `[A-Za-z][A-Za-z0-9+.-]*`), so a later, unanchored `://` is plain path text —
+  `url_parse("/p/a://b")` gives `path="/p/a://b"`, not a bogus `scheme="/p/a"`. The scheme is
+  lowercased (`url_parse("HTTPS://EXAMPLE.COM/x")` gives `scheme="https"`); `host` keeps its
+  original case. Ceiling: a `//`-less scheme (`mailto:x`) still lands the remainder in `path`.
+  `url_parse("///p")` follows CPython (`host=""`, `path="/p"`), not Go's RFC-3986 special
   case which keeps `///p` whole in `path` — CPython is the ancestor for scripting/stdlib feel.
 
 **Seam note:** the `str` members UTF-8-validate their decoded output, so a non-UTF-8 result is an `Err`
