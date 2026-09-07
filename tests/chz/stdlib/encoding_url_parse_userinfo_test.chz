@@ -1,0 +1,13 @@
+# tests/chz/stdlib/encoding_url_parse_userinfo_test.chz — TICKET-070: `url_parse` splits the
+# authority on the LAST `:` with no `@`-split first, so userinfo containing a `:` bleeds into
+# `host`/`port` and the real host is misreported. Security-relevant: an allowlist check against
+# `host` passes for an attacker-controlled host.
+#
+# Measured: CPython 3.14.7 `urllib.parse.urlsplit("http://example.com:pw@evil.com/x")` ->
+# hostname='evil.com', port=None. Go 1.27 `net/url.Parse` agrees: Host="evil.com".
+
+import std.encoding as enc
+
+test fn url_parse_splits_userinfo_before_port():
+    parts := enc.url_parse("http://example.com:pw@evil.com/x")
+    assert parts["host"] == "evil.com", str(parts)
