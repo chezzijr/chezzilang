@@ -278,7 +278,15 @@ pub type ArgFloatWidenTable = HashMap<CarrierKey, bool>;
 /// error instead of silently applying one site's seed to another. A lookup MISS means "plain numeric
 /// sum", which is also the pre-fix lowering — so a missing entry can only ever under-apply the fix,
 /// never mis-apply it.
-pub type NewtypeSumTable = HashMap<CarrierKey, Option<(String, bool)>>;
+#[derive(Debug, Clone, PartialEq)]
+pub enum SumSeed {
+    /// A scalar numeric `newtype`: `ConstInt(0)`/`ConstFloat(0.0)` then `Op::NewType(key)`.
+    NewType { key: String, is_float: bool },
+    /// A plain `List[float]`: a bare `ConstFloat(0.0)`. The EMPTY case is why this exists --
+    /// the backend is type-blind and an empty list carries no element to read a kind off.
+    Float,
+}
+pub type SumSeedTable = HashMap<CarrierKey, Option<SumSeed>>;
 
 /// Surface-only parameter labels on a function type (Swift SE-0111 keyword arguments through a
 /// function VALUE). They ride PARALLEL to a `Ty::Func`'s `params`, but participate in NO type

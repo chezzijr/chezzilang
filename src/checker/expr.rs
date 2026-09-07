@@ -3115,7 +3115,7 @@ impl Checker {
                 // key is a hard error instead of one site's seed reaching another.
                 let elem = (**elem).clone();
                 if method == "sum" {
-                    let seed = self.newtype_sum_seed(&elem);
+                    let seed = self.sum_seed(&elem);
                     if seed.is_none() && !(elem.is_numeric() || elem.is_unknown()) {
                         self.infer_all(args);
                         self.error(
@@ -3124,7 +3124,7 @@ impl Checker {
                         );
                         return Ty::Unknown;
                     }
-                    self.record_newtype_sum(name_span, seed, span);
+                    self.record_sum_seed(name_span, seed, span);
                 }
                 // **W7-45**, the same dispatch-time residual one line up, for the same reason. These
                 // four have a RUNTIME of `values_equal` (`vm/call.rs` contains / index_of /

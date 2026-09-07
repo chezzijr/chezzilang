@@ -114,7 +114,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     c.carriers = ct;
     c.proto_eq_calls = pe;
     c.list_widen = lw;
-    c.newtype_sums = ns;
+    c.sum_seeds = ns;
     c.ret_coerce = rc;
     c.arg_float_widen = afw;
     // Pass 0: collision pre-pass — assign runtime keys for module-scoped user types. A type name
@@ -200,7 +200,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     c.carriers = ct;
     c.proto_eq_calls = pe;
     c.list_widen = lw;
-    c.newtype_sums = ns;
+    c.sum_seeds = ns;
     c.ret_coerce = rc;
     c.arg_float_widen = afw;
     let toplevel = c.compile_module(0, module, &[], true, None)?;
@@ -354,8 +354,8 @@ struct Compiler {
     /// Which `.sum()` sites need a `T(0)` newtype SEED pushed as a hidden argument. The backend is
     /// type-blind — an empty `List[Cents]` carries no element to read a `type_key` off — so this is
     /// CONSUMED from the checker and never re-derived; a MISS means "plain numeric sum", which is the
-    /// pre-fix lowering. See [`crate::checker::NewtypeSumTable`].
-    newtype_sums: crate::checker::NewtypeSumTable,
+    /// pre-fix lowering. See [`crate::checker::SumSeedTable`].
+    sum_seeds: crate::checker::SumSeedTable,
     /// W8-21 — which implicit success-coercion (if any) each declared `T?`/`T!E` return sink applies
     /// to its bare success value, consumed verbatim: the backend is type-blind and cannot re-derive
     /// whether the returned expression is already a carrier. A MISS means `NoWrap` — the pre-fix
@@ -891,7 +891,7 @@ impl Compiler {
             carriers: crate::checker::CarrierTable::new(),
             proto_eq_calls: crate::checker::ProtoEqTable::new(),
             list_widen: crate::checker::ListWidenTable::new(),
-            newtype_sums: crate::checker::NewtypeSumTable::new(),
+            sum_seeds: crate::checker::SumSeedTable::new(),
             ret_coerce: crate::checker::RetCoerceTable::new(),
             arg_float_widen: crate::checker::ArgFloatWidenTable::new(),
             next_opt_tmp: 0,
@@ -2560,18 +2560,9 @@ impl Compiler {
                     // is a check-clean / run-faulting `List[Cents].sum()`. The seed is a plain
                     // newtype-wrapped scalar, so it crosses `do_spawn`'s `deep_clone_all` airlock
                     // exactly like any other spawned argument.
-                    if let Some((nt_key, is_float)) = self.newtype_sum_seed(name, args, *name_span)
-                    {
+                    if let Some(seed) = self.sum_seed(name, args, *name_span) {
                         self.compile_expr(fc, obj)?;
-                        fc.emit(
-                            if is_float {
-                                Op::ConstFloat(0.0)
-                            } else {
-                                Op::ConstInt(0)
-                            },
-                            call.span,
-                        );
-                        fc.emit(Op::NewType(nt_key), call.span);
+                        self.emit_sum_seed(fc, &seed, call.span);
                         fc.emit(Op::SpawnMethod(name.clone(), 1), call.span);
                         return Ok(());
                     }
@@ -4838,17 +4829,9 @@ impl Compiler {
             // `Vm::do_method_call`, so without it the fold sees a `NewType` element and faults at
             // RUN time on a program that CHECKED clean. Method dispatch has exactly three opcodes
             // (`CallMethod`/`DeferMethod`/`SpawnMethod`); all three consult the seed.
-            if let Some((nt_key, is_float)) = self.newtype_sum_seed(name, args, *name_span) {
+            if let Some(seed) = self.sum_seed(name, args, *name_span) {
                 self.compile_expr(fc, obj)?;
-                fc.emit(
-                    if is_float {
-                        Op::ConstFloat(0.0)
-                    } else {
-                        Op::ConstInt(0)
-                    },
-                    call.span,
-                );
-                fc.emit(Op::NewType(nt_key), call.span);
+                self.emit_sum_seed(fc, &seed, call.span);
                 fc.emit(Op::DeferMethod(name.clone(), 1), call.span);
                 return Ok(());
             }
@@ -4985,21 +4968,22 @@ impl Compiler {
             )) == Some(&true)
     }
 
-    /// The `T(0)` seed a `xs.sum()` site needs, per the checker's [`crate::checker::NewtypeSumTable`]
-    /// — `Some((runtime type key, underlying-is-float))` for a scalar-numeric-newtype list. A MISS,
-    /// or a recorded `None`, means the plain numeric sum (the pre-fix lowering), so a stale/absent
-    /// entry can only under-apply. Keyed on the method-NAME token, which is distinct per link of a
-    /// postfix/pipe chain (the call node's span is not — see [`crate::checker::CarrierKey`]).
-    fn newtype_sum_seed(
+    /// The seed a `xs.sum()` site needs, per the checker's [`crate::checker::SumSeedTable`] --
+    /// `Some(SumSeed::NewType { .. })` for a scalar-numeric-newtype list, `Some(SumSeed::Float)` for
+    /// a plain `List[float]`. A MISS, or a recorded `None`, means the plain numeric sum (the pre-fix
+    /// lowering), so a stale/absent entry can only under-apply. Keyed on the method-NAME token,
+    /// which is distinct per link of a postfix/pipe chain (the call node's span is not -- see
+    /// [`crate::checker::CarrierKey`]).
+    fn sum_seed(
         &self,
         name: &str,
         args: &[Expr],
         name_span: Span,
-    ) -> Option<(String, bool)> {
+    ) -> Option<crate::checker::SumSeed> {
         if name != "sum" || !args.is_empty() {
             return None;
         }
-        self.newtype_sums
+        self.sum_seeds
             .get(&crate::checker::carrier_key(
                 self.current_module_idx,
                 self.kw_frag_ctx,
@@ -5007,6 +4991,26 @@ impl Compiler {
                 name_span,
             ))?
             .clone()
+    }
+
+    /// Emit `sum`'s hidden seed argument: `T(0)` for a numeric newtype, a bare `0.0` for a plain
+    /// `List[float]`. The value IS the empty list's answer, and its TAG tells the runtime fold
+    /// which kind to accumulate in.
+    fn emit_sum_seed(&self, fc: &mut FnComp, seed: &crate::checker::SumSeed, span: Span) {
+        match seed {
+            crate::checker::SumSeed::NewType { key, is_float } => {
+                fc.emit(
+                    if *is_float {
+                        Op::ConstFloat(0.0)
+                    } else {
+                        Op::ConstInt(0)
+                    },
+                    span,
+                );
+                fc.emit(Op::NewType(key.clone()), span);
+            }
+            crate::checker::SumSeed::Float => fc.emit(Op::ConstFloat(0.0), span),
+        }
     }
 
     /// W8-21 — emit the `Op::NewEnum` wrap a declared `T?`/`T!E` return sink's success-coercion
@@ -5739,17 +5743,9 @@ impl Compiler {
             // EMPTY list, which is why it must come from here: the backend is type-blind and an empty
             // list carries no element to read a `type_key` off. The checker decided it; a miss falls
             // through to the plain numeric lowering below.
-            if let Some((nt_key, is_float)) = self.newtype_sum_seed(name, args, *name_span) {
+            if let Some(seed) = self.sum_seed(name, args, *name_span) {
                 self.compile_expr(fc, obj)?;
-                fc.emit(
-                    if is_float {
-                        Op::ConstFloat(0.0)
-                    } else {
-                        Op::ConstInt(0)
-                    },
-                    span,
-                );
-                fc.emit(Op::NewType(nt_key), span);
+                self.emit_sum_seed(fc, &seed, span);
                 let ic = self.next_method_ic();
                 fc.emit(
                     Op::CallMethod {

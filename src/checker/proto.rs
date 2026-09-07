@@ -2864,7 +2864,10 @@ impl Checker {
     /// underlying — so `sum`'s `where T: Add` bound and this seed can never disagree. A newtype OF a
     /// newtype has a non-numeric underlying and so is `None`: it is rejected, exactly as `Cents(1) +
     /// Cents(1)`'s outer wrapper and `.min()`'s `Comparable` bound already reject it.
-    pub(super) fn newtype_sum_seed(&self, elem: &Ty) -> Option<(String, bool)> {
+    pub(super) fn sum_seed(&self, elem: &Ty) -> Option<SumSeed> {
+        if matches!(elem, Ty::Float) {
+            return Some(SumSeed::Float);
+        }
         let Ty::NewType(key, _) = elem else {
             return None;
         };
@@ -2872,19 +2875,15 @@ impl Checker {
             return None;
         }
         let under = self.newtype_underlying(key)?;
-        under
-            .is_numeric()
-            .then(|| (key.clone(), matches!(under, Ty::Float)))
+        under.is_numeric().then(|| SumSeed::NewType {
+            key: key.clone(),
+            is_float: matches!(under, Ty::Float),
+        })
     }
 
     /// Record one `.sum()` site's seed for the backend, under the same key derivation
     /// [`Self::record_proto_eq`] uses (the method-NAME token — see [`crate::checker::CarrierKey`]).
-    pub(super) fn record_newtype_sum(
-        &mut self,
-        name_span: Span,
-        seed: Option<(String, bool)>,
-        span: Span,
-    ) {
+    pub(super) fn record_sum_seed(&mut self, name_span: Span, seed: Option<SumSeed>, span: Span) {
         let key = crate::checker::carrier_key(
             self.graph_module_idx,
             self.kw_frag_ctx,
@@ -2892,7 +2891,7 @@ impl Checker {
             name_span,
         );
         crate::checker::record_call_table_entry(
-            &mut self.newtype_sums,
+            &mut self.sum_seeds,
             &mut self.table_conflicts,
             key,
             seed,

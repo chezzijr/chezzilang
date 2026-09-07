@@ -98,7 +98,7 @@ impl Checker {
             carriers: crate::checker::CarrierTable::new(),
             proto_eq_calls: crate::checker::ProtoEqTable::new(),
             list_widen: crate::checker::ListWidenTable::new(),
-            newtype_sums: crate::checker::NewtypeSumTable::new(),
+            sum_seeds: crate::checker::SumSeedTable::new(),
             ret_coerce: crate::checker::RetCoerceTable::new(),
             arg_float_widen: crate::checker::ArgFloatWidenTable::new(),
             table_conflicts: Vec::new(),

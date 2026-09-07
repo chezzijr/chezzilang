@@ -3279,49 +3279,57 @@ impl Vm {
                         Ok(Value::nil())
                     }
                     "sum" => {
-                        // A SCALAR NUMERIC NEWTYPE list arrives with one hidden argument: the `T(0)`
-                        // seed the compiler minted from the checker's `NewtypeSumTable` (a user cannot
-                        // spell `.sum(x)` — the harvested sig takes no parameters). Fold from it
-                        // through `newtype_arith`, the same unwrap→native-op→rewrap path `Cents +
-                        // Cents` takes, so overflow faults identically and the result is `T`. The seed
-                        // alone is the answer for an EMPTY list.
-                        if args.len() == 1 {
+                        // A one-argument call carries the CHECKER's seed: either the `T(0)` seed for a
+                        // scalar numeric newtype list (a user cannot spell `.sum(x)` — the harvested
+                        // sig takes no parameters), folded through `newtype_arith`, the same
+                        // unwrap→native-op→rewrap path `Cents + Cents` takes, so overflow faults
+                        // identically and the result is `T`; or a bare `0.0` seed for a plain
+                        // `List[float]`, whose VALUE is the empty list's own answer and only has to
+                        // force the fold below into its float arm. The seed alone is the answer for an
+                        // EMPTY list either way.
+                        let seed_is_float = if args.len() == 1 {
                             let seed = args[0];
-                            let elems = items.clone();
-                            let mut acc = seed;
-                            for &v in &elems {
-                                // BELT-AND-BRACES, not load-bearing today. `acc` is a heap value held
-                                // only in a Rust local across `newtype_arith`'s `heap.alloc`, which is
-                                // the shape `with_roots` exists for — but no collection can land here:
-                                // the only two `collect()` sites are `run_until`'s instruction boundary
-                                // (`exec.rs`) and `sample_mem_cap` (per task dispatch, `sched.rs`);
-                                // `Heap::alloc` merely bumps counters. Unlike the `values_equal_guarded`
-                                // / `hash_value` `with_roots` sites nearby, `newtype_arith` is pure
-                                // native and cannot re-enter the VM — the admitted set is exactly the
-                                // INTRINSIC-`Add` set, so there is no user `add` hook to dispatch. Kept
-                                // so the fold stays correct if a collect trigger ever moves.
-                                acc = self.with_roots(&[Value::obj(h), acc, v], |vm| {
-                                    match (acc.as_obj(), v.as_obj()) {
-                                        (Some(ha), Some(hb)) if vm.same_newtype_keys(ha, hb) => {
-                                            vm.newtype_arith(&Op::Add, ha, hb, "Add", span)
+                            if seed.is_float() {
+                                true
+                            } else {
+                                let elems = items.clone();
+                                let mut acc = seed;
+                                for &v in &elems {
+                                    // BELT-AND-BRACES, not load-bearing today. `acc` is a heap value held
+                                    // only in a Rust local across `newtype_arith`'s `heap.alloc`, which is
+                                    // the shape `with_roots` exists for — but no collection can land here:
+                                    // the only two `collect()` sites are `run_until`'s instruction boundary
+                                    // (`exec.rs`) and `sample_mem_cap` (per task dispatch, `sched.rs`);
+                                    // `Heap::alloc` merely bumps counters. Unlike the `values_equal_guarded`
+                                    // / `hash_value` `with_roots` sites nearby, `newtype_arith` is pure
+                                    // native and cannot re-enter the VM — the admitted set is exactly the
+                                    // INTRINSIC-`Add` set, so there is no user `add` hook to dispatch. Kept
+                                    // so the fold stays correct if a collect trigger ever moves.
+                                    acc = self.with_roots(&[Value::obj(h), acc, v], |vm| {
+                                        match (acc.as_obj(), v.as_obj()) {
+                                            (Some(ha), Some(hb)) if vm.same_newtype_keys(ha, hb) => {
+                                                vm.newtype_arith(&Op::Add, ha, hb, "Add", span)
+                                            }
+                                            _ => Err(vm.err(
+                                                format!(
+                                                    "sum() expects a numeric list, got an element of type {}",
+                                                    vm.type_name(v)
+                                                ),
+                                                span,
+                                            )),
                                         }
-                                        _ => Err(vm.err(
-                                            format!(
-                                                "sum() expects a numeric list, got an element of type {}",
-                                                vm.type_name(v)
-                                            ),
-                                            span,
-                                        )),
-                                    }
-                                })?;
+                                    })?;
+                                }
+                                return Ok(acc);
                             }
-                            return Ok(acc);
-                        }
-                        self.arity_err("sum", args, 0, span)?;
+                        } else {
+                            self.arity_err("sum", args, 0, span)?;
+                            false
+                        };
                         // Clone out so `make_int`/`box_float` (which mutate the heap) don't collide with
                         // the `items` heap borrow.
                         let elems = items.clone();
-                        let any_float = elems.iter().any(|v| v.is_float());
+                        let any_float = seed_is_float || elems.iter().any(|v| v.is_float());
                         if any_float {
                             let mut acc = 0.0_f64;
                             for &v in &elems {

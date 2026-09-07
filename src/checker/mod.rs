@@ -22,8 +22,8 @@ pub use ty::Ty;
 use ty::compatible;
 pub use ty::{
     ArgFloatWidenTable, CarrierKey, CarrierMode, CarrierTable, ElemWiden, FnLabels, KeywordKey,
-    KeywordTable, ListWidenKey, ListWidenTable, NewtypeSumTable, ProtoEqTable, RetCoerce,
-    RetCoerceTable, WitnessCallee, WitnessKey, WitnessSrc, WitnessTable,
+    KeywordTable, ListWidenKey, ListWidenTable, ProtoEqTable, RetCoerce, RetCoerceTable, SumSeed,
+    SumSeedTable, WitnessCallee, WitnessKey, WitnessSrc, WitnessTable,
 };
 
 /// The fully-resolved C signature of one `extern` fn, computed by the checker in the defining
@@ -1026,7 +1026,7 @@ pub fn resolve_call_tables(
     CarrierTable,
     ProtoEqTable,
     ListWidenTable,
-    NewtypeSumTable,
+    SumSeedTable,
     RetCoerceTable,
     ArgFloatWidenTable,
     TableConflicts,
@@ -1041,7 +1041,7 @@ pub fn resolve_call_tables(
             std::mem::take(&mut c.carriers),
             std::mem::take(&mut c.proto_eq_calls),
             std::mem::take(&mut c.list_widen),
-            std::mem::take(&mut c.newtype_sums),
+            std::mem::take(&mut c.sum_seeds),
             std::mem::take(&mut c.ret_coerce),
             std::mem::take(&mut c.arg_float_widen),
             std::mem::take(&mut c.table_conflicts),
@@ -1067,7 +1067,7 @@ pub fn resolve_call_tables_standalone(
     CarrierTable,
     ProtoEqTable,
     ListWidenTable,
-    NewtypeSumTable,
+    SumSeedTable,
     RetCoerceTable,
     ArgFloatWidenTable,
     TableConflicts,
@@ -2149,8 +2149,8 @@ struct Checker {
     /// Which `.sum()` sites sum a scalar-numeric-newtype list and so need a `T(0)` seed, keyed by
     /// [`carrier_key`] on the method-name token and consumed verbatim by the compiler (which cannot
     /// re-derive it: the decision is the ELEMENT's type, and an empty list carries none at runtime).
-    /// Recorded UNCONDITIONALLY, for the same reason [`Self::carriers`] is. See [`NewtypeSumTable`].
-    newtype_sums: NewtypeSumTable,
+    /// Recorded UNCONDITIONALLY, for the same reason [`Self::carriers`] is. See [`SumSeedTable`].
+    sum_seeds: SumSeedTable,
     /// W8-21 — which implicit success-coercion, if any, each declared `T?`/`T!E` return sink applies,
     /// keyed by [`ret_coerce_key`] on the returned value's own span and consumed verbatim by the
     /// compiler (which cannot re-derive it: the decision is whether the returned expression is
