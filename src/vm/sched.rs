@@ -796,9 +796,20 @@ impl Vm {
                 sched,
                 cancel,
                 drainer: None, // the OWNER's drainer serves this scope too — it drains the global queue
+                drainer_slot: None,
                 scope,
             });
         }
+        // TICKET-073 — a NESTED nursery's private drainer costs one OS thread per OPEN nursery, not
+        // per nesting level, so it spends from the process-wide `NestedDrainerSlot` budget; a denied
+        // slot falls back to the lazy queue-at-join path via the `?` below, same as a failed thread
+        // spawn. The OUTERMOST nursery (`self.mn.is_none()`) never needs a slot: there is exactly one
+        // per thread.
+        let drainer_slot = if self.mn.is_some() {
+            Some(NestedDrainerSlot::acquire()?)
+        } else {
+            None
+        };
         let cancel = Arc::new(AtomicBool::new(false));
         let deadlock_err = self.err(DEADLOCK_MSG.to_string(), nursery_span);
         // wid 0 = inline join worker, wid 1 = the dedicated raw drainer below, wids 2.. = the pool
@@ -861,6 +872,7 @@ impl Vm {
             sched,
             cancel,
             drainer: Some(drainer),
+            drainer_slot,
             scope: 0,
         })
     }
@@ -910,6 +922,7 @@ impl Vm {
             sched,
             cancel,
             drainer,
+            drainer_slot: _held,
             scope: sid,
         } = scope;
         sched.close_body(sid);
@@ -920,6 +933,9 @@ impl Vm {
         // enclosing scope is the last scope again. It must NOT touch the sched's drainer or its other
         // scopes' slots — those belong to the owner's join. Mirrors `run_mn_nursery_nested`.
         if drainer.is_none() {
+            // TICKET-073 — a nested join farms its own raw runners from the `NestedDrainerSlot`
+            // budget, scaling this join with `--threads` the way the outermost arm below already does.
+            let helpers = self.farm_nested_eager_helpers(&sched, &cancel, sid);
             {
                 // §2c1 — the ENCLOSING body is parked here for the duration, so it cannot inject:
                 // clear its `body_open` veto or a genuine nested deadlock hangs.
@@ -934,6 +950,9 @@ impl Vm {
                     shell.mn_worker_loop(&sched, 0, sid);
                 }
                 sched.wait_for_scope(sid);
+                for (h, _slot) in helpers {
+                    let _ = h.join();
+                }
             }
             let slots = sched.take_scope_slots(sid);
             sched.retire_last_scope(sid);
@@ -952,6 +971,50 @@ impl Vm {
         }
         let slots = sched.take_slots();
         self.reduce_task_slots(slots)
+    }
+
+    /// TICKET-073 — farm RAW `chezzi-eager-helper` threads (never the bounded pool) for a NESTED
+    /// eager join, from the same [`NestedDrainerSlot`] budget the nursery's own drainer draws from.
+    /// The bounded pool is FIFO and fixed at `worker_count()`; a nested join runs while its enclosing
+    /// body is parked, so a pool-submitted helper would hold the pool while the scope it serves waits
+    /// for an `Executor` job queued behind it — measured, that hangs 21 `vm::tests` under
+    /// `--test-threads=28`. A raw thread is not a FIFO resource and has no such hazard.
+    ///
+    /// Returns an empty `Vec` when fewer than 2 tasks are outstanding (same reasoning as
+    /// `farm_outermost_eager_helpers`) or when the budget has no slot left, in which case the nested
+    /// join's own inline loop is the only runner, matching this shape's `--threads=1` behaviour. Each
+    /// returned handle is paired with the [`NestedDrainerSlot`] it holds, so the slot is released only
+    /// once the caller joins the thread.
+    fn farm_nested_eager_helpers(
+        &mut self,
+        sched: &Arc<MnSched>,
+        cancel: &Arc<AtomicBool>,
+        sid: usize,
+    ) -> Vec<(std::thread::JoinHandle<()>, NestedDrainerSlot)> {
+        let mut helpers = Vec::new();
+        if sched.outstanding_tasks() < 2 {
+            return helpers;
+        }
+        for wid in eager_helper_wids(worker_count()) {
+            let Some(slot) = NestedDrainerSlot::acquire() else {
+                break;
+            };
+            let mut shell = self.spawn_shell(sched, cancel);
+            let sched = Arc::clone(sched);
+            let Ok(handle) = std::thread::Builder::new()
+                .stack_size(VM_STACK_BYTES)
+                .name("chezzi-eager-helper".into())
+                .spawn(move || {
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        shell.mn_worker_loop(&sched, wid, sid)
+                    }));
+                })
+            else {
+                break;
+            };
+            helpers.push((handle, slot));
+        }
+        helpers
     }
 
     /// §2c1 — farm the bounded pool onto an OUTERMOST eager sched whose body has just closed, so a
@@ -995,6 +1058,7 @@ impl Vm {
             sched,
             cancel,
             drainer,
+            drainer_slot: _held,
             scope: sid,
         } = scope;
         // N4 — trip the cancel UNDER the core lock (`trip_scope_cancel`, scope 0 = the eager scope, whose
@@ -5455,6 +5519,35 @@ pub(super) fn eager_helper_wids(n: usize) -> std::ops::Range<usize> {
     2..n.max(2)
 }
 
+/// TICKET-073 — the one process-wide budget of EXTRA eager runner threads a NESTED eager nursery may
+/// spend: a per-nursery `chezzi-eager` drainer (`activate_eager_nursery`) and a nested join's raw
+/// `chezzi-eager-helper` threads (`farm_nested_eager_helpers`) both draw from it. Sized
+/// `worker_count().max(2)` so the bound stays linear in `--threads` and independent of nesting depth
+/// and fan-out (see `src/vm/pool.rs`).
+static NESTED_EAGER_DRAINERS: AtomicUsize = AtomicUsize::new(0);
+
+/// A held share of [`NESTED_EAGER_DRAINERS`]. Released by `Drop`, never by hand: an `EagerScope`
+/// moves across `Vm::swap_ctx` and is consumed by `join_eager_nursery` OR `abort_eager_nursery`, and a
+/// hand-written release in only those two consumers would leak a slot on every other drop path.
+pub(super) struct NestedDrainerSlot;
+
+impl NestedDrainerSlot {
+    pub(super) fn acquire() -> Option<Self> {
+        NESTED_EAGER_DRAINERS
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |c| {
+                (c < worker_count().max(2)).then_some(c + 1)
+            })
+            .ok()
+            .map(|_| NestedDrainerSlot)
+    }
+}
+
+impl Drop for NestedDrainerSlot {
+    fn drop(&mut self) {
+        NESTED_EAGER_DRAINERS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 /// W8-8 — the inline joiner runs fibers only when the budget has a slot left after the drainer.
 /// At `n == 1` the drainer already holds the only slot, so the joiner just waits for completion —
 /// otherwise `--threads=1` runs two CPU runners and does not serialize.
@@ -5468,10 +5561,12 @@ pub(super) fn eager_helper_wids(n: usize) -> std::ops::Range<usize> {
 /// joiner's `wait_for_completion`/`wait_for_scope` blocks forever. Pre-W8-8 the joiner's own fiber
 /// loop covered that. At `n >= 2` the cover differs BY ARM and only one of them has a fallback: the
 /// OUTERMOST arms farm pool helpers (`farm_outermost_eager_helpers`, called from
-/// `join_eager_nursery` alone) so a dead drainer still leaves runners behind, while the NESTED arms
-/// farm nothing at all — there the joiner's own loop IS the only cover, so the window is closed at
-/// `n >= 2` purely because the gate lets that loop run. Requires a pre-existing scheduler bug to
-/// reach, so no code change here — recorded so the next reader sees the trade.
+/// `join_eager_nursery` alone) so a dead drainer still leaves runners behind. TICKET-073 — the NESTED
+/// arm now also farms runners (`farm_nested_eager_helpers`, raw `chezzi-eager-helper` threads from the
+/// `NestedDrainerSlot` budget, never the pool), so it has the same fallback whenever the budget has a
+/// slot; only when the budget is empty does the joiner's own loop become the sole cover, closing the
+/// window at `n >= 2` purely because the gate lets that loop run. Requires a pre-existing scheduler bug
+/// to reach, so no code change here — recorded so the next reader sees the trade.
 ///
 /// **And do not "restore" the old cover without reading what it actually did.** The pre-W8-8 joiner
 /// loop did not rescue the lost fiber — nothing can; its slot is gone either way. What it did was sit

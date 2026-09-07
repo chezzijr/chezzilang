@@ -7,6 +7,22 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-073 (2026-09-08) — a `parallel:` nested inside another nursery scaled wrong two
+  different ways.** Nested in a nursery BODY it was pinned to 2 CPU runners regardless of
+  `--threads`; nested in a spawned TASK it leaked one raw OS thread per open nursery (a depth-7 tree
+  of 128 sleeping leaves peaked at 130 / 134 / 158 live threads at `CHEZZI_THREADS` 2 / 4 / 0, against
+  a documented bound of `N + (joining threads)`). Root cause: `Vm::activate_eager_nursery`'s
+  `self.mn.is_none()` predicate gave the shared-sched arm no way to farm extra runners, and the
+  private-sched arm one dedicated drainer thread per OPEN nursery rather than per nesting level.
+  Fixed with one process-wide budget of extra eager runner threads (`NestedDrainerSlot`, sized
+  `worker_count().max(2)`): a nested nursery's `chezzi-eager` drainer spends a slot, and a nested
+  join farms raw `chezzi-eager-helper` threads from the same budget (never the bounded pool — that
+  hung 21 `vm::tests` under `--test-threads=28`, since the pool is FIFO-fixed and a nested join runs
+  while its enclosing body is parked). A denied slot falls back to the lazy queue-at-join path, the
+  same liveness price this shape already pays at `--threads=1`. Measured: nested cores now match the
+  flat form at every `--threads` (100/197/388/759 vs flat 100/197/390/752), and the depth-7 tree now
+  peaks at 4/6/12/20 threads (depth-11, 2048 leaves: 6 at `=2`, was 2050). `src/vm/sched.rs`,
+  `src/vm/mod.rs`, `src/vm/pool.rs`, `docs/future.md`, `docs/concurrency.md`.
 - **TICKET-072 (2026-09-08) — `s[i]`/`s[a:b]` were O(n) per operation, and every `str` method
   cloned its whole receiver before dispatch.** `get_index`/`get_slice` re-collected a `Vec<char>` of
   the whole string per subscript (`src/vm/stmt.rs:665`/`:473`), so an index loop was O(n²)

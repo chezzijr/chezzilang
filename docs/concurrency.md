@@ -290,7 +290,12 @@ How a `parallel:` block runs on the M:N engine (`chezzi run` — the default):
 1. Executing `spawn X` **evaluates the call's callee + arguments eagerly, at the spawn point** (Go's
    arg-evaluation timing), **deep-copies them across the airlock** ([§7](#7-sendability)), and
    **starts** the task on the innermost nursery. **The parent then continues to the next statement
-   immediately** — `spawn` does not block.
+   immediately** — `spawn` does not block. A `parallel:` nursery entered **inside a spawned task**
+   starts the same way — eagerly, at the point it is entered — **while the run's process-wide budget
+   of extra eager runner threads has a slot left** (`worker_count().max(2)`, `src/vm/pool.rs`); a
+   nested eager nursery costs one OS thread per OPEN nursery rather than per nesting level, so a denied slot
+   falls its tasks back to starting at the join instead, exactly as this shape already behaves at
+   `--threads=1` — no program gains a hang it did not already have at that setting.
 2. The task runs **concurrently** with the statements that follow it and with its siblings. There is
    no FIFO order between tasks and no defined order against the parent's own statements.
 3. The first task to error **aborts the remaining siblings** and propagates out of the `parallel:`

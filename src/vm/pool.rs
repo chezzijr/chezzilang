@@ -5,7 +5,13 @@
 //! `--threads=N` / `CHEZZI_THREADS`, or [`available_parallelism`] when unset), created lazily on
 //! first use and living for the process lifetime. A `parallel:` join farms its tasks here
 //! and the joining thread itself runs one inline (decision B: the parent participates), so total
-//! live threads stay bounded at `N + (joining threads)` regardless of `parallel:` nesting depth.
+//! live threads stay bounded at `N` plus the joining threads plus at most `worker_count().max(2)`
+//! extra eager runner threads (TICKET-073). That extra budget is [`super::sched::NestedDrainerSlot`],
+//! spent by two things a nested `parallel:` can build: a nursery's own `chezzi-eager` drainer thread
+//! (one per OPEN nested nursery, not per nesting level) and a nested join's raw `chezzi-eager-helper`
+//! threads. It is what keeps the bound independent of `parallel:` nesting depth AND fan-out: measured,
+//! a depth-11 tree of 2048 sleeping leaves nested in a spawned task peaks at 6 live threads at
+//! `CHEZZI_THREADS=2`, against 2050 before the budget existed.
 //!
 //! Each pool thread is spawned with the same 256 MiB stack as the main VM thread
 //! ([`super::VM_STACK_BYTES`]) — a worker `Vm` recurses as deeply as the parent can. Idle threads

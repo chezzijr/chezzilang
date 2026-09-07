@@ -1928,6 +1928,11 @@ struct EagerScope {
     /// drainer-less owner, so the caller falls back to the lazy queue-at-join path instead of leaving
     /// a nursery with no worker at all during its body.
     drainer: Option<std::thread::JoinHandle<()>>,
+    /// TICKET-073 — the [`sched::NestedDrainerSlot`] this scope's `drainer` holds, if any. Held so the
+    /// budget share lives until the drainer is joined at the end of `join_eager_nursery` /
+    /// `abort_eager_nursery`, and released by `Drop` on every path out of `EagerScope` (see
+    /// `NestedDrainerSlot`'s own doc for why a hand-written release is not safe here).
+    drainer_slot: Option<sched::NestedDrainerSlot>,
     /// §2c1 — this nursery's scope id on `sched`. `0` for an owner; a fresh appended scope for a
     /// nested eager nursery sharing the owner's sched.
     ///

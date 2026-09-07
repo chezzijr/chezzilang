@@ -2878,6 +2878,7 @@ fn eager_scope_round_trips_with_fiber_ctx() {
         sched: Arc::clone(&host_sched),
         cancel: Arc::new(AtomicBool::new(false)),
         drainer: None,
+        drainer_slot: None,
         scope: 0,
     }));
 
@@ -2887,6 +2888,7 @@ fn eager_scope_round_trips_with_fiber_ctx() {
             sched: Arc::clone(&fiber_sched),
             cancel: Arc::new(AtomicBool::new(false)),
             drainer: None,
+            drainer_slot: None,
             scope: 0,
         })],
         ..FiberCtx::default()

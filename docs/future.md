@@ -427,8 +427,20 @@ were mandatory — see the correction under them.
    `--threads=1` is genuinely one runner: the same shape peaks at **4 live OS threads**, two independent
    samplers, two runs — still bounded and flat, nowhere near 130. The original "3" has no surviving repro
    program in the tree, so the one-thread difference is methodology, not a regression; the bound this gate
-   exists to hold is intact.) A top-level nursery has no outer worker to starve and
+   exists to hold is intact — but only at `N == 1`.) A top-level nursery has no outer worker to starve and
    creates exactly one drainer per thread, so it stays unconditional.
+
+   **Correction (TICKET-073, 2026-09-08): this clause held the bound only at `N == 1`, not at every
+   `N`.** The 2026-08-18 re-measurement sampled `--threads=1` alone, which is why the bound read as
+   intact — at higher `N` it was not: the same depth-7, 128-leaf tree reaches **130 / 134 / 158** live
+   threads at `CHEZZI_THREADS` **2 / 4 / 0 (default)**, because the eager drainer costs one OS thread
+   per OPEN nested nursery, not per nesting level, and a depth-7 binary tree holds 127 interior
+   nurseries open at once. The bound at every `N` now comes from the `NestedDrainerSlot` budget in
+   `src/vm/sched.rs` (`worker_count().max(2)`), which the same tree measures at **4 / 6 / 12 / 20**
+   live threads at `CHEZZI_THREADS` **1 / 2 / 4 / 8**. This `EnterNursery` clause is unchanged and still
+   correct to keep — a nursery entered inside a spawned task still builds a scope on the enclosing
+   worker's sched rather than run eagerly there when `worker_count() < 2` — but it is no longer the
+   thing holding the nesting-depth bound.
 
 9. **`Op::EnterNursery` is `#[inline(never)]`** (`Vm::op_enter_nursery`). The arm grew from three
    lines to a page, and `run_until`'s hot loop pays for every arm's code size whether it is reached or
