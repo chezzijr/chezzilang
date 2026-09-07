@@ -3019,7 +3019,7 @@ print(Light.Red.next().cost())      # 2
 
 Variants are **scoped under their enum** and must be written **qualified** as `Enum.Variant`
 everywhere they're used: as a value (`Shape.Point`), a constructor (`Shape.Circle(2)`), and in a
-`match` arm (`case Shape.Circle(r):`). A bare user-variant name is a compile error (the error names
+`match` arm (`Shape.Circle(r):`). A bare user-variant name is a compile error (the error names
 the enum so you can fix it). Because variants are per-enum, **two enums may share a variant name**
 (`Color.Red` and `Light.Red` are distinct values). A real binding named like the enum wins, so
 qualified access only resolves when the name on the left isn't a local/parameter. (The built-in
@@ -3281,7 +3281,10 @@ fn query() -> Row!DbErr:        # Result[Row, DbErr]
 
 match query():
     Ok(row): use(row)
-    Err(e):  print(e.message())   # message(), line(), col() and file() are all available
+    Err(e):  print(e.message())   # message() is declared by DbErr itself
+# `line()` / `col()` / `file()` are the bare `Error` existential's origin accessors (see `recover:`
+# below) — they are NOT available on a user error type like `DbErr`, which carries only what it
+# declares. Spell the sink `Row!` (i.e. `Result[Row, Error]`) to get them.
 ```
 
 `Option[T]` (shorthand `T?`) is the same shape for "maybe absent": `Some(v)` / `None`, also usable with `?`.
