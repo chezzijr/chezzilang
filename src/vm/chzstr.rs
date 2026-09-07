@@ -18,8 +18,13 @@ pub const INLINE_CAP: usize = 22;
 /// Storage for a Chezzi string value: inline for short strings, heap-boxed for the rest.
 #[derive(Clone)]
 pub enum ChzStr {
-    Inline { len: u8, bytes: [u8; INLINE_CAP] },
+    Inline {
+        len: u8,
+        bytes: [u8; INLINE_CAP],
+    },
     Heap(Box<str>),
+    /// Heap-boxed, every byte < 0x80, so a codepoint index IS a byte index (TICKET-072).
+    HeapAscii(Box<str>),
 }
 
 impl ChzStr {
@@ -33,6 +38,7 @@ impl ChzStr {
                 unsafe { std::str::from_utf8_unchecked(&bytes[..*len as usize]) }
             }
             ChzStr::Heap(s) => s,
+            ChzStr::HeapAscii(s) => s,
         }
     }
 
@@ -40,6 +46,27 @@ impl ChzStr {
     #[cfg(test)]
     pub fn is_inline(&self) -> bool {
         matches!(self, ChzStr::Inline { .. })
+    }
+
+    /// The bytes of this string IF every byte is ASCII (< 0x80), in which case a byte index is
+    /// also a codepoint index. `None` for any non-ASCII string, inline or heap.
+    pub fn ascii_bytes(&self) -> Option<&[u8]> {
+        match self {
+            ChzStr::HeapAscii(s) => Some(s.as_bytes()),
+            ChzStr::Heap(_) => None,
+            ChzStr::Inline { .. } => {
+                let b = self.as_str().as_bytes();
+                b.is_ascii().then_some(b)
+            }
+        }
+    }
+
+    /// Number of codepoints. O(1) for an ASCII string, O(n) otherwise.
+    pub fn char_len(&self) -> usize {
+        match self.ascii_bytes() {
+            Some(b) => b.len(),
+            None => self.as_str().chars().count(),
+        }
     }
 }
 
@@ -52,6 +79,8 @@ impl From<&str> for ChzStr {
                 len: s.len() as u8,
                 bytes,
             }
+        } else if s.is_ascii() {
+            ChzStr::HeapAscii(Box::from(s))
         } else {
             ChzStr::Heap(Box::from(s))
         }
@@ -63,6 +92,8 @@ impl From<String> for ChzStr {
         // Reuse the `&str` selection; for the heap arm this reuses `s`'s existing allocation.
         if s.len() <= INLINE_CAP {
             ChzStr::from(s.as_str())
+        } else if s.is_ascii() {
+            ChzStr::HeapAscii(s.into_boxed_str())
         } else {
             ChzStr::Heap(s.into_boxed_str())
         }
@@ -73,6 +104,8 @@ impl From<Box<str>> for ChzStr {
     fn from(s: Box<str>) -> Self {
         if s.len() <= INLINE_CAP {
             ChzStr::from(&*s) // copy into the inline buffer, drop the box
+        } else if s.is_ascii() {
+            ChzStr::HeapAscii(s) // reuse the existing allocation
         } else {
             ChzStr::Heap(s) // reuse the existing allocation
         }
@@ -218,5 +251,33 @@ mod tests {
         assert!(s.starts_with("Hello"));
         assert_eq!(&s[..5], "Hello");
         assert_eq!(s.to_uppercase(), "HELLO, WORLD");
+    }
+
+    #[test]
+    fn heap_ascii_string_exposes_its_bytes() {
+        let s: ChzStr = "a".repeat(100).into();
+        assert_eq!(s.ascii_bytes().map(<[u8]>::len), Some(100));
+        assert_eq!(s.char_len(), 100);
+    }
+
+    #[test]
+    fn heap_non_ascii_string_has_no_ascii_bytes() {
+        let s: ChzStr = "é".repeat(100).into();
+        assert!(s.ascii_bytes().is_none());
+        assert_eq!(s.char_len(), 100);
+        assert_eq!(s.as_str().chars().count(), 100);
+    }
+
+    #[test]
+    fn inline_non_ascii_has_no_ascii_bytes() {
+        let s: ChzStr = "héllo".into();
+        assert!(s.is_inline());
+        assert!(s.ascii_bytes().is_none());
+        assert_eq!(s.char_len(), 5);
+    }
+
+    #[test]
+    fn chzstr_layout_is_unchanged_by_the_ascii_split() {
+        assert_eq!(std::mem::size_of::<ChzStr>(), 24);
     }
 }
