@@ -2389,7 +2389,9 @@ impl Compiler {
                         fc.emit_decl_named(name.clone(), arm.span);
                     }
                     WaitTarget::Discard => fc.emit(Op::Pop, arm.span),
-                    WaitTarget::Assign(target) => self.emit_wait_assign(fc, target, arm.span)?,
+                    WaitTarget::Assign(target) => {
+                        self.emit_assign_value_first(fc, target, arm.span)?
+                    }
                 },
                 // A send arm binds nothing — `take_wait_send_arm` pushes no value, so no prologue.
                 WaitArmKind::Send { .. } => {}
@@ -2422,11 +2424,12 @@ impl Compiler {
         Ok(())
     }
 
-    /// A `wait` `=` arm: store the value on the stack top into an existing lvalue. `Ident` pops
-    /// straight into the binding; `Field`/`Index` stash the value in a hidden temp, evaluate the
-    /// object (and index), then reload it — so the `[obj, (index,) value]` order `SetField`/`SetIndex`
-    /// expect is reconstructed even though the value was produced first by `WaitPoll`.
-    fn emit_wait_assign(
+    /// Store the value on the stack top into an existing lvalue, for a plain `=` and for a `wait`
+    /// `=` arm. `Ident` pops straight into the binding; `Field`/`Index` stash the value in a
+    /// hidden temp, evaluate the object (and index), then reload it — so the `[obj, (index,)
+    /// value]` order `SetField`/`SetIndex` expect is reconstructed even though the value was
+    /// produced FIRST.
+    fn emit_assign_value_first(
         &mut self,
         fc: &mut FnComp,
         target: &Expr,
@@ -2655,10 +2658,12 @@ impl Compiler {
                     self.emit_store(fc, name, span);
                 }
             },
-            // `obj.f = v` → [obj, v] SetField; compound dups `obj` to read-modify-write.
+            // `obj.f = v` → RHS first (Python order), then `emit_assign_value_first` rebuilds the
+            // `[obj, v]` order `SetField` expects. Compound dups `obj` to read-modify-write and
+            // keeps evaluating `obj` first, because `x OP= v` is `x = x OP v` (Python's order too).
             ExprKind::Field { obj, name, .. } => {
-                self.compile_expr(fc, obj)?;
                 if let Some(bin) = op.to_binop() {
+                    self.compile_expr(fc, obj)?;
                     let ic = self.next_field_ic(name);
                     fc.emit(Op::Dup, span);
                     fc.emit(
@@ -2670,33 +2675,36 @@ impl Compiler {
                     );
                     self.compile_expr(fc, value)?;
                     fc.emit(compound_op(op, bin), span);
+                    let ic = self.next_field_ic(name);
+                    fc.emit(
+                        Op::SetField {
+                            name: name.clone(),
+                            ic,
+                        },
+                        span,
+                    );
                 } else {
                     self.compile_expr(fc, value)?;
+                    self.emit_assign_value_first(fc, target, span)?;
                 }
-                let ic = self.next_field_ic(name);
-                fc.emit(
-                    Op::SetField {
-                        name: name.clone(),
-                        ic,
-                    },
-                    span,
-                );
             }
-            // `obj[i] = v` → [obj, i, v] SetIndex; compound dups `[obj, i]` to read-modify-write.
+            // `obj[i] = v` → RHS first (Python order), then `emit_assign_value_first` rebuilds the
+            // `[obj, i, v]` order `SetIndex` expects. Compound dups `[obj, i]` to read-modify-write.
             ExprKind::Index { obj, index } => {
-                self.compile_expr(fc, obj)?;
-                self.compile_expr(fc, index)?;
                 // No `AsInt`: the index may be a map key (str/bool). `GetIndex`/`SetIndex`
                 // validate int-ness in their list/str arms at runtime.
                 if let Some(bin) = op.to_binop() {
+                    self.compile_expr(fc, obj)?;
+                    self.compile_expr(fc, index)?;
                     fc.emit(Op::Dup2, span);
                     fc.emit(Op::GetIndex, target.span);
                     self.compile_expr(fc, value)?;
                     fc.emit(compound_op(op, bin), span);
+                    fc.emit(Op::SetIndex, span);
                 } else {
                     self.compile_expr(fc, value)?;
+                    self.emit_assign_value_first(fc, target, span)?;
                 }
-                fc.emit(Op::SetIndex, span);
             }
             // `a, b = b, a` — multi-target tuple assignment (op is always `Eq`; the parser enforces
             // it). Evaluate the FULL RHS tuple into a hidden local FIRST (Python semantics — so a

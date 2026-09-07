@@ -11792,7 +11792,7 @@ fn vm_wait_sweeps_other_buckets_after_waking() {
     );
 }
 
-/// A `wait` `=` arm to a Field/Index lvalue (the custom `emit_wait_assign` stash-and-reload path):
+/// A `wait` `=` arm to a Field/Index lvalue (the custom `emit_assign_value_first` stash-and-reload path):
 /// the received value must land in the struct field / list slot, identical to the interp.
 #[test]
 fn vm_wait_assign_to_field_and_index_matches_interp() {
