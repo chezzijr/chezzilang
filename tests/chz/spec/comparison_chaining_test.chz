@@ -1,0 +1,7 @@
+# tests/chz/spec/comparison_chaining_test.chz — TICKET-077/078: `a == b == c` parses as
+# `(a == b) == c`, so the all-bool shape silently type-checks and disagrees with CPython, which
+# chains: `True == False == False` -> False. Chezzi returns `true` today.
+# Real CPython 3.14: `print(True == False == False)` -> `False`.
+
+test fn bool_eq_chain_matches_cpython():
+    assert (true == false == false) == false

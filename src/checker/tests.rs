@@ -20636,6 +20636,15 @@ fn panic_typechecks_in_value_position_as_bottom() {
 }
 
 #[test]
+fn os_exit_typechecks_in_value_position_as_bottom() {
+    // TICKET-077: `os.exit` diverges just like `panic`, so a `match` arm that calls it must be
+    // bottom-typed, not `nil`. Currently rejected: "branches have incompatible types: int and nil".
+    entry_ok(
+        "import std.os\nfn main():\n    r: Result[int, str] = Err(\"boom\")\n    x := match r:\n        Ok(v): v\n        Err(e): os.exit(2)\n    print(x)\nmain()\n",
+    );
+}
+
+#[test]
 fn panic_requires_a_str_argument() {
     rejects(
         "fn main():\n    panic(123)\nmain()\n",
