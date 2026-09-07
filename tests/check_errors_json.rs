@@ -775,3 +775,24 @@ fn member_miss_json_spans_the_member_name() {
         "help must still suggest 'len', got: {stdout}"
     );
 }
+
+/// TICKET-079: a fatal resolve/lex error (`report_fatal`) renders as a bare one-line message with
+/// no `|`-gutter source echo, unlike a type error which goes through `render_diag` +
+/// `lexer::render_snippet`. An unclosed `[` should show the caret snippet the type-error path
+/// already has.
+#[test]
+fn resolve_error_plaintext_shows_caret_snippet() {
+    let t = TmpDir::new();
+    let p = t.write("v1.chz", "xs := [1, 2, 3\nprint(xs)\n");
+    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .args(["check", p.to_str().unwrap()])
+        .output()
+        .expect("run chezzi check");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stderr = stderr.trim_end();
+
+    assert!(
+        stderr.contains("\n  |\n") || stderr.contains("|\n1 |"),
+        "resolve error must render a caret gutter like a type error does, got: {stderr}"
+    );
+}
