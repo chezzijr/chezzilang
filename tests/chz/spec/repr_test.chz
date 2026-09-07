@@ -96,3 +96,10 @@ test fn non_printable_characters_escape():
     assert str(["\u{1d173}"]) == "['\\U0001d173']"
     # Printable non-ASCII stays literal.
     assert str(["é", "😀"]) == "['é', '😀']"
+
+# Combining marks (Mn/Mc/Me) are the VISIBLE content of Devanagari/Hebrew/Arabic/Thai text, not
+# invisible whitespace like U+00A0/U+200B above — `char::escape_debug` wrongly lumps them in with
+# those, so a nested Devanagari string renders as escaped hex instead of literal text (TICKET-081/
+# TICKET-088, `docs/gaps.md` W7-25). CPython's `repr` prints them literally.
+test fn combining_marks_stay_literal_in_nested_repr():
+    assert str(["नमस्ते"]) == "['नमस्ते']"
