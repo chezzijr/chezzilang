@@ -359,6 +359,142 @@ fn cancel_c5_gate_at_eight_workers() {
     );
 }
 
+/// TICKET-073(a) — a `parallel:` reached from inside another `parallel:` **body** (called, not
+/// spawned — same shape as `threads_one_serializes_nested_eager_parallel_tasks` above) must SCALE
+/// with `--threads` the way the identical call does at top level. `activate_eager_nursery`'s nested
+/// arm (`src/vm/sched.rs`, `self.mn.is_none() && an outer eager scope is open`) returns
+/// `EagerScope { drainer: None, .. }`, and `join_eager_nursery`'s `drainer.is_none()` arm never farms
+/// the bounded pool (only the outermost arm calls `farm_outermost_eager_helpers`) — so the nested
+/// scope is served by the outer scope's ONE `chezzi-eager` drainer plus (at N>=2) the inline joiner:
+/// two runners, always, regardless of `--threads`. 16 spawns of `burn(75000)` at
+/// `CHEZZI_THREADS=8`: a flat (non-nested) version of this exact workload measures close to 8 cores;
+/// this asserts the nested version reaches at least `MIN_CORES_AT_EIGHT_WORKERS_NESTED`, which is
+/// comfortably below 8 but above the ~2.0 the bug caps it at.
+#[cfg(unix)]
+const MIN_CORES_AT_EIGHT_WORKERS_NESTED: f64 = 3.5;
+
+#[cfg(unix)]
+#[test]
+fn threads_eight_scales_nested_eager_parallel_tasks_in_body() {
+    let dir = std::env::temp_dir().join(format!(
+        "chz-threads-073-nested-scale-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+
+    let burn = "fn burn(n: int) -> int:\n    \
+                 x := 0\n    \
+                 i := 0\n    \
+                 while i < n:\n        \
+                 x = x + i * i - i\n        \
+                 i += 1\n    \
+                 return x\n\n";
+
+    let path = dir.join("nested_burn_scale.chz");
+    let spawns = "        spawn: burn(75000)\n".repeat(16);
+    std::fs::write(
+        &path,
+        format!(
+            "{burn}fn work():\n    parallel:\n{spawns}\n\
+             fn main():\n    \
+             parallel:\n        \
+             work()\n\
+             main()\n"
+        ),
+    )
+    .expect("write program");
+
+    for run in 0..SERIALIZATION_RUNS {
+        let (wall, user, sys, status, stdout) =
+            child_rusage::run_timed(&["run", path.to_str().unwrap()], "8");
+        assert!(
+            status.success(),
+            "chezzi run {path:?} failed (run {run}): {stdout}"
+        );
+        let cpu = user + sys;
+        assert!(
+            cpu > std::time::Duration::from_millis(900),
+            "program finished too fast (cpu={cpu:?}, run {run}) to be a meaningful measurement — \
+             recalibrate the burn size"
+        );
+        let cores = cpu.as_secs_f64() / wall.as_secs_f64();
+        assert!(
+            cores >= MIN_CORES_AT_EIGHT_WORKERS_NESTED,
+            "a parallel: nested in a nursery BODY must scale with --threads (run {run}): \
+             cores={cores:.2} (cpu={cpu:?} wall={wall:?}), expected >= \
+             {MIN_CORES_AT_EIGHT_WORKERS_NESTED} at CHEZZI_THREADS=8. A nested eager join never \
+             farms the bounded pool (only the outermost arm does), so it is pinned to the outer \
+             drainer + inline joiner regardless of --threads (TICKET-073a)."
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// TICKET-073(b) — a `parallel:` nested inside a SPAWNED task (not called from a body) must keep live
+/// OS threads bounded at `N + (joining threads)` per `src/vm/pool.rs:8`'s invariant, at every
+/// `--threads` setting, not just `=1`. A spawned task runs on a worker shell whose `self.mn` is
+/// already `Some`, so `activate_eager_nursery` takes the general (non-shared) path and builds a
+/// brand-new private `MnSched` PLUS a dedicated `chezzi-eager` drainer thread for every nested
+/// nursery — unbounded under a binary-tree fan-out. A depth-7 tree (128 sleeping leaves) is spawned
+/// under `CHEZZI_THREADS=2`, and `/proc/<pid>/task` is polled while the process is alive; a healthy
+/// binary stays near `N + few`, the bug reaches ~130.
+#[cfg(target_os = "linux")]
+#[test]
+fn threads_stay_bounded_for_a_nursery_nested_in_a_spawned_task() {
+    let dir = std::env::temp_dir().join(format!("chz-threads-073-leak-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+
+    let program = "import std.time\n\n\
+                    fn tree(d: int):\n    \
+                    if d == 0:\n        \
+                    time.sleep_ms(300)\n    \
+                    else:\n        \
+                    parallel:\n            \
+                    spawn: tree(d - 1)\n            \
+                    spawn: tree(d - 1)\n\n\
+                    fn main():\n    \
+                    tree(7)\n\
+                    main()\n";
+    let path = dir.join("thread_tree.chz");
+    std::fs::write(&path, program).expect("write program");
+
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .args(["run", path.to_str().unwrap()])
+        .env("CHEZZI_THREADS", "2")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn chezzi");
+    let pid = child.id();
+
+    let mut max_threads: usize = 0;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if let Ok(entries) = std::fs::read_dir(format!("/proc/{pid}/task")) {
+            let n = entries.count();
+            if n > max_threads {
+                max_threads = n;
+            }
+        } else {
+            break; // process exited
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let status = child.wait().expect("wait chezzi");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(status.success(), "chezzi run {path:?} failed");
+    // Healthy bound: N (2) + a handful of joining threads, generously slack-ed to 20.
+    const MAX_HEALTHY_THREADS: usize = 20;
+    assert!(
+        max_threads <= MAX_HEALTHY_THREADS,
+        "live OS threads must stay bounded at N + (joining threads) per src/vm/pool.rs:8, \
+         regardless of parallel: nesting depth (TICKET-073b): observed max_threads={max_threads} \
+         at CHEZZI_THREADS=2, expected <= {MAX_HEALTHY_THREADS}"
+    );
+}
+
 fn tail(s: &str) -> String {
     let lines: Vec<&str> = s.lines().collect();
     let start = lines.len().saturating_sub(15);
