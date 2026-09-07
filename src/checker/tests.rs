@@ -31028,3 +31028,14 @@ fn ticket_066_pass_stays_statement_only_outside_a_closure_body() {
         "closure body has type nil, but its return type is int",
     );
 }
+
+// TICKET-075: an unrelated struct's UNIQUE same-named method (here `Deco.f`, which does not satisfy
+// `P`) has its trailing default splice into a protocol-typed call before the arity check runs, so
+// `x.f(2)` (one argument, matching P.f's exact arity) is checked as a two-argument call and
+// rejected with a false count. `Deco` never satisfies `P` and never participates in this call.
+#[test]
+fn ticket_075_unrelated_struct_default_does_not_splice_into_protocol_call() {
+    ok_desugared(
+        "protocol P:\n    fn f(self, a: int) -> int\nstruct Deco:\n    z: int\n    fn f(self, a: int, b: int = 10) -> int:\n        return a + b\nfn use(x: P) -> int:\n    return x.f(2)\n",
+    );
+}
