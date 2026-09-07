@@ -20,3 +20,10 @@ test fn hostname_is_an_option_whose_coalesce_agrees():
 
 test fn hostname_is_stable_across_calls():
     assert (os.hostname() ?? "<sentinel>") == (os.hostname() ?? "<sentinel>")
+
+# `os.chdir` on a missing path must name the path, matching every other path-taking `Err` in the
+# fs/io/os surface (`fs.size`, etc. all prefix `"{path}: {e}"`) and both CPython and Go.
+test fn chdir_missing_path_names_the_path():
+    match os.chdir("/nope/zz-TICKET-081"):
+        Err(e): assert e.message().contains("/nope/zz-TICKET-081"), e.message()
+        Ok(_):  assert false, "expected Err for a nonexistent directory"
