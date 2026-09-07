@@ -662,17 +662,26 @@ impl Vm {
             }
             Obj::Str(s) => {
                 let idx = int_idx(self)?;
-                let chars: Vec<char> = s.chars().collect();
-                match crate::slice::norm_index(idx, chars.len()).map(|i| chars[i]) {
+                // ASCII arm: a byte index IS a codepoint index, so this is O(1) per subscript.
+                // The `None` arm is the pre-change code verbatim and stays O(n) per subscript.
+                let (c, n) = match s.ascii_bytes() {
+                    Some(b) => {
+                        let n = b.len();
+                        (crate::slice::norm_index(idx, n).map(|i| b[i] as char), n)
+                    }
+                    None => {
+                        let chars: Vec<char> = s.chars().collect();
+                        let n = chars.len();
+                        (crate::slice::norm_index(idx, n).map(|i| chars[i]), n)
+                    }
+                };
+                match c {
                     Some(c) => {
                         let nh = self.alloc_char(c);
                         self.push(nh);
                         Ok(())
                     }
-                    None => Err(self.err(
-                        format!("index {idx} out of bounds (len {})", chars.len()),
-                        span,
-                    )),
+                    None => Err(self.err(format!("index {idx} out of bounds (len {n})"), span)),
                 }
             }
             Obj::Bytes(b) => {
