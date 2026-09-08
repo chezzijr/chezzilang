@@ -31332,3 +31332,105 @@ fn deeply_nested_or_pattern_beyond_max_depth_still_rejected() {
         "non-exhaustive match on Option: missing Some",
     );
 }
+
+// TICKET-093: `fn`-type params are compared COVARIANTLY (src/checker/proto.rs:1233), so a narrower
+// `fn(Dog) -> Dog` is wrongly accepted where `fn(Any) -> Dog` is declared. Parameters must be
+// contravariant; this must be a type error.
+#[test]
+fn fn_type_param_covariance_hole_rejected() {
+    rejects(
+        "struct Dog:\n    name: str\nstruct Cat:\n    name: int\nfn idd(d: Dog) -> Dog:\n    return d\nfn f():\n    h: fn(Any) -> Dog = idd\n",
+        "cannot assign",
+    );
+}
+
+// TICKET-093: a narrower fn value must be rejected at every sink that holds a fn-typed slot, not
+// just a plain `:=` binding — HOF argument, List element, Map value, struct field and declared
+// return type all zip parameters the same way.
+#[test]
+fn fn_type_param_invariance_rejects_a_narrow_fn_at_every_sink() {
+    rejects(
+        "struct Dog:\n    name: str\nfn idd(d: Dog) -> Dog:\n    return d\nfn hof(f: fn(Any) -> Dog) -> Dog:\n    return f(1)\nz := hof(idd)\n",
+        "argument 1 of 'hof': expected fn(Any) -> Dog, found fn(Dog) -> Dog",
+    );
+    rejects(
+        "struct Dog:\n    name: str\nfn idd(d: Dog) -> Dog:\n    return d\nfs: List[fn(Any) -> Dog] = [idd]\n",
+        "list element: expected fn(Any) -> Dog, found fn(Dog) -> Dog",
+    );
+    rejects(
+        "struct Dog:\n    name: str\nfn idd(d: Dog) -> Dog:\n    return d\nm: Map[str, fn(Any) -> Dog] = {\"a\": idd}\n",
+        "map value: expected fn(Any) -> Dog, found fn(Dog) -> Dog",
+    );
+    rejects(
+        "struct Dog:\n    name: str\nstruct Box:\n    f: fn(Any) -> Dog\nfn idd(d: Dog) -> Dog:\n    return d\nb := Box(idd)\n",
+        "argument 1 of 'Box': expected fn(Any) -> Dog, found fn(Dog) -> Dog",
+    );
+    rejects(
+        "struct Dog:\n    name: str\nfn idd(d: Dog) -> Dog:\n    return d\nfn mk() -> fn(Any) -> Dog:\n    return idd\n",
+        "expected return type fn(Any) -> Dog, found fn(Dog) -> Dog",
+    );
+}
+
+// TICKET-093: `src/checker/ty.rs:640`'s `compatible`-based `Func`/`Func` arm is reached by protocol
+// method conformance and by container type arguments, not just `assignable` — both were measured
+// ACCEPTED on the base binary.
+#[test]
+fn fn_type_param_invariance_pins_the_compatible_site() {
+    rejects(
+        "protocol Wants:\n    fn go(self, f: fn(Error) -> int) -> int\nstruct S:\n    id: int\n    fn go(self, f: fn(str) -> int) -> int:\n        return f(\"x\")\nw: Wants = S(1)\n",
+        "type S does not satisfy Wants (method 'go' has the wrong signature)",
+    );
+    rejects(
+        "fn g(s: str) -> int:\n    return s.len()\nxs := [g]\nys: List[fn(Error) -> int] = xs\n",
+        "cannot assign List[fn(str) -> int] to variable of type List[fn(Error) -> int]",
+    );
+}
+
+// TICKET-093: the intrinsic `(Protocol("Error"), Str)` grant at `src/checker/ty.rs:595` must not
+// smuggle a builtin fn value into a fn(Error)-typed parameter — a one-way `compatible` call leaves
+// this open because the grant is asymmetric.
+#[test]
+fn fn_type_error_grant_does_not_smuggle_a_builtin_into_a_param() {
+    rejects(
+        "struct MyErr:\n    code: int\n    fn message(self) -> str:\n        return \"e\"\nh: fn(Error) -> int = ord\n",
+        "cannot assign fn(str) -> int to variable of type fn(Error) -> int",
+    );
+}
+
+// TICKET-093: invariance must reach a nested type argument of a fn parameter, not just the fn
+// parameter's own top-level type.
+#[test]
+fn fn_type_param_invariance_reaches_a_nested_type_argument() {
+    rejects(
+        "struct Dog:\n    name: str\nfn idd(d: Dog) -> Dog:\n    return d\nh: fn(Option[Any]) -> Dog = fn(o: Option[Dog]): idd(Dog(\"x\"))\n",
+        "cannot assign fn(Option[Dog]) -> Dog to variable of type fn(Option[Any]) -> Dog",
+    );
+}
+
+// TICKET-093: contravariance is deliberately refused. The direction table's row 2 — the
+// contravariant-legal case — must keep rejecting under invariance too.
+#[test]
+fn fn_type_param_invariance_still_rejects_a_wide_fn_into_a_narrow_slot() {
+    rejects(
+        "fn wide(a: Any) -> str:\n    return \"w\"\nh: fn(int) -> str = wide\n",
+        "cannot assign fn(Any) -> str to variable of type fn(int) -> str",
+    );
+}
+
+// TICKET-093: the parameter fix must not move the optional-arity rule, protocol conformance for a
+// fn-typed parameter that already matches, or the common HOF/closure-literal shapes.
+#[test]
+fn fn_type_param_invariance_leaves_the_neighbours_alone() {
+    rejects(
+        "fn a(x: int = 1) -> int:\n    return x\nfn b(x: int) -> int:\n    return x\nh := a\nh = b\n",
+        "the value requires 1 argument(s) but the target may be called with as few as 0",
+    );
+    rejects(
+        "struct Dog:\n    name: str\nprotocol Feeder:\n    fn feed(self, a: Any) -> int\nstruct Keeper:\n    id: int\n    fn feed(self, a: Dog) -> int:\n        return 1\nk: Feeder = Keeper(1)\n",
+        "type Keeper does not satisfy Feeder (method 'feed' has the wrong signature)",
+    );
+    ok("fn a(x: int = 1) -> int:\n    return x\nh: fn(int) -> int = a\nprint(h(2))\n");
+    ok(
+        "fn applyit(f: fn(int) -> int, x: int) -> int:\n    return f(x)\nfn dbl(n: int) -> int:\n    return n * 2\nprint(applyit(dbl, 3))\nprint(applyit(fn(x): x + 1, 3))\nprint([1, 2, 3].map(fn(x): x * 2))\n",
+    );
+}

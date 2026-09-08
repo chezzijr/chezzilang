@@ -8196,8 +8196,10 @@ the judging loop on the release binary at `699be0d2`, every candidate judged aga
 / Rust reference. Index and full session log: the end of **[`docs/gaps.md`](docs/gaps.md)**
 (`W11-1..W11-13`).
 
-- **TICKET-093 (P0)** — `fn`-type parameters compared covariantly; `check` clean, then an `int` sits in
-  a `List[str]` at rc=0. `src/checker/proto.rs:1233` plus a second site in `src/checker/ty.rs`.
+- **TICKET-093 (P0) — CLOSED 2026-09-08.** `fn`-type parameters compared covariantly; `check` clean,
+  then an `int` sat in a `List[str]` at rc=0. Fixed by making parameters strictly INVARIANT (the
+  Go/Rust rule, not contravariant) at all three sites — `src/checker/proto.rs:1233`,
+  `src/checker/ty.rs:640` and `:667` — via a new `param_invariant` helper; the return stays covariant.
 - **TICKET-094 (P1/P2 ×3, CLOSED 2026-09-08)** — expected-type/widening does not reach three declared
   sinks: an `internal:` compiler-bug abort on a mixed-numeric list DEFAULT (`span-keyed-table-aliasing`
   #5), the element widen missing at both default sinks, and a generic callee dropping the hint on
