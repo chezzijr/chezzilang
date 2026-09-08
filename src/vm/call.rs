@@ -3,6 +3,12 @@
 
 use super::*;
 
+/// CPython's `str.isspace()` is true for 29 codepoints; Rust's `char::is_whitespace` covers 25. The
+/// four extras are U+001C..U+001F (the C0 "information separator" controls), measured 2026-09-08.
+fn py_blank(c: char) -> bool {
+    c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
+}
+
 impl Vm {
     pub(super) fn do_call(&mut self, argc: usize, span: Span) -> Result<(), RuntimeError> {
         let at = self.stack.len() - argc;
@@ -2872,7 +2878,7 @@ impl Vm {
                     }
                     "trim" => {
                         self.arity_err("trim", args, 0, span)?;
-                        Ok(self.alloc_str(s.trim().to_string()))
+                        Ok(self.alloc_str(s.trim_matches(py_blank).to_string()))
                     }
                     // `str` conforms to `Error`: `message()` returns the string itself. It copies
                     // the receiver's stamped origin onto the fresh string it allocates
@@ -3134,7 +3140,7 @@ impl Vm {
                     // `strip` is a trim alias.
                     "strip" => {
                         self.arity_err("strip", args, 0, span)?;
-                        Ok(self.alloc_str(s.trim().to_string()))
+                        Ok(self.alloc_str(s.trim_matches(py_blank).to_string()))
                     }
                     // gap #7: safe numeric parse — None on bad input (trims like int()/float()).
                     "to_int" => {
