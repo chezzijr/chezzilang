@@ -879,3 +879,33 @@ fn unknown_type_json_spans_the_type_name() {
         "got: {stdout}"
     );
 }
+
+/// TICKET-079/TICKET-080 (d): `import X from M` gets the same near-miss `help` the qualified
+/// `M.X` path already has, and its span covers the MEMBER name, not `import`.
+#[test]
+fn import_from_member_miss_suggests_and_spans_the_member() {
+    let t = TmpDir::new();
+    t.write(
+        "pkg/mathx.chz",
+        "fn double(x: int) -> int:\n    return x * 2\n",
+    );
+    let entry = t.write(
+        "e1.chz",
+        "import doubel from pkg.mathx\nfn main(): print(1)\n",
+    );
+
+    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .args(["check", entry.to_str().unwrap(), "--errors=json"])
+        .output()
+        .expect("run chezzi check --errors=json");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stdout = stdout.trim();
+    assert!(
+        stdout.contains("\"col\":8,\"end_line\":1,\"end_col\":14"),
+        "span must cover 'doubel' (col 8..14), got: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"help\":\"did you mean 'double'?\""),
+        "got: {stdout}"
+    );
+}

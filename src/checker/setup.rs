@@ -486,6 +486,22 @@ impl Checker {
         names
     }
 
+    /// Every name a module's `sig` exports that `import X from M` can bind: its functions, its
+    /// top-level values, and its declared types — sorted, since `functions`/`values` are
+    /// `HashMap`s and an unsorted list would make a near-miss suggestion depend on hash order.
+    pub(super) fn sig_member_names(sig: &ModuleSig) -> Vec<String> {
+        let mut names: Vec<String> = sig
+            .functions
+            .keys()
+            .chain(sig.values.keys())
+            .chain(sig.types.iter())
+            .cloned()
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
     /// A struct's field names, in declaration order. `StructInfo.fields` is a `Vec`, so it is already
     /// deterministic and needs no sort.
     pub(super) fn field_names(&self, key: &str) -> Vec<String> {
@@ -1992,12 +2008,14 @@ impl Checker {
                             );
                         }
                     } else {
-                        self.error(
-                            imp.span,
+                        let candidates = Self::sig_member_names(&sig);
+                        self.error_help(
+                            *name_span,
                             format!(
                                 "module '{}' has no member '{member}'",
                                 module_label(&imp.import)
                             ),
+                            suggest::did_you_mean(member, &candidates),
                         );
                     }
                 }
