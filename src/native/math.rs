@@ -197,9 +197,10 @@ fn parse_int_base_impl(s: &str, base: i64) -> Result<i64, String> {
             "parse_int_base: base must be 0 or 2..=36, got {base}"
         ));
     }
-    let (neg, rest) = match s.strip_prefix('-') {
+    let t = s.trim();
+    let (neg, rest) = match t.strip_prefix('-') {
         Some(r) => (true, r),
-        None => (false, s.strip_prefix('+').unwrap_or(s)),
+        None => (false, t.strip_prefix('+').unwrap_or(t)),
     };
     let lower = rest.to_ascii_lowercase();
     let (radix, digits): (u32, &str) = if base == 0 {
@@ -230,6 +231,11 @@ fn parse_int_base_impl(s: &str, base: i64) -> Result<i64, String> {
             "parse_int_base: cannot parse '{s}' in base {radix}"
         ));
     }
+    let Some(digits) = crate::vm::strip_num_underscores_radix(digits, radix) else {
+        return Err(format!(
+            "parse_int_base: cannot parse '{s}' in base {radix}"
+        ));
+    };
     // Re-attach the sign and let `from_str_radix` parse it directly, so i64::MIN (whose magnitude
     // is i64::MAX+1 and cannot be parsed-then-negated) round-trips like Python/Go.
     let signed = if neg {
@@ -237,8 +243,12 @@ fn parse_int_base_impl(s: &str, base: i64) -> Result<i64, String> {
     } else {
         digits.to_string()
     };
-    i64::from_str_radix(&signed, radix)
-        .map_err(|_| format!("parse_int_base: cannot parse '{s}' in base {radix}"))
+    i64::from_str_radix(&signed, radix).map_err(|e| match e.kind() {
+        std::num::IntErrorKind::PosOverflow | std::num::IntErrorKind::NegOverflow => format!(
+            "parse_int_base: '{s}' in base {radix} overflows i64 (range -9223372036854775808..=9223372036854775807)"
+        ),
+        _ => format!("parse_int_base: cannot parse '{s}' in base {radix}"),
+    })
 }
 
 fn gcd(h: &mut dyn Host) -> Result<NativeRet, HostError> {
