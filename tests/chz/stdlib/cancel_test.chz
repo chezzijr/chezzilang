@@ -229,3 +229,9 @@ test fn an_interrupted_cascade_still_reports_cancelled():
         if not t.cancelled():
             live = live + 1
     assert live == 0, "an interrupted cascade must not lose a descendant: {live} of {toks.len()} uncancelled"
+
+test fn a_max_int_timeout_token_can_be_derived():
+    c := cancel.timeout(9223372036854775807)
+    k := c.derive()
+    assert k.cancelled() == false
+    assert c.cancelled() == false
