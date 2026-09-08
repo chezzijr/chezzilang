@@ -1317,12 +1317,13 @@ mod tests {
     /// TICKET-007 criterion 14: a near-miss `help` suggestion rides the LSP's `message` field.
     #[test]
     fn diag_help_appended_to_message() {
-        let ds = diag("xs := [1, 2, 3]\nxs.lenght()\n");
+        let ds =
+            diag("struct T:\n    fn tick(self) -> int:\n        return 1\nt := T()\nt.tik()\n");
         assert!(!ds.is_empty(), "method typo should produce a diagnostic");
         let d = &ds[0];
-        assert!(d.message.contains("has no method 'lenght'"), "got: {d:?}");
+        assert!(d.message.contains("has no method 'tik'"), "got: {d:?}");
         assert!(
-            d.message.contains("help: did you mean 'len'?"),
+            d.message.contains("help: did you mean 'tick'?"),
             "got: {d:?}"
         );
     }

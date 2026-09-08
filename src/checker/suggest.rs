@@ -1,6 +1,9 @@
 //! Near-miss "did you mean" suggestions for method/field typos, scored with a restricted
-//! Damerau-Levenshtein distance discounted by length difference — derived by measuring rustc
-//! 1.97.1's own suggestions rather than by reading rustc's source (see TICKET-007 `## Digest`).
+//! Damerau-Levenshtein distance — NOT discounted by length difference (TICKET-079/TICKET-080:
+//! the discount let a 3-character lookup match a 2-character binding sharing one letter; measured
+//! against CPython 3.14.7, `[].lenght` and `math.nope` produce no suggestion, so a suggestion now
+//! requires a genuine near miss). Originally derived by measuring rustc 1.97.1's own suggestions
+//! rather than by reading rustc's source (see TICKET-007 `## Digest`).
 
 /// Restricted Damerau-Levenshtein distance (insert/delete/substitute cost 1, adjacent
 /// transposition cost 1) over `char`s, bailing out early past `limit`.
@@ -36,22 +39,16 @@ pub(super) fn edit_distance(a: &str, b: &str, limit: usize) -> Option<usize> {
     if result <= limit { Some(result) } else { None }
 }
 
-/// Score a candidate against the looked-up name, discounting a length difference and rejecting
-/// a pair where one string is under half the length of the other. Lower is better; `None` means
-/// no match within `limit`.
+/// Score a candidate against the looked-up name, rejecting a pair where one string is under half
+/// the length of the other. Lower is better; `None` means no match within `limit`.
 pub(super) fn score(lookup: &str, cand: &str, limit: usize) -> Option<usize> {
     let n = lookup.chars().count();
     let m = cand.chars().count();
-    let len_diff = n.abs_diff(m);
     let big = n * 2 < m || m * 2 < n;
-    let d = edit_distance(lookup, cand, limit + len_diff)?;
-    if !big && d >= len_diff && d - len_diff <= limit {
-        Some(d - len_diff)
-    } else if d <= limit {
-        Some(d)
-    } else {
-        None
+    if big {
+        return None;
     }
+    edit_distance(lookup, cand, limit)
 }
 
 /// Find the best-scoring candidate for `lookup` among `candidates`, in the given order, or an
@@ -87,16 +84,13 @@ mod tests {
     }
 
     #[test]
-    fn length_difference_is_discounted() {
-        assert_eq!(
-            did_you_mean("lenght", &["len".to_string()]),
-            Some("did you mean 'len'?".to_string())
-        );
+    fn length_difference_is_not_discounted() {
+        assert_eq!(did_you_mean("lenght", &["len".to_string()]), None);
     }
 
     #[test]
-    fn substring_typo_suggests() {
-        assert!(did_you_mean("lenxyz", &["len".to_string()]).is_some());
+    fn substring_typo_suggests_nothing() {
+        assert_eq!(did_you_mean("lenxyz", &["len".to_string()]), None);
     }
 
     #[test]

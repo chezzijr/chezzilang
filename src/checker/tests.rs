@@ -8482,15 +8482,17 @@ fn unknown_struct_field_rejected() {
     );
 }
 
-/// TICKET-007 (docs/gaps.md W8-17): a near-miss method typo gets a "did you mean" suggestion in
-/// the error's `help` field. `len` is one edit away from the typo `lenght`.
+/// TICKET-079/TICKET-080: `lenght` is distance 3 from `len` against a limit of 2 (no longer
+/// discounted by the 3-character length gap), matching CPython 3.14.7's `[].lenght` — no
+/// suggestion.
 #[test]
-fn method_typo_suggests_near_miss() {
-    rejects_help(
-        "xs := [1, 2, 3]\nxs.lenght()\n",
-        "has no method 'lenght'",
-        "did you mean 'len'",
-    );
+fn method_typo_far_from_every_method_suggests_nothing() {
+    let errs = check_src("xs := [1, 2, 3]\nxs.lenght()\n");
+    let e = errs
+        .iter()
+        .find(|e| e.message.contains("has no method 'lenght'"))
+        .unwrap_or_else(|| panic!("expected a 'lenght' miss, got: {errs:?}"));
+    assert_eq!(e.help, None, "expected no suggestion, got: {e:?}");
 }
 
 /// TICKET-007 criterion 2: a struct field typo suggests the near-miss field name.
@@ -8517,10 +8519,22 @@ fn struct_method_typo_suggests_near_miss() {
 #[test]
 fn field_assign_typo_suggests_near_miss() {
     rejects_help(
-        "struct P:\n    x: int\n    y: int\np := P(1, 2)\np.zz = 3\n",
-        "cannot assign to 'zz'",
-        "did you mean",
+        "struct P:\n    x: int\n    y: int\np := P(1, 2)\np.yy = 3\n",
+        "cannot assign to 'yy'",
+        "did you mean 'y'",
     );
+}
+
+/// TICKET-079/TICKET-080: `xqq` against `xs` is distance 2 with a limit of 1 — no longer
+/// discounted by the length gap, matching CPython 3.14.7's `NameError` with no suggestion.
+#[test]
+fn a_two_letter_binding_is_not_suggested_for_a_three_letter_miss() {
+    let errs = check_src("xs := [1]\nprint(xqq)\n");
+    let e = errs
+        .iter()
+        .find(|e| e.message.contains("unknown name 'xqq'"))
+        .unwrap_or_else(|| panic!("expected an 'xqq' miss, got: {errs:?}"));
+    assert_eq!(e.help, None, "expected no suggestion, got: {e:?}");
 }
 
 /// TICKET-007 criterion 5: an unrelated method name gets no invented suggestion.

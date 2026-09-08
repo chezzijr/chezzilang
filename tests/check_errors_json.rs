@@ -563,7 +563,7 @@ fn severity_key_is_additive_and_the_clean_case_is_unchanged() {
 #[test]
 fn near_miss_help_is_emitted() {
     let t = TmpDir::new();
-    let bad = t.write("bad.chz", "xs := [1, 2, 3]\nxs.lenght()\n");
+    let bad = t.write("bad.chz", "xs := [1, 2, 3]\nxs.lenn()\n");
 
     let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
         .args(["check", bad.to_str().unwrap()])
@@ -571,9 +571,9 @@ fn near_miss_help_is_emitted() {
         .expect("run chezzi check");
     assert!(!out.status.success(), "method typo must exit non-zero");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("has no method 'lenght'"), "got: {stderr}");
+    assert!(stderr.contains("has no method 'lenn'"), "got: {stderr}");
     assert!(
-        stderr.lines().any(|l| l.contains("2 | xs.lenght()")),
+        stderr.lines().any(|l| l.contains("2 | xs.lenn()")),
         "got: {stderr}"
     );
     assert!(
@@ -593,7 +593,7 @@ fn near_miss_help_is_emitted() {
     let stdout = stdout.trim();
     assert!(
         stdout.contains(
-            "\"message\":\"type List[int] has no method 'lenght'\",\"help\":\"did you mean 'len'?\""
+            "\"message\":\"type List[int] has no method 'lenn'\",\"help\":\"did you mean 'len'?\""
         ),
         "help key must follow message, got: {stdout}"
     );
@@ -759,11 +759,11 @@ fn parse_error_message_is_not_doubled() {
 }
 
 /// W8-17 — the member-miss JSON span's WIDTH covers the member name, not just its start column.
-/// `lenght` is 6 chars starting at 1-based col 10, so `end_col` must be 16.
+/// `lenn` is 4 chars starting at 1-based col 10, so `end_col` must be 14.
 #[test]
 fn member_miss_json_spans_the_member_name() {
     let t = TmpDir::new();
-    let p = t.write("m.chz", "xs := [1, 2, 3]\nprint(xs.lenght())\n");
+    let p = t.write("m.chz", "xs := [1, 2, 3]\nprint(xs.lenn())\n");
     let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
         .args(["check", p.to_str().unwrap(), "--errors=json"])
         .output()
@@ -772,8 +772,8 @@ fn member_miss_json_spans_the_member_name() {
     let stdout = stdout.trim();
 
     assert!(
-        stdout.contains("\"line\":2,\"col\":10,\"end_line\":2,\"end_col\":16"),
-        "span must cover 'lenght' (col 10..16), got: {stdout}"
+        stdout.contains("\"line\":2,\"col\":10,\"end_line\":2,\"end_col\":14"),
+        "span must cover 'lenn' (col 10..14), got: {stdout}"
     );
     assert!(
         stdout.contains("\"help\":\"did you mean 'len'?\""),
