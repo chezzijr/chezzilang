@@ -275,6 +275,21 @@ mod tests {
         assert!(err.contains("double-quoted"), "got: {err}");
     }
 
+    /// A leading UTF-8 BOM (`U+FEFF`) is a file-entry artifact from Windows/VS Code editors, not
+    /// program text — the lexer already strips one (`src/lexer/mod.rs::strip_bom`), and a
+    /// BOM-prefixed source file with the SAME project runs fine. The manifest parser did not get
+    /// the same fix, so a BOM-prefixed `chezzi.toml` fails on line 1 quoting the BOM itself.
+    #[test]
+    fn parse_strips_leading_bom() {
+        let with_bom = "\u{feff}[project]\nname = \"myapp\"\n";
+        let without_bom = "[project]\nname = \"myapp\"\n";
+        assert_eq!(
+            parse(with_bom),
+            parse(without_bom),
+            "expected a leading BOM to parse identically to the same file without it"
+        );
+    }
+
     #[test]
     fn escaped_quote_before_hash_is_preserved() {
         // strip_comment must honor `\"` so the `#` inside the value is not treated as a comment.
