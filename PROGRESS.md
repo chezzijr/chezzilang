@@ -7,6 +7,23 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-077 (2026-09-08) — two bundled bugs: `os.exit` was not bottom-typed in value position,
+  and `a == b == c` parsed as `(a == b) == c` instead of chaining like Python.** (1) `os.exit`'s
+  declared return type (`nil`) was used at both call seams (`src/checker/expr.rs`), so `Err(e):
+  os.exit(2)` in a `match` arm failed `branches have incompatible types: int and nil` even though
+  `panic` — bottom-typed via `Ty::Unknown` — worked in the identical position. Fixed by returning
+  `Ty::Unknown` for both spellings (`os.exit(...)` and a `from`-imported bare `exit(...)`), gated by
+  a new `is_diverging_native`/`imported_diverging` pair keyed on the resolved module id, never the
+  bare name. (2) All seven comparison operators (`==`/`!=`/`in`/`<`/`<=`/`>`/`>=`) now share ONE
+  precedence level and CHAIN, Python-style: `0 <= i < n` means `0 <= i and i < n`, with each interior
+  operand evaluated exactly once (a hidden compiler temp, never a re-inferred/re-compiled clone) and
+  the chain short-circuiting at the first false link. New `ExprKind::Compare` node,
+  `Checker::infer_compare_chain`/`compare_pair` (extracted from `infer_binary`), and a
+  `JumpIfFalseKeep`-based compiler lowering beside the `and`/`or` short-circuit. `1 < 2 == true` is
+  now a NEW rejection (`cannot compare int and bool for equality`) where it used to silently print
+  `true`. `docs/grammar.bnf`'s `<eqExpr>`/`<relExpr>` merged into one `<cmpExpr>`/`<cmpOp>`; two
+  `tests/corpus/accept/*.chz` rule tags updated to match. `cargo test` green (both worker counts on
+  `tests/chz`), `cargo clippy -- -D warnings` clean.
 - **TICKET-076 (2026-09-08) — a `match` over a tuple (or a nested `Option`/`Result`) whose arms
   covered the full cartesian product of the constituent domains was rejected as non-exhaustive;
   rustc accepts the identical program.** The old model tracked a flat top-level covered-key set plus

@@ -384,7 +384,8 @@ cancel/defer/recover + sync primitives, checker⊋compiler, core-vs-CPython, std
 runner), ~400 probe programs; every candidate re-run by the main loop on the release binary at
 `CHEZZI_THREADS=1` and default before filing. 30 candidates → 26 confirmed, 2 documented-by-design
 (the airlock install rule, `concurrency.md:1428`; wave-9's own decision), 2 left as decisions (a fn body
-reading a `:=` global declared below it; `1 < x < 3` chaining). The `--serial` oracle the hunt prompt
+reading a `:=` global declared below it; `1 < x < 3` chaining, landed under TICKET-077 — Python-style
+chaining, all seven comparisons at one precedence level). The `--serial` oracle the hunt prompt
 still names is gone (2026-08-16): the oracles were the two-worker-count diff plus a RUN Go/Python/Rust
 reference, exactly as wave 9.
 

@@ -1,4 +1,4 @@
-# rule: expr, orExpr, andExpr, eqExpr, relExpr, addExpr, mulExpr, unary, coalesceExpr, notExpr
+# rule: expr, orExpr, andExpr, cmpExpr, cmpOp, addExpr, mulExpr, unary, coalesceExpr, notExpr
 fn main():
     a := 1 + 2 * 3
     b := x and y or z

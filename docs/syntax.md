@@ -665,12 +665,11 @@ Highest → lowest. Same row = same precedence, left-associative unless noted.
 | 9 | `&` | bitwise and (int) / set intersection (`Set[T]`) |
 | 10 | `^` | bitwise xor (int) / set symmetric-difference (`Set[T]`) |
 | 11 | `\|` | bitwise or (int) / set union (`Set[T]`) |
-| 12 | `<` `<=` `>` `>=` | |
-| 13 | `==` `!=` `in` | `in` = membership, yields `bool` (see below) |
-| 14 | `not` (prefix) | looser than the comparisons, tighter than `and` (Python's grammar) |
-| 15 | `and` | |
-| 16 | `or` | |
-| 17 | `\|>` | pipe (§11), left-assoc |
+| 12 | `<` `<=` `>` `>=` `==` `!=` `in` | ALL SEVEN comparisons — one level, and they CHAIN (see below); `in` = membership, yields `bool` |
+| 13 | `not` (prefix) | looser than the comparisons, tighter than `and` (Python's grammar) |
+| 14 | `and` | |
+| 15 | `or` | |
+| 16 | `\|>` | pipe (§11), left-assoc |
 
 > This table is the contract for the Pratt parser. The relative order follows Python (comparison
 > looser than `\|` < `^` < `&` < shifts). A shift amount outside `0..64` is a runtime error. A left
@@ -681,6 +680,17 @@ Highest → lowest. Same row = same precedence, left-associative unless noted.
 > `??` binds tighter than every binary operator, so `m.get("a") ?? 0 + 1` is
 > `(m.get("a") ?? 0) + 1`, yielding `2`. `not` binds looser than the comparisons, so `not x in xs`
 > is `not (x in xs)`, while `1 + not y` is a parse error — write `1 + (not y)` instead.
+>
+> **Comparisons chain, like Python.** `0 <= i < n` means `0 <= i and i < n`, not
+> `(0 <= i) < n`. Each interior operand is evaluated exactly once (`1 < f() < 3` calls `f` once),
+> and the chain short-circuits at the first false link (`f()`/`g()` in `1 < f() < 0 < g()` — `g`
+> never runs once `f() < 0` is false). Parentheses stop a chain: `(a < b) == c` is two ordinary
+> comparisons, not a chain. A link whose operand types cannot be compared is a type error, exactly
+> as an unchained comparison would be — and because the seven comparisons now share one level,
+> `1 < 2 == true` is a NEW rejection versus the old two-level grammar: it used to parse as
+> `(1 < 2) == true` and print `true`; it now chains as `1 < 2 and 2 == true`, and the second link
+> is `cannot compare int and bool for equality` — a type error, where CPython's dynamically-typed
+> `1 < 2 == True` answers `False`.
 >
 > **Collection operators.** `+ *` and `& ^ |` also operate on collections, with behaviour identical
 > to the equivalent methods (so a mismatched element type is a type error, same as the method form):

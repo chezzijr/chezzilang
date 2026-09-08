@@ -493,12 +493,14 @@
 <andExpr>  ::= <notExpr> | <andExpr> "AND" <notExpr>
 # `not` (gap): sits between `and` and the comparisons, matching Python — `not x in xs` is
 # `not (x in xs)`, and `1 + not y` is a parse error (`not` no longer reaches into the unary tier).
-<notExpr>  ::= <eqExpr> | "NOT" <notExpr>
-# `in` membership sits at the equality level (same precedence as `==`/`!=`); yields a bool.
-<eqExpr>   ::= <relExpr> | <eqExpr> "EQEQ" <relExpr> | <eqExpr> "NOTEQ" <relExpr> | <eqExpr> "IN" <relExpr>
-<relExpr>  ::= <bitOrExpr>
-             | <relExpr> "LT" <bitOrExpr>   | <relExpr> "LTEQ" <bitOrExpr>
-             | <relExpr> "GT" <bitOrExpr>   | <relExpr> "GTEQ" <bitOrExpr>
+<notExpr>  ::= <cmpExpr> | "NOT" <notExpr>
+# TICKET-077: all seven comparisons (`==`/`!=`/`in`/`<`/`<=`/`>`/`>=`) share ONE precedence level —
+# this production is left-recursive over that shared level, same as any other. What the BNF cannot
+# express: they CHAIN, Python-style. `a < b == c` means `a < b and b == c`, with `b` evaluated
+# exactly once and the chain short-circuiting at the first false link; `(a < b) == c` (parenthesized)
+# stays two ordinary comparisons instead. See `docs/syntax.md` §4 for the semantic rule.
+<cmpExpr>  ::= <bitOrExpr> | <cmpExpr> <cmpOp> <bitOrExpr>
+<cmpOp>    ::= "EQEQ" | "NOTEQ" | "IN" | "LT" | "LTEQ" | "GT" | "GTEQ"
 # Bitwise / shift cascade (gap #13), Python's relative order: `|` looser than `^` looser than `&`
 # looser than the shifts, which sit just above range. Int-only on int operands; `| & ^` ALSO do set
 # algebra (union/intersection/symmetric-difference) on two `Set[T]` (gap #3). `<< >>` stay int-only.
