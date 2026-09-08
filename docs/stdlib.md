@@ -1110,9 +1110,12 @@ C-ABI vocabulary for `extern "lib":` blocks (see the FFI section of `syntax.md`)
 `null() -> ptr` · `is_null(p: ptr) -> bool`. Also exports the marshalling **type names**: the opaque
 pointer handle `ptr` plus the eight fixed-width integers `int8`, `int16`, `int32`, `int64`, `uint8`,
 `uint16`, `uint32`, `uint64`. None of these are global builtins — a module that uses `ptr` or a width
-type (in an annotation **or an `extern` signature**) must import it from `std.ffi`: whole-module
-`import std.ffi` (which also licenses `ptr`) or per-name `import ptr, int32 from std.ffi`. (FFI type
-names cannot be renamed on import — the backends key off the literal surface name.)
+type (in an annotation **or an `extern` signature**) must import it from `std.ffi`. The two spellings
+are **not interchangeable for the width names**: whole-module `import std.ffi` licenses the bare `ptr`
+and the qualified `ffi.int32` form, but a bare `int32` needs the per-name `import int32 from std.ffi`
+(measured: `import std.ffi` then `fn abs(n: int32)` is *unknown type 'int32'*, while `ffi.int32` and a
+bare `ptr` both work). (FFI type names cannot be renamed on import — the backends key off the literal
+surface name.)
 (Sync scalar **callbacks** need no `std.ffi` surface — a callback extern param is just a function-typed
 param spelled `fn(scalars) -> scalar`; see the FFI section of `syntax.md`.)
 
@@ -1156,7 +1159,11 @@ buffer can be handed to a C fn that itself reallocs/frees it.
 
 - `alloc(nbytes) -> ptr` — `malloc(nbytes)`; the bytes are **garbage** (uninitialized).
 - `alloc_zeroed(nbytes) -> ptr` — `calloc`-style; the bytes are **zeroed**.
-- `free(p)` — release a buffer; returns `nil`. `free(ffi.null())` is a safe **no-op**.
+- `free(p)` — release a buffer; returns `nil`. `free(ffi.null())` is a safe **no-op**. Freeing the
+  same buffer **twice is undefined behavior and aborts the process** (measured: `free(): double free
+  detected in tcache 2`, SIGABRT) — this is the libc allocator, so it is not catchable by `recover:`.
+  CPython `ctypes` aborts identically on the same program; the mitigation is the same one as for a
+  dangling `load_*` — do not reuse a `ptr` after `free`.
 
 > **Manual free.** A `ptr` is **never auto-freed** (the same rule as every other `ptr`). The idiom is
 > `p := ffi.alloc(n)` then `defer ffi.free(p)`. **Forgetting to free is a leak.** A `nbytes < 0` is a

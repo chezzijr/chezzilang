@@ -37,13 +37,16 @@
 >   NOT special-cased; it only must never PANIC and never HANG (it completes or faults `deadlock` cleanly,
 >   guarded by `parallel_cross_nursery_contended_never_panics`). This is the same semantic gap the
 >   cooperative flatten would close.
-> - **Cooperative (`--serial`)** still serializes nested nursery levels → the same program still
->   faults `deadlock` there. The cooperative-engine flatten (§5 "Cooperative") is a **separate, later
->   commit**; the design below still applies. Workaround: case C (siblings in one nursery).
-> - **Case B — inline outer-body *blocking* recv (§4 last paragraph):** the fix is **wake-side only**.
->   A blocking `recv`/`for v in ch:`/`wait:` issued directly in the inline `parallel:` body (not inside
->   a `spawn:`) still faults with a "deadlock — no runnable task can send" (the diagnostic names the
->   `spawn:` fix). Put blocking work in a `spawn:`.
+> - **Cooperative (`--serial`)** — HISTORICAL. The cooperative engine was **removed 2026-08-16**
+>   (`docs/future.md` §2b), so there is no second engine to serialize nested nursery levels and the
+>   cooperative-engine flatten of §5 is moot. Kept only so the design discussion below reads.
+> - **Case B — inline outer-body *blocking* recv (§4 last paragraph): CLOSED, re-measured 2026-09-08
+>   (bug-hunt wave 11).** This bullet used to say a blocking `recv`/`for v in ch:`/`wait:` issued
+>   directly in the inline `parallel:` body still faults `deadlock`. It does not: a `spawn:` sibling
+>   sending to a `recv` in the inline body prints `inline got 5`, rc=0, at `CHEZZI_THREADS=1`, `2` and
+>   the default. The `wait:`-with-a-runnable-sibling shape (N10) likewise takes the VALUE, not the
+>   timer, at all three counts. Both limits appear to have been closed by later wake-side work; the
+>   §4 paragraph and the §5 parenthetical below are stale in the same way.
 > - **Eager (per-connection) nurseries** run on a private `MnSched` (`activate_eager_nursery`, for
 >   liveness — OPTION A, kept). A `send`/`close` inside an eager body only scans that private sched's
 >   own park set, so a receiver parked in the PARENT nursery was never woken → a spurious `deadlock`
@@ -52,8 +55,16 @@
 >   that chain (strictly upward — no cycle, no ABBA) to requeue the parent's parked receiver. Golden:
 >   `parallel_cross_nursery_nested_send_to_outer_recv.chz`. **Residual (still a limit):** parent→child
 >   (a receiver parked INSIDE an eager body, sender in an ancestor — `parent_wake` points UP only) and
->   sibling-eager→sibling-eager; those are timing-divergent and complete-or-deadlock-fault cleanly
->   (pinned by `parallel_cross_nursery_parent_to_child_residual_never_panics`).
+>   sibling-eager→sibling-eager (pinned by
+>   `parallel_cross_nursery_parent_to_child_residual_never_panics`). **Re-measured 2026-09-08 (bug-hunt
+>   wave 11): "timing-divergent" is wrong — the parent→child residual is DETERMINISTIC per worker
+>   count.** A sender sleeping 300 ms in an ancestor task, receiver parked in a nested eager body:
+>   `CHEZZI_THREADS=1` prints the value 10/10 runs; `=2` and `=4` fault `deadlock` 10/10. Go prints the
+>   value at every `GOMAXPROCS`. So this is not a benign completes-or-faults-cleanly limit: it is a
+>   **confident FALSE `deadlock` verdict on a program that has a live sender**, which is exactly what
+>   `parked-is-not-stuck` / `docs/gaps.md` **W7-12** say a heuristic must never emit — the required
+>   behaviour when unsure is to DECLINE. Closing it is the cross-nursery flatten milestone this
+>   document designs, so it needs a decision rather than a patch.
 >
 > Cross-refs: [`concurrency.md §11`](concurrency.md),
 > [`concurrency-tier-d.md`](concurrency-tier-d.md), `PROGRESS.md`.

@@ -205,7 +205,16 @@ Right now: **pre-JIT/pre-freeze bug-hunt + drift-fix hunt** is the active phase 
 checker↔runtime, and IO drift — live ledger in `docs/gaps.md`), with **M19 — Perf track** paused
 in-progress alongside it.
 
-> **START HERE (2026-09-06): `docs/gaps.md` — 2 open rows, `W8-17` and `W8-19`.** Bug-hunt wave 10
+> **START HERE (2026-09-08): `docs/gaps.md` — bug-hunt WAVE 11 filed `W11-1..W11-13`**, six domains,
+> every row re-verified on the release binary at `699be0d2` and ticketed as **TICKET-093..098** (093 is
+> the P0: `fn`-type params are compared COVARIANTLY, so `h: fn(Any) -> Dog = idd` type-checks and a
+> `Cat` reaches a `List[str]` at rc=0). Read wave 11's session log at the END of `docs/gaps.md` before
+> working any of them — it also records what the wave found CLEAN (the whole `std.*` surface at ~28 000
+> differential cases, all 32 FFI null guards, `std.net`'s read contract), the one row that needs a
+> DECISION rather than a patch (the parent→child cross-nursery false `deadlock`, deterministic per
+> worker count, not "timing-divergent" as its doc said), and one row deliberately NOT ticketed
+> (`W11-13`, an airlock warning under-warn — re-open only with a measured runtime-derived table).
+> Older, still open: **2 rows, `W8-17` and `W8-19`.** Bug-hunt wave 10
 > (2026-09-05/06) filed `W10-1..W10-26` and **all 26 are closed**: TICKET-060..069 landed overnight through the
 > pipeline and every fix was re-verified on the merged release binary at both worker counts (read the
 > wave-10 session log in `docs/gaps.md` first; `W9-9` closed under TICKET-059).

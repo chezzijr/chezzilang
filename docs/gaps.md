@@ -12467,3 +12467,91 @@ matters: a 3 000-link chain (~19× the depth the original cap rejected) is accep
 **Gate:** `cargo clippy --all-targets -- -D warnings` clean; `cargo test --lib checker::` **1808 passed
 / 0 failed**; `./target/release/chezzi test tests/chz/` **493/493 identical** on M:N and `--serial`;
 all `examples/*.chz` check clean.
+
+---
+
+## Session log — 2026-09-08 (bug-hunt wave 11: 6 domains, 13 findings, 6 tickets filed)
+
+Six agents over disjoint domains, plus a seventh (FFI / `std.net`) run in the main loop. Every finding
+below was re-verified by the judging loop on the release binary at `699be0d2` before it was written
+down. `--serial` no longer exists, so the oracle for every row is a RUN reference program in the
+owning ancestor (Go for concurrency, CPython for scripting feel, Rust for types/enums) plus the
+worker-count differential at `CHEZZI_THREADS=1 / 2 / default`.
+
+**The rows, ranked, with the ticket each landed in.** Full repros, mechanisms and the
+already-correct regression surface live in the tickets — this is the index, not the record.
+
+| row | P | domain | one line | ticket |
+|---|---|---|---|---|
+| **W11-1** | P0 | checker | `fn`-type PARAMS are compared covariantly (`src/checker/proto.rs:1233`, second site `src/checker/ty.rs:640`/`:667`), so `h: fn(Any) -> Dog = idd` type-checks and a `Cat` lands in a `List[str]` at rc=0 | TICKET-093 |
+| **W11-2** | P1 | checker | A mixed-numeric list literal as a param/field DEFAULT aborts at run time with `internal: two different list element-widening decisions were recorded` — `span-keyed-table-aliasing` instance 5, `ListWidenTable` (`src/checker/ty.rs:196`) landed after W7-49 fixed the same aliasing for its three sibling tables | TICKET-094 |
+| **W11-3** | P1 | scheduler | A nested-nursery deadlock **hangs forever** at `CHEZZI_THREADS=1` (10/10, also at a 45 s bound) where every other worker count faults in ~11 ms; Go faults at every `GOMAXPROCS`. `eager_joiner_runs_fibers(n) = n >= 2` (`src/vm/sched.rs:5584`) leaves nobody in `take_runnable` to evaluate `is_deadlocked` on the nested private `MnSched` | TICKET-095 |
+| **W11-4** | P1 | cancel | A module top-level `spawn` fault is delivered TWICE — `recover:` catches it AND it aborts at rc=1 — and every statement after the handler is silently skipped. The same shape one scope down is correct (rc=0). Neither Python `TaskGroup` nor Go delivers twice | TICKET-096 |
+| **W11-5** | P1 | airlock | A crossing closure carries the sender's module global only when the sender ASSIGNED the slot and the body TEXTUALLY names it: `fill_global_free` (`src/compiler/mod.rs:1954`) gathers children through `MakeClosure`/`SpawnBlock` but never `Op::Call`, and an in-place `ys.push(2)` never sets the sending view's `assigned` bit. Same closure answers 1 then 100 after an UNRELATED `recv` | TICKET-097 |
+| **W11-6** | P2 | cancel | `main`'s loop back-edge is not a cancel checkpoint: a doomed top-level CPU loop ran **39 774 ms** to completion where the identical loop in a `parallel:` sibling is cut at 33 ms. `docs/concurrency.md:1042` claims the back-edge IS the checkpoint "on the top-level `main` thread" | TICKET-096 |
+| **W11-7** | P2 | checker | A GENERIC callee loses expected-type inference on every CONCRETE arg slot — `fn g[T](a: float, b: T)` rejects `g(1, "x")` where the non-generic twin accepts. `infer_generic_arg_tys` (`src/checker/expr.rs:~3937`) drops the hint `infer_arg` threads; `check_generic_arg` re-infers with it only for closures. Contradicts `docs/syntax.md:613` verbatim | TICKET-094 |
+| **W11-8** | P2 | checker | The collection-element widen is missing at both DEFAULT sinks (`fn g(zs: List[float] = [1, 2])` rejects) though the SCALAR widen is present there; `docs/syntax.md:~596` claims the same sink set for both | TICKET-094 |
+| **W11-9** | P3 | checker | A non-exhaustive STRUCT match renders its witness as the internal module-mangled key, twice: `pattern \`sw::S.sw::S(_, _)\` is not covered`. `::` is not Chezzi path syntax. The enum (`E.A(_)`) and tuple witnesses are correct — this is `Dom::Prod` only (`src/checker/exhaust.rs:299`/`:358`/`:87`) | TICKET-098 |
+| **W11-10** | P3 | stdlib | `cancel.timeout(9223372036854775807).derive()` faults `int(): 9223372036854776000 is out of integer range`, naming `std/cancel.chz:156` — a file the user never wrote. The `+1` margin is computed on a value already rounded above i64::MAX | TICKET-098 |
+| **W11-11** | P3 | stdlib | Two integer parsers in one language disagree: `math.parse_int_base("1_0", 10)` and `(" 10 ", 10)` both `Err` where `"1_0".to_int()` / `" 10 ".to_int()` give `Some(10)` and CPython gives `10`. And the out-of-range case says "cannot parse", a wrong diagnosis — `math.factorial` already gets this right in the same module | TICKET-098 |
+| **W11-12** | P3 | stdlib | `regex.replace_all(r"(\d+)", "12 34", "$1px")` silently returns `Ok(' ')`. Go RE2 is byte-identical so the BEHAVIOUR is right; the gap is that the sibling Python spelling `\1` already gets a custom diagnostic and the greedy-name trap `$1x` gets none | TICKET-098 |
+| **W11-13** | P3 | airlock | The airlock isolation warning gates on the READ shape: `s.v = 2` in a `spawn:` then `print("{s}")` warns, `print("{s.v}")` does not, and `xs[0].push(2)` does not, while five other write/read shapes do. **Deliberately NOT ticketed** — an under-warn is the acceptable direction per CLAUDE.md, and that convention also requires the gate be a MEASURED table derived from the runtime, one program per shape. Re-open only with that enumeration in hand | — |
+
+**Doc drift found while judging, fixed in place in this same commit** (no ticket): the Case B and N10
+limits in `docs/cross-nursery-flat-scheduler.md` are measured CLOSED; that file's `--serial` bullet
+outlived the engine; `docs/concurrency.md` §5a did not say `pmap` is a submodule (`concurrency.pmap`
+is a type error); `docs/stdlib.md` implied whole-module `import std.ffi` licenses the bare width names
+(it licenses `ptr` and the qualified `ffi.int32` only); `ffi.free`'s double-free abort was unstated.
+
+### The one row that needs a DECISION, not a patch
+
+The parent→child cross-nursery residual — a receiver parked inside an eager body, sender in an
+ancestor — is documented in `docs/cross-nursery-flat-scheduler.md` as "timing-divergent and
+complete-or-deadlock-fault cleanly". **Re-measured here, it is deterministic per worker count:**
+`CHEZZI_THREADS=1` prints the value 10/10; `=2` and `=4` fault `deadlock` 10/10; Go prints the value at
+every `GOMAXPROCS`. So it is a **confident FALSE `deadlock` on a program that has a live sender**,
+which `parked-is-not-stuck` / **W7-12** say a heuristic must never emit — the required behaviour when
+unsure is to DECLINE. Closing it is the cross-nursery flatten milestone that document designs, so it
+is recorded rather than ticketed. Its doc bullet has been corrected in place.
+
+Also recorded rather than filed: DAG aliases split into two copies at the airlock
+(`docs/concurrency.md:1498` says deliberate, pinned by
+`airlock_struct_dag_alias_stays_independent`). Measured, a struct aliased by two names before a
+`spawn:` shows `b.v = 1` in-task where CPython threading and `copy.deepcopy` both show 99 — and W7-4c
+fixed the analogous shape for `Cell`s the OTHER way, so cells and data now disagree. Flagged for
+re-decision.
+
+### What the wave did NOT find — the clean columns
+
+- **stdlib is clean.** ~28 000 differential cases against CPython 3.14 and Go 1.26 across `str`
+  methods, format specs, `std.json` (generated + mutation-fuzzed), `std.csv`, `std.math`,
+  `std.encoding`, `std.datetime`, `std.crypto`, `std.path`, `std.duration`, `std.fs`/`io`,
+  `std.regex`, `std.collections`/`bisect`/`flag`/`log`/`iter`/`os`/`process`/`rand`. **Zero
+  correctness bugs**; every divergence found was already documented (the IEEE-total policy, the i64
+  ceiling, the no-bignum `Json.Num` fallback, RE2-vs-`re`). Two results worth keeping: format specs
+  are byte-identical to CPython over 3 000 generated specs, and `math.cbrt` is byte-identical to Go
+  and up to ~2 ULP MORE accurate than CPython's (verified against a 60-digit Decimal Newton
+  iteration).
+- **FFI is clean.** All 14 `load_*` and 18 `store_*` forms (base and `_at`) return a recoverable
+  `Err('ffi.<fn>: null pointer')` on `null()` — zero segfaults, no missed site. GC pressure inside a
+  libffi callback (400-element `qsort` with an allocating comparator) sorts correctly; a Chezzi fault
+  inside a callback is stashed and re-raised as the extern's own error and is `recover:`-able; the
+  stored-callback safety net fires exactly as documented (`signal`+`raise` aborts with its named
+  message rather than running the handler on a poisoned trampoline).
+- **`std.net` is clean.** The `str`-read contract holds byte-exactly: valid text before a bad byte is
+  delivered first, the `invalid utf-8 on the socket` error is sticky across repeated reads, and
+  `read_bytes` then drains the refused bytes plus the following text (`Ok(b'\xff\xfecd')`).
+- **Everything the six agents probed and found correct** is listed per domain in their reports; the
+  largest blocks were `defer` (LIFO, per-iteration scoping, panic-during-unwind replacement — all
+  byte-identical to Go), `recover:` over ten fault classes with correct origin stamping, the full
+  `std.cancel` cascade including first-cause latching, `Channel`/`wait:`/`Executor` under contention
+  (8×20000 `AtomicInt.add`, 900 values over 3 channels, a 500-iteration rendezvous ping-pong), and the
+  M24 witness-passing surface in every forwarding position.
+
+**Meta-finding, consistent with wave 9.** The mechanical oracles again found nothing — every one of
+the 13 rows came from a hand-built program judged against a RUN reference. Three of the six domains
+were opened by reading a doc sentence and testing whether it was still true; two of those sentences
+had silently stopped being true (W11-6, and the two closed limits above), which is the same shape as
+W8-18. And **W11-3 is invisible to the standing gates by construction**: `tests/chezzi_threads_cli.rs`
+runs `tests/chz` at the default count and `CHEZZI_THREADS=2` only, so T=1 is ungated — and no
+`tests/chz` test can assert a hang in the first place.

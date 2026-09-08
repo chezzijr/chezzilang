@@ -453,6 +453,10 @@ The report-channel + one-`spawn`-per-element + join + reassemble pattern is comm
 - `pmap_limited[T, U](xs, f, limit) -> List[U]` — same, capping in-flight `f`-executions at `limit`
   via a channel-as-semaphore token bucket (also the standard **concurrency limiter**; `limit > 0`).
 
+Both live in the **submodule** `std.concurrency.pmap`, not on `std.concurrency` itself, so the
+spelling is `import std.concurrency.pmap` then `pmap.pmap(xs, f)` / `pmap.pmap_limited(xs, f, n)` —
+`concurrency.pmap(...)` is a `module 'concurrency' has no member 'pmap'` type error.
+
 Determinism comes from reassembling by submission INDEX (`sort_by_key`), never completion order — so
 the result is byte-identical at every worker count. The nursery lives inside the helper and joins
 before the collect (structured concurrency — a task can't outlive the call); `f` crosses the airlock
