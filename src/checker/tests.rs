@@ -31451,3 +31451,52 @@ fn struct_match_witness_is_spellable_not_module_mangled() {
     let help = errs[0].help.as_deref().expect("expected a help message");
     assert_eq!(help, "pattern `S(_, _)` is not covered");
 }
+
+// TICKET-098 sub-bug A: the same `Dom::Prod` defect also hits a struct nested in an enum payload,
+// since `exh_new`'s `MatchKind::Struct` label is only one of two constructors that build a
+// `Dom::Prod` -- `dom_of_ty`'s `Ty::Struct` arm builds the other.
+#[test]
+fn struct_witness_inside_an_enum_payload_is_spellable() {
+    let errs = check_entry(
+        "struct P:\n    x: int\n\nenum W:\n    K(P)\n\nfn k(w: W) -> int:\n    match w:\n        W.K(P(1)): return 0\n\n    return 1\n",
+    );
+    assert_eq!(
+        errs.len(),
+        1,
+        "expected one non-exhaustive-match error, got: {errs:?}"
+    );
+    let help = errs[0].help.as_deref().expect("expected a help message");
+    assert_eq!(help, "pattern `W.K(P(_))` is not covered");
+}
+
+// TICKET-098 sub-bug A: an enum witness's prefix must survive the fix -- only `Dom::Prod` drops its
+// prefix, `Dom::Sum` keeps `display_of(dom_label(dom), name)`.
+#[test]
+fn enum_match_witness_stays_bare_prefixed() {
+    let errs = check_entry(
+        "enum E:\n    A(int)\n    B\n\nfn g(e: E) -> int:\n    match e:\n        E.B: return 0\n\n    return 1\n",
+    );
+    assert_eq!(
+        errs.len(),
+        1,
+        "expected one non-exhaustive-match error, got: {errs:?}"
+    );
+    let help = errs[0].help.as_deref().expect("expected a help message");
+    assert_eq!(help, "pattern `E.A(_)` is not covered");
+}
+
+// TICKET-098 sub-bug A: a tuple's witness must survive the fix -- a tuple's `Dom::Prod` has an
+// empty label, so its empty ctor name hits `render_wit`'s empty-name arm and stays parenthesised.
+#[test]
+fn tuple_match_witness_stays_parenthesised() {
+    let errs = check_entry(
+        "enum E:\n    A(int)\n    B\n\nfn h(t: (E, E)) -> int:\n    match t:\n        (E.B, E.B): return 0\n\n    return 1\n",
+    );
+    assert_eq!(
+        errs.len(),
+        1,
+        "expected one non-exhaustive-match error, got: {errs:?}"
+    );
+    let help = errs[0].help.as_deref().expect("expected a help message");
+    assert_eq!(help, "pattern `(E.A(_), _)` is not covered");
+}
