@@ -8416,6 +8416,12 @@ it.
    **One deliberate residual:** Rust also treats grapheme-extend characters as non-printable, so a
    combining mark escapes here and prints literally in CPython. Escaping is the unambiguous
    direction, and a Unicode-category dependency for one category is not worth it.
+   **CLOSED 2026-09-08 (TICKET-081/088):** a generated 375-range table (`src/printable.rs`, no
+   dependency) corrects `str_repr` to keep combining marks literal like CPython. The residual now
+   runs the other way — 4764 codepoints CPython escapes as unassigned (`Cn`) print literally here,
+   because rustc's Unicode tables are newer than the CPython build this was measured against. That
+   is a Unicode-VERSION skew, not chased here — matching it would mean pinning Chezzi's printability
+   to a specific CPython release.
 
 *Both are the same meta-finding as W7-22's: a fix applied to SOME arms of an N-way set. The N here
 was "the renderers" (three) and "the ambiguous characters" (two alphabets), and in both cases the

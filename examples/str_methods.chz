@@ -51,7 +51,7 @@ fn main():
     print("file.tmp".strip_suffix(".tmp"))
     print("file.txt".strip_suffix(".tmp"))
 
-    # split_lines: split on "\n".
+    # split_lines: split on a newline (LF, CRLF, or lone CR).
     print("a\nb\nc".split_lines())
 
     # strip: trim alias.

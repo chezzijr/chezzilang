@@ -3944,7 +3944,7 @@ s.starts_with("ab")  s.ends_with("yz")  s.contains("b")
 s.chars()        # → List[str] of 1-char strings; also `for c in s:` iterates them
 s.replace("a","b")  s.repeat(3)   s.reverse()      s.pad_left(4,"0")
 s.index_of("x")  s.count("x")     s.strip_prefix("p")  s.strip_suffix("s")
-s.split_lines()  # → List[str] split on "\n"
+s.split_lines()  # → List[str] split on a newline (LF, CRLF, or lone CR)
 s.to_int()       s.to_float()     # → int? / float? (Some/None — None on bad input)
 s.parse_int()    s.parse_float()  # → Result[int,str] / Result[float,str] (Ok/Err(msg) on bad input)
 "a" + "b"        # concatenation

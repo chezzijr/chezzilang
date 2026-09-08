@@ -23,7 +23,7 @@ Conventions used below:
 | `int` | `int(x) -> int` | Convert from `int`/`float`/`bool`/`str` (parses a string; truncates a float). A string parse accepts PEP-515 single underscores between digits (`"1_000"` → `1000`), mirroring the lexer's numeric-literal rule. Bad string raises (recoverable) — for `None`-on-failure use `s.to_int() -> int?`. Rejects a `List`/`Map`/`Set`/tuple/struct/enum/function/`Option`/`Result`/`bytes`/`bytearray`/`Shared`/`Channel`/`Atomic`/`AtomicInt`/`RwShared`/`Executor`/`Socket`/`Listener`/`Writer`/`Reader`/`ptr` argument at CHECK time. |
 | `float` | `float(x) -> float` | Convert from `float`/`int`/`str`. A string parse accepts PEP-515 single underscores between digits (`"1_0.5"` → `10.5`). Bad string raises — for `None`-on-failure use `s.to_float() -> float?`. Rejects a `List`/`Map`/`Set`/tuple/struct/enum/function/`Option`/`Result`/`bytes`/`bytearray`/`Shared`/`Channel`/`Atomic`/`AtomicInt`/`RwShared`/`Executor`/`Socket`/`Listener`/`Writer`/`Reader`/`ptr` argument at CHECK time. |
 | `bool` | `bool(x) -> bool` | Truthiness cast (never faults on a scalar). `int`: `0` → `false`, else `true`. `float`: `0.0`/`-0.0` → `false`, `NaN` → `true` (Python parity), else `true`. `bool`: identity. `str`: `""` → `false`, else `true` (non-empty is truthy — **not** a parse, so `bool(" ")` is `true`). Rejects a `List`/`Map`/`Set`/tuple/struct/enum/function/`Option`/`Result`/`bytes`/`bytearray`/`Shared`/`Channel`/`Atomic`/`AtomicInt`/`RwShared`/`Executor`/`Socket`/`Listener`/`Writer`/`Reader`/`ptr` argument at CHECK time. |
-| `str` | `str(x) -> str` | Stringify an `int`/`float`/`bool` (and more — see the `Stringable` protocol in `syntax.md`). Scalars (`int`/`float`/`bool`/`str`) also intrinsically satisfy the `Stringable` protocol, so `[T: Stringable]` generics accept them. A string NESTED inside a container / struct field / enum payload renders as its Python `repr` — quoted and escaped (`str(["a", "b"])` is `['a', 'b']`) — while a bare string stays its own characters (`str("a")` is `a`). See `syntax.md` §"A nested `str` is quoted". |
+| `str` | `str(x) -> str` | Stringify an `int`/`float`/`bool` (and more — see the `Stringable` protocol in `syntax.md`). Scalars (`int`/`float`/`bool`/`str`) also intrinsically satisfy the `Stringable` protocol, so `[T: Stringable]` generics accept them. A string NESTED inside a container / struct field / enum payload renders as its Python `repr` — quoted and escaped (`str(["a", "b"])` is `['a', 'b']`) — while a bare string stays its own characters (`str("a")` is `a`). The one residual difference: a codepoint unassigned to CPython's Unicode build escapes there but prints literally here (a Unicode-version skew, `docs/gaps.md` §W7-25). See `syntax.md` §"A nested `str` is quoted". |
 | `ord` | `ord(s) -> int` | Unicode codepoint of `s`, which must be exactly **one character** (`ord("é")` → 233; `ord("ab")` faults, like Python). |
 | `chr` | `chr(code) -> str` | One-character string for codepoint `code`. |
 | `panic` | `panic(msg) -> never` | Raise a recoverable fault (caught by the nearest `recover:`, else aborts). Bottom-typed. |
@@ -150,7 +150,7 @@ than the Python analogue; there is nothing to fix.
 |--------|-----------|-------|
 | `len` | `() -> int` | Character (codepoint) count. |
 | `upper` / `lower` | `() -> str` | Case-mapped copy. |
-| `trim` | `() -> str` | Strip leading/trailing whitespace. |
+| `trim` | `() -> str` | Strip leading/trailing whitespace: Unicode `White_Space` plus U+001C..U+001F, matching CPython's `str.isspace()`. |
 | `split` | `(sep: str) -> List[str]` | Split on `sep`. Yields `separators + 1` pieces, so the empty string splits to a one-element list holding `""` (`"".split(",")` → `[""]`, length 1), matching Python/Go/Rust/JS. An empty `sep` raises a recoverable `split: sep must not be empty` fault (Python `ValueError`; matches `std.string.split`). |
 | `chars` | `() -> List[str]` | One-character strings. |
 | `starts_with` | `(prefix: str) -> bool` | |
@@ -166,7 +166,7 @@ than the Python analogue; there is nothing to fix.
 | `strip` | `() -> str` | Trim alias (strip leading/trailing whitespace). |
 | `strip_prefix` | `(p: str) -> str` | Remove `p` from the front if present, else unchanged. |
 | `strip_suffix` | `(p: str) -> str` | Remove `p` from the end if present, else unchanged. |
-| `split_lines` | `() -> List[str]` | Split on `"\n"`. |
+| `split_lines` | `() -> List[str]` | Split on `"\n"`, `"\r\n"` or a lone `"\r"`; a trailing terminator yields no final empty piece (Python `str.splitlines()`). It does NOT split on `\v`, `\f`, U+0085, U+2028 or U+2029. |
 | `to_int` | `() -> int?` | Safe parse (trims first, accepts PEP-515 underscores between digits): `Some(n)` or `None` on bad input. |
 | `to_float` | `() -> float?` | Safe parse (trims first, accepts PEP-515 underscores between digits): `Some(f)` or `None` on bad input. |
 | `parse_int` | `() -> Result[int, str]` | Result-returning parse (trims first, accepts PEP-515 underscores between digits): `Ok(n)` or `Err(msg)` carrying a human-readable parse-error message. The error-message sibling of `to_int`. |
@@ -1330,7 +1330,7 @@ Written in Chezzi (`std/*.chz`); same `import std.<name>` surface.
 - `rsplit(s, sep, maxsplit = -1) -> List[str]` — as `split` but from the RIGHT; unlimited `maxsplit` is identical to `split`. Empty `sep` faults.
 - `split_whitespace(s) -> List[str]` — split on runs of whitespace, dropping empty pieces (Python no-arg `str.split()`): `"  a  b "` → `["a", "b"]`, `""` → `[]`.
 
-The case fns are ASCII-guaranteed; exotic full-Unicode case-folding follows Rust (e.g. `ß`→`SS`) and may differ from Python. `split_whitespace`'s blank class is Rust's Unicode `White_Space` (native `trim`), byte-identical to Python on ASCII whitespace.
+The case fns are ASCII-guaranteed; exotic full-Unicode case-folding follows Rust (e.g. `ß`→`SS`) and may differ from Python. `split_whitespace`'s blank class is the native `trim`'s (see `trim` above), which matches Python's `str.split()` blank class exactly.
 
 `is_empty` aside, the FIRST list (`repeat`…`strip_suffix`) is also available as receiver methods on `str` (no import needed): `s.ends_with(x)` ≡ `text.ends_with(s, x)`. See the `str` method table in §2. The ergonomics fns above are `std.string`-only.
 
@@ -1606,7 +1606,7 @@ already `Atomic`. There is no `ConcurrentList`/`ConcurrentSet`/`ConcurrentQueue`
 | function | signature | semantics |
 | --- | --- | --- |
 | `pmap` | `pmap[T, U](xs: List[T], f: fn(T) -> U) -> List[U]` | spawn one task per element, run `f` on each in parallel, return the results in **submission order** (`[f(xs[0]), f(xs[1]), …]`). |
-| `pmap_limited` | `pmap_limited[T, U](xs: List[T], f: fn(T) -> U, limit: int) -> List[U]` | same, but at most `limit` tasks run `f` at once (a channel-as-semaphore token bucket). `limit > 0` required (`limit <= 0` deadlocks — no permits). |
+| `pmap_limited` | `pmap_limited[T, U](xs: List[T], f: fn(T) -> U, limit: int) -> List[U]` | same, but at most `limit` tasks run `f` at once (a channel-as-semaphore token bucket). `limit > 0` required — `limit <= 0` faults with a message naming `limit`, before the nursery is entered. |
 
 Determinism comes from reassembling by submission index (a `sort_by_key` on the tagged results),
 **never** completion order — so a run that finishes tasks in a different order still returns the
