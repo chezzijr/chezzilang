@@ -11,6 +11,35 @@ justify lives in **[`future.md §4`](future.md)**; the scheduled work is roadmap
 > They are kept as the record of what was measured at the time; they are not reproducible on today's
 > binary, and "serial == M:N parity green" in an older section means the gate that existed then.
 
+## TICKET-085 -- a string-keyed Map[str, int] bench (map_str), and a correction to the filed 4.1x -- 2026-09-08
+
+`benches/chz/map.chz`'s own header says its int-key choice is deliberate: "Int keys hash straight to
+their f64 bits", so that bench never pays string-content hashing. `benches/chz/map_str.chz` /
+`benches/py/map_str.py` close that gap: 1000 distinct string keys built once into a list, then 1000
+rounds of get-then-increment over them (1M gets + 1M sets). Both sides print `1000000`.
+
+Measurement conditions: this box, release binary at `2c8a19ba`, min of eleven alternating samples per
+side, `uptime` load average 0.80 to 1.57. No `hyperfine` on this box, so the runs are `date +%s.%N`
+deltas.
+
+Whole-program: 0.328 s vs 0.129 s = 2.54x, INSIDE the ~1.3x-3.5x band.
+
+The isolated map phase, measured on the 5x-rounds variant described below: 0.674 s vs 0.123 s = 5.48x.
+The control is the identical program with the map deleted and the probe replaced by `acc += k.len()`.
+The isolated map phase is outside the advertised band.
+
+The isolated figure must be measured at 5x rounds. At the shipped size the CPython term of the
+subtraction is about 0.025 s, so it is noise-dominated: three batches of 7 samples gave 4.02x, 5.30x
+and 5.82x on one binary within minutes.
+
+The isolated figure warrants a follow-up optimisation ticket on string-key hashing. No optimisation
+landed here, by the human's 2026-09-07 instruction.
+
+**Correction.** The 4.1x filed for this shape on 2026-09-07 was measured on a non-equivalent program:
+a plain assignment loop `m[k] = i` over 5000 keys, not get-then-increment over 1000 keys. Re-measurement
+of the reported shape gives 2.52x (ticket author) and 2.54x (planning) whole-program. Nobody should
+re-derive the 4.1x later and read the difference as a regression.
+
 ## W10-22 — std.json and std.string.replace build output with a join, not per-codepoint concat — 2026-09-06
 
 `std/json.chz` (`parse_string`, `parse_number`'s `raw`, `escape`, `stringify_depth`'s `Arr`/`Obj`
