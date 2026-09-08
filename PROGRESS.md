@@ -8184,6 +8184,15 @@ enums/errors — by **running the reference program**, never by citing a second 
 below dated before 2026-08-16 that measure `--serial`, compare `serial` against `M:N`, or call it the
 parity oracle are **dated records** and are kept verbatim.
 
+**TICKET-079 (2026-09-08, closes `docs/gaps.md` W8-17's remaining bundle):** a fatal resolve/lex/
+parse error now renders the same `|`-gutter caret snippet a type error already had (`report_fatal`
+routed through `render_diag`'s renderer); an unclosed delimiter (`xs := [1, 2, 3`) spans its OPENER,
+not the token the parser gave up on; the near-miss suggester no longer discounts the edit distance
+by the length gap, so a suggestion needs a genuine near miss (`xs.lenght()` and `math.nope` no
+longer suggest); `unknown type` carets the type name and gains its own near-miss suggestion; a
+method-miss that names a FIELD reports the kind instead of suggesting the identical spelling; and
+`import X from M` gets the same `help` + member span the qualified `M.X` path already had.
+
 ### Paused track — Type Conversion (2026-07-07)
 
 **🎯 TYPE CONVERSION — `Convert`/`From` PROTOCOL + SCALAR FILLS.** **STATUS (updated 2026-08-10):
