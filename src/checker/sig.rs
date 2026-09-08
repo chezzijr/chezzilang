@@ -1634,7 +1634,30 @@ impl Checker {
                         }
                     }
                     _ => {
-                        self.error(span, self.unknown_type_msg(n));
+                        // A synthesized annotation's `name_span` is `Span::default()` (line 0);
+                        // fall back to the enclosing-statement span there.
+                        let at = if name_span.line != 0 {
+                            *name_span
+                        } else {
+                            span
+                        };
+                        let msg = self.unknown_type_msg(n);
+                        // A bound's own type arg (e.g. `T: Produces[Bogus]`) is resolved once,
+                        // unconditionally, when the owning signature is hoisted, and then AGAIN at
+                        // every call site or witness dispatch that substitutes it (`resolve_bound_arg`
+                        // and several direct `resolve_type` calls in `proto.rs`/`expr.rs`) — all
+                        // resolving the SAME `Type::Named` AST node, so they now share `at` too. Skip
+                        // a report that would be byte-for-byte identical to one already recorded,
+                        // rather than patch every such call site individually.
+                        let attributed = self.attribute(&msg);
+                        if !self
+                            .errors
+                            .iter()
+                            .any(|e| e.span == at && e.message == attributed)
+                        {
+                            let help = suggest::did_you_mean(n, &self.type_names());
+                            self.error_help(at, msg, help);
+                        }
                         Ty::Unknown
                     }
                 };

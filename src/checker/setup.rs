@@ -447,6 +447,45 @@ impl Checker {
         names
     }
 
+    /// Every type name a bare annotation can resolve to: in-scope user types plus the reserved
+    /// scalar/collection names, sorted — `bare_types`/`types_by_name`/`type_params` are `HashMap`s,
+    /// so an unsorted list would make a near-miss suggestion depend on hash order.
+    pub(super) fn type_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .bare_types
+            .keys()
+            .chain(self.types_by_name.keys())
+            .chain(self.type_params.keys())
+            .cloned()
+            .chain(
+                [
+                    "int",
+                    "float",
+                    "bool",
+                    "str",
+                    "bytes",
+                    "bytearray",
+                    "nil",
+                    "tuple",
+                    "range",
+                    "List",
+                    "Map",
+                    "Set",
+                    "Result",
+                    "Option",
+                    "Iterator",
+                    "Channel",
+                    "Error",
+                ]
+                .iter()
+                .map(|s| s.to_string()),
+            )
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
     /// A struct's field names, in declaration order. `StructInfo.fields` is a `Vec`, so it is already
     /// deterministic and needs no sort.
     pub(super) fn field_names(&self, key: &str) -> Vec<String> {
@@ -1241,7 +1280,7 @@ impl Checker {
 
     /// Attribute a diagnostic to the module currently being checked (graph path only). Shared by
     /// `error` and `warn` so the two can never drift on how a cross-module diagnostic reads.
-    fn attribute(&self, message: impl Into<String>) -> String {
+    pub(super) fn attribute(&self, message: impl Into<String>) -> String {
         match &self.current_module_label {
             Some(label) => format!("in module '{label}': {}", message.into()),
             None => message.into(),

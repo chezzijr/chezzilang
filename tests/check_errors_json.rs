@@ -861,3 +861,21 @@ fn a_closed_paren_keeps_the_expected_message() {
         "a closed paren must not be reported as unclosed, got: {stderr}"
     );
 }
+
+/// TICKET-079/TICKET-080 (b): the `unknown type` JSON span covers the type name, columns 4-9
+/// for `Strng` in `x: Strng = "a"`, not column 1.
+#[test]
+fn unknown_type_json_spans_the_type_name() {
+    let t = TmpDir::new();
+    let p = t.write("t1.chz", "x: Strng = \"a\"\n");
+    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .args(["check", p.to_str().unwrap(), "--errors=json"])
+        .output()
+        .expect("run chezzi check --errors=json");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stdout = stdout.trim();
+    assert!(
+        stdout.contains("\"line\":1,\"col\":4,\"end_line\":1,\"end_col\":9"),
+        "got: {stdout}"
+    );
+}

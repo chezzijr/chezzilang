@@ -2135,15 +2135,18 @@ fn produce_as[R, T: Produces[R]](x: T) -> R:
 /// green — a widening is untested by its own suite unless the test hits every pass it widened.
 #[test]
 fn neither_speculative_pass_duplicates_bound_arg_diagnostics() {
+    // TICKET-079: `unknown type` now carets the type name's own span (line 6, where `Bogus` is
+    // written in the bound), not the call-site span (line 8) `resolve_bound_arg` used to pass
+    // through — the duplicate-diagnostic question this test asks is unaffected by which line.
     let at_call_site = |src: &str| -> usize {
         let errs = check_src(src);
         let n = errs
             .iter()
-            .filter(|e| e.message.contains("Bogus") && e.span.line == 8)
+            .filter(|e| e.message.contains("Bogus") && e.span.line == 6)
             .count();
         assert!(
             n > 0,
-            "expected the bad bound arg at the call site: {errs:?}"
+            "expected the bad bound arg at the bound's own span: {errs:?}"
         );
         n
     };
@@ -7118,6 +7121,29 @@ fn unknown_param_type_rejected() {
         "fn f(a: Widget) -> int:\n    return 1\n",
         "unknown type 'Widget'",
     );
+}
+
+/// TICKET-079/TICKET-080 (b): an unknown type gets a near-miss suggestion from the type
+/// namespace, like every other kind of miss already does.
+#[test]
+fn unknown_type_spans_the_type_name_and_suggests() {
+    rejects_help(
+        "x: Lst = [1]\n",
+        "unknown type 'Lst'",
+        "did you mean 'List'",
+    );
+}
+
+/// TICKET-079/TICKET-080 (b): the span carets the TYPE NAME, not column 1. `Strng` starts at
+/// 1-based column 9 in `fn f(a: Strng) -> int:`.
+#[test]
+fn unknown_type_in_a_param_spans_the_type_name() {
+    let errs = check_src("fn f(a: Strng) -> int:\n    return 1\n");
+    let e = errs
+        .iter()
+        .find(|e| e.message.contains("unknown type 'Strng'"))
+        .unwrap_or_else(|| panic!("expected an 'Strng' miss, got: {errs:?}"));
+    assert_eq!(e.span.col, 9, "got: {e:?}");
 }
 
 // ===== 3. arity =====
