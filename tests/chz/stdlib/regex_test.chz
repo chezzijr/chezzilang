@@ -29,3 +29,10 @@ test fn replace_all_keeps_a_literal_backslash_before_a_non_digit():
     match regex.replace_all(r"x", "x", r"\n"):
         Ok(v): assert v == r"\n", "a backslash not before a digit stays literal, got '" + v + "'"
         Err(e): assert false, e.message()
+
+test fn replace_all_rejects_a_dollar_ref_to_a_missing_group():
+    # `$1px` names a group called `1px` (RE2 takes the longest `[0-9A-Za-z_]` run after `$`), which
+    # this one-group pattern does not have.
+    match regex.replace_all(r"(\d+)", "12 34", "$1px"):
+        Ok(v): assert false, "expected a missing-group Err, got Ok('" + v + "')"
+        Err(e): assert e.message().contains(r"${1}"), e.message()

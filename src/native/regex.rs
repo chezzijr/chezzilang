@@ -430,6 +430,42 @@ mod tests {
         );
     }
 
+    /// TICKET-098 sub-bug E: `$` takes the LONGEST `[0-9A-Za-z_]` run, so `$1px` names a group called
+    /// `1px`, not group 1 followed by literal `px` -- that group does not exist, and today the call
+    /// silently expands it to the empty string instead of erroring.
+    #[test]
+    fn replace_all_rejects_a_dollar_ref_to_a_group_that_does_not_exist() {
+        let e = do_replace_all(r"(\d+)", "12 34", "$1px").unwrap_err();
+        assert!(e.contains("${1}"), "{e}");
+        assert!(do_replace_all(r"(\d+)", "12 34", "$2").is_err());
+    }
+
+    /// Every valid or literal `$` spelling must keep working unchanged: the braced form, `$$`, a
+    /// trailing lone `$`, a `$` before a space, and a named group.
+    #[test]
+    fn replace_all_leaves_every_valid_or_literal_dollar_alone() {
+        assert_eq!(
+            do_replace_all(r"(\d+)", "12 34", "${1}px"),
+            Ok("12px 34px".to_string())
+        );
+        assert_eq!(
+            do_replace_all(r"(\d+)", "12 34", "$$"),
+            Ok("$ $".to_string())
+        );
+        assert_eq!(
+            do_replace_all(r"(\d+)", "12 34", "a$"),
+            Ok("a$ a$".to_string())
+        );
+        assert_eq!(
+            do_replace_all(r"(\d+)", "12 34", "$ 5"),
+            Ok("$ 5 $ 5".to_string())
+        );
+        assert_eq!(
+            do_replace_all(r"(?<w>\d+)", "12 34", "$w!"),
+            Ok("12! 34!".to_string())
+        );
+    }
+
     /// Ordering: the pattern compiles first, so a bad pattern still wins over a bad replacement.
     #[test]
     fn bad_pattern_beats_the_replacement_check() {
