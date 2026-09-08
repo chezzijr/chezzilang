@@ -136,6 +136,24 @@ fn ast_on_a_closed_pipe_does_not_panic() {
     );
 }
 
+/// An unknown command near a real one suggests it; a nonsense command suggests nothing.
+#[test]
+fn an_unknown_command_suggests_a_near_miss() {
+    let (_stdout, stderr, code) = run(&["ruc"]);
+    assert_eq!(code, 1, "got stderr={stderr:?}");
+    assert!(
+        stderr.contains("chezzi: unknown command 'ruc'"),
+        "got stderr={stderr:?}"
+    );
+    assert!(
+        stderr.contains("help: did you mean 'run'?"),
+        "got stderr={stderr:?}"
+    );
+
+    let (_stdout, stderr, _code) = run(&["zzzzzzzz"]);
+    assert!(!stderr.contains("did you mean"), "got stderr={stderr:?}");
+}
+
 /// (c) `chezzi help` never documents the `--` terminator, and its closing NOTE only describes the
 /// file-argument form — the only way to pass args to a manifest-`entrypoint` run.
 #[test]
