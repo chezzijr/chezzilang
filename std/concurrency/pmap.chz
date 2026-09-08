@@ -18,8 +18,8 @@
 #
 # LIMITER: `pmap_limited` caps the number of tasks running `f` at once with a channel-as-semaphore —
 # a bucket pre-seeded with `limit` tokens; a task must `recv` a token before running `f` and `send`
-# one back after (the standard Go semaphore pattern). `limit > 0` is required — `limit <= 0` seeds no
-# tokens, so every task blocks forever on the acquire (a deadlock fault, no consumer).
+# one back after (the standard Go semaphore pattern). `limit > 0` is required — `pmap_limited` faults
+# on a non-positive `limit` before the nursery is entered, naming `limit` in the message.
 
 # Depend on std.concurrency so its native module is harvested before this one is checked (mirrors
 # std.concurrency.collection); the helpers themselves use only global `Channel`, but the import keeps
@@ -48,6 +48,8 @@ fn pmap[T, U](xs: List[T], f: fn(T) -> U) -> List[U]:
 # Like `pmap`, but at most `limit` tasks run `f` at once (the rest wait). `limit` must be `> 0`. Result
 # is still in submission order — the limiter only bounds concurrency, not the reassembly.
 fn pmap_limited[T, U](xs: List[T], f: fn(T) -> U, limit: int) -> List[U]:
+    if limit <= 0:
+        panic("pmap_limited: limit must be > 0, got " + str(limit))
     n := xs.len()
     results := Channel[_PmapCell[U]]()
     # Semaphore: a token bucket seeded with `limit` permits. `recv` acquires, `send` releases.
