@@ -16,6 +16,12 @@ use chezzi::{checker, editor, lexer, manifest, native, parser, resolver, test_ru
 
 use std::process::ExitCode;
 
+/// The command names `did_you_mean` suggests from and `USAGE`'s `COMMANDS:` block documents — kept
+/// in step: a command added to one and not the other is either undocumented or unsuggestable.
+const COMMAND_NAMES: [&str; 9] = [
+    "init", "run", "test", "check", "tokens", "ast", "docs", "version", "help",
+];
+
 const USAGE: &str = "\
 chezzi — the Chezzi language toolchain
 
@@ -95,7 +101,13 @@ fn main() -> ExitCode {
         "init" => cmd_init(&args[1..]),
         "docs" => cmd_docs(&args[1..]),
         other => {
-            eprintln!("chezzi: unknown command '{other}'\n");
+            eprintln!("chezzi: unknown command '{other}'");
+            if let Some(help) =
+                checker::suggest::did_you_mean(other, &COMMAND_NAMES.map(str::to_string))
+            {
+                eprintln!("help: {help}");
+            }
+            eprintln!();
             print!("{USAGE}");
             ExitCode::FAILURE
         }

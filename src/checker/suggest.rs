@@ -54,7 +54,7 @@ pub(super) fn score(lookup: &str, cand: &str, limit: usize) -> Option<usize> {
 /// Find the best-scoring candidate for `lookup` among `candidates`, in the given order, or an
 /// exact case-insensitive match. Ties break on candidate order — callers that want a
 /// deterministic result over a `HashMap`-backed table must sort `candidates` first.
-pub(super) fn did_you_mean(lookup: &str, candidates: &[String]) -> Option<String> {
+pub fn did_you_mean(lookup: &str, candidates: &[String]) -> Option<String> {
     if let Some(c) = candidates.iter().find(|c| c.eq_ignore_ascii_case(lookup)) {
         return Some(format!("did you mean '{c}'?"));
     }
