@@ -290,7 +290,7 @@ fn sleep_synchronised_tests() -> BTreeSet<String> {
 /// rejected it (the walk returns 68). Obtain it by compiling once with an empty array and copying
 /// the "sleeps but is not listed" list `no_new_rust_test_sleeps_to_order_two_events` reports,
 /// verbatim, the same way `stack_trace_reports_call_chain`'s golden was obtained.
-const SLEEP_SYNCHRONISED_TESTS: [&str; 73] = [
+const SLEEP_SYNCHRONISED_TESTS: [&str; 75] = [
     "a_bailed_join_stops_its_jobs_from_starting_new_work",
     "a_cancelled_siblings_defer_runs_whole_on_both_engines",
     "a_finished_executor_job_lets_the_genuine_nursery_deadlock_fire",
