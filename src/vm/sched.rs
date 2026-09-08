@@ -2085,6 +2085,11 @@ impl Vm {
         self.offload = None;
         self.poll_park = None;
         self.cancelled = false;
+        // TICKET-096 review fix — `owner_fault_floor` indexes THIS fiber's `nurseries` (swapped by
+        // `swap_ctx`, not carried in `FiberCtx`), so a floor left by the fiber that just parked/died
+        // on this shell must not survive into the next fiber scheduled in here, or an unrelated
+        // `recover:` in that fiber is wrongly bypassed (`run_until`'s `owner_bypass`).
+        self.owner_fault_floor = None;
         self.pending_exit = None;
         self.reds = CONTEXT_REDS; // D3 — fresh reduction budget on every schedule-in (BEAM semantics)
         self.yield_now = false;

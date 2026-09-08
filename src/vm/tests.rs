@@ -3004,6 +3004,26 @@ fn cap0_core() -> Arc<ChannelCore> {
 fn core_key(core: &Arc<ChannelCore>) -> usize {
     Arc::as_ptr(core) as usize
 }
+/// TICKET-096 review finding — `owner_fault_floor` indexes the RUNNING fiber's `nurseries` stack
+/// (per-fiber, swapped by `swap_ctx`), but the field itself lives on the worker-shell `Vm` and is
+/// not carried in `FiberCtx`. A floor left by the fiber that just died on this shell must not
+/// leak into the next fiber scheduled in here, or an unrelated `recover:` in that fiber is wrongly
+/// bypassed by `run_until`'s `owner_bypass` check. `run_one_fiber` must reset it on every swap-in,
+/// exactly like `self.cancelled`.
+#[test]
+fn run_one_fiber_resets_owner_fault_floor_left_by_the_previous_fiber() {
+    let mut vm = Vm::new(Arc::new(empty_program()));
+    // Simulate a floor left dangling by a fiber that died via the `owner_bypass` path (uncaught —
+    // never reached the catch arm that clears it).
+    vm.owner_fault_floor = Some(3);
+    let mut fiber = mk_pending_fiber(0);
+    vm.run_one_fiber(&mut fiber, Span::RUNTIME);
+    assert_eq!(
+        vm.owner_fault_floor, None,
+        "a stale owner_fault_floor must not survive into the next fiber scheduled on this shell"
+    );
+}
+
 /// TICKET-028 — a `WakeKind::Send` wake on a cap-0 channel requeues a parked SENDER without waking
 /// a parked receiver sharing the same bucket. Pins the pair-spin guard's other half.
 #[test]
