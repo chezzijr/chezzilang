@@ -2419,6 +2419,43 @@ impl Parser {
             let rhs = self.parse_bp(r_bp)?;
             let span = lhs.span;
             lhs = match op {
+                // TICKET-077: a comparison operator CHAINS with any further comparison at the same
+                // level, Python-style — consume every adjacent link here rather than letting the
+                // outer `while` fold them pairwise (which would nest as `(a < b) == c`).
+                InfixOp::Bin(op) if is_comparison(op) => {
+                    let mut operands = vec![lhs, rhs];
+                    let mut ops = vec![op];
+                    while let Some((InfixOp::Bin(next_op), next_l, next_r)) = infix_op(self.peek())
+                        .filter(|(o, ..)| matches!(o, InfixOp::Bin(nop) if is_comparison(*nop)))
+                    {
+                        if next_l < min_bp {
+                            break;
+                        }
+                        chain += 1;
+                        if self.depth + self.fold_depth + chain > MAX_AST_DEPTH {
+                            return Err(self.err("expression nested too deeply".to_string()));
+                        }
+                        self.advance();
+                        let next_rhs = self.parse_bp(next_r)?;
+                        operands.push(next_rhs);
+                        ops.push(next_op);
+                    }
+                    if ops.len() == 1 {
+                        Expr {
+                            kind: ExprKind::Binary {
+                                op: ops[0],
+                                lhs: Box::new(operands.remove(0)),
+                                rhs: Box::new(operands.remove(0)),
+                            },
+                            span,
+                        }
+                    } else {
+                        Expr {
+                            kind: ExprKind::Compare { operands, ops },
+                            span,
+                        }
+                    }
+                }
                 InfixOp::Bin(op) => Expr {
                     kind: ExprKind::Binary {
                         op,
@@ -3249,10 +3286,13 @@ fn infix_op(tok: &Token) -> Option<(InfixOp, u8, u8)> {
         // `in` membership — comparison-level precedence (same as `==`). `for x in xs:` never
         // reaches here: `parse_for`/`parse_comp_clause` consume `in` explicitly via `expect`.
         Token::In => (Bin(In), 7),
-        Token::Lt => (Bin(Lt), 9),
-        Token::LtEq => (Bin(LtEq), 9),
-        Token::Gt => (Bin(Gt), 9),
-        Token::GtEq => (Bin(GtEq), 9),
+        // TICKET-077: all seven comparisons (`==`/`!=`/`in`/`<`/`<=`/`>`/`>=`) share ONE level and
+        // CHAIN like Python (`a < b == c` means `a < b and b == c`) — see `parse_bp`'s comparison
+        // fold and `ExprKind::Compare`.
+        Token::Lt => (Bin(Lt), 7),
+        Token::LtEq => (Bin(LtEq), 7),
+        Token::Gt => (Bin(Gt), 7),
+        Token::GtEq => (Bin(GtEq), 7),
         Token::BitOr => (Bin(BitOr), 11),
         Token::Caret => (Bin(BitXor), 13),
         Token::Amp => (Bin(BitAnd), 15),
@@ -3272,6 +3312,13 @@ fn infix_op(tok: &Token) -> Option<(InfixOp, u8, u8)> {
         _ => return None,
     };
     Some((op, l, l + 1))
+}
+
+/// True for the seven comparison operators, which all share one precedence level and CHAIN
+/// (TICKET-077) — see `infix_op`'s comment and `parse_bp`'s comparison fold.
+fn is_comparison(op: BinaryOp) -> bool {
+    use BinaryOp::*;
+    matches!(op, Eq | NotEq | In | Lt | LtEq | Gt | GtEq)
 }
 
 #[cfg(test)]
@@ -3300,6 +3347,30 @@ mod tests {
         let (toks, comments) = lexer::tokenize_with_comments(src, 0).unwrap();
         let mut m = parse_with_docs(toks, comments).unwrap_or_else(|e| panic!("parse failed: {e}"));
         m.stmts.remove(0).kind
+    }
+
+    #[test]
+    fn comparison_chain_parses_as_one_compare_node() {
+        let StmtKind::Expr(e) = only("a < b == c\n") else {
+            panic!("expected an expr stmt");
+        };
+        let ExprKind::Compare { operands, ops } = e.kind else {
+            panic!("expected ExprKind::Compare, got {:?}", e.kind);
+        };
+        assert_eq!(operands.len(), 3);
+        assert_eq!(ops, vec![BinaryOp::Lt, BinaryOp::Eq]);
+
+        // Parentheses stop a chain: still an ordinary `Binary`.
+        let StmtKind::Expr(e) = only("(a < b) == c\n") else {
+            panic!("expected an expr stmt");
+        };
+        assert!(matches!(
+            e.kind,
+            ExprKind::Binary {
+                op: BinaryOp::Eq,
+                ..
+            }
+        ));
     }
 
     #[test]

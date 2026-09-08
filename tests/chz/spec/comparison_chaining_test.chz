@@ -5,3 +5,29 @@
 
 test fn bool_eq_chain_matches_cpython():
     assert (true == false == false) == false
+
+# TICKET-077: `0 <= i < n` is the Python idiom this chain exists to support.
+test fn int_chain_matches_the_python_idiom():
+    i := 2
+    n := 5
+    assert 0 <= i < n
+    assert not (0 <= 7 < n)
+
+# The middle operand of a chain must be evaluated exactly once, like CPython's `1 < f() < 3`.
+test fn chain_evaluates_the_middle_operand_once():
+    seen: List[int] = []
+    fn mid(v: int) -> int:
+        seen.push(v)
+        return v
+    assert 1 < mid(2) < 3
+    assert seen.len() == 1
+
+# A chain short-circuits at the first false link — a later operand's call never runs.
+test fn chain_short_circuits_after_a_false_link():
+    seen: List[int] = []
+    fn note(v: int) -> int:
+        seen.push(v)
+        return v
+    assert (5 < note(1) < note(9)) == false
+    assert seen.len() == 1
+    assert seen[0] == 1

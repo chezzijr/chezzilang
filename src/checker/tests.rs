@@ -20645,6 +20645,21 @@ fn os_exit_typechecks_in_value_position_as_bottom() {
 }
 
 #[test]
+fn int_comparison_chain_typechecks() {
+    // TICKET-077: `0 <= i < n` is a chained comparison, Python-style.
+    ok("fn main():\n    i := 2\n    n := 5\n    print(0 <= i < n)\nmain()\n");
+}
+
+#[test]
+fn a_mixed_type_link_in_a_chain_is_rejected() {
+    // TICKET-077: chaining makes `1 < 2 == true` a chain over `(1<2)` and `true`, an int/bool link.
+    rejects(
+        "fn main():\n    print(1 < 2 == true)\nmain()\n",
+        "cannot compare int and bool for equality",
+    );
+}
+
+#[test]
 fn os_exit_from_imported_typechecks_in_value_position_as_bottom() {
     // TICKET-077: same as above, but through `import exit from std.os` and a bare call.
     entry_ok(
