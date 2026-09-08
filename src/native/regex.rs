@@ -173,9 +173,80 @@ fn check_replacement_dialect(repl: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Reject a `$`-reference to a capture group `re` does not have. `regex-automata`'s expander
+/// (`util/interpolate.rs`, `find_cap_ref`) silently expands an unresolvable name to the empty
+/// string; that is a wrong answer worth an `Err`, not the deliberately-literal `$$`/lone-`$`/
+/// missing-brace cases, which this mirrors exactly so a valid replacement never regresses.
+fn check_group_refs(re: &regex::Regex, repl: &str) -> Result<(), String> {
+    let bytes = repl.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'$' {
+            i += 1;
+            continue;
+        }
+        if let Some(&next) = bytes.get(i + 1) {
+            if next == b'$' {
+                i += 2;
+                continue;
+            }
+            if next == b'{' {
+                if let Some(end) = repl[i + 2..].find('}') {
+                    let name = &repl[i + 2..i + 2 + end];
+                    check_one_group_ref(re, name)?;
+                    i = i + 2 + end + 1;
+                    continue;
+                }
+                // No closing brace: literal `$`.
+                i += 1;
+                continue;
+            }
+        }
+        let rest = &repl[i + 1..];
+        let run_len = rest
+            .bytes()
+            .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_')
+            .count();
+        if run_len == 0 {
+            // A lone `$`, or `$` before a space/other non-name byte: literal `$`.
+            i += 1;
+            continue;
+        }
+        let name = &rest[..run_len];
+        check_one_group_ref(re, name)?;
+        i += 1 + run_len;
+    }
+    Ok(())
+}
+
+fn check_one_group_ref(re: &regex::Regex, name: &str) -> Result<(), String> {
+    let resolved = match name.parse::<usize>() {
+        Ok(idx) => idx < re.captures_len(),
+        Err(_) => re.capture_names().flatten().any(|n| n == name),
+    };
+    if resolved {
+        return Ok(());
+    }
+    // `name` is the LONGEST `[0-9A-Za-z_]` run, so `$1px` names a group called `1px`, not group 1
+    // followed by literal `px`. Hint the leading digit run as the likely intended index.
+    let digit_prefix: String = name.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let hint = if digit_prefix.is_empty() {
+        "N".to_string()
+    } else {
+        digit_prefix
+    };
+    Err(format!(
+        "replace_all: '${name}' names a capture group this pattern does not have -- the \
+         replacement dialect is RE2 (the Rust regex crate), which takes the LONGEST \
+         '[0-9A-Za-z_]' run after '$' and expands an unknown name to the empty string; write \
+         '${{{hint}}}' to delimit a group index, or '$$' for a literal '$'"
+    ))
+}
+
 fn do_replace_all(pat: &str, s: &str, repl: &str) -> Result<String, String> {
     let re = compiled(pat)?;
     check_replacement_dialect(repl)?;
+    check_group_refs(&re, repl)?;
     Ok(re.replace_all(s, repl).into_owned())
 }
 
