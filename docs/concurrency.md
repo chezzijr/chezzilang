@@ -295,7 +295,8 @@ How a `parallel:` block runs on the M:N engine (`chezzi run` — the default):
    of extra eager runner threads has a slot left** (`worker_count().max(2)`, `src/vm/pool.rs`); a
    nested eager nursery costs one OS thread per OPEN nursery rather than per nesting level, so a denied slot
    falls its tasks back to starting at the join instead, exactly as this shape already behaves at
-   `--threads=1` — no program gains a hang it did not already have at that setting.
+   `--threads=1`; the deadlock predicate still evaluates on that queue-at-join fallback (TICKET-095),
+   so a genuine deadlock underneath it faults there like anywhere else.
 2. The task runs **concurrently** with the statements that follow it and with its siblings. There is
    no FIFO order between tasks and no defined order against the parent's own statements.
 3. The first task to error **aborts the remaining siblings** and propagates out of the `parallel:`
@@ -1191,6 +1192,12 @@ never yielded, so the faulting sibling never got the thread to trip the cancel. 
 kernel preempts the spinner and it faults promptly.) Lifting the limit would
 require teaching the cooperative scheduler to time-slice a *running* fiber (its own milestone), which
 `--threads=1` already makes unnecessary for users.
+
+A deadlock nested under a spawned task's implicit nursery faults `deadlock: …` at `--threads=1` too,
+byte-identically to every other worker count (TICKET-095, `docs/gaps.md` **W11-3**): the nested scope
+runs on the owner fiber's own thread at that width, and that fiber is counted a `blocked_owners` of
+`SchedCore::running` for exactly the span it sits in the join, so the deadlock predicate still fires
+instead of the fiber hanging forever uncounted.
 
 **Re-derived 2026-08-18 on the genuinely 1-wide binary** (`docs/gaps.md` **W8-8**, below — until it
 landed, `--threads=1` silently ran two runners, so the original "0/15 hangs" was measured two-wide): the

@@ -2160,6 +2160,12 @@ struct JoinScope {
     /// grandchild hangs the teardown forever. Read at every checkpoint via the shell's re-pointed
     /// `Vm::cancel_outer` (`Vm::cancel_requested`).
     ancestors: Vec<Arc<AtomicBool>>,
+    /// This scope's own deadlock fault, used instead of `MnSched::deadlock_err` when set. `flag_deadlock`
+    /// clones ONE error into every parked fiber's slot (DEC-048), so a scope with a more specific span
+    /// (the owner-fiber arm of `run_mn_nursery_nested`) overrides it here. `None` for every other scope,
+    /// including an early-enlisted outer scope (DEC-048: it reports the BUILDER's span) and the
+    /// `(None, Some(held))` late-spawn arm (no `blocked_owners` bracket, so no per-scope span either).
+    deadlock_err: Option<RuntimeError>,
 }
 
 struct SchedCore {
@@ -2179,7 +2185,11 @@ struct SchedCore {
     /// by a single global index, minimizing churn; each scope owns a contiguous `base_index..base+total`
     /// sub-range (reduce/take operate per-scope on that sub-slice — see `take_scope_slots`).
     slots: Vec<Option<TaskOutcome>>,
-    running: usize,  // fibers currently swapped into a worker (executing)
+    running: usize, // fibers currently swapped into a worker (executing)
+    /// Of `running`, how many are fibers whose OS thread is blocked in a NESTED nursery join on THIS
+    /// sched. Such a fiber cannot send, yield or spawn until its child scope moves, so it is stuck by
+    /// construction — see `is_deadlocked_ignoring_jobs`'s `running == blocked_owners` clause.
+    blocked_owners: usize,
     parked_n: usize, // total fibers across every `parked` bucket
     /// Cross-nursery flat scheduler (M:N) — the per-nursery join records, replacing the old scalar
     /// `{done,total,body_open}`. ONE global `MnSched` is shared by every nested `run_mn_nursery` /
@@ -2458,6 +2468,7 @@ impl MnSched {
                 parked: std::collections::HashMap::new(),
                 slots: (0..total).map(|_| None).collect(),
                 running: 0,
+                blocked_owners: 0,
                 parked_n: 0,
                 scopes: vec![JoinScope {
                     base_index: 0,
@@ -2471,6 +2482,7 @@ impl MnSched {
                     // The creator wires the enclosing scopes' flags in (`Vm::scope_ancestors`)
                     // when this sched is built INSIDE an already-running task.
                     ancestors: Vec::new(),
+                    deadlock_err: None,
                 }],
                 terminate: false,
                 demoted_chans: std::collections::HashMap::new(),
@@ -2526,6 +2538,7 @@ impl MnSched {
             awaiting_builder: false,
             cancel,
             ancestors,
+            deadlock_err: None,
         });
         // Cross-nursery flat scheduler — a late `spawn:` into a non-outermost nursery registers a fresh
         // TRAILING scope on the HELD sched (`run_mn_nursery` held-nested branch) AFTER every prior scope
@@ -2568,6 +2581,7 @@ impl MnSched {
             awaiting_builder: false,
             cancel,
             ancestors,
+            deadlock_err: None,
         });
         // A freshly-registered scope has unfinished work — un-latch any stale global `terminate` (see
         // `register_scope`) so the inline owner that drains it is not stopped on the stale flag.
@@ -3872,7 +3886,12 @@ impl MnSched {
         if c.all_incomplete_awaiting_builder() {
             return false;
         }
-        if !(c.running == 0
+        // `blocked_owners` — of `running`, fibers whose OS thread is blocked in a NESTED nursery join
+        // on THIS sched (§ `SchedCore::blocked_owners`). Such a fiber cannot send, yield or spawn until
+        // its child scope moves, so it is stuck by construction, not merely idle — `running == 0` alone
+        // could never hold for a nursery nested under a spawned task at `worker_count() == 1`, where the
+        // child runs as a scope on the OWNER FIBER's own thread (`op_enter_nursery`'s lazy fallback).
+        if !(c.running == c.blocked_owners
             && self.runnable.load(Ordering::Relaxed) == 0
             && self.inflight.load(Ordering::Relaxed) == 0
             // D5 owe #3 (Path C) — a `blocked_native` fiber (demoted, waiting in place on a channel
@@ -4183,8 +4202,15 @@ impl SchedCore {
                     // `task_index`/`scope_id` are Copy, read before the partial move of
                     // `f.ctx.out`/`f.ctx.stderr`.
                     let (ti, sid) = (f.task_index, f.scope_id);
+                    // A scope with its own `deadlock_err` (the owner-fiber arm of
+                    // `run_mn_nursery_nested`) reports ITS span instead of the sched-wide `err` — see
+                    // `JoinScope::deadlock_err` and DEC-048.
+                    let scope_err = self.scopes[sid]
+                        .deadlock_err
+                        .clone()
+                        .unwrap_or_else(|| err.clone());
                     self.slots[ti] = Some(TaskOutcome::Deadlocked {
-                        err: err.clone(),
+                        err: scope_err,
                         out: f.ctx.out,
                         stderr: f.ctx.stderr,
                     });

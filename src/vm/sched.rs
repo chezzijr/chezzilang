@@ -469,8 +469,8 @@ impl Vm {
         // trailing scope reduces inline at its own join (it is NOT counted in `mn_enlisted`), exactly like
         // a nested nursery. Only when no sched is held do we build a fresh outermost sched.
         match (self.mn.clone(), self.mn_enlist_sched.clone()) {
-            (Some(sched), _) => self.run_mn_nursery_nested(&sched, tasks),
-            (None, Some(held)) => self.run_mn_nursery_nested(&held, tasks),
+            (Some(sched), _) => self.run_mn_nursery_nested(&sched, tasks, nursery_span),
+            (None, Some(held)) => self.run_mn_nursery_nested(&held, tasks, nursery_span),
             (None, None) => self.run_mn_nursery_outermost(tasks, nursery_span),
         }
     }
@@ -585,6 +585,7 @@ impl Vm {
         &mut self,
         sched: &Arc<MnSched>,
         tasks: Vec<QueuedTask>,
+        nursery_span: Span,
     ) -> Result<(), RuntimeError> {
         // W6-2 — each task replays the snapshot pinned at its own spawn: on a worker fiber that is a
         // FRESH snapshot of the TASK's own (possibly mutated) view, not the parent module's frozen copy.
@@ -602,6 +603,15 @@ impl Vm {
         }
         let scope_id =
             sched.register_scope_seeded(Arc::clone(&cancel), self.scope_ancestors(), workers);
+        // TICKET-095 — the owner-fiber arm (`self.owns_nested_sched(sched)`) gets its OWN deadlock
+        // error, naming THIS nursery's span, so a T=1 fault reports the inner nursery like every other
+        // worker count does. The `(None, Some(held))` late-spawn arm gets none: it has no
+        // `blocked_owners` bracket either (see `blocked_owner_guard`), and DEC-048 makes the sched's
+        // builder-span error correct for it.
+        if self.owns_nested_sched(sched) {
+            sched.lock().scopes[scope_id].deadlock_err =
+                Some(self.err(DEADLOCK_MSG.to_string(), nursery_span));
+        }
         let wid = self.wid;
         let mut shell = self.spawn_shell(sched, &cancel);
         {
@@ -609,6 +619,10 @@ impl Vm {
             // a worker shell, `mn.is_some()`); it registers only on the `(None, Some(held))` late-spawn
             // path, where `self` really is the top-level builder blocked in this join.
             let _party = self.nursery_party_guard(sched);
+            // TICKET-095 — counts this fiber's OS thread as a `blocked_owner` for the span it sits
+            // inline in this join, so `is_deadlocked_ignoring_jobs` can tell it apart from a genuinely
+            // running worker. `None` on the late-spawn arm (see `blocked_owner_guard`).
+            let _owner = self.blocked_owner_guard(sched);
             shell.mn_worker_loop(sched, wid, scope_id);
             sched.wait_for_scope(scope_id);
         }
@@ -2522,6 +2536,31 @@ impl Vm {
         self.mn.is_none().then(|| {
             self.quiesce
                 .block(crate::vm::quiesce::PartyWait::Nursery(Arc::clone(sched)))
+        })
+    }
+
+    /// TICKET-095 — true on the exact complement of `nursery_party_guard`'s gate: `self` is a fiber
+    /// running ON `sched` itself (the `(Some(sched), _)` arm of `run_mn_nursery`), not the top-level
+    /// late-spawn builder (the `(None, Some(held))` arm, which `nursery_party_guard` covers instead).
+    pub(super) fn owns_nested_sched(&self, sched: &Arc<MnSched>) -> bool {
+        self.mn.as_ref().is_some_and(|m| Arc::ptr_eq(m, sched))
+    }
+
+    /// TICKET-095 — counts a fiber whose OS thread is about to block in a NESTED nursery join on
+    /// `sched` as a `SchedCore::blocked_owners`, so `is_deadlocked_ignoring_jobs`'s `running ==
+    /// blocked_owners` clause can tell "stuck by construction" from "genuinely running". `None` on
+    /// the `(None, Some(held))` late-spawn arm — that owner is not counted in `running` either.
+    pub(super) fn blocked_owner_guard(&self, sched: &Arc<MnSched>) -> Option<BlockedOwnerGuard> {
+        if !self.owns_nested_sched(sched) {
+            return None;
+        }
+        {
+            let mut c = sched.lock();
+            c.blocked_owners += 1;
+        }
+        sched.cv.notify_all();
+        Some(BlockedOwnerGuard {
+            sched: Arc::clone(sched),
         })
     }
 
@@ -5677,4 +5716,22 @@ pub(super) fn dispatch_eager_job(
             }
         }
     }));
+}
+
+/// TICKET-095 — RAII handle for `SchedCore::blocked_owners`. Held across the span in which a fiber's
+/// OS thread is blocked inline in a nested nursery join (`run_mn_nursery_nested`'s owner-fiber arm);
+/// dropped when the join returns, decrementing the counter and re-notifying idle workers so a scope
+/// that just became genuinely stuck (not merely counted-blocked) is re-evaluated.
+pub(super) struct BlockedOwnerGuard {
+    sched: Arc<MnSched>,
+}
+
+impl Drop for BlockedOwnerGuard {
+    fn drop(&mut self) {
+        {
+            let mut c = self.sched.lock();
+            c.blocked_owners -= 1;
+        }
+        self.sched.cv.notify_all();
+    }
 }

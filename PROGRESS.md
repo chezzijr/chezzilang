@@ -7,6 +7,16 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-095 (2026-09-08) — a nested-nursery deadlock hung forever at `CHEZZI_THREADS=1` where
+  every other worker count faulted `deadlock: …` in ~11 ms.** `Vm::op_enter_nursery` makes a nursery
+  entered inside a spawned task LAZY at one worker, so it ran as a scope on the ENCLOSING sched with
+  the owner fiber's own thread as its worker, and that fiber stayed counted in `SchedCore::running`
+  while blocked in the join — `is_deadlocked_ignoring_jobs`'s `running == 0` clause could never hold.
+  Fixed by counting such a fiber in a new `SchedCore::blocked_owners` and relaxing the predicate to
+  `running == blocked_owners`; a per-scope `deadlock_err` keeps the T=1 fault naming the same inner
+  nursery span (`dd6.chz:3:5`) every other worker count already did. Measured on the release binary:
+  `CHEZZI_THREADS=1 chezzi run` on the ticket's five-line repro now faults at rc=1 in ~11 ms instead
+  of hanging past a 10 s timeout at rc=124; `--threads=1` still runs 1.00 CPU runners (W8-8 unchanged).
 - **TICKET-092 (2026-09-08) — `docs/concurrency.md` compared the deadlock verdict to Go's
   `fatal error` but never said Chezzi's IS catchable.** A reader carried Go's un-catchability over,
   so a broad top-level `recover:` silently turned a deadlock into `Err(...)` at rc=0. Docs-only: the

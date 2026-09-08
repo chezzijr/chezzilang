@@ -290,7 +290,7 @@ fn sleep_synchronised_tests() -> BTreeSet<String> {
 /// rejected it (the walk returns 68). Obtain it by compiling once with an empty array and copying
 /// the "sleeps but is not listed" list `no_new_rust_test_sleeps_to_order_two_events` reports,
 /// verbatim, the same way `stack_trace_reports_call_chain`'s golden was obtained.
-const SLEEP_SYNCHRONISED_TESTS: [&str; 72] = [
+const SLEEP_SYNCHRONISED_TESTS: [&str; 73] = [
     "a_bailed_join_stops_its_jobs_from_starting_new_work",
     "a_cancelled_siblings_defer_runs_whole_on_both_engines",
     "a_finished_executor_job_lets_the_genuine_nursery_deadlock_fire",
@@ -341,6 +341,9 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 72] = [
     // probe to wait on.
     "nested_nursery_deadlock_faults_at_one_worker_like_every_other_count",
     "net_read_partial_timeout_then_clean_timeout_is_not_incomplete",
+    // TICKET-095. Same reason as the entry above — a poll interval against a deadline, not a
+    // happens-before edge — over the `recover:` variant of the same repro.
+    "recovered_nested_nursery_deadlock_lets_the_program_continue_at_one_worker",
     "net_read_poll_once_mid_codepoint_errs_incomplete_not_timeout",
     "net_read_timeout_bounds_the_in_callback_demote_path",
     "net_read_timeout_bounds_whole_call_across_codepoint_parks",
