@@ -6247,6 +6247,21 @@ print(probe())
     );
 }
 
+/// TICKET-094 defect A — a `List[float]` parameter DEFAULT holding a MIXED numeric-constant literal
+/// (`[1, 2.5]`) aborts with the W7-49 `ListWidenTable` conflict, even on a single call site with no
+/// caller-side shadow. `check` reports no errors; the abort surfaces only when the default is
+/// actually spliced into a call, i.e. only on `run`.
+#[test]
+fn list_float_default_with_mixed_literal_does_not_abort() {
+    let src = "fn g(xs: List[float] = [1, 2.5]) -> List[float]:\n    return xs\nprint(g())\n";
+    let (out, res) = run_program(src);
+    assert!(
+        res.is_ok(),
+        "expected `run` to print [1.0, 2.5], got fault: {res:?} (stdout so far: {out:?})"
+    );
+    assert_eq!(out, "[1.0, 2.5]\n");
+}
+
 // ===== W7-51 — a default resolves in the module that DECLARES it =====
 //
 // RUST, not `tests/chz/`, for the same reason as the W7-49 trio above: the defect is inherently
