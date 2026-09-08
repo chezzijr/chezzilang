@@ -133,7 +133,7 @@ fn chdir(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     let p = super::fs::arg_path(h, 0)?;
     match std::env::set_current_dir(&p) {
         Ok(()) => Ok(NativeRet::Ok(Box::new(NativeRet::Nil))),
-        Err(e) => Ok(NativeRet::Err(e.to_string())),
+        Err(e) => Ok(NativeRet::Err(format!("{}: {e}", super::fs::shown(&p)))),
     }
 }
 

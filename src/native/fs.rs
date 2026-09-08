@@ -62,7 +62,7 @@ pub(crate) fn path_bytes(p: &Path) -> Vec<u8> {
 /// A path rendered for a HUMAN-facing error message. LOSSY on purpose — this is `Path::display()`'s
 /// model (and `path.Path.str()`'s), NOT a missed decode: the value that gets USED is always the raw
 /// bytes, and only the diagnostic text is substituted.
-fn shown(p: &Path) -> std::path::Display<'_> {
+pub(crate) fn shown(p: &Path) -> std::path::Display<'_> {
     p.display()
 }
 
