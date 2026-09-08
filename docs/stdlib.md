@@ -615,6 +615,10 @@ Number / integer functions (Python `math` semantics):
 - `parse_int_base(s: str, base: int) -> Result[int]` — parse `s` in `base` (`0` or `2..=36`); malformed
   input Errs (never faults). `base 0` auto-detects a `0x`/`0o`/`0b` prefix (else decimal); bases `2`/`8`/`16`
   also accept the matching prefix. A leading `+`/`-` sign is allowed (`parse_int_base("-2a", 16)` → `-42`).
+  Trims surrounding whitespace and accepts PEP-515 single underscores between digits at every base,
+  exactly as `str.to_int` does (`parse_int_base("1_0", 10)` → `10`; `parse_int_base("ff_ff", 16)` →
+  `65535`). A well-formed numeral outside i64 now Errs with `overflows i64 (range
+  -9223372036854775808..=9223372036854775807)` instead of `cannot parse`.
 
 Constants (all `const` — reassigning `math.pi`, or `import pi from std.math; pi = x`, is a type
 error naming them const): `math.pi`, `math.e`, `math.inf` (positive infinity), `math.nan` (NaN;
@@ -1023,7 +1027,7 @@ recommended spelling for a pattern, because it also keeps every backslash litera
 doubled backslash is still a trap next to `r"\d+"`, even though the brace half of the trap is gone.
 (`docs/gaps.md` **W8-1**.)
 
-**The dialect is RE2 (the Rust `regex` crate), not Python's `re`.** Five differences bite in order of
+**The dialect is RE2 (the Rust `regex` crate), not Python's `re`.** Six differences bite in order of
 how often:
 
 - **Replacement is `$1` / `${name}`, Rust-style — Python's `\1` is REJECTED, not silently
@@ -1047,6 +1051,11 @@ how often:
 - **An empty match abutting the previous match is dropped** (RE2/Go/Rust rule): `find_all(r"a*", "baaa")`
   → `['', 'aaa']` where Python gives `['', 'aaa', '']`; `replace_all(r"a*", "baaab", "-")` → `-b-b-` vs
   Python's `-b--b-`; and `a$` does not match before a trailing `\n` (Python's `$` does). (W10, 2026-09-05.)
+- **`$` takes the LONGEST `[0-9A-Za-z_]` run, so `$1px` names a group called `1px`**, not group 1
+  followed by literal text `px` — that group does not exist, and the call now Errs naming `${1}`.
+  `${1}px` still gives `Ok('12px 34px')`, and `$$` is a literal `$`. This is a DELIBERATE divergence
+  from Go, whose `regexp.ReplaceAllString` silently expands an unknown name to the empty string — the
+  same trade already made for the Python backslash form above.
 
 ### `std.request`
 Returns use `struct Response { status: int, body: str, headers: Map[str, str] }` (header names

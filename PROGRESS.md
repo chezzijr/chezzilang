@@ -7,6 +7,24 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-098 (2026-09-09) — five diagnostic/edge-case papercuts, W11-9..W11-12.** (A) A
+  non-exhaustive STRUCT match's witness doubled its module-mangled key (`main::S.main::S(_, _)`),
+  because a `Dom::Prod`'s label is BOTH its sole constructor name and its display prefix; a new
+  `ctor_display` (`src/checker/exhaust.rs`) renders a `Dom::Prod` bare, fixing the top-level case AND
+  the same defect nested inside an enum payload (`W.K(main::P.main::P(_))`), which the filed row did
+  not name — enum and tuple witnesses are unchanged. (B) `cancel.timeout(9223372036854775807).derive()`
+  faulted `int(): 9223372036854776000 is out of integer range`; `std/cancel.chz`'s remaining-ms
+  computation now clamps to i64::MAX instead of calling `int()` on a product one ulp past it. (C/D)
+  `math.parse_int_base` rejected underscores and surrounding whitespace that `str.to_int` and CPython
+  accept, at every base — it is now the seventh caller of the shared PEP-515 helper (renamed
+  `strip_num_underscores_radix`, `src/vm/mod.rs`), which **supersedes DEC-069**'s "out of scope"
+  clause; an out-of-range numeral now Errs `overflows i64 (range ...)` instead of the wrong
+  `cannot parse`. (E) `regex.replace_all(..., "$1px")` silently returned `Ok(' ')` because `$` takes
+  the LONGEST `[0-9A-Za-z_]` run and `1px` is not a group; a new `check_group_refs` now Errs on any
+  `$name` reference to a capture group the pattern lacks, naming the RE2 dialect, while every valid or
+  literal `$` spelling (`${1}`, `$$`, a trailing lone `$`, `$` before a space, a named group) is
+  unchanged — a deliberate divergence from Go's silent-empty-expansion, the same trade already made
+  for the Python backslash form.
 - **TICKET-097 (2026-09-09) — a crossing closure lost the sender's module global when the read was
   behind a called top-level `fn`, or when the write was an in-place mutation.** Two defects, both in
   the W8-25/TICKET-051 airlock. (A) `Compiler::fill_global_free`'s call graph was built only from
