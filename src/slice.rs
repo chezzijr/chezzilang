@@ -168,11 +168,12 @@ pub fn bytearray_repr(bytes: &[u8]) -> String {
 /// lowercase hex) — otherwise `["\u{a0}"]` and `[" "]` would print identically, which is the whole
 /// defect this function exists to remove. Printable non-ASCII stays literal (`repr('é')` is `'é'`).
 ///
-/// Printability comes from `char::escape_debug` (Rust's own Unicode tables) rather than a
-/// `unicodedata` dependency. **One documented divergence:** Rust also treats grapheme-extend
-/// characters as non-printable, so a combining mark (`U+0301`) escapes here while CPython prints it
-/// literally. Escaping is the unambiguous direction, and a Unicode-category crate for one category
-/// is not worth the dependency (`docs/gaps.md` §W7-25).
+/// Printability comes from `char::escape_debug` (Rust's own Unicode tables), with `crate::printable`
+/// as a correction layer: a combining mark (`U+0301`) now stays literal via that generated table,
+/// matching CPython. **The residual divergence runs the other way:** 4764 codepoints that CPython
+/// escapes as unassigned (`Cn`) print literally here, because rustc's Unicode tables are newer than
+/// the CPython build this was measured against — a Unicode-version skew, not a design choice
+/// (`docs/gaps.md` §W7-25).
 pub fn str_repr(s: &str) -> String {
     use std::fmt::Write;
     let quote = if s.contains('\'') && !s.contains('"') {
@@ -196,7 +197,9 @@ pub fn str_repr(s: &str) -> String {
             // would render invisibly or ambiguously. CPython's escape widths.
             c if (c as u32) < 0x20
                 || c as u32 == 0x7F
-                || (!c.is_ascii() && c.escape_debug().count() > 1) =>
+                || (!c.is_ascii()
+                    && c.escape_debug().count() > 1
+                    && !crate::printable::is_cpython_printable_mark(c)) =>
             {
                 let n = c as u32;
                 if n <= 0xFF {

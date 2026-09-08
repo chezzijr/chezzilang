@@ -24,6 +24,7 @@ pub mod lexer;
 pub mod manifest;
 pub mod native;
 pub mod parser;
+pub mod printable;
 pub mod resolver;
 pub mod slice;
 pub mod test_runner;
