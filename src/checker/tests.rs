@@ -31434,3 +31434,20 @@ fn fn_type_param_invariance_leaves_the_neighbours_alone() {
         "fn applyit(f: fn(int) -> int, x: int) -> int:\n    return f(x)\nfn dbl(n: int) -> int:\n    return n * 2\nprint(applyit(dbl, 3))\nprint(applyit(fn(x): x + 1, 3))\nprint([1, 2, 3].map(fn(x): x * 2))\n",
     );
 }
+
+// TICKET-098 sub-bug A: a `Dom::Prod`'s label is BOTH its sole constructor name and its display
+// prefix, so `display_of` joins the module-mangled key to itself instead of printing the bare
+// struct name once.
+#[test]
+fn struct_match_witness_is_spellable_not_module_mangled() {
+    let errs = check_entry(
+        "struct S:\n    a: int\n    b: int\n\nfn f(s: S) -> int:\n    match s:\n        S(1, 2): return 0\n\n    return 1\n",
+    );
+    assert_eq!(
+        errs.len(),
+        1,
+        "expected one non-exhaustive-match error, got: {errs:?}"
+    );
+    let help = errs[0].help.as_deref().expect("expected a help message");
+    assert_eq!(help, "pattern `S(_, _)` is not covered");
+}
