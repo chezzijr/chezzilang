@@ -7,6 +7,12 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-092 (2026-09-08) — `docs/concurrency.md` compared the deadlock verdict to Go's
+  `fatal error` but never said Chezzi's IS catchable.** A reader carried Go's un-catchability over,
+  so a broad top-level `recover:` silently turned a deadlock into `Err(...)` at rc=0. Docs-only: the
+  `recv`-blocks bullet now states the divergence, shows the recovered program, and records that the
+  siblings' `defer`s still do not run. Runtime behaviour deliberately unchanged. The ticket's second
+  item (`src/vm/pool.rs:8`'s thread bound) was already corrected by TICKET-073.
 - **TICKET-091 (2026-09-08) — four CLI defects from a 2026-09-07 external dogfood pass.** (1) Neither
   `chezzi --version` nor `chezzi version` existed; a new `"version" | "-V" | "--version"` arm prints
   `chezzi <CARGO_PKG_VERSION>` at rc 0. (2) `chezzi ast`/`chezzi tokens` panicked with a raw Rust
