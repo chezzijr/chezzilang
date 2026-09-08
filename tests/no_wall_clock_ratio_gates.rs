@@ -332,6 +332,8 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 73] = [
     "executor_job_feeds_a_parked_nursery_task_instead_of_a_false_deadlock",
     "gc_mark_walk_does_not_deadlock_on_a_cyclic_core_graph",
     "max_heap_byte_walk_does_not_deadlock_on_a_cyclic_core_graph",
+    "module_top_level_fault_is_delivered_twice_and_truncates_after_recover",
+    "module_top_level_loop_back_edge_is_not_a_cancel_checkpoint",
     "native_time_now_is_int_monotonic_is_float",
     "nested_executor_job_is_cancelled_by_an_outer_shutdown_now_mn",
     // TICKET-095. Its sleep is a POLL INTERVAL, not a happens-before edge: the test spawns
