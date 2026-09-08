@@ -2200,6 +2200,11 @@ impl Checker {
                     // `from`-imported fn with an optional arg); for plain sigs `min_params ==
                     // params.len()`, so this is identical to the old exact-arity check.
                     self.check_args_range_w(name, &sig.params, sig.min_params, args, span, true);
+                    // TICKET-077: a `from`-imported diverging native fn (`exit`) bottom-types like
+                    // `panic`, so it type-checks in value position (e.g. a `match` arm).
+                    if self.imported_diverging.contains(name) {
+                        return Some(Ty::Unknown);
+                    }
                     return Some(sig.ret);
                 }
                 None
@@ -2512,6 +2517,8 @@ impl Checker {
         match &obj_ty {
             // `module.fn(args)` is a plain call on the member — no `self`.
             Ty::Module(mname) => {
+                // Captured before `sig`'s borrow, for the diverging-native check below (TICKET-077).
+                let mod_id = self.imported_modules.get(mname).cloned();
                 let sig = self
                     .imported_modules
                     .get(mname)
@@ -2561,6 +2568,14 @@ impl Checker {
                         span,
                         true,
                     );
+                    // TICKET-077: a diverging native fn (`os.exit`) bottom-types like `panic`, so
+                    // it type-checks in value position (e.g. a `match` arm).
+                    if mod_id
+                        .as_ref()
+                        .is_some_and(|id| is_diverging_native(id, method))
+                    {
+                        return Ty::Unknown;
+                    }
                     return fsig.ret;
                 }
                 // W7-21 — a module GLOBAL that HOLDS a function value is callable through the module

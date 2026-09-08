@@ -562,6 +562,15 @@ fn is_reserved_protocol(name: &str) -> bool {
     RESERVED_PROTOCOLS.contains(&name)
 }
 
+/// True if the native fn `module_id.member` diverges (never returns), like `panic`. Used to
+/// bottom-type its call so it type-checks in value position (TICKET-077). Keyed on the resolved
+/// module id plus member name, never the bare callee name, so a shadowing local or user method
+/// named `exit` is untouched. A native module's [`crate::resolver::ModuleId`] is the synthetic path
+/// `<native:std.os>` (see `crate::resolver::native_id`), not the dotted string itself.
+fn is_diverging_native(module_id: &crate::resolver::ModuleId, member: &str) -> bool {
+    member == "exit" && module_id.0.to_string_lossy() == "<native:std.os>"
+}
+
 /// True if `name` is one of the four recognized suite lifecycle hooks.
 fn is_lifecycle_hook(name: &str) -> bool {
     crate::vm::op::LIFECYCLE_HOOKS.contains(&name)
@@ -2235,6 +2244,9 @@ struct Checker {
     /// `from`-imported names that are numeric-polymorphic native fns (`abs`/`min`/`max`), so a bare
     /// call resolves their result type by argument type instead of the float-only `FnSig` (gap #12).
     imported_poly: std::collections::HashSet<String>,
+    /// `from`-imported names that are diverging native fns (`exit`, via `import exit from std.os`),
+    /// so a bare call bottom-types like `panic` (TICKET-077). Per-module: cleared in `begin_module`.
+    imported_diverging: std::collections::HashSet<String>,
     /// `from`-imported module GLOBALS (`import COUNT from lib.st`) → the dotted module path they came
     /// from. A from-imported global is a SNAPSHOT copy (Python-identical), so REBINDING the bare name
     /// would write a local alias that is silently lost — rejected in `check_assign`, consistent with

@@ -20645,6 +20645,14 @@ fn os_exit_typechecks_in_value_position_as_bottom() {
 }
 
 #[test]
+fn os_exit_from_imported_typechecks_in_value_position_as_bottom() {
+    // TICKET-077: same as above, but through `import exit from std.os` and a bare call.
+    entry_ok(
+        "import exit from std.os\nfn main():\n    r: Result[int, str] = Err(\"boom\")\n    x := match r:\n        Ok(v): v\n        Err(e): exit(2)\n    print(x)\nmain()\n",
+    );
+}
+
+#[test]
 fn panic_requires_a_str_argument() {
     rejects(
         "fn main():\n    panic(123)\nmain()\n",
