@@ -41,6 +41,65 @@ fn version_command_and_flags_print_the_crate_version() {
     }
 }
 
+/// Run `chezzi <cmd> /dev/stdin`, feed it a program that prints far more than a pipe buffer holds,
+/// read only a little of stdout then drop it (what `| head` does), and return the child's stderr
+/// and exit code.
+fn closed_pipe(cmd: &str) -> (String, Option<i32>) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .arg(cmd)
+        .arg("/dev/stdin")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn chezzi");
+
+    let mut prog = String::from("fn main():\n");
+    for i in 0..2000 {
+        prog.push_str(&format!("    print({i})\n"));
+    }
+    let mut stdin = child.stdin.take().unwrap();
+    let _ = stdin.write_all(prog.as_bytes());
+    drop(stdin);
+
+    let mut stdout = child.stdout.take().unwrap();
+    let mut buf = [0u8; 64];
+    let _ = std::io::Read::read(&mut stdout, &mut buf);
+    drop(stdout);
+
+    let out = child.wait_with_output().expect("wait chezzi");
+    (
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.code(),
+    )
+}
+
+/// `tokens` on a closed pipe reports `run`'s own broken-pipe wording, not a raw Rust panic.
+#[test]
+fn tokens_on_a_closed_pipe_reports_the_run_wording() {
+    let (stderr, code) = closed_pipe("tokens");
+    assert_eq!(
+        stderr.trim_end(),
+        "chezzi tokens: stdout closed (broken pipe)",
+        "got stderr={stderr:?}"
+    );
+    assert!(!stderr.contains("panicked at"), "got stderr={stderr:?}");
+    assert_eq!(code, Some(1), "got stderr={stderr:?}");
+}
+
+/// `ast` on a closed pipe reports `run`'s own broken-pipe wording, not a raw Rust panic.
+#[test]
+fn ast_on_a_closed_pipe_reports_the_run_wording() {
+    let (stderr, code) = closed_pipe("ast");
+    assert_eq!(
+        stderr.trim_end(),
+        "chezzi ast: stdout closed (broken pipe)",
+        "got stderr={stderr:?}"
+    );
+    assert!(!stderr.contains("panicked at"), "got stderr={stderr:?}");
+    assert_eq!(code, Some(1), "got stderr={stderr:?}");
+}
+
 /// (b) `chezzi ast` piped into a closed reader (`head -1`) panics with a raw Rust broken-pipe
 /// message instead of `run`'s own wording.
 #[test]
