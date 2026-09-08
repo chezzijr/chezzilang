@@ -237,6 +237,11 @@ pub fn strip_bom(source: &str) -> &str {
 }
 
 pub fn render_snippet(span: Span, source: &str) -> Option<String> {
+    // A Span::default() has line: 0; only the fatal path (a synthesized import span) can reach
+    // this function with one.
+    if span.line == 0 {
+        return None;
+    }
     let raw = source.lines().nth(span.line as usize - 1)?;
     let text: String = raw
         .trim_end_matches('\r')
@@ -3743,6 +3748,17 @@ mod tests {
         let src = "a := 1\nb := 2\n";
         let span = Span {
             line: 9,
+            col: 1,
+            file: 0,
+        };
+        assert_eq!(render_snippet(span, src), None);
+    }
+
+    #[test]
+    fn render_snippet_line_zero_is_none() {
+        let src = "a := 1";
+        let span = Span {
+            line: 0,
             col: 1,
             file: 0,
         };

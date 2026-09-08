@@ -747,9 +747,14 @@ fn parse_error_message_is_not_doubled() {
         "resolve error ({}:1:4): expected identifier, found '('",
         p.display()
     );
+    let first_line = stderr.lines().next().unwrap_or_default();
     assert_eq!(
-        stderr, &expected,
+        first_line, expected,
         "plain text must render the position exactly once, got: {stderr}"
+    );
+    assert!(
+        stderr.lines().any(|l| l == "1 | fn (): pass"),
+        "plain text must render the caret gutter's source echo, got: {stderr}"
     );
 }
 

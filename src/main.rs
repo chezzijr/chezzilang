@@ -206,7 +206,14 @@ fn cmd_check(args: &[String]) -> ExitCode {
             message,
             span,
         } => {
-            report_fatal(&text, &message, span, &files, json);
+            report_fatal(
+                &text,
+                &message,
+                span,
+                &files,
+                json,
+                Some((entry_path, &source)),
+            );
             ExitCode::FAILURE
         }
     }
@@ -341,7 +348,14 @@ fn cmd_run(args: &[String]) -> ExitCode {
             message,
             span,
         } => {
-            report_fatal(&text, &message, span, &files, json);
+            report_fatal(
+                &text,
+                &message,
+                span,
+                &files,
+                json,
+                Some((entry_path, &source)),
+            );
             return ExitCode::FAILURE;
         }
     }
@@ -1289,6 +1303,7 @@ fn report_fatal(
     span: lexer::Span,
     files: &[(u32, std::path::PathBuf)],
     json: bool,
+    entry: Option<(&std::path::Path, &str)>,
 ) {
     if json {
         // Same renderer as a type error, so `severity` is present on EVERY object a consumer can
@@ -1301,7 +1316,20 @@ fn report_fatal(
             )
         );
     } else {
-        eprintln!("{text}");
+        let mut cache = seed_cache(entry);
+        let mut out = text.to_string();
+        if let Some(path) = path_for(files, span.file) {
+            let src = cache
+                .entry(path.to_path_buf())
+                .or_insert_with(|| std::fs::read_to_string(path).ok());
+            if let Some(src) = src
+                && let Some(snippet) = lexer::render_snippet(span, lexer::strip_bom(src))
+            {
+                out.push('\n');
+                out.push_str(&snippet);
+            }
+        }
+        eprintln!("{out}");
     }
 }
 
