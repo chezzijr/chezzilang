@@ -543,7 +543,8 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   conversions stay type errors (`y: int = 2.3`, `-> int: return 2.3`, `float` into `List[int]`,
   `int`→`float` across a **newtype** boundary). Widening is **scalar-or-element-at-the-sink**: the
   element widen reaches every position the scalar widen does — an annotated `let`, a call argument, a
-  method argument, a struct constructor argument, a `return` (TICKET-033) — but a compound/NESTED or
+  method argument, a struct constructor argument, a `return` (TICKET-033), and a parameter or field
+  DEFAULT (TICKET-094) — but a compound/NESTED or
   type-ARGUMENT float slot is NOT widened: `List[List[float]] = [[1]]`, `float? = Some(3)`,
   `float! = Ok(3)`, `fn f() -> List[float]?: return [1, 2]`, and a non-literal RHS
   (`List[float] = f()`) all stay type errors (use explicit floats or a literal). An un-annotated mixed collection with a TYPED int element

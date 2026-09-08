@@ -596,8 +596,9 @@ untyped float constant infers `List[float]` / `Map[_, float]` and coerces its un
 (`[1, 2.3]`, `[1, -2.5]`, `[1 + 1, 2.5]`). The ELEMENT of a mixed-numeric-CONSTANT collection widens at
 the same set of sinks the scalar rule does (TICKET-033): an annotated `xs: List[float] = [1, f]` /
 `m: Map[str, float] = {"a": 1}` / `xs: List[float] = [1, 2]` (the annotation is the type CONTEXT), a
-`List[float]`/`Map[_, float]` call argument, method argument, struct constructor argument, and a
-`-> List[float]`/`-> Map[_, float]` return. A
+`List[float]`/`Map[_, float]` call argument, method argument, struct constructor argument, a
+`-> List[float]`/`-> Map[_, float]` return, and a List[float]/Map[_, float] parameter or field DEFAULT
+(TICKET-094) (`fn g(xs: List[float] = [1, 2.5])`; `struct S: v: List[float] = [1, 2]`). A
 `float` sink spelled through a type ALIAS (`type F = float`; `x: F = 1`, `fn g(z: F)`, `v: F`) is a float
 sink like any other. Because the conversion is real, the value behaves as a float everywhere —
 `x: float = 3` makes `x / 2 == 1.5` (float division), not `1`. The mixed-type arithmetic / comparison
@@ -611,7 +612,10 @@ that declaration is what the backend coerces from — not exceptions):
   value cannot be told apart from it, so neither adapts. A fn-typed struct FIELD is a fn value too.
 - A **generic-erased** slot never widens: a method param declared as the type variable (`fn set(self, x: T)`
   on a `Box[float]`) is `T` at runtime, so `b.set(1)` is an error — write `b.set(1.0)`. A param declared
-  `float` on the same generic struct adapts normally.
+  `float` on the same generic struct adapts normally. (TICKET-094) A callee declaring its OWN type
+  params (`fn g[T](a: float, b: T)`) adapts every slot it declares CONCRETELY exactly the same way —
+  genericity of the callee is irrelevant to a slot the callee itself spells `float`/`List[float]`/
+  `Map[_, float]`; only a slot spelled as the callee's own type variable is erased.
 - A whole-collection alias IS a type context (TICKET-033): `type LF = List[float]`; `xs: LF = [1, 2]`
   adapts exactly like the un-aliased spelling, because the checker now licenses the widen from the
   RESOLVED slot type and hands the verdict to the (still type-blind) backend, rather than requiring the

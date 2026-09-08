@@ -51,3 +51,38 @@ test fn map_return_widens():
     m := give_map()
     assert str(m) == "{{'a': 1.0}}"
     assert m["a"] / 2 == 0.5
+
+# TICKET-094 defect B/C — the element widen must also RUN at a parameter/field/map-value DEFAULT and
+# at a generic callee's own concrete argument slots, not just check-clean.
+
+fn with_list_default(xs: List[float] = [1, 2]) -> List[float]:
+    return xs
+
+struct FieldDefault:
+    v: List[float] = [1, 2]
+
+fn with_map_default(m: Map[str, float] = {"a": 1}) -> Map[str, float]:
+    return m
+
+fn generic_widens[T](a: List[float], b: T) -> List[float]:
+    return a
+
+test fn param_default_widens_elements():
+    xs := with_list_default()
+    assert str(xs) == "[1.0, 2.0]"
+    assert xs[0] / 2 == 0.5
+
+test fn field_default_widens_elements():
+    f := FieldDefault()
+    assert str(f.v) == "[1.0, 2.0]"
+    assert f.v[0] / 2 == 0.5
+
+test fn map_value_default_widens():
+    m := with_map_default()
+    assert str(m) == "{{'a': 1.0}}"
+    assert m["a"] / 2 == 0.5
+
+test fn generic_callee_widens_concrete_slots():
+    xs := generic_widens([1, 2], "x")
+    assert str(xs) == "[1.0, 2.0]"
+    assert xs[0] / 2 == 0.5

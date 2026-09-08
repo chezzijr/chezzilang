@@ -8198,9 +8198,14 @@ the judging loop on the release binary at `699be0d2`, every candidate judged aga
 
 - **TICKET-093 (P0)** — `fn`-type parameters compared covariantly; `check` clean, then an `int` sits in
   a `List[str]` at rc=0. `src/checker/proto.rs:1233` plus a second site in `src/checker/ty.rs`.
-- **TICKET-094 (P1/P2 ×3)** — expected-type/widening does not reach three declared sinks: an
-  `internal:` compiler-bug abort on a mixed-numeric list DEFAULT (`span-keyed-table-aliasing` #5), the
-  element widen missing at both default sinks, and a generic callee dropping the hint on concrete slots.
+- **TICKET-094 (P1/P2 ×3, CLOSED 2026-09-08)** — expected-type/widening does not reach three declared
+  sinks: an `internal:` compiler-bug abort on a mixed-numeric list DEFAULT (`span-keyed-table-aliasing`
+  #5), the element widen missing at both default sinks, and a generic callee dropping the hint on
+  concrete slots. Fixed by licensing `float_elem_hint` at both default decl-sites (`src/checker/sig.rs`)
+  and threading the declared arg/param slot through `infer_generic_arg_tys`/`check_generic_arg`
+  (`src/checker/expr.rs`, `src/checker/proto.rs`), keyed on the PRE-substitution slot per DEC-054. Rust
+  lib suite: 4581 → 4586 passed, 0 failed. Chezzi suite (`tests/chz`): 853 passed, 0 failed (4 new
+  cases in `tests/chz/spec/float_elem_widen_sinks_test.chz`).
 - **TICKET-095 (P1)** — a nested-nursery deadlock hangs forever at `CHEZZI_THREADS=1`; Go faults at
   every `GOMAXPROCS`. Ungated because `tests/chezzi_threads_cli.rs` only runs default + T=2.
 - **TICKET-096 (P1/P2)** — a module top-level `spawn` fault is delivered twice (caught AND fatal) with

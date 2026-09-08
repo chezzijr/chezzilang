@@ -6262,6 +6262,22 @@ fn list_float_default_with_mixed_literal_does_not_abort() {
     assert_eq!(out, "[1.0, 2.5]\n");
 }
 
+/// TICKET-094 defect C, run-time proof — the checker accepting a generic callee's concrete slots is
+/// not enough on its own: the value actually stored there must be a real `f64`, not an `Int` under a
+/// static `float` (the same class `docs/gaps.md` W7-49 names for the erased-slot hazard). Runs
+/// through `run_program`, not just `checker::tests::ok`, so a widen that type-checks but never emits
+/// the backend's `Op::CoerceFloat` would still show up here as `1 [1, 2]` instead of `1.0 [1.0, 2.0]`.
+#[test]
+fn generic_callee_concrete_slots_store_real_floats() {
+    let src = "fn g[T](a: float, xs: List[float], b: T) -> str:\n    return \"{a} {xs}\"\nprint(g(1, [1, 2], \"x\"))\n";
+    let (out, res) = run_program(src);
+    assert!(
+        res.is_ok(),
+        "expected `run` to print 1.0 [1.0, 2.0], got fault: {res:?} (stdout so far: {out:?})"
+    );
+    assert_eq!(out, "1.0 [1.0, 2.0]\n");
+}
+
 // ===== W7-51 — a default resolves in the module that DECLARES it =====
 //
 // RUST, not `tests/chz/`, for the same reason as the W7-49 trio above: the defect is inherently
