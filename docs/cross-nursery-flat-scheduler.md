@@ -57,9 +57,15 @@
 >   (a receiver parked INSIDE an eager body, sender in an ancestor — `parent_wake` points UP only) and
 >   sibling-eager→sibling-eager (pinned by
 >   `parallel_cross_nursery_parent_to_child_residual_never_panics`). **Re-measured 2026-09-08 (bug-hunt
->   wave 11): "timing-divergent" is wrong — the parent→child residual is DETERMINISTIC per worker
->   count.** A sender sleeping 300 ms in an ancestor task, receiver parked in a nested eager body:
->   `CHEZZI_THREADS=1` prints the value 10/10 runs; `=2` and `=4` fault `deadlock` 10/10. Go prints the
+>   wave 11), and the earlier "timing-divergent" wording was replaced by "DETERMINISTIC per worker
+>   count", which is ALSO wrong — it was generalised from one program. The honest statement is that
+>   the outcome is worker-count-dependent, and whether it is deterministic depends on the race.**
+>   Two measured shapes, both a receiver parked in a nested eager body:
+>   (a) sender sleeps 300 ms in an ancestor task — deterministic: `CHEZZI_THREADS=1` prints the value
+>   20/20 runs, `=2` and `=4` fault `deadlock` 20/20; (b) sender is a sibling `spawn:` with no sleep
+>   (a tight race) — FLAKY, and the rate climbs with width: T=1 0/30 deadlock, T=2 7/30, T=4 22/30,
+>   T=8 30/30. So a single-count sample can read as clean and must not be trusted; sample at several
+>   widths and report the rate. Go prints the
 >   value at every `GOMAXPROCS`. So this is not a benign completes-or-faults-cleanly limit: it is a
 >   **confident FALSE `deadlock` verdict on a program that has a live sender**, which is exactly what
 >   `parked-is-not-stuck` / `docs/gaps.md` **W7-12** say a heuristic must never emit — the required
