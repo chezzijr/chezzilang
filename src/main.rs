@@ -30,6 +30,7 @@ COMMANDS:
     tokens  <file>   Print the token stream
     ast     <file>   Print the parsed AST
     docs    [topic]  Print language docs (no topic → full reference, for piping to an LLM)
+    version          Print the toolchain version (also chezzi --version / -V)
     help             Show this message
 
 FLAGS:
@@ -75,6 +76,10 @@ fn main() -> ExitCode {
     match cmd {
         "help" | "-h" | "--help" => {
             print!("{USAGE}");
+            ExitCode::SUCCESS
+        }
+        "version" | "-V" | "--version" => {
+            println!("chezzi {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
         "tokens" => cmd_tokens(args.get(1)),
