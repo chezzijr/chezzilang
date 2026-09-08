@@ -801,3 +801,63 @@ fn resolve_error_plaintext_shows_caret_snippet() {
         "resolve error must render a caret gutter like a type error does, got: {stderr}"
     );
 }
+
+/// TICKET-079: an unclosed `[` must span its OPENER, not the token where the parser gave up.
+#[test]
+fn unclosed_bracket_points_at_the_opener() {
+    let t = TmpDir::new();
+    let p = t.write("v1.chz", "xs := [1, 2, 3\nprint(xs)\n");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .args(["check", p.to_str().unwrap()])
+        .output()
+        .expect("run chezzi check");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stderr = stderr.trim_end();
+    let first_line = stderr.lines().next().unwrap_or_default();
+    assert!(
+        first_line.ends_with(":1:7): '[' was never closed"),
+        "first line must span the opener at 1:7, got: {stderr}"
+    );
+    assert!(
+        stderr.lines().any(|l| l == "1 | xs := [1, 2, 3"),
+        "must echo the opener's source line, got: {stderr}"
+    );
+
+    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .args(["check", p.to_str().unwrap(), "--errors=json"])
+        .output()
+        .expect("run chezzi check --errors=json");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stdout = stdout.trim();
+    assert!(
+        stdout.contains("\"line\":1,\"col\":7,\"end_line\":1,\"end_col\":8"),
+        "json span must cover the opener, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"message\":\"'[' was never closed\""),
+        "json message must name the opener, got: {stdout}"
+    );
+}
+
+/// TICKET-079: a `(` that IS closed later must keep the ordinary `expected ')'` message — the
+/// forward scan must not let a missing comma masquerade as an unclosed opener.
+#[test]
+fn a_closed_paren_keeps_the_expected_message() {
+    let t = TmpDir::new();
+    let p = t.write("v2.chz", "fn main():\n    print(1 2)\n");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .args(["check", p.to_str().unwrap()])
+        .output()
+        .expect("run chezzi check");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("expected ')', found integer 2"),
+        "got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("was never closed"),
+        "a closed paren must not be reported as unclosed, got: {stderr}"
+    );
+}

@@ -294,6 +294,11 @@ impl Parser {
     fn expect(&mut self, kind: &Token) -> PResult<Tok> {
         if self.check(kind) {
             Ok(self.advance())
+        } else if let Some(open) = self.unclosed_opener(kind) {
+            Err(ParseError {
+                message: format!("{} was never closed", describe(&open.kind)),
+                span: open.span,
+            })
         } else {
             Err(self.err(format!(
                 "expected {}, found {}",
@@ -301,6 +306,43 @@ impl Parser {
                 describe(self.peek())
             )))
         }
+    }
+
+    /// When `close` is a closing delimiter (`)`/`]`/`}`) and the token stream never closes the
+    /// nearest matching opener before `self.pos`, return that opener. STATELESS by design — three
+    /// backtracking sites restore `self.pos` by hand, so a delimiter stack maintained in `advance`
+    /// would desync there. A forward scan runs FIRST: `f(a b)` must keep reporting `expected ')'`,
+    /// because its `(` IS closed later, just not where `expect` looked.
+    fn unclosed_opener(&self, close: &Token) -> Option<Tok> {
+        let open_kind = match close {
+            Token::RParen => Token::LParen,
+            Token::RBracket => Token::LBracket,
+            Token::RBrace => Token::LBrace,
+            _ => return None,
+        };
+        let mut depth: usize = 0;
+        for t in &self.toks[self.pos..] {
+            if t.kind == open_kind {
+                depth += 1;
+            } else if &t.kind == close {
+                if depth == 0 {
+                    return None;
+                }
+                depth -= 1;
+            }
+        }
+        let mut depth: usize = 0;
+        for t in self.toks[..self.pos].iter().rev() {
+            if &t.kind == close {
+                depth += 1;
+            } else if t.kind == open_kind {
+                if depth == 0 {
+                    return Some(t.clone());
+                }
+                depth -= 1;
+            }
+        }
+        None
     }
 
     /// Consume an identifier, returning its name.
