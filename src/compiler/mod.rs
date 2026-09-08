@@ -311,6 +311,10 @@ struct Compiler {
     /// alongside `program.protos.push` in `Compiler::finish` (the one push site in the tree). Lets
     /// `fill_global_free` resolve `let_global_slots` membership per proto.
     proto_module: Vec<usize>,
+    /// TICKET-097 — maps the `(module_idx, slot)` of every top-level `fn` to the proto it defines,
+    /// so `fill_global_free` can follow a bare `helper()` call, whose bytecode names only the fn's
+    /// global slot.
+    fn_global_protos: HashMap<(usize, u32), ProtoId>,
     /// The module index that declared `std/json.chz`'s bodyless `native fn _to_json` (set once, in
     /// `hoist_types`, which runs over every module before any `compile_module`). `None` if
     /// `std.json` is not part of this compile. Gates the bare-call `_to_json(...)` lowering to
@@ -883,6 +887,7 @@ impl Compiler {
             current_module_idx: 0,
             let_global_slots: std::collections::HashSet::new(),
             proto_module: Vec::new(),
+            fn_global_protos: HashMap::new(),
             json_to_value_home: None,
             bare_types: HashMap::new(),
             extern_sigs: crate::checker::ExternTable::new(),
@@ -1566,10 +1571,11 @@ impl Compiler {
                         .insert(decl.name.clone(), (pid, module_idx));
                 }
                 fc.emit(Op::MakeFunc(pid), stmt.span);
-                fc.emit(
-                    Op::DefineGlobalSlot(self.global_slot(&decl.name)),
-                    stmt.span,
-                );
+                let fn_slot = self.global_slot(&decl.name);
+                fc.emit(Op::DefineGlobalSlot(fn_slot), stmt.span);
+                // TICKET-097 — records the call edge `fill_global_free` needs to follow a bare
+                // `helper()` call, whose bytecode names only `helper`'s global slot, not its proto.
+                self.fn_global_protos.insert((module_idx, fn_slot), pid);
                 // `chezzi test` discovery — a free `test fn` (entry module only).
                 if decl.is_test && is_entry {
                     self.program.tests.push((decl.name.clone(), pid));
@@ -1961,6 +1967,17 @@ impl Compiler {
                 match op {
                     Op::GetGlobalSlot(s) => {
                         reads[p].insert(*s);
+                        // TICKET-097 — a bare call (`helper()`) loads its callee through this same
+                        // op, so a read behind the call is otherwise invisible to this pass. The
+                        // fixpoint below unions the child's WRITES too, so a callee that writes the
+                        // slot still lands in `writes[p]` and stays excluded (W8-25's rule). The
+                        // fixpoint only grows its sets, so a recursive or mutually-recursive callee
+                        // converges without a visited set. `self.proto_module[p]` is baked into the
+                        // map key, so a call into ANOTHER module is never followed (slot numbers are
+                        // per module).
+                        if let Some(&q) = self.fn_global_protos.get(&(self.proto_module[p], *s)) {
+                            children[p].push(q);
+                        }
                     }
                     Op::SetGlobalSlot(s) | Op::DefineGlobalSlot(s) => {
                         writes[p].insert(*s);
