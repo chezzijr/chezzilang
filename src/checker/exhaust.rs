@@ -143,7 +143,7 @@ impl Checker {
     /// Lower one surface pattern into its matrix row(s) — one per or-alternative — against `dom`.
     fn exh_lower(&self, pattern: &Pattern, dom: &Dom, depth: usize) -> Vec<Pat> {
         if depth > MAX_DEPTH {
-            return vec![Pat::Wild];
+            return vec![Pat::Never];
         }
         match pattern {
             Pattern::Wildcard => vec![Pat::Wild],

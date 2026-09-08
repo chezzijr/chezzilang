@@ -31171,3 +31171,15 @@ fn adding_a_variant_makes_the_product_non_exhaustive_again() {
         "E.C",
     );
 }
+
+// TICKET-076 review finding: exh_lower's depth bail must NOT widen to Pat::Wild. A 7-deep nested
+// Option chain with an or-pattern at each level lowers the innermost literal past MAX_DEPTH while
+// the witness search reaches that column well within it, so a Pat::Wild bail reads the whole
+// pattern as covering its column and falsely accepts a match missing the deep non-zero payload.
+#[test]
+fn deeply_nested_or_pattern_beyond_max_depth_still_rejected() {
+    rejects(
+        "fn f(x: Option[Option[Option[Option[Option[Option[Option[int]]]]]]]) -> int:\n    match x:\n        Some(Some(Some(Some(Some(Some(Some(0) | None) | None) | None) | None) | None) | None): return 1\n        None: return 0\n",
+        "non-exhaustive match on Option: missing Some",
+    );
+}
