@@ -30769,8 +30769,21 @@ fn struct_copy_field_wins_over_the_intrinsic_and_stays_uncallable() {
     // was accepted at check time and then faulted at runtime with "'{}' is not callable".
     rejects(
         "struct S:\n    copy: int\n\nfn main():\n    s := S(7)\n    print(s.copy())\n",
-        "has no method 'copy'",
+        "has no method 'copy' ('copy' is a field -- read it without parentheses)",
     );
+}
+
+/// TICKET-079/TICKET-080 (c): a method-miss name that is a FIELD reports its kind instead of
+/// suggesting itself — `did you mean 'copy'?` would answer with the identical spelling the user
+/// already typed.
+#[test]
+fn a_field_named_like_a_method_is_never_suggested() {
+    let errs = check_src("struct S:\n    copy: int\nfn main():\n    s := S(7)\n    s.copy()\n");
+    let e = errs
+        .iter()
+        .find(|e| e.message.contains("has no method 'copy'"))
+        .unwrap_or_else(|| panic!("expected a 'copy' miss, got: {errs:?}"));
+    assert_eq!(e.help, None, "expected no suggestion, got: {e:?}");
 }
 
 #[test]

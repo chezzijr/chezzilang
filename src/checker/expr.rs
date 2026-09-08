@@ -2876,13 +2876,27 @@ impl Checker {
                     return obj_ty.clone();
                 }
                 self.infer_all(args);
+                // TICKET-079/TICKET-080 (c): a name that exists as a FIELD is never suggested for a
+                // method miss of the same name — `did you mean 'copy'?` would answer with the exact
+                // spelling the user already typed. Report the kind instead, mirroring the reverse
+                // case (a field miss naming a method) at `pattern.rs`'s field lookup.
+                if self.field_names(sname).iter().any(|f| f == method) {
+                    self.error(
+                        name_span,
+                        format!(
+                            "type {obj_ty} has no method '{method}' ('{method}' is a field -- read \
+                             it without parentheses)"
+                        ),
+                    );
+                    return Ty::Unknown;
+                }
                 // TICKET-030 — DEC-007: a `HashMap`-drawn candidate list must be sorted before scoring
-                // so a distance tie doesn't depend on hash order. `copy` is callable on every struct,
-                // so it belongs in this near-miss set. Do NOT add it to `Checker::method_names` itself:
-                // 14 call sites share that helper, including `method_names("str")` and
-                // `method_names("List")`, neither of which has a `copy()`.
+                // so a distance tie doesn't depend on hash order. `copy` is callable on every struct
+                // WITHOUT a `copy` field, so it belongs in this near-miss set only then.
                 let mut names = self.method_names(sname);
-                names.push("copy".to_string());
+                if !has_copy_field {
+                    names.push("copy".to_string());
+                }
                 names.sort();
                 self.error_help(
                     name_span,
