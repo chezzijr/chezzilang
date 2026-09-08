@@ -1260,6 +1260,13 @@ same as a direct named call, and work in `defer`/`spawn` position too (`defer d(
 is fully static (the checker rewrites the keyword call to a positional one; the runtime `Op::Call` /
 `DeferCall` / `SpawnCall` stay positional), so the VM produce identical output.
 
+A function type's **parameter types** are strictly **invariant** — neither covariant nor
+contravariant. `h: fn(Any) -> Dog = idd` over `fn idd(d: Dog) -> Dog` is a type error (covariance
+would let a `Cat` value reach a `Dog`-typed slot), and so is the reverse `h: fn(int) -> str = wide`
+over `fn wide(a: Any) -> str` (contravariance would let that through, but Chezzi rejects it, matching
+Go and Rust, which both make function types invariant in their parameters). The **return** type
+stays covariant.
+
 **A GENERIC fn as a value.** A generic function (`fn ident[T](x: T) -> T`) becomes a usable **value**
 once its type parameters are **pinned** — either with an explicit **turbofish** or against a **known
 concrete `fn(...) -> ...` type** (an annotation, a HOF parameter, a return position, or an assignment

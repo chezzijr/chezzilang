@@ -19,12 +19,12 @@ use std::collections::HashMap;
 use std::fmt;
 
 pub use ty::Ty;
-use ty::compatible;
 pub use ty::{
     ArgFloatWidenTable, CarrierKey, CarrierMode, CarrierTable, ElemWiden, FnLabels, KeywordKey,
     KeywordTable, ListWidenKey, ListWidenTable, ProtoEqTable, RetCoerce, RetCoerceTable, SumSeed,
     SumSeedTable, WitnessCallee, WitnessKey, WitnessSrc, WitnessTable,
 };
+use ty::{compatible, param_invariant};
 
 /// The fully-resolved C signature of one `extern` fn, computed by the checker in the defining
 /// module's import/alias scope (the single source of truth for every alias spelling). Each param /

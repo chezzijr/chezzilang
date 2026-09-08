@@ -206,9 +206,9 @@ checker↔runtime, and IO drift — live ledger in `docs/gaps.md`), with **M19 �
 in-progress alongside it.
 
 > **START HERE (2026-09-08): `docs/gaps.md` — bug-hunt WAVE 11 filed `W11-1..W11-13`**, six domains,
-> every row re-verified on the release binary at `699be0d2` and ticketed as **TICKET-093..098** (093 is
-> the P0: `fn`-type params are compared COVARIANTLY, so `h: fn(Any) -> Dog = idd` type-checks and a
-> `Cat` reaches a `List[str]` at rc=0). Read wave 11's session log at the END of `docs/gaps.md` before
+> every row re-verified on the release binary at `699be0d2` and ticketed as **TICKET-093..098** (093 was
+> the P0, CLOSED 2026-09-08: `fn`-type params were compared COVARIANTLY, so `h: fn(Any) -> Dog = idd`
+> type-checked and a `Cat` reached a `List[str]` at rc=0 — now strictly INVARIANT). Read wave 11's session log at the END of `docs/gaps.md` before
 > working any of them — it also records what the wave found CLEAN (the whole `std.*` surface at ~28 000
 > differential cases, all 32 FFI null guards, `std.net`'s read contract), the one row that needs a
 > DECISION rather than a patch (the parent→child cross-nursery false `deadlock`, deterministic per

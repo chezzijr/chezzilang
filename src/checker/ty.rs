@@ -566,6 +566,17 @@ pub fn fn_arity_note(expected: &Ty, actual: &Ty) -> String {
     String::new()
 }
 
+/// A function type's parameters are compared with STRICT INVARIANCE (the Go/Rust rule), never
+/// covariance or contravariance. Covariance was the TICKET-093 unsoundness: it accepted
+/// `h: fn(Any) -> Dog = idd` over `fn idd(d: Dog) -> Dog`, so a `Cat` value reached a `Dog`-typed
+/// slot at run time. Contravariance is refused too — it would accept `h: fn(int) -> str = wide`
+/// over `fn wide(a: Any) -> str`, which this language rejects. The call is two-way because
+/// `compatible` is symmetric except the `Error`/`Str` intrinsic grant above and a nested function
+/// type's own optional-arity disjunct, and both must cancel for the parameters to be truly invariant.
+pub fn param_invariant(a: &Ty, b: &Ty) -> bool {
+    compatible(a, b) && compatible(b, a)
+}
+
 pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
     use Ty::*;
     match (expected, actual) {
@@ -637,7 +648,7 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
         ) => {
             p1.len() == p2.len()
                 && l2.min_or(p2.len()) <= l1.min_or(p1.len())
-                && p1.iter().zip(p2).all(|(a, b)| compatible(a, b))
+                && p1.iter().zip(p2).all(|(a, b)| param_invariant(a, b))
                 && compatible(r1, r2)
         }
         // A first-class builtin-fn value is signature-compatible with a matching `fn(...)` param (so
@@ -664,7 +675,7 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
             },
         ) => {
             p1.len() == p2.len()
-                && p1.iter().zip(p2).all(|(a, b)| compatible(a, b))
+                && p1.iter().zip(p2).all(|(a, b)| param_invariant(a, b))
                 && compatible(r1, r2)
         }
         (Tuple(a), Tuple(b)) => {

@@ -1216,6 +1216,11 @@ impl Checker {
             // it: `h := a; h = b` over `fn a(x: int = 1)` / `fn b(x: int)` was check-clean and then
             // `function 'b' expects 1 argument(s), got 0` at runtime. The reverse
             // (a defaulted fn into a plain `fn(int) -> int`) is strictly more permissive and stays legal.
+            //
+            // Parameter TYPES, unlike arity, are strictly INVARIANT (TICKET-093), not covariant: a
+            // covariant `self.assignable(a, b)` accepted `h: fn(Any) -> Dog = idd` over
+            // `fn idd(d: Dog) -> Dog`, so `h(Cat(5))` put a `Cat` value where a `Dog` was promised. The
+            // return type stays covariant.
             (
                 Func {
                     params: p1,
@@ -1230,7 +1235,7 @@ impl Checker {
             ) => {
                 p1.len() == p2.len()
                     && l2.min_or(p2.len()) <= l1.min_or(p1.len())
-                    && p1.iter().zip(p2).all(|(a, b)| self.assignable(a, b))
+                    && p1.iter().zip(p2).all(|(a, b)| param_invariant(a, b))
                     && self.assignable(r1, r2)
             }
             _ => compatible(expected, actual),
