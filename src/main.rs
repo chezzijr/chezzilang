@@ -21,6 +21,7 @@ chezzi — the Chezzi language toolchain
 
 USAGE:
     chezzi <command> [flags] <file.chz> [program args...]
+    chezzi run [flags] [-- program args...]   # no file: runs the manifest [project] entrypoint
 
 COMMANDS:
     init    [dir]    Scaffold a new Chezzi project (manifest + src; never overwrites)
@@ -60,6 +61,10 @@ FLAGS:
 NOTE: flags must come BEFORE the file path. Anything after the file is passed
       to the program as an argument, so `chezzi run prog.chz --threads=4` hands
       `--threads=4` to the program instead of sizing the engine. Use `chezzi run --threads=4 prog.chz`.
+      With NO file — a bare `chezzi run` on a manifest `entrypoint` — there is no file to put
+      arguments after, so `--` is the terminator: `chezzi run -- hello` passes `hello` to the
+      program. It works after a file path too (`chezzi run prog.chz -- hello`), and the `--` itself
+      is consumed.
 ";
 
 fn main() -> ExitCode {
