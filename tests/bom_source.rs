@@ -163,6 +163,30 @@ fn a_mid_file_bom_is_still_an_error() {
     );
 }
 
+/// A leading BOM in `chezzi.toml` (Windows/VS Code write these routinely) must parse exactly as the
+/// same manifest without it — the lexer already strips one, and a BOM-prefixed `.chz` source runs
+/// fine, so the manifest parser must match (TICKET-091).
+#[test]
+fn manifest_with_a_leading_bom_runs_the_entrypoint() {
+    let t = TmpDir::new();
+    t.write(
+        "chezzi.toml",
+        "\u{feff}[project]\nname = \"bomproj\"\nentrypoint = \"src.main:main\"\n",
+    );
+    t.write("src/main.chz", "fn main():\n    print(7)\n");
+    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .arg("run")
+        .current_dir(&t.0)
+        .output()
+        .expect("run chezzi run");
+    assert!(
+        out.status.code() == Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "7\n");
+}
+
 #[test]
 fn a_bom_only_file_is_an_empty_program_at_rc_0() {
     let t = TmpDir::new();
