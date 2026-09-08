@@ -1404,6 +1404,7 @@ impl Checker {
             } => self.infer_comprehension(*kind, key.as_deref(), elem, clauses),
             ExprKind::Unary { op, expr: inner } => self.infer_unary(*op, inner),
             ExprKind::Binary { op, lhs, rhs } => self.infer_binary(*op, lhs, rhs),
+            ExprKind::Compare { operands, ops } => self.infer_compare_chain(operands, ops),
             ExprKind::Slice {
                 obj,
                 start,
@@ -2909,6 +2910,32 @@ impl Checker {
                 }
             }
         }
+    }
+
+    /// A Python-style chained comparison (`a < b <= c`, TICKET-077): infers each operand exactly
+    /// once, then judges every adjacent pair through [`Self::compare_pair`]. Per DEC-034, the
+    /// expected-type hint is re-installed before EVERY operand, uniformly, exactly as
+    /// `infer_binary` does for a pair.
+    pub(super) fn infer_compare_chain(&mut self, operands: &[Expr], ops: &[BinaryOp]) -> Ty {
+        let hint = self.expected_hint.take();
+        let tys: Vec<Ty> = operands
+            .iter()
+            .map(|o| {
+                self.expected_hint = hint.clone();
+                self.infer_value(o)
+            })
+            .collect();
+        self.expected_hint = None;
+        for i in 0..ops.len() {
+            self.compare_pair(
+                ops[i],
+                &tys[i],
+                &tys[i + 1],
+                operands[i].span,
+                operands[i + 1].span,
+            );
+        }
+        Ty::Bool
     }
 
     /// The type rules for the seven comparison operators (`<`/`<=`/`>`/`>=`/`==`/`!=`/`in`),
@@ -4449,6 +4476,11 @@ impl Checker {
             ExprKind::Binary { lhs, rhs, .. } => {
                 self.scan_expr_for_pin(name, lhs, match_pin, member_pin);
                 self.scan_expr_for_pin(name, rhs, match_pin, member_pin);
+            }
+            ExprKind::Compare { operands, .. } => {
+                for o in operands {
+                    self.scan_expr_for_pin(name, o, match_pin, member_pin);
+                }
             }
             ExprKind::Range { start, end } => {
                 self.scan_expr_for_pin(name, start, match_pin, member_pin);

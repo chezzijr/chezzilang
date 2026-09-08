@@ -4119,6 +4119,34 @@ impl Compiler {
                 self.compile_expr(fc, rhs)?;
                 fc.emit(binary_op(*op), expr.span);
             }
+            // TICKET-077: a Python-style chained comparison (`a < b <= c`) lowers like `and`, one
+            // link per adjacent pair, but the middle operand must be evaluated exactly once — so
+            // each interior operand is stashed in a hidden temp and read back for the next link,
+            // instead of being recompiled.
+            ExprKind::Compare { operands, ops } => {
+                self.compile_expr(fc, &operands[0])?;
+                let mut end_jumps = Vec::new();
+                for (i, op) in ops.iter().enumerate() {
+                    self.compile_expr(fc, &operands[i + 1])?;
+                    let interior_slot = if i + 1 < ops.len() {
+                        let slot = fc.add_hidden();
+                        fc.emit_hidden_set(slot, operands[i + 1].span);
+                        fc.emit_hidden_get(slot, operands[i + 1].span);
+                        Some(slot)
+                    } else {
+                        None
+                    };
+                    fc.emit(binary_op(*op), expr.span);
+                    if let Some(slot) = interior_slot {
+                        end_jumps.push(fc.emit_jump(Op::JumpIfFalseKeep(0), expr.span));
+                        fc.emit(Op::Pop, expr.span);
+                        fc.emit_hidden_get(slot, operands[i + 1].span);
+                    }
+                }
+                for jump in end_jumps {
+                    fc.patch_jump(jump);
+                }
+            }
             ExprKind::Range { .. } => {
                 // A bare range has no runtime value: it is lowered ONLY as a `for`/comprehension
                 // iterable (a counting loop) or a slice receiver (materialize + slice), none of
@@ -6739,6 +6767,11 @@ fn find_boundary_free_expr(e: &Expr, out: &mut HashSet<String>) {
             find_boundary_free_expr(lhs, out);
             find_boundary_free_expr(rhs, out);
         }
+        ExprKind::Compare { operands, .. } => {
+            for o in operands {
+                find_boundary_free_expr(o, out);
+            }
+        }
         ExprKind::Range { start, end } => {
             find_boundary_free_expr(start, out);
             find_boundary_free_expr(end, out);
@@ -7234,6 +7267,11 @@ pub(crate) fn free_names_expr(e: &Expr, bound: &HashSet<String>, out: &mut FreeN
             free_names_expr(elem, &b, out);
         }
         ExprKind::Unary { expr, .. } | ExprKind::Try(expr) => free_names_expr(expr, bound, out),
+        ExprKind::Compare { operands, .. } => {
+            for o in operands {
+                free_names_expr(o, bound, out);
+            }
+        }
         ExprKind::Binary { lhs, rhs, .. } | ExprKind::NullCoalesce { lhs, rhs, .. } => {
             free_names_expr(lhs, bound, out);
             free_names_expr(rhs, bound, out);
@@ -7388,6 +7426,11 @@ fn collect_frame_binds_expr(e: &Expr, out: &mut HashSet<String>) {
         ExprKind::Binary { lhs, rhs, .. } | ExprKind::NullCoalesce { lhs, rhs, .. } => {
             collect_frame_binds_expr(lhs, out);
             collect_frame_binds_expr(rhs, out);
+        }
+        ExprKind::Compare { operands, .. } => {
+            for o in operands {
+                collect_frame_binds_expr(o, out);
+            }
         }
         ExprKind::Range { start, end } => {
             collect_frame_binds_expr(start, out);
@@ -7578,6 +7621,7 @@ fn expr_has_bare_spawn(e: &Expr) -> bool {
         ExprKind::Binary { lhs, rhs, .. } | ExprKind::NullCoalesce { lhs, rhs, .. } => {
             expr_has_bare_spawn(lhs) || expr_has_bare_spawn(rhs)
         }
+        ExprKind::Compare { operands, .. } => operands.iter().any(expr_has_bare_spawn),
         ExprKind::Range { start, end } => expr_has_bare_spawn(start) || expr_has_bare_spawn(end),
         ExprKind::Call {
             callee,

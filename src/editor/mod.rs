@@ -849,6 +849,11 @@ fn overlay_expr(expr: &crate::ast::Expr, map: &mut std::collections::HashMap<(us
             overlay_expr(lhs, map);
             overlay_expr(rhs, map);
         }
+        ExprKind::Compare { operands, .. } => {
+            for o in operands {
+                overlay_expr(o, map);
+            }
+        }
         ExprKind::Range { start, end } => {
             overlay_expr(start, map);
             overlay_expr(end, map);

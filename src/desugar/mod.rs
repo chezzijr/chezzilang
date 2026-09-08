@@ -1317,6 +1317,11 @@ fn walk_idents_and_types(e: &Expr, f: &mut impl FnMut(&str), tf: &mut impl FnMut
             walk_idents_and_types(lhs, f, tf);
             walk_idents_and_types(rhs, f, tf);
         }
+        ExprKind::Compare { operands, .. } => {
+            for o in operands {
+                walk_idents_and_types(o, f, tf);
+            }
+        }
         ExprKind::Range { start, end } => {
             walk_idents_and_types(start, f, tf);
             walk_idents_and_types(end, f, tf);
@@ -2147,6 +2152,11 @@ impl Walker<'_> {
             ExprKind::Binary { lhs, rhs, .. } => {
                 self.walk_expr(lhs)?;
                 self.walk_expr(rhs)?;
+            }
+            ExprKind::Compare { operands, .. } => {
+                for o in operands {
+                    self.walk_expr(o)?;
+                }
             }
             ExprKind::Range { start, end } => {
                 self.walk_expr(start)?;

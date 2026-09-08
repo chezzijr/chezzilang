@@ -957,6 +957,14 @@ pub enum ExprKind {
         lhs: Box<Expr>,
         rhs: Box<Expr>,
     },
+    /// A Python-style chained comparison (`a < b <= c`, TICKET-077): `operands.len() ==
+    /// ops.len() + 1` and `ops.len() >= 2` (a single comparison stays `Binary`). Means
+    /// `operands[0] ops[0] operands[1] and operands[1] ops[1] operands[2] and ...`, with each
+    /// interior operand evaluated exactly once.
+    Compare {
+        operands: Vec<Expr>,
+        ops: Vec<BinaryOp>,
+    },
     /// `start..end` (end-exclusive).
     Range {
         start: Box<Expr>,
@@ -1202,6 +1210,11 @@ pub fn expr_recover_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
         ExprKind::Binary { lhs, rhs, .. } | ExprKind::NullCoalesce { lhs, rhs, .. } => {
             go(lhs);
             go(rhs);
+        }
+        ExprKind::Compare { operands, .. } => {
+            for o in operands {
+                go(o);
+            }
         }
         ExprKind::Range { start, end } => {
             go(start);
