@@ -2869,14 +2869,8 @@ impl Checker {
                     Ty::Unknown
                 }
             }
-            Lt | LtEq | Gt | GtEq => {
-                let ok = (l.is_numeric() && r.is_numeric())
-                    || (l == Ty::Str && r == Ty::Str)
-                    || self.ordering_allowed(&l, &r);
-                if !ok && !either_unknown {
-                    self.error(lhs.span, format!("cannot compare {l} and {r}"));
-                }
-                Ty::Bool
+            Lt | LtEq | Gt | GtEq | Eq | NotEq | In => {
+                self.compare_pair(op, &l, &r, lhs.span, rhs.span)
             }
             // Bitwise/shift ops are int-only (gap #13), EXCEPT `| & ^` also do set algebra
             // (gap #3): union / intersection / symmetric-difference on two `set[T]`. Shifts
@@ -2913,6 +2907,36 @@ impl Checker {
                     );
                     Ty::Unknown
                 }
+            }
+        }
+    }
+
+    /// The type rules for the seven comparison operators (`<`/`<=`/`>`/`>=`/`==`/`!=`/`in`),
+    /// extracted from `infer_binary` (TICKET-077) so a comparison CHAIN (`a < b == c`) can judge
+    /// each adjacent PAIR without re-inferring either operand: `infer_compare_chain` calls
+    /// `infer_value` once per operand and then calls this per adjacent pair. Re-inferring an
+    /// operand a second time (e.g. via `infer_binary` on synthesized pairs) would double-report its
+    /// errors and re-key the span-keyed side tables — `record_proto_eq` treats an aliased key as a
+    /// hard error.
+    pub(super) fn compare_pair(
+        &mut self,
+        op: BinaryOp,
+        l: &Ty,
+        r: &Ty,
+        lspan: Span,
+        rspan: Span,
+    ) -> Ty {
+        use BinaryOp::*;
+        let either_unknown = l.is_unknown() || r.is_unknown();
+        match op {
+            Lt | LtEq | Gt | GtEq => {
+                let ok = (l.is_numeric() && r.is_numeric())
+                    || (*l == Ty::Str && *r == Ty::Str)
+                    || self.ordering_allowed(l, r);
+                if !ok && !either_unknown {
+                    self.error(lspan, format!("cannot compare {l} and {r}"));
+                }
+                Ty::Bool
             }
             // **B2** (`docs/gaps.md`) — `==`/`!=` yields `bool`, but the operands must be able to be
             // equal. Only a **provably disjoint** pair (`1 == "a"`, `Box[int] == Box[str]`) is
@@ -2955,9 +2979,9 @@ impl Checker {
                     })
                     .collect();
                 let (l, r) = if pins.is_empty() {
-                    (l, r)
+                    (l.clone(), r.clone())
                 } else {
-                    (subst(&l, &pins), subst(&r, &pins))
+                    (subst(l, &pins), subst(r, &pins))
                 };
                 // **W7-41.** Does the structural equality walk reach a declared `eq` whose `where`
                 // bounds do not hold for this instantiation? The explicit spelling `a.eq(b)` was
@@ -3000,7 +3024,7 @@ impl Checker {
                     // Decorated, not replaced: the bare text reads as "you have no equality", and the
                     // user WROTE an `eq`. Same ` — ` separator the `<` operator's note used.
                     self.error(
-                        lhs.span,
+                        lspan,
                         format!("cannot compare {l} and {r} for equality — {why}"),
                     );
                     // One diagnostic per site — do not also run the co-inhabitance question.
@@ -3008,7 +3032,7 @@ impl Checker {
                 }
                 let ok = self.may_be_equal(&l, &r);
                 if !ok && !either_unknown {
-                    self.error(lhs.span, format!("cannot compare {l} and {r} for equality"));
+                    self.error(lspan, format!("cannot compare {l} and {r} for equality"));
                 }
                 Ty::Bool
             }
@@ -3021,10 +3045,10 @@ impl Checker {
                 // (A range RHS needs no special case here: `r = self.infer(rhs)` above already
                 // rejected it generically — see `infer_kind`'s `ExprKind::Range` arm — and lands
                 // `Unknown`, which `either_unknown` then silences. A guard here would DOUBLE-report.)
-                match &r {
+                match r {
                     Ty::List(elem) | Ty::Set(elem) => {
-                        if !either_unknown && !compatible(elem, &l) {
-                            self.error(lhs.span, format!("cannot test membership of {l} in {r}"));
+                        if !either_unknown && !compatible(elem, l) {
+                            self.error(lspan, format!("cannot test membership of {l} in {r}"));
                         }
                         // **W7-45.** `in` runs `values_equal` per element, exactly as `==` does, but
                         // it is typed by `compatible` — which asks co-inhabitance, not whether the
@@ -3047,15 +3071,15 @@ impl Checker {
                             && let Some(why) = self.eq_bounds_unsatisfied(elem)
                         {
                             self.error(
-                                lhs.span,
+                                lspan,
                                 format!("cannot test membership of {l} in {r} — {why}"),
                             );
                         }
                     }
                     Ty::Map(key, _) => {
-                        if !either_unknown && !compatible(key, &l) {
+                        if !either_unknown && !compatible(key, l) {
                             self.error(
-                                lhs.span,
+                                lspan,
                                 format!(
                                     "cannot test membership of {l} in {r} (map `in` tests keys)"
                                 ),
@@ -3063,9 +3087,9 @@ impl Checker {
                         }
                     }
                     Ty::Str => {
-                        if l != Ty::Str && !either_unknown {
+                        if *l != Ty::Str && !either_unknown {
                             self.error(
-                                lhs.span,
+                                lspan,
                                 format!("substring `in` requires a str on the left, found {l}"),
                             );
                         }
@@ -3074,15 +3098,12 @@ impl Checker {
                     other => {
                         // `Contains` protocol: a struct/enum with `contains(self, item) -> bool`.
                         if let Some(item) = self.contains_item_ty(other) {
-                            if !either_unknown && !compatible(&item, &l) {
-                                self.error(
-                                    lhs.span,
-                                    format!("cannot test membership of {l} in {r}"),
-                                );
+                            if !either_unknown && !compatible(&item, l) {
+                                self.error(lspan, format!("cannot test membership of {l} in {r}"));
                             }
                         } else {
                             self.error(
-                                rhs.span,
+                                rspan,
                                 format!(
                                     "cannot use `in` on {other} (expected a list, set, map, str, or a type with `contains(self, item) -> bool`)"
                                 ),
@@ -3091,6 +3112,9 @@ impl Checker {
                     }
                 }
                 Ty::Bool
+            }
+            And | Or | Add | Sub | Mul | Div | Mod | BitAnd | BitOr | BitXor | Shl | Shr => {
+                unreachable!("compare_pair called with a non-comparison operator")
             }
         }
     }
