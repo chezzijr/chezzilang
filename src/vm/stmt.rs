@@ -1963,6 +1963,44 @@ impl Vm {
         }
     }
 
+    /// TICKET-097 — marks module global `slot` `carried` (never `assigned`) after an IN-PLACE
+    /// mutation of the value it holds, which never reaches `Op::SetGlobalSlot`
+    /// (`Op::TouchGlobalSlot` for a definite field/index-assignment root, `Op::TouchGlobalSlotByName`
+    /// for the type-blind mutator-method-name path). Marking `assigned` too would be wrong: that bit
+    /// is the ONLY thing `install_global_slot` consults to refuse an arriving install, so marking it
+    /// here would make a task that merely mutated a global in place start REFUSING a sender's newer
+    /// value for that slot (DEC-051). `builtin_only` restricts the by-name path to `List`/`Map`/
+    /// `Set`/`ByteArray`, since a user struct method sharing a mutator name (`add`, `insert`, …) may
+    /// mutate nothing; the definite path accepts a `Struct` too, since its root is statically certain.
+    pub(super) fn touch_global_slot(&mut self, module: GcRef, slot: u32, builtin_only: bool) {
+        self.ensure_module_faulted(module);
+        let Some(v) = (if let Obj::Module(m) = self.heap.get(module) {
+            m.slots.get(slot as usize).copied()
+        } else {
+            None
+        }) else {
+            return;
+        };
+        let ValueView::Obj(h) = v.view() else {
+            return;
+        };
+        let touches = match self.heap.get(h) {
+            Obj::List(_) | Obj::Map(_) | Obj::Set(_) | Obj::ByteArray(_) => true,
+            Obj::Struct { .. } => !builtin_only,
+            _ => false,
+        };
+        if !touches {
+            return;
+        }
+        if let Obj::Module(m) = self.heap.get_mut(module) {
+            let i = slot as usize;
+            if m.carried.len() <= i {
+                m.carried.resize(i + 1, false);
+            }
+            m.carried[i] = true;
+        }
+    }
+
     /// TICKET-051 — the airlock's write path: installs an arriving closure's value for `slot` into
     /// the RECEIVING view, unless that view already assigned the slot itself. Returns `false` (and
     /// writes nothing) when `module` has no such slot (a hand-built fixture with an empty module) or

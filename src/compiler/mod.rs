@@ -2662,6 +2662,16 @@ impl Compiler {
         value: &Expr,
         span: Span,
     ) -> Result<(), CompileError> {
+        // TICKET-097 — a field/index assignment target rooted at a module global is an IN-PLACE
+        // mutation of the value it holds (`zs[0] = 9`, `p.v = 9`), which never reaches `emit_store`
+        // and so never emits `Op::SetGlobalSlot`. The `Ident` arm is excluded on purpose: it DOES
+        // reach `emit_store`, which already marks both bits.
+        let touch = match &target.kind {
+            ExprKind::Field { obj, .. } | ExprKind::Index { obj, .. } => {
+                self.global_root_slot(fc, obj)
+            }
+            _ => None,
+        };
         match &target.kind {
             ExprKind::Ident(name) => match op.to_binop() {
                 None => {
@@ -2745,6 +2755,9 @@ impl Compiler {
                 });
             }
         }
+        if let Some(slot) = touch {
+            fc.emit(Op::TouchGlobalSlot(slot), span);
+        }
         Ok(())
     }
 
@@ -2759,6 +2772,14 @@ impl Compiler {
         i: usize,
         span: Span,
     ) -> Result<(), CompileError> {
+        // TICKET-097 — same in-place-mutation mark as `compile_assign`, for a destructured
+        // `a, b = ...` target rooted at a module global.
+        let touch = match &target.kind {
+            ExprKind::Field { obj, .. } | ExprKind::Index { obj, .. } => {
+                self.global_root_slot(fc, obj)
+            }
+            _ => None,
+        };
         match &target.kind {
             ExprKind::Ident(name) => {
                 fc.emit_hidden_get(tuple_slot, span);
@@ -2810,6 +2831,9 @@ impl Compiler {
                 });
             }
         }
+        if let Some(slot) = touch {
+            fc.emit(Op::TouchGlobalSlot(slot), span);
+        }
         Ok(())
     }
 
@@ -2834,6 +2858,31 @@ impl Compiler {
                 fc.emit(Op::CellStore, span);
             }
             None => fc.emit(Op::SetGlobalSlot(self.global_slot(name)), span),
+        }
+    }
+
+    /// TICKET-097 — walks a `Field`/`Index` chain down to its root and, if that root is a bare
+    /// module `let` global (never a local, a captured name, a type, or a module alias), returns its
+    /// slot. Deliberately does NOT call `Compiler::global_slot`, which PANICS on a miss: this runs
+    /// on a branch (`compile_call`'s `ExprKind::Field` callee, and an assignment target) that also
+    /// sees `Type.method(...)` and `module.Type(...)` roots with no slot at all.
+    fn global_root_slot(&self, fc: &FnComp, e: &Expr) -> Option<u32> {
+        let mut cur = e;
+        loop {
+            cur = match &cur.kind {
+                ExprKind::Field { obj, .. } | ExprKind::Index { obj, .. } => obj.as_ref(),
+                ExprKind::Ident(name) => {
+                    if !fc.is_unbound(name) {
+                        return None;
+                    }
+                    let slot = *self.globals.get(name.as_str())?;
+                    return self
+                        .let_global_slots
+                        .contains(&(self.current_module_idx, slot))
+                        .then_some(slot);
+                }
+                _ => return None,
+            };
         }
     }
 
@@ -5523,6 +5572,32 @@ impl Compiler {
             name_span,
         } = &callee.kind
         {
+            // TICKET-097 — the type-blind by-name mark: `ys.push(2)` never emits `Op::SetGlobalSlot`,
+            // so the sender's `assigned`/`carried` bits for `ys` would otherwise never be set. The
+            // name list is copied verbatim from `mutates_receiver` (`src/checker/mod.rs:3720`). This
+            // is the one point covering the branch's many early returns below, and the op is
+            // stack-neutral so it is safe unconditionally. `str.reverse`, `Shared.update`,
+            // `Atomic.add` and a static `V.add` are resolved elsewhere: the first three by
+            // `Vm::touch_global_slot`'s runtime `List`/`Map`/`Set`/`ByteArray` test, the fourth by
+            // `global_root_slot` returning `None` for a type-name root.
+            if matches!(
+                name.as_str(),
+                "push"
+                    | "pop"
+                    | "reverse"
+                    | "extend"
+                    | "sort"
+                    | "sort_by"
+                    | "sort_by_key"
+                    | "insert"
+                    | "remove_at"
+                    | "remove"
+                    | "update"
+                    | "add"
+            ) && let Some(slot) = self.global_root_slot(fc, obj)
+            {
+                fc.emit(Op::TouchGlobalSlotByName(slot), span);
+            }
             // `module.Struct(args)` → qualified struct constructor. `module` is a bound module name
             // whose target declares struct `name`; emit `NewStruct` keyed by that module's runtime key.
             if let ExprKind::Ident(mname) = &obj.kind

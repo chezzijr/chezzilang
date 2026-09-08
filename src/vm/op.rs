@@ -152,6 +152,17 @@ pub enum Op {
     DefineGlobalSlot(u32),
     /// Assign (`=`/`+=`/`-=`) the current module's global `slot` (checker guarantees it is defined).
     SetGlobalSlot(u32),
+    /// TICKET-097 — the running task's view mutated module global `slot` IN PLACE through an
+    /// assignment to a field or an index rooted at it (`zs[0] = 9`, `g.n = 1`). Marks `carried`
+    /// only, never `assigned`, so the airlock's send filter serializes the slot while
+    /// `Vm::install_global_slot`'s receive-side skip stays exactly as DEC-051 defined it. Pushes
+    /// and pops nothing.
+    TouchGlobalSlot(u32),
+    /// TICKET-097 — the same mark from the TYPE-BLIND path: a call of a method NAME that mutates a
+    /// builtin container (`ys.push(2)`). `Vm::touch_global_slot` refuses to mark unless the slot
+    /// holds a `List`/`Map`/`Set`/`ByteArray` — never a struct, because a user struct method
+    /// sharing one of those names may mutate nothing. Pushes and pops nothing.
+    TouchGlobalSlotByName(u32),
     /// Read the current closure's captured value at compile-time `slot` (M19 lever #3: positional
     /// captures — `captured[slot]`, no string hash on the hot path). The slot indexes the closure's
     /// `captured` Vec, which is populated in the same snapshot order as the proto's `capture_names`.

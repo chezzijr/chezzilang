@@ -1961,6 +1961,14 @@ impl Vm {
                 let home = self.frames.last().unwrap().home;
                 self.assign_global_slot(home, *slot, v);
             }
+            Op::TouchGlobalSlot(slot) => {
+                let home = self.frames.last().unwrap().home;
+                self.touch_global_slot(home, *slot, false);
+            }
+            Op::TouchGlobalSlotByName(slot) => {
+                let home = self.frames.last().unwrap().home;
+                self.touch_global_slot(home, *slot, true);
+            }
             Op::GetCaptured(slot) => {
                 // Lever #3: hot path is a pure `captured[slot]` index — no string hash. The slot is
                 // always in range (one capture per snapshot entry, populated at MakeClosure), and a

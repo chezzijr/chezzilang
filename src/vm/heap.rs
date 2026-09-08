@@ -166,9 +166,10 @@ pub struct ModuleData {
     /// another view's allocation, exactly like `origin` (TICKET-051).
     pub assigned: Vec<bool>,
     /// `carried[i]` is set when this view's value for slot `i` descends from a write by this view
-    /// or by an ancestor view: its own assignment, the snapshot it was replayed from, or an
-    /// airlock install. `assigned[i]` implies `carried[i]`. Never copied into another view's
-    /// allocation (TICKET-051).
+    /// or by an ancestor view: its own assignment, the snapshot it was replayed from, an airlock
+    /// install, or an in-place mutation of the slot's own value (`Op::TouchGlobalSlot` /
+    /// `Op::TouchGlobalSlotByName`, TICKET-097). `assigned[i]` implies `carried[i]`. Never copied
+    /// into another view's allocation (TICKET-051).
     pub carried: Vec<bool>,
 }
 
