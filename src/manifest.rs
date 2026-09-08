@@ -22,7 +22,8 @@
 //! and leading/trailing whitespace. Only `[project]` keys (`name`/`version`/`entrypoint`) are
 //! captured; unknown sections and unknown keys are ignored. A line that is neither blank, a comment,
 //! a section header, nor a quoted `key = "value"` pair is a hard parse error (the schema is small and
-//! fixed — silently skipping a malformed line would hide e.g. an `entrypoint` typo).
+//! fixed — silently skipping a malformed line would hide e.g. an `entrypoint` typo). A single leading
+//! U+FEFF byte-order mark is stripped before parsing.
 //!
 //! An **empty** manifest parses fine to an all-`None` `Manifest` (the existing fixtures are empty
 //! root markers): `entrypoint` is optional.
@@ -38,6 +39,10 @@ pub struct Manifest {
 /// Parse a `chezzi.toml` source string into a [`Manifest`]. Returns `Err(message)` on a malformed
 /// line; an empty (or comment/whitespace-only) file is `Ok(Manifest::default())`.
 pub fn parse(src: &str) -> Result<Manifest, String> {
+    // DEC-058: strip a leading U+FEFF exactly once, via `strip_prefix` semantics (a second BOM or a
+    // mid-file BOM stays an error) — matching what the lexer already does for `.chz` source. The
+    // strip cannot cross a newline, so every `chezzi.toml:<line>` number below is unaffected.
+    let src = crate::lexer::strip_bom(src);
     let mut manifest = Manifest::default();
     let mut section: Option<String> = None;
 
