@@ -80,6 +80,25 @@ fn a_program_that_never_exits_explicitly_succeeds() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "hi\n");
 }
 
+#[test]
+fn os_exit_in_a_match_arm_exits_with_that_status() {
+    // TICKET-077: `os.exit` is bottom-typed, so a `match` arm calling it type-checks against the
+    // other arm's `int`. Confirm it also runs correctly: the process exits with that status and the
+    // `print(x)` after the match never runs (its branch never returns).
+    let t = TmpDir::new();
+    let entry = t.write(
+        "main.chz",
+        "import std.os\nfn main():\n    r: Result[int, str] = Err(\"boom\")\n    x := match r:\n        Ok(v): v\n        Err(e): os.exit(2)\n    print(x)\nmain()\n",
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .arg("run")
+        .arg(&entry)
+        .output()
+        .expect("spawn chezzi");
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "");
+}
+
 /// Run `chezzi <sub> <file>` under a watchdog: `(status, stdout)`, or a PANIC if it outlives `secs`.
 /// A hang must FAIL the test, never mask as a pass — which is exactly what W7-47 was before the fix.
 /// std only (no `timeout(1)` dependency). Output is tiny, so reading the pipe after the wait cannot
