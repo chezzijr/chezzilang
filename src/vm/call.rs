@@ -3131,10 +3131,33 @@ impl Vm {
                     }
                     "split_lines" => {
                         self.arity_err("split_lines", args, 0, span)?;
-                        let parts: Vec<Value> = s
-                            .split('\n')
-                            .map(|p| self.alloc_str(p.to_string()))
-                            .collect();
+                        // Splits on "\r\n", "\n" or a lone "\r" — the same three terminators
+                        // `io::Reader::read_line`/`.lines()` recognize (src/native/mod.rs). A
+                        // trailing terminator yields no final empty piece (matches CPython's
+                        // `str.splitlines()`), so a plain "\n"-only input drops the historical
+                        // trailing `""` too.
+                        let mut lines: Vec<String> = Vec::new();
+                        let mut cur = String::new();
+                        let mut it = s.chars().peekable();
+                        while let Some(c) = it.next() {
+                            match c {
+                                '\r' => {
+                                    if it.peek() == Some(&'\n') {
+                                        it.next();
+                                    }
+                                    lines.push(std::mem::take(&mut cur));
+                                }
+                                '\n' => {
+                                    lines.push(std::mem::take(&mut cur));
+                                }
+                                _ => cur.push(c),
+                            }
+                        }
+                        if !cur.is_empty() {
+                            lines.push(cur);
+                        }
+                        let parts: Vec<Value> =
+                            lines.into_iter().map(|p| self.alloc_str(p)).collect();
                         Ok(Value::obj(self.heap.alloc(Obj::List(parts))))
                     }
                     // `strip` is a trim alias.

@@ -39,9 +39,10 @@ fn reverse(s: str) -> str:
 fn pad_left(s: str, width: int, fill: str) -> str:
     return s.pad_left(width, fill)
 
-# Split `s` on newlines into a list of lines.
+# Split `s` on "\r\n", "\n" or a lone "\r" into a list of lines (delegates to the native method
+# per DEC-068 rather than re-implementing the loop here).
 fn split_lines(s: str) -> List[str]:
-    return s.split("\n")
+    return s.split_lines()
 
 # Does `s` end with `suffix`? (mirror of the native `starts_with`). The empty suffix ends every
 # string. A suffix longer than `s` can't match, so guard before slicing the tail.
