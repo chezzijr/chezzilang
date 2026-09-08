@@ -153,7 +153,14 @@ struct Token:
             # `d` directly — so a task woken by done() could still read cancelled()==false. That breaks
             # the Go-context invariant "once done() unblocks, the token is cancelled". Over-arming by
             # ≤1ms keeps done() at-or-after `d` (Go timers fire at-or-after too), never early.
-            rem_ms := int((d - time.monotonic()) * 1000.0) + 1
+            rem := (d - time.monotonic()) * 1000.0
+            rem_ms := 9223372036854775807
+            # int() faults above i64::MAX, and a max-int `timeout` puts this millisecond product one
+            # ulp past it. Clamp instead of faulting: the clamped timer still fires about 2^63 ms out,
+            # so no program can observe the difference, and the `+ 1` margin below still applies to
+            # every span a program can actually wait for.
+            if rem < 9223372036854775808.0:
+                rem_ms = int(rem) + 1
             if rem_ms < 0:
                 rem_ms = 0
             cdl = timer(rem_ms)
