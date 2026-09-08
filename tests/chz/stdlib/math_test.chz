@@ -63,6 +63,31 @@ test fn parse_int_base():
         Ok(v): assert v == -9223372036854775808, "i64::MIN parses"
         Err(_): assert false, "i64::MIN"
 
+test fn parse_int_base_agrees_with_to_int_on_underscores_and_whitespace():
+    match math.parse_int_base("1_0", 10):
+        Ok(v): assert v == 10, "underscore between digits at base 10"
+        Err(_): assert false, "1_0"
+    match math.parse_int_base(" 10 ", 10):
+        Ok(v): assert v == 10, "surrounding whitespace at base 10"
+        Err(_): assert false, " 10 "
+    match math.parse_int_base("ff_ff", 16):
+        Ok(v): assert v == 65535, "underscore between digits at base 16"
+        Err(_): assert false, "ff_ff"
+    match math.parse_int_base("1__0", 10):
+        Ok(_): assert false, "a double underscore must not parse"
+        Err(_): assert true
+    match math.parse_int_base("_10", 10):
+        Ok(_): assert false, "a leading underscore must not parse"
+        Err(_): assert true
+    match math.parse_int_base("10_", 10):
+        Ok(_): assert false, "a trailing underscore must not parse"
+        Err(_): assert true
+
+test fn parse_int_base_overflow_says_overflow_not_malformed():
+    match math.parse_int_base("8000000000000000", 16):
+        Ok(_): assert false, "8000000000000000 base 16 overflows i64"
+        Err(e): assert e.message().contains("overflows i64") and not e.message().contains("cannot parse"), e.message()
+
 # M24-5 — a native module FUNCTION is an ordinary `defer` target and really runs. Its neighbour, a
 # native CONSTRUCTOR reached the same way (`concurrency.Shared(0)`, `time.timer(10)`), is refused by
 # the checker like the bare `defer Shared(0)` spelling — see

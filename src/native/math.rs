@@ -531,6 +531,23 @@ mod tests {
     }
 
     #[test]
+    fn parse_int_base_accepts_underscores_and_surrounding_whitespace() {
+        assert_eq!(parse_int_base_impl("1_0", 10), Ok(10));
+        assert_eq!(parse_int_base_impl(" 10 ", 10), Ok(10));
+        assert_eq!(parse_int_base_impl("ff_ff", 16), Ok(65535));
+        assert!(parse_int_base_impl("1__0", 10).is_err());
+        assert!(parse_int_base_impl("_10", 10).is_err());
+        assert!(parse_int_base_impl("10_", 10).is_err());
+    }
+
+    #[test]
+    fn parse_int_base_overflow_message_names_the_overflow() {
+        let msg = parse_int_base_impl("8000000000000000", 16).unwrap_err();
+        assert!(msg.contains("overflows i64"), "{msg}");
+        assert!(!msg.contains("cannot parse"), "{msg}");
+    }
+
+    #[test]
     fn trig_exp_log_values() {
         // Exact integer-valued results.
         assert_eq!(call1(sin, 0.0), 0.0);
