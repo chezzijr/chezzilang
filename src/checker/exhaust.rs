@@ -315,7 +315,7 @@ impl Checker {
                 let specialized = specialize(rows, name, tys.len());
                 if let Some(mut w) = self.exh_witness_rec(&specialized, &sub_doms, depth + 1) {
                     let args: Vec<Wit> = w.drain(..tys.len()).collect();
-                    let mut out = vec![Wit::Ctor(display_of(dom_label(dom0), name), args)];
+                    let mut out = vec![Wit::Ctor(ctor_display(dom0, name), args)];
                     out.extend(w);
                     return Some(out);
                 }
@@ -326,10 +326,9 @@ impl Checker {
             let w = self.exh_witness_rec(&defaulted, rest_doms, depth + 1)?;
             let missing = ctors.iter().find(|(n, _)| !used.contains(n.as_str()));
             let head = match missing {
-                Some((name, tys)) => Wit::Ctor(
-                    display_of(dom_label(dom0), name),
-                    vec![Wit::Wild; tys.len()],
-                ),
+                Some((name, tys)) => {
+                    Wit::Ctor(ctor_display(dom0, name), vec![Wit::Wild; tys.len()])
+                }
                 None => Wit::Wild,
             };
             let mut out = vec![head];
@@ -357,6 +356,18 @@ fn dom_label(dom: &Dom) -> &str {
         Dom::Sum(prefix, _) => prefix,
         Dom::Prod(label, _) => label,
         Dom::Bool | Dom::Open => "",
+    }
+}
+
+/// Render a witness constructor's display name for `dom`'s domain.
+///
+/// A `Dom::Prod`'s label IS its only constructor, so `display_of` would prefix that label with
+/// itself and print the internal module-mangled key twice; a tuple keeps an empty label, so its
+/// ctor name stays empty and `render_wit`'s parenthesised arm still fires.
+fn ctor_display(dom: &Dom, name: &str) -> String {
+    match dom {
+        Dom::Prod(_, _) => crate::compiler::bare_display(name),
+        _ => display_of(dom_label(dom), name),
     }
 }
 
