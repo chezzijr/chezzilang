@@ -290,7 +290,7 @@ fn sleep_synchronised_tests() -> BTreeSet<String> {
 /// rejected it (the walk returns 68). Obtain it by compiling once with an empty array and copying
 /// the "sleeps but is not listed" list `no_new_rust_test_sleeps_to_order_two_events` reports,
 /// verbatim, the same way `stack_trace_reports_call_chain`'s golden was obtained.
-const SLEEP_SYNCHRONISED_TESTS: [&str; 71] = [
+const SLEEP_SYNCHRONISED_TESTS: [&str; 72] = [
     "a_bailed_join_stops_its_jobs_from_starting_new_work",
     "a_cancelled_siblings_defer_runs_whole_on_both_engines",
     "a_finished_executor_job_lets_the_genuine_nursery_deadlock_fire",
@@ -334,6 +334,12 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 71] = [
     "max_heap_byte_walk_does_not_deadlock_on_a_cyclic_core_graph",
     "native_time_now_is_int_monotonic_is_float",
     "nested_executor_job_is_cancelled_by_an_outer_shutdown_now_mn",
+    // TICKET-095. Its sleep is a POLL INTERVAL, not a happens-before edge: the test spawns
+    // `chezzi run` on a program that hangs before the fix and polls `try_wait` against a
+    // deadline. A hung child never closes its pipes, so `output()` would wedge this test
+    // binary instead of failing it, and a child process exposes no channel, latch or counted
+    // probe to wait on.
+    "nested_nursery_deadlock_faults_at_one_worker_like_every_other_count",
     "net_read_partial_timeout_then_clean_timeout_is_not_incomplete",
     "net_read_poll_once_mid_codepoint_errs_incomplete_not_timeout",
     "net_read_timeout_bounds_the_in_callback_demote_path",
