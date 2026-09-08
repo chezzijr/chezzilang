@@ -2690,6 +2690,251 @@ print("module xs: {xs}")
 }
 
 #[test]
+fn airlock_closure_carries_a_global_a_called_helper_reads() {
+    // TICKET-097 defect A. `fill_global_free` builds its call graph only from
+    // `Op::MakeClosure`/`Op::SpawnBlock`, never `Op::Call`, so a read of `n` behind a bare
+    // `helper()` call never reaches the crossing closure's `global_free` and the closure answers
+    // the stale pre-write value. Measured today: `indirect before: 1`. Go 1.26.6 and CPython
+    // 3.14.7 both print `100` for every line (measured 2026-09-09).
+    let src = r#"
+n := 1
+
+fn helper() -> int:
+    return n
+
+c1 := Channel[fn() -> int](1)
+c2 := Channel[fn() -> int](1)
+
+fn producer():
+    n = 100
+    c1.send(fn() -> int: helper())
+    c2.send(fn() -> int: n)
+
+fn main():
+    parallel:
+        spawn producer()
+    indirect := c1.recv()
+    print("indirect before: {indirect()}")
+    direct := c2.recv()
+    print("indirect after : {indirect()}")
+    print("direct         : {direct()}")
+main()
+"#;
+    let out = golden_entry(src);
+    assert_eq!(
+        out, "indirect before: 100\nindirect after : 100\ndirect         : 100\n",
+        "a closure calling a top-level fn that reads a module global must carry that global \
+         through the call edge: {out:?}"
+    );
+}
+
+#[test]
+fn airlock_a_called_helper_that_writes_the_global_keeps_it_a_late_load() {
+    // TICKET-097 guard for W8-25's deliberate exclusion: a global the closure tree WRITES must
+    // stay a late load, even when the write happens behind a called helper. This must PASS both
+    // before and after the defect-A fix (step 12's call edge unions writes too).
+    let src = r#"
+n := 1
+
+fn bump() -> int:
+    n = n + 1
+    return n
+
+c := Channel[fn() -> int](1)
+
+fn producer():
+    n = 100
+    c.send(fn() -> int: bump())
+
+fn main():
+    parallel:
+        spawn producer()
+    f := c.recv()
+    print("late load: {f()}")
+main()
+"#;
+    let out = golden_entry(src);
+    assert_eq!(
+        out, "late load: 2\n",
+        "a global the called helper WRITES must stay excluded from global_free (a late load), \
+         never carried: {out:?}. `late load: 101` would mean the call edge unioned reads without \
+         writes."
+    );
+}
+
+#[test]
+fn airlock_a_closure_calling_a_nested_fn_already_carries_the_global() {
+    // TICKET-097 regression guard. A nested fn is a CAPTURE of the crossing closure, so it
+    // crosses as a closure value carrying its own `Proto::global_free` — this already works
+    // before any fix in this ticket. CPython 3.14.7 also prints `100` (measured 2026-09-09).
+    let src = r#"
+n := 1
+c := Channel[fn() -> int](1)
+
+fn producer():
+    fn helper() -> int:
+        return n
+    n = 100
+    c.send(fn() -> int: helper())
+
+fn main():
+    parallel:
+        spawn producer()
+    print("nested-fn indirect: {c.recv()()}")
+main()
+"#;
+    let out = golden_entry(src);
+    assert_eq!(
+        out, "nested-fn indirect: 100\n",
+        "a closure calling a NESTED fn must already carry the global (it crosses as a capture): \
+         {out:?}"
+    );
+}
+
+#[test]
+fn airlock_closure_carries_a_global_the_sender_mutated_in_place() {
+    // TICKET-097 defect B. `ys.push(2)` compiles to `GetGlobalSlot` + a method call, never
+    // `SetGlobalSlot`, so the sender's `assigned`/`carried` bits for `ys` are never set and the
+    // airlock's send filter (`Vm::closure_global_snapshot`) skips the slot. Measured today:
+    // `assigned global via closure : 2` / `in-place global via closure : 1`. Go 1.26.6 and
+    // CPython 3.14.7 both print `2` twice (measured 2026-09-09).
+    let src = r#"
+xs := [1]
+ys := [1]
+c := Channel[fn() -> int](1)
+c2 := Channel[fn() -> int](1)
+
+fn producer():
+    xs = [1, 2]
+    ys.push(2)
+    c.send(fn() -> int: xs.len())
+    c2.send(fn() -> int: ys.len())
+
+fn main():
+    parallel:
+        spawn producer()
+    f := c.recv()
+    g := c2.recv()
+    print("assigned global via closure : {f()}")
+    print("in-place global via closure : {g()}")
+main()
+"#;
+    let out = golden_entry(src);
+    assert_eq!(
+        out, "assigned global via closure : 2\nin-place global via closure : 2\n",
+        "an in-place mutation of a sent-closure's module global must mark the slot carried, same \
+         as an assignment: {out:?}"
+    );
+}
+
+#[test]
+fn airlock_closure_carries_a_global_the_sender_mutated_by_index_or_field_assignment() {
+    // TICKET-097 defect B, index/field variant. Same class as the in-place-mutation case: `zs[0]
+    // = 9` and `p.v = 9` never reach `emit_store`, so neither emits `Op::SetGlobalSlot`. Measured
+    // today: both print `1`. CPython 3.14.7 prints `9` and `9` (measured 2026-09-09).
+    let src = r#"
+zs := [1]
+struct P:
+    v: int
+p := P(1)
+c := Channel[fn() -> int](1)
+c2 := Channel[fn() -> int](1)
+
+fn producer():
+    zs[0] = 9
+    p.v = 9
+    c.send(fn() -> int: zs[0])
+    c2.send(fn() -> int: p.v)
+
+fn main():
+    parallel:
+        spawn producer()
+    f := c.recv()
+    g := c2.recv()
+    print("index-assigned global via closure : {f()}")
+    print("field-assigned global via closure : {g()}")
+main()
+"#;
+    let out = golden_entry(src);
+    assert_eq!(
+        out, "index-assigned global via closure : 9\nfield-assigned global via closure : 9\n",
+        "an index- or field-assignment to a module global rooted list/struct must mark the slot \
+         carried: {out:?}"
+    );
+}
+
+#[test]
+fn airlock_user_struct_method_mutation_is_a_known_residual() {
+    // TICKET-097 / W11-5's third sub-defect, deliberately NOT fixed here: a user struct method
+    // that mutates `self` (`g.bump()`) still marks nothing, because the write inside the method
+    // targets `self`, not a global root. CPython 3.14.7 prints `3` (measured 2026-09-09). Fixing
+    // it needs a self-mutation summary per method (`src/checker/mod.rs:3717`'s named upgrade
+    // path) — its own ticket.
+    let src = r#"
+struct C:
+    n: int
+    fn bump(self):
+        self.n = self.n + 1
+
+g := C(1)
+c := Channel[fn() -> int](1)
+
+fn producer():
+    g.bump()
+    g.bump()
+    c.send(fn() -> int: g.n)
+
+fn main():
+    parallel:
+        spawn producer()
+    print("user-method mutation via closure: {c.recv()()}")
+main()
+"#;
+    let out = golden_entry(src);
+    assert_eq!(
+        out, "user-method mutation via closure: 1\n",
+        "this residual must stay pinned at the WRONG answer until the self-mutation summary is \
+         built; a `3` here means step 16 started marking a struct on the by-name path: {out:?}"
+    );
+}
+
+#[test]
+fn a_mutator_named_method_on_a_type_or_a_handle_marks_nothing() {
+    // TICKET-097. The type-blind by-name mark (`Op::TouchGlobalSlotByName`) must not fire on the
+    // four ambiguous names that collide with the mutator list but do not mutate a module global's
+    // builtin container: a static method `V.add`, `str.reverse` (returns a NEW str), `Atomic.add`
+    // (an RMW on a handle), `Shared.update` (mutates a handle, not the slot's own value). All four
+    // run unchanged today (measured 2026-09-09): `3`, `cba`, `5`, `1`.
+    let src = r#"
+import std.concurrency
+
+struct V:
+    x: int
+    fn add(a: V, b: V) -> V:
+        return V(a.x + b.x)
+
+s := "abc"
+a := Atomic(0)
+sh := Shared(0)
+
+fn main():
+    print(V.add(V(1), V(2)).x)
+    print(s.reverse())
+    a.add(5)
+    print(a.load())
+    sh.update(fn(v: int) -> int: v + 1)
+    print(sh.get())
+main()
+"#;
+    let out = golden_entry(src);
+    assert_eq!(
+        out, "3\ncba\n5\n1\n",
+        "a mutator-named method on a type or a handle must mark nothing and stay byte-identical: \
+         {out:?}"
+    );
+}
+
+#[test]
 fn generator_guard_clears_on_every_unwind_path() {
     // The guard is the VM's existing `active_generators` root list, pushed on resume and popped on
     // EVERY exit path — so it is self-clearing and can never poison a generator as permanently
