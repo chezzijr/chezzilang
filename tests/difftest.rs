@@ -32,7 +32,7 @@ fn manifest(rel: &str) -> PathBuf {
 fn p0_existing_bench_pairs_match() {
     let cfg = config();
     let names = [
-        "fib", "loop", "str", "primes", "list", "map", "struct", "empty",
+        "fib", "loop", "str", "primes", "list", "map", "map_str", "struct", "empty",
     ];
     for name in names {
         let chz = std::fs::read_to_string(manifest(&format!("benches/chz/{name}.chz")))

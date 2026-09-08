@@ -24,6 +24,8 @@ before its timing means anything.
 | `primes`| `while` + `%`, primes below 200k  | `17984` |
 | `loop`  | int add, 20M iterations           | `199999990000000` |
 | `list`  | push + sum, 2M elements           | `1999999000000` |
+| `map`   | int-keyed map, 200k insert + 1M lookup | `199999000000` |
+| `map_str` | string-keyed map, 1M get-then-increment | `1000000` |
 | `empty` | startup — empty program           | (no output) |
 
 > `primes` here is the **sequential** single-task variant. The spawned/parallel version
