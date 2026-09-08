@@ -31085,3 +31085,13 @@ fn ticket_075_a_genuine_over_arity_protocol_call_is_still_rejected() {
         "'f' expects 1 argument(s), got 2",
     );
 }
+
+// TICKET-076: a match over a tuple whose arms cover the full cartesian product of the constituent
+// enums is falsely rejected as non-exhaustive today (the checker only tracks a flat top-level
+// covered-key set, which a tuple scrutinee has none of). rustc accepts the identical program.
+#[test]
+fn tuple_match_cartesian_product_of_two_enums_is_exhaustive() {
+    ok(
+        "enum E:\n    A\n    B\nenum F:\n    X\n    Y\nfn f(a: E, b: F) -> str:\n    match (a, b):\n        (E.A, F.X): return \"ax\"\n        (E.A, F.Y): return \"ay\"\n        (E.B, F.X): return \"bx\"\n        (E.B, F.Y): return \"by\"\n",
+    );
+}
