@@ -1072,6 +1072,72 @@ test fn hof_spins():
     );
 }
 
+// ===== TICKET-096: the module top-level nursery treats `main` differently from a `parallel:`
+// sibling =====
+
+/// Defect A — a task fault reaching the module-level implicit nursery is delivered TWICE: once
+/// caught by a `recover:` that docs say cannot catch a nursery cancel (`docs/spec.md:149`,
+/// `docs/concurrency-b3.md:235`), and again at the module-nursery join, so the run aborts (rc=1)
+/// even though the fault was "handled". The abort also silently truncates everything after the
+/// `recover:` — the final `print` never runs and nothing says why.
+#[test]
+fn module_top_level_fault_is_delivered_twice_and_truncates_after_recover() {
+    let t = TmpDir::new();
+    let entry = t.write(
+        "main.chz",
+        r#"import std.time
+spawn:
+    panic("boom")
+r := recover:
+    time.sleep_ms(50)
+    1
+print("r={r}")
+time.sleep_ms(50)
+print("THIS LINE NEVER PRINTS")
+"#,
+    );
+    let (status, out) = run_capped(&entry, 20);
+    assert!(out.contains("r=Err('boom')"), "the recover ran: {out:?}");
+    assert!(
+        !out.contains("THIS LINE NEVER PRINTS"),
+        "BUG: everything after the recover: is silently truncated, expected it to print: {out:?}"
+    );
+    assert_eq!(
+        status, 0,
+        "BUG: the module nursery re-reports the fault a second time at join, aborting rc=1 even \
+         though recover: already handled it: {out:?}"
+    );
+}
+
+/// Defect B — the top-level `main` fiber's `while` loop back-edge is not a cancel checkpoint, so a
+/// sibling task's fault does not cancel a doomed CPU loop promptly. `docs/concurrency.md:1042`
+/// claims "the loop back-edge is the checkpoint" on the top-level `main` thread too, and the
+/// identical loop inside a `parallel:` sibling IS cancelled promptly (measured ~33 ms in the
+/// ticket). Here the loop is sized so an UNCANCELLED run takes several seconds; a correct run
+/// must finish in well under a second.
+#[test]
+fn module_top_level_loop_back_edge_is_not_a_cancel_checkpoint() {
+    let t = TmpDir::new();
+    let entry = t.write(
+        "main.chz",
+        r#"import std.time
+spawn:
+    time.sleep_ms(20)
+    panic("boom")
+i := 0
+while i < 20000000:
+    i = i + 1
+print("main loop finished i={i}")
+"#,
+    );
+    let (_status, out, elapsed) = run_capped_timed(&["run"], &entry, 30);
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "BUG: the top-level loop is not cancelled at its back-edge, ran to completion after \
+         {elapsed:?} instead of aborting promptly on the sibling's fault: {out:?}"
+    );
+}
+
 /// FALSE-HALT FENCE for the rung above — the direction that matters. A HOF-heavy test that finishes
 /// UNDER the cap must still `PASS` with its result intact (no truncated `map`/`fold`), and the same
 /// file with NO `--timeout` at all — the common case, and every `chezzi run` — must be unaffected,
