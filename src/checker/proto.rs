@@ -4686,7 +4686,7 @@ impl Checker {
         // `infer_generic_arg_tys` — its ctor callers pin nothing afterwards, so there the read IS
         // final. The helper scopes what is set here to the immediate bare-identifier arguments.
         let saved = std::mem::replace(&mut self.generic_fn_value_prepass, true);
-        let mut arg_tys = self.infer_generic_arg_tys(args);
+        let mut arg_tys = self.infer_generic_arg_tys(args, &sig.params, true);
         self.generic_fn_value_prepass = saved;
         // Explicit call-site type arguments (`max[int](…)`) seed the substitution; remaining (or
         // all, when none given) parameters are inferred from positional arguments. `unify` only
@@ -4829,6 +4829,7 @@ impl Checker {
         // into the return so a downstream `+1`/`.upper()` was spuriously rejected.
         self.recover_return_only_params(
             name,
+            &sig.params,
             &sig.params,
             &arg_tys,
             args,
@@ -4994,6 +4995,11 @@ impl Checker {
         &mut self,
         method: &str,
         params: &[Ty],
+        // The PRE-substitution declared param list, receiver included — TICKET-094 defect C's
+        // license must be keyed on this, never on `params` above (already substituted with the
+        // receiver's own type args), or a slot written `T` on `P[float]` would widen (DEC-054).
+        // Empty declines every license, which reproduces this method's behaviour before this ticket.
+        declared: &[Ty],
         ret: &Ty,
         mtps: &[TypeParam],
         wparams: &[String],
@@ -5045,8 +5051,9 @@ impl Checker {
         // which let `Bx(ident)` through to the very "argument 1 of 'f': expected T, found int" this
         // rule exists to replace. (The helper does SCOPE what is set here to the immediate bare-ident
         // arguments, so a nested `Bx(ident)` still faces the wall.)
+        let dec_args = declared.split_first().map_or(&[][..], |(_, d)| d);
         let saved = std::mem::replace(&mut self.generic_fn_value_prepass, true);
-        let mut arg_tys = self.infer_generic_arg_tys(args);
+        let mut arg_tys = self.infer_generic_arg_tys(args, dec_args, true);
         self.generic_fn_value_prepass = saved;
         // Explicit member-level turbofish seeds the `[U]` params (arity-checked); `unify` only binds
         // a param not already in the map, so an explicit targ wins and a conflicting arg is caught by
@@ -5180,7 +5187,7 @@ impl Checker {
         // unbound param-position param to `Unknown`. `expected` = arg slots (sans receiver); `params` =
         // the full list incl receiver for the param-position degrade.
         self.recover_return_only_params(
-            method, expected, &arg_tys, args, params, mtps, &mut mmap, span, true,
+            method, expected, dec_args, &arg_tys, args, params, mtps, &mut mmap, span, true,
         );
         // …and NOW — with `mmap` as bound as it will ever get — the deferred half of the
         // uninstantiated-generic-fn-value rule. This is the LAST possible moment, which is the whole
@@ -5376,10 +5383,15 @@ impl Checker {
     /// free-fn path its `report_uninferable_closure_params` + pass-1 `enforce_bounds`) BEFORE this call,
     /// so `bound_after_pass1` is correct and pass-1 bounds are enforced exactly once.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)] // arg decls (subst + pre-subst twins) + arity + span + flag
     pub(super) fn recover_return_only_params(
         &mut self,
         name: &str,
         arg_decls: &[Ty],
+        // The PRE-substitution declared slot per argument, same shape as `arg_decls` (receiver
+        // already dropped by the caller) — TICKET-094 defect C's scalar-float license is keyed on
+        // this, never on `arg_decls`, which is already substituted on the method path (DEC-054).
+        declared: &[Ty],
         arg_tys: &[Ty],
         args: &[Expr],
         all_params: &[Ty],
@@ -5391,7 +5403,8 @@ impl Checker {
         // Snapshot the params bound after pass 1, so the loop-back below only re-enforces bounds on
         // params NEWLY bound from a refined arg (pass-1 bounds are enforced by the caller).
         let bound_after_pass1: std::collections::HashSet<String> = map.keys().cloned().collect();
-        for (decl, (actual, arg)) in arg_decls.iter().zip(arg_tys.iter().zip(args)) {
+        for (i, (decl, (actual, arg))) in arg_decls.iter().zip(arg_tys.iter().zip(args)).enumerate()
+        {
             let want = subst(decl, map);
             // For a closure whose UNANNOTATED body is a nested free generic call, the prepass return
             // leaks the callee's own `Ty::Param` (`fn(?) -> T`) — not the lenient `Unknown` a direct
@@ -5406,7 +5419,7 @@ impl Checker {
             } else {
                 actual.clone()
             };
-            let refined = self.check_generic_arg(name, &want, &fallback, arg);
+            let refined = self.check_generic_arg(name, declared.get(i), &want, &fallback, arg);
             // SOUNDNESS: when the closure's expected return is ALREADY concrete (a return-only `[U]`
             // pinned by a sibling value arg or an explicit slot), enforce it explicitly here against the
             // REFINED return — rejecting a genuinely wrong body while ACCEPTING a nested-generic-call

@@ -1085,7 +1085,7 @@ impl Checker {
         // method's own `[U]` params. Seed each from its respective turbofish, then infer the rest by
         // unifying the declared param types (which may carry either set of `Ty::Param`s) against the
         // argument types — exactly like the struct/newtype ctor + a generic free fn.
-        let arg_tys = self.infer_generic_arg_tys(args);
+        let arg_tys = self.infer_generic_arg_tys(args, &sig.params, true);
         if arg_tys.len() != sig.params.len() {
             self.check_arity(method, sig.params.len(), args, span);
         }
@@ -1108,7 +1108,7 @@ impl Checker {
         seed_from_hint(hint, &sig.ret, &mut sub);
         for (decl, (actual, arg)) in sig.params.iter().zip(arg_tys.iter().zip(args)) {
             let expected = subst(decl, &sub);
-            self.check_generic_arg(method, &expected, actual, arg);
+            self.check_generic_arg(method, Some(decl), &expected, actual, arg);
         }
         self.enforce_bounds(&tps, &sub, span);
         self.enforce_bounds(&sig.type_params, &sub, span);
@@ -1195,7 +1195,7 @@ impl Checker {
         // given, else are inferred by unifying the variant's declared payload types (which contain
         // the enum's `Ty::Param`s) against the argument types, then check each argument against the
         // substituted payload.
-        let arg_tys = self.infer_generic_arg_tys(args);
+        let arg_tys = self.infer_generic_arg_tys(args, &v.payload, false);
         if arg_tys.len() != v.payload.len() {
             self.check_arity(name, v.payload.len(), args, span);
         }
@@ -1214,7 +1214,7 @@ impl Checker {
         );
         for (decl, (actual, arg)) in v.payload.iter().zip(arg_tys.iter().zip(args)) {
             let expected = subst(decl, &sub);
-            self.check_generic_arg(name, &expected, actual, arg);
+            self.check_generic_arg(name, None, &expected, actual, arg);
         }
         self.enforce_bounds(&tps, &sub, span);
         let targs_out = tps
@@ -1251,7 +1251,7 @@ impl Checker {
             self.check_args_w(name, &field_tys, args, span);
             return Ty::strukt(key.to_string());
         }
-        let arg_tys = self.infer_generic_arg_tys(args);
+        let arg_tys = self.infer_generic_arg_tys(args, &field_tys, true);
         self.check_ctor_arity(
             name,
             &tps,
@@ -1281,7 +1281,7 @@ impl Checker {
         self.report_uninferable_closure_params(name, &tps, &field_tys, args, &mut sub, span);
         for (decl, (actual, arg)) in field_tys.iter().zip(arg_tys.iter().zip(args)) {
             let expected = subst(decl, &sub);
-            self.check_generic_arg(name, &expected, actual, arg);
+            self.check_generic_arg(name, Some(decl), &expected, actual, arg);
         }
         self.enforce_bounds(&tps, &sub, span);
         let targs_out = tps
@@ -1317,7 +1317,7 @@ impl Checker {
             self.check_args(name, std::slice::from_ref(underlying), args, span);
             return Ty::NewType(key.to_string(), Vec::new());
         }
-        let arg_tys = self.infer_generic_arg_tys(args);
+        let arg_tys = self.infer_generic_arg_tys(args, std::slice::from_ref(underlying), false);
         if arg_tys.len() != 1 {
             self.check_arity(name, 1, args, span);
         }
@@ -1335,7 +1335,7 @@ impl Checker {
         );
         if let (Some(actual), Some(arg)) = (arg_tys.first(), args.first()) {
             let expected = subst(underlying, &sub);
-            self.check_generic_arg(name, &expected, actual, arg);
+            self.check_generic_arg(name, None, &expected, actual, arg);
         }
         self.enforce_bounds(tps, &sub, span);
         let targs_out = tps
@@ -2128,7 +2128,7 @@ impl Checker {
                     // Generic struct: type arguments come from explicit call-site args (`S[int](…)`)
                     // when given, else are inferred by unifying the declared field types (which
                     // contain the struct's `Ty::Param`s) against the argument types.
-                    let arg_tys = self.infer_generic_arg_tys(args);
+                    let arg_tys = self.infer_generic_arg_tys(args, &field_tys, true);
                     self.check_ctor_arity(name, &tps, &fields, &defaulted, targs, args, span);
                     let mut sub = self.seed_targs(name, &tps, targs, span);
                     for (decl, actual) in field_tys.iter().zip(&arg_tys) {
@@ -2148,7 +2148,7 @@ impl Checker {
                     );
                     for (decl, (actual, arg)) in field_tys.iter().zip(arg_tys.iter().zip(args)) {
                         let expected = subst(decl, &sub);
-                        self.check_generic_arg(name, &expected, actual, arg);
+                        self.check_generic_arg(name, Some(decl), &expected, actual, arg);
                     }
                     self.enforce_bounds(&tps, &sub, span);
                     let targs = tps
@@ -2360,6 +2360,7 @@ impl Checker {
             return NativeHandleMethod::Generic(self.infer_generic_method(
                 method,
                 &params,
+                &[],
                 &sig.ret,
                 &sig.type_params,
                 &[], // a native method never takes a witness (no user body to construct in)
@@ -2792,8 +2793,8 @@ impl Checker {
                     // mirrors the free generic-fn path (`infer_generic_call`).
                     if !mtps.is_empty() {
                         return self.infer_generic_method(
-                            method, &params, &ret, &mtps, &mwitness, &obj_ty, type_args, args,
-                            mminp, name_span, span, hint,
+                            method, &params, &declared, &ret, &mtps, &mwitness, &obj_ty, type_args,
+                            args, mminp, name_span, span, hint,
                         );
                     }
                     // The first param is the receiver (bound implicitly from `obj`), so the call's
@@ -2975,8 +2976,8 @@ impl Checker {
                     self.enforce_bounds(&where_bounds, &rmap, span);
                     if !mtps.is_empty() {
                         return self.infer_generic_method(
-                            method, &params, &ret, &mtps, &mwitness, &obj_ty, type_args, args,
-                            mminp, name_span, span, hint,
+                            method, &params, &declared, &ret, &mtps, &mwitness, &obj_ty, type_args,
+                            args, mminp, name_span, span, hint,
                         );
                     }
                     match params.split_first() {
@@ -3071,8 +3072,8 @@ impl Checker {
                     self.enforce_bounds(&where_bounds, &rmap, span);
                     if !mtps.is_empty() {
                         return self.infer_generic_method(
-                            method, &params, &ret, &mtps, &mwitness, &obj_ty, type_args, args,
-                            mminp, name_span, span, hint,
+                            method, &params, &declared, &ret, &mtps, &mwitness, &obj_ty, type_args,
+                            args, mminp, name_span, span, hint,
                         );
                     }
                     match params.split_first() {
@@ -3201,6 +3202,7 @@ impl Checker {
                         return self.infer_generic_method(
                             method,
                             &params,
+                            &[],
                             &sig.ret,
                             &sig.type_params,
                             &[], // native `List` methods take no witness
@@ -3443,6 +3445,7 @@ impl Checker {
                     this.infer_generic_method(
                         name,
                         &params,
+                        &[],
                         &r,
                         &tps,
                         &[],
@@ -3935,7 +3938,12 @@ impl Checker {
     /// type and reports cleanly there (mirrors the `RwShared.read` recovery-reinfer idiom). Every
     /// generic ctor/variant/fn/method path uses this pair so closure params are pinned by the field/
     /// param type, not left `Unknown`.
-    pub(super) fn infer_generic_arg_tys(&mut self, args: &[Expr]) -> Vec<Ty> {
+    pub(super) fn infer_generic_arg_tys(
+        &mut self,
+        args: &[Expr],
+        declared: &[Ty],
+        widen: bool,
+    ) -> Vec<Ty> {
         // The "this read is re-pinned afterwards" licence ([`Checker::generic_fn_value_prepass`],
         // set by the two callers that DO re-pin) belongs to the IMMEDIATE bare-identifier arguments
         // only — they are the only shape `bare_generic_fn_value_arg` can ever re-pin. Any other
@@ -3948,7 +3956,8 @@ impl Checker {
         let repins = std::mem::take(&mut self.generic_fn_value_prepass);
         let tys = args
             .iter()
-            .map(|a| {
+            .enumerate()
+            .map(|(i, a)| {
                 self.generic_fn_value_prepass = repins && matches!(a.kind, ExprKind::Ident(_));
                 if matches!(a.kind, ExprKind::Closure { .. }) {
                     let mark = self.diag_mark();
@@ -3958,6 +3967,24 @@ impl Checker {
                     let t = self.infer_value(a);
                     self.generic_arg_prepass = saved;
                     self.diag_rollback(mark);
+                    t
+                } else if let Some(d) = declared.get(i)
+                    && ty_fully_concrete(d)
+                {
+                    // TICKET-094 defect C — a CONCRETE declared slot (never the callee's own type
+                    // variable) keeps the expected-type hint its non-generic twin already threads
+                    // through `infer_arg`, so a bare literal argument widens/coerces exactly like it
+                    // does on a non-generic callee. The `List(_, Some(_))` skip mirrors
+                    // `check_args_range_decl`'s: a synthesized default-provider call must not double-
+                    // license the same literal its decl-site copy already licenses.
+                    self.float_elem_hint = if widen && !matches!(a.kind, ExprKind::List(_, Some(_)))
+                    {
+                        float_elem_hint_ty(d)
+                    } else {
+                        None
+                    };
+                    let t = self.infer_arg(a, Some(d));
+                    self.float_elem_hint = None;
                     t
                 } else {
                     self.infer_value(a)
@@ -3984,6 +4011,7 @@ impl Checker {
     pub(super) fn check_generic_arg(
         &mut self,
         name: &str,
+        decl: Option<&Ty>,
         expected: &Ty,
         fallback: &Ty,
         arg: &Expr,
@@ -4002,7 +4030,15 @@ impl Checker {
         } else {
             fallback.clone()
         };
-        if !self.assignable(expected, fallback) {
+        // TICKET-094 defect C — a scalar `float` DECLARED slot (never the substituted `expected`,
+        // which could read `float` through a type param too) still widens a bare int literal here,
+        // mirroring `check_args_range_decl`'s scalar sink. Every other slot keeps the strict check.
+        let ok = if decl == Some(&Ty::Float) {
+            self.assignable_w(expected, fallback, crate::ast::untyped_int_const(arg))
+        } else {
+            self.assignable(expected, fallback)
+        };
+        if !ok {
             self.error(
                 arg.span,
                 format!("argument to '{name}' has type {fallback}, expected {expected}"),

@@ -1943,6 +1943,65 @@ fn element_widen_reaches_parameter_and_field_defaults() {
     );
 }
 
+/// TICKET-094 defect C — a generic callee must keep expected-type inference on every CONCRETE
+/// argument slot (a slot declared `float`/`List[float]`/`Map[str, float]`/`List[Any]`, never the
+/// type variable itself), matching what the same slot does on a non-generic twin. Includes two
+/// REGRESSION PINS the human approval note required (2026-09-08): row 9 is a NON-generic method on
+/// a generic struct, which already widened before this ticket and must keep doing so; row 10 is a
+/// generic fn's RETURN position, which already widened before this ticket via the `sig.rs` return
+/// sink this ticket's defect-A/B fix also touches.
+#[test]
+fn generic_callee_keeps_expected_type_on_concrete_slots() {
+    ok("fn g[T](a: float, b: T) -> float:\n    return a\nfn main():\n    print(g(1, \"x\"))\n");
+    ok(
+        "fn g[T](a: List[float], b: T) -> List[float]:\n    return a\nfn main():\n    print(g([1, 2], \"x\"))\n",
+    );
+    ok(
+        "fn g[T](a: Map[str, float], b: T) -> Map[str, float]:\n    return a\nfn main():\n    print(g({\"a\": 1}, \"x\"))\n",
+    );
+    ok(
+        "fn g[T](a: List[Any], b: T) -> List[Any]:\n    return a\nfn main():\n    print(g([1, -2.5], \"x\"))\n",
+    );
+    ok(
+        "fn g[T](a: List[Any], b: T) -> List[Any]:\n    return a\nfn main():\n    print(g([1, \"a\"], \"x\"))\n",
+    );
+    ok(
+        "struct S:\n    fn g[U](self, x: float, u: U) -> float:\n        return x\nfn main():\n    print(S().g(1, \"z\"))\n",
+    );
+    ok(
+        "struct S:\n    fn mk[U](x: float, u: U) -> float:\n        return x\nfn main():\n    print(S.mk(1, \"z\"))\n",
+    );
+    ok("struct P[T]:\n    a: float\n    b: T\nfn main():\n    p := P(1, \"x\")\n    print(p.a)\n");
+    // Regression pin 9 (human approval note) — a NON-generic method on a generic struct.
+    ok(
+        "struct P[T]:\n    v: T\n    fn g(self, xs: List[float]) -> List[float]:\n        return xs\nfn main():\n    p := P(1)\n    print(p.g([1, 2]))\n",
+    );
+    // Regression pin 10 (human approval note) — a generic fn's RETURN position.
+    ok("fn f[T](b: T) -> List[float]:\n    return [1, 2]\nfn main():\n    print(f(\"x\"))\n");
+}
+
+/// TICKET-094 defect C, negative half — the generic-erased slot exception must keep declining: a
+/// slot declared as the callee's OWN type variable `T`, never a concrete slot, is never widened.
+#[test]
+fn generic_callee_still_declines_an_erased_slot() {
+    rejects(
+        "fn g[T](a: T, b: T) -> T:\n    return a\nfn main():\n    print(g(1, 2.5))\n",
+        "expected int",
+    );
+    rejects(
+        "struct Box[T]:\n    v: T\n    fn set(self, x: T):\n        self.v = x\nfn main():\n    Box(1.0).set(1)\n",
+        "expected float, found int",
+    );
+    entry_rejects(
+        "fn f(...zs: float):\n    print(zs)\nfn main():\n    f(1, 2)\n",
+        "list element: expected float, found int",
+    );
+    rejects(
+        "fn g[T](a: List[float], b: T) -> List[float]:\n    return a\nfn main():\n    print(g([1, \"a\"], \"x\"))\n",
+        "str",
+    );
+}
+
 /// A GENERIC method cannot witness a protocol requirement. Its signature is spelled in binders that
 /// exist in no scope the requirement can see, so `method_matches` was comparing two independently
 /// scoped `Ty::Param`s by their NAME STRING — and alpha-renaming, which must never change meaning,
