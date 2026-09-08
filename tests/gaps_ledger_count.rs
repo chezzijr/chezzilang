@@ -69,6 +69,34 @@ fn a_row_that_says_closed_is_struck() {
     );
 }
 
+/// `docs/concurrency.md`'s deadlock-vs-Go's-`fatal error` bullet never says the Chezzi fault is
+/// catchable, so a reader carries over Go's un-catchability: a top-level `recover:` around a
+/// `parallel:` deadlock actually returns `Err(...)` at rc=0 (TICKET-092). The bullet must name
+/// `recover` and state the fault is catchable, next to the existing Go comparison.
+#[test]
+fn concurrency_doc_deadlock_bullet_states_recover_is_catchable() {
+    let doc = read("docs/concurrency.md");
+    let start = doc
+        .find("**`recv` on an empty channel BLOCKS**")
+        .unwrap_or_else(|| {
+            panic!("docs/concurrency.md: no `recv on an empty channel BLOCKS` bullet found")
+        });
+    let rest = &doc[start..];
+    let end = rest[1..]
+        .find("\n- **")
+        .map(|i| i + 1)
+        .unwrap_or(rest.len());
+    let bullet = &rest[..end];
+    assert!(
+        bullet.contains("recover"),
+        "docs/concurrency.md's deadlock-vs-Go bullet must mention `recover`: {bullet}"
+    );
+    assert!(
+        bullet.to_lowercase().contains("catchable"),
+        "docs/concurrency.md's deadlock-vs-Go bullet must state the Chezzi fault is catchable: {bullet}"
+    );
+}
+
 /// The W8-19 row's `Option`/`Result`-methods sub-item: the `Option` half is DECLINED (TICKET-037,
 /// `??` already covers it), and the `Result` half CLOSED (TICKET-039, `??` now covers it too via a
 /// discarding lowering).
