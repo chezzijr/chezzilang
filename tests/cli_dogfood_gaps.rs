@@ -26,6 +26,21 @@ fn version_flag_prints_a_version_and_exits_0() {
     assert!(!stderr.contains("unknown command"), "stderr={stderr:?}");
 }
 
+/// `version`, `--version` and `-V` all print the crate version and exit 0.
+#[test]
+fn version_command_and_flags_print_the_crate_version() {
+    let expected = format!("chezzi {}\n", env!("CARGO_PKG_VERSION"));
+    for flag in ["version", "--version", "-V"] {
+        let (stdout, stderr, code) = run(&[flag]);
+        assert_eq!(
+            code, 0,
+            "chezzi {flag}: got stdout={stdout:?} stderr={stderr:?} code={code}"
+        );
+        assert_eq!(stdout, expected, "chezzi {flag}: got stdout={stdout:?}");
+        assert_eq!(stderr, "", "chezzi {flag}: got stderr={stderr:?}");
+    }
+}
+
 /// (b) `chezzi ast` piped into a closed reader (`head -1`) panics with a raw Rust broken-pipe
 /// message instead of `run`'s own wording.
 #[test]
