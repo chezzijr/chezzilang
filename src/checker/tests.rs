@@ -31268,3 +31268,14 @@ fn deeply_nested_or_pattern_beyond_max_depth_still_rejected() {
         "non-exhaustive match on Option: missing Some",
     );
 }
+
+// TICKET-093: `fn`-type params are compared COVARIANTLY (src/checker/proto.rs:1233), so a narrower
+// `fn(Dog) -> Dog` is wrongly accepted where `fn(Any) -> Dog` is declared. Parameters must be
+// contravariant; this must be a type error.
+#[test]
+fn fn_type_param_covariance_hole_rejected() {
+    rejects(
+        "struct Dog:\n    name: str\nstruct Cat:\n    name: int\nfn idd(d: Dog) -> Dog:\n    return d\nfn f():\n    h: fn(Any) -> Dog = idd\n",
+        "cannot assign",
+    );
+}
