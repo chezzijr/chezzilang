@@ -2428,7 +2428,9 @@ impl Checker {
                             || self.bare_generic_fn_value_arg(def).is_none();
                         let fhint = fseed.then(|| expected.clone());
                         let saved_dsd = std::mem::replace(&mut self.decl_site_default, true);
+                        self.float_elem_hint = float_elem_hint_ty(&expected);
                         let actual = self.infer_arg(def, fhint.as_ref());
+                        self.float_elem_hint = None;
                         let actual = self.resolve_default_binders(&expected, actual);
                         self.decl_site_default = saved_dsd;
                         if !matches!(expected, Ty::Unknown)
@@ -3927,16 +3929,16 @@ impl Checker {
                     // an immediate clear so a non-call return value never leaks the hint.
                     //
                     // TICKET-033 — a `return` is also a sink the int→float ELEMENT widen reaches:
-                    // license it from the RESOLVED return type, same as the `let` path, gated on
-                    // `!in_default_provider` like the coercion above it (a synthesized default
-                    // provider is structurally a return sink but must stay excluded). Computed from
+                    // license it from the RESOLVED return type, same as the `let` path. Computed from
                     // `ret` BEFORE any carrier unwrap, so `-> List[float]?` stays declined by
                     // construction (`float_elem_hint_ty` answers `None` for `Ty::Option(..)`).
-                    self.float_elem_hint = if self.in_default_provider {
-                        None
-                    } else {
-                        float_elem_hint_ty(&ret)
-                    };
+                    // TICKET-094 — UNLIKE the `ret_coerce` success-coercion below (DEC-025, still
+                    // gated on `in_default_provider`), the element license now reaches a synthesized
+                    // default provider on purpose: the decl-site copy of the same default literal
+                    // (`src/checker/sig.rs`'s parameter/field-default sites) licenses the SAME literal
+                    // at the SAME span, so gating this half off would make the two recorded verdicts
+                    // disagree again and re-trigger the `ListWidenTable` aliasing abort (DEC-033).
+                    self.float_elem_hint = float_elem_hint_ty(&ret);
                     self.expected_hint = Some(ret.clone());
                     let t = self.infer(e);
                     self.float_elem_hint = None;
@@ -4419,7 +4421,9 @@ impl Checker {
                 let seed = ty_fully_concrete(&ty) || self.bare_generic_fn_value_arg(def).is_none();
                 let hint = seed.then(|| ty.clone());
                 let saved_dsd = std::mem::replace(&mut self.decl_site_default, true);
+                self.float_elem_hint = float_elem_hint_ty(&ty);
                 let actual = self.infer_arg(def, hint.as_ref());
+                self.float_elem_hint = None;
                 let actual = self.resolve_default_binders(&ty, actual);
                 self.decl_site_default = saved_dsd;
                 self.current_ret = saved_ret;

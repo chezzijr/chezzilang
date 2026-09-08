@@ -1904,8 +1904,8 @@ fn element_widen_reaches_every_argument_and_return_sink() {
 }
 
 /// TICKET-033: a carrier (`List[float]?`), a nested element (`List[List[float]]`), an erased
-/// generic-param slot, a reassignment and a decl-site default all stay declined — the widen only
-/// licenses the sink types `float_elem_hint_ty` maps directly, computed BEFORE any carrier unwrap.
+/// generic-param slot and a reassignment all stay declined — the widen only licenses the sink types
+/// `float_elem_hint_ty` maps directly, computed BEFORE any carrier unwrap.
 #[test]
 fn element_widen_still_declines_carrier_nested_and_erased_sinks() {
     rejects(
@@ -1928,13 +1928,18 @@ fn element_widen_still_declines_carrier_nested_and_erased_sinks() {
         "fn f(...zs: float):\n    print(zs)\nfn main():\n    f(1, 2)\n",
         "list element: expected float, found int",
     );
-    rejects(
-        "fn f(xs: List[float] = [1, 2]):\n    print(xs)\n",
-        "list element: expected float, found int",
-    );
-    rejects(
-        "struct S:\n    v: List[float] = [1, 2]\n",
-        "list element: expected float, found int",
+}
+
+/// TICKET-094 defect B — the element widen must reach a parameter default, a struct-field default,
+/// a `Map[_, float]` value default and a method default, matching the scalar default's widen and
+/// `docs/syntax.md`'s stated sink list.
+#[test]
+fn element_widen_reaches_parameter_and_field_defaults() {
+    ok("fn f(xs: List[float] = [1, 2]):\n    print(xs)\nfn main():\n    f()\n");
+    entry_ok("struct S:\n    v: List[float] = [1, 2]\nfn main():\n    print(S().v)\n");
+    ok("fn f(m: Map[str, float] = {\"a\": 1}):\n    print(m)\nfn main():\n    f()\n");
+    entry_ok(
+        "struct S:\n    fn m(self, xs: List[float] = [1, 2.5]):\n        print(xs)\nfn main():\n    S().m()\n",
     );
 }
 
