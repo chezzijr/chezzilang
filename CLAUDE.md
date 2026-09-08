@@ -52,6 +52,7 @@ cargo test --features lsp --test lsp_smoke   # the feature-gated LSP server smok
 cargo test conformance   # execute docs/grammar.bnf, differential-test vs the parser
 cargo clippy -- -D warnings   # lint (must be clean before commit)
 cargo run -- help        # CLI usage
+cargo run -- version     # print the toolchain version (also --version / -V)
 
 cargo run -- init my_proj                # scaffold a new project (chezzi.toml w/ entrypoint="src.main:main" + src/main.chz + a _test.chz)
 cargo run -- tokens examples/hello.chz   # token stream (M1)
