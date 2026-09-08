@@ -1,0 +1,48 @@
+# TICKET-076: a `match` over a tuple (or a nested `Option`) whose arms cover the full cartesian
+# product of the constituent domains is exhaustive without a `_` arm, matching rustc. This RUNS
+# each program (not just checks it) — proving the compiler can lower a no-`_` product without
+# reaching `Op::MatchNoArm`. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+
+enum E:
+    A
+    B
+enum F:
+    X
+    Y
+
+test fn tuple_product_of_two_enums():
+    fn f(a: E, b: F) -> str:
+        match (a, b):
+            (E.A, F.X): return "ax"
+            (E.A, F.Y): return "ay"
+            (E.B, F.X): return "bx"
+            (E.B, F.Y): return "by"
+    assert f(E.A, F.Y) == "ay"
+    assert f(E.B, F.X) == "bx"
+
+test fn nested_option_arms():
+    fn f(x: Option[Option[int]]) -> str:
+        match x:
+            Some(None): return "in"
+            Some(Some(v)): return "v {v}"
+            None: return "on"
+    assert f(Some(Some(4))) == "v 4"
+    assert f(Some(None)) == "in"
+    assert f(None) == "on"
+
+test fn product_with_a_bool_column():
+    fn f(a: E, b: bool) -> str:
+        match (a, b):
+            (E.A, true): return "at"
+            (E.A, false): return "af"
+            (E.B, _): return "b"
+    assert f(E.A, false) == "af"
+    assert f(E.B, true) == "b"
+
+test fn product_with_a_wildcard_column():
+    fn f(a: E, n: int) -> str:
+        match (a, n):
+            (E.A, 0..5): return "a-lo"
+            (E.A, _): return "a-hi"
+            (E.B, _): return "b"
+    assert f(E.A, 3) == "a-lo"

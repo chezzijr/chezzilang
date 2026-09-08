@@ -3092,7 +3092,8 @@ warns as unreachable), a **tuple**, or a **struct** (destructured positionally �
 **nest**: a variant payload, tuple
 element, or struct field may itself be a binding, a literal, a wildcard, a tuple, a struct, or another
 variant — including a **nested nullary variant** like the `None` in `Some(None)` (a refutable variant
-match, not a binding).
+match, not a binding). A tuple match is exhaustive once its arms cover the cartesian product of the constituent
+domains, with no `_` needed; adding a variant to any constituent enum makes it non-exhaustive again.
 
 ```chezzi
 match point:                  # tuple scrutinee
@@ -3106,8 +3107,8 @@ match maybe_pair:             # nested: a tuple inside Some(...)
 
 match nested:                 # nested nullary variant — the bare `None` MATCHES (not binds)
     Some(None):    "inner none"
-    Some(Some(v)): "value {v}"  # (one arm per outer variant; refine the rest with `_`)
-    _:             "outer none"
+    Some(Some(v)): "value {v}"
+    None:          "outer none"
 ```
 
 A **struct** scrutinee destructures by **positional field binding**, mirroring an enum-variant pattern

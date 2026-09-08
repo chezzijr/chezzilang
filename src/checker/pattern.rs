@@ -780,6 +780,7 @@ impl Checker {
         kind: &MatchKind,
         covered: &std::collections::HashSet<String>,
         has_wildcard: bool,
+        help: Option<String>,
         span: Span,
     ) {
         if has_wildcard {
@@ -795,30 +796,43 @@ impl Checker {
                     .collect();
                 if !missing.is_empty() {
                     missing.sort();
-                    self.error(
+                    self.error_help(
                         span,
                         format!(
                             "non-exhaustive match on {}: missing {}",
                             crate::compiler::bare_display(label.as_str()),
                             missing.join(", ")
                         ),
+                        help,
                     );
                 }
             }
             MatchKind::Literal(_) => {
-                self.error(span, "non-exhaustive match: add a `_` arm".to_string());
+                self.error_help(
+                    span,
+                    "non-exhaustive match: add a `_` arm".to_string(),
+                    help,
+                );
             }
             MatchKind::Tuple(_) => {
                 // A tuple match is exhaustive only via an irrefutable arm (a `_`, or a tuple of
                 // all-binding sub-patterns). `has_wildcard` already captured that.
-                self.error(span, "non-exhaustive match: add a `_` arm".to_string());
+                self.error_help(
+                    span,
+                    "non-exhaustive match: add a `_` arm".to_string(),
+                    help,
+                );
             }
             MatchKind::Struct { .. } => {
                 // A struct has ONE constructor, so a single all-binding `Point(x, y)` arm is
                 // irrefutable and closes the match (`has_wildcard` already captured that). Reaching
                 // here means every arm was refutable (a literal/nested field like `Point(0, y)`) with
                 // no `_` — non-exhaustive.
-                self.error(span, "non-exhaustive match: add a `_` arm".to_string());
+                self.error_help(
+                    span,
+                    "non-exhaustive match: add a `_` arm".to_string(),
+                    help,
+                );
             }
         }
     }
@@ -969,6 +983,7 @@ impl Checker {
         let kind = self.match_kind(scrutinee, &pats);
         let mut covered = std::collections::HashSet::new();
         let mut has_wildcard = false;
+        let mut exh = self.exh_new(&kind);
         for arm in arms {
             self.warn_unreachable_arm(
                 has_wildcard,
@@ -995,12 +1010,14 @@ impl Checker {
             }
             has_wildcard |= irref && arm.guard.is_none();
             has_wildcard |= Self::bool_domain_closed(&kind, &covered);
+            has_wildcard |= self.exh_add(&mut exh, &arm.pattern, arm.guard.is_some());
             for stmt in &arm.body {
                 self.check_stmt(stmt);
             }
             self.pop_scope();
         }
-        self.check_exhaustive(&kind, &covered, has_wildcard, scrutinee.span);
+        let help = self.exh_help(&exh);
+        self.check_exhaustive(&kind, &covered, has_wildcard, help, scrutinee.span);
     }
 
     /// Infer an expression-position `match`: bind each arm, infer its value, and unify the arm
@@ -1020,6 +1037,7 @@ impl Checker {
         let kind = self.match_kind(scrutinee, &pats);
         let mut covered = std::collections::HashSet::new();
         let mut has_wildcard = false;
+        let mut exh = self.exh_new(&kind);
         let mut result: Option<Ty> = None;
         // int→float widen an untyped-int-const arm when a float-const sibling arm is present (mirrors
         // the list/map `literal_numeric_mix` peephole the compiler coerces on — see `branch_widen`).
@@ -1040,6 +1058,7 @@ impl Checker {
             }
             has_wildcard |= irref && arm.guard.is_none();
             has_wildcard |= Self::bool_domain_closed(&kind, &covered);
+            has_wildcard |= self.exh_add(&mut exh, &arm.pattern, arm.guard.is_some());
             self.expected_hint = hint.clone();
             let t = self.infer(&arm.body);
             self.pop_scope();
@@ -1047,7 +1066,8 @@ impl Checker {
             result = Some(self.unify_branch(result, t, arm.body.span, hint.as_ref()));
         }
         self.expected_hint = None;
-        self.check_exhaustive(&kind, &covered, has_wildcard, scrutinee.span);
+        let help = self.exh_help(&exh);
+        self.check_exhaustive(&kind, &covered, has_wildcard, help, scrutinee.span);
         let res = result.unwrap_or(Ty::Unknown);
         if had_hint {
             res
@@ -1838,6 +1858,7 @@ impl Checker {
         let kind = self.match_kind(scrutinee, &pats);
         let mut covered = std::collections::HashSet::new();
         let mut has_wildcard = false;
+        let mut exh = self.exh_new(&kind);
         let mut result: Option<Ty> = None;
         let mut uniform = true;
         for arm in arms {
@@ -1857,6 +1878,7 @@ impl Checker {
             }
             has_wildcard |= irref && arm.guard.is_none();
             has_wildcard |= Self::bool_domain_closed(&kind, &covered);
+            has_wildcard |= self.exh_add(&mut exh, &arm.pattern, arm.guard.is_some());
             // `match_tail_is_value` guarantees a non-empty body with a trailing `Expr`.
             let (last, init) = arm
                 .body
@@ -1882,7 +1904,8 @@ impl Checker {
                 }
             }
         }
-        self.check_exhaustive(&kind, &covered, has_wildcard, scrutinee.span);
+        let help = self.exh_help(&exh);
+        self.check_exhaustive(&kind, &covered, has_wildcard, help, scrutinee.span);
         if uniform {
             result.unwrap_or(Ty::Nil)
         } else {

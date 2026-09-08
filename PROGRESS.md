@@ -7,6 +7,17 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-076 (2026-09-08) — a `match` over a tuple (or a nested `Option`/`Result`) whose arms
+  covered the full cartesian product of the constituent domains was rejected as non-exhaustive;
+  rustc accepts the identical program.** The old model tracked a flat top-level covered-key set plus
+  one irrefutability bool, which has no top-level key for a tuple and clears on any nested refutable
+  payload (`Some(None)`), so it could never see a product close. Fixed with a Maranget usefulness/
+  witness check over a pattern matrix in new `src/checker/exhaust.rs`, ORed into `has_wildcard` in
+  the three arm loops (`src/checker/pattern.rs`) per DEC-065 — so a trailing `_` after a full product
+  now warns `unreachable match arm` like rustc, and the old `covered` set still owns duplicate-arm
+  detection and `bool` closure. The witness lands in `CheckError.help`, never the message. Nine new
+  tests in `src/checker/tests.rs`, four run in `tests/chz/spec/tuple_product_match_exhaustive_test.chz`.
+  `cargo test` green, `cargo clippy -- -D warnings` clean.
 - **TICKET-075 (2026-09-08) — an unrelated struct's defaulted method spliced into a protocol-typed
   call before the arity check, so `x.f(2)` through `x: P` was rejected as `'f' expects 1
   argument(s), got 2`.** `normalize_call` fell back to the program-wide name-keyed method table

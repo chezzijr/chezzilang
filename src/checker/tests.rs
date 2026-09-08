@@ -31095,3 +31095,79 @@ fn tuple_match_cartesian_product_of_two_enums_is_exhaustive() {
         "enum E:\n    A\n    B\nenum F:\n    X\n    Y\nfn f(a: E, b: F) -> str:\n    match (a, b):\n        (E.A, F.X): return \"ax\"\n        (E.A, F.Y): return \"ay\"\n        (E.B, F.X): return \"bx\"\n        (E.B, F.Y): return \"by\"\n",
     );
 }
+
+// TICKET-076 neighbour n2: same headers, the (E.B, F.Y) arm deleted — still non-exhaustive.
+#[test]
+fn tuple_product_missing_one_combination_still_rejected() {
+    rejects(
+        "enum E:\n    A\n    B\nenum F:\n    X\n    Y\nfn f(a: E, b: F) -> str:\n    match (a, b):\n        (E.A, F.X): return \"ax\"\n        (E.A, F.Y): return \"ay\"\n        (E.B, F.X): return \"bx\"\n",
+        "non-exhaustive match: add a `_` arm",
+    );
+}
+
+// TICKET-076 neighbour n3: nested Option — Some(None)/Some(Some(v))/None is exhaustive.
+#[test]
+fn nested_option_some_none_some_some_none_is_exhaustive() {
+    ok(
+        "fn f(x: Option[Option[int]]) -> str:\n    match x:\n        Some(None): return \"in\"\n        Some(Some(v)): return \"v {v}\"\n        None: return \"on\"\n",
+    );
+}
+
+// TICKET-076 neighbour n4: n1 with a guard on the first arm — a guard never covers, still rejected.
+#[test]
+fn tuple_product_with_a_guarded_arm_still_rejected() {
+    rejects(
+        "enum E:\n    A\n    B\nenum F:\n    X\n    Y\nfn f(a: E, b: F) -> str:\n    match (a, b):\n        (E.A, F.X) if true: return \"ax\"\n        (E.A, F.Y): return \"ay\"\n        (E.B, F.X): return \"bx\"\n        (E.B, F.Y): return \"by\"\n",
+        "non-exhaustive match: add a `_` arm",
+    );
+}
+
+// TICKET-076 neighbour n5: enum x bool product is exhaustive.
+#[test]
+fn tuple_product_over_an_enum_and_a_bool_is_exhaustive() {
+    ok(
+        "enum E:\n    A\n    B\nfn f(a: E, b: bool) -> str:\n    match (a, b):\n        (E.A, true): return \"at\"\n        (E.A, false): return \"af\"\n        (E.B, _): return \"b\"\n",
+    );
+}
+
+// TICKET-076 neighbour n6: enum x int with a literal column — int is infinite, still rejected.
+#[test]
+fn tuple_product_with_an_int_literal_column_still_rejected() {
+    rejects(
+        "enum E:\n    A\n    B\nfn f(a: E, n: int) -> str:\n    match (a, n):\n        (E.A, 0): return \"a0\"\n        (E.B, _): return \"b\"\n",
+        "non-exhaustive match: add a `_` arm",
+    );
+}
+
+// TICKET-076 neighbour n7: an or-pattern covering every variant of a 3-variant enum is exhaustive.
+#[test]
+fn tuple_product_of_or_patterns_covers_every_variant() {
+    ok(
+        "enum G:\n    A\n    B\n    C\nfn f(a: G, b: G) -> str:\n    match (a, b):\n        (G.A | G.B, _): return \"ab\"\n        (G.C, _): return \"c\"\n",
+    );
+}
+
+// TICKET-076 neighbour n8: an all-binding tuple arm stays irrefutable (unchanged).
+#[test]
+fn all_binding_tuple_arm_stays_irrefutable() {
+    ok("fn f(p: (int, int)) -> str:\n    match p:\n        (x, y): return \"{x},{y}\"\n");
+}
+
+// TICKET-076 neighbour n9: a range column refined by a wildcard sibling is exhaustive.
+#[test]
+fn tuple_product_with_a_wildcard_column_is_exhaustive() {
+    ok(
+        "enum E:\n    A\n    B\nfn f(a: E, n: int) -> str:\n    match (a, n):\n        (E.A, 0..5): return \"a-lo\"\n        (E.A, _): return \"a-hi\"\n        (E.B, _): return \"b\"\n",
+    );
+}
+
+// TICKET-076 variant-add regression: n1 with a third variant `C` added to `enum E`, arms unchanged —
+// must reject again, with a `help:` line naming `E.C`.
+#[test]
+fn adding_a_variant_makes_the_product_non_exhaustive_again() {
+    rejects_help(
+        "enum E:\n    A\n    B\n    C\nenum F:\n    X\n    Y\nfn f(a: E, b: F) -> str:\n    match (a, b):\n        (E.A, F.X): return \"ax\"\n        (E.A, F.Y): return \"ay\"\n        (E.B, F.X): return \"bx\"\n        (E.B, F.Y): return \"by\"\n",
+        "non-exhaustive match: add a `_` arm",
+        "E.C",
+    );
+}

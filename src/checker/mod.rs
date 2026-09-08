@@ -2521,6 +2521,7 @@ pub(super) struct StaleWrite {
     granular: bool,
 }
 
+mod exhaust;
 mod expr;
 mod pattern;
 // `pub(crate)` for `proto::INTRINSIC_PROTO_METHODS` — the intrinsic-grant ↔ VM-arm pairing table,
