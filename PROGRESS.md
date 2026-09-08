@@ -7,6 +7,28 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-097 (2026-09-09) — a crossing closure lost the sender's module global when the read was
+  behind a called top-level `fn`, or when the write was an in-place mutation.** Two defects, both in
+  the W8-25/TICKET-051 airlock. (A) `Compiler::fill_global_free`'s call graph was built only from
+  `Op::MakeClosure`/`Op::SpawnBlock`, never `Op::Call`, so `n` never reached a crossing closure's
+  `Proto::global_free` when only a called helper (`fn helper() -> int: return n`) read it — the
+  closure answered a stale pre-write value, and answering `1` then `100` after receiving an unrelated
+  closure on an unrelated channel. Fixed with a new `Compiler::fn_global_protos` map from a top-level
+  fn's `(module_idx, slot)` to its proto, consulted by the `Op::GetGlobalSlot` arm of
+  `fill_global_free`'s call graph; the existing fixpoint already unions a child's writes too, so a
+  called helper that WRITES the slot still keeps it a late load (W8-25's rule survives unchanged). (B)
+  An in-place mutation (`ys.push(2)`, `zs[0] = 9`, `p.v = 9`) never emits `Op::SetGlobalSlot`, so the
+  sending view's `assigned`/`carried` bits were never set and `Vm::closure_global_snapshot` skipped
+  the slot. Fixed with two new ops, `Op::TouchGlobalSlot` (a definite field/index-assignment root) and
+  `Op::TouchGlobalSlotByName` (the type-blind mutator-method-name path, copied from the checker's
+  `mutates_receiver` name list), both routed through `Vm::touch_global_slot`, which marks `carried`
+  ONLY — never `assigned`, since that bit is the sole thing `Vm::install_global_slot` consults to
+  refuse an arriving install, and marking it would make an in-place mutator start refusing a sender's
+  newer value. The by-name op refuses to mark a `Struct`, so a user method sharing a mutator name
+  (`add`, `insert`, …) that mutates nothing cannot over-mark. Residual, deliberately left open
+  (`docs/gaps.md` W11-5): a user struct METHOD that mutates `self` (`g.bump()`) still marks nothing,
+  because the write targets `self`, not a global root — needs a self-mutation summary per method
+  (`src/checker/mod.rs:3717`).
 - **TICKET-096 (2026-09-08) — a nursery OWNER, top-level `main` included, was not a cancel
   participant in its own scope, so a child's fault reached it in two ways that both silently disagreed.**
   `Vm::cancel_flags` yields only the flags this fiber is a MEMBER of, so a nursery owner (the body that

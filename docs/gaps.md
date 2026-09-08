@@ -12487,7 +12487,7 @@ already-correct regression surface live in the tickets — this is the index, no
 | ~~**W11-2**~~ | P1 | checker | A mixed-numeric list literal as a param/field DEFAULT aborts at run time with `internal: two different list element-widening decisions were recorded` — `span-keyed-table-aliasing` instance 5, `ListWidenTable` (`src/checker/ty.rs:196`) landed after W7-49 fixed the same aliasing for its three sibling tables | TICKET-094 — CLOSED 2026-09-08 (TICKET-094). Before: `chezzi run` on `fn g(xs: List[float] = [1, 2.5]) -> List[float]: return xs` / `print(g())` aborted `internal: two different list element-widening decisions were recorded for one source position`. After: prints `[1.0, 2.5]` at rc=0. **CORRECTION to this row's own filed diagnosis: it is NOT a span-keyed-table-aliasing instance, and the `span-keyed-table-aliasing` count stays at 4.** Measured during planning: the key was already real — one literal, one span, one origin — and the two recorded verdicts differed because one site was WRONG, the decl-site default copy recording `ElemWiden::Default` while the inline-spliced call argument recorded `ElemWiden::Widen(Elem)`. `ListWidenKey` and `list_widen_key` are unchanged by the fix. That also makes W11-2 and W11-8 the SAME defect — the decl-site refused the element license its call site granted — so fixing W11-8 fixed W11-2. Anyone who meets this `internal:` abort again should first ask which of the two recording sites is misjudging the slot, not whether the coordinate aliases |
 | ~~**W11-3**~~ | P1 | scheduler | A nested-nursery deadlock **hangs forever** at `CHEZZI_THREADS=1` (10/10, also at a 45 s bound) where every other worker count faults in ~11 ms; Go faults at every `GOMAXPROCS`. `Vm::op_enter_nursery` makes a nursery entered inside a spawned task LAZY at `worker_count() == 1`, so it runs as a scope on the ENCLOSING sched with the owner fiber's own thread as its worker; that fiber stays counted in `SchedCore::running` while blocked in the join, so `is_deadlocked_ignoring_jobs`'s `running == 0` clause could never hold | ✅ CLOSED 2026-09-08 (TICKET-095) — a blocked owner fiber is now counted in a new `SchedCore::blocked_owners`, and the predicate asks `running == blocked_owners`; the T=1 fault now names the same inner-nursery span every other worker count does. |
 | ~~**W11-4**~~ | P1 | cancel | A module top-level `spawn` fault is delivered TWICE — `recover:` catches it AND it aborts at rc=1 — and every statement after the handler is silently skipped. The same shape one scope down is correct (rc=0). Neither Python `TaskGroup` nor Go delivers twice — ✅ CLOSED 2026-09-08 (TICKET-096): fixed at `block_halt_check` (`src/vm/netio.rs`), the OWNER-side rung that delivers a nursery child's recorded fault. Before: `r=Err('boom')` then a second abort at rc=1. After: one `runtime error (...): boom` at rc=1, no `recover:` catch. This row's own filed premise is FALSE — re-measured on the base binary, a `parallel:` body owner and a `fn` body owner both printed `r=Err('boom')` then `runtime error` at rc=1 too; the genuine control is a `parallel:` SIBLING, which still catches at rc=0 | TICKET-096 |
-| **W11-5** | P1 | airlock | A crossing closure carries the sender's module global only when the sender ASSIGNED the slot and the body TEXTUALLY names it: `fill_global_free` (`src/compiler/mod.rs:1954`) gathers children through `MakeClosure`/`SpawnBlock` but never `Op::Call`, and an in-place `ys.push(2)` never sets the sending view's `assigned` bit. Same closure answers 1 then 100 after an UNRELATED `recv` | TICKET-097 |
+| **W11-5** | P1 | airlock | A crossing closure carries the sender's module global only when the sender ASSIGNED the slot and the body TEXTUALLY names it: `fill_global_free` (`src/compiler/mod.rs:1954`) gathers children through `MakeClosure`/`SpawnBlock` but never `Op::Call`, and an in-place `ys.push(2)` never sets the sending view's `assigned` bit. Same closure answers 1 then 100 after an UNRELATED `recv` | PARTIALLY CLOSED (TICKET-097, 2026-09-09) — the call-indirected read and the in-place mutation are both fixed; the row stays OPEN for its third sub-defect, so no counter moves. See "W11-5 residual" below. |
 | ~~**W11-6**~~ | P2 | cancel | `main`'s loop back-edge is not a cancel checkpoint: a doomed top-level CPU loop ran **39 774 ms** to completion where the identical loop in a `parallel:` sibling is cut at 33 ms. `docs/concurrency.md:1042` claims the back-edge IS the checkpoint "on the top-level `main` thread" — ✅ CLOSED 2026-09-08 (TICKET-096): fixed at `jump_checked`'s back-edge (`src/vm/exec.rs`), riding the existing 1/1024 sample gate. Before: the top-level loop ran for seconds. After: cut at 31 ms | TICKET-096 |
 | ~~**W11-7**~~ | P2 | checker | A GENERIC callee loses expected-type inference on every CONCRETE arg slot — `fn g[T](a: float, b: T)` rejects `g(1, "x")` where the non-generic twin accepts. `infer_generic_arg_tys` (`src/checker/expr.rs:~3937`) drops the hint `infer_arg` threads; `check_generic_arg` re-infers with it only for closures. Contradicts `docs/syntax.md:613` verbatim | TICKET-094 — CLOSED 2026-09-08 (TICKET-094). Before: `chezzi check` on `fn g[T](a: float, b: T) -> float: return a` / `print(g(1, "x"))` rejected `argument to 'g' has type int, expected float`. After: type-checks and `chezzi run` prints `1.0` |
 | ~~**W11-8**~~ | P2 | checker | The collection-element widen is missing at both DEFAULT sinks (`fn g(zs: List[float] = [1, 2])` rejects) though the SCALAR widen is present there; `docs/syntax.md:~596` claims the same sink set for both | TICKET-094 — CLOSED 2026-09-08 (TICKET-094). Before: `chezzi check` on `fn g(zs: List[float] = [1, 2]) -> List[float]: return zs` rejected with two `list element: expected float, found int` errors. After: type-checks and yields `[1.0, 2.0]` |
@@ -12556,3 +12556,33 @@ had silently stopped being true (W11-6, and the two closed limits above), which 
 W8-18. And **W11-3 is invisible to the standing gates by construction**: `tests/chezzi_threads_cli.rs`
 runs `tests/chz` at the default count and `CHEZZI_THREADS=2` only, so T=1 is ungated — and no
 `tests/chz` test can assert a hang in the first place.
+
+### W11-5 residual
+
+TICKET-097 fixed W11-5's first two sub-defects (a read behind a called top-level `fn`, and an
+in-place mutation via `push`/index/field assignment). A third sub-defect stays open: a user struct
+METHOD that mutates `self` still marks nothing.
+
+    struct C:
+        n: int
+        fn bump(self):
+            self.n = self.n + 1
+    g := C(1)
+    c := Channel[fn() -> int](1)
+    fn producer():
+        g.bump()
+        g.bump()
+        c.send(fn() -> int: g.n)
+    fn main():
+        parallel:
+            spawn producer()
+        print("user-method mutation via closure: {c.recv()()}")
+    main()
+
+Measured 2026-09-09 on the release binary at `65fe244d`: Chezzi prints
+`user-method mutation via closure: 1`, CPython 3.14.7 prints `user-method mutation via closure: 3`.
+
+Mechanism: `mutates_receiver` (`src/checker/mod.rs:3720`) covers no user method — its own comment
+names the upgrade path as a self-mutation summary per method. `Op::TouchGlobalSlotByName` deliberately
+refuses to mark a struct so a same-named user method (`add`, `insert`, …) cannot over-mark a slot it
+never touched; that refusal is what leaves this case uncovered. Fixing it is its own ticket.

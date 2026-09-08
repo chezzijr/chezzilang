@@ -1468,9 +1468,13 @@ was retired when module globals started deep-copying per task.)
   home module's `let`-bound globals; the airlock installs its free globals into the RECEIVING task's
   own module copy (TICKET-016 / W8-25, TICKET-051)**, alongside its captures: `Proto::global_free`
   names every such global the closure's body (or a closure nested inside it) reads and never writes,
+  including a read performed only by a top-level `fn` in the same module that the body CALLS (a call
+  into ANOTHER module is deliberately not followed, because global slot numbers are per module),
   and the airlock installs the sending view's value for exactly those slots — provided the sending
   view's own lineage (its own assignment, an ancestor snapshot, or an earlier install) actually
-  descends from a write to that slot, and provided the RECEIVING view has not itself already assigned
+  descends from a write to that slot, where a write is either an assignment to the slot or an
+  IN-PLACE mutation of the value it holds (`ys.push(2)`, `zs[0] = 9`, `g.n = 1`), and provided the
+  RECEIVING view has not itself already assigned
   that slot (its own later write always wins). Installing rather than freezing means **inside one
   task, one module global denotes one object**: a closure's read of the slot and the task's own
   read always agree, because both now read the SAME copy. A global the closure itself **writes** is
@@ -1483,7 +1487,36 @@ was retired when module globals started deep-copying per task.)
   `Channel.send`/`.recv()` round trip — so the closure keeps reading that global LIVE, matching the
   measured CPython `direct : 126` / `module xs: [1, 9]` and Go `direct : 126` / `module xs: [1 9]`
   (2026-09-03). Top-level `fn`s, imports, `native fn`s and `extern` fns are unaffected and stay late
-  loads always. So a `spawn f()`
+  loads always.
+
+  **Residual (TICKET-097, W11-5): a user struct METHOD that mutates `self` still marks nothing.**
+  The write inside the method targets `self`, not a global root, so no in-place-mutation mark is
+  emitted:
+
+  ```
+  struct C:
+      n: int
+      fn bump(self):
+          self.n = self.n + 1
+  g := C(1)
+  c := Channel[fn() -> int](1)
+  fn producer():
+      g.bump()
+      g.bump()
+      c.send(fn() -> int: g.n)
+  fn main():
+      parallel:
+          spawn producer()
+      print("user-method mutation via closure: {c.recv()()}")
+  main()
+  ```
+
+  Measured 2026-09-09 on the release binary at `65fe244d`: Chezzi prints
+  `user-method mutation via closure: 1`, CPython 3.14.7 prints `user-method mutation via closure: 3`.
+  The upgrade path is a self-mutation summary per method (`src/checker/mod.rs:3717`'s named
+  follow-up). See `docs/gaps.md` W11-5, which stays open for this sub-defect.
+
+  So a `spawn f()`
   callee whose captured environment contains a nested closure/`fn` (or is itself a bare `fn`) runs
   cleanly, its captured plain data isolated per task exactly like any other sendable. **Checker
   (landed, Task 2a):** the function type is **sendable**, so a closure crosses as data —
