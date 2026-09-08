@@ -113,8 +113,18 @@ fn cmd_tokens(path: Option<&String>) -> ExitCode {
 
     match lexer::tokenize(&source) {
         Ok(tokens) => {
+            use std::io::Write;
+            let stdout = std::io::stdout();
+            let mut lock = stdout.lock();
             for tok in &tokens {
-                println!("{:?}", tok.kind);
+                if let Err(e) = writeln!(lock, "{:?}", tok.kind) {
+                    eprintln!("{}", stdout_write_error("tokens", &e));
+                    return ExitCode::FAILURE;
+                }
+            }
+            if let Err(e) = lock.flush() {
+                eprintln!("{}", stdout_write_error("tokens", &e));
+                return ExitCode::FAILURE;
             }
             ExitCode::SUCCESS
         }
@@ -148,9 +158,13 @@ fn cmd_ast(path: Option<&String>) -> ExitCode {
     // `<unnamed>` rather than `main`, since the write happens on the spawned thread and
     // `resume_unwind` does not re-run the panic hook — measured, and the only observable delta.
     let result: Result<(), String> = chezzi::on_frontend_stack(move || {
+        use std::io::Write;
         let tokens = lexer::tokenize(&source).map_err(|e| e.to_string())?;
         let module = parser::parse(tokens).map_err(|e| e.to_string())?;
-        println!("{module:#?}");
+        let stdout = std::io::stdout();
+        let mut lock = stdout.lock();
+        writeln!(lock, "{module:#?}").map_err(|e| stdout_write_error("ast", &e))?;
+        lock.flush().map_err(|e| stdout_write_error("ast", &e))?;
         Ok(())
     });
 
@@ -606,12 +620,7 @@ fn cmd_test(args: &[String]) -> ExitCode {
     // reader as a clean pass. Matches `chezzi run`'s own broken-pipe handling (see `out_dead_reason`
     // above): a truncated report is a failure, full stop.
     if let Err(e) = std::io::Write::write_all(&mut std::io::stdout(), &report.bytes) {
-        let why = if e.kind() == std::io::ErrorKind::BrokenPipe {
-            "stdout closed (broken pipe)".to_string()
-        } else {
-            format!("cannot write stdout: {e}")
-        };
-        eprintln!("chezzi test: {why}");
+        eprintln!("{}", stdout_write_error("test", &e));
         return ExitCode::FAILURE;
     }
     // fd 2 is diagnostic-only: a failed write here does not change the verdict, unlike the fd 1
@@ -893,6 +902,18 @@ fn cmd_docs(args: &[String]) -> ExitCode {
             eprintln!("{msg}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Render a stdout write failure for a subcommand's own dump, matching `chezzi run`'s wording
+/// (`src/vm/stream.rs:113` is the other owner of the `stdout closed (broken pipe)` string — a third
+/// copy is a drift bug). `chezzi docs` (`cmd_docs`, above) deliberately does NOT use this: exiting 0
+/// on a closed pipe is correct there, since a bulk reference dump is designed to be read as a prefix.
+fn stdout_write_error(cmd: &str, e: &std::io::Error) -> String {
+    if e.kind() == std::io::ErrorKind::BrokenPipe {
+        format!("chezzi {cmd}: stdout closed (broken pipe)")
+    } else {
+        format!("chezzi {cmd}: cannot write stdout: {e}")
     }
 }
 
