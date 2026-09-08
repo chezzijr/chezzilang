@@ -1078,6 +1078,11 @@ pub struct Vm {
     /// tell a swallowed cooperative abort apart from a real fault (a cancelled task is dropped, not
     /// reported). Not in [`FiberCtx`] — like `pending_exit`, cancellation is a per-VM concern.
     cancelled: bool,
+    /// The `nurseries` index of the nursery whose recorded child fault is currently unwinding this
+    /// OWNER (TICKET-096). `Some(n)` means a `recover:` installed INSIDE nursery `n`'s body must not
+    /// catch this fault, while one installed outside it still must — that is what TICKET-062's
+    /// `tests/chz/spec/nursery_fault_verdict_test.chz` asserts. Not in [`FiberCtx`], like `cancelled`.
+    owner_fault_floor: Option<usize>,
     /// Set only on the worker `Vm` of an EAGERLY-dispatched `Executor` job (M:N) — to that job's own
     /// executor core. Such a worker has no nursery scheduler and no [`MnSched`], so a blocking op
     /// falls to the "no scheduler" arm of `chan_recv_step` / `send` / `wait:`, which faults

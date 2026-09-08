@@ -1075,11 +1075,9 @@ test fn hof_spins():
 // ===== TICKET-096: the module top-level nursery treats `main` differently from a `parallel:`
 // sibling =====
 
-/// Defect A — a task fault reaching the module-level implicit nursery is delivered TWICE: once
-/// caught by a `recover:` that docs say cannot catch a nursery cancel (`docs/spec.md:149`,
-/// `docs/concurrency-b3.md:235`), and again at the module-nursery join, so the run aborts (rc=1)
-/// even though the fault was "handled". The abort also silently truncates everything after the
-/// `recover:` — the final `print` never runs and nothing says why.
+/// Defect A — a nursery OWNER (the module top level) is now a cancel participant in its own scope:
+/// a `recover:` installed INSIDE the faulting nursery's body does not catch the cancel, and the
+/// program aborts exactly once at rc=1 (`docs/spec.md:149`, `docs/concurrency-b3.md:235`).
 #[test]
 fn module_top_level_fault_is_delivered_twice_and_truncates_after_recover() {
     let t = TmpDir::new();
@@ -1088,6 +1086,7 @@ fn module_top_level_fault_is_delivered_twice_and_truncates_after_recover() {
         r#"import std.time
 spawn:
     panic("boom")
+print("before recover")
 r := recover:
     time.sleep_ms(50)
     1
@@ -1097,16 +1096,19 @@ print("THIS LINE NEVER PRINTS")
 "#,
     );
     let (status, out) = run_capped(&entry, 20);
-    assert!(out.contains("r=Err('boom')"), "the recover ran: {out:?}");
+    assert!(
+        out.contains("before recover"),
+        "main ran before the fault: {out:?}"
+    );
+    assert!(
+        !out.contains("r=Err('boom')"),
+        "BUG: the recover: caught the module nursery cancel: {out:?}"
+    );
     assert!(
         !out.contains("THIS LINE NEVER PRINTS"),
-        "BUG: everything after the recover: is silently truncated, expected it to print: {out:?}"
+        "the abort must stop the program: {out:?}"
     );
-    assert_eq!(
-        status, 0,
-        "BUG: the module nursery re-reports the fault a second time at join, aborting rc=1 even \
-         though recover: already handled it: {out:?}"
-    );
+    assert_eq!(status, 1, "the fault must abort exactly once: {out:?}");
 }
 
 /// Defect B — the top-level `main` fiber's `while` loop back-edge is not a cancel checkpoint, so a
@@ -1135,6 +1137,10 @@ print("main loop finished i={i}")
         elapsed < std::time::Duration::from_secs(1),
         "BUG: the top-level loop is not cancelled at its back-edge, ran to completion after \
          {elapsed:?} instead of aborting promptly on the sibling's fault: {out:?}"
+    );
+    assert!(
+        !out.contains("main loop finished"),
+        "BUG: the top-level loop ran to completion: {out:?}"
     );
 }
 

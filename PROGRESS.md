@@ -7,6 +7,20 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-096 (2026-09-08) — a nursery OWNER, top-level `main` included, was not a cancel
+  participant in its own scope, so a child's fault reached it in two ways that both silently disagreed.**
+  `Vm::cancel_flags` yields only the flags this fiber is a MEMBER of, so a nursery owner (the body that
+  executed `Op::EnterNursery`) held none of its own scope's — `block_halt_check`'s existing
+  `owned_nursery_fault` rung delivered the fault, but a `recover:` INSIDE the nursery body could still
+  catch it and let the program limp on before the module join re-reported the same fault a second time,
+  and `jump_checked`'s loop back-edge never asked `owned_nursery_fault` at all, so a doomed owner loop
+  ran to completion instead of aborting promptly. Fixed by adding `Vm::owner_fault_floor`, the faulting
+  nursery's `nurseries` index: `run_until` now bypasses only a handler with `Handler::nursery_len` above
+  that floor — one installed INSIDE the nursery body — while a `recover:` outside the nursery still
+  catches, unchanged from TICKET-062. The same `owned_nursery_fault` rung now also fires at the
+  `jump_checked` back-edge, riding its existing 1/1024 sample gate. Measured: the ticket's module
+  top-level fault now delivers once at rc=1 in 17 ms (was `r=Err('boom')` then a second abort); its
+  top-level CPU loop is cut at 31 ms where it previously ran for seconds.
 - **TICKET-095 (2026-09-08) — a nested-nursery deadlock hung forever at `CHEZZI_THREADS=1` where
   every other worker count faulted `deadlock: …` in ~11 ms.** `Vm::op_enter_nursery` makes a nursery
   entered inside a spawned task LAZY at one worker, so it ran as a scope on the ENCLOSING sched with

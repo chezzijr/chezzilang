@@ -2324,16 +2324,23 @@ impl Vm {
     }
 
     /// TICKET-062 (W10-16) — the lowest-index `Fault` recorded by a task of a `parallel:` nursery open
-    /// on THIS thread, innermost scope first. `.rev()` because `eager_scheds` is innermost-LAST, the
-    /// same walk [`Vm::blocked_bodies_guard_with`] uses. A nursery OWNER blocked in its own body never
-    /// passes through `reduce_task_slots`'s `Exit > Fault > Deadlocked` precedence
+    /// on THIS thread, innermost scope first, alongside the `nurseries` index `n` of that nursery.
+    /// `.rev()` because `eager_scheds` is innermost-LAST, the same walk
+    /// [`Vm::blocked_bodies_guard_with`] uses. `eager_scheds` is lockstep with `nurseries` (DEC-048:
+    /// both push/pop together, `src/vm/exec.rs:1757`/`:1791`, `src/vm/sched.rs:353-359`), so the index
+    /// `i` at which a fault is found IS that nursery's `nurseries` index — TICKET-096 reads it as the
+    /// floor below which a `recover:` must not catch this fault. A nursery OWNER blocked in its own
+    /// body never passes through `reduce_task_slots`'s `Exit > Fault > Deadlocked` precedence
     /// (`src/vm/sched.rs:2150-2158`), so this restores that precedence for the owner.
-    pub(super) fn owned_nursery_fault(&self) -> Option<RuntimeError> {
+    pub(super) fn owned_nursery_fault(&self) -> Option<(usize, RuntimeError)> {
         self.eager_scheds
             .iter()
-            .flatten()
+            .enumerate()
             .rev()
-            .find_map(|s| s.sched.scope_fault(s.scope))
+            .find_map(|(i, s)| {
+                let s = s.as_ref()?;
+                s.sched.scope_fault(s.scope).map(|e| (i, e))
+            })
     }
 
     /// Register this thread as a blocked party for as long as the returned guard lives, so the
@@ -2480,7 +2487,14 @@ impl Vm {
         // owner reports a synthesized `deadlock` instead. Deliberately NOT gated on
         // `is_counted_party()` — a recorded fault is a fact, not a heuristic verdict, so it needs no
         // judgeability.
-        if let Some(e) = self.owned_nursery_fault() {
+        // TICKET-096 — records `n`, the faulting nursery's `nurseries` index, so `run_until` can bypass
+        // only a handler installed INSIDE nursery `n`'s body (`Handler::nursery_len > n`), never one
+        // outside it. `!cancel_suppressed()` is the same defer/already-unwinding pair
+        // `cancel_requested()` applies, so a `defer` body is never truncated by this rung.
+        if !self.cancel_suppressed()
+            && let Some((n, e)) = self.owned_nursery_fault()
+        {
+            self.owner_fault_floor = Some(n);
             return Err(e);
         }
         // The process-wide deadlock verdict (`future.md` §2d step 0), checked LAST so the two real

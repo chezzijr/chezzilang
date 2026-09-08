@@ -160,6 +160,7 @@ impl Vm {
             cancel: None,
             cancel_outer: Vec::new(),
             cancelled: false,
+            owner_fault_floor: None,
             eager_core: None,
             quiesce: Arc::new(crate::vm::quiesce::QuiesceState::default()),
             timeout_ms: 0,
@@ -1402,7 +1403,20 @@ impl Vm {
                 let caught_here =
                     matches!(self.handlers.last().copied(), Some(h) if h.frame_len > base_level);
                 let cancel_bypass = self.cancelled && !(self.deferring > 0 && caught_here);
-                if cancel_bypass || rte.is_over_memory || rte.is_timed_out {
+                // TICKET-096 — a nursery OWNER's `owner_fault_floor` is `Some(n)` while a child fault
+                // recorded at `nurseries` index `n` is unwinding it. A handler with `Handler::nursery_len
+                // > n` was installed INSIDE nursery `n`'s body — in the cancelled scope — and must not
+                // catch (measured: `recover:` wrapping a `parallel:` whose child panics keeps printing
+                // `outer r=Err('boom')` at rc=0, since that handler sits at `nursery_len <= n`, outside
+                // the nursery). The `n < self.nurseries.len()` term is a liveness guard: a floor left by a
+                // fault that was neither caught nor propagated cannot bypass an unrelated later handler.
+                // This makes the delivery happen ONCE — the owner aborts at the first delivery instead of
+                // catching and re-reading the recorded fault at every later checkpoint.
+                let owner_bypass = matches!(
+                    (self.owner_fault_floor, self.handlers.last()),
+                    (Some(n), Some(h)) if caught_here && n < self.nurseries.len() && h.nursery_len > n
+                );
+                if cancel_bypass || owner_bypass || rte.is_over_memory || rte.is_timed_out {
                     let over_mem = rte.is_over_memory;
                     let timed = rte.is_timed_out;
                     let rte = self.unwind_deferred(base_level, false).unwrap_or(rte);
@@ -1446,6 +1460,9 @@ impl Vm {
                         // belongs to a fault that is now handled), so a later uncaught fault re-captures.
                         self.fault_trace = None;
                         self.fault_trace_depth = 0;
+                        // TICKET-096 — this handler is outside the faulting nursery, so the fault is
+                        // handled; the floor must not survive it and bypass an unrelated later handler.
+                        self.owner_fault_floor = None;
                         // `unwind_deferred` already dropped frames down to `h.frame_len`; restore the
                         // operand stack / call-depth / ip to the boundary's snapshot.
                         self.stack.truncate(h.stack_len);
@@ -1639,6 +1656,19 @@ impl Vm {
             if sampled && let Some(e) = self.exit_halt(span) {
                 return Err(e);
             }
+            // TICKET-096 — the `block_halt_check` rung's counterpart for the loop back-edge.
+            // `cancel_requested()` above reads only cancel flags THIS fiber holds, and a nursery OWNER
+            // holds none of its own scope's, so a doomed owner loop ran to completion (measured: the
+            // top-level loop took seconds, cut to 31 ms by this rung). Same precedence slot as
+            // `block_halt_check`'s rung, below the exit halt. Rides the existing 1/1024 `sampled` gate
+            // because `MnSched::scope_fault` takes the sched lock.
+            if sampled
+                && !self.cancel_suppressed()
+                && let Some((n, e)) = self.owned_nursery_fault()
+            {
+                self.owner_fault_floor = Some(n);
+                return Err(e);
+            }
         }
         self.frames.last_mut().unwrap().ip = target;
         Ok(())
@@ -1708,7 +1738,7 @@ impl Vm {
 
     /// The two suppressions of the cancel predicate — a tripped flag does NOT cancel this fiber while
     /// either holds, and neither can change while it is blocked in place.
-    fn cancel_suppressed(&self) -> bool {
+    pub(super) fn cancel_suppressed(&self) -> bool {
         self.cancelled || self.deferring > 0
     }
 
