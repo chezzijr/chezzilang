@@ -210,9 +210,9 @@ in-progress alongside it.
 > the P0, CLOSED 2026-09-08: `fn`-type params were compared COVARIANTLY, so `h: fn(Any) -> Dog = idd`
 > type-checked and a `Cat` reached a `List[str]` at rc=0 — now strictly INVARIANT). Read wave 11's session log at the END of `docs/gaps.md` before
 > working any of them — it also records what the wave found CLEAN (the whole `std.*` surface at ~28 000
-> differential cases, all 32 FFI null guards, `std.net`'s read contract), the parent→child cross-nursery
-> false `deadlock` (CLOSED 2026-09-09, TICKET-099 — replaced the upward-only `MnSched::parent_wake`
-> chain with a run-wide `wake_run_wide` + a peer-veto deadlock predicate), and one row deliberately NOT ticketed
+> differential cases, all 32 FFI null guards, `std.net`'s read contract), the one row that needs a
+> DECISION rather than a patch (the parent→child cross-nursery false `deadlock`, deterministic per
+> worker count, not "timing-divergent" as its doc said), and one row deliberately NOT ticketed
 > (`W11-13`, an airlock warning under-warn — re-open only with a measured runtime-derived table).
 > Older, still open: **2 rows, `W8-17` and `W8-19`.** Bug-hunt wave 10
 > (2026-09-05/06) filed `W10-1..W10-26` and **all 26 are closed**: TICKET-060..069 landed overnight through the

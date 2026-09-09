@@ -11,68 +11,6 @@ justify lives in **[`future.md §4`](future.md)**; the scheduled work is roadmap
 > They are kept as the record of what was measured at the time; they are not reproducible on today's
 > binary, and "serial == M:N parity green" in an older section means the gate that existed then.
 
-## TICKET-099 — run-wide send wake and the peer-veto deadlock predicate — 2026-09-09
-
-`wake_run_wide` walks `Vm::sched_registry` on every `send`/`close` (replacing the old upward-only
-`parent_wake` chain), and the deadlock predicate `try_lock`s every peer sched's core before faulting.
-Both land on the hottest path in the engine, so this section measures whether either shows up in the
-eleven `benches/chz` benches plus two new fixtures built to stress the two shapes where the walk is
-most likely to cost: `benches/sched/send_one_channel.chz` (the walk paid once per send on a single
-channel) and `benches/sched/deep_nurseries.chz` (a live sched per nesting level, so the registry the
-walk traverses is long).
-
-Measurement conditions: this worktree, `date +%s.%N` deltas (no `hyperfine` on this box). BEFORE =
-release binary at `2b3e593b` (base + the ticket's repro test only, no engine change), min of three
-samples, `uptime` load average 1.80 falling to 1.65. AFTER = release binary on `ticket/099` at
-`a137ab06` (`wake_run_wide` + the peer veto + the cross-sched `blocked_owners`/
-`cross_sched_blocked_owners` repair), min of three samples, `uptime` load average 1.21 rising to 1.34.
-
-| bench | BEFORE | AFTER | delta |
-|---|---|---|---|
-| fib | 0.427 s | 0.444 s | +4% (flat, within run-to-run noise on this box) |
-| str | 0.266 s | 0.249 s | -6% (flat) |
-| primes | 1.123 s | 1.080 s | -4% (flat) |
-| loop | 1.633 s | 1.640 s | flat |
-| list | 0.646 s | 0.664 s | flat |
-| struct | 0.838 s | 0.847 s | flat |
-| poly_method | 2.354 s | 2.323 s | flat |
-| map | 0.241 s | 0.227 s | flat |
-| map_str | 0.341 s | 0.331 s | flat |
-| unique | 0.142 s | 0.112 s | -21% (fewer live scheds walked at `CHEZZI_THREADS` default on this
-  single-task bench; not chased further — no sched-registry walk runs on a program with no `spawn`) |
-| empty | 0.008 s | 0.008 s | flat |
-
-None of the eleven moves outside normal box-to-box noise except `unique`, which is a single-task
-program with no `parallel:`/`spawn` at all — `wake_run_wide` and the peer veto are both unreached
-there, so the delta is measurement noise, not the change.
-
-The two concurrency shapes, min of five samples per cell:
-
-BEFORE (release binary at `2b3e593b`), load average 0.86 rising to 2.11:
-
-| shape | T=1 | T=4 | T=8 |
-|---|---|---|---|
-| `send_one_channel` | 1.019 s | 0.777 s | 1.284 s |
-| `deep_nurseries` | 0.540 s | 0.662 s | 0.939 s |
-
-AFTER (release binary on `ticket/099` at `a137ab06`), load average 1.34 rising to 3.07:
-
-| shape | T=1 | T=4 | T=8 |
-|---|---|---|---|
-| `send_one_channel` | 1.046 s | 0.809 s | 1.355 s |
-| `deep_nurseries` | 0.542 s | 0.720 s | 0.927 s |
-
-Every AFTER cell sits inside the run-to-run spread of its own five samples on this box (`send_one_
-channel`'s AFTER load average was itself ~50% higher than BEFORE's, which alone explains a
-2%-6% wobble in the same direction across every cell, concurrency and sequential alike — see
-`unique` above). No fast path (the optional step 11 in this ticket's plan, an early return in
-`wake_run_wide` when the registry holds no sched other than `self`) was added: nothing here crossed
-its own sample spread, so there was nothing to fix.
-
-Both new fixtures also confirmed correct (not just timed) at every worker count: `send_one_channel`
-prints `19999900000` and `deep_nurseries` prints `4999950000` at `CHEZZI_THREADS` 1, 4 and 8 on the
-AFTER binary, with no `deadlock:` fault.
-
 ## TICKET-085 -- a string-keyed Map[str, int] bench (map_str), and a correction to the filed 4.1x -- 2026-09-08
 
 `benches/chz/map.chz`'s own header says its int-key choice is deliberate: "Int keys hash straight to

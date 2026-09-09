@@ -11,7 +11,6 @@ benches/
   chz/   one .chz per bench   # fib str primes loop list empty
   py/    one .py  per bench   # same workload, identical stdout
   run.chz                     # the driver — written in Chezzi, shells out to hyperfine
-  sched/ two concurrency shapes, hand-timed, no CPython twin
 ```
 
 Each `chz/X.chz` and its `py/X.py` twin **print identical stdout** (one result line). That
@@ -72,20 +71,6 @@ under-measures (ignores off-heap `Vec`/`HashMap` capacity). Baseline table + rea
 against `chezzi run --threads=N`. Used to check the M:N scheduler's idle-worker policy
 (`docs/gaps.md` W8-7/W8-8) against the owning ancestors instead of reasoning about it — see
 `docs/benchmarks.md` → "W8-7 / W8-8 idle-worker-policy fix".
-
-## Scheduler cost shapes (`sched/`, no CPython twin)
-
-`sched/send_one_channel.chz` and `sched/deep_nurseries.chz` (TICKET-099) measure the two shapes
-where a run-wide send-wake walk (`MnSched::wake_run_wide`) is most likely to cost: paying the walk
-once per send on a single channel, and a long registry (one live sched per nursery-nesting level).
-`tests/bench_coverage.rs` and `tests/difftest.rs` only scan `benches/chz/` + `benches/py/` by name,
-so `sched/` sits outside both gates and outside `run.chz`'s driver list — CPython has no nursery, so
-neither fixture has a twin to pair with. Time by hand (see `docs/benchmarks.md`'s TICKET-099 section):
-
-```sh
-CHEZZI_THREADS=4 ./target/release/chezzi run benches/sched/send_one_channel.chz  # 19999900000
-CHEZZI_THREADS=4 ./target/release/chezzi run benches/sched/deep_nurseries.chz    # 4999950000
-```
 
 ## Notes
 

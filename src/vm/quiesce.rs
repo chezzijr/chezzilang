@@ -193,16 +193,13 @@ impl PartyWait {
             // W7-58 — a nursery join is over exactly when the nursery can still move: the sched's OWN
             // deadlock predicate, minus its W7-56 outstanding-job veto.
             //
-            // **Not circular.** `local_quiesced` reads only `SchedCore` + this sched's own
+            // **Not circular.** `is_deadlocked_ignoring_jobs` reads only `SchedCore` + this sched's own
             // atomics — never `parties`, never `outstanding` — so the process-wide verdict never
-            // appears on its own right-hand side. TICKET-099 — this calls `local_quiesced` on purpose,
-            // NOT the sibling predicate that also carries a peer-sched veto: this arm feeds the
-            // process-wide verdict, which already does its own cross-sched accounting. A second veto
-            // here would over-count `live` and hang a genuinely deadlocked run (measured on three
-            // `*_still_fault` tests — see `live_eager_bodies` below). Dropping the W7-56 veto
-            // HERE (the reason for the `local_` half in the first place) is sound precisely because the
-            // job is then visible as its own party (an unregistered job is a live one, and
-            // `parties.len() < live` already vetoes).
+            // appears on its own right-hand side. The `_ignoring_jobs` half is the load-bearing part:
+            // the full `is_deadlocked` vetoes on `outstanding > 0`, and the whole point of this arm is
+            // the case where the outstanding job is itself a registered, stuck party. Dropping the
+            // veto HERE is sound precisely because the job is then visible as its own party (an
+            // unregistered job is a live one, and `parties.len() < live` already vetoes).
             //
             // Lock order: `parties` (P) → `SchedCore` (A) → `ChannelCore::q` (Q) — the predicate's
             // last gate peeks Q for every demoted fiber, which is the order `send_wake` already uses.
@@ -210,9 +207,9 @@ impl PartyWait {
             // and no other site takes `parties` while holding a core lock.
             PartyWait::Nursery(sched) => {
                 let c = sched.lock();
-                !sched.local_quiesced(&c)
+                !sched.is_deadlocked_ignoring_jobs(&c)
             }
-            // TICKET-063 — mirrors `SchedCore::guard_waits`' veto in `local_quiesced`.
+            // TICKET-063 — mirrors `SchedCore::guard_waits`' veto in `is_deadlocked_ignoring_jobs`.
             PartyWait::Guard(key, me) => super::core::guard_wait_satisfiable(*key, *me),
         }
     }
@@ -430,15 +427,10 @@ impl QuiesceState {
         // merely-incomplete nurseries over-counts `live` forever once their fibers are stuck, which
         // vetoes the verdict and HANGS a genuinely deadlocked run (measured on three `*_still_fault`
         // tests). The blocked-body-aware variant is the right question HERE and only here.
-        //
-        // TICKET-099 — `local_quiesced` on purpose, not the sibling predicate that also carries a
-        // peer-sched veto: this fn feeds the process-wide verdict, so it must not see that veto
-        // either. A vetoed body would count a quiesced-but-peer-vetoed nursery as `live`, inflate
-        // `live` past the party count, and reproduce exactly the hang the paragraph above measured.
         live.iter()
             .filter(|s| {
                 let c = s.lock();
-                c.any_scope_incomplete() && !s.local_quiesced(&c)
+                c.any_scope_incomplete() && !s.is_deadlocked_ignoring_jobs(&c)
             })
             .count()
     }

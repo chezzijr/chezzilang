@@ -1941,11 +1941,11 @@ struct EagerScope {
     /// §2c1 — this nursery's scope id on `sched`. `0` for an owner; a fresh appended scope for a
     /// nested eager nursery sharing the owner's sched.
     ///
-    /// **Why nesting must share ONE sched.** TICKET-099's `wake_run_wide` now reaches a sibling's
-    /// private sched too, so wake is no longer the reason two nested eager nurseries on the same
-    /// thread's chain must share one sched — the reason is the FAULT predicate. Giving each nursery
-    /// its own sched reintroduced exactly the cross-nursery deadlock the flat scheduler was built to
-    /// kill — measured, `examples/parallel_cross_nursery_{circular,fanout}.chz` both faulted
+    /// **Why nesting must share ONE sched.** Two sibling nurseries on two private scheds cannot wake
+    /// each other: `send_wake` scans its own sched and then `wake_parent_chain`, which is strictly
+    /// upward, so there is no sideways or downward path. Giving each nursery its own sched
+    /// reintroduced exactly the cross-nursery deadlock the flat scheduler was built to kill —
+    /// measured, `examples/parallel_cross_nursery_{circular,fanout}.chz` both faulted
     /// `deadlock: every task in this parallel: block is blocked…`. One sched with one scope per
     /// nursery restores it: the inline owner drains the GLOBAL queue, so it runs a sibling scope's
     /// fiber, and `is_deadlocked` sees the enclosing scope's still-open body and vetoes.
@@ -2066,13 +2066,18 @@ struct MnSched {
     /// fire (see [`MnSched::is_deadlocked`]). The block loop checks the channel queue before `terminate`,
     /// so a value that was genuinely sent always wins over a spuriously-fired terminate.
     blocked_native: AtomicUsize,
-    /// TICKET-099 — every live `MnSched` of this run (the same registry `Vm::sched_registry` publishes
-    /// to and `Vm::wake_on_send_key` already walks). A `send`/`close` on THIS sched must be able to
-    /// wake a receiver parked on ANY other sched — sibling, ancestor or descendant — not just an
-    /// ancestor, so `MnSched::wake_run_wide` walks this instead of the old upward-only ancestor chain.
-    /// Assigned AFTER construction (like `exec_registry`/`quiesce` below), so the predicate's
-    /// unit fixtures keep an empty registry — i.e. today's behaviour, which is what they test.
-    sched_registry: crate::vm::SchedRegistry,
+    /// gaps.md B5 — the ANCESTOR sched to also wake on a `send`/`close`. `None` for every ordinary
+    /// sched (top-level + lazy nested nurseries all share ONE global `MnSched`). Set ONLY on an EAGER
+    /// nested nursery's PRIVATE sched (`activate_eager_nursery`), where it points at the sched the
+    /// activating worker fiber was running on (its parent nursery). A `send`/`close` inside an eager
+    /// body pushes the value into the SHARED `ChannelCore` but `wake_bucket` only scans the eager
+    /// sched's own `parked` set — so a receiver parked in the PARENT nursery on that channel is never
+    /// made runnable, and the parent quiesces to a spurious `deadlock`. `send_wake`/`close_wake` walk
+    /// this chain (strictly UPWARD — no cycle, no ABBA) to requeue the parent's parked receiver onto
+    /// its home sched. Value already in the shared queue → the woken receiver pops it (no double
+    /// consume); an over-wake (receiver finds the queue empty and re-parks) is the already-tolerated
+    /// pattern. Points UP only: parent→child ("into" an eager body) is a documented residual limit.
+    parent_wake: Option<Arc<MnSched>>,
     /// gaps.md W7-56 — the run's [`ExecRegistry`], so [`MnSched::is_deadlocked`] can see an eager
     /// `Executor` job as a live, UNCOUNTED feeder. The predicate's counters model fibers of THIS
     /// sched only; an `ex.submit(f)` job runs on the shared pool with no fiber, no `runnable`, no
@@ -2080,7 +2085,7 @@ struct MnSched {
     /// quiesces and faults a healthy program. Same veto `quiesce::QuiesceState::quiesced` already
     /// applies process-wide (`parties.len() < live`), for the same reason.
     ///
-    /// Assigned AFTER construction (like `exec_registry`) rather than through `new`, so the predicate's
+    /// Assigned AFTER construction (like `parent_wake`) rather than through `new`, so the predicate's
     /// unit fixtures keep an empty registry — i.e. today's behaviour, which is what they test.
     exec_registry: crate::vm::core::ExecRegistry,
     /// gaps.md W7-58 — the run's [`quiesce::QuiesceState`], so an idle worker of this sched can JUDGE
@@ -2088,7 +2093,7 @@ struct MnSched {
     /// `mn_worker_loop`, not in a blocking native), so a run whose only stuck parties are nursery
     /// owners has no polling judge at all and would hang with the party registration alone.
     ///
-    /// Assigned AFTER construction (like `sched_registry`/`exec_registry`) rather than through `new`, so
+    /// Assigned AFTER construction (like `parent_wake`/`exec_registry`) rather than through `new`, so
     /// the predicate's unit fixtures keep an empty state — i.e. today's behaviour, which is what they
     /// test (an empty registry means `live == 1` and `parties` empty, so `quiesced` is never reached
     /// past its count gate).
@@ -2190,20 +2195,6 @@ struct SchedCore {
     /// sched. Such a fiber cannot send, yield or spawn until its child scope moves, so it is stuck by
     /// construction — see `is_deadlocked_ignoring_jobs`'s `running == blocked_owners` clause.
     blocked_owners: usize,
-    /// TICKET-099 — of `blocked_owners`, how many are blocked on a CHILD SCHED (a private eager
-    /// nursery of its own), not a scope on THIS sched. This sched has NO visibility into that child's
-    /// progress (it is not one of `scopes`), so — unlike a same-sched `blocked_owners` fiber, whose
-    /// child scope's own siblings would show up in THIS sched's `running`/`runnable` if they could feed
-    /// it — this sched cannot tell whether the child is genuinely stuck or about to resolve. A nonzero
-    /// count vetoes only THIS sched's OWN fault decision (`is_deadlocked_ignoring_jobs`), the same way
-    /// `is_deadlocked`'s `outstanding_jobs` veto does for an uncounted `Executor` sender: the child's
-    /// own deadlock detection (if genuine) will fire on the CHILD sched instead, and its `Fault`
-    /// propagates back through this fiber's own call return (`Vm::classify_mn_outcome` → `trip_cancel`)
-    /// exactly like any other task failure — never through this sched declaring itself deadlocked.
-    /// `local_quiesced` does NOT read this field: a peer sched's veto (`peer_can_move` →
-    /// `local_quiesced`) must still see THIS sched as quiesced, or the child's own genuine deadlock is
-    /// vetoed forever (the hang this ticket's cross-sched `blocked_owner_guard` widening fixes).
-    cross_sched_blocked_owners: usize,
     parked_n: usize, // total fibers across every `parked` bucket
     /// Cross-nursery flat scheduler (M:N) — the per-nursery join records, replacing the old scalar
     /// `{done,total,body_open}`. ONE global `MnSched` is shared by every nested `run_mn_nursery` /
@@ -2483,7 +2474,6 @@ impl MnSched {
                 slots: (0..total).map(|_| None).collect(),
                 running: 0,
                 blocked_owners: 0,
-                cross_sched_blocked_owners: 0,
                 parked_n: 0,
                 scopes: vec![JoinScope {
                     base_index: 0,
@@ -2516,9 +2506,8 @@ impl MnSched {
             inflight: AtomicUsize::new(0),
             blocked_native: AtomicUsize::new(0),
             mem_cap,
-            // TICKET-099 — empty by default; both `MnSched` construction sites assign the run's
-            // registry. An empty one is today's behaviour (no peers to wake or veto against).
-            sched_registry: Default::default(),
+            // gaps.md B5 — no parent by default; `activate_eager_nursery` sets it on an eager sched.
+            parent_wake: None,
             // gaps.md W7-56 — empty by default; both `MnSched` construction sites assign the run's
             // registry. An empty one is today's behaviour (no veto).
             exec_registry: Default::default(),
@@ -2902,16 +2891,8 @@ impl MnSched {
             // hang, not a style nit. Everything below the gap is therefore re-derived: `continue`
             // rather than fall through, so `c.terminate` and the queue gates at the top of the loop
             // are re-evaluated rather than skipped with a stale verdict (a lost wakeup otherwise).
-            if !judged && self.local_quiesced(&c) {
-                // TICKET-099 — `judged` is set BEFORE the peer veto below, not after. It is what
-                // selects the timed `DEMOTE_POLL_BACKOFF` park further down over the untimed
-                // `self.cv.wait(c)` — and a vetoed sched needs that timed park: nothing notifies this
-                // sched's `cv` when a PEER quiesces later, so leaving `judged` false here would let a
-                // vetoed sched sleep forever with nothing left to re-examine it.
+            if !judged && self.is_deadlocked_ignoring_jobs(&c) {
                 judged = true;
-                if self.any_peer_can_move() {
-                    continue;
-                }
                 drop(c);
                 let verdict = self.quiesce.quiesced(&self.exec_registry);
                 c = self.lock();
@@ -3049,7 +3030,7 @@ impl MnSched {
                 drop(c);
                 self.cv.notify_all();
                 core.cv.notify_all();
-                self.wake_run_wide(key, WakeKind::Send);
+                self.wake_parent_chain(key, WakeKind::Send);
             }
         }
     }
@@ -3109,7 +3090,7 @@ impl MnSched {
         self.wake_bucket(&mut c, key, WakeKind::All);
         drop(c);
         self.cv.notify_all();
-        self.wake_run_wide(key, WakeKind::All);
+        self.wake_parent_chain(key, WakeKind::All);
         core.cv.notify_all();
     }
 
@@ -3133,7 +3114,7 @@ impl MnSched {
         self.wake_bucket(&mut c, key, WakeKind::All);
         drop(c);
         self.cv.notify_all();
-        self.wake_run_wide(key, WakeKind::All);
+        self.wake_parent_chain(key, WakeKind::All);
         core.cv.notify_all();
         true
     }
@@ -3155,7 +3136,7 @@ impl MnSched {
         drop(c);
         self.cv.notify_all();
         core.cv.notify_all();
-        self.wake_run_wide(key, kind);
+        self.wake_parent_chain(key, kind);
     }
 
     /// §6d M:N multi-channel `wait` park — the N-key generalization of [`MnSched::park`]. The running
@@ -3282,7 +3263,7 @@ impl MnSched {
                 }
             }
             for k in rendezvous {
-                self.wake_run_wide(k, WakeKind::Send);
+                self.wake_parent_chain(k, WakeKind::Send);
             }
         }
     }
@@ -3500,35 +3481,25 @@ impl MnSched {
         }
     }
 
-    /// TICKET-099 — after waking this sched's own `parked` bucket for `key`, wake the matching bucket
-    /// on every OTHER live `MnSched` of this run too. A parked receiver can sit on a sibling sched or a
-    /// descendant sched, not just an ancestor — the old upward-only ancestor chain never reached
-    /// either, which is the whole defect this replaces. Takes `sched_registry` first, upgrades every `Weak`,
-    /// prunes the dead entries, then DROPS the registry lock before touching any sched core (registry
-    /// then core, R then A — the same order [`Vm::wake_on_send_key`] already uses); the caller must
-    /// hold no sched core lock and no `ChannelCore::q` when this runs. `wake_key` takes each peer's OWN
-    /// core lock in turn, so no two sched cores are ever held at once (no ABBA). An over-wake (a peer's
-    /// bucket is empty → its fiber just re-parks) is the already-tolerated pattern.
-    fn wake_run_wide(&self, key: usize, kind: WakeKind) {
-        let mut g = self
-            .sched_registry
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if g.is_empty() {
-            return;
-        }
-        let live: Vec<_> = g.iter().filter_map(|w| w.upgrade()).collect();
-        g.retain(|w| w.strong_count() > 0);
-        drop(g);
-        for s in live {
-            if !std::ptr::eq(Arc::as_ptr(&s), self as *const MnSched) {
-                s.wake_key(key, kind);
-            }
+    /// gaps.md B5 — after waking this sched's own `parked` bucket for `key`, walk the `parent_wake`
+    /// chain and wake each ANCESTOR sched's bucket too. `None` for every ordinary sched, so this is a
+    /// no-op on the hot path; it fires only for an eager nested nursery's private sched, where a
+    /// receiver parked in the PARENT nursery on this channel would otherwise never be made runnable
+    /// (the value is already in the shared `ChannelCore`, but wake is per-sched). Each ancestor is
+    /// woken under its OWN core lock — the eager core guard is already dropped by the caller before
+    /// this runs, and `parent_wake` points strictly UPWARD, so no two sched cores are ever held at
+    /// once (no ABBA). `wake_bucket` bumps the ancestor's own `runnable`, requeuing the parent's
+    /// receiver onto its home queue; an over-wake (empty queue → re-park) is the tolerated pattern.
+    fn wake_parent_chain(&self, key: usize, kind: WakeKind) {
+        let mut p = self.parent_wake.clone();
+        while let Some(anc) = p {
+            anc.wake_key(key, kind);
+            p = anc.parent_wake.clone();
         }
     }
 
     /// Drain this sched's `parked` bucket for `key` and notify its workers — one link of
-    /// [`MnSched::wake_run_wide`], also used by the W7-56 registry walk in [`Vm::wake_on_send`]
+    /// [`MnSched::wake_parent_chain`], also used by the W7-56 registry walk in [`Vm::wake_on_send`]
     /// (an eager `Executor` job holds no sched, so it reaches a parked fiber only this way). Takes
     /// the core lock itself, so the caller must hold NO sched core lock and no `ChannelCore::q`.
     fn wake_key(&self, key: usize, kind: WakeKind) {
@@ -3551,7 +3522,7 @@ impl MnSched {
         self.cv.notify_all();
         // gaps.md B5 — also wake a receiver parked on this channel in an ANCESTOR (parent) nursery's
         // sched (eager nested nursery only; no-op otherwise). Value is already queued above.
-        self.wake_run_wide(key, WakeKind::All);
+        self.wake_parent_chain(key, WakeKind::All);
         // D5 owe #3 (Path C) — also wake any worker thread DEMOTED on this channel (blocked in place
         // on `core.cv` after a `recv` inside a native callback). Snapshot-parked fibers are requeued
         // above + woken via `self.cv`; a demoted thread instead waits on the channel's OWN condvar, so
@@ -3574,7 +3545,7 @@ impl MnSched {
         core.cv.notify_all();
         // gaps.md B5 — a close from inside an eager body must also wake a receiver ranging over this
         // channel in an ANCESTOR nursery so it observes the close and ends (no-op for ordinary scheds).
-        self.wake_run_wide(key, WakeKind::All);
+        self.wake_parent_chain(key, WakeKind::All);
     }
 
     /// Record a finished fiber's outcome in its FLAT slot, bump its SCOPE's done, drop it from
@@ -3867,23 +3838,16 @@ impl MnSched {
     }
 
     /// [`MnSched::is_deadlocked`] minus its W7-56 outstanding-job veto — "can THIS sched still move on
-    /// its own?", asked without reference to any executor OR any peer sched.
+    /// its own?", asked without reference to any executor.
     ///
-    /// Three callers:
+    /// Two callers, and the split is what makes W7-58's verdict non-circular:
     /// * [`quiesce::PartyWait::Nursery::satisfiable`] — an owner parked in a nursery join is
     ///   satisfiable exactly when its nursery can still move. The full predicate would be useless
     ///   there: it vetoes on `outstanding > 0`, which is precisely the W7-58 shape (a stuck job).
     ///   Sound because that job is then a registered party of the process-wide verdict in its own
     ///   right — an *unregistered* job is a running one, and `parties.len() < live` already vetoes.
-    ///   TICKET-099 — never sees the peer veto either: the process-wide verdict already does its own
-    ///   cross-sched accounting, and a second veto underneath it double-counts (see
-    ///   `any_peer_can_move`'s own doc).
-    /// * [`quiesce::QuiesceState::live_eager_bodies`] — same reason: it feeds the process-wide verdict,
-    ///   so it must not see the peer veto either (TICKET-099).
     /// * the W7-58 judge in [`MnSched::take_runnable`], which escalates to the process-wide verdict
-    ///   when only this sched's own predicate holds — reached through [`MnSched::is_deadlocked_ignoring_jobs`],
-    ///   which DOES see the peer veto, and through [`MnSched::is_deadlocked`]'s four `flag_deadlock`
-    ///   callers.
+    ///   when only this sched's own predicate holds.
     ///
     /// **Why it is not circular, stated precisely.** It reads no party state and no `outstanding` —
     /// so the process-wide verdict never appears on its own right-hand side. It is NOT lock-free
@@ -3891,7 +3855,7 @@ impl MnSched {
     /// peeks `ChannelCore::q` for every demoted fiber. Evaluated from `PartyWait::Nursery` that makes
     /// the chain **P → A → Q**, which is the established total order (`parties` → `SchedCore` →
     /// `ChannelCore::q`); `A → Q` is the order `send_wake` and the demoted peek already use.
-    pub(super) fn local_quiesced(&self, c: &SchedCore) -> bool {
+    pub(super) fn is_deadlocked_ignoring_jobs(&self, c: &SchedCore) -> bool {
         // The `done < total` half is now explicit (the owner-stop replaced the preceding scalar
         // `done == total` terminate check). If EVERY scope is done there is no deadlock — `finish` will
         // have (or is about to) set global `terminate`; the owner-stop returns each owner already.
@@ -3997,73 +3961,6 @@ impl MnSched {
             return false;
         }
         true
-    }
-
-    /// TICKET-099 — "can a PEER sched still move?", asked from inside a fault decision that already
-    /// holds this sched's own core lock. `try_lock`s the peer's core rather than blocking: a failed
-    /// `try_lock` reads as "a peer can move" (the predicate only ever DECLINES to fault), and a
-    /// `try_lock` can never close a cycle against `wake_run_wide`'s registry-then-core (R then A)
-    /// order, because this is core-then-core (A then A). Calls [`MnSched::local_quiesced`], never
-    /// [`MnSched::is_deadlocked_ignoring_jobs`] — the recursive spelling would come back to `try_lock`
-    /// a core this thread already holds if `self` ever appeared in its own peer list (it never does —
-    /// `any_peer_can_move` excludes `self` by `std::ptr::eq`).
-    ///
-    /// A peer whose only non-parked fiber is an owner blocked at a nested join (`SchedCore::running
-    /// == SchedCore::blocked_owners`, TICKET-095's clause, widened cross-sched by TICKET-099's
-    /// `blocked_owner_guard`) reads as `local_quiesced` and therefore does NOT veto. Dropping that
-    /// cross-sched bracket makes every nested-nursery genuine deadlock hang instead of fault: the
-    /// outer sched's join-blocked fiber would count in `running` with `blocked_owners` at zero, so it
-    /// would never read `local_quiesced`, and this fn would answer "can move" forever.
-    fn peer_can_move(&self) -> bool {
-        let c = match self.core.try_lock() {
-            Ok(c) => c,
-            Err(std::sync::TryLockError::WouldBlock) => return true,
-            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
-        };
-        c.any_scope_incomplete() && !self.local_quiesced(&c)
-    }
-
-    /// TICKET-099 — "can ANY OTHER live sched of this run still move?" `try_lock`s the registry too
-    /// (this thread already holds its own `SchedCore` lock, so the registry acquisition must not
-    /// block): contention reads as "a peer can move", same discipline as [`MnSched::peer_can_move`].
-    /// An empty registry answers `false` — no peers, no veto, which is the unit fixtures' default
-    /// (see `sched_registry`'s own doc).
-    fn any_peer_can_move(&self) -> bool {
-        let g = match self.sched_registry.try_lock() {
-            Ok(g) => g,
-            Err(std::sync::TryLockError::WouldBlock) => return true,
-            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
-        };
-        if g.is_empty() {
-            return false;
-        }
-        let live: Vec<_> = g.iter().filter_map(|w| w.upgrade()).collect();
-        drop(g);
-        live.iter()
-            .filter(|s| !std::ptr::eq(Arc::as_ptr(s), self as *const MnSched))
-            .any(|s| s.peer_can_move())
-    }
-
-    /// TICKET-099 — [`MnSched::local_quiesced`] plus a peer veto, applied ONLY on a FAULT decision
-    /// (`is_deadlocked`'s four `flag_deadlock` callers and the W7-58 judge in `take_runnable`), NEVER
-    /// on an input to the process-wide verdict (`quiesce::PartyWait::Nursery::satisfiable` and
-    /// `quiesce::QuiesceState::live_eager_bodies` both call `local_quiesced` directly — see its own
-    /// doc). The process-wide verdict already does its own cross-sched accounting through `parties`/
-    /// `live`/`outstanding_jobs`; a second cross-sched veto underneath it would over-count `live` and
-    /// hang a genuinely deadlocked run (measured on three `*_still_fault` tests — see `quiesce.rs`).
-    ///
-    /// A THIRD veto, `c.cross_sched_blocked_owners == 0` — this sched must not conclude ITS OWN
-    /// deadlock while one of its fibers is blocked on a CHILD sched it cannot see into (see
-    /// `SchedCore::cross_sched_blocked_owners`'s own doc). Without it, a nested-nursery genuine
-    /// deadlock double-fires: the CHILD sched correctly detects it (its own `is_deadlocked_ignoring_jobs`
-    /// is unaffected — this veto only applies to fibers blocked ON this sched, not the sched a peer's
-    /// fiber is blocked into), but the PARENT sched, now reading `local_quiesced` too (the very fix that
-    /// lets the child's peer veto lift), independently reaches the same false conclusion about itself and
-    /// faults its OWN parked siblings directly — with `flag_deadlock` dropping their `defer`s, instead of
-    /// letting the child's fault propagate up through the blocked fiber's own return and trip the
-    /// parent's scope cancel the ordinary way (`Vm::classify_mn_outcome` → `Vm::trip_cancel`).
-    pub(super) fn is_deadlocked_ignoring_jobs(&self, c: &SchedCore) -> bool {
-        c.cross_sched_blocked_owners == 0 && self.local_quiesced(c) && !self.any_peer_can_move()
     }
 
     /// D5 — hand a fiber that hit a blocking native call to the dirty/blocking pool, freeing this

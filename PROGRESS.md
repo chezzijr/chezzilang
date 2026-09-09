@@ -7,41 +7,6 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
-- **TICKET-099 (2026-09-09) — a `send`/`close` never woke a receiver parked on another eager
-  sched's private nursery (parent→child and sibling→sibling), and the fix for it then hung a genuine
-  nested deadlock.** Two shapes measured on the base binary at `2b3e593b`: a sibling's `send` racing a
-  deeper receiver's park (T=1 30/30 ok, T=8 0/30 ok) and an ancestor's delayed `send` to a receiver
-  already parked deeper (faulted `deadlock:` at every worker count above one). `MnSched::parent_wake`
-  (an upward-only chain) is replaced by `MnSched::wake_run_wide`, a walk of a new run-wide
-  `Vm::sched_registry` that reaches every live sched of the run — parent, sibling, descendant — not
-  just an ancestor; every `send_wake`/`close_wake` call site now uses it. Paired with a peer-veto
-  deadlock predicate: `MnSched::is_deadlocked_ignoring_jobs` now reads `local_quiesced(c) &&
-  !any_peer_can_move()`, where a peer's `try_lock`-guarded `local_quiesced` check declines to fault
-  while ANY live peer sched can still move (contention reads as "can move" — the predicate only ever
-  DECLINES to fault). The veto is applied ONLY on the fault decision (`take_runnable`'s judge and
-  `is_deadlocked`'s four callers), never on the two `quiesce.rs` inputs to the process-wide verdict,
-  which still call `local_quiesced` directly — pointing them at the vetoed predicate hangs a
-  genuinely deadlocked run (measured on three `*_still_fault` tests).
-  **The veto alone hung a genuine NESTED deadlock forever**
-  (`vm::golden_tests::parity_nested_deadlock_cancels_the_outer_parked_siblings_defer`, `timeout 120`
-  never returning): `Vm::blocked_owner_guard` only bracketed `SchedCore::blocked_owners` for a
-  same-sched nested join (TICKET-095), so a fiber blocked at an EAGER PRIVATE child sched's join
-  never counted, its enclosing sched never read `local_quiesced`, and the inner sched's genuine
-  deadlock was vetoed forever. Widened the bracket to the cross-sched case — but that alone made the
-  ENCLOSING sched independently conclude a FALSE deadlock about itself too (mutually-blocked peers
-  each reading the other as unable to move), dropping the parked sibling's `defer` without running
-  it. Fixed with a second counter, `SchedCore::cross_sched_blocked_owners`: it vetoes only a sched's
-  OWN fault decision (so the real, same-sched-visible deadlock still resolves on the CHILD sched and
-  propagates up through the blocked fiber's own return — `Vm::classify_mn_outcome` → `Vm::trip_cancel`
-  — exactly like any other task failure), while leaving `local_quiesced` itself unaffected so a PEER's
-  veto still reads the sched as quiesced. The actual call site needing the bracket turned out to be
-  `Vm::join_eager_nursery`'s private-sched branch, not `run_mn_nursery_nested` as first planned — the
-  latter is reached only by the early-enlisted/late-spawn fallback, not by a nursery entered inside a
-  spawned task. Both shapes are now green at every worker count 1/2/4/8, 30/30 runs each. Two new
-  `benches/sched/*.chz` fixtures (no CPython twin, a nursery has none) measure the two costliest
-  shapes for the new run-wide walk — one send on one channel, a long per-nesting-level registry — and
-  neither moved outside normal run-to-run noise against the base binary. `cargo test` green (4613
-  lib tests passed, 0 failed), `cargo clippy -- -D warnings` clean.
 - **TICKET-098 (2026-09-09) — five diagnostic/edge-case papercuts, W11-9..W11-12.** (A) A
   non-exhaustive STRUCT match's witness doubled its module-mangled key (`main::S.main::S(_, _)`),
   because a `Dom::Prod`'s label is BOTH its sole constructor name and its display prefix; a new
