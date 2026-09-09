@@ -2291,12 +2291,15 @@ reinvented; none is scheduled. (B3–B5 itself is planned in [`concurrency-b3.md
     `wait:` issued directly in the body (not inside a `spawn:`) still faults with a "deadlock — no
     runnable task can send" (the diagnostic points at the `spawn:` fix). Put blocking work in a `spawn:`.
   - **Eager (per-connection) nurseries** run on their OWN private `MnSched` (`activate_eager_nursery`,
-    for liveness — no inline worker between Enter/Join). A cross-nursery wake **OUT OF** an eager body
-    (child→parent: a `send`/`close` inside the eager body waking a receiver parked in the parent) is now
-    routed via `MnSched::parent_wake` (gaps.md B5 — golden
-    `parallel_cross_nursery_nested_send_to_outer_recv.chz`). A wake **INTO** an eager body (parent→child:
-    receiver parked inside, sender in an ancestor) and sibling-eager→sibling-eager are still a separate
-    limit (timing-divergent — complete or deadlock-fault cleanly).
+    for liveness — no inline worker between Enter/Join). A cross-nursery wake in EITHER direction — OUT
+    OF an eager body (child→parent) or INTO one (parent→child, or sibling-eager→sibling-eager) — is
+    routed via `MnSched::wake_run_wide` (gaps.md B5, CLOSED 2026-09-09 TICKET-099 for every direction —
+    goldens `parallel_cross_nursery_nested_send_to_outer_recv.chz` and
+    `parallel_cross_nursery_parent_to_child_send_wakes_the_deeper_receiver`), a run-wide walk of
+    `Vm::sched_registry` that replaced the old upward-only `MnSched::parent_wake` chain. Paired with a
+    peer-veto deadlock predicate (`MnSched::peer_can_move`) and a cross-sched `blocked_owner_guard`
+    widening so a genuine nested deadlock still faults and a sched blocked on a child's join does not
+    conclude a false deadlock about itself.
 
   **(Symbol note:** the old `pick_runnable` linear scan named in earlier drafts is gone — replaced by
   D0's `ready`-set.)

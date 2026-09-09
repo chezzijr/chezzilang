@@ -339,10 +339,15 @@ were mandatory — see the correction under them.
    premise that is gone now that the outer nursery is eager too and an eager nursery owns a **dedicated
    raw drainer thread**, not a bounded-pool slot. Keeping top-level and nested on the same path also
    matters: a lazy nested nursery under an eager outer one would route its join to
-   `run_mn_nursery_outermost` and build a *second* outermost sched with `parent_wake: None` beside the
-   live one — reintroducing the `gaps.md` B5 cross-sched wake bug.
-2. **`Vm::activate_eager_nursery` (`src/vm/sched.rs`) gained a no-parent form.** `parent_wake: None` is
-   correct at the top level (that sched *is* the outermost scheduler; there is nobody above it to wake),
+   `run_mn_nursery_outermost` and build a *second* outermost sched beside the
+   live one — reintroducing the `gaps.md` B5 cross-sched wake bug. (`parent_wake`, the single-ancestor
+   pointer this point originally named, was replaced by the run-wide `MnSched::wake_run_wide` in
+   TICKET-099 — the shape of the bug this point describes is unchanged.)
+2. **`Vm::activate_eager_nursery` (`src/vm/sched.rs`) gained a no-parent form.** Publishing a sched with
+   no ancestor to wake was correct at the top level (that sched *is* the outermost scheduler; there is
+   nobody above it to wake) — TICKET-099's `wake_run_wide` walks the run's `Vm::sched_registry`
+   directly rather than an ancestor pointer, so this point is now moot by construction, not by a `None`
+   value, but the top-level sched still has nothing to wake beneath it.
    and `exec_registry` + `quiesce` stay wired. It returns `None` if the OS refuses the drainer thread,
    which falls back to the lazy queue-at-join path — a worker-less eager scope would hang a blocking
    body.
@@ -379,8 +384,10 @@ were mandatory — see the correction under them.
    eager scopes on one thread nest strictly LIFO.
 
    The reason is wrong turn (c): **two sibling nurseries on two private scheds cannot wake each other.**
-   `send_wake` scans its own sched and then `wake_parent_chain`, which is strictly *upward* — there is
-   no sideways or downward path. One sched with one scope per nursery is the cross-nursery flat
+   `send_wake` scanned its own sched and then `wake_parent_chain`, which was strictly *upward* — there
+   was no sideways or downward path (`wake_parent_chain` was replaced by the run-wide
+   `MnSched::wake_run_wide` in TICKET-099, which closed exactly this gap for the eager-private-sched
+   case too). One sched with one scope per nursery is the cross-nursery flat
    scheduler that already existed for the lazy path; eager start simply has to keep using it.
 
    Two consequences that had to move with it: `poller::drain_scope` (a nested escape may only unpark
@@ -476,8 +483,9 @@ verdict, which is where this milestone's real difficulty lived — not in starti
   already complete is not a "maybe"; it is a "no".
 - **(c) Giving every nursery its own private sched.** The natural reading of "make the top level eager
   too" is "run `activate_eager_nursery` there as well" — and that builds a *sibling* sched beside the
-  enclosing one. Sibling scheds are mutually invisible (`send_wake` → own sched → `wake_parent_chain`,
-  strictly upward), so a task in one nursery could not wake a receiver parked in another, and
+  enclosing one. Sibling scheds were mutually invisible (`send_wake` → own sched → `wake_parent_chain`,
+  strictly upward — replaced by the run-wide `MnSched::wake_run_wide` in TICKET-099, which reaches a
+  sibling directly), so a task in one nursery could not wake a receiver parked in another, and
   `examples/parallel_cross_nursery_{circular,fanout}.chz` — the goldens that exist for exactly this —
   **false-faulted** `deadlock: every task in this parallel: block is blocked…`. Fixed by making a
   nested nursery a SCOPE on the enclosing sched (mechanism 6). **Lesson: eager start is not a scheduling

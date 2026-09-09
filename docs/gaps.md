@@ -3705,10 +3705,17 @@ two agree. Low priority.
 > UNCHANGED — a genuine no-sender quiesce still faults. Golden
 > `parallel_cross_nursery_nested_send_to_outer_recv.chz` (serial==M:N=="receiver got 1"; 30× on M:N under
 > CPU load, 0 flakes) + `parity_tests.rs` parity + three guards (genuine-deadlock-still-faults,
-> real-fault-reports-real-error, parent→child-residual-never-panics). **Residual (documented, pinned):**
-> parent→child (receiver parked INSIDE an eager body, sender in an ancestor — `parent_wake` points UP
-> only) and sibling-eager→sibling-eager remain timing-divergent (complete-or-deadlock-fault cleanly); a
-> descendant walk / VM-global registry would be a larger pre-freeze change (out of scope). See
+> real-fault-reports-real-error, parent→child-residual-never-panics). **Residual, CLOSED 2026-09-09
+> (TICKET-099):** the parent→child direction (receiver parked INSIDE an eager body, sender in an
+> ancestor — `parent_wake` pointed UP only) and sibling-eager→sibling-eager are fixed too.
+> `MnSched::parent_wake`'s single-ancestor pointer is replaced by `MnSched::wake_run_wide`, a walk of a
+> new run-wide `Vm::sched_registry` (the "descendant walk / VM-global registry" this paragraph called
+> out of scope) that reaches every live sched of the run in either direction. Paired with a peer-veto
+> deadlock predicate (`MnSched::peer_can_move`/`local_quiesced`) so a genuine nested deadlock still
+> faults instead of hanging, and a cross-sched widening of `blocked_owner_guard`
+> (`SchedCore::cross_sched_blocked_owners`) so a sched blocked on a child sched's join does not conclude
+> a FALSE deadlock about itself. Both former-residual shapes are now green at every worker count 1/2/4/8,
+> 30/30 runs each — see `PROGRESS.md`'s TICKET-099 entry. See
 > `docs/cross-nursery-flat-scheduler.md` (eager bullet + §3).
 
 On the **default M:N engine**, a `send` issued from inside a **nested** (child) `parallel:` does not wake a
@@ -5582,7 +5589,8 @@ parallel:
 **Root cause — NOT where the hunt's report guessed.** The report proposed "`close_wake` does not
 claim/sweep the `Wait` token the way `send_wake` does". That is **false**: `send_wake` and `close_wake`
 both funnel through the same `wake_bucket`, whose `ParkedEntry::Wait` arm does the claimed-CAS + sweep
-identically, and both walk `wake_parent_chain` (B5). The real cause is the N-arm **gap re-check** in
+identically, and both walk `wake_run_wide` (B5; renamed from `wake_parent_chain`, TICKET-099). The real
+cause is the N-arm **gap re-check** in
 `MnSched::park_wait` (`src/vm/mod.rs:2378`): its recv-arm readiness predicate was `!g.is_empty()` and
 deliberately ignored `g.closed` — an in-code `parity-perf-0` note records that a previous attempt at
 `closed == ready` was reverted because it live-locked (requeue → re-poll → `op_wait_poll` SKIPS the
@@ -12504,16 +12512,22 @@ outlived the engine; `docs/concurrency.md` §5a did not say `pmap` is a submodul
 is a type error); `docs/stdlib.md` implied whole-module `import std.ffi` licenses the bare width names
 (it licenses `ptr` and the qualified `ffi.int32` only); `ffi.free`'s double-free abort was unstated.
 
-### The one row that needs a DECISION, not a patch
+### The row that needed a DECISION — CLOSED 2026-09-09 (TICKET-099)
 
 The parent→child cross-nursery residual — a receiver parked inside an eager body, sender in an
-ancestor — is documented in `docs/cross-nursery-flat-scheduler.md` as "timing-divergent and
-complete-or-deadlock-fault cleanly". **Re-measured here, it is deterministic per worker count:**
-`CHEZZI_THREADS=1` prints the value 10/10; `=2` and `=4` fault `deadlock` 10/10; Go prints the value at
-every `GOMAXPROCS`. So it is a **confident FALSE `deadlock` on a program that has a live sender**,
-which `parked-is-not-stuck` / **W7-12** say a heuristic must never emit — the required behaviour when
-unsure is to DECLINE. Closing it is the cross-nursery flatten milestone that document designs, so it
-is recorded rather than ticketed. Its doc bullet has been corrected in place.
+ancestor — was documented in `docs/cross-nursery-flat-scheduler.md` as timing-divergent and
+complete-or-deadlock-fault cleanly. **Re-measured here (before the fix), it was deterministic per
+worker count:** `CHEZZI_THREADS=1` printed the value 10/10; `=2` and `=4` faulted `deadlock` 10/10; Go
+printed the value at every `GOMAXPROCS`. So it was a **confident FALSE `deadlock` on a program that has
+a live sender**, which `parked-is-not-stuck` / **W7-12** say a heuristic must never emit — the required
+behaviour when unsure is to DECLINE. Closing it needed the cross-nursery flatten decision this row
+asked for: replace the upward-only `MnSched::parent_wake` chain with `MnSched::wake_run_wide` (a
+run-wide `Vm::sched_registry` walk) plus a peer-veto deadlock predicate
+(`MnSched::peer_can_move`/`local_quiesced`) and a cross-sched `blocked_owner_guard` widening
+(`SchedCore::cross_sched_blocked_owners`) so the fix does not just trade a false `deadlock` for a hung
+one. Both the parent→child and sibling-eager→sibling-eager shapes are now green at every worker count
+1/2/4/8, 30/30 runs each. Its doc bullets are corrected in place (`docs/cross-nursery-flat-scheduler.md`,
+`docs/concurrency.md`, `docs/concurrency-tier-d.md`).
 
 Also recorded rather than filed: DAG aliases split into two copies at the airlock
 (`docs/concurrency.md:1498` says deliberate, pinned by
