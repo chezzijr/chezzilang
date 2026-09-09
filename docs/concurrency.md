@@ -1536,15 +1536,25 @@ was retired when module globals started deep-copying per task.)
   module-global snapshot) and **round-trips** — every container `WireValue` arm carries a per-serialization
   `id` + a `WireValue::Backref(id)` for a back-edge, exactly like `Cell`/`Closure`. `from_wire` ties the
   knot on the receiver (placeholder-alloc → register `id` → recurse → patch); `Map`/`Set` reuse the carried
-  hash so a cyclic key is never re-hashed. **Byte-identical across runs.** For **data** the identity is
-  **back-edge-only** (a node is popped off the serialize DFS stack on exit), so an acyclic **DAG alias**
-  (the same node appearing twice off the cycle) is re-serialized as **two independent deep copies**, never
-  collapsed into one shared node (mutating one copy in a task leaves the other untouched). The depth cap
+  hash so a cyclic key is never re-hashed. **Byte-identical across runs.** **TICKET-100:** one source object
+  now produces **one copy per crossing**, for data and cells alike — a node is popped off the serialize DFS
+  stack on DFS exit but stays recorded for the rest of the crossing (`WireMemo::nodes`), so an acyclic **DAG
+  alias** (the same node appearing twice off the cycle) is ALSO `Backref`'d to the one copy: mutating
+  through one alias in a task is visible through the other, matching same-task reference semantics
+  (`b := a`) and CPython's `copy.deepcopy` (which memoizes by source identity). The depth cap
   (`maximum structural depth …`) stays **only** as the backstop for a genuinely-unbounded **acyclic** nest.
-- **A captured BINDING keeps its identity across the whole crossing — the one deliberate exception to the
-  DAG rule above.** The `Cell` that backs a by-reference-captured local is memoized for the ENTIRE
-  serialization, not just the current DFS stack, so **two sibling closures over one local still share one
-  cell after crossing**:
+- **The `RwShared` store is the ONE exception, and it is a recorded limit (W11-15), not a design
+  choice.** Its read views (`at`/`for_each`/`fold`/`slice`/`get_key`) drain ONE stored wire through MANY
+  independent rebuild maps, so a cross-element back-reference would force the rebuild side
+  (`from_wire_piece`) to re-materialize the whole container **per element** — the cliff
+  `rwshared_view_over_shared_bindings_is_not_quadratic` exists to catch. So the three `RwShared` stores
+  alone keep the OLD per-crossing-DFS-stack scoping: a DAG alias stored in an `RwShared` still crosses as
+  two independent copies, exactly like every store did before this ticket.
+- **A captured BINDING keeps its identity across the whole crossing.** The `Cell` that backs a
+  by-reference-captured local is memoized for the ENTIRE serialization, not just the current DFS stack, so
+  **two sibling closures over one local still share one cell after crossing** — this was already true
+  before TICKET-100 and is now one case of the general one-copy-per-crossing rule above, not an exception
+  to it:
 
   ```
   struct Ctr:
@@ -1564,13 +1574,13 @@ was retired when module globals started deep-copying per task.)
   print(d.get())          # 2 after two incs — ONE binding, not one per reference
   ```
 
-  **Why the two rules differ:** a list is a *value*, a cell is a *binding's identity*. The language's own
+  **Why the cell rule was never really different:** a cell is a *binding's identity*. The language's own
   rule ([`syntax.md`](syntax.md)) is that a write through a capture is visible in the defining scope **and
   across sibling closures**; crossing the airlock snapshot-copies that binding into **one** independent
   per-task cell — one per **binding**, not one per reference — so the sharing rule survives inside the
-  task (Go behaves the same). Data aliasing keeps the deep-copy-independence contract unchanged: only
-  `Obj::Cell` uses the persistent memo, every container and the closure VALUES themselves still pop on DFS
-  exit. One serialization spans everything that crosses together — a `spawn`'s callee/receiver + all args,
+  task (Go behaves the same). TICKET-100 made data aliasing follow the SAME memoize-by-source-identity
+  discipline (`WireMemo::nodes`), so a container/closure and a `Cell` now share one rule instead of two.
+  One serialization spans everything that crosses together — a `spawn`'s callee/receiver + all args,
   a `spawn:` block's captures, and **the whole module snapshot** (every module, not one: W7-4a).
 
   **Known ceilings** — all of the shape "two *independent* serializations reach the same cell", which is

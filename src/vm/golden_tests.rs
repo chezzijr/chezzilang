@@ -8248,13 +8248,14 @@ main()";
 }
 
 /// W7-4 (was `airlock_aliased_closure_stays_independent`, which asserted `1`): a list holding the SAME
-/// closure twice (`[f, f]`, f closing over the mutable outer local `count`) crosses the airlock. The
-/// closure VALUES are still two independent deep copies (the `Closure` arm keeps the back-edge-only,
-/// pop-on-DFS-exit `path` discipline) — but the ONE BINDING they close over is now ONE cell on the far
-/// side, because a cell is a binding's identity, not a value (`WireMemo::cells` is never popped). So
-/// `pair[0]()` then `pair[1]()` reads `2`, matching the language's own sibling-closure sharing rule
-/// (docs/syntax.md) and Go. Contrast `airlock_struct_dag_alias_stays_independent` below, which pins the
-/// unchanged DATA rule: an acyclic DAG alias is still two independent copies.
+/// closure twice (`[f, f]`, f closing over the mutable outer local `count`) crosses the airlock. TICKET-100:
+/// the two list slots now hold ONE closure object — step 4's `Obj::Closure` arm back-references an
+/// off-stack alias exactly like the container arms — and the ONE BINDING they close over was already ONE
+/// cell (`WireMemo::cells` is never popped). Collapsing the closure VALUE is unobservable: a closure is
+/// proto + captures, immutable, and every piece of mutable state it owns already lived in the cell. So
+/// `pair[0]()` then `pair[1]()` still reads `2`, matching the language's own sibling-closure sharing rule
+/// (docs/syntax.md) and Go. See `airlock_struct_alias_preserves_identity` — data and closures now follow
+/// the SAME identity rule.
 #[test]
 fn airlock_aliased_closure_shares_its_binding() {
     let src = "\
@@ -8351,38 +8352,13 @@ fn airlock_mixed_struct_closure_cycle_round_trips_both() {
     assert_golden_out(src, "5\n");
 }
 
-/// ADVERSARIAL, parity-blind (the item-2 lesson): a mutable `struct` appearing TWICE as an ACYCLIC
-/// alias in a spawned payload must stay TWO INDEPENDENT deep copies — the back-edge-only (pop-on-DFS-
-/// exit) memo discipline re-serializes an off-stack alias as an independent copy, never a shared node.
-/// A shared-vs-duplicated node is stdout-identical, so this asserts INDEPENDENCE
-/// explicitly: mutate one alias in the task, observe the other is UNAFFECTED (`9 1`, not `9 9`). Guards
-/// against a future visited-set regression collapsing DAG aliases into one shared node (mirror
-/// `airlock_aliased_closure_shares_its_binding` for the closure/BINDING path, which deliberately does
-/// NOT share this rule). UNCHANGED by W7-4 — only `Obj::Cell` became persistent-memo.
-#[test]
-fn airlock_struct_dag_alias_stays_independent() {
-    let src = "\
-struct Box:
-    n: int
-fn main():
-    box := Box(1)
-    pair := [box, box]
-    r := Channel[str]()
-    parallel:
-        spawn:
-            p := pair
-            p[0].n = 9
-            r.send(\"{p[0].n} {p[1].n}\")
-    print(r.recv())
-main()";
-    assert_golden_out(src, "9 1\n");
-}
-
-/// TICKET-100: the airlock copy is not identity-preserving for a plain non-cyclic alias. `pair := [box,
-/// box]` holds ONE struct reached by two references; the same-task semantics (`b := a` means a write
-/// through `a` is visible through `b`) and CPython's `deepcopy` (which memoizes by source identity)
-/// both say the copy must still be ONE object on the far side. `airlock_struct_dag_alias_stays_independent`
-/// above pins today's WRONG answer (`9 1`) as a characterization test; this test states the correct one.
+/// TICKET-100: the airlock copy is now identity-preserving for a plain non-cyclic alias, matching the
+/// same-task semantics (`b := a` means a write through `a` is visible through `b`) and CPython's
+/// `deepcopy` (which memoizes by source identity). `pair := [box, box]` holds ONE struct reached by two
+/// references; mutating through one alias in the task is visible through the other (`9 9`, not `9 1`).
+/// Before this change the back-edge-only (pop-on-DFS-exit) memo discipline re-serialized an off-stack
+/// alias as an independent copy — `airlock_struct_dag_alias_stays_independent` pinned that as `9 1` and
+/// is now deleted (this test runs the byte-identical program with the corrected golden).
 #[test]
 fn airlock_struct_alias_preserves_identity() {
     let src = "\
@@ -8402,14 +8378,13 @@ main()";
     assert_golden_out(src, "9 9\n");
 }
 
-/// W7-4 fence for the SEAM the fix creates: `do_spawn`/`lower_task` now serialize the callee, ALL args
-/// and the receiver under ONE `WireMemo` (so sibling closures keep their one binding). The same list
-/// passed as TWO SEPARATE args must nonetheless stay TWO INDEPENDENT deep copies — the data-DAG rule
-/// is per-serialization, not per-root, and only `Obj::Cell` is exempt. Mutating arg `a` in the task
-/// must leave arg `b` untouched (`2 1`, not `2 2`). This is the exact case a careless
-/// "share the whole memo for everything" widening would collapse.
+/// W7-4/TICKET-100 fence for the SEAM the fix creates: `do_spawn`/`lower_task` serialize the callee, ALL
+/// args and the receiver under ONE `WireMemo` (so sibling closures/aliases keep their one identity). The
+/// same list passed as TWO SEPARATE args is one source object reached via two roots, so it must stay ONE
+/// object on the far side too — the data-DAG identity rule is per-serialization, not per-arg. Mutating
+/// arg `a` in the task must be visible through arg `b` (`2 2`, not `2 1`).
 #[test]
-fn airlock_cross_arg_data_alias_stays_independent() {
+fn airlock_cross_arg_data_alias_preserves_identity() {
     let src = "\
 fn work(a: List[int], b: List[int], r: Channel[str]):
     a.push(2)
@@ -8421,7 +8396,76 @@ fn main():
         spawn work(xs, xs, r)
     print(r.recv())
 main()";
+    assert_golden_out(src, "2 2\n");
+}
+
+/// TICKET-100: `Channel.send` is an ordinary cross-heap STORE (`to_wire_crossable`, `elem_split` off),
+/// so it now keeps identity like `spawn` args do. `xs := [box, box]` holds ONE struct reached twice;
+/// after `ch.send(xs)` the receiving task mutates through `ys[0]` and reads the SAME value through
+/// `ys[1]` (`9 9`).
+#[test]
+fn airlock_channel_send_preserves_alias_identity() {
+    let src = "\
+struct Box:
+    n: int
+fn main():
+    box := Box(1)
+    xs := [box, box]
+    ch := Channel[List[Box]]()
+    ch.send(xs)
+    parallel:
+        spawn:
+            ys := ch.recv()
+            ys[0].n = 9
+            print(\"{ys[0].n} {ys[1].n}\")
+main()";
+    assert_golden_out(src, "9 9\n");
+}
+
+/// W11-15, a KNOWN RESIDUAL: the three `RwShared` stores keep `elem_split` (`to_wire_crossable_split`),
+/// so `WireMemo::nodes` stays empty for them and a DAG alias stored in an `RwShared` still crosses as
+/// two independent copies, unlike every other cross-heap store after TICKET-100. Deferred because an
+/// `RwShared` read view (`at`/`for_each`/`fold`/`slice`/`get_key`) drains one stored wire through many
+/// independent rebuild maps, so a cross-element back-ref would force `from_wire_piece` to re-materialize
+/// the whole container per element — the cliff `rwshared_view_over_shared_bindings_is_not_quadratic`
+/// exists to catch. Re-opens if a rebuild path ever shares one map across the piecewise drains. `outer :=
+/// [inner, inner]` stored in an `RwShared`, read back with `get()`, then pushed through `v[0]`: the two
+/// slots have DIFFERENT lengths (`2 1`), the pre-TICKET-100 answer for every store.
+#[test]
+fn airlock_rwshared_store_dag_alias_is_a_known_residual() {
+    let src = "\
+import std.concurrency
+fn main():
+    inner := [1]
+    outer := [inner, inner]
+    r := RwShared(outer)
+    v := r.get()
+    v[0].push(2)
+    print(\"{v[0].len()} {v[1].len()}\")
+main()";
     assert_golden_out(src, "2 1\n");
+}
+
+/// TICKET-100: a generator has no wire id, so it can never be a `Backref` target. With containers now
+/// back-referencing, a list holding the SAME frame-local generator twice reaches it a second time
+/// off-stack — silently duplicating it would be the exact e8dcad7 wrong-result class the cycle guard
+/// above already prevents on-stack, so the second off-stack reach is REJECTED too.
+#[test]
+fn airlock_generator_reached_twice_rejects() {
+    let src = "\
+fn gen() -> Iterator[int]:
+    yield 1
+fn main():
+    it := gen()
+    xs := [it, it]
+    ch := Channel[List[Iterator[int]]]()
+    ch.send(xs)
+main()";
+    let out = golden_entry_fault(src);
+    assert!(
+        out.contains("a generator cannot be sent across tasks twice in one crossing"),
+        "expected the double-reach fault message, got: {out:?}"
+    );
 }
 
 /// NF#5 — capture READ (same task): a nested fn reads an outer local by reference; a write to that

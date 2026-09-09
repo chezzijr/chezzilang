@@ -1,0 +1,28 @@
+# TICKET-100 — the airlock's cross-heap copy is now identity-preserving: one source object stays one
+# object per crossing, for containers as well as cells (`b := a` inside a task means the same thing it
+# means outside one). `outer := [inner, inner]` holds ONE list reached twice; a write through one
+# alias inside a spawned task is visible through the other. Gated by `chz_suite_passes`
+# (`tests/chz_suite.rs`).
+
+test fn container_alias_preserves_identity_across_spawn():
+    inner := [1]
+    outer := [inner, inner]
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            outer[0].push(99)
+            r.send("{outer[0].len()} {outer[1].len()}")
+    assert r.recv() == "2 2"
+
+struct Box:
+    n: int
+
+test fn struct_alias_preserves_identity_across_spawn():
+    box := Box(1)
+    pair := [box, box]
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            pair[0].n = 9
+            r.send("{pair[0].n} {pair[1].n}")
+    assert r.recv() == "9 9"

@@ -12497,6 +12497,7 @@ already-correct regression surface live in the tickets — this is the index, no
 | ~~**W11-12**~~ | P3 | stdlib | `regex.replace_all(r"(\d+)", "12 34", "$1px")` silently returns `Ok(' ')`. Go RE2 is byte-identical so the BEHAVIOUR is right; the gap is that the sibling Python spelling `\1` already gets a custom diagnostic and the greedy-name trap `$1x` gets none | ✅ CLOSED 2026-09-09 (TICKET-098) — `replace_all` now Errs on a `$name` reference to a capture group the pattern does not have, naming the RE2 dialect. Every valid or literal `$` spelling (`${1}`, `$$`, a trailing lone `$`, `$` before a space, a named group) is unchanged. |
 | **W11-13** | P3 | airlock | The airlock isolation warning gates on the READ shape: `s.v = 2` in a `spawn:` then `print("{s}")` warns, `print("{s.v}")` does not, and `xs[0].push(2)` does not, while five other write/read shapes do. **Deliberately NOT ticketed** — an under-warn is the acceptable direction per CLAUDE.md, and that convention also requires the gate be a MEASURED table derived from the runtime, one program per shape. Re-open only with that enumeration in hand | — |
 | **W11-14** | P3 | cancel | `Vm::guarded_checkpoint` (`src/vm/exec.rs:385`) has the same owner hole TICKET-096 fixed at the other two checkpoints, so a nursery OWNER running a straight-line callback under `list.map`/`filter`/`fold`/`sort_by` reaches no loop back-edge and no blocking op and a child's fault never cuts it short; it was left open because that checkpoint runs per ELEMENT and `MnSched::scope_fault` takes the sched lock, so a rung there needs its own `benches/run.chz` measurement, which is the condition for re-opening | — |
+| **W11-15** | P3 | airlock | TICKET-100 made a DAG alias cross the airlock as ONE object for every store except the three `RwShared` stores (`Op::NewRwShared`, `RwShared.set`, `RwShared.write`), which still split it into TWO independent copies — deferred because an `RwShared` read view drains one stored wire through many independent rebuild maps, so a cross-element back-ref would force `from_wire_piece` to re-materialize the whole container per element, the cliff `rwshared_view_over_shared_bindings_is_not_quadratic` exists to catch. Re-opens with a rebuild path that shares one map across the piecewise drains. Pinned by `airlock_rwshared_store_dag_alias_is_a_known_residual` (`src/vm/golden_tests.rs`) | TICKET-100 |
 
 **Doc drift found while judging, fixed in place in this same commit** (no ticket): the Case B and N10
 limits in `docs/cross-nursery-flat-scheduler.md` are measured CLOSED; that file's `--serial` bullet
@@ -12515,12 +12516,9 @@ which `parked-is-not-stuck` / **W7-12** say a heuristic must never emit — the 
 unsure is to DECLINE. Closing it is the cross-nursery flatten milestone that document designs, so it
 is recorded rather than ticketed. Its doc bullet has been corrected in place.
 
-Also recorded rather than filed: DAG aliases split into two copies at the airlock
-(`docs/concurrency.md:1498` says deliberate, pinned by
-`airlock_struct_dag_alias_stays_independent`). Measured, a struct aliased by two names before a
-`spawn:` shows `b.v = 1` in-task where CPython threading and `copy.deepcopy` both show 99 — and W7-4c
-fixed the analogous shape for `Cell`s the OTHER way, so cells and data now disagree. Flagged for
-re-decision.
+TICKET-100 CLOSED this for every crossing except the `RwShared` store: a struct aliased by two names
+before a `spawn:` now shows `b.v = 9` in-task, matching CPython threading and `copy.deepcopy`, and
+data/cell identity no longer disagree. The `RwShared` store residual is filed as **W11-15** above.
 
 ### What the wave did NOT find — the clean columns
 

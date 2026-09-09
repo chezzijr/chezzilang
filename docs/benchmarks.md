@@ -2094,3 +2094,30 @@ pre-change `Vec<char>` collect per operation.
 (O(n), once, at construction) to pick `HeapAscii` vs `Heap`. `benches/run.chz`'s `str` bench (500k
 f-string interpolations + one `join`, all ASCII) is the closest existing bench to this cost: main
 `0.271 s` vs this branch `0.252 s`, same box, load average ~1.4–2.5 — no regression.
+
+## TICKET-100 — one source object stays one object per crossing (2026-09-10)
+
+`hyperfine` and root access (for installing it) are both unavailable in this sandbox, so
+`benches/run.chz` itself (which shells out to `hyperfine`) could not be run; every `FAILED [name]:
+sh: line 1: hyperfine: command not found` was reproduced on this box before falling back to a
+`time`-based substitute measurement, real numbers only, no `hyperfine` table.
+
+The fix adds a per-crossing `nodes`/`gens_seen` map to `WireMemo` (`src/vm/sched.rs`), checked on
+every identity-preserved node's first visit and on every generator reach — the same shape of cost
+`path`/`cells` already pay. Since the standard CPU benches (`fib`, `loop`, `struct`, …) never cross
+the airlock, the cost this ticket could plausibly add is on the SPAWN path specifically, so the
+substitute bench targets that: 20000 iterations of `struct Box: n: int`, alias it twice into a list,
+`spawn` a task that reads through one alias and sends it back over a `Channel[int]`.
+
+Release binary, `main`/pre-ticket (`9c6df262`) vs this branch, same box, `uptime` load average
+beside each run (`chezzi run`, not `hyperfine`, 2 runs each side):
+
+| run | before (`9c6df262`) | after (this branch) |
+|-----|----------------------|----------------------|
+| 1   | 4.233 s (load 2.45)  | 3.958 s (load 2.41)  |
+| 2   | 4.088 s (load 2.45)  | 3.847 s (load 2.45)  |
+
+No regression on the spawn path — the after numbers are consistently faster, within the box's
+normal run-to-run noise (both binaries print the identical result `199990000`). The three extra
+hashmap inserts per identity-preserved node are the same order of cost as the existing `path`
+insert they sit beside, so this is the expected outcome, not a surprise.

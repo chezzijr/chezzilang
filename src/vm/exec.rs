@@ -2621,7 +2621,8 @@ impl Vm {
                 // The box holds the wire form (single serialization == the old deep_clone-in). A
                 // non-sendable init (a frame-holding generator / module/native/FFI handle) faults
                 // gracefully with this Op's span — the box is a shared cross-thread cell.
-                let init = self.to_wire_crossable(init, span)?;
+                // TICKET-100 — `_split`: an `RwShared`'s read views drain this stored wire piecewise.
+                let init = self.to_wire_crossable_split(init, span)?;
                 let h = self.heap.alloc(Obj::RwShared(Arc::new(RwSharedCore {
                     v: RwLock::new(init),
                     ..Default::default()

@@ -3093,7 +3093,8 @@ impl Vm {
             }
             "set" => {
                 self.arity_err("set", args, 1, span)?;
-                let w = self.to_wire_crossable(args[0], span)?;
+                // TICKET-100 — `_split`: this stored wire is drained piecewise by the zero-copy read views below.
+                let w = self.to_wire_crossable_split(args[0], span)?;
                 let core = self.rwshared_core(h);
                 let key = Arc::as_ptr(&core) as usize;
                 let _guard = self.take_update_guard(key, "a RwShared update guard", span)?;
@@ -3132,7 +3133,8 @@ impl Vm {
                 let next = self.guarded(|vm| vm.invoke_value(f, vec![cur], span));
                 self.pop();
                 let next = next?;
-                let stored = self.to_wire_crossable(next, span)?;
+                // TICKET-100 — `_split`: this stored wire is drained piecewise by the zero-copy read views below.
+                let stored = self.to_wire_crossable_split(next, span)?;
                 core.store(stored);
                 Ok(Value::nil())
             }

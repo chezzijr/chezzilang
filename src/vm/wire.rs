@@ -131,21 +131,23 @@ pub enum WireValue {
         inner: Box<WireValue>,
     },
     /// A BACK-REFERENCE to an already-serialized identity-preserved node (`Cell`/`Closure` OR any
-    /// container arm — `List`/`Tuple`/`Map`/`Set`/`Struct`/`Enum`/`NewType`/`Iter`) currently on the
-    /// serialize DFS stack — the encoding that lets ANY value cycle cross the airlock: a recursive local
-    /// `fn`'s letrec self-cell, a mutually-recursive closure pair, a self-referential struct/list/map,
-    /// or a mixed struct+closure cycle. Serialize assigns each such node an `id` on first visit and, on a
-    /// REVISIT of a node still on the stack (a true back-edge), emits `Backref(id)` and stops the descent;
-    /// a node revisited OFF the stack (an acyclic DAG alias) is re-serialized as an independent deep copy
-    /// — preserving the deep-copy-independence contract for closures and data alike.
+    /// container arm — `List`/`Tuple`/`Map`/`Set`/`Struct`/`Enum`/`NewType`/`Iter`) — the encoding that
+    /// lets ANY value cycle cross the airlock: a recursive local `fn`'s letrec self-cell, a
+    /// mutually-recursive closure pair, a self-referential struct/list/map, or a mixed struct+closure
+    /// cycle. Serialize assigns each such node an `id` on first visit and, on a REVISIT of a node still
+    /// on the DFS stack (a true back-edge), emits `Backref(id)` and stops the descent.
     ///
-    /// **W7-4 — [`Cell`](WireValue::Cell) is the ONE exception**: a cell is a BINDING's identity, not a
-    /// value, so its id is memoized for the whole serialization scope and an OFF-stack revisit ALSO
-    /// emits `Backref(id)` (two sibling closures over one captured local must land on one cell — the
-    /// language's own "visible across sibling closures" rule). Cross-heap STORES additionally re-emit a
-    /// cell's full definition once per depth-1 subtree (`WireMemo::elem_split`) so `RwShared`'s
-    /// piecewise read views never see a `Backref` into a sibling piece; a repeated definition dedupes
-    /// on rebuild, so a whole-value rebuild still ties every reference to one cell.
+    /// TICKET-100: a node revisited OFF the stack is ALSO `Backref(id)` now, for containers and closures
+    /// as well as cells — one source object produces one copy per crossing, matching same-task
+    /// reference semantics (`b := a` means the same thing inside a task as outside) and CPython's
+    /// `copy.deepcopy` (memoizes by source identity).
+    ///
+    /// **The `RwShared` store is the ONE exception**: its id is memoized for the whole serialization
+    /// scope like everything else, but the store additionally re-emits a cell's full definition once
+    /// per depth-1 subtree (`WireMemo::elem_split`) so `RwShared`'s piecewise read views never see a
+    /// `Backref` into a sibling piece, and an off-stack container/generator alias goes back to being an
+    /// independent copy under that same `elem_split` scope. A repeated cell definition dedupes on
+    /// rebuild, so a whole-value rebuild still ties every reference to one cell.
     ///
     /// `from_wire` resolves a `Backref` to the placeholder registered under that `id`, tying the knot.
     /// Holds no `GcRef` and terminates the walk, so `has_handle` leaves it `false`.

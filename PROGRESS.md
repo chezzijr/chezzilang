@@ -13036,6 +13036,19 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- **The airlock's cross-heap copy is now identity-preserving for data and closures, not just cells
+  (2026-09-10, TICKET-100).** A DAG alias (`pair := [box, box]`) used to re-serialize as two
+  independent copies on every crossing; it now back-references like a cycle does, so one source
+  object stays one object per crossing (`b := a` means the same thing inside a task as outside one,
+  matching CPython's `copy.deepcopy`). `WireMemo` gains a never-popped `nodes`/`gens_seen` pair
+  alongside `path`/`cells` (`src/vm/sched.rs`); a generator reached twice in one crossing is now a
+  clean fault (`a generator cannot be sent across tasks twice in one crossing`) instead of a silent
+  duplicate, since a generator carries no wire id to back-reference. **Exception, recorded as W11-15
+  (`docs/gaps.md`):** the three `RwShared` stores keep the old per-crossing splitting
+  (`to_wire_crossable_split`), because their read views drain one stored wire through many
+  independent rebuild maps and a cross-element back-ref would make a rebuild quadratic
+  (`rwshared_view_over_shared_bindings_is_not_quadratic`). No regression measured on the spawn path
+  (`docs/benchmarks.md`).
 - **TICKET-050's seven deferred wall-clock tests are converted to counted measures, the Rust ratio
   ban now scans all of `src/`+`tests/`, both W8-8 serialization gates bound child CPU against child
   wall on one run instead of dividing two wall-clock samples, the wall-clock allowlist is down to 19,

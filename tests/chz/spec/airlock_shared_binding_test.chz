@@ -5,8 +5,8 @@
 # `WireValue::Cell`, so `d.inc()` and `d.get()` landed on TWO cells and the shared binding silently
 # split (`d.get()` read 1 where 2 was written).
 #
-# The contrast that must NOT change: a DATA DAG alias (`pair := [xs, xs]`) is still two independent
-# deep copies (docs/concurrency.md) — a cell is a binding's identity, a list is a value.
+# TICKET-100: a DATA DAG alias (`pair := [xs, xs]`) now crosses as ONE object too, same as a cell —
+# both a data alias and a cell alias mean the same source object stays one object per crossing.
 # Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 import std.concurrency
 
@@ -163,10 +163,10 @@ test fn discarded_snapshot_walk_rolls_back_its_cell_ids():
             r.send(_w74size())
     assert r.recv() == 1
 
-# FENCE — the DATA DAG rule is deliberate and must NOT change: an acyclic alias reached twice is two
-# independent deep copies, never collapsed into one shared node (docs/concurrency.md). Green before
-# and after the cell fix; it goes red only under an over-broad "preserve everything" memo.
-test fn data_dag_alias_stays_two_copies():
+# FENCE — TICKET-100 inverted the DATA DAG rule: an acyclic alias reached twice is now ONE object on
+# the far side, same as a cell (docs/concurrency.md). Goes red if a store ever stops back-referencing
+# an off-stack alias.
+test fn data_dag_alias_is_one_object():
     xs := [1]
     pair := [xs, xs]
     ch := Channel[List[List[int]]](1)
@@ -174,7 +174,7 @@ test fn data_dag_alias_stays_two_copies():
     p := ch.recv()
     p[0].push(2)
     assert p[0].len() == 2
-    assert p[1].len() == 1
+    assert p[1].len() == 2
 
 # FENCE — the OTHER boundary of the new rule: identity is preserved within ONE crossing, never BETWEEN
 # crossings. Two separate tasks each snapshot the binding independently (F1 per-task isolation,
@@ -251,8 +251,9 @@ test fn rwshared_views_over_sibling_closures():
     # (`contains` shares the code path but is unreachable with closures — a `fn` is not Hashable, so a
     # Set can never hold two sibling closures.)
 
-# FENCE — same rule across two SEPARATE spawn args (the seam a shared serialize memo could collapse).
-test fn data_dag_alias_across_spawn_args_stays_two_copies():
+# FENCE — TICKET-100: same inverted rule across two SEPARATE spawn args (the seam a shared serialize
+# memo could collapse the wrong way).
+test fn data_dag_alias_across_spawn_args_is_one_object():
     xs := [1]
     r := Channel[str](1)
     fn work(a: List[int], b: List[int], out: Channel[str]):
@@ -260,7 +261,7 @@ test fn data_dag_alias_across_spawn_args_stays_two_copies():
         out.send("{a.len()} {b.len()}")
     parallel:
         spawn work(xs, xs, r)
-    assert r.recv() == "2 1"
+    assert r.recv() == "2 2"
 
 # W7-4 REVIEW (charge 1/5/7) — a `RwShared` read VIEW run CONCURRENTLY with a writer. The first cut
 # resolved a piece's `Backref` by RE-READING `core.v` after dropping the read guard, so a `set` in that
