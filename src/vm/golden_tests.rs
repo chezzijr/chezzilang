@@ -8378,6 +8378,30 @@ main()";
     assert_golden_out(src, "9 1\n");
 }
 
+/// TICKET-100: the airlock copy is not identity-preserving for a plain non-cyclic alias. `pair := [box,
+/// box]` holds ONE struct reached by two references; the same-task semantics (`b := a` means a write
+/// through `a` is visible through `b`) and CPython's `deepcopy` (which memoizes by source identity)
+/// both say the copy must still be ONE object on the far side. `airlock_struct_dag_alias_stays_independent`
+/// above pins today's WRONG answer (`9 1`) as a characterization test; this test states the correct one.
+#[test]
+fn airlock_struct_alias_preserves_identity() {
+    let src = "\
+struct Box:
+    n: int
+fn main():
+    box := Box(1)
+    pair := [box, box]
+    r := Channel[str]()
+    parallel:
+        spawn:
+            p := pair
+            p[0].n = 9
+            r.send(\"{p[0].n} {p[1].n}\")
+    print(r.recv())
+main()";
+    assert_golden_out(src, "9 9\n");
+}
+
 /// W7-4 fence for the SEAM the fix creates: `do_spawn`/`lower_task` now serialize the callee, ALL args
 /// and the receiver under ONE `WireMemo` (so sibling closures keep their one binding). The same list
 /// passed as TWO SEPARATE args must nonetheless stay TWO INDEPENDENT deep copies — the data-DAG rule
