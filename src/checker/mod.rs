@@ -3939,13 +3939,18 @@ mod graph_tests {
 
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-    struct TmpDir(PathBuf);
+    pub(super) struct TmpDir(PathBuf);
     impl TmpDir {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-            let dir = std::env::temp_dir().join(format!("chezzi_chk_{}_{}", std::process::id(), n));
+            let dir =
+                std::env::temp_dir().join(format!("chezzi_chk_graph_{}_{}", std::process::id(), n));
             std::fs::create_dir_all(&dir).unwrap();
             TmpDir(dir)
+        }
+        /// The fixture directory this handle owns, and deletes on drop.
+        pub(super) fn path(&self) -> &Path {
+            &self.0
         }
         fn write(&self, rel: &str, contents: &str) -> PathBuf {
             let p = self.0.join(rel);

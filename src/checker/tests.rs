@@ -9904,7 +9904,8 @@ struct TmpDir(PathBuf);
 impl TmpDir {
     fn new() -> Self {
         let n = CHECKER_TMP_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("chezzi_chk_{}_{}", std::process::id(), n));
+        let dir =
+            std::env::temp_dir().join(format!("chezzi_chk_unit_{}_{}", std::process::id(), n));
         std::fs::create_dir_all(&dir).unwrap();
         TmpDir(dir)
     }
@@ -31513,7 +31514,7 @@ fn the_two_checker_tempdir_helpers_do_not_share_a_name_format() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     // Built at runtime, never written literally: this file is one of the two being scanned, and a
     // literal here would match itself and make the test vacuously red forever.
-    let shared = format!("chezzi_chk_{{}}_{{}}");
+    let shared = ["chezzi_chk_", "{}", "_", "{}"].concat();
     let graph =
         std::fs::read_to_string(root.join("src/checker/mod.rs")).expect("read src/checker/mod.rs");
     let unit = std::fs::read_to_string(root.join("src/checker/tests.rs"))
@@ -31523,5 +31524,67 @@ fn the_two_checker_tempdir_helpers_do_not_share_a_name_format() {
         "checker::graph_tests::TmpDir and checker::tests::TmpDir both format their fixture \
          directory as {shared}, so their independent counters mint identical paths and one \
          helper's Drop deletes the other's live fixture; give each helper its own prefix"
+    );
+}
+
+// TICKET-102 regression guard: `checker::tests::TmpDir` (this file) and `checker::graph_tests::TmpDir`
+// (`src/checker/mod.rs`) each mint their fixture directory from their OWN zero-based counter. They
+// run in the same test binary, so the same process id; if either helper's prefix ever regresses to
+// match the other's, two live fixtures land on the same path and whichever `Drop` runs first
+// deletes the other test's live fixture, and the survivor fails to resolve its own entry file.
+//
+// The two counters are process-global and every other checker test bumps them, so at the moment
+// this test runs they sit at unrelated values and one construction from each may differ by
+// accident. Minting ROUNDS directories from each in lockstep crosses any starting skew smaller
+// than ROUNDS, so a collision would be forced rather than hoped for. Every handle stays alive until
+// the assertion, so this asserts what the bug would break: no two LIVE fixture directories share a
+// path.
+#[test]
+fn colliding_tempdir_names_corrupt_concurrent_checker_fixtures() {
+    use std::collections::HashSet;
+
+    const ROUNDS: usize = 512;
+
+    /// The `_<n>` counter value a fixture directory name ends with.
+    fn counter_of(p: &std::path::Path) -> usize {
+        let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        name.rsplit('_')
+            .next()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("fixture dir name does not end in `_<counter>`: {name}"))
+    }
+
+    let mut graph_live = Vec::with_capacity(ROUNDS);
+    let mut unit_live = Vec::with_capacity(ROUNDS);
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let mut shared: Vec<PathBuf> = Vec::new();
+
+    for _ in 0..ROUNDS {
+        let g = super::graph_tests::TmpDir::new();
+        let gp = g.path().to_path_buf();
+        if !seen.insert(gp.clone()) {
+            shared.push(gp);
+        }
+        graph_live.push(g);
+
+        let u = TmpDir::new();
+        let up = u.0.clone();
+        if !seen.insert(up.clone()) {
+            shared.push(up);
+        }
+        unit_live.push(u);
+    }
+
+    let skew = counter_of(graph_live[0].path()).abs_diff(counter_of(&unit_live[0].0));
+    assert!(
+        skew < ROUNDS,
+        "the two counters started {skew} apart, which ROUNDS = {ROUNDS} does not cross -- raise it"
+    );
+    assert!(
+        shared.is_empty(),
+        "{} of the {} fixture directories minted here repeat a path already live in this test, so two checker fixtures share one directory and each Drop deletes the other's files; first repeat: {}",
+        shared.len(),
+        ROUNDS * 2,
+        shared[0].display()
     );
 }

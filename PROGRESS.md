@@ -58,6 +58,16 @@ Single source of truth for "what am I doing next." Update after every work sessi
   `deadlock:` (20/20 runs, 8-11 ms), and no shape hangs. `chezzi run --threads=1` still measures one
   CPU runner (104% cpu, W8-8 unaffected). `cargo test --lib` green (4617 passed, 0 failed, 2 ignored),
   `cargo clippy -- -D warnings` clean.
+- **TICKET-102 (2026-09-10) — two checker test helpers minted the same tempdir names.**
+  `checker::graph_tests::TmpDir` (`src/checker/mod.rs`) and `checker::tests::TmpDir`
+  (`src/checker/tests.rs`) each formatted `chezzi_chk_{pid}_{n}` off their own zero-based counter in
+  ONE test binary, so two live fixtures shared a directory and the first `Drop` ran `remove_dir_all`
+  over the other's entry file — roughly 1 to 2 full `cargo test --lib` runs in 5 went red, on a
+  varying checker test name. Each helper now carries its own prefix (`chezzi_chk_graph_`,
+  `chezzi_chk_unit_`), the repo's existing one-prefix-per-helper convention; measured over `src/` and
+  `tests/`, `chezzi_chk` was the only one of 19 such prefixes shared by two files. Guarded twice: a
+  source-text rule that neither file may carry the shared format, and a runtime check that mints 512
+  rounds from both real helpers and asserts no two live fixture directories share a path.
 - **TICKET-098 (2026-09-09) — five diagnostic/edge-case papercuts, W11-9..W11-12.** (A) A
   non-exhaustive STRUCT match's witness doubled its module-mangled key (`main::S.main::S(_, _)`),
   because a `Dom::Prod`'s label is BOTH its sole constructor name and its display prefix; a new
