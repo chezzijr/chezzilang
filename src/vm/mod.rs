@@ -3892,6 +3892,20 @@ impl MnSched {
     /// the chain **P → A → Q**, which is the established total order (`parties` → `SchedCore` →
     /// `ChannelCore::q`); `A → Q` is the order `send_wake` and the demoted peek already use.
     pub(super) fn local_quiesced(&self, c: &SchedCore) -> bool {
+        self.quiesced_core(c, true)
+    }
+
+    /// TICKET-101 — `local_quiesced`'s body, parameterised on whether the D5 Path-C clause (below)
+    /// demands a visible parked-or-`blocked_native` victim. `require_parked = true` is "may THIS sched
+    /// fault?" — the fault path and the two process-wide-verdict inputs
+    /// (`quiesce::PartyWait::Nursery::satisfiable`, `quiesce::QuiesceState::live_eager_bodies`) all want
+    /// a victim in view before declaring deadlock, per DEC-099. `require_parked = false` is
+    /// [`MnSched::peer_can_move`]'s question, "can THIS PEER still feed me?" — a peer whose only fiber
+    /// is an owner blocked at a nested join has `parked_n == 0` (it counts only in `blocked_owners`), so
+    /// demanding a parked fiber there vetoes forever even though that fiber can send nothing. Do not
+    /// collapse the two calls: passing `true` at the peer site re-hangs the genuine nested deadlock this
+    /// ticket fixes; passing `false` at either fault-path site hands the verdict a sched with no victim.
+    fn quiesced_core(&self, c: &SchedCore, require_parked: bool) -> bool {
         // The `done < total` half is now explicit (the owner-stop replaced the preceding scalar
         // `done == total` terminate check). If EVERY scope is done there is no deadlock — `finish` will
         // have (or is about to) set global `terminate`; the owner-stop returns each owner already.
@@ -3940,7 +3954,9 @@ impl MnSched {
             // no send can ever arrive, so an all-parked-or-blocked_native quiesce IS a deadlock. The
             // demoted thread observes the resulting `terminate` (via its bounded condvar poll) and
             // faults in place. (`blocked_native++` notifies `cv` so an idle puller re-evaluates this.)
-            && (c.parked_n > 0 || self.blocked_native.load(Ordering::Relaxed) > 0))
+            && (!require_parked
+                || c.parked_n > 0
+                || self.blocked_native.load(Ordering::Relaxed) > 0))
         {
             return false;
         }
@@ -4010,17 +4026,20 @@ impl MnSched {
     ///
     /// A peer whose only non-parked fiber is an owner blocked at a nested join (`SchedCore::running
     /// == SchedCore::blocked_owners`, TICKET-095's clause, widened cross-sched by TICKET-099's
-    /// `blocked_owner_guard`) reads as `local_quiesced` and therefore does NOT veto. Dropping that
-    /// cross-sched bracket makes every nested-nursery genuine deadlock hang instead of fault: the
-    /// outer sched's join-blocked fiber would count in `running` with `blocked_owners` at zero, so it
-    /// would never read `local_quiesced`, and this fn would answer "can move" forever.
+    /// `blocked_owner_guard`) reads as [`MnSched::quiesced_core`]`(&c, false)` and therefore does NOT
+    /// veto (TICKET-101 — `local_quiesced`'s own D5 Path-C parked-victim demand read this same peer as
+    /// "not quiesced" and vetoed forever, which hung the genuine nested deadlock this fn exists to let
+    /// through). Dropping the cross-sched `blocked_owner_guard` bracket entirely makes every
+    /// nested-nursery genuine deadlock hang instead of fault: the outer sched's join-blocked fiber would
+    /// count in `running` with `blocked_owners` at zero, so it would never read quiesced, and this fn
+    /// would answer "can move" forever.
     fn peer_can_move(&self) -> bool {
         let c = match self.core.try_lock() {
             Ok(c) => c,
             Err(std::sync::TryLockError::WouldBlock) => return true,
             Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
         };
-        c.any_scope_incomplete() && !self.local_quiesced(&c)
+        c.any_scope_incomplete() && !self.quiesced_core(&c, false)
     }
 
     /// TICKET-099 — "can ANY OTHER live sched of this run still move?" `try_lock`s the registry too

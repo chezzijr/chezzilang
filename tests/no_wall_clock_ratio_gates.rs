@@ -290,7 +290,7 @@ fn sleep_synchronised_tests() -> BTreeSet<String> {
 /// rejected it (the walk returns 68). Obtain it by compiling once with an empty array and copying
 /// the "sleeps but is not listed" list `no_new_rust_test_sleeps_to_order_two_events` reports,
 /// verbatim, the same way `stack_trace_reports_call_chain`'s golden was obtained.
-const SLEEP_SYNCHRONISED_TESTS: [&str; 77] = [
+const SLEEP_SYNCHRONISED_TESTS: [&str; 78] = [
     "a_bailed_join_stops_its_jobs_from_starting_new_work",
     "a_cancelled_siblings_defer_runs_whole_on_both_engines",
     "a_finished_executor_job_lets_the_genuine_nursery_deadlock_fire",
@@ -366,6 +366,9 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 77] = [
     "reaps_idle_thread",
     "register_with_deadline_times_out_when_fd_never_ready",
     "respects_cap",
+    // TICKET-101. The sleep is a deadline poll (20ms) over a child process that hangs before the
+    // fix and never closes its pipes, not a happens-before edge between two events in this test.
+    "sibling_send_wakes_receiver_in_a_deeper_nursery_at_eight_workers",
     "six_sleeping_jobs_overlap_at_one_worker",
     "socket_read_bytes_recovers_the_sticky_invalid_utf8_carry",
     "submit_to_a_nested_executor_after_a_graceful_outer_shutdown_runs_mn",
