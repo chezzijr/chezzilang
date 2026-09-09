@@ -401,9 +401,12 @@ Critical + Important findings before the completion claim.
   (`..._late_spawn.chz`), and makes the enlist atomic; genuine deadlocks still fault (the predicate
   vetoes only while every incomplete scope is *awaiting the builder's join*). **Wake-side only:** a
   *blocking* recv issued directly in the inline body (case B) still faults — put it in a `spawn:`. Eager
-  (per-connection) nurseries run on a private sched; a wake OUT OF an eager body (child→parent) is now
-  routed via `MnSched::parent_wake` (gaps.md B5, `..._nested_send_to_outer_recv.chz`), but a wake INTO an
-  eager body (parent→child) + sibling-eager→sibling-eager remain a separate limit (timing-divergent).
+  (per-connection) nurseries run on a private sched; a wake in EITHER direction — OUT OF an eager body
+  (child→parent) or INTO one (parent→child, or sibling-eager→sibling-eager) — is routed via
+  `MnSched::wake_run_wide`, a run-wide `Vm::sched_registry` walk that replaced the old upward-only
+  `MnSched::parent_wake` chain (gaps.md B5, CLOSED 2026-09-09 TICKET-099 for every direction —
+  `..._nested_send_to_outer_recv.chz` and `..._parent_to_child_send_wakes_the_deeper_receiver`), paired
+  with a peer-veto deadlock predicate so a genuine nested deadlock still faults.
   **Independent / normal multi-level nesting RUNS** (no "2+ enlisting levels" gate): any
   depth of nested `parallel:` with sibling + late `spawn:`s matches coop; a late `spawn:` into a middle
   nursery runs on the held sched as a fresh trailing scope (`register_scope_seeded`, atomic). The only

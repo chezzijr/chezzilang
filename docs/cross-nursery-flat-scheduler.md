@@ -8,8 +8,10 @@
 > **Status: RESOLVED under `--parallel` (M:N).** The circular outer-sibling case (§1–§2 below) is fixed
 > by the flat scheduler described in §4. The landed fix covers: the circular wakeup, the inline
 > outer-body's own `send`/`close` waking an enlisted parked sibling, a `spawn:` issued *after* the
-> enlist, an atomic enlist, and (gaps.md B5) a send/close OUT OF an eager nested nursery waking a
-> receiver parked in the parent (`MnSched::parent_wake`, child→parent — see the eager bullet below).
+> enlist, an atomic enlist, and (gaps.md B5) a send/close touching an eager nested nursery waking a
+> receiver parked
+> anywhere else in the run (`MnSched::wake_run_wide` — CLOSED 2026-09-09, TICKET-099, every direction;
+> see the eager bullet below).
 > Goldens: `examples/parallel_cross_nursery_{circular,fanout,inline_send,inline_close,late_spawn,
 > nested_send_to_outer_recv}.chz`. Genuine deadlocks still fault (the deadlock predicate vetoes only while
 > every still-incomplete scope is *awaiting the builder's join* — a live external feeder —
@@ -19,8 +21,8 @@
 > GONE): a `parallel:` nested inside another `parallel:` — at any depth, with sibling `spawn`s and late
 > `spawn:`s into a non-outermost nursery — RUNS under `--parallel` and matches the cooperative engine.
 > (A nested nursery entered inside a `spawn:` takes the EAGER private-sched path; a `send`/`close` out of
-> it now wakes a parent-parked receiver via `MnSched::parent_wake` — gaps.md B5, see the eager bullet —
-> while a wake INTO an eager body remains a residual limit.)
+> it now wakes ANY parked receiver of this run via `MnSched::wake_run_wide` — gaps.md B5, see the eager
+> bullet — CLOSED 2026-09-09, TICKET-099: a wake INTO an eager body is no longer a residual limit.)
 > Every still-pending OUTER nursery early-enlists as its own scope; a late `spawn:` into a middle nursery
 > runs on the held flat sched as a fresh trailing scope via `register_scope_seeded` (registers + seeds it
 > atomically under one core lock — append-only slots, un-latches a stale `terminate`), so the inline owner
@@ -48,29 +50,26 @@
 >   timer, at all three counts. Both limits appear to have been closed by later wake-side work; the
 >   §4 paragraph and the §5 parenthetical below are stale in the same way.
 > - **Eager (per-connection) nurseries** run on a private `MnSched` (`activate_eager_nursery`, for
->   liveness — OPTION A, kept). A `send`/`close` inside an eager body only scans that private sched's
->   own park set, so a receiver parked in the PARENT nursery was never woken → a spurious `deadlock`
->   (gaps.md **B5**). **FIXED for child→parent (OUT OF an eager body):** the eager sched carries a
->   `MnSched::parent_wake` pointer at the activating parent sched, and `send_wake`/`close_wake` walk
->   that chain (strictly upward — no cycle, no ABBA) to requeue the parent's parked receiver. Golden:
->   `parallel_cross_nursery_nested_send_to_outer_recv.chz`. **Residual (still a limit):** parent→child
->   (a receiver parked INSIDE an eager body, sender in an ancestor — `parent_wake` points UP only) and
->   sibling-eager→sibling-eager (pinned by
->   `parallel_cross_nursery_parent_to_child_residual_never_panics`). **Re-measured 2026-09-08 (bug-hunt
->   wave 11), and the earlier "timing-divergent" wording was replaced by "DETERMINISTIC per worker
->   count", which is ALSO wrong — it was generalised from one program. The honest statement is that
->   the outcome is worker-count-dependent, and whether it is deterministic depends on the race.**
->   Two measured shapes, both a receiver parked in a nested eager body:
->   (a) sender sleeps 300 ms in an ancestor task — deterministic: `CHEZZI_THREADS=1` prints the value
->   20/20 runs, `=2` and `=4` fault `deadlock` 20/20; (b) sender is a sibling `spawn:` with no sleep
->   (a tight race) — FLAKY, and the rate climbs with width: T=1 0/30 deadlock, T=2 7/30, T=4 22/30,
->   T=8 30/30. So a single-count sample can read as clean and must not be trusted; sample at several
->   widths and report the rate. Go prints the
->   value at every `GOMAXPROCS`. So this is not a benign completes-or-faults-cleanly limit: it is a
->   **confident FALSE `deadlock` verdict on a program that has a live sender**, which is exactly what
->   `parked-is-not-stuck` / `docs/gaps.md` **W7-12** say a heuristic must never emit — the required
->   behaviour when unsure is to DECLINE. Closing it is the cross-nursery flatten milestone this
->   document designs, so it needs a decision rather than a patch.
+>   liveness — OPTION A, kept). A `send`/`close` inside an eager body used to only scan that private
+>   sched's own park set, so a receiver parked in the PARENT nursery (or a sibling's) was never woken →
+>   a spurious `deadlock` (gaps.md **B5**). **CLOSED 2026-09-09, TICKET-099, for every direction:** the
+>   upward-only `MnSched::parent_wake` chain is gone; `send_wake`/`close_wake` now walk
+>   `MnSched::wake_run_wide`, a run-wide `Vm::sched_registry` scan that reaches ANY live sched of the
+>   run — parent, sibling, or descendant — not just an ancestor. Goldens:
+>   `parallel_cross_nursery_nested_send_to_outer_recv.chz` (child→parent, unchanged) and
+>   `parallel_cross_nursery_parent_to_child_send_wakes_the_deeper_receiver` (parent→child, the
+>   tightened former residual test, TICKET-099). Paired with a peer-veto deadlock predicate
+>   (`MnSched::peer_can_move`, `local_quiesced`) and a cross-sched widening of `blocked_owner_guard`
+>   (`SchedCore::cross_sched_blocked_owners`) so a genuine nested deadlock still faults instead of
+>   hanging, and a sched whose only join-blocked fiber's child sched is elsewhere does not conclude a
+>   FALSE deadlock about itself. **Re-measured 2026-09-08 (bug-hunt wave 11) before the fix, for the
+>   record:** the earlier wording (claiming the outcome varied only by wall-clock timing) was itself
+>   wrong — it was generalised from one
+>   program. Two measured shapes, both a receiver parked in a nested eager body: (a) sender sleeps
+>   300 ms in an ancestor task — deterministic: `CHEZZI_THREADS=1` printed the value 20/20 runs, `=2`
+>   and `=4` faulted `deadlock` 20/20; (b) sender is a sibling `spawn:` with no sleep (a tight race) —
+>   FLAKY, and the rate climbed with width: T=1 0/30 deadlock, T=2 7/30, T=4 22/30, T=8 30/30. Both
+>   shapes are now green at every worker count 1/2/4/8, 30/30 runs each (TICKET-099, `## Thread`).
 >
 > Cross-refs: [`concurrency.md §11`](concurrency.md),
 > [`concurrency-tier-d.md`](concurrency-tier-d.md), `PROGRESS.md`.
@@ -186,12 +185,17 @@ Structures:
 - **`--parallel` M:N engine.** `run_mn_nursery` + `MnSched`. LAZY nested nurseries all share ONE global
   `MnSched` (flat scheduler, §4), so their park/wake is already cross-scope. The residual (gaps.md B5)
   was narrower: an EAGER (per-connection) nested nursery gets its OWN private `MnSched`
-  (`activate_eager_nursery`, for liveness), and `MnSched::send_wake`/`close_wake` only scan the sched
-  they run on — so a `send`/`close` inside the eager body delivered the value into the shared
-  `ChannelCore` but never woke a receiver parked on the PARENT sched. Fixed by `MnSched::parent_wake`
-  (the eager sched points at its parent; the wake walks that chain child→parent). Deadlock predicate
-  (`is_deadlocked`) is UNCHANGED: a genuine no-sender quiesce still faults on the eager sched's own
-  predicate.
+  (`activate_eager_nursery`, for liveness), and `MnSched::send_wake`/`close_wake` used to only scan the
+  sched they run on — so a `send`/`close` inside the eager body delivered the value into the shared
+  `ChannelCore` but never woke a receiver parked on another sched. **CLOSED 2026-09-09, TICKET-099**:
+  `MnSched::parent_wake` (an upward-only chain, child→parent) is replaced by `MnSched::wake_run_wide`,
+  a walk of `Vm::sched_registry` that reaches ANY live sched of the run — parent, sibling, or
+  descendant — in either direction. The deadlock predicate changed WITH it, not independently: a
+  genuine no-sender quiesce still faults, now via `MnSched::is_deadlocked` → `is_deadlocked_ignoring_
+  jobs`, which adds a peer veto (`peer_can_move`/`local_quiesced`) so a peer sched that can still send
+  vetoes the fault, and a cross-sched widening of `blocked_owner_guard`
+  (`SchedCore::cross_sched_blocked_owners`) so a sched blocked on a child sched's join neither hangs a
+  genuine nested deadlock nor concludes a false one about itself.
 
 ## 4. Target design — nursery = join-counter, not a scheduler frame
 

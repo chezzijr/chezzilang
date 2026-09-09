@@ -565,6 +565,9 @@ impl Vm {
             deadlock_err,
             self.heap.mem_cap(),
         );
+        // TICKET-099 — so a send/close on this sched can wake a receiver parked on any other live
+        // sched of this run (sibling or descendant), not just an ancestor.
+        inner.sched_registry = Arc::clone(&self.sched_registry);
         // gaps.md W7-56 — the deadlock predicate must see this run's outstanding eager `Executor`
         // jobs (uncounted senders). Assigned here, not through `new`, so the predicate's unit
         // fixtures keep an empty registry.
@@ -667,9 +670,13 @@ impl Vm {
             // a worker shell, `mn.is_some()`); it registers only on the `(None, Some(held))` late-spawn
             // path, where `self` really is the top-level builder blocked in this join.
             let _party = self.nursery_party_guard(sched);
-            // TICKET-095 — counts this fiber's OS thread as a `blocked_owner` for the span it sits
-            // inline in this join, so `is_deadlocked_ignoring_jobs` can tell it apart from a genuinely
-            // running worker. `None` on the late-spawn arm (see `blocked_owner_guard`).
+            // TICKET-095 — counts this fiber's OS thread as a `blocked_owner`, on ITS OWN sched
+            // (`self.mn`), for the span it sits inline in this join, so `is_deadlocked_ignoring_jobs`
+            // can tell it apart from a genuinely running worker. `None` on the late-spawn arm (see
+            // `blocked_owner_guard`). TICKET-099 widened this to the cross-sched case too: `sched`
+            // (the child nursery this fiber is joining) may be a private eager sched of its own, not
+            // `self.mn` — the fiber still counts as blocked on `self.mn`, because a peer veto asks
+            // `self.mn` "can you still feed me?" and a fiber waiting on this join can feed nobody.
             let _owner = self.blocked_owner_guard(sched);
             shell.mn_worker_loop(sched, wid, scope_id);
             sched.wait_for_scope(scope_id);
@@ -836,13 +843,14 @@ impl Vm {
     /// (an accept loop) would hang outright.
     pub(super) fn activate_eager_nursery(&mut self, nursery_span: Span) -> Option<EagerScope> {
         // §2c1 — a NESTED eager nursery on THIS thread joins the enclosing scope's sched as a new
-        // SCOPE instead of building a private sibling sched. Two private scheds cannot wake each
-        // other (`send_wake` scans its own sched then `wake_parent_chain`, strictly upward), which is
-        // the cross-nursery deadlock the flat scheduler exists to prevent — see `EagerScope::scope`.
+        // SCOPE instead of building a private sibling sched, so the two share one predicate and one
+        // wake fan-out from the start — see `EagerScope::scope`. (TICKET-099 — a private sibling sched
+        // would still be reachable through `wake_run_wide`'s run-wide registry walk, but joining as a
+        // scope keeps one fault predicate rather than two that must agree.)
         //
         // Only when `mn.is_none()`. On a WORKER SHELL the enclosing eager scope belongs to a
-        // different nursery generation and the private-sched-plus-`parent_wake` shape is the
-        // per-connection-spawn design; that path is unchanged.
+        // different nursery generation and a private eager sched sharing the run's `sched_registry` is
+        // the per-connection-spawn design; that path is unchanged.
         if self.mn.is_none()
             && let Some(outer) = self.eager_scheds.iter().flatten().next_back()
         {
@@ -886,19 +894,11 @@ impl Vm {
             deadlock_err,
             self.heap.mem_cap(),
         );
-        // gaps.md B5 — this eager sched is PRIVATE (no link to the parent). A `send`/`close` inside its
-        // body only scans its OWN parked set, so a receiver parked in the PARENT nursery on a shared
-        // channel is never woken → the parent spuriously faults `deadlock`. Point `parent_wake` at the
-        // sched the activating worker fiber is running on (its parent nursery — held in `self.mn`, or
-        // `mn_enlist_sched` on the inline outermost builder) so `send_wake`/`close_wake` route the wake
-        // up to it. Strictly upward: no cycle, and it wakes a receiver on the parent's HOME sched (its
-        // outcome slot / JoinScope stay put).
-        //
-        // §2c1 — at the TOP LEVEL both are `None`, and that is CORRECT rather than merely convenient:
-        // a top-level eager sched IS the outermost scheduler, so there is no parked receiver above it
-        // for a wake to reach. (The wake still reaches SIBLING scheds through the run's
-        // `sched_registry` — `Vm::wake_on_send` — which is a different, non-hierarchical path.)
-        inner.parent_wake = self.mn.clone().or_else(|| self.mn_enlist_sched.clone());
+        // TICKET-099 — this eager sched is PRIVATE (no link to the parent). A `send`/`close` inside its
+        // body must be able to wake a receiver parked on ANY other live sched of this run — the parent
+        // nursery, a sibling, or a descendant — not just an ancestor, so it shares the run's registry
+        // and `wake_run_wide` walks it directly rather than through a hierarchical chain.
+        inner.sched_registry = Arc::clone(&self.sched_registry);
         // gaps.md W7-56 — see `run_mn_nursery_outermost`.
         inner.exec_registry = Arc::clone(&self.exec_registry);
         // gaps.md W7-58 — so an idle worker of this sched can JUDGE the process-wide verdict on
@@ -1008,6 +1008,12 @@ impl Vm {
                 // cannot self-stop while `main` sits here (`scopes[0].body_open` stays true), so at a
                 // budget of one that drainer alone is the whole CPU allowance. Running the inline
                 // owner too would be a second runner. Same gate as the outermost arms below.
+                // TICKET-099 — this thread's OS-level block on `wait_for_scope` below counts as a
+                // `blocked_owner` on `self.mn` (see `blocked_owner_guard`'s doc): `None` here since
+                // `drainer.is_none()` only happens when `self.mn` was already `None` at nursery entry
+                // (`activate_eager_nursery`'s reused-scope branch requires it), so there is no sched
+                // above this one to report to.
+                let _owner = self.blocked_owner_guard(&sched);
                 if eager_joiner_runs_fibers(worker_count()) {
                     shell.mn_worker_loop(&sched, 0, sid);
                 }
@@ -1023,6 +1029,12 @@ impl Vm {
         self.farm_outermost_eager_helpers(&sched, &cancel);
         {
             let _party = self.nursery_party_guard(&sched);
+            // TICKET-099 — this thread's OS-level block on `wait_for_completion` below counts as a
+            // `blocked_owner` on `self.mn`, whether `sched` (this join's PRIVATE eager sched) is the
+            // outermost nursery (`self.mn` is `None`, the guard is a no-op) or a nursery entered
+            // inside a spawned task (`self.mn` is `Some(outer)`, so this fiber counts as blocked on
+            // `outer` — the fiber that is join-blocked here can feed `outer`'s peer veto nothing).
+            let _owner = self.blocked_owner_guard(&sched);
             if eager_joiner_runs_fibers(worker_count()) {
                 shell.mn_worker_loop(&sched, 0, 0);
             }
@@ -2599,21 +2611,43 @@ impl Vm {
         self.mn.as_ref().is_some_and(|m| Arc::ptr_eq(m, sched))
     }
 
-    /// TICKET-095 — counts a fiber whose OS thread is about to block in a NESTED nursery join on
-    /// `sched` as a `SchedCore::blocked_owners`, so `is_deadlocked_ignoring_jobs`'s `running ==
+    /// TICKET-095 — counts a fiber whose OS thread is about to block in a NESTED nursery join as a
+    /// `SchedCore::blocked_owners` ON ITS OWN SCHED, so `is_deadlocked_ignoring_jobs`'s `running ==
     /// blocked_owners` clause can tell "stuck by construction" from "genuinely running". `None` on
-    /// the `(None, Some(held))` late-spawn arm — that owner is not counted in `running` either.
+    /// the `(None, Some(held))` late-spawn arm — that owner is not counted in `running` either, which
+    /// is exactly the `self.mn.is_none()` case.
+    ///
+    /// TICKET-099 widened this from the same-sched case only: a fiber blocked at a nested join counts
+    /// as a `blocked_owner` on ITS OWN sched (`self.mn`) whether the child nursery it is waiting on
+    /// (`sched`) runs on that same sched (`owns_nested_sched`) or on a private eager one of its own.
+    /// TICKET-099's peer veto (`MnSched::peer_can_move`) asks a PEER sched "can you still feed me?",
+    /// and a fiber waiting on a join can feed nobody, whichever sched its child runs on — the same
+    /// distinction `local_quiesced`'s §2c1 comment already draws between `any_body_injecting` and
+    /// `any_body_open`. Without this widening the outer sched of a nested nursery never counts its
+    /// join-blocked fiber as a `blocked_owner`, so it never reads `local_quiesced`, so a peer veto
+    /// against it never lifts and a genuine nested deadlock hangs forever instead of faulting
+    /// (measured: `parity_nested_deadlock_cancels_the_outer_parked_siblings_defer` at `fdc71d70`).
     pub(super) fn blocked_owner_guard(&self, sched: &Arc<MnSched>) -> Option<BlockedOwnerGuard> {
-        if !self.owns_nested_sched(sched) {
-            return None;
-        }
+        let (owner, cross_sched) = if self.owns_nested_sched(sched) {
+            (Arc::clone(sched), false)
+        } else {
+            let own = self.mn.clone()?;
+            if Arc::ptr_eq(&own, sched) {
+                return None;
+            }
+            (own, true)
+        };
         {
-            let mut c = sched.lock();
+            let mut c = owner.lock();
             c.blocked_owners += 1;
+            if cross_sched {
+                c.cross_sched_blocked_owners += 1;
+            }
         }
-        sched.cv.notify_all();
+        owner.cv.notify_all();
         Some(BlockedOwnerGuard {
-            sched: Arc::clone(sched),
+            sched: owner,
+            cross_sched,
         })
     }
 
@@ -5836,11 +5870,13 @@ pub(super) fn dispatch_eager_job(
 }
 
 /// TICKET-095 — RAII handle for `SchedCore::blocked_owners`. Held across the span in which a fiber's
-/// OS thread is blocked inline in a nested nursery join (`run_mn_nursery_nested`'s owner-fiber arm);
-/// dropped when the join returns, decrementing the counter and re-notifying idle workers so a scope
-/// that just became genuinely stuck (not merely counted-blocked) is re-evaluated.
+/// OS thread is blocked inline in a nested nursery join; dropped when the join returns, decrementing
+/// the counter and re-notifying idle workers so a scope that just became genuinely stuck (not merely
+/// counted-blocked) is re-evaluated. TICKET-099 — also decrements `cross_sched_blocked_owners` when
+/// the join was into a CHILD sched (`blocked_owner_guard`'s cross-sched branch).
 pub(super) struct BlockedOwnerGuard {
     sched: Arc<MnSched>,
+    cross_sched: bool,
 }
 
 impl Drop for BlockedOwnerGuard {
@@ -5848,6 +5884,9 @@ impl Drop for BlockedOwnerGuard {
         {
             let mut c = self.sched.lock();
             c.blocked_owners -= 1;
+            if self.cross_sched {
+                c.cross_sched_blocked_owners -= 1;
+            }
         }
         self.sched.cv.notify_all();
     }
