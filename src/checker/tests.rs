@@ -31500,3 +31500,28 @@ fn tuple_match_witness_stays_parenthesised() {
     let help = errs[0].help.as_deref().expect("expected a help message");
     assert_eq!(help, "pattern `(E.A(_), _)` is not covered");
 }
+
+/// TICKET-102 — `checker::tests::TmpDir` and `checker::graph_tests::TmpDir` are two fixture
+/// helpers in ONE test binary, each with its own zero-based counter. While both format their
+/// directory as `chezzi_chk_{pid}_{n}` they mint the same names, so two live fixtures share a
+/// directory and the first `Drop` deletes the other's files — roughly 1 to 2 full
+/// `cargo test --lib` runs in 5 went red, on a varying checker test name. Each helper must carry
+/// its own prefix. This is a source-text rule because the defect IS the duplicated format string;
+/// the runtime collision guard lives beside the fix.
+#[test]
+fn the_two_checker_tempdir_helpers_do_not_share_a_name_format() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    // Built at runtime, never written literally: this file is one of the two being scanned, and a
+    // literal here would match itself and make the test vacuously red forever.
+    let shared = format!("chezzi_chk_{{}}_{{}}");
+    let graph =
+        std::fs::read_to_string(root.join("src/checker/mod.rs")).expect("read src/checker/mod.rs");
+    let unit = std::fs::read_to_string(root.join("src/checker/tests.rs"))
+        .expect("read src/checker/tests.rs");
+    assert!(
+        !(graph.contains(&shared) && unit.contains(&shared)),
+        "checker::graph_tests::TmpDir and checker::tests::TmpDir both format their fixture \
+         directory as {shared}, so their independent counters mint identical paths and one \
+         helper's Drop deletes the other's live fixture; give each helper its own prefix"
+    );
+}
