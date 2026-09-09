@@ -60,9 +60,14 @@
 >   `parallel_cross_nursery_parent_to_child_send_wakes_the_deeper_receiver` (parent→child, the
 >   tightened former residual test, TICKET-099). Paired with a peer-veto deadlock predicate
 >   (`MnSched::peer_can_move`, `local_quiesced`) and a cross-sched widening of `blocked_owner_guard`
->   (`SchedCore::cross_sched_blocked_owners`) so a genuine nested deadlock still faults instead of
->   hanging, and a sched whose only join-blocked fiber's child sched is elsewhere does not conclude a
->   FALSE deadlock about itself. **Re-measured 2026-09-08 (bug-hunt wave 11) before the fix, for the
+>   (`SchedCore::cross_sched_blocked_owners`), so a sched whose only join-blocked fiber's child sched is
+>   elsewhere does not conclude a FALSE deadlock about itself. **As shipped 2026-09-09 the peer veto
+>   still made a GENUINE nested deadlock hang** instead of fault, at `CHEZZI_THREADS` 2/4/8 — it demanded
+>   a visible parked-or-`blocked_native` victim on the peer, which a peer whose only fiber was a
+>   join-blocked owner never had. **CLOSED 2026-09-10, TICKET-101:**
+>   `MnSched::quiesced_core(c, require_parked)` drops that demand ONLY for the peer question; the fault
+>   path keeps it. A genuine nested deadlock now faults again in single-digit ms, and both directions
+>   above stay green at every worker count. **Re-measured 2026-09-08 (bug-hunt wave 11) before the
 >   record:** the earlier wording (claiming the outcome varied only by wall-clock timing) was itself
 >   wrong — it was generalised from one
 >   program. Two measured shapes, both a receiver parked in a nested eager body: (a) sender sleeps

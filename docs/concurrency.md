@@ -2308,8 +2308,11 @@ reinvented; none is scheduled. (B3–B5 itself is planned in [`concurrency-b3.md
     `parallel_cross_nursery_parent_to_child_send_wakes_the_deeper_receiver`), a run-wide walk of
     `Vm::sched_registry` that replaced the old upward-only `MnSched::parent_wake` chain. Paired with a
     peer-veto deadlock predicate (`MnSched::peer_can_move`) and a cross-sched `blocked_owner_guard`
-    widening so a genuine nested deadlock still faults and a sched blocked on a child's join does not
-    conclude a false deadlock about itself.
+    widening so a sched blocked on a child's join does not conclude a false deadlock about itself. **As
+    shipped 2026-09-09 the peer veto instead hung a genuine nested deadlock at `CHEZZI_THREADS` 2/4/8**
+    (a peer whose only fiber was a join-blocked owner never satisfied its parked-victim demand); CLOSED
+    2026-09-10 (TICKET-101) by splitting that demand out of the peer question alone
+    (`MnSched::quiesced_core(c, require_parked)`), so a genuine nested deadlock faults again.
 
   **(Symbol note:** the old `pick_runnable` linear scan named in earlier drafts is gone — replaced by
   D0's `ready`-set.)

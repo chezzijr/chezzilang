@@ -3711,12 +3711,17 @@ two agree. Low priority.
 > `MnSched::parent_wake`'s single-ancestor pointer is replaced by `MnSched::wake_run_wide`, a walk of a
 > new run-wide `Vm::sched_registry` (the "descendant walk / VM-global registry" this paragraph called
 > out of scope) that reaches every live sched of the run in either direction. Paired with a peer-veto
-> deadlock predicate (`MnSched::peer_can_move`/`local_quiesced`) so a genuine nested deadlock still
-> faults instead of hanging, and a cross-sched widening of `blocked_owner_guard`
-> (`SchedCore::cross_sched_blocked_owners`) so a sched blocked on a child sched's join does not conclude
-> a FALSE deadlock about itself. Both former-residual shapes are now green at every worker count 1/2/4/8,
-> 30/30 runs each — see `PROGRESS.md`'s TICKET-099 entry. See
-> `docs/cross-nursery-flat-scheduler.md` (eager bullet + §3).
+> deadlock predicate (`MnSched::peer_can_move`/`local_quiesced`), and a cross-sched widening of
+> `blocked_owner_guard` (`SchedCore::cross_sched_blocked_owners`) so a sched blocked on a child sched's
+> join does not conclude a FALSE deadlock about itself. **As shipped 2026-09-09 this made a genuine
+> nested deadlock HANG instead of fault, at `CHEZZI_THREADS` 2/4/8** — `peer_can_move`/`local_quiesced`
+> demanded a visible parked-or-`blocked_native` victim before answering, and a peer whose only fiber was
+> an owner blocked at a nested join had neither, so the veto never lifted. **CLOSED 2026-09-10
+> (TICKET-101):** `MnSched::quiesced_core(c, require_parked)` splits that demand out — the fault path and
+> the process-wide-verdict callers keep `require_parked = true`, `peer_can_move` alone asks with `false`
+> — so a genuine nested deadlock faults again (measured 8-11 ms) and both former-residual shapes stay
+> green, all at worker counts 1/2/4/8, 20-30 runs each. See `PROGRESS.md`'s TICKET-099 and TICKET-101
+> entries. See `docs/cross-nursery-flat-scheduler.md` (eager bullet + §3).
 
 On the **default M:N engine**, a `send` issued from inside a **nested** (child) `parallel:` does not wake a
 single receiver parked on that channel in an **outer/ancestor** nursery — so M:N declares a **false
@@ -12525,10 +12530,15 @@ behaviour when unsure is to DECLINE. Closing it needed the cross-nursery flatten
 asked for: replace the upward-only `MnSched::parent_wake` chain with `MnSched::wake_run_wide` (a
 run-wide `Vm::sched_registry` walk) plus a peer-veto deadlock predicate
 (`MnSched::peer_can_move`/`local_quiesced`) and a cross-sched `blocked_owner_guard` widening
-(`SchedCore::cross_sched_blocked_owners`) so the fix does not just trade a false `deadlock` for a hung
-one. Both the parent→child and sibling-eager→sibling-eager shapes are now green at every worker count
-1/2/4/8, 30/30 runs each. Its doc bullets are corrected in place (`docs/cross-nursery-flat-scheduler.md`,
-`docs/concurrency.md`, `docs/concurrency-tier-d.md`).
+(`SchedCore::cross_sched_blocked_owners`), intended so the fix does not just trade a false `deadlock`
+for a hung one. **It shipped that trade anyway** — the peer veto demanded a visible parked-or-
+`blocked_native` victim, which a peer whose only fiber was a join-blocked owner never had, so a genuine
+nested deadlock hung at `CHEZZI_THREADS` 2/4/8 (reverted the same day, TICKET-099 → `8ac8bcfb`).
+**CLOSED for real 2026-09-10 (TICKET-101):** `MnSched::quiesced_core(c, require_parked)` splits the
+victim demand so only `peer_can_move` drops it; the fault path keeps it. Both the parent→child and
+sibling-eager→sibling-eager shapes are green at every worker count 1/2/4/8, 20-30 runs each, and the
+genuine nested deadlock faults again in single-digit ms. Its doc bullets are corrected in place
+(`docs/cross-nursery-flat-scheduler.md`, `docs/concurrency.md`, `docs/concurrency-tier-d.md`).
 
 TICKET-100 CLOSED this for every crossing except the `RwShared` store: a struct aliased by two names
 before a `spawn:` now shows `b.v = 9` in-task, matching CPython threading and `copy.deepcopy`, and

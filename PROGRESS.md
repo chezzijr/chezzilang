@@ -37,11 +37,27 @@ Single source of truth for "what am I doing next." Update after every work sessi
   veto still reads the sched as quiesced. The actual call site needing the bracket turned out to be
   `Vm::join_eager_nursery`'s private-sched branch, not `run_mn_nursery_nested` as first planned — the
   latter is reached only by the early-enlisted/late-spawn fallback, not by a nursery entered inside a
-  spawned task. Both shapes are now green at every worker count 1/2/4/8, 30/30 runs each. Two new
+  spawned task. Both shapes were measured green at every worker count 1/2/4/8, 30/30 runs each. Two new
   `benches/sched/*.chz` fixtures (no CPython twin, a nursery has none) measure the two costliest
   shapes for the new run-wide walk — one send on one channel, a long per-nesting-level registry — and
   neither moved outside normal run-to-run noise against the base binary. `cargo test` green (4613
-  lib tests passed, 0 failed), `cargo clippy -- -D warnings` clean.
+  lib tests passed, 0 failed), `cargo clippy -- -D warnings` clean. **This entry's own claim was
+  wrong: shipped 2026-09-09, this fix hung a genuine NESTED deadlock at `CHEZZI_THREADS` 2/4/8 anyway
+  — the `blocked_owner_guard` widening above fixed the false-fault direction but `peer_can_move`/
+  `local_quiesced` still demanded a visible parked victim, which a peer whose only fiber was a
+  join-blocked owner never had. Reverted the same day (`8ac8bcfb`); see the TICKET-101 entry below for
+  the real close.**
+- **TICKET-101 (2026-09-10) — re-landed TICKET-099's revert with the missing split, closing the hang
+  above.** `MnSched::quiesced_core(&self, c, require_parked: bool)` replaces `local_quiesced`'s body;
+  `local_quiesced` keeps `require_parked = true` (its three callers — the fault path,
+  `quiesce::PartyWait::Nursery::satisfiable`, `quiesce::QuiesceState::live_eager_bodies` — still demand
+  a visible parked-or-`blocked_native` victim, per DEC-099), and `peer_can_move` alone calls
+  `quiesced_core(&c, false)`, dropping that demand only for "can a peer still feed me?". Measured on
+  the release binary, `CHEZZI_THREADS` 1/2/4/8: the two former-residual healthy shapes stay green
+  (30/30 and 20/20 runs), the genuine two-deep nested deadlock and a single-level deadlock both fault
+  `deadlock:` (20/20 runs, 8-11 ms), and no shape hangs. `chezzi run --threads=1` still measures one
+  CPU runner (104% cpu, W8-8 unaffected). `cargo test --lib` green (4617 passed, 0 failed, 2 ignored),
+  `cargo clippy -- -D warnings` clean.
 - **TICKET-098 (2026-09-09) — five diagnostic/edge-case papercuts, W11-9..W11-12.** (A) A
   non-exhaustive STRUCT match's witness doubled its module-mangled key (`main::S.main::S(_, _)`),
   because a `Dom::Prod`'s label is BOTH its sole constructor name and its display prefix; a new
