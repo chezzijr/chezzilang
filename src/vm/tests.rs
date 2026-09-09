@@ -8245,6 +8245,48 @@ fn mnsched_two_quiesced_scheds_still_fire_the_deadlock() {
     );
 }
 
+/// TICKET-099 — a peer whose only non-parked fiber is an OWNER blocked at a nested join must NOT veto:
+/// that fiber can feed nobody, whichever sched its child nursery runs on (the cross-sched widening of
+/// `blocked_owner_guard`). Before that widening, B's join-blocked fiber counted only in `running`, so
+/// `local_quiesced` read `false` on B and this veto declined forever — the exact hang measured on
+/// `parity_nested_deadlock_cancels_the_outer_parked_siblings_defer` at `fdc71d70`.
+#[test]
+fn mnsched_a_peer_blocked_only_in_a_nested_join_does_not_veto() {
+    let reg: crate::vm::SchedRegistry = Default::default();
+    let mut inner_a = mk_sched(1);
+    inner_a.sched_registry = Arc::clone(&reg);
+    let a = Arc::new(inner_a);
+    let mut inner_b = mk_sched(2);
+    inner_b.sched_registry = Arc::clone(&reg);
+    let b = Arc::new(inner_b);
+    reg.lock().unwrap().push(Arc::downgrade(&a));
+    reg.lock().unwrap().push(Arc::downgrade(&b));
+
+    let chan = empty_core();
+    a.seed(vec![mk_fiber(0)]);
+    let fa = take_run(&a);
+    a.park(core_key(&chan), &chan, fa);
+
+    // B seeds two fibers: park the first normally, take-but-don't-park the second — simulating a
+    // fiber blocked inline in a nested nursery join (counted via `blocked_owners`, not `parked`).
+    b.seed(vec![mk_fiber(0), mk_fiber(1)]);
+    let f0 = take_run(&b);
+    let _f1 = take_run(&b);
+    b.park(core_key(&chan), &chan, f0);
+    {
+        let mut cb = b.lock();
+        cb.running = 1;
+        cb.blocked_owners = 1;
+    }
+
+    let c = a.lock();
+    assert!(
+        a.is_deadlocked_ignoring_jobs(&c),
+        "B's only non-parked fiber is an owner blocked at a nested join, which can feed nobody, so \
+         the peer veto must not apply"
+    );
+}
+
 /// TICKET-099 — a vetoed sched must poll (`DEMOTE_POLL_BACKOFF`) rather than sleep on its OWN condvar
 /// untimed: nothing notifies A's `cv` when peer B quiesces later, so an untimed wait here would hang
 /// forever even though B eventually stops being a live peer.

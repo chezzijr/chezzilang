@@ -2190,6 +2190,20 @@ struct SchedCore {
     /// sched. Such a fiber cannot send, yield or spawn until its child scope moves, so it is stuck by
     /// construction — see `is_deadlocked_ignoring_jobs`'s `running == blocked_owners` clause.
     blocked_owners: usize,
+    /// TICKET-099 — of `blocked_owners`, how many are blocked on a CHILD SCHED (a private eager
+    /// nursery of its own), not a scope on THIS sched. This sched has NO visibility into that child's
+    /// progress (it is not one of `scopes`), so — unlike a same-sched `blocked_owners` fiber, whose
+    /// child scope's own siblings would show up in THIS sched's `running`/`runnable` if they could feed
+    /// it — this sched cannot tell whether the child is genuinely stuck or about to resolve. A nonzero
+    /// count vetoes only THIS sched's OWN fault decision (`is_deadlocked_ignoring_jobs`), the same way
+    /// `is_deadlocked`'s `outstanding_jobs` veto does for an uncounted `Executor` sender: the child's
+    /// own deadlock detection (if genuine) will fire on the CHILD sched instead, and its `Fault`
+    /// propagates back through this fiber's own call return (`Vm::classify_mn_outcome` → `trip_cancel`)
+    /// exactly like any other task failure — never through this sched declaring itself deadlocked.
+    /// `local_quiesced` does NOT read this field: a peer sched's veto (`peer_can_move` →
+    /// `local_quiesced`) must still see THIS sched as quiesced, or the child's own genuine deadlock is
+    /// vetoed forever (the hang this ticket's cross-sched `blocked_owner_guard` widening fixes).
+    cross_sched_blocked_owners: usize,
     parked_n: usize, // total fibers across every `parked` bucket
     /// Cross-nursery flat scheduler (M:N) — the per-nursery join records, replacing the old scalar
     /// `{done,total,body_open}`. ONE global `MnSched` is shared by every nested `run_mn_nursery` /
@@ -2469,6 +2483,7 @@ impl MnSched {
                 slots: (0..total).map(|_| None).collect(),
                 running: 0,
                 blocked_owners: 0,
+                cross_sched_blocked_owners: 0,
                 parked_n: 0,
                 scopes: vec![JoinScope {
                     base_index: 0,
@@ -3992,6 +4007,13 @@ impl MnSched {
     /// [`MnSched::is_deadlocked_ignoring_jobs`] — the recursive spelling would come back to `try_lock`
     /// a core this thread already holds if `self` ever appeared in its own peer list (it never does —
     /// `any_peer_can_move` excludes `self` by `std::ptr::eq`).
+    ///
+    /// A peer whose only non-parked fiber is an owner blocked at a nested join (`SchedCore::running
+    /// == SchedCore::blocked_owners`, TICKET-095's clause, widened cross-sched by TICKET-099's
+    /// `blocked_owner_guard`) reads as `local_quiesced` and therefore does NOT veto. Dropping that
+    /// cross-sched bracket makes every nested-nursery genuine deadlock hang instead of fault: the
+    /// outer sched's join-blocked fiber would count in `running` with `blocked_owners` at zero, so it
+    /// would never read `local_quiesced`, and this fn would answer "can move" forever.
     fn peer_can_move(&self) -> bool {
         let c = match self.core.try_lock() {
             Ok(c) => c,
@@ -4029,8 +4051,19 @@ impl MnSched {
     /// doc). The process-wide verdict already does its own cross-sched accounting through `parties`/
     /// `live`/`outstanding_jobs`; a second cross-sched veto underneath it would over-count `live` and
     /// hang a genuinely deadlocked run (measured on three `*_still_fault` tests — see `quiesce.rs`).
+    ///
+    /// A THIRD veto, `c.cross_sched_blocked_owners == 0` — this sched must not conclude ITS OWN
+    /// deadlock while one of its fibers is blocked on a CHILD sched it cannot see into (see
+    /// `SchedCore::cross_sched_blocked_owners`'s own doc). Without it, a nested-nursery genuine
+    /// deadlock double-fires: the CHILD sched correctly detects it (its own `is_deadlocked_ignoring_jobs`
+    /// is unaffected — this veto only applies to fibers blocked ON this sched, not the sched a peer's
+    /// fiber is blocked into), but the PARENT sched, now reading `local_quiesced` too (the very fix that
+    /// lets the child's peer veto lift), independently reaches the same false conclusion about itself and
+    /// faults its OWN parked siblings directly — with `flag_deadlock` dropping their `defer`s, instead of
+    /// letting the child's fault propagate up through the blocked fiber's own return and trip the
+    /// parent's scope cancel the ordinary way (`Vm::classify_mn_outcome` → `Vm::trip_cancel`).
     pub(super) fn is_deadlocked_ignoring_jobs(&self, c: &SchedCore) -> bool {
-        self.local_quiesced(c) && !self.any_peer_can_move()
+        c.cross_sched_blocked_owners == 0 && self.local_quiesced(c) && !self.any_peer_can_move()
     }
 
     /// D5 — hand a fiber that hit a blocking native call to the dirty/blocking pool, freeing this
