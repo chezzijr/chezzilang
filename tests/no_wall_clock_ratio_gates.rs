@@ -290,7 +290,7 @@ fn sleep_synchronised_tests() -> BTreeSet<String> {
 /// rejected it (the walk returns 68). Obtain it by compiling once with an empty array and copying
 /// the "sleeps but is not listed" list `no_new_rust_test_sleeps_to_order_two_events` reports,
 /// verbatim, the same way `stack_trace_reports_call_chain`'s golden was obtained.
-const SLEEP_SYNCHRONISED_TESTS: [&str; 75] = [
+const SLEEP_SYNCHRONISED_TESTS: [&str; 76] = [
     "a_bailed_join_stops_its_jobs_from_starting_new_work",
     "a_cancelled_siblings_defer_runs_whole_on_both_engines",
     "a_finished_executor_job_lets_the_genuine_nursery_deadlock_fire",
@@ -309,6 +309,11 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 75] = [
     "a_wait_timer_arm_in_a_native_callback_loses_to_a_sibling_value",
     "a_yielded_pool_thread_retires_instead_of_growing_the_pool",
     "abort_diagnoses_even_with_a_full_unread_stdout_pipe",
+    // TICKET-099. The sleep is the PROPERTY under test (a deterministic 300ms window in which the
+    // deeper receiver is already parked before any send exists), not a happens-before edge between
+    // two Rust events. A rendezvous handshake would collapse it into the tight race the sibling test
+    // in the same file already covers.
+    "an_ancestor_send_wakes_a_receiver_parked_in_a_deeper_nursery",
     "an_eager_wait_timer_arm_loses_to_a_sibling_value",
     "an_executor_jobs_send_wakes_a_task_parked_on_another_scheds_channel",
     "cancel_cascade_crosses_the_airlock",

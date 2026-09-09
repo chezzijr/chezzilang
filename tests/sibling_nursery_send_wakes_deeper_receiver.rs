@@ -62,3 +62,58 @@ fn sibling_send_wakes_receiver_in_a_deeper_nursery_at_eight_workers() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Shape B — an ANCESTOR sends after a delay, to a receiver already parked in a DEEPER nursery.
+/// `MnSched::is_deadlocked_ignoring_jobs` reads only its own `SchedCore`, so the deeper sched
+/// quiesces and faults `deadlock` immediately, long before the sender's 300ms sleep elapses and the
+/// send exists. This is deterministic (not a race): the receiver is parked well before the send is
+/// even reachable. Measured on the release binary at `2be17751`: faults `deadlock:` at every worker
+/// count above one.
+#[test]
+fn an_ancestor_send_wakes_a_receiver_parked_in_a_deeper_nursery() {
+    let dir = std::env::temp_dir().join(format!("chz-ticket099b-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create fixture dir");
+    let path = dir.join("h3b.chz");
+    std::fs::write(
+        &path,
+        "import std.time\n\
+         ch := Channel[int](0)\n\
+         fn feed(c: Channel[int]):\n    \
+             time.sleep_ms(300)\n    \
+             c.send(1)\n\
+         parallel:\n    \
+             spawn feed(ch)\n    \
+             spawn:\n        \
+                 parallel:\n            \
+                     spawn:\n                \
+                         print(\"inner got \" + str(ch.recv()))\n",
+    )
+    .expect("write ancestor-send repro fixture");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .arg("run")
+        .arg(&path)
+        .env("CHEZZI_THREADS", "4")
+        .output()
+        .expect("run chezzi");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "expected rc=0 and `inner got 1` (an ancestor sender can unblock a deeper receiver), got \
+         status {} (stdout: {stdout}, stderr: {stderr})",
+        output.status
+    );
+    assert!(
+        stdout.contains("inner got 1"),
+        "expected `inner got 1` on stdout, got: {stdout}"
+    );
+    assert!(
+        !stderr.contains("deadlock:"),
+        "expected no `deadlock:` fault (the receiver CAN proceed, the ancestor's delayed send CAN \
+         unblock it), got: {stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
