@@ -1,0 +1,25 @@
+fn drain(c: Channel[int], n: int):
+    total := 0
+    i := 0
+    while i < n:
+        total += c.recv()
+        i += 1
+    print("{total}")
+
+fn fill(c: Channel[int], n: int):
+    i := 0
+    while i < n:
+        c.send(i)
+        i += 1
+
+fn deep(c: Channel[int], n: int, depth: int):
+    if depth == 0:
+        parallel:
+            spawn fill(c, n)
+            spawn drain(c, n)
+        return
+    parallel:
+        spawn deep(c, n, depth - 1)
+
+ch := Channel[int](1)
+deep(ch, 100000, 6)
