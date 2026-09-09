@@ -517,6 +517,9 @@ impl Vm {
             deadlock_err,
             self.heap.mem_cap(),
         );
+        // TICKET-099 — so a send/close on this sched can wake a receiver parked on any other live
+        // sched of this run (sibling or descendant), not just an ancestor.
+        inner.sched_registry = Arc::clone(&self.sched_registry);
         // gaps.md W7-56 — the deadlock predicate must see this run's outstanding eager `Executor`
         // jobs (uncounted senders). Assigned here, not through `new`, so the predicate's unit
         // fixtures keep an empty registry.
@@ -788,13 +791,14 @@ impl Vm {
     /// (an accept loop) would hang outright.
     pub(super) fn activate_eager_nursery(&mut self, nursery_span: Span) -> Option<EagerScope> {
         // §2c1 — a NESTED eager nursery on THIS thread joins the enclosing scope's sched as a new
-        // SCOPE instead of building a private sibling sched. Two private scheds cannot wake each
-        // other (`send_wake` scans its own sched then `wake_parent_chain`, strictly upward), which is
-        // the cross-nursery deadlock the flat scheduler exists to prevent — see `EagerScope::scope`.
+        // SCOPE instead of building a private sibling sched, so the two share one predicate and one
+        // wake fan-out from the start — see `EagerScope::scope`. (TICKET-099 — a private sibling sched
+        // would still be reachable through `wake_run_wide`'s run-wide registry walk, but joining as a
+        // scope keeps one fault predicate rather than two that must agree.)
         //
         // Only when `mn.is_none()`. On a WORKER SHELL the enclosing eager scope belongs to a
-        // different nursery generation and the private-sched-plus-`parent_wake` shape is the
-        // per-connection-spawn design; that path is unchanged.
+        // different nursery generation and a private eager sched sharing the run's `sched_registry` is
+        // the per-connection-spawn design; that path is unchanged.
         if self.mn.is_none()
             && let Some(outer) = self.eager_scheds.iter().flatten().next_back()
         {
@@ -838,19 +842,11 @@ impl Vm {
             deadlock_err,
             self.heap.mem_cap(),
         );
-        // gaps.md B5 — this eager sched is PRIVATE (no link to the parent). A `send`/`close` inside its
-        // body only scans its OWN parked set, so a receiver parked in the PARENT nursery on a shared
-        // channel is never woken → the parent spuriously faults `deadlock`. Point `parent_wake` at the
-        // sched the activating worker fiber is running on (its parent nursery — held in `self.mn`, or
-        // `mn_enlist_sched` on the inline outermost builder) so `send_wake`/`close_wake` route the wake
-        // up to it. Strictly upward: no cycle, and it wakes a receiver on the parent's HOME sched (its
-        // outcome slot / JoinScope stay put).
-        //
-        // §2c1 — at the TOP LEVEL both are `None`, and that is CORRECT rather than merely convenient:
-        // a top-level eager sched IS the outermost scheduler, so there is no parked receiver above it
-        // for a wake to reach. (The wake still reaches SIBLING scheds through the run's
-        // `sched_registry` — `Vm::wake_on_send` — which is a different, non-hierarchical path.)
-        inner.parent_wake = self.mn.clone().or_else(|| self.mn_enlist_sched.clone());
+        // TICKET-099 — this eager sched is PRIVATE (no link to the parent). A `send`/`close` inside its
+        // body must be able to wake a receiver parked on ANY other live sched of this run — the parent
+        // nursery, a sibling, or a descendant — not just an ancestor, so it shares the run's registry
+        // and `wake_run_wide` walks it directly rather than through a hierarchical chain.
+        inner.sched_registry = Arc::clone(&self.sched_registry);
         // gaps.md W7-56 — see `run_mn_nursery_outermost`.
         inner.exec_registry = Arc::clone(&self.exec_registry);
         // gaps.md W7-58 — so an idle worker of this sched can JUDGE the process-wide verdict on
