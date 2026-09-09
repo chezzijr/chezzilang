@@ -290,7 +290,7 @@ fn sleep_synchronised_tests() -> BTreeSet<String> {
 /// rejected it (the walk returns 68). Obtain it by compiling once with an empty array and copying
 /// the "sleeps but is not listed" list `no_new_rust_test_sleeps_to_order_two_events` reports,
 /// verbatim, the same way `stack_trace_reports_call_chain`'s golden was obtained.
-const SLEEP_SYNCHRONISED_TESTS: [&str; 75] = [
+const SLEEP_SYNCHRONISED_TESTS: [&str; 77] = [
     "a_bailed_join_stops_its_jobs_from_starting_new_work",
     "a_cancelled_siblings_defer_runs_whole_on_both_engines",
     "a_finished_executor_job_lets_the_genuine_nursery_deadlock_fire",
@@ -304,6 +304,10 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 75] = [
     "a_sleeping_nursery_task_is_cancelled_mid_flight_by_a_sibling_fault",
     "a_sleeping_nursery_task_is_untouched_without_an_exit",
     "a_slow_but_healthy_job_at_the_exit_drain_is_untouched",
+    // TICKET-101. Its 300ms `time.sleep_ms` is inside the fixture .chz program's SOURCE STRING, not
+    // a happens-before edge in this Rust test's own control flow -- the test asserts the child's
+    // final rc and stdout, not an ordering the sleep enforces here.
+    "an_ancestor_send_wakes_a_receiver_parked_in_a_deeper_nursery",
     "a_test_fn_that_exits_does_not_poison_later_blocking_tests",
     "a_top_level_wait_timer_arm_loses_to_an_eager_job",
     "a_wait_timer_arm_in_a_native_callback_loses_to_a_sibling_value",
@@ -331,6 +335,10 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 75] = [
     "eager_job_os_exit_terminates_a_socket_blocked_main",
     "executor_job_feeds_a_parked_nursery_task_instead_of_a_false_deadlock",
     "gc_mark_walk_does_not_deadlock_on_a_cyclic_core_graph",
+    // TICKET-101. Same reason as `nested_nursery_deadlock_faults_at_one_worker_like_every_other_count`
+    // below -- a poll interval against a deadline, over a child that hangs before the fix and never
+    // closes its pipes, not a happens-before edge.
+    "genuine_deadlock_two_nurseries_deep_faults_instead_of_hanging",
     "max_heap_byte_walk_does_not_deadlock_on_a_cyclic_core_graph",
     "module_top_level_fault_is_delivered_twice_and_truncates_after_recover",
     "module_top_level_loop_back_edge_is_not_a_cancel_checkpoint",
