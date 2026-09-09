@@ -8180,6 +8180,120 @@ fn w758_is_deadlocked_ignoring_jobs_matches_is_deadlocked_with_no_executors() {
     sched.cancel_drain(0);
 }
 
+/// TICKET-099 — a live PEER sched (still has a running/runnable fiber) vetoes the deadlock verdict of
+/// a sched whose own fibers are all parked. `local_quiesced` stays `true` (the sched genuinely cannot
+/// move on its own); only `is_deadlocked_ignoring_jobs`, which adds the peer veto, must flip.
+#[test]
+fn mnsched_a_live_peer_sched_vetoes_the_deadlock() {
+    let reg: crate::vm::SchedRegistry = Default::default();
+    let mut inner_a = mk_sched(1);
+    inner_a.sched_registry = Arc::clone(&reg);
+    let a = Arc::new(inner_a);
+    let mut inner_b = mk_sched(1);
+    inner_b.sched_registry = Arc::clone(&reg);
+    let b = Arc::new(inner_b);
+    reg.lock().unwrap().push(Arc::downgrade(&a));
+    reg.lock().unwrap().push(Arc::downgrade(&b));
+
+    a.seed(vec![mk_fiber(0)]);
+    let f = take_run(&a);
+    let chan = empty_core();
+    a.park(core_key(&chan), &chan, f);
+
+    // B keeps its seeded fiber runnable — never taken, so B's own `running`/`runnable` shows work.
+    b.seed(vec![mk_fiber(0)]);
+
+    let c = a.lock();
+    assert!(
+        a.local_quiesced(&c),
+        "A's own fibers are all parked, so its LOCAL predicate must still say quiesced"
+    );
+    assert!(
+        !a.is_deadlocked_ignoring_jobs(&c),
+        "B still has runnable work, so the peer veto must decline A's fault"
+    );
+}
+
+/// TICKET-099 — the peer veto lifts once EVERY sched is genuinely quiesced: two private scheds that
+/// are BOTH fully parked must still fire the deadlock, or a real deadlock hangs forever instead of
+/// faulting.
+#[test]
+fn mnsched_two_quiesced_scheds_still_fire_the_deadlock() {
+    let reg: crate::vm::SchedRegistry = Default::default();
+    let mut inner_a = mk_sched(1);
+    inner_a.sched_registry = Arc::clone(&reg);
+    let a = Arc::new(inner_a);
+    let mut inner_b = mk_sched(1);
+    inner_b.sched_registry = Arc::clone(&reg);
+    let b = Arc::new(inner_b);
+    reg.lock().unwrap().push(Arc::downgrade(&a));
+    reg.lock().unwrap().push(Arc::downgrade(&b));
+
+    let chan = empty_core();
+    a.seed(vec![mk_fiber(0)]);
+    let fa = take_run(&a);
+    a.park(core_key(&chan), &chan, fa);
+    b.seed(vec![mk_fiber(0)]);
+    let fb = take_run(&b);
+    b.park(core_key(&chan), &chan, fb);
+
+    let c = a.lock();
+    assert!(
+        a.is_deadlocked_ignoring_jobs(&c),
+        "B is ALSO fully parked with no runnable work, so the veto must not apply and the genuine \
+         deadlock must still fire"
+    );
+}
+
+/// TICKET-099 — a vetoed sched must poll (`DEMOTE_POLL_BACKOFF`) rather than sleep on its OWN condvar
+/// untimed: nothing notifies A's `cv` when peer B quiesces later, so an untimed wait here would hang
+/// forever even though B eventually stops being a live peer.
+#[test]
+fn mnsched_a_vetoed_sched_polls_instead_of_parking_untimed() {
+    let reg: crate::vm::SchedRegistry = Default::default();
+    let mut inner_a = mk_sched(1);
+    inner_a.sched_registry = Arc::clone(&reg);
+    let a = Arc::new(inner_a);
+    let mut inner_b = mk_sched(1);
+    inner_b.sched_registry = Arc::clone(&reg);
+    let b = Arc::new(inner_b);
+    reg.lock().unwrap().push(Arc::downgrade(&a));
+    reg.lock().unwrap().push(Arc::downgrade(&b));
+
+    let chan = empty_core();
+    a.seed(vec![mk_fiber(0)]);
+    let fa = take_run(&a);
+    a.park(core_key(&chan), &chan, fa);
+    // B keeps its seeded fiber runnable — A's fault decision is vetoed by it.
+    b.seed(vec![mk_fiber(0)]);
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let a2 = Arc::clone(&a);
+    std::thread::spawn(move || {
+        tx.send(matches!(a2.take_runnable(0, 1, 0), Take::Stop))
+            .ok();
+    });
+
+    // If A took the untimed `self.cv.wait(c)` path, nothing notifies A's cv here (parking B's fiber
+    // below notifies B's condvar, never A's), so this MUST still be pending.
+    assert_eq!(
+        rx.recv_timeout(std::time::Duration::from_millis(200)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+        "A must not have stopped yet — its own fault decision is vetoed and it has nothing else to run"
+    );
+
+    // Park B's fiber too, so A's next `DEMOTE_POLL_BACKOFF` poll sees the genuine deadlock and fires.
+    let fb = take_run(&b);
+    b.park(core_key(&chan), &chan, fb);
+
+    assert_eq!(
+        rx.recv_timeout(std::time::Duration::from_secs(2)),
+        Ok(true),
+        "a vetoed sched must be polling (DEMOTE_POLL_BACKOFF), not parked untimed on its own cv — \
+         otherwise it never re-examines B and hangs forever"
+    );
+}
+
 /// W7-58 — `PartyWait::Nursery` answers the nursery's OWN predicate, live, on every evaluation.
 ///
 /// This is the "a wait predicate that answers a CONSTANT is a bug waiting for a window" fence: the
@@ -13317,29 +13431,25 @@ fn parallel_cross_nursery_nested_real_fault_reports_real_error() {
     }
 }
 
-/// gaps.md B5 residual boundary — the fix routes child→parent (a send OUT OF an eager body) ONLY;
-/// `parent_wake` points strictly UPWARD. The REVERSE direction (receiver parked INSIDE the eager body,
-/// sender in an ANCESTOR nursery) is NOT routed. This program is timing-divergent (if the ancestor send
-/// lands first the eager receiver reads the buffered value; if the eager receiver parks first it is not
-/// woken → deadlock), so — like the contended case — it must only ever COMPLETE or fault `deadlock`
-/// CLEANLY, never panic/hang. Pins that the fix is NOT over-claimed as full "any live sched" coverage.
-/// 30s watchdog.
+/// TICKET-099 — the reverse direction (receiver parked INSIDE an eager body, sender in an ANCESTOR
+/// nursery) is now routed run-wide too, same as child→parent. Before this fix the direction was
+/// unrouted and whether this program completed or deadlock-faulted depended on scheduling order (a
+/// bare accept-either-outcome test); now it must deterministically succeed. 30s watchdog.
 #[test]
-fn parallel_cross_nursery_parent_to_child_residual_never_panics() {
+fn parallel_cross_nursery_parent_to_child_send_wakes_the_deeper_receiver() {
     let src = "import std.concurrency\nfn main():\n    ready := Channel[int]()\n    parallel:\n        spawn:\n            parallel:\n                spawn:\n                    v := ready.recv()\n                    print(\"got {v}\")\n        spawn:\n            ready.send(1)\nmain()\n";
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(run_capture(src));
     });
     match rx.recv_timeout(std::time::Duration::from_secs(30)) {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => assert!(
-            e.message.contains("deadlock"),
-            "parent→child residual must succeed or deadlock-fault, got: {}",
+        Ok(Ok(out)) => assert!(out.contains("got 1"), "expected 'got 1' in output: {out}"),
+        Ok(Err(e)) => panic!(
+            "parent→child send must wake the deeper receiver, not deadlock-fault: {}",
             e.message
         ),
         Err(_) => {
-            panic!("hung — parent→child residual must complete or deadlock-fault, never hang/panic")
+            panic!("hung — parent→child send must wake the deeper receiver, never hang/panic")
         }
     }
 }
