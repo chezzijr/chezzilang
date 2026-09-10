@@ -33,3 +33,53 @@ test fn explicit_none_stays_unaffected():
 test fn bare_value_coerces_at_a_closure_sink():
     c := fn() -> int?: 1
     assert str(c()) == "Some(1)"
+
+# TICKET-107 (W12-13): a MIXED if/match-expression at a T?/T!E return sink — some branches already
+# wrapped (`None`/`Err`), some bare — success-coerces only its bare branches.
+fn opt_mixed(n: int) -> int?: (if n > 0: n else: None)
+
+fn res_mixed(n: int) -> int!: (if n > 0: n else: Err("neg"))
+
+enum S:
+    C(int)
+    P
+
+fn match_mixed(s: S) -> int?:
+    return match s:
+        S.C(r): r
+        S.P: None
+
+fn elif_mixed(n: int) -> int?:
+    return if n > 0: n elif n == 0: None else: 0 - n
+
+fn nested_coalesce(o: int?, c: bool) -> int?:
+    return if c: (o ?? 0) else: None
+
+test fn if_expr_mixed_branches_coerce_the_bare_ones():
+    assert str(opt_mixed(2)) == "Some(2)"
+    assert str(opt_mixed(-1)) == "None"
+
+test fn if_expr_mixed_branches_coerce_at_a_result_sink():
+    assert str(res_mixed(2)) == "Ok(2)"
+    assert match res_mixed(-1):
+        Ok(_): false
+        Err(_): true
+
+test fn match_expr_mixed_branches_coerce_the_bare_ones():
+    assert str(match_mixed(S.C(7))) == "Some(7)"
+    assert str(match_mixed(S.P)) == "None"
+
+test fn elif_chain_mixed_branches_coerce_the_bare_ones():
+    assert str(elif_mixed(2)) == "Some(2)"
+    assert str(elif_mixed(0)) == "None"
+    assert str(elif_mixed(-5)) == "Some(5)"
+
+test fn a_coalesce_owned_branch_is_never_double_wrapped():
+    assert str(nested_coalesce(Some(5), true)) == "Some(5)"
+    assert str(nested_coalesce(None, true)) == "Some(0)"
+    assert str(nested_coalesce(Some(5), false)) == "None"
+
+test fn closure_if_expr_mixed_branches_coerce_the_bare_ones():
+    g := fn(n: int) -> int?: if n > 0: n else: None
+    assert str(g(3)) == "Some(3)"
+    assert str(g(-3)) == "None"

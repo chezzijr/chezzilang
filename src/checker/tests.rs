@@ -31792,7 +31792,7 @@ fn bare_name_catch_all_ok_on_option_scrutinee() {
 
 #[test]
 fn if_expr_success_coerces_at_option_return_sink() {
-    ok("fn opt(n: int) -> int?:\n    (if n > 0: n else: None)\n\nfn main():\n    print(opt(2))\n");
+    ok("fn opt(n: int) -> int?: (if n > 0: n else: None)\n\nfn main():\n    print(opt(2))\n");
 }
 
 #[test]
@@ -31862,5 +31862,59 @@ fn ticket_107_bare_variant_names_stay_rejected_on_enum_scrutinees() {
     rejects(
         "enum E:\n    A\n    B\n\nenum F:\n    X\n\nfn f(e: E) -> int:\n    match e:\n        X: return 1\n        _: return 2\n",
         "'X' is a variant of enum 'F'; write it qualified as 'F.X'",
+    );
+}
+
+#[test]
+fn ticket_107_inline_if_expr_success_coerces_at_result_sink() {
+    ok(
+        "fn res(n: int) -> int!: (if n > 0: n else: Err(\"neg\"))\n\nfn main():\n    print(res(2))\n",
+    );
+}
+
+#[test]
+fn ticket_107_match_expr_success_coerces_at_option_sink() {
+    ok(
+        "enum S:\n    C(int)\n    P\n\nfn g(s: S) -> int?:\n    return match s:\n        S.C(r): r\n        S.P: None\n\nfn main():\n    print(g(S.P))\n",
+    );
+}
+
+#[test]
+fn ticket_107_closure_if_expr_success_coerces_at_option_sink() {
+    ok("fn main():\n    g := fn(n: int) -> int?: if n > 0: n else: None\n    print(g(3))\n");
+}
+
+#[test]
+fn ticket_107_elif_chain_success_coerces_at_option_sink() {
+    ok(
+        "fn f(n: int) -> int?:\n    return if n > 0: n elif n == 0: None else: 0 - n\n\nfn main():\n    print(f(0))\n",
+    );
+}
+
+#[test]
+fn ticket_107_mixed_branch_coercion_stays_declined_off_a_return_sink() {
+    rejects(
+        "fn main():\n    x: int? = if true: 1 else: None\n",
+        "branches have incompatible types: int and Option[?]",
+    );
+    rejects(
+        "fn t(x: int?) -> int:\n    return 0\n\nfn main():\n    print(t(if true: 1 else: None))\n",
+        "branches have incompatible types: int and Option[?]",
+    );
+    rejects(
+        "fn f(c: bool) -> float?:\n    return if c: 1 else: None\n",
+        "branches have incompatible types: int and Option[?]",
+    );
+    rejects(
+        "fn f(o: int?) -> int?:\n    return o ?? None\n",
+        "branches have incompatible types: int and Option[?]",
+    );
+    rejects(
+        "fn f[T](x: T, c: bool) -> T?:\n    return if c: x else: None\n",
+        "branches have incompatible types: T and Option[?]",
+    );
+    rejects(
+        "fn f(c: bool) -> Option[Option[int]]:\n    return if c: Some(1) else: None\n",
+        "expected return type Option[Option[int]], found Option[int]",
     );
 }

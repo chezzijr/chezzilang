@@ -73,6 +73,7 @@ impl Checker {
             generic_fn_value_prepass: false,
             expected_hint: None,
             float_elem_hint: None,
+            ret_coerce_sink: None,
             inferring_ret: false,
             collected_rets: Vec::new(),
             in_generator: false,

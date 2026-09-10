@@ -4532,7 +4532,9 @@ impl Compiler {
             ExprKind::Match { scrutinee, arms } => {
                 self.compile_match_expr(fc, scrutinee, arms, expr.span)?
             }
-            ExprKind::IfElse { cond, then, els } => self.compile_if_expr(fc, cond, then, els)?,
+            ExprKind::IfElse { cond, then, els } => {
+                self.compile_if_expr(fc, cond, then, els, expr.span)?
+            }
             ExprKind::Recover(block) => self.compile_recover(fc, block, expr.span)?,
         }
         Ok(())
@@ -4747,6 +4749,12 @@ impl Compiler {
             if mix && crate::ast::untyped_int_const(body) {
                 fc.emit(Op::CoerceFloat, body.span);
             }
+            // TICKET-107 (W12-13): a branch whose span equals the match expression's OWN span is a
+            // synthesized `??`/`?.` desugar sharing that span — never re-look-it-up here, or a bare
+            // value at that span wraps twice.
+            if body.span != span {
+                s.emit_ret_coerce(fc, body.span)?;
+            }
             Ok(())
         };
         if self.arms_are_literal(arms.iter().map(|a| &a.pattern)) {
@@ -4763,8 +4771,9 @@ impl Compiler {
         cond: &Expr,
         then: &Expr,
         els: &Expr,
+        own: Span,
     ) -> Result<(), CompileError> {
-        self.compile_if_expr_chain(fc, cond, then, els, None)
+        self.compile_if_expr_chain(fc, cond, then, els, None, own)
     }
 
     /// Chain-aware body of `compile_if_expr`. `inherited_mix` threads the WHOLE-chain
@@ -4781,6 +4790,7 @@ impl Compiler {
         then: &Expr,
         els: &Expr,
         inherited_mix: Option<bool>,
+        own: Span,
     ) -> Result<(), CompileError> {
         let mix = inherited_mix.unwrap_or_else(|| if_chain_numeric_mix(then, els));
         self.compile_expr(fc, cond)?;
@@ -4789,6 +4799,12 @@ impl Compiler {
         self.compile_expr(fc, then)?;
         if mix && crate::ast::untyped_int_const(then) {
             fc.emit(Op::CoerceFloat, then.span);
+        }
+        // TICKET-107 (W12-13): a branch whose span equals the if-expression's OWN span is a
+        // synthesized `??`/`?.` desugar sharing that span — never re-look-it-up here, or a bare
+        // value at that span wraps twice.
+        if then.span != own {
+            self.emit_ret_coerce(fc, then.span)?;
         }
         let end = fc.emit_jump(Op::Jump(0), cond.span);
         fc.patch_jump(skip);
@@ -4800,12 +4816,15 @@ impl Compiler {
             els: e2,
         } = &els.kind
         {
-            self.compile_if_expr_chain(fc, c2, t2, e2, Some(mix))?;
+            self.compile_if_expr_chain(fc, c2, t2, e2, Some(mix), els.span)?;
         } else {
             self.compile_expr(fc, els)?;
             if mix && crate::ast::untyped_int_const(els) {
                 fc.emit(Op::CoerceFloat, els.span);
             }
+        }
+        if els.span != own {
+            self.emit_ret_coerce(fc, els.span)?;
         }
         fc.patch_jump(end);
         Ok(())

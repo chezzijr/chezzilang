@@ -1047,6 +1047,8 @@ impl Checker {
         &mut self,
         scrutinee: &Expr,
         arms: &[crate::ast::MatchExprArm],
+        sink: Option<Ty>,
+        own: Span,
     ) -> Ty {
         // Capture + clear the expected-type hint before the scrutinee/guards (the hint is for the
         // arm BODIES, the tail values). It is re-installed before each arm body below — every arm
@@ -1059,7 +1061,7 @@ impl Checker {
         let mut covered = std::collections::HashSet::new();
         let mut has_wildcard = false;
         let mut exh = self.exh_new(&kind);
-        let mut result: Option<Ty> = None;
+        let mut arm_tys: Vec<(Span, Ty)> = Vec::new();
         // int→float widen an untyped-int-const arm when a float-const sibling arm is present (mirrors
         // the list/map `literal_numeric_mix` peephole the compiler coerces on — see `branch_widen`).
         let mix = crate::compiler::literal_numeric_mix(arms.iter().map(|a| &a.body));
@@ -1081,16 +1083,29 @@ impl Checker {
             has_wildcard |= Self::bool_domain_closed(&kind, &covered);
             has_wildcard |= self.exh_add(&mut exh, &arm.pattern, arm.guard.is_some());
             self.expected_hint = hint.clone();
+            self.ret_coerce_sink = sink.clone();
             let t = self.infer(&arm.body);
             self.pop_scope();
             let t = Self::branch_widen(&arm.body, t, mix);
-            result = Some(self.unify_branch(result, t, arm.body.span, hint.as_ref()));
+            arm_tys.push((arm.body.span, t));
         }
         self.expected_hint = None;
+        let coerced = sink
+            .as_ref()
+            .and_then(|h| self.coerce_branches_at_sink(h, own, &arm_tys));
+        let result = if coerced.is_some() {
+            coerced.clone()
+        } else {
+            let mut acc = None;
+            for (sp, t) in arm_tys {
+                acc = Some(self.unify_branch(acc, t, sp, hint.as_ref()));
+            }
+            acc
+        };
         let help = self.exh_help(&exh);
         self.check_exhaustive(&kind, &covered, has_wildcard, help, scrutinee.span);
         let res = result.unwrap_or(Ty::Unknown);
-        if had_hint {
+        if had_hint || coerced.is_some() {
             res
         } else {
             self.default_expr_result_e(res)
@@ -1098,8 +1113,15 @@ impl Checker {
     }
 
     /// Infer an expression-position `if c: a else: b`: condition is bool, the two branches unify.
-    pub(super) fn infer_if_else(&mut self, cond: &Expr, then: &Expr, els: &Expr) -> Ty {
-        self.infer_if_else_chain(cond, then, els, None)
+    pub(super) fn infer_if_else(
+        &mut self,
+        cond: &Expr,
+        then: &Expr,
+        els: &Expr,
+        sink: Option<Ty>,
+        own: Span,
+    ) -> Ty {
+        self.infer_if_else_chain(cond, then, els, None, sink, own)
     }
 
     /// Chain-aware body of `infer_if_else`. `inherited_mix` carries the WHOLE-chain
@@ -1115,6 +1137,8 @@ impl Checker {
         then: &Expr,
         els: &Expr,
         inherited_mix: Option<bool>,
+        sink: Option<Ty>,
+        own: Span,
     ) -> Ty {
         // Capture + clear the expected-type hint before the condition: the hint is for the branch
         // VALUES (tail position), not the bool condition. Re-install it for EACH branch — both are
@@ -1131,6 +1155,7 @@ impl Checker {
         // No refine-on-first-use barrier here: a pin made in a branch VALUE persists, exactly like
         // statement position. See the note above `Checker::is_unrefined_empty_coll`.
         self.expected_hint = hint.clone();
+        self.ret_coerce_sink = sink.clone();
         let t_then = self.infer(then);
         self.expected_hint = hint.clone();
         // A nested-`IfElse` `els` is the `elif` tail — recurse DIRECTLY, threading the head's mix; any
@@ -1141,13 +1166,23 @@ impl Checker {
             els: e2,
         } = &els.kind
         {
-            self.infer_if_else_chain(c2, t2, e2, Some(mix))
+            self.infer_if_else_chain(c2, t2, e2, Some(mix), sink.clone(), els.span)
         } else {
+            self.ret_coerce_sink = sink.clone();
             self.infer(els)
         };
         self.expected_hint = None;
         let t_then = Self::branch_widen(then, t_then, mix);
         let t_els = Self::branch_widen(els, t_els, mix);
+        if let Some(h) = &sink
+            && let Some(ty) = self.coerce_branches_at_sink(
+                h,
+                own,
+                &[(then.span, t_then.clone()), (els.span, t_els.clone())],
+            )
+        {
+            return ty;
+        }
         let acc = self.unify_branch(None, t_then, then.span, hint.as_ref());
         let res = self.unify_branch(Some(acc), t_els, els.span, hint.as_ref());
         if had_hint {
@@ -1243,6 +1278,50 @@ impl Checker {
                 }
             }
         }
+    }
+
+    /// TICKET-107 (W12-13) — mixed-branch success-coercion at a `T?`/`T!E` return `sink`. Fires only
+    /// when the branches MIX: at least one is a bare coercible value (`ret_coerce_mode` returns
+    /// `Some`) and every other branch is already assignable to `sink`. All-bare branches (every mode
+    /// `Some`) and all-already-typed branches (every mode `None`) both decline here and keep the old
+    /// `unify_branch` fold — an all-bare match is wrapped whole at the return site (DEC-025), and an
+    /// incompatible all-typed fold stays rejected. A branch whose own span equals the if/match node's
+    /// `own` span is EXCLUDED on both sides (never coerced, never recorded): the `??`/`?.` desugar
+    /// gives a synthesized arm body the whole node's span, so without this a bare branch there would
+    /// be wrapped twice (`return if c: (o ?? 0) else: None` → `Some(Some(5))`). Records only WRAP
+    /// verdicts, and none under `generic_arg_prepass` (a closure body infers more than once, DEC-025).
+    fn coerce_branches_at_sink(
+        &mut self,
+        sink: &Ty,
+        own: Span,
+        branches: &[(Span, Ty)],
+    ) -> Option<Ty> {
+        if !ty_fully_concrete(sink) {
+            return None;
+        }
+        let modes: Vec<Option<crate::checker::RetCoerce>> = branches
+            .iter()
+            .map(|(_, t)| self.ret_coerce_mode(sink, t))
+            .collect();
+        if modes.iter().all(Option::is_none) || modes.iter().all(Option::is_some) {
+            return None;
+        }
+        for ((span, t), mode) in branches.iter().zip(modes.iter()) {
+            match mode {
+                Some(_) if *span == own => return None,
+                Some(_) => {}
+                None if !self.assignable(sink, t) => return None,
+                None => {}
+            }
+        }
+        if !self.generic_arg_prepass {
+            for ((span, _), mode) in branches.iter().zip(modes) {
+                if let Some(m) = mode {
+                    self.record_ret_coerce(*span, Some(m));
+                }
+            }
+        }
+        Some(sink.clone())
     }
 
     // ===== expression inference =====
@@ -1364,6 +1443,7 @@ impl Checker {
         // call argument, or any other sub-expression does NOT inherit it. Mirrors the compiler's
         // identical `take()` at the top of `compile_expr`.
         let elem_hint = self.float_elem_hint.take();
+        let ret_sink = self.ret_coerce_sink.take();
         match &expr.kind {
             ExprKind::Int(_) => Ty::Int,
             ExprKind::Float(_) => Ty::Float,
@@ -1500,8 +1580,12 @@ impl Checker {
                 // #2/#3) and the ambiguity check happen inside `infer_closure`.
                 self.infer_closure(params, ret.as_ref(), body, None)
             }
-            ExprKind::Match { scrutinee, arms } => self.infer_match(scrutinee, arms),
-            ExprKind::IfElse { cond, then, els } => self.infer_if_else(cond, then, els),
+            ExprKind::Match { scrutinee, arms } => {
+                self.infer_match(scrutinee, arms, ret_sink, expr.span)
+            }
+            ExprKind::IfElse { cond, then, els } => {
+                self.infer_if_else(cond, then, els, ret_sink, expr.span)
+            }
             ExprKind::Recover(block) => self.infer_recover(block),
             // `Type[T1, T2]` is a type-application HEAD — only valid as the receiver of a member
             // access / call (`Result[int, str].Ok(5)`, nullary `Box[int].Empty`). The `infer_call`
@@ -4846,7 +4930,9 @@ impl Checker {
                 ty
             })
             .collect();
+        self.ret_coerce_sink = ret.is_some().then(|| self.current_ret.clone());
         let body_ty = self.infer(body);
+        self.ret_coerce_sink = None;
         let closure_had_err = self.errors.len() > closure_mark;
         self.pop_scope();
         self.loop_depth = saved_loop_depth;

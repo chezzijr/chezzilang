@@ -2362,6 +2362,11 @@ struct Checker {
     /// same `take()`-at-expr-entry clear), which is what makes the checker's accepted set a subset of
     /// what the compiler lowers.
     float_elem_hint: Option<crate::ast::ElemFloatHint>,
+    /// TICKET-107 (W12-13): the declared `T?`/`T!E` return type when the expression about to be
+    /// inferred sits DIRECTLY at a W8-21 success-coercion sink. `take()`n at the top of `infer_kind`,
+    /// like `float_elem_hint`, so only an if/match expression at that exact position (and, through
+    /// it, its own branches) ever sees it.
+    ret_coerce_sink: Option<Ty>,
     /// For each `spawn:` block body currently being checked, the local-scope depth (`scopes.len()`)
     /// at the point the task body opened. A binding living at a scope index *below* the innermost
     /// floor is a **captured** binding — read-only inside the task (assigning to it is an error).

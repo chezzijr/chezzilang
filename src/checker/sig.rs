@@ -3940,7 +3940,13 @@ impl Checker {
                     // disagree again and re-trigger the `ListWidenTable` aliasing abort (DEC-033).
                     self.float_elem_hint = float_elem_hint_ty(&ret);
                     self.expected_hint = Some(ret.clone());
+                    // TICKET-107 (W12-13) — a mixed if/match-expression return value may success-
+                    // coerce its bare branches at this same sink; same `ret_declared` /
+                    // `in_default_provider` gate as the whole-value coercion just below.
+                    self.ret_coerce_sink =
+                        (self.ret_declared && !self.in_default_provider).then(|| ret.clone());
                     let t = self.infer(e);
+                    self.ret_coerce_sink = None;
                     self.float_elem_hint = None;
                     self.expected_hint = None;
                     t
@@ -4465,7 +4471,11 @@ impl Checker {
             ] = decl.body.as_slice()
         {
             let ret = sig.ret.clone();
+            // TICKET-107 (W12-13) — same gate as the coercion mode computed below.
+            self.ret_coerce_sink =
+                (decl.ret.is_some() && !self.in_default_provider).then(|| ret.clone());
             let ty = self.infer(e);
+            self.ret_coerce_sink = None;
             if ret == Ty::Nil {
                 // A NON-nil expr against `-> nil` is a void fn that actually returns a value —
                 // reject it, mirroring the multiline `return <expr>` path. A nil-typed inline expr
