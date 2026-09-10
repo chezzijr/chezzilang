@@ -3465,7 +3465,13 @@ impl Checker {
                     );
                     return;
                 };
-                if self.is_loop_var(name) {
+                // TICKET-107 (W12-14) — `List += List` lowers to `Op::AddInPlace` (DEC-015), which
+                // extends the SAME list and writes the same handle back; it never rebinds the name,
+                // so neither guard below applies. Every other compound form, and `+=` on any other
+                // type, rebinds and stays rejected.
+                let extends_in_place = op == AssignOp::PlusEq
+                    && matches!((&var_ty, &val_ty), (Ty::List(_), Ty::List(_)));
+                if !extends_in_place && self.is_loop_var(name) {
                     self.error(
                         target.span,
                         format!("cannot assign to loop variable '{name}' (loop variables are rebound each iteration)"),
@@ -3477,7 +3483,7 @@ impl Checker {
                 // (`xs.push(v)`, `xs[i] = v`) is a different arm and stays allowed — const is shallow.
                 // Not fired for a from-imported const (that name is not in `const_decls`; its rebind is
                 // caught by the imported-global guard below, which names const when it is one).
-                if self.is_const_decl(name) {
+                if !extends_in_place && self.is_const_decl(name) {
                     self.error(
                         target.span,
                         format!("cannot reassign const binding '{name}'"),

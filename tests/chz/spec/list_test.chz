@@ -474,3 +474,17 @@ test fn sort_rejects_mutation_from_a_struct_compare():
     match r:
         Ok(_): assert false, "struct sort with a mutating compare did not fault"
         Err(e): assert e.message().contains("list modified during 'sort'"), e.message()
+
+# TICKET-107 (W12-14): `List += List` extends in place (DEC-015), so it never rebinds the name —
+# it must pass through a loop variable and a `const` binding, unlike every other compound form.
+test fn plus_equals_extends_through_a_loop_variable():
+    lst := [[1], [2]]
+    for row in lst:
+        row += [0]
+    assert str(lst) == "[[1, 0], [2, 0]]"
+
+test fn plus_equals_extends_through_a_const_binding():
+    xs: const List[int] = [1]
+    alias := xs
+    xs += [3]
+    assert str(alias) == "[1, 3]"

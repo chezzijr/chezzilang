@@ -31918,3 +31918,31 @@ fn ticket_107_mixed_branch_coercion_stays_declined_off_a_return_sink() {
         "expected return type Option[Option[int]], found Option[int]",
     );
 }
+
+#[test]
+fn ticket_107_rebinding_compound_assign_stays_rejected_on_loop_var_and_const() {
+    rejects(
+        "fn main():\n    for row in [[1]]:\n        row *= 2\n",
+        "cannot assign to loop variable 'row'",
+    );
+    rejects(
+        "fn main():\n    for row in [[1]]:\n        row = [2]\n",
+        "cannot assign to loop variable 'row'",
+    );
+    rejects(
+        "fn main():\n    for row in [[1]]:\n        row += 5\n",
+        "cannot assign to loop variable 'row'",
+    );
+    rejects(
+        "fn main():\n    for f in [1.5]:\n        f += 1.0\n",
+        "cannot assign to loop variable 'f'",
+    );
+    rejects(
+        "fn main():\n    xs: const List[int] = [1]\n    xs *= 2\n",
+        "cannot reassign const binding 'xs'",
+    );
+    rejects(
+        "fn main():\n    s: const str = \"a\"\n    s += \"b\"\n",
+        "cannot reassign const binding 's'",
+    );
+}
