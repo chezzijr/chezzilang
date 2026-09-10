@@ -125,6 +125,7 @@ impl Vm {
             mn_enlisted: 0,
             mn_enlist_sched: None,
             eager_scheds: Vec::new(),
+            fiber_scope: None,
             nursery_defer_floors: Vec::new(),
             nursery_spans: Vec::new(),
             executors: Vec::new(),

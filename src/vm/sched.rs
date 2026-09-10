@@ -677,7 +677,10 @@ impl Vm {
             // (the child nursery this fiber is joining) may be a private eager sched of its own, not
             // `self.mn` — the fiber still counts as blocked on `self.mn`, because a peer veto asks
             // `self.mn` "can you still feed me?" and a fiber waiting on this join can feed nobody.
-            let _owner = self.blocked_owner_guard(sched);
+            // TICKET-103 — in the owner arm the joined scope is on the owner's own sched, so it is
+            // recorded as this join's target for `flag_deadlock_leaves`.
+            let _owner =
+                self.blocked_owner_guard(sched, self.owns_nested_sched(sched).then_some(scope_id));
             shell.mn_worker_loop(sched, wid, scope_id);
             sched.wait_for_scope(scope_id);
         }
@@ -1013,7 +1016,7 @@ impl Vm {
                 // `drainer.is_none()` only happens when `self.mn` was already `None` at nursery entry
                 // (`activate_eager_nursery`'s reused-scope branch requires it), so there is no sched
                 // above this one to report to.
-                let _owner = self.blocked_owner_guard(&sched);
+                let _owner = self.blocked_owner_guard(&sched, None);
                 if eager_joiner_runs_fibers(worker_count()) {
                     shell.mn_worker_loop(&sched, 0, sid);
                 }
@@ -1034,7 +1037,7 @@ impl Vm {
             // outermost nursery (`self.mn` is `None`, the guard is a no-op) or a nursery entered
             // inside a spawned task (`self.mn` is `Some(outer)`, so this fiber counts as blocked on
             // `outer` — the fiber that is join-blocked here can feed `outer`'s peer veto nothing).
-            let _owner = self.blocked_owner_guard(&sched);
+            let _owner = self.blocked_owner_guard(&sched, None);
             if eager_joiner_runs_fibers(worker_count()) {
                 shell.mn_worker_loop(&sched, 0, 0);
             }
@@ -2138,6 +2141,8 @@ impl Vm {
             // …and the ENCLOSING scopes' flags with it: an outer cancel must reach a nested scope's
             // fibers (structured concurrency), or a nested nursery inside a cancelled task never dies.
             self.cancel_outer = ancestors;
+            // TICKET-103 — `blocked_owner_guard` counts this fiber on its own scope.
+            self.fiber_scope = Some(fiber.scope_id);
         }
         self.suspend = None;
         self.wait_suspend = None; // set by `op_wait_poll`'s M:N snapshot-park (→ `Disp::WaitPark`)
@@ -2627,7 +2632,16 @@ impl Vm {
     /// join-blocked fiber as a `blocked_owner`, so it never reads `local_quiesced`, so a peer veto
     /// against it never lifts and a genuine nested deadlock hangs forever instead of faulting
     /// (measured: `parity_nested_deadlock_cancels_the_outer_parked_siblings_defer` at `fdc71d70`).
-    pub(super) fn blocked_owner_guard(&self, sched: &Arc<MnSched>) -> Option<BlockedOwnerGuard> {
+    ///
+    /// TICKET-103 — it also counts the owner on its OWN scope (`JoinScope::owners_blocked`, from
+    /// `self.fiber_scope`) and, when `joined` is `Some`, the nursery it joins on this same sched
+    /// (`JoinScope::joins_blocked` on that nursery's origin scope). `flag_deadlock_leaves` reads
+    /// both. `owner` is `self.mn` in both branches, so `fiber_scope` indexes the right sched.
+    pub(super) fn blocked_owner_guard(
+        &self,
+        sched: &Arc<MnSched>,
+        joined: Option<usize>,
+    ) -> Option<BlockedOwnerGuard> {
         let (owner, cross_sched) = if self.owns_nested_sched(sched) {
             (Arc::clone(sched), false)
         } else {
@@ -2643,11 +2657,23 @@ impl Vm {
             if cross_sched {
                 c.cross_sched_blocked_owners += 1;
             }
+            if let Some(s) = self.fiber_scope {
+                c.scopes[s].owners_blocked += 1;
+            }
+            if let Some(j) = joined {
+                debug_assert!(
+                    !cross_sched,
+                    "a joined scope lives on the owner's own sched"
+                );
+                c.scopes[j].joins_blocked += 1;
+            }
         }
         owner.cv.notify_all();
         Some(BlockedOwnerGuard {
             sched: owner,
             cross_sched,
+            scope: self.fiber_scope,
+            joined,
         })
     }
 
@@ -5877,6 +5903,10 @@ pub(super) fn dispatch_eager_job(
 pub(super) struct BlockedOwnerGuard {
     sched: Arc<MnSched>,
     cross_sched: bool,
+    /// TICKET-103 — the owner fiber's own scope, whose `owners_blocked` this guard holds.
+    scope: Option<usize>,
+    /// TICKET-103 — the same-sched nursery origin scope whose `joins_blocked` this guard holds.
+    joined: Option<usize>,
 }
 
 impl Drop for BlockedOwnerGuard {
@@ -5886,6 +5916,12 @@ impl Drop for BlockedOwnerGuard {
             c.blocked_owners -= 1;
             if self.cross_sched {
                 c.cross_sched_blocked_owners -= 1;
+            }
+            if let Some(s) = self.scope {
+                c.scopes[s].owners_blocked -= 1;
+            }
+            if let Some(j) = self.joined {
+                c.scopes[j].joins_blocked -= 1;
             }
         }
         self.sched.cv.notify_all();

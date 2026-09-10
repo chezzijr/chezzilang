@@ -895,6 +895,9 @@ pub struct Vm {
     /// innermost nursery is eager injects its handler fiber straight into the scope's sched (runs
     /// concurrently with the body) instead of queueing it for the join. See [`EagerScope`].
     eager_scheds: Vec<Option<EagerScope>>,
+    /// TICKET-103 — the scope id of the fiber this shell is running; set on every swap-in by
+    /// `run_one_fiber`.
+    fiber_scope: Option<usize>,
     /// Every `Executor` created during the run (`Op::NewExecutor`), in creation order. These handles
     /// are GC roots (see [`Vm::collect`]) so an un-shut executor's queued work survives until the
     /// program-exit auto-drain (C5 / A2) reaps any executor never explicitly shut down.
@@ -2166,6 +2169,14 @@ struct JoinScope {
     /// including an early-enlisted outer scope (DEC-048: it reports the BUILDER's span) and the
     /// `(None, Some(held))` late-spawn arm (no `blocked_owners` bracket, so no per-scope span either).
     deadlock_err: Option<RuntimeError>,
+    /// TICKET-103 — of `SchedCore::blocked_owners`, the fibers OF THIS SCOPE blocked inline at a
+    /// nested join. A joined family holding one is interior for `flag_deadlock_leaves`: that fiber
+    /// may feed it once its own join returns.
+    owners_blocked: usize,
+    /// TICKET-103 — owners blocked inline joining the nursery whose ORIGIN scope this is, on this
+    /// same sched. Set by `join_fiber_owned_nursery`, `abort_fiber_owned_nursery` and
+    /// `run_mn_nursery_nested`'s owner arm. Its family is a target for `flag_deadlock_leaves`.
+    joins_blocked: usize,
 }
 
 struct SchedCore {
@@ -2498,6 +2509,8 @@ impl MnSched {
                     // when this sched is built INSIDE an already-running task.
                     ancestors: Vec::new(),
                     deadlock_err: None,
+                    owners_blocked: 0,
+                    joins_blocked: 0,
                 }],
                 terminate: false,
                 demoted_chans: std::collections::HashMap::new(),
@@ -2555,6 +2568,8 @@ impl MnSched {
             cancel,
             ancestors,
             deadlock_err: None,
+            owners_blocked: 0,
+            joins_blocked: 0,
         });
         // Cross-nursery flat scheduler — a late `spawn:` into a non-outermost nursery registers a fresh
         // TRAILING scope on the HELD sched (`run_mn_nursery` held-nested branch) AFTER every prior scope
@@ -2598,6 +2613,8 @@ impl MnSched {
             cancel,
             ancestors,
             deadlock_err: None,
+            owners_blocked: 0,
+            joins_blocked: 0,
         });
         // A freshly-registered scope has unfinished work — un-latch any stale global `terminate` (see
         // `register_scope`) so the inline owner that drains it is not stopped on the stale flag.
@@ -2884,9 +2901,15 @@ impl MnSched {
             // hold the core lock and `running == 0` excludes the only out-of-lock mutator (a running
             // worker's local push/steal), so no fiber can be in flight to become runnable.
             if self.is_deadlocked(&c) {
-                c.flag_deadlock(&self.deadlock_err);
+                // TICKET-103 — fault joined leaves first. A non-terminating flag `continue`s: a
+                // SENTINEL helper treats `Stop` as exit-forever, and the leaf's inline owner reaches
+                // its scope-scoped owner stop on the next pass.
+                let done = c.flag_deadlock_leaves(&self.deadlock_err);
                 self.cv.notify_all();
-                return Take::Stop;
+                if done {
+                    return Take::Stop;
+                }
+                continue;
             }
             // gaps.md W7-58 — THE NURSERY OWNER'S JUDGE. The gate above declined because a job is
             // outstanding (W7-56). That veto is right when the job is RUNNING, and wrong when the job
@@ -2916,9 +2939,13 @@ impl MnSched {
                 let verdict = self.quiesce.quiesced(&self.exec_registry);
                 c = self.lock();
                 if verdict && self.is_deadlocked_ignoring_jobs(&c) {
-                    c.flag_deadlock(&self.deadlock_err);
+                    // TICKET-103 — same leaf-first flag as above.
+                    let done = c.flag_deadlock_leaves(&self.deadlock_err);
                     self.cv.notify_all();
-                    return Take::Stop;
+                    if done {
+                        return Take::Stop;
+                    }
+                    continue;
                 }
                 continue;
             }
@@ -3912,6 +3939,14 @@ impl MnSched {
         if !c.any_scope_incomplete() {
             return false;
         }
+        // TICKET-103 — a join-blocked owner whose joined family is complete resumes on its next pass,
+        // and its `BlockedOwnerGuard` drop notifies `cv`. Judging in that window finds no parked leaf,
+        // so `flag_deadlock_leaves` falls back to the sched-wide flag and faults the owner's live
+        // siblings (W12-4 at T>=2 with a denied slot). Above the `require_parked` split (DEC-101), so
+        // both callers get it; it lasts one owner pass.
+        if c.any_joined_family_done() {
+            return false;
+        }
         // Per-connection spawn — an eager nursery whose body is still running is live work the sched
         // can't account (the acceptor runs inline and may `inject` a handler that wakes a parked
         // sibling). Never declare deadlock while ANY body can still inject; `close_body` at
@@ -4320,33 +4355,157 @@ impl SchedCore {
                     }
                 };
                 if let Some(f) = fiber {
-                    // Carry the parked fiber's OWN buffered stdout/stderr into its Deadlocked slot
-                    // (not an empty buffer). `swap_ctx` moved this fiber's live prints into
-                    // `f.ctx.out` when it parked; the downstream `reduce_task_slots` flushes EVERY
-                    // Deadlocked slot's buffer at its task-order slot (not just the lowest-index one,
-                    // as with a real Fault), so with two-or-more parked fibers a higher-index
-                    // printer's output is preserved byte-identically to a strictly sequential run.
-                    // `task_index`/`scope_id` are Copy, read before the partial move of
-                    // `f.ctx.out`/`f.ctx.stderr`.
-                    let (ti, sid) = (f.task_index, f.scope_id);
-                    // A scope with its own `deadlock_err` (the owner-fiber arm of
-                    // `run_mn_nursery_nested`) reports ITS span instead of the sched-wide `err` — see
-                    // `JoinScope::deadlock_err` and DEC-048.
-                    let scope_err = self.scopes[sid]
-                        .deadlock_err
-                        .clone()
-                        .unwrap_or_else(|| err.clone());
-                    self.slots[ti] = Some(TaskOutcome::Deadlocked {
-                        err: scope_err,
-                        out: f.ctx.out,
-                        stderr: f.ctx.stderr,
-                    });
-                    self.scopes[sid].done += 1;
+                    self.record_deadlocked(f, err);
                 }
             }
         }
         self.parked_n = 0;
         self.terminate = true;
+    }
+
+    /// Store one claimed parked fiber's `Deadlocked` outcome and bump its scope's `done`. Shared by
+    /// `flag_deadlock` and `flag_deadlock_leaves`.
+    fn record_deadlocked(&mut self, f: Fiber, err: &RuntimeError) {
+        // Carry the parked fiber's OWN buffered stdout/stderr into its Deadlocked slot (not an empty
+        // buffer). `swap_ctx` moved this fiber's live prints into `f.ctx.out` when it parked; the
+        // downstream `reduce_task_slots` flushes EVERY Deadlocked slot's buffer at its task-order slot
+        // (not just the lowest-index one, as with a real Fault), so with two-or-more parked fibers a
+        // higher-index printer's output is preserved byte-identically to a strictly sequential run.
+        // `task_index`/`scope_id` are Copy, read before the partial move of `f.ctx.out`/`f.ctx.stderr`.
+        let (ti, sid) = (f.task_index, f.scope_id);
+        // A scope with its own `deadlock_err` (the owner-fiber arm of `run_mn_nursery_nested`)
+        // reports ITS span instead of the sched-wide `err` — see `JoinScope::deadlock_err` and
+        // DEC-048.
+        let scope_err = self.scopes[sid]
+            .deadlock_err
+            .clone()
+            .unwrap_or_else(|| err.clone());
+        self.slots[ti] = Some(TaskOutcome::Deadlocked {
+            err: scope_err,
+            out: f.ctx.out,
+            stderr: f.ctx.stderr,
+        });
+        self.scopes[sid].done += 1;
+    }
+
+    /// TICKET-103 — every scope sharing `scope_id`'s cancel token: a nursery's origin scope plus its
+    /// continuation scopes (`MnSched::inject_or_extend`). Every other scope owns a distinct Arc, so
+    /// its family is itself.
+    fn scope_family(&self, scope_id: usize) -> Vec<usize> {
+        let tok = &self.scopes[scope_id].cancel;
+        self.scopes
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| Arc::ptr_eq(&s.cancel, tok))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// TICKET-103 — some owner blocked at a same-sched join is joining a family whose every scope is
+    /// complete. That owner resumes on its next pass (see `MnSched::quiesced_core`).
+    fn any_joined_family_done(&self) -> bool {
+        (0..self.scopes.len()).any(|i| {
+            self.scopes[i].joins_blocked > 0
+                && self
+                    .scope_family(i)
+                    .iter()
+                    .all(|&j| self.scopes[j].done == self.scopes[j].total)
+        })
+    }
+
+    /// TICKET-103 (W12-4) — the deadlock flag, faulting only the parked fibers of JOINED LEAF
+    /// families. Returns `true` when it fell back to the sched-wide [`SchedCore::flag_deadlock`]
+    /// (which sets `terminate`), `false` when it faulted leaves only and the sched keeps running.
+    ///
+    /// A join-blocked owner feeds by CHANNEL, not by family, so a parked fiber outside the family it
+    /// joins may be its next receiver once its `recover:` returns (`cousin_fed`). A *joined* family
+    /// (one with `joins_blocked > 0`) is a *leaf* when none of its scopes holds a join-blocked owner
+    /// (`owners_blocked`). A joined leaf's fibers have no feeder left: its owner waits on them, and
+    /// no member waits on a join. With no parked fiber in a joined leaf, every other shape keeps
+    /// today's sched-wide flag. Residual: two joined leaves where one owner feeds the other after
+    /// its `recover:` (`leaf_cousin`) fault together, as T>=2 already does.
+    fn flag_deadlock_leaves(&mut self, err: &RuntimeError) -> bool {
+        let mut target = vec![false; self.scopes.len()];
+        for i in 0..self.scopes.len() {
+            if self.scopes[i].joins_blocked == 0 {
+                continue;
+            }
+            let fam = self.scope_family(i);
+            if fam.iter().any(|&j| self.scopes[j].owners_blocked > 0) {
+                continue; // interior: a member's owner may feed it once its own join returns
+            }
+            for j in fam {
+                target[j] = true;
+            }
+        }
+        // Peek a `Wait` fiber's scope under its mutex without claiming, as `cancel_drain` does.
+        let peek = |wp: &Arc<WaitPark>| -> Option<usize> {
+            wp.fiber
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .map(|f| f.scope_id)
+        };
+        let any_leaf_parked = self.parked.values().flatten().any(|e| match e {
+            ParkedEntry::Recv(f) | ParkedEntry::Send(f) => target[f.scope_id],
+            ParkedEntry::Wait(wp) => {
+                !wp.claimed.load(Ordering::Acquire) && peek(wp).is_some_and(|s| target[s])
+            }
+        });
+        if !any_leaf_parked {
+            self.flag_deadlock(err);
+            return true;
+        }
+        let buckets: Vec<(usize, Vec<ParkedEntry>)> = self.parked.drain().collect();
+        let mut flagged = 0usize;
+        for (key, v) in buckets {
+            let mut keep: Vec<ParkedEntry> = Vec::new();
+            for entry in v {
+                let fiber = match entry {
+                    ParkedEntry::Recv(f) | ParkedEntry::Send(f) if target[f.scope_id] => Some(f),
+                    ParkedEntry::Wait(wp) => {
+                        if wp.claimed.load(Ordering::Acquire) {
+                            continue; // a stale copy of a claimed token: drop it
+                        }
+                        match peek(&wp) {
+                            None => continue, // already taken: drop the stale copy
+                            Some(s) if !target[s] => {
+                                keep.push(ParkedEntry::Wait(wp));
+                                continue;
+                            }
+                            Some(_) => {
+                                if wp
+                                    .claimed
+                                    .compare_exchange(
+                                        false,
+                                        true,
+                                        Ordering::AcqRel,
+                                        Ordering::Acquire,
+                                    )
+                                    .is_err()
+                                {
+                                    continue;
+                                }
+                                wp.fiber.lock().unwrap_or_else(|e| e.into_inner()).take()
+                            }
+                        }
+                    }
+                    other => {
+                        keep.push(other); // outside every joined leaf: stays parked
+                        continue;
+                    }
+                };
+                if let Some(f) = fiber {
+                    self.record_deadlocked(f, err);
+                    flagged += 1;
+                }
+            }
+            if !keep.is_empty() {
+                self.parked.insert(key, keep);
+            }
+        }
+        self.parked_n -= flagged;
+        false
     }
 }
 
