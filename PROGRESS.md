@@ -135,6 +135,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   `jump_checked` back-edge, riding its existing 1/1024 sample gate. Measured: the ticket's module
   top-level fault now delivers once at rc=1 in 17 ms (was `r=Err('boom')` then a second abort); its
   top-level CPU loop is cut at 31 ms where it previously ran for seconds.
+- **TICKET-103 (2026-09-10) — a nested nursery whose owner blocks on a channel op was falsely `deadlock`-faulted at `CHEZZI_THREADS=1` and past the nested-drainer budget, and a recovered inner deadlock poisoned the enclosing nursery (W12-1, W12-4).** The fallback registers a scope on the spawning fiber's own sched at `EnterNursery`, so tasks start at `spawn`; a spawn into a non-last scope opens a continuation scope; the owner parks at its join (`Disp::JoinPark`), including the implicit-nursery join `do_return` runs, and the rewound op completes the return after the wake; the deadlock flag faults joined leaf nurseries first. Residual: the T>=2 depth cliff on the granted-slot path (TICKET-112).
 - **TICKET-095 (2026-09-08) — a nested-nursery deadlock hung forever at `CHEZZI_THREADS=1` where
   every other worker count faulted `deadlock: …` in ~11 ms.** `Vm::op_enter_nursery` makes a nursery
   entered inside a spawned task LAZY at one worker, so it ran as a scope on the ENCLOSING sched with

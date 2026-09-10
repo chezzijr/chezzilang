@@ -3978,6 +3978,14 @@ impl Vm {
             self.drain_escaped_nursery(nursery_floor + 1); // cancel inner escaped `parallel:` levels
             if self.nurseries.len() > nursery_floor {
                 self.join_nursery()?; // join the implicit nursery (runs its tasks)
+                // TICKET-103 — `join_nursery` parked this fiber (`Disp::JoinPark`) and rewound `ip`
+                // to the op that called us: `Op::Return`, or `Op::Try` for a `?`. Leave the frame and
+                // the return value on the stack; the op re-executes after the wake and completes the
+                // return. `do_try` pushed the propagated value back before calling us, so the
+                // rewound `Op::Try` re-pops the same value.
+                if self.join_suspend.is_some() {
+                    return Ok(());
+                }
             }
         }
         // Drain with the return value still on top of the stack (rooted) and the frame still on

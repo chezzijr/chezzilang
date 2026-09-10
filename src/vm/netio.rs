@@ -2339,7 +2339,11 @@ impl Vm {
             .rev()
             .find_map(|(i, s)| {
                 let s = s.as_ref()?;
-                s.sched.scope_fault(s.scope).map(|e| (i, e))
+                // TICKET-103 — every scope of the nursery's family, continuations included.
+                s.sids()
+                    .into_iter()
+                    .find_map(|sid| s.sched.scope_fault(sid))
+                    .map(|e| (i, e))
             })
     }
 
@@ -2392,6 +2396,10 @@ impl Vm {
                 .eager_scheds
                 .iter()
                 .flatten()
+                // TICKET-103 — a fiber-owned nursery's body is a counted fiber, and marking its scope
+                // `awaiting_builder` would veto a genuine deadlock. Continuations need no entry here:
+                // `set_body_wait` marks the whole family.
+                .filter(|s| !s.fiber_owned)
                 .map(|s| {
                     s.sched
                         .set_body_wait(s.scope, wait.as_ref(), true, awaiting_builder);

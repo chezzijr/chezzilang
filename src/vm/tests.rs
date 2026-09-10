@@ -2880,6 +2880,8 @@ fn eager_scope_round_trips_with_fiber_ctx() {
         drainer: None,
         drainer_slot: None,
         scope: 0,
+        fiber_owned: false,
+        more_scopes: Vec::new(),
     }));
 
     let fiber_sched = Arc::new(mk_sched(0));
@@ -2890,6 +2892,8 @@ fn eager_scope_round_trips_with_fiber_ctx() {
             drainer: None,
             drainer_slot: None,
             scope: 0,
+            fiber_owned: false,
+            more_scopes: Vec::new(),
         })],
         ..FiberCtx::default()
     };
@@ -8329,6 +8333,362 @@ fn mnsched_a_peer_whose_only_fiber_is_a_join_blocked_owner_does_not_veto() {
         "B's only fiber is an owner blocked at a nested join and nothing on B is parked, so B can \
          feed nobody and the peer veto must not apply"
     );
+}
+
+/// TICKET-103 — park a fresh fiber for slot `task_index` of `scope_id` on its own channel. Returns
+/// the channel so the caller keeps its park key alive.
+fn park_in_scope(s: &MnSched, task_index: usize, scope_id: usize) -> Arc<ChannelCore> {
+    let ch = empty_core();
+    let mut f = mk_fiber(task_index);
+    f.scope_id = scope_id;
+    s.seed(vec![f]);
+    let f = take_run(s);
+    s.park(core_key(&ch), &ch, f);
+    ch
+}
+
+/// TICKET-103 (`cousin_fed`) — owner A (scope 0) is blocked joining `s1`, whose child C is stuck.
+/// F (scope 0) and D (scope `s2`) are parked too, but A may feed either once its `recover:`
+/// returns, so only C is faulted and the sched keeps running.
+#[test]
+fn flag_deadlock_leaves_faults_only_the_family_a_blocked_owner_joins() {
+    let s = mk_sched(2); // slot 0 = owner A, slot 1 = F
+    let s1 = s.register_scope(1, Arc::new(AtomicBool::new(false)), Vec::new()); // slot 2 = C
+    let s2 = s.register_scope(1, Arc::new(AtomicBool::new(false)), Vec::new()); // slot 3 = D
+    let _chans = [
+        park_in_scope(&s, 1, 0),
+        park_in_scope(&s, 2, s1),
+        park_in_scope(&s, 3, s2),
+    ];
+    let mut c = s.lock();
+    c.running = 1;
+    c.blocked_owners = 1;
+    c.scopes[0].owners_blocked = 1;
+    c.scopes[s1].joins_blocked = 1;
+    let r = c.flag_deadlock_leaves(&s.deadlock_err);
+    assert!(!r, "a leaf flag must not report a sched-wide stop");
+    assert!(!c.terminate, "a leaf flag must not terminate the sched");
+    assert!(
+        matches!(c.slots[2], Some(TaskOutcome::Deadlocked { .. })),
+        "C is the stuck leaf"
+    );
+    assert!(c.slots[1].is_none(), "F stays parked for A to feed");
+    assert!(
+        c.slots[3].is_none(),
+        "D stays parked: A feeds by channel, not by family"
+    );
+    assert_eq!(c.parked_n, 2);
+}
+
+/// TICKET-103 — with no joined family the flag stays sched-wide, exactly as `flag_deadlock`.
+#[test]
+fn flag_deadlock_leaves_is_sched_wide_without_a_joined_family() {
+    let s = mk_sched(2);
+    let s1 = s.register_scope(1, Arc::new(AtomicBool::new(false)), Vec::new());
+    let s2 = s.register_scope(1, Arc::new(AtomicBool::new(false)), Vec::new());
+    let _chans = [
+        park_in_scope(&s, 1, 0),
+        park_in_scope(&s, 2, s1),
+        park_in_scope(&s, 3, s2),
+    ];
+    let mut c = s.lock();
+    c.running = 1;
+    c.blocked_owners = 1;
+    c.scopes[0].owners_blocked = 1;
+    let r = c.flag_deadlock_leaves(&s.deadlock_err);
+    assert!(r);
+    assert!(c.terminate);
+    for i in 1..=3 {
+        assert!(
+            matches!(c.slots[i], Some(TaskOutcome::Deadlocked { .. })),
+            "slot {i} must be flagged"
+        );
+    }
+}
+
+/// TICKET-103 — leaf-ness is a FAMILY property. `s1`'s continuation `c1` holds owner B, blocked
+/// joining `s2`. So `s1`'s family is interior and its parked P stays; only `s2`'s C is faulted.
+#[test]
+fn flag_deadlock_leaves_reads_leafness_over_the_joined_family() {
+    let s = mk_sched(1); // slot 0 = owner A
+    let tok = Arc::new(AtomicBool::new(false));
+    let s1 = s.register_scope(1, Arc::clone(&tok), Vec::new()); // slot 1 = P
+    let c1 = s.register_scope(1, Arc::clone(&tok), Vec::new()); // slot 2 = owner B, never seeded
+    let s2 = s.register_scope(1, Arc::new(AtomicBool::new(false)), Vec::new()); // slot 3 = C
+    let _chans = [park_in_scope(&s, 1, s1), park_in_scope(&s, 3, s2)];
+    let mut c = s.lock();
+    c.running = 2;
+    c.blocked_owners = 2;
+    c.scopes[0].owners_blocked = 1;
+    c.scopes[s1].joins_blocked = 1;
+    c.scopes[c1].owners_blocked = 1;
+    c.scopes[s2].joins_blocked = 1;
+    let r = c.flag_deadlock_leaves(&s.deadlock_err);
+    assert!(!r);
+    assert!(
+        matches!(c.slots[3], Some(TaskOutcome::Deadlocked { .. })),
+        "C is the stuck leaf"
+    );
+    assert!(
+        c.slots[1].is_none(),
+        "P's family holds a blocked owner, so it is interior"
+    );
+    assert_eq!(c.parked_n, 1);
+}
+
+/// TICKET-103 — the joined target is a FAMILY: a parked fiber in a continuation of the joined
+/// scope is faulted with the origin's.
+#[test]
+fn flag_deadlock_leaves_faults_every_scope_of_the_joined_family() {
+    let s = mk_sched(2); // slot 0 = owner A, slot 1 = B
+    let tok = Arc::new(AtomicBool::new(false));
+    let s1 = s.register_scope(1, Arc::clone(&tok), Vec::new()); // slot 2 = C
+    let c1 = s.register_scope(1, Arc::clone(&tok), Vec::new()); // slot 3 = D, continuation of s1
+    let _chans = [
+        park_in_scope(&s, 1, 0),
+        park_in_scope(&s, 2, s1),
+        park_in_scope(&s, 3, c1),
+    ];
+    let mut c = s.lock();
+    c.running = 1;
+    c.blocked_owners = 1;
+    c.scopes[0].owners_blocked = 1;
+    c.scopes[s1].joins_blocked = 1;
+    let r = c.flag_deadlock_leaves(&s.deadlock_err);
+    assert!(!r);
+    assert!(matches!(c.slots[2], Some(TaskOutcome::Deadlocked { .. })));
+    assert!(
+        matches!(c.slots[3], Some(TaskOutcome::Deadlocked { .. })),
+        "the continuation too"
+    );
+    assert!(c.slots[1].is_none(), "B is outside the joined family");
+    assert_eq!(c.parked_n, 1);
+}
+
+/// TICKET-103 — once a joined family is complete its owner resumes on its next pass, so the sched
+/// is not quiesced until that owner's guard drops. The `done = 0` half is the positive control.
+#[test]
+fn a_blocked_owner_whose_joined_family_is_done_is_not_quiesced() {
+    let s = mk_sched(2); // slot 0 = owner A, slot 1 = B
+    let s1 = s.register_scope(1, Arc::new(AtomicBool::new(false)), Vec::new()); // slot 2, no fiber
+    let _ch = park_in_scope(&s, 1, 0);
+    let mut c = s.lock();
+    c.running = 1;
+    c.blocked_owners = 1;
+    c.scopes[0].owners_blocked = 1;
+    c.scopes[s1].joins_blocked = 1;
+    c.scopes[s1].done = 1;
+    assert!(
+        !s.local_quiesced(&c),
+        "the joined family is done and its owner is about to resume"
+    );
+    c.scopes[s1].done = 0;
+    assert!(
+        s.local_quiesced(&c),
+        "positive control: the fixture reaches the clause"
+    );
+}
+
+/// TICKET-103 — a continuation scope shares its nursery's cancel token, so draining the origin
+/// must requeue the continuation's parked fibers too, and leave every other scope's parked.
+#[test]
+fn cancel_drain_requeues_every_scope_sharing_the_cancel_token() {
+    let s = mk_sched(1);
+    let shared = Arc::new(AtomicBool::new(false));
+    let s1 = s.register_scope(1, Arc::clone(&shared), Vec::new());
+    let s2 = s.register_scope(1, Arc::clone(&shared), Vec::new());
+    let _chans = [
+        park_in_scope(&s, 0, 0),
+        park_in_scope(&s, 1, s1),
+        park_in_scope(&s, 2, s2),
+    ];
+    let before = s.runnable.load(Ordering::Relaxed);
+    s.cancel_drain(s1);
+    assert_eq!(s.lock().parked_n, 1, "only scope 0's fiber stays parked");
+    assert_eq!(s.runnable.load(Ordering::Relaxed), before + 2);
+}
+
+/// TICKET-103 — a body's wait mark covers its whole family in one acquisition, and no other scope.
+#[test]
+fn set_body_wait_marks_every_scope_sharing_the_cancel_token() {
+    let s = mk_sched(1);
+    let other = s.register_scope(0, Arc::new(AtomicBool::new(false)), Vec::new());
+    let tok = Arc::clone(&s.lock().scopes[0].cancel);
+    let cont = s.register_scope(1, tok, Vec::new());
+    s.set_body_wait(0, None, true, true);
+    {
+        let c = s.lock();
+        assert!(c.scopes[cont].body_blocked && c.scopes[cont].awaiting_builder);
+        assert!(!c.scopes[other].body_blocked && !c.scopes[other].awaiting_builder);
+    }
+    s.set_body_wait(0, None, false, true);
+    let c = s.lock();
+    assert!(
+        c.scopes
+            .iter()
+            .all(|x| !x.body_blocked && !x.awaiting_builder)
+    );
+}
+
+/// TICKET-103 — a spawn into a scope that is no longer the sched's last opens a continuation scope
+/// sharing its cancel token; a spawn into the continuation (now last) grows it in place.
+#[test]
+fn inject_or_extend_opens_a_continuation_when_the_target_is_not_last() {
+    let s = mk_sched(1);
+    let tok = Arc::new(AtomicBool::new(false));
+    let s1 = s.register_scope(0, Arc::clone(&tok), Vec::new());
+    let _s2 = s.register_scope(0, Arc::new(AtomicBool::new(false)), Vec::new());
+    assert_eq!(s.inject_or_extend(mk_pending_fiber(0), s1), Some(3));
+    {
+        let c = s.lock();
+        assert_eq!(c.scopes[3].total, 1);
+        assert!(Arc::ptr_eq(&c.scopes[3].cancel, &tok));
+        assert_eq!(
+            c.scopes[s1].total, 0,
+            "the origin never grows past a later scope"
+        );
+    }
+    assert_eq!(s.inject_or_extend(mk_pending_fiber(0), 3), None);
+    assert_eq!(s.lock().scopes[3].total, 2);
+}
+
+/// TICKET-103 fixture `S1`: owner A (slot 0, scope 0) join-parked on scope `s1`, whose one task C
+/// is slot 1. Returns `s1`.
+fn park_join_owner(s: &MnSched) -> usize {
+    let s1 = s.register_scope(1, Arc::new(AtomicBool::new(false)), Vec::new());
+    s.seed(vec![mk_fiber(0)]);
+    let a = take_run(s);
+    s.park_join(a, s1);
+    s1
+}
+
+/// TICKET-103 fixture `S1`, second half: child C runs in `s1` and parks on an empty channel.
+fn park_join_child(s: &MnSched, s1: usize) -> Arc<ChannelCore> {
+    let mut cf = mk_fiber(1);
+    cf.scope_id = s1;
+    s.seed(vec![cf]);
+    let cf = take_run(s);
+    let ch = empty_core();
+    s.park(core_key(&ch), &ch, cf);
+    ch
+}
+
+/// TICKET-103 — an owner whose joined family is incomplete is filed out of `running` and
+/// `parked_n`, counted on both join counters, and requeued once its family completes.
+#[test]
+fn park_join_files_the_owner_and_wake_completed_joins_requeues_it_when_its_family_is_done() {
+    let s = mk_sched(1);
+    let s1 = park_join_owner(&s);
+    let mut c = s.lock();
+    assert_eq!(c.join_parked.len(), 1);
+    assert_eq!(c.running, 0);
+    assert_eq!(c.parked_n, 0);
+    assert_eq!(c.scopes[s1].joins_blocked, 1);
+    assert_eq!(c.scopes[0].owners_blocked, 1);
+    assert_eq!(s.runnable.load(Ordering::Relaxed), 0);
+    c.scopes[s1].done = 1;
+    let woken = s.wake_completed_joins(&mut c);
+    assert_eq!(woken, 1);
+    assert!(c.join_parked.is_empty());
+    assert_eq!(c.global.len(), 1);
+    assert_eq!(s.runnable.load(Ordering::Relaxed), 1);
+    assert_eq!(c.scopes[s1].joins_blocked, 0);
+    assert_eq!(c.scopes[0].owners_blocked, 0);
+}
+
+/// TICKET-103 — the park gap: a family that completed between the owner's check and the filing
+/// requeues the owner at once instead of stranding it.
+#[test]
+fn park_join_requeues_at_once_when_the_family_is_already_done() {
+    let s = mk_sched(1);
+    let s1 = s.register_scope(0, Arc::new(AtomicBool::new(false)), Vec::new());
+    s.seed(vec![mk_fiber(0)]);
+    let a = take_run(&s);
+    s.park_join(a, s1);
+    let c = s.lock();
+    assert!(c.join_parked.is_empty());
+    assert_eq!(c.global.len(), 1);
+    assert_eq!(c.running, 0);
+    assert_eq!(s.runnable.load(Ordering::Relaxed), 1);
+    assert_eq!(c.scopes[s1].joins_blocked, 0);
+    assert_eq!(c.scopes[0].owners_blocked, 0);
+}
+
+/// TICKET-103 — the task that completes a joined family requeues the family's join-parked owner.
+#[test]
+fn finish_wakes_the_join_parked_owner_of_the_completed_family() {
+    let s = mk_sched(1);
+    let s1 = park_join_owner(&s);
+    let mut cf = mk_fiber(1);
+    cf.scope_id = s1;
+    s.seed(vec![cf]);
+    let cf = take_run(&s);
+    s.finish(
+        cf.task_index,
+        s1,
+        TaskOutcome::Deadlocked {
+            err: dl_err(),
+            out: Vec::new(),
+            stderr: Vec::new(),
+        },
+    );
+    let c = s.lock();
+    assert!(c.join_parked.is_empty());
+    assert_eq!(c.global.len(), 1);
+    assert_eq!(s.runnable.load(Ordering::Relaxed), 1);
+    assert_eq!(c.running, 0);
+    assert!(!c.terminate);
+}
+
+/// TICKET-103 — the leaf flag completes the joined family, so it must requeue the family's
+/// join-parked owner too, or the owner is stranded on a family nothing will bump again.
+#[test]
+fn flag_deadlock_leaves_wakes_the_join_parked_owner_of_the_faulted_leaf() {
+    let s = mk_sched(1);
+    let s1 = park_join_owner(&s);
+    let _ch = park_join_child(&s, s1);
+    let mut c = s.lock();
+    let r = s.flag_leaves_and_wake(&mut c);
+    assert!(!r);
+    assert!(matches!(c.slots[1], Some(TaskOutcome::Deadlocked { .. })));
+    assert!(c.slots[0].is_none());
+    assert!(c.join_parked.is_empty());
+    assert_eq!(c.global.len(), 1);
+    assert_eq!(c.parked_n, 0);
+    assert!(!c.terminate);
+}
+
+/// TICKET-103 — the sched-wide flag sets `terminate`, which stops every worker before its next
+/// global pop, so a join-parked owner is recorded `Deadlocked` rather than requeued.
+#[test]
+fn flag_deadlock_records_a_join_parked_owner_as_deadlocked() {
+    let s = mk_sched(1);
+    let s1 = park_join_owner(&s);
+    let _ch = park_join_child(&s, s1);
+    let mut c = s.lock();
+    c.flag_deadlock(&s.deadlock_err);
+    assert!(matches!(c.slots[0], Some(TaskOutcome::Deadlocked { .. })));
+    assert!(matches!(c.slots[1], Some(TaskOutcome::Deadlocked { .. })));
+    assert!(c.join_parked.is_empty());
+    assert!(c.terminate);
+    assert_eq!(c.scopes[0].done, 1);
+    assert_eq!(c.scopes[s1].done, 1);
+    assert_eq!(c.scopes[s1].joins_blocked, 0);
+    assert_eq!(c.scopes[0].owners_blocked, 0);
+}
+
+/// TICKET-103 — a cancel drain requeues channel-parked fibers of the family only; a join-parked
+/// owner stays filed until its children finish.
+#[test]
+fn cancel_drain_leaves_a_join_parked_owner_filed() {
+    let s = mk_sched(1);
+    let s1 = park_join_owner(&s);
+    let _ch = park_join_child(&s, s1);
+    s.cancel_drain(0);
+    let c = s.lock();
+    assert_eq!(c.join_parked.len(), 1);
+    assert_eq!(c.parked_n, 1);
+    assert!(c.global.is_empty());
 }
 
 /// TICKET-099 — a vetoed sched must poll (`DEMOTE_POLL_BACKOFF`) rather than sleep on its OWN condvar

@@ -294,9 +294,9 @@ How a `parallel:` block runs on the M:N engine (`chezzi run` — the default):
    starts the same way — eagerly, at the point it is entered — **while the run's process-wide budget
    of extra eager runner threads has a slot left** (`worker_count().max(2)`, `src/vm/pool.rs`); a
    nested eager nursery costs one OS thread per OPEN nursery rather than per nesting level, so a denied slot
-   falls its tasks back to starting at the join instead, exactly as this shape already behaves at
-   `--threads=1`; the deadlock predicate still evaluates on that queue-at-join fallback (TICKET-095),
-   so a genuine deadlock underneath it faults there like anywhere else.
+   — and every such nursery at `--threads=1` — registers its scope on the spawning task's own
+   scheduler, so its tasks still start at the `spawn` and run on that scheduler's existing workers;
+   the owner parks at its join and is requeued when the scope completes (TICKET-103).
 2. The task runs **concurrently** with the statements that follow it and with its siblings. There is
    no FIFO order between tasks and no defined order against the parent's own statements.
 3. The first task to error **aborts the remaining siblings** and propagates out of the `parallel:`
@@ -1198,6 +1198,11 @@ byte-identically to every other worker count (TICKET-095, `docs/gaps.md` **W11-3
 runs on the owner fiber's own thread at that width, and that fiber is counted a `blocked_owners` of
 `SchedCore::running` for exactly the span it sits in the join, so the deadlock predicate still fires
 instead of the fiber hanging forever uncounted.
+
+An inner deadlock faults only the innermost stuck nursery that a parked owner is joining: every task
+parked outside it stays parked, for that owner to feed once `recover:` returns (TICKET-103,
+`docs/gaps.md` W12-4). The owner parks at its join whether that join is a `parallel:` block's end or
+the implicit nursery's `return`, `?` or fall-through; the joining op re-executes after the wake.
 
 **Re-derived 2026-08-18 on the genuinely 1-wide binary** (`docs/gaps.md` **W8-8**, below — until it
 landed, `--threads=1` silently ran two runners, so the original "0/15 hangs" was measured two-wide): the
