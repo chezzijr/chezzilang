@@ -290,7 +290,7 @@ fn sleep_synchronised_tests() -> BTreeSet<String> {
 /// rejected it (the walk returns 68). Obtain it by compiling once with an empty array and copying
 /// the "sleeps but is not listed" list `no_new_rust_test_sleeps_to_order_two_events` reports,
 /// verbatim, the same way `stack_trace_reports_call_chain`'s golden was obtained.
-const SLEEP_SYNCHRONISED_TESTS: [&str; 78] = [
+const SLEEP_SYNCHRONISED_TESTS: [&str; 80] = [
     "a_bailed_join_stops_its_jobs_from_starting_new_work",
     "a_cancelled_siblings_defer_runs_whole_on_both_engines",
     "a_finished_executor_job_lets_the_genuine_nursery_deadlock_fire",
@@ -334,6 +334,9 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 78] = [
     "eager_job_os_exit_terminates_a_recv_blocked_main",
     "eager_job_os_exit_terminates_a_socket_blocked_main",
     "executor_job_feeds_a_parked_nursery_task_instead_of_a_false_deadlock",
+    // TICKET-103. Same reason as the TICKET-095 entries below — a poll interval against a deadline,
+    // over a child that may hang and never close its pipes, not a happens-before edge.
+    "fixed_nested_nursery_shapes_complete_at_every_worker_count",
     "gc_mark_walk_does_not_deadlock_on_a_cyclic_core_graph",
     // TICKET-101. Same reason as `nested_nursery_deadlock_faults_at_one_worker_like_every_other_count`
     // below -- a poll interval against a deadline, over a child that hangs before the fix and never
@@ -350,6 +353,9 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 78] = [
     // binary instead of failing it, and a child process exposes no channel, latch or counted
     // probe to wait on.
     "nested_nursery_deadlock_faults_at_one_worker_like_every_other_count",
+    // TICKET-103. Same reason as the entry above — a poll interval against a deadline, over a
+    // genuine-deadlock child that would hang if the fix broke its verdict.
+    "nested_nursery_genuine_deadlocks_still_fault_at_every_worker_count",
     "net_read_partial_timeout_then_clean_timeout_is_not_incomplete",
     // TICKET-095. Same reason as the entry above — a poll interval against a deadline, not a
     // happens-before edge — over the `recover:` variant of the same repro.

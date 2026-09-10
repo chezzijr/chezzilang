@@ -1812,13 +1812,19 @@ impl Vm {
         // that live threads stay at `N + joiners` "regardless of `parallel:` nesting depth" —
         // measured, depth 7 / 128 leaves at `--threads=1` went 3 threads → 130.
         //
+        // When no private sched is available (`worker_count() == 1`, a denied
+        // `NestedDrainerSlot`, or a failed drainer thread), a fiber's nursery registers its scope
+        // on the fiber's OWN sched instead (`activate_fiber_owned_nursery`), so its tasks still
+        // start at the `spawn`, on that sched's existing workers, adding no thread (TICKET-103,
+        // W12-1). Only a top-level nursery whose drainer thread fails still queues to its join.
+        //
         // A top-level nursery has no outer worker to starve and creates exactly ONE drainer per
         // thread, so it is unconditional.
         let eager = self.mn.is_none() || worker_count() >= 2;
-        // `flatten` — `activate_eager_nursery` returns `None` if the OS refuses its drainer
-        // thread, which falls back to the lazy queue-at-join path rather than leaving a
-        // worker-less eager scope that would hang a blocking body.
-        let scope = eager.then(|| self.activate_eager_nursery(span)).flatten();
+        let scope = eager
+            .then(|| self.activate_eager_nursery(span))
+            .flatten()
+            .or_else(|| self.activate_fiber_owned_nursery(span));
         self.eager_scheds.push(scope);
     }
 

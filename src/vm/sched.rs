@@ -347,18 +347,24 @@ impl Vm {
             return Err(self.err("spawn must be inside a parallel: block".to_string(), span));
         };
         // Eager innermost nursery → inject a live fiber. Clone the sched Arc, drop the borrow so
-        // `prepare_worker` can take `&mut self`; `inject` assigns the real slot index under its lock
-        // (the `0` placeholder is overwritten), so no caller-side index bookkeeping is needed.
+        // `prepare_worker` can take `&mut self`; `inject_or_extend` assigns the real slot index under
+        // its lock (the `0` placeholder is overwritten), so no caller-side index bookkeeping is needed.
         if let Some(Some(scope)) = self.eager_scheds.last() {
             let sched = Arc::clone(&scope.sched);
-            // The eager nursery owns its OWN sched (a single scope 0 — see `activate_eager_nursery`);
-            // `inject` overwrites the `0` placeholder `task_index` under its lock. This path PREPARES the
-            // task right here, so a snapshot build failure surfaces right here too (prepare instant).
-            let sid = scope.scope;
+            // TICKET-103 — every eager scope may have a later scope registered on its sched by a
+            // fiber (`activate_fiber_owned_nursery`), so a spawn goes to the nursery's TAIL scope, or
+            // opens a continuation scope when the tail is no longer the sched's last. This path
+            // PREPARES the task right here, so a snapshot build failure surfaces right here too
+            // (prepare instant).
+            let tail = scope.more_scopes.last().copied().unwrap_or(scope.scope);
             let fiber = self
                 .prepare_worker(task, Some(snap?), &cell_ids)?
-                .into_fiber(0, sid);
-            sched.inject(fiber, sid);
+                .into_fiber(0, tail);
+            if let Some(n) = sched.inject_or_extend(fiber, tail)
+                && let Some(Some(scope)) = self.eager_scheds.last_mut()
+            {
+                scope.more_scopes.push(n);
+            }
             return Ok(());
         }
         self.nurseries[i].push(QueuedTask {
@@ -871,6 +877,8 @@ impl Vm {
                 drainer: None, // the OWNER's drainer serves this scope too — it drains the global queue
                 drainer_slot: None,
                 scope,
+                fiber_owned: false,
+                more_scopes: Vec::new(),
             });
         }
         // TICKET-073 — a NESTED nursery's private drainer costs one OS thread per OPEN nursery, not
@@ -939,6 +947,39 @@ impl Vm {
             drainer: Some(drainer),
             drainer_slot,
             scope: 0,
+            fiber_owned: false,
+            more_scopes: Vec::new(),
+        })
+    }
+
+    /// TICKET-103 (W12-1) — the fallback when a nursery entered inside a spawned fiber gets no
+    /// private eager sched (`worker_count() == 1`, a denied `NestedDrainerSlot`, or a failed drainer
+    /// thread): register its scope on the fiber's OWN sched (`self.mn`). Each `spawn` then injects a
+    /// live fiber that runs on that sched's existing workers, so the task starts at the `spawn` as
+    /// Go's `go` does, and no thread is added (W8-8, the pool bound). The queue-at-join fallback
+    /// this replaces starved any owner body that blocks on its own child before the join.
+    ///
+    /// No `open_body`: the owner is a counted fiber (`running`/`parked`), so `body_open` would veto
+    /// the predicate while it is parked and a genuine deadlock would hang. The scope names this
+    /// nursery in its deadlock fault (DEC-095). `None` at the top level (`self.mn` is `None`).
+    pub(super) fn activate_fiber_owned_nursery(
+        &mut self,
+        nursery_span: Span,
+    ) -> Option<EagerScope> {
+        let sched = self.mn.clone()?;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let scope =
+            sched.register_scope_seeded(Arc::clone(&cancel), self.nursery_ancestors(), Vec::new());
+        sched.lock().scopes[scope].deadlock_err =
+            Some(self.err(DEADLOCK_MSG.to_string(), nursery_span));
+        Some(EagerScope {
+            sched,
+            cancel,
+            drainer: None,
+            drainer_slot: None,
+            scope,
+            fiber_owned: true,
+            more_scopes: Vec::new(),
         })
     }
 
@@ -983,12 +1024,18 @@ impl Vm {
     ///   forever). `nursery_party_guard` self-gates on `mn.is_none()`,
     ///   so it stays a no-op on a shell.
     pub(super) fn join_eager_nursery(&mut self, scope: EagerScope) -> Result<(), RuntimeError> {
+        if scope.fiber_owned {
+            return self.join_fiber_owned_nursery(scope);
+        }
+        let sids = scope.sids();
         let EagerScope {
             sched,
             cancel,
             drainer,
             drainer_slot: _held,
             scope: sid,
+            fiber_owned: _,
+            more_scopes: _,
         } = scope;
         sched.close_body(sid);
         let mut shell = self.spawn_shell(&sched, &cancel);
@@ -1017,16 +1064,25 @@ impl Vm {
                 // (`activate_eager_nursery`'s reused-scope branch requires it), so there is no sched
                 // above this one to report to.
                 let _owner = self.blocked_owner_guard(&sched, None);
-                if eager_joiner_runs_fibers(worker_count()) {
-                    shell.mn_worker_loop(&sched, 0, sid);
+                // TICKET-103 — over the nursery's family: its continuation scopes hold the tasks
+                // spawned after a fiber registered a later scope on this sched.
+                for &s in &sids {
+                    if eager_joiner_runs_fibers(worker_count()) {
+                        shell.mn_worker_loop(&sched, 0, s);
+                    }
+                    sched.wait_for_scope(s);
                 }
-                sched.wait_for_scope(sid);
                 for (h, _slot) in helpers {
                     let _ = h.join();
                 }
             }
-            let slots = sched.take_scope_slots(sid);
-            sched.retire_last_scope(sid);
+            let slots: Vec<_> = sids
+                .iter()
+                .flat_map(|&s| sched.take_scope_slots(s))
+                .collect();
+            for &s in sids.iter().rev() {
+                sched.retire_last_scope(s);
+            }
             return self.reduce_task_slots(slots);
         }
         self.farm_outermost_eager_helpers(&sched, &cancel);
@@ -1131,12 +1187,18 @@ impl Vm {
     /// (Decision F). The body's own escape error is what propagates, so a handler fault here is
     /// swallowed (only its buffered output + any `os.exit` are honored via `reduce_task_slots`).
     pub(super) fn abort_eager_nursery(&mut self, scope: EagerScope) {
+        if scope.fiber_owned {
+            return self.abort_fiber_owned_nursery(scope);
+        }
+        let sids = scope.sids();
         let EagerScope {
             sched,
             cancel,
             drainer,
             drainer_slot: _held,
             scope: sid,
+            fiber_owned: _,
+            more_scopes: _,
         } = scope;
         // N4 — trip the cancel UNDER the core lock (`trip_scope_cancel`, scope 0 = the eager scope, whose
         // `JoinScope::cancel` IS this `cancel` Arc) and BEFORE `close_body` clears the `any_body_open`
@@ -1152,7 +1214,9 @@ impl Vm {
         if drainer.is_some() {
             poller::drain_sched(&sched);
         } else {
-            poller::drain_scope(&sched, sid);
+            for &s in &sids {
+                poller::drain_scope(&sched, s);
+            }
         }
         let mut shell = self.spawn_shell(&sched, &cancel);
         // §2c1 — a NESTED scope settles and reduces only ITSELF, then retires (see
@@ -1161,14 +1225,22 @@ impl Vm {
             {
                 let _bodies = self.blocked_bodies_guard(true); // see `join_eager_nursery`'s nested arm
                 let _party = self.nursery_party_guard(&sched);
-                // T1-fix (W8-8, nested arm) — same gate as `join_eager_nursery`'s nested arm above.
-                if eager_joiner_runs_fibers(worker_count()) {
-                    shell.mn_worker_loop(&sched, 0, sid);
+                // T1-fix (W8-8, nested arm) — same gate as `join_eager_nursery`'s nested arm above,
+                // over the same family (TICKET-103).
+                for &s in &sids {
+                    if eager_joiner_runs_fibers(worker_count()) {
+                        shell.mn_worker_loop(&sched, 0, s);
+                    }
+                    sched.wait_for_scope(s);
                 }
-                sched.wait_for_scope(sid);
             }
-            let slots = sched.take_scope_slots(sid);
-            sched.retire_last_scope(sid);
+            let slots: Vec<_> = sids
+                .iter()
+                .flat_map(|&s| sched.take_scope_slots(s))
+                .collect();
+            for &s in sids.iter().rev() {
+                sched.retire_last_scope(s);
+            }
             let _ = self.reduce_task_slots(slots);
             return;
         }
@@ -1189,6 +1261,67 @@ impl Vm {
         // The body's escape error is what propagates; a handler fault here is swallowed. But
         // `reduce_task_slots` still sets `self.pending_exit` for a handler `os.exit` (decision C —
         // a hard halt wins), which the catch site honors after the drain — so it is NOT lost.
+        let _ = self.reduce_task_slots(slots);
+    }
+
+    /// TICKET-103 — `JoinNursery` for a fiber-owned nursery (`EagerScope::fiber_owned`). Its scopes
+    /// live on this fiber's own sched, so the owner's OS thread runs them inline, scope by scope over
+    /// the family, under `blocked_owner_guard` with the origin scope as its join target. Mirrors
+    /// `run_mn_nursery_nested`'s owner arm.
+    ///
+    /// The inline loop is NEVER gated on `eager_joiner_runs_fibers`: at `worker_count() == 1` this
+    /// thread is the scope's only runner (the main-thread nested arm differs because a drainer
+    /// exists there). No `nursery_party_guard`: the owner is a fiber, never a counted party. No
+    /// `blocked_bodies_guard`: the body is a counted fiber, and `awaiting_builder` on its scope would
+    /// veto a genuine deadlock.
+    fn join_fiber_owned_nursery(&mut self, scope: EagerScope) -> Result<(), RuntimeError> {
+        let sids = scope.sids();
+        let wid = self.wid;
+        let mut shell = self.spawn_shell(&scope.sched, &scope.cancel);
+        {
+            let _owner = self.blocked_owner_guard(&scope.sched, Some(scope.scope));
+            for &sid in &sids {
+                shell.mn_worker_loop(&scope.sched, wid, sid);
+                scope.sched.wait_for_scope(sid);
+            }
+        }
+        let slots: Vec<_> = sids
+            .iter()
+            .flat_map(|&s| scope.sched.take_scope_slots(s))
+            .collect();
+        for &s in sids.iter().rev() {
+            scope.sched.retire_last_scope(s);
+        }
+        self.reduce_task_slots(slots)
+    }
+
+    /// TICKET-103 — `abort_eager_nursery` for a fiber-owned nursery: trip the family's one cancel
+    /// token, requeue its parked and socket-parked fibers, then settle them inline exactly as
+    /// [`Vm::join_fiber_owned_nursery`] does (same guards, same ungated loop). The body's escape
+    /// error is what propagates, so a task fault here is swallowed.
+    fn abort_fiber_owned_nursery(&mut self, scope: EagerScope) {
+        let sids = scope.sids();
+        scope.sched.trip_scope_cancel(scope.scope);
+        scope.sched.cancel_drain(scope.scope);
+        for &sid in &sids {
+            poller::drain_scope(&scope.sched, sid);
+        }
+        let wid = self.wid;
+        let mut shell = self.spawn_shell(&scope.sched, &scope.cancel);
+        {
+            let _owner = self.blocked_owner_guard(&scope.sched, Some(scope.scope));
+            for &sid in &sids {
+                shell.mn_worker_loop(&scope.sched, wid, sid);
+                scope.sched.wait_for_scope(sid);
+            }
+        }
+        let slots: Vec<_> = sids
+            .iter()
+            .flat_map(|&s| scope.sched.take_scope_slots(s))
+            .collect();
+        for &s in sids.iter().rev() {
+            scope.sched.retire_last_scope(s);
+        }
         let _ = self.reduce_task_slots(slots);
     }
 

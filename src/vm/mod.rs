@@ -1953,6 +1953,22 @@ struct EagerScope {
     /// nursery restores it: the inline owner drains the GLOBAL queue, so it runs a sibling scope's
     /// fiber, and `is_deadlocked` sees the enclosing scope's still-open body and vetoes.
     scope: usize,
+    /// TICKET-103 — scope lives on the spawning fiber's own sched (`self.mn`) because no private
+    /// eager sched was available (`worker_count() == 1` or a denied `NestedDrainerSlot`); no
+    /// drainer, no `body_open`.
+    fiber_owned: bool,
+    /// TICKET-103 — continuation scopes, spawn order, sharing `cancel`; see
+    /// [`MnSched::inject_or_extend`].
+    more_scopes: Vec<usize>,
+}
+
+impl EagerScope {
+    /// TICKET-103 — the family: `scope` then every continuation, in slot order.
+    fn sids(&self) -> Vec<usize> {
+        std::iter::once(self.scope)
+            .chain(self.more_scopes.iter().copied())
+            .collect()
+    }
 }
 
 /// §6d M:N `wait` (select) park — ONE blocked fiber shared across the N arm-channel buckets it parks
@@ -2660,6 +2676,7 @@ impl MnSched {
     /// `base_index..base_index+total` sub-range contiguous (the contract `reduce`/`take_scope_slots`
     /// rely on). The `debug_assert` pins that invariant: inject only ever targets the last scope, so
     /// growing it never overruns a later scope's range.
+    #[cfg(test)]
     fn inject(&self, fiber: Fiber, scope_id: usize) {
         let opened = self.inject_or_extend(fiber, scope_id);
         debug_assert!(

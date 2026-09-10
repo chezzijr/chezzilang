@@ -2880,6 +2880,8 @@ fn eager_scope_round_trips_with_fiber_ctx() {
         drainer: None,
         drainer_slot: None,
         scope: 0,
+        fiber_owned: false,
+        more_scopes: Vec::new(),
     }));
 
     let fiber_sched = Arc::new(mk_sched(0));
@@ -2890,6 +2892,8 @@ fn eager_scope_round_trips_with_fiber_ctx() {
             drainer: None,
             drainer_slot: None,
             scope: 0,
+            fiber_owned: false,
+            more_scopes: Vec::new(),
         })],
         ..FiberCtx::default()
     };
