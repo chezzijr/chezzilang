@@ -1985,12 +1985,13 @@ fn generic_callee_keeps_expected_type_on_concrete_slots() {
 
 /// TICKET-094 defect C, negative half — the generic-erased slot exception must keep declining: a
 /// slot declared as the callee's OWN type variable `T`, never a concrete slot, is never widened.
+/// (TICKET-106 W12-15: a bare `T` slot with an untyped int CONSTANT beside a `float`-binding
+/// sibling argument is the one narrow exception — Go's `Max(1, 2.5)` widens the same way — so
+/// `g(1, 2.5)` now accepts with `T = float`. The other three cases here are untouched: none is a
+/// bare-`T`-slot untyped-int-constant-beside-a-float shape.)
 #[test]
 fn generic_callee_still_declines_an_erased_slot() {
-    rejects(
-        "fn g[T](a: T, b: T) -> T:\n    return a\nfn main():\n    print(g(1, 2.5))\n",
-        "expected int",
-    );
+    ok("fn g[T](a: T, b: T) -> T:\n    return a\nfn main():\n    print(g(1, 2.5))\n");
     rejects(
         "struct Box[T]:\n    v: T\n    fn set(self, x: T):\n        self.v = x\nfn main():\n    Box(1.0).set(1)\n",
         "expected float, found int",
@@ -11065,11 +11066,10 @@ fn cmp_max_int_result_widens_into_float_let() {
 
 #[test]
 fn cmp_max_mixed_int_float_rejected() {
-    // No implicit int->float widening: T unifies to int, so a float second arg is rejected.
-    entry_rejects(
-        "import std.cmp\nfn main():\n    print(cmp.max(3, 5.0))\n",
-        "",
-    );
+    // TICKET-106 W12-15: `cmp.max[T: Comparable]`'s bare `T` slot now widens the untyped int
+    // constant `3` to `float` beside `5.0` (Go's `Max(3, 5.0)` widens the same way), so this call
+    // is accepted, not rejected.
+    entry_ok("import std.cmp\nfn main():\n    print(cmp.max(3, 5.0))\n");
 }
 
 #[test]
@@ -31680,6 +31680,56 @@ fn w12_9_generic_struct_ctor_uses_expected_type_hint() {
     );
 }
 
+/// W12-9 (TICKET-106) neighbours: an expected type widens an argument-bound type arg at every hint
+/// site — enum variant, `Box[Any]` argument slot, list element, return annotation, a free-fn/static
+/// -method generic constructor, and an instance generic method.
+#[test]
+fn w12_9_expected_type_widens_generic_targs_at_every_sink() {
+    let prelude = "protocol Named:\n    fn name(self) -> str\nstruct A:\n    fn name(self) -> str:\n        return \"a\"\nstruct Box[T]:\n    v: T\nenum E[T]:\n    V(T)\n";
+    ok(&format!("{prelude}e: E[Named] = E.V(A())\nprint(e)\n"));
+    ok(&format!(
+        "{prelude}fn f(x: Box[Any]) -> int:\n    return 1\nprint(f(Box(1)))\n"
+    ));
+    ok(&format!(
+        "{prelude}xs: List[Box[Named]] = [Box(A())]\nprint(xs)\n"
+    ));
+    ok(&format!(
+        "{prelude}fn g() -> Box[Any]:\n    return Box(1)\nprint(g())\n"
+    ));
+    ok(&format!(
+        "{prelude}fn mk[T](x: T) -> Box[T]:\n    return Box(x)\nc: Box[Named] = mk(A())\nprint(c)\n"
+    ));
+    ok(&format!(
+        "{prelude}fn mkl[T](x: T) -> List[T]:\n    return [x]\nys: List[Named] = mkl(A())\nprint(ys)\n"
+    ));
+    ok(&format!(
+        "{prelude}struct Box2[T]:\n    v: T\n    fn of(x: T) -> Box2[T]:\n        return Box2(x)\nb2: Box2[Named] = Box2.of(A())\nprint(b2)\n"
+    ));
+    ok(&format!(
+        "{prelude}struct Maker:\n    fn wrap[T](self, x: T) -> Box[T]:\n        return Box(x)\nw: Box[Named] = Maker().wrap(A())\nprint(w)\n"
+    ));
+}
+
+/// W12-9 (TICKET-106) neighbours: the widen must decline where it would move an already-typed
+/// binding — a mismatched scalar type arg, or an aliased mutable value whose declared type would
+/// silently change.
+#[test]
+fn w12_9_expected_type_widen_declines_unsound_neighbours() {
+    let prelude = "struct Box[T]:\n    v: T\n";
+    rejects(
+        &format!("{prelude}bi: Box[int] = Box(\"s\")\n"),
+        "cannot assign Box[str] to variable of type Box[int]",
+    );
+    rejects(
+        &format!("{prelude}bf: Box[float] = Box(1)\n"),
+        "cannot assign Box[int] to variable of type Box[float]",
+    );
+    rejects(
+        "protocol Named:\n    fn name(self) -> str\nstruct A:\n    fn name(self) -> str:\n        return \"a\"\nstruct Bag[T]:\n    items: List[T]\nzs := [A()]\nd: Bag[Named] = Bag(zs)\n",
+        "cannot assign Bag[A] to variable of type Bag[Named]",
+    );
+}
+
 /// W12-15 (TICKET-106): a `[T: Comparable]` generic call rejects the same int/float widening
 /// granted at an untyped sink (`x := [1, 2.5]`, `if c: 1 else: 2.5`) once both constants land at
 /// a generic call's two positions instead of one. Go's `Max(1, 2.5)` under `[T cmp.Ordered]`
@@ -31688,5 +31738,40 @@ fn w12_9_generic_struct_ctor_uses_expected_type_hint() {
 fn w12_15_generic_call_widens_mixed_int_float_constants() {
     ok(
         "fn mx[T: Comparable](a: T, b: T) -> T:\n    if a > b:\n        return a\n    return b\nprint(mx(1, 2.5))\n",
+    );
+}
+
+/// W12-15 (TICKET-106) neighbours: the widen fires for `float`-either-side and through a typed
+/// local, keeps rejecting a mismatched type and an explicit turbofish, and keeps rejecting a
+/// TYPED int (not a bare constant) beside a float.
+#[test]
+fn w12_15_mixed_constant_widen_neighbours() {
+    let prelude =
+        "fn mx[T: Comparable](a: T, b: T) -> T:\n    if a > b:\n        return a\n    return b\n";
+    ok(&format!("{prelude}print(mx(2.5, 1))\n"));
+    ok(&format!("{prelude}x := 2.5\nprint(mx(1, x))\n"));
+    ok("print([1.5, 2.5].fold(0, fn(a: float, b: float) -> float: a + b))\n");
+    rejects(
+        &format!("{prelude}print(mx(1, \"x\"))\n"),
+        "argument to 'mx' has type str, expected int",
+    );
+    rejects(
+        &format!("{prelude}print(mx[int](1, 2.5))\n"),
+        "argument to 'mx' has type float, expected int",
+    );
+    rejects(
+        &format!("{prelude}n := 1\nprint(mx(n, 2.5))\n"),
+        "argument to 'mx' has type float, expected int",
+    );
+}
+
+/// W12-15 (TICKET-106) neighbour: a default value on a bare `T` slot stays rejected — this is the
+/// rule that keeps a spliced default from ever sharing an `ArgFloatWidenTable` span across callers
+/// (see `## Digest` gotcha 1).
+#[test]
+fn w12_15_bare_type_param_default_stays_rejected() {
+    rejects(
+        "fn md[T: Comparable](a: T, b: T = 1) -> T:\n    if a > b:\n        return a\n    return b\nprint(md(3))\n",
+        "default value for parameter 'b': expected T, found int",
     );
 }

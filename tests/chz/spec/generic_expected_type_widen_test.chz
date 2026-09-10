@@ -9,3 +9,44 @@ fn firsts[S: Iterable[(A, B)], A, B](it: S) -> List[A]:
 test fn iterable_tuple_bound_recovers_both_params():
     assert firsts([(1, "a"), (2, "b")]) == [1, 2]
     assert firsts([(1, "a")])[0] + 1 == 2
+
+# W12-9 (TICKET-106): an expected type widens an argument-bound generic type arg at RUN time — the
+# resulting value really carries the widened element, not just a check-time-only verdict.
+protocol Named:
+    fn name(self) -> str
+
+struct A:
+    fn name(self) -> str:
+        return "a"
+
+struct C:
+    fn name(self) -> str:
+        return "c"
+
+struct Box[T]:
+    v: T
+
+fn mk[T](x: T) -> Box[T]:
+    return Box(x)
+
+enum E[T]:
+    V(T)
+
+test fn expected_type_widen_carries_the_real_value_at_run_time():
+    b: Box[Named] = Box(A())
+    assert b.v.name() == "a"
+    b.v = C()
+    assert b.v.name() == "c"
+
+test fn expected_type_widen_at_a_function_argument_slot():
+    fn f(x: Box[Any]) -> str:
+        return str(x.v)
+    assert f(Box(1)) == "1"
+
+test fn expected_type_widen_at_an_enum_variant():
+    e: E[Named] = E.V(A())
+    assert str(e) == "V(A())"
+
+test fn expected_type_widen_through_a_free_fn_return():
+    c: Box[Named] = mk(A())
+    assert c.v.name() == "a"

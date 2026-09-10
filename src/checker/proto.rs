@@ -3975,6 +3975,114 @@ impl Checker {
         }
     }
 
+    /// W12-9 (TICKET-106) — let an expected type WIDEN a type arg the ARGUMENTS already bound:
+    /// `b: Box[Named] = Box(A())` binds `T = A` from the arg, and `seed_from_hint` (which fills only
+    /// FREE params) ignored the hint. Declines unless ALL of these hold, so no accepted program's
+    /// types move and no aliased mutable value is re-typed:
+    ///
+    /// 1. no turbofish
+    /// 2. the hint is `ty_fully_concrete` (DEC-054)
+    /// 3. the result as inferred is NOT already assignable to the hint
+    /// 4. every re-bound param's new type accepts its old one
+    /// 5. every argument is still assignable to its declared slot under the new binding (this is
+    ///    the invariance guard: `Bag(zs)` with `zs: List[A]` fails it)
+    /// 6. the declared bounds still hold
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn widen_targs_from_hint(
+        &mut self,
+        hint: Option<&Ty>,
+        shape: &Ty,
+        tps: &[TypeParam],
+        decls: &[Ty],
+        arg_tys: &[Ty],
+        explicit: bool,
+        sub: &mut HashMap<String, Ty>,
+        span: Span,
+    ) {
+        let Some(h) = hint else { return };
+        if explicit || !ty_fully_concrete(h) || self.assignable(h, &subst(shape, sub)) {
+            return;
+        }
+        let mut want: HashMap<String, Ty> = HashMap::new();
+        unify(shape, h, &mut want);
+        let mut cand = sub.clone();
+        let mut changed = false;
+        for tp in tps {
+            if let (Some(have), Some(w)) = (sub.get(&tp.name), want.get(&tp.name))
+                && have != w
+                && ty_fully_concrete(w)
+                && self.assignable(w, have)
+            {
+                cand.insert(tp.name.clone(), w.clone());
+                changed = true;
+            }
+        }
+        if !changed
+            || decls
+                .iter()
+                .zip(arg_tys)
+                .any(|(d, a)| !self.assignable(&subst(d, &cand), a))
+        {
+            return;
+        }
+        let mark = self.diag_mark();
+        self.enforce_bounds(tps, &cand, span);
+        let bounds_fail = self.errors.len() > mark.errors;
+        self.diag_rollback(mark);
+        if !bounds_fail {
+            *sub = cand;
+        }
+    }
+
+    /// W12-15 (TICKET-106) — Go's untyped-constant rule at a generic slot: a type param that one
+    /// argument binds to `float` and whose every `int` binding comes from an untyped int CONSTANT in
+    /// a BARE `T` slot becomes `float`, and those constants are coerced at the call site
+    /// (`ArgFloatWidenTable` → `Op::CoerceFloat` in `compile_args`), so no int reaches a float slot.
+    /// Records a verdict (true OR false) for every such constant: an inline-spliced default shares
+    /// one span across callers, and only a recorded `false` lets `record_call_table_entry` catch two
+    /// callers disagreeing.
+    pub(super) fn widen_mixed_numeric_args(
+        &mut self,
+        tps: &[TypeParam],
+        decls: &[Ty],
+        arg_tys: &mut [Ty],
+        args: &[Expr],
+        explicit: bool,
+        sub: &mut HashMap<String, Ty>,
+    ) {
+        let n = decls.len().min(arg_tys.len()).min(args.len());
+        for tp in tps {
+            let p = &tp.name;
+            let (mut has_float, mut other_int) = (false, false);
+            let mut consts: Vec<usize> = Vec::new();
+            for i in 0..n {
+                let mut one: HashMap<String, Ty> = HashMap::new();
+                unify(&decls[i], &arg_tys[i], &mut one);
+                match one.get(p) {
+                    Some(Ty::Float) => has_float = true,
+                    Some(Ty::Int)
+                        if matches!(&decls[i], Ty::Param(d) if d == p)
+                            && crate::ast::untyped_int_const(&args[i]) =>
+                    {
+                        consts.push(i)
+                    }
+                    Some(Ty::Int) => other_int = true,
+                    _ => {}
+                }
+            }
+            let widen = !explicit && has_float && !other_int && !consts.is_empty();
+            for &i in &consts {
+                self.record_arg_float_widen(args[i].span, widen);
+                if widen {
+                    arg_tys[i] = Ty::Float;
+                }
+            }
+            if widen {
+                sub.insert(p.clone(), Ty::Float);
+            }
+        }
+    }
+
     /// The parameterized bounds whose type args are recovered by a dedicated extractor above
     /// (`recover_iter_elems` / `recover_index_args`). They read the arg straight off the concrete
     /// type (`iter_elem`, `index_kv`, `slice_result`) instead of unifying method signatures, so the
@@ -4753,6 +4861,17 @@ impl Checker {
                 unify(decl, actual, &mut subst_map);
             }
         }
+        // W12-15 (TICKET-106): widen a bare-`T` untyped int constant to float when a sibling argument
+        // binds `T = float`, BEFORE `recover_iter_elems`/`recover_protocol_args` — those recoveries
+        // may pin further params, and this widen must see only the direct arg-to-param bindings.
+        self.widen_mixed_numeric_args(
+            &sig.type_params,
+            &sig.params,
+            &mut arg_tys,
+            args,
+            !targs.is_empty(),
+            &mut subst_map,
+        );
         // Recover element types from parameterized `Iterator[T]` bounds (bind `T` to the iterand's
         // element), then enforce every declared bound against its inferred binding.
         self.recover_iter_elems(&sig.type_params, &mut subst_map, span);
@@ -4766,6 +4885,17 @@ impl Checker {
         // hint — so `xs: List[int] = empty()` pins a return-only `T`, and the deadlock probe below
         // sees it bound. After arg-unification ⇒ turbofish/args win.
         seed_from_hint(hint, &sig.ret, &mut subst_map);
+        // W12-9 (TICKET-106): let the expected type widen a type arg the ARGUMENTS already bound.
+        self.widen_targs_from_hint(
+            hint,
+            &sig.ret,
+            &sig.type_params,
+            &sig.params,
+            &arg_tys,
+            !targs.is_empty(),
+            &mut subst_map,
+            span,
+        );
         // Second pass for the deferred bare generic-fn args, placed HERE — after every sibling value
         // argument, the closure-return recovery, the `Iterator`/index recovery AND the annotation
         // hint have bound what they bind, and before `enforce_bounds` so a bound on a param this pass
@@ -5113,6 +5243,16 @@ impl Checker {
             }
             unify(&expected[i], &arg_tys[i].clone(), &mut mmap);
         }
+        // W12-15 (TICKET-106): widen a bare-`T` untyped int constant to float when a sibling argument
+        // binds `T = float`, BEFORE the `Iterator`/protocol recoveries.
+        self.widen_mixed_numeric_args(
+            mtps,
+            expected,
+            &mut arg_tys,
+            args,
+            !targs.is_empty(),
+            &mut mmap,
+        );
         // Recover element types from `Iterator[T]` bounds, then enforce every declared bound.
         self.recover_iter_elems(mtps, &mut mmap, span);
         self.recover_index_args(mtps, &mut mmap, span);
@@ -5126,6 +5266,17 @@ impl Checker {
         // it, which is why `v: int? = w.take(xs)` used to report a false conformance error PLUS
         // `cannot assign R to variable of type Option[int]`.
         seed_from_hint(hint, ret, &mut mmap);
+        // W12-9 (TICKET-106): let the expected type widen a type arg the ARGUMENTS already bound.
+        self.widen_targs_from_hint(
+            hint,
+            ret,
+            mtps,
+            expected,
+            &arg_tys,
+            !targs.is_empty(),
+            &mut mmap,
+            span,
+        );
         // …and the same probe-gated inference diagnostic as the free-fn path, so a recovery miss
         // names the un-inferable param instead of blaming the witnessing method's signature. The
         // gate is the `enforce_bounds` error-count delta: bind the candidates to a hole, and report

@@ -1106,6 +1106,17 @@ impl Checker {
         // still FREE) and bounds enforce against the hint-pinned concrete type (mirrors the free-fn
         // path, `infer_generic_call`).
         seed_from_hint(hint, &sig.ret, &mut sub);
+        let all_tps: Vec<TypeParam> = tps.iter().chain(sig.type_params.iter()).cloned().collect();
+        self.widen_targs_from_hint(
+            hint,
+            &sig.ret,
+            &all_tps,
+            &sig.params,
+            &arg_tys,
+            !targs.is_empty() || !mtargs.is_empty(),
+            &mut sub,
+            span,
+        );
         for (decl, (actual, arg)) in sig.params.iter().zip(arg_tys.iter().zip(args)) {
             let expected = subst(decl, &sub);
             self.check_generic_arg(method, Some(decl), &expected, actual, arg);
@@ -1212,6 +1223,16 @@ impl Checker {
             &Ty::Enum(v.enum_name.clone(), param_shape(&tps)),
             &mut sub,
         );
+        self.widen_targs_from_hint(
+            hint,
+            &Ty::Enum(v.enum_name.clone(), param_shape(&tps)),
+            &tps,
+            &v.payload,
+            &arg_tys,
+            !targs.is_empty(),
+            &mut sub,
+            span,
+        );
         for (decl, (actual, arg)) in v.payload.iter().zip(arg_tys.iter().zip(args)) {
             let expected = subst(decl, &sub);
             self.check_generic_arg(name, None, &expected, actual, arg);
@@ -1274,6 +1295,16 @@ impl Checker {
             &Ty::Struct(key.to_string(), param_shape(&tps)),
             &mut sub,
         );
+        self.widen_targs_from_hint(
+            hint,
+            &Ty::Struct(key.to_string(), param_shape(&tps)),
+            &tps,
+            &field_tys,
+            &arg_tys,
+            !targs.is_empty(),
+            &mut sub,
+            span,
+        );
         // Same un-inferable closure-param deadlock guard as the bare struct-ctor / free-fn paths
         // (`Heap([], fn(a, b): a < b)` via a module-qualified ctor): report the cause and bind the
         // params to Unknown BEFORE the per-arg closure body is checked, so it doesn't leak a
@@ -1332,6 +1363,16 @@ impl Checker {
             hint,
             &Ty::NewType(key.to_string(), param_shape(tps)),
             &mut sub,
+        );
+        self.widen_targs_from_hint(
+            hint,
+            &Ty::NewType(key.to_string(), param_shape(tps)),
+            tps,
+            std::slice::from_ref(underlying),
+            &arg_tys,
+            !targs.is_empty(),
+            &mut sub,
+            span,
         );
         if let (Some(actual), Some(arg)) = (arg_tys.first(), args.first()) {
             let expected = subst(underlying, &sub);
@@ -2140,6 +2181,16 @@ impl Checker {
                     // breaks the `Heap([], fn(a, b): a < b)` deadlock (it pins `T`, which in turn pins
                     // the comparator's closure params via the per-arg checking-mode re-infer below).
                     seed_from_hint(hint, &Ty::Struct(key.clone(), param_shape(&tps)), &mut sub);
+                    self.widen_targs_from_hint(
+                        hint,
+                        &Ty::Struct(key.clone(), param_shape(&tps)),
+                        &tps,
+                        &field_tys,
+                        &arg_tys,
+                        !targs.is_empty(),
+                        &mut sub,
+                        span,
+                    );
                     // Detect the un-inferable closure-param deadlock (e.g. `Heap([], fn(a,b): a<b)`)
                     // BEFORE the per-arg check, so it reports the cause instead of leaking a
                     // "cannot compare T and T" from inside the lambda. Binds the params to Unknown.
