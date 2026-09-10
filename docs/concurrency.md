@@ -1494,9 +1494,22 @@ was retired when module globals started deep-copying per task.)
   (2026-09-03). Top-level `fn`s, imports, `native fn`s and `extern` fns are unaffected and stay late
   loads always.
 
-  **Residual (TICKET-097, W11-5): a user struct METHOD that mutates `self` still marks nothing.**
-  The write inside the method targets `self`, not a global root, so no in-place-mutation mark is
-  emitted:
+  **TICKET-105: a free global also crosses when the sending view provably changed it since the
+  snapshot that view descends from.** `assigned`/`carried` above catch a write that goes through an
+  op naming the global (`g = …`, `g.push(…)`, `g[0] = …`, `g.n = …`); a write through a LOCAL ALIAS
+  of the global (`xs := g; xs.push(2)`), a callee PARAM ALIAS (`fn add(xs): xs.push(2)`), or a user
+  struct METHOD that mutates `self` (`g.bump()`) reaches no such op, so neither bit is ever set. The
+  fix is a third, content-based check: at each closure crossing, compare the sending view's live
+  value for the global against that view's own baseline (a worker's `module_snapshot`, or the root
+  view's FIRST snapshot) via `wire_content_differs` — a renumbering-aware wire comparator that
+  DECLINES toward "unchanged" on every doubt (a kind change, an unmatched `Backref`, NaN, a handle/
+  callable/cell/iterator/builtin, the depth cap), because a false "changed" would clobber a
+  receiver's own in-place push (the DEC-051 no-clobber invariant). The verdict is folded into
+  `ModuleSnap.carried` at each snapshot build too, so an ancestor's alias write reaches a
+  grandchild's send, not just the sender's own. Cost: O(size) per closure crossing, for each free
+  global that is a mutable aggregate and not already carried — see `docs/benchmarks.md` TICKET-105.
+
+  All three shapes above now match CPython:
 
   ```
   struct C:
@@ -1516,10 +1529,15 @@ was retired when module globals started deep-copying per task.)
   main()
   ```
 
-  Measured 2026-09-09 on the release binary at `65fe244d`: Chezzi prints
-  `user-method mutation via closure: 1`, CPython 3.14.7 prints `user-method mutation via closure: 3`.
-  The upgrade path is a self-mutation summary per method (`src/checker/mod.rs:3717`'s named
-  follow-up). See `docs/gaps.md` W11-5, which stays open for this sub-defect.
+  Measured 2026-09-11: Chezzi and CPython 3.14.7 both print
+  `user-method mutation via closure: 3`. Closes `docs/gaps.md` W11-5 and W12-6.
+
+  **Residual (W12-5, TICKET-111): a task-local alias of a global element is a second, independent
+  wire identity.** `inner := gl[0]` crossing in the SAME closure as `gl` itself gives the receiver
+  two separate copies rather than one shared object — CPython and Go both see one. TICKET-105's
+  changed-since-baseline check fixes the VALUES two such copies hold (a push through one alias is
+  now visible through the other's home global once both cross), but not their IDENTITY when both
+  cross together; see `docs/gaps.md` W12-5.
 
   So a `spawn f()`
   callee whose captured environment contains a nested closure/`fn` (or is itself a bare `fn`) runs

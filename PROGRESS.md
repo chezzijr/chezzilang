@@ -7,6 +7,24 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-105 (2026-09-11) — a crossing closure now carries a module global the sender changed
+  through a LOCAL ALIAS, a callee PARAM alias, or a user struct METHOD (W12-6, closes W11-5).**
+  `assigned`/`carried` (TICKET-051/097) catch a write through an op that names the global directly;
+  `xs := g; xs.push(2)`, `fn add(xs): xs.push(2)`, and `g.bump()` (a method mutating `self`) all
+  reach no such op, so neither bit was ever set. Fix: a third input to the send filter — at each
+  closure crossing, `Vm::slot_changed_since_baseline` compares the sending view's live value for a
+  free global against that view's own baseline (a worker's `module_snapshot`, or the root view's
+  FIRST snapshot, `Vm::root_baseline`, new) via a new `wire_content_differs` (`src/vm/wire.rs`): a
+  renumbering-aware wire comparator that DECLINES toward "unchanged" on every doubt (a kind change,
+  an unmatched `Backref`, NaN, any handle/callable/cell/iterator/builtin, the depth cap) — a false
+  "changed" would clobber a receiver's own in-place push, the DEC-051 no-clobber invariant. The
+  verdict also folds into `ModuleSnap.carried` at each snapshot build, so an ancestor's alias write
+  reaches a grandchild's send. Cost: O(size) per closure crossing, for each free global that is a
+  mutable aggregate and not already carried — see `docs/benchmarks.md` TICKET-105 (worst case
+  measured ~144x on an adversarial repeated-send-of-an-unmutated-large-global loop, accepted by
+  design; every real bench in `benches/chz` stayed within ±5%). The G6/G7 identity residual (a
+  task-local alias of a global element crosses as a SEPARATE wire identity, not the same shared
+  object) is a distinct subsystem — split to TICKET-111 as W12-5.
 - **TICKET-104 (2026-09-10) — a `Comparable` enum now orders through its own `compare` in
   `sort()`, `min()`/`max()`, `min_by`/`max_by` and `sort_by_key` (W12-2 P0, W12-3 P1).** The checker
   granted `Comparable` to an enum with `compare`, and `<`/`>` already dispatched it (`compare_op`

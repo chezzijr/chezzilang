@@ -2183,3 +2183,42 @@ No regression on the spawn path — the after numbers are consistently faster, w
 normal run-to-run noise (both binaries print the identical result `199990000`). The three extra
 hashmap inserts per identity-preserved node are the same order of cost as the existing `path`
 insert they sit beside, so this is the expected outcome, not a surprise.
+
+### TICKET-105 — send-time changed-since-baseline carry (2026-09-11)
+
+`wire_content_differs`'s serialize-then-compare adds one O(size) walk per free global that is a
+mutable aggregate AND not already `assigned`/`carried`, run at every closure crossing
+(`Vm::closure_global_snapshot`). Measured on `/tmp/t105-base-chezzi` (pre-fix, `40b9a276` +
+rebase) vs this branch's `target/release/chezzi`, `time`-based (no `hyperfine` on this box),
+median of 7 interleaved runs each, `uptime` load average 1.6-2.0 for the standard suite, 1.6-13.5
+for the four TICKET-105 bench programs (`closure_send` saturates all cores):
+
+| bench | base median | branch median | delta |
+|---|---|---|---|
+| `benches/chz/fib.chz` | 0.4744 s | 0.4591 s | -3.2% |
+| `benches/chz/str.chz` | 0.2777 s | 0.2855 s | +2.8% |
+| `benches/chz/primes.chz` | 1.1237 s | 1.1220 s | -0.2% |
+| `benches/chz/loop.chz` | 1.6747 s | 1.7053 s | +1.8% |
+| `benches/chz/list.chz` | 0.6829 s | 0.6899 s | +1.0% |
+| `benches/chz/struct.chz` | 0.8703 s | 0.9004 s | +3.5% |
+| `benches/chz/poly_method.chz` | 2.4094 s | 2.4053 s | -0.2% |
+| `benches/chz/map.chz` | 0.2679 s | 0.2543 s | -5.1% |
+| `benches/chz/map_str.chz` | 0.3657 s | 0.3716 s | +1.6% |
+| `benches/chz/unique.chz` | 0.1264 s | 0.1254 s | -0.8% |
+| `benches/chz/empty.chz` | 0.00736 s | 0.00709 s | -3.6% |
+| `storm120k.chz` (Digest, no free-global crossing) | 0.7409 s | 0.7264 s | -2.0% |
+| `nested3000.chz` (Digest, no free-global crossing) | 0.9986 s | 1.0213 s | +2.3% |
+| `server3000.chz` (Digest, no free-global crossing) | 2.3144 s | 2.3106 s | -0.2% |
+| `closure_send.chz` (Digest, DESIGNED WORST CASE) | 0.0697 s | 10.0544 s | +14330% |
+
+None of the eleven `benches/chz` programs, nor the three spawn-shape programs that never cross a
+free global, regresses past the +/-10% threshold (worst is `struct.chz` at +3.5%, inside normal
+run-to-run noise on this box). `closure_send.chz` sends a closure over a `Channel` 20000 times,
+each crossing capturing a free global `big := [0] * 10000` that is never mutated: every crossing
+now pays one O(10000) serialize-then-compare on `big` (it is a mutable-aggregate free global not
+already `assigned`/`carried`), for a measured ~14000% cost on this specifically adversarial shape.
+This is the accepted, by-design price of the O(size) per-crossing decline-on-doubt comparator: the
+human's answer explicitly named this shape and set no threshold on it (`## Plan` step 13). A
+repeated-send-of-an-unmutated-large-global loop is the one pattern that pays this on every single
+crossing, because nothing short of a per-view dirty bit (future lever, see `## Decisions`) can
+short-circuit an in-place write that sets no bit.

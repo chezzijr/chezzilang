@@ -172,6 +172,7 @@ impl Vm {
             module_snapshot: None,
             module_faulted: Vec::new(),
             snapshot_memo: None,
+            root_baseline: None,
             snapshot_rebuild: super::fxhash::FxHashMap::default(),
             snapshot_cells: std::sync::Arc::new(super::fxhash::FxHashMap::default()),
             snapshot_next_id: 0,
@@ -240,6 +241,9 @@ impl Vm {
         std::mem::swap(&mut self.module_faulted, &mut ctx.module_faulted);
         std::mem::swap(&mut self.module_snapshot, &mut ctx.module_snapshot);
         std::mem::swap(&mut self.snapshot_memo, &mut ctx.snapshot_memo);
+        // TICKET-105 — `root_baseline` describes the same view as `module_snapshot`/`snapshot_memo`
+        // above, so it swaps with them.
+        std::mem::swap(&mut self.root_baseline, &mut ctx.root_baseline);
         // W7-4a — the snapshot rebuild map describes the SAME view, so it travels with it. Unlike the
         // two `Arc<ModuleSnapshot>`s above it IS heap-keyed (`GcRef` values), exactly like
         // `module_objs` just above: for an M:N fiber it indexes the heap swapped below, for a fiber

@@ -2864,12 +2864,12 @@ main()
 }
 
 #[test]
-fn airlock_user_struct_method_mutation_is_a_known_residual() {
-    // TICKET-097 / W11-5's third sub-defect, deliberately NOT fixed here: a user struct method
-    // that mutates `self` (`g.bump()`) still marks nothing, because the write inside the method
-    // targets `self`, not a global root. CPython 3.14.7 prints `3` (measured 2026-09-09). Fixing
-    // it needs a self-mutation summary per method (`src/checker/mod.rs:3717`'s named upgrade
-    // path) — its own ticket.
+fn airlock_closure_carries_a_global_a_user_struct_method_mutated() {
+    // TICKET-097 / W11-5's third sub-defect, CLOSED by TICKET-105: a user struct method that
+    // mutates `self` (`g.bump()`) writes through no op that names the global `g`, so neither
+    // `assigned` nor `carried` was ever set by the write itself — the same shape as an alias write.
+    // TICKET-105's changed-since-baseline check catches it: `g`'s wire content after two bumps
+    // differs from producer's baseline. CPython 3.14.7 prints `3` (measured 2026-09-09).
     let src = r#"
 struct C:
     n: int
@@ -2892,9 +2892,250 @@ main()
 "#;
     let out = golden_entry(src);
     assert_eq!(
-        out, "user-method mutation via closure: 1\n",
-        "this residual must stay pinned at the WRONG answer until the self-mutation summary is \
-         built; a `3` here means step 16 started marking a struct on the by-name path: {out:?}"
+        out, "user-method mutation via closure: 3\n",
+        "a user-method mutation must now be carried, matching CPython: {out:?}"
+    );
+}
+
+#[test]
+fn airlock_closure_carries_a_global_main_mutated_through_a_local_alias() {
+    // TICKET-105 (W12-6), G1. `main` itself is the sender, aliasing `g` into `xs` and pushing
+    // through the alias before the send. CPython 3.14.7 prints `[1, 2]` (measured 2026-09-10).
+    let src = r#"
+import std.concurrency
+
+g := [1]
+
+fn main():
+    c := Channel[fn() -> str](1)
+    done := Channel[str](1)
+    parallel:
+        spawn:
+            f := c.recv()
+            done.send(f())
+        xs := g
+        xs.push(2)
+        c.send(fn() -> str: "{g}")
+    print("main-as-sender alias: {done.recv()}")
+main()
+"#;
+    let out = golden_entry(src);
+    assert_eq!(
+        out, "main-as-sender alias: [1, 2]\n",
+        "a root-view alias write before the send must be carried: {out:?}"
+    );
+}
+
+#[test]
+fn airlock_closure_carries_a_global_the_sender_mutated_through_a_struct_alias() {
+    // TICKET-105 (W12-6), G2. `h := g; h.n = 5` writes through a local alias of a struct global.
+    // CPython 3.14.7 prints `5` (measured 2026-09-10).
+    let src = r#"
+import std.concurrency
+
+struct H:
+    n: int
+
+g := H(1)
+c := Channel[fn() -> int](1)
+
+fn producer():
+    h := g
+    h.n = 5
+    c.send(fn() -> int: g.n)
+
+fn main():
+    parallel:
+        spawn producer()
+    print("struct alias: {c.recv()()}")
+main()
+"#;
+    let out = golden_entry(src);
+    assert_eq!(
+        out, "struct alias: 5\n",
+        "a write through a local alias of a struct global must be carried: {out:?}"
+    );
+}
+
+#[test]
+fn airlock_alias_write_reaches_a_grandchild_senders_closure() {
+    // TICKET-105 (W12-6), G3. The alias write happens in `producer`, an ancestor of the closure's
+    // eventual sender `child`; the fold into `ModuleSnap.carried` must reach the grandchild.
+    // CPython 3.14.7 prints `[1, 2]` (measured 2026-09-10).
+    let src = r#"
+import std.concurrency
+
+g := [1]
+c := Channel[fn() -> str](1)
+
+fn child():
+    c.send(fn() -> str: "{g}")
+
+fn producer():
+    xs := g
+    xs.push(2)
+    parallel:
+        spawn child()
+
+fn main():
+    parallel:
+        spawn producer()
+    print("grandchild alias: {c.recv()()}")
+main()
+"#;
+    let out = golden_entry(src);
+    assert_eq!(
+        out, "grandchild alias: [1, 2]\n",
+        "an ancestor's alias write must reach a grandchild task's send: {out:?}"
+    );
+}
+
+#[test]
+fn airlock_closure_over_an_aliased_element_carries_the_senders_push() {
+    // TICKET-105 (W12-6), G4. `inner := gl[0]` aliases a list element; the sender pushes through
+    // `inner` before sending a closure that reads both `inner` and `gl[0]`. CPython 3.14.7 prints
+    // `[1, 2] [1, 2]` (measured 2026-09-10).
+    let src = r#"
+import std.concurrency
+
+gl := [[1]]
+
+fn main():
+    c := Channel[fn() -> str](1)
+    done := Channel[str](1)
+    inner := gl[0]
+    parallel:
+        spawn:
+            f := c.recv()
+            done.send(f())
+        inner.push(2)
+        c.send(fn() -> str: "{inner} {gl[0]}")
+    print("sender-push alias: {done.recv()}")
+main()
+"#;
+    let out = golden_entry(src);
+    assert_eq!(
+        out, "sender-push alias: [1, 2] [1, 2]\n",
+        "the sender's push through an aliased element must carry: {out:?}"
+    );
+}
+
+#[test]
+fn airlock_unchanged_aliased_global_does_not_clobber_the_receivers_push() {
+    // TICKET-105 (W12-6), G5 (negative control). `a := xs; n := a.len()` never mutates the alias,
+    // so the comparator must not read the receiver's own in-place push as a sender-side change —
+    // a cross-global `Backref` or a renumbered id must not read as "changed" (DEC-051).
+    let src = r#"
+import std.concurrency
+
+inner := [1]
+xs := [inner, inner]
+ch := Channel[fn() -> int](1)
+res := Channel[str](1)
+
+fn main():
+    parallel:
+        spawn:
+            xs[0].push(9)
+            k := ch.recv()
+            res.send("{xs} len {k()}")
+        a := xs
+        n := a.len()
+        ch.send(fn() -> int: xs.len() + n)
+    print(res.recv())
+main()
+"#;
+    let out = golden_entry(src);
+    assert_eq!(
+        out, "[[1, 9], [1, 9]] len 4\n",
+        "an unread alias must not falsely register as changed and clobber the receiver's own \
+         in-place push: {out:?}"
+    );
+}
+
+#[test]
+fn airlock_closure_over_a_captured_alias_pushed_by_the_receiver_is_a_known_residual() {
+    // TICKET-105, G6. The push through `inner` runs in the RECEIVER's captured closure body,
+    // AFTER the send — the sender's `gl` never changes, so this is a pure W12-5 identity residual
+    // (TICKET-111), not something a send-time changed-since-baseline check can reach. CPython
+    // 3.14.7 prints `[1, 2] [1, 2]` (measured 2026-09-10); pin today's value.
+    let src = r#"
+import std.concurrency
+
+gl := [[1]]
+
+fn main():
+    c := Channel[fn() -> str](1)
+    done := Channel[str](1)
+    inner := gl[0]
+    fn work() -> str:
+        inner.push(2)
+        return "{inner} {gl[0]}"
+    parallel:
+        spawn:
+            f := c.recv()
+            done.send(f())
+        c.send(work)
+    print("channel capture alias: {done.recv()}")
+main()
+"#;
+    let out = golden_entry(src);
+    assert_eq!(
+        out, "channel capture alias: [1, 2] [1]\n",
+        "a receiver-side push through a captured alias after the send is a W12-5 identity \
+         residual (TICKET-111), pinned here: {out:?}"
+    );
+}
+
+#[test]
+fn airlock_task_local_alias_of_a_global_is_a_known_residual() {
+    // TICKET-105, G7. A spawn-arg alias (`spawn f(gl[0], r)`) and a whole-value alias (`a := gl`)
+    // are both W12-5 identity residuals (TICKET-111): the task's own copy of the alias diverges
+    // from `gl`'s copy once the task pushes into it. CPython 3.14.7 prints `[1, 2] [1, 2]` and
+    // `[[1, 2]] [[1, 2]]` (measured 2026-09-10); pin today's values.
+    let src = r#"
+import std.concurrency
+
+gl := [[1]]
+
+fn f(x: List[int], r: Channel[str]):
+    x.push(2)
+    r.send("{x} {gl[0]}")
+
+fn main():
+    r := Channel[str](1)
+    parallel:
+        spawn f(gl[0], r)
+    print("spawn arg alias: {r.recv()}")
+main()
+"#;
+    let out = golden_entry(src);
+    assert_eq!(
+        out, "spawn arg alias: [1, 2] [1]\n",
+        "a spawn-arg alias of a global element is a W12-5 identity residual (TICKET-111), \
+         pinned here: {out:?}"
+    );
+
+    let src2 = r#"
+import std.concurrency
+
+gl := [[1]]
+
+fn main():
+    a := gl
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            a[0].push(2)
+            r.send("{a} {gl}")
+    print("whole alias: {r.recv()}")
+main()
+"#;
+    let out2 = golden_entry(src2);
+    assert_eq!(
+        out2, "whole alias: [[1, 2]] [[1]]\n",
+        "a whole-value alias of a global is a W12-5 identity residual (TICKET-111), pinned \
+         here: {out2:?}"
     );
 }
 

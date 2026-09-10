@@ -2030,6 +2030,178 @@ fn wire_roundtrip_preserves_value_equality() {
     );
 }
 
+// ----- TICKET-105: wire_content_differs (renumbering-aware wire comparator) -----
+
+/// Two wires that are the same shape and content but were assigned different `id`s (a fresh
+/// `to_wire` call mints ids in a different order than an earlier one) must compare equal — the
+/// comparator pairs ids structurally, it never compares them literally.
+#[test]
+fn wire_content_differs_ignores_id_renumbering() {
+    use super::wire::wire_content_differs;
+    let base = WireValue::List {
+        id: 7,
+        items: vec![
+            WireValue::List {
+                id: 8,
+                items: vec![WireValue::Int(1)],
+            },
+            WireValue::Backref(8),
+        ],
+    };
+    let live = WireValue::List {
+        id: 0,
+        items: vec![
+            WireValue::List {
+                id: 1,
+                items: vec![WireValue::Int(1)],
+            },
+            WireValue::Backref(1),
+        ],
+    };
+    assert!(
+        !wire_content_differs(&base, &live),
+        "id renumbering alone must not read as a content change"
+    );
+}
+
+/// A genuinely changed leaf value, or a length change, must be reported as a difference — this is
+/// the comparator's whole reason to exist.
+#[test]
+fn wire_content_differs_reports_a_changed_leaf_or_length() {
+    use super::wire::wire_content_differs;
+    let base = WireValue::List {
+        id: 7,
+        items: vec![WireValue::Int(1)],
+    };
+    let live = WireValue::List {
+        id: 0,
+        items: vec![WireValue::Int(1), WireValue::Int(2)],
+    };
+    assert!(
+        wire_content_differs(&base, &live),
+        "a length change must be reported as a difference"
+    );
+
+    let base = WireValue::Struct {
+        id: 3,
+        name: "H".into(),
+        fields: vec![("n".into(), WireValue::Int(1))],
+    };
+    let live = WireValue::Struct {
+        id: 0,
+        name: "H".into(),
+        fields: vec![("n".into(), WireValue::Int(5))],
+    };
+    assert!(
+        wire_content_differs(&base, &live),
+        "a changed field value must be reported as a difference"
+    );
+}
+
+/// Every uncertain pair must decline toward "unchanged" — a false "changed" verdict would clobber
+/// a receiver's own in-place push (DEC-051), so any doubt must read as `Same`/`Unknown`, never
+/// `Differs`.
+#[test]
+fn wire_content_differs_declines_every_uncertain_pair() {
+    use super::wire::wire_content_differs;
+
+    assert!(
+        !wire_content_differs(&WireValue::Float(f64::NAN), &WireValue::Float(f64::NAN)),
+        "NaN vs NaN must decline"
+    );
+    assert!(
+        !wire_content_differs(&WireValue::Float(0.0), &WireValue::Float(-0.0)),
+        "0.0 vs -0.0 must decline"
+    );
+    assert!(
+        !wire_content_differs(
+            &WireValue::Nil,
+            &WireValue::List {
+                id: 0,
+                items: vec![],
+            }
+        ),
+        "a kind change (Nil vs List) must decline"
+    );
+    assert!(
+        !wire_content_differs(&WireValue::Int(1), &WireValue::Str("1".into())),
+        "a kind change (Int vs Str) must decline"
+    );
+    assert!(
+        !wire_content_differs(
+            &WireValue::List {
+                id: 7,
+                items: vec![WireValue::Backref(9)],
+            },
+            &WireValue::List {
+                id: 0,
+                items: vec![WireValue::List {
+                    id: 1,
+                    items: vec![WireValue::Int(1)],
+                }],
+            }
+        ),
+        "an unmatched Backref must decline"
+    );
+    assert!(
+        !wire_content_differs(
+            &WireValue::List {
+                id: 7,
+                items: vec![
+                    WireValue::List {
+                        id: 8,
+                        items: vec![],
+                    },
+                    WireValue::Backref(8),
+                ],
+            },
+            &WireValue::List {
+                id: 0,
+                items: vec![
+                    WireValue::List {
+                        id: 1,
+                        items: vec![],
+                    },
+                    WireValue::Backref(0),
+                ],
+            }
+        ),
+        "an inconsistent Backref pairing must decline"
+    );
+    assert!(
+        !wire_content_differs(
+            &WireValue::Builtin("print".into()),
+            &WireValue::Builtin("len".into())
+        ),
+        "a builtin, never structurally compared, must decline"
+    );
+}
+
+/// A proven difference elsewhere in the same structure must win over a declined sibling pair — the
+/// comparator must not let one `Unknown` branch swallow a `Differs` found in another.
+#[test]
+fn wire_content_differs_a_proven_difference_outranks_a_declined_sibling() {
+    use super::wire::wire_content_differs;
+    let base = WireValue::List {
+        id: 7,
+        items: vec![WireValue::Backref(9), WireValue::Int(1)],
+    };
+    let live = WireValue::List {
+        id: 0,
+        items: vec![
+            WireValue::List {
+                id: 1,
+                items: vec![],
+            },
+            WireValue::Int(2),
+        ],
+    };
+    assert!(
+        wire_content_differs(&base, &live),
+        "a proven difference must outrank a declined sibling"
+    );
+}
+
 /// `Map`/`Set` cross the wire carrying their **cached hashes** and **insertion order** unchanged —
 /// `from_wire` rebuilds via `push(hash, …)`, never re-hashing. Pins byte-identical reconstruction
 /// (the iteration order + index a later `print`/lookup observes) even when two keys collide.

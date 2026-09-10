@@ -507,3 +507,238 @@ impl WireValue {
         walk(self, &mut super::fxhash::FxHashSet::default(), known)
     }
 }
+
+/// TICKET-105 — true iff `live` is PROVABLY different content from `base` at some path, modulo
+/// per-serialization id renumbering. Declines (`false`) on every doubt: a false `true` here would
+/// wrongly carry a global and clobber a receiver's own in-place push (DEC-051), so an under-mark is
+/// the safe direction, never an over-mark.
+pub(super) fn wire_content_differs(base: &WireValue, live: &WireValue) -> bool {
+    wire_cmp(base, live, 0, &mut super::fxhash::FxHashMap::default()) == WireCmp::Differs
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WireCmp {
+    Same,
+    Unknown,
+    Differs,
+}
+
+/// `ids` pairs a `base` id with the `live` id it was found paired with, so `Backref` targets and
+/// container/struct ids can be compared modulo renumbering rather than literally.
+fn wire_cmp(
+    base: &WireValue,
+    live: &WireValue,
+    depth: usize,
+    ids: &mut super::fxhash::FxHashMap<u32, u32>,
+) -> WireCmp {
+    if depth > super::MAX_STRUCTURAL_DEPTH {
+        return WireCmp::Unknown;
+    }
+    match (base, live) {
+        (WireValue::Int(a), WireValue::Int(b)) => {
+            if a == b {
+                WireCmp::Same
+            } else {
+                WireCmp::Differs
+            }
+        }
+        (WireValue::Bool(a), WireValue::Bool(b)) => {
+            if a == b {
+                WireCmp::Same
+            } else {
+                WireCmp::Differs
+            }
+        }
+        (WireValue::Str(a), WireValue::Str(b)) => {
+            if a == b {
+                WireCmp::Same
+            } else {
+                WireCmp::Differs
+            }
+        }
+        (WireValue::Bytes(a), WireValue::Bytes(b)) => {
+            if a == b {
+                WireCmp::Same
+            } else {
+                WireCmp::Differs
+            }
+        }
+        (WireValue::ByteArray(a), WireValue::ByteArray(b)) => {
+            if a == b {
+                WireCmp::Same
+            } else {
+                WireCmp::Differs
+            }
+        }
+        (WireValue::Float(a), WireValue::Float(b)) => {
+            if a == b || (a.is_nan() && b.is_nan()) {
+                WireCmp::Same
+            } else {
+                WireCmp::Differs
+            }
+        }
+        (WireValue::Nil, WireValue::Nil) => WireCmp::Same,
+        (WireValue::List { id: a, items: xs }, WireValue::List { id: b, items: ys })
+        | (WireValue::Tuple { id: a, items: xs }, WireValue::Tuple { id: b, items: ys }) => {
+            if !pair_ids(ids, *a, *b) {
+                return WireCmp::Unknown;
+            }
+            cmp_seq(xs, ys, depth, ids)
+        }
+        (WireValue::Map { id: a, entries: xs }, WireValue::Map { id: b, entries: ys }) => {
+            if !pair_ids(ids, *a, *b) {
+                return WireCmp::Unknown;
+            }
+            if xs.len() != ys.len() {
+                return WireCmp::Differs;
+            }
+            let mut saw_unknown = false;
+            for ((_, kx, vx), (_, ky, vy)) in xs.iter().zip(ys.iter()) {
+                match wire_cmp(kx, ky, depth + 1, ids) {
+                    WireCmp::Differs => return WireCmp::Differs,
+                    WireCmp::Unknown => saw_unknown = true,
+                    WireCmp::Same => {}
+                }
+                match wire_cmp(vx, vy, depth + 1, ids) {
+                    WireCmp::Differs => return WireCmp::Differs,
+                    WireCmp::Unknown => saw_unknown = true,
+                    WireCmp::Same => {}
+                }
+            }
+            if saw_unknown {
+                WireCmp::Unknown
+            } else {
+                WireCmp::Same
+            }
+        }
+        (WireValue::Set { id: a, entries: xs }, WireValue::Set { id: b, entries: ys }) => {
+            if !pair_ids(ids, *a, *b) {
+                return WireCmp::Unknown;
+            }
+            if xs.len() != ys.len() {
+                return WireCmp::Differs;
+            }
+            let mut saw_unknown = false;
+            for ((_, ex), (_, ey)) in xs.iter().zip(ys.iter()) {
+                match wire_cmp(ex, ey, depth + 1, ids) {
+                    WireCmp::Differs => return WireCmp::Differs,
+                    WireCmp::Unknown => saw_unknown = true,
+                    WireCmp::Same => {}
+                }
+            }
+            if saw_unknown {
+                WireCmp::Unknown
+            } else {
+                WireCmp::Same
+            }
+        }
+        (
+            WireValue::Struct {
+                id: a,
+                name: an,
+                fields: af,
+            },
+            WireValue::Struct {
+                id: b,
+                name: bn,
+                fields: bf,
+            },
+        ) => {
+            if !pair_ids(ids, *a, *b) {
+                return WireCmp::Unknown;
+            }
+            if an != bn || af.len() != bf.len() {
+                return WireCmp::Unknown;
+            }
+            if af.iter().zip(bf.iter()).any(|((fx, _), (fy, _))| fx != fy) {
+                return WireCmp::Unknown;
+            }
+            let xs: Vec<WireValue> = af.iter().map(|(_, v)| v.clone()).collect();
+            let ys: Vec<WireValue> = bf.iter().map(|(_, v)| v.clone()).collect();
+            cmp_seq(&xs, &ys, depth, ids)
+        }
+        (
+            WireValue::Enum {
+                variant_id: av,
+                payload: ap,
+                ..
+            },
+            WireValue::Enum {
+                variant_id: bv,
+                payload: bp,
+                ..
+            },
+        ) => {
+            if av != bv {
+                return WireCmp::Differs;
+            }
+            cmp_seq(ap, bp, depth, ids)
+        }
+        (
+            WireValue::NewType {
+                id: a,
+                type_key: ak,
+                inner: ai,
+            },
+            WireValue::NewType {
+                id: b,
+                type_key: bk,
+                inner: bi,
+            },
+        ) => {
+            if !pair_ids(ids, *a, *b) {
+                return WireCmp::Unknown;
+            }
+            if ak != bk {
+                return WireCmp::Unknown;
+            }
+            wire_cmp(ai, bi, depth + 1, ids)
+        }
+        (WireValue::Backref(a), WireValue::Backref(b)) => {
+            if ids.get(a) == Some(b) {
+                WireCmp::Same
+            } else {
+                WireCmp::Unknown
+            }
+        }
+        _ => WireCmp::Unknown,
+    }
+}
+
+/// Records the first `base`/`live` id pairing seen and requires every later sighting of `a` to pair
+/// with the same `b` — a conflicting re-pairing is treated as `Unknown` by the caller.
+fn pair_ids(ids: &mut super::fxhash::FxHashMap<u32, u32>, a: u32, b: u32) -> bool {
+    match ids.get(&a) {
+        Some(&existing) => existing == b,
+        None => {
+            ids.insert(a, b);
+            true
+        }
+    }
+}
+
+/// A length mismatch is a proven `Differs`. Otherwise walk pairwise and return the first `Differs`
+/// found; failing that, `Unknown` if any pair declined, else `Same`.
+fn cmp_seq(
+    xs: &[WireValue],
+    ys: &[WireValue],
+    depth: usize,
+    ids: &mut super::fxhash::FxHashMap<u32, u32>,
+) -> WireCmp {
+    if xs.len() != ys.len() {
+        return WireCmp::Differs;
+    }
+    let mut saw_unknown = false;
+    for (x, y) in xs.iter().zip(ys.iter()) {
+        match wire_cmp(x, y, depth + 1, ids) {
+            WireCmp::Differs => return WireCmp::Differs,
+            WireCmp::Unknown => saw_unknown = true,
+            WireCmp::Same => {}
+        }
+    }
+    if saw_unknown {
+        WireCmp::Unknown
+    } else {
+        WireCmp::Same
+    }
+}

@@ -3138,20 +3138,96 @@ impl Vm {
     /// slot no ancestor ever assigned still holds the value the receiver's own lineage gave it, and
     /// copying it over would discard a receiving task's in-place mutation of that same value
     /// (`xs.push(9)`, which no slot write records) — so it is deliberately left out.
+    /// TICKET-105 — a third input: a slot no ancestor ever ASSIGNED can still be CARRIED if this
+    /// view's live value for it provably differs from this view's own baseline (an alias write, a
+    /// callee-param write, or a user-method write — none reach an op that names the global). See
+    /// `slot_changed_since_baseline`.
     pub(super) fn closure_global_snapshot(&self, proto: ProtoId, home: GcRef) -> Vec<(u32, Value)> {
         let free = &self.program.protos[proto].global_free;
         let mut out = Vec::with_capacity(free.len());
         if let Obj::Module(m) = self.heap.get(home) {
             for &slot in free {
                 let i = slot as usize;
+                // TICKET-105 — a third input beside `assigned`/`carried`: an alias write (`xs := g;
+                // xs.push(2)`) or a callee-param write reaches no op that names the global, so
+                // neither bit is set. Catch it by comparing the live value against this view's own
+                // baseline snapshot; the comparator declines on every doubt (DEC-051).
                 let carries = m.assigned.get(i).copied().unwrap_or(false)
-                    || m.carried.get(i).copied().unwrap_or(false);
+                    || m.carried.get(i).copied().unwrap_or(false)
+                    || self.slot_changed_since_baseline(home, slot);
                 if carries && let Some(&v) = m.slots.get(i) {
                     out.push((slot, v));
                 }
             }
         }
         out
+    }
+
+    /// TICKET-105 — true iff `v` is a container/struct/enum whose CONTENTS can be mutated in place
+    /// with no slot write (`q.push(1)`, `p.x = 1`) — the shape an alias write reaches. A scalar or a
+    /// by-reference handle (`Channel`/`Shared`/callable/…) never needs the changed-since-baseline
+    /// check: a scalar can only change via a slot write (already caught by `assigned`), and a handle
+    /// aliases the same shared core on both sides regardless.
+    pub(super) fn may_change_in_place(&self, v: Value) -> bool {
+        match v.view() {
+            super::value::ValueView::Obj(h) => matches!(
+                self.heap.get(h),
+                Obj::List(_)
+                    | Obj::Tuple(_)
+                    | Obj::Map(_)
+                    | Obj::Set(_)
+                    | Obj::ByteArray(_)
+                    | Obj::Struct { .. }
+                    | Obj::Enum { .. }
+                    | Obj::NewType { .. }
+            ),
+            _ => false,
+        }
+    }
+
+    /// TICKET-105 — this view's own baseline for module `home`'s slot `slot`: a worker's baseline is
+    /// the `ModuleSnapshot` it was faulted from (`module_snapshot`); the root view's is its FIRST
+    /// snapshot (`root_baseline`). `None` when the view has no baseline yet, the module/slot is not
+    /// in it, or the baseline's slot name no longer matches (a slot renumbered by a later define).
+    fn baseline_snap_value(&self, home: GcRef, slot: u32) -> Option<&SnapValue> {
+        let snap = self
+            .module_snapshot
+            .as_ref()
+            .or(self.root_baseline.as_ref())?;
+        let idx = self.home_index(home)?;
+        let m = match self.heap.get(home) {
+            Obj::Module(m) => m,
+            _ => return None,
+        };
+        let (name, sv) = snap.modules.get(idx)?.globals.get(slot as usize)?;
+        if m.index.get(name.as_str()) == Some(&slot) {
+            Some(sv)
+        } else {
+            None
+        }
+    }
+
+    /// TICKET-105 — true iff this view's live value for `home`'s slot `slot` is PROVABLY different
+    /// content from the baseline it descends from. Declines (`false`) on every doubt — a missing
+    /// baseline, a non-mutable-aggregate value, a serialize failure, or an uncertain comparator
+    /// verdict all read as "unchanged" (see `wire_content_differs`'s decline rules, DEC-051).
+    pub(super) fn slot_changed_since_baseline(&self, home: GcRef, slot: u32) -> bool {
+        let Some(SnapValue::Wire(base)) = self.baseline_snap_value(home, slot) else {
+            return false;
+        };
+        let Obj::Module(m) = self.heap.get(home) else {
+            return false;
+        };
+        let Some(&v) = m.slots.get(slot as usize) else {
+            return false;
+        };
+        if !self.may_change_in_place(v) {
+            return false;
+        }
+        let Ok(live) = self.to_wire(v) else {
+            return false;
+        };
+        super::wire::wire_content_differs(base, &live)
     }
 
     pub(super) fn to_wire(&self, v: Value) -> Result<WireValue, RuntimeError> {
@@ -5105,6 +5181,12 @@ impl Vm {
         // view (that is O(all module globals) per spawn — measured 84× on a spawn storm with a big
         // aggregate global). Freshness comes from the two invalidation rules, not from refusing to cache.
         self.snapshot_memo = Some(Arc::clone(&snap));
+        // TICKET-105 — the root view keeps its FIRST snapshot for its whole life, never a later one:
+        // a worker already has its own baseline (`module_snapshot`, the snapshot it was faulted
+        // from), so this only fires once, on the root view's first snapshot build.
+        if self.module_snapshot.is_none() && self.root_baseline.is_none() {
+            self.root_baseline = Some(Arc::clone(&snap));
+        }
         Ok(snap)
     }
 
@@ -5134,11 +5216,18 @@ impl Vm {
             module_replay: true,
             ..WireMemo::default()
         };
-        for &pm in &self.module_objs {
+        // TICKET-105 — this view's own baseline, so an in-place alias write can be folded into
+        // `carried` below and reach a later task's snapshot (a grandchild's send, not just the
+        // sender's own).
+        let baseline = self
+            .module_snapshot
+            .as_ref()
+            .or(self.root_baseline.as_ref());
+        for (mi, &pm) in self.module_objs.iter().enumerate() {
             // M19 Phase 2b — collect globals in *slot order* (not HashMap iteration order) so a
             // worker replays them into matching slots; the shared `Arc<Program>` slot map makes
             // parent and worker agree on slot↔name regardless of any hash ordering.
-            let (name, globals, carried): (Box<str>, Vec<(String, Value)>, Vec<bool>) =
+            let (name, globals, mut carried): (Box<str>, Vec<(String, Value)>, Vec<bool>) =
                 match self.heap.get(pm) {
                     Obj::Module(m) => {
                         // TICKET-051 — slot-aligned with `module_slot_pairs`' slot-order walk.
@@ -5156,6 +5245,11 @@ impl Vm {
                     }
                     _ => ("<worker>".into(), Vec::new(), Vec::new()),
                 };
+            // TICKET-105 — `mutable[i]` before `globals` is consumed below.
+            let mutable: Vec<bool> = globals
+                .iter()
+                .map(|(_, v)| self.may_change_in_place(*v))
+                .collect();
             // Fallible: a module global that is a frame-holding generator faults here (graceful,
             // re-stamped with the nursery span by `ensure_snapshot`) instead of panicking in `to_snap`.
             let mut snapped = Vec::with_capacity(globals.len());
@@ -5180,6 +5274,27 @@ impl Vm {
             for (k, v) in globals {
                 reusable &= self.slot_snapshot_reusable(v);
                 snapped.push((k, self.to_snap(v, &mut memo)?));
+            }
+            // TICKET-105 — fold this view's own alias write into `carried`, so a value this view
+            // changed in place (with no slot write to set `assigned`/`carried` above) still reaches
+            // whatever task is snapshotted from here (DEC-097: sets `carried` only, never `assigned`).
+            let base_mod = baseline.and_then(|b| b.modules.get(mi));
+            if let Some(base_mod) = base_mod {
+                for (i, (k, sv)) in snapped.iter().enumerate() {
+                    if carried.get(i).copied().unwrap_or(true)
+                        || !mutable.get(i).copied().unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    let changed = matches!(
+                        (sv, base_mod.globals.get(i)),
+                        (SnapValue::Wire(new), Some((bk, SnapValue::Wire(old))))
+                            if bk == k && super::wire::wire_content_differs(old, new)
+                    );
+                    if changed {
+                        carried[i] = true;
+                    }
+                }
             }
             modules.push(ModuleSnap {
                 name,
