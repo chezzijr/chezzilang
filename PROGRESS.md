@@ -7,6 +7,31 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-108 (2026-09-11) — five desugar/parser/checker papercuts: a same-named static method
+  across two structs, a fn value in a tuple slot, an fn-type diagnostic's missing optional arity, a
+  protocol type alias as a bound, and `a, b := 1, 2` (W12-10 P2; W12-16(a)/(c)/(d), W12-17 P3).**
+  W12-10: `Desugar::Walker::receiver_struct_ty` gains a bare type-NAME arm (a struct's static call
+  `A.new()` resolves through `methods_by_struct[(A, new)]`), guarded by a new `type_params` per-scope
+  set so a type parameter shadowing a struct name (`fn f[A: Mk]() -> A: return A.new()`) still binds
+  the PROTOCOL's arity, not the shadowed struct's default. W12-16(a): `crate::ast::is_tuple_index`
+  keeps a decimal member name (`t.0(3)`) out of the four Field-callee method-call arms (checker
+  `infer_call`, compiler `compile_call`/`compile_defer`/`compile_spawn`), so it takes the ordinary
+  value-call path instead of `has no method '0'`. W12-16(c): a new `Checker::protocol_alias_key`
+  resolves a protocol type alias (local or `import`ed) as a bound, consulted by `protocol_key` only
+  on a miss (alias-first could shadow a same-named protocol from another module); a GENERIC alias
+  (`type IntBag = Bag[int]`) gets its own `check_bounds` diagnostic naming the limit rather than
+  falling through to "unknown protocol". W12-16(d): `Ty::Func`'s `Display` now marks an omittable
+  parameter `int = …` via `FnLabels::min_or`, so `[a, b]` over a defaulted/non-defaulted pair reports
+  `fn(int = …) -> int vs fn(int) -> int` instead of two identical strings. W12-16(e) (turbofish +
+  named args, keyword call through a fn-typed field/tuple slot) is a documented decline in
+  `docs/syntax.md`, not lifted — both workarounds already run. W12-17: the parser's destructuring-let
+  branch now reads a comma-separated value list after `:=` when more than one target is present,
+  arity-checked at parse time (`destructuring binds N name(s) but M value(s)`); `docs/grammar.bnf`'s
+  `<letStmt>` and `tests/corpus/accept/destructure_let.chz` move in the same commit. W12-16(b) (`for
+  a, b` over a generator/cursor/`Iterable`) stays OPEN — `compile_for`'s multi-name branch indexes a
+  list or walks a map, so a checker-only widening would be check-OK-then-broken; needs its own
+  ticket. Docs: `docs/syntax.md` (four sections), `docs/grammar.bnf`, `docs/gaps.md` (W12-10/17
+  closed, W12-16 split by sub-item).
 - **TICKET-107 (2026-09-11) — three checker over-rejects: a bare-name catch-all on an enum/Option
   scrutinee, missing success-coercion in a mixed if/match EXPRESSION at a `T?`/`T!E` return sink,
   and `List +=` refused through a loop variable or `const` binding (W12-11 P2; W12-13, W12-14 P3).**
