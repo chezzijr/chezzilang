@@ -2569,13 +2569,25 @@ impl Checker {
             {
                 self.error(e.span, format!("set element type {why}"));
             }
-            if elem.is_unknown() {
-                elem = et;
-            } else if !et.is_unknown() && !compatible(&elem, &et) {
-                self.error(e.span, format!("set elements differ: {elem} vs {et}"));
+            match &elem_expected {
+                // W12-7 (TICKET-106): mirror `infer_map`'s expected-type path — check each element
+                // is ASSIGNABLE to the declared element type (so a protocol-satisfying struct literal
+                // is accepted) instead of accumulating and comparing elements to each other.
+                Some(x) => {
+                    if !et.is_unknown() && !self.assignable(x, &et) {
+                        self.error(e.span, format!("set element: expected {x}, found {et}"));
+                    }
+                }
+                None => {
+                    if elem.is_unknown() {
+                        elem = et;
+                    } else if !et.is_unknown() && !compatible(&elem, &et) {
+                        self.error(e.span, format!("set elements differ: {elem} vs {et}"));
+                    }
+                }
             }
         }
-        Ty::set(elem)
+        Ty::set(elem_expected.unwrap_or(elem))
     }
 
     pub(super) fn infer_map(
@@ -3074,7 +3086,7 @@ impl Checker {
                 // `Unknown`, which `either_unknown` then silences. A guard here would DOUBLE-report.)
                 match r {
                     Ty::List(elem) | Ty::Set(elem) => {
-                        if !either_unknown && !compatible(elem, l) {
+                        if !either_unknown && !compatible(elem, l) && !self.assignable(elem, l) {
                             self.error(lspan, format!("cannot test membership of {l} in {r}"));
                         }
                         // **W7-45.** `in` runs `values_equal` per element, exactly as `==` does, but
@@ -3104,7 +3116,7 @@ impl Checker {
                         }
                     }
                     Ty::Map(key, _) => {
-                        if !either_unknown && !compatible(key, l) {
+                        if !either_unknown && !compatible(key, l) && !self.assignable(key, l) {
                             self.error(
                                 lspan,
                                 format!(
@@ -3666,7 +3678,7 @@ impl Checker {
         match self.infer_value(obj) {
             Ty::Map(k, v) => {
                 let idx_ty = self.infer_value(index);
-                if !compatible(&k, &idx_ty) {
+                if !compatible(&k, &idx_ty) && !self.assignable(&k, &idx_ty) {
                     self.error(index.span, format!("map key must be {k}, found {idx_ty}"));
                 }
                 *v

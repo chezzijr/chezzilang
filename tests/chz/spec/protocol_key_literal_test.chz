@@ -1,0 +1,30 @@
+# W12-7 (TICKET-106): a protocol-typed Map/Set key must accept any literal that satisfies the
+# protocol, at RUN time (not just check time) — mirroring the already-accepted spelling that binds
+# the value to a local `Keyed` variable first.
+protocol Keyed:
+    fn hash(self) -> int
+
+struct A:
+    n: int
+    fn hash(self) -> int:
+        return self.n
+
+test fn map_accepts_a_protocol_satisfying_literal_key():
+    m: Map[Keyed, str] = {}
+    k: Keyed = A(1)
+    m[k] = "typed"
+    m[A(2)] = "lit"
+    assert m[A(1)] == "typed"
+    assert m[A(2)] == "lit"
+    assert A(2) in m
+    assert m.len() == 2
+
+test fn set_accepts_a_protocol_satisfying_literal_key():
+    s: Set[Keyed] = {A(1), A(2), A(1)}
+    assert s.len() == 2
+    assert A(2) in s
+
+test fn hashable_map_accepts_a_scalar_literal_key():
+    h: Map[Hashable, int] = {}
+    h[1] = 10
+    assert h[1] == 10

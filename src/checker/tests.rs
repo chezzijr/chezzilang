@@ -1804,9 +1804,12 @@ fn an_annotation_reaches_through_a_collection_literal() {
         "list element: expected int, found str",
     );
     // …and the `Set` twin, which reaches it through the element hint rather than a homogeneity check.
+    // (TICKET-106 W12-7: `infer_set` now checks each element's ASSIGNABILITY to the expected element
+    // type per-entry, mirroring `infer_map`, so the message is "set element: expected …" rather than
+    // the whole-collection "cannot assign Set[str] to variable of type Set[int]".)
     rejects(
         "fn one[T](x: T) -> T:\n    return x\ns: Set[int] = {one(\"a\")}\n",
-        "cannot assign Set[str] to variable of type Set[int]",
+        "set element: expected int, found str",
     );
 
     // The AGREEING shapes must be untouched — this is a hint, not a new rejection rule.
@@ -31597,6 +31600,39 @@ fn colliding_tempdir_names_corrupt_concurrent_checker_fixtures() {
 fn w12_7_protocol_typed_map_set_key_accepts_literal_satisfying_value() {
     ok(
         "protocol Keyed:\n    fn hash(self) -> int\nstruct A:\n    n: int\n    fn hash(self) -> int:\n        return self.n\nm: Map[Keyed, str] = {}\nm[A(1)] = \"lit\"\ns: Set[Keyed] = {A(1), A(2)}\nprint(m)\nprint(s)\n",
+    );
+}
+
+/// W12-7 (TICKET-106) neighbours: a protocol-typed map/set key must accept any literal that
+/// satisfies the protocol (via `assignable`), keep rejecting one that does not, and leave the
+/// existing `List[Keyed]` and `Map[Hashable, int]` spellings unchanged.
+#[test]
+fn w12_7_protocol_key_neighbours_accept_and_reject() {
+    let prelude = "protocol Keyed:\n    fn hash(self) -> int\nstruct A:\n    n: int\n    fn hash(self) -> int:\n        return self.n\nstruct B:\n    n: int\nm: Map[Keyed, str] = {}\n";
+    ok(&format!("{prelude}print(m[A(1)])\n"));
+    ok(&format!("{prelude}print(A(1) in m)\n"));
+    ok(&format!(
+        "{prelude}s: Set[Keyed] = {{A(1)}}\nprint(A(1) in s)\n"
+    ));
+    ok(&format!(
+        "{prelude}xs: List[Keyed] = [A(1)]\nprint(A(1) in xs)\n"
+    ));
+    ok("h: Map[Hashable, int] = {}\nh[1] = 1\nprint(h[1])\n");
+    rejects(
+        &format!("{prelude}print(m[B(1)])\n"),
+        "map key must be Keyed, found B",
+    );
+    rejects(
+        &format!("{prelude}m[B(1)] = \"no\"\n"),
+        "map key must be Keyed, found B",
+    );
+    rejects(
+        &format!("{prelude}s2: Set[Keyed] = {{A(1), B(2)}}\n"),
+        "set element: expected Keyed, found B",
+    );
+    rejects(
+        &format!("{prelude}print(B(1) in m)\n"),
+        "cannot test membership of B in Map[Keyed, str]",
     );
 }
 

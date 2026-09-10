@@ -3587,7 +3587,7 @@ impl Checker {
                 match self.infer(obj) {
                     Ty::Map(k, v) => {
                         let idx_ty = self.infer(index);
-                        if !compatible(&k, &idx_ty) {
+                        if !compatible(&k, &idx_ty) && !self.assignable(&k, &idx_ty) {
                             self.error(index.span, format!("map key must be {k}, found {idx_ty}"));
                         }
                         // Direct insertion-site Hashable / float-key ban: reject a non-Hashable key
