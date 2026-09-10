@@ -31775,3 +31775,34 @@ fn w12_15_bare_type_param_default_stays_rejected() {
         "default value for parameter 'b': expected T, found int",
     );
 }
+
+#[test]
+fn bare_name_catch_all_ok_on_enum_scrutinee() {
+    ok(
+        "enum E:\n    A(int)\n    B\n\nfn f(e: E, n: int) -> str:\n    return match e:\n        x if n > 0: \"g\"\n        E.A(1): \"one\"\n        E.A(_): \"a\"\n        E.B: \"b\"\n\nfn main():\n    print(f(E.A(1), 1))\n",
+    );
+}
+
+#[test]
+fn bare_name_catch_all_ok_on_option_scrutinee() {
+    ok(
+        "fn f(o: int?) -> str:\n    return match o:\n        whole: \"w{whole}\"\n\nfn main():\n    print(f(Some(1)))\n",
+    );
+}
+
+#[test]
+fn if_expr_success_coerces_at_option_return_sink() {
+    ok("fn opt(n: int) -> int?:\n    (if n > 0: n else: None)\n\nfn main():\n    print(opt(2))\n");
+}
+
+#[test]
+fn list_plus_equals_ok_through_loop_variable() {
+    ok(
+        "fn main():\n    lst := [[1], [2]]\n    for row in lst:\n        row += [0]\n    print(lst)\n",
+    );
+}
+
+#[test]
+fn list_plus_equals_ok_through_const_binding() {
+    ok("fn main():\n    xs: const List[int] = [1]\n    xs += [3]\n    print(xs)\n");
+}
