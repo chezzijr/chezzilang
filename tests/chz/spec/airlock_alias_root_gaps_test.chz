@@ -1,0 +1,50 @@
+# TICKET-105 (docs/gaps.md W12-5 / W12-6) — the airlock carries a module global only when the
+# crossing closure names the global itself. A LOCAL that merely ALIASES the global (`inner := gl[0]`,
+# `xs := g`) is treated as an independent value: the alias's own mutation crosses as its own copy,
+# separate from the module snapshot's copy of the global, so the two diverge across the airlock.
+# CPython threading and Go both see one shared object through the alias.
+import std.concurrency
+
+gl: List[List[int]] = [[1]]
+
+test fn local_alias_of_global_element_is_not_a_second_copy():
+    inner := gl[0]
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            inner.push(2)
+            r.send("{inner} {gl[0]}")
+    got := r.recv()
+    assert got == "[1, 2] [1, 2]", "alias/global diverged: {got}"
+
+g: List[int] = [1]
+
+fn producer_alias(c: Channel[fn() -> str]):
+    xs := g
+    xs.push(2)
+    c.send(fn() -> str: "{g}")
+
+test fn write_through_local_alias_of_global_is_carried():
+    c := Channel[fn() -> str](1)
+    parallel:
+        spawn producer_alias(c)
+    f := c.recv()
+    got := f()
+    assert got == "[1, 2]", "write through local alias lost: {got}"
+
+h: List[int] = [1]
+
+fn add(xs: List[int]):
+    xs.push(2)
+
+fn producer_param(c: Channel[fn() -> str]):
+    add(h)
+    c.send(fn() -> str: "{h}")
+
+test fn write_through_param_alias_of_global_is_carried():
+    c := Channel[fn() -> str](1)
+    parallel:
+        spawn producer_param(c)
+    f := c.recv()
+    got := f()
+    assert got == "[1, 2]", "write through param alias lost: {got}"
