@@ -132,7 +132,7 @@ const RECURSIVE: &str = r#"fn level(n: int, out: Channel[int]):
 fn main():
     out := Channel[int](0)
     parallel:
-        spawn level(30, out)
+        spawn level(DEPTH, out)
         print("depth {out.recv()}")
 main()
 "#;
@@ -246,11 +246,63 @@ const RECSTUCK: &str = r#"fn main():
 main()
 "#;
 
+const DD6: &str = r#"ch := Channel[int](0)
+fn f():
+    spawn:
+        print(ch.recv())
+spawn f()
+"#;
+
+const DD6_FED: &str = r#"fn f(ch: Channel[int]):
+    spawn:
+        print("f got {ch.recv()}")
+
+fn main():
+    ch := Channel[int](0)
+    parallel:
+        spawn f(ch)
+        ch.send(7)
+    print("done")
+main()
+"#;
+
+const RET_FED: &str = r#"fn f(ch: Channel[int]) -> int:
+    spawn:
+        print("f got {ch.recv()}")
+    return 3
+
+fn main():
+    ch := Channel[int](0)
+    parallel:
+        spawn:
+            print("f returned {f(ch)}")
+        ch.send(7)
+    print("done")
+main()
+"#;
+
+const TRY_FED: &str = r#"fn g(ch: Channel[int]) -> Result[int, str]:
+    spawn:
+        print("g got {ch.recv()}")
+    r: Result[int, str] = Err("bail")
+    v := r?
+    return Ok(v)
+
+fn main():
+    ch := Channel[int](0)
+    parallel:
+        spawn:
+            print("g -> {g(ch)}")
+        ch.send(7)
+    print("done")
+main()
+"#;
+
 /// What a completing fixture must print. `Exact` lines are causally ordered. `ThenLast` lines may
 /// print in any order, followed by one causally-last line.
-enum Expect {
-    Exact(&'static [&'static str]),
-    ThenLast(&'static [&'static str], &'static str),
+enum Expect<'a> {
+    Exact(&'a [&'a str]),
+    ThenLast(&'a [&'a str], &'a str),
 }
 
 /// Write `src` to a fresh temp dir and start `chezzi run` on it, piped, at `threads`.
@@ -293,41 +345,73 @@ fn read_pipes(child: &mut std::process::Child) -> (String, String) {
     (out, err)
 }
 
+/// The depth `recursive` runs at, per worker count.
+///
+/// TICKET-112 carries the T>=2 depth cliff: `recursive` faults once its depth exceeds the
+/// granted-slot path, which TICKET-103 leaves alone. Full depth at T=1 only; `worker count - 1` at
+/// T=2/4/8 and at most seven at the default, each measured green (TICKET-103 `## Digest`, round 5).
+fn recursive_depth(threads: Option<&str>) -> usize {
+    match threads {
+        Some("1") => 30,
+        Some(t) => t.parse::<usize>().expect("worker count") - 1,
+        None => std::thread::available_parallelism()
+            .map_or(1, |n| n.get())
+            .saturating_sub(1)
+            .min(7),
+    }
+}
+
 /// TICKET-103 (W12-1, W12-4) — every live nested-nursery shape completes with Go's output at every
-/// worker count: an owner blocked on its own child's channel, a 30-deep recursion of that shape, a
-/// recovered inner deadlock (both roles), and a sibling spawned after the inner nursery opened.
+/// worker count: an owner blocked on its own child's channel, a recursion of that shape (30 deep at
+/// T=1), a fn whose implicit nursery joins at fall-through, `return` or `?` while a caller feeds
+/// its child, a recovered inner deadlock (both roles), and a sibling spawned after the inner
+/// nursery opened.
 ///
 /// Spawns and polls rather than calling `output()`: a hung child never closes its pipes, so
 /// `output()` would wedge this test binary instead of failing it.
 #[test]
-#[ignore = "TICKET-103: red until the parking join lands; plan step 1 removes this attribute"]
 fn fixed_nested_nursery_shapes_complete_at_every_worker_count() {
-    let fixtures: [(&str, &str, Expect); 6] = [
-        ("owner_blocked", OWNER_BLOCKED, Expect::Exact(&["got 2"])),
-        ("recursive", RECURSIVE, Expect::Exact(&["depth 31"])),
-        (
-            "recovered",
-            RECOVERED,
-            Expect::Exact(&["inner err", "task got 1", "done"]),
-        ),
-        (
-            "recovered_swapped",
-            RECOVERED_SWAPPED,
-            Expect::Exact(&["inner err", "task got 1", "done"]),
-        ),
-        (
-            "late_feed",
-            LATE_FEED,
-            Expect::ThenLast(&["inner got 5", "late sibling done"], "done"),
-        ),
-        (
-            "late_recover",
-            LATE_RECOVER,
-            Expect::Exact(&["inner err", "task got 1", "done"]),
-        ),
-    ];
-    for (name, src, expect) in &fixtures {
-        for threads in WORKER_COUNTS {
+    for threads in WORKER_COUNTS {
+        let depth = recursive_depth(threads);
+        let recursive_src = RECURSIVE.replace("DEPTH", &depth.to_string());
+        let recursive_want = format!("depth {}", depth + 1);
+        let recursive_want = [recursive_want.as_str()];
+        let fixtures: [(&str, &str, Expect); 9] = [
+            ("owner_blocked", OWNER_BLOCKED, Expect::Exact(&["got 2"])),
+            ("recursive", &recursive_src, Expect::Exact(&recursive_want)),
+            ("dd6_fed", DD6_FED, Expect::Exact(&["f got 7", "done"])),
+            (
+                "ret_fed",
+                RET_FED,
+                Expect::Exact(&["f got 7", "f returned 3", "done"]),
+            ),
+            (
+                "try_fed",
+                TRY_FED,
+                Expect::Exact(&["g got 7", "g -> Err('bail')", "done"]),
+            ),
+            (
+                "recovered",
+                RECOVERED,
+                Expect::Exact(&["inner err", "task got 1", "done"]),
+            ),
+            (
+                "recovered_swapped",
+                RECOVERED_SWAPPED,
+                Expect::Exact(&["inner err", "task got 1", "done"]),
+            ),
+            (
+                "late_feed",
+                LATE_FEED,
+                Expect::ThenLast(&["inner got 5", "late sibling done"], "done"),
+            ),
+            (
+                "late_recover",
+                LATE_RECOVER,
+                Expect::Exact(&["inner err", "task got 1", "done"]),
+            ),
+        ];
+        for (name, src, expect) in &fixtures {
             for round in 0..10 {
                 let (dir, mut child) = spawn_fixture(name, src, threads, round);
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
@@ -372,7 +456,7 @@ fn fixed_nested_nursery_shapes_complete_at_every_worker_count() {
 /// waits on a channel nobody sends, both still fault `deadlock` at every worker count.
 #[test]
 fn nested_nursery_genuine_deadlocks_still_fault_at_every_worker_count() {
-    for (name, src) in [("nofeed", NOFEED), ("recstuck", RECSTUCK)] {
+    for (name, src) in [("nofeed", NOFEED), ("recstuck", RECSTUCK), ("dd6", DD6)] {
         for threads in WORKER_COUNTS {
             for round in 0..5 {
                 let (dir, mut child) = spawn_fixture(name, src, threads, round);

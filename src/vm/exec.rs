@@ -132,6 +132,7 @@ impl Vm {
             exec_registry: Arc::new(Mutex::new(Vec::new())),
             sched_registry: Arc::new(Mutex::new(Vec::new())), // W7-56
             suspend: None,
+            join_suspend: None,
             wait_suspend: None,
             send_suspend: None,
             send_deposit: None,
@@ -293,6 +294,7 @@ impl Vm {
     /// construction.)
     pub(super) fn paused(&self) -> bool {
         self.suspend.is_some()
+            || self.join_suspend.is_some()
             || self.wait_suspend.is_some()
             || self.send_suspend.is_some()
             || self.yield_now

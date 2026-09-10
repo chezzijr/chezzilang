@@ -928,6 +928,9 @@ pub struct Vm {
     /// VM-global (not part of [`FiberCtx`]): only one fiber runs at a time per shell, so at most one
     /// suspend is pending.
     suspend: Option<GcRef>,
+    /// TICKET-103 — origin scope of the fiber-owned nursery whose `JoinNursery` parked the running
+    /// fiber; consumed by `run_one_fiber` into `Disp::JoinPark`.
+    join_suspend: Option<usize>,
     /// `wait` (§6d) — the multi-channel analogue of `suspend`: the live arm-channel handles a blocking
     /// `wait:` parked the running fiber on. Set by [`Vm::op_wait_poll`]'s M:N snapshot-park, consumed
     /// by [`Vm::run_one_fiber`]'s dispatch (`Disp::WaitPark`), which files the fiber under every key
@@ -3096,7 +3099,6 @@ impl MnSched {
     /// scope is `origin` (`Disp::JoinPark`), freeing the worker. Closes the park gap the way `park`
     /// does: a family that completed between `join_nursery`'s check and this call requeues the
     /// fiber at once, under the same lock `finish` bumps `done` under.
-    #[cfg_attr(not(test), expect(dead_code))]
     fn park_join(&self, mut fiber: Fiber, origin: usize) {
         let mut c = self.lock();
         c.running -= 1;
@@ -4892,6 +4894,9 @@ enum Disp {
     /// netpoller (`MnSched::poll_park_offload`) and is freed. The poller re-enqueues the fiber on OS
     /// readiness (`MnSched::complete_offload`); the rewound op then re-runs.
     PollPark(PollPark),
+    /// TICKET-103 — the fiber reached the `JoinNursery` of a fiber-owned nursery whose family is
+    /// incomplete; filed via `MnSched::park_join`; the op re-executes on resume.
+    JoinPark(usize),
     Finish(TaskOutcome),
 }
 
