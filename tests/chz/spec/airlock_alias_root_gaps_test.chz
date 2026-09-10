@@ -1,21 +1,10 @@
-# TICKET-105 (docs/gaps.md W12-5 / W12-6) — the airlock carries a module global only when the
-# crossing closure names the global itself. A LOCAL that merely ALIASES the global (`inner := gl[0]`,
-# `xs := g`) is treated as an independent value: the alias's own mutation crosses as its own copy,
-# separate from the module snapshot's copy of the global, so the two diverge across the airlock.
-# CPython threading and Go both see one shared object through the alias.
+# TICKET-105 (docs/gaps.md W12-6) — the airlock carries a module global only when the
+# crossing closure names the global itself. A write through a LOCAL ALIAS of the global
+# (`xs := g; xs.push(2)`) or a callee PARAM ALIAS (`fn add(xs): xs.push(2)`) is not carried by
+# a crossing closure: the write reaches no op that names the global, so it is lost across the
+# airlock. CPython threading and Go both see one shared object through the alias.
+# W12-5's identity test moved to TICKET-111 (source at 40b9a276).
 import std.concurrency
-
-gl: List[List[int]] = [[1]]
-
-test fn local_alias_of_global_element_is_not_a_second_copy():
-    inner := gl[0]
-    r := Channel[str](1)
-    parallel:
-        spawn:
-            inner.push(2)
-            r.send("{inner} {gl[0]}")
-    got := r.recv()
-    assert got == "[1, 2] [1, 2]", "alias/global diverged: {got}"
 
 g: List[int] = [1]
 
