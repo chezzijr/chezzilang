@@ -25894,7 +25894,9 @@ fn bare_unpinned_generic_fn_value_rejected_at_the_binding() {
     .collect::<Vec<_>>()
     .join(" | ");
     assert!(
-        joined.contains("fn(<T>, int = ) -> str") || joined.contains("fn(<T>, int) -> str"),
+        joined.contains("fn(<T>, int = ) -> str")
+            || joined.contains("fn(<T>, int) -> str")
+            || joined.contains("fn(<T>, int = …) -> str"),
         "rendered signature: {joined}"
     );
 }
@@ -31976,4 +31978,14 @@ fn a_type_param_shadowing_a_struct_keeps_the_protocol_arity() {
 #[test]
 fn a_fn_value_in_a_tuple_slot_is_callable_by_member_syntax() {
     ok_desugared("fn dbl(x: int) -> int:\n    return x * 2\nt := (dbl, 1)\nprint(t.0(3))\n");
+}
+
+/// TICKET-108 / W12-16(d) -- an fn-type diagnostic must show which parameter is omittable, so two
+/// distinct fn types whose only difference is one optional argument don't print identically.
+#[test]
+fn fn_type_display_marks_an_omittable_parameter() {
+    rejects(
+        "fn a(x: int = 1) -> int:\n    return x\nfn b(x: int) -> int:\n    return x\nxs := [a, b]\n",
+        "list elements differ: fn(int = …) -> int vs fn(int) -> int",
+    );
 }

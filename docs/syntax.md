@@ -1273,7 +1273,9 @@ reverse is fine — a defaulted function is strictly more permissive, so it flow
 `fn(int) -> int` slot. Named arguments through a value evaluate in **parameter-declaration order**, the
 same as a direct named call, and work in `defer`/`spawn` position too (`defer d(name="Zoe")`). Resolution
 is fully static (the checker rewrites the keyword call to a positional one; the runtime `Op::Call` /
-`DeferCall` / `SpawnCall` stay positional), so the VM produce identical output.
+`DeferCall` / `SpawnCall` stay positional), so the VM produce identical output. Diagnostics print an
+omittable parameter as `int = …`, so `[a, b]` over those two functions reports
+`fn(int = …) -> int vs fn(int) -> int`.
 
 A function type's **parameter types** are strictly **invariant** — neither covariant nor
 contravariant. `h: fn(Any) -> Dog = idd` over `fn idd(d: Dog) -> Dog` is a type error (covariance

@@ -291,7 +291,9 @@ pub type SumSeedTable = HashMap<CarrierKey, Option<SumSeed>>;
 /// Surface-only parameter labels on a function type (Swift SE-0111 keyword arguments through a
 /// function VALUE). They ride PARALLEL to a `Ty::Func`'s `params`, but participate in NO type
 /// identity: two function types differing only in labels are the SAME type (mutually assignable,
-/// unifiable, protocol-conforming, identically displayed). This wrapper's `PartialEq` is therefore
+/// unifiable, protocol-conforming). Display is the one exception: it marks each parameter at or past
+/// `min_or` as omittable (`int = …`), so two types that differ only in optional arity print
+/// differently even though they remain the same type everywhere else. This wrapper's `PartialEq` is therefore
 /// EQUALITY-NEUTRAL (always `true`), so the derived `PartialEq` on `Ty` transparently ignores labels
 /// — no hand-written `Ty` equality, zero regression to HOF/callback/protocol/subtyping code. The
 /// labels are consulted ONLY when resolving a value call that carries keyword arguments
@@ -385,7 +387,7 @@ pub enum Ty {
         /// Surface-only parameter labels (parallel to `params`); equality-neutral (see [`FnLabels`]).
         /// Built with the fn's/closure's param names (or an annotation's optional labels) so a value
         /// call can resolve `g(name="Bob")` to a positional slot. IGNORED by `compatible`/`unify`/
-        /// `Display`/`sendable`.
+        /// `sendable`. Display marks an omittable parameter (`int = …`) using `min_or`.
         labels: FnLabels,
     },
     /// A first-class UNIVERSE builtin FUNCTION value (`print`/`ord`/`chr`/`panic`) used in value
@@ -767,7 +769,25 @@ impl fmt::Display for Ty {
             }
             Ty::Param(n) => write!(f, "{n}"),
             Ty::Module(n) => write!(f, "module {n}"),
-            Ty::Func { params, ret, .. } | Ty::BuiltinFn { params, ret } => {
+            Ty::Func {
+                params,
+                ret,
+                labels,
+            } => {
+                write!(f, "fn(")?;
+                let min = labels.min_or(params.len());
+                for (i, p) in params.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{p}")?;
+                    if i >= min {
+                        write!(f, " = …")?;
+                    }
+                }
+                write!(f, ") -> {ret}")
+            }
+            Ty::BuiltinFn { params, ret } => {
                 write!(f, "fn(")?;
                 for (i, p) in params.iter().enumerate() {
                     if i > 0 {
