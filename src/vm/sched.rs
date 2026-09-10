@@ -429,6 +429,19 @@ impl Vm {
     }
 
     pub(super) fn join_nursery(&mut self) -> Result<(), RuntimeError> {
+        // TICKET-103 — a fiber-owned nursery's owner PARKS here while its family runs, and re-runs
+        // this op once `MnSched::park_join`'s wake requeues it. Checked before the first pop below,
+        // which the re-run must still find. Under `native_reentry > 0` the fiber cannot park (its
+        // Rust stack holds the native frame), so `join_fiber_owned_nursery` runs the loop inline.
+        if self.native_reentry == 0
+            && let Some(Some(scope)) = self.eager_scheds.last()
+            && scope.fiber_owned
+            && !scope.sched.lock().family_done(scope.scope)
+        {
+            self.frames.last_mut().unwrap().ip -= 1;
+            self.join_suspend = Some(scope.scope);
+            return Ok(());
+        }
         // Consume this nursery's tasks (FIFO). Popping the entry now (as the old drain did at the
         // end) keeps the parent's `Handler::nursery_len` accounting correct on a later fault.
         self.nursery_defer_floors.pop(); // keep the parallel floor stack in lockstep with `nurseries`
@@ -1274,11 +1287,16 @@ impl Vm {
     /// exists there). No `nursery_party_guard`: the owner is a fiber, never a counted party. No
     /// `blocked_bodies_guard`: the body is a counted fiber, and `awaiting_builder` on its scope would
     /// veto a genuine deadlock.
+    ///
+    /// With `native_reentry == 0` the family is complete here, because `join_nursery` parked the
+    /// fiber otherwise. Under `native_reentry > 0` the fiber cannot park (its Rust stack holds the
+    /// native frame, the rule `park_recv`'s caller follows), so the inline loop stays for that shape
+    /// only.
     fn join_fiber_owned_nursery(&mut self, scope: EagerScope) -> Result<(), RuntimeError> {
         let sids = scope.sids();
-        let wid = self.wid;
-        let mut shell = self.spawn_shell(&scope.sched, &scope.cancel);
-        {
+        if !scope.sched.lock().family_done(scope.scope) {
+            let wid = self.wid;
+            let mut shell = self.spawn_shell(&scope.sched, &scope.cancel);
             let _owner = self.blocked_owner_guard(&scope.sched, Some(scope.scope));
             for &sid in &sids {
                 shell.mn_worker_loop(&scope.sched, wid, sid);
@@ -1299,6 +1317,9 @@ impl Vm {
     /// token, requeue its parked and socket-parked fibers, then settle them inline exactly as
     /// [`Vm::join_fiber_owned_nursery`] does (same guards, same ungated loop). The body's escape
     /// error is what propagates, so a task fault here is swallowed.
+    ///
+    /// It keeps the inline loop: it runs inside `drain_escaped_nursery`, where no op can be
+    /// rewound, so the owner cannot park. Residual in the ticket's `## Decisions` (TICKET-103).
     fn abort_fiber_owned_nursery(&mut self, scope: EagerScope) {
         let sids = scope.sids();
         scope.sched.trip_scope_cancel(scope.scope);
@@ -2184,6 +2205,8 @@ impl Vm {
                 // D6 — the fiber's socket op `WouldBlock`ed; hand it + the fd to the netpoller (frees
                 // this worker). The poller re-enqueues it via `complete_offload` on OS readiness.
                 Disp::PollPark(pp) => sched.poll_park_offload(fiber, pp),
+                // TICKET-103 — file the owner until its nursery's family completes.
+                Disp::JoinPark(origin) => sched.park_join(fiber, origin),
                 Disp::Finish(outcome) => {
                     // `finish` reports whether the STORED outcome aborts: it may itself turn a `Done`
                     // into a hard-halt over-memory `Fault` (W7-26r), which needs the same sibling
@@ -2387,6 +2410,9 @@ impl Vm {
                 // worker). Mutually exclusive with `offload`/`suspend`/`yield_now` — the socket op
                 // returns up via the `paused()` gate before any other safepoint runs.
                 Disp::PollPark(self.poll_park.take().unwrap())
+            } else if res.is_ok() && self.join_suspend.is_some() {
+                // TICKET-103 — the fiber parked at a fiber-owned nursery's `JoinNursery`.
+                Disp::JoinPark(self.join_suspend.take().unwrap())
             } else if res.is_ok() && self.suspend.is_some() {
                 let h = self.suspend.take().unwrap();
                 // Capture the park key + the channel `Arc` WHILE the fiber heap is live (`h` is a
