@@ -12608,3 +12608,189 @@ Mechanism: `mutates_receiver` (`src/checker/mod.rs:3720`) covers no user method 
 names the upgrade path as a self-mutation summary per method. `Op::TouchGlobalSlotByName` deliberately
 refuses to mark a struct so a same-named user method (`add`, `insert`, …) cannot over-mark a slot it
 never touched; that refusal is what leaves this case uncovered. Fixing it is its own ticket.
+
+## Session log — 2026-09-10 (bug-hunt wave 12: 7 domains, ~500 hand-built programs, 22 findings — 3 P0/P1 silent-wrong or false-fault, rest over-rejects/papercuts)
+
+Seven agents over disjoint domains (generics/protocols, enum/match/numeric, airlock/generators,
+scheduler/channel/cancel, Python-feel surface, modules/CLI/host IO, stdlib/FFI). Every row below was
+re-verified by the judging loop on the release binary at `3f1300ab`, at `CHEZZI_THREADS=1/2/default`
+(the scheduler rows sampled 5–10× per count). Oracle per row: a RUN Go 1.27 / CPython 3.14 reference,
+or the worker-count differential, or a quoted doc sentence. `tests/chz` at `CHEZZI_THREADS=1` (ungated,
+see wave 11's meta-finding) was also run: 861/861 green.
+
+**Rows, ranked.** Repros for P0/P1 are inline (the hunt's scratch dir is tmpfs). No ticket filed yet.
+
+| row | P | domain | one line | ticket |
+|---|---|---|---|---|
+| **W12-1** | P0 | scheduler | A nested nursery whose OWNER body blocks on a channel op is falsely `deadlock`-faulted: at `CHEZZI_THREADS=1` at ANY depth, and at every worker count once nesting depth exceeds the pool (T=2 → depth 3, T=4 → depth 5, T=8 → 9, 28 → 13). Go `GOMAXPROCS=1` completes (`got 2`, `depth 31`). Repro below | — |
+| **W12-2** | P0 | enum | `List[E].sort()` on an enum with a user `compare` type-checks (`Comparable` gate is real — an enum without `compare` is rejected) and returns the list UNSORTED at rc=0: `[Hi(3), Lo, Hi(1)]`. Operators `<` on the same enum work; a struct wrapping it sorts. Rust `Vec<Lv>.sort()` with `impl Ord` → `[Lo, Hi(1), Hi(3)]`. Repro below | — |
+| **W12-3** | P1 | enum | Same missing enum arm, other symptom: `xs.min()`/`max()`/`min_by`/`sort_by_key` on that enum → `runtime error: sort_by_key keys are not comparable: enum vs enum` (message names `sort_by_key` for a `min()` call); `std.cmp.max` on it works | — |
+| **W12-4** | P1 | scheduler | After a task RECOVERS a genuine inner-nursery `deadlock` at `CHEZZI_THREADS=1`, the enclosing nursery is poisoned: a later rendezvous with a sibling either hangs forever (task `send`s, sibling `recv`s: rc=124 10/10) or completes and the join then reports a FALSE `deadlock` (`task got 1` printed, then `deadlock: every task in this parallel: block is blocked`). T=2/4/default rc=0 10/10. Repro below. Clean neighbours: same shape inside an Executor job, `recover:` outside the outer nursery, recovered `all channels closed` | — |
+| **W12-5** | P1 | airlock | A captured LOCAL that aliases (part of) a module global crosses as a copy SEPARATE from the module snapshot's copy: `inner := gl[0]` then in-task `inner.push(2)` → `"{inner} {gl[0]}"` prints `[1, 2] [1]`; CPython threading `[1, 2] [1, 2]`, Go `[1 2] [1 2]`. Same for whole-global alias, a `spawn f(gl[0])` ARG vs callee's `gl[0]`, a sent closure, and a module-global generator (two live copies: `Some(1) Some(1)`). `docs/concurrency.md:1583` says one serialization spans captures + module snapshot; W7-4c unified the CELL memo (`QueuedTask::cell_ids`) but TICKET-100's `WireMemo::nodes` is per-serialization | — |
+| **W12-6** | P1 | airlock | A module global mutated through a local ALIAS (`xs := g; xs.push(2)`) or a callee PARAMETER (`fn add(xs): xs.push(2)`; `add(g)`) or a struct field via alias (`h := g; h.n = 5`) is not carried by a crossing closure — `[1]`/`[1]`/`1` where CPython prints `[1, 2]`/`[1, 2]`/`5`. Sibling of W11-5's METHOD residual, distinct sub-shape (TICKET-097's `global_root_slot` marks only when the textual root is the global ident). Controls that DO carry: `g.push`, `g[i]=`, `g.a.b=`, `g += `, `g.sort()`, write via called fn | — |
+| **W12-7** | P2 | checker | Protocol-typed `Map`/`Set` key refused at every LITERAL key position (`m[A(1)] = …` → `map key must be Keyed, found A`; `s: Set[Keyed] = {A(1)}`; `h: Map[Hashable,int]; h[1]`) while the same key through a typed local `k: Keyed = A(1)` is accepted and runs. Go/CPython accept. `List[Keyed] = [A(1)]` widens — the index-key/set-element check uses equality, not `assignable` | — |
+| **W12-8** | P2 | checker | `Iterable[T]`/`Iterator[T]` bound recovery unifies only a BARE param: `[S: Iterable[(A, B)], A, B]`, `Iterable[Option[A]]`, `Iterator[List[A]]` all fail `iterator element type (int, str) does not match the declared element type (A, B)`; result annotation does not rescue it. Doc §7b promises recovery "by unifying"; Rust `I: IntoIterator<Item=(A,B)>` infers | — |
+| **W12-9** | P2 | checker | A USER generic struct/enum ctor ignores the expected type: `b: Box[Named] = Box(A())` / `e: E[Named] = E.V(A())` / `f(Box(1))` for `fn f(x: Box[Any])` rejected, while builtin `o: Option[Named] = Some(A())` is accepted; turbofish `Box[Named](A())` works. The struct/enum-ctor arm never threads the hint TICKET-094 gave generic free fns | — |
+| **W12-10** | P2 | desugar | Two structs each with a static `fn new(n: int = 1)` → BOTH `A.new()`/`B.new()` fail `'new' expects 1 argument(s), got 0` (one struct alone: fine; the INSTANCE twin resolves). `Desugar::receiver_struct_ty` (`src/desugar/mod.rs:~1779`) has no arm for a bare struct-NAME head, so the call falls into the name-keyed table and bails on the collision. The Rust `fn new` idiom | — |
+| **W12-11** | P2 | match | A bare-name catch-all pattern is rejected on an enum/Option scrutinee (`x if n > 0:` → `'x' is not a variant of E`; `whole:` → `'whole' is not a variant of Option` + `unknown name`) while the identical shape on int/tuple/struct is accepted; doc §8 "a bare name binds the WHOLE value (catch-all)". Chezzi mandates `E.Variant`, so a bare name can never be a variant | — |
+| **W12-12** | P2 | tooling | Checker AND compiler are exponential (~1.8×/level) in nested-`fn`-DECLARATION depth: `check` 16-deep 0.23 s, 20-deep 3.05 s, 30-deep >60 s; `run` 20-deep 9.4 s. Nested closures/if/while ×20 ≤7 ms; `ast` 18 ms. CPython compiles a 50-deep `def` chain in 0.02 s | — |
+| **W12-13** | P3 | Result | Success-coercion (TICKET-025) does not reach a mixed `v`/`None` or `v`/`Err` `if`/`match` EXPRESSION at a `T?`/`T!E` sink: `fn opt(n) -> int?: (if n > 0: n else: None)` → `branches have incompatible types: int and Option[?]`; statement forms and all-`v` branches coerce. Doc §8 + §3 sentences imply it should | — |
+| **W12-14** | P3 | `+=` | `+=` on a `List` is the documented in-place extend, but (a) `xs += [3]` on a `const List[int]` → `cannot reassign const binding` (`push` accepted) and (b) `for row in lst: row += [0]` → `cannot assign to loop variable 'row' (loop variables are rebound each iteration)` — factually wrong for a List; CPython `[[1, 0], [2, 0]]`. `check_assign` fires `is_loop_var`/const on every `AssignOp` before looking at the operand type | — |
+| **W12-15** | P3 | checker | Untyped int + float constants do not adapt when the sink is a generic `T`: `mx(1, 2.5)` with `[T: Comparable]` → `has type float, expected int`; `[1.5].fold(0, fn(float,float)->float)` likewise. Go `Max(1, 2.5)` → `2.5`; doc §3 grants the widen in `[1, 2.5]` | — |
+| **W12-16** | P3 | checker | Five smaller over-rejects/limits, each verified: a fn value in a tuple slot cannot be called (`(t.0)(3)` → `has no method '0'`; struct field/list/map element fine); `for a, b in gen()` / `.iter()` refuses tuple destructuring a list-of-tuples allows (`a generator iterator binds a single loop variable`); `type N = Named` is `unknown protocol 'N'` in a bound though fine as a value type; `[T: Add]` refuses `str` although `"a" + "b"` is legal (doc-consistent — decision needed); fn-type diagnostics never print optional arity (`fn(int) -> int vs fn(int) -> int`); `S[str]("x", n=2)` (turbofish + named arg) and `h.f(x=4)` through a labelled fn-typed field are undocumented `resolve error`s | — |
+| **W12-17** | P3 | grammar | `a, b := 1, 2` is `expected end of line, found ','` while `x, y := (5, 6)` and `a, b = b, a` work. Matches `grammar.bnf` `<identList> WALRUS <expr>` as written; Go/CPython both accept. Affordance | — |
+| **W12-18** | P3 | numeric | `int("9223372036854775808")` / `.parse_int()` say `cannot parse` for a well-formed out-of-range numeral — the diagnosis W11-11 fixed for `math.parse_int_base` only (`overflows i64`). Also: `to_int`/`to_float`/`parse_int_base` reject non-ASCII decimal digits (`"١٢"`, `"１２"`) that CPython `int()` accepts; Go rejects — undocumented either way | — |
+| **W12-19** | P3 | strings | A `#` inside an interpolation hole silently starts a comment: `print("{1 # c}")` → `1` rc=0 (tail of the hole vanishes, no diagnostic); CPython `SyntaxError`. Doc §10 says nothing about `#` in a hole | — |
+| **W12-20** | P3 | stdlib | Four edge drifts: `json.stringify` accepts depth 2001 that `json.parse` rejects (doc: cap on "both", and stringify output should parse); `csv.parse("a\rb")` → `[['a'], ['b']]` (doc: CRLF or LF; Go keeps `a\rb` as one field, CPython errors); `regex.replace_all(…, r"${}")` Errs naming the group `'$'` where Go keeps `${}` literal (the `${1` / `$ ` neighbours match Go); `duration.parse("-9223372036854775808ms")` → `Err(out of range)` though `to_string()` of that value round-trips (magnitude parsed unsigned before the sign) | — |
+| **W12-21** | P3 | tooling/doc | `chezzi ast` is O(n²) in a left-nested chain (500-term `and` chain: 24 s / 20 MB; `check` 19 ms) — derived `{:#?}` indents every line by depth. `import std.math` twice is `'math' is already imported` (Go-style, defensible) but doc §12 says import semantics "are Python's" — undocumented. Doc `docs/stdlib.md` §std.io claims a closed stdout fd (`>&-`) prints `cannot write stdout`; measured rc=0, nothing printed — Rust reopens fd 1 as `/dev/null` at startup, CPython behaves the same, so the DOC sentence is the defect | — |
+| **W12-22** | P3 | diagnostics | `h := Cnt.zero` (static method as a value) on an IMPORTED struct says `unknown type 'Cnt'; import it from lib.types` — the suggested line is line 1 of the file; `types.Cnt.zero` says `module 'types' has no member 'Cnt'` though `types.Cnt.zero()` works. The instance-method spelling already has the right "methods are not values" message | — |
+
+**Residual documented-vs-observed (safe direction, no row):** a live generator reached TWICE in one
+crossing (`a := g; spawn: a.next(); g.next()`, or a generator nested in another generator's frame
+passed alongside it) faults `a generator cannot be sent across tasks twice in one crossing` — a
+deliberate TICKET-100 choice (recorded in `PROGRESS.md` and `src/vm/sched.rs`) but absent from
+`docs/concurrency.md:1637`'s "crosses any airlock as data as an independent deep copy". And the
+"cycle threaded through a generator's parked frame" fault (`docs/concurrency.md:1655`) fires only when
+the generator itself is the re-entered node; a container-rooted cycle round-trips correctly. Both are
+doc drift to fix in place.
+
+### W12-1 repro (P0)
+
+    fn main():
+        out := Channel[int](0)
+        parallel:
+            spawn:
+                inner := Channel[int](0)
+                parallel:
+                    spawn:
+                        inner.send(1)
+                    out.send(inner.recv() + 1)
+            print("got {out.recv()}")
+    main()
+
+`CHEZZI_THREADS=1`, 5/5: `runtime error (…:10:21): recv on an empty channel: deadlock — no runnable task
+can send.` rc=1. T=2/4/default 5/5: `got 2`. Go `GOMAXPROCS=1` (same shape, unbuffered): `got 2`. The
+recursive form (`level(n)` spawns `level(n-1)` on `inner`, then `out.send(inner.recv()+1)`) faults at
+T=4 for depth 5 and completes for depth 4 — the cliff is the pool size. Also fires with either channel
+buffered, with the owner SENDING to its child, with no outer blocker, and with the owner in a `wait:`
+(the timer arm fires first, proving the child is starved, not stuck). Mechanism guess: a nursery entered
+inside a spawned task runs on the enclosing sched with the owner fiber's thread as its worker (TICKET-095's
+lazy path at T=1; the eager path pins one worker per blocked owner at T≥2); when that owner blocks on a
+CHANNEL op (not the join) its child is never driven, and `quiesced_core` reads the starved child as dead.
+`parked-is-not-stuck` applies: the verdict must be built from what is impossible, and here a sender exists.
+
+### W12-2 repro (P0)
+
+    enum Lv:
+        Lo
+        Hi(int)
+        fn compare(self, o: Lv) -> int:
+            return self.rank() - o.rank()
+        fn rank(self) -> int:
+            return match self:
+                Lv.Lo: 0
+                Lv.Hi(n): n
+    xs := [Lv.Hi(3), Lv.Lo, Lv.Hi(1)]
+    xs.sort()
+    print(xs)
+    print(xs.min(), xs.max())
+
+`check`: ok. `run`: `[Hi(3), Lo, Hi(1)]` then `runtime error: sort_by_key keys are not comparable: enum vs enum`.
+Same through `fn sorted[T: Comparable](xs: List[T])`. Mechanism guess: the native sort/min comparator
+dispatches a user `compare` for `Obj::Struct` only; an enum element hits a no-op arm (sort) or the
+"not comparable" arm (min/max/sort_by_key).
+
+### W12-4 repro (P1)
+
+    fn main():
+        ch := Channel[int](0)
+        out := Channel[int](0)
+        parallel:
+            spawn:
+                r := recover:
+                    parallel:
+                        spawn:
+                            ch.recv()
+                match r:
+                    Ok(_): print("inner ok")
+                    Err(e): print("inner err")
+                print("task got {out.recv()}")
+            spawn:
+                out.send(1)
+        print("done")
+    main()
+
+`CHEZZI_THREADS=1`, 5/5: `inner err` / `task got 1` / `runtime error (…:4:5): deadlock: every task in this
+parallel: block is blocked …` rc=1 — the exchange SUCCEEDED and the join still faulted. Swap the roles
+(task `send`s, sibling `recv`s): T=1 hangs, rc=124. T=2+: `inner err` / `task got 1` / `done`. Likely the
+same seam as W12-1: the T=1 nested-nursery deadlock verdict leaves the enclosing sched's
+parked/`blocked_owners` bookkeeping stale after the fault is recovered.
+
+### W12-5 / W12-6 repros (P1)
+
+    gl := [[1]]                          # W12-5
+    fn main():
+        inner := gl[0]
+        r := Channel[str](1)
+        parallel:
+            spawn:
+                inner.push(2)
+                r.send("{inner} {gl[0]}")
+        print(r.recv())
+    main()
+
+Chezzi `[1, 2] [1]` at every worker count; CPython threading `[1, 2] [1, 2]`; Go `[1 2] [1 2]`.
+
+    g := [1]                             # W12-6
+    c := Channel[fn() -> str](1)
+    fn producer():
+        xs := g
+        xs.push(2)
+        c.send(fn() -> str: "{g}")
+    fn main():
+        parallel:
+            spawn producer()
+        print(c.recv()())
+    main()
+
+Chezzi `[1]`; CPython `[1, 2]`. Also `fn add(xs: List[int]): xs.push(2)` / `add(g)` → `[1]`.
+
+### What the wave did NOT find — the clean columns
+
+- **No worker-count divergence, hang, panic or `internal:` abort anywhere outside the scheduler rows**
+  (~500 programs at T=1/2/default). Fn-type invariance (TICKET-093) holds at every neighbour position
+  (nested fn types, enum payload, generic field, Map/Channel/tuple/Option slots, param default,
+  protocol witness). **No int-under-float hole found** across generic identity/first-of/get-or,
+  comprehension, `Some(1)`/`Ok(1)`, `float? = 4`, erased setters, closures, fn-typed fields.
+- **M24 witness passing** clean in every forwarding position incl. `defer f(x)`, `spawn f(x)`,
+  cross-module in all three import spellings; object-safety refusals correct.
+- **Deadlock predicate** correct on 20+ completing shapes (parent→grandchild, sibling eager nurseries,
+  three-way ring, Executor⇄nursery both ways, `Shared.update` doing `recv`, stdin-blocked peer, 200-way
+  fan-in, 2000-iteration rendezvous) and 12 must-fault shapes — every fault in ms, never a hang —
+  EXCEPT the owner-blocked-on-channel family (W12-1) and the recovered-deadlock aftermath (W12-4).
+- **Channels / `wait:` / `Executor` / `Shared` / `std.cancel` / `defer` / `recover:`** byte-identical to
+  Go across 60+ shapes (first-fault-wins, cancel of a parked full-`send`, `os.exit` from every position,
+  `--timeout`/`--max-heap` reaching a blocked child, token crossing the airlock then `derive()`d).
+- **Airlock**: closures by value, TICKET-097 carry for every root-named write shape, TICKET-100 DAG/cycle
+  identity (20 000-way alias list < 5 s), cursors/generators with position, `Shared` get-is-a-copy,
+  struct Map keys snapshotted — all correct.
+- **Python-feel**: 300-float format differential byte-identical; unicode case/trim/slice; repr escapes;
+  every slice/index form; comprehension scoping; `+=` aliasing at 7 neighbours of W8-27; compound-target
+  single evaluation; i64 edge arithmetic; mixed comparison above 2^53; `range` edges; List/Map/Set method
+  edges — all CPython-identical bar the rows above.
+- **stdlib**: ~55 hand JSON edges, 22 CSV, RE2 empty-match/unicode, 100 math cases, datetime year-0 and
+  i64 epochs, duration Go-loose forms, collections/bisect/iter degenerate inputs, encoding/crypto block
+  boundaries, path byte-exactness, fs/io/os error paths, process 2 MB stderr no-deadlock, seeded rand
+  across worker counts — clean bar W12-20.
+- **FFI** (40 probes on a custom `.so`): struct-by-value padding, width wraps, 9000-deep extern↔callback
+  recursion (20 000 → clean fault), a callback opening a nursery at T=1/2/default, embedded NUL, null
+  loads — zero segfaults.
+- **Modules / CLI / host IO**: diamond and symlinked imports run top-level once; cycles diagnosed;
+  nested `chezzi.toml` boundary; pure-type modules through both import forms with no `bind_import`
+  fault; 60 malformed inputs to `tokens`/`ast`/`check`/`run` — zero panics; `| head -1` terminates from
+  loop/spawn/Executor/defer/generator/test; `--errors=json` shape on every error class.
+
+**Meta-finding, third wave running.** Zero findings from generated inputs; every row is a hand-built
+pairing (enum × sort, alias × airlock, recover × deadlock verdict, owner × channel-block, static default ×
+two structs). Two of the three worst rows sit in the code that changed LAST (the deadlock predicate,
+TICKET-095/099/101, four days old) — fresh code is the productive place to point the next wave.
