@@ -2461,7 +2461,7 @@ impl Vm {
         Ok(out)
     }
 
-    /// Natural order over two `sort_by_key` keys: a Comparable struct key dispatches to its
+    /// Natural order over two `sort_by_key` keys: a Comparable struct or enum key dispatches to its
     /// `compare`; scalar keys (int/float/str) use the built-in [`Vm::compare`]. The checker has
     /// verified the key type is orderable.
     pub(super) fn order_key(
@@ -2471,8 +2471,8 @@ impl Vm {
         span: Span,
     ) -> Result<std::cmp::Ordering, RuntimeError> {
         if let (Some(ha), Some(hb)) = (a.as_obj(), b.as_obj())
-            && matches!(self.heap.get(ha), Obj::Struct { .. })
-            && matches!(self.heap.get(hb), Obj::Struct { .. })
+            && matches!(self.heap.get(ha), Obj::Struct { .. } | Obj::Enum { .. })
+            && matches!(self.heap.get(hb), Obj::Struct { .. } | Obj::Enum { .. })
         {
             return self.struct_compare(a, b, span);
         }
@@ -3257,14 +3257,14 @@ impl Vm {
                     "sort" => {
                         self.arity_err("sort", args, 0, span)?;
                         // In place, ascending. Checker guarantees a homogeneous orderable element type.
-                        // A list of Comparable structs orders via each struct's `compare` (engine
+                        // A list of Comparable structs/enums orders via each one's `compare` (engine
                         // re-entry, so a merge sort that holds `&mut self`); primitives use the faster
                         // `value_order`. Str elements live on the heap, so `value_order` needs
                         // `&self.heap` — clone the elements out, sort (no alloc/closure → no GC for the
                         // primitive path), then write back.
-                        let is_struct = matches!(items.first().and_then(|v| v.as_obj()), Some(hh) if matches!(self.heap.get(hh), Obj::Struct { .. }));
-                        if is_struct {
-                            // Struct compare re-enters the VM (may GC) → rooted, index-based sort.
+                        let user_compare = matches!(items.first().and_then(|v| v.as_obj()), Some(hh) if matches!(self.heap.get(hh), Obj::Struct { .. } | Obj::Enum { .. }));
+                        if user_compare {
+                            // A user compare (struct or enum) re-enters the VM (may GC) → rooted, index-based sort.
                             return self.list_sort_structs(h, span);
                         }
                         let mut elems = items.clone();

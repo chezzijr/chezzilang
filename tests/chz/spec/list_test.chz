@@ -135,6 +135,24 @@ test fn sort_min_max_comparable_enum():
         Some(r): assert r == Rank.High
         None: assert false, "max of a non-empty list is Some"
 
+# TICKET-104 / DEC-015: an enum sort re-enters user code too, so a mutating compare must fault.
+w104_es := [Rank104M.B, Rank104M.A]
+
+enum Rank104M:
+    A
+    B
+    fn compare(self, o: Rank104M) -> int:
+        w104_es.push(Rank104M.A)
+        return 0
+    fn eq(self, o: Rank104M) -> bool:
+        return true
+
+test fn sort_rejects_mutation_from_an_enum_compare():
+    r := recover: w104_es.sort()
+    match r:
+        Ok(_): assert false, "enum sort with a mutating compare did not fault"
+        Err(e): assert e.message().contains("list modified during 'sort'"), e.message()
+
 # ---- unique / dedup ----
 
 test fn unique_dedup():

@@ -1,0 +1,89 @@
+# TICKET-104 (docs/gaps.md W12-2, W12-3): every consumer that orders by `compare` must treat a
+# Comparable ENUM exactly like its Comparable STRUCT twin. The expected orders are Rust's: a
+# `Vec<Lv>` with `impl Ord` sorts to `[Lo, Hi(1), Hi(3)]`, and `iter().min()` is `Some(Lo)`.
+import std.cmp
+import std.bisect
+import std.collections as col
+
+enum Lv:
+    Lo
+    Hi(int)
+    fn compare(self, o: Lv) -> int:
+        return self.rank() - o.rank()
+    fn rank(self) -> int:
+        return match self:
+            Lv.Lo: 0
+            Lv.Hi(n): n
+
+struct LvS:
+    n: int
+    fn compare(self, o: LvS) -> int:
+        return self.n - o.n
+
+fn es() -> List[Lv]:
+    return [Lv.Hi(3), Lv.Lo, Lv.Hi(1)]
+
+fn ss() -> List[LvS]:
+    return [LvS(3), LvS(0), LvS(1)]
+
+fn ranks(xs: List[Lv]) -> List[int]:
+    return xs.map(fn(l: Lv) -> int: l.rank())
+
+fn sranks(xs: List[LvS]) -> List[int]:
+    return xs.map(fn(s: LvS) -> int: s.n)
+
+fn sorted[T: Comparable](xs: List[T]) -> List[T]:
+    xs.sort()
+    return xs
+
+test fn sort_orders_an_enum_like_its_struct_twin():
+    e := es()
+    e.sort()
+    s := ss()
+    s.sort()
+    assert ranks(e) == [0, 1, 3], "sort() must use the enum's compare()"
+    assert ranks(e) == sranks(s)
+
+test fn sort_through_a_comparable_bound_orders_an_enum():
+    assert ranks(sorted(es())) == [0, 1, 3]
+    assert ranks(sorted(es())) == sranks(sorted(ss()))
+
+test fn min_max_order_an_enum_like_its_struct_twin():
+    assert (es().min() ?? Lv.Hi(99)).rank() == 0
+    assert (es().max() ?? Lv.Lo).rank() == 3
+    assert (es().min() ?? Lv.Hi(99)).rank() == (ss().min() ?? LvS(99)).n
+    assert (es().max() ?? Lv.Lo).rank() == (ss().max() ?? LvS(0)).n
+    m := {"a": Lv.Hi(3), "b": Lv.Lo, "c": Lv.Hi(1)}
+    assert (m.values().min() ?? Lv.Hi(99)).rank() == 0
+
+test fn keyed_orderings_accept_an_enum_key():
+    ident := fn(l: Lv) -> Lv: l
+    assert (es().min_by(ident) ?? Lv.Hi(99)).rank() == 0
+    assert (es().max_by(ident) ?? Lv.Lo).rank() == 3
+    e := es()
+    e.sort_by_key(ident)
+    assert ranks(e) == [0, 1, 3], "sort_by_key must use the enum key's compare()"
+
+test fn std_cmp_orders_an_enum_like_its_struct_twin():
+    assert cmp.min(Lv.Hi(3), Lv.Hi(1)).rank() == cmp.min(LvS(3), LvS(1)).n
+    assert cmp.max(Lv.Lo, Lv.Hi(1)).rank() == cmp.max(LvS(0), LvS(1)).n
+    assert cmp.clamp(Lv.Hi(5), Lv.Lo, Lv.Hi(3)).rank() == cmp.clamp(LvS(5), LvS(0), LvS(3)).n
+
+test fn std_bisect_orders_an_enum_like_its_struct_twin():
+    e := [Lv.Lo, Lv.Hi(1), Lv.Hi(3)]
+    s := [LvS(0), LvS(1), LvS(3)]
+    assert bisect.bisect_left(e, Lv.Hi(1)) == bisect.bisect_left(s, LvS(1))
+    assert bisect.bisect_right(e, Lv.Hi(1)) == bisect.bisect_right(s, LvS(1))
+    bisect.insort_right(e, Lv.Hi(2))
+    assert ranks(e) == [0, 1, 2, 3]
+
+test fn std_collections_heap_orders_an_enum_like_its_struct_twin():
+    h := col.from_list(es(), fn(a: Lv, b: Lv) -> bool: a < b)
+    hs := col.from_list(ss(), fn(a: LvS, b: LvS) -> bool: a < b)
+    got: List[int] = []
+    want: List[int] = []
+    while not h.is_empty():
+        got.push((h.pop() ?? Lv.Hi(99)).rank())
+        want.push((hs.pop() ?? LvS(99)).n)
+    assert got == [0, 1, 3]
+    assert got == want

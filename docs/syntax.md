@@ -3975,7 +3975,7 @@ List methods (built in): `xs.push(x)` `xs.pop()` `xs.len()` `xs.reverse()` `xs.c
 `xs.extend(ys)` (append in place, → nil); higher-order `xs.map(f)` `xs.filter(p)` `xs.fold(init, f)`;
 `xs.sort_by(fn(a, b) -> int)` — a custom comparator (negative = `a` before `b`), stable, in place;
 and `xs.sort_by_key(fn(x) -> K)` — sort by a derived key (`K` Comparable: int/float/str, or a struct
-defining `compare`), stable, in place.
+or enum defining `compare`), stable, in place.
 
 > **Empty-collection element typing (refine-on-first-use).** An un-annotated empty `[]` / `{}` /
 > `Set()` has no element/key type yet; the **first** mutating op on the binding — `.push`/`.add`/

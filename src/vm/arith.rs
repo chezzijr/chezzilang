@@ -1645,7 +1645,7 @@ impl Vm {
         }
     }
 
-    /// `xs.sort()` over a list of Comparable structs, ordering via each struct's `compare`. Because
+    /// `xs.sort()` over a list of Comparable structs/enums, ordering via each one's `compare`. Because
     /// `compare` re-enters the VM (and may allocate / trigger GC), this mirrors `list_sort_by`
     /// exactly: snapshot the elements into a heap list ROOTED on the operand stack, permute
     /// *indices* re-read from that rooted list per comparison (never holding unrooted `Value`s

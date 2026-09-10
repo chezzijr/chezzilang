@@ -7,6 +7,19 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-104 (2026-09-10) — a `Comparable` enum now orders through its own `compare` in
+  `sort()`, `min()`/`max()`, `min_by`/`max_by` and `sort_by_key` (W12-2 P0, W12-3 P1).** The checker
+  granted `Comparable` to an enum with `compare`, and `<`/`>` already dispatched it (`compare_op`
+  matches `Obj::Struct | Obj::Enum`). The two list-ordering gates in `src/vm/call.rs` matched
+  `Obj::Struct` only. `sort()` fell to `value_order`, which ranks every enum pair `Equal` (a silent
+  no-op at rc=0), and `order_key` faulted `sort_by_key keys are not comparable: enum vs enum`. Both
+  gates now match `Obj::Struct | Obj::Enum`. An enum list sorts through `list_sort_structs`, so
+  DEC-015's mutation fault covers an enum `compare` too. Matches Rust's `Vec<E>.sort()` with
+  `impl Ord` (`[Lo, Hi(1), Hi(3)]`). `std.cmp`, `std.bisect` and `std.collections` `Heap` already
+  ordered enums through `<`, and they are now pinned too. Tests:
+  `tests/chz/spec/comparable_enum_test.chz` (every consumer against a struct twin) and
+  `sort_rejects_mutation_from_an_enum_compare` in `tests/chz/spec/list_test.chz`.
+
 - **TICKET-099 (2026-09-09) — a `send`/`close` never woke a receiver parked on another eager
   sched's private nursery (parent→child and sibling→sibling), and the fix for it then hung a genuine
   nested deadlock.** Two shapes measured on the base binary at `2b3e593b`: a sibling's `send` racing a
