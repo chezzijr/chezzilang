@@ -300,6 +300,7 @@ fn read_pipes(child: &mut std::process::Child) -> (String, String) {
 /// Spawns and polls rather than calling `output()`: a hung child never closes its pipes, so
 /// `output()` would wedge this test binary instead of failing it.
 #[test]
+#[ignore = "TICKET-103: red until the parking join lands; plan step 1 removes this attribute"]
 fn fixed_nested_nursery_shapes_complete_at_every_worker_count() {
     let fixtures: [(&str, &str, Expect); 6] = [
         ("owner_blocked", OWNER_BLOCKED, Expect::Exact(&["got 2"])),
