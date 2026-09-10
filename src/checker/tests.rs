@@ -31588,3 +31588,48 @@ fn colliding_tempdir_names_corrupt_concurrent_checker_fixtures() {
         shared[0].display()
     );
 }
+
+/// W12-7 (TICKET-106): a protocol-typed `Map`/`Set` key rejects a literal concrete-type value
+/// even though the same value already type-checks through a typed intermediate (`k: Keyed = A(1);
+/// m[k] = "ok"`) and through `List[Keyed]`. `m[A(1)] = "lit"` and `Set[Keyed] = {A(1), A(2)}` must
+/// both be accepted, mirroring Go's `map[Keyed]string{}; m[A{1}] = "a1"`.
+#[test]
+fn w12_7_protocol_typed_map_set_key_accepts_literal_satisfying_value() {
+    ok(
+        "protocol Keyed:\n    fn hash(self) -> int\nstruct A:\n    n: int\n    fn hash(self) -> int:\n        return self.n\nm: Map[Keyed, str] = {}\nm[A(1)] = \"lit\"\ns: Set[Keyed] = {A(1), A(2)}\nprint(m)\nprint(s)\n",
+    );
+}
+
+/// W12-8 (TICKET-106): `[S: Iterable[(A, B)], A, B]` fails to recover `A`/`B` from a
+/// `List[(int, str)]` argument, even though the bare `[S: Iterable[T], T]` shape recovers `T`
+/// fine. `docs/syntax.md` §7b promises `Iterable[T]` recovers `T` by unifying against the
+/// iterand's element type; a tuple element must unify the same way, mirroring Rust's
+/// `I: IntoIterator<Item = (A, B)>` inference.
+#[test]
+fn w12_8_iterable_tuple_bound_recovers_element_type_params() {
+    ok(
+        "fn firsts[S: Iterable[(A, B)], A, B](it: S) -> List[A]:\n    out := []\n    for p in it:\n        out.push(p.0)\n    return out\nr := firsts([(1, \"a\"), (2, \"b\")])\nprint(r)\n",
+    );
+}
+
+/// W12-9 (TICKET-106): a user generic ctor (`Box[T]`) does not thread the expected type
+/// (`Box[Named]`) into its argument's inference the way `Option`/`Some` already does
+/// (`o: Option[Named] = Some(A())` is accepted). `Box(A())` at a `Box[Named]` sink must widen
+/// `A` to `Named`, mirroring Rust's `let b: Box<dyn Named> = Box::new(A)` coercion.
+#[test]
+fn w12_9_generic_struct_ctor_uses_expected_type_hint() {
+    ok(
+        "protocol Named:\n    fn name(self) -> str\nstruct A:\n    fn name(self) -> str:\n        return \"a\"\nstruct Box[T]:\n    v: T\nb: Box[Named] = Box(A())\nprint(b)\n",
+    );
+}
+
+/// W12-15 (TICKET-106): a `[T: Comparable]` generic call rejects the same int/float widening
+/// granted at an untyped sink (`x := [1, 2.5]`, `if c: 1 else: 2.5`) once both constants land at
+/// a generic call's two positions instead of one. Go's `Max(1, 2.5)` under `[T cmp.Ordered]`
+/// widens and returns `2.5`.
+#[test]
+fn w12_15_generic_call_widens_mixed_int_float_constants() {
+    ok(
+        "fn mx[T: Comparable](a: T, b: T) -> T:\n    if a > b:\n        return a\n    return b\nprint(mx(1, 2.5))\n",
+    );
+}
