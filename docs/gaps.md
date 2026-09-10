@@ -12726,6 +12726,15 @@ parallel: block is blocked …` rc=1 — the exchange SUCCEEDED and the join sti
 same seam as W12-1: the T=1 nested-nursery deadlock verdict leaves the enclosing sched's
 parked/`blocked_owners` bookkeeping stale after the fault is recovered.
 
+**W12-4 addendum (2026-09-10, found while judging TICKET-103's plan — `cousin_fed`).** Take W12-4's
+recovering task, make its `x.send(1)` feed a COUSIN: a sibling task whose own nursery has a child doing
+`y.send(x.recv() + 1)` and a body printing `y.recv()`. Release binary at `af156f81`, 3 runs per count,
+20 s bound: `CHEZZI_THREADS=1` prints `inner err` then HANGS; `=2`, `=4`, default HANG with NO output —
+the inner nursery's genuine deadlock (`never.recv()`) is not even detected at T≥2. Go's model: the inner
+fault is recovered, A sends, F prints `2`, `done`. So the T≥2 half is a nested genuine deadlock that
+TICKET-095/101 promised to fault in ms and that instead hangs when the joining task's cousins are parked
+on channels only that task can feed after its join. Filed into TICKET-103.
+
 ### W12-5 / W12-6 repros (P1)
 
     gl := [[1]]                          # W12-5
