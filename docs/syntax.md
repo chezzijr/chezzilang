@@ -186,6 +186,7 @@ print(t.1)        # 1
 # t[0]  → type error: cannot index into (str, int)   (a tuple is not Indexable)
 # t.0 = "b"  → type error: cannot assign to field '0' of (str, int)
 a, b := t         # destructuring is the other way in — see §3
+a, b := 1, 2      # a value list destructures the same way (Go, CPython)
 ```
 
 Destructuring (`a, b := t`, or `for a, b in pairs`) is usually what you want; `.N` matters where you

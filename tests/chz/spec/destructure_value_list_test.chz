@@ -1,0 +1,12 @@
+# W12-17
+test fn a_walrus_binds_a_value_list_positionally():
+    a, b := 1, 2
+    assert a == 1, "got {a}"
+    assert b == 2, "got {b}"
+    x, y, z := 1, "s", 2.5
+    assert x == 1, "got {x}"
+    assert y == "s", "got {y}"
+    assert z == 2.5, "got {z}"
+    p, q := b, a
+    assert p == 2, "got {p}"
+    assert q == 1, "got {q}"

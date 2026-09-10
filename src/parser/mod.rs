@@ -629,9 +629,34 @@ impl Parser {
                 targets.push(self.parse_expr()?);
             }
             // `a, b := pair()` — destructuring let. Requires every target to be a bare identifier.
+            // The RHS is a single expression by default; a same-arity, comma-separated value list
+            // (`a, b := 1, 2`) is the tuple written without parentheses — Go's/CPython's
+            // multi-assignment shape.
             if self.peek() == &Token::Walrus {
                 self.advance();
-                let value = self.parse_expr()?;
+                let mut values = vec![self.parse_expr()?];
+                while self.eat(&Token::Comma) {
+                    values.push(self.parse_expr()?);
+                }
+                let value = if values.len() == 1 {
+                    values.into_iter().next().unwrap()
+                } else {
+                    if values.len() != targets.len() {
+                        return Err(ParseError {
+                            message: format!(
+                                "destructuring binds {} name(s) but {} value(s)",
+                                targets.len(),
+                                values.len()
+                            ),
+                            span: targets[0].span,
+                        });
+                    }
+                    let value_span = values[0].span;
+                    Expr {
+                        kind: ExprKind::Tuple(values),
+                        span: value_span,
+                    }
+                };
                 let mut names = Vec::with_capacity(targets.len());
                 // Each target ident's span (parallel to `names`) for per-binding decl-site hover.
                 let mut name_spans = Vec::with_capacity(targets.len());
@@ -3389,6 +3414,19 @@ mod tests {
         let (toks, comments) = lexer::tokenize_with_comments(src, 0).unwrap();
         let mut m = parse_with_docs(toks, comments).unwrap_or_else(|e| panic!("parse failed: {e}"));
         m.stmts.remove(0).kind
+    }
+
+    /// TICKET-108 / W12-17 -- a destructuring `:=` with a value-list RHS must check arity at parse
+    /// time: `a, b := 1, 2, 3` names 2 targets but 3 values.
+    #[test]
+    fn destructuring_value_list_arity_mismatch_is_a_parse_error() {
+        let e = parse_err("a, b := 1, 2, 3\n");
+        assert!(
+            e.message
+                .contains("destructuring binds 2 name(s) but 3 value(s)"),
+            "got: {}",
+            e.message
+        );
     }
 
     #[test]
