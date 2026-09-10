@@ -360,6 +360,30 @@ test fn an_instance_method_still_drops_its_receiver_slot():
     # The neighbour the fix must not disturb: an instance method's explicit args still start at 1.
     assert Q(1).combine() == 6, "got {Q(1).combine()}"
 
+# W12-10
+struct W1210A:
+    v: int
+    fn new(n: int = 1) -> W1210A:
+        return W1210A(n)
+
+struct W1210B:
+    v: int
+    fn new(n: int = 2) -> W1210B:
+        return W1210B(n)
+
+enum W1210E:
+    X
+
+    fn new(n: int = 3) -> int:
+        return n
+
+test fn a_same_named_static_method_fills_and_binds_by_its_own_type():
+    assert W1210A.new().v == 1, "got {W1210A.new().v}"
+    assert W1210B.new().v == 2, "got {W1210B.new().v}"
+    assert W1210A.new(n=5).v == 5, "got {W1210A.new(n=5).v}"
+    assert W1210B.new(n=6).v == 6, "got {W1210B.new(n=6).v}"
+    assert W1210E.new() == 3, "got {W1210E.new()}"
+
 struct W847G[T]:
     v: T
 

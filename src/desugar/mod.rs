@@ -517,6 +517,7 @@ pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
             scopes: Vec::new(),
             local_struct: Vec::new(),
             local_proto: Vec::new(),
+            type_params: Vec::new(),
             needed: std::collections::BTreeMap::new(),
             depth: 0,
         };
@@ -635,6 +636,7 @@ pub fn run_standalone(module: &mut Module) -> Result<(), ResolveError> {
         scopes: Vec::new(),
         local_struct: Vec::new(),
         local_proto: Vec::new(),
+        type_params: Vec::new(),
         needed: std::collections::BTreeMap::new(),
         depth: 0,
     };
@@ -1628,6 +1630,8 @@ struct Walker<'a> {
     /// protocol-bounded parameter and a protocol-typed `let`. TICKET-075 — lets a method call
     /// `recv.m(args)` filter the name-keyed fallback to candidates the protocol's own arity admits.
     local_proto: Vec<HashMap<String, (ModuleId, String)>>,
+    /// Per-scope type-parameter names, parallel to `scopes`; a type parameter shadows a struct name.
+    type_params: Vec<HashSet<String>>,
     /// Providers in OTHER modules this module's call sites now call, `name → (declaring module,
     /// first call site)`. Drained into synthetic `from` imports after the walk. A `BTreeMap` so the
     /// drain order is the (globally unique) provider name — import order feeds the compiler's
@@ -1653,12 +1657,19 @@ impl Walker<'_> {
         self.scopes.push(HashSet::new());
         self.local_struct.push(HashMap::new());
         self.local_proto.push(HashMap::new());
+        self.type_params.push(HashSet::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.local_struct.pop();
         self.local_proto.pop();
+        self.type_params.pop();
+    }
+
+    /// Whether `name` is a type-parameter name in scope. A type parameter shadows a struct name.
+    fn is_type_param(&self, name: &str) -> bool {
+        self.type_params.iter().any(|s| s.contains(name))
     }
 
     /// Record that LOCAL `name` holds a value of struct type `sname`, in the innermost scope.
@@ -1773,7 +1784,9 @@ impl Walker<'_> {
     /// The struct name of a method-call receiver `obj`, when knowable pre-type — so a shared method
     /// name (siblings disagreeing on a param's ref-ness) resolves to the RIGHT sibling regardless of
     /// the receiver's syntactic shape. Covers: (i) a named local, (ii) an inline ctor call
-    /// `StructName(...)`, (iii) a free-fn call `mk()` whose declared return type is a struct. Returns
+    /// `StructName(...)`, (iii) a free-fn call `mk()` whose declared return type is a struct, (iv) a
+    /// bare type-NAME head `A.new()`: `methods_by_struct[(A, m)]` decides, and a miss (module name,
+    /// unknown name, collision-nulled key) falls through to the name-keyed table unchanged. Returns
     /// `None` for any receiver whose struct type cannot be determined syntactically (the caller then
     /// falls back to the agreement-gated name-keyed table).
     fn receiver_struct_ty(&self, obj: &Expr) -> Option<String> {
@@ -1784,6 +1797,9 @@ impl Walker<'_> {
             ExprKind::Call { .. } if self.struct_value_ty(obj).is_some() => {
                 self.struct_value_ty(obj)
             }
+            // (iv) a bare type-NAME head `A.new()`: a type parameter shadows a struct name, so this
+            // must never bind a generic body's static call to the wrong type's default.
+            ExprKind::Ident(n) if !self.is_local(n) && !self.is_type_param(n) => Some(n.clone()),
             // (iii) struct-returning free fn `mk()` — resolved through the SAME module the callee
             // resolves in (own module first, then a `from`-import), mirroring `resolve_bare`.
             ExprKind::Call { callee, .. } => {
@@ -1895,6 +1911,10 @@ impl Walker<'_> {
                 // Nested/top-level function body: params are a fresh scope.
                 let tp_bounds = tp_bounds_of(&[], decl);
                 self.push_scope();
+                self.type_params
+                    .last_mut()
+                    .unwrap()
+                    .extend(decl.type_params.iter().map(|t| t.name.clone()));
                 for p in &decl.params {
                     self.bind_param(p, &tp_bounds);
                 }
@@ -1922,6 +1942,12 @@ impl Walker<'_> {
                     }
                     let tp_bounds = tp_bounds_of(type_params, m);
                     self.push_scope();
+                    self.type_params.last_mut().unwrap().extend(
+                        type_params
+                            .iter()
+                            .chain(m.type_params.iter())
+                            .map(|t| t.name.clone()),
+                    );
                     for p in &m.params {
                         self.bind_param(p, &tp_bounds);
                     }
@@ -2031,6 +2057,12 @@ impl Walker<'_> {
                     }
                     let tp_bounds = tp_bounds_of(type_params, m);
                     self.push_scope();
+                    self.type_params.last_mut().unwrap().extend(
+                        type_params
+                            .iter()
+                            .chain(m.type_params.iter())
+                            .map(|t| t.name.clone()),
+                    );
                     for p in &m.params {
                         self.bind_param(p, &tp_bounds);
                     }
@@ -2054,6 +2086,12 @@ impl Walker<'_> {
                     }
                     let tp_bounds = tp_bounds_of(type_params, m);
                     self.push_scope();
+                    self.type_params.last_mut().unwrap().extend(
+                        type_params
+                            .iter()
+                            .chain(m.type_params.iter())
+                            .map(|t| t.name.clone()),
+                    );
                     for p in &m.params {
                         self.bind_param(p, &tp_bounds);
                     }

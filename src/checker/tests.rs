@@ -31958,6 +31958,17 @@ fn a_same_named_static_method_on_two_structs_type_checks() {
     );
 }
 
+/// TICKET-108 / W12-10 guard -- a type parameter shadows a struct name. `f[A: Mk]() -> A: return
+/// A.new()` must keep resolving `A.new()` through the PROTOCOL's arity, not splice in struct
+/// `A`'s own default -- that would be check-clean but bind the wrong type's default.
+#[test]
+fn a_type_param_shadowing_a_struct_keeps_the_protocol_arity() {
+    rejects_desugared(
+        "protocol Mk:\n    fn new(n: int) -> Self\nstruct A:\n    v: int\n    fn new(n: int = 1) -> A:\n        return A(n)\nstruct B:\n    v: int\n    fn new(n: int = 7) -> B:\n        return B(n)\nfn f[A: Mk]() -> A:\n    return A.new()\nprint(f[B]().v)\n",
+        "'new' expects 1 argument(s), got 0",
+    );
+}
+
 /// TICKET-108 / W12-16(a) repro -- a fn value sitting in a tuple slot must be directly
 /// callable, `t.0(3)`, the same as a fn-typed struct field / list element / map value already
 /// are. `infer_call`'s method-call arm has no guard for a decimal tuple-slot member name, so
