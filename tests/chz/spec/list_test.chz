@@ -107,6 +107,34 @@ test fn min_max_comparable_struct():
     assert es.min() == None
     assert es.max() == None
 
+# TICKET-104: a Comparable ENUM (compare()+eq() implemented like P above) must order the same way
+# a Comparable struct does — sort() must not silently no-op, and min()/max()/sort_by_key() must not
+# fault with "not comparable".
+enum Rank:
+    Low
+    Mid
+    High
+    fn compare(self, o: Rank) -> int:
+        return self.ord() - o.ord()
+    fn eq(self, o: Rank) -> bool:
+        return self.ord() == o.ord()
+    fn ord(self) -> int:
+        match self:
+            Rank.Low: return 0
+            Rank.Mid: return 1
+            Rank.High: return 2
+
+test fn sort_min_max_comparable_enum():
+    xs := [Rank.High, Rank.Low, Rank.Mid]
+    xs.sort()
+    assert xs == [Rank.Low, Rank.Mid, Rank.High], "sort() must use the enum's compare()"
+    match [Rank.High, Rank.Low, Rank.Mid].min():
+        Some(r): assert r == Rank.Low
+        None: assert false, "min of a non-empty list is Some"
+    match [Rank.High, Rank.Low, Rank.Mid].max():
+        Some(r): assert r == Rank.High
+        None: assert false, "max of a non-empty list is Some"
+
 # ---- unique / dedup ----
 
 test fn unique_dedup():
