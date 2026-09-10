@@ -31989,3 +31989,33 @@ fn fn_type_display_marks_an_omittable_parameter() {
         "list elements differ: fn(int = …) -> int vs fn(int) -> int",
     );
 }
+
+/// TICKET-108 / W12-16(c) -- a protocol type alias must be a valid bound: `type N = Named` then
+/// `fn show[T: N]` binds `T` exactly as `[T: Named]` would, same errors, same messages.
+#[test]
+fn a_protocol_alias_bound_is_enforced_like_the_protocol() {
+    const SRC_ALIAS: &str = "protocol Named:\n    fn name(self) -> str\ntype N = Named\nfn show[T: N](x: T) -> str:\n    return x.name()\ny := show(5)\n";
+    const SRC_PLAIN: &str = "protocol Named:\n    fn name(self) -> str\nfn show[T: Named](x: T) -> str:\n    return x.name()\ny := show(5)\n";
+    let plain = check_src(SRC_PLAIN);
+    assert!(
+        !plain.is_empty(),
+        "expected a type error over the plain bound"
+    );
+    let alias = check_src(SRC_ALIAS);
+    let plain_msgs: Vec<_> = plain.iter().map(|e| e.message.clone()).collect();
+    let alias_msgs: Vec<_> = alias.iter().map(|e| e.message.clone()).collect();
+    assert_eq!(
+        plain_msgs, alias_msgs,
+        "alias bound must report the identical errors as the plain protocol bound"
+    );
+}
+
+/// TICKET-108 / W12-16(c) -- a GENERIC protocol alias (`type IntBag = Bag[int]`) applies type
+/// arguments, so it cannot name a bound by itself: the substitution a bound would need is not done.
+#[test]
+fn a_bound_naming_a_generic_protocol_alias_is_refused_by_name() {
+    rejects(
+        "protocol Bag[T]:\n    fn get(self) -> T\ntype IntBag = Bag[int]\nfn f[T: IntBag](x: T) -> int:\n    return 1\n",
+        "type alias 'IntBag' applies type arguments",
+    );
+}

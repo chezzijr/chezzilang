@@ -277,13 +277,52 @@ impl Checker {
     }
 
     /// The runtime key for a protocol name: unchanged (bare) for a [`RESERVED_PROTOCOLS`] member,
-    /// else [`Checker::bare_key`] (mirrors the struct/enum treatment, TICKET-027).
+    /// else [`Checker::bare_key`] (mirrors the struct/enum treatment, TICKET-027). Falls back to
+    /// [`Checker::protocol_alias_key`] ONLY when `name` misses as a protocol directly — alias-first
+    /// could send another module's bare protocol key to a same-named LOCAL alias.
     pub(super) fn protocol_key(&self, name: &str) -> String {
-        if is_reserved_protocol(name) {
+        let key = if is_reserved_protocol(name) {
             name.to_string()
         } else {
             self.bare_key(name)
+        };
+        if self.protocols.contains_key(&key) || self.owning_protocol_def(&key).is_some() {
+            return key;
         }
+        self.protocol_alias_key(name).unwrap_or(key)
+    }
+
+    /// The identity key of the protocol a type alias `name` ultimately names, TICKET-108 (W12-16c) —
+    /// so `type N = Named` (local) or `import N from m` (where `m` declares `type N = Named`) makes
+    /// `N` a valid bound (`fn f[T: N]`), interchangeably with `Named` itself. Walks LOCAL aliases
+    /// through `Type::Named` heads only (any other body shape, or a cycle capped at 64 hops, is
+    /// `None` — mirrors `alias_body_ty`), then checks whether the final head is an imported protocol
+    /// alias. An alias that APPLIES TYPE ARGUMENTS (`type IntBag = Bag[int]`) is `None`: no bound-
+    /// argument substitution exists to make that a sound bound by name (see `check_bounds`'s own
+    /// diagnostic for that shape). `None` when the resolved head is not a protocol at all.
+    pub(super) fn protocol_alias_key(&self, name: &str) -> Option<String> {
+        let mut head = name.to_string();
+        let mut depth = 0;
+        while let Some(body) = self.aliases.get(&head).cloned() {
+            match body {
+                Type::Named { name: n, .. } => head = n,
+                _ => return None,
+            }
+            depth += 1;
+            if depth > 64 {
+                return None;
+            }
+        }
+        if let Some(Ty::Protocol(key, args)) = self.imported_alias_tys.get(&head) {
+            return args.is_empty().then(|| key.clone());
+        }
+        let key = if is_reserved_protocol(&head) {
+            head.clone()
+        } else {
+            self.bare_key(&head)
+        };
+        (self.protocols.contains_key(&key) || self.owning_protocol_def(&key).is_some())
+            .then_some(key)
     }
 
     /// A protocol's shape looked up by identity key in the OWNING module's `ModuleSig` (miss-only

@@ -4651,6 +4651,21 @@ impl Checker {
         let mut seen_iterator = false;
         for b in bounds {
             let Some(arity) = self.protocol_shape(&b.name).map(|p| p.type_params.len()) else {
+                // A protocol alias that APPLIES TYPE ARGUMENTS (`type IntBag = Bag[int]`) cannot name
+                // a bound: there is no substitution seam to carry `int` into `T`'s bound. Diagnose
+                // this shape by name rather than falling through to the generic "unknown protocol".
+                if let Some(Type::Generic(head, ..)) = self.aliases.get(&b.name).cloned()
+                    && self.protocol_shape(&head).is_some()
+                {
+                    self.error(
+                        span,
+                        format!(
+                            "type alias '{}' applies type arguments, so it cannot name a bound on '{param}' -- write the protocol and its arguments in the bound",
+                            b.name
+                        ),
+                    );
+                    continue;
+                }
                 // A `where T: <scalar>` equality bound (int/float/bool/str/…) — not a protocol, but a
                 // valid constraint pinning `T` to exactly that scalar type. It takes no type args.
                 if Self::scalar_bound_ty(&b.name).is_some() {

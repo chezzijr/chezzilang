@@ -1,0 +1,38 @@
+import W1216N from protocol_alias_bound_lib
+
+protocol Tagged:
+    fn name(self) -> str
+
+type TagAlias = Tagged
+
+protocol Mk:
+    fn make() -> Self
+
+type MkAlias = Mk
+
+struct PA:
+    v: int
+
+    fn name(self) -> str:
+        return "pa"
+
+    fn make() -> PA:
+        return PA(4)
+
+fn show_local[T: TagAlias](x: T) -> str:
+    return x.name()
+
+fn show_imported[T: W1216N](x: T) -> str:
+    return x.name()
+
+fn build[T: MkAlias]() -> T:
+    return T.make()
+
+test fn a_local_protocol_alias_is_a_valid_bound():
+    assert show_local(PA(1)) == "pa", "got {show_local(PA(1))}"
+
+test fn an_imported_protocol_alias_is_a_valid_bound():
+    assert show_imported(PA(1)) == "pa", "got {show_imported(PA(1))}"
+
+test fn a_protocol_alias_bound_satisfies_a_static_requirement():
+    assert build[PA]().v == 4, "got {build[PA]().v}"

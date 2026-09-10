@@ -1,0 +1,4 @@
+protocol W1216Named:
+    fn name(self) -> str
+
+type W1216N = W1216Named

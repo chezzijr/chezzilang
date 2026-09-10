@@ -2635,7 +2635,9 @@ with `xs.iter()` first).
 **Type aliases** name an existing type transparently — `type Name =
 <type>` makes `Name` interchangeable with the aliased type everywhere (structural, not a distinct
 nominal type); aliases may name scalars, collections, structs, or other aliases (cycles are
-rejected).
+rejected). An alias of a protocol may name a bound (`type N = Named` then `fn show[T: N]`),
+including one brought in with `import N from m`; an alias that applies type arguments (`type IntBag
+= Bag[int]`) may not, so write `T: Bag[int]`.
 
 ```chezzi
 type UserId = int
