@@ -2660,25 +2660,63 @@ impl MnSched {
     /// `base_index..base_index+total` sub-range contiguous (the contract `reduce`/`take_scope_slots`
     /// rely on). The `debug_assert` pins that invariant: inject only ever targets the last scope, so
     /// growing it never overruns a later scope's range.
-    fn inject(&self, mut fiber: Fiber, scope_id: usize) {
+    fn inject(&self, fiber: Fiber, scope_id: usize) {
+        let opened = self.inject_or_extend(fiber, scope_id);
+        debug_assert!(
+            opened.is_none(),
+            "inject only grows the LAST scope (keeps flat slots contiguous)"
+        );
+    }
+
+    /// TICKET-103 — [`MnSched::inject`] for a sched whose scope order is NOT LIFO. A fiber may
+    /// register its own nursery's scope on this sched (`Vm::activate_fiber_owned_nursery`), after
+    /// which `main` or an outer fiber can spawn into its own, now non-last, scope. Growing that scope
+    /// would overrun the later scope's slot range, so this opens a *continuation scope* instead: a
+    /// new trailing `JoinScope` sharing the target's cancel token (the nursery's *family*, see
+    /// `SchedCore::scope_family`), its ancestors and its `deadlock_err`. Returns the continuation's
+    /// id when it opened one, `None` when it grew `scope_id` in place (it was the last scope). The
+    /// caller must pass its nursery's TAIL scope, so the last scope still owns the slot tail
+    /// (`retire_last_scope`). Same one-lock grow+runnable atomicity as `inject`; like `inject`, it
+    /// does not un-latch `terminate`.
+    fn inject_or_extend(&self, mut fiber: Fiber, scope_id: usize) -> Option<usize> {
         debug_assert!(
             matches!(fiber.state, FiberState::Pending(_)),
             "an injected handler must be unstarted (Pending) so `run_one_fiber` runs its body via `start_task`"
         );
         let mut c = self.lock();
-        debug_assert_eq!(
-            scope_id,
-            c.scopes.len() - 1,
-            "inject only grows the LAST scope (keeps flat slots contiguous)"
-        );
-        fiber.task_index = c.slots.len(); // authoritative flat slot index — the slots END
-        fiber.scope_id = scope_id;
-        c.scopes[scope_id].total += 1;
+        let base_index = c.slots.len(); // authoritative flat slot index — the slots END
+        let opened = if scope_id + 1 == c.scopes.len() {
+            c.scopes[scope_id].total += 1;
+            fiber.scope_id = scope_id;
+            None
+        } else {
+            let origin = &c.scopes[scope_id];
+            let cont = JoinScope {
+                base_index,
+                total: 1,
+                done: 0,
+                bytes: 0,
+                body_open: false,
+                body_blocked: false,
+                awaiting_builder: false,
+                cancel: Arc::clone(&origin.cancel),
+                ancestors: origin.ancestors.clone(),
+                deadlock_err: origin.deadlock_err.clone(),
+                owners_blocked: 0,
+                joins_blocked: 0,
+            };
+            let id = c.scopes.len();
+            c.scopes.push(cont);
+            fiber.scope_id = id;
+            Some(id)
+        };
+        fiber.task_index = base_index;
         c.slots.push(None);
         c.global.push_back(fiber);
         self.runnable.fetch_add(1, Ordering::Relaxed);
         drop(c);
         self.cv.notify_all();
+        opened
     }
 
     /// Per-connection spawn — mark `scope_id`'s (eager) body as still producing tasks: a transient
@@ -2764,18 +2802,25 @@ impl MnSched {
             if blocked && let Some(w) = wait {
                 c.body_waits.push(Arc::clone(w));
             }
-            if let Some(s) = c.scopes.get_mut(scope_id) {
-                s.body_blocked = blocked;
-                // §2c1 — a body parked in a NESTED nursery's join is not merely unable to inject: it
-                // WILL resume the moment that inner scope completes, and may then `send`/`close` to a
-                // sibling. That is exactly what `awaiting_builder` already means, so say it rather
-                // than invent a second flag — `all_incomplete_awaiting_builder` then vetoes when the
-                // inner scope is DONE (the builder is about to resume and feed) and does NOT veto
-                // while the inner scope is itself incomplete-and-stuck (a genuine nested deadlock,
-                // which must fault). A body blocked on a CHANNEL leaves it false: that body resumes
-                // only if somebody feeds it, so it is not a promise of progress.
-                if awaiting {
-                    s.awaiting_builder = blocked;
+            // TICKET-103 — the whole family, in this same acquisition: an unmarked continuation keeps
+            // `all_incomplete_awaiting_builder` false and lets the predicate fault a sibling the body
+            // feeds after its nested join.
+            if scope_id < c.scopes.len() {
+                let family = c.scope_family(scope_id);
+                for i in family {
+                    let s = &mut c.scopes[i];
+                    s.body_blocked = blocked;
+                    // §2c1 — a body parked in a NESTED nursery's join is not merely unable to inject:
+                    // it WILL resume the moment that inner scope completes, and may then `send`/`close`
+                    // to a sibling. That is exactly what `awaiting_builder` already means, so say it
+                    // rather than invent a second flag — `all_incomplete_awaiting_builder` then vetoes
+                    // when the inner scope is DONE (the builder is about to resume and feed) and does
+                    // NOT veto while the inner scope is itself incomplete-and-stuck (a genuine nested
+                    // deadlock, which must fault). A body blocked on a CHANNEL leaves it false: that
+                    // body resumes only if somebody feeds it, so it is not a promise of progress.
+                    if awaiting {
+                        s.awaiting_builder = blocked;
+                    }
                 }
             }
             if !blocked
@@ -3709,11 +3754,17 @@ impl MnSched {
     ///
     /// (An `os.exit` reaches every scope by calling this in a loop — [`MnSched::cancel_all`] — rather
     /// than by relaxing the scope-scoping here, which the structured-concurrency invariant forbids.)
+    ///
+    /// TICKET-103 — "that scope" is its FAMILY (`SchedCore::scope_family`): a nursery's continuation
+    /// scopes share its one cancel token, so a faulting child must requeue a parked sibling in a
+    /// continuation too, or `any_cancelled_scope_awaiting_drain` vetoes forever. Every other scope
+    /// owns a distinct Arc, so the result is unchanged for them.
     fn cancel_drain(&self, scope_id: usize) {
         let mut c = self.lock();
         if c.parked_n == 0 {
             return;
         }
+        let family = c.scope_family(scope_id);
         let buckets: Vec<(usize, Vec<ParkedEntry>)> = c.parked.drain().collect();
         let mut drained = 0usize;
         for (key, v) in buckets {
@@ -3721,7 +3772,7 @@ impl MnSched {
             for entry in v {
                 match entry {
                     ParkedEntry::Recv(mut f) => {
-                        if f.scope_id == scope_id {
+                        if family.contains(&f.scope_id) {
                             drained += 1;
                             f.state = FiberState::Ready;
                             c.global.push_back(f);
@@ -3730,7 +3781,7 @@ impl MnSched {
                         }
                     }
                     ParkedEntry::Send(mut f) => {
-                        if f.scope_id == scope_id {
+                        if family.contains(&f.scope_id) {
                             drained += 1;
                             f.state = FiberState::Ready;
                             c.global.push_back(f);
@@ -3745,7 +3796,7 @@ impl MnSched {
                         // token copy. Only a matching-scope, still-present fiber is claimed + requeued.
                         let in_scope = {
                             let g = wp.fiber.lock().unwrap_or_else(|e| e.into_inner());
-                            g.as_ref().is_some_and(|f| f.scope_id == scope_id)
+                            g.as_ref().is_some_and(|f| family.contains(&f.scope_id))
                         };
                         if !in_scope {
                             // Either a different scope (keep parked) OR already claimed (drop). Keep the

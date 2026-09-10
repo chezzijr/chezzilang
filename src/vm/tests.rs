@@ -8485,6 +8485,69 @@ fn a_blocked_owner_whose_joined_family_is_done_is_not_quiesced() {
     );
 }
 
+/// TICKET-103 — a continuation scope shares its nursery's cancel token, so draining the origin
+/// must requeue the continuation's parked fibers too, and leave every other scope's parked.
+#[test]
+fn cancel_drain_requeues_every_scope_sharing_the_cancel_token() {
+    let s = mk_sched(1);
+    let shared = Arc::new(AtomicBool::new(false));
+    let s1 = s.register_scope(1, Arc::clone(&shared), Vec::new());
+    let s2 = s.register_scope(1, Arc::clone(&shared), Vec::new());
+    let _chans = [
+        park_in_scope(&s, 0, 0),
+        park_in_scope(&s, 1, s1),
+        park_in_scope(&s, 2, s2),
+    ];
+    let before = s.runnable.load(Ordering::Relaxed);
+    s.cancel_drain(s1);
+    assert_eq!(s.lock().parked_n, 1, "only scope 0's fiber stays parked");
+    assert_eq!(s.runnable.load(Ordering::Relaxed), before + 2);
+}
+
+/// TICKET-103 — a body's wait mark covers its whole family in one acquisition, and no other scope.
+#[test]
+fn set_body_wait_marks_every_scope_sharing_the_cancel_token() {
+    let s = mk_sched(1);
+    let other = s.register_scope(0, Arc::new(AtomicBool::new(false)), Vec::new());
+    let tok = Arc::clone(&s.lock().scopes[0].cancel);
+    let cont = s.register_scope(1, tok, Vec::new());
+    s.set_body_wait(0, None, true, true);
+    {
+        let c = s.lock();
+        assert!(c.scopes[cont].body_blocked && c.scopes[cont].awaiting_builder);
+        assert!(!c.scopes[other].body_blocked && !c.scopes[other].awaiting_builder);
+    }
+    s.set_body_wait(0, None, false, true);
+    let c = s.lock();
+    assert!(
+        c.scopes
+            .iter()
+            .all(|x| !x.body_blocked && !x.awaiting_builder)
+    );
+}
+
+/// TICKET-103 — a spawn into a scope that is no longer the sched's last opens a continuation scope
+/// sharing its cancel token; a spawn into the continuation (now last) grows it in place.
+#[test]
+fn inject_or_extend_opens_a_continuation_when_the_target_is_not_last() {
+    let s = mk_sched(1);
+    let tok = Arc::new(AtomicBool::new(false));
+    let s1 = s.register_scope(0, Arc::clone(&tok), Vec::new());
+    let _s2 = s.register_scope(0, Arc::new(AtomicBool::new(false)), Vec::new());
+    assert_eq!(s.inject_or_extend(mk_pending_fiber(0), s1), Some(3));
+    {
+        let c = s.lock();
+        assert_eq!(c.scopes[3].total, 1);
+        assert!(Arc::ptr_eq(&c.scopes[3].cancel, &tok));
+        assert_eq!(
+            c.scopes[s1].total, 0,
+            "the origin never grows past a later scope"
+        );
+    }
+    assert_eq!(s.inject_or_extend(mk_pending_fiber(0), 3), None);
+    assert_eq!(s.lock().scopes[3].total, 2);
+}
+
 /// TICKET-099 — a vetoed sched must poll (`DEMOTE_POLL_BACKOFF`) rather than sleep on its OWN condvar
 /// untimed: nothing notifies A's `cv` when peer B quiesces later, so an untimed wait here would hang
 /// forever even though B eventually stops being a live peer.
