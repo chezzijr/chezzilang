@@ -3878,6 +3878,25 @@ impl Checker {
     /// very iterand it was given. The predicate stays [`iter_elem`](Self::iter_elem) (NOT
     /// `iterable_elem`): recovery is deliberately NOT total for `Iterable` — a struct with only
     /// `iter(self) -> Iterator[E]` still needs a concrete-arg bound (`[S: Iterable[int]]`).
+    /// W12-8 (TICKET-106) — bind every still-FREE type param a recovered bound arg mentions, at any
+    /// depth (`(A, B)`, `Option[A]`, `List[A]`), then check the SUBSTITUTED arg agrees with what was
+    /// recovered. `Some(pinned)` = disagreement, for the caller to word. A bare free param reproduces
+    /// the old insert; a bound or concrete arg reproduces the old agreement check.
+    fn bind_recovered(
+        &self,
+        arg_ty: &Ty,
+        recovered: &Ty,
+        sub: &mut HashMap<String, Ty>,
+    ) -> Option<Ty> {
+        unify(arg_ty, recovered, sub);
+        let pinned = subst(arg_ty, sub);
+        if pinned.is_unknown() || recovered.is_unknown() || self.assignable(&pinned, recovered) {
+            None
+        } else {
+            Some(pinned)
+        }
+    }
+
     pub(super) fn recover_iter_elems(
         &mut self,
         tps: &[TypeParam],
@@ -3898,28 +3917,13 @@ impl Checker {
             }
         }
         for (arg_ty, elem) in &binds {
-            // Bind the element param if it's still free; otherwise it was already pinned (an explicit
-            // type arg, another argument position, or a concrete `Iterator[int]` bound) and the
-            // recovered element MUST agree — `unify` is a silent no-op there, so check it ourselves.
-            match arg_ty {
-                Ty::Param(n) if !sub.contains_key(n) => {
-                    if !elem.is_unknown() {
-                        sub.insert(n.clone(), elem.clone());
-                    }
-                }
-                _ => {
-                    let pinned = match arg_ty {
-                        Ty::Param(n) => sub.get(n).cloned().unwrap_or(Ty::Unknown),
-                        other => other.clone(),
-                    };
-                    if !pinned.is_unknown() && !elem.is_unknown() && !self.assignable(&pinned, elem)
-                    {
-                        self.error(
-                            span,
-                            format!("iterator element type {elem} does not match the declared element type {pinned}"),
-                        );
-                    }
-                }
+            if let Some(pinned) = self.bind_recovered(arg_ty, elem, sub) {
+                self.error(
+                    span,
+                    format!(
+                        "iterator element type {elem} does not match the declared element type {pinned}"
+                    ),
+                );
             }
         }
     }
@@ -3962,30 +3966,11 @@ impl Checker {
             }
         }
         for (arg_ty, recovered) in &binds {
-            // Bind the arg param if still free; otherwise it was already pinned and must agree.
-            match arg_ty {
-                Ty::Param(n) if !sub.contains_key(n) => {
-                    if !recovered.is_unknown() {
-                        sub.insert(n.clone(), recovered.clone());
-                    }
-                }
-                _ => {
-                    let pinned = match arg_ty {
-                        Ty::Param(n) => sub.get(n).cloned().unwrap_or(Ty::Unknown),
-                        other => other.clone(),
-                    };
-                    if !pinned.is_unknown()
-                        && !recovered.is_unknown()
-                        && !self.assignable(&pinned, recovered)
-                    {
-                        self.error(
-                            span,
-                            format!(
-                                "index type {recovered} does not match the declared type {pinned}"
-                            ),
-                        );
-                    }
-                }
+            if let Some(pinned) = self.bind_recovered(arg_ty, recovered, sub) {
+                self.error(
+                    span,
+                    format!("index type {recovered} does not match the declared type {pinned}"),
+                );
             }
         }
     }

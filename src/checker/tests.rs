@@ -31648,6 +31648,27 @@ fn w12_8_iterable_tuple_bound_recovers_element_type_params() {
     );
 }
 
+/// W12-8 (TICKET-106) neighbours: recovery must unify STRUCTURALLY, not just a bare `Ty::Param`, so
+/// `Option[A]`, `List[A]` and `(A, B)` all recover their nested params, an explicit turbofish still
+/// works, and a genuinely mismatched element still rejects.
+#[test]
+fn w12_8_structured_bound_arg_recovery_neighbours() {
+    ok(
+        "fn f1[S: Iterable[Option[A]], A](it: S) -> int:\n    n := 0\n    for _ in it:\n        n = n + 1\n    return n\nprint(f1([Some(1), None]))\n",
+    );
+    ok(
+        "fn f2[S: Iterator[List[A]], A](it: S) -> int:\n    n := 0\n    for _ in it:\n        n = n + 1\n    return n\nprint(f2([[1], [2]].iter()))\n",
+    );
+    ok("fn f3[C: Index[int, (A, B)], A, B](c: C) -> int:\n    return 1\nprint(f3([(1, \"a\")]))\n");
+    ok(
+        "fn firsts[S: Iterable[(A, B)], A, B](it: S) -> List[A]:\n    out := []\n    for p in it:\n        out.push(p.0)\n    return out\nr := firsts[List[(int, str)], int, str]([(1, \"a\")])\nprint(r)\n",
+    );
+    rejects(
+        "fn f4[S: Iterable[(A, B)], A, B](it: S) -> int:\n    n := 0\n    for _ in it:\n        n = n + 1\n    return n\nprint(f4([1, 2]))\n",
+        "iterator element type int does not match the declared element type (A, B)",
+    );
+}
+
 /// W12-9 (TICKET-106): a user generic ctor (`Box[T]`) does not thread the expected type
 /// (`Box[Named]`) into its argument's inference the way `Option`/`Some` already does
 /// (`o: Option[Named] = Some(A())` is accepted). `Box(A())` at a `Box[Named]` sink must widen

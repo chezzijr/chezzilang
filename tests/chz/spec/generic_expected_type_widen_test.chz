@@ -1,0 +1,11 @@
+# W12-8 (TICKET-106): a structured bound arg like `Iterable[(A, B)]` recovers every type param it
+# mentions, not just a bare `T` slot, at RUN time.
+fn firsts[S: Iterable[(A, B)], A, B](it: S) -> List[A]:
+    out: List[A] = []
+    for p in it:
+        out.push(p.0)
+    return out
+
+test fn iterable_tuple_bound_recovers_both_params():
+    assert firsts([(1, "a"), (2, "b")]) == [1, 2]
+    assert firsts([(1, "a")])[0] + 1 == 2
