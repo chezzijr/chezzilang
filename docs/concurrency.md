@@ -1639,7 +1639,11 @@ was retired when module globals started deep-copying per task.)
   in a `Channel`/`Shared`/`RwShared`/`Atomic`) as an **independent deep copy** — `to_wire`/`from_wire`
   serialize its `proto`, backing closure, and parked operand-stack/args and rebuild a fresh
   `GeneratorCore` on the receiver, so advancing one copy never affects the other (like a cursor, but
-  carrying frozen execution state, not a plain snapshot). Every parked slot is wired recursively, so a
+  carrying frozen execution state, not a plain snapshot). **One generator, one copy per crossing:** a
+  live generator reached TWICE in one crossing (`a := g` then `spawn: a.next(); g.next()`, or a generator
+  nested in another generator's parked frame passed alongside it) faults `a generator cannot be sent
+  across tasks twice in one crossing` — it carries no wire id, so it cannot back-reference like a
+  container or cell, and TICKET-100 chose the fault over a silent second copy. Every parked slot is wired recursively, so a
   **non-sendable parked slot** still **rejects at the crossing** — a slot is checked at serialize time,
   so there is no under-gate.
   TICKET-041 — a generator crossed **WHILE it is running** (its own body calls `Channel.send`/
@@ -1655,7 +1659,9 @@ was retired when module globals started deep-copying per task.)
   structural depth …` depth cap; a value **cycle** threaded *through* the generator's own parked frame
   (the generator carries no wire id, so it can't back-reference) is caught by re-entering the same
   generator on the serialize stack — a clean `a generator cannot be sent across tasks as part of a
-  reference cycle` fault (never a silent duplicate — the container-back-edge cuts the recursion before
+  reference cycle` fault. That fires only when the GENERATOR is the node re-entered; a cycle whose root
+  is a container the generator's frame merely points at (`xs.push(gen_over_xs)` then `c.send(xs)`)
+  round-trips correctly, the copied frame aliasing the copied container (never a silent duplicate — the container-back-edge cuts the recursion before
   the depth cap would trip, so the generator arm guards it directly). A parked **recursive local `fn`**
   (or a parked **self-referential struct/list/map**), by contrast, now round-trips like any other
   capture — its cycle back-references cleanly (only a cycle passing through the generator's frame itself

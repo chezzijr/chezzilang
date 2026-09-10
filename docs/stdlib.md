@@ -167,7 +167,7 @@ than the Python analogue; there is nothing to fix.
 | `strip_prefix` | `(p: str) -> str` | Remove `p` from the front if present, else unchanged. |
 | `strip_suffix` | `(p: str) -> str` | Remove `p` from the end if present, else unchanged. |
 | `split_lines` | `() -> List[str]` | Split on `"\n"`, `"\r\n"` or a lone `"\r"`; a trailing terminator yields no final empty piece (Python `str.splitlines()`). It does NOT split on `\v`, `\f`, U+0085, U+2028 or U+2029. |
-| `to_int` | `() -> int?` | Safe parse (trims first, accepts PEP-515 underscores between digits): `Some(n)` or `None` on bad input. |
+| `to_int` | `() -> int?` | Safe parse (trims first, accepts PEP-515 underscores between digits): `Some(n)` or `None` on bad input. ASCII digits only — `"١٢"`/`"１２"` are `None` (Go/Rust semantics; CPython's `int()` accepts Unicode decimal digits). Same for `to_float` and `math.parse_int_base`. |
 | `to_float` | `() -> float?` | Safe parse (trims first, accepts PEP-515 underscores between digits): `Some(f)` or `None` on bad input. |
 | `parse_int` | `() -> Result[int, str]` | Result-returning parse (trims first, accepts PEP-515 underscores between digits): `Ok(n)` or `Err(msg)` carrying a human-readable parse-error message. The error-message sibling of `to_int`. |
 | `parse_float` | `() -> Result[float, str]` | Result-returning parse (trims first, accepts PEP-515 underscores between digits): `Ok(f)` or `Err(msg)`. The error-message sibling of `to_float`. |
@@ -768,10 +768,12 @@ task's line is visible before its nursery joins). Three rules follow:
   siblings on any fault, broken pipe included (`docs/concurrency.md` §8). A dead stdout deliberately
   does **not** halt via
   the `os.exit` channel: that channel outranks a fault, so borrowing it made a *crashing* program under
-  `| head -1` report **exit 0 with no trace**. Any other stdout I/O error (`ENOSPC`, `EIO`, a closed fd)
+  `| head -1` report **exit 0 with no trace**. Any other stdout I/O error (`ENOSPC`, `EIO`)
   additionally prints `chezzi run: cannot write stdout: …`: a truncated redirect never reports success.
   A failure on **stderr** is swallowed — it is a diagnostic channel, and a dead `2>` reader is no reason
-  to kill a healthy program.
+  to kill a healthy program. A stdout fd that is already CLOSED at startup (`chezzi run f.chz >&-`)
+  is not an error: the Rust runtime reopens fd 0/1/2 on `/dev/null` before `main`, so every `print`
+  succeeds into the void and the run exits 0 — CPython does the same.
 - **All of the above covers the VM's own sink only.** Bytes an FFI call writes to the descriptor
   itself (`extern "libc": fn puts`) are outside every guarantee here — not line-atomic against
   `print`, not unbuffered, not ordered with it, and invisible to the broken-pipe halt, so a `| head -1`

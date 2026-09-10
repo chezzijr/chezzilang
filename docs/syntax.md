@@ -4372,7 +4372,9 @@ this rule — name your modules and your types apart.
 
 **The named-import form is `import X from M`, not Python's `from M import X`** — the module path comes
 *last*, so every import statement starts with the `import` keyword (`from` at statement start is a
-parse error: *unexpected 'from' in expression*). Semantics are Python's; only the word order differs.
+parse error: *unexpected 'from' in expression*). Semantics are Python's; only the word order differs — with one Go-style exception: importing the same
+module or name twice in one file is a type error (`'math' is already imported`), where Python silently
+accepts the duplicate.
 
 **`import X from M` is a SNAPSHOT** (Python-identical): the value is copied into this module at import
 time. A later write to the module's own global (`M.bump()`) is **not** visible through the bare name —
