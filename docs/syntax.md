@@ -264,6 +264,9 @@ PI = 3.0                      # ✗ type error: cannot reassign const binding 'P
 ANSWER += 1                   # ✗ every compound form is caught too
 ```
 
+`xs += ys` on a `const List[int]` is the one exception: it extends the receiver in place (see the
+`+=` note above) rather than rebinding the name, so it's allowed through a `const` binding.
+
 - **Shallow.** `const` freezes the binding, not the object it points at. A `const` container's own
   contents stay mutable — only the name can't be rebound:
 
@@ -569,7 +572,9 @@ including its inline-expr body), a bare success value implicitly coerces: `T -> 
 `Ok` and every `Err` stay explicit; a value that is ALREADY an `Option`/`Result` is never re-wrapped
 (`Option[Option[int]]: return Some(1)` still needs `Some(Some(1))`); the coercion never chains onto the
 separate int→float widen (`float?: return 1` is still an error); and it declines at a sink mentioning a
-type parameter, and inside a synthesized default-argument provider.
+type parameter, and inside a synthesized default-argument provider. A `return`ed or inline-expr-bodied
+**if/match expression** at the same sink success-coerces per BARE branch (see §8): `return if c: n else:
+None` wraps only the bare `n`, leaving the already-wrapped `None` alone.
 
 **One-way `int`→`float` widening — an UNTYPED CONSTANT only (Go's rule).** An untyped int **constant**
 expression adapts to a `float` context and is converted to a real `f64`. A **typed** `int` **value**
@@ -714,7 +719,9 @@ Highest → lowest. Same row = same precedence, left-associative unless noted.
 > **in place** and every alias sees it, matching CPython's `list.__iadd__` — it does not rebind the
 > local to a fresh list. `xs *= n` (list) and the set forms `s |= t` / `s &= t` / `s ^= t` / `s -= t`
 > still build a new collection and rebind, identical to their binary form. That asymmetry is
-> deliberate: `xs + ys` and `xs * n` always copy; only `+=` mutates.
+> deliberate: `xs + ys` and `xs * n` always copy; only `+=` mutates. Because `xs += ys` never
+> rebinds, it works through a **loop variable** and a `const` binding, where every other compound
+> form (`*=`, or `+=` on a scalar) still rejects the rebind.
 >
 >     fn add(xs: List[int]):
 >         xs += [9]
@@ -3165,6 +3172,11 @@ match p:
     rest:        "at {rest.x},{rest.y}"   # a bare name binds the WHOLE struct value (catch-all)
 ```
 
+A bare non-variant name is the same whole-value catch-all on an enum, `Option` or `Result`
+scrutinee (`rest:` binds the whole `E`). A **guarded** one (`x if c:`) closes nothing, and a bare
+**variant** name (`None`, or an unqualified user variant) is never a binding — it stays a variant
+lookup, qualified as `E.A` if it needs to match one.
+
 The constructor may be written **bare** (`Point(x, y)`, for a local or `from`-imported struct) or
 **module-qualified** (`geo.Point(x, y)` — the only spelling for a struct reached through a whole-module
 `import geo`, since the bare name isn't in scope; this mirrors qualified construction `geo.Point(3, 4)`).
@@ -3277,7 +3289,11 @@ position — an annotated binding, a call argument, a declared return — take t
 (`x: Sh = if true: Sq(2) else: Tr(9)`, where `Sh` is a protocol both `Sq` and `Tr` satisfy). With NO
 expected type the branches must still agree, so `x := if true: Sq(2) else: Tr(9)` stays `branches have
 incompatible types: Sq and Tr`. The expected type is matched with plain assignability, so it never
-licenses the int-to-float widen — `x: float = if c: 1 else: 2` stays an error. This is a
+licenses the int-to-float widen — `x: float = if c: 1 else: 2` stays an error. At a declared
+`T?`/`T!E` **return sink** the branches may also MIX bare success values with already-wrapped ones
+(`return if n > 0: n else: None`); each bare branch is success-coerced (`Some(n)`), the others are
+left alone, and the same declines named under **Success-coercion** below apply (a generic slot, a
+declared `Option[Option[int]]`). This is a
 property of the if/match EXPRESSION and is distinct from multi-`return` inference (which still conflicts
 on `int`/`float` — annotate `-> float`). When every branch is an `Ok(…)` (no `Err`
 branch pins the error type), an **unannotated** `if`/`match`-expression's `Result` error slot defaults

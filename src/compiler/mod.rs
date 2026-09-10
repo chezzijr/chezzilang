@@ -3766,9 +3766,9 @@ impl Compiler {
                     }
                     return Ok(());
                 }
-                // A bare whole-value binding catch-all (`rest:` after a refutable struct arm) — only
-                // reachable in a struct match (the checker gates the bare binding there; enum/tuple
-                // scrutinees require `_`). Bind the scrutinee like a plain `Pattern::Ident`.
+                // A bare whole-value binding catch-all (`rest:` after a refutable struct arm) —
+                // reachable in a struct, enum, `Option` or `Result` match (TICKET-107). Bind the
+                // scrutinee like a plain `Pattern::Ident`.
                 if enum_name.is_none()
                     && bindings.is_empty()
                     && self.variant_pair(None, name).is_none()

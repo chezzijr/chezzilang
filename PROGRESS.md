@@ -7,6 +7,25 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-107 (2026-09-11) — three checker over-rejects: a bare-name catch-all on an enum/Option
+  scrutinee, missing success-coercion in a mixed if/match EXPRESSION at a `T?`/`T!E` return sink,
+  and `List +=` refused through a loop variable or `const` binding (W12-11 P2; W12-13, W12-14 P3).**
+  W12-11: `MatchKind::Variants` gains a `scrut: Ty` field so `bind_match_arm`'s catch-all binding
+  keeps the scrutinee's own type (generic args included); a bare non-variant, non-payload name now
+  binds the whole scrutinee on an enum/Option/Result match too, matching the existing struct rule —
+  exhaustiveness and the compiler already treated it as a wildcard. W12-13: a new
+  `ret_coerce_sink: Option<Ty>` field, `take()`n at the top of `infer_kind` like `float_elem_hint`,
+  lets `infer_if_else`/`infer_match` record a PER-BRANCH success-coercion verdict
+  (`coerce_branches_at_sink`) when the branches mix a bare value with an already-wrapped one at a
+  declared `T?`/`T!E` sink; the compiler's `compile_if_expr_chain`/`compile_match_expr` look up each
+  branch's own span. A branch whose span equals its own if/match node's span is excluded on both
+  sides — the `??`/`?.` desugar shares spans, and without the guard `return if c: (o ?? 0) else:
+  None` wraps `c` twice (measured `Some(Some(5))`, pinned by a test that fails red without the
+  guard). W12-14: `check_assign` exempts `List += List` (the exact `Op::AddInPlace` pair, DEC-015)
+  from the loop-variable and const-binding rebind guards, since it extends in place and never
+  rebinds the name. All three fixes are independently revertible (disjoint functions). Docs:
+  `docs/syntax.md` (struct catch-all note, §8 mixed-branch coercion, Success-coercion, `+=`/const
+  sections), `docs/gaps.md` (W12-11/13/14 closed).
 - **TICKET-105 (2026-09-11) — a crossing closure now carries a module global the sender changed
   through a LOCAL ALIAS, a callee PARAM alias, or a user struct METHOD (W12-6, closes W11-5).**
   `assigned`/`carried` (TICKET-051/097) catch a write through an op that names the global directly;
