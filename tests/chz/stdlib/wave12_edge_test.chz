@@ -1,0 +1,69 @@
+# tests/chz/stdlib/wave12_edge_test.chz — bug-hunt wave 12 edge fixes (docs/gaps.md W12-18a,
+# W12-19, W12-20a/b/c/d). Each `test fn` pins one repro from TICKET-110. Run: `cargo run -- test
+# tests/chz/`. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+
+import std.json
+import std.csv
+import std.regex
+import std.duration
+
+# W12-18a: int()/parse_int on a well-formed, out-of-range numeral must say WHY (overflow), not the
+# generic "cannot parse" the checker also gives for genuinely malformed input.
+test fn int_and_parse_int_overflow_say_overflow_not_cannot_parse():
+    r1 := recover: int("9223372036854775808")
+    match r1:
+        Ok(_): assert false, "9223372036854775808 does not fit i64"
+        Err(e): assert e.message().contains("overflow"), e.message()
+    r2 := recover: "9223372036854775808".parse_int()
+    match r2:
+        Ok(_): assert false, "9223372036854775808 does not fit i64"
+        Err(e): assert e.message().contains("overflow"), e.message()
+
+# W12-19: a `#` inside an interpolation hole must be a located error, not a silent comment that
+# eats the rest of the hole (and, in the worst case, the rest of the string literal).
+test fn hash_inside_interpolation_hole_is_rejected():
+    r := recover: eval_interp()
+    match r:
+        Ok(v): assert false, "expected a located error, got Ok(" + v + ")"
+        Err(_): assert true
+
+fn eval_interp() -> str:
+    x := 1
+    return "{x # c}"
+
+# W12-20a: stringify's depth cap must match parse's, so stringify's own output always round-trips
+# through parse. Build a tree 2001 array-levels deep (parse's own cutoff -- `parse_past_depth_limit`
+# in json_test.chz rejects a 2001-deep document); stringify must refuse it too, not accept it.
+test fn stringify_depth_cap_matches_parse():
+    j := Json.Arr([])
+    i := 1
+    while i < 2001:
+        j = Json.Arr([j])
+        i += 1
+    r := recover: json.stringify(j)
+    match r:
+        Ok(_): assert false, "stringify accepted a tree one level past parse's own MAX_NEST_DEPTH"
+        Err(e): assert e.message() == "json.stringify: exceeded max depth"
+
+# W12-20b: csv.parse follows Go's encoding/csv record-separator set (CRLF or LF); a lone CR is
+# ordinary field data, not a record break.
+test fn csv_lone_cr_is_field_data_not_a_record_break():
+    assert csv.parse("a\rb") == [["a\rb"]], "expected a single field with a literal CR"
+
+# W12-20c: `${}` (an empty capture-group name) must give the SAME "names a capture group this
+# pattern does not have" diagnosis every other malformed/unknown `$name` form already gets, not
+# silently swallow to empty string.
+test fn regex_dollar_brace_empty_name_errors_like_the_other_malformed_forms():
+    r := regex.replace_all(r"(\d+)", "12 34", r"${}")
+    match r:
+        Ok(v): assert false, "expected an Err, got Ok(" + v + ")"
+        Err(e): assert e.message().contains("does not have"), e.message()
+
+# W12-20d: the magnitude of a duration literal is parsed UNSIGNED before the sign is applied, so
+# i64::MIN milliseconds (whose magnitude alone overflows a signed i64) must parse, matching its own
+# round-trip through `to_string`.
+test fn duration_parse_accepts_i64_min_millis():
+    r := duration.parse("-9223372036854775808ms")
+    match r:
+        Ok(g): assert g.as_millis() == -9223372036854775808
+        Err(e): assert false, "i64::MIN ms must parse: " + e.message()

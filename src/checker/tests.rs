@@ -27541,6 +27541,24 @@ fn bound_method_as_value_rejected() {
 }
 
 #[test]
+fn static_method_as_value_on_local_struct_should_say_method_not_value() {
+    // W12-22: `C.zero` (a static/ctor-head method spelling used as a VALUE, not called) currently
+    // rejects with the generic "unknown name 'C'" -- the false claim that `C` isn't a struct at
+    // all. It should get the SAME "methods are not values" diagnosis the instance-method spelling
+    // (`bound_method_as_value_rejected` above) already gives.
+    const STATIC_S: &str = "\
+struct S:
+    n: int
+    fn zero() -> S:
+        return S(0)
+";
+    entry_rejects(
+        &format!("{STATIC_S}h := S.zero\n"),
+        "methods are not values",
+    );
+}
+
+#[test]
 fn bound_method_launder_rejected() {
     // Each of these type-checked (the `?` self slot unified with anything) then faulted at runtime.
     // Each must now be exactly ONE error -- no `'closure' expects 1 argument(s)` cascade.
