@@ -31806,3 +31806,61 @@ fn list_plus_equals_ok_through_loop_variable() {
 fn list_plus_equals_ok_through_const_binding() {
     ok("fn main():\n    xs: const List[int] = [1]\n    xs += [3]\n    print(xs)\n");
 }
+
+#[test]
+fn ticket_107_bare_catch_all_on_enum_closes_the_match_without_underscore() {
+    ok(
+        "enum E:\n    A(int)\n    B\n\nfn f(e: E) -> int:\n    match e:\n        E.A(1): return 1\n        rest: return 2\n\nfn main():\n    print(f(E.B))\n",
+    );
+}
+
+#[test]
+fn ticket_107_guarded_bare_catch_all_on_enum_does_not_close_the_match() {
+    rejects(
+        "enum E:\n    A(int)\n    B\n\nfn f(e: E, n: int) -> int:\n    match e:\n        x if n > 0: return 1\n        E.A(_): return 2\n    return 0\n",
+        "non-exhaustive match on E: missing B",
+    );
+}
+
+#[test]
+fn ticket_107_unguarded_bare_catch_all_warns_a_later_arm_unreachable() {
+    warns(
+        "enum E:\n    A(int)\n    B\n\nfn f(e: E) -> int:\n    match e:\n        rest: return 1\n        E.B: return 2\n",
+        "unreachable match arm",
+    );
+}
+
+#[test]
+fn ticket_107_bare_catch_all_on_option_binds_the_whole_option() {
+    rejects(
+        "fn f(o: int?) -> int:\n    match o:\n        whole: return whole\n",
+        "expected return type int, found Option[int]",
+    );
+}
+
+#[test]
+fn ticket_107_bare_catch_all_on_a_generic_enum_keeps_its_type_args() {
+    ok(
+        "enum T[X]:\n    Leaf(X)\n    Nil\n\nfn g(t: T[int]) -> int:\n    match t:\n        T.Leaf(v): return v\n        _: return 0\n\nfn h(t: T[int]) -> int:\n    match t:\n        T.Nil: return 0\n        other: return g(other)\n\nfn main():\n    print(h(T.Leaf(3)))\n",
+    );
+}
+
+#[test]
+fn ticket_107_bare_variant_names_stay_rejected_on_enum_scrutinees() {
+    rejects(
+        "enum E:\n    A\n    B\n\nfn f(e: E) -> int:\n    match e:\n        None: return 1\n        _: return 2\n",
+        "'None' is not a variant of E",
+    );
+    rejects(
+        "fn f(o: int?) -> int:\n    match o:\n        Ok: return 1\n        _: return 2\n",
+        "'Ok' is not a variant of Option",
+    );
+    rejects(
+        "enum E:\n    A\n    B\n\nfn f(e: E) -> int:\n    match e:\n        A: return 1\n        _: return 2\n",
+        "'A' is a variant of enum 'E'; write it qualified as 'E.A'",
+    );
+    rejects(
+        "enum E:\n    A\n    B\n\nenum F:\n    X\n\nfn f(e: E) -> int:\n    match e:\n        X: return 1\n        _: return 2\n",
+        "'X' is a variant of enum 'F'; write it qualified as 'F.X'",
+    );
+}

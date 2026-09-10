@@ -57,6 +57,9 @@ enum MatchKind {
     Variants {
         label: String,
         variants: HashMap<String, Vec<Ty>>,
+        /// The scrutinee's own type (generic args included), for a bare whole-value catch-all
+        /// binding (TICKET-107).
+        scrut: Ty,
     },
     /// int/str/bool scrutinee — arms are literal patterns (+ a required `_` wildcard).
     Literal(Ty),

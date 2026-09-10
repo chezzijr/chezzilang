@@ -5013,6 +5013,7 @@ impl Checker {
                 MatchKind::Variants {
                     label: name.clone(),
                     variants,
+                    scrut: sty.clone(),
                 }
             }
             Ty::Result(ok, err) => MatchKind::Variants {
@@ -5021,6 +5022,7 @@ impl Checker {
                     ("Ok".into(), vec![(**ok).clone()]),
                     ("Err".into(), vec![(**err).clone()]),
                 ]),
+                scrut: sty.clone(),
             },
             Ty::Option(inner) => MatchKind::Variants {
                 label: "Option".into(),
@@ -5028,6 +5030,7 @@ impl Checker {
                     ("Some".into(), vec![(**inner).clone()]),
                     ("None".into(), vec![]),
                 ]),
+                scrut: sty.clone(),
             },
             // int/str/bool scrutinees match against literal patterns (+ a `_` wildcard).
             Ty::Int => MatchKind::Literal(Ty::Int),

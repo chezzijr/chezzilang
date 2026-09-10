@@ -422,7 +422,11 @@ impl Checker {
                     _ => {}
                 }
             }
-            MatchKind::Variants { label, variants } => {
+            MatchKind::Variants {
+                label,
+                variants,
+                scrut,
+            } => {
                 self.push_scope();
                 match pattern {
                     Pattern::Variant {
@@ -431,6 +435,21 @@ impl Checker {
                         enum_name,
                         module_name,
                     } => {
+                        // TICKET-107 (W12-11) — a bare non-variant name binds the whole scrutinee
+                        // (Rust's identifier-pattern rule; Chezzi requires `E.Variant`, so it can
+                        // never be a variant); returning `true` makes it irrefutable, so an
+                        // unguarded one closes the match and warns later arms exactly like `_`, and
+                        // a guarded one closes nothing; `exh_lower` already lowers it to `Pat::Wild`
+                        // and the compiler already binds the whole value.
+                        if enum_name.is_none()
+                            && module_name.is_none()
+                            && bindings.is_empty()
+                            && !self.variant_owners.contains_key(name)
+                            && !crate::checker::is_builtin_variant(name)
+                        {
+                            self.declare(name, scrut.clone());
+                            return true;
+                        }
                         self.check_pattern_qualifier(
                             module_name,
                             enum_name,
@@ -788,7 +807,9 @@ impl Checker {
         }
         match kind {
             MatchKind::Skip => {}
-            MatchKind::Variants { label, variants } => {
+            MatchKind::Variants {
+                label, variants, ..
+            } => {
                 let mut missing: Vec<String> = variants
                     .keys()
                     .filter(|v| !covered.contains(*v))

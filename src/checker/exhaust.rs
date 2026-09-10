@@ -119,7 +119,9 @@ impl Checker {
     /// close anyway).
     pub(super) fn exh_new(&self, kind: &MatchKind) -> Option<ExhCheck> {
         let dom = match kind {
-            MatchKind::Variants { label, variants } => {
+            MatchKind::Variants {
+                label, variants, ..
+            } => {
                 let prefix = if label == "Option" || label == "Result" {
                     String::new()
                 } else {
