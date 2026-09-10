@@ -99,6 +99,15 @@ Single source of truth for "what am I doing next." Update after every work sessi
   `tests/`, `chezzi_chk` was the only one of 19 such prefixes shared by two files. Guarded twice: a
   source-text rule that neither file may carry the shared format, and a runtime check that mints 512
   rounds from both real helpers and asserts no two live fixture directories share a path.
+- **TICKET-106 (2026-09-11) — four generic-inference over-rejects, W12-7/8/9/15.** A protocol-typed
+  Map/Set key or `in` test now accepts a satisfying literal via `assignable` (W12-7); an
+  `Iterable[(A, B)]`/`Iterator[List[A]]`/`Index[int, (A, B)]` bound now recovers every type param a
+  structured bound arg mentions, not just a bare `T` (W12-8); an expected type now widens a generic
+  ctor/call's argument-bound type args at seven hint sites, with a per-argument re-check that keeps an
+  aliased mutable value invariant (W12-9); and a generic call's bare `T` slot now widens an untyped
+  int constant to `float` beside a sibling `float`-binding argument, coerced at the call site via the
+  existing `ArgFloatWidenTable` (W12-15). `cargo test --lib` 4654 passed, 0 failed, 2 ignored;
+  `cargo clippy -- -D warnings` clean; `tests/chz` green at `CHEZZI_THREADS=1`, `=2` and default.
 - **TICKET-098 (2026-09-09) — five diagnostic/edge-case papercuts, W11-9..W11-12.** (A) A
   non-exhaustive STRUCT match's witness doubled its module-mangled key (`main::S.main::S(_, _)`),
   because a `Dom::Prod`'s label is BOTH its sole constructor name and its display prefix; a new

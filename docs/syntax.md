@@ -624,6 +624,10 @@ that declaration is what the backend coerces from — not exceptions):
 - A **variadic** `float` param (`fn f(...zs: float)`) adapts its untyped int constants only when an
   untyped float constant sibling is present (`f(1, 2.5)` ✓, `f(1, 2)` ✗ — write `f(1.0, 2.0)`): the args
   are packed into a `List[float]` the callee prologue cannot coerce.
+- A generic call's bare type-parameter slot (`fn mx[T: Comparable](a: T, b: T) -> T`) adapts its
+  untyped int constants the same way, when another argument binds that same slot to `float`
+  (`mx(1, 2.5)` → `2.5`, matching Go's `Max(1, 2.5)`). A TYPED int (`n := 1; mx(n, 2.5)`), an explicit
+  turbofish (`mx[int](1, 2.5)`), or a constant nested inside a slot like `List[T]` still rejects.
 - The element widening of a mixed-numeric-CONSTANT literal needs a NUMERIC element type to ask for it.
   An `Any` element SLOT declines it — at EVERY position the slot reaches a literal, so
   `xs: List[Any] = [1, -2.5]`, `f([1, -2.5])` for `fn f(xs: List[Any])`, `f(1, -2.5)` for
@@ -2573,7 +2577,9 @@ does **not** conform to it — supply the args (`Container[int]`) to use it as a
 The prebuilt **`Iterable[T]`** and **`Iterator[T]`** are parameterized bounds with extra magic: they
 **recover** `T` from the iterand's element (by unifying it), rather than requiring it written out. `T`
 then flows into the body's loop variable and the return type. (User protocols take their args
-explicitly; only these two recover them.) The two differ in WHAT they accept — the same split as Rust's
+explicitly; only these two recover them.) Recovery unifies **structurally**, so `Iterable[(A, B)]`,
+`Iterable[Option[A]]` and `Index[int, (A, B)]` recover every type param they mention, not just a bare
+`Iterable[T]`. The two differ in WHAT they accept — the same split as Rust's
 `IntoIterator` vs `Iterator`, or Go's `range` vs an iterator value:
 
 * `[S: Iterable[T], T]` — **anything you can iterate.** Built-in `list`/`set`/`map`/`str`/`bytes`/
@@ -2952,7 +2958,10 @@ print(label[Point(1, 2)])        # still "again" — the stored key was snapshot
 ```
 
 **Generic structs** carry type parameters after the name; their fields and methods may use them.
-Type arguments are inferred at construction, or written explicitly in a type annotation.
+Type arguments are inferred at construction, or written explicitly in a type annotation. An expected
+type widens an argument-inferred type argument when every argument still fits it, so
+`b: Box[Named] = Box(A())` is a `Box[Named]`, while `Bag(zs)` with an existing `zs: List[A]` stays
+invariant and is rejected (widening it would silently retype the aliased value everyone else sees).
 
 ```chezzi
 struct Pair[A, B]:
