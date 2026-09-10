@@ -31946,3 +31946,23 @@ fn ticket_107_rebinding_compound_assign_stays_rejected_on_loop_var_and_const() {
         "cannot reassign const binding 's'",
     );
 }
+
+/// TICKET-108 / W12-10 repro -- two structs each declaring a same-named static method with a
+/// default (`fn new(n: int = 1) -> Self`) must resolve `Type.new()` from the struct it is
+/// called on. `receiver_struct_ty` has no arm for a bare struct-name ident head, so `A.new()`
+/// falls into the name-keyed `methods` table and bails on the cross-struct collision.
+#[test]
+fn a_same_named_static_method_on_two_structs_type_checks() {
+    ok_desugared(
+        "struct W108A:\n    v: int\n    fn new(n: int = 1) -> W108A:\n        return W108A(n)\nstruct W108B:\n    v: int\n    fn new(n: int = 1) -> W108B:\n        return W108B(n)\nprint(W108A.new().v)\nprint(W108B.new().v)\n",
+    );
+}
+
+/// TICKET-108 / W12-16(a) repro -- a fn value sitting in a tuple slot must be directly
+/// callable, `t.0(3)`, the same as a fn-typed struct field / list element / map value already
+/// are. `infer_call`'s method-call arm has no guard for a decimal tuple-slot member name, so
+/// `t.0(3)` is routed to method-call resolution and rejected with `has no method '0'`.
+#[test]
+fn a_fn_value_in_a_tuple_slot_is_callable_by_member_syntax() {
+    ok_desugared("fn dbl(x: int) -> int:\n    return x * 2\nt := (dbl, 1)\nprint(t.0(3))\n");
+}
