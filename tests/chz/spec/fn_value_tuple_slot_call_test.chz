@@ -1,0 +1,27 @@
+# W12-16(a)
+fn dbl(x: int) -> int:
+    return x * 2
+
+w1216_hits := 0
+
+fn w1216_bump(n: int) -> int:
+    w1216_hits = w1216_hits + n
+    return w1216_hits
+
+fn w1216_go():
+    t := (w1216_bump, 0)
+    defer t.0(5)
+
+test fn a_tuple_slot_fn_is_callable_directly():
+    t := (dbl, 1)
+    assert t.0(3) == 6, "got {t.0(3)}"
+    assert (t.0)(4) == 8, "got {(t.0)(4)}"
+
+test fn a_tuple_slot_fn_is_callable_from_defer():
+    w1216_go()
+    assert w1216_hits == 5, "got {w1216_hits}"
+
+test fn a_tuple_slot_fn_is_callable_from_spawn():
+    t2 := (dbl, 1)
+    parallel:
+        spawn t2.0(7)

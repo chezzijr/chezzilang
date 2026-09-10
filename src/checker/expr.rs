@@ -86,6 +86,7 @@ impl Checker {
             name,
             name_span,
         } = &callee.kind
+            && !crate::ast::is_tuple_index(name)
         {
             // `module.Struct(args)` — qualified struct constructor. `module` is a bound module name
             // whose sig declares struct `name`. Inject nothing: resolve the constructor through the

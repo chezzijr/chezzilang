@@ -2574,6 +2574,7 @@ impl Compiler {
                     name,
                     name_span,
                 } = &callee.kind
+                    && !crate::ast::is_tuple_index(name)
                 {
                     // Same hidden `Cents(0)` seed the eager `Op::CallMethod` emit pushes: a spawned
                     // member call runs through the identical `Vm::do_method_call`, so a missing seed
@@ -4944,6 +4945,7 @@ impl Compiler {
             name,
             name_span,
         } = &callee.kind
+            && !crate::ast::is_tuple_index(name)
         {
             // `defer xs.sum()` over a scalar-numeric-newtype list needs the same hidden `Cents(0)`
             // seed the eager `Op::CallMethod` emit pushes — `Op::DeferMethod` lands in the very same
@@ -5590,6 +5592,7 @@ impl Compiler {
             name,
             name_span,
         } = &callee.kind
+            && !crate::ast::is_tuple_index(name)
         {
             // TICKET-097 — the type-blind by-name mark: `ys.push(2)` never emits `Op::SetGlobalSlot`,
             // so the sender's `assigned`/`carried` bits for `ys` would otherwise never be set. The

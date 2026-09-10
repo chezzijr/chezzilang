@@ -799,6 +799,11 @@ pub fn is_float_ty(ty: &Type) -> bool {
     matches!(ty, Type::Named { name, .. } if name == "float")
 }
 
+/// True iff `name` is a decimal tuple slot (`t.0`): never a method, field or module member.
+pub fn is_tuple_index(name: &str) -> bool {
+    name.parse::<usize>().is_ok()
+}
+
 /// The kind of an UNTYPED numeric constant expression (see [`const_num`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConstNum {
