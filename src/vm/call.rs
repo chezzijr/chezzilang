@@ -3190,12 +3190,18 @@ impl Vm {
                     // Err(msg) instead of None (trims first, like int()/float()/to_int/to_float).
                     "parse_int" => {
                         self.arity_err("parse_int", args, 0, span)?;
-                        match strip_num_underscores(s.trim()).and_then(|t| t.parse::<i64>().ok()) {
-                            Some(n) => {
+                        match parse_i64_pep515(s.trim()) {
+                            Ok(n) => {
                                 let nv = self.make_int(n);
                                 Ok(self.alloc_enum("Result", "Ok", vec![nv]))
                             }
-                            None => {
+                            Err(IntParseErr::Overflow) => {
+                                let msg = self.alloc_str(format!(
+                                    "'{s}' overflows i64 (range -9223372036854775808..=9223372036854775807)"
+                                ));
+                                Ok(self.alloc_enum("Result", "Err", vec![msg]))
+                            }
+                            Err(IntParseErr::Malformed) => {
                                 let msg =
                                     self.alloc_str(format!("cannot parse '{s}' as an integer"));
                                 Ok(self.alloc_enum("Result", "Err", vec![msg]))

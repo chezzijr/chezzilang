@@ -133,6 +133,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
   `deadlock:` (20/20 runs, 8-11 ms), and no shape hangs. `chezzi run --threads=1` still measures one
   CPU runner (104% cpu, W8-8 unaffected). `cargo test --lib` green (4617 passed, 0 failed, 2 ignored),
   `cargo clippy -- -D warnings` clean.
+- **TICKET-110 (2026-09-10) — seven wave-12 edge fixes, W12-18a/19/20a-d/22.**
+  `int()`/`s.parse_int()` on a well-formed numeral outside i64 now say `overflows i64 (range …)`
+  instead of `cannot parse …`, sharing `parse_i64_pep515` (`src/vm/mod.rs`) with `builtin_int`.
 - **TICKET-102 (2026-09-10) — two checker test helpers minted the same tempdir names.**
   `checker::graph_tests::TmpDir` (`src/checker/mod.rs`) and `checker::tests::TmpDir`
   (`src/checker/tests.rs`) each formatted `chezzi_chk_{pid}_{n}` off their own zero-based counter in

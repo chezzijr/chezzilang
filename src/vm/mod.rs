@@ -5510,6 +5510,28 @@ fn strip_num_underscores(s: &str) -> Option<std::borrow::Cow<'_, str>> {
     strip_num_underscores_radix(s, 10)
 }
 
+/// Why a numeral was rejected by [`parse_i64_pep515`] — a malformed numeral and a well-formed one
+/// outside i64 range get different messages at the caller (W12-18a), the same split
+/// `math.parse_int_base` already makes for the same input.
+pub(crate) enum IntParseErr {
+    Malformed,
+    Overflow,
+}
+
+/// The one PEP-515 (underscore-stripping) base-10 integer parse, shared by every `int()`/
+/// `parse_int`-family caller, so overflow is diagnosed identically everywhere (W12-18a; DEC-098).
+pub(crate) fn parse_i64_pep515(s: &str) -> Result<i64, IntParseErr> {
+    let Some(t) = strip_num_underscores(s) else {
+        return Err(IntParseErr::Malformed);
+    };
+    t.parse::<i64>().map_err(|e| match e.kind() {
+        std::num::IntErrorKind::PosOverflow | std::num::IntErrorKind::NegOverflow => {
+            IntParseErr::Overflow
+        }
+        _ => IntParseErr::Malformed,
+    })
+}
+
 // ===== entry points =====
 
 /// W6-9 — the CAPTURE boundary. The buffered sink is BYTES (so `Writer.write_bytes` reaches an

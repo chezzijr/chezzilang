@@ -14,7 +14,7 @@ test fn int_and_parse_int_overflow_say_overflow_not_cannot_parse():
     match r1:
         Ok(_): assert false, "9223372036854775808 does not fit i64"
         Err(e): assert e.message().contains("overflow"), e.message()
-    r2 := recover: "9223372036854775808".parse_int()
+    r2 := recover: "9223372036854775808".parse_int()?
     match r2:
         Ok(_): assert false, "9223372036854775808 does not fit i64"
         Err(e): assert e.message().contains("overflow"), e.message()

@@ -1717,10 +1717,15 @@ impl Vm {
             match self.heap.get(h) {
                 Obj::Str(s) => {
                     let s = s.to_string();
-                    return match strip_num_underscores(s.trim()).and_then(|t| t.parse::<i64>().ok())
-                    {
-                        Some(n) => Ok(self.make_int(n)),
-                        None => {
+                    return match parse_i64_pep515(s.trim()) {
+                        Ok(n) => Ok(self.make_int(n)),
+                        Err(IntParseErr::Overflow) => Err(self.err(
+                            format!(
+                                "int(): '{s}' overflows i64 (range -9223372036854775808..=9223372036854775807)"
+                            ),
+                            span,
+                        )),
+                        Err(IntParseErr::Malformed) => {
                             Err(self.err(format!("int(): cannot parse '{s}' as an integer"), span))
                         }
                     };

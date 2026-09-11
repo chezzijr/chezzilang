@@ -61,7 +61,7 @@ primitives are Go's, not Python's.
 | `m[k]`, key absent | `key not found: 'zz'` | `KeyError: 'zz'` | **`m.get(k) -> Option[V]`** (Python `dict.get` → `None`) |
 | `xs.remove_at(i)` out of range | `index 9 out of bounds (len 3)` | `IndexError: pop index out of range` | — |
 | `xs.chunk(n)` / `xs.windows(n)`, `n <= 0` | `chunk/window size must be positive, got 0` | `ValueError: n must be at least one` (`itertools.batched`) | — |
-| `int(s)` / `float(s)` on a bad string | `int(): cannot parse 'abc' as an integer` | `ValueError: invalid literal for int() with base 10: 'abc'` | **`s.parse_int()`/`parse_float() -> Result`**, `s.to_int()/to_float() -> Option` |
+| `int(s)` / `float(s)` on a bad string | `int(): cannot parse 'abc' as an integer`; a well-formed numeral outside i64 → `int(): '9223372036854775808' overflows i64 (range …)` (`s.parse_int()` Errs with the same text minus `int(): `) (W12-18a) | `ValueError: invalid literal for int() with base 10: 'abc'` | **`s.parse_int()`/`parse_float() -> Result`**, `s.to_int()/to_float() -> Option` |
 | `chr(code)` out of range | `chr(): -1 is not a valid Unicode codepoint` | `ValueError: chr() arg not in range(0x110000)` | — |
 | `ord(s)` on `""` | `ord() of an empty string` | `TypeError: ord() expected a character, but string of length 0 found` | — |
 | `ord(s)` on a multi-**character** string | `ord() expects a 1-character str, got 2 characters` | `TypeError: ord() expected a character, but string of length 2 found` | — |
