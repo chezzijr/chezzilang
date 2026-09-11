@@ -6,6 +6,7 @@
 # TICKET-111 (docs/gaps.md W12-5) — even where TICKET-105's mechanism carries a changed global,
 # a task-local alias of it crosses as its OWN copy, separate from the module snapshot's copy:
 # the two diverge instead of denoting one object. Source at 40b9a276.
+# TICKET-111 also covers a whole-global alias, a struct inside a global Map, and a global generator.
 import std.concurrency
 
 gl: List[List[int]] = [[1]]
@@ -51,3 +52,49 @@ test fn write_through_param_alias_of_global_is_carried():
     f := c.recv()
     got := f()
     assert got == "[1, 2]", "write through param alias lost: {got}"
+
+gw: List[List[int]] = [[1]]
+
+test fn local_alias_of_a_whole_global_is_not_a_second_copy():
+    a := gw
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            a[0].push(2)
+            r.send("{a} {gw}")
+    got := r.recv()
+    assert got == "[[1, 2]] [[1, 2]]", "whole alias diverged: {got}"
+
+struct P:
+    n: int
+
+gm: Map[str, P] = {"k": P(1)}
+
+test fn local_alias_of_a_struct_in_a_global_map_is_not_a_second_copy():
+    k := "k"
+    p := gm[k]
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            p.n = 5
+            r.send("{p.n} {gm[k].n}")
+    got := r.recv()
+    assert got == "5 5", "struct alias diverged: {got}"
+
+fn count3() -> Iterator[int]:
+    yield 1
+    yield 2
+    yield 3
+
+gg: List[Iterator[int]] = [count3()]
+
+test fn local_alias_of_a_global_generator_is_one_generator():
+    it := gg[0]
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            a := it.next()
+            b := gg[0].next()
+            r.send("{a} {b}")
+    got := r.recv()
+    assert got == "Some(1) Some(2)", "generator alias is two live copies: {got}"

@@ -1532,12 +1532,16 @@ was retired when module globals started deep-copying per task.)
   Measured 2026-09-11: Chezzi and CPython 3.14.7 both print
   `user-method mutation via closure: 3`. Closes `docs/gaps.md` W11-5 and W12-6.
 
-  **Residual (W12-5, TICKET-111): a task-local alias of a global element is a second, independent
-  wire identity.** `inner := gl[0]` crossing in the SAME closure as `gl` itself gives the receiver
-  two separate copies rather than one shared object — CPython and Go both see one. TICKET-105's
-  changed-since-baseline check fixes the VALUES two such copies hold (a push through one alias is
-  now visible through the other's home global once both cross), but not their IDENTITY when both
-  cross together; see `docs/gaps.md` W12-5.
+  **CLOSED (W12-5, TICKET-111): a spawn-crossed alias of a module global is adopted as the global's
+  own object.** `inner := gl[0]` crossing in the SAME closure as `gl` itself — or as a local, a
+  spawn arg, the whole global, a struct inside a global `Map`, or a generator — no longer gives the
+  receiver two separate copies: a snapshot node registry (`Vm::snapshot_nodes`) ties the spawn
+  crossing's id to the module snapshot's, and `fault_module`'s own replay (`Vm::snapshot_adopt`,
+  `adopt_active`) installs the capture's rebuilt object as the global's object, matching CPython and
+  Go. Residuals (unchanged): a Channel-sent closure carrying an alias pushed on the receiver side
+  after the send (G6), a node aliased by globals of two DIFFERENT modules, a container on the slow
+  `SnapValue` path (holds a closure or handle), and `bytearray` (no wire id); see `docs/gaps.md`
+  W12-5.
 
   So a `spawn f()`
   callee whose captured environment contains a nested closure/`fn` (or is itself a bare `fn`) runs

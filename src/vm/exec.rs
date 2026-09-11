@@ -175,6 +175,9 @@ impl Vm {
             root_baseline: None,
             snapshot_rebuild: super::fxhash::FxHashMap::default(),
             snapshot_cells: std::sync::Arc::new(super::fxhash::FxHashMap::default()),
+            snapshot_nodes: std::sync::Arc::new(super::fxhash::FxHashMap::default()),
+            snapshot_adopt: super::fxhash::FxHashMap::default(),
+            adopt_active: false,
             snapshot_next_id: 0,
             snapshot_builds: 0,
             mn: None,
@@ -252,6 +255,10 @@ impl Vm {
         // W7-4c — the snapshot cell registry is heap-keyed too (its KEYS are `GcRef`s into the heap the
         // snapshot was built from), so it travels with the same view for the same reason.
         std::mem::swap(&mut self.snapshot_cells, &mut ctx.snapshot_cells);
+        // TICKET-111 — the snapshot node registry is heap-keyed too, for the same reason.
+        std::mem::swap(&mut self.snapshot_nodes, &mut ctx.snapshot_nodes);
+        // TICKET-111 — pending adoption captures are heap-keyed too, for the same reason.
+        std::mem::swap(&mut self.snapshot_adopt, &mut ctx.snapshot_adopt);
         // W7-4c — the counter travels WITH the registry it numbers; see `FiberCtx::snapshot_cells`.
         // Split them and a fiber resuming on a fresher shell re-mints ids its own registry already
         // uses, merging two unrelated bindings.
@@ -1593,6 +1600,14 @@ impl Vm {
         // in `deep_clone_all`/`lower_task` would then identify with the dead cell's id and merge into
         // the wrong binding. A rooted key is never swept, so never recycled.
         work.extend(self.snapshot_cells.keys().copied());
+        // TICKET-111 — the snapshot node registry's KEYS, load-bearing for the same reason as
+        // `snapshot_cells` above: an unrooted key could be swept and its slot recycled, and adoption
+        // would then identify the wrong node with a live global's id.
+        work.extend(self.snapshot_nodes.keys().copied());
+        // TICKET-111 — the pending-adoption captures' VALUES (the capture's own rebuilt handle, not a
+        // module-global key): load-bearing the same way, so a capture waiting to be adopted by a
+        // module the task has not read yet is never swept out from under it.
+        work.extend(self.snapshot_adopt.values().copied());
         while let Some(h) = work.pop() {
             if self.heap.mark(h) {
                 work.extend(self.heap.children(h));
@@ -1790,6 +1805,8 @@ impl Vm {
             self.snapshot_memo = None;
             // W7-4c — the registry numbers that snapshot; drop it with the cache.
             self.snapshot_cells = std::sync::Arc::new(super::fxhash::FxHashMap::default());
+            // TICKET-111 — the node registry numbers the same snapshot; drop it too.
+            self.snapshot_nodes = std::sync::Arc::new(super::fxhash::FxHashMap::default());
         }
         self.nurseries.push(Vec::new());
         self.mn_scopes.push(None); // lockstep — set Some(scope_id) only if early-enlisted

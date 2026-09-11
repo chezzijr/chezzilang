@@ -696,8 +696,14 @@ impl PendingCall {
 type CellIds = Vec<(GcRef, u32)>;
 
 /// W7-4c — what one `snapshot_modules` build yields: the snapshot, the cell registry keyed by the
-/// heap it was built from, and the next free id (monotonic across builds).
-type SnapshotBuild = (ModuleSnapshot, Arc<fxhash::FxHashMap<GcRef, u32>>, u32);
+/// heap it was built from, the TICKET-111 data-node registry (same keying), and the next free id
+/// (monotonic across builds).
+type SnapshotBuild = (
+    ModuleSnapshot,
+    Arc<fxhash::FxHashMap<GcRef, u32>>,
+    Arc<fxhash::FxHashMap<GcRef, u32>>,
+    u32,
+);
 
 #[derive(Clone)]
 struct QueuedTask {
@@ -1200,6 +1206,26 @@ pub struct Vm {
     /// and merged into the wrong binding. Bounded by the module globals' cell count — clone cells go
     /// on the task (`QueuedTask::cell_ids`), never in here, so a spawn storm does not grow it.
     snapshot_cells: Arc<fxhash::FxHashMap<GcRef, u32>>,
+    /// TICKET-111 — the same registry as `snapshot_cells`, but for adoptable DATA nodes
+    /// (`Vm::is_adoptable_node`): every data node a module global reached in THIS view's snapshot,
+    /// keyed by its `GcRef` in the heap the snapshot was built from. Seeds `WireMemo::base_nodes` so a
+    /// spawn-crossed alias of the same node mints the SAME id, and `snapshot_adopt` then ties the two
+    /// crossings to one object during `fault_module`'s replay only. Reset alongside `snapshot_cells`
+    /// everywhere that field is.
+    snapshot_nodes: Arc<fxhash::FxHashMap<GcRef, u32>>,
+    /// TICKET-111 — this task's spawn-crossed captures, keyed by their adoption id, waiting to be
+    /// installed as the module global's own object the first time `fault_module` replays that
+    /// global. `rebuild_ready` populates it (`prepare_worker`'s adopt ids); `fault_module`'s
+    /// container/generator arms consult it ONLY while `adopt_active`, and each entry is removed once
+    /// consumed. GC-rooted (its VALUES): a module the task never reads keeps its entries alive for the
+    /// task's whole life, bounded by what the task's own captures held at spawn. Cleared in
+    /// `install_snapshot`.
+    snapshot_adopt: fxhash::FxHashMap<u32, GcRef>,
+    /// TICKET-111 — true ONLY for the duration of `fault_module`'s own globals-replay loop. Adoption
+    /// must be scoped this tightly: `RwShared.slice` (`src/vm/netio.rs`) relies on `from_wire_memo`'s
+    /// container arms NOT deduping on any other path, and a `Channel` message's ids are a separate id
+    /// space that could otherwise collide with an adopt id (see `airlock_adoption_is_scoped_to_the_snapshot_replay`).
+    adopt_active: bool,
     /// W7-4c — MONOTONIC id counter across every snapshot this VM builds; never reset, unlike the
     /// per-build `WireMemo::next_id` it seeds. A task pins the snapshot live at its own `spawn`, but a
     /// module-slot write can drop the cache and renumber before the task is prepared. With a monotonic
@@ -1413,6 +1439,14 @@ struct FiberCtx {
     /// scopes, so a registry numbered on shell A resuming on shell B would mint ids that COLLIDE with
     /// its own entries — two unrelated bindings merged into one cell, silently.
     snapshot_cells: Arc<fxhash::FxHashMap<GcRef, u32>>,
+    /// TICKET-111 — the fiber's snapshot node registry (see [`Vm::snapshot_nodes`]). Heap-keyed and
+    /// travels with the heap, for the same reason as `snapshot_cells`.
+    snapshot_nodes: Arc<fxhash::FxHashMap<GcRef, u32>>,
+    /// TICKET-111 — the fiber's pending adoption captures (see [`Vm::snapshot_adopt`]). Heap-keyed
+    /// (its values are `GcRef`s into the heap the fiber owns) and travels with the heap for the same
+    /// reason as `snapshot_rebuild`. `adopt_active` is NOT here — it is true only for the duration of
+    /// one `fault_module` call on the currently-running view, never a state a parked fiber holds.
+    snapshot_adopt: fxhash::FxHashMap<u32, GcRef>,
     snapshot_next_id: u32,
     /// D2b — the fiber's `Executor` handles (GC roots into its own heap; same heap-keyed argument as
     /// `module_objs`). Empty for a fiber with no heap of its own.
@@ -4863,6 +4897,10 @@ impl ReadyWorker {
             snapshot_rebuild: worker.snapshot_rebuild,
             // W7-4c — the registry + its counter travel together (see `FiberCtx::snapshot_cells`).
             snapshot_cells: worker.snapshot_cells,
+            // TICKET-111 — travels with the heap for the same reason as `snapshot_cells`.
+            snapshot_nodes: worker.snapshot_nodes,
+            // TICKET-111 — travels with the heap for the same reason as `snapshot_rebuild`.
+            snapshot_adopt: worker.snapshot_adopt,
             snapshot_next_id: worker.snapshot_next_id,
             executors: worker.executors,
             // M19 Phase 3 — the intern cache indexes `worker.heap`, which becomes `ctx.heap`; carry it

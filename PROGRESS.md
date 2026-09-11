@@ -7,6 +7,15 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-111 (2026-09-11) — a spawn-crossed alias of a module global is adopted as one object
+  (W12-5).** A snapshot node registry (`Vm::snapshot_nodes`, mirrors W7-4c's `snapshot_cells`) ties a
+  spawn crossing's data-node id to the module snapshot's; `snapshot_adopt` carries the spawn
+  capture's rebuilt handle, consumed ONLY inside `fault_module`'s own replay (`adopt_active`) so
+  `RwShared.slice` and a Channel message's own id space are untouched. Covers a local, a spawn arg,
+  the whole global, a struct inside a global `Map`, and a generator (`WireValue::Generator` gained an
+  adoption-only `id`). An adopted node's snapshot subtree is still rebuilt-and-discarded so a later
+  global's `Backref` into it resolves. Residuals unchanged: the sent-closure shape (G6), a node
+  aliased by two different modules, the slow `SnapValue` path, `bytearray`.
 - **TICKET-108 (2026-09-11) — five desugar/parser/checker papercuts: a same-named static method
   across two structs, a fn value in a tuple slot, an fn-type diagnostic's missing optional arity, a
   protocol type alias as a bound, and `a, b := 1, 2` (W12-10 P2; W12-16(a)/(c)/(d), W12-17 P3).**

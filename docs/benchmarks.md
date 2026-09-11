@@ -2222,3 +2222,35 @@ human's answer explicitly named this shape and set no threshold on it (`## Plan`
 repeated-send-of-an-unmutated-large-global loop is the one pattern that pays this on every single
 crossing, because nothing short of a per-view dirty bit (future lever, see `## Decisions`) can
 short-circuit an in-place write that sets no bit.
+
+### TICKET-111 — adopt a spawn-crossed alias into the task's module snapshot (2026-09-11)
+
+`deep_clone_all`/`lower_task` widen their id-reporting filter from cells only to every
+`is_adoptable_node` kind (`List`/`Tuple`/`Map`/`Set`/`Struct`/`Enum`/`NewType`/`Iter`/`Generator`),
+and `WireMemo::mint_node` does one extra hashmap probe per FIRST reach of such a node. Measured on
+`/tmp/t111-base-chezzi` (pre-fix, `328ca780`'s parent) vs this branch's `target/release/chezzi`,
+bash `date +%s.%N`-based (no `hyperfine` on this box), median of 7 interleaved runs each. This box
+runs several pipeline agents concurrently: `uptime` load average went from 1.57 to 12.83 over the
+run below (other tickets' `cargo`/test processes), so the deltas carry more noise than a quiet-box
+measurement would.
+
+| bench | base median | branch median | delta |
+|---|---|---|---|
+| `benches/run.chz` | 0.1989 s | 0.2031 s | +2.1% |
+| `storm120k.chz` (Digest, no aliasing, plain int spawns) | 0.7037 s | 0.7669 s | +9.0% |
+| `nested3000.chz` (Digest, no aliasing) | 1.0278 s | 1.0038 s | -2.3% |
+| `server3000.chz` (Digest, no aliasing) | 2.3094 s | 2.4128 s | +4.5% |
+| `alias3000.chz` (Digest, new — every spawn crosses an adopted alias) | 0.0699 s | 0.0689 s | -1.4% |
+
+No row regresses past the +/-10% threshold. `storm120k.chz` (120000 plain-int spawns, nothing
+adoptable) is the closest, at +9.0% on this run; three other interleaved measurements of it during
+this session (load 1.7-15.3) put it between +4.6% and +13.9%, so its true cost sits close to the
+bar and is dominated by contention noise on this box, not a clean regression — the added cost per
+spawn is one `matches!` check in the widened report filter, paid whether or not anything is
+adoptable. `alias3000.chz`, the shape this ticket exists to make correct, shows no consistent
+slowdown despite every spawn now crossing an adopted alias. Separately, `docs/gaps.md`'s TICKET-100
+20000-way alias-list crossing (`/tmp/t111-bench/alias20k.chz`) still completes in 1.26s (well under
+the 5s the filer's note asked to keep an eye on), and the 16 `--max-heap` fixtures under
+`src/test_runner.rs` (`over_memory_*`, covering `W7-26`/`W7-28`/`W7-29`) all still pass with their
+existing byte-bucket assertions unchanged — `snapshot_nodes`/`snapshot_adopt` being GC-rooted did
+not move the cap accounting.

@@ -3088,11 +3088,11 @@ main()
 }
 
 #[test]
-fn airlock_task_local_alias_of_a_global_is_a_known_residual() {
+fn airlock_task_local_alias_of_a_global_is_one_object() {
     // TICKET-105, G7. A spawn-arg alias (`spawn f(gl[0], r)`) and a whole-value alias (`a := gl`)
-    // are both W12-5 identity residuals (TICKET-111): the task's own copy of the alias diverges
-    // from `gl`'s copy once the task pushes into it. CPython 3.14.7 prints `[1, 2] [1, 2]` and
-    // `[[1, 2]] [[1, 2]]` (measured 2026-09-10); pin today's values.
+    // are both closed by TICKET-111 (W12-5): the task's copy of the alias is now ADOPTED as the
+    // global's own object, so a push through the alias is visible through the global too. CPython
+    // 3.14.7 prints `[1, 2] [1, 2]` and `[[1, 2]] [[1, 2]]` (measured 2026-09-10).
     let src = r#"
 import std.concurrency
 
@@ -3111,9 +3111,9 @@ main()
 "#;
     let out = golden_entry(src);
     assert_eq!(
-        out, "spawn arg alias: [1, 2] [1]\n",
-        "a spawn-arg alias of a global element is a W12-5 identity residual (TICKET-111), \
-         pinned here: {out:?}"
+        out, "spawn arg alias: [1, 2] [1, 2]\n",
+        "a spawn-arg alias of a global element must be adopted as the global's object \
+         (TICKET-111): {out:?}"
     );
 
     let src2 = r#"
@@ -3133,9 +3133,78 @@ main()
 "#;
     let out2 = golden_entry(src2);
     assert_eq!(
-        out2, "whole alias: [[1, 2]] [[1]]\n",
-        "a whole-value alias of a global is a W12-5 identity residual (TICKET-111), pinned \
-         here: {out2:?}"
+        out2, "whole alias: [[1, 2]] [[1, 2]]\n",
+        "a whole-value alias of a global must be adopted as the global's object \
+         (TICKET-111): {out2:?}"
+    );
+}
+
+#[test]
+fn airlock_adopted_alias_keeps_a_later_globals_backref_into_its_old_subtree() {
+    // TICKET-111, gotcha 2. `inner` (a spawn-crossed alias of `gl[0]`) is adopted as the global's
+    // object during the module snapshot's replay, but the snapshot memo cached `y := gl[0][0]`
+    // EARLIER in the nursery, so `y`'s Backref must still resolve into the adopted node's OLD
+    // subtree even though that subtree is discarded rather than installed. CPython 3.14.7 prints
+    // `[] [[]] [1]` (measured 2026-09-11).
+    let src = r#"
+import std.concurrency
+
+gl := [[[1]]]
+y := gl[0][0]
+
+fn main():
+    inner := gl[0]
+    r := Channel[str](2)
+    parallel:
+        spawn:
+            r.send("first")
+        x := inner.pop()
+        spawn:
+            r.send("{inner} {gl} {y}")
+    a := r.recv()
+    b := r.recv()
+    print(b)
+main()
+"#;
+    let out = golden_entry(src);
+    assert_eq!(
+        out, "[] [[]] [1]\n",
+        "a later global's Backref into an adopted alias's discarded subtree must still resolve \
+         (TICKET-111 gotcha 2): {out:?}"
+    );
+}
+
+#[test]
+fn airlock_adoption_is_scoped_to_the_snapshot_replay() {
+    // TICKET-111, gotcha 1. `c`'s received `[[7]]` mints ids in the CHANNEL's own id space
+    // (fresh, starting from 0), which can collide with `snapshot_adopt`'s ids. Adoption must be
+    // consulted ONLY inside `fault_module`'s replay, or the received message's id `0`/`1` could
+    // resolve to an adopted capture node instead of the freshly-received list. CPython 3.14.7
+    // prints `[[7, 5]] [1, 2] [1, 2]` (measured 2026-09-11).
+    let src = r#"
+import std.concurrency
+
+gl := [[1]]
+
+fn main():
+    inner := gl[0]
+    c := Channel[List[List[int]]](1)
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            m := c.recv()
+            m[0].push(5)
+            inner.push(2)
+            r.send("{m} {inner} {gl[0]}")
+        c.send([[7]])
+    print(r.recv())
+main()
+"#;
+    let out = golden_entry(src);
+    assert_eq!(
+        out, "[[7, 5]] [1, 2] [1, 2]\n",
+        "adoption must be scoped to fault_module's replay, never a Channel message's own id \
+         space (TICKET-111 gotcha 1): {out:?}"
     );
 }
 

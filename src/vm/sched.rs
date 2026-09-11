@@ -84,6 +84,9 @@ struct WireMemo {
     /// shape W7-4 already rejected for `to_snap`'s speculative rollback. Never written: new ids go to
     /// `cells`, which shadows it, so `try_wire_speculative`'s rollback stays exact.
     base_cells: Option<Arc<super::fxhash::FxHashMap<GcRef, u32>>>,
+    /// TICKET-111 — read-only snapshot node registry consulted when a data node is first reached;
+    /// never written, never set on a memo that speculates.
+    base_nodes: Option<Arc<super::fxhash::FxHashMap<GcRef, u32>>>,
     /// Ids from `cells` already EMITTED (as a full `WireValue::Cell`) under the current `gen`. Equal to
     /// `cells`' id set unless `elem_split` is on.
     emitted: super::fxhash::FxHashMap<u32, u32>,
@@ -156,6 +159,22 @@ impl WireMemo {
         self.path.remove(&h);
     }
 
+    /// TICKET-111 — the id to mint for a data node's FIRST reach this crossing: the snapshot
+    /// registry's id for `h` if it holds one (ties this crossing to the module snapshot's
+    /// replay, W12-5 adoption), else a fresh id.
+    fn mint_node(&mut self, h: GcRef) -> u32 {
+        if let Some(id) = self
+            .base_nodes
+            .as_ref()
+            .and_then(|base| base.get(&h).copied())
+        {
+            return id;
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
     /// TICKET-100 — record a generator reach: always on the DFS stack (`gens_on_stack`), and (unless
     /// `elem_split`) also in `gens_seen`, journaling the insertion in `gens_undo` while `speculating`
     /// so a discarded attempt can roll it back.
@@ -164,6 +183,21 @@ impl WireMemo {
         if !self.elem_split && self.gens_seen.insert(h) && self.speculating {
             self.gens_undo.push(h);
         }
+    }
+}
+
+impl Vm {
+    /// TICKET-111 — the pending adoption capture for `id`, if this is `fault_module`'s own replay
+    /// (`adopt_active`) and this task's `snapshot_adopt` still holds one. Consuming (`remove`), so a
+    /// second reach of the same id within the same replay mints/rebuilds fresh instead of re-adopting
+    /// an already-claimed handle. `None` on EVERY other path that reaches `from_wire_memo` — a Channel
+    /// message's ids are a separate id space that must never be checked against this map (gotcha 1,
+    /// `airlock_adoption_is_scoped_to_the_snapshot_replay`).
+    fn adopt_node(&mut self, id: u32) -> Option<GcRef> {
+        if !self.adopt_active {
+            return None;
+        }
+        self.snapshot_adopt.remove(&id)
     }
 }
 
@@ -2989,8 +3023,13 @@ impl Vm {
         // entirely — that is every program whose module globals hold no closure over a captured local.
         let base_cells =
             (!self.snapshot_cells.is_empty()).then(|| Arc::clone(&self.snapshot_cells));
+        // TICKET-111 — same idea for data nodes: a spawn-crossed alias of a module global mints the
+        // registry's id, so `rebuild_ready` can later adopt it as the global's own object.
+        let base_nodes =
+            (!self.snapshot_nodes.is_empty()).then(|| Arc::clone(&self.snapshot_nodes));
         let mut memo = WireMemo {
             base_cells,
+            base_nodes,
             next_id: seed_ceiling,
             ..WireMemo::default()
         };
@@ -3012,12 +3051,20 @@ impl Vm {
         // Otherwise report only ids BELOW the seed ceiling: those are the registry's, the only ones the
         // snapshot can also use. Ids this walk minted are above every snapshot id (the counter is
         // monotonic), so they can never collide and carrying them would just cost.
-        let cell_ids: super::CellIds = if self.snapshot_cells.is_empty() {
+        // TICKET-111 — containers and generators now report too, alongside cells: `lower_task` splits
+        // this list back apart by kind, so a data-node id also ties this crossing to the module
+        // snapshot's replay (adoption), the same way a cell id always has.
+        let cell_ids: super::CellIds = if self.snapshot_cells.is_empty()
+            && self.snapshot_nodes.is_empty()
+        {
             Vec::new()
         } else {
             rebuild
                 .iter()
-                .filter(|&(&id, &h)| id < seed_ceiling && matches!(self.heap.get(h), Obj::Cell(_)))
+                .filter(|&(&id, &h)| {
+                    id < seed_ceiling
+                        && (matches!(self.heap.get(h), Obj::Cell(_)) || self.is_adoptable_node(h))
+                })
                 .map(|(&id, &h)| (h, id))
                 .collect()
         };
@@ -3183,6 +3230,25 @@ impl Vm {
             ),
             _ => false,
         }
+    }
+
+    /// TICKET-111 — true iff `h` is a data node kind eligible for the snapshot node registry / adoption:
+    /// every identity-preserved container plus `Generator`, EXCLUDING `Cell` (tied separately via
+    /// `snapshot_cells`, W7-4c) and `Closure` (never adopted — a closure's identity is its own binding,
+    /// not a spawn-crossed alias target).
+    pub(super) fn is_adoptable_node(&self, h: GcRef) -> bool {
+        matches!(
+            self.heap.get(h),
+            Obj::List(_)
+                | Obj::Tuple(_)
+                | Obj::Map(_)
+                | Obj::Set(_)
+                | Obj::Struct { .. }
+                | Obj::Enum { .. }
+                | Obj::NewType { .. }
+                | Obj::Iter { .. }
+                | Obj::Generator(_)
+        )
     }
 
     /// TICKET-105 — this view's own baseline for module `home`'s slot `slot`: a worker's baseline is
@@ -3410,8 +3476,7 @@ impl Vm {
                     if let Some(id) = memo.seen(h) {
                         WireValue::Backref(id)
                     } else {
-                        let id = memo.next_id;
-                        memo.next_id += 1;
+                        let id = memo.mint_node(h);
                         memo.enter(h, id);
                         let mut out = Vec::with_capacity(items.len());
                         for x in items {
@@ -3425,8 +3490,7 @@ impl Vm {
                     if let Some(id) = memo.seen(h) {
                         WireValue::Backref(id)
                     } else {
-                        let id = memo.next_id;
-                        memo.next_id += 1;
+                        let id = memo.mint_node(h);
                         memo.enter(h, id);
                         let mut out = Vec::with_capacity(items.len());
                         for x in items {
@@ -3440,8 +3504,7 @@ impl Vm {
                     if let Some(id) = memo.seen(h) {
                         WireValue::Backref(id)
                     } else {
-                        let id = memo.next_id;
-                        memo.next_id += 1;
+                        let id = memo.mint_node(h);
                         memo.enter(h, id);
                         let mut out = Vec::with_capacity(m.entries.len());
                         for (hash, k, val) in &m.entries {
@@ -3459,8 +3522,7 @@ impl Vm {
                     if let Some(id) = memo.seen(h) {
                         WireValue::Backref(id)
                     } else {
-                        let id = memo.next_id;
-                        memo.next_id += 1;
+                        let id = memo.mint_node(h);
                         memo.enter(h, id);
                         let mut out = Vec::with_capacity(s.entries.len());
                         for (hash, e) in &s.entries {
@@ -3476,8 +3538,7 @@ impl Vm {
                     if let Some(id) = memo.seen(h) {
                         WireValue::Backref(id)
                     } else {
-                        let id = memo.next_id;
-                        memo.next_id += 1;
+                        let id = memo.mint_node(h);
                         memo.enter(h, id);
                         // Positional layout: recover the declaration-order field names from the
                         // StructDef (cold cross-task path) so the WireValue encoding is unchanged.
@@ -3519,8 +3580,7 @@ impl Vm {
                     if let Some(id) = memo.seen(h) {
                         WireValue::Backref(id)
                     } else {
-                        let id = memo.next_id;
-                        memo.next_id += 1;
+                        let id = memo.mint_node(h);
                         memo.enter(h, id);
                         let mut out = Vec::with_capacity(payload.len());
                         for x in payload {
@@ -3543,8 +3603,7 @@ impl Vm {
                     if let Some(id) = memo.seen(h) {
                         WireValue::Backref(id)
                     } else {
-                        let id = memo.next_id;
-                        memo.next_id += 1;
+                        let id = memo.mint_node(h);
                         memo.enter(h, id);
                         let winner = self.to_wire_depth(*inner, depth + 1, memo)?;
                         memo.exit(h);
@@ -3612,6 +3671,13 @@ impl Vm {
                         ));
                     }
                     memo.gen_enter(h);
+                    // TICKET-111 — an adoption-only id: never a `Backref` target (DEC-100's second-reach
+                    // reject still fires above), so this is skipped when `elem_split` is on, same as
+                    // every other identity-preserved node's `nodes` entry.
+                    let id = memo.mint_node(h);
+                    if !memo.elem_split {
+                        memo.nodes.insert(h, id);
+                    }
                     let home = self.home_index(g.home);
                     let closure = match g.closure {
                         Some(c) => Some(Box::new(self.to_wire_depth(
@@ -3695,6 +3761,7 @@ impl Vm {
                     // later off-stack revisit within this same crossing instead of deep-copying it.
                     memo.gens_on_stack.remove(&h);
                     WireValue::Generator {
+                        id,
                         proto: g.proto,
                         home,
                         closure,
@@ -3753,8 +3820,7 @@ impl Vm {
                     if let Some(id) = memo.seen(h) {
                         WireValue::Backref(id)
                     } else {
-                        let id = memo.next_id;
-                        memo.next_id += 1;
+                        let id = memo.mint_node(h);
                         memo.enter(h, id);
                         let pos = *pos;
                         let items = items.clone();
@@ -3999,6 +4065,14 @@ impl Vm {
             // collects, so no GC runs between the placeholder and the patch. (Nothing READS the
             // placeholder's contents mid-reconstruction — only its handle identity is observed.)
             WireValue::List { id, items } => {
+                // TICKET-111 — adopted: this capture IS the module global's object. Still discard-
+                // rebuild the children so every id they define registers (gotcha 2), then return the
+                // adopted handle instead of a fresh one.
+                if let Some(h) = self.adopt_node(id) {
+                    rebuild.insert(id, h);
+                    self.rebuild_items(items, rebuild, |x| x);
+                    return Value::obj(h);
+                }
                 let h = self.heap.alloc(Obj::List(Vec::new()));
                 rebuild.insert(id, h);
                 let cloned = self.rebuild_items(items, rebuild, |x| x);
@@ -4006,6 +4080,11 @@ impl Vm {
                 Value::obj(h)
             }
             WireValue::Tuple { id, items } => {
+                if let Some(h) = self.adopt_node(id) {
+                    rebuild.insert(id, h);
+                    self.rebuild_items(items, rebuild, |x| x);
+                    return Value::obj(h);
+                }
                 let h = self.heap.alloc(Obj::Tuple(Vec::new()));
                 rebuild.insert(id, h);
                 let cloned = self.rebuild_items(items, rebuild, |x| x);
@@ -4013,6 +4092,11 @@ impl Vm {
                 Value::obj(h)
             }
             WireValue::Iter { id, items, pos } => {
+                if let Some(h) = self.adopt_node(id) {
+                    rebuild.insert(id, h);
+                    self.rebuild_items(items, rebuild, |x| x);
+                    return Value::obj(h);
+                }
                 let h = self.heap.alloc(Obj::Iter {
                     items: Vec::new(),
                     pos,
@@ -4026,6 +4110,14 @@ impl Vm {
                 Value::obj(h)
             }
             WireValue::Map { id, entries } => {
+                if let Some(h) = self.adopt_node(id) {
+                    rebuild.insert(id, h);
+                    for (_, k, val) in entries {
+                        self.from_wire_memo(k, rebuild);
+                        self.from_wire_memo(val, rebuild);
+                    }
+                    return Value::obj(h);
+                }
                 let h = self.heap.alloc(Obj::Map(MapData::default()));
                 rebuild.insert(id, h);
                 // Reconstruction reuses the CARRIED hash (`push(hash, …)`) — never re-hashes a
@@ -4040,6 +4132,13 @@ impl Vm {
                 Value::obj(h)
             }
             WireValue::Set { id, entries } => {
+                if let Some(h) = self.adopt_node(id) {
+                    rebuild.insert(id, h);
+                    for (_, e) in entries {
+                        self.from_wire_memo(e, rebuild);
+                    }
+                    return Value::obj(h);
+                }
                 let h = self.heap.alloc(Obj::Set(SetData::default()));
                 rebuild.insert(id, h);
                 let mut out = SetData::default();
@@ -4051,6 +4150,11 @@ impl Vm {
                 Value::obj(h)
             }
             WireValue::Struct { id, name, fields } => {
+                if let Some(h) = self.adopt_node(id) {
+                    rebuild.insert(id, h);
+                    self.rebuild_items(fields, rebuild, |(_, val)| val);
+                    return Value::obj(h);
+                }
                 // Positional layout: the wire fields arrive in declaration order (to_wire emits
                 // them so), so rebuild positionally — the carried names are discarded.
                 let tid = self.struct_tid(&name);
@@ -4071,6 +4175,11 @@ impl Vm {
                 variant_id,
                 payload,
             } => {
+                if let Some(h) = self.adopt_node(id) {
+                    rebuild.insert(id, h);
+                    self.rebuild_items(payload, rebuild, |x| x);
+                    return Value::obj(h);
+                }
                 let h = self.heap.alloc(Obj::Enum {
                     variant_id,
                     payload: Vec::new(),
@@ -4090,6 +4199,11 @@ impl Vm {
                 type_key,
                 inner,
             } => {
+                if let Some(h) = self.adopt_node(id) {
+                    rebuild.insert(id, h);
+                    self.from_wire_memo(*inner, rebuild);
+                    return Value::obj(h);
+                }
                 let h = self.heap.alloc(Obj::NewType {
                     type_key,
                     inner: Value::nil(),
@@ -4219,18 +4333,39 @@ impl Vm {
             // so it can construct the private `CallFrame`/`GenCtx`/`GeneratorCore`). The rebuilt frame's
             // `home`/`closure` reuse the core's rebuilt `GcRef`s (they were equal at serialize time).
             WireValue::Generator {
+                id,
                 proto,
                 home,
                 closure,
                 state,
             } => {
+                // TICKET-111 — adopted: this capture IS the module global's object. Still rebuild the
+                // closure/parked children so every id their subtree defines registers (gotcha 2 — a
+                // later global's Backref into this discarded subtree must still resolve), then discard
+                // the result and return the adopted handle.
+                if let Some(h) = self.adopt_node(id) {
+                    rebuild.insert(id, h);
+                    if let Some(c) = closure {
+                        self.from_wire_memo(*c, rebuild);
+                    }
+                    match state {
+                        WireGenState::Pending(wargs) => {
+                            self.rebuild_items(wargs, rebuild, |w| w);
+                        }
+                        WireGenState::Suspended { stack, .. } => {
+                            self.rebuild_items(stack, rebuild, |w| w);
+                        }
+                        WireGenState::Done => {}
+                    }
+                    return Value::obj(h);
+                }
                 let home = self.worker_home(home);
                 let closure = closure.map(|c| {
                     self.from_wire_memo(*c, rebuild)
                         .as_obj()
                         .expect("a generator's backing closure wire rebuilds to a heap object")
                 });
-                match state {
+                let g = match state {
                     WireGenState::Pending(wargs) => {
                         let args = self.rebuild_items(wargs, rebuild, |w| w);
                         self.alloc_generator(proto, home, closure, args)
@@ -4289,7 +4424,11 @@ impl Vm {
                         };
                         Value::obj(self.heap.alloc(Obj::Generator(Box::new(core))))
                     }
-                }
+                };
+                // TICKET-111 — a generator's id is adoption-only (never a `Backref` target, DEC-100),
+                // but `rebuild_ready` still needs its rebuilt handle to seed `snapshot_adopt`.
+                rebuild.insert(id, g.as_obj().expect("generator rebuilds to a heap object"));
+                g
             }
         }
     }
@@ -4454,6 +4593,17 @@ impl Vm {
         snap: Option<Arc<ModuleSnapshot>>,
         cell_ids: &[(GcRef, u32)],
     ) -> Result<ReadyWorker, RuntimeError> {
+        // TICKET-111 — `cell_ids` now mixes cells and adoptable data-node ids (see `deep_clone_all`'s
+        // report filter); split them so `share` (the cell-sharing prune below) only fires on an actual
+        // cell, and the data-node ids can seed `snapshot_adopt` in `rebuild_ready`.
+        let share = cell_ids
+            .iter()
+            .any(|&(h, _)| matches!(self.heap.get(h), Obj::Cell(_)));
+        let adopt_ids: Vec<u32> = cell_ids
+            .iter()
+            .filter(|&&(h, _)| !matches!(self.heap.get(h), Obj::Cell(_)))
+            .map(|&(_, id)| id)
+            .collect();
         // 1. Lower the task to a `Send` description in THIS (parent) heap (read-only serialize),
         //    rejecting any value that can't cross a heap boundary as-is.
         let lowered = self.lower_task(task, cell_ids)?;
@@ -4469,7 +4619,7 @@ impl Vm {
         };
         let mut worker = self.spawn_worker();
         worker.install_snapshot(snap);
-        let (call, span) = worker.rebuild_ready(lowered, !cell_ids.is_empty());
+        let (call, span) = worker.rebuild_ready(lowered, share, &adopt_ids);
         Ok(ReadyWorker { worker, call, span })
     }
 
@@ -4514,8 +4664,23 @@ impl Vm {
             .max()
             .unwrap_or(0)
             .max(self.snapshot_next_id);
+        // TICKET-111 — `cell_ids` now also carries `deep_clone_all`'s adoptable data-node ids
+        // (see that fn's report filter): split them back apart by heap kind so a data node ties to
+        // the snapshot's node registry (`base_nodes`) rather than being mistaken for a cell.
+        let (cells, node_ids): (Vec<_>, Vec<_>) = cell_ids
+            .iter()
+            .copied()
+            .partition(|&(h, _)| matches!(self.heap.get(h), Obj::Cell(_)));
+        let base_nodes = (!node_ids.is_empty()).then(|| {
+            Arc::new(
+                node_ids
+                    .into_iter()
+                    .collect::<super::fxhash::FxHashMap<_, _>>(),
+            )
+        });
         let mut memo = WireMemo {
-            cells: cell_ids.iter().copied().collect(),
+            cells: cells.into_iter().collect(),
+            base_nodes,
             next_id,
             ..WireMemo::default()
         };
@@ -4619,7 +4784,12 @@ impl Vm {
     /// captures; a `Method`'s receiver before its args), so a cell shared between an arg and a capture
     /// is rebuilt once and both references tie to it — and no `Backref` is ever reached before the
     /// `WireValue::Cell` that defines it.
-    pub(super) fn rebuild_ready(&mut self, lowered: Lowered, share: bool) -> (ReadyCall, Span) {
+    pub(super) fn rebuild_ready(
+        &mut self,
+        lowered: Lowered,
+        share: bool,
+        adopt_ids: &[u32],
+    ) -> (ReadyCall, Span) {
         // W7-4c — when this task carries snapshot-numbered cells, rebuild into the SAME map
         // `fault_module` drains, so a cell its captures rebuild is the one the module snapshot's later,
         // lazy replay ties to (both sides emit full definitions under the shared id; `from_wire_memo`
@@ -4686,6 +4856,15 @@ impl Vm {
                 (ReadyCall::Method { recv, name, args }, span)
             }
         };
+        // TICKET-111 — copy each adopt id's just-rebuilt handle into `snapshot_adopt`, so this task's
+        // OWN module-global fault (`fault_module`) can adopt it as the global's object instead of
+        // rebuilding a second copy. Must happen before the cell-only prune below (`owned` still holds
+        // both cells and data nodes here).
+        for &id in adopt_ids {
+            if let Some(&h) = owned.get(&id) {
+                self.snapshot_adopt.insert(id, h);
+            }
+        }
         // W7-4c — prune to cells, for the same reason `fault_module` does: only a cell can be
         // back-referenced by a LATER, separate serialization (the module snapshot's), and keeping the
         // task's whole rebuilt object graph in a `Vm`-lived GC root would make it immortal.
@@ -5170,11 +5349,12 @@ impl Vm {
         // so a later `deep_clone_all`/`lower_task` can serialize the same binding under the same id.
         // On failure nothing is stored (the build path caches only on success), so a faulted snapshot
         // never leaves a half-registry behind.
-        let (built, cells, next_id) = self
+        let (built, cells, nodes, next_id) = self
             .snapshot_modules(self.snapshot_next_id)
             .map_err(|e| self.err(e.message, span))?;
         let snap = Arc::new(built);
         self.snapshot_cells = cells;
+        self.snapshot_nodes = nodes;
         self.snapshot_next_id = next_id;
         self.snapshot_builds += 1;
         // Cache unconditionally: consecutive `spawn`s into one nursery must not each rebuild the whole
@@ -5201,6 +5381,11 @@ impl Vm {
         let mut modules = Vec::with_capacity(self.module_objs.len());
         // W6-2 — computed inside the walk that already visits every global (no extra traversal).
         let mut reusable = true;
+        // TICKET-111 — the snapshot node registry, harvested from `memo.nodes` after EACH module's
+        // globals loop (before the next module clears it): first module wins, mirroring `snapshot_cells`.
+        // Filtered to `is_adoptable_node` — this registry never carries a `Cell` (that is
+        // `snapshot_cells`'s job) or a `Closure` (never adopted).
+        let mut nodes = super::fxhash::FxHashMap::default();
         // W7-4a — ONE [`WireMemo`] spans EVERY module, matched by the one `Vm`-lived rebuild map
         // `fault_module` drains ([`Vm::snapshot_rebuild`]) — the scope invariant of `deep_clone_all`,
         // now at snapshot scope. A memo per module gave a cell reached from globals in two DIFFERENT
@@ -5275,6 +5460,13 @@ impl Vm {
                 reusable &= self.slot_snapshot_reusable(v);
                 snapped.push((k, self.to_snap(v, &mut memo)?));
             }
+            // TICKET-111 — harvest THIS module's data-node ids before the next iteration clears
+            // `memo.nodes`; first module wins (`or_insert`), same tie-break as `snapshot_cells`.
+            for (&h, &id) in &memo.nodes {
+                if self.is_adoptable_node(h) {
+                    nodes.entry(h).or_insert(id);
+                }
+            }
             // TICKET-105 — fold this view's own alias write into `carried`, so a value this view
             // changed in place (with no slot write to set `assigned`/`carried` above) still reaches
             // whatever task is snapshotted from here (DEC-097: sets `carried` only, never `assigned`).
@@ -5305,6 +5497,7 @@ impl Vm {
         Ok((
             ModuleSnapshot { modules, reusable },
             Arc::new(memo.cells),
+            Arc::new(nodes),
             memo.next_id,
         ))
     }
@@ -5419,6 +5612,10 @@ impl Vm {
     ) -> Option<WireValue> {
         debug_assert!(memo.path.is_empty() && memo.gens_on_stack.is_empty());
         debug_assert!(!memo.speculating, "try_wire_speculative must not nest");
+        debug_assert!(
+            memo.base_nodes.is_none(),
+            "a speculating memo must not carry base_nodes: the watermark rollback cannot undo a base id"
+        );
         let mint_from = memo.next_id;
         memo.emit_undo.clear();
         memo.gens_undo.clear();
@@ -5744,6 +5941,11 @@ impl Vm {
         // NESTED nursery's tasks fall back to pre-W7-4c behavior (two bindings) until this worker
         // builds a snapshot of its own — a missed optimisation, never a wrong merge.
         self.snapshot_cells = Arc::new(super::fxhash::FxHashMap::default());
+        // TICKET-111 — same reasoning: a fresh worker starts with no node registry either.
+        self.snapshot_nodes = Arc::new(super::fxhash::FxHashMap::default());
+        // TICKET-111 — a fresh worker has no pending adoption captures of its own yet either (they are
+        // populated per-task by `rebuild_ready`, after this runs).
+        self.snapshot_adopt.clear();
         // W6-2 — seed the cache from the snapshot being installed: this view IS a faithful replay of
         // `snap`, so a nested `spawn` that changed nothing reuses it for free instead of materializing
         // + re-walking every global. The two invalidation rules still apply to it: a slot write drops it,
@@ -5775,6 +5977,8 @@ impl Vm {
         // snapshot rather than mutating the view, so the registry rides the same take/restore the
         // cache does.
         let saved_cells = std::mem::take(&mut self.snapshot_cells);
+        // TICKET-111 — the node registry rides the same take/restore, for the same reason.
+        let saved_nodes = std::mem::take(&mut self.snapshot_nodes);
         // W7-4a: ONE rebuild map for the WHOLE view's replay, mirroring the one `WireMemo`
         // `snapshot_modules` now spans every module with (scope invariant — see `deep_clone_all`), so
         // two globals over one captured local rebuild ONE cell whether they live in the same module or
@@ -5793,10 +5997,16 @@ impl Vm {
         // miss is never charged to the next unrelated `from_wire` caller's assert. Loud in debug; in
         // release the miss still degrades to `nil` rather than aborting the host.
         self.wire_backref_missing = false;
+        // TICKET-111 — adoption is consulted ONLY across this module's own replay: `RwShared.slice`
+        // (`src/vm/netio.rs`) relies on `from_wire_memo`'s container/generator arms NOT deduping on
+        // any other path, and a `Channel` message's ids are a separate id space that must never be
+        // checked against `snapshot_adopt` (gotcha 1).
+        self.adopt_active = !self.snapshot_adopt.is_empty();
         for (name, sv) in &snap.modules[idx].globals {
             let val = self.replay_snap(sv, &mut rb);
             self.module_define(module, name, val);
         }
+        self.adopt_active = false;
         debug_assert!(
             !self.wire_backref_missing,
             "fault_module: a module global's replay hit a dangling Backref — a discarded speculative \
@@ -5819,6 +6029,7 @@ impl Vm {
         self.snapshot_rebuild = rb;
         self.snapshot_memo = memo;
         self.snapshot_cells = saved_cells;
+        self.snapshot_nodes = saved_nodes;
         // TICKET-051 — carry the source view's `carried` lineage into this replayed view, OR-ed in
         // (never touching `assigned`: a replay is not this view's own write). Never routed through
         // `module_define`, which would drop the `snapshot_memo`/`snapshot_cells` this fault just

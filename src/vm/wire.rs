@@ -276,6 +276,9 @@ pub enum WireValue {
     /// more than one parked frame is a HARD ARM (`to_wire` rejects cleanly) — but both are
     /// checker-unreachable, so the reject is only a defensive guard against the type-blind compiler.
     Generator {
+        /// TICKET-111 — adoption id only: a second reach inside one crossing is still rejected
+        /// (DEC-100), so no Backref ever targets it.
+        id: u32,
         proto: ProtoId,
         home: Option<usize>,
         closure: Option<Box<WireValue>>,
