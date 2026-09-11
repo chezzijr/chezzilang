@@ -17,7 +17,9 @@ import std.time
 # where the fixed path is slower than release. At n=150 000, measured 2026-09-06: release base
 # 6.390s / 6.377s, release fixed 0.0925s / 0.0713s, debug fixed 0.731s / 0.569s -- so `< 2.0s`
 # clears the fixed debug run with headroom while the pre-fix release binary still misses it 3x
-# over. n=200 000 is deliberately avoided: the pre-fix release binary did not finish a 200 000-char
+# over. Widened to `< 4.0s` on 2026-09-11 (TICKET-115 / W12-23 family): under 24 CPU hogs the
+# debug run measured 2.103s and went red about 1 gate in 10; 4.0s still sits 1.6x under the
+# pre-fix release time, so a quadratic regression is still caught. n=200 000 is deliberately avoided: the pre-fix release binary did not finish a 200 000-char
 # parse in 600s. The bound below is wall-clock but hugely discriminating, not tight (same
 # convention as cancel_test.chz).
 test fn parse_large_string_is_not_quadratic():
@@ -29,7 +31,7 @@ test fn parse_large_string_is_not_quadratic():
     match r:
         Ok(_): assert true
         Err(e): assert false, "expected Ok: " + e.message()
-    assert d < 2.0, "json.parse({n}-char string) took {d}s, expected < 2.0s"
+    assert d < 4.0, "json.parse({n}-char string) took {d}s, expected < 4.0s"
 
 test fn stringify_large_string_is_not_quadratic():
     n := 150000
