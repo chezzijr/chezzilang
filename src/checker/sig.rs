@@ -4868,6 +4868,37 @@ impl Checker {
         ty
     }
 
+    /// Tuple-destructuring `for a, b, … in xs` (N > 1 names): bind each name to the matching slot of
+    /// a TUPLE element type — the bindings `a, b := t` would give inside a one-name loop, which is
+    /// how `compile_for` lowers it (`GetField(j)` on each element, on every iteration path). `None`
+    /// when the element is not a tuple, so the caller reports it in its own iterand-specific words;
+    /// an arity mismatch is reported here, once for every source (TICKET-113).
+    fn for_tuple_bindings(
+        &mut self,
+        vars: &[String],
+        elem: &Ty,
+        span: Span,
+    ) -> Option<Vec<(String, Ty)>> {
+        match elem {
+            Ty::Tuple(ts) if ts.len() == vars.len() => {
+                Some(vars.iter().cloned().zip(ts.iter().cloned()).collect())
+            }
+            Ty::Tuple(ts) => {
+                self.error(
+                    span,
+                    format!(
+                        "tuple-destructuring `for` binds {} names but the element has {} ({elem})",
+                        vars.len(),
+                        ts.len()
+                    ),
+                );
+                Some(vars.iter().map(|v| (v.clone(), Ty::Unknown)).collect())
+            }
+            Ty::Unknown => Some(vars.iter().map(|v| (v.clone(), Ty::Unknown)).collect()),
+            _ => None,
+        }
+    }
+
     pub(super) fn for_bindings(&mut self, vars: &[String], iter: &Expr) -> Vec<(String, Ty)> {
         let unknowns = |vars: &[String]| vars.iter().map(|v| (v.clone(), Ty::Unknown)).collect();
         // Ranges are syntactic and always yield a single int.
@@ -4902,26 +4933,22 @@ impl Checker {
             // Tuple-destructuring `for`: over a `list[(A, B, …)]` with N>1 names, bind each name to
             // the matching tuple element. One name still binds the whole tuple (the `Ty::List` arm
             // below). A list of non-tuples (or an arity mismatch) with N>1 names is an error.
-            Ty::List(inner) if vars.len() > 1 => match &**inner {
-                Ty::Tuple(ts) if ts.len() == vars.len() => {
-                    vars.iter().cloned().zip(ts.iter().cloned()).collect()
+            Ty::List(inner) if vars.len() > 1 => {
+                match self.for_tuple_bindings(vars, inner, iter.span) {
+                    Some(bindings) => bindings,
+                    None => {
+                        self.error(
+                            iter.span,
+                            format!("`for k, v` requires a map or a list of tuples, found {it}"),
+                        );
+                        unknowns(vars)
+                    }
                 }
-                Ty::Tuple(ts) => {
-                    self.error(iter.span, format!(
-                        "tuple-destructuring `for` binds {} names but the element has {} ({inner})",
-                        vars.len(), ts.len()
-                    ));
-                    unknowns(vars)
-                }
-                Ty::Unknown => unknowns(vars),
-                _ => {
-                    self.error(
-                        iter.span,
-                        format!("`for k, v` requires a map or a list of tuples, found {it}"),
-                    );
-                    unknowns(vars)
-                }
-            },
+            }
+            // `for a, b in ch` over a `Channel[(A, B)]`: each received tuple destructures (TICKET-113).
+            Ty::Channel(elem) if vars.len() > 1 && matches!(**elem, Ty::Tuple(_)) => self
+                .for_tuple_bindings(vars, elem, iter.span)
+                .expect("a tuple element always binds"),
             Ty::Str | Ty::Bytes | Ty::ByteArray | Ty::Set(_) | Ty::Channel(_)
                 if vars.len() != 1 =>
             {
@@ -4952,27 +4979,38 @@ impl Checker {
                         .and_then(|b| b.args.first().cloned())
                 });
                 match arg {
-                    Some(_) if vars.len() != 1 => {
-                        self.error(iter.span, format!("`for k, v` requires a map, found {it}"));
-                        unknowns(vars)
+                    Some(t) => {
+                        let elem = self.resolve_type(&t, iter.span);
+                        if vars.len() == 1 {
+                            vec![(vars[0].clone(), elem)]
+                        } else if let Some(bindings) =
+                            self.for_tuple_bindings(vars, &elem, iter.span)
+                        {
+                            bindings
+                        } else {
+                            self.error(iter.span, format!("`for k, v` requires a map, found {it}"));
+                            unknowns(vars)
+                        }
                     }
-                    Some(t) => vec![(vars[0].clone(), self.resolve_type(&t, iter.span))],
                     None => {
                         self.error(iter.span, format!("cannot iterate over {it}"));
                         unknowns(vars)
                     }
                 }
             }
-            // A generator result `Iterator[T]` (experimental, VM-only) binds a single element of T.
+            // A generator result or `.iter()` cursor `Iterator[T]` binds one element of T, or N names over a tuple T.
             Ty::Struct(name, args) if name == "Iterator" && args.len() == 1 => {
-                if vars.len() != 1 {
-                    self.error(
-                        iter.span,
-                        "a generator iterator binds a single loop variable",
-                    );
-                    return unknowns(vars);
+                if vars.len() == 1 {
+                    return vec![(vars[0].clone(), args[0].clone())];
                 }
-                vec![(vars[0].clone(), args[0].clone())]
+                if let Some(bindings) = self.for_tuple_bindings(vars, &args[0], iter.span) {
+                    return bindings;
+                }
+                self.error(
+                    iter.span,
+                    "a generator iterator binds a single loop variable",
+                );
+                unknowns(vars)
             }
             _ if self.iterable_elem(&it).is_some() => {
                 // Everything else `iterable_elem` admits, binding a single element: a user struct with
@@ -4981,17 +5019,21 @@ impl Checker {
                 // before `iter` (a struct with BOTH keeps the `next()` fast path) is `iterable_elem`'s
                 // own `iter_elem().or_else(struct_iterable_elem)` precedence.
                 let elem = self.iterable_elem(&it).expect("guarded by the match arm");
-                if vars.len() != 1 {
-                    // The arm is reached by protocol EXISTENTIALS too (an `Iterable[E]` annotation),
-                    // so only an actual struct gets told it is one; everything else is named.
-                    if matches!(it, Ty::Struct(..)) {
-                        self.error(iter.span, "a struct iterator binds a single loop variable");
-                    } else {
-                        self.error(iter.span, format!("`for k, v` requires a map, found {it}"));
-                    }
-                    return unknowns(vars);
+                if vars.len() == 1 {
+                    return vec![(vars[0].clone(), elem)];
                 }
-                vec![(vars[0].clone(), elem)]
+                // N names destructure a tuple element (TICKET-113). The arm is reached by protocol
+                // EXISTENTIALS too (an `Iterable[E]` annotation), so only an actual struct gets told
+                // it is one when the element is not a tuple; everything else is named.
+                if let Some(bindings) = self.for_tuple_bindings(vars, &elem, iter.span) {
+                    return bindings;
+                }
+                if matches!(it, Ty::Struct(..)) {
+                    self.error(iter.span, "a struct iterator binds a single loop variable");
+                } else {
+                    self.error(iter.span, format!("`for k, v` requires a map, found {it}"));
+                }
+                unknowns(vars)
             }
             other => {
                 self.error(iter.span, format!("cannot iterate over {other}"));

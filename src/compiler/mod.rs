@@ -3013,18 +3013,38 @@ impl Compiler {
             fc.emit(Op::Jump(loop_start), span);
             fc.patch_jump(exit);
             self.patch_loop(fc, inc_target);
-        } else if vars.len() == 1 {
-            // Single loop variable. The iterand may be a sequence (list/map-keys/set/str), a user
-            // struct implementing the iterator protocol (`next(self) -> Option[T]`), OR a `Channel[T]`
-            // (`for v in ch:` — block per value, end on close). The compiler is type-erased, so we
-            // branch at RUNTIME on `IsChannel`/`IsStruct`: the channel and struct paths are both driven
-            // LAZILY by an `Option`-producing step (so an infinite iterator with a `break` terminates,
-            // and a channel blocks then ends on close); anything else is indexed as a snapshotted list.
-            // The channel and struct steps converge on ONE shared `Option` (None ⇒ exit, Some ⇒ bind)
-            // decoder — they differ only in how they produce the `Option`.
+        } else {
+            // The iterand may be a sequence (list/map-keys/set/str), a user struct implementing the
+            // iterator protocol (`next(self) -> Option[T]`), OR a `Channel[T]` (`for v in ch:` — block
+            // per value, end on close). The compiler is type-erased, so we branch at RUNTIME on
+            // `IsChannel`/`IsStruct`: the channel and struct paths are both driven LAZILY by an
+            // `Option`-producing step (so an infinite iterator with a `break` terminates, and a channel
+            // blocks then ends on close); anything else is indexed as a snapshotted list. The channel
+            // and struct steps converge on ONE shared `Option` (None ⇒ exit, Some ⇒ bind) decoder —
+            // they differ only in how they produce the `Option`.
+            //
+            // N>1 names (`for a, b, … in xs`) ride the SAME machinery: each path lands one element in
+            // the hidden `elem` slot, which is destructured into the names via `GetField(j)` (the
+            // `a, b := t` lowering, generalized to N). The one exception is a MAP, tested at RUNTIME on
+            // `IsMap`: its two names bind (key, value) from a keys + values snapshot indexed in
+            // lockstep, so a body that mutates the map cannot perturb the bindings. The checker admits
+            // N>1 names only over a `Map` or an element that is statically a tuple of that arity. A
+            // tuple is not `Hashable`, so no map key is ever a tuple and the `IsMap` split never sees a
+            // tuple-yielding map (TICKET-113).
+            let multi = vars.len() > 1;
             self.compile_expr(fc, iter)?;
             let iter_slot = fc.add_hidden();
             fc.emit_hidden_set(iter_slot, span);
+            // Map-ness is read off the iterand as written (`IterableToCursor` passes a map through).
+            let map_mode_slot = if multi {
+                fc.emit_hidden_get(iter_slot, span);
+                fc.emit(Op::IsMap, span);
+                let slot = fc.add_hidden(); // true ⇒ map (key, value) path
+                fc.emit_hidden_set(slot, span);
+                Some(slot)
+            } else {
+                None
+            };
             // ONE-TIME pure-`Iterable` conversion: a struct with `iter()` but no `next()` becomes its
             // cursor here (then drives via the seq path); every other iterand (struct-with-`next`,
             // generator, collection) passes through unchanged, so their fast paths are byte-identical.
@@ -3059,16 +3079,16 @@ impl Compiler {
             fc.emit(Op::True, span);
             fc.emit_hidden_set(struct_mode_slot, span);
             fc.patch_jump(not_cursor);
-            // The loop variable, plus the seq-path bookkeeping slots (allocated unconditionally; the
-            // lazy paths simply never touch them) and the lazy paths' `Option` result slot. When the
-            // loop var is boxed (captured), the loop MECHANISM writes a hidden raw slot and the user
-            // cell is refreshed from it per iteration (fresh cell per iteration, C1).
-            let item_slot = fc.add_local(vars[0].clone());
-            let item_raw = fc.loopvar_raw_slot(item_slot);
+            // Where each step's element lands: the one name's mechanism slot, or a hidden temp the
+            // N-name destructure reads.
+            let var_slots: Vec<usize> = vars.iter().map(|v| fc.add_local(v.clone())).collect();
+            let var_raws: Vec<usize> = var_slots.iter().map(|&s| fc.loopvar_raw_slot(s)).collect();
+            let elem = if multi { fc.add_hidden() } else { var_raws[0] };
             let lst_slot = fc.add_hidden();
             let len_slot = fc.add_hidden();
             let idx_slot = fc.add_hidden();
             let opt_slot = fc.add_hidden();
+            let vals_slot = if multi { Some(fc.add_hidden()) } else { None }; // map values snapshot
 
             // Seq init (skipped on BOTH lazy paths): snapshot the iterand to a list, take its length,
             // start the index at 0. Skip when channel OR struct.
@@ -3088,6 +3108,23 @@ impl Compiler {
             fc.emit_hidden_set(len_slot, span);
             fc.emit(Op::ConstInt(0), span);
             fc.emit_hidden_set(idx_slot, span);
+            // Map (N names): snapshot the values beside the keys `ListClone` just took, same order.
+            if let (Some(map_mode), Some(vals)) = (map_mode_slot, vals_slot) {
+                fc.emit_hidden_get(map_mode, span);
+                let not_map = fc.emit_jump(Op::JumpIfFalse(0), span);
+                fc.emit_hidden_get(iter_slot, span);
+                let ic = self.next_method_ic();
+                fc.emit(
+                    Op::CallMethod {
+                        name: "values".to_string(),
+                        argc: 0,
+                        ic,
+                    },
+                    span,
+                );
+                fc.emit_hidden_set(vals, span);
+                fc.patch_jump(not_map);
+            }
             fc.patch_jump(chan_skip_init);
             fc.patch_jump(struct_skip_init);
 
@@ -3133,8 +3170,8 @@ impl Compiler {
             );
             let lazy_exit = fc.emit_jump(Op::Jump(0), span); // None matched ⇒ leave the loop
             fc.patch_jump(none_arm); // not None ⇒ try Some here
-            // `Some(v)`: a match binds the payload into the loop variable's MECHANISM slot (`item_raw`)
-            // and falls through to the body jump; a non-Some jumps to the trap below.
+            // `Some(v)`: a match binds the payload into `elem` and falls through to the body jump; a
+            // non-Some jumps to the trap below.
             let some_arm = fc.emit_jump(
                 Op::MatchArm {
                     scrut: opt_slot,
@@ -3142,7 +3179,7 @@ impl Compiler {
                     variant_id: crate::vm::op::VID_SOME,
                     enum_name: None,
                     nbind: 1,
-                    bind_start: item_raw,
+                    bind_start: elem,
                     next: 0,
                 },
                 iter.span,
@@ -3159,11 +3196,47 @@ impl Compiler {
             fc.emit_hidden_get(lst_slot, span);
             fc.emit_hidden_get(idx_slot, span);
             fc.emit(Op::GetIndex, span);
-            fc.emit_set_local_raw(item_raw, span);
+            fc.emit_set_local_raw(elem, span);
+            // Map (N names): bind (key, value) and skip the tuple destructure.
+            let map_bound = if let (Some(map_mode), Some(vals)) = (map_mode_slot, vals_slot) {
+                fc.emit_hidden_get(map_mode, span);
+                let not_map = fc.emit_jump(Op::JumpIfFalse(0), span);
+                fc.emit_hidden_get(elem, span);
+                fc.emit_set_local_raw(var_raws[0], span);
+                fc.emit_hidden_get(vals, span);
+                fc.emit_hidden_get(idx_slot, span);
+                fc.emit(Op::GetIndex, span);
+                fc.emit_set_local_raw(var_raws[1], span);
+                let bound = fc.emit_jump(Op::Jump(0), span);
+                fc.patch_jump(not_map);
+                Some(bound)
+            } else {
+                None
+            };
 
             fc.patch_jump(to_body);
-            // Fresh cell per iteration for a boxed (captured) loop var (C1); no-op when unboxed.
-            fc.emit_loopvar_refresh(item_slot, item_raw, span);
+            if multi {
+                // Destructure the element tuple into each name (var[j] = elem.j). Reached from the lazy
+                // `Some(v)` bind and from the seq read of a non-map.
+                for (j, &vr) in var_raws.iter().enumerate() {
+                    fc.emit_hidden_get(elem, span);
+                    fc.emit(
+                        Op::GetField {
+                            name: j.to_string(),
+                            ic: NO_IC,
+                        },
+                        span,
+                    ); // tuple element
+                    fc.emit_set_local_raw(vr, span);
+                }
+            }
+            if let Some(bound) = map_bound {
+                fc.patch_jump(bound);
+            }
+            // Fresh cell per iteration for each boxed (captured) loop var (C1); no-op when unboxed.
+            for (&vs, &vr) in var_slots.iter().zip(&var_raws) {
+                fc.emit_loopvar_refresh(vs, vr, span);
+            }
             self.compile_defer_scoped_block(fc, body)?;
             // `continue` lands HERE — the advance step. For a channel/struct, "advance" is just
             // re-looping (the next lazy step); for a sequence, it's the index increment.
@@ -3184,114 +3257,6 @@ impl Compiler {
             // All exit paths land here (past the back-edge).
             fc.patch_jump(lazy_exit);
             fc.patch_jump(seq_exit);
-            self.patch_loop(fc, inc_target);
-        } else {
-            // Multi-name `for`: either `for k, v in m` over a MAP (key, value) or tuple-destructuring
-            // `for a, b, … in xs` over a `List[(A, B, …)]`. The compiler is type-erased, so we branch
-            // at RUNTIME on `IsMap` (mirroring the single-var `IsStruct` split):
-            //   - map: snapshot keys + values up front and index them in lockstep (so a body that
-            //     mutates the map mid-loop can't perturb the bindings);
-            //   - list of tuples: index the list, then destructure each element tuple into the N
-            //     loop vars via `GetField(j)` (the destructure-`:=` pattern, generalized to N).
-            self.compile_expr(fc, iter)?;
-            let src_slot = fc.add_hidden();
-            fc.emit_hidden_set(src_slot, span);
-            fc.emit_hidden_get(src_slot, span);
-            fc.emit(Op::IsMap, span);
-            let mode_slot = fc.add_hidden(); // true ⇒ map path
-            fc.emit_hidden_set(mode_slot, span);
-
-            let lst = fc.add_hidden(); // the list we index (map keys, or the list of tuples)
-            let vals = fc.add_hidden(); // map values snapshot (map path only)
-            let len = fc.add_hidden();
-            let idx = fc.add_hidden();
-            let elem = fc.add_hidden(); // the element read at lst[idx]
-            let var_slots: Vec<usize> = vars.iter().map(|v| fc.add_local(v.clone())).collect();
-            // Each loop var's MECHANISM slot: a hidden raw slot when boxed (its user cell is refreshed
-            // per iteration), else the user slot itself (byte-identical when uncaptured).
-            let var_raws: Vec<usize> = var_slots.iter().map(|&s| fc.loopvar_raw_slot(s)).collect();
-
-            // ----- init: branch map vs list -----
-            fc.emit_hidden_get(mode_slot, span);
-            let to_list_init = fc.emit_jump(Op::JumpIfFalse(0), span); // false ⇒ list init
-            // map init: keys snapshot into `lst`, values snapshot into `vals` (same instant/order)
-            fc.emit_hidden_get(src_slot, span);
-            fc.emit(Op::ListClone, iter.span);
-            fc.emit_hidden_set(lst, span);
-            fc.emit_hidden_get(src_slot, span);
-            let ic = self.next_method_ic();
-            fc.emit(
-                Op::CallMethod {
-                    name: "values".to_string(),
-                    argc: 0,
-                    ic,
-                },
-                span,
-            );
-            fc.emit_hidden_set(vals, span);
-            let after_init = fc.emit_jump(Op::Jump(0), span);
-            // list init: clone the list of tuples into `lst`
-            fc.patch_jump(to_list_init);
-            fc.emit_hidden_get(src_slot, span);
-            fc.emit(Op::ListClone, iter.span);
-            fc.emit_hidden_set(lst, span);
-            fc.patch_jump(after_init);
-            // common: len = lst.len(), idx = 0
-            fc.emit_hidden_get(lst, span);
-            fc.emit(Op::ArrLen, span);
-            fc.emit_hidden_set(len, span);
-            fc.emit(Op::ConstInt(0), span);
-            fc.emit_hidden_set(idx, span);
-
-            let loop_start = fc.here();
-            fc.emit_hidden_get(idx, span);
-            fc.emit_hidden_get(len, span);
-            fc.emit(Op::Lt, span);
-            let exit = fc.emit_jump(Op::JumpIfFalse(0), span);
-            // elem = lst[idx]
-            fc.emit_hidden_get(lst, span);
-            fc.emit_hidden_get(idx, span);
-            fc.emit(Op::GetIndex, span);
-            fc.emit_hidden_set(elem, span);
-            // ----- bind: branch map vs list (into the MECHANISM slots `var_raws`) -----
-            fc.emit_hidden_get(mode_slot, span);
-            let to_list_bind = fc.emit_jump(Op::JumpIfFalse(0), span);
-            // map bind: var[0] = key (elem), var[1] = vals[idx]
-            fc.emit_hidden_get(elem, span);
-            fc.emit_set_local_raw(var_raws[0], span);
-            fc.emit_hidden_get(vals, span);
-            fc.emit_hidden_get(idx, span);
-            fc.emit(Op::GetIndex, span);
-            fc.emit_set_local_raw(var_raws[1], span);
-            let after_bind = fc.emit_jump(Op::Jump(0), span);
-            // list bind: destructure the tuple element into each loop var (var[j] = elem.j)
-            fc.patch_jump(to_list_bind);
-            for (j, &vr) in var_raws.iter().enumerate() {
-                fc.emit_hidden_get(elem, span);
-                fc.emit(
-                    Op::GetField {
-                        name: j.to_string(),
-                        ic: NO_IC,
-                    },
-                    span,
-                ); // tuple element
-                fc.emit_set_local_raw(vr, span);
-            }
-            fc.patch_jump(after_bind);
-
-            // Fresh cell per iteration for each boxed (captured) loop var (C1); no-op when unboxed.
-            for (i, &vs) in var_slots.iter().enumerate() {
-                fc.emit_loopvar_refresh(vs, var_raws[i], span);
-            }
-            self.compile_defer_scoped_block(fc, body)?;
-            // `continue` lands HERE — the index increment, so the loop advances instead of looping.
-            let inc_target = fc.here();
-            fc.emit_hidden_get(idx, span);
-            fc.emit(Op::ConstInt(1), span);
-            fc.emit(Op::Add, span);
-            fc.emit_hidden_set(idx, span);
-            fc.emit(Op::Jump(loop_start), span);
-            fc.patch_jump(exit);
             self.patch_loop(fc, inc_target);
         }
         fc.end_scope();
