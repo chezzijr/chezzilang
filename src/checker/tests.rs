@@ -27559,6 +27559,66 @@ struct S:
 }
 
 #[test]
+fn static_method_as_value_through_an_import_says_method_not_value() {
+    // W12-22: the same false "unknown name"/"has no member" claim on the two import-qualified
+    // static-head spellings.
+    const LIB: &str = "\
+struct Cnt:
+    n: int
+    fn zero() -> Cnt:
+        return Cnt(0)
+";
+    files_reject(
+        &[
+            ("lib/types.chz", LIB),
+            ("main.chz", "import Cnt from lib.types\nh := Cnt.zero\n"),
+        ],
+        "'zero' is a static method of 'Cnt'",
+    );
+    files_reject(
+        &[
+            ("lib/types.chz", LIB),
+            ("main.chz", "import lib.types\nh := types.Cnt.zero\n"),
+        ],
+        "'zero' is a static method of 'types.Cnt'",
+    );
+}
+
+#[test]
+fn instance_method_through_the_type_head_says_method_not_value() {
+    // W12-22: an INSTANCE method read through the TYPE head (not a value, not a receiver) gets the
+    // instance wording, not "unknown name".
+    const S: &str = "\
+struct S:
+    n: int
+    fn get(self) -> int:
+        return self.n
+";
+    entry_rejects(
+        &format!("{S}h := S.get\n"),
+        "'get' is an instance method of 'S'",
+    );
+}
+
+#[test]
+fn type_head_member_value_keeps_its_decline_neighbours() {
+    // W12-22 scope fence: a shadowing parameter keeps `type int has no field`, and an unknown
+    // member on a real struct head keeps `unknown name` -- the new arm fires ONLY when the member
+    // IS a declared method.
+    const S: &str = "\
+struct S:
+    n: int
+    fn zero() -> S:
+        return S(0)
+";
+    entry_rejects(
+        &format!("{S}fn f(S: int) -> int:\n    return S.zero\n"),
+        "type int has no field 'zero'",
+    );
+    entry_rejects(&format!("{S}h := S.nosuch\n"), "unknown name 'S'");
+}
+
+#[test]
 fn bound_method_launder_rejected() {
     // Each of these type-checked (the `?` self slot unified with anything) then faulted at runtime.
     // Each must now be exactly ONE error -- no `'closure' expects 1 argument(s)` cascade.
@@ -27633,7 +27693,7 @@ fn method_neighbors_still_ok() {
     entry_ok(
         "struct C:\n    get: fn(int) -> int\n    fn other(self) -> int:\n        return 1\nfn dbl(x: int) -> int:\n    return x * 2\nc := C(dbl)\nprint(c.get(3))\nprint(c.other())\n",
     );
-    // 4. a static/associated CALL (a bare `P.make` VALUE is not legal today -- `unknown name 'P'`).
+    // 4. a static/associated CALL (a bare `P.make` VALUE is refused: methods are not values).
     entry_ok(
         "struct P:\n    n: int\n    fn make(n: int) -> P:\n        return P(n)\np := P.make(3)\nprint(p.n)\n",
     );
@@ -29250,7 +29310,7 @@ fn witness_member_as_value_rejected() {
     );
     entry_rejects(
         &format!("{head}fn main():\n    g := Holder.build\n    print(1)\nmain()\n"),
-        "unknown name 'Holder'",
+        "'build' is a static method of 'Holder'",
     );
 }
 

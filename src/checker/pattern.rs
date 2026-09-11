@@ -3415,6 +3415,38 @@ impl Checker {
         }
     }
 
+    /// Is `obj` a STRUCT TYPE head (bare or module-qualified), not a value — the same two shapes
+    /// `infer_static_call`'s bare/qualified arms resolve a static CALL through (`expr.rs`'s
+    /// `ExprKind::Ident`/`ExprKind::Field` arms). Returns the struct's runtime key and the spelling to
+    /// quote back at the user. `None` for anything else, including a LOCAL binding that merely
+    /// shadows a struct name (W12-22).
+    fn struct_value_head(&self, obj: &Expr) -> Option<(String, String)> {
+        match &obj.kind {
+            ExprKind::Ident(t) if !self.is_local_binding(t) && self.struct_names.contains(t) => {
+                Some((self.bare_key(t), t.clone()))
+            }
+            ExprKind::Field {
+                obj: inner,
+                name: t,
+                ..
+            } => {
+                let ExprKind::Ident(m) = &inner.kind else {
+                    return None;
+                };
+                if self.is_local_binding(m) {
+                    return None;
+                }
+                let mid = self.imported_modules.get(m)?;
+                let sig = self.module_sigs.get(mid)?;
+                if !sig.struct_defs.contains_key(t) {
+                    return None;
+                }
+                Some((self.type_key(mid, t), format!("{m}.{t}")))
+            }
+            _ => None,
+        }
+    }
+
     pub(super) fn infer_field(&mut self, obj: &Expr, name: &str, name_span: Span) -> Ty {
         // A too-deep qualified-path mistake (`std.net.Socket(0)`, `std.concurrency.Shared(0)`,
         // `std.concurrency.collection.Counter(...)`): the receiver `obj` is the BARE first segment of
@@ -3624,6 +3656,31 @@ impl Checker {
                     return Ty::Unknown;
                 }
             }
+        }
+        // `Type.method` or `module.Type.method` read as a VALUE (not called): resolve through the
+        // same static-call head `infer_static_call` uses, and if `name` IS a declared method, refuse
+        // it with the "methods are not values" wording instead of falling into `self.infer(obj)`
+        // (which does not know `obj` names a type and says "unknown name") (W12-22).
+        if let Some((key, spelled)) = self.struct_value_head(obj)
+            && let Some(is_static) = self
+                .structs
+                .get(&key)
+                .and_then(|info| info.methods.get(name))
+                .map(|sig| sig.is_static)
+        {
+            let msg = if is_static {
+                format!(
+                    "'{name}' is a static method of '{spelled}' -- methods are not values: call it \
+                     (`{spelled}.{name}(…)`) or wrap it (`fn(): {spelled}.{name}()`)"
+                )
+            } else {
+                format!(
+                    "'{name}' is an instance method of '{spelled}' -- methods are not values: call \
+                     it on a value (`x.{name}(…)`) or wrap it (`fn(): x.{name}()`)"
+                )
+            };
+            self.error(name_span, msg);
+            return Ty::Unknown;
         }
         let obj_ty = self.infer(obj);
         match &obj_ty {

@@ -146,6 +146,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
   `regex.replace_all` now keeps an empty `${}` literal (Go parity) instead of Erring on it.
   `duration.parse` now accepts `i64::MIN` milliseconds on the negative side (Go parity), by
   accumulating the magnitude on the negative side of i64, the only side that reaches 2^63.
+  A method read through its struct's TYPE head as a VALUE (`S.zero`, `types.Cnt.zero`, `S.get`)
+  now says "methods are not values" instead of a false `unknown name`/`has no member`.
 - **TICKET-102 (2026-09-10) — two checker test helpers minted the same tempdir names.**
   `checker::graph_tests::TmpDir` (`src/checker/mod.rs`) and `checker::tests::TmpDir`
   (`src/checker/tests.rs`) each formatted `chezzi_chk_{pid}_{n}` off their own zero-based counter in
