@@ -139,6 +139,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
   A `#` inside an interpolation hole now comments to the end of the physical line (CPython
   3.12+ parity) instead of silently eating the rest of the fragment; a single-line hole where that
   swallows the closing `}` is now a located compile error.
+  `json.stringify`/`encode` now count nesting the same way `parse` does (outermost = level 1, a
+  scalar adds none), so every document `stringify` emits parses back.
 - **TICKET-102 (2026-09-10) — two checker test helpers minted the same tempdir names.**
   `checker::graph_tests::TmpDir` (`src/checker/mod.rs`) and `checker::tests::TmpDir`
   (`src/checker/tests.rs`) each formatted `chezzi_chk_{pid}_{n}` off their own zero-based counter in

@@ -1833,7 +1833,10 @@ enum Json:
 `get(j, key) -> Option[Json]` · `at(j, i) -> Option[Json]` · `len(j) -> int` (faults on
 `Null`/`Bool`/`Num`/`Int` — a scalar has no length, matching CPython's `len(None)` `TypeError`).
 
-> **Nesting depth is capped at `MAX_NEST_DEPTH = 2000` on both `parse` and `stringify`.** `std.json`
+> **Nesting depth is capped at `MAX_NEST_DEPTH = 2000` on both `parse` and `stringify`.** Both count
+> the same way — the outermost array/object is level 1 and a scalar adds no level — so every
+> document `stringify` (and `encode`) returns parses back; before, `stringify` also accepted level
+> 2001 when the innermost value was an empty container (W12-20a). `std.json`
 > is recursive-descent in pure Chezzi, so nesting depth becomes recursion depth in your program.
 > `parse`'s `Result` is now **total**: past the cap it returns `Err("exceeded max depth")` instead of
 > aborting the process, matching Go's `encoding/json` (`exceeded max depth`) and CPython's catchable

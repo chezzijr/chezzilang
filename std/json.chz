@@ -382,13 +382,18 @@ fn num_str(f: float) -> str:
 # call depth` guard just like `parse` can (`docs/gaps.md` W8-5). Unlike `parse`, `stringify` has no
 # `Result` to put an error in and CPython's `json.dumps` also raises `RecursionError` here — so this
 # stays a fault, just a LEGIBLE one naming the cause instead of an opaque VM message pointing at a
-# `std/json.chz` line the caller never opened. Same measured depth limit as `parse` (`MAX_NEST_DEPTH`).
+# `std/json.chz` line the caller never opened. Same limit as `parse`, counted the same way
+# (outermost container = level 1), so everything stringify emits parses back.
 fn stringify(j: Json) -> str:
     return stringify_depth(j, 0)
 
-fn stringify_depth(j: Json, depth: int) -> str:
-    if depth > MAX_NEST_DEPTH:
+# `depth` counts ENCLOSING containers, so this container is level `depth + 1` — parse's count,
+# outermost = 1, a scalar adds none (W12-20a).
+fn _check_stringify_depth(depth: int):
+    if depth + 1 > MAX_NEST_DEPTH:
         panic("json.stringify: exceeded max depth")
+
+fn stringify_depth(j: Json, depth: int) -> str:
     match j:
         Json.Null: return "null"
         Json.Bool(b):
@@ -399,6 +404,7 @@ fn stringify_depth(j: Json, depth: int) -> str:
         Json.Num(n): return num_str(n)
         Json.Str(s): return escape(s)
         Json.Arr(xs):
+            _check_stringify_depth(depth)
             parts: List[str] = ["["]
             first := true
             for x in xs:
@@ -409,6 +415,7 @@ fn stringify_depth(j: Json, depth: int) -> str:
             parts.push("]")
             return "".join(parts)
         Json.Obj(m):
+            _check_stringify_depth(depth)
             parts: List[str] = ["{{"]
             first := true
             for k in m.keys():

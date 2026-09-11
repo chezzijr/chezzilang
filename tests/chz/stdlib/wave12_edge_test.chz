@@ -48,6 +48,18 @@ test fn stringify_depth_cap_matches_parse():
         Ok(_): assert false, "stringify accepted a tree one level past parse's own MAX_NEST_DEPTH"
         Err(e): assert e.message() == "json.stringify: exceeded max depth"
 
+# W12-20a: at exactly parse's own cutoff, stringify must accept AND the output must parse back.
+test fn stringify_at_the_depth_cap_parses_back():
+    j := Json.Arr([])
+    i := 1
+    while i < 2000:
+        j = Json.Arr([j])
+        i += 1
+    t := json.stringify(j)
+    match json.parse(t):
+        Ok(_): assert true
+        Err(e): assert false, "stringify output must parse: " + e.message()
+
 # W12-20b: csv.parse follows Go's encoding/csv record-separator set (CRLF or LF); a lone CR is
 # ordinary field data, not a record break.
 test fn csv_lone_cr_is_field_data_not_a_record_break():
