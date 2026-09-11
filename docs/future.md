@@ -1591,6 +1591,14 @@ The original M5 baseline was ~4–6.5× over the then-existing (now-removed) tre
 - **Cranelift AOT/JIT** — already the stretch goal. Near-native, but a whole backend. Only after the
   language stops moving.
 
+- **Debug-build M:N stall once the pool covers every free core (lead from `docs/gaps.md` W12-23, not started).**
+  The 10k-fiber D3 program on the DEBUG CLI finishes in 0.3 s at `CHEZZI_THREADS=8` and 1.0 s at 24,
+  but runs past 120 s at 27/28 (= nproc) while other cargo builds share the box; the release binary
+  takes 0.17 s at 28 beside 20 CPU hogs. Presumably a wait that spins instead of parking. Under a
+  4-core `CPUQuota` with 28 hogs the debug CLI did NOT stall at the default pool (11.6–13.6 s), so the
+  trigger is whole-box contention, not the quota. TICKET-114 moved the lib test to a fixed pool of 8
+  in its own process; the engine is unchanged.
+
 ### Memory layout & access patterns (cache levers — diagnosed 2026-06-16)
 
 > **Caveat first (measure, don't guess):** the bench bottleneck is **dispatch + calls + a few alloc

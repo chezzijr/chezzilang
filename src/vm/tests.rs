@@ -7917,40 +7917,8 @@ main()
     }
 }
 
-/// D3/soundness: thousands of CPU-bound fibers (each a bounded loop + a `Shared` increment), far
-/// more than the worker pool, all complete under heavy yield churn — no corruption, no lost fiber,
-/// no false deadlock. Bounded loops terminate regardless of preemption, so this is a soundness
-/// guard for the yield/requeue machinery rather than the discriminating fairness test above.
-#[test]
-#[ignore = "W12-23: hangs at pool == nproc under load in the debug build; TICKET-114 moves it to a CLI-driven test at a fixed pool"]
-fn d3_thousands_of_cpu_fibers_all_complete() {
-    let src = "\
-fn work(s: Shared[int]):
-    i := 0
-    while i < 100:
-        i += 1
-    s.update(fn(x): x + 1)
-
-fn main():
-    s := Shared(0)
-    parallel:
-        for _ in 0..10000:
-            spawn work(s)
-    print(s.get())
-
-main()
-";
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(run_capture(src));
-    });
-    match rx.recv_timeout(std::time::Duration::from_secs(60)) {
-        Ok(r) => assert_eq!(r.expect("10k-fiber nursery completed"), "10000\n"),
-        Err(_) => {
-            panic!("10k CPU-bound fibers did not all complete in time (yield machinery hang?)")
-        }
-    }
-}
+// `d3_thousands_of_cpu_fibers_all_complete` moved to tests/d3_thousands_of_cpu_fibers_cli.rs (TICKET-114):
+// at the lib target's default pool the debug build hung to its 60 s bound under load (W12-23).
 
 /// D3/regression: a reduction yield must unwind cleanly through **nested function calls**. A yield
 /// is detected at the safepoint of the innermost `run_until`; every enclosing `run_proto`/call site

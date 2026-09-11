@@ -7,6 +7,17 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-114 (2026-09-11) — the 10k-CPU-fiber D3 soundness test runs at a fixed pool in its own
+  process (W12-23).** `vm::tests::d3_thousands_of_cpu_fibers_all_complete` hung to its 60 s bound in
+  the debug lib target whenever the default pool (every core) met other load. `vm::pool` is one
+  process-wide `OnceLock`, so the test moved to `tests/d3_thousands_of_cpu_fibers_cli.rs`, which
+  drives the built binary at `CHEZZI_THREADS=8` and keeps the `10000`/rc 0 assertion and the bound
+  (debug CLI, 4-core `CPUQuota` beside 28 `yes` hogs: 9.96–12.80 s, 5/5). The source-text rule
+  `tests/d3_test_lives_in_the_cli_target.rs` fails if it moves back. The repro
+  `tests/mn_pool_ignores_cpu_quota_hangs.rs` now pre-builds the lib test target outside its hog
+  window. `parallel_many_spawns_cheap_and_correct` and `fibers_scale_ready_queue_not_quadratic` stay:
+  no CPU loop, and pool size did not move them. Engine unchanged; the debug stall is a
+  `docs/future.md` §4 lead.
 - **TICKET-111 (2026-09-11) — a spawn-crossed alias of a module global is adopted as one object
   (W12-5).** A snapshot node registry (`Vm::snapshot_nodes`, mirrors W7-4c's `snapshot_cells`) ties a
   spawn crossing's data-node id to the module snapshot's; `snapshot_adopt` carries the spawn
