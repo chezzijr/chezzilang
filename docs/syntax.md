@@ -1432,8 +1432,10 @@ for k in counts:       # iterate a map → its keys (insertion order)
 for k, v in counts:    # iterate a map's entries → key + value
     print("{k}={v}")
 
-for a, b in pairs:     # destructure a List[(A, B)] — N names over a List[tupleN]
-    print("{a}:{b}")   # (one name binds the whole tuple). enumerate/zip live in std.iter.
+for a, b in pairs:     # destructure a tuple element — N names over any iterable of tupleN: a
+    print("{a}:{b}")   #    List[(A, B)], a generator, an .iter() cursor, a `next` struct, a
+                        #    Channel[(A, B)] or an Iterable[(A, B)] value (one name binds the whole
+                        #    tuple; a Map binds key + value instead). enumerate/zip live in std.iter.
 
 # `for` over a List/Map/Set iterates a SNAPSHOT of the SPINE, taken once when the loop starts —
 # shallow: the elements are the same objects (mutating a struct element IS visible), but pushing,
@@ -1461,7 +1463,7 @@ struct Counter:
         self.n = self.n + 1
         return Some(v)
 
-for x in Counter(0, 5):    # x binds the element type (int); single loop variable only
+for x in Counter(0, 5):    # x binds the element type (int); a next() yielding a tuple destructures (for a, b in …)
     print(x)
 
 # `Iterable[T]` is a real protocol bound: a generic fn can take ANY iterable — built-in

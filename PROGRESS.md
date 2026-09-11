@@ -18,6 +18,14 @@ Single source of truth for "what am I doing next." Update after every work sessi
   window. `parallel_many_spawns_cheap_and_correct` and `fibers_scale_ready_queue_not_quadratic` stay:
   no CPU loop, and pool size did not move them. Engine unchanged; the debug stall is a
   `docs/future.md` §4 lead.
+- **TICKET-113 (2026-09-11) — `for a, b in xs` destructures a tuple element from ANY iterable (W12-16(b)).**
+  A generator, an `.iter()` cursor, a user `next` struct, a pure-`Iterable` struct, an
+  `Iterable[(A, B)]` param or bound and a `Channel[(A, B)]` now destructure like a `List[(A, B)]`
+  (CPython 3.14.7 gives the same values). `compile_for`'s multi-name branch is merged into the
+  one-name branch: every path lands one element in a hidden slot and `GetField(j)` splits it, while a
+  Map still binds (key, value) from a keys + values snapshot. The checker's new `for_tuple_bindings`
+  admits N names only over an element that is statically a tuple of arity N. A non-tuple element keeps
+  its old message, and a wrong arity names both counts. One-name `for` bytecode is unchanged.
 - **TICKET-111 (2026-09-11) — a spawn-crossed alias of a module global is adopted as one object
   (W12-5).** A snapshot node registry (`Vm::snapshot_nodes`, mirrors W7-4c's `snapshot_cells`) ties a
   spawn crossing's data-node id to the module snapshot's; `snapshot_adopt` carries the spawn
