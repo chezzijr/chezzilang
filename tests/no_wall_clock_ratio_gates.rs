@@ -294,7 +294,7 @@ fn sleep_synchronised_tests() -> BTreeSet<String> {
 /// rejected it (the walk returns 68). Obtain it by compiling once with an empty array and copying
 /// the "sleeps but is not listed" list `no_new_rust_test_sleeps_to_order_two_events` reports,
 /// verbatim, the same way `stack_trace_reports_call_chain`'s golden was obtained.
-const SLEEP_SYNCHRONISED_TESTS: [&str; 82] = [
+const SLEEP_SYNCHRONISED_TESTS: [&str; 83] = [
     "cousin_fed_completes_instead_of_hanging_at_two_and_four_workers",
     "a_bailed_join_stops_its_jobs_from_starting_new_work",
     "a_cancelled_siblings_defer_runs_whole_on_both_engines",
@@ -323,6 +323,9 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 82] = [
     "cancel_cascade_crosses_the_airlock",
     "cancel_trip_wakes_parked_wait_under_parallel",
     "connect_to_dead_port_reports_refused",
+    // TICKET-114: the sleep is a POLL INTERVAL on `try_wait` against the 60 s hang bound (DEC-095's
+    // exemption) -- a hung child never closes its pipes, so `output()` would wedge the test binary.
+    "d3_thousands_of_cpu_fibers_all_complete",
     // TICKET-114's repro: the sleep is a POLL INTERVAL on `try_wait` against a hang bound (DEC-095's
     // exemption) -- a hung child never closes its pipes, so `output()` would wedge the test binary.
     "d3_thousands_of_fibers_does_not_hang_under_a_narrow_cpu_quota",
