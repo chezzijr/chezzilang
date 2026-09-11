@@ -12627,7 +12627,7 @@ see wave 11's meta-finding) was also run: 861/861 green.
 
 | row | P | domain | one line | ticket |
 |---|---|---|---|---|
-| **W12-1** | P0 | scheduler | A nested nursery whose OWNER body blocks on a channel op is falsely `deadlock`-faulted: at `CHEZZI_THREADS=1` at ANY depth, and at every worker count once nesting depth exceeds the pool (T=2 → depth 3, T=4 → depth 5, T=8 → 9, 28 → 13). Go `GOMAXPROCS=1` completes (`got 2`, `depth 31`). Repro below | CLOSED 2026-09-10 (TICKET-103); residual: the T>=2 depth cliff on the granted-slot path is carried by TICKET-112 |
+| **W12-1** | P0 | scheduler | A nested nursery whose OWNER body blocks on a channel op is falsely `deadlock`-faulted: at `CHEZZI_THREADS=1` at ANY depth, and at every worker count once nesting depth exceeds the pool (T=2 → depth 3, T=4 → depth 5, T=8 → 9, 28 → 13). Go `GOMAXPROCS=1` completes (`got 2`, `depth 31`). Repro below | CLOSED 2026-09-10 (TICKET-103); the T>=2 depth cliff on the granted-slot path CLOSED 2026-09-11 (TICKET-112) |
 | **W12-2** | P0 | enum | `List[E].sort()` on an enum with a user `compare` type-checks (`Comparable` gate is real — an enum without `compare` is rejected) and returns the list UNSORTED at rc=0: `[Hi(3), Lo, Hi(1)]`. Operators `<` on the same enum work; a struct wrapping it sorts. Rust `Vec<Lv>.sort()` with `impl Ord` → `[Lo, Hi(1), Hi(3)]`. Repro below | CLOSED 2026-09-10 (TICKET-104) |
 | **W12-3** | P1 | enum | Same missing enum arm, other symptom: `xs.min()`/`max()`/`min_by`/`sort_by_key` on that enum → `runtime error: sort_by_key keys are not comparable: enum vs enum` (message names `sort_by_key` for a `min()` call); `std.cmp.max` on it works | CLOSED 2026-09-10 (TICKET-104) |
 | **W12-4** | P1 | scheduler | After a task RECOVERS a genuine inner-nursery `deadlock` at `CHEZZI_THREADS=1`, the enclosing nursery is poisoned: a later rendezvous with a sibling either hangs forever (task `send`s, sibling `recv`s: rc=124 10/10) or completes and the join then reports a FALSE `deadlock` (`task got 1` printed, then `deadlock: every task in this parallel: block is blocked`). T=2/4/default rc=0 10/10. Repro below. Clean neighbours: same shape inside an Executor job, `recover:` outside the outer nursery, recovered `all channels closed` | CLOSED 2026-09-10 (TICKET-103) |
@@ -12686,7 +12686,37 @@ lazy path at T=1; the eager path pins one worker per blocked owner at T≥2); wh
 CHANNEL op (not the join) its child is never driven, and `quiesced_core` reads the starved child as dead.
 `parked-is-not-stuck` applies: the verdict must be built from what is impossible, and here a sender exists.
 
-**Residual, carried by TICKET-112.** At `CHEZZI_THREADS>=2` `recursive` still faults `recv on an empty channel: deadlock` at `14:23` once its depth exceeds the granted-`NestedDrainerSlot` path, which TICKET-103 left alone. Measured at the fix (debug binary): depth 1, 3 and 7 complete at T=2, 4 and 8, and depth 7 at the default (28 workers); depth 12 and 27 at the default fault every round. Same private-sched predicate family as `cousin_fed` (W12-4 addendum). `tests/chezzi_nested_nursery_deadlock.rs` runs the full depth at T=1 only.
+**Residual, carried by TICKET-112 — CLOSED 2026-09-11.** At `CHEZZI_THREADS>=2` `recursive` used to fault `recv on an empty channel: deadlock` at `14:23` once its depth exceeded the granted-`NestedDrainerSlot` path. Root cause: a private nested eager sched's own `body_open` vetoed its peers' verdicts forever, and `QuiesceState::live_eager_bodies` counted only OUTERMOST scheds so the process-wide verdict false-faulted `main` while a nested chain still ran. Fix: `MnSched::body_is_fiber` — a nested sched's body is a fiber counted on ANOTHER sched, so it no longer vetoes a peer's own `body_open`, and it now registers with `live_eager_bodies`, judged with `quiesced_core(c, false)` (DEC-101's allowed relaxation). `recursive` now runs 30 deep at every worker count. Measured on the final binary, 20 rounds under 8 CPU hogs: 20/20 at T=1/2/4/8/default. Same private-sched predicate family as `cousin_fed` (W12-4 addendum, closed alongside).
+
+**exec_join — OPEN, filed by TICKET-112.** An Executor job whose OUTERMOST nursery's only undone fiber is an owner blocked at a nested join still hangs at `CHEZZI_THREADS>=2`: outermost scheds keep `local_quiesced` (DEC-101), so `body_is_fiber`'s relaxation does not reach them. Measured 3/3 per count at `9924fcfd` and unchanged after TICKET-112.
+
+    import std.concurrency
+
+    fn job():
+        never := Channel[int](0)
+        x := Channel[int](0)
+        r := recover:
+            parallel:
+                spawn:
+                    parallel:
+                        spawn:
+                            parallel:
+                                spawn:
+                                    never.recv()
+                        # B's `x.recv()` line removed: B waits at its join instead, on the
+                        # Executor job's OUTERMOST sched.
+        match r:
+            Ok(_): print("job ok")
+            Err(e): print("job err")
+
+    fn main():
+        ex := Executor()
+        ex.submit(fn(): job())
+        ex.shutdown()
+        print("done")
+    main()
+
+Needs its own repro-in-hand relaxation for outermost scheds (DEC-101's condition) before it can close.
 
 ### W12-2 repro (P0)
 
@@ -12735,14 +12765,18 @@ parallel: block is blocked …` rc=1 — the exchange SUCCEEDED and the join sti
 same seam as W12-1: the T=1 nested-nursery deadlock verdict leaves the enclosing sched's
 parked/`blocked_owners` bookkeeping stale after the fault is recovered.
 
-**W12-4 addendum (2026-09-10, found while judging TICKET-103's plan — `cousin_fed`).** Take W12-4's
-recovering task, make its `x.send(1)` feed a COUSIN: a sibling task whose own nursery has a child doing
-`y.send(x.recv() + 1)` and a body printing `y.recv()`. Release binary at `af156f81`, 3 runs per count,
-20 s bound: `CHEZZI_THREADS=1` prints `inner err` then HANGS; `=2`, `=4`, default HANG with NO output —
-the inner nursery's genuine deadlock (`never.recv()`) is not even detected at T≥2. Go's model: the inner
-fault is recovered, A sends, F prints `2`, `done`. So the T≥2 half is a nested genuine deadlock that
-TICKET-095/101 promised to fault in ms and that instead hangs when the joining task's cousins are parked
-on channels only that task can feed after its join. Filed into TICKET-103.
+**W12-4 addendum (2026-09-10, found while judging TICKET-103's plan — `cousin_fed`) — CLOSED
+2026-09-11 (TICKET-112).** Take W12-4's recovering task, make its `x.send(1)` feed a COUSIN: a sibling
+task whose own nursery has a child doing `y.send(x.recv() + 1)` and a body printing `y.recv()`. Release
+binary at `af156f81`, 3 runs per count, 20 s bound: `CHEZZI_THREADS=1` prints `inner err` then HANGS;
+`=2`, `=4`, default HANG with NO output — the inner nursery's genuine deadlock (`never.recv()`) is not
+even detected at T≥2. Go's model: the inner fault is recovered, A sends, F prints `2`, `done`. So the
+T≥2 half is a nested genuine deadlock that TICKET-095/101 promised to fault in ms and that instead hangs
+when the joining task's cousins are parked on channels only that task can feed after its join. T=1 half
+filed into and fixed by TICKET-103; T>=2 half fixed by TICKET-112's `MnSched::body_is_fiber` (the T=1
+half was the recovering task's own open body vetoing itself; the T>=2 half was that same open body
+vetoing its COUSIN peers). Measured on the final binary, 20 rounds under 8 CPU hogs: 20/20 at every
+worker count.
 
 ### W12-5 / W12-6 repros (P1)
 

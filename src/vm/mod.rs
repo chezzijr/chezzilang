@@ -2139,6 +2139,14 @@ struct MnSched {
     /// Assigned AFTER construction (like `exec_registry`/`quiesce` below), so the predicate's
     /// unit fixtures keep an empty registry — i.e. today's behaviour, which is what they test.
     sched_registry: crate::vm::SchedRegistry,
+    /// TICKET-112 — `true` for a PRIVATE NESTED eager sched (`activate_eager_nursery` with
+    /// `self.mn.is_some()`): its scope-0 body is run by a fiber of ANOTHER sched, not a thread of its
+    /// own. That fiber is counted on its own sched's `running`/`runnable`/`parked_n`/`inflight`/
+    /// `blocked_owners`, and every sched sits in `sched_registry` and `QuiesceState::eager_bodies` — so
+    /// its liveness is always visible somewhere else. `quiesced_core`'s body clause and
+    /// `is_deadlocked_ignoring_jobs`'s own-verdict decline both read this flag. Always `false` for an
+    /// OUTERMOST eager sched, whose body runs on its own dedicated drainer thread.
+    body_is_fiber: bool,
     /// gaps.md W7-56 — the run's [`ExecRegistry`], so [`MnSched::is_deadlocked`] can see an eager
     /// `Executor` job as a live, UNCOUNTED feeder. The predicate's counters model fibers of THIS
     /// sched only; an `ex.submit(f)` job runs on the shared pool with no fiber, no `runnable`, no
@@ -2603,6 +2611,8 @@ impl MnSched {
             // TICKET-099 — empty by default; both `MnSched` construction sites assign the run's
             // registry. An empty one is today's behaviour (no peers to wake or veto against).
             sched_registry: Default::default(),
+            // TICKET-112 — false by default; `activate_eager_nursery` sets it for a nested sched.
+            body_is_fiber: false,
             // gaps.md W7-56 — empty by default; both `MnSched` construction sites assign the run's
             // registry. An empty one is today's behaviour (no veto).
             exec_registry: Default::default(),
@@ -3042,7 +3052,7 @@ impl MnSched {
             // hang, not a style nit. Everything below the gap is therefore re-derived: `continue`
             // rather than fall through, so `c.terminate` and the queue gates at the top of the loop
             // are re-evaluated rather than skipped with a stale verdict (a lost wakeup otherwise).
-            if !judged && self.local_quiesced(&c) {
+            if !judged && !self.body_held_by_fiber(&c) && self.local_quiesced(&c) {
                 // TICKET-099 — `judged` is set BEFORE the peer veto below, not after. It is what
                 // selects the timed `DEMOTE_POLL_BACKOFF` park further down over the untimed
                 // `self.cv.wait(c)` — and a vetoed sched needs that timed park: nothing notifies this
@@ -4144,7 +4154,9 @@ impl MnSched {
         // exact relaxation false-faulted `examples/parallel_cross_nursery_{circular,fanout}.chz`. Now
         // that sibling is another SCOPE on this same sched, so it shows up in `running`/`runnable` and
         // vetoes on its own merits.
-        if c.any_body_injecting() {
+        // TICKET-112 — a private nested sched's open body is run by a fiber of ANOTHER sched, which
+        // counts and judges that fiber itself (`MnSched::body_is_fiber`). Do not veto here on it.
+        if c.any_body_injecting() && !self.body_is_fiber {
             return false;
         }
         // Cross-nursery flat scheduler — if every still-incomplete scope is an early-enlisted outer
@@ -4297,7 +4309,17 @@ impl MnSched {
     /// letting the child's fault propagate up through the blocked fiber's own return and trip the
     /// parent's scope cancel the ordinary way (`Vm::classify_mn_outcome` → `Vm::trip_cancel`).
     pub(super) fn is_deadlocked_ignoring_jobs(&self, c: &SchedCore) -> bool {
-        c.cross_sched_blocked_owners == 0 && self.local_quiesced(c) && !self.any_peer_can_move()
+        c.cross_sched_blocked_owners == 0
+            && !self.body_held_by_fiber(c)
+            && self.local_quiesced(c)
+            && !self.any_peer_can_move()
+    }
+
+    /// TICKET-112 — this sched's own body is open and run by a fiber of another sched
+    /// (`body_is_fiber`): that fiber may still feed this sched's parked fibers, so this sched must not
+    /// fault itself while its body is open. `close_body`'s `cv.notify_all()` re-judges once it joins.
+    fn body_held_by_fiber(&self, c: &SchedCore) -> bool {
+        self.body_is_fiber && c.any_body_open()
     }
 
     /// D5 — hand a fiber that hit a blocking native call to the dirty/blocking pool, freeing this

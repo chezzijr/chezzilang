@@ -222,7 +222,9 @@ impl PartyWait {
 #[derive(Default)]
 pub(super) struct QuiesceState {
     parties: Mutex<Vec<Arc<PartyWait>>>,
-    /// §2c1 — every OUTERMOST eager nursery alive in this run, by `Weak` (like [`super::SchedRegistry`]).
+    /// §2c1 — every eager nursery alive in this run, by `Weak` (like [`super::SchedRegistry`]) —
+    /// every eager nursery (nested ones since TICKET-112, which is sound only with
+    /// `MnSched::body_is_fiber`).
     ///
     /// It exists because eager start broke the invariant `live`'s soundness rests on — *a nursery
     /// fiber never coexists with a counted party*. It can now: top-level `main` runs the `parallel:`
@@ -380,7 +382,7 @@ impl QuiesceState {
         // by an executor slot. Read under the party lock so a `submit` cannot slip a new job past a
         // count already taken (it could only be issued by a RUNNING party, which is unregistered and
         // therefore already vetoes — but the read is free here and the invariant is worth pinning).
-        // §2c1 — plus one per OUTERMOST eager nursery that still holds an undone task: those fibers
+        // §2c1 — plus one per eager nursery (nested ones since TICKET-112) that still holds an undone task: those fibers
         // are uncounted senders, and this is the term that stops a healthy `spawn: ch.send(1)` beside
         // a blocking `ch.recv()` on `main` from reading as a deadlock. See `eager_bodies`.
         let live = 1 + Self::outstanding_jobs(exec_registry) + self.live_eager_bodies();
@@ -393,7 +395,8 @@ impl QuiesceState {
         Some(parties.iter().all(|p| matches!(**p, PartyWait::Join(..))))
     }
 
-    /// §2c1 — publish an OUTERMOST eager nursery's sched, so [`Self::live_eager_bodies`] can count its
+    /// §2c1 — publish an eager nursery's sched (every eager nursery since TICKET-112), so
+    /// [`Self::live_eager_bodies`] can count its
     /// fibers as uncounted senders for as long as they are undone. Takes only this lock.
     pub(super) fn register_eager_body(&self, sched: &Arc<super::MnSched>) {
         let mut g = self.eager_bodies.lock().unwrap_or_else(|e| e.into_inner());
@@ -435,10 +438,15 @@ impl QuiesceState {
         // peer-sched veto: this fn feeds the process-wide verdict, so it must not see that veto
         // either. A vetoed body would count a quiesced-but-peer-vetoed nursery as `live`, inflate
         // `live` past the party count, and reproduce exactly the hang the paragraph above measured.
+        // TICKET-112 — a NESTED sched (`body_is_fiber`) is judged with `require_parked = false`, the
+        // peer question. When every undone fiber is parked or blocked at a deeper join, it can send
+        // nothing until another registered sched moves, and that sched counts on its own. With
+        // `local_quiesced` here such a sched counted live forever and hung `exec_nested` at
+        // `CHEZZI_THREADS>=2`. Outermost scheds keep `local_quiesced` (DEC-101).
         live.iter()
             .filter(|s| {
                 let c = s.lock();
-                c.any_scope_incomplete() && !s.local_quiesced(&c)
+                c.any_scope_incomplete() && !s.quiesced_core(&c, !s.body_is_fiber)
             })
             .count()
     }

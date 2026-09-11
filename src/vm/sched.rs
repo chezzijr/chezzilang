@@ -959,6 +959,9 @@ impl Vm {
         // nursery, a sibling, or a descendant — not just an ancestor, so it shares the run's registry
         // and `wake_run_wide` walks it directly rather than through a hierarchical chain.
         inner.sched_registry = Arc::clone(&self.sched_registry);
+        // TICKET-112 — this eager sched is NESTED: its body runs on the fiber of `self`'s own sched
+        // (`self.mn.is_some()`), not on a dedicated drainer thread. See `MnSched::body_is_fiber`.
+        inner.body_is_fiber = self.mn.is_some();
         // gaps.md W7-56 — see `run_mn_nursery_outermost`.
         inner.exec_registry = Arc::clone(&self.exec_registry);
         // gaps.md W7-58 — so an idle worker of this sched can JUDGE the process-wide verdict on
@@ -981,15 +984,17 @@ impl Vm {
                 }));
             })
             .ok()?; // no drainer ⇒ no worker during the body ⇒ fall back to lazy (see the doc above)
-        // §2c1 — an OUTERMOST eager nursery publishes itself so the process-wide verdict counts its
-        // undone fibers as uncounted senders. Without it, top-level `main` blocked on `ch.recv()`
-        // while a live sibling is about to `send` is `parties.len() >= live` with nothing satisfiable
-        // — a false deadlock on a live program. NESTED eager nurseries are not registered: their body
-        // runs on a worker shell, which is never a counted party, so the invariant was never broken
-        // there. See `quiesce::QuiesceState::eager_bodies`.
-        if self.mn.is_none() {
-            self.quiesce.register_eager_body(&sched);
-        }
+        // §2c1 — an eager nursery publishes itself so the process-wide verdict counts its undone
+        // fibers as uncounted senders. Without it, top-level `main` blocked on `ch.recv()` while a
+        // live sibling is about to `send` is `parties.len() >= live` with nothing satisfiable — a
+        // false deadlock on a live program.
+        //
+        // TICKET-112 — NESTED eager nurseries are registered too, not just OUTERMOST ones: a NESTED
+        // sched's fibers are also live senders the process-wide verdict must count (`recursive`
+        // false-faulted past the granted-slot path at the default worker count without this). Sound
+        // only together with `MnSched::body_is_fiber` and `live_eager_bodies`' `quiesced_core(c,
+        // false)` read below — see `## Decisions` bullet 3.
+        self.quiesce.register_eager_body(&sched);
         Some(EagerScope {
             sched,
             cancel,

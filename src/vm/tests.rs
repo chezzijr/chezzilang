@@ -8507,6 +8507,67 @@ fn mnsched_a_peer_whose_only_fiber_is_a_join_blocked_owner_does_not_veto() {
     );
 }
 
+/// TICKET-112 — a private nested sched whose body is run by a fiber of ANOTHER sched does not veto a
+/// peer's verdict on that open body: the fiber is counted on its own sched, which answers for it.
+#[test]
+fn mnsched_a_fiber_body_peer_whose_children_are_parked_does_not_veto() {
+    let reg: crate::vm::SchedRegistry = Default::default();
+    let mut inner_a = mk_sched(1);
+    inner_a.sched_registry = Arc::clone(&reg);
+    let a = Arc::new(inner_a);
+    let mut inner_b = mk_sched(1);
+    inner_b.sched_registry = Arc::clone(&reg);
+    inner_b.body_is_fiber = true;
+    let b = Arc::new(inner_b);
+    reg.lock().unwrap().push(Arc::downgrade(&a));
+    reg.lock().unwrap().push(Arc::downgrade(&b));
+
+    let ch_a = empty_core();
+    a.seed(vec![mk_fiber(0)]);
+    let fa = take_run(&a);
+    a.park(core_key(&ch_a), &ch_a, fa);
+
+    let ch_b = empty_core();
+    b.open_body(0);
+    b.seed(vec![mk_fiber(0)]);
+    let fb = take_run(&b);
+    b.park(core_key(&ch_b), &ch_b, fb);
+
+    let c = a.lock();
+    assert!(
+        a.is_deadlocked_ignoring_jobs(&c),
+        "B's only child is parked and B's open body is a fiber counted on another sched, so B \
+         must not veto A"
+    );
+}
+
+/// TICKET-112 — the same sched never faults its own fibers while that body is open: the body's
+/// fiber may still feed them. Once the body reaches its join, the sched judges itself again.
+#[test]
+fn mnsched_a_fiber_body_sched_declines_its_own_verdict_until_its_body_closes() {
+    let mut inner = mk_sched(1);
+    inner.body_is_fiber = true;
+    let s = Arc::new(inner);
+    let ch = empty_core();
+    s.open_body(0);
+    s.seed(vec![mk_fiber(0)]);
+    let f = take_run(&s);
+    s.park(core_key(&ch), &ch, f);
+    assert!(
+        s.local_quiesced(&s.lock()),
+        "every fiber of this sched is parked, and its open body is not this sched's to count"
+    );
+    assert!(
+        !s.is_deadlocked_ignoring_jobs(&s.lock()),
+        "the fiber running the open body may still feed the parked child"
+    );
+    s.close_body(0);
+    assert!(
+        s.is_deadlocked_ignoring_jobs(&s.lock()),
+        "with the body at its join, nothing can feed the parked child"
+    );
+}
+
 /// TICKET-103 — park a fresh fiber for slot `task_index` of `scope_id` on its own channel. Returns
 /// the channel so the caller keeps its park key alive.
 fn park_in_scope(s: &MnSched, task_index: usize, scope_id: usize) -> Arc<ChannelCore> {

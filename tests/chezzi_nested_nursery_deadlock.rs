@@ -246,6 +246,78 @@ const RECSTUCK: &str = r#"fn main():
 main()
 "#;
 
+/// TICKET-112 — a task joining a nested nursery whose only child is genuinely deadlocked, while two
+/// cousin nurseries feed each other only after that join returns: at `CHEZZI_THREADS>=2` the private
+/// nested sched's open body used to veto the genuine deadlock's own fault, hanging the whole run.
+const COUSIN_FED: &str = r#"fn main():
+    never := Channel[int](0)
+    x := Channel[int](0)
+    y := Channel[int](0)
+    parallel:
+        spawn:
+            r := recover:
+                parallel:
+                    spawn:
+                        never.recv()
+            match r:
+                Ok(_): print("inner ok")
+                Err(e): print("inner err")
+            x.send(1)
+        spawn:
+            parallel:
+                spawn:
+                    y.send(x.recv() + 1)
+                print("F got {y.recv()}")
+    print("done")
+main()
+"#;
+
+/// TICKET-112 — a genuine nested deadlock whose outer body sits at its own join (not a channel
+/// recv), a third shape of the same open-body-veto defect.
+const NOFEED_JOIN: &str = r#"fn main():
+    out := Channel[int](0)
+    never := Channel[int](0)
+    parallel:
+        spawn:
+            inner := Channel[int](0)
+            parallel:
+                spawn:
+                    never.recv()
+                out.send(inner.recv() + 1)
+        spawn:
+            print("got {out.recv()}")
+    print("done")
+main()
+"#;
+
+/// TICKET-112 — an Executor job's nursery spawns a task that opens its own nested nursery, whose
+/// only child is genuinely deadlocked. Traces the same defect on the Executor path.
+const EXEC_NESTED: &str = r#"import std.concurrency
+
+fn job():
+    never := Channel[int](0)
+    x := Channel[int](0)
+    r := recover:
+        parallel:
+            spawn:
+                parallel:
+                    spawn:
+                        parallel:
+                            spawn:
+                                never.recv()
+                    x.recv()
+    match r:
+        Ok(_): print("job ok")
+        Err(e): print("job err")
+
+fn main():
+    ex := Executor()
+    ex.submit(fn(): job())
+    ex.shutdown()
+    print("done")
+main()
+"#;
+
 const DD6: &str = r#"ch := Channel[int](0)
 fn f():
     spawn:
@@ -347,18 +419,11 @@ fn read_pipes(child: &mut std::process::Child) -> (String, String) {
 
 /// The depth `recursive` runs at, per worker count.
 ///
-/// TICKET-112 carries the T>=2 depth cliff: `recursive` faults once its depth exceeds the
-/// granted-slot path, which TICKET-103 leaves alone. Full depth at T=1 only; `worker count - 1` at
-/// T=2/4/8 and at most seven at the default, each measured green (TICKET-103 `## Digest`, round 5).
-fn recursive_depth(threads: Option<&str>) -> usize {
-    match threads {
-        Some("1") => 30,
-        Some(t) => t.parse::<usize>().expect("worker count") - 1,
-        None => std::thread::available_parallelism()
-            .map_or(1, |n| n.get())
-            .saturating_sub(1)
-            .min(7),
-    }
+/// TICKET-112 lifted the T>=2 clamp: a nested eager sched now counts as live work in the
+/// process-wide verdict (`QuiesceState::live_eager_bodies`), so `recursive` no longer false-faults
+/// past the granted-slot path at any worker count. Full depth everywhere.
+fn recursive_depth(_threads: Option<&str>) -> usize {
+    30
 }
 
 /// TICKET-103 (W12-1, W12-4) — every live nested-nursery shape completes with Go's output at every
@@ -376,7 +441,7 @@ fn fixed_nested_nursery_shapes_complete_at_every_worker_count() {
         let recursive_src = RECURSIVE.replace("DEPTH", &depth.to_string());
         let recursive_want = format!("depth {}", depth + 1);
         let recursive_want = [recursive_want.as_str()];
-        let fixtures: [(&str, &str, Expect); 9] = [
+        let fixtures: [(&str, &str, Expect); 11] = [
             ("owner_blocked", OWNER_BLOCKED, Expect::Exact(&["got 2"])),
             ("recursive", &recursive_src, Expect::Exact(&recursive_want)),
             ("dd6_fed", DD6_FED, Expect::Exact(&["f got 7", "done"])),
@@ -409,6 +474,16 @@ fn fixed_nested_nursery_shapes_complete_at_every_worker_count() {
                 "late_recover",
                 LATE_RECOVER,
                 Expect::Exact(&["inner err", "task got 1", "done"]),
+            ),
+            (
+                "cousin_fed",
+                COUSIN_FED,
+                Expect::Exact(&["inner err", "F got 2", "done"]),
+            ),
+            (
+                "exec_nested",
+                EXEC_NESTED,
+                Expect::Exact(&["job err", "done"]),
             ),
         ];
         for (name, src, expect) in &fixtures {
@@ -456,7 +531,12 @@ fn fixed_nested_nursery_shapes_complete_at_every_worker_count() {
 /// waits on a channel nobody sends, both still fault `deadlock` at every worker count.
 #[test]
 fn nested_nursery_genuine_deadlocks_still_fault_at_every_worker_count() {
-    for (name, src) in [("nofeed", NOFEED), ("recstuck", RECSTUCK), ("dd6", DD6)] {
+    for (name, src) in [
+        ("nofeed", NOFEED),
+        ("recstuck", RECSTUCK),
+        ("dd6", DD6),
+        ("nofeed_join", NOFEED_JOIN),
+    ] {
         for threads in WORKER_COUNTS {
             for round in 0..5 {
                 let (dir, mut child) = spawn_fixture(name, src, threads, round);

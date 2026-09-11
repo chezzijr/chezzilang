@@ -2346,6 +2346,22 @@ reinvented; none is scheduled. (B3–B5 itself is planned in [`concurrency-b3.md
     (a peer whose only fiber was a join-blocked owner never satisfied its parked-victim demand); CLOSED
     2026-09-10 (TICKET-101) by splitting that demand out of the peer question alone
     (`MnSched::quiesced_core(c, require_parked)`), so a genuine nested deadlock faults again.
+  - **A private NESTED eager sched's own open body (`MnSched::body_is_fiber`).** That body is run by
+    a fiber of ANOTHER sched, not a dedicated drainer thread, and that fiber is already counted on its
+    own sched's `running`/`runnable`/`parked_n`/`inflight`/`blocked_owners`, and every sched sits in
+    `sched_registry` and `QuiesceState::eager_bodies` — so its liveness is always visible somewhere
+    else. **As shipped through 2026-09-10 such a nested sched's open body vetoed every PEER's own
+    genuine deadlock forever**, hanging a cousin nursery whose only child was truly stuck
+    (`cousin_fed`, `nofeed_join`) and, separately, false-faulting `main` at the default worker count
+    while a deep nested chain was still running (`recursive`, past the granted-`NestedDrainerSlot`
+    path). CLOSED 2026-09-11 (TICKET-112): a nested sched never vetoes a peer on its own open body, it
+    never faults its OWN fibers while that body is open (the body's fiber may still feed them), and
+    NESTED scheds now register with the process-wide `live` count too, judged with
+    `quiesced_core(c, false)` — a nested sched whose undone fibers are all parked or blocked at a
+    deeper join can send nothing until another registered sched moves, and that sched counts on its
+    own. **Limit:** an OUTERMOST sched keeps `local_quiesced`, so an Executor job whose nursery's only
+    undone fiber is an owner blocked at a nested join (`exec_join`, `docs/gaps.md`) still hangs at
+    `CHEZZI_THREADS>=2`.
 
   **(Symbol note:** the old `pick_runnable` linear scan named in earlier drafts is gone — replaced by
   D0's `ready`-set.)
