@@ -1267,11 +1267,7 @@ cannot express a gap — call the function directly by name for that shape; **(2
 first-class **built-in** function values (`p := ord`) take **no** keyword arguments (labels are a
 user-function surface).
 
-**Two call shapes take no keyword arguments** (documented limits, W12-16): a keyword call through a
-fn-typed struct field or a tuple slot (`h.f(x=4)`, `t.0(x=4)`) is refused, because member-call syntax
-resolves as a method before it is seen as a value, so bind the function first (`g := h.f` then
-`g(x=4)`); and a call with an explicit turbofish takes no named arguments (`S[str]("x", n=2)` is a
-parse error), so annotate the binding instead (`s: S[str] = S("x", n=2)`).
+**Two call shapes take no keyword arguments** (documented limits, W12-16): a keyword call through a fn-typed struct field or a tuple slot (`h.f(x=4)`, `t.0(x=4)`) is refused, because member-call syntax resolves as a method before it is seen as a value, so bind the function first (`g := h.f` then `g(x=4)`); and a call with an explicit turbofish takes no named arguments (`S[str]("x", n=2)` is a parse error), so annotate the binding instead (`s: S[str] = S("x", n=2)`).
 
 How few arguments a function value may be called with is part of what it means to store one: a
 binding typed from `fn a(x: int = 1)` may be called with none, so a function that *requires* an
@@ -1280,9 +1276,7 @@ reverse is fine — a defaulted function is strictly more permissive, so it flow
 `fn(int) -> int` slot. Named arguments through a value evaluate in **parameter-declaration order**, the
 same as a direct named call, and work in `defer`/`spawn` position too (`defer d(name="Zoe")`). Resolution
 is fully static (the checker rewrites the keyword call to a positional one; the runtime `Op::Call` /
-`DeferCall` / `SpawnCall` stay positional), so the VM produce identical output. Diagnostics print an
-omittable parameter as `int = …`, so `[a, b]` over those two functions reports
-`fn(int = …) -> int vs fn(int) -> int`.
+`DeferCall` / `SpawnCall` stay positional), so the VM produce identical output. Diagnostics print an omittable parameter as `int = …`, so `[a, b]` over those two functions reports `fn(int = …) -> int vs fn(int) -> int`.
 
 A function type's **parameter types** are strictly **invariant** — neither covariant nor
 contravariant. `h: fn(Any) -> Dog = idd` over `fn idd(d: Dog) -> Dog` is a type error (covariance
