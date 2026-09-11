@@ -14,12 +14,28 @@
 //! targeting that one test, one thread, with a 65s outer bound (5s slack over the panic's own 60s).
 //! `--include-ignored` because main `#[ignore]`s that lib test until TICKET-114 moves it (7253a982):
 //! without it libtest skips the test, exits 0, and this repro reads green before any fix.
+//! The test pre-builds the lib test target before it opens the quota scope, so the bound times the run and never a compile.
 
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 #[test]
 fn d3_thousands_of_fibers_does_not_hang_under_a_narrow_cpu_quota() {
+    // Build the lib test target HERE, outside the quota scope and before any hog starts, in this
+    // process's own environment (the one the inner `cargo test --lib` inherits), so the bound below
+    // times the test run and never a compile. Measured 2026-09-11 (TICKET-114 planning): with a
+    // stale lib test target the inner cargo recompiled `ring`/`rustls`/`rustls-webpki` inside the
+    // hog window and hit the 65 s `timeout` (`Some(124)`) without ever starting the test.
+    let build = Command::new("cargo")
+        .args(["test", "--lib", "--no-run"])
+        .output()
+        .expect("spawn cargo test --lib --no-run");
+    assert!(
+        build.status.success(),
+        "cargo test --lib --no-run failed before the quota run\nstderr: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
     let unit = format!(
         "ticket114-d3-quota-{}-{}",
         std::process::id(),
