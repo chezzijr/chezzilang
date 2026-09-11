@@ -173,13 +173,25 @@ fn check_replacement_dialect(repl: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Reject a `$`-reference to a capture group `re` does not have. `regex-automata`'s expander
-/// (`util/interpolate.rs`, `find_cap_ref`) silently expands an unresolvable name to the empty
-/// string; that is a wrong answer worth an `Err`, not the deliberately-literal `$$`/lone-`$`/
+/// Reject a `$`-reference to a capture group `re` does not have, and return the replacement text to
+/// hand the crate — identity unless an empty `${}` needs rewriting (see below). `regex-automata`'s
+/// expander (`util/interpolate.rs`, `find_cap_ref`) silently expands an unresolvable name to the
+/// empty string; that is a wrong answer worth an `Err`, not the deliberately-literal `$$`/lone-`$`/
 /// missing-brace cases, which this mirrors exactly so a valid replacement never regresses.
-fn check_group_refs(re: &regex::Regex, repl: &str) -> Result<(), String> {
+///
+/// `${}` (an empty braced name) is its own case: Go's `ReplaceAllString` keeps it literal, but
+/// `regex-automata`'s `find_cap_ref_braced` resolves it to `Ref::Named("")` and would expand it to
+/// the empty string. So an empty `${}` is rewritten to `$${}` — an escaped `$` followed by the
+/// literal text `{}` — before the crate ever sees it (W12-20c; DEC-098: `check_group_refs` must move
+/// with the crate).
+fn check_group_refs<'r>(
+    re: &regex::Regex,
+    repl: &'r str,
+) -> Result<std::borrow::Cow<'r, str>, String> {
     let bytes = repl.as_bytes();
     let mut i = 0;
+    let mut out: Option<String> = None;
+    let mut copied = 0;
     while i < bytes.len() {
         if bytes[i] != b'$' {
             i += 1;
@@ -193,6 +205,16 @@ fn check_group_refs(re: &regex::Regex, repl: &str) -> Result<(), String> {
             if next == b'{' {
                 if let Some(end) = repl[i + 2..].find('}') {
                     let name = &repl[i + 2..i + 2 + end];
+                    if end == 0 {
+                        // An empty `${}`: Go keeps it literal, so double the `$` and leave `{}` as
+                        // plain text for the crate.
+                        out.get_or_insert_with(String::new)
+                            .push_str(&repl[copied..i]);
+                        out.as_mut().unwrap().push('$');
+                        copied = i;
+                        i += 3;
+                        continue;
+                    }
                     check_one_group_ref(re, name)?;
                     i = i + 2 + end + 1;
                     continue;
@@ -216,7 +238,13 @@ fn check_group_refs(re: &regex::Regex, repl: &str) -> Result<(), String> {
         check_one_group_ref(re, name)?;
         i += 1 + run_len;
     }
-    Ok(())
+    Ok(match out {
+        Some(mut s) => {
+            s.push_str(&repl[copied..]);
+            std::borrow::Cow::Owned(s)
+        }
+        None => std::borrow::Cow::Borrowed(repl),
+    })
 }
 
 fn check_one_group_ref(re: &regex::Regex, name: &str) -> Result<(), String> {
@@ -246,8 +274,8 @@ fn check_one_group_ref(re: &regex::Regex, name: &str) -> Result<(), String> {
 fn do_replace_all(pat: &str, s: &str, repl: &str) -> Result<String, String> {
     let re = compiled(pat)?;
     check_replacement_dialect(repl)?;
-    check_group_refs(&re, repl)?;
-    Ok(re.replace_all(s, repl).into_owned())
+    let repl = check_group_refs(&re, repl)?;
+    Ok(re.replace_all(s, repl.as_ref()).into_owned())
 }
 
 fn do_split(pat: &str, s: &str) -> Result<Vec<String>, String> {
@@ -509,6 +537,26 @@ mod tests {
         let e = do_replace_all(r"(\d+)", "12 34", "$1px").unwrap_err();
         assert!(e.contains("${1}"), "{e}");
         assert!(do_replace_all(r"(\d+)", "12 34", "$2").is_err());
+    }
+
+    /// `${}` (an empty braced name) is malformed, and Go's `ReplaceAllString` keeps it literal
+    /// rather than erroring — the crate's own expander would instead expand `Ref::Named("")` to the
+    /// empty string, so it must be rewritten to `$${}` before the crate ever sees it (W12-20c).
+    #[test]
+    fn replace_all_keeps_an_empty_braced_name_literal_like_go() {
+        assert_eq!(
+            do_replace_all(r"(\d+)", "12 34", "${}"),
+            Ok("${} ${}".to_string())
+        );
+        assert_eq!(
+            do_replace_all(r"(\d+)", "12 34", "x${}y"),
+            Ok("x${}y x${}y".to_string())
+        );
+        assert_eq!(
+            do_replace_all(r"(\d+)", "12 34", "$${}"),
+            Ok("${} ${}".to_string())
+        );
+        assert!(do_replace_all(r"(\d+)", "12 34", "${2}").is_err());
     }
 
     /// Every valid or literal `$` spelling must keep working unchanged: the braced form, `$$`, a

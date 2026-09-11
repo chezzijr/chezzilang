@@ -76,14 +76,13 @@ test fn csv_lone_cr_neighbours_match_go():
     rows := [["a\rb", "c"], ["x\r", "\ry"]]
     assert csv.parse(csv.format(rows)) == rows
 
-# W12-20c: `${}` (an empty capture-group name) must give the SAME "names a capture group this
-# pattern does not have" diagnosis every other malformed/unknown `$name` form already gets, not
-# silently swallow to empty string.
-test fn regex_dollar_brace_empty_name_errors_like_the_other_malformed_forms():
+# W12-20c: `${}` (an empty capture-group name) is malformed and stays literal text, matching Go's
+# ReplaceAllString("12 34", "${}") -> "${} ${}", not an Err.
+test fn regex_dollar_brace_empty_name_stays_literal_like_go():
     r := regex.replace_all(r"(\d+)", "12 34", r"${}")
     match r:
-        Ok(v): assert false, "expected an Err, got Ok(" + v + ")"
-        Err(e): assert e.message().contains("does not have"), e.message()
+        Ok(v): assert v == "${{}} ${{}}", v
+        Err(e): assert false, e.message()
 
 # W12-20d: the magnitude of a duration literal is parsed UNSIGNED before the sign is applied, so
 # i64::MIN milliseconds (whose magnitude alone overflows a signed i64) must parse, matching its own

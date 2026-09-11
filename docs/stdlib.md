@@ -1058,6 +1058,8 @@ how often:
   `${1}px` still gives `Ok('12px 34px')`, and `$$` is a literal `$`. This is a DELIBERATE divergence
   from Go, whose `regexp.ReplaceAllString` silently expands an unknown name to the empty string — the
   same trade already made for the Python backslash form above.
+  An empty `${}` is malformed and stays literal text, as in Go (`replace_all(r"(\d+)", "12 34",
+  r"${}")` → `Ok('${} ${}')`) (W12-20c).
 
 ### `std.request`
 Returns use `struct Response { status: int, body: str, headers: Map[str, str] }` (header names
