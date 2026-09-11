@@ -136,6 +136,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 - **TICKET-110 (2026-09-10) — seven wave-12 edge fixes, W12-18a/19/20a-d/22.**
   `int()`/`s.parse_int()` on a well-formed numeral outside i64 now say `overflows i64 (range …)`
   instead of `cannot parse …`, sharing `parse_i64_pep515` (`src/vm/mod.rs`) with `builtin_int`.
+  A `#` inside an interpolation hole now comments to the end of the physical line (CPython
+  3.12+ parity) instead of silently eating the rest of the fragment; a single-line hole where that
+  swallows the closing `}` is now a located compile error.
 - **TICKET-102 (2026-09-10) — two checker test helpers minted the same tempdir names.**
   `checker::graph_tests::TmpDir` (`src/checker/mod.rs`) and `checker::tests::TmpDir`
   (`src/checker/tests.rs`) each formatted `chezzi_chk_{pid}_{n}` off their own zero-based counter in

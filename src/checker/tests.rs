@@ -29998,6 +29998,8 @@ fn literal_shape_errors_point_at_their_own_char() {
         ("s := \"a\\tb}c\"\n", 11, "unmatched '}'"),
         // `s := "a\tb{x:>99999999}c"` — `{`11 `x`12 `:`13 `>`←14, the spec's first char.
         ("s := \"a\\tb{x:>99999999}c\"\n", 14, "format spec:"),
+        // `s := "a\tb{x # c}"` — `{`11 `x`12 ` `13 `#`←14, the comment that swallowed the `}`
+        ("s := \"a\\tb{x # c}\"\n", 14, "'#'"),
     ] {
         let errs = check_src(src);
         let e = errs
@@ -30011,6 +30013,18 @@ fn literal_shape_errors_point_at_their_own_char() {
             e.message
         );
     }
+}
+
+/// A `#` inside a hole comments to the end of the PHYSICAL line (CPython 3.12+), not a blanket
+/// reject — so a single-line hole is rejected (its closing `}` is commented out) while a multi-line
+/// hole's comment ends at the real line break. W12-19.
+#[test]
+fn hash_comment_in_a_hole_runs_to_the_real_end_of_line() {
+    rejects("x := 1\ny := \"{x # c}\"\n", "'#'");
+    rejects("x := 1\ny := \"{x # c\\n}\"\n", "'#'"); // an escaped newline does not end the comment
+    ok("x := 1\ny := \"\"\"{x # note: y\n}\"\"\"\n");
+    ok("d := {\"#\": 1}\ny := \"{d['#']}{'#'}\"\n");
+    ok("n := 255\ny := \"{n:#x}\"\n");
 }
 
 /// …and the position it names must EXIST IN THE FILE. "Unterminated `{`" points at the literal's

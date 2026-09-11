@@ -3860,7 +3860,11 @@ print("literal {{x}} vs value {x}")
 (fragments are parsed with the rest of the module, before call arguments are normalized). The
 fragment scanner is **quote- and depth-aware**, so a `}` inside a nested string literal or inside
 `(`/`[`/`{` belongs to the expression rather than closing the fragment; whitespace padding around the
-fragment is insignificant.
+fragment is insignificant. A `#` outside a nested string literal starts a comment that runs to the
+end of the line, as in CPython 3.12+ (W12-19). In a multi-line (`"""`) hole the comment ends at the
+line break, so `"""{x # note⏎}"""` is `x`; on one line it comments out the closing `}` and is a
+compile error pointing at the `#`. An escaped `\n` does not end it. A `#` in a nested string
+(`{d['#']}`) or in the format spec (`{n:#x}`) is ordinary text.
 
 ```chezzi
 fn greet(name: str, greeting: str = "hi") -> str:

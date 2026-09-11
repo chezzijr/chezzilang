@@ -64,13 +64,17 @@ pub(crate) fn parse_interpolation(lit_tok: &StrLit, span: Span) -> Result<Vec<Ch
                 let mut closed = false;
                 let mut depth: i32 = 0;
                 let mut in_str: Option<char> = None;
+                // Set once a `#` outside a nested string starts a comment (W12-19). CPython
+                // 3.12+: the comment runs to the end of the PHYSICAL line; a single-line hole's
+                // closing `}` is commented out and the hole never closes.
+                let mut comment_at: Option<usize> = None;
                 // Past the top-level `:` the rest of the fragment is the FORMAT SPEC — literal text,
                 // not an expression. Quote/bracket tracking must stop there or a spec whose fill
                 // char is `'`, `(` or `)` (`"{x:'>5}"`, `"{x:(>5}"` — both legal, both CPython) is
                 // read as an unterminated string / unbalanced bracket and the fragment never closes.
                 // Only brace nesting still counts in spec text (CPython's nested `{width}` field).
                 let mut in_spec = false;
-                for (_, ic) in chars.by_ref() {
+                for (j, ic) in chars.by_ref() {
                     if in_spec {
                         match ic {
                             '{' => depth += 1,
@@ -84,11 +88,27 @@ pub(crate) fn parse_interpolation(lit_tok: &StrLit, span: Span) -> Result<Vec<Ch
                         inner.push(ic);
                         continue;
                     }
+                    if comment_at.is_some() {
+                        // Only a REAL line break ends the comment — an escaped `\n` stays on one
+                        // source line (`map.at`'s line does not advance across it).
+                        if ic == '\n' && map.at(j + 1).line > map.at(j).line {
+                            comment_at = None;
+                            inner.push(ic);
+                        } else {
+                            inner.push(' ');
+                        }
+                        continue;
+                    }
                     if let Some(q) = in_str {
                         if ic == q {
                             in_str = None;
                         }
                         inner.push(ic);
+                        continue;
+                    }
+                    if ic == '#' {
+                        comment_at = Some(j);
+                        inner.push(' ');
                         continue;
                     }
                     match ic {
@@ -110,6 +130,12 @@ pub(crate) fn parse_interpolation(lit_tok: &StrLit, span: Span) -> Result<Vec<Ch
                     inner.push(ic);
                 }
                 if !closed {
+                    if let Some(h) = comment_at {
+                        return Err(InterpError {
+                            message: "'#' starts a comment inside an interpolation hole and the comment runs to the end of the line, so this hole's closing '}' is commented out".to_string(),
+                            span: map.at(h),
+                        });
+                    }
                     // One past the last content char — the literal's closing delimiter, which is
                     // where CPython 3.14 points too (`f"a\tb{1 + c"` → caret on the closing `"`,
                     // offset 17). The lexer CHECKPOINTS that index with the delimiter's own span

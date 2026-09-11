@@ -19,17 +19,20 @@ test fn int_and_parse_int_overflow_say_overflow_not_cannot_parse():
         Ok(_): assert false, "9223372036854775808 does not fit i64"
         Err(e): assert e.message().contains("overflow"), e.message()
 
-# W12-19: a `#` inside an interpolation hole must be a located error, not a silent comment that
-# eats the rest of the hole (and, in the worst case, the rest of the string literal).
-test fn hash_inside_interpolation_hole_is_rejected():
-    r := recover: eval_interp()
-    match r:
-        Ok(v): assert false, "expected a located error, got Ok(" + v + ")"
-        Err(_): assert true
-
-fn eval_interp() -> str:
+# W12-19: a single-line hole's `#` comments out its own closing `}` and is a compile error — pinned
+# in src/checker/tests.rs (hash_comment_in_a_hole_runs_to_the_real_end_of_line) because a compile
+# error aborts the whole test file and `recover:` cannot catch it. Here we pin only the accepted
+# neighbours: a `#` inside a nested string or a format spec, and a multi-line hole's comment ending
+# at the real line break.
+test fn hash_in_a_hole_keeps_its_accepted_neighbours():
+    d := {"#": 1}
+    assert "{'#'}" == "#"
+    assert "{d['#']}" == "1"
+    n := 255
+    assert "{n:#x}" == "0xff"
     x := 1
-    return "{x # c}"
+    assert """{x # note: y
+}""" == "1"
 
 # W12-20a: stringify's depth cap must match parse's, so stringify's own output always round-trips
 # through parse. Build a tree 2001 array-levels deep (parse's own cutoff -- `parse_past_depth_limit`
