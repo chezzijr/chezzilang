@@ -20531,6 +20531,16 @@ fn two_var_for_over_iterable_annotation_names_the_type() {
     );
 }
 
+/// TICKET-113: a struct-iterator `next()` yielding a TUPLE should destructure with `for a, b in`,
+/// the same as a `list[(A, B)]` does. Today the struct-iterator arm in `for_bindings` rejects any
+/// `vars.len() != 1` before ever looking at the element type, so this is wrongly rejected.
+#[test]
+fn for_multi_name_over_struct_next_tuple_destructures() {
+    ok(
+        "struct Pairs:\n    n: int\n    fn next(self) -> Option[(int, str)]:\n        if self.n <= 0:\n            return None\n        self.n -= 1\n        return Some((self.n, \"x\"))\nfn main():\n    for a, b in Pairs(2):\n        print(\"{a}:{b}\")\nmain()\n",
+    );
+}
+
 // ===== non-void fn must return a value on every path (Option B) =====
 
 #[test]
