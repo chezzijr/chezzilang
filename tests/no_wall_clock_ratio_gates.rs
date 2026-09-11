@@ -72,12 +72,15 @@ fn no_chz_test_divides_two_wall_clock_samples() {
 /// A name may join the list, but only deliberately, in the commit that adds the clock, with the
 /// reason in that commit message. A test converted to a counted measure must be DELETED from the
 /// list in the same commit that converts it.
-const CLOCK_READING_TESTS: [&str; 22] = [
+const CLOCK_READING_TESTS: [&str; 23] = [
     "a_chezzi_hang_python_survives_is_a_finding",
     "a_cyclic_shared_field_type_graph_is_also_walked_once_per_type",
     "a_shared_field_type_graph_is_walked_once_per_type",
     "a_sleeping_nursery_task_is_cancelled_mid_flight_by_a_sibling_fault",
     "a_slow_but_healthy_job_at_the_exit_drain_is_untouched",
+    // TICKET-114's repro: its `.elapsed()` is an outer HANG bound around a `systemd-run` child (a
+    // hung child never exits, so there is nothing to count); it asserts the child's exit status.
+    "d3_thousands_of_fibers_does_not_hang_under_a_narrow_cpu_quota",
     "d5_blocking_sleeps_run_concurrently_not_serialized",
     "d5_owe3_path_c_sleep_in_callback_demotes_frees_worker",
     "deadline_past_fires_immediately",
@@ -291,7 +294,7 @@ fn sleep_synchronised_tests() -> BTreeSet<String> {
 /// rejected it (the walk returns 68). Obtain it by compiling once with an empty array and copying
 /// the "sleeps but is not listed" list `no_new_rust_test_sleeps_to_order_two_events` reports,
 /// verbatim, the same way `stack_trace_reports_call_chain`'s golden was obtained.
-const SLEEP_SYNCHRONISED_TESTS: [&str; 81] = [
+const SLEEP_SYNCHRONISED_TESTS: [&str; 82] = [
     "cousin_fed_completes_instead_of_hanging_at_two_and_four_workers",
     "a_bailed_join_stops_its_jobs_from_starting_new_work",
     "a_cancelled_siblings_defer_runs_whole_on_both_engines",
@@ -320,6 +323,9 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 81] = [
     "cancel_cascade_crosses_the_airlock",
     "cancel_trip_wakes_parked_wait_under_parallel",
     "connect_to_dead_port_reports_refused",
+    // TICKET-114's repro: the sleep is a POLL INTERVAL on `try_wait` against a hang bound (DEC-095's
+    // exemption) -- a hung child never closes its pipes, so `output()` would wedge the test binary.
+    "d3_thousands_of_fibers_does_not_hang_under_a_narrow_cpu_quota",
     "d5_blocking_sleeps_run_concurrently_not_serialized",
     "d5_owe3_path_c_accept_in_callback_demotes",
     "d5_owe3_path_c_recv_in_native_map_callback_demotes",
