@@ -152,7 +152,8 @@ fn cmd_tokens(path: Option<&String>) -> ExitCode {
     }
 }
 
-/// `chezzi ast <file>` — lex, parse, and pretty-print the AST. (M2)
+/// `chezzi ast <file>` — lex, parse, and print the AST: `{:#?}`, or one-line `{:?}` past
+/// `ast::AST_DUMP_MAX_PRETTY_DEPTH` (W12-21). (M2)
 fn cmd_ast(path: Option<&String>) -> ExitCode {
     let Some(path) = path else {
         eprintln!("chezzi ast: missing file argument\nusage: chezzi ast <file.chz>");
@@ -180,7 +181,7 @@ fn cmd_ast(path: Option<&String>) -> ExitCode {
         let module = parser::parse(tokens).map_err(|e| e.to_string())?;
         let stdout = std::io::stdout();
         let mut lock = stdout.lock();
-        writeln!(lock, "{module:#?}").map_err(|e| stdout_write_error("ast", &e))?;
+        chezzi::ast::write_dump(&mut lock, &module).map_err(|e| stdout_write_error("ast", &e))?;
         lock.flush().map_err(|e| stdout_write_error("ast", &e))?;
         Ok(())
     });

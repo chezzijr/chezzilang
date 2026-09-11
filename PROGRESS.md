@@ -152,6 +152,20 @@ Single source of truth for "what am I doing next." Update after every work sessi
   int constant to `float` beside a sibling `float`-binding argument, coerced at the call site via the
   existing `ArgFloatWidenTable` (W12-15). `cargo test --lib` 4654 passed, 0 failed, 2 ignored;
   `cargo clippy -- -D warnings` clean; `tests/chz` green at `CHEZZI_THREADS=1`, `=2` and default.
+- **TICKET-109 (2026-09-11) — nested `fn` declarations are limited to 16 deep, and `chezzi ast` goes
+  one-line past depth 128 (W12-12 guarded, W12-21 closed).** The checker walks N nested un-annotated
+  fns `2^(N+2) - 4` times, and `run` is three checker passes over that walk. `desugar` now rejects the
+  17th nesting level with one located resolve error naming the fn and the limit; W12-12 stays
+  OPEN-DEFERRED (`docs/gaps.md` enumerates the four side-effect readers a real fix must snapshot to
+  make the nested walk idempotent: the error count, `fn_reads`, hover decl-site records, and
+  `drop_empty_site` pins). `chezzi ast` now prints the pretty `{:#?}` form only up to bracket depth 128
+  (`ast::AST_DUMP_MAX_PRETTY_DEPTH`) and the one-line `{:?}` form past it, via a streaming
+  `debug_nesting` probe that stores nothing. Measured on the release binary: `check nf16` 226 ms (was
+  exponential past nf18), `check nf17`/`nf30` 5 ms each at the limit error, `ast and5000` (5000-term
+  `and` chain) 789 KB in 20-41 ms (was a 60 s timeout unguarded). A sweep of all 517 tracked `.chz`
+  files' `ast` and `check --errors=json` output against the pre-fix binary showed zero diffs. Gates:
+  `cargo test --lib` `0 failed`, `cargo clippy -- -D warnings` clean, `cargo fmt --check` clean,
+  `tests/chz` green at `CHEZZI_THREADS=1`, `=2` and default.
 - **TICKET-098 (2026-09-09) — five diagnostic/edge-case papercuts, W11-9..W11-12.** (A) A
   non-exhaustive STRUCT match's witness doubled its module-mangled key (`main::S.main::S(_, _)`),
   because a `Dom::Prod`'s label is BOTH its sole constructor name and its display prefix; a new

@@ -16,6 +16,70 @@ pub struct Module {
 /// A block is just a list of statements (a function body, an `if` arm, a loop body, …).
 pub type Block = Vec<Stmt>;
 
+/// W12-21 / TICKET-109 — the deepest bracket nesting `chezzi ast` prints in the pretty `{:#?}` form.
+/// `{:#?}` indents every line by its depth, so a left-nested chain of n nodes renders O(n²) bytes (a
+/// 500-term `and` chain: 20 MB in 24 s). Past this depth [`write_dump`] prints the one-line `{:?}`
+/// form instead. The deepest tracked `.chz` file renders 48 levels deep.
+pub const AST_DUMP_MAX_PRETTY_DEPTH: usize = 128;
+
+/// The deepest bracket nesting of `module`'s compact `{:?}` rendering. A sink that stores nothing
+/// counts it, so the probe costs O(n) time and no memory. Brackets inside a string literal do not
+/// count.
+pub fn debug_nesting(module: &Module) -> usize {
+    struct Probe {
+        depth: usize,
+        max: usize,
+        in_str: bool,
+        esc: bool,
+    }
+    impl std::fmt::Write for Probe {
+        fn write_str(&mut self, s: &str) -> std::fmt::Result {
+            for b in s.bytes() {
+                if self.in_str {
+                    if self.esc {
+                        self.esc = false;
+                    } else if b == b'\\' {
+                        self.esc = true;
+                    } else if b == b'"' {
+                        self.in_str = false;
+                    }
+                    continue;
+                }
+                match b {
+                    b'"' => self.in_str = true,
+                    b'(' | b'[' | b'{' => {
+                        self.depth += 1;
+                        self.max = self.max.max(self.depth);
+                    }
+                    b')' | b']' | b'}' => self.depth = self.depth.saturating_sub(1),
+                    _ => {}
+                }
+            }
+            Ok(())
+        }
+    }
+    let mut probe = Probe {
+        depth: 0,
+        max: 0,
+        in_str: false,
+        esc: false,
+    };
+    // `Probe::write_str` never fails, and a derived `Debug` impl fails only when its sink does.
+    let _ = std::fmt::write(&mut probe, format_args!("{module:?}"));
+    probe.max
+}
+
+/// Write `chezzi ast`'s dump of `module` to `out`, newline-terminated: `{:#?}` when
+/// [`debug_nesting`] is at most [`AST_DUMP_MAX_PRETTY_DEPTH`], else the one-line `{:?}`. Both forms
+/// stream straight into `out` (DEC-091: never build the render as a `String` first).
+pub fn write_dump(out: &mut impl std::io::Write, module: &Module) -> std::io::Result<()> {
+    if debug_nesting(module) <= AST_DUMP_MAX_PRETTY_DEPTH {
+        writeln!(out, "{module:#?}")
+    } else {
+        writeln!(out, "{module:?}")
+    }
+}
+
 // ===== statements =====
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1350,5 +1414,41 @@ mod tests {
             let toks = crate::lexer::tokenize("1 + 2").unwrap();
             crate::parser::parse_expr(toks).unwrap()
         }));
+    }
+
+    fn parse_module(src: &str) -> Module {
+        crate::parser::parse(crate::lexer::tokenize(src).expect("lex")).expect("parse")
+    }
+
+    /// W12-21 / TICKET-109 — below the depth cap, `chezzi ast` prints exactly the pretty `{:#?}` form.
+    #[test]
+    fn ast_dump_keeps_the_pretty_form_below_the_depth_cap() {
+        let m = parse_module("fn f(x: int) -> int:\n    return x + 1\nprint(f(1))\n");
+        let mut out = Vec::new();
+        write_dump(&mut out, &m).expect("write to a Vec");
+        assert_eq!(String::from_utf8(out).unwrap(), format!("{m:#?}\n"));
+    }
+
+    /// W12-21 / TICKET-109 — past the cap it prints the one-line `{:?}` form. A 100-term `and` chain
+    /// nests about 200 deep; its `{:#?}` form is 850 KB, its `{:?}` form about 16 KB.
+    #[test]
+    fn ast_dump_goes_compact_past_the_depth_cap() {
+        let m = parse_module(&format!("x := true{}\n", " and true".repeat(99)));
+        assert!(
+            debug_nesting(&m) > AST_DUMP_MAX_PRETTY_DEPTH,
+            "the fixture went shallow"
+        );
+        let mut out = Vec::new();
+        write_dump(&mut out, &m).expect("write to a Vec");
+        assert_eq!(String::from_utf8(out).unwrap(), format!("{m:?}\n"));
+    }
+
+    /// W12-21 / TICKET-109 — brackets inside a string literal, including after an escaped quote, do
+    /// not count toward the nesting depth.
+    #[test]
+    fn debug_nesting_skips_brackets_inside_strings() {
+        let plain = parse_module("print(\"a\")\n");
+        let bracketed = parse_module("print(\"\\\"((((((((\")\n");
+        assert_eq!(debug_nesting(&bracketed), debug_nesting(&plain));
     }
 }
