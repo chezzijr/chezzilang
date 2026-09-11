@@ -32019,3 +32019,32 @@ fn a_bound_naming_a_generic_protocol_alias_is_refused_by_name() {
         "type alias 'IntBag' applies type arguments",
     );
 }
+
+/// TICKET-109 (W12-12): N nested `fn` declarations (`fn f0(): fn f1(): ... pass`) made `check`
+/// exponential in N. The checker walks an un-annotated nested fn's body twice (`infer_fn_ret`, then
+/// `check_fn_body`), and every enclosing inference walk repeats both. Measured on the release binary
+/// at 3f1300ab: N=18 0.845s, N=20 3.39s, N=24 past 30s.
+#[test]
+fn nested_fn_decl_check_is_not_exponential() {
+    const N: usize = 18;
+    let mut src = String::new();
+    for i in 0..N {
+        src.push_str(&"    ".repeat(i));
+        src.push_str(&format!("fn f{i}():\n"));
+    }
+    src.push_str(&"    ".repeat(N));
+    src.push_str("pass\n");
+
+    let tokens = lexer::tokenize(&src).expect("lex should succeed");
+    let module = parser::parse(tokens).expect("parse should succeed");
+    let start = std::time::Instant::now();
+    let verdict = check(&module);
+    let elapsed = start.elapsed();
+
+    assert!(verdict.is_ok(), "expected no errors, got: {verdict:?}");
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "checking {N} nested fn declarations took {elapsed:?} (>2s ceiling) -- exponential \
+         checker cost in nested-fn-declaration depth (TICKET-109 / W12-12)"
+    );
+}

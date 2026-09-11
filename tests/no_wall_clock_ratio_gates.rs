@@ -82,6 +82,7 @@ const CLOCK_READING_TESTS: [&str; 21] = [
     "d5_owe3_path_c_sleep_in_callback_demotes_frees_worker",
     "deadline_past_fires_immediately",
     "fibers_scale_ready_queue_not_quadratic",
+    "nested_fn_decl_check_is_not_exponential",
     "parallel_many_spawns_cheap_and_correct",
     "parity_blocking_native_is_an_entry_cancellation_checkpoint_on_both_engines",
     "rwshared_view_over_shared_bindings_is_not_quadratic",
