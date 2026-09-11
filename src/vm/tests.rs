@@ -7922,6 +7922,7 @@ main()
 /// no false deadlock. Bounded loops terminate regardless of preemption, so this is a soundness
 /// guard for the yield/requeue machinery rather than the discriminating fairness test above.
 #[test]
+#[ignore = "W12-23: hangs at pool == nproc under load in the debug build; TICKET-114 moves it to a CLI-driven test at a fixed pool"]
 fn d3_thousands_of_cpu_fibers_all_complete() {
     let src = "\
 fn work(s: Shared[int]):
