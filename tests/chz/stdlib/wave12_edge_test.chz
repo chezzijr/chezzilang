@@ -65,6 +65,17 @@ test fn stringify_at_the_depth_cap_parses_back():
 test fn csv_lone_cr_is_field_data_not_a_record_break():
     assert csv.parse("a\rb") == [["a\rb"]], "expected a single field with a literal CR"
 
+# W12-20b: the lone-CR neighbours match Go's encoding/csv, and the round-trip through format stays
+# total for a CR-bearing field.
+test fn csv_lone_cr_neighbours_match_go():
+    assert csv.parse("a\r") == [["a"]]
+    assert csv.parse("a\r\r\n") == [["a\r"]]
+    assert csv.parse("a,\rb") == [["a", "\rb"]]
+    assert csv.parse("a\r\nb") == [["a"], ["b"]]
+    assert csv.parse("\r") == [[]]
+    rows := [["a\rb", "c"], ["x\r", "\ry"]]
+    assert csv.parse(csv.format(rows)) == rows
+
 # W12-20c: `${}` (an empty capture-group name) must give the SAME "names a capture group this
 # pattern does not have" diagnosis every other malformed/unknown `$name` form already gets, not
 # silently swallow to empty string.

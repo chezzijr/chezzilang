@@ -5,9 +5,11 @@
 # in format. Deterministic at every worker count — pure compute, no IO.
 #
 # ===== CONTRACT (load-bearing semantics) =====
-# * SEPARATOR: comma. Fields are separated by `,`, records by CRLF or LF (parse accepts both;
-#   format emits CRLF per RFC 4180). A field wrapped in double-quotes may contain commas, CR, LF
-#   and escaped quotes (`""` inside a quoted field = one literal `"`).
+# * SEPARATOR: comma. Fields are separated by `,`, records by CRLF or LF (parse accepts both; a
+#   lone CR is field data, Go `encoding/csv` parity, except a final CR at end of input, which ends
+#   the record as in Go — W12-20b; format emits CRLF per RFC 4180). A field wrapped in
+#   double-quotes may contain commas, CR, LF and escaped quotes (`""` inside a quoted field = one
+#   literal `"`).
 # * BARE QUOTES (W7-10): a `"` opens a quoted field ONLY at FIELD START. Anywhere else it is an
 #   ORDINARY character kept LITERALLY — `a,b"c` -> ["a", "b\"c"], `a,b""c` -> ["a", "b\"\"c"] (two
 #   literal quotes: `""` collapses to one only INSIDE a quoted field). This is CPython
@@ -75,7 +77,12 @@ fn parse(text: str) -> List[List[str]]:
                 started = true
                 field_start = true
                 i += 1
-            elif c == "\r":
+            elif c == "\r" and i + 1 < n and chars[i + 1] != "\n":
+                field.push(c)              # a LONE CR mid-input is field data (Go encoding/csv, W12-20b)
+                started = true
+                field_start = false
+                i += 1
+            elif c == "\r":                # CRLF, or a final CR at EOF: a record terminator
                 if started:
                     row.push("".join(field))
                 field = []

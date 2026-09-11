@@ -1373,7 +1373,9 @@ The case fns are ASCII-guaranteed; exotic full-Unicode case-folding follows Rust
   and `parse("\"a\"b,c")` → `[["ab", "c"]]`.
 - `format` — the inverse. A field is quoted **iff** it contains a `,`, `"`, CR, or LF; embedded quotes
   are doubled. Each record is **terminated** by CRLF (`\r\n`, per RFC 4180) — not separator-joined —
-  so `format([["a","b"]])` == `"a,b\r\n"`; `parse` accepts CRLF or LF either way. `format([])` → `""`.
+  so `format([["a","b"]])` == `"a,b\r\n"`; `parse` accepts CRLF or LF either way; a lone CR is field
+  data (`parse("a\rb")` → `[["a\rb"]]`, Go `encoding/csv`), except a final CR at end of input,
+  which ends the record (W12-20b). `format([])` → `""`.
 - **Round-trip guarantee:** `parse(format(rows)) == rows` is **total** — proven for rows covering every
   hard case (embedded comma, escaped quote, embedded newline, empty field, unicode) **including** an
   empty record `[]` and a sole or trailing single-empty-field record `[""]`: `format([[]])` == `"\r\n"`

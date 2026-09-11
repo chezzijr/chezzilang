@@ -141,6 +141,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
   swallows the closing `}` is now a located compile error.
   `json.stringify`/`encode` now count nesting the same way `parse` does (outermost = level 1, a
   scalar adds none), so every document `stringify` emits parses back.
+  `csv.parse` keeps a lone CR as field data (Go `encoding/csv` parity) instead of splitting a
+  record on it; a final CR at end of input still ends the record.
 - **TICKET-102 (2026-09-10) — two checker test helpers minted the same tempdir names.**
   `checker::graph_tests::TmpDir` (`src/checker/mod.rs`) and `checker::tests::TmpDir`
   (`src/checker/tests.rs`) each formatted `chezzi_chk_{pid}_{n}` off their own zero-based counter in
