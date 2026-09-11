@@ -1,0 +1,136 @@
+# TICKET-113 (W12-16(b)): `for a, b, … in xs` destructures a tuple element from ANY iterable, not only
+# a List[(A, B)]. Reference: CPython 3.14.7 binds the slots positionally for a generator, an iterator
+# and any iterable of tuples (`for a, b in pairs(): print(a, b)` prints `1 x` then `2 y`).
+
+fn pairs() -> Iterator[(int, str)]:
+    yield (1, "x")
+    yield (2, "y")
+
+fn trip() -> Iterator[(int, str, float)]:
+    yield (1, "x", 2.5)
+    yield (2, "y", 5.0)
+
+fn kv() -> Iterator[(str, int)]:
+    yield ("a", 1)
+    yield ("b", 2)
+
+struct Pairs:
+    n: int
+    fn next(self) -> Option[(int, str)]:
+        if self.n <= 0:
+            return None
+        self.n -= 1
+        return Some((self.n, "p{self.n}"))
+
+# Infinite: only `break` ends it.
+struct Squares:
+    n: int
+    fn next(self) -> Option[(int, int)]:
+        self.n += 1
+        return Some((self.n, self.n * self.n))
+
+# Pure `Iterable`: `iter`, no `next`.
+struct Wrap:
+    xs: List[(int, str)]
+    fn iter(self) -> Iterator[(int, str)]:
+        return self.xs.iter()
+
+fn joined(xs: Iterable[(str, int)]) -> str:
+    out := ""
+    for k, v in xs:
+        out = out + "{k}{v}"
+    return out
+
+fn joined_bound[S: Iterable[(str, int)]](xs: S) -> str:
+    out := ""
+    for k, v in xs:
+        out = out + "{k}{v}"
+    return out
+
+test fn a_generator_of_pairs_destructures():
+    got: List[str] = []
+    for a, b in pairs():
+        got.push("{a}{b}")
+    assert got == ["1x", "2y"], "got {got}"
+
+test fn a_generator_of_triples_destructures_into_three_names():
+    got: List[str] = []
+    for a, b, c in trip():
+        got.push("{a}{b}{c}")
+    assert got == ["1x2.5", "2y5.0"], "got {got}"
+
+test fn a_named_cursor_destructures_and_is_drained_in_place():
+    c := [(1, "x"), (2, "y"), (3, "z")].iter()
+    skipped := c.next()
+    assert skipped == Some((1, "x")), "got {skipped}"
+    got: List[str] = []
+    for a, b in c:
+        got.push("{a}{b}")
+    assert got == ["2y", "3z"], "got {got}"
+    assert c.next() == None, "the loop must drive the shared cursor, not a copy"
+
+test fn a_next_struct_destructures():
+    got: List[str] = []
+    for a, b in Pairs(2):
+        got.push("{a}{b}")
+    assert got == ["1p1", "0p0"], "got {got}"
+
+test fn an_infinite_next_struct_honours_continue_and_break():
+    got: List[int] = []
+    for n, sq in Squares(0):
+        if n == 2:
+            continue
+        if n > 4:
+            break
+        got.push(sq)
+    assert got == [1, 9, 16], "got {got}"
+
+test fn a_pure_iterable_struct_destructures():
+    got: List[str] = []
+    for a, b in Wrap([(1, "x"), (2, "y")]):
+        got.push("{a}{b}")
+    assert got == ["1x", "2y"], "got {got}"
+
+test fn an_iterable_param_destructures_every_witness():
+    assert joined([("a", 1), ("b", 2)]) == "a1b2"
+    assert joined(kv()) == "a1b2"
+    assert joined_bound([("a", 1)]) == "a1"
+    assert joined_bound(kv()) == "a1b2"
+
+test fn a_channel_of_pairs_destructures():
+    ch := Channel[(int, str)](2)
+    ch.send((1, "x"))
+    ch.send((2, "y"))
+    ch.close()
+    got: List[str] = []
+    for a, b in ch:
+        got.push("{a}{b}")
+    assert got == ["1x", "2y"], "got {got}"
+
+# Go >= 1.22 per-iteration cells (docs/syntax.md:511) hold for EVERY name. CPython late-binds here
+# and both closures see (2, 'y') -- a documented, deliberate divergence.
+test fn every_name_gets_a_fresh_cell_per_iteration():
+    fs: List[fn() -> str] = []
+    for a, b in pairs():
+        fs.push(fn() -> str: "{a}{b}")
+    assert [f() for f in fs] == ["1x", "2y"]
+
+test fn a_comprehension_over_a_generator_destructures():
+    assert [a * 10 + b.len() for a, b in pairs()] == [11, 21]
+
+test fn a_map_still_binds_key_and_value_from_a_snapshot():
+    m := {"a": 1, "b": 2}
+    got: List[str] = []
+    for k, v in m:
+        m["c"] = 3
+        got.push("{k}={v}")
+    assert got == ["a=1", "b=2"], "got {got}"
+    assert m.len() == 3
+
+test fn a_list_of_pairs_still_snapshots_its_spine():
+    xs := [(1, "x"), (2, "y")]
+    got: List[str] = []
+    for a, b in xs:
+        xs.push((9, "z"))
+        got.push("{a}{b}")
+    assert got == ["1x", "2y"], "got {got}"

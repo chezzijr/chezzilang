@@ -32,3 +32,13 @@ xs := [1, 2, 3]
 ys := [10, 20, 30]
 sums := [a + b for a, b in iter.zip(xs, ys)]
 print(sums)
+
+# Any iterable whose element is a tuple destructures the same way (TICKET-113): a generator, an
+# `.iter()` cursor, a `next` struct, an `Iterable[(A, B)]` value.
+fn gen_pairs() -> Iterator[(int, str)]:
+    yield (1, "x")
+    yield (2, "y")
+for a, b in gen_pairs():
+    print(a, b)
+for a, b in [(1, "x")].iter():
+    print(a, b)

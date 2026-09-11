@@ -20511,9 +20511,9 @@ fn struct_with_nonconforming_next_is_not_iterable() {
 /// only for actual structs.
 #[test]
 fn two_var_for_over_iterable_annotation_names_the_type() {
-    rejects(
+    // A TUPLE element destructures (TICKET-113), so this is accepted now; the non-tuple Iterable[str] below keeps the named-type message.
+    ok(
         "fn pairs(xs: Iterable[(str, int)]) -> int:\n    n := 0\n    for k, v in xs:\n        n += v\n    return n\nfn main():\n    print(str(pairs([(\"a\", 1)])))\nmain()\n",
-        "`for k, v` requires a map, found Iterable[(str, int)]",
     );
     rejects(
         "fn kv(xs: Iterable[str]) -> int:\n    n := 0\n    for i, v in xs:\n        n += 1\n    return n\nfn main():\n    print(str(kv([\"a\"])))\nmain()\n",
@@ -20538,6 +20538,87 @@ fn two_var_for_over_iterable_annotation_names_the_type() {
 fn for_multi_name_over_struct_next_tuple_destructures() {
     ok(
         "struct Pairs:\n    n: int\n    fn next(self) -> Option[(int, str)]:\n        if self.n <= 0:\n            return None\n        self.n -= 1\n        return Some((self.n, \"x\"))\nfn main():\n    for a, b in Pairs(2):\n        print(\"{a}:{b}\")\nmain()\n",
+    );
+}
+
+/// TICKET-113: N names over ANY iterable whose element is statically a tuple of arity N bind each
+/// name to its slot type — not only a `List[(A, B)]`. One `ok` per source; the slot types are
+/// pinned by the last case of `for_multi_name_rejects_non_tuple_and_wrong_arity`.
+#[test]
+fn for_multi_name_over_every_tuple_source_checks() {
+    let pairs = "fn pairs() -> Iterator[(int, str)]:\n    yield (1, \"x\")\n    yield (2, \"y\")\n";
+    // (a) a generator
+    ok(&format!(
+        "{pairs}fn main():\n    for a, b in pairs():\n        print(a + 1, b.len())\nmain()\n"
+    ));
+    // (b) an `.iter()` cursor
+    ok("fn main():\n    for a, b in [(1, \"x\")].iter():\n        print(a + 1, b.len())\nmain()\n");
+    // (c) an `Iterable[(str, int)]` annotation
+    ok(
+        "fn total(xs: Iterable[(str, int)]) -> int:\n    n := 0\n    for k, v in xs:\n        n += v + k.len()\n    return n\nfn main():\n    print(total([(\"a\", 1)]))\nmain()\n",
+    );
+    // (d) an `[S: Iterable[(str, int)]]` bound
+    ok(
+        "fn total[S: Iterable[(str, int)]](xs: S) -> int:\n    n := 0\n    for k, v in xs:\n        n += v + k.len()\n    return n\nfn main():\n    print(total([(\"a\", 1)]))\nmain()\n",
+    );
+    // (e) arity 3 from a generator
+    ok(
+        "fn trip() -> Iterator[(int, str, float)]:\n    yield (1, \"x\", 2.5)\nfn main():\n    for a, b, c in trip():\n        print(a + 1, b.len(), c * 2.0)\nmain()\n",
+    );
+    // (f) a pure-`Iterable` struct (`iter`, no `next`)
+    ok(
+        "struct Wrap:\n    xs: List[(int, str)]\n    fn iter(self) -> Iterator[(int, str)]:\n        return self.xs.iter()\nfn main():\n    for a, b in Wrap([(1, \"x\")]):\n        print(a + 1, b.len())\nmain()\n",
+    );
+    // (g) a `Channel[(int, str)]`
+    ok(
+        "fn main():\n    ch := Channel[(int, str)](1)\n    ch.send((1, \"x\"))\n    ch.close()\n    for a, b in ch:\n        print(a + 1, b.len())\nmain()\n",
+    );
+    // (h) a comprehension clause over a generator (`for_bindings` serves both)
+    ok(&format!(
+        "{pairs}fn main():\n    print([a + b.len() for a, b in pairs()])\nmain()\n"
+    ));
+}
+
+/// TICKET-113: the N-name widening admits a TUPLE element only. A non-tuple element keeps each
+/// source's existing message, a tuple of the wrong arity names both counts from every source, and a
+/// range stays refused. The last case pins that the names carry the slot types, not `Unknown`.
+#[test]
+fn for_multi_name_rejects_non_tuple_and_wrong_arity() {
+    rejects(
+        "fn gen() -> Iterator[int]:\n    yield 1\nfn main():\n    for a, b in gen():\n        print(a)\nmain()\n",
+        "a generator iterator binds a single loop variable",
+    );
+    rejects(
+        "fn main():\n    for a, b in [1, 2].iter():\n        print(a)\nmain()\n",
+        "a generator iterator binds a single loop variable",
+    );
+    rejects(
+        "fn main():\n    ch := Channel[int](1)\n    ch.close()\n    for a, b in ch:\n        print(a)\nmain()\n",
+        "a channel iterator binds a single loop variable",
+    );
+    rejects(
+        "fn main():\n    for a, b in 0..3:\n        print(a)\nmain()\n",
+        "a range binds a single loop variable; `for k, v` needs a map",
+    );
+    rejects(
+        "fn trip() -> Iterator[(int, str, float)]:\n    yield (1, \"x\", 2.5)\nfn main():\n    for a, b in trip():\n        print(a)\nmain()\n",
+        "tuple-destructuring `for` binds 2 names but the element has 3",
+    );
+    rejects(
+        "struct Pairs:\n    n: int\n    fn next(self) -> Option[(int, str)]:\n        return None\nfn main():\n    for a, b, c in Pairs(0):\n        print(a)\nmain()\n",
+        "tuple-destructuring `for` binds 3 names but the element has 2",
+    );
+    rejects(
+        "fn f(xs: Iterable[(str, int)]) -> int:\n    for a, b, c in xs:\n        return 0\n    return 1\nfn main():\n    print(f([(\"a\", 1)]))\nmain()\n",
+        "tuple-destructuring `for` binds 3 names but the element has 2",
+    );
+    rejects(
+        "fn main():\n    ch := Channel[(int, str)](1)\n    ch.close()\n    for a, b, c in ch:\n        print(a)\nmain()\n",
+        "tuple-destructuring `for` binds 3 names but the element has 2",
+    );
+    rejects(
+        "fn pairs() -> Iterator[(int, str)]:\n    yield (1, \"x\")\nfn main():\n    for a, b in pairs():\n        s: str = a\n        print(s)\nmain()\n",
+        "cannot assign int to variable of type str",
     );
 }
 
