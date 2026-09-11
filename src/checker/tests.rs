@@ -32023,7 +32023,11 @@ fn a_bound_naming_a_generic_protocol_alias_is_refused_by_name() {
 /// TICKET-109 (W12-12): N nested `fn` declarations (`fn f0(): fn f1(): ... pass`) made `check`
 /// exponential in N. The checker walks an un-annotated nested fn's body twice (`infer_fn_ret`, then
 /// `check_fn_body`), and every enclosing inference walk repeats both. Measured on the release binary
-/// at 3f1300ab: N=18 0.845s, N=20 3.39s, N=24 past 30s.
+/// at 3f1300ab: N=18 0.845s, N=20 3.39s, N=24 past 30s. The fix is a limit, not a faster walk:
+/// `desugar` rejects a `fn` nested deeper than `desugar::MAX_FN_NESTING` (16) before the checker
+/// runs. This test drives the production order (`resolver::build_graph`: desugar, then check) at
+/// N=18 and requires that one error inside the 2s ceiling. Before the limit, N=18 checked clean after
+/// about 7.5s in the dev profile.
 #[test]
 fn nested_fn_decl_check_is_not_exponential() {
     const N: usize = 18;
@@ -32036,15 +32040,19 @@ fn nested_fn_decl_check_is_not_exponential() {
     src.push_str("pass\n");
 
     let tokens = lexer::tokenize(&src).expect("lex should succeed");
-    let module = parser::parse(tokens).expect("parse should succeed");
+    let mut module = parser::parse(tokens).expect("parse should succeed");
     let start = std::time::Instant::now();
-    let verdict = check(&module);
+    let verdict = crate::desugar::run_standalone(&mut module).map(|()| check(&module));
     let elapsed = start.elapsed();
 
-    assert!(verdict.is_ok(), "expected no errors, got: {verdict:?}");
+    let err = verdict.expect_err("18 nested fn declarations must hit the fn-nesting limit");
+    assert!(
+        err.message.contains("fn declarations nest at most 16 deep"),
+        "got: {err:?}"
+    );
     assert!(
         elapsed < std::time::Duration::from_secs(2),
-        "checking {N} nested fn declarations took {elapsed:?} (>2s ceiling) -- exponential \
+        "rejecting {N} nested fn declarations took {elapsed:?} (>2s ceiling) -- exponential \
          checker cost in nested-fn-declaration depth (TICKET-109 / W12-12)"
     );
 }

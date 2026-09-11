@@ -520,6 +520,7 @@ pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
             type_params: Vec::new(),
             needed: std::collections::BTreeMap::new(),
             depth: 0,
+            fn_depth: 0,
         };
         {
             // Borrow the module's AST mutably; everything `walker` reads lives in `regs`/the maps above.
@@ -639,6 +640,7 @@ pub fn run_standalone(module: &mut Module) -> Result<(), ResolveError> {
         type_params: Vec::new(),
         needed: std::collections::BTreeMap::new(),
         depth: 0,
+        fn_depth: 0,
     };
     walker.walk_block(&mut module.stmts)?;
     debug_assert!(walker.needed.is_empty(), "standalone module has no imports");
@@ -1640,9 +1642,37 @@ struct Walker<'a> {
     /// Current [`Walker::walk_expr`] recursion depth — see that method. This counter is what turns
     /// [`crate::parser::MAX_AST_DEPTH`] into a **global** bound instead of a per-`Parser` one.
     depth: usize,
+    /// TICKET-109 — how many `fn` bodies (a top-level or nested `fn`, a `test fn`, or a struct, enum
+    /// or native-struct method) enclose the statement being walked. See [`MAX_FN_NESTING`].
+    fn_depth: usize,
 }
 
+/// TICKET-109 / W12-12 — how deep `fn` declarations may nest. A top-level `fn`, a `test fn` or a
+/// method is level 1; each `fn` declared in its body adds one. The checker walks an un-annotated
+/// nested fn's body twice (`infer_fn_ret`, then `check_fn_body`), and every enclosing inference walk
+/// repeats both, so N levels cost `2^(N+2) - 4` body walks: 16 deep checks in about 0.2 s on release,
+/// 20 deep took 3 s and 30 deep over a minute. Rejecting the 17th level here, before the checker
+/// runs, is a limit, not a fix: `docs/gaps.md` W12-12 records what a real fix needs.
+pub const MAX_FN_NESTING: usize = 16;
+
 impl Walker<'_> {
+    /// Enter one `fn` body (TICKET-109): count it, and reject it past [`MAX_FN_NESTING`] at its name.
+    /// Every caller decrements `fn_depth` after walking the body. An `Err` aborts the whole walk, so
+    /// that path needs no decrement.
+    fn enter_fn(&mut self, name: &str, name_span: crate::lexer::Span) -> Result<(), ResolveError> {
+        self.fn_depth += 1;
+        if self.fn_depth > MAX_FN_NESTING {
+            return Err(err(
+                name_span,
+                format!(
+                    "fn '{name}' is nested {} deep; fn declarations nest at most {MAX_FN_NESTING} deep (declare it at an outer level)",
+                    self.fn_depth
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     fn is_local(&self, name: &str) -> bool {
         self.scopes.iter().any(|s| s.contains(name))
     }
@@ -1909,6 +1939,7 @@ impl Walker<'_> {
                     }
                 }
                 // Nested/top-level function body: params are a fresh scope.
+                self.enter_fn(&decl.name, decl.name_span)?;
                 let tp_bounds = tp_bounds_of(&[], decl);
                 self.push_scope();
                 self.type_params
@@ -1920,6 +1951,7 @@ impl Walker<'_> {
                 }
                 self.walk_block(&mut decl.body)?;
                 self.pop_scope();
+                self.fn_depth -= 1;
             }
             StmtKind::Struct {
                 type_params,
@@ -1940,6 +1972,7 @@ impl Walker<'_> {
                             self.walk_expr(d)?;
                         }
                     }
+                    self.enter_fn(&m.name, m.name_span)?;
                     let tp_bounds = tp_bounds_of(type_params, m);
                     self.push_scope();
                     self.type_params.last_mut().unwrap().extend(
@@ -1953,6 +1986,7 @@ impl Walker<'_> {
                     }
                     self.walk_block(&mut m.body)?;
                     self.pop_scope();
+                    self.fn_depth -= 1;
                 }
             }
             StmtKind::If {
@@ -2055,6 +2089,7 @@ impl Walker<'_> {
                             self.walk_expr(d)?;
                         }
                     }
+                    self.enter_fn(&m.name, m.name_span)?;
                     let tp_bounds = tp_bounds_of(type_params, m);
                     self.push_scope();
                     self.type_params.last_mut().unwrap().extend(
@@ -2068,6 +2103,7 @@ impl Walker<'_> {
                     }
                     self.walk_block(&mut m.body)?;
                     self.pop_scope();
+                    self.fn_depth -= 1;
                 }
             }
             // A `native struct`'s BODIED Chezzi methods ARE compiled to bytecode, so their bodies +
@@ -2084,6 +2120,7 @@ impl Walker<'_> {
                             self.walk_expr(d)?;
                         }
                     }
+                    self.enter_fn(&m.name, m.name_span)?;
                     let tp_bounds = tp_bounds_of(type_params, m);
                     self.push_scope();
                     self.type_params.last_mut().unwrap().extend(
@@ -2097,6 +2134,7 @@ impl Walker<'_> {
                     }
                     self.walk_block(&mut m.body)?;
                     self.pop_scope();
+                    self.fn_depth -= 1;
                 }
             }
             // No nested expressions / bindings to rewrite.
@@ -3195,6 +3233,52 @@ mod tests {
             }],
         };
         run(&mut graph).expect_err("expected a desugar error")
+    }
+
+    /// TICKET-109 — `n` nested `fn {prefix}{i}():` declarations, the outermost indented `indent`
+    /// levels, the innermost body `pass`.
+    fn fn_chain(prefix: &str, n: usize, indent: usize) -> String {
+        let mut src = String::new();
+        for i in 0..n {
+            src.push_str(&"    ".repeat(indent + i));
+            src.push_str(&format!("fn {prefix}{i}():\n"));
+        }
+        src.push_str(&"    ".repeat(indent + n));
+        src.push_str("pass\n");
+        src
+    }
+
+    /// TICKET-109 / W12-12 — `fn` declarations nest 16 deep (`MAX_FN_NESTING`) and no deeper; a
+    /// top-level `fn` or a method is level 1. A sibling chain starts again at level 1, so the second
+    /// 16-deep chain here fails if a body's walk forgets to decrement the depth.
+    #[test]
+    fn fn_nesting_sixteen_deep_is_accepted() {
+        desugar_ok(&(fn_chain("f", 16, 0) + &fn_chain("g", 16, 0)));
+        desugar_ok(&format!(
+            "struct S:\n    x: int\n    fn m(self):\n{}",
+            fn_chain("f", 15, 2)
+        ));
+    }
+
+    /// TICKET-109 / W12-12 — the 17th level is one resolve error at that fn's name, whether the
+    /// chain starts at a top-level `fn` or at a method.
+    #[test]
+    fn fn_nesting_seventeen_deep_is_rejected_at_the_fn_name() {
+        let e = desugar_err(&fn_chain("f", 17, 0));
+        assert_eq!(
+            e.message,
+            "fn 'f16' is nested 17 deep; fn declarations nest at most 16 deep (declare it at an outer level)"
+        );
+        assert_eq!((e.span.line, e.span.col), (17, 68));
+        let e = desugar_err(&format!(
+            "struct S:\n    x: int\n    fn m(self):\n{}",
+            fn_chain("f", 16, 2)
+        ));
+        assert_eq!(
+            e.message,
+            "fn 'f15' is nested 17 deep; fn declarations nest at most 16 deep (declare it at an outer level)"
+        );
+        assert_eq!((e.span.line, e.span.col), (19, 72));
     }
 
     /// Pull the positional arg ints out of the call inside the last statement (`x := CALL` or `CALL`).

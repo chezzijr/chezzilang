@@ -529,7 +529,11 @@ fn main():
 main()
 ```
 
-**v1 limits.** A nested fn may **not** be generic (`fn id[T](x: T)` inside a body is rejected — declare
+**v1 limits.** `fn` declarations nest at most **16** deep: a top-level `fn`, a `test fn` or a method is
+level 1, and each `fn` declared in its body adds one. The 17th level is a resolve error at its name —
+`fn 'f16' is nested 17 deep; fn declarations nest at most 16 deep (declare it at an outer level)` —
+because checking an un-annotated nested fn doubles in cost per level (`docs/gaps.md` W12-12). A nested
+fn may **not** be generic (`fn id[T](x: T)` inside a body is rejected — declare
 it at the top level), and **mutual recursion** between two sibling nested fns is unsupported: a nested
 fn is only in scope *after* its own declaration, so `a` referencing a later-declared sibling `b` is a
 `unknown name 'b'` error (declare such a pair at the top level instead). A nested fn may **not** be
