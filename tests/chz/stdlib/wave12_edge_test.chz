@@ -92,3 +92,26 @@ test fn duration_parse_accepts_i64_min_millis():
     match r:
         Ok(g): assert g.as_millis() == -9223372036854775808
         Err(e): assert false, "i64::MIN ms must parse: " + e.message()
+
+# W12-20d: the negative edge's neighbours — one past i64::MIN in either direction Errs, the fraction
+# path and a multi-group sum both reach i64::MIN, and the pre-existing overflow guard on the
+# opposite unit still fires.
+test fn duration_parse_negative_edge_neighbours():
+    match duration.parse("9223372036854775808ms"):
+        Ok(_): assert false, "one past i64::MAX ms must Err"
+        Err(_): assert true
+    match duration.parse("-9223372036854775809ms"):
+        Ok(_): assert false, "one past i64::MIN ms must Err"
+        Err(_): assert true
+    match duration.parse("-9223372036854775.808s"):
+        Ok(g): assert g.as_millis() == -9223372036854775807 - 1
+        Err(e): assert false, e.message()
+    match duration.parse("-9223372036854775807ms1ms"):
+        Ok(g): assert g.as_millis() == -9223372036854775807 - 1
+        Err(e): assert false, e.message()
+    match duration.parse("-9223372036854775807ms2ms"):
+        Ok(_): assert false, "a multi-group sum one past i64::MIN must Err"
+        Err(_): assert true
+    match duration.parse("-2562047788015.9h"):
+        Ok(_): assert false, "the pre-existing overflow guard must still fire"
+        Err(_): assert true

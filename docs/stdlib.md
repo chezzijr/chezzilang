@@ -1705,7 +1705,9 @@ plain struct over a single int of **milliseconds**.
   `"2562047788016h"` (9223372036857600000 ms, above `i64::MAX`) is `Err("duration out of range")`.
   Round-trips exactly (`parse(d.to_string())` ⇒ `d`) for every magnitude the parser accepts, now
   including both `int` extremes: `parse(millis(i64::MAX).to_string())` and
-  `parse(millis(i64::MIN).to_string())` both round-trip.
+  `parse(millis(i64::MIN).to_string())` both round-trip. The negative side reaches one further, as in
+  Go: `parse("-9223372036854775808ms")` is `Ok` (`i64::MIN`) while `"9223372036854775808ms"` is `Err`
+  (W12-20d).
 - **`since(start: float) -> Duration`** — elapsed since a `time.monotonic()` reading (imports native
   `std.time`; floors to whole ms). **`sleep(d: Duration)`** — delegates to native `sleep_ms`.
 
