@@ -95,8 +95,8 @@ fn chz_suite_passes_at_a_second_worker_count() {
     let (ok_default, summary_default, out_default, err_default) = run_chz_test(&root, None, None);
     assert!(
         ok_default,
-        "tests/chz must pass at the default worker count\nsummary: {summary_default}\nstderr: {err_default}\nstdout tail:\n{}",
-        tail(&out_default)
+        "tests/chz must pass at the default worker count\nsummary: {summary_default}\nstderr: {err_default}\nFAIL/ERROR line(s):\n{}",
+        fail_lines(&out_default)
     );
     assert!(
         summary_default.contains(" passed, 0 failed, 0 errored"),
@@ -106,8 +106,8 @@ fn chz_suite_passes_at_a_second_worker_count() {
     let (ok_2, summary_2, out_2, err_2) = run_chz_test(&root, Some("2"), None);
     assert!(
         ok_2,
-        "tests/chz must pass with CHEZZI_THREADS=2\nsummary: {summary_2}\nstderr: {err_2}\nstdout tail:\n{}",
-        tail(&out_2)
+        "tests/chz must pass with CHEZZI_THREADS=2\nsummary: {summary_2}\nstderr: {err_2}\nFAIL/ERROR line(s):\n{}",
+        fail_lines(&out_2)
     );
     assert!(
         summary_2.contains(" passed, 0 failed, 0 errored"),
@@ -504,4 +504,73 @@ fn tail(s: &str) -> String {
     let lines: Vec<&str> = s.lines().collect();
     let start = lines.len().saturating_sub(15);
     lines[start..].join("\n")
+}
+
+/// Extracts every full `FAIL`/`ERROR` record (name, position, message, and any stack frame lines)
+/// from a `chezzi test` report, verbatim. `tail()` keeps only the last 15 lines of stdout, which cut
+/// the actual `FAIL <name> (<file:line>) …` line on every prior red run of
+/// `chz_suite_passes_at_a_second_worker_count` (TICKET-110/111/113/115) — the summary line survived,
+/// but the one thing that names the failing `.chz` test did not.
+fn fail_lines(s: &str) -> String {
+    let lines: Vec<&str> = s.lines().collect();
+    let is_record_start = |l: &str| {
+        l.starts_with("PASS ")
+            || l.starts_with("FAIL ")
+            || l.starts_with("ERROR ")
+            || l.starts_with("OVER-MEMORY ")
+            || l.starts_with("TIMED-OUT ")
+    };
+    let is_summary = |l: &str| l.contains(" test(s):");
+    let mut out: Vec<&str> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if lines[i].starts_with("FAIL ") || lines[i].starts_with("ERROR ") {
+            out.push(lines[i]);
+            i += 1;
+            while i < lines.len() && !is_record_start(lines[i]) && !is_summary(lines[i]) {
+                out.push(lines[i]);
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    if out.is_empty() {
+        "<no FAIL/ERROR line found>".to_string()
+    } else {
+        out.join("\n")
+    }
+}
+
+#[cfg(test)]
+mod fail_lines_tests {
+    use super::fail_lines;
+
+    #[test]
+    fn extracts_full_fail_record_including_wrapped_message() {
+        let report = "PASS a (f.chz)\n\
+                       FAIL parse_large_string_is_not_quadratic (tests/chz/stdlib/json_test.chz:32:5) assertion failed:\n\
+                       json.parse(150000-char string) took 2.1s, expected < 2.0s\n\
+                       (2.1 < 2.0)\n\
+                       PASS b (f.chz)\n\
+                       \n\
+                       915 test(s): 914 passed, 1 failed, 0 errored\n";
+        let got = fail_lines(report);
+        assert!(
+            got.contains("FAIL parse_large_string_is_not_quadratic (tests/chz/stdlib/json_test.chz:32:5) assertion failed:"),
+            "got:\n{got}"
+        );
+        assert!(
+            got.contains("json.parse(150000-char string) took 2.1s, expected < 2.0s"),
+            "wrapped message line must be kept, not truncated: got:\n{got}"
+        );
+        assert!(
+            !got.contains("PASS a"),
+            "must not include unrelated PASS lines: got:\n{got}"
+        );
+        assert!(
+            !got.contains("test(s):"),
+            "must not include the summary line: got:\n{got}"
+        );
+    }
 }
