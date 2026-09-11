@@ -12,6 +12,8 @@
 //!
 //! Reproduced with a nested `systemd-run --user --scope -p CPUQuota=400%` around `cargo test --lib`
 //! targeting that one test, one thread, with a 65s outer bound (5s slack over the panic's own 60s).
+//! `--include-ignored` because main `#[ignore]`s that lib test until TICKET-114 moves it (7253a982):
+//! without it libtest skips the test, exits 0, and this repro reads green before any fix.
 
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -35,7 +37,7 @@ fn d3_thousands_of_fibers_does_not_hang_under_a_narrow_cpu_quota() {
     let cmd = format!(
         "for i in $(seq 1 {hogs}); do yes > /dev/null & done; \
          trap 'kill $(jobs -p) 2>/dev/null' EXIT; \
-         timeout 65 cargo test --lib vm::tests::d3_thousands_of_cpu_fibers_all_complete -- --nocapture --test-threads=1"
+         timeout 65 cargo test --lib vm::tests::d3_thousands_of_cpu_fibers_all_complete -- --include-ignored --nocapture --test-threads=1"
     );
     let mut child = Command::new("systemd-run")
         .args([
