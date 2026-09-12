@@ -1665,7 +1665,10 @@ was retired when module globals started deep-copying per task.)
   in a frame **local** crosses **any** task airlock **as data** (passed/captured into a `spawn`, or stored
   in a `Channel`/`Shared`/`RwShared`/`Atomic`) as an **independent deep copy** — `to_wire`/`from_wire`
   serialize its `proto`, backing closure, and parked operand-stack/args and rebuild a fresh
-  `GeneratorCore` on the receiver, so advancing one copy never affects the other (like a cursor, but
+  `GeneratorCore` on the receiver, so advancing one copy never affects the other (the SAME live generator reached twice in one
+  crossing — `a := g; spawn: a.next(); g.next()`, or nested in another generator's frame passed
+  alongside it — faults `a generator cannot be sent across tasks twice in one crossing`, a TICKET-100
+  decision) (like a cursor, but
   carrying frozen execution state, not a plain snapshot). **One generator, one copy per crossing:** a
   live generator reached TWICE in one crossing (`a := g` then `spawn: a.next(); g.next()`, or a generator
   nested in another generator's parked frame passed alongside it) faults `a generator cannot be sent

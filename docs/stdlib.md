@@ -1661,7 +1661,8 @@ and would break that determinism.
 `compare(self, other: Self) -> int` is enough — an `eq` is optional and only needed to *override* `==`
 (int/float/str satisfy `Comparable` intrinsically, with no method to write). M23's "must also define
 `eq`" rule was dropped 2026-08-11; see `docs/gaps.md` **W7-41**. Its `compare` is **total on floats**: a `NaN` operand
-returns an ordering int (never a fault), using the same total order `List.sort()`/`sort_by_key`/`min`/
+returns an ordering int (never a fault; the intrinsic `compare` is reachable only through a
+`[T: Comparable]` bound — `1.5.compare(2.0)` on a concrete scalar is `has no method 'compare'`, like `(5).str()`), using the same total order `List.sort()`/`sort_by_key`/`min`/
 `max` use (`f64::total_cmp`, `NaN` to one end). The `<`/`<=`/`>`/`>=` *operators* stay IEEE (`false` for
 every `NaN` comparison) — that is the one divergence. `min` and `max` are written with `<`, so they
 follow the **operator** rule, not the total order: on a non-`<` tie both return the **first** argument

@@ -499,7 +499,8 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   SEPARATELY computed `NaN`s stay unequal — the bare `==` operator is untouched. Sorting is deterministic with `NaN`:
   `sort()` and `sort_by_key` use a total order (`f64::total_cmp`, `NaN` sorts to one end) instead of
   faulting. **`Comparable`'s `.compare()` shares that SAME total order** — `a.compare(b)` on a `NaN`
-  operand returns an ordering int (never a fault), landing `NaN` on exactly the side `sort()` puts it, so
+  operand returns an ordering int (never a fault; callable only through a `[T: Comparable]` bound — a
+  concrete scalar receiver has no `compare` method, like `(5).str()`), landing `NaN` on exactly the side `sort()` puts it, so
   `compare`/`sort`/`sort_by_key`/`.min()`/`.max()` are all one order. The *operators* stay IEEE, and that
   is the single divergence: `nan < 1.0` is `false` while `nan.compare(1.0)` is nonzero. (Two corollaries:
   `a.compare(a)` is `0` for a `NaN` `a` although `a == a` is `false`; and only `NaN` takes the total-order
