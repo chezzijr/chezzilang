@@ -7499,6 +7499,25 @@ fn stack_trace_reports_call_chain() {
     );
 }
 
+/// W13-20: a fault raised inside a generator's body, driven by a `for` loop in an OUTER function,
+/// must report the FULL call chain (generator frames AND driver frames), not just one side. The
+/// generator swaps its own private frame stack into the live `Vm` while it runs (`swap_gen_ctx`),
+/// and `generator_next` restores the host frames before propagating the fault — so a fault captured
+/// while `self.frames` held only the generator's frames drops the driver's frames on the floor.
+#[test]
+fn generator_fault_trace_includes_driver_frames() {
+    let src = "fn h() -> int:\n    xs: List[int] = []\n    return xs[3]\nfn g():\n    yield h()\nfn drive():\n    for x in g():\n        print(x)\nfn main():\n    drive()\nmain()\n";
+    let dir = std::env::temp_dir().join("chezzi_gen_trace_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("u02.chz");
+    std::fs::write(&path, src).unwrap();
+    let (_out, _err, res, _) = run_file(&path);
+    let e = res.expect_err("program should fault");
+    assert_eq!(e.message, "index 3 out of bounds (len 0)");
+    let names: Vec<&str> = e.trace.iter().map(|f| f.function.as_str()).collect();
+    assert_eq!(names, vec!["h", "g", "drive", "main"]);
+}
+
 /// Helper: write deep-infinite-recursion source to a temp file and return its path. The recursion
 /// hits `MAX_CALL_DEPTH` → a `recursion limit exceeded` fault with a ~10_000-frame raw trace.
 #[cfg(test)]

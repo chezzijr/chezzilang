@@ -352,3 +352,27 @@ fn file_run_strips_double_dash_terminator() {
         "-- must be consumed in file-mode too, not forwarded literally; stdout:\n{stdout}\nstderr:\n{stderr}"
     );
 }
+
+// W13-21 — a manifest entrypoint that returns `Err(...)` faults with NO file coordinate: the
+// synthetic entry-call site (the point that invokes `main` by name from the manifest, before any
+// user frame exists) renders `line 1, col 1` with no path, unlike a real in-body fault which names
+// `src/main.chz`. Expected: the coordinate names the entrypoint file.
+#[test]
+fn manifest_entrypoint_err_reports_the_entry_file() {
+    let t = TmpDir::new();
+    t.write("chezzi.toml", "[project]\nentrypoint = \"src.main:main\"\n");
+    t.write(
+        "src/main.chz",
+        "fn main() -> int!str:\n    return Err(\"main failed\")\n",
+    );
+    let (stdout, stderr, ok) = run(&t.0, &["run"]);
+    assert!(!ok, "an Err entrypoint must fault; stdout:\n{stdout}");
+    assert!(
+        stderr.contains("unhandled error: main failed"),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("src/main.chz") || stderr.contains("src\\main.chz"),
+        "the fault must name the entrypoint file, not render bare 'line 1, col 1'; stderr:\n{stderr}"
+    );
+}
