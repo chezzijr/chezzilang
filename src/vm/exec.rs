@@ -2361,6 +2361,13 @@ impl Vm {
                 // the enclosing closure's value by its positional `parent_slot`.
                 let frame = self.frames.last().unwrap();
                 let (base, home, enclosing) = (frame.base, frame.home, frame.closure);
+                // TICKET-116 (W13-1) — a worker's home module faults lazily, and
+                // `Vm::closure_global_snapshot` takes `&self` so it cannot fault it at send time.
+                // A closure that names free globals must fault its home here, or the send reads an
+                // unfaulted module and carries nothing (an adopted-alias write vanishes).
+                if !self.program.protos[*proto].global_free.is_empty() {
+                    self.ensure_module_faulted(home);
+                }
                 let mut captured = Vec::with_capacity(entries.len());
                 for e in entries {
                     let v = match e.src {

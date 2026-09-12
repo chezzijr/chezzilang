@@ -115,6 +115,104 @@ test fn write_through_spawn_adopted_alias_of_global_is_carried():
     got := c.recv()()
     assert got == "[1, 2]", "write through spawn-adopted alias lost: {got}"
 
+# W13-1 neighbours (TICKET-116) — the same shape across container kinds, closure timings and
+# forwarding hops. All must reach the ancestor answer once the home module faults at MakeClosure.
+gl3: List[List[int]] = [[1]]
+
+test fn element_alias_write_in_task_is_carried():
+    inner := gl3[0]
+    c := Channel[fn() -> str](1)
+    parallel:
+        spawn:
+            inner.push(2)
+            c.send(fn() -> str: "{gl3[0]}")
+    got := c.recv()()
+    assert got == "[1, 2]", "element alias write lost: {got}"
+
+gl4: List[List[int]] = [[1]]
+
+fn w4(xs: List[int], c: Channel[fn() -> str]):
+    xs.push(2)
+    c.send(fn() -> str: "{gl4[0]}")
+
+test fn spawn_arg_alias_write_is_carried():
+    c := Channel[fn() -> str](1)
+    parallel:
+        spawn w4(gl4[0], c)
+    got := c.recv()()
+    assert got == "[1, 2]", "spawn-arg alias write lost: {got}"
+
+struct P116:
+    n: int
+
+gm116: Map[str, P116] = {"k": P116(1)}
+
+test fn struct_in_map_alias_write_is_carried():
+    p := gm116["k"]
+    c := Channel[fn() -> int](1)
+    parallel:
+        spawn:
+            p.n = 5
+            c.send(fn() -> int: gm116["k"].n)
+    got := c.recv()()
+    assert got == 5, "struct-in-map alias write lost: {got}"
+
+gl5: List[int] = [1]
+
+test fn closure_built_before_the_alias_push_is_carried():
+    a := gl5
+    c := Channel[fn() -> str](1)
+    parallel:
+        spawn:
+            f := fn() -> str: "{gl5}"
+            a.push(2)
+            c.send(f)
+    got := c.recv()()
+    assert got == "[1, 2]", "closure built before the push lost the write: {got}"
+
+gl6: List[int] = [1]
+
+test fn nested_nursery_send_carries_the_alias_write():
+    a := gl6
+    c := Channel[fn() -> str](1)
+    parallel:
+        spawn:
+            a.push(2)
+            parallel:
+                spawn:
+                    c.send(fn() -> str: "{gl6}")
+    got := c.recv()()
+    assert got == "[1, 2]", "nested nursery send lost the write: {got}"
+
+gl8: List[int] = [1]
+
+test fn executor_job_sees_the_alias_write():
+    r := Channel[str](1)
+    ex := Executor()
+    parallel:
+        spawn:
+            a := gl8
+            a.push(2)
+            ex.submit(fn(): r.send("{gl8}"))
+    got := r.recv()
+    assert got == "[1, 2]", "executor job lost the write: {got}"
+
+gl9: List[int] = [1]
+
+test fn two_hop_closure_carries_the_alias_write():
+    a := gl9
+    c := Channel[fn() -> str](1)
+    d := Channel[fn() -> str](1)
+    parallel:
+        spawn:
+            a.push(2)
+            c.send(fn() -> str: "{gl9}")
+        spawn:
+            f := c.recv()
+            d.send(f)
+    got := d.recv()()
+    assert got == "[1, 2]", "two-hop forwarded closure lost the write: {got}"
+
 # W13-2 (docs/gaps.md) — a receiver's OWN in-place mutation of a module global is silently
 # overwritten by an arriving closure whose sender also mutated it, instead of both writes
 # landing. Go (mutex) sees `[1, 9, 2]`, CPython sees `[1, 2, 9]`; either order is acceptable,
