@@ -3256,15 +3256,48 @@ impl Vm {
         )
     }
 
-    /// TICKET-105 — this view's own baseline for module `home`'s slot `slot`: a worker's baseline is
-    /// the `ModuleSnapshot` it was faulted from (`module_snapshot`); the root view's is its FIRST
-    /// snapshot (`root_baseline`). `None` when the view has no baseline yet, the module/slot is not
-    /// in it, or the baseline's slot name no longer matches (a slot renumbered by a later define).
+    /// TICKET-105 — this view's own baseline for module `home`'s slot `slot`, for the SEND side
+    /// (`closure_global_snapshot`): a worker's baseline is the `ModuleSnapshot` it was faulted from
+    /// (`module_snapshot`); the root view's is its FIRST snapshot (`root_baseline`), because a root
+    /// closure being sent must carry an alias write made in ANY earlier nursery, not just the latest
+    /// one. `None` when the view has no baseline yet, the module/slot is not in it, or the baseline's
+    /// slot name no longer matches (a slot renumbered by a later define).
     fn baseline_snap_value(&self, home: GcRef, slot: u32) -> Option<&SnapValue> {
-        let snap = self
-            .module_snapshot
-            .as_ref()
-            .or(self.root_baseline.as_ref())?;
+        self.snap_value_from(
+            self.module_snapshot
+                .as_ref()
+                .or(self.root_baseline.as_ref()),
+            home,
+            slot,
+        )
+    }
+
+    /// TICKET-116 — this view's own baseline for `home`'s slot `slot`, for the RECEIVE side
+    /// (`install_global_slot`): a worker's boundary is still `module_snapshot` (its one fork point),
+    /// but the root's is the CURRENT `snapshot_memo`, not `root_baseline`. An install guard asks "did
+    /// I change this since the arriving value's sender forked", and a sender always forks from the
+    /// snapshot open at ITS spawn time — the latest one, not the root's frozen first-ever one. Using
+    /// `root_baseline` here over-refuses every install to a slot the root mutated in place in an
+    /// EARLIER nursery: that mutation already predates the sender's fork and is already folded into
+    /// the arriving value, so it must not read as "changed" forever. `None` under the same doubts as
+    /// `baseline_snap_value`, plus a `snapshot_memo` that has not been (re)built yet this nursery.
+    fn recv_baseline_snap_value(&self, home: GcRef, slot: u32) -> Option<&SnapValue> {
+        self.snap_value_from(
+            self.module_snapshot
+                .as_ref()
+                .or(self.snapshot_memo.as_ref()),
+            home,
+            slot,
+        )
+    }
+
+    fn snap_value_from<'a>(
+        &self,
+        snap: Option<&'a Arc<ModuleSnapshot>>,
+        home: GcRef,
+        slot: u32,
+    ) -> Option<&'a SnapValue> {
+        let snap = snap?;
         let idx = self.home_index(home)?;
         let m = match self.heap.get(home) {
             Obj::Module(m) => m,
@@ -3283,7 +3316,17 @@ impl Vm {
     /// baseline, a non-mutable-aggregate value, a serialize failure, or an uncertain comparator
     /// verdict all read as "unchanged" (see `wire_content_differs`'s decline rules, DEC-051).
     pub(super) fn slot_changed_since_baseline(&self, home: GcRef, slot: u32) -> bool {
-        let Some(SnapValue::Wire(base)) = self.baseline_snap_value(home, slot) else {
+        self.slot_differs(self.baseline_snap_value(home, slot), home, slot)
+    }
+
+    /// TICKET-116 — the RECEIVE-side counterpart of `slot_changed_since_baseline`: same comparator,
+    /// boundary is `recv_baseline_snap_value` (the current snapshot) instead of the frozen one.
+    pub(super) fn slot_changed_since_recv_baseline(&self, home: GcRef, slot: u32) -> bool {
+        self.slot_differs(self.recv_baseline_snap_value(home, slot), home, slot)
+    }
+
+    fn slot_differs(&self, baseline: Option<&SnapValue>, home: GcRef, slot: u32) -> bool {
+        let Some(SnapValue::Wire(base)) = baseline else {
             return false;
         };
         let Obj::Module(m) = self.heap.get(home) else {

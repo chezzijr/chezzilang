@@ -16,8 +16,11 @@ Single source of truth for "what am I doing next." Update after every work sessi
   (`g.push(9)`) was silently overwritten by an arriving closure whose sender also mutated it, because
   `Vm::install_global_slot`'s receive-side skip (`src/vm/stmt.rs`) tested `assigned` only and DEC-097
   marks an in-place write `carried`, never `assigned`. Fix: the receive side also refuses a slot whose
-  live value provably differs from the receiving view's own baseline (`Vm::slot_changed_since_baseline`,
-  supersedes part of DEC-051). Recorded residual: when both the sender and the receiver mutate the
+  live value provably differs from the receiving view's own CURRENT baseline
+  (`Vm::slot_changed_since_recv_baseline` — the current snapshot, not the root's frozen first-ever
+  `root_baseline`, or the guard over-refuses every install to a slot the root mutated in an earlier
+  nursery; a review fix on the first landing), supersedes part of DEC-051. Recorded residual: when
+  both the sender and the receiver mutate the
   same global in place after the sender's snapshot, the receiver's object wins and the sender's
   in-place delta is dropped (Chezzi `[1, 9]`, Go `[1 9 2]`, CPython `[1, 2, 9]`) — narrower than the
   ancestors' one-object merge, but the receiver's own write is never lost, which was the bar filed
