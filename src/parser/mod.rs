@@ -7590,4 +7590,12 @@ mod tests {
         // `const` sits in the type slot, so a type must follow it (no inferred-type const in v1).
         assert!(parse(lexer::tokenize("x: const = 5\n").unwrap()).is_err());
     }
+
+    // ===== TICKET-122: enum body must require a newline after every variant =====
+
+    #[test]
+    fn enum_two_variants_on_one_line_is_a_parse_error() {
+        let e = parse_err("enum E:\n    A B\n");
+        assert!(e.message.contains("expected newline"), "got: {}", e.message);
+    }
 }
