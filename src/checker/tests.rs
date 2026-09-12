@@ -32239,3 +32239,19 @@ fn nested_fn_decl_check_is_not_exponential() {
          checker cost in nested-fn-declaration depth (TICKET-109 / W12-12)"
     );
 }
+
+/// TICKET-120 / W13-11 repro -- two structs each declaring a same-named static method with a
+/// default, resolved through a QUALIFIED `module.Type.new()` head. TICKET-108 (W12-10) added the
+/// bare type-NAME head to `receiver_struct_ty` but not the qualified `module.Type` head, so this
+/// falls into the name-keyed `methods` table and bails on the cross-struct collision, same as the
+/// bare-name form did before TICKET-108.
+#[test]
+fn a_same_named_static_method_via_qualified_module_type_head_type_checks() {
+    files_ok(&[
+        (
+            "lib_s3.chz",
+            "struct A:\n    v: int\n    fn new(n: int = 1) -> A:\n        return A(n)\nstruct L:\n    v: int\n    fn new(n: int = 11) -> L:\n        return L(n)\n",
+        ),
+        ("main.chz", "import lib_s3\nprint(lib_s3.L.new().v)\n"),
+    ]);
+}
