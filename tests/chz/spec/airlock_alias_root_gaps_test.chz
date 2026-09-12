@@ -98,3 +98,38 @@ test fn local_alias_of_a_global_generator_is_one_generator():
             r.send("{a} {b}")
     got := r.recv()
     assert got == "Some(1) Some(2)", "generator alias is two live copies: {got}"
+
+# W13-1 (docs/gaps.md) — a spawn-ADOPTED alias of a module global (`a := gl` in the parent,
+# `a.push(2)` in the task) is not carried by a closure the task sends back: the closure
+# reads the module global's own snapshot, which never saw the write through the adopted alias.
+# CPython threading and Go both see one shared object through the alias: `[1, 2]`.
+gl2: List[int] = [1]
+
+test fn write_through_spawn_adopted_alias_of_global_is_carried():
+    a := gl2
+    c := Channel[fn() -> str](1)
+    parallel:
+        spawn:
+            a.push(2)
+            c.send(fn() -> str: "{gl2}")
+    got := c.recv()()
+    assert got == "[1, 2]", "write through spawn-adopted alias lost: {got}"
+
+# W13-2 (docs/gaps.md) — a receiver's OWN in-place mutation of a module global is silently
+# overwritten by an arriving closure whose sender also mutated it, instead of both writes
+# landing. Go (mutex) sees `[1, 9, 2]`, CPython sees `[1, 2, 9]`; either order is acceptable,
+# but the receiver's own `9` must never be lost.
+g2: List[int] = [1]
+
+fn producer_w13_2(c: Channel[fn() -> str]):
+    g2.push(2)
+    c.send(fn() -> str: "{g2}")
+
+test fn receiver_own_write_survives_arriving_closure_write():
+    c := Channel[fn() -> str](1)
+    parallel:
+        spawn producer_w13_2(c)
+        g2.push(9)
+    f := c.recv()
+    got := "{f()} {g2}"
+    assert 9 in g2, "receiver's own write to the global was lost: {got}"
