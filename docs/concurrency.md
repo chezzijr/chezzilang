@@ -1479,8 +1479,13 @@ was retired when module globals started deep-copying per task.)
   view's own lineage (its own assignment, an ancestor snapshot, or an earlier install) actually
   descends from a write to that slot, where a write is either an assignment to the slot or an
   IN-PLACE mutation of the value it holds (`ys.push(2)`, `zs[0] = 9`, `g.n = 1`), and provided the
-  RECEIVING view has not itself already assigned
-  that slot (its own later write always wins). Installing rather than freezing means **inside one
+  RECEIVING view has not itself already written that slot — an assignment, or an in-place mutation
+  its own baseline comparison can see (TICKET-116 / W13-2) — so its own later write always wins.
+  When both views mutate the same global in place after the sender's snapshot, the RECEIVER's object
+  wins and the sender's in-place delta is dropped: this is narrower than Go's and CPython's one-object
+  merge, and is the explicit trade TICKET-116 made rather than lose the receiver's write outright. A
+  receiver write that PREDATES the sender's snapshot still merges, because the sender's value already
+  contains it. Installing rather than freezing means **inside one
   task, one module global denotes one object**: a closure's read of the slot and the task's own
   read always agree, because both now read the SAME copy. A global the closure itself **writes** is
   excluded from `global_free` and stays a plain **late load** against whichever task's own module
@@ -1508,6 +1513,13 @@ was retired when module globals started deep-copying per task.)
   `ModuleSnap.carried` at each snapshot build too, so an ancestor's alias write reaches a
   grandchild's send, not just the sender's own. Cost: O(size) per closure crossing, for each free
   global that is a mutable aggregate and not already carried — see `docs/benchmarks.md` TICKET-105.
+  TICKET-116 runs the same comparator on the RECEIVE side too, inside `Vm::install_global_slot`, at
+  O(size) per arriving free global that is a mutable aggregate — the receiver's own write must be
+  provably distinguished from an inherited one before the arriving value can refuse it. TICKET-116
+  also faults a closure's home module at `Op::MakeClosure` when the proto names free globals: a
+  worker's home module faults lazily, and `closure_global_snapshot` takes `&self` and cannot fault it,
+  so a closure that reads free globals must fault its home at creation or the crossing above reads an
+  unfaulted module and carries nothing.
 
   All three shapes above now match CPython:
 

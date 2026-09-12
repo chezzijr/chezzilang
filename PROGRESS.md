@@ -7,6 +7,22 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-116 (2026-09-12) — an adopted-alias write is carried and a receiver's own in-place write
+  survives (W13-1, W13-2).** W13-1: a spawn-ADOPTED alias write (`a := gl` in the parent, `a.push(2)`
+  in the task) was not carried by a closure the task sent back, because the task's home module faults
+  LAZILY and `Vm::closure_global_snapshot` takes `&self` and cannot fault it — the send read an
+  unfaulted module and carried nothing. Fix: a closure that names free globals now faults its home at
+  `Op::MakeClosure` (`src/vm/exec.rs`). W13-2: a receiver's own in-place mutation of a module global
+  (`g.push(9)`) was silently overwritten by an arriving closure whose sender also mutated it, because
+  `Vm::install_global_slot`'s receive-side skip (`src/vm/stmt.rs`) tested `assigned` only and DEC-097
+  marks an in-place write `carried`, never `assigned`. Fix: the receive side also refuses a slot whose
+  live value provably differs from the receiving view's own baseline (`Vm::slot_changed_since_baseline`,
+  supersedes part of DEC-051). Recorded residual: when both the sender and the receiver mutate the
+  same global in place after the sender's snapshot, the receiver's object wins and the sender's
+  in-place delta is dropped (Chezzi `[1, 9]`, Go `[1 9 2]`, CPython `[1, 2, 9]`) — narrower than the
+  ancestors' one-object merge, but the receiver's own write is never lost, which was the bar filed
+  under. 11 new tests pin both mechanisms across container/timing/forwarding shapes; the "push before
+  the nursery opens" control (`d20`) stays clean.
 - **TICKET-114 (2026-09-11) — the 10k-CPU-fiber D3 soundness test runs at a fixed pool in its own
   process (W12-23).** `vm::tests::d3_thousands_of_cpu_fibers_all_complete` hung to its 60 s bound in
   the debug lib target whenever the default pool (every core) met other load. `vm::pool` is one
