@@ -17912,6 +17912,53 @@ main()
     );
 }
 
+/// W13-9 -- a module global nested >= 5000 levels deep makes EVERY nursery open take ~22s (release,
+/// `bbac6723`) before the correct, recoverable depth-exceeded fault, because `to_snap_depth`'s
+/// `try_wire_speculative` fast-path re-walks the WHOLE remaining subtree from every node on the chain
+/// (each re-walk discarded on `Err`, then the slow arm descends one node and repeats), an O(depth^2)
+/// pattern bounded by `MAX_STRUCTURAL_DEPTH` regardless of how much deeper the real chain goes (depth
+/// 8000 measured the same ~22s as depth 5000). The same chain captured as a closed-over LOCAL (not a
+/// module global) faults in 0.04s -- so the cost is specific to the module-snapshot failure path, not
+/// the depth walk itself.
+#[test]
+fn airlock_deep_module_global_depth_fault_is_not_quadratic() {
+    let src = "\
+struct N:
+    next: Option[N]
+fn mk() -> N:
+    head := N(None)
+    cur := head
+    for i in range(5000):
+        n := N(None)
+        cur.next = Some(n)
+        cur = n
+    return head
+gl: N = mk()
+fn main():
+    r := recover:
+        parallel:
+            spawn:
+                print(\"crossed\")
+        0
+    match r:
+        Ok(v): print(\"ok\")
+        Err(e): print(\"err: {e.message()}\")
+main()
+";
+    let t = std::time::Instant::now();
+    let out = run(src);
+    let el = t.elapsed();
+    assert_eq!(
+        out,
+        "err: maximum structural depth (10000) exceeded (cyclic data structure?)\n"
+    );
+    assert!(
+        el < std::time::Duration::from_secs(5),
+        "a 5000-deep module global took {el:?} to reach the depth fault (>5s ceiling) -- \
+         O(depth^2) regression in the module-snapshot failure path"
+    );
+}
+
 /// W7-4 memory-safety lock for the module-scoped REBUILD MAP: `fault_module` now keeps one wire-`id`
 /// → `GcRef` map alive ACROSS the whole `module_define` loop (so two globals over one captured local
 /// rebuild ONE cell). A `GcRef` parked in that map between globals must stay rooted — if it did not, a
