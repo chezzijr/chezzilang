@@ -3491,6 +3491,17 @@ fn parallel_all_blocked_deadlock_faults() {
     assert!(err.message.contains("deadlock"), "got: {}", err.message);
 }
 
+/// gaps.md W13-3 — a genuine nested deadlock (main body AND a nested owner body both
+/// channel-parked on `never.recv()`, leaf at depth 2) must fault `deadlock`, not hang. At the
+/// default thread count the watchdog times out instead.
+#[test]
+fn parallel_nested_deadlock_at_channel_parked_owner_faults() {
+    let src = "fn main():\n    never := Channel[int](0)\n    parallel:\n        spawn:\n            parallel:\n                spawn:\n                    never.recv()\n                never.recv()\n        never.recv()\n    print(\"unreachable\")\nmain()\n";
+    let (_o, _e, res, _c) = run_parallel_watchdog(src);
+    let err = res.expect_err("a genuine nested deadlock must fault, not hang");
+    assert!(err.message.contains("deadlock"), "got: {}", err.message);
+}
+
 /// A blocking `for v in ch:` (recv) with no producer and no runnable sibling deadlocks with an
 /// ENGINE-AGNOSTIC message — the old text hardcoded "sequential executor", which
 /// is misleading under the default M:N (real-thread) engine.
