@@ -12848,3 +12848,242 @@ Chezzi `[1]`; CPython `[1, 2]`. Also `fn add(xs: List[int]): xs.push(2)` / `add(
 pairing (enum × sort, alias × airlock, recover × deadlock verdict, owner × channel-block, static default ×
 two structs). Two of the three worst rows sit in the code that changed LAST (the deadlock predicate,
 TICKET-095/099/101, four days old) — fresh code is the productive place to point the next wave.
+
+## Session log — 2026-09-12 (bug-hunt wave 13: 6 domains, ~450 hand-built programs, 23 findings — 2 P0 silent-wrong/data-loss, 8 P1 hang/false-fault, 4 P2 over-reject, 9 P3)
+
+Six agents over disjoint domains, weighted to the code that changed LAST (wave 12's meta-finding):
+checker widenings TICKET-106/107/108/113, the deadlock predicate TICKET-103/112, the airlock adoption
+TICKET-105/111, enum ordering TICKET-104, stdlib TICKET-109/110, and control-flow pairings. Every row
+was re-verified by the judging loop on the release binary at `bbac6723` at `CHEZZI_THREADS=1 / 2 /
+default` (scheduler rows sampled 5× per count by the judge on top of the hunter's own 5–20×). Oracle per
+row: a RUN Go 1.27 / CPython 3.14 reference or a quoted doc sentence. Repro sources live in
+`/home/chezzijr/.cache/chezzi-hunt13/<domain>/` (on `/home`, not tmpfs); the P0/P1 programs are inline.
+No ticket filed yet.
+
+**Where the bugs are.** All ten P0/P1 rows sit in three seams: the airlock's TICKET-105 carry ×
+TICKET-111 adoption interaction (W13-1, W13-2), the nested-nursery deadlock verdict at its channel-parked
+edges (W13-3..W13-6) and the Executor's cancel/yield bracket not reaching a job's NURSERY fibers (W13-7,
+W13-8). Every checker widening from TICKET-106 LOWERED correctly wherever it was accepted; the four P2s
+are the SAME widening missing at a neighbour sink (qualified head, ctor arm, nested hint, reassignment).
+
+| row | P | domain | one line | ticket |
+|---|---|---|---|---|
+| **W13-1** | P0 | airlock | A write through a spawn-ADOPTED alias of a module global (`a := gl` in the parent, `a.push(2)` in the task) is not carried by a closure the task sends back: `c.recv()()` prints `[1]`; CPython threading / Go `[1, 2]`. Same for element alias, spawn-arg alias, struct-in-Map alias, closure created before the push, nested nursery, Executor job, two hops. The identical alias taken INSIDE the task carries. TICKET-105's carry check declines on a TICKET-111-adopted node — distinct from the OPEN G6 residual (the push here is sender-side, before the send). Repro below | — |
+| **W13-2** | P0 | airlock | A receiver's OWN in-place mutation of a module global is silently overwritten by an arriving closure whose sender also mutated it: parent `g.push(9)` while a task does `g.push(2)` and sends a closure over `g`; after `recv()` the parent's own `g` is `[1, 2]` — the 9 is gone. Go (mutex) `[1 9 2]`, CPython `[1, 2, 9]`. Same for `g[1] = 9`, `g.b = 9`, sibling receiver. Only whole-slot `g = [1, 9]` survives. `docs/concurrency.md:1481` defines a sender write to INCLUDE in-place mutation but the receive-side skip (DEC-051) tests `assigned` only. Repro below | — |
+| **W13-3** | P1 | scheduler | A genuine nested deadlock HANGS at T>=2 whenever the main body AND a nested owner body are both channel-parked (`never.recv()` at depth 0 and depth 1, leaf at depth 2): T=1 faults 5/5, T=2/default rc=124 5/5. Go `all goroutines are asleep`. Drop the main-body recv → faults in ms at every count. The Executor-job twins of the OPEN `exec_join` row hang the same way, so `exec_join` needs no Executor. Repro below | — |
+| **W13-4** | P1 | scheduler | Mirror at T=1: a genuine deadlock whose ONLY channel-parked owner is at depth 3+ hangs (rc=124 5/5) while T>=2 faults 5/5; depth 2 faults everywhere. `chezzi test --timeout=300` does not reach it at T=1 (20 s, vs `TIMED-OUT` at 311 ms for a sleeping child). Go `GOMAXPROCS=1` faults. Repro below | — |
+| **W13-5** | P1 | scheduler | W12-4 aftermath, cousin variant: a task that RECOVERS a genuine inner-nursery deadlock and then feeds a COUSIN whose owner sits at its join is false-faulted `deadlock: every task in this parallel: block is blocked` — judge 4/5 at T=2 and default, hunter 5/5 at T=1/4. Go `err / cousin got 5 / done`. `cousin_fed` (cousin body on `recv`) is 20/20 clean; the join-body cousin is the shape TICKET-112 did not cover. Also with a recovered `panic("boom")` instead of a deadlock (T=2 4/5). Repro below | — |
+| **W13-6** | P1 | scheduler | TWO siblings that each recover an inner deadlock and then fan in to the main body's `recv` HANG at T>=2 (rc=124 5/5 at N=2, 5, 20, 100); T=1 completes `t 2` 5/5. Same two recovers without the fan-in: clean; ONE task recovering twice: clean. Go `done`. Repro below | — |
+| **W13-7** | P1 | Executor | An Executor job parked at a NURSERY join whose child is channel-blocked pins its pool thread at T=1, so a sibling job that would feed it never starts (rc=124 5/5; T>=2 `j1 got 1 / done` 5/5). `docs/concurrency.md:1805` (TICKET-052) promises "a blocked job no longer pins its pool thread … fixed for every shape above" — the yield bracket fires for a job blocked ON a channel, not for a job whose nursery child is. Go `GOMAXPROCS=1` completes. Repro below | — |
+| **W13-8** | P1 | Executor | `shutdown_now()` does not cancel a job's nursery child parked on `recv`: depth 1 → false `deadlock` fault at every count (5/5); depth 2 → T=1 fault, T>=2 rc=124. Job itself on `never.recv()` (no nursery) → `awake / done` 20/20. Doc: `shutdown_now()` "ask running jobs to stop at their next cancellation point" and `recv` IS a cancellation point. Go `select`+`cancel()` completes. Repro below | — |
+| **W13-9** | P1 | airlock | A module global nested ≥5 000 deep makes EVERY nursery open take ~22 s before the (correct, recoverable) `maximum structural depth (10000) exceeded` fault — measured 21.6 s at every count; depth 4 500 crosses in 0.04 s; the SAME chain as a captured LOCAL faults in 0.04 s. Constant ~22 s once the cap trips (quadratic walk on the module-snapshot failure path). Looks like a hang under any timeout ≤20 s | — |
+| **W13-10** | P1 | stdlib | `[] * 9223372036854775807` hangs (rc=124 at every count; `*=` and `N * e` likewise): the repeat loop is O(N) even for an empty source, and the capacity guard passes because `0 * N == 0`. `e * 1000000000` takes 0.51 s to return `0`. CPython instant `0`. `"".repeat(i64::MAX)` returns `0` instantly — the string arm short-circuits, the list arm does not | — |
+| **W13-11** | P2 | checker | W12-10 one spelling over: `import lib; lib.L.new()` with TWO structs in `lib` each carrying a defaulted static `fn new(n: int = …)` → `'new' expects 1 argument(s), got 0`; `import L from lib; L.new()` fine; one struct in the lib fine; instance twin through the qualified head fine. TICKET-108 added the bare-NAME head to `Desugar::receiver_struct_ty`, not the `module.Type` head | — |
+| **W13-12** | P2 | checker | W12-15 one arm over: an untyped int constant does not widen at a generic CTOR's `T=float` slot: `Pair(1, 2.5)` → `has type float, expected int`; `Pair[float](1, 2.5)` → `has type int, expected float`; `r: Pair[float] = Pair(1, 2)` → `cannot assign Pair[int]`; same for `enum E[T]: V(T, T)`. `mx(1, 2.5)` (free fn) widens. Go generic ctor / CPython accept | — |
+| **W13-13** | P2 | checker | W12-9 one level over: the expected type reaches only the OUTERMOST generic ctor. `bb: Box[Box[Named]] = Box(Box(A()))` → `cannot assign Box[Box[A]]`; even `Box[Box[Named]](Box(A()))` rejected; `(Box(A()), 1)` at a `(Box[Named], int)` sink, `Some([A()])` at `Option[List[Named]]`, `Box([A()])` at `Box[List[Named]]` all rejected. Rust `Box<Box<dyn Named>>` propagates inward | — |
+| **W13-14** | P2 | checker | The literal/ctor hint exists only at DECLARATION: `l: List[Named] = [A()]` OK, then `l = [A()]` → `cannot assign List[A] to List[Named]`; same for `ll[0] = [A()]`, `bb.v = Box(A())`, and W12-7's `m2 = {B(3): 6}` / `nested[A(1)] = {…}`. `docs/syntax.md` lists the hinted positions as binding / call argument / return — reassignment, index-assign and field-assign have a known target type and are missing | — |
+| **W13-15** | P3 | checker | `l: List[float]; l.push(3)` → `expected float, found int (the collection's element type was already pinned … by an earlier use)` — the hint is wrong (it was DECLARED); `m: Map[str, float]; m["a"] = 1` → `cannot assign int to float`. `f(1)` for `x: float` widens. Doc: a float method parameter is a definition sink | — |
+| **W13-16** | P3 | grammar | `enum E:\n    A B` declares TWO variants at rc=0, and `static fn zero()` in an enum body declares a phantom variant `static` (it then appears in `non-exhaustive match … missing static`). `grammar.bnf:329` mandates NEWLINE after every variant; `parse_enum` (`src/parser/mod.rs:~1513`) never requires it. A struct body rejects the same shape | — |
+| **W13-17** | P3 | strings | `"abc".replace("", "-")` → `abc`; CPython AND Go → `-a-b-c-` (`"".replace("", "-")` → `-`). `docs/stdlib.md:160` records "empty `old` → unchanged" as a fact with no `DEC-`; Chezzi's own `"abc".count("")` → `4` agrees with both ancestors, so `count` and `replace` disagree | — |
+| **W13-18** | P3 | checker⊋runtime | `o: float? = Some(1.5); print("{o:.2f}")` is check-OK then `runtime error: format spec: type 'f' not valid for a string`. `docs/syntax.md` §10 says the mismatch is caught at compile time whenever the static type is concrete; `Option[float]` is, and the message names a type the value does not have | — |
+| **W13-19** | P3 | std.json | `json.encode` charges a nesting level for `Some(...)`, which emits no bracket: an `Option`-linked struct chain Errs `exceeded max depth` at 1000 links while `stringify`/`parse` accept 2000 and the doc says `encode` "carries its own nesting-depth cap of 2 000" | — |
+| **W13-20** | P3 | diagnostics | A fault raised under a generator resume prints EITHER the generator-side frames (`at h`, `at g`) OR the driver-side frames (`at drive`, `at main`), never both — which side survives depends on whether the `for` loop is one call deeper than `main`. CPython lists all four. W8-14 presumed every frame prints | — |
+| **W13-21** | P3 | diagnostics | A manifest entrypoint (`entrypoint = "src.main:main"`) returning `Err(…)`/`None` faults `runtime error (line 1, col 1): unhandled error: …` with NO file; a real fault in the same fn names `src/main.chz`. Last `line 1, col 1`-without-file render after W8-14 | — |
+| **W13-22** | P3 | doc | `1.5.compare(2.0)` / `(1).compare(2)` / `"a".hash()` → `type float has no method 'compare'`; only reachable through a `[T: Comparable]` bound. `docs/stdlib.md:1663` and `docs/spec.md:501` write `a.compare(b)` on floats as if callable. Rust `1.5f64.total_cmp(&2.0)` is | — |
+| **W13-23** | P3 | decision | `a, a := 1, 2` (and `a, a := (1, 2)`) is accepted, prints `2`. Go `a repeated on left side of :=`, Rust E0416, CPython `2`. Consistent with Chezzi's same-scope `x := 1; x := 2` rebinding — a DECISION item, not a defect; file only if `:=` is meant to follow Go here | — |
+
+### W13-1 repro (P0)
+
+    gl: List[int] = [1]
+    fn main():
+        a := gl
+        c := Channel[fn() -> str](1)
+        parallel:
+            spawn:
+                a.push(2)
+                c.send(fn() -> str: "{gl}")
+        print(c.recv()())
+    main()
+
+Chezzi `[1]` at T=1/2/default; CPython threading `[1, 2]`; Go `[1 2]`. Control: move `a := gl` INSIDE the
+`spawn:` → `[1, 2]`. `/home/chezzijr/.cache/chezzi-hunt13/airlock/c2k_whole_alias_captured.chz` (+ c2a, c2i,
+c2h, c2m, c2n, c2o, c2q for the other shapes; `c2a.py`, `c2a.go`).
+
+### W13-2 repro (P0)
+
+    g: List[int] = [1]
+    c := Channel[fn() -> str](1)
+    fn producer():
+        g.push(2)
+        c.send(fn() -> str: "{g}")
+    fn main():
+        parallel:
+            spawn producer()
+            g.push(9)
+        f := c.recv()
+        print("{f()} {g}")
+    main()
+
+Chezzi `[1, 2] [1, 2]` — the parent's own `9` is lost from the parent's own `g`. Go `[1 9 2] [1 9 2]`
+(`d17.go`, mutex); CPython `[1, 2, 9] [1, 2, 9]`. `airlock/d17_direct_push_both.chz`; d18 (`g[1] = 9`),
+d22 (struct field), d21 (sibling receiver), d19/d20 (the two shapes that survive).
+
+### W13-3 / W13-4 repros (P1)
+
+    fn main():                        # W13-3: hangs at T>=2, faults at T=1
+        never := Channel[int](0)
+        parallel:
+            spawn:
+                parallel:
+                    spawn:
+                        never.recv()
+                    never.recv()
+            never.recv()
+        print("unreachable")
+    main()
+
+    fn main():                        # W13-4: hangs at T=1, faults at T>=2
+        never := Channel[int](0)
+        parallel:
+            spawn:
+                parallel:
+                    spawn:
+                        parallel:
+                            spawn:
+                                never.recv()
+                            never.recv()
+        print("unreachable")
+    main()
+
+Go twins (`sched/go/b2b.go`, `b2d.go`): `fatal error: all goroutines are asleep - deadlock!` at
+`GOMAXPROCS=1` and default. `sched/b2b.chz`, `b2d.chz`; `b2.chz` (depth 3, all bodies parked) and
+`b2f.chz` (depth 4) are the wider forms; `b1.chz` (depth 2) faults everywhere.
+
+### W13-5 repro (P1)
+
+    fn main():
+        out := Channel[int](0)
+        parallel:
+            spawn:
+                r := recover:
+                    parallel:
+                        spawn:
+                            never := Channel[int](0)
+                            never.recv()
+                match r:
+                    Ok(_): print("ok")
+                    Err(e): print("err")
+                out.send(5)
+            spawn:
+                parallel:
+                    spawn:
+                        print("cousin got {out.recv()}")
+        print("done")
+    main()
+
+Chezzi `err` then `runtime error (…:15:13): deadlock: every task in this parallel: block is blocked` —
+judge 4/5 at T=2 and default, hunter 5/5 at T=1/4; the clean runs print `cousin got 5 / done`. Go
+`err / cousin got 5 / done`. `sched/d2a.chz`; `d2.chz` (recover at depth 3), `d2d.chz` (roles swapped:
+one run printed `task got 5` AND then faulted), `g3.chz` (recovered `panic` instead of a deadlock).
+
+### W13-6 repro (P1)
+
+    fn main():
+        out := Channel[int](0)
+        parallel:
+            for i in range(2):
+                spawn:
+                    r := recover:
+                        parallel:
+                            spawn:
+                                never := Channel[int](0)
+                                never.recv()
+                    match r:
+                        Ok(_): out.send(0)
+                        Err(e): out.send(1)
+            t := 0
+            for i in range(2):
+                t = t + out.recv()
+            print("t {t}")
+    main()
+
+T=1 `t 2` 5/5; T=2/default rc=124 5/5. Go `done`. `sched/i6n2.chz`; `i6b.chz` (no fan-in) and `d1.chz`
+(one task recovering twice) are clean.
+
+### W13-7 / W13-8 repros (P1)
+
+    import std.concurrency            # W13-7: T=1 rc=124 5/5
+    a := Channel[int](0)
+    fn j1():
+        parallel:
+            spawn:
+                print("j1 got {a.recv()}")
+    fn main():
+        ex := Executor()
+        ex.submit(fn(): j1())
+        ex.submit(fn(): a.send(1))
+        ex.shutdown()
+        print("done")
+    main()
+
+    import std.concurrency            # W13-8: false deadlock at every count
+    import std.time
+    never := Channel[int](0)
+    fn job():
+        parallel:
+            spawn:
+                never.recv()
+    fn main():
+        ex := Executor()
+        ex.submit(fn(): job())
+        time.sleep_ms(300)
+        print("awake")
+        ex.shutdown_now()
+        print("done")
+    main()
+
+Go `sched/go/h1.go`, `h3.go`, `h2c.go` complete at `GOMAXPROCS=1`. `sched/h1c.chz`, `h1.chz`, `h3.chz`
+(job at depth 3 submitting back); `h2c.chz`, `h2b.chz` (depth 2: T>=2 hangs), `h2d.chz` (no nursery: clean).
+
+### What the wave did NOT find — the clean columns
+
+- **Checker widenings (TICKET-106/107/108/113) all LOWER correctly where accepted** — ~60 programs,
+  byte-identical at every worker count: W12-7 protocol keys through every Map/Set op and across `spawn`;
+  W12-8 `Iterable[(A,B)]`/`Option[A]`/`List[A]`/`Map[K,V]`/3-deep bounds with wrong-arity REJECTED;
+  W12-9 one-level ctor hint with protocol call + mutation; W12-11 catch-all in every position incl. the
+  unreachable-arm warning both ways; W12-13 every statement/expression pairing incl. `?` after; W12-14
+  `+=` on loop-var/const/field/nested/`spawn`/`Shared.update`; W12-15 the int really arrives as f64;
+  W12-16(a)(b)(c)(d) and W12-17 in 12 shapes each; W12-10 bare heads incl. generic/enum/`defer`;
+  TICKET-109 16-deep runs (`136`), 17-deep rejected on `check` and `run`.
+- **Enum ordering (TICKET-104)** clean at every neighbour: unit-first lists, all-unit enums, through
+  bounds / `Box[Opt[Lv]]` / `sort_by_key` keys / `spawn` / `Shared.update` / cross-module witness; 30k-element
+  sort with re-entrant `compare`; degenerate `compare` (always-1, always-0 stable, overflow → clean
+  fault with the list UNCHANGED); `Eq`/`Hash` on enums through all 12 natives; match exhaustiveness on
+  enum-in-tuple-in-enum; `?` in every position.
+- **Airlock**: adoption × 12 container shapes, × 14 timing shapes, × 6 closure shapes; TICKET-105 carry
+  for 12 in-task alias write shapes; cycles/DAGs × adoption; every handle type crosses per doc §7;
+  20 000 adopted aliases in 0.11 s.
+- **Scheduler**: W12-1 (20/20), 30-deep recursive chains with two children per level, owner in
+  `Shared.update`/`wait:`/Executor result/cancel `done()`; 200 nested nurseries fanning in; 20 genuine
+  deadlocks that fault in ms at every count (chains at join, `Shared.update` body, guard-order, generator
+  `next()` doing `recv`, two jobs deadlocked on each other, `wait:`+timer racing a nested deadlock); first-fault-wins at
+  depth 2/3; `for x in ch` closed from a grandchild; `os.exit` at depth 3; `--timeout` reaching a sleeping
+  nested child at T=1.
+- **Control flow**: defer (13 pairings incl. faulting defer replacing the in-flight panic, 1000 defers,
+  defers of a `break`-cancelled task), recover (3-deep, recursion-limit resumable, `e.line/col/file`
+  through defer-in-task / closure-in-task / generator-in-`for a, b`-in-task), generators (14 pairings),
+  `std.cancel` (11), `wait:` (8), closures (per-iteration `for` var, shared `while` var — both as documented),
+  modules/CLI (12), host IO (9).
+- **Python-feel / stdlib**: `int()`/`float()` on 53 strings, `#`-in-hole at 12 positions, 80+ format
+  specs byte-identical to CPython, 30 str-method edges, i64 edges, NaN/-0.0 ordering, Map order, 12 slice
+  forms, json.parse 55 edges + decode 25 shapes, csv vs Go, datetime 15 epochs + 25 ISO forms, path 40
+  forms vs posixpath + Go, base64/hex/url 50 inputs, flag 27 shapes vs Go, seeded rand identical at every
+  count, resource-cap edges under a 4 GB vmem cap — clean bar W13-10/17/18/19.
+
+**Meta-finding, fourth wave running.** Again zero findings from anything generated; every row is a
+hand-built pairing. Every P0/P1 sits in code younger than a week (TICKET-105 × 111, TICKET-103/112's
+predicate, TICKET-052's Executor bracket). Four of the ten P1s are the SAME question as the wave-12 rows
+they neighbour (W12-1/W12-4 → W13-3/4/5/6): a fix that closes the filed shape leaves the shape one
+nesting level over, or with the roles of body/child swapped, and the ticket's own gate never contained
+it. The fix for a verdict-predicate row should ship with the predicate's edge table (owner-at-join ×
+owner-on-channel × depth × worker count × recovered-or-not), not with the one filed program.
