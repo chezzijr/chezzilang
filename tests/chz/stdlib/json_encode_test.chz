@@ -14,3 +14,20 @@ test fn encode_round_trips_through_decode():
     match json.decode[Point](s):
         Ok(p2): assert p2.x == 1 and p2.y == 2
         Err(e): assert false, "expected Ok: " + e.message()
+
+# W13-19: `json.encode` charges a nesting level for `Some(...)` even though `Some` emits no JSON
+# bracket, so an `Option`-linked chain hits the 2000 cap at half the depth a plain nested object
+# would. `json.stringify`/`json.parse` accept a 2000-deep `Json.Obj` chain; `encode` must use the
+# SAME brackets-deep measure. 1000 `Option`-linked struct levels is 1000 JSON-object levels deep —
+# well inside the cap — and must encode; encode must fault only once the JSON itself nests past 2000.
+struct B:
+    inner: Option[B]
+
+test fn encode_does_not_charge_a_level_for_option_wrapping():
+    b: B = B(None)
+    i := 0
+    while i < 1000:
+        b = B(Some(b))
+        i += 1
+    s := json.encode(b)
+    assert s.len() > 0, "expected 1000-deep Option-linked struct to encode, got empty string"

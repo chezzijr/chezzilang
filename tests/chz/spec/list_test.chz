@@ -8,6 +8,8 @@
 # Fault-path cases (empty min()/max(), OOB remove_at, non-positive chunk(), overflow sum) stay in
 # Rust — `assert` cannot catch a runtime fault's message, so they have no in-language equivalent.
 
+import std.time
+
 # ---- first / last / reversed (non-mutating) ----
 
 test fn first_last_reversed():
@@ -488,3 +490,16 @@ test fn plus_equals_extends_through_a_const_binding():
     alias := xs
     xs += [3]
     assert str(alias) == "[1, 3]"
+
+# W13-10: `[] * n` on an EMPTY source still loops `n` times (each iteration extends nothing), so
+# the cost is O(n) instead of O(1) — CPython's `[] * (2**63-1)` returns instantly. A huge `n`
+# (e.g. `i64::MAX`) hangs the process (rc=124); this bound is wall-clock but hugely discriminating
+# (same convention as string_test.chz's `replace_large_input_is_not_quadratic`): measured ~0.91s
+# pre-fix for n=2_000_000_000 on this branch, vs a correct O(1) empty-source repeat.
+test fn empty_list_repeat_is_constant_time():
+    e: List[int] = []
+    t0 := time.monotonic()
+    r := e * 2000000000
+    d := time.monotonic() - t0
+    assert r.len() == 0
+    assert d < 0.1, "[] * 2000000000 took {d}s, expected < 0.1s"

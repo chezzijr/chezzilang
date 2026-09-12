@@ -25,6 +25,14 @@ test fn repeat_contract_unchanged():
     assert string.repeat("ab", 0) == ""
     assert string.repeat("ab", -5) == ""
 
+# W13-17: an empty `old` currently returns the receiver unchanged; both owning ancestors insert
+# the replacement between every codepoint (CPython 3.14 `"abc".replace("", "-")` and Go 1.27
+# `strings.ReplaceAll("abc", "", "-")` both give `-a-b-c-`; `"".replace("", "-")` gives `-` in
+# both). `str.count("")` already agrees with the ancestors (4 empty-match positions in "abc").
+test fn replace_empty_old_inserts_between_every_codepoint():
+    assert "abc".replace("", "-") == "-a-b-c-"
+    assert "".replace("", "-") == "-"
+
 test fn repeat_huge_n_faults_recoverably():
     r := recover: string.repeat("ab", 9223372036854775807)
     match r:
