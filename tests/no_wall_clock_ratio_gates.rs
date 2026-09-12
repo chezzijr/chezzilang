@@ -300,7 +300,7 @@ fn sleep_synchronised_tests() -> BTreeSet<String> {
 /// rejected it (the walk returns 68). Obtain it by compiling once with an empty array and copying
 /// the "sleeps but is not listed" list `no_new_rust_test_sleeps_to_order_two_events` reports,
 /// verbatim, the same way `stack_trace_reports_call_chain`'s golden was obtained.
-const SLEEP_SYNCHRONISED_TESTS: [&str; 83] = [
+const SLEEP_SYNCHRONISED_TESTS: [&str; 85] = [
     "cousin_fed_completes_instead_of_hanging_at_two_and_four_workers",
     "a_bailed_join_stops_its_jobs_from_starting_new_work",
     "a_cancelled_siblings_defer_runs_whole_on_both_engines",
@@ -359,6 +359,11 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 83] = [
     // below -- a poll interval against a deadline, over a child that hangs before the fix and never
     // closes its pipes, not a happens-before edge.
     "genuine_deadlock_two_nurseries_deep_faults_instead_of_hanging",
+    // TICKET-118 (W13-7). Its sleep is a POLL INTERVAL on `try_wait` against the 10 s hang bound,
+    // the same shape as `nested_nursery_deadlock_faults_at_one_worker_like_every_other_count` below
+    // -- the child hangs before the fix and never closes its pipes, so `output()` would wedge this
+    // test binary instead of failing it.
+    "job_nursery_child_blocked_on_recv_does_not_pin_the_pool_thread_at_t1",
     "max_heap_byte_walk_does_not_deadlock_on_a_cyclic_core_graph",
     "module_top_level_fault_is_delivered_twice_and_truncates_after_recover",
     "module_top_level_loop_back_edge_is_not_a_cancel_checkpoint",
@@ -389,6 +394,13 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 83] = [
     "reaps_idle_thread",
     "register_with_deadline_times_out_when_fd_never_ready",
     "respects_cap",
+    // TICKET-118 (W13-8). Its 300ms `time.sleep_ms` sits inside the fixture .chz program's SOURCE
+    // STRING, not in this Rust test's own control flow -- the same reason as
+    // `an_ancestor_send_wakes_a_receiver_parked_in_a_deeper_nursery` above. The edge it guesses at
+    // (the job reaching its nursery park before `shutdown_now()`) is why TICKET-118 ADDS the
+    // handshake-synchronised twin DEC-050 asks for rather than converting this one: this is the
+    // ticket's declared `test_file`, and a planning stage may not repoint that field.
+    "shutdown_now_cancels_a_jobs_nursery_child_blocked_on_recv",
     // TICKET-101. The sleep is a deadline poll (20ms) over a child process that hangs before the
     // fix and never closes its pipes, not a happens-before edge between two events in this test.
     "sibling_send_wakes_receiver_in_a_deeper_nursery_at_eight_workers",
