@@ -2014,6 +2014,10 @@ impl Vm {
     /// the receiving view already assigned it; the receiving view's own write always wins. On a
     /// successful install marks `carried` (never `assigned`: this view did not write it itself),
     /// which is what lets a forwarding task's `closure_global_snapshot` carry the value onward.
+    /// TICKET-116 (W13-2) — the receive side also refuses a slot whose live value in THIS view
+    /// provably differs from this view's own baseline, which is the in-place write `assigned` alone
+    /// cannot see (DEC-097 marks an in-place mutation `carried` only). The comparator declines on
+    /// doubt (DEC-051), so a doubtful slot still installs exactly as it did before.
     pub(super) fn install_global_slot(&mut self, module: GcRef, slot: u32, value: Value) -> bool {
         self.ensure_module_faulted(module);
         let ok = matches!(
@@ -2021,7 +2025,7 @@ impl Vm {
             Obj::Module(m) if (slot as usize) < m.slots.len()
                 && !m.assigned.get(slot as usize).copied().unwrap_or(false)
         );
-        if !ok {
+        if !ok || self.slot_changed_since_baseline(module, slot) {
             return false;
         }
         self.set_global_slot(module, slot, value);

@@ -231,3 +231,61 @@ test fn receiver_own_write_survives_arriving_closure_write():
     f := c.recv()
     got := "{f()} {g2}"
     assert 9 in g2, "receiver's own write to the global was lost: {got}"
+
+# W13-2 neighbours (TICKET-116) — the receiver's own in-place write must survive an arriving
+# closure's install, across write shapes, sibling receivers, and the pre-nursery control that must
+# stay clean.
+g18: List[int] = [1, 0]
+
+fn producer_w13_2_index(c: Channel[fn() -> str]):
+    g18.push(2)
+    c.send(fn() -> str: "{g18}")
+
+test fn receiver_index_assign_survives_arriving_closure():
+    c := Channel[fn() -> str](1)
+    parallel:
+        spawn producer_w13_2_index(c)
+        g18[1] = 9
+    f := c.recv()
+    got := "{f()} {g18}"
+    assert g18[1] == 9, "receiver's own index write was lost: {got}"
+
+struct Q116:
+    a: int
+    b: int
+
+g22: Q116 = Q116(0, 0)
+
+fn producer_w13_2_field(c: Channel[fn() -> str]):
+    g22.a = 2
+    c.send(fn() -> str: "{g22.a}")
+
+test fn receiver_field_write_survives_arriving_closure():
+    c := Channel[fn() -> str](1)
+    parallel:
+        spawn producer_w13_2_field(c)
+        g22.b = 9
+    f := c.recv()
+    got := "{f()} {g22.a} {g22.b}"
+    assert g22.b == 9, "receiver's own field write was lost: {got}"
+
+g21: List[int] = [1]
+
+fn producer_w13_2_sibling(c: Channel[fn() -> str]):
+    g21.push(2)
+    c.send(fn() -> str: "{g21}")
+
+fn consumer_w13_2_sibling(c: Channel[fn() -> str], r: Channel[str]):
+    g21.push(9)
+    f := c.recv()
+    r.send("{f()} {g21}")
+
+test fn sibling_task_receiver_own_write_survives():
+    c := Channel[fn() -> str](1)
+    r := Channel[str](1)
+    parallel:
+        spawn producer_w13_2_sibling(c)
+        spawn consumer_w13_2_sibling(c, r)
+    got := r.recv()
+    assert "9" in got, "sibling receiver's own write was lost: {got}"
+
