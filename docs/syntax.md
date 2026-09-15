@@ -594,7 +594,12 @@ a name, a call result, a field, an index — so `i := 1; x: float = i`, `x: floa
 each naming the fix (`a typed int never widens to float — write float(x)`).
 
 An untyped int constant adapts at every value-DEFINITION sink: a typed binding (`x: float = 1 + 2` →
-`3.0`), a `float` function / method parameter (coerced at the CALLEE prologue, from the DECLARED param
+`3.0`), a **reassignment, index-assign, or field-assign into a declared `float` slot** (`x: float = 1.5`
+then `x = 1`; `xs: List[float] = [1.5]` then `xs[0] = 1`; `s.f = 1` for a `float` field — coerced at the
+assignment's own `Op::CoerceFloat`, TICKET-124), a **`List[float]` collection-method argument**
+(`l: List[float] = [1.5]; l.push(3)` → `[1.5, 3.0]`, TICKET-124 — the collection method itself is
+type-blind, so the widen is recorded and coerced at the call site, exactly like the protocol-witness
+case below), a `float` function / method parameter (coerced at the CALLEE prologue, from the DECLARED param
 type, including one reached through a protocol-typed receiver or a bound type parameter -- the
 REQUIREMENT'S declared slot licenses this, not the actual witness's: a generic witness (`struct
 S[T]` satisfying `fn m(self, x: float)` via `T=float`) declares its own param `T`, so its prologue
@@ -638,8 +643,17 @@ that declaration is what the backend coerces from — not exceptions):
   are packed into a `List[float]` the callee prologue cannot coerce.
 - A generic call's bare type-parameter slot (`fn mx[T: Comparable](a: T, b: T) -> T`) adapts its
   untyped int constants the same way, when another argument binds that same slot to `float`
-  (`mx(1, 2.5)` → `2.5`, matching Go's `Max(1, 2.5)`). A TYPED int (`n := 1; mx(n, 2.5)`), an explicit
-  turbofish (`mx[int](1, 2.5)`), or a constant nested inside a slot like `List[T]` still rejects.
+  (`mx(1, 2.5)` → `2.5`, matching Go's `Max(1, 2.5)`). A TYPED int (`n := 1; mx(n, 2.5)`), or a
+  constant nested inside a slot like `List[T]`, still rejects. An **explicit turbofish** (`mx[float](1,
+  2)`) pins the slot to `float` directly and widens the same way — it is Go's `id[float64](1)` — and so
+  does a **generic ctor's own expected-type hint reaching its type params** (`r: Pair[float] =
+  Pair(1, 2)`; `Pair[float](1, 2.5)`; `bf: Box[float] = Box(1)`; TICKET-124). The one still-declined
+  shape is a bare-slot `T` pinned only by a SIBLING annotation with no turbofish and no arg binding it
+  (`y: float = id(1)` stays rejected — Go does not infer a type argument from the assignment context
+  either). The expected type also reaches through a **nested generic ctor argument**, not only the
+  outermost one (`bb: Box[Box[Named]] = Box(Box(A()))`; `o: Option[List[Named]] = Some([A()])`;
+  TICKET-124) — an aliased mutable value passed by IDENTIFIER is never re-typed this way (`b := Box(A());
+  bb: Box[Box[Named]] = Box(b)` stays rejected), only a fresh call/list/map/set/tuple literal is.
 - The element widening of a mixed-numeric-CONSTANT literal needs a NUMERIC element type to ask for it.
   An `Any` element SLOT declines it — at EVERY position the slot reaches a literal, so
   `xs: List[Any] = [1, -2.5]`, `f([1, -2.5])` for `fn f(xs: List[Any])`, `f(1, -2.5)` for
@@ -3968,11 +3982,15 @@ trailing `.0`. An **unknown type char** or trailing junk in the spec is a **pars
 `{x:.3d}` precision on an int, zero-pad on a non-number) is now **caught at compile time by `chezzi
 check`** whenever the value's static type is a **concrete scalar** (`int`/`float`/`str`/`bool`) — a
 provably-wrong spec/type pairing is a static error, in the spirit of Chezzi's statically-typed model
-(this is a **deliberate divergence from Python**, where such a mismatch is a runtime `ValueError`).
+(this is a **deliberate divergence from Python**, where such a mismatch is a runtime `ValueError`). A
+**concrete `List`/`Map`/`Set`/tuple/`Option`/`Result`** value is checked the same way, against the
+STRING rules (it renders via the runtime's text-form path) — `xs := [1]; "{xs:d}"` and `n: int? =
+None; "{n:+}"` are both compile errors naming the container type (TICKET-124); a width/fill spec
+(`{o:>12}` on an `Option[float]`) still passes, exactly as it would on a `str`.
 The **runtime** validation stays as an identical backstop (same wording, single-sourced in
 `spec_valid_for_scalar`): it still fires for a value whose type the checker can't pin to a concrete
-scalar — a generic `fn show[T](v: T): "{v:.2f}"` instantiated with a `str`, an `Unknown`, or a
-protocol existential — where the mismatch is only knowable at run time. The spec is parsed once,
+scalar or concrete container — a generic `fn show[T](v: T): "{v:.2f}"` instantiated with a `str`, an
+`Unknown`, or a protocol existential — where the mismatch is only knowable at run time. The spec is parsed once,
 one module (`src/fmtspec.rs`), so its output is byte-identical across runs. The `:` split is bracket/quote-aware — a `:` inside an index, string key, or
 slice (`{m["a:b"]}`, `{xs[1:2]}`) is *not* the spec separator. **Ternaries:** a bare interpolated
 ternary `{if b: a else: b}` works (its colons are part of the expression, not a spec); to attach a

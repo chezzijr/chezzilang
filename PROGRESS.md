@@ -7,6 +7,34 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-124 (2026-09-16) — the expected-type / untyped-constant widening TICKET-106 wired into one sink now reaches its neighbours: a generic ctor's own hint, a nested ctor argument, a reassignment/index-assign/field-assign target, and a `float`-slot collection-method argument; plus a check-OK container format spec (W13-12/13/14/15/18).**
+  W13-12: `widen_mixed_numeric_args` (`src/checker/proto.rs`) grew a `want: Option<&HashMap>` — a
+  turbofish or a ctor's own expected-type hint via the new `hint_want` — beside its existing
+  sibling-`float`-argument trigger, and is now called from all three generic ctor paths (bare struct,
+  qualified struct, enum variant) in `src/checker/expr.rs`, not only the free-fn/method paths. `Pair(1,
+  2.5)`, `r: Pair[float] = Pair(1, 2)`, `id[float](1)` all widen now, matching Go's turbofish rule.
+  W13-13: the new `ctor_arg_hints` (`src/checker/proto.rs`) derives a per-argument expected type from
+  a ctor's turbofish/hint and threads it through `infer_generic_arg_tys` (a new `arg_hints` param), so
+  a NESTED ctor argument sees the hint too (`bb: Box[Box[Named]] = Box(Box(A()))`), not only the
+  outermost one. `Some`/`Ok`/`Err` (new `one_arg_hinted`) and a tuple literal (`pattern.rs`) get the
+  same hint. The invariance guard is unchanged: an aliased mutable value passed by identifier is never
+  re-typed (`b := Box(A()); bb: Box[Box[Named]] = Box(b)` stays rejected).
+  W13-14: `StmtKind::Assign` (`src/checker/sig.rs`) now probes the target's type (mark/rollback) for a
+  plain `=` whose RHS is a fresh call/list/map/set/tuple, and threads it as an `infer_arg` hint — so
+  `l: List[Named] = [A()]; l = [A()]`, `ll[0] = [A()]` and `bb.v = Box(A())` all widen the same way a
+  declaration already did.
+  W13-15: `check_assign`/`check_assign_value` grew a `widen_span` (set only for an untyped int constant
+  under plain `=`) that widens into a declared `float` slot exactly like a call-arg sink — recorded in
+  `ArgFloatWidenTable` and coerced by `compile_assign`'s new `arg_widen_recorded` read on the Ident,
+  Field and Index arms, so a local, a captured cell, a module global, a struct field, a List index and
+  a Map value all coerce from one set of call sites. `check_args_range_decl` grew a `coll_widen` gate
+  so `l: List[float] = [1.5]; l.push(3)` widens too; the stale "already pinned … by an earlier use"
+  wording (which lied for a DECLARED slot) is now "fixed by its annotation or an earlier use".
+  W13-18: `check_interp_chunks` (`src/checker/pattern.rs`) now checks a concrete `List`/`Map`/`Set`/
+  tuple/`Option`/`Result` value's format spec against `ScalarKind::Str`'s rules too (it renders via the
+  same runtime text-form path a scalar `str` does), so `o: float? = Some(1.5); "{o:.2f}"` is now a
+  compile error naming the container type, matching `docs/syntax.md`'s "caught at check time whenever
+  the static type is concrete" rule.
 - **TICKET-118 (2026-09-16) — an Executor job's nursery join no longer pins its pool thread at T=1 or T=2, and `shutdown_now()` now reaches a job's nursery children (W13-7, W13-8).**
   W13-7: a job's own OS thread parked at a nursery join — `MnSched::wait_for_scope`, `MnSched::wait_for_completion`, and the idle park in `MnSched::take_runnable` — never called `pool::yield_slot`, so a queued sibling `ex.submit` job never started while the joiner waited. `MnSched::pool_joiner_guard` now marks the joining thread (only the top-level `Vm`, `mn.is_none()`, per DEC-052), and `MnSched::joiner_step`/`joiner_wait` hand the pool slot to a replacement after one `DEMOTE_POLL_BACKOFF` tick of the sched having no running or runnable fiber — gated on idle, not merely on elapsed time, so a CPU-bound nursery inside a job still serializes at `CHEZZI_THREADS=1` (measured: 1.00 cores gated vs 1.86-1.95 with the idle term removed — `threads_one_serializes_a_cpu_bound_nursery_inside_an_executor_job`, the third gate in W8-8's form, DEC-059). W13-8: `shutdown_now` trips a flag a job's nursery scope carries in `JoinScope::ancestors`, but a `recv`-parked fiber's re-check (`park`/`park_send`/`park_wait`) read only its own scope's flag, so the fiber never requeued and the nursery's deadlock verdict fired instead of the cancel. `SchedCore::scope_cancel_tripped` now reads the scope's own flag OR any ancestor's, and `MnSched::take_runnable` runs a `cancelled_scope_awaiting_drain` trigger (one read per lock hold, threaded through `is_deadlocked_given`/`local_quiesced_given` so the two never disagree inside one hold) before its deadlock verdict, requeuing a cancelled family's parked fibers via `cancel_drain`. `shutdown_now` also pokes every live sched (`poke_live_scheds`, lock-then-notify) right after storing the cancel flag, closing a lost-wakeup window where a worker could read the flag on both sides of the trip under its own core lock. Before: `h1c`/`h1`/`h3` rc=124 at one worker (rc=0 at two/default), `h2`/`h2b` rc=124 at two/default (deadlock fault at one), `h2c` `deadlock` fault at every count, `two.chz` rc=124 at one and two workers. After: all rc=0 in 5/5 runs at every worker count.
 - **TICKET-123 (2026-09-15) — a generator-resume trace now reports every frame, and a manifest entrypoint fault names the entry file (W13-20, W13-21).**
