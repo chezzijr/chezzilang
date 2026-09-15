@@ -500,6 +500,167 @@ fn threads_stay_bounded_for_a_nursery_nested_in_a_spawned_task() {
     );
 }
 
+/// W13-3 (TICKET-117): the main body AND a nested owner body both channel-parked, leaf at depth 2.
+const NESTED_BODY_BLOCKED: &str = "fn main():
+    never := Channel[int](0)
+    parallel:
+        spawn:
+            parallel:
+                spawn:
+                    never.recv()
+                never.recv()
+        never.recv()
+    print(\"unreachable\")
+main()
+";
+
+/// Control: the same nesting with the main body NOT blocked; faults in milliseconds on base.
+const NESTED_OWNER_BLOCKED_ONLY: &str = "fn main():
+    never := Channel[int](0)
+    parallel:
+        spawn:
+            parallel:
+                spawn:
+                    never.recv()
+                never.recv()
+    print(\"unreachable\")
+main()
+";
+
+/// Control: depth 3, the owner parked on a second `send` after one rendezvous; faults on base.
+const NESTED_OWNER_SECOND_SEND: &str = "fn main():
+    never := Channel[int](0)
+    parallel:
+        spawn:
+            parallel:
+                spawn:
+                    parallel:
+                        spawn:
+                            never.recv()
+                        never.send(1)
+                        never.send(2)
+    print(\"unreachable\")
+main()
+";
+
+/// Control (W12-1): a LIVE nested rendezvous chain; it must complete, never hang or false-fault.
+const NESTED_LIVE_RENDEZVOUS: &str = "fn main():
+    out := Channel[int](0)
+    parallel:
+        spawn:
+            inner := Channel[int](0)
+            parallel:
+                spawn:
+                    inner.send(1)
+                out.send(inner.recv() + 1)
+        print(\"got {out.recv()}\")
+main()
+";
+
+const NESTED_DEADLOCK_RUNS: usize = 5;
+const NESTED_DEADLOCK_THREADS: [&str; 3] = ["1", "2", "4"];
+
+/// Runs `chezzi run <path>` at `CHEZZI_THREADS=<threads>`; `None` when it outlives a 20 s hang
+/// deadline (the child is killed). The poll loop lives in this plain fn, not in a `#[test]` body, so
+/// `tests/no_wall_clock_ratio_gates.rs`'s body scans list no new name (the `child_rusage` precedent).
+fn run_with_hang_deadline(path: &Path, threads: &str) -> Option<std::process::Output> {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .args(["run", path.to_str().unwrap()])
+        .env("CHEZZI_THREADS", threads)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn chezzi");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        if child.try_wait().expect("try_wait chezzi").is_some() {
+            return Some(child.wait_with_output().expect("collect chezzi output"));
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+fn faulted_deadlock(out: &std::process::Output) -> bool {
+    !out.status.success() && String::from_utf8_lossy(&out.stderr).contains("deadlock")
+}
+
+/// Writes `program` to a temp file and runs it [`NESTED_DEADLOCK_RUNS`] times at each of
+/// [`NESTED_DEADLOCK_THREADS`], panicking on the first hang or the first run `check` rejects. Five
+/// runs per count, because a ~5% flake reads as 0/1 on one run.
+fn assert_at_every_worker_count(
+    file: &str,
+    program: &str,
+    check: fn(&std::process::Output) -> bool,
+    want: &str,
+) {
+    let dir = std::env::temp_dir().join(format!("chz-threads-117-{}-{file}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join(file);
+    std::fs::write(&path, program).expect("write program");
+    for threads in NESTED_DEADLOCK_THREADS {
+        for run in 1..=NESTED_DEADLOCK_RUNS {
+            let Some(out) = run_with_hang_deadline(&path, threads) else {
+                let _ = std::fs::remove_dir_all(&dir);
+                panic!(
+                    "{file} hung past its 20 s deadline at CHEZZI_THREADS={threads}, run {run}; want {want}"
+                );
+            };
+            if !check(&out) {
+                let _ = std::fs::remove_dir_all(&dir);
+                panic!(
+                    "{file} at CHEZZI_THREADS={threads}, run {run}: want {want}, got {:?}\nstdout: {}\nstderr: {}",
+                    out.status,
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// W13-3 (TICKET-117): a genuine nested deadlock whose main body is itself channel-parked must fault
+/// `deadlock` at every worker count. Before the fix main's 5 ms `recv` poll woke the nested sched's
+/// parked receiver with `WakeKind::All` on every tick, so no sched quiesced and T>=2 hung.
+#[test]
+fn nested_body_blocked_deadlock_faults_at_every_worker_count() {
+    assert_at_every_worker_count(
+        "nested_body_blocked.chz",
+        NESTED_BODY_BLOCKED,
+        faulted_deadlock,
+        "a `deadlock` fault",
+    );
+}
+
+/// TICKET-117's controls: the cap-0 wake-kind narrowing must not lose a verdict that already held
+/// (the `b1`/`j2` hunt shapes) nor turn a live nested rendezvous into a hang (W12-1's `a1b` shape).
+#[test]
+fn nested_deadlock_controls_hold_at_every_worker_count() {
+    assert_at_every_worker_count(
+        "nested_owner_blocked_only.chz",
+        NESTED_OWNER_BLOCKED_ONLY,
+        faulted_deadlock,
+        "a `deadlock` fault",
+    );
+    assert_at_every_worker_count(
+        "nested_owner_second_send.chz",
+        NESTED_OWNER_SECOND_SEND,
+        faulted_deadlock,
+        "a `deadlock` fault",
+    );
+    assert_at_every_worker_count(
+        "nested_live_rendezvous.chz",
+        NESTED_LIVE_RENDEZVOUS,
+        |out| out.status.success() && String::from_utf8_lossy(&out.stdout) == "got 2\n",
+        "exit 0 with stdout `got 2`",
+    );
+}
+
 fn tail(s: &str) -> String {
     let lines: Vec<&str> = s.lines().collect();
     let start = lines.len().saturating_sub(15);

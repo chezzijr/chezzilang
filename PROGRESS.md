@@ -7,6 +7,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-117 (2026-09-15) — a nested deadlock whose main body is channel-parked faults instead of hanging (W13-3).**
+  Main's rendezvous `recv` poll woke every live sched with `WakeKind::All` and requeued a nested sched's parked receiver every 5 ms, so no sched quiesced. The no-sched receiver wake now carries `WakeKind::Send` on a cap-0 channel, as `MnSched::recv_wake` already did. W13-4/5/6 and `exec_join` move to TICKET-125.
 - **TICKET-116 (2026-09-12) — an adopted-alias write is carried and a receiver's own in-place write
   survives (W13-1, W13-2).** W13-1: a spawn-ADOPTED alias write (`a := gl` in the parent, `a.push(2)`
   in the task) was not carried by a closure the task sent back, because the task's home module faults

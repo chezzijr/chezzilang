@@ -1996,7 +1996,12 @@ impl Vm {
             sched.recv_wake(key, core);
         } else {
             core.cv.notify_all();
-            self.wake_on_send_key(Arc::as_ptr(core) as usize);
+            let kind = if core.cap == Some(0) {
+                WakeKind::Send
+            } else {
+                WakeKind::All
+            };
+            self.wake_on_send_key_kind(Arc::as_ptr(core) as usize, kind);
         }
     }
 

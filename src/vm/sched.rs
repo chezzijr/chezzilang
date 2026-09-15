@@ -2730,6 +2730,13 @@ impl Vm {
         // no-sched wake sites (`close`, `trip`, `channel_send_wire`, the bounded enqueue, and the
         // bounded slot-free wake); patching one would leave the other four broken. Every one of them
         // has dropped `ChannelCore::q` before calling, so taking the sched lock here is q-free.
+        self.wake_on_send_key_kind(key, WakeKind::All);
+    }
+
+    /// Same as [`Vm::wake_on_send_key`] but with the wake kind carried by the caller (TICKET-117 —
+    /// a cap-0 receiver-side wake must pass `WakeKind::Send`, per DEC-028; every sender/close/trip
+    /// caller keeps going through `wake_on_send_key` above, which stays `WakeKind::All`).
+    pub(super) fn wake_on_send_key_kind(&mut self, key: usize, kind: WakeKind) {
         {
             let mut g = self
                 .sched_registry
@@ -2740,7 +2747,7 @@ impl Vm {
                 g.retain(|w| w.strong_count() > 0);
                 drop(g);
                 for s in live {
-                    s.wake_key(key, WakeKind::All);
+                    s.wake_key(key, kind);
                 }
             }
         }
