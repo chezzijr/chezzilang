@@ -432,6 +432,22 @@ impl Parser {
         )))
     }
 
+    /// A member of a `struct`/`enum`/native body must end its logical line: `docs/grammar.bnf`'s
+    /// `<field>`, `<variant>` and `<nativeMethodDecl>` all end in `"NEWLINE"`. Carries the same
+    /// `Dedent`-previous escape as [`Self::expect_stmt_end`] for a block-valued field default,
+    /// whose arm block's `Dedent` is the terminator with no NEWLINE of its own.
+    fn expect_member_end(&self, what: &str, name: &str) -> PResult<()> {
+        if matches!(self.peek(), Token::Newline | Token::Dedent | Token::Eof)
+            || (self.pos > 0 && matches!(self.toks[self.pos - 1].kind, Token::Dedent))
+        {
+            return Ok(());
+        }
+        Err(self.err(format!(
+            "expected newline after {what} '{name}', found {}",
+            describe(self.peek())
+        )))
+    }
+
     fn err(&self, message: String) -> ParseError {
         ParseError {
             message,
@@ -1170,6 +1186,7 @@ impl Parser {
                         "native struct methods must be `native fn` declarations".to_string(),
                     ));
                 };
+                self.expect_member_end("native method", &decl.name)?;
                 methods.push(decl);
                 self.skip_newlines();
                 continue;
@@ -1199,6 +1216,7 @@ impl Parser {
                         .to_string(),
                 ));
             }
+            self.expect_member_end("native struct field", &fname)?;
             fields.push(Field {
                 name: fname,
                 name_span: fname_span,
@@ -1253,6 +1271,7 @@ impl Parser {
                     return Err(self
                         .err("native enum methods must be `native fn` declarations".to_string()));
                 };
+                self.expect_member_end("native method", &decl.name)?;
                 methods.push(decl);
                 self.skip_newlines();
                 continue;
@@ -1281,6 +1300,7 @@ impl Parser {
                 }
                 self.expect(&Token::RParen)?;
             }
+            self.expect_member_end("enum variant", &vname)?;
             variants.push(Variant {
                 name: vname,
                 name_span: vname_span,
@@ -1467,6 +1487,7 @@ impl Parser {
                 } else {
                     None
                 };
+                self.expect_member_end("struct field", &fname)?;
                 if default.is_some() {
                     seen_default = true;
                 } else if seen_default {
@@ -1560,6 +1581,7 @@ impl Parser {
                     }
                     self.expect(&Token::RParen)?;
                 }
+                self.expect_member_end("enum variant", &vname)?;
                 variants.push(Variant {
                     name: vname,
                     name_span: vname_span,
