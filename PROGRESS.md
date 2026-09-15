@@ -7,6 +7,16 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-121 (2026-09-15) — an empty-list repeat is O(1), an empty-`old` `str.replace` interleaves, `json.encode` counts brackets not `Some` wrappers (W13-10/17/19).**
+  `list_repeat` (`src/vm/arith.rs`) now returns an empty list before its repeat loop when the source
+  is empty, so `[] * n`, `n * []` and `xs *= n` no longer loop `n` times over nothing (measured
+  ~0.5–0.9s pre-fix at `n = 1e9`, instant after). `str.replace`'s native arm (`src/vm/call.rs`)
+  deletes the empty-`old` special case, delegating fully to Rust's `str::replace`, which already
+  interleaves `new` between every codepoint like CPython 3.14 and Go 1.27 — two example goldens moved.
+  `json.encode`'s `json_of` (`src/vm/call.rs`) now peels `Some` iteratively before charging any
+  bracket depth, and charges the 2000-deep cap only at the three container arms
+  (`List`/`Tuple`, `Map`, `Struct`), matching `json.parse`/`json.stringify`'s own bracket count — an
+  `Option`-linked chain now reaches the full 2000-deep cap instead of faulting at 1000.
 - **TICKET-117 (2026-09-15) — a nested deadlock whose main body is channel-parked faults instead of hanging (W13-3).**
   Main's rendezvous `recv` poll woke every live sched with `WakeKind::All` and requeued a nested sched's parked receiver every 5 ms, so no sched quiesced. The no-sched receiver wake now carries `WakeKind::Send` on a cap-0 channel, as `MnSched::recv_wake` already did. W13-4/5/6 and `exec_join` move to TICKET-125.
 - **TICKET-116 (2026-09-12) — an adopted-alias write is carried and a receiver's own in-place write

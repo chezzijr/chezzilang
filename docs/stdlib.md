@@ -1875,7 +1875,10 @@ enum Json:
 > (`json.encode: cannot encode enum <name>`), and on any other object
 > (`json.encode: cannot encode <type>`). It carries its own nesting-depth cap of 2 000, independent of
 > `stringify`'s: a struct is a reference value and may be cyclic, so the cap guards the walk itself
-> rather than a tree that already exists.
+> rather than a tree that already exists. The cap counts BRACKETS, exactly as `parse`/`stringify` do
+> — the outermost `List`/`Map`/`Struct` is level 1; a scalar, `None`, an already-built `Json` value
+> and a `Some` wrapper add no level, so an `Option`-linked chain reaches the same depth a plain
+> nested object does; an empty container still occupies its own level (`docs/gaps.md` **W13-19**).
 
 An integer-shaped JSON numeral inside the i64 window decodes to `Json.Int` and round-trips
 byte-exact — `as_int` and `json.decode[int]` read it directly, never through f64, so a 19-digit id

@@ -716,7 +716,8 @@ Highest → lowest. Same row = same precedence, left-associative unless noted.
 > to the equivalent methods (so a mismatched element type is a type error, same as the method form):
 > - `List[T] + List[T]` → concat (= `.concat`); element types must match. `[] + [1]` infers `List[int]`.
 > - `List[T] * int` / `int * List[T]` → repeat (commutative, Python-style); `n <= 0` → `[]`. A giant
->   `n` raises a recoverable `list repeat capacity overflow`, never a process abort.
+>   `n` raises a recoverable `list repeat capacity overflow`, never a process abort. An empty source
+>   repeats to `[]` in constant time for any `n`.
 > - `Set[T] | Set[T]` → union (= `.union`), `& ` → intersection (= `.intersection`), `-` → difference
 >   (= `.difference`), `^` → symmetric-difference (no method form). Result preserves insertion order.
 >
