@@ -31906,10 +31906,6 @@ fn w12_9_expected_type_widen_declines_unsound_neighbours() {
         "cannot assign Box[str] to variable of type Box[int]",
     );
     rejects(
-        &format!("{prelude}bf: Box[float] = Box(1)\n"),
-        "cannot assign Box[int] to variable of type Box[float]",
-    );
-    rejects(
         "protocol Named:\n    fn name(self) -> str\nstruct A:\n    fn name(self) -> str:\n        return \"a\"\nstruct Bag[T]:\n    items: List[T]\nzs := [A()]\nd: Bag[Named] = Bag(zs)\n",
         "cannot assign Bag[A] to variable of type Bag[Named]",
     );
@@ -32420,5 +32416,66 @@ fn format_spec_mismatch_against_option_float_caught_at_check_time() {
     rejects(
         "fn main():\n    o: float? = Some(1.5)\n    print(\"{o:.2f}\")\n",
         "format spec",
+    );
+}
+
+const GENERIC_CTOR_WIDEN_PRELUDE: &str = "struct Pair[T]:\n    a: T\n    b: T\n\nstruct Box[T]:\n    v: T\n\nenum E[T]:\n    V(T, T)\n\nfn id[T](x: T) -> T:\n    return x\n\nfn mx[T: Comparable](a: T, b: T) -> T:\n    if a > b:\n        return a\n    return b\n\n";
+
+#[test]
+fn generic_ctor_numeric_widen_neighbours_accept() {
+    ok(&format!(
+        "{GENERIC_CTOR_WIDEN_PRELUDE}fn main():\n    p := Pair[float](1, 2.5)\n    print(p)\n"
+    ));
+    ok(&format!(
+        "{GENERIC_CTOR_WIDEN_PRELUDE}fn main():\n    r: Pair[float] = Pair(1, 2)\n    print(r)\n"
+    ));
+    ok(&format!(
+        "{GENERIC_CTOR_WIDEN_PRELUDE}fn main():\n    e := E.V(1, 2.5)\n    print(e)\n"
+    ));
+    ok(&format!(
+        "{GENERIC_CTOR_WIDEN_PRELUDE}fn main():\n    f: E[float] = E.V(1, 2)\n    print(f)\n"
+    ));
+    ok(&format!(
+        "{GENERIC_CTOR_WIDEN_PRELUDE}fn main():\n    bf: Box[float] = Box(1)\n    print(bf)\n"
+    ));
+    ok(&format!(
+        "{GENERIC_CTOR_WIDEN_PRELUDE}fn main():\n    y := id[float](1)\n    print(y)\n"
+    ));
+    ok(&format!(
+        "{GENERIC_CTOR_WIDEN_PRELUDE}fn main():\n    z := mx[float](1, 2)\n    print(z)\n"
+    ));
+}
+
+#[test]
+fn generic_ctor_numeric_widen_neighbours_reject() {
+    rejects(
+        &format!(
+            "{GENERIC_CTOR_WIDEN_PRELUDE}fn main():\n    b: Box[str] = Box(1)\n    print(b)\n"
+        ),
+        "cannot assign Box[int] to variable of type Box[str]",
+    );
+    rejects(
+        &format!("{GENERIC_CTOR_WIDEN_PRELUDE}fn main():\n    print(mx(1, \"a\"))\n"),
+        "argument to 'mx' has type str",
+    );
+    rejects(
+        &format!(
+            "{GENERIC_CTOR_WIDEN_PRELUDE}fn main():\n    i := 1\n    r: Pair[float] = Pair(i, 2)\n    print(r)\n"
+        ),
+        "cannot assign Pair[int] to variable of type Pair[float]",
+    );
+    rejects(
+        &format!("{GENERIC_CTOR_WIDEN_PRELUDE}fn main():\n    y: float = id(1)\n    print(y)\n"),
+        "cannot assign int to variable of type float",
+    );
+    rejects(
+        &format!("{GENERIC_CTOR_WIDEN_PRELUDE}fn main():\n    print(mx[int](1, 2.5))\n"),
+        "argument to 'mx' has type float, expected int",
+    );
+    rejects(
+        &format!(
+            "{GENERIC_CTOR_WIDEN_PRELUDE}enum F:\n    V(float)\n\nfn main():\n    print(F.V(1))\n"
+        ),
+        "argument 1 of 'V': expected float, found int",
     );
 }

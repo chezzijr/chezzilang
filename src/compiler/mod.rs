@@ -4965,6 +4965,19 @@ impl Compiler {
     /// already filled, so `args.len()` matches the field count). A generic field typed `T` is not
     /// `float`, so it is left untouched (matching the no-generic-widening carve-out). With no float
     /// fields this is byte-identical to the old flat `for a in args { compile_expr }` loop.
+    /// TICKET-124 (W13-12): whether the checker recorded a `true` verdict in `arg_float_widen` for
+    /// this argument's span — the same lookup [`Self::compile_args`] already does, extracted so
+    /// [`Self::compile_ctor_args`] and [`Self::compile_assign`] can share it.
+    fn arg_widen_recorded(&self, span: Span) -> bool {
+        let key = crate::checker::arg_float_widen_key(
+            self.current_module_idx,
+            self.kw_frag_ctx,
+            self.kw_frag_ord,
+            span,
+        );
+        self.arg_float_widen.get(&key) == Some(&true)
+    }
+
     fn compile_ctor_args(
         &mut self,
         fc: &mut FnComp,
@@ -4997,7 +5010,7 @@ impl Compiler {
             .unwrap_or_default();
         for (i, a) in args.iter().enumerate() {
             self.compile_expr(fc, a)?;
-            if float_field.get(i).copied().unwrap_or(false) {
+            if float_field.get(i).copied().unwrap_or(false) || self.arg_widen_recorded(a.span) {
                 fc.emit(Op::CoerceFloat, a.span);
             }
         }

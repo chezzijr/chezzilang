@@ -1207,7 +1207,7 @@ impl Checker {
         // given, else are inferred by unifying the variant's declared payload types (which contain
         // the enum's `Ty::Param`s) against the argument types, then check each argument against the
         // substituted payload.
-        let arg_tys = self.infer_generic_arg_tys(args, &v.payload, false);
+        let mut arg_tys = self.infer_generic_arg_tys(args, &v.payload, false);
         if arg_tys.len() != v.payload.len() {
             self.check_arity(name, v.payload.len(), args, span);
         }
@@ -1215,6 +1215,18 @@ impl Checker {
         for (decl, actual) in v.payload.iter().zip(&arg_tys) {
             unify(decl, actual, &mut sub);
         }
+        // TICKET-124 (W13-12): widen a bare-`T` untyped int constant to float when the expected
+        // type pins this variant's `T` to float, same as a sibling float argument.
+        let want = self.hint_want(hint, &Ty::Enum(v.enum_name.clone(), param_shape(&tps)));
+        self.widen_mixed_numeric_args(
+            &tps,
+            &v.payload,
+            &mut arg_tys,
+            args,
+            !targs.is_empty(),
+            &mut sub,
+            want.as_ref(),
+        );
         self.recover_iter_elems(&tps, &mut sub, span);
         // Expected-type checking-mode: an annotation (`let`/return/param `Enum[int]`) seeds any type
         // param the args left FREE — unify the declared enum SHAPE (Param-bearing) against the hint
@@ -1273,7 +1285,7 @@ impl Checker {
             self.check_args_w(name, &field_tys, args, span);
             return Ty::strukt(key.to_string());
         }
-        let arg_tys = self.infer_generic_arg_tys(args, &field_tys, true);
+        let mut arg_tys = self.infer_generic_arg_tys(args, &field_tys, true);
         self.check_ctor_arity(
             name,
             &tps,
@@ -1287,6 +1299,18 @@ impl Checker {
         for (decl, actual) in field_tys.iter().zip(&arg_tys) {
             unify(decl, actual, &mut sub);
         }
+        // TICKET-124 (W13-12): widen a bare-`T` untyped int constant to float when the expected
+        // type pins this ctor's `T` to float, same as a sibling float argument.
+        let want = self.hint_want(hint, &Ty::Struct(key.to_string(), param_shape(&tps)));
+        self.widen_mixed_numeric_args(
+            &tps,
+            &field_tys,
+            &mut arg_tys,
+            args,
+            !targs.is_empty(),
+            &mut sub,
+            want.as_ref(),
+        );
         self.recover_iter_elems(&tps, &mut sub, span);
         // Expected-type checking-mode: a `let`/return/param annotation (`Heap[int]`) seeds any type
         // param the args left FREE, BEFORE the deadlock probe — so the annotation breaks the
@@ -2170,12 +2194,24 @@ impl Checker {
                     // Generic struct: type arguments come from explicit call-site args (`S[int](…)`)
                     // when given, else are inferred by unifying the declared field types (which
                     // contain the struct's `Ty::Param`s) against the argument types.
-                    let arg_tys = self.infer_generic_arg_tys(args, &field_tys, true);
+                    let mut arg_tys = self.infer_generic_arg_tys(args, &field_tys, true);
                     self.check_ctor_arity(name, &tps, &fields, &defaulted, targs, args, span);
                     let mut sub = self.seed_targs(name, &tps, targs, span);
                     for (decl, actual) in field_tys.iter().zip(&arg_tys) {
                         unify(decl, actual, &mut sub);
                     }
+                    // TICKET-124 (W13-12): widen a bare-`T` untyped int constant to float when the
+                    // expected type pins this ctor's `T` to float, same as a sibling float argument.
+                    let want = self.hint_want(hint, &Ty::Struct(key.clone(), param_shape(&tps)));
+                    self.widen_mixed_numeric_args(
+                        &tps,
+                        &field_tys,
+                        &mut arg_tys,
+                        args,
+                        !targs.is_empty(),
+                        &mut sub,
+                        want.as_ref(),
+                    );
                     self.recover_iter_elems(&tps, &mut sub, span);
                     // Expected-type checking-mode: a `let`/return/param annotation (`Heap[int]`) seeds
                     // any type param the args left FREE, BEFORE the deadlock probe — so the annotation

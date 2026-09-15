@@ -4041,6 +4041,12 @@ impl Checker {
     /// Records a verdict (true OR false) for every such constant: an inline-spliced default shares
     /// one span across callers, and only a recorded `false` lets `record_call_table_entry` catch two
     /// callers disagreeing.
+    ///
+    /// TICKET-124 (W13-12): `want` is the type-param binding a turbofish or a ctor's expected-type
+    /// hint (`hint_want`) already pinned. A param pinned to `float` there widens its bare-`T`
+    /// constants exactly like a sibling `float` argument does, so `Pair[float](1, 2.5)` and
+    /// `r: Pair[float] = Pair(1, 2)` widen the same way `mx(1, 2.5)` already did.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn widen_mixed_numeric_args(
         &mut self,
         tps: &[TypeParam],
@@ -4049,6 +4055,7 @@ impl Checker {
         args: &[Expr],
         explicit: bool,
         sub: &mut HashMap<String, Ty>,
+        want: Option<&HashMap<String, Ty>>,
     ) {
         let n = decls.len().min(arg_tys.len()).min(args.len());
         for tp in tps {
@@ -4070,7 +4077,12 @@ impl Checker {
                     _ => {}
                 }
             }
-            let widen = !explicit && has_float && !other_int && !consts.is_empty();
+            let pinned = if explicit {
+                sub.get(p) == Some(&Ty::Float)
+            } else {
+                has_float || want.is_some_and(|w| w.get(p) == Some(&Ty::Float))
+            };
+            let widen = pinned && (explicit || !other_int) && !consts.is_empty();
             for &i in &consts {
                 self.record_arg_float_widen(args[i].span, widen);
                 if widen {
@@ -4081,6 +4093,23 @@ impl Checker {
                 sub.insert(p.clone(), Ty::Float);
             }
         }
+    }
+
+    /// TICKET-124 (W13-12/W13-13): the expected type's binding for a ctor's own type params, used
+    /// to pin a bare-`T` slot the same way a turbofish does. Declines unless the hint is
+    /// `ty_fully_concrete` (DEC-054), so it never widens against a partially-known annotation.
+    pub(super) fn hint_want(
+        &mut self,
+        hint: Option<&Ty>,
+        shape: &Ty,
+    ) -> Option<HashMap<String, Ty>> {
+        let h = hint?;
+        if !ty_fully_concrete(h) {
+            return None;
+        }
+        let mut w = HashMap::new();
+        unify(shape, h, &mut w);
+        Some(w)
     }
 
     /// The parameterized bounds whose type args are recovered by a dedicated extractor above
@@ -4871,6 +4900,7 @@ impl Checker {
             args,
             !targs.is_empty(),
             &mut subst_map,
+            None,
         );
         // Recover element types from parameterized `Iterator[T]` bounds (bind `T` to the iterand's
         // element), then enforce every declared bound against its inferred binding.
@@ -5252,6 +5282,7 @@ impl Checker {
             args,
             !targs.is_empty(),
             &mut mmap,
+            None,
         );
         // Recover element types from `Iterator[T]` bounds, then enforce every declared bound.
         self.recover_iter_elems(mtps, &mut mmap, span);
