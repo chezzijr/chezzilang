@@ -1823,7 +1823,9 @@ supervised tasks) — Go's float-free `go` is the model both ecosystems *rejecte
 > abort siblings by default.
 >
 > **TICKET-052 — a blocked job no longer pins its pool thread.** A job blocking on a `Channel`, a
-> `Shared`/`RwShared` guard, `time.sleep_ms`/a timer wait, or a nested `Executor`'s `shutdown()` join
+> `Shared`/`RwShared` guard, `time.sleep_ms`/a timer wait, a nested `Executor`'s `shutdown()` join, or
+> a nursery join whose child is blocked (TICKET-118, while the nursery has no running or runnable task
+> - a job whose nursery is busy keeps its slot, so `CHEZZI_THREADS=1` still runs one CPU runner)
 > now hands its pool thread to a freshly spawned replacement worker and RETIRES when the job ends, so
 > the live pool count stays at `worker_count()` plus the number of jobs blocked right now. Before this,
 > a bounded pool of K jobs plus one unblocker could hang forever at K >= pool size, including at the

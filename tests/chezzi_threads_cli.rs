@@ -328,6 +328,71 @@ fn threads_one_serializes_nested_eager_parallel_tasks() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// W8-8 residual (TICKET-118, W13-7) — a CPU-bound nursery INSIDE an `Executor` job's `parallel:`
+/// must not gain the joiner's pool slot as a second runner. `MnSched::joiner_step` gates the yield
+/// on `running == 0 && runnable == 0`; if that term were dropped, the marked joiner would yield
+/// while the job's own nursery is still burning CPU on the raw `chezzi-eager` drainer, handing the
+/// replacement worker the queued sibling `burn` job to run beside it. Measured on the debug binary
+/// (prototype, 2026-09-16): gated `real=2.902-2.951 user=2.897-2.951` (1.00 cores); with the
+/// running/runnable term replaced by `false`, `real=1.509-1.615 user=2.945-3.016` (1.86-1.95 cores).
+#[cfg(unix)]
+#[test]
+fn threads_one_serializes_a_cpu_bound_nursery_inside_an_executor_job() {
+    let dir = std::env::temp_dir().join(format!("chz-w13-7-burn-job-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+
+    let program = "import std.concurrency\n\
+        fn burn(n: int) -> int:\n    \
+            x := 0\n    \
+            for i in range(n):\n        \
+                x = (x + i * 7) % 1000003\n    \
+            return x\n\
+        fn job():\n    \
+            parallel:\n        \
+                spawn:\n            burn(75000)\n        \
+                spawn:\n            burn(75000)\n        \
+                spawn:\n            burn(75000)\n        \
+                spawn:\n            burn(75000)\n        \
+                spawn:\n            burn(75000)\n        \
+                spawn:\n            burn(75000)\n        \
+                spawn:\n            burn(75000)\n        \
+                spawn:\n            burn(75000)\n\
+        fn main():\n    \
+            ex := Executor()\n    \
+            ex.submit(fn(): job())\n    \
+            ex.submit(fn(): burn(600000))\n    \
+            ex.shutdown()\n    \
+            print(\"done\")\n\
+        main()\n";
+    let path = dir.join("burn.chz");
+    std::fs::write(&path, program).expect("write program");
+
+    for run in 0..SERIALIZATION_RUNS {
+        let (wall, user, sys, status, stdout) =
+            child_rusage::run_timed(&["run", path.to_str().unwrap()], "1");
+        assert!(
+            status.success(),
+            "chezzi run {path:?} failed (run {run}): {stdout}"
+        );
+        let cpu = user + sys;
+        assert!(
+            cpu > std::time::Duration::from_millis(900),
+            "program finished too fast (cpu={cpu:?}, run {run}) to be a meaningful measurement — \
+             recalibrate the burn size"
+        );
+        assert!(
+            cpu <= wall.mul_f64(MAX_CORES_AT_ONE_WORKER),
+            "--threads=1 must serialize a CPU-bound nursery inside an ex.submit job too (run {run}): \
+             cpu={cpu:?} wall={wall:?} (cpu must be <= wall * {MAX_CORES_AT_ONE_WORKER}). A second \
+             runner means the job's joiner handed its pool slot to a replacement that ran the queued \
+             `burn` job beside the `chezzi-eager` drainer (TICKET-118, the idle term in \
+             `MnSched::joiner_step`)."
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// C5's teeth: `std.cancel`'s "`done()` never fires before `cancelled()` flips" invariant is only
 /// OBSERVABLE at a worker count the two standing `tests/chz` runs don't cover. `_mark` used to
 /// `trip()` the done-channel before setting the cancel bit, so a task woken by a cascaded

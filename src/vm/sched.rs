@@ -1159,6 +1159,9 @@ impl Vm {
                 // (`activate_eager_nursery`'s reused-scope branch requires it), so there is no sched
                 // above this one to report to.
                 let _owner = self.blocked_owner_guard(&sched, None);
+                // TICKET-118 (W13-7) — only the top-level `Vm` (`mn.is_none()`) may hand its pool
+                // slot over while it waits here (DEC-052).
+                let _joiner = self.mn.is_none().then(|| sched.pool_joiner_guard());
                 // TICKET-103 — over the nursery's family: its continuation scopes hold the tasks
                 // spawned after a fiber registered a later scope on this sched.
                 for &s in &sids {
@@ -1189,6 +1192,9 @@ impl Vm {
             // inside a spawned task (`self.mn` is `Some(outer)`, so this fiber counts as blocked on
             // `outer` — the fiber that is join-blocked here can feed `outer`'s peer veto nothing).
             let _owner = self.blocked_owner_guard(&sched, None);
+            // TICKET-118 (W13-7) — only the top-level `Vm` (`mn.is_none()`) may hand its pool slot
+            // over while it waits here (DEC-052).
+            let _joiner = self.mn.is_none().then(|| sched.pool_joiner_guard());
             if eager_joiner_runs_fibers(worker_count()) {
                 shell.mn_worker_loop(&sched, 0, 0);
             }
@@ -2108,6 +2114,10 @@ impl Vm {
     /// TICKET-052 — hand this thread's pool slot to a replacement worker before blocking in place.
     /// A no-op on an M:N worker shell (`self.mn.is_some()`): those already compensate through
     /// [`Vm::demote_enter`], and yielding here too would spawn two replacements for one block.
+    /// TICKET-118 (W13-7) — a job's top-level `Vm` joining a nursery hands its slot over in
+    /// `MnSched::joiner_wait` and `MnSched::take_runnable` instead, marked by
+    /// `MnSched::pool_joiner_guard` and only while that sched has no running or runnable fiber; an
+    /// M:N shell still never yields.
     pub(super) fn yield_pool_slot(&self, budget: Option<std::time::Duration>) {
         if self.mn.is_some() {
             return;

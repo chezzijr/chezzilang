@@ -1344,6 +1344,32 @@ const CONNECT_BLOCK_TIMEOUT_SECS: u64 = 10;
 /// hang) and bounds how fast a demoted thread observes `terminate`/`cancel` (a sibling fault/deadlock).
 const DEMOTE_POLL_BACKOFF: std::time::Duration = std::time::Duration::from_millis(5);
 
+/// TICKET-118 (W13-7) — what a marked pool-slot joiner does on its next wait/park pass:
+/// `Untimed` (not the marked joiner, or its sched still has work), `Timed` (marked and idle, but
+/// under one `DEMOTE_POLL_BACKOFF` tick so far), or `Yield` (marked and idle for a full tick — hand
+/// the pool slot over).
+enum JoinerStep {
+    Untimed,
+    Timed,
+    Yield,
+}
+
+/// TICKET-118 (W13-7) — while held, `sched.core.pool_joiner` names this OS thread as the one
+/// eligible to hand its bounded-pool slot to a replacement while it waits idle on this sched's
+/// nursery join (DEC-052: only the top-level `Vm`, `mn.is_none()`, ever installs this). Restores
+/// the previous marker (usually `None`) on drop, so a nested join's guard does not clobber an outer
+/// one — though only the outermost `mn.is_none()` thread ever installs one in practice.
+pub(super) struct PoolJoinerGuard {
+    sched: Arc<MnSched>,
+    prev: Option<std::thread::ThreadId>,
+}
+
+impl Drop for PoolJoinerGuard {
+    fn drop(&mut self) {
+        self.sched.lock().pool_joiner = self.prev;
+    }
+}
+
 /// D5 owe #3 Path C (#3 socket half) — block the (replacement-covered) worker on `fd` until it is
 /// readable/writable per `interest` OR `timeout` elapses, then return. Used by [`Vm::demote_block_socket`]
 /// so an in-callback socket op that can't snapshot-park onto the netpoller still waits in the KERNEL
@@ -2303,6 +2329,10 @@ struct SchedCore {
     /// `local_quiesced`) must still see THIS sched as quiesced, or the child's own genuine deadlock is
     /// vetoed forever (the hang this ticket's cross-sched `blocked_owner_guard` widening fixes).
     cross_sched_blocked_owners: usize,
+    /// TICKET-118 (W13-7) — the OS thread of the top-level `Vm` (`mn.is_none()`) joining this
+    /// sched's nursery, the only thread that may hand its bounded-pool slot over while it waits
+    /// (DEC-052).
+    pool_joiner: Option<std::thread::ThreadId>,
     parked_n: usize, // total fibers across every `parked` bucket
     /// TICKET-103 — owners parked at the `JoinNursery` of a fiber-owned nursery (`Disp::JoinPark`),
     /// as `(origin scope id, fiber)`. In neither `running` nor `parked_n`. Woken by
@@ -2588,6 +2618,7 @@ impl MnSched {
                 running: 0,
                 blocked_owners: 0,
                 cross_sched_blocked_owners: 0,
+                pool_joiner: None,
                 parked_n: 0,
                 join_parked: Vec::new(),
                 scopes: vec![JoinScope {
@@ -2634,6 +2665,71 @@ impl MnSched {
             // gaps.md W7-58 — empty by default; both `MnSched` construction sites assign the run's
             // state. An empty one has no parties, so the judge below never fires.
             quiesce: Default::default(),
+        }
+    }
+
+    /// TICKET-118 (W13-7) — mark this OS thread as the one thread of THIS sched allowed to hand its
+    /// bounded-pool slot over while it waits idle on a nursery join. Restores the previous marker
+    /// (DEC-052: only ever installed by the top-level `Vm`, `mn.is_none()`) when the guard drops.
+    pub(super) fn pool_joiner_guard(self: &Arc<Self>) -> PoolJoinerGuard {
+        let prev = self.lock().pool_joiner.replace(std::thread::current().id());
+        PoolJoinerGuard {
+            sched: Arc::clone(self),
+            prev,
+        }
+    }
+
+    /// TICKET-118 (W13-7) — what the marked joiner (if this thread is one) should do on its next
+    /// wait/park pass. `idle_since` tracks how long `running`/`runnable` have both read zero;
+    /// resets to `None` the moment either is nonzero.
+    fn joiner_step(
+        &self,
+        c: &SchedCore,
+        idle_since: &mut Option<std::time::Instant>,
+    ) -> JoinerStep {
+        if c.pool_joiner.is_none()
+            || !crate::vm::pool::may_yield_slot()
+            || c.pool_joiner != Some(std::thread::current().id())
+        {
+            return JoinerStep::Untimed;
+        }
+        if c.running != 0 || self.runnable.load(Ordering::Relaxed) != 0 {
+            *idle_since = None;
+            return JoinerStep::Timed;
+        }
+        let now = std::time::Instant::now();
+        match *idle_since {
+            Some(t) if now.duration_since(t) >= DEMOTE_POLL_BACKOFF => JoinerStep::Yield,
+            Some(_) => JoinerStep::Timed,
+            None => {
+                *idle_since = Some(now);
+                JoinerStep::Timed
+            }
+        }
+    }
+
+    /// TICKET-118 (W13-7) — wait according to `step`: `Untimed` parks on `cv` with no deadline,
+    /// `Timed` parks for one `DEMOTE_POLL_BACKOFF` tick, `Yield` hands the pool slot to a
+    /// replacement (dropping the core lock first — `pool::yield_slot` must never run while holding
+    /// it) and re-locks.
+    fn joiner_wait<'a>(
+        &'a self,
+        c: std::sync::MutexGuard<'a, SchedCore>,
+        idle_since: &mut Option<std::time::Instant>,
+    ) -> std::sync::MutexGuard<'a, SchedCore> {
+        match self.joiner_step(&c, idle_since) {
+            JoinerStep::Untimed => self.cv.wait(c).unwrap_or_else(|e| e.into_inner()),
+            JoinerStep::Timed => {
+                self.cv
+                    .wait_timeout(c, DEMOTE_POLL_BACKOFF)
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0
+            }
+            JoinerStep::Yield => {
+                drop(c);
+                crate::vm::pool::yield_slot(None);
+                self.lock()
+            }
         }
     }
 
@@ -2948,6 +3044,7 @@ impl MnSched {
         // notify — they do not, which is why the idle wait below is BOUNDED whenever this is set (see
         // there). Cleared at every wait site.
         let mut judged = false;
+        let mut idle_since = None;
         loop {
             // 0. D4d — every `GLOBAL_CHECK_INTERVAL`th schedule, pull from the global queue FIRST
             //    (before own local / stealing). Without this a worker continuously refilled by
@@ -3150,6 +3247,27 @@ impl MnSched {
             // pays (`block_wait_tick`, `demote_recv_block`, `demote_block_socket`,
             // `block_until_deadline`), for the same reason: a lost wakeup then costs latency instead
             // of the whole run.
+            //
+            // TICKET-118 (W13-7) — only the marked joiner (`SchedCore::pool_joiner`) ever times or
+            // yields here; every other idle worker keeps its untimed/timed choice above unchanged.
+            match self.joiner_step(&c, &mut idle_since) {
+                JoinerStep::Untimed => {}
+                JoinerStep::Timed => {
+                    let (guard, _) = self
+                        .cv
+                        .wait_timeout(c, DEMOTE_POLL_BACKOFF)
+                        .unwrap_or_else(|e| e.into_inner());
+                    drop(guard);
+                    judged = false;
+                    continue;
+                }
+                JoinerStep::Yield => {
+                    drop(c);
+                    crate::vm::pool::yield_slot(None);
+                    judged = false;
+                    continue;
+                }
+            }
             if judged {
                 let (guard, _) = self
                     .cv
@@ -4039,8 +4157,9 @@ impl MnSched {
     /// still settling this scope's last fiber. Poison-tolerant.
     fn wait_for_scope(&self, scope_id: usize) {
         let mut c = self.lock();
+        let mut idle_since = None;
         while c.scopes[scope_id].done < c.scopes[scope_id].total {
-            c = self.cv.wait(c).unwrap_or_else(|e| e.into_inner());
+            c = self.joiner_wait(c, &mut idle_since);
         }
     }
 
@@ -4056,8 +4175,9 @@ impl MnSched {
     /// `done` strictly advances to `total`.
     fn wait_for_completion(&self) {
         let mut c = self.lock();
+        let mut idle_since = None;
         while c.any_scope_incomplete() {
-            c = self.cv.wait(c).unwrap_or_else(|e| e.into_inner());
+            c = self.joiner_wait(c, &mut idle_since);
         }
     }
 

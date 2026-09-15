@@ -106,16 +106,18 @@ pub(super) fn should_yield_slot(
     now.duration_since(t) >= b
 }
 
+/// Is this OS thread a pool job that still holds the slot it was spawned with.
+pub(super) fn may_yield_slot() -> bool {
+    ON_JOB.with(|c| c.get()) && SLOT.with(|c| c.get()) == Slot::Held
+}
+
 /// Called from inside a blocking-in-place wait on an eager job's OS thread. Returns `true` iff this
 /// call yielded the slot (spawned a replacement worker and marked `SLOT` `Yielded`); the caller does
 /// not otherwise change behaviour on the result — the thread still returns to its caller and blocks
 /// exactly as before, it just no longer holds the pool at `worker_count()` while doing so. A no-op
 /// (returns `false`) off a job (`ON_JOB` false) or once a job's slot has already left `Held`.
 pub(super) fn yield_slot(budget: Option<Duration>) -> bool {
-    if !ON_JOB.with(|c| c.get()) {
-        return false;
-    }
-    if SLOT.with(|c| c.get()) != Slot::Held {
+    if !may_yield_slot() {
         return false;
     }
     let now = Instant::now();
@@ -207,5 +209,10 @@ mod tests {
         let t0 = Instant::now();
         let budget = Duration::from_millis(5);
         assert!(!should_yield_slot(Some(t0), t0 + budget / 2, Some(budget)));
+    }
+
+    #[test]
+    fn off_a_job_the_slot_is_not_yieldable() {
+        assert!(!super::may_yield_slot());
     }
 }
