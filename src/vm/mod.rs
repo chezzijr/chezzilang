@@ -1284,6 +1284,11 @@ pub struct Vm {
     /// Experimental generators — handles of generators whose bodies are currently executing (LIFO).
     /// `collect` marks each so the generator object survives to have its state written back.
     active_generators: Vec<GcRef>,
+    /// W13-20 — the generator-side frames of a fault that propagated OUT of a `generator_next`
+    /// resume, waiting to be prepended to the DRIVER-side capture. Consumed exactly once, by the
+    /// dispatch loop's error arm. Deliberately absent from `FiberCtx`, `GenCtx`, `Vm::swap_ctx` and
+    /// `Vm::swap_gen_ctx`, for the same reason `gen_host_ctx` is: a fiber cannot park mid-resume.
+    gen_fault_prefix: Vec<TraceFrame>,
     /// D5 owe #3 (Path C) — this M:N worker shell's worker id (its `locals[wid]` slot), set at the top
     /// of [`Vm::mn_worker_loop`]. Read by [`Vm::demote_recv_block`] so a demoted worker's raw
     /// replacement thread reuses the same `wid` (safe: a demoted worker never touches `locals[wid]`

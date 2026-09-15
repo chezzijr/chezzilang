@@ -7518,6 +7518,69 @@ fn generator_fault_trace_includes_driver_frames() {
     assert_eq!(names, vec!["h", "g", "drive", "main"]);
 }
 
+/// W13-20: the other half of the merge-guard bug — a `for` loop driving the generator directly in
+/// `main` must keep `main`'s own frame instead of losing it to the generator's frames.
+#[test]
+fn generator_fault_trace_keeps_the_driver_when_main_drives() {
+    let src = "fn h() -> int:\n    xs: List[int] = []\n    return xs[3]\nfn g():\n    yield h()\nfn main():\n    for x in g():\n        print(x)\nmain()\n";
+    let dir = std::env::temp_dir().join("chezzi_gen_trace_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("y18.chz");
+    std::fs::write(&path, src).unwrap();
+    let (_out, _err, res, _) = run_file(&path);
+    let e = res.expect_err("program should fault");
+    assert_eq!(e.message, "index 3 out of bounds (len 0)");
+    let names: Vec<&str> = e.trace.iter().map(|f| f.function.as_str()).collect();
+    assert_eq!(names, vec!["h", "g", "main"]);
+}
+
+/// W13-20: the explicit `.next()` driver path (`src/vm/call.rs`) must merge the same way as the
+/// `for`-loop driver path (`src/vm/stmt.rs`).
+#[test]
+fn generator_fault_trace_includes_driver_frames_for_explicit_next() {
+    let src = "fn h() -> int:\n    xs: List[int] = []\n    return xs[3]\nfn g():\n    yield h()\nfn drive():\n    it := g()\n    print(it.next())\nfn main():\n    drive()\nmain()\n";
+    let dir = std::env::temp_dir().join("chezzi_gen_trace_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("u09.chz");
+    std::fs::write(&path, src).unwrap();
+    let (_out, _err, res, _) = run_file(&path);
+    let e = res.expect_err("program should fault");
+    assert_eq!(e.message, "index 3 out of bounds (len 0)");
+    let names: Vec<&str> = e.trace.iter().map(|f| f.function.as_str()).collect();
+    assert_eq!(names, vec!["h", "g", "drive", "main"]);
+}
+
+/// W13-20: a generator driving another generator must report every frame in the chain.
+#[test]
+fn nested_generator_fault_trace_lists_every_frame() {
+    let src = "fn h() -> int:\n    xs: List[int] = []\n    return xs[3]\nfn inner():\n    yield h()\nfn outer():\n    for v in inner():\n        yield v\nfn drive():\n    for x in outer():\n        print(x)\nfn main():\n    drive()\nmain()\n";
+    let dir = std::env::temp_dir().join("chezzi_gen_trace_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("nested.chz");
+    std::fs::write(&path, src).unwrap();
+    let (_out, _err, res, _) = run_file(&path);
+    let e = res.expect_err("program should fault");
+    assert_eq!(e.message, "index 3 out of bounds (len 0)");
+    let names: Vec<&str> = e.trace.iter().map(|f| f.function.as_str()).collect();
+    assert_eq!(names, vec!["h", "inner", "outer", "drive", "main"]);
+}
+
+/// W13-20 guard: a generator fault CAUGHT by the driver's own `recover:` must not leave a stale
+/// prefix behind to decorate a later, unrelated fault.
+#[test]
+fn a_generator_fault_caught_by_the_driver_leaves_no_frames_behind() {
+    let src = "fn h() -> int:\n    xs: List[int] = []\n    return xs[3]\nfn g():\n    yield h()\nfn drive() -> int:\n    r := recover:\n        for x in g():\n            print(x)\n    print(\"caught\")\n    ys: List[int] = []\n    return ys[7]\nfn main():\n    print(drive())\nmain()\n";
+    let dir = std::env::temp_dir().join("chezzi_gen_trace_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("caught.chz");
+    std::fs::write(&path, src).unwrap();
+    let (_out, _err, res, _) = run_file(&path);
+    let e = res.expect_err("program should fault");
+    assert_eq!(e.message, "index 7 out of bounds (len 0)");
+    let names: Vec<&str> = e.trace.iter().map(|f| f.function.as_str()).collect();
+    assert_eq!(names, vec!["drive", "main"]);
+}
+
 /// Helper: write deep-infinite-recursion source to a temp file and return its path. The recursion
 /// hits `MAX_CALL_DEPTH` → a `recursion limit exceeded` fault with a ~10_000-frame raw trace.
 #[cfg(test)]

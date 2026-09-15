@@ -157,6 +157,7 @@ impl Vm {
             gen_yielding: false, // experimental generators
             gen_host_ctx: Vec::new(),
             active_generators: Vec::new(),
+            gen_fault_prefix: Vec::new(),
             wid: 0,         // D5 owe #3 (Path C) — set in mn_worker_loop
             demoted: false, // D5 owe #3 (Path C)
             cancel: None,
@@ -558,6 +559,14 @@ impl Vm {
         for hd in &mut self.handlers {
             hd.nursery_len = floor;
         }
+        // W13-20 — give this resume its OWN fault latch. `fault_trace_depth` is a frame COUNT, and
+        // the generator's private `frames` (just swapped in above) is a different stack than the
+        // driver's, so comparing a generator-side count against the restored driver frame count
+        // compares two different stacks. Park the host's latch and start the generator on an empty
+        // one; on `Err` the generator's own capture becomes a PREFIX the driver-side capture
+        // prepends, instead of a value the merge guard compares against the wrong stack.
+        let host_trace = self.fault_trace.take();
+        let host_trace_depth = std::mem::replace(&mut self.fault_trace_depth, 0);
         self.gen_host_ctx.push(host);
         self.active_generators.push(h);
 
@@ -583,6 +592,16 @@ impl Vm {
         self.swap_gen_ctx(&mut host); // self.* = host restored
         self.active_generators.pop();
         let _ = first_call;
+
+        // Pull the generator's own capture back out and restore the host's latch. On `Err` the
+        // generator's frames become the prefix the driver-side capture (in the dispatch loop's
+        // error arm) prepends to.
+        let gen_trace = self.fault_trace.take();
+        self.fault_trace = host_trace;
+        self.fault_trace_depth = host_trace_depth;
+        if run.is_err() {
+            self.gen_fault_prefix = gen_trace.unwrap_or_default();
+        }
 
         // A fault inside the generator: leave it `Done` (already set) with an empty ctx, propagate.
         run?;
@@ -687,6 +706,7 @@ impl Vm {
         self.arm_deadline();
         self.fault_trace = None;
         self.fault_trace_depth = 0;
+        self.gen_fault_prefix.clear();
     }
 
     /// Bare `chezzi run` with a `module:function` manifest entrypoint — invoke a named top-level
@@ -1414,6 +1434,12 @@ impl Vm {
                 // no handler above `base_level` the fault returns `Err` either way. It is kept because
                 // it preserves the bypass in MORE cases (a cancelled task is more likely to die), which
                 // is the safe direction. Do not "simplify" it away without re-deriving that.
+                // W13-20 — take the parked generator prefix UNCONDITIONALLY, above the bypass block
+                // and the capture below. The prefix must be consumed exactly once per fault: a fault
+                // this level CATCHES, or that leaves via the cancel / `--max-heap` / `--timeout`
+                // bypass just below, drops it here instead of surviving to decorate an unrelated
+                // later fault.
+                let gen_prefix = std::mem::take(&mut self.gen_fault_prefix);
                 let caught_here =
                     matches!(self.handlers.last().copied(), Some(h) if h.frame_len > base_level);
                 let cancel_bypass = self.cancelled && !(self.deferring > 0 && caught_here);
@@ -1444,7 +1470,9 @@ impl Vm {
                 // it. A fault this loop CAN catch resets the capture below, so no stale trace survives
                 // a `recover:`.
                 if !caught_here && self.frames.len() > self.fault_trace_depth {
-                    self.fault_trace = Some(self.capture_trace());
+                    let mut trace = gen_prefix;
+                    trace.extend(self.capture_trace());
+                    self.fault_trace = Some(trace);
                     self.fault_trace_depth = self.frames.len();
                 }
                 // The nearest `recover:` boundary owned by THIS dispatch loop catches the fault; a
