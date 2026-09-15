@@ -358,6 +358,12 @@ where
 /// ([`pool`]) is a `OnceLock` created lazily on first use, so a later store would not resize it.
 static WORKER_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
 
+/// TICKET-126 — counts calls to [`SchedCore::cancelled_scope_awaiting_drain`], the O(scopes) idle-path
+/// scan TICKET-118 added. Test-only instrumentation for a proxy that a cancel-generation guard should
+/// gate this scan on, rather than re-running it on every idle pass.
+#[cfg(test)]
+static CANCEL_SCAN_CALLS: AtomicUsize = AtomicUsize::new(0);
+
 /// A process-wide lock serializing every test that WRITES [`WORKER_OVERRIDE`]. The override is
 /// process-global and the harness runs tests on multiple threads, so an unguarded store would change
 /// the worker count under every concurrent parallel test. Same shape and same reason as
@@ -2504,6 +2510,8 @@ impl SchedCore {
     /// drains it before judging a deadlock; every other caller reads the own-flag-only
     /// `any_cancelled_scope_awaiting_drain` above.
     fn cancelled_scope_awaiting_drain(&self) -> Option<usize> {
+        #[cfg(test)]
+        CANCEL_SCAN_CALLS.fetch_add(1, Ordering::Relaxed);
         (0..self.scopes.len()).find(|&sid| {
             let s = &self.scopes[sid];
             s.done < s.total && self.scope_cancel_tripped(sid) && self.scope_has_undrained_park(sid)

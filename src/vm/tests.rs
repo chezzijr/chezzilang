@@ -20953,3 +20953,60 @@ fn caught_error_carries_the_fault_origin_span() {
     let src = "fn boom() -> int!:\n    xs := [1]\n    return Ok(xs[9])\nfn main():\n    r := recover: boom()\n    match r:\n        Ok(v): print(v)\n        Err(e):\n            print(e.line())\n            print(e.col())\nmain()\n";
     assert_eq!(run(src), "Some(3)\nSome(15)\n");
 }
+
+/// TICKET-126 (W13-24) — TICKET-118 added `SchedCore::cancelled_scope_awaiting_drain` to the idle
+/// path of `take_runnable`, called on every idle pass that reaches it regardless of whether any
+/// cancel has EVER been tripped. A channel ping-pong with no cancel at all still pays that scan on
+/// every idle cycle of every idle worker, which is the measured 17.9% regression at the default
+/// worker count. A cancel-generation guard (checked before the scan) should make the scan count stay
+/// small and roughly proportional to the number of `send`/`recv` round trips, not to the number of
+/// idle passes forced by a larger worker pool.
+///
+/// Forces `worker_count(8)` so idle workers vastly outnumber the two real tasks, magnifying the idle
+/// scan cost the same way the filed measurement's 28-core default pool did.
+#[test]
+fn ticket126_idle_cancel_scan_is_not_paid_when_no_cancel_ever_trips() {
+    struct Workers(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+    impl Drop for Workers {
+        fn drop(&mut self) {
+            crate::vm::set_worker_count(crate::vm::test_baseline_worker_count());
+        }
+    }
+    let _workers = Workers(
+        crate::vm::TEST_WORKER_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+    );
+    crate::vm::set_worker_count(8);
+
+    crate::vm::CANCEL_SCAN_CALLS.store(0, Ordering::Relaxed);
+    let src = "\
+fn pp():
+    ping := Channel[int](0)
+    pong := Channel[int](0)
+    parallel:
+        spawn:
+            i := 0
+            while i < 2000:
+                ping.send(i)
+                n := pong.recv()
+                i = i + 1
+        spawn:
+            i := 0
+            while i < 2000:
+                v := ping.recv()
+                pong.send(v)
+                i = i + 1
+fn main():
+    pp()
+    print(\"done\")
+main()
+";
+    assert_eq!(run(src), "done\n");
+    let scans = crate::vm::CANCEL_SCAN_CALLS.load(Ordering::Relaxed);
+    assert!(
+        scans < 4000,
+        "idle cancel-drain scan ran {scans} times for 2000 round trips with no cancel ever \
+         tripped — it must be gated by a cancel-generation check, not re-run on every idle pass"
+    );
+}
