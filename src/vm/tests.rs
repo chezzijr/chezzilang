@@ -17959,6 +17959,87 @@ main()
     );
 }
 
+/// TICKET-119 -- same shape as `airlock_deep_module_global_depth_fault_is_not_quadratic`, but each
+/// node also carries a `List[int]` payload, to prove the skip does not depend on the node carrying no
+/// other heap data.
+#[test]
+fn airlock_deep_module_global_with_a_payload_at_every_level_is_not_quadratic() {
+    let src = "\
+struct N:
+    tag: List[int]
+    next: Option[N]
+fn mk() -> N:
+    head := N([1], None)
+    cur := head
+    for i in range(5000):
+        n := N([i], None)
+        cur.next = Some(n)
+        cur = n
+    return head
+gl: N = mk()
+fn main():
+    r := recover:
+        parallel:
+            spawn:
+                print(\"crossed\")
+        0
+    match r:
+        Ok(v): print(\"ok\")
+        Err(e): print(\"err: {e.message()}\")
+main()
+";
+    let t = std::time::Instant::now();
+    let out = run(src);
+    let el = t.elapsed();
+    assert_eq!(
+        out,
+        "err: maximum structural depth (10000) exceeded (cyclic data structure?)\n"
+    );
+    assert!(
+        el < std::time::Duration::from_secs(5),
+        "a 5000-deep module global carrying a payload at every level took {el:?} to reach the depth \
+         fault (>5s ceiling) -- O(depth^2) regression in the module-snapshot failure path"
+    );
+}
+
+/// TICKET-119 -- same shape, but the chain is 6000 nested closures rather than a struct chain, to
+/// prove a doom record comes from the `Err` unwind of `to_wire_depth`, not from `memo.path` (a `Cell`
+/// is never on `path`).
+#[test]
+fn airlock_deep_module_global_of_nested_closures_is_not_quadratic() {
+    let src = "\
+fn mk(k: int) -> fn() -> int:
+    f := fn() -> int: 0
+    for i in range(k):
+        inner := f
+        f = fn() -> int: inner() + 1
+    return f
+gl: fn() -> int = mk(6000)
+fn main():
+    r := recover:
+        parallel:
+            spawn:
+                print(\"crossed\")
+        0
+    match r:
+        Ok(v): print(\"ok\")
+        Err(e): print(\"err: {e.message()}\")
+main()
+";
+    let t = std::time::Instant::now();
+    let out = run(src);
+    let el = t.elapsed();
+    assert_eq!(
+        out,
+        "err: maximum structural depth (10000) exceeded (cyclic data structure?)\n"
+    );
+    assert!(
+        el < std::time::Duration::from_secs(5),
+        "a 6000-deep nested-closure module global took {el:?} to reach the depth fault (>5s ceiling) \
+         -- O(depth^2) regression in the module-snapshot failure path"
+    );
+}
+
 /// W7-4 memory-safety lock for the module-scoped REBUILD MAP: `fault_module` now keeps one wire-`id`
 /// → `GcRef` map alive ACROSS the whole `module_define` loop (so two globals over one captured local
 /// rebuild ONE cell). A `GcRef` parked in that map between globals must stay rooted — if it did not, a
