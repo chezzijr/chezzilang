@@ -18040,6 +18040,187 @@ main()
     );
 }
 
+/// TICKET-119 review finding -- the first doomed-skip design (`(node, shallowest depth)` alone,
+/// dropped) is unsound: a KEPT sibling speculative attempt mints `m`, a node inside a doomed walk. A
+/// later deep reach of `h` skips its own attempt, so the slow arms never Backref `m`, and the walk
+/// runs past the cap. This program crosses on base (`crossed`/`ok`); the unsound skip faulted it with
+/// the depth-exceeded error instead. `holder.x` reaches `h`'s 1000th descendant `m` directly at depth
+/// 1 and mints it; `holder.y` then reaches `h` itself at a much deeper depth, doomed by the
+/// generator's earlier depth-tripped attempt.
+#[test]
+fn airlock_doomed_skip_keeps_a_sibling_backref_and_the_program_crosses() {
+    let dir = std::env::temp_dir().join(format!("chezzi_vm_t119_review_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("k.chz"), "V := 41\n").unwrap();
+    let entry = dir.join("main.chz");
+    let src = "import k\nstruct N:\n    next: Option[N]\nstruct Last:\n    count: fn() -> int\n    tail: N\nstruct P:\n    next: Option[P]\n    last: Option[Last]\nstruct Holder:\n    gen: Iterator[int]\n    x: N\n    y: P\nfn make() -> fn() -> int:\n    p := [k]\n    fn count() -> int:\n        return p.len()\n    return count\nfn mk(k: int) -> N:\n    head := N(None)\n    cur := head\n    for i in range(k):\n        n := N(None)\n        cur.next = Some(n)\n        cur = n\n    return head\nfn chain_to(k: int, tail: N) -> N:\n    head := N(None)\n    cur := head\n    for i in range(k):\n        n := N(None)\n        cur.next = Some(n)\n        cur = n\n    cur.next = Some(tail)\n    return head\nfn nth(h: N, i: int) -> N:\n    cur := h\n    for j in range(i):\n        match cur.next:\n            Some(n): cur = n\n            None: return cur\n    return cur\nfn drive(deep: N) -> Iterator[int]:\n    yield 1\n    match deep.next:\n        Some(n): yield 2\n        None: yield 0\nfn build() -> Holder:\n    h := mk(3000)\n    y := P(None, Some(Last(make(), h)))\n    for i in range(2600):\n        y = P(Some(y), None)\n    return Holder(drive(chain_to(2500, h)), nth(h, 1000), y)\nholder: Holder = build()\nstarted := holder.gen.next()\nfn main():\n    r := recover:\n        parallel:\n            spawn:\n                print(\"crossed\")\n        0\n    match r:\n        Ok(v): print(\"ok\")\n        Err(e): print(\"err: {e.message()}\")\nmain()\n";
+    std::fs::write(&entry, src).unwrap();
+    let (vm_out, _e, vm_res, _) = run_file(&entry);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(vm_res.is_ok(), "unexpected top-level fault: {vm_res:?}");
+    assert_eq!(
+        vm_out, "crossed\nok\n",
+        "a doomed-attempt skip lost a sibling's Backref and faulted a program that must cross"
+    );
+}
+
+/// TICKET-119 review finding -- the same unsound design also fails on a cycle: the recording attempt
+/// Backrefs `z` because `z` is on its `path`, but `w`'s own attempt lacks that state, re-enters `z` by
+/// a shorter route and is kept. Skipping `w` loops the slow arms.
+#[test]
+fn airlock_cyclic_module_global_with_a_shorter_reentry_still_crosses() {
+    let src = "\
+struct G:
+    a: Option[G]
+    b: Option[G]
+fn build() -> G:
+    r := G(None, None)
+    z := G(None, None)
+    w := G(None, None)
+    h := G(None, None)
+    y := G(None, None)
+    cur := y
+    for i in range(4950):
+        n := G(None, None)
+        cur.a = Some(n)
+        cur = n
+    r.a = Some(z)
+    z.a = Some(w)
+    z.b = Some(y)
+    w.a = Some(h)
+    h.a = Some(z)
+    a1 := G(None, None)
+    h.b = Some(a1)
+    p := a1
+    for i in range(50):
+        q := G(None, None)
+        p.a = Some(q)
+        p = q
+    p.a = Some(y)
+    return r
+gl: G = build()
+fn main():
+    r := recover:
+        parallel:
+            spawn:
+                print(\"crossed\")
+        0
+    match r:
+        Ok(v): print(\"ok\")
+        Err(e): print(\"err: {e.message()}\")
+main()
+";
+    assert_eq!(run(src), "crossed\nok\n");
+}
+
+/// TICKET-119 -- a doomed-skip's `depth >= d0` comparison must honour the depth the doom was recorded
+/// at: `holder.a` and `holder.b` alias the SAME `N` chain `h`, but the generator's own depth-tripped
+/// attempt records `h`'s tail at a much deeper depth than either field reaches it at, so neither
+/// field's attempt is skipped and both cross clean, sharing identity through the mutation.
+#[test]
+fn airlock_module_global_skip_honours_the_depth_the_doom_was_recorded_at() {
+    let src = "\
+struct N:
+    tag: List[int]
+    next: Option[N]
+struct Holder:
+    gen: Iterator[int]
+    a: N
+    b: N
+fn mk(k: int) -> N:
+    head := N([1], None)
+    cur := head
+    for i in range(k):
+        n := N([i], None)
+        cur.next = Some(n)
+        cur = n
+    return head
+fn chain_to(k: int, tail: N) -> N:
+    head := N([0], None)
+    cur := head
+    for i in range(k):
+        n := N([i], None)
+        cur.next = Some(n)
+        cur = n
+    cur.next = Some(tail)
+    return head
+fn drive(deep: N) -> Iterator[int]:
+    yield 1
+    yield deep.tag.len()
+fn build() -> Holder:
+    h := mk(3000)
+    return Holder(drive(chain_to(2500, h)), h, h)
+holder: Holder = build()
+started := holder.gen.next()
+fn main():
+    parallel:
+        spawn:
+            holder.a.tag.push(9)
+            print(\"{holder.b.tag.len()}\")
+main()
+";
+    assert_eq!(run(src), "2\n");
+}
+
+/// TICKET-119 -- a module global just under `MAX_STRUCTURAL_DEPTH` must still cross without ever
+/// hitting the depth-tripped recording path at all.
+#[test]
+fn airlock_module_global_just_under_the_depth_cap_still_crosses() {
+    let src = "\
+struct N:
+    next: Option[N]
+fn mk() -> N:
+    head := N(None)
+    cur := head
+    for i in range(4500):
+        n := N(None)
+        cur.next = Some(n)
+        cur = n
+    return head
+gl: N = mk()
+fn main():
+    r := recover:
+        parallel:
+            spawn:
+                print(\"crossed\")
+        0
+    match r:
+        Ok(v): print(\"ok\")
+        Err(e): print(\"err: {e.message()}\")
+main()
+";
+    assert_eq!(run(src), "crossed\nok\n");
+}
+
+/// TICKET-119 -- DEC-100 identity lock: a deep module global aliased through two `List[int]` bindings
+/// must still cross as ONE object even when a doomed-skip decision fires along the way.
+#[test]
+fn airlock_deep_module_global_alias_still_crosses_as_one_object() {
+    let src = "\
+struct N:
+    next: Option[N]
+fn mk(k: int) -> N:
+    head := N(None)
+    cur := head
+    for i in range(k):
+        n := N(None)
+        cur.next = Some(n)
+        cur = n
+    return head
+shared: List[int] = [1]
+a: List[int] = shared
+b: List[int] = shared
+gl: N = mk(4000)
+fn main():
+    parallel:
+        spawn:
+            a.push(2)
+            print(\"{b.len()} {gl.next != None}\")
+main()
+";
+    assert_eq!(run(src), "2 true\n");
+}
+
 /// W7-4 memory-safety lock for the module-scoped REBUILD MAP: `fault_module` now keeps one wire-`id`
 /// → `GcRef` map alive ACROSS the whole `module_define` loop (so two globals over one captured local
 /// rebuild ONE cell). A `GcRef` parked in that map between globals must stay rooted — if it did not, a
