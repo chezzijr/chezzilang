@@ -1086,7 +1086,7 @@ impl Checker {
         // method's own `[U]` params. Seed each from its respective turbofish, then infer the rest by
         // unifying the declared param types (which may carry either set of `Ty::Param`s) against the
         // argument types — exactly like the struct/newtype ctor + a generic free fn.
-        let arg_tys = self.infer_generic_arg_tys(args, &sig.params, true);
+        let arg_tys = self.infer_generic_arg_tys(args, &sig.params, true, &[]);
         if arg_tys.len() != sig.params.len() {
             self.check_arity(method, sig.params.len(), args, span);
         }
@@ -1207,7 +1207,14 @@ impl Checker {
         // given, else are inferred by unifying the variant's declared payload types (which contain
         // the enum's `Ty::Param`s) against the argument types, then check each argument against the
         // substituted payload.
-        let mut arg_tys = self.infer_generic_arg_tys(args, &v.payload, false);
+        let hints = self.ctor_arg_hints(
+            hint,
+            &Ty::Enum(v.enum_name.clone(), param_shape(&tps)),
+            &tps,
+            &v.payload,
+            targs,
+        );
+        let mut arg_tys = self.infer_generic_arg_tys(args, &v.payload, false, &hints);
         if arg_tys.len() != v.payload.len() {
             self.check_arity(name, v.payload.len(), args, span);
         }
@@ -1285,7 +1292,14 @@ impl Checker {
             self.check_args_w(name, &field_tys, args, span);
             return Ty::strukt(key.to_string());
         }
-        let mut arg_tys = self.infer_generic_arg_tys(args, &field_tys, true);
+        let hints = self.ctor_arg_hints(
+            hint,
+            &Ty::Struct(key.to_string(), param_shape(&tps)),
+            &tps,
+            &field_tys,
+            targs,
+        );
+        let mut arg_tys = self.infer_generic_arg_tys(args, &field_tys, true, &hints);
         self.check_ctor_arity(
             name,
             &tps,
@@ -1373,7 +1387,8 @@ impl Checker {
             self.check_args(name, std::slice::from_ref(underlying), args, span);
             return Ty::NewType(key.to_string(), Vec::new());
         }
-        let arg_tys = self.infer_generic_arg_tys(args, std::slice::from_ref(underlying), false);
+        let arg_tys =
+            self.infer_generic_arg_tys(args, std::slice::from_ref(underlying), false, &[]);
         if arg_tys.len() != 1 {
             self.check_arity(name, 1, args, span);
         }
@@ -2103,13 +2118,29 @@ impl Checker {
                 if args.is_empty() {
                     Ty::Nil
                 } else {
-                    self.one_arg(name, args, span)
+                    let h = hint.and_then(|h| match h {
+                        Ty::Result(t, _) => Some((**t).clone()),
+                        _ => None,
+                    });
+                    self.one_arg_hinted(name, args, span, h.as_ref())
                 },
                 Ty::Unknown,
             )),
-            "Some" => Some(Ty::option(self.one_arg(name, args, span))),
+            "Some" => Some(Ty::option({
+                let h = hint.and_then(|h| match h {
+                    Ty::Option(t) => Some((**t).clone()),
+                    _ => None,
+                });
+                self.one_arg_hinted(name, args, span, h.as_ref())
+            })),
             // `Err(x)`: error type known (`typeof x`), success type open.
-            "Err" => Some(Ty::result_e(Ty::Unknown, self.one_arg(name, args, span))),
+            "Err" => Some(Ty::result_e(Ty::Unknown, {
+                let h = hint.and_then(|h| match h {
+                    Ty::Result(_, e) => Some((**e).clone()),
+                    _ => None,
+                });
+                self.one_arg_hinted(name, args, span, h.as_ref())
+            })),
             _ => {
                 // Newtype constructor? `UserId(x)` — one arg of the underlying type, returns the
                 // newtype. Mirrors the single-field struct ctor; only a BARE-resolvable newtype. A
@@ -2194,7 +2225,14 @@ impl Checker {
                     // Generic struct: type arguments come from explicit call-site args (`S[int](…)`)
                     // when given, else are inferred by unifying the declared field types (which
                     // contain the struct's `Ty::Param`s) against the argument types.
-                    let mut arg_tys = self.infer_generic_arg_tys(args, &field_tys, true);
+                    let hints = self.ctor_arg_hints(
+                        hint,
+                        &Ty::Struct(key.clone(), param_shape(&tps)),
+                        &tps,
+                        &field_tys,
+                        targs,
+                    );
+                    let mut arg_tys = self.infer_generic_arg_tys(args, &field_tys, true, &hints);
                     self.check_ctor_arity(name, &tps, &fields, &defaulted, targs, args, span);
                     let mut sub = self.seed_targs(name, &tps, targs, span);
                     for (decl, actual) in field_tys.iter().zip(&arg_tys) {
@@ -3958,6 +3996,26 @@ impl Checker {
             .unwrap_or(Ty::Unknown)
     }
 
+    /// TICKET-124 (W13-13): like [`Checker::one_arg`], but reaches a `ty_fully_concrete` expected
+    /// type into the single argument (`Some`/`Ok`/`Err`'s payload), so `Some([A()])` under an
+    /// `Option[List[Named]]` hint infers the list literal's elements as `Named`, not `A`.
+    pub(super) fn one_arg_hinted(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        span: Span,
+        h: Option<&Ty>,
+    ) -> Ty {
+        self.check_arity(name, 1, args, span);
+        let Some(a) = args.first() else {
+            return Ty::Unknown;
+        };
+        match h {
+            Some(t) if ty_fully_concrete(t) => self.infer_arg(a, Some(t)),
+            _ => self.infer_value(a),
+        }
+    }
+
     pub(super) fn infer_all(&mut self, args: &[Expr]) {
         for a in args {
             self.infer_value(a);
@@ -4031,6 +4089,7 @@ impl Checker {
         args: &[Expr],
         declared: &[Ty],
         widen: bool,
+        arg_hints: &[Option<Ty>],
     ) -> Vec<Ty> {
         // The "this read is re-pinned afterwards" licence ([`Checker::generic_fn_value_prepass`],
         // set by the two callers that DO re-pin) belongs to the IMMEDIATE bare-identifier arguments
@@ -4074,6 +4133,12 @@ impl Checker {
                     let t = self.infer_arg(a, Some(d));
                     self.float_elem_hint = None;
                     t
+                } else if let Some(Some(h)) = arg_hints.get(i) {
+                    // TICKET-124 (W13-13): the declared slot is a bare/under-determined type
+                    // param, but the CTOR's own expected-type hint pinned this argument's type
+                    // concretely — reach the hint into the nested argument instead of stopping at
+                    // the outermost ctor.
+                    self.infer_arg(a, Some(h))
                 } else {
                     self.infer_value(a)
                 }

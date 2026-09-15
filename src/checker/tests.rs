@@ -32399,6 +32399,56 @@ fn nested_generic_ctor_widens_at_declared_protocol_type() {
     );
 }
 
+const NESTED_CTOR_HINT_PRELUDE: &str = "protocol Named:\n    fn name(self) -> str\n\nstruct A:\n    fn name(self) -> str:\n        return \"a\"\n\nstruct Box[T]:\n    v: T\n\nstruct Bag[T]:\n    items: List[T]\n\n";
+
+#[test]
+fn nested_ctor_hint_neighbours_accept() {
+    ok(&format!(
+        "{NESTED_CTOR_HINT_PRELUDE}fn main():\n    bb2: Box[Box[Named]] = Box[Box[Named]](Box(A()))\n    print(bb2)\n"
+    ));
+    ok(&format!(
+        "{NESTED_CTOR_HINT_PRELUDE}fn main():\n    t: (Box[Named], int) = (Box(A()), 1)\n    print(t)\n"
+    ));
+    ok(&format!(
+        "{NESTED_CTOR_HINT_PRELUDE}fn main():\n    o: Option[List[Named]] = Some([A()])\n    print(o)\n"
+    ));
+    ok(&format!(
+        "{NESTED_CTOR_HINT_PRELUDE}fn main():\n    c: Box[List[Named]] = Box([A()])\n    print(c)\n"
+    ));
+    ok(&format!(
+        "{NESTED_CTOR_HINT_PRELUDE}fn main():\n    r: Result[Box[Named], str] = Ok(Box(A()))\n    print(r)\n"
+    ));
+    ok(&format!(
+        "{NESTED_CTOR_HINT_PRELUDE}fn mk() -> Box[Box[Named]]:\n    return Box(Box(A()))\n\nfn main():\n    print(mk())\n"
+    ));
+    ok(&format!(
+        "{NESTED_CTOR_HINT_PRELUDE}fn tk(b: Box[Box[Named]]) -> int:\n    return 1\n\nfn main():\n    print(tk(Box(Box(A()))))\n"
+    ));
+    ok(&format!(
+        "{NESTED_CTOR_HINT_PRELUDE}fn main():\n    g: Bag[Named] = Bag([A()])\n    print(g)\n"
+    ));
+}
+
+#[test]
+fn nested_ctor_hint_keeps_invariance() {
+    rejects(
+        &format!(
+            "{NESTED_CTOR_HINT_PRELUDE}fn main():\n    b := Box(A())\n    bb: Box[Box[Named]] = Box(b)\n    print(bb)\n"
+        ),
+        "cannot assign Box[Box[A]] to variable of type Box[Box[Named]]",
+    );
+    rejects(
+        &format!(
+            "{NESTED_CTOR_HINT_PRELUDE}fn main():\n    zs := [A()]\n    g: Bag[Named] = Bag(zs)\n    print(g)\n"
+        ),
+        "cannot assign Bag[A] to variable of type Bag[Named]",
+    );
+    rejects(
+        "fn main():\n    o: float? = Some(1)\n    print(o)\n",
+        "cannot assign Option[int] to variable of type Option[float]",
+    );
+}
+
 #[test]
 fn reassignment_widens_at_declared_protocol_type() {
     ok(

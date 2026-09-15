@@ -3868,6 +3868,40 @@ impl Checker {
         sub
     }
 
+    /// TICKET-124 (W13-13): a per-argument expected-type hint for a generic ctor/variant call, so
+    /// the expected type reaches a NESTED ctor argument too (`Box[Box[Named]] = Box(Box(A()))`),
+    /// not only the outermost one. The seed is the turbofish binding when explicit type args were
+    /// given, else the annotation's binding via [`Self::hint_want`]; a decl whose substitution under
+    /// that seed is `ty_fully_concrete` gets that hint, else `None` (an under-determined slot keeps
+    /// its ordinary bottom-up inference).
+    pub(super) fn ctor_arg_hints(
+        &mut self,
+        hint: Option<&Ty>,
+        shape: &Ty,
+        tps: &[TypeParam],
+        decls: &[Ty],
+        targs: &[Ty],
+    ) -> Vec<Option<Ty>> {
+        let seed = if !targs.is_empty() {
+            tps.iter()
+                .zip(targs)
+                .map(|(tp, ta)| (tp.name.clone(), ta.clone()))
+                .collect()
+        } else {
+            match self.hint_want(hint, shape) {
+                Some(w) => w,
+                None => return Vec::new(),
+            }
+        };
+        decls
+            .iter()
+            .map(|d| {
+                let s = subst(d, &seed);
+                ty_fully_concrete(&s).then_some(s)
+            })
+            .collect()
+    }
+
     /// Recover element types from parameterized `Iterator[T]` / `Iterable[T]` bounds: for each type
     /// param already bound to a concrete iterand in `sub`, bind the bound's element arg `T` to the
     /// iterand's element type. Mutates `sub` (collects first to avoid borrowing it while iterating).
@@ -4813,7 +4847,7 @@ impl Checker {
         // `infer_generic_arg_tys` — its ctor callers pin nothing afterwards, so there the read IS
         // final. The helper scopes what is set here to the immediate bare-identifier arguments.
         let saved = std::mem::replace(&mut self.generic_fn_value_prepass, true);
-        let mut arg_tys = self.infer_generic_arg_tys(args, &sig.params, true);
+        let mut arg_tys = self.infer_generic_arg_tys(args, &sig.params, true, &[]);
         self.generic_fn_value_prepass = saved;
         // Explicit call-site type arguments (`max[int](…)`) seed the substitution; remaining (or
         // all, when none given) parameters are inferred from positional arguments. `unify` only
@@ -5203,7 +5237,7 @@ impl Checker {
         // arguments, so a nested `Bx(ident)` still faces the wall.)
         let dec_args = declared.split_first().map_or(&[][..], |(_, d)| d);
         let saved = std::mem::replace(&mut self.generic_fn_value_prepass, true);
-        let mut arg_tys = self.infer_generic_arg_tys(args, dec_args, true);
+        let mut arg_tys = self.infer_generic_arg_tys(args, dec_args, true, &[]);
         self.generic_fn_value_prepass = saved;
         // Explicit member-level turbofish seeds the `[U]` params (arity-checked); `unify` only binds
         // a param not already in the map, so an explicit targ wins and a conflicting arg is caught by

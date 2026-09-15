@@ -1473,7 +1473,26 @@ impl Checker {
                 self.infer_list(items, hint.as_ref(), elem_hint)
             }
             ExprKind::Tuple(items) => {
-                Ty::Tuple(items.iter().map(|e| self.infer_value(e)).collect())
+                // TICKET-124 (W13-13): consume any expected-type hint (a `(Box[Named], int)` slot),
+                // same `take()`-then-project contract as `List`/`Map` above, so a nested ctor
+                // literal inside the tuple sees its own element's hint instead of the bare
+                // bottom-up type.
+                let hint = self.expected_hint.take();
+                let tys = match hint {
+                    Some(Ty::Tuple(hs)) if hs.len() == items.len() => items
+                        .iter()
+                        .zip(&hs)
+                        .map(|(e, h)| {
+                            if ty_fully_concrete(h) {
+                                self.infer_arg(e, Some(h))
+                            } else {
+                                self.infer_value(e)
+                            }
+                        })
+                        .collect(),
+                    _ => items.iter().map(|e| self.infer_value(e)).collect(),
+                };
+                Ty::Tuple(tys)
             }
             // Same `take()`-then-project contract as the `List` arm above. Without the `take()` the
             // OUTER `Map[str, List[int]]` stayed in the slot and was consumed — wasted — by the first
