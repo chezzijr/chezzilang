@@ -1183,9 +1183,9 @@ impl Gen {
         ))
     }
 
-    /// A guaranteed-non-empty single-char string literal. Used for `replace`'s `old` and
-    /// `split`'s `sep`, where an empty argument diverges (Chezzi unchanged / per-char split vs
-    /// Python insert-everywhere / `ValueError`).
+    /// A guaranteed-non-empty single-char string literal. Used for `split`'s `sep`, where an empty
+    /// argument diverges (Chezzi per-char split vs Python `ValueError`), and for `replace`'s `old`
+    /// by choice only: since TICKET-121 an empty `old` interleaves in Chezzi exactly as in Python.
     fn non_empty_str_lit(&mut self) -> Expr {
         const SAFE: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789 .,-_";
         let c = SAFE[self.rng.pick(SAFE.len())] as char;

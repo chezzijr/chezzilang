@@ -484,10 +484,10 @@ printing, and equality would false-positive on that routine, harmless shape (`ga
 - **String methods** (`string_methods`): the eight ASCII-identical methods `upper`/`lower`/`replace`/
   `split`/`join`/`starts_with`/`ends_with`/`contains`. The emitters map names per language
   (`starts_with`→`startswith`, `ends_with`→`endswith`); `contains` has no Python `str` method so it
-  renders as `sub in recv`. Two by-design diffs are dodged by generator restriction (no shim): a
-  `replace` `old` and a `split` `sep` are always **non-empty** literals (empty `old` is unchanged in
-  Chezzi but insert-everywhere in Python; empty `sep` per-char-splits in Chezzi but `ValueError`s in
-  Python).
+  renders as `sub in recv`. One by-design diff is dodged by generator restriction (no shim): a `split` `sep` is always a
+  **non-empty** literal (empty `sep` per-char-splits in Chezzi but `ValueError`s in Python). A
+  `replace` `old` is also kept non-empty, by choice only: since TICKET-121 an empty `old`
+  interleaves in Chezzi exactly as in Python.
 - **Slicing + negative indexing** (`slicing`): Python-style `xs[a:b:c]` on lists/strings and negative
   scalar index `xs[-k]`. Both engines clamp out-of-range bounds identically and step `0` errors on
   both, so no shim — the generator just never emits step `0` and keeps negative scalar indices in
