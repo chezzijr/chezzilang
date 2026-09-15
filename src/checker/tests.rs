@@ -32387,3 +32387,38 @@ fn a_cross_module_struct_name_collision_keeps_the_qualified_static_call_rejected
         "'new' expects 1 argument(s), got 0",
     );
 }
+
+// ===== TICKET-124: expected-type widening missing at generic ctor / nested ctor / =====
+// ===== reassignment / float-slot method-param sinks, plus a check-OK format spec =====
+
+#[test]
+fn generic_ctor_widens_untyped_int_to_float_slot() {
+    ok("struct Pair[T]:\n    a: T\n    b: T\n\nfn main():\n    p := Pair(1, 2.5)\n    print(p)\n");
+}
+
+#[test]
+fn nested_generic_ctor_widens_at_declared_protocol_type() {
+    ok(
+        "protocol Named:\n    fn name(self) -> str\n\nstruct A:\n    fn name(self) -> str:\n        return \"a\"\n\nstruct Box[T]:\n    v: T\n\nfn main():\n    bb: Box[Box[Named]] = Box(Box(A()))\n    print(bb)\n",
+    );
+}
+
+#[test]
+fn reassignment_widens_at_declared_protocol_type() {
+    ok(
+        "protocol Named:\n    fn name(self) -> str\n\nstruct A:\n    fn name(self) -> str:\n        return \"a\"\n\nfn main():\n    l: List[Named] = [A()]\n    l = [A()]\n    print(l)\n",
+    );
+}
+
+#[test]
+fn float_collection_method_param_widens_untyped_int() {
+    ok("fn main():\n    l: List[float] = [1.5]\n    l.push(3)\n    print(l)\n");
+}
+
+#[test]
+fn format_spec_mismatch_against_option_float_caught_at_check_time() {
+    rejects(
+        "fn main():\n    o: float? = Some(1.5)\n    print(\"{o:.2f}\")\n",
+        "format spec",
+    );
+}
