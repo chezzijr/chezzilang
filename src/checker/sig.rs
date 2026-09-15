@@ -2252,6 +2252,33 @@ impl Checker {
                     } else {
                         self.infer_value(value)
                     }
+                } else if *op == AssignOp::Eq
+                    && matches!(
+                        target.kind,
+                        ExprKind::Ident(_) | ExprKind::Index { .. } | ExprKind::Field { .. }
+                    )
+                    && matches!(
+                        value.kind,
+                        ExprKind::Call { .. }
+                            | ExprKind::List(..)
+                            | ExprKind::Map(_)
+                            | ExprKind::Set(_)
+                            | ExprKind::Tuple(_)
+                    )
+                {
+                    // TICKET-124 (W13-14): the hint that seeds a FRESH literal/call value used to
+                    // exist only at DECLARATION (an annotated `let`, a call argument, a return) —
+                    // reassignment, index-assign and field-assign have a statically known target
+                    // type too. Probe it speculatively (mark/rollback, same idiom as the closure
+                    // branch above) so an lvalue read never double-diagnoses.
+                    let mark = self.diag_mark();
+                    let target_ty = self.infer(target);
+                    self.diag_rollback(mark);
+                    if ty_fully_concrete(&target_ty) {
+                        self.infer_arg(value, Some(&target_ty))
+                    } else {
+                        self.infer_value(value)
+                    }
                 } else {
                     self.infer_value(value)
                 };

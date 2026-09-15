@@ -32457,6 +32457,53 @@ fn reassignment_widens_at_declared_protocol_type() {
 }
 
 #[test]
+fn reassignment_hint_neighbours_accept() {
+    ok(
+        "protocol Named:\n    fn name(self) -> str\nstruct A:\n    fn name(self) -> str:\n        return \"a\"\nll: List[List[Named]] = [[A()]]\nll[0] = [A()]\nstruct Box[T]:\n    v: T\nb: Box[Named] = Box(A())\nbb: Box[Box[Named]] = Box[Box[Named]](b)\nbb.v = Box(A())\n",
+    );
+    ok(
+        "protocol Keyed:\n    fn hash(self) -> int\nstruct A:\n    n: int\n    fn hash(self) -> int:\n        return self.n\nstruct B:\n    n: int\n    fn hash(self) -> int:\n        return self.n\nm2: Map[Keyed, int] = {B(2): 5}\nm2 = {B(3): 6}\nfn f(m: Map[Keyed, int]) -> int:\n    return m.len()\nnested: Map[Keyed, Map[Keyed, int]] = {A(1): {B(2): 5}}\nnested[A(1)] = {B(2): 5}\n",
+    );
+    ok(
+        "protocol Named:\n    fn name(self) -> str\nstruct A:\n    fn name(self) -> str:\n        return \"a\"\nl: List[Named] = []\nl = [A()]\n",
+    );
+    ok(
+        "protocol Named:\n    fn name(self) -> str\nstruct A:\n    fn name(self) -> str:\n        return \"a\"\nstruct Box[T]:\n    v: T\nt: (Box[Named], int) = (Box(A()), 1)\nt = (Box(A()), 2)\n",
+    );
+}
+
+#[test]
+fn reassignment_hint_keeps_invariance() {
+    rejects(
+        "protocol Named:\n    fn name(self) -> str\nstruct A:\n    fn name(self) -> str:\n        return \"a\"\nzs := [A()]\nl: List[Named] = []\nl = zs\n",
+        "cannot assign List[A] to List[Named]",
+    );
+    rejects(
+        "l: List[float] = [1.5]\nl = [1, 2]\n",
+        "list element: expected float, found int",
+    );
+}
+
+#[test]
+fn reassignment_hint_keeps_unannotated_empty_collections_open() {
+    ok("xs := []\nxs = [1]\n");
+    ok("m := {}\nm[\"k\"] = [1]\n");
+    ok("ys := []\nys[0] = 1\n");
+    rejects(
+        "xs := []\nxs = [1]\nxs.push(\"a\")\n",
+        "expected int, found str",
+    );
+    rejects(
+        "m := {}\nm[\"k\"] = [1]\nm[\"j\"] = [\"a\"]\n",
+        "list element: expected int, found str",
+    );
+    rejects(
+        "ys := []\nys[0] = 1\nys.push(\"a\")\n",
+        "expected int, found str",
+    );
+}
+
+#[test]
 fn float_collection_method_param_widens_untyped_int() {
     ok("fn main():\n    l: List[float] = [1.5]\n    l.push(3)\n    print(l)\n");
 }
