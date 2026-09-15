@@ -74,16 +74,16 @@ fn no_chz_test_divides_two_wall_clock_samples() {
 /// list in the same commit that converts it.
 const CLOCK_READING_TESTS: [&str; 26] = [
     "a_chezzi_hang_python_survives_is_a_finding",
-    // TICKET-119 (W13-9): `to_snap_depth`'s speculative fast path re-walks the whole remaining
-    // subtree from every node before falling to the slow arm, an O(depth^2) cost the VM counts
-    // nowhere; the bound is one absolute ceiling, same shape as `unique_is_not_quadratic`.
-    "airlock_deep_module_global_depth_fault_is_not_quadratic",
-    "airlock_deep_module_global_with_a_payload_at_every_level_is_not_quadratic",
-    "airlock_deep_module_global_of_nested_closures_is_not_quadratic",
     "a_cyclic_shared_field_type_graph_is_also_walked_once_per_type",
     "a_shared_field_type_graph_is_walked_once_per_type",
     "a_sleeping_nursery_task_is_cancelled_mid_flight_by_a_sibling_fault",
     "a_slow_but_healthy_job_at_the_exit_drain_is_untouched",
+    // TICKET-119 (W13-9): `to_snap_depth`'s speculative fast path re-walks the whole remaining
+    // subtree from every node before falling to the slow arm, an O(depth^2) cost the VM counts
+    // nowhere; the bound is one absolute ceiling, same shape as `unique_is_not_quadratic`.
+    "airlock_deep_module_global_depth_fault_is_not_quadratic",
+    "airlock_deep_module_global_of_nested_closures_is_not_quadratic",
+    "airlock_deep_module_global_with_a_payload_at_every_level_is_not_quadratic",
     // TICKET-114's repro: its `.elapsed()` is an outer HANG bound around a `systemd-run` child (a
     // hung child never exits, so there is nothing to count); it asserts the child's exit status.
     "d3_thousands_of_fibers_does_not_hang_under_a_narrow_cpu_quota",

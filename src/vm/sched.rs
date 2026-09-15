@@ -135,7 +135,8 @@ struct WireMemo {
     doom_pending: Vec<(GcRef, u32, usize)>,
     /// TICKET-119 — the LATEST depth-tripped attempt's records: node -> (enter stamp, depth). While a
     /// record is valid, an attempt rooted at that node at `depth >= d0` replays the recorded walk
-    /// exactly and trips no later, so `to_snap_depth` skips it. See DEC for TICKET-119.
+    /// exactly and trips no later, so `to_snap_depth` skips it. See `docs/concurrency.md`'s
+    /// depth-guard paragraph and `WireMemo::doomed`.
     doom: super::fxhash::FxHashMap<GcRef, (u32, usize)>,
     /// TICKET-119 — every node/cell that attempt minted -> its id there, which is its enter stamp.
     doom_ids: super::fxhash::FxHashMap<GcRef, u32>,
@@ -154,6 +155,17 @@ impl WireMemo {
         if let Some(&s) = self.doom_ids.get(&h) {
             self.doom_invalid_upto = Some(self.doom_invalid_upto.map_or(s, |u| u.max(s)));
         }
+    }
+
+    /// TICKET-119 — true iff a depth-tripped attempt already proved, by an exact-replay argument,
+    /// that a walk from `h` at `depth` or deeper trips no later than it did: a `doom` record exists
+    /// for `h`, `depth` is at or below the recorded depth's cap-ward direction (`depth >= d0`), and
+    /// nothing has invalidated the record since (`enter > doom_invalid_upto`). `to_snap_depth` skips
+    /// the speculative attempt when this is true. See `docs/concurrency.md`'s depth-guard paragraph.
+    fn doomed(&self, h: GcRef, depth: usize) -> bool {
+        self.doom.get(&h).is_some_and(|&(enter, d0)| {
+            depth >= d0 && self.doom_invalid_upto.is_none_or(|u| enter > u)
+        })
     }
 
     /// W7-4c — the id this cell already crosses under, from the overlay or the shared base.
@@ -5837,11 +5849,10 @@ impl Vm {
         // must be rolled back on that branch (`try_wire_speculative`).
         // TICKET-119: skip the attempt entirely when an EARLIER depth-tripped attempt already proved,
         // by an exact replay argument, that a walk from `h` at this depth or deeper trips no later —
-        // see DEC for TICKET-119.
-        let doomed = memo.doom.get(&h).is_some_and(|&(enter, d0)| {
-            depth >= d0 && memo.doom_invalid_upto.is_none_or(|u| enter > u)
-        });
-        if !doomed && let Some(w) = self.try_wire_speculative(v, depth, memo, |w| !w.has_handle()) {
+        // see `docs/concurrency.md`'s depth-guard paragraph and `WireMemo::doomed`.
+        if !memo.doomed(h, depth)
+            && let Some(w) = self.try_wire_speculative(v, depth, memo, |w| !w.has_handle())
+        {
             return Ok(SnapValue::Wire(w));
         }
         Ok(match self.heap.get(h).clone() {
@@ -6569,5 +6580,30 @@ impl Drop for BlockedOwnerGuard {
             }
         }
         self.sched.cv.notify_all();
+    }
+}
+
+#[cfg(test)]
+mod doomed_tests {
+    use super::*;
+
+    /// TICKET-119 — the program-level lock
+    /// (`airlock_module_global_skip_honours_the_depth_the_doom_was_recorded_at` in `src/vm/tests.rs`)
+    /// stayed green with `depth >= d0` deleted from `WireMemo::doomed`, because that program's
+    /// invalidation masked the term's effect. This proves the term directly, against the predicate
+    /// itself, so the mutation cannot hide behind a program-level side effect.
+    #[test]
+    fn doomed_requires_depth_at_or_above_the_recorded_depth() {
+        let h = GcRef(1);
+        let mut memo = WireMemo {
+            doom: [(h, (7, 10))].into_iter().collect(),
+            ..Default::default()
+        };
+        assert!(!memo.doomed(h, 9), "depth below d0 must not be doomed");
+        assert!(memo.doomed(h, 10), "depth at d0 must be doomed");
+        assert!(memo.doomed(h, 11), "depth above d0 must be doomed");
+
+        memo.doom.clear();
+        assert!(!memo.doomed(h, 10), "no record at all must not be doomed");
     }
 }
