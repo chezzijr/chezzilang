@@ -7,6 +7,23 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-123 (2026-09-15) — a generator-resume trace now reports every frame, and a manifest entrypoint fault names the entry file (W13-20, W13-21).**
+  W13-20: `Vm::generator_next` parks the host's `fault_trace`/`fault_trace_depth` latch across the
+  resume and runs the generator body on an empty one, so a fault the generator captures is no longer
+  compared against a frame count taken under a different stack. The generator's own capture is handed
+  to a new `Vm::gen_fault_prefix` field and consumed exactly once, unconditionally, at the top of the
+  dispatch loop's error arm — before the cancel/`--max-heap`/`--timeout` bypass and the `!caught_here`
+  capture, so a fault the driver's own `recover:` catches drops the prefix instead of decorating a
+  later unrelated fault. Measured on `control/u02_trace_gen_depth.chz`: was `at drive` / `at main`
+  only, now `at h` / `at g` / `at drive` / `at main`; `control/y18_trace_gen_plain.chz` was `at h` /
+  `at g` only, now also carries `at main`. W13-21: a new `Proto::decl_span` (from `FnDecl::name_span`,
+  set only in `Compiler::compile_fn_body`) gives `Vm::invoke_entrypoint`'s synthetic call site a true
+  coordinate when the callee has a declaration — a closure or native entrypoint has none and keeps the
+  old `Span::RUNTIME` fallback. Measured: `runtime error (line 1, col 1): unhandled error: main
+  failed` is now `runtime error (src/main.chz:1:4): unhandled error: main failed`, and a real in-body
+  fault's `at main (called at line 1, col 1)` frame now names `src/main.chz`. `--errors=json` still
+  carries no runtime fault on any path (measured `[]` for both an `Err` entrypoint and a real
+  in-body fault) — scoped out, its own ticket.
 - **TICKET-121 (2026-09-15) — an empty-list repeat is O(1), an empty-`old` `str.replace` interleaves, `json.encode` counts brackets not `Some` wrappers (W13-10/17/19).**
   `list_repeat` (`src/vm/arith.rs`) now returns an empty list before its repeat loop when the source
   is empty, so `[] * n`, `n * []` and `xs *= n` no longer loop `n` times over nothing (measured

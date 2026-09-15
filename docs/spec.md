@@ -341,8 +341,10 @@ path**, optionally suffixed with **`:function`** (e.g. `"src.main:main"`). The m
 top-to-bottom like any other file; with a `:function` suffix the entry function is then **called** (a
 missing/non-function name is a clear error), so the source needs no trailing call. An entry function
 may legitimately be `-> T!` and use `?`; if it returns `Err`/`None`, `chezzi run` surfaces it as
-`unhandled error: …` (rc=1), symmetric with the unhandled-top-level rule. Without the suffix the module
-just runs top-to-bottom (no entry function is called). Running an explicit file (`chezzi run <file>`)
+`unhandled error: …` (rc=1), symmetric with the unhandled-top-level rule. The fault names the entry
+function's own declaration in the entry file, rather than a bare `line 1, col 1`; an entrypoint bound
+to a closure or a native fn has no declaration to name, so it keeps the bare coordinate. Without the
+suffix the module just runs top-to-bottom (no entry function is called). Running an explicit file (`chezzi run <file>`)
 is always top-level-only.
 
 ## Imports & module resolution
