@@ -503,3 +503,26 @@ test fn empty_list_repeat_is_constant_time():
     d := time.monotonic() - t0
     assert r.len() == 0
     assert d < 0.1, "[] * 2000000000 took {d}s, expected < 0.1s"
+
+# Same bug, the other two spellings that reach `list_repeat`: the reversed `n * xs` and the
+# in-place `xs *= n` both hit the same O(n) loop over an empty source (arith.rs:537-558).
+test fn empty_list_repeat_is_constant_time_in_every_spelling():
+    e: List[int] = []
+    t0 := time.monotonic()
+    a := e * 1000000000
+    b := 1000000000 * e
+    e *= 1000000000
+    d := time.monotonic() - t0
+    assert a.len() == 0 and b.len() == 0 and e.len() == 0
+    assert d < 0.1, "three empty-source repeats took {d}s, expected < 0.1s"
+
+# The early return must land AFTER the `n <= 0` arm and BEFORE the capacity guard: it must not
+# change the non-empty-source contract, including the capacity-overflow fault.
+test fn non_empty_list_repeat_contract_unchanged():
+    assert ([1, 2] * 3).len() == 6
+    assert ([1, 2] * 0).len() == 0
+    assert ([1, 2] * -5).len() == 0
+    r := recover: [1] * 100000000000
+    match r:
+        Ok(_): assert false, "expected a capacity fault"
+        Err(e): assert e.message() == "list repeat capacity overflow"

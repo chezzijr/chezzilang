@@ -615,6 +615,13 @@ impl Vm {
             return Ok(Value::obj(self.heap.alloc(Obj::List(Vec::new()))));
         }
         let n = n as usize;
+        // An empty source repeats to `[]` in constant time for any `n`: `total` below is 0
+        // regardless of `n`, so without this the loop at the bottom of this fn would still
+        // iterate `n` times extending nothing (W13-10). CPython's `len([] * (2**63-1))` is `0`
+        // instantly.
+        if items.is_empty() {
+            return Ok(Value::obj(self.heap.alloc(Obj::List(Vec::new()))));
+        }
         // Guard the allocation: a giant `n` would abort the process via `Vec`'s capacity panic.
         // Bound the BYTE size (`count * size_of::<Value>()`) by `isize::MAX`, matching `Vec`'s own
         // limit — `str.repeat` does the same on its byte length (vm:7514). Recoverable fault.
