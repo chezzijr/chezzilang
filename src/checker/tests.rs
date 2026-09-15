@@ -32255,3 +32255,135 @@ fn a_same_named_static_method_via_qualified_module_type_head_type_checks() {
         ("main.chz", "import lib_s3\nprint(lib_s3.L.new().v)\n"),
     ]);
 }
+
+/// TICKET-120 step 1 -- the alias-import spelling of the qualified head must resolve too.
+#[test]
+fn a_qualified_module_type_head_resolves_a_static_default_through_an_import_alias() {
+    files_ok(&[
+        (
+            "lib_s3.chz",
+            "struct A:\n    v: int\n    fn new(n: int = 1) -> A:\n        return A(n)\nstruct L:\n    v: int\n    fn new(n: int = 11) -> L:\n        return L(n)\n",
+        ),
+        ("main.chz", "import lib_s3 as m\nprint(m.L.new().v)\n"),
+    ]);
+}
+
+/// TICKET-120 step 1 -- an enum's static default resolves through the qualified head too.
+#[test]
+fn a_qualified_module_enum_head_resolves_a_static_default() {
+    files_ok(&[
+        (
+            "lib_e.chz",
+            "enum E:\n    A(int)\n    B\n    fn new(n: int = 7) -> E:\n        return E.A(n)\nenum F:\n    C(int)\n    D\n    fn new(n: int = 8) -> F:\n        return F.C(n)\n",
+        ),
+        ("main.chz", "import lib_e\nprint(lib_e.E.new())\n"),
+    ]);
+}
+
+/// TICKET-120 step 1 -- a generic struct's static default resolves through the qualified head.
+#[test]
+fn a_qualified_generic_struct_head_resolves_a_static_default() {
+    files_ok(&[
+        (
+            "lib_g.chz",
+            "struct Box[T]:\n    v: T\n    fn make(n: int = 4) -> Box[int]:\n        return Box(n)\nstruct Bin[T]:\n    v: T\n    fn make(n: int = 9) -> Bin[int]:\n        return Bin(n)\n",
+        ),
+        ("main.chz", "import lib_g\nprint(lib_g.Box.make().v)\n"),
+    ]);
+}
+
+/// TICKET-120 step 1 -- a static name colliding with a builtin still resolves its default.
+#[test]
+fn a_qualified_head_with_a_builtin_colliding_static_name_resolves_a_default() {
+    files_ok(&[
+        (
+            "lib_b.chz",
+            "struct SB:\n    n: int\n    fn add(n: int = 51) -> SB:\n        return SB(n)\nstruct SC:\n    n: int\n    fn add(n: int = 52) -> SC:\n        return SC(n)\n",
+        ),
+        ("main.chz", "import lib_b\nprint(lib_b.SB.add().n)\n"),
+    ]);
+}
+
+/// TICKET-120 step 2 -- a defaultless argument through the qualified head still rejects on arity.
+#[test]
+fn a_qualified_static_call_missing_a_defaultless_argument_still_rejects() {
+    files_reject(
+        &[
+            (
+                "lib_b.chz",
+                "struct SB:\n    n: int\n    fn add(n: int = 51) -> SB:\n        return SB(n)\nstruct SC:\n    n: int\n    fn add(n: int = 52) -> SC:\n        return SC(n)\nstruct SD:\n    n: int\n    fn need(n: int) -> SD:\n        return SD(n)\n",
+            ),
+            ("main.chz", "import lib_b\nprint(lib_b.SD.need().n)\n"),
+        ],
+        "'need' expects 1 argument(s), got 0",
+    );
+}
+
+/// TICKET-120 step 2 -- an instance method reached through a qualified TYPE head still rejects.
+#[test]
+fn an_instance_method_through_a_qualified_type_head_still_rejects() {
+    files_reject(
+        &[
+            (
+                "lib_s3.chz",
+                "struct A:\n    v: int\n    fn new(n: int = 1) -> A:\n        return A(n)\nstruct L:\n    v: int\n    fn new(n: int = 11) -> L:\n        return L(n)\n    fn bump(self, k: int = 5) -> int:\n        return self.v + k\n",
+            ),
+            ("main.chz", "import lib_s3\nprint(lib_s3.L.bump())\n"),
+        ],
+        "is an instance method of",
+    );
+}
+
+/// TICKET-120 step 2 -- a qualified head naming an unknown module member still rejects.
+#[test]
+fn a_qualified_head_naming_an_unknown_module_member_still_rejects() {
+    files_reject(
+        &[
+            (
+                "lib_s3.chz",
+                "struct A:\n    v: int\n    fn new(n: int = 1) -> A:\n        return A(n)\nstruct L:\n    v: int\n    fn new(n: int = 11) -> L:\n        return L(n)\n",
+            ),
+            ("main.chz", "import lib_s3\nprint(lib_s3.Nope.new())\n"),
+        ],
+        "has no member 'Nope'",
+    );
+}
+
+/// TICKET-120 step 2 -- too many arguments through the qualified head still rejects on arity.
+#[test]
+fn a_qualified_static_call_with_too_many_arguments_still_rejects() {
+    files_reject(
+        &[
+            (
+                "lib_s3.chz",
+                "struct A:\n    v: int\n    fn new(n: int = 1) -> A:\n        return A(n)\nstruct L:\n    v: int\n    fn new(n: int = 11) -> L:\n        return L(n)\n",
+            ),
+            ("main.chz", "import lib_s3\nprint(lib_s3.L.new(1, 2).v)\n"),
+        ],
+        "got 2",
+    );
+}
+
+/// TICKET-120 step 2 -- a cross-module struct-name collision keeps the qualified static call
+/// rejected: `collect_methods_by_struct` nulls the disagreeing key, and the new arm must not
+/// invent an agreement that isn't there.
+#[test]
+fn a_cross_module_struct_name_collision_keeps_the_qualified_static_call_rejected() {
+    files_reject(
+        &[
+            (
+                "lib_c1.chz",
+                "struct CC:\n    v: int\n    fn new(n: int = 31) -> CC:\n        return CC(n)\n",
+            ),
+            (
+                "lib_c2.chz",
+                "struct CC:\n    v: int\n    fn new(n: int = 32) -> CC:\n        return CC(n)\n",
+            ),
+            (
+                "main.chz",
+                "import lib_c1\nimport lib_c2\nprint(lib_c1.CC.new().v)\n",
+            ),
+        ],
+        "'new' expects 1 argument(s), got 0",
+    );
+}
