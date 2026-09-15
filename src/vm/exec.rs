@@ -1524,6 +1524,12 @@ impl Vm {
                         // belongs to a fault that is now handled), so a later uncaught fault re-captures.
                         self.fault_trace = None;
                         self.fault_trace_depth = 0;
+                        // A deferred call run by `unwind_deferred` above (e.g. a generator's
+                        // `.next()`) can fault and park its own frames in `gen_fault_prefix` without
+                        // ever passing back through this loop's error arm to be taken — that only
+                        // happens for a fault THIS dispatch loop raises directly. Clear it here too,
+                        // or it survives to decorate a later, unrelated uncaught fault.
+                        self.gen_fault_prefix.clear();
                         // TICKET-096 — this handler is outside the faulting nursery, so the fault is
                         // handled; the floor must not survive it and bypass an unrelated later handler.
                         self.owner_fault_floor = None;

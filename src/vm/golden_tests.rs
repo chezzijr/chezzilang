@@ -7592,6 +7592,25 @@ fn a_generator_fault_caught_by_the_driver_leaves_no_frames_behind() {
     assert_eq!(names, vec!["drive", "main"]);
 }
 
+/// W13-20 guard: a generator fault raised by a DEFERRED `.next()` call, during an unwind a
+/// `recover:` catches, must not leave `Vm::gen_fault_prefix` set for a later, unrelated fault to
+/// pick up. `unwind_deferred` runs the deferred `.next()` outside the dispatch loop's own error
+/// arm, so the prefix `generator_next` parks on that inner fault is never taken there — it must be
+/// cleared when the OUTER fault is caught instead.
+#[test]
+fn a_deferred_generator_fault_does_not_leak_its_prefix_to_a_later_fault() {
+    let src = "fn h() -> int:\n    xs: List[int] = []\n    return xs[3]\nfn g():\n    yield h()\nfn f():\n    it := g()\n    defer it.next()\n    ys: List[int] = []\n    print(ys[5])\nfn main():\n    r := recover:\n        f()\n    print(\"caught\")\n    zs: List[int] = []\n    print(zs[9])\nmain()\n";
+    let dir = std::env::temp_dir().join("chezzi_gen_trace_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("deferred_leak.chz");
+    std::fs::write(&path, src).unwrap();
+    let (_out, _err, res, _) = run_file(&path);
+    let e = res.expect_err("program should fault");
+    assert_eq!(e.message, "index 9 out of bounds (len 0)");
+    let names: Vec<&str> = e.trace.iter().map(|f| f.function.as_str()).collect();
+    assert_eq!(names, vec!["main"]);
+}
+
 /// Helper: write deep-infinite-recursion source to a temp file and return its path. The recursion
 /// hits `MAX_CALL_DEPTH` → a `recursion limit exceeded` fault with a ~10_000-frame raw trace.
 #[cfg(test)]
