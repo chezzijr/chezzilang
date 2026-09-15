@@ -38,6 +38,18 @@ Single source of truth for "what am I doing next." Update after every work sessi
   ancestors' one-object merge, but the receiver's own write is never lost, which was the bar filed
   under. 11 new tests pin both mechanisms across container/timing/forwarding shapes; the "push before
   the nursery opens" control (`d20`) stays clean.
+- **TICKET-122 (2026-09-12) — a struct/enum body member must end its line (W13-16).** Six member-
+  append arms called `skip_newlines()` (zero or more) where `docs/grammar.bnf`'s `<field>`,
+  `<variant>` and `<nativeMethodDecl>` all mandate exactly one NEWLINE: `parse_enum`'s variant arm,
+  `parse_struct`'s field arm, `parse_native_struct`'s field and native-method arms, and
+  `parse_native_enum`'s variant and native-method arms. `enum Lv:` / `Lo` / `static fn zero() -> Lv:`
+  used to declare a phantom unit variant named `static` (then surfacing as `non-exhaustive match …
+  missing static`); `struct S:` / `x: int y: int` packed a second field onto one line. New helper
+  `Parser::expect_member_end` guards all six sites with the message `expected newline after <what>
+  '<name>', found <token>`; `parse_protocol`, `parse_extern`, `parse_native_decl`, `parse_newtype` and
+  the bodied-`fn` arms were measured clean and stay on `expect_stmt_end`. The helper carries
+  `expect_stmt_end`'s `Dedent`-previous escape, so a block-valued field default (`x: int = match 1:` +
+  arms) still ends its line correctly.
 - **TICKET-114 (2026-09-11) — the 10k-CPU-fiber D3 soundness test runs at a fixed pool in its own
   process (W12-23).** `vm::tests::d3_thousands_of_cpu_fibers_all_complete` hung to its 60 s bound in
   the debug lib target whenever the default pool (every core) met other load. `vm::pool` is one

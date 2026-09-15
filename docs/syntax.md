@@ -31,7 +31,9 @@ struct Point:
   unchanged; a `U+FEFF` anywhere else, including a second one at the start, stays a lex error. The
   project manifest gets the same strip: a `chezzi.toml` whose first bytes are `EF BB BF` parses
   exactly as the same file without them.
-- **Logical lines** end at a newline. Blank / comment-only lines are ignored.
+- **Logical lines** end at a newline. Blank / comment-only lines are ignored. A struct, enum, protocol
+  or native body takes one declaration per logical line: two fields, two variants, or a variant and a
+  method packed onto one line is a parse error.
 - **Identifiers:** letter or `_`, then letters/digits/`_`. Case-sensitive.
 - **Doc-comments:** any plain `#` line(s) *immediately above* a declaration (`fn`/method, `struct`,
   `enum`, `protocol`, `newtype`, `type` alias, top-level binding) become its doc. The doc surfaces on
@@ -3031,6 +3033,9 @@ fn area(s: Shape) -> float:
         Shape.Square(n): return float(n * n)
         Shape.Point:     return 0.0
 ```
+
+An enum body takes one variant per line -- `enum E:` then `A B` is a parse error naming the token
+after the variant, as Rust's `enum E { A B }` is.
 
 Enums may be **generic**, carrying type parameters after the name exactly like generic structs; a
 variant's payload may reference them (including the enum's own type, for recursive shapes). Type
