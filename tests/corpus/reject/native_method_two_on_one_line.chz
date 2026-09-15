@@ -1,0 +1,4 @@
+# rule: nativeMethodDecl
+# expect: expected newline after native method
+native struct S:
+    native fn a(self) -> int native fn b(self) -> int

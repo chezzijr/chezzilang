@@ -1,0 +1,4 @@
+# rule: field
+# expect: expected newline after struct field
+struct S:
+    x: int y: int

@@ -1,0 +1,4 @@
+# rule: variant
+# expect: expected newline after enum variant
+enum E:
+    A B

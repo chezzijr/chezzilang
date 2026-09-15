@@ -7598,4 +7598,159 @@ mod tests {
         let e = parse_err("enum E:\n    A B\n");
         assert!(e.message.contains("expected newline"), "got: {}", e.message);
     }
+
+    #[test]
+    fn enum_variant_then_method_on_one_line_is_a_parse_error() {
+        let e = parse_err("enum E:\n    A(int) fn f(self) -> int:\n        return 1\n");
+        assert!(
+            e.message
+                .contains("expected newline after enum variant 'A', found 'fn'"),
+            "got: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn enum_static_fn_does_not_declare_a_phantom_variant() {
+        let e = parse_err("enum Lv:\n    Lo\n    static fn zero() -> Lv:\n        return Lv.Lo\n");
+        assert!(
+            e.message
+                .contains("expected newline after enum variant 'static', found 'fn'"),
+            "got: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn enum_variant_before_a_packed_method_beats_the_ordering_error() {
+        let e = parse_err("enum E:\n    A fn f(self) -> int:\n        return 1\n    B\n");
+        assert!(
+            e.message
+                .contains("expected newline after enum variant 'A', found 'fn'"),
+            "got: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn struct_two_fields_on_one_line_is_a_parse_error() {
+        let e = parse_err("struct S:\n    x: int y: int\n");
+        assert!(
+            e.message
+                .contains("expected newline after struct field 'x', found identifier 'y'"),
+            "got: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn struct_two_defaulted_fields_on_one_line_is_a_parse_error() {
+        let e = parse_err("struct S:\n    x: int = 1 y: int = 2\n");
+        assert!(
+            e.message
+                .contains("expected newline after struct field 'x', found identifier 'y'"),
+            "got: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn native_enum_two_variants_on_one_line_is_a_parse_error() {
+        let e = parse_err("native enum E:\n    A B\n");
+        assert!(
+            e.message
+                .contains("expected newline after enum variant 'A', found identifier 'B'"),
+            "got: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn native_enum_method_packed_onto_a_variant_line_is_a_parse_error() {
+        let e = parse_err("native enum E:\n    A(int) native fn m(self) -> int\n");
+        assert!(
+            e.message
+                .contains("expected newline after enum variant 'A', found 'native'"),
+            "got: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn native_struct_two_fields_on_one_line_is_a_parse_error() {
+        let e = parse_err("native struct S:\n    x: int y: int\n");
+        assert!(
+            e.message
+                .contains("expected newline after native struct field 'x', found identifier 'y'"),
+            "got: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn a_block_valued_field_default_still_ends_its_line() {
+        let kind = only(
+            "struct S:\n    x: int = match 1:\n        1: 10\n        _: 20\n    y: int = 3\n",
+        );
+        let StmtKind::Struct { fields, .. } = kind else {
+            panic!("expected a struct");
+        };
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].name, "x");
+        assert_eq!(fields[1].name, "y");
+    }
+
+    #[test]
+    fn a_trailing_comment_after_a_variant_still_ends_its_line() {
+        let kind = only("enum E:\n    A(int)   # payload\n    B        # unit\n");
+        let StmtKind::Enum { variants, .. } = kind else {
+            panic!("expected an enum");
+        };
+        assert_eq!(variants.len(), 2);
+    }
+
+    #[test]
+    fn native_struct_two_methods_on_one_line_is_a_parse_error() {
+        let e =
+            parse_err("native struct S:\n    native fn a(self) -> int native fn b(self) -> int\n");
+        assert!(
+            e.message
+                .contains("expected newline after native method 'a', found 'native'"),
+            "got: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn native_enum_two_methods_on_one_line_is_a_parse_error() {
+        let e = parse_err(
+            "native enum E:\n    A\n    native fn m(self) -> int native fn n(self) -> int\n",
+        );
+        assert!(
+            e.message
+                .contains("expected newline after native method 'm', found 'native'"),
+            "got: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn protocol_two_method_sigs_on_one_line_is_a_parse_error() {
+        let e = parse_err("protocol P:\n    fn a(self) -> int fn b(self) -> int\n");
+        assert!(
+            e.message.contains("expected end of line, found 'fn'"),
+            "got: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn extern_two_fn_sigs_on_one_line_is_a_parse_error() {
+        let e = parse_err("extern \"libc\":\n    fn getpid() -> int fn getppid() -> int\n");
+        assert!(
+            e.message.contains("expected end of line, found 'fn'"),
+            "got: {}",
+            e.message
+        );
+    }
 }
