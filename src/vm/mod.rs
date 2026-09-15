@@ -1286,8 +1286,18 @@ pub struct Vm {
     active_generators: Vec<GcRef>,
     /// W13-20 — the generator-side frames of a fault that propagated OUT of a `generator_next`
     /// resume, waiting to be prepended to the DRIVER-side capture. Consumed exactly once, by the
-    /// dispatch loop's error arm. Deliberately absent from `FiberCtx`, `GenCtx`, `Vm::swap_ctx` and
-    /// `Vm::swap_gen_ctx`, for the same reason `gen_host_ctx` is: a fiber cannot park mid-resume.
+    /// dispatch loop's error arm (`exec.rs`'s uncaught arm — a fault that reaches that arm for the
+    /// FIRST time takes it there). A fault a `recover:` catches instead never reaches that arm, so
+    /// EVERY catch path that can run a deferred `.next()` after this slot might already be set must
+    /// clear it explicitly, or it survives to decorate a later, unrelated uncaught fault: `exec.rs`'s
+    /// `recover:`-catch arm (after BOTH its defer drains — `unwind_deferred` for frames above the
+    /// boundary and `drain_frame_to` for the recover block's own defers, since a `defer it.next()`
+    /// can sit in either), and `stmt.rs`'s recover-scoped `?` catch (`do_try`, after both of ITS
+    /// drains). Grep for `gen_fault_prefix.clear()` for the full list — a THIRD catch path added
+    /// later needs the same clear, derived the same way (every drain it runs after this slot could
+    /// already be set), not by pattern-matching the two here. Deliberately absent from `FiberCtx`,
+    /// `GenCtx`, `Vm::swap_ctx` and `Vm::swap_gen_ctx`, for the same reason `gen_host_ctx` is: a
+    /// fiber cannot park mid-resume.
     gen_fault_prefix: Vec<TraceFrame>,
     /// D5 owe #3 (Path C) — this M:N worker shell's worker id (its `locals[wid]` slot), set at the top
     /// of [`Vm::mn_worker_loop`]. Read by [`Vm::demote_recv_block`] so a demoted worker's raw

@@ -7611,6 +7611,42 @@ fn a_deferred_generator_fault_does_not_leak_its_prefix_to_a_later_fault() {
     assert_eq!(names, vec!["main"]);
 }
 
+/// Review finding (2026-09-15): the prior fix closed the leak only for a `defer it.next()` OUTSIDE
+/// the `recover:` block. A `defer it.next()` DIRECTLY INSIDE the `recover:` block still leaked: the
+/// clear used to run BEFORE the recover block's own defer drain (`drain_frame_to(h.defer_len)` in
+/// `exec.rs`), so a deferred generator fault drained AFTER the clear set the prefix again and it
+/// survived to decorate the next uncaught fault.
+#[test]
+fn a_defer_inside_the_recover_block_does_not_leak_its_prefix_to_a_later_fault() {
+    let src = "fn h() -> int:\n    xs: List[int] = []\n    return xs[3]\nfn g():\n    yield h()\nfn main():\n    it := g()\n    r := recover:\n        defer it.next()\n        ys: List[int] = []\n        print(ys[5])\n    print(\"caught\")\n    zs: List[int] = []\n    print(zs[9])\nmain()\n";
+    let dir = std::env::temp_dir().join("chezzi_gen_trace_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("defer_in_recover_leak.chz");
+    std::fs::write(&path, src).unwrap();
+    let (_out, _err, res, _) = run_file(&path);
+    let e = res.expect_err("program should fault");
+    assert_eq!(e.message, "index 9 out of bounds (len 0)");
+    let names: Vec<&str> = e.trace.iter().map(|f| f.function.as_str()).collect();
+    assert_eq!(names, vec!["main"]);
+}
+
+/// Review finding (2026-09-15), the `?` catch path sibling: a recover-scoped `?` (`stmt.rs`'s
+/// `do_try`, which drains the recover block's own defers at its own boundary) had NO clear site at
+/// all — the same leak shape as the `recover:`-catch path, one level lower.
+#[test]
+fn a_defer_inside_a_recover_scoped_question_mark_does_not_leak_its_prefix() {
+    let src = "fn h() -> int:\n    xs: List[int] = []\n    return xs[3]\nfn g():\n    yield h()\nfn maybe() -> int!str:\n    return Err(\"boom\")\nfn main():\n    it := g()\n    r := recover:\n        defer it.next()\n        maybe()?\n    print(\"caught\")\n    zs: List[int] = []\n    print(zs[9])\nmain()\n";
+    let dir = std::env::temp_dir().join("chezzi_gen_trace_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("defer_in_question_mark_recover_leak.chz");
+    std::fs::write(&path, src).unwrap();
+    let (_out, _err, res, _) = run_file(&path);
+    let e = res.expect_err("program should fault");
+    assert_eq!(e.message, "index 9 out of bounds (len 0)");
+    let names: Vec<&str> = e.trace.iter().map(|f| f.function.as_str()).collect();
+    assert_eq!(names, vec!["main"]);
+}
+
 /// Helper: write deep-infinite-recursion source to a temp file and return its path. The recursion
 /// hits `MAX_CALL_DEPTH` → a `recursion limit exceeded` fault with a ~10_000-frame raw trace.
 #[cfg(test)]

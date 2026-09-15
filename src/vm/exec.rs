@@ -1524,12 +1524,6 @@ impl Vm {
                         // belongs to a fault that is now handled), so a later uncaught fault re-captures.
                         self.fault_trace = None;
                         self.fault_trace_depth = 0;
-                        // A deferred call run by `unwind_deferred` above (e.g. a generator's
-                        // `.next()`) can fault and park its own frames in `gen_fault_prefix` without
-                        // ever passing back through this loop's error arm to be taken — that only
-                        // happens for a fault THIS dispatch loop raises directly. Clear it here too,
-                        // or it survives to decorate a later, unrelated uncaught fault.
-                        self.gen_fault_prefix.clear();
                         // TICKET-096 — this handler is outside the faulting nursery, so the fault is
                         // handled; the floor must not survive it and bypass an unrelated later handler.
                         self.owner_fault_floor = None;
@@ -1543,6 +1537,16 @@ impl Vm {
                         // boundary frame's own (recover-block) defers remain — drain them now, before
                         // binding the result. A fault in one supersedes the original.
                         let rte = self.drain_frame_to(h.defer_len).unwrap_or(rte);
+                        // W13-20 — clear the prefix HERE, after every drain this catch runs
+                        // (`unwind_deferred` above AND this recover-block drain), not before either
+                        // one. A deferred `.next()` — whether outside the recover block (drained by
+                        // `unwind_deferred`) or DIRECTLY INSIDE it (drained by `drain_frame_to` just
+                        // above) — can fault and park its own frames here without ever passing back
+                        // through this loop's error arm to be taken (that only happens for a fault
+                        // THIS dispatch loop raises directly). Clearing before either drain leaves the
+                        // second drain's fault to survive uncleared and decorate a later, unrelated
+                        // uncaught fault — the review finding this fixes.
+                        self.gen_fault_prefix.clear();
                         // Drop the scope markers of any defer scopes opened inside the recover block:
                         // the fault jumped past their `LeaveDeferScope`s, so they would otherwise leak
                         // and corrupt later drains in this frame.

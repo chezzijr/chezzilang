@@ -208,6 +208,13 @@ impl Vm {
                             None => self.push(v), // the propagated Result/Option value IS the result
                         },
                     }
+                    // W13-20 — a deferred `.next()` run by either drain above (the escaped `parallel:`
+                    // body's, or the recover block's own) can fault and park its own frames in
+                    // `gen_fault_prefix` without ever passing through the dispatch loop's error arm
+                    // to be taken (this recover-scoped `?` catches inline, never via that arm). Clear
+                    // it here too, or it survives to decorate a later, unrelated uncaught fault — the
+                    // same leak class as the `recover:`-catch path in `exec.rs`, one level lower.
+                    self.gen_fault_prefix.clear();
                     self.jump(h.ip);
                     return Ok(());
                 }
