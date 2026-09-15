@@ -13263,6 +13263,17 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- **TICKET-119 (2026-09-15) — a deep module global reaches its depth-exceeded fault in linear, not
+  quadratic, time (W13-9).** `to_snap_depth`'s speculative fast path (`try_wire_speculative`) re-walked
+  the whole remaining subtree from every node before the slow arm descended one node and repeated, an
+  O(cap²) cost bounded by `MAX_STRUCTURAL_DEPTH` regardless of the chain's real length — a 5000-deep and
+  an 8000-deep module global both measured ~20.4 s. Fixed by skipping a speculative attempt already
+  proven, by an exact-replay argument over the memo's mint/taint/invalidation state, to overflow the
+  same way again (`WireMemo`'s new `doom`/`doom_ids`/`doom_invalid_upto`). Measured on release binaries:
+  5000-link chain 20.40 s → 0.05 s, 8000-link 20.32 s → 0.05 s, 5000-link with a payload per level
+  33.30 s → 0.06 s, 6000-deep nested closures 8.81 s → 0.04 s; the under-cap 4500-link control and two
+  crossing-heavy programs (50-task fan-out over a 200k-int list, a spawn over 20 000 aliases) show no
+  slowdown.
 - **TICKET-120 (2026-09-12): a static method's default now fills through a module-qualified
   `mod.Type` head, closing W13-11.** `Walker::receiver_struct_ty` (`src/desugar/mod.rs`) gains a
   fifth arm for `Field { obj: Ident(alias), name }`, resolved through a new `Ctx::find_type_qualified`

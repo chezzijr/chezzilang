@@ -2030,6 +2030,28 @@ crossings above are one-off manual verifications rather than standing tests: the
 the GC's deep-graph marking, not the cancellation model. It is also why the `parent` column of the
 chain table sits ~4x above the parent-less one. Worth a ledger row on its own.
 
+**TICKET-119 (W13-9) — the module-global depth-fault path was O(cap²), bounded by the cap not the
+chain.** `to_snap_depth`'s speculative fast path (`try_wire_speculative`) re-walked the whole remaining
+subtree from every node before falling to the slow arm, so a module global deep enough to trip
+`MAX_STRUCTURAL_DEPTH` cost the same ~20 s whether the chain was 5 000 or 8 000 deep — the walk is
+bounded by the cap, not by how much further the real chain goes. Fixed by skipping a speculative attempt
+already proven, by an exact-replay argument over the memo's mint/taint/invalidation state, to overflow
+the same way again (`doom`/`doom_ids`/`doom_invalid_upto` in `WireMemo`). Release binaries, load average
+3.11 at measurement:
+
+| program | base | fixed | output (identical) |
+|---|---|---|---|
+| 5000-link chain | 20.40 s | 0.05 s | depth-exceeded fault |
+| 8000-link chain | 20.32 s | 0.05 s | depth-exceeded fault |
+| 5000-link, `List[int]` payload per level | 33.30 s | 0.06 s | depth-exceeded fault |
+| 6000-deep nested closures | 8.81 s | 0.04 s | depth-exceeded fault |
+| 4500-link control (under the cap) | 0.04 s | 0.04 s | `crossed` / `ok` |
+
+No regression on the crossing (non-faulting) path: a nursery spawning 50 tasks that each capture one
+200 000-int `List` module global (median of 10 runs) measured 653.7 ms base vs 645.5 ms fixed; a spawn
+capturing 20 000 aliases of one global measured 23.7 ms base vs 21.2 ms fixed — both **at or below**
+base, within run-to-run noise, not a slowdown.
+
 
 ## GC — the mark pass over a rooted graph of live cores
 

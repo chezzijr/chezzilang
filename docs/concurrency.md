@@ -1759,7 +1759,10 @@ was retired when module globals started deep-copying per task.)
   (10000) exceeded (cyclic data structure?)` fault, re-stamped with the real airlock site and catchable
   by `recover:`. (A cycle threaded through a live generator's parked frame — the generator carries no
   wire id — is instead caught by the generator-on-stack guard, a clean `a generator cannot be sent
-  across tasks as part of a reference cycle` fault.)
+  across tasks as part of a reference cycle` fault.) A deep **module global** now reaches that fault in
+  time linear in the walk, not quadratic in the depth cap: the module-snapshot path (`to_snap_depth`)
+  skips a speculative crossing attempt already proven, by an exact-replay argument, to overflow the
+  same way again (TICKET-119).
   Large-but-**shallow** data (e.g. a 100k-element list) crosses fine — the counter measures nesting
   depth, not element count.
 

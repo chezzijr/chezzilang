@@ -124,9 +124,38 @@ struct WireMemo {
     /// `spawn`'s arg/capture crossing, `Shared`/`RwShared` stores), where the sender's write already
     /// happened before the value crosses and a snapshot is the only correct answer.
     module_replay: bool,
+    /// TICKET-119 — set by `to_wire_depth_inner`'s depth guard, cleared at each speculative attempt's
+    /// entry. No arm swallows an error, so it classifies the one `Err` that leaves the attempt.
+    depth_tripped: bool,
+    /// TICKET-119 — `next_id` at the in-flight attempt's latest SHORTCUT (a `Backref` return, or a
+    /// cell whose id already existed). A frame entered at or before it records nothing.
+    shortcut_at: Option<u32>,
+    /// TICKET-119 — `(node, enter stamp, depth)` of each untainted frame a depth-tripped attempt
+    /// unwound through; moved into `doom` when that attempt is discarded.
+    doom_pending: Vec<(GcRef, u32, usize)>,
+    /// TICKET-119 — the LATEST depth-tripped attempt's records: node -> (enter stamp, depth). While a
+    /// record is valid, an attempt rooted at that node at `depth >= d0` replays the recorded walk
+    /// exactly and trips no later, so `to_snap_depth` skips it. See DEC for TICKET-119.
+    doom: super::fxhash::FxHashMap<GcRef, (u32, usize)>,
+    /// TICKET-119 — every node/cell that attempt minted -> its id there, which is its enter stamp.
+    doom_ids: super::fxhash::FxHashMap<GcRef, u32>,
+    /// TICKET-119 — highest `doom_ids` stamp touched since the recording; a record is valid only
+    /// while its enter stamp is above it.
+    doom_invalid_upto: Option<u32>,
 }
 
 impl WireMemo {
+    /// TICKET-119 — `h` may be about to become a `Backref` target: invalidate every `doom` record
+    /// whose recorded sub-walk contains it.
+    fn doom_touch(&mut self, h: GcRef) {
+        if self.doom_ids.is_empty() {
+            return;
+        }
+        if let Some(&s) = self.doom_ids.get(&h) {
+            self.doom_invalid_upto = Some(self.doom_invalid_upto.map_or(s, |u| u.max(s)));
+        }
+    }
+
     /// W7-4c — the id this cell already crosses under, from the overlay or the shared base.
     fn cell_id(&self, h: GcRef) -> Option<u32> {
         self.cells.get(&h).copied().or_else(|| {
@@ -3371,13 +3400,44 @@ impl Vm {
     /// `RuntimeError` (placeholder `Span{0,0}`, re-stamped with the real airlock site by `to_wire_at`).
     /// Kept in lockstep with [`Vm::to_snap`] (which shares this budget on its fast path) so the serial
     /// and M:N engines trip at the identical depth.
+    #[inline(always)]
     fn to_wire_depth(
         &self,
         v: Value,
         depth: usize,
         memo: &mut WireMemo,
     ) -> Result<WireValue, RuntimeError> {
+        if !memo.speculating {
+            return self.to_wire_depth_inner(v, depth, memo);
+        }
+        let enter = memo.next_id;
+        if let Some(h) = v.as_obj() {
+            memo.doom_touch(h);
+        }
+        let r = self.to_wire_depth_inner(v, depth, memo);
+        match &r {
+            Ok(WireValue::Backref(_)) => memo.shortcut_at = Some(memo.next_id),
+            Err(_) if memo.depth_tripped => {
+                if let Some(h) = v.as_obj()
+                    && memo.shortcut_at.is_none_or(|s| enter > s)
+                {
+                    memo.doom_pending.push((h, enter, depth));
+                }
+            }
+            _ => {}
+        }
+        r
+    }
+
+    /// TICKET-119 — the walk itself, wrapped by `to_wire_depth` for doomed-attempt bookkeeping.
+    fn to_wire_depth_inner(
+        &self,
+        v: Value,
+        depth: usize,
+        memo: &mut WireMemo,
+    ) -> Result<WireValue, RuntimeError> {
         if self.walk_base + depth > MAX_STRUCTURAL_DEPTH {
+            memo.depth_tripped = true;
             return Err(self.depth_exceeded_err(Span::default()));
         }
         // TICKET-100: a `to_wire_crossable_split` store (the three `RwShared` stores) re-emits each
@@ -3840,7 +3900,12 @@ impl Vm {
                 // definition DEDUPES on rebuild, so identity is unchanged either way.
                 Obj::Cell(v) => {
                     let id = match memo.cell_id(h) {
-                        Some(id) => id,
+                        Some(id) => {
+                            if memo.speculating {
+                                memo.shortcut_at = Some(memo.next_id);
+                            }
+                            id
+                        }
                         None => {
                             let id = memo.next_id;
                             memo.next_id += 1;
@@ -5512,6 +5577,11 @@ impl Vm {
             memo.nodes.clear();
             memo.gens_seen.clear();
             for (k, v) in globals {
+                // TICKET-119 — a `doom` record only describes the global whose walk made it: clear
+                // before each global's own walk, so no global's skip decision depends on another's.
+                memo.doom.clear();
+                memo.doom_ids.clear();
+                memo.doom_invalid_upto = None;
                 reusable &= self.slot_snapshot_reusable(v);
                 snapped.push((k, self.to_snap(v, &mut memo)?));
             }
@@ -5674,6 +5744,9 @@ impl Vm {
         let mint_from = memo.next_id;
         memo.emit_undo.clear();
         memo.gens_undo.clear();
+        memo.depth_tripped = false;
+        memo.shortcut_at = None;
+        memo.doom_pending.clear();
         memo.speculating = true;
         let attempt = self.to_wire_depth(v, depth, memo);
         memo.speculating = false;
@@ -5684,8 +5757,28 @@ impl Vm {
                 Some(w)
             }
             _ => {
-                memo.cells.retain(|_, id| *id < mint_from);
-                memo.nodes.retain(|_, id| *id < mint_from);
+                let record = memo.depth_tripped;
+                if record {
+                    memo.doom.clear();
+                    memo.doom_ids.clear();
+                    memo.doom_invalid_upto = None;
+                    for (h, e, d) in memo.doom_pending.drain(..) {
+                        memo.doom.insert(h, (e, d));
+                    }
+                }
+                let doom_ids = &mut memo.doom_ids;
+                memo.cells.retain(|h, id| {
+                    if record && *id >= mint_from {
+                        doom_ids.insert(*h, *id);
+                    }
+                    *id < mint_from
+                });
+                memo.nodes.retain(|h, id| {
+                    if record && *id >= mint_from {
+                        doom_ids.insert(*h, *id);
+                    }
+                    *id < mint_from
+                });
                 // Newest-first, so an id marked twice in one attempt lands back on its ORIGINAL entry.
                 for (id, prev) in memo.emit_undo.drain(..).rev() {
                     match prev {
@@ -5742,7 +5835,13 @@ impl Vm {
         // `to_wire` Err → we fall to the slow arm, which re-raises that real reject.
         // W7-4: SPECULATIVE — the attempt is discarded when the value carries a handle, so the memo
         // must be rolled back on that branch (`try_wire_speculative`).
-        if let Some(w) = self.try_wire_speculative(v, depth, memo, |w| !w.has_handle()) {
+        // TICKET-119: skip the attempt entirely when an EARLIER depth-tripped attempt already proved,
+        // by an exact replay argument, that a walk from `h` at this depth or deeper trips no later —
+        // see DEC for TICKET-119.
+        let doomed = memo.doom.get(&h).is_some_and(|&(enter, d0)| {
+            depth >= d0 && memo.doom_invalid_upto.is_none_or(|u| enter > u)
+        });
+        if !doomed && let Some(w) = self.try_wire_speculative(v, depth, memo, |w| !w.has_handle()) {
             return Ok(SnapValue::Wire(w));
         }
         Ok(match self.heap.get(h).clone() {
@@ -5932,6 +6031,9 @@ impl Vm {
             // source-reachable: `p := [k]` captured by two closures over one binding read `1` where
             // CPython measures `3`.
             Obj::Cell(v) => {
+                // TICKET-119: this arm mints a Backref target directly (bypassing the speculative
+                // wrapper), so a doom record whose recorded sub-walk contains `h` is now invalid.
+                memo.doom_touch(h);
                 let id = match memo.cell_id(h) {
                     Some(id) => id,
                     None => {
