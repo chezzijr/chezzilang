@@ -3963,6 +3963,11 @@ impl Vm {
                 // still runs to completion; that is Java's contract too.
                 core.cancel
                     .store(true, std::sync::atomic::Ordering::Relaxed);
+                // TICKET-118 (W13-8) — a cancel is a wake source too: without this poke, a worker
+                // deciding under its own core lock could read the flag on both sides of the trip and
+                // park untimed, leaving a job's cancelled nursery child un-drained until some later
+                // unrelated wake reached it.
+                crate::vm::sched::poke_live_scheds(&self.sched_registry);
                 // …then JOIN, exactly like `shutdown`. Java's `shutdownNow` returns without
                 // waiting because it hands back the never-started tasks and you follow up with
                 // `awaitTermination`; Chezzi has no such follow-up call, so not waiting here

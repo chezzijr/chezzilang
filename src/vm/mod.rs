@@ -2474,10 +2474,10 @@ impl SchedCore {
     /// prevent is only possible while parked fibers are still owed their `cancel_drain`; once drained
     /// they are in `global` (`runnable > 0`), so the predicate is false on its own terms and the veto is
     /// no longer needed. A cancelled scope cannot RE-accumulate parked fibers after its drain: every
-    /// park path re-checks THIS scope's cancel (`park`/`park_wait` re-read
-    /// `c.scopes[fiber.scope_id].cancel` under the core lock and requeue `Ready` instead of parking;
-    /// `poll_park_offload` hands the netpoller's `register` that same per-scope flag, which rejects the
-    /// park under the registry lock `drain_sched` sweeps under) — pinned by
+    /// park path re-checks this scope's cancel OR an ancestor's (`park`/`park_send`/`park_wait` re-read
+    /// `c.scope_cancel_tripped(fiber.scope_id)` under the core lock and requeue `Ready` instead of
+    /// parking; `poll_park_offload` hands the netpoller's `register` the scope's own flag only, which
+    /// rejects the park under the registry lock `drain_sched` sweeps under) — pinned by
     /// `mnsched_park_requeues_when_cancel_tripped` and `poll_park_rejects_cancelled_inner_scope`. The
     /// NETPOLLER half of the drain window needs no veto at all: a poll-parked fiber is deliberately NOT
     /// in `parked` and `poll_park_offload` accounts it running→`inflight`, and `is_deadlocked` already
@@ -2486,10 +2486,25 @@ impl SchedCore {
     /// therefore a REAL deadlock, and `demote_recv_block`'s self-detect reports it instead of hanging
     /// (`mnsched_cancelled_scope_whose_only_fiber_is_demoted_is_deadlock`).
     fn any_cancelled_scope_awaiting_drain(&self) -> bool {
-        self.scopes.iter().enumerate().any(|(sid, s)| {
-            s.done < s.total
-                && s.cancel.load(Ordering::Relaxed)
-                && self.scope_has_undrained_park(sid)
+        self.cancelled_scope_awaiting_drain().is_some()
+    }
+
+    /// TICKET-118 (W13-8) — is scope `sid`'s cancel flag itself set, or any ancestor's (an
+    /// `Executor`'s `shutdown_now` trips a flag a job's nursery scope carries in
+    /// `JoinScope::ancestors`, installed by `Vm::run_one_fiber` as this fiber's `cancel_outer`)?
+    fn scope_cancel_tripped(&self, sid: usize) -> bool {
+        let s = &self.scopes[sid];
+        s.cancel.load(Ordering::Relaxed) || s.ancestors.iter().any(|a| a.load(Ordering::Relaxed))
+    }
+
+    /// TICKET-118 (W13-8) — the first scope (if any) whose own flag or an ancestor's is tripped,
+    /// still incomplete, and still owing a `cancel_drain` to some parked fiber. `MnSched::take_runnable`
+    /// drains it before judging a deadlock; every other caller reads the own-flag-only
+    /// `any_cancelled_scope_awaiting_drain` above.
+    fn cancelled_scope_awaiting_drain(&self) -> Option<usize> {
+        (0..self.scopes.len()).find(|&sid| {
+            let s = &self.scopes[sid];
+            s.done < s.total && self.scope_cancel_tripped(sid) && self.scope_has_undrained_park(sid)
         })
     }
 
@@ -3134,12 +3149,30 @@ impl MnSched {
                     return Take::Stop;
                 }
             }
+            // TICKET-118 (W13-8) — drain a cancelled family's parked fibers BEFORE judging a
+            // deadlock, so a `shutdown_now` (or any scope-cancel) that trips an ANCESTOR flag a
+            // parked fiber's own re-check can't see (`SchedCore::scope_cancel_tripped`, only read by
+            // `park`/`park_send`/`park_wait`, not by this predicate scan) still requeues that fiber
+            // instead of getting faulted as deadlocked. `cancel_drain` moves the family's parks to
+            // `global`; each requeued fiber re-checks the same flags at its recv/send/`wait:`
+            // checkpoint and unwinds; a `defer` body demotes and never parks so it is unaffected; a
+            // park landing after the trip is caught by step 8's own re-check, not this scan. ONE read
+            // per lock hold: a trip landing between two separate reads could let this scan say
+            // `false` while the N4 veto inside `is_deadlocked`/`local_quiesced` said `true` (or vice
+            // versa), parking the worker on a stale verdict (TICKET-118 plan-validation, 2026-09-15
+            // 10:59Z) — `awaiting_drain` threads this ONE read into both calls below instead.
+            if let Some(sid) = c.cancelled_scope_awaiting_drain() {
+                drop(c);
+                self.cancel_drain(sid);
+                continue;
+            }
+            let awaiting_drain = Some(false);
             // D4a — deadlock predicate reads the authoritative `runnable` count rather than
             // `global.is_empty()`: under the split queues there is no single queue to test, but
             // `runnable == 0` means no fiber is queued in any local or the global. Sound because we
             // hold the core lock and `running == 0` excludes the only out-of-lock mutator (a running
             // worker's local push/steal), so no fiber can be in flight to become runnable.
-            if self.is_deadlocked(&c) {
+            if self.is_deadlocked_given(&c, awaiting_drain) {
                 // TICKET-103 — fault joined leaves first. A non-terminating flag `continue`s: a
                 // SENTINEL helper treats `Stop` as exit-forever, and the leaf's inline owner reaches
                 // its scope-scoped owner stop on the next pass.
@@ -3164,7 +3197,10 @@ impl MnSched {
             // hang, not a style nit. Everything below the gap is therefore re-derived: `continue`
             // rather than fall through, so `c.terminate` and the queue gates at the top of the loop
             // are re-evaluated rather than skipped with a stale verdict (a lost wakeup otherwise).
-            if !judged && !self.body_held_by_fiber(&c) && self.local_quiesced(&c) {
+            if !judged
+                && !self.body_held_by_fiber(&c)
+                && self.local_quiesced_given(&c, awaiting_drain)
+            {
                 // TICKET-099 — `judged` is set BEFORE the peer veto below, not after. It is what
                 // selects the timed `DEMOTE_POLL_BACKOFF` park further down over the untimed
                 // `self.cv.wait(c)` — and a vetoed sched needs that timed park: nothing notifies this
@@ -3363,7 +3399,7 @@ impl MnSched {
         let latched = core.done_latch.load(Ordering::Relaxed);
         // Cross-nursery flat scheduler — read the PARKING fiber's SCOPE cancel (not the sched's global
         // `cancel`), so an inner fault that tripped only its scope re-checks the right flag here.
-        let cancelled = c.scopes[fiber.scope_id].cancel.load(Ordering::Relaxed);
+        let cancelled = c.scope_cancel_tripped(fiber.scope_id);
         if message_waiting || closed || latched || cancelled {
             fiber.state = FiberState::Ready;
             c.global.push_back(fiber);
@@ -3409,7 +3445,7 @@ impl MnSched {
             let g = core.q.lock().unwrap_or_else(|e| e.into_inner());
             (g.has_send_slot(core.cap), g.closed)
         };
-        let cancelled = c.scopes[fiber.scope_id].cancel.load(Ordering::Relaxed);
+        let cancelled = c.scope_cancel_tripped(fiber.scope_id);
         // TICKET-042a — an outstanding rendezvous deposit overrides the ordinary space re-check: a
         // transient free slot must not requeue a fiber whose deposit is still `DEPOSIT_QUEUED` (that
         // spins), and a taken/withdrawn deposit must requeue regardless of `space` so the fiber can
@@ -3519,7 +3555,7 @@ impl MnSched {
         // recv arm is ready with a queued value / on close; a SEND arm is ready with a FREE slot (a
         // bounded channel below capacity, or unbounded — always) / on close. Using the recv predicate
         // for a full send arm would (wrongly) call it "ready" and spin requeue→re-poll→still-full→re-park.
-        let mut ready_now = c.scopes[fiber.scope_id].cancel.load(Ordering::Relaxed);
+        let mut ready_now = c.scope_cancel_tripped(fiber.scope_id);
         // W7-2 — arm accounting is THREE-way, mirroring `op_wait_poll` exactly: READY (take the arm
         // now), DEAD (closed+empty recv arm — the poll SKIPS it and only counts it toward
         // `all_closed`), or LIVE (empty but still wakeable). `any_live` tracks the third.
@@ -4190,6 +4226,13 @@ impl MnSched {
     /// core lock (the caller holds `c`); `running == 0` excludes the only out-of-lock `runnable`
     /// mutator, and `inflight` is mutated only under the core lock, so both reads are sound.
     fn is_deadlocked(&self, c: &SchedCore) -> bool {
+        self.is_deadlocked_given(c, None)
+    }
+
+    /// TICKET-118 (W13-8) — [`MnSched::is_deadlocked`], parameterised on an already-computed
+    /// `cancelled_scope_awaiting_drain` read (see [`MnSched::quiesced_core_given`]). `None` reads
+    /// live, matching `is_deadlocked`'s old behaviour exactly.
+    fn is_deadlocked_given(&self, c: &SchedCore, awaiting_drain: Option<bool>) -> bool {
         // W7-56 — an eager `Executor` job outstanding anywhere in this RUN is a live sender the
         // counters below cannot see: it runs on the shared pool with no fiber of this sched, so it
         // bumps neither `running`/`runnable` nor `inflight`, and a nursery task parked on the channel
@@ -4215,7 +4258,7 @@ impl MnSched {
         if crate::vm::quiesce::QuiesceState::outstanding_jobs(&self.exec_registry) > 0 {
             return false;
         }
-        self.is_deadlocked_ignoring_jobs(c)
+        self.is_deadlocked_ignoring_jobs_given(c, awaiting_drain)
     }
 
     /// [`MnSched::is_deadlocked`] minus its W7-56 outstanding-job veto — "can THIS sched still move on
@@ -4244,7 +4287,13 @@ impl MnSched {
     /// the chain **P → A → Q**, which is the established total order (`parties` → `SchedCore` →
     /// `ChannelCore::q`); `A → Q` is the order `send_wake` and the demoted peek already use.
     pub(super) fn local_quiesced(&self, c: &SchedCore) -> bool {
-        self.quiesced_core(c, true)
+        self.local_quiesced_given(c, None)
+    }
+
+    /// TICKET-118 (W13-8) — [`MnSched::local_quiesced`], parameterised on an already-computed
+    /// `cancelled_scope_awaiting_drain` read.
+    fn local_quiesced_given(&self, c: &SchedCore, awaiting_drain: Option<bool>) -> bool {
+        self.quiesced_core_given(c, true, awaiting_drain)
     }
 
     /// TICKET-101 — `local_quiesced`'s body, parameterised on whether the D5 Path-C clause (below)
@@ -4258,6 +4307,20 @@ impl MnSched {
     /// collapse the two calls: passing `true` at the peer site re-hangs the genuine nested deadlock this
     /// ticket fixes; passing `false` at either fault-path site hands the verdict a sched with no victim.
     fn quiesced_core(&self, c: &SchedCore, require_parked: bool) -> bool {
+        self.quiesced_core_given(c, require_parked, None)
+    }
+
+    /// TICKET-118 (W13-8) — [`MnSched::quiesced_core`], parameterised on an already-computed
+    /// `cancelled_scope_awaiting_drain` read: `None` reads live (every caller except the
+    /// `MnSched::take_runnable` W13-8 drain trigger), `Some(_)` reuses that ONE read so the N4 veto
+    /// below and the trigger's own drain decision can never disagree inside the same lock hold (a
+    /// trip landing between two reads would otherwise let one say `false` and the other `true`).
+    fn quiesced_core_given(
+        &self,
+        c: &SchedCore,
+        require_parked: bool,
+        awaiting_drain: Option<bool>,
+    ) -> bool {
         // The `done < total` half is now explicit (the owner-stop replaced the preceding scalar
         // `done == total` terminate check). If EVERY scope is done there is no deadlock — `finish` will
         // have (or is about to) set global `terminate`; the owner-stop returns each owner already.
@@ -4343,7 +4406,9 @@ impl MnSched {
         // `deferring > 0`) IS a genuine deadlock and is reported, not hung. Evaluated only at the
         // quiesce (after the counter gate above), so the scan is off the idle/steal hot path. A GENUINE
         // deadlock (nothing cancelled anywhere) is untouched.
-        if c.any_cancelled_scope_awaiting_drain() || c.any_demoted_cancel_pending() {
+        if awaiting_drain.unwrap_or_else(|| c.any_cancelled_scope_awaiting_drain())
+            || c.any_demoted_cancel_pending()
+        {
             return false;
         }
         // D5 owe #3 Path C (#1 false-positive fix) — before declaring deadlock, peek every demoted
@@ -4444,9 +4509,19 @@ impl MnSched {
     /// letting the child's fault propagate up through the blocked fiber's own return and trip the
     /// parent's scope cancel the ordinary way (`Vm::classify_mn_outcome` → `Vm::trip_cancel`).
     pub(super) fn is_deadlocked_ignoring_jobs(&self, c: &SchedCore) -> bool {
+        self.is_deadlocked_ignoring_jobs_given(c, None)
+    }
+
+    /// TICKET-118 (W13-8) — [`MnSched::is_deadlocked_ignoring_jobs`], parameterised on an
+    /// already-computed `cancelled_scope_awaiting_drain` read.
+    fn is_deadlocked_ignoring_jobs_given(
+        &self,
+        c: &SchedCore,
+        awaiting_drain: Option<bool>,
+    ) -> bool {
         c.cross_sched_blocked_owners == 0
             && !self.body_held_by_fiber(c)
-            && self.local_quiesced(c)
+            && self.local_quiesced_given(c, awaiting_drain)
             && !self.any_peer_can_move()
     }
 

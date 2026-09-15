@@ -300,12 +300,17 @@ fn sleep_synchronised_tests() -> BTreeSet<String> {
 /// rejected it (the walk returns 68). Obtain it by compiling once with an empty array and copying
 /// the "sleeps but is not listed" list `no_new_rust_test_sleeps_to_order_two_events` reports,
 /// verbatim, the same way `stack_trace_reports_call_chain`'s golden was obtained.
-const SLEEP_SYNCHRONISED_TESTS: [&str; 85] = [
+const SLEEP_SYNCHRONISED_TESTS: [&str; 87] = [
     "cousin_fed_completes_instead_of_hanging_at_two_and_four_workers",
     "a_bailed_join_stops_its_jobs_from_starting_new_work",
     "a_cancelled_siblings_defer_runs_whole_on_both_engines",
     "a_finished_executor_job_lets_the_genuine_nursery_deadlock_fire",
     "a_finished_jobs_output_survives_a_timeout_bail",
+    // TICKET-118. Its 300ms `time.sleep_ms` is inside the fixture .chz program's SOURCE STRING, not
+    // a happens-before edge in this Rust test's own control flow -- the test asserts the child's
+    // final rc and stderr, not an ordering the sleep enforces here (the negative control: NO
+    // shutdown_now, so this must still fault).
+    "a_job_nursery_deadlock_with_no_shutdown_still_faults",
     "a_job_submitted_to_mains_executor_survives_another_executors_shutdown_now_mn",
     "a_leaked_job_from_a_top_level_executor_still_aborts_a_later_test",
     "a_leaked_jobs_exit_is_attributed_to_the_test_that_leaked_it",
@@ -400,6 +405,10 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 85] = [
     // (the job reaching its nursery park before `shutdown_now()`) is why TICKET-118 ADDS the
     // handshake-synchronised twin DEC-050 asks for rather than converting this one: this is the
     // ticket's declared `test_file`, and a planning stage may not repoint that field.
+    // TICKET-118. Its 300ms `time.sleep_ms` is inside the fixture .chz program's SOURCE STRING, not
+    // a happens-before edge in this Rust test's own control flow -- the test asserts the child's
+    // final rc and stdout, not an ordering the sleep enforces here.
+    "shutdown_now_cancels_a_depth_two_nursery_child",
     "shutdown_now_cancels_a_jobs_nursery_child_blocked_on_recv",
     // TICKET-101. The sleep is a deadline poll (20ms) over a child process that hangs before the
     // fix and never closes its pipes, not a happens-before edge between two events in this test.

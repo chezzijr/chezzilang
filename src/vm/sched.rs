@@ -6541,23 +6541,28 @@ pub(super) fn dispatch_eager_job(
         // re-evaluates: without this, a job that ends WITHOUT sending leaves the veto's consumers
         // asleep forever (idle workers `cv.wait` untimed) — turning a program that correctly faults
         // `deadlock` today into a silent hang.
-        //
-        // The lock is taken and dropped rather than a bare `notify_all`, and that is what makes it
-        // reliable: a worker that read `outstanding == 1` inside `is_deadlocked` did so under this
-        // same core lock, so acquiring it here happens-after that read completes — the worker is
-        // either already on the condvar (and gets the notify) or has not yet taken the lock (and
-        // will read the new count). A bare notify could land in the gap and be lost.
-        {
-            let mut g = sched_registry.lock().unwrap_or_else(|e| e.into_inner());
-            let live: Vec<_> = g.iter().filter_map(|w| w.upgrade()).collect();
-            g.retain(|w| w.strong_count() > 0);
-            drop(g);
-            for s in live {
-                drop(s.lock());
-                s.cv.notify_all();
-            }
-        }
+        poke_live_scheds(&sched_registry);
     }));
+}
+
+/// TICKET-118 (W13-8), extracted from `dispatch_eager_job`'s completion closure — poke every live
+/// sched of `sched_registry` so an idle worker re-evaluates whatever it is waiting on. The lock is
+/// taken and dropped rather than a bare `notify_all`, and that is what makes it reliable: a worker
+/// that read the stale state inside its predicate did so under this same core lock, so acquiring it
+/// here happens-after that read completes — the worker is either already on the condvar (and gets
+/// the notify) or has not yet taken the lock (and will read the new state). A bare notify could land
+/// in the gap and be lost. Also called by `shutdown_now`: a cancel store is a wake source too, and
+/// without this poke a worker deciding under its own core lock could read the flag on both sides of
+/// the trip and park untimed (TICKET-118 plan-validation, 2026-09-15 10:59Z).
+pub(super) fn poke_live_scheds(sched_registry: &crate::vm::SchedRegistry) {
+    let mut g = sched_registry.lock().unwrap_or_else(|e| e.into_inner());
+    let live: Vec<_> = g.iter().filter_map(|w| w.upgrade()).collect();
+    g.retain(|w| w.strong_count() > 0);
+    drop(g);
+    for s in live {
+        drop(s.lock());
+        s.cv.notify_all();
+    }
 }
 
 /// TICKET-095 — RAII handle for `SchedCore::blocked_owners`. Held across the span in which a fiber's

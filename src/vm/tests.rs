@@ -7999,6 +7999,86 @@ fn mnsched_park_requeues_when_cancel_tripped() {
     assert_eq!(c.global.len(), 1);
 }
 
+/// TICKET-118 (W13-8) — the park-gap guard must also requeue on an ANCESTOR's cancel, not just this
+/// scope's own flag: an `Executor`'s `shutdown_now` trips a flag a job's nursery scope carries in
+/// `JoinScope::ancestors`, not `scopes[sid].cancel` itself.
+#[test]
+fn mnsched_park_requeues_when_an_ancestor_cancel_is_tripped() {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let sched = MnSched::new(1, 4, Arc::clone(&cancel), dl_err(), 0);
+    let core = empty_core();
+    sched.seed(vec![mk_fiber(0)]);
+    let f = take_run(&sched);
+    sched.lock().scopes[0]
+        .ancestors
+        .push(Arc::new(AtomicBool::new(true)));
+    sched.park(core_key(&core), &core, f);
+    let c = sched.lock();
+    assert_eq!(
+        c.parked_n, 0,
+        "must not park a fiber whose ancestor is cancelled"
+    );
+    assert_eq!(c.global.len(), 1);
+}
+
+/// TICKET-118 (W13-8) — `take_runnable`'s drain trigger must requeue a park whose ancestor's cancel
+/// tripped AFTER the fiber parked (not just before, as the park-gap guard above covers), so a
+/// `shutdown_now` racing a job's nursery `recv` still ends it instead of getting judged deadlocked.
+#[test]
+fn mnsched_take_runnable_drains_a_park_whose_ancestor_cancel_tripped_after_it_parked() {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let sched = MnSched::new(1, 4, Arc::clone(&cancel), dl_err(), 0);
+    let ancestor = Arc::new(AtomicBool::new(false));
+    sched.lock().scopes[0].ancestors.push(Arc::clone(&ancestor));
+    let core = empty_core();
+    sched.seed(vec![mk_fiber(0)]);
+    let f = take_run(&sched);
+    sched.park(core_key(&core), &core, f);
+    assert_eq!(
+        sched.lock().parked_n,
+        1,
+        "fiber parks while the ancestor is not yet cancelled"
+    );
+    ancestor.store(true, Ordering::Relaxed);
+    assert!(matches!(sched.take_runnable(0, 1, 0), Take::Run(_)));
+    assert_eq!(
+        sched.lock().parked_n,
+        0,
+        "drain trigger must requeue the park before judging deadlock"
+    );
+}
+
+/// TICKET-118 (W13-8) — `poke_live_scheds` must take each live sched's core lock before it notifies,
+/// not just call `notify_all` bare: a `cv.notify_all()` with no lock held can race a worker about to
+/// wait and be lost, which is exactly the lost-wakeup shape `shutdown_now`'s cancel store needs
+/// closed. Proven by observing the poke's completion (a channel send AFTER it returns) stay blocked
+/// while this test holds the sched's core lock, then unblock the instant the lock is released.
+#[test]
+fn poke_live_scheds_takes_each_sched_core_lock_before_notifying() {
+    let sched = Arc::new(mk_sched(1));
+    let registry: Vec<std::sync::Weak<MnSched>> = vec![Arc::downgrade(&sched)];
+    let registry: crate::vm::SchedRegistry = Arc::new(Mutex::new(registry));
+
+    let guard = sched.lock();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let poke_registry = Arc::clone(&registry);
+    let handle = std::thread::spawn(move || {
+        crate::vm::sched::poke_live_scheds(&poke_registry);
+        tx.send(()).unwrap();
+    });
+    assert!(
+        rx.recv_timeout(std::time::Duration::from_millis(100))
+            .is_err(),
+        "poke_live_scheds must block on the held core lock before it can notify"
+    );
+    drop(guard);
+    assert!(
+        rx.recv_timeout(std::time::Duration::from_secs(10)).is_ok(),
+        "poke_live_scheds must complete once the core lock is released"
+    );
+    handle.join().unwrap();
+}
+
 /// D2b/U4: every not-done fiber parked, none running, run queue empty ⇒ deadlock. `take_runnable`
 /// detects it, records a `Deadlocked` outcome (`err.message == DEADLOCK_MSG`) for every parked
 /// fiber, and terminates.
