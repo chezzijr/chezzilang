@@ -1391,6 +1391,26 @@ impl Checker {
                     && let Err(msg) = crate::fmtspec::spec_valid_for_scalar(fs, kind)
                 {
                     self.error(span, msg);
+                } else if let Some(fs) = spec
+                    && matches!(
+                        &ty,
+                        Ty::List(_)
+                            | Ty::Map(..)
+                            | Ty::Set(_)
+                            | Ty::Tuple(_)
+                            | Ty::Option(_)
+                            | Ty::Result(..)
+                    )
+                    && let Err(msg) =
+                        crate::fmtspec::spec_valid_for_scalar(fs, crate::fmtspec::ScalarKind::Str)
+                {
+                    // TICKET-124 (W13-18): a List/Map/Set/tuple/Option/Result value renders via the
+                    // runtime's `FmtArg::Other` → `render_str` path — same string-format rules a
+                    // scalar `Str` value follows — so a spec that fails those rules is provably
+                    // wrong here too, and `docs/syntax.md` says the mismatch is caught by `check`
+                    // whenever the static type is concrete (an `Option`/`Result`/collection IS, and
+                    // is never `T`/`Unknown`/a protocol existential — the runtime backstop's domain).
+                    self.error(span, format!("{msg} ({ty} is formatted as its text form)"));
                 }
                 ord += 1;
             }
@@ -5078,6 +5098,13 @@ impl Checker {
 /// → `render_str` path). Everything else (Unknown, `Param(T)`, protocols, structs, lists, bytes, …)
 /// returns `None` so the static check is skipped and the runtime keeps its identical backstop — the
 /// soundness boundary that lets a generic body `"{v:.2f}"` (v: T could be float) pass check.
+///
+/// TICKET-124 (W13-18): `check_interp_chunks`'s caller has its own sibling branch for a CONCRETE
+/// container (`List`/`Map`/`Set`/tuple/`Option`/`Result`), which is not `scalar_kind_of` and not
+/// added here — a container is never a "scalar" and mixing it into this map would license a spec
+/// this fn's own callers never expect for a scalar (`d`/`x`/`.2f` are meaningless on a `List`). The
+/// container branch checks against `ScalarKind::Str` directly instead, since a container renders via
+/// the same `render_str` path a scalar `Str` does.
 fn scalar_kind_of(ty: &Ty) -> Option<crate::fmtspec::ScalarKind> {
     use crate::fmtspec::ScalarKind;
     match ty {

@@ -32559,6 +32559,24 @@ fn format_spec_mismatch_against_option_float_caught_at_check_time() {
     );
 }
 
+#[test]
+fn format_spec_on_container_rejected_at_check() {
+    rejects(
+        "fn main():\n    xs := [1]\n    print(\"{xs:d}\")\n",
+        "format spec: type 'd' not valid for a string (List[int] is formatted as its text form)",
+    );
+    rejects(
+        "fn main():\n    n: int? = None\n    print(\"{n:+}\")\n",
+        "sign '+' not allowed on a string",
+    );
+}
+
+#[test]
+fn format_spec_on_container_width_still_accepted() {
+    ok("fn main():\n    o: float? = Some(1.5)\n    print(\"{o:>12}\")\n");
+    ok("fn show[T](v: T) -> str:\n    return \"{v:.2f}\"\n\nfn main():\n    print(show(1.5))\n");
+}
+
 const GENERIC_CTOR_WIDEN_PRELUDE: &str = "struct Pair[T]:\n    a: T\n    b: T\n\nstruct Box[T]:\n    v: T\n\nenum E[T]:\n    V(T, T)\n\nfn id[T](x: T) -> T:\n    return x\n\nfn mx[T: Comparable](a: T, b: T) -> T:\n    if a > b:\n        return a\n    return b\n\n";
 
 #[test]
