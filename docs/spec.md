@@ -554,8 +554,9 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   `float! = Ok(3)`, `fn f() -> List[float]?: return [1, 2]`, and a non-literal RHS
   (`List[float] = f()`) all stay type errors (use explicit floats or a literal). An un-annotated mixed collection with a TYPED int element
   (`a := 1; xs := [a, 2.5]`) is an error — no type context, no adaptation; annotate AND write
-  `float(a)`. One further restriction: a plain reassignment `x = 3` to a `float` local is rejected
-  (type-blind target). The same scalar-only rule governs
+  `float(a)`. A plain reassignment, index-assign or field-assign into a declared `float` slot widens
+  the same untyped int constant (`x: float = 1.5; x = 1`; TICKET-124) — see `docs/syntax.md` for the
+  full sink list. The same scalar-only rule governs
   **un-annotated multi-branch return inference**: sibling `return` branches merge with a join. It does
   **not** widen `int`→`float` across branches — an inferred return is not a widening *sink* (widening
   emits `Op::CoerceFloat` only at an explicit sink), so mixed `if c: return 1 else: return 2.0`

@@ -680,9 +680,6 @@ Widening is **scalar-or-element-at-the-sink** — a nested / type-argument float
 `List[List[float]] = [[1]]`, `float? = Some(3)`, `float! = Ok(3)`,
 `fn f() -> List[float]?: return [1, 2]`, and a non-literal RHS (`List[float] = f()`) all stay type
 errors; write explicit floats (`[[1.0]]`, `Some(3.0)`) or a literal.
-One further scoped restriction: a plain
-reassignment `x = 3` to a `float`-declared local is rejected (a reassignment target is type-blind, like
-`p.x = 3`).
 
 ## 4. Operators & precedence
 
