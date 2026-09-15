@@ -342,8 +342,10 @@ top-to-bottom like any other file; with a `:function` suffix the entry function 
 missing/non-function name is a clear error), so the source needs no trailing call. An entry function
 may legitimately be `-> T!` and use `?`; if it returns `Err`/`None`, `chezzi run` surfaces it as
 `unhandled error: …` (rc=1), symmetric with the unhandled-top-level rule. The fault names the entry
-function's own declaration in the entry file, rather than a bare `line 1, col 1`; an entrypoint bound
-to a closure or a native fn has no declaration to name, so it keeps the bare coordinate. Without the
+function's own declaration — the entry file for an ordinary `fn`, or wherever a module-global alias
+(`main := helper`) points if `helper` is declared elsewhere — rather than a bare `line 1, col 1`; an
+entrypoint bound to a closure or a native fn has no declaration to name, so it keeps the bare
+coordinate. Without the
 suffix the module just runs top-to-bottom (no entry function is called). Running an explicit file (`chezzi run <file>`)
 is always top-level-only.
 
