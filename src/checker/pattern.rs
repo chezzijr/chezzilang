@@ -926,7 +926,7 @@ impl Checker {
                         // `=` assigns an existing outer lvalue — reuse the ordinary assignment checks
                         // (assignability, type match, read-only/loop-var gates).
                         WaitTarget::Assign(target) => {
-                            self.check_assign(target, AssignOp::Eq, elem, arm.span)
+                            self.check_assign(target, AssignOp::Eq, elem, arm.span, None)
                         }
                         WaitTarget::Discard => {}
                     }

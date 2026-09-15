@@ -4494,16 +4494,26 @@ impl Checker {
             // The widen license: the sink must be an untyped int CONSTANT *and* — for a substituted
             // param list — the slot must have been DECLARED `float` (not a type param the backend
             // erased). `declared: None` ⇒ `params` are the declared types (the ordinary case).
-            let widen = widen
+            // TICKET-124 (W13-15): a collection-method argument (`push`/`insert`/…) into a `float`
+            // slot widens an untyped int constant exactly like a free-fn call already did — `widen`
+            // itself is FALSE for a builtin-method call (see the TICKET-033 comment above), so this
+            // is its own gate, keyed on `is_collection` rather than the caller's `widen` flag.
+            let coll_widen = is_collection
                 && crate::ast::untyped_int_const(arg)
-                && declared.is_none_or(|d| d.get(i) == Some(&Ty::Float));
+                && params.get(i) == Some(&Ty::Float);
+            let widen = (widen
+                && crate::ast::untyped_int_const(arg)
+                && declared.is_none_or(|d| d.get(i) == Some(&Ty::Float)))
+                || coll_widen;
             // TICKET-054 review fix — `declared: Some(_)` is exactly `check_args_subst`'s calls: a
             // struct/protocol/bound-generic method dispatch, where the runtime witness the backend
             // actually calls may declare this param generically (erased, no prologue coercion) even
             // where THIS `declared` slot reads `float`. Record the call-site verdict so the compiler
             // coerces the literal itself instead of trusting the callee's prologue. See
-            // `Checker::record_arg_float_widen` and `ArgFloatWidenTable`.
-            if declared.is_some() {
+            // `Checker::record_arg_float_widen` and `ArgFloatWidenTable`. A collection-method
+            // argument records for the same reason: `compile_args` reads the table for every
+            // non-ctor call, including a method's.
+            if declared.is_some() || is_collection {
                 self.record_arg_float_widen(arg.span, widen);
             }
             // PART A: passing a bare empty-collection binding (`b := []`) into a CONCRETE collection
@@ -4527,9 +4537,18 @@ impl Checker {
                 // method name `add` also names `Atomic.add` (a handle), whose float mismatch must NOT
                 // show the collection hint — gate on the receiver actually being a collection.
                 let pnote = self.protocol_note(pt, &at);
+                // TICKET-124 (W13-15): a widen-eligible shape (`float` slot, `int` argument) is the
+                // one-way-widening rule falling short of a CONSTANT, not a stale element pin — the
+                // narrative below is false there (the type was DECLARED, not learned from an
+                // earlier use), so `widen_note` names the fix instead.
+                let coll_mismatch_is_float_widen = matches!((pt, &at), (Ty::Float, Ty::Int));
                 let hint = if !pnote.is_empty() {
                     pnote
-                } else if is_collection && i == 0 && matches!(name, "push" | "add" | "insert") {
+                } else if is_collection
+                    && i == 0
+                    && matches!(name, "push" | "add" | "insert")
+                    && !coll_mismatch_is_float_widen
+                {
                     // Only an UN-BOUND/leaked type param (not in scope here) means "un-inferred": a
                     // return-only `T` from `empty[T]()` called with nothing to bind it from. A
                     // `Ty::Param` that IS in scope (`self.type_params`) is a legitimately-bound
@@ -4545,8 +4564,11 @@ impl Checker {
                             " (the collection's element type is the un-inferred type parameter {expected}; bind it at the construction site with a turbofish or annotation, e.g. `empty[int]()` or `xs: List[int] = ...`)"
                         )
                     } else {
+                        // TICKET-124 (W13-15): the old "already pinned … by an earlier use" wording
+                        // was false whenever the slot was DECLARED (`l: List[float] = [1.5]`), not
+                        // learned from an earlier push — say what's actually true of both cases.
                         format!(
-                            " (the collection's element type was already pinned to {expected} by an earlier use; annotate the binding, e.g. `List[<protocol>] = []`, for a mixed/protocol collection)"
+                            " (the collection's element type is {expected}, fixed by its annotation or an earlier use; annotate the binding, e.g. `List[<protocol>] = []`, for a mixed/protocol collection)"
                         )
                     }
                 } else {

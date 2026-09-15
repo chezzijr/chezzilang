@@ -2303,7 +2303,9 @@ impl Checker {
                     Some(t)
                 };
                 self.drop_value_escape_sites(value, sink.as_ref());
-                self.check_assign(target, *op, val_ty, span);
+                let widen_span = (*op == AssignOp::Eq && crate::ast::untyped_int_const(value))
+                    .then_some(value.span);
+                self.check_assign(target, *op, val_ty, span, widen_span);
                 // TICKET-032 A1 — `c = b` (both still unrefined empty collections) is a whole-binding
                 // ALIAS, exactly like `c := b`: link the two names so a later pin on either reaches
                 // both. Recorded BELOW `check_assign`, whose funnel unlink (Ident arm) just broke any
@@ -3471,7 +3473,19 @@ impl Checker {
         }
     }
 
-    pub(super) fn check_assign(&mut self, target: &Expr, op: AssignOp, val_ty: Ty, span: Span) {
+    /// `widen_span` is `Some(value.span)` exactly when the assignment VALUE is an untyped int
+    /// constant (`crate::ast::untyped_int_const`) under a plain `=` — TICKET-124 (W13-15)'s
+    /// reassignment/index-assign/field-assign sink into a `float` slot, coerced by
+    /// `compile_assign`'s matching `Op::CoerceFloat` read of the recorded verdict. `None`
+    /// everywhere else (a compound op, a non-constant value, the Tuple-element recursion).
+    pub(super) fn check_assign(
+        &mut self,
+        target: &Expr,
+        op: AssignOp,
+        val_ty: Ty,
+        span: Span,
+        widen_span: Option<Span>,
+    ) {
         // Task 1 — an index/field-assign (`m[k]=v`, `s.field=x`) on a captured module global inside a
         // task is no longer rejected: spawning deep-copies module globals per task, so the write hits
         // the task's OWN copy. Gate
@@ -3555,7 +3569,7 @@ impl Checker {
                 // the let-binding/for-binding `Local` hover. Simple-Ident lvalue only (Index/Field
                 // targets are handled in their own arms below, where the receiver IS inferred).
                 self.hover_record_at(target.span, &var_ty, HoverKind::Local, None);
-                self.check_assign_value(&var_ty, op, &val_ty, target.span);
+                self.check_assign_value(&var_ty, op, &val_ty, target.span, widen_span);
                 // TICKET-032 A1 — a whole-binding (re)assignment rebinds `name` to a DIFFERENT runtime
                 // object, breaking any alias pair naming it. `+=` on a `List` is the one exception
                 // (DEC-015): it extends IN PLACE and yields the SAME handle, so the pair survives.
@@ -3632,17 +3646,17 @@ impl Checker {
                         {
                             self.error(index.span, format!("map key type {why}"));
                         }
-                        self.check_assign_value(&v, op, &val_ty, target.span);
+                        self.check_assign_value(&v, op, &val_ty, target.span, widen_span);
                     }
                     Ty::List(elem) => {
                         self.expect_int(index, "index");
-                        self.check_assign_value(&elem, op, &val_ty, target.span);
+                        self.check_assign_value(&elem, op, &val_ty, target.span, widen_span);
                     }
                     // `ba[i] = x` — the MUTABLE sibling of bytes. Int index, int value (0–255
                     // validated at runtime). Bytes has NO arm here (immutable); bytearray adds one.
                     Ty::ByteArray => {
                         self.expect_int(index, "index");
-                        self.check_assign_value(&Ty::Int, op, &val_ty, target.span);
+                        self.check_assign_value(&Ty::Int, op, &val_ty, target.span, widen_span);
                     }
                     Ty::Str => {
                         self.expect_int(index, "index");
@@ -3664,7 +3678,7 @@ impl Checker {
                                     format!("index must be {k}, found {idx_ty}"),
                                 );
                             }
-                            self.check_assign_value(&v, op, &val_ty, target.span);
+                            self.check_assign_value(&v, op, &val_ty, target.span, widen_span);
                         } else {
                             self.error(target.span, format!("cannot index-assign into {name}"));
                         }
@@ -3715,7 +3729,13 @@ impl Checker {
                             });
                             match incoherent {
                                 Some(msg) => self.error(target.span, msg),
-                                None => self.check_assign_value(&v, op, &val_ty, target.span),
+                                None => self.check_assign_value(
+                                    &v,
+                                    op,
+                                    &val_ty,
+                                    target.span,
+                                    widen_span,
+                                ),
                             }
                         } else {
                             self.expect_int(index, "index");
@@ -3742,7 +3762,9 @@ impl Checker {
                                 .map(|(_, ty)| subst(ty, &struct_param_map(info, targs)))
                         });
                         match field_ty {
-                            Some(ty) => self.check_assign_value(&ty, op, &val_ty, target.span),
+                            Some(ty) => {
+                                self.check_assign_value(&ty, op, &val_ty, target.span, widen_span)
+                            }
                             None => {
                                 let names = self.field_names(sname);
                                 self.error_help(
@@ -3805,7 +3827,7 @@ impl Checker {
                 }
                 let elems = elems.clone();
                 for (t, ety) in targets.iter().zip(elems) {
-                    self.check_assign(t, AssignOp::Eq, ety, span);
+                    self.check_assign(t, AssignOp::Eq, ety, span, None);
                 }
             }
             _ => self.error(
@@ -3821,10 +3843,20 @@ impl Checker {
         op: AssignOp,
         val_ty: &Ty,
         span: Span,
+        widen_span: Option<Span>,
     ) {
         match op {
             AssignOp::Eq => {
-                if !self.assignable(target_ty, val_ty) {
+                // TICKET-124 (W13-15): an untyped int constant assigned into a `float` slot widens
+                // exactly like the same constant does at a `let`/call-arg/return sink — record the
+                // verdict (true OR false, mirroring `widen_mixed_numeric_args`) so
+                // `compile_assign`'s `Op::CoerceFloat` read never diverges from what this accepted.
+                let widen =
+                    widen_span.is_some() && matches!((target_ty, val_ty), (Ty::Float, Ty::Int));
+                if let Some(s) = widen_span {
+                    self.record_arg_float_widen(s, widen);
+                }
+                if !self.assignable_w(target_ty, val_ty, widen) {
                     let note = self.protocol_note(target_ty, val_ty);
                     self.error(
                         span,

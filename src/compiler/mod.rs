@@ -2679,6 +2679,13 @@ impl Compiler {
             ExprKind::Ident(name) => match op.to_binop() {
                 None => {
                     self.compile_expr(fc, value)?;
+                    // TICKET-124 (W13-15): an untyped int constant widened into a `float` slot at
+                    // check time (`check_assign_value`'s `widen_span`) is coerced HERE — a genuine
+                    // `f64` reaches `emit_store`, which dispatches a local, a captured cell and a
+                    // module global from this one arm alike.
+                    if self.arg_widen_recorded(value.span) {
+                        fc.emit(Op::CoerceFloat, value.span);
+                    }
                     self.emit_store(fc, name, span);
                 }
                 Some(bin) => {
@@ -2715,6 +2722,9 @@ impl Compiler {
                     );
                 } else {
                     self.compile_expr(fc, value)?;
+                    if self.arg_widen_recorded(value.span) {
+                        fc.emit(Op::CoerceFloat, value.span);
+                    }
                     self.emit_assign_value_first(fc, target, span)?;
                 }
             }
@@ -2733,6 +2743,9 @@ impl Compiler {
                     fc.emit(Op::SetIndex, span);
                 } else {
                     self.compile_expr(fc, value)?;
+                    if self.arg_widen_recorded(value.span) {
+                        fc.emit(Op::CoerceFloat, value.span);
+                    }
                     self.emit_assign_value_first(fc, target, span)?;
                 }
             }

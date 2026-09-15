@@ -1140,30 +1140,23 @@ fn widen_compound_float_positions_rejected() {
     );
 }
 
-/// A plain `x = <int>` reassignment to a `float`-declared local is a STRICT assign target (no
-/// widening — the documented carve-out): the checker rejects it. (Annotated/param/return/field DO
-/// widen; a reassignment target is type-blind for the same reason `p.x = 3` is.)
+/// TICKET-124 (W13-14/W13-15) superseded this test's premise: a plain `x = <int>` reassignment to a
+/// `float`-declared local now widens an untyped int CONSTANT exactly like an annotated `let`/call-arg
+/// sink already did — `check_assign_value`'s `widen_span` plus `compile_assign`'s matching
+/// `Op::CoerceFloat`. A TYPED int still rejects (`reassignment_float_widen_rejects_typed_int`).
 #[test]
-fn widen_reassign_int_to_float_local_rejected() {
-    rejects("x: float = 1.0\nx = 3\nprint(x)\n", "cannot assign");
+fn widen_reassign_int_to_float_local_accepts_untyped_constant() {
+    ok("x: float = 1.0\nx = 3\nprint(x)\n");
 }
 
-/// Type-blind assign TARGETS stay strict (no runtime hole): `p.x = 3` / `xs[0] = 3` / `m[k] = 3`
-/// into a float container reject, because the compiler has no field/elem type to coerce against.
+/// TICKET-124 (W13-14/W13-15) superseded this test's premise: a field/index assign target is no
+/// longer type-blind for an untyped int CONSTANT into a declared `float` slot — `p.x = 3` /
+/// `xs[0] = 3` / `m[k] = 3` all widen now, the same sink `compile_assign`'s Field/Index arms coerce.
 #[test]
-fn widen_typeblind_assign_targets_still_reject() {
-    rejects_desugared(
-        "struct P:\n    x: float\np := P(1.0)\np.x = 3\nprint(p.x)\n",
-        "cannot assign",
-    );
-    rejects(
-        "xs: List[float] = [1.0]\nxs[0] = 3\nprint(xs)\n",
-        "cannot assign",
-    );
-    rejects(
-        "m: Map[str, float] = {\"a\": 1.0}\nm[\"a\"] = 3\nprint(m)\n",
-        "cannot assign",
-    );
+fn widen_field_index_assign_targets_accept_untyped_constant() {
+    ok_desugared("struct P:\n    x: float\np := P(1.0)\np.x = 3\nprint(p.x)\n");
+    ok("xs: List[float] = [1.0]\nxs[0] = 3\nprint(xs)\n");
+    ok("m: Map[str, float] = {\"a\": 1.0}\nm[\"a\"] = 3\nprint(m)\n");
 }
 
 /// A newtype boundary stays nominal — NO int→float widening into a `float`-backed newtype ctor.
@@ -21509,7 +21502,7 @@ fn empty_list_push_pins_element_then_mixed_rejected() {
     // x:=[]; x.push(1) pins List[int]; x.push("s") is then a normal mismatch.
     rejects(
         "fn main():\n x := []\n x.push(1)\n x.push(\"s\")\nmain()",
-        "pinned",
+        "fixed by its annotation or an earlier use",
     );
 }
 
@@ -21614,8 +21607,11 @@ fn heterogeneous_struct_list_unannotated_rejected() {
         "struct Sq:\n s: int\nstruct Rect:\n w: int\n h: int\nfn main():\n shapes := []\n shapes.push(Sq(3))\n shapes.push(Rect(2, 4))\nmain()",
     );
     assert!(
-        errs.iter()
-            .any(|e| e.message.contains("pinned") && e.message.contains("annotate")),
+        errs.iter().any(|e| {
+            e.message
+                .contains("fixed by its annotation or an earlier use")
+                && e.message.contains("annotate")
+        }),
         "expected a pinned/annotate hint, got: {errs:?}"
     );
 }
@@ -21647,8 +21643,9 @@ fn pinned_hint_preserved_for_concrete_collection() {
     // "pinned by an earlier push" narrative and NOT use the un-inferred-param message.
     let errs = check_src("fn main():\n xs := []\n xs.push(1)\n xs.push(\"s\")\nmain()");
     assert!(
-        errs.iter()
-            .any(|e| e.message.contains("pinned") && e.message.contains("earlier")),
+        errs.iter().any(|e| e
+            .message
+            .contains("fixed by its annotation or an earlier use")),
         "expected the original pinned/earlier hint, got: {errs:?}"
     );
     assert!(
@@ -21667,8 +21664,9 @@ fn pinned_hint_preserved_for_bound_generic_param() {
     // narrative and NOT the un-inferred-param message (which only fits an un-bound/leaked param).
     let errs = check_src("fn f[T](x: T):\n xs := []\n xs.push(x)\n xs.push(\"s\")\nf(1)\n");
     assert!(
-        errs.iter()
-            .any(|e| e.message.contains("pinned") && e.message.contains("earlier")),
+        errs.iter().any(|e| e
+            .message
+            .contains("fixed by its annotation or an earlier use")),
         "bound-param pin must keep the original earlier-push hint, got: {errs:?}"
     );
     assert!(
@@ -32506,6 +32504,51 @@ fn reassignment_hint_keeps_unannotated_empty_collections_open() {
 #[test]
 fn float_collection_method_param_widens_untyped_int() {
     ok("fn main():\n    l: List[float] = [1.5]\n    l.push(3)\n    print(l)\n");
+}
+
+#[test]
+fn reassignment_float_widen_accepts_untyped_int_constant() {
+    ok("fn main():\n    x: float = 1.5\n    x = 1\n    print(x)\n");
+    ok(
+        "struct S:\n    f: float\n    fn set_one(self):\n        self.f = 1\n\nfn main():\n    s := S(2.0)\n    s.set_one()\n    print(s.f)\n",
+    );
+    ok("g: float = 1.5\n\nfn set_g():\n    g = 1\n\nfn main():\n    set_g()\n    print(g)\n");
+    ok("fn main():\n    c: float = 1.5\n    fn bump():\n        c = 1\n    bump()\n    print(c)\n");
+    ok("fn main():\n    xs: List[float] = [1.5]\n    xs[0] = 1\n    print(xs)\n");
+    ok("fn main():\n    m: Map[str, float] = {}\n    m[\"a\"] = 1\n    print(m)\n");
+}
+
+#[test]
+fn reassignment_float_widen_rejects_typed_int() {
+    rejects(
+        "fn main():\n    x: float = 1.5\n    i := 2\n    x = i\n    print(x)\n",
+        "cannot assign int to float",
+    );
+    rejects(
+        "fn main():\n    n: int = 1\n    n = 2.5\n    print(n)\n",
+        "cannot assign float to int",
+    );
+}
+
+#[test]
+fn collection_method_float_widen_accepts_untyped_int_constant() {
+    ok("fn main():\n    l: List[float] = [1.5]\n    l.insert(0, 3)\n    print(l.contains(1))\n");
+}
+
+#[test]
+fn collection_method_float_widen_rejects_typed_int() {
+    rejects(
+        "fn main():\n    l: List[float] = [1.5]\n    i := 3\n    l.push(i)\n    print(l)\n",
+        "a typed int never widens to float",
+    );
+}
+
+#[test]
+fn collection_method_mismatch_note_does_not_claim_an_earlier_use() {
+    rejects(
+        "fn main():\n    l: List[float] = [1.5]\n    l.push(\"a\")\n    print(l)\n",
+        "fixed by its annotation or an earlier use",
+    );
 }
 
 #[test]
