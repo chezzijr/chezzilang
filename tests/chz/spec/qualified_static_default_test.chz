@@ -1,0 +1,24 @@
+# TICKET-120 W13-11: a static method's default now fills through a module-qualified `mod.Type`
+# head, matching the bare `Type.new()` head (TICKET-108).
+import qualified_static_default_lib
+import qualified_static_default_lib as q
+
+test fn qualified_head_fills_a_static_default():
+    x := qualified_static_default_lib.QL.new()
+    assert x.v == 11, "got " + str(x.v)
+
+test fn qualified_alias_head_fills_a_static_default():
+    x := q.QL.new()
+    assert x.v == 11, "got " + str(x.v)
+
+test fn qualified_enum_head_fills_a_static_default():
+    x := qualified_static_default_lib.QE.new()
+    assert str(x) == "A(7)", "got " + str(x)
+
+test fn qualified_generic_struct_head_fills_a_static_default():
+    x := qualified_static_default_lib.QBox.make()
+    assert x.v == 4, "got " + str(x.v)
+
+test fn qualified_head_with_an_explicit_argument_overrides_the_default():
+    x := qualified_static_default_lib.QL.new(3)
+    assert x.v == 3, "got " + str(x.v)

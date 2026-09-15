@@ -1,0 +1,34 @@
+struct QA:
+    v: int
+    fn new(n: int = 1) -> QA:
+        return QA(n)
+
+struct QL:
+    v: int
+    fn new(n: int = 11) -> QL:
+        return QL(n)
+
+    fn bump(self, k: int = 5) -> int:
+        return self.v + k
+
+enum QE:
+    A(int)
+    B
+    fn new(n: int = 7) -> QE:
+        return QE.A(n)
+
+enum QF:
+    C(int)
+    D
+    fn new(n: int = 8) -> QF:
+        return QF.C(n)
+
+struct QBox[T]:
+    v: T
+    fn make(n: int = 4) -> QBox[int]:
+        return QBox(n)
+
+struct QBin[T]:
+    v: T
+    fn make(n: int = 9) -> QBin[int]:
+        return QBin(n)

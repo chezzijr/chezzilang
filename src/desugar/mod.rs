@@ -441,6 +441,9 @@ struct ModReg {
     fn_ret_struct: HashMap<String, String>,
     /// This module's own protocols, keyed by name (see [`ProtoReg`]).
     protos: HashMap<String, ProtoReg>,
+    /// Every type name (struct, enum, newtype) this module declares -- the key space of
+    /// `collect_methods_by_struct`. Used to recognise a `module.Type` qualified receiver head.
+    types: HashSet<String>,
 }
 
 impl ModReg {
@@ -1473,6 +1476,7 @@ fn collect_module_reg(stmts: &[Stmt], id: &ModuleId, file: u32) -> ModReg {
                 ..
             } => {
                 let tps: Vec<String> = type_params.iter().map(|t| t.name.clone()).collect();
+                reg.types.insert(name.clone());
                 reg.structs.insert(
                     name.clone(),
                     fields
@@ -1494,6 +1498,9 @@ fn collect_module_reg(stmts: &[Stmt], id: &ModuleId, file: u32) -> ModReg {
                         })
                         .collect(),
                 );
+            }
+            StmtKind::Enum { name, .. } | StmtKind::NewType { name, .. } => {
+                reg.types.insert(name.clone());
             }
             StmtKind::Protocol {
                 name,
@@ -1591,6 +1598,17 @@ impl Ctx<'_> {
             .get(target)
             .is_some_and(|r| r.protos.contains_key(name))
             .then(|| (target.clone(), name.to_string()))
+    }
+
+    /// Resolve a module-qualified TYPE name (`alias.Type`) to the bare type name, for a
+    /// `receiver_struct_ty` head like `lib.L.new()`. `alias` must be a real import alias, and the
+    /// target module must declare `name` as a struct/enum/newtype. Mirrors [`Self::find_proto_qualified`].
+    fn find_type_qualified(&self, alias: &str, name: &str) -> Option<String> {
+        let target = self.aliases.get(alias)?;
+        self.regs
+            .get(target)
+            .is_some_and(|r| r.types.contains(name))
+            .then(|| name.to_string())
     }
 
     /// The EXPLICIT parameter count `proto::method` declares, searching `proto`'s embeds
@@ -1853,6 +1871,22 @@ impl Walker<'_> {
                     .get(target)
                     .and_then(|r| r.fn_ret_struct.get(n))
                     .cloned()
+            }
+            // (v) a module-qualified type head `alias.Type.new()`: `alias` must be a REAL import
+            // alias, not a local or a type parameter shadowing one -- the same DEC-108 rule arm (iv)
+            // applies, one spelling over. This is what keeps a local field chain (`x.y.m()`) and a
+            // module GLOBAL of struct type (`lib.counter_val.add()`) out: neither's head resolves
+            // through `find_type_qualified`, which only recognises a declared struct/enum/newtype.
+            ExprKind::Field {
+                obj: head, name, ..
+            } => {
+                let ExprKind::Ident(alias) = &head.kind else {
+                    return None;
+                };
+                if self.is_local(alias) || self.is_type_param(alias) {
+                    return None;
+                }
+                self.ctx.find_type_qualified(alias, name)
             }
             _ => None,
         }

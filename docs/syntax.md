@@ -1091,8 +1091,9 @@ can't be chosen safely — its **defaults aren't filled** either (the call then 
 so give same-named methods the same parameter shape or unique names. A method that **reuses a built-in
 method name** (`map`, `push`, `len`, `add`, …) does still get default/named support, but **only when
 the receiver's struct/enum type is statically known** at this pre-type pass — a typed local
-(`c := Counter(0)` or `t: Tag = …`), an inline constructor call (`Counter(0).add(amount=5)`), or a
-struct-returning function call (`mk().add(...)`). A genuine builtin receiver (a `List`/`Set`/`Map`/`str`
+(`c := Counter(0)` or `t: Tag = …`), an inline constructor call (`Counter(0).add(amount=5)`), a
+struct-returning function call (`mk().add(...)`), a bare type head such as `Counter.mk()`, or a
+module-qualified type head such as `mod.Counter.mk()`. A genuine builtin receiver (a `List`/`Set`/`Map`/`str`
 value) keeps routing to the builtin method untouched; a named call to a builtin-colliding method whose
 receiver type is *not* statically known (e.g. an unannotated parameter, or an inferred `m := E.Variant`)
 is rejected with an accurate "reuses a built-in method name — bind it to a typed local or pass

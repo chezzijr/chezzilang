@@ -13263,6 +13263,14 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- **TICKET-120 (2026-09-12): a static method's default now fills through a module-qualified
+  `mod.Type` head, closing W13-11.** `Walker::receiver_struct_ty` (`src/desugar/mod.rs`) gains a
+  fifth arm for `Field { obj: Ident(alias), name }`, resolved through a new `Ctx::find_type_qualified`
+  and gated on `alias` being a real import alias (never a local or a type parameter). A new
+  `ModReg::types` set (struct + enum + newtype names) backs the lookup. Four shapes now resolve their
+  default through the qualified head — the plain import, the `import … as` alias, an enum, and a
+  generic struct — while five stay rejected unchanged: a defaultless argument, an instance method
+  called statically, an unknown module member, over-arity, and a cross-module struct-name collision.
 - **The airlock's cross-heap copy is now identity-preserving for data and closures, not just cells
   (2026-09-10, TICKET-100).** A DAG alias (`pair := [box, box]`) used to re-serialize as two
   independent copies on every crossing; it now back-references like a cycle does, so one source
