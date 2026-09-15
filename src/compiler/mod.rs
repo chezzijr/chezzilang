@@ -1750,6 +1750,7 @@ impl Compiler {
         fc.boxed_names = captured_names_of_body(&decl.body, &decl.params);
         fc.is_generator = decl.is_generator;
         fc.is_test = decl.is_test;
+        fc.decl_span = decl.name_span;
         // One-way int→float widening: a `-> float` return type coerces every `return` value.
         fc.ret_is_float = decl.ret.as_ref().is_some_and(|t| {
             self.float_aliases
@@ -1945,6 +1946,7 @@ impl Compiler {
             has_implicit_nursery: fc.has_implicit_nursery,
             is_generator: fc.is_generator,
             is_test: fc.is_test,
+            decl_span: fc.decl_span,
             // Lever #3: cold-path capture-name metadata in slot order (empty for non-closures).
             capture_names: fc.captured_names,
             // TICKET-016 (W8-25): filled by `fill_global_free`'s whole-program post-pass.
@@ -7906,6 +7908,9 @@ struct FnComp {
     /// See [`crate::vm::op::Proto::min_arity`]. Starts at `arity`; only the default prologue lowers it.
     min_arity: usize,
     is_toplevel: bool,
+    /// W13-21 — see [`crate::vm::op::Proto::decl_span`]. Set from `FnDecl::name_span` only in
+    /// `Compiler::compile_fn_body`; every other `FnComp::new` site keeps `Span::RUNTIME`.
+    decl_span: Span,
     code: Vec<Op>,
     lines: Vec<Span>,
     locals: Vec<LocalVar>,
@@ -7958,6 +7963,7 @@ impl FnComp {
             // it actually emits a fill for a trailing defaulted parameter.
             min_arity: arity,
             is_toplevel,
+            decl_span: Span::RUNTIME,
             code: Vec::new(),
             lines: Vec::new(),
             locals: Vec::new(),

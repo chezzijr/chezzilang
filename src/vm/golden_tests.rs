@@ -6009,6 +6009,17 @@ fn manifest_entrypoint_err_surfaced_both_engines() {
         "expected 'unhandled error: boom', got {:?}",
         e.message
     );
+    // W13-21 — the entry call's coordinate must name the entry fn's declaration, not render a bare
+    // `line 1, col 1` with no file.
+    let rendered = crate::vm::format_trace(&e);
+    assert!(
+        rendered.contains("main.chz:1:"),
+        "the entry fault must name the entry file, got {rendered}"
+    );
+    assert!(
+        e.span.file != 0,
+        "the entry span must carry the entry module's file id"
+    );
 }
 
 // GUARD: an entry fn returning `Ok(..)` runs clean (rc=0) — the surfacing gate is Err/None only.

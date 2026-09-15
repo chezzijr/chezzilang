@@ -709,6 +709,20 @@ impl Vm {
         self.gen_fault_prefix.clear();
     }
 
+    /// W13-21 — the declaration span of the entry callee, if it has one. `Some` for a callee backed
+    /// by a real `FnDecl` (`Obj::Func`/`Obj::Closure`, both carry a `ProtoId`); `None` for anything
+    /// else (`Obj::Native`, `Obj::Cffi`, or the callee not being found at all), which keeps the old
+    /// `Span::RUNTIME` fallback — a closure or native has no declaration to borrow a coordinate from.
+    fn entry_decl_span(&self, callee: Value) -> Option<Span> {
+        let h = callee.as_obj()?;
+        match self.heap.get(h) {
+            Obj::Func { proto, .. } | Obj::Closure { proto, .. } => {
+                Some(self.program.protos[*proto].decl_span)
+            }
+            _ => None,
+        }
+    }
+
     /// Bare `chezzi run` with a `module:function` manifest entrypoint — invoke a named top-level
     /// function of the entry module after `run()` has initialized all modules. Looks the name up in
     /// the entry module's namespace (so a re-exported import works too) and calls it with no args.
@@ -748,11 +762,19 @@ impl Vm {
                 span,
             ));
         }
+        // W13-21 — the entry call's real coordinate, when the callee has a declaration to give one.
+        // No file-id guard on the read: `invoke_entrypoint`'s one caller (`run_file_inner`) always
+        // compiles a module GRAPH, and every module in a graph carries a distinct non-zero
+        // `Span::file` (`resolver::tests::every_module_gets_a_distinct_nonzero_span_file_id`), so
+        // `entry_decl_span` returns either a true lexed coordinate or `None` — never a coordinate
+        // with an unresolvable file id. `render_span` already omits the path for a file id it can't
+        // resolve, so this invents nothing (DEC-048).
+        let entry_span = self.entry_decl_span(callee).unwrap_or(span);
         // Symmetric with the unhandled-top-level-Err rule: if the entry fn returns `Err(..)`/`None`,
         // surface it as "unhandled error: <detail>" (rc=1) rather than silently discarding it. This
         // lets a manifest entrypoint legitimately be `-> T!` and use `?`.
-        let ret = self.invoke_value(callee, Vec::new(), span)?;
-        if let Some(e) = self.top_level_error(ret, span) {
+        let ret = self.invoke_value(callee, Vec::new(), entry_span)?;
+        if let Some(e) = self.top_level_error(ret, entry_span) {
             return Err(e);
         }
         Ok(())

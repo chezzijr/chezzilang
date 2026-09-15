@@ -606,6 +606,11 @@ pub struct Proto {
     /// runnable tests by this tag (set by the compiler from `FnDecl::is_test`); ordinary `run` never
     /// inspects it.
     pub is_test: bool,
+    /// W13-21 — the span of this proto's declaration NAME (`FnDecl::name_span`), or `Span::RUNTIME`
+    /// for a proto with no user declaration: a module top level, a closure, a `spawn:`/`defer:`
+    /// block, a suite thunk. Read by `Vm::entry_decl_span` so a manifest entrypoint's synthetic
+    /// call site can report a true coordinate instead of a bare `line 1, col 1`.
+    pub decl_span: Span,
     /// M19 lever #3 — for a closure proto, the names of its captured environment in slot order
     /// (`capture_names[i]` is the name read by `Op::GetCaptured(i)`). Cold-path metadata only (the
     /// `GetCaptured` home-global fallback + closure error messages); the hot read is a pure

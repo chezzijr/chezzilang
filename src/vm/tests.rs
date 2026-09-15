@@ -9349,6 +9349,7 @@ fn worker_fixture(code: Vec<Op>) -> (Vm, PendingCall) {
         has_implicit_nursery: false,
         is_generator: false,
         is_test: false,
+        decl_span: Span::RUNTIME,
         capture_names: Vec::new(),
         global_free: Vec::new(),
     };

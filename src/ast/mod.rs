@@ -488,9 +488,11 @@ impl AssignOp {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FnDecl {
     pub name: String,
-    /// Source span of the function-NAME token. Purely diagnostic metadata for editor tooling (the
-    /// LSP semantic-token overlay marks the decl name `function`); runtime-inert — never read by
-    /// desugar/compiler/vm, so it is behavior-neutral (mirrors `Field.name_span`).
+    /// Source span of the function-NAME token. Diagnostic metadata for editor tooling (the LSP
+    /// semantic-token overlay marks the decl name `function`), AND, since W13-21, the compiler reads
+    /// it into `FnComp::decl_span`/`Proto::decl_span`: it is the coordinate a manifest entrypoint's
+    /// synthetic call site reports, in place of a bare `line 1, col 1`. `Field.name_span` stays
+    /// runtime-inert.
     pub name_span: Span,
     /// Generic type parameters: `fn max[T: Comparable](…)`. Empty for non-generic fns/methods.
     pub type_params: Vec<TypeParam>,

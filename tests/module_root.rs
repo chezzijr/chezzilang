@@ -376,3 +376,90 @@ fn manifest_entrypoint_err_reports_the_entry_file() {
         "the fault must name the entrypoint file, not render bare 'line 1, col 1'; stderr:\n{stderr}"
     );
 }
+
+// W13-21 — the `None` arm goes through the same `Vm::top_level_error` call as `Err`; both must name
+// the entrypoint file.
+#[test]
+fn manifest_entrypoint_none_reports_the_entry_file() {
+    let t = TmpDir::new();
+    t.write("chezzi.toml", "[project]\nentrypoint = \"src.main:main\"\n");
+    t.write("src/main.chz", "fn main() -> int?:\n    return None\n");
+    let (stdout, stderr, ok) = run(&t.0, &["run"]);
+    assert!(!ok, "a None entrypoint must fault; stdout:\n{stdout}");
+    assert!(
+        stderr.contains("unhandled error: None"),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("src/main.chz") || stderr.contains("src\\main.chz"),
+        "the fault must name the entrypoint file, not render bare 'line 1, col 1'; stderr:\n{stderr}"
+    );
+}
+
+// W13-21 — a real in-body fault's headline already names the file; the CALL-SITE `at main (called
+// at …)` frame line must too.
+#[test]
+fn manifest_entrypoint_frame_line_names_the_entry_file() {
+    let t = TmpDir::new();
+    t.write("chezzi.toml", "[project]\nentrypoint = \"src.main:main\"\n");
+    t.write(
+        "src/main.chz",
+        "fn main() -> int:\n    xs := [1]\n    return xs[3]\n",
+    );
+    let (stdout, stderr, ok) = run(&t.0, &["run"]);
+    assert!(
+        !ok,
+        "an out-of-bounds entrypoint must fault; stdout:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("at main (called at ") && stderr.contains("src/main.chz"),
+        "the call-site frame must name the entrypoint file; stderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("called at line 1, col 1"),
+        "the call-site frame must not render a bare coordinate; stderr:\n{stderr}"
+    );
+}
+
+// W13-21 — a missing manifest entrypoint function has no proto at all; the two pre-callee guards in
+// `Vm::invoke_entrypoint` must keep `Span::RUNTIME` rather than borrow a coordinate from elsewhere.
+#[test]
+fn a_missing_manifest_entrypoint_function_keeps_its_bare_coordinate() {
+    let t = TmpDir::new();
+    t.write("chezzi.toml", "[project]\nentrypoint = \"src.main:nope\"\n");
+    t.write("src/main.chz", "fn main() -> int:\n    return 1\n");
+    let (stdout, stderr, ok) = run(&t.0, &["run"]);
+    assert!(
+        !ok,
+        "a missing entrypoint function must fault; stdout:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("entrypoint function") && stderr.contains("not found"),
+        "stderr:\n{stderr}"
+    );
+}
+
+// W13-21 DEC-048 honesty guard — a closure entrypoint has no `FnDecl`, so it must keep the bare
+// `line 1, col 1` coordinate rather than borrow one from somewhere it does not belong.
+#[test]
+fn a_closure_entrypoint_keeps_its_bare_coordinate() {
+    let t = TmpDir::new();
+    t.write("chezzi.toml", "[project]\nentrypoint = \"src.main:main\"\n");
+    t.write(
+        "src/main.chz",
+        "main := fn() -> int!str: Err(\"closure failed\")\n",
+    );
+    let (stdout, stderr, ok) = run(&t.0, &["run"]);
+    assert!(
+        !ok,
+        "an Err closure entrypoint must fault; stdout:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("runtime error (line 1, col 1): unhandled error: closure failed"),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("main.chz:"),
+        "a closure entrypoint has no declaration to borrow a coordinate from; stderr:\n{stderr}"
+    );
+}
