@@ -726,6 +726,193 @@ fn nested_deadlock_controls_hold_at_every_worker_count() {
     );
 }
 
+/// W13-4 (TICKET-125, split from TICKET-117): the ONLY channel-parked owner sits at depth 3. Must
+/// fault `deadlock` at every worker count; hangs instead at `CHEZZI_THREADS=1`.
+const CHANNEL_PARKED_OWNER_DEPTH_3: &str = "fn main():
+    never := Channel[int](0)
+    parallel:
+        spawn:
+            parallel:
+                spawn:
+                    parallel:
+                        spawn:
+                            never.recv()
+                        never.recv()
+    print(\"unreachable\")
+main()
+";
+
+/// W13-5 (TICKET-125): a task recovers a genuine inner-nursery deadlock, then sends to a cousin whose
+/// owner sits at its join with a child doing `recv()`. Must print `err`, `cousin got 5`, `done` and
+/// exit 0; false-faults `deadlock` instead.
+const RECOVERED_DEADLOCK_THEN_COUSIN_JOIN: &str = "fn main():
+    out := Channel[int](0)
+    parallel:
+        spawn:
+            r := recover:
+                parallel:
+                    spawn:
+                        never := Channel[int](0)
+                        never.recv()
+            match r:
+                Ok(_): print(\"ok\")
+                Err(e): print(\"err\")
+            out.send(5)
+        spawn:
+            parallel:
+                spawn:
+                    print(\"cousin got {out.recv()}\")
+    print(\"done\")
+main()
+";
+
+/// W13-6 (TICKET-125): two siblings each recover an inner deadlock, then fan in to the main body's
+/// `recv()` loop. Must print `t 2` and exit 0; hangs instead at `CHEZZI_THREADS=2`/default.
+const TWO_RECOVERERS_FAN_IN: &str = "fn main():
+    out := Channel[int](0)
+    parallel:
+        for i in range(2):
+            spawn:
+                r := recover:
+                    parallel:
+                        spawn:
+                            never := Channel[int](0)
+                            never.recv()
+                match r:
+                    Ok(_): out.send(0)
+                    Err(e): out.send(1)
+        t := 0
+        for i in range(2):
+            t = t + out.recv()
+        print(\"t {t}\")
+main()
+";
+
+/// exec_join (TICKET-125, filed by TICKET-112): an Executor job whose OUTERMOST nursery's only undone
+/// fiber is an owner blocked at a nested join (the nested `spawn` has no statement after its own
+/// `parallel:`, so it waits at ITS join rather than on a channel op). Must complete and exit 0; hangs
+/// instead at `CHEZZI_THREADS=2`/default.
+const EXECUTOR_JOB_OWNER_BLOCKED_AT_NESTED_JOIN: &str = "import std.concurrency
+
+fn job():
+    never := Channel[int](0)
+    r := recover:
+        parallel:
+            spawn:
+                parallel:
+                    spawn:
+                        parallel:
+                            spawn:
+                                never.recv()
+    match r:
+        Ok(_): print(\"job ok\")
+        Err(e): print(\"job err\")
+
+fn main():
+    ex := Executor()
+    ex.submit(fn(): job())
+    ex.shutdown()
+    print(\"done\")
+main()
+";
+
+/// W13-4 (TICKET-125): reproduces the depth-3 channel-parked-owner hang at `CHEZZI_THREADS=1`.
+#[test]
+fn w13_4_channel_parked_owner_at_depth_3_faults_at_thread_one() {
+    let dir = std::env::temp_dir().join(format!("chz-threads-125-w134-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("channel_parked_owner_depth3.chz");
+    std::fs::write(&path, CHANNEL_PARKED_OWNER_DEPTH_3).expect("write program");
+    let out = run_with_hang_deadline(&path, "1");
+    let _ = std::fs::remove_dir_all(&dir);
+    let out = out.unwrap_or_else(|| {
+        panic!(
+            "channel_parked_owner_depth3.chz hung past its 20 s deadline at CHEZZI_THREADS=1; want a `deadlock` fault"
+        )
+    });
+    assert!(
+        faulted_deadlock(&out),
+        "want a `deadlock` fault at CHEZZI_THREADS=1, got {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// W13-5 (TICKET-125): reproduces the false `deadlock` fault at `CHEZZI_THREADS=1`, where the bug
+/// measured 5/5.
+#[test]
+fn w13_5_recovered_deadlock_then_cousin_join_completes_at_thread_one() {
+    let dir = std::env::temp_dir().join(format!("chz-threads-125-w135-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("recovered_deadlock_cousin_join.chz");
+    std::fs::write(&path, RECOVERED_DEADLOCK_THEN_COUSIN_JOIN).expect("write program");
+    let out = run_with_hang_deadline(&path, "1");
+    let _ = std::fs::remove_dir_all(&dir);
+    let out = out.unwrap_or_else(|| {
+        panic!(
+            "recovered_deadlock_cousin_join.chz hung past its 20 s deadline at CHEZZI_THREADS=1; want exit 0 with stdout `err\\ncousin got 5\\ndone\\n`"
+        )
+    });
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && stdout == "err\ncousin got 5\ndone\n",
+        "want exit 0 with stdout `err\\ncousin got 5\\ndone\\n`, got {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        stdout,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// W13-6 (TICKET-125): reproduces the fan-in hang at `CHEZZI_THREADS=2`.
+#[test]
+fn w13_6_two_recoverers_fan_in_completes_at_thread_two() {
+    let dir = std::env::temp_dir().join(format!("chz-threads-125-w136-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("two_recoverers_fan_in.chz");
+    std::fs::write(&path, TWO_RECOVERERS_FAN_IN).expect("write program");
+    let out = run_with_hang_deadline(&path, "2");
+    let _ = std::fs::remove_dir_all(&dir);
+    let out = out.unwrap_or_else(|| {
+        panic!(
+            "two_recoverers_fan_in.chz hung past its 20 s deadline at CHEZZI_THREADS=2; want exit 0 with stdout `t 2\\n`"
+        )
+    });
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && stdout == "t 2\n",
+        "want exit 0 with stdout `t 2\\n`, got {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        stdout,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// exec_join (TICKET-125, filed by TICKET-112): reproduces the Executor-job outermost-nursery hang at
+/// `CHEZZI_THREADS=2`.
+#[test]
+fn exec_join_owner_blocked_at_nested_join_completes_at_thread_two() {
+    let dir = std::env::temp_dir().join(format!("chz-threads-125-execjoin-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("executor_job_owner_blocked_at_nested_join.chz");
+    std::fs::write(&path, EXECUTOR_JOB_OWNER_BLOCKED_AT_NESTED_JOIN).expect("write program");
+    let out = run_with_hang_deadline(&path, "2");
+    let _ = std::fs::remove_dir_all(&dir);
+    let out = out.unwrap_or_else(|| {
+        panic!(
+            "executor_job_owner_blocked_at_nested_join.chz hung past its 20 s deadline at CHEZZI_THREADS=2; want exit 0 with stdout containing `job err` and `done`"
+        )
+    });
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && stdout.contains("job err") && stdout.contains("done"),
+        "want exit 0 with stdout containing `job err` and `done`, got {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        stdout,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 fn tail(s: &str) -> String {
     let lines: Vec<&str> = s.lines().collect();
     let start = lines.len().saturating_sub(15);
