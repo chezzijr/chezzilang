@@ -823,6 +823,18 @@ impl Vm {
     /// recursing forever. Tied to `std/json.chz`'s `MAX_NEST_DEPTH`.
     const JSON_ENCODE_MAX_DEPTH: usize = 2000;
 
+    /// Enter one more bracket level of `json.encode`'s walk, counting exactly as `json.parse`/
+    /// `json.stringify` do: the outermost container is level 1, and only a value that actually
+    /// emits a JSON bracket (`List`/`Tuple`/`Map`/`Struct`) calls this. A scalar, `None`, an
+    /// already-built `Json` value and a `Some` wrapper add no level (W13-19).
+    fn json_enter(depth: usize) -> Result<usize, String> {
+        if depth >= Self::JSON_ENCODE_MAX_DEPTH {
+            Err("json.encode: exceeded max depth".to_string())
+        } else {
+            Ok(depth + 1)
+        }
+    }
+
     /// `Op::JsonToValue`: pop one runtime value, push the `Json` tree that `std.json`'s own
     /// `stringify` then renders — `json.encode(x)` is `stringify(_to_json(x))` in Chezzi.
     pub(super) fn json_to_value(&mut self, span: Span) -> Result<(), RuntimeError> {
@@ -858,8 +870,23 @@ impl Vm {
     /// `coerce_json` (no new rooting scheme).
     fn json_of(&mut self, v: Value, depth: usize) -> Result<Value, String> {
         use crate::vm::op::{VID_ERR, VID_NONE_VARIANT, VID_OK, VID_SOME};
-        if depth > Self::JSON_ENCODE_MAX_DEPTH {
-            return Err("json.encode: exceeded max depth".to_string());
+        // Peel every `Some` wrapper iteratively: it emits no JSON bracket, so it must charge
+        // neither a bracket level (W13-19) nor a Rust stack frame (a recursive arm here would let
+        // an `Option`-linked chain reach two Rust frames per bracket level, defeating the reason
+        // DEC-110 wanted a depth guard at all).
+        let mut v = v;
+        while let Some(h) = v.as_obj() {
+            let Obj::Enum {
+                variant_id,
+                payload,
+            } = self.heap.get(h)
+            else {
+                break;
+            };
+            if *variant_id != VID_SOME {
+                break;
+            }
+            v = payload[0];
         }
         match v.view() {
             ValueView::Nil => self.json_variant("Null", Vec::new()),
@@ -879,14 +906,16 @@ impl Vm {
                     self.json_variant("Str", vec![sv])
                 }
                 Obj::List(items) | Obj::Tuple(items) => {
+                    let inner = Self::json_enter(depth)?;
                     let mut out = Vec::with_capacity(items.len());
                     for it in items {
-                        out.push(self.json_of(it, depth + 1)?);
+                        out.push(self.json_of(it, inner)?);
                     }
                     let lv = Value::obj(self.heap.alloc(Obj::List(out)));
                     self.json_variant("Arr", vec![lv])
                 }
                 Obj::Map(m) => {
+                    let inner = Self::json_enter(depth)?;
                     let mut out = MapData::default();
                     for (hk, k, val) in m.entries {
                         if self.val_str(k).is_none() {
@@ -895,13 +924,14 @@ impl Vm {
                                 self.type_name(k)
                             ));
                         }
-                        let jv = self.json_of(val, depth + 1)?;
+                        let jv = self.json_of(val, inner)?;
                         out.push(hk, k, jv);
                     }
                     let mv = Value::obj(self.heap.alloc(Obj::Map(out)));
                     self.json_variant("Obj", vec![mv])
                 }
                 Obj::Struct { tid, fields } => {
+                    let inner = Self::json_enter(depth)?;
                     let key = self.struct_name_of_tid(tid).to_string();
                     let field_names = self
                         .program
@@ -914,7 +944,7 @@ impl Vm {
                     for (fname, fval) in field_names.into_iter().zip(field_vals) {
                         let key_v = self.alloc_str(fname);
                         let hk = self.scalar_hash(key_v);
-                        let jv = self.json_of(fval, depth + 1)?;
+                        let jv = self.json_of(fval, inner)?;
                         out.push(hk, key_v, jv);
                     }
                     let mv = Value::obj(self.heap.alloc(Obj::Map(out)));
@@ -922,14 +952,14 @@ impl Vm {
                 }
                 Obj::Enum {
                     variant_id,
-                    payload,
+                    payload: _,
                 } => {
                     let (ty, _) = self.enum_names(variant_id);
                     if ty == "Json" {
                         return Ok(v);
                     }
                     match variant_id {
-                        VID_SOME => self.json_of(payload[0], depth + 1),
+                        // `VID_SOME` is peeled at the top of this fn, before this match.
                         VID_NONE_VARIANT => self.json_variant("Null", Vec::new()),
                         VID_OK | VID_ERR => Err("json.encode: cannot encode a Result".to_string()),
                         _ => Err(format!("json.encode: cannot encode enum {ty}")),

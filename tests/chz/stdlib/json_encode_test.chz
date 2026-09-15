@@ -31,3 +31,49 @@ test fn encode_does_not_charge_a_level_for_option_wrapping():
         i += 1
     s := json.encode(b)
     assert s.len() > 0, "expected 1000-deep Option-linked struct to encode, got empty string"
+
+fn b_chain(k: int) -> B:
+    b: B = B(None)
+    i := 0
+    while i < k:
+        b = B(Some(b))
+        i += 1
+    return b
+
+# `json.encode` must count BRACKETS, exactly as `json.parse`/`json.stringify` do: `b_chain(1999)`
+# is 2000 nested JSON objects (accepted at 2000, the same bound `parse`/`stringify` accept),
+# `b_chain(2000)` is 2001 (rejected). This goes red if `Some` still charges a level (the accepting
+# half would fault the way the 1000-wrap chain does today) and red if the cap is merely raised (the
+# rejecting half would then encode).
+test fn encode_accepts_a_two_thousand_object_chain_and_rejects_one_more():
+    ok := recover: json.encode(b_chain(1999))
+    match ok:
+        Ok(s): assert s.len() > 0
+        Err(e): assert false, "expected a 2000-object chain to encode: " + e.message()
+    too_deep := recover: json.encode(b_chain(2000))
+    match too_deep:
+        Ok(_): assert false, "expected a 2001-object chain to fault"
+        Err(e): assert e.message() == "json.encode: exceeded max depth"
+
+# An empty container still occupies its own bracket level, even though it has no child to charge.
+# This is the W12-20a shape: an implementation that peels `Some` but keeps a per-value guard at the
+# top of `json_of` would encode `deep` (no child ever reaches level 2001 to trip a per-value check).
+struct E:
+    kid: Option[E]
+    tail: Map[str, int]
+
+test fn encode_charges_a_level_for_an_empty_container():
+    e: E = E(None, {})
+    i := 0
+    while i < 1998:
+        e = E(Some(e), {})
+        i += 1
+    ok := recover: json.encode(e)
+    match ok:
+        Ok(s): assert s.len() > 0
+        Err(err): assert false, "expected a 1999-object E chain to encode: " + err.message()
+    deep := E(Some(e), {})
+    too_deep := recover: json.encode(deep)
+    match too_deep:
+        Ok(_): assert false, "expected a 2000-object E chain (empty map at level 2001) to fault"
+        Err(err): assert err.message() == "json.encode: exceeded max depth"
