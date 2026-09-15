@@ -33,6 +33,17 @@ test fn replace_empty_old_inserts_between_every_codepoint():
     assert "abc".replace("", "-") == "-a-b-c-"
     assert "".replace("", "-") == "-"
 
+# The interleave rule must hold codepoint-wise (not byte-wise), agree with `count`/`index_of` on
+# how many empty matches exist, and ride BOTH spellings (`std.string.replace` delegates to the
+# native arm per DEC-068), while a genuine non-empty `old` stays unaffected.
+test fn replace_empty_old_agrees_with_count_and_both_spellings():
+    assert string.replace("abc", "", "-") == "-a-b-c-"
+    assert "héllo".replace("", "-") == "-h-é-l-l-o-"
+    assert "abc".replace("", "") == "abc"
+    assert "abc".count("") == 4
+    assert "abc".index_of("") == 0
+    assert "a.b".replace(".", "-") == "a-b"
+
 test fn repeat_huge_n_faults_recoverably():
     r := recover: string.repeat("ab", 9223372036854775807)
     match r:

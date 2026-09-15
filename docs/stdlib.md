@@ -157,7 +157,7 @@ than the Python analogue; there is nothing to fix.
 | `ends_with` | `(suffix: str) -> bool` | Empty suffix is always true. |
 | `contains` | `(sub: str) -> bool` | Substring test. |
 | `join` | `(xs: List[str]) -> str` | Join `xs` with the receiver as the separator. |
-| `replace` | `(old: str, new: str) -> str` | Replace every non-overlapping `old`; empty `old` → unchanged. |
+| `replace` | `(old: str, new: str) -> str` | Replace every non-overlapping `old`; empty `old` matches at every codepoint boundary, so `new` lands between every codepoint and at both ends (`"abc".replace("", "-")` → `"-a-b-c-"`, matching CPython and Go). |
 | `repeat` | `(n: int) -> str` | `n <= 0` → `""`. Raises a recoverable `string repeat capacity overflow` fault if `n * len` would exceed allocatable capacity. |
 | `reverse` | `() -> str` | Reversed copy (by codepoint). |
 | `pad_left` | `(width: int, fill: str) -> str` | Left-pad to `width` codepoints; never shrinks (`width` ≤ len → unchanged). A multi-char `fill` is a repeating cycle truncated to fit, so the result is **exactly** `width` codepoints (`"a".pad_left(4, "xy")` → `"xyxa"`). An empty `fill` raises a recoverable `pad_left: fill must not be empty` fault. Raises a recoverable `string pad capacity overflow` fault if the pad would exceed allocatable capacity. |
@@ -186,9 +186,10 @@ hung indefinitely (`pad_left`, measured still running at 15s). `tests/chz/stdlib
 pins both spellings against each other so they cannot drift apart again. As of 2026-09-06, `replace`
 delegates too (TICKET-068 — its hand-written loop was quadratic on two axes: `out = out + ...` and a
 per-position codepoint-vector re-collect on `s[i : i + m]`, gone for ASCII receivers as of TICKET-072
-but still present for non-ASCII text). The empty-`old` rule (`replace(s, "", x)`
-returns `s` unchanged) now lives ONLY in the native arm (`src/vm/call.rs:2982`), so editing that arm to
-match CPython's interleaving behavior changes both spellings, and `std/csv.chz`'s quote-doubling with it.
+but still present for non-ASCII text). The empty-`old` rule (`replace(s, "", x)` interleaves `x`
+between every codepoint, matching CPython and Go) lives ONLY in the native arm
+(`src/vm/call.rs:3004`), so editing that arm changes both spellings, and `std/csv.chz`'s
+quote-doubling with it (unaffected: it always passes a literal `"` as `old`, never empty).
 
 ### `List[T]`
 | Method | Signature | Notes |

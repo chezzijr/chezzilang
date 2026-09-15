@@ -3005,12 +3005,11 @@ impl Vm {
                         self.arity_err("replace", args, 2, span)?;
                         let old = str_arg(self, 0)?;
                         let new = str_arg(self, 1)?;
-                        // std.string returns `s` unchanged for an empty `old`.
-                        if old.is_empty() {
-                            Ok(self.alloc_str(s))
-                        } else {
-                            Ok(self.alloc_str(s.replace(old.as_str(), new.as_str())))
-                        }
+                        // An empty `old` interleaves `new` between every codepoint and at both
+                        // ends, matching CPython 3.14.7 `'abc'.replace('','-')` and Go 1.27
+                        // `strings.ReplaceAll("abc", "", "-")`, both `-a-b-c-`. Rust's own
+                        // `str::replace` already does this, so no special case is needed.
+                        Ok(self.alloc_str(s.replace(old.as_str(), new.as_str())))
                     }
                     "repeat" => {
                         self.arity_err("repeat", args, 1, span)?;

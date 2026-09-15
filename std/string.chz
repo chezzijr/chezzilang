@@ -74,10 +74,10 @@ fn count(s: str, sub: str) -> int:
     return n
 
 # Replace every non-overlapping occurrence of `old` in `s` with `new`, left to right. Delegates to
-# the native `str.replace` receiver method (`src/vm/call.rs:2978`), the same move `repeat` and
-# `pad_left` made on 2026-08-18: the native arm already returns `s` unchanged for an empty `old`
-# (`src/vm/call.rs:2982`), where CPython's `str.replace("", X)` would interleave, so both spellings
-# stay byte-identical. Replaced text is never re-scanned.
+# the native `str.replace` receiver method (`src/vm/call.rs:3004`), the same move `repeat` and
+# `pad_left` made on 2026-08-18: an empty `old` interleaves `new` between every codepoint and at
+# both ends, matching CPython's and Go's `str.replace("", X)`, so both spellings stay
+# byte-identical. Replaced text is never re-scanned.
 fn replace(s: str, old: str, new: str) -> str:
     return s.replace(old, new)
 

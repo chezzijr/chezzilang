@@ -9,7 +9,8 @@ fn main():
     print("hi".ends_with(""))
     print("hi".ends_with("hello"))
 
-    # replace: all occurrences, overlapping advance, no-op when absent, empty old -> unchanged.
+    # replace: all occurrences, overlapping advance, no-op when absent, empty old is inserted
+    # between every codepoint.
     print("a.b.c".replace(".", "-"))
     print("aaaa".replace("aa", "b"))
     print("hello".replace("z", "Z"))

@@ -21,7 +21,7 @@ fn main():
     print(text.count("abc", "z"))
     print(text.count("abc", ""))
 
-    # replace: all occurrences, no-op when absent, empty old returns s unchanged.
+    # replace: all occurrences, no-op when absent, empty old is inserted between every codepoint.
     print(text.replace("a.b.c", ".", "-"))
     print(text.replace("aaaa", "aa", "b"))
     print(text.replace("hello", "z", "Z"))
