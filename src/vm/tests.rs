@@ -8039,7 +8039,7 @@ fn mnsched_take_runnable_drains_a_park_whose_ancestor_cancel_tripped_after_it_pa
         1,
         "fiber parks while the ancestor is not yet cancelled"
     );
-    ancestor.store(true, Ordering::Relaxed);
+    crate::vm::trip_cancel_flag(&ancestor);
     assert!(matches!(sched.take_runnable(0, 1, 0), Take::Run(_)));
     assert_eq!(
         sched.lock().parked_n,
@@ -20952,4 +20952,147 @@ fn caught_error_location_is_nil_without_a_recorded_span() {
 fn caught_error_carries_the_fault_origin_span() {
     let src = "fn boom() -> int!:\n    xs := [1]\n    return Ok(xs[9])\nfn main():\n    r := recover: boom()\n    match r:\n        Ok(v): print(v)\n        Err(e):\n            print(e.line())\n            print(e.col())\nmain()\n";
     assert_eq!(run(src), "Some(3)\nSome(15)\n");
+}
+
+/// TICKET-126 (W13-24) — TICKET-118 added `SchedCore::cancelled_scope_awaiting_drain` to the idle
+/// path of `take_runnable`, called on every idle pass that reaches it regardless of whether any
+/// cancel has EVER been tripped. A channel ping-pong with no cancel at all still pays that scan on
+/// every idle cycle of every idle worker, which is the measured 17.9% regression at the default
+/// worker count. A cancel-generation guard (checked before the scan) should make the scan count stay
+/// small and roughly proportional to the number of `send`/`recv` round trips, not to the number of
+/// idle passes forced by a larger worker pool.
+///
+/// Forces `worker_count(8)` so idle workers vastly outnumber the two real tasks, magnifying the idle
+/// scan cost the same way the filed measurement's 28-core default pool did.
+#[test]
+fn ticket126_idle_cancel_scan_is_not_paid_when_no_cancel_ever_trips() {
+    struct Workers(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+    impl Drop for Workers {
+        fn drop(&mut self) {
+            crate::vm::set_worker_count(crate::vm::test_baseline_worker_count());
+        }
+    }
+    let _workers = Workers(
+        crate::vm::TEST_WORKER_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+    );
+    crate::vm::set_worker_count(8);
+
+    crate::vm::CANCEL_SCAN_CALLS.store(0, Ordering::Relaxed);
+    let src = "\
+fn pp():
+    ping := Channel[int](0)
+    pong := Channel[int](0)
+    parallel:
+        spawn:
+            i := 0
+            while i < 2000:
+                ping.send(i)
+                n := pong.recv()
+                i = i + 1
+        spawn:
+            i := 0
+            while i < 2000:
+                v := ping.recv()
+                pong.send(v)
+                i = i + 1
+fn main():
+    pp()
+    print(\"done\")
+main()
+";
+    assert_eq!(run(src), "done\n");
+    let scans = crate::vm::CANCEL_SCAN_CALLS.load(Ordering::Relaxed);
+    assert!(
+        scans < 4000,
+        "idle cancel-drain scan ran {scans} times for 2000 round trips with no cancel ever \
+         tripped — it must be gated by a cancel-generation check, not re-run on every idle pass"
+    );
+}
+
+/// TICKET-126 (W13-24) — the idle drain scan is skipped only while no cancel was tripped since the
+/// last scan that found nothing: a trip after a clean scan must re-arm it, and a scan that found a
+/// scope must not record the generation (else the next pass skips a family still owed its drain).
+#[test]
+fn mnsched_drain_scan_reruns_after_a_cancel_generation_bump() {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let sched = MnSched::new(1, 4, Arc::clone(&cancel), dl_err(), 0);
+    let ancestor = Arc::new(AtomicBool::new(false));
+    sched.lock().scopes[0].ancestors.push(Arc::clone(&ancestor));
+    let core = empty_core();
+    sched.seed(vec![mk_fiber(0)]);
+    let f = take_run(&sched);
+    sched.park(core_key(&core), &core, f);
+    assert_eq!(
+        sched.lock().drain_scan_due(),
+        None,
+        "nothing tripped: no scope owes a drain"
+    );
+    crate::vm::trip_cancel_flag(&ancestor);
+    assert_eq!(
+        sched.lock().drain_scan_due(),
+        Some(0),
+        "a trip after a clean scan must re-arm the scan"
+    );
+    assert_eq!(
+        sched.lock().drain_scan_due(),
+        Some(0),
+        "a scan that found a scope must not record the generation"
+    );
+}
+
+/// TICKET-126 (W13-24) — every production cancel-flag store goes through `trip_cancel_flag`, which
+/// bumps `CANCEL_GEN`. A bare store is invisible to the gated drain scan of `take_runnable` and
+/// brings back W13-8's false deadlock for a parked fiber whose ancestor was cancelled.
+#[test]
+fn ticket126_every_cancel_store_goes_through_trip_cancel_flag() {
+    for (name, src) in [
+        ("exec.rs", include_str!("exec.rs")),
+        ("mod.rs", include_str!("mod.rs")),
+        ("sched.rs", include_str!("sched.rs")),
+        ("netio.rs", include_str!("netio.rs")),
+    ] {
+        let flat: String = src.chars().filter(|c| !c.is_whitespace()).collect();
+        for bypass in ["cancel.store(true", "c.store(true"] {
+            assert_eq!(
+                flat.matches(bypass).count(),
+                0,
+                "src/vm/{name}: a bare {bypass} bypasses trip_cancel_flag"
+            );
+        }
+    }
+}
+
+/// TICKET-126 (W13-24) — the `CANCEL_GEN` bump is `Release` and the gate's read is `Acquire`. With
+/// both sides `Relaxed` the pair establishes no happens-before, so `drain_scan_due` can see the
+/// bumped generation, read the flag it was bumped for as still `false`, record that generation, and
+/// leave a fiber parked under a cancelled ancestor undrained — W13-8's false deadlock. No mutex
+/// orders the pair for us: `Vm::trip_cancel` stores an ancestor flag under no core lock and
+/// `scope_cancel_tripped` reads it under one. A source-text rule, because no test can observe a
+/// memory ordering.
+#[test]
+fn ticket126_cancel_gen_bump_is_release_and_the_gate_read_is_acquire() {
+    let flat: String = include_str!("mod.rs")
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    for needed in [
+        "CANCEL_GEN.fetch_add(1,Ordering::Release)",
+        "CANCEL_GEN.load(Ordering::Acquire)",
+    ] {
+        assert!(
+            flat.contains(needed),
+            "src/vm/mod.rs: {needed} is missing; that release/acquire pair is what orders a cancel-flag store before the gated drain scan"
+        );
+    }
+    for weak in [
+        "CANCEL_GEN.fetch_add(1,Ordering::Relaxed)",
+        "CANCEL_GEN.load(Ordering::Relaxed)",
+    ] {
+        assert!(
+            !flat.contains(weak),
+            "src/vm/mod.rs: {weak} loses a trip; a scanner can see the bumped generation while the flag it was bumped for still reads false (W13-8)"
+        );
+    }
 }

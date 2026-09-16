@@ -7,6 +7,14 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-126 (2026-09-16) — TICKET-118's idle-path cost removed: an unbuffered ping-pong at the default worker count is back within 5% of the pre-TICKET-118 binary (W13-24).**
+  A process-wide `CANCEL_GEN` counter (`src/vm/mod.rs`), bumped `Release` by the sole production
+  cancel-flag setter `trip_cancel_flag` and read `Acquire` by the new `SchedCore::drain_scan_due`,
+  gates the O(scopes) idle-path cancel-drain scan so it runs only after a cancel was actually
+  tripped; `joiner_step`'s pool-slot-yield check now tests the joiner's `ThreadId` (computed once per
+  `take_runnable` call, outside the lock) before `pool::may_yield_slot()`, not after. `flat.chz` at
+  the default (28) worker count: base median 11.149 s, fixed median 11.308 s (+1.4%, was +17.9% on
+  TICKET-118's branch); `CHEZZI_THREADS=8` -1.7%, `=2` -2.4%, `nested.chz` at default +0.7%.
 - **TICKET-125 (2026-09-16) — three of wave 13's nested-deadlock verdict edges close (W13-4, exec_join, W13-5 at T=1); W13-6 and W13-5 at T>=2 stay open with a measured residual.**
   Four mechanisms: (1) a joined family whose member fiber owns a still-incomplete NESTED nursery is
   now INTERIOR, not a leaf (`JoinScope::parent_scope`, set by `Vm::activate_fiber_owned_nursery`) — a

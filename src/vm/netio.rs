@@ -160,7 +160,7 @@ fn deadline_gap_wake(
     scope_cancel: &Option<Arc<AtomicBool>>,
 ) {
     if let Some(c) = scope_cancel {
-        c.store(true, Ordering::Relaxed);
+        crate::vm::trip_cancel_flag(c);
     }
     sched.close_wake(key, core);
 }
@@ -3961,8 +3961,7 @@ impl Vm {
                 // flag so a job already running dies at its next back-edge, and one the pool has
                 // not started yet observes it in its prologue. A job with no cancellation point
                 // still runs to completion; that is Java's contract too.
-                core.cancel
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                crate::vm::trip_cancel_flag(&core.cancel);
                 // TICKET-118 (W13-8) — a cancel is a wake source too: without this poke, a worker
                 // deciding under its own core lock could read the flag on both sides of the trip and
                 // park untimed, leaving a job's cancelled nursery child un-drained until some later

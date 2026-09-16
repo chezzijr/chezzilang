@@ -358,6 +358,34 @@ where
 /// ([`pool`]) is a `OnceLock` created lazily on first use, so a later store would not resize it.
 static WORKER_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
 
+/// TICKET-126 — counts calls to [`SchedCore::cancelled_scope_awaiting_drain`], the O(scopes) idle-path
+/// scan TICKET-118 added. Test-only instrumentation for the behavioural proxy that pins the cancel-
+/// generation guard: with the guard, a program that never cancels must not re-run this per idle pass.
+#[cfg(test)]
+static CANCEL_SCAN_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+/// TICKET-126 (W13-24) — bumped once by every cancel-flag trip ([`trip_cancel_flag`]). Process-wide
+/// on purpose: an ancestor flag (an `Executor`'s `shutdown_now`) is shared by scheds the storing site
+/// cannot name. Starts at 1 so a fresh sched (`drain_scan_gen == 0`) always scans once.
+static CANCEL_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// TICKET-126 (W13-24) — the ONLY way production code sets a scope-cancel or ancestor-cancel flag.
+/// Store FIRST, then bump, and bump with `Release` against the `Acquire` load in
+/// [`SchedCore::drain_scan_due`]. That release/acquire pair on `CANCEL_GEN` is the ONLY thing that
+/// makes the flag store visible to a scanner which sees the new generation: `Relaxed` on both sides
+/// establishes no happens-before. There is no mutex to fall back on — `Vm::trip_cancel`
+/// (`src/vm/exec.rs:212`) stores an ancestor flag under NO core lock, while
+/// `SchedCore::scope_cancel_tripped` reads that same shared flag under the core lock. Under
+/// `Relaxed`/`Relaxed` this interleaving is reachable: the trip stores the flag and bumps the
+/// generation; `drain_scan_due` loads the new generation, scans, reads the flag as still `false`,
+/// returns `None` and RECORDS the new generation; only the NEXT trip re-arms the scan, so the fiber
+/// parked under the cancelled ancestor is never drained and `take_runnable` faults it as a deadlock —
+/// W13-8, the regression TICKET-118 fixed.
+pub(crate) fn trip_cancel_flag(flag: &AtomicBool) {
+    flag.store(true, Ordering::Relaxed);
+    CANCEL_GEN.fetch_add(1, Ordering::Release);
+}
+
 /// A process-wide lock serializing every test that WRITES [`WORKER_OVERRIDE`]. The override is
 /// process-global and the harness runs tests on multiple threads, so an unguarded store would change
 /// the worker count under every concurrent parallel test. Same shape and same reason as
@@ -2335,6 +2363,9 @@ struct SchedCore {
     /// sched's nursery, the only thread that may hand its bounded-pool slot over while it waits
     /// (DEC-052).
     pool_joiner: Option<std::thread::ThreadId>,
+    /// TICKET-126 (W13-24) — the `CANCEL_GEN` value at which this sched's last drain scan found no
+    /// cancelled scope owing a drain. Written only by [`SchedCore::drain_scan_due`].
+    drain_scan_gen: u64,
     parked_n: usize, // total fibers across every `parked` bucket
     /// TICKET-103 — owners parked at the `JoinNursery` of a fiber-owned nursery (`Disp::JoinPark`),
     /// as `(origin scope id, fiber)`. In neither `running` nor `parked_n`. Woken by
@@ -2504,10 +2535,33 @@ impl SchedCore {
     /// drains it before judging a deadlock; every other caller reads the own-flag-only
     /// `any_cancelled_scope_awaiting_drain` above.
     fn cancelled_scope_awaiting_drain(&self) -> Option<usize> {
+        #[cfg(test)]
+        CANCEL_SCAN_CALLS.fetch_add(1, Ordering::Relaxed);
         (0..self.scopes.len()).find(|&sid| {
             let s = &self.scopes[sid];
             s.done < s.total && self.scope_cancel_tripped(sid) && self.scope_has_undrained_park(sid)
         })
+    }
+
+    /// TICKET-126 (W13-24) — the drain scan, skipped while no cancel flag was tripped since this sched's
+    /// last scan found nothing. Skipping is sound because a cancelled scope cannot gain a parked fiber
+    /// after its trip (`park`/`park_send`/`park_wait` re-check the flags under this lock and requeue,
+    /// DEC-118). The generation is recorded only on `None`: a found scope is re-scanned until its drain
+    /// empties it. Before this gate the scan ran on every idle pass of every worker (W13-24).
+    ///
+    /// The load is `Acquire`, against the `Release` bump in [`trip_cancel_flag`]. That pair is what
+    /// orders a flag store before this scan, so seeing a newer generation means seeing the flag. The
+    /// flag loads in `scope_cancel_tripped` stay `Relaxed`: this one acquire orders them all.
+    fn drain_scan_due(&mut self) -> Option<usize> {
+        let cancel_gen = CANCEL_GEN.load(Ordering::Acquire);
+        if self.drain_scan_gen == cancel_gen {
+            return None;
+        }
+        let found = self.cancelled_scope_awaiting_drain();
+        if found.is_none() {
+            self.drain_scan_gen = cancel_gen;
+        }
+        found
     }
 
     /// Is any fiber of scope `sid` still sitting in `parked`, i.e. still owed its `cancel_drain`?
@@ -2644,6 +2698,7 @@ impl MnSched {
                 blocked_owners: 0,
                 cross_sched_blocked_owners: 0,
                 pool_joiner: None,
+                drain_scan_gen: 0,
                 parked_n: 0,
                 join_parked: Vec::new(),
                 scopes: vec![JoinScope {
@@ -2708,15 +2763,19 @@ impl MnSched {
     /// TICKET-118 (W13-7) — what the marked joiner (if this thread is one) should do on its next
     /// wait/park pass. `idle_since` tracks how long `running`/`runnable` have both read zero;
     /// resets to `None` the moment either is nonzero.
+    ///
+    /// TICKET-126 (W13-24) — the id compare goes first and `me` is computed once per `take_runnable`
+    /// call outside the lock, because every helper worker is a pool job, so the old order paid two
+    /// TLS reads and a `thread::current()` under the core lock on every idle pass (measured +15% at
+    /// 28 workers, W13-24). The conjunction is logically identical: `c.pool_joiner != Some(me)` is
+    /// true whenever `c.pool_joiner.is_none()` was.
     fn joiner_step(
         &self,
         c: &SchedCore,
+        me: std::thread::ThreadId,
         idle_since: &mut Option<std::time::Instant>,
     ) -> JoinerStep {
-        if c.pool_joiner.is_none()
-            || !crate::vm::pool::may_yield_slot()
-            || c.pool_joiner != Some(std::thread::current().id())
-        {
+        if c.pool_joiner != Some(me) || !crate::vm::pool::may_yield_slot() {
             return JoinerStep::Untimed;
         }
         if c.running != 0 || self.runnable.load(Ordering::Relaxed) != 0 {
@@ -2743,7 +2802,7 @@ impl MnSched {
         c: std::sync::MutexGuard<'a, SchedCore>,
         idle_since: &mut Option<std::time::Instant>,
     ) -> std::sync::MutexGuard<'a, SchedCore> {
-        match self.joiner_step(&c, idle_since) {
+        match self.joiner_step(&c, std::thread::current().id(), idle_since) {
             JoinerStep::Untimed => self.cv.wait(c).unwrap_or_else(|e| e.into_inner()),
             JoinerStep::Timed => {
                 self.cv
@@ -3074,6 +3133,7 @@ impl MnSched {
         // there). Cleared at every wait site.
         let mut judged = false;
         let mut idle_since = None;
+        let me = std::thread::current().id();
         loop {
             // 0. D4d — every `GLOBAL_CHECK_INTERVAL`th schedule, pull from the global queue FIRST
             //    (before own local / stealing). Without this a worker continuously refilled by
@@ -3175,7 +3235,9 @@ impl MnSched {
             // `false` while the N4 veto inside `is_deadlocked`/`local_quiesced` said `true` (or vice
             // versa), parking the worker on a stale verdict (TICKET-118 plan-validation, 2026-09-15
             // 10:59Z) — `awaiting_drain` threads this ONE read into both calls below instead.
-            if let Some(sid) = c.cancelled_scope_awaiting_drain() {
+            // TICKET-126 — gated by `CANCEL_GEN` (see `SchedCore::drain_scan_due`); the generation
+            // read is this pass's one cancel read.
+            if let Some(sid) = c.drain_scan_due() {
                 drop(c);
                 self.cancel_drain(sid);
                 continue;
@@ -3300,7 +3362,7 @@ impl MnSched {
             //
             // TICKET-118 (W13-7) — only the marked joiner (`SchedCore::pool_joiner`) ever times or
             // yields here; every other idle worker keeps its untimed/timed choice above unchanged.
-            match self.joiner_step(&c, &mut idle_since) {
+            match self.joiner_step(&c, me, &mut idle_since) {
                 JoinerStep::Untimed => {}
                 JoinerStep::Timed => {
                     let (guard, _) = self
@@ -3994,7 +4056,7 @@ impl MnSched {
                 // publishes the flag to every worker that later evaluates `is_deadlocked`. Only THIS
                 // scope: an inner nursery's backlog must not cancel an outer sibling (structured
                 // concurrency); the fault propagates outward through the join instead.
-                s.cancel.store(true, Ordering::Relaxed);
+                crate::vm::trip_cancel_flag(&s.cancel);
             }
             outcome
         } else {
@@ -4029,7 +4091,7 @@ impl MnSched {
     /// `Vm::trip_cancel`, which is program-ordered before `finish`'s own lock release).
     fn trip_scope_cancel(&self, scope_id: usize) {
         let c = self.lock();
-        c.scopes[scope_id].cancel.store(true, Ordering::Relaxed);
+        crate::vm::trip_cancel_flag(&c.scopes[scope_id].cancel);
     }
 
     /// gaps.md W7-57 — the run-wide `os.exit` analogue of the intra-nursery abort teardown
@@ -4052,7 +4114,7 @@ impl MnSched {
         let n = {
             let c = self.lock();
             for s in &c.scopes {
-                s.cancel.store(true, Ordering::Relaxed);
+                crate::vm::trip_cancel_flag(&s.cancel);
             }
             c.scopes.len()
         };

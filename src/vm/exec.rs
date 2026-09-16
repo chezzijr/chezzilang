@@ -209,7 +209,7 @@ impl Vm {
     /// No-op when this VM runs under no nursery (`cancel` is `None`) — e.g. the top-level VM.
     pub(super) fn trip_cancel(&self) {
         if let Some(c) = &self.cancel {
-            c.store(true, Ordering::Relaxed);
+            crate::vm::trip_cancel_flag(c);
         }
     }
 

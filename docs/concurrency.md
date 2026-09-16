@@ -1834,7 +1834,9 @@ supervised tasks) — Go's float-free `go` is the model both ecosystems *rejecte
 > **TICKET-118 — a `shutdown_now()` cancel now reaches a job's nursery fibers too.** Before, a `recv`-
 > parked task of a nursery a job opened never saw the cancel flag its `Executor` tripped, so the
 > nursery's own deadlock detector fired first instead of the cancel taking effect (see the
-> `shutdown_now()` row below).
+> `shutdown_now()` row below). An idle worker pays for that check only after some cancel was
+> tripped (TICKET-126): the drain scan is gated by a process-wide cancel generation, so a program
+> that never cancels pays one atomic read per idle pass.
 >
 > **The queue did not go away** — the shared pool has one, and a submitted job waits in it when every
 > worker is busy. What changed is *who drains it and when*: continuously by pool workers, rather than

@@ -2276,3 +2276,37 @@ the 5s the filer's note asked to keep an eye on), and the 16 `--max-heap` fixtur
 `src/test_runner.rs` (`over_memory_*`, covering `W7-26`/`W7-28`/`W7-29`) all still pass with their
 existing byte-bucket assertions unchanged — `snapshot_nodes`/`snapshot_adopt` being GC-rooted did
 not move the cap accounting.
+
+## TICKET-126 — idle-path cancel scan and joiner check off the hot path (2026-09-16)
+
+**Cause.** TICKET-118 (W13-7/W13-8) added two per-idle-pass costs to `MnSched::take_runnable`, both
+run under the core lock on every idle pass: an O(scopes) cancel-drain scan
+(`SchedCore::cancelled_scope_awaiting_drain`) and `joiner_step`'s pool-slot-yield check, whose old
+conjunction order paid two TLS reads plus `std::thread::current()` on every helper worker before
+testing whether it was the joiner. Fix: a process-wide `CANCEL_GEN` counter, bumped `Release` by the
+one production entry point that sets a cancel flag (`trip_cancel_flag`) and read `Acquire` by a new
+`SchedCore::drain_scan_due`, skips the scan while no cancel was tripped since this sched's last clean
+scan; `joiner_step`'s id compare now runs first against a `ThreadId` computed once per
+`take_runnable` call outside the lock.
+
+Release binaries, `flat.chz` (200000-round-trip unbuffered channel ping-pong), 10 interleaved runs
+each. Base = `/home/chezzijr/.cache/chezzi-perf118/target/release/chezzi` (`d5bfa5ab`, pre-TICKET-118).
+Fixed = this ticket's binary, built at `CARGO_TARGET_DIR=/home/chezzijr/.cache/chezzi-target-126`.
+`uptime` load average before/after each batch: 3.42→18.77 (T=default flat.chz), 17.27→9.20 (T=8),
+8.54→6.10 (T=2), 6.10→4.87 (nested.chz); no orphan spinner (`ppid=1` held only the pipeline
+dispatcher) at any check.
+
+| row | base median | fixed median | change |
+|---|---|---|---|
+| `flat.chz`, default (28) workers | 11.149 s | 11.308 s | +1.4% |
+| `flat.chz`, `CHEZZI_THREADS=8` | 3.740 s | 3.675 s | -1.7% |
+| `flat.chz`, `CHEZZI_THREADS=2` | 1.490 s | 1.454 s | -2.4% |
+| `nested.chz`, default (28) workers | 4.046 s | 4.076 s | +0.7% |
+
+Every row is within the 5% ceiling; TICKET-118's filed +17.9% default-worker regression on this same
+program is gone. Every run of both binaries exited rc=0.
+
+`h1c.chz h1.chz h3.chz h2.chz h2b.chz h2c.chz` in `/home/chezzijr/.cache/chezzi-hunt13/sched/`, five
+runs each at `CHEZZI_THREADS=1`, `=2` and default, on the fixed binary: rc=0 5/5 at every worker count
+for every program. `h5.chz b4d.chz b4e.chz`, same schedule: rc=1 5/5 at every worker count for every
+program.

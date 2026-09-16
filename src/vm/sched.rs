@@ -5365,7 +5365,7 @@ impl Vm {
             // It is a REQUEST, not a kill — a job with no cancellation checkpoint (an in-flight
             // `process.run` child, `docs/stdlib.md` §"blocking calls cannot be interrupted") still runs
             // to completion. That ceiling is the documented one, unchanged here.
-            core.cancel.store(true, Ordering::Relaxed);
+            crate::vm::trip_cancel_flag(&core.cancel);
             return Err(e);
         }
         self.reduce_task_slots(slots)
@@ -6538,8 +6538,7 @@ pub(super) fn dispatch_eager_job(
             // Stop the siblings still feeding the backlog — the `shutdown_now` idiom (D4: cooperative,
             // a job with no cancellation point still runs to completion). Without it the remaining
             // jobs keep allocating while the join drains, which is what the abort exists to prevent.
-            core.cancel
-                .store(true, std::sync::atomic::Ordering::Relaxed);
+            crate::vm::trip_cancel_flag(&core.cancel);
         }
         core.eager_cv.notify_all();
         // W7-56 — this job's `outstanding` just dropped, so it no longer vetoes any nursery's
