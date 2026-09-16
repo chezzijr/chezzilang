@@ -15,7 +15,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   `take_runnable` call, outside the lock) before `pool::may_yield_slot()`, not after. `flat.chz` at
   the default (28) worker count: base median 11.149 s, fixed median 11.308 s (+1.4%, was +17.9% on
   TICKET-118's branch); `CHEZZI_THREADS=8` -1.7%, `=2` -2.4%, `nested.chz` at default +0.7%.
-- **TICKET-125 (2026-09-16) — three of wave 13's nested-deadlock verdict edges close (W13-4, exec_join, W13-5 at T=1); W13-6 and W13-5 at T>=2 stay open with a measured residual.**
+- **TICKET-125 (2026-09-16) — three of wave 13's nested-deadlock verdict edges close (W13-4, exec_join, W13-5 at T=1); W13-6 stays open, W13-5 at T>=2 was left with a measured residual (CLOSED 2026-09-16 by TICKET-129, see below).**
   Four mechanisms: (1) a joined family whose member fiber owns a still-incomplete NESTED nursery is
   now INTERIOR, not a leaf (`JoinScope::parent_scope`, set by `Vm::activate_fiber_owned_nursery`) — a
   channel-parked owner at depth 3+ used to be faulted and dropped without unwinding its child scope,
@@ -49,7 +49,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   per worker count: `d2a`/`d2d`/`g3` false-faulted 37/32/31, 23/36/31, 24/30 (at T=2/4/T=2) on base,
   0/60 at every count on the fix; `b1`/`j2`/`two_leaf` controls stayed 30/30 faulting, `a1b`/`cousin_fed`
   stayed 20/20 clean. The pre-existing, NOT-owned-by-this-ticket `two_leaf` hang at `CHEZZI_THREADS=1`
-  (`docs/gaps.md`'s two-leaf-deadlock control) is unaffected: a temporary trace showed its hangs never
+  (filed as `docs/gaps.md` **W13-26**, OPEN) is unaffected: a temporary trace showed its hangs never
   reach the new `may_fault_unproven` path, and an interleaved comparative sample put the fix's hang rate
   at or below base's (18/280 vs 29/280).
 - **TICKET-124 (2026-09-16) — the expected-type / untyped-constant widening TICKET-106 wired into one sink now reaches its neighbours: a generic ctor's own hint, a nested ctor argument, a reassignment/index-assign/field-assign target, and a `float`-slot collection-method argument; plus a check-OK container format spec (W13-12/13/14/15/18).**
