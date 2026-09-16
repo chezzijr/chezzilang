@@ -8834,6 +8834,25 @@ fn inject_or_extend_opens_a_continuation_when_the_target_is_not_last() {
     assert_eq!(s.lock().scopes[3].total, 2);
 }
 
+/// TICKET-128 — a scope-scoped owner stop must wait for every continuation scope of its family,
+/// not just the origin scope.
+#[test]
+fn owner_stop_waits_for_every_continuation_scope_of_its_family() {
+    let s = mk_sched(1);
+    let tok = Arc::new(AtomicBool::new(false));
+    let s1 = s.register_scope(1, Arc::clone(&tok), Vec::new());
+    let _s2 = s.register_scope(0, Arc::new(AtomicBool::new(false)), Vec::new());
+    assert_eq!(s.inject_or_extend(mk_pending_fiber(0), s1), Some(3));
+    let mut c = s.lock();
+    c.scopes[s1].done = 1;
+    assert!(
+        !c.owner_scope_done(s1),
+        "continuation scope 3 is still running"
+    );
+    c.scopes[3].done = 1;
+    assert!(c.owner_scope_done(s1));
+}
+
 /// TICKET-103 fixture `S1`: owner A (slot 0, scope 0) join-parked on scope `s1`, whose one task C
 /// is slot 1. Returns `s1`.
 fn park_join_owner(s: &MnSched) -> usize {

@@ -3216,12 +3216,12 @@ impl MnSched {
             // `terminate` (set by `finish` only when ALL scopes are done, or by deadlock/fault/exit).
             // `body_open` (eager) holds the scope open against a transient `done == total`. Single-scope
             // fast path: an outermost owner with one scope behaves exactly like the old `done == total`.
-            if scope_id != SENTINEL_SCOPE {
-                let s = &c.scopes[scope_id];
-                if s.done == s.total && !s.body_open {
-                    self.cv.notify_all();
-                    return Take::Stop;
-                }
+            // The owner stops only when its whole FAMILY — the origin scope plus any TICKET-103
+            // continuation scopes sharing its cancel token — is done, not the origin alone
+            // (`SchedCore::owner_scope_done`, TICKET-128/W13-25).
+            if scope_id != SENTINEL_SCOPE && c.owner_scope_done(scope_id) {
+                self.cv.notify_all();
+                return Take::Stop;
             }
             // TICKET-118 (W13-8) — drain a cancelled family's parked fibers BEFORE judging a
             // deadlock, so a `shutdown_now` (or any scope-cancel) that trips an ANCESTOR flag a
@@ -4904,6 +4904,16 @@ impl SchedCore {
         self.scope_family(scope_id)
             .iter()
             .all(|&j| self.scopes[j].done == self.scopes[j].total)
+    }
+
+    /// TICKET-128 (W13-25) — a scope-scoped owner may stop only when its WHOLE family (the origin
+    /// scope plus any TICKET-103 continuation scopes sharing its cancel token) is done, not the
+    /// origin alone. A drainer scope-scoped to the origin used to stop while a continuation scope —
+    /// opened by `inject_or_extend` when a spawn landed after the origin was no longer the sched's
+    /// last scope — still held a parked fiber; at `CHEZZI_THREADS=1` no worker was left to run it and
+    /// the joiner slept on an untimed `cv.wait` forever.
+    fn owner_scope_done(&self, scope_id: usize) -> bool {
+        !self.scopes[scope_id].body_open && self.family_done(scope_id)
     }
 
     /// TICKET-103 — some owner blocked at a same-sched join is joining a family whose every scope is
