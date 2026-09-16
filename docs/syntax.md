@@ -341,6 +341,11 @@ fn f():
   is a first declaration and may be any type (`x := 1` / `x, y := (2, "s")` is fine), and — like the
   single-name let — a fn-local or block-scope destructure is a fresh shadow and may retype. A
   destructure also cannot **un-const** a prior `X: const int = 1`, even at the same type.
+- **A name repeated inside one destructure is legal and the LAST value wins.** `a, a := 1, 2` binds
+  `a` to `2`, as CPython does; Go rejects it (`a repeated on left side of :=`) and Rust rejects the
+  equivalent pattern (E0416). Chezzi follows CPython here on purpose: `x := 1` then `x := 2` in the
+  same scope is already a rebind, so rejecting the one-statement form would make `:=` inconsistent
+  with itself (`docs/gaps.md` W13-23, decided 2026-09-16).
 - **A top-level `fn` shares the slot too, and re-declaring one is judged on its readers.** `fn helper()`
   and a later `helper := 3` are the same storage slot, and the `fn` is defined into it *before any
   statement runs* — so **where the `fn` sits does not matter**: `f := fn() -> int: helper()` / `helper
