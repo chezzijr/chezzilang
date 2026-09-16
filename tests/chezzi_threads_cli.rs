@@ -622,16 +622,66 @@ const NESTED_LIVE_RENDEZVOUS: &str = "fn main():
 main()
 ";
 
+/// Control (TICKET-125 step 1, `cousin_fed.chz`): a recoverer feeds a cousin BY CHANNEL after its own
+/// inner deadlock recovers. Must complete at every worker count.
+const COUSIN_FED: &str = "fn main():
+    never := Channel[int](0)
+    x := Channel[int](0)
+    y := Channel[int](0)
+    parallel:
+        spawn:
+            r := recover:
+                parallel:
+                    spawn:
+                        never.recv()
+            match r:
+                Ok(_): print(\"inner ok\")
+                Err(e): print(\"inner err\")
+            x.send(1)
+        spawn:
+            parallel:
+                spawn:
+                    y.send(x.recv() + 1)
+                print(\"F got {y.recv()}\")
+    print(\"done\")
+main()
+";
+
+/// Control (TICKET-125 step 1, `i6b.chz`): TWO siblings each recover an inner deadlock, no fan-in.
+/// Must complete at every worker count.
+const TWO_RECOVERERS_NO_FAN_IN: &str = "fn main():
+    parallel:
+        for i in range(2):
+            spawn:
+                r := recover:
+                    parallel:
+                        spawn:
+                            never := Channel[int](0)
+                            never.recv()
+                print(\"recovered {i}\")
+    print(\"done\")
+main()
+";
+
 const NESTED_DEADLOCK_RUNS: usize = 5;
-const NESTED_DEADLOCK_THREADS: [&str; 3] = ["1", "2", "4"];
+/// TICKET-125 step 1 — `""` is the default worker count (`CHEZZI_THREADS` unset), added so every
+/// caller of `assert_at_every_worker_count` also runs at the count most programs actually use.
+const NESTED_DEADLOCK_THREADS: [&str; 4] = ["1", "2", "4", ""];
 
 /// Runs `chezzi run <path>` at `CHEZZI_THREADS=<threads>`; `None` when it outlives a 20 s hang
 /// deadline (the child is killed). The poll loop lives in this plain fn, not in a `#[test]` body, so
 /// `tests/no_wall_clock_ratio_gates.rs`'s body scans list no new name (the `child_rusage` precedent).
+/// TICKET-125 — an empty `threads` removes `CHEZZI_THREADS` instead of setting it, so the child runs
+/// at the default worker count.
 fn run_with_hang_deadline(path: &Path, threads: &str) -> Option<std::process::Output> {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_chezzi"))
-        .args(["run", path.to_str().unwrap()])
-        .env("CHEZZI_THREADS", threads)
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
+    cmd.args(["run", path.to_str().unwrap()]);
+    if threads.is_empty() {
+        cmd.env_remove("CHEZZI_THREADS");
+    } else {
+        cmd.env("CHEZZI_THREADS", threads);
+    }
+    let mut child = cmd
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -723,6 +773,41 @@ fn nested_deadlock_controls_hold_at_every_worker_count() {
         NESTED_LIVE_RENDEZVOUS,
         |out| out.status.success() && String::from_utf8_lossy(&out.stdout) == "got 2\n",
         "exit 0 with stdout `got 2`",
+    );
+}
+
+/// TICKET-125 step 1: a recoverer feeds a cousin by channel after its own inner deadlock recovers.
+/// Must stay clean at every worker count, including the default this ticket adds.
+#[test]
+fn cousin_fed_completes_at_every_worker_count() {
+    assert_at_every_worker_count(
+        "cousin_fed.chz",
+        COUSIN_FED,
+        |out| {
+            out.status.success()
+                && String::from_utf8_lossy(&out.stdout) == "inner err\nF got 2\ndone\n"
+        },
+        "exit 0 with stdout `inner err`, `F got 2`, `done`",
+    );
+}
+
+/// TICKET-125 step 1: two siblings each recover an inner deadlock, no fan-in. Must stay clean at
+/// every worker count.
+#[test]
+fn i6b_two_recoverers_without_fan_in_complete_at_every_worker_count() {
+    assert_at_every_worker_count(
+        "i6b.chz",
+        TWO_RECOVERERS_NO_FAN_IN,
+        |out| {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let lines: Vec<&str> = stdout.lines().collect();
+            out.status.success()
+                && lines.len() == 3
+                && lines[2] == "done"
+                && std::collections::BTreeSet::from_iter(lines[..2].iter().copied())
+                    == std::collections::BTreeSet::from_iter(["recovered 0", "recovered 1"])
+        },
+        "exit 0 with `recovered 0`/`recovered 1` (either order) then `done`",
     );
 }
 
