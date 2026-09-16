@@ -13038,7 +13038,8 @@ Rollback section's own fallback) fixed T=4 too in isolated runs, but the SAME ev
 then false-faulted at T=2 in the full suite — reverted per the Rollback section's next step
 (revert 7 and 8 wholesale). `tests/chezzi_threads_cli.rs`'s
 `w13_6_two_recoverers_fan_in_completes_at_thread_two` (from TICKET-117's triage) stays red at T=2 on
-this binary, tracked here.
+this binary; it is `#[ignore]`d with reason `"TICKET-125 residual: W13-6 at T>=2 — see docs/gaps.md"`
+so `cargo test --test chezzi_threads_cli` reports `0 failed`, and tracked here as the residual.
 
 ### W13-7 / W13-8 repros (P1)
 
