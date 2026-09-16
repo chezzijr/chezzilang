@@ -851,6 +851,174 @@ const RECOVERED_DEADLOCK_THEN_COUSIN_JOIN: &str = "fn main():
 main()
 ";
 
+/// W13-5 (TICKET-125, `d2d.chz`): the SAME shape as [`RECOVERED_DEADLOCK_THEN_COUSIN_JOIN`] with the
+/// two roles swapped (the recoverer, not the cousin, sits at a nested join). Must print `err`,
+/// `task got 5`, `done` and exit 0.
+const RECOVERED_DEADLOCK_ROLES_SWAPPED: &str = "fn main():
+    out := Channel[int](0)
+    parallel:
+        spawn:
+            parallel:
+                spawn:
+                    r := recover:
+                        parallel:
+                            spawn:
+                                never := Channel[int](0)
+                                never.recv()
+                    match r:
+                        Ok(_): print(\"ok\")
+                        Err(e): print(\"err\")
+                    print(\"task got {out.recv()}\")
+        spawn:
+            parallel:
+                spawn:
+                    out.send(5)
+    print(\"done\")
+main()
+";
+
+/// W13-5 (TICKET-125, `g3.chz`): the recoverer catches a `panic(\"boom\")` instead of an inner
+/// deadlock, then still feeds the cousin. Must print `err`, `cousin got 5`, `done` and exit 0.
+const RECOVERED_PANIC_THEN_COUSIN_JOIN: &str = "fn main():
+    out := Channel[int](0)
+    parallel:
+        spawn:
+            r := recover:
+                parallel:
+                    spawn:
+                        panic(\"boom\")
+            match r:
+                Ok(_): print(\"ok\")
+                Err(e): print(\"err\")
+            out.send(5)
+        spawn:
+            parallel:
+                spawn:
+                    print(\"cousin got {out.recv()}\")
+    print(\"done\")
+main()
+";
+
+/// Runs `program` [`NESTED_DEADLOCK_RUNS`] times at `CHEZZI_THREADS=1`, asserting exit 0 with the
+/// exact `want_stdout`.
+fn assert_clean_sampled_at_thread_one(file: &str, program: &str, want_stdout: &str) {
+    let dir = std::env::temp_dir().join(format!(
+        "chz-threads-125-w135s-{}-{file}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join(file);
+    std::fs::write(&path, program).expect("write program");
+    for run in 1..=NESTED_DEADLOCK_RUNS {
+        let Some(out) = run_with_hang_deadline(&path, "1") else {
+            let _ = std::fs::remove_dir_all(&dir);
+            panic!("{file} hung past its 20 s deadline at CHEZZI_THREADS=1, run {run}");
+        };
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        if !(out.status.success() && stdout == want_stdout) {
+            let _ = std::fs::remove_dir_all(&dir);
+            panic!(
+                "{file} at CHEZZI_THREADS=1, run {run}: want exit 0 with stdout `{want_stdout}`, got {:?}\nstdout: {stdout}\nstderr: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// W13-5 (TICKET-125): the cousin-join shape must stay clean, sampled, at `CHEZZI_THREADS=1`.
+#[test]
+fn w13_5_d2a_cousin_join_completes_at_thread_one_sampled() {
+    assert_clean_sampled_at_thread_one(
+        "d2a_sampled.chz",
+        RECOVERED_DEADLOCK_THEN_COUSIN_JOIN,
+        "err\ncousin got 5\ndone\n",
+    );
+}
+
+/// W13-5 (TICKET-125): the roles-swapped shape must stay clean, sampled, at `CHEZZI_THREADS=1`.
+#[test]
+fn w13_5_d2d_roles_swapped_completes_at_thread_one_sampled() {
+    assert_clean_sampled_at_thread_one(
+        "d2d_sampled.chz",
+        RECOVERED_DEADLOCK_ROLES_SWAPPED,
+        "err\ntask got 5\ndone\n",
+    );
+}
+
+/// W13-5 (TICKET-125): the recovered-`panic` shape must stay clean, sampled, at `CHEZZI_THREADS=1`.
+#[test]
+fn w13_5_g3_recovered_panic_then_cousin_join_completes_at_thread_one_sampled() {
+    assert_clean_sampled_at_thread_one(
+        "g3_sampled.chz",
+        RECOVERED_PANIC_THEN_COUSIN_JOIN,
+        "err\ncousin got 5\ndone\n",
+    );
+}
+
+/// W13-5 (TICKET-125) residual, T>=2: `steps 13-15`'s cross-sched deferral (`defer_to_provable_peer`)
+/// cut the false-fault rate sharply (measured ~3/5 -> ~1/20 at T=4 on `d2a`) but did not reach 0, and
+/// forcing `try_lock` contention to read as "no provable peer" made it WORSE (~6/30), so per the
+/// plan's own rollback that mechanism is reverted rather than shipped partially wrong. Tracked OPEN
+/// in `docs/gaps.md` (W13-5 at T>=2).
+#[ignore = "TICKET-125 residual: W13-5 at T>=2 — see docs/gaps.md"]
+#[test]
+fn w13_5_d2a_cousin_join_completes_at_every_worker_count() {
+    assert_at_every_worker_count(
+        "d2a_every.chz",
+        RECOVERED_DEADLOCK_THEN_COUSIN_JOIN,
+        |out| {
+            out.status.success()
+                && String::from_utf8_lossy(&out.stdout) == "err\ncousin got 5\ndone\n"
+        },
+        "exit 0 with stdout `err`, `cousin got 5`, `done`",
+    );
+}
+
+/// W13-5 (TICKET-125) residual, T>=2 — see [`w13_5_d2a_cousin_join_completes_at_every_worker_count`].
+#[ignore = "TICKET-125 residual: W13-5 at T>=2 — see docs/gaps.md"]
+#[test]
+fn w13_5_d2d_roles_swapped_completes_at_every_worker_count() {
+    assert_at_every_worker_count(
+        "d2d_every.chz",
+        RECOVERED_DEADLOCK_ROLES_SWAPPED,
+        |out| {
+            out.status.success()
+                && String::from_utf8_lossy(&out.stdout) == "err\ntask got 5\ndone\n"
+        },
+        "exit 0 with stdout `err`, `task got 5`, `done`",
+    );
+}
+
+/// TICKET-125 — a GENUINE two-leaf deadlock on a channel created in `main` must still fault at every
+/// worker count: the non-provable fallback (fault the lowest-index leaf, then re-judge) must retire
+/// BOTH leaves rather than decline forever.
+const TWO_LEAF_DEADLOCK_ON_A_MAIN_CHANNEL: &str = "fn main():
+    ch := Channel[int](0)
+    parallel:
+        spawn:
+            parallel:
+                spawn:
+                    ch.recv()
+        spawn:
+            parallel:
+                spawn:
+                    ch.recv()
+    print(\"unreachable\")
+main()
+";
+
+#[test]
+fn two_leaf_deadlock_on_a_main_channel_still_faults_at_every_worker_count() {
+    assert_at_every_worker_count(
+        "two_leaf_deadlock_main_channel.chz",
+        TWO_LEAF_DEADLOCK_ON_A_MAIN_CHANNEL,
+        faulted_deadlock,
+        "a `deadlock` fault",
+    );
+}
+
 /// W13-6 (TICKET-125): two siblings each recover an inner deadlock, then fan in to the main body's
 /// `recv()` loop. Must print `t 2` and exit 0; hangs instead at `CHEZZI_THREADS=2`/default.
 const TWO_RECOVERERS_FAN_IN: &str = "fn main():

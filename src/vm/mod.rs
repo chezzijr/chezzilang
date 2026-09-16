@@ -4858,11 +4858,22 @@ impl SchedCore {
     /// joins may be its next receiver once its `recover:` returns (`cousin_fed`). A *joined* family
     /// (one with `joins_blocked > 0`) is a *leaf* when none of its scopes holds a join-blocked owner
     /// (`owners_blocked`). A joined leaf's fibers have no feeder left: its owner waits on them, and
-    /// no member waits on a join. With no parked fiber in a joined leaf, every other shape keeps
-    /// today's sched-wide flag. Residual: two joined leaves where one owner feeds the other after
-    /// its `recover:` (`leaf_cousin`) fault together, as T>=2 already does.
+    /// no member waits on a join. With no parked fiber in ANY joined leaf, the sched keeps today's
+    /// sched-wide flag.
+    ///
+    /// TICKET-125 (W13-5) — with two OR MORE parked leaves, faulting all of them at once can be
+    /// wrong: one leaf's owner may feed a COUSIN leaf once its `recover:` returns
+    /// (`leaf_cousin`/`d2a`), so faulting the cousin too drops a live receiver. [`SchedCore::provable`]
+    /// answers "is every holder of this leaf's channel(s) visible?" — fault only the PROVABLE parked
+    /// leaves; when none is provable, fault the single lowest-index parked leaf alone (this adds no
+    /// fault today's pre-TICKET-125 binary would not already deliver — see DEC-101 condition 2) and
+    /// let the sched re-judge on its next pass, so a two-leaf shape with neither provable still
+    /// faults leaf-by-leaf rather than hanging.
     fn flag_deadlock_leaves(&mut self, err: &RuntimeError) -> bool {
-        let mut target = vec![false; self.scopes.len()];
+        // Distinct joined-leaf families, keyed (and so de-duplicated + ordered) by each family's
+        // lowest scope index.
+        let mut families: std::collections::BTreeMap<usize, Vec<usize>> =
+            std::collections::BTreeMap::new();
         for i in 0..self.scopes.len() {
             if self.scopes[i].joins_blocked == 0 {
                 continue;
@@ -4882,9 +4893,8 @@ impl SchedCore {
             }) {
                 continue;
             }
-            for j in fam {
-                target[j] = true;
-            }
+            let lowest = *fam.iter().min().expect("scope_family never returns empty");
+            families.entry(lowest).or_insert(fam);
         }
         // Peek a `Wait` fiber's scope under its mutex without claiming, as `cancel_drain` does.
         let peek = |wp: &Arc<WaitPark>| -> Option<usize> {
@@ -4894,15 +4904,40 @@ impl SchedCore {
                 .as_ref()
                 .map(|f| f.scope_id)
         };
-        let any_leaf_parked = self.parked.values().flatten().any(|e| match e {
-            ParkedEntry::Recv(f) | ParkedEntry::Send(f) => target[f.scope_id],
-            ParkedEntry::Wait(wp) => {
-                !wp.claimed.load(Ordering::Acquire) && peek(wp).is_some_and(|s| target[s])
-            }
-        });
-        if !any_leaf_parked {
+        let parked_scopes: std::collections::HashSet<usize> = self
+            .parked
+            .values()
+            .flatten()
+            .filter_map(|e| match e {
+                ParkedEntry::Recv(f) | ParkedEntry::Send(f) => Some(f.scope_id),
+                ParkedEntry::Wait(wp) => (!wp.claimed.load(Ordering::Acquire))
+                    .then(|| peek(wp))
+                    .flatten(),
+            })
+            .collect();
+        let candidates: Vec<&Vec<usize>> = families
+            .values()
+            .filter(|fam| fam.iter().any(|s| parked_scopes.contains(s)))
+            .collect();
+        if candidates.is_empty() {
             self.flag_deadlock(err);
             return true;
+        }
+        let provable: Vec<&Vec<usize>> = candidates
+            .iter()
+            .copied()
+            .filter(|fam| self.provable(|s| fam.contains(&s)))
+            .collect();
+        let mut target = vec![false; self.scopes.len()];
+        let chosen: Vec<&Vec<usize>> = if provable.is_empty() {
+            vec![candidates[0]]
+        } else {
+            provable
+        };
+        for fam in chosen {
+            for &j in fam {
+                target[j] = true;
+            }
         }
         let buckets: Vec<(usize, Vec<ParkedEntry>)> = self.parked.drain().collect();
         let mut flagged = 0usize;
@@ -4954,6 +4989,86 @@ impl SchedCore {
         }
         self.parked_n -= flagged;
         false
+    }
+
+    /// TICKET-125 (W13-5) — is EVERY holder of the channel(s) `member` waits on visible to this scan?
+    /// `member` selects the scope indices to check (a leaf family, or every scope). A `false` answer
+    /// means "cannot prove", never "definitely not" — the scan is conservative in the safe direction
+    /// (DEC-101's leaf-policy condition 1): any holder it cannot see (another heap, a `Shared`/
+    /// `RwShared`/`Atomic` box, a buffered `WireValue::Channel`, an Executor job, a module global, an
+    /// FFI value, a generator frame, a timer, `demoted_chans`, a `PartyWait`) holds a strong `Arc`,
+    /// which only RAISES `Arc::strong_count` above what the scan counts inside its own heaps — so an
+    /// incomplete scan can only return `false` where a complete one would return `true`, never the
+    /// reverse.
+    fn provable(&self, member: impl Fn(usize) -> bool) -> bool {
+        // A member scope whose body may still `spawn`/`send` is a live feeder this scan cannot see.
+        if self
+            .scopes
+            .iter()
+            .enumerate()
+            .any(|(i, s)| member(i) && s.body_open)
+        {
+            return false;
+        }
+        let mut recv_fibers: Vec<&Fiber> = Vec::new();
+        for entry in self.parked.values().flatten() {
+            match entry {
+                ParkedEntry::Send(f) if member(f.scope_id) => return false,
+                ParkedEntry::Wait(wp) => {
+                    let scope = wp
+                        .fiber
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .as_ref()
+                        .map(|f| f.scope_id);
+                    if scope.is_some_and(&member) {
+                        return false;
+                    }
+                }
+                ParkedEntry::Recv(f) if member(f.scope_id) => recv_fibers.push(f),
+                _ => {}
+            }
+        }
+        // Every member scope's undone tasks must be accounted for by a PARKED RECV fiber of that
+        // scope: a member fiber blocked some other way (join, native, cancelled) is invisible to the
+        // handle scan below, so its channel's true holder count could be anything.
+        for (i, s) in self.scopes.iter().enumerate() {
+            if !member(i) {
+                continue;
+            }
+            let recv_of_scope = recv_fibers.iter().filter(|f| f.scope_id == i).count();
+            if recv_of_scope != s.total - s.done {
+                return false;
+            }
+        }
+        for f in &recv_fibers {
+            if f.ctx.heap.is_none() || f.recv_waits.len() != 1 {
+                return false;
+            }
+        }
+        let mut cores: Vec<&Arc<ChannelCore>> = Vec::new();
+        for f in &recv_fibers {
+            let core = f.recv_waits[0].core();
+            if !cores.iter().any(|c| Arc::ptr_eq(c, core)) {
+                cores.push(core);
+            }
+        }
+        for core in cores {
+            let inside: usize = recv_fibers
+                .iter()
+                .map(|f| {
+                    f.ctx.heap.as_ref().unwrap().channel_handles(core)
+                        + f.recv_waits
+                            .iter()
+                            .filter(|rw| Arc::ptr_eq(rw.core(), core))
+                            .count()
+                })
+                .sum();
+            if Arc::strong_count(core) != inside {
+                return false;
+            }
+        }
+        true
     }
 }
 
