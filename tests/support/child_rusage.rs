@@ -15,6 +15,7 @@ use std::process::Command;
 /// `1`).
 // `wait4` IS the reap (it's `waitpid` + rusage in one syscall) — clippy can't see that, only that
 // `Child::wait()`/`.output()` was never called on `child`.
+#[allow(clippy::zombie_processes)]
 #[cfg(unix)]
 pub fn run_timed(
     args: &[&str],
@@ -23,31 +24,6 @@ pub fn run_timed(
     std::time::Duration,
     std::time::Duration,
     std::time::Duration,
-    std::process::ExitStatus,
-    String,
-) {
-    let (wall, rusage, status, stdout) = run_with_rusage(args, threads);
-    let user = std::time::Duration::new(
-        rusage.ru_utime.tv_sec as u64,
-        (rusage.ru_utime.tv_usec as u32) * 1000,
-    );
-    let sys = std::time::Duration::new(
-        rusage.ru_stime.tv_sec as u64,
-        (rusage.ru_stime.tv_usec as u32) * 1000,
-    );
-    (wall, user, sys, status, stdout)
-}
-
-/// [`run_timed`]'s spawn and `wait4`, returning the child's whole `libc::rusage` so a caller can read
-/// a COUNT from it (`ru_nvcsw`, TICKET-128) instead of dividing two clocks.
-#[allow(clippy::zombie_processes)]
-#[cfg(unix)]
-pub fn run_with_rusage(
-    args: &[&str],
-    threads: &str,
-) -> (
-    std::time::Duration,
-    libc::rusage,
     std::process::ExitStatus,
     String,
 ) {
@@ -89,9 +65,18 @@ pub fn run_with_rusage(
     let stdout = stdout_reader.join().expect("stdout reader thread");
     let _stderr = stderr_reader.join().expect("stderr reader thread");
 
+    let user = std::time::Duration::new(
+        rusage.ru_utime.tv_sec as u64,
+        (rusage.ru_utime.tv_usec as u32) * 1000,
+    );
+    let sys = std::time::Duration::new(
+        rusage.ru_stime.tv_sec as u64,
+        (rusage.ru_stime.tv_usec as u32) * 1000,
+    );
     (
         wall,
-        rusage,
+        user,
+        sys,
         std::process::ExitStatus::from_raw(status),
         stdout,
     )

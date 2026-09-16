@@ -12,11 +12,63 @@
 //! **Deliberately its own target**, same reasoning as `tests/chezzi_threads_sys_time.rs`: this
 //! fixture burns real wall time (~1s-~10s) at high worker counts, which would destabilize timing
 //! gates sharing a target under `RUST_TEST_THREADS`.
+//!
+//! **Self-contained on purpose.** The pipeline gate copies only this file onto a checkout of base to
+//! prove the bug is not already fixed there. A helper this ticket added under `tests/support/` does
+//! not exist in that run, and the target failed to compile. [`run_counting_switches`] is therefore a
+//! local copy of `child_rusage::run_timed`'s spawn and `wait4`, reading `ru_nvcsw` and no clock.
 
+/// Runs the built `chezzi` with `args` at `CHEZZI_THREADS=threads` and returns its exit status,
+/// stdout, and the child's own voluntary context switch count. Uses `libc::wait4` on the pid, not
+/// `getrusage(RUSAGE_CHILDREN)`, so no other child this test binary reaps contaminates the count.
+/// stdout/stderr drain on background threads so a chatty child cannot block on a full pipe.
+// `wait4` IS the reap (it's `waitpid` + rusage in one syscall) — clippy can't see that, only that
+// `Child::wait()`/`.output()` was never called on `child`.
+#[allow(clippy::zombie_processes)]
 #[cfg(unix)]
-#[allow(dead_code)]
-#[path = "support/child_rusage.rs"]
-mod child_rusage;
+fn run_counting_switches(args: &[&str], threads: &str) -> (std::process::ExitStatus, String, i64) {
+    use std::io::Read;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::{Command, Stdio};
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
+    cmd.args(args);
+    cmd.env("CHEZZI_THREADS", threads);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().expect("spawn chezzi");
+    let pid = child.id() as libc::pid_t;
+
+    let mut stdout_pipe = child.stdout.take().expect("stdout piped");
+    let mut stderr_pipe = child.stderr.take().expect("stderr piped");
+    let stdout_reader = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = stdout_pipe.read_to_string(&mut s);
+        s
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = stderr_pipe.read_to_string(&mut s);
+        s
+    });
+
+    let mut status: libc::c_int = 0;
+    let mut rusage: libc::rusage = unsafe { std::mem::zeroed() };
+    // SAFETY: `pid` was just returned by `child.id()` for a process we own and have not yet waited
+    // on; `&mut status`/`&mut rusage` are valid, appropriately-sized out-params for the call.
+    let ret = unsafe { libc::wait4(pid, &mut status, 0, &mut rusage) };
+    assert_eq!(ret, pid, "wait4({pid}) failed");
+
+    let stdout = stdout_reader.join().expect("stdout reader thread");
+    let _stderr = stderr_reader.join().expect("stderr reader thread");
+
+    (
+        std::process::ExitStatus::from_raw(status),
+        stdout,
+        rusage.ru_nvcsw as i64,
+    )
+}
 
 /// W13-25 — the two worker counts this gate compares. `LOW` matches the task count (no idle
 /// workers); `HIGH` sits far above it, the regime the row measures the cliff in.
@@ -78,11 +130,10 @@ main()\n",
 
     let args = ["run", path.to_str().unwrap()];
 
-    let (wall_low, rusage_low, status_low, stdout_low) =
-        child_rusage::run_with_rusage(&args, LOW_WORKERS);
+    let (status_low, stdout_low, switches_low) = run_counting_switches(&args, LOW_WORKERS);
     assert!(
         status_low.success(),
-        "chezzi run at {LOW_WORKERS} workers must exit 0 (wall={wall_low:?}): {stdout_low}"
+        "chezzi run at {LOW_WORKERS} workers must exit 0: {stdout_low}"
     );
     assert_eq!(
         stdout_low.trim(),
@@ -90,11 +141,10 @@ main()\n",
         "wrong output at {LOW_WORKERS} workers"
     );
 
-    let (wall_high, rusage_high, status_high, stdout_high) =
-        child_rusage::run_with_rusage(&args, HIGH_WORKERS);
+    let (status_high, stdout_high, switches_high) = run_counting_switches(&args, HIGH_WORKERS);
     assert!(
         status_high.success(),
-        "chezzi run at {HIGH_WORKERS} workers must exit 0 (wall={wall_high:?}): {stdout_high}"
+        "chezzi run at {HIGH_WORKERS} workers must exit 0: {stdout_high}"
     );
     assert_eq!(
         stdout_high.trim(),
@@ -102,17 +152,14 @@ main()\n",
         "wrong output at {HIGH_WORKERS} workers"
     );
 
-    let switches_low = rusage_low.ru_nvcsw as i64;
-    let switches_high = rusage_high.ru_nvcsw as i64;
     let bound = MAX_HIGH_OVER_LOW * switches_low + ROUND_TRIPS;
     assert!(
         switches_high <= bound,
         "a flat two-task ping-pong must not get slower as the worker pool grows: \
          voluntary context switches at {HIGH_WORKERS} workers = {switches_high}, at {LOW_WORKERS} \
          workers = {switches_low}; must be <= {MAX_HIGH_OVER_LOW} x low + {ROUND_TRIPS} round trips \
-         = {bound} (wall@{LOW_WORKERS}={wall_low:?} wall@{HIGH_WORKERS}={wall_high:?}, not asserted). \
-         The Go twin stays flat across this range (W13-25); a high count means each rendezvous still \
-         wakes idle workers that do not get the fiber."
+         = {bound}. The Go twin stays flat across this range (W13-25); a high count means each \
+         rendezvous still wakes idle workers that do not get the fiber."
     );
 
     let _ = std::fs::remove_dir_all(&dir);
