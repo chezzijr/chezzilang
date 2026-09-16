@@ -2291,6 +2291,8 @@ struct JoinScope {
     /// `run_mn_nursery_nested`'s owner arm) and join-parked ones (`MnSched::park_join`). Its family
     /// is a target for `flag_deadlock_leaves`.
     joins_blocked: usize,
+    /// TICKET-125 — the scope of the fiber that owns this fiber-owned nursery; `None` otherwise.
+    parent_scope: Option<usize>,
 }
 
 struct SchedCore {
@@ -2651,6 +2653,7 @@ impl MnSched {
                     deadlock_err: None,
                     owners_blocked: 0,
                     joins_blocked: 0,
+                    parent_scope: None,
                 }],
                 terminate: false,
                 demoted_chans: std::collections::HashMap::new(),
@@ -2777,6 +2780,7 @@ impl MnSched {
             deadlock_err: None,
             owners_blocked: 0,
             joins_blocked: 0,
+            parent_scope: None,
         });
         // Cross-nursery flat scheduler — a late `spawn:` into a non-outermost nursery registers a fresh
         // TRAILING scope on the HELD sched (`run_mn_nursery` held-nested branch) AFTER every prior scope
@@ -2822,6 +2826,7 @@ impl MnSched {
             deadlock_err: None,
             owners_blocked: 0,
             joins_blocked: 0,
+            parent_scope: None,
         });
         // A freshly-registered scope has unfinished work — un-latch any stale global `terminate` (see
         // `register_scope`) so the inline owner that drains it is not stopped on the stale flag.
@@ -2912,6 +2917,7 @@ impl MnSched {
                 deadlock_err: origin.deadlock_err.clone(),
                 owners_blocked: 0,
                 joins_blocked: 0,
+                parent_scope: None,
             };
             let id = c.scopes.len();
             c.scopes.push(cont);
@@ -4853,6 +4859,17 @@ impl SchedCore {
             let fam = self.scope_family(i);
             if fam.iter().any(|&j| self.scopes[j].owners_blocked > 0) {
                 continue; // interior: a member's owner may feed it once its own join returns
+            }
+            // TICKET-125 (W13-4) — a member fiber that owns a still-incomplete NESTED nursery is
+            // also interior: faulting that member drops it without unwinding its child scope, which
+            // orphans the child and hangs the run. `owners_blocked` alone misses this: it only
+            // counts JOIN-parked owners, not one parked on a channel inside the child's own body.
+            if self.scopes.iter().enumerate().any(|(k, s)| {
+                !fam.contains(&k)
+                    && s.done < s.total
+                    && s.parent_scope.is_some_and(|p| fam.contains(&p))
+            }) {
+                continue;
             }
             for j in fam {
                 target[j] = true;

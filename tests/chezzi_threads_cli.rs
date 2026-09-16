@@ -901,6 +901,18 @@ fn main():
 main()
 ";
 
+/// W13-4 (TICKET-125): the depth-3 channel-parked-owner shape must fault `deadlock` at EVERY worker
+/// count, not just default/T=2 as the pre-fix binary already does. Red on base: hangs at T=1.
+#[test]
+fn w13_4_channel_parked_owner_depth_3_faults_at_every_worker_count() {
+    assert_at_every_worker_count(
+        "channel_parked_owner_depth3_every.chz",
+        CHANNEL_PARKED_OWNER_DEPTH_3,
+        faulted_deadlock,
+        "a `deadlock` fault",
+    );
+}
+
 /// W13-4 (TICKET-125): reproduces the depth-3 channel-parked-owner hang at `CHEZZI_THREADS=1`.
 #[test]
 fn w13_4_channel_parked_owner_at_depth_3_faults_at_thread_one() {

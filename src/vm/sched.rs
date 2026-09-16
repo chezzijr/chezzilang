@@ -1065,8 +1065,14 @@ impl Vm {
         let cancel = Arc::new(AtomicBool::new(false));
         let scope =
             sched.register_scope_seeded(Arc::clone(&cancel), self.nursery_ancestors(), Vec::new());
-        sched.lock().scopes[scope].deadlock_err =
-            Some(self.err(DEADLOCK_MSG.to_string(), nursery_span));
+        {
+            let mut c = sched.lock();
+            c.scopes[scope].deadlock_err = Some(self.err(DEADLOCK_MSG.to_string(), nursery_span));
+            // TICKET-125 — this scope's fibers can only be fed once the OWNING fiber's own join
+            // returns; a family faulting that fiber (`flag_deadlock_leaves`) must treat this scope
+            // as interior, not a leaf, or the owner is dropped without unwinding it (W13-4).
+            c.scopes[scope].parent_scope = self.fiber_scope;
+        }
         Some(EagerScope {
             sched,
             cancel,
