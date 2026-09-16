@@ -12870,7 +12870,7 @@ are the SAME widening missing at a neighbour sink (qualified head, ctor arm, nes
 | ~~**W13-2**~~ | P0 | airlock | A receiver's OWN in-place mutation of a module global is silently overwritten by an arriving closure whose sender also mutated it: parent `g.push(9)` while a task does `g.push(2)` and sends a closure over `g`; after `recv()` the parent's own `g` is `[1, 2]` — the 9 is gone. Go (mutex) `[1 9 2]`, CPython `[1, 2, 9]`. Same for `g[1] = 9`, `g.b = 9`, sibling receiver. Only whole-slot `g = [1, 9]` survives. `docs/concurrency.md:1481` defines a sender write to INCLUDE in-place mutation but the receive-side skip (DEC-051) tests `assigned` only. Repro below | CLOSED 2026-09-12, TICKET-116: `Vm::install_global_slot` now also refuses on `slot_changed_since_recv_baseline` (the CURRENT snapshot, not the root's frozen first-ever one — a review fix on the first landing), so a receiver's own in-place write survives; recorded residual: the sender's in-place delta is then dropped rather than merged |
 | **W13-3** | P1 | scheduler | A genuine nested deadlock HANGS at T>=2 whenever the main body AND a nested owner body are both channel-parked (`never.recv()` at depth 0 and depth 1, leaf at depth 2): T=1 faults 5/5, T=2/default rc=124 5/5. Go `all goroutines are asleep`. Drop the main-body recv → faults in ms at every count. The Executor-job twins of the OPEN `exec_join` row hang the same way, so `exec_join` needs no Executor. Repro below | CLOSED 2026-09-15 (TICKET-117); W13-4, W13-5, W13-6 and the exec_join row moved to TICKET-125 |
 | **W13-4** | P1 | scheduler | Mirror at T=1: a genuine deadlock whose ONLY channel-parked owner is at depth 3+ hangs (rc=124 5/5) while T>=2 faults 5/5; depth 2 faults everywhere. `chezzi test --timeout=300` does not reach it at T=1 (20 s, vs `TIMED-OUT` at 311 ms for a sleeping child). Go `GOMAXPROCS=1` faults. Repro below | CLOSED 2026-09-16 (TICKET-125) |
-| **W13-5** | P1 | scheduler | W12-4 aftermath, cousin variant: a task that RECOVERS a genuine inner-nursery deadlock and then feeds a COUSIN whose owner sits at its join is false-faulted `deadlock: every task in this parallel: block is blocked` — judge 4/5 at T=2 and default, hunter 5/5 at T=1/4. Go `err / cousin got 5 / done`. `cousin_fed` (cousin body on `recv`) is 20/20 clean; the join-body cousin is the shape TICKET-112 did not cover. Also with a recovered `panic("boom")` instead of a deadlock (T=2 4/5). Repro below | PARTIAL CLOSE 2026-09-16 (TICKET-125): fixed at T=1 (`SchedCore::provable`, fault only a provable joined leaf, else the lowest-index one); at T>=2 two private scheds still race independently (measured ~1/20 to ~6/30 false-fault on `d2a`/`d2d` depending on the tried cross-sched deferral) — OPEN, see the W13-5-at-T>=2 residual below |
+| **W13-5** | P1 | scheduler | W12-4 aftermath, cousin variant: a task that RECOVERS a genuine inner-nursery deadlock and then feeds a COUSIN whose owner sits at its join is false-faulted `deadlock: every task in this parallel: block is blocked` — judge 4/5 at T=2 and default, hunter 5/5 at T=1/4. Go `err / cousin got 5 / done`. `cousin_fed` (cousin body on `recv`) is 20/20 clean; the join-body cousin is the shape TICKET-112 did not cover. Also with a recovered `panic("boom")` instead of a deadlock (T=2 4/5). Repro below | CLOSED 2026-09-16 (TICKET-129, on top of TICKET-125's T=1 fix): see the W13-5-at-T>=2 residual below |
 | **W13-6** | P1 | scheduler | TWO siblings that each recover an inner deadlock and then fan in to the main body's `recv` HANG at T>=2 (rc=124 5/5 at N=2, 5, 20, 100); T=1 completes `t 2` 5/5. Same two recovers without the fan-in: clean; ONE task recovering twice: clean. Go `done`. Repro below | OPEN — TICKET-125 tried handing this owner's worker to a replacement (`spawn_replacement_worker_holding` + a `NestedDrainerSlot`); it fixed T=2 but false-faulted at T=4 (measured 2/8), so reverted per its own rollback |
 | ~~**W13-7**~~ | P1 | Executor | CLOSED 2026-09-16 (TICKET-118). An Executor job parked at a NURSERY join whose child is channel-blocked pins its pool thread at T=1, so a sibling job that would feed it never starts (rc=124 5/5; T>=2 `j1 got 1 / done` 5/5). `docs/concurrency.md:1805` (TICKET-052) promises "a blocked job no longer pins its pool thread … fixed for every shape above" — the yield bracket fires for a job blocked ON a channel, not for a job whose nursery child is. Go `GOMAXPROCS=1` completes. Repro below | — |
 | ~~**W13-8**~~ | P1 | Executor | CLOSED 2026-09-16 (TICKET-118). `shutdown_now()` does not cancel a job's nursery child parked on `recv`: depth 1 → false `deadlock` fault at every count (5/5); depth 2 → T=1 fault, T>=2 rc=124. Job itself on `never.recv()` (no nursery) → `awake / done` 20/20. Doc: `shutdown_now()` "ask running jobs to stop at their next cancellation point" and `recv` IS a cancellation point. Go `select`+`cancel()` completes. Repro below | — |
@@ -12986,21 +12986,38 @@ judge 4/5 at T=2 and default, hunter 5/5 at T=1/4; the clean runs print `cousin 
 `err / cousin got 5 / done`. `sched/d2a.chz`; `d2.chz` (recover at depth 3), `d2d.chz` (roles swapped:
 one run printed `task got 5` AND then faulted), `g3.chz` (recovered `panic` instead of a deadlock).
 
-**Residual, T>=2 — OPEN (TICKET-125).** `SchedCore::provable` (fault only a joined leaf whose channel
-handles are fully accounted for, else the lowest-index one) closes this at T=1 outright (`d2a`/`d2d`/
-`g3` all 0/20 false-fault). At T>=2 each cousin's leaf sits on its OWN private sched, so the two
-`is_deadlocked_ignoring_jobs` judges still race independently. A cross-sched deferral
-(`MnSched::defer_to_provable_peer`, deferring to a peer sched whose own victims ARE provable) cut the
-rate sharply but not to zero — measured on the release binary, 30 runs at `CHEZZI_THREADS=4`: `d2a`
-1/20 false-fault, `d2d` 7/30. Reading a contended `try_lock` in that fn as "no provable peer" instead
-of "defer" made both WORSE (`d2a` 6/30, `d2d` 7/30), so the deferral is reverted rather than shipped
-partially wrong (`git log --oneline -- src/vm/mod.rs` around TICKET-125's third-to-last commit on
-`ticket/125` has the diff). **On the SHIPPED binary (without the deferral) the rate is load-sensitive
-and worse than either of the above** — 10 runs each under concurrent CPU load (another process at
-~46% CPU): `d2a` 9/10 at T=2, 8/10 at default; `d2d` 5/10 at T=2, 7/10 at default; `g3` 2/10 at T=2,
-0/10 at default; all three 0/10 at T=1. `tests/chezzi_threads_cli.rs`'s
-`w13_5_d2a_cousin_join_completes_at_every_worker_count` and
-`w13_5_d2d_roles_swapped_completes_at_every_worker_count` are `#[ignore]`d with this row cited.
+**Residual, T>=2 — CLOSED 2026-09-16 (TICKET-129).** `SchedCore::provable` (fault only a joined leaf
+whose channel handles are fully accounted for, else the lowest-index one) closed this at T=1 outright
+(`d2a`/`d2d`/`g3` all 0/20 false-fault) but at T>=2 each cousin's leaf sat on its OWN private sched, so
+the two `is_deadlocked_ignoring_jobs` judges raced independently. TICKET-125's own cross-sched
+deferral (`MnSched::defer_to_provable_peer`) cut the rate sharply but not to zero (`d2a` as low as
+1/20, `d2d` 7/30) and was reverted rather than shipped partially wrong.
+Mechanism found by TICKET-129: the false fault was NOT the `provable.is_empty()` fallback line
+itself — it was that `SchedCore::flag_deadlock_leaves` faulted an UNPROVEN candidate unconditionally
+whenever nothing was provable, with no cross-sched check at all once TICKET-125's deferral was
+reverted. Fix: `flag_deadlock_leaves` now takes an `unproven_ok: bool` and returns `Option<bool>`
+(`None` = decline, caller waits, never spins); `unproven_ok` is licensed by
+`MnSched::may_fault_unproven`, a `try_lock`-based peer scan (contention reads as "peer can move", the
+same discipline as `any_peer_can_move`) that declines while any peer sched can still move, has an open
+body after finishing (owner hasn't dropped its `BlockedOwnerGuard` yet), or will independently resolve
+its own provable deadlock first. Separately, `MnSched::park` now takes its channel `Arc` BY VALUE and
+drops it under the core lock instead of on the caller's stack: `SchedCore::provable` compares
+`Arc::strong_count`, and a stack-held Arc outliving `park` read a genuinely provable leaf as unprovable
+for one window (measured 5/20 false faults on `d2a` at T=2 before this fix).
+Measured on the debug binary (`.project`'s `sample.sh`, `n>=60` per count), base `5f576be1` vs the
+fix: `d2a` false-faulted 37/32/31 of 60 at T=2/4/default, `d2d` 23/36/31, `g3` 24/30 at T=2 → the fix
+is 0 of 60 for all three at T=1/2/4/default. Controls held: `two_leaf_deadlock_on_a_main_channel_still_faults_at_every_worker_count`
+still faults `b1`/`j2` 30/30 at every count, `a1b`/`cousin_fed` still `ok` 20/20. The one pre-existing,
+NOT-owned-by-this-ticket defect: a genuine two-leaf deadlock on a channel created in `main`
+(`two_leaf.chz`) already HANGS at `CHEZZI_THREADS=1` on base at a load-dependent ~2-12% rate (measured
+1/80 to 23/200 across sessions) — an unrelated missed-wakeup edge, not this fix's unproven-fallback
+path (confirmed by a temporary trace: the hangs never reached `may_fault_unproven`). Comparative
+sampling (interleaved single runs, which control for host-load drift that a block-sequential sample
+does not) showed the fix's T=1 hang rate at or below base's (18/280 vs 29/280 combined) — the fix does
+not make this pre-existing gap worse. `tests/chezzi_threads_cli.rs`'s
+`w13_5_d2a_cousin_join_completes_at_every_worker_count`, `w13_5_d2d_roles_swapped_completes_at_every_worker_count`,
+and the new `w13_5_g3_recovered_panic_then_cousin_join_completes_at_every_worker_count` are un-`#[ignore]`d
+and green at every worker count.
 
 ### W13-6 repro (P1)
 

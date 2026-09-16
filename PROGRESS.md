@@ -35,6 +35,23 @@ Single source of truth for "what am I doing next." Update after every work sessi
   record the measured rates. New: `tests/chezzi_threads_cli.rs`'s harness runs every nested-deadlock
   shape at the default worker count too (was 1/2/4 only), plus a 16-cell owner×depth×recovered edge
   table (320 sampled runs, 8s).
+- **TICKET-129 (2026-09-16) — W13-5 at `CHEZZI_THREADS>=2` closes: an unproven deadlock verdict now
+  declines instead of faulting a live cousin.** `SchedCore::flag_deadlock_leaves` takes
+  `unproven_ok: bool` and returns `Option<bool>` (`None` = decline, the caller waits, never spins);
+  `unproven_ok` is licensed by a new `MnSched::may_fault_unproven`, a `try_lock`-based peer scan (same
+  discipline as `any_peer_can_move`) that declines while any peer sched can still move, is a
+  finished-but-not-yet-returned owner, or will independently resolve its own provable deadlock first —
+  the fallback to an unproven fault still fires once every live sched is parked and unproven, matching
+  Go's all-goroutines-asleep rule. Separately, `MnSched::park` now takes its channel `Arc` by value and
+  drops it under the core lock instead of on the caller's stack, closing a window where
+  `SchedCore::provable`'s `Arc::strong_count` check read a genuinely provable leaf as unprovable
+  (measured 5/20 false faults on `d2a` at T=2 before this fix). Measured on the debug binary, 60 runs
+  per worker count: `d2a`/`d2d`/`g3` false-faulted 37/32/31, 23/36/31, 24/30 (at T=2/4/T=2) on base,
+  0/60 at every count on the fix; `b1`/`j2`/`two_leaf` controls stayed 30/30 faulting, `a1b`/`cousin_fed`
+  stayed 20/20 clean. The pre-existing, NOT-owned-by-this-ticket `two_leaf` hang at `CHEZZI_THREADS=1`
+  (`docs/gaps.md`'s two-leaf-deadlock control) is unaffected: a temporary trace showed its hangs never
+  reach the new `may_fault_unproven` path, and an interleaved comparative sample put the fix's hang rate
+  at or below base's (18/280 vs 29/280).
 - **TICKET-124 (2026-09-16) — the expected-type / untyped-constant widening TICKET-106 wired into one sink now reaches its neighbours: a generic ctor's own hint, a nested ctor argument, a reassignment/index-assign/field-assign target, and a `float`-slot collection-method argument; plus a check-OK container format spec (W13-12/13/14/15/18).**
   W13-12: `widen_mixed_numeric_args` (`src/checker/proto.rs`) grew a `want: Option<&HashMap>` — a
   turbofish or a ctor's own expected-type hint via the new `hint_want` — beside its existing
