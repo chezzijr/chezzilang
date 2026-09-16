@@ -1281,6 +1281,77 @@ fn exec_join_owner_blocked_at_nested_join_completes_at_thread_two() {
     );
 }
 
+/// TICKET-125 step 16 — builds one edge-table cell: `depth` nested `parallel:`/`spawn:` levels ending
+/// in an innermost `spawn: never.recv()`. `channel_owner` additionally runs `never.recv()` in the
+/// DEEPEST nursery's BODY (right after its own `spawn:`, still inside that same `parallel:` block) —
+/// `b2d.chz`'s shape; when `false` every body is empty (a pure join-blocked owner chain). `recovered`
+/// wraps the whole nested structure in `r := recover:` and prints `err`/`ok` then `done`.
+fn edge_table_cell(depth: usize, channel_owner: bool, recovered: bool) -> String {
+    fn nested(level: usize, depth: usize, indent: usize, channel_owner: bool) -> String {
+        let pad = |n: usize| " ".repeat(n);
+        let mut s = format!("{}parallel:\n{}spawn:\n", pad(indent), pad(indent + 4));
+        if level == depth {
+            s.push_str(&format!("{}never.recv()\n", pad(indent + 8)));
+            if channel_owner {
+                s.push_str(&format!("{}never.recv()\n", pad(indent + 4)));
+            }
+        } else {
+            s.push_str(&nested(level + 1, depth, indent + 8, channel_owner));
+        }
+        s
+    }
+    let body = nested(1, depth, 4, channel_owner);
+    if recovered {
+        format!(
+            "fn main():\n    never := Channel[int](0)\n    r := recover:\n{}    match r:\n        Ok(_): print(\"ok\")\n        Err(e): print(\"err\")\n    print(\"done\")\nmain()\n",
+            body.lines()
+                .map(|l| format!("    {l}\n"))
+                .collect::<String>()
+        )
+    } else {
+        format!(
+            "fn main():\n    never := Channel[int](0)\n{body}    print(\"unreachable\")\nmain()\n"
+        )
+    }
+}
+
+/// TICKET-125 step 16 — the full owner (join/channel) × depth (1..4) × recovered (no/yes) edge table:
+/// every non-recovered cell must fault `deadlock` at every worker count, every recovered cell must
+/// exit 0 with stdout exactly `err\ndone\n` (DEC-092) at every worker count.
+#[test]
+fn nested_verdict_edge_table_matches_go_at_every_worker_count() {
+    for &channel_owner in &[false, true] {
+        let owner = if channel_owner { "channel" } else { "join" };
+        for depth in 1..=4 {
+            for &recovered in &[false, true] {
+                let program = edge_table_cell(depth, channel_owner, recovered);
+                let file = format!(
+                    "edge_{owner}_depth{depth}_{}.chz",
+                    if recovered { "recovered" } else { "plain" }
+                );
+                if recovered {
+                    assert_at_every_worker_count(
+                        &file,
+                        &program,
+                        |out| {
+                            out.status.success()
+                                && String::from_utf8_lossy(&out.stdout) == "err\ndone\n"
+                        },
+                        "exit 0 with stdout `err`, `done`",
+                    );
+                } else {
+                    assert_at_every_worker_count(
+                        &file,
+                        &program,
+                        faulted_deadlock,
+                        "a `deadlock` fault",
+                    );
+                }
+            }
+        }
+    }
+}
+
 fn tail(s: &str) -> String {
     let lines: Vec<&str> = s.lines().collect();
     let start = lines.len().saturating_sub(15);
