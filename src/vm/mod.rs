@@ -3252,7 +3252,18 @@ impl MnSched {
                 // TICKET-103 — fault joined leaves first. A non-terminating flag `continue`s: a
                 // SENTINEL helper treats `Stop` as exit-forever, and the leaf's inline owner reaches
                 // its scope-scoped owner stop on the next pass.
-                let done = self.flag_leaves_and_wake(&mut c);
+                // TICKET-129 (W13-5 residual) — `None` means the verdict is unproven and no peer
+                // licenses it yet: wait (timed — `judged = false` so the next pass re-derives the
+                // W7-58 verdict too), never spin on the same declined judgement.
+                let Some(done) = self.flag_leaves_and_wake(&mut c) else {
+                    let (guard, _) = self
+                        .cv
+                        .wait_timeout(c, DEMOTE_POLL_BACKOFF)
+                        .unwrap_or_else(|e| e.into_inner());
+                    drop(guard);
+                    judged = false;
+                    continue;
+                };
                 self.cv.notify_all();
                 if done {
                     return Take::Stop;
@@ -3290,8 +3301,16 @@ impl MnSched {
                 let verdict = self.quiesce.quiesced(&self.exec_registry);
                 c = self.lock();
                 if verdict && self.is_deadlocked_ignoring_jobs(&c) {
-                    // TICKET-103 — same leaf-first flag as above.
-                    let done = self.flag_leaves_and_wake(&mut c);
+                    // TICKET-103 — same leaf-first flag as above. TICKET-129 — same declined-verdict
+                    // wait as above.
+                    let Some(done) = self.flag_leaves_and_wake(&mut c) else {
+                        let (guard, _) = self
+                            .cv
+                            .wait_timeout(c, DEMOTE_POLL_BACKOFF)
+                            .unwrap_or_else(|e| e.into_inner());
+                        drop(guard);
+                        continue;
+                    };
                     self.cv.notify_all();
                     if done {
                         return Take::Stop;
@@ -3437,13 +3456,77 @@ impl MnSched {
     }
 
     /// TICKET-103 — [`SchedCore::flag_deadlock_leaves`], then wake the owners of the families it
-    /// completed. The sched-wide fallback (`true`) records join-parked owners itself.
-    fn flag_leaves_and_wake(&self, c: &mut SchedCore) -> bool {
-        let done = c.flag_deadlock_leaves(&self.deadlock_err);
+    /// completed. The sched-wide fallback (`Some(true)`) records join-parked owners itself.
+    ///
+    /// TICKET-129 (W13-5 residual) — `unproven_ok` is licensed either by this sched's own leaves
+    /// already being provable ([`SchedCore::victims_proven`], no peer question needed) or by
+    /// [`MnSched::may_fault_unproven`]. Returns `None` when the flag declined: the caller must wait,
+    /// never spin (a bare `continue` here would busy-loop on the same unproven verdict).
+    fn flag_leaves_and_wake(&self, c: &mut SchedCore) -> Option<bool> {
+        let ok = c.victims_proven() || self.may_fault_unproven();
+        let done = c.flag_deadlock_leaves(&self.deadlock_err, ok)?;
         if !done {
             self.wake_completed_joins(c);
         }
-        done
+        Some(done)
+    }
+
+    /// TICKET-129 (W13-5 residual) — may an UNPROVEN deadlock verdict on this sched fault? Licensed
+    /// only when no live peer sched can still move or prove its own victims (Go's rule: fault only
+    /// when every goroutine in the process is parked). Called with this sched's own core lock (`self`)
+    /// already held — `try_lock`s the registry and each peer's core, reading contention as "a peer can
+    /// move" (never blocks, matches [`MnSched::any_peer_can_move`]'s discipline).
+    ///
+    /// Four clauses per peer (Digest gotchas 2-4, measured on the planning spike):
+    /// 1. no incomplete scope and no open body — the peer has FINISHED but its owner thread has not
+    ///    yet dropped its `BlockedOwnerGuard` (`Disp::Park`'s Arc-drop-under-lock in [`MnSched::park`]
+    ///    only closes the analogous window for `provable`, not this one). Faulting in that gap drops a
+    ///    live feeder (`g3`, `d2a`): decline.
+    /// 2. no incomplete scope but an OPEN body — a finished-looking peer whose body is still open is
+    ///    NOT that window; treating it as a veto hung `j2.chz` at every run. Skip it (matches
+    ///    [`MnSched::peer_can_move`]'s own first clause).
+    /// 3. `!quiesced_core(&c, false)` — the peer still has live work and may yet feed this sched's
+    ///    candidate: decline.
+    /// 4. the peer's own state is ALREADY a provable genuine deadlock
+    ///    (`cross_sched_blocked_owners == 0 && !body_held_by_fiber && local_quiesced && victims_proven`):
+    ///    decline, and let that peer resolve itself first rather than racing it.
+    ///
+    /// Only when every live peer clears every clause does this return `true`.
+    fn may_fault_unproven(&self) -> bool {
+        let g = match self.sched_registry.try_lock() {
+            Ok(g) => g,
+            Err(std::sync::TryLockError::WouldBlock) => return false,
+            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+        };
+        let live: Vec<_> = g.iter().filter_map(|w| w.upgrade()).collect();
+        drop(g);
+        for s in live
+            .iter()
+            .filter(|s| !std::ptr::eq(Arc::as_ptr(s), self as *const MnSched))
+        {
+            let c = match s.core.try_lock() {
+                Ok(c) => c,
+                Err(std::sync::TryLockError::WouldBlock) => return false,
+                Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+            };
+            if !c.any_scope_incomplete() {
+                if !c.any_body_open() {
+                    return false; // clause 1 — finished, guard not yet dropped
+                }
+                continue; // clause 2 — finished-looking but body open: not that window
+            }
+            if !s.quiesced_core(&c, false) {
+                return false; // clause 3 — peer may still move
+            }
+            if c.cross_sched_blocked_owners == 0
+                && !s.body_held_by_fiber(&c)
+                && s.local_quiesced(&c)
+                && c.victims_proven()
+            {
+                return false; // clause 4 — peer will resolve its own provable deadlock first
+            }
+        }
+        true
     }
 
     /// Park the running fiber on channel `key` (it blocked on an empty `recv`), freeing the worker —
@@ -3458,7 +3541,15 @@ impl MnSched {
     /// detected by this worker's next `take_runnable` (`running == 0`). EXCEPT the rendezvous
     /// (`cap == Some(0)`) case (TICKET-028): arming this receiver's `RecvWait` can make a parked
     /// SENDER runnable, so that one path does wake, under this same lock hold.
-    fn park(&self, key: usize, core: &Arc<ChannelCore>, mut fiber: Fiber) {
+    ///
+    /// TICKET-129 (W13-5 residual) — takes `core` BY VALUE and drops the caller's `Arc` here, under
+    /// the core lock, rather than leaving it live on the caller's stack until `park` returns.
+    /// [`SchedCore::provable`] compares `Arc::strong_count` against the handles it can see in-heap; a
+    /// stack-held Arc outliving the park is an extra holder invisible to that scan, so a genuinely
+    /// provable leaf read as unprovable for the window between filing the fiber and the caller's frame
+    /// unwinding (measured 5/20 false faults on `d2a` at `CHEZZI_THREADS=2` before this fix). Never
+    /// reintroduce a stack-held channel Arc that outlives this fn's lock hold.
+    fn park(&self, key: usize, core: Arc<ChannelCore>, mut fiber: Fiber) {
         let mut c = self.lock();
         c.running -= 1;
         // Close the park gap: re-check (under the core lock) whether a message is waiting, the channel
@@ -3486,8 +3577,9 @@ impl MnSched {
             // SENDER, both BEFORE the filing: a sender woken while `recv_waiting` is still 0 would
             // re-park immediately. Both happen under this same lock hold `c` — moving the wake out
             // from under it opens a false-`deadlock` window (see `## Decisions`).
-            fiber.recv_waits.push(crate::vm::core::RecvWait::arm(core));
-            if core.cap == Some(0) {
+            fiber.recv_waits.push(crate::vm::core::RecvWait::arm(&core));
+            let rendezvous = core.cap == Some(0);
+            if rendezvous {
                 self.wake_bucket(&mut c, key, WakeKind::Send);
             }
             fiber.state = FiberState::Blocked; // running → parked: runnable unchanged
@@ -3496,10 +3588,13 @@ impl MnSched {
                 .or_default()
                 .push(ParkedEntry::Recv(fiber));
             c.parked_n += 1;
-            if core.cap == Some(0) {
+            if rendezvous {
+                core.cv.notify_all();
+            }
+            drop(core); // TICKET-129 — die under `c`'s lock, not on the caller's stack.
+            if rendezvous {
                 drop(c);
                 self.cv.notify_all();
-                core.cv.notify_all();
                 self.wake_run_wide(key, WakeKind::Send);
             }
         }
@@ -4927,72 +5022,35 @@ impl SchedCore {
     /// wrong: one leaf's owner may feed a COUSIN leaf once its `recover:` returns
     /// (`leaf_cousin`/`d2a`), so faulting the cousin too drops a live receiver. [`SchedCore::provable`]
     /// answers "is every holder of this leaf's channel(s) visible?" — fault only the PROVABLE parked
-    /// leaves; when none is provable, fault the single lowest-index parked leaf alone (this adds no
-    /// fault today's pre-TICKET-125 binary would not already deliver — see DEC-101 condition 2) and
-    /// let the sched re-judge on its next pass, so a two-leaf shape with neither provable still
-    /// faults leaf-by-leaf rather than hanging.
-    fn flag_deadlock_leaves(&mut self, err: &RuntimeError) -> bool {
-        // Distinct joined-leaf families, keyed (and so de-duplicated + ordered) by each family's
-        // lowest scope index.
-        let mut families: std::collections::BTreeMap<usize, Vec<usize>> =
-            std::collections::BTreeMap::new();
-        for i in 0..self.scopes.len() {
-            if self.scopes[i].joins_blocked == 0 {
-                continue;
-            }
-            let fam = self.scope_family(i);
-            if fam.iter().any(|&j| self.scopes[j].owners_blocked > 0) {
-                continue; // interior: a member's owner may feed it once its own join returns
-            }
-            // TICKET-125 (W13-4) — a member fiber that owns a still-incomplete NESTED nursery is
-            // also interior: faulting that member drops it without unwinding its child scope, which
-            // orphans the child and hangs the run. `owners_blocked` alone misses this: it only
-            // counts JOIN-parked owners, not one parked on a channel inside the child's own body.
-            if self.scopes.iter().enumerate().any(|(k, s)| {
-                !fam.contains(&k)
-                    && s.done < s.total
-                    && s.parent_scope.is_some_and(|p| fam.contains(&p))
-            }) {
-                continue;
-            }
-            let lowest = *fam.iter().min().expect("scope_family never returns empty");
-            families.entry(lowest).or_insert(fam);
-        }
-        // Peek a `Wait` fiber's scope under its mutex without claiming, as `cancel_drain` does.
-        let peek = |wp: &Arc<WaitPark>| -> Option<usize> {
-            wp.fiber
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .as_ref()
-                .map(|f| f.scope_id)
-        };
-        let parked_scopes: std::collections::HashSet<usize> = self
-            .parked
-            .values()
-            .flatten()
-            .filter_map(|e| match e {
-                ParkedEntry::Recv(f) | ParkedEntry::Send(f) => Some(f.scope_id),
-                ParkedEntry::Wait(wp) => (!wp.claimed.load(Ordering::Acquire))
-                    .then(|| peek(wp))
-                    .flatten(),
-            })
-            .collect();
-        let candidates: Vec<&Vec<usize>> = families
-            .values()
-            .filter(|fam| fam.iter().any(|s| parked_scopes.contains(s)))
-            .collect();
+    /// leaves; when none is provable, fault the single lowest-index parked leaf alone, but ONLY when
+    /// `unproven_ok` licenses it (TICKET-129 — [`MnSched::may_fault_unproven`] is that license: a
+    /// private sched judging its own leaf in isolation cannot tell "genuinely stuck" from "a cousin on
+    /// another sched is about to feed me", so an unproven fault must wait for that peer to either move
+    /// or itself go quiet, matching Go's all-goroutines-parked rule instead of a per-subgroup guess).
+    ///
+    /// Returns `None` when the scan found nothing PROVEN and `unproven_ok` is `false` — the caller
+    /// must decline (wait, never spin) rather than fault. Otherwise returns `Some(true)` when it fell
+    /// back to the sched-wide [`SchedCore::flag_deadlock`] (which sets `terminate`), `Some(false)`
+    /// when it faulted leaves only and the sched keeps running.
+    fn flag_deadlock_leaves(&mut self, err: &RuntimeError, unproven_ok: bool) -> Option<bool> {
+        let candidates = self.leaf_candidates();
         if candidates.is_empty() {
+            if !unproven_ok && !self.provable(|_| true) {
+                return None;
+            }
             self.flag_deadlock(err);
-            return true;
+            return Some(true);
         }
         let provable: Vec<&Vec<usize>> = candidates
             .iter()
-            .copied()
             .filter(|fam| self.provable(|s| fam.contains(&s)))
             .collect();
+        if provable.is_empty() && !unproven_ok {
+            return None;
+        }
         let mut target = vec![false; self.scopes.len()];
         let chosen: Vec<&Vec<usize>> = if provable.is_empty() {
-            vec![candidates[0]]
+            vec![&candidates[0]]
         } else {
             provable
         };
@@ -5012,7 +5070,7 @@ impl SchedCore {
                         if wp.claimed.load(Ordering::Acquire) {
                             continue; // a stale copy of a claimed token: drop it
                         }
-                        match peek(&wp) {
+                        match Self::peek_wait_scope(&wp) {
                             None => continue, // already taken: drop the stale copy
                             Some(s) if !target[s] => {
                                 keep.push(ParkedEntry::Wait(wp));
@@ -5050,7 +5108,78 @@ impl SchedCore {
             }
         }
         self.parked_n -= flagged;
-        false
+        Some(false)
+    }
+
+    /// Peek a `Wait` fiber's scope under its mutex without claiming, as `cancel_drain` does. Shared by
+    /// [`SchedCore::leaf_candidates`] and the flagging loop in [`SchedCore::flag_deadlock_leaves`].
+    fn peek_wait_scope(wp: &Arc<WaitPark>) -> Option<usize> {
+        wp.fiber
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|f| f.scope_id)
+    }
+
+    /// TICKET-129 (W13-5 residual) — the distinct joined-leaf families with at least one parked
+    /// member, exactly [`SchedCore::flag_deadlock_leaves`]'s pre-TICKET-129 `candidates` computation,
+    /// split out so [`SchedCore::victims_proven`] can ask the same question without flagging anything.
+    fn leaf_candidates(&self) -> Vec<Vec<usize>> {
+        // Distinct joined-leaf families, keyed (and so de-duplicated + ordered) by each family's
+        // lowest scope index.
+        let mut families: std::collections::BTreeMap<usize, Vec<usize>> =
+            std::collections::BTreeMap::new();
+        for i in 0..self.scopes.len() {
+            if self.scopes[i].joins_blocked == 0 {
+                continue;
+            }
+            let fam = self.scope_family(i);
+            if fam.iter().any(|&j| self.scopes[j].owners_blocked > 0) {
+                continue; // interior: a member's owner may feed it once its own join returns
+            }
+            // TICKET-125 (W13-4) — a member fiber that owns a still-incomplete NESTED nursery is
+            // also interior: faulting that member drops it without unwinding its child scope, which
+            // orphans the child and hangs the run. `owners_blocked` alone misses this: it only
+            // counts JOIN-parked owners, not one parked on a channel inside the child's own body.
+            if self.scopes.iter().enumerate().any(|(k, s)| {
+                !fam.contains(&k)
+                    && s.done < s.total
+                    && s.parent_scope.is_some_and(|p| fam.contains(&p))
+            }) {
+                continue;
+            }
+            let lowest = *fam.iter().min().expect("scope_family never returns empty");
+            families.entry(lowest).or_insert(fam);
+        }
+        let parked_scopes: std::collections::HashSet<usize> = self
+            .parked
+            .values()
+            .flatten()
+            .filter_map(|e| match e {
+                ParkedEntry::Recv(f) | ParkedEntry::Send(f) => Some(f.scope_id),
+                ParkedEntry::Wait(wp) => (!wp.claimed.load(Ordering::Acquire))
+                    .then(|| Self::peek_wait_scope(wp))
+                    .flatten(),
+            })
+            .collect();
+        families
+            .into_values()
+            .filter(|fam| fam.iter().any(|s| parked_scopes.contains(s)))
+            .collect()
+    }
+
+    /// TICKET-129 (W13-5 residual) — are this sched's own deadlock-leaf victims PROVEN? Empty
+    /// candidates means the sched-wide fallback would apply, so it asks `provable` over every scope;
+    /// otherwise it asks per joined-leaf family, matching [`SchedCore::flag_deadlock_leaves`]'s own
+    /// provable scan. Used by [`MnSched::flag_leaves_and_wake`] to decide whether this sched needs
+    /// [`MnSched::may_fault_unproven`]'s license at all, and by that fn's own peer-provable clause.
+    fn victims_proven(&self) -> bool {
+        let cands = self.leaf_candidates();
+        if cands.is_empty() {
+            self.provable(|_| true)
+        } else {
+            cands.iter().any(|f| self.provable(|s| f.contains(&s)))
+        }
     }
 
     /// TICKET-125 (W13-5) — is EVERY holder of the channel(s) `member` waits on visible to this scan?

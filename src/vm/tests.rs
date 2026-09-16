@@ -3239,7 +3239,7 @@ fn rendezvous_park_wakes_a_parked_sender_in_one_lock_hold() {
         c.parked_n += 1;
         c.running -= 1;
     }
-    sched.park(key, &core, f1);
+    sched.park(key, Arc::clone(&core), f1);
     assert_eq!(sched.lock().parked_n, 1);
     assert_eq!(
         core.q
@@ -3347,7 +3347,7 @@ fn mnsched_runnable_tracks_single_queue() {
         2,
         "pop transitions runnable→running"
     );
-    sched.park(key, &core, f0);
+    sched.park(key, Arc::clone(&core), f0);
     assert_eq!(
         sched.runnable.load(Ordering::Relaxed),
         2,
@@ -3411,7 +3411,7 @@ fn mnsched_inject_does_not_false_deadlock() {
     sched.seed(vec![mk_fiber(0)]);
     let f0 = take_run(&sched); // running 1, runnable 0
     let core = empty_core();
-    sched.park(core_key(&core), &core, f0); // parked 1, running 0, runnable 0 → deadlock
+    sched.park(core_key(&core), Arc::clone(&core), f0); // parked 1, running 0, runnable 0 → deadlock
     {
         let c = sched.lock();
         assert!(
@@ -3554,7 +3554,7 @@ fn mn_parked_entry_recv_roundtrips() {
     let f0 = take_run(&sched); // running 1
     let core = empty_core();
     let key = core_key(&core);
-    sched.park(key, &core, f0); // parked 1, running 0
+    sched.park(key, Arc::clone(&core), f0); // parked 1, running 0
     assert_eq!(
         sched.lock().parked_n,
         1,
@@ -4354,7 +4354,7 @@ fn mnsched_park_then_wake_requeues_fiber() {
     let key = core_key(&core);
     sched.seed(vec![mk_fiber(0)]);
     let f = take_run(&sched);
-    sched.park(key, &core, f);
+    sched.park(key, Arc::clone(&core), f);
     {
         let c = sched.lock();
         assert_eq!(c.running, 0);
@@ -7977,7 +7977,7 @@ fn mnsched_park_requeues_when_message_already_waiting() {
         crate::vm::core::wire_summary(&WireValue::Int(7)),
         WireValue::Int(7),
     );
-    sched.park(key, &core, f);
+    sched.park(key, Arc::clone(&core), f);
     let c = sched.lock();
     assert_eq!(c.parked_n, 0, "must not park behind a waiting message");
     assert_eq!(c.global.len(), 1, "fiber requeued to re-run recv");
@@ -7993,7 +7993,7 @@ fn mnsched_park_requeues_when_cancel_tripped() {
     sched.seed(vec![mk_fiber(0)]);
     let f = take_run(&sched);
     cancel.store(true, Ordering::Relaxed);
-    sched.park(core_key(&core), &core, f);
+    sched.park(core_key(&core), Arc::clone(&core), f);
     let c = sched.lock();
     assert_eq!(c.parked_n, 0, "must not park a cancelled fiber");
     assert_eq!(c.global.len(), 1);
@@ -8012,7 +8012,7 @@ fn mnsched_park_requeues_when_an_ancestor_cancel_is_tripped() {
     sched.lock().scopes[0]
         .ancestors
         .push(Arc::new(AtomicBool::new(true)));
-    sched.park(core_key(&core), &core, f);
+    sched.park(core_key(&core), Arc::clone(&core), f);
     let c = sched.lock();
     assert_eq!(
         c.parked_n, 0,
@@ -8033,7 +8033,7 @@ fn mnsched_take_runnable_drains_a_park_whose_ancestor_cancel_tripped_after_it_pa
     let core = empty_core();
     sched.seed(vec![mk_fiber(0)]);
     let f = take_run(&sched);
-    sched.park(core_key(&core), &core, f);
+    sched.park(core_key(&core), Arc::clone(&core), f);
     assert_eq!(
         sched.lock().parked_n,
         1,
@@ -8090,8 +8090,8 @@ fn mnsched_deadlock_when_all_parked_runq_empty() {
     sched.seed(vec![mk_fiber(0), mk_fiber(1)]);
     let a = take_run(&sched);
     let b = take_run(&sched);
-    sched.park(core_key(&c1), &c1, a);
-    sched.park(core_key(&c2), &c2, b);
+    sched.park(core_key(&c1), Arc::clone(&c1), a);
+    sched.park(core_key(&c2), Arc::clone(&c2), b);
     assert!(matches!(sched.take_runnable(0, 1, 0), Take::Stop));
     let slots = sched.take_slots();
     assert_eq!(slots.len(), 2);
@@ -8121,8 +8121,8 @@ fn mnsched_cancelled_scope_with_parked_fibers_is_not_deadlock() {
     let a = take_run(&sched);
     let b = take_run(&sched);
     // Cancel still false → these really park (the park-gap re-check does not requeue them).
-    sched.park(core_key(&c1), &c1, a);
-    sched.park(core_key(&c2), &c2, b);
+    sched.park(core_key(&c1), Arc::clone(&c1), a);
+    sched.park(core_key(&c2), Arc::clone(&c2), b);
     {
         let c = sched.lock();
         assert_eq!(c.parked_n, 2, "both fibers parked (quiesced, pre-cancel)");
@@ -8263,7 +8263,7 @@ fn mnsched_cancelled_scope_with_a_parked_and_a_demoted_fiber_is_not_deadlock() {
     let a = take_run(&sched);
     let b = take_run(&sched);
     let d = take_run(&sched);
-    sched.park(core_key(&park_core), &park_core, b); // cancel still false → really parks
+    sched.park(core_key(&park_core), Arc::clone(&park_core), b); // cancel still false → really parks
     {
         let mut c = sched.lock();
         c.running -= 1;
@@ -8311,7 +8311,7 @@ fn mnsched_outstanding_eager_job_vetoes_the_deadlock_until_it_finishes() {
     let f = take_run(&sched);
     // `submit` reserves the slot BEFORE the job is dispatched, so it counts from here.
     let idx = exec.eager.lock().unwrap().reserve();
-    sched.park(core_key(&chan), &chan, f);
+    sched.park(core_key(&chan), Arc::clone(&chan), f);
     {
         let c = sched.lock();
         assert_eq!(c.parked_n, 1, "the nursery's only task is parked");
@@ -8378,7 +8378,7 @@ fn w758_is_deadlocked_ignoring_jobs_matches_is_deadlocked_with_no_executors() {
     check(&sched, false, "one running fiber");
     // (d) all parked, nothing runnable/inflight → the genuine deadlock state.
     let chan = empty_core();
-    sched.park(core_key(&chan), &chan, f);
+    sched.park(core_key(&chan), Arc::clone(&chan), f);
     check(&sched, true, "all parked with no possible feeder");
     // (e) `body_open` veto — an eager nursery body may still `inject` a feeder.
     sched.open_body(0);
@@ -8391,7 +8391,7 @@ fn w758_is_deadlocked_ignoring_jobs_matches_is_deadlocked_with_no_executors() {
     let s1 = two.register_scope(1, Arc::new(AtomicBool::new(false)), Vec::new());
     two.seed(vec![mk_fiber(0)]);
     let g = take_run(&two);
-    two.park(core_key(&chan), &chan, g);
+    two.park(core_key(&chan), Arc::clone(&chan), g);
     check(&two, true, "two incomplete scopes, all parked");
     {
         let mut c = two.lock();
@@ -8423,7 +8423,7 @@ fn mnsched_a_live_peer_sched_vetoes_the_deadlock() {
     a.seed(vec![mk_fiber(0)]);
     let f = take_run(&a);
     let chan = empty_core();
-    a.park(core_key(&chan), &chan, f);
+    a.park(core_key(&chan), Arc::clone(&chan), f);
 
     // B keeps its seeded fiber runnable — never taken, so B's own `running`/`runnable` shows work.
     b.seed(vec![mk_fiber(0)]);
@@ -8457,10 +8457,10 @@ fn mnsched_two_quiesced_scheds_still_fire_the_deadlock() {
     let chan = empty_core();
     a.seed(vec![mk_fiber(0)]);
     let fa = take_run(&a);
-    a.park(core_key(&chan), &chan, fa);
+    a.park(core_key(&chan), Arc::clone(&chan), fa);
     b.seed(vec![mk_fiber(0)]);
     let fb = take_run(&b);
-    b.park(core_key(&chan), &chan, fb);
+    b.park(core_key(&chan), Arc::clone(&chan), fb);
 
     let c = a.lock();
     assert!(
@@ -8490,14 +8490,14 @@ fn mnsched_a_peer_blocked_only_in_a_nested_join_does_not_veto() {
     let chan = empty_core();
     a.seed(vec![mk_fiber(0)]);
     let fa = take_run(&a);
-    a.park(core_key(&chan), &chan, fa);
+    a.park(core_key(&chan), Arc::clone(&chan), fa);
 
     // B seeds two fibers: park the first normally, take-but-don't-park the second — simulating a
     // fiber blocked inline in a nested nursery join (counted via `blocked_owners`, not `parked`).
     b.seed(vec![mk_fiber(0), mk_fiber(1)]);
     let f0 = take_run(&b);
     let _f1 = take_run(&b);
-    b.park(core_key(&chan), &chan, f0);
+    b.park(core_key(&chan), Arc::clone(&chan), f0);
     {
         let mut cb = b.lock();
         cb.running = 1;
@@ -8532,7 +8532,7 @@ fn mnsched_a_peer_whose_only_fiber_is_a_join_blocked_owner_does_not_veto() {
     let chan = empty_core();
     a.seed(vec![mk_fiber(0)]);
     let fa = take_run(&a);
-    a.park(core_key(&chan), &chan, fa);
+    a.park(core_key(&chan), Arc::clone(&chan), fa);
 
     // B seeds exactly one fiber, taken but never parked — an owner blocked inline at a nested join,
     // counted only via `blocked_owners`. Nothing on B is parked.
@@ -8574,13 +8574,13 @@ fn mnsched_a_fiber_body_peer_whose_children_are_parked_does_not_veto() {
     let ch_a = empty_core();
     a.seed(vec![mk_fiber(0)]);
     let fa = take_run(&a);
-    a.park(core_key(&ch_a), &ch_a, fa);
+    a.park(core_key(&ch_a), Arc::clone(&ch_a), fa);
 
     let ch_b = empty_core();
     b.open_body(0);
     b.seed(vec![mk_fiber(0)]);
     let fb = take_run(&b);
-    b.park(core_key(&ch_b), &ch_b, fb);
+    b.park(core_key(&ch_b), Arc::clone(&ch_b), fb);
 
     let c = a.lock();
     assert!(
@@ -8601,7 +8601,7 @@ fn mnsched_a_fiber_body_sched_declines_its_own_verdict_until_its_body_closes() {
     s.open_body(0);
     s.seed(vec![mk_fiber(0)]);
     let f = take_run(&s);
-    s.park(core_key(&ch), &ch, f);
+    s.park(core_key(&ch), Arc::clone(&ch), f);
     assert!(
         s.local_quiesced(&s.lock()),
         "every fiber of this sched is parked, and its open body is not this sched's to count"
@@ -8625,7 +8625,7 @@ fn park_in_scope(s: &MnSched, task_index: usize, scope_id: usize) -> Arc<Channel
     f.scope_id = scope_id;
     s.seed(vec![f]);
     let f = take_run(s);
-    s.park(core_key(&ch), &ch, f);
+    s.park(core_key(&ch), Arc::clone(&ch), f);
     ch
 }
 
@@ -8647,7 +8647,9 @@ fn flag_deadlock_leaves_faults_only_the_family_a_blocked_owner_joins() {
     c.blocked_owners = 1;
     c.scopes[0].owners_blocked = 1;
     c.scopes[s1].joins_blocked = 1;
-    let r = c.flag_deadlock_leaves(&s.deadlock_err);
+    let r = c
+        .flag_deadlock_leaves(&s.deadlock_err, true)
+        .expect("unproven_ok never declines");
     assert!(!r, "a leaf flag must not report a sched-wide stop");
     assert!(!c.terminate, "a leaf flag must not terminate the sched");
     assert!(
@@ -8677,7 +8679,9 @@ fn flag_deadlock_leaves_is_sched_wide_without_a_joined_family() {
     c.running = 1;
     c.blocked_owners = 1;
     c.scopes[0].owners_blocked = 1;
-    let r = c.flag_deadlock_leaves(&s.deadlock_err);
+    let r = c
+        .flag_deadlock_leaves(&s.deadlock_err, true)
+        .expect("unproven_ok never declines");
     assert!(r);
     assert!(c.terminate);
     for i in 1..=3 {
@@ -8686,6 +8690,71 @@ fn flag_deadlock_leaves_is_sched_wide_without_a_joined_family() {
             "slot {i} must be flagged"
         );
     }
+}
+
+/// TICKET-129 (W13-5 residual) — an unproven sched-wide flag must DECLINE (`None`) when
+/// `unproven_ok` is false, and only fault (`Some(true)`) when licensed. A `mk_fiber` has no heap,
+/// so its leaf is never provable.
+#[test]
+fn flag_deadlock_leaves_declines_an_unproven_sched_wide_flag() {
+    let s = mk_sched(1);
+    let _ch = park_in_scope(&s, 0, 0);
+    let mut c = s.lock();
+    assert_eq!(c.flag_deadlock_leaves(&s.deadlock_err, false), None);
+    assert_eq!(c.parked_n, 1);
+    assert!(!c.terminate);
+    assert_eq!(c.flag_deadlock_leaves(&s.deadlock_err, true), Some(true));
+    assert!(c.terminate);
+}
+
+/// TICKET-129 (W13-5 residual) — `may_fault_unproven` must decline while a peer sched still has
+/// runnable work: that peer may yet feed this sched's unprovable candidate.
+#[test]
+fn mnsched_may_fault_unproven_waits_for_a_peer_with_runnable_work() {
+    let reg: crate::vm::SchedRegistry = Default::default();
+    let mut inner_a = mk_sched(1);
+    inner_a.sched_registry = Arc::clone(&reg);
+    let a = Arc::new(inner_a);
+    let mut inner_b = mk_sched(1);
+    inner_b.sched_registry = Arc::clone(&reg);
+    let b = Arc::new(inner_b);
+    reg.lock().unwrap().push(Arc::downgrade(&a));
+    reg.lock().unwrap().push(Arc::downgrade(&b));
+
+    a.seed(vec![mk_fiber(0)]);
+    let f = take_run(&a);
+    let chan = empty_core();
+    a.park(core_key(&chan), Arc::clone(&chan), f);
+
+    // B keeps its seeded fiber runnable — never taken, so B's own `running`/`runnable` shows work.
+    b.seed(vec![mk_fiber(0)]);
+
+    assert!(!a.may_fault_unproven(), "B still has runnable work");
+}
+
+/// TICKET-129 (W13-5 residual) — when every sched in the run is parked and unproven, the fallback
+/// must still license the fault, or a genuine deadlock hangs forever instead of faulting.
+#[test]
+fn mnsched_may_fault_unproven_when_every_peer_is_parked_and_unproven() {
+    let reg: crate::vm::SchedRegistry = Default::default();
+    let mut inner_a = mk_sched(1);
+    inner_a.sched_registry = Arc::clone(&reg);
+    let a = Arc::new(inner_a);
+    let mut inner_b = mk_sched(1);
+    inner_b.sched_registry = Arc::clone(&reg);
+    let b = Arc::new(inner_b);
+    reg.lock().unwrap().push(Arc::downgrade(&a));
+    reg.lock().unwrap().push(Arc::downgrade(&b));
+
+    let chan = empty_core();
+    a.seed(vec![mk_fiber(0)]);
+    let fa = take_run(&a);
+    a.park(core_key(&chan), Arc::clone(&chan), fa);
+    b.seed(vec![mk_fiber(0)]);
+    let fb = take_run(&b);
+    b.park(core_key(&chan), Arc::clone(&chan), fb);
+
+    assert!(a.may_fault_unproven(), "every sched is parked and unproven");
 }
 
 /// TICKET-103 — leaf-ness is a FAMILY property. `s1`'s continuation `c1` holds owner B, blocked
@@ -8705,7 +8774,9 @@ fn flag_deadlock_leaves_reads_leafness_over_the_joined_family() {
     c.scopes[s1].joins_blocked = 1;
     c.scopes[c1].owners_blocked = 1;
     c.scopes[s2].joins_blocked = 1;
-    let r = c.flag_deadlock_leaves(&s.deadlock_err);
+    let r = c
+        .flag_deadlock_leaves(&s.deadlock_err, true)
+        .expect("unproven_ok never declines");
     assert!(!r);
     assert!(
         matches!(c.slots[3], Some(TaskOutcome::Deadlocked { .. })),
@@ -8736,7 +8807,9 @@ fn flag_deadlock_leaves_faults_every_scope_of_the_joined_family() {
     c.blocked_owners = 1;
     c.scopes[0].owners_blocked = 1;
     c.scopes[s1].joins_blocked = 1;
-    let r = c.flag_deadlock_leaves(&s.deadlock_err);
+    let r = c
+        .flag_deadlock_leaves(&s.deadlock_err, true)
+        .expect("unproven_ok never declines");
     assert!(!r);
     assert!(matches!(c.slots[2], Some(TaskOutcome::Deadlocked { .. })));
     assert!(
@@ -8851,7 +8924,7 @@ fn park_join_child(s: &MnSched, s1: usize) -> Arc<ChannelCore> {
     s.seed(vec![cf]);
     let cf = take_run(s);
     let ch = empty_core();
-    s.park(core_key(&ch), &ch, cf);
+    s.park(core_key(&ch), Arc::clone(&ch), cf);
     ch
 }
 
@@ -8930,7 +9003,9 @@ fn flag_deadlock_leaves_wakes_the_join_parked_owner_of_the_faulted_leaf() {
     let s1 = park_join_owner(&s);
     let _ch = park_join_child(&s, s1);
     let mut c = s.lock();
-    let r = s.flag_leaves_and_wake(&mut c);
+    let r = s
+        .flag_leaves_and_wake(&mut c)
+        .expect("an empty registry licenses the fault");
     assert!(!r);
     assert!(matches!(c.slots[1], Some(TaskOutcome::Deadlocked { .. })));
     assert!(c.slots[0].is_none());
@@ -8991,7 +9066,7 @@ fn mnsched_a_vetoed_sched_polls_instead_of_parking_untimed() {
     let chan = empty_core();
     a.seed(vec![mk_fiber(0)]);
     let fa = take_run(&a);
-    a.park(core_key(&chan), &chan, fa);
+    a.park(core_key(&chan), Arc::clone(&chan), fa);
     // B keeps its seeded fiber runnable — A's fault decision is vetoed by it.
     b.seed(vec![mk_fiber(0)]);
 
@@ -9012,7 +9087,7 @@ fn mnsched_a_vetoed_sched_polls_instead_of_parking_untimed() {
 
     // Park B's fiber too, so A's next `DEMOTE_POLL_BACKOFF` poll sees the genuine deadlock and fires.
     let fb = take_run(&b);
-    b.park(core_key(&chan), &chan, fb);
+    b.park(core_key(&chan), Arc::clone(&chan), fb);
 
     assert_eq!(
         rx.recv_timeout(std::time::Duration::from_secs(2)),
@@ -9043,7 +9118,7 @@ fn w758_nursery_party_is_satisfiable_whenever_the_sched_can_still_move() {
         "a running fiber → the nursery can move"
     );
     let chan = empty_core();
-    sched.park(core_key(&chan), &chan, f);
+    sched.park(core_key(&chan), Arc::clone(&chan), f);
     assert!(
         !party.satisfiable(),
         "the only fiber is parked with nothing to feed it — the owner's wait CANNOT end"
@@ -9053,7 +9128,7 @@ fn w758_nursery_party_is_satisfiable_whenever_the_sched_can_still_move() {
     assert!(party.satisfiable(), "runnable > 0");
     let g = take_run(&sched);
     assert!(party.satisfiable(), "running > 0");
-    sched.park(core_key(&chan), &chan, g);
+    sched.park(core_key(&chan), Arc::clone(&chan), g);
     assert!(!party.satisfiable(), "back to stuck");
     // `inflight` (a blocking-pool call WILL come back):
     sched.inflight.fetch_add(1, Ordering::Relaxed);
@@ -9090,7 +9165,7 @@ fn w758_nursery_party_is_satisfiable_whenever_the_sched_can_still_move() {
     let two_party = crate::vm::quiesce::PartyWait::Nursery(Arc::clone(&two));
     two.seed(vec![mk_fiber(0)]);
     let h = take_run(&two);
-    two.park(core_key(&chan), &chan, h);
+    two.park(core_key(&chan), Arc::clone(&chan), h);
     assert!(
         !two_party.satisfiable(),
         "both scopes incomplete, all parked"
@@ -9126,7 +9201,7 @@ fn w758_quiesced_counts_a_nursery_owner_against_live() {
     sched.seed(vec![mk_fiber(0)]);
     let f = take_run(&sched);
     let chan = empty_core();
-    sched.park(core_key(&chan), &chan, f);
+    sched.park(core_key(&chan), Arc::clone(&chan), f);
 
     let job = state.block(crate::vm::quiesce::PartyWait::Recv(empty_core()));
     assert!(
@@ -9146,7 +9221,7 @@ fn w758_quiesced_counts_a_nursery_owner_against_live() {
         "a runnable fiber makes the owner's wait satisfiable, which must veto the verdict"
     );
     let g = take_run(&sched);
-    sched.park(core_key(&chan), &chan, g);
+    sched.park(core_key(&chan), Arc::clone(&chan), g);
     assert!(state.quiesced(&registry), "stuck again");
     // The other direction: fewer parties than `live` must always veto.
     drop(job);
@@ -9232,8 +9307,8 @@ fn mnsched_cancel_drain_requeues_parked() {
     sched.seed(vec![mk_fiber(0), mk_fiber(1)]);
     let a = take_run(&sched);
     let b = take_run(&sched);
-    sched.park(core_key(&c1), &c1, a);
-    sched.park(core_key(&c2), &c2, b);
+    sched.park(core_key(&c1), Arc::clone(&c1), a);
+    sched.park(core_key(&c2), Arc::clone(&c2), b);
     sched.cancel_drain(0);
     let c = sched.lock();
     assert_eq!(c.parked_n, 0);
@@ -21023,7 +21098,7 @@ fn mnsched_drain_scan_reruns_after_a_cancel_generation_bump() {
     let core = empty_core();
     sched.seed(vec![mk_fiber(0)]);
     let f = take_run(&sched);
-    sched.park(core_key(&core), &core, f);
+    sched.park(core_key(&core), Arc::clone(&core), f);
     assert_eq!(
         sched.lock().drain_scan_due(),
         None,

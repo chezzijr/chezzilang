@@ -2291,7 +2291,7 @@ impl Vm {
             let scope_id = fiber.scope_id;
             let span = fiber.span;
             match self.run_one_fiber(&mut fiber, span) {
-                Disp::Park(key, core) => sched.park(key, &core, fiber),
+                Disp::Park(key, core) => sched.park(key, core, fiber),
                 // Bounded backpressure — the send-side park (gap re-check = space, not a message).
                 Disp::SendPark(key, core) => sched.park_send(key, &core, fiber),
                 // §6d — multi-channel `wait` park: file ONE shared token in every arm's bucket.
