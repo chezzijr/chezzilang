@@ -7,6 +7,26 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-125 (2026-09-16) — three of wave 13's nested-deadlock verdict edges close (W13-4, exec_join, W13-5 at T=1); W13-6 and W13-5 at T>=2 stay open with a measured residual.**
+  Four mechanisms: (1) a joined family whose member fiber owns a still-incomplete NESTED nursery is
+  now INTERIOR, not a leaf (`JoinScope::parent_scope`, set by `Vm::activate_fiber_owned_nursery`) — a
+  channel-parked owner at depth 3+ used to be faulted and dropped without unwinding its child scope,
+  hanging the run at `CHEZZI_THREADS=1` (W13-4, `flag_deadlock_leaves`). (2) an outermost sched whose
+  every counted fiber is an owner blocked at a nested join (`SchedCore::only_blocked_owners`) can feed
+  nobody and has no parked victim to demand, so `live_eager_bodies`/`PartyWait::Nursery::satisfiable`
+  now relax `require_parked` for it too, not only for `body_is_fiber` — closes `exec_join` and its
+  Executor twins `b4a`/`e10`/`e11`, previously hung at `CHEZZI_THREADS>=2`. (3) `SchedCore::provable`
+  answers "is every holder of this leaf's channel(s) visible?" via `Arc::strong_count` against a new
+  `Heap::channel_handles` + `RecvWait::core`; `flag_deadlock_leaves` now faults only PROVABLE parked
+  leaves, else the single lowest-index one — closes W13-5 (a recoverer feeding a cousin at its join)
+  at `CHEZZI_THREADS=1` (`d2a`/`d2d`/`g3` all 0/20 false-fault, was 4/5-5/5). (4) a cross-sched
+  deferral for W13-5 at T>=2 and a replacement-worker handoff for W13-6 (two siblings recovering an
+  inner deadlock then fanning in) were both built and both measured WORSE than the plan's own
+  rollback threshold (a false fault, not a hang) at `CHEZZI_THREADS=4`, so both are reverted; the
+  every-worker-count tests for `d2a`/`d2d` are `#[ignore]`d and `docs/gaps.md`'s W13-5/W13-6 rows
+  record the measured rates. New: `tests/chezzi_threads_cli.rs`'s harness runs every nested-deadlock
+  shape at the default worker count too (was 1/2/4 only), plus a 16-cell owner×depth×recovered edge
+  table (320 sampled runs, 8s).
 - **TICKET-124 (2026-09-16) — the expected-type / untyped-constant widening TICKET-106 wired into one sink now reaches its neighbours: a generic ctor's own hint, a nested ctor argument, a reassignment/index-assign/field-assign target, and a `float`-slot collection-method argument; plus a check-OK container format spec (W13-12/13/14/15/18).**
   W13-12: `widen_mixed_numeric_args` (`src/checker/proto.rs`) grew a `want: Option<&HashMap>` — a
   turbofish or a ctor's own expected-type hint via the new `hint_want` — beside its existing

@@ -12688,7 +12688,7 @@ CHANNEL op (not the join) its child is never driven, and `quiesced_core` reads t
 
 **Residual, carried by TICKET-112 — CLOSED 2026-09-11.** At `CHEZZI_THREADS>=2` `recursive` used to fault `recv on an empty channel: deadlock` at `14:23` once its depth exceeded the granted-`NestedDrainerSlot` path. Root cause: a private nested eager sched's own `body_open` vetoed its peers' verdicts forever, and `QuiesceState::live_eager_bodies` counted only OUTERMOST scheds so the process-wide verdict false-faulted `main` while a nested chain still ran. Fix: `MnSched::body_is_fiber` — a nested sched's body is a fiber counted on ANOTHER sched, so it no longer vetoes a peer's own `body_open`, and it now registers with `live_eager_bodies`, judged with `quiesced_core(c, false)` (DEC-101's allowed relaxation). `recursive` now runs 30 deep at every worker count. Measured on the final binary, 20 rounds under 8 CPU hogs: 20/20 at T=1/2/4/8/default. Same private-sched predicate family as `cousin_fed` (W12-4 addendum, closed alongside).
 
-**exec_join — OPEN, filed by TICKET-112.** An Executor job whose OUTERMOST nursery's only undone fiber is an owner blocked at a nested join still hangs at `CHEZZI_THREADS>=2`: outermost scheds keep `local_quiesced` (DEC-101), so `body_is_fiber`'s relaxation does not reach them. Measured 3/3 per count at `9924fcfd` and unchanged after TICKET-112.
+**exec_join — CLOSED 2026-09-16 (TICKET-125).** An Executor job whose OUTERMOST nursery's only undone fiber is an owner blocked at a nested join used to hang at `CHEZZI_THREADS>=2`: outermost scheds kept `local_quiesced` (DEC-101), so `body_is_fiber`'s relaxation never reached them. Fix: `SchedCore::only_blocked_owners` (`running > 0 && running == blocked_owners && parked_n == 0`) — such a sched can feed nobody and has no parked victim of its own to demand, so `live_eager_bodies` and `PartyWait::Nursery::satisfiable` now also relax `require_parked` for it, not only for `body_is_fiber`. Its Executor twins `b4a`/`e10`/`e11` closed alongside. Measured on the fixed release binary, 5 runs per count at T=1/2/4/default: all four complete or fault as Go does.
 
     import std.concurrency
 
@@ -12715,8 +12715,6 @@ CHANNEL op (not the join) its child is never driven, and `quiesced_core` reads t
         ex.shutdown()
         print("done")
     main()
-
-Needs its own repro-in-hand relaxation for outermost scheds (DEC-101's condition) before it can close.
 
 ### W12-2 repro (P0)
 
@@ -12871,9 +12869,9 @@ are the SAME widening missing at a neighbour sink (qualified head, ctor arm, nes
 | ~~**W13-1**~~ | P0 | airlock | A write through a spawn-ADOPTED alias of a module global (`a := gl` in the parent, `a.push(2)` in the task) is not carried by a closure the task sends back: `c.recv()()` prints `[1]`; CPython threading / Go `[1, 2]`. Same for element alias, spawn-arg alias, struct-in-Map alias, closure created before the push, nested nursery, Executor job, two hops. The identical alias taken INSIDE the task carries. TICKET-105's carry check declines on a TICKET-111-adopted node — distinct from the OPEN G6 residual (the push here is sender-side, before the send). Repro below | CLOSED 2026-09-12, TICKET-116: a closure that names free globals now faults its home module at `Op::MakeClosure`, so an adopted-alias write reaches the send |
 | ~~**W13-2**~~ | P0 | airlock | A receiver's OWN in-place mutation of a module global is silently overwritten by an arriving closure whose sender also mutated it: parent `g.push(9)` while a task does `g.push(2)` and sends a closure over `g`; after `recv()` the parent's own `g` is `[1, 2]` — the 9 is gone. Go (mutex) `[1 9 2]`, CPython `[1, 2, 9]`. Same for `g[1] = 9`, `g.b = 9`, sibling receiver. Only whole-slot `g = [1, 9]` survives. `docs/concurrency.md:1481` defines a sender write to INCLUDE in-place mutation but the receive-side skip (DEC-051) tests `assigned` only. Repro below | CLOSED 2026-09-12, TICKET-116: `Vm::install_global_slot` now also refuses on `slot_changed_since_recv_baseline` (the CURRENT snapshot, not the root's frozen first-ever one — a review fix on the first landing), so a receiver's own in-place write survives; recorded residual: the sender's in-place delta is then dropped rather than merged |
 | **W13-3** | P1 | scheduler | A genuine nested deadlock HANGS at T>=2 whenever the main body AND a nested owner body are both channel-parked (`never.recv()` at depth 0 and depth 1, leaf at depth 2): T=1 faults 5/5, T=2/default rc=124 5/5. Go `all goroutines are asleep`. Drop the main-body recv → faults in ms at every count. The Executor-job twins of the OPEN `exec_join` row hang the same way, so `exec_join` needs no Executor. Repro below | CLOSED 2026-09-15 (TICKET-117); W13-4, W13-5, W13-6 and the exec_join row moved to TICKET-125 |
-| **W13-4** | P1 | scheduler | Mirror at T=1: a genuine deadlock whose ONLY channel-parked owner is at depth 3+ hangs (rc=124 5/5) while T>=2 faults 5/5; depth 2 faults everywhere. `chezzi test --timeout=300` does not reach it at T=1 (20 s, vs `TIMED-OUT` at 311 ms for a sleeping child). Go `GOMAXPROCS=1` faults. Repro below | — |
-| **W13-5** | P1 | scheduler | W12-4 aftermath, cousin variant: a task that RECOVERS a genuine inner-nursery deadlock and then feeds a COUSIN whose owner sits at its join is false-faulted `deadlock: every task in this parallel: block is blocked` — judge 4/5 at T=2 and default, hunter 5/5 at T=1/4. Go `err / cousin got 5 / done`. `cousin_fed` (cousin body on `recv`) is 20/20 clean; the join-body cousin is the shape TICKET-112 did not cover. Also with a recovered `panic("boom")` instead of a deadlock (T=2 4/5). Repro below | — |
-| **W13-6** | P1 | scheduler | TWO siblings that each recover an inner deadlock and then fan in to the main body's `recv` HANG at T>=2 (rc=124 5/5 at N=2, 5, 20, 100); T=1 completes `t 2` 5/5. Same two recovers without the fan-in: clean; ONE task recovering twice: clean. Go `done`. Repro below | — |
+| **W13-4** | P1 | scheduler | Mirror at T=1: a genuine deadlock whose ONLY channel-parked owner is at depth 3+ hangs (rc=124 5/5) while T>=2 faults 5/5; depth 2 faults everywhere. `chezzi test --timeout=300` does not reach it at T=1 (20 s, vs `TIMED-OUT` at 311 ms for a sleeping child). Go `GOMAXPROCS=1` faults. Repro below | CLOSED 2026-09-16 (TICKET-125) |
+| **W13-5** | P1 | scheduler | W12-4 aftermath, cousin variant: a task that RECOVERS a genuine inner-nursery deadlock and then feeds a COUSIN whose owner sits at its join is false-faulted `deadlock: every task in this parallel: block is blocked` — judge 4/5 at T=2 and default, hunter 5/5 at T=1/4. Go `err / cousin got 5 / done`. `cousin_fed` (cousin body on `recv`) is 20/20 clean; the join-body cousin is the shape TICKET-112 did not cover. Also with a recovered `panic("boom")` instead of a deadlock (T=2 4/5). Repro below | PARTIAL CLOSE 2026-09-16 (TICKET-125): fixed at T=1 (`SchedCore::provable`, fault only a provable joined leaf, else the lowest-index one); at T>=2 two private scheds still race independently (measured ~1/20 to ~6/30 false-fault on `d2a`/`d2d` depending on the tried cross-sched deferral) — OPEN, see the W13-5-at-T>=2 residual below |
+| **W13-6** | P1 | scheduler | TWO siblings that each recover an inner deadlock and then fan in to the main body's `recv` HANG at T>=2 (rc=124 5/5 at N=2, 5, 20, 100); T=1 completes `t 2` 5/5. Same two recovers without the fan-in: clean; ONE task recovering twice: clean. Go `done`. Repro below | OPEN — TICKET-125 tried handing this owner's worker to a replacement (`spawn_replacement_worker_holding` + a `NestedDrainerSlot`); it fixed T=2 but false-faulted at T=4 (measured 2/8), so reverted per its own rollback |
 | ~~**W13-7**~~ | P1 | Executor | CLOSED 2026-09-16 (TICKET-118). An Executor job parked at a NURSERY join whose child is channel-blocked pins its pool thread at T=1, so a sibling job that would feed it never starts (rc=124 5/5; T>=2 `j1 got 1 / done` 5/5). `docs/concurrency.md:1805` (TICKET-052) promises "a blocked job no longer pins its pool thread … fixed for every shape above" — the yield bracket fires for a job blocked ON a channel, not for a job whose nursery child is. Go `GOMAXPROCS=1` completes. Repro below | — |
 | ~~**W13-8**~~ | P1 | Executor | CLOSED 2026-09-16 (TICKET-118). `shutdown_now()` does not cancel a job's nursery child parked on `recv`: depth 1 → false `deadlock` fault at every count (5/5); depth 2 → T=1 fault, T>=2 rc=124. Job itself on `never.recv()` (no nursery) → `awake / done` 20/20. Doc: `shutdown_now()` "ask running jobs to stop at their next cancellation point" and `recv` IS a cancellation point. Go `select`+`cancel()` completes. Repro below | — |
 | ~~**W13-9**~~ | P1 | airlock | A module global nested ≥5 000 deep makes EVERY nursery open take ~22 s before the (correct, recoverable) `maximum structural depth (10000) exceeded` fault — measured 21.6 s at every count; depth 4 500 crosses in 0.04 s; the SAME chain as a captured LOCAL faults in 0.04 s. Constant ~22 s once the cap trips (quadratic walk on the module-snapshot failure path). Looks like a hang under any timeout ≤20 s | CLOSED 2026-09-15, TICKET-119: `to_snap_depth` now skips a speculative attempt already proven, by an exact-replay argument, to overflow the same way again — 5000/8000-deep chains now fault in 0.05 s (was 20.4/20.3 s) |
@@ -12988,6 +12986,19 @@ judge 4/5 at T=2 and default, hunter 5/5 at T=1/4; the clean runs print `cousin 
 `err / cousin got 5 / done`. `sched/d2a.chz`; `d2.chz` (recover at depth 3), `d2d.chz` (roles swapped:
 one run printed `task got 5` AND then faulted), `g3.chz` (recovered `panic` instead of a deadlock).
 
+**Residual, T>=2 — OPEN (TICKET-125).** `SchedCore::provable` (fault only a joined leaf whose channel
+handles are fully accounted for, else the lowest-index one) closes this at T=1 outright (`d2a`/`d2d`/
+`g3` all 0/20 false-fault). At T>=2 each cousin's leaf sits on its OWN private sched, so the two
+`is_deadlocked_ignoring_jobs` judges still race independently. A cross-sched deferral
+(`MnSched::defer_to_provable_peer`, deferring to a peer sched whose own victims ARE provable) cut the
+rate sharply but not to zero — measured on the release binary, 30 runs at `CHEZZI_THREADS=4`: `d2a`
+1/20 false-fault, `d2d` 7/30. Reading a contended `try_lock` in that fn as "no provable peer" instead
+of "defer" made both WORSE (`d2a` 6/30, `d2d` 7/30), so the deferral is reverted rather than shipped
+partially wrong (`git log --oneline -- src/vm/mod.rs` around TICKET-125's third-to-last commit on
+`ticket/125` has the diff). `tests/chezzi_threads_cli.rs`'s
+`w13_5_d2a_cousin_join_completes_at_every_worker_count` and
+`w13_5_d2d_roles_swapped_completes_at_every_worker_count` are `#[ignore]`d with this row cited.
+
 ### W13-6 repro (P1)
 
     fn main():
@@ -13011,6 +13022,20 @@ one run printed `task got 5` AND then faulted), `g3.chz` (recovered `panic` inst
 
 T=1 `t 2` 5/5; T=2/default rc=124 5/5. Go `done`. `sched/i6n2.chz`; `i6b.chz` (no fan-in) and `d1.chz`
 (one task recovering twice) are clean.
+
+**Residual — OPEN (TICKET-125).** Root cause: recoverer 1 blocks the outer sched's only runner (its
+`chezzi-eager` drainer) inside a private nested join; recoverer 2 stays queued, because pool helpers
+are farmed only after `close_body` and main's body is open in its `recv` loop. Tried:
+`Vm::spawn_replacement_worker_holding` (splitting `spawn_replacement_worker` to hold a
+`NestedDrainerSlot` for the replacement's lifetime) spawned unconditionally right after
+`farm_outermost_eager_helpers` in `join_eager_nursery`'s outermost arm — fixed T=2 (5/5) but
+false-faulted `i6n2` at T=4 (2/8, `err` for the recovered deadlock then a spurious `deadlock` on
+main's own `recv` loop). Gating the spawn on `outer.runnable.load(Ordering::Relaxed) > 0` (the
+Rollback section's own fallback) fixed T=4 too in isolated runs, but the SAME every-worker-count test
+then false-faulted at T=2 in the full suite — reverted per the Rollback section's next step
+(revert 7 and 8 wholesale). `tests/chezzi_threads_cli.rs`'s
+`w13_6_two_recoverers_fan_in_completes_at_thread_two` (from TICKET-117's triage) stays red at T=2 on
+this binary, tracked here.
 
 ### W13-7 / W13-8 repros (P1)
 

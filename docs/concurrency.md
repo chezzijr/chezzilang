@@ -2386,9 +2386,11 @@ reinvented; none is scheduled. (B3–B5 itself is planned in [`concurrency-b3.md
     NESTED scheds now register with the process-wide `live` count too, judged with
     `quiesced_core(c, false)` — a nested sched whose undone fibers are all parked or blocked at a
     deeper join can send nothing until another registered sched moves, and that sched counts on its
-    own. **Limit:** an OUTERMOST sched keeps `local_quiesced`, so an Executor job whose nursery's only
-    undone fiber is an owner blocked at a nested join (`exec_join`, `docs/gaps.md`) still hangs at
-    `CHEZZI_THREADS>=2`.
+    own. **CLOSED 2026-09-16 (TICKET-125):** an outermost sched whose every counted fiber is an owner
+    blocked at a nested join (`SchedCore::only_blocked_owners`) can feed nobody and has no parked
+    victim of its own to demand, so it now relaxes the same way — an Executor job whose nursery's
+    only undone fiber is an owner blocked at a nested join (`exec_join`, `docs/gaps.md`) completes at
+    every worker count instead of hanging.
 
   **(Symbol note:** the old `pick_runnable` linear scan named in earlier drafts is gone — replaced by
   D0's `ready`-set.)
