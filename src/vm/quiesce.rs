@@ -210,7 +210,10 @@ impl PartyWait {
             // and no other site takes `parties` while holding a core lock.
             PartyWait::Nursery(sched) => {
                 let c = sched.lock();
-                !sched.local_quiesced(&c)
+                // TICKET-125 — a sched whose every counted fiber is an owner blocked at a nested
+                // join has no parked victim to demand either (same DEC-112 bullet-3 relaxation as
+                // `live_eager_bodies` above).
+                !sched.quiesced_core(&c, !c.only_blocked_owners())
             }
             // TICKET-063 — mirrors `SchedCore::guard_waits`' veto in `local_quiesced`.
             PartyWait::Guard(key, me) => super::core::guard_wait_satisfiable(*key, *me),
@@ -442,11 +445,15 @@ impl QuiesceState {
         // peer question. When every undone fiber is parked or blocked at a deeper join, it can send
         // nothing until another registered sched moves, and that sched counts on its own. With
         // `local_quiesced` here such a sched counted live forever and hung `exec_nested` at
-        // `CHEZZI_THREADS>=2`. Outermost scheds keep `local_quiesced` (DEC-101).
+        // `CHEZZI_THREADS>=2`. Outermost scheds keep `local_quiesced` (DEC-101), EXCEPT when every
+        // counted fiber is an owner blocked at a nested join (`only_blocked_owners`, TICKET-125,
+        // DEC-112 bullet 3) — such a sched has no parked victim of its own to demand and hung
+        // `exec_join`/`b4a`/`e10`/`e11` at T>=2 the same way.
         live.iter()
             .filter(|s| {
                 let c = s.lock();
-                c.any_scope_incomplete() && !s.quiesced_core(&c, !s.body_is_fiber)
+                c.any_scope_incomplete()
+                    && !s.quiesced_core(&c, !(s.body_is_fiber || c.only_blocked_owners()))
             })
             .count()
     }

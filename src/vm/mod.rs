@@ -2538,6 +2538,14 @@ impl SchedCore {
         self.scopes.iter().any(|s| s.done < s.total)
     }
 
+    /// TICKET-125 (exec_join, DEC-112 bullet 3) — every counted fiber on this sched is an owner
+    /// blocked at a nested join: it can feed nobody (DEC-099) and has no parked fiber of its own
+    /// (`parked_n == 0`), so a caller demanding a visible parked victim before counting this sched
+    /// live must not — that demand is exactly what hung `exec_join`/`b4a`/`e10`/`e11` at T>=2.
+    pub(super) fn only_blocked_owners(&self) -> bool {
+        self.running > 0 && self.running == self.blocked_owners && self.parked_n == 0
+    }
+
     /// Register a demoted fiber's channel (refcounted). Caller holds core lock A.
     fn register_demoted(&mut self, ptr: usize, core: &Arc<ChannelCore>) {
         self.demoted_chans
@@ -4292,6 +4300,9 @@ impl MnSched {
     /// peeks `ChannelCore::q` for every demoted fiber. Evaluated from `PartyWait::Nursery` that makes
     /// the chain **P → A → Q**, which is the established total order (`parties` → `SchedCore` →
     /// `ChannelCore::q`); `A → Q` is the order `send_wake` and the demoted peek already use.
+    // TICKET-125 — production call sites now route through `quiesced_core` directly so they can pass
+    // `only_blocked_owners`; only the unit tests below call this wrapper.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn local_quiesced(&self, c: &SchedCore) -> bool {
         self.local_quiesced_given(c, None)
     }

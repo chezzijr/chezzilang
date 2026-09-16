@@ -985,6 +985,109 @@ fn w13_6_two_recoverers_fan_in_completes_at_thread_two() {
     );
 }
 
+/// exec_join (TICKET-125): the same shape must complete at EVERY worker count, not just T=2.
+#[test]
+fn exec_join_owner_blocked_at_nested_join_completes_at_every_worker_count() {
+    assert_at_every_worker_count(
+        "executor_job_owner_blocked_at_nested_join_every.chz",
+        EXECUTOR_JOB_OWNER_BLOCKED_AT_NESTED_JOIN,
+        |out| {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            out.status.success() && stdout.contains("job err") && stdout.contains("done")
+        },
+        "exit 0 with stdout containing `job err` and `done`",
+    );
+}
+
+/// b4a (TICKET-125): an Executor job recovers a nested deadlock and completes, at every worker count.
+const B4A_EXECUTOR_JOB_RECOVERS_NESTED_DEADLOCK: &str = "import std.concurrency\nfn job():
+    never := Channel[int](0)
+    r := recover:
+        parallel:
+            spawn:
+                parallel:
+                    spawn:
+                        never.recv()
+            never.recv()
+    match r:
+        Ok(_): print(\"job ok\")
+        Err(e): print(\"job err\")
+fn main():
+    ex := Executor()
+    ex.submit(fn(): job())
+    ex.shutdown()
+    print(\"done\")
+main()
+";
+
+#[test]
+fn b4a_executor_job_recovers_nested_deadlock_at_every_worker_count() {
+    assert_at_every_worker_count(
+        "b4a_executor_job_recovers_nested_deadlock.chz",
+        B4A_EXECUTOR_JOB_RECOVERS_NESTED_DEADLOCK,
+        |out| String::from_utf8_lossy(&out.stdout) == "job err\ndone\n" && out.status.success(),
+        "exit 0 with stdout `job err\\ndone\\n`",
+    );
+}
+
+/// e10 (TICKET-125): an Executor job's genuine nested deadlock still faults, at every worker count.
+const E10_EXECUTOR_JOB_NESTED_DEADLOCK_FAULTS: &str =
+    "import std.concurrency\nnever := Channel[int](0)
+fn job():
+    parallel:
+        spawn:
+            parallel:
+                spawn:
+                    never.recv()
+            never.recv()
+fn main():
+    ex := Executor()
+    ex.submit(fn(): job())
+    ex.shutdown()
+    print(\"unreachable\")
+main()
+";
+
+#[test]
+fn e10_executor_job_nested_deadlock_faults_at_every_worker_count() {
+    assert_at_every_worker_count(
+        "e10_executor_job_nested_deadlock.chz",
+        E10_EXECUTOR_JOB_NESTED_DEADLOCK_FAULTS,
+        faulted_deadlock,
+        "a `deadlock` fault",
+    );
+}
+
+/// e11 (TICKET-125): an Executor job's LIVE nested rendezvous still reaches `main`, at every worker count.
+const E11_EXECUTOR_JOB_NESTED_DEADLOCK_REACHES_MAIN: &str =
+    "import std.concurrency\nnever := Channel[int](0)
+out := Channel[int](0)
+fn job():
+    parallel:
+        spawn:
+            parallel:
+                spawn:
+                    never.recv()
+    out.send(1)
+fn main():
+    ex := Executor()
+    ex.submit(fn(): job())
+    print(\"main {out.recv()}\")
+    ex.shutdown()
+    print(\"unreachable\")
+main()
+";
+
+#[test]
+fn e11_executor_job_nested_deadlock_reaches_main_at_every_worker_count() {
+    assert_at_every_worker_count(
+        "e11_executor_job_nested_deadlock.chz",
+        E11_EXECUTOR_JOB_NESTED_DEADLOCK_REACHES_MAIN,
+        faulted_deadlock,
+        "a `deadlock` fault",
+    );
+}
+
 /// exec_join (TICKET-125, filed by TICKET-112): reproduces the Executor-job outermost-nursery hang at
 /// `CHEZZI_THREADS=2`.
 #[test]
