@@ -962,7 +962,6 @@ fn w13_5_g3_recovered_panic_then_cousin_join_completes_at_thread_one_sampled() {
 /// forcing `try_lock` contention to read as "no provable peer" made it WORSE (~6/30), so per the
 /// plan's own rollback that mechanism is reverted rather than shipped partially wrong. Tracked OPEN
 /// in `docs/gaps.md` (W13-5 at T>=2).
-#[ignore = "TICKET-125 residual: W13-5 at T>=2 — see docs/gaps.md"]
 #[test]
 fn w13_5_d2a_cousin_join_completes_at_every_worker_count() {
     assert_at_every_worker_count(
@@ -977,7 +976,6 @@ fn w13_5_d2a_cousin_join_completes_at_every_worker_count() {
 }
 
 /// W13-5 (TICKET-125) residual, T>=2 — see [`w13_5_d2a_cousin_join_completes_at_every_worker_count`].
-#[ignore = "TICKET-125 residual: W13-5 at T>=2 — see docs/gaps.md"]
 #[test]
 fn w13_5_d2d_roles_swapped_completes_at_every_worker_count() {
     assert_at_every_worker_count(
