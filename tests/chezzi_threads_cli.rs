@@ -957,11 +957,13 @@ fn w13_5_g3_recovered_panic_then_cousin_join_completes_at_thread_one_sampled() {
     );
 }
 
-/// W13-5 (TICKET-125) residual, T>=2: `steps 13-15`'s cross-sched deferral (`defer_to_provable_peer`)
-/// cut the false-fault rate sharply (measured ~3/5 -> ~1/20 at T=4 on `d2a`) but did not reach 0, and
-/// forcing `try_lock` contention to read as "no provable peer" made it WORSE (~6/30), so per the
-/// plan's own rollback that mechanism is reverted rather than shipped partially wrong. Tracked OPEN
-/// in `docs/gaps.md` (W13-5 at T>=2).
+/// W13-5 (TICKET-125) residual, T>=2 — CLOSED by TICKET-129. `SchedCore::flag_deadlock_leaves` now
+/// DECLINES an unproven verdict (`unproven_ok: bool`, `Option<bool>` return) unless
+/// `MnSched::may_fault_unproven` licenses it — no live peer sched can still move or prove its own
+/// victims, matching Go's all-goroutines-parked rule. TICKET-125's own cross-sched deferral
+/// (`defer_to_provable_peer`) had cut the false-fault rate (~3/5 -> ~1/20 at T=4 on `d2a`) without
+/// reaching 0 and was reverted; TICKET-129 measured 0 false faults of 60 runs per worker count on
+/// `d2a`/`d2d`/`g3` (debug binary) before closing `docs/gaps.md`'s W13-5 row.
 #[test]
 fn w13_5_d2a_cousin_join_completes_at_every_worker_count() {
     assert_at_every_worker_count(
@@ -986,6 +988,21 @@ fn w13_5_d2d_roles_swapped_completes_at_every_worker_count() {
                 && String::from_utf8_lossy(&out.stdout) == "err\ntask got 5\ndone\n"
         },
         "exit 0 with stdout `err`, `task got 5`, `done`",
+    );
+}
+
+/// W13-5 (TICKET-125) residual, T>=2 — the third instance (a recovered PANIC rather than a recovered
+/// inner deadlock), see [`w13_5_d2a_cousin_join_completes_at_every_worker_count`].
+#[test]
+fn w13_5_g3_recovered_panic_then_cousin_join_completes_at_every_worker_count() {
+    assert_at_every_worker_count(
+        "g3_every.chz",
+        RECOVERED_PANIC_THEN_COUSIN_JOIN,
+        |out| {
+            out.status.success()
+                && String::from_utf8_lossy(&out.stdout) == "err\ncousin got 5\ndone\n"
+        },
+        "exit 0 with stdout `err`, `cousin got 5`, `done`",
     );
 }
 
