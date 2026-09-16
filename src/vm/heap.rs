@@ -1019,6 +1019,17 @@ impl Heap {
         self.bytes_in(false)
     }
 
+    /// TICKET-125 — the in-heap half of the provable-leaf handle count: how many of `slots` hold
+    /// `Some(Obj::Channel(a))` with `Arc::ptr_eq(a, core)`. Counts UNSWEPT GARBAGE slots too (no mark
+    /// check) — counting garbage too can only make a leaf LESS provable, never more, so it is safe on
+    /// the side that matters (an over-count of holders only declines to fault, never faults wrongly).
+    pub fn channel_handles(&self, core: &Arc<ChannelCore>) -> usize {
+        self.slots
+            .iter()
+            .filter(|s| matches!(&s.obj, Some(Obj::Channel(a)) if Arc::ptr_eq(a, core)))
+            .count()
+    }
+
     /// The shared body of [`live_bytes`](Heap::live_bytes) / [`own_bytes`](Heap::own_bytes):
     /// `include_cores` decides whether an `Arc`-shared core's payload is charged to this heap (the
     /// reachability question) or skipped entirely (the "what does this heap itself own" question).
@@ -2116,6 +2127,20 @@ mod iter_obj_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// TICKET-125 — `channel_handles` counts every slot holding the given core, by `Arc` pointer
+    /// identity, and none holding a different core.
+    #[test]
+    fn channel_handles_counts_every_slot_holding_the_core() {
+        let mut h = Heap::new();
+        let a = Arc::new(ChannelCore::default());
+        let b = Arc::new(ChannelCore::default());
+        h.alloc(Obj::Channel(Arc::clone(&a)));
+        h.alloc(Obj::Channel(Arc::clone(&a)));
+        h.alloc(Obj::Channel(Arc::clone(&b)));
+        assert_eq!(h.channel_handles(&a), 2);
+        assert_eq!(h.channel_handles(&b), 1);
+    }
 
     /// W8-22: a swept slot's stamped span must not leak to whatever `alloc` reuses the index for.
     #[test]

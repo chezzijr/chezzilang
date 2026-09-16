@@ -416,6 +416,13 @@ impl RecvWait {
         drop(g);
         RecvWait(std::sync::Arc::clone(core))
     }
+
+    /// TICKET-125 — the channel core this park is armed against, so the provable-leaf scan
+    /// (`SchedCore::provable`) can key on it. The field is private to this module; every other
+    /// caller reaches the core only through this accessor.
+    pub fn core(&self) -> &std::sync::Arc<ChannelCore> {
+        &self.0
+    }
 }
 
 impl Drop for RecvWait {
