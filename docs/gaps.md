@@ -12995,7 +12995,10 @@ rate sharply but not to zero — measured on the release binary, 30 runs at `CHE
 1/20 false-fault, `d2d` 7/30. Reading a contended `try_lock` in that fn as "no provable peer" instead
 of "defer" made both WORSE (`d2a` 6/30, `d2d` 7/30), so the deferral is reverted rather than shipped
 partially wrong (`git log --oneline -- src/vm/mod.rs` around TICKET-125's third-to-last commit on
-`ticket/125` has the diff). `tests/chezzi_threads_cli.rs`'s
+`ticket/125` has the diff). **On the SHIPPED binary (without the deferral) the rate is load-sensitive
+and worse than either of the above** — 10 runs each under concurrent CPU load (another process at
+~46% CPU): `d2a` 9/10 at T=2, 8/10 at default; `d2d` 5/10 at T=2, 7/10 at default; `g3` 2/10 at T=2,
+0/10 at default; all three 0/10 at T=1. `tests/chezzi_threads_cli.rs`'s
 `w13_5_d2a_cousin_join_completes_at_every_worker_count` and
 `w13_5_d2d_roles_swapped_completes_at_every_worker_count` are `#[ignore]`d with this row cited.
 
