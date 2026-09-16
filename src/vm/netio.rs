@@ -262,7 +262,7 @@ impl Vm {
                 if sched.is_deadlocked(&c) {
                     c.flag_deadlock(&sched.deadlock_err);
                     drop(c);
-                    sched.cv.notify_all();
+                    sched.notify_waiters();
                     break Err(sched.deadlock_err.clone());
                 }
             }
@@ -1914,7 +1914,7 @@ impl Vm {
                 self.send_deposit = Some((Arc::as_ptr(&core) as usize, Arc::clone(&handle)));
                 if let Some(sched) = self.mn.clone() {
                     let key = self.channel_core_ptr(h);
-                    sched.deposit_wake(key, &core);
+                    sched.handoff_wake(key, &core, WakeKind::All, self.wid, true, false);
                 }
             }
             self.park_send(h, orig);
@@ -1991,8 +1991,18 @@ impl Vm {
         if core.cap.is_none() {
             return;
         }
-        if let Some(sched) = self.mn.clone().or_else(|| self.mn_enlist_sched.clone()) {
-            let key = Arc::as_ptr(core) as usize;
+        let key = Arc::as_ptr(core) as usize;
+        if let Some(sched) = self.mn.clone() {
+            // TICKET-128 (W13-25) — this waker (the receiver) keeps running after the handoff, so
+            // `recruit: true`: it may block its own thread (e.g. `io.input`) before anyone else
+            // reaches the handed-off sender, and nobody else would steal it before `HANDOFF_GRACE`.
+            let kind = if core.cap == Some(0) {
+                WakeKind::Send
+            } else {
+                WakeKind::All
+            };
+            sched.handoff_wake(key, core, kind, self.wid, false, true);
+        } else if let Some(sched) = self.mn_enlist_sched.clone() {
             sched.recv_wake(key, core);
         } else {
             core.cv.notify_all();

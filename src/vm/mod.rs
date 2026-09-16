@@ -1979,6 +1979,10 @@ const JOIN_DEADLOCK_MSG: &str = "waiting for this Executor's jobs: deadlock — 
 /// already drains it so the deadlock predicate stays sound if a future commit starts using it.
 struct LocalQ {
     runnext: Option<Fiber>,
+    /// TICKET-128 (W13-25) — when `runnext` was filed by a handoff wake. `None` when `runnext` is
+    /// `None` or was populated some other way. `try_steal` won't take a `runnext` younger than
+    /// `HANDOFF_GRACE`, giving the waker time to park before a sibling can snatch its partner.
+    runnext_at: Option<std::time::Instant>,
     ring: std::collections::VecDeque<Fiber>,
 }
 
@@ -1998,6 +2002,12 @@ const LOCAL_RING_CAP: usize = 256;
 /// CPU. Small (the window is microseconds), and a missed notify costs ≤ this, never liveness.
 const SPIN_BACKOFF: std::time::Duration = std::time::Duration::from_micros(500);
 
+/// TICKET-128 (W13-25) — how long a fresh `runnext` handoff is protected from `try_steal`, mirroring
+/// Go's `runqgrab` delay before it will take a P's `runnext`. Without this an idle sibling can steal
+/// the woken partner before the waker itself parks, and the pair migrates across workers on every
+/// message — exactly the cost this handoff exists to avoid.
+const HANDOFF_GRACE: std::time::Duration = std::time::Duration::from_micros(200);
+
 /// D4d — every Nth schedule a worker checks the global queue before its own local, bounding the
 /// latency of global work while a worker is continuously fed by stealing. Go uses 61 (prime, to
 /// avoid resonating with common batch sizes).
@@ -2013,11 +2023,13 @@ impl LocalQ {
     fn new() -> Self {
         LocalQ {
             runnext: None,
+            runnext_at: None,
             ring: std::collections::VecDeque::new(),
         }
     }
     /// Pop the next fiber to run: `runnext` first (locality), then the ring front (FIFO).
     fn pop(&mut self) -> Option<Fiber> {
+        self.runnext_at = None;
         self.runnext.take().or_else(|| self.ring.pop_front())
     }
 }
@@ -2236,6 +2248,19 @@ struct MnSched {
     /// test (an empty registry means `live == 1` and `parties` empty, so `quiesced` is never reached
     /// past its count gate).
     quiesce: Arc<quiesce::QuiesceState>,
+    /// TICKET-128 (W13-25) — the idle sleep for a worker with NOTHING runnable (`runnable == 0`).
+    /// Split off `cv` (which stays for every timed wait, the joiner, and terminate/deadlock/cancel
+    /// broadcasts) so a rendezvous handoff can recruit exactly one idle sleeper (`recruit`) instead
+    /// of broadcasting `cv` to every parked worker on every message.
+    idle_cv: Condvar,
+    /// TICKET-128 (W13-25) — count of workers currently asleep on `idle_cv`. `recruit` only bothers
+    /// `notify_one` when this is nonzero; `notify_waiters` only touches `idle_cv` at all when this is
+    /// nonzero.
+    idle_sleepers: AtomicUsize,
+    /// TICKET-128 (W13-25) — count of workers currently in the bounded `SPIN_BACKOFF` wait (D4e,
+    /// `runnable > 0` but nothing grabbed yet). `recruit` skips waking an idle sleeper while any
+    /// worker is already spinning — a spinner will pick up the work on its own next pass.
+    spinning: AtomicUsize,
 }
 
 /// Cross-nursery flat scheduler (M:N) — one nursery's JOIN RECORD (Trio/Go-style: structured
@@ -2746,6 +2771,9 @@ impl MnSched {
             // gaps.md W7-58 — empty by default; both `MnSched` construction sites assign the run's
             // state. An empty one has no parties, so the judge below never fires.
             quiesce: Default::default(),
+            idle_cv: Condvar::new(),
+            idle_sleepers: AtomicUsize::new(0),
+            spinning: AtomicUsize::new(0),
         }
     }
 
@@ -2918,6 +2946,32 @@ impl MnSched {
         self.core.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// TICKET-128 (W13-25) — a run-wide wake. Broadcasts `cv` (the joiner and every timed waiter
+    /// still listen there) and, only when a worker is actually asleep on `idle_cv`, broadcasts that
+    /// too. Every site that used to broadcast `cv` alone for a wake reachable by an idle worker now
+    /// calls this instead, so narrowing the idle sleep to its own condvar never strands a sleeper
+    /// that the old broadcast would have reached.
+    fn notify_waiters(&self) {
+        self.cv.notify_all();
+        if self.idle_sleepers.load(Ordering::Relaxed) > 0 {
+            self.idle_cv.notify_all();
+        }
+    }
+
+    /// TICKET-128 (W13-25) — wake exactly one idle worker, damped: a no-op while any worker is
+    /// already spinning (D4e's `SPIN_BACKOFF` loop) or none is asleep. This is Go's `wakep`: a
+    /// handoff wake's consumer is the worker that keeps running after the handoff (send-side
+    /// `park_send`, or nothing at all on the receive side), so no BROADCAST is needed — only a
+    /// recruit for the rarer case where that consumer blocks its own thread before reaching the
+    /// handed-off fiber.
+    fn recruit(&self) {
+        if self.spinning.load(Ordering::Relaxed) == 0
+            && self.idle_sleepers.load(Ordering::Relaxed) > 0
+        {
+            self.idle_cv.notify_one();
+        }
+    }
+
     /// Seed the run queue with the nursery's fibers (task order).
     fn seed(&self, fibers: Vec<Fiber>) {
         self.runnable.fetch_add(fibers.len(), Ordering::Relaxed);
@@ -2996,7 +3050,7 @@ impl MnSched {
         c.global.push_back(fiber);
         self.runnable.fetch_add(1, Ordering::Relaxed);
         drop(c);
-        self.cv.notify_all();
+        self.notify_waiters();
         opened
     }
 
@@ -3012,7 +3066,7 @@ impl MnSched {
     /// fire a genuine deadlock now that the body is no longer live work.
     fn close_body(&self, scope_id: usize) {
         self.lock().scopes[scope_id].body_open = false;
-        self.cv.notify_all();
+        self.notify_waiters();
     }
 
     /// §2c1 — a NESTED eager scope has joined and every one of its tasks is done: pop it and give its
@@ -3112,7 +3166,7 @@ impl MnSched {
             }
         }
         if blocked {
-            self.cv.notify_all();
+            self.notify_waiters();
         }
     }
 
@@ -3126,6 +3180,22 @@ impl MnSched {
     /// `send`/`yield` and make a sibling runnable, so an idle worker waits rather than declaring
     /// deadlock. (D4c will insert work-stealing passes between the local and the park.)
     fn take_runnable(&self, wid: usize, tick: u64, scope_id: usize) -> Take {
+        let mut spun = false;
+        let t = self.take_runnable_inner(wid, tick, scope_id, &mut spun);
+        // TICKET-128 (W13-25) — a worker that had to spin before it found this fiber may itself be
+        // the one that just consumed a periodic global pull ahead of its own `runnext` (step 0
+        // below), or may simply mean other idle siblings should be nudged awake now that there was
+        // contention. Recruiting here is a cheap top-up on top of `handoff_wake`'s own recruit.
+        if spun && matches!(t, Take::Run(_)) && self.runnable.load(Ordering::Relaxed) > 0 {
+            self.recruit();
+        }
+        t
+    }
+
+    /// TICKET-128 (W13-25) — the body of [`Self::take_runnable`], split out so the wrapper can track
+    /// whether this call spun (`spun`) before returning. See `take_runnable` for the recruit this
+    /// enables.
+    fn take_runnable_inner(&self, wid: usize, tick: u64, scope_id: usize, spun: &mut bool) -> Take {
         // gaps.md W7-58 — "this worker has already asked the process-wide verdict since its last
         // wait". Bounds the (relatively expensive, `parties`-locking) escalation below to ONE call per
         // wait, so it can never spin. It is NOT a claim that the verdict's inputs only move on a
@@ -3140,11 +3210,18 @@ impl MnSched {
             //    stealing a busy sibling's local could leave older global work waiting; the periodic
             //    pull bounds that latency (Go's `schedtick % 61`). A single fiber is enough — it is a
             //    fairness nudge, not the main grab path.
+            //    TICKET-128 (W13-25) — this pulled fiber runs AHEAD of this worker's own `runnext`
+            //    and may block its thread in a `Kind::Inline` native, so if `runnext` is occupied an
+            //    idle worker is recruited to steal it (nobody else is left to run it otherwise).
             if tick.is_multiple_of(GLOBAL_CHECK_INTERVAL) {
                 let mut c = self.lock();
                 if let Some(f) = c.global.pop_front() {
                     c.running += 1;
                     self.runnable.fetch_sub(1, Ordering::Relaxed); // runnable → running
+                    drop(c);
+                    if self.lock_local(wid).runnext.is_some() {
+                        self.recruit();
+                    }
                     return Take::Run(f);
                 }
                 drop(c);
@@ -3201,7 +3278,7 @@ impl MnSched {
                     // sibling that was already in a real `cv.wait` (parked when `runnable` was 0, e.g.
                     // before this batch was produced) so it re-checks and steals promptly. Notify
                     // after releasing the local lock (B) — `cv` is the core's, not held here.
-                    self.cv.notify_all();
+                    self.notify_waiters();
                 }
                 return Take::Run(first);
             }
@@ -3216,12 +3293,12 @@ impl MnSched {
             // `terminate` (set by `finish` only when ALL scopes are done, or by deadlock/fault/exit).
             // `body_open` (eager) holds the scope open against a transient `done == total`. Single-scope
             // fast path: an outermost owner with one scope behaves exactly like the old `done == total`.
-            if scope_id != SENTINEL_SCOPE {
-                let s = &c.scopes[scope_id];
-                if s.done == s.total && !s.body_open {
-                    self.cv.notify_all();
-                    return Take::Stop;
-                }
+            // The owner stops only when its whole FAMILY — the origin scope plus any TICKET-103
+            // continuation scopes sharing its cancel token — is done, not the origin alone
+            // (`SchedCore::owner_scope_done`, TICKET-128/W13-25).
+            if scope_id != SENTINEL_SCOPE && c.owner_scope_done(scope_id) {
+                self.notify_waiters();
+                return Take::Stop;
             }
             // TICKET-118 (W13-8) — drain a cancelled family's parked fibers BEFORE judging a
             // deadlock, so a `shutdown_now` (or any scope-cancel) that trips an ANCESTOR flag a
@@ -3264,7 +3341,7 @@ impl MnSched {
                     judged = false;
                     continue;
                 };
-                self.cv.notify_all();
+                self.notify_waiters();
                 if done {
                     return Take::Stop;
                 }
@@ -3311,7 +3388,7 @@ impl MnSched {
                         drop(guard);
                         continue;
                     };
-                    self.cv.notify_all();
+                    self.notify_waiters();
                     if done {
                         return Take::Stop;
                     }
@@ -3348,11 +3425,14 @@ impl MnSched {
             // atomic is the reachability oracle Go lacks). Terminate/deadlock/cancel still broadcast
             // via `notify_all`, which wakes these true sleepers to exit/unwind.
             if self.runnable.load(Ordering::Relaxed) > 0 {
+                self.spinning.fetch_add(1, Ordering::Relaxed);
+                *spun = true;
                 let (guard, _) = self
                     .cv
                     .wait_timeout(c, SPIN_BACKOFF)
                     .unwrap_or_else(|e| e.into_inner());
                 drop(guard);
+                self.spinning.fetch_sub(1, Ordering::Relaxed);
                 judged = false; // W7-58 — a real wait ended: the verdict's inputs may have moved.
                 continue;
             }
@@ -3406,7 +3486,13 @@ impl MnSched {
                     .unwrap_or_else(|e| e.into_inner());
                 drop(guard);
             } else {
-                let guard = self.cv.wait(c).unwrap_or_else(|e| e.into_inner());
+                // TICKET-128 (W13-25) — a worker with NOTHING runnable sleeps on `idle_cv`, not `cv`,
+                // so a rendezvous handoff can recruit exactly this one sleeper (`recruit`) instead of
+                // broadcasting to every parked worker. `notify_waiters` still reaches this wait; only
+                // a bare `cv.notify_all()`/`notify_one()` would miss it.
+                self.idle_sleepers.fetch_add(1, Ordering::Relaxed);
+                let guard = self.idle_cv.wait(c).unwrap_or_else(|e| e.into_inner());
+                self.idle_sleepers.fetch_sub(1, Ordering::Relaxed);
                 drop(guard);
             }
             judged = false; // W7-58 — see above.
@@ -3431,7 +3517,7 @@ impl MnSched {
             c.join_parked.push((origin, fiber));
         }
         drop(c);
-        self.cv.notify_all();
+        self.notify_waiters();
     }
 
     /// TICKET-103 — requeue every join-parked owner whose joined family is now complete. Returns how
@@ -3571,7 +3657,7 @@ impl MnSched {
             fiber.state = FiberState::Ready;
             c.global.push_back(fiber);
             self.runnable.fetch_add(1, Ordering::Relaxed); // running → ready (requeued)
-            self.cv.notify_all();
+            self.notify_waiters();
         } else {
             // TICKET-028 — arm the receiver-presence guard, then (rendezvous only) wake any parked
             // SENDER, both BEFORE the filing: a sender woken while `recv_waiting` is still 0 would
@@ -3594,7 +3680,7 @@ impl MnSched {
             drop(core); // TICKET-129 — die under `c`'s lock, not on the caller's stack.
             if rendezvous {
                 drop(c);
-                self.cv.notify_all();
+                self.notify_waiters();
                 self.wake_run_wide(key, WakeKind::Send);
             }
         }
@@ -3634,7 +3720,7 @@ impl MnSched {
             fiber.state = FiberState::Ready;
             c.global.push_back(fiber);
             self.runnable.fetch_add(1, Ordering::Relaxed); // running → ready (requeued, re-checks space)
-            self.cv.notify_all();
+            self.notify_waiters();
         } else {
             fiber.state = FiberState::Blocked; // running → parked: runnable unchanged
             c.parked
@@ -3650,13 +3736,56 @@ impl MnSched {
     /// value is already queued as a deposit; this is [`Self::send_wake_bounded`]'s wake-fan-out tail
     /// with no push. `WakeKind::All` (not `Send`) because the wake follows a QUEUED value: a woken
     /// receiver should POP it, not re-park waiting for one.
-    fn deposit_wake(&self, key: usize, core: &Arc<ChannelCore>) {
+    ///
+    /// TICKET-128 (W13-25) — replaces the old always-broadcast wake. When exactly ONE fiber was
+    /// woken (`n == 1`), file it in `wid`'s own `LocalQ.runnext` (Go's `runnext` handoff) instead of
+    /// requeuing it to the global queue and broadcasting: the pair stays on one worker and no
+    /// broadcast-to-every-idle-worker cost is paid per message. `recruit` controls whether that
+    /// worker is ALSO nudged awake: the send-side caller (`park_send` runs on the very next line, so
+    /// the worker is never idle) passes `false`; the receive-side caller passes `true`, because its
+    /// own waker may keep running and block its thread in a `Kind::Inline` native before anyone else
+    /// reaches the handed-off fiber. `quiet_empty` (only ever `true` from the send-side deposit path)
+    /// skips the notify entirely when `n == 0` — a deposit that woke nobody has no consumer to reach.
+    /// Falls back to the old broadcast path when more than one fiber woke, or the `runnext` slot was
+    /// already occupied by a fresher handoff.
+    fn handoff_wake(
+        &self,
+        key: usize,
+        core: &Arc<ChannelCore>,
+        kind: WakeKind,
+        wid: usize,
+        quiet_empty: bool,
+        recruit: bool,
+    ) {
         let mut c = self.lock();
-        self.wake_bucket(&mut c, key, WakeKind::All);
-        drop(c);
-        self.cv.notify_all();
-        self.wake_run_wide(key, WakeKind::All);
+        let n = self.wake_bucket(&mut c, key, kind);
+        let quiet = quiet_empty && n == 0;
+        if n == 1
+            && wid < self.locals.len()
+            && let Some(f) = c.global.pop_back()
+        {
+            drop(c);
+            let mut lq = self.lock_local(wid);
+            if lq.runnext.is_none() {
+                lq.runnext = Some(f);
+                lq.runnext_at = Some(std::time::Instant::now());
+                drop(lq);
+                if recruit {
+                    self.recruit();
+                }
+            } else {
+                drop(lq);
+                self.lock().global.push_back(f);
+                self.notify_waiters();
+            }
+        } else {
+            drop(c);
+            if !quiet {
+                self.notify_waiters();
+            }
+        }
         core.cv.notify_all();
+        self.wake_run_wide(key, kind);
     }
 
     /// Bounded-channel `send` when the queue may be at capacity: the space-check + enqueue + wake of
@@ -3678,7 +3807,7 @@ impl MnSched {
         }
         self.wake_bucket(&mut c, key, WakeKind::All);
         drop(c);
-        self.cv.notify_all();
+        self.notify_waiters();
         self.wake_run_wide(key, WakeKind::All);
         core.cv.notify_all();
         true
@@ -3699,7 +3828,7 @@ impl MnSched {
         let mut c = self.lock();
         self.wake_bucket(&mut c, key, kind);
         drop(c);
-        self.cv.notify_all();
+        self.notify_waiters();
         core.cv.notify_all();
         self.wake_run_wide(key, kind);
     }
@@ -3776,7 +3905,7 @@ impl MnSched {
             fiber.state = FiberState::Ready;
             c.global.push_back(fiber);
             self.runnable.fetch_add(1, Ordering::Relaxed); // running → ready (requeued, re-polls)
-            self.cv.notify_all();
+            self.notify_waiters();
             return;
         }
         fiber.state = FiberState::Blocked; // running → parked: runnable unchanged
@@ -3821,7 +3950,7 @@ impl MnSched {
         c.parked_n += 1; // ONE fiber, regardless of arm count
         if !rendezvous.is_empty() {
             drop(c);
-            self.cv.notify_all();
+            self.notify_waiters();
             for (_, arm_core, is_send) in &arms {
                 if !*is_send && arm_core.cap == Some(0) {
                     arm_core.cv.notify_all();
@@ -3860,7 +3989,7 @@ impl MnSched {
     ///    back. That replacement was spun up while `runnable == 0` and typically parked into this same
     ///    `take_runnable`'s untimed `cv.wait` well before this yield — so on the `demoted` exit no one
     ///    is left awake, unless something notifies. Fixed at the departure, not here: `mn_worker_loop`
-    ///    now does `sched.cv.notify_all()` on the `self.demoted` return (`sched.rs`), which is where
+    ///    now does `sched.notify_waiters()` on the `self.demoted` return (`sched.rs`), which is where
     ///    the actual consumer gap is — see its doc for the enumeration. (This is the gaps.md W8-7 hang
     ///    regression fix.)
     /// 2. The owner-scope-completing case this argument used to cite separately is **vacuous**, not a
@@ -3902,6 +4031,21 @@ impl MnSched {
     ///
     /// `seed` is a third no-notify site, but it runs pre-start. This is the sys-time collapse W8-7
     /// measured.
+    ///
+    /// TICKET-128 (W13-25) — `handoff_wake`'s one-fiber path is a FOURTH no-broadcast site, and its
+    /// consumer argument is per-caller, not the shared one above:
+    ///   - The send-side deposit (`Vm::send_step`, `netio.rs`) files the fiber in the SENDING
+    ///     worker's own `runnext` and calls `park_send` on the very next line — its consumer is that
+    ///     worker's own next `take_runnable` re-entry, exactly like a yield. Its one gap:
+    ///     `take_runnable_inner`'s step 0 periodic global pull can run a global fiber ahead of that
+    ///     `runnext` and may block its thread in a native, so step 0 calls `recruit()` whenever it
+    ///     pulls a fiber while `runnext` is occupied.
+    ///   - The receive-side handoff (`Vm::wake_senders_core`, `netio.rs`) has NO guaranteed consumer:
+    ///     the receiver keeps running and may block its own thread (e.g. in a native) before ever
+    ///     reaching the handed-off sender. It always passes `recruit: true`, which wakes at most one
+    ///     `idle_cv` sleeper (damped: a no-op while any worker is already spinning). A woken spinner
+    ///     cannot steal the fresh `runnext` until `HANDOFF_GRACE` elapses (`try_steal`), which gives
+    ///     the intended consumer time to arrive on its own first.
     fn yield_fiber(&self, mut fiber: Fiber) {
         let mut c = self.lock();
         c.running -= 1;
@@ -3934,15 +4078,25 @@ impl MnSched {
                 continue;
             }
             let mut vq = self.lock_local(v);
-            let len = vq.ring.len() + usize::from(vq.runnext.is_some());
+            // TICKET-128 (W13-25) — a `runnext` younger than `HANDOFF_GRACE` is not yet stealable
+            // (see `LocalQ::runnext_at`); older than that it counts and steals like any other fiber.
+            let rn_stealable = vq.runnext_at.is_none_or(|t| t.elapsed() >= HANDOFF_GRACE);
+            let len = vq.ring.len() + usize::from(vq.runnext.is_some() && rn_stealable);
             if len == 0 {
                 continue;
             }
             let take = len.div_ceil(2); // ceil-half, so a victim with 1 still yields it
             let mut stolen = Vec::with_capacity(take);
             for _ in 0..take {
-                // Ring BACK first, then the `runnext` slot as a last resort.
-                if let Some(f) = vq.ring.pop_back().or_else(|| vq.runnext.take()) {
+                // Ring BACK first, then the `runnext` slot as a last resort (if stealable).
+                let next = vq.ring.pop_back().or_else(|| {
+                    if rn_stealable {
+                        vq.runnext.take()
+                    } else {
+                        None
+                    }
+                });
+                if let Some(f) = next {
                     stolen.push(f);
                 } else {
                     break;
@@ -3971,10 +4125,16 @@ impl MnSched {
     ///   OTHER `wp.keys` bucket (by `Arc::ptr_eq`) under this same lock hold, so a later `send`/`close`
     ///   to a swept channel can never re-wake the now-moved fiber. A loser sees `claimed` already set
     ///   and drops the stale token (no double-wake, no panic). All under the one core-lock hold.
-    fn wake_bucket(&self, c: &mut SchedCore, key: usize, kind: WakeKind) {
+    ///
+    /// Returns the number of fibers actually woken (moved `parked` → `global` `Ready`). TICKET-128
+    /// (W13-25) — `handoff_wake` needs this count to decide between a one-fiber handoff (file it in
+    /// the waker's own `runnext`) and a broadcast (more than one, or the woken fiber already
+    /// reclaimed by the general path).
+    fn wake_bucket(&self, c: &mut SchedCore, key: usize, kind: WakeKind) -> usize {
         let Some(entries) = c.parked.remove(&key) else {
-            return;
+            return 0;
         };
+        let mut woken = 0usize;
         let mut keep: Vec<ParkedEntry> = Vec::new();
         for entry in entries {
             match entry {
@@ -3987,6 +4147,7 @@ impl MnSched {
                     }
                     c.parked_n -= 1;
                     self.runnable.fetch_add(1, Ordering::Relaxed); // parked → ready
+                    woken += 1;
                     let mut f = f;
                     f.state = FiberState::Ready;
                     c.global.push_back(f);
@@ -3994,6 +4155,7 @@ impl MnSched {
                 ParkedEntry::Send(mut f) => {
                     c.parked_n -= 1;
                     self.runnable.fetch_add(1, Ordering::Relaxed); // parked → ready
+                    woken += 1;
                     f.state = FiberState::Ready;
                     c.global.push_back(f);
                 }
@@ -4020,6 +4182,7 @@ impl MnSched {
                         .expect("WaitPark fiber claimed twice");
                     c.parked_n -= 1; // ONE fiber, matching park_wait's +1
                     self.runnable.fetch_add(1, Ordering::Relaxed); // parked → ready
+                    woken += 1;
                     f.state = FiberState::Ready;
                     c.global.push_back(f);
                     // Sweep the stale token out of every OTHER arm bucket (this `key` is already drained
@@ -4044,6 +4207,7 @@ impl MnSched {
         if !keep.is_empty() {
             c.parked.insert(key, keep);
         }
+        woken
     }
 
     /// TICKET-099 — after waking this sched's own `parked` bucket for `key`, wake the matching bucket
@@ -4081,7 +4245,7 @@ impl MnSched {
         let mut c = self.lock();
         self.wake_bucket(&mut c, key, kind);
         drop(c);
-        self.cv.notify_all();
+        self.notify_waiters();
     }
 
     fn send_wake(&self, key: usize, core: &Arc<ChannelCore>, w: WireValue) {
@@ -4094,7 +4258,7 @@ impl MnSched {
             .push(sum, w);
         self.wake_bucket(&mut c, key, WakeKind::All);
         drop(c);
-        self.cv.notify_all();
+        self.notify_waiters();
         // gaps.md B5 — also wake a receiver parked on this channel in an ANCESTOR (parent) nursery's
         // sched (eager nested nursery only; no-op otherwise). Value is already queued above.
         self.wake_run_wide(key, WakeKind::All);
@@ -4116,7 +4280,7 @@ impl MnSched {
         let mut c = self.lock();
         self.wake_bucket(&mut c, key, WakeKind::All);
         drop(c);
-        self.cv.notify_all();
+        self.notify_waiters();
         core.cv.notify_all();
         // gaps.md B5 — a close from inside an eager body must also wake a receiver ranging over this
         // channel in an ANCESTOR nursery so it observes the close and ends (no-op for ordinary scheds).
@@ -4173,7 +4337,7 @@ impl MnSched {
         if c.all_scopes_done() && !c.any_body_open() {
             c.terminate = true;
         }
-        self.cv.notify_all();
+        self.notify_waiters();
         aborts
     }
 
@@ -4217,7 +4381,7 @@ impl MnSched {
             self.cancel_drain(scope_id);
         }
         poller::drain_sched(self);
-        self.cv.notify_all();
+        self.notify_waiters();
     }
 
     /// B3.4 — after a scope's cancel is tripped, move every parked fiber **belonging to that scope**
@@ -4313,7 +4477,7 @@ impl MnSched {
         }
         c.parked_n -= drained;
         self.runnable.fetch_add(drained, Ordering::Relaxed); // parked → ready
-        self.cv.notify_all();
+        self.notify_waiters();
     }
 
     /// Drain the per-task outcome slots after the nursery terminates (joining thread, post-loop).
@@ -4814,7 +4978,7 @@ impl MnSched {
         c.global.push_back(fiber);
         self.runnable.fetch_add(1, Ordering::Relaxed);
         drop(c);
-        self.cv.notify_all();
+        self.notify_waiters();
     }
 }
 
@@ -4999,6 +5163,16 @@ impl SchedCore {
         self.scope_family(scope_id)
             .iter()
             .all(|&j| self.scopes[j].done == self.scopes[j].total)
+    }
+
+    /// TICKET-128 (W13-25) — a scope-scoped owner may stop only when its WHOLE family (the origin
+    /// scope plus any TICKET-103 continuation scopes sharing its cancel token) is done, not the
+    /// origin alone. A drainer scope-scoped to the origin used to stop while a continuation scope —
+    /// opened by `inject_or_extend` when a spawn landed after the origin was no longer the sched's
+    /// last scope — still held a parked fiber; at `CHEZZI_THREADS=1` no worker was left to run it and
+    /// the joiner slept on an untimed `cv.wait` forever.
+    fn owner_scope_done(&self, scope_id: usize) -> bool {
+        !self.scopes[scope_id].body_open && self.family_done(scope_id)
     }
 
     /// TICKET-103 — some owner blocked at a same-sched join is joining a family whose every scope is

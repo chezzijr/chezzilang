@@ -2310,3 +2310,57 @@ program is gone. Every run of both binaries exited rc=0.
 runs each at `CHEZZI_THREADS=1`, `=2` and default, on the fixed binary: rc=0 5/5 at every worker count
 for every program. `h5.chz b4d.chz b4e.chz`, same schedule: rc=1 5/5 at every worker count for every
 program.
+
+## W13-25 — rendezvous handoff replaces the broadcast wake (2026-09-17)
+
+**Cause.** Every rendezvous wake (a send-side deposit and every receive-side wake) requeued the woken
+fiber to the global queue and then `cv.notify_all()`'d every parked worker, so the cost of making ONE
+fiber runnable grew with the pool: a two-task ping-pong pair migrated across workers on every message.
+**Fix.** `MnSched::handoff_wake` files a single woken fiber directly in the waker's own
+`LocalQ.runnext` (Go's `runnext` handoff) instead, with no broadcast. The consumer differs by caller:
+the send-side deposit's consumer is `park_send` on the very next line (`recruit: false`); the
+receive-side handoff's own waker may block its thread before reaching the handed-off fiber, so it
+passes `recruit: true`, which wakes at most one `idle_cv` sleeper (damped: a no-op while any worker is
+already spinning). `try_steal` won't take a `runnext` younger than `HANDOFF_GRACE` (200µs), so an idle
+sibling can't snatch a partner before the waker parks. Idle workers with nothing runnable now sleep on
+their own `idle_cv` instead of the shared `cv`, so the replacement `notify_waiters` only broadcasts
+`idle_cv` when a sleeper is actually there. Also fixed in the same ticket (not a perf change): a
+scope-scoped drainer used to stop when its OWN scope read `done`, even while a TICKET-103 continuation
+scope of the same family still held a parked fiber — a genuine two-leaf deadlock on a main channel then
+HUNG instead of faulting at `CHEZZI_THREADS=1` (measured 7 of 60 runs on base). `SchedCore::owner_scope_done`
+now requires the WHOLE family done.
+
+Release binaries, `flat.chz` (200000-round-trip unbuffered channel ping-pong). Base =
+`/home/chezzijr/.cache/chezzi-target-128basemain/release/chezzi` (main at `1141a502`, pre-TICKET-128).
+Branch = `/home/chezzijr/.cache/chezzi-target-128impl/release/chezzi`. 10 runs per row, INTERLEAVED
+(base and branch alternated every round, not run in two separate blocks) so a rising load trend cancels
+between the two rather than biasing one side. `uptime` load average: batch start 3.55 (`T=2`) → batch
+end 15.19 (`default`, the last flat.chz batch) → 6.91 (end of `nested.chz` batch); load rose steadily
+through the whole run (background pipeline activity, not this ticket's binaries).
+
+| row | base median (range) | branch median (range) | ratio branch/base |
+|---|---|---|---|
+| `flat.chz`, `CHEZZI_THREADS=2` | 1.501 s (1.373–2.537) | 1.298 s (1.232–1.349) | 0.86x |
+| `flat.chz`, `CHEZZI_THREADS=8` | 3.893 s (3.655–4.060) | 1.369 s (1.357–1.422) | 0.35x |
+| `flat.chz`, default (28) workers | 11.231 s (10.888–12.377) | 1.369 s (1.334–1.413) | 0.12x |
+| `nested.chz`, default (28) workers | 4.111 s (3.968–4.204) | 7.920 s (7.559–8.141) | **1.93x** |
+
+**Ship criterion** (default-worker median ≤ 1.10x the same binary's `CHEZZI_THREADS=2` median): base
+11.231 / 1.501 = **7.48x** (the cliff); branch 1.369 / 1.298 = **1.06x** — met.
+
+**`nested.chz` regressed ~1.9x** (the flat ping-pong wrapped 4 deep in single-spawn `parallel:`
+nurseries, so 4 inline "owner" fibers share the one flat `MnSched` with the 2 real ping-pong workers).
+Re-measured with base/branch calls alternated per round specifically to rule out the batch's rising
+load as the cause — the gap holds either way (ranges do not overlap: base max 4.204 s < branch min
+7.559 s). Not root-caused; filed as **W13-26** in `docs/gaps.md` rather than fixed here, since the
+ticket's ship criterion and every human answer scoped this ticket to the flat two-task cliff only.
+Correctness on nested nurseries is unaffected — `chezzi_threads_cli`'s nested-nursery suite
+(`nested_deadlock_controls_hold_at_every_worker_count`,
+`threads_eight_scales_nested_eager_parallel_tasks_in_body`,
+`threads_stay_bounded_for_a_nursery_nested_in_a_spawned_task`,
+`cousin_fed_completes_at_every_worker_count`) all pass on the branch.
+
+Go twin (`/home/chezzijr/.cache/chezzi-perf118/go/main.go`, `sync.WaitGroup`, two unbuffered channels,
+same 200000 iterations), unchanged from the ticket's own filing: `GOMAXPROCS=2` 0.145 s, `=8` 0.197 s,
+`=28` 0.196 s — flat. Chezzi remains ~9x slower than Go at 2 workers even after this fix; closing that
+absolute gap stays out of scope (ticket Summary + 14:51Z human answer).

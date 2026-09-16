@@ -1034,6 +1034,95 @@ fn two_leaf_deadlock_on_a_main_channel_still_faults_at_every_worker_count() {
     );
 }
 
+/// W13-25 (TICKET-128) — a rendezvous wake must not wait for the woken receiver's blocking
+/// native. The sender's `for` loop finishes its three sends the moment the third receive
+/// happens; the receiver then burns CPU three times before finally blocking on `io.input`.
+/// A broadcast-only wake that files the woken sender behind the receiver's blocking native
+/// stalls "sender resumed" until stdin is provided.
+const RENDEZVOUS_WAKE_STALL: &str = "import std.io
+fn main():
+    ch := Channel[int](0)
+    parallel:
+        spawn:
+            for i in range(3):
+                ch.send(i)
+            print(\"sender resumed\")
+        spawn:
+            for i in range(3):
+                t := 0
+                for j in range(200000):
+                    t += j
+                v := ch.recv()
+            s := io.input(\"\")
+            print(\"got stdin\")
+main()
+";
+
+#[test]
+fn a_rendezvous_wake_does_not_wait_for_the_receivers_blocking_native() {
+    let dir = std::env::temp_dir().join(format!(
+        "chz-threads-128-runnext-stall-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("rendezvous_wake_stall.chz");
+    std::fs::write(&path, RENDEZVOUS_WAKE_STALL).expect("write program");
+
+    for threads in ["2", ""] {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
+        cmd.args(["run", path.to_str().unwrap()]);
+        if threads.is_empty() {
+            cmd.env_remove("CHEZZI_THREADS");
+        } else {
+            cmd.env("CHEZZI_THREADS", threads);
+        }
+        let mut child = cmd
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn chezzi");
+
+        let mut stdin = child.stdin.take().expect("child stdin");
+        let stdout = child.stdout.take().expect("child stdout");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::BufReader::new(stdout)
+                .lines()
+                .map_while(Result::ok)
+            {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+
+        loop {
+            match rx.recv_timeout(std::time::Duration::from_secs(20)) {
+                Ok(line) if line == "sender resumed" => break,
+                Ok(_) => continue,
+                Err(_) => panic!(
+                    "the woken sender waited for stdin (W13-25 runnext stall) at \
+                     CHEZZI_THREADS={threads}"
+                ),
+            }
+        }
+
+        use std::io::Write;
+        let _ = writeln!(stdin, "x");
+        drop(stdin);
+        let _ = reader.join();
+        let status = child.wait().expect("wait chezzi");
+        assert!(
+            status.success(),
+            "chezzi run {path:?} failed at CHEZZI_THREADS={threads}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// W13-6 (TICKET-125): two siblings each recover an inner deadlock, then fan in to the main body's
 /// `recv()` loop. Must print `t 2` and exit 0; hangs instead at `CHEZZI_THREADS=2`/default.
 const TWO_RECOVERERS_FAN_IN: &str = "fn main():

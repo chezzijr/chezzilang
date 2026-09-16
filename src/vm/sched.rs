@@ -1507,7 +1507,7 @@ impl Vm {
             // fiber that IS a genuine deadlock, and must be reported rather than hang.
             let tok = c.watch_demoted_cancel(self.demote_cancel_flags());
             drop(c);
-            sched.cv.notify_all();
+            sched.notify_waiters();
             tok
         };
         // TICKET-028 — arm this demoted receiver's presence guard for the whole block loop, then
@@ -1636,7 +1636,7 @@ impl Vm {
                     c.unregister_demoted(ptr);
                     c.unwatch_demoted_cancel(tok);
                     drop(c);
-                    sched.cv.notify_all();
+                    sched.notify_waiters();
                     return Err(sched.deadlock_err.clone());
                 }
             }
@@ -1685,7 +1685,7 @@ impl Vm {
             }
             let tok = c.watch_demoted_cancel(self.demote_cancel_flags());
             drop(c);
-            sched.cv.notify_all();
+            sched.notify_waiters();
             tok
         };
         // TICKET-028 — every arm reaching this fn is a RECV arm; arm one RecvWait per arm, then wake
@@ -1793,7 +1793,7 @@ impl Vm {
                     c.flag_deadlock(&sched.deadlock_err);
                     un_account(&mut c);
                     drop(c);
-                    sched.cv.notify_all();
+                    sched.notify_waiters();
                     return Err(sched.deadlock_err.clone());
                 }
             }
@@ -1853,7 +1853,7 @@ impl Vm {
             c.running -= 1;
             sched.inflight.fetch_add(1, Ordering::Relaxed);
             drop(c);
-            sched.cv.notify_all();
+            sched.notify_waiters();
         }
         // 2. Spin up a replacement worker ONCE per demoted thread (reuse the `self.demoted` coverage the
         //    recv demote sets — one spawn + one eventual exit per demoted thread regardless of how many
@@ -2141,7 +2141,7 @@ impl Vm {
             c.running -= 1;
             sched.inflight.fetch_add(1, Ordering::Relaxed);
             drop(c);
-            sched.cv.notify_all();
+            sched.notify_waiters();
         }
         if !self.demoted {
             if !self.spawn_replacement_worker(&sched, self.wid) {
@@ -2197,7 +2197,7 @@ impl Vm {
             c.register_guard_wait(key, self.guard_token);
             let tok = c.watch_demoted_cancel(self.demote_cancel_flags());
             drop(c);
-            sched.cv.notify_all();
+            sched.notify_waiters();
             tok
         };
         if !self.demoted {
@@ -2362,7 +2362,7 @@ impl Vm {
             //       `finish` themselves, which is a pre-existing scheduler-bug path (see
             //       `eager_joiner_runs_fibers`' own hazard note).
             if self.demoted {
-                sched.cv.notify_all();
+                sched.notify_waiters();
                 return;
             }
         }
@@ -2932,7 +2932,7 @@ impl Vm {
                 c.scopes[j].joins_blocked += 1;
             }
         }
-        owner.cv.notify_all();
+        owner.notify_waiters();
         Some(BlockedOwnerGuard {
             sched: owner,
             cross_sched,
@@ -6566,7 +6566,7 @@ pub(super) fn poke_live_scheds(sched_registry: &crate::vm::SchedRegistry) {
     drop(g);
     for s in live {
         drop(s.lock());
-        s.cv.notify_all();
+        s.notify_waiters();
     }
 }
 
@@ -6599,7 +6599,7 @@ impl Drop for BlockedOwnerGuard {
                 c.scopes[j].joins_blocked -= 1;
             }
         }
-        self.sched.cv.notify_all();
+        self.sched.notify_waiters();
     }
 }
 

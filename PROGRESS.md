@@ -7,6 +7,18 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-128 (2026-09-17) — a rendezvous wake hands off to the waker's own `runnext` instead of broadcasting: a flat two-task ping-pong no longer gets slower as the worker pool grows (W13-25).**
+  `MnSched::handoff_wake` files a single woken fiber in the waker's own `LocalQ.runnext` (Go's
+  `runnext` handoff) instead of requeuing to the global queue and `cv.notify_all()`-ing every idle
+  worker; idle workers with nothing runnable now sleep on a separate `idle_cv` so a handoff can
+  recruit exactly one sleeper (damped: a no-op while any worker is spinning) instead of broadcasting.
+  `try_steal` won't take a `runnext` younger than `HANDOFF_GRACE` (200µs). `flat.chz`, 10 interleaved
+  runs: default-worker/`CHEZZI_THREADS=2` ratio went from 7.48x (the cliff) to 1.06x (ship bound
+  1.10x). Also fixed: a scope-scoped drainer used to stop when its OWN scope was done even while a
+  TICKET-103 continuation scope of the same family still held a parked fiber, hanging a genuine
+  two-leaf deadlock instead of faulting it at `CHEZZI_THREADS=1` (7 of 60 runs on base). Filed as
+  **W13-26**, not fixed here: this same change regresses `nested.chz` (4-deep nested nurseries around
+  the same ping-pong) ~1.9x at the default worker count — see `docs/gaps.md`.
 - **TICKET-126 (2026-09-16) — TICKET-118's idle-path cost removed: an unbuffered ping-pong at the default worker count is back within 5% of the pre-TICKET-118 binary (W13-24).**
   A process-wide `CANCEL_GEN` counter (`src/vm/mod.rs`), bumped `Release` by the sole production
   cancel-flag setter `trip_cancel_flag` and read `Acquire` by the new `SchedCore::drain_scan_due`,
@@ -49,9 +61,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
   per worker count: `d2a`/`d2d`/`g3` false-faulted 37/32/31, 23/36/31, 24/30 (at T=2/4/T=2) on base,
   0/60 at every count on the fix; `b1`/`j2`/`two_leaf` controls stayed 30/30 faulting, `a1b`/`cousin_fed`
   stayed 20/20 clean. The pre-existing, NOT-owned-by-this-ticket `two_leaf` hang at `CHEZZI_THREADS=1`
-  (filed as `docs/gaps.md` **W13-26**, OPEN) is unaffected: a temporary trace showed its hangs never
-  reach the new `may_fault_unproven` path, and an interleaved comparative sample put the fix's hang rate
-  at or below base's (18/280 vs 29/280).
+  is unaffected: a temporary trace showed its hangs never reach the new `may_fault_unproven` path, and
+  an interleaved comparative sample put the fix's hang rate at or below base's (18/280 vs 29/280). That
+  hang is closed separately by TICKET-128 under `docs/gaps.md` **W13-25**.
 - **TICKET-124 (2026-09-16) — the expected-type / untyped-constant widening TICKET-106 wired into one sink now reaches its neighbours: a generic ctor's own hint, a nested ctor argument, a reassignment/index-assign/field-assign target, and a `float`-slot collection-method argument; plus a check-OK container format spec (W13-12/13/14/15/18).**
   W13-12: `widen_mixed_numeric_args` (`src/checker/proto.rs`) grew a `want: Option<&HashMap>` — a
   turbofish or a ctor's own expected-type hint via the new `hint_want` — beside its existing

@@ -4328,6 +4328,52 @@ fn schedule_pulls_global_every_61st_tick() {
     assert_eq!(got, 0, "non-periodic tick drains the own local first");
 }
 
+/// TICKET-128 (W13-25) — the periodic global pull (step 0 of `take_runnable`) can run a global
+/// fiber AHEAD of this worker's own `runnext`. That global fiber may block its thread in a
+/// `Kind::Inline` native, so step 0 must recruit an idle worker to steal the skipped `runnext` —
+/// otherwise nobody is left to run it (the W13-25 send-side stall).
+#[test]
+fn a_periodic_global_pull_recruits_a_worker_for_the_skipped_runnext() {
+    let sched = Arc::new(mk_sched(2));
+    {
+        let mut lq = sched.lock_local(0);
+        lq.runnext = Some(mk_fiber(0));
+        lq.runnext_at = Some(std::time::Instant::now());
+    }
+    sched.runnable.fetch_add(1, Ordering::Relaxed);
+    sched.seed(vec![mk_fiber(1)]);
+
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (woken_tx, woken_rx) = std::sync::mpsc::channel();
+    let s = Arc::clone(&sched);
+    std::thread::spawn(move || {
+        let mut c = s.lock();
+        s.idle_sleepers.fetch_add(1, Ordering::Relaxed);
+        ready_tx.send(()).unwrap();
+        c = s.idle_cv.wait(c).unwrap_or_else(|e| e.into_inner());
+        s.idle_sleepers.fetch_sub(1, Ordering::Relaxed);
+        drop(c);
+        woken_tx.send(()).unwrap();
+    });
+    ready_rx.recv().unwrap();
+
+    let got = match sched.take_runnable(0, GLOBAL_CHECK_INTERVAL, SENTINEL_SCOPE) {
+        Take::Run(f) => f.task_index,
+        Take::Stop => panic!("expected a runnable fiber"),
+    };
+    assert_eq!(got, 1, "step 0 must run the global fiber ahead of runnext");
+    assert!(
+        sched.lock_local(0).runnext.is_some(),
+        "the runnext must still be there, unstolen"
+    );
+    assert!(
+        woken_rx
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .is_ok(),
+        "step 0 ran a global fiber ahead of a runnext and recruited nobody (W13-25 send-side stall)"
+    );
+}
+
 /// D4c: a thief never steals from itself and skips empty victims (returns nothing when only its
 /// own local has work).
 #[test]
@@ -4341,6 +4387,27 @@ fn steal_skips_self_and_empty_victims() {
     assert!(
         sched.try_steal(0).is_empty(),
         "no sibling has work; must not steal from self"
+    );
+}
+
+/// TICKET-128 (W13-25) — a `runnext` younger than `HANDOFF_GRACE` is not stealable, so an idle
+/// worker cannot snatch a rendezvous partner before the waker parks; once the grace elapses it
+/// IS stealable, so a fiber stranded there is never permanently unreachable.
+#[test]
+fn try_steal_leaves_a_fresh_runnext_until_the_handoff_grace_elapses() {
+    let sched = mk_sched(0);
+    sched.lock_local(1).runnext = Some(mk_fiber(0));
+    sched.lock_local(1).runnext_at =
+        Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+    assert!(
+        sched.try_steal(0).is_empty(),
+        "a fresh runnext must not be stolen"
+    );
+    sched.lock_local(1).runnext_at = Some(std::time::Instant::now() - HANDOFF_GRACE * 2);
+    assert_eq!(
+        sched.try_steal(0).len(),
+        1,
+        "a runnext older than HANDOFF_GRACE must become stealable"
     );
 }
 
@@ -4370,6 +4437,30 @@ fn mnsched_park_then_wake_requeues_fiber() {
     let g = take_run(&sched);
     assert_eq!(g.task_index, 0);
     assert!(matches!(g.state, FiberState::Ready));
+}
+
+/// TICKET-128 (W13-25) — a rendezvous wake that wakes exactly ONE fiber files it in the WAKER's
+/// own `LocalQ.runnext` (Go's `runnext` handoff) instead of the global queue, so the pair stays
+/// on one worker and no broadcast is needed.
+#[test]
+fn handoff_wake_files_one_woken_fiber_in_the_wakers_runnext() {
+    let sched = mk_sched(2);
+    let core = empty_core();
+    let key = core_key(&core);
+    sched.seed(vec![mk_fiber(0), mk_fiber(1)]);
+    let f0 = take_run(&sched);
+    let _f1 = take_run(&sched);
+    sched.park(key, Arc::clone(&core), f0);
+    sched.handoff_wake(key, &core, WakeKind::All, 1, true, false);
+    assert!(
+        sched.lock_local(1).runnext.is_some(),
+        "the woken fiber must land in worker 1's runnext"
+    );
+    assert!(
+        sched.lock().global.is_empty(),
+        "the woken fiber must not also sit in the global queue"
+    );
+    assert_eq!(sched.runnable.load(Ordering::Relaxed), 1);
 }
 
 /// D3/U: a fiber that exhausts its reduction budget `yield_fiber`s — the scheduler frees the
@@ -8905,6 +8996,25 @@ fn inject_or_extend_opens_a_continuation_when_the_target_is_not_last() {
     }
     assert_eq!(s.inject_or_extend(mk_pending_fiber(0), 3), None);
     assert_eq!(s.lock().scopes[3].total, 2);
+}
+
+/// TICKET-128 — a scope-scoped owner stop must wait for every continuation scope of its family,
+/// not just the origin scope.
+#[test]
+fn owner_stop_waits_for_every_continuation_scope_of_its_family() {
+    let s = mk_sched(1);
+    let tok = Arc::new(AtomicBool::new(false));
+    let s1 = s.register_scope(1, Arc::clone(&tok), Vec::new());
+    let _s2 = s.register_scope(0, Arc::new(AtomicBool::new(false)), Vec::new());
+    assert_eq!(s.inject_or_extend(mk_pending_fiber(0), s1), Some(3));
+    let mut c = s.lock();
+    c.scopes[s1].done = 1;
+    assert!(
+        !c.owner_scope_done(s1),
+        "continuation scope 3 is still running"
+    );
+    c.scopes[3].done = 1;
+    assert!(c.owner_scope_done(s1));
 }
 
 /// TICKET-103 fixture `S1`: owner A (slot 0, scope 0) join-parked on scope `s1`, whose one task C
