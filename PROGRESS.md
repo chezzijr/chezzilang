@@ -7,6 +7,16 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-130 (2026-09-17) — a peer sched's `wake_key` no longer broadcasts on an empty drain: a nested ping-pong no longer gets slower as the worker pool grows (W13-26).**
+  `wake_run_wide` calls `MnSched::wake_key` on every OTHER live sched once per channel wake; `wake_key`
+  used to call `notify_waiters()` unconditionally, so a 4-deep nested `parallel: spawn:` ping-pong
+  broadcast `idle_cv` to 4 peer eager scheds' idle workers on every one of 200,000 round trips even
+  though their bucket for that key was always empty (3,199,996 `wake_key` calls, 3,178,667 idle-worker
+  sleeps at `CHEZZI_THREADS=8`). The filed W13-25 suspect (a handoff stolen out of a shared `runnext`
+  slot) measured false — zero steals. `wake_key` now notifies only when its drain requeued a fiber.
+  `nested.chz`, 10 interleaved release runs: default-worker branch median 1.582 s, no longer slower
+  than base's 4.122 s (was ~1.9x slower). `flat.chz`'s default/`CHEZZI_THREADS=2` ratio held at 1.086x
+  (ship bound 1.10x), so TICKET-128's win was not spent.
 - **TICKET-128 (2026-09-17) — a rendezvous wake hands off to the waker's own `runnext` instead of broadcasting: a flat two-task ping-pong no longer gets slower as the worker pool grows (W13-25).**
   `MnSched::handoff_wake` files a single woken fiber in the waker's own `LocalQ.runnext` (Go's
   `runnext` handoff) instead of requeuing to the global queue and `cv.notify_all()`-ing every idle
@@ -17,8 +27,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
   1.10x). Also fixed: a scope-scoped drainer used to stop when its OWN scope was done even while a
   TICKET-103 continuation scope of the same family still held a parked fiber, hanging a genuine
   two-leaf deadlock instead of faulting it at `CHEZZI_THREADS=1` (7 of 60 runs on base). Filed as
-  **W13-26**, not fixed here: this same change regresses `nested.chz` (4-deep nested nurseries around
-  the same ping-pong) ~1.9x at the default worker count — see `docs/gaps.md`.
+  **W13-26**: this same change regressed `nested.chz` (4-deep nested nurseries around the same
+  ping-pong) ~1.9x at the default worker count. Closed under TICKET-130 — see above.
 - **TICKET-126 (2026-09-16) — TICKET-118's idle-path cost removed: an unbuffered ping-pong at the default worker count is back within 5% of the pre-TICKET-118 binary (W13-24).**
   A process-wide `CANCEL_GEN` counter (`src/vm/mod.rs`), bumped `Release` by the sole production
   cancel-flag setter `trip_cancel_flag` and read `Acquire` by the new `SchedCore::drain_scan_due`,

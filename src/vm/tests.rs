@@ -4463,6 +4463,81 @@ fn handoff_wake_files_one_woken_fiber_in_the_wakers_runnext() {
     assert_eq!(sched.runnable.load(Ordering::Relaxed), 1);
 }
 
+/// TICKET-130 (W13-26) — `wake_key` on a sched whose bucket for `key` holds NO fiber changes no
+/// counter that sched's workers read, so it must not wake them. `wake_run_wide` calls `wake_key` on
+/// every peer sched once per wake; with an unconditional `notify_waiters` a four-deep nested
+/// ping-pong woke every idle worker of four peer eager scheds on every message.
+#[test]
+fn wake_key_on_an_empty_bucket_does_not_wake_an_idle_sleeper() {
+    let sched = Arc::new(mk_sched(2));
+    let core = empty_core();
+    let key = core_key(&core);
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (woken_tx, woken_rx) = std::sync::mpsc::channel();
+    let s = Arc::clone(&sched);
+    std::thread::spawn(move || {
+        let mut c = s.lock();
+        s.idle_sleepers.fetch_add(1, Ordering::Relaxed);
+        ready_tx.send(()).unwrap();
+        c = s.idle_cv.wait(c).unwrap_or_else(|e| e.into_inner());
+        s.idle_sleepers.fetch_sub(1, Ordering::Relaxed);
+        drop(c);
+        woken_tx.send(()).unwrap();
+    });
+    ready_rx.recv().unwrap();
+    sched.wake_key(key, WakeKind::All);
+    assert!(
+        woken_rx
+            .recv_timeout(std::time::Duration::from_millis(200))
+            .is_err(),
+        "wake_key drained an empty bucket and still woke an idle worker (W13-26 peer-sched broadcast)"
+    );
+    sched.notify_waiters();
+    assert!(
+        woken_rx
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .is_ok(),
+        "the sleeper must still answer a real notify_waiters"
+    );
+}
+
+/// TICKET-130 (W13-26) — the other half of `wake_key`'s contract: a drain that DID requeue a parked
+/// fiber must still wake an idle worker to run it, or that fiber sits in `global` with nobody awake.
+#[test]
+fn wake_key_that_requeues_a_parked_fiber_still_wakes_an_idle_sleeper() {
+    let sched = Arc::new(mk_sched(2));
+    let core = empty_core();
+    let key = core_key(&core);
+    sched.seed(vec![mk_fiber(0)]);
+    let f0 = take_run(&sched);
+    sched.park(key, Arc::clone(&core), f0);
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (woken_tx, woken_rx) = std::sync::mpsc::channel();
+    let s = Arc::clone(&sched);
+    std::thread::spawn(move || {
+        let mut c = s.lock();
+        s.idle_sleepers.fetch_add(1, Ordering::Relaxed);
+        ready_tx.send(()).unwrap();
+        c = s.idle_cv.wait(c).unwrap_or_else(|e| e.into_inner());
+        s.idle_sleepers.fetch_sub(1, Ordering::Relaxed);
+        drop(c);
+        woken_tx.send(()).unwrap();
+    });
+    ready_rx.recv().unwrap();
+    sched.wake_key(key, WakeKind::All);
+    assert_eq!(
+        sched.runnable.load(Ordering::Relaxed),
+        1,
+        "wake_key must requeue the parked fiber"
+    );
+    assert!(
+        woken_rx
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .is_ok(),
+        "wake_key requeued a parked fiber and woke no idle worker to run it"
+    );
+}
+
 /// D3/U: a fiber that exhausts its reduction budget `yield_fiber`s — the scheduler frees the
 /// worker (`running--`) and requeues it at the **tail** of `runq` (round-robin), still `Ready`.
 /// No park bucket is touched (a yield carries no channel handle). Mirrors the park/wake test.

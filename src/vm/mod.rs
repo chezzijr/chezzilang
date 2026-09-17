@@ -4217,8 +4217,8 @@ impl MnSched {
     /// prunes the dead entries, then DROPS the registry lock before touching any sched core (registry
     /// then core, R then A — the same order [`Vm::wake_on_send_key`] already uses); the caller must
     /// hold no sched core lock and no `ChannelCore::q` when this runs. `wake_key` takes each peer's OWN
-    /// core lock in turn, so no two sched cores are ever held at once (no ABBA). An over-wake (a peer's
-    /// bucket is empty → its fiber just re-parks) is the already-tolerated pattern.
+    /// core lock in turn, so no two sched cores are ever held at once (no ABBA). A peer whose bucket is
+    /// empty is not notified at all (TICKET-130, see `wake_key`).
     fn wake_run_wide(&self, key: usize, kind: WakeKind) {
         let mut g = self
             .sched_registry
@@ -4237,15 +4237,26 @@ impl MnSched {
         }
     }
 
-    /// Drain this sched's `parked` bucket for `key` and notify its workers — one link of
-    /// [`MnSched::wake_run_wide`], also used by the W7-56 registry walk in [`Vm::wake_on_send`]
-    /// (an eager `Executor` job holds no sched, so it reaches a parked fiber only this way). Takes
-    /// the core lock itself, so the caller must hold NO sched core lock and no `ChannelCore::q`.
+    /// Drain this sched's `parked` bucket for `key` and, when that requeued at least one fiber,
+    /// notify its workers — one link of [`MnSched::wake_run_wide`], also used by the W7-56 registry
+    /// walk in [`Vm::wake_on_send`] (an eager `Executor` job holds no sched, so it reaches a parked
+    /// fiber only this way). Takes the core lock itself, so the caller must hold NO sched core lock
+    /// and no `ChannelCore::q`.
+    ///
+    /// TICKET-130 (W13-26) — a drain that requeued NO fiber changes no `runnable`/`parked_n`/`global`
+    /// a worker of this sched reads, so it notifies nobody. `wake_run_wide` calls this on every peer
+    /// sched once per wake, and the old unconditional `notify_waiters` woke every idle worker of
+    /// every peer on every rendezvous message: a ping-pong nested four `parallel:` levels deep went
+    /// from ~1.6 s to ~7.7 s at 8 workers. Skipping it is live because every parker re-checks the
+    /// channel under this same core lock (`park`, `park_send`, `park_wait`): a racing fiber is either
+    /// already in the bucket (`n > 0`, notified here) or sees the new state and requeues itself.
     fn wake_key(&self, key: usize, kind: WakeKind) {
         let mut c = self.lock();
-        self.wake_bucket(&mut c, key, kind);
+        let n = self.wake_bucket(&mut c, key, kind);
         drop(c);
-        self.notify_waiters();
+        if n > 0 {
+            self.notify_waiters();
+        }
     }
 
     fn send_wake(&self, key: usize, core: &Arc<ChannelCore>, w: WireValue) {

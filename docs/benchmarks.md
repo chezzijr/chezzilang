@@ -2354,6 +2354,7 @@ Re-measured with base/branch calls alternated per round specifically to rule out
 load as the cause — the gap holds either way (ranges do not overlap: base max 4.204 s < branch min
 7.559 s). Not root-caused; filed as **W13-26** in `docs/gaps.md` rather than fixed here, since the
 ticket's ship criterion and every human answer scoped this ticket to the flat two-task cliff only.
+Root-caused and fixed under TICKET-130 — see the W13-26 section below.
 Correctness on nested nurseries is unaffected — `chezzi_threads_cli`'s nested-nursery suite
 (`nested_deadlock_controls_hold_at_every_worker_count`,
 `threads_eight_scales_nested_eager_parallel_tasks_in_body`,
@@ -2364,3 +2365,36 @@ Go twin (`/home/chezzijr/.cache/chezzi-perf118/go/main.go`, `sync.WaitGroup`, tw
 same 200000 iterations), unchanged from the ticket's own filing: `GOMAXPROCS=2` 0.145 s, `=8` 0.197 s,
 `=28` 0.196 s — flat. Chezzi remains ~9x slower than Go at 2 workers even after this fix; closing that
 absolute gap stays out of scope (ticket Summary + 14:51Z human answer).
+
+## W13-26 — a peer sched's empty wake no longer broadcasts (2026-09-17)
+
+**Cause.** W13-25's filed diagnosis (a rendezvous handoff filed into the WAKER's own `runnext` gets
+stolen after `HANDOFF_GRACE`) measured false: zero `runnext` steals, every handoff popped by its own
+worker. The real cause is `MnSched::wake_run_wide` (`src/vm/mod.rs`), which calls `wake_key` on every
+OTHER live sched once per channel wake. `nested.chz`'s four inline `parallel: spawn:` nursery owners
+each publish their own eager sched, so every one of the 200,000 round trips called `wake_key` on 4 peer
+scheds whose bucket for that key is always empty — and `wake_key` called `notify_waiters()`
+unconditionally, broadcasting `idle_cv` and waking every idle worker of every peer sched to find
+nothing runnable and re-park. Counted on the release binary at `1d83edef`: 3,199,996 `wake_key` calls
+and 3,178,667 idle-worker sleeps for 200,000 round trips at `T=8`, none of them from a stolen handoff.
+
+**Fix.** `wake_key` now notifies only when its bucket drain requeued at least one fiber (`src/vm/mod.rs`,
+`MnSched::wake_key`). Live because every parker (`park`, `park_send`, `park_wait`) re-checks channel
+state under the same core lock `wake_key` takes: a racing fiber is either already in the bucket (which
+still notifies) or sees the new state and requeues itself with its own notify.
+
+**Measured (release binaries, 10 interleaved rounds, `uptime` load 9.26→9.39 during the run, box also
+running a sibling ticket's suite):**
+
+| row | base median (range) | branch median (range) |
+|---|---|---|
+| `nested.chz`, `CHEZZI_THREADS=2` | 3.426 s (3.331–3.613) | 1.376 s (1.316–1.526) |
+| `nested.chz`, default workers | 4.122 s (4.050–4.299) | 1.582 s (1.485–1.619) |
+| `flat.chz`, `CHEZZI_THREADS=2` | 1.538 s (1.453–1.861) | 1.278 s (1.208–1.332) |
+| `flat.chz`, default workers | 10.759 s (10.592–11.557) | 1.387 s (1.361–1.504) |
+
+**Ship criteria:** `nested.chz` default-worker branch median (1.582 s) is no slower than base
+(4.122 s) — met, and faster. `flat.chz` default-worker branch median (1.387 s) stays at most 1.10x its
+own `CHEZZI_THREADS=2` branch median (1.278 s x 1.10 = 1.406 s) — met at 1.086x, TICKET-128's win held.
+`flat.chz`'s base row stays slow at default workers (10.759 s) because base predates TICKET-128; that
+row is not a criterion, only a sanity check that the fixture still reproduces the pre-128 cliff.
