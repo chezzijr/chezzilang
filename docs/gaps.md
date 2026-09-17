@@ -12871,7 +12871,7 @@ are the SAME widening missing at a neighbour sink (qualified head, ctor arm, nes
 | ~~**W13-3**~~ | P1 | scheduler | A genuine nested deadlock HANGS at T>=2 whenever the main body AND a nested owner body are both channel-parked (`never.recv()` at depth 0 and depth 1, leaf at depth 2): T=1 faults 5/5, T=2/default rc=124 5/5. Go `all goroutines are asleep`. Drop the main-body recv → faults in ms at every count. The Executor-job twins of the `exec_join` row (CLOSED 2026-09-16, TICKET-125) hang the same way, so `exec_join` needs no Executor. Repro below | CLOSED 2026-09-15 (TICKET-117); W13-4, W13-5, W13-6 and the exec_join row moved to TICKET-125 |
 | ~~**W13-4**~~ | P1 | scheduler | Mirror at T=1: a genuine deadlock whose ONLY channel-parked owner is at depth 3+ hangs (rc=124 5/5) while T>=2 faults 5/5; depth 2 faults everywhere. `chezzi test --timeout=300` does not reach it at T=1 (20 s, vs `TIMED-OUT` at 311 ms for a sleeping child). Go `GOMAXPROCS=1` faults. Repro below | CLOSED 2026-09-16 (TICKET-125) |
 | ~~**W13-5**~~ | P1 | scheduler | W12-4 aftermath, cousin variant: a task that RECOVERS a genuine inner-nursery deadlock and then feeds a COUSIN whose owner sits at its join is false-faulted `deadlock: every task in this parallel: block is blocked` — judge 4/5 at T=2 and default, hunter 5/5 at T=1/4. Go `err / cousin got 5 / done`. `cousin_fed` (cousin body on `recv`) is 20/20 clean; the join-body cousin is the shape TICKET-112 did not cover. Also with a recovered `panic("boom")` instead of a deadlock (T=2 4/5). Repro below | CLOSED 2026-09-16 (TICKET-129, on top of TICKET-125's T=1 fix): see the W13-5-at-T>=2 residual below |
-| **W13-6** | P1 | scheduler | TWO siblings that each recover an inner deadlock and then fan in to the main body's `recv` HANG at T>=2 (rc=124 5/5 at N=2, 5, 20, 100); T=1 completes `t 2` 5/5. Same two recovers without the fan-in: clean; ONE task recovering twice: clean. Go `done`. Repro below | OPEN — TICKET-125 tried handing this owner's worker to a replacement (`spawn_replacement_worker_holding` + a `NestedDrainerSlot`); it fixed T=2 but false-faulted at T=4 (measured 2/8), so reverted per its own rollback. TICKET-127 then re-tried the same mechanism and false-faulted `i6n2` 4/5 at T=4 on the DEBUG binary, and is closed as escalated with its evidence on branch `ticket/127`. Now owned by **TICKET-131**, which BANS that mechanism and points at Go's shape: a blocking owner releases its worker slot |
+| **W13-6** | P1 | scheduler | TWO siblings that each recover an inner deadlock and then fan in to the main body's `recv` HANG at T>=2 (rc=124 5/5 at N=2, 5, 20, 100); T=1 completes `t 2` 5/5. Same two recovers without the fan-in: clean; ONE task recovering twice: clean. Go `done`. Repro below | OPEN — BLOCKED on DEC-103's two inline waits (TICKET-131, 2026-09-17). TICKET-125 (2/8 false faults at T=4, release) and TICKET-127 (4/5, debug; closed as superseded, evidence on branch `ticket/127`) tried a replacement worker (`spawn_replacement_worker_holding` + a `NestedDrainerSlot`) and reverted it; do not re-attempt. Mechanism identified: release the worker at the nested join — `src/vm/exec.rs:1906` `let eager = self.mn.is_none() \|\| worker_count() >= 2;` becomes `let eager = self.mn.is_none();`, so the owner parks (`Disp::JoinPark`, the TICKET-103 path T=1 already uses). On the debug binary that fixes `i6n2` (`t 2` rc=0 5/5 at T=1, 2, 4, default; base rc=124 at T>=2) with the guard set unchanged. It is NOT safe yet: it makes two inline waits reachable at T>=2 — `abort_fiber_owned_nursery` (`src/vm/sched.rs`, `mn_worker_loop` + `wait_for_scope` when a body escapes its nursery) and a join under `native_reentry > 0` (a nursery inside `list.map`) — and an inline waiter can pop its own ancestor from the global queue. Debug, base vs patched interleaved, 12 runs per count, hangs: `nat_anc` T=2 1/12 → 12/12, T=4 0 → 3, default 0 → 1; `esc_anc` T=2 0 → 7, T=4 0 → 0, default 0 → 3; no run faulted. Land a parking abort + parking native-callback join first (DEC-103's prescription), bring both repros to base rates, then apply the predicate change |
 | ~~**W13-7**~~ | P1 | Executor | CLOSED 2026-09-16 (TICKET-118). An Executor job parked at a NURSERY join whose child is channel-blocked pins its pool thread at T=1, so a sibling job that would feed it never starts (rc=124 5/5; T>=2 `j1 got 1 / done` 5/5). `docs/concurrency.md:1805` (TICKET-052) promises "a blocked job no longer pins its pool thread … fixed for every shape above" — the yield bracket fires for a job blocked ON a channel, not for a job whose nursery child is. Go `GOMAXPROCS=1` completes. Repro below | — |
 | ~~**W13-8**~~ | P1 | Executor | CLOSED 2026-09-16 (TICKET-118). `shutdown_now()` does not cancel a job's nursery child parked on `recv`: depth 1 → false `deadlock` fault at every count (5/5); depth 2 → T=1 fault, T>=2 rc=124. Job itself on `never.recv()` (no nursery) → `awake / done` 20/20. Doc: `shutdown_now()` "ask running jobs to stop at their next cancellation point" and `recv` IS a cancellation point. Go `select`+`cancel()` completes. Repro below | — |
 | ~~**W13-9**~~ | P1 | airlock | A module global nested ≥5 000 deep makes EVERY nursery open take ~22 s before the (correct, recoverable) `maximum structural depth (10000) exceeded` fault — measured 21.6 s at every count; depth 4 500 crosses in 0.04 s; the SAME chain as a captured LOCAL faults in 0.04 s. Constant ~22 s once the cap trips (quadratic walk on the module-snapshot failure path). Looks like a hang under any timeout ≤20 s | CLOSED 2026-09-15, TICKET-119: `to_snap_depth` now skips a speculative attempt already proven, by an exact-replay argument, to overflow the same way again — 5000/8000-deep chains now fault in 0.05 s (was 20.4/20.3 s) |
@@ -13062,6 +13062,77 @@ then false-faulted at T=2 in the full suite — reverted per the Rollback sectio
 `w13_6_two_recoverers_fan_in_completes_at_thread_two` (from TICKET-117's triage) stays red at T=2 on
 this binary; it is `#[ignore]`d with reason `"TICKET-125 residual: W13-6 at T>=2 — see docs/gaps.md"`
 so `cargo test --test chezzi_threads_cli` reports `0 failed`, and tracked here as the residual.
+
+**Blocked on a prerequisite (TICKET-131, 2026-09-17).** Parking the owner at every worker count
+(`let eager = self.mn.is_none();` at `src/vm/exec.rs:1906`) fixes `i6n2` but widens DEC-103's
+inline-wait hang residual from T=1 to T>=2 (rates in the W13-6 row; debug, base and patched
+interleaved, `timeout 15`, 12 runs per count). `esc_anc.chz` escapes a nested `parallel:` with
+`return` (`abort_fiber_owned_nursery`); `nat_anc.chz` joins a nursery inside `[1].map(leaf)`
+(`native_reentry > 0`). After a parking abort and a parking native-callback join land, both must sit
+at base rates before the predicate change goes on top.
+
+`esc_anc.chz` (base 0/12 hangs at T=2, patched 7/12):
+
+    fn burn(n: int) -> int:
+        x := 0
+        i := 0
+        while i < n:
+            x = x + i * i - i
+            i += 1
+        return x
+
+    fn inner() -> int:
+        parallel:
+            spawn: burn(2000000)
+            return 1
+        return 0
+
+    fn outer() -> int:
+        parallel:
+            spawn: inner()
+            burn(300000)
+            return 2
+        return 0
+
+    fn main():
+        parallel:
+            spawn: outer()
+            spawn: outer()
+        print("done")
+    main()
+
+`nat_anc.chz` (base 1/12 hangs at T=2, patched 12/12):
+
+    fn burn(n: int) -> int:
+        x := 0
+        i := 0
+        while i < n:
+            x = x + i * i - i
+            i += 1
+        return x
+
+    fn leaf(x: int) -> int:
+        parallel:
+            spawn: burn(2000000)
+        return x
+
+    fn inner() -> int:
+        r := [1].map(leaf)
+        return r[0]
+
+    fn outer() -> int:
+        parallel:
+            spawn: inner()
+            burn(300000)
+            return 2
+        return 0
+
+    fn main():
+        parallel:
+            spawn: outer()
+            spawn: outer()
+        print("done")
+    main()
 
 ### W13-7 / W13-8 repros (P1)
 
