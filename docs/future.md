@@ -449,13 +449,6 @@ were mandatory — see the correction under them.
    worker's sched rather than run eagerly there when `worker_count() < 2` — but it is no longer the
    thing holding the nesting-depth bound.
 
-   **Removed (TICKET-131, 2026-09-17).** The clause is gone: `EnterNursery` reads `let eager =
-   self.mn.is_none();`. A nursery inside a spawned task never builds a private sched and never takes a
-   `NestedDrainerSlot`; it registers a fiber-owned scope on the task's own sched, adding no thread, and
-   its owner parks at the join at every worker count (TICKET-103's path). The clause's blocking private
-   join was W13-6's hang: two recoverers fanning in to an open body. It could only go after TICKET-132
-   parked the escape abort.
-
 9. **`Op::EnterNursery` is `#[inline(never)]`** (`Vm::op_enter_nursery`). The arm grew from three
    lines to a page, and `run_until`'s hot loop pays for every arm's code size whether it is reached or
    not: `benches/loop.chz` executes no nursery opcode at all and still measured **+3.1%** inline

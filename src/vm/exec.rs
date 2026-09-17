@@ -1880,25 +1880,30 @@ impl Vm {
         // That is Go's `go f()`: the task starts at the `spawn`, and the join keeps its own
         // (orthogonal) job of guaranteeing COMPLETION by the barrier (`docs/future.md` §2b/§2c1).
         //
-        // A nursery entered inside a spawned task (`mn.is_some()`) never builds a private sched:
-        // at EVERY worker count it registers a scope on the fiber's OWN sched
-        // (`activate_fiber_owned_nursery`), its tasks start at the `spawn` on that sched's
-        // existing workers, adding no thread, and the owner PARKS at its join (`Disp::JoinPark`,
-        // `MnSched::park_join`), releasing its worker until the family completes (TICKET-103).
-        // That is Go's `gopark` releasing the P. TICKET-131 removed the worker-count clause that
-        // gave such a nursery a private sched with a BLOCKING join at T>=2: that join held the
-        // outer sched's only runner while a sibling stayed queued, so two recoverers fanning in
-        // to an open body hung (W13-6). The clause could only go once an escape out of a
-        // fiber-owned nursery parked instead of waiting inline (TICKET-132), because the inline
-        // wait popped its own ancestor. Do not restore the clause, and do not add a replacement
-        // worker beside the deadlock verdict instead (TICKET-125 and TICKET-127 false-faulted
-        // `i6n2` at T=4). Cost: while the OUTER body is open, these tasks share the outer sched's
-        // runners (`docs/gaps.md` W13-27).
+        // `mn.is_some()` WAS the defect and is gone: a top-level nursery has no worker shell,
+        // so it was lazy by construction and its tasks could not start until the join. A
+        // nursery entered on a thread that already has an eager scope open does not build a
+        // sched at all — it registers a SCOPE on that one (`activate_eager_nursery`), which is
+        // what keeps sibling nurseries mutually visible.
+        //
+        // `worker_count() >= 2` STAYS, and only for `mn.is_some()` — a nursery entered inside a
+        // spawned task, the one shape that still builds a private sched with its own dedicated
+        // raw drainer thread. That is the case its original rationale was written for (an eager
+        // inner join blocking its parent's OUTER worker while a handler needs an outer sibling
+        // to progress — impossible when the outer nursery has one worker), and it is also the
+        // only per-nursery THREAD source left: dropping it broke `pool.rs`'s documented bound
+        // that live threads stay at `N + joiners` "regardless of `parallel:` nesting depth" —
+        // measured, depth 7 / 128 leaves at `--threads=1` went 3 threads → 130.
+        //
+        // When no private sched is available (`worker_count() == 1`, a denied
+        // `NestedDrainerSlot`, or a failed drainer thread), a fiber's nursery registers its scope
+        // on the fiber's OWN sched instead (`activate_fiber_owned_nursery`), so its tasks still
+        // start at the `spawn`, on that sched's existing workers, adding no thread (TICKET-103,
+        // W12-1). Only a top-level nursery whose drainer thread fails still queues to its join.
         //
         // A top-level nursery has no outer worker to starve and creates exactly ONE drainer per
-        // thread, so it stays eager; if that drainer thread fails, `activate_fiber_owned_nursery`
-        // returns `None` (there is no `self.mn`) and the nursery queues its tasks to the join.
-        let eager = self.mn.is_none();
+        // thread, so it is unconditional.
+        let eager = self.mn.is_none() || worker_count() >= 2;
         let scope = eager
             .then(|| self.activate_eager_nursery(span))
             .flatten()

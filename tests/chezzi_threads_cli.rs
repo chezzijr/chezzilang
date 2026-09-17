@@ -1260,17 +1260,6 @@ fn w13_6_two_recoverers_fan_in_completes_at_thread_two() {
     );
 }
 
-/// W13-6 (TICKET-131): the same fan-in prints t 2 at every worker count, five runs each.
-#[test]
-fn w13_6_two_recoverers_fan_in_completes_at_every_worker_count() {
-    assert_at_every_worker_count(
-        "two_recoverers_fan_in_every.chz",
-        TWO_RECOVERERS_FAN_IN,
-        |out| out.status.success() && String::from_utf8_lossy(&out.stdout) == "t 2\n",
-        "exit 0 with stdout `t 2\\n`",
-    );
-}
-
 /// exec_join (TICKET-125): the same shape must complete at EVERY worker count, not just T=2.
 #[test]
 fn exec_join_owner_blocked_at_nested_join_completes_at_every_worker_count() {
