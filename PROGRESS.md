@@ -7,6 +7,20 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-131 (2026-09-17) — a nursery inside a spawned task parks its owner at its join at every worker count, so two recoverers fanning in to the main body no longer hang at CHEZZI_THREADS>=2 (W13-6).**
+  `src/vm/exec.rs`'s `EnterNursery` gate is now `let eager = self.mn.is_none();` (was
+  `self.mn.is_none() || worker_count() >= 2`), so a nursery entered inside a spawned task always
+  registers a fiber-owned scope on that task's own sched instead of building a private sched with a
+  BLOCKING join at T>=2. `tests/chezzi_threads_cli.rs::w13_6_two_recoverers_fan_in_completes_at_thread_two`
+  is no longer `#[ignore]`d, and a new
+  `w13_6_two_recoverers_fan_in_completes_at_every_worker_count` pins the property at every count.
+  `target/t131/guard-set.log` (5 runs/count, 14 programs) ends `branch mismatches=0`;
+  `target/t131/guard-12.log` (12 runs/count, `i6n2` + five escape repros) also ends
+  `branch mismatches=0`. W13-27 files the cost: release `fan_open.chz` (a nursery inside a spawned task
+  while the enclosing body is open) T=8 base 205-239 ms vs branch 358-386 ms; `fan_closed.chz`
+  (enclosing body already closed) is unchanged. The private nested-sched code (`NestedDrainerSlot`,
+  `activate_eager_nursery`'s `mn.is_some()` arm) stays in place, unreachable from `EnterNursery`.
+  `esc_rec.chz` re-verified clean at 60/60 (TICKET-133's triage) plus 96/96 (this ticket).
 - **TICKET-132 (2026-09-17) — an escape out of a fiber-owned nursery parks its owner instead of waiting inline, closing DEC-103's abort residual.**
   `Vm::park_escaped_abort` (`src/vm/sched.rs`) rewinds `do_return`'s two escape drains and
   `Op::ReclaimNursery` to park the owner fiber, the way `join_nursery` already parked a plain join —

@@ -291,14 +291,14 @@ How a `parallel:` block runs on the M:N engine (`chezzi run` — the default):
    arg-evaluation timing), **deep-copies them across the airlock** ([§7](#7-sendability)), and
    **starts** the task on the innermost nursery. **The parent then continues to the next statement
    immediately** — `spawn` does not block. A `parallel:` nursery entered **inside a spawned task**
-   starts the same way — eagerly, at the point it is entered — **while the run's process-wide budget
-   of extra eager runner threads has a slot left** (`worker_count().max(2)`, `src/vm/pool.rs`); a
-   nested eager nursery costs one OS thread per OPEN nursery rather than per nesting level, so a denied slot
-   — and every such nursery at `--threads=1` — registers its scope on the spawning task's own
-   scheduler, so its tasks still start at the `spawn` and run on that scheduler's existing workers;
-   the owner parks at its join and is requeued when the scope completes (TICKET-103). A `return`, `?`,
-   `break` or `continue` out of such a nursery parks the owner the same way, requeuing it once its
-   cancelled tasks settle, instead of waiting on them inline (TICKET-132).
+   starts the same way — eagerly, at the point it is entered — at every worker count: it registers
+   its scope on the spawning task's own scheduler, so its tasks start at the `spawn` and run on that
+   scheduler's existing workers without adding an OS thread, and the owner parks at its join, releasing
+   its worker, and is requeued when the scope completes (TICKET-103; every worker count since
+   TICKET-131). A `return`, `?`, `break` or `continue` out of such a nursery parks the owner the same
+   way, requeuing it once its cancelled tasks settle, instead of waiting on them inline (TICKET-132).
+   While the enclosing nursery's body is still open, those tasks share the enclosing scheduler's
+   runners (`docs/gaps.md` W13-27).
 2. The task runs **concurrently** with the statements that follow it and with its siblings. There is
    no FIFO order between tasks and no defined order against the parent's own statements.
 3. The first task to error **aborts the remaining siblings** and propagates out of the `parallel:`

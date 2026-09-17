@@ -12871,7 +12871,7 @@ are the SAME widening missing at a neighbour sink (qualified head, ctor arm, nes
 | ~~**W13-3**~~ | P1 | scheduler | A genuine nested deadlock HANGS at T>=2 whenever the main body AND a nested owner body are both channel-parked (`never.recv()` at depth 0 and depth 1, leaf at depth 2): T=1 faults 5/5, T=2/default rc=124 5/5. Go `all goroutines are asleep`. Drop the main-body recv → faults in ms at every count. The Executor-job twins of the `exec_join` row (CLOSED 2026-09-16, TICKET-125) hang the same way, so `exec_join` needs no Executor. Repro below | CLOSED 2026-09-15 (TICKET-117); W13-4, W13-5, W13-6 and the exec_join row moved to TICKET-125 |
 | ~~**W13-4**~~ | P1 | scheduler | Mirror at T=1: a genuine deadlock whose ONLY channel-parked owner is at depth 3+ hangs (rc=124 5/5) while T>=2 faults 5/5; depth 2 faults everywhere. `chezzi test --timeout=300` does not reach it at T=1 (20 s, vs `TIMED-OUT` at 311 ms for a sleeping child). Go `GOMAXPROCS=1` faults. Repro below | CLOSED 2026-09-16 (TICKET-125) |
 | ~~**W13-5**~~ | P1 | scheduler | W12-4 aftermath, cousin variant: a task that RECOVERS a genuine inner-nursery deadlock and then feeds a COUSIN whose owner sits at its join is false-faulted `deadlock: every task in this parallel: block is blocked` — judge 4/5 at T=2 and default, hunter 5/5 at T=1/4. Go `err / cousin got 5 / done`. `cousin_fed` (cousin body on `recv`) is 20/20 clean; the join-body cousin is the shape TICKET-112 did not cover. Also with a recovered `panic("boom")` instead of a deadlock (T=2 4/5). Repro below | CLOSED 2026-09-16 (TICKET-129, on top of TICKET-125's T=1 fix): see the W13-5-at-T>=2 residual below |
-| **W13-6** | P1 | scheduler | TWO siblings that each recover an inner deadlock and then fan in to the main body's `recv` HANG at T>=2 (rc=124 5/5 at N=2, 5, 20, 100); T=1 completes `t 2` 5/5. Same two recovers without the fan-in: clean; ONE task recovering twice: clean. Go `done`. Repro below | OPEN — BLOCKED on DEC-103's two inline waits (TICKET-131, 2026-09-17). TICKET-125 (2/8 false faults at T=4, release) and TICKET-127 (4/5, debug; closed as superseded, evidence on branch `ticket/127`) tried a replacement worker (`spawn_replacement_worker_holding` + a `NestedDrainerSlot`) and reverted it; do not re-attempt. Mechanism identified: release the worker at the nested join — `src/vm/exec.rs:1906` `let eager = self.mn.is_none() \|\| worker_count() >= 2;` becomes `let eager = self.mn.is_none();`, so the owner parks (`Disp::JoinPark`, the TICKET-103 path T=1 already uses). On the debug binary that fixes `i6n2` (`t 2` rc=0 5/5 at T=1, 2, 4, default; base rc=124 at T>=2) with the guard set unchanged. It is NOT safe yet: it makes two inline waits reachable at T>=2 — `abort_fiber_owned_nursery` (`src/vm/sched.rs`, `mn_worker_loop` + `wait_for_scope` when a body escapes its nursery) and a join under `native_reentry > 0` (a nursery inside `list.map`) — and an inline waiter can pop its own ancestor from the global queue. Debug, base vs patched interleaved, 12 runs per count, hangs: `nat_anc` T=2 1/12 → 12/12, T=4 0 → 3, default 0 → 1; `esc_anc` T=2 0 → 7, T=4 0 → 0, default 0 → 3; no run faulted. Land a parking abort + parking native-callback join first (DEC-103's prescription), bring both repros to base rates, then apply the predicate change |
+| ~~**W13-6**~~ | P1 | scheduler | TWO siblings that each recover an inner deadlock and then fan in to the main body's `recv` HANG at T>=2 (rc=124 5/5 at N=2, 5, 20, 100); T=1 completes `t 2` 5/5. Same two recovers without the fan-in: clean; ONE task recovering twice: clean. Go `done`. Repro below | **CLOSED 2026-09-17 (TICKET-131).** A nursery entered inside a spawned task now parks its owner at its join at every worker count: `src/vm/exec.rs`'s `EnterNursery` gate is `let eager = self.mn.is_none();`, the TICKET-103 path T=1 already used, so the owner releases its worker instead of blocking it in a private nested join (Go's `gopark` releasing the P). TICKET-132 first parked the escape abort that made this unsafe. Debug binary, base `99ea4779` and branch interleaved per run: `i6n2` prints `t 2` rc=0 at T=1, 2, 4 and default, where base hangs at T>=2; `nat_anc`, `esc_anc`, `esc_brk`, `esc_impl` and `esc_rec` hang in 0 of 12 runs per count on both; the guard set (`two_leaf b1 j2 h5 b4d b4e` rc=1, `a1b cousin_fed h1c h1 h3 h2 h2b h2c` rc=0) is unchanged, 5 runs per count. Pinned by `w13_6_two_recoverers_fan_in_completes_at_thread_two` (no longer ignored) and `w13_6_two_recoverers_fan_in_completes_at_every_worker_count` in `tests/chezzi_threads_cli.rs`. Cost filed as W13-27. TICKET-125 (2/8 false faults at T=4, release) and TICKET-127 (4/5, debug; evidence on branch `ticket/127`) tried a replacement worker (`spawn_replacement_worker_holding` + a `NestedDrainerSlot`) and reverted it; do not re-attempt. |
 | ~~**W13-7**~~ | P1 | Executor | CLOSED 2026-09-16 (TICKET-118). An Executor job parked at a NURSERY join whose child is channel-blocked pins its pool thread at T=1, so a sibling job that would feed it never starts (rc=124 5/5; T>=2 `j1 got 1 / done` 5/5). `docs/concurrency.md:1805` (TICKET-052) promises "a blocked job no longer pins its pool thread … fixed for every shape above" — the yield bracket fires for a job blocked ON a channel, not for a job whose nursery child is. Go `GOMAXPROCS=1` completes. Repro below | — |
 | ~~**W13-8**~~ | P1 | Executor | CLOSED 2026-09-16 (TICKET-118). `shutdown_now()` does not cancel a job's nursery child parked on `recv`: depth 1 → false `deadlock` fault at every count (5/5); depth 2 → T=1 fault, T>=2 rc=124. Job itself on `never.recv()` (no nursery) → `awake / done` 20/20. Doc: `shutdown_now()` "ask running jobs to stop at their next cancellation point" and `recv` IS a cancellation point. Go `select`+`cancel()` completes. Repro below | — |
 | ~~**W13-9**~~ | P1 | airlock | A module global nested ≥5 000 deep makes EVERY nursery open take ~22 s before the (correct, recoverable) `maximum structural depth (10000) exceeded` fault — measured 21.6 s at every count; depth 4 500 crosses in 0.04 s; the SAME chain as a captured LOCAL faults in 0.04 s. Constant ~22 s once the cap trips (quadratic walk on the module-snapshot failure path). Looks like a hang under any timeout ≤20 s | CLOSED 2026-09-15, TICKET-119: `to_snap_depth` now skips a speculative attempt already proven, by an exact-replay argument, to overflow the same way again — 5000/8000-deep chains now fault in 0.05 s (was 20.4/20.3 s) |
@@ -12892,6 +12892,7 @@ are the SAME widening missing at a neighbour sink (qualified head, ctor arm, nes
 | ~~**W13-24**~~ | P2 | perf | TICKET-118 (W13-7/8) slowed a 200 000-message unbuffered rendezvous ping-pong at the default worker count: median 11.09 s on `d5bfa5ab` vs 13.08 s on `eb5a991d` (+17.9%, 10 interleaved runs, ranges do not overlap); +4.1% at T=8, +2.7% at T=2, +1.8% nested 4 deep. Likely the per-pass `cancelled_scope_awaiting_drain()` scan and `joiner_step` added to `MnSched::take_runnable`'s idle path. The perf check TICKET-118's approval required was not run before merge; measured by the monitor 2026-09-16. **CLOSED 2026-09-16 (TICKET-126).** `flat.chz` at the default worker count: base median 11.149 s, fixed median 11.308 s (+1.4%); `CHEZZI_THREADS=8` -1.7%, `=2` -2.4%, `nested.chz` at default +0.7% | TICKET-126 |
 | ~~**W13-25**~~ | P2 | perf | Pre-existing, measured on `d5bfa5ab` (before TICKET-118): the same flat ping-pong takes 1.50 s at `CHEZZI_THREADS=2`, 3.65 s at 8 and 11.1 s at the default 28, a 7x cliff as the pool grows. The Go twin (`sync.WaitGroup`, two unbuffered channels) takes 0.14-0.16 s at `GOMAXPROCS=2`, 0.18-0.21 s at 8 and 0.16-0.20 s at 28: flat. Chezzi is ~10x slower than Go at 2 workers and ~60x at 28, and gets slower as workers are added where Go does not. Same idle-worker family as W8-7. Repro `/home/chezzijr/.cache/chezzi-perf118/flat.chz`, Go twin `/home/chezzijr/.cache/chezzi-perf118/go/main.go`. **CLOSED 2026-09-17 (TICKET-128).** A rendezvous wake now files a single woken fiber in the waker's own `LocalQ.runnext` (Go's `runnext` handoff) instead of broadcasting to every idle worker. `flat.chz`, 10 INTERLEAVED runs (base and branch alternated per round, to cancel a load trend), release binary, load 3.6-15.2 rising through the batch: `CHEZZI_THREADS=2` base median 1.501 s (range 1.373-2.537) → branch median 1.298 s (range 1.232-1.349); `=8` base median 3.893 s (range 3.655-4.060) → branch median 1.369 s (range 1.357-1.422); default base median 11.231 s (range 10.888-12.377) → branch median 1.369 s (range 1.334-1.413) — was a 7.5x cliff (default/T2), now 1.06x (ratio bound < 1.10x met). Closing the ~10x absolute gap to Go stays out of scope. Also fixed in the same ticket: a genuine two-leaf deadlock on a main channel HUNG instead of faulting at `CHEZZI_THREADS=1` (7 of 60 runs on base) — a scope-scoped drainer stopped when its OWN scope read done, even while a TICKET-103 continuation scope of the same family still held a parked fiber. See **W13-26** for a nested-nursery regression this same fix introduced | TICKET-128 |
 | ~~**W13-26**~~ | P2 | perf | Introduced by TICKET-128's W13-25 fix. `nested.chz` (the flat ping-pong wrapped 4 deep in single-spawn `parallel:` nurseries, so 4 inline "owner" fibers share the one flat `MnSched` with the 2 real ping-pong workers) was ~1.9x SLOWER on the branch at the default worker count. The filed suspect (a handoff filed into a shared `locals` slot) measured FALSE: zero `runnext` steals, every handoff popped by its own worker. Real cause: `wake_run_wide` calls `wake_key` on every peer sched per wake, and `wake_key` broadcast `idle_cv` unconditionally even when its bucket drain found nothing — 3,199,996 `wake_key` calls and 3,178,667 idle-worker sleeps for 200,000 round trips at `T=8`. Repro `/home/chezzijr/.cache/chezzi-perf118/nested.chz`. **CLOSED 2026-09-17 (TICKET-130).** `wake_key` now notifies its workers only when the drain requeued a fiber. 10 INTERLEAVED release runs, load 9.26-9.39: `nested.chz` `CHEZZI_THREADS=2` base median 3.426 s (range 3.331-3.613) → branch 1.376 s (range 1.316-1.526); default base median 4.122 s (range 4.050-4.299) → branch 1.582 s (range 1.485-1.619) — no longer slower than base. `flat.chz` default branch median 1.387 s stayed at most 1.10x its own `CHEZZI_THREADS=2` branch median 1.278 s (1.086x), so TICKET-128's win held | TICKET-130 |
+| **W13-27** | P2 | perf | Introduced by TICKET-131's W13-6 fix. A nursery inside a spawned task now parks its owner and runs its tasks on that task's OWN sched at every worker count; before, at T>=2, it got a private sched with its own `chezzi-eager` drainer and nested helper threads. The cost falls ONLY on such a nursery while its ENCLOSING nursery's body is still open: `farm_outermost_eager_helpers` (`src/vm/sched.rs`) farms pool helpers only after `close_body`, so until then the outer sched's drainer is its only runner. `fan_open.chz` (8 `burn(300000)` tasks in a nursery inside a spawned task while main's body blocks on `recv`), release, base `99ea4779` and branch interleaved per run, 6 runs per cell, 2026-09-17: T=8 base 205-239 ms vs 358-386 ms; default (28 workers) base 206-235 ms vs 343-417 ms. `fan_closed.chz` (the same fan-out, enclosing body already closed) is unchanged: T=8 base 203-228 ms vs 186-223 ms; default 195-225 ms vs 186-221 ms. Identified recovery path, not implemented: farm pool helpers for an outer sched while its body is blocked, not only after `close_body`; it touches DEC-052/DEC-118 pool-slot accounting and needs its own measurements. Do not recover it by restoring the private nested sched at T>=2: that is W13-6. Repro below | OPEN — not ticketed |
 
 ### W13-1 repro (P0)
 
@@ -13048,7 +13049,7 @@ and green at every worker count.
 T=1 `t 2` 5/5; T=2/default rc=124 5/5. Go `done`. `sched/i6n2.chz`; `i6b.chz` (no fan-in) and `d1.chz`
 (one task recovering twice) are clean.
 
-**Residual — OPEN (TICKET-125).** Root cause: recoverer 1 blocks the outer sched's only runner (its
+**Residual — CLOSED 2026-09-17 (TICKET-131); the history below is TICKET-125's.** Root cause: recoverer 1 blocks the outer sched's only runner (its
 `chezzi-eager` drainer) inside a private nested join; recoverer 2 stays queued, because pool helpers
 are farmed only after `close_body` and main's body is open in its `recv` loop. Tried:
 `Vm::spawn_replacement_worker_holding` (splitting `spawn_replacement_worker` to hold a
@@ -13061,9 +13062,9 @@ then false-faulted at T=2 in the full suite — reverted per the Rollback sectio
 (revert 7 and 8 wholesale). `tests/chezzi_threads_cli.rs`'s
 `w13_6_two_recoverers_fan_in_completes_at_thread_two` (from TICKET-117's triage) stays red at T=2 on
 this binary; it is `#[ignore]`d with reason `"TICKET-125 residual: W13-6 at T>=2 — see docs/gaps.md"`
-so `cargo test --test chezzi_threads_cli` reports `0 failed`, and tracked here as the residual.
+so `cargo test --test chezzi_threads_cli` reports `0 failed`, until TICKET-131 removed the `#[ignore]`.
 
-**Blocked on a prerequisite (TICKET-131, 2026-09-17).** Parking the owner at every worker count
+**Was blocked on a prerequisite (TICKET-131, 2026-09-17; unblocked by TICKET-132, below).** Parking the owner at every worker count
 (`let eager = self.mn.is_none();` at `src/vm/exec.rs:1906`) fixes `i6n2` but widens DEC-103's
 inline-wait hang residual from T=1 to T>=2 (rates in the W13-6 row; debug, base and patched
 interleaved, `timeout 15`, 12 runs per count). `esc_anc.chz` escapes a nested `parallel:` with
@@ -13186,6 +13187,14 @@ and a faulted defer were not re-tested here. Whoever files or updates the resuma
 follow-up ticket (`## Thread`, human note 2026-09-17) should re-verify `esc_rec.chz` against the merged
 binary before assuming it still blocks TICKET-131.
 
+**`esc_rec.chz` re-verified (2026-09-17): it does not block W13-6.** TICKET-133's triage measured it
+rc=0 in 60 of 60 runs on `99ea4779`, and a temporary `eprintln!` showed the recover-catch inline drain
+IS reached (4 calls per run at T=1, in a fixed order, never cycling). The human then measured it rc=0
+in 96 of 96 runs: 12 per count at T=1, 2, 4 and default, debug, `99ea4779` and the same tree with
+TICKET-131's predicate change, interleaved. TICKET-133 was rejected as not reproducible, and TICKET-131
+shipped the predicate change. The fault-unwind sites DEC-132 lists still wait inline; re-open only with
+a repro that hangs.
+
 ### W13-7 / W13-8 repros (P1)
 
     import std.concurrency            # W13-7: T=1 rc=124 5/5
@@ -13220,6 +13229,37 @@ binary before assuming it still blocks TICKET-131.
 
 Go `sched/go/h1.go`, `h3.go`, `h2c.go` complete at `GOMAXPROCS=1`. `sched/h1c.chz`, `h1.chz`, `h3.chz`
 (job at depth 3 submitting back); `h2c.chz`, `h2b.chz` (depth 2: T>=2 hangs), `h2d.chz` (no nursery: clean).
+
+### W13-27 repro (P2)
+
+    fn burn(n: int) -> int:
+        x := 0
+        i := 0
+        while i < n:
+            x = x + i * i - i
+            i += 1
+        return x
+
+    fn main():
+        ch := Channel[int](0)
+        parallel:
+            spawn:
+                parallel:
+                    spawn: burn(300000)
+                    spawn: burn(300000)
+                    spawn: burn(300000)
+                    spawn: burn(300000)
+                    spawn: burn(300000)
+                    spawn: burn(300000)
+                    spawn: burn(300000)
+                    spawn: burn(300000)
+                ch.send(1)
+            print("open {ch.recv()}")
+    main()
+
+`fan_closed.chz` is the same program with `ch`, `ch.send(1)` and the `recv` print removed, and
+`print("closed")` after the outer `parallel:`. Time both at `CHEZZI_THREADS=8` and the default on the
+release binary, base and branch interleaved per run.
 
 ### What the wave did NOT find — the clean columns
 
