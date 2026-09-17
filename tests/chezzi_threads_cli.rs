@@ -1460,6 +1460,120 @@ fn nested_verdict_edge_table_matches_go_at_every_worker_count() {
     }
 }
 
+/// TICKET-132 (`nat_anc.chz`, `docs/gaps.md` W13-6 residual): a nursery join taken under
+/// `native_reentry > 0` (a nursery inside `[1].map(leaf)`) runs the scheduler loop INLINE on the
+/// owner's own OS worker instead of parking it, so the inline waiter can pop its own ancestor fiber
+/// off the global queue and then wait on a fiber beneath it. At `CHEZZI_THREADS=1` there is only one
+/// worker, so this cycle always forms: 12/12 runs hang past a 15 s deadline (measured 2026-09-17).
+const NAT_ANC: &str = "fn burn(n: int) -> int:
+    x := 0
+    i := 0
+    while i < n:
+        x = x + i * i - i
+        i += 1
+    return x
+
+fn leaf(x: int) -> int:
+    parallel:
+        spawn: burn(2000000)
+    return x
+
+fn inner() -> int:
+    r := [1].map(leaf)
+    return r[0]
+
+fn outer() -> int:
+    parallel:
+        spawn: inner()
+        burn(300000)
+        return 2
+    return 0
+
+fn main():
+    parallel:
+        spawn: outer()
+        spawn: outer()
+    print(\"done\")
+main()
+";
+
+#[test]
+fn nat_anc_nursery_join_under_native_reentry_hangs_at_thread_one() {
+    let dir = std::env::temp_dir().join(format!("chz-threads-132-nat-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("nat_anc.chz");
+    std::fs::write(&path, NAT_ANC).expect("write program");
+    let out = run_with_hang_deadline(&path, "1");
+    let _ = std::fs::remove_dir_all(&dir);
+    let out = out.expect(
+        "nat_anc.chz hung past its 15 s deadline at CHEZZI_THREADS=1 (TICKET-132): the nursery \
+         join inside [1].map(leaf) waits INLINE on the owner's own OS worker, which can pop its \
+         own ancestor fiber off the global queue",
+    );
+    assert!(
+        out.status.success() && String::from_utf8_lossy(&out.stdout).contains("done"),
+        "nat_anc.chz must print `done` and exit 0 at CHEZZI_THREADS=1, like its Go twin; got {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// TICKET-132 (`esc_anc.chz`, `docs/gaps.md` W13-6 residual): a body that escapes its nursery (a
+/// `return` out of a nested `parallel:`) runs `abort_fiber_owned_nursery`, which also runs the
+/// scheduler loop INLINE on the owner's own OS worker. Same cycle as `nat_anc.chz`: 12/12 runs hang
+/// past a 15 s deadline at `CHEZZI_THREADS=1` (measured 2026-09-17).
+const ESC_ANC: &str = "fn burn(n: int) -> int:
+    x := 0
+    i := 0
+    while i < n:
+        x = x + i * i - i
+        i += 1
+    return x
+
+fn inner() -> int:
+    parallel:
+        spawn: burn(2000000)
+        return 1
+    return 0
+
+fn outer() -> int:
+    parallel:
+        spawn: inner()
+        burn(300000)
+        return 2
+    return 0
+
+fn main():
+    parallel:
+        spawn: outer()
+        spawn: outer()
+    print(\"done\")
+main()
+";
+
+#[test]
+fn esc_anc_nursery_escape_abort_hangs_at_thread_one() {
+    let dir = std::env::temp_dir().join(format!("chz-threads-132-esc-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("esc_anc.chz");
+    std::fs::write(&path, ESC_ANC).expect("write program");
+    let out = run_with_hang_deadline(&path, "1");
+    let _ = std::fs::remove_dir_all(&dir);
+    let out = out.expect(
+        "esc_anc.chz hung past its 15 s deadline at CHEZZI_THREADS=1 (TICKET-132): \
+         abort_fiber_owned_nursery waits INLINE on the owner's own OS worker, which can pop its \
+         own ancestor fiber off the global queue",
+    );
+    assert!(
+        out.status.success() && String::from_utf8_lossy(&out.stdout).contains("done"),
+        "esc_anc.chz must print `done` and exit 0 at CHEZZI_THREADS=1, like its Go twin; got {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 fn tail(s: &str) -> String {
     let lines: Vec<&str> = s.lines().collect();
     let start = lines.len().saturating_sub(15);
