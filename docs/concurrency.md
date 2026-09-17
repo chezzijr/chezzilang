@@ -296,7 +296,9 @@ How a `parallel:` block runs on the M:N engine (`chezzi run` — the default):
    nested eager nursery costs one OS thread per OPEN nursery rather than per nesting level, so a denied slot
    — and every such nursery at `--threads=1` — registers its scope on the spawning task's own
    scheduler, so its tasks still start at the `spawn` and run on that scheduler's existing workers;
-   the owner parks at its join and is requeued when the scope completes (TICKET-103).
+   the owner parks at its join and is requeued when the scope completes (TICKET-103). A `return`, `?`,
+   `break` or `continue` out of such a nursery parks the owner the same way, requeuing it once its
+   cancelled tasks settle, instead of waiting on them inline (TICKET-132).
 2. The task runs **concurrently** with the statements that follow it and with its siblings. There is
    no FIFO order between tasks and no defined order against the parent's own statements.
 3. The first task to error **aborts the remaining siblings** and propagates out of the `parallel:`

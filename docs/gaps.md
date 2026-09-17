@@ -13136,6 +13136,56 @@ at base rates before the predicate change goes on top.
         print("done")
     main()
 
+**TICKET-132 landed (2026-09-17) — the escape-abort inline wait is now a parking abort.**
+`Vm::park_escaped_abort` (`src/vm/sched.rs`) parks the owner at every rewindable escape of a
+fiber-owned nursery — `do_return`'s implicit-nursery drain, `do_return`'s post-defer drain, and
+`Op::ReclaimNursery` (break/continue) — instead of running `abort_fiber_owned_nursery`'s scheduler
+loop inline. `esc_anc.chz`, `esc_brk.chz` (a `break`) and `esc_impl.chz` (an implicit-nursery escape)
+all sit at base rates now: 0/12 hangs at `CHEZZI_THREADS=1`, and under TICKET-131's uncommitted
+predicate patch (`let eager = self.mn.is_none();`), 0/12 hangs at T=2, T=4 and default (base-patched,
+without the fix, is still 3-9/12 hangs in those cells). `nat_anc.chz` also sits at base rates — its
+hang traced (via `nat_anc.chz` with the escape moved below the join, `## Digest`'s `nat_noesc.chz`) to
+the escape abort, not the `native_reentry > 0` join alone, so the join stays inline by design (see
+`## Decisions`, TICKET-132). The `native_reentry > 0` join residual therefore stands: re-open only
+with a repro that hangs with no escape abort.
+
+Under the predicate patch, `timeout 600 chezzi test tests/chz` stayed green (`961 passed, 0 failed, 0
+errored`) at T=1, T=2 and default on both a patched `main` and the TICKET-132 branch, and
+`tests/chz/spec/fiber_owned_nursery_escape_test.chz` (the one file that reaches the park; `## Decisions`)
+passed 12/12 at T=2, T=4 and default on both. One T=1 run on the branch read `960 passed, 1 failed`
+immediately after a heavy back-to-back measurement batch (elevated load); 20 immediate resamples at
+T=1 were all `961 passed, 0 failed, 0 errored`, so this reads as a pre-existing wall-clock flake in
+the standing suite (the same class as `vm::tests::fibers_scale_ready_queue_not_quadratic`, which also
+missed its own ceiling under load during this same session), not a TICKET-132 regression — the failing
+test's identity was not captured, so treat this as unconfirmed rather than closed.
+
+**`esc_rec.chz` fault-unwind residual — narrower than `## Digest` recorded, re-verify before relying
+on it.** `## Digest`'s 3-run sample found `esc_rec.chz` (`assert false` inside `recover: parallel:`)
+hanging on `main` at T=1 (3/3) and, under the predicate patch, at T=2 (3/3), with `main` itself clean
+at T=2 (3/3). Raising the sample to 12+ per cell on the TICKET-132 branch changes that picture:
+
+    binary              T=1      T=2 (unpatched)   T=2 (patched)   T=4 (patched)   default (patched)
+    main (pre-fix)      12/12 hang   -                  -               -               -
+    branch (this fix)   0/32 hang    0/20 hang          -               -               -
+    main + patch        -            -                  9/12 hang       0/12 hang       0/12 hang
+    branch + patch       -           -                  0/12 hang       0/12 hang       0/12 hang
+
+The TICKET-132 branch shows **0 hangs in every cell measured** (32 runs at T=1, 20 at T=2 unpatched,
+12 each at T=2/T=4/default patched — 88 runs total), where `main` (with or without the predicate
+patch) still hangs at T=1 and, under the patch, at T=2. This ticket made no change to any fault-unwind
+path (`recover:` catch, `unwind_deferred`, the recover-scoped `?`) — `abort_fiber_owned_nursery`'s new
+`family_done` gate (`## Decisions`, TICKET-132) is the only touched code this repro can reach, and it
+was written for the `native_reentry`/no-op case, not for this one. The likely mechanism: `assert
+false` faults before the sibling `spawn: burn(2000000)` is ever picked up by a worker, so
+`cancel_fiber_owned_family`'s drain cancels it while still queued and `family_done` is already true by
+the time the gate is checked — under the OLD code the inline loop still ran unconditionally and could
+still pop the wrong fiber even with nothing left to do. This is a plausible explanation, not a proven
+one: it was not traced in the debugger, and only this one fault-unwind shape was sampled. Do not treat
+this as a general fix for the fault-unwind class recorded in `## Decisions` — the recover-scoped `?`
+and a faulted defer were not re-tested here. Whoever files or updates the resumable-catch-continuation
+follow-up ticket (`## Thread`, human note 2026-09-17) should re-verify `esc_rec.chz` against the merged
+binary before assuming it still blocks TICKET-131.
+
 ### W13-7 / W13-8 repros (P1)
 
     import std.concurrency            # W13-7: T=1 rc=124 5/5

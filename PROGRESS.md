@@ -7,6 +7,20 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-132 (2026-09-17) — an escape out of a fiber-owned nursery parks its owner instead of waiting inline, closing DEC-103's abort residual.**
+  `Vm::park_escaped_abort` (`src/vm/sched.rs`) rewinds `do_return`'s two escape drains and
+  `Op::ReclaimNursery` to park the owner fiber, the way `join_nursery` already parked a plain join —
+  instead of `abort_fiber_owned_nursery` running the scheduler loop INLINE on the owner's own OS
+  worker, where it could pop its own ancestor off the global queue and wait on a fiber beneath it
+  (`docs/gaps.md` W13-6 residual). `esc_anc.chz`, `esc_brk.chz` (`break`), `esc_impl.chz` (an implicit-
+  nursery escape) and `nat_anc.chz` (traced to the same escape-abort cause, not the separate
+  `native_reentry > 0` join) all sit at base rates now — 0/12 hangs at `CHEZZI_THREADS=1`, and 0/12 at
+  T=2/T=4/default under TICKET-131's still-uncommitted predicate patch, where the unfixed binary hangs
+  3-9/12 in those same cells. The `native_reentry > 0` join stays inline by design (measured: removing
+  only the escape from `nat_anc.chz` leaves it clean 36/36). A new `tests/chz/spec/` file is the entire
+  regression surface for the park (a full `tests/chz` run reaches it 0 times without
+  `CHEZZI_THREADS=1`). See `docs/gaps.md`'s W13-6 residual for the `esc_rec.chz` fault-unwind finding
+  this ticket did not target but measured resolved on this branch — re-verify before relying on it.
 - **TICKET-130 (2026-09-17) — a peer sched's `wake_key` no longer broadcasts on an empty drain: a nested ping-pong no longer gets slower as the worker pool grows (W13-26).**
   `wake_run_wide` calls `MnSched::wake_key` on every OTHER live sched once per channel wake; `wake_key`
   used to call `notify_waiters()` unconditionally, so a 4-deep nested `parallel: spawn:` ping-pong

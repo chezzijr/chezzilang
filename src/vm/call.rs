@@ -4010,6 +4010,11 @@ impl Vm {
         let frame_top = self.frames.last().unwrap();
         let nursery_floor = frame_top.nursery_len;
         if frame_top.has_implicit_nursery {
+            // TICKET-132 — park the owner instead of waiting inline if the level(s) above the
+            // implicit nursery are fiber-owned escapes; no defer has run yet.
+            if self.park_escaped_abort(nursery_floor + 1) {
+                return Ok(());
+            }
             self.drain_escaped_nursery(nursery_floor + 1); // cancel inner escaped `parallel:` levels
             if self.nurseries.len() > nursery_floor {
                 self.join_nursery()?; // join the implicit nursery (runs its tasks)
@@ -4027,6 +4032,11 @@ impl Vm {
         // `self.frames` (so `collect` roots the pending records). Defers run AFTER the implicit-nursery
         // join above (tasks complete, then cleanup).
         let defer_err = self.drain_top_frame_deferred();
+        // TICKET-132 — the defers already ran; a rewound re-run of this op finds them consumed, with
+        // the return value still on the stack.
+        if defer_err.is_none() && self.park_escaped_abort(nursery_floor) {
+            return Ok(());
+        }
         let ret = self.pop();
         let frame = self.frames.pop().unwrap();
         if frame.counted {

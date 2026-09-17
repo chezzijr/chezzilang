@@ -503,6 +503,38 @@ impl Vm {
         }
     }
 
+    /// TICKET-132 — before `drain_escaped_nursery` pops anything, check whether the TOP levels
+    /// (from `from_len`) are fiber-owned and PARK the owner instead of letting their abort wait
+    /// inline. Declines (`false`, no pop) at the first level that is not fiber-owned — that level and
+    /// every level below it still drain inline, unchanged — or when `native_reentry > 0` (the Rust
+    /// stack holds the native frame, so this fiber cannot park). On park, the rewound op re-runs once
+    /// `MnSched::park_join` requeues the fiber; `drain_escaped_nursery`'s re-run then finds the
+    /// family settled and pops normally.
+    pub(super) fn park_escaped_abort(&mut self, from_len: usize) -> bool {
+        if self.native_reentry != 0 {
+            return false;
+        }
+        for i in (from_len..self.nurseries.len()).rev() {
+            if matches!(self.mn_scopes.get(i), Some(Some(_))) {
+                return false;
+            }
+            let Some(Some(scope)) = self.eager_scheds.get(i) else {
+                return false;
+            };
+            if !scope.fiber_owned {
+                return false;
+            }
+            cancel_fiber_owned_family(scope);
+            if !scope.sched.lock().family_done(scope.scope) {
+                let origin = scope.scope;
+                self.frames.last_mut().unwrap().ip -= 1;
+                self.join_suspend = Some(origin);
+                return true;
+            }
+        }
+        false
+    }
+
     pub(super) fn join_nursery(&mut self) -> Result<(), RuntimeError> {
         // TICKET-103 — a fiber-owned nursery's owner PARKS here while its family runs, and re-runs
         // this op once `MnSched::park_join`'s wake requeues it. Checked before the first pop below,
@@ -1407,23 +1439,17 @@ impl Vm {
         self.reduce_task_slots(slots)
     }
 
-    /// TICKET-103 — `abort_eager_nursery` for a fiber-owned nursery: trip the family's one cancel
-    /// token, requeue its parked and socket-parked fibers, then settle them inline exactly as
-    /// [`Vm::join_fiber_owned_nursery`] does (same guards, same ungated loop). The body's escape
-    /// error is what propagates, so a task fault here is swallowed.
-    ///
-    /// It keeps the inline loop: it runs inside `drain_escaped_nursery`, where no op can be
-    /// rewound, so the owner cannot park. Residual in the ticket's `## Decisions` (TICKET-103).
+    /// TICKET-103/TICKET-132 — `abort_eager_nursery` for a fiber-owned nursery: trip the family's
+    /// one cancel token, requeue its parked and socket-parked fibers, then settle them. It waits
+    /// inline ONLY where [`Vm::park_escaped_abort`] declines: a fault-unwind escape (the fault is
+    /// consumed, so no op can rewind) or `native_reentry > 0` (the Rust stack holds the native
+    /// frame). The body's escape error is what propagates, so a task fault here is swallowed.
     fn abort_fiber_owned_nursery(&mut self, scope: EagerScope) {
         let sids = scope.sids();
-        scope.sched.trip_scope_cancel(scope.scope);
-        scope.sched.cancel_drain(scope.scope);
-        for &sid in &sids {
-            poller::drain_scope(&scope.sched, sid);
-        }
-        let wid = self.wid;
-        let mut shell = self.spawn_shell(&scope.sched, &scope.cancel);
-        {
+        cancel_fiber_owned_family(&scope);
+        if !scope.sched.lock().family_done(scope.scope) {
+            let wid = self.wid;
+            let mut shell = self.spawn_shell(&scope.sched, &scope.cancel);
             let _owner = self.blocked_owner_guard(&scope.sched, Some(scope.scope));
             for &sid in &sids {
                 shell.mn_worker_loop(&scope.sched, wid, sid);
@@ -6396,6 +6422,17 @@ impl Vm {
                 Value::obj(self.heap.alloc(Obj::Set(out)))
             }
         }
+    }
+}
+
+/// TICKET-132 — trip a fiber-owned family's cancel and drain its parked/socket-parked fibers.
+/// Idempotent: a re-run after a park finds nothing left to trip or drain. Shared by
+/// `Vm::park_escaped_abort` and `Vm::abort_fiber_owned_nursery`.
+fn cancel_fiber_owned_family(scope: &EagerScope) {
+    scope.sched.trip_scope_cancel(scope.scope);
+    scope.sched.cancel_drain(scope.scope);
+    for sid in scope.sids() {
+        poller::drain_scope(&scope.sched, sid);
     }
 }
 

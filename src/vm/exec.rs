@@ -2674,7 +2674,11 @@ impl Vm {
             // tasks and pop exactly that one level (the compiler emits one per escaped scope).
             Op::ReclaimNursery => {
                 let from = self.nurseries.len().saturating_sub(1);
-                self.drain_escaped_nursery(from);
+                // TICKET-132 — park the owner instead of waiting inline if `from`'s level is a
+                // fiber-owned escape; the rewound op re-runs once the cancelled family settles.
+                if !self.park_escaped_abort(from) {
+                    self.drain_escaped_nursery(from);
+                }
             }
             Op::SpawnCall(argc) => self.do_spawn(None, *argc, span)?,
             Op::SpawnMethod(name, argc) => self.do_spawn(Some(name.clone()), *argc, span)?,
