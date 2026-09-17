@@ -13071,6 +13071,8 @@ interleaved, `timeout 15`, 12 runs per count). `esc_anc.chz` escapes a nested `p
 (`native_reentry > 0`). After a parking abort and a parking native-callback join land, both must sit
 at base rates before the predicate change goes on top.
 
+**Ancestor measured (2026-09-17).** Go twins of both programs, `/home/chezzijr/.cache/chezzi-hunt13/sched/go/{esc_anc,nat_anc}.go` — a `sync.WaitGroup` models the nursery join (a `return` inside a Chezzi `parallel:` still joins), and `nat_anc.go`'s `mapInts` models `[1].map(leaf)` calling back into user code. Both print `done` and exit 0 in **12 of 12** runs at `GOMAXPROCS=1`, `2`, `4` and the default, `timeout 15`, load 0.2-0.3. Go has one way to block: `gopark` releases the P. It has no path where a goroutine runs the scheduler on its own M and then waits on work that loop can swallow, which is what `abort_fiber_owned_nursery` and a `native_reentry > 0` join do here. So these two inline waits are a divergence from the owning ancestor, not a cost of the M:N model.
+
 `esc_anc.chz` (base 0/12 hangs at T=2, patched 7/12):
 
     fn burn(n: int) -> int:
