@@ -1,0 +1,94 @@
+# tests/chz/spec/fiber_owned_nursery_escape_test.chz — TICKET-132: an escape out of a nursery
+# entered inside a spawned task. At CHEZZI_THREADS=1 that nursery is fiber-owned, so every escape
+# below reaches `abort_fiber_owned_nursery` (five aborts per run) while the family is still running.
+# `return`, `?`, `break`, `continue` and an escape above an implicit nursery must keep the return
+# value, the loop state and the defer order they have at every worker count.
+#
+# Each child parks on a channel nobody sends to, so only the escape's cancel ends it. At k == 0 the
+# body hands its child a value instead (a channel handshake, never a sleep -- DEC-050, DEC-059).
+# Asserts read a Shared after the join. Gated by `chz_suite_passes` (`tests/chz_suite.rs`); the
+# fiber-owned path runs only under `CHEZZI_THREADS=1 chezzi test tests/chz`.
+import std.concurrency
+
+fn park(ch: Channel[int]):
+    _ := ch.recv()
+
+fn ret_escape(log: Shared[str]) -> int:
+    defer:
+        log.update(fn(s: str) -> str: s + "D")
+    ch := Channel[int]()
+    parallel:
+        spawn: park(ch)
+        log.update(fn(s: str) -> str: s + "R")
+        return 7
+    return 0
+
+fn fails() -> int!str:
+    return Err("bail")
+
+fn try_escape(log: Shared[str]) -> int!str:
+    defer:
+        log.update(fn(s: str) -> str: s + "D")
+    ch := Channel[int]()
+    parallel:
+        spawn: park(ch)
+        v := fails()?
+        return Ok(v)
+    return Ok(0)
+
+fn loop_escape(log: Shared[str]) -> int:
+    n := 0
+    for k in range(3):
+        ch := Channel[int]()
+        parallel:
+            spawn: park(ch)
+            n += 1
+            if k == 0:
+                ch.send(1)
+            if k == 1:
+                continue
+            if k == 2:
+                break
+        log.update(fn(s: str) -> str: s + "L{k}")
+    log.update(fn(s: str) -> str: s + "E")
+    return n
+
+fn impl_escape(log: Shared[str]) -> int:
+    spawn: log.update(fn(s: str) -> str: s + "S")
+    ch := Channel[int]()
+    parallel:
+        spawn: park(ch)
+        return 5
+    return 0
+
+test fn return_out_of_a_task_nursery_keeps_value_and_defer_order():
+    log := Shared("")
+    r := Shared(0)
+    parallel:
+        spawn: r.set(ret_escape(log))
+    assert r.get() == 7, "r={r.get()}"
+    assert log.get() == "RD", "log={log.get()}"
+
+test fn try_out_of_a_task_nursery_keeps_err_and_defer():
+    log := Shared("")
+    r := Shared("")
+    parallel:
+        spawn: r.set("{try_escape(log)}")
+    assert r.get() == "Err('bail')", "r={r.get()}"
+    assert log.get() == "D", "log={log.get()}"
+
+test fn break_and_continue_out_of_a_task_nursery_keep_loop_state():
+    log := Shared("")
+    r := Shared(0)
+    parallel:
+        spawn: r.set(loop_escape(log))
+    assert r.get() == 3, "r={r.get()}"
+    assert log.get() == "L0E", "log={log.get()}"
+
+test fn escape_above_an_implicit_task_nursery_keeps_value():
+    log := Shared("")
+    r := Shared(0)
+    parallel:
+        spawn: r.set(impl_escape(log))
+    assert r.get() == 5, "r={r.get()}"
+    assert log.get() == "S", "log={log.get()}"

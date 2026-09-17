@@ -1460,11 +1460,12 @@ fn nested_verdict_edge_table_matches_go_at_every_worker_count() {
     }
 }
 
-/// TICKET-132 (`nat_anc.chz`, `docs/gaps.md` W13-6 residual): a nursery join taken under
-/// `native_reentry > 0` (a nursery inside `[1].map(leaf)`) runs the scheduler loop INLINE on the
-/// owner's own OS worker instead of parking it, so the inline waiter can pop its own ancestor fiber
-/// off the global queue and then wait on a fiber beneath it. At `CHEZZI_THREADS=1` there is only one
-/// worker, so this cycle always forms: 12/12 runs hang past a 15 s deadline (measured 2026-09-17).
+/// TICKET-132 (`nat_anc.chz`, `docs/gaps.md` W13-6 residual): `leaf`'s inline `native_reentry > 0`
+/// join loop pops its own ancestor `outer` off the global queue, then `outer`'s escaped `parallel:`
+/// aborts its nursery INLINE on a family holding `inner` beneath it (measured via `nat_noesc.chz`,
+/// `outer`'s escape removed: the map join alone never hangs, 36/36 `done`). At `CHEZZI_THREADS=1`
+/// there is only one worker, so this cycle always forms: 12/12 runs hang past a 15 s deadline
+/// (measured 2026-09-17).
 const NAT_ANC: &str = "fn burn(n: int) -> int:
     x := 0
     i := 0
@@ -1568,6 +1569,113 @@ fn esc_anc_nursery_escape_abort_hangs_at_thread_one() {
     assert!(
         out.status.success() && String::from_utf8_lossy(&out.stdout).contains("done"),
         "esc_anc.chz must print `done` and exit 0 at CHEZZI_THREADS=1, like its Go twin; got {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// TICKET-132 (`esc_brk.chz`): a `break` out of a fiber-owned nursery aborts it INLINE, same cycle as
+/// `esc_anc.chz`. 3/3 runs hang past a 15 s deadline at `CHEZZI_THREADS=1` (measured 2026-09-17).
+const ESC_BRK: &str = "fn burn(n: int) -> int:
+    x := 0
+    i := 0
+    while i < n:
+        x = x + i * i - i
+        i += 1
+    return x
+
+fn inner() -> int:
+    for k in range(1):
+        parallel:
+            spawn: burn(2000000)
+            break
+    return 1
+
+fn outer() -> int:
+    parallel:
+        spawn: inner()
+        burn(300000)
+        return 2
+    return 0
+
+fn main():
+    parallel:
+        spawn: outer()
+        spawn: outer()
+    print(\"done\")
+main()
+";
+
+#[test]
+fn esc_brk_break_out_of_a_nursery_parks_at_thread_one() {
+    let dir = std::env::temp_dir().join(format!("chz-threads-132-brk-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("esc_brk.chz");
+    std::fs::write(&path, ESC_BRK).expect("write program");
+    let out = run_with_hang_deadline(&path, "1");
+    let _ = std::fs::remove_dir_all(&dir);
+    let out = out.expect(
+        "esc_brk.chz hung past its 15 s deadline at CHEZZI_THREADS=1 (TICKET-132): a break out of \
+         a fiber-owned nursery aborts it INLINE",
+    );
+    assert!(
+        out.status.success() && String::from_utf8_lossy(&out.stdout).contains("done"),
+        "esc_brk.chz must print `done` and exit 0 at CHEZZI_THREADS=1, like its Go twin; got {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// TICKET-132 (`esc_impl.chz`): an escape above an IMPLICIT nursery (a bare `spawn:` plus a
+/// `parallel:` escaped by `return`) aborts it INLINE, same cycle as `esc_anc.chz`. 3/3 runs hang past
+/// a 15 s deadline at `CHEZZI_THREADS=1` (measured 2026-09-17).
+const ESC_IMPL: &str = "fn burn(n: int) -> int:
+    x := 0
+    i := 0
+    while i < n:
+        x = x + i * i - i
+        i += 1
+    return x
+
+fn inner() -> int:
+    spawn: burn(10)
+    parallel:
+        spawn: burn(2000000)
+        return 1
+    return 0
+
+fn outer() -> int:
+    parallel:
+        spawn: inner()
+        burn(300000)
+        return 2
+    return 0
+
+fn main():
+    parallel:
+        spawn: outer()
+        spawn: outer()
+    print(\"done\")
+main()
+";
+
+#[test]
+fn esc_impl_escape_above_an_implicit_nursery_parks_at_thread_one() {
+    let dir = std::env::temp_dir().join(format!("chz-threads-132-impl-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("esc_impl.chz");
+    std::fs::write(&path, ESC_IMPL).expect("write program");
+    let out = run_with_hang_deadline(&path, "1");
+    let _ = std::fs::remove_dir_all(&dir);
+    let out = out.expect(
+        "esc_impl.chz hung past its 15 s deadline at CHEZZI_THREADS=1 (TICKET-132): an escape above \
+         an implicit nursery aborts it INLINE",
+    );
+    assert!(
+        out.status.success() && String::from_utf8_lossy(&out.stdout).contains("done"),
+        "esc_impl.chz must print `done` and exit 0 at CHEZZI_THREADS=1, like its Go twin; got {:?}\nstdout: {}\nstderr: {}",
         out.status,
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
