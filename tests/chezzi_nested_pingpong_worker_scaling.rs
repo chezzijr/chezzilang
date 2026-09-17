@@ -1,12 +1,16 @@
-//! W13-26 (`docs/gaps.md`): TICKET-128's rendezvous handoff (`Vm::handoff_wake`, `src/vm/mod.rs`)
-//! files the woken peer into the CALLING fiber's own `wid` `runnext` slot. That is correct for a flat
-//! two-task ping-pong (`tests/chezzi_pingpong_worker_scaling.rs`), where the pair are the only two
-//! fibers. It is wrong once other fibers occupy worker slots too: `nested.chz` wraps the identical
-//! ping-pong four `parallel: spawn:` nurseries deep, so four inline nursery-owner fibers sit on the
-//! sched alongside the two ping-pong tasks. Once the worker pool is wide enough to spread the pair
-//! across different `wid`s, a handoff lands in a `runnext` whose worker may be blocked in a nested
-//! join, so the peer waits out `HANDOFF_GRACE` and is then stolen instead of being picked up
-//! immediately — one steal and one grace wait per rendezvous, instead of zero.
+//! W13-26 (`docs/gaps.md`): a channel wake broadcasts every PEER sched's idle workers.
+//! `nested.chz` wraps a flat two-task ping-pong four `parallel: spawn:` nurseries deep, and each
+//! inline nursery owner publishes its own eager sched. `MnSched::wake_run_wide` (`src/vm/mod.rs`)
+//! calls `wake_key` on every other live sched once per channel wake, and `wake_key` used to call
+//! `notify_waiters()` even when its bucket drain requeued NO fiber — so all four peers woke every
+//! idle worker they had, per message, to find nothing runnable and re-park. Counted on the release
+//! binary before the fix: 3,199,996 `wake_key` calls and 3,178,667 idle-worker sleeps for 200,000
+//! round trips at 8 workers.
+//!
+//! The originally filed diagnosis — that TICKET-128's handoff is filed into the WAKER's own `wid`
+//! `runnext` and then stolen after `HANDOFF_GRACE` — was MEASURED FALSE under TICKET-130: zero
+//! `runnext` steals, and all 399,999 handoffs were popped by their own worker. Do not re-derive a
+//! fix from it.
 //!
 //! **Counts the work, not the clock**, same reasoning as `chezzi_pingpong_worker_scaling.rs`: each
 //! extra wake this bug causes is a futex park/unpark, which shows up in the child's `ru_nvcsw`
@@ -168,10 +172,10 @@ main()\n",
         "a ping-pong nested four `parallel: spawn:` levels deep must not get slower as the worker \
          pool grows: voluntary context switches at {HIGH_WORKERS} workers = {switches_high}, at \
          {LOW_WORKERS} workers = {switches_low}; must be <= {MAX_HIGH_OVER_LOW} x low + 1.5x low + \
-         {ROUND_TRIPS} round trips = {bound}. A rendezvous handoff filed into the WAKER's own worker \
-         slot lands in a slot blocked on a nested join once the pool is wide enough to spread the \
-         pair across slots (W13-26), so every message pays a stolen `HANDOFF_GRACE` wait instead of \
-         being picked up immediately."
+         {ROUND_TRIPS} round trips = {bound}. Each nested nursery level publishes its own eager \
+         sched, and a channel wake that requeues no fiber on a peer sched must not notify that \
+         peer's idle workers (W13-26); an unconditional `notify_waiters` in `MnSched::wake_key` \
+         woke every idle worker of every peer once per message."
     );
 
     let _ = std::fs::remove_dir_all(&dir);
