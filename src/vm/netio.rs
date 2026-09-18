@@ -1569,28 +1569,11 @@ impl Vm {
             "recv" => {
                 self.arity_err("recv", args, 0, span)?;
                 // D5 owe #3 (Path C) — a `recv` reached INSIDE a native callback on the M:N engine
-                // (`native_reentry > 0`) can't snapshot-park (its host-stack loop frame is not
-                // capturable), so it DEMOTES the worker thread: block in place on the channel condvar +
-                // spin a replacement, resuming on a sibling `send` (Go's `handoffp`). Handled before
-                // `chan_recv_step` (which only covers the snapshot-park / block-in-place / fault
-                // paths). `demote_recv_block` is itself closed-aware (a `close` faults the demoted recv).
-                // A `timer(ms)` channel is excluded from demote — it has no sibling sender to block on;
-                // `chan_recv_step` synthesises its value (inline-sleep to the deadline) at any reentry.
-                if self.mn.is_some()
-                    && self.native_reentry > 0
-                    && self.channel_core(h).timer.is_none()
-                {
-                    return match self.demote_recv_block(h, span)? {
-                        RecvStep::Got(w) => {
-                            self.wake_senders(h); // freed a slot — wake a parked bounded sender
-                            Ok(self.from_wire(w))
-                        }
-                        RecvStep::ClosedEmpty => Err(self.err(CLOSED_RECV.to_string(), span)),
-                        // demote never parks (it blocks in place); a Parked here is impossible.
-                        RecvStep::Parked => unreachable!("demote_recv_block never parks"),
-                    };
-                }
-                match self.chan_recv_step(h, span)? {
+                // can't snapshot-park, so `recv_step_or_demote` DEMOTES the worker thread: block in
+                // place on the channel condvar + spin a replacement, resuming on a sibling `send`
+                // (Go's `handoffp`). `demote_recv_block` is itself closed-aware (a `close` faults the
+                // demoted recv).
+                match self.recv_step_or_demote(h, span)? {
                     RecvStep::Got(w) => {
                         self.wake_senders(h); // freed a slot — wake a parked bounded sender
                         Ok(self.from_wire(w))
@@ -2041,8 +2024,25 @@ impl Vm {
         }
     }
 
+    /// The ONE entry for a `recv` that may run inside a native re-entry (TICKET-136, W14-16): the
+    /// `recv` method and `for v in ch:`. A native re-entry — a callback, a `defer`, a generator
+    /// resume — has a host-stack loop frame that cannot be snapshot-parked, so an M:N fiber DEMOTES
+    /// (block in place, spin a replacement worker) instead of faulting. A `timer(ms)` channel is
+    /// excluded: it has no sibling sender, and [`Vm::chan_recv_step`] synthesises its value at any
+    /// re-entry. A new site that calls `chan_recv_step` directly brings W14-16 back.
+    pub(super) fn recv_step_or_demote(
+        &mut self,
+        h: GcRef,
+        span: Span,
+    ) -> Result<RecvStep, RuntimeError> {
+        if self.mn.is_some() && self.native_reentry > 0 && self.channel_core(h).timer.is_none() {
+            return self.demote_recv_block(h, span);
+        }
+        self.chan_recv_step(h, span)
+    }
+
     /// One blocking-`recv` step on the snapshot-park / block-in-place / fault paths (NOT the
-    /// in-callback demote path, which `recv` handles directly). Pops a value if one is waiting,
+    /// in-callback demote path, which [`Vm::recv_step_or_demote`] takes first). Pops a value if one is waiting,
     /// signals `ClosedEmpty` on a closed-and-drained channel, or parks the running fiber (re-rooting
     /// the receiver + rewinding `ip` so the calling op re-runs on resume, setting `suspend`). Shared
     /// by `recv` (`CallMethod`) and the `ChanRecvOrClosed` op (`for v in ch:`).

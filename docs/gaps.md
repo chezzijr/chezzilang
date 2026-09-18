@@ -13342,7 +13342,7 @@ whole-program faults (deadlock, `os.exit`, resource caps).
 | W14-13 | P1 | Executor | `shutdown_now()` leaves a `submit_task` Task/`submit_result` channel empty forever: `t.get()` hangs or false-deadlocks; `stdlib.md:457` promises CLOSED; CPython `CancelledError` | ticket |
 | W14-14 | P1 | sched | at `--threads=1` a CPU loop inside a native re-entry callback (`List.map`, `Shared.update`) is never preempted; siblings starve (hang 5/5); Go `GOMAXPROCS=1` completes | ticket |
 | W14-15 | P1 | cancel | a nursery join is not a cancel point: a cancelled owner runs its code after the join (`inner after nursery`); asyncio never runs it | ticket |
-| W14-16 | P1 | sched | `for v in c` inside a generator driven from a spawned task → false `deadlock` 5/5 every count | ticket |
+| ~~W14-16~~ | P1 | sched | `for v in c` inside a generator driven from a spawned task → false `deadlock` 5/5 every count | CLOSED 2026-09-19, TICKET-136: `Op::ChanRecvOrClosed` called `chan_recv_step` directly, but a generator resume is a native re-entry that cannot snapshot-park; it now goes through `Vm::recv_step_or_demote` like the `recv` method (Go twin prints the value) |
 | W14-17 | P1 | airlock | a crossing generator does not carry its free globals while a closure does (`t 100` / `p 1`) | D2 (becomes the rule) |
 | W14-18 | P1 | airlock | an install replaces the receiver's slot object, detaching its local alias `a := g` (`[1]` vs CPython `[1, 2]`) | D2 |
 | W14-19 | P1 | checker | `{m:.2f}` / `{a:04}` on a newtype/struct/enum/bytes/fn/`Shared` is check-OK then `format spec: ... not valid for a string` | ticket |
