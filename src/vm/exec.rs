@@ -2608,13 +2608,15 @@ impl Vm {
             Op::ChanRecvOrClosed => {
                 // `for v in ch:` step: pop a value (parking on empty-open exactly like `recv`) and push
                 // `Some(v)`, or push `None` once the channel is closed-and-drained (the loop's clean
-                // exit). Runs at the loop top, never inside a native callback (`native_reentry == 0`),
-                // so it takes the snapshot-park / block-in-place / fault paths — never the demote path.
+                // exit). It DOES run inside a native re-entry when the loop sits in a generator body,
+                // a callback or a `defer` (TICKET-136, W14-16), so it goes through
+                // `recv_step_or_demote`: an M:N fiber there demotes instead of faulting a false
+                // deadlock. Outside a re-entry it takes the snapshot-park / block-in-place path.
                 let v = self.pop();
                 let Some(h) = v.as_obj() else {
                     return Err(self.err("`for` over a non-channel value".to_string(), span));
                 };
-                match self.chan_recv_step(h, span)? {
+                match self.recv_step_or_demote(h, span)? {
                     RecvStep::Got(w) => {
                         self.wake_senders(h); // `for v in ch:` freed a slot — wake a parked bounded sender
                         let val = self.from_wire(w);

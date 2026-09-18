@@ -1,0 +1,35 @@
+# TICKET-136 (W14-16) — `for v in ch:` inside a generator, driven from a spawned task.
+# A generator resume is a native re-entry, which cannot snapshot-park, so an M:N fiber must demote
+# the recv instead of faulting `recv on an empty channel: deadlock` while a sibling still sends.
+#
+# The CPU `burn` only makes the drainer likely to reach its `recv` first; the test passes under
+# any interleaving once fixed (no sleep: DEC-050).
+
+fn gen_over(c: Channel[int]) -> Iterator[int]:
+    for v in c:
+        yield v
+
+fn burn(n: int) -> int:
+    s := 0
+    for i in range(n):
+        s += i % 7
+    return s
+
+fn drain_gen(c: Channel[int], out: Channel[int]):
+    for v in gen_over(c):
+        out.send(v)
+    out.close()
+
+test fn for_over_a_channel_in_a_generator_driven_from_a_task_gets_the_value():
+    c := Channel[int](4)
+    out := Channel[int](4)
+    parallel:
+        spawn:
+            c.send(7 + burn(3000000) % 1)
+            c.close()
+        spawn:
+            drain_gen(c, out)
+    got: List[int] = []
+    for v in out:
+        got.push(v)
+    assert got == [7]

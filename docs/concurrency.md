@@ -1140,7 +1140,12 @@ fn serve(tok: Token, io: Channel[str]):
 > something that can never arrive (`ch.recv()` no one will ever answer) leaves the program quiesced —
 > and the deadlock detector still fires (the demoted worker self-detects the quiesce). If a sibling's
 > fault is what cancelled the task, *that* fault is what is reported — the stuck cleanup's own error is
-> swallowed with its cancelled task.
+> swallowed with its cancelled task. The same holds for a `defer` that runs on the `main` thread — a
+> `defer` in `main`, at module top level, or in a `parallel:` body (which runs AFTER the join): the
+> process-wide verdict counts a party whose every native re-entry is a `defer` drain, so a cleanup
+> that can never complete faults `deadlock` (fatal) instead of hanging (TICKET-136, W14-11). A pending
+> `os.exit` from another party still outranks that verdict (Go: the exit status). A cleanup a live
+> task WILL feed is not judged: that task keeps `blocked < live`.
 >
 > **Cancelling a scope cancels its nested scopes — at their CHECKPOINTS.** A `parallel:` entered from a
 > task that is then cancelled dies with it: its children observe the enclosing cancel at their own

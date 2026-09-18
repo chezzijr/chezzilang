@@ -57,6 +57,22 @@ const FULL_SEND_DEADLOCK: &str = "send on a full channel: deadlock — the bound
     capacity and no runnable task can receive to free a slot. (Make sure a task that receives from \
     this channel is spawned with `spawn:` and is still running.)";
 
+/// The rendezvous (cap 0) sibling of [`FULL_SEND_DEADLOCK`] (TICKET-136, W14-35): a rendezvous
+/// channel has no slots, so "at capacity" is false for it — the send can never complete because no
+/// receiver is coming. Picked by [`send_deadlock_msg`] wherever the channel's cap is known.
+const RENDEZVOUS_SEND_DEADLOCK: &str = "send on a rendezvous channel: deadlock — the channel has \
+    no buffer and no runnable task can receive from it. (Make sure a task that receives from this \
+    channel is spawned with `spawn:` and is still running.)";
+
+/// The send-deadlock text for a channel of capacity `cap` (`Some(0)` = rendezvous).
+fn send_deadlock_msg(cap: Option<usize>) -> &'static str {
+    if cap == Some(0) {
+        RENDEZVOUS_SEND_DEADLOCK
+    } else {
+        FULL_SEND_DEADLOCK
+    }
+}
+
 /// The shared fault for a `send` to a CLOSED channel. ONE const for the same reason
 /// [`FULL_SEND_DEADLOCK`] is one: the top-of-`send` guard, the `wait:` send arm and the eager
 /// blocked-sender loop must all emit byte-identical text. Go panics `send on closed channel` here.
@@ -1553,28 +1569,11 @@ impl Vm {
             "recv" => {
                 self.arity_err("recv", args, 0, span)?;
                 // D5 owe #3 (Path C) — a `recv` reached INSIDE a native callback on the M:N engine
-                // (`native_reentry > 0`) can't snapshot-park (its host-stack loop frame is not
-                // capturable), so it DEMOTES the worker thread: block in place on the channel condvar +
-                // spin a replacement, resuming on a sibling `send` (Go's `handoffp`). Handled before
-                // `chan_recv_step` (which only covers the snapshot-park / block-in-place / fault
-                // paths). `demote_recv_block` is itself closed-aware (a `close` faults the demoted recv).
-                // A `timer(ms)` channel is excluded from demote — it has no sibling sender to block on;
-                // `chan_recv_step` synthesises its value (inline-sleep to the deadline) at any reentry.
-                if self.mn.is_some()
-                    && self.native_reentry > 0
-                    && self.channel_core(h).timer.is_none()
-                {
-                    return match self.demote_recv_block(h, span)? {
-                        RecvStep::Got(w) => {
-                            self.wake_senders(h); // freed a slot — wake a parked bounded sender
-                            Ok(self.from_wire(w))
-                        }
-                        RecvStep::ClosedEmpty => Err(self.err(CLOSED_RECV.to_string(), span)),
-                        // demote never parks (it blocks in place); a Parked here is impossible.
-                        RecvStep::Parked => unreachable!("demote_recv_block never parks"),
-                    };
-                }
-                match self.chan_recv_step(h, span)? {
+                // can't snapshot-park, so `recv_step_or_demote` DEMOTES the worker thread: block in
+                // place on the channel condvar + spin a replacement, resuming on a sibling `send`
+                // (Go's `handoffp`). `demote_recv_block` is itself closed-aware (a `close` faults the
+                // demoted recv).
+                match self.recv_step_or_demote(h, span)? {
                     RecvStep::Got(w) => {
                         self.wake_senders(h); // freed a slot — wake a parked bounded sender
                         Ok(self.from_wire(w))
@@ -1814,11 +1813,13 @@ impl Vm {
                         Arc::clone(&core),
                         Some(Arc::clone(&handle)),
                     ));
-                    if let Err(e) = self.block_wait_tick(&core, FULL_SEND_DEADLOCK, span, |g| {
-                        handle.load(Ordering::Relaxed) != crate::vm::core::DEPOSIT_QUEUED
-                            || g.has_send_slot(core.cap)
-                            || g.closed
-                    }) {
+                    if let Err(e) =
+                        self.block_wait_tick(&core, RENDEZVOUS_SEND_DEADLOCK, span, |g| {
+                            handle.load(Ordering::Relaxed) != crate::vm::core::DEPOSIT_QUEUED
+                                || g.has_send_slot(core.cap)
+                                || g.closed
+                        })
+                    {
                         // TICKET-042a — a deadline/cancel/exit/deadlock fault unwinds out of this
                         // loop. The deposit must not outlive the send that faulted, or a later
                         // `try_recv`/`recv` delivers a value from a send that never completed.
@@ -1903,7 +1904,7 @@ impl Vm {
         // cannot snapshot-park — fault for v1 (the `ponytail:` upgrade path is a demote-in-place send
         // block, like `demote_recv_block`).
         if self.native_reentry > 0 {
-            return Err(self.err(FULL_SEND_DEADLOCK.to_string(), span));
+            return Err(self.err(send_deadlock_msg(core.cap).to_string(), span));
         }
         // A real M:N WORKER snapshot-parks: the worker loop drives `send_suspend` → `Disp::SendPark`.
         if self.mn.is_some() {
@@ -1932,7 +1933,7 @@ impl Vm {
         // worker loop to drive its `send_suspend` — parking there would leak it forever (`paused()`
         // stuck true → silent halt), so it must NOT park: fault (the inline-owner-never-parks
         // invariant, mirroring `chan_recv_step` gating its snapshot-park on `self.mn.is_some()` ONLY).
-        Err(self.err(FULL_SEND_DEADLOCK.to_string(), span))
+        Err(self.err(send_deadlock_msg(core.cap).to_string(), span))
     }
 
     /// Atomic space-check + enqueue + receiver-wake on a BOUNDED channel; returns whether the value
@@ -2023,8 +2024,25 @@ impl Vm {
         }
     }
 
+    /// The ONE entry for a `recv` that may run inside a native re-entry (TICKET-136, W14-16): the
+    /// `recv` method and `for v in ch:`. A native re-entry — a callback, a `defer`, a generator
+    /// resume — has a host-stack loop frame that cannot be snapshot-parked, so an M:N fiber DEMOTES
+    /// (block in place, spin a replacement worker) instead of faulting. A `timer(ms)` channel is
+    /// excluded: it has no sibling sender, and [`Vm::chan_recv_step`] synthesises its value at any
+    /// re-entry. A new site that calls `chan_recv_step` directly brings W14-16 back.
+    pub(super) fn recv_step_or_demote(
+        &mut self,
+        h: GcRef,
+        span: Span,
+    ) -> Result<RecvStep, RuntimeError> {
+        if self.mn.is_some() && self.native_reentry > 0 && self.channel_core(h).timer.is_none() {
+            return self.demote_recv_block(h, span);
+        }
+        self.chan_recv_step(h, span)
+    }
+
     /// One blocking-`recv` step on the snapshot-park / block-in-place / fault paths (NOT the
-    /// in-callback demote path, which `recv` handles directly). Pops a value if one is waiting,
+    /// in-callback demote path, which [`Vm::recv_step_or_demote`] takes first). Pops a value if one is waiting,
     /// signals `ClosedEmpty` on a closed-and-drained channel, or parks the running fiber (re-rooting
     /// the receiver + rewinding `ip` so the calling op re-runs on resume, setting `suspend`). Shared
     /// by `recv` (`CallMethod`) and the `ChanRecvOrClosed` op (`for v in ch:`).
@@ -2276,16 +2294,24 @@ impl Vm {
     /// Registering is therefore gated on this, and forgetting to register somewhere is a HANG
     /// (`blocked < live` ⇒ veto), never a false fault. See [`crate::vm::quiesce`] for the full
     /// argument and the error-direction table.
+    ///
+    /// **A party whose every native re-entry is a `defer` drain IS counted** (TICKET-136, W14-11):
+    /// `native_reentry == deferring`. `run_one_deferred` raises both by one, and a `defer` body is VM
+    /// code on the same thread, so it cannot drive an uncounted thread — the invariant above holds. Any
+    /// other re-entry (a callback, a generator resume, a `test fn` body) leaves `native_reentry >
+    /// deferring` and stays unjudged. Without this, a `main`-thread or module-top-level `defer` that
+    /// can never complete blocked in place, unregistered, and hung forever.
     pub(super) fn is_counted_party(&self) -> bool {
-        self.owns_os_thread() && self.native_reentry == 0
+        self.owns_os_thread() && self.native_reentry == self.deferring
     }
 
     /// Does this context own the OS thread it is running on — no scheduler of ANY kind under it?
     ///
-    /// [`Vm::is_counted_party`] is exactly this plus `native_reentry == 0`, and the split matters:
-    /// the extra clause answers "may the process-wide verdict JUDGE this party?", not "may it block?".
-    /// A `main` thread inside a native callback owns its thread just as much — it simply cannot be
-    /// judged, because it is not reachable as a counted party while a host frame sits under it.
+    /// [`Vm::is_counted_party`] is exactly this plus `native_reentry == deferring` (every re-entry a
+    /// `defer` drain), and the split matters: the extra clause answers "may the process-wide verdict
+    /// JUDGE this party?", not "may it block?". A `main` thread inside a native callback owns its
+    /// thread just as much — it simply cannot be judged, because it is not reachable as a counted
+    /// party while a host frame sits under it.
     ///
     /// Use this only where a block is provably FINITE on its own (W7-14's timed `wait:` — the deadline
     /// ends it whatever anyone else does). For an unbounded block, [`Vm::can_block_in_place`] is the
@@ -2308,9 +2334,10 @@ impl Vm {
     /// None`, `native_reentry > 0` — a generator resume, a `list.map`/`Shared.update` callback, a
     /// `test fn` body). Such a party blocks WITHOUT registering, exactly like the eager-callback case
     /// above, so the verdict declines to judge it rather than asserting a wrong `deadlock`.
-    /// [`Vm::is_counted_party`] itself is deliberately NOT widened: `src/vm/quiesce.rs`'s live-count
+    /// [`Vm::is_counted_party`] is NOT widened to such a re-entry: `src/vm/quiesce.rs`'s live-count
     /// argument requires a party inside a native call to stay live-and-unregistered, so registering it
-    /// here would delete that veto and turn a genuine uncounted sender into a false deadlock.
+    /// here would delete that veto and turn a genuine uncounted sender into a false deadlock. The one
+    /// exception is a `defer` drain (TICKET-136), which is VM code and not a host call.
     fn can_block_in_place(&self) -> bool {
         self.eager_core.is_some() || self.owns_os_thread()
     }
@@ -2324,8 +2351,9 @@ impl Vm {
     ///   host stack so the fiber can't park, but [`Vm::demote_socket_enter`] spins a replacement worker
     ///   so the pool keeps its width;
     /// - top-level `main` — not a worker shell, not an eager
-    ///   `Executor` job, no scheduler under it ([`Vm::is_counted_party`] = [`Vm::owns_os_thread`] +
-    ///   `native_reentry == 0`). Go-identical: `ln.Accept()` on the main goroutine blocks until a
+    ///   `Executor` job, no scheduler under it ([`Vm::owns_os_thread`] + `native_reentry == 0`; NOT
+    ///   [`Vm::is_counted_party`], which since TICKET-136 also admits a `defer` drain — widening this to
+    ///   it would turn a would-block socket op in a `defer` from `Err` into a block). Go-identical: `ln.Accept()` on the main goroutine blocks until a
     ///   client arrives, and until this landed the hello-world TCP server was unwritable (the old gate
     ///   was `mn.is_some()`, which means "worker shell", not "parallel is on").
     ///
@@ -2343,7 +2371,7 @@ impl Vm {
     /// ([`Vm::park_on_fd`]) — so the narrowing costs the M:N server shapes nothing.
     pub(super) fn may_block_socket_in_place(&self) -> bool {
         (self.mn.is_some() && self.native_reentry > 0)
-            || (self.eager_core.is_none() && self.is_counted_party())
+            || (self.eager_core.is_none() && self.owns_os_thread() && self.native_reentry == 0)
     }
 
     /// TICKET-062 (W10-16) — the lowest-index `Fault` recorded by a task of a `parallel:` nursery open
@@ -2575,6 +2603,15 @@ impl Vm {
             // child's fault-slot write, so this re-read sees the fault.
             if let Some(e) = self.deliver_owner_fault() {
                 return Err(e);
+            }
+            // TICKET-136 — `run_exit_err` is suppressed inside a `defer` (W7-57), so a pending run-wide
+            // `os.exit` from another party must be read HERE, or a `defer` judged deadlocked would
+            // report `deadlock` for somebody else's exit. The exit outranks the verdict (Go: exit 3).
+            if self.deferring > 0
+                && let Some(code) = self.quiesce.pending()
+            {
+                self.pending_exit = Some(code);
+                return Err(self.err("exit".to_string(), span));
             }
             return Err(self.err(deadlock_msg.to_string(), span).deadlock());
         }

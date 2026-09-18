@@ -37,7 +37,7 @@
 //! blocked, so `blocked < live` and the verdict is vetoed. An uncounted sender therefore always
 //! implies a veto, which is why no separate "is a scheduler alive?" global is needed. The corollary is
 //! `Vm::is_counted_party`: a party registers only when it has no scheduler of any kind and is not
-//! inside a native callback.
+//! inside a native callback other than a `defer` drain.
 //!
 //! Both error directions are asymmetric and both fall the safe way:
 //!
