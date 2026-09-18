@@ -3801,8 +3801,8 @@ a parsed manifest**: the toolchain reads its `[project]` keys (`name`/`version` 
 (`[section]` headers, `key = "value"` string pairs, `#` comments); an empty `chezzi.toml` is a valid
 root marker with no entrypoint.
 
-> **Manifest mode forwards program arguments after a `--` terminator**, matching `go run . -- --dir x`
-> / `cargo run -- --dir x`:
+> **Manifest mode forwards program arguments after a `--` terminator**, matching `cargo run -- --dir x`
+> (NOT `go run`, which forwards the `--` itself: measured `go run main.go -- a` → `[-- a]`):
 >
 > ```
 > $ chezzi run -- --dir logs   # entrypoint sees std.os.args() == ['--dir', 'logs']
@@ -4205,6 +4205,9 @@ print(total)                                         # 60
 
 (The pipe's right side must be a free **call**, so a method like `xs.sum()` is not reachable from
 `|>` — that's why `std.iter` carries free-function forms.)
+
+Named arguments are not accepted on the right side of `|>` (`1 |> cnt(c=5)` is the error
+`named arguments are not supported on the right side of '|>'`); call it directly instead.
 
 ## 11b. Concurrency — `spawn` / `parallel:`  (see [`concurrency.md`](concurrency.md))
 

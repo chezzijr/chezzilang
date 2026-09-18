@@ -13304,3 +13304,67 @@ they neighbour (W12-1/W12-4 → W13-3/4/5/6): a fix that closes the filed shape 
 nesting level over, or with the roles of body/child swapped, and the ticket's own gate never contained
 it. The fix for a verdict-predicate row should ship with the predicate's edge table (owner-at-join ×
 owner-on-channel × depth × worker count × recovered-or-not), not with the one filed program.
+
+## Session log — 2026-09-18 (bug-hunt wave 14: 6 domains, ~700 hand-built programs, 36 rows — 7 P0, 13 P1; three seams sent to REDESIGN, not row-fixing)
+
+Six agents over disjoint domains (scheduler/nursery, airlock/capture, cancel/defer/Executor, checker ⊋
+compiler, core language, stdlib/host IO) on the release binary at `6eb64921`. Every P0/P1 row was
+re-verified by the judging loop at `CHEZZI_THREADS=1 / 2 / default`. Oracle per row: a RUN Go 1.27 /
+CPython 3.14 / rustc twin, or a quoted doc sentence. Repro sources: `~/.cache/chezzi-hunt14/<domain>/`
+(Go/Python twins beside them).
+
+**Meta-finding — the count is not converging, and it is concentrated.** Waves 12/13/14 filed 22/23/36
+rows. The P0/P1s sit in three seams whose fixes keep minting neighbours (W13-26 was introduced by
+TICKET-128, W13-27 by TICKET-131, W14-6 by TICKET-116): the recoverable nested-deadlock verdict, the
+airlock's install-on-arrival of module globals, and per-sink int→float widening (~7 helpers). The
+owner decided (2026-09-18) to delete each class by a design change instead of another row fix:
+**D1** a deadlock is FATAL (Go's `all goroutines are asleep`), not `recover:`-able; **D2** a received
+closure reads the RUNNING task's module globals — the airlock no longer installs the sender's;
+**D3** an int never widens into a float SLOT (Rust/Kotlin: write `1.0`); mixed arithmetic `i * f`,
+which the VM promotes by runtime tag (`src/vm/arith.rs:76`), is unchanged. Boundary recorded with D1:
+recoverable = value/operation faults (index, overflow, `panic`, IO, call depth); fatal = scheduler /
+whole-program faults (deadlock, `os.exit`, resource caps).
+
+| row | P | domain | one line | disposition |
+|---|---|---|---|---|
+| W14-1 | P0 | core | a closure/nested fn/`defer:`/`spawn:` capturing a bare-name match binding (`whole: (fn() -> int: whole)()`) panics the VM: `CellLoad on a non-handle value` (`src/vm/exec.rs:2346`), rc=101. CPython/Rust print `5` | ticket |
+| W14-2 | P0 | core | a fn VALUE called with named args binds by the labels of whichever fn fixed the value's type: `fs := [f, ren]; fs[1](a=1, b=2)` → `201`; CPython `102` | ticket |
+| W14-3 | P0 | sched | a rendezvous sender torn down by a recovered deadlock verdict leaves its value: `c.try_recv()` → `Some(1)`; Go `None` | D1 |
+| W14-4 | P0 | defer | `return`/`?`/`break` out of `parallel:` runs the enclosing blocks' defers BEFORE the cancelled children's defers; `syntax.md` "inner-block-first"; Go/asyncio children first | ticket |
+| W14-5 | P0 | airlock | a receiver write that PREDATES the sender's snapshot still refuses the install (`n = 5` before the nursery → `5 5`, Go `15 15`), contradicting the DEC-116 sentence | D2 |
+| W14-6 | P0 | airlock | a WORKER receiver's in-place write before a nested nursery drops the child's write (`[1, 5]`, CPython `[1, 5, 2]`); regressed with TICKET-116 | D2 |
+| W14-7 | P0 | io | `read_line`/`lines()`/`input` strip EVERY trailing `\r` (`src/vm/fileio.rs:35`, `src/native/mod.rs:87`); doc and Go/Rust strip one | ticket |
+| W14-8 | P1 | sched | a task recovers an inner deadlock then `out.send(1)`; a busy main `out.recv()` is false-`deadlock`ed 10/10; Go `1 end` | D1 |
+| W14-9 | P1 | sched | a nursery BODY that recovers its own inner deadlock gets its outer siblings torn down (`z6.chz`) | D1 |
+| W14-10 | P1 | sched | genuine deadlock HANGS when an Executor job and main each hold a 3-level parked nursery tree (5/5 every count); Go reports | ticket |
+| W14-11 | P1 | sched | a main-thread `defer: c.recv()` that can never complete hangs; `concurrency.md` §6e "REPORTED, never a silent hang" | ticket |
+| W14-12 | P1 | cancel | a CANCELLED task's `defer: panic(...)` is swallowed (rc=0; `shutdown_now()` → `Ok(nil)`); Go/asyncio surface it | ticket |
+| W14-13 | P1 | Executor | `shutdown_now()` leaves a `submit_task` Task/`submit_result` channel empty forever: `t.get()` hangs or false-deadlocks; `stdlib.md:457` promises CLOSED; CPython `CancelledError` | ticket |
+| W14-14 | P1 | sched | at `--threads=1` a CPU loop inside a native re-entry callback (`List.map`, `Shared.update`) is never preempted; siblings starve (hang 5/5); Go `GOMAXPROCS=1` completes | ticket |
+| W14-15 | P1 | cancel | a nursery join is not a cancel point: a cancelled owner runs its code after the join (`inner after nursery`); asyncio never runs it | ticket |
+| W14-16 | P1 | sched | `for v in c` inside a generator driven from a spawned task → false `deadlock` 5/5 every count | ticket |
+| W14-17 | P1 | airlock | a crossing generator does not carry its free globals while a closure does (`t 100` / `p 1`) | D2 (becomes the rule) |
+| W14-18 | P1 | airlock | an install replaces the receiver's slot object, detaching its local alias `a := g` (`[1]` vs CPython `[1, 2]`) | D2 |
+| W14-19 | P1 | checker | `{m:.2f}` / `{a:04}` on a newtype/struct/enum/bytes/fn/`Shared` is check-OK then `format spec: ... not valid for a string` | ticket |
+| W14-20 | P1 | CLI | `chezzi run f.chz a -- b` swallows a MID-args `--` (`['a', 'b']`); Go/Python keep it. (The doc's "matching `go run`" claim fixed in place 2026-09-18: `go run` forwards `--`) | ticket |
+| W14-21 | P2 | checker | int→float widening missing at neighbour sinks: one-expression body, `extend`/`concat`/`update`/`+=`, `Shared`/`Channel`/`Atomic`, non-generic enum `float` payload, generic static method, success-coercion × ctor hint, tuple-assign, `??`, `yield`, comprehension | D3 |
+| W14-22 | P2 | core | a string-literal match pattern `"{x}"` never interpolates, no diagnostic; CPython `SyntaxError` | ticket |
+| W14-23 | P2 | core | tuples/`List`/`Option` have no ordering (`[(2,"b"),(1,"z")].sort()` rejected); CPython/Rust order lexicographically | ticket |
+| W14-24 | P2 | concurrency | `Atomic[T].cas(a.load(), …)` is always `false` when T holds a fn value → silent infinite CAS loop; Go panics `comparing uncomparable type` | ticket |
+| W14-25 | P2 | airlock | airlock warning fires on a read an arriving closure made visible (`w1.chz`) | D2 |
+| W14-26 | P2 | airlock | a closure reading ANOTHER module's global directly (`lib.items`) does not carry it | D2 |
+| W14-27 | P2 | airlock | two module globals aliasing one generator → `type nil has no method 'next'` | D2 ticket |
+| W14-28 | P2 | airlock | nursery opens with a deep module global cost O(depth²) on the SUCCESS path (depth 4999: 25.6 s) | D2 ticket |
+| W14-29 | P2 | std.flag | int flags decimal only (`010` → 10; Go `ParseInt(s, 0, 64)` → 8, `0x10` → 16); `" 3"` accepted | ticket |
+| W14-30 | P2 | std.request | a non-UTF-8 response header is dropped; duplicate headers keep only the first | ticket |
+| W14-31 | P2 | encoding | `base64_decode("Zm9v\n")` → `invalid length`; CPython/Go ignore newlines | ticket |
+| W14-32 | P2 | checker | `_ := f(); _ := g()` at top level → `cannot re-declare module-level binding '_'` — the discard warning's own suggested fix | ticket |
+| W14-33 | P3 | checker | untyped constant overflow (`i64::MAX + 1`) is check-OK then faults (Go: compile error); `ch: Channel[float] = Channel(1)` "needs an element type"; nested `fn f(x: int = 3)` can't omit the arg (`'closure' expects 1`) | ticket |
+| W14-34 | P3 | stdlib | `json.decode` can't take back a tuple `encode` emits; `{inf:E}` lower case (CPython `INF`); float `sum` uncompensated (CPython 3.12+ `0.6`); `-0.0` breaks sort stability / `min` ties; `path.with_ext("", …)` → `.txt`; `0x_ff` rejected by lexer and `parse_int_base`; `datetime.from_epoch` near `i64::MIN` overflows; `days_from_civil(2023, 13, 1)` silently normalizes | ticket |
+| W14-35 | P3 | diagnostics | generator fault frame names the FIRST resume; entrypoint missing fn found only at runtime, no file; same-named types from two modules render identically; empty range pattern `5..1` accepted; `int??` leaks `questionquestion`; `?` prints an unknown type as `?`; duplicate-arm spans point at the scrutinee; `fn a() -> int: if …` inline rejected (closure accepts); cyclic list print faults (CPython `[1, [...]]`); rendezvous deadlock says "bounded channel is at capacity"; `submit_task` fault located in `<native:std.concurrency>` | ticket |
+| W14-36 | P3 | core | a tuple scrutinee rejects a bare-name catch-all (`rest:`); CPython/Rust accept | ticket |
+
+Not filed: `json.parse` rejecting a lone surrogate escape (defensible — a `str` cannot hold one; Go
+substitutes U+FFFD); a spawned-task fault printing only `at main` (deliberate, B4). Clean: every checker
+widening that WAS accepted produced a real float at runtime; fn-type/container variance held; slicing
+and the format mini-language byte-match CPython; crypto/csv/regex/path; TICKET-118/126/131/132 shapes.
