@@ -1,14 +1,10 @@
-# TICKET-097 — `fill_global_free` (src/compiler/mod.rs) misses two ordinary spellings of "this
-# closure reads a module global", so the airlock's carried set silently drops the global and a
-# crossing closure answers a stale value.
-#
-# Defect A: the read is behind a CALL. `children[p]` is built only from `Op::MakeClosure` /
-# `Op::SpawnBlock`, never `Op::Call`, so a closure whose body calls a helper that reads the global
-# never has that global in its own `global_free`. Go and CPython both read the LIVE value (100).
-#
-# Defect B: the sender's write was an IN-PLACE mutation (`ys.push(2)`), not a `SetGlobalSlot`/
-# `DefineGlobalSlot`, so the sending view's `assigned` bit is never set for `ys` and the install is
-# skipped. Go and CPython both read the LIVE value (2).
+# TICKET-137 (owner decision D2) — supersedes TICKET-097/TICKET-051's install. A closure received
+# from another task reads the module globals of the task that RUNS it: each task owns a deep copy
+# of every module global (taken at its spawn), and a crossing carries captures only. The sender's
+# write (`n = 100`, `xs = [1, 2]`, `ys.push(2)`) lands in the SENDER's copy and never reaches the
+# receiver, whether the closure reads the global directly or through a called helper. To share a
+# value across tasks, use `Shared`/`Channel`. Go and CPython read one live global (100 / 2); the
+# divergence is the deliberate "module globals isolate per task" rule (docs/concurrency.md).
 import std.concurrency
 
 n: int = 1
@@ -21,7 +17,7 @@ fn producer_a(c1: Channel[fn() -> int], c2: Channel[fn() -> int]):
     c1.send(fn() -> int: helper())
     c2.send(fn() -> int: n)
 
-test fn call_indirected_global_read_is_carried():
+test fn call_indirected_global_read_reads_the_receivers_copy():
     c1 := Channel[fn() -> int]()
     c2 := Channel[fn() -> int]()
     parallel:
@@ -30,9 +26,9 @@ test fn call_indirected_global_read_is_carried():
     before := indirect()
     direct := c2.recv()
     after := indirect()
-    assert before == 100, "indirect (call-indirected) read saw {before} before the unrelated recv"
-    assert after == 100, "indirect (call-indirected) read saw {after} after the unrelated recv"
-    assert direct() == 100, "direct read saw {direct()}"
+    assert before == 1, "indirect (call-indirected) read saw {before} before the unrelated recv"
+    assert after == 1, "indirect (call-indirected) read saw {after} after the unrelated recv"
+    assert direct() == 1, "direct read saw {direct()}"
 
 xs: List[int] = [1]
 ys: List[int] = [1]
@@ -43,12 +39,12 @@ fn producer_b(c: Channel[fn() -> int], c2: Channel[fn() -> int]):
     c.send(fn() -> int: xs.len())
     c2.send(fn() -> int: ys.len())
 
-test fn in_place_mutated_global_is_carried():
+test fn in_place_mutated_global_reads_the_receivers_copy():
     c := Channel[fn() -> int]()
     c2 := Channel[fn() -> int]()
     parallel:
         spawn producer_b(c, c2)
     f := c.recv()
     g := c2.recv()
-    assert f() == 2, "assigned global via closure saw {f()}"
-    assert g() == 2, "in-place-mutated global via closure saw {g()}"
+    assert f() == 1, "assigned global via closure saw {f()}"
+    assert g() == 1, "in-place-mutated global via closure saw {g()}"

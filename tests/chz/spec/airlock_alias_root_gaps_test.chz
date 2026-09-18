@@ -1,12 +1,13 @@
-# TICKET-105 (docs/gaps.md W12-6) — the airlock carries a module global only when the
-# crossing closure names the global itself. A write through a LOCAL ALIAS of the global
-# (`xs := g; xs.push(2)`) or a callee PARAM ALIAS (`fn add(xs): xs.push(2)`) is not carried by
-# a crossing closure: the write reaches no op that names the global, so it is lost across the
-# airlock. CPython threading and Go both see one shared object through the alias.
-# TICKET-111 (docs/gaps.md W12-5) — even where TICKET-105's mechanism carries a changed global,
-# a task-local alias of it crosses as its OWN copy, separate from the module snapshot's copy:
-# the two diverge instead of denoting one object. Source at 40b9a276.
-# TICKET-111 also covers a whole-global alias, a struct inside a global Map, and a global generator.
+# TICKET-137 (owner decision D2) — supersedes TICKET-105/TICKET-116's carry-and-install. A
+# closure received from another task reads the module globals of the task that RUNS it: each task
+# owns a deep copy of every module global, and a crossing carries captures only. A sender's write
+# to a global (directly, through a local alias, a callee param alias, a spawn-adopted alias, or an
+# element alias) lands in the SENDER's copy, so the receiver's closure still reads its own value.
+# CPython threading and Go see one shared object; the divergence is the deliberate "module globals
+# isolate per task" rule (docs/concurrency.md) — use `Shared`/`Channel` to share.
+# TICKET-111 (docs/gaps.md W12-5) — a task-local alias of a global is the SAME object as the
+# task's copy of the global (adoption), not a second copy. That still holds and the tests below
+# that assert it (`*_is_not_a_second_copy`) are unchanged.
 import std.concurrency
 
 gl: List[List[int]] = [[1]]
@@ -28,13 +29,13 @@ fn producer_alias(c: Channel[fn() -> str]):
     xs.push(2)
     c.send(fn() -> str: "{g}")
 
-test fn write_through_local_alias_of_global_is_carried():
+test fn write_through_local_alias_of_global_reads_the_receivers_copy():
     c := Channel[fn() -> str](1)
     parallel:
         spawn producer_alias(c)
     f := c.recv()
     got := f()
-    assert got == "[1, 2]", "write through local alias lost: {got}"
+    assert got == "[1]", "received closure read the sender's alias write: {got}"
 
 h: List[int] = [1]
 
@@ -45,13 +46,13 @@ fn producer_param(c: Channel[fn() -> str]):
     add(h)
     c.send(fn() -> str: "{h}")
 
-test fn write_through_param_alias_of_global_is_carried():
+test fn write_through_param_alias_of_global_reads_the_receivers_copy():
     c := Channel[fn() -> str](1)
     parallel:
         spawn producer_param(c)
     f := c.recv()
     got := f()
-    assert got == "[1, 2]", "write through param alias lost: {got}"
+    assert got == "[1]", "received closure read the sender's param-alias write: {got}"
 
 gw: List[List[int]] = [[1]]
 
@@ -100,12 +101,12 @@ test fn local_alias_of_a_global_generator_is_one_generator():
     assert got == "Some(1) Some(2)", "generator alias is two live copies: {got}"
 
 # W13-1 (docs/gaps.md) — a spawn-ADOPTED alias of a module global (`a := gl` in the parent,
-# `a.push(2)` in the task) is not carried by a closure the task sends back: the closure
-# reads the module global's own snapshot, which never saw the write through the adopted alias.
-# CPython threading and Go both see one shared object through the alias: `[1, 2]`.
+# `a.push(2)` in the task). Under D2 the adopted alias IS the task's copy of the global, so the
+# task's own `gl2` reads `[1, 2]`, but the closure it sends back is read by the RECEIVER against
+# the receiver's copy of `gl2`: `[1]`. CPython threading and Go see one shared list: `[1, 2]`.
 gl2: List[int] = [1]
 
-test fn write_through_spawn_adopted_alias_of_global_is_carried():
+test fn write_through_spawn_adopted_alias_reads_the_receivers_copy():
     a := gl2
     c := Channel[fn() -> str](1)
     parallel:
@@ -113,13 +114,13 @@ test fn write_through_spawn_adopted_alias_of_global_is_carried():
             a.push(2)
             c.send(fn() -> str: "{gl2}")
     got := c.recv()()
-    assert got == "[1, 2]", "write through spawn-adopted alias lost: {got}"
+    assert got == "[1]", "received closure read the sender's adopted-alias write: {got}"
 
 # W13-1 neighbours (TICKET-116) — the same shape across container kinds, closure timings and
-# forwarding hops. All must reach the ancestor answer once the home module faults at MakeClosure.
+# forwarding hops. Each received closure reads the receiver's own copy of the global.
 gl3: List[List[int]] = [[1]]
 
-test fn element_alias_write_in_task_is_carried():
+test fn element_alias_write_reads_the_receivers_copy():
     inner := gl3[0]
     c := Channel[fn() -> str](1)
     parallel:
@@ -127,7 +128,7 @@ test fn element_alias_write_in_task_is_carried():
             inner.push(2)
             c.send(fn() -> str: "{gl3[0]}")
     got := c.recv()()
-    assert got == "[1, 2]", "element alias write lost: {got}"
+    assert got == "[1]", "received closure read the sender's element-alias write: {got}"
 
 gl4: List[List[int]] = [[1]]
 
@@ -135,19 +136,19 @@ fn w4(xs: List[int], c: Channel[fn() -> str]):
     xs.push(2)
     c.send(fn() -> str: "{gl4[0]}")
 
-test fn spawn_arg_alias_write_is_carried():
+test fn spawn_arg_alias_write_reads_the_receivers_copy():
     c := Channel[fn() -> str](1)
     parallel:
         spawn w4(gl4[0], c)
     got := c.recv()()
-    assert got == "[1, 2]", "spawn-arg alias write lost: {got}"
+    assert got == "[1]", "received closure read the sender's spawn-arg alias write: {got}"
 
 struct P116:
     n: int
 
 gm116: Map[str, P116] = {"k": P116(1)}
 
-test fn struct_in_map_alias_write_is_carried():
+test fn struct_in_map_alias_write_reads_the_receivers_copy():
     p := gm116["k"]
     c := Channel[fn() -> int](1)
     parallel:
@@ -155,11 +156,11 @@ test fn struct_in_map_alias_write_is_carried():
             p.n = 5
             c.send(fn() -> int: gm116["k"].n)
     got := c.recv()()
-    assert got == 5, "struct-in-map alias write lost: {got}"
+    assert got == 1, "received closure read the sender's struct-alias write: {got}"
 
 gl5: List[int] = [1]
 
-test fn closure_built_before_the_alias_push_is_carried():
+test fn closure_built_before_the_alias_push_reads_the_receivers_copy():
     a := gl5
     c := Channel[fn() -> str](1)
     parallel:
@@ -168,11 +169,11 @@ test fn closure_built_before_the_alias_push_is_carried():
             a.push(2)
             c.send(f)
     got := c.recv()()
-    assert got == "[1, 2]", "closure built before the push lost the write: {got}"
+    assert got == "[1]", "received closure read the sender's push: {got}"
 
 gl6: List[int] = [1]
 
-test fn nested_nursery_send_carries_the_alias_write():
+test fn nested_nursery_send_reads_the_receivers_copy():
     a := gl6
     c := Channel[fn() -> str](1)
     parallel:
@@ -182,11 +183,11 @@ test fn nested_nursery_send_carries_the_alias_write():
                 spawn:
                     c.send(fn() -> str: "{gl6}")
     got := c.recv()()
-    assert got == "[1, 2]", "nested nursery send lost the write: {got}"
+    assert got == "[1]", "received closure read the sender's nested-nursery write: {got}"
 
 gl8: List[int] = [1]
 
-test fn executor_job_sees_the_alias_write():
+test fn executor_job_reads_the_receivers_copy():
     r := Channel[str](1)
     ex := Executor()
     parallel:
@@ -195,11 +196,11 @@ test fn executor_job_sees_the_alias_write():
             a.push(2)
             ex.submit(fn(): r.send("{gl8}"))
     got := r.recv()
-    assert got == "[1, 2]", "executor job lost the write: {got}"
+    assert got == "[1]", "executor job read the sender's write: {got}"
 
 gl9: List[int] = [1]
 
-test fn two_hop_closure_carries_the_alias_write():
+test fn two_hop_closure_reads_the_receivers_copy():
     a := gl9
     c := Channel[fn() -> str](1)
     d := Channel[fn() -> str](1)
@@ -211,7 +212,7 @@ test fn two_hop_closure_carries_the_alias_write():
             f := c.recv()
             d.send(f)
     got := d.recv()()
-    assert got == "[1, 2]", "two-hop forwarded closure lost the write: {got}"
+    assert got == "[1]", "two-hop forwarded closure read the sender's write: {got}"
 
 # W13-2 (docs/gaps.md) — a receiver's OWN in-place mutation of a module global is silently
 # overwritten by an arriving closure whose sender also mutated it, instead of both writes
@@ -295,15 +296,17 @@ fn producer_w13_2_control(c: Channel[fn() -> str]):
     g20.push(2)
     c.send(fn() -> str: "{g20}")
 
-# TICKET-116 (W13-2) review fix — this control's own nursery is NOT the first one the VM opens
-# (every test above it already opened one), so it also proves the receive-side guard's boundary
-# is the CURRENT snapshot, not the root's frozen first-ever one (review finding on `8cff19c2`).
-test fn receiver_push_before_the_nursery_still_merges():
+# TICKET-137 — the receiver's `9` is pushed BEFORE the nursery, so it is in the task's snapshot
+# and in the receiver's own copy; the sender's `2` lands only in the sender's copy. The received
+# closure reads the receiver's `[1, 9]`. (Its nursery is not the first the VM opens — every test
+# above it already opened one — so it also covers a re-snapshot after earlier nurseries.)
+test fn receiver_push_before_the_nursery_is_in_the_receivers_copy():
     g20.push(9)
     c := Channel[fn() -> str](1)
     parallel:
         spawn producer_w13_2_control(c)
     f := c.recv()
     got := f()
-    assert "{g20}" == "[1, 9, 2]", "pre-nursery push stopped merging: {got} {g20}"
+    assert got == "[1, 9]", "received closure read {got}, expected the receiver's [1, 9]"
+    assert "{g20}" == "[1, 9]", "receiver's own copy read {g20}"
 
