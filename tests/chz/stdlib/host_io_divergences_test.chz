@@ -1,0 +1,27 @@
+# tests/chz/stdlib/host_io_divergences_test.chz — TICKET-143 (W14-29, W14-31).
+# Go 1.27 `flag` parses ints with ParseInt(s, 0, 64); Go `base64.StdEncoding.DecodeString` and
+# CPython `b64decode` ignore \r and \n.
+
+import std.flag as flag
+import std.encoding as encoding
+
+test fn flag_int_accepts_go_prefixed_bases():
+    fs := flag.new()
+    fs.int_flag("n", 0, "count")
+    match fs.parse(["-n", "0x10"]):
+        Ok(_): pass
+        Err(e): assert false, "unexpected Err(" + e.message() + ")"
+    assert fs.get_int("n") == 16, str(fs.get_int("n"))
+
+test fn flag_int_leading_zero_is_octal():
+    fs := flag.new()
+    fs.int_flag("n", 0, "count")
+    match fs.parse(["-n", "010"]):
+        Ok(_): pass
+        Err(e): assert false, "unexpected Err(" + e.message() + ")"
+    assert fs.get_int("n") == 8, str(fs.get_int("n"))
+
+test fn base64_decode_ignores_newlines():
+    match encoding.base64_decode("Zm9v\r\nYmFy\n"):
+        Ok(s): assert s == "foobar", s
+        Err(e): assert false, "unexpected Err(" + e.message() + ")"
