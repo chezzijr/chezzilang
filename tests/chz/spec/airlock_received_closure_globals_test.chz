@@ -2,6 +2,7 @@
 # globals of the task that RUNS it. The airlock must not install the sender's value into the
 # receiver's copy, and must not replace the receiver's slot object (which detaches its aliases).
 import std.concurrency
+import std.time
 
 g: List[int] = [1]
 
@@ -39,3 +40,60 @@ test fn aliased_generator_globals_do_not_become_nil_in_a_task():
                 print("{x} {y}")
     msg := "{r}"
     assert not msg.contains("type nil"), "got {msg}"
+
+w: List[int] = [1]
+
+fn w_case() -> str:
+    c := Channel[fn() -> str](1)
+    parallel:
+        spawn:
+            w.push(2)
+            c.send(fn() -> str: "{w}")
+    f := c.recv()
+    return "{f()} {w}"
+
+test fn received_closure_reads_the_receivers_in_place_copy():
+    got := w_case()
+    assert got == "[1] [1]", "got {got}"
+
+fn rnums() -> Iterator[int]:
+    yield 1
+    yield rhelper()
+    yield 3
+
+rg := rnums()
+
+fn rhelper() -> int:
+    c := Channel[int](1)
+    parallel:
+        spawn:
+            c.send(rg.next() ?? -7)
+    return c.recv()
+
+test fn a_running_module_generator_faults_clearly_in_a_task():
+    r := recover:
+        for v in rg:
+            pass
+    msg := "{r}"
+    assert msg.contains("was running when this task was spawned"), "got {msg}"
+    assert not msg.contains("type nil"), "got {msg}"
+
+struct DeepL:
+    kids: List[DeepL]
+
+fn build_deep(d: int) -> DeepL:
+    n := DeepL([])
+    for _ in range(d):
+        n = DeepL([n])
+    return n
+
+deep_glob := build_deep(2000)
+
+test fn deep_module_global_nursery_opens_stay_linear():
+    t0 := time.monotonic()
+    for i in range(6):
+        parallel:
+            spawn:
+                pass
+    d := time.monotonic() - t0
+    assert d < 3.0, "6 nursery opens over a depth-2000 module global took {d}s, expected < 3s"
