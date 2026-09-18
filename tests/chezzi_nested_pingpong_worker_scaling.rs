@@ -1,11 +1,14 @@
-//! W13-26 (`docs/gaps.md`): a channel wake broadcasts every PEER sched's idle workers.
-//! `nested.chz` wraps a flat two-task ping-pong four `parallel: spawn:` nurseries deep, and each
-//! inline nursery owner publishes its own eager sched. `MnSched::wake_run_wide` (`src/vm/mod.rs`)
-//! calls `wake_key` on every other live sched once per channel wake, and `wake_key` used to call
-//! `notify_waiters()` even when its bucket drain requeued NO fiber — so all four peers woke every
-//! idle worker they had, per message, to find nothing runnable and re-park. Counted on the release
-//! binary before the fix: 3,199,996 `wake_key` calls and 3,178,667 idle-worker sleeps for 200,000
-//! round trips at 8 workers.
+//! W13-26 (`docs/gaps.md`): a channel wake broadcast every PEER sched's idle workers.
+//! `MnSched::wake_run_wide` (`src/vm/mod.rs`) calls `wake_key` on every other live sched once per
+//! channel wake, and `wake_key` used to call `notify_waiters()` even when its bucket drain requeued
+//! NO fiber. The pin runs a ping-pong inside an `Executor` job: a job's VM has no `mn`, so its
+//! `parallel:` builds a top-level eager sched that is a live peer of main's sched, whose workers sit
+//! idle while main waits on `done.recv()`. Debug binary, 2026-09-17, 12 rounds: fixed 1,587-10,450
+//! switches at T=2 and T=8; with `wake_key`'s `if n > 0` guard removed, 156,952-186,281. It used to
+//! run the ping-pong four nested `parallel: spawn:` levels deep, where each level built a private
+//! eager sched. TICKET-131 made those levels fiber-owned scopes on main's sched, so that shape has no
+//! peer: with the guard removed on top of TICKET-131 it ran the same distribution as without. Do not
+//! move this pin back to a nested shape. Its leftover debug-only slow mode is W13-28.
 //!
 //! The originally filed diagnosis — that TICKET-128's handoff is filed into the WAKER's own `wid`
 //! `runnext` and then stolen after `HANDOFF_GRACE` — was MEASURED FALSE under TICKET-130: zero
@@ -13,7 +16,7 @@
 //! fix from it.
 //!
 //! **Counts the work, not the clock**, same reasoning as `chezzi_pingpong_worker_scaling.rs`: each
-//! extra wake this bug causes is a futex park/unpark, which shows up in the child's `ru_nvcsw`
+//! extra wake the bug caused is a futex park/unpark, which shows up in the child's `ru_nvcsw`
 //! (voluntary context switches). This avoids `tests/no_wall_clock_ratio_gates.rs`'s ban on dividing
 //! two wall-clock samples.
 //!
@@ -75,44 +78,29 @@ fn run_counting_switches(args: &[&str], threads: &str) -> (std::process::ExitSta
     )
 }
 
-/// W13-26 — the two worker counts this gate compares. `LOW` matches the visible task count (the pair
-/// plus the four nursery owners fit inside 2 workers with no slot to spread across); `HIGH` is wide
-/// enough that the pair and the four owners land on different `wid`s, the regime the row measures the
-/// cliff in.
+/// W13-26 — the two worker counts this gate runs. The broadcast this pin guards costs switches at
+/// BOTH counts, so each count is bounded on its own.
 #[cfg(unix)]
 const LOW_WORKERS: &str = "2";
 #[cfg(unix)]
 const HIGH_WORKERS: &str = "8";
 
-/// W13-26 — message count. 20,000 round trips through four nested single-`spawn:` nurseries takes
-/// under 2s at either worker count on the DEBUG binary `cargo test` builds.
+/// W13-26 — message count. 20,000 round trips through the ping-pong takes under 2s at either worker
+/// count on the DEBUG binary `cargo test` builds.
 #[cfg(unix)]
 const ROUND_TRIPS: i64 = 20_000;
 
-/// W13-26 — the high-pool count may be at most this multiple of the low-pool count, plus one switch
-/// per round trip of absolute headroom. Measured on the debug binary at `d9487bae`, 2026-09-17:
-///
-/// | workers | nvcsw   |
-/// |---------|---------|
-/// | 2       | 172,490 |
-/// | 8       | 326,014 |
-///
-/// High is ~1.9x low; base (pre-TICKET-128, broadcast wake) has no such cliff because it never files
-/// a handoff into a specific `wid` at all.
-#[cfg(unix)]
-const MAX_HIGH_OVER_LOW: i64 = 1;
-
 #[cfg(unix)]
 #[test]
-fn nested_ping_pong_does_not_degrade_as_worker_pool_grows() {
-    let dir =
-        std::env::temp_dir().join(format!("chz-w13-26-nested-pingpong-{}", std::process::id()));
+fn a_ping_pong_in_an_executor_job_does_not_wake_the_main_scheds_idle_workers() {
+    let dir = std::env::temp_dir().join(format!("chz-w13-26-peer-pingpong-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
-    let path = dir.join("nested_pingpong.chz");
+    let path = dir.join("peer_pingpong.chz");
     std::fs::write(
         &path,
         format!(
             "\
+import std.concurrency\n\n\
 fn pp():\n    \
     ping := Channel[int](0)\n    \
     pong := Channel[int](0)\n    \
@@ -125,16 +113,17 @@ fn pp():\n    \
             for i in range({n}):\n                \
                 v := ping.recv()\n                \
                 pong.send(v)\n\n\
+fn pp_then(done: Channel[int]):\n    \
+    pp()\n    \
+    done.send(1)\n\n\
 fn main():\n    \
+    done := Channel[int](0)\n    \
+    ex := Executor()\n    \
+    ex.submit(fn(): pp_then(done))\n    \
     parallel:\n        \
         spawn:\n            \
-            parallel:\n                \
-                spawn:\n                    \
-                    parallel:\n                        \
-                        spawn:\n                            \
-                            parallel:\n                                \
-                                spawn:\n                                    \
-                                    pp()\n    \
+            done.recv()\n    \
+    ex.shutdown()\n    \
     print(\"done\")\n\n\
 main()\n",
             n = ROUND_TRIPS
@@ -166,16 +155,22 @@ main()\n",
         "wrong output at {HIGH_WORKERS} workers"
     );
 
-    let bound = MAX_HIGH_OVER_LOW * switches_low + ROUND_TRIPS + switches_low / 2;
+    let bound = 2 * ROUND_TRIPS;
+    assert!(
+        switches_low <= bound,
+        "a ping-pong inside an `Executor` job must not wake the idle workers of main's peer sched \
+         once per message (W13-26): voluntary context switches at {LOW_WORKERS} workers = \
+         {switches_low}; must be <= 2 x {ROUND_TRIPS} round trips = {bound}. `MnSched::wake_key` must \
+         notify only when its bucket drain requeued a fiber; the unconditional `notify_waiters` \
+         measured 156,952-186,281 at both counts."
+    );
     assert!(
         switches_high <= bound,
-        "a ping-pong nested four `parallel: spawn:` levels deep must not get slower as the worker \
-         pool grows: voluntary context switches at {HIGH_WORKERS} workers = {switches_high}, at \
-         {LOW_WORKERS} workers = {switches_low}; must be <= {MAX_HIGH_OVER_LOW} x low + 1.5x low + \
-         {ROUND_TRIPS} round trips = {bound}. Each nested nursery level publishes its own eager \
-         sched, and a channel wake that requeues no fiber on a peer sched must not notify that \
-         peer's idle workers (W13-26); an unconditional `notify_waiters` in `MnSched::wake_key` \
-         woke every idle worker of every peer once per message."
+        "a ping-pong inside an `Executor` job must not wake the idle workers of main's peer sched \
+         once per message (W13-26): voluntary context switches at {HIGH_WORKERS} workers = \
+         {switches_high}; must be <= 2 x {ROUND_TRIPS} round trips = {bound}. `MnSched::wake_key` \
+         must notify only when its bucket drain requeued a fiber; the unconditional `notify_waiters` \
+         measured 156,952-186,281 at both counts."
     );
 
     let _ = std::fs::remove_dir_all(&dir);
