@@ -90,7 +90,10 @@ print(counter)                     # 0  — to actually share, use a Shared[int]
 ```
 
 **Module globals isolate per task.** A `spawn`ed task gets its own deep copy of every
-module global (and of every captured local) — mutating one inside a task never propagates out.
+module global (and of every captured local) — mutating one inside a task never propagates out. A
+closure or generator, wherever it was created, reads and writes the module globals of the task that
+RUNS it (owner decision D2, TICKET-137), so a closure received over a `Channel` never sees the
+sender's global writes; to share, use `Shared`/`Channel` ([§7](#7-sendability)).
 
 **The checker warns when you read the lost value.** Writing a captured binding inside a `spawn:` body
 and reading it again after the join emits a non-fatal warning naming the binding and citing the write's
@@ -1431,9 +1434,8 @@ a residual of this milestone.
 
 **The model — spawning a task copies its environment (fork-like).** A `spawn`ed task does not share the
 parent's heap. It receives its **own isolated copy** of everything it captures — captured locals are
-deep-copied, module globals are snapshot-copied per task (fresh at its `spawn`, [§2](#2-the-model)) — and a **closure**'s own references to its home module's globals are likewise installed into the
-receiving task's own module copy at the airlock (TICKET-016 / W8-25, TICKET-051 — see the closures
-bullet below) — much like a
+deep-copied, module globals are snapshot-copied per task (fresh at its `spawn`, [§2](#2-the-model)) — and a **closure** or generator reads the module globals of the task that RUNS it, never
+the sender's (owner decision D2, TICKET-137 — see the closures bullet below) — much like a
 forked child copies the parent's address space. Two deliberate differences from a real `fork`:
 1. It copies only the **reachable captured environment**, not the whole heap.
 2. **Explicit concurrency handles cross by SHARED reference, not by copy** — `Channel`, `Shared`,
@@ -1473,80 +1475,57 @@ was retired when module globals started deep-copying per task.)
   and protocol-typed spawn args cross; the erased witness rides by deep value copy).
 - **Closures / functions cross by value (B3.3).** At runtime the airlock lowers a closure or
   bare `fn` **by value** — its `proto` (shared, read-only) + its captures deep-copied recursively + its
-  home module index, never a by-reference heap handle. **A closure carries no private copy of its
-  home module's `let`-bound globals; the airlock installs its free globals into the RECEIVING task's
-  own module copy (TICKET-016 / W8-25, TICKET-051)**, alongside its captures: `Proto::global_free`
-  names every such global the closure's body (or a closure nested inside it) reads and never writes,
-  including a read performed only by a top-level `fn` in the same module that the body CALLS (a call
-  into ANOTHER module is deliberately not followed, because global slot numbers are per module),
-  and the airlock installs the sending view's value for exactly those slots — provided the sending
-  view's own lineage (its own assignment, an ancestor snapshot, or an earlier install) actually
-  descends from a write to that slot, where a write is either an assignment to the slot or an
-  IN-PLACE mutation of the value it holds (`ys.push(2)`, `zs[0] = 9`, `g.n = 1`), and provided the
-  RECEIVING view has not itself already written that slot — an assignment, or an in-place mutation
-  its own baseline comparison can see (TICKET-116 / W13-2) — so its own later write always wins.
-  When both views mutate the same global in place after the sender's snapshot, the RECEIVER's object
-  wins and the sender's in-place delta is dropped: this is narrower than Go's and CPython's one-object
-  merge, and is the explicit trade TICKET-116 made rather than lose the receiver's write outright. A
-  receiver write that PREDATES the sender's snapshot still merges, because the sender's value already
-  contains it. Installing rather than freezing means **inside one
-  task, one module global denotes one object**: a closure's read of the slot and the task's own
-  read always agree, because both now read the SAME copy. A global the closure itself **writes** is
-  excluded from `global_free` and stays a plain **late load** against whichever task's own module
-  copy calls it — a module-level `let` binding is otherwise still a late load in-task (matching
-  CPython), so a write to it AFTER a closure is created is visible to a later same-task call.
-  TICKET-041 narrows "crossing an airlock" further: the install is skipped entirely when the crossing
-  lands the closure on the SAME module view it started on (tracked by a per-allocation
-  `ModuleData.origin`, compared to the sender's `WireValue::Closure.home_origin`) — e.g. a same-task
-  `Channel.send`/`.recv()` round trip — so the closure keeps reading that global LIVE, matching the
-  measured CPython `direct : 126` / `module xs: [1, 9]` and Go `direct : 126` / `module xs: [1 9]`
-  (2026-09-03). Top-level `fn`s, imports, `native fn`s and `extern` fns are unaffected and stay late
-  loads always.
-
-  **TICKET-105: a free global also crosses when the sending view provably changed it since the
-  snapshot that view descends from.** `assigned`/`carried` above catch a write that goes through an
-  op naming the global (`g = …`, `g.push(…)`, `g[0] = …`, `g.n = …`); a write through a LOCAL ALIAS
-  of the global (`xs := g; xs.push(2)`), a callee PARAM ALIAS (`fn add(xs): xs.push(2)`), or a user
-  struct METHOD that mutates `self` (`g.bump()`) reaches no such op, so neither bit is ever set. The
-  fix is a third, content-based check: at each closure crossing, compare the sending view's live
-  value for the global against that view's own baseline (a worker's `module_snapshot`, or the root
-  view's FIRST snapshot) via `wire_content_differs` — a renumbering-aware wire comparator that
-  DECLINES toward "unchanged" on every doubt (a kind change, an unmatched `Backref`, NaN, a handle/
-  callable/cell/iterator/builtin, the depth cap), because a false "changed" would clobber a
-  receiver's own in-place push (the DEC-051 no-clobber invariant). The verdict is folded into
-  `ModuleSnap.carried` at each snapshot build too, so an ancestor's alias write reaches a
-  grandchild's send, not just the sender's own. Cost: O(size) per closure crossing, for each free
-  global that is a mutable aggregate and not already carried — see `docs/benchmarks.md` TICKET-105.
-  TICKET-116 runs the same comparator on the RECEIVE side too, inside `Vm::install_global_slot`, at
-  O(size) per arriving free global that is a mutable aggregate — the receiver's own write must be
-  provably distinguished from an inherited one before the arriving value can refuse it. TICKET-116
-  also faults a closure's home module at `Op::MakeClosure` when the proto names free globals: a
-  worker's home module faults lazily, and `closure_global_snapshot` takes `&self` and cannot fault it,
-  so a closure that reads free globals must fault its home at creation or the crossing above reads an
-  unfaulted module and carries nothing.
-
-  All three shapes above now match CPython:
+  home module index, never a by-reference heap handle. **A closure carries captures only — never module
+  globals (owner decision D2, TICKET-137).** A closure or generator, wherever it was created, reads
+  and writes the module globals of the task that RUNS it. Each task owns a deep copy of every module
+  global (taken at its `spawn`, [§2](#2-the-model)); a crossing installs nothing into it and replaces
+  no slot, so a receiver's aliases of its own globals (`a := g`) stay attached. To share a value
+  across tasks, use `Shared`/`RwShared`/`Atomic`/`Channel`. This is what the checker's airlock warning
+  already says, now true by construction, and it supersedes the carry-and-install rules of
+  TICKET-016/041/051/097/105/116 (`Proto::global_free`, `ModuleData.assigned`/`carried`/`origin`, the
+  `Vm::install_global_slot` receive refusal and the changed-since-baseline comparator).
 
   ```
-  struct C:
-      n: int
-      fn bump(self):
-          self.n = self.n + 1
-  g := C(1)
-  c := Channel[fn() -> int](1)
-  fn producer():
-      g.bump()
-      g.bump()
-      c.send(fn() -> int: g.n)
+  g: List[int] = [1]
   fn main():
+      c := Channel[fn() -> str](1)
       parallel:
-          spawn producer()
-      print("user-method mutation via closure: {c.recv()()}")
+          spawn:
+              g.push(2)                    # the task's own copy: [1, 2]
+              c.send(fn() -> str: "{g}")
+      f := c.recv()
+      print("{f()} {g}")                   # [1] [1] — f runs in main, against main's copy
   main()
   ```
 
-  Measured 2026-09-11: Chezzi and CPython 3.14.7 both print
-  `user-method mutation via closure: 3`. Closes `docs/gaps.md` W11-5 and W12-6.
+  Go and CPython have ONE global object, so they print `[1, 2] [1, 2]` for the same source, and `300`
+  for W8-25's module-scope closure (`n := 1`, a task writes `n = 100`, sends `fn(x): x * n`, the
+  receiver calls `f(3)`); Chezzi prints `[1] [1]` and `3`. The divergence is the deliberate
+  "module globals isolate per task" rule ([§2](#2-the-model)). The migration path is to make the
+  shared value a `Shared`:
+
+  ```
+  n := Shared(1)
+  ch := Channel[fn(int) -> int]()
+  parallel:
+      spawn:
+          n.set(100)
+          ch.send(fn(x: int) -> int: x * n.get())
+  f := ch.recv()
+  print(f(3))                              # 300 — the Shared crosses by handle
+  ```
+
+  A module-level `let` binding is otherwise a late load in-task (matching CPython), so a write to it
+  AFTER a closure is created is visible to a later same-task call, including through a same-task
+  `Channel.send`/`.recv()` round trip. Top-level `fn`s, imports, `native fn`s and `extern` fns are
+  unaffected. **Consequence:** a closure passed as a spawn ARG after an in-nursery in-place push now
+  reads the task's stale in-nursery view, exactly as a `spawn:` block does ("within one nursery"
+  above). A closure's own **captures** still cross by value: a captured local reads as the sender
+  left it.
+
+  TICKET-137 also removed the cost the deleted comparator carried: every nursery open with a deep
+  module global re-snapshotted at O(depth²) (`docs/gaps.md` W14-28); it is linear in the global's
+  size again.
 
   **CLOSED (W12-5, TICKET-111): a spawn-crossed alias of a module global is adopted as the global's
   own object.** `inner := gl[0]` crossing in the SAME closure as `gl` itself — or as a local, a
@@ -1681,15 +1660,20 @@ was retired when module globals started deep-copying per task.)
   in a frame **local** crosses **any** task airlock **as data** (passed/captured into a `spawn`, or stored
   in a `Channel`/`Shared`/`RwShared`/`Atomic`) as an **independent deep copy** — `to_wire`/`from_wire`
   serialize its `proto`, backing closure, and parked operand-stack/args and rebuild a fresh
-  `GeneratorCore` on the receiver, so advancing one copy never affects the other (the SAME live generator reached twice in one
-  crossing — `a := g; spawn: a.next(); g.next()`, or nested in another generator's frame passed
-  alongside it — faults `a generator cannot be sent across tasks twice in one crossing`, a TICKET-100
-  decision) (like a cursor, but
-  carrying frozen execution state, not a plain snapshot). **One generator, one copy per crossing:** a
-  live generator reached TWICE in one crossing (`a := g` then `spawn: a.next(); g.next()`, or a generator
-  nested in another generator's parked frame passed alongside it) faults `a generator cannot be sent
-  across tasks twice in one crossing` — it carries no wire id, so it cannot back-reference like a
-  container or cell, and TICKET-100 chose the fault over a silent second copy. Every parked slot is wired recursively, so a
+  `GeneratorCore` on the receiver, so advancing one copy never affects the other (like a cursor, but
+  carrying frozen execution state, not a plain snapshot). **One generator, one copy per crossing,
+  aliases preserved (TICKET-137):** a live generator reached TWICE in one crossing (`a := g` then
+  `spawn: a.next(); g.next()`, two module globals aliasing one generator, or a generator nested in
+  another generator's parked frame passed alongside it) crosses as ONE copy — the second reach is a
+  `Backref` to the first, so `a` and `g` still denote one generator in the task (CPython prints
+  `t 2 3` for `g1 := nums(); g2 := g1` read from a thread; Chezzi's task copy does too). A cycle
+  that re-enters the generator ON the serialize stack still faults `a generator cannot be sent
+  across tasks as part of a reference cycle`. A module-global generator the task's snapshot cannot
+  copy — it was RUNNING when the task was spawned, or it holds a value that cannot cross tasks — is
+  an inert placeholder: a task that never drives it runs clean, and driving it faults
+  `a module-global generator that was running when this task was spawned has no copy in the task;
+  send its values through a Channel` (or `... holding a value that cannot cross tasks ...`), never
+  `type nil has no method 'next'`. Every parked slot is wired recursively, so a
   **non-sendable parked slot** still **rejects at the crossing** — a slot is checked at serialize time,
   so there is no under-gate.
   TICKET-041 — a generator crossed **WHILE it is running** (its own body calls `Channel.send`/
@@ -1739,13 +1723,12 @@ was retired when module globals started deep-copying per task.)
   **module global** inside a task is fine: the write lands on that task's own copy, invisible to the
   parent and to sibling tasks. To produce output visible to the parent, use a `Channel` or a `Shared`.
   (Reads are always fine, and a task reads the values current when its nursery opened —
-  [§2](#2-the-model).) **The exception (TICKET-051): a task's assignment to a module global becomes
-  visible to whoever later RECEIVES A CLOSURE over that global**, because the airlock installs the
-  sending task's value into the receiving task's own module copy (see the closures bullet above) — the
-  owning ancestors' answer (Go and CPython each have exactly one global object, so the write is always
-  visible), and what keeps the closures-bullet invariant true inside a receiving task. It
-  never lets one task see another task's write any other way — only a value that actually rides a
-  closure across an airlock carries it. *(History: a G1 checker rule once made both a
+  [§2](#2-the-model).) **There is no exception (owner decision D2, TICKET-137):** a task's write to a
+  module global is NEVER visible to whoever later receives a closure over that global, because a
+  crossing carries captures only (see the closures bullet above). Go and CPython each have exactly
+  one global object, so the write is always visible there; the divergence is deliberate. *(History:
+  TICKET-051 once made a task's assignment visible to a closure receiver by installing the sender's
+  value into the receiver's module copy; D2 removed the install. Also: a G1 checker rule once made both a
   **compile error**, because the serial engine shared the globals while M:N snapshotted them.
   Deep-copying per task removed the divergence, and the rule — and its partially-covered indirect
   forms — was retired with it.)*

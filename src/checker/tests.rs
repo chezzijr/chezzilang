@@ -497,6 +497,22 @@ fn a_task_side_write_read_after_the_join_warns() {
     );
 }
 
+/// TICKET-137 (W14-25, owner decision D2) — the warning is TRUE by construction for a MODULE GLOBAL
+/// too. A `spawn:` write to a global lands in the task's own copy, and a closure sent back over a
+/// `Channel` reads the RECEIVER's copy, so neither the closure nor the later read sees the write —
+/// exactly what the warning says. Pinned on the ticket's own repro shape (a global pushed inside a
+/// task, a closure over it sent out, both read after the join); the runtime side is
+/// `tests/chz/spec/airlock_received_closure_globals_test.chz::received_closure_reads_the_receivers_in_place_copy`,
+/// which asserts the pair prints `[1] [1]`. If the runtime ever installs the sender's value again,
+/// that test fails; if the warning stops firing here, this one does.
+#[test]
+fn a_module_global_written_in_a_task_warns_where_a_received_closure_reads_the_receivers_copy() {
+    warns(
+        "import std.concurrency\ng: List[int] = [1]\nfn main():\n    c := Channel[fn() -> str](1)\n    parallel:\n        spawn:\n            g.push(2)\n            c.send(fn() -> str: \"{g}\")\n    f := c.recv()\n    print(\"{f()} {g}\")\nmain()\n",
+        "'g' is read here as its pre-`spawn:` value",
+    );
+}
+
 /// A taint describes ONE binding, and `spawn_stale` is keyed by bare name — so a taint recorded on a
 /// BLOCK-LOCAL SHADOW must die with that block rather than be charged to the outer binding of the
 /// same name. Both were measured warning on the pre-fix binary while printing the CORRECT answer,

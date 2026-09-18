@@ -2208,6 +2208,9 @@ insert they sit beside, so this is the expected outcome, not a surprise.
 
 ### TICKET-105 — send-time changed-since-baseline carry (2026-09-11)
 
+> **Removed 2026-09-19 (TICKET-137, owner decision D2):** the comparator this section measures, and
+> the `closure_send.chz` worst case below, no longer exist. Kept as a dated record.
+
 `wire_content_differs`'s serialize-then-compare adds one O(size) walk per free global that is a
 mutable aggregate AND not already `assigned`/`carried`, run at every closure crossing
 (`Vm::closure_global_snapshot`). Measured on `/tmp/t105-base-chezzi` (pre-fix, `40b9a276` +
@@ -2398,3 +2401,26 @@ running a sibling ticket's suite):**
 own `CHEZZI_THREADS=2` branch median (1.278 s x 1.10 = 1.406 s) — met at 1.086x, TICKET-128's win held.
 `flat.chz`'s base row stays slow at default workers (10.759 s) because base predates TICKET-128; that
 row is not a criterion, only a sanity check that the fixture still reproduces the pre-128 cliff.
+
+### TICKET-137 — the closure-crossing comparator is deleted (2026-09-19)
+
+Owner decision D2 removed the airlock install, and with it the two O(size) costs it carried:
+TICKET-105's send-time `wire_content_differs` (one serialize-then-compare per free global that is a
+mutable aggregate, per closure crossing) and TICKET-116's receive-side run of the same comparator
+inside `Vm::install_global_slot`. Neither exists any more, so the `closure_send.chz` worst case
+recorded under TICKET-105 (+14330%) no longer applies.
+
+The same comparator was also the cause of W14-28. `snapshot_modules` folded it over every mutable
+aggregate global at each snapshot after the first, and `wire_cmp`'s `Struct` arm deep-cloned every
+field at every level: O(depth²) per nursery open. `dv.chz` (`struct L: kids: List[L]`, a module
+global chain of the given depth, `for i in range(10): parallel: spawn: pass`), release binary,
+single run each:
+
+| depth | before (base, from the ticket) | after |
+|---|---|---|
+| 1 | 0.014 s | 0.010 s |
+| 2000 | 15.55 s | 0.049 s |
+| 4999 | 25.6 s (the row's own figure) | 0.113 s |
+
+`tests/chz/spec/airlock_received_closure_globals_test.chz::deep_module_global_nursery_opens_stay_linear`
+pins it at depth 2000, six opens, under 3 s (base: 9.8 s measured red on the same file).
