@@ -211,6 +211,7 @@ impl Vm {
                             is_assert: false,
                             is_over_memory: false,
                             is_timed_out: false,
+                            is_deadlock: false,
                         })?;
                         Ok(self.lower_native(ret))
                     }
@@ -380,6 +381,7 @@ impl Vm {
             is_assert: false,
             is_over_memory: false,
             is_timed_out: false,
+            is_deadlock: false,
         })?;
         // A streamed `io.print`/`io.flush` whose stdout died emitted into a dead sink
         // ([`Vm::emit_out`], a no-op there) and still returned `Ok` — so the deterministic

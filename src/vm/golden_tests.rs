@@ -3514,11 +3514,11 @@ fn deadlock_fault_message_is_engine_agnostic() {
     assert!(!msg.contains("sequential executor"), "got: {msg}");
 }
 
-/// The reworded deadlock fault stays catchable by `recover:` on BOTH engines, surfacing the new
-/// engine-agnostic text (catchability is text-independent, but pin it so a future reword can't
-/// silently make it uncatchable).
+/// `recover:` is transparent to the deadlock verdict (TICKET-135, D1): the program aborts with the
+/// engine-agnostic text instead of binding `Err` (a scheduler verdict is fatal, like Go's
+/// `all goroutines are asleep`).
 #[test]
-fn deadlock_fault_is_recoverable_new_message() {
+fn deadlock_fault_is_not_recoverable_new_message() {
     let src = "fn main():\n\
                \x20   ch := Channel[int]()\n\
                \x20   r := recover:\n\
@@ -3528,10 +3528,9 @@ fn deadlock_fault_is_recoverable_new_message() {
                \x20       Ok(_): print(\"ok\")\n\
                \x20       Err(e): print(\"caught: {e.message()}\")\n\
                main()\n";
-    let out = golden_file_entry(&[("main.chz", src)], "main.chz");
-    assert!(out.contains("caught:"), "got: {out}");
-    assert!(out.contains("deadlock"), "got: {out}");
-    assert!(!out.contains("sequential executor"), "got: {out}");
+    let msg = golden_entry_fault(src);
+    assert!(msg.contains("deadlock"), "got: {msg}");
+    assert!(!msg.contains("sequential executor"), "got: {msg}");
 }
 
 /// `std.cancel` wakeup regression — a sibling's `cancel()` (which `trip()`s the token's `done()`
@@ -11694,35 +11693,29 @@ fn parity_native_hof_loop_is_cancellable() {
     assert_same_lines(&serial, &mn);
 }
 
-/// A NESTED nursery's deadlock, with an outer sibling PARKED and holding a registered `defer`. The
-/// nested deadlock reaches the outer level as an ordinary child error, so it cancels
-/// the outer scope and runs the parked sibling's `defer` (42). Locks the N5 boundary: a level's
-/// OWN deadlock still tears its fibers down without defers — but a
-/// nested one must not diverge.
+/// A NESTED nursery's deadlock, with an outer sibling PARKED and holding a registered `defer`, is
+/// FATAL through an outer `recover:` (TICKET-135, D1): the `recover:` is transparent to the verdict,
+/// so the program aborts and the `print(s.get())` after it never runs.
 #[test]
-fn parity_nested_deadlock_cancels_the_outer_parked_siblings_defer() {
+fn nested_deadlock_is_fatal_through_an_outer_recover() {
     let src = "fn cleanup(s: Shared[int]):\n    s.set(42)\n\
                fn a(ch: Channel[int], go: Channel[int], s: Shared[int]):\n    defer cleanup(s)\n    go.send(0)\n    ch.recv()\n\
                fn dead(d: Channel[int]):\n    d.recv()\n\
                fn b(go: Channel[int]):\n    go.recv()\n    d := Channel[int]()\n    parallel:\n        spawn dead(d)\n\
                fn main():\n    ch := Channel[int]()\n    go := Channel[int]()\n    s := Shared(0)\n    r := recover:\n        parallel:\n            spawn a(ch, go, s)\n            spawn b(go)\n        0\n    print(s.get())\nmain()\n";
-    let serial = run_capture(src).expect("the deadlock is recovered");
-    let mn = run_capture(src).expect("the deadlock is recovered");
-    assert_eq!(serial, "42\n", "serial: the parked sibling's defer ran");
-    assert_eq!(mn, "42\n", "M:N: the parked sibling's defer ran");
+    let err = run_capture(src).expect_err("the nested deadlock is fatal");
+    assert!(err.message.contains("deadlock"), "got: {}", err.message);
 }
 
-/// A GENUINE deadlock (every task parked, nothing cancelled) is still DETECTED — not hung — on both
-/// engines. The cancel drain must never swallow it: it is reported from `run_scheduler_level`'s
-/// `None` arm, which never routes through `drain_cancelled_children`.
+/// A GENUINE deadlock (every task parked, nothing cancelled) is still DETECTED — not hung — and is
+/// FATAL through `recover:` (TICKET-135, D1). The cancel drain must never swallow it: it is reported
+/// from `run_scheduler_level`'s `None` arm, which never routes through `drain_cancelled_children`.
 #[test]
-fn parity_genuine_deadlock_is_still_detected() {
+fn genuine_deadlock_is_detected_and_fatal() {
     let src = "fn waiter(ch: Channel[int]):\n    ch.recv()\n\
                fn main():\n    ch := Channel[int]()\n    r := recover:\n        parallel:\n            spawn waiter(ch)\n            spawn waiter(ch)\n        0\n    print(\"caught\")\nmain()\n";
-    let serial = run_capture(src).expect("the deadlock is recovered");
-    let mn = run_capture(src).expect("the deadlock is recovered");
-    assert_eq!(serial, "caught\n");
-    assert_same_lines(&serial, &mn);
+    let err = run_capture(src).expect_err("the deadlock is fatal");
+    assert!(err.message.contains("deadlock"), "got: {}", err.message);
 }
 
 /// A `defer` is the cleanup the cancel exists to RUN — so no cancellation checkpoint fires INSIDE a

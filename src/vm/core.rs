@@ -1019,6 +1019,7 @@ pub(super) fn halt_over_backlog(
         // the run `OVER-MEMORY`, exactly like the parent-side abort in `Vm::run_until`.
         is_over_memory: true,
         is_timed_out: false,
+        is_deadlock: false,
     };
     match outcome {
         T::Done(r) => (

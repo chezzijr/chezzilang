@@ -2576,7 +2576,7 @@ impl Vm {
             if let Some(e) = self.deliver_owner_fault() {
                 return Err(e);
             }
-            return Err(self.err(deadlock_msg.to_string(), span));
+            return Err(self.err(deadlock_msg.to_string(), span).deadlock());
         }
         // TICKET-052 — an eager `Executor` job (`mn.is_none()`) about to wait another tick hands its
         // pool thread to a replacement, so the job that would unblock it can still get a thread.

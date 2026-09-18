@@ -679,7 +679,7 @@ impl Vm {
                     .into_fiber(i, 0),
             );
         }
-        let deadlock_err = self.err(DEADLOCK_MSG.to_string(), nursery_span);
+        let deadlock_err = self.err(DEADLOCK_MSG.to_string(), nursery_span).deadlock();
         // Worker count must account for the early-enlisted OUTER scopes' tasks too (case-A: `main`'s `O`),
         // so a multi-task inner nursery + outer siblings still gets real parallelism. We don't yet know
         // the outer totals here, so size to a reasonable upper bound (core count) capped by total work
@@ -789,7 +789,7 @@ impl Vm {
         // builder-span error correct for it.
         if self.owns_nested_sched(sched) {
             sched.lock().scopes[scope_id].deadlock_err =
-                Some(self.err(DEADLOCK_MSG.to_string(), nursery_span));
+                Some(self.err(DEADLOCK_MSG.to_string(), nursery_span).deadlock());
         }
         let wid = self.wid;
         let mut shell = self.spawn_shell(sched, &cancel);
@@ -1014,7 +1014,7 @@ impl Vm {
             None
         };
         let cancel = Arc::new(AtomicBool::new(false));
-        let deadlock_err = self.err(DEADLOCK_MSG.to_string(), nursery_span);
+        let deadlock_err = self.err(DEADLOCK_MSG.to_string(), nursery_span).deadlock();
         // wid 0 = inline join worker, wid 1 = the dedicated raw drainer below, wids 2.. = the pool
         // helpers `join_eager_nursery` farms for an OUTERMOST scope. `MnSched::new` allocates the
         // per-worker local queues up front (`locals: (0..nworkers)`), so the count must be sized here
@@ -1099,7 +1099,8 @@ impl Vm {
             sched.register_scope_seeded(Arc::clone(&cancel), self.nursery_ancestors(), Vec::new());
         {
             let mut c = sched.lock();
-            c.scopes[scope].deadlock_err = Some(self.err(DEADLOCK_MSG.to_string(), nursery_span));
+            c.scopes[scope].deadlock_err =
+                Some(self.err(DEADLOCK_MSG.to_string(), nursery_span).deadlock());
             // TICKET-125 — this scope's fibers can only be fed once the OWNING fiber's own join
             // returns; a family faulting that fiber (`flag_deadlock_leaves`) must treat this scope
             // as interior, not a leaf, or the owner is dropped without unwinding it (W13-4).
@@ -2711,7 +2712,7 @@ impl Vm {
                     // fault output ordering is a separate, pre-existing nondeterminism (see the
                     // single-producer case covered by the test
                     // `parallel_faulting_task_flushes_partial_output_3engine`).
-                    if first_hard_fault.is_none() && executor_hard_halt(&err) {
+                    if first_hard_fault.is_none() && (executor_hard_halt(&err) || err.is_deadlock) {
                         first_hard_fault = Some(err.clone());
                     }
                     self.out.extend_from_slice(&out);
@@ -2748,7 +2749,9 @@ impl Vm {
         }
         // W7-5 review Fix 1: `first_hard_fault` (if any) wins over `first_fault` here — the
         // precedence is `Exit` > hard-halt-marked `Fault` > ordinary `Fault` > `Deadlocked`, lowest
-        // index winning within each kind. This changes ONLY which error propagates; it does not
+        // index winning within each kind. A deadlock-marked `Fault` (a party's own verdict, e.g. an
+        // eager job) ranks with the hard halts (TICKET-135); a synthesized `Deadlocked` slot still
+        // ranks last (TICKET-062). This changes ONLY which error propagates; it does not
         // touch the `Exit`-over-`Fault` rule above or the nursery's abort semantics (every fault
         // still trips the shared cancel flag the same way it always did).
         // W7-47 — `first_exit` only ever comes from a SLOT, so an `os.exit` issued by an eager
@@ -5315,7 +5318,7 @@ impl Vm {
                 // Re-check under the re-taken lock: a job may have finished in the gap, which is
                 // progress and makes the verdict stale.
                 if verdict && g.outstanding() > slack {
-                    bail = Some(self.err(JOIN_DEADLOCK_MSG.to_string(), span));
+                    bail = Some(self.err(JOIN_DEADLOCK_MSG.to_string(), span).deadlock());
                     break;
                 }
             }

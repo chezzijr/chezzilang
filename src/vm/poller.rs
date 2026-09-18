@@ -528,6 +528,7 @@ mod tests {
             is_assert: false,
             is_over_memory: false,
             is_timed_out: false,
+            is_deadlock: false,
         }
     }
 

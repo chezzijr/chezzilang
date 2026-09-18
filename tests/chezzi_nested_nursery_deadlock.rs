@@ -3,6 +3,8 @@
 //! unblock it, and a task that RECOVERS a genuine inner-nursery `deadlock` poisons the enclosing
 //! nursery's bookkeeping so a later live rendezvous is also falsely reported as `deadlock`.
 //! T=2/4/default: both programs complete cleanly (`docs/gaps.md` W12-1 / W12-4).
+//! TICKET-135 (D1): a deadlock verdict is now FATAL, so no program can RECOVER an inner deadlock and
+//! keep running. The recovered shapes below abort with `deadlock` at every worker count.
 
 use std::process::Command;
 
@@ -55,50 +57,28 @@ fn nested_nursery_owner_blocked_on_channel_op_completes_at_threads_1() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// W12-4: a task recovers a genuine inner-nursery `deadlock`, then rendezvous with a sibling over
-/// `out`. The exchange succeeds (`task got 1`) but the outer join then falsely faults `deadlock`
-/// too — the recovered fault leaves the enclosing sched's bookkeeping stale.
+/// W12-4 (TICKET-135, D1): a task `recover:`s a genuine inner-nursery `deadlock`. The verdict is
+/// FATAL, so `recover:` is transparent to it: the program aborts, `inner err` never prints, and the
+/// later `out` rendezvous and the outer join never run.
 #[test]
-fn recovered_inner_deadlock_does_not_poison_the_enclosing_nursery_at_threads_1() {
+fn a_recovered_inner_deadlock_is_fatal_at_threads_1() {
     let dir = std::env::temp_dir().join(format!("chz-w12-4-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("create fixture dir");
-    let path = dir.join("recovered_poisons.chz");
-    std::fs::write(
-        &path,
-        "fn main():\n    \
-             ch := Channel[int](0)\n    \
-             out := Channel[int](0)\n    \
-             parallel:\n        \
-                 spawn:\n            \
-                     r := recover:\n                \
-                         parallel:\n                    \
-                             spawn:\n                        \
-                                 ch.recv()\n            \
-                     match r:\n                \
-                         Ok(_): print(\"inner ok\")\n                \
-                         Err(e): print(\"inner err\")\n            \
-                     print(\"task got {out.recv()}\")\n        \
-                 spawn:\n            \
-                     out.send(1)\n    \
-             print(\"done\")\n\
-         main()\n",
-    )
-    .expect("write fixture");
+    let path = dir.join("recovered_fatal.chz");
+    std::fs::write(&path, RECOVERED).expect("write fixture");
 
     for round in 0..5 {
         let out = run_at_threads_1(&path);
+        let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
-            out.status.success(),
-            "round {round}: expected rc=0, got {} — stderr: {stderr}",
+            !out.status.success() && stderr.contains("deadlock"),
+            "round {round}: expected a fatal `deadlock`, got {} — stderr: {stderr}",
             out.status
         );
-        let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(
-            stdout.contains("inner err")
-                && stdout.contains("task got 1")
-                && stdout.contains("done"),
-            "round {round}: expected full completion, got stdout: {stdout} stderr: {stderr}"
+            !stdout.contains("inner err") && !stdout.contains("done"),
+            "round {round}: `recover:` must not catch the verdict, got stdout: {stdout}"
         );
     }
     let _ = std::fs::remove_dir_all(&dir);
@@ -429,8 +409,8 @@ fn recursive_depth(_threads: Option<&str>) -> usize {
 /// TICKET-103 (W12-1, W12-4) — every live nested-nursery shape completes with Go's output at every
 /// worker count: an owner blocked on its own child's channel, a recursion of that shape (30 deep at
 /// T=1), a fn whose implicit nursery joins at fall-through, `return` or `?` while a caller feeds
-/// its child, a recovered inner deadlock (both roles), and a sibling spawned after the inner
-/// nursery opened.
+/// its child, and a sibling spawned after the inner nursery opened. (The recovered-inner-deadlock
+/// shapes moved to the fatal test below: TICKET-135, D1.)
 ///
 /// Spawns and polls rather than calling `output()`: a hung child never closes its pipes, so
 /// `output()` would wedge this test binary instead of failing it.
@@ -441,7 +421,7 @@ fn fixed_nested_nursery_shapes_complete_at_every_worker_count() {
         let recursive_src = RECURSIVE.replace("DEPTH", &depth.to_string());
         let recursive_want = format!("depth {}", depth + 1);
         let recursive_want = [recursive_want.as_str()];
-        let fixtures: [(&str, &str, Expect); 11] = [
+        let fixtures: [(&str, &str, Expect); 6] = [
             ("owner_blocked", OWNER_BLOCKED, Expect::Exact(&["got 2"])),
             ("recursive", &recursive_src, Expect::Exact(&recursive_want)),
             ("dd6_fed", DD6_FED, Expect::Exact(&["f got 7", "done"])),
@@ -456,34 +436,9 @@ fn fixed_nested_nursery_shapes_complete_at_every_worker_count() {
                 Expect::Exact(&["g got 7", "g -> Err('bail')", "done"]),
             ),
             (
-                "recovered",
-                RECOVERED,
-                Expect::Exact(&["inner err", "task got 1", "done"]),
-            ),
-            (
-                "recovered_swapped",
-                RECOVERED_SWAPPED,
-                Expect::Exact(&["inner err", "task got 1", "done"]),
-            ),
-            (
                 "late_feed",
                 LATE_FEED,
                 Expect::ThenLast(&["inner got 5", "late sibling done"], "done"),
-            ),
-            (
-                "late_recover",
-                LATE_RECOVER,
-                Expect::Exact(&["inner err", "task got 1", "done"]),
-            ),
-            (
-                "cousin_fed",
-                COUSIN_FED,
-                Expect::Exact(&["inner err", "F got 2", "done"]),
-            ),
-            (
-                "exec_nested",
-                EXEC_NESTED,
-                Expect::Exact(&["job err", "done"]),
             ),
         ];
         for (name, src, expect) in &fixtures {
@@ -528,7 +483,9 @@ fn fixed_nested_nursery_shapes_complete_at_every_worker_count() {
 
 /// TICKET-103 — the fix must not turn a genuine nested deadlock into a hang: an owner blocked on a
 /// child that waits on a channel nobody sends, and a recovered inner deadlock whose task then
-/// waits on a channel nobody sends, both still fault `deadlock` at every worker count.
+/// waits on a channel nobody sends, both still fault `deadlock` at every worker count. TICKET-135
+/// (D1): the shapes that `recover:` an inner deadlock (`recovered`, `recovered_swapped`,
+/// `late_recover`, `cousin_fed`, `exec_nested`) abort too, before any post-recover line prints.
 #[test]
 fn nested_nursery_genuine_deadlocks_still_fault_at_every_worker_count() {
     for (name, src) in [
@@ -536,6 +493,11 @@ fn nested_nursery_genuine_deadlocks_still_fault_at_every_worker_count() {
         ("recstuck", RECSTUCK),
         ("dd6", DD6),
         ("nofeed_join", NOFEED_JOIN),
+        ("recovered", RECOVERED),
+        ("recovered_swapped", RECOVERED_SWAPPED),
+        ("late_recover", LATE_RECOVER),
+        ("cousin_fed", COUSIN_FED),
+        ("exec_nested", EXEC_NESTED),
     ] {
         for threads in WORKER_COUNTS {
             for round in 0..5 {
@@ -558,9 +520,13 @@ fn nested_nursery_genuine_deadlocks_still_fault_at_every_worker_count() {
                 };
                 let (stdout, stderr) = read_pipes(&mut child);
                 assert!(
-                    !status.success() && stderr.contains("deadlock"),
-                    "{name}, CHEZZI_THREADS={threads:?}, round {round}: expected a `deadlock` \
-                     fault, got status {status}, stdout {stdout:?}, stderr {stderr:?}"
+                    !status.success()
+                        && stderr.contains("deadlock")
+                        && !stdout.contains("inner err")
+                        && !stdout.contains("job err"),
+                    "{name}, CHEZZI_THREADS={threads:?}, round {round}: expected a fatal \
+                     `deadlock` with no post-recover output, got status {status}, \
+                     stdout {stdout:?}, stderr {stderr:?}"
                 );
                 let _ = std::fs::remove_dir_all(&dir);
             }

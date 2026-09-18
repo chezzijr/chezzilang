@@ -68,6 +68,7 @@ impl Vm {
             is_assert: false,
             is_over_memory: false,
             is_timed_out: false,
+            is_deadlock: false,
         })
     }
 
@@ -192,6 +193,7 @@ impl Vm {
             is_assert: false,
             is_over_memory: false,
             is_timed_out: false,
+            is_deadlock: false,
         }
     }
 
@@ -1462,8 +1464,13 @@ impl Vm {
                 // bypass just below, drops it here instead of surviving to decorate an unrelated
                 // later fault.
                 let gen_prefix = std::mem::take(&mut self.gen_fault_prefix);
-                let caught_here =
-                    matches!(self.handlers.last().copied(), Some(h) if h.frame_len > base_level);
+                // TICKET-135 (D1): a deadlock verdict is fatal like Go's `all goroutines are asleep`.
+                // `recover:` is transparent to it: the fault takes the uncaught path (defers and
+                // escaped-nursery reports unchanged) and the marker is re-stamped so a faulting
+                // `defer` cannot strip it.
+                let fatal = rte.is_deadlock;
+                let caught_here = !fatal
+                    && matches!(self.handlers.last().copied(), Some(h) if h.frame_len > base_level);
                 let cancel_bypass = self.cancelled && !(self.deferring > 0 && caught_here);
                 // TICKET-096 — a nursery OWNER's `owner_fault_floor` is `Some(n)` while a child fault
                 // recorded at `nurseries` index `n` is unwinding it. A handler with `Handler::nursery_len
@@ -1503,7 +1510,7 @@ impl Vm {
                 // deferred calls first (Go: defers run as the panic unwinds, before recover regains
                 // control). A fault inside a deferred call supersedes the original.
                 let target = match self.handlers.last().copied() {
-                    Some(h) if h.frame_len > base_level => h.frame_len,
+                    Some(h) if !fatal && h.frame_len > base_level => h.frame_len,
                     _ => base_level,
                 };
                 // A genuine fault (not a B3.4 cancel / `std.os.exit`, both handled above) cancels-and-
@@ -1513,12 +1520,13 @@ impl Vm {
                 // defers). `unwind_deferred` does the interleaving; this covers BOTH the uncaught arm
                 // (no handler) and the frames discarded above a catching `recover:`.
                 let rte = self.unwind_deferred(target, true).unwrap_or(rte);
+                let rte = if fatal { rte.deadlock() } else { rte };
                 // A deferred `std.os.exit` turns the unwind into a hard halt.
                 if self.pending_exit.is_some() {
                     return Err(rte);
                 }
                 match self.handlers.last().copied() {
-                    Some(h) if h.frame_len > base_level => {
+                    Some(h) if !fatal && h.frame_len > base_level => {
                         self.handlers.pop();
                         // This `recover:` caught the fault — discard any trace captured deeper in (it
                         // belongs to a fault that is now handled), so a later uncaught fault re-captures.
@@ -2015,6 +2023,7 @@ impl Vm {
                     is_assert: true,
                     is_over_memory: false,
                     is_timed_out: false,
+                    is_deadlock: false,
                 });
             }
             Op::GetLocal(slot) => {
