@@ -1,0 +1,35 @@
+# tests/chz/stdlib/numeric_edges_w14_test.chz — TICKET-144 (W14-34): numeric/stdlib edges vs CPython 3.14.
+import std.math
+import std.path
+import std.datetime
+
+test fn float_sum_is_compensated_like_cpython():
+    assert [0.1, 0.2, 0.3].sum() == 0.6, "{[0.1, 0.2, 0.3].sum()}"
+
+test fn inf_and_nan_upper_case_under_upper_format_specs():
+    inf := 1.0 / 0.0
+    got := "{inf:E} {-inf:E} {inf:G}"
+    assert got == "INF -INF INF", got
+
+test fn signed_zero_orders_as_equal_and_sort_is_stable():
+    ys := [(1, 0.0), (2, -0.0)]
+    ys.sort_by_key(fn(t: (int, float)) -> float: t.1)
+    assert ys[0].0 == 1, "{ys}"
+
+test fn parse_int_base_accepts_underscore_after_prefix():
+    r := math.parse_int_base("0x_ff", 0)
+    match r:
+        Ok(v): assert v == 255
+        Err(e): assert false, e.message()
+
+test fn with_ext_on_empty_name_is_an_error():
+    r := recover: path.with_ext("", "txt")
+    match r:
+        Ok(v): assert false, "with_ext on empty name returned {v}"
+        Err(_): assert true
+
+test fn from_epoch_near_i64_min_does_not_overflow():
+    r := recover: datetime.from_epoch(-9223372036854775807)
+    match r:
+        Ok(_): assert true
+        Err(e): assert false, e.message()
