@@ -166,3 +166,20 @@ test fn try_recv_sees_a_blocked_in_place_rendezvous_sender():
     rz.send(7)
     ex.shutdown()
     assert got.get() == 7, "try_recv must see a block-in-place rendezvous sender"
+
+# TICKET-136 (W14-35) — a rendezvous channel has no slots, so a send that can never complete names
+# the missing RECEIVER, not a full buffer. The `map` callback is a native re-entry, so the send
+# cannot park and takes the in-callback fault.
+fn send_one(rz: Channel[int], x: int) -> int:
+    rz.send(x)
+    return x
+
+test fn rendezvous_send_that_cannot_park_names_the_missing_receiver():
+    rz := Channel[int](0)
+    msg := Shared("")
+    parallel:
+        spawn:
+            r := recover: [1].map(fn(x: int) -> int: send_one(rz, x))
+            msg.set(fault_msg(r))
+    assert msg.get().starts_with("send on a rendezvous channel: deadlock"), msg.get()
+    assert not msg.get().contains("at capacity"), msg.get()

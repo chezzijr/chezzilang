@@ -57,6 +57,22 @@ const FULL_SEND_DEADLOCK: &str = "send on a full channel: deadlock — the bound
     capacity and no runnable task can receive to free a slot. (Make sure a task that receives from \
     this channel is spawned with `spawn:` and is still running.)";
 
+/// The rendezvous (cap 0) sibling of [`FULL_SEND_DEADLOCK`] (TICKET-136, W14-35): a rendezvous
+/// channel has no slots, so "at capacity" is false for it — the send can never complete because no
+/// receiver is coming. Picked by [`send_deadlock_msg`] wherever the channel's cap is known.
+const RENDEZVOUS_SEND_DEADLOCK: &str = "send on a rendezvous channel: deadlock — the channel has \
+    no buffer and no runnable task can receive from it. (Make sure a task that receives from this \
+    channel is spawned with `spawn:` and is still running.)";
+
+/// The send-deadlock text for a channel of capacity `cap` (`Some(0)` = rendezvous).
+fn send_deadlock_msg(cap: Option<usize>) -> &'static str {
+    if cap == Some(0) {
+        RENDEZVOUS_SEND_DEADLOCK
+    } else {
+        FULL_SEND_DEADLOCK
+    }
+}
+
 /// The shared fault for a `send` to a CLOSED channel. ONE const for the same reason
 /// [`FULL_SEND_DEADLOCK`] is one: the top-of-`send` guard, the `wait:` send arm and the eager
 /// blocked-sender loop must all emit byte-identical text. Go panics `send on closed channel` here.
@@ -1814,11 +1830,13 @@ impl Vm {
                         Arc::clone(&core),
                         Some(Arc::clone(&handle)),
                     ));
-                    if let Err(e) = self.block_wait_tick(&core, FULL_SEND_DEADLOCK, span, |g| {
-                        handle.load(Ordering::Relaxed) != crate::vm::core::DEPOSIT_QUEUED
-                            || g.has_send_slot(core.cap)
-                            || g.closed
-                    }) {
+                    if let Err(e) =
+                        self.block_wait_tick(&core, RENDEZVOUS_SEND_DEADLOCK, span, |g| {
+                            handle.load(Ordering::Relaxed) != crate::vm::core::DEPOSIT_QUEUED
+                                || g.has_send_slot(core.cap)
+                                || g.closed
+                        })
+                    {
                         // TICKET-042a — a deadline/cancel/exit/deadlock fault unwinds out of this
                         // loop. The deposit must not outlive the send that faulted, or a later
                         // `try_recv`/`recv` delivers a value from a send that never completed.
@@ -1903,7 +1921,7 @@ impl Vm {
         // cannot snapshot-park — fault for v1 (the `ponytail:` upgrade path is a demote-in-place send
         // block, like `demote_recv_block`).
         if self.native_reentry > 0 {
-            return Err(self.err(FULL_SEND_DEADLOCK.to_string(), span));
+            return Err(self.err(send_deadlock_msg(core.cap).to_string(), span));
         }
         // A real M:N WORKER snapshot-parks: the worker loop drives `send_suspend` → `Disp::SendPark`.
         if self.mn.is_some() {
@@ -1932,7 +1950,7 @@ impl Vm {
         // worker loop to drive its `send_suspend` — parking there would leak it forever (`paused()`
         // stuck true → silent halt), so it must NOT park: fault (the inline-owner-never-parks
         // invariant, mirroring `chan_recv_step` gating its snapshot-park on `self.mn.is_some()` ONLY).
-        Err(self.err(FULL_SEND_DEADLOCK.to_string(), span))
+        Err(self.err(send_deadlock_msg(core.cap).to_string(), span))
     }
 
     /// Atomic space-check + enqueue + receiver-wake on a BOUNDED channel; returns whether the value
