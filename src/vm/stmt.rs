@@ -65,7 +65,7 @@ impl Vm {
     /// cleanup runs as the stack unwinds, before a `recover:` boundary regains control (or before
     /// the program exits on an uncaught fault). A fault in a deferred call supersedes the original.
     ///
-    /// `report_escaped` — a genuine fault (not a B3.4 cancel / `std.os.exit`) cancels
+    /// `report_escaped` — a genuine fault or a B3.4 cancel (TICKET-135, W14-39), but not `std.os.exit`, cancels
     /// each discarded frame's escaped nurseries (its implicit nursery + any inner `parallel:` the
     /// fault unwound past) BEFORE that frame's `defer`s run — matching the interp oracle, which
     /// reports in `exec_parallel` / `leave_implicit_nursery` as the body unwinds and only then runs

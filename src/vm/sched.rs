@@ -2481,7 +2481,9 @@ impl Vm {
                         // documented no-defer behavior: it sets neither the cancel latch nor a marker.
                         let rte = if self.cancelled || rte.is_over_memory || rte.is_timed_out {
                             let (over_mem, timed) = (rte.is_over_memory, rte.is_timed_out);
-                            let r = self.unwind_deferred(0, false).unwrap_or(rte);
+                            // TICKET-135 (W14-39): as in `run_until`'s cancel bypass, abort the
+                            // escaped nurseries of a task whose offloaded sleep a cancel ended.
+                            let r = self.unwind_deferred(0, self.cancelled).unwrap_or(rte);
                             let r = if over_mem { r.over_memory() } else { r };
                             if timed { r.timed_out() } else { r }
                         } else {

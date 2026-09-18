@@ -252,6 +252,44 @@ const COUSIN_FED: &str = r#"fn main():
 main()
 "#;
 
+/// TICKET-135 (W14-39) — task A's nested nursery child panics while task B's nested nursery child
+/// is parked on a channel that only A's tail would feed.
+const PANIC_COUSIN: &str = r#"fn main():
+    x := Channel[int](0)
+    y := Channel[int](0)
+    parallel:
+        spawn:
+            parallel:
+                spawn:
+                    panic("boom")
+            x.send(1)
+        spawn:
+            parallel:
+                spawn:
+                    y.send(x.recv() + 1)
+                print("F got {y.recv()}")
+    print("done")
+main()
+"#;
+
+/// TICKET-135 (W14-39) — as `PANIC_COUSIN`, but B's nested nursery body parks on its own channel.
+const PANIC_BODY_PARKED: &str = r#"fn main():
+    x := Channel[int](0)
+    y := Channel[int](0)
+    parallel:
+        spawn:
+            parallel:
+                spawn:
+                    panic("boom")
+        spawn:
+            parallel:
+                spawn:
+                    x.recv()
+                y.recv()
+    print("done")
+main()
+"#;
+
 /// TICKET-112 — a genuine nested deadlock whose outer body sits at its own join (not a channel
 /// recv), a third shape of the same open-body-veto defect.
 const NOFEED_JOIN: &str = r#"fn main():
@@ -527,6 +565,50 @@ fn nested_nursery_genuine_deadlocks_still_fault_at_every_worker_count() {
                     "{name}, CHEZZI_THREADS={threads:?}, round {round}: expected a fatal \
                      `deadlock` with no post-recover output, got status {status}, \
                      stdout {stdout:?}, stderr {stderr:?}"
+                );
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+        }
+    }
+}
+
+/// TICKET-135 (W14-39) — a sibling task's fault cancels a task parked in its nested nursery's BODY,
+/// and the run faults `boom` at every worker count instead of hanging. The cancel unwind used to
+/// skip aborting the nested nursery, orphaning its parked child; at `CHEZZI_THREADS=1` no worker
+/// was left to drain it. Go 1.27 prints `panic: boom`.
+#[test]
+fn a_sibling_fault_cancels_a_task_parked_in_its_nested_nursery_body_at_every_worker_count() {
+    for (name, src) in [
+        ("panic_cousin", PANIC_COUSIN),
+        ("panic_body_parked", PANIC_BODY_PARKED),
+    ] {
+        for threads in WORKER_COUNTS {
+            for round in 0..8 {
+                let (dir, mut child) = spawn_fixture(name, src, threads, round);
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                let status = loop {
+                    match child.try_wait().expect("try_wait") {
+                        Some(st) => break Some(st),
+                        None if std::time::Instant::now() >= deadline => break None,
+                        None => std::thread::sleep(std::time::Duration::from_millis(20)),
+                    }
+                };
+                let Some(status) = status else {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!(
+                        "{name}, CHEZZI_THREADS={threads:?}, round {round}: must fault `boom`, \
+                         not hang (no exit within 10s)"
+                    );
+                };
+                let (stdout, stderr) = read_pipes(&mut child);
+                assert!(
+                    !status.success()
+                        && stderr.contains("boom")
+                        && !stdout.contains("F got")
+                        && !stdout.contains("done"),
+                    "{name}, CHEZZI_THREADS={threads:?}, round {round}: expected a fatal `boom`, \
+                     got status {status}, stdout {stdout:?}, stderr {stderr:?}"
                 );
                 let _ = std::fs::remove_dir_all(&dir);
             }

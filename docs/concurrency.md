@@ -1084,7 +1084,8 @@ fn serve(tok: Token, io: Channel[str]):
 >
 > A cancelled task then unwinds through its `defer`s — cancelled while running (back-edge), while parked
 > on a `recv`/`wait:`, while parked on a socket, or while parked when a *sibling*'s fault tore the
-> nursery down. `defer` is the language's only cleanup
+> nursery down. A cancelled task first cancels and joins every `parallel:` it is inside, so its own
+> children finish before its `defer`s run (TICKET-135, W14-39). `defer` is the language's only cleanup
 > mechanism (no destructors, no `with`), so this is the guarantee cleanup rests on. At a `recv`/`wait:`
 > checkpoint **cancel wins** over a queued value, a tripped `done()` latch and a fired timer.
 >

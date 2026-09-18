@@ -1488,7 +1488,13 @@ impl Vm {
                 if cancel_bypass || owner_bypass || rte.is_over_memory || rte.is_timed_out {
                     let over_mem = rte.is_over_memory;
                     let timed = rte.is_timed_out;
-                    let rte = self.unwind_deferred(base_level, false).unwrap_or(rte);
+                    // TICKET-135 (W14-39): a cancelled task aborts and joins every nursery it unwinds
+                    // past, like a faulting one. With `false` its nested nursery's parked children
+                    // were orphaned, and at CHEZZI_THREADS=1 the join hung. The hard halts
+                    // (`--max-heap`, `--timeout`) keep `false`.
+                    let rte = self
+                        .unwind_deferred(base_level, cancel_bypass)
+                        .unwrap_or(rte);
                     let rte = if over_mem { rte.over_memory() } else { rte };
                     let rte = if timed { rte.timed_out() } else { rte };
                     return Err(rte);

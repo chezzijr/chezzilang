@@ -13364,6 +13364,7 @@ whole-program faults (deadlock, `os.exit`, resource caps).
 | W14-35 | P3 | diagnostics | generator fault frame names the FIRST resume; entrypoint missing fn found only at runtime, no file; same-named types from two modules render identically; empty range pattern `5..1` accepted; `int??` leaks `questionquestion`; `?` prints an unknown type as `?`; duplicate-arm spans point at the scrutinee; `fn a() -> int: if …` inline rejected (closure accepts); cyclic list print faults (CPython `[1, [...]]`); rendezvous deadlock says "bounded channel is at capacity"; `submit_task` fault located in `<native:std.concurrency>` | ticket |
 | W14-36 | P3 | core | a tuple scrutinee rejects a bare-name catch-all (`rest:`); CPython/Rust accept | ticket |
 | W14-37 | P3 | sched | a fatal deadlock verdict still runs the unwound frames' defers (`main` defer ran); Go 1.27's all-goroutines-asleep abort runs none. Residual of TICKET-135: D1 kept the uncaught path's defer behavior, and parked siblings run none (DEC-092) | residual |
+| ~~W14-39~~ | P1 | sched | a sibling's fault cancels a task parked in its nested nursery's body; the cancel unwind skipped the nested nursery's abort, its parked child was orphaned, and the run hung at CHEZZI_THREADS=1 (Go 1.27: panic: boom) | CLOSED 2026-09-19, TICKET-135: the cancel unwind aborts escaped nurseries |
 
 Not filed: `json.parse` rejecting a lone surrogate escape (defensible — a `str` cannot hold one; Go
 substitutes U+FFFD); a spawned-task fault printing only `at main` (deliberate, B4). Clean: every checker
