@@ -32653,3 +32653,16 @@ fn generic_ctor_numeric_widen_neighbours_reject() {
         "argument 1 of 'V': expected float, found int",
     );
 }
+
+#[test]
+fn int_never_widens_into_float_declaration_slot() {
+    rejects("x: float = 1\nprint(x)\n", "write 1.0");
+}
+
+#[test]
+fn int_never_widens_into_float_list_extend_slot() {
+    rejects(
+        "fn main():\n    l: List[float] = [1.5]\n    l.extend([3])\n",
+        "write 1.0",
+    );
+}
