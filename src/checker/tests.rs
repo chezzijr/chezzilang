@@ -33007,3 +33007,20 @@ fn a_tuple_scrutinee_catch_all_binding_is_irrefutable() {
         "non-exhaustive",
     );
 }
+
+// TICKET-142 (W14-19): a numeric format spec on a concrete struct is a compile error, like the containers.
+#[test]
+fn format_spec_on_concrete_struct_rejected_at_check() {
+    rejects(
+        "struct P:\n    x: int\n\nfn main():\n    p := P(1)\n    print(\"{p:d}\")\n",
+        "format spec: type 'd' not valid for a string",
+    );
+}
+
+// TICKET-142 (W14-32): `_ := expr` discards at module top level, any number of times, any types.
+#[test]
+fn blank_identifier_redeclared_at_top_level_with_different_types() {
+    ok(
+        "fn f() -> int?:\n    return None\n\nfn g() -> str?:\n    return None\n\n_ := f()\n_ := g()\n",
+    );
+}
