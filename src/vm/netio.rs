@@ -86,6 +86,14 @@ const EMPTY_WAIT_DEADLOCK: &str = "wait on channels that are all empty: deadlock
 #[cfg(test)]
 pub(crate) static BLOCK_WAITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// TICKET-134 — test-only: hold the window between the owner-fault rung and the verdict open until
+/// the owner's nursery has recorded a fault. Fires once per run, only when the run's own
+/// `HostConfig.env` carries this key, so no other lib test can trip it (libtest runs the whole lib
+/// suite in one process, and `run_file_with` runs the VM on its own thread, so neither a global flag
+/// nor a thread-local can be scoped to one test — the per-run `HostConfig.env` can).
+#[cfg(test)]
+pub(crate) const OWNER_FAULT_WINDOW_ENV: &str = "CHEZZI_TEST_OWNER_FAULT_WINDOW";
+
 /// Test-only instrumentation: **W7-13's defect signature** — a [`Vm::block_wait_tick`] wait that
 /// slept its whole [`DEMOTE_POLL_BACKOFF`] tick and yet found the channel READY when it woke, i.e. a
 /// wakeup that was lost because it landed while nobody was on the condvar.
@@ -2362,6 +2370,48 @@ impl Vm {
             })
     }
 
+    /// TICKET-062 (W10-16) / TICKET-096 — a sibling task's recorded fault outranks the synthesized
+    /// deadlock verdict for a `parallel:` nursery OWNER. Records `owner_fault_floor` so `run_until`
+    /// can bypass only a handler installed INSIDE the faulting nursery's body. Deliberately NOT gated
+    /// on `is_counted_party()` — a recorded fault is a fact, not a heuristic verdict, so it needs no
+    /// judgeability. `cancel_suppressed()` is the same defer/already-unwinding guard
+    /// `cancel_requested()` applies, so a `defer` body is never truncated by this rung.
+    pub(super) fn deliver_owner_fault(&mut self) -> Option<RuntimeError> {
+        if self.cancel_suppressed() {
+            return None;
+        }
+        let (n, e) = self.owned_nursery_fault()?;
+        self.owner_fault_floor = Some(n);
+        Some(e)
+    }
+
+    /// TICKET-134 — test-only: hold the window between the owner-fault rung and the verdict open
+    /// until the owner's nursery has recorded a fault, so the check-then-check race
+    /// [`Vm::block_halt_check`] closes is deterministically reachable. No-op unless armed via
+    /// [`OWNER_FAULT_WINDOW_ENV`] in this run's own `HostConfig.env`.
+    #[cfg(test)]
+    fn owner_fault_window_hook(&self) {
+        if self.eager_scheds.is_empty() {
+            return;
+        }
+        let armed = self
+            .host
+            .env
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(OWNER_FAULT_WINDOW_ENV)
+            .is_some();
+        if !armed {
+            return;
+        }
+        let t0 = std::time::Instant::now();
+        while self.owned_nursery_fault().is_none()
+            && t0.elapsed() < std::time::Duration::from_secs(10)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
     /// Register this thread as a blocked party for as long as the returned guard lives, so the
     /// process-wide verdict can see it parked. The party half is `None` when this thread is not a
     /// counted party.
@@ -2503,23 +2553,15 @@ impl Vm {
         if let Some(e) = self.run_exit_err(span) {
             return Err(e);
         }
-        // TICKET-062 (W10-16) — a sibling task's recorded fault outranks the synthesized deadlock
-        // verdict for a `parallel:` nursery OWNER, applying `reduce_task_slots`'s `Exit > Fault >
-        // Deadlocked` precedence (`src/vm/sched.rs:2150-2158`) here too: the owner's own body never
-        // passes through that reduce, so without this rung its child's fault never reaches it and the
-        // owner reports a synthesized `deadlock` instead. Deliberately NOT gated on
-        // `is_counted_party()` — a recorded fault is a fact, not a heuristic verdict, so it needs no
-        // judgeability.
-        // TICKET-096 — records `n`, the faulting nursery's `nurseries` index, so `run_until` can bypass
-        // only a handler installed INSIDE nursery `n`'s body (`Handler::nursery_len > n`), never one
-        // outside it. `!cancel_suppressed()` is the same defer/already-unwinding pair
-        // `cancel_requested()` applies, so a `defer` body is never truncated by this rung.
-        if !self.cancel_suppressed()
-            && let Some((n, e)) = self.owned_nursery_fault()
-        {
-            self.owner_fault_floor = Some(n);
+        // TICKET-062 (W10-16) / TICKET-096 — see `Vm::deliver_owner_fault`.
+        if let Some(e) = self.deliver_owner_fault() {
             return Err(e);
         }
+        // TICKET-134 — test-only seam: widen the check-then-check window between the rung above and
+        // the verdict below so a racing fault is deterministically reachable in a test. No-op outside
+        // `#[cfg(test)]` and unless armed.
+        #[cfg(test)]
+        self.owner_fault_window_hook();
         // The process-wide deadlock verdict (`future.md` §2d step 0), checked LAST so the two real
         // halts still outrank it. Every counted party is registered as blocked and none of their wait
         // conditions is satisfiable ⇒ nothing in this run can ever move again, so this party faults
@@ -2528,6 +2570,12 @@ impl Vm {
         // ([`quiesce::PartyWait::satisfiable`]) answers that question directly instead of waiting a
         // tick to guess at it — a value that landed IS a satisfiable wait, so the verdict declines.
         if self.is_counted_party() && self.quiesce.quiesced(&self.exec_registry) {
+            // TICKET-134 — the child can record its fault and complete between the rung above and
+            // this verdict. A verdict that saw the nursery complete took the SchedCore lock after the
+            // child's fault-slot write, so this re-read sees the fault.
+            if let Some(e) = self.deliver_owner_fault() {
+                return Err(e);
+            }
             return Err(self.err(deadlock_msg.to_string(), span));
         }
         // TICKET-052 — an eager `Executor` job (`mn.is_none()`) about to wait another tick hands its

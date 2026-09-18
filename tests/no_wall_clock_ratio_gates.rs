@@ -300,7 +300,7 @@ fn sleep_synchronised_tests() -> BTreeSet<String> {
 /// rejected it (the walk returns 68). Obtain it by compiling once with an empty array and copying
 /// the "sleeps but is not listed" list `no_new_rust_test_sleeps_to_order_two_events` reports,
 /// verbatim, the same way `stack_trace_reports_call_chain`'s golden was obtained.
-const SLEEP_SYNCHRONISED_TESTS: [&str; 87] = [
+const SLEEP_SYNCHRONISED_TESTS: [&str; 89] = [
     "cousin_fed_completes_instead_of_hanging_at_two_and_four_workers",
     "a_bailed_join_stops_its_jobs_from_starting_new_work",
     "a_cancelled_siblings_defer_runs_whole_on_both_engines",
@@ -392,6 +392,13 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 87] = [
     "net_read_timeout_bounds_whole_call_across_codepoint_parks",
     "net_write_timeout_when_buffer_full",
     "no_event_does_not_inject",
+    // TICKET-134. Its 300ms `time.sleep_ms` is inside the fixture .chz program's SOURCE STRING. It
+    // only lets the owner block before the child faults; the ordering that matters is enforced by
+    // the `owner_fault_window_hook` latch, and a lost race fails loudly on `window not exercised`.
+    "owner_fault_recorded_after_the_fault_rung_still_outranks_the_deadlock_verdict",
+    // TICKET-134. Same reason as the recv entry above: the sleep only orders the owner's block
+    // before the child's fault, and `owner_fault_window_hook` is the real latch.
+    "owner_fault_recorded_after_the_fault_rung_still_outranks_the_full_send_deadlock_verdict",
     "parity_a_blocking_defer_body_completes_when_the_task_is_cancelled",
     "parity_blocking_native_is_an_entry_cancellation_checkpoint_on_both_engines",
     "read_timeout_returns_err",
