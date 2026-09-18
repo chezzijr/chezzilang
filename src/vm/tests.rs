@@ -5455,12 +5455,16 @@ main()
 ";
     let entry = write_temp_chz("t134_owner_fault_window", src);
     let cfg = crate::native::HostConfig::default();
-    cfg.env.lock().unwrap().insert(
-        crate::vm::netio::OWNER_FAULT_WINDOW_ENV.to_string(),
-        "1".to_string(),
-    );
-    let before =
-        crate::vm::netio::OWNER_FAULT_WINDOW_HITS.load(std::sync::atomic::Ordering::Relaxed);
+    // The literal equals `netio::OWNER_FAULT_WINDOW_ENV`. It is spelled out, not imported, so this
+    // test still compiles on a base without the seam (the pipeline's red-on-base check copies only
+    // this file there). The hook `remove`s the key when it arms, so a key still present after the
+    // run means THIS run never reached the window.
+    const KEY: &str = "CHEZZI_TEST_OWNER_FAULT_WINDOW";
+    cfg.env
+        .lock()
+        .unwrap()
+        .insert(KEY.to_string(), "1".to_string());
+    let env = std::sync::Arc::clone(&cfg.env);
     let run_entry = entry.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -5468,10 +5472,9 @@ main()
     });
     let result = rx.recv_timeout(std::time::Duration::from_secs(30));
     let _ = std::fs::remove_file(&entry);
-    let hits = crate::vm::netio::OWNER_FAULT_WINDOW_HITS.load(std::sync::atomic::Ordering::Relaxed);
     assert!(
-        hits > before,
-        "window not exercised: the child faulted before the owner blocked"
+        !env.lock().unwrap().contains_key(KEY),
+        "window not exercised: the hook never armed in this run"
     );
     match result {
         Ok((_out, _err, res, _code)) => match res {

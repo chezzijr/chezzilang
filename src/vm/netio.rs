@@ -93,9 +93,6 @@ pub(crate) static BLOCK_WAITS: std::sync::atomic::AtomicU64 = std::sync::atomic:
 /// nor a thread-local can be scoped to one test — the per-run `HostConfig.env` can).
 #[cfg(test)]
 pub(crate) const OWNER_FAULT_WINDOW_ENV: &str = "CHEZZI_TEST_OWNER_FAULT_WINDOW";
-#[cfg(test)]
-pub(crate) static OWNER_FAULT_WINDOW_HITS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
 
 /// Test-only instrumentation: **W7-13's defect signature** — a [`Vm::block_wait_tick`] wait that
 /// slept its whole [`DEMOTE_POLL_BACKOFF`] tick and yet found the channel READY when it woke, i.e. a
@@ -2392,7 +2389,6 @@ impl Vm {
         if !armed {
             return;
         }
-        OWNER_FAULT_WINDOW_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let t0 = std::time::Instant::now();
         while self.owned_nursery_fault().is_none()
             && t0.elapsed() < std::time::Duration::from_secs(10)
