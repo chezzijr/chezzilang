@@ -260,6 +260,14 @@ None`), so it can block on the channel condvar directly — no replacement worke
 blocks in place and registers no party, so the process-wide verdict declines to judge it rather than
 asserting a wrong `deadlock`.
 
+**TICKET-136 (W14-11) — `is_counted_party` now admits a `defer`-only re-entry.** `run_one_deferred`
+raises `deferring` and `native_reentry` together, so `is_counted_party` is `owns_os_thread() &&
+native_reentry == deferring`: a `main`-thread (or module-top-level) `defer` that blocks now registers
+and the verdict can judge it, where it used to block in place unregistered and hang. A `defer` body
+is VM code on the same thread, so the live-count invariant in `src/vm/quiesce.rs` still holds; a
+callback, generator resume or `test fn` body still leaves `native_reentry > deferring` and stays
+unjudged. `may_block_socket_in_place` keeps the old `native_reentry == 0` meaning.
+
 **`Shared.update` same-box hold-and-wait — WON'T FIX by design.** `update(f)` holds the box's lock
 across `f`; if `f` blocks on a `recv` needing the **same** box, any such sender deadlocks. This is the
 classic hold-and-wait-while-blocking deadlock *every* language with locks + blocking hits (Go detects
