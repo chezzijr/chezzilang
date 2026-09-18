@@ -86,6 +86,17 @@ const EMPTY_WAIT_DEADLOCK: &str = "wait on channels that are all empty: deadlock
 #[cfg(test)]
 pub(crate) static BLOCK_WAITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// TICKET-134 — test-only: hold the window between the owner-fault rung and the verdict open until
+/// the owner's nursery has recorded a fault. Fires once per run, only when the run's own
+/// `HostConfig.env` carries this key, so no other lib test can trip it (libtest runs the whole lib
+/// suite in one process, and `run_file_with` runs the VM on its own thread, so neither a global flag
+/// nor a thread-local can be scoped to one test — the per-run `HostConfig.env` can).
+#[cfg(test)]
+pub(crate) const OWNER_FAULT_WINDOW_ENV: &str = "CHEZZI_TEST_OWNER_FAULT_WINDOW";
+#[cfg(test)]
+pub(crate) static OWNER_FAULT_WINDOW_HITS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 /// Test-only instrumentation: **W7-13's defect signature** — a [`Vm::block_wait_tick`] wait that
 /// slept its whole [`DEMOTE_POLL_BACKOFF`] tick and yet found the channel READY when it woke, i.e. a
 /// wakeup that was lost because it landed while nobody was on the condvar.
@@ -2362,6 +2373,34 @@ impl Vm {
             })
     }
 
+    /// TICKET-134 — test-only: hold the window between the owner-fault rung and the verdict open
+    /// until the owner's nursery has recorded a fault, so the check-then-check race
+    /// [`Vm::block_halt_check`] closes is deterministically reachable. No-op unless armed via
+    /// [`OWNER_FAULT_WINDOW_ENV`] in this run's own `HostConfig.env`.
+    #[cfg(test)]
+    fn owner_fault_window_hook(&self) {
+        if self.eager_scheds.is_empty() {
+            return;
+        }
+        let armed = self
+            .host
+            .env
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(OWNER_FAULT_WINDOW_ENV)
+            .is_some();
+        if !armed {
+            return;
+        }
+        OWNER_FAULT_WINDOW_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let t0 = std::time::Instant::now();
+        while self.owned_nursery_fault().is_none()
+            && t0.elapsed() < std::time::Duration::from_secs(10)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
     /// Register this thread as a blocked party for as long as the returned guard lives, so the
     /// process-wide verdict can see it parked. The party half is `None` when this thread is not a
     /// counted party.
@@ -2520,6 +2559,11 @@ impl Vm {
             self.owner_fault_floor = Some(n);
             return Err(e);
         }
+        // TICKET-134 — test-only seam: widen the check-then-check window between the rung above and
+        // the verdict below so a racing fault is deterministically reachable in a test. No-op outside
+        // `#[cfg(test)]` and unless armed.
+        #[cfg(test)]
+        self.owner_fault_window_hook();
         // The process-wide deadlock verdict (`future.md` §2d step 0), checked LAST so the two real
         // halts still outrank it. Every counted party is registered as blocked and none of their wait
         // conditions is satisfiable ⇒ nothing in this run can ever move again, so this party faults

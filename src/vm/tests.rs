@@ -5433,6 +5433,59 @@ main()
     }
 }
 
+/// TICKET-134 — `Vm::block_halt_check` reads the owner's nursery fault, then reads the deadlock
+/// verdict, as two separate observations of shared state. A child that faults between them makes the
+/// verdict see a complete nursery and report a synthesized `deadlock` instead of the child's real
+/// fault. The `owner_fault_window_hook` seam (`src/vm/netio.rs`) widens that window so the race is
+/// deterministically reachable: it blocks between the two reads until the child's fault lands.
+#[test]
+fn owner_fault_recorded_after_the_fault_rung_still_outranks_the_deadlock_verdict() {
+    let src = "\
+import std.time
+
+fn main():
+    ch := Channel[int]()
+    parallel:
+        spawn:
+            time.sleep_ms(300)
+            panic(\"task died\")
+        print(ch.recv())
+
+main()
+";
+    let entry = write_temp_chz("t134_owner_fault_window", src);
+    let cfg = crate::native::HostConfig::default();
+    cfg.env.lock().unwrap().insert(
+        crate::vm::netio::OWNER_FAULT_WINDOW_ENV.to_string(),
+        "1".to_string(),
+    );
+    let before =
+        crate::vm::netio::OWNER_FAULT_WINDOW_HITS.load(std::sync::atomic::Ordering::Relaxed);
+    let run_entry = entry.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_file_with(&run_entry, cfg));
+    });
+    let result = rx.recv_timeout(std::time::Duration::from_secs(30));
+    let _ = std::fs::remove_file(&entry);
+    let hits = crate::vm::netio::OWNER_FAULT_WINDOW_HITS.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        hits > before,
+        "window not exercised: the child faulted before the owner blocked"
+    );
+    match result {
+        Ok((_out, _err, res, _code)) => match res {
+            Err(e) => {
+                let s = format!("{e:?}");
+                assert!(s.contains("task died"), "got: {s}");
+                assert!(!s.contains("deadlock"), "got: {s}");
+            }
+            Ok(()) => panic!("t134: expected the child's fault to propagate, program succeeded"),
+        },
+        Err(_) => panic!("hung — t134 owner-fault-window regressed"),
+    }
+}
+
 /// gaps.md W10-1 — a main-task `recv` inside a native re-entry (here: a generator resume) must not
 /// fault `deadlock` while a live sibling can still send. `can_block_in_place` (`src/vm/netio.rs`)
 /// requires `is_counted_party`, which requires `native_reentry == 0`, so main-in-callback falls to
