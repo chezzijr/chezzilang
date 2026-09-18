@@ -7,6 +7,12 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-134 (2026-09-18) — a child fault recorded between the owner-fault rung and the deadlock verdict now outranks the verdict.**
+  `Vm::deliver_owner_fault` (`src/vm/netio.rs`) reads the owner's recorded nursery fault; `block_halt_check`
+  now calls it a second time inside the deadlock verdict, so a child that faults and completes between
+  the two reads is still reported instead of a synthesized `deadlock`. Pinned by two deterministic lib
+  tests, `owner_fault_recorded_after_the_fault_rung_still_outranks_the_deadlock_verdict` (recv) and its
+  `_full_send_` sibling, both driven through the `#[cfg(test)]`-only `owner_fault_window_hook` seam.
 - **TICKET-132 (2026-09-17) — an escape out of a fiber-owned nursery parks its owner instead of waiting inline, closing DEC-103's abort residual.**
   `Vm::park_escaped_abort` (`src/vm/sched.rs`) rewinds `do_return`'s two escape drains and
   `Op::ReclaimNursery` to park the owner fiber, the way `join_nursery` already parked a plain join —

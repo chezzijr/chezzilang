@@ -2370,6 +2370,21 @@ impl Vm {
             })
     }
 
+    /// TICKET-062 (W10-16) / TICKET-096 — a sibling task's recorded fault outranks the synthesized
+    /// deadlock verdict for a `parallel:` nursery OWNER. Records `owner_fault_floor` so `run_until`
+    /// can bypass only a handler installed INSIDE the faulting nursery's body. Deliberately NOT gated
+    /// on `is_counted_party()` — a recorded fault is a fact, not a heuristic verdict, so it needs no
+    /// judgeability. `cancel_suppressed()` is the same defer/already-unwinding guard
+    /// `cancel_requested()` applies, so a `defer` body is never truncated by this rung.
+    pub(super) fn deliver_owner_fault(&mut self) -> Option<RuntimeError> {
+        if self.cancel_suppressed() {
+            return None;
+        }
+        let (n, e) = self.owned_nursery_fault()?;
+        self.owner_fault_floor = Some(n);
+        Some(e)
+    }
+
     /// TICKET-134 — test-only: hold the window between the owner-fault rung and the verdict open
     /// until the owner's nursery has recorded a fault, so the check-then-check race
     /// [`Vm::block_halt_check`] closes is deterministically reachable. No-op unless armed via
@@ -2538,21 +2553,8 @@ impl Vm {
         if let Some(e) = self.run_exit_err(span) {
             return Err(e);
         }
-        // TICKET-062 (W10-16) — a sibling task's recorded fault outranks the synthesized deadlock
-        // verdict for a `parallel:` nursery OWNER, applying `reduce_task_slots`'s `Exit > Fault >
-        // Deadlocked` precedence (`src/vm/sched.rs:2150-2158`) here too: the owner's own body never
-        // passes through that reduce, so without this rung its child's fault never reaches it and the
-        // owner reports a synthesized `deadlock` instead. Deliberately NOT gated on
-        // `is_counted_party()` — a recorded fault is a fact, not a heuristic verdict, so it needs no
-        // judgeability.
-        // TICKET-096 — records `n`, the faulting nursery's `nurseries` index, so `run_until` can bypass
-        // only a handler installed INSIDE nursery `n`'s body (`Handler::nursery_len > n`), never one
-        // outside it. `!cancel_suppressed()` is the same defer/already-unwinding pair
-        // `cancel_requested()` applies, so a `defer` body is never truncated by this rung.
-        if !self.cancel_suppressed()
-            && let Some((n, e)) = self.owned_nursery_fault()
-        {
-            self.owner_fault_floor = Some(n);
+        // TICKET-062 (W10-16) / TICKET-096 — see `Vm::deliver_owner_fault`.
+        if let Some(e) = self.deliver_owner_fault() {
             return Err(e);
         }
         // TICKET-134 — test-only seam: widen the check-then-check window between the rung above and
@@ -2568,6 +2570,12 @@ impl Vm {
         // ([`quiesce::PartyWait::satisfiable`]) answers that question directly instead of waiting a
         // tick to guess at it — a value that landed IS a satisfiable wait, so the verdict declines.
         if self.is_counted_party() && self.quiesce.quiesced(&self.exec_registry) {
+            // TICKET-134 — the child can record its fault and complete between the rung above and
+            // this verdict. A verdict that saw the nursery complete took the SchedCore lock after the
+            // child's fault-slot write, so this re-read sees the fault.
+            if let Some(e) = self.deliver_owner_fault() {
+                return Err(e);
+            }
             return Err(self.err(deadlock_msg.to_string(), span));
         }
         // TICKET-052 — an eager `Executor` job (`mn.is_none()`) about to wait another tick hands its
