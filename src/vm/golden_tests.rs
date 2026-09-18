@@ -2433,25 +2433,12 @@ print("plain global read   : {res.recv()}")
 }
 
 #[test]
-fn airlock_forwarded_closure_reads_forwarders_write_not_the_first_senders_snapshot() {
-    // TICKET-051, historical. Before the fix, `closure_global_snapshot` preferred an existing
-    // frozen snapshot entry over a live read of `home`'s module slot. That preference was meant to
-    // carry a closure's already-resolved values forward through a chain of crossings. But
-    // `to_wire_depth`'s `Obj::Closure` arm treated a forward (task B re-sending a closure it
-    // received from task A) as its OWN "genuine crossing" (task B's `home_origin` differs from
-    // task C's view, so `from_wire_memo` installed a fresh frozen snapshot rather than reusing
-    // task B's) -- yet the VALUES that snapshot was built from were still A's frozen ones, because
-    // `closure_global_snapshot` never re-read task B's own (live, since-written) module slot. Task
-    // B's write to `n` therefore landed in NO copy the forwarded closure could ever reach: not A's
-    // frozen snapshot (never touched by B), not B's own live module slot (the preference skipped
-    // it), and not C's own fresh module
-    // slot (C never wrote it) -- a third, permanently unreachable copy.
-    //
-    // A -> B: real cross-task crossing, installs a snapshot of A's `n` (1).
-    // B writes n = 999 to ITS OWN module copy, then forwards the SAME closure B -> C: this is
-    // also a genuine crossing (a different module view), so by `closure_global_snapshot`'s own
-    // "a genuine crossing installs a fresh snapshot of the CURRENT globals" rule it should carry
-    // B's n = 999, not A's stale n = 1.
+fn airlock_forwarded_closure_reads_the_receivers_copy() {
+    // TICKET-137 (owner decision D2), superseding TICKET-051. A closure carries captures only; the
+    // globals it reads are those of the task that RUNS it. A -> B -> C: B writes `n = 999` to ITS
+    // OWN module copy and forwards the closure, but task C runs it against C's own copy of `n`
+    // (still `1`), so `3 * 1 = 3`. Go and CPython read one live global (`2997`); the divergence is
+    // the deliberate "module globals isolate per task" rule -- share with `Shared`/`Channel`.
     let src = r#"
 n := 1
 fn mk() -> fn(int) -> int:
@@ -2477,9 +2464,9 @@ print("result: {res.recv()}")
 "#;
     let out = golden_entry(src);
     assert_eq!(
-        out, "result: 2997\n",
-        "the forwarding task's own write to the module global must be visible in what it \
-         forwards, not the first sender's stale snapshot: {out:?}"
+        out, "result: 3\n",
+        "a forwarded closure must read the receiving task's own copy of the module global, not \
+         the forwarder's write: {out:?}"
     );
 }
 
@@ -2523,10 +2510,10 @@ print("task read    : {res.recv()}")
 #[test]
 fn airlock_arriving_closure_loses_to_the_receiving_views_own_assignment() {
     // TICKET-051. Same shape as `airlock_receiving_tasks_own_write_beats_an_arriving_closures_global`
-    // but with a top-level `n = 7` inserted before the nursery, so the SENDING task's slot is
-    // `carried` (inherited through its snapshot) and only the receive-side `assigned` skip can
-    // save the receiver's own later write. Go 1.26.6 and CPython 3.14.7 both print `5` and `5`
-    // (measured 2026-09-04, `/tmp/t051p/guard2.chz`).
+    // but with a top-level `n = 7` inserted before the nursery, so the SENDING task inherits `7`
+    // through its snapshot. Under D2 (TICKET-137) the crossing carries no globals, so the
+    // receiver's own later write wins by construction. Go 1.26.6 and CPython 3.14.7 both print `5`
+    // and `5` (measured 2026-09-04, `/tmp/t051p/guard2.chz`).
     let src = r#"
 n := 1
 n = 7
@@ -2553,17 +2540,17 @@ print("task read    : {res.recv()}")
     let out = golden_entry(src);
     assert_eq!(
         out, "closure sees : 5\ntask read    : 5\n",
-        "the receive side must skip a slot the receiving view assigned itself even when the \
-         sender's value is merely carried, not directly assigned: {out:?}"
+        "the receiving view's own assignment must win even when the sender inherited a different \
+         value for the same global: {out:?}"
     );
 }
 
 #[test]
 fn airlock_arriving_closure_does_not_clobber_the_receivers_in_place_push() {
-    // TICKET-051. A slot no ancestor ever assigned must NOT be installed from an arriving
-    // closure, because the receiving task may have mutated its copy in place (`xs.push(9)`),
-    // which no slot write records. Go 1.26.6 and CPython 3.14.7 both print length `2`
-    // (measured 2026-09-04, `/tmp/t051p/xspush.chz`). Chezzi prints `[1, 9] len 1` today.
+    // TICKET-051. An arriving closure must NOT replace the receiving task's copy of a global,
+    // because the receiving task may have mutated it in place (`xs.push(9)`). Under D2
+    // (TICKET-137) no crossing installs anything. Go 1.26.6 and CPython 3.14.7 both print length
+    // `2` (measured 2026-09-04, `/tmp/t051p/xspush.chz`).
     let src = r#"
 import std.concurrency
 
@@ -2595,11 +2582,11 @@ print(res.recv())
 }
 
 #[test]
-fn airlock_closure_carries_a_global_its_sender_only_inherited() {
-    // TICKET-051 regression guard, passes BEFORE any fix on purpose. The rejected "assigned-only"
-    // send filter fails this case: the SENDING task never itself assigns `n`, it only inherits
-    // main's `n = 7` write through the module snapshot taken at its spawn. Chezzi, Go 1.26.6 and
-    // CPython 3.14.7 all print `7` (measured 2026-09-04, `/tmp/t051p/c1.chz`).
+fn airlock_closure_from_a_sender_that_only_inherited_a_global_reads_the_receivers_copy() {
+    // TICKET-137 (owner decision D2), superseding TICKET-051. The SENDING task inherits main's
+    // `n = 7` through the snapshot taken at its spawn, but the RECEIVING task was spawned before
+    // that write and owns a copy with `n = 1`. The received closure reads the receiver's copy.
+    // Go and CPython read one live global (`7`); the divergence is the deliberate per-task rule.
     let src = r#"
 import std.concurrency
 
@@ -2621,17 +2608,17 @@ print("closure sees : {res.recv()}")
 "#;
     let out = golden_entry(src);
     assert_eq!(
-        out, "closure sees : 7\n",
-        "a closure sent by a task that only inherited a write through its snapshot, never \
-         assigned it itself, must still carry that write: {out:?}"
+        out, "closure sees : 1\n",
+        "a received closure must read the receiving task's own copy of the global, not the \
+         sender's inherited write: {out:?}"
     );
 }
 
 #[test]
-fn airlock_forwarded_closure_without_its_own_write_carries_the_first_senders_value() {
-    // TICKET-051 regression guard. Task A writes `n = 999` and sends a closure over `n`. Task B
-    // only forwards the closure without writing `n` itself. Task C receives it and must still see
-    // A's write via B's install-then-forward: `999 * 3 = 2997`.
+fn airlock_forwarded_closure_without_its_own_write_reads_the_receivers_copy() {
+    // TICKET-137 (owner decision D2), superseding TICKET-051. Task A writes `n = 999` and sends a
+    // closure over `n`; task B only forwards it. Task C runs the closure against C's own copy of
+    // `n` (`1`), so `1 * 3 = 3`. Go and CPython read one live global (`2997`).
     let src = r#"
 n := 1
 fn mk() -> fn(int) -> int:
@@ -2658,9 +2645,9 @@ print("result: {res.recv()}")
 "#;
     let out = golden_entry(src);
     assert_eq!(
-        out, "result: 2997\n",
-        "a task that only forwards a closure without writing the global itself must still carry \
-         the value it received: {out:?}"
+        out, "result: 3\n",
+        "a forwarded closure must read the receiving task's own copy of the global, not the \
+         first sender's write: {out:?}"
     );
 }
 
@@ -2690,12 +2677,11 @@ print("module xs: {xs}")
 }
 
 #[test]
-fn airlock_closure_carries_a_global_a_called_helper_reads() {
-    // TICKET-097 defect A. `fill_global_free` builds its call graph only from
-    // `Op::MakeClosure`/`Op::SpawnBlock`, never `Op::Call`, so a read of `n` behind a bare
-    // `helper()` call never reaches the crossing closure's `global_free` and the closure answers
-    // the stale pre-write value. Measured today: `indirect before: 1`. Go 1.26.6 and CPython
-    // 3.14.7 both print `100` for every line (measured 2026-09-09).
+fn airlock_closure_calling_a_helper_that_reads_a_global_reads_the_receivers_copy() {
+    // TICKET-137 (owner decision D2), superseding TICKET-097 defect A. The sender writes
+    // `n = 100` to ITS copy; a received closure reads the receiver's `n` (`1`) whether it names
+    // the global directly or calls a helper that reads it. Go 1.26.6 and CPython 3.14.7 print
+    // `100` for every line (one live global); the divergence is the deliberate per-task rule.
     let src = r#"
 n := 1
 
@@ -2722,17 +2708,17 @@ main()
 "#;
     let out = golden_entry(src);
     assert_eq!(
-        out, "indirect before: 100\nindirect after : 100\ndirect         : 100\n",
-        "a closure calling a top-level fn that reads a module global must carry that global \
-         through the call edge: {out:?}"
+        out, "indirect before: 1\nindirect after : 1\ndirect         : 1\n",
+        "a received closure, direct or through a helper call, must read the receiving task's \
+         own copy of the module global: {out:?}"
     );
 }
 
 #[test]
 fn airlock_a_called_helper_that_writes_the_global_keeps_it_a_late_load() {
-    // TICKET-097 guard for W8-25's deliberate exclusion: a global the closure tree WRITES must
-    // stay a late load, even when the write happens behind a called helper. This must PASS both
-    // before and after the defect-A fix (step 12's call edge unions writes too).
+    // TICKET-097 guard, unchanged in outcome by TICKET-137: a global the closure tree WRITES is a
+    // live read of the RUNNING task's copy, even when the write happens behind a called helper.
+    // The sender's `n = 100` lands in the sender's copy; `bump()` runs against the receiver's `1`.
     let src = r#"
 n := 1
 
@@ -2756,17 +2742,17 @@ main()
     let out = golden_entry(src);
     assert_eq!(
         out, "late load: 2\n",
-        "a global the called helper WRITES must stay excluded from global_free (a late load), \
-         never carried: {out:?}. `late load: 101` would mean the call edge unioned reads without \
-         writes."
+        "a global the called helper WRITES must be read live from the running task's copy: \
+         {out:?}. `late load: 101` would mean the sender's `n = 100` reached the receiver."
     );
 }
 
 #[test]
-fn airlock_a_closure_calling_a_nested_fn_already_carries_the_global() {
-    // TICKET-097 regression guard. A nested fn is a CAPTURE of the crossing closure, so it
-    // crosses as a closure value carrying its own `Proto::global_free` — this already works
-    // before any fix in this ticket. CPython 3.14.7 also prints `100` (measured 2026-09-09).
+fn airlock_a_closure_calling_a_nested_fn_reads_the_receivers_copy() {
+    // TICKET-137 (owner decision D2), superseding TICKET-097. A nested fn is a CAPTURE of the
+    // crossing closure and crosses as a closure value, but its global read runs against the
+    // RECEIVER's copy (`1`), not the sender's `n = 100`. CPython 3.14.7 prints `100` (one live
+    // global); the divergence is the deliberate per-task rule.
     let src = r#"
 n := 1
 c := Channel[fn() -> int](1)
@@ -2785,19 +2771,18 @@ main()
 "#;
     let out = golden_entry(src);
     assert_eq!(
-        out, "nested-fn indirect: 100\n",
-        "a closure calling a NESTED fn must already carry the global (it crosses as a capture): \
+        out, "nested-fn indirect: 1\n",
+        "a closure calling a NESTED fn must read the receiving task's own copy of the global: \
          {out:?}"
     );
 }
 
 #[test]
-fn airlock_closure_carries_a_global_the_sender_mutated_in_place() {
-    // TICKET-097 defect B. `ys.push(2)` compiles to `GetGlobalSlot` + a method call, never
-    // `SetGlobalSlot`, so the sender's `assigned`/`carried` bits for `ys` are never set and the
-    // airlock's send filter (`Vm::closure_global_snapshot`) skips the slot. Measured today:
-    // `assigned global via closure : 2` / `in-place global via closure : 1`. Go 1.26.6 and
-    // CPython 3.14.7 both print `2` twice (measured 2026-09-09).
+fn airlock_closure_over_a_global_the_sender_mutated_in_place_reads_the_receivers_copy() {
+    // TICKET-137 (owner decision D2), superseding TICKET-097 defect B. The sender's `xs = [1, 2]`
+    // and `ys.push(2)` land in the SENDER's copy; the received closures read the receiver's
+    // `[1]` for both. Go 1.26.6 and CPython 3.14.7 print `2` twice (one live global); the
+    // divergence is the deliberate per-task rule.
     let src = r#"
 xs := [1]
 ys := [1]
@@ -2821,17 +2806,19 @@ main()
 "#;
     let out = golden_entry(src);
     assert_eq!(
-        out, "assigned global via closure : 2\nin-place global via closure : 2\n",
-        "an in-place mutation of a sent-closure's module global must mark the slot carried, same \
-         as an assignment: {out:?}"
+        out, "assigned global via closure : 1\nin-place global via closure : 1\n",
+        "a received closure must read the receiving task's own copy of an assigned or \
+         in-place-mutated global: {out:?}"
     );
 }
 
 #[test]
-fn airlock_closure_carries_a_global_the_sender_mutated_by_index_or_field_assignment() {
-    // TICKET-097 defect B, index/field variant. Same class as the in-place-mutation case: `zs[0]
-    // = 9` and `p.v = 9` never reach `emit_store`, so neither emits `Op::SetGlobalSlot`. Measured
-    // today: both print `1`. CPython 3.14.7 prints `9` and `9` (measured 2026-09-09).
+fn airlock_closure_over_a_global_the_sender_mutated_by_index_or_field_assignment_reads_the_receivers_copy()
+ {
+    // TICKET-137 (owner decision D2), superseding TICKET-097 defect B (index/field variant). The
+    // sender's `zs[0] = 9` and `p.v = 9` land in the sender's copy; both received closures read
+    // the receiver's `1`. CPython 3.14.7 prints `9` and `9` (one live global); the divergence is
+    // the deliberate per-task rule.
     let src = r#"
 zs := [1]
 struct P:
@@ -2857,19 +2844,18 @@ main()
 "#;
     let out = golden_entry(src);
     assert_eq!(
-        out, "index-assigned global via closure : 9\nfield-assigned global via closure : 9\n",
-        "an index- or field-assignment to a module global rooted list/struct must mark the slot \
-         carried: {out:?}"
+        out, "index-assigned global via closure : 1\nfield-assigned global via closure : 1\n",
+        "a received closure must read the receiving task's own copy of an index- or \
+         field-assigned global: {out:?}"
     );
 }
 
 #[test]
-fn airlock_closure_carries_a_global_a_user_struct_method_mutated() {
-    // TICKET-097 / W11-5's third sub-defect, CLOSED by TICKET-105: a user struct method that
-    // mutates `self` (`g.bump()`) writes through no op that names the global `g`, so neither
-    // `assigned` nor `carried` was ever set by the write itself — the same shape as an alias write.
-    // TICKET-105's changed-since-baseline check catches it: `g`'s wire content after two bumps
-    // differs from producer's baseline. CPython 3.14.7 prints `3` (measured 2026-09-09).
+fn airlock_closure_over_a_global_a_user_struct_method_mutated_reads_the_receivers_copy() {
+    // TICKET-137 (owner decision D2), superseding TICKET-097/TICKET-105. A user struct method that
+    // mutates `self` (`g.bump()` twice) changes the SENDER's copy of `g`; the received closure
+    // reads the receiver's `g.n == 1`. CPython 3.14.7 prints `3` (one live global); the divergence
+    // is the deliberate per-task rule.
     let src = r#"
 struct C:
     n: int
@@ -2892,15 +2878,18 @@ main()
 "#;
     let out = golden_entry(src);
     assert_eq!(
-        out, "user-method mutation via closure: 3\n",
-        "a user-method mutation must now be carried, matching CPython: {out:?}"
+        out, "user-method mutation via closure: 1\n",
+        "a received closure must read the receiving task's own copy of a global the sender \
+         mutated through a user method: {out:?}"
     );
 }
 
 #[test]
-fn airlock_closure_carries_a_global_main_mutated_through_a_local_alias() {
-    // TICKET-105 (W12-6), G1. `main` itself is the sender, aliasing `g` into `xs` and pushing
-    // through the alias before the send. CPython 3.14.7 prints `[1, 2]` (measured 2026-09-10).
+fn airlock_closure_over_a_global_main_mutated_through_a_local_alias_reads_the_receivers_copy() {
+    // TICKET-137 (owner decision D2), superseding TICKET-105 (W12-6) G1. `main` is the sender,
+    // aliasing `g` into `xs` and pushing through the alias before the send. The receiving task
+    // was spawned before the push and owns `[1]`; the received closure reads that. CPython 3.14.7
+    // prints `[1, 2]` (one live global); the divergence is the deliberate per-task rule.
     let src = r#"
 import std.concurrency
 
@@ -2921,15 +2910,19 @@ main()
 "#;
     let out = golden_entry(src);
     assert_eq!(
-        out, "main-as-sender alias: [1, 2]\n",
-        "a root-view alias write before the send must be carried: {out:?}"
+        out, "main-as-sender alias: [1]\n",
+        "a received closure must read the receiving task's own copy, not the root's alias \
+         write: {out:?}"
     );
 }
 
 #[test]
-fn airlock_closure_carries_a_global_the_sender_mutated_through_a_struct_alias() {
-    // TICKET-105 (W12-6), G2. `h := g; h.n = 5` writes through a local alias of a struct global.
-    // CPython 3.14.7 prints `5` (measured 2026-09-10).
+fn airlock_closure_over_a_global_the_sender_mutated_through_a_struct_alias_reads_the_receivers_copy()
+ {
+    // TICKET-137 (owner decision D2), superseding TICKET-105 (W12-6) G2. `h := g; h.n = 5` writes
+    // the sender's copy of a struct global through a local alias; the received closure reads the
+    // receiver's `g.n == 1`. CPython 3.14.7 prints `5` (one live global); the divergence is the
+    // deliberate per-task rule.
     let src = r#"
 import std.concurrency
 
@@ -2952,16 +2945,18 @@ main()
 "#;
     let out = golden_entry(src);
     assert_eq!(
-        out, "struct alias: 5\n",
-        "a write through a local alias of a struct global must be carried: {out:?}"
+        out, "struct alias: 1\n",
+        "a received closure must read the receiving task's own copy of a struct global the \
+         sender wrote through an alias: {out:?}"
     );
 }
 
 #[test]
-fn airlock_alias_write_reaches_a_grandchild_senders_closure() {
-    // TICKET-105 (W12-6), G3. The alias write happens in `producer`, an ancestor of the closure's
-    // eventual sender `child`; the fold into `ModuleSnap.carried` must reach the grandchild.
-    // CPython 3.14.7 prints `[1, 2]` (measured 2026-09-10).
+fn airlock_alias_write_does_not_reach_a_grandchild_senders_closure() {
+    // TICKET-137 (owner decision D2), superseding TICKET-105 (W12-6) G3. The alias write happens
+    // in `producer`, an ancestor of the closure's eventual sender `child`; `child` inherits it in
+    // its own copy, but the closure is RUN by `main`, whose copy is `[1]`. CPython 3.14.7 prints
+    // `[1, 2]` (one live global); the divergence is the deliberate per-task rule.
     let src = r#"
 import std.concurrency
 
@@ -2985,16 +2980,18 @@ main()
 "#;
     let out = golden_entry(src);
     assert_eq!(
-        out, "grandchild alias: [1, 2]\n",
-        "an ancestor's alias write must reach a grandchild task's send: {out:?}"
+        out, "grandchild alias: [1]\n",
+        "a received closure must read the receiving task's own copy, not an ancestor's alias \
+         write: {out:?}"
     );
 }
 
 #[test]
-fn airlock_closure_over_an_aliased_element_carries_the_senders_push() {
-    // TICKET-105 (W12-6), G4. `inner := gl[0]` aliases a list element; the sender pushes through
-    // `inner` before sending a closure that reads both `inner` and `gl[0]`. CPython 3.14.7 prints
-    // `[1, 2] [1, 2]` (measured 2026-09-10).
+fn airlock_closure_over_an_aliased_element_reads_the_receivers_global_copy() {
+    // TICKET-137 (owner decision D2), superseding TICKET-105 (W12-6) G4. `inner := gl[0]` aliases
+    // a list element; the sender pushes through `inner` before sending a closure that reads both
+    // `inner` (a CAPTURE, so it crosses as the sender's `[1, 2]`) and `gl[0]` (a GLOBAL, read from
+    // the receiver's copy: `[1]`). CPython 3.14.7 prints `[1, 2] [1, 2]` (one live global).
     let src = r#"
 import std.concurrency
 
@@ -3015,8 +3012,9 @@ main()
 "#;
     let out = golden_entry(src);
     assert_eq!(
-        out, "sender-push alias: [1, 2] [1, 2]\n",
-        "the sender's push through an aliased element must carry: {out:?}"
+        out, "sender-push alias: [1, 2] [1]\n",
+        "a capture crosses as the sender's value; a global reads the receiving task's copy: \
+         {out:?}"
     );
 }
 
@@ -3205,42 +3203,6 @@ main()
         out, "[[7, 5]] [1, 2] [1, 2]\n",
         "adoption must be scoped to fault_module's replay, never a Channel message's own id \
          space (TICKET-111 gotcha 1): {out:?}"
-    );
-}
-
-#[test]
-fn a_mutator_named_method_on_a_type_or_a_handle_marks_nothing() {
-    // TICKET-097. The type-blind by-name mark (`Op::TouchGlobalSlotByName`) must not fire on the
-    // four ambiguous names that collide with the mutator list but do not mutate a module global's
-    // builtin container: a static method `V.add`, `str.reverse` (returns a NEW str), `Atomic.add`
-    // (an RMW on a handle), `Shared.update` (mutates a handle, not the slot's own value). All four
-    // run unchanged today (measured 2026-09-09): `3`, `cba`, `5`, `1`.
-    let src = r#"
-import std.concurrency
-
-struct V:
-    x: int
-    fn add(a: V, b: V) -> V:
-        return V(a.x + b.x)
-
-s := "abc"
-a := Atomic(0)
-sh := Shared(0)
-
-fn main():
-    print(V.add(V(1), V(2)).x)
-    print(s.reverse())
-    a.add(5)
-    print(a.load())
-    sh.update(fn(v: int) -> int: v + 1)
-    print(sh.get())
-main()
-"#;
-    let out = golden_entry(src);
-    assert_eq!(
-        out, "3\ncba\n5\n1\n",
-        "a mutator-named method on a type or a handle must mark nothing and stay byte-identical: \
-         {out:?}"
     );
 }
 
@@ -8914,26 +8876,25 @@ main()";
     assert_golden_out(src, "2 1\n");
 }
 
-/// TICKET-100: a generator has no wire id, so it can never be a `Backref` target. With containers now
-/// back-referencing, a list holding the SAME frame-local generator twice reaches it a second time
-/// off-stack — silently duplicating it would be the exact e8dcad7 wrong-result class the cycle guard
-/// above already prevents on-stack, so the second off-stack reach is REJECTED too.
+/// TICKET-137 (superseding TICKET-100's reject): a generator now has a node id, so a list holding the
+/// SAME frame-local generator twice reaches it a second time off-stack and the second reach is a
+/// `Backref` to the first copy. The crossing holds ONE generator with the alias intact: driving
+/// `ys[0]` consumes the value `ys[1]` would have seen, as it does without a channel in between.
+/// (An on-stack cycle through a generator still rejects: see `generator_in_data_cycle_rejects_both`.)
 #[test]
-fn airlock_generator_reached_twice_rejects() {
+fn airlock_generator_reached_twice_is_one_copy() {
     let src = "\
 fn gen() -> Iterator[int]:
     yield 1
 fn main():
     it := gen()
     xs := [it, it]
-    ch := Channel[List[Iterator[int]]]()
+    ch := Channel[List[Iterator[int]]](1)
     ch.send(xs)
+    ys := ch.recv()
+    print(\"{ys[0].next() ?? -1} {ys[1].next() ?? -1}\")
 main()";
-    let out = golden_entry_fault(src);
-    assert!(
-        out.contains("a generator cannot be sent across tasks twice in one crossing"),
-        "expected the double-reach fault message, got: {out:?}"
-    );
+    assert_golden_out(src, "1 -1\n");
 }
 
 /// NF#5 — capture READ (same task): a nested fn reads an outer local by reference; a write to that
@@ -10401,10 +10362,11 @@ main()";
 }
 
 /// A module-global generator carrying a genuinely NON-SENDABLE parked slot (a >10000-deep acyclic nest,
-/// tripping `MAX_STRUCTURAL_DEPTH`) is snapshotted as an inert `Nil` placeholder (the `to_snap` slow arm
-/// no longer eager-faults the whole snapshot — that regressed any module merely *holding* such a
-/// generator). A task that REACHES it therefore faults recoverably AT THE USE SITE ("cannot iterate over
-/// nil"), NOT a crash, NOT a silent skip. Byte-identical. (The unreached case runs clean —
+/// tripping `MAX_STRUCTURAL_DEPTH`) is snapshotted as an inert `Unsendable` generator (the `to_snap`
+/// slow arm no longer eager-faults the whole snapshot — that regressed any module merely *holding* such
+/// a generator). A task that REACHES it therefore faults recoverably AT THE USE SITE with a message
+/// naming the cause (TICKET-137: it used to read as `nil`, "cannot iterate over nil"), NOT a crash, NOT
+/// a silent skip. Byte-identical. (The unreached case runs clean —
 /// see `generator_module_global_unreached_nonsendable_runs_clean_both`.)
 #[test]
 fn generator_module_global_parked_slot_nonsendable_rejects_both() {
@@ -10426,16 +10388,20 @@ fn main():
                 out.send(x)
 main()";
     let ve = vm_outcome(src).expect_err("reached non-sendable generator must fault");
-    assert!(ve.contains("cannot iterate over nil"), "{ve}");
+    assert!(
+        ve.contains("holding a value that cannot cross tasks") && !ve.contains("nil"),
+        "{ve}"
+    );
 }
 
-/// A module-global generator in a reference CYCLE is snapshotted as an inert `Nil` placeholder (its
-/// `to_wire` trips item A's `gens_on_stack` cycle guard → the `to_snap` slow arm falls back to `Nil`
-/// rather than eager-faulting the whole snapshot). `box` (module global) holds `g` and `g`'s Pending arg
-/// holds `box`, so `box -> g -> box`. A task that REACHES it faults recoverably at the use site ("cannot
-/// iterate over nil"), byte-identical.
+/// TICKET-137 — a module-global generator in a reference CYCLE through `box` now crosses as ONE
+/// copy. The snapshot walks global `box` first: `box -> g -> box` closes on `box`'s own id (a list
+/// `Backref`, not a generator cycle), and the later global `g` is a second off-stack reach of the
+/// generator, so it is a `Backref` to the copy inside `box` (it used to hit `gens_seen`'s reject and
+/// degrade to `Nil`). The task drives its own copy: `box.len()` is `1` there. (A cycle that
+/// re-enters the generator ON the DFS stack still rejects: `generator_in_data_cycle_rejects_both`.)
 #[test]
-fn generator_module_global_in_data_cycle_rejects_both() {
+fn generator_module_global_in_data_cycle_crosses_as_one_copy() {
     let src = "\
 fn gen(box: List[Iterator[int]]) -> Iterator[int]:
     yield box.len()
@@ -10448,24 +10414,28 @@ fn main():
             for x in g:
                 print(\"got {x}\")
 main()";
-    let ve = vm_outcome(src).expect_err("reached module-global generator in a cycle must fault");
-    assert!(ve.contains("cannot iterate over nil"), "{ve}");
+    assert_eq!(vm_outcome(src).expect("program should run"), "got 1\n");
 }
 
-/// REGRESSION LOCK (backlog item B remediation): a module module that merely HOLDS a non-sendable
-/// module-global generator (here in a reference cycle) but whose spawned task NEVER reaches it must run
-/// CLEAN — the `to_snap` slow arm snapshots the untouched generator as an inert `Nil`, so `snapshot_modules`
-/// (which walks EVERY global once at the first spawn) no longer eager-faults the whole program. Before the
-/// remediation this faulted "as part of a reference cycle" at the first spawn. Byte-identical against
-/// the golden. (Reached-behaviour is covered by `generator_module_global_in_data_cycle_rejects_both`.)
+/// REGRESSION LOCK (backlog item B remediation): a module that merely HOLDS a non-sendable
+/// module-global generator (here a parked slot nested past `MAX_STRUCTURAL_DEPTH`) but whose spawned
+/// task NEVER reaches it must run CLEAN — the `to_snap` slow arm snapshots the untouched generator as
+/// an inert `Unsendable` one, so `snapshot_modules` (which walks EVERY global once at the first spawn)
+/// no longer eager-faults the whole program. Byte-identical against the golden. (Reached-behaviour is
+/// covered by `generator_module_global_parked_slot_nonsendable_rejects_both`; TICKET-137 replaced the
+/// old reference-cycle shape here, which now crosses as one copy.)
 #[test]
 fn generator_module_global_unreached_nonsendable_runs_clean_both() {
     let src = "\
-fn gen(box: List[Iterator[int]]) -> Iterator[int]:
-    yield box.len()
-box: List[Iterator[int]] = []
-g := gen(box)
-pushed := box.push(g)
+fn gen() -> Iterator[int]:
+    keep: List[int] = []
+    deep: List[List[int]] = [keep]
+    for i in 0..10001:
+        deep = [deep]
+    yield 1
+    yield deep.len()
+g := gen()
+started := g.next()
 fn hello():
     print(\"hello\")
 fn main():

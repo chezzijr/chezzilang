@@ -2030,178 +2030,6 @@ fn wire_roundtrip_preserves_value_equality() {
     );
 }
 
-// ----- TICKET-105: wire_content_differs (renumbering-aware wire comparator) -----
-
-/// Two wires that are the same shape and content but were assigned different `id`s (a fresh
-/// `to_wire` call mints ids in a different order than an earlier one) must compare equal — the
-/// comparator pairs ids structurally, it never compares them literally.
-#[test]
-fn wire_content_differs_ignores_id_renumbering() {
-    use super::wire::wire_content_differs;
-    let base = WireValue::List {
-        id: 7,
-        items: vec![
-            WireValue::List {
-                id: 8,
-                items: vec![WireValue::Int(1)],
-            },
-            WireValue::Backref(8),
-        ],
-    };
-    let live = WireValue::List {
-        id: 0,
-        items: vec![
-            WireValue::List {
-                id: 1,
-                items: vec![WireValue::Int(1)],
-            },
-            WireValue::Backref(1),
-        ],
-    };
-    assert!(
-        !wire_content_differs(&base, &live),
-        "id renumbering alone must not read as a content change"
-    );
-}
-
-/// A genuinely changed leaf value, or a length change, must be reported as a difference — this is
-/// the comparator's whole reason to exist.
-#[test]
-fn wire_content_differs_reports_a_changed_leaf_or_length() {
-    use super::wire::wire_content_differs;
-    let base = WireValue::List {
-        id: 7,
-        items: vec![WireValue::Int(1)],
-    };
-    let live = WireValue::List {
-        id: 0,
-        items: vec![WireValue::Int(1), WireValue::Int(2)],
-    };
-    assert!(
-        wire_content_differs(&base, &live),
-        "a length change must be reported as a difference"
-    );
-
-    let base = WireValue::Struct {
-        id: 3,
-        name: "H".into(),
-        fields: vec![("n".into(), WireValue::Int(1))],
-    };
-    let live = WireValue::Struct {
-        id: 0,
-        name: "H".into(),
-        fields: vec![("n".into(), WireValue::Int(5))],
-    };
-    assert!(
-        wire_content_differs(&base, &live),
-        "a changed field value must be reported as a difference"
-    );
-}
-
-/// Every uncertain pair must decline toward "unchanged" — a false "changed" verdict would clobber
-/// a receiver's own in-place push (DEC-051), so any doubt must read as `Same`/`Unknown`, never
-/// `Differs`.
-#[test]
-fn wire_content_differs_declines_every_uncertain_pair() {
-    use super::wire::wire_content_differs;
-
-    assert!(
-        !wire_content_differs(&WireValue::Float(f64::NAN), &WireValue::Float(f64::NAN)),
-        "NaN vs NaN must decline"
-    );
-    assert!(
-        !wire_content_differs(&WireValue::Float(0.0), &WireValue::Float(-0.0)),
-        "0.0 vs -0.0 must decline"
-    );
-    assert!(
-        !wire_content_differs(
-            &WireValue::Nil,
-            &WireValue::List {
-                id: 0,
-                items: vec![],
-            }
-        ),
-        "a kind change (Nil vs List) must decline"
-    );
-    assert!(
-        !wire_content_differs(&WireValue::Int(1), &WireValue::Str("1".into())),
-        "a kind change (Int vs Str) must decline"
-    );
-    assert!(
-        !wire_content_differs(
-            &WireValue::List {
-                id: 7,
-                items: vec![WireValue::Backref(9)],
-            },
-            &WireValue::List {
-                id: 0,
-                items: vec![WireValue::List {
-                    id: 1,
-                    items: vec![WireValue::Int(1)],
-                }],
-            }
-        ),
-        "an unmatched Backref must decline"
-    );
-    assert!(
-        !wire_content_differs(
-            &WireValue::List {
-                id: 7,
-                items: vec![
-                    WireValue::List {
-                        id: 8,
-                        items: vec![],
-                    },
-                    WireValue::Backref(8),
-                ],
-            },
-            &WireValue::List {
-                id: 0,
-                items: vec![
-                    WireValue::List {
-                        id: 1,
-                        items: vec![],
-                    },
-                    WireValue::Backref(0),
-                ],
-            }
-        ),
-        "an inconsistent Backref pairing must decline"
-    );
-    assert!(
-        !wire_content_differs(
-            &WireValue::Builtin("print".into()),
-            &WireValue::Builtin("len".into())
-        ),
-        "a builtin, never structurally compared, must decline"
-    );
-}
-
-/// A proven difference elsewhere in the same structure must win over a declined sibling pair — the
-/// comparator must not let one `Unknown` branch swallow a `Differs` found in another.
-#[test]
-fn wire_content_differs_a_proven_difference_outranks_a_declined_sibling() {
-    use super::wire::wire_content_differs;
-    let base = WireValue::List {
-        id: 7,
-        items: vec![WireValue::Backref(9), WireValue::Int(1)],
-    };
-    let live = WireValue::List {
-        id: 0,
-        items: vec![
-            WireValue::List {
-                id: 1,
-                items: vec![],
-            },
-            WireValue::Int(2),
-        ],
-    };
-    assert!(
-        wire_content_differs(&base, &live),
-        "a proven difference must outrank a declined sibling"
-    );
-}
-
 /// `Map`/`Set` cross the wire carrying their **cached hashes** and **insertion order** unchanged —
 /// `from_wire` rebuilds via `push(hash, …)`, never re-hashing. Pins byte-identical reconstruction
 /// (the iteration order + index a later `print`/lookup observes) even when two keys collide.
@@ -2243,9 +2071,6 @@ fn wire_passes_by_reference_objects_as_same_handle() {
         name: "m".into(),
         slots: Vec::new(),
         index: Default::default(),
-        origin: crate::vm::heap::next_module_origin(),
-        assigned: Vec::new(),
-        carried: Vec::new(),
     })));
     let v = Value::obj(m);
     let w = vm.to_wire(v).expect("by-ref object should serialize");
@@ -9805,7 +9630,6 @@ fn worker_fixture(code: Vec<Op>) -> (Vm, PendingCall) {
         is_test: false,
         decl_span: Span::RUNTIME,
         capture_names: Vec::new(),
-        global_free: Vec::new(),
     };
     let program = Program {
         protos: vec![proto],
@@ -9816,9 +9640,6 @@ fn worker_fixture(code: Vec<Op>) -> (Vm, PendingCall) {
         name: "<test>".into(),
         slots: Vec::new(),
         index: Default::default(),
-        origin: crate::vm::heap::next_module_origin(),
-        assigned: Vec::new(),
-        carried: Vec::new(),
     })));
     let clo = vm.heap.alloc(Obj::Closure {
         proto: 0,
@@ -21137,9 +20958,8 @@ parallel:
     );
 }
 
-/// TICKET-016 / W8-25 — a crossed closure that READS AND WRITES the same module global must keep
-/// the written slot a late load: `Proto::global_free` excludes any slot the closure tree writes, so
-/// the snapshot can never go stale.
+/// TICKET-016 / W8-25 — a crossed closure that READS AND WRITES the same module global reads its
+/// own late load of the RUNNING task's copy, so its own write is always visible to its next read.
 #[test]
 fn ticket_016_closure_over_module_global_written_by_closure_stays_late() {
     let src = "\
@@ -21168,10 +20988,10 @@ print(g(3))
     );
 }
 
-/// TICKET-016 / W8-25 — a closure NESTED inside a crossed closure must also see the airlock
-/// snapshot: `Compiler::fill_global_free`'s fixpoint follows `Op::MakeClosure`/`Op::SpawnBlock`, and
-/// a nested closure created inside a crossed one shares the parent's home module view, so the
-/// airlock's install (into that view's own module copy) is visible to it too.
+/// TICKET-016 / W8-25, reversed by owner decision D2 (TICKET-137) — a closure NESTED inside a crossed
+/// closure reads the module globals of the task that RUNS it, exactly like the crossed closure does:
+/// the sender's `n = 100` lands in the sender's copy, so `g(3)` prints `3`. Go/CPython print `300`
+/// (one live global); the divergence is the deliberate per-task rule — share with `Shared`/`Channel`.
 #[test]
 fn ticket_016_closure_over_module_global_read_by_nested_closure() {
     let src = "\
@@ -21189,15 +21009,19 @@ print(g(3))
     let (out, err, res, _code) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_file(&entry);
     assert!(res.is_ok(), "run faulted: {res:?} err={err}");
-    assert_eq!(out, "300\n", "expected 300: {out:?}");
+    assert_eq!(
+        out, "3\n",
+        "a nested closure must read the receiving task's own copy of `n` (D2): {out:?}"
+    );
 }
 
-/// TICKET-016 / W8-25 — a closure's reference to a MODULE GLOBAL is a late global load, not a
-/// capture, so it is neither moved nor copied at the `parallel:`/`spawn:` airlock: a live cross-heap
-/// read of one cell from two heaps. At module scope the closure crossed through the `Channel` sees
-/// the RECEIVER's un-mutated global cell (`n=1`) instead of the sender's write (`n=100`), so
-/// `f(3)` prints `3` instead of Go/CPython's `300`. The identical body inside `fn main()` (over a
-/// LOCAL, which the airlock does copy) already prints `300` — see
+/// TICKET-016 / W8-25, reversed by owner decision D2 (TICKET-137) — a closure's reference to a
+/// MODULE GLOBAL is a late global load, not a capture, so it is neither moved nor copied at the
+/// `parallel:`/`spawn:` airlock: it reads the module globals of the task that RUNS it. At module
+/// scope the closure crossed through the `Channel` sees the RECEIVER's un-mutated global (`n=1`),
+/// not the sender's write (`n=100`), so `f(3)` prints `3`. This is deliberate (each task owns a copy
+/// of every module global); Go/CPython print `300` (one live global). The identical body inside
+/// `fn main()` (over a LOCAL, which the airlock does copy) prints `300` — see
 /// `ticket_016_closure_over_local_in_fn_crosses_airlock_correctly` for the contrast.
 #[test]
 fn ticket_016_closure_over_module_global_loses_value_at_airlock() {
@@ -21218,9 +21042,9 @@ print(f(3))
     let _ = std::fs::remove_file(&entry);
     assert!(res.is_ok(), "run faulted: {res:?}");
     assert_eq!(
-        out, "300\n",
-        "expected a closure's module-global reference to see the pre-airlock write (300, \
-         matching Go/CPython), got {out:?} — the current bug reads the receiver's stale global (W8-25)"
+        out, "3\n",
+        "a closure's module-global reference must read the receiving task's own copy (D2, `3`; \
+         Go/CPython print 300), got {out:?}"
     );
 }
 
