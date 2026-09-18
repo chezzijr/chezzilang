@@ -776,38 +776,30 @@ fn nested_deadlock_controls_hold_at_every_worker_count() {
     );
 }
 
-/// TICKET-125 step 1: a recoverer feeds a cousin by channel after its own inner deadlock recovers.
-/// Must stay clean at every worker count, including the default this ticket adds.
+/// TICKET-125 step 1 / TICKET-135 (D1): a recoverer that would feed a cousin after its own inner
+/// deadlock recovers now aborts instead: `recover:` is transparent to the verdict.
 #[test]
-fn cousin_fed_completes_at_every_worker_count() {
+fn cousin_fed_is_fatal_at_every_worker_count() {
     assert_at_every_worker_count(
         "cousin_fed.chz",
         COUSIN_FED,
-        |out| {
-            out.status.success()
-                && String::from_utf8_lossy(&out.stdout) == "inner err\nF got 2\ndone\n"
-        },
-        "exit 0 with stdout `inner err`, `F got 2`, `done`",
+        |out| faulted_deadlock(out) && !String::from_utf8_lossy(&out.stdout).contains("inner err"),
+        "a fatal `deadlock` (D1), no post-recover output",
     );
 }
 
-/// TICKET-125 step 1: two siblings each recover an inner deadlock, no fan-in. Must stay clean at
-/// every worker count.
+/// TICKET-125 step 1 / TICKET-135 (D1): two siblings each recover an inner deadlock, no fan-in. The
+/// first verdict is fatal, so neither `recovered N` nor `done` prints.
 #[test]
-fn i6b_two_recoverers_without_fan_in_complete_at_every_worker_count() {
+fn i6b_two_recoverers_without_fan_in_is_fatal_at_every_worker_count() {
     assert_at_every_worker_count(
         "i6b.chz",
         TWO_RECOVERERS_NO_FAN_IN,
         |out| {
             let stdout = String::from_utf8_lossy(&out.stdout);
-            let lines: Vec<&str> = stdout.lines().collect();
-            out.status.success()
-                && lines.len() == 3
-                && lines[2] == "done"
-                && std::collections::BTreeSet::from_iter(lines[..2].iter().copied())
-                    == std::collections::BTreeSet::from_iter(["recovered 0", "recovered 1"])
+            faulted_deadlock(out) && !stdout.contains("recovered") && !stdout.contains("done")
         },
-        "exit 0 with `recovered 0`/`recovered 1` (either order) then `done`",
+        "a fatal `deadlock` (D1), no post-recover output",
     );
 }
 
@@ -927,23 +919,54 @@ fn assert_clean_sampled_at_thread_one(file: &str, program: &str, want_stdout: &s
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// W13-5 (TICKET-125): the cousin-join shape must stay clean, sampled, at `CHEZZI_THREADS=1`.
+/// TICKET-135 (D1): runs `program` [`NESTED_DEADLOCK_RUNS`] times at `CHEZZI_THREADS=1`, asserting a
+/// fatal `deadlock` whose stdout never holds `forbidden_stdout` (a line only a program that
+/// continued past its recovered verdict prints).
+fn assert_fatal_sampled_at_thread_one(file: &str, program: &str, forbidden_stdout: &str) {
+    let dir = std::env::temp_dir().join(format!(
+        "chz-threads-135-fatal-{}-{file}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join(file);
+    std::fs::write(&path, program).expect("write program");
+    for run in 1..=NESTED_DEADLOCK_RUNS {
+        let Some(out) = run_with_hang_deadline(&path, "1") else {
+            let _ = std::fs::remove_dir_all(&dir);
+            panic!("{file} hung past its 20 s deadline at CHEZZI_THREADS=1, run {run}");
+        };
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        if !(faulted_deadlock(&out) && !stdout.contains(forbidden_stdout)) {
+            let _ = std::fs::remove_dir_all(&dir);
+            panic!(
+                "{file} at CHEZZI_THREADS=1, run {run}: want a fatal `deadlock` without `{forbidden_stdout}` in stdout, got {:?}\nstdout: {stdout}\nstderr: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// W13-5 (TICKET-125) / TICKET-135 (D1): the cousin-join shape recovers a deadlock, so it aborts,
+/// sampled, at `CHEZZI_THREADS=1`, before `cousin got 5` can print.
 #[test]
-fn w13_5_d2a_cousin_join_completes_at_thread_one_sampled() {
-    assert_clean_sampled_at_thread_one(
+fn w13_5_d2a_cousin_join_is_fatal_at_thread_one_sampled() {
+    assert_fatal_sampled_at_thread_one(
         "d2a_sampled.chz",
         RECOVERED_DEADLOCK_THEN_COUSIN_JOIN,
-        "err\ncousin got 5\ndone\n",
+        "cousin got 5",
     );
 }
 
-/// W13-5 (TICKET-125): the roles-swapped shape must stay clean, sampled, at `CHEZZI_THREADS=1`.
+/// W13-5 (TICKET-125) / TICKET-135 (D1): the roles-swapped shape aborts, sampled, at
+/// `CHEZZI_THREADS=1`, before `task got 5` can print.
 #[test]
-fn w13_5_d2d_roles_swapped_completes_at_thread_one_sampled() {
-    assert_clean_sampled_at_thread_one(
+fn w13_5_d2d_roles_swapped_is_fatal_at_thread_one_sampled() {
+    assert_fatal_sampled_at_thread_one(
         "d2d_sampled.chz",
         RECOVERED_DEADLOCK_ROLES_SWAPPED,
-        "err\ntask got 5\ndone\n",
+        "task got 5",
     );
 }
 
@@ -957,7 +980,7 @@ fn w13_5_g3_recovered_panic_then_cousin_join_completes_at_thread_one_sampled() {
     );
 }
 
-/// W13-5 (TICKET-125) residual, T>=2 — CLOSED by TICKET-129. `SchedCore::flag_deadlock_leaves` now
+/// W13-5 (TICKET-125) residual, T>=2 — CLOSED by TICKET-129. TICKET-135 (D1): the recovered shapes now abort. `SchedCore::flag_deadlock_leaves` now
 /// DECLINES an unproven verdict (`unproven_ok: bool`, `Option<bool>` return) unless
 /// `MnSched::may_fault_unproven` licenses it — no live peer sched can still move or prove its own
 /// victims, matching Go's all-goroutines-parked rule. TICKET-125's own cross-sched deferral
@@ -965,34 +988,28 @@ fn w13_5_g3_recovered_panic_then_cousin_join_completes_at_thread_one_sampled() {
 /// reaching 0 and was reverted; TICKET-129 measured 0 false faults of 60 runs per worker count on
 /// `d2a`/`d2d`/`g3` (debug binary) before closing `docs/gaps.md`'s W13-5 row.
 #[test]
-fn w13_5_d2a_cousin_join_completes_at_every_worker_count() {
+fn w13_5_d2a_cousin_join_is_fatal_at_every_worker_count() {
     assert_at_every_worker_count(
         "d2a_every.chz",
         RECOVERED_DEADLOCK_THEN_COUSIN_JOIN,
-        |out| {
-            out.status.success()
-                && String::from_utf8_lossy(&out.stdout) == "err\ncousin got 5\ndone\n"
-        },
-        "exit 0 with stdout `err`, `cousin got 5`, `done`",
+        |out| faulted_deadlock(out) && !String::from_utf8_lossy(&out.stdout).contains("cousin got"),
+        "a fatal `deadlock` (D1), no post-recover output",
     );
 }
 
-/// W13-5 (TICKET-125) residual, T>=2 — see [`w13_5_d2a_cousin_join_completes_at_every_worker_count`].
+/// W13-5 (TICKET-125) residual, T>=2 — see [`w13_5_d2a_cousin_join_is_fatal_at_every_worker_count`].
 #[test]
-fn w13_5_d2d_roles_swapped_completes_at_every_worker_count() {
+fn w13_5_d2d_roles_swapped_is_fatal_at_every_worker_count() {
     assert_at_every_worker_count(
         "d2d_every.chz",
         RECOVERED_DEADLOCK_ROLES_SWAPPED,
-        |out| {
-            out.status.success()
-                && String::from_utf8_lossy(&out.stdout) == "err\ntask got 5\ndone\n"
-        },
-        "exit 0 with stdout `err`, `task got 5`, `done`",
+        |out| faulted_deadlock(out) && !String::from_utf8_lossy(&out.stdout).contains("task got"),
+        "a fatal `deadlock` (D1), no post-recover output",
     );
 }
 
 /// W13-5 (TICKET-125) residual, T>=2 — the third instance (a recovered PANIC rather than a recovered
-/// inner deadlock), see [`w13_5_d2a_cousin_join_completes_at_every_worker_count`].
+/// inner deadlock), see [`w13_5_d2a_cousin_join_is_fatal_at_every_worker_count`].
 #[test]
 fn w13_5_g3_recovered_panic_then_cousin_join_completes_at_every_worker_count() {
     assert_at_every_worker_count(
@@ -1208,10 +1225,10 @@ fn w13_4_channel_parked_owner_at_depth_3_faults_at_thread_one() {
     );
 }
 
-/// W13-5 (TICKET-125): reproduces the false `deadlock` fault at `CHEZZI_THREADS=1`, where the bug
-/// measured 5/5.
+/// W13-5 (TICKET-125) / TICKET-135 (D1): the recovered deadlock is fatal at `CHEZZI_THREADS=1`; no
+/// post-recover line prints.
 #[test]
-fn w13_5_recovered_deadlock_then_cousin_join_completes_at_thread_one() {
+fn w13_5_recovered_deadlock_then_cousin_join_is_fatal_at_thread_one() {
     let dir = std::env::temp_dir().join(format!("chz-threads-125-w135-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let path = dir.join("recovered_deadlock_cousin_join.chz");
@@ -1220,25 +1237,25 @@ fn w13_5_recovered_deadlock_then_cousin_join_completes_at_thread_one() {
     let _ = std::fs::remove_dir_all(&dir);
     let out = out.unwrap_or_else(|| {
         panic!(
-            "recovered_deadlock_cousin_join.chz hung past its 20 s deadline at CHEZZI_THREADS=1; want exit 0 with stdout `err\\ncousin got 5\\ndone\\n`"
+            "recovered_deadlock_cousin_join.chz hung past its 20 s deadline at CHEZZI_THREADS=1; want a fatal `deadlock`"
         )
     });
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        out.status.success() && stdout == "err\ncousin got 5\ndone\n",
-        "want exit 0 with stdout `err\\ncousin got 5\\ndone\\n`, got {:?}\nstdout: {}\nstderr: {}",
+        faulted_deadlock(&out) && !stdout.contains("done"),
+        "want a fatal `deadlock` and no `done`, got {:?}\nstdout: {}\nstderr: {}",
         out.status,
         stdout,
         String::from_utf8_lossy(&out.stderr)
     );
 }
 
-/// W13-6 (TICKET-131): two recoverers fanning in to the main body's `recv` must complete at
-/// `CHEZZI_THREADS=2`. A nursery inside a spawned task now parks its owner at its join at every
+/// W13-6 (TICKET-131) / TICKET-135 (D1): two recoverers fanning in to the main body's `recv` abort at
+/// `CHEZZI_THREADS=2`: the first recovered verdict is fatal, so `t 2` never prints. A nursery inside a spawned task now parks its owner at its join at every
 /// worker count. TICKET-125 and TICKET-127 tried a replacement worker instead, false-faulted this
 /// program at T=4, and reverted it.
 #[test]
-fn w13_6_two_recoverers_fan_in_completes_at_thread_two() {
+fn w13_6_two_recoverers_fan_in_is_fatal_at_thread_two() {
     let dir = std::env::temp_dir().join(format!("chz-threads-125-w136-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let path = dir.join("two_recoverers_fan_in.chz");
@@ -1247,45 +1264,47 @@ fn w13_6_two_recoverers_fan_in_completes_at_thread_two() {
     let _ = std::fs::remove_dir_all(&dir);
     let out = out.unwrap_or_else(|| {
         panic!(
-            "two_recoverers_fan_in.chz hung past its 20 s deadline at CHEZZI_THREADS=2; want exit 0 with stdout `t 2\\n`"
+            "two_recoverers_fan_in.chz hung past its 20 s deadline at CHEZZI_THREADS=2; want a fatal `deadlock`"
         )
     });
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        out.status.success() && stdout == "t 2\n",
-        "want exit 0 with stdout `t 2\\n`, got {:?}\nstdout: {}\nstderr: {}",
+        faulted_deadlock(&out) && !stdout.contains("t 2"),
+        "want a fatal `deadlock` and no `t 2`, got {:?}\nstdout: {}\nstderr: {}",
         out.status,
         stdout,
         String::from_utf8_lossy(&out.stderr)
     );
 }
 
-/// W13-6 (TICKET-131): the same fan-in prints t 2 at every worker count, five runs each.
+/// W13-6 (TICKET-131) / TICKET-135 (D1): the same fan-in aborts at every worker count, five runs each.
+/// This also covers a `recover:` INSIDE a spawned task: the marker survives the task-slot crossing.
 #[test]
-fn w13_6_two_recoverers_fan_in_completes_at_every_worker_count() {
+fn w13_6_two_recoverers_fan_in_is_fatal_at_every_worker_count() {
     assert_at_every_worker_count(
         "two_recoverers_fan_in_every.chz",
         TWO_RECOVERERS_FAN_IN,
-        |out| out.status.success() && String::from_utf8_lossy(&out.stdout) == "t 2\n",
-        "exit 0 with stdout `t 2\\n`",
+        |out| faulted_deadlock(out) && !String::from_utf8_lossy(&out.stdout).contains("t 2"),
+        "a fatal `deadlock` (D1), no post-recover output",
     );
 }
 
-/// exec_join (TICKET-125): the same shape must complete at EVERY worker count, not just T=2.
+/// exec_join (TICKET-125) / TICKET-135 (D1): the same shape aborts at EVERY worker count, not just T=2.
 #[test]
-fn exec_join_owner_blocked_at_nested_join_completes_at_every_worker_count() {
+fn exec_join_owner_blocked_at_nested_join_is_fatal_at_every_worker_count() {
     assert_at_every_worker_count(
         "executor_job_owner_blocked_at_nested_join_every.chz",
         EXECUTOR_JOB_OWNER_BLOCKED_AT_NESTED_JOIN,
         |out| {
             let stdout = String::from_utf8_lossy(&out.stdout);
-            out.status.success() && stdout.contains("job err") && stdout.contains("done")
+            faulted_deadlock(out) && !stdout.contains("job err") && !stdout.contains("done")
         },
-        "exit 0 with stdout containing `job err` and `done`",
+        "a fatal `deadlock` (D1), no post-recover output",
     );
 }
 
-/// b4a (TICKET-125): an Executor job recovers a nested deadlock and completes, at every worker count.
+/// b4a (TICKET-125) / TICKET-135 (D1): an Executor job recovers a nested deadlock; the abort surfaces
+/// at `shutdown()`, at every worker count.
 const B4A_EXECUTOR_JOB_RECOVERS_NESTED_DEADLOCK: &str = "import std.concurrency\nfn job():
     never := Channel[int](0)
     r := recover:
@@ -1307,12 +1326,15 @@ main()
 ";
 
 #[test]
-fn b4a_executor_job_recovers_nested_deadlock_at_every_worker_count() {
+fn b4a_executor_job_recovered_nested_deadlock_is_fatal_at_every_worker_count() {
     assert_at_every_worker_count(
         "b4a_executor_job_recovers_nested_deadlock.chz",
         B4A_EXECUTOR_JOB_RECOVERS_NESTED_DEADLOCK,
-        |out| String::from_utf8_lossy(&out.stdout) == "job err\ndone\n" && out.status.success(),
-        "exit 0 with stdout `job err\\ndone\\n`",
+        |out| {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            faulted_deadlock(out) && !stdout.contains("job err") && !stdout.contains("done")
+        },
+        "a fatal `deadlock` (D1), no post-recover output",
     );
 }
 
@@ -1374,10 +1396,10 @@ fn e11_executor_job_nested_deadlock_reaches_main_at_every_worker_count() {
     );
 }
 
-/// exec_join (TICKET-125, filed by TICKET-112): reproduces the Executor-job outermost-nursery hang at
-/// `CHEZZI_THREADS=2`.
+/// exec_join (TICKET-125, filed by TICKET-112) / TICKET-135 (D1): the Executor-job outermost-nursery
+/// shape aborts at `CHEZZI_THREADS=2` instead of hanging or recovering.
 #[test]
-fn exec_join_owner_blocked_at_nested_join_completes_at_thread_two() {
+fn exec_join_owner_blocked_at_nested_join_is_fatal_at_thread_two() {
     let dir = std::env::temp_dir().join(format!("chz-threads-125-execjoin-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let path = dir.join("executor_job_owner_blocked_at_nested_join.chz");
@@ -1386,13 +1408,13 @@ fn exec_join_owner_blocked_at_nested_join_completes_at_thread_two() {
     let _ = std::fs::remove_dir_all(&dir);
     let out = out.unwrap_or_else(|| {
         panic!(
-            "executor_job_owner_blocked_at_nested_join.chz hung past its 20 s deadline at CHEZZI_THREADS=2; want exit 0 with stdout containing `job err` and `done`"
+            "executor_job_owner_blocked_at_nested_join.chz hung past its 20 s deadline at CHEZZI_THREADS=2; want a fatal `deadlock`"
         )
     });
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        out.status.success() && stdout.contains("job err") && stdout.contains("done"),
-        "want exit 0 with stdout containing `job err` and `done`, got {:?}\nstdout: {}\nstderr: {}",
+        faulted_deadlock(&out) && !stdout.contains("done"),
+        "want a fatal `deadlock` and no `done`, got {:?}\nstdout: {}\nstderr: {}",
         out.status,
         stdout,
         String::from_utf8_lossy(&out.stderr)
@@ -1434,8 +1456,8 @@ fn edge_table_cell(depth: usize, channel_owner: bool, recovered: bool) -> String
 }
 
 /// TICKET-125 step 16 — the full owner (join/channel) × depth (1..4) × recovered (no/yes) edge table:
-/// every non-recovered cell must fault `deadlock` at every worker count, every recovered cell must
-/// exit 0 with stdout exactly `err\ndone\n` (DEC-092) at every worker count.
+/// every non-recovered cell must fault `deadlock` at every worker count, and every recovered cell
+/// must fault `deadlock` too (TICKET-135, D1: `recover:` is transparent to the verdict).
 #[test]
 fn nested_verdict_edge_table_matches_go_at_every_worker_count() {
     for &channel_owner in &[false, true] {
@@ -1452,10 +1474,10 @@ fn nested_verdict_edge_table_matches_go_at_every_worker_count() {
                         &file,
                         &program,
                         |out| {
-                            out.status.success()
-                                && String::from_utf8_lossy(&out.stdout) == "err\ndone\n"
+                            faulted_deadlock(out)
+                                && !String::from_utf8_lossy(&out.stdout).contains("err")
                         },
-                        "exit 0 with stdout `err`, `done`",
+                        "a fatal `deadlock` through `recover:`",
                     );
                 } else {
                     assert_at_every_worker_count(

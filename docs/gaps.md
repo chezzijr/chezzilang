@@ -13329,13 +13329,13 @@ whole-program faults (deadlock, `os.exit`, resource caps).
 |---|---|---|---|---|
 | W14-1 | P0 | core | a closure/nested fn/`defer:`/`spawn:` capturing a bare-name match binding (`whole: (fn() -> int: whole)()`) panics the VM: `CellLoad on a non-handle value` (`src/vm/exec.rs:2346`), rc=101. CPython/Rust print `5` | ticket |
 | W14-2 | P0 | core | a fn VALUE called with named args binds by the labels of whichever fn fixed the value's type: `fs := [f, ren]; fs[1](a=1, b=2)` → `201`; CPython `102` | ticket |
-| W14-3 | P0 | sched | a rendezvous sender torn down by a recovered deadlock verdict leaves its value: `c.try_recv()` → `Some(1)`; Go `None` | D1 |
+| ~~W14-3~~ | P0 | sched | a rendezvous sender torn down by a recovered deadlock verdict leaves its value: `c.try_recv()` → `Some(1)`; Go `None` | CLOSED 2026-09-19, TICKET-135 (D1): the deadlock verdict is fatal, so no program continues past it |
 | W14-4 | P0 | defer | `return`/`?`/`break` out of `parallel:` runs the enclosing blocks' defers BEFORE the cancelled children's defers; `syntax.md` "inner-block-first"; Go/asyncio children first | ticket |
 | W14-5 | P0 | airlock | a receiver write that PREDATES the sender's snapshot still refuses the install (`n = 5` before the nursery → `5 5`, Go `15 15`), contradicting the DEC-116 sentence | D2 |
 | W14-6 | P0 | airlock | a WORKER receiver's in-place write before a nested nursery drops the child's write (`[1, 5]`, CPython `[1, 5, 2]`); regressed with TICKET-116 | D2 |
 | W14-7 | P0 | io | `read_line`/`lines()`/`input` strip EVERY trailing `\r` (`src/vm/fileio.rs:35`, `src/native/mod.rs:87`); doc and Go/Rust strip one | ticket |
-| W14-8 | P1 | sched | a task recovers an inner deadlock then `out.send(1)`; a busy main `out.recv()` is false-`deadlock`ed 10/10; Go `1 end` | D1 |
-| W14-9 | P1 | sched | a nursery BODY that recovers its own inner deadlock gets its outer siblings torn down (`z6.chz`) | D1 |
+| ~~W14-8~~ | P1 | sched | a task recovers an inner deadlock then `out.send(1)`; a busy main `out.recv()` is false-`deadlock`ed 10/10; Go `1 end` | CLOSED 2026-09-19, TICKET-135 (D1): the deadlock verdict is fatal, so no program continues past it |
+| ~~W14-9~~ | P1 | sched | a nursery BODY that recovers its own inner deadlock gets its outer siblings torn down (`z6.chz`) | CLOSED 2026-09-19, TICKET-135 (D1): the deadlock verdict is fatal, so no program continues past it |
 | W14-10 | P1 | sched | genuine deadlock HANGS when an Executor job and main each hold a 3-level parked nursery tree (5/5 every count); Go reports | ticket |
 | W14-11 | P1 | sched | a main-thread `defer: c.recv()` that can never complete hangs; `concurrency.md` §6e "REPORTED, never a silent hang" | ticket |
 | W14-12 | P1 | cancel | a CANCELLED task's `defer: panic(...)` is swallowed (rc=0; `shutdown_now()` → `Ok(nil)`); Go/asyncio surface it | ticket |
@@ -13363,6 +13363,7 @@ whole-program faults (deadlock, `os.exit`, resource caps).
 | W14-34 | P3 | stdlib | `json.decode` can't take back a tuple `encode` emits; `{inf:E}` lower case (CPython `INF`); float `sum` uncompensated (CPython 3.12+ `0.6`); `-0.0` breaks sort stability / `min` ties; `path.with_ext("", …)` → `.txt`; `0x_ff` rejected by lexer and `parse_int_base`; `datetime.from_epoch` near `i64::MIN` overflows; `days_from_civil(2023, 13, 1)` silently normalizes | ticket |
 | W14-35 | P3 | diagnostics | generator fault frame names the FIRST resume; entrypoint missing fn found only at runtime, no file; same-named types from two modules render identically; empty range pattern `5..1` accepted; `int??` leaks `questionquestion`; `?` prints an unknown type as `?`; duplicate-arm spans point at the scrutinee; `fn a() -> int: if …` inline rejected (closure accepts); cyclic list print faults (CPython `[1, [...]]`); rendezvous deadlock says "bounded channel is at capacity"; `submit_task` fault located in `<native:std.concurrency>` | ticket |
 | W14-36 | P3 | core | a tuple scrutinee rejects a bare-name catch-all (`rest:`); CPython/Rust accept | ticket |
+| W14-37 | P3 | sched | a fatal deadlock verdict still runs the unwound frames' defers (`main` defer ran); Go 1.27's all-goroutines-asleep abort runs none. Residual of TICKET-135: D1 kept the uncaught path's defer behavior, and parked siblings run none (DEC-092) | residual |
 
 Not filed: `json.parse` rejecting a lone surrogate escape (defensible — a `str` cannot hold one; Go
 substitutes U+FFFD); a spawned-task fault printing only `at main` (deliberate, B4). Clean: every checker

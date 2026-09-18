@@ -73,7 +73,7 @@ fn nested_nursery_deadlock_faults_at_one_worker_like_every_other_count() {
 }
 
 #[test]
-fn recovered_nested_nursery_deadlock_lets_the_program_continue_at_one_worker() {
+fn recovered_nested_nursery_deadlock_is_fatal_at_one_worker() {
     let dir = std::env::temp_dir().join(format!("chz-ticket095-rec-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("create fixture dir");
     let path = dir.join("rec.chz");
@@ -115,7 +115,7 @@ fn recovered_nested_nursery_deadlock_lets_the_program_continue_at_one_worker() {
         let _ = child.kill();
         let _ = child.wait();
         panic!(
-            "CHEZZI_THREADS=1 must let `recover:` catch the nested-nursery deadlock and continue, \
+            "CHEZZI_THREADS=1 must abort on the recovered nested-nursery deadlock (TICKET-135, D1), \
              like every other worker count, not hang forever (no exit within 10s)"
         );
     };
@@ -125,17 +125,18 @@ fn recovered_nested_nursery_deadlock_lets_the_program_continue_at_one_worker() {
         use std::io::Read as _;
         let _ = o.read_to_string(&mut stdout);
     }
+    let mut stderr = String::new();
+    if let Some(mut e) = child.stderr.take() {
+        use std::io::Read as _;
+        let _ = e.read_to_string(&mut stderr);
+    }
     assert!(
-        status.success(),
-        "expected rc=0 (the deadlock was caught by `recover:`), got {status} (stdout: {stdout})"
+        !status.success() && stderr.contains("deadlock"),
+        "expected a fatal `deadlock` (`recover:` is transparent to it), got {status} (stdout: {stdout}, stderr: {stderr})"
     );
     assert!(
-        stdout.contains("Err('deadlock:"),
-        "expected the recovered `Err('deadlock: …')` on stdout, got: {stdout}"
-    );
-    assert!(
-        stdout.contains("still running"),
-        "expected the program to continue past the recovered deadlock, got: {stdout}"
+        !stdout.contains("still running") && !stdout.contains("Err('deadlock:"),
+        "the program must not continue past the deadlock, got: {stdout}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

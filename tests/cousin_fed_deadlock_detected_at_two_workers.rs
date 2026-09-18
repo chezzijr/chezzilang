@@ -4,6 +4,8 @@
 //! T=1 once TICKET-103 landed): `inner err`, `F got 2`, `done`, rc=0. Measured on this branch at
 //! `af156f81`-equivalent: T=1 now passes (TICKET-103), but T=2/4 hang with NO output at all
 //! (rc=124), because the inner nursery's genuine deadlock on `never.recv()` is never faulted.
+//! TICKET-135 (D1): the verdict is now FATAL through `recover:`, so the expected outcome is a
+//! `deadlock` abort at rc!=0 within the deadline, with no `inner err` / `F got 2` / `done`.
 //!
 //! Spawns and polls rather than calling `output()`: a hung child never closes its pipes, so
 //! `output()` would wedge this test binary instead of failing it.
@@ -11,7 +13,7 @@
 use std::process::Command;
 
 #[test]
-fn cousin_fed_completes_instead_of_hanging_at_two_and_four_workers() {
+fn cousin_fed_recovered_deadlock_is_fatal_not_a_hang_at_two_and_four_workers() {
     let program = "fn main():\n    \
         never := Channel[int](0)\n    \
         x := Channel[int](0)\n    \
@@ -66,8 +68,8 @@ fn cousin_fed_completes_instead_of_hanging_at_two_and_four_workers() {
             let _ = child.wait();
             panic!(
                 "CHEZZI_THREADS={threads}: a task joining a nested nursery whose only child is \
-                 genuinely deadlocked must complete (\"inner err\", \"F got 2\", \"done\"), not \
-                 hang forever with no output (no exit within 10s)"
+                 genuinely deadlocked must abort with `deadlock`, not hang forever with no \
+                 output (no exit within 10s)"
             );
         };
 
@@ -82,12 +84,14 @@ fn cousin_fed_completes_instead_of_hanging_at_two_and_four_workers() {
             let _ = e.read_to_string(&mut stderr);
         }
         assert!(
-            status.success(),
-            "CHEZZI_THREADS={threads}: expected rc=0, got {status} — stdout: {stdout} stderr: {stderr}"
+            !status.success() && stderr.contains("deadlock"),
+            "CHEZZI_THREADS={threads}: expected a fatal `deadlock`, got {status} — stdout: {stdout} stderr: {stderr}"
         );
         assert!(
-            stdout.contains("inner err") && stdout.contains("F got 2") && stdout.contains("done"),
-            "CHEZZI_THREADS={threads}: expected \"inner err\"/\"F got 2\"/\"done\", got stdout: \
+            !stdout.contains("inner err")
+                && !stdout.contains("F got 2")
+                && !stdout.contains("done"),
+            "CHEZZI_THREADS={threads}: `recover:` must not catch the verdict, got stdout: \
              {stdout} stderr: {stderr}"
         );
 

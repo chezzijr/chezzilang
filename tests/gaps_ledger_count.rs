@@ -69,12 +69,12 @@ fn a_row_that_says_closed_is_struck() {
     );
 }
 
-/// `docs/concurrency.md`'s deadlock-vs-Go's-`fatal error` bullet never says the Chezzi fault is
-/// catchable, so a reader carries over Go's un-catchability: a top-level `recover:` around a
-/// `parallel:` deadlock actually returns `Err(...)` at rc=0 (TICKET-092). The bullet must name
-/// `recover` and state the fault is catchable, next to the existing Go comparison.
+/// `docs/concurrency.md`'s deadlock-vs-Go's-`fatal error` bullet must say the Chezzi verdict is FATAL
+/// (TICKET-135, D1): a top-level `recover:` around a `parallel:` deadlock aborts at rc=1 like Go's
+/// `fatal error`. The bullet must name `recover` and state the verdict is fatal, next to the Go
+/// comparison.
 #[test]
-fn concurrency_doc_deadlock_bullet_states_recover_is_catchable() {
+fn concurrency_doc_deadlock_bullet_states_the_verdict_is_fatal() {
     let doc = read("docs/concurrency.md");
     let start = doc
         .find("**`recv` on an empty channel BLOCKS**")
@@ -92,8 +92,8 @@ fn concurrency_doc_deadlock_bullet_states_recover_is_catchable() {
         "docs/concurrency.md's deadlock-vs-Go bullet must mention `recover`: {bullet}"
     );
     assert!(
-        bullet.to_lowercase().contains("catchable"),
-        "docs/concurrency.md's deadlock-vs-Go bullet must state the Chezzi fault is catchable: {bullet}"
+        bullet.contains("FATAL"),
+        "docs/concurrency.md's deadlock-vs-Go bullet must state the Chezzi verdict is FATAL: {bullet}"
     );
 }
 

@@ -413,10 +413,9 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
   print(ch.recv())     # 1
   ```
 
-  **DIVERGENCE from Go: the deadlock fault IS catchable.** Go's `fatal error: all goroutines are
-  asleep - deadlock!` is unrecoverable — `recover()` never runs and the process dies. Chezzi's
-  verdict is an ordinary runtime fault, so a `recover:` above the nursery catches it and the
-  program continues:
+  **The deadlock fault is FATAL, like Go.** Go's `fatal error: all goroutines are asleep -
+  deadlock!` cannot be recovered, and neither can Chezzi's: `recover:` is transparent to the
+  verdict, and the program aborts at rc=1 with the `deadlock` message (TICKET-135, D1):
 
   ```chezzi
   ch := Channel[int]()
@@ -426,16 +425,16 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
               v := ch.recv()
           spawn:
               v := ch.recv()
-  print(r)               # Err('deadlock: every task in this parallel: block ... cannot progress')
-  print("still running")
+  print("unreachable")   # the `recover:` never binds `r`; `runtime error (<file>:3:5): deadlock: ...`, rc=1
   ```
 
-  Uncaught, that same program aborts instead — `runtime error (<file>:2:1): deadlock: ...`, rc=1 —
-  so a broad top-level `recover:` converts "this program cannot proceed" into an `Err` a caller can
-  ignore. Scope the `recover:` to the faults you mean to handle, or re-`panic`. Catching it does NOT
-  resurrect the siblings: §6e's *One deliberate exception: a genuine deadlock does not run
-  `defer`s* still applies, and the parked tasks are torn down where they stand (measured: with a
-  `defer: print(...)` in each task under the `recover:`, neither defer printed).
+  Value and operation faults (index, overflow, `panic`, IO, call depth, a `Shared` guard re-entry)
+  stay recoverable. Scheduler and whole-program faults (deadlock, `os.exit`, `--max-heap`/`--timeout`)
+  do not. An `Executor` job's deadlock aborts at `shutdown()`, and `chezzi test` reports a
+  deadlocking test as ERROR and runs the rest of the suite. The parked tasks are torn down where
+  they stand: §6e's *One deliberate exception: a genuine deadlock does not run `defer`s* still
+  applies to them. The unwound frames on the faulting task's own stack still run their `defer`s,
+  as for any uncaught fault (Go runs none; filed as `docs/gaps.md` W14-37).
 - **Move-on-send** = Go's send without Go's sharing. Nothing is *enforced* — there is no Rust-style
   move checker here, and a sender that keeps using the value it sent is legal and safe: the crossing
   deep-copies, so the two sides simply stop being the same object. Measured: `ch.send(xs)` then
@@ -1204,8 +1203,8 @@ runs on the owner fiber's own thread at that width, and that fiber is counted a 
 instead of the fiber hanging forever uncounted.
 
 An inner deadlock faults only the innermost stuck nursery that a parked owner is joining: every task
-parked outside it stays parked, for that owner to feed once `recover:` returns (TICKET-103,
-`docs/gaps.md` W12-4). The owner parks at its join whether that join is a `parallel:` block's end or
+parked outside it stays parked until the program aborts: the verdict is fatal, so no `recover:`
+returns to feed them (TICKET-103 `docs/gaps.md` W12-4, then TICKET-135 D1). The owner parks at its join whether that join is a `parallel:` block's end or
 the implicit nursery's `return`, `?` or fall-through; the joining op re-executes after the wake.
 
 **Re-derived 2026-08-18 on the genuinely 1-wide binary** (`docs/gaps.md` **W8-8**, below — until it
