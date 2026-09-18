@@ -152,17 +152,6 @@ pub enum Op {
     DefineGlobalSlot(u32),
     /// Assign (`=`/`+=`/`-=`) the current module's global `slot` (checker guarantees it is defined).
     SetGlobalSlot(u32),
-    /// TICKET-097 — the running task's view mutated module global `slot` IN PLACE through an
-    /// assignment to a field or an index rooted at it (`zs[0] = 9`, `g.n = 1`). Marks `carried`
-    /// only, never `assigned`, so the airlock's send filter serializes the slot while
-    /// `Vm::install_global_slot`'s receive-side skip stays exactly as DEC-051 defined it. Pushes
-    /// and pops nothing.
-    TouchGlobalSlot(u32),
-    /// TICKET-097 — the same mark from the TYPE-BLIND path: a call of a method NAME that mutates a
-    /// builtin container (`ys.push(2)`). `Vm::touch_global_slot` refuses to mark unless the slot
-    /// holds a `List`/`Map`/`Set`/`ByteArray` — never a struct, because a user struct method
-    /// sharing one of those names may mutate nothing. Pushes and pops nothing.
-    TouchGlobalSlotByName(u32),
     /// Read the current closure's captured value at compile-time `slot` (M19 lever #3: positional
     /// captures — `captured[slot]`, no string hash on the hot path). The slot indexes the closure's
     /// `captured` Vec, which is populated in the same snapshot order as the proto's `capture_names`.
@@ -616,15 +605,6 @@ pub struct Proto {
     /// `GetCaptured` home-global fallback + closure error messages); the hot read is a pure
     /// `captured[slot]` index. Empty for non-closure protos. Mirrors [`StructDef::fields`].
     pub capture_names: Vec<String>,
-    /// TICKET-016 (W8-25) — the home-module `let`-bound global slots this proto's body, or any
-    /// closure proto nested inside it (via `Op::MakeClosure`/`Op::SpawnBlock`), READS and NEVER
-    /// WRITES. Computed once by `Compiler::fill_global_free` as a whole-program bytecode post-pass.
-    /// The airlock installs exactly these slots' values into the RECEIVING view's own module copy
-    /// (TICKET-051, `Vm::closure_global_snapshot`/`from_wire_memo`'s `WireValue::Closure` arm); a
-    /// slot the closure tree writes is excluded so an install can never clobber the receiving
-    /// task's own later write to that same slot. Empty for a proto that never crosses a heap
-    /// boundary as a closure.
-    pub global_free: Vec<u32>,
 }
 
 /// A struct type's runtime shape (program-global). `module_idx` identifies the module that defined

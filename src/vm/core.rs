@@ -1327,7 +1327,7 @@ pub fn collect_gcrefs_structural(
                 WireGenState::Suspended { stack, .. } => stack
                     .iter()
                     .for_each(|x| collect_gcrefs_structural(x, out, seen, pending)),
-                WireGenState::Done => {}
+                WireGenState::Done | WireGenState::Unsendable(_) => {}
             }
         }
         // A nested core is QUEUED, never locked here — `seen` keeps each one queued at most once,
@@ -1363,13 +1363,8 @@ pub fn collect_gcrefs_structural(
         // B3.6: a submitted closure queued in an `Executor` crosses by value, but its captures may
         // still embed `Handle`s into the live heap (a captured `Channel[str]`'s bytes root nothing,
         // but a captured callable would) — root them while the task sits in the queue.
-        WireValue::Closure {
-            captured, globals, ..
-        } => {
+        WireValue::Closure { captured, .. } => {
             captured
-                .iter()
-                .for_each(|(_, v)| collect_gcrefs_structural(v, out, seen, pending));
-            globals
                 .iter()
                 .for_each(|(_, v)| collect_gcrefs_structural(v, out, seen, pending));
         }
@@ -1521,17 +1516,14 @@ pub fn wire_summary(w: &WireValue) -> (usize, bool) {
                 WireGenState::Suspended { stack, .. } => {
                     stack.iter().for_each(|x| walk(&mut acc, x))
                 }
-                WireGenState::Done => {}
+                WireGenState::Done | WireGenState::Unsendable(_) => {}
             }
         }
-        WireValue::Closure {
-            captured, globals, ..
-        } => {
+        WireValue::Closure { captured, .. } => {
             captured.iter().for_each(|(n, v)| {
                 acc.0 += n.len();
                 walk(&mut acc, v);
             });
-            globals.iter().for_each(|(_, v)| walk(&mut acc, v));
         }
         // A nested core: conservatively dirty (a store on the INNER core can introduce a handle
         // without ever touching this one's cache), and the walk stops here.
@@ -1701,16 +1693,11 @@ fn nested_core_bytes_structural(
                         acc += nested_core_bytes_structural(x, seen, pending);
                     }
                 }
-                WireGenState::Done => {}
+                WireGenState::Done | WireGenState::Unsendable(_) => {}
             }
         }
-        WireValue::Closure {
-            captured, globals, ..
-        } => {
+        WireValue::Closure { captured, .. } => {
             for (_, v) in captured {
-                acc += nested_core_bytes_structural(v, seen, pending);
-            }
-            for (_, v) in globals {
                 acc += nested_core_bytes_structural(v, seen, pending);
             }
         }

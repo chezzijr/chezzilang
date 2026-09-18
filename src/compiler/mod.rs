@@ -152,9 +152,6 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     c.program.rebuild_struct_names();
     c.build_eq_hooks();
     c.build_provider_table()?;
-    // TICKET-016 (W8-25): one whole-program bytecode post-pass computing which home-module `let`
-    // globals each proto's closure tree reads and never writes — the airlock snapshot set.
-    c.fill_global_free();
     Ok(c.program)
 }
 
@@ -302,19 +299,6 @@ struct Compiler {
     /// The CURRENT module's index, set at the top of `compile_module` — the home module whose
     /// locally-declared types use its own `type_keys` entry.
     current_module_idx: usize,
-    /// TICKET-016 (W8-25) — every `(module_idx, slot)` a top-level `let` binds, across every module.
-    /// Filled by `collect_globals`'s third pass. `Compiler::fill_global_free` intersects a proto's
-    /// read set against this so only `let`-bound globals are ever snapshot-copied at the airlock —
-    /// top-level `fn`s, imports, `native fn`s and `extern` fns stay late loads.
-    let_global_slots: std::collections::HashSet<(usize, u32)>,
-    /// TICKET-016 (W8-25) — `proto_module[p]` is the module index that owns proto `p`, pushed
-    /// alongside `program.protos.push` in `Compiler::finish` (the one push site in the tree). Lets
-    /// `fill_global_free` resolve `let_global_slots` membership per proto.
-    proto_module: Vec<usize>,
-    /// TICKET-097 — maps the `(module_idx, slot)` of every top-level `fn` to the proto it defines,
-    /// so `fill_global_free` can follow a bare `helper()` call, whose bytecode names only the fn's
-    /// global slot.
-    fn_global_protos: HashMap<(usize, u32), ProtoId>,
     /// The module index that declared `std/json.chz`'s bodyless `native fn _to_json` (set once, in
     /// `hoist_types`, which runs over every module before any `compile_module`). `None` if
     /// `std.json` is not part of this compile. Gates the bare-call `_to_json(...)` lowering to
@@ -885,9 +869,6 @@ impl Compiler {
             static_methods: std::collections::HashSet::new(),
             imported_modules: HashMap::new(),
             current_module_idx: 0,
-            let_global_slots: std::collections::HashSet::new(),
-            proto_module: Vec::new(),
-            fn_global_protos: HashMap::new(),
             json_to_value_home: None,
             bare_types: HashMap::new(),
             extern_sigs: crate::checker::ExternTable::new(),
@@ -1092,7 +1073,6 @@ impl Compiler {
     /// `native fn`s are module globals too, see the `StmtKind::Native` arm below.
     fn collect_globals(
         &mut self,
-        module_idx: usize,
         imports: &[ResolvedImport],
         stmts: &[Stmt],
         native: Option<&'static str>,
@@ -1161,10 +1141,6 @@ impl Compiler {
             if let StmtKind::Let { names, .. } = &stmt.kind {
                 for name in names {
                     add(name.clone(), &mut self.globals, &mut self.global_slots);
-                    // TICKET-016 (W8-25): record this top-level `let` binding's slot as a candidate
-                    // for airlock snapshot-copying (subject to `fill_global_free`'s write exclusion).
-                    let slot = self.globals[name];
-                    self.let_global_slots.insert((module_idx, slot));
                 }
             }
         }
@@ -1273,7 +1249,7 @@ impl Compiler {
     ) -> Result<ProtoId, CompileError> {
         // M19 Phase 2b: assign a stable slot to every module global before emitting any code, so
         // forward references (method/fn bodies, imports used before their line) resolve to a slot.
-        self.collect_globals(module_idx, imports, &module.stmts, native);
+        self.collect_globals(imports, &module.stmts, native);
         // Module-scoped types: record this module's index + its imported module bindings, so a
         // qualified `geo.Point(...)` resolves to the right module's runtime key.
         self.current_module_idx = module_idx;
@@ -1573,9 +1549,6 @@ impl Compiler {
                 fc.emit(Op::MakeFunc(pid), stmt.span);
                 let fn_slot = self.global_slot(&decl.name);
                 fc.emit(Op::DefineGlobalSlot(fn_slot), stmt.span);
-                // TICKET-097 — records the call edge `fill_global_free` needs to follow a bare
-                // `helper()` call, whose bytecode names only `helper`'s global slot, not its proto.
-                self.fn_global_protos.insert((module_idx, fn_slot), pid);
                 // `chezzi test` discovery — a free `test fn` (entry module only).
                 if decl.is_test && is_entry {
                     self.program.tests.push((decl.name.clone(), pid));
@@ -1933,9 +1906,6 @@ impl Compiler {
         let pid = self.program.protos.len();
         // M19: peephole pass — const-fold + superinstruction fusion, with jump relocation.
         let (code, lines) = peephole::optimize(fc.code, fc.lines);
-        // TICKET-016 (W8-25): record this proto's owning module BEFORE the push, so `proto_module`
-        // and `program.protos` stay index-aligned for `fill_global_free`.
-        self.proto_module.push(self.current_module_idx);
         self.program.protos.push(Proto {
             name: fc.name,
             arity: fc.arity,
@@ -1949,79 +1919,8 @@ impl Compiler {
             decl_span: fc.decl_span,
             // Lever #3: cold-path capture-name metadata in slot order (empty for non-closures).
             capture_names: fc.captured_names,
-            // TICKET-016 (W8-25): filled by `fill_global_free`'s whole-program post-pass.
-            global_free: Vec::new(),
         });
         pid
-    }
-
-    /// TICKET-016 (W8-25) — one whole-program bytecode post-pass: for every proto, compute the
-    /// home-module `let`-bound global slots its body (or any closure proto nested inside it via
-    /// `Op::MakeClosure`/`Op::SpawnBlock`) reads and never writes, and stamp it onto
-    /// `Proto::global_free`. This is what the airlock snapshot-copies onto a crossing closure.
-    fn fill_global_free(&mut self) {
-        let n = self.program.protos.len();
-        let mut reads: Vec<std::collections::HashSet<u32>> = vec![Default::default(); n];
-        let mut writes: Vec<std::collections::HashSet<u32>> = vec![Default::default(); n];
-        let mut children: Vec<Vec<ProtoId>> = vec![Vec::new(); n];
-        for (p, proto) in self.program.protos.iter().enumerate() {
-            for op in &proto.code {
-                match op {
-                    Op::GetGlobalSlot(s) => {
-                        reads[p].insert(*s);
-                        // TICKET-097 — a bare call (`helper()`) loads its callee through this same
-                        // op, so a read behind the call is otherwise invisible to this pass. The
-                        // fixpoint below unions the child's WRITES too, so a callee that writes the
-                        // slot still lands in `writes[p]` and stays excluded (W8-25's rule). The
-                        // fixpoint only grows its sets, so a recursive or mutually-recursive callee
-                        // converges without a visited set. `self.proto_module[p]` is baked into the
-                        // map key, so a call into ANOTHER module is never followed (slot numbers are
-                        // per module).
-                        if let Some(&q) = self.fn_global_protos.get(&(self.proto_module[p], *s)) {
-                            children[p].push(q);
-                        }
-                    }
-                    Op::SetGlobalSlot(s) | Op::DefineGlobalSlot(s) => {
-                        writes[p].insert(*s);
-                    }
-                    Op::MakeClosure(q, _) | Op::SpawnBlock(q, _) => {
-                        children[p].push(*q);
-                    }
-                    _ => {}
-                }
-            }
-        }
-        // Fixpoint: union each child's reads/writes into its parent until a full sweep is a no-op.
-        loop {
-            let mut changed = false;
-            for p in 0..n {
-                for &child in &children[p] {
-                    let (before_r, before_w) = (reads[p].len(), writes[p].len());
-                    let child_reads = reads[child].clone();
-                    let child_writes = writes[child].clone();
-                    reads[p].extend(child_reads);
-                    writes[p].extend(child_writes);
-                    if reads[p].len() != before_r || writes[p].len() != before_w {
-                        changed = true;
-                    }
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-        for p in 0..n {
-            let module_idx = self.proto_module[p];
-            let mut free: Vec<u32> = reads[p]
-                .iter()
-                .filter(|s| !writes[p].contains(s))
-                .filter(|s| self.let_global_slots.contains(&(module_idx, **s)))
-                .copied()
-                .collect();
-            free.sort_unstable();
-            free.dedup();
-            self.program.protos[p].global_free = free;
-        }
     }
 
     // ----- statements -----
@@ -2665,16 +2564,6 @@ impl Compiler {
         value: &Expr,
         span: Span,
     ) -> Result<(), CompileError> {
-        // TICKET-097 — a field/index assignment target rooted at a module global is an IN-PLACE
-        // mutation of the value it holds (`zs[0] = 9`, `p.v = 9`), which never reaches `emit_store`
-        // and so never emits `Op::SetGlobalSlot`. The `Ident` arm is excluded on purpose: it DOES
-        // reach `emit_store`, which already marks both bits.
-        let touch = match &target.kind {
-            ExprKind::Field { obj, .. } | ExprKind::Index { obj, .. } => {
-                self.global_root_slot(fc, obj)
-            }
-            _ => None,
-        };
         match &target.kind {
             ExprKind::Ident(name) => match op.to_binop() {
                 None => {
@@ -2771,9 +2660,6 @@ impl Compiler {
                 });
             }
         }
-        if let Some(slot) = touch {
-            fc.emit(Op::TouchGlobalSlot(slot), span);
-        }
         Ok(())
     }
 
@@ -2788,14 +2674,6 @@ impl Compiler {
         i: usize,
         span: Span,
     ) -> Result<(), CompileError> {
-        // TICKET-097 — same in-place-mutation mark as `compile_assign`, for a destructured
-        // `a, b = ...` target rooted at a module global.
-        let touch = match &target.kind {
-            ExprKind::Field { obj, .. } | ExprKind::Index { obj, .. } => {
-                self.global_root_slot(fc, obj)
-            }
-            _ => None,
-        };
         match &target.kind {
             ExprKind::Ident(name) => {
                 fc.emit_hidden_get(tuple_slot, span);
@@ -2847,9 +2725,6 @@ impl Compiler {
                 });
             }
         }
-        if let Some(slot) = touch {
-            fc.emit(Op::TouchGlobalSlot(slot), span);
-        }
         Ok(())
     }
 
@@ -2874,31 +2749,6 @@ impl Compiler {
                 fc.emit(Op::CellStore, span);
             }
             None => fc.emit(Op::SetGlobalSlot(self.global_slot(name)), span),
-        }
-    }
-
-    /// TICKET-097 — walks a `Field`/`Index` chain down to its root and, if that root is a bare
-    /// module `let` global (never a local, a captured name, a type, or a module alias), returns its
-    /// slot. Deliberately does NOT call `Compiler::global_slot`, which PANICS on a miss: this runs
-    /// on a branch (`compile_call`'s `ExprKind::Field` callee, and an assignment target) that also
-    /// sees `Type.method(...)` and `module.Type(...)` roots with no slot at all.
-    fn global_root_slot(&self, fc: &FnComp, e: &Expr) -> Option<u32> {
-        let mut cur = e;
-        loop {
-            cur = match &cur.kind {
-                ExprKind::Field { obj, .. } | ExprKind::Index { obj, .. } => obj.as_ref(),
-                ExprKind::Ident(name) => {
-                    if !fc.is_unbound(name) {
-                        return None;
-                    }
-                    let slot = *self.globals.get(name.as_str())?;
-                    return self
-                        .let_global_slots
-                        .contains(&(self.current_module_idx, slot))
-                        .then_some(slot);
-                }
-                _ => return None,
-            };
         }
     }
 
@@ -5587,32 +5437,6 @@ impl Compiler {
         } = &callee.kind
             && !crate::ast::is_tuple_index(name)
         {
-            // TICKET-097 — the type-blind by-name mark: `ys.push(2)` never emits `Op::SetGlobalSlot`,
-            // so the sender's `assigned`/`carried` bits for `ys` would otherwise never be set. The
-            // name list is copied verbatim from `mutates_receiver` (`src/checker/mod.rs:3720`). This
-            // is the one point covering the branch's many early returns below, and the op is
-            // stack-neutral so it is safe unconditionally. `str.reverse`, `Shared.update`,
-            // `Atomic.add` and a static `V.add` are resolved elsewhere: the first three by
-            // `Vm::touch_global_slot`'s runtime `List`/`Map`/`Set`/`ByteArray` test, the fourth by
-            // `global_root_slot` returning `None` for a type-name root.
-            if matches!(
-                name.as_str(),
-                "push"
-                    | "pop"
-                    | "reverse"
-                    | "extend"
-                    | "sort"
-                    | "sort_by"
-                    | "sort_by_key"
-                    | "insert"
-                    | "remove_at"
-                    | "remove"
-                    | "update"
-                    | "add"
-            ) && let Some(slot) = self.global_root_slot(fc, obj)
-            {
-                fc.emit(Op::TouchGlobalSlotByName(slot), span);
-            }
             // `module.Struct(args)` → qualified struct constructor. `module` is a bound module name
             // whose target declares struct `name`; emit `NewStruct` keyed by that module's runtime key.
             if let ExprKind::Ident(mname) = &obj.kind

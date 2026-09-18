@@ -563,6 +563,10 @@ enum GenState {
     Suspended,
     /// Body returned / fell off the end (or faulted). Every further `.next()` yields `None`.
     Done,
+    /// TICKET-137 — a module-global generator the task's snapshot could not copy (it was running at the
+    /// spawn, or held a value that cannot cross tasks). Inert until driven; any `.next()` faults with
+    /// this message instead of reading as `nil` or as exhausted.
+    Unsendable(Box<str>),
 }
 
 /// Experimental generators — the heap payload of an `Obj::Generator`. A one-shot coroutine driven
@@ -587,6 +591,7 @@ impl std::fmt::Debug for GeneratorCore {
             GenState::Pending(_) => "Pending",
             GenState::Suspended => "Suspended",
             GenState::Done => "Done",
+            GenState::Unsendable(_) => "Unsendable",
         };
         f.debug_struct("GeneratorCore")
             .field("proto", &self.proto)
@@ -1210,12 +1215,6 @@ pub struct Vm {
     /// Swapped per fiber with `module_snapshot`: it describes the swapped-in view, not the VM. See
     /// [`Vm::ensure_snapshot`].
     snapshot_memo: Option<Arc<ModuleSnapshot>>,
-    /// TICKET-105 — the root view's FIRST snapshot, kept for the view's whole life (never replaced
-    /// by a later one, unlike `snapshot_memo`). It is the baseline `Vm::slot_changed_since_baseline`
-    /// compares the root's live globals against: the LATEST snapshot would lose a root-view alias
-    /// write made between two nurseries, for any task born from the first nursery. `None` on a
-    /// worker view (its baseline is `module_snapshot`, the snapshot it was faulted from).
-    root_baseline: Option<Arc<ModuleSnapshot>>,
     /// W7-4a — the ONE rebuild map for this view's whole snapshot replay: wire `id` → the `Obj::Cell`
     /// already built for it. `snapshot_modules` serializes every module under ONE [`WireMemo`], so a
     /// cell reached from globals in TWO DIFFERENT modules carries ONE id; the modules fault in lazily
@@ -1505,8 +1504,6 @@ struct FiberCtx {
     /// nothing for them.
     module_snapshot: Option<Arc<ModuleSnapshot>>,
     snapshot_memo: Option<Arc<ModuleSnapshot>>,
-    /// TICKET-105 — see [`Vm::root_baseline`]; travels with the fiber like `snapshot_memo`.
-    root_baseline: Option<Arc<ModuleSnapshot>>,
     /// W7-4a — the fiber's snapshot rebuild map (see [`Vm::snapshot_rebuild`]). UNLIKE the two above
     /// it IS heap-keyed. A fiber's own heap is never traced while parked, and its map travels with the
     /// heap here.
@@ -1745,12 +1742,6 @@ struct ModuleSnapshot {
 struct ModuleSnap {
     name: Box<str>,
     globals: Vec<(String, SnapValue)>,
-    /// TICKET-051 — slot-aligned with `globals`: `carried[i]` is true when the source view's slot
-    /// `i` was `assigned` or `carried` there, so the view this snapshot is replayed into inherits
-    /// that lineage (`fault_module`) instead of starting `carried` from scratch. TICKET-105 — also
-    /// true when the source view's value provably differs from that view's own baseline (an alias
-    /// write reaching no op that names the global), so the fold reaches a grandchild task's send.
-    carried: Vec<bool>,
 }
 
 /// M19 Phase 2b — a module's globals as `(name, value)` pairs in **slot order** (slot `i` at index
@@ -5655,9 +5646,6 @@ impl ReadyWorker {
             // per-nursery now, so the shell's cannot substitute for this fiber's).
             module_snapshot: worker.module_snapshot,
             snapshot_memo: worker.snapshot_memo,
-            // TICKET-105 — a spawned worker is never a root view, so this is always `None`; carried
-            // for the same reason as `snapshot_memo` above (the field must swap symmetrically).
-            root_baseline: worker.root_baseline,
             // W7-4a — the rebuild map indexes `worker.heap` (which becomes `ctx.heap`) and belongs to
             // the view above; carry it for the same heap-keyed reason as `str_intern`, so the modules
             // that fault in later all tie to one cell per binding.

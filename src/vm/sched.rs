@@ -16,22 +16,22 @@ use super::*;
 /// node reached anywhere in this crossing, so an OFF-stack DAG alias back-references too, exactly like
 /// an on-stack cycle: `b := a` inside a task means the same thing it means outside one, and CPython's
 /// `copy.deepcopy` agrees (it memoizes by source identity). A `Generator` is the sole remaining
-/// unpreserved container (its parked frame holds no id, so it can never be a `Backref` target). A cycle
-/// re-entering the SAME generator on the DFS stack is REJECTED cleanly (`gens_on_stack`): with the
-/// containers now back-referencing, the depth cap no longer trips on such a cycle, and re-serializing
-/// the generator would silently DUPLICATE it — the e8dcad7 wrong-result class. `gens_seen` extends the
-/// same reject to a later OFF-stack reach, now reachable from ordinary code (two list slots holding the
-/// same generator) now that containers back-reference. The documented backstop is thus two-pronged: an
-/// acyclic parked slot too deep trips the depth cap; a generator reached twice (on- or off-stack) trips
-/// `gens_on_stack`/`gens_seen`.
+/// unpreserved container on the DFS stack (its parked frame is mid-serialization, so it cannot be a
+/// `Backref` target while it is being written). A cycle re-entering the SAME generator on the DFS stack
+/// is REJECTED cleanly (`gens_on_stack`): with the containers now back-referencing, the depth cap no
+/// longer trips on such a cycle, and re-serializing the generator would silently DUPLICATE it — the
+/// e8dcad7 wrong-result class. TICKET-137: a later OFF-stack reach (two module globals or two list
+/// slots holding the same generator) is a `Backref` to the id its first reach minted in `nodes`, so
+/// the crossing holds ONE copy with the alias intact. An acyclic parked slot too deep still trips the
+/// depth cap.
 ///
 /// **The `RwShared` store is the ONE exception to one-copy-per-crossing**, not `Obj::Cell` — a cell is
 /// now one case of the general rule, sharing `nodes`' identity-preservation via its own never-popped
 /// `cells` map (kept separate for `elem_split` scoping, see below). An `RwShared` read view drains ONE
 /// stored wire through MANY independent `from_wire` rebuilds, so a depth-1 element back-referencing a
 /// SIBLING element's node would hit `from_wire_memo`'s `.expect` (a host panic) — the id is not in that
-/// piece's rebuild map. So the three `RwShared` stores alone set `elem_split`, under which `nodes` and
-/// `gens_seen` stay EMPTY (an off-stack alias is deep-copied independently, like before this ticket) and
+/// piece's rebuild map. So the three `RwShared` stores alone set `elem_split`, under which `nodes`
+/// stays EMPTY (an off-stack alias is deep-copied independently, like before this ticket) and
 /// a cell is re-emitted as a FULL `WireValue::Cell` (same id) the first time each depth-1 subtree
 /// reaches it (`gen` bumps on entry to each depth-1 node). Every depth-1 subtree is then self-contained,
 /// and `from_wire_memo` DEDUPES by id (second definition resolves to the first rebuild), so a
@@ -63,14 +63,6 @@ struct WireMemo {
     /// cross-element back-ref would force `from_wire_piece` to re-materialize the whole container per
     /// element (`rwshared_view_over_shared_bindings_is_not_quadratic`). See `WireMemo::seen`/`enter`.
     nodes: super::fxhash::FxHashMap<GcRef, u32>,
-    /// TICKET-100 — GcRef of every `Obj::Generator` reached ANYWHERE in this crossing, so a second
-    /// off-stack reach is rejected instead of silently duplicated now that containers back-reference.
-    /// Stays EMPTY when `elem_split` is set, for the same reason `nodes` does. See `WireMemo::gen_enter`.
-    gens_seen: super::fxhash::FxHashSet<GcRef>,
-    /// TICKET-100 — the `gens_seen` insertions made by the speculative attempt currently in flight,
-    /// so a discarded attempt (`try_wire_speculative`) can undo exactly those and no others. Recorded
-    /// only while `speculating`, mirroring `emit_undo`.
-    gens_undo: Vec<GcRef>,
     /// W7-4 — GcRef of every `Obj::Cell` seen ANYWHERE in this serialization → (its `id`, the `gen` it
     /// was last EMITTED under). Never removed: a cell is a binding, so reaching it again under the same
     /// `gen` (off-stack sibling closure, or on-stack letrec back-edge) emits `Backref` and the far side
@@ -109,21 +101,11 @@ struct WireMemo {
     /// Re-emit a cell's full definition once per depth-1 subtree (cross-heap stores only).
     elem_split: bool,
     next_id: u32,
-    /// GcRefs of `Obj::Generator`s currently on the serialize DFS stack. A generator carries no id (its
-    /// parked frame can't be a `Backref` target), so re-entering one still on the stack is a cycle
-    /// through a non-preservable node → reject (never duplicate). Removed on DFS exit. TICKET-100: an
-    /// off-stack revisit is now rejected too, by `gens_seen` (see that field's doc), not deep-copied.
+    /// GcRefs of `Obj::Generator`s currently on the serialize DFS stack. Re-entering one still on the
+    /// stack is a cycle through a node whose parked frame is mid-serialization → reject (never
+    /// duplicate). Removed on DFS exit. An OFF-stack revisit is a `Backref` through `nodes`
+    /// (TICKET-137), not a reject.
     gens_on_stack: super::fxhash::FxHashSet<GcRef>,
-    /// TICKET-016 (W8-25) review finding — true for the whole walk `snapshot_modules` runs to build a
-    /// NEW TASK'S OWN COPY of every module global (`ensure_snapshot`/`fault_module`), including the
-    /// `try_wire_speculative` fast path it takes through `to_wire_depth`. That walk moves a closure
-    /// and the globals it reads into the SAME replay, together, so a `WireValue::Closure`/
-    /// `SnapValue::Closure` built under it must not install a frozen value at the snapshot's
-    /// pre-write state — the closure keeps doing a live `Op::GetGlobalSlot` read against its own
-    /// task's module copy instead. False on every other path that reaches `to_wire_depth` (`Channel.send`,
-    /// `spawn`'s arg/capture crossing, `Shared`/`RwShared` stores), where the sender's write already
-    /// happened before the value crosses and a snapshot is the only correct answer.
-    module_replay: bool,
     /// TICKET-119 — set by `to_wire_depth_inner`'s depth guard, cleared at each speculative attempt's
     /// entry. No arm swallows an error, so it classifies the one `Err` that leaves the attempt.
     depth_tripped: bool,
@@ -214,16 +196,6 @@ impl WireMemo {
         let id = self.next_id;
         self.next_id += 1;
         id
-    }
-
-    /// TICKET-100 — record a generator reach: always on the DFS stack (`gens_on_stack`), and (unless
-    /// `elem_split`) also in `gens_seen`, journaling the insertion in `gens_undo` while `speculating`
-    /// so a discarded attempt can roll it back.
-    fn gen_enter(&mut self, h: GcRef) {
-        self.gens_on_stack.insert(h);
-        if !self.elem_split && self.gens_seen.insert(h) && self.speculating {
-            self.gens_undo.push(h);
-        }
     }
 }
 
@@ -3266,72 +3238,6 @@ impl Vm {
         self.to_wire_crossable_gen(v, span, true)
     }
 
-    /// B3.0 — serialize a value into its [`WireValue`] form (the airlock's outbound half). A
-    /// read-only walk of the heap, structurally identical to `deep_clone`'s old recursion but
-    /// allocating nothing. Data (list/tuple/map/set/struct/enum) recurses; immutable / by-reference
-    /// objects (`Str`, callables, modules, `Channel`/`Shared`/`Executor`) cross as
-    /// [`WireValue::Handle`] (the existing handle, same heap in B3.0). `Map`/`Set` carry their cached
-    /// hashes through so reconstruction never re-hashes.
-    ///
-    /// Every `Value` and every `Obj` variant maps to a wire arm — by-reference objects (callables,
-    /// modules, `Channel`/`Shared`/`Executor`) cross as `Handle`. The ONE fallible arm is a
-    /// frame-holding **generator** (`Obj::Generator`): its parked frames reference this heap, so it
-    /// is not sendable and returns a graceful `a generator cannot be sent across tasks` error here
-    /// (carrying a placeholder `Span{0,0}` that airlock callers re-stamp with the real site via
-    /// `to_wire_at`/`deep_clone`/`ensure_snapshot`). Every other arm is infallible (the `?` only
-    /// forwards the generator error up through container recursion).
-    /// TICKET-051 — the airlock's SEND-side filter: a crossing carries only the free globals whose
-    /// value descends from an explicit write in `home`'s own lineage (`assigned` or `carried`). A
-    /// slot no ancestor ever assigned still holds the value the receiver's own lineage gave it, and
-    /// copying it over would discard a receiving task's in-place mutation of that same value
-    /// (`xs.push(9)`, which no slot write records) — so it is deliberately left out.
-    /// TICKET-105 — a third input: a slot no ancestor ever ASSIGNED can still be CARRIED if this
-    /// view's live value for it provably differs from this view's own baseline (an alias write, a
-    /// callee-param write, or a user-method write — none reach an op that names the global). See
-    /// `slot_changed_since_baseline`.
-    pub(super) fn closure_global_snapshot(&self, proto: ProtoId, home: GcRef) -> Vec<(u32, Value)> {
-        let free = &self.program.protos[proto].global_free;
-        let mut out = Vec::with_capacity(free.len());
-        if let Obj::Module(m) = self.heap.get(home) {
-            for &slot in free {
-                let i = slot as usize;
-                // TICKET-105 — a third input beside `assigned`/`carried`: an alias write (`xs := g;
-                // xs.push(2)`) or a callee-param write reaches no op that names the global, so
-                // neither bit is set. Catch it by comparing the live value against this view's own
-                // baseline snapshot; the comparator declines on every doubt (DEC-051).
-                let carries = m.assigned.get(i).copied().unwrap_or(false)
-                    || m.carried.get(i).copied().unwrap_or(false)
-                    || self.slot_changed_since_baseline(home, slot);
-                if carries && let Some(&v) = m.slots.get(i) {
-                    out.push((slot, v));
-                }
-            }
-        }
-        out
-    }
-
-    /// TICKET-105 — true iff `v` is a container/struct/enum whose CONTENTS can be mutated in place
-    /// with no slot write (`q.push(1)`, `p.x = 1`) — the shape an alias write reaches. A scalar or a
-    /// by-reference handle (`Channel`/`Shared`/callable/…) never needs the changed-since-baseline
-    /// check: a scalar can only change via a slot write (already caught by `assigned`), and a handle
-    /// aliases the same shared core on both sides regardless.
-    pub(super) fn may_change_in_place(&self, v: Value) -> bool {
-        match v.view() {
-            super::value::ValueView::Obj(h) => matches!(
-                self.heap.get(h),
-                Obj::List(_)
-                    | Obj::Tuple(_)
-                    | Obj::Map(_)
-                    | Obj::Set(_)
-                    | Obj::ByteArray(_)
-                    | Obj::Struct { .. }
-                    | Obj::Enum { .. }
-                    | Obj::NewType { .. }
-            ),
-            _ => false,
-        }
-    }
-
     /// TICKET-111 — true iff `h` is a data node kind eligible for the snapshot node registry / adoption:
     /// every identity-preserved container plus `Generator`, EXCLUDING `Cell` (tied separately via
     /// `snapshot_cells`, W7-4c) and `Closure` (never adopted — a closure's identity is its own binding,
@@ -3351,94 +3257,20 @@ impl Vm {
         )
     }
 
-    /// TICKET-105 — this view's own baseline for module `home`'s slot `slot`, for the SEND side
-    /// (`closure_global_snapshot`): a worker's baseline is the `ModuleSnapshot` it was faulted from
-    /// (`module_snapshot`); the root view's is its FIRST snapshot (`root_baseline`), because a root
-    /// closure being sent must carry an alias write made in ANY earlier nursery, not just the latest
-    /// one. `None` when the view has no baseline yet, the module/slot is not in it, or the baseline's
-    /// slot name no longer matches (a slot renumbered by a later define).
-    fn baseline_snap_value(&self, home: GcRef, slot: u32) -> Option<&SnapValue> {
-        self.snap_value_from(
-            self.module_snapshot
-                .as_ref()
-                .or(self.root_baseline.as_ref()),
-            home,
-            slot,
-        )
-    }
-
-    /// TICKET-116 — this view's own baseline for `home`'s slot `slot`, for the RECEIVE side
-    /// (`install_global_slot`): a worker's boundary is still `module_snapshot` (its one fork point),
-    /// but the root's is the CURRENT `snapshot_memo`, not `root_baseline`. An install guard asks "did
-    /// I change this since the arriving value's sender forked", and a sender always forks from the
-    /// snapshot open at ITS spawn time — the latest one, not the root's frozen first-ever one. Using
-    /// `root_baseline` here over-refuses every install to a slot the root mutated in place in an
-    /// EARLIER nursery: that mutation already predates the sender's fork and is already folded into
-    /// the arriving value, so it must not read as "changed" forever. `None` under the same doubts as
-    /// `baseline_snap_value`, plus a `snapshot_memo` that has not been (re)built yet this nursery.
-    fn recv_baseline_snap_value(&self, home: GcRef, slot: u32) -> Option<&SnapValue> {
-        self.snap_value_from(
-            self.module_snapshot
-                .as_ref()
-                .or(self.snapshot_memo.as_ref()),
-            home,
-            slot,
-        )
-    }
-
-    fn snap_value_from<'a>(
-        &self,
-        snap: Option<&'a Arc<ModuleSnapshot>>,
-        home: GcRef,
-        slot: u32,
-    ) -> Option<&'a SnapValue> {
-        let snap = snap?;
-        let idx = self.home_index(home)?;
-        let m = match self.heap.get(home) {
-            Obj::Module(m) => m,
-            _ => return None,
-        };
-        let (name, sv) = snap.modules.get(idx)?.globals.get(slot as usize)?;
-        if m.index.get(name.as_str()) == Some(&slot) {
-            Some(sv)
-        } else {
-            None
-        }
-    }
-
-    /// TICKET-105 — true iff this view's live value for `home`'s slot `slot` is PROVABLY different
-    /// content from the baseline it descends from. Declines (`false`) on every doubt — a missing
-    /// baseline, a non-mutable-aggregate value, a serialize failure, or an uncertain comparator
-    /// verdict all read as "unchanged" (see `wire_content_differs`'s decline rules, DEC-051).
-    pub(super) fn slot_changed_since_baseline(&self, home: GcRef, slot: u32) -> bool {
-        self.slot_differs(self.baseline_snap_value(home, slot), home, slot)
-    }
-
-    /// TICKET-116 — the RECEIVE-side counterpart of `slot_changed_since_baseline`: same comparator,
-    /// boundary is `recv_baseline_snap_value` (the current snapshot) instead of the frozen one.
-    pub(super) fn slot_changed_since_recv_baseline(&self, home: GcRef, slot: u32) -> bool {
-        self.slot_differs(self.recv_baseline_snap_value(home, slot), home, slot)
-    }
-
-    fn slot_differs(&self, baseline: Option<&SnapValue>, home: GcRef, slot: u32) -> bool {
-        let Some(SnapValue::Wire(base)) = baseline else {
-            return false;
-        };
-        let Obj::Module(m) = self.heap.get(home) else {
-            return false;
-        };
-        let Some(&v) = m.slots.get(slot as usize) else {
-            return false;
-        };
-        if !self.may_change_in_place(v) {
-            return false;
-        }
-        let Ok(live) = self.to_wire(v) else {
-            return false;
-        };
-        super::wire::wire_content_differs(base, &live)
-    }
-
+    /// B3.0 — serialize a value into its [`WireValue`] form (the airlock's outbound half). A
+    /// read-only walk of the heap, structurally identical to `deep_clone`'s old recursion but
+    /// allocating nothing. Data (list/tuple/map/set/struct/enum) recurses; immutable / by-reference
+    /// objects (`Str`, callables, modules, `Channel`/`Shared`/`Executor`) cross as
+    /// [`WireValue::Handle`] (the existing handle, same heap in B3.0). `Map`/`Set` carry their cached
+    /// hashes through so reconstruction never re-hashes.
+    ///
+    /// Every `Value` and every `Obj` variant maps to a wire arm — by-reference objects (callables,
+    /// modules, `Channel`/`Shared`/`Executor`) cross as `Handle`. The ONE fallible arm is a
+    /// frame-holding **generator** (`Obj::Generator`): its parked frames reference this heap, so it
+    /// is not sendable and returns a graceful `a generator cannot be sent across tasks` error here
+    /// (carrying a placeholder `Span{0,0}` that airlock callers re-stamp with the real site via
+    /// `to_wire_at`/`deep_clone`/`ensure_snapshot`). Every other arm is infallible (the `?` only
+    /// forwards the generator error up through container recursion).
     pub(super) fn to_wire(&self, v: Value) -> Result<WireValue, RuntimeError> {
         // Fresh memo per root — correct for a SINGLE-root crossing (`Channel.send`, a `Shared` store).
         // A crossing whose roots belong together (a `spawn`'s args, a `spawn:` block's captures, one
@@ -3565,35 +3397,12 @@ impl Vm {
                             let name = names.get(i).cloned().unwrap_or_default();
                             wcap.push((name.into_boxed_str(), w));
                         }
-                        // TICKET-016 (W8-25) — the airlock's by-value snapshot of this closure's free
-                        // home-module globals, wired through the same memo as the captures. Skipped
-                        // under `memo.module_replay` — see that field's doc: this closure and `home`'s
-                        // globals are moving together into one task's own module copy, not crossing
-                        // from a different task's heap, so a live read must win instead.
-                        let mut wglobals = Vec::new();
-                        if !memo.module_replay {
-                            let free_globals = self.closure_global_snapshot(*proto, *home);
-                            wglobals.reserve(free_globals.len());
-                            for (slot, gv) in free_globals {
-                                let w = self.to_wire_depth(gv, depth + 1, memo)?;
-                                wglobals.push((slot, w));
-                            }
-                        }
                         memo.exit(h);
-                        // TICKET-041(b)/TICKET-051 — the sender's view identity, so the receiver can
-                        // tell a same-view round trip (install nothing, read the global live) from a
-                        // genuine cross-task crossing (install `globals` into its own module copy).
-                        let home_origin = match self.heap.get(*home) {
-                            Obj::Module(m) => Some(m.origin),
-                            _ => None,
-                        };
                         WireValue::Closure {
                             id,
                             proto: *proto,
                             captured: wcap,
                             home: self.home_index(*home),
-                            globals: wglobals,
-                            home_origin,
                         }
                     }
                 }
@@ -3813,19 +3622,12 @@ impl Vm {
                             Span::default(),
                         ));
                     }
-                    // The SOLE remaining non-identity-preserved container: a generator's parked frame
-                    // holds no `WireValue` id, so it can't be a `Backref` target. With the containers now
-                    // identity-preserved, a cycle re-entering THIS generator no longer trips the depth cap
-                    // (a container back-edge cuts the recursion first) — so re-serializing it would
-                    // silently DUPLICATE the generator (two independent copies sharing one container), the
-                    // e8dcad7 wrong-result class. Guard it directly: if `h` is already on the DFS stack we
-                    // are closing a value cycle through a non-preservable node → reject cleanly (both
-                    // engines run this identical path → byte-identical fault). Insert BEFORE recursing;
-                    // remove on exit — TICKET-100: a generator revisited OFF the stack is no longer
-                    // silently deep-copied independently; the `gens_seen` check right below rejects it
-                    // too, for the same reason containers now back-reference off-stack. A recursive
-                    // closure PARKED in the generator is still fine: its self-cell cycle is
-                    // identity-preserved and back-refs.
+                    // A cycle re-entering THIS generator on the DFS stack closes a value cycle through a
+                    // node whose parked frame cannot be a mid-rebuild `Backref` target → reject cleanly
+                    // (re-serializing it would silently DUPLICATE the generator, the e8dcad7
+                    // wrong-result class). Insert BEFORE recursing; remove on exit. A recursive closure
+                    // PARKED in the generator is still fine: its self-cell cycle is identity-preserved
+                    // and back-refs.
                     if memo.gens_on_stack.contains(&h) {
                         return Err(self.err(
                             "a generator cannot be sent across tasks as part of a reference cycle"
@@ -3833,21 +3635,15 @@ impl Vm {
                             Span::default(),
                         ));
                     }
-                    // TICKET-100 — off the DFS stack but already reached earlier in this same crossing:
-                    // with containers now back-referencing, a second off-stack reach is reachable from
-                    // ordinary code (two list slots holding the same generator), and a generator has no
-                    // wire id to back-reference to, so reject rather than silently duplicate it.
-                    if memo.gens_seen.contains(&h) {
-                        return Err(self.err(
-                            "a generator cannot be sent across tasks twice in one crossing"
-                                .to_string(),
-                            Span::default(),
-                        ));
+                    // TICKET-137 — a generator reached a second time OFF the stack (two module globals,
+                    // or two list slots, aliasing one generator) is ONE copy per crossing: `nodes` holds
+                    // the id its first reach minted and `from_wire_memo` registered, so the alias is a
+                    // `Backref`. `nodes` stays empty under `elem_split`, where the old independent copy
+                    // per depth-1 subtree stays.
+                    if let Some(id) = memo.nodes.get(&h).copied() {
+                        return Ok(WireValue::Backref(id));
                     }
-                    memo.gen_enter(h);
-                    // TICKET-111 — an adoption-only id: never a `Backref` target (DEC-100's second-reach
-                    // reject still fires above), so this is skipped when `elem_split` is on, same as
-                    // every other identity-preserved node's `nodes` entry.
+                    memo.gens_on_stack.insert(h);
                     let id = memo.mint_node(h);
                     if !memo.elem_split {
                         memo.nodes.insert(h, id);
@@ -3870,6 +3666,7 @@ impl Vm {
                             WireGenState::Pending(wargs)
                         }
                         GenState::Done => WireGenState::Done,
+                        GenState::Unsendable(m) => WireGenState::Unsendable(m.clone()),
                         GenState::Suspended => {
                             // CHECKER-UNREACHABLE HARD ARMS — reject cleanly rather than silently
                             // mis-serialize. Neither shape can arise from checker-valid source; these
@@ -3930,9 +3727,7 @@ impl Vm {
                             }
                         }
                     };
-                    // Off the DFS stack: `h` stays in `gens_seen` (inserted by `gen_enter` above, never
-                    // popped here), so TICKET-100's `gens_seen` check at this arm's entry now REJECTS a
-                    // later off-stack revisit within this same crossing instead of deep-copying it.
+                    // Off the DFS stack; `nodes` keeps `h`, so a later reach is a `Backref`.
                     memo.gens_on_stack.remove(&h);
                     WireValue::Generator {
                         id,
@@ -4454,8 +4249,6 @@ impl Vm {
                 proto,
                 captured,
                 home,
-                globals,
-                home_origin,
             } => {
                 let home = self.worker_home(home);
                 let n = captured.len();
@@ -4468,29 +4261,8 @@ impl Vm {
                 // Lever #3: rebuild positionally — push values in wire (slot) order, discard the
                 // carried names (they live in `proto.capture_names`). `to_wire` emits in slot order.
                 let cap = self.rebuild_items(captured, rebuild, |(_k, w)| w);
-                // TICKET-051 — keep RECONSTRUCTING every `globals` entry even when nothing below
-                // installs it: ids in the shared `WireMemo` are minted across captures and globals
-                // together, so a skipped subtree would leave a later `Backref(id)` unresolvable.
-                let mut global_entries = Vec::with_capacity(globals.len());
-                for (slot, w) in globals {
-                    let v = self.from_wire_memo(w, rebuild);
-                    global_entries.push((slot, v));
-                }
-                // TICKET-041(b)/TICKET-051 — a receiver whose module VIEW differs from the sender's
-                // installs those globals into ITS OWN module copy; a receiver that landed back on the
-                // SAME module object (a same-view round trip) must keep reading live and installs
-                // nothing.
-                let same_view = home_origin.is_some()
-                    && home_origin
-                        == match self.heap.get(home) {
-                            Obj::Module(m) => Some(m.origin),
-                            _ => None,
-                        };
-                if !same_view {
-                    for (slot, v) in global_entries {
-                        self.install_global_slot(home, slot, v);
-                    }
-                }
+                // Owner decision D2 (TICKET-137): a crossing carries captures only. The closure's
+                // globals are whatever module copy the RUNNING task owns (`home` resolved above).
                 match self.heap.get_mut(h) {
                     Obj::Closure { captured, .. } => {
                         *captured = cap;
@@ -4534,7 +4306,7 @@ impl Vm {
                         WireGenState::Suspended { stack, .. } => {
                             self.rebuild_items(stack, rebuild, |w| w);
                         }
-                        WireGenState::Done => {}
+                        WireGenState::Done | WireGenState::Unsendable(_) => {}
                     }
                     return Value::obj(h);
                 }
@@ -4549,12 +4321,16 @@ impl Vm {
                         let args = self.rebuild_items(wargs, rebuild, |w| w);
                         self.alloc_generator(proto, home, closure, args)
                     }
-                    WireGenState::Done => {
+                    WireGenState::Done | WireGenState::Unsendable(_) => {
+                        let state = match state {
+                            WireGenState::Unsendable(m) => GenState::Unsendable(m),
+                            _ => GenState::Done,
+                        };
                         let core = GeneratorCore {
                             proto,
                             home,
                             closure,
-                            state: GenState::Done,
+                            state,
                             ctx: GenCtx::default(),
                         };
                         Value::obj(self.heap.alloc(Obj::Generator(Box::new(core))))
@@ -5469,9 +5245,6 @@ impl Vm {
             name: "<worker>".into(),
             slots: Vec::new(),
             index: Default::default(),
-            origin: crate::vm::heap::next_module_origin(),
-            assigned: Vec::new(),
-            carried: Vec::new(),
         })))
     }
 
@@ -5540,12 +5313,6 @@ impl Vm {
         // view (that is O(all module globals) per spawn — measured 84× on a spawn storm with a big
         // aggregate global). Freshness comes from the two invalidation rules, not from refusing to cache.
         self.snapshot_memo = Some(Arc::clone(&snap));
-        // TICKET-105 — the root view keeps its FIRST snapshot for its whole life, never a later one:
-        // a worker already has its own baseline (`module_snapshot`, the snapshot it was faulted
-        // from), so this only fires once, on the root view's first snapshot build.
-        if self.module_snapshot.is_none() && self.root_baseline.is_none() {
-            self.root_baseline = Some(Arc::clone(&snap));
-        }
         Ok(snap)
     }
 
@@ -5575,45 +5342,16 @@ impl Vm {
             // W7-4c — MONOTONIC across builds, so an id from a superseded snapshot can never collide
             // with one from this build (a stale seed then simply misses; see `Vm::snapshot_next_id`).
             next_id,
-            // TICKET-016 (W8-25) review finding — this whole walk moves a closure and the module
-            // globals it reads together into one task's own copy; see the field doc.
-            module_replay: true,
             ..WireMemo::default()
         };
-        // TICKET-105 — this view's own baseline, so an in-place alias write can be folded into
-        // `carried` below and reach a later task's snapshot (a grandchild's send, not just the
-        // sender's own).
-        let baseline = self
-            .module_snapshot
-            .as_ref()
-            .or(self.root_baseline.as_ref());
-        for (mi, &pm) in self.module_objs.iter().enumerate() {
+        for &pm in &self.module_objs {
             // M19 Phase 2b — collect globals in *slot order* (not HashMap iteration order) so a
             // worker replays them into matching slots; the shared `Arc<Program>` slot map makes
             // parent and worker agree on slot↔name regardless of any hash ordering.
-            let (name, globals, mut carried): (Box<str>, Vec<(String, Value)>, Vec<bool>) =
-                match self.heap.get(pm) {
-                    Obj::Module(m) => {
-                        // TICKET-051 — slot-aligned with `module_slot_pairs`' slot-order walk.
-                        let carried = (0..m.slots.len())
-                            .map(|i| {
-                                m.assigned.get(i).copied().unwrap_or(false)
-                                    || m.carried.get(i).copied().unwrap_or(false)
-                            })
-                            .collect();
-                        (
-                            m.name.clone(),
-                            module_slot_pairs(&m.slots, &m.index),
-                            carried,
-                        )
-                    }
-                    _ => ("<worker>".into(), Vec::new(), Vec::new()),
-                };
-            // TICKET-105 — `mutable[i]` before `globals` is consumed below.
-            let mutable: Vec<bool> = globals
-                .iter()
-                .map(|(_, v)| self.may_change_in_place(*v))
-                .collect();
+            let (name, globals): (Box<str>, Vec<(String, Value)>) = match self.heap.get(pm) {
+                Obj::Module(m) => (m.name.clone(), module_slot_pairs(&m.slots, &m.index)),
+                _ => ("<worker>".into(), Vec::new()),
+            };
             // Fallible: a module global that is a frame-holding generator faults here (graceful,
             // re-stamped with the nursery span by `ensure_snapshot`) instead of panicking in `to_snap`.
             let mut snapped = Vec::with_capacity(globals.len());
@@ -5624,17 +5362,16 @@ impl Vm {
             // `WireValue::Cell` definition under the SAME id, and `from_wire_memo`'s first-wins dedupe
             // ties the second definition to the cell the first one built. The cost is wire size, and
             // only for a cell reached from 2+ modules — the same trade `elem_split` already makes for
-            // `RwShared` stores. TICKET-100: WITHIN a module the `nodes`/`gens_seen` clears just below
+            // `RwShared` stores. TICKET-100: WITHIN a module the `nodes` clear just below
             // give containers and generators the analogous per-module self-containment.
             memo.emitted.clear();
             // TICKET-100 — a container/generator is not re-emitted per module the way a cell is (that
-            // would be O(size) wire per module, not O(1)), so `nodes`/`gens_seen` are CLEARED per
+            // would be O(size) wire per module, not O(1)), so `nodes` is CLEARED per
             // module instead: this module's encoding must stay self-contained because modules fault in
             // lazily and in the task's own order, so a `Backref`/reject built against an earlier
             // module's node would be meaningless here. A container aliased by globals in two DIFFERENT
             // modules is therefore still two independent copies in the task.
             memo.nodes.clear();
-            memo.gens_seen.clear();
             for (k, v) in globals {
                 // TICKET-119 — a `doom` record only describes the global whose walk made it: clear
                 // before each global's own walk, so no global's skip decision depends on another's.
@@ -5651,31 +5388,9 @@ impl Vm {
                     nodes.entry(h).or_insert(id);
                 }
             }
-            // TICKET-105 — fold this view's own alias write into `carried`, so a value this view
-            // changed in place (with no slot write to set `assigned`/`carried` above) still reaches
-            // whatever task is snapshotted from here (DEC-097: sets `carried` only, never `assigned`).
-            let base_mod = baseline.and_then(|b| b.modules.get(mi));
-            if let Some(base_mod) = base_mod {
-                for (i, (k, sv)) in snapped.iter().enumerate() {
-                    if carried.get(i).copied().unwrap_or(true)
-                        || !mutable.get(i).copied().unwrap_or(false)
-                    {
-                        continue;
-                    }
-                    let changed = matches!(
-                        (sv, base_mod.globals.get(i)),
-                        (SnapValue::Wire(new), Some((bk, SnapValue::Wire(old))))
-                            if bk == k && super::wire::wire_content_differs(old, new)
-                    );
-                    if changed {
-                        carried[i] = true;
-                    }
-                }
-            }
             modules.push(ModuleSnap {
                 name,
                 globals: snapped,
-                carried,
             });
         }
         Ok((
@@ -5802,7 +5517,6 @@ impl Vm {
         );
         let mint_from = memo.next_id;
         memo.emit_undo.clear();
-        memo.gens_undo.clear();
         memo.depth_tripped = false;
         memo.shortcut_at = None;
         memo.doom_pending.clear();
@@ -5812,7 +5526,6 @@ impl Vm {
         match attempt {
             Ok(w) if keep(&w) => {
                 memo.emit_undo.clear();
-                memo.gens_undo.clear();
                 Some(w)
             }
             _ => {
@@ -5844,9 +5557,6 @@ impl Vm {
                         Some(g) => memo.emitted.insert(id, g),
                         None => memo.emitted.remove(&id),
                     };
-                }
-                for h in memo.gens_undo.drain(..) {
-                    memo.gens_seen.remove(&h);
                 }
                 memo.next_id = mint_from;
                 memo.path.clear();
@@ -5944,9 +5654,6 @@ impl Vm {
                         name,
                         slots,
                         index,
-                        origin: _,
-                        assigned: _,
-                        carried: _,
                     } = *m;
                     let mut globals = Vec::new();
                     for (k, mv) in module_slot_pairs(&slots, &index) {
@@ -6062,21 +5769,43 @@ impl Vm {
             //   - Ok + no handle  → encode the by-value wire copy; `from_wire` rebuilds a fresh
             //     independent `GeneratorCore` on the worker heap (the feature).
             //   - otherwise (non-sendable parked slot / reference cycle / a parked module/native/FFI
-            //     handle) → snapshot an inert `Nil` placeholder, NOT the `?`-propagated reject. Emitting
-            //     `Wire(w)` for a handle-bearing generator would replay a parent `GcRef` on the worker
-            //     (the memory-safety hole), so it must not cross — but eager-faulting the WHOLE snapshot
-            //     here would abort every `spawn` in a module that merely *holds* a non-sendable generator
-            //     it never sends (a regression: `snapshot_modules` walks EVERY global once, reached or
-            //     not). `Nil` keeps the snapshot infallible and inert: a task that never touches the
-            //     generator runs clean, and one that DOES reach it faults at the use site (iterating a
-            //     `Nil` is not iterable) — "fault only when reached" by construction (every task
-            //     snapshots from the same memoized frozen copy).
-            // W7-4: also SPECULATIVE (the `Nil` branch discards it) — same rollback discipline, and
+            //     handle / a generator running at the spawn) → snapshot an inert `Unsendable` generator,
+            //     NOT the `?`-propagated reject. Emitting `Wire(w)` for a handle-bearing generator would
+            //     replay a parent `GcRef` on the worker (the memory-safety hole), so it must not cross —
+            //     but eager-faulting the WHOLE snapshot here would abort every `spawn` in a module that
+            //     merely *holds* a non-sendable generator it never sends (a regression:
+            //     `snapshot_modules` walks EVERY global once, reached or not). The inert copy keeps the
+            //     snapshot infallible: a task that never touches the generator runs clean, and one that
+            //     DOES drive it faults at the use site with a message naming the cause — "fault only
+            //     when reached" by construction (every task snapshots from the same memoized frozen
+            //     copy).
+            // W7-4: also SPECULATIVE (the fallback branch discards it) — same rollback discipline, and
             // it must use the SHARED memo on the kept branch or its ids would collide with the ones the
             // module's other globals minted, aliasing unrelated nodes on replay.
-            Obj::Generator(_) => SnapValue::Wire(
-                self.try_wire_speculative(v, depth, memo, |w| !w.has_handle())
-                    .unwrap_or(WireValue::Nil),
+            // TICKET-137 — the discarded attempt no longer degrades to `Nil` (an aliased running
+            // generator read as `type nil has no method 'next'`). It becomes an inert
+            // `GenState::Unsendable` generator: a task that never drives it runs clean, and one that
+            // does gets a fault naming the cause.
+            Obj::Generator(g) => SnapValue::Wire(
+                match self.try_wire_speculative(v, depth, memo, |w| !w.has_handle()) {
+                    Some(w) => w,
+                    None => {
+                        let msg = if self.active_generators.contains(&h) {
+                            "a module-global generator that was running when this task was spawned has no copy in the task; send its values through a Channel"
+                        } else {
+                            "a module-global generator holding a value that cannot cross tasks has no copy in the task; send its values through a Channel"
+                        };
+                        let id = memo.next_id;
+                        memo.next_id += 1;
+                        WireValue::Generator {
+                            id,
+                            proto: g.proto,
+                            home: self.home_index(g.home),
+                            closure: None,
+                            state: WireGenState::Unsendable(msg.into()),
+                        }
+                    }
+                },
             ),
             // A `Cell` embedding a handle snaps like a 1-field box (its inner recursively snapped) —
             // replayed as ONE independent cell per BINDING (design §4 F1). A pure-data cell took the
@@ -6141,9 +5870,6 @@ impl Vm {
                 name: m.name.clone(),
                 slots: Vec::new(),
                 index: std::collections::HashMap::new(),
-                origin: crate::vm::heap::next_module_origin(),
-                assigned: Vec::new(),
-                carried: Vec::new(),
             })));
             self.module_objs.push(wm);
         }
@@ -6245,21 +5971,6 @@ impl Vm {
         self.snapshot_memo = memo;
         self.snapshot_cells = saved_cells;
         self.snapshot_nodes = saved_nodes;
-        // TICKET-051 — carry the source view's `carried` lineage into this replayed view, OR-ed in
-        // (never touching `assigned`: a replay is not this view's own write). Never routed through
-        // `module_define`, which would drop the `snapshot_memo`/`snapshot_cells` this fault just
-        // took out and restored above.
-        let snap_carried = &snap.modules[idx].carried;
-        if let Obj::Module(m) = self.heap.get_mut(module) {
-            if m.carried.len() < snap_carried.len() {
-                m.carried.resize(snap_carried.len(), false);
-            }
-            for (i, &c) in snap_carried.iter().enumerate() {
-                if c {
-                    m.carried[i] = true;
-                }
-            }
-        }
     }
 
     /// D1 — if this is a worker VM (a snapshot is installed), ensure the module that owns `home` has
@@ -6320,9 +6031,6 @@ impl Vm {
                     name: name.clone(),
                     slots: Vec::new(),
                     index: std::collections::HashMap::new(),
-                    origin: crate::vm::heap::next_module_origin(),
-                    assigned: Vec::new(),
-                    carried: Vec::new(),
                 })));
                 for (k, gv) in globals {
                     let val = self.replay_snap(gv, rb);

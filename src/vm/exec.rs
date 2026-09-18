@@ -174,7 +174,6 @@ impl Vm {
             module_snapshot: None,
             module_faulted: Vec::new(),
             snapshot_memo: None,
-            root_baseline: None,
             snapshot_rebuild: super::fxhash::FxHashMap::default(),
             snapshot_cells: std::sync::Arc::new(super::fxhash::FxHashMap::default()),
             snapshot_nodes: std::sync::Arc::new(super::fxhash::FxHashMap::default()),
@@ -247,9 +246,6 @@ impl Vm {
         std::mem::swap(&mut self.module_faulted, &mut ctx.module_faulted);
         std::mem::swap(&mut self.module_snapshot, &mut ctx.module_snapshot);
         std::mem::swap(&mut self.snapshot_memo, &mut ctx.snapshot_memo);
-        // TICKET-105 — `root_baseline` describes the same view as `module_snapshot`/`snapshot_memo`
-        // above, so it swaps with them.
-        std::mem::swap(&mut self.root_baseline, &mut ctx.root_baseline);
         // W7-4a — the snapshot rebuild map describes the SAME view, so it travels with it. Unlike the
         // two `Arc<ModuleSnapshot>`s above it IS heap-keyed (`GcRef` values), exactly like
         // `module_objs` just above: for an M:N fiber it indexes the heap swapped below, for a fiber
@@ -517,6 +513,15 @@ impl Vm {
         // generator already executing`.
         if self.active_generators.contains(&h) {
             return Err(self.err("generator already running".to_string(), span));
+        }
+        // TICKET-137 — a module-global generator the task's snapshot could not copy: fault with the
+        // recorded cause. Before the state take below, whose `Done` short-circuit would read it as
+        // exhausted.
+        if let Obj::Generator(g) = self.heap.get(h)
+            && let GenState::Unsendable(msg) = &g.state
+        {
+            let msg = msg.to_string();
+            return Err(self.err(msg, span));
         }
         // Take the generator's lifecycle state + parked context out of the heap object. `state` is
         // left as `Done` and `ctx` as empty; the real state is written back after the run. An
@@ -941,9 +946,6 @@ impl Vm {
             name: m.label.clone().into_boxed_str(),
             slots: vec![Value::nil(); m.global_slots.len()],
             index,
-            origin: crate::vm::heap::next_module_origin(),
-            assigned: Vec::new(),
-            carried: Vec::new(),
         })));
         debug_assert_eq!(self.module_objs.len(), idx);
         self.module_objs.push(mod_obj);
@@ -2059,15 +2061,7 @@ impl Vm {
             Op::SetGlobalSlot(slot) => {
                 let v = self.pop();
                 let home = self.frames.last().unwrap().home;
-                self.assign_global_slot(home, *slot, v);
-            }
-            Op::TouchGlobalSlot(slot) => {
-                let home = self.frames.last().unwrap().home;
-                self.touch_global_slot(home, *slot, false);
-            }
-            Op::TouchGlobalSlotByName(slot) => {
-                let home = self.frames.last().unwrap().home;
-                self.touch_global_slot(home, *slot, true);
+                self.set_global_slot(home, *slot, v);
             }
             Op::GetCaptured(slot) => {
                 // Lever #3: hot path is a pure `captured[slot]` index — no string hash. The slot is
@@ -2431,13 +2425,6 @@ impl Vm {
                 // the enclosing closure's value by its positional `parent_slot`.
                 let frame = self.frames.last().unwrap();
                 let (base, home, enclosing) = (frame.base, frame.home, frame.closure);
-                // TICKET-116 (W13-1) — a worker's home module faults lazily, and
-                // `Vm::closure_global_snapshot` takes `&self` so it cannot fault it at send time.
-                // A closure that names free globals must fault its home here, or the send reads an
-                // unfaulted module and carries nothing (an adopted-alias write vanishes).
-                if !self.program.protos[*proto].global_free.is_empty() {
-                    self.ensure_module_faulted(home);
-                }
                 let mut captured = Vec::with_capacity(entries.len());
                 for e in entries {
                     let v = match e.src {

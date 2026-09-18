@@ -16,7 +16,6 @@ use crate::lexer::Span;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A single key's position(s) in `entries`. Numeric keys hash injectively (`(n as f64).to_bits()`),
 /// so the overwhelmingly common case is a single candidate — [`Pos::One`] inlines it with **zero
@@ -157,27 +156,6 @@ pub struct ModuleData {
     pub name: Box<str>,
     pub slots: Vec<Value>,
     pub index: HashMap<Box<str>, u32>,
-    /// The identity of THIS module copy. Every `Obj::Module` allocation mints a fresh one via
-    /// [`next_module_origin`]; an origin is never copied into a new allocation. Lets an airlock
-    /// crossing tell a same-view round trip from a genuine cross-task hop (TICKET-041).
-    pub origin: u64,
-    /// `assigned[i]` is set when THIS view writes slot `i` through `Op::SetGlobalSlot`. A define,
-    /// an import binding and `module_define` set neither this nor `carried`. Never copied into
-    /// another view's allocation, exactly like `origin` (TICKET-051).
-    pub assigned: Vec<bool>,
-    /// `carried[i]` is set when this view's value for slot `i` descends from a write by this view
-    /// or by an ancestor view: its own assignment, the snapshot it was replayed from, an airlock
-    /// install, or an in-place mutation of the slot's own value (`Op::TouchGlobalSlot` /
-    /// `Op::TouchGlobalSlotByName`, TICKET-097). `assigned[i]` implies `carried[i]`. Never copied
-    /// into another view's allocation (TICKET-051).
-    pub carried: Vec<bool>,
-}
-
-static MODULE_ORIGIN: AtomicU64 = AtomicU64::new(1);
-
-/// Mints a fresh, process-global module-view id for a new `ModuleData` allocation.
-pub fn next_module_origin() -> u64 {
-    MODULE_ORIGIN.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Struct field storage: ≤3 fields inline (no second heap alloc), more spill to a boxed slice.
@@ -489,11 +467,7 @@ fn obj_bytes_shallow(obj: &Obj) -> usize {
         Obj::Struct { fields, .. } => fields.heap_bytes(),
         Obj::Enum { payload, .. } => payload.capacity() * std::mem::size_of::<Value>(),
         Obj::Closure { captured, .. } => captured.capacity() * std::mem::size_of::<Value>(),
-        Obj::Module(m) => {
-            m.slots.capacity() * std::mem::size_of::<Value>()
-                + m.assigned.capacity()
-                + m.carried.capacity()
-        }
+        Obj::Module(m) => m.slots.capacity() * std::mem::size_of::<Value>(),
         // Map/Set: entries + the index cost; approximate by entries backing only.
         Obj::Map(m) => m.entries.capacity() * std::mem::size_of::<(u64, Value, Value)>(),
         Obj::Set(s) => s.entries.capacity() * std::mem::size_of::<(u64, Value)>(),
