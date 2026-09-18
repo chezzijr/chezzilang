@@ -3,8 +3,8 @@
 //! channel wake, and `wake_key` used to call `notify_waiters()` even when its bucket drain requeued
 //! NO fiber. The pin runs a ping-pong inside an `Executor` job: a job's VM has no `mn`, so its
 //! `parallel:` builds a top-level eager sched that is a live peer of main's sched, whose workers sit
-//! idle while main waits on `done.recv()`. Debug binary, 2026-09-17, 12 rounds: fixed 1,587-10,450
-//! switches at T=2 and T=8; with `wake_key`'s `if n > 0` guard removed, 156,952-186,281. It used to
+//! idle while main waits on `done.recv()`. Debug binary, 2026-09-18, 12 rounds: fixed 1,479-10,144
+//! switches at T=2 and T=8; with `wake_key`'s `if n > 0` guard removed, 159,558-190,230. It used to
 //! run the ping-pong four nested `parallel: spawn:` levels deep, where each level built a private
 //! eager sched. TICKET-131 made those levels fiber-owned scopes on main's sched, so that shape has no
 //! peer: with the guard removed on top of TICKET-131 it ran the same distribution as without. Do not
@@ -162,7 +162,7 @@ main()\n",
          once per message (W13-26): voluntary context switches at {LOW_WORKERS} workers = \
          {switches_low}; must be <= 2 x {ROUND_TRIPS} round trips = {bound}. `MnSched::wake_key` must \
          notify only when its bucket drain requeued a fiber; the unconditional `notify_waiters` \
-         measured 156,952-186,281 at both counts."
+         measured 159,558-190,230 at both counts."
     );
     assert!(
         switches_high <= bound,
@@ -170,7 +170,7 @@ main()\n",
          once per message (W13-26): voluntary context switches at {HIGH_WORKERS} workers = \
          {switches_high}; must be <= 2 x {ROUND_TRIPS} round trips = {bound}. `MnSched::wake_key` \
          must notify only when its bucket drain requeued a fiber; the unconditional `notify_waiters` \
-         measured 156,952-186,281 at both counts."
+         measured 159,558-190,230 at both counts."
     );
 
     let _ = std::fs::remove_dir_all(&dir);

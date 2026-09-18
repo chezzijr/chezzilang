@@ -14,21 +14,32 @@ Single source of truth for "what am I doing next." Update after every work sessi
   BLOCKING join at T>=2. `tests/chezzi_threads_cli.rs::w13_6_two_recoverers_fan_in_completes_at_thread_two`
   is no longer `#[ignore]`d, and a new
   `w13_6_two_recoverers_fan_in_completes_at_every_worker_count` pins the property at every count.
-  `target/t131/guard-set.log` (5 runs/count, 14 programs) ends `branch mismatches=0`;
-  `target/t131/guard-12.log` (12 runs/count, `i6n2` + five escape repros) also ends
-  `branch mismatches=0`. W13-27 files the cost: release `fan_open.chz` (a nursery inside a spawned task
-  while the enclosing body is open) T=8 base 205-239 ms vs branch 358-386 ms; `fan_closed.chz`
-  (enclosing body already closed) is unchanged. The private nested-sched code (`NestedDrainerSlot`,
-  `activate_eager_nursery`'s `mn.is_some()` arm) stays in place, unreachable from `EnterNursery`.
-  `esc_rec.chz` re-verified clean at 60/60 (TICKET-133's triage) plus 96/96 (this ticket).
-  TICKET-130's W13-26 pin (`tests/chezzi_nested_pingpong_worker_scaling.rs`) now runs its ping-pong
-  inside an `Executor` job, whose sched is still a live peer of main's; the nested shape stopped
-  having peers. Debug, 12 rounds: base and branch at most 10,450 switches per count, `wake_key`'s
-  guard removed at least 156,952; the pin's bound is 2 x round trips per count, and it went red
+  Rebased onto post-TICKET-134 `main` (`24985fd9`) and every number below is re-measured against
+  that base, not carried forward from the pre-rebase run. `target/t131/guard-set.log` (5 runs/count,
+  14 programs, `base-debug-main` at `24985fd9` vs rebased `branch-debug`) ends `branch mismatches=0`;
+  `target/t131/guard-12.log` (12 runs/count, `i6n2` + five escape repros, same two binaries) also ends
+  `branch mismatches=0` — `i6n2` prints `t 2` rc=0 in all 48 runs, none of the five escape repros
+  hangs in 48 runs each. W13-27 files the cost: release `fan_open.chz` (a nursery inside a spawned
+  task while the enclosing body is open), base `24985fd9` vs branch interleaved, 6 runs/cell: T=8
+  base 199-234 ms vs branch 338-399 ms; default (28 workers) base 199-235 ms vs branch 344-426 ms.
+  `fan_closed.chz` (enclosing body already closed) is unchanged: T=8 base 189-230 ms vs branch
+  189-234 ms; default base 197-219 ms vs branch 198-236 ms. The private nested-sched code
+  (`NestedDrainerSlot`, `activate_eager_nursery`'s `mn.is_some()` arm) stays in place, unreachable
+  from `EnterNursery`. `esc_rec.chz` re-verified clean at 60/60 (TICKET-133's triage) plus 96/96
+  (this ticket, pre-rebase) plus 48/48 (post-rebase). TICKET-130's W13-26 pin
+  (`tests/chezzi_nested_pingpong_worker_scaling.rs`) runs its ping-pong inside an `Executor` job,
+  whose sched is still a live peer of main's; the nested shape stopped having peers. Debug, rebased
+  binaries, 12 interleaved rounds: base and branch at most 10,144 switches per count, `wake_key`'s
+  guard removed at least 159,558; the pin's bound is 2 x round trips per count, and it went red
   through cargo with the guard removed. W13-28 files the debug-only slow mode the old nested pin had
   started failing on.
   `verdict base-debug: 0 of 12 over bound`, `verdict branch-debug: 0 of 12 over bound`,
-  `verdict exp-branch-rev130: ALL of 12 over bound` (`target/t131/pin/peer-pin-12.log`).
+  `verdict exp-branch-rev130: ALL of 12 over bound` (`target/t131/pin/peer-pin-12.log`,
+  `git diff c42a75d0 -- src/vm/exec.rs` is empty, so the fix these guard logs cover is the same one
+  the peer-pin sampling ran against).
+  `cargo test --test chezzi_threads_cli` over 12 interleaved rounds, rebased branch vs post-134
+  `main`: see `## Thread` for the table (every `test result:` line, both sides `0 failed` in every
+  round).
 - **TICKET-134 (2026-09-18) — a child fault recorded between the owner-fault rung and the deadlock verdict now outranks the verdict.**
   `Vm::deliver_owner_fault` (`src/vm/netio.rs`) reads the owner's recorded nursery fault; `block_halt_check`
   now calls it a second time inside the deadlock verdict, so a child that faults and completes between
