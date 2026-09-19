@@ -33282,3 +33282,49 @@ fn question_op_in_unknown_return_fn_does_not_print_bare_question_mark_type() {
         "unknown type printed as '?': {errs:?}"
     );
 }
+
+#[test]
+fn inline_if_without_else_in_fn_body_is_rejected() {
+    let tokens = lexer::tokenize("fn a(n: int): if n > 0: 1\n").expect("lex should succeed");
+    let err = parser::parse(tokens)
+        .err()
+        .expect("else-less inline if must not parse");
+    assert!(
+        err.message.contains("expected 'else'"),
+        "wrong message: {err:?}"
+    );
+}
+
+#[test]
+fn inline_nested_if_statement_block_is_still_rejected() {
+    let tokens = lexer::tokenize("fn main():\n    if true: if false: print(1)\n")
+        .expect("lex should succeed");
+    let err = parser::parse(tokens)
+        .err()
+        .expect("nested inline block must not parse");
+    assert!(
+        err.message
+            .contains("a nested block must be indented, not written inline after ':'"),
+        "wrong message: {err:?}"
+    );
+}
+
+#[test]
+fn double_question_type_suffix_names_the_nested_optional_form() {
+    let tokens =
+        lexer::tokenize("fn main():\n    y: int?? = Some(None)\n").expect("lex should succeed");
+    let err = parser::parse(tokens).err().expect("`int??` must not parse");
+    assert!(
+        err.message.contains("'??' is not a type suffix"),
+        "wrong message: {err:?}"
+    );
+}
+
+#[test]
+fn question_op_in_undeclared_return_closure_names_the_missing_return_type() {
+    let src = "fn p(n: int) -> int?:\n    return Some(n)\nfn main():\n    f := fn(n: int): p(n)? + 1\n    print(f(1))\n";
+    rejects(
+        src,
+        "'?' used in a function whose return type is not declared",
+    );
+}
