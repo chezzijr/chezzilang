@@ -2394,7 +2394,8 @@ impl Checker {
                             Ty::Func {
                                 params: sig.params.clone(),
                                 ret: Box::new(Ty::Unknown),
-                                labels: crate::checker::FnLabels::new(sig.labels.clone()),
+                                labels: crate::checker::FnLabels::new(sig.labels.clone())
+                                    .with_min(sig.min_params),
                             },
                         );
                         self.kw_certain.insert(kw_key.clone());
@@ -2409,7 +2410,8 @@ impl Checker {
                         Ty::Func {
                             params: sig.params.clone(),
                             ret: Box::new(sig.ret.clone()),
-                            labels: crate::checker::FnLabels::new(sig.labels.clone()),
+                            labels: crate::checker::FnLabels::new(sig.labels.clone())
+                                .with_min(sig.min_params),
                         },
                     );
                     self.kw_certain.insert(kw_key.clone());

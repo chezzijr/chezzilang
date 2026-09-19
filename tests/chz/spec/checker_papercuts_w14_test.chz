@@ -1,0 +1,17 @@
+# TICKET-142 (W14-33): two checker papercuts, RUN end to end.
+#  - `Channel(1)` takes its element type from the let annotation (as `l: List[float] = []` does).
+#  - a nested `fn`'s default parameter applies at its call sites and through a value alias.
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+
+test fn channel_element_type_from_annotation():
+    ch: Channel[float] = Channel(1)
+    ch.send(1.5)
+    assert ch.recv() == 1.5
+
+test fn nested_fn_default_applies():
+    fn f(x: int = 3) -> int:
+        return x
+    assert f() == 3
+    assert f(4) == 4
+    h := f
+    assert h(5) == 5
