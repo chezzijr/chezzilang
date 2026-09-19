@@ -32902,3 +32902,15 @@ fn int_never_widens_dot_zero_spellings_check() {
         ok(src);
     }
 }
+
+#[test]
+fn holed_string_pattern_is_a_compile_error() {
+    // W14-22: `"{x}"` in pattern position was accepted and silently never matched.
+    let errs = check_src(
+        "fn main():\n    x := \"hi\"\n    match \"hi\":\n        \"{x}\": print(\"interp\")\n        _: print(\"none\")\n",
+    );
+    assert!(
+        !errs.is_empty(),
+        "expected an error for a holed string pattern, got no errors"
+    );
+}
