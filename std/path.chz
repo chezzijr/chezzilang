@@ -136,6 +136,17 @@ fn _last_idx(b: bytes, byte: int) -> int:
         i -= 1
     return -1
 
+# True when `b` is non-empty and every byte is '/'.
+fn _all_slashes(b: bytes) -> bool:
+    if b.len() == 0:
+        return false
+    i := 0
+    while i < b.len():
+        if b[i] != SEP:
+            return false
+        i += 1
+    return true
+
 # `sep.join(parts)` semantics: no leading/trailing separator, one between each pair.
 fn _join(parts: List[bytes], sep: int) -> bytes:
     ba := bytearray(b"")
@@ -231,7 +242,10 @@ fn stem(p: PathLike) -> Path:
 # an empty `e` strips the extension. Faults on an extension that is all dots or contains a path
 # separator. CPython `PurePath.with_suffix` raises `ValueError: Invalid suffix` only for the
 # separator case (measured: ".", "..", "..d" all succeed there); the all-dots fault is our own
-# choice, not a CPython citation.
+# choice, not a CPython citation. Trailing `/` and `/.` are trimmed first, like `pathlib`
+# (`with_ext("a/", "txt")` and `with_ext("a/.", "txt")` -> "a.txt"; `"/a/"` -> "/a.txt"), and a path
+# with no name left (`""`, `"."`, `"./"`, `"/"`, `"//"`, `"/."`) faults `path has an empty name`
+# (`ValueError: has an empty name`); `".."` is a name (`with_ext("..", "txt")` -> "...txt").
 #   with_ext("a/b.txt", ".md") -> "a/b.md" · with_ext("a/b", ".md") -> "a/b.md" ·
 #   with_ext("a/b.txt", "") -> "a/b" · with_ext("a/b.txt", "md") -> "a/b.md"
 fn with_ext(p: PathLike, e: PathLike) -> Path:
@@ -245,8 +259,24 @@ fn with_ext(p: PathLike, e: PathLike) -> Path:
         if ne.len() == 0 or _last_idx(ne, SEP) >= 0:
             panic("with_ext: invalid extension: '" + Path(raw).str() + "'")
         ne = _cat(b".", ne)
-    d := dirname(p).bytes()
-    newbase := _cat(stem(p).bytes(), ne)
+    # CPython `PurePosixPath.with_suffix` works on the parsed path, which drops trailing `/` and
+    # `/.` components: trim them first, so `"a/"`, `"a//"` and `"a/."` all name `a`.
+    raw_p := p.as_path()
+    more := true
+    while more:
+        n := raw_p.len()
+        more = false
+        if n >= 2 and raw_p[n - 1] == DOT and raw_p[n - 2] == SEP:
+            raw_p = raw_p[0 : n - 1]
+            more = true
+        elif n >= 1 and raw_p[n - 1] == SEP and not _all_slashes(raw_p):
+            raw_p = raw_p[0 : n - 1]
+            more = true
+    name := basename(Path(raw_p)).bytes()
+    if name.len() == 0 or (name.len() == 1 and name[0] == DOT):
+        panic("with_ext: path has an empty name: '" + Path(p.as_path()).str() + "'")
+    d := dirname(Path(raw_p)).bytes()
+    newbase := _cat(stem(Path(raw_p)).bytes(), ne)
     if d.len() == 0:
         return Path(newbase)
     # A head that already ends in '/' (including the root "/") takes no extra separator.
