@@ -200,7 +200,7 @@ impl Vm {
                                 None => String::new(),
                             };
                             let sp = self.panic_origin(args.first().copied(), span);
-                            Err(self.err(message, sp))
+                            Err(self.err(message, sp).raised_by_panic())
                         }
                         _ => unreachable!("non-first-class builtin {name} reached invoke_value"),
                     },
@@ -216,6 +216,7 @@ impl Vm {
                             is_over_memory: false,
                             is_timed_out: false,
                             is_deadlock: false,
+                            is_panic: false,
                         })?;
                         Ok(self.lower_native(ret))
                     }
@@ -396,6 +397,7 @@ impl Vm {
             is_over_memory: false,
             is_timed_out: false,
             is_deadlock: false,
+            is_panic: false,
         })?;
         // A streamed `io.print`/`io.flush` whose stdout died emitted into a dead sink
         // ([`Vm::emit_out`], a no-op there) and still returned `Ok` — so the deterministic

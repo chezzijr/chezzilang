@@ -2921,6 +2921,7 @@ fn dl_err() -> RuntimeError {
         is_over_memory: false,
         is_timed_out: false,
         is_deadlock: false,
+        is_panic: false,
     }
 }
 fn mk_sched(total: usize) -> MnSched {

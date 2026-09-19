@@ -1021,6 +1021,7 @@ pub(super) fn halt_over_backlog(
         is_over_memory: true,
         is_timed_out: false,
         is_deadlock: false,
+        is_panic: false,
     };
     match outcome {
         T::Done(r) => (

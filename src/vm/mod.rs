@@ -63,6 +63,9 @@ use crate::{lexer, parser};
 ///
 /// `is_deadlock` marks a scheduler deadlock verdict (TICKET-135, D1). The `run_until` Err funnel
 /// makes `recover:` transparent to it, and it is re-stamped after every unwind.
+///
+/// `is_panic` marks a fault raised by `panic(...)`; `run_until`'s catch never relocates it to the
+/// user's call into std (TICKET-148).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct RuntimeError {
     pub message: String,
@@ -71,6 +74,7 @@ pub struct RuntimeError {
     pub is_over_memory: bool,
     pub is_timed_out: bool,
     pub is_deadlock: bool,
+    pub is_panic: bool,
 }
 
 impl RuntimeError {
@@ -95,6 +99,12 @@ impl RuntimeError {
     /// unwind so a mid-unwind `defer` fault cannot strip it and let `recover:` catch the verdict.
     pub(crate) fn deadlock(mut self) -> Self {
         self.is_deadlock = true;
+        self
+    }
+
+    /// Mark this fault as raised by `panic(...)` (see [`RuntimeError::is_panic`]).
+    pub(crate) fn raised_by_panic(mut self) -> Self {
+        self.is_panic = true;
         self
     }
 }
@@ -4959,6 +4969,7 @@ impl MnSched {
                     is_over_memory: false,
                     is_timed_out: false,
                     is_deadlock: false,
+                    is_panic: false,
                 }),
                 Err(p) => Err(panic_to_fault(p, span)),
             };
@@ -5079,6 +5090,7 @@ fn arm_timer_sleep(sched: Arc<MnSched>, mut fiber: Fiber, t: TimerSleep, span: S
                 is_over_memory: false,
                 is_timed_out: false,
                 is_deadlock: false,
+                is_panic: false,
             }
             .timed_out(),
         )
@@ -5090,6 +5102,7 @@ fn arm_timer_sleep(sched: Arc<MnSched>, mut fiber: Fiber, t: TimerSleep, span: S
             is_over_memory: false,
             is_timed_out: false,
             is_deadlock: false,
+            is_panic: false,
         })
     } else {
         None
@@ -5498,6 +5511,7 @@ fn panic_to_fault(payload: Box<dyn std::any::Any + Send>, span: Span) -> Runtime
         is_over_memory: false,
         is_timed_out: false,
         is_deadlock: false,
+        is_panic: false,
     }
 }
 
@@ -6415,6 +6429,7 @@ fn run_program_inner(src: &str) -> (Vec<u8>, Result<(), RuntimeError>) {
                     is_over_memory: false,
                     is_timed_out: false,
                     is_deadlock: false,
+                    is_panic: false,
                 }),
             );
         }
@@ -6431,6 +6446,7 @@ fn run_program_inner(src: &str) -> (Vec<u8>, Result<(), RuntimeError>) {
                     is_over_memory: false,
                     is_timed_out: false,
                     is_deadlock: false,
+                    is_panic: false,
                 }),
             );
         }
@@ -6447,6 +6463,7 @@ fn run_program_inner(src: &str) -> (Vec<u8>, Result<(), RuntimeError>) {
                     is_over_memory: false,
                     is_timed_out: false,
                     is_deadlock: false,
+                    is_panic: false,
                 }),
             );
         }
@@ -6520,6 +6537,7 @@ pub fn run_with_cfg(src: &str, stress: bool) -> (Result<String, RuntimeError>, u
                             is_over_memory: false,
                             is_timed_out: false,
                             is_deadlock: false,
+                            is_panic: false,
                         }),
                         0,
                     );
@@ -6536,6 +6554,7 @@ pub fn run_with_cfg(src: &str, stress: bool) -> (Result<String, RuntimeError>, u
                             is_over_memory: false,
                             is_timed_out: false,
                             is_deadlock: false,
+                            is_panic: false,
                         }),
                         0,
                     );
@@ -6552,6 +6571,7 @@ pub fn run_with_cfg(src: &str, stress: bool) -> (Result<String, RuntimeError>, u
                             is_over_memory: false,
                             is_timed_out: false,
                             is_deadlock: false,
+                            is_panic: false,
                         }),
                         0,
                     );
@@ -6585,6 +6605,7 @@ pub fn run_capture_on_stack(src: &str, stack_bytes: usize) -> Result<String, Run
                 is_over_memory: false,
                 is_timed_out: false,
                 is_deadlock: false,
+                is_panic: false,
             })?;
             let module = parser::parse(tokens).map_err(|e| RuntimeError {
                 message: e.message,
@@ -6593,6 +6614,7 @@ pub fn run_capture_on_stack(src: &str, stack_bytes: usize) -> Result<String, Run
                 is_over_memory: false,
                 is_timed_out: false,
                 is_deadlock: false,
+                is_panic: false,
             })?;
             let program =
                 crate::compiler::compile_module_standalone(&module).map_err(|e| RuntimeError {
@@ -6602,6 +6624,7 @@ pub fn run_capture_on_stack(src: &str, stack_bytes: usize) -> Result<String, Run
                     is_over_memory: false,
                     is_timed_out: false,
                     is_deadlock: false,
+                    is_panic: false,
                 })?;
             let mut vm = Vm::new(Arc::new(program));
             vm.run()
@@ -6643,6 +6666,7 @@ pub fn run_capture_nursery_len(src: &str) -> (Result<String, RuntimeError>, usiz
                             is_over_memory: false,
                             is_timed_out: false,
                             is_deadlock: false,
+                            is_panic: false,
                         }),
                         0,
                     );
@@ -6659,6 +6683,7 @@ pub fn run_capture_nursery_len(src: &str) -> (Result<String, RuntimeError>, usiz
                             is_over_memory: false,
                             is_timed_out: false,
                             is_deadlock: false,
+                            is_panic: false,
                         }),
                         0,
                     );
@@ -6675,6 +6700,7 @@ pub fn run_capture_nursery_len(src: &str) -> (Result<String, RuntimeError>, usiz
                             is_over_memory: false,
                             is_timed_out: false,
                             is_deadlock: false,
+                            is_panic: false,
                         }),
                         0,
                     );
@@ -6845,6 +6871,7 @@ fn run_file_inner(
                     is_over_memory: false,
                     is_timed_out: false,
                     is_deadlock: false,
+                    is_panic: false,
                 })),
                 None,
             );
@@ -6863,6 +6890,7 @@ fn run_file_inner(
                     is_over_memory: false,
                     is_timed_out: false,
                     is_deadlock: false,
+                    is_panic: false,
                 })),
                 None,
             );

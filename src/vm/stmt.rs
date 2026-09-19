@@ -1133,7 +1133,7 @@ impl Vm {
                 None => String::new(),
             };
             let sp = self.panic_origin(args.first().copied(), span);
-            return Err(self.err(message, sp));
+            return Err(self.err(message, sp).raised_by_panic());
         }
         let result = match name {
             "range" => self.builtin_range(&args, span)?,

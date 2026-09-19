@@ -3583,9 +3583,12 @@ match r:
 (not via `recover:`) carries none of these — `line()`/`col()`/`file()` are all `None` on it, and so are
 they on any error still in flight through a `?` propagation, since only `recover:` (and a `defer`-fault
 boundary) stamps the origin. `panic(e.message())` **re-raises at the origin `e` carries**, not at the
-`panic` call's own line — a re-raise never moves the coordinate. And a fault **raised inside the
-stdlib itself** is never stamped, so `line()`/`col()`/`file()` answer `None` for it rather than
-naming a `std/` file the user never wrote.
+`panic` call's own line — a re-raise never moves the coordinate. A fault the runtime raises **inside
+a stdlib function** (a native operation such as `submit` on a shut-down `Executor`) is located at
+**your call into the stdlib**, like Rust's `#[track_caller]` — for a caught fault (`e.file()`/
+`line()`/`col()`) and for the uncaught headline alike; the trace keeps its frames. A stdlib
+`panic(...)` stays unstamped, so `line()`/`col()`/`file()` answer `None` for it rather than naming a
+`std/` file you never wrote.
 
 ### `defer` — block-scoped cleanup  (M16)
 

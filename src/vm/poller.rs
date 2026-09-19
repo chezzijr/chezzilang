@@ -529,6 +529,7 @@ mod tests {
             is_over_memory: false,
             is_timed_out: false,
             is_deadlock: false,
+            is_panic: false,
         }
     }
 

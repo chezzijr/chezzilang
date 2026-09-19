@@ -69,6 +69,7 @@ impl Vm {
             is_over_memory: false,
             is_timed_out: false,
             is_deadlock: false,
+            is_panic: false,
         })
     }
 
@@ -196,6 +197,7 @@ impl Vm {
             is_over_memory: false,
             is_timed_out: false,
             is_deadlock: false,
+            is_panic: false,
         }
     }
 
@@ -1237,6 +1239,25 @@ impl Vm {
             .collect()
     }
 
+    /// TICKET-148 — where a NATIVE fault raised inside std should point: the call site in user code
+    /// that entered the innermost run of std frames (Rust's `#[track_caller]`). `None` when the
+    /// innermost frame is user code or no frame's caller is a user file: decline, never guess.
+    pub(super) fn std_entry_call_site(&self) -> Option<Span> {
+        for f in self.frames.iter().rev() {
+            let own = self.program.protos[f.proto]
+                .lines
+                .iter()
+                .find(|s| s.file != 0);
+            if !own.is_some_and(|s| self.program.file_is_std(s.file)) {
+                return None;
+            }
+            if f.call_span.file != 0 && !self.program.file_is_std(f.call_span.file) {
+                return Some(f.call_span);
+            }
+        }
+        None
+    }
+
     // ----- the dispatch loop -----
 
     pub(super) fn run_until(&mut self, base_level: usize) -> Result<(), RuntimeError> {
@@ -1525,6 +1546,15 @@ impl Vm {
                 // `base_level` and propagate. Either way, every frame discarded on the way runs its
                 // deferred calls first (Go: defers run as the panic unwinds, before recover regains
                 // control). A fault inside a deferred call supersedes the original.
+                // TICKET-148 — computed while the frames are intact; applied below (at the catch's
+                // stamp, and to the uncaught headline) only if the error is still this one (a
+                // faulting `defer` may supersede it).
+                let std_site = if !fatal && !rte.is_panic && self.program.file_is_std(rte.span.file)
+                {
+                    self.std_entry_call_site().map(|site| (rte.span, site))
+                } else {
+                    None
+                };
                 let target = match self.handlers.last().copied() {
                     Some(h) if !fatal && h.frame_len > base_level => h.frame_len,
                     _ => base_level,
@@ -1537,6 +1567,15 @@ impl Vm {
                 // (no handler) and the frames discarded above a catching `recover:`.
                 let rte = self.unwind_deferred(target, true).unwrap_or(rte);
                 let rte = if fatal { rte.deadlock() } else { rte };
+                // TICKET-148 — relocate a NATIVE std fault to the user's call into std, for the
+                // caught stamp below AND the uncaught headline (the trace keeps its frames). A
+                // superseding `defer` fault (a different span) and a `panic` stay where they are.
+                let rte = match std_site {
+                    Some((raised, site)) if raised == rte.span && !rte.is_panic => {
+                        RuntimeError { span: site, ..rte }
+                    }
+                    _ => rte,
+                };
                 // A deferred `std.os.exit` turns the unwind into a hard halt.
                 if self.pending_exit.is_some() {
                     return Err(rte);
@@ -1595,8 +1634,8 @@ impl Vm {
                         // can read it back later. `msg` is always a fresh `Obj::Str`
                         // (`alloc_str` allocates one per call), so this can never alias an
                         // unrelated string's span. A stdlib-raised span is not stamped
-                        // (TICKET-045): the coordinate would name a `std/` file the user never
-                        // wrote.
+                        // (TICKET-045), except a NATIVE fault, which is relocated above to the
+                        // user's call into std (TICKET-148).
                         self.stamp_err_span(msg, sp);
                         let err = self.alloc_enum("Result", "Err", vec![msg]);
                         self.push(err);
@@ -2042,6 +2081,7 @@ impl Vm {
                     is_over_memory: false,
                     is_timed_out: false,
                     is_deadlock: false,
+                    is_panic: false,
                 });
             }
             Op::GetLocal(slot) => {
