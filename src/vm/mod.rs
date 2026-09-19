@@ -1136,6 +1136,10 @@ pub struct Vm {
     /// tell a swallowed cooperative abort apart from a real fault (a cancelled task is dropped, not
     /// reported). Not in [`FiberCtx`] — like `pending_exit`, cancellation is a per-VM concern.
     cancelled: bool,
+    /// TICKET-147 (W14-12): set by a cancel funnel when a `defer` (or a nested nursery it aborted)
+    /// replaced the `cancelled` sentinel with a real, non-deadlock fault. Read (and cleared) by
+    /// [`Vm::classify_mn_outcome`], which then reports `CancelledFault` instead of swallowing it.
+    cancel_unwind_faulted: bool,
     /// The `nurseries` index of the nursery whose recorded child fault is currently unwinding this
     /// OWNER (TICKET-096). `Some(n)` means a `recover:` installed INSIDE nursery `n`'s body must not
     /// catch this fault, while one installed outside it still must — that is what TICKET-062's
@@ -1891,6 +1895,17 @@ enum TaskOutcome {
     /// always runs its prologue, so those bytes really were printed, and dropping them here would
     /// silently un-print output the program genuinely produced.
     Cancelled { out: Vec<u8>, stderr: Vec<u8> },
+    /// TICKET-147 (W14-12) — a CANCELLED task whose own unwind faulted: a `defer` of the cancelled
+    /// task, or a nested nursery it aborted while unwinding, raised a real fault in place of the
+    /// `cancelled` sentinel. It is a fault of the program, so `reduce_task_slots` propagates it — but
+    /// ranked BELOW every ordinary `Fault` (the cancel's root cause is the more useful report;
+    /// asyncio `TaskGroup` lists `['boom', 'cleanup failed']`) and above a synthesized `Deadlocked`.
+    /// It does not trip the scope cancel (the scope is already cancelled) and is not a scope fault.
+    CancelledFault {
+        err: RuntimeError,
+        out: Vec<u8>,
+        stderr: Vec<u8>,
+    },
     /// Called `std.os.exit(code)`. Buffered output is flushed, then the parent hard-halts with `code`.
     Exit {
         code: i32,
@@ -1932,6 +1947,7 @@ impl TaskOutcome {
         match self {
             TaskOutcome::Done(wr) => (&wr.out, &wr.stderr),
             TaskOutcome::Cancelled { out, stderr }
+            | TaskOutcome::CancelledFault { out, stderr, .. }
             | TaskOutcome::Exit { out, stderr, .. }
             | TaskOutcome::Fault { out, stderr, .. }
             | TaskOutcome::Deadlocked { out, stderr, .. } => (out, stderr),
@@ -5578,9 +5594,19 @@ impl ReadyWorker {
             }
         } else if self.worker.cancelled {
             // This worker observed a sibling's cancel and unwound — its output still flushes.
-            TaskOutcome::Cancelled {
-                out: std::mem::take(&mut self.worker.out),
-                stderr: std::mem::take(&mut self.worker.stderr),
+            // TICKET-147 — unless its own `defer` faulted during that unwind (see `classify_mn_outcome`).
+            match res {
+                Err(err) if std::mem::take(&mut self.worker.cancel_unwind_faulted) => {
+                    TaskOutcome::CancelledFault {
+                        err,
+                        out: std::mem::take(&mut self.worker.out),
+                        stderr: std::mem::take(&mut self.worker.stderr),
+                    }
+                }
+                _ => TaskOutcome::Cancelled {
+                    out: std::mem::take(&mut self.worker.out),
+                    stderr: std::mem::take(&mut self.worker.stderr),
+                },
             }
         } else {
             match res {

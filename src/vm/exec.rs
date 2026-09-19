@@ -166,6 +166,7 @@ impl Vm {
             cancel: None,
             cancel_outer: Vec::new(),
             cancelled: false,
+            cancel_unwind_faulted: false,
             owner_fault_floor: None,
             eager_core: None,
             quiesce: Arc::new(crate::vm::quiesce::QuiesceState::default()),
@@ -1503,9 +1504,7 @@ impl Vm {
                     // past, like a faulting one. With `false` its nested nursery's parked children
                     // were orphaned, and at CHEZZI_THREADS=1 the join hung. The hard halts
                     // (`--max-heap`, `--timeout`) keep `false`.
-                    let rte = self
-                        .unwind_deferred(base_level, cancel_bypass)
-                        .unwrap_or(rte);
+                    let rte = self.unwind_cancelled(base_level, cancel_bypass, rte);
                     let rte = if over_mem { rte.over_memory() } else { rte };
                     let rte = if timed { rte.timed_out() } else { rte };
                     return Err(rte);
@@ -1552,6 +1551,7 @@ impl Vm {
                         // TICKET-096 — this handler is outside the faulting nursery, so the fault is
                         // handled; the floor must not survive it and bypass an unrelated later handler.
                         self.owner_fault_floor = None;
+                        self.cancel_unwind_faulted = false;
                         // `unwind_deferred` already dropped frames down to `h.frame_len`; restore the
                         // operand stack / call-depth / ip to the boundary's snapshot.
                         self.stack.truncate(h.stack_len);
@@ -1582,7 +1582,8 @@ impl Vm {
                         // never ran) — the nursery list is always reclaimed on unwind.
                         // TASK B: route through `drain_escaped_nursery` so a `?` caught by `recover:`
                         // cancels its tasks IDENTICALLY to an uncaught `?`.
-                        self.drain_escaped_nursery(h.nursery_len);
+                        // TICKET-147 — the caught fault is the root cause; a child's fault is dropped.
+                        let _ = self.drain_escaped_nursery(h.nursery_len);
                         if self.pending_exit.is_some() {
                             return Err(rte);
                         }
@@ -2661,15 +2662,21 @@ impl Vm {
                 return Err(self.err(format!("no match arm for variant '{variant}'"), span));
             }
             Op::EnterNursery => self.op_enter_nursery(span),
-            Op::JoinNursery => self.join_nursery_released()?,
+            Op::JoinNursery => {
+                self.join_nursery_released()?;
+                self.cancel_at_join(span)?;
+            }
             // TASK B — `break`/`continue` leaving a `parallel:` scope: cancel its
             // tasks and pop exactly that one level (the compiler emits one per escaped scope).
             Op::ReclaimNursery => {
                 let from = self.nurseries.len().saturating_sub(1);
                 // TICKET-132 — park the owner instead of waiting inline if `from`'s level is a
                 // fiber-owned escape; the rewound op re-runs once the cancelled family settles.
-                if !self.park_escaped_abort(from) {
-                    self.drain_escaped_nursery(from);
+                if !self.park_escaped_abort(from)
+                    && let Some(e) = self.drain_escaped_nursery(from)
+                {
+                    // TICKET-147 — the aborted nursery's child fault is a real fault.
+                    return Err(e);
                 }
             }
             Op::SpawnCall(argc) => self.do_spawn(None, *argc, span)?,

@@ -1056,8 +1056,12 @@ fn serve(tok: Token, io: Channel[str]):
 
 > **Cancellation is delivered at CHECKPOINTS — and a registered `defer` ALWAYS runs.**
 > A cancel (a sibling's fault, an `os.exit`, a scope teardown) is observed only at **cancellation
-> points**: **loop back-edges** and **blocking / park ops** (`recv`, `wait:`, a socket op, a blocking
-> native like `sleep_ms`). It is *not* observed at every instruction. Two consequences, both intended
+> points**: **loop back-edges**, **blocking / park ops** (`recv`, `wait:`, a socket op, a blocking
+> native like `sleep_ms`) and **a nursery join** (a `parallel:` dedent, a function's implicit-nursery
+> join, `Executor.shutdown()` / `shutdown_now()`): a cancelled owner never runs the code after its join
+> — the join itself raises the cancel (asyncio never runs code after a cancelled `async with`). The
+> join checks the cancel the owner holds from an ENCLOSING scope, never its own nursery's fault, and
+> never inside a `defer`. It is *not* observed at every instruction. Two consequences, both intended
 > (this is Trio-style structured concurrency; Go never preemptively kills a goroutine at all):
 >
 > - **A STARTED task always runs its straight-line prologue**, so a `defer` it registers is registered
@@ -1123,6 +1127,13 @@ fn serve(tok: Token, io: Channel[str]):
 > `parallel:` opened inside a `defer` gets a **clean slate** — it does not inherit the already-tripped
 > enclosing cancel, so its children run to completion (they are still cancellable by their *own*
 > nursery's faults).
+>
+> **A cancelled task's own `defer` fault is a real fault.** A `defer` of a cancelled task (or of a nested
+> nursery it aborted) that panics does not vanish: the nursery join, or `Executor.shutdown_now()`, raises
+> it (Go and asyncio surface it too). It ranks BELOW every ordinary fault and above a `deadlock` abort —
+> the cancel's root cause is the more useful report (asyncio `TaskGroup` lists `['boom', 'cleanup
+> failed']`, root cause first). A stuck cleanup's `deadlock` verdict stays swallowed when a sibling's real
+> fault is the cause.
 >
 > **A `recover:` INSIDE a defer body catches — even while the task is being torn down.** Since no
 > cancellation point fires inside a deferred call, a fault raised *beneath* a `recover:` that the defer

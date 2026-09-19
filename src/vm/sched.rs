@@ -445,10 +445,16 @@ impl Vm {
     /// (`docs/gaps.md` W7-12: an uncertain verdict must decline). trio and `asyncio.TaskGroup` print
     /// nothing here either. The eager path never reported, so this also removes a pre-existing
     /// eager-vs-lazy observable split rather than creating one.
-    pub(super) fn drain_escaped_nursery(&mut self, from_len: usize) {
+    ///
+    /// TICKET-147 (W14-12) — returns the FIRST fault the aborted levels' children ended with (`None`
+    /// when none faulted, or on an `os.exit`, which keeps its `pending_exit` route). A caller whose
+    /// escape carries its own fault keeps that as the root cause and drops this; a cancel funnel, whose
+    /// escape is only the `cancelled` sentinel, replaces the sentinel with it.
+    pub(super) fn drain_escaped_nursery(&mut self, from_len: usize) -> Option<RuntimeError> {
         if self.nurseries.len() <= from_len {
-            return; // nothing escaped past the join (e.g. normal fall-through already popped it)
+            return None; // nothing escaped past the join (e.g. normal fall-through already popped it)
         }
+        let mut child_fault: Option<RuntimeError> = None;
         // TICKET-141 — every inline abort below waits in place: hold no width permit across it.
         self.width_release();
         while self.nurseries.len() > from_len {
@@ -466,16 +472,19 @@ impl Vm {
             // nursery's `abort_eager_nursery`. (A nursery is never both: the enlist only happens on the
             // lazy path, so `eager` is `None` here.)
             if let Some(scope_id) = mn_scope {
-                self.abort_enlisted_scope(scope_id);
+                let e = self.abort_enlisted_scope(scope_id);
+                child_fault = child_fault.or(e);
                 continue;
             }
             // Per-connection spawn / §2c1 — an eager nursery's tasks are already-started live fibers:
             // cancel + drain + flush them.
             if let Some(scope) = eager {
-                self.abort_eager_nursery(scope);
+                let e = self.abort_eager_nursery(scope);
+                child_fault = child_fault.or(e);
             }
         }
         self.width_acquire();
+        child_fault
     }
 
     /// TICKET-132 — before `drain_escaped_nursery` pops anything, check whether the TOP levels
@@ -530,7 +539,11 @@ impl Vm {
             if err.is_none() && self.park_escaped_abort(top) {
                 return true;
             }
-            self.drain_escaped_nursery(top);
+            // TICKET-147 — a body defer fault stays the root cause; a child fault only fills the gap.
+            let child = self.drain_escaped_nursery(top);
+            if err.is_none() {
+                *err = child;
+            }
         }
         false
     }
@@ -909,10 +922,12 @@ impl Vm {
     /// join (`?`/`return`/`break`/`continue`/caught fault). Its tasks are live fibers, so cancel them
     /// (trip the scope cancel, drain, settle — like `abort_eager_nursery`), reduce (only `os.exit`
     /// honored — the escape error is what propagates), and release the held sched at the last scope.
-    pub(super) fn abort_enlisted_scope(&mut self, scope_id: usize) {
-        let Some(sched) = self.mn_enlist_sched.clone() else {
-            return;
-        };
+    ///
+    /// TICKET-147 (W14-12) — returns the fault its children ended with, if any (an `os.exit` keeps its
+    /// `pending_exit` route and returns `None`). The escape's own fault stays the root cause: callers
+    /// use this only when the escape carries none (see [`Vm::drain_escaped_nursery`]).
+    pub(super) fn abort_enlisted_scope(&mut self, scope_id: usize) -> Option<RuntimeError> {
+        let sched = self.mn_enlist_sched.clone()?;
         // N4 — ARM the cancel-teardown veto BEFORE clearing `awaiting_builder` (which is the veto that
         // has been holding the deadlock predicate off this scope): a GAPLESS handoff. Clearing first —
         // as this did — leaves a window in which the scope has NEITHER veto, and an idle worker's
@@ -946,7 +961,16 @@ impl Vm {
         if self.mn_enlisted == 0 {
             self.mn_enlist_sched = None;
         }
-        let _ = self.reduce_task_slots(slots); // escape error propagates; only os.exit honored here
+        self.escape_child_fault(slots)
+    }
+
+    /// TICKET-147 — reduce an aborted (escaped) nursery's slots into the fault its children ended
+    /// with. An `os.exit` sets `pending_exit` inside the reduce and is not reported here: the catch
+    /// sites honor it through `pending_exit`.
+    fn escape_child_fault(&mut self, slots: Vec<Option<TaskOutcome>>) -> Option<RuntimeError> {
+        self.reduce_task_slots(slots)
+            .err()
+            .filter(|_| self.pending_exit.is_none())
     }
 
     /// Per-connection spawn — the EAGER counterpart to [`Vm::run_mn_nursery`], split across the
@@ -1326,7 +1350,10 @@ impl Vm {
     /// `cancel_drain` + `drain_sched`), run the inline worker to settle them, then flush their output
     /// (Decision F). The body's own escape error is what propagates, so a handler fault here is
     /// swallowed (only its buffered output + any `os.exit` are honored via `reduce_task_slots`).
-    pub(super) fn abort_eager_nursery(&mut self, scope: EagerScope) {
+    ///
+    /// TICKET-147 (W14-12) — returns the fault its children ended with (see
+    /// [`Vm::abort_enlisted_scope`]); the callers keep the escape's own fault first.
+    pub(super) fn abort_eager_nursery(&mut self, scope: EagerScope) -> Option<RuntimeError> {
         if scope.fiber_owned {
             return self.abort_fiber_owned_nursery(scope);
         }
@@ -1381,8 +1408,7 @@ impl Vm {
             for &s in sids.iter().rev() {
                 sched.retire_last_scope(s);
             }
-            let _ = self.reduce_task_slots(slots);
-            return;
+            return self.escape_child_fault(slots);
         }
         {
             // §2c1 — same reason as `join_eager_nursery`: a top-level escape settles its handlers on
@@ -1398,10 +1424,10 @@ impl Vm {
             let _ = h.join();
         }
         let slots = sched.take_slots();
-        // The body's escape error is what propagates; a handler fault here is swallowed. But
-        // `reduce_task_slots` still sets `self.pending_exit` for a handler `os.exit` (decision C —
-        // a hard halt wins), which the catch site honors after the drain — so it is NOT lost.
-        let _ = self.reduce_task_slots(slots);
+        // `reduce_task_slots` sets `self.pending_exit` for a handler `os.exit` (decision C — a hard
+        // halt wins), which the catch site honors after the drain — so it is NOT lost. A handler
+        // fault is returned; the callers keep the escape's own fault first.
+        self.escape_child_fault(slots)
     }
 
     /// TICKET-103 — `JoinNursery` for a fiber-owned nursery (`EagerScope::fiber_owned`). Its scopes
@@ -1445,7 +1471,7 @@ impl Vm {
     /// inline ONLY where [`Vm::park_escaped_abort`] declines: a fault-unwind escape (the fault is
     /// consumed, so no op can rewind) or `native_reentry > 0` (the Rust stack holds the native
     /// frame). The body's escape error is what propagates, so a task fault here is swallowed.
-    fn abort_fiber_owned_nursery(&mut self, scope: EagerScope) {
+    fn abort_fiber_owned_nursery(&mut self, scope: EagerScope) -> Option<RuntimeError> {
         let sids = scope.sids();
         cancel_fiber_owned_family(&scope);
         if !scope.sched.lock().family_done(scope.scope) {
@@ -1464,7 +1490,7 @@ impl Vm {
         for &s in sids.iter().rev() {
             scope.sched.retire_last_scope(s);
         }
-        let _ = self.reduce_task_slots(slots);
+        self.escape_child_fault(slots)
     }
 
     /// D2b — build a thin host **shell** `Vm` for the M:N engine: a worker `Vm` with the nursery
@@ -2306,6 +2332,21 @@ impl Vm {
         self.width_acquire();
     }
 
+    /// TICKET-147 (W14-15) — a nursery join is a cancellation point for its OWNER. `join_nursery`
+    /// reduces an all-`Cancelled` slot vector to `Ok(())`, so a cancelled owner would otherwise run the
+    /// straight-line code after its join (asyncio never runs code after a cancelled `async with`).
+    /// Runs after the join returns; it reads [`Vm::cancel_requested`], i.e. only the flags the owner
+    /// holds from an ENCLOSING scope — never its own nursery's (DEC-096: the owner learns its own
+    /// nursery's fault via `owned_nursery_fault`), and never inside a `defer`. A join that parked
+    /// (`join_suspend`) re-runs after the wake, so it is not checked here.
+    pub(super) fn cancel_at_join(&mut self, span: Span) -> Result<(), RuntimeError> {
+        if self.join_suspend.is_none() && self.cancel_requested() {
+            self.cancelled = true;
+            return Err(self.err("cancelled".to_string(), span));
+        }
+        Ok(())
+    }
+
     /// TICKET-141 — `join_nursery` with this thread's width permit released for the whole join.
     pub(super) fn join_nursery_released(&mut self) -> Result<(), RuntimeError> {
         self.width_release();
@@ -2553,6 +2594,7 @@ impl Vm {
         self.offload = None;
         self.poll_park = None;
         self.cancelled = false;
+        self.cancel_unwind_faulted = false;
         // TICKET-096 review fix — `owner_fault_floor` indexes THIS fiber's `nurseries` (swapped by
         // `swap_ctx`, not carried in `FiberCtx`), so a floor left by the fiber that just parked/died
         // on this shell must not survive into the next fiber scheduled in here, or an unrelated
@@ -2605,7 +2647,7 @@ impl Vm {
                             let (over_mem, timed) = (rte.is_over_memory, rte.is_timed_out);
                             // TICKET-135 (W14-39): as in `run_until`'s cancel bypass, abort the
                             // escaped nurseries of a task whose offloaded sleep a cancel ended.
-                            let r = self.unwind_deferred(0, self.cancelled).unwrap_or(rte);
+                            let r = self.unwind_cancelled(0, self.cancelled, rte);
                             let r = if over_mem { r.over_memory() } else { r };
                             if timed { r.timed_out() } else { r }
                         } else {
@@ -2733,9 +2775,21 @@ impl Vm {
                 stderr: std::mem::take(&mut self.stderr),
             }
         } else if self.cancelled {
-            TaskOutcome::Cancelled {
-                out: std::mem::take(&mut self.out),
-                stderr: std::mem::take(&mut self.stderr),
+            // TICKET-147 (W14-12) — the cancel funnel replaced the `cancelled` sentinel with a real
+            // fault from the task's own `defer` / an aborted nested nursery: report it, ranked below
+            // every ordinary fault. No `trip_cancel`: the scope is already cancelled.
+            match res {
+                Err(err) if std::mem::take(&mut self.cancel_unwind_faulted) => {
+                    TaskOutcome::CancelledFault {
+                        err,
+                        out: std::mem::take(&mut self.out),
+                        stderr: std::mem::take(&mut self.stderr),
+                    }
+                }
+                _ => TaskOutcome::Cancelled {
+                    out: std::mem::take(&mut self.out),
+                    stderr: std::mem::take(&mut self.stderr),
+                },
             }
         } else {
             match res {
@@ -2776,8 +2830,10 @@ impl Vm {
     /// lowest-index [`executor_hard_halt`]-marked `Fault` (over-memory/timeout) likewise
     /// wins over any ordinary `Fault` regardless of index, for the same reason — an Executor drain's
     /// hard halt must never be demoted to a catchable error by an earlier sibling's plain fault. Full
-    /// precedence: `Exit` > hard-halt `Fault` > ordinary `Fault` > `Deadlocked`, lowest index winning
-    /// within each kind (scan order + `is_none()`).
+    /// precedence: `Exit` > hard-halt `Fault` > ordinary `Fault` > `CancelledFault` > `Deadlocked`,
+    /// lowest index winning within each kind (scan order + `is_none()`). TICKET-147: a
+    /// `CancelledFault` (a cancelled task's own `defer` fault) ranks below every ordinary fault —
+    /// the cancel's root cause is the more useful report.
     pub(super) fn reduce_task_slots(
         &mut self,
         slots: Vec<Option<TaskOutcome>>,
@@ -2793,6 +2849,8 @@ impl Vm {
         // buffered output regardless of index (W7-5c) — only which error `reduce_task_slots` returns.
         let mut first_hard_fault: Option<RuntimeError> = None;
         let mut deadlock_err: Option<RuntimeError> = None;
+        // TICKET-147 — the lowest-index `CancelledFault`; used only when no ordinary fault exists.
+        let mut first_cancel_fault: Option<RuntimeError> = None;
         for slot in slots {
             // W7-60 — a `None` here means the slot was already drained by `EagerState::take_finished`
             // on a `join_eager_jobs` bail-out (its output is flushed, its outcome consumed), which is
@@ -2861,6 +2919,13 @@ impl Vm {
                         deadlock_err = Some(err);
                     }
                 }
+                TaskOutcome::CancelledFault { err, out, stderr } => {
+                    self.out.extend_from_slice(&out);
+                    self.stderr.extend_from_slice(&stderr);
+                    if first_cancel_fault.is_none() {
+                        first_cancel_fault = Some(err);
+                    }
+                }
                 TaskOutcome::Cancelled { out, stderr } => {
                     // A cancelled task's buffered output flushes at its task-order slot (it really
                     // printed those bytes — with cancellation points a started task always completes
@@ -2884,7 +2949,8 @@ impl Vm {
         // `parked-is-not-stuck` class. The run-scoped cell carries that exit, folded in as an ordinary
         // `first_exit` so there is ONE precedence table (Go's rule: the first `os.Exit` wins).
         let first_exit = first_exit.or_else(|| self.quiesce.pending());
-        match (first_exit, first_hard_fault.or(first_fault), deadlock_err) {
+        let fault = first_hard_fault.or(first_fault).or(first_cancel_fault);
+        match (first_exit, fault, deadlock_err) {
             // A child `os.exit` hard-halts the parent: set `pending_exit` and return the exit
             // sentinel. The op→`step`→`run_until` chain sees `pending_exit` and unwinds past every
             // `recover:` to the driver, which reports `code` as the process exit status (decision C).

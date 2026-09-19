@@ -68,6 +68,63 @@ test fn shutdown_now_surfaces_a_nested_childs_defer_fault():
     assert "{r}" == "Err('cleanup failed')"
 
 
+# The other escape routes (`break`, `?`) abort the nursery through the same path as `return`: the
+# cancelled child's defer fault surfaces, it is not dropped.
+fn break_out(started: Channel[int]):
+    for i in range(1):
+        parallel:
+            spawn cleanup_fails(started)
+            _ := started.recv()
+            break
+
+test fn a_break_out_of_a_nursery_surfaces_a_cancelled_childs_defer_fault():
+    started := Channel[int](1)
+    r := recover: break_out(started)
+    assert "{r}" == "Err('cleanup failed')"
+
+
+fn fails() -> int!str:
+    return Err("try failed")
+
+fn try_out(started: Channel[int]) -> int!str:
+    parallel:
+        spawn cleanup_fails(started)
+        _ := started.recv()
+        v := fails()?
+        return Ok(v)
+    return Ok(0)
+
+test fn a_try_out_of_a_nursery_surfaces_a_cancelled_childs_defer_fault():
+    started := Channel[int](1)
+    r := recover: try_out(started)
+    assert "{r}" == "Err('cleanup failed')"
+
+
+# Must still pass: a `defer` is never cancelled, so a nursery join INSIDE a cancelled task's defer body
+# is not a cancellation point, and the cleanup after it runs.
+fn cleanup_with_nursery(ran: Shared[int], started: Channel[int], hold: Channel[int]):
+    defer:
+        parallel:
+            spawn ran.set(1)
+        ran.update(fn(n: int) -> int: n + 10)
+    started.send(1)
+    _ := hold.recv()
+
+fn escape_ok(ran: Shared[int], started: Channel[int], hold: Channel[int]):
+    parallel:
+        spawn cleanup_with_nursery(ran, started, hold)
+        _ := started.recv()
+        return
+
+test fn a_nursery_join_inside_a_defer_is_not_a_cancel_point():
+    ran := Shared(0)
+    started := Channel[int](1)
+    hold := Channel[int]()
+    r := recover: escape_ok(ran, started, hold)
+    assert "{r}" == "Ok(nil)"
+    assert ran.get() == 11
+
+
 # Ranking pin: a cancelled sibling's defer fault is a consequence of the root cause, so it ranks
 # BELOW every ordinary fault (asyncio TaskGroup lists ['boom', 'cleanup failed']).
 test fn a_sibling_fault_outranks_a_cancelled_siblings_defer_fault():

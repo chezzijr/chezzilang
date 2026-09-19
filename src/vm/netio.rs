@@ -4087,6 +4087,7 @@ impl Vm {
                 // fault instead of hanging both of us forever. Nothing to arm here any more: the
                 // verdict is process-wide, so it no longer matters WHICH join a thread is in.
                 self.join_eager_jobs(&core, span)?;
+                self.cancel_at_join(span)?; // TICKET-147 (W14-15): the join is a cancellation point
                 Ok(Value::nil())
             }
             "shutdown_now" => {
@@ -4115,10 +4116,12 @@ impl Vm {
                 // "already handled" — see `ExecutorCore::unreduced` — but that only closes the
                 // self-join hand-off; it still does not WAIT for a job this call has not joined
                 // itself, so skipping the join here would still be an exit-mid-job hazard.)
-                // Cancelled jobs are swallowed by `reduce_task_slots` (their output still flushes
-                // at their slot), so this raises a fault only if a job genuinely faulted before
-                // the trip landed.
+                // A cancelled job is swallowed by `reduce_task_slots` (its output still flushes at
+                // its slot), except that its own `defer` fault is a real fault (TICKET-147, W14-12):
+                // it raises here, ranked below any ordinary fault. So this raises a fault if a job
+                // genuinely faulted, or a cancelled job's cleanup did.
                 self.join_eager_jobs(&core, span)?;
+                self.cancel_at_join(span)?; // TICKET-147 (W14-15): the join is a cancellation point
                 Ok(Value::nil())
             }
             _ => Err(self.err(format!("type Executor has no method '{method}'"), span)),

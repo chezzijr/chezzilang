@@ -76,7 +76,46 @@ impl Vm {
         target_frame_len: usize,
         report_escaped: bool,
     ) -> Option<RuntimeError> {
+        self.unwind_deferred_escaped(target_frame_len, report_escaped)
+            .0
+    }
+
+    /// TICKET-147 (W14-12) — the cancel funnels' unwind: run [`Vm::unwind_deferred_escaped`] and let a
+    /// real fault raised by the cancelled task's own `defer`, or by a nested nursery it aborted,
+    /// replace the `cancelled` sentinel `rte`. Such a fault latches `cancel_unwind_faulted` so
+    /// `classify_mn_outcome` reports `CancelledFault` rather than swallowing it. A deadlock-marked
+    /// fault (a stuck cleanup's verdict) and a hard halt stay swallowed / stay hard halts, and a
+    /// non-cancel unwind (`report_escaped == false`) never latches.
+    pub(super) fn unwind_cancelled(
+        &mut self,
+        target_frame_len: usize,
+        report_escaped: bool,
+        rte: RuntimeError,
+    ) -> RuntimeError {
+        let hard_halt = rte.is_over_memory || rte.is_timed_out;
+        let (defer, escaped) = self.unwind_deferred_escaped(target_frame_len, report_escaped);
+        let replaced = defer.or(escaped);
+        if report_escaped
+            && self.cancelled
+            && !hard_halt
+            && replaced.as_ref().is_some_and(|e| !e.is_deadlock)
+        {
+            self.cancel_unwind_faulted = true;
+        }
+        replaced.unwrap_or(rte)
+    }
+
+    /// [`Vm::unwind_deferred`] that also reports the first fault an aborted (escaped) nursery's
+    /// children ended with, as `(defer_fault, first_escaped_child_fault)`. TICKET-147 (W14-12): a
+    /// genuine fault keeps the defer fault as its root cause (`unwind_deferred` drops the second
+    /// element); the cancel funnels replace their `cancelled` sentinel with either.
+    pub(super) fn unwind_deferred_escaped(
+        &mut self,
+        target_frame_len: usize,
+        report_escaped: bool,
+    ) -> (Option<RuntimeError>, Option<RuntimeError>) {
         let mut err = None;
+        let mut escaped_err: Option<RuntimeError> = None;
         while self.frames.len() > target_frame_len {
             let fi = self.frames.len() - 1;
             // Report this frame's escaped nurseries BEFORE its defers (drain pops innermost-first, so
@@ -88,7 +127,8 @@ impl Vm {
                 } else {
                     f.nursery_len
                 };
-                self.drain_escaped_nursery(floor.min(self.nurseries.len()));
+                let child = self.drain_escaped_nursery(floor.min(self.nurseries.len()));
+                escaped_err = escaped_err.or(child);
             }
             if self.pending_exit.is_none() {
                 while let Some(d) = self.frames[fi].deferred.pop() {
@@ -114,7 +154,7 @@ impl Vm {
                 self.handlers.pop();
             }
         }
-        err
+        (err, escaped_err)
     }
 
     pub(super) fn do_try(&mut self, span: Span) -> Result<(), RuntimeError> {
@@ -182,7 +222,10 @@ impl Vm {
                     {
                         return Err(e);
                     }
-                    self.drain_escaped_nursery(h.nursery_len);
+                    // TICKET-147 — the propagated `Err` is the recover's value; a body defer fault
+                    // supersedes it, and an aborted nursery's child fault fills that gap.
+                    let child = self.drain_escaped_nursery(h.nursery_len);
+                    body_defer_err = body_defer_err.or(child);
                     // Drain the recover block's own defers before binding the result. A fault in one
                     // supersedes the propagated value (becomes the recover's `Err`); a recover-block
                     // defer fault in turn supersedes a body defer fault (it unwinds later).

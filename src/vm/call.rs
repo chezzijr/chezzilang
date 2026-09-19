@@ -4104,6 +4104,9 @@ impl Vm {
             if self.join_suspend.is_some() {
                 return Ok(());
             }
+            // TICKET-147 (W14-15) — the join is a cancellation point: a cancelled owner returns `Err`
+            // with the frame intact, so the cancel unwind runs its defers.
+            self.cancel_at_join(Span::RUNTIME)?;
         }
         // Drain with the return value still on top of the stack (rooted) and the frame still on
         // `self.frames` (so `collect` roots the pending records). The frame's remaining defers run
@@ -4127,7 +4130,7 @@ impl Vm {
         // cancelled-and-reported (not silently dropped). NB: within-frame `break`/`continue` out of a
         // `parallel:` no longer rely on this — the compiler emits a `ReclaimNursery` before their
         // loop-exit `Jump` (see `compile_parallel`/`emit_loop_escape_drain`), reclaiming block-scoped.
-        self.drain_escaped_nursery(frame.nursery_len);
+        let escaped = self.drain_escaped_nursery(frame.nursery_len);
         // Drop any `recover:` handlers installed in the frame we just left (e.g. a `?` early-return
         // out of a recover block) — they must not survive to catch a later, unrelated fault.
         while self
@@ -4137,7 +4140,8 @@ impl Vm {
         {
             self.handlers.pop();
         }
-        if let Some(e) = defer_err {
+        // TICKET-147 — a defer fault stays the root cause; an aborted nursery's child fault fills the gap.
+        if let Some(e) = defer_err.or(escaped) {
             return Err(e);
         }
         self.push(ret);

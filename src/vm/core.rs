@@ -952,6 +952,7 @@ pub(super) fn outcome_summary(o: &super::TaskOutcome) -> (usize, bool) {
     let (out, stderr, value) = match o {
         T::Done(r) => (&r.out, &r.stderr, Some(&r.value)),
         T::Cancelled { out, stderr }
+        | T::CancelledFault { out, stderr, .. }
         | T::Exit { out, stderr, .. }
         | T::Fault { out, stderr, .. }
         | T::Deadlocked { out, stderr, .. } => (out, stderr, None),
