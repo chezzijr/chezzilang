@@ -1,13 +1,16 @@
 # tests/chz/spec/nursery_escape_defer_order_test.chz — W14-4: an escape (`return`) from `parallel:`
 # must let the nursery's cancelled children finish unwinding (their defers run) BEFORE any
 # enclosing block's defer runs. Go twin: cancel + wg.Wait() before return.
-import std.time
+# The child parks on `hold`, which nobody sends on, so only the escape's cancel ends it; `started`
+# makes the body escape only after the child's defer is registered (a handshake, not a sleep).
 import std.concurrency
 
 
 fn flushed() -> int:
     log := Channel[str](10)
     count := Shared(0)
+    started := Channel[int](1)
+    hold := Channel[int]()
     fn inner() -> int:
         defer:
             log.close()
@@ -18,7 +21,9 @@ fn flushed() -> int:
         parallel:
             spawn:
                 defer log.send("worker cleanup")
-                time.sleep_ms(3000)
+                started.send(1)
+                _ := hold.recv()
+            _ := started.recv()
             return 1
         return 0
     inner()
