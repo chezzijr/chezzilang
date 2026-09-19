@@ -341,8 +341,10 @@ propagated `Err`/`None` at the program boundary) and inside a `Result`/`Option`-
 error (there is no `fn main`/entrypoint exception — a fn must return `Result`/`Option`). A bare
 `chezzi run` (no file argument) runs the project manifest's `[project] entrypoint` — a **dotted module
 path**, optionally suffixed with **`:function`** (e.g. `"src.main:main"`). The module runs
-top-to-bottom like any other file; with a `:function` suffix the entry function is then **called** (a
-missing/non-function name is a clear error), so the source needs no trailing call. An entry function
+top-to-bottom like any other file; with a `:function` suffix the entry function is then **called**, so
+the source needs no trailing call. The function part must be one name; a name the entry module never
+binds is rejected by `chezzi check` and bare `chezzi run` before any code runs (an error naming
+`chezzi.toml`), and a name bound to a non-function is a run-time error. An entry function
 may legitimately be `-> T!` and use `?`; if it returns `Err`/`None`, `chezzi run` surfaces it as
 `unhandled error: …` (rc=1), symmetric with the unhandled-top-level rule. The fault names the entry
 function's own declaration — the entry file for an ordinary `fn`, or wherever a module-global alias

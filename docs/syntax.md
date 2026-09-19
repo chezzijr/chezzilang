@@ -2915,6 +2915,26 @@ zero-width space from `""`. Printable non-ASCII stays literal (`['é', '😀']`)
 inside a wrapper box: `print(Shared(["a"]))` is `Shared(['a'])`. A `str(self)` display hook's result
 is the object's own rendering, never a nested string, so it is never quoted.
 
+**A container that re-enters itself prints its back edge as `...`** (CPython's rule). While a
+list, map, set or default-repr struct is being rendered, meeting the same object again writes
+`[...]`, `{...}`, `Set(...)` or `...` for it instead of faulting. Only an object still being
+rendered counts, so a shared but acyclic child prints in full:
+
+```chezzi
+xs: List[Any] = [1]
+xs.push(xs)
+print(xs)                     # [1, [...]]
+m: Map[str, Any] = {}
+m["a"] = m
+print(m)                      # {'a': {...}}
+x: List[Any] = []
+print([x, x])                 # [[], []]       — shared, not cyclic
+```
+
+A `str(self)` hook is never guarded, and `==` / hashing on cyclic data still fault with
+`maximum structural depth` (`recover:` catches it). A deep ACYCLIC nest past 10 000 levels also
+still faults on print.
+
 (One deliberate deviation from CPython: a combining mark such as `U+0301` escapes here and prints
 literally in Python — Chezzi reads printability from Rust's Unicode tables, which also treat
 grapheme-extend characters as non-printable. Escaping is the unambiguous direction.)
@@ -3786,8 +3806,11 @@ entrypoint = "src.main:main"   # run src/main.chz's top-level, then call its `ma
 
 With a `:function` suffix, a bare `chezzi run` runs the entry module's top-level and **then calls that
 function** — so the source needs no trailing call, and you can swap which function runs (e.g.
-`main` → `other_main`) by editing the manifest alone. A named function that doesn't exist (or isn't a
-function) is a clear error, not a silent no-op. Without the suffix, the module top-level runs and
+`main` → `other_main`) by editing the manifest alone. The function part is ONE name (a second `:` or a
+`.` is a manifest error naming `chezzi.toml`). A named function the entry module never binds (no
+top-level `fn`, `let` or import of that name) is rejected by `chezzi check` and by bare `chezzi run`
+BEFORE any code runs, with an error naming `chezzi.toml`; a name that is bound to something that is not a
+function is a run-time error, not a silent no-op. Without the suffix, the module top-level runs and
 nothing is auto-called. Running an explicit file (`chezzi run src/main.chz`) is always top-level-only
 (scripting model) regardless of the manifest.
 
