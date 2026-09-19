@@ -4000,45 +4000,51 @@ impl Vm {
     /// values — and the return value — rooted. A fault in a deferred call supersedes the frame's
     /// result (Go: a panic in a defer wins): it returns `Err` and the frame is still torn down.
     pub(super) fn do_return(&mut self, _propagated: bool) -> Result<(), RuntimeError> {
-        // M-C implicit nurseries: if this frame opened one, JOIN it here (run its spawned tasks to
-        // completion) BEFORE the frame unwinds — `return`/`?`/fall-through is the join barrier. This
-        // runs while the frame is still current and the return value (if any) still sits on the
-        // operand stack; `join_nursery` swaps the whole `FiberCtx`, never the operand value, so the
-        // value survives. Any *inner* `parallel:` this return/`?` escaped sits ABOVE the implicit
-        // nursery and is cancelled-and-reported first (existing escape semantics). A task that faults
-        // during the join propagates as this function's error (the frame is intact, so the normal
-        // unwind machinery runs its defers). NB: an uncaught *body* fault never reaches here — it
-        // unwinds via the handler path, which cancels (not joins) the implicit nursery.
+        // W14-4 -- escaped `parallel:` levels unwind FIRST, innermost-first: each level's body defers,
+        // then its cancel + wait (its children run their defers), THEN the implicit-nursery join, THEN
+        // the frame's remaining defers. So the enclosing defers run after the cancelled children have
+        // unwound (Go cancel + `wg.Wait()`, asyncio `TaskGroup`). All of this runs while the frame is
+        // still current and the return value (if any) still sits on the operand stack.
+        //
+        // M-C implicit nurseries: if this frame opened one, JOIN it (run its spawned tasks to
+        // completion) BEFORE the frame unwinds — `return`/`?`/fall-through is the join barrier.
+        // `join_nursery` swaps the whole `FiberCtx`, never the operand value, so the value survives.
+        // A task that faults during the join propagates as this function's error (the frame is
+        // intact, so the normal unwind machinery runs its defers). NB: an uncaught *body* fault never
+        // reaches here — it unwinds via the handler path, which cancels (not joins) the implicit
+        // nursery.
         let frame_top = self.frames.last().unwrap();
         let nursery_floor = frame_top.nursery_len;
-        if frame_top.has_implicit_nursery {
-            // TICKET-132 — park the owner instead of waiting inline if the level(s) above the
-            // implicit nursery are fiber-owned escapes; no defer has run yet.
-            if self.park_escaped_abort(nursery_floor + 1) {
-                return Ok(());
+        let implicit = frame_top.has_implicit_nursery;
+        let mut defer_err = None;
+        // TICKET-132 — an escaped fiber-owned level PARKS the owner (rewinds `ip`); the op re-runs
+        // with the drained defers consumed.
+        if self.unwind_escaped_levels(nursery_floor + usize::from(implicit), &mut defer_err) {
+            return Ok(());
+        }
+        if implicit && self.nurseries.len() > nursery_floor {
+            // A body defer faulted above the implicit nursery: return `Err` with the frame intact,
+            // so the fault path cancels the implicit nursery and runs the remaining defers, as for a
+            // join fault. Joining could park and lose the fault.
+            if let Some(e) = defer_err {
+                return Err(e);
             }
-            self.drain_escaped_nursery(nursery_floor + 1); // cancel inner escaped `parallel:` levels
-            if self.nurseries.len() > nursery_floor {
-                self.join_nursery()?; // join the implicit nursery (runs its tasks)
-                // TICKET-103 — `join_nursery` parked this fiber (`Disp::JoinPark`) and rewound `ip`
-                // to the op that called us: `Op::Return`, or `Op::Try` for a `?`. Leave the frame and
-                // the return value on the stack; the op re-executes after the wake and completes the
-                // return. `do_try` pushed the propagated value back before calling us, so the
-                // rewound `Op::Try` re-pops the same value.
-                if self.join_suspend.is_some() {
-                    return Ok(());
-                }
+            self.join_nursery()?; // join the implicit nursery (runs its tasks)
+            // TICKET-103 — `join_nursery` parked this fiber (`Disp::JoinPark`) and rewound `ip`
+            // to the op that called us: `Op::Return`, or `Op::Try` for a `?`. Leave the frame and
+            // the return value on the stack; the op re-executes after the wake and completes the
+            // return. `do_try` pushed the propagated value back before calling us, so the
+            // rewound `Op::Try` re-pops the same value.
+            if self.join_suspend.is_some() {
+                return Ok(());
             }
         }
         // Drain with the return value still on top of the stack (rooted) and the frame still on
-        // `self.frames` (so `collect` roots the pending records). Defers run AFTER the implicit-nursery
-        // join above (tasks complete, then cleanup).
-        let defer_err = self.drain_top_frame_deferred();
-        // TICKET-132 — the defers already ran; a rewound re-run of this op finds them consumed, with
-        // the return value still on the stack.
-        if defer_err.is_none() && self.park_escaped_abort(nursery_floor) {
-            return Ok(());
-        }
+        // `self.frames` (so `collect` roots the pending records). The frame's remaining defers run
+        // AFTER the escaped levels and the implicit-nursery join above (children complete, then
+        // cleanup). `unwind_escaped_levels` leaves no level above `nursery_floor`, so no park can
+        // follow the defers.
+        let defer_err = self.drain_top_frame_deferred().or(defer_err);
         let ret = self.pop();
         let frame = self.frames.pop().unwrap();
         if frame.counted {
@@ -4054,7 +4060,7 @@ impl Vm {
         // at entry). TASK B: route through `drain_escaped_nursery` so the unstarted tasks are
         // cancelled-and-reported (not silently dropped). NB: within-frame `break`/`continue` out of a
         // `parallel:` no longer rely on this — the compiler emits a `ReclaimNursery` before their
-        // loop-exit `Jump` (see `compile_parallel`/`emit_loop_body_drain`), reclaiming block-scoped.
+        // loop-exit `Jump` (see `compile_parallel`/`emit_loop_escape_drain`), reclaiming block-scoped.
         self.drain_escaped_nursery(frame.nursery_len);
         // Drop any `recover:` handlers installed in the frame we just left (e.g. a `?` early-return
         // out of a recover block) — they must not survive to catch a later, unrelated fault.

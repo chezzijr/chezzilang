@@ -507,6 +507,31 @@ impl Vm {
         false
     }
 
+    /// W14-4 -- escape every `parallel:` level above `from_len`, innermost-first: run the level's
+    /// body defers (down to its `nursery_defer_floors` entry), then cancel it and wait for its
+    /// children. Enclosing defers therefore run after the cancelled children unwind (Go cancel +
+    /// `wg.Wait()`, asyncio `TaskGroup`). Returns `true` when it parked (TICKET-132); the rewound op
+    /// re-runs with the drained defers consumed. It never parks once a defer faulted: the re-run
+    /// would lose the fault.
+    pub(super) fn unwind_escaped_levels(
+        &mut self,
+        from_len: usize,
+        err: &mut Option<RuntimeError>,
+    ) -> bool {
+        while self.nurseries.len() > from_len {
+            let top = self.nurseries.len() - 1;
+            let floor = self.nursery_defer_floors[top];
+            if let Some(e) = self.drain_frame_to(floor) {
+                *err = Some(e);
+            }
+            if err.is_none() && self.park_escaped_abort(top) {
+                return true;
+            }
+            self.drain_escaped_nursery(top);
+        }
+        false
+    }
+
     pub(super) fn join_nursery(&mut self) -> Result<(), RuntimeError> {
         // TICKET-103 — a fiber-owned nursery's owner PARKS here while its family runs, and re-runs
         // this op once `MnSched::park_join`'s wake requeues it. Checked before the first pop below,

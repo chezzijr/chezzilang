@@ -354,6 +354,13 @@ tasks, and prints **nothing** about it. There is no "N pending task(s) cancelled
 starts at its `spawn`, so there are no unstarted tasks to count, and any residual number would be a
 race. `trio` and `asyncio.TaskGroup` are silent here too.
 
+The order is innermost-first (W14-4): a `return`, `?`, `break` or `continue` runs the `parallel:`
+block's own defers, then cancels its children and **waits** for them to finish unwinding (their
+defers run), and only then runs the enclosing blocks' defers. A defer that flushes a log channel
+therefore sees what a cancelled child's defer wrote. Go does the same (`cancel()` + `wg.Wait()`
+before the function returns) and so does `asyncio.TaskGroup` (the children unwind before the
+`async with` exits).
+
 ---
 
 ## 5. `Channel[T]` — a mailbox outside every heap

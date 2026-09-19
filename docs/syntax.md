@@ -3550,8 +3550,10 @@ naming a `std/` file the user never wrote.
 `defer <call>` schedules a call to run when the **enclosing lexical block** exits — on **every**
 path: fall-through, `break`/`continue`, normal return, a `?` short-circuit, or a panic. Deferred
 calls run **LIFO** (last registered, first run); an unwind crossing several blocks runs each block's
-defers inner-block-first. The receiver and arguments are evaluated **at the `defer` statement** (Go
-semantics); only the call itself is delayed.
+defers inner-block-first. A `return`, `?`, `break` or `continue` that leaves a `parallel:` block runs
+that block's own defers, then cancels its children and waits for them to finish unwinding (their
+defers run), and only then runs any enclosing block's defers. The receiver and arguments are
+evaluated **at the `defer` statement** (Go semantics); only the call itself is delayed.
 
 Every indented block is a defer scope: the function body, a loop body, an `if`/`elif`/`else` branch,
 a `recover:` block, a statement-form `match` arm, and the module top level.

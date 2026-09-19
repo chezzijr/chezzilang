@@ -1642,16 +1642,33 @@ impl Compiler {
         Ok(())
     }
 
-    /// Emit one `LeaveDeferScope` per defer scope between the current point and the enclosing loop
-    /// body (inclusive), draining them LIFO before a `break`/`continue` jumps away. These ops run on
-    /// the jump path only; the blocks' own end-of-scope `LeaveDeferScope`s are skipped by the jump,
-    /// so each marker is popped exactly once. The compiler's `defer_scopes` count is unchanged — the
-    /// scopes remain lexically open and emit their natural leaves on the fall-through path.
-    fn emit_loop_body_drain(&mut self, fc: &mut FnComp, span: Span) {
-        let Some(floor) = fc.loops.last().map(|c| c.defer_floor) else {
+    /// Drain everything a `break`/`continue` leaves, innermost-first, on the jump path only (the
+    /// blocks' own `LeaveDeferScope`/`JoinNursery` are skipped by the jump, so each is emitted
+    /// exactly once). W14-4: a `parallel:` level the escape leaves runs its OWN body defers, then a
+    /// `ReclaimNursery` (cancel + wait, so its children run their defers), and only then the defers
+    /// of the enclosing blocks down to the loop body (inclusive) -- the order
+    /// `Vm::unwind_escaped_levels` gives `return`/`?`. Every level between a loop and its `break` is
+    /// a `parallel:` level: implicit nurseries open at `FnComp` entry, below every loop's
+    /// `nursery_floor`. The compiler's `defer_scopes`/`nursery_scopes` counts are unchanged: the
+    /// scopes stay lexically open and emit their natural ops on the fall-through path.
+    fn emit_loop_escape_drain(&mut self, fc: &mut FnComp, span: Span) {
+        let Some((defer_floor, nursery_floor)) =
+            fc.loops.last().map(|c| (c.defer_floor, c.nursery_floor))
+        else {
             return; // no enclosing loop — the checker rejects this `break`/`continue`
         };
-        for _ in 0..(fc.defer_scopes - floor) {
+        let escaped = fc.nursery_scopes - nursery_floor;
+        let marks: Vec<usize> =
+            fc.nursery_defer_marks[fc.nursery_defer_marks.len() - escaped..].to_vec();
+        let mut open = fc.defer_scopes;
+        for &mark in marks.iter().rev() {
+            for _ in 0..(open - mark) {
+                fc.emit(Op::LeaveDeferScope, span);
+            }
+            open = mark;
+            fc.emit(Op::ReclaimNursery, span);
+        }
+        for _ in 0..(open - defer_floor) {
             fc.emit(Op::LeaveDeferScope, span);
         }
     }
@@ -1781,15 +1798,11 @@ impl Compiler {
                 Ok(())
             }
             StmtKind::Break => {
-                // Drain the current iteration's loop-body defers (and any nested block defers) before
-                // jumping out, so they run at the `break`, not at function return.
-                self.emit_loop_body_drain(fc, stmt.span);
-                // TASK B — cancel any `parallel:` nursery this `break` leaves before its
-                // join. Order on the jump path is body defers first, then the nursery reclaim
-                // (silent cancel, §2c1) — distinct from the fall-through order (JoinNursery then the
-                // block's LeaveDeferScope), because a `break` cancels the nursery rather than joining
-                // its children.
-                self.emit_loop_nursery_drain(fc, stmt.span);
+                // Drain the current iteration's defers and cancel any `parallel:` nursery this `break`
+                // leaves (TASK B, silent cancel §2c1), innermost-first (W14-4): a nursery's body
+                // defers, then its reclaim (its children unwind), then the enclosing blocks' defers.
+                // They run at the `break`, not at function return.
+                self.emit_loop_escape_drain(fc, stmt.span);
                 let j = fc.emit_jump(Op::Jump(0), stmt.span);
                 match fc.current_loop() {
                     Some(ctx) => ctx.break_jumps.push(j),
@@ -1801,8 +1814,7 @@ impl Compiler {
                 Ok(())
             }
             StmtKind::Continue => {
-                self.emit_loop_body_drain(fc, stmt.span);
-                self.emit_loop_nursery_drain(fc, stmt.span);
+                self.emit_loop_escape_drain(fc, stmt.span);
                 let j = fc.emit_jump(Op::Jump(0), stmt.span);
                 match fc.current_loop() {
                     Some(ctx) => ctx.continue_jumps.push(j),
@@ -2036,15 +2048,17 @@ impl Compiler {
         // TASK B — track the open nursery scope so a `break`/`continue` inside `body` knows to emit a
         // `ReclaimNursery` (silent cancel) before its loop-exit jump. Mirrors `defer_scopes`.
         fc.nursery_scopes += 1;
+        fc.nursery_defer_marks.push(fc.defer_scopes);
         let has_defer = block_has_defer(body);
         if has_defer {
             fc.emit(Op::EnterDeferScope, body[0].span);
             fc.defer_scopes += 1;
         }
         // The counter bracketing must wrap this body compile exactly as before (so
-        // `emit_loop_body_drain`/`emit_loop_nursery_drain` emit the right count on a break/continue
-        // out of the block); only the fall-through JoinNursery/LeaveDeferScope order changes.
+        // `emit_loop_escape_drain` emits the right count on a break/continue out of the block); only
+        // the fall-through JoinNursery/LeaveDeferScope order changes.
         self.compile_block_scoped(fc, body)?;
+        fc.nursery_defer_marks.pop();
         fc.nursery_scopes -= 1;
         fc.emit(Op::JoinNursery, span);
         if has_defer {
@@ -2052,21 +2066,6 @@ impl Compiler {
             fc.defer_scopes -= 1;
         }
         Ok(())
-    }
-
-    /// TASK B — emit one `ReclaimNursery` per `parallel:` scope between the current point and the
-    /// enclosing loop body (inclusive), cancelling-and-reporting each escaped nursery before a
-    /// `break`/`continue` jumps away. These run on the jump path only; the blocks' own `JoinNursery`s
-    /// are skipped by the jump. Mirrors `emit_loop_body_drain` for defer scopes. The compiler's
-    /// `nursery_scopes` count is unchanged — the scopes remain lexically open and emit their natural
-    /// `JoinNursery` on the fall-through path.
-    fn emit_loop_nursery_drain(&mut self, fc: &mut FnComp, span: Span) {
-        let Some(floor) = fc.loops.last().map(|c| c.nursery_floor) else {
-            return; // no enclosing loop — the checker rejects this `break`/`continue`
-        };
-        for _ in 0..(fc.nursery_scopes - floor) {
-            fc.emit(Op::ReclaimNursery, span);
-        }
     }
 
     /// `spawn` — register a task on the innermost nursery. Form 1 (`spawn f(args)` / `spawn
@@ -7259,6 +7258,10 @@ struct FnComp {
     /// the `EnterNursery` emit in `compile_parallel`, decremented at the matching `JoinNursery`). Read
     /// by `break`/`continue` to know how many `ReclaimNursery`s to emit before jumping out of the loop.
     nursery_scopes: usize,
+    /// W14-4 -- one entry per open `parallel:` level, innermost last: the `defer_scopes` count when
+    /// the level was entered, before its body's `EnterDeferScope`. Implicit nurseries push nothing;
+    /// they open at `FnComp` entry, below every loop.
+    nursery_defer_marks: Vec<usize>,
     /// M-C — this body opened an implicit nursery at entry (its `Op::EnterNursery` is the first body
     /// op) because it contains a bare `spawn`. Stamped onto the [`Proto`] in `finish`; the VM's
     /// `do_return` JOINS this nursery at the body's `return`/end.
@@ -7293,6 +7296,7 @@ impl FnComp {
             loops: Vec::new(),
             defer_scopes: 0,
             nursery_scopes: 0,
+            nursery_defer_marks: Vec::new(),
             has_implicit_nursery: false,
             is_generator: false,
             is_test: false,
