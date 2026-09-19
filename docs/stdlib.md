@@ -1758,9 +1758,14 @@ Recognised syntax (Go conventions): `--name value` / `--name=value` / `--verbose
 `1 t T TRUE true True` / `0 f F FALSE false False`) / `--` terminator (every later token is a positional) /
 `--help` and `-h` (returns `Err("flag: help requested\n" + usage())` — the `ContinueOnError` analog of
 Go's `ErrHelp`; never prints or exits). A user-registered `help`/`h` flag wins over the built-in
-handling, matching Go. A leading run of
-dashes is stripped, so a flag named `n` answers to **both** `-n` and `--n` — a deliberate v1
+handling, matching Go. One or two leading
+dashes are stripped, so a flag named `n` answers to **both** `-n` and `--n` — a deliberate v1
 simplification vs strict Go (which registers each spelling separately); a lone `-` is a positional.
+A third dash, `-=x` or `--=x` is Go's `Err("bad flag syntax: <tok>")` (measured Go 1.27.0).
+An **int** flag parses Go's `strconv.ParseInt(s, 0, 64)` syntax (what Go's `flag.Int` runs): a `0x`/`0o`/`0b`
+prefix (any case) picks the base, a leading `0` is **octal** (`-n 010` → 8), `_` is allowed between digits
+(`0_10` → 8, `0x_1f` → 31, `1_000` → 1000), and `" 3"`, `"3 "`, `08`, `1__0`, `0x`, `+-5` are an `Err`
+(`flag --n: cannot parse '08' as an integer`); a value outside the i64 range is an `Err` naming the range.
 `parse` **replaces** the positionals on every call (Go `FlagSet.Parse`), but never resets flag
 **values** — those persist across calls, matching Go.
 Deferred (not built): required-flag enforcement, subcommands, duplicate-registration detection.

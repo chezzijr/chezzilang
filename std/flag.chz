@@ -13,9 +13,12 @@
 #   --                # terminator: every later token is a positional, even if it starts with `-`
 #   --help / -h       # returns Err("flag: help requested\n" + usage()) unless the caller registered
 #                      # their own `help`/`h` flag, in which case that registration wins (Go's rule)
-# A leading run of dashes is stripped, so a flag named `n` answers to BOTH `-n` and `--n` (a
+# One or two leading dashes are stripped, so a flag named `n` answers to BOTH `-n` and `--n` (a
 # deliberate v1 simplification vs strict Go, which registers each spelling separately — add explicit
-# short-alias params only if a real need appears). A lone `-` (len 1) is a positional.
+# short-alias params only if a real need appears). A third dash, or `-=x` / `--=x`, is Go's
+# `bad flag syntax: <tok>` (Go 1.27). A lone `-` (len 1) is a positional.
+# An int flag takes Go's `ParseInt(s, 0, 64)` syntax: `0x`/`0o`/`0b` prefixes, a leading `0` is octal
+# (`010` = 8), `_` between digits, no whitespace; out of i64 range is an Err.
 #
 # Divergence from Go, deliberate: flags are still recognised AFTER the first positional.
 # `parse(["a", "--name", "x", "b"])` is `Ok(["a", "b"])` with `name = "x"`. Measured Go 1.26.6 stops
@@ -36,6 +39,70 @@
 # ponytail: v1 scope is str/bool/int + long/short + `=`-form + positionals + `--` + a usage line.
 # Deferred (add when a real need appears): required-flag enforcement, subcommands, duplicate-
 # registration detection.
+
+import std.math as math
+
+# Go `strconv.ParseInt(s, 0, 64)` — what Go 1.27 `flag.Int` runs. NOT `str.parse_int` (decimal only,
+# trims) and NOT `math.parse_int_base(s, 0)` (Python-style: no leading-0 octal, trims). Base from the
+# prefix: `0x`/`0o`/`0b` (any case) or a leading `0` = octal, else decimal. `_` is allowed only
+# between digits, or straight after a base prefix (Go `underscoreOK`). No whitespace, no second sign.
+# Err texts keep the `int()` family wording (`cannot parse`) so scripts that grep it stay stable.
+fn _parse_go_int(s: str) -> Result[int, str]:
+    bad := "cannot parse '" + s + "' as an integer"
+    body := s
+    sign := ""
+    if body.starts_with("-") or body.starts_with("+"):
+        if body.starts_with("-"):
+            sign = "-"
+        body = body[1 : body.len()]
+    base := 10
+    digits := body
+    prefixed := false
+    if body.starts_with("0"):
+        p := ""
+        if body.len() >= 3:
+            p = body[1 : 2].lower()
+        if p == "x" or p == "o" or p == "b":
+            prefixed = true
+            digits = body[2 : body.len()]
+            if p == "x":
+                base = 16
+            elif p == "o":
+                base = 8
+            else:
+                base = 2
+        else:
+            base = 8
+            digits = body[1 : body.len()]
+    if body.contains("_"):
+        saw := "^"
+        scan := body
+        if prefixed:
+            saw = "0"
+            scan = digits
+        for c in scan:
+            if c == "_":
+                if saw != "0":
+                    return Err(bad)
+                saw = "_"
+            elif "0123456789abcdefABCDEF".contains(c) and (base == 16 or "0123456789".contains(c)):
+                saw = "0"
+            else:
+                saw = "!"
+        if saw == "_":
+            return Err(bad)
+    clean := digits.replace("_", "")
+    if clean == "":
+        if body.starts_with("0") and not prefixed:
+            return Ok(0)
+        return Err(bad)
+    valid := "0123456789abcdef"[0 : base]
+    for c in clean.lower():
+        if not valid.contains(c):
+            return Err(bad)
+    match math.parse_int_base(sign + clean, base):
+        Ok(v): return Ok(v)
+        Err(_): return Err("'" + s + "' overflows i64 (range -9223372036854775808..=9223372036854775807)")
 
 struct FlagSet:
     names: List[str]        # registration order → deterministic usage()
@@ -93,9 +160,12 @@ struct FlagSet:
                 i += 1
                 continue
             if tok.len() > 1 and tok.starts_with("-"):
-                body := tok
-                while body.starts_with("-"):
+                # One or two leading dashes; a third, or `-=`/`--=`, is Go's `bad flag syntax`.
+                body := tok[1 : tok.len()]
+                if body.starts_with("-"):
                     body = body[1 : body.len()]
+                if body == "" or body.starts_with("-") or body.starts_with("="):
+                    return Err("bad flag syntax: " + tok)
                 name := body
                 inline := ""
                 has_inline := false
@@ -138,7 +208,7 @@ struct FlagSet:
                     val = args[i + 1]
                     i += 2
                 if kind == "int":
-                    match val.parse_int():
+                    match _parse_go_int(val):
                         Ok(iv): self.ints[name] = iv
                         Err(m): return Err("flag --" + name + ": " + m)
                 else:
