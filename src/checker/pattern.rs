@@ -72,6 +72,7 @@ impl Checker {
                 false
             }
             Pattern::Range { .. } => {
+                self.reject_empty_range(pattern, span);
                 // A range sub-pattern is int-only and always refutable.
                 if !ty.is_unknown() && ty != &Ty::Int {
                     self.error(
@@ -316,6 +317,21 @@ impl Checker {
         }
     }
 
+    /// Reject an empty range pattern. `start..end` is half-open (`start <= v < end`), so
+    /// `start >= end` matches nothing on any run; rustc rejects the same shapes (E0579).
+    fn reject_empty_range(&mut self, pattern: &Pattern, span: Span) {
+        if let Pattern::Range { start, end } = pattern
+            && start >= end
+        {
+            self.error(
+                span,
+                format!(
+                    "empty range pattern '{start}..{end}': the lower bound must be less than the upper bound (a range pattern matches start <= v < end)"
+                ),
+            );
+        }
+    }
+
     /// Push a scope and bind one arm's pattern, recording coverage + diagnostics. Returns `true` if
     /// this arm is **irrefutable** (a `_` wildcard, or a tuple of irrefutable sub-patterns — either
     /// makes the match exhaustive). The caller must `pop_scope` after the arm body.
@@ -376,6 +392,7 @@ impl Checker {
                 format!("identifier '{dup}' is bound more than once in this pattern"),
             );
         }
+        self.reject_empty_range(pattern, span);
         match kind {
             MatchKind::Skip => {
                 // Un-inferable scrutinee with only binding/`_` arms: accept the pattern shape

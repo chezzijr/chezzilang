@@ -423,7 +423,8 @@
                 | "INT" "DOTDOT" "INT"
 # A leading "MINUS" makes the int literal / range bound negative (int-only — there is no float
 # pattern, so a "MINUS" before a float is a parse error, exactly like a bare float). Either range
-# bound may independently be negative (`-10..-5`, `-10..5`, `0..-5`).
+# bound may independently be negative (`-10..-5`, `-10..5`); the grammar also accepts an empty
+# range such as `0..-5`, which the checker rejects.
                 | "MINUS" "INT"
                 | "MINUS" "INT" "DOTDOT" "MINUS" "INT"
                 | "MINUS" "INT" "DOTDOT" "INT"

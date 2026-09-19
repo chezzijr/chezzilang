@@ -3278,8 +3278,12 @@ match score:
     _:      "A"
 ```
 
+The range must be non-empty: `start..end` with `start >= end` (`5..1`, `3..3`, `0..-5`) is a compile
+error `empty range pattern` (rustc E0579). It applies at every position: an arm, an or-alternative, a
+payload.
+
 Int literal and range patterns may be **negative** (`-3:`, `-10..-5:`; either bound independently,
-`-10..5`, `0..-5`). This is int-only — there is **no float pattern**, so a negative (or positive)
+`-10..5`). This is int-only — there is **no float pattern**, so a negative (or positive)
 float like `-3.0:` / `3.0:` is a parse error, the same as today.
 
 ```chezzi

@@ -15213,6 +15213,30 @@ fn range_pattern_empty_or_inverted_rejected() {
 }
 
 #[test]
+fn range_pattern_empty_rejected_at_every_position() {
+    // Top level, inside an or-alternative, nested in a payload, a negative inverted bound, and an
+    // expression-position match arm. Each is reported once, at its own arm's line.
+    let errs = check_src(
+        "o: int? = Some(3)\nmatch o:\n    Some(5..1): print(1)\n    _: pass\nn := 3\nmatch n:\n    1 | 5..1: print(1)\n    3..3: print(2)\n    0..-5: print(3)\n    _: pass\nk := match n:\n    9..2: 1\n    _: 0\n",
+    );
+    let mut lines: Vec<u32> = errs
+        .iter()
+        .filter(|e| e.message.contains("empty range pattern"))
+        .map(|e| e.span.line)
+        .collect();
+    lines.sort();
+    assert_eq!(lines, vec![3, 7, 8, 9, 12], "all errors: {errs:?}");
+}
+
+#[test]
+fn range_pattern_nonempty_neighbours_ok() {
+    // One-wide and negative ranges are non-empty: `start < end` on each side of the line.
+    ok(
+        "n := 3\nmatch n:\n    0..1: print(1)\n    -10..-5: print(2)\n    -1..0: print(3)\n    _: pass\n",
+    );
+}
+
+#[test]
 fn range_pattern_ok() {
     ok(
         "fn grade(n: int) -> str:\n    return match n:\n        0..60: \"F\"\n        60..90: \"B\"\n        _: \"A\"\ngrade(50)\n",
