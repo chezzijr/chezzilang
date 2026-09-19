@@ -1,0 +1,23 @@
+# W14-22
+test fn a_doubled_brace_pattern_matches_the_decoded_text():
+    s := "{{x}}"
+    r := ""
+    match s:
+        "{{x}}": r = "dbl"
+        _: r = "none"
+    assert r == "dbl", "got {r}"
+
+test fn an_all_digit_hole_pattern_is_literal_text():
+    r := ""
+    match "{4}":
+        "{4}": r = "digit"
+        _: r = "none"
+    assert r == "digit", "got {r}"
+
+test fn a_raw_string_pattern_keeps_its_braces():
+    u := r"{x}"
+    r := ""
+    match u:
+        r"{x}": r = "raw"
+        _: r = "none"
+    assert r == "raw", "got {r}"

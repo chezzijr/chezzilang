@@ -1890,13 +1890,38 @@ impl Parser {
                 }
                 return Ok(Pattern::Literal(LitPattern::Int(start)));
             }
-            // A raw string is an ordinary `str` literal in pattern position too. (A pattern never
-            // interpolates, so the `StrLit`'s position map is dropped here on purpose.)
+            // A string pattern is decoded exactly like the same literal in expression position
+            // (TICKET-139/W14-22): `{{`/`}}` are literal braces and an all-digit hole is text
+            // (DEC-018), but a real `{expr}` hole is a parse error -- a pattern matches literals,
+            // it never interpolates. This must stay HERE: `Token::RawStr` below lands in the same
+            // `LitPattern::Str`, so no later phase can tell `r"{x}"` from a holed `"{x}"`.
             Token::Str(s) => {
-                let s = s.raw.clone();
+                let s = s.clone();
+                let span = self.cur_span();
+                let chunks = match crate::interpolation::parse_interpolation(&s, span) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return Err(ParseError {
+                            message: e.message,
+                            span: e.span,
+                        });
+                    }
+                };
+                let mut text = String::new();
+                for chunk in chunks {
+                    match chunk {
+                        Chunk::Lit(l) => text.push_str(&l),
+                        Chunk::Expr(..) => {
+                            return Err(self.err(
+                                "a string pattern cannot interpolate: `{...}` is a hole, not text; write `{{` and `}}` for literal braces, or bind the value and compare it in a guard".to_string(),
+                            ));
+                        }
+                    }
+                }
                 self.advance();
-                return Ok(Pattern::Literal(LitPattern::Str(s)));
+                return Ok(Pattern::Literal(LitPattern::Str(text)));
             }
+            // A raw string is an ordinary `str` literal in pattern position too.
             Token::RawStr(s) => {
                 let s = s.clone();
                 self.advance();

@@ -3091,6 +3091,12 @@ match safe_div(10, 2):
     Err(e): print("failed: {e}")
 ```
 
+A **string pattern** is decoded exactly like the same literal in an expression: `{{` and `}}` are
+literal braces (`"{{x}}"` matches the text `{x}`) and an all-digit hole is text (`"{4}"` matches
+`{4}`), while a real hole (`"{x}"`) is a **parse error**, since a pattern matches literals and never
+interpolates (CPython: `SyntaxError: patterns may only match literals`). Compare a value in a guard
+instead. A raw `r"{x}"` pattern keeps its braces verbatim.
+
 A scrutinee can also be an **int/str** (literal arms, always needing a `_` wildcard), a **bool**
 (exhaustive once unguarded `true` and `false` arms both appear, no `_` needed — an `_` after both then
 warns as unreachable), a **tuple**, or a **struct** (destructured positionally — see below). Patterns

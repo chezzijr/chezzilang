@@ -32905,14 +32905,32 @@ fn int_never_widens_dot_zero_spellings_check() {
 
 #[test]
 fn holed_string_pattern_is_a_compile_error() {
-    // W14-22: `"{x}"` in pattern position was accepted and silently never matched.
-    let errs = check_src(
-        "fn main():\n    x := \"hi\"\n    match \"hi\":\n        \"{x}\": print(\"interp\")\n        _: print(\"none\")\n",
-    );
-    assert!(
-        !errs.is_empty(),
-        "expected an error for a holed string pattern, got no errors"
-    );
+    // W14-22: `"{x}"` in pattern position was accepted and silently never matched. The check is
+    // in the PARSER now (a pattern is decoded like the same literal), so parse the source directly.
+    fn parse_src(src: &str) -> Result<crate::ast::Module, crate::parser::ParseError> {
+        parser::parse(lexer::tokenize(src).expect("lex should succeed"))
+    }
+    fn prog(pat: &str) -> String {
+        format!(
+            "fn main():\n    match \"hi\":\n        {pat}: print(\"a\")\n        _: print(\"b\")\n"
+        )
+    }
+    match parse_src(&prog("\"{x}\"")) {
+        Ok(_) => panic!("expected an error for a holed string pattern, got no errors"),
+        Err(e) => assert!(
+            e.message.contains("a string pattern cannot interpolate"),
+            "got: {}",
+            e.message
+        ),
+    }
+    // A malformed `{` reports the same interpolation error as the expression form.
+    match parse_src(&prog("\"{\"")) {
+        Ok(_) => panic!("expected an error for an unterminated '{{' pattern"),
+        Err(e) => assert!(e.message.contains("unterminated '{'"), "got: {}", e.message),
+    }
+    // Not holes: an all-digit hole is literal text (DEC-018), `{{x}}` is literal braces.
+    parse_src(&prog("\"{4}\"")).expect("an all-digit hole pattern is literal text");
+    parse_src(&prog("\"{{x}}\"")).expect("a doubled-brace pattern is literal braces");
 }
 
 #[test]
