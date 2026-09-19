@@ -15157,6 +15157,15 @@ fn range_pattern_non_exhaustive_without_wildcard() {
 }
 
 #[test]
+fn range_pattern_empty_or_inverted_rejected() {
+    // TICKET-149 (2): `5..1` (inverted) matches nothing; rustc rejects with E0579.
+    rejects(
+        "n := 3\nmatch n:\n    5..1: print(\"never\")\n    _: pass\n",
+        "empty range pattern",
+    );
+}
+
+#[test]
 fn range_pattern_ok() {
     ok(
         "fn grade(n: int) -> str:\n    return match n:\n        0..60: \"F\"\n        60..90: \"B\"\n        _: \"A\"\ngrade(50)\n",
