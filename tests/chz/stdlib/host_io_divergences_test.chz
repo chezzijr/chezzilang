@@ -97,3 +97,25 @@ test fn flag_dash_forms_still_parse():
     assert bad_syntax(["-name", "x"]) == "OK"
     assert bad_syntax(["--name", "x"]) == "OK"
     assert bad_syntax(["--name=x", "-"]) == "OK"
+
+fn b64(s: str) -> str:
+    match encoding.base64_decode(s):
+        Ok(v): return "Ok(" + v + ")"
+        Err(e): return "Err"
+
+fn b64u(s: str) -> str:
+    match encoding.base64_decode_url(s):
+        Ok(v): return "Ok(" + v + ")"
+        Err(e): return "Err"
+
+# Go `Std/URLEncoding.DecodeString` drops every \r and \n anywhere (measured Go 1.27.0) and Errs on
+# space/tab and on padding split by a newline.
+test fn base64_newline_rules_match_go():
+    assert b64u("Zm\n9v") == "Ok(foo)", b64u("Zm\n9v")
+    assert b64("Zm8=\n") == "Ok(fo)", b64("Zm8=\n")
+    assert b64("Zm9v\rYmFy") == "Ok(foobar)", b64("Zm9v\rYmFy")
+    assert b64("Zm9v YmFy") == "Err", b64("Zm9v YmFy")
+    assert b64("Zm9v\tYmFy") == "Err", b64("Zm9v\tYmFy")
+    assert b64("Zm9=\nv") == "Err", b64("Zm9=\nv")
+    assert b64("\n") == "Ok()", b64("\n")
+    assert b64("Zm9\n") == "Err", b64("Zm9\n")   # 3 chars once the newline is dropped: bad length

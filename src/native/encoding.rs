@@ -10,7 +10,8 @@
 //! - base64: RFC 4648 — `base64_encode`/`base64_decode` (std `+/` alphabet, `=` padding), the
 //!   URL-safe `base64_encode_url`/`base64_decode_url` (`-_` alphabet), and the binary
 //!   `base64_encode_bytes`/`base64_decode_bytes` (std alphabet). Decode strips/accepts padding;
-//!   the std decoder rejects `-_` and the url decoder rejects `+/`.
+//!   the std decoder rejects `-_` and the url decoder rejects `+/`. Decode ignores `\r`/`\n`
+//!   anywhere (Go); any other non-alphabet byte, space and tab included, is an `Err`.
 //! - hex: lowercase `hex_encode`, `hex_decode` (rejects odd length / non-hex digits).
 //! - url: RFC 3986 COMPONENT percent-encoding — `url_encode` keeps the unreserved set
 //!   `A-Za-z0-9-._~` literal and `%XX`-escapes everything else (uppercase hex); `url_decode` reverses
@@ -50,14 +51,17 @@ fn b64_encode(bytes: &[u8], alphabet: &[u8; 64]) -> String {
     out
 }
 
-/// Decode a base64 `str` to raw bytes using `alphabet`. Rejects out-of-alphabet chars, bad length,
-/// and misplaced padding. Padding is required to a multiple of 4 (canonical RFC 4648).
+/// Decode a base64 `str` to raw bytes using `alphabet`. `\r` and `\n` anywhere are ignored (Go's
+/// `base64.Encoding.DecodeString`, W14-31); every other non-alphabet char (space and tab included),
+/// bad length and misplaced padding are rejected. Padding is required to a multiple of 4 (canonical
+/// RFC 4648), counted after the newlines are dropped.
 fn b64_decode(s: &str, alphabet: &[u8; 64]) -> Result<Vec<u8>, HostError> {
     let mut rev = [255u8; 256];
     for (i, &c) in alphabet.iter().enumerate() {
         rev[c as usize] = i as u8;
     }
-    let bytes = s.as_bytes();
+    let cleaned: Vec<u8> = s.bytes().filter(|&b| b != b'\r' && b != b'\n').collect();
+    let bytes = &cleaned[..];
     if !bytes.len().is_multiple_of(4) {
         return Err(HostError {
             message: "base64: invalid length (not a multiple of 4)".into(),

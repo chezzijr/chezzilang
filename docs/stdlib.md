@@ -1228,7 +1228,9 @@ Reversible text codecs. Every function takes a `str` and operates on its **UTF-8
 *All members are pure CPU str transforms (no I/O); they run inline on every engine.*
 - base64 (RFC 4648): `base64_encode(s) -> str` / `base64_decode(s) -> Result[str]` (std `+/` alphabet,
   `=` padding) · `base64_encode_url(s) -> str` / `base64_decode_url(s) -> Result[str]` (URL-safe `-_`
-  alphabet). The std decoder rejects `-_`; the URL decoder rejects `+/`.
+  alphabet). The std decoder rejects `-_`; the URL decoder rejects `+/`. **Every decoder ignores `\r` and
+  `\n` anywhere** in the input (Go's `DecodeString`; CPython `b64decode` too), so a PEM/MIME-wrapped body
+  decodes; any other non-alphabet byte — space and tab included — is still an `Err`.
 - base64 of **raw bytes** (R1): `base64_encode_bytes(b: bytes) -> str` ·
   `base64_decode_bytes(s: str) -> Result[bytes]` (std alphabet). These do not
   UTF-8-validate, so **arbitrary binary round-trips** (an image, a gzip body). Not added: URL-safe or
