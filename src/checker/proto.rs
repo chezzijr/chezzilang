@@ -3198,6 +3198,72 @@ impl Checker {
         }
     }
 
+    /// The rendered type of the first `fn` value reachable from `ty` by the same structural walk as
+    /// [`Self::reaches_user_eq`] (same cycle guard, same holes), or `None`. Only `Ty::Func` is a hit:
+    /// a `Ty::BuiltinFn` (`ord`, `math.sqrt`) is a bare name that compares equal after an `Atomic`
+    /// round trip, so `cas` on it keeps working. TICKET-144 (W14-24): `Atomic.cas` on a payload
+    /// holding a closure can never succeed — every `load()` builds a fresh copy and closures compare by
+    /// identity. `Param`/`Protocol` payloads hide the fn from this walk; the runtime `cas` backstops
+    /// them (`WireValue::holds_fn`).
+    pub(super) fn reaches_func(&self, ty: &Ty, stack: &mut Vec<String>) -> Option<String> {
+        let any = |s: &Self, ts: &[Ty], stack: &mut Vec<String>| -> Option<String> {
+            ts.iter().find_map(|t| s.reaches_func(t, stack))
+        };
+        match ty {
+            Ty::Func { .. } => Some(ty.to_string()),
+            Ty::List(t) | Ty::Set(t) | Ty::Option(t) => self.reaches_func(t, stack),
+            Ty::Map(k, v) => self
+                .reaches_func(k, stack)
+                .or_else(|| self.reaches_func(v, stack)),
+            Ty::Result(t, e) => self
+                .reaches_func(t, stack)
+                .or_else(|| self.reaches_func(e, stack)),
+            Ty::Tuple(elems) => any(self, elems, stack),
+            Ty::Struct(name, args) => {
+                if let hit @ Some(_) = any(self, args, stack) {
+                    return hit;
+                }
+                if stack.contains(name) {
+                    return None;
+                }
+                let fields = self.structs.get(name)?.fields.clone();
+                stack.push(name.clone());
+                let hit = fields.iter().find_map(|(_, f)| self.reaches_func(f, stack));
+                stack.pop();
+                hit
+            }
+            Ty::Enum(name, args) => {
+                if let hit @ Some(_) = any(self, args, stack) {
+                    return hit;
+                }
+                if stack.contains(name) {
+                    return None;
+                }
+                let payloads: Vec<Ty> = self
+                    .variants
+                    .values()
+                    .filter(|v| &v.enum_name == name)
+                    .flat_map(|v| v.payload.clone())
+                    .collect();
+                stack.push(name.clone());
+                let hit = payloads.iter().find_map(|p| self.reaches_func(p, stack));
+                stack.pop();
+                hit
+            }
+            Ty::NewType(name, _) => {
+                if stack.contains(name) {
+                    return None;
+                }
+                let under = self.newtype_unwrap_target(ty)?;
+                stack.push(name.clone());
+                let hit = self.reaches_func(&under, stack);
+                stack.pop();
+                hit
+            }
+            _ => None,
+        }
+    }
+
     /// **W7-41 — is anything the structural equality walk REACHES a declared `eq` whose `where`
     /// bounds do not hold for this instantiation?** `None` = this type's equality is sound to reach;
     /// `Some(reason)` = it is not, and neither `==` nor a `[T: Eq]` bound may accept it.

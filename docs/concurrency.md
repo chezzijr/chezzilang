@@ -593,7 +593,12 @@ check time** — its own (`Atomic[K] payload defines its own 'eq' …`) or one o
 slot, struct field, enum payload or newtype underlying the structural compare would recurse into
 (`Atomic[List[K]] payload reaches 'K', which defines its own 'eq' …`); use `Shared[K]`, which has no
 `cas`. Because no checker walk can see through a protocol existential payload, the VM ALSO switches the
-`eq` hook off for the compare — the no-user-code-under-the-lock property is enforced, not assumed. Each method is a single
+`eq` hook off for the compare — the no-user-code-under-the-lock property is enforced, not assumed. **`cas` on a payload that holds a `fn` value is rejected too**
+(TICKET-144, W14-24; `Atomic[fn() -> int]`, a struct field or `List` element of `fn` type): every `load()` returns a fresh copy of the closure and
+closures compare by identity, so `cas(a.load(), new)` could never succeed and the standard CAS retry loop would spin forever
+(Go's `atomic.Value.CompareAndSwap` panics `comparing uncomparable type` on the same shape). The error is at the `cas` call, so
+`load`/`store`/`exchange` of a fn stay legal, and a builtin fn value (`Atomic(ord)`) — which compares equal after a load — keeps `cas`. A generic `fn f[T](a: Atomic[T], …)`
+hides the fn from the checker, so the runtime `cas` faults `Atomic.cas: the payload holds a function value, which cas cannot compare` instead of answering `false` forever. Each method is a single
 lock-op-unlock, so the read-modify-write is atomic across threads with no separate update lock. `Atomic`
 vs `Shared`: reach for `Atomic` when a lock-free-style counter/flag/CAS-loop is clearer than
 `update(closure)`; reach for `Shared` when the update is an arbitrary transformation.

@@ -5947,6 +5947,48 @@ fn atomic_payload_with_eq_rejected() {
     );
 }
 
+/// TICKET-144 (W14-24): `Atomic.cas` on a payload that holds a `fn` value can never succeed — every
+/// `load()` returns a fresh copy of the closure and closures compare by identity — so the standard
+/// `cas(a.load(), new)` retry loop spins forever. Go's `atomic.Value.CompareAndSwap` panics
+/// `comparing uncomparable type` on the same shape. Rejected at the `cas` CALL (`load`/`store`/
+/// `exchange` of a fn stay legal, as Go's `Value` Store/Load of a func do); a builtin fn value
+/// (`ord`) compares equal after a load and stays allowed.
+#[test]
+fn atomic_cas_on_fn_payload_rejected() {
+    let decl = "import std.concurrency\nfn one() -> int:\n    return 1\nstruct H:\n    n: int\n    f: fn() -> int\n";
+    let needle = "cas cannot compare a payload that holds a function value";
+    entry_rejects(
+        &format!(
+            "{decl}fn main():\n    a := Atomic[fn() -> int](one)\n    print(a.cas(a.load(), one))\nmain()\n"
+        ),
+        needle,
+    );
+    entry_rejects(
+        &format!(
+            "{decl}fn main():\n    a := Atomic(H(1, one))\n    print(a.cas(a.load(), H(2, one)))\nmain()\n"
+        ),
+        needle,
+    );
+    // The fn nested in a container/option is the same payload.
+    entry_rejects(
+        &format!(
+            "{decl}fn main():\n    a := Atomic([one])\n    print(a.cas(a.load(), [one]))\nmain()\n"
+        ),
+        needle,
+    );
+    // MUST STILL PASS: a fn payload with only `store`/`load`/`exchange`, and a builtin fn with `cas`.
+    entry_ok(&format!(
+        "{decl}fn main():\n    a := Atomic[fn() -> int](one)\n    a.store(one)\n    f := a.exchange(one)\n    print(f() + a.load()())\nmain()\n"
+    ));
+    entry_ok(
+        "import std.concurrency\nfn main():\n    a := Atomic(ord)\n    print(a.cas(a.load(), ord))\nmain()\n",
+    );
+    // A payload with no fn in it keeps `cas`.
+    entry_ok(&format!(
+        "{decl}struct Q:\n    x: int\nfn main():\n    a := Atomic(Q(1))\n    print(a.cas(a.load(), Q(2)))\nmain()\n"
+    ));
+}
+
 /// The gate must see through EVERY type structural equality recurses into, not just the payload's
 /// own methods. `cas` compares `Atomic[List[P]]` element-by-element, so it reaches `P`'s `eq` on
 /// exactly the compare a bare `Atomic[P]` does — and the `_ => false` arm this replaces let the

@@ -3690,6 +3690,21 @@ impl Checker {
                 // express — it must stay BEFORE the lookup so a non-numeric element short-circuits to
                 // the "no method" path (matching the retired `atomic_method_sig`).
                 let numeric_gated = matches!(method, "add" | "sub") && !elem.is_numeric();
+                // TICKET-144 (W14-24): `cas` on a payload holding a `fn` value can never succeed —
+                // each `load()` returns a fresh closure copy and closures compare by identity — so the
+                // `cas(a.load(), new)` retry loop would spin forever. Go's `atomic.Value` panics
+                // `comparing uncomparable type` there. `load`/`store`/`exchange` stay legal; a
+                // `Param`/protocol payload hides the fn, so the runtime `cas` backstops it.
+                if method == "cas"
+                    && let Some(f) = self.reaches_func(&elem, &mut Vec::new())
+                {
+                    self.error(
+                        name_span,
+                        format!(
+                            "Atomic[{elem}].cas cannot compare a payload that holds a function value ('{f}'): every load() returns a fresh copy, so the swap could never succeed; use store/exchange instead"
+                        ),
+                    );
+                }
                 let resolved = if numeric_gated {
                     NativeHandleMethod::Miss
                 } else {
