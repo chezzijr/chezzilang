@@ -31,3 +31,145 @@ fn flushed() -> int:
 
 test fn return_from_nursery_runs_child_defers_before_enclosing_defers():
     assert flushed() == 1
+
+
+# Every escape kind: the block's own defers, then the cancelled children's defers (a `parallel:`
+# child parks on `hold`, which nobody sends on), then the enclosing blocks' defers.
+fn child(log: Shared[str], ready: Channel[int], hold: Channel[int]):
+    defer log.update(fn(s: str) -> str: s + "C")
+    ready.send(1)
+    _ := hold.recv()
+
+
+fn noop():
+    pass
+
+
+fn fails() -> int!str:
+    return Err("bail")
+
+
+fn ret_order(log: Shared[str]) -> int:
+    ready := Channel[int](1)
+    hold := Channel[int]()
+    defer:
+        log.update(fn(s: str) -> str: s + "O")
+    parallel:
+        defer:
+            log.update(fn(s: str) -> str: s + "B")
+        spawn child(log, ready, hold)
+        _ := ready.recv()
+        return 1
+    return 0
+
+
+fn try_order(log: Shared[str]) -> int!str:
+    ready := Channel[int](1)
+    hold := Channel[int]()
+    defer:
+        log.update(fn(s: str) -> str: s + "O")
+    parallel:
+        spawn child(log, ready, hold)
+        _ := ready.recv()
+        v := fails()?
+        return Ok(v)
+    return Ok(0)
+
+
+fn break_order(log: Shared[str]):
+    ready := Channel[int](1)
+    hold := Channel[int]()
+    defer:
+        log.update(fn(s: str) -> str: s + "O")
+    for i in range(1):
+        defer:
+            log.update(fn(s: str) -> str: s + "L")
+        parallel:
+            spawn child(log, ready, hold)
+            _ := ready.recv()
+            break
+    log.update(fn(s: str) -> str: s + "E")
+
+
+fn continue_order(log: Shared[str]):
+    ready := Channel[int](1)
+    hold := Channel[int]()
+    defer:
+        log.update(fn(s: str) -> str: s + "O")
+    for i in range(1):
+        defer:
+            log.update(fn(s: str) -> str: s + "L")
+        parallel:
+            spawn child(log, ready, hold)
+            _ := ready.recv()
+            continue
+    log.update(fn(s: str) -> str: s + "E")
+
+
+fn impl_order(log: Shared[str]) -> int:
+    ready := Channel[int](1)
+    hold := Channel[int]()
+    defer:
+        log.update(fn(s: str) -> str: s + "O")
+    spawn noop()
+    parallel:
+        defer:
+            log.update(fn(s: str) -> str: s + "B")
+        spawn child(log, ready, hold)
+        _ := ready.recv()
+        return 1
+    return 0
+
+
+fn impl_fault(log: Shared[str]) -> int:
+    ready := Channel[int](1)
+    hold := Channel[int]()
+    defer:
+        log.update(fn(s: str) -> str: s + "O")
+    spawn noop()
+    parallel:
+        defer:
+            panic("body cleanup failed")
+        spawn child(log, ready, hold)
+        _ := ready.recv()
+        return 1
+    return 0
+
+
+test fn return_escape_runs_body_then_child_then_owner_defers():
+    log := Shared("")
+    assert ret_order(log) == 1
+    assert log.get() == "BCO"
+
+
+test fn try_escape_runs_child_defer_before_owner_defer():
+    log := Shared("")
+    assert "{try_order(log)}" == "Err('bail')"
+    assert log.get() == "CO"
+
+
+test fn break_escape_runs_child_defer_before_loop_defer():
+    log := Shared("")
+    break_order(log)
+    assert log.get() == "CLEO"
+
+
+test fn continue_escape_runs_child_defer_before_loop_defer():
+    log := Shared("")
+    continue_order(log)
+    assert log.get() == "CLEO"
+
+
+test fn escape_above_an_implicit_nursery_runs_body_child_owner():
+    log := Shared("")
+    assert impl_order(log) == 1
+    assert log.get() == "BCO"
+
+
+test fn body_defer_fault_above_an_implicit_nursery_is_reported():
+    log := Shared("")
+    r := recover: impl_fault(log)
+    match r:
+        Err(e): assert e.message().contains("body cleanup failed")
+        Ok(_): assert false
+    assert log.get() == "CO"
