@@ -106,6 +106,39 @@ main()";
     assert_eq!(run_capture_stress(src), "00123456\nok\n");
 }
 
+/// TICKET-146: a tuple ordering walk re-enters a user `compare` that allocates (GC mid-walk). The
+/// list being sorted, each tuple, and an inline-temporary operand pair must all stay rooted.
+#[test]
+fn tuple_ordering_survives_gc_stress() {
+    let src = "\
+struct M:
+    c: int
+    fn compare(self, o: M) -> int:
+        junk := [str(self.c), str(o.c)]
+        return self.c - o.c
+    fn eq(self, o: M) -> bool:
+        return self.c == o.c
+fn make() -> List[(M, int)]:
+    xs := []
+    i := 0
+    while i < 8:
+        xs.push((M((i * 5) % 7), i))
+        i = i + 1
+    return xs
+fn main():
+    xs := make()
+    xs.sort()
+    out := \"\"
+    for t in xs:
+        out = out + str(t.0.c)
+    print(out)
+    make().sort()
+    print((M(1), 2) < (M(1), 3))
+    print((M(2), 2) < (M(1), 3))
+main()";
+    assert_eq!(run_capture_stress(src), "00123456\ntrue\nfalse\n");
+}
+
 /// M23 — `==` dispatching to a user `eq` that ALLOCATES (triggering GC mid-compare). `eq_operator`
 /// POPS both operands before `run_proto`, so an inline-temporary operand (`M(1) == M(2)`) is reachable
 /// only through the argument vec while the callee runs — the same rooting question

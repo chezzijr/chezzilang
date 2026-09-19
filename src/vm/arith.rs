@@ -1123,6 +1123,22 @@ impl Vm {
             self.push(Value::bool(bres));
             return Ok(());
         }
+        // TICKET-146: a same-kind tuple / List / Option pair orders lexicographically. MUST precede
+        // the struct/enum gate below — an `Option` is an `Obj::Enum` with no `compare` method.
+        if self.seq_pair(l, r) {
+            let b = match self.seq_order(l, r, false, span)? {
+                Some(ord) => match op {
+                    Op::Lt => ord.is_lt(),
+                    Op::LtEq => ord.is_le(),
+                    Op::Gt => ord.is_gt(),
+                    Op::GtEq => ord.is_ge(),
+                    _ => unreachable!(),
+                },
+                None => false, // a NaN element pair: every ordered compare is false
+            };
+            self.push(Value::bool(b));
+            return Ok(());
+        }
         // Operator overloading: ordering on two structs dispatches to `compare(self, other) -> int`
         // (the `Comparable` protocol). The checker has verified conformance. Equality stays
         // structural; only ordering is overloaded.
@@ -1222,6 +1238,123 @@ impl Vm {
                 span,
             )),
         }
+    }
+
+    /// Which lexicographic container `v` is, for the TICKET-146 ordering walk: `0` tuple, `1` list,
+    /// `2` `Option` (an `Obj::Enum` stamped with the reserved `VID_SOME`/`VID_NONE_VARIANT` id,
+    /// disjoint from every user variant id). `None` for anything else, so a user enum or a
+    /// `Result` never enters the walk.
+    pub(super) fn seq_kind(&self, v: Value) -> Option<u8> {
+        use crate::vm::op::{VID_NONE_VARIANT, VID_SOME};
+        match self.heap.get(v.as_obj()?) {
+            Obj::Tuple(_) => Some(0),
+            Obj::List(_) => Some(1),
+            Obj::Enum { variant_id, .. }
+                if *variant_id == VID_SOME || *variant_id == VID_NONE_VARIANT =>
+            {
+                Some(2)
+            }
+            _ => None,
+        }
+    }
+
+    /// `Some(k)` when `a` and `b` are the same [`Self::seq_kind`] — the pairs every ordering gate
+    /// hands to [`Self::seq_order`] BEFORE its struct/enum user-`compare` gate (an `Option` is an
+    /// `Obj::Enum` with no `compare` method, so reaching that gate would fault).
+    pub(super) fn seq_pair(&self, a: Value, b: Value) -> bool {
+        matches!((self.seq_kind(a), self.seq_kind(b)), (Some(x), Some(y)) if x == y)
+    }
+
+    /// Length of the tuple/list `v` and its `i`th element, read fresh from the heap.
+    fn seq_elem(&self, v: Value, i: usize) -> (usize, Option<Value>) {
+        match v.as_obj().map(|h| self.heap.get(h)) {
+            Some(Obj::Tuple(xs) | Obj::List(xs)) => (xs.len(), xs.get(i).copied()),
+            _ => (0, None),
+        }
+    }
+
+    /// Lexicographic order of two same-kind tuple/List/Option values (TICKET-146): elements left to
+    /// right, the first non-equal pair decides, a shorter prefix sorts first, `None < Some(_)`.
+    ///
+    /// `total` picks the flavour. `false` is the OPERATOR order (`<`/`<=`/`>`/`>=`): partial, so a NaN
+    /// element pair yields `None` (all four ops false). `true` is the TOTAL order behind
+    /// `sort`/`min`/`max`/`sort_by_key`/`.compare()`, whose float leaves go through `order_key`'s
+    /// `float_order` (DEC-144) — never a bare `total_cmp`.
+    ///
+    /// A user `compare` inside an element re-enters the VM (may GC, may shrink a list), so both
+    /// containers are rooted and every step re-reads lengths and elements from the heap.
+    pub(super) fn seq_order(
+        &mut self,
+        a: Value,
+        b: Value,
+        total: bool,
+        span: Span,
+    ) -> Result<Option<std::cmp::Ordering>, RuntimeError> {
+        use crate::vm::op::VID_SOME;
+        use std::cmp::Ordering;
+        self.with_roots(&[a, b], |vm| {
+            if vm.seq_kind(a) == Some(2) {
+                let payload = |vm: &Self, v: Value| match v.as_obj().map(|h| vm.heap.get(h)) {
+                    Some(Obj::Enum {
+                        variant_id,
+                        payload,
+                    }) if *variant_id == VID_SOME => payload.first().copied(),
+                    _ => None,
+                };
+                return match (payload(vm, a), payload(vm, b)) {
+                    (None, None) => Ok(Some(Ordering::Equal)),
+                    (None, Some(_)) => Ok(Some(Ordering::Less)),
+                    (Some(_), None) => Ok(Some(Ordering::Greater)),
+                    (Some(x), Some(y)) => vm.elem_order(x, y, total, span),
+                };
+            }
+            let mut i = 0;
+            loop {
+                let (len_a, x) = vm.seq_elem(a, i);
+                let (len_b, y) = vm.seq_elem(b, i);
+                let (Some(x), Some(y)) = (x, y) else {
+                    return Ok(Some(len_a.cmp(&len_b)));
+                };
+                match vm.elem_order(x, y, total, span)? {
+                    Some(Ordering::Equal) => i += 1,
+                    other => return Ok(other),
+                }
+            }
+        })
+    }
+
+    /// One element pair of a [`Self::seq_order`] walk. CPython's `x is y or x == y` first: the raw
+    /// word is identity (a float is boxed per allocation), which keeps `<=` agreeing with the
+    /// container `==` (`elem_equal`). Then the total order via `order_key`, or the partial one:
+    /// nested containers recurse, a struct/enum orders by its `compare`, a scalar by `compare`
+    /// (`None` on NaN).
+    fn elem_order(
+        &mut self,
+        x: Value,
+        y: Value,
+        total: bool,
+        span: Span,
+    ) -> Result<Option<std::cmp::Ordering>, RuntimeError> {
+        if x == y {
+            return Ok(Some(std::cmp::Ordering::Equal));
+        }
+        // The pair may reach user code (`compare` re-enters the VM and can GC), and a list element
+        // may since have left its container — root both across the call.
+        self.with_roots(&[x, y], |vm| {
+            if total {
+                return Ok(Some(vm.order_key(x, y, span)?));
+            }
+            if vm.seq_pair(x, y) {
+                return vm.seq_order(x, y, false, span);
+            }
+            if let (Some(hx), Some(hy)) = (x.as_obj(), y.as_obj())
+                && matches!(vm.heap.get(hx), Obj::Struct { .. } | Obj::Enum { .. })
+                && matches!(vm.heap.get(hy), Obj::Struct { .. } | Obj::Enum { .. })
+            {
+                return Ok(Some(vm.struct_compare(x, y, span)?));
+            }
+            Ok(vm.compare(x, y))
+        })
     }
 
     /// A `u64` hash of `v` for map/set keys, upholding the invariant `values_equal(a,b) ⇒
@@ -1706,8 +1839,9 @@ impl Vm {
     }
 
     /// Stable top-down merge sort over `idx` (positions into the rooted list `src_h`), comparing
-    /// elements via each struct's `compare`. Re-reads elements from `src_h` per comparison so no
-    /// unrooted `Value` is held across the GC-capable `struct_compare` call.
+    /// elements via `order_key` (a struct/enum's `compare`, or the lexicographic walk of a tuple/List/
+    /// Option — TICKET-146). Re-reads elements from `src_h` per comparison so no unrooted `Value` is
+    /// held across the GC-capable call.
     pub(super) fn msort_indices_structs(
         &mut self,
         src_h: GcRef,
@@ -1740,7 +1874,7 @@ impl Vm {
                 _ => unreachable!(),
             };
             // `<= Equal` keeps the left element first on ties → stable.
-            if self.struct_compare(a, b, span)?.is_le() {
+            if self.order_key(a, b, span)?.is_le() {
                 out.push(left[li]);
                 li += 1;
             } else {

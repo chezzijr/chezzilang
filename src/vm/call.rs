@@ -1464,10 +1464,11 @@ impl Vm {
                 Err(e) => {
                     // W7-8 adds `as_path` (the `PathLike` grant on str/bytes/bytearray) to the gate;
                     // M23 adds `eq` (the `Eq` grant on `str` — the one scalar that is heap-backed and
-                    // so lands in this container dispatcher rather than the inline-scalar path).
+                    // so lands in this container dispatcher rather than the inline-scalar path); TICKET-146 adds
+                    // `compare` (the `Comparable` grant on a tuple / `List`).
                     if !matches!(
                         method,
-                        "index" | "set_index" | "slice" | "hash" | "as_path" | "eq"
+                        "index" | "set_index" | "slice" | "hash" | "as_path" | "eq" | "compare"
                     ) {
                         return Err(e);
                     }
@@ -2537,6 +2538,13 @@ impl Vm {
         b: Value,
         span: Span,
     ) -> Result<std::cmp::Ordering, RuntimeError> {
+        // TICKET-146: a same-kind tuple / List / Option pair walks lexicographically under the TOTAL
+        // order. MUST precede the struct/enum gate — an `Option` is an `Obj::Enum` with no `compare`.
+        if self.seq_pair(a, b) {
+            return Ok(self
+                .seq_order(a, b, true, span)?
+                .unwrap_or(std::cmp::Ordering::Equal));
+        }
         if let (Some(ha), Some(hb)) = (a.as_obj(), b.as_obj())
             && matches!(self.heap.get(ha), Obj::Struct { .. } | Obj::Enum { .. })
             && matches!(self.heap.get(hb), Obj::Struct { .. } | Obj::Enum { .. })
@@ -2767,6 +2775,11 @@ impl Vm {
             // miss-only so a user method always wins. A `±0.0` pair therefore still answers via
             // `self.compare` (IEEE-Equal) exactly as before — only NaN comes through here.
             // `order_key`'s terminal `Err` is unreachable behind the `numeric_unwrapped` gate.
+            // TICKET-146: a tuple / List / Option receiver walks lexicographically (total order).
+            ("compare", 1) if self.seq_pair(recv, args[0]) => {
+                let other = args[0];
+                Ok(Some(Value::int(self.order_key(recv, other, span)? as i64)))
+            }
             ("compare", 1) => match self.compare(recv, args[0]) {
                 Some(ord) => Ok(Some(Value::int(ord as i64))),
                 None if self.numeric_unwrapped(recv) && self.numeric_unwrapped(args[0]) => {
@@ -3333,11 +3346,12 @@ impl Vm {
                         self.arity_err("sort", args, 0, span)?;
                         // In place, ascending. Checker guarantees a homogeneous orderable element type.
                         // A list of Comparable structs/enums orders via each one's `compare` (engine
-                        // re-entry, so a merge sort that holds `&mut self`); primitives use the faster
-                        // `value_order`. Str elements live on the heap, so `value_order` needs
-                        // `&self.heap` — clone the elements out, sort (no alloc/closure → no GC for the
-                        // primitive path), then write back.
-                        let user_compare = matches!(items.first().and_then(|v| v.as_obj()), Some(hh) if matches!(self.heap.get(hh), Obj::Struct { .. } | Obj::Enum { .. }));
+                        // re-entry, so a merge sort that holds `&mut self`); so does a list of tuples /
+                        // Lists / Options (TICKET-146; an `Option` is an `Obj::Enum`), whose elements may
+                        // hold a struct. Primitives use the faster `value_order`. Str elements live on
+                        // the heap, so `value_order` needs `&self.heap` — clone the elements out, sort
+                        // (no alloc/closure → no GC for the primitive path), then write back.
+                        let user_compare = matches!(items.first().and_then(|v| v.as_obj()), Some(hh) if matches!(self.heap.get(hh), Obj::Struct { .. } | Obj::Enum { .. } | Obj::Tuple(_) | Obj::List(_)));
                         if user_compare {
                             // A user compare (struct or enum) re-enters the VM (may GC) → rooted, index-based sort.
                             return self.list_sort_structs(h, span);

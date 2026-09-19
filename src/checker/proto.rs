@@ -301,6 +301,10 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, &str)] = &[
     ("Comparable", "compare", "float"),
     ("Comparable", "compare", "str"),
     ("Comparable", "compare", "newtype"),
+    // A tuple / List / Option is Comparable exactly when every element type is (TICKET-146).
+    ("Comparable", "compare", "tuple"),
+    ("Comparable", "compare", "list"),
+    ("Comparable", "compare", "option"),
     // Eq — D1: EVERY receiver kind whose `==` this table can key a row on except `nil` (not
     // spellable as a value). Most rows are the structural derive (`Vm::values_equal`): the four
     // scalars are all here because `==` is defined on `bool` too, unlike `Comparable`; a newtype's
@@ -2071,6 +2075,26 @@ impl Checker {
                 return Ok(Grant::no_intrinsic_method());
             }
         }
+        if protocol == "Comparable" {
+            // TICKET-146: a tuple / `List` / `Option` is Comparable when every element type is
+            // (lexicographic; `None < Some(_)`). Each element is asked through `satisfies` with a
+            // FRESH `seen` set: the shared one is keyed by embed name without the subject type, so
+            // reusing it would skip the element's own `Eq` embed.
+            let elems: Option<Vec<&Ty>> = match ty {
+                Ty::Tuple(es) => Some(es.iter().collect()),
+                Ty::List(e) | Ty::Option(e) => Some(vec![&**e]),
+                _ => None,
+            };
+            if let Some(elems) = elems {
+                if elems
+                    .iter()
+                    .any(|e| self.satisfies(e, "Comparable").is_err())
+                {
+                    return Err(format!("type {ty} does not satisfy Comparable"));
+                }
+                return self.grant_intrinsic(protocol, ty);
+            }
+        }
         if protocol == "Comparable" && matches!(ty, Ty::Int | Ty::Float | Ty::Str) {
             return self.grant_intrinsic(protocol, ty);
         }
@@ -2707,7 +2731,8 @@ impl Checker {
     }
 
     /// Are `l < r` etc. allowed? True for same-named comparable type params, or same-named structs
-    /// that satisfy `Comparable` (operator overloading dispatches to their `compare` at runtime).
+    /// that satisfy `Comparable` (operator overloading dispatches to their `compare` at runtime),
+    /// or a tuple / `List` / `Option` pair whose element types are all Comparable (TICKET-146).
     pub(super) fn ordering_allowed(&self, l: &Ty, r: &Ty) -> bool {
         self.cmp_overload_allowed(l, r, "Comparable", "compare")
     }
@@ -2740,6 +2765,15 @@ impl Checker {
                 (!self.newtype_is_generic(a)
                     && self.newtype_underlying(a).is_some_and(|u| u.is_numeric()))
                     || self.satisfies(l, protocol).is_ok()
+            }
+            // TICKET-146: a tuple / `List` / `Option` pair orders lexicographically when every
+            // element type is Comparable; `compatible` keeps `(int, int) < (int, str)` out.
+            (Ty::Tuple(_), Ty::Tuple(_))
+            | (Ty::List(_), Ty::List(_))
+            | (Ty::Option(_), Ty::Option(_))
+                if compatible(l, r) =>
+            {
+                self.satisfies(l, protocol).is_ok()
             }
             // No `(Ty::Protocol, Ty::Protocol)` arm — `Comparable.compare(self, o: Self)` (and
             // `Eq.eq(self, o: Self)`) is `Self`-parameterized, so two values of one protocol are

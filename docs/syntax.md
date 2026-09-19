@@ -2146,7 +2146,14 @@ print(max(Point(1, 2), Point(3, 0)).x)   # works: Point is Comparable
 The prebuilt **`Comparable`** protocol (`compare(self, other: Self) -> int`) is the protocol wired to
 the **ordering** operators. For any `Comparable` value — including a bare `T: Comparable` —
 `< <= > >=` dispatch to `compare` (a negative/zero/positive result means less/equal/greater).
-`int`, `float`, and `str` satisfy `Comparable` intrinsically. (It is not the only operator-wired
+`int`, `float`, and `str` satisfy `Comparable` intrinsically. So does a **tuple**, a **`List[T]`** and an
+**`Option[T]`** whenever every element type is `Comparable`: they order lexicographically (first unequal
+element decides, a shorter prefix sorts first, `None < Some(_)` — Rust's order), so
+`print((1, 2) < (1, 3))  # true`, `[(2, "b"), (1, "z")].sort()` gives `[(1, "z"), (2, "b")]`, and `min`/`max`,
+`sort_by_key` with a tuple key and `std.cmp` all work. A tuple holding a non-`Comparable` element is still
+rejected. A **struct gets no default ordering** (W7-41): write its own `compare`. `Map`, `Set` and `Result`
+stay unordered. Operators on a `NaN` element pair are all `false`; `sort`/`min`/`max` use the same total
+order as bare floats. (It is not the only operator-wired
 protocol: `Eq` owns `==`/`!=` below, and `Add`/`Sub`/`Mul`/`Div`/`Mod`/`Neg` own the arithmetic
 operators further down.)
 

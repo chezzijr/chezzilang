@@ -87,3 +87,29 @@ test fn std_collections_heap_orders_an_enum_like_its_struct_twin():
         want.push((hs.pop() ?? LvS(99)).n)
     assert got == [0, 1, 3]
     assert got == want
+
+# TICKET-146 / DEC-104 item 5: a tuple element orders by its `compare`, enum and struct alike.
+fn tranks(xs: List[(Lv, int)]) -> List[int]:
+    out: List[int] = []
+    for t in xs:
+        out.push(t.0.rank())
+    return out
+
+fn tsranks(xs: List[(LvS, int)]) -> List[int]:
+    out: List[int] = []
+    for t in xs:
+        out.push(t.0.n)
+    return out
+
+test fn tuple_element_orders_an_enum_like_its_struct_twin():
+    assert (Lv.Hi(2), 0) > (Lv.Hi(1), 9)
+    assert (Lv.Lo, 5) < (Lv.Hi(1), 0)
+    assert ((Lv.Hi(2), 0) > (Lv.Hi(1), 9)) == ((LvS(2), 0) > (LvS(1), 9))
+    e := [(Lv.Hi(3), 0), (Lv.Lo, 1), (Lv.Hi(1), 2)]
+    s := [(LvS(3), 0), (LvS(0), 1), (LvS(1), 2)]
+    e.sort()
+    s.sort()
+    assert tranks(e) == [0, 1, 3]
+    assert tranks(e) == tsranks(s)
+    assert (e.min() ?? (Lv.Hi(99), 0)).0.rank() == (s.min() ?? (LvS(99), 0)).0.n
+    assert cmp.max((Lv.Lo, 0), (Lv.Hi(1), 0)).0.rank() == cmp.max((LvS(0), 0), (LvS(1), 0)).0.n

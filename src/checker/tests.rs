@@ -3886,11 +3886,11 @@ v := pick(Wrap(1), Wrap(2))
 fn list_min_max_return_option_and_keep_their_bound() {
     // (a) the where-bound still fires through the new `Option` return
     rejects(
-        "xs := [[1], [2]]\nxs.min()\n",
+        "xs := [[true], [false]]\nxs.min()\n",
         "does not satisfy Comparable",
     );
     rejects(
-        "xs := [[1], [2]]\nxs.max()\n",
+        "xs := [[true], [false]]\nxs.max()\n",
         "does not satisfy Comparable",
     );
     // …and a Comparable element is still accepted
@@ -33337,4 +33337,33 @@ fn comparable_tuple_list_option_ok() {
     ok("print([1] < [2])\n");
     ok("print(Some(1) < Some(2))\n");
     ok("xs := [(2, \"b\"), (1, \"z\")]\nxs.sort()\n");
+    ok("a: int? = None\nprint(a < Some(0))\n");
+    ok("xs := [(1, \"a\")]\nxs.sort()\n");
+    ok("xs := [(1, 2)]\nprint(xs.min())\n");
+    ok("fn f[T: Comparable](a: T):\n    pass\nf((1, \"a\"))\n");
+    ok("fn g[T: Comparable](xs: List[T], ys: List[T]) -> bool:\n    return xs < ys\n");
+}
+
+/// TICKET-146: the grant is exactly "every element type is Comparable" — a non-orderable element
+/// (a plain struct, a bool) or an unordered container (`Result`, `Map`, `Set`) stays rejected.
+#[test]
+fn comparable_tuple_list_option_non_comparable_element_rejected() {
+    let plain = "struct Plain:\n    n: int\n";
+    rejects(
+        &format!("{plain}print((1, Plain(1)) < (1, Plain(2)))\n"),
+        "cannot compare",
+    );
+    rejects("print([true] < [false])\n", "cannot compare");
+    rejects("print(Some(true) < Some(false))\n", "cannot compare");
+    rejects("print(Ok(1) < Ok(2))\n", "cannot compare");
+    rejects("print({1: 2} < {1: 3})\n", "cannot compare");
+    rejects("print(Set([1]) < Set([2]))\n", "cannot compare");
+    rejects(
+        &format!("{plain}xs := [(1, Plain(1))]\nxs.sort()\n"),
+        "does not satisfy Comparable",
+    );
+    rejects(
+        "xs := [[true], [false]]\nxs.min()\n",
+        "does not satisfy Comparable",
+    );
 }
