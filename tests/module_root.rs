@@ -353,6 +353,36 @@ fn file_run_strips_double_dash_terminator() {
     );
 }
 
+// TICKET-143 (W14-20) — only a `--` in TERMINATOR position (right after the path) is consumed. A `--`
+// after a program arg is the program's own and is forwarded (Go `go run main.go a -- b` -> [a -- b],
+// Python and `cargo run -- a -- b` too), so `std.flag` never parses a flag the user put after it.
+#[test]
+fn file_run_forwards_a_mid_args_double_dash() {
+    let t = TmpDir::new();
+    let file = t.write("prog.chz", "import std.os\nprint(os.args())\n");
+    let (stdout, stderr, ok) = run(&t.0, &["run", file.to_str().unwrap(), "a", "--", "b"]);
+    assert!(ok, "run should succeed; stderr:\n{stderr}");
+    assert!(
+        stdout.contains("['a', '--', 'b']"),
+        "a `--` after a program arg must be forwarded; stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
+// TICKET-143 pin — in manifest mode the first `--` is the terminator and a second one is forwarded.
+// (Green on base too: once `forwarding` is set every later arg is forwarded.)
+#[test]
+fn bare_run_forwards_a_second_double_dash() {
+    let t = TmpDir::new();
+    t.write("chezzi.toml", "[project]\nentrypoint = \"src.main\"\n");
+    t.write("src/main.chz", "import std.os\nprint(os.args())\n");
+    let (stdout, stderr, ok) = run(&t.0, &["run", "--", "a", "--", "b"]);
+    assert!(ok, "run should succeed; stderr:\n{stderr}");
+    assert!(
+        stdout.contains("['a', '--', 'b']"),
+        "only the first `--` is the terminator; stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
 // W13-21 — a manifest entrypoint that returns `Err(...)` faults with NO file coordinate: the
 // synthetic entry-call site (the point that invokes `main` by name from the manifest, before any
 // user frame exists) renders `line 1, col 1` with no path, unlike a real in-body fault which names

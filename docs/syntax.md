@@ -3763,7 +3763,10 @@ root marker with no entrypoint.
 >
 > `--` is consumed, not forwarded, and the same terminator works in the **file** form too
 > (`chezzi run src/main.chz -- --dir logs`) — there it strips the `--` from what was already forwarded
-> after the path. (Fixed `docs/gaps.md` **W8-10**.)
+> after the path. (Fixed `docs/gaps.md` **W8-10**.) Only the FIRST `--`, in terminator position (right
+> after `run`/its flags or the path), is consumed; a later `--` is the program's own and reaches
+> `std.os.args()` (`chezzi run f.chz a -- b` → `['a', '--', 'b']`, as `go run main.go a -- b`,
+> `python f.py a -- b` and `cargo run -- a -- b` forward it; `docs/gaps.md` **W14-20**).
 
 ## 10. Strings & interpolation
 

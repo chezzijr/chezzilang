@@ -278,6 +278,8 @@ fn cmd_run(args: &[String]) -> ExitCode {
     // unchanged (even one shaped like a flag), and the `--` itself is consumed, not forwarded.
     // This applies whether or not a file path has already been set, so it covers manifest-mode
     // `chezzi run -- --dir logs` (no path ever set) as well as `chezzi run file.chz -- --dir logs`.
+    // Only a `--` in TERMINATOR position (no program arg yet) is consumed: a `--` after a program arg
+    // is the program's own and is forwarded, as Go/Python/`cargo run` do (`f.chz a -- b` → `a -- b`).
     let mut forwarding = false;
     for arg in args {
         if forwarding {
@@ -285,7 +287,7 @@ fn cmd_run(args: &[String]) -> ExitCode {
             continue;
         }
         match arg.as_str() {
-            "--" => forwarding = true,
+            "--" if prog_args.is_empty() => forwarding = true,
             _ if path.is_some() => prog_args.push(arg.clone()),
             "--errors=json" => json = true,
             "--parallel" => {} // accepted no-op alias — the engine is the default already
