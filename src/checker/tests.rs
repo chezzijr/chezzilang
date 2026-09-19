@@ -33248,3 +33248,37 @@ fn lambda_call_keeps_exact_arity() {
         "'closure' expects 1 argument(s), got 0",
     );
 }
+
+// TICKET-145 (W14): diagnostics that name the wrong thing.
+#[test]
+fn inline_if_else_body_in_fn_is_accepted() {
+    let src = "fn a(n: int) -> int: if n > 0: 1 else: 2\nfn main():\n    print(a(1))\n";
+    let tokens = lexer::tokenize(src).expect("lex should succeed");
+    let parsed = parser::parse(tokens);
+    assert!(
+        parsed.is_ok(),
+        "inline if/else fn body rejected: {:?}",
+        parsed.err()
+    );
+}
+
+#[test]
+fn double_question_type_error_does_not_leak_token_name() {
+    let src = "fn main():\n    y: int?? = Some(None)\n";
+    let tokens = lexer::tokenize(src).expect("lex should succeed");
+    let msg = format!("{:?}", parser::parse(tokens).err());
+    assert!(
+        !msg.contains("questionquestion"),
+        "token name leaked: {msg}"
+    );
+}
+
+#[test]
+fn question_op_in_unknown_return_fn_does_not_print_bare_question_mark_type() {
+    let src = "fn p(n: int) -> int?:\n    return Some(n)\nfn main():\n    f := fn(n: int): p(n)? + 1\n    print(f(1))\n";
+    let errs = check_src(src);
+    assert!(
+        !errs.iter().any(|e| e.message.contains("returns ?,")),
+        "unknown type printed as '?': {errs:?}"
+    );
+}
