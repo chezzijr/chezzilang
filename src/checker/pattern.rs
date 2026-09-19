@@ -4392,13 +4392,19 @@ impl Checker {
     }
 
     /// Whether `json.decode` can produce a value of this type. Mirrors `json_decode::from_type`'s
-    /// acceptance (kept in sync): scalars, `list`/`map[str,_]`/`Option` of decodables, and
+    /// acceptance (kept in sync): scalars, `list`/`tuple`/`map[str,_]`/`Option` of decodables, and
     /// non-generic, non-recursive structs of decodable fields. `visiting` rejects recursive structs.
     pub(super) fn is_decodable(&self, ty: &Ty, visiting: &mut Vec<String>) -> Result<(), String> {
         match ty {
             Ty::Int | Ty::Float | Ty::Str | Ty::Bool => Ok(()),
             Ty::Unknown => Ok(()), // an error was already reported; don't pile on
             Ty::List(t) | Ty::Option(t) => self.is_decodable(t, visiting),
+            Ty::Tuple(ts) => {
+                for t in ts {
+                    self.is_decodable(t, visiting)?;
+                }
+                Ok(())
+            }
             Ty::Map(k, v) => {
                 if !matches!(**k, Ty::Str) {
                     return Err(format!("decode: map keys must be str, found {k}"));

@@ -755,6 +755,27 @@ impl Vm {
                 }
                 Ok(Value::obj(self.heap.alloc(Obj::List(out))))
             }
+            D::Tuple(elems) => {
+                if variant != "Arr" {
+                    return Err(mismatch("array"));
+                }
+                let items = match self.heap.get(self.as_obj(payload[0])) {
+                    Obj::List(items) => items.clone(),
+                    _ => return Err(mismatch("array")),
+                };
+                if items.len() != elems.len() {
+                    return Err(format!(
+                        "decode: expected an array of {} elements at {path}, found {}",
+                        elems.len(),
+                        items.len()
+                    ));
+                }
+                let mut out = Vec::with_capacity(items.len());
+                for (i, (it, d)) in items.into_iter().zip(elems).enumerate() {
+                    out.push(self.coerce_json(it, d, &format!("{path}[{i}]"))?);
+                }
+                Ok(Value::obj(self.heap.alloc(Obj::Tuple(out))))
+            }
             D::Map(inner) => {
                 if variant != "Obj" {
                     return Err(mismatch("object"));

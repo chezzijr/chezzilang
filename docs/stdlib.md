@@ -1941,8 +1941,11 @@ numeral's start where CPython names its second digit.
 
 For a known shape, `json.decode[T](s) -> Result[T]` (a `std.json` member, the one type-argument
 method-call form — not a global builtin) deserializes straight into a struct / `Map[str, V]` /
-`List[T]` / scalar: `Option` fields accept null-or-absent, extra keys are ignored, and
-recursive/generic struct targets are rejected (use the `Json` enum for those).
+`List[T]` / tuple / scalar: `Option` fields accept null-or-absent, extra keys are ignored, and
+recursive/generic struct targets are rejected (use the `Json` enum for those). A **tuple** target takes
+a JSON array of exactly the tuple's arity — what `encode` emits, so `decode[(int, str)](encode((1, "x")))`
+round-trips (also as a struct field or a `List` element); a shorter or longer array is an `Err`
+(`decode: expected an array of 2 elements at $, found 1`), never padded or truncated (W14-34).
 
 A JSON *literal in Chezzi source* clashes with string interpolation, so use a raw string
 (`r"""{"k": 1}"""`, verbatim — preferred) or double the braces (`"{{ }}"`); a bare `{…}` in a normal

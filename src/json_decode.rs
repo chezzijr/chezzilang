@@ -21,6 +21,9 @@ pub enum TypeDescriptor {
     Map(Box<TypeDescriptor>),
     /// `T?` — `Option[T]`; JSON `null` (or an absent object field) becomes `None`.
     Option(Box<TypeDescriptor>),
+    /// `(A, B, …)` — a tuple; a JSON array of EXACTLY this arity (what `json.encode` emits for a
+    /// tuple). A shorter or longer array is an `Err`, never padded or truncated.
+    Tuple(Vec<TypeDescriptor>),
     /// A concrete (non-generic) struct. ROOT REDESIGN — carries BOTH the IDENTITY KEY (the
     /// `<module-key>::Name` the runtime tags the produced `Value::Struct`/`Obj::Struct` with and looks
     /// the layout up by) AND the bare DISPLAY name (for `decode: expected object for <name>` errors).
@@ -53,7 +56,7 @@ pub trait DecodeEnv {
 
 /// Build a descriptor for a `json.decode[T]` target type `ty` written in module `call_module`,
 /// resolving every struct reference (and the field types it transitively names) through `env`.
-/// Returns a human-readable error if the type is not decodable (functions, tuples, generic/recursive
+/// Returns a human-readable error if the type is not decodable (functions, generic/recursive
 /// structs, `Result`, unknown names). `visiting` tracks the (identity-key) struct-expansion stack to
 /// reject recursive targets — two modules' same-named structs are correctly distinct keys.
 pub fn from_type(
@@ -102,7 +105,11 @@ pub fn from_type(
             (other, _) => Err(format!("decode: cannot decode into generic type '{other}'")),
         },
         Type::Func { .. } => Err("decode: cannot decode into a function type".to_string()),
-        Type::Tuple(_) => Err("decode: cannot decode into a tuple type".to_string()),
+        Type::Tuple(ts) => ts
+            .iter()
+            .map(|t| from_type(t, call_module, env, visiting))
+            .collect::<Result<Vec<_>, _>>()
+            .map(TypeDescriptor::Tuple),
         // A module-qualified struct target (`json.decode[geo.Point]`): resolve `module.name` to its
         // identity key in the call-site module. Generic qualified targets are not decodable.
         Type::Qualified { module, name, args } => {

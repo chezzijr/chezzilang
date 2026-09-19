@@ -1,0 +1,45 @@
+# tests/chz/stdlib/json_tuple_decode_test.chz — TICKET-143 (W14-34 json part).
+# `json.encode((1, "x"))` emits `[1,"x"]`; `json.decode[(int, str)]` must take it back
+# (doc: `decode[T](encode(x))` gives back `x`). A JSON array of EXACTLY the tuple's arity decodes.
+# Its own file: on base the whole file is a type error (`cannot decode into (int, str)`).
+
+import std.json as json
+
+struct P:
+    name: str
+    pair: (int, str)
+
+test fn tuple_round_trips_through_encode():
+    match json.decode[(int, str)](json.encode((1, "x"))):
+        Ok(t): assert t == (1, "x"), str(t)
+        Err(e): assert false, e.message()
+
+test fn struct_tuple_field_round_trips():
+    p := P("n", (7, "y"))
+    match json.decode[P](json.encode(p)):
+        Ok(q):
+            assert q.name == "n"
+            assert q.pair == (7, "y"), str(q.pair)
+        Err(e): assert false, e.message()
+
+test fn tuple_wrong_length_errs():
+    for src in ["[1]", "[1, \"x\", 2]", "[]"]:
+        match json.decode[(int, str)](src):
+            Ok(t): assert false, src + " decoded as " + str(t)
+            Err(e): assert e.message().contains("expected an array of 2 elements"), e.message()
+
+test fn tuple_element_mismatch_errs():
+    match json.decode[(int, str)]("[\"a\", \"x\"]"):
+        Ok(t): assert false, "decoded " + str(t)
+        Err(e): assert e.message().contains("expected int at $[0]"), e.message()
+
+test fn tuple_non_array_errs():
+    match json.decode[(int, str)](r'{"a": 1}'):
+        Ok(t): assert false, "decoded " + str(t)
+        Err(e): assert e.message().contains("expected array at $"), e.message()
+
+test fn nested_tuple_in_list_round_trips():
+    xs := [(1, "a"), (2, "b")]
+    match json.decode[List[(int, str)]](json.encode(xs)):
+        Ok(ys): assert ys == xs, str(ys)
+        Err(e): assert false, e.message()
