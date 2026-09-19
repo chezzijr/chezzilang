@@ -3439,17 +3439,31 @@ impl Vm {
                         let elems = items.clone();
                         let any_float = seed_is_float || elems.iter().any(|v| v.is_float());
                         if any_float {
-                            let mut acc = 0.0_f64;
+                            // CPython 3.12+ `sum`: Neumaier-compensated, ints included. A non-finite
+                            // compensation is dropped so an overflowing `hi` stays `inf`, never `nan`.
+                            let (mut hi, mut lo) = (0.0_f64, 0.0_f64);
                             for &v in &elems {
-                                if v.is_float() {
-                                    acc += self.float_of(v);
+                                let x = if v.is_float() {
+                                    self.float_of(v)
                                 } else if let Some(n) = self.int_val(v) {
-                                    acc += n as f64;
+                                    n as f64
                                 } else {
                                     return Err(self.err(format!("sum() expects a numeric list, got an element of type {}", self.type_name(v)), span));
+                                };
+                                let t = hi + x;
+                                if hi.abs() >= x.abs() {
+                                    lo += (hi - t) + x;
+                                } else {
+                                    lo += (x - t) + hi;
                                 }
+                                hi = t;
                             }
-                            Ok(self.box_float(acc))
+                            let r = if lo != 0.0 && lo.is_finite() {
+                                hi + lo
+                            } else {
+                                hi
+                            };
+                            Ok(self.box_float(r))
                         } else {
                             let mut acc = 0_i64;
                             for &v in &elems {
