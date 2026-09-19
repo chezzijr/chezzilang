@@ -1067,6 +1067,11 @@ Returns use `struct Response { status: int, body: str, headers: Map[str, str] }`
 lowercased). A ≥400 status is **not** an error — the code rides in `Response.status`; only
 transport/DNS/TLS failures become `Err`. Blocking (offloaded under the OS-thread engine) and
 [uninterruptible while in flight](#blocking-calls-cannot-be-interrupted).
+A response header sent more than once is **joined with `, `** in `Response.headers` (Python `requests`;
+`Set-Cookie: a=1` + `Set-Cookie: b=2` → `a=1, b=2`). A header whose value holds a byte outside visible
+ASCII (`0x20..=0x7E` plus tab) — UTF-8 (`café`) included — is currently **absent** from
+`Response.headers`: the HTTP client (ureq 2.12.1) drops it and exposes no raw bytes (`docs/gaps.md`
+**W14-30b**; the fix is a ureq 3 migration).
 `Match`, `Response`, and `ProcResult` are **module-owned** struct types (of `std.regex`, `std.request`,
 and `std.process` respectively), **not** reserved program-global names. Field access on a returned value
 (`.text`/`.status`/`.code`, …) works with **no import**; naming or constructing the type (`m: Match` /

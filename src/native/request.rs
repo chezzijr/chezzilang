@@ -59,7 +59,8 @@ fn response_ret(status: i64, body: String, headers: Vec<(String, String)>) -> Na
 }
 
 /// Read status, headers (sorted + deduped for determinism and to honor the map unique-key
-/// invariant), and body out of a `ureq::Response`, then build a `Result[Response]`. Headers must be
+/// invariant; a header sent more than once is joined with `, `, as Python `requests` does, W14-30),
+/// and body out of a `ureq::Response`, then build a `Result[Response]`. Headers must be
 /// read before `into_string` consumes the response. A body-read failure (truncated/aborted stream)
 /// becomes `Err` rather than a misleading empty-body success.
 fn lower_response(resp: ureq::Response) -> NativeRet {
@@ -69,7 +70,14 @@ fn lower_response(resp: ureq::Response) -> NativeRet {
     names.dedup(); // a header name could be listed more than once; one entry per key.
     let headers: Vec<(String, String)> = names
         .iter()
-        .filter_map(|n| resp.header(n).map(|v| (n.clone(), v.to_string())))
+        .filter_map(|n| {
+            let vals = resp.all(n);
+            if vals.is_empty() {
+                None
+            } else {
+                Some((n.clone(), vals.join(", ")))
+            }
+        })
         .collect();
     match resp.into_string() {
         Ok(body) => NativeRet::Ok(Box::new(response_ret(status, body, headers))),
