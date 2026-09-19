@@ -612,6 +612,150 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
 
 impl fmt::Display for Ty {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.fmt_named(f, None)
+    }
+}
+
+/// A nested type rendered through [`Ty::fmt_named`] with the caller's name map.
+struct Named<'a>(&'a Ty, Option<&'a HashMap<String, String>>);
+
+impl fmt::Display for Named<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt_named(f, self.1)
+    }
+}
+
+/// Strip a trailing `#<digits>` from a module key: the `module_keys` duplicate-label tiebreak
+/// (`src/resolver/mod.rs`). `#` is unspellable in source, so it never reaches a message.
+fn strip_dup_label(module: &str) -> &str {
+    match module.rsplit_once('#') {
+        Some((head, tail)) if !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()) => head,
+        _ => module,
+    }
+}
+
+impl Ty {
+    /// Render each type for ONE diagnostic message. A nominal type renders bare (as `Display` does)
+    /// unless another DISTINCT nominal type in the same message shares its bare name, in which case
+    /// both render module-qualified (`a.Col`, `b.Col`; the full dotted module path when the last
+    /// segments also collide). A group that stays ambiguous after that (a `#<idx>` duplicate-label
+    /// key, whose stripped module is equal) renders bare rather than print two equal names.
+    /// Stateless: `Display for Ty` is unchanged, because checker code keys on its output.
+    pub(crate) fn render_distinct<const N: usize>(tys: [&Ty; N]) -> [String; N] {
+        let mut keys = std::collections::BTreeSet::new();
+        for t in tys {
+            t.collect_nominal_keys(&mut keys);
+        }
+        let mut groups: std::collections::BTreeMap<String, Vec<&str>> =
+            std::collections::BTreeMap::new();
+        for k in &keys {
+            groups
+                .entry(crate::compiler::bare_display(k))
+                .or_default()
+                .push(k);
+        }
+        let mut names: HashMap<String, String> = HashMap::new();
+        for (bare, group) in groups.iter().filter(|(_, g)| g.len() >= 2) {
+            // (key, module) for the keys that carry a module; the rest stay bare.
+            let split: Vec<(&str, &str)> = group
+                .iter()
+                .filter_map(|k| k.rsplit_once("::").map(|(m, _)| (*k, strip_dup_label(m))))
+                .collect();
+            let short = |m: &str| m.rsplit('.').next().unwrap_or(m).to_string();
+            let shorts: std::collections::BTreeSet<String> =
+                split.iter().map(|(_, m)| short(m)).collect();
+            let distinct_shorts = shorts.len() == split.len();
+            let mut rendered: Vec<(&str, String)> = group
+                .iter()
+                .filter(|k| !split.iter().any(|(sk, _)| sk == *k))
+                .map(|k| (*k, bare.clone()))
+                .collect();
+            for (k, m) in &split {
+                let q = if distinct_shorts {
+                    short(m)
+                } else {
+                    m.to_string()
+                };
+                rendered.push((k, format!("{q}.{bare}")));
+            }
+            let unique: std::collections::BTreeSet<&String> =
+                rendered.iter().map(|(_, r)| r).collect();
+            if unique.len() != rendered.len() {
+                continue; // still ambiguous: decline, both stay bare
+            }
+            for (k, r) in rendered {
+                names.insert(k.to_string(), r);
+            }
+        }
+        tys.map(|t| {
+            if names.is_empty() {
+                t.to_string()
+            } else {
+                Named(t, Some(&names)).to_string()
+            }
+        })
+    }
+
+    /// Every nominal (struct/enum/newtype/protocol) identity key inside `self`, at any depth.
+    fn collect_nominal_keys(&self, out: &mut std::collections::BTreeSet<String>) {
+        match self {
+            Ty::List(t)
+            | Ty::Set(t)
+            | Ty::Option(t)
+            | Ty::Channel(t)
+            | Ty::Shared(t)
+            | Ty::RwShared(t)
+            | Ty::Atomic(t) => t.collect_nominal_keys(out),
+            Ty::Map(a, b) | Ty::Result(a, b) => {
+                a.collect_nominal_keys(out);
+                b.collect_nominal_keys(out);
+            }
+            Ty::Tuple(ts) => ts.iter().for_each(|t| t.collect_nominal_keys(out)),
+            Ty::Func { params, ret, .. } | Ty::BuiltinFn { params, ret } => {
+                params.iter().for_each(|t| t.collect_nominal_keys(out));
+                ret.collect_nominal_keys(out);
+            }
+            Ty::Struct(n, args)
+            | Ty::Enum(n, args)
+            | Ty::NewType(n, args)
+            | Ty::Protocol(n, args) => {
+                out.insert(n.clone());
+                args.iter().for_each(|t| t.collect_nominal_keys(out));
+            }
+            _ => {}
+        }
+    }
+
+    /// `Name` or `Name[A, B]` for a nominal type: the caller's qualified name for identity key `n`
+    /// when `names` has one, else the bare display name.
+    fn fmt_nominal(
+        f: &mut fmt::Formatter<'_>,
+        n: &str,
+        args: &[Ty],
+        names: Option<&HashMap<String, String>>,
+    ) -> fmt::Result {
+        match names.and_then(|m| m.get(n)) {
+            Some(q) => write!(f, "{q}")?,
+            None => write!(f, "{}", crate::compiler::bare_display(n))?,
+        }
+        if !args.is_empty() {
+            write!(f, "[")?;
+            for (i, a) in args.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{}", Named(a, names))?;
+            }
+            write!(f, "]")?;
+        }
+        Ok(())
+    }
+
+    fn fmt_named(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        names: Option<&HashMap<String, String>>,
+    ) -> fmt::Result {
         match self {
             Ty::Int => write!(f, "int"),
             Ty::Float => write!(f, "float"),
@@ -620,21 +764,23 @@ impl fmt::Display for Ty {
             Ty::Bytes => write!(f, "bytes"),
             Ty::ByteArray => write!(f, "bytearray"),
             Ty::Nil => write!(f, "nil"),
-            Ty::List(t) => write!(f, "List[{t}]"),
-            Ty::Map(k, v) => write!(f, "Map[{k}, {v}]"),
-            Ty::Set(t) => write!(f, "Set[{t}]"),
+            Ty::List(t) => write!(f, "List[{}]", Named(t, names)),
+            Ty::Map(k, v) => write!(f, "Map[{}, {}]", Named(k, names), Named(v, names)),
+            Ty::Set(t) => write!(f, "Set[{}]", Named(t, names)),
             // `Result[T]` when the error is the default `Error` or still unconstrained (`?`);
             // `Result[T, E]` for an explicit error type.
             Ty::Result(t, e) => match e.as_ref() {
-                Ty::Protocol(p, pa) if p == "Error" && pa.is_empty() => write!(f, "Result[{t}]"),
-                Ty::Unknown => write!(f, "Result[{t}]"),
-                _ => write!(f, "Result[{t}, {e}]"),
+                Ty::Protocol(p, pa) if p == "Error" && pa.is_empty() => {
+                    write!(f, "Result[{}]", Named(t, names))
+                }
+                Ty::Unknown => write!(f, "Result[{}]", Named(t, names)),
+                _ => write!(f, "Result[{}, {}]", Named(t, names), Named(e, names)),
             },
-            Ty::Option(t) => write!(f, "Option[{t}]"),
-            Ty::Channel(t) => write!(f, "Channel[{t}]"),
-            Ty::Shared(t) => write!(f, "Shared[{t}]"),
-            Ty::RwShared(t) => write!(f, "RwShared[{t}]"),
-            Ty::Atomic(t) => write!(f, "Atomic[{t}]"),
+            Ty::Option(t) => write!(f, "Option[{}]", Named(t, names)),
+            Ty::Channel(t) => write!(f, "Channel[{}]", Named(t, names)),
+            Ty::Shared(t) => write!(f, "Shared[{}]", Named(t, names)),
+            Ty::RwShared(t) => write!(f, "RwShared[{}]", Named(t, names)),
+            Ty::Atomic(t) => write!(f, "Atomic[{}]", Named(t, names)),
             Ty::AtomicInt => write!(f, "AtomicInt"),
             Ty::Executor => write!(f, "Executor"),
             Ty::Socket => write!(f, "Socket"),
@@ -642,54 +788,14 @@ impl fmt::Display for Ty {
             Ty::Writer => write!(f, "Writer"),
             Ty::Reader => write!(f, "Reader"),
             Ty::Ptr => write!(f, "ptr"),
-            Ty::Protocol(n, args) => {
-                // `n` is the qualified IDENTITY key (`<module-key>::Name`, TICKET-027); user-facing
-                // diagnostics must render the BARE display name, matching the struct/enum treatment.
-                write!(f, "{}", crate::compiler::bare_display(n))?;
-                if !args.is_empty() {
-                    write!(f, "[")?;
-                    for (i, a) in args.iter().enumerate() {
-                        if i > 0 {
-                            write!(f, ", ")?;
-                        }
-                        write!(f, "{a}")?;
-                    }
-                    write!(f, "]")?;
-                }
-                Ok(())
-            }
-            Ty::Struct(n, args) | Ty::Enum(n, args) => {
-                // `n` is the qualified IDENTITY key (`<module-key>::Name`); user-facing
-                // diagnostics must render the BARE display name, matching runtime display.
-                write!(f, "{}", crate::compiler::bare_display(n))?;
-                if !args.is_empty() {
-                    write!(f, "[")?;
-                    for (i, a) in args.iter().enumerate() {
-                        if i > 0 {
-                            write!(f, ", ")?;
-                        }
-                        write!(f, "{a}")?;
-                    }
-                    write!(f, "]")?;
-                }
-                Ok(())
-            }
-            // A newtype renders its BARE display name (`UserId`), like struct/enum, matching runtime,
-            // plus its type args when generic (`Stack[int]`).
-            Ty::NewType(n, args) => {
-                write!(f, "{}", crate::compiler::bare_display(n))?;
-                if !args.is_empty() {
-                    write!(f, "[")?;
-                    for (i, a) in args.iter().enumerate() {
-                        if i > 0 {
-                            write!(f, ", ")?;
-                        }
-                        write!(f, "{a}")?;
-                    }
-                    write!(f, "]")?;
-                }
-                Ok(())
-            }
+            // `n` is the qualified IDENTITY key (`<module-key>::Name`, TICKET-027); user-facing
+            // diagnostics render the BARE display name (matching runtime display) unless `names`
+            // qualifies it because a different type with the same bare name is in the same message.
+            // A newtype renders like struct/enum, plus its type args when generic (`Stack[int]`).
+            Ty::Protocol(n, args)
+            | Ty::Struct(n, args)
+            | Ty::Enum(n, args)
+            | Ty::NewType(n, args) => Self::fmt_nominal(f, n, args, names),
             Ty::Param(n) => write!(f, "{n}"),
             Ty::Module(n) => write!(f, "module {n}"),
             Ty::Func {
@@ -703,12 +809,12 @@ impl fmt::Display for Ty {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    write!(f, "{p}")?;
+                    write!(f, "{}", Named(p, names))?;
                     if i >= min {
                         write!(f, " = …")?;
                     }
                 }
-                write!(f, ") -> {ret}")
+                write!(f, ") -> {}", Named(ret, names))
             }
             Ty::BuiltinFn { params, ret } => {
                 write!(f, "fn(")?;
@@ -716,9 +822,9 @@ impl fmt::Display for Ty {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    write!(f, "{p}")?;
+                    write!(f, "{}", Named(p, names))?;
                 }
-                write!(f, ") -> {ret}")
+                write!(f, ") -> {}", Named(ret, names))
             }
             Ty::Tuple(elems) => {
                 write!(f, "(")?;
@@ -726,7 +832,7 @@ impl fmt::Display for Ty {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    write!(f, "{t}")?;
+                    write!(f, "{}", Named(t, names))?;
                 }
                 write!(f, ")")
             }
@@ -809,5 +915,65 @@ mod tests {
         );
         // A bare (unqualified) key is unchanged.
         assert_eq!(Ty::strukt("Point").to_string(), "Point");
+    }
+
+    fn nominal(key: &str) -> Ty {
+        Ty::Enum(key.into(), vec![])
+    }
+
+    #[test]
+    fn render_distinct_qualifies_two_different_types_with_one_bare_name() {
+        let [a, b] = Ty::render_distinct([&nominal("pkg.a::Col"), &nominal("pkg.b::Col")]);
+        assert_eq!((a.as_str(), b.as_str()), ("a.Col", "b.Col"));
+        // Nested at depth, through different wrappers.
+        let [a, b] = Ty::render_distinct([
+            &Ty::list(nominal("pkg.a::Col")),
+            &Ty::option(nominal("pkg.b::Col")),
+        ]);
+        assert_eq!((a.as_str(), b.as_str()), ("List[a.Col]", "Option[b.Col]"));
+    }
+
+    #[test]
+    fn render_distinct_keeps_the_same_type_on_both_sides_bare() {
+        // One key twice is NOT a collision: `cannot compare P and P` must stay.
+        let [a, b] = Ty::render_distinct([&nominal("pkg.a::Col"), &nominal("pkg.a::Col")]);
+        assert_eq!((a.as_str(), b.as_str()), ("Col", "Col"));
+    }
+
+    #[test]
+    fn render_distinct_leaves_names_outside_the_collision_bare() {
+        let [a, b, c] = Ty::render_distinct([
+            &nominal("pkg.a::Col"),
+            &nominal("pkg.b::Col"),
+            &nominal("pkg.a::Other"),
+        ]);
+        assert_eq!(
+            (a.as_str(), b.as_str(), c.as_str()),
+            ("a.Col", "b.Col", "Other")
+        );
+    }
+
+    #[test]
+    fn render_distinct_uses_the_full_path_when_last_segments_collide() {
+        let [a, b] = Ty::render_distinct([&nominal("x.m::Col"), &nominal("y.m::Col")]);
+        assert_eq!((a.as_str(), b.as_str()), ("x.m.Col", "y.m.Col"));
+    }
+
+    #[test]
+    fn render_distinct_never_prints_a_duplicate_label_and_declines_when_ambiguous() {
+        // `m#1` is the resolver's duplicate-label key; stripped it equals `m`, so two equal
+        // qualified names would print: decline, both stay bare.
+        let [a, b] = Ty::render_distinct([&nominal("m::Col"), &nominal("m#1::Col")]);
+        assert_eq!((a.as_str(), b.as_str()), ("Col", "Col"));
+        // A label on one side does not block qualification when the modules differ.
+        let [a, b] = Ty::render_distinct([&nominal("pkg.a#1::Col"), &nominal("pkg.b::Col")]);
+        assert_eq!((a.as_str(), b.as_str()), ("a.Col", "b.Col"));
+    }
+
+    #[test]
+    fn render_distinct_display_stays_bare() {
+        // `Display` never sees the map: checker code keys on its output (DEC-059).
+        assert_eq!(nominal("pkg.a::Col").to_string(), "Col");
+        assert_eq!(nominal("pkg.b::Col").to_string(), "Col");
     }
 }

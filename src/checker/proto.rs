@@ -3839,10 +3839,11 @@ impl Checker {
                 let t = t.clone();
                 if !t.is_unknown() && !inferred.is_unknown() && !self.assignable(&t, &inferred) {
                     let note = self.protocol_note(&t, &inferred);
+                    let [t_s, inferred_s] = Ty::render_distinct([&t, &inferred]);
                     self.error(
                         span,
                         format!(
-                            "{name}[{t}]() expected element type {t}, found {inferred}{note}{}",
+                            "{name}[{t_s}]() expected element type {t_s}, found {inferred_s}{note}{}",
                             float_fix_note(&t, &inferred)
                         ),
                     );
@@ -5360,9 +5361,10 @@ impl Checker {
         // is seeded — and a wrong static type escapes onto the value (a soundness hole).
         let want_recv = subst(receiver, &mmap);
         if !self.assignable(&want_recv, recv_ty) {
+            let [recv_s, want_s] = Ty::render_distinct([recv_ty, &want_recv]);
             self.error(
                 span,
-                format!("receiver of '{method}' has type {recv_ty}, expected {want_recv}"),
+                format!("receiver of '{method}' has type {recv_s}, expected {want_s}"),
             );
         }
         // Bug D closure-return recovery (shared with the free-fn path via `recover_return_only_params`):
@@ -5609,9 +5611,10 @@ impl Checker {
                 && ty_fully_concrete(want_ret)
                 && !self.assignable(want_ret, got_ret)
             {
+                let [got_s, want_s] = Ty::render_distinct([got_ret, want_ret]);
                 self.error(
                     arg.span,
-                    format!("closure argument to '{name}' returns {got_ret}, expected {want_ret}"),
+                    format!("closure argument to '{name}' returns {got_s}, expected {want_s}"),
                 );
             }
             // LOOP-BACK (INTERLEAVED per-arg): a closure re-inferred WITH its expected param types has a

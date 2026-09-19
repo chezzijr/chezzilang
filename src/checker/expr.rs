@@ -871,10 +871,11 @@ impl Checker {
                     .map(|s| format!("parameter '{s}'"))
                     .unwrap_or_else(|| format!("argument {}", i + 1));
                 let note = self.protocol_note(pt, &at);
+                let [pt_s, at_s] = Ty::render_distinct([pt, &at]);
                 self.error(
                     e.span,
                     format!(
-                        "{pname} of a function-value call: expected {pt}, found {at}{note}{}",
+                        "{pname} of a function-value call: expected {pt_s}, found {at_s}{note}{}",
                         float_fix_note(pt, &at)
                     ),
                 );
@@ -1490,10 +1491,11 @@ impl Checker {
             && !matches!(under, Ty::Unknown)
             && !compatible(&target, &under)
         {
+            let [aty_s, under_s, target_s] = Ty::render_distinct([aty, &under, &target]);
             self.error(
                 span,
                 format!(
-                    "{cast}() cannot unwrap newtype {aty} (its underlying type is {under}, not {target})"
+                    "{cast}() cannot unwrap newtype {aty_s} (its underlying type is {under_s}, not {target_s})"
                 ),
             );
         }
@@ -1748,10 +1750,11 @@ impl Checker {
                                     && !self.assignable(&t, &elem)
                                 {
                                     let note = self.protocol_note(&t, &elem);
+                                    let [t_s, elem_s] = Ty::render_distinct([&t, &elem]);
                                     self.error(
                                         args[0].span,
                                         format!(
-                                            "List[{t}]() expected elements of type {t}, found {elem}{note}"
+                                            "List[{t_s}]() expected elements of type {t_s}, found {elem_s}{note}"
                                         ),
                                     );
                                 }
@@ -1809,10 +1812,11 @@ impl Checker {
                                     && !self.assignable(&t, &elem)
                                 {
                                     let note = self.protocol_note(&t, &elem);
+                                    let [t_s, elem_s] = Ty::render_distinct([&t, &elem]);
                                     self.error(
                                         args[0].span,
                                         format!(
-                                            "Set[{t}]() expected elements of type {t}, found {elem}{note}"
+                                            "Set[{t_s}]() expected elements of type {t_s}, found {elem_s}{note}"
                                         ),
                                     );
                                 }
@@ -1885,19 +1889,21 @@ impl Checker {
                         if let Some((tk, tv)) = &targ_kv {
                             if !tk.is_unknown() && !k.is_unknown() && !self.assignable(tk, &k) {
                                 let note = self.protocol_note(tk, &k);
+                                let [tk_s, tv_s, k_s] = Ty::render_distinct([tk, tv, &k]);
                                 self.error(
                                     args[0].span,
                                     format!(
-                                        "Map[{tk}, {tv}]() expected keys of type {tk}, found {k}{note}"
+                                        "Map[{tk_s}, {tv_s}]() expected keys of type {tk_s}, found {k_s}{note}"
                                     ),
                                 );
                             }
                             if !tv.is_unknown() && !v.is_unknown() && !self.assignable(tv, &v) {
                                 let note = self.protocol_note(tv, &v);
+                                let [tk_s, tv_s, v_s] = Ty::render_distinct([tk, tv, &v]);
                                 self.error(
                                     args[0].span,
                                     format!(
-                                        "Map[{tk}, {tv}]() expected values of type {tv}, found {v}{note}"
+                                        "Map[{tk_s}, {tv_s}]() expected values of type {tv_s}, found {v_s}{note}"
                                     ),
                                 );
                             }
@@ -4139,10 +4145,11 @@ impl Checker {
             fallback.clone()
         };
         if !self.assignable(expected, fallback) {
+            let [fallback_s, expected_s] = Ty::render_distinct([fallback, expected]);
             self.error(
                 arg.span,
                 format!(
-                    "argument to '{name}' has type {fallback}, expected {expected}{}",
+                    "argument to '{name}' has type {fallback_s}, expected {expected_s}{}",
                     float_fix_note_join(fallback, expected)
                 ),
             );
@@ -4410,7 +4417,7 @@ impl Checker {
             if let Some(pt) = params.get(i)
                 && !self.assignable(pt, &at)
             {
-                let (expected, actual) = (pt.to_string(), at.to_string());
+                let [expected, actual] = Ty::render_distinct([pt, &at]);
                 // Annotation hint for a collection mutator whose element slot was PINNED by an
                 // earlier push/add/insert (refine-on-first-use). An un-annotated `xs := []` reads as
                 // `list[<first element>]`; a later element of a different (e.g. protocol-sibling) type

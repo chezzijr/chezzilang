@@ -22424,6 +22424,68 @@ fn check_files(files: &[(&str, &str)]) -> Vec<CheckError> {
 }
 
 #[test]
+fn same_named_types_from_two_modules_are_qualified_in_one_message() {
+    // TICKET-149 (3): two DIFFERENT `Col`s in one message print module-qualified, as Go does
+    // (`cannot use b.Red (constant of type b.Col) as a.Col value`).
+    let errs = check_files(&[
+        ("pkg/a.chz", "enum Col:\n    Red\n    Blue\n"),
+        ("pkg/b.chz", "enum Col:\n    Red\n    Green\n"),
+        (
+            "main.chz",
+            "import Col from pkg.a\nimport Col as BCol from pkg.b\nfn f(c: Col) -> int: 1\nprint(f(BCol.Red))\nc: Col = BCol.Red\nfn g() -> Col:\n    return BCol.Red\nxs: List[Col] = [BCol.Red]\nprint(Col.Red == BCol.Red)\n",
+        ),
+    ]);
+    for want in [
+        "argument 1 of 'f': expected a.Col, found b.Col",
+        "cannot assign b.Col to variable of type a.Col",
+        "expected return type a.Col, found b.Col",
+        "list element: expected a.Col, found b.Col",
+        "cannot compare a.Col and b.Col for equality",
+    ] {
+        assert!(
+            errs.iter().any(|e| e.message.contains(want)),
+            "expected a message containing {want:?}, got: {errs:?}"
+        );
+    }
+}
+
+#[test]
+fn a_message_without_a_name_collision_stays_bare() {
+    // Only ONE `Col` is in the message, so nothing is qualified.
+    let errs = check_files(&[
+        ("pkg/a.chz", "enum Col:\n    Red\n    Blue\n"),
+        ("pkg/b.chz", "enum Col:\n    Red\n    Green\n"),
+        (
+            "main.chz",
+            "import Col from pkg.a\nimport Col as BCol from pkg.b\nfn f(c: Col) -> int: 1\nprint(f(1))\n",
+        ),
+    ]);
+    assert!(
+        errs.iter()
+            .any(|e| e.message == "argument 1 of 'f': expected Col, found int"),
+        "got: {errs:?}"
+    );
+}
+
+#[test]
+fn same_named_types_whose_module_names_collide_use_the_full_path() {
+    // `x.m` and `y.m` share the last segment `m`, so `m.Col` twice would still be ambiguous.
+    let errs = check_files(&[
+        ("x/m.chz", "enum Col:\n    Red\n"),
+        ("y/m.chz", "enum Col:\n    Red\n"),
+        (
+            "main.chz",
+            "import Col from x.m\nimport Col as YCol from y.m\nfn f(c: Col) -> int: 1\nprint(f(YCol.Red))\n",
+        ),
+    ]);
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("expected x.m.Col, found y.m.Col")),
+        "got: {errs:?}"
+    );
+}
+
+#[test]
 fn extern_fn_reachable_as_module_member() {
     // TICKET-061 W10-14: an extern fn is a module-global callable (docs/syntax.md) and functions
     // export by default, but `capture_sig` has no `StmtKind::Extern` arm, so it never lands in

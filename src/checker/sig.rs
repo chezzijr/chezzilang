@@ -519,10 +519,11 @@ impl Checker {
             Err(conflict) => {
                 let (x, y) = *conflict;
                 if !body_had_err {
+                    let [x_s, y_s] = Ty::render_distinct([&x, &y]);
                     self.error(
                         decl.name_span,
                         format!(
-                            "cannot infer return type: conflicting branches ({x} vs {y}); add a -> annotation"
+                            "cannot infer return type: conflicting branches ({x_s} vs {y_s}); add a -> annotation"
                         ),
                     );
                 }
@@ -2105,10 +2106,11 @@ impl Checker {
                     Some(expected) => {
                         if !self.assignable(&expected, &val_ty) {
                             let note = self.protocol_note(&expected, &val_ty);
+                            let [val_s, expected_s] = Ty::render_distinct([&val_ty, &expected]);
                             self.error(
                                 value.span,
                                 format!(
-                                    "cannot assign {val_ty} to variable of type {expected}{}{note}{}",
+                                    "cannot assign {val_s} to variable of type {expected_s}{}{note}{}",
                                     crate::checker::ty::fn_arity_note(&expected, &val_ty),
                                     float_fix_note(&expected, &val_ty)
                                 ),
@@ -2508,10 +2510,11 @@ impl Checker {
                         if !matches!(expected, Ty::Unknown) && !self.assignable(&expected, &actual)
                         {
                             let note = self.protocol_note(&expected, &actual);
+                            let [expected_s, actual_s] = Ty::render_distinct([&expected, &actual]);
                             self.error(
                                 def.span,
                                 format!(
-                                    "default value for field '{}': expected {expected}, found {actual}{note}{}",
+                                    "default value for field '{}': expected {expected_s}, found {actual_s}{note}{}",
                                     field.name,
                                     float_fix_note(&expected, &actual)
                                 ),
@@ -3276,10 +3279,11 @@ impl Checker {
             return;
         }
         if operand != self_ty {
+            let [self_s, operand_s] = Ty::render_distinct([self_ty, operand]);
             self.error(
                 span,
                 format!(
-                    "'eq' on {self_ty} is {hint}: its operand must be {self_ty}, found {operand} — rename the method if it is not equality"
+                    "'eq' on {self_s} is {hint}: its operand must be {self_s}, found {operand_s} — rename the method if it is not equality"
                 ),
             );
             return;
@@ -3425,6 +3429,7 @@ impl Checker {
                 && crate::checker::merge_unknown(&prev, declared) != *declared)
                 || fn_min_arity_grew(&prev, declared))
         {
+            let [prev_s, declared_s] = Ty::render_distinct([&prev, declared]);
             let msg = if prev == *declared {
                 // Only the arity disjunct can have fired here.
                 format!(
@@ -3434,11 +3439,11 @@ impl Checker {
                 )
             } else if from_fn {
                 format!(
-                    "cannot re-declare module-level binding '{name}': a top-level `fn` and a module global are ONE storage slot, and the fn is defined into it before any statement runs, so code above this line that already reads '{name}' is typed against {prev} while the slot now holds {declared} (rename one of them; declaration order does not separate them)"
+                    "cannot re-declare module-level binding '{name}': a top-level `fn` and a module global are ONE storage slot, and the fn is defined into it before any statement runs, so code above this line that already reads '{name}' is typed against {prev_s} while the slot now holds {declared_s} (rename one of them; declaration order does not separate them)"
                 )
             } else {
                 format!(
-                    "cannot re-declare module-level binding '{name}' with a different type ({prev} -> {declared}) — a module global is ONE storage slot whose type is frozen at its first declaration, so any code that reads or writes '{name}' is typed against {prev} while the slot now holds {declared} (rename it, or keep its type; a fn-local ':=' is a fresh binding and may change type)"
+                    "cannot re-declare module-level binding '{name}' with a different type ({prev_s} -> {declared_s}) — a module global is ONE storage slot whose type is frozen at its first declaration, so any code that reads or writes '{name}' is typed against {prev_s} while the slot now holds {declared_s} (rename it, or keep its type; a fn-local ':=' is a fresh binding and may change type)"
                 )
             };
             self.error(span, msg);
@@ -3638,10 +3643,11 @@ impl Checker {
                     if let Some(pin) = self.carrier_pin(name)
                         && !self.assignable(&pin, &val_ty)
                     {
+                        let [val_s, pin_s] = Ty::render_distinct([&val_ty, &pin]);
                         self.error(
                             target.span,
                             format!(
-                                "cannot assign {val_ty} to '{name}' -- its payload was pinned to {pin} by an earlier use"
+                                "cannot assign {val_s} to '{name}' -- its payload was pinned to {pin_s} by an earlier use"
                             ),
                         );
                     } else {
@@ -3675,7 +3681,8 @@ impl Checker {
                     Ty::Map(k, v) => {
                         let idx_ty = self.infer(index);
                         if !compatible(&k, &idx_ty) && !self.assignable(&k, &idx_ty) {
-                            self.error(index.span, format!("map key must be {k}, found {idx_ty}"));
+                            let [k_s, idx_s] = Ty::render_distinct([&k, &idx_ty]);
+                            self.error(index.span, format!("map key must be {k_s}, found {idx_s}"));
                         }
                         // Direct insertion-site Hashable / float-key ban: reject a non-Hashable key
                         // expr even when the map's key type is still `Unknown` (an empty `{}`), so
@@ -3713,9 +3720,10 @@ impl Checker {
                         if let Some((k, v)) = self.param_indexset_kv(&name, target.span) {
                             let idx_ty = self.infer(index);
                             if !idx_ty.is_unknown() && !self.assignable(&k, &idx_ty) {
+                                let [k_s, idx_s] = Ty::render_distinct([&k, &idx_ty]);
                                 self.error(
                                     index.span,
-                                    format!("index must be {k}, found {idx_ty}"),
+                                    format!("index must be {k_s}, found {idx_s}"),
                                 );
                             }
                             self.check_assign_value(&v, op, &val_ty, target.span);
@@ -3742,9 +3750,10 @@ impl Checker {
                             let (k, v) = read.clone().unwrap_or((set_k.clone(), set_v.clone()));
                             let idx_ty = self.infer(index);
                             if !idx_ty.is_unknown() && !self.assignable(&k, &idx_ty) {
+                                let [k_s, idx_s] = Ty::render_distinct([&k, &idx_ty]);
                                 self.error(
                                     index.span,
-                                    format!("index must be {k}, found {idx_ty}"),
+                                    format!("index must be {k_s}, found {idx_s}"),
                                 );
                             }
                             // A compound reads through `index` and writes the result back through
@@ -3880,10 +3889,11 @@ impl Checker {
             AssignOp::Eq => {
                 if !self.assignable(target_ty, val_ty) {
                     let note = self.protocol_note(target_ty, val_ty);
+                    let [val_s, target_s] = Ty::render_distinct([val_ty, target_ty]);
                     self.error(
                         span,
                         format!(
-                            "cannot assign {val_ty} to {target_ty}{}{note}{}",
+                            "cannot assign {val_s} to {target_s}{}{note}{}",
                             crate::checker::ty::fn_arity_note(target_ty, val_ty),
                             float_fix_note(target_ty, val_ty)
                         ),
@@ -3940,10 +3950,11 @@ impl Checker {
                         AssignOp::SlashEq => "/=",
                         _ => "%=",
                     };
+                    let [target_s, val_s] = Ty::render_distinct([target_ty, val_ty]);
                     self.error(
                         span,
                         format!(
-                            "cannot apply {sym} to {target_ty} and {val_ty}{}",
+                            "cannot apply {sym} to {target_s} and {val_s}{}",
                             float_fix_note_join(target_ty, val_ty)
                         ),
                     );
@@ -3969,9 +3980,10 @@ impl Checker {
                         AssignOp::ShlEq => "<<=",
                         _ => ">>=",
                     };
+                    let [target_s, val_s] = Ty::render_distinct([target_ty, val_ty]);
                     self.error(
                         span,
-                        format!("bitwise operator {sym} requires int operands or two sets, found {target_ty} and {val_ty}"),
+                        format!("bitwise operator {sym} requires int operands or two sets, found {target_s} and {val_s}"),
                     );
                 }
             }
@@ -4045,10 +4057,11 @@ impl Checker {
                     if mode.is_some() {
                     } else if !self.assignable(&ret, &ty) {
                         let note = self.protocol_note(&ret, &ty);
+                        let [ret_s, ty_s] = Ty::render_distinct([&ret, &ty]);
                         self.error(
                             e.span,
                             format!(
-                                "expected return type {ret}, found {ty}{note}{}",
+                                "expected return type {ret_s}, found {ty_s}{note}{}",
                                 float_fix_note(&ret, &ty)
                             ),
                         );
@@ -4249,10 +4262,11 @@ impl Checker {
             && !self.assignable(&elem, &ty)
         {
             let note = self.protocol_note(&elem, &ty);
+            let [elem_s, ty_s] = Ty::render_distinct([&elem, &ty]);
             self.error(
                 e.span,
                 format!(
-                    "expected yield type {elem}, found {ty}{note}{}",
+                    "expected yield type {elem_s}, found {ty_s}{note}{}",
                     float_fix_note(&elem, &ty)
                 ),
             );
@@ -4513,10 +4527,11 @@ impl Checker {
                 self.in_fn_body = saved_in_fn;
                 if !matches!(ty, Ty::Unknown) && !self.assignable(&ty, &actual) {
                     let note = self.protocol_note(&ty, &actual);
+                    let [ty_s, actual_s] = Ty::render_distinct([&ty, &actual]);
                     self.error(
                         def.span,
                         format!(
-                            "default value for parameter '{}': expected {ty}, found {actual}{note}{}",
+                            "default value for parameter '{}': expected {ty_s}, found {actual_s}{note}{}",
                             param.name,
                             float_fix_note(&ty, &actual)
                         ),
@@ -4566,10 +4581,11 @@ impl Checker {
                 self.record_ret_coerce(e.span, mode);
                 if mode.is_none() && !self.assignable(&ret, &ty) {
                     let note = self.protocol_note(&ret, &ty);
+                    let [ret_s, ty_s] = Ty::render_distinct([&ret, &ty]);
                     self.error(
                         e.span,
                         format!(
-                            "expected return type {ret}, found {ty}{note}{}",
+                            "expected return type {ret_s}, found {ty_s}{note}{}",
                             float_fix_note(&ret, &ty)
                         ),
                     );

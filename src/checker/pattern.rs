@@ -2671,10 +2671,11 @@ impl Checker {
         {
             for (t, item) in tys.iter().zip(items) {
                 if !t.is_unknown() && !self.assignable(e, t) {
+                    let [e_s, t_s] = Ty::render_distinct([e, t]);
                     self.error(
                         item.span,
                         format!(
-                            "list element: expected {e}, found {t}{}",
+                            "list element: expected {e_s}, found {t_s}{}",
                             float_fix_note(e, t)
                         ),
                     );
@@ -2689,10 +2690,11 @@ impl Checker {
             if elem.is_unknown() {
                 elem = t.clone();
             } else if !t.is_unknown() && !compatible(&elem, t) {
+                let [elem_s, t_s] = Ty::render_distinct([&elem, t]);
                 self.error(
                     item.span,
                     format!(
-                        "list elements differ: {elem} vs {t}{}",
+                        "list elements differ: {elem_s} vs {t_s}{}",
                         float_fix_note_join(&elem, t)
                     ),
                 );
@@ -2731,14 +2733,16 @@ impl Checker {
                 // is accepted) instead of accumulating and comparing elements to each other.
                 Some(x) => {
                     if !et.is_unknown() && !self.assignable(x, &et) {
-                        self.error(e.span, format!("set element: expected {x}, found {et}"));
+                        let [x_s, et_s] = Ty::render_distinct([x, &et]);
+                        self.error(e.span, format!("set element: expected {x_s}, found {et_s}"));
                     }
                 }
                 None => {
                     if elem.is_unknown() {
                         elem = et;
                     } else if !et.is_unknown() && !compatible(&elem, &et) {
-                        self.error(e.span, format!("set elements differ: {elem} vs {et}"));
+                        let [elem_s, et_s] = Ty::render_distinct([&elem, &et]);
+                        self.error(e.span, format!("set elements differ: {elem_s} vs {et_s}"));
                     }
                 }
             }
@@ -2792,24 +2796,30 @@ impl Checker {
             match &key_expected {
                 Some(ke) => {
                     if !kt.is_unknown() && !self.assignable(ke, &kt) {
-                        self.error(k_expr.span, format!("map key: expected {ke}, found {kt}"));
+                        let [ke_s, kt_s] = Ty::render_distinct([ke, &kt]);
+                        self.error(
+                            k_expr.span,
+                            format!("map key: expected {ke_s}, found {kt_s}"),
+                        );
                     }
                 }
                 None => {
                     if key.is_unknown() {
                         key = kt.clone();
                     } else if !kt.is_unknown() && !compatible(&key, &kt) {
-                        self.error(k_expr.span, format!("map keys differ: {key} vs {kt}"));
+                        let [key_s, kt_s] = Ty::render_distinct([&key, &kt]);
+                        self.error(k_expr.span, format!("map keys differ: {key_s} vs {kt_s}"));
                     }
                 }
             }
             match &val_expected {
                 Some(ve) => {
                     if !vt.is_unknown() && !self.assignable(ve, &vt) {
+                        let [ve_s, vt_s] = Ty::render_distinct([ve, &vt]);
                         self.error(
                             v_expr.span,
                             format!(
-                                "map value: expected {ve}, found {vt}{}",
+                                "map value: expected {ve_s}, found {vt_s}{}",
                                 float_fix_note(ve, &vt)
                             ),
                         );
@@ -2819,10 +2829,11 @@ impl Checker {
                     if value.is_unknown() {
                         value = vt.clone();
                     } else if !vt.is_unknown() && !compatible(&value, &vt) {
+                        let [value_s, vt_s] = Ty::render_distinct([&value, &vt]);
                         self.error(
                             v_expr.span,
                             format!(
-                                "map values differ: {value} vs {vt}{}",
+                                "map values differ: {value_s} vs {vt_s}{}",
                                 float_fix_note_join(&value, &vt)
                             ),
                         );
@@ -2977,10 +2988,11 @@ impl Checker {
                     if compatible(le, re) {
                         Ty::List(Box::new(merge_unknown(le, re)))
                     } else {
+                        let [l_s, r_s] = Ty::render_distinct([&l, &r]);
                         self.error(
                             lhs.span,
                             format!(
-                                "cannot apply + to {l} and {r}{}",
+                                "cannot apply + to {l_s} and {r_s}{}",
                                 float_fix_note_join(&l, &r)
                             ),
                         );
@@ -2989,10 +3001,11 @@ impl Checker {
                 } else if either_unknown {
                     Ty::Unknown
                 } else {
+                    let [l_s, r_s] = Ty::render_distinct([&l, &r]);
                     self.error(
                         lhs.span,
                         format!(
-                            "cannot apply + to {l} and {r}{}",
+                            "cannot apply + to {l_s} and {r_s}{}",
                             float_fix_note_join(&l, &r)
                         ),
                     );
@@ -3020,10 +3033,11 @@ impl Checker {
                     if compatible(le, re) {
                         Ty::Set(Box::new(merge_unknown(le, re)))
                     } else {
+                        let [l_s, r_s] = Ty::render_distinct([&l, &r]);
                         self.error(
                             lhs.span,
                             format!(
-                                "cannot apply {} to {l} and {r}{}",
+                                "cannot apply {} to {l_s} and {r_s}{}",
                                 op_sym(op),
                                 float_fix_note_join(&l, &r)
                             ),
@@ -3033,10 +3047,11 @@ impl Checker {
                 } else if either_unknown {
                     Ty::Unknown
                 } else {
+                    let [l_s, r_s] = Ty::render_distinct([&l, &r]);
                     self.error(
                         lhs.span,
                         format!(
-                            "cannot apply {} to {l} and {r}{}",
+                            "cannot apply {} to {l_s} and {r_s}{}",
                             op_sym(op),
                             float_fix_note_join(&l, &r)
                         ),
@@ -3056,10 +3071,11 @@ impl Checker {
                 } else if either_unknown {
                     Ty::Unknown
                 } else {
+                    let [l_s, r_s] = Ty::render_distinct([&l, &r]);
                     self.error(
                         lhs.span,
                         format!(
-                            "cannot apply {} to {l} and {r}{}",
+                            "cannot apply {} to {l_s} and {r_s}{}",
                             op_sym(op),
                             float_fix_note_join(&l, &r)
                         ),
@@ -3084,10 +3100,11 @@ impl Checker {
                     if compatible(le, re) {
                         Ty::Set(Box::new(merge_unknown(le, re)))
                     } else {
+                        let [l_s, r_s] = Ty::render_distinct([&l, &r]);
                         self.error(
                             lhs.span,
                             format!(
-                                "bitwise operator {} requires int operands or two sets, found {l} and {r}",
+                                "bitwise operator {} requires int operands or two sets, found {l_s} and {r_s}",
                                 op_sym(op)
                             ),
                         );
@@ -3096,10 +3113,11 @@ impl Checker {
                 } else if either_unknown {
                     Ty::Unknown
                 } else {
+                    let [l_s, r_s] = Ty::render_distinct([&l, &r]);
                     self.error(
                         lhs.span,
                         format!(
-                            "bitwise operator {} requires int operands or two sets, found {l} and {r}",
+                            "bitwise operator {} requires int operands or two sets, found {l_s} and {r_s}",
                             op_sym(op)
                         ),
                     );
@@ -3158,7 +3176,8 @@ impl Checker {
                     || (*l == Ty::Str && *r == Ty::Str)
                     || self.ordering_allowed(l, r);
                 if !ok && !either_unknown {
-                    self.error(lspan, format!("cannot compare {l} and {r}"));
+                    let [l_s, r_s] = Ty::render_distinct([l, r]);
+                    self.error(lspan, format!("cannot compare {l_s} and {r_s}"));
                 }
                 Ty::Bool
             }
@@ -3247,16 +3266,21 @@ impl Checker {
                 {
                     // Decorated, not replaced: the bare text reads as "you have no equality", and the
                     // user WROTE an `eq`. Same ` — ` separator the `<` operator's note used.
+                    let [l_s, r_s] = Ty::render_distinct([&l, &r]);
                     self.error(
                         lspan,
-                        format!("cannot compare {l} and {r} for equality — {why}"),
+                        format!("cannot compare {l_s} and {r_s} for equality — {why}"),
                     );
                     // One diagnostic per site — do not also run the co-inhabitance question.
                     return Ty::Bool;
                 }
                 let ok = self.may_be_equal(&l, &r);
                 if !ok && !either_unknown {
-                    self.error(lspan, format!("cannot compare {l} and {r} for equality"));
+                    let [l_s, r_s] = Ty::render_distinct([&l, &r]);
+                    self.error(
+                        lspan,
+                        format!("cannot compare {l_s} and {r_s} for equality"),
+                    );
                 }
                 Ty::Bool
             }
@@ -3272,7 +3296,8 @@ impl Checker {
                 match r {
                     Ty::List(elem) | Ty::Set(elem) => {
                         if !either_unknown && !compatible(elem, l) && !self.assignable(elem, l) {
-                            self.error(lspan, format!("cannot test membership of {l} in {r}"));
+                            let [l_s, r_s] = Ty::render_distinct([l, r]);
+                            self.error(lspan, format!("cannot test membership of {l_s} in {r_s}"));
                         }
                         // **W7-45.** `in` runs `values_equal` per element, exactly as `==` does, but
                         // it is typed by `compatible` — which asks co-inhabitance, not whether the
@@ -3294,18 +3319,20 @@ impl Checker {
                             && matches!(r, Ty::List(_))
                             && let Some(why) = self.eq_bounds_unsatisfied(elem)
                         {
+                            let [l_s, r_s] = Ty::render_distinct([l, r]);
                             self.error(
                                 lspan,
-                                format!("cannot test membership of {l} in {r} — {why}"),
+                                format!("cannot test membership of {l_s} in {r_s} — {why}"),
                             );
                         }
                     }
                     Ty::Map(key, _) => {
                         if !either_unknown && !compatible(key, l) && !self.assignable(key, l) {
+                            let [l_s, r_s] = Ty::render_distinct([l, r]);
                             self.error(
                                 lspan,
                                 format!(
-                                    "cannot test membership of {l} in {r} (map `in` tests keys)"
+                                    "cannot test membership of {l_s} in {r_s} (map `in` tests keys)"
                                 ),
                             );
                         }
@@ -3323,7 +3350,11 @@ impl Checker {
                         // `Contains` protocol: a struct/enum with `contains(self, item) -> bool`.
                         if let Some(item) = self.contains_item_ty(other) {
                             if !either_unknown && !compatible(&item, l) {
-                                self.error(lspan, format!("cannot test membership of {l} in {r}"));
+                                let [l_s, r_s] = Ty::render_distinct([l, r]);
+                                self.error(
+                                    lspan,
+                                    format!("cannot test membership of {l_s} in {r_s}"),
+                                );
                             }
                         } else {
                             self.error(
@@ -3921,7 +3952,8 @@ impl Checker {
             Ty::Map(k, v) => {
                 let idx_ty = self.infer_value(index);
                 if !compatible(&k, &idx_ty) && !self.assignable(&k, &idx_ty) {
-                    self.error(index.span, format!("map key must be {k}, found {idx_ty}"));
+                    let [k_s, idx_s] = Ty::render_distinct([&k, &idx_ty]);
+                    self.error(index.span, format!("map key must be {k_s}, found {idx_s}"));
                 }
                 *v
             }
@@ -3943,7 +3975,8 @@ impl Checker {
                 if let Some((k, v)) = self.param_index_kv(&name, obj.span) {
                     let idx_ty = self.infer_value(index);
                     if !idx_ty.is_unknown() && !self.assignable(&k, &idx_ty) {
-                        self.error(index.span, format!("index must be {k}, found {idx_ty}"));
+                        let [k_s, idx_s] = Ty::render_distinct([&k, &idx_ty]);
+                        self.error(index.span, format!("index must be {k_s}, found {idx_s}"));
                     }
                     return v;
                 }
@@ -3956,7 +3989,8 @@ impl Checker {
                 if let Some((k, v)) = self.index_kv(&other) {
                     let idx_ty = self.infer_value(index);
                     if !idx_ty.is_unknown() && !self.assignable(&k, &idx_ty) {
-                        self.error(index.span, format!("index must be {k}, found {idx_ty}"));
+                        let [k_s, idx_s] = Ty::render_distinct([&k, &idx_ty]);
+                        self.error(index.span, format!("index must be {k_s}, found {idx_s}"));
                     }
                     return v;
                 }

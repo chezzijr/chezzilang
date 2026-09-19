@@ -448,7 +448,10 @@ case: two modules' `Point` are simply `a::Point` and `b::Point`. The **display n
 `Name`, carried separately on the type's def: all user-facing output — print/`str`, error messages,
 `json.decode` errors, `repr` — renders the bare name, so output is byte-identical regardless of module
 and two colliding `Point`s **both** print `Point(...)` (Python-like; the module is never shown in
-normal output). JSON *encode* likewise emits the bare field/type naming (no `module::` leaks into the
+normal output). Exception, compile-time only: a type diagnostic naming two DIFFERENT types with the
+same bare name qualifies both by module (`expected a.Col, found b.Col`; the full dotted path when
+the last segments also match, and bare again if that is still ambiguous). Runtime output never
+changes. JSON *encode* likewise emits the bare field/type naming (no `module::` leaks into the
 wire). Reserved/native types (`Result`/`Option`/`Some`/`Ok`/…, `Iterator`, the std library type
 surface on `import std.*`, and the FFI width names like `int32`) are **not** module-keyed — they keep
 their bare name globally. An imported `type` alias is **transparent**: its body is resolved in the
