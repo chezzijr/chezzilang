@@ -100,11 +100,25 @@ native struct Executor:
 
 # Chezzi closures are single-expression only, so a multi-statement job body must be a named
 # top-level fn the lambda calls.
+#
+# A `shutdown_now()` cancel is not a fault `recover:` catches, so neither arm below runs for a
+# cancelled job. The `defer:` settles it instead: a cancel message into `err`, then `out` CLOSED,
+# so `Task.done()` is true and `get()`/`recv()` raise at once (TICKET-148, W14-13; CPython's
+# `result()` raises `CancelledError`). `settled` marks a job an arm already settled; each arm
+# sends it LAST, so a cancel landing mid-arm still closes `out`.
 fn run_outcome[T](f: fn() -> T, out: Channel[T], err: Channel[str]):
+    settled := Channel[bool](1)
+    defer:
+        if settled.len() == 0:
+            err.try_send("task cancelled: shutdown_now() stopped it before it finished")
+            out.close()
     r := recover: f()
     match r:
-        Ok(v): out.send(v)
+        Ok(v):
+            out.send(v)
+            settled.send(true)
         Err(e):
             err.send(e.message())
             out.close()
+            settled.send(true)
             panic(e.message())

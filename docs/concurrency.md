@@ -491,7 +491,9 @@ future-style handle (memoization + readiness poll):
   shape, measured: `result raised: RuntimeError job failed` / `done= True`) — `shutdown()` still
   raises the job's fault too, and its error keeps the job's own origin (`e.file()`/`line()`/`col()`
   point at the user's `panic` site). `.get()`'s re-raised error crosses a task airlock, so it
-  answers `None` for `file()`/`line()`/`col()` instead.
+  answers `None` for `file()`/`line()`/`col()` instead. A task `shutdown_now()` cancelled raises
+  `task cancelled: shutdown_now() stopped it before it finished` at once, never hangs
+  (CPython: `CancelledError`), and `done()` is `true`.
 - `Task.done() -> bool` — non-blocking readiness poll; `true` once the job has finished, faulted or
   not.
 
