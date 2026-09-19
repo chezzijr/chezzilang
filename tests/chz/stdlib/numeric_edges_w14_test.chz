@@ -2,6 +2,7 @@
 import std.math
 import std.path
 import std.datetime
+import std.concurrency
 
 test fn float_sum_is_compensated_like_cpython():
     assert [0.1, 0.2, 0.3].sum() == 0.6, "{[0.1, 0.2, 0.3].sum()}"
@@ -33,3 +34,111 @@ test fn from_epoch_near_i64_min_does_not_overflow():
     match r:
         Ok(_): assert true
         Err(e): assert false, e.message()
+
+# ---- rows added for the rest of W14-34 / W14-24 (each judged against a RUN CPython 3.14 / Go twin) ----
+struct H:
+    n: int
+    f: fn() -> int
+
+fn one() -> int:
+    return 1
+
+fn try_cas[T](a: Atomic[T], v: T) -> bool:
+    return a.cas(a.load(), v)
+
+test fn float_sum_neumaier_vectors():
+    assert [1e16, 1.0, 1.0].sum() == 1.0000000000000002e16
+    assert [1.0, 1e100, 1.0, -1e100].sum() == 2.0
+    assert math.is_inf([1e308, 1e308, -1e308].sum())
+    empty: List[float] = []
+    assert empty.sum() == 0.0
+
+test fn upper_format_specs_upper_case_non_finite():
+    nan := 0.0 / 0.0
+    inf := 1.0 / 0.0
+    got := "{nan:G} {nan:E} {inf:E} {1.5:E}"
+    assert got == "NAN NAN INF 1.500000E+00", got
+    lower := "{inf:e} {nan:g} {inf:%}"
+    assert lower == "inf NaN inf%", lower
+
+test fn signed_zero_min_max_sort():
+    m := [0.0, -0.0].min()
+    match m:
+        Some(v): assert str(v) == "0.0", str(v)
+        None: assert false
+    x := [-0.0, 0.0].max()
+    match x:
+        Some(v): assert str(v) == "-0.0", str(v)
+        None: assert false
+    xs := [0.0, -0.0, 1.0, -0.0]
+    xs.sort()
+    assert str(xs) == "[0.0, -0.0, -0.0, 1.0]", str(xs)
+
+fn pib(s: str, base: int) -> Result[int]:
+    return math.parse_int_base(s, base)
+
+fn errs(s: str, base: int) -> bool:
+    match math.parse_int_base(s, base):
+        Ok(_): return false
+        Err(_): return true
+
+test fn parse_int_base_underscore_after_prefix_table():
+    assert pib("0b_1", 0) == Ok(1)
+    assert pib("0x_ff", 16) == Ok(255)
+    assert pib("-0x_ff", 0) == Ok(-255)
+    assert errs("0x__ff", 0)
+    assert errs("0x_", 0)
+    assert errs("_ff", 16)
+    assert errs("0x_-5", 0)
+
+fn we(p: str) -> str:
+    return path.with_ext(p, "txt").str()
+
+test fn with_ext_empty_name_faults_like_pathlib():
+    for p in ["", "/", "//", ".", "./", "/."]:
+        r := recover: we(p)
+        match r:
+            Ok(v): assert false, "with_ext('{p}') returned {v}"
+            Err(e): assert e.message().starts_with("with_ext: path has an empty name"), e.message()
+
+test fn with_ext_trims_trailing_slashes_like_pathlib():
+    assert we("a/") == "a.txt"
+    assert we("a//") == "a.txt"
+    assert we("a/.") == "a.txt"
+    assert we("a/./") == "a.txt"
+    assert we("a/..") == "a/...txt"
+    assert we("..") == "...txt"
+    assert we("/a/") == "/a.txt"
+    assert we("a/b.md") == "a/b.txt"
+
+test fn datetime_epoch_roundtrips_at_the_i64_edge():
+    lo := -9223372036854775807 - 1
+    assert datetime.to_epoch(datetime.from_epoch(lo)) == lo
+    assert datetime.to_epoch(datetime.from_epoch(lo + 1)) == lo + 1
+    hi := 9223372036854775807
+    assert datetime.to_epoch(datetime.from_epoch(hi)) == hi
+
+test fn days_from_civil_rejects_invalid_dates():
+    r := recover: datetime.days_from_civil(2023, 13, 1)
+    match r:
+        Ok(v): assert false, "month 13 returned {v}"
+        Err(e): assert e.message() == "days_from_civil: month out of range: 13", e.message()
+    r0 := recover: datetime.days_from_civil(2023, 0, 1)
+    match r0:
+        Ok(v): assert false, "month 0 returned {v}"
+        Err(_): assert true
+    rd := recover: datetime.days_from_civil(2023, 2, 29)
+    match rd:
+        Ok(v): assert false, "Feb 29 2023 returned {v}"
+        Err(e): assert e.message() == "days_from_civil: day out of range: 29", e.message()
+    assert datetime.days_from_civil(2024, 2, 29) == 19782
+
+test fn atomic_cas_faults_on_a_fn_payload_the_checker_cannot_see():
+    a := Atomic[fn() -> int](one)
+    r := recover: try_cas(a, one)
+    match r:
+        Ok(v): assert false, "cas on a fn payload returned {v}"
+        Err(e): assert e.message() == "Atomic.cas: the payload holds a function value, which cas cannot compare", e.message()
+    b := Atomic[int](3)
+    assert try_cas(b, 4) == true
+    assert b.load() == 4
