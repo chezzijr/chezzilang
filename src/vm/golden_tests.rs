@@ -3170,7 +3170,8 @@ fn airlock_adopted_alias_keeps_a_later_globals_backref_into_its_old_subtree() {
     // object during the module snapshot's replay, but the snapshot memo cached `y := gl[0][0]`
     // EARLIER in the nursery, so `y`'s Backref must still resolve into the adopted node's OLD
     // subtree even though that subtree is discarded rather than installed. CPython 3.14.7 prints
-    // `[] [[]] [1]` (measured 2026-09-11).
+    // `[] [[]] [1]` (measured 2026-09-11). The two sibling sends race, so the program prints
+    // whichever message is not "first" rather than the second one received.
     let src = r#"
 import std.concurrency
 
@@ -3188,7 +3189,7 @@ fn main():
             r.send("{inner} {gl} {y}")
     a := r.recv()
     b := r.recv()
-    print(b)
+    print(if a == "first": b else: a)
 main()
 "#;
     let out = golden_entry(src);
