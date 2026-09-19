@@ -33367,3 +33367,28 @@ fn comparable_tuple_list_option_non_comparable_element_rejected() {
         "does not satisfy Comparable",
     );
 }
+
+/// A protocol VALUE whose protocol requires a `Self`-taking method (here via the `Comparable` embed)
+/// erases which type it holds, so two of them must not be ordered as a tuple/List/Option element
+/// either: `lt(A(1), B("x"))` would hand a `B` to `A.compare`. Base rejects the bare `a < b` too.
+#[test]
+fn comparable_tuple_list_option_protocol_value_element_rejected() {
+    let ord2 = "protocol Ord2:\n    Comparable\n    fn tag(self) -> str\n";
+    rejects(
+        &format!("{ord2}fn lt(a: Ord2, b: Ord2) -> bool:\n    return (a, 0) < (b, 0)\n"),
+        "cannot compare",
+    );
+    rejects(
+        &format!("{ord2}fn lt(a: Ord2, b: Ord2) -> bool:\n    return [a] < [b]\n"),
+        "cannot compare",
+    );
+    rejects(
+        &format!("{ord2}fn s(xs: List[(Ord2, int)]):\n    xs.sort()\n"),
+        "does not satisfy Comparable",
+    );
+    // Nested: the element check recurses through the inner tuple.
+    rejects(
+        &format!("{ord2}fn lt(a: Ord2, b: Ord2) -> bool:\n    return [(a, 0)] < [(b, 0)]\n"),
+        "cannot compare",
+    );
+}

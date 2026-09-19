@@ -2086,9 +2086,16 @@ impl Checker {
                 _ => None,
             };
             if let Some(elems) = elems {
+                // A protocol VALUE whose protocol takes `Self` (object safety) is not orderable:
+                // the `Ty::Protocol` arm below deliberately skips that guard, but ordering pairs two
+                // values, which may hold two different witnesses.
+                let unorderable = |e: &Ty| match e {
+                    Ty::Protocol(p, _) => self.protocol_self_param_method(p).is_some(),
+                    _ => false,
+                };
                 if elems
                     .iter()
-                    .any(|e| self.satisfies(e, "Comparable").is_err())
+                    .any(|e| unorderable(e) || self.satisfies(e, "Comparable").is_err())
                 {
                     return Err(format!("type {ty} does not satisfy Comparable"));
                 }
