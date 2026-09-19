@@ -3500,7 +3500,7 @@ impl Checker {
                         // variant name. A repeat *within the same* enum is still a collision.
                         if self.variants.contains_key(&(key.clone(), v.name.clone())) {
                             self.error(
-                                s.span,
+                                v.name_span,
                                 format!("variant '{}' is already defined in enum '{name}'", v.name),
                             );
                         }

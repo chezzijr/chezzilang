@@ -3055,21 +3055,30 @@ pub fn lower_carrier_option(expr: &mut Expr, tmp: usize) {
     let c = format!("__opt{tmp}");
     let kind = std::mem::replace(&mut expr.kind, ExprKind::Bool(false));
     expr.kind = match kind {
-        ExprKind::NullCoalesce { lhs, rhs, .. } => ExprKind::Match {
-            scrutinee: lhs,
-            arms: vec![
-                MatchExprArm {
-                    pattern: variant_pat("Some", vec![Pattern::Ident(c.clone(), Span::default())]),
-                    guard: None,
-                    body: ident_expr(&c, span),
-                },
-                MatchExprArm {
-                    pattern: variant_pat("None", vec![]),
-                    guard: None,
-                    body: *rhs,
-                },
-            ],
-        },
+        ExprKind::NullCoalesce { lhs, rhs, .. } => {
+            // Synthesized arms take the scrutinee span: a diagnostic on one stays where it was.
+            let arm_span = lhs.span;
+            ExprKind::Match {
+                scrutinee: lhs,
+                arms: vec![
+                    MatchExprArm {
+                        span: arm_span,
+                        pattern: variant_pat(
+                            "Some",
+                            vec![Pattern::Ident(c.clone(), Span::default())],
+                        ),
+                        guard: None,
+                        body: ident_expr(&c, span),
+                    },
+                    MatchExprArm {
+                        span: arm_span,
+                        pattern: variant_pat("None", vec![]),
+                        guard: None,
+                        body: *rhs,
+                    },
+                ],
+            }
+        }
         ExprKind::OptChain {
             obj,
             name,
@@ -3113,15 +3122,18 @@ pub fn lower_carrier_option(expr: &mut Expr, tmp: usize) {
                 },
                 span,
             };
+            let arm_span = obj.span;
             ExprKind::Match {
                 scrutinee: obj,
                 arms: vec![
                     MatchExprArm {
+                        span: arm_span,
                         pattern: variant_pat("Some", vec![Pattern::Ident(c, Span::default())]),
                         guard: None,
                         body: some_body,
                     },
                     MatchExprArm {
+                        span: arm_span,
                         pattern: variant_pat("None", vec![]),
                         guard: None,
                         body: ident_expr("None", span),
@@ -3149,15 +3161,18 @@ pub fn lower_carrier_result_coalesce(expr: &mut Expr, tmp: usize) {
     let ExprKind::NullCoalesce { lhs, rhs, .. } = kind else {
         unreachable!("lower_carrier_result_coalesce applies to '??' only");
     };
+    let arm_span = lhs.span;
     expr.kind = ExprKind::Match {
         scrutinee: lhs,
         arms: vec![
             MatchExprArm {
+                span: arm_span,
                 pattern: variant_pat("Ok", vec![Pattern::Ident(c.clone(), Span::default())]),
                 guard: None,
                 body: ident_expr(&c, span),
             },
             MatchExprArm {
+                span: arm_span,
                 pattern: variant_pat("Err", vec![Pattern::Wildcard]),
                 guard: None,
                 body: *rhs,

@@ -605,6 +605,9 @@ pub struct Variant {
 /// One arm of a `match`: `pattern [if guard]: body`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchArm {
+    /// Source position of the arm's first pattern token. Diagnostic-only: the checker reports
+    /// arm-level pattern errors here. Runtime-inert; never read by desugar/compiler/vm.
+    pub span: Span,
     pub pattern: Pattern,
     /// Optional `if <expr>` guard. The arm matches only if the pattern binds AND the guard (a bool,
     /// evaluated with the pattern's bindings in scope) is true; otherwise control falls through to
@@ -1109,6 +1112,9 @@ pub struct OptCall {
 /// One arm of an expression-position `match`: `pattern [if guard]: value-expr`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchExprArm {
+    /// Source position of the arm's first pattern token. Diagnostic-only: the checker reports
+    /// arm-level pattern errors here. Runtime-inert; never read by desugar/compiler/vm.
+    pub span: Span,
     pub pattern: Pattern,
     /// Optional `if <expr>` guard — see [`MatchArm::guard`].
     pub guard: Option<Expr>,

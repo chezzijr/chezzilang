@@ -15156,6 +15156,53 @@ fn range_pattern_non_exhaustive_without_wildcard() {
     );
 }
 
+/// The position of the first error whose message contains `needle`.
+fn error_pos(src: &str, needle: &str) -> (usize, usize) {
+    let errs = check_src(src);
+    let e = errs
+        .iter()
+        .find(|e| e.message.contains(needle))
+        .unwrap_or_else(|| panic!("expected an error containing {needle:?}, got: {errs:?}"));
+    (e.span.line as usize, e.span.col as usize)
+}
+
+#[test]
+fn duplicate_match_arm_points_at_the_arm() {
+    // TICKET-149 (1): the error names the offending arm, not the scrutinee.
+    let pos = error_pos(
+        "enum E:\n    A\n    B\ne := E.A\nmatch e:\n    E.A: print(1)\n    E.B: print(2)\n    E.A: print(3)\n",
+        "duplicate match arm 'A'",
+    );
+    assert_eq!(pos, (8, 5));
+}
+
+#[test]
+fn not_a_constructor_points_at_the_arm() {
+    let pos = error_pos(
+        "struct IA:\n    x: int\nv := IA(1)\ny := match v:\n    IA(x): x\n    IB(z): z\n",
+        "'IB' is not a constructor of IA",
+    );
+    assert_eq!(pos, (6, 5));
+}
+
+#[test]
+fn recover_tail_duplicate_arm_points_at_the_arm() {
+    let pos = error_pos(
+        "enum E:\n    A\n    B\ne := E.A\nr := recover:\n    match e:\n        E.A: 1\n        E.B: 2\n        E.A: 3\n",
+        "duplicate match arm 'A'",
+    );
+    assert_eq!(pos, (9, 9));
+}
+
+#[test]
+fn duplicate_variant_points_at_the_variant() {
+    let pos = error_pos(
+        "enum E:\n    A\n    B\n    A\n",
+        "variant 'A' is already defined in enum 'E'",
+    );
+    assert_eq!(pos, (4, 5));
+}
+
 #[test]
 fn range_pattern_empty_or_inverted_rejected() {
     // TICKET-149 (2): `5..1` (inverted) matches nothing; rustc rejects with E0579.

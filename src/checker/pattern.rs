@@ -1046,7 +1046,7 @@ impl Checker {
             let irref = self.bind_match_arm(
                 &arm.pattern,
                 &kind,
-                scrutinee.span,
+                arm.span,
                 &mut covered,
                 arm.guard.is_some(),
             );
@@ -1095,7 +1095,7 @@ impl Checker {
             let irref = self.bind_match_arm(
                 &arm.pattern,
                 &kind,
-                scrutinee.span,
+                arm.span,
                 &mut covered,
                 arm.guard.is_some(),
             );
@@ -2041,7 +2041,7 @@ impl Checker {
             let irref = self.bind_match_arm(
                 &arm.pattern,
                 &kind,
-                scrutinee.span,
+                arm.span,
                 &mut covered,
                 arm.guard.is_some(),
             );

@@ -1760,6 +1760,7 @@ impl Parser {
         let mut arms = Vec::new();
         self.skip_newlines();
         while !self.check(&Token::Dedent) && !self.check(&Token::Eof) {
+            let arm_span = self.cur_span();
             let pattern = self.parse_pattern()?;
             let guard = if self.eat(&Token::If) {
                 Some(self.parse_expr()?)
@@ -1768,6 +1769,7 @@ impl Parser {
             };
             let body = self.parse_block()?;
             arms.push(MatchArm {
+                span: arm_span,
                 pattern,
                 guard,
                 body,
@@ -1786,6 +1788,7 @@ impl Parser {
         let mut arms = Vec::new();
         self.skip_newlines();
         while !self.check(&Token::Dedent) && !self.check(&Token::Eof) {
+            let arm_span = self.cur_span();
             let pattern = self.parse_pattern()?;
             let guard = if self.eat(&Token::If) {
                 Some(self.parse_expr()?)
@@ -1795,6 +1798,7 @@ impl Parser {
             self.expect(&Token::Colon)?;
             let body = self.parse_expr()?;
             arms.push(MatchExprArm {
+                span: arm_span,
                 pattern,
                 guard,
                 body,
