@@ -33148,3 +33148,54 @@ fn nested_fn_default_applies_at_call() {
         "fn outer() -> int:\n    fn f(x: int, y: int = 3) -> int:\n        return x + y\n    g := f\n    return f(1) + g(1, 2)\n",
     );
 }
+
+// TICKET-142 (W14-33): a nested fn's default is evaluated in MODULE scope (the compiler's prologue
+// hides the frame's locals), so a default reading an enclosing local/param is a check error.
+#[test]
+fn nested_fn_default_cannot_read_enclosing_locals() {
+    let msg = "a nested fn's default cannot read the enclosing fn's locals";
+    // (a) a param
+    rejects(
+        "fn outer(n: int) -> int:\n    fn f(x: int = n) -> int:\n        return x\n    return f()\nprint(outer(5))\n",
+        msg,
+    );
+    // (b) a local
+    rejects(
+        "fn outer() -> int:\n    m := 4\n    fn f(x: int = m + 1) -> int:\n        return x\n    return f()\nprint(outer())\n",
+        msg,
+    );
+    // (c) a local shadowing a module global (the prologue would silently read the global)
+    rejects(
+        "K := 7\nfn outer() -> int:\n    K := 100\n    fn f(x: int = K) -> int:\n        return x\n    return f()\nprint(outer())\n",
+        msg,
+    );
+    // (d) a sibling nested fn
+    rejects(
+        "fn outer() -> int:\n    fn one() -> int:\n        return 1\n    fn f(x: int = one()) -> int:\n        return x\n    return f()\nprint(outer())\n",
+        msg,
+    );
+    // (e) an interpolation hole
+    rejects(
+        "fn outer(n: int) -> str:\n    fn f(s: str = \"n={n}\") -> str:\n        return s\n    return f()\nprint(outer(1))\n",
+        msg,
+    );
+}
+
+#[test]
+fn nested_fn_default_reads_module_global() {
+    ok(
+        "K := 7\nfn outer() -> int:\n    fn f(x: int = K, y: int = 2) -> int:\n        return x + y\n    g := f\n    return f() + f(1) + g() + g(1, 1)\nprint(outer())\n",
+    );
+    ok(
+        "fn outer() -> int:\n    fn f(xs: List[int] = [], n: int = \"ab\".len()) -> int:\n        return xs.len() + n\n    return f()\nprint(outer())\n",
+    );
+}
+
+// A lambda cannot declare a default, so it keeps exact arity and today's message.
+#[test]
+fn lambda_call_keeps_exact_arity() {
+    rejects(
+        "h := fn(x: int) -> int: x\nprint(h())\n",
+        "'closure' expects 1 argument(s), got 0",
+    );
+}

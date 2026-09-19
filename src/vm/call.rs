@@ -28,7 +28,9 @@ impl Vm {
                 // Arity check BEFORE disturbing the stack — identical messages to `invoke_value`, and
                 // the error path leaves `[callee, args…]` intact for the trace / `recover:`.
                 let arity = self.program.protos[proto].arity;
-                if clo.is_none() {
+                // A closure proto with defaults (a nested `fn`) may be entered short too; a lambda
+                // cannot declare a default, so it keeps the exact-arity check and its message.
+                if clo.is_none() || self.program.protos[proto].min_arity < arity {
                     self.check_proto_arity(proto, argc, span)?;
                 } else if argc != arity {
                     return Err(self.err(
@@ -136,7 +138,9 @@ impl Vm {
                         self.run_proto(proto, home, None, args, true, false, span)
                     }
                     Callee::Closure { proto, home } => {
-                        if argc != self.program.protos[proto].arity {
+                        if self.program.protos[proto].min_arity < self.program.protos[proto].arity {
+                            self.check_proto_arity(proto, argc, span)?;
+                        } else if argc != self.program.protos[proto].arity {
                             return Err(self.err(
                                 format!(
                                     "closure expects {} argument(s), got {argc}",

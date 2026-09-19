@@ -2376,6 +2376,34 @@ impl Checker {
                         return;
                     }
                     let mut sig = self.fn_sig(decl, decl.name_span);
+                    // TICKET-142 (W14-33) — a nested fn's default is compiled in MODULE scope (the
+                    // prologue hides the frame's locals), so a free name that resolves innermost-first
+                    // to a non-module scope (a param, a local, a sibling fn, a local shadowing a
+                    // global) would panic the compiler or silently read the global: reject it.
+                    for p in &decl.params {
+                        let Some(def) = &p.default else { continue };
+                        let mut free: Vec<String> = crate::compiler::free_names_of_expr(
+                            def,
+                            &std::collections::HashSet::new(),
+                        )
+                        .into_iter()
+                        .collect();
+                        free.sort();
+                        let local = free.iter().find(|n| {
+                            self.scopes
+                                .iter()
+                                .rposition(|s| s.contains_key(n.as_str()))
+                                .is_some_and(|i| i > 0)
+                        });
+                        if let Some(n) = local {
+                            self.error(
+                                def.span,
+                                format!(
+                                    "a nested fn's default cannot read the enclosing fn's locals: '{n}' is local here, and a default is evaluated in module scope (pass it as an argument, or read a module-level binding)"
+                                ),
+                            );
+                        }
+                    }
                     // TICKET-139 (W14-2) — a nested fn's own name is certain to hold that one fn (a
                     // keyword call through it is legal). Its two declares below are a same-scope
                     // re-declaration, which `declare` marks as a write; undo that mark unless the
