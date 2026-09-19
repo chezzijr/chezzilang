@@ -1469,7 +1469,37 @@ impl Checker {
         ty
     }
 
+    /// TICKET-142 (W14-33): the dispatch every expression inference passes through. Wraps
+    /// [`Self::infer_kind_inner`] with the constant-overflow check: at the root of each maximal
+    /// arithmetic (`Binary`/`Unary`) tree, run ONE `const_int_scan` over the whole tree and report
+    /// each overflow once. A child of a `Binary`/`Unary` sees `arith_parent` and skips (its parent's
+    /// scan already entered it); a child of any other node (a call argument under a `+`) starts its
+    /// own tree. Each node is scanned at most once, so the check is linear even on a
+    /// `MAX_AST_DEPTH` chain. Must not touch `ret_coerce_sink` (the inner fn takes it first).
     pub(super) fn infer_kind(&mut self, expr: &Expr) -> Ty {
+        let covered = self.arith_parent;
+        let is_arith = matches!(expr.kind, ExprKind::Unary { .. } | ExprKind::Binary { .. });
+        if is_arith && !covered {
+            let mut found = Vec::new();
+            crate::ast::const_int_scan(expr, &mut self.const_scan_visits, &mut found);
+            for (sp, op) in found {
+                if self.const_overflow_seen.insert(sp) {
+                    self.error(
+                        sp,
+                        format!(
+                            "integer overflow in {op}: this constant expression does not fit in int (i64)"
+                        ),
+                    );
+                }
+            }
+        }
+        self.arith_parent = is_arith;
+        let ty = self.infer_kind_inner(expr);
+        self.arith_parent = covered;
+        ty
+    }
+
+    fn infer_kind_inner(&mut self, expr: &Expr) -> Ty {
         let ret_sink = self.ret_coerce_sink.take();
         match &expr.kind {
             ExprKind::Int(_) => Ty::Int,

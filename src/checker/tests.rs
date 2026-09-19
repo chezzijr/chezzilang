@@ -33112,6 +33112,27 @@ fn constant_int_overflow_rejected_at_check() {
     ok("print(1 / 0)\n");
 }
 
+// TICKET-142 (W14-33): the constant-overflow scan runs once per maximal arithmetic tree, so it is
+// linear on a left chain. One scan of a 3000-`+` chain visits 6001 nodes; a per-node rescan visits
+// about 4.5 million. Do not raise the bound: it is what tells the two apart.
+#[test]
+fn constant_int_overflow_scan_is_linear() {
+    fn visits(src: String) -> usize {
+        let tokens = lexer::tokenize(&src).expect("lex should succeed");
+        let module = parser::parse(tokens).expect("parse should succeed");
+        crate::on_frontend_stack_scoped(move || {
+            let mut c = Checker::new();
+            c.seed_native_prelude_sigs();
+            c.check_module(&module.stmts, None, &[]);
+            c.const_scan_visits
+        })
+    }
+    let typed = visits(format!("x := 1\ny := x{}\n", " + 1".repeat(3000)));
+    assert!(typed < 7000, "non-constant chain scanned {typed} nodes");
+    let constant = visits(format!("y := 1{}\n", " + 1".repeat(3000)));
+    assert!(constant < 7000, "constant chain scanned {constant} nodes");
+}
+
 // TICKET-142 (W14-33): `Channel(n)` takes its element type from the annotation / param slot.
 #[test]
 fn channel_ctor_takes_element_type_from_annotation_and_param() {

@@ -28,6 +28,11 @@ pub(super) struct DiagMark {
     /// recording happens on the real (non-speculative) `check_stmt` walk, once every callee sig is
     /// settled.
     ret_coerce: crate::checker::RetCoerceTable,
+    /// TICKET-142 (W14-33) — the constant-overflow dedupe set is SPECULATIVE STATE like
+    /// `spawn_stale`: a speculative pass (return inference of an un-annotated fn, a generic-arg
+    /// prepass) records a span, then the rollback discards its error. A rollback that kept the span
+    /// would leave the real pass silent. Empty unless the program overflows, so the clone is free.
+    const_overflow_seen: std::collections::HashSet<Span>,
 }
 
 impl Checker {
@@ -68,6 +73,9 @@ impl Checker {
             generic_fn_value_prepass: false,
             expected_hint: None,
             ret_coerce_sink: None,
+            arith_parent: false,
+            const_scan_visits: 0,
+            const_overflow_seen: std::collections::HashSet::new(),
             inferring_ret: false,
             collected_rets: Vec::new(),
             in_generator: false,
@@ -1315,6 +1323,7 @@ impl Checker {
             // `HashMap` clone allocates nothing.
             spawn_stale: self.spawn_stale.clone(),
             ret_coerce: self.ret_coerce.clone(),
+            const_overflow_seen: self.const_overflow_seen.clone(),
         }
     }
 
@@ -1325,6 +1334,7 @@ impl Checker {
         self.warnings.truncate(m.warnings);
         self.spawn_stale = m.spawn_stale;
         self.ret_coerce = m.ret_coerce;
+        self.const_overflow_seen = m.const_overflow_seen;
     }
 
     /// Attribute a diagnostic to the module currently being checked (graph path only). Shared by
