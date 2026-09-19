@@ -1,0 +1,16 @@
+# TICKET-142 (W14-32): `_ := e` discards at module top level, any number of times, any types — the
+# escape the discarded-`Result`/`Option` warning recommends. Regression pin for the top-level Let path
+# (the red-first test for the compiler's `_ =` lowering is `blank_identifier_test.chz`).
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+fn f() -> int?:
+    return None
+
+fn g() -> str?:
+    return None
+
+_ := f()
+_ := g()
+
+test fn blank_toplevel_let_twice():
+    assert f() == None
+    assert g() == None

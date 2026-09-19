@@ -1974,6 +1974,9 @@ impl Checker {
                 }
                 let elem = match targs {
                     [t] => t.clone(),
+                    // TICKET-142 (W14-33): an expected `Channel[T]` (a let annotation, a call
+                    // argument's declared param) supplies the element, as `l: List[float] = []` does.
+                    [] if let Some(Ty::Channel(e)) = hint => (**e).clone(),
                     [] => {
                         self.error(span, "Channel() needs an element type — write Channel[T]()");
                         Ty::Unknown

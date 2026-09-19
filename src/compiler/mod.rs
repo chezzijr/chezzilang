@@ -877,7 +877,10 @@ impl Compiler {
         for stmt in stmts {
             if let StmtKind::Let { names, .. } = &stmt.kind {
                 for name in names {
-                    add(name.clone(), &mut self.globals, &mut self.global_slots);
+                    // TICKET-142 (W14-32): `_` is the blank identifier — it gets no global slot.
+                    if name != "_" {
+                        add(name.clone(), &mut self.globals, &mut self.global_slots);
+                    }
                 }
             }
         }
@@ -1684,6 +1687,10 @@ impl Compiler {
                     let tuple_slot = fc.add_hidden();
                     fc.emit_hidden_set(tuple_slot, stmt.span);
                     for (i, name) in names.iter().enumerate() {
+                        // TICKET-142 (W14-32): a `_` element is the blank identifier — never bound.
+                        if name == "_" {
+                            continue;
+                        }
                         fc.emit_hidden_get(tuple_slot, stmt.span);
                         fc.emit(Op::GetField { name: i.to_string(), ic: NO_IC }, stmt.span); // tuple element
                         if fc.is_global_scope() {
@@ -1692,6 +1699,11 @@ impl Compiler {
                             fc.emit_decl_named(name.clone(), stmt.span);
                         }
                     }
+                } else if names[0] == "_" {
+                    // TICKET-142 (W14-32): `_ := e` evaluates `e` and discards it — `_` is never
+                    // declared, so it has no local slot and no module global slot (the checker
+                    // agrees: it never declares `_`).
+                    fc.emit(Op::Pop, stmt.span);
                 } else if fc.is_global_scope() {
                     fc.emit(Op::DefineGlobalSlot(self.global_slot(&names[0])), stmt.span);
                 } else {
@@ -2197,7 +2209,13 @@ impl Compiler {
             ExprKind::Ident(name) => match op.to_binop() {
                 None => {
                     self.compile_expr(fc, value)?;
-                    self.emit_store(fc, name, span);
+                    if name == "_" {
+                        // TICKET-142 (W14-32): `_ = e` evaluates `e` and discards it; `_` has no
+                        // slot to store to (the checker never declares it).
+                        fc.emit(Op::Pop, span);
+                    } else {
+                        self.emit_store(fc, name, span);
+                    }
                 }
                 Some(bin) => {
                     self.emit_load(fc, name, span);
@@ -6527,8 +6545,14 @@ pub(crate) fn free_names_block(stmts: &[Stmt], bound: &HashSet<String>, out: &mu
                 free_names_expr(value, &b, out);
                 b.extend(names.iter().cloned());
             }
-            StmtKind::Assign { target, value, .. } => {
-                free_names_expr(target, &b, out);
+            StmtKind::Assign { target, op, value } => {
+                // TICKET-142 (W14-32): a plain `_ = e` target is the blank identifier, never a
+                // variable — listing it would make a nested fn capture a non-existent `_`.
+                let blank =
+                    *op == AssignOp::Eq && matches!(&target.kind, ExprKind::Ident(n) if n == "_");
+                if !blank {
+                    free_names_expr(target, &b, out);
+                }
                 free_names_expr(value, &b, out);
             }
             StmtKind::Fn(decl) => {

@@ -33007,3 +33007,195 @@ fn a_tuple_scrutinee_catch_all_binding_is_irrefutable() {
         "non-exhaustive",
     );
 }
+
+// TICKET-142 (W14-19): a numeric format spec on a concrete struct is a compile error, like the containers.
+#[test]
+fn format_spec_on_concrete_struct_rejected_at_check() {
+    rejects(
+        "struct P:\n    x: int\n\nfn main():\n    p := P(1)\n    print(\"{p:d}\")\n",
+        "format spec: type 'd' not valid for a string",
+    );
+}
+
+// TICKET-142 (W14-32): `_ := expr` discards at module top level, any number of times, any types.
+#[test]
+fn blank_identifier_redeclared_at_top_level_with_different_types() {
+    ok(
+        "fn f() -> int?:\n    return None\n\nfn g() -> str?:\n    return None\n\n_ := f()\n_ := g()\n",
+    );
+}
+
+// TICKET-142 (W14-19): a numeric newtype formats as its underlying number, so a numeric spec on it
+// checks against that underlying; a spec the underlying rejects is still an error.
+#[test]
+fn format_spec_on_numeric_newtype_checks_its_underlying() {
+    ok("newtype M = float\nprint(\"{M(1.5):.2f}\")\n");
+    ok("newtype N = int\nprint(\"{N(7):04} {N(255):x} {N(7):+}\")\n");
+    rejects(
+        "newtype M = float\nprint(\"{M(1.5):d}\")\n",
+        "type 'd' not valid for a float",
+    );
+}
+
+// TICKET-142 (W14-19): every other concrete non-numeric type renders as its text form, so a numeric
+// spec on it is a compile error (checked against the string rules), while an alignment spec is fine.
+#[test]
+fn format_spec_on_enum_fn_bytes_shared_rejected_at_check() {
+    let needle = "format spec: type 'd' not valid for a string";
+    rejects("enum E:\n    A\n\ne := E.A\nprint(\"{e:d}\")\n", needle);
+    rejects("fn f() -> int:\n    return 1\n\nprint(\"{f:d}\")\n", needle);
+    rejects("b := b\"ab\"\nprint(\"{b:d}\")\n", needle);
+    entry_rejects(
+        "import std.concurrency\ns := Shared[int](1)\nprint(\"{s:d}\")\n",
+        needle,
+    );
+    rejects("newtype S = str\nprint(\"{S(\\\"a\\\"):d}\")\n", needle);
+    ok("enum E:\n    A\n\ne := E.A\nprint(\"{e:>5}\")\n");
+}
+
+// TICKET-142 (W14-32): `_` is the blank identifier in `:=`, `=` and destructuring, at every scope.
+#[test]
+fn blank_identifier_discards_in_every_position() {
+    let decls = "fn f() -> int?:\n    return None\n\nfn g() -> str?:\n    return None\n\n";
+    ok(&format!(
+        "{decls}fn main():\n    _ := f()\n    _ := g()\n    _ = f()\n    _ = g()\n    fn inner() -> int:\n        _ = g()\n        return 1\n    a, _ := (1, \"x\")\n    b, _ := (\"y\", 2)\n    print(inner() + a)\n    print(b)\n"
+    ));
+    ok(&format!("{decls}_ = f()\n"));
+}
+
+// TICKET-142 (W14-32): `_` is never declared, so it cannot be read; a loop variable named `_` binds.
+#[test]
+fn blank_identifier_is_not_readable() {
+    rejects("_ := 5\nprint(_)\n", "cannot use '_' as a value");
+    ok("for _ in range(2):\n    print(_)\n");
+}
+
+// TICKET-142 (W14-33): an all-constant int expression that overflows i64 is a compile error.
+#[test]
+fn constant_int_overflow_rejected_at_check() {
+    let needle = "does not fit in int";
+    rejects("print(9223372036854775807 + 1)\n", needle);
+    rejects("print(9223372036854775807 * 2)\n", needle);
+    rejects("print(-(-9223372036854775807 - 1))\n", needle);
+    rejects("x := 1\nprint(x + (9223372036854775807 + 1))\n", needle);
+    rejects(
+        "fn f(a: int) -> int:\n    return a\ny := f(9223372036854775807 * 2) + 1\n",
+        needle,
+    );
+    rejects(
+        "fn main():\n    print(9223372036854775807 + 1)\nmain()\n",
+        needle,
+    );
+    rejects(
+        "fn app[T](f: fn() -> T) -> T:\n    return f()\nprint(app(fn() -> int: 9223372036854775807 + 1))\n",
+        needle,
+    );
+    rejects(
+        "fn id[T](x: T) -> T:\n    return x\nprint(id(9223372036854775807 + 1))\n",
+        needle,
+    );
+    // Exactly one diagnostic even where the checker infers the expression more than once.
+    let errs = check_src("fn main():\n    print(9223372036854775807 + 1)\nmain()\n");
+    assert_eq!(
+        errs.iter().filter(|e| e.message.contains(needle)).count(),
+        1,
+        "got: {errs:?}"
+    );
+    let errs = check_src("print(1 + (9223372036854775807 + 1))\n");
+    assert_eq!(
+        errs.iter().filter(|e| e.message.contains(needle)).count(),
+        1,
+        "got: {errs:?}"
+    );
+    ok("print(9223372036854775807 - 1)\n");
+    ok("x := 9223372036854775807\nprint(x + 1)\n");
+    ok("print(1 / 0)\n");
+}
+
+// TICKET-142 (W14-33): the constant-overflow scan runs once per maximal arithmetic tree, so it is
+// linear on a left chain. One scan of a 3000-`+` chain visits 6001 nodes; a per-node rescan visits
+// about 4.5 million. Do not raise the bound: it is what tells the two apart.
+#[test]
+fn constant_int_overflow_scan_is_linear() {
+    fn visits(src: String) -> usize {
+        let tokens = lexer::tokenize(&src).expect("lex should succeed");
+        let module = parser::parse(tokens).expect("parse should succeed");
+        crate::on_frontend_stack_scoped(move || {
+            let mut c = Checker::new();
+            c.seed_native_prelude_sigs();
+            c.check_module(&module.stmts, None, &[]);
+            c.const_scan_visits
+        })
+    }
+    let typed = visits(format!("x := 1\ny := x{}\n", " + 1".repeat(3000)));
+    assert!(typed < 7000, "non-constant chain scanned {typed} nodes");
+    let constant = visits(format!("y := 1{}\n", " + 1".repeat(3000)));
+    assert!(constant < 7000, "constant chain scanned {constant} nodes");
+}
+
+// TICKET-142 (W14-33): `Channel(n)` takes its element type from the annotation / param slot.
+#[test]
+fn channel_ctor_takes_element_type_from_annotation_and_param() {
+    ok("ch: Channel[float] = Channel(1)\n");
+    ok("fn f(c: Channel[int]):\n    pass\nf(Channel(1))\n");
+    rejects("c := Channel(1)\n", "needs an element type");
+}
+
+// TICKET-142 (W14-33): a nested `fn`'s defaults apply at its call sites and through a value alias.
+#[test]
+fn nested_fn_default_applies_at_call() {
+    ok(
+        "fn outer() -> int:\n    fn f(x: int, y: int = 3) -> int:\n        return x + y\n    g := f\n    return f(1) + g(1, 2)\n",
+    );
+}
+
+// TICKET-142 (W14-33): a nested fn's default is evaluated in MODULE scope (the compiler's prologue
+// hides the frame's locals), so a default reading an enclosing local/param is a check error.
+#[test]
+fn nested_fn_default_cannot_read_enclosing_locals() {
+    let msg = "a nested fn's default cannot read the enclosing fn's locals";
+    // (a) a param
+    rejects(
+        "fn outer(n: int) -> int:\n    fn f(x: int = n) -> int:\n        return x\n    return f()\nprint(outer(5))\n",
+        msg,
+    );
+    // (b) a local
+    rejects(
+        "fn outer() -> int:\n    m := 4\n    fn f(x: int = m + 1) -> int:\n        return x\n    return f()\nprint(outer())\n",
+        msg,
+    );
+    // (c) a local shadowing a module global (the prologue would silently read the global)
+    rejects(
+        "K := 7\nfn outer() -> int:\n    K := 100\n    fn f(x: int = K) -> int:\n        return x\n    return f()\nprint(outer())\n",
+        msg,
+    );
+    // (d) a sibling nested fn
+    rejects(
+        "fn outer() -> int:\n    fn one() -> int:\n        return 1\n    fn f(x: int = one()) -> int:\n        return x\n    return f()\nprint(outer())\n",
+        msg,
+    );
+    // (e) an interpolation hole
+    rejects(
+        "fn outer(n: int) -> str:\n    fn f(s: str = \"n={n}\") -> str:\n        return s\n    return f()\nprint(outer(1))\n",
+        msg,
+    );
+}
+
+#[test]
+fn nested_fn_default_reads_module_global() {
+    ok(
+        "K := 7\nfn outer() -> int:\n    fn f(x: int = K, y: int = 2) -> int:\n        return x + y\n    g := f\n    return f() + f(1) + g() + g(1, 1)\nprint(outer())\n",
+    );
+    ok(
+        "fn outer() -> int:\n    fn f(xs: List[int] = [], n: int = \"ab\".len()) -> int:\n        return xs.len() + n\n    return f()\nprint(outer())\n",
+    );
+}
+
+// A lambda cannot declare a default, so it keeps exact arity and today's message.
+#[test]
+fn lambda_call_keeps_exact_arity() {
+    rejects(
+        "h := fn(x: int) -> int: x\nprint(h())\n",
+        "'closure' expects 1 argument(s), got 0",
+    );
+}

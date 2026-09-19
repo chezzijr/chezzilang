@@ -292,6 +292,16 @@ ANSWER += 1                   # ✗ every compound form is caught too
   that *any* imported global is already read-only — a from-imported value is a snapshot copy — so the
   const marking sharpens the message, it doesn't add the restriction.)
 
+#### The blank identifier `_`
+
+`_` is Go's blank identifier in `:=`, `=` and destructuring, at **every** scope (TICKET-142):
+`_ := e` and `_ = e` evaluate `e` and discard it, any number of times, with any types — so the
+discarded-`Result` warning's own escape (`_ := f()`, then `_ := g()`) works at module top level too.
+`_` is never declared, so it has no type to freeze and no global slot, and reading it is an error
+(`cannot use '_' as a value`; Go: `cannot use _ as value or type`). `_ := 5; print(_)` printed `5`
+before. A loop variable, parameter or match pattern named `_` still binds as before. `_ := f()`
+stays a `let`, not an expression statement, so it does not fire the discarded-`Result` warning.
+
 #### Re-declaring an ordinary binding — rebind anywhere, retype only in a fn
 
 Re-declaring a name with `:=` (or a second typed let) is legal, but what it *means* differs by scope,
@@ -646,7 +656,11 @@ Highest → lowest. Same row = same precedence, left-associative unless noted.
 > looser than `\|` < `^` < `&` < shifts). A shift amount outside `0..64` is a runtime error. A left
 > shift (`<<`) that drops a significant bit overflows like `+ - * /` — a recoverable
 > `integer overflow in Shl` (e.g. `1 << 63`), not a silent wrap; round-trip-safe shifts incl.
-> `-1 << 63 == INT_MIN` still succeed. `>>` never overflows.
+> `-1 << 63 == INT_MIN` still succeed. `>>` never overflows. An **all-constant** int expression
+> under `+ - * / %` and unary `-` that overflows `i64` (`print(9223372036854775807 + 1)`) is a
+> **compile error** (TICKET-142; Go: `constant ... overflows int`); the same overflow with a
+> non-constant operand (`m := 9223372036854775807; m + 1`) stays the runtime fault. `<<` is not
+> folded, so `1 << 63` keeps its runtime `integer overflow in Shl`.
 >
 > `??` binds tighter than every binary operator, so `m.get("a") ?? 0 + 1` is
 > `(m.get("a") ?? 0) + 1`, yielding `2`. `not` binds looser than the comparisons, so `not x in xs`
@@ -994,6 +1008,14 @@ different ancestor on each:
   (`def f(xs=[])` accumulates). Chezzi re-evaluates on **every omitting call**, so `f(n: int = bump())`
   returns `1`, `2`, `3` on three calls, and `f(xs: List[int] = [])` hands each call a fresh list.
   Passing the argument explicitly does not evaluate the default at all.
+
+A **nested** `fn`'s defaults apply at a direct call **and** through a value alias (`g := f; g()`), and
+are evaluated in **module scope**, like a top-level fn's (TICKET-142). A default that reads the
+enclosing fn's param, a local, a sibling nested fn, or a local shadowing a module global is a check
+error: *"a nested fn's default cannot read the enclosing fn's locals: 'n' is local here, and a
+default is evaluated in module scope (pass it as an argument, or read a module-level binding)"*.
+CPython reads the enclosing local at `def` time; Chezzi rejects it rather than silently reading a
+global. A lambda (`fn(x: int) -> int: x`) cannot declare a default, so it keeps exact arity.
 
 Because parameters are not in scope in the declaring module's top level, a param-referencing default
 (`y: int = x + 1`) is rejected: *"default value cannot reference parameter 'x' (a default is evaluated
@@ -2662,6 +2684,11 @@ n: int = int(uid)      # unwrap via the cast builtin → 10
 # needs_int(uid)       # ERROR: a UserId is not an int
 ```
 
+In an interpolation hole, a newtype over `int`/`float` formats as its underlying number **when a
+format spec is present** (TICKET-142): `"{UserId(7):04}"` is `0007` and `"{UserId(7):>5}"` is
+`    7`, as Go's `%04d` / `%5v` print. A bare `"{uid}"` / `print(uid)` still prints the `UserId(7)`
+text form (Go and Python both print `7`; the display form is unchanged here).
+
 Crossing the boundary is always **explicit** — either **construct** (`UserId(10)`) or **cast-unwrap**
 via the matching cast builtin: `int(uid)` / `float(m)` return the inner value (and for a
 `newtype N = str`, `str(n)` unwraps the inner string; for an aggregate underlying the matching
@@ -3941,14 +3968,21 @@ trailing `.0`. An **unknown type char** or trailing junk in the spec is a **pars
 check`** whenever the value's static type is a **concrete scalar** (`int`/`float`/`str`/`bool`) — a
 provably-wrong spec/type pairing is a static error, in the spirit of Chezzi's statically-typed model
 (this is a **deliberate divergence from Python**, where such a mismatch is a runtime `ValueError`). A
-**concrete `List`/`Map`/`Set`/tuple/`Option`/`Result`** value is checked the same way, against the
-STRING rules (it renders via the runtime's text-form path) — `xs := [1]; "{xs:d}"` and `n: int? =
-None; "{n:+}"` are both compile errors naming the container type (TICKET-124); a width/fill spec
-(`{o:>12}` on an `Option[float]`) still passes, exactly as it would on a `str`.
+**concrete non-scalar** value is checked the same way, against the STRING rules (it renders via the
+runtime's text-form path): a `List`/`Map`/`Set`/tuple/`Option`/`Result` (TICKET-124), and — since
+TICKET-142 — a struct, enum, `bytes`, a fn value, and every native struct (`Shared`, `Channel`,
+`AtomicInt`, `Writer`, …). `xs := [1]; "{xs:d}"`, `n: int? = None; "{n:+}"`, a struct `{p:d}` and an
+enum `{e:d}` are all compile errors naming the type; a width/fill spec (`{o:>12}` on an
+`Option[float]`) still passes, exactly as it would on a `str`. A **numeric newtype** (underlying
+`int`/`float`, through any newtype chain) is the exception: with a spec present it formats as its
+underlying number, as Go's `type M int; fmt.Printf("%04d %x", M(7), M(255))` prints `0007 ff` —
+`{M(1.5):.2f}` is `1.50`, `{N(7):04}` is `0007`, `{N(7):>5}` is `    7`. A `str`/`bool`/aggregate
+newtype keeps its text form and is checked against the string rules.
 The **runtime** validation stays as an identical backstop (same wording, single-sourced in
-`spec_valid_for_scalar`): it still fires for a value whose type the checker can't pin to a concrete
-scalar or concrete container — a generic `fn show[T](v: T): "{v:.2f}"` instantiated with a `str`, an
-`Unknown`, or a protocol existential — where the mismatch is only knowable at run time. The spec is parsed once,
+`spec_valid_for_scalar`): it fires only for a value whose type the checker can't pin to a concrete
+type — a generic `fn show[T](v: T): "{v:.2f}"` instantiated with a `str`, an `Unknown`, or a
+protocol existential — where the mismatch is only knowable at run time. A program that passes
+`check` never faults with `format spec:` on a concrete-typed hole. The spec is parsed once,
 one module (`src/fmtspec.rs`), so its output is byte-identical across runs. The `:` split is bracket/quote-aware — a `:` inside an index, string key, or
 slice (`{m["a:b"]}`, `{xs[1:2]}`) is *not* the spec separator. **Ternaries:** a bare interpolated
 ternary `{if b: a else: b}` works (its colons are part of the expression, not a spec); to attach a

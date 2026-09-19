@@ -1,0 +1,37 @@
+# TICKET-142 (W14-32): `_` is Go's blank identifier in `:=`, `=` and destructuring, at every scope.
+# `_ := e` / `_ = e` evaluate `e` and discard it; `_` is never declared, so it has no type to freeze
+# and no module global slot.
+#
+# This file must NEVER gain a top-level `_ :=`: `collect_globals` pre-scans every top-level `Let`, so
+# one such line would give `_` a global slot and hide a missing `_ =` discard in the compiler. The
+# top-level `_ :=` shape lives in `blank_identifier_toplevel_let_test.chz`.
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+fn f() -> int?:
+    return None
+
+fn g() -> str?:
+    return None
+
+_ = f()
+_ = g()
+
+test fn blank_assign_in_fn_without_decl():
+    _ = g()
+    assert true
+
+test fn blank_in_nested_fn():
+    fn inner() -> int:
+        _ = g()
+        return 1
+    assert inner() == 1
+
+test fn blank_in_destructure():
+    a, _ := (1, "x")
+    b, _ := ("y", 2)
+    assert a == 1
+    assert b == "y"
+
+test fn blank_let_twice_in_fn():
+    _ := f()
+    _ := g()
+    assert true

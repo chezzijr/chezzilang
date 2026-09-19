@@ -2352,6 +2352,18 @@ struct Checker {
     /// like other one-shot hints, so only an if/match expression at that exact position (and, through
     /// it, its own branches) ever sees it.
     ret_coerce_sink: Option<Ty>,
+    /// TICKET-142 (W14-33): true while the checker is inferring the CHILD of a `Binary`/`Unary`
+    /// node, so `infer_kind` starts its constant-overflow scan only at the root of a maximal
+    /// arithmetic tree (one linear scan per tree, never one per node). Set/restored by the
+    /// `infer_kind` wrapper.
+    arith_parent: bool,
+    /// TICKET-142 (W14-33): total nodes entered by every `const_int_scan`; pinned by a test so the
+    /// scan stays linear on a `MAX_AST_DEPTH` chain.
+    pub(super) const_scan_visits: usize,
+    /// TICKET-142 (W14-33): spans whose constant-overflow error is already reported, so a
+    /// re-inferred root does not report twice. Speculative state: `DiagMark` snapshots and
+    /// `diag_rollback` restores it.
+    const_overflow_seen: std::collections::HashSet<Span>,
     /// For each `spawn:` block body currently being checked, the local-scope depth (`scopes.len()`)
     /// at the point the task body opened. A binding living at a scope index *below* the innermost
     /// floor is a **captured** binding — read-only inside the task (assigning to it is an error).

@@ -1375,36 +1375,23 @@ impl Checker {
                 // real column there is nothing left to anchor, and the checker finally agrees with
                 // the compiler, which never re-anchored.
                 let ty = self.infer_value(e);
-                // Static format-spec/value-type check: when the value is a CONCRETE scalar
-                // and the spec is provably wrong for it, reject at COMPILE time (same wording
-                // the runtime backstop would emit — single-sourced in `fmtspec`). Only fires
-                // for Int/Float/Str/Bool; Unknown, a generic `Param(T)`, protocols, structs,
-                // lists, bytes, ... all fall through and keep the runtime backstop.
+                // Static format-spec/value-type check: a CONCRETE static type is checked at COMPILE
+                // time (same wording the runtime backstop would emit — single-sourced in
+                // `fmtspec`); only `Unknown`, a generic `Param(T)` and a protocol existential keep
+                // the runtime backstop (see `format_spec_kind`).
                 if let Some(fs) = spec
-                    && let Some(kind) = scalar_kind_of(&ty)
+                    && let Some((kind, text_form)) = self.format_spec_kind(&ty)
                     && let Err(msg) = crate::fmtspec::spec_valid_for_scalar(fs, kind)
                 {
-                    self.error(span, msg);
-                } else if let Some(fs) = spec
-                    && matches!(
-                        &ty,
-                        Ty::List(_)
-                            | Ty::Map(..)
-                            | Ty::Set(_)
-                            | Ty::Tuple(_)
-                            | Ty::Option(_)
-                            | Ty::Result(..)
-                    )
-                    && let Err(msg) =
-                        crate::fmtspec::spec_valid_for_scalar(fs, crate::fmtspec::ScalarKind::Str)
-                {
-                    // TICKET-124 (W13-18): a List/Map/Set/tuple/Option/Result value renders via the
-                    // runtime's `FmtArg::Other` → `render_str` path — same string-format rules a
-                    // scalar `Str` value follows — so a spec that fails those rules is provably
-                    // wrong here too, and `docs/syntax.md` says the mismatch is caught by `check`
-                    // whenever the static type is concrete (an `Option`/`Result`/collection IS, and
-                    // is never `T`/`Unknown`/a protocol existential — the runtime backstop's domain).
-                    self.error(span, format!("{msg} ({ty} is formatted as its text form)"));
+                    // TICKET-124 (W13-18) / TICKET-142 (W14-19): a value that renders as its text
+                    // form goes through the runtime's `FmtArg::Other` → `render_str` path — the same
+                    // string-format rules a scalar `Str` follows — so a spec that fails those rules
+                    // is provably wrong here too.
+                    if text_form {
+                        self.error(span, format!("{msg} ({ty} is formatted as its text form)"));
+                    } else {
+                        self.error(span, msg);
+                    }
                 }
                 ord += 1;
             }
@@ -1412,6 +1399,37 @@ impl Checker {
         self.kw_frag_ctx = saved_ctx;
         self.kw_frag_ord = saved_ord;
         Ty::Str
+    }
+
+    /// The [`crate::fmtspec::ScalarKind`] a format spec on a value of static type `ty` is checked
+    /// against, plus whether the value renders as its text form (for the diagnostic). `None` keeps
+    /// the runtime backstop: `Unknown`, a generic `Param(T)`, a protocol existential, a module. A
+    /// newtype is peeled to its underlying first — a numeric one formats as its number (`{N(7):04}`
+    /// is `0007`, as Go's `%04d` prints), any other renders as its text form.
+    fn format_spec_kind(&self, ty: &Ty) -> Option<(crate::fmtspec::ScalarKind, bool)> {
+        use crate::fmtspec::ScalarKind;
+        let mut cur = ty.clone();
+        let mut peeled = false;
+        // A newtype chain is finite (a cyclic one is rejected at declaration); bound the peel anyway.
+        for _ in 0..64 {
+            if !matches!(cur, Ty::NewType(..)) {
+                break;
+            }
+            cur = self.newtype_unwrap_target(&cur)?;
+            peeled = true;
+        }
+        match (&cur, peeled) {
+            (Ty::Int, _) => Some((ScalarKind::Int, false)),
+            (Ty::Float, _) => Some((ScalarKind::Float, false)),
+            (Ty::Param(_) | Ty::Unknown | Ty::Protocol(..), true) => None,
+            // A newtype over text (or anything else) keeps its `Name(inner)` text form.
+            (_, true) => Some((ScalarKind::Str, true)),
+            (_, false) => match scalar_kind_of(&cur) {
+                Some(kind) => Some((kind, false)),
+                None if renders_as_text(&cur) => Some((ScalarKind::Str, true)),
+                None => None,
+            },
+        }
     }
 
     /// Infer an expression that is used in **value position** (assignment RHS, a call/collection
@@ -1451,7 +1469,37 @@ impl Checker {
         ty
     }
 
+    /// TICKET-142 (W14-33): the dispatch every expression inference passes through. Wraps
+    /// [`Self::infer_kind_inner`] with the constant-overflow check: at the root of each maximal
+    /// arithmetic (`Binary`/`Unary`) tree, run ONE `const_int_scan` over the whole tree and report
+    /// each overflow once. A child of a `Binary`/`Unary` sees `arith_parent` and skips (its parent's
+    /// scan already entered it); a child of any other node (a call argument under a `+`) starts its
+    /// own tree. Each node is scanned at most once, so the check is linear even on a
+    /// `MAX_AST_DEPTH` chain. Must not touch `ret_coerce_sink` (the inner fn takes it first).
     pub(super) fn infer_kind(&mut self, expr: &Expr) -> Ty {
+        let covered = self.arith_parent;
+        let is_arith = matches!(expr.kind, ExprKind::Unary { .. } | ExprKind::Binary { .. });
+        if is_arith && !covered {
+            let mut found = Vec::new();
+            crate::ast::const_int_scan(expr, &mut self.const_scan_visits, &mut found);
+            for (sp, op) in found {
+                if self.const_overflow_seen.insert(sp) {
+                    self.error(
+                        sp,
+                        format!(
+                            "integer overflow in {op}: this constant expression does not fit in int (i64)"
+                        ),
+                    );
+                }
+            }
+        }
+        self.arith_parent = is_arith;
+        let ty = self.infer_kind_inner(expr);
+        self.arith_parent = covered;
+        ty
+    }
+
+    fn infer_kind_inner(&mut self, expr: &Expr) -> Ty {
         let ret_sink = self.ret_coerce_sink.take();
         match &expr.kind {
             ExprKind::Int(_) => Ty::Int,
@@ -2504,6 +2552,16 @@ impl Checker {
                      bound name) or alias with `import {dotted} as {bound}` then `{bound}.<Name>`; \
                      multi-level paths like `{name}.….<Name>` are not supported"
                 ),
+            );
+            return Ty::Unknown;
+        }
+        // TICKET-142 (W14-32): `_` is the blank identifier — never declared, so it cannot be read
+        // (Go: `cannot use _ as value or type`). A loop variable / parameter named `_` still binds
+        // and resolves in the first arm above.
+        if name == "_" {
+            self.error(
+                span,
+                "cannot use '_' as a value — '_' is the blank identifier; `_ := e` and `_ = e` discard e",
             );
             return Ty::Unknown;
         }
@@ -4956,16 +5014,10 @@ impl Checker {
 
 /// Map a type to the [`crate::fmtspec::ScalarKind`] it renders as for a static format-spec check —
 /// but ONLY for CONCRETE scalars. `bool` folds into `Str` (it renders via the runtime `FmtArg::Other`
-/// → `render_str` path). Everything else (Unknown, `Param(T)`, protocols, structs, lists, bytes, …)
-/// returns `None` so the static check is skipped and the runtime keeps its identical backstop — the
+/// → `render_str` path). Everything else returns `None`: a type that renders as its text form is
+/// classified by [`renders_as_text`] (and checked against `ScalarKind::Str` by
+/// `Checker::format_spec_kind`), and `Unknown`/`Param(T)`/protocols keep the runtime backstop — the
 /// soundness boundary that lets a generic body `"{v:.2f}"` (v: T could be float) pass check.
-///
-/// TICKET-124 (W13-18): `check_interp_chunks`'s caller has its own sibling branch for a CONCRETE
-/// container (`List`/`Map`/`Set`/tuple/`Option`/`Result`), which is not `scalar_kind_of` and not
-/// added here — a container is never a "scalar" and mixing it into this map would license a spec
-/// this fn's own callers never expect for a scalar (`d`/`x`/`.2f` are meaningless on a `List`). The
-/// container branch checks against `ScalarKind::Str` directly instead, since a container renders via
-/// the same `render_str` path a scalar `Str` does.
 fn scalar_kind_of(ty: &Ty) -> Option<crate::fmtspec::ScalarKind> {
     use crate::fmtspec::ScalarKind;
     match ty {
@@ -4973,5 +5025,48 @@ fn scalar_kind_of(ty: &Ty) -> Option<crate::fmtspec::ScalarKind> {
         Ty::Float => Some(ScalarKind::Float),
         Ty::Str | Ty::Bool => Some(ScalarKind::Str),
         _ => None,
+    }
+}
+
+/// TICKET-142 (W14-19): does a value of this CONCRETE type render through the runtime's text form
+/// (`render_str`) when a format spec is present? Measured for every native struct (`FileInfo`,
+/// `AtomicInt`, `Atomic`, `Executor`, `RwShared`, `Channel`, `Writer`, `ptr`): none renders as a
+/// scalar. An exhaustive `match` with no `_` arm, so a new `Ty` variant does not compile until it is
+/// classified — a type whose runtime value IS a scalar must return `false` here.
+fn renders_as_text(ty: &Ty) -> bool {
+    match ty {
+        Ty::Bytes
+        | Ty::ByteArray
+        | Ty::List(_)
+        | Ty::Map(..)
+        | Ty::Set(_)
+        | Ty::Tuple(_)
+        | Ty::Option(_)
+        | Ty::Result(..)
+        | Ty::Func { .. }
+        | Ty::BuiltinFn { .. }
+        | Ty::Struct(..)
+        | Ty::Enum(..)
+        | Ty::NewType(..)
+        | Ty::Channel(_)
+        | Ty::Shared(_)
+        | Ty::Atomic(_)
+        | Ty::AtomicInt
+        | Ty::RwShared(_)
+        | Ty::Executor
+        | Ty::Socket
+        | Ty::Listener
+        | Ty::Writer
+        | Ty::Reader
+        | Ty::Ptr => true,
+        Ty::Int
+        | Ty::Float
+        | Ty::Bool
+        | Ty::Str
+        | Ty::Nil
+        | Ty::Param(_)
+        | Ty::Protocol(..)
+        | Ty::Module(_)
+        | Ty::Unknown => false,
     }
 }

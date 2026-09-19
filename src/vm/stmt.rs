@@ -2480,11 +2480,20 @@ impl Vm {
     ) -> Result<(), RuntimeError> {
         let v = self.stack[self.stack.len() - 1]; // leave rooted; rendering may run user code
         let mut out = String::new();
-        if let Some(n) = self.int_val(v) {
+        // TICKET-142 (W14-19): a newtype over `int`/`float` (through any newtype chain) formats as
+        // its underlying number when a spec is present (`{N(7):04}` is `0007`, as Go's `%04d`).
+        // `v` stays on the stack and roots `inner`; a non-numeric newtype keeps the text-form path.
+        let mut num = v;
+        while let Some(h) = num.as_obj()
+            && let Obj::NewType { inner, .. } = self.heap.get(h)
+        {
+            num = *inner;
+        }
+        if let Some(n) = self.int_val(num) {
             crate::fmtspec::apply(spec, crate::fmtspec::FmtArg::Int(n), &mut out)
                 .map_err(|m| self.err(m, span))?;
-        } else if v.is_float() {
-            let x = self.float_of(v);
+        } else if num.is_float() {
+            let x = self.float_of(num);
             crate::fmtspec::apply(spec, crate::fmtspec::FmtArg::Float(x), &mut out)
                 .map_err(|m| self.err(m, span))?;
         } else if let Some(h) = v.as_obj()

@@ -1,0 +1,15 @@
+# TICKET-142 (W14-19): a newtype over `int`/`float` formats as its underlying NUMBER when a format
+# spec is present, as Go's `type N int; fmt.Printf("%04d", N(7))` prints `0007`. The checker accepts a
+# numeric spec on such a newtype and the runtime unwraps it (through any newtype chain); a bare `{n}`
+# still prints the `N(7)` text form. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+newtype M = float
+newtype N = int
+newtype A = N
+
+test fn numeric_newtype_formats_as_its_number():
+    assert "{M(1.5):.2f}" == "1.50"
+    assert "{N(7):04}" == "0007"
+    assert "{N(255):x}" == "ff"
+    assert "{N(7):+}" == "+7"
+    assert "{N(7):>5}" == "    7"
+    assert "{A(N(7)):04}" == "0007"
