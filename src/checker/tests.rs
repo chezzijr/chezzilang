@@ -33328,3 +33328,13 @@ fn question_op_in_undeclared_return_closure_names_the_missing_return_type() {
         "'?' used in a function whose return type is not declared",
     );
 }
+
+/// TICKET-146 (W14-23): a tuple, `List` and `Option` are ordered lexicographically when every
+/// element type is `Comparable`; the checker must accept `<` on them and `.sort()` of a tuple list.
+#[test]
+fn comparable_tuple_list_option_ok() {
+    ok("print((1, 2) < (1, 3))\n");
+    ok("print([1] < [2])\n");
+    ok("print(Some(1) < Some(2))\n");
+    ok("xs := [(2, \"b\"), (1, \"z\")]\nxs.sort()\n");
+}
