@@ -56,8 +56,8 @@ test fn float_sum_neumaier_vectors():
 test fn upper_format_specs_upper_case_non_finite():
     nan := 0.0 / 0.0
     inf := 1.0 / 0.0
-    got := "{nan:G} {nan:E} {inf:E} {1.5:E}"
-    assert got == "NAN NAN INF 1.500000E+00", got
+    got := "{nan:G} {nan:E} {inf:F} {1.5:F} {1.5:E}"
+    assert got == "NAN NAN INF 1.500000 1.500000E+00", got
     lower := "{inf:e} {nan:g} {inf:%}"
     assert lower == "inf NaN inf%", lower
 

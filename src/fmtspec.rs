@@ -248,7 +248,7 @@ fn to_align(c: char) -> Align {
 fn is_type(c: char) -> bool {
     matches!(
         c,
-        'd' | 'f' | 'x' | 'X' | 'b' | 'o' | 'e' | 'E' | '%' | 'g' | 'G'
+        'd' | 'f' | 'F' | 'x' | 'X' | 'b' | 'o' | 'e' | 'E' | '%' | 'g' | 'G'
     )
 }
 
@@ -406,7 +406,13 @@ pub fn spec_valid_for_scalar(spec: &FormatSpec, kind: ScalarKind) -> Result<(), 
             if spec.precision.is_some()
                 && !matches!(
                     spec.ty,
-                    Some('f') | Some('e') | Some('E') | Some('%') | Some('g') | Some('G')
+                    Some('f')
+                        | Some('F')
+                        | Some('e')
+                        | Some('E')
+                        | Some('%')
+                        | Some('g')
+                        | Some('G')
                 )
             {
                 return Err("format spec: precision not allowed on an integer".to_string());
@@ -481,7 +487,7 @@ fn render_int(spec: &FormatSpec, n: i64) -> Result<(String, String, bool), Strin
         Some('b') => format!("{mag:b}"),
         Some('o') => format!("{mag:o}"),
         // Float type chars promote the int to a float.
-        Some('f') => return render_float(spec, n as f64),
+        Some('f') | Some('F') => return render_float(spec, n as f64),
         Some('e') => return render_float(spec, n as f64),
         Some('E') => return render_float(spec, n as f64),
         Some('%') => return render_float(spec, n as f64),
@@ -512,7 +518,7 @@ fn render_float(spec: &FormatSpec, x: f64) -> Result<(String, String, bool), Str
     let body = match spec.ty {
         // Fixed-point at CPython's default precision 6. This must NEVER emit scientific notation
         // and must not share the no-type `repr_float` path below.
-        Some('f') => {
+        Some('f') | Some('F') => {
             let s = format!("{mag:.*}", spec.precision.unwrap_or(6));
             if spec.alt { force_point(s) } else { s }
         }
@@ -541,6 +547,13 @@ fn render_float(spec: &FormatSpec, x: f64) -> Result<(String, String, bool), Str
         }
         Some('g') | Some('G') => render_g(mag, spec),
         Some(_) => unreachable!("validity checked by spec_valid_for_scalar"),
+    };
+    // CPython upper-cases `inf`/`nan` under `E`/`F`/`G` (`INF`, `NAN`); lower-case type chars and
+    // the no-type path keep `inf` (and Chezzi's `NaN`).
+    let body = if !x.is_finite() && matches!(spec.ty, Some('E') | Some('F') | Some('G')) {
+        body.to_ascii_uppercase()
+    } else {
+        body
     };
     Ok((sign_prefix(neg, spec.sign), body, true))
 }
@@ -1000,8 +1013,22 @@ mod tests {
         assert_eq!(ok_apply("#g", FmtArg::Float(1e20)), "1.00000e+20");
         assert_eq!(ok_apply("g", FmtArg::Float(f64::INFINITY)), "inf");
         assert_eq!(ok_apply("#g", FmtArg::Float(f64::INFINITY)), "inf");
-        // CPython prints `NAN`; Gotcha 5 casing divergence
-        assert_eq!(ok_apply("G", FmtArg::Float(f64::NAN)), "NaN");
+        // Upper-case type chars upper-case a non-finite value like CPython (`INF`/`-INF`/`NAN`);
+        // lower-case ones keep `inf` (and `NaN`, the one documented casing divergence).
+        assert_eq!(ok_apply("G", FmtArg::Float(f64::NAN)), "NAN");
+        assert_eq!(ok_apply("g", FmtArg::Float(f64::NAN)), "NaN");
+        assert_eq!(ok_apply("E", FmtArg::Float(f64::INFINITY)), "INF");
+        assert_eq!(ok_apply("E", FmtArg::Float(f64::NEG_INFINITY)), "-INF");
+        assert_eq!(ok_apply("F", FmtArg::Float(f64::NEG_INFINITY)), "-INF");
+        assert_eq!(ok_apply("F", FmtArg::Float(1.5)), "1.500000");
+        assert_eq!(ok_apply("F", FmtArg::Int(2)), "2.000000");
+        assert_eq!(
+            ok_apply("10.3E", FmtArg::Float(f64::INFINITY)),
+            "       INF"
+        );
+        assert_eq!(ok_apply("e", FmtArg::Float(f64::INFINITY)), "inf");
+        assert_eq!(ok_apply("#f", FmtArg::Float(f64::INFINITY)), "inf");
+        assert_eq!(ok_apply("%", FmtArg::Float(f64::INFINITY)), "inf%");
     }
 
     #[test]

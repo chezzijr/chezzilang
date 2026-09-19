@@ -3951,12 +3951,12 @@ print("{42: d}")          # leading-space sign           → " 42"
   `"0,001,000"`, nine chars for a width of eight — matching CPython).
 - **precision** `.N`: float decimals; on a **string** it **truncates** to N chars (Python parity);
   also capped at 4096.
-- **type**: `d` int · `f` fixed float (default precision 6, NEVER scientific — `{1e16:f}` gives
+- **type**: `d` int · `f`/`F` fixed float (default precision 6, NEVER scientific — `{1e16:f}` gives
   `"10000000000000000.000000"`) · `x`/`X` hex · `b` binary · `o` octal · `e`/`E` scientific
   (default precision 6, exponent always signed and zero-padded to ≥2 digits, e.g. `1.234568e+05`) ·
   `g`/`G` general format (fixed-point when the decimal exponent falls in `-4..precision`, scientific
   otherwise; trailing zeros stripped unless `#`; default precision 6, minimum 1) ·
-  `%` percent (×100 then `%`). A float type char (`f`/`e`/`E`/`g`/`G`/`%`) promotes an int.
+  `%` percent (×100 then `%`). `inf`/`-inf`/`nan` print upper case (`INF`, `-INF`, `NAN`) under the upper-case type chars `E`/`F`/`G`, like CPython, and lower case under `e`/`f`/`g`/`%` (`NaN` stays the one documented casing divergence there). A float type char (`f`/`F`/`e`/`E`/`g`/`G`/`%`) promotes an int.
 
 A **bare** `{expr}` (or `{expr:}` with an empty spec) renders a whole float with a trailing `.0` —
 e.g. `5.0`. A `.N` precision with **no type char** is CPython's general format, not fixed-point:
@@ -3989,7 +3989,7 @@ ternary `{if b: a else: b}` works (its colons are part of the expression, not a 
 spec to a ternary, **parenthesize** it — `{(if b: 1 else: 2):>5}`.
 
 **Plain float formatting matches CPython `repr()`/`str()` exactly, with ONE exception: `NaN` casing.**
-Chezzi prints `NaN` where CPython prints `nan` (`inf`/`-inf` agree). It is the single differing byte
+Chezzi prints `NaN` where CPython prints `nan` (`inf`/`-inf` agree; the upper-case `E`/`F`/`G` type chars print `INF`/`-INF`/`NAN` like CPython). It is the single differing byte
 across the whole float surface, and it differs on **every** path — bare `print`, `str()`,
 interpolation, container element, `{x:.2f}`, `{x:>8}`. Test against `NaN`, or compare with
 `math.is_nan` instead of a string. (`docs/gaps.md` **W8-18**.) A bare float — `print(x)`,
