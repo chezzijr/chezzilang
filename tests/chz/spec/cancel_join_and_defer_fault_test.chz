@@ -41,3 +41,41 @@ test fn cancelled_owner_does_not_run_code_after_nursery_join():
                 panic("boom")
     assert "{r}".starts_with("Err(")
     assert ran.get() == 0
+
+
+# Executor twin of the first test: `shutdown_now()` cancels the parked job; its defer fault surfaces.
+test fn shutdown_now_surfaces_a_cancelled_jobs_defer_fault():
+    started := Channel[int](1)
+    ex := Executor()
+    ex.submit(fn(): cleanup_fails(started))
+    _ := started.recv()
+    r := recover: ex.shutdown_now()
+    assert "{r}" == "Err('cleanup failed')"
+
+
+fn owner(started: Channel[int], hold: Channel[int]):
+    parallel:
+        spawn cleanup_fails(started)
+        _ := hold.recv()
+
+test fn shutdown_now_surfaces_a_nested_childs_defer_fault():
+    started := Channel[int](1)
+    hold := Channel[int]()
+    ex := Executor()
+    ex.submit(fn(): owner(started, hold))
+    _ := started.recv()
+    r := recover: ex.shutdown_now()
+    assert "{r}" == "Err('cleanup failed')"
+
+
+# Ranking pin: a cancelled sibling's defer fault is a consequence of the root cause, so it ranks
+# BELOW every ordinary fault (asyncio TaskGroup lists ['boom', 'cleanup failed']).
+test fn a_sibling_fault_outranks_a_cancelled_siblings_defer_fault():
+    started := Channel[int](1)
+    r := recover:
+        parallel:
+            spawn cleanup_fails(started)
+            spawn:
+                _ := started.recv()
+                panic("boom")
+    assert "{r}" == "Err('boom')"
