@@ -2658,10 +2658,7 @@ impl Vm {
                     return Ok(());
                 }
                 out.push('[');
-                self.repr_active.push(h);
-                let r = self.stringify_seq_into(out, &items, span, depth + 1);
-                self.repr_active.pop();
-                r?;
+                self.stringify_open_seq(out, h, &items, span, depth)?;
                 out.push(']');
             }
             Obj::Tuple(items) => {
@@ -2680,24 +2677,7 @@ impl Vm {
                     return Ok(());
                 }
                 out.push('{');
-                self.repr_active.push(h);
-                let mut r = Ok(());
-                for (i, (_, k, mv)) in m.entries.iter().enumerate() {
-                    if i > 0 {
-                        out.push_str(", ");
-                    }
-                    r = self.stringify_nested_into(out, *k, span, depth + 1);
-                    if r.is_err() {
-                        break;
-                    }
-                    out.push_str(": ");
-                    r = self.stringify_nested_into(out, *mv, span, depth + 1);
-                    if r.is_err() {
-                        break;
-                    }
-                }
-                self.repr_active.pop();
-                r?;
+                self.stringify_open_map(out, h, &m.entries, span, depth)?;
                 out.push('}');
             }
             Obj::Set(s) => {
@@ -2708,19 +2688,7 @@ impl Vm {
                     return Ok(());
                 } else {
                     out.push('{');
-                    self.repr_active.push(h);
-                    let mut r = Ok(());
-                    for (i, (_, e)) in s.entries.iter().enumerate() {
-                        if i > 0 {
-                            out.push_str(", ");
-                        }
-                        r = self.stringify_nested_into(out, *e, span, depth + 1);
-                        if r.is_err() {
-                            break;
-                        }
-                    }
-                    self.repr_active.pop();
-                    r?;
+                    self.stringify_open_set(out, h, &s.entries, span, depth)?;
                     out.push('}');
                 }
             }
@@ -2778,27 +2746,7 @@ impl Vm {
                     return Ok(());
                 }
                 let _ = write!(out, "{display}(");
-                self.repr_active.push(h);
-                let mut r = Ok(());
-                for (i, fv) in fields.iter().enumerate() {
-                    if i > 0 {
-                        out.push_str(", ");
-                    }
-                    match def.as_ref().and_then(|d| d.fields.get(i)) {
-                        Some(k) => {
-                            let _ = write!(out, "{k}=");
-                        }
-                        None => {
-                            let _ = write!(out, "{i}=");
-                        }
-                    }
-                    r = self.stringify_nested_into(out, *fv, span, depth + 1);
-                    if r.is_err() {
-                        break;
-                    }
-                }
-                self.repr_active.pop();
-                r?;
+                self.stringify_open_fields(out, h, def.as_ref(), fields.as_slice(), span, depth)?;
                 out.push(')');
             }
             Obj::Enum {
@@ -2919,6 +2867,114 @@ impl Vm {
             Obj::Iter { .. } => out.push_str("<iterator>"),
         }
         Ok(())
+    }
+
+    // W14-35c — the four open-render helpers below hold `repr_active` open around one container's
+    // element walk and close it on the `Ok` AND the `Err` path. They are `#[inline(never)]` so the
+    // `Result` temporaries they need stay out of `stringify_obj_into`'s frame: a `str` hook that
+    // re-enters `str(self)` recurses through that frame, and a bigger frame would trip the native
+    // stack before the call-depth cap (`self_referential_stringable_hits_depth_limit`).
+
+    #[inline(never)]
+    fn stringify_open_seq(
+        &mut self,
+        out: &mut String,
+        h: GcRef,
+        elems: &[Value],
+        span: Span,
+        depth: usize,
+    ) -> Result<(), RuntimeError> {
+        self.repr_active.push(h);
+        let r = self.stringify_seq_into(out, elems, span, depth + 1);
+        self.repr_active.pop();
+        r
+    }
+
+    #[inline(never)]
+    fn stringify_open_map(
+        &mut self,
+        out: &mut String,
+        h: GcRef,
+        entries: &[(u64, Value, Value)],
+        span: Span,
+        depth: usize,
+    ) -> Result<(), RuntimeError> {
+        self.repr_active.push(h);
+        let mut r = Ok(());
+        for (i, (_, k, mv)) in entries.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            r = self.stringify_nested_into(out, *k, span, depth + 1);
+            if r.is_err() {
+                break;
+            }
+            out.push_str(": ");
+            r = self.stringify_nested_into(out, *mv, span, depth + 1);
+            if r.is_err() {
+                break;
+            }
+        }
+        self.repr_active.pop();
+        r
+    }
+
+    #[inline(never)]
+    fn stringify_open_set(
+        &mut self,
+        out: &mut String,
+        h: GcRef,
+        entries: &[(u64, Value)],
+        span: Span,
+        depth: usize,
+    ) -> Result<(), RuntimeError> {
+        self.repr_active.push(h);
+        let mut r = Ok(());
+        for (i, (_, e)) in entries.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            r = self.stringify_nested_into(out, *e, span, depth + 1);
+            if r.is_err() {
+                break;
+            }
+        }
+        self.repr_active.pop();
+        r
+    }
+
+    #[inline(never)]
+    fn stringify_open_fields(
+        &mut self,
+        out: &mut String,
+        h: GcRef,
+        def: Option<&super::op::StructDef>,
+        fields: &[Value],
+        span: Span,
+        depth: usize,
+    ) -> Result<(), RuntimeError> {
+        use std::fmt::Write as _;
+        self.repr_active.push(h);
+        let mut r = Ok(());
+        for (i, fv) in fields.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            match def.and_then(|d| d.fields.get(i)) {
+                Some(k) => {
+                    let _ = write!(out, "{k}=");
+                }
+                None => {
+                    let _ = write!(out, "{i}=");
+                }
+            }
+            r = self.stringify_nested_into(out, *fv, span, depth + 1);
+            if r.is_err() {
+                break;
+            }
+        }
+        self.repr_active.pop();
+        r
     }
 
     pub(super) fn stringify_seq_into(
