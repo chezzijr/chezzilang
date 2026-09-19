@@ -107,24 +107,19 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     // witness params and what fills each witness at each call site. The compiler CONSUMES it — it
     // never re-derives which protocols carry a static requirement (that resolves through
     // imports/aliases/embeds, which is checker work).
-    let (kw, wt, ct, pe, lw, ns, rc, afw, conflicts) = crate::checker::resolve_call_tables(graph);
+    let (kw, wt, ct, pe, ns, rc, conflicts) = crate::checker::resolve_call_tables(graph);
     reject_table_conflicts(conflicts)?;
     c.keyword_calls = kw;
     c.witnesses = wt;
     c.carriers = ct;
     c.proto_eq_calls = pe;
-    c.list_widen = lw;
     c.sum_seeds = ns;
     c.ret_coerce = rc;
-    c.arg_float_widen = afw;
     // Pass 0: collision pre-pass — assign runtime keys for module-scoped user types. A type name
     // declared in exactly one module keeps its BARE name (the common case → unchanged Display/print
     // output); a name declared in ≥2 modules that are BOTH in the program is disambiguated (the
     // first/entry-most keeps bare, the rest get `<dotted.path>::Name`).
     c.assign_type_keys(graph);
-    // Alias transparency for the backend's float coercion sites (`type F = float`): built BEFORE any
-    // hoist, so a struct field / fn param / `let` annotation spelled through an alias still coerces.
-    c.float_aliases = FloatAliases::collect(&float_alias_inputs(graph));
     // Pass 1: hoist all type declarations across every module. (No flat alias gather: the multi-file
     // path lowers every extern type from the checker-resolved, module-scoped `extern_sigs` table.)
     for (idx, lm) in graph.modules.iter().enumerate() {
@@ -183,23 +178,19 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
             );
         }
     }
-    c.float_aliases =
-        FloatAliases::collect(&[(alias_decls(&module.stmts), HashMap::new(), HashMap::new())]);
     c.hoist_types(0, &module.stmts)?;
     // SINGLE-RESOLVER: extern C types come from the checker's standalone pass — the SAME resolver the
     // multi-file CLI uses (no second backend resolver exists). The backend reads this table verbatim.
     c.extern_sigs = crate::checker::resolve_extern_signatures_standalone(&module.stmts);
-    let (kw, wt, ct, pe, lw, ns, rc, afw, conflicts) =
+    let (kw, wt, ct, pe, ns, rc, conflicts) =
         crate::checker::resolve_call_tables_standalone(&module.stmts);
     reject_table_conflicts(conflicts)?;
     c.keyword_calls = kw;
     c.witnesses = wt;
     c.carriers = ct;
     c.proto_eq_calls = pe;
-    c.list_widen = lw;
     c.sum_seeds = ns;
     c.ret_coerce = rc;
-    c.arg_float_widen = afw;
     let toplevel = c.compile_module(0, module, &[], true, None)?;
     let global_slots = std::mem::take(&mut c.global_slots);
     // A synthetic module id so the run driver has something to key the namespace cache on.
@@ -225,10 +216,6 @@ struct Compiler {
     program: Program,
     /// Struct name → declared fields (with types), kept for building `json.decode` descriptors.
     struct_fields: HashMap<String, Vec<crate::ast::Field>>,
-    /// Struct key → its declared GENERIC type-param names (`struct S[F]` → `{"F"}`). Read by
-    /// `compile_ctor_args`, whose field types are written in the STRUCT's scope, not the caller's:
-    /// a field `v: F` must not be treated as a float alias when `F` is the struct's own type param.
-    struct_generics: HashMap<String, std::collections::HashSet<String>>,
     /// M23 — struct/enum runtime key → its `Eq` protocol hook (`(proto, home module index)`), for the
     /// types whose `eq` method [`binds_eq_hook`] accepts. Materialized into the `tid`- and
     /// `variant_id`-indexed `Program::eq_struct` / `eq_enum` by [`Compiler::build_eq_hooks`] once every
@@ -241,12 +228,6 @@ struct Compiler {
     /// Default-argument provider NAME → `(its proto, the index of the module declaring it)`, filled
     /// as each declaring module is compiled. Materialized into `Program::providers` at the end.
     provider_defs: HashMap<String, (ProtoId, usize)>,
-    /// The GENERIC type-param names currently in scope (enclosing type's `[T]` + the fn's own `[U]`).
-    /// A type param SHADOWS a module-level `type F = float` alias, exactly as it does in the checker's
-    /// scoped `resolve_type` — so every `FloatAliases` lookup below must exclude these names, or the
-    /// backend coerces a value whose static type is the type VARIABLE (a runtime `Float` under a
-    /// static `int`, or a hard fault on a `str` instantiation, on a check-clean program).
-    float_shadow: std::collections::HashSet<String>,
     /// M19 Phase 2b — the current module's global name → slot map, rebuilt at the start of each
     /// `compile_module`. Shared across the toplevel proto and every fn/method/closure compiled for
     /// the module, so a global reference anywhere in the module resolves to the same slot.
@@ -335,10 +316,6 @@ struct Compiler {
     /// means "ordinary by-name call", which is the pre-W7-53 lowering. See
     /// [`crate::checker::ProtoEqTable`].
     proto_eq_calls: crate::checker::ProtoEqTable,
-    /// The checker's per-list-literal int→float element-widen verdict (see
-    /// [`crate::checker::ListWidenTable`]), consumed verbatim: the backend is type-blind and cannot
-    /// re-derive the SLOT element type that decides it. A MISS means "widen" — the pre-fix lowering.
-    list_widen: crate::checker::ListWidenTable,
     /// Which `.sum()` sites need a `T(0)` newtype SEED pushed as a hidden argument. The backend is
     /// type-blind — an empty `List[Cents]` carries no element to read a `type_key` off — so this is
     /// CONSUMED from the checker and never re-derived; a MISS means "plain numeric sum", which is the
@@ -350,10 +327,6 @@ struct Compiler {
     /// lowering. See [`crate::checker::RetCoerceTable`].
     ret_coerce: crate::checker::RetCoerceTable,
     /// TICKET-054 review fix — which call arguments must widen int→float AT THE CALL SITE (a
-    /// `Ty::Protocol`/`Ty::Param` dispatch's actual witness may declare the param generically, so its
-    /// own prologue cannot be trusted), consumed verbatim by [`Compiler::compile_args`]. A MISS means
-    /// no call-site coercion — the pre-fix lowering. See [`crate::checker::ArgFloatWidenTable`].
-    arg_float_widen: crate::checker::ArgFloatWidenTable,
     /// W7-43 — counter for the fresh `__optN` temp names the Option lowering mints, mirroring the
     /// checker's own. Frame-local and `__`-prefixed (unwritable by user code), so uniqueness within
     /// one compilation is all that is ever needed — and this makes it true by construction rather
@@ -382,189 +355,6 @@ struct Compiler {
     /// outside interpolation.
     kw_frag_ctx: crate::lexer::Span,
     kw_frag_ord: usize,
-    /// One-way int→float widening — the element-coercion hint for the collection literal currently
-    /// being compiled as a typed `let` value (`xs: List[float] = [..]`). Set transiently by
-    /// `compile_stmt`'s `Let` arm around the value compile and consumed by the `List`/`Map`/`Set` arms
-    /// of `compile_expr` so int ELEMENTS widen to float. `None` outside an annotated collection let.
-    float_elem_hint: Option<crate::ast::ElemFloatHint>,
-    /// Type-ALIAS names that mean `float` (`type F = float`, `type G = F`, `type H = m.F`). Every
-    /// float coercion site below keys on the SYNTACTIC declared type, while the checker keys on the
-    /// RESOLVED `Ty::Float` — without this table an alias-spelled `float` sink (`x: F = 1`,
-    /// `fn g(z: F)`, `-> F`, a `v: F` field) would check clean and lower with NO `Op::CoerceFloat`,
-    /// leaving a runtime `Int` under a static `float`. Built once per graph (see [`FloatAliases`]).
-    float_aliases: FloatAliases,
-}
-
-/// The alias names that resolve to `float`, per module — the backend's alias-transparency table (the
-/// checker gets this for free from `resolve_type`). Built once from the module graph, before any
-/// type is hoisted, so every coercion site can ask "is this declared type a `float`?" in the scope of
-/// the module that WROTE it.
-#[derive(Default)]
-struct FloatAliases {
-    /// `(declaring module idx, alias name)` for every alias resolving to `float` — the target of a
-    /// qualified `m.F` lookup, and of a struct field declared in another module.
-    decl: std::collections::HashSet<(usize, String)>,
-    /// module idx → the names usable BARE there that mean `float` (its own aliases + `from`-imported).
-    bare: Vec<std::collections::HashSet<String>>,
-    /// module idx → bound module name → that module's idx (for a qualified `m.F` annotation).
-    binds: Vec<HashMap<String, usize>>,
-}
-
-impl FloatAliases {
-    /// True iff the type `ty`, as WRITTEN in module `idx`, means `float` (directly or through an alias
-    /// chain). Mirrors `crate::ast::is_float_ty` with alias resolution added. `shadow` holds the
-    /// GENERIC type-param names in scope at the site: a type param SHADOWS a same-named module alias
-    /// (the checker resolves it to a `Ty::Param`), so it is never a float sink.
-    fn is_float(&self, idx: usize, ty: &Type, shadow: &std::collections::HashSet<String>) -> bool {
-        match ty {
-            Type::Named { name, .. } if shadow.contains(name) => false,
-            Type::Named { name, .. } => {
-                name == "float" || self.bare.get(idx).is_some_and(|s| s.contains(name))
-            }
-            Type::Qualified { module, name, args } if args.is_empty() => self
-                .binds
-                .get(idx)
-                .and_then(|b| b.get(module))
-                .is_some_and(|j| self.decl.contains(&(*j, name.clone()))),
-            _ => false,
-        }
-    }
-
-    /// The collection element-widening hint for a `let` annotation written in module `idx`:
-    /// `List[float]` → `Elem`, `Map[_, float]` → `MapValue` (float ELEMENT aliases resolved, generic
-    /// type params shadowed). Matches the SYNTACTIC `List[…]`/`Map[…]` shape only — a whole-collection
-    /// alias (`type LF = List[float]`) is NOT a hint here, so the checker (whose twin gate keys on the
-    /// same syntactic shape) must not license the widen for one either.
-    fn elem_hint(
-        &self,
-        idx: usize,
-        ty: &Type,
-        shadow: &std::collections::HashSet<String>,
-    ) -> Option<crate::ast::ElemFloatHint> {
-        match ty {
-            Type::Generic(n, args, ..)
-                if n == "List" && args.len() == 1 && self.is_float(idx, &args[0], shadow) =>
-            {
-                Some(crate::ast::ElemFloatHint::Elem)
-            }
-            Type::Generic(n, args, ..)
-                if n == "Map" && args.len() == 2 && self.is_float(idx, &args[1], shadow) =>
-            {
-                Some(crate::ast::ElemFloatHint::MapValue)
-            }
-            _ => None,
-        }
-    }
-
-    /// Collect every `type … = float` alias (transitively, across modules). Each module contributes
-    /// its top-level aliases, its bound module names, and its `from`-imported names (bound name →
-    /// source module + declared name).
-    fn collect(modules: &[AliasInputs]) -> FloatAliases {
-        let n = modules.len();
-        let mut decl: std::collections::HashSet<(usize, String)> = std::collections::HashSet::new();
-        // Fixpoint over the alias graph (`type G = F` may precede `type F = float`, in this or another
-        // module); it terminates in at most one round per alias, and a cycle simply never resolves.
-        let total: usize = modules.iter().map(|(a, _, _)| a.len()).sum();
-        for _ in 0..=total {
-            let mut changed = false;
-            for (i, (aliases, binds, froms)) in modules.iter().enumerate() {
-                for (name, ty) in aliases {
-                    if decl.contains(&(i, name.clone())) {
-                        continue;
-                    }
-                    let is_float = match ty {
-                        Type::Named { name: n2, .. } => {
-                            n2 == "float"
-                                || decl.contains(&(i, n2.clone()))
-                                || froms
-                                    .get(n2)
-                                    .is_some_and(|(j, orig)| decl.contains(&(*j, orig.clone())))
-                        }
-                        Type::Qualified {
-                            module,
-                            name: n2,
-                            args,
-                        } if args.is_empty() => binds
-                            .get(module)
-                            .is_some_and(|j| decl.contains(&(*j, n2.clone()))),
-                        _ => false,
-                    };
-                    if is_float {
-                        decl.insert((i, name.clone()));
-                        changed = true;
-                    }
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-        let bare = (0..n)
-            .map(|i| {
-                let mut names: std::collections::HashSet<String> = decl
-                    .iter()
-                    .filter(|(j, _)| *j == i)
-                    .map(|(_, name)| name.clone())
-                    .collect();
-                // A `from`-imported alias is visible under its BOUND name (`import F as G from m`).
-                for (bound, (j, orig)) in &modules[i].2 {
-                    if decl.contains(&(*j, orig.clone())) {
-                        names.insert(bound.clone());
-                    }
-                }
-                names
-            })
-            .collect();
-        let binds = modules.iter().map(|(_, b, _)| b.clone()).collect();
-        FloatAliases { decl, bare, binds }
-    }
-}
-
-/// Per-module inputs to [`FloatAliases::collect`]: top-level type aliases, bound module name → idx,
-/// and `from`-imported BOUND name → (source module idx, declared name).
-type AliasInputs = (
-    Vec<(String, Type)>,
-    HashMap<String, usize>,
-    HashMap<String, (usize, String)>,
-);
-
-/// Gather [`AliasInputs`] for every module in the graph.
-fn float_alias_inputs(graph: &ModuleGraph) -> Vec<AliasInputs> {
-    let idx_of: HashMap<&crate::resolver::ModuleId, usize> = graph
-        .modules
-        .iter()
-        .enumerate()
-        .map(|(i, m)| (&m.id, i))
-        .collect();
-    graph
-        .modules
-        .iter()
-        .map(|lm| {
-            let aliases = alias_decls(&lm.ast.stmts);
-            let mut binds = HashMap::new();
-            let mut froms = HashMap::new();
-            for imp in &lm.imports {
-                let Some(&j) = idx_of.get(&imp.target) else {
-                    continue;
-                };
-                match &imp.import {
-                    crate::ast::Import::Module { path, alias, .. } => {
-                        let bind = alias
-                            .clone()
-                            .unwrap_or_else(|| path.last().cloned().unwrap_or_default());
-                        binds.insert(bind, j);
-                    }
-                    crate::ast::Import::From { names, .. } => {
-                        for (name, alias) in names {
-                            let bound = alias.clone().unwrap_or_else(|| name.clone());
-                            froms.insert(bound, (j, name.clone()));
-                        }
-                    }
-                }
-            }
-            (aliases, binds, froms)
-        })
-        .collect()
 }
 
 /// The top-level `type X = …` declarations of a module.
@@ -576,53 +366,6 @@ fn alias_decls(stmts: &[Stmt]) -> Vec<(String, Type)> {
             _ => None,
         })
         .collect()
-}
-
-/// All-constant int→float widening peephole: true iff `exprs` contains BOTH an untyped float constant
-/// and an untyped int constant (the trigger to widen the untyped-int-constant siblings of an
-/// un-annotated mixed collection like `[1, 2.3]`, `[1, -2.5]`, `[1 + 1, 2.5]`). Only
-/// [`crate::ast::const_num`] expressions count — anything TYPED (a variable, a call) is neither, so a
-/// mixed collection with a typed int element never fires here. That is sound because the CHECKER now
-/// rejects exactly those (`elem_widen_ok` licenses a widen only where this peephole — or the `let`
-/// element hint below — is guaranteed to coerce); the two share `crate::ast::const_num`, so they
-/// cannot drift.
-pub(crate) fn literal_numeric_mix<'a>(exprs: impl Iterator<Item = &'a Expr>) -> bool {
-    let mut has_int = false;
-    let mut has_float = false;
-    for e in exprs {
-        match crate::ast::const_num(e) {
-            Some(crate::ast::ConstNum::Int) => has_int = true,
-            Some(crate::ast::ConstNum::Float) => has_float = true,
-            None => {}
-        }
-    }
-    has_int && has_float
-}
-
-/// `literal_numeric_mix` over ALL the LEAF value branches of a whole `if … elif … else` chain: an
-/// `elif` desugars to a nested `IfElse` in the `els` slot, so a float constant in ANY arm — head,
-/// middle, or tail — must license widening the int-constant arms, ORDER-INDEPENDENTLY (like a list
-/// literal / `match`). Flattens the chain to its leaves (each `then`, plus the final non-`IfElse`
-/// `els`) before applying the peephole. Computed ONCE at the chain head and threaded down the nested
-/// recursion (`compile_if_expr_chain` / the checker's `infer_if_else_chain` carry it as
-/// `inherited_mix`), so every level sees the SAME whole-chain mix rather than recomputing a narrower
-/// sub-chain mix. Used IDENTICALLY by both, so they cannot drift; each level then coerces only its own
-/// immediate leaf (`untyped_int_const`).
-pub(crate) fn if_chain_numeric_mix(then: &Expr, els: &Expr) -> bool {
-    let mut leaves: Vec<&Expr> = Vec::new();
-    fn collect<'a>(then: &'a Expr, els: &'a Expr, out: &mut Vec<&'a Expr>) {
-        out.push(then);
-        if let ExprKind::IfElse {
-            then: t2, els: e2, ..
-        } = &els.kind
-        {
-            collect(t2, e2, out);
-        } else {
-            out.push(els);
-        }
-    }
-    collect(then, els, &mut leaves);
-    literal_numeric_mix(leaves.into_iter())
 }
 
 /// M19 lever #2 — register an enum variant into BOTH program tables, assigning it the next dense
@@ -852,9 +595,7 @@ impl Compiler {
         Compiler {
             program,
             struct_fields: HashMap::new(),
-            struct_generics: HashMap::new(),
             eq_hooks: HashMap::new(),
-            float_shadow: std::collections::HashSet::new(),
             globals: HashMap::new(),
             provider_ids: HashMap::new(),
             provider_defs: HashMap::new(),
@@ -876,18 +617,14 @@ impl Compiler {
             witnesses: crate::checker::WitnessTable::default(),
             carriers: crate::checker::CarrierTable::new(),
             proto_eq_calls: crate::checker::ProtoEqTable::new(),
-            list_widen: crate::checker::ListWidenTable::new(),
             sum_seeds: crate::checker::SumSeedTable::new(),
             ret_coerce: crate::checker::RetCoerceTable::new(),
-            arg_float_widen: crate::checker::ArgFloatWidenTable::new(),
             next_opt_tmp: 0,
             witness_locals: Vec::new(),
             pending_witnesses: Vec::new(),
             imported_fns: HashMap::new(),
             kw_frag_ctx: crate::lexer::Span::default(),
             kw_frag_ord: 0,
-            float_elem_hint: None,
-            float_aliases: FloatAliases::default(),
         }
     }
 
@@ -1155,16 +892,9 @@ impl Compiler {
                     name,
                     fields,
                     methods,
-                    type_params,
                     ..
                 } => {
                     let key = self.type_key(module_idx, name);
-                    // The struct's own generic params — they shadow a module float alias in its FIELD
-                    // types (read by `compile_ctor_args`, which runs in the CALLER's scope).
-                    self.struct_generics.insert(
-                        key.clone(),
-                        type_params.iter().map(|tp| tp.name.clone()).collect(),
-                    );
                     // Record each STATIC method (first param not `self`) so a `Type.method(...)` call
                     // site classifies it as `Op::CallStatic`, mirroring the checker's classification.
                     for m in methods {
@@ -1361,10 +1091,6 @@ impl Compiler {
                 let key = self.type_key(module_idx, name);
                 // The struct's `[T]`s are in scope for every method body + field default below (they
                 // shadow a same-named module `type T = float` alias at each coercion site).
-                let prev_shadow = std::mem::replace(
-                    &mut self.float_shadow,
-                    type_params.iter().map(|tp| tp.name.clone()).collect(),
-                );
                 let mut test_methods: Vec<String> = Vec::new();
                 let mut suite_tests: Vec<(String, ProtoId)> = Vec::new();
                 let mut hooks: HashMap<String, ProtoId> = HashMap::new();
@@ -1401,7 +1127,6 @@ impl Compiler {
                         });
                     }
                 }
-                self.float_shadow = prev_shadow;
             }
         }
         // Compile enum methods next (type-erased — no `StructDef`/`tid`), recording proto ids under
@@ -1418,10 +1143,6 @@ impl Compiler {
                     continue;
                 }
                 let key = self.type_key(module_idx, name);
-                let prev_shadow = std::mem::replace(
-                    &mut self.float_shadow,
-                    type_params.iter().map(|tp| tp.name.clone()).collect(),
-                );
                 let mut compiled: HashMap<String, ProtoId> = HashMap::new();
                 for m in methods {
                     self.pending_witnesses = self.member_witnesses(module_idx, &key, &m.name);
@@ -1431,7 +1152,6 @@ impl Compiler {
                         self.eq_hooks.insert(key.clone(), (pid, module_idx));
                     }
                 }
-                self.float_shadow = prev_shadow;
                 self.program
                     .enum_methods
                     .entry(key.clone())
@@ -1450,23 +1170,17 @@ impl Compiler {
             if let StmtKind::NativeStruct {
                 name,
                 bodied_methods,
-                type_params,
                 ..
             } = &stmt.kind
             {
                 if bodied_methods.is_empty() {
                     continue;
                 }
-                let prev_shadow = std::mem::replace(
-                    &mut self.float_shadow,
-                    type_params.iter().map(|tp| tp.name.clone()).collect(),
-                );
                 let mut compiled: HashMap<String, ProtoId> = HashMap::new();
                 for m in bodied_methods {
                     let pid = self.compile_fn(m, false)?;
                     compiled.insert(m.name.clone(), pid);
                 }
-                self.float_shadow = prev_shadow;
                 self.program
                     .native_methods
                     .entry(name.clone())
@@ -1479,25 +1193,14 @@ impl Compiler {
         // newtype's module-scoped runtime key. A newtype ALWAYS gets a `newtype_home` entry (even
         // method-less) so the runtime can recognize the key as a newtype.
         for stmt in &module.stmts {
-            if let StmtKind::NewType {
-                name,
-                methods,
-                type_params,
-                ..
-            } = &stmt.kind
-            {
+            if let StmtKind::NewType { name, methods, .. } = &stmt.kind {
                 let key = self.type_key(module_idx, name);
-                let prev_shadow = std::mem::replace(
-                    &mut self.float_shadow,
-                    type_params.iter().map(|tp| tp.name.clone()).collect(),
-                );
                 let mut compiled: HashMap<String, ProtoId> = HashMap::new();
                 for m in methods {
                     self.pending_witnesses = self.member_witnesses(module_idx, &key, &m.name);
                     let pid = self.compile_fn(m, false)?;
                     compiled.insert(m.name.clone(), pid);
                 }
-                self.float_shadow = prev_shadow;
                 self.program
                     .newtype_methods
                     .entry(key.clone())
@@ -1643,16 +1346,6 @@ impl Compiler {
             match &f.default {
                 Some(d) => {
                     self.compile_expr(&mut fc, d)?;
-                    // One-way int→float widening: a `float` suite field coerces its int default, so
-                    // the constructed suite instance stores a genuine f64 (the suite thunk bypasses
-                    // `compile_ctor_args`, which does this for a regular ctor).
-                    if self.float_aliases.is_float(
-                        self.current_module_idx,
-                        &f.ty,
-                        &self.float_shadow,
-                    ) {
-                        fc.emit(Op::CoerceFloat, d.span);
-                    }
                 }
                 None => {
                     return Err(CompileError {
@@ -1691,9 +1384,6 @@ impl Compiler {
         // The fn's OWN generic params join the enclosing type's for the duration of this body: they
         // shadow any same-named module-level float alias at every coercion site below (and inside any
         // nested closure, which compiles within this same scope).
-        let prev_shadow = self.float_shadow.clone();
-        self.float_shadow
-            .extend(decl.type_params.iter().map(|tp| tp.name.clone()));
         // M24 — this body's OWN hidden witness params. `pending_witnesses` is set ONLY at the
         // module-level `fn`/member emit site, so a nested `fn` takes the empty default: it declares
         // none, and reaches the enclosing frame's through the `$w:T` capture entries
@@ -1702,7 +1392,6 @@ impl Compiler {
         let prev_w = std::mem::replace(&mut self.witness_locals, witnesses);
         let r = self.compile_fn_body(decl, captured_names);
         self.witness_locals = prev_w;
-        self.float_shadow = prev_shadow;
         r
     }
 
@@ -1724,23 +1413,15 @@ impl Compiler {
         fc.is_generator = decl.is_generator;
         fc.is_test = decl.is_test;
         fc.decl_span = decl.name_span;
-        // One-way int→float widening: a `-> float` return type coerces every `return` value.
-        fc.ret_is_float = decl.ret.as_ref().is_some_and(|t| {
-            self.float_aliases
-                .is_float(self.current_module_idx, t, &self.float_shadow)
-        });
         for p in &decl.params {
             fc.add_local(p.name.clone());
         }
         for w in &self.witness_locals {
             fc.add_local(witness_local(w));
         }
-        // A `float` param coerces any int argument at the callee prologue — so EVERY caller (incl. an
-        // int VARIABLE, not just a literal) widens.
-        // Callee-side default fill FIRST, so a filled value is coerced and boxed like a supplied one.
+        // Callee-side default fill FIRST, so a filled value is boxed like a supplied one.
         self.emit_default_param_prologue(&mut fc, &decl.params)?;
-        self.emit_float_param_prologue(&mut fc, &decl.params);
-        // Uniform by-reference capture: box any param captured by a nested closure (after coercion).
+        // Uniform by-reference capture: box any param captured by a nested closure.
         self.emit_box_param_prologue(&mut fc, &decl.params);
         // An inline-expr body (`fn a(): <expr>`) implicitly returns its single expression — exactly
         // like a closure `fn(x): expr` (see `compile_closure`): compile the expr and emit `Return`
@@ -1756,9 +1437,6 @@ impl Compiler {
             ] = decl.body.as_slice()
         {
             self.compile_expr(&mut fc, e)?;
-            if fc.ret_is_float {
-                fc.emit(Op::CoerceFloat, e.span);
-            }
             self.emit_ret_coerce(&mut fc, e.span)?;
             fc.emit(Op::Return, e.span);
             return Ok(self.finish(fc));
@@ -1862,35 +1540,10 @@ impl Compiler {
         Ok(())
     }
 
-    /// One-way int→float widening — emit the callee-prologue coercion for every `float`-typed param:
-    /// `GetLocal(slot), CoerceFloat, SetLocal(slot)`. Done at the callee boundary (not the call site)
-    /// so an int argument widens regardless of how it was passed (literal OR variable OR field) and
-    /// regardless of which caller called — the single general coverage point for float params. The
-    /// param slots are `0..params.len()` in declaration order (matching the `add_local` loop). A
-    /// non-`float` (incl. a generic `T`) param emits nothing, so a fn with no float params is
-    /// byte-identical to before.
-    fn emit_float_param_prologue(&mut self, fc: &mut FnComp, params: &[crate::ast::Param]) {
-        for (i, p) in params.iter().enumerate() {
-            if !p.is_variadic
-                && p.ty.as_ref().is_some_and(|t| {
-                    self.float_aliases
-                        .is_float(self.current_module_idx, t, &self.float_shadow)
-                })
-            {
-                let slot = i;
-                let span = Span::RUNTIME;
-                fc.emit_get_local_raw(slot, span);
-                fc.emit(Op::CoerceFloat, span);
-                fc.emit_set_local_raw(slot, span);
-            }
-        }
-    }
-
     /// Uniform by-reference capture — box every param captured by a nested closure/`spawn`/`defer`.
-    /// After arg binding (and any float coercion), replace the raw arg in the boxed slot with a fresh
-    /// cell wrapping it: `GetLocal(slot); NewCell; SetLocal(slot)`. Runs AFTER
-    /// [`emit_float_param_prologue`] so the value is already coerced before it is boxed. The param
-    /// slots are `0..params.len()` in declaration order. A fn with no captured params emits nothing.
+    /// After arg binding, replace the raw arg in the boxed slot with a fresh cell wrapping it:
+    /// `GetLocal(slot); NewCell; SetLocal(slot)`. The param slots are `0..params.len()` in
+    /// declaration order. A fn with no captured params emits nothing.
     fn emit_box_param_prologue(&mut self, fc: &mut FnComp, params: &[crate::ast::Param]) {
         for i in 0..params.len() {
             if fc.is_boxed_slot(i) {
@@ -2005,27 +1658,8 @@ impl Compiler {
 
     fn compile_stmt(&mut self, fc: &mut FnComp, stmt: &Stmt) -> Result<(), CompileError> {
         match &stmt.kind {
-            StmtKind::Let { names, value, ty, .. } => {
-                // One-way int→float widening: a collection-element annotation (`List[float]` /
-                // `Map[_, float]`) widens int ELEMENTS at the literal-compile site (hint consumed by
-                // `compile_expr`'s `List`/`Map` arms); a scalar `float` annotation coerces the whole
-                // value below. (A later plain `x = <int>` to a float local is rejected by the checker —
-                // strict assign target — so it needs no runtime coercion.)
-                let elem_hint = ty.as_ref().and_then(|t| {
-                    self.float_aliases
-                        .elem_hint(self.current_module_idx, t, &self.float_shadow)
-                });
-                let prev_hint = std::mem::replace(&mut self.float_elem_hint, elem_hint);
+            StmtKind::Let { names, value, .. } => {
                 self.compile_expr(fc, value)?;
-                self.float_elem_hint = prev_hint;
-                if names.len() == 1
-                    && ty.as_ref().is_some_and(|t| {
-                        self.float_aliases
-                            .is_float(self.current_module_idx, t, &self.float_shadow)
-                    })
-                {
-                    fc.emit(Op::CoerceFloat, value.span);
-                }
                 if names.len() > 1 {
                     // destructuring let `a, b := value`: stash the tuple in a hidden local, then for
                     // each binding load it and read element `.i` (the tuple-aware `GetField`). No new
@@ -2129,10 +1763,6 @@ impl Compiler {
                 match value {
                     Some(e) => {
                         self.compile_expr(fc, e)?;
-                        // One-way int→float widening: a `-> float` fn coerces its return value.
-                        if fc.ret_is_float {
-                            fc.emit(Op::CoerceFloat, e.span);
-                        }
                         self.emit_ret_coerce(fc, e.span)?;
                     }
                     None => {
@@ -2568,13 +2198,6 @@ impl Compiler {
             ExprKind::Ident(name) => match op.to_binop() {
                 None => {
                     self.compile_expr(fc, value)?;
-                    // TICKET-124 (W13-15): an untyped int constant widened into a `float` slot at
-                    // check time (`check_assign_value`'s `widen_span`) is coerced HERE — a genuine
-                    // `f64` reaches `emit_store`, which dispatches a local, a captured cell and a
-                    // module global from this one arm alike.
-                    if self.arg_widen_recorded(value.span) {
-                        fc.emit(Op::CoerceFloat, value.span);
-                    }
                     self.emit_store(fc, name, span);
                 }
                 Some(bin) => {
@@ -2611,9 +2234,6 @@ impl Compiler {
                     );
                 } else {
                     self.compile_expr(fc, value)?;
-                    if self.arg_widen_recorded(value.span) {
-                        fc.emit(Op::CoerceFloat, value.span);
-                    }
                     self.emit_assign_value_first(fc, target, span)?;
                 }
             }
@@ -2632,9 +2252,6 @@ impl Compiler {
                     fc.emit(Op::SetIndex, span);
                 } else {
                     self.compile_expr(fc, value)?;
-                    if self.arg_widen_recorded(value.span) {
-                        fc.emit(Op::CoerceFloat, value.span);
-                    }
                     self.emit_assign_value_first(fc, target, span)?;
                 }
             }
@@ -3889,11 +3506,6 @@ impl Compiler {
     }
 
     fn compile_expr(&mut self, fc: &mut FnComp, expr: &Expr) -> Result<(), CompileError> {
-        // One-way int→float widening — the collection-element hint set by a typed `let` value applies
-        // to the IMMEDIATE collection literal only. Take it (clearing the field) so any non-collection
-        // value, a nested element, or a call argument does NOT inherit it; the `List`/`Map` arms below
-        // re-read it from this local.
-        let elem_hint = self.float_elem_hint.take();
         match &expr.kind {
             ExprKind::Int(n) => fc.emit(Op::ConstInt(*n), expr.span),
             ExprKind::Float(x) => fc.emit(Op::ConstFloat(*x), expr.span),
@@ -3907,39 +3519,13 @@ impl Compiler {
             ExprKind::RawStr(s) => fc.emit(Op::ConstStr(s.clone()), expr.span),
             ExprKind::Bytes(b) => fc.emit(Op::ConstBytes(b.clone().into_boxed_slice()), expr.span),
             ExprKind::Ident(name) => self.compile_ident(fc, name, expr.span),
-            ExprKind::List(items, origin) => {
-                // One-way int→float widening for THIS list: widen an element when the `List[float]`
-                // annotation says so OR the constant peephole fires (≥1 untyped float CONSTANT sibling
-                // → widen the untyped int CONSTANT siblings) — UNLESS the checker recorded that this
-                // literal sits in a `List[Any]` SLOT, where the slot sanctions the mix and no numeric
-                // type asks for the widen. That verdict is CONSUMED, never re-derived (the slot's
-                // element type is invisible here), and it is looked up under the SAME
-                // `literal_numeric_mix` gate the checker recorded it under, so the two cannot drift.
-                // A miss = widen, the pre-fix lowering.
-                let verdict = self.list_widen.get(&crate::checker::list_widen_key(
-                    self.current_module_idx,
-                    self.kw_frag_ctx,
-                    self.kw_frag_ord,
-                    expr.span,
-                    *origin,
-                ));
-                let annotated = elem_hint == Some(crate::ast::ElemFloatHint::Elem)
-                    || verdict
-                        == Some(&crate::checker::ElemWiden::Widen(
-                            crate::ast::ElemFloatHint::Elem,
-                        ));
-                let peephole = literal_numeric_mix(items.iter())
-                    && verdict != Some(&crate::checker::ElemWiden::Decline);
+            ExprKind::List(items, _) => {
                 for it in items {
                     self.compile_expr(fc, it)?;
-                    if annotated || (peephole && crate::ast::untyped_int_const(it)) {
-                        fc.emit(Op::CoerceFloat, it.span);
-                    }
                 }
                 fc.emit(Op::NewList(items.len()), expr.span);
             }
             ExprKind::Tuple(items) => {
-                // A tuple is heterogeneous (positional types), so no element widening.
                 for it in items {
                     self.compile_expr(fc, it)?;
                 }
@@ -3947,27 +3533,9 @@ impl Compiler {
             }
             ExprKind::Map(entries) => {
                 // Push `[k0, v0, k1, v1, …]`, then build the map (last duplicate key wins at runtime).
-                // One-way int→float widening on the VALUE position only (keys are never float): the
-                // `Map[_, float]` annotation, or the constant peephole over the value column.
-                let verdict = self.list_widen.get(&crate::checker::list_widen_key(
-                    self.current_module_idx,
-                    self.kw_frag_ctx,
-                    self.kw_frag_ord,
-                    expr.span,
-                    None,
-                ));
-                let annotated = elem_hint == Some(crate::ast::ElemFloatHint::MapValue)
-                    || verdict
-                        == Some(&crate::checker::ElemWiden::Widen(
-                            crate::ast::ElemFloatHint::MapValue,
-                        ));
-                let peephole = literal_numeric_mix(entries.iter().map(|(_, v)| v));
                 for (k, v) in entries {
                     self.compile_expr(fc, k)?;
                     self.compile_expr(fc, v)?;
-                    if annotated || (peephole && crate::ast::untyped_int_const(v)) {
-                        fc.emit(Op::CoerceFloat, v.span);
-                    }
                 }
                 fc.emit(Op::NewMap(entries.len()), expr.span);
             }
@@ -4357,8 +3925,8 @@ impl Compiler {
                 })?;
                 fc.emit(Op::JsonDecode(desc), expr.span);
             }
-            ExprKind::Closure { params, ret, body } => {
-                self.compile_closure(fc, params, ret.as_ref(), body, expr.span)?
+            ExprKind::Closure { params, body, .. } => {
+                self.compile_closure(fc, params, body, expr.span)?
             }
             ExprKind::Match { scrutinee, arms } => {
                 self.compile_match_expr(fc, scrutinee, arms, expr.span)?
@@ -4570,16 +4138,8 @@ impl Compiler {
         arms: &[MatchExprArm],
         span: Span,
     ) -> Result<(), CompileError> {
-        // One-way int→float widening across arm VALUES: coerce an untyped int CONSTANT arm when a
-        // float CONSTANT sibling arm is present, under the same `literal_numeric_mix` predicate the
-        // checker's `branch_widen` licenses (identical `untyped_int_const` guard) — so the join always
-        // leaves the `float` the static type promises. Mirrors `compile_if_expr`.
-        let mix = literal_numeric_mix(arms.iter().map(|a| &a.body));
         let widen = |s: &mut Self, fc: &mut FnComp, body: &Expr| -> Result<(), CompileError> {
             s.compile_expr(fc, body)?; // leaves the arm's value on the stack
-            if mix && crate::ast::untyped_int_const(body) {
-                fc.emit(Op::CoerceFloat, body.span);
-            }
             // TICKET-107 (W12-13): a branch whose span equals the match expression's OWN span is a
             // synthesized `??`/`?.` desugar sharing that span — never re-look-it-up here, or a bare
             // value at that span wraps twice.
@@ -4604,33 +4164,23 @@ impl Compiler {
         els: &Expr,
         own: Span,
     ) -> Result<(), CompileError> {
-        self.compile_if_expr_chain(fc, cond, then, els, None, own)
+        self.compile_if_expr_chain(fc, cond, then, els, own)
     }
 
-    /// Chain-aware body of `compile_if_expr`. `inherited_mix` threads the WHOLE-chain
-    /// `if_chain_numeric_mix` down an `if … elif … else` chain (an `elif` is a nested `IfElse` in
-    /// `els`), so a float constant in an EARLIER arm licenses coercing the int constants in a later
-    /// all-int suffix. MUST mirror the checker's `infer_if_else_chain` predicate exactly (same
-    /// whole-chain mix + `untyped_int_const` guard), or static type and stored value drift. Each level
-    /// coerces only its own immediate leaf; the nested `els` sub-chain is compiled by a DIRECT
-    /// recursive call carrying the head's mix. `None` = chain head (compute the full-chain mix).
+    /// Chain-aware body of `compile_if_expr`: an `elif` is a nested `IfElse` in `els`, compiled by a
+    /// DIRECT recursive call. Mirrors the checker's `infer_if_else_chain`.
     fn compile_if_expr_chain(
         &mut self,
         fc: &mut FnComp,
         cond: &Expr,
         then: &Expr,
         els: &Expr,
-        inherited_mix: Option<bool>,
         own: Span,
     ) -> Result<(), CompileError> {
-        let mix = inherited_mix.unwrap_or_else(|| if_chain_numeric_mix(then, els));
         self.compile_expr(fc, cond)?;
         fc.emit(Op::AsBool, cond.span);
         let skip = fc.emit_jump(Op::JumpIfFalse(0), cond.span);
         self.compile_expr(fc, then)?;
-        if mix && crate::ast::untyped_int_const(then) {
-            fc.emit(Op::CoerceFloat, then.span);
-        }
         // TICKET-107 (W12-13): a branch whose span equals the if-expression's OWN span is a
         // synthesized `??`/`?.` desugar sharing that span — never re-look-it-up here, or a bare
         // value at that span wraps twice.
@@ -4639,20 +4189,17 @@ impl Compiler {
         }
         let end = fc.emit_jump(Op::Jump(0), cond.span);
         fc.patch_jump(skip);
-        // A nested-`IfElse` `els` is the `elif` tail — recurse DIRECTLY, threading the head's mix; any
-        // other `els` is the final leaf, coerced here if it is an int constant.
+        // A nested-`IfElse` `els` is the `elif` tail — recurse DIRECTLY; any other `els` is the final
+        // leaf.
         if let ExprKind::IfElse {
             cond: c2,
             then: t2,
             els: e2,
         } = &els.kind
         {
-            self.compile_if_expr_chain(fc, c2, t2, e2, Some(mix), els.span)?;
+            self.compile_if_expr_chain(fc, c2, t2, e2, els.span)?;
         } else {
             self.compile_expr(fc, els)?;
-            if mix && crate::ast::untyped_int_const(els) {
-                fc.emit(Op::CoerceFloat, els.span);
-            }
         }
         if els.span != own {
             self.emit_ret_coerce(fc, els.span)?;
@@ -4821,85 +4368,12 @@ impl Compiler {
         Ok(())
     }
 
-    /// Compile a struct constructor's positional argument list, coercing any argument whose declared
-    /// field type is `float` (one-way int→float widening) with `Op::CoerceFloat` right after that
-    /// argument is pushed — so the value sits on the stack as a genuine `f64` before `NewStruct`
-    /// consumes it. The field types come from the desugar-completed `struct_fields[key]` (defaults are
-    /// already filled, so `args.len()` matches the field count). A generic field typed `T` is not
-    /// `float`, so it is left untouched (matching the no-generic-widening carve-out). With no float
-    /// fields this is byte-identical to the old flat `for a in args { compile_expr }` loop.
-    /// TICKET-124 (W13-12): whether the checker recorded a `true` verdict in `arg_float_widen` for
-    /// this argument's span — the same lookup [`Self::compile_args`] already does, extracted so
-    /// [`Self::compile_ctor_args`] and [`Self::compile_assign`] can share it.
-    fn arg_widen_recorded(&self, span: Span) -> bool {
-        let key = crate::checker::arg_float_widen_key(
-            self.current_module_idx,
-            self.kw_frag_ctx,
-            self.kw_frag_ord,
-            span,
-        );
-        self.arg_float_widen.get(&key) == Some(&true)
-    }
-
-    fn compile_ctor_args(
-        &mut self,
-        fc: &mut FnComp,
-        key: &str,
-        args: &[Expr],
-    ) -> Result<(), CompileError> {
-        // Snapshot the per-field float-ness up front so we don't borrow `self.struct_fields` across
-        // the `&mut self` call to `compile_expr`.
-        // Field types are written in the struct's DECLARING module, so an alias (`v: F`) resolves in
-        // that module's scope — not the constructing one.
-        let home = self
-            .program
-            .structs
-            .get(key)
-            .map(|d| d.module_idx)
-            .unwrap_or(self.current_module_idx);
-        // …and in the struct's OWN generic scope: a field `v: F` of `struct S[F]` is the type VARIABLE
-        // `F`, never a module `type F = float` alias (the checker resolves it that way too).
-        let empty = std::collections::HashSet::new();
-        let shadow = self.struct_generics.get(key).unwrap_or(&empty);
-        let float_field: Vec<bool> = self
-            .struct_fields
-            .get(key)
-            .map(|fields| {
-                fields
-                    .iter()
-                    .map(|f| self.float_aliases.is_float(home, &f.ty, shadow))
-                    .collect()
-            })
-            .unwrap_or_default();
-        for (i, a) in args.iter().enumerate() {
-            self.compile_expr(fc, a)?;
-            if float_field.get(i).copied().unwrap_or(false) || self.arg_widen_recorded(a.span) {
-                fc.emit(Op::CoerceFloat, a.span);
-            }
-        }
-        Ok(())
-    }
-
-    /// Compile a positional argument list onto the stack (no struct-field coercion — that is the
-    /// struct-ctor-only job of [`compile_ctor_args`]). Replaces the flat `for a in args { compile_expr }`
-    /// loop repeated at every non-struct call/variant/static/defer emit site.
-    ///
-    /// TICKET-054 review fix — after each argument, consult [`Self::arg_float_widen`] and emit a
-    /// call-site `Op::CoerceFloat` when the checker recorded `true` for that argument's own span. A
-    /// miss or `false` is a no-op — the pre-fix lowering — so this widens no call this table was
-    /// never populated for (every path but [`crate::checker::Checker::check_args_subst`]).
+    /// Compile a positional argument list onto the stack. Replaces the flat
+    /// `for a in args { compile_expr }` loop repeated at every call/ctor/variant/static/defer emit
+    /// site. No argument is coerced: an int never reaches a `float` slot (D3, TICKET-138).
     fn compile_args(&mut self, fc: &mut FnComp, args: &[Expr]) -> Result<(), CompileError> {
         for a in args {
             self.compile_expr(fc, a)?;
-            let key = crate::checker::arg_float_widen_key(
-                self.current_module_idx,
-                self.kw_frag_ctx,
-                self.kw_frag_ord,
-                a.span,
-            );
-            if self.arg_float_widen.get(&key) == Some(&true) {
-                fc.emit(Op::CoerceFloat, a.span);
-            }
         }
         Ok(())
     }
@@ -5451,7 +4925,7 @@ impl Compiler {
                 if self.program.structs.contains_key(&key)
                     && !self.module_fns.get(tidx).is_some_and(|f| f.contains(name))
                 {
-                    self.compile_ctor_args(fc, &key, args)?;
+                    self.compile_args(fc, args)?;
                     fc.emit(Op::NewStruct(key, args.len()), span);
                     return Ok(());
                 }
@@ -5965,7 +5439,7 @@ impl Compiler {
                 && (self.raw_ctor_owner.as_deref() == Some(struct_key.as_str())
                     || !self.ctor_shadowed(name))
             {
-                self.compile_ctor_args(fc, &struct_key, args)?;
+                self.compile_args(fc, args)?;
                 fc.emit(Op::NewStruct(struct_key, args.len()), span);
                 return Ok(());
             }
@@ -6079,7 +5553,6 @@ impl Compiler {
         &mut self,
         fc: &mut FnComp,
         params: &[crate::ast::Param],
-        ret: Option<&crate::ast::Type>,
         body: &Expr,
         span: Span,
     ) -> Result<(), CompileError> {
@@ -6110,20 +5583,10 @@ impl Compiler {
         // Uniform by-reference capture (Task A): this closure's own boxed-name set (unwired).
         child.boxed_names = captured_names_of_closure(body, params);
         child.captured_names = captured_names;
-        // One-way int→float widening: a closure's OWN `-> float` return type coerces its body,
-        // exactly like a named fn's declared return (`:1711`). A closure body is always a single
-        // expression (never a block), so one `Op::CoerceFloat` before `emit_ret_coerce` below covers
-        // every closure.
-        child.ret_is_float = ret.is_some_and(|t| {
-            self.float_aliases
-                .is_float(self.current_module_idx, t, &self.float_shadow)
-        });
         for p in params {
             child.add_local(p.name.clone());
         }
-        // A `float`-typed closure param coerces at the prologue, like a named-fn param.
-        self.emit_float_param_prologue(&mut child, params);
-        // Uniform by-reference capture: box any param captured by a nested closure (after coercion).
+        // Uniform by-reference capture: box any param captured by a nested closure.
         self.emit_box_param_prologue(&mut child, params);
         // M-C (TICKET-040): a closure body is its own function body — a nested bare `spawn` (incl.
         // one reached through a `recover:`) binds to the closure's *own* implicit nursery, joined
@@ -6137,9 +5600,6 @@ impl Compiler {
         self.compile_expr(&mut child, body)?;
         if implicit {
             child.nursery_scopes -= 1;
-        }
-        if child.ret_is_float {
-            child.emit(Op::CoerceFloat, body.span);
         }
         self.emit_ret_coerce(&mut child, body.span)?;
         child.emit(Op::Return, span);
@@ -7796,10 +7256,6 @@ struct FnComp {
     /// This proto is a `test fn` body (free test or suite method). Stamped onto the [`Proto`] in
     /// `finish`; used only by `chezzi test` discovery.
     is_test: bool,
-    /// One-way int→float widening — this fn's declared return type is `float`, so every `return`
-    /// (and an inline-expr body's implicit return) coerces its value with `Op::CoerceFloat` before
-    /// `Op::Return`. Set from `FnDecl.ret` at the start of `compile_fn` (closures declare no ret type).
-    ret_is_float: bool,
 }
 
 impl FnComp {
@@ -7828,7 +7284,6 @@ impl FnComp {
             has_implicit_nursery: false,
             is_generator: false,
             is_test: false,
-            ret_is_float: false,
         }
     }
 

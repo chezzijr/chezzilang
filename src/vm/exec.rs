@@ -2142,22 +2142,6 @@ impl Vm {
                     );
                 }
             }
-            Op::CoerceFloat => {
-                // One-way int→float widening (idempotent on Float). Reuses `builtin_float`'s
-                // `n as f64`; any non-numeric top is a runtime error (the checker guarantees numeric).
-                let v = *self.stack.last().unwrap();
-                if let Some(n) = self.int_val(v) {
-                    let f = self.box_float(n as f64);
-                    *self.stack.last_mut().unwrap() = f;
-                } else if v.is_float() {
-                    // already a float — idempotent no-op
-                } else {
-                    return Err(self.err(
-                        format!("expected number, found {}", self.type_name(v)),
-                        span,
-                    ));
-                }
-            }
             // ----- M19 superinstructions. Bodies live in `#[inline(never)]` helpers so `step`'s own
             // stack frame stays lean. Plain calls no longer recurse the host stack (call-flattening:
             // `Op::Call` pushes a frame and the running `run_until` loop executes it), but the

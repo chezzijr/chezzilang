@@ -1357,39 +1357,14 @@ impl Checker {
         }
     }
 
-    /// Like [`Checker::assignable`], but accepts **one-way int→float widening** (`(Float, Int)` only)
-    /// at a SCALAR value-DEFINITION sink (typed `let`, function/struct/method arg, return,
-    /// param/field default).
-    ///
-    /// `widen` is NOT "this is a float sink" — it is "this expression is an untyped int CONSTANT"
-    /// ([`crate::ast::untyped_int_const`]), which is what every caller must pass. Go's rule: an
-    /// untyped constant adapts to a float context; a TYPED int value never implicitly converts (the
-    /// user writes `float(x)`). That distinction is what the old blanket `widen=true` lacked — it
-    /// accepted `i := 1; x: float = i`, which the type-blind compiler happily lowered as an `Int`
-    /// sitting in a static `float` slot (int overflow under a float type, an unsorted `List[float]`,
-    /// an `f64` load over an int payload once a JIT exists).
-    ///
-    /// Widening is still NOT propagated into ANY compound position (list/set/option element,
-    /// map/result value, struct/tuple/func) — only a scalar `float` sink emits `Op::CoerceFloat`.
-    /// Collection floats come instead from mixed-literal element inference (`[1, 2.3]` infers
-    /// `list[float]`), whose own widen gate (`Checker::elem_widen_ok`) fires only where the compiler
-    /// is guaranteed to coerce. `widen=false` ⇒ identical to [`Checker::assignable`].
-    pub(super) fn assignable_w(&self, expected: &Ty, actual: &Ty, widen: bool) -> bool {
-        if widen && matches!((expected, actual), (Ty::Float, Ty::Int)) {
-            return true;
-        }
-        self.assignable(expected, actual)
-    }
-
     /// W8-21 — which implicit success-coercion (if any) a bare value of type `ty` gets at a declared
     /// return sink of type `ret`. `None` means "no coercion" — the caller keeps its existing
-    /// `assignable`/`assignable_w` diagnostic unchanged.
+    /// `assignable` diagnostic unchanged.
     ///
     /// Order matters: `assignable` first (rule a — an already-legal return is never coerced), then
     /// "already a carrier" (never re-wrap `Option[Option[T]]`/`Result[Option[T],E]`), then
     /// `ty_fully_concrete(ret)` (rule c — a generic sink `T?` declines). The wrap arms use plain
-    /// `assignable`, NEVER `assignable_w` (rule b — no chaining onto int→float:
-    /// `float?: return 1` must keep erroring).
+    /// `assignable` (rule b — no chaining onto int→float: `float?: return 1` must keep erroring).
     pub(super) fn ret_coerce_mode(&self, ret: &Ty, ty: &Ty) -> Option<crate::checker::RetCoerce> {
         if self.assignable(ret, ty) {
             return None;
@@ -1442,28 +1417,6 @@ impl Checker {
             key,
             mode.unwrap_or(crate::checker::RetCoerce::NoWrap),
             "return-coercion",
-            span,
-        );
-    }
-
-    /// TICKET-054 review fix — record one call-argument's call-site widen verdict into
-    /// [`crate::checker::ArgFloatWidenTable`], keyed on `span` (the argument's own span). Called for
-    /// EVERY argument `check_args_subst` reaches (both `true` and `false`), so an aliased key —
-    /// two call sites sharing one spliced-default argument span — becomes a hard compile error
-    /// instead of silently applying one site's verdict to the other.
-    pub(super) fn record_arg_float_widen(&mut self, span: Span, widen: bool) {
-        let key = crate::checker::arg_float_widen_key(
-            self.graph_module_idx,
-            self.kw_frag_ctx,
-            self.kw_frag_ord,
-            span,
-        );
-        crate::checker::record_call_table_entry(
-            &mut self.arg_float_widen,
-            &mut self.table_conflicts,
-            key,
-            widen,
-            "argument float widen",
             span,
         );
     }
@@ -3781,7 +3734,10 @@ impl Checker {
                     let note = self.protocol_note(&t, &inferred);
                     self.error(
                         span,
-                        format!("{name}[{t}]() expected element type {t}, found {inferred}{note}"),
+                        format!(
+                            "{name}[{t}]() expected element type {t}, found {inferred}{note}{}",
+                            float_fix_note(&t, &inferred)
+                        ),
                     );
                 }
                 t
@@ -4065,67 +4021,6 @@ impl Checker {
         self.diag_rollback(mark);
         if !bounds_fail {
             *sub = cand;
-        }
-    }
-
-    /// W12-15 (TICKET-106) — Go's untyped-constant rule at a generic slot: a type param that one
-    /// argument binds to `float` and whose every `int` binding comes from an untyped int CONSTANT in
-    /// a BARE `T` slot becomes `float`, and those constants are coerced at the call site
-    /// (`ArgFloatWidenTable` → `Op::CoerceFloat` in `compile_args`), so no int reaches a float slot.
-    /// Records a verdict (true OR false) for every such constant: an inline-spliced default shares
-    /// one span across callers, and only a recorded `false` lets `record_call_table_entry` catch two
-    /// callers disagreeing.
-    ///
-    /// TICKET-124 (W13-12): `want` is the type-param binding a turbofish or a ctor's expected-type
-    /// hint (`hint_want`) already pinned. A param pinned to `float` there widens its bare-`T`
-    /// constants exactly like a sibling `float` argument does, so `Pair[float](1, 2.5)` and
-    /// `r: Pair[float] = Pair(1, 2)` widen the same way `mx(1, 2.5)` already did.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn widen_mixed_numeric_args(
-        &mut self,
-        tps: &[TypeParam],
-        decls: &[Ty],
-        arg_tys: &mut [Ty],
-        args: &[Expr],
-        explicit: bool,
-        sub: &mut HashMap<String, Ty>,
-        want: Option<&HashMap<String, Ty>>,
-    ) {
-        let n = decls.len().min(arg_tys.len()).min(args.len());
-        for tp in tps {
-            let p = &tp.name;
-            let (mut has_float, mut other_int) = (false, false);
-            let mut consts: Vec<usize> = Vec::new();
-            for i in 0..n {
-                let mut one: HashMap<String, Ty> = HashMap::new();
-                unify(&decls[i], &arg_tys[i], &mut one);
-                match one.get(p) {
-                    Some(Ty::Float) => has_float = true,
-                    Some(Ty::Int)
-                        if matches!(&decls[i], Ty::Param(d) if d == p)
-                            && crate::ast::untyped_int_const(&args[i]) =>
-                    {
-                        consts.push(i)
-                    }
-                    Some(Ty::Int) => other_int = true,
-                    _ => {}
-                }
-            }
-            let pinned = if explicit {
-                sub.get(p) == Some(&Ty::Float)
-            } else {
-                has_float || want.is_some_and(|w| w.get(p) == Some(&Ty::Float))
-            };
-            let widen = pinned && (explicit || !other_int) && !consts.is_empty();
-            for &i in &consts {
-                self.record_arg_float_widen(args[i].span, widen);
-                if widen {
-                    arg_tys[i] = Ty::Float;
-                }
-            }
-            if widen {
-                sub.insert(p.clone(), Ty::Float);
-            }
         }
     }
 
@@ -4847,7 +4742,7 @@ impl Checker {
         // `infer_generic_arg_tys` — its ctor callers pin nothing afterwards, so there the read IS
         // final. The helper scopes what is set here to the immediate bare-identifier arguments.
         let saved = std::mem::replace(&mut self.generic_fn_value_prepass, true);
-        let mut arg_tys = self.infer_generic_arg_tys(args, &sig.params, true, &[]);
+        let mut arg_tys = self.infer_generic_arg_tys(args, &sig.params, &[]);
         self.generic_fn_value_prepass = saved;
         // Explicit call-site type arguments (`max[int](…)`) seed the substitution; remaining (or
         // all, when none given) parameters are inferred from positional arguments. `unify` only
@@ -4924,18 +4819,6 @@ impl Checker {
                 unify(decl, actual, &mut subst_map);
             }
         }
-        // W12-15 (TICKET-106): widen a bare-`T` untyped int constant to float when a sibling argument
-        // binds `T = float`, BEFORE `recover_iter_elems`/`recover_protocol_args` — those recoveries
-        // may pin further params, and this widen must see only the direct arg-to-param bindings.
-        self.widen_mixed_numeric_args(
-            &sig.type_params,
-            &sig.params,
-            &mut arg_tys,
-            args,
-            !targs.is_empty(),
-            &mut subst_map,
-            None,
-        );
         // Recover element types from parameterized `Iterator[T]` bounds (bind `T` to the iterand's
         // element), then enforce every declared bound against its inferred binding.
         self.recover_iter_elems(&sig.type_params, &mut subst_map, span);
@@ -5013,7 +4896,6 @@ impl Checker {
         // into the return so a downstream `+1`/`.upper()` was spuriously rejected.
         self.recover_return_only_params(
             name,
-            &sig.params,
             &sig.params,
             &arg_tys,
             args,
@@ -5237,7 +5119,7 @@ impl Checker {
         // arguments, so a nested `Bx(ident)` still faces the wall.)
         let dec_args = declared.split_first().map_or(&[][..], |(_, d)| d);
         let saved = std::mem::replace(&mut self.generic_fn_value_prepass, true);
-        let mut arg_tys = self.infer_generic_arg_tys(args, dec_args, true, &[]);
+        let mut arg_tys = self.infer_generic_arg_tys(args, dec_args, &[]);
         self.generic_fn_value_prepass = saved;
         // Explicit member-level turbofish seeds the `[U]` params (arity-checked); `unify` only binds
         // a param not already in the map, so an explicit targ wins and a conflicting arg is caught by
@@ -5307,17 +5189,6 @@ impl Checker {
             }
             unify(&expected[i], &arg_tys[i].clone(), &mut mmap);
         }
-        // W12-15 (TICKET-106): widen a bare-`T` untyped int constant to float when a sibling argument
-        // binds `T = float`, BEFORE the `Iterator`/protocol recoveries.
-        self.widen_mixed_numeric_args(
-            mtps,
-            expected,
-            &mut arg_tys,
-            args,
-            !targs.is_empty(),
-            &mut mmap,
-            None,
-        );
         // Recover element types from `Iterator[T]` bounds, then enforce every declared bound.
         self.recover_iter_elems(mtps, &mut mmap, span);
         self.recover_index_args(mtps, &mut mmap, span);
@@ -5393,7 +5264,7 @@ impl Checker {
         // unbound param-position param to `Unknown`. `expected` = arg slots (sans receiver); `params` =
         // the full list incl receiver for the param-position degrade.
         self.recover_return_only_params(
-            method, expected, dec_args, &arg_tys, args, params, mtps, &mut mmap, span, true,
+            method, expected, &arg_tys, args, params, mtps, &mut mmap, span, true,
         );
         // …and NOW — with `mmap` as bound as it will ever get — the deferred half of the
         // uninstantiated-generic-fn-value rule. This is the LAST possible moment, which is the whole
@@ -5588,16 +5459,11 @@ impl Checker {
     /// The caller must complete pass-1 state (turbofish/arg-unify/iter+index recovery, and for the
     /// free-fn path its `report_uninferable_closure_params` + pass-1 `enforce_bounds`) BEFORE this call,
     /// so `bound_after_pass1` is correct and pass-1 bounds are enforced exactly once.
-    #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)] // arg decls (subst + pre-subst twins) + arity + span + flag
+    #[allow(clippy::too_many_arguments)] // arg decls + arity + span + flag
     pub(super) fn recover_return_only_params(
         &mut self,
         name: &str,
         arg_decls: &[Ty],
-        // The PRE-substitution declared slot per argument, same shape as `arg_decls` (receiver
-        // already dropped by the caller) — TICKET-094 defect C's scalar-float license is keyed on
-        // this, never on `arg_decls`, which is already substituted on the method path (DEC-054).
-        declared: &[Ty],
         arg_tys: &[Ty],
         args: &[Expr],
         all_params: &[Ty],
@@ -5609,8 +5475,7 @@ impl Checker {
         // Snapshot the params bound after pass 1, so the loop-back below only re-enforces bounds on
         // params NEWLY bound from a refined arg (pass-1 bounds are enforced by the caller).
         let bound_after_pass1: std::collections::HashSet<String> = map.keys().cloned().collect();
-        for (i, (decl, (actual, arg))) in arg_decls.iter().zip(arg_tys.iter().zip(args)).enumerate()
-        {
+        for (decl, (actual, arg)) in arg_decls.iter().zip(arg_tys.iter().zip(args)) {
             let want = subst(decl, map);
             // For a closure whose UNANNOTATED body is a nested free generic call, the prepass return
             // leaks the callee's own `Ty::Param` (`fn(?) -> T`) — not the lenient `Unknown` a direct
@@ -5625,7 +5490,7 @@ impl Checker {
             } else {
                 actual.clone()
             };
-            let refined = self.check_generic_arg(name, declared.get(i), &want, &fallback, arg);
+            let refined = self.check_generic_arg(name, &want, &fallback, arg);
             // SOUNDNESS: when the closure's expected return is ALREADY concrete (a return-only `[U]`
             // pinned by a sibling value arg or an explicit slot), enforce it explicitly here against the
             // REFINED return — rejecting a genuinely wrong body while ACCEPTING a nested-generic-call

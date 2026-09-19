@@ -20,9 +20,9 @@ use std::fmt;
 
 pub use ty::Ty;
 pub use ty::{
-    ArgFloatWidenTable, CarrierKey, CarrierMode, CarrierTable, ElemWiden, FnLabels, KeywordKey,
-    KeywordTable, ListWidenKey, ListWidenTable, ProtoEqTable, RetCoerce, RetCoerceTable, SumSeed,
-    SumSeedTable, WitnessCallee, WitnessKey, WitnessSrc, WitnessTable,
+    CarrierKey, CarrierMode, CarrierTable, FnLabels, KeywordKey, KeywordTable, ProtoEqTable,
+    RetCoerce, RetCoerceTable, SumSeed, SumSeedTable, WitnessCallee, WitnessKey, WitnessSrc,
+    WitnessTable,
 };
 use ty::{compatible, param_invariant};
 
@@ -237,44 +237,78 @@ fn is_reserved_type(name: &str) -> bool {
         || name == "timer"
 }
 
-/// The note appended to a `float`-sink mismatch whose actual expression is a TYPED int — the rule is
-/// Go's: an untyped int CONSTANT adapts to a float context, a typed int VALUE never does. Empty for
-/// any other mismatch, and empty when the offending expression IS an untyped int constant (it was
-/// rejected because the sink does not widen at all — a builtin-method arg, an enum payload, a call
-/// through a function VALUE — not because it is typed; claiming otherwise would be a lie).
-fn widen_note(expected: &Ty, actual: &Ty, e: &Expr) -> &'static str {
-    if matches!((expected, actual), (Ty::Float, Ty::Int)) && !crate::ast::untyped_int_const(e) {
-        " (a typed int never widens to float — write float(x))"
+/// D3 (TICKET-138): an int NEVER widens into a `float` slot, at any sink. The fix a diagnostic names.
+pub(crate) const FLOAT_FIX_NOTE: &str = " — write 1.0 (or float(x))";
+
+/// Does `actual` differ from `expected` by an int sitting where a `float` is expected — at the top or
+/// nested under the same type constructor? It only picks whether a failed slot check carries
+/// [`FLOAT_FIX_NOTE`]; it never decides what is accepted.
+fn int_where_float(expected: &Ty, actual: &Ty) -> bool {
+    fn any_pair(e: &[Ty], a: &[Ty]) -> bool {
+        e.len() == a.len() && e.iter().zip(a).any(|(e, a)| int_where_float(e, a))
+    }
+    match (expected, actual) {
+        (Ty::Float, Ty::Int) => true,
+        (Ty::List(e), Ty::List(a))
+        | (Ty::Set(e), Ty::Set(a))
+        | (Ty::Option(e), Ty::Option(a))
+        | (Ty::Channel(e), Ty::Channel(a))
+        | (Ty::Shared(e), Ty::Shared(a))
+        | (Ty::Atomic(e), Ty::Atomic(a))
+        | (Ty::RwShared(e), Ty::RwShared(a)) => int_where_float(e, a),
+        (Ty::Map(_, e), Ty::Map(_, a)) => int_where_float(e, a),
+        (Ty::Result(e1, e2), Ty::Result(a1, a2)) => {
+            int_where_float(e1, a1) || int_where_float(e2, a2)
+        }
+        (Ty::Tuple(e), Ty::Tuple(a)) => any_pair(e, a),
+        (Ty::Struct(n, e), Ty::Struct(m, a))
+        | (Ty::Enum(n, e), Ty::Enum(m, a))
+        | (Ty::NewType(n, e), Ty::NewType(m, a))
+        | (Ty::Protocol(n, e), Ty::Protocol(m, a))
+            if n == m =>
+        {
+            any_pair(e, a)
+        }
+        (
+            Ty::Func {
+                params: p1,
+                ret: r1,
+                ..
+            },
+            Ty::Func {
+                params: p2,
+                ret: r2,
+                ..
+            },
+        ) => any_pair(p1, p2) || int_where_float(r1, r2),
+        // The success-coercion sink (W8-21): a bare `1` at `float?` / `float!`.
+        (Ty::Option(e), a) | (Ty::Result(e, _), a)
+            if !matches!(a, Ty::Option(_) | Ty::Result(..)) =>
+        {
+            int_where_float(e, a)
+        }
+        _ => false,
+    }
+}
+
+/// The note a DIRECTED slot mismatch (an `expected` slot, an `actual` value) appends when the cause is
+/// an int where a `float` is expected. Empty for every other mismatch.
+pub(crate) fn float_fix_note(expected: &Ty, actual: &Ty) -> &'static str {
+    if int_where_float(expected, actual) {
+        FLOAT_FIX_NOTE
     } else {
         ""
     }
 }
 
-/// The collection element-widening hint derived from a RESOLVED `let` annotation: `List[float]` →
-/// `Elem`, `Map[_, float]` → `MapValue`. The `Ty` twin of the compiler's `Compiler::float_elem_hint`
-/// (which resolves the same thing from the syntactic `Type`, aliases included).
-/// (`Set[float]` is impossible — float is not Hashable — so it is intentionally not handled.)
-fn float_elem_hint_ty(ty: &Ty) -> Option<crate::ast::ElemFloatHint> {
-    match ty {
-        Ty::List(e) if **e == Ty::Float => Some(crate::ast::ElemFloatHint::Elem),
-        Ty::Map(_, v) if **v == Ty::Float => Some(crate::ast::ElemFloatHint::MapValue),
-        _ => None,
+/// [`float_fix_note`] for a SYMMETRIC mismatch (two branches, two elements, two operands): the int
+/// may sit on either side.
+pub(crate) fn float_fix_note_join(a: &Ty, b: &Ty) -> &'static str {
+    if int_where_float(a, b) || int_where_float(b, a) {
+        FLOAT_FIX_NOTE
+    } else {
+        ""
     }
-}
-
-/// The widen-SUPPRESSION twin of [`float_elem_hint_ty`]: an expected slot type of `List[Any]`
-/// declines the int→float element widen entirely — `Any` is the empty TOP protocol, not a numeric
-/// type, and `infer_list`'s expected-type-directed path already sanctions the heterogeneous literal,
-/// so nothing asks for the coercion (CPython keeps `[1, 3.0]`).
-///
-/// Keyed on the RESOLVED slot type only, so it is the same question at every position the slot type
-/// reaches a literal — an annotated `let`, a call argument, a struct constructor argument, the
-/// synthesized variadic pack, a `return`. A generic type param named `Any` resolves to `Ty::Param`
-/// and is therefore NOT a suppression, with no shadow set to maintain. The backend cannot re-derive
-/// any of this (it is type-blind); it consumes the verdict through [`ListWidenTable`].
-pub(crate) fn any_elem_slot(expected: Option<&Ty>) -> bool {
-    matches!(expected, Some(Ty::List(e))
-        if matches!(&**e, Ty::Protocol(n, a) if n == "Any" && a.is_empty()))
 }
 
 /// A short, surface-faithful label for a return-only extern `Type` in a marshallability error
@@ -1037,10 +1071,8 @@ pub fn resolve_call_tables(
     WitnessTable,
     CarrierTable,
     ProtoEqTable,
-    ListWidenTable,
     SumSeedTable,
     RetCoerceTable,
-    ArgFloatWidenTable,
     TableConflicts,
 ) {
     crate::on_frontend_stack_scoped(move || {
@@ -1052,10 +1084,8 @@ pub fn resolve_call_tables(
             std::mem::take(&mut c.witnesses),
             std::mem::take(&mut c.carriers),
             std::mem::take(&mut c.proto_eq_calls),
-            std::mem::take(&mut c.list_widen),
             std::mem::take(&mut c.sum_seeds),
             std::mem::take(&mut c.ret_coerce),
-            std::mem::take(&mut c.arg_float_widen),
             std::mem::take(&mut c.table_conflicts),
         )
     })
@@ -1078,10 +1108,8 @@ pub fn resolve_call_tables_standalone(
     WitnessTable,
     CarrierTable,
     ProtoEqTable,
-    ListWidenTable,
     SumSeedTable,
     RetCoerceTable,
-    ArgFloatWidenTable,
     TableConflicts,
 ) {
     let id = crate::resolver::ModuleId(std::path::PathBuf::from("<main>"));
@@ -1209,36 +1237,10 @@ pub fn carrier_key(
     (module_idx, frag_ctx, frag_ord, name_span)
 }
 
-/// Build the [`ListWidenKey`] for one list literal: a [`carrier_key`] on the literal's own node span,
-/// plus the node's ORIGIN — `ExprKind::List`'s second component, verbatim. The checker's record site
-/// and the compiler's lookup site call this one helper on the same AST node, so they cannot derive it
-/// differently. See [`ListWidenKey`] for why the span alone aliases.
-pub fn list_widen_key(
-    module_idx: usize,
-    frag_ctx: Span,
-    frag_ord: usize,
-    span: Span,
-    origin: Option<Span>,
-) -> crate::checker::ListWidenKey {
-    (carrier_key(module_idx, frag_ctx, frag_ord, span), origin)
-}
-
 /// W8-21 — build the [`RetCoerceTable`] key for one return-sink success-coercion decision: a plain
 /// [`carrier_key`] on the returned value's own span. The checker's record site and the compiler's
 /// lookup site call this one helper so they can never disagree on the key.
 pub fn ret_coerce_key(
-    module_idx: usize,
-    frag_ctx: Span,
-    frag_ord: usize,
-    span: Span,
-) -> crate::checker::CarrierKey {
-    carrier_key(module_idx, frag_ctx, frag_ord, span)
-}
-
-/// TICKET-054 review fix — build the [`ArgFloatWidenTable`] key for one call argument: a plain
-/// [`carrier_key`] on the argument's own span. The checker's record site and the compiler's lookup
-/// site call this one helper so they can never disagree on the key.
-pub fn arg_float_widen_key(
     module_idx: usize,
     frag_ctx: Span,
     frag_ord: usize,
@@ -2153,11 +2155,6 @@ struct Checker {
     /// type). Recorded UNCONDITIONALLY, for the same reason [`Self::carriers`] is. See
     /// [`ProtoEqTable`].
     proto_eq_calls: ProtoEqTable,
-    /// Which mixed-numeric list LITERALS must DECLINE the int→float element widen, keyed by
-    /// [`carrier_key`] on the literal's own span and consumed verbatim by the compiler (which cannot
-    /// re-derive it: the decision is the SLOT's element type). Recorded UNCONDITIONALLY, for the same
-    /// reason [`Self::carriers`] is. See [`ListWidenTable`].
-    list_widen: ListWidenTable,
     /// Which `.sum()` sites sum a scalar-numeric-newtype list and so need a `T(0)` seed, keyed by
     /// [`carrier_key`] on the method-name token and consumed verbatim by the compiler (which cannot
     /// re-derive it: the decision is the ELEMENT's type, and an empty list carries none at runtime).
@@ -2168,10 +2165,6 @@ struct Checker {
     /// compiler (which cannot re-derive it: the decision is whether the returned expression is
     /// already a carrier). See [`RetCoerceTable`].
     ret_coerce: RetCoerceTable,
-    /// TICKET-054 review fix — which call-argument literals a `Ty::Protocol`/`Ty::Param` (or
-    /// concrete-struct) dispatch must widen int→float AT THE CALL SITE, keyed by
-    /// [`arg_float_widen_key`] on the argument's own span. See [`ArgFloatWidenTable`].
-    arg_float_widen: ArgFloatWidenTable,
     /// W7-49 — side-table keys that were asked to hold two DIFFERENT decisions at once. Filled by
     /// [`record_call_table_entry`] (never by ordinary type errors) and returned alongside the three
     /// tables, because this pass DISCARDS its type errors — `self.error` would be swallowed here.
@@ -2354,17 +2347,9 @@ struct Checker {
     /// `Heap([], fn(x, y): x < y)` deadlock: the annotation pins `T`, which then pins the closure
     /// params. Mirrors the existing closure-vs-fn-annotation checking-mode (`infer_arg`).
     expected_hint: Option<Ty>,
-    /// One-way int→float ELEMENT-widening license for the collection literal directly bound to an
-    /// annotated `let` (`xs: List[float] = [1, f]`). SEPARATE from `expected_hint` on purpose:
-    /// `expected_hint` is also set for call arguments, and licensing off it would re-open the hole
-    /// (`f([a, 2.5])` into a `List[float]` param — the compiler has NO annotation there and cannot
-    /// coerce). This mirrors the compiler's own `float_elem_hint` exactly (same `let`-only set site,
-    /// same `take()`-at-expr-entry clear), which is what makes the checker's accepted set a subset of
-    /// what the compiler lowers.
-    float_elem_hint: Option<crate::ast::ElemFloatHint>,
     /// TICKET-107 (W12-13): the declared `T?`/`T!E` return type when the expression about to be
     /// inferred sits DIRECTLY at a W8-21 success-coercion sink. `take()`n at the top of `infer_kind`,
-    /// like `float_elem_hint`, so only an if/match expression at that exact position (and, through
+    /// like other one-shot hints, so only an if/match expression at that exact position (and, through
     /// it, its own branches) ever sees it.
     ret_coerce_sink: Option<Ty>,
     /// For each `spawn:` block body currently being checked, the local-scope depth (`scopes.len()`)

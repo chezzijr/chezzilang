@@ -943,60 +943,71 @@ fn rejects_desugared(src: &str, needle: &str) {
 
 // ===== one-way int→float implicit widening (C-like) =====
 
-/// `x: float = 3` — an int literal widens into a float-annotated let binding (the checker ACCEPTS it).
+/// `x: float = 3` — D3: an int literal never widens into a float-annotated let binding.
 #[test]
-fn widen_int_to_float_let_accepted() {
-    ok("x: float = 3\nprint(x)\n");
+fn d3_widen_int_to_float_let_rejected() {
+    rejects("x: float = 3\nprint(x)\n", "write 1.0");
+    ok("x: float = 3.0\nprint(x)\n");
 }
 
-/// An untyped int CONSTANT passed into a `float` parameter widens at the callee boundary. A TYPED
-/// int variable does NOT (BREAKING, was accepted → left an `Int` under a static `float`): write
-/// `float(a)`.
+/// D3: neither an int CONSTANT nor a typed int variable passed into a `float` parameter widens.
 #[test]
-fn widen_int_arg_into_float_param_accepted() {
-    ok("fn f(z: float):\n    print(z)\nf(7)\nf(1 + 2)\nf(-1)\n");
+fn d3_widen_int_arg_into_float_param_rejected() {
+    rejects("fn f(z: float):\n    print(z)\nf(7)\n", "write 1.0");
+    rejects("fn f(z: float):\n    print(z)\nf(1 + 2)\n", "write 1.0");
+    rejects("fn f(z: float):\n    print(z)\nf(-1)\n", "write 1.0");
+    ok("fn f(z: float):\n    print(z)\nf(7.0)\n");
     rejects(
         "fn f(z: float):\n    print(z)\na := 3\nf(a)\n",
-        "a typed int never widens to float — write float(x)",
+        "write 1.0 (or float(x))",
     );
     ok("fn f(z: float):\n    print(z)\na := 3\nf(float(a))\n");
 }
 
-/// A TYPED int expression returned from a `-> float` function no longer widens (BREAKING): `n + 1`
-/// with `n: int` is a typed int. An untyped int CONSTANT return still widens.
+/// D3: an int returned from a `-> float` function never widens, constant or typed.
 #[test]
-fn widen_int_return_into_float_ret_accepted() {
-    ok("fn g() -> float:\n    return 1 + 2\nprint(g())\n");
+fn d3_widen_int_return_into_float_ret_rejected() {
+    rejects(
+        "fn g() -> float:\n    return 1 + 2\nprint(g())\n",
+        "write 1.0",
+    );
     rejects(
         "fn g(n: int) -> float:\n    return n + 1\nprint(g(2))\n",
-        "a typed int never widens to float — write float(x)",
+        "write 1.0 (or float(x))",
     );
     ok("fn g(n: int) -> float:\n    return float(n + 1)\nprint(g(2))\n");
 }
 
-/// An int field value widens into a `float` struct field.
+/// D3: an int never widens into a `float` struct field.
 #[test]
-fn widen_int_into_float_struct_field_accepted() {
-    ok_desugared("struct P:\n    v: float\np := P(3)\nprint(p.v)\n");
+fn d3_widen_int_into_float_struct_field_rejected() {
+    rejects_desugared(
+        "struct P:\n    v: float\np := P(3)\nprint(p.v)\n",
+        "write 1.0",
+    );
+    ok_desugared("struct P:\n    v: float\np := P(3.0)\nprint(p.v)\n");
 }
 
-/// An annotated `List[float]` accepts int elements (widened); a `map` VALUE position too. (Float is
-/// not Hashable, so `Set[float]` / `Map[float, _]` are independently illegal — not a widening case.)
+/// D3: an annotated `List[float]` / `Map[_, float]` rejects int elements. (Float is not Hashable, so
+/// `Set[float]` / `Map[float, _]` are independently illegal — not a widening case.)
 #[test]
-fn widen_int_elems_into_annotated_float_collection_accepted() {
-    ok("xs: List[float] = [1, 2.3]\nprint(xs)\n");
-    ok("m: Map[str, float] = {\"a\": 1, \"b\": 2.3}\nprint(m)\n");
+fn d3_widen_int_elems_into_annotated_float_collection_rejected() {
+    rejects("xs: List[float] = [1, 2.3]\nprint(xs)\n", "write 1.0");
+    rejects(
+        "m: Map[str, float] = {\"a\": 1, \"b\": 2.3}\nprint(m)\n",
+        "write 1.0",
+    );
+    ok("xs: List[float] = [1.0, 2.3]\nprint(xs)\n");
+    ok("m: Map[str, float] = {\"a\": 1.0, \"b\": 2.3}\nprint(m)\n");
 }
 
-/// An int DEFAULT value widens into a `float` parameter (scalar sink; coerced at the callee prologue
-/// when the default is desugar-spliced into a call). The reverse (float default into an int param)
-/// stays a lossy type error (covered in `widen_float_into_int_still_rejected`).
+/// D3: an int DEFAULT value never widens into a `float` parameter. The default-value-vs-param-type
+/// check fires at the DECLARATION, so a wrong-typed default is caught even when every call overrides
+/// it. The reverse (float default into an int param) stays a lossy type error.
 #[test]
-fn widen_int_default_into_float_param_accepted() {
-    // The default-value-vs-param-type check fires at the DECLARATION (so a wrong-typed default is
-    // caught even when every call overrides it); declaration-only keeps this off the desugar/arity
-    // path. The omitted-default RUNTIME coercion is covered by vm::golden_tests::widen_default_param_division.
-    ok("fn g(a: float = 3) -> float:\n    return a\n");
+fn d3_widen_int_default_into_float_param_rejected() {
+    rejects("fn g(a: float = 3) -> float:\n    return a\n", "write 1.0");
+    ok("fn g(a: float = 3.0) -> float:\n    return a\n");
 }
 
 /// TICKET-025 / W8-21: implicit success-coercion at a declared `T?`/`T!E` sink is not implemented
@@ -1157,22 +1168,29 @@ fn widen_compound_float_positions_rejected() {
 }
 
 /// TICKET-124 (W13-14/W13-15) superseded this test's premise: a plain `x = <int>` reassignment to a
-/// `float`-declared local now widens an untyped int CONSTANT exactly like an annotated `let`/call-arg
-/// sink already did — `check_assign_value`'s `widen_span` plus `compile_assign`'s matching
-/// `Op::CoerceFloat`. A TYPED int still rejects (`reassignment_float_widen_rejects_typed_int`).
+/// D3: reassigning an int (constant or typed) to a `float`-declared local never widens.
 #[test]
-fn widen_reassign_int_to_float_local_accepts_untyped_constant() {
-    ok("x: float = 1.0\nx = 3\nprint(x)\n");
+fn d3_widen_reassign_int_to_float_local_rejects_untyped_constant() {
+    rejects("x: float = 1.0\nx = 3\nprint(x)\n", "write 1.0");
+    ok("x: float = 1.0\nx = 3.0\nprint(x)\n");
 }
 
-/// TICKET-124 (W13-14/W13-15) superseded this test's premise: a field/index assign target is no
-/// longer type-blind for an untyped int CONSTANT into a declared `float` slot — `p.x = 3` /
-/// `xs[0] = 3` / `m[k] = 3` all widen now, the same sink `compile_assign`'s Field/Index arms coerce.
+/// D3: a field/index assign target rejects an int constant into a declared `float` slot —
+/// `p.x = 3` / `xs[0] = 3` / `m[k] = 3`.
 #[test]
-fn widen_field_index_assign_targets_accept_untyped_constant() {
-    ok_desugared("struct P:\n    x: float\np := P(1.0)\np.x = 3\nprint(p.x)\n");
-    ok("xs: List[float] = [1.0]\nxs[0] = 3\nprint(xs)\n");
-    ok("m: Map[str, float] = {\"a\": 1.0}\nm[\"a\"] = 3\nprint(m)\n");
+fn d3_widen_field_index_assign_targets_reject_untyped_constant() {
+    rejects_desugared(
+        "struct P:\n    x: float\np := P(1.0)\np.x = 3\nprint(p.x)\n",
+        "write 1.0",
+    );
+    rejects(
+        "xs: List[float] = [1.0]\nxs[0] = 3\nprint(xs)\n",
+        "write 1.0",
+    );
+    rejects(
+        "m: Map[str, float] = {\"a\": 1.0}\nm[\"a\"] = 3\nprint(m)\n",
+        "write 1.0",
+    );
 }
 
 /// A newtype boundary stays nominal — NO int→float widening into a `float`-backed newtype ctor.
@@ -1795,7 +1813,7 @@ p: Produces[int] = IntProducer()
 /// fallback then finds it compatible with anything. Both silent wrong answers below were measured
 /// check-clean at rc=0 and faulted at run time.
 #[test]
-fn an_annotation_reaches_through_a_collection_literal() {
+fn d3_an_annotation_reaches_through_a_collection_literal() {
     const EMPTY: &str = "fn empty_list[E]() -> List[E]:\n    return []\n";
 
     // `a[1][0] + 1` was `ok: no type errors`, then *cannot apply Add to str and int* at run time.
@@ -1822,6 +1840,7 @@ fn an_annotation_reaches_through_a_collection_literal() {
     );
 
     // The AGREEING shapes must be untouched — this is a hint, not a new rejection rule.
+    // (D3: an int at a `float` element slot is the one new rejection, with the `write 1.0` note.)
     ok(&format!("{EMPTY}a: List[List[int]] = [empty_list()]\n"));
     ok(&format!(
         "{EMPTY}m: Map[str, List[int]] = {{\"k\": empty_list()}}\n"
@@ -1833,8 +1852,8 @@ fn an_annotation_reaches_through_a_collection_literal() {
     // column, a protocol element slot, a struct ctor argument, a declared return, and the
     // synthesized variadic pack.
     ok("xs: List[Any] = [1, \"a\", true]\n");
-    ok("xs: List[float] = [1, 2, 2.5]\n");
-    ok("m: Map[str, float] = {\"a\": 1, \"b\": 2.5}\n");
+    rejects("xs: List[float] = [1, 2, 2.5]\n", "write 1.0");
+    rejects("m: Map[str, float] = {\"a\": 1, \"b\": 2.5}\n", "write 1.0");
     ok(
         "protocol Show:\n    fn show(self) -> str\nstruct A:\n    n: int\n    fn show(self) -> str:\n        return \"a\"\nstruct B:\n    fn show(self) -> str:\n        return \"b\"\nxs: List[Show] = [A(1), B()]\n",
     );
@@ -1890,29 +1909,49 @@ fn an_annotation_reaches_through_a_collection_literal() {
 /// checker-side widen and its compiler twin `Compiler::elem_hint` are installed at exactly one
 /// site, `StmtKind::Let`. This test asserts the CORRECT (fixed) behavior, so it fails today.
 #[test]
-fn ticket_033_element_widen_missing_at_non_let_sinks() {
-    ok("fn f(xs: List[float]):\n    print(xs)\nfn main():\n    f([1, 2])\n");
-    ok("fn f() -> List[float]:\n    return [1, 2]\n");
-    ok("struct S:\n    v: List[float]\nfn main():\n    S([1, 2])\n");
+fn d3_ticket_033_element_int_rejected_at_non_let_sinks() {
+    rejects(
+        "fn f(xs: List[float]):\n    print(xs)\nfn main():\n    f([1, 2])\n",
+        "write 1.0",
+    );
+    rejects("fn f() -> List[float]:\n    return [1, 2]\n", "write 1.0");
+    rejects(
+        "struct S:\n    v: List[float]\nfn main():\n    S([1, 2])\n",
+        "write 1.0",
+    );
 }
 
 /// TICKET-033: every remaining position a slot type reaches a literal also licenses the widen — a
 /// method argument, a desugared keyword argument, the `Map[str, float]` twin at each sink, and a
 /// whole-collection alias sink.
 #[test]
-fn element_widen_reaches_every_argument_and_return_sink() {
-    ok(
+fn d3_element_int_rejected_at_every_argument_and_return_sink() {
+    rejects(
         "struct S:\n    fn m(self, xs: List[float]):\n        print(xs)\nfn main():\n    S().m([1, 2])\n",
+        "write 1.0",
     );
     // keyword calls only desugar under the harvest pass (`harvest_keywords`), which `check_graph`
-    // runs and the bare `check()` `ok()` helper does not — use `entry_ok`.
-    entry_ok(
+    // runs and the bare `check()` `ok()` helper does not — use `entry_rejects`.
+    entry_rejects(
         "fn f(xs: List[float], n: int):\n    print(xs, n)\nfn main():\n    f(n = 1, xs = [1, 2])\n",
+        "write 1.0",
     );
-    ok("fn f(m: Map[str, float]):\n    print(m)\nfn main():\n    f({\"a\": 1})\n");
-    ok("struct S:\n    v: Map[str, float]\nfn main():\n    S({\"a\": 1})\n");
-    ok("fn f() -> Map[str, float]:\n    return {\"a\": 1}\n");
-    ok("type LF = List[float]\nfn f(xs: LF):\n    print(xs)\nfn main():\n    f([1, 2])\n");
+    rejects(
+        "fn f(m: Map[str, float]):\n    print(m)\nfn main():\n    f({\"a\": 1})\n",
+        "write 1.0",
+    );
+    rejects(
+        "struct S:\n    v: Map[str, float]\nfn main():\n    S({\"a\": 1})\n",
+        "write 1.0",
+    );
+    rejects(
+        "fn f() -> Map[str, float]:\n    return {\"a\": 1}\n",
+        "write 1.0",
+    );
+    rejects(
+        "type LF = List[float]\nfn f(xs: LF):\n    print(xs)\nfn main():\n    f([1, 2])\n",
+        "write 1.0",
+    );
 }
 
 /// TICKET-033: a carrier (`List[float]?`), a nested element (`List[List[float]]`), an erased
@@ -1946,12 +1985,22 @@ fn element_widen_still_declines_carrier_nested_and_erased_sinks() {
 /// a `Map[_, float]` value default and a method default, matching the scalar default's widen and
 /// `docs/syntax.md`'s stated sink list.
 #[test]
-fn element_widen_reaches_parameter_and_field_defaults() {
-    ok("fn f(xs: List[float] = [1, 2]):\n    print(xs)\nfn main():\n    f()\n");
-    entry_ok("struct S:\n    v: List[float] = [1, 2]\nfn main():\n    print(S().v)\n");
-    ok("fn f(m: Map[str, float] = {\"a\": 1}):\n    print(m)\nfn main():\n    f()\n");
-    entry_ok(
+fn d3_element_int_rejected_at_parameter_and_field_defaults() {
+    rejects(
+        "fn f(xs: List[float] = [1, 2]):\n    print(xs)\nfn main():\n    f()\n",
+        "write 1.0",
+    );
+    entry_rejects(
+        "struct S:\n    v: List[float] = [1, 2]\nfn main():\n    print(S().v)\n",
+        "write 1.0",
+    );
+    rejects(
+        "fn f(m: Map[str, float] = {\"a\": 1}):\n    print(m)\nfn main():\n    f()\n",
+        "write 1.0",
+    );
+    entry_rejects(
         "struct S:\n    fn m(self, xs: List[float] = [1, 2.5]):\n        print(xs)\nfn main():\n    S().m()\n",
+        "write 1.0",
     );
 }
 
@@ -1963,13 +2012,18 @@ fn element_widen_reaches_parameter_and_field_defaults() {
 /// generic fn's RETURN position, which already widened before this ticket via the `sig.rs` return
 /// sink this ticket's defect-A/B fix also touches.
 #[test]
-fn generic_callee_keeps_expected_type_on_concrete_slots() {
-    ok("fn g[T](a: float, b: T) -> float:\n    return a\nfn main():\n    print(g(1, \"x\"))\n");
-    ok(
-        "fn g[T](a: List[float], b: T) -> List[float]:\n    return a\nfn main():\n    print(g([1, 2], \"x\"))\n",
+fn d3_generic_callee_rejects_int_on_concrete_float_slots() {
+    rejects(
+        "fn g[T](a: float, b: T) -> float:\n    return a\nfn main():\n    print(g(1, \"x\"))\n",
+        "write 1.0",
     );
-    ok(
+    rejects(
+        "fn g[T](a: List[float], b: T) -> List[float]:\n    return a\nfn main():\n    print(g([1, 2], \"x\"))\n",
+        "write 1.0",
+    );
+    rejects(
         "fn g[T](a: Map[str, float], b: T) -> Map[str, float]:\n    return a\nfn main():\n    print(g({\"a\": 1}, \"x\"))\n",
+        "write 1.0",
     );
     ok(
         "fn g[T](a: List[Any], b: T) -> List[Any]:\n    return a\nfn main():\n    print(g([1, -2.5], \"x\"))\n",
@@ -1977,19 +2031,28 @@ fn generic_callee_keeps_expected_type_on_concrete_slots() {
     ok(
         "fn g[T](a: List[Any], b: T) -> List[Any]:\n    return a\nfn main():\n    print(g([1, \"a\"], \"x\"))\n",
     );
-    ok(
+    rejects(
         "struct S:\n    fn g[U](self, x: float, u: U) -> float:\n        return x\nfn main():\n    print(S().g(1, \"z\"))\n",
+        "write 1.0",
     );
-    ok(
+    rejects(
         "struct S:\n    fn mk[U](x: float, u: U) -> float:\n        return x\nfn main():\n    print(S.mk(1, \"z\"))\n",
+        "write 1.0",
     );
-    ok("struct P[T]:\n    a: float\n    b: T\nfn main():\n    p := P(1, \"x\")\n    print(p.a)\n");
+    rejects(
+        "struct P[T]:\n    a: float\n    b: T\nfn main():\n    p := P(1, \"x\")\n    print(p.a)\n",
+        "write 1.0",
+    );
     // Regression pin 9 (human approval note) — a NON-generic method on a generic struct.
-    ok(
+    rejects(
         "struct P[T]:\n    v: T\n    fn g(self, xs: List[float]) -> List[float]:\n        return xs\nfn main():\n    p := P(1)\n    print(p.g([1, 2]))\n",
+        "write 1.0",
     );
     // Regression pin 10 (human approval note) — a generic fn's RETURN position.
-    ok("fn f[T](b: T) -> List[float]:\n    return [1, 2]\nfn main():\n    print(f(\"x\"))\n");
+    rejects(
+        "fn f[T](b: T) -> List[float]:\n    return [1, 2]\nfn main():\n    print(f(\"x\"))\n",
+        "write 1.0",
+    );
 }
 
 /// TICKET-094 defect C, negative half — the generic-erased slot exception must keep declining: a
@@ -1999,8 +2062,11 @@ fn generic_callee_keeps_expected_type_on_concrete_slots() {
 /// `g(1, 2.5)` now accepts with `T = float`. The other three cases here are untouched: none is a
 /// bare-`T`-slot untyped-int-constant-beside-a-float shape.)
 #[test]
-fn generic_callee_still_declines_an_erased_slot() {
-    ok("fn g[T](a: T, b: T) -> T:\n    return a\nfn main():\n    print(g(1, 2.5))\n");
+fn d3_generic_callee_still_declines_an_erased_slot() {
+    rejects(
+        "fn g[T](a: T, b: T) -> T:\n    return a\nfn main():\n    print(g(1, 2.5))\n",
+        "write 1.0",
+    );
     rejects(
         "struct Box[T]:\n    v: T\n    fn set(self, x: T):\n        self.v = x\nfn main():\n    Box(1.0).set(1)\n",
         "expected float, found int",
@@ -7730,9 +7796,10 @@ fn multibranch_int_float_conflicts_not_inferred() {
         "fn f(c: bool):\n    if c:\n        return 1\n    return 2.0\nfn main():\n    pass\n",
         "conflicting branches",
     );
-    // …but an explicit `-> float` annotation DOES widen (the real sink emits the coercion).
-    entry_ok(
+    // …and an explicit `-> float` annotation does not widen either (D3): `return 1` is rejected.
+    entry_rejects(
         "fn f(c: bool) -> float:\n    if c:\n        return 1\n    return 2.0\nfn main():\n    x := f(true)\n    print(x / 2)\n",
+        "write 1.0",
     );
 }
 
@@ -7893,16 +7960,21 @@ fn if_expr_edefault_keeps_binding_leniency_and_neighbors() {
     entry_ok(
         "fn main():\n    x: Result[str, str] = if true: Ok(\"a\") else: Err(\"b\")\n    print(x)\n",
     );
-    // An untyped int-CONST branch beside a float-CONST branch now WIDENS to float (the
-    // `literal_numeric_mix` peephole — consistent with the list literal `[3, 4.0]`; the compiler
-    // emits `Op::CoerceFloat` on the int branch, so it is sound, not int-under-float).
-    entry_ok("fn main():\n    x := if true: 3 else: 4.0\n    print(x)\n");
+    // D3: an int-CONST branch beside a float-CONST branch is a conflict, not a widen.
+    entry_rejects(
+        "fn main():\n    x := if true: 3 else: 4.0\n    print(x)\n",
+        "write 1.0",
+    );
 }
 
 #[test]
-fn multibranch_annotated_float_still_widens() {
-    // NEIGHBOR: the ANNOTATED-return widening path is untouched (`-> float: return 3` still widens).
-    entry_ok("fn f() -> float:\n    return 3\nfn main():\n    print(f())\n");
+fn d3_multibranch_annotated_float_rejects_int() {
+    // D3: the ANNOTATED-return path does not widen either (`-> float: return 3` is an error).
+    entry_rejects(
+        "fn f() -> float:\n    return 3\nfn main():\n    print(f())\n",
+        "write 1.0",
+    );
+    entry_ok("fn f() -> float:\n    return 3.0\nfn main():\n    print(f())\n");
 }
 
 #[test]
@@ -8320,22 +8392,25 @@ fn if_expression_incompatible_branches_rejected() {
 }
 
 #[test]
-fn if_expression_int_float_const_mix_widens() {
-    // QoL + consistency with list literals (`[1, 2.5]`): an untyped int-CONSTANT branch widens to
-    // float when a float-CONSTANT sibling branch is present — the same `literal_numeric_mix` peephole
-    // the list/map literals use. The compiler emits `Op::CoerceFloat` on the int branch under the
-    // identical predicate, so this is sound (no `Int` under a static `float`).
-    ok("x := if true: 1 else: 2.5\ny := x + 0.5\n");
-    ok("x := if false: 2.5 else: 1\ny := x + 0.5\n");
-    // elif chain: a float const anywhere licenses widening the int-const arms, ORDER-INDEPENDENTLY
-    // (the whole-chain mix is threaded through the recursion — `infer_if_else_chain`). Both a float in
-    // the tail/else AND a float in the head (before an all-int suffix) must widen, matching `[.., ..]`.
-    ok("x := if false: 1 elif false: 2 else: 3.5\ny := x + 0.5\n");
-    ok("x := if false: 2.5 elif false: 1 else: 2\ny := x + 0.5\n");
-    ok("x := if false: 1 elif false: 2.5 else: 3\ny := x + 0.5\n");
-    // A separate if-expr AFTER a mixed chain must NOT inherit the chain's mix (no leak): both-int
-    // stays int.
-    ok("x := if false: 1 elif false: 2 else: 3.5\nz := if true: 4 else: 5\nw := z + 1\n");
+fn d3_if_expression_int_float_const_mix_rejected() {
+    // D3: an int branch beside a float branch is a conflict (like the list literal `[1, 2.5]`), in
+    // either order and anywhere in an elif chain.
+    rejects("x := if true: 1 else: 2.5\ny := x + 0.5\n", "write 1.0");
+    rejects("x := if false: 2.5 else: 1\ny := x + 0.5\n", "write 1.0");
+    rejects(
+        "x := if false: 1 elif false: 2 else: 3.5\ny := x + 0.5\n",
+        "write 1.0",
+    );
+    rejects(
+        "x := if false: 2.5 elif false: 1 else: 2\ny := x + 0.5\n",
+        "write 1.0",
+    );
+    rejects(
+        "x := if false: 1 elif false: 2.5 else: 3\ny := x + 0.5\n",
+        "write 1.0",
+    );
+    // The `.0` spelling checks, and an all-int if-expr stays int.
+    ok("x := if false: 1.0 elif false: 2.0 else: 3.5\ny := x + 0.5\n");
     // both branches int (no float sibling) is UNCHANGED — stays `int`.
     ok("x := if true: 1 else: 2\ny := x + 1\n");
 }
@@ -8490,8 +8565,12 @@ fn int_match_two_literals_without_wildcard_still_rejected() {
 }
 
 #[test]
-fn match_expression_int_float_const_mix_widens() {
-    ok("x := match true:\n    true: 1\n    _: 2.5\ny := x + 0.5\n");
+fn d3_match_expression_int_float_const_mix_rejected() {
+    rejects(
+        "x := match true:\n    true: 1\n    _: 2.5\ny := x + 0.5\n",
+        "write 1.0",
+    );
+    ok("x := match true:\n    true: 1.0\n    _: 2.5\ny := x + 0.5\n");
 }
 
 #[test]
@@ -11012,11 +11091,14 @@ fn native_math_from_import_binds_member() {
 }
 
 #[test]
-fn native_math_float_param_accepts_int() {
-    // One-way int->float widening: `math.sqrt(16)` widens the int arg to a float (the native host's
-    // `arg_float` already runtime-promotes int, so this is hole-free — resolves the old
-    // "inconsistent" gap where the runtime promoted but the checker rejected).
-    entry_ok("import std.math\nfn main():\n    print(math.sqrt(16))\n");
+fn d3_native_math_float_param_rejects_int() {
+    // D3: `math.sqrt(16)` is rejected like any user fn; the fix is `math.sqrt(16.0)`. (The native
+    // host's `arg_float` runtime leniency stays as defence-in-depth, unreachable through the checker.)
+    entry_rejects(
+        "import std.math\nfn main():\n    print(math.sqrt(16))\n",
+        "write 1.0",
+    );
+    entry_ok("import std.math\nfn main():\n    print(math.sqrt(16.0))\n");
 }
 
 // ===== int+float polymorphic math (gap #12) =====
@@ -11068,17 +11150,20 @@ fn cmp_max_int_result_widens_into_float_let() {
     // `float(...)` (or `cmp.max(3.0, 5.0)`).
     entry_rejects(
         "import std.cmp\nfn main():\n    x: float = cmp.max(3, 5)\n    print(x)\n",
-        "a typed int never widens to float — write float(x)",
+        "write 1.0 (or float(x))",
     );
     entry_ok("import std.cmp\nfn main():\n    x: float = float(cmp.max(3, 5))\n    print(x)\n");
 }
 
 #[test]
-fn cmp_max_mixed_int_float_rejected() {
-    // TICKET-106 W12-15: `cmp.max[T: Comparable]`'s bare `T` slot now widens the untyped int
-    // constant `3` to `float` beside `5.0` (Go's `Max(3, 5.0)` widens the same way), so this call
-    // is accepted, not rejected.
-    entry_ok("import std.cmp\nfn main():\n    print(cmp.max(3, 5.0))\n");
+fn d3_cmp_max_mixed_int_float_rejected() {
+    // D3 (supersedes TICKET-106 W12-15): a bare `T` slot never widens the untyped int constant `3`
+    // beside `5.0`; the fix is `cmp.max(3.0, 5.0)`.
+    entry_rejects(
+        "import std.cmp\nfn main():\n    print(cmp.max(3, 5.0))\n",
+        "write 1.0",
+    );
+    entry_ok("import std.cmp\nfn main():\n    print(cmp.max(3.0, 5.0))\n");
 }
 
 #[test]
@@ -11097,16 +11182,18 @@ fn cmp_from_import_max_int_widens_into_float_let() {
     // BREAKING, same as `cmp_max_int_result_widens_into_float_let` through the `from`-import path.
     entry_rejects(
         "import max from std.cmp\nfn main():\n    x: float = max(3, 5)\n    print(x)\n",
-        "a typed int never widens to float — write float(x)",
+        "write 1.0 (or float(x))",
     );
 }
 
 #[test]
-fn native_math_floor_widens_int_arg() {
-    // `floor`/`ceil`/`sqrt` keep a float-only RESULT (not numeric-polymorphic like abs/min/max), but
-    // one-way int->float widening now lets an int ARG flow into their float param (hole-free: the
-    // native host promotes int). `floor(2)` is `floor(2.0)`.
-    entry_ok("import std.math\nfn main():\n    print(math.floor(2))\n");
+fn d3_native_math_floor_rejects_int_arg() {
+    // D3: `floor`/`ceil`/`sqrt` take a float-only param; `floor(2)` is rejected, `floor(2.0)` checks.
+    entry_rejects(
+        "import std.math\nfn main():\n    print(math.floor(2))\n",
+        "write 1.0",
+    );
+    entry_ok("import std.math\nfn main():\n    print(math.floor(2.0))\n");
 }
 
 // ===== higher-order-function parameter types =====
@@ -18152,11 +18239,14 @@ fn extern_call_typechecks() {
 }
 
 #[test]
-fn extern_call_int_into_float_param_widens() {
-    // One-way int->float widening (matches std.math): `cos(2)` widens the int literal into the C
-    // `double` param. Hole-free — the FFI host's `arg_float` promotes an int arg to f64 before
-    // marshalling, so the C function receives `2.0`. A non-numeric arg (str/bool) is still rejected.
-    ok("extern \"libm.so.6\":\n    fn cos(x: float) -> float\n\nprint(cos(2))\n");
+fn d3_extern_call_int_into_float_param_rejected() {
+    // D3 (matches std.math): `cos(2)` is rejected at check time and names `write 1.0`; `cos(2.0)`
+    // checks. The FFI host's `arg_float` runtime promotion stays as defence-in-depth.
+    rejects(
+        "extern \"libm.so.6\":\n    fn cos(x: float) -> float\n\nprint(cos(2))\n",
+        "write 1.0",
+    );
+    ok("extern \"libm.so.6\":\n    fn cos(x: float) -> float\n\nprint(cos(2.0))\n");
 }
 
 #[test]
@@ -27351,7 +27441,7 @@ fn return_in_spawn_nested_in_recover_reports_spawn_only() {
 // converts (write `float(x)`). The checker's accepted set is now a SUBSET of what the type-blind
 // compiler can lower, so no sink can end up holding an `Int` under a static `float`.
 
-const WIDEN_NOTE: &str = "a typed int never widens to float — write float(x)";
+const WIDEN_NOTE: &str = "write 1.0 (or float(x))";
 
 /// V1 — a non-const int element in a `List[float]` call-arg slot. Checked clean before, ran as an
 /// `Int` under a static `float` (`xs[0] / 2` → `0.0` instead of `0.5`).
@@ -27375,8 +27465,12 @@ fn widen_v2_unannotated_mixed_nonliteral_float_rejected() {
 /// V2 (annotated) — the same literal WITH a `List[float]` annotation stays legal: the annotation is
 /// the type context, and the compiler's element hint coerces the untyped int constant.
 #[test]
-fn widen_annotated_list_const_int_with_float_var_ok() {
-    entry_ok("fn main():\n    f := 2.5\n    xs: List[float] = [1, f]\n    print(xs[0] / 2)\n");
+fn d3_widen_annotated_list_const_int_with_float_var_rejected() {
+    entry_rejects(
+        "fn main():\n    f := 2.5\n    xs: List[float] = [1, f]\n    print(xs[0] / 2)\n",
+        "write 1.0",
+    );
+    entry_ok("fn main():\n    f := 2.5\n    xs: List[float] = [1.0, f]\n    print(xs[0] / 2)\n");
 }
 
 /// V3 — a non-const int in a `Map[str, float]` VALUE position.
@@ -27473,24 +27567,26 @@ fn widen_typed_int_at_scalar_sinks_rejected() {
 
 /// OVER-REJECTION GUARD — every untyped-int-CONSTANT case still adapts to a float context.
 #[test]
-fn widen_untyped_int_const_still_adapts() {
-    entry_ok("fn main():\n    x: float = 1\n    print(x)\n");
-    entry_ok("fn main():\n    x: float = -5\n    print(x)\n");
-    entry_ok("fn main():\n    x: float = 1 + 2\n    print(x)\n");
-    entry_ok("fn main():\n    x: float = 2 * 3\n    print(x)\n");
-    entry_ok("fn f(z: float):\n    print(z)\nfn main():\n    f(7)\n    f(1 + 2)\n");
-    entry_ok("fn f() -> float:\n    return 1 + 2\nfn main():\n    print(f())\n");
-    entry_ok("struct P:\n    v: float\nfn main():\n    p := P(3)\n    print(p.v)\n");
-    entry_ok("fn g(a: float = 3) -> float:\n    return a\nfn main():\n    print(g())\n");
-    entry_ok("fn main():\n    xs: List[float] = [1, 2.3]\n    print(xs)\n");
-    entry_ok("fn main():\n    m: Map[str, float] = {\"a\": 1, \"b\": 2.3}\n    print(m)\n");
-    entry_ok("fn main():\n    xs := [1, 2.5]\n    print(xs[0])\n");
-    entry_ok("fn main():\n    xs := [1 + 1, 2.5]\n    print(xs[0])\n");
-    entry_ok("fn main():\n    xs := [1, -2.5]\n    print(xs[0])\n");
-    entry_ok("import std.math\nfn main():\n    print(math.floor(2))\n");
-    entry_ok(
+fn d3_widen_untyped_int_const_rejected() {
+    for src in [
+        "fn main():\n    x: float = 1\n    print(x)\n",
+        "fn main():\n    x: float = -5\n    print(x)\n",
+        "fn main():\n    x: float = 1 + 2\n    print(x)\n",
+        "fn main():\n    x: float = 2 * 3\n    print(x)\n",
+        "fn f(z: float):\n    print(z)\nfn main():\n    f(7)\n    f(1 + 2)\n",
+        "fn f() -> float:\n    return 1 + 2\nfn main():\n    print(f())\n",
+        "struct P:\n    v: float\nfn main():\n    p := P(3)\n    print(p.v)\n",
+        "fn g(a: float = 3) -> float:\n    return a\nfn main():\n    print(g())\n",
+        "fn main():\n    xs: List[float] = [1, 2.3]\n    print(xs)\n",
+        "fn main():\n    m: Map[str, float] = {\"a\": 1, \"b\": 2.3}\n    print(m)\n",
+        "fn main():\n    xs := [1, 2.5]\n    print(xs[0])\n",
+        "fn main():\n    xs := [1 + 1, 2.5]\n    print(xs[0])\n",
+        "fn main():\n    xs := [1, -2.5]\n    print(xs[0])\n",
+        "import std.math\nfn main():\n    print(math.floor(2))\n",
         "fn main():\n    ch := Channel[List[float]]()\n    ch.send([1, 2.5])\n    print(ch.recv())\n",
-    );
+    ] {
+        entry_rejects(src, "write 1.0");
+    }
 }
 
 /// HINT-LEAK GUARD — the `List[float]` let annotation licenses THIS literal's elements only; a nested
@@ -27540,9 +27636,13 @@ fn widen_through_fn_value_rejected() {
 /// A float sink spelled through a type ALIAS (`type F = float`) is a real float sink: the compiler
 /// resolves the alias at every coercion site, so the untyped-constant widen still lowers to an f64.
 #[test]
-fn widen_through_float_alias_ok() {
-    entry_ok(
+fn d3_widen_through_float_alias_rejected() {
+    entry_rejects(
         "type F = float\nfn g(z: F) -> F:\n    return z\nstruct P:\n    v: F\nfn main():\n    x: F = 1\n    xs: List[F] = [1, 2]\n    print(x / 2)\n    print(g(3) / 2)\n    print(P(3).v / 2)\n    print(xs)\n",
+        "write 1.0",
+    );
+    entry_ok(
+        "type F = float\nfn g(z: F) -> F:\n    return z\nstruct P:\n    v: F\nfn main():\n    x: F = 1.0\n    xs: List[F] = [1.0, 2.0]\n    print(x / 2)\n    print(g(3.0) / 2)\n    print(P(3.0).v / 2)\n    print(xs)\n",
     );
 }
 
@@ -27550,7 +27650,7 @@ fn widen_through_float_alias_ok() {
 /// CONSTANT at a NON-widening float sink (a builtin-method arg, an enum payload) is rejected because
 /// the sink does not widen at all — telling the user "a typed int never widens" would be a lie.
 #[test]
-fn widen_note_absent_for_untyped_const_at_nonwidening_sink() {
+fn d3_untyped_const_send_carries_the_float_fix_note() {
     let errs = check_entry("fn main():\n    ch := Channel[float]()\n    ch.send(1)\n");
     assert!(
         errs.iter()
@@ -27558,17 +27658,23 @@ fn widen_note_absent_for_untyped_const_at_nonwidening_sink() {
         "expected the send() mismatch, got: {errs:?}"
     );
     assert!(
-        !errs.iter().any(|e| e.message.contains(WIDEN_NOTE)),
-        "an untyped int constant must not be blamed as a TYPED int: {errs:?}"
+        errs.iter().any(|e| e.message.contains(WIDEN_NOTE)),
+        "D3: an untyped int constant at a slot sink names the `write 1.0` fix: {errs:?}"
     );
 }
 
 /// A `List[float]` / `Map[_, float]` annotation is a type CONTEXT: an ALL-int-constant literal adapts
 /// to it (the docs say so — and now the checker agrees; it used to be a spurious error).
 #[test]
-fn widen_annotated_all_int_collection_adapts() {
-    entry_ok("fn main():\n    xs: List[float] = [1, 2]\n    print(xs)\n");
-    entry_ok("fn main():\n    m: Map[str, float] = {\"a\": 1}\n    print(m)\n");
+fn d3_widen_annotated_all_int_collection_rejected() {
+    entry_rejects(
+        "fn main():\n    xs: List[float] = [1, 2]\n    print(xs)\n",
+        "write 1.0",
+    );
+    entry_rejects(
+        "fn main():\n    m: Map[str, float] = {\"a\": 1}\n    print(m)\n",
+        "write 1.0",
+    );
 }
 
 // ===== adversarial-review fixes: generic erasure + collection-alias annotations =====
@@ -27598,11 +27704,20 @@ fn widen_generic_method_param_at_float_rejected() {
 /// from the RESOLVED slot type, and the backend consumes the verdict verbatim instead of re-deriving
 /// it from syntax, so it no longer needs to see through the alias.
 #[test]
-fn widen_collection_alias_annotation_now_widens() {
-    entry_ok("type LF = List[float]\nxs: LF = [1, 2]\nprint(xs)\n");
-    entry_ok("type MF = Map[str, float]\nm: MF = {\"k\": 1}\nprint(m)\n");
-    // the ELEMENT spelled through an alias keeps working (the backend's `is_float` is alias-aware)
-    entry_ok("type F = float\nxs: List[F] = [1, 2.5]\nprint(xs)\n");
+fn d3_widen_collection_alias_annotation_rejects() {
+    entry_rejects(
+        "type LF = List[float]\nxs: LF = [1, 2]\nprint(xs)\n",
+        "write 1.0",
+    );
+    entry_rejects(
+        "type MF = Map[str, float]\nm: MF = {\"k\": 1}\nprint(m)\n",
+        "write 1.0",
+    );
+    // the ELEMENT spelled through an alias is rejected the same way
+    entry_rejects(
+        "type F = float\nxs: List[F] = [1, 2.5]\nprint(xs)\n",
+        "write 1.0",
+    );
 }
 
 /// KNOWN LIMIT (pinned): a VARIADIC `float` param adapts an untyped int constant only when an untyped
@@ -27611,12 +27726,16 @@ fn widen_collection_alias_annotation_now_widens() {
 /// `f(1, 2)` is therefore rejected while the identical scalar sink `fn f(z: float); f(1)` adapts.
 /// Upgrade path: make `Op::CoerceFloat` list-aware and emit the prologue for the variadic slot.
 #[test]
-fn widen_variadic_float_param_all_int_consts_rejected_known_limit() {
+fn d3_widen_variadic_float_param_int_consts_rejected() {
     entry_rejects(
         "fn f(...zs: float):\n    print(zs)\nf(1, 2)\n",
         "list element: expected float, found int",
     );
-    entry_ok("fn f(...zs: float):\n    print(zs)\nf(1, 2.5)\n");
+    entry_rejects(
+        "fn f(...zs: float):\n    print(zs)\nf(1, 2.5)\n",
+        "write 1.0",
+    );
+    entry_ok("fn f(...zs: float):\n    print(zs)\nf(1.0, 2.5)\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -28406,10 +28525,8 @@ fn module_global_fn_value_call_still_checks_args() {
         ],
         "argument 1 of 'TW': expected int, found str",
     );
-    // The case the STRICT choice actually decides: an int literal into a `float` param. A DECLARED
-    // module fn widens it (its prologue emits `Op::CoerceFloat`); a function VALUE does not, because
-    // a `Ty::Func` does not say which declaration it came from. Arity and str-vs-int above fail under
-    // either helper — this is the one that pins `check_args` over `check_args_w`.
+    // An int literal into a `float` param through a function VALUE is rejected (D3), and so is the
+    // declared-fn spelling of the same call below: no int ever widens into a `float` slot.
     files_reject(
         &[
             ("k.chz", "fn half(x: float) -> float:\n    return x / 2.0\n"),
@@ -28418,11 +28535,16 @@ fn module_global_fn_value_call_still_checks_args() {
         ],
         "argument 1 of 'FL': expected float, found int",
     );
-    // …and the declared-fn spelling of the same call still widens, so the strictness is a property of
-    // the VALUE, not of module-qualified calls in general.
+    files_reject(
+        &[
+            ("k.chz", "fn half(x: float) -> float:\n    return x / 2.0\n"),
+            ("main.chz", "import k\nprint(k.half(2))\n"),
+        ],
+        "write 1.0",
+    );
     files_ok(&[
         ("k.chz", "fn half(x: float) -> float:\n    return x / 2.0\n"),
-        ("main.chz", "import k\nprint(k.half(2))\n"),
+        ("main.chz", "import k\nprint(k.half(2.0))\n"),
     ]);
 }
 
@@ -30756,9 +30878,8 @@ fn value_slot_protocol_note_absent_for_a_non_protocol_mismatch() {
     let src = "fn f(x: float): pass\ni := 1\nf(i)\n";
     let errs = check_src(src);
     assert!(
-        errs.iter().any(|e| e
-            .message
-            .ends_with("(a typed int never widens to float \u{2014} write float(x))")),
+        errs.iter()
+            .any(|e| e.message.ends_with(" — write 1.0 (or float(x))")),
         "expected a widen-note error, got: {errs:?}"
     );
 }
@@ -31121,7 +31242,7 @@ fn binary_op_hint_reaches_both_operands_in_every_hinted_position() {
 }
 
 #[test]
-fn binary_op_hint_neighbours_unchanged() {
+fn d3_binary_op_hint_neighbours() {
     // Four cells whose verdict AND message are unchanged by TICKET-034's fix — passes both
     // before and after step 5's re-install. `pick() == false` is the load-bearing one: it pins
     // that the re-install stays UNIFORM over every operator (never filtered to arithmetic-only),
@@ -31132,9 +31253,12 @@ fn binary_op_hint_neighbours_unchanged() {
     );
     rejects(
         "q := [1] + [2, 2.5]\nprint(q)\n",
-        "cannot apply + to List[int] and List[float]",
+        "list elements differ: int vs float",
     );
-    ok("fn takeF(xs: List[float]) -> int:\n    return xs.len()\nprint(takeF([2]))\n");
+    rejects(
+        "fn takeF(xs: List[float]) -> int:\n    return xs.len()\nprint(takeF([2]))\n",
+        "write 1.0",
+    );
     ok(
         "fn pick[T]() -> T:\n    return pick[T]()\nfn use():\n    b: bool = pick() == false\n    print(b)\n",
     );
@@ -31175,18 +31299,22 @@ fn ticket_054_if_expr_uses_annotation_on_own_binding() {
 // TICKET-054 (2): a closure's OWN `-> float` return type must widen an untyped int constant body,
 // same as a named fn's and a method's `-> float` return already do (`pattern.rs:4663`).
 #[test]
-fn ticket_054_closure_own_return_type_widens_int_to_float() {
-    entry_ok("g := fn() -> float: 3\nprint(g())\n");
+fn d3_ticket_054_closure_own_return_type_rejects_int() {
+    entry_rejects("g := fn() -> float: 3\nprint(g())\n", "write 1.0");
+    entry_ok("g := fn() -> float: 3.0\nprint(g())\n");
 }
 
 // TICKET-054 (3): a `float` parameter reached through a protocol-typed receiver must widen an
 // untyped int argument, same as the identical method called on the concrete receiver already does.
 #[test]
-fn ticket_054_protocol_receiver_widens_float_param() {
-    let errs = check_entry(
+fn d3_ticket_054_protocol_receiver_rejects_float_param() {
+    entry_rejects(
         "protocol P:\n    fn m(self, x: float) -> float\nstruct S:\n    fn m(self, x: float) -> float:\n        return x\np: P = S()\nprint(p.m(1))\n",
+        "write 1.0",
     );
-    assert!(errs.is_empty(), "expected no errors, got: {errs:?}");
+    entry_ok(
+        "protocol P:\n    fn m(self, x: float) -> float\nstruct S:\n    fn m(self, x: float) -> float:\n        return x\np: P = S()\nprint(p.m(1.0))\n",
+    );
 }
 
 // TICKET-054 step 1: neighbours the sink-1 fix must NOT move. The branch-unifier hint must be
@@ -31286,20 +31414,28 @@ fn ticket_054_if_expr_hint_accepts_every_expected_type_spelling() {
 // return widens an untyped int constant reached through a `type` alias, and a HOF callback closure
 // widens the same way.
 #[test]
-fn ticket_054_closure_float_return_alias_and_hof() {
-    entry_ok("type F = float\ng := fn() -> F: 3\nprint(g())\n");
-    entry_ok("xs := [1, 2]\nprint(xs.map(fn(x) -> float: 3))\n");
+fn d3_ticket_054_closure_float_return_alias_and_hof() {
+    entry_rejects(
+        "type F = float\ng := fn() -> F: 3\nprint(g())\n",
+        "write 1.0",
+    );
+    entry_rejects(
+        "xs := [1, 2]\nprint(xs.map(fn(x) -> float: 3))\n",
+        "write 1.0",
+    );
 }
 
 // TICKET-054 step 4: sink-3's widen must reach a bound generic type parameter (not only a
 // protocol-typed receiver), and must carry DEC-033's element license (a `List[float]` requirement).
 #[test]
-fn ticket_054_protocol_and_bound_receiver_widen_more_spellings() {
-    entry_ok(
+fn d3_ticket_054_protocol_and_bound_receiver_reject_more_spellings() {
+    entry_rejects(
         "protocol P:\n    fn m(self, x: float) -> float\nstruct S:\n    fn m(self, x: float) -> float:\n        return x\nfn viabound[T: P](t: T) -> float:\n    return t.m(1)\nprint(viabound(S()))\n",
+        "write 1.0",
     );
-    entry_ok(
+    entry_rejects(
         "protocol Q:\n    fn n(self, xs: List[float]) -> float\nstruct S:\n    fn n(self, xs: List[float]) -> float:\n        return xs[0]\nq: Q = S()\nprint(q.n([1, 2]))\n",
+        "write 1.0",
     );
 }
 
@@ -31310,12 +31446,12 @@ fn ticket_054_protocol_and_bound_receiver_widen_more_spellings() {
 // `tests/chz/spec/expected_type_sinks_test.chz`, which divides the result and would see an
 // un-coerced `Int` (`0`, not `0.5`) before this fix. This test only pins the checker half.
 #[test]
-fn ticket_054_protocol_receiver_widens_through_generic_witness() {
-    entry_ok(
+fn d3_ticket_054_protocol_receiver_rejects_through_generic_witness() {
+    entry_rejects(
         "protocol P2:\n    fn m2(self, x: float) -> float\nstruct GS[T]:\n    v: T\n    fn m2(self, x: T) -> T:\n        return x\np2: P2 = GS(1.0)\nprint(p2.m2(1))\n",
+        "write 1.0",
     );
-    // The DIRECT (non-protocol) call to the same generic witness must still reject — the concrete
-    // receiver's own declared `T` is what the backend actually calls, and `T` is generic-erased.
+    // The DIRECT (non-protocol) call to the same generic witness rejects too.
     entry_rejects(
         "protocol G:\n    fn m2(self, x: float) -> float\nstruct GS[T]:\n    v: T\n    fn m2(self, x: T) -> T:\n        return x\ns := GS(1.0)\nprint(s.m2(1))\n",
         "argument 1 of 'm2': expected float, found int",
@@ -31930,9 +32066,10 @@ fn w12_9_expected_type_widen_declines_unsound_neighbours() {
 /// a generic call's two positions instead of one. Go's `Max(1, 2.5)` under `[T cmp.Ordered]`
 /// widens and returns `2.5`.
 #[test]
-fn w12_15_generic_call_widens_mixed_int_float_constants() {
-    ok(
+fn d3_w12_15_generic_call_rejects_mixed_int_float_constants() {
+    rejects(
         "fn mx[T: Comparable](a: T, b: T) -> T:\n    if a > b:\n        return a\n    return b\nprint(mx(1, 2.5))\n",
+        "write 1.0",
     );
 }
 
@@ -31940,12 +32077,19 @@ fn w12_15_generic_call_widens_mixed_int_float_constants() {
 /// local, keeps rejecting a mismatched type and an explicit turbofish, and keeps rejecting a
 /// TYPED int (not a bare constant) beside a float.
 #[test]
-fn w12_15_mixed_constant_widen_neighbours() {
+fn d3_w12_15_mixed_constant_widen_neighbours() {
     let prelude =
         "fn mx[T: Comparable](a: T, b: T) -> T:\n    if a > b:\n        return a\n    return b\n";
-    ok(&format!("{prelude}print(mx(2.5, 1))\n"));
-    ok(&format!("{prelude}x := 2.5\nprint(mx(1, x))\n"));
-    ok("print([1.5, 2.5].fold(0, fn(a: float, b: float) -> float: a + b))\n");
+    rejects(&format!("{prelude}print(mx(2.5, 1))\n"), "write 1.0");
+    rejects(
+        &format!("{prelude}x := 2.5\nprint(mx(1, x))\n"),
+        "write 1.0",
+    );
+    rejects(
+        "print([1.5, 2.5].fold(0, fn(a: float, b: float) -> float: a + b))\n",
+        "write 1.0",
+    );
+    ok("print([1.5, 2.5].fold(0.0, fn(a: float, b: float) -> float: a + b))\n");
     rejects(
         &format!("{prelude}print(mx(1, \"x\"))\n"),
         "argument to 'mx' has type str, expected int",
@@ -32402,8 +32546,14 @@ fn a_cross_module_struct_name_collision_keeps_the_qualified_static_call_rejected
 // ===== reassignment / float-slot method-param sinks, plus a check-OK format spec =====
 
 #[test]
-fn generic_ctor_widens_untyped_int_to_float_slot() {
-    ok("struct Pair[T]:\n    a: T\n    b: T\n\nfn main():\n    p := Pair(1, 2.5)\n    print(p)\n");
+fn d3_generic_ctor_rejects_untyped_int_to_float_slot() {
+    rejects(
+        "struct Pair[T]:\n    a: T\n    b: T\n\nfn main():\n    p := Pair(1, 2.5)\n    print(p)\n",
+        "write 1.0",
+    );
+    ok(
+        "struct Pair[T]:\n    a: T\n    b: T\n\nfn main():\n    p := Pair(1.0, 2.5)\n    print(p)\n",
+    );
 }
 
 #[test]
@@ -32518,20 +32668,40 @@ fn reassignment_hint_keeps_unannotated_empty_collections_open() {
 }
 
 #[test]
-fn float_collection_method_param_widens_untyped_int() {
-    ok("fn main():\n    l: List[float] = [1.5]\n    l.push(3)\n    print(l)\n");
+fn d3_float_collection_method_param_rejects_untyped_int() {
+    rejects(
+        "fn main():\n    l: List[float] = [1.5]\n    l.push(3)\n    print(l)\n",
+        "write 1.0",
+    );
+    ok("fn main():\n    l: List[float] = [1.5]\n    l.push(3.0)\n    print(l)\n");
 }
 
 #[test]
-fn reassignment_float_widen_accepts_untyped_int_constant() {
-    ok("fn main():\n    x: float = 1.5\n    x = 1\n    print(x)\n");
-    ok(
-        "struct S:\n    f: float\n    fn set_one(self):\n        self.f = 1\n\nfn main():\n    s := S(2.0)\n    s.set_one()\n    print(s.f)\n",
+fn d3_reassignment_float_rejects_untyped_int_constant() {
+    rejects(
+        "fn main():\n    x: float = 1.5\n    x = 1\n    print(x)\n",
+        "write 1.0",
     );
-    ok("g: float = 1.5\n\nfn set_g():\n    g = 1\n\nfn main():\n    set_g()\n    print(g)\n");
-    ok("fn main():\n    c: float = 1.5\n    fn bump():\n        c = 1\n    bump()\n    print(c)\n");
-    ok("fn main():\n    xs: List[float] = [1.5]\n    xs[0] = 1\n    print(xs)\n");
-    ok("fn main():\n    m: Map[str, float] = {}\n    m[\"a\"] = 1\n    print(m)\n");
+    rejects(
+        "struct S:\n    f: float\n    fn set_one(self):\n        self.f = 1\n\nfn main():\n    s := S(2.0)\n    s.set_one()\n    print(s.f)\n",
+        "write 1.0",
+    );
+    rejects(
+        "g: float = 1.5\n\nfn set_g():\n    g = 1\n\nfn main():\n    set_g()\n    print(g)\n",
+        "write 1.0",
+    );
+    rejects(
+        "fn main():\n    c: float = 1.5\n    fn bump():\n        c = 1\n    bump()\n    print(c)\n",
+        "write 1.0",
+    );
+    rejects(
+        "fn main():\n    xs: List[float] = [1.5]\n    xs[0] = 1\n    print(xs)\n",
+        "write 1.0",
+    );
+    rejects(
+        "fn main():\n    m: Map[str, float] = {}\n    m[\"a\"] = 1\n    print(m)\n",
+        "write 1.0",
+    );
 }
 
 #[test]
@@ -32547,15 +32717,18 @@ fn reassignment_float_widen_rejects_typed_int() {
 }
 
 #[test]
-fn collection_method_float_widen_accepts_untyped_int_constant() {
-    ok("fn main():\n    l: List[float] = [1.5]\n    l.insert(0, 3)\n    print(l.contains(1))\n");
+fn d3_collection_method_float_widen_rejects_untyped_int_constant() {
+    rejects(
+        "fn main():\n    l: List[float] = [1.5]\n    l.insert(0, 3)\n    print(l.contains(1))\n",
+        "write 1.0",
+    );
 }
 
 #[test]
 fn collection_method_float_widen_rejects_typed_int() {
     rejects(
         "fn main():\n    l: List[float] = [1.5]\n    i := 3\n    l.push(i)\n    print(l)\n",
-        "a typed int never widens to float",
+        "write 1.0",
     );
 }
 
@@ -32596,27 +32769,23 @@ fn format_spec_on_container_width_still_accepted() {
 const GENERIC_CTOR_WIDEN_PRELUDE: &str = "struct Pair[T]:\n    a: T\n    b: T\n\nstruct Box[T]:\n    v: T\n\nenum E[T]:\n    V(T, T)\n\nfn id[T](x: T) -> T:\n    return x\n\nfn mx[T: Comparable](a: T, b: T) -> T:\n    if a > b:\n        return a\n    return b\n\n";
 
 #[test]
-fn generic_ctor_numeric_widen_neighbours_accept() {
+fn d3_generic_ctor_numeric_widen_neighbours_rejected() {
+    for body in [
+        "p := Pair[float](1, 2.5)\n    print(p)",
+        "r: Pair[float] = Pair(1, 2)\n    print(r)",
+        "e := E.V(1, 2.5)\n    print(e)",
+        "f: E[float] = E.V(1, 2)\n    print(f)",
+        "bf: Box[float] = Box(1)\n    print(bf)",
+        "y := id[float](1)\n    print(y)",
+        "z := mx[float](1, 2)\n    print(z)",
+    ] {
+        rejects(
+            &format!("{GENERIC_CTOR_WIDEN_PRELUDE}fn main():\n    {body}\n"),
+            "write 1.0",
+        );
+    }
     ok(&format!(
-        "{GENERIC_CTOR_WIDEN_PRELUDE}fn main():\n    p := Pair[float](1, 2.5)\n    print(p)\n"
-    ));
-    ok(&format!(
-        "{GENERIC_CTOR_WIDEN_PRELUDE}fn main():\n    r: Pair[float] = Pair(1, 2)\n    print(r)\n"
-    ));
-    ok(&format!(
-        "{GENERIC_CTOR_WIDEN_PRELUDE}fn main():\n    e := E.V(1, 2.5)\n    print(e)\n"
-    ));
-    ok(&format!(
-        "{GENERIC_CTOR_WIDEN_PRELUDE}fn main():\n    f: E[float] = E.V(1, 2)\n    print(f)\n"
-    ));
-    ok(&format!(
-        "{GENERIC_CTOR_WIDEN_PRELUDE}fn main():\n    bf: Box[float] = Box(1)\n    print(bf)\n"
-    ));
-    ok(&format!(
-        "{GENERIC_CTOR_WIDEN_PRELUDE}fn main():\n    y := id[float](1)\n    print(y)\n"
-    ));
-    ok(&format!(
-        "{GENERIC_CTOR_WIDEN_PRELUDE}fn main():\n    z := mx[float](1, 2)\n    print(z)\n"
+        "{GENERIC_CTOR_WIDEN_PRELUDE}fn main():\n    p := Pair[float](1.0, 2.5)\n    print(p)\n"
     ));
 }
 
@@ -32657,4 +32826,95 @@ fn generic_ctor_numeric_widen_neighbours_reject() {
 #[test]
 fn int_never_widens_into_float_declaration_slot() {
     rejects("x: float = 1\nprint(x)\n", "write 1.0");
+}
+
+#[test]
+fn int_never_widens_into_float_list_extend_slot() {
+    rejects(
+        "fn main():\n    l: List[float] = [1.5]\n    l.extend([3])\n",
+        "write 1.0",
+    );
+}
+
+#[test]
+fn int_never_widens_at_every_sink() {
+    let boxed = "struct Box[T]:\n    v: T\n\n";
+    let lf = "    l: List[float] = [1.5]\n";
+    let progs: Vec<String> = vec![
+        "x: float = 1\nprint(x)\n".into(),
+        "fn main():\n    x: float = 1.0\n    x = 1\n    print(x)\n".into(),
+        "fn main():\n    x: float = 1.0\n    y: float = 1.0\n    x, y = 1, 2\n    print(x + y)\n"
+            .into(),
+        format!("{boxed}fn g() -> Box[float]: Box(1)\n"),
+        format!("fn main():\n{lf}    l.push(3)\n"),
+        format!("fn main():\n{lf}    l.extend([3])\n"),
+        format!("fn main():\n{lf}    l += [3]\n"),
+        "fn main():\n    ch := Channel[float](1)\n    ch.send(1)\n".into(),
+        "fn mx[T](a: T, b: T) -> T: a\n\nfn main():\n    print(mx(1, 2.5))\n".into(),
+        "fn id[T](x: T) -> T: x\n\nfn main():\n    print(id[float](1))\n".into(),
+        "struct S:\n    a: float\n\nfn main():\n    print(S(1).a)\n".into(),
+        "fn main():\n    m: Map[str, float] = {\"a\": 1}\n    print(m)\n".into(),
+        "enum E:\n    V(float)\n\nfn main():\n    print(E.V(1))\n".into(),
+        "fn main():\n    o: float? = None\n    x: float = o ?? 1\n    print(x)\n".into(),
+        "fn gen() -> Iterator[float]:\n    yield 1\n".into(),
+        "fn main():\n    l: List[float] = [i for i in range(3)]\n    print(l)\n".into(),
+        "fn g(a: float = 3) -> float: a\n".into(),
+        "struct S:\n    a: float = 3\n".into(),
+        "fn main():\n    g := fn() -> float: 3\n    print(g())\n".into(),
+        "fn f() -> float: 3\n".into(),
+        "fn f() -> float:\n    return 3\n".into(),
+        "fn main():\n    x: float? = 1\n    print(x)\n".into(),
+        "fn main():\n    x: float? = Some(1)\n    print(x)\n".into(),
+        "fn main():\n    r: Result[float, str] = Ok(1)\n    print(r)\n".into(),
+        "fn main():\n    x := if true: 1 else: 2.5\n    print(x)\n".into(),
+        "fn main():\n    x := match 1:\n        1: 2\n        _: 2.5\n    print(x)\n".into(),
+        "fn main():\n    x := [1, 2.5]\n    print(x)\n".into(),
+        "fn main():\n    m := {\"a\": 1, \"b\": 2.5}\n    print(m)\n".into(),
+        "fn main():\n    l: List[float] = [1.5] + [2]\n    print(l)\n".into(),
+        "fn main():\n    m: Map[str, float] = {\"a\": 1.5}\n    m[\"b\"] = 2\n".into(),
+        format!("fn main():\n{lf}    l[0] = 2\n"),
+        "struct S:\n    a: float\n\nfn main():\n    s := S(1.0)\n    s.a = 2\n".into(),
+        "fn main():\n    i := 3\n    x: float = i\n    print(x)\n".into(),
+        "fn main():\n    x := [1.5, 2.5].fold(0, fn(a: float, b: float) -> float: a + b)\n    print(x)\n"
+            .into(),
+    ];
+    for src in &progs {
+        let errs = check_src(src);
+        assert!(
+            errs.iter().any(|e| e.message.contains("write 1.0")),
+            "expected a `write 1.0` error for:\n{src}\ngot: {errs:?}"
+        );
+    }
+    // The native std types resolve only through the module graph.
+    entry_rejects(
+        "import std.math\n\nfn main():\n    print(math.sqrt(16))\n",
+        "write 1.0",
+    );
+    entry_rejects(
+        "import std.concurrency\n\nfn main():\n    s := Shared[float](1)\n    print(s)\n",
+        "write 1.0",
+    );
+    entry_rejects(
+        "import std.concurrency\n\nfn main():\n    a := Atomic[float](1)\n    print(a)\n",
+        "write 1.0",
+    );
+}
+
+#[test]
+fn int_never_widens_dot_zero_spellings_check() {
+    let progs: Vec<String> = vec![
+        "x: float = 1.0\nprint(x)\n".into(),
+        "fn main():\n    l: List[float] = [1.5]\n    l.push(3.0)\n".into(),
+        "fn mx[T](a: T, b: T) -> T: a\n\nfn main():\n    print(mx(1.0, 2.5))\n".into(),
+        "fn main():\n    ch := Channel[float](1)\n    ch.send(1.0)\n".into(),
+        "struct Box[T]:\n    v: T\n\nfn g() -> Box[float]: Box(1.0)\n".into(),
+        "fn main():\n    x := [1.0, 2.5]\n    print(x)\n".into(),
+        "fn main():\n    x: Any = if true: 1 else: 2.5\n    print(x)\n".into(),
+        "fn main():\n    f := 1.5\n    f += 1\n    print(f)\n".into(),
+        "fn main():\n    i := 3\n    print(i * 1.5)\n    print(2 * 1.5)\n    print(i < 3.5)\n"
+            .into(),
+    ];
+    for src in &progs {
+        ok(src);
+    }
 }

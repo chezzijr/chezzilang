@@ -836,9 +836,7 @@ impl Checker {
                 &named[ci - args.len()].1
             };
             let at = self.infer_arg(e, Some(pt));
-            // STRICT, like the positional function-value path above: a `Ty::Func` may be a generic fn
-            // instantiated at float (`f := id[float]`), whose callee prologue coerces nothing.
-            if !self.assignable_w(pt, &at, false) {
+            if !self.assignable(pt, &at) {
                 let pname = labels
                     .get(i)
                     .and_then(|l| l.as_deref())
@@ -848,8 +846,8 @@ impl Checker {
                 self.error(
                     e.span,
                     format!(
-                        "{pname} of a function-value call: expected {pt}, found {at}{}{note}",
-                        widen_note(pt, &at, e)
+                        "{pname} of a function-value call: expected {pt}, found {at}{note}{}",
+                        float_fix_note(pt, &at)
                     ),
                 );
             }
@@ -1079,14 +1077,14 @@ impl Checker {
             if !targs.is_empty() {
                 self.error(span, format!("'{tname}' takes no type arguments"));
             }
-            self.check_args_w(method, &sig.params, args, span);
+            self.check_args(method, &sig.params, args, span);
             return sig.ret;
         }
         // Generic: ONE by-name substitution map over BOTH the enclosing type's params and the
         // method's own `[U]` params. Seed each from its respective turbofish, then infer the rest by
         // unifying the declared param types (which may carry either set of `Ty::Param`s) against the
         // argument types — exactly like the struct/newtype ctor + a generic free fn.
-        let arg_tys = self.infer_generic_arg_tys(args, &sig.params, true, &[]);
+        let arg_tys = self.infer_generic_arg_tys(args, &sig.params, &[]);
         if arg_tys.len() != sig.params.len() {
             self.check_arity(method, sig.params.len(), args, span);
         }
@@ -1120,7 +1118,7 @@ impl Checker {
         );
         for (decl, (actual, arg)) in sig.params.iter().zip(arg_tys.iter().zip(args)) {
             let expected = subst(decl, &sub);
-            self.check_generic_arg(method, Some(decl), &expected, actual, arg);
+            self.check_generic_arg(method, &expected, actual, arg);
         }
         self.enforce_bounds(&tps, &sub, span);
         self.enforce_bounds(&sig.type_params, &sub, span);
@@ -1214,7 +1212,7 @@ impl Checker {
             &v.payload,
             targs,
         );
-        let mut arg_tys = self.infer_generic_arg_tys(args, &v.payload, false, &hints);
+        let arg_tys = self.infer_generic_arg_tys(args, &v.payload, &hints);
         if arg_tys.len() != v.payload.len() {
             self.check_arity(name, v.payload.len(), args, span);
         }
@@ -1222,18 +1220,6 @@ impl Checker {
         for (decl, actual) in v.payload.iter().zip(&arg_tys) {
             unify(decl, actual, &mut sub);
         }
-        // TICKET-124 (W13-12): widen a bare-`T` untyped int constant to float when the expected
-        // type pins this variant's `T` to float, same as a sibling float argument.
-        let want = self.hint_want(hint, &Ty::Enum(v.enum_name.clone(), param_shape(&tps)));
-        self.widen_mixed_numeric_args(
-            &tps,
-            &v.payload,
-            &mut arg_tys,
-            args,
-            !targs.is_empty(),
-            &mut sub,
-            want.as_ref(),
-        );
         self.recover_iter_elems(&tps, &mut sub, span);
         // Expected-type checking-mode: an annotation (`let`/return/param `Enum[int]`) seeds any type
         // param the args left FREE — unify the declared enum SHAPE (Param-bearing) against the hint
@@ -1255,7 +1241,7 @@ impl Checker {
         );
         for (decl, (actual, arg)) in v.payload.iter().zip(arg_tys.iter().zip(args)) {
             let expected = subst(decl, &sub);
-            self.check_generic_arg(name, None, &expected, actual, arg);
+            self.check_generic_arg(name, &expected, actual, arg);
         }
         self.enforce_bounds(&tps, &sub, span);
         let targs_out = tps
@@ -1289,7 +1275,7 @@ impl Checker {
                 self.error(span, format!("'{name}' takes no type arguments"));
             }
             // Struct ctor float fields are coerced per-field by the backend's `NewStruct` site.
-            self.check_args_w(name, &field_tys, args, span);
+            self.check_args(name, &field_tys, args, span);
             return Ty::strukt(key.to_string());
         }
         let hints = self.ctor_arg_hints(
@@ -1299,7 +1285,7 @@ impl Checker {
             &field_tys,
             targs,
         );
-        let mut arg_tys = self.infer_generic_arg_tys(args, &field_tys, true, &hints);
+        let arg_tys = self.infer_generic_arg_tys(args, &field_tys, &hints);
         self.check_ctor_arity(
             name,
             &tps,
@@ -1313,18 +1299,6 @@ impl Checker {
         for (decl, actual) in field_tys.iter().zip(&arg_tys) {
             unify(decl, actual, &mut sub);
         }
-        // TICKET-124 (W13-12): widen a bare-`T` untyped int constant to float when the expected
-        // type pins this ctor's `T` to float, same as a sibling float argument.
-        let want = self.hint_want(hint, &Ty::Struct(key.to_string(), param_shape(&tps)));
-        self.widen_mixed_numeric_args(
-            &tps,
-            &field_tys,
-            &mut arg_tys,
-            args,
-            !targs.is_empty(),
-            &mut sub,
-            want.as_ref(),
-        );
         self.recover_iter_elems(&tps, &mut sub, span);
         // Expected-type checking-mode: a `let`/return/param annotation (`Heap[int]`) seeds any type
         // param the args left FREE, BEFORE the deadlock probe — so the annotation breaks the
@@ -1351,7 +1325,7 @@ impl Checker {
         self.report_uninferable_closure_params(name, &tps, &field_tys, args, &mut sub, span);
         for (decl, (actual, arg)) in field_tys.iter().zip(arg_tys.iter().zip(args)) {
             let expected = subst(decl, &sub);
-            self.check_generic_arg(name, Some(decl), &expected, actual, arg);
+            self.check_generic_arg(name, &expected, actual, arg);
         }
         self.enforce_bounds(&tps, &sub, span);
         let targs_out = tps
@@ -1387,8 +1361,7 @@ impl Checker {
             self.check_args(name, std::slice::from_ref(underlying), args, span);
             return Ty::NewType(key.to_string(), Vec::new());
         }
-        let arg_tys =
-            self.infer_generic_arg_tys(args, std::slice::from_ref(underlying), false, &[]);
+        let arg_tys = self.infer_generic_arg_tys(args, std::slice::from_ref(underlying), &[]);
         if arg_tys.len() != 1 {
             self.check_arity(name, 1, args, span);
         }
@@ -1416,7 +1389,7 @@ impl Checker {
         );
         if let (Some(actual), Some(arg)) = (arg_tys.first(), args.first()) {
             let expected = subst(underlying, &sub);
-            self.check_generic_arg(name, None, &expected, actual, arg);
+            self.check_generic_arg(name, &expected, actual, arg);
         }
         self.enforce_bounds(tps, &sub, span);
         let targs_out = tps
@@ -2219,7 +2192,7 @@ impl Checker {
                     let field_tys: Vec<Ty> = fields.iter().map(|(_, t)| t.clone()).collect();
                     if tps.is_empty() {
                         // Struct ctor float fields are coerced per-field by the `NewStruct` site.
-                        self.check_args_w(name, &field_tys, args, span);
+                        self.check_args(name, &field_tys, args, span);
                         return Some(Ty::strukt(key));
                     }
                     // Generic struct: type arguments come from explicit call-site args (`S[int](…)`)
@@ -2232,24 +2205,12 @@ impl Checker {
                         &field_tys,
                         targs,
                     );
-                    let mut arg_tys = self.infer_generic_arg_tys(args, &field_tys, true, &hints);
+                    let arg_tys = self.infer_generic_arg_tys(args, &field_tys, &hints);
                     self.check_ctor_arity(name, &tps, &fields, &defaulted, targs, args, span);
                     let mut sub = self.seed_targs(name, &tps, targs, span);
                     for (decl, actual) in field_tys.iter().zip(&arg_tys) {
                         unify(decl, actual, &mut sub);
                     }
-                    // TICKET-124 (W13-12): widen a bare-`T` untyped int constant to float when the
-                    // expected type pins this ctor's `T` to float, same as a sibling float argument.
-                    let want = self.hint_want(hint, &Ty::Struct(key.clone(), param_shape(&tps)));
-                    self.widen_mixed_numeric_args(
-                        &tps,
-                        &field_tys,
-                        &mut arg_tys,
-                        args,
-                        !targs.is_empty(),
-                        &mut sub,
-                        want.as_ref(),
-                    );
                     self.recover_iter_elems(&tps, &mut sub, span);
                     // Expected-type checking-mode: a `let`/return/param annotation (`Heap[int]`) seeds
                     // any type param the args left FREE, BEFORE the deadlock probe — so the annotation
@@ -2274,7 +2235,7 @@ impl Checker {
                     );
                     for (decl, (actual, arg)) in field_tys.iter().zip(arg_tys.iter().zip(args)) {
                         let expected = subst(decl, &sub);
-                        self.check_generic_arg(name, Some(decl), &expected, actual, arg);
+                        self.check_generic_arg(name, &expected, actual, arg);
                     }
                     self.enforce_bounds(&tps, &sub, span);
                     let targs = tps
@@ -2325,7 +2286,7 @@ impl Checker {
                     // Honor an optional trailing tail (`min_params < params.len()`, e.g. a native
                     // `from`-imported fn with an optional arg); for plain sigs `min_params ==
                     // params.len()`, so this is identical to the old exact-arity check.
-                    self.check_args_range_w(name, &sig.params, sig.min_params, args, span, true);
+                    self.check_args_range(name, &sig.params, sig.min_params, args, span);
                     // TICKET-077: a `from`-imported diverging native fn (`exit`) bottom-types like
                     // `panic`, so it type-checks in value position (e.g. a `match` arm).
                     if self.imported_diverging.contains(name) {
@@ -2687,14 +2648,7 @@ impl Checker {
                     // Float params are coerced at the callee's prologue. Honor an optional trailing
                     // tail (`min_params < params.len()`, e.g. `request.get(url, timeout_ms?)`); for
                     // plain sigs `min_params == params.len()`, identical to the old exact check.
-                    self.check_args_range_w(
-                        method,
-                        &fsig.params,
-                        fsig.min_params,
-                        args,
-                        span,
-                        true,
-                    );
+                    self.check_args_range(method, &fsig.params, fsig.min_params, args, span);
                     // TICKET-077: a diverging native fn (`os.exit`) bottom-types like `panic`, so
                     // it type-checks in value position (e.g. a `match` arm).
                     if mod_id
@@ -2819,12 +2773,7 @@ impl Checker {
                         .iter()
                         .map(|t| subst(t, &pmap))
                         .collect();
-                    // The widen license keys on the PRE-substitution declared slot: a requirement
-                    // declared `float` adapts because the WITNESS's own prologue emits
-                    // `Op::CoerceFloat` from that same declared `float`, while one declared as a
-                    // protocol type parameter (`T`) stays generic-erased and does not widen.
-                    let declared: Vec<Ty> = msig.params.get(1..).unwrap_or(&[]).to_vec();
-                    self.check_args_subst(method, &expected, &declared, expected.len(), args, span);
+                    self.check_args_subst(method, &expected, expected.len(), args, span);
                     return subst(&msig.ret, &pmap);
                 }
                 self.infer_all(args);
@@ -2947,11 +2896,9 @@ impl Checker {
                                     mdoc.clone(),
                                 );
                             }
-                            let dec = declared.split_first().map_or(&[][..], |(_, d)| d);
                             self.check_args_subst(
                                 method,
                                 expected,
-                                dec,
                                 mminp.saturating_sub(1),
                                 args,
                                 span,
@@ -3107,17 +3054,13 @@ impl Checker {
                         );
                     }
                     match params.split_first() {
-                        Some((_receiver, expected)) => {
-                            let dec = declared.split_first().map_or(&[][..], |(_, d)| d);
-                            self.check_args_subst(
-                                method,
-                                expected,
-                                dec,
-                                mminp.saturating_sub(1),
-                                args,
-                                span,
-                            )
-                        }
+                        Some((_receiver, expected)) => self.check_args_subst(
+                            method,
+                            expected,
+                            mminp.saturating_sub(1),
+                            args,
+                            span,
+                        ),
                         None => {
                             self.error(
                                 span,
@@ -3203,17 +3146,13 @@ impl Checker {
                         );
                     }
                     match params.split_first() {
-                        Some((_receiver, expected)) => {
-                            let dec = declared.split_first().map_or(&[][..], |(_, d)| d);
-                            self.check_args_subst(
-                                method,
-                                expected,
-                                dec,
-                                mminp.saturating_sub(1),
-                                args,
-                                span,
-                            )
-                        }
+                        Some((_receiver, expected)) => self.check_args_subst(
+                            method,
+                            expected,
+                            mminp.saturating_sub(1),
+                            args,
+                            span,
+                        ),
                         None => {
                             self.error(
                                 span,
@@ -3880,15 +3819,7 @@ impl Checker {
                         Some((_recv, rest)) => rest.iter().map(|t| subst(t, &map)).collect(),
                         None => Vec::new(),
                     };
-                    // The widen license keys on the PRE-substitution declared slot: a requirement
-                    // declared `float` adapts because the WITNESS's own prologue emits
-                    // `Op::CoerceFloat` from that same declared `float`, while one declared as a
-                    // protocol type parameter (`T`) stays generic-erased and does not widen.
-                    let declared: Vec<Ty> = msig
-                        .params
-                        .split_first()
-                        .map_or_else(Vec::new, |(_recv, rest)| rest.to_vec());
-                    self.check_args_subst(method, &expected, &declared, expected.len(), args, span);
+                    self.check_args_subst(method, &expected, expected.len(), args, span);
                     // `Iterator[T].next()` yields `Option[T]` — its return is the bound's element arg,
                     // not `Self` (the registered placeholder). Resolve the arg with sibling params in
                     // scope (we're inside the bounded type's own generic context).
@@ -4022,25 +3953,16 @@ impl Checker {
         }
     }
 
-    /// Check argument count and each argument's type against a known parameter list. STRICT — no
-    /// int→float widening. Used for type-blind / collection-mutator paths (`push`/`add`/`insert`,
-    /// `send`, builtin methods) where the backend cannot coerce the argument.
+    /// Check argument count and each argument's type against a known parameter list. STRICT — an int
+    /// never widens into a `float` slot (D3, TICKET-138).
     pub(super) fn check_args(&mut self, name: &str, params: &[Ty], args: &[Expr], span: Span) {
-        self.check_args_range_w(name, params, params.len(), args, span, false);
-    }
-
-    /// Like [`Checker::check_args`] but accepting C-like one-way int→float widening. Used ONLY where
-    /// the COMPILER coerces the argument at the callee boundary from a static annotation: a call into
-    /// a user/extern function or method's float param, and a struct constructor's float field. The
-    /// backend's prologue / per-field coercion makes the stored value a genuine `f64` (no hole).
-    pub(super) fn check_args_w(&mut self, name: &str, params: &[Ty], args: &[Expr], span: Span) {
-        self.check_args_range_w(name, params, params.len(), args, span, true);
+        self.check_args_range(name, params, params.len(), args, span);
     }
 
     /// D6c — `check_args` generalized to an optional trailing tail: the arg count must fall in
     /// `min_params..=params.len()`, and each supplied arg must match its positional param. Used for the
     /// net socket ops whose `timeout_ms` is optional. `min_params == params.len()` reproduces the
-    /// exact-arity behavior of [`Checker::check_args`]. STRICT (no widening).
+    /// exact-arity behavior of [`Checker::check_args`].
     pub(super) fn check_args_range(
         &mut self,
         name: &str,
@@ -4049,7 +3971,7 @@ impl Checker {
         args: &[Expr],
         span: Span,
     ) {
-        self.check_args_range_w(name, params, min_params, args, span, false);
+        self.check_args_range_decl(name, params, min_params, args, span, false);
     }
 
     /// Infer a single call argument in *checking mode*: if the argument is a closure literal and the
@@ -4088,7 +4010,6 @@ impl Checker {
         &mut self,
         args: &[Expr],
         declared: &[Ty],
-        widen: bool,
         arg_hints: &[Option<Ty>],
     ) -> Vec<Ty> {
         // The "this read is re-pinned afterwards" licence ([`Checker::generic_fn_value_prepass`],
@@ -4120,19 +4041,8 @@ impl Checker {
                 {
                     // TICKET-094 defect C — a CONCRETE declared slot (never the callee's own type
                     // variable) keeps the expected-type hint its non-generic twin already threads
-                    // through `infer_arg`, so a bare literal argument widens/coerces exactly like it
-                    // does on a non-generic callee. The `List(_, Some(_))` skip mirrors
-                    // `check_args_range_decl`'s: a synthesized default-provider call must not double-
-                    // license the same literal its decl-site copy already licenses.
-                    self.float_elem_hint = if widen && !matches!(a.kind, ExprKind::List(_, Some(_)))
-                    {
-                        float_elem_hint_ty(d)
-                    } else {
-                        None
-                    };
-                    let t = self.infer_arg(a, Some(d));
-                    self.float_elem_hint = None;
-                    t
+                    // through `infer_arg`.
+                    self.infer_arg(a, Some(d))
                 } else if let Some(Some(h)) = arg_hints.get(i) {
                     // TICKET-124 (W13-13): the declared slot is a bare/under-determined type
                     // param, but the CTOR's own expected-type hint pinned this argument's type
@@ -4164,7 +4074,6 @@ impl Checker {
     pub(super) fn check_generic_arg(
         &mut self,
         name: &str,
-        decl: Option<&Ty>,
         expected: &Ty,
         fallback: &Ty,
         arg: &Expr,
@@ -4183,18 +4092,13 @@ impl Checker {
         } else {
             fallback.clone()
         };
-        // TICKET-094 defect C — a scalar `float` DECLARED slot (never the substituted `expected`,
-        // which could read `float` through a type param too) still widens a bare int literal here,
-        // mirroring `check_args_range_decl`'s scalar sink. Every other slot keeps the strict check.
-        let ok = if decl == Some(&Ty::Float) {
-            self.assignable_w(expected, fallback, crate::ast::untyped_int_const(arg))
-        } else {
-            self.assignable(expected, fallback)
-        };
-        if !ok {
+        if !self.assignable(expected, fallback) {
             self.error(
                 arg.span,
-                format!("argument to '{name}' has type {fallback}, expected {expected}"),
+                format!(
+                    "argument to '{name}' has type {fallback}, expected {expected}{}",
+                    float_fix_note_join(fallback, expected)
+                ),
             );
         }
         refined
@@ -4358,19 +4262,6 @@ impl Checker {
         true
     }
 
-    /// [`Checker::check_args_range`] with an explicit `widen` flag — see [`Checker::assignable_w`].
-    pub(super) fn check_args_range_w(
-        &mut self,
-        name: &str,
-        params: &[Ty],
-        min_params: usize,
-        args: &[Expr],
-        span: Span,
-        widen: bool,
-    ) {
-        self.check_args_range_decl(name, params, None, min_params, args, span, widen, false);
-    }
-
     /// [`Checker::check_args_range`] for a List/Set COLLECTION mutator receiver — the only path that
     /// may show the element-pin annotation hint on a `push`/`add`/`insert` mismatch (handle methods
     /// like `Atomic.add` route through `check_args_range` and never see it).
@@ -4382,21 +4273,15 @@ impl Checker {
         args: &[Expr],
         span: Span,
     ) {
-        self.check_args_range_decl(name, params, None, min_params, args, span, false, true);
+        self.check_args_range_decl(name, params, min_params, args, span, true);
     }
 
-    /// [`Checker::check_args_w`] for a SUBSTITUTED parameter list (a method of a generic type, whose
-    /// `T`s are already replaced by the receiver's type args). `declared` is the SAME list BEFORE
-    /// substitution — the widen license is keyed on it, because the type-blind backend keys
-    /// `emit_float_param_prologue` on the DECLARED syntactic type: a param written `T` is erased and
-    /// gets NO `Op::CoerceFloat`, even when `T` is instantiated at `float`. Widening there would leave
-    /// a runtime `Int` under a static `float` (the generic-erasure hazard already refused for calls
-    /// through a fn VALUE). A param written `float` (or a float alias) still adapts.
+    /// [`Checker::check_args_range`] for a SUBSTITUTED parameter list (a method of a generic type,
+    /// whose `T`s are already replaced by the receiver's type args).
     pub(super) fn check_args_subst(
         &mut self,
         name: &str,
         params: &[Ty],
-        declared: &[Ty],
         min_params: usize,
         args: &[Expr],
         span: Span,
@@ -4404,11 +4289,9 @@ impl Checker {
         self.check_args_range_decl(
             name,
             params,
-            Some(declared),
             min_params.min(params.len()),
             args,
             span,
-            true,
             false,
         );
     }
@@ -4448,16 +4331,13 @@ impl Checker {
         self.drop_empty_site(name, Some(pt));
     }
 
-    #[allow(clippy::too_many_arguments)] // params + their pre-substitution twins + arity + span + flags
     fn check_args_range_decl(
         &mut self,
         name: &str,
         params: &[Ty],
-        declared: Option<&[Ty]>,
         min_params: usize,
         args: &[Expr],
         span: Span,
-        widen: bool,
         is_collection: bool,
     ) {
         if !(min_params..=params.len()).contains(&args.len()) {
@@ -4472,50 +4352,7 @@ impl Checker {
             );
         }
         for (i, arg) in args.iter().enumerate() {
-            // TICKET-033 — a call/method/ctor/keyword argument is also a sink the int→float
-            // ELEMENT widen reaches: license it from the DECLARED param slot, the element twin of
-            // the scalar `widen` gate below. `widen` itself is false for a builtin-method argument
-            // (keeps those un-widened); the `ExprKind::List(_, Some(_))` skip is the synthesized
-            // variadic pack, whose all-int decline `docs/spec.md` documents; the `declared` gate is
-            // the element twin of the scalar check at `widen && declared…== Some(&Ty::Float)` below
-            // — a substituted generic param list must not license a slot the backend erased.
-            self.float_elem_hint = if widen
-                && !matches!(arg.kind, ExprKind::List(_, Some(_)))
-                && declared.is_none_or(|d| {
-                    d.get(i).and_then(float_elem_hint_ty)
-                        == params.get(i).and_then(float_elem_hint_ty)
-                }) {
-                params.get(i).and_then(float_elem_hint_ty)
-            } else {
-                None
-            };
             let at = self.infer_arg(arg, params.get(i));
-            self.float_elem_hint = None;
-            // The widen license: the sink must be an untyped int CONSTANT *and* — for a substituted
-            // param list — the slot must have been DECLARED `float` (not a type param the backend
-            // erased). `declared: None` ⇒ `params` are the declared types (the ordinary case).
-            // TICKET-124 (W13-15): a collection-method argument (`push`/`insert`/…) into a `float`
-            // slot widens an untyped int constant exactly like a free-fn call already did — `widen`
-            // itself is FALSE for a builtin-method call (see the TICKET-033 comment above), so this
-            // is its own gate, keyed on `is_collection` rather than the caller's `widen` flag.
-            let coll_widen = is_collection
-                && crate::ast::untyped_int_const(arg)
-                && params.get(i) == Some(&Ty::Float);
-            let widen = (widen
-                && crate::ast::untyped_int_const(arg)
-                && declared.is_none_or(|d| d.get(i) == Some(&Ty::Float)))
-                || coll_widen;
-            // TICKET-054 review fix — `declared: Some(_)` is exactly `check_args_subst`'s calls: a
-            // struct/protocol/bound-generic method dispatch, where the runtime witness the backend
-            // actually calls may declare this param generically (erased, no prologue coercion) even
-            // where THIS `declared` slot reads `float`. Record the call-site verdict so the compiler
-            // coerces the literal itself instead of trusting the callee's prologue. See
-            // `Checker::record_arg_float_widen` and `ArgFloatWidenTable`. A collection-method
-            // argument records for the same reason: `compile_args` reads the table for every
-            // non-ctor call, including a method's.
-            if declared.is_some() || is_collection {
-                self.record_arg_float_widen(arg.span, widen);
-            }
             // PART A: passing a bare empty-collection binding (`b := []`) into a CONCRETE collection
             // parameter (`f(xs: List[int])`) constrains its element type — clear the pending annotation
             // requirement (the spec's typed-parameter false-positive guard, one binding away from the
@@ -4525,7 +4362,7 @@ impl Checker {
                 self.constrain_empty_arg(arg, pt);
             }
             if let Some(pt) = params.get(i)
-                && !self.assignable_w(pt, &at, widen)
+                && !self.assignable(pt, &at)
             {
                 let (expected, actual) = (pt.to_string(), at.to_string());
                 // Annotation hint for a collection mutator whose element slot was PINNED by an
@@ -4537,10 +4374,9 @@ impl Checker {
                 // method name `add` also names `Atomic.add` (a handle), whose float mismatch must NOT
                 // show the collection hint — gate on the receiver actually being a collection.
                 let pnote = self.protocol_note(pt, &at);
-                // TICKET-124 (W13-15): a widen-eligible shape (`float` slot, `int` argument) is the
-                // one-way-widening rule falling short of a CONSTANT, not a stale element pin — the
-                // narrative below is false there (the type was DECLARED, not learned from an
-                // earlier use), so `widen_note` names the fix instead.
+                // An int at a `float` slot is not a stale element pin — the narrative below is
+                // false there (the type was DECLARED, not learned from an earlier use), so
+                // `float_fix_note` names the fix instead.
                 let coll_mismatch_is_float_widen = matches!((pt, &at), (Ty::Float, Ty::Int));
                 let hint = if !pnote.is_empty() {
                     pnote
@@ -4572,9 +4408,7 @@ impl Checker {
                         )
                     }
                 } else {
-                    // A typed int at a `float` sink is the one-way-widening rule, not a mistype —
-                    // name the fix.
-                    widen_note(pt, &at, arg).to_string()
+                    float_fix_note(pt, &at).to_string()
                 };
                 self.error(
                     arg.span,

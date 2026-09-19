@@ -926,7 +926,7 @@ impl Checker {
                         // `=` assigns an existing outer lvalue — reuse the ordinary assignment checks
                         // (assignability, type match, read-only/loop-var gates).
                         WaitTarget::Assign(target) => {
-                            self.check_assign(target, AssignOp::Eq, elem, arm.span, None)
+                            self.check_assign(target, AssignOp::Eq, elem, arm.span)
                         }
                         WaitTarget::Discard => {}
                     }
@@ -1062,9 +1062,6 @@ impl Checker {
         let mut has_wildcard = false;
         let mut exh = self.exh_new(&kind);
         let mut arm_tys: Vec<(Span, Ty)> = Vec::new();
-        // int→float widen an untyped-int-const arm when a float-const sibling arm is present (mirrors
-        // the list/map `literal_numeric_mix` peephole the compiler coerces on — see `branch_widen`).
-        let mix = crate::compiler::literal_numeric_mix(arms.iter().map(|a| &a.body));
         for arm in arms {
             self.warn_unreachable_arm(has_wildcard, arm.body.span);
             // No refine-on-first-use barrier here: a pin made in a value arm PERSISTS, exactly like
@@ -1086,7 +1083,6 @@ impl Checker {
             self.ret_coerce_sink = sink.clone();
             let t = self.infer(&arm.body);
             self.pop_scope();
-            let t = Self::branch_widen(&arm.body, t, mix);
             arm_tys.push((arm.body.span, t));
         }
         self.expected_hint = None;
@@ -1121,22 +1117,16 @@ impl Checker {
         sink: Option<Ty>,
         own: Span,
     ) -> Ty {
-        self.infer_if_else_chain(cond, then, els, None, sink, own)
+        self.infer_if_else_chain(cond, then, els, sink, own)
     }
 
-    /// Chain-aware body of `infer_if_else`. `inherited_mix` carries the WHOLE-chain
-    /// `if_chain_numeric_mix` down from the head of an `if … elif … else` chain: an `elif` desugars to
-    /// a nested `IfElse` in `els`, and the nested `els` sub-chain is inferred by a DIRECT recursive
-    /// call here (not generic `infer`) so the head's mix reaches it — otherwise a float constant in an
-    /// EARLIER arm would not license widening the int constants in a later all-int suffix, making the
-    /// widening order-dependent (unlike a list literal / `match`). `None` = this is the chain head, so
-    /// compute the mix over the full chain; `Some(m)` = inherited from the head.
+    /// Chain-aware body of `infer_if_else`: an `elif` desugars to a nested `IfElse` in `els`, and the
+    /// nested `els` sub-chain is inferred by a DIRECT recursive call here (not generic `infer`).
     fn infer_if_else_chain(
         &mut self,
         cond: &Expr,
         then: &Expr,
         els: &Expr,
-        inherited_mix: Option<bool>,
         sink: Option<Ty>,
         own: Span,
     ) -> Ty {
@@ -1147,10 +1137,6 @@ impl Checker {
         // would deadlock (acceptance would depend on branch order).
         let hint = self.expected_hint.take();
         let had_hint = hint.is_some();
-        // int→float widen an untyped-int-const branch when a float-const sibling is present ANYWHERE
-        // in the if/elif chain — the whole-chain mix, computed at the head and threaded down (mirrors
-        // the compiler's `compile_if_expr` — see `branch_widen`).
-        let mix = inherited_mix.unwrap_or_else(|| crate::compiler::if_chain_numeric_mix(then, els));
         self.expect_bool(cond, "if condition");
         // No refine-on-first-use barrier here: a pin made in a branch VALUE persists, exactly like
         // statement position. See the note above `Checker::is_unrefined_empty_coll`.
@@ -1158,22 +1144,20 @@ impl Checker {
         self.ret_coerce_sink = sink.clone();
         let t_then = self.infer(then);
         self.expected_hint = hint.clone();
-        // A nested-`IfElse` `els` is the `elif` tail — recurse DIRECTLY, threading the head's mix; any
-        // other `els` is the final leaf, inferred normally.
+        // A nested-`IfElse` `els` is the `elif` tail — recurse DIRECTLY; any other `els` is the final
+        // leaf, inferred normally.
         let t_els = if let ExprKind::IfElse {
             cond: c2,
             then: t2,
             els: e2,
         } = &els.kind
         {
-            self.infer_if_else_chain(c2, t2, e2, Some(mix), sink.clone(), els.span)
+            self.infer_if_else_chain(c2, t2, e2, sink.clone(), els.span)
         } else {
             self.ret_coerce_sink = sink.clone();
             self.infer(els)
         };
         self.expected_hint = None;
-        let t_then = Self::branch_widen(then, t_then, mix);
-        let t_els = Self::branch_widen(els, t_els, mix);
         if let Some(h) = &sink
             && let Some(ty) = self.coerce_branches_at_sink(
                 h,
@@ -1225,32 +1209,13 @@ impl Checker {
         }
     }
 
-    /// One-way int→float widening for an if/match-EXPRESSION tail branch — the scalar sibling of
-    /// [`elem_widen`], under the IDENTICAL soundness rule: a branch widens iff it is an untyped INT
-    /// constant AND the compiler is GUARANTEED to emit `Op::CoerceFloat` for it. The guarantee here is
-    /// the `literal_numeric_mix` peephole (`mix`) — a float-constant sibling branch is present — the
-    /// same predicate the compiler's `compile_if_expr`/`compile_match_expr` key their per-branch
-    /// coerce on, so checker and backend cannot drift (both over `crate::ast::const_num` /
-    /// `untyped_int_const`). A TYPED int branch (a variable, a call) never widens: the compiler cannot
-    /// see its type, so accepting it would leave an `Int` under a static `float` (the V1 hole). This
-    /// is what makes `x := if c: 1 else: 2.5` consistent with the accepted list literal `[1, 2.5]`.
-    fn branch_widen(body: &Expr, t: Ty, mix: bool) -> Ty {
-        if mix && t == Ty::Int && crate::ast::untyped_int_const(body) {
-            Ty::Float
-        } else {
-            t
-        }
-    }
-
     /// Fold one branch's type into a match/if expression's running result type. The first concrete
     /// branch sets the type; a later incompatible branch is a real error (and yields `Unknown` to
     /// suppress cascades). `Unknown` branches never override a concrete result. `hint` is the
     /// statically known expected type at this position (an annotated binding, a call argument, a
     /// declared return) — it is read ONLY on a `compatible` mismatch, and ONLY through `assignable`,
     /// never folded into the accumulator (so an existing diagnostic like `Sq and int` stays that,
-    /// not `Sh and int`) and never through `assignable_w` (DEC-034: routing the int→float widen
-    /// through `expected_hint` here would leave a runtime `Int` under a static `float`, since no
-    /// backend coerce is keyed on the hint for this fold).
+    /// not `Sh and int`). An int branch beside a float branch is an error (D3: no int→float widening).
     pub(super) fn unify_branch(
         &mut self,
         acc: Option<Ty>,
@@ -1272,7 +1237,10 @@ impl Checker {
                 } else {
                     self.error(
                         span,
-                        format!("branches have incompatible types: {prev} and {t}"),
+                        format!(
+                            "branches have incompatible types: {prev} and {t}{}",
+                            float_fix_note_join(&prev, &t)
+                        ),
                     );
                     Ty::Unknown
                 }
@@ -1458,11 +1426,6 @@ impl Checker {
     }
 
     pub(super) fn infer_kind(&mut self, expr: &Expr) -> Ty {
-        // One-way int→float ELEMENT-widening license from an annotated `let` — applies to the
-        // IMMEDIATE collection literal only. `take()` it (clearing the field) so a nested element, a
-        // call argument, or any other sub-expression does NOT inherit it. Mirrors the compiler's
-        // identical `take()` at the top of `compile_expr`.
-        let elem_hint = self.float_elem_hint.take();
         let ret_sink = self.ret_coerce_sink.take();
         match &expr.kind {
             ExprKind::Int(_) => Ty::Int,
@@ -1476,7 +1439,7 @@ impl Checker {
             ExprKind::Bool(_) => Ty::Bool,
             ExprKind::Pass => Ty::Nil,
             ExprKind::Ident(name) => self.infer_ident(name, expr.span),
-            ExprKind::List(items, origin) => {
+            ExprKind::List(items, _) => {
                 // Consume any expected-type hint (a `List[E]` slot: an annotated `let`, a call
                 // arg, a return position — or the synthesized variadic list). `take()` so the
                 // hint drives THIS literal's element type and never leaks into a nested element
@@ -1485,12 +1448,7 @@ impl Checker {
                     .expected_hint
                     .take()
                     .map(|t| Self::sink_payload(&t).clone());
-                // The backend is type-blind: hand it this literal's widen verdict rather than let it
-                // re-derive the slot's element type. One record site ⇒ every position an expected
-                // `List[E]` reaches a literal (annotated `let`, call arg, struct ctor arg, the
-                // synthesized variadic pack, `return`) is served by one channel.
-                self.record_list_widen(expr.span, items, *origin, hint.as_ref(), elem_hint);
-                self.infer_list(items, hint.as_ref(), elem_hint)
+                self.infer_list(items, hint.as_ref())
             }
             ExprKind::Tuple(items) => {
                 // TICKET-124 (W13-13): consume any expected-type hint (a `(Box[Named], int)` slot),
@@ -1522,12 +1480,7 @@ impl Checker {
                     .expected_hint
                     .take()
                     .map(|t| Self::sink_payload(&t).clone());
-                self.record_map_widen(expr.span, entries, elem_hint);
-                self.infer_map(
-                    entries,
-                    elem_hint == Some(crate::ast::ElemFloatHint::MapValue),
-                    hint.as_ref(),
-                )
+                self.infer_map(entries, hint.as_ref())
             }
             ExprKind::Set(elems) => {
                 let hint = self
@@ -2537,39 +2490,6 @@ impl Checker {
         Ty::Unknown
     }
 
-    /// One-way int→float ELEMENT widening for a collection literal — the SOUNDNESS gate, applied
-    /// IN PLACE to the already-inferred item types BEFORE any expected-type check.
-    ///
-    /// An item widens iff it is an untyped INT constant (`1`, `-2`, `1 + 1`) AND the compiler is
-    /// GUARANTEED to emit `Op::CoerceFloat` for it: either an untyped FLOAT constant sibling is
-    /// present (the compiler's `literal_numeric_mix` peephole fires) or the annotated-`let` element
-    /// hint is active (`Compiler::float_elem_hint`). Same predicate (`crate::ast::const_num`) over the
-    /// same syntax on both sides ⇒ the checker's element type IS what the backend stores, by
-    /// construction — in EVERY element context, including a `List[Any]` / variadic `...xs: Any` slot,
-    /// where the element type stays `Any` but the stored value is the widened `float`.
-    ///
-    /// A TYPED int item (a variable, a call result) never widens — the compiler cannot see its type,
-    /// so accepting it would leave a runtime `Int` under a static `float` (the V1 hole).
-    fn elem_widen<'a>(
-        &self,
-        items: impl Iterator<Item = &'a Expr> + Clone,
-        tys: &mut [Ty],
-        hint: bool,
-    ) {
-        let license = hint
-            || items
-                .clone()
-                .any(|e| crate::ast::const_num(e) == Some(crate::ast::ConstNum::Float));
-        if !license {
-            return;
-        }
-        for (e, t) in items.zip(tys) {
-            if *t == Ty::Int && crate::ast::untyped_int_const(e) {
-                *t = Ty::Float;
-            }
-        }
-    }
-
     /// A bare collection literal at a `T?` / `T!E` sink coerces to `Some(v)` / `Ok(v)` (W8-21), so the
     /// literal's real expected type is the carrier's PAYLOAD, not the carrier. Without this unwrap the
     /// element hint stopped at the carrier and nothing reached the items — the same laundering the
@@ -2592,12 +2512,7 @@ impl Checker {
         }
     }
 
-    pub(super) fn infer_list(
-        &mut self,
-        items: &[Expr],
-        expected: Option<&Ty>,
-        hint: Option<crate::ast::ElemFloatHint>,
-    ) -> Ty {
+    pub(super) fn infer_list(&mut self, items: &[Expr], expected: Option<&Ty>) -> Ty {
         // EXPECTED-TYPE-DIRECTED path: when the slot type is a concrete `List[E]` (an annotated
         // `let xs: List[Any] = …`, a `List[E]` call arg — INCLUDING the synthesized variadic list
         // for `...xs: E` — or a `List[E]` return), drive `E` down onto each element instead of
@@ -2607,8 +2522,8 @@ impl Checker {
         // variadic element type — `fn f(...xs: Any)` called `f(1, "a", true)` (and the equivalent
         // `xs: List[Any] = [1, "a", true]`) collapse to a `List[Any]` and check clean, since every
         // value satisfies the empty `Any` protocol. Falls back to bottom-up inference when `E` is not
-        // satisfied-by-all, preserving the existing "list elements differ" diagnostic + numeric
-        // (int→float) widening for a genuinely mistyped literal.
+        // satisfied-by-all, preserving the existing "list elements differ" diagnostic for a
+        // genuinely mistyped literal.
         // EXPECTED-TYPE PROPAGATION: drive the declared ELEMENT type onto each item, so a generic
         // call in element position is pinned by the slot it fills (`a: List[List[int]] =
         // [empty()]` binds `empty`'s `T` to `int`). The `take()` at the `ExprKind::List` arm stops
@@ -2626,7 +2541,7 @@ impl Checker {
             Some(Ty::List(e)) if !e.is_unknown() => Some((**e).clone()),
             _ => None,
         };
-        let mut tys: Vec<Ty> = items
+        let tys: Vec<Ty> = items
             .iter()
             .map(|it| match &elem_expected {
                 Some(e) => {
@@ -2638,21 +2553,7 @@ impl Checker {
                 None => self.infer_value(it),
             })
             .collect();
-        // Element widening runs FIRST, so the widened element type is what BOTH the expected-type
-        // path and the bottom-up path see — the compiler's peephole coerces the same items regardless
-        // of the slot, so the checker must not disagree with it in a variadic / un-annotated slot.
-        // A `List[Any]` SLOT is the one context that suppresses the widen outright — at every
-        // position, not just an annotated `let`: `Any` is the empty top protocol, and the
-        // expected-type-directed path below already sanctions the mix, so nothing asks for the
-        // coercion. The backend declines on the SAME verdict, consumed through `ListWidenTable`
-        // (recorded by `record_list_widen` from this very `expected`), so the two cannot drift.
-        if !crate::checker::any_elem_slot(expected) {
-            self.elem_widen(
-                items.iter(),
-                &mut tys,
-                hint == Some(crate::ast::ElemFloatHint::Elem),
-            );
-        }
+
         // TICKET-032 A2 — CLOSED. This gate used to be all-or-nothing: one element not assignable to
         // `e` abandoned the expected path entirely and fell through to the bottom-up homogeneity
         // below, where an `Unknown`-CORED sibling laundered the whole literal (`compatible(List[
@@ -2669,21 +2570,31 @@ impl Checker {
         {
             for (t, item) in tys.iter().zip(items) {
                 if !t.is_unknown() && !self.assignable(e, t) {
-                    self.error(item.span, format!("list element: expected {e}, found {t}"));
+                    self.error(
+                        item.span,
+                        format!(
+                            "list element: expected {e}, found {t}{}",
+                            float_fix_note(e, t)
+                        ),
+                    );
                 }
             }
             return Ty::list((**e).clone());
         }
-        // Bottom-up homogeneity over the (possibly widened) item types. A mixed literal the gate did
-        // not license is the ordinary heterogeneity error — `[a, 2.5]` with a TYPED int `a` has no
-        // type context to adapt to (Go), so it is rejected rather than silently leaving an `Int` under
-        // a static `float`.
+        // Bottom-up homogeneity over the item types. A mixed literal is the ordinary heterogeneity
+        // error — `[1, 2.5]` has no type context to adapt to, so it is rejected (D3: write `1.0`).
         let mut elem = Ty::Unknown;
         for (t, item) in tys.iter().zip(items) {
             if elem.is_unknown() {
                 elem = t.clone();
             } else if !t.is_unknown() && !compatible(&elem, t) {
-                self.error(item.span, format!("list elements differ: {elem} vs {t}"));
+                self.error(
+                    item.span,
+                    format!(
+                        "list elements differ: {elem} vs {t}{}",
+                        float_fix_note_join(&elem, t)
+                    ),
+                );
             }
         }
         Ty::list(elem)
@@ -2734,12 +2645,7 @@ impl Checker {
         Ty::set(elem_expected.unwrap_or(elem))
     }
 
-    pub(super) fn infer_map(
-        &mut self,
-        entries: &[(Expr, Expr)],
-        hint: bool,
-        expected: Option<&Ty>,
-    ) -> Ty {
+    pub(super) fn infer_map(&mut self, entries: &[(Expr, Expr)], expected: Option<&Ty>) -> Ty {
         // Drive the declared KEY and VALUE types onto each entry, exactly as `infer_list` does — and
         // for the same reason: an `Unknown`-carrying value laundered the whole literal. Measured
         // before, `m: Map[str, List[int]] = {"k": empty(), "j": ["x"]}` was check-clean at rc=0 and
@@ -2751,8 +2657,7 @@ impl Checker {
             ),
             _ => (None, None),
         };
-        // Infer keys+values in source order first (so the widen gate can see the whole VALUE column),
-        // then run the homogeneity checks in that same order — diagnostics are unchanged.
+        // Infer keys+values in source order first, then run the homogeneity checks in that same order.
         let mut key_tys: Vec<Ty> = Vec::with_capacity(entries.len());
         let mut val_tys: Vec<Ty> = Vec::with_capacity(entries.len());
         for (k, v) in entries {
@@ -2762,8 +2667,7 @@ impl Checker {
             val_tys.push(self.infer_value(v));
             self.expected_hint = None;
         }
-        // One-way int→float widening on the VALUE column only (keys are never float — not Hashable).
-        self.elem_widen(entries.iter().map(|(_, v)| v), &mut val_tys, hint);
+
         // TICKET-032 A2 — CLOSED, the `infer_list` twin: an expected key/value type is reported per
         // ENTRY instead of falling through to bottom-up homogeneity, closing the same
         // `Unknown`-cored-sibling launder (`m: Map[str, List[int]] = {"k": empty().reversed(), "j":
@@ -2801,14 +2705,26 @@ impl Checker {
             match &val_expected {
                 Some(ve) => {
                     if !vt.is_unknown() && !self.assignable(ve, &vt) {
-                        self.error(v_expr.span, format!("map value: expected {ve}, found {vt}"));
+                        self.error(
+                            v_expr.span,
+                            format!(
+                                "map value: expected {ve}, found {vt}{}",
+                                float_fix_note(ve, &vt)
+                            ),
+                        );
                     }
                 }
                 None => {
                     if value.is_unknown() {
                         value = vt.clone();
                     } else if !vt.is_unknown() && !compatible(&value, &vt) {
-                        self.error(v_expr.span, format!("map values differ: {value} vs {vt}"));
+                        self.error(
+                            v_expr.span,
+                            format!(
+                                "map values differ: {value} vs {vt}{}",
+                                float_fix_note_join(&value, &vt)
+                            ),
+                        );
                     }
                 }
             }
@@ -2960,13 +2876,25 @@ impl Checker {
                     if compatible(le, re) {
                         Ty::List(Box::new(merge_unknown(le, re)))
                     } else {
-                        self.error(lhs.span, format!("cannot apply + to {l} and {r}"));
+                        self.error(
+                            lhs.span,
+                            format!(
+                                "cannot apply + to {l} and {r}{}",
+                                float_fix_note_join(&l, &r)
+                            ),
+                        );
                         Ty::Unknown
                     }
                 } else if either_unknown {
                     Ty::Unknown
                 } else {
-                    self.error(lhs.span, format!("cannot apply + to {l} and {r}"));
+                    self.error(
+                        lhs.span,
+                        format!(
+                            "cannot apply + to {l} and {r}{}",
+                            float_fix_note_join(&l, &r)
+                        ),
+                    );
                     Ty::Unknown
                 }
             }
@@ -2993,7 +2921,11 @@ impl Checker {
                     } else {
                         self.error(
                             lhs.span,
-                            format!("cannot apply {} to {l} and {r}", op_sym(op)),
+                            format!(
+                                "cannot apply {} to {l} and {r}{}",
+                                op_sym(op),
+                                float_fix_note_join(&l, &r)
+                            ),
                         );
                         Ty::Unknown
                     }
@@ -3002,7 +2934,11 @@ impl Checker {
                 } else {
                     self.error(
                         lhs.span,
-                        format!("cannot apply {} to {l} and {r}", op_sym(op)),
+                        format!(
+                            "cannot apply {} to {l} and {r}{}",
+                            op_sym(op),
+                            float_fix_note_join(&l, &r)
+                        ),
                     );
                     Ty::Unknown
                 }
@@ -3021,7 +2957,11 @@ impl Checker {
                 } else {
                     self.error(
                         lhs.span,
-                        format!("cannot apply {} to {l} and {r}", op_sym(op)),
+                        format!(
+                            "cannot apply {} to {l} and {r}{}",
+                            op_sym(op),
+                            float_fix_note_join(&l, &r)
+                        ),
                     );
                     Ty::Unknown
                 }
@@ -4098,116 +4038,6 @@ impl Checker {
         );
     }
 
-    /// Record ONE mixed-numeric list literal's int→float element-widen verdict for the backend (see
-    /// [`crate::checker::ListWidenTable`]). The backend is type-blind: it can see the literal's
-    /// syntax (`literal_numeric_mix`, shared verbatim below) but never the SLOT's element type, which
-    /// is the whole decision.
-    ///
-    /// Recorded only for a literal that has BOTH halves of a real decision:
-    /// - the syntactic half — `literal_numeric_mix` fires, so there is actually something to widen.
-    ///   Without it the verdict is inert on both sides, so recording one would only add aliasing
-    ///   surface for nothing;
-    /// - the type half — a SETTLED `List[E]` slot with a known `E`, the same gate `infer_list`'s
-    ///   expected-type-directed path uses. The checker types one expression more than once by design
-    ///   (the generic-argument prepass and `infer_fn_ret` both walk a body early, with slots still
-    ///   `Unknown`) — see [`Self::record_carrier`] for the same hazard — so an unsettled walk must not
-    ///   register as a decision that then conflicts with the settled one.
-    ///
-    /// Both verdicts are recorded where those hold, so an aliased key is a loud error rather than one
-    /// literal's verdict silently applied to another. A backend MISS means "widen": the pre-fix
-    /// lowering, so an unrecorded literal can only under-apply the fix.
-    fn record_list_widen(
-        &mut self,
-        span: Span,
-        items: &[Expr],
-        origin: Option<Span>,
-        expected: Option<&Ty>,
-        license: Option<crate::ast::ElemFloatHint>,
-    ) {
-        // TICKET-033 — a non-`let` sink (a call argument, a struct ctor argument, a `return`)
-        // licenses the SAME int→float widen the `let` path grants, checked BEFORE the
-        // settled-slot decline/default branch below so a licensed sink always wins.
-        if license == Some(crate::ast::ElemFloatHint::Elem)
-            && items.iter().any(crate::ast::untyped_int_const)
-        {
-            let key = crate::checker::list_widen_key(
-                self.graph_module_idx,
-                self.kw_frag_ctx,
-                self.kw_frag_ord,
-                span,
-                origin,
-            );
-            crate::checker::record_call_table_entry(
-                &mut self.list_widen,
-                &mut self.table_conflicts,
-                key,
-                crate::checker::ElemWiden::Widen(crate::ast::ElemFloatHint::Elem),
-                "list element-widening",
-                span,
-            );
-            return;
-        }
-        if !matches!(expected, Some(Ty::List(e)) if !e.is_unknown())
-            || !crate::compiler::literal_numeric_mix(items.iter())
-        {
-            return;
-        }
-        let key = crate::checker::list_widen_key(
-            self.graph_module_idx,
-            self.kw_frag_ctx,
-            self.kw_frag_ord,
-            span,
-            origin,
-        );
-        let value = if crate::checker::any_elem_slot(expected) {
-            crate::checker::ElemWiden::Decline
-        } else {
-            crate::checker::ElemWiden::Default
-        };
-        crate::checker::record_call_table_entry(
-            &mut self.list_widen,
-            &mut self.table_conflicts,
-            key,
-            value,
-            "list element-widening",
-            span,
-        );
-    }
-
-    /// TICKET-033 — the [`Self::record_list_widen`] sibling for a `Map[_, float]` sink: records
-    /// `Widen(MapValue)` when `license` says this literal's VALUE column is licensed to widen at a
-    /// non-`let` sink and at least one value is an untyped int constant. No `Decline`/`Default` twin:
-    /// a `Map` slot has no `Any`-value suppression case to record (unlike `any_elem_slot`'s `List`).
-    fn record_map_widen(
-        &mut self,
-        span: Span,
-        entries: &[(Expr, Expr)],
-        license: Option<crate::ast::ElemFloatHint>,
-    ) {
-        if license != Some(crate::ast::ElemFloatHint::MapValue)
-            || !entries
-                .iter()
-                .any(|(_, v)| crate::ast::untyped_int_const(v))
-        {
-            return;
-        }
-        let key = crate::checker::list_widen_key(
-            self.graph_module_idx,
-            self.kw_frag_ctx,
-            self.kw_frag_ord,
-            span,
-            None,
-        );
-        crate::checker::record_call_table_entry(
-            &mut self.list_widen,
-            &mut self.table_conflicts,
-            key,
-            crate::checker::ElemWiden::Widen(crate::ast::ElemFloatHint::MapValue),
-            "map value-widening",
-            span,
-        );
-    }
-
     /// W7-43 — infer a `?.` carrier: type the OPERAND, pick the lowering from it, record the choice
     /// for the compiler, then **clone-and-lower to a real AST shape and infer THAT**.
     ///
@@ -5054,13 +4884,12 @@ impl Checker {
                 {
                     self.record_ret_coerce(body.span, Some(m));
                 }
-                if mode.is_none()
-                    && !self.assignable_w(&declared, &body_ty, crate::ast::untyped_int_const(body))
-                {
+                if mode.is_none() && !self.assignable(&declared, &body_ty) {
                     self.error(
                         body.span,
                         format!(
-                            "closure body has type {body_ty}, but its return type is {declared}"
+                            "closure body has type {body_ty}, but its return type is {declared}{}",
+                            float_fix_note(&declared, &body_ty)
                         ),
                     );
                 }

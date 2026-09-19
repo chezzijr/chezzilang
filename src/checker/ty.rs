@@ -158,69 +158,6 @@ pub type CarrierTable = HashMap<CarrierKey, CarrierMode>;
 /// fix, never mis-apply it.
 pub type ProtoEqTable = HashMap<CarrierKey, bool>;
 
-/// The [`ListWidenTable`] key: a [`CarrierKey`] on the list literal's OWN node span, plus the node's
-/// ORIGIN (`ExprKind::List`'s second component — `None` for a list the user wrote, the callee's key
-/// span for the synthesized variadic argument pack).
-///
-/// The span alone is NOT injective, and the origin is what makes it so. A list literal the user wrote
-/// is a primary expression, so its span is its own bracket range — but the synthesized pack has no
-/// source text and carries the CALL's span, and a pipe gives every link of `a |> f() |> g()` the LHS
-/// primary's span. Measured on `[1, 3.0] |> f(2.5) |> g(1, 2.0)`: the literal, the inner `Call` and the
-/// outer `Call` all report `line 1, col 6`. So without the origin, `[1, 3.0] |> vari(2.5, 1)` gave the
-/// pack and the user's inner literal one key — the pack's "decline" verdict reached the inner literal
-/// and stored an `Int` under a static `List[float]`, a silent wrong value (`[[1, 3.0], 2.5, 1]` where
-/// the un-piped spelling of the same program prints `[[1.0, 3.0], 2.5, 1]`) — and two variadic calls
-/// in one pipe chain aliased pack-to-pack, turning a valid program into a hard `internal:` error.
-///
-/// This is instance #4 of the repo's span-keyed-table aliasing class (`docs/gaps.md` M24-6, W7-49,
-/// W7-43), and it takes those rows' remedy: make the coordinate REAL, never re-anchor a span (a
-/// re-spanned pack only relocates the collision — a computed callee falls back to the call span again).
-pub type ListWidenKey = (CarrierKey, Option<Span>);
-
-/// Whether a mixed-numeric LIST LITERAL declines the int→float element widen, keyed by
-/// [`ListWidenKey`].
-///
-/// `true` = the slot's element type is the `Any` top protocol, so nothing numeric asks for the
-/// coercion and the backend must leave the int an int (CPython: `[1, 3.0]`). The backend is
-/// TYPE-BLIND and cannot re-derive this: the decision is the SLOT's element type, and a slot reaches
-/// a literal at an annotated `let`, a call argument (including a struct constructor argument and the
-/// synthesized variadic pack), and a `return` alike — one channel for every position, rather than one
-/// special case per position.
-///
-/// Recorded — and looked up — ONLY where [`crate::compiler::literal_numeric_mix`] fires, the one
-/// syntactic predicate both sides already share: a literal with nothing to widen has no decision to
-/// carry, so it never takes an entry and never risks the aliasing backstop. BOTH verdicts are
-/// recorded where it does fire, so [`crate::checker::record_call_table_entry`] can turn an aliased
-/// key into a hard error instead of silently applying one literal's verdict to another. A lookup MISS
-/// means "widen", which is the pre-fix lowering — a missing entry can only ever under-apply the fix.
-pub type ListWidenTable = HashMap<ListWidenKey, ElemWiden>;
-
-/// TICKET-033 — the verdict [`ListWidenTable`] carries for one mixed-numeric collection literal.
-///
-/// `Decline` is the old `true`: an `Any` element/value slot SUPPRESSES the widen the peephole would
-/// otherwise do (see [`crate::checker::any_elem_slot`]). `Default` is the old `false`: recorded only
-/// so [`crate::checker::record_call_table_entry`] still turns an aliased key into a hard error instead
-/// of letting one literal's `Decline` silently reach another. `Widen(h)` is new: this literal sits at a
-/// sink OUTSIDE the annotated `let` (a call argument, a struct constructor argument, a `return`) whose
-/// element/value type is `float`, so the checker licenses the SAME int→float widen the `let` path
-/// already grants — the backend has no annotation to re-derive this from at those sinks, so it must be
-/// carried, exactly like DEC-025's `RetCoerceTable`.
-///
-/// `Decline` and `Widen` never override each other: a `List` literal only ever records `Widen(Elem)` or
-/// the `Decline`/`Default` pair, a `Map` literal only ever records `Widen(MapValue)` or that pair —
-/// each backend arm tests only its own variant, so a cross-kind key collision (impossible in practice,
-/// since a `List` and a `Map` literal cannot share a span) would be inert, never a silent widen. A
-/// lookup MISS means "widen", the pre-fix lowering (unchanged from the old `bool` table).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ElemWiden {
-    /// An `Any` element/value slot: suppress the peephole widen entirely.
-    Decline,
-    /// Recorded only to keep an aliased key loud; carries no widen decision of its own.
-    Default,
-    /// This literal's element/value type is licensed to widen at this (non-`let`) sink.
-    Widen(crate::ast::ElemFloatHint),
-}
-
 /// W8-21 — which implicit success-coercion, if any, a declared `T?`/`T!E` return sink applies to a
 /// bare success value, keyed exactly like [`CarrierKey`]. This is the checker-to-backend contract:
 /// the compiler is TYPE-BLIND (it sees `decl.ret`'s syntactic annotation but not whether the returned
@@ -245,22 +182,6 @@ pub enum RetCoerce {
 }
 
 pub type RetCoerceTable = HashMap<CarrierKey, RetCoerce>;
-
-/// TICKET-054 review fix — whether one call ARGUMENT's untyped int literal must be widened to float
-/// AT THE CALL SITE, keyed exactly like [`RetCoerceTable`] on the argument's own span. Needed for a
-/// call reached through [`crate::checker::Checker::check_args_subst`] — a `Ty::Protocol`/`Ty::Param`
-/// dispatch resolves to WHICHEVER witness's proto the runtime struct tag names, and that witness's
-/// own declared param may be a generic `T` (erased, no `Op::CoerceFloat` in its prologue) even where
-/// the protocol requirement and every OTHER witness declare the slot literally `float`. The checker
-/// cannot see which witness backs a given protocol value, so it cannot trust the callee's prologue
-/// here and must coerce the argument itself, before the dynamic dispatch. (A concrete `Ty::Struct`
-/// receiver also routes through `check_args_subst`; there the callee IS statically known, so its own
-/// prologue already coerces and this is a harmless duplicate `Op::CoerceFloat`.) BOTH `true` and
-/// `false` are recorded (never skipped), so `record_call_table_entry` turns an aliased key — a
-/// spliced default argument reused at two call sites — into a hard compile error instead of silently
-/// applying one site's verdict to another. A lookup MISS means "no call-site coercion", the pre-fix
-/// lowering — this can only ever under-apply, never mis-apply.
-pub type ArgFloatWidenTable = HashMap<CarrierKey, bool>;
 
 /// Which `.sum()` call sites sum a list of a SCALAR NUMERIC NEWTYPE (`newtype Cents = int`), keyed
 /// exactly like [`CarrierKey`] (the method-NAME token — see there for why the call node's span

@@ -2092,22 +2092,8 @@ impl Checker {
                     // params. `infer_call` clears the hint, but pair the set with an immediate clear
                     // so a non-call value never leaks it into the next statement.
                     Some(expected) => {
-                        // One-way int→float ELEMENT widening: a `List[float]` / `Map[_, float]`
-                        // annotation licenses the literal's untyped-int-constant elements to widen —
-                        // TICKET-033 — derived from the RESOLVED `Ty`, so a whole-collection alias
-                        // (`type LF = List[float]`) is now a type context too: the verdict RIDES
-                        // `ListWidenTable` to the backend (`record_list_widen`/`record_map_widen`)
-                        // rather than the compiler re-deriving it from the syntactic shape, so an
-                        // alias the compiler cannot see through is no longer a reason to decline.
-                        // `infer_kind` `take()`s it so nothing nested inherits the license.
-                        // (The opposite verdict — a `List[Any]` slot SUPPRESSING the widen — does not
-                        // ride this channel: it is derived from `expected_hint` at the literal itself,
-                        // so it holds at every slot position, not just an annotated `let`. See
-                        // `crate::checker::any_elem_slot` / `ListWidenTable`.)
-                        self.float_elem_hint = float_elem_hint_ty(expected);
                         self.expected_hint = Some(expected.clone());
                         let vt = self.infer_value(value);
-                        self.float_elem_hint = None;
                         self.expected_hint = None;
                         vt
                     }
@@ -2121,18 +2107,14 @@ impl Checker {
                 let name = &names[0];
                 let declared = match annotated {
                     Some(expected) => {
-                        if !self.assignable_w(
-                            &expected,
-                            &val_ty,
-                            crate::ast::untyped_int_const(value),
-                        ) {
+                        if !self.assignable(&expected, &val_ty) {
                             let note = self.protocol_note(&expected, &val_ty);
                             self.error(
                                 value.span,
                                 format!(
-                                    "cannot assign {val_ty} to variable of type {expected}{}{}{note}",
-                                    widen_note(&expected, &val_ty, value),
-                                    crate::checker::ty::fn_arity_note(&expected, &val_ty)
+                                    "cannot assign {val_ty} to variable of type {expected}{}{note}{}",
+                                    crate::checker::ty::fn_arity_note(&expected, &val_ty),
+                                    float_fix_note(&expected, &val_ty)
                                 ),
                             );
                         }
@@ -2303,9 +2285,7 @@ impl Checker {
                     Some(t)
                 };
                 self.drop_value_escape_sites(value, sink.as_ref());
-                let widen_span = (*op == AssignOp::Eq && crate::ast::untyped_int_const(value))
-                    .then_some(value.span);
-                self.check_assign(target, *op, val_ty, span, widen_span);
+                self.check_assign(target, *op, val_ty, span);
                 // TICKET-032 A1 — `c = b` (both still unrefined empty collections) is a whole-binding
                 // ALIAS, exactly like `c := b`: link the two names so a later pin on either reaches
                 // both. Recorded BELOW `check_assign`, whose funnel unlink (Ident arm) just broke any
@@ -2457,25 +2437,18 @@ impl Checker {
                             || self.bare_generic_fn_value_arg(def).is_none();
                         let fhint = fseed.then(|| expected.clone());
                         let saved_dsd = std::mem::replace(&mut self.decl_site_default, true);
-                        self.float_elem_hint = float_elem_hint_ty(&expected);
                         let actual = self.infer_arg(def, fhint.as_ref());
-                        self.float_elem_hint = None;
                         let actual = self.resolve_default_binders(&expected, actual);
                         self.decl_site_default = saved_dsd;
-                        if !matches!(expected, Ty::Unknown)
-                            && !self.assignable_w(
-                                &expected,
-                                &actual,
-                                crate::ast::untyped_int_const(def),
-                            )
+                        if !matches!(expected, Ty::Unknown) && !self.assignable(&expected, &actual)
                         {
                             let note = self.protocol_note(&expected, &actual);
                             self.error(
                                 def.span,
                                 format!(
-                                    "default value for field '{}': expected {expected}, found {actual}{}{note}",
+                                    "default value for field '{}': expected {expected}, found {actual}{note}{}",
                                     field.name,
-                                    widen_note(&expected, &actual, def)
+                                    float_fix_note(&expected, &actual)
                                 ),
                             );
                         }
@@ -3473,19 +3446,7 @@ impl Checker {
         }
     }
 
-    /// `widen_span` is `Some(value.span)` exactly when the assignment VALUE is an untyped int
-    /// constant (`crate::ast::untyped_int_const`) under a plain `=` — TICKET-124 (W13-15)'s
-    /// reassignment/index-assign/field-assign sink into a `float` slot, coerced by
-    /// `compile_assign`'s matching `Op::CoerceFloat` read of the recorded verdict. `None`
-    /// everywhere else (a compound op, a non-constant value, the Tuple-element recursion).
-    pub(super) fn check_assign(
-        &mut self,
-        target: &Expr,
-        op: AssignOp,
-        val_ty: Ty,
-        span: Span,
-        widen_span: Option<Span>,
-    ) {
+    pub(super) fn check_assign(&mut self, target: &Expr, op: AssignOp, val_ty: Ty, span: Span) {
         // Task 1 — an index/field-assign (`m[k]=v`, `s.field=x`) on a captured module global inside a
         // task is no longer rejected: spawning deep-copies module globals per task, so the write hits
         // the task's OWN copy. Gate
@@ -3569,7 +3530,7 @@ impl Checker {
                 // the let-binding/for-binding `Local` hover. Simple-Ident lvalue only (Index/Field
                 // targets are handled in their own arms below, where the receiver IS inferred).
                 self.hover_record_at(target.span, &var_ty, HoverKind::Local, None);
-                self.check_assign_value(&var_ty, op, &val_ty, target.span, widen_span);
+                self.check_assign_value(&var_ty, op, &val_ty, target.span);
                 // TICKET-032 A1 — a whole-binding (re)assignment rebinds `name` to a DIFFERENT runtime
                 // object, breaking any alias pair naming it. `+=` on a `List` is the one exception
                 // (DEC-015): it extends IN PLACE and yields the SAME handle, so the pair survives.
@@ -3646,17 +3607,17 @@ impl Checker {
                         {
                             self.error(index.span, format!("map key type {why}"));
                         }
-                        self.check_assign_value(&v, op, &val_ty, target.span, widen_span);
+                        self.check_assign_value(&v, op, &val_ty, target.span);
                     }
                     Ty::List(elem) => {
                         self.expect_int(index, "index");
-                        self.check_assign_value(&elem, op, &val_ty, target.span, widen_span);
+                        self.check_assign_value(&elem, op, &val_ty, target.span);
                     }
                     // `ba[i] = x` — the MUTABLE sibling of bytes. Int index, int value (0–255
                     // validated at runtime). Bytes has NO arm here (immutable); bytearray adds one.
                     Ty::ByteArray => {
                         self.expect_int(index, "index");
-                        self.check_assign_value(&Ty::Int, op, &val_ty, target.span, widen_span);
+                        self.check_assign_value(&Ty::Int, op, &val_ty, target.span);
                     }
                     Ty::Str => {
                         self.expect_int(index, "index");
@@ -3678,7 +3639,7 @@ impl Checker {
                                     format!("index must be {k}, found {idx_ty}"),
                                 );
                             }
-                            self.check_assign_value(&v, op, &val_ty, target.span, widen_span);
+                            self.check_assign_value(&v, op, &val_ty, target.span);
                         } else {
                             self.error(target.span, format!("cannot index-assign into {name}"));
                         }
@@ -3729,13 +3690,7 @@ impl Checker {
                             });
                             match incoherent {
                                 Some(msg) => self.error(target.span, msg),
-                                None => self.check_assign_value(
-                                    &v,
-                                    op,
-                                    &val_ty,
-                                    target.span,
-                                    widen_span,
-                                ),
+                                None => self.check_assign_value(&v, op, &val_ty, target.span),
                             }
                         } else {
                             self.expect_int(index, "index");
@@ -3762,9 +3717,7 @@ impl Checker {
                                 .map(|(_, ty)| subst(ty, &struct_param_map(info, targs)))
                         });
                         match field_ty {
-                            Some(ty) => {
-                                self.check_assign_value(&ty, op, &val_ty, target.span, widen_span)
-                            }
+                            Some(ty) => self.check_assign_value(&ty, op, &val_ty, target.span),
                             None => {
                                 let names = self.field_names(sname);
                                 self.error_help(
@@ -3827,7 +3780,7 @@ impl Checker {
                 }
                 let elems = elems.clone();
                 for (t, ety) in targets.iter().zip(elems) {
-                    self.check_assign(t, AssignOp::Eq, ety, span, None);
+                    self.check_assign(t, AssignOp::Eq, ety, span);
                 }
             }
             _ => self.error(
@@ -3843,26 +3796,17 @@ impl Checker {
         op: AssignOp,
         val_ty: &Ty,
         span: Span,
-        widen_span: Option<Span>,
     ) {
         match op {
             AssignOp::Eq => {
-                // TICKET-124 (W13-15): an untyped int constant assigned into a `float` slot widens
-                // exactly like the same constant does at a `let`/call-arg/return sink — record the
-                // verdict (true OR false, mirroring `widen_mixed_numeric_args`) so
-                // `compile_assign`'s `Op::CoerceFloat` read never diverges from what this accepted.
-                let widen =
-                    widen_span.is_some() && matches!((target_ty, val_ty), (Ty::Float, Ty::Int));
-                if let Some(s) = widen_span {
-                    self.record_arg_float_widen(s, widen);
-                }
-                if !self.assignable_w(target_ty, val_ty, widen) {
+                if !self.assignable(target_ty, val_ty) {
                     let note = self.protocol_note(target_ty, val_ty);
                     self.error(
                         span,
                         format!(
-                            "cannot assign {val_ty} to {target_ty}{}{note}",
-                            crate::checker::ty::fn_arity_note(target_ty, val_ty)
+                            "cannot assign {val_ty} to {target_ty}{}{note}{}",
+                            crate::checker::ty::fn_arity_note(target_ty, val_ty),
+                            float_fix_note(target_ty, val_ty)
                         ),
                     );
                 }
@@ -3919,7 +3863,10 @@ impl Checker {
                     };
                     self.error(
                         span,
-                        format!("cannot apply {sym} to {target_ty} and {val_ty}"),
+                        format!(
+                            "cannot apply {sym} to {target_ty} and {val_ty}{}",
+                            float_fix_note_join(target_ty, val_ty)
+                        ),
                     );
                 }
             }
@@ -3992,18 +3939,6 @@ impl Checker {
                     // `fn mk() -> Heap[int]: return Heap([], fn(x, y): x < y)` pins `T=int`. `unify`
                     // no-ops on a `Nil` (void) ret, so setting it unconditionally is safe; pair with
                     // an immediate clear so a non-call return value never leaks the hint.
-                    //
-                    // TICKET-033 — a `return` is also a sink the int→float ELEMENT widen reaches:
-                    // license it from the RESOLVED return type, same as the `let` path. Computed from
-                    // `ret` BEFORE any carrier unwrap, so `-> List[float]?` stays declined by
-                    // construction (`float_elem_hint_ty` answers `None` for `Ty::Option(..)`).
-                    // TICKET-094 — UNLIKE the `ret_coerce` success-coercion below (DEC-025, still
-                    // gated on `in_default_provider`), the element license now reaches a synthesized
-                    // default provider on purpose: the decl-site copy of the same default literal
-                    // (`src/checker/sig.rs`'s parameter/field-default sites) licenses the SAME literal
-                    // at the SAME span, so gating this half off would make the two recorded verdicts
-                    // disagree again and re-trigger the `ListWidenTable` aliasing abort (DEC-033).
-                    self.float_elem_hint = float_elem_hint_ty(&ret);
                     self.expected_hint = Some(ret.clone());
                     // TICKET-107 (W12-13) — a mixed if/match-expression return value may success-
                     // coerce its bare branches at this same sink; same `ret_declared` /
@@ -4012,7 +3947,6 @@ impl Checker {
                         (self.ret_declared && !self.in_default_provider).then(|| ret.clone());
                     let t = self.infer(e);
                     self.ret_coerce_sink = None;
-                    self.float_elem_hint = None;
                     self.expected_hint = None;
                     t
                 };
@@ -4030,13 +3964,13 @@ impl Checker {
                     };
                     self.record_ret_coerce(e.span, mode);
                     if mode.is_some() {
-                    } else if !self.assignable_w(&ret, &ty, crate::ast::untyped_int_const(e)) {
+                    } else if !self.assignable(&ret, &ty) {
                         let note = self.protocol_note(&ret, &ty);
                         self.error(
                             e.span,
                             format!(
-                                "expected return type {ret}, found {ty}{}{note}",
-                                widen_note(&ret, &ty, e)
+                                "expected return type {ret}, found {ty}{note}{}",
+                                float_fix_note(&ret, &ty)
                             ),
                         );
                     } else if let ExprKind::Ident(name) = &e.kind
@@ -4230,17 +4164,18 @@ impl Checker {
             self.collected_yields.push(ty);
             return;
         }
-        // Pass 2: validate each yield against the pinned element type `T`. Plain `assignable` (NOT a
-        // widening variant): there is no `CoerceFloat` emitted at a `yield`, so an `int` yielded under
-        // an inferred/annotated `float` `T` would run int-under-float — a strict `assignable` (which
-        // makes `int` vs `float` incompatible) rejects it instead of silently coercing.
+        // Pass 2: validate each yield against the pinned element type `T`. An `int` yielded under an
+        // inferred/annotated `float` `T` is rejected (D3: no int→float slot widening).
         if let Some(elem) = self.yield_ty.clone()
             && !self.assignable(&elem, &ty)
         {
             let note = self.protocol_note(&elem, &ty);
             self.error(
                 e.span,
-                format!("expected yield type {elem}, found {ty}{note}"),
+                format!(
+                    "expected yield type {elem}, found {ty}{note}{}",
+                    float_fix_note(&elem, &ty)
+                ),
             );
         }
     }
@@ -4492,26 +4427,19 @@ impl Checker {
                 let seed = ty_fully_concrete(&ty) || self.bare_generic_fn_value_arg(def).is_none();
                 let hint = seed.then(|| ty.clone());
                 let saved_dsd = std::mem::replace(&mut self.decl_site_default, true);
-                self.float_elem_hint = float_elem_hint_ty(&ty);
                 let actual = self.infer_arg(def, hint.as_ref());
-                self.float_elem_hint = None;
                 let actual = self.resolve_default_binders(&ty, actual);
                 self.decl_site_default = saved_dsd;
                 self.current_ret = saved_ret;
                 self.in_fn_body = saved_in_fn;
-                // One-way int→float widening (scalar sink): a `float` param accepts an int default,
-                // coerced to f64 at the callee prologue (the default is desugar-spliced into the call
-                // when omitted). Mirrors the typed-`let`/arg/return/struct-field sinks.
-                if !matches!(ty, Ty::Unknown)
-                    && !self.assignable_w(&ty, &actual, crate::ast::untyped_int_const(def))
-                {
+                if !matches!(ty, Ty::Unknown) && !self.assignable(&ty, &actual) {
                     let note = self.protocol_note(&ty, &actual);
                     self.error(
                         def.span,
                         format!(
-                            "default value for parameter '{}': expected {ty}, found {actual}{}{note}",
+                            "default value for parameter '{}': expected {ty}, found {actual}{note}{}",
                             param.name,
-                            widen_note(&ty, &actual, def)
+                            float_fix_note(&ty, &actual)
                         ),
                     );
                 }
@@ -4557,14 +4485,13 @@ impl Checker {
                     None
                 };
                 self.record_ret_coerce(e.span, mode);
-                if mode.is_none() && !self.assignable_w(&ret, &ty, crate::ast::untyped_int_const(e))
-                {
+                if mode.is_none() && !self.assignable(&ret, &ty) {
                     let note = self.protocol_note(&ret, &ty);
                     self.error(
                         e.span,
                         format!(
-                            "expected return type {ret}, found {ty}{}{note}",
-                            widen_note(&ret, &ty, e)
+                            "expected return type {ret}, found {ty}{note}{}",
+                            float_fix_note(&ret, &ty)
                         ),
                     );
                 }
