@@ -551,6 +551,14 @@ impl Vm {
         let mut host = GenCtx::default();
         self.swap_gen_ctx(&mut host); // self.* now default-empty; `host` holds the real host context
         self.swap_gen_ctx(&mut gen_ctx); // self.* now the generator's (suspended) context; gen_ctx empty
+        // A resumed body frame reports THIS resume site as "called at", not the first `.next()` that
+        // ever drove it (W14-35c; CPython names the faulting `next(g)` line). A suspended generator
+        // holds exactly one frame — a `yield` cannot sit in a nested call.
+        if !matches!(state, GenState::Pending(_))
+            && let Some(f) = self.frames.first_mut()
+        {
+            f.call_span = span;
+        }
         // NURSERY-FLOOR REBASE. `nurseries` is NOT part of `GenCtx` (never swapped by `swap_gen_ctx`),
         // so `self.nurseries` is the RESUMING driver's stack, while a parked frame's / recover
         // handler's `nursery_len` was captured (absolutely) against whatever floor existed when the

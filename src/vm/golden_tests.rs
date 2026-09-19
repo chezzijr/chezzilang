@@ -7518,6 +7518,35 @@ fn generator_fault_trace_includes_driver_frames() {
     assert_eq!(names, vec!["h", "g", "drive", "main"]);
 }
 
+/// W14-35c: a suspended generator's body frame reports the resume that FAULTED, not the first
+/// `.next()` that drove it. Here `g.next()` (line 10) is the first resume and `List(g)` (line 11)
+/// the faulting one; CPython's traceback names line 11.
+#[test]
+fn generator_fault_trace_names_the_faulting_drain_site() {
+    let src = "fn inner() -> Iterator[int]:\n    yield 1\n    xs := [1]\n    yield xs[5]\nfn outer() -> Iterator[int]:\n    for v in inner():\n        yield v * 2\nfn main():\n    g := outer()\n    print(g.next())\n    print(List(g))\nmain()\n";
+    let dir = std::env::temp_dir().join("chezzi_gen_trace_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("gf2.chz");
+    std::fs::write(&path, src).unwrap();
+    let (_out, _err, res, _) = run_file(&path);
+    let e = res.expect_err("program should fault");
+    assert_eq!(e.message, "index 5 out of bounds (len 1)");
+    let line_of = |name: &str| {
+        e.trace
+            .iter()
+            .find(|f| f.function == name)
+            .unwrap_or_else(|| panic!("no frame named {name}: {:?}", e.trace))
+            .span
+            .line
+    };
+    assert_eq!(
+        line_of("outer"),
+        11,
+        "outer is called at the faulting List(g)"
+    );
+    assert_eq!(line_of("inner"), 6, "inner is driven by outer's for loop");
+}
+
 /// W13-20: the other half of the merge-guard bug — a `for` loop driving the generator directly in
 /// `main` must keep `main`'s own frame instead of losing it to the generator's frames.
 #[test]
