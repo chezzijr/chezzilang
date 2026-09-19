@@ -12,7 +12,7 @@ fn label() -> str:
 fn connect(host: str, retries: int = RETRIES, tag: str = label()) -> str:
     return "{host} retries={retries} tag={tag}"
 
-fn window(size: float = math.sqrt(16)) -> float:
+fn window(size: float = math.sqrt(16.0)) -> float:
     return size
 
 struct Pool:

@@ -584,9 +584,9 @@ it returns)`, which is how it reads apart from a real abort.
 Functions: `abs`, `floor`, `ceil`, `round`, `pow(base, exp)`, `sqrt`, `sin`, `cos`, `tan`,
 `asin`, `acos`, `atan`, `atan2(y, x)`, `exp`, `ln`, `log2`, `log10`, `log(value, base)`.
 `abs` is numeric-polymorphic (`int`→`int`, `float`→`float`); the rest take/return `float`. A `float`
-parameter accepts an untyped int CONSTANT via one-way `int`→`float` widening — `sqrt(16)` / `floor(2)`
-are the same as `sqrt(16.0)` / `floor(2.0)` (the int is converted to a real `f64`). A **typed** int
-value does not adapt: `i := 16; sqrt(i)` is a type error — write `sqrt(float(i))` (see `syntax.md §3`).
+parameter never accepts an `int` (rule D3, `syntax.md §3`): `sqrt(16)` / `floor(2)` are type errors
+naming `write 1.0 (or float(x))` — write `sqrt(16.0)` / `floor(2.0)`, or `sqrt(float(i))` for a typed
+`int` value.
 `math.round` rounds **half away from zero** (`round(2.5)` → `3`, `round(-2.5)` → `-3`), which differs
 from the `:.0f` string-format spec's **banker's rounding** (`"{2.5:.0f}"` → `2`, matching Python) — the
 two rounding conventions coexist by design; pick `math.round` for arithmetic, the format spec for display.

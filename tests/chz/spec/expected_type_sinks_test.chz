@@ -1,8 +1,8 @@
 # TICKET-054: three positions hold a statically known expected type at the position -- an
 # annotation on a binding, a closure's own declared return, a protocol's declared parameter type --
 # and used to ignore it, falsely rejecting a program every ancestor accepts. These assert the
-# RUNTIME value, not just that the checker accepts: a checker-only fix would leave an `Int` under a
-# static `float`, and `/ 2` makes that visible (an un-coerced `Int` yields `1`/`0`, not `1.5`/`0.5`).
+# RUNTIME value, not just that the checker accepts. D3 (TICKET-138): an int never widens into a
+# `float` slot, so every `float` slot below is written `N.0`; `/ 2` still reads back a real float.
 
 protocol Sh:
     fn area(self) -> int
@@ -25,15 +25,15 @@ test fn if_expr_annotation_picks_protocol_slot():
         _: Tr(4)
     assert z.area() == 9
 
-test fn closure_own_float_return_widens():
-    g := fn() -> float: 3
+test fn closure_own_float_return_holds_a_float():
+    g := fn() -> float: 3.0
     assert g() == 3.0
     assert g() / 2 == 1.5
 
 type F = float
 
-test fn closure_float_return_through_alias_widens():
-    h := fn() -> F: 3
+test fn closure_float_return_through_alias_holds_a_float():
+    h := fn() -> F: 3.0
     assert h() / 2 == 1.5
 
 protocol P:
@@ -44,11 +44,11 @@ struct S:
         return x
 
 fn viabound[T: P](t: T) -> float:
-    return t.m(1)
+    return t.m(1.0)
 
-test fn protocol_receiver_widens_float_arg():
+test fn protocol_receiver_takes_a_float_arg():
     p: P = S()
-    assert p.m(1) / 2 == 0.5
+    assert p.m(1.0) / 2 == 0.5
     assert viabound(S()) / 2 == 0.5
 
 protocol Q:
@@ -58,13 +58,11 @@ struct SQ:
     fn n(self, xs: List[float]) -> float:
         return xs[0]
 
-test fn protocol_receiver_widens_float_list_element():
+test fn protocol_receiver_takes_a_float_list_element():
     q: Q = SQ()
-    assert q.n([1, 2]) / 2 == 0.5
+    assert q.n([1.0, 2.0]) / 2 == 0.5
 
-# Review-fail fix — a GENERIC struct witness declares its own param as the type parameter `T`, not
-# literally `float`, so its own prologue never emits `Op::CoerceFloat`. The widen must happen at the
-# CALL SITE (before the dynamic protocol dispatch), or this divides an un-coerced Int and gets 0.
+# A GENERIC struct witness declares its own param as the type parameter `T`, not literally `float`.
 protocol P2:
     fn m2(self, x: float) -> float
 
@@ -73,6 +71,6 @@ struct GS[T]:
     fn m2(self, x: T) -> T:
         return x
 
-test fn protocol_receiver_widens_float_arg_through_generic_witness():
+test fn protocol_receiver_takes_a_float_arg_through_generic_witness():
     p2: P2 = GS(1.0)
-    assert p2.m2(1) / 2 == 0.5
+    assert p2.m2(1.0) / 2 == 0.5

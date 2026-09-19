@@ -583,108 +583,41 @@ including its inline-expr body), a bare success value implicitly coerces: `T -> 
 `T -> T!E` gives `Ok(v)` — and a bare `return` at a `Result[nil, E]` sink gives `Ok()`. `None`, `Some`,
 `Ok` and every `Err` stay explicit; a value that is ALREADY an `Option`/`Result` is never re-wrapped
 (`Option[Option[int]]: return Some(1)` still needs `Some(Some(1))`); the coercion never chains onto the
-separate int→float widen (`float?: return 1` is still an error); and it declines at a sink mentioning a
+int→float rule (`float?: return 1` is still an error, D3); and it declines at a sink mentioning a
 type parameter, and inside a synthesized default-argument provider. A `return`ed or inline-expr-bodied
 **if/match expression** at the same sink success-coerces per BARE branch (see §8): `return if c: n else:
 None` wraps only the bare `n`, leaving the already-wrapped `None` alone.
 
-**One-way `int`→`float` widening — an UNTYPED CONSTANT only (Go's rule).** An untyped int **constant**
-expression adapts to a `float` context and is converted to a real `f64`. A **typed** `int` **value**
-never implicitly converts — write `float(x)`. The reverse (`float`→`int`) is always a type error (lossy).
+**No `int`→`float` widening at any slot (rule D3, TICKET-138).** An `int`-typed expression — a literal
+or not — is **never** accepted where a `float` is expected: not at a typed binding, a reassignment /
+index-assign / field-assign, a call / method / constructor / enum-payload argument, a `return` (a
+closure's own too), a parameter or field default, a collection element or map value, a
+`Channel[float]`/`Shared[float]`/`Atomic[float]` send / constructor, a `yield`, a generic type-argument
+binding (`mx(1, 2.5)` with one `T`), or an `if`/`match` branch join. Every one is the same type error,
+and the message names the fix:
 
-An untyped int constant is an int literal, unary `-`, and the arithmetic operators `+ - * / %` composed
-over those (`1`, `-5`, `1 + 2`, `2 * 3`). Anything carrying a declared type is TYPED and does not adapt:
-a name, a call result, a field, an index — so `i := 1; x: float = i`, `x: float = i + 1`, and
-`x: float = cmp.max(1, 2)` (a fn RESULT is a typed int, even with constant args) are all type errors,
-each naming the fix (`a typed int never widens to float — write float(x)`).
+```
+x: float = 1              # cannot assign int to variable of type float — write 1.0 (or float(x))
+l: List[float] = [1.5]
+l.push(3)                 # argument 1 of 'push': expected float, found int — write 1.0 (or float(x))
+```
 
-An untyped int constant adapts at every value-DEFINITION sink: a typed binding (`x: float = 1 + 2` →
-`3.0`), a **reassignment, index-assign, or field-assign into a declared `float` slot** (`x: float = 1.5`
-then `x = 1`; `xs: List[float] = [1.5]` then `xs[0] = 1`; `s.f = 1` for a `float` field — coerced at the
-assignment's own `Op::CoerceFloat`, TICKET-124), a **`List[float]` collection-method argument**
-(`l: List[float] = [1.5]; l.push(3)` → `[1.5, 3.0]`, TICKET-124 — the collection method itself is
-type-blind, so the widen is recorded and coerced at the call site, exactly like the protocol-witness
-case below), a `float` function / method parameter (coerced at the CALLEE prologue, from the DECLARED param
-type, including one reached through a protocol-typed receiver or a bound type parameter -- the
-REQUIREMENT'S declared slot licenses this, not the actual witness's: a generic witness (`struct
-S[T]` satisfying `fn m(self, x: float)` via `T=float`) declares its own param `T`, so its prologue
-does NOT coerce, and the checker cannot see which witness a protocol value holds. So this one
-argument is instead coerced at the CALL SITE, before the dynamic dispatch -- sound for every witness,
-and a harmless duplicate on a concrete receiver whose own prologue also coerces), a `float`
-parameter DEFAULT (`fn g(a: float = 3)`), a `-> float` return, including a closure's own
-(`g := fn() -> float: 3`), a `float` struct field
-(`P(3)` for `v: float`), and a **mixed-numeric-constant** collection literal — a list/map literal with ≥1
-untyped float constant infers `List[float]` / `Map[_, float]` and coerces its untyped int constants
-(`[1, 2.3]`, `[1, -2.5]`, `[1 + 1, 2.5]`). The ELEMENT of a mixed-numeric-CONSTANT collection widens at
-the same set of sinks the scalar rule does (TICKET-033): an annotated `xs: List[float] = [1, f]` /
-`m: Map[str, float] = {"a": 1}` / `xs: List[float] = [1, 2]` (the annotation is the type CONTEXT), a
-`List[float]`/`Map[_, float]` call argument, method argument, struct constructor argument, a
-`-> List[float]`/`-> Map[_, float]` return, and a List[float]/Map[_, float] parameter or field DEFAULT
-(TICKET-094) (`fn g(xs: List[float] = [1, 2.5])`; `struct S: v: List[float] = [1, 2]`). A
-`float` sink spelled through a type ALIAS (`type F = float`; `x: F = 1`, `fn g(z: F)`, `v: F`) is a float
-sink like any other. Because the conversion is real, the value behaves as a float everywhere —
-`x: float = 3` makes `x / 2 == 1.5` (float division), not `1`. The mixed-type arithmetic / comparison
-operators (`1 + 2.0`, `1 < 2.3`, `1 == 2.3`) follow the same one-way rule.
+Write `1.0` for a constant (Rust's `let x: f64 = 1;` is E0308 too), or `float(i)` for a typed value.
+The reverse (`float`→`int`) is a type error as well (lossy). A `float` sink spelled through a type
+ALIAS (`type F = float`) or a whole-collection alias (`type LF = List[float]`) follows the same rule.
 
-Four boundaries follow from the rule (all are the SAME rule — the sink must be DECLARED `float`, since
-that declaration is what the backend coerces from — not exceptions):
-- A call through a function **VALUE** never widens (`f := id[float]` / `f: fn(float) -> float = h`; write
-  `f(1.0)`). The coercion lives in the callee prologue, driven by the callee's DECLARED param type — a
-  generic fn instantiated at `float` declares `T` and is generic-erased at runtime, and a `fn(float)`
-  value cannot be told apart from it, so neither adapts. A fn-typed struct FIELD is a fn value too.
-- A **generic-erased** slot never widens: a method param declared as the type variable (`fn set(self, x: T)`
-  on a `Box[float]`) is `T` at runtime, so `b.set(1)` is an error — write `b.set(1.0)`. A param declared
-  `float` on the same generic struct adapts normally. (TICKET-094) A callee declaring its OWN type
-  params (`fn g[T](a: float, b: T)`) adapts every slot it declares CONCRETELY exactly the same way —
-  genericity of the callee is irrelevant to a slot the callee itself spells `float`/`List[float]`/
-  `Map[_, float]`; only a slot spelled as the callee's own type variable is erased.
-- A whole-collection alias IS a type context (TICKET-033): `type LF = List[float]`; `xs: LF = [1, 2]`
-  adapts exactly like the un-aliased spelling, because the checker now licenses the widen from the
-  RESOLVED slot type and hands the verdict to the (still type-blind) backend, rather than requiring the
-  backend to see through the alias itself. An aliased ELEMENT is fine either way —
-  `type F = float`; `xs: List[F] = [1, 2]`.
-- A **variadic** `float` param (`fn f(...zs: float)`) adapts its untyped int constants only when an
-  untyped float constant sibling is present (`f(1, 2.5)` ✓, `f(1, 2)` ✗ — write `f(1.0, 2.0)`): the args
-  are packed into a `List[float]` the callee prologue cannot coerce.
-- A generic call's bare type-parameter slot (`fn mx[T: Comparable](a: T, b: T) -> T`) adapts its
-  untyped int constants the same way, when another argument binds that same slot to `float`
-  (`mx(1, 2.5)` → `2.5`, matching Go's `Max(1, 2.5)`). A TYPED int (`n := 1; mx(n, 2.5)`), or a
-  constant nested inside a slot like `List[T]`, still rejects. An **explicit turbofish** (`mx[float](1,
-  2)`) pins the slot to `float` directly and widens the same way — it is Go's `id[float64](1)` — and so
-  does a **generic ctor's own expected-type hint reaching its type params** (`r: Pair[float] =
-  Pair(1, 2)`; `Pair[float](1, 2.5)`; `bf: Box[float] = Box(1)`; TICKET-124). The one still-declined
-  shape is a bare-slot `T` pinned only by a SIBLING annotation with no turbofish and no arg binding it
-  (`y: float = id(1)` stays rejected — Go does not infer a type argument from the assignment context
-  either). The expected type also reaches through a **nested generic ctor argument**, not only the
-  outermost one (`bb: Box[Box[Named]] = Box(Box(A()))`; `o: Option[List[Named]] = Some([A()])`;
-  TICKET-124) — an aliased mutable value passed by IDENTIFIER is never re-typed this way (`b := Box(A());
-  bb: Box[Box[Named]] = Box(b)` stays rejected), only a fresh call/list/map/set/tuple literal is.
-- The element widening of a mixed-numeric-CONSTANT literal needs a NUMERIC element type to ask for it.
-  An `Any` element SLOT declines it — at EVERY position the slot reaches a literal, so
-  `xs: List[Any] = [1, -2.5]`, `f([1, -2.5])` for `fn f(xs: List[Any])`, `f(1, -2.5)` for
-  `fn f(...xs: Any)`, a `List[Any]` struct-constructor argument and a `-> List[Any]` return all keep
-  the `1` an `int`, exactly as CPython's `[1, -2.5]` does. (`Any` is the empty top protocol, not a
-  numeric type, and the slot already sanctions the heterogeneous literal.) An alias spelling of the
-  top type decides the same way (`type A = Any; xs: List[A] = [1, -2.5]`), but a generic type param
-  named `Any` shadows the protocol and is not an `Any` slot. A TYPED int element is never touched
-  either way (`a := 1; xs: List[Any] = [a, -2.5]` keeps `1`), and the hint stays on the IMMEDIATE
-  literal — a nested one is un-annotated and unifies as usual (`n: List[Any] = [[1, -2.5]]` →
-  `[[1.0, -2.5]]`). An `if`/`match` ARM inherits the slot, so `f(if c: [1, -2.5] else: [2, -4.0])`
-  keeps its `1` an `int` too; the SCALAR numeric-mix path is untouched — `x: Any = if c: 1 else: 2.5`
-  still unifies its branches and stores `1.0`. And the SPELLING of a position never changes the
-  answer: `[1, -2.5] |> f()` means exactly what `f([1, -2.5])` means, piped or not.
+What does **not** change is arithmetic and comparison on **values**: `2 * 1.5` (`3.0`), `i * f`,
+`x + 1` with `x: float`, `f += 1`, `i < f` and `1 == 2.3` mix an `int` and a `float` operand and yield
+a `float` / `bool` — the VM promotes by runtime tag, so no slot rule is involved. A mixed literal such
+as `[1, 2.5]` or `if c: 1 else: 2.5` is *not* arithmetic: it is an `int` and a `float` meeting in one
+slot, so it is an error (`list elements differ: int vs float — write 1.0 (or float(x))`). Nothing
+coerces at runtime, so a `float` slot always holds a real float, and `x: float = 3.0` makes `x / 2 ==
+1.5`. An `Any` slot keeps an `int` an `int` (`x: Any = if c: 1 else: 2.5` stores `1`; `xs: List[Any] =
+[1, -2.5]` keeps the `1`), as Go's `var x any = 1` does.
 
-Un-annotated, there is no type context, so **no** adaptation: `f := 2.5; xs := [1, f]` is an error
-(`list elements differ: int vs float`) — annotate `xs: List[float] = [1, f]`. Likewise a TYPED int
-element never widens, annotated or not: `a := 1; xs: List[float] = [a, 2.3]` is an error; write
-`[float(a), 2.3]`.
-
-Anti-lossy cases stay type errors: `y: int = 2.3`, `fn f() -> int: return 2.3`, a `float` into a
-`List[int]`, and an `int`→`float` into a **newtype** (nominal — no widening across its boundary).
-Widening is **scalar-or-element-at-the-sink** — a nested / type-argument float slot is NOT widened:
-`List[List[float]] = [[1]]`, `float? = Some(3)`, `float! = Ok(3)`,
-`fn f() -> List[float]?: return [1, 2]`, and a non-literal RHS (`List[float] = f()`) all stay type
-errors; write explicit floats (`[[1.0]]`, `Some(3.0)`) or a literal.
+The bare success-value coercion above never chains onto this rule: `float?: return 1` is still an
+error (write `return 1.0`). *Protocol* widening is unrelated and stays: `b: Box[Named] = Box(A())`
+re-binds `T` to a protocol the argument satisfies.
 
 ## 4. Operators & precedence
 
@@ -973,9 +906,8 @@ inline expr against `-> nil`, e.g. a bare void call, stays legal).
 expression's type (`fn ten(): 10` infers `-> int`); otherwise **all** the body's `return` branches
 (plus an implicit trailing/inline expression) are typed and **merged** with a join. A body with no
 value-returning `return` infers `nil`. Param types stay required. The join `J(a, b)` is: (1) equal
-types → that type; (2) mixed `{int, float}` branches **conflict** — an inferred return is *not* a
-widening sink, so annotate `-> float` to opt into the coercion (widening emits `Op::CoerceFloat` only
-at an explicit sink); (3) the **same** type-constructor (`Result`/`Option`/`List`/`Map`/
+types → that type; (2) mixed `{int, float}` branches **conflict** — no `int` ever widens into a
+`float` (rule D3, §3), so write `1.0`; (3) the **same** type-constructor (`Result`/`Option`/`List`/`Map`/
 `Set`, or the same generic struct/enum) with differing type-args → **merge slot-wise** (each slot: one
 side `?`/un-inferred fills from the other; two concrete slots must be **equal**, no widening inside
 payloads — `Result[int]` and `Result[float]` **conflict**). The `Result` **error slot** is special:
@@ -3312,18 +3244,16 @@ sign := if n > 0: "pos" else: "neg"
 grade := if s >= 90: "A" elif s >= 80: "B" else: "F"
 ```
 
-All arms (and both `if` branches) must agree on a type — with ONE numeric adaptation: an untyped **int
-constant** branch beside a float **constant** sibling branch widens to `float` (`x := if c: 1 else: 2.5`
-→ `float`; `match n: 0: 1; _: 2.5` → `float`), the exact `literal_numeric_mix` peephole the list literal
-`[1, 2.5]` uses (the compiler emits `Op::CoerceFloat` on the int branch, so it is a real float, never an
-`int` under a `float`). A **typed** int branch (a variable, a call) does NOT adapt — `a := 5; if c: a
-else: 2.5` is a type error (write `float(a)`), same as a typed int element in a mixed list. Branches
+All arms (and both `if` branches) must agree on a type — there is NO numeric adaptation (rule D3, §3):
+an `int` branch beside a `float` branch is a type error (`x := if c: 1 else: 2.5` →
+`branches have incompatible types: int and float — write 1.0 (or float(x))`; the same for `match`),
+like the mixed list literal `[1, 2.5]`. Write `1.0`, or `float(a)` for a typed int. Branches
 that disagree with each other but are each assignable to a statically known expected type at the
 position — an annotated binding, a call argument, a declared return — take that expected type instead
 (`x: Sh = if true: Sq(2) else: Tr(9)`, where `Sh` is a protocol both `Sq` and `Tr` satisfy). With NO
 expected type the branches must still agree, so `x := if true: Sq(2) else: Tr(9)` stays `branches have
 incompatible types: Sq and Tr`. The expected type is matched with plain assignability, so it never
-licenses the int-to-float widen — `x: float = if c: 1 else: 2` stays an error. At a declared
+licenses an int-to-float widen — `x: float = if c: 1 else: 2` is an error (write `1.0`). At a declared
 `T?`/`T!E` **return sink** the branches may also MIX bare success values with already-wrapped ones
 (`return if n > 0: n else: None`); each bare branch is success-coerced (`Some(n)`), the others are
 left alone, and the same declines named under **Success-coercion** below apply (a generic slot, a
@@ -4063,11 +3993,9 @@ or enum defining `compare`), stable, in place.
 > element position is pinned by the slot it fills — `a: List[List[int]] = [empty()]` on
 > `fn empty[T]() -> List[T]` binds `T = int`. The same holds for a `Map` literal's key and value
 > columns and a `Set` literal's elements, and it reaches through a `T?` / `T!E` sink (where a bare
-> literal coerces to `Some(v)` / `Ok(v)`) onto the carrier's payload. One limit remains: the int→float
-> element widen (TICKET-033: now reaches an annotated `let`, a call argument, a method argument, a
-> struct constructor argument and a `return` alike) is computed from the SINK type before
-> `sink_payload` unwraps a carrier, so `fn f() -> List[float]?: return [1, 2]` stays rejected even
-> though the bare `-> List[float]` sink widens.
+> literal coerces to `Some(v)` / `Ok(v)`) onto the carrier's payload. (No int→float widening exists at
+> any of these slots — rule D3, §3 — so `fn f() -> List[float]?: return [1, 2]` and the bare
+> `-> List[float]` sink both reject the ints: write `[1.0, 2.0]`.)
 > (An `= []` empty binding plus later `.push` also works and is equally valid.)
 > A **never-constrained** empty — one that nothing ever pins or constrains (e.g. `b := []` that is only
 > *read* into an untyped sink: `print(b)`, `b.len()`) — is a **static error**: `cannot infer element type
@@ -4561,9 +4489,9 @@ C `int32_t`/`uint32_t`/… use the dedicated `int8`..`uint64` names below — th
 `isdigit`, which returns an *arbitrary* nonzero `int` for true — must be bound `-> int` and tested
 `!= 0`, **not** `bool`), `str` → null-terminated `const char*` (a `char*` return is copied into a Chezzi
 `str`; **return-only** `owned_str` also frees it, `str?` makes a `NULL` return `None` — see below), and
-`ptr` ↔ C `void*` (an **opaque handle** — see below). One-way `int`→`float` widening applies at a
-C `double` param too (`cos(2)` widens the int to `2.0` before marshalling — the FFI host promotes it;
-a non-numeric arg like a `str`/`bool` is still rejected). A no-return signature (`fn srand(seed: int)`) — or an explicit
+`ptr` ↔ C `void*` (an **opaque handle** — see below). An `int` never widens into a
+C `double` param either (rule D3, §3): `cos(2)` is a type error naming `write 1.0`; write `cos(2.0)`.
+A non-numeric arg like a `str`/`bool` is rejected too. A no-return signature (`fn srand(seed: int)`) — or an explicit
 `-> nil` — maps to C `void`; `nil` is a **return-only** type (it is rejected as a parameter). A
 **flat-scalar `struct`** marshals **by value** as a C struct (see below). The checker rejects any
 other non-marshallable param/return (list/map/set/tuple/enum/generic struct/struct-with-non-scalar-

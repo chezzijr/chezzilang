@@ -508,59 +508,28 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   `compare`/`sort`/`sort_by_key`/`.min()`/`.max()` are all one order. The *operators* stay IEEE, and that
   is the single divergence: `nan < 1.0` is `false` while `nan.compare(1.0)` is nonzero. (Two corollaries:
   `a.compare(a)` is `0` for a `NaN` `a` although `a == a` is `false`; and only `NaN` takes the total-order
-  path, so `(-0.0).compare(0.0)` is `0` even though `sort()` orders `-0.0 < +0.0`.) **One-way `int`→`float` widening — UNTYPED CONSTANTS only (Go's rule):** an untyped int
-  *constant* expression adapts to a `float` context and is converted to a real `f64`; a **typed** `int`
-  *value* never implicitly converts (write `float(x)`), and the reverse is always a lossy type error. An
-  untyped int constant is an int literal, unary `-`, and `+ - * / %` composed over those — anything with
-  a declared type (a name, a CALL RESULT, a field, an index) is typed and is rejected at a `float` sink
-  with a diagnostic naming the fix. It fires at every value-definition boundary: a typed binding
-  (`x: float = 1 + 2` so `x / 2 == 1.5`, real float division), a `float` function/method parameter
-  (coerced at the callee prologue, from the DECLARED param type — so a call through a function VALUE
-  never widens: `f := id[float]`; `f(1)` is an error, write `f(1.0)`), a `float` parameter DEFAULT
-  value (`fn g(a: float = 3)`), a `-> float` return, a `float` struct field, native/`extern` `double`
-  params, a **mixed-numeric-constant** collection (a list/map literal with ≥1 untyped float constant
-  infers `List[float]`/`Map[_, float]` — `[1, 2.3]`, `[1, -2.5]`, `[1 + 1, 2.5]`), a **mixed-numeric-constant
-  if/match EXPRESSION** (an untyped int-constant tail branch beside a float-constant sibling branch widens
-  to `float` — `x := if c: 1 else: 2.5`, `match n: 0: 1; _: 2.5` — the same peephole, consistent with the
-  `[1, 2.5]` literal; a TYPED int branch does NOT adapt, and this is a property of the EXPRESSION, distinct
-  from un-annotated multi-`return` merge below which still conflicts), or an annotated
-  `xs: List[float] = [1, f]` / `[1, 2]` (the annotation is the type context — spelled as a `List[…]`/
-  `Map[…]`, and TICKET-033 makes a whole-collection alias `type LF = List[float]` a type context too:
-  the checker licenses the widen from the RESOLVED slot type and hands the verdict to the type-blind
-  backend, so the backend no longer needs to see through the alias itself). A scalar `float` sink spelled through a type ALIAS (`type F = float`) is a float sink
-  like any other (the backend resolves the alias, and a generic type param of the same name shadows it).
-  The sink must be DECLARED `float`: a generic-erased slot (a method param declared `T` on a `Box[float]`)
-  and a variadic `float` param's all-int-constant pack (`fn f(...zs: float)`; `f(1, 2)`) do NOT adapt —
-  the backend has no declared `float` to coerce from.
-  The element widening belongs to the LITERAL, but only where a NUMERIC element type asks for it: an
-  `Any` element SLOT declines it at every position the slot reaches a literal — an annotated `let`, a
-  call argument, a struct constructor argument, the synthesized variadic pack, an `if`/`match` arm
-  under any of those, a `return` — and the SPELLING of the position never changes the answer, so a
-  piped call (`[1, -2.5] |> f()`) means what `f([1, -2.5])` means. Hence
-  `xs: List[Any] = [1, -2.5]`, `f([1, -2.5])` for `fn f(xs: List[Any])` and `f(1, -2.5)` for
-  `fn f(...xs: Any)` all keep the `1` an `int`, as CPython does. `Any` is the empty top protocol, not a
-  numeric type, and the expected-type-directed path already sanctions the heterogeneous literal, so
-  nothing asks for the coercion. The checker records that verdict per literal and the type-blind
-  backend consumes it. The compiler emits a real conversion
-  (`Op::CoerceFloat`) so the checked path and the golden harness see the same value.
-  The checker's accepted set is a strict SUBSET of what the type-blind compiler can coerce (one shared
-  predicate, `ast::const_num`), so no sink can hold a runtime `Int` under a static `float`. Lossy
-  conversions stay type errors (`y: int = 2.3`, `-> int: return 2.3`, `float` into `List[int]`,
-  `int`→`float` across a **newtype** boundary). Widening is **scalar-or-element-at-the-sink**: the
-  element widen reaches every position the scalar widen does — an annotated `let`, a call argument, a
-  method argument, a struct constructor argument, a `return` (TICKET-033), and a parameter or field
-  DEFAULT (TICKET-094) — but a compound/NESTED or
-  type-ARGUMENT float slot is NOT widened: `List[List[float]] = [[1]]`, `float? = Some(3)`,
-  `float! = Ok(3)`, `fn f() -> List[float]?: return [1, 2]`, and a non-literal RHS
-  (`List[float] = f()`) all stay type errors (use explicit floats or a literal). An un-annotated mixed collection with a TYPED int element
-  (`a := 1; xs := [a, 2.5]`) is an error — no type context, no adaptation; annotate AND write
-  `float(a)`. A plain reassignment, index-assign or field-assign into a declared `float` slot widens
-  the same untyped int constant (`x: float = 1.5; x = 1`; TICKET-124) — see `docs/syntax.md` for the
-  full sink list. The same scalar-only rule governs
+  path, so `(-0.0).compare(0.0)` is `0` even though `sort()` orders `-0.0 < +0.0`.) **No `int`→`float` widening at any slot (rule D3, TICKET-138 — Rust/Kotlin, not Go's untyped-constant
+  rule):** an `int`-typed expression, literal or not, is never accepted where a `float` is expected. That
+  covers a typed binding, a reassignment / index-assign / field-assign, a function / method /
+  constructor / enum-payload argument (a call through a function VALUE and an `extern` `double` param
+  too), a `return` (a closure's own too), a parameter or field default, a list / map element, a
+  `Channel`/`Shared`/`Atomic` send or constructor, a `yield`, a generic type-argument binding
+  (`mx(1, 2.5)` with one `T`), and an `if`/`match` branch join (`x := if c: 1 else: 2.5`). Each is one
+  type error whose message names the fix — `expected float, found int — write 1.0 (or float(x))` —
+  and the mixed literal `[1, 2.5]` is `list elements differ: int vs float`. Write `1.0` for a
+  constant, `float(i)` for a typed value. Nothing coerces at runtime, so a `float` slot always holds a
+  real float (`x: float = 3.0` makes `x / 2 == 1.5`), and a `float` sink spelled through a type ALIAS
+  (`type F = float`, `type LF = List[float]`) follows the same rule. What is unchanged is arithmetic and
+  comparison on VALUES: `2 * 1.5` is `3.0`, `i * f`, `x + 1` (`x: float`), `f += 1` and `i < f` mix an
+  `int` and a `float` operand and the VM promotes by runtime tag (`src/vm/arith.rs`) — no slot rule is
+  involved. An `Any` slot keeps an `int` an `int` (`xs: List[Any] = [1, -2.5]`, `x: Any = if c: 1 else:
+  2.5` stores `1`), as CPython's `[1, -2.5]` and Go's `var x any = 1` do. Lossy conversions stay type
+  errors too (`y: int = 2.3`, `-> int: return 2.3`, `float` into `List[int]`, `int`→`float` across a
+  **newtype** boundary). Protocol widening is a separate rule and stays (`Box[Named] = Box(A())`). See
+  `docs/syntax.md` §3 for the full sink list. The same rule governs
   **un-annotated multi-branch return inference**: sibling `return` branches merge with a join. It does
-  **not** widen `int`→`float` across branches — an inferred return is not a widening *sink* (widening
-  emits `Op::CoerceFloat` only at an explicit sink), so mixed `if c: return 1 else: return 2.0`
-  **conflicts**; annotate `-> float` to opt in. `return Ok(1)` / `return Ok(2.0)` likewise conflict (no
+  **not** widen `int`→`float` across branches, so mixed `if c: return 1 else: return 2.0`
+  **conflicts**; write `2.0` in both. `return Ok(1)` / `return Ok(2.0)` likewise conflict (no
   widening inside a merged type-arg slot — the `float! = Ok(3)` error above). The `Result` **error
   slot** defaults to the built-in `Error` protocol when it is un-pinned or its payload **satisfies
   `Error`** (`return Err("a")` + `return Ok("h")` infers `Result[str, Error]`, not `Result[str, str]`,
@@ -933,8 +902,8 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 
 Chezzi has **no `as` cast operator**, no `Into`/`TryFrom`, and no general-purpose value-level
 conversion protocol (yet — see `docs/future.md`); a **bound-only** `Convert[S]` conversion protocol
-exists as a generic bound (below). Conversion is done by a small fixed set of explicit builtins plus one implicit
-numeric widening. The design is deliberately minimal: prefer an explicit constructor call over silent
+exists as a generic bound (below). Conversion is done by a small fixed set of explicit builtins — there is no
+implicit `int`→`float` widening at a slot (rule D3). The design is deliberately minimal: prefer an explicit constructor call over silent
 coercion, and keep newtypes nominally distinct so a conversion is always visible in the source.
 
 **Scalar conversion constructors** (global builtins — see `docs/stdlib.md §1`):
@@ -958,15 +927,13 @@ always faults, so the checker catches it early.
 (`Ok(n)` or `Err(msg)` with a human-readable parse-error message). Use these over `int()`/`float()`
 when the input is untrusted.
 
-**Implicit coercion — one-way `int` → `float` widening of an UNTYPED CONSTANT only** (Go's rule). An
-untyped int *constant* expression (literal / unary `-` / `+ - * / %` over those) adapts to a `float`
-slot and is converted to a real `f64` at every value-definition boundary (typed binding, `float`
-param/default, `-> float` return, `float` struct field, mixed-numeric-constant collection). A **typed**
-`int` value never implicitly converts — write `float(x)`, and a call through a function VALUE never
-widens at all. It is **scalar-or-element-at-the-sink**: never propagated into a nested/type-argument slot
-(`List[List[float]] = [[1]]`, `float? = Some(3)`, `fn f() -> List[float]?: return [1, 2]` stay errors), and the reverse (`float` → `int`) is always
-a lossy type error. Emitted as `Op::CoerceFloat` so the lowering is uniform. (Full rules in the
-numeric-arithmetic section above.)
+**No implicit `int` → `float` conversion at a slot** (rule D3, TICKET-138). An `int`-typed expression,
+literal or not, is never accepted where a `float` is expected — a typed binding, a `float` param /
+default / field, a `-> float` return, a collection element, a generic type-argument binding, an
+`if`/`match` join: write `1.0`, or `float(x)` for a typed value (Rust's `let x: f64 = 1;` is E0308
+too). The reverse (`float` → `int`) is a lossy type error as well. What stays is arithmetic and
+comparison on VALUES, which the VM promotes by runtime tag (`2 * 1.5` is `3.0`, `i < f`). Nothing is
+coerced at runtime. (Full rules in the numeric-arithmetic section above.)
 
 **Newtype boundary** (`newtype Name = <T>`) — nominally distinct, so crossing is always explicit:
 wrap with `Name(x)`, unwrap with the matching scalar/aggregate cast (`int(n)`, `list(s)`, …; the

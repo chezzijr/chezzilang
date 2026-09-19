@@ -1,10 +1,8 @@
-# tests/chz/spec/list_any_no_widen_test.chz — a `List[Any]` annotation does not widen int elements.
+# tests/chz/spec/list_any_no_widen_test.chz -- a `List[Any]` annotation keeps int elements.
 #
-# `Any` is the EMPTY top protocol, not a numeric type, so nothing in the slot asks for the one-way
-# int→float element widen: the element stays an `int`, exactly as CPython's `[1, 3.0]` keeps it.
-# The widen IS right when a numeric type asks for it — a `List[float]` annotation, or an
-# un-annotated literal whose elements must unify to one type — so both are pinned here too: the
-# narrowing must not spread past the `Any` slot. (`docs/gaps.md` wave-4 row.)
+# `Any` is the EMPTY top protocol, not a numeric type, so the element stays an `int`, exactly as
+# CPython's `[1, 3.0]` keeps it. D3 (TICKET-138): an int never widens into a `float` slot either, so
+# the `List[float]` slots below are written `1.0`.
 #
 # `Any` carries no methods, so an element cannot be interrogated directly; `str()` of the whole list
 # is the observable that separates `1` from `1.0`.
@@ -14,17 +12,12 @@ test fn list_any_keeps_int_element():
     assert str(xs) == "[1, 3.0]", "List[Any] must not widen the int (CPython prints [1, 3.0])"
 
 test fn list_any_keeps_int_element_float_first():
-    # Order-independent: the peephole is a whole-literal predicate, so the suppression must be too.
     xs: List[Any] = [3.0, 1]
     assert str(xs) == "[3.0, 1]"
 
-test fn list_float_annotation_still_widens():
-    ys: List[float] = [1, 3.0]
+test fn list_float_annotation_takes_float_literals():
+    ys: List[float] = [1.0, 3.0]
     assert str(ys) == "[1.0, 3.0]"
-
-test fn unannotated_mixed_list_still_widens():
-    zs := [1, 3.0]
-    assert str(zs) == "[1.0, 3.0]"
 
 test fn list_any_homogeneous_and_non_numeric_unchanged():
     a: List[Any] = [1, 2]
@@ -34,16 +27,7 @@ test fn list_any_homogeneous_and_non_numeric_unchanged():
     c: List[Any] = [1, 3.0, "a"]
     assert str(c) == "[1, 3.0, 'a']"
 
-test fn nested_literal_under_list_any_still_widens():
-    # The hint is consumed by the IMMEDIATE literal only, so the inner list is un-annotated and
-    # unifies to `List[float]` as usual.
-    n: List[Any] = [[1, 3.0]]
-    assert str(n) == "[[1.0, 3.0]]"
-
 # --- the SLOT, not the `let`: every position an expected `List[Any]` reaches a literal ---
-# The verdict rides the slot's element type, recorded per literal for the type-blind backend, so all
-# of these answer the same way the `let` above does. Before that, only the `let` did — the language
-# answered one question four different ways depending on where the literal sat.
 
 fn take_any(xs: List[Any]) -> str:
     return str(xs)
@@ -61,7 +45,7 @@ fn vari_float(...xs: float) -> str:
     return str(xs)
 
 fn ret_float() -> List[float]:
-    return [1, 3.0]
+    return [1.0, 3.0]
 
 struct AnyBox:
     v: List[Any]
@@ -71,7 +55,7 @@ test fn list_any_call_argument_keeps_int_element():
 
 test fn variadic_any_pack_keeps_int_element():
     # `...xs: Any` desugars to a synthesized `List` literal at the variadic slot, so it is the same
-    # site as the call argument above — and must answer the same.
+    # site as the call argument above -- and must answer the same.
     assert vari_any(1, 3.0) == "[1, 3.0]"
 
 test fn list_any_return_keeps_int_element():
@@ -81,10 +65,9 @@ test fn list_any_struct_ctor_argument_keeps_int_element():
     b := AnyBox([1, 3.0])
     assert str(b.v) == "[1, 3.0]"
 
-test fn list_float_slots_all_still_widen():
-    # The narrowing must not spread to the genuinely numeric annotation at ANY of those positions.
-    assert take_float([1, 3.0]) == "[1.0, 3.0]"
-    assert vari_float(1, 3.0) == "[1.0, 3.0]"
+test fn list_float_slots_all_take_float_literals():
+    assert take_float([1.0, 3.0]) == "[1.0, 3.0]"
+    assert vari_float(1.0, 3.0) == "[1.0, 3.0]"
     assert str(ret_float()) == "[1.0, 3.0]"
 
 test fn list_any_slots_homogeneous_and_non_numeric_unchanged():
@@ -92,7 +75,7 @@ test fn list_any_slots_homogeneous_and_non_numeric_unchanged():
     assert take_any([1, "a"]) == "[1, 'a']"
 
 test fn alias_of_any_element_keeps_int_element():
-    # The verdict is the RESOLVED slot type, so an alias spelling of the top type decides the same
+    # The slot is judged on its RESOLVED type, so an alias spelling of the top type decides the same
     # way the bare one does.
     xs: List[AnyAlias] = [1, 3.0]
     assert str(xs) == "[1, 3.0]"
@@ -100,10 +83,8 @@ test fn alias_of_any_element_keeps_int_element():
 type AnyAlias = Any
 
 # --- The synthesized variadic pack has no source text of its own, so it carries the CALL's span --
-# and a pipe gives every link of `a |> f() |> g()` the LHS primary's span. When that primary IS a
-# list literal, the pack and the user's own literal used to key one slot in the checker→compiler
-# widen table, and the pack's verdict was applied to the literal: a silent wrong value that only the
-# PIPED spelling produced. Each test below asserts the piped form equals the form it desugars to.
+# and a pipe gives every link of `a |> f() |> g()` the LHS primary's span. Each test below asserts
+# the piped form equals the form it desugars to.
 
 fn vari_head_float(xs: List[float], ...rest: Any) -> float:
     return xs[0] / 2
@@ -112,28 +93,21 @@ fn vari_any_tail_float(a: str, ...ys: float) -> str:
     return a + "|" + str(ys)
 
 test fn piped_variadic_pack_does_not_alias_the_piped_literal():
-    # The pack `[[1, 3.0], 2.5, 1]` and the argument `[1, 3.0]` share a span; only the pack's slot is
-    # `Any`. Piping must not change the answer.
-    assert ([1, 3.0] |> vari_any(2.5, 1)) == vari_any([1, 3.0], 2.5, 1)
-    assert ([1, 3.0] |> vari_any(2.5, 1)) == "[[1.0, 3.0], 2.5, 1]"
+    assert ([1.0, 3.0] |> vari_any(2.5, 1)) == vari_any([1.0, 3.0], 2.5, 1)
+    assert ([1.0, 3.0] |> vari_any(2.5, 1)) == "[[1.0, 3.0], 2.5, 1]"
 
-test fn piped_literal_into_a_typed_first_param_still_widens():
-    # Same collision, opposite verdicts (`List[float]` param vs the `Any` pack): this spelling used
-    # to abort with an `internal:` table-conflict error rather than run.
-    assert ([1, 3.0] |> vari_head_float(2.5, 1)) == vari_head_float([1, 3.0], 2.5, 1)
-    assert ([1, 3.0] |> vari_head_float(2.5, 1)) == 0.5
+test fn piped_literal_into_a_typed_first_param_takes_floats():
+    assert ([1.0, 3.0] |> vari_head_float(2.5, 1)) == vari_head_float([1.0, 3.0], 2.5, 1)
+    assert ([1.0, 3.0] |> vari_head_float(2.5, 1)) == 0.5
 
 test fn two_variadic_packs_in_one_pipe_chain_do_not_alias():
-    # Both packs are synthesized, both carry the SAME shared chain span, and their verdicts differ
-    # (`Any` declines, `float` widens) — so the pack marker has to be per-callee, not a flag.
-    piped := [1, 3.0] |> vari_any(2.5, 7) |> vari_any_tail_float(1, 2.0)
-    assert piped == vari_any_tail_float(vari_any([1, 3.0], 2.5, 7), 1, 2.0)
+    piped := [1.0, 3.0] |> vari_any(2.5, 7) |> vari_any_tail_float(1.0, 2.0)
+    assert piped == vari_any_tail_float(vari_any([1.0, 3.0], 2.5, 7), 1.0, 2.0)
     assert piped == "[[1.0, 3.0], 2.5, 7]|[1.0, 2.0]"
 
 test fn list_any_slot_reaches_an_if_arm_literal():
     # An `if`/`match` ARM inherits the expected hint, so a `List[Any]` slot reaches the arm literal
-    # and it declines like any other `List[Any]` literal. (The SCALAR numeric-mix path is untouched:
-    # `if true: 1 else: 2.0` still unifies to float — see the case below.)
+    # and it keeps its ints like any other `List[Any]` literal.
     assert take_any(if true: [1, 3.0] else: [2, 4.0]) == "[1, 3.0]"
     s: Any = if true: 1 else: 2.0
-    assert str(s) == "1.0"
+    assert str(s) == "1"

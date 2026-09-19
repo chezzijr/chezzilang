@@ -95,11 +95,12 @@ the freeze.
   this one shape: int-under-float (`.sort()` returned an unsorted `List[float]`), range-as-value,
   bound-method-as-value with `self: Unknown`, `return` in `defer:`/`spawn:` silently discarded, nested
   `import` as a no-op.
-- **Int→float widening is the Go model.** Untyped *constant* expressions adapt (`x: float = 1 + 2` →
-  `3.0`); a typed int *value* never converts (write `float(x)`). Do **not** join `int`/`float` in an
-  inferred return — the compiler reads the annotation, not the inferred type, so no coercion is
-  emitted and `x / 2` does integer division under a `float` type. Always runtime-verify an inferred
-  float; `check` alone cannot see it.
+- **An int never widens into a `float` slot (rule D3, the Rust model).** `x: float = 1` is an error,
+  literal or not, at every sink — write `1.0` or `float(x)`. There is no `Op::CoerceFloat`: nothing
+  coerces at runtime, so the checker alone keeps an `int` out of a `float` slot. Do **not** join
+  `int`/`float` in an inferred return either — `x / 2` would do integer division under a `float` type.
+  Close a future int-under-float bug in the checker; never re-add a runtime coercion that hides it.
+  Mixed arithmetic on values (`2 * 1.5`, `i < f`) is unchanged: the VM promotes by runtime tag.
 - **An un-inferable `Unknown` in an inferred return is a type-check bypass** (`compatible(Unknown, _)`
   is true). `fill_ret` must be exhaustive over every `Ty` variant that carries an inner type — no
   catch-all — so a future variant fails to compile instead of re-opening the leak. The first cut's
