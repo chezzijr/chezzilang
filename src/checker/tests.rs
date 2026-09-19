@@ -5976,6 +5976,13 @@ fn atomic_cas_on_fn_payload_rejected() {
         ),
         needle,
     );
+    // A std native fn (`math.sqrt`) types as `fn(float) -> float` and loads back UNEQUAL to itself
+    // (measured on the base binary: `Atomic(math.sqrt).cas(a.load(), math.sqrt)` is `false`), so it
+    // is the same bug and is rejected too.
+    entry_rejects(
+        "import std.concurrency\nimport std.math\nfn main():\n    a := Atomic(math.sqrt)\n    print(a.cas(a.load(), math.sqrt))\nmain()\n",
+        needle,
+    );
     // MUST STILL PASS: a fn payload with only `store`/`load`/`exchange`, and a builtin fn with `cas`.
     entry_ok(&format!(
         "{decl}fn main():\n    a := Atomic[fn() -> int](one)\n    a.store(one)\n    f := a.exchange(one)\n    print(f() + a.load()())\nmain()\n"

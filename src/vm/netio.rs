@@ -3792,6 +3792,19 @@ impl Vm {
                 // `values_equal` borrow `self`, not the guard (which borrows the cloned `Arc`), so the
                 // lock can stay held while they run.
                 let mut g = core.v.lock().unwrap();
+                // TICKET-144 (W14-24): a payload holding a `fn` value can never compare equal — every
+                // `load()` rebuilds a fresh closure and closures compare by identity — so answering
+                // `false` would spin the standard CAS retry loop forever. The checker rejects the
+                // visible spellings; this catches one hidden behind a type param / protocol. Go's
+                // `atomic.Value.CompareAndSwap` panics `comparing uncomparable type` on the same shape.
+                // (`g` drops on the early return, leaving the box unchanged.)
+                if g.holds_fn() {
+                    return Err(self.err(
+                        "Atomic.cas: the payload holds a function value, which cas cannot compare"
+                            .to_string(),
+                        span,
+                    ));
+                }
                 let cur = self.from_wire(g.clone());
                 // Propagate a cyclic-operand depth fault (`?`) instead of swallowing it — consistent
                 // with `==` and every container membership site. The `?` runs BEFORE the store, so a

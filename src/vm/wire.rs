@@ -385,6 +385,31 @@ impl WireValue {
         }
     }
 
+    /// TICKET-144 (W14-24) — does this wire hold a user `fn` value (a `Closure` or `Func`) anywhere
+    /// in its data? `Atomic.cas` refuses such a payload at runtime: each `load()` rebuilds a fresh
+    /// closure from the wire and closures compare by identity, so the compare could never succeed.
+    /// The checker rejects the visible spellings (`reaches_func`); this backstops a payload hidden
+    /// behind a type param or protocol. Shaped like [`has_handle`](Self::has_handle): same recursion,
+    /// `Backref` terminates the walk (its target is visited where it is defined), and a
+    /// `Builtin`/`Native` fn is NOT a hit — it is a bare name that compares equal after a round trip.
+    pub fn holds_fn(&self) -> bool {
+        match self {
+            WireValue::Closure { .. } | WireValue::Func { .. } => true,
+            WireValue::List { items: xs, .. }
+            | WireValue::Tuple { items: xs, .. }
+            | WireValue::Enum { payload: xs, .. } => xs.iter().any(WireValue::holds_fn),
+            WireValue::Map { entries, .. } => {
+                entries.iter().any(|(_, k, v)| k.holds_fn() || v.holds_fn())
+            }
+            WireValue::Set { entries, .. } => entries.iter().any(|(_, e)| e.holds_fn()),
+            WireValue::Struct { fields, .. } => fields.iter().any(|(_, v)| v.holds_fn()),
+            WireValue::NewType { inner, .. } => inner.holds_fn(),
+            WireValue::Iter { items, .. } => items.iter().any(WireValue::holds_fn),
+            WireValue::Cell { inner, .. } => inner.holds_fn(),
+            _ => false,
+        }
+    }
+
     /// W7-11 — this node's per-serialization identity, if it has one: every identity-preserved arm
     /// (the containers, `Cell`, `Closure`) plus [`Backref`](WireValue::Backref), whose id names the
     /// node it points at. `None` for a leaf (scalar/`Str`/`bytes`/handle/generator), which by
