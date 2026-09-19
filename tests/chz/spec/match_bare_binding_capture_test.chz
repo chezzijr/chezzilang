@@ -1,0 +1,39 @@
+# W14-1
+test fn a_bare_match_binding_can_be_captured_by_a_closure():
+    e := 5
+    r := 0
+    match e:
+        1: r = 1
+        whole: r = (fn() -> int: whole)()
+    assert r == 5, "got {r}"
+
+test fn a_bare_binding_over_an_option_can_be_captured():
+    o: int? = Some(3)
+    r: int? = None
+    match o:
+        None: r = None
+        w: r = (fn() -> int?: w)()
+    assert r == Some(3), "got {r}"
+
+test fn each_match_of_a_bare_binding_gets_its_own_cell():
+    fs: List[fn() -> int] = []
+    for i in 0..3:
+        match i:
+            0: fs.push(fn() -> int: 100)
+            k: fs.push(fn() -> int: k)
+    got := [fs[0](), fs[1](), fs[2]()]
+    assert got == [100, 1, 2], "got {got}"
+
+test fn a_bare_binding_can_be_captured_in_a_guard_and_a_defer():
+    seen: List[int] = []
+    match 7:
+        q if (fn() -> bool: q > 1)(): seen.push(q)
+        _: seen.push(0)
+    fn run():
+        match 9:
+            z:
+                defer:
+                    seen.push(z)
+                seen.push(1)
+    run()
+    assert seen == [7, 1, 9], "got {seen}"

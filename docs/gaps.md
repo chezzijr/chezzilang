@@ -13327,7 +13327,7 @@ whole-program faults (deadlock, `os.exit`, resource caps).
 
 | row | P | domain | one line | disposition |
 |---|---|---|---|---|
-| W14-1 | P0 | core | a closure/nested fn/`defer:`/`spawn:` capturing a bare-name match binding (`whole: (fn() -> int: whole)()`) panics the VM: `CellLoad on a non-handle value` (`src/vm/exec.rs:2346`), rc=101. CPython/Rust print `5` | ticket |
+| ~~**W14-1**~~ | P0 | core | a closure/nested fn/`defer:`/`spawn:` capturing a bare-name match binding (`whole: (fn() -> int: whole)()`) panics the VM: `CellLoad on a non-handle value` (`src/vm/exec.rs:2346`), rc=101. CPython/Rust print `5` | **CLOSED 2026-09-19 (TICKET-139).** `pattern_binds` (`src/compiler/mod.rs`) now collects a bare payload-free unqualified `Pattern::Variant` name (DEC-107), so a closure, nested `fn`, `defer:` or `spawn:` capturing a bare match binding boxes its slot instead of running `CellLoad` on a raw value. Pinned by `tests/chz/spec/match_bare_binding_capture_test.chz`. |
 | W14-2 | P0 | core | a fn VALUE called with named args binds by the labels of whichever fn fixed the value's type: `fs := [f, ren]; fs[1](a=1, b=2)` → `201`; CPython `102` | ticket |
 | ~~W14-3~~ | P0 | sched | a rendezvous sender torn down by a recovered deadlock verdict leaves its value: `c.try_recv()` → `Some(1)`; Go `None` | CLOSED 2026-09-19, TICKET-135 (D1): the deadlock verdict is fatal, so no program continues past it |
 | W14-4 | P0 | defer | `return`/`?`/`break` out of `parallel:` runs the enclosing blocks' defers BEFORE the cancelled children's defers; `syntax.md` "inner-block-first"; Go/asyncio children first | ticket |

@@ -5883,6 +5883,18 @@ fn pattern_binds(p: &Pattern, out: &mut HashSet<String>) {
         Pattern::Ident(n, _) => {
             out.insert(n.clone());
         }
+        // TICKET-139/W14-1 + DEC-107: a bare, payload-free, unqualified name (`whole:`) is a
+        // whole-value catch-all binding (or a nullary variant — over-collecting that is harmless),
+        // so capture analysis must see it or the slot is never boxed and the closure's `CellLoad`
+        // reads a raw value.
+        Pattern::Variant {
+            name,
+            bindings,
+            enum_name: None,
+            module_name: None,
+        } if bindings.is_empty() => {
+            out.insert(name.clone());
+        }
         Pattern::Variant { bindings, .. } => bindings.iter().for_each(|b| pattern_binds(b, out)),
         Pattern::Tuple(ps) | Pattern::Or(ps) => ps.iter().for_each(|b| pattern_binds(b, out)),
         Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard => {}

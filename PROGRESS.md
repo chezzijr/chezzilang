@@ -13466,6 +13466,7 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- **TICKET-139 W14-1 (2026-09-19) — a closure can capture a bare match catch-all binding.** `pattern_binds` (`src/compiler/mod.rs`) now collects a payload-free unqualified name, the capture-analysis twin of DEC-107's catch-all predicate; before, `match e: 1: ..; whole: (fn() -> int: whole)()` was check-OK then panicked `CellLoad on a non-handle value` (rc=101). Pinned by `tests/chz/spec/match_bare_binding_capture_test.chz`.
 - **TICKET-119 (2026-09-15) — a deep module global reaches its depth-exceeded fault in linear, not
   quadratic, time (W13-9).** `to_snap_depth`'s speculative fast path (`try_wire_speculative`) re-walked
   the whole remaining subtree from every node before the slow arm descended one node and repeated, an
