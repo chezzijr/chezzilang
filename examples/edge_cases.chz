@@ -20,9 +20,11 @@ fn f_div0() -> int:
 fn f_mod0() -> int:
     return 7 % 0
 fn f_overflow() -> int:
-    return 9223372036854775807 + 1
+    m := 9223372036854775807
+    return m + 1
 fn f_underflow() -> int:
-    return 0 - 9223372036854775807 - 2
+    m := 9223372036854775807
+    return 0 - m - 2
 fn f_shift_hi() -> int:
     return 1 << 99
 fn f_shift_neg() -> int:
