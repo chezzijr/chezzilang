@@ -2525,6 +2525,16 @@ impl Checker {
             );
             return Ty::Unknown;
         }
+        // TICKET-142 (W14-32): `_` is the blank identifier — never declared, so it cannot be read
+        // (Go: `cannot use _ as value or type`). A loop variable / parameter named `_` still binds
+        // and resolves in the first arm above.
+        if name == "_" {
+            self.error(
+                span,
+                "cannot use '_' as a value — '_' is the blank identifier; `_ := e` and `_ = e` discard e",
+            );
+            return Ty::Unknown;
+        }
         let names = self.in_scope_names();
         self.error_help(
             span,

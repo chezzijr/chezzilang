@@ -2118,6 +2118,12 @@ impl Checker {
                     }
                     None => val_ty,
                 };
+                // TICKET-142 (W14-32): `_ := e` is Go's blank identifier — `e` is evaluated and
+                // discarded, `_` is never declared (so no type to freeze, no module global slot,
+                // and it may repeat with any types). The annotation check above still ran.
+                if name == "_" {
+                    return;
+                }
                 // PART A: an UN-annotated empty literal (`b := []`/`{}`/`Set()`) whose element/key/value
                 // slot is still `Unknown` records a pending site; if no later op constrains it, the
                 // end-of-scope finalize requires an annotation. Gated on `!inferring_ret` so the
@@ -2229,6 +2235,12 @@ impl Checker {
                 }
             }
             StmtKind::Assign { target, op, value } => {
+                // TICKET-142 (W14-32): `_ = e` is the blank identifier — evaluate and discard, at
+                // every scope. A compound `_ += 1` keeps the ordinary path (and its error).
+                if *op == AssignOp::Eq && matches!(&target.kind, ExprKind::Ident(n) if n == "_") {
+                    self.infer_value(value);
+                    return;
+                }
                 // Checking-mode: a closure assigned to a `fn`-typed lvalue (a struct fn-field or a
                 // fn-typed variable) binds its unannotated params from the target's type (source #1).
                 let val_ty = if matches!(value.kind, ExprKind::Closure { .. }) {
@@ -3416,7 +3428,9 @@ impl Checker {
         match val_ty {
             Ty::Unknown => {
                 for name in names {
-                    self.declare(name, Ty::Unknown);
+                    if name != "_" {
+                        self.declare(name, Ty::Unknown);
+                    }
                 }
             }
             Ty::Tuple(elems) if elems.len() == names.len() => {
@@ -3431,12 +3445,16 @@ impl Checker {
                 // the program cannot observe (CPython prints the last, measured). Judging it fired on
                 // the sound `x := "a"` / `x, x := (1, "b")`; judging only the FIRST occurrence would
                 // instead miss the real retype in `x := 1` / closure `-> int` / `x, x := (2, "s")`.
+                // TICKET-142 (W14-32): a `_` element is the blank identifier — never declared.
                 for (i, name) in names.iter().enumerate() {
-                    if !names[i + 1..].contains(name) {
+                    if name != "_" && !names[i + 1..].contains(name) {
                         self.reject_redeclare(name, &elems[i], name_spans[i]);
                     }
                 }
                 for ((name, ty), name_span) in names.iter().zip(elems).zip(name_spans.iter()) {
+                    if name == "_" {
+                        continue;
+                    }
                     // EDITOR HOVER: each destructure target (`a`/`b` in `a, b := (1,2)`) is a NAME,
                     // not an `Expr` the probe visits; record its tuple-element type at its own span
                     // (no-op unless a probe is armed → zero overhead on normal checks).
@@ -3454,7 +3472,9 @@ impl Checker {
                     ),
                 );
                 for name in names {
-                    self.declare(name, Ty::Unknown);
+                    if name != "_" {
+                        self.declare(name, Ty::Unknown);
+                    }
                 }
             }
             other => {
@@ -3463,7 +3483,9 @@ impl Checker {
                     format!("cannot destructure non-tuple value of type {other}"),
                 );
                 for name in names {
-                    self.declare(name, Ty::Unknown);
+                    if name != "_" {
+                        self.declare(name, Ty::Unknown);
+                    }
                 }
             }
         }

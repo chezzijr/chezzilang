@@ -33024,3 +33024,106 @@ fn blank_identifier_redeclared_at_top_level_with_different_types() {
         "fn f() -> int?:\n    return None\n\nfn g() -> str?:\n    return None\n\n_ := f()\n_ := g()\n",
     );
 }
+
+// TICKET-142 (W14-19): a numeric newtype formats as its underlying number, so a numeric spec on it
+// checks against that underlying; a spec the underlying rejects is still an error.
+#[test]
+fn format_spec_on_numeric_newtype_checks_its_underlying() {
+    ok("newtype M = float\nprint(\"{M(1.5):.2f}\")\n");
+    ok("newtype N = int\nprint(\"{N(7):04} {N(255):x} {N(7):+}\")\n");
+    rejects(
+        "newtype M = float\nprint(\"{M(1.5):d}\")\n",
+        "type 'd' not valid for a float",
+    );
+}
+
+// TICKET-142 (W14-19): every other concrete non-numeric type renders as its text form, so a numeric
+// spec on it is a compile error (checked against the string rules), while an alignment spec is fine.
+#[test]
+fn format_spec_on_enum_fn_bytes_shared_rejected_at_check() {
+    let needle = "format spec: type 'd' not valid for a string";
+    rejects("enum E:\n    A\n\ne := E.A\nprint(\"{e:d}\")\n", needle);
+    rejects("fn f() -> int:\n    return 1\n\nprint(\"{f:d}\")\n", needle);
+    rejects("b := b\"ab\"\nprint(\"{b:d}\")\n", needle);
+    entry_rejects(
+        "import std.concurrency\ns := Shared[int](1)\nprint(\"{s:d}\")\n",
+        needle,
+    );
+    rejects("newtype S = str\nprint(\"{S(\\\"a\\\"):d}\")\n", needle);
+    ok("enum E:\n    A\n\ne := E.A\nprint(\"{e:>5}\")\n");
+}
+
+// TICKET-142 (W14-32): `_` is the blank identifier in `:=`, `=` and destructuring, at every scope.
+#[test]
+fn blank_identifier_discards_in_every_position() {
+    let decls = "fn f() -> int?:\n    return None\n\nfn g() -> str?:\n    return None\n\n";
+    ok(&format!(
+        "{decls}fn main():\n    _ := f()\n    _ := g()\n    _ = f()\n    _ = g()\n    fn inner() -> int:\n        _ = g()\n        return 1\n    a, _ := (1, \"x\")\n    b, _ := (\"y\", 2)\n    print(inner() + a)\n    print(b)\n"
+    ));
+    ok(&format!("{decls}_ = f()\n"));
+}
+
+// TICKET-142 (W14-32): `_` is never declared, so it cannot be read; a loop variable named `_` binds.
+#[test]
+fn blank_identifier_is_not_readable() {
+    rejects("_ := 5\nprint(_)\n", "cannot use '_' as a value");
+    ok("for _ in range(2):\n    print(_)\n");
+}
+
+// TICKET-142 (W14-33): an all-constant int expression that overflows i64 is a compile error.
+#[test]
+fn constant_int_overflow_rejected_at_check() {
+    let needle = "does not fit in int";
+    rejects("print(9223372036854775807 + 1)\n", needle);
+    rejects("print(9223372036854775807 * 2)\n", needle);
+    rejects("print(-(-9223372036854775807 - 1))\n", needle);
+    rejects("x := 1\nprint(x + (9223372036854775807 + 1))\n", needle);
+    rejects(
+        "fn f(a: int) -> int:\n    return a\ny := f(9223372036854775807 * 2) + 1\n",
+        needle,
+    );
+    rejects(
+        "fn main():\n    print(9223372036854775807 + 1)\nmain()\n",
+        needle,
+    );
+    rejects(
+        "fn app[T](f: fn() -> T) -> T:\n    return f()\nprint(app(fn() -> int: 9223372036854775807 + 1))\n",
+        needle,
+    );
+    rejects(
+        "fn id[T](x: T) -> T:\n    return x\nprint(id(9223372036854775807 + 1))\n",
+        needle,
+    );
+    // Exactly one diagnostic even where the checker infers the expression more than once.
+    let errs = check_src("fn main():\n    print(9223372036854775807 + 1)\nmain()\n");
+    assert_eq!(
+        errs.iter().filter(|e| e.message.contains(needle)).count(),
+        1,
+        "got: {errs:?}"
+    );
+    let errs = check_src("print(1 + (9223372036854775807 + 1))\n");
+    assert_eq!(
+        errs.iter().filter(|e| e.message.contains(needle)).count(),
+        1,
+        "got: {errs:?}"
+    );
+    ok("print(9223372036854775807 - 1)\n");
+    ok("x := 9223372036854775807\nprint(x + 1)\n");
+    ok("print(1 / 0)\n");
+}
+
+// TICKET-142 (W14-33): `Channel(n)` takes its element type from the annotation / param slot.
+#[test]
+fn channel_ctor_takes_element_type_from_annotation_and_param() {
+    ok("ch: Channel[float] = Channel(1)\n");
+    ok("fn f(c: Channel[int]):\n    pass\nf(Channel(1))\n");
+    rejects("c := Channel(1)\n", "needs an element type");
+}
+
+// TICKET-142 (W14-33): a nested `fn`'s defaults apply at its call sites and through a value alias.
+#[test]
+fn nested_fn_default_applies_at_call() {
+    ok(
+        "fn outer() -> int:\n    fn f(x: int, y: int = 3) -> int:\n        return x + y\n    g := f\n    return f(1) + g(1, 2)\n",
+    );
+}
