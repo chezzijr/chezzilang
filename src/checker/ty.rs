@@ -218,7 +218,9 @@ pub type SumSeedTable = HashMap<CarrierKey, Option<SumSeed>>;
 /// EQUALITY-NEUTRAL (always `true`), so the derived `PartialEq` on `Ty` transparently ignores labels
 /// — no hand-written `Ty` equality, zero regression to HOF/callback/protocol/subtyping code. The
 /// labels are consulted ONLY when resolving a value call that carries keyword arguments
-/// (`g(name="Bob")`), turning each label into a positional slot.
+/// (`g(name="Bob")`), turning each label into a positional slot — and only through a binding
+/// certain to hold one function (TICKET-139/W14-2: `kw_certain`), because labels are not type
+/// identity and any other callee may hold a function that names its parameters differently.
 #[derive(Debug, Clone, Default)]
 pub struct FnLabels {
     /// Surface parameter names, parallel to the function type's `params`.

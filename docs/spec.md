@@ -112,7 +112,10 @@ in `docs/future.md`; parameterized targets like `cast[List[int]]` stay unsound u
 exist). Default + named
 arguments still cover most ergonomic cases. Named arguments also work through a first-class **function
 value** (Swift-style labels: a `fn(...)` type carries its parameter labels, so `g := greet;
-g(name="Bob")` and a `fn(name: str)->nil` HOF parameter both accept keywords). Labels are
+g(name="Bob")` works) — but only through a binding that holds **one known function** (a `:=` of a
+fn or closure literal, or a nested `fn`, never reassigned); a keyword call through a HOF parameter,
+list slot or reassigned binding is a compile error (TICKET-139/W14-2: the callee's own parameter
+names are not statically certain, so pass positionally). Labels are
 **surface-only** (SE-0111) — `fn(str)->nil` ≡ `fn(name:str)->nil`, so no impact on HOF/callback/protocol
 typing — and a value call is scope-cut: it must supply every parameter (declaration-site **defaults do
 not fill through a value**; a direct call still does), and built-in fn values take no keywords.

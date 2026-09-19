@@ -2193,7 +2193,22 @@ impl Checker {
                     None
                 };
                 self.reject_redeclare(name, &declared, span);
+                // TICKET-139 (W14-2) — an unannotated single-name `:=` of a closure literal or of a
+                // top-level user fn (no local shadow) holds exactly ONE known function, so its
+                // labels are certain. Computed BEFORE `declare` so `h := h` cannot see itself.
+                let one_known_fn = names.len() == 1
+                    && ty.is_none()
+                    && match &value.kind {
+                        ExprKind::Closure { .. } => true,
+                        ExprKind::Ident(n) => {
+                            self.lookup(n).is_none() && self.functions.contains_key(n)
+                        }
+                        _ => false,
+                    };
                 self.declare(name, declared);
+                if one_known_fn && let Some(s) = self.owning_scope(name) {
+                    self.kw_certain.insert((s, name.to_string()));
+                }
                 if is_const {
                     self.declare_const(name);
                 }
@@ -2349,6 +2364,13 @@ impl Checker {
                         return;
                     }
                     let mut sig = self.fn_sig(decl, decl.name_span);
+                    // TICKET-139 (W14-2) — a nested fn's own name is certain to hold that one fn (a
+                    // keyword call through it is legal). Its two declares below are a same-scope
+                    // re-declaration, which `declare` marks as a write; undo that mark unless the
+                    // name was already written or declared here before this fn.
+                    let kw_key = (self.scopes.len() - 1, decl.name.clone());
+                    let kw_was_written = self.kw_written.contains(&kw_key)
+                        || self.scopes.last().is_some_and(|s| s.contains_key(nm));
                     // No `-> T`: infer the return from the body (mirrors the top-level single-fn
                     // inference). Declare a PROVISIONAL `Ty::Func` first so a self-recursive call
                     // inside inference resolves as an arity-checked value-call (not a global namesake
@@ -2363,6 +2385,7 @@ impl Checker {
                                 labels: crate::checker::FnLabels::new(sig.labels.clone()),
                             },
                         );
+                        self.kw_certain.insert(kw_key.clone());
                         let inferred = self.infer_fn_ret(decl, None, &sig, true);
                         sig.ret = inferred;
                     }
@@ -2377,6 +2400,10 @@ impl Checker {
                             labels: crate::checker::FnLabels::new(sig.labels.clone()),
                         },
                     );
+                    self.kw_certain.insert(kw_key.clone());
+                    if !kw_was_written {
+                        self.kw_written.remove(&kw_key);
+                    }
                     // B3.3 (Task 2a): record the nested fn's non-sendable LOCAL captures keyed by its
                     // name (same free-var over-approximation as the runtime), so `spawn <name>()`
                     // rejects a captured `ref` at compile time. `decl.name` is bound BEFORE this so a
@@ -3463,6 +3490,10 @@ impl Checker {
                     );
                     return;
                 };
+                // TICKET-139 (W14-2) — a write voids the certainty of a keyword call through `name`.
+                if let Some(s) = self.owning_scope(name) {
+                    self.kw_written.insert((s, name.clone()));
+                }
                 // TICKET-107 (W12-14) — `List += List` lowers to `Op::AddInPlace` (DEC-015), which
                 // extends the SAME list and writes the same handle back; it never rebinds the name,
                 // so neither guard below applies. Every other compound form, and `+=` on any other

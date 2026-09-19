@@ -12,9 +12,10 @@ g(greeting="Yo", name="Al")      # reordered labels
 g("Sam", "Hey")                  # positional through the value still works
 g("Kim", greeting="Sup")         # mixed: positional then label
 
-# Keyword through a higher-order-function parameter: `f`'s labels come from the annotation.
+# A keyword call through a higher-order-function PARAMETER is a compile error (TICKET-139/W14-2):
+# labels are surface-only, so the callee may name its parameters differently. Pass positionally.
 fn apply(f: fn(name: str) -> nil):
-    f(name="X")
+    f("X")
 apply(fn(name: str): print(name))
 
 # A closure value carries its own param labels.
@@ -32,13 +33,13 @@ sA := subAB
 sP := subPQ
 print("{sA(y=1, x=10)} {sP(p=3, q=2)}")   # 9 1
 
-# Chained value keyword calls (currying): a function value RETURNS another function value, and each
-# link of the postfix chain carries its OWN keyword permutation. The two calls must not alias one
-# table slot even though the parser gives both the same call-node span.
+# Chained value calls (currying): a function value RETURNS another function value. Keywords apply to
+# the FIRST call, through a binding of one known fn; the returned value is called positionally (a
+# keyword call through a returned value is a compile error, TICKET-139/W14-2).
 fn make_greeter(prefix: str) -> fn(name: str, punct: str) -> nil:
     return fn(name: str, punct: str): print(prefix, name, punct)
 mk := make_greeter
-mk(prefix="Hello")(punct="!", name="World")   # inner a=Hello; outer reordered -> Hello World !
+mk(prefix="Hello")("World", "!")   # Hello World !
 
 # Side-effecting args evaluate in SLOT order (declaration order), not source order.
 fn log(s: str) -> str:

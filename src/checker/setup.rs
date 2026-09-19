@@ -139,6 +139,9 @@ impl Checker {
             empty_coll_sites: Vec::new(),
             empty_coll_aliases: Vec::new(),
             carrier_pins: Vec::new(),
+            kw_certain: std::collections::HashSet::new(),
+            kw_written: std::collections::HashSet::new(),
+            kw_pending: Vec::new(),
             hover_pending: None,
         };
         c.seed_stdlib_structs();
@@ -2210,6 +2213,29 @@ impl Checker {
         self.capture_table.push(HashMap::new());
     }
     pub(super) fn pop_scope(&mut self) {
+        // TICKET-139 (W14-2) — settle the popped scope's keyword calls BEFORE the scope goes: a
+        // keyword call through a `kw_certain` binding is legal only if the binding is never written,
+        // and a write may come after the call, so the verdict waits for the binding's own scope end.
+        // Module scope pops through here too (a module binding written from a fn body). The three
+        // tables are keyed `(scope_idx, name)` and scope indices are reused (DEC-032), so they drain
+        // here.
+        let top = self.scopes.len().saturating_sub(1);
+        let pending = std::mem::take(&mut self.kw_pending);
+        for (key, span) in pending {
+            if key.0 < top {
+                self.kw_pending.push((key, span));
+            } else if self.kw_written.contains(&key) {
+                let n = &key.1;
+                self.error(
+                    span,
+                    format!(
+                        "keyword arguments through '{n}' are ambiguous: '{n}' is reassigned, so it may hold a function with different parameter names; pass the arguments positionally"
+                    ),
+                );
+            }
+        }
+        self.kw_certain.retain(|k| k.0 < top);
+        self.kw_written.retain(|k| k.0 < top);
         self.scopes.pop();
         self.loop_vars.pop();
         self.const_decls.pop();
@@ -2252,6 +2278,12 @@ impl Checker {
         false
     }
     pub(super) fn declare(&mut self, name: &str, ty: Ty) {
+        // TICKET-139 (W14-2) — a same-scope re-declaration can share the runtime slot, so it counts
+        // as a write for the keyword-call gate (`kw_written`).
+        if self.scopes.last().is_some_and(|s| s.contains_key(name)) {
+            self.kw_written
+                .insert((self.scopes.len() - 1, name.to_string()));
+        }
         self.scopes.last_mut().unwrap().insert(name.to_string(), ty);
         // Re-declaring a name (e.g. `:=` shadowing a loop var in the same scope) yields a fresh,
         // mutable binding — clear any loop-var mark so assignment to it isn't wrongly rejected.

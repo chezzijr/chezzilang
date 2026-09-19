@@ -1,0 +1,21 @@
+# W14-2: a keyword call through a fn value is legal only through a binding that holds ONE known fn
+# (`h := some_fn`, a closure literal, a nested `fn`, never reassigned). A list slot, a param or a
+# reassigned binding may hold a fn with different parameter names, so those calls are compile errors
+# (see `kw_value_call_through_*` in `src/checker/tests.rs`); positional calls stay legal everywhere.
+fn w14_f(a: int, b: int) -> int:
+    return a * 100 + b
+
+fn w14_ren(b: int, a: int) -> int:
+    return a * 100 + b
+
+test fn a_named_arg_call_through_a_binding_of_one_fn_binds_by_that_fns_names():
+    h := w14_ren
+    assert h(a=1, b=2) == 102, "got {h(a=1, b=2)}"
+
+test fn a_named_arg_call_through_a_closure_binding_binds_by_the_closure_names():
+    g := fn(b: int, a: int) -> int: a * 100 + b
+    assert g(a=1, b=2) == 102, "got {g(a=1, b=2)}"
+
+test fn a_list_slot_call_binds_positionally():
+    fs := [w14_f, w14_ren]
+    assert fs[1](1, 2) == 201, "got {fs[1](1, 2)}"

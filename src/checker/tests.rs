@@ -25284,14 +25284,17 @@ fn kw_value_call_accepts() {
     );
 }
 
-/// A keyword argument through a HOF parameter resolves against the ANNOTATION's labels.
+/// TICKET-139/W14-2: a keyword argument through a HOF PARAMETER is rejected — the annotation's
+/// labels are surface-only, so the runtime callee may name its parameters differently.
 #[test]
-fn kw_value_call_hof_param_labels() {
-    ok(
+fn kw_value_call_through_a_param_is_rejected() {
+    rejects(
         "fn apply(f: fn(name: str) -> nil):\n    f(name=\"X\")\napply(fn(name: str): print(name))\n",
+        "need a binding that holds one known function",
     );
-    entry_ok(
+    entry_rejects(
         "fn apply(f: fn(name: str) -> nil):\n    f(name=\"X\")\nfn main():\n    apply(fn(name: str): print(name))\nmain()\n",
+        "need a binding that holds one known function",
     );
 }
 
@@ -25395,6 +25398,60 @@ fn a_generic_methods_callee_filled_default_may_be_omitted() {
 #[test]
 fn kw_value_builtin_rejects_keywords() {
     rejects("p := ord\np(x=\"a\")\n", "takes no keyword arguments");
+}
+
+// ----- TICKET-139/W14-2: a keyword call through a fn value needs ONE known callee -----
+
+/// Two fns of the SAME type `fn(int, int) -> int` whose parameter names are swapped.
+const KW_SWAP_FNS: &str = "fn f(a: int, b: int) -> int:\n    return a * 100 + b\nfn ren(b: int, a: int) -> int:\n    return a * 100 + b\n";
+
+/// Must still fail: a list slot may hold either fn, so its labels are not certain.
+#[test]
+fn kw_value_call_through_a_list_slot_is_rejected() {
+    rejects(
+        &format!("{KW_SWAP_FNS}fs := [f, ren]\nprint(fs[1](a=1, b=2))\n"),
+        "need a binding that holds one known function",
+    );
+}
+
+/// Must still fail: a binding that is written anywhere in its lifetime — before the call, after it
+/// in a loop, from a nested fn, or (module scope) from a fn body — may hold a different fn.
+#[test]
+fn kw_value_call_through_a_reassigned_binding_is_rejected() {
+    rejects(
+        &format!("{KW_SWAP_FNS}h := f\nh = ren\nprint(h(a=1, b=2))\n"),
+        "is reassigned",
+    );
+    rejects(
+        &format!(
+            "{KW_SWAP_FNS}fn main():\n    h := f\n    for i in 0..2:\n        print(h(a=1, b=2))\n        h = ren\nmain()\n"
+        ),
+        "is reassigned",
+    );
+    rejects(
+        &format!(
+            "{KW_SWAP_FNS}fn main():\n    h := f\n    fn w():\n        h = ren\n    w()\n    print(h(a=1, b=2))\nmain()\n"
+        ),
+        "is reassigned",
+    );
+    rejects(
+        &format!("{KW_SWAP_FNS}h := f\nfn w():\n    h = ren\nprint(h(a=1, b=2))\n"),
+        "is reassigned",
+    );
+}
+
+/// Must still pass: a binding certain to hold one known fn keeps its keyword call, and a write to a
+/// same-named binding in ANOTHER fn does not leak into it.
+#[test]
+fn kw_value_call_through_one_known_fn_stays_ok() {
+    ok(&format!("{KW_SWAP_FNS}h := ren\nprint(h(a=1, b=2))\n"));
+    ok("g := fn(a: int, b: int) -> int: a * 100 + b\nprint(g(b=2, a=1))\n");
+    ok(
+        "fn main():\n    fn inner(a: int, b: int) -> int:\n        return a * 100 + b\n    print(inner(b=2, a=1))\nmain()\n",
+    );
+    ok(&format!(
+        "{KW_SWAP_FNS}fn p():\n    h := f\n    print(h(a=1, b=2))\nfn q():\n    h := ren\n    h = f\n    print(h(1, 2))\n"
+    ));
 }
 
 // ===== Variadic parameters + `Any` top type (M-variadic) =====

@@ -1196,8 +1196,9 @@ protocol is a general accept-all top type, not a special case keyed on the name 
 
 **Keyword arguments through a function VALUE (Swift-style labels).** Named arguments also work through a
 first-class **function value**, not just a direct call — a `fn(...)` type carries its parameters'
-**labels**, so a value bound to a user function (or closure), or reached through a `fn(...)`-typed
-parameter, accepts keyword args:
+**labels**, so a binding that holds **one known function** accepts keyword args (TICKET-139/W14-2):
+that is an unannotated `g := some_fn`, `g := fn(...): ...` (a closure literal) or a nested `fn`'s own
+name, and it is **never written afterwards**:
 
 ```chezzi
 fn greet(name: str, greeting: str):
@@ -1208,11 +1209,24 @@ g(name="Bob", greeting="Hi")           # "Hi Bob" — by label, through a value
 g(greeting="Hi", name="Bob")           # same — labels may be reordered
 g("Bob", "Hi")                         # positional through the value still works
 
-fn apply(f: fn(name: str) -> nil):     # labels ride on the fn TYPE
-    f(name="X")                        # keyword through a HOF parameter
+fn apply(f: fn(name: str) -> nil):
+    f(name="X")     # ERROR: keyword arguments through a function value need a binding that
+                    # holds one known function (...); pass the arguments positionally
+    f("X")          # fine — positional through any value
 ```
 
-Labels are **surface-only** (Swift SE-0111): `fn(str) -> nil` and `fn(name: str) -> nil` are the **same
+Any other callee — a **parameter**, a list/map slot, a loop variable, a match binding, an annotated
+binding, a returned value (`mk(a)(x=1)`), or a binding that is **reassigned** anywhere in its
+lifetime (even after the call, in a loop, or from a nested fn) — takes **no keyword arguments**, and
+the call is a compile error naming the positional workaround. The reason: labels are **surface-only**
+(Swift SE-0111), so `fn(a: int, b: int)` and `fn(b: int, a: int)` are the **same type**. A value
+of that type may hold either function, so `fs := [f, ren]; fs[1](a=1, b=2)` would have bound `a`/`b` by
+`f`'s labels and run `ren` (`201` where CPython's rebinding by the callee's own names prints `102`),
+and binding by the runtime callee's names instead is unsound when the two functions type their
+same-position parameters differently. The gate is deliberately conservative: `h := f; h = f2` with
+identical labels is rejected too.
+
+Labels stay **surface-only for typing**: `fn(str) -> nil` and `fn(name: str) -> nil` are the **same
 type** — mutually assignable, so an unlabelled callback flows into a labelled parameter and vice-versa
 (no impact on existing HOF/callback/protocol code). Two limits, both by design: **(1)** a value call
 may omit only a **trailing** run of defaulted parameters — `h := hasdefault; h()` fills the default

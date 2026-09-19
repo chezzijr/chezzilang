@@ -600,6 +600,37 @@ impl Checker {
                 ret,
                 labels,
             } if !named.is_empty() => {
+                // TICKET-139 (W14-2) — labels are surface-only (equality-neutral, DEC-108), so a
+                // callee that is not certain to hold ONE known function may bind a permuted set of
+                // names: `fs := [f, ren]; fs[1](a=1, b=2)` bound `a`/`b` by `f`'s labels and ran
+                // `ren`. Only a `kw_certain` `Ident` binding keeps keyword calls; everything else
+                // is a compile error (positional calls are unaffected).
+                let key = match &callee.kind {
+                    ExprKind::Ident(n) => self
+                        .owning_scope(n)
+                        .map(|s| (s, n.clone()))
+                        .filter(|k| self.kw_certain.contains(k)),
+                    _ => None,
+                };
+                let Some(key) = key else {
+                    for a in args {
+                        self.infer(a);
+                    }
+                    for (_, v) in named {
+                        self.infer(v);
+                    }
+                    self.error(
+                        span,
+                        "keyword arguments through a function value need a binding that holds one known function (`g := some_fn`, a closure literal, or a nested `fn`, never reassigned); this callee may hold any function of its type, whose parameter names can differ, so pass the arguments positionally".to_string(),
+                    );
+                    return *ret;
+                };
+                // Settled at the binding's `pop_scope` (a write may come after this call). Nothing
+                // is recorded under the generic-arg prepass, and a closure body inferred more than
+                // once (DEC-025) records each call once.
+                if !self.generic_arg_prepass && !self.kw_pending.contains(&(key.clone(), span)) {
+                    self.kw_pending.push((key, span));
+                }
                 let minp = labels.min_or(params.len());
                 self.check_value_keyword_call(&params, &labels.names, minp, args, named, span);
                 *ret
