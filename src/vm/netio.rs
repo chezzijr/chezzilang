@@ -263,6 +263,9 @@ impl Vm {
         span: Span,
     ) -> Result<Result<core::UpdateGuard, GuardCycle>, RuntimeError> {
         let tok = self.guard_wait_enter(key, what, span)?;
+        // TICKET-141 — the holder of this guard may be a preempted `update` closure on a gated
+        // sibling thread; hold no width permit while waiting for it.
+        self.width_release();
         let _party = self.block_party_guard(quiesce::PartyWait::Guard(key, self.guard_token));
         let out = loop {
             match acquire_update_guard_within(
@@ -292,6 +295,7 @@ impl Vm {
             }
         };
         self.guard_wait_exit(key, tok);
+        self.width_acquire();
         out
     }
 
@@ -2256,7 +2260,22 @@ impl Vm {
     /// `--timeout` deadline, a cancel, the deadlock verdict — are not in any predicate and are still
     /// observed once per tick, so cancellation is now the SLOWEST thing in this loop rather than the
     /// fastest. That bound is unchanged by this fix, not introduced by it.
+    ///
+    /// TICKET-141 — releases this thread's width permit for the tick and re-takes it after.
     fn block_wait_tick(
+        &mut self,
+        core: &Arc<ChannelCore>,
+        deadlock_msg: &str,
+        span: Span,
+        ready: impl FnMut(&mut crate::vm::core::ChanState) -> bool,
+    ) -> Result<(), RuntimeError> {
+        self.width_release();
+        let r = self.block_wait_tick_in_place(core, deadlock_msg, span, ready);
+        self.width_acquire();
+        r
+    }
+
+    fn block_wait_tick_in_place(
         &mut self,
         core: &Arc<ChannelCore>,
         deadlock_msg: &str,
@@ -2647,7 +2666,20 @@ impl Vm {
     /// a sleeper in a different heap to observe (measured: the sleep runs in full, 3005 ms, then the
     /// OVER-MEMORY verdict lands). `--timeout` has no such gap: it is an absolute wall-clock deadline
     /// this loop reads directly.
+    ///
+    /// TICKET-141 — releases this thread's width permit for the whole wait and re-takes it after.
     pub(super) fn block_until_deadline(
+        &mut self,
+        deadline: std::time::Instant,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        self.width_release();
+        let r = self.block_until_deadline_in_place(deadline, span);
+        self.width_acquire();
+        r
+    }
+
+    fn block_until_deadline_in_place(
         &mut self,
         deadline: std::time::Instant,
         span: Span,

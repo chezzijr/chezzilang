@@ -254,6 +254,69 @@ fn threads_one_serializes_cpu_bound_parallel_tasks() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// TICKET-141 (W14-14) — guards the handoff for a CPU loop preempted INSIDE a native callback: the
+/// preempted thread hands its width permit to one replacement thread and takes one back in FIFO
+/// order, so at `CHEZZI_THREADS=1` the two never burn concurrently (DEC-059's 1.00-core bound).
+/// Same construction as `threads_one_serializes_cpu_bound_parallel_tasks`, but two of the six
+/// spawns run their `burn` inside a `List.map` callback. A free-running replacement (the N+1 cost a
+/// blocking demote accepts) would push `cpu` past `wall`.
+#[cfg(unix)]
+#[test]
+fn threads_one_serializes_cpu_bound_callback_tasks() {
+    let dir = std::env::temp_dir().join(format!("chz-threads-w8-8-cb-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+
+    let burn = "fn burn(n: int) -> int:\n    \
+                 x := 0\n    \
+                 i := 0\n    \
+                 while i < n:\n        \
+                 x = x + i * i - i\n        \
+                 i += 1\n    \
+                 return x\n\n";
+
+    let path_b = dir.join("burn_eight_callback.chz");
+    // Two callback spawns plus four plain ones. A callback-only program cannot tell a gated
+    // replacement from a free-running one (every thread then sits in a callback and queues on the
+    // gate within one budget); the plain spawns are what a permit-less replacement would burn
+    // alongside a callback thread. Measured on the debug binary at `CHEZZI_THREADS=1`: 0.90-0.97
+    // cores gated, 1.9 cores with the worker loop's `width_acquire` removed.
+    let spawns = format!(
+        "{}{}",
+        "        spawn:\n            ys := [75000].map(fn(n): burn(n))\n".repeat(2),
+        "        spawn: burn(75000)\n".repeat(4)
+    );
+    std::fs::write(
+        &path_b,
+        format!("{burn}fn main():\n    parallel:\n{spawns}main()\n"),
+    )
+    .expect("write callback program");
+
+    for run in 0..SERIALIZATION_RUNS {
+        let (wall, user, sys, status, stdout) =
+            child_rusage::run_timed(&["run", path_b.to_str().unwrap()], "1");
+        assert!(
+            status.success(),
+            "chezzi run {path_b:?} failed (run {run}): {stdout}"
+        );
+        let cpu = user + sys;
+        // Negative control: cpu must be non-trivial, or a near-zero/near-zero ratio could pass by
+        // accident.
+        assert!(
+            cpu > std::time::Duration::from_millis(500),
+            "callback program finished too fast (cpu={cpu:?}, run {run}) to be a meaningful \
+             measurement — recalibrate the burn size"
+        );
+        assert!(
+            cpu <= wall.mul_f64(MAX_CORES_AT_ONE_WORKER),
+            "--threads=1 must run at most one CPU runner (run {run}): cpu={cpu:?} wall={wall:?} \
+             (cpu must be <= wall * {MAX_CORES_AT_ONE_WORKER}). A second runner means a preempted \
+             callback thread and its replacement burn concurrently (TICKET-141)."
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// T1-fix — the same W8-8 defect on the NESTED eager-nursery arm: `fn work(): parallel: ...` **called
 /// (not spawned)** from a top-level `parallel:` body, so `work()`'s `parallel:` runs synchronously on
 /// `main` while the outer scope's body is still open — `activate_eager_nursery`'s

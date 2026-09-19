@@ -14,6 +14,7 @@ mod pool;
 mod quiesce;
 mod timer;
 pub mod value;
+mod width;
 pub mod wire;
 
 use core::{
@@ -1352,6 +1353,14 @@ pub struct Vm {
     /// [`Vm::run_one_fiber`] and NOT part of [`FiberCtx`] (a demoted thread runs exactly one fiber to
     /// settle, then exits, so it never carries the flag into another fiber).
     demoted: bool,
+    /// TICKET-141 (W14-14) — this shell runs Chezzi code only while it holds a permit of
+    /// [`MnSched::width`]. Set by [`Vm::callback_preempt`] on the thread that first preempts inside a
+    /// native callback; [`Vm::spawn_shell`] copies it into every shell it builds (the replacement
+    /// worker, inline join shells, farmed helpers). Per-shell like `demoted`.
+    width_gated: bool,
+    /// TICKET-141 — this shell currently holds a width permit. Only meaningful while `width_gated`;
+    /// per-shell like `demoted`. See `src/vm/width.rs`.
+    holds_width: bool,
 }
 
 /// D3 — a fiber's reduction budget per schedule-in: how many ops it dispatches before yielding its
@@ -2162,6 +2171,8 @@ enum ParkedEntry {
 struct MnSched {
     core: Mutex<SchedCore>,
     cv: Condvar,
+    /// TICKET-141 (W14-14) — per-sched FIFO width gate; see `src/vm/width.rs`.
+    width: width::WidthGate,
     // N4 — the legacy sched-level `cancel` field is GONE. It held only the OUTERMOST nursery's flag, so
     // every read of it was a latent bug for a nested/enlisted scope: `park`/`park_wait` had already moved
     // to the per-fiber `scopes[fiber.scope_id].cancel`, and its last reader (the netpoller's `register`,
@@ -2718,6 +2729,7 @@ impl MnSched {
         mem_cap: usize,
     ) -> Self {
         MnSched {
+            width: Default::default(),
             core: Mutex::new(SchedCore {
                 global: std::collections::VecDeque::new(),
                 parked: std::collections::HashMap::new(),

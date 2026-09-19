@@ -374,8 +374,18 @@ impl Vm {
             return Ok(Value::nil());
         }
         let writes_before = self.stdout_writes;
+        // TICKET-141 — a `Kind::Blocking` native run inline (its offload path is unavailable inside a
+        // callback) waits on the host thread: hold no width permit across it.
+        let in_place = kind == Kind::Blocking;
+        if in_place {
+            self.width_release();
+        }
         let mut host = VmHost { vm: self, args };
-        let ret = func(&mut host).map_err(|e| RuntimeError {
+        let raw = func(&mut host);
+        if in_place {
+            self.width_acquire();
+        }
+        let ret = raw.map_err(|e| RuntimeError {
             message: e.message,
             span,
             is_assert: false,
@@ -4029,7 +4039,7 @@ impl Vm {
             if let Some(e) = defer_err {
                 return Err(e);
             }
-            self.join_nursery()?; // join the implicit nursery (runs its tasks)
+            self.join_nursery_released()?; // join the implicit nursery (runs its tasks)
             // TICKET-103 — `join_nursery` parked this fiber (`Disp::JoinPark`) and rewound `ip`
             // to the op that called us: `Op::Return`, or `Op::Try` for a `?`. Leave the frame and
             // the return value on the stack; the op re-executes after the wake and completes the

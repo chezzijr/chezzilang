@@ -449,6 +449,8 @@ impl Vm {
         if self.nurseries.len() <= from_len {
             return; // nothing escaped past the join (e.g. normal fall-through already popped it)
         }
+        // TICKET-141 — every inline abort below waits in place: hold no width permit across it.
+        self.width_release();
         while self.nurseries.len() > from_len {
             // All five stacks pop TOGETHER, unconditionally — nurseries, nursery_defer_floors,
             // nursery_spans, mn_scopes and eager_scheds are lockstep, and the enlisted arm below
@@ -473,6 +475,7 @@ impl Vm {
                 self.abort_eager_nursery(scope);
             }
         }
+        self.width_acquire();
     }
 
     /// TICKET-132 — before `drain_escaped_nursery` pops anything, check whether the TOP levels
@@ -1483,6 +1486,9 @@ impl Vm {
             _ => self.cancel_outer.clone(),
         };
         shell.cancel = Some(Arc::clone(cancel));
+        // TICKET-141 (W14-14) — the replacement worker, an inline join shell and a farmed helper of a
+        // gated thread are gated too; each starts without a permit (see `src/vm/width.rs`).
+        shell.width_gated = self.width_gated;
         shell
     }
 
@@ -1500,7 +1506,20 @@ impl Vm {
     /// → the fiber faults). Never [`RecvStep::Parked`] — a demoted recv blocks in place, it never
     /// snapshot-parks. Only ever called on the M:N engine inside a native callback (the recv site gates
     /// on `mn.is_some() && native_reentry > 0`).
+    ///
+    /// TICKET-141 — releases this thread's width permit for the whole wait and re-takes it after.
     pub(super) fn demote_recv_block(
+        &mut self,
+        h: GcRef,
+        span: Span,
+    ) -> Result<RecvStep, RuntimeError> {
+        self.width_release();
+        let r = self.demote_recv_block_in_place(h, span);
+        self.width_acquire();
+        r
+    }
+
+    fn demote_recv_block_in_place(
         &mut self,
         h: GcRef,
         span: Span,
@@ -1685,7 +1704,21 @@ impl Vm {
     /// is SKIPPED; once EVERY arm is closed+empty it returns "all channels closed". Cancel/terminate/
     /// self-detected-deadlock fault in place. Never parks. Only called on the M:N engine inside a
     /// callback (gated `mn.is_some() && native_reentry > 0`).
+    ///
+    /// TICKET-141 — releases this thread's width permit for the whole wait and re-takes it after.
     pub(super) fn demote_wait_block(
+        &mut self,
+        arms: Vec<(usize, Arc<ChannelCore>)>,
+        timer: Option<(usize, std::time::Instant)>,
+        span: Span,
+    ) -> Result<(usize, WireValue), RuntimeError> {
+        self.width_release();
+        let r = self.demote_wait_block_in_place(arms, timer, span);
+        self.width_acquire();
+        r
+    }
+
+    fn demote_wait_block_in_place(
         &mut self,
         arms: Vec<(usize, Arc<ChannelCore>)>,
         timer: Option<(usize, std::time::Instant)>,
@@ -1861,11 +1894,20 @@ impl Vm {
     /// returns only via a sibling `send`). Returns `Ok(Nil)` (`sleep_ms` yields nothing). Residual: the
     /// `thread::sleep` is uninterruptible, so a cancel during the sleep is observed only after it returns
     /// (no worse than the inline pin it replaces — the worker is now freed).
+    ///
+    /// TICKET-141 — releases this thread's width permit for the whole wait and re-takes it after.
     pub(super) fn demote_block_sleep(
         &mut self,
         ms: u64,
         span: Span,
     ) -> Result<Value, RuntimeError> {
+        self.width_release();
+        let r = self.demote_block_sleep_in_place(ms, span);
+        self.width_acquire();
+        r
+    }
+
+    fn demote_block_sleep_in_place(&mut self, ms: u64, span: Span) -> Result<Value, RuntimeError> {
         let sched =
             Arc::clone(self.mn.as_ref().expect(
                 "demote_block_sleep called with no active M:N scheduler (self.mn is None)",
@@ -2038,7 +2080,23 @@ impl Vm {
     /// `Err("incomplete utf-8: …")` classification instead. It is the ONLY escape from the "never-ready
     /// fd" case above — an in-callback socket op is `inflight`, so it can never self-fire the deadlock
     /// predicate.
+    ///
+    /// TICKET-141 — releases this thread's width permit for the whole wait and re-takes it after.
     pub(super) fn demote_block_socket(
+        &mut self,
+        fd: std::os::fd::RawFd,
+        interest: poller::Interest,
+        deadline: Option<std::time::Instant>,
+        span: Span,
+        attempt: impl FnMut(&mut Vm) -> SockPoll,
+    ) -> Result<Value, RuntimeError> {
+        self.width_release();
+        let r = self.demote_block_socket_in_place(fd, interest, deadline, span, attempt);
+        self.width_acquire();
+        r
+    }
+
+    fn demote_block_socket_in_place(
         &mut self,
         fd: std::os::fd::RawFd,
         interest: poller::Interest,
@@ -2197,6 +2255,65 @@ impl Vm {
         sched.inflight.fetch_sub(1, Ordering::Relaxed);
     }
 
+    /// TICKET-141 (W14-14) — give this thread's width permit back. A no-op unless it holds one.
+    pub(super) fn width_release(&mut self) {
+        if !self.holds_width {
+            return;
+        }
+        self.holds_width = false;
+        if let Some(sched) = self.mn.as_ref() {
+            sched.width.release();
+        }
+    }
+
+    /// TICKET-141 — take a width permit in FIFO order. A no-op for an ungated shell or one that
+    /// already holds a permit.
+    pub(super) fn width_acquire(&mut self) {
+        if !self.width_gated || self.holds_width {
+            return;
+        }
+        let Some(sched) = self.mn.clone() else {
+            return;
+        };
+        sched.width.acquire();
+        self.holds_width = true;
+    }
+
+    /// TICKET-141 (W14-14) — the D3 budget ran out inside a native callback. The fiber cannot leave
+    /// the thread, so the THREAD hands its runner slot to one replacement and takes one back in FIFO
+    /// order, keeping `--threads=N` at N runners. Preempts only when someone can use the slot.
+    pub(super) fn callback_preempt(&mut self) {
+        self.reds = CONTEXT_REDS;
+        let Some(sched) = self.mn.clone() else {
+            return;
+        };
+        if sched.runnable.load(Ordering::Relaxed) == 0 && sched.width.waiting() == 0 {
+            return;
+        }
+        // Convert this thread's implicit slot into an explicit permit (`free` stays 0).
+        if !self.width_gated {
+            self.width_gated = true;
+            self.holds_width = true;
+        }
+        if !self.demoted {
+            // A refused replacement thread returns without handing off: the thread keeps running.
+            if !self.spawn_replacement_worker(&sched, self.wid) {
+                return;
+            }
+            self.demoted = true;
+        }
+        self.width_release();
+        self.width_acquire();
+    }
+
+    /// TICKET-141 — `join_nursery` with this thread's width permit released for the whole join.
+    pub(super) fn join_nursery_released(&mut self) -> Result<(), RuntimeError> {
+        self.width_release();
+        let r = self.join_nursery();
+        self.width_acquire();
+        r
+    }
+
     /// TICKET-063 — enter a `Shared`/`RwShared` update-guard wait. Unlike [`Vm::demote_enter`] (which
     /// accounts `inflight`, correct for its socket/sleep callers), this accounts the wait
     /// `blocked_native` and registers `(key, guard_token)` on `SchedCore::guard_waits`, because a
@@ -2309,12 +2426,19 @@ impl Vm {
             tick = tick.wrapping_add(1);
             let mut fiber = match sched.take_runnable(wid, tick, owner_scope) {
                 Take::Run(f) => f,
-                Take::Stop => return,
+                Take::Stop => {
+                    debug_assert!(!self.holds_width, "TICKET-141: exit holding a permit");
+                    return;
+                }
             };
+            self.width_acquire();
             let task_index = fiber.task_index;
             let scope_id = fiber.scope_id;
             let span = fiber.span;
-            match self.run_one_fiber(&mut fiber, span) {
+            let disp = self.run_one_fiber(&mut fiber, span);
+            // Also runs on the panic path: `run_one_fiber` catches the panic and returns `Disp::Finish`.
+            self.width_release();
+            match disp {
                 Disp::Park(key, core) => sched.park(key, core, fiber),
                 // Bounded backpressure — the send-side park (gap re-check = space, not a message).
                 Disp::SendPark(key, core) => sched.park_send(key, &core, fiber),
@@ -2387,6 +2511,7 @@ impl Vm {
             //       `eager_joiner_runs_fibers`' own hazard note).
             if self.demoted {
                 sched.notify_waiters();
+                debug_assert!(!self.holds_width, "TICKET-141: exit holding a permit");
                 return;
             }
         }
@@ -5023,7 +5148,20 @@ impl Vm {
     /// A joiner running inside a nursery task is NOT a counted party and so does not register: a
     /// sibling task may be the very producer the blocked job needs (pinned by
     /// `executor_job_keeps_waiting_when_shutdown_runs_beside_a_live_producer`).
+    ///
+    /// TICKET-141 — releases this thread's width permit for the whole join and re-takes it after.
     pub(super) fn join_eager_jobs(
+        &mut self,
+        core: &Arc<ExecutorCore>,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        self.width_release();
+        let r = self.join_eager_jobs_in_place(core, span);
+        self.width_acquire();
+        r
+    }
+
+    fn join_eager_jobs_in_place(
         &mut self,
         core: &Arc<ExecutorCore>,
         span: Span,

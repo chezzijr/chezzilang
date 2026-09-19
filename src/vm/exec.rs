@@ -161,6 +161,8 @@ impl Vm {
             gen_fault_prefix: Vec::new(),
             wid: 0,         // D5 owe #3 (Path C) — set in mn_worker_loop
             demoted: false, // D5 owe #3 (Path C)
+            width_gated: false,
+            holds_width: false,
             cancel: None,
             cancel_outer: Vec::new(),
             cancelled: false,
@@ -332,7 +334,10 @@ impl Vm {
         self.native_reentry -= 1;
         match r {
             Ok(v) => v,
-            Err(payload) => std::panic::resume_unwind(payload),
+            // A panic out of a bracketed wait left the permit released, and an FFI trampoline above
+            // may resume Chezzi code; a no-op when ungated or already holding.
+            #[rustfmt::skip]
+            Err(payload) => { self.width_acquire(); std::panic::resume_unwind(payload) }
         }
     }
 
@@ -1293,14 +1298,18 @@ impl Vm {
             // exhaustion yield this worker so a queued sibling runs (round-robin fairness). A yielded
             // cancelled fiber observes the cancel at its next checkpoint. The
             // `native_reentry == 0` guard mirrors `recv`-park: a yield inside a native callback can't
-            // save the caller's Rust-stack state, so we defer it (leave `reds` at 0 and re-check next
-            // op, once the reentry unwinds). Reuses the suspend/rewind contract — frames stay intact,
-            // resume re-enters `run_until(0)` — but carries no channel handle (a voluntary park).
+            // save the caller's Rust-stack state, so the fiber cannot be swapped off. Instead the
+            // THREAD hands its width permit to a sibling turn in place (TICKET-141,
+            // `callback_preempt`). Outside a callback this reuses the suspend/rewind contract —
+            // frames stay intact, resume re-enters `run_until(0)` — but carries no channel handle (a
+            // voluntary park).
             if self.mn.is_some() {
                 if self.reds == 0 {
                     if self.native_reentry == 0 {
                         self.yield_now = true;
                         return Ok(());
+                    } else {
+                        self.callback_preempt();
                     }
                 } else {
                     self.reds -= 1;
@@ -2652,7 +2661,7 @@ impl Vm {
                 return Err(self.err(format!("no match arm for variant '{variant}'"), span));
             }
             Op::EnterNursery => self.op_enter_nursery(span),
-            Op::JoinNursery => self.join_nursery()?,
+            Op::JoinNursery => self.join_nursery_released()?,
             // TASK B — `break`/`continue` leaving a `parallel:` scope: cancel its
             // tasks and pop exactly that one level (the compiler emits one per escaped scope).
             Op::ReclaimNursery => {

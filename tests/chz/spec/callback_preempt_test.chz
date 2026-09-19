@@ -1,0 +1,62 @@
+# TICKET-141 (W14-14): a CPU loop inside a native callback is preempted at every worker count.
+# Gated by chz_suite_passes (tests/chz_suite.rs).
+import std.concurrency
+
+fn wait_flag(f: AtomicInt, x: int) -> int:
+    while f.load() == 0:
+        x += 0
+    return x + 1000
+
+fn wait_then_join(f: AtomicInt, c: Channel[int], x: int) -> int:
+    while f.load() == 0:
+        x += 0
+    got := AtomicInt(0)
+    parallel:
+        spawn:
+            got.store(c.recv())
+    return x + got.load()
+
+test fn a_map_callback_spin_lets_its_sibling_run():
+    flag := AtomicInt(0)
+    out := Shared([0])
+    parallel:
+        spawn:
+            ys := [1].map(fn(x): wait_flag(flag, x))
+            out.set(ys)
+        spawn:
+            flag.store(1)
+    assert out.get() == [1001]
+
+test fn an_update_callback_spin_lets_its_sibling_run():
+    flag := AtomicInt(0)
+    s := Shared(0)
+    parallel:
+        spawn s.update(fn(x): wait_flag(flag, x))
+        spawn:
+            flag.store(1)
+    assert s.get() == 1000
+
+test fn a_sibling_fault_cancels_a_spinning_update():
+    flag := AtomicInt(0)
+    s := Shared(0)
+    r := recover:
+        parallel:
+            spawn s.update(fn(x): wait_flag(flag, x))
+            spawn:
+                panic("sib")
+    assert "{r}" == "Err('sib')"
+    assert s.get() == 0
+
+test fn a_nursery_inside_a_preempted_callback_joins():
+    flag := AtomicInt(0)
+    ch := Channel[int](0)
+    out := Shared([0])
+    parallel:
+        spawn:
+            ys := [1].map(fn(x): wait_then_join(flag, ch, x))
+            out.set(ys)
+        spawn:
+            flag.store(1)
+        spawn:
+            ch.send(41)
+    assert out.get() == [42]
