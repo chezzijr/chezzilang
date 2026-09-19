@@ -147,3 +147,12 @@ test fn atomic_cas_faults_on_a_fn_payload_the_checker_cannot_see():
     b := Atomic[int](3)
     assert try_cas(b, 4) == true
     assert b.load() == 4
+
+test fn datetime_fmod_is_floored_like_python():
+    assert datetime.fmod(-1, 7) == 6
+    assert datetime.fmod(-7, 2) == 1
+    assert datetime.fmod(7, -2) == -1
+    assert datetime.fmod(-7, -2) == -1
+    assert datetime.fmod(6, 3) == 0
+    assert datetime.fmod(-6, 3) == 0
+    assert datetime.fmod(-9223372036854775807 - 1, 86400) == 30592

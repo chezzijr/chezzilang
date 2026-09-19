@@ -1484,7 +1484,7 @@ struct DateTime:
 | `from_epoch` | `(epoch: int) -> DateTime` | Decompose Unix epoch-seconds (UTC) into a `DateTime`. Negative epochs floored. |
 | `to_epoch` | `(dt: DateTime) -> int` | Recompose to Unix epoch-seconds. `to_epoch(from_epoch(e)) == e`. |
 | `now` | `() -> DateTime` | Current UTC date/time (`from_epoch(time.now())`) — the only clock use. |
-| `days_from_civil` | `(y, m, d) -> int` | Days since 1970-01-01 (Hinnant). `(1970,1,1)`→0, `(1969,12,31)`→-1, `(2024,2,29)`→19782. |
+| `days_from_civil` | `(y, m, d) -> int` | Days since 1970-01-01 (Hinnant). `(1970,1,1)`→0, `(1969,12,31)`→-1, `(2024,2,29)`→19782. A month outside `1..12` or a day outside `1..days_in_month(y, m)` **faults** (`days_from_civil: month out of range: 13`), like CPython `date()` — it never normalizes `(2023,13,1)` to 2024-01-01. `from_epoch`/`to_epoch` round-trip the whole i64 range, including within 86 399 s of `i64::MIN`. |
 | `civil_from_days` | `(z) -> (int, int, int)` | Inverse: `(year, month, day)` tuple. `0`→`(1970,1,1)`, `-1`→`(1969,12,31)`. |
 | `is_leap_year` | `(y) -> bool` | Proleptic Gregorian: `2000`→true, `1900`→false, `2024`→true. |
 | `days_in_month` | `(y, m) -> int` | Leap-aware. `(2024,2)`→29, `(2023,2)`→28, `(2024,4)`→30. A month outside `1..12` is a domain violation and **faults** (recoverable via `recover:`), like Python `calendar.monthrange` — it never returns a plausible-looking 31. |

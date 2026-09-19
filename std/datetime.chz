@@ -35,9 +35,15 @@ fn fdiv(a: int, b: int) -> int:
     return q
 
 # Floored modulo: result has the sign of `b` (always 0..b-1 for positive b).
-# fmod(-1, 7) == 6, fmod(-7, 2) == 1. `b == 0` faults `division by zero` (via `fdiv`).
+# fmod(-1, 7) == 6, fmod(-7, 2) == 1. `b == 0` faults `division by zero`.
 fn fmod(a: int, b: int) -> int:
-    return a - fdiv(a, b) * b
+    if b == 0:
+        return a / b             # keeps the `division by zero` fault (raw `%` says `modulo by zero`)
+    # `a - fdiv(a, b) * b` overflows in the `*` within |b|-1 of i64::MIN; `%` never does.
+    r := a % b
+    if r != 0 and ((r < 0) != (b < 0)):
+        r += b
+    return r
 
 # ---- the DateTime value (a user-defined struct in this module; access as datetime.DateTime) ----
 
@@ -75,8 +81,14 @@ fn days_in_month(y: int, m: int) -> int:
 # ---- civil <-> days-since-epoch (Howard Hinnant, proleptic Gregorian, exact incl. negatives) ----
 
 # Days since 1970-01-01 for the civil date (y, m, d). Inverse of civil_from_days.
-# days_from_civil(1970,1,1) == 0, (1969,12,31) == -1.
+# days_from_civil(1970,1,1) == 0, (1969,12,31) == -1. A month outside 1..12 or a day outside
+# 1..days_in_month(y, m) FAULTS (recoverable), like CPython `date()` — it never normalizes
+# (`(2023, 13, 1)` is not 2024-01-01).
 fn days_from_civil(y: int, m: int, d: int) -> int:
+    if m < 1 or m > 12:
+        panic("days_from_civil: month out of range: " + str(m))
+    if d < 1 or d > days_in_month(y, m):
+        panic("days_from_civil: day out of range: " + str(d))
     yy := y
     if m <= 2:
         yy = y - 1
@@ -143,7 +155,12 @@ fn from_epoch(epoch: int) -> DateTime:
 # Recompose a DateTime back into Unix epoch-seconds (UTC). Round-trips from_epoch.
 fn to_epoch(dt: DateTime) -> int:
     days := days_from_civil(dt.year, dt.month, dt.day)
-    return days * 86400 + dt.hour * 3600 + dt.minute * 60 + dt.second
+    secs := dt.hour * 3600 + dt.minute * 60 + dt.second
+    # `days * 86400` alone overflows within 86399 of i64::MIN, though the sum fits: fold the last
+    # day of the product into `secs` first (`(days + 1) * 86400 + (secs - 86400)`).
+    if days < 0:
+        return (days + 1) * 86400 + (secs - 86400)
+    return days * 86400 + secs
 
 # Current UTC date/time from the system clock (the only system dependency).
 fn now() -> DateTime:
