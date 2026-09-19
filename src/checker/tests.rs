@@ -7787,11 +7787,8 @@ fn multibranch_void_stays_nil_no_error() {
 
 #[test]
 fn multibranch_int_float_conflicts_not_inferred() {
-    // Mixed int/float sibling branches CONFLICT (annotate `-> float` to opt in). Inferring `float`
-    // here would set the static type to float WITHOUT the compiler emitting `Op::CoerceFloat` (it
-    // reads `decl.ret`, the annotation, not the inferred ret), leaving a runtime int under a float
-    // type — `x / 2` would do integer division. Widening is a SINK-only rule (an inferred return is
-    // not a sink).
+    // Mixed int/float sibling branches CONFLICT. Inferring `float` here would leave a runtime int
+    // under a float type — `x / 2` would do integer division. D3: no int ever widens into a float.
     entry_rejects(
         "fn f(c: bool):\n    if c:\n        return 1\n    return 2.0\nfn main():\n    pass\n",
         "conflicting branches",
@@ -19812,8 +19809,8 @@ fn generator_inferred_element_recovered_not_unknown() {
 #[test]
 fn generator_inferred_int_then_float_rejected() {
     // CONSTRAINT 1: strict-first-yield pins `T = int` from the first yield; a later `yield 2.0`
-    // (float) must be REJECTED at check time, NOT silently coerced to float. There is no CoerceFloat
-    // plumbed through `yield`, so a silent int->float join would leave a runtime int under a float
+    // (float) must be REJECTED at check time, NOT silently coerced to float. Nothing coerces at a
+    // `yield`, so a silent int->float join would leave a runtime int under a float
     // type. This program is check-REJECTED, so there is deliberately no runtime arm — accepting it
     // (the bug) is exactly what this test forbids. Checked via the full module-graph entry path.
     let errs = check_entry("fn count():\n    yield 1\n    yield 2.0\nfn main():\n    pass\n");
@@ -27567,7 +27564,7 @@ fn widen_typed_int_at_scalar_sinks_rejected() {
 
 /// OVER-REJECTION GUARD — every untyped-int-CONSTANT case still adapts to a float context.
 #[test]
-fn d3_widen_untyped_int_const_rejected() {
+fn d3_widen_untyped_int_literal_rejected() {
     for src in [
         "fn main():\n    x: float = 1\n    print(x)\n",
         "fn main():\n    x: float = -5\n    print(x)\n",
@@ -27609,9 +27606,8 @@ fn widen_let_hint_does_not_leak_into_nested_literal() {
 // ===== SOUNDNESS follow-ups (adversarial review): the sinks the first cut still leaked =====
 
 /// A GENERIC fn instantiated at float and used as a fn VALUE (`f := id[float]`) is generic-ERASED at
-/// runtime: its declared param is `T`, so the callee prologue emits NO `Op::CoerceFloat`. An int
-/// argument would sit in the slot under a static `float` (`f(1) / 2` → `0`, and a `List[float]` built
-/// from it sorted UNSORTED). A function-VALUE call therefore never widens — write `f(1.0)`.
+/// runtime. An int argument would sit in the slot under a static `float` (`f(1) / 2` → `0`, and a
+/// `List[float]` built from it sorted UNSORTED). A function-VALUE call never widens — write `f(1.0)`.
 #[test]
 fn widen_through_fn_value_rejected() {
     entry_rejects(
@@ -27680,10 +27676,8 @@ fn d3_widen_annotated_all_int_collection_rejected() {
 // ===== adversarial-review fixes: generic erasure + collection-alias annotations =====
 
 /// GENERIC ERASURE at a method call: a method param declared as the struct's type VARIABLE `T`,
-/// instantiated at `float`, is NOT a float sink the backend can lower — `emit_float_param_prologue`
-/// keys on the DECLARED syntactic type (`T`), which is erased, so it emits no `Op::CoerceFloat`. The
-/// checker must therefore refuse to widen there (same rule as a call through a fn VALUE), or an `Int`
-/// lands in a slot whose static type is `float`.
+/// instantiated at `float`, never accepts an int (same rule as every other sink, D3), or an `Int`
+/// would land in a slot whose static type is `float`.
 #[test]
 fn widen_generic_method_param_at_float_rejected() {
     entry_rejects(
@@ -27697,12 +27691,8 @@ fn widen_generic_method_param_at_float_rejected() {
     );
 }
 
-/// TICKET-033 — a collection type spelled through an ALIAS (`type LF = List[float]`) now widens too.
-/// Before TICKET-033 this was rejected: the backend's `float_elem_hint` matched the SYNTACTIC
-/// `List[…]`/`Map[…]` shape only, so a whole-collection alias slipped past it. The recorded
-/// `ElemWiden` verdict (`ListWidenTable`) removes that reason — the checker now licenses the widen
-/// from the RESOLVED slot type, and the backend consumes the verdict verbatim instead of re-deriving
-/// it from syntax, so it no longer needs to see through the alias.
+/// D3 — a collection type spelled through an ALIAS (`type LF = List[float]`) rejects int elements
+/// exactly like the spelled-out `List[float]`: the checker judges the RESOLVED slot type.
 #[test]
 fn d3_widen_collection_alias_annotation_rejects() {
     entry_rejects(
@@ -27720,11 +27710,7 @@ fn d3_widen_collection_alias_annotation_rejects() {
     );
 }
 
-/// KNOWN LIMIT (pinned): a VARIADIC `float` param adapts an untyped int constant only when an untyped
-/// FLOAT constant sibling is present (the list peephole is the only coercion the type-blind backend
-/// can emit for the synthesized pack — the callee prologue cannot `Op::CoerceFloat` a List slot).
-/// `f(1, 2)` is therefore rejected while the identical scalar sink `fn f(z: float); f(1)` adapts.
-/// Upgrade path: make `Op::CoerceFloat` list-aware and emit the prologue for the variadic slot.
+/// D3: a VARIADIC `float` param rejects int constants, like the scalar sink `fn f(z: float); f(1)`.
 #[test]
 fn d3_widen_variadic_float_param_int_consts_rejected() {
     entry_rejects(
@@ -31441,10 +31427,8 @@ fn d3_ticket_054_protocol_and_bound_receiver_reject_more_spellings() {
 
 // TICKET-054 review fix — a GENERIC struct witness (`struct GS[T]` with `fn m2(self, x: T) -> T`)
 // satisfying a protocol requirement declared `x: float` DECLARES its own param `T`, so its own
-// prologue emits no `Op::CoerceFloat`. The checker must still accept this call (`entry_ok` here),
-// but the RUNTIME value is what review-fail-caught: see the `.chz` sibling test in
-// `tests/chz/spec/expected_type_sinks_test.chz`, which divides the result and would see an
-// un-coerced `Int` (`0`, not `0.5`) before this fix. This test only pins the checker half.
+// prologue coerces nothing. D3: the checker rejects the int argument (`entry_rejects` here); the
+// `.chz` sibling test in `tests/chz/spec/expected_type_sinks_test.chz` pins the `1.0` spelling.
 #[test]
 fn d3_ticket_054_protocol_receiver_rejects_through_generic_witness() {
     entry_rejects(
@@ -32105,7 +32089,7 @@ fn d3_w12_15_mixed_constant_widen_neighbours() {
 }
 
 /// W12-15 (TICKET-106) neighbour: a default value on a bare `T` slot stays rejected — this is the
-/// rule that keeps a spliced default from ever sharing an `ArgFloatWidenTable` span across callers
+/// rule that keeps a spliced default from ever sharing a call-table span across callers
 /// (see `## Digest` gotcha 1).
 #[test]
 fn w12_15_bare_type_param_default_stays_rejected() {
@@ -32677,7 +32661,7 @@ fn d3_float_collection_method_param_rejects_untyped_int() {
 }
 
 #[test]
-fn d3_reassignment_float_rejects_untyped_int_constant() {
+fn d3_reassignment_float_rejects_untyped_int_literal() {
     rejects(
         "fn main():\n    x: float = 1.5\n    x = 1\n    print(x)\n",
         "write 1.0",
@@ -32717,7 +32701,7 @@ fn reassignment_float_widen_rejects_typed_int() {
 }
 
 #[test]
-fn d3_collection_method_float_widen_rejects_untyped_int_constant() {
+fn d3_collection_method_float_widen_rejects_untyped_int_literal() {
     rejects(
         "fn main():\n    l: List[float] = [1.5]\n    l.insert(0, 3)\n    print(l.contains(1))\n",
         "write 1.0",

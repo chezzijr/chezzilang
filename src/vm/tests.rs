@@ -1198,39 +1198,6 @@ fn suite_is_discovered_with_thunk_and_methods() {
 }
 
 #[test]
-fn widen_suite_float_field_coerced() {
-    // A `float` suite field with an int default stores a genuine f64 — the suite-construction
-    // thunk emits `Op::CoerceFloat` (it bypasses `compile_ctor_args`). Regression for the
-    // prosecutor charge "Int in a float slot via the suite thunk" (no golden test covers this
-    // path, hence this Rust unit test).
-    let src = "struct SuiteF:\n    v: float = 3\n    test fn t(self):\n        assert self.v / 2 == 1.5\n";
-    let module = parser::parse(lexer::tokenize(src).unwrap()).unwrap();
-    let program = crate::compiler::compile_module_standalone(&module).unwrap();
-    let thunk = program.suites[0].new_thunk;
-    let mut vm = Vm::new(Arc::new(program));
-    vm.init_for_tests().unwrap();
-    let inst = vm.build_suite_instance(thunk).unwrap();
-    let Some(h) = inst.as_obj() else {
-        panic!("suite instance is not an object");
-    };
-    let f0 = {
-        let Obj::Struct { fields, .. } = vm.heap.get(h) else {
-            panic!("suite instance is not a struct");
-        };
-        fields[0]
-    };
-    assert!(
-        f0.is_float(),
-        "float suite field must store a boxed float, not Int(3)"
-    );
-    assert_eq!(
-        vm.float_of(f0),
-        3.0,
-        "float suite field must store f64(3.0)"
-    );
-}
-
-#[test]
 fn quicken_table_presized_and_based() {
     // White-box wiring: the per-`Vm` quicken side table has one state byte per program
     // instruction, and `quicken_base` is the prefix sum of per-proto code lengths so a site is
@@ -6548,37 +6515,6 @@ print(probe())
     );
 }
 
-/// TICKET-094 defect A — a `List[float]` parameter DEFAULT holding a MIXED numeric-constant literal
-/// (`[1, 2.5]`) aborts with the W7-49 `ListWidenTable` conflict, even on a single call site with no
-/// caller-side shadow. `check` reports no errors; the abort surfaces only when the default is
-/// actually spliced into a call, i.e. only on `run`.
-#[test]
-fn list_float_default_with_mixed_literal_does_not_abort() {
-    let src = "fn g(xs: List[float] = [1, 2.5]) -> List[float]:\n    return xs\nprint(g())\n";
-    let (out, res) = run_program(src);
-    assert!(
-        res.is_ok(),
-        "expected `run` to print [1.0, 2.5], got fault: {res:?} (stdout so far: {out:?})"
-    );
-    assert_eq!(out, "[1.0, 2.5]\n");
-}
-
-/// TICKET-094 defect C, run-time proof — the checker accepting a generic callee's concrete slots is
-/// not enough on its own: the value actually stored there must be a real `f64`, not an `Int` under a
-/// static `float` (the same class `docs/gaps.md` W7-49 names for the erased-slot hazard). Runs
-/// through `run_program`, not just `checker::tests::ok`, so a widen that type-checks but never emits
-/// the backend's `Op::CoerceFloat` would still show up here as `1 [1, 2]` instead of `1.0 [1.0, 2.0]`.
-#[test]
-fn generic_callee_concrete_slots_store_real_floats() {
-    let src = "fn g[T](a: float, xs: List[float], b: T) -> str:\n    return \"{a} {xs}\"\nprint(g(1, [1, 2], \"x\"))\n";
-    let (out, res) = run_program(src);
-    assert!(
-        res.is_ok(),
-        "expected `run` to print 1.0 [1.0, 2.0], got fault: {res:?} (stdout so far: {out:?})"
-    );
-    assert_eq!(out, "1.0 [1.0, 2.0]\n");
-}
-
 // ===== W7-51 — a default resolves in the module that DECLARES it =====
 //
 // RUST, not `tests/chz/`, for the same reason as the W7-49 trio above: the defect is inherently
@@ -6727,7 +6663,7 @@ fn a_cross_module_default_may_call_through_the_definers_std_import() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("g.chz"),
-        "import std.math\nfn f(x: float = math.sqrt(16)) -> float:\n    return x\n",
+        "import std.math\nfn f(x: float = math.sqrt(16.0)) -> float:\n    return x\n",
     )
     .unwrap();
     let entry = dir.join("main.chz");

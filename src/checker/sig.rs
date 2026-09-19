@@ -552,14 +552,10 @@ impl Checker {
         let conflict = || (a.clone(), b.clone());
         match (a, b) {
             (Unknown, other) | (other, Unknown) => Ok(other.clone()),
-            // NOTE: no `(Int, Float) -> Float` widen here. An inferred return type is NOT a widening
-            // "sink" (spec.md: int->float widens only at an explicit sink — a typed binding/param/
-            // `-> float` annotation, which emits `Op::CoerceFloat`). Inferring `float` from mixed
-            // `return 3` / `return 4.0` branches would set the static type to float WITHOUT the
-            // compiler emitting the coercion (compile_fn reads `decl.ret`, the annotation, not the
-            // checker's inferred ret), leaving a runtime `int` under a `float` type — `x / 2` would
-            // do integer division. So mixed int/float branches CONFLICT: annotate `-> float` (which
-            // coerces correctly) to opt in.
+            // NOTE: no `(Int, Float) -> Float` widen here (D3, TICKET-138: an int never widens into
+            // a `float` slot, and nothing coerces at runtime). Inferring `float` from mixed
+            // `return 3` / `return 4.0` branches would leave a runtime `int` under a `float` type —
+            // `x / 2` would do integer division. So mixed int/float branches CONFLICT: write `3.0`.
             // Merge the T-slot (Ok payload) normally; merge the E-slot with `join_err_slot` — two
             // DIFFERENT `Err` payloads that BOTH satisfy `Error` do NOT conflict (they unify to the
             // uniform `Error` existential at finalize), but a non-`Error` payload keeps `join_slot`'s
@@ -652,8 +648,8 @@ impl Checker {
     }
 
     /// Infer an un-annotated generator's return type as `Iterator[T]` where `T` is the type of the
-    /// FIRST `yield` (strict-first-yield — chosen over a JOIN so no int->float coercion is silently
-    /// introduced at a `yield`, which has no `CoerceFloat`; pass-2 `check_yield` validates the rest of
+    /// FIRST `yield` (strict-first-yield — chosen over a JOIN so no int->float join is silently
+    /// introduced at a `yield`; pass-2 `check_yield` validates the rest of
     /// the yields against this `T`). On the FINALIZE pass, a residual un-inferable `Unknown` in the
     /// element (an empty generator whose only `yield` is `[]`, or one that reached no `yield` at all)
     /// is a clear ERROR — never a silent `Iterator[Unknown]` leak (the residual-Unknown type-check

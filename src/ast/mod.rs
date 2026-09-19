@@ -927,9 +927,7 @@ pub enum ExprKind {
     /// span because it has no source text of its own, and a pipe gives every link of `a |> f() |> g()`
     /// the LHS primary's span (measured: `[1, 3.0] |> f(2.5) |> g(1, 2.0)` — the literal, the inner
     /// `Call` and the outer `Call` all report `line 1, col 6`). So `[1, 3.0] |> vari(2.5, 1)` had the
-    /// pack and the user's own inner literal sharing one [`crate::checker::ListWidenTable`] key, and
-    /// the pack's "decline the widen" verdict was applied to the inner literal — an `Int` stored under
-    /// a static `List[float]`, a silent wrong value under a green `chezzi check`. Two packs in one pipe
+    /// pack and the user's own inner literal sharing one span-keyed table slot. Two packs in one pipe
     /// chain aliased the same way.
     ///
     /// The repo's rule for this failure class (`docs/gaps.md` M24-6, W7-49, W7-43) is **make the

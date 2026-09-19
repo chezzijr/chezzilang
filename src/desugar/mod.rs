@@ -2871,7 +2871,7 @@ impl Walker<'_> {
             out.push(Expr {
                 // `Some(..)` marks this as the synthesized pack, NOT a list the user wrote: `span` is
                 // the CALL's, which a pipe shares with the LHS primary, so the pack and a piped list
-                // literal would otherwise key the same `ListWidenTable` slot. See `ExprKind::List`.
+                // literal would otherwise key the same span-keyed table slot. See `ExprKind::List`.
                 kind: ExprKind::List(elems, Some(pack_origin)),
                 span,
             });

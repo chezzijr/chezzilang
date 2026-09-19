@@ -6081,7 +6081,7 @@ fn parity_list_sum_overflow() {
 /// (guards against the int checked_add being hoisted above any_float).
 #[test]
 fn parity_list_sum_mixed_float() {
-    let src = "print([9223372036854775807, 1, 0.0].sum())\n";
+    let src = "print([9223372036854775807.0, 1.0, 0.0].sum())\n";
     assert_golden_out(src, "9.223372036854776e+18\n");
 }
 
@@ -9634,141 +9634,23 @@ fn generator_iter_returns_self_vm() {
     assert_eq!(run_capture(src).expect("vm"), "Some(1)\nSome(2)\nNone\n");
 }
 
-// ===== one-way int→float implicit widening (Architecture C: real runtime coercion) =====
+// ===== mixed int/float VALUE arithmetic (D3: no int→float slot widening, no runtime coercion) =====
 
 /// Assert the M:N engine produces `want`.
 fn widen_three_engines(src: &str, want: &str) {
     assert_eq!(run_capture(src).expect("program should run"), want);
 }
 
-/// A `float`-annotated let binding stores a genuine `f64` (display `3.0`), and `x / 2` is FLOAT
-/// division (`1.5`), NOT int division (`1`). The division is the load-bearing semantic proof.
-#[test]
-fn widen_let_display_and_division() {
-    widen_three_engines("x: float = 3\nprint(x)\nprint(x / 2)\n", "3.0\n1.5\n");
-}
-
-/// Passing an untyped int CONSTANT EXPRESSION into a `float` param coerces at the callee PROLOGUE
-/// (nothing folds `1 + 2`, so an `Int` reaches the callee and `Op::CoerceFloat` converts it): `z / 2`
-/// is float division. Proves the coercion is at the callee boundary, not the call site — which is why
-/// it must stay for fn-values/closures/methods. An explicit `float(a)` of a TYPED int (the only way
-/// to pass one now) lands as an f64 too.
-#[test]
-fn widen_param_int_variable_division() {
-    widen_three_engines("fn f(z: float):\n    print(z / 2)\nf(1 + 2)\n", "1.5\n");
-    widen_three_engines(
-        "fn f(z: float):\n    print(z / 2)\na := 3\nf(float(a))\n",
-        "1.5\n",
-    );
-}
-
-/// An untyped int CONSTANT EXPRESSION returned from a `-> float` function is coerced before `Return`.
-/// (A TYPED int expression — `n + 1` with `n: int` — is now a CHECK ERROR; see
-/// checker::tests::widen_int_return_into_float_ret_accepted.)
-#[test]
-fn widen_return_nonliteral_int_expr() {
-    widen_three_engines(
-        "fn g() -> float:\n    return 1 + 2\nprint(g() / 2)\n",
-        "1.5\n",
-    );
-    widen_three_engines(
-        "fn g(n: int) -> float:\n    return float(n + 1)\nprint(g(2) / 2)\n",
-        "1.5\n",
-    );
-}
-
-/// An int field value widens into a `float` struct field (per-field coercion at `NewStruct`).
-#[test]
-fn widen_struct_float_field_division() {
-    widen_three_engines(
-        "struct P:\n    v: float\np := P(3)\nprint(p.v / 2)\n",
-        "1.5\n",
-    );
-}
-
-/// An int DEFAULT value widens into a `float` param: omitted (`g()` → spliced default coerced at
-/// the prologue) AND explicit int (`g(5)`) both store a genuine f64.
-#[test]
-fn widen_default_param_division() {
-    widen_three_engines(
-        "fn g(a: float = 3) -> float:\n    return a / 2\nprint(g())\nprint(g(5))\n",
-        "1.5\n2.5\n",
-    );
-}
-
-/// An inline-expr fn body (`fn g() -> float: 1 + 2`) coerces its implicit return too.
-#[test]
-fn widen_inline_expr_body_return() {
-    widen_three_engines("fn g() -> float: 1 + 2\nprint(g() / 2)\n", "1.5\n");
-}
-
-/// A `float`-param closure coerces at its prologue.
-#[test]
-fn widen_closure_float_param_division() {
-    widen_three_engines("f := fn(z: float): z / 2\nprint(f(3))\n", "1.5\n");
-}
-
-/// (A) Annotated `List[float] = [1, 2.3]` — `xs[0]` is a genuine float (`1 / 2 == 0.5`).
-/// (B) Un-annotated all-literal mix `[1, 2.3]` widens its int LITERAL via the peephole.
-/// (C) A map VALUE float position likewise widens.
-#[test]
-fn widen_collection_annotated_and_literal() {
-    widen_three_engines("xs: List[float] = [1, 2.3]\nprint(xs[0] / 2)\n", "0.5\n");
-    widen_three_engines(
-        "ys := [1, 2.3]\nprint(ys[0] / 2)\nprint(ys[1])\n",
-        "0.5\n2.3\n",
-    );
-    widen_three_engines(
-        "m: Map[str, float] = {\"a\": 1, \"b\": 2.3}\nprint(m[\"a\"] / 2)\n",
-        "0.5\n",
-    );
-}
-
-/// An all-int literal collection must NOT widen (the peephole only fires when ≥1 float literal is
-/// present): `[1, 2, 3]` stays `List[int]`, so `xs[0] / 2` is int division (`0`).
+/// An all-int literal collection stays `List[int]`, so `xs[0] / 2` is int division (`0`).
 #[test]
 fn widen_all_int_literal_collection_stays_int() {
     widen_three_engines("xs := [1, 2, 3]\nprint(xs[0] / 2)\n", "0\n");
 }
 
-/// Regression-pin: mixed int/float COMPARISONS already widen at runtime; ensure no double-coerce
-/// or divergence after the new coercion ops.
+/// Regression-pin: mixed int/float COMPARISONS promote by runtime tag (`src/vm/arith.rs`).
 #[test]
 fn widen_mixed_comparisons_pinned() {
     widen_three_engines("print(1 < 2.3)\nprint(1 == 2.3)\n", "true\nfalse\n");
-}
-
-/// An ANNOTATED `List[float]` licenses an untyped int CONSTANT element even when the float sibling is
-/// a VARIABLE (the literal peephole cannot see it — only the annotation hint can). The element must
-/// land as a genuine f64: `xs[0] / 2 == 0.5`, and `.sort()` sorts as floats.
-/// (A TYPED int element — `xs: List[float] = [a, 2.3]` — is now a CHECK ERROR: an annotation is a
-/// type CONTEXT for a constant, not a conversion for a typed value. See
-/// checker::tests::widen_let_hint_does_not_leak_into_nested_literal / the V1 tests.)
-#[test]
-fn widen_annotated_list_const_int_float_var_runs() {
-    widen_three_engines(
-        "f := 2.5\nxs: List[float] = [1, f]\nprint(xs[0] / 2)\nxs.sort()\nprint(xs)\n",
-        "0.5\n[1.0, 2.5]\n",
-    );
-}
-
-/// An untyped int CONSTANT EXPRESSION element (`1 + 1`, not a bare literal) is coerced by the literal
-/// peephole — the checker accepts it, so the compiler MUST widen it (else a fresh Int-under-float).
-#[test]
-fn widen_const_int_expr_element_coerced() {
-    widen_three_engines("xs := [1 + 1, 2.5]\nprint(xs[0] / 2)\n", "1.0\n");
-}
-
-/// A UNARY / BINARY untyped FLOAT-constant sibling licenses the peephole too (`-2.5`, `2.0 + 0.5` are
-/// not `ExprKind::Float` literals). Both were pre-existing Int-under-float leaks (printed `0`).
-#[test]
-fn widen_unary_float_sibling_coerced() {
-    widen_three_engines("xs := [1, -2.5]\nprint(xs[0] / 2)\n", "0.5\n");
-    widen_three_engines("xs := [1, 2.0 + 0.5]\nprint(xs[0] / 2)\n", "0.5\n");
-    widen_three_engines(
-        "m := {\"a\": 1, \"b\": -2.5}\nprint(m[\"a\"] / 2)\n",
-        "0.5\n",
-    );
 }
 
 // ===== Generic fn as a VALUE (scope A + B) — runtime is generic-ERASED, so a RUN test is still
@@ -11142,42 +11024,9 @@ main()
 
 // ===== widening follow-ups (adversarial review): alias sinks, variadic float param, `Any` elements
 
-/// A float sink spelled through a type ALIAS coerces exactly like `float` at EVERY sink (let, param,
-/// return, struct field, param default, `List[F]` elements). Before the alias table the compiler's
-/// syntactic `is_float_ty` never matched `F`, so the checker accepted the widen and the backend
-/// emitted no `Op::CoerceFloat` — a runtime `Int` under a static `float` (`x / 2` → `0`).
-#[test]
-fn widen_float_alias_sinks_coerce() {
-    widen_three_engines(
-        "type F = float\nfn g(z: F) -> F:\n    return z\nfn k(a: F = 3) -> F:\n    return a\nstruct P:\n    v: F\nx: F = 1\nprint(x / 2)\nprint(g(3) / 2)\nprint(k() / 2)\nprint(P(3).v / 2)\nxs: List[F] = [1, 2.5]\nprint(xs[0] / 2)\n",
-        "0.5\n1.5\n1.5\n1.5\n0.5\n",
-    );
-    // an alias OF an alias resolves too
-    widen_three_engines(
-        "type F = float\ntype G = F\ny: G = 1\nprint(y / 2)\n",
-        "0.5\n",
-    );
-}
-
-/// A VARIADIC `float` param (`fn f(...zs: float)`) packs its args into a `List[float]`: the callee
-/// prologue must NOT `Op::CoerceFloat` that slot (it holds a List — a guaranteed runtime fault on a
-/// program the checker just called well-typed). The elements are coerced by the list peephole.
-#[test]
-fn widen_variadic_float_param_runs() {
-    widen_three_engines(
-        "fn f(...zs: float):\n    print(zs)\n    print(zs[0] / 2)\nf(1, 2.5)\n",
-        "[1.0, 2.5]\n0.5\n",
-    );
-}
-
-/// A mixed untyped-numeric-CONSTANT literal widens in every element context where a NUMERIC type
-/// asks for it — the peephole is type-blind, so the CHECKER widens there too (it types the element
-/// `float`) and nothing stores a value the static type does not describe.
-///
-/// An `Any` element SLOT is the exception, at every position it reaches a literal — an annotated
-/// `let`, a call argument, and the synthesized variadic pack alike: the checker records the verdict
-/// per literal and the backend consumes it, so both decline the widen and the `int` survives, as in
-/// CPython's `xs = [1, -2.5]`.
+/// A mixed int/float literal in an `Any` element SLOT keeps the `int` an `int` — at every position it
+/// reaches a literal (an annotated `let`, a call argument, the synthesized variadic pack), as in
+/// CPython's `xs = [1, -2.5]`. Nothing widens an int into a float (D3).
 #[test]
 fn widen_any_collection_const_mix_agrees() {
     widen_three_engines("xs: List[Any] = [1, -2.5]\nprint(xs)\n", "[1, -2.5]\n");
@@ -11190,16 +11039,6 @@ fn widen_any_collection_const_mix_agrees() {
     widen_three_engines(
         "a := 1\nxs: List[Any] = [a, -2.5]\nprint(xs)\n",
         "[1, -2.5]\n",
-    );
-}
-
-/// An ALL-int-constant literal under a `List[float]` / `Map[_, float]` annotation adapts (the
-/// annotation is the type context) and lands as genuine f64s.
-#[test]
-fn widen_annotated_all_int_collection_runs() {
-    widen_three_engines(
-        "xs: List[float] = [1, 2]\nm: Map[str, float] = {\"a\": 1}\nprint(xs)\nprint(m)\nprint(xs[0] / 2)\n",
-        "[1.0, 2.0]\n{'a': 1.0}\n0.5\n",
     );
 }
 
@@ -11221,22 +11060,6 @@ fn float_alias_shadowed_by_type_param_no_coerce() {
     widen_three_engines(
         "type F = float\nstruct S[F]:\n    v: F\n\n    fn get(self) -> F:\n        return self.v\n\nprint(S[int](5).get())\nprint(S[str](\"hi\").get())\nfn h[F](x: F) -> List[F]:\n    xs: List[F] = [x]\n    return xs\nprint(h(5))\n",
         "5\nhi\n[5]\n",
-    );
-}
-
-/// Over-rejection guard for the generic-method fix: a param DECLARED `float` (on a plain OR a generic
-/// struct) still adapts an untyped int constant — the backend's prologue coerces it, so the checker
-/// must keep accepting it. Only a param declared as the type VARIABLE (`T` instantiated at float) is
-/// rejected (see checker::tests::widen_generic_method_param_at_float_rejected).
-#[test]
-fn widen_method_float_param_still_adapts() {
-    widen_three_engines(
-        "struct P:\n    v: float\n\n    fn set(self, x: float):\n        self.v = x\n\np := P(0.0)\np.set(1)\nprint(p.v)\nprint(p.v / 2)\n",
-        "1.0\n0.5\n",
-    );
-    widen_three_engines(
-        "struct Box[T]:\n    v: T\n\n    fn scale(self, k: float) -> float:\n        return k\n\nb := Box[str](\"s\")\nprint(b.scale(1) / 2)\n",
-        "0.5\n",
     );
 }
 
@@ -12698,33 +12521,6 @@ fn main():
 print(main().get())
 ";
     assert_eq!(golden_entry(src), "1\n");
-}
-
-/// QoL: an untyped int-CONSTANT branch of an if/match EXPRESSION widens to `float` when a
-/// float-constant sibling branch is present (the `literal_numeric_mix` peephole, shared with list/map
-/// literals). This test proves the compiler actually emits `Op::CoerceFloat` on the int branch — the
-/// int-taken branch must render as a FLOAT ("1.0"), never leave an `Int` under a static `float`.
-#[test]
-fn if_match_expr_int_float_widen_parity() {
-    let src = concat!(
-        "fn main():\n",
-        "    x := if true: 1 else: 2.5\n", // int branch taken -> must be 1.0
-        "    print(x)\n",
-        "    print(x + 0.5)\n",
-        "    y := if false: 1 else: 2.5\n", // float branch taken -> 2.5
-        "    print(y)\n",
-        "    z := match true:\n        true: 1\n        _: 2.5\n", // int arm -> 1.0
-        "    print(z)\n",
-        "    print(str(if true: 1 else: 2.5))\n", // str of the widened value -> "1.0"
-        "    e := if false: 1 elif true: 2 else: 3.5\n", // elif chain, int arm taken -> 2.0
-        "    print(e)\n",
-        "    h := if true: 2.5 elif false: 1 else: 3\n", // float in HEAD, float arm taken -> 2.5
-        "    print(h)\n",
-        "    g := if false: 2.5 elif true: 1 else: 3\n", // float in HEAD, int arm taken -> 1.0
-        "    print(g)\n",
-        "main()\n",
-    );
-    assert_golden_out(src, "1.0\n1.5\n2.5\n1.0\n1.0\n2.0\n2.5\n1.0\n");
 }
 
 // ----- 8-byte `Value` (int-favoring pointer-tag): boxing must be invisible to programs -----

@@ -627,11 +627,8 @@ impl Checker {
                 ret,
                 labels,
             } => {
-                // STRICT — no int→float widening through a function VALUE. A `Ty::Func` does not say
-                // which declaration it came from: a GENERIC fn instantiated at float (`f := id[float]`)
-                // has the declared param `T`, so the callee prologue emits NO `Op::CoerceFloat` and an
-                // int argument would sit in the slot under a static `float`. The checker cannot tell
-                // that value apart from a plain `fn(x: float)`, so neither adapts — write `f(1.0)`.
+                // STRICT — an int never widens into a `float` param through a function VALUE (D3, like
+                // every other sink) — write `f(1.0)`.
                 //
                 // Arity is a RANGE when the underlying declaration's trailing parameters carry
                 // defaults: the callee fills the omitted ones itself, so `f := g; f()` is legal and so
