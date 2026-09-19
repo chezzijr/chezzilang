@@ -1719,10 +1719,16 @@ mod init_tests {
             manifest::split_entrypoint("src.main:main").unwrap(),
             ("src.main", Some("main"))
         );
-        // Split on the FIRST colon (module path can't contain one; the rest is the fn name verbatim).
+        // The function part is ONE name: a second `:`, a `.` or padding is rejected (W14-35c —
+        // `"src.e3:main:x"` used to pass validation and then fail at run time naming no file).
+        for bad in ["a.b:c:d", "src.main:a.b", "src.main: main", "src.main:1x"] {
+            let err = manifest::split_entrypoint(bad).unwrap_err();
+            assert!(err.contains("must be a single name"), "{bad}: {err}");
+        }
+        // Unicode and `_` names pass, matching the lexer's identifier rule.
         assert_eq!(
-            manifest::split_entrypoint("a.b:c:d").unwrap(),
-            ("a.b", Some("c:d"))
+            manifest::split_entrypoint("a.b:_héllo2").unwrap(),
+            ("a.b", Some("_héllo2"))
         );
         // A trailing `:` with no function name is rejected (would otherwise be an empty fn name).
         let err = manifest::split_entrypoint("src.main:").unwrap_err();

@@ -151,18 +151,31 @@ fn parse_string_value(s: &str) -> Option<String> {
 }
 
 /// Split a manifest `entrypoint` value into its dotted module path and an optional `:function`
-/// suffix. Splits on the FIRST `:` so the function name is taken verbatim; `"src.main"` →
-/// `("src.main", None)`, `"src.main:main"` → `("src.main", Some("main"))`. A `:` with no function
-/// after it (`"src.main:"`) is rejected — otherwise it reaches the VM as an empty name and produces a
-/// baffling "function `` not found" error. Pure (no I/O) so it is unit-testable.
+/// suffix; `"src.main"` → `("src.main", None)`, `"src.main:main"` → `("src.main", Some("main"))`.
+/// A `:` with no function after it (`"src.main:"`) is rejected — otherwise it reaches the VM as an
+/// empty name and produces a baffling "function `` not found" error. So is a function part that is
+/// not ONE identifier (a second `:`, a `.`, padding): it could never name a binding, and would
+/// otherwise pass validation and fail only at run time, naming no file. Pure (no I/O) so it is
+/// unit-testable.
 pub fn split_entrypoint(entrypoint: &str) -> Result<(&str, Option<&str>), String> {
     match entrypoint.split_once(':') {
         Some((_, "")) => Err(format!(
             "has an invalid [project] entrypoint {entrypoint:?}; the ':' must be followed by a function name like \"src.main:main\""
         )),
+        Some((_, func)) if !is_identifier(func) => Err(format!(
+            "has an invalid [project] entrypoint {entrypoint:?}; the function after ':' must be a single name like \"src.main:main\""
+        )),
         Some((module, func)) => Ok((module, Some(func))),
         None => Ok((entrypoint, None)),
     }
+}
+
+/// One identifier under the lexer's rule (`Lexer::identifier`): a leading alphabetic or `_`, then
+/// alphanumerics or `_`.
+fn is_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    chars.next().is_some_and(|c| c.is_alphabetic() || c == '_')
+        && chars.all(|c| c.is_alphanumeric() || c == '_')
 }
 
 /// Map a manifest `[project] entrypoint` (a dotted module path) to its `.chz` file, root-relatively.

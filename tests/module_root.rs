@@ -493,3 +493,53 @@ fn a_closure_entrypoint_keeps_its_bare_coordinate() {
         "a closure entrypoint has no declaration to borrow a coordinate from; stderr:\n{stderr}"
     );
 }
+
+// TICKET-150 (W14-35c) — a manifest entrypoint naming a function the entry module never binds is
+// refused BEFORE any user code runs, by `check` and by bare `run`, and the error names `chezzi.toml`
+// (Go and cargo reject a bad entry up front). Before, `run` executed the module's top level first.
+#[test]
+fn a_missing_manifest_entrypoint_is_refused_by_check_and_run() {
+    let t = TmpDir::new();
+    t.write("chezzi.toml", "[project]\nentrypoint = \"src.main:nope\"\n");
+    t.write(
+        "src/main.chz",
+        "print(\"TOP RAN\")\nfn main():\n    print(\"main ran\")\n",
+    );
+    let (stdout, stderr, ok) = run(&t.0, &["check", "src/main.chz"]);
+    let all = format!("{stdout}{stderr}");
+    assert!(!ok, "check must reject the missing entrypoint:\n{all}");
+    assert!(
+        all.contains("chezzi.toml") && all.contains("'nope'"),
+        "check output:\n{all}"
+    );
+    let (stdout, stderr, ok) = run(&t.0, &["run"]);
+    assert!(!ok, "run must reject the missing entrypoint:\n{stdout}");
+    assert!(
+        !stdout.contains("TOP RAN"),
+        "the module top level ran before the entrypoint was validated:\n{stdout}"
+    );
+    assert!(stderr.contains("chezzi.toml"), "stderr:\n{stderr}");
+}
+
+// The rejection must not refuse a project that runs today: an entrypoint bound by a top-level `let`
+// or by an `import … from` is a valid runtime binding (`Compiler::collect_globals`).
+#[test]
+fn a_manifest_entrypoint_bound_by_a_let_or_an_import_still_runs() {
+    let t = TmpDir::new();
+    t.write("chezzi.toml", "[project]\nentrypoint = \"src.main:main\"\n");
+    t.write(
+        "src/main.chz",
+        "fn helper():\n    print(\"helper ran\")\nmain := helper\n",
+    );
+    let (stdout, stderr, ok) = run(&t.0, &["run"]);
+    assert!(ok, "a let-bound entrypoint must run; stderr:\n{stderr}");
+    assert!(stdout.contains("helper ran"), "stdout:\n{stdout}");
+
+    let t = TmpDir::new();
+    t.write("chezzi.toml", "[project]\nentrypoint = \"src.main:main\"\n");
+    t.write("src/lib.chz", "fn main():\n    print(\"lib main\")\n");
+    t.write("src/main.chz", "import main from src.lib\n");
+    let (stdout, stderr, ok) = run(&t.0, &["run"]);
+    assert!(ok, "an import-bound entrypoint must run; stderr:\n{stderr}");
+    assert!(stdout.contains("lib main"), "stdout:\n{stdout}");
+}

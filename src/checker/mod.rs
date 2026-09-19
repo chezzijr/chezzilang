@@ -1270,6 +1270,29 @@ pub fn witness_key_span(callee: &Expr, call_span: Span) -> Span {
     }
 }
 
+/// Whether the entry module binds `name` as a module global at run time. MUST stay in lockstep
+/// with the binding sources of `Compiler::collect_globals` (`src/compiler/mod.rs`): an import (its
+/// alias, else the last path segment / the member), a top-level `fn`, an `extern` fn, and a
+/// top-level `let` (except `_`). `Vm::invoke_entrypoint` looks the manifest entrypoint up in exactly
+/// that slot table, so a name absent here can never be invoked (TICKET-150, W14-35c).
+fn entry_module_binds(stmts: &[Stmt], imports: &[ResolvedImport], name: &str) -> bool {
+    let imported = imports.iter().any(|imp| match &imp.import {
+        Import::Module { path, alias, .. } => {
+            alias.as_deref().or(path.last().map(String::as_str)) == Some(name)
+        }
+        Import::From { names, .. } => names
+            .iter()
+            .any(|(member, alias)| alias.as_deref().unwrap_or(member) == name),
+    });
+    imported
+        || stmts.iter().any(|s| match &s.kind {
+            StmtKind::Fn(d) => d.name == name,
+            StmtKind::Extern { fns, .. } => fns.iter().any(|f| f.name == name),
+            StmtKind::Let { names, .. } => name != "_" && names.iter().any(|n| n == name),
+            _ => false,
+        })
+}
+
 impl Checker {
     /// The shared deps-first module-checking pass behind both [`check_graph`] and
     /// [`resolve_extern_signatures`]. When `harvest_externs` is set, gathers every struct's AST field
@@ -1627,6 +1650,18 @@ impl Checker {
                         span,
                         format!(
                             "the manifest entrypoint '{f}' is invoked with no arguments, so {cause}"
+                        ),
+                    );
+                }
+                // TICKET-150 (W14-35c) — a name nothing binds is refused here, before any user code
+                // runs; it used to surface only after the module's top level. `Span::RUNTIME`: there
+                // is no declaration to point at (DEC-048). A binding that exists but is not callable
+                // stays a run-time error — its checker type may be `Any`, so the checker declines.
+                if decl.is_none() && !entry_module_binds(&lm.ast.stmts, &lm.imports, &f) {
+                    c.error(
+                        Span::RUNTIME,
+                        format!(
+                            "chezzi.toml's [project] entrypoint function '{f}' not found: the entry module has no top-level fn, value or import called '{f}'"
                         ),
                     );
                 }
