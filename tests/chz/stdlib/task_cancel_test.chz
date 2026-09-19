@@ -1,0 +1,30 @@
+# tests/chz/stdlib/task_cancel_test.chz — TICKET-148 (W14-13).
+#
+# `shutdown_now()` must not strand a `submit_task` Task: `get()` must promptly raise a catchable
+# error and `done()` must be true. Reference — CPython 3.14 `shutdown(cancel_futures=True)`:
+# `future.result()` raises `CancelledError` at once.
+
+import std.concurrency
+import std.time
+import submit_task from std.concurrency.task
+
+fn heartbeat(f: AtomicInt):
+    while f.load() == 0:
+        time.sleep_ms(10)
+
+fn slow() -> int:
+    time.sleep_ms(1500)
+    return 1
+
+test fn shutdown_now_does_not_strand_a_submitted_task():
+    flag := AtomicInt(0)
+    bg := Executor()
+    bg.submit(fn(): heartbeat(flag))
+    ex := Executor()
+    t := submit_task(ex, fn(): slow())
+    time.sleep_ms(50)
+    ex.shutdown_now()
+    time.sleep_ms(100)
+    done := t.done()
+    flag.store(1)
+    assert done, "done() must be true after shutdown_now()"
