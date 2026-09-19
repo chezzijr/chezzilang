@@ -1,0 +1,63 @@
+# tests/chz/stdlib/std_fault_origin_test.chz — TICKET-148 (W14-35 part).
+#
+# A NATIVE fault raised inside a std function is stamped at the user's call into std (Rust's
+# `#[track_caller]`). A `panic(...)` raised from std code stays unstamped: `file()`/`line()`/`col()`
+# answer `None`, whether std calls `panic` directly or calls it as a first-class callback value.
+
+import std.cmp
+import std.concurrency
+import std.iter
+import submit_task from std.concurrency.task
+
+fn submit_on(ex: Executor) -> int:
+    t := submit_task(ex, fn(): 1)
+    return t.get()
+
+test fn a_native_std_fault_is_located_at_the_users_call():
+    ex := Executor()
+    ex.shutdown()
+    r := recover: submit_task(ex, fn(): 1)
+    match r:
+        Ok(_): assert false, "submit on a shut-down Executor must fault"
+        Err(e):
+            assert e.message() == "submit on a shut-down Executor (it no longer accepts work)"
+            assert e.line() == Some(19), "line must be the submit_task call"
+            assert e.col() == Some(19), "col must be the submit_task call"
+            match e.file():
+                None: assert false, "expected the user's file"
+                Some(p): assert p.ends_with("std_fault_origin_test.chz"), "file: {p}"
+
+test fn a_native_std_fault_in_a_job_is_located_at_the_users_call():
+    ex := Executor()
+    ex.shutdown()
+    outer := Executor()
+    t := submit_task(outer, fn(): submit_on(ex))
+    r := recover: outer.shutdown()
+    match r:
+        Ok(_): assert false, "the job must fault"
+        Err(e):
+            assert e.line() == Some(13), "line must be the submit_task call in submit_on"
+            assert e.col() == Some(10), "col must be the submit_task call in submit_on"
+            match e.file():
+                None: assert false, "expected the user's file"
+                Some(p): assert p.ends_with("std_fault_origin_test.chz"), "file: {p}"
+
+test fn a_std_panic_stays_unstamped():
+    r := recover: cmp.clamp(5, 3, 1)
+    match r:
+        Ok(_): assert false, "inverted bounds must fault"
+        Err(e):
+            assert e.message() == "cmp.clamp: inverted bounds (lo > hi)"
+            assert e.file() == None, "a std panic names no file"
+            assert e.line() == None, "a std panic names no line"
+            assert e.col() == None, "a std panic names no col"
+
+test fn a_first_class_panic_called_inside_std_stays_unstamped():
+    r := recover: iter.map(["boom"], panic)
+    match r:
+        Ok(_): assert false, "a panic callback must fault"
+        Err(e):
+            assert e.message() == "boom"
+            assert e.file() == None, "a panic names no file: {e.file()}"
+            assert e.line() == None, "a panic names no line: {e.line()}"
+            assert e.col() == None, "a panic names no col: {e.col()}"

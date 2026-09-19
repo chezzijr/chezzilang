@@ -178,3 +178,67 @@ fn std_module_fault_names_the_std_file_not_a_bare_line() {
         "a project-local call site under the cwd must render RELATIVE, got {frame_path:?} in:\n{stderr}"
     );
 }
+
+/// TICKET-148 (W14-35 part) — a native fault raised inside std, reached through `submit_task` in
+/// a job, is headlined at the user's `submit_task(...)` call, never at `<native:std.concurrency>`.
+/// `ex` is shut down before the job exists, so the inner submit always faults.
+#[test]
+fn std_native_fault_in_a_submit_task_job_names_the_users_call() {
+    let t = TmpDir::new();
+    t.write(
+        "main.chz",
+        "import std.concurrency\nimport submit_task from std.concurrency.task\nex := Executor()\nex.shutdown()\nfn outer(ex: Executor) -> int:\n    inner := submit_task(ex, fn(): 5)\n    return inner.get() + 1\nouter_ex := Executor()\nt2 := submit_task(outer_ex, fn(): outer(ex))\nouter_ex.shutdown()\nprint(t2.get())\n",
+    );
+    let (_stdout, stderr, ok) = run(&t.0, &["run", "main.chz"]);
+    assert!(!ok, "the program must fault");
+    assert!(
+        stderr.starts_with("runtime error (main.chz:6:14): submit on a shut-down Executor"),
+        "headline must name the user's submit_task call, got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("<native:std.concurrency>"),
+        "got:\n{stderr}"
+    );
+}
+
+/// TICKET-148 (owner requirement 1) — the same native fault on the MAIN thread: the uncaught
+/// headline and the caught `e.file()`/`line()`/`col()` name the same user coordinate, and the
+/// trace keeps its frames.
+#[test]
+fn std_native_fault_on_main_headline_and_caught_origin_agree() {
+    let t = TmpDir::new();
+    let head = "import std.concurrency\nimport submit_task from std.concurrency.task\nex := Executor()\nex.shutdown()\n";
+    t.write(
+        "uncaught.chz",
+        &format!("{head}task := submit_task(ex, fn(): 1)\nprint(task.get())\n"),
+    );
+    let (_o, stderr, ok) = run(&t.0, &["run", "uncaught.chz"]);
+    assert!(!ok, "the program must fault");
+    assert!(
+        stderr.starts_with("runtime error (uncaught.chz:5:9): submit on a shut-down Executor"),
+        "headline must name the user's submit_task call, got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("<native:std.concurrency>"),
+        "got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("called at uncaught.chz:5:9"),
+        "the trace keeps its frames, got:\n{stderr}"
+    );
+
+    // The recovered fault names the same line; its col is the call's own (after `recover: `).
+    t.write(
+        "caught.chz",
+        &format!(
+            "{head}r := recover: submit_task(ex, fn(): 1)\nmatch r:\n    Ok(_): print(\"no fault\")\n    Err(e): print(\"{{e.file()}} {{e.line()}} {{e.col()}}\")\n"
+        ),
+    );
+    let (stdout, stderr, ok) = run(&t.0, &["run", "caught.chz"]);
+    assert!(ok, "the recovered program must succeed, got:\n{stderr}");
+    assert_eq!(
+        stdout.trim(),
+        "Some(caught.chz) Some(5) Some(15)",
+        "caught origin"
+    );
+}
