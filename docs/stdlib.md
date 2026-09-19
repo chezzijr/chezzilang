@@ -618,7 +618,9 @@ Number / integer functions (Python `math` semantics):
   also accept the matching prefix. A leading `+`/`-` sign is allowed (`parse_int_base("-2a", 16)` → `-42`).
   Trims surrounding whitespace and accepts PEP-515 single underscores between digits at every base,
   exactly as `str.to_int` does (`parse_int_base("1_0", 10)` → `10`; `parse_int_base("ff_ff", 16)` →
-  `65535`). A well-formed numeral outside i64 now Errs with `overflows i64 (range
+  `65535`), plus ONE underscore right after a base prefix (`parse_int_base("0x_ff", 0)` → `255`,
+  `("-0x_ff", 0)` → `-255`; `0x__ff`, `0x_` and a base-16 `_ff` are an `Err`, like CPython `int()`).
+  A well-formed numeral outside i64 now Errs with `overflows i64 (range
   -9223372036854775808..=9223372036854775807)` instead of `cannot parse`.
 
 Constants (all `const` — reassigning `math.pi`, or `import pi from std.math; pi = x`, is a type

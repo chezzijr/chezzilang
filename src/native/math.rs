@@ -223,6 +223,14 @@ fn parse_int_base_impl(s: &str, base: i64) -> Result<i64, String> {
         };
         (radix, stripped.unwrap_or(rest))
     };
+    // ONE `_` right after a base prefix is legal (`0x_ff`, PEP 515; CPython `int('0x_ff', 0)`). A
+    // prefix was stripped iff `digits` is shorter than `rest`; a second `_` (`0x__ff`) is left for
+    // `strip_num_underscores_radix` to reject.
+    let digits = if digits.len() < rest.len() {
+        digits.strip_prefix('_').unwrap_or(digits)
+    } else {
+        digits
+    };
     // Reject a second/embedded sign: after the one leading sign + optional base prefix, `digits`
     // must be bare radix digits. `from_str_radix` would otherwise re-accept a leading +/- here
     // ("+-5", "0x-5", "0b+1"), which Python int()/Go ParseInt reject.

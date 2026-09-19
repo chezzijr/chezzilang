@@ -1384,7 +1384,10 @@ impl Lexer {
                 let is_digit = |c: char| c.is_digit(radix);
                 for (i, &c) in body.iter().enumerate() {
                     if c == '_' {
-                        let prev_ok = i > 0 && is_digit(body[i - 1]);
+                        // `i == 0`: the radix marker (`0x`) precedes `body[0]`, so ONE underscore right
+                        // after the prefix is legal (`0x_ff`, PEP 515); `next_ok` still rejects `0x_`
+                        // and `0x__ff`.
+                        let prev_ok = i == 0 || is_digit(body[i - 1]);
                         let next_ok = body.get(i + 1).is_some_and(|n| is_digit(*n));
                         if !(prev_ok && next_ok) {
                             // The offending `_` itself: body index `i` is char `body_start + i`.
@@ -2684,10 +2687,28 @@ mod tests {
         assert!(tokenize("0b2").is_err(), "non-binary digit");
         assert!(tokenize("0o8").is_err(), "non-octal digit");
         assert!(tokenize("0x").is_err(), "empty hex body");
-        assert!(
-            tokenize("0x_FF").is_err(),
-            "leading underscore after prefix"
-        );
+    }
+
+    // TICKET-144 (W14-34): CPython/Go/Rust accept ONE underscore right after a radix prefix
+    // (`0x_ff` = 255); a doubled or trailing one stays an error. Replaces the old `0x_FF`-is-an-error
+    // pin in `bad_radix_digit_errors`, which recorded the divergence this ticket removes.
+    #[test]
+    fn radix_literal_accepts_underscore_after_prefix() {
+        for (src, n) in [("0x_ff", 255), ("0b_1", 1), ("0o_7", 7), ("0X_Ff", 255)] {
+            assert_eq!(
+                kinds(src),
+                vec![Token::Int(n), Token::Newline, Token::Eof],
+                "{src}"
+            );
+        }
+        for src in ["0x__ff", "0x_", "0b__1", "0x_g"] {
+            let e = tokenize(src).expect_err(src);
+            assert!(
+                e.message.contains("'_' in a number must be between digits"),
+                "{src}: {}",
+                e.message
+            );
+        }
     }
 
     #[test]
