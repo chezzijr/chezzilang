@@ -84,8 +84,7 @@ impl Stdin {
                 if n == 0 {
                     return Ok(None);
                 }
-                let trimmed = buf.trim_end_matches('\n').trim_end_matches('\r');
-                Ok(Some(trimmed.to_string()))
+                Ok(Some(strip_eol(&buf).to_string()))
             }
         }
     }
@@ -565,6 +564,15 @@ impl HostError {
             message: format!("argument {i} must be {want}, got {got}"),
         }
     }
+}
+
+/// Strip a line terminator the way Go `bufio.ScanLines` does: ONE trailing `\n`, then ONE `\r`
+/// (`dropCR`). `"a\r\r\r\n"` -> `"a\r\r"`, and a final unterminated `"b\r\r"` -> `"b\r"`. Shared by
+/// `io.read_line`/`io.input` (`Stdin::read_line`) and `Reader.read_line`/`Reader.lines()`
+/// (`vm/fileio.rs`) so the two cannot drift; `trim_end_matches` ate EVERY `\r` (W14-7).
+pub(crate) fn strip_eol(line: &str) -> &str {
+    let l = line.strip_suffix('\n').unwrap_or(line);
+    l.strip_suffix('\r').unwrap_or(l)
 }
 
 /// Helper for native functions: assert an exact argument count, else a uniform error.

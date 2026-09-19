@@ -268,6 +268,36 @@ fn task_reads_piped_stdin_mn() {
     task_reads_piped_stdin();
 }
 
+const READ_LINE_CR_PROG: &str = "\
+import std.io
+while true:
+    match io.read_line():
+        Some(l): print(l.encode())
+        None: break
+";
+
+/// `io.read_line()` on the REAL process stdin strips ONE `\n`, then ONE `\r` (Go `bufio.Scanner`):
+/// `"a\r\r\r\nb\r\r"` -> `a\r\r`, `b\r`. The old `trim_end_matches('\r')` printed `b'a'`, `b'b'` (W14-7).
+fn stdin_read_line_strips_one_cr() {
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", READ_LINE_CR_PROG);
+    let mut child = spawn(&entry);
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"a\r\r\r\nb\r\r").unwrap();
+    drop(stdin); // EOF
+    let out = child.wait_with_output().expect("wait");
+    assert!(out.status.success(), "exit: {:?}", out.status);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "b'a\\r\\r'\nb'b\\r'\n"
+    );
+}
+
+#[test]
+fn stdin_read_line_strips_one_cr_mn() {
+    stdin_read_line_strips_one_cr();
+}
+
 const READ_ALL_PROG: &str = "\
 import std.io
 io.print(io.read_all())

@@ -1,0 +1,35 @@
+# tests/chz/stdlib/read_line_cr_test.chz — TICKET-143 (W14-7).
+# `Reader.read_line` / `Reader.lines()` strip ONE trailing `\n`, then ONE `\r` (Go `bufio.Scanner`
+# `ScanLines`/`dropCR`): "a\r\r\r\nb\r\r" -> "a\r\r", "b\r". Measured Go 1.27.0. The old
+# `trim_end_matches('\r')` ate every `\r`.
+
+import std.io
+import std.os
+import std.fs
+
+fn read_back(tag: str, content: str, via_lines: bool) -> Result[List[str]]:
+    p := os.temp_dir().str() + "/chz_t143_" + tag + "_" + str(os.getpid()) + ".txt"
+    io.write_file(p, content)?
+    defer fs.remove_file(p)
+    r := io.open(p)?
+    out: List[str] = []
+    if via_lines:
+        for l in r.lines():
+            out.push(l)
+    else:
+        while true:
+            match r.read_line():
+                Some(l): out.push(l)
+                None: break
+    r.close()?
+    return Ok(out)
+
+test fn reader_read_line_strips_one_cr_like_go_scanner():
+    match read_back("rl", "a\r\r\r\nb\r\r", false):
+        Ok(ls): assert ls == ["a\r\r", "b\r"], str(ls)
+        Err(e): assert false, e.message()
+
+test fn reader_lines_strips_one_cr_like_go_scanner():
+    match read_back("ln", "a\r\r\nb\r\n\r\nc\r", true):
+        Ok(ls): assert ls == ["a\r", "b", "", "c"], str(ls)
+        Err(e): assert false, e.message()

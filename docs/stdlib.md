@@ -689,10 +689,10 @@ opened by `open(path)`): stream a large file line- or chunk-by-chunk instead of 
 
 | Method | Signature | Notes |
 |--------|-----------|-------|
-| `read_line` | `() -> Option[str]` | **Three** outcomes, not the two the `Option` spells: one line (trailing `\n`, and a preceding `\r`, **stripped**; matches the module-level `read_line()`), `None` at EOF, or a clean **fault** on a mid-read I/O error / non-UTF-8 line, pointing at `read_bytes` (an `Option` can't carry the error, like `read_file`). The non-UTF-8 fault is **non-destructive** — see the carry rule below. |
+| `read_line` | `() -> Option[str]` | **Three** outcomes, not the two the `Option` spells: one line (ONE trailing `\n`, then ONE `\r`, **stripped** — Go `bufio.Scanner`; matches the module-level `read_line()`), `None` at EOF, or a clean **fault** on a mid-read I/O error / non-UTF-8 line, pointing at `read_bytes` (an `Option` can't carry the error, like `read_file`). The non-UTF-8 fault is **non-destructive** — see the carry rule below. |
 | `read_bytes` | `(n: int) -> Result[bytes]` | At-most-`n` bytes (exactly `n` until a short final chunk); **empty bytes = EOF**; `Err` on closed / I/O. The binary + error-distinguishing escape hatch. `n <= 0` → `Ok(b"")`. Drains a pending **carry** first, without touching the fd. |
 | `close` | `() -> Result[nil]` | Release the fd, and discard any carry. Idempotent; a read after `close` is a clean `Err` (`read_bytes`) / fault (`read_line`), never a panic. |
-| `lines` | `() -> Iterator[str]` | **Lazy** line stream — `for ln in r.lines():` (Python `for l in f` / Go `bufio.Scanner` / Rust `BufRead::lines`). A generator over `read_line()`: each line is fetched on demand (the file is **not** snapshotted; an early `break` stops reading), trailing `\n`/`\r` stripped, ends at EOF. A mid-read non-UTF-8 fault surfaces exactly as `read_line`, carry included. |
+| `lines` | `() -> Iterator[str]` | **Lazy** line stream — `for ln in r.lines():` (Python `for l in f` / Go `bufio.Scanner` / Rust `BufRead::lines`). A generator over `read_line()`: each line is fetched on demand (the file is **not** snapshotted; an early `break` stops reading), one trailing `\n`, then one `\r`, stripped (as `read_line`), ends at EOF. A mid-read non-UTF-8 fault surfaces exactly as `read_line`, carry included. |
 
 - **The non-UTF-8 fault is NON-DESTRUCTIVE (W7-9)** — recovery actually works. The line `read_line`
   could not decode is **carried**: its raw bytes, line terminator included, are retained on the reader,

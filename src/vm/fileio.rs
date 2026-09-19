@@ -5,6 +5,7 @@
 // suite captures), never a raw fd.
 
 use super::*;
+use crate::native::strip_eol;
 
 /// R2 — the outcome of a low-level write to a [`WriterCore`].
 enum WriteErr {
@@ -26,13 +27,6 @@ fn from_inner(e: WriteErr) -> WriteErr {
         }
         io => io,
     }
-}
-
-/// Strip the line terminator the same way the module-level `io.read_line` does (native/mod.rs):
-/// trailing `'\n'` then `'\r'` UNCONDITIONALLY — a bare/classic-Mac `'\r'` must not survive, or
-/// `Reader.read_line` drifts from its owning ancestor.
-fn strip_eol(line: &str) -> &str {
-    line.trim_end_matches('\n').trim_end_matches('\r')
 }
 
 impl Vm {
