@@ -126,6 +126,8 @@
 # Indented block: ':' NEWLINE INDENT stmts DEDENT. Inline block: ':' followed by ONE simple
 # statement on the same line (its NEWLINE terminates the line). Inline bodies exclude compound
 # statements, so `if a: if b: x` cannot parse inline — a trailing `else` would be ambiguous.
+# A `<fnDecl>` inline body may still be an `<ifExpr>` (via `<exprStmt>`): `fn f(n): if n > 0: 1 else: 2`;
+# `else` is required there, so it is an expression, not a nested statement block.
 <block> ::= "COLON" "NEWLINE" "INDENT" <stmts> "DEDENT"
           | "COLON" <simpleStmt>
 

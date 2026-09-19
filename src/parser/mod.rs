@@ -853,7 +853,21 @@ impl Parser {
         // token immediately after that colon (an indented block is `Colon Newline Indent …`). `peek`
         // is the body `Colon` here, so `peek_at(1)` is the token right after it.
         let inline = self.peek() == &Token::Colon && self.peek_at(1) != &Token::Newline;
-        let body = self.parse_block()?;
+        // An inline body starting with `if` is an if-EXPRESSION (the closure / `x := if …` form), so
+        // it becomes the implicit return; `parse_block`'s nested-block rule still guards every
+        // other compound statement.
+        let body = if inline && self.peek_at(1) == &Token::If {
+            self.expect(&Token::Colon)?;
+            let span = self.cur_span();
+            let expr = self.parse_expr()?;
+            self.expect_stmt_end()?;
+            vec![Stmt {
+                kind: StmtKind::Expr(expr),
+                span,
+            }]
+        } else {
+            self.parse_block()?
+        };
         let is_generator = body_contains_yield(&body);
         // An inline body whose single statement is a bare expression implicitly returns that
         // expression (mirroring a closure `fn(x): expr`). Inline non-expr statements (`: x = 5`,
@@ -2475,6 +2489,12 @@ impl Parser {
                 } else {
                     ty = Type::Generic("Result".to_string(), vec![ty], Span::default());
                 }
+            } else if self.check(&Token::QuestionQuestion) {
+                // Adjacent `??` lexes as ONE coalesce token, so `int??` used to fall through to a
+                // caller's `expected '='`. Speculative callers swallow this error and backtrack.
+                return Err(self.err(
+                    "'??' is not a type suffix: write a nested optional as Option[T?]".to_string(),
+                ));
             } else {
                 break;
             }
@@ -3344,8 +3364,11 @@ fn describe(tok: &Token) -> String {
         Str(_) => "a string literal",
         Bytes(_) => "a byte-string literal",
         RawStr(_) => "a raw-string literal",
-        // keywords print as their lowercase source spelling
-        other => return format!("'{}'", format!("{other:?}").to_lowercase()),
+        // operators and keywords print their source spelling
+        other => match other.lexeme() {
+            Some(l) => return format!("'{l}'"),
+            None => return format!("'{}'", format!("{other:?}").to_lowercase()),
+        },
     };
     s.to_string()
 }

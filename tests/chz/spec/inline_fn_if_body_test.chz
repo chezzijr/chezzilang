@@ -1,0 +1,27 @@
+# W14-35 / TICKET-145 — an inline fn body may be an if-expression (`fn f(n): if c: a else: b`), the
+# same form closures and `x := if …` already accept; it is the implicit return and `else` is required.
+# CPython reference: `def pick(n): return 1 if n > 0 else 2` gives 1 then 2. Gated by
+# `chz_suite_passes` (`tests/chz_suite.rs`).
+
+fn pick(n: int) -> int: if n > 0: 1 else: 2
+
+fn sign(n: int): if n > 0: "pos" elif n < 0: "neg" else: "zero"
+
+struct Box:
+    v: int
+
+    fn pick(self, c: bool) -> int: if c: self.v else: 0
+
+test fn inline_if_else_fn_body_returns_the_taken_branch():
+    assert pick(5) == 1
+    assert pick(-5) == 2
+
+test fn inline_elif_chain_fn_body_infers_its_return_type():
+    assert sign(3) == "pos"
+    assert sign(-3) == "neg"
+    assert sign(0) == "zero"
+
+test fn inline_if_else_method_body_returns_the_taken_branch():
+    b := Box(7)
+    assert b.pick(true) == 7
+    assert b.pick(false) == 0

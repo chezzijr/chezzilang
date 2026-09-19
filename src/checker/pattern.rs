@@ -4284,6 +4284,10 @@ impl Checker {
             "a default expression cannot propagate with `?` — defaults are evaluated in their \
              defining module, which has no caller to propagate to; use `??` or return an Option"
                 .to_string()
+        } else if matches!(ret, Ty::Unknown) {
+            "'?' used in a function whose return type is not declared; declare it to return \
+             Result or Option (e.g. `-> int?`)"
+                .to_string()
         } else {
             format!("'?' used in a function that returns {ret}, not Result or Option")
         }

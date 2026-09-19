@@ -903,6 +903,14 @@ fn dbl(x: int): x * 2      # usable as a value / .map argument: [1,2,3].map(dbl)
 fn answer() -> int: 42     # annotated inline-expr body is valid (the expr is the implicit return)
 ```
 
+An inline body may also be an **if-expression** — the same form a closure or `x := if …` uses. It is
+the implicit return, and `else` is required; every other compound statement (`for`, `while`, `match`,
+a statement-`if`) still needs an indented block:
+
+```chezzi
+fn pick(n: int) -> int: if n > 0: 1 else: 2     # pick(5) == 1, pick(-5) == 2
+```
+
 Only a *bare expression* inline body returns implicitly. An inline **non-expression** statement does
 not: `fn a(): x = 5` (an assignment) returns `nil`, and `fn a(): return 10` is an explicit return as
 written. An inline **call** returns the call's value (it is an expression-statement): `fn a(): foo()`
