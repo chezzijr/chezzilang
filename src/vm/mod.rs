@@ -1353,6 +1353,13 @@ pub struct Vm {
     /// `GenCtx`, `Vm::swap_ctx` and `Vm::swap_gen_ctx`, for the same reason `gen_host_ctx` is: a
     /// fiber cannot park mid-resume.
     gen_fault_prefix: Vec<TraceFrame>,
+    /// TICKET-150 (W14-35c) — the list/map/set/struct objects whose default `print`/`str` render is
+    /// currently OPEN, innermost last (CPython's `Py_ReprEnter`). An object met again while open is a
+    /// back edge and renders as `[...]` / `{...}` / `Set(...)` / `...`. An in-progress STACK, not a
+    /// visited set, so a shared but acyclic child (`[x, x]`) still prints in full. Every push is
+    /// popped on both the `Ok` and `Err` path. Deliberately absent from `FiberCtx` and `GenCtx`:
+    /// a render never parks (a `str` hook runs under `guarded_walk`), so no other fiber can observe it.
+    repr_active: Vec<GcRef>,
     /// D5 owe #3 (Path C) — this M:N worker shell's worker id (its `locals[wid]` slot), set at the top
     /// of [`Vm::mn_worker_loop`]. Read by [`Vm::demote_recv_block`] so a demoted worker's raw
     /// replacement thread reuses the same `wid` (safe: a demoted worker never touches `locals[wid]`

@@ -19187,7 +19187,8 @@ fn golden_iterator_chz_matches_expected_and_interp() {
 // ----- cyclic-data structural-depth guard + order-independent map == -----
 
 #[test]
-fn cyclic_print_errors_not_crashes() {
+fn cyclic_print_renders_the_back_edge() {
+    // W14-35c: CPython's dataclass repr of the same cycle is `Node(next=[Node(next=[...])])`.
     let src = "\
 struct Node:
     next: List[Node]
@@ -19197,10 +19198,7 @@ a.next.push(b)
 b.next.push(a)
 print(a)
 ";
-    assert!(
-        run_err(src).contains("maximum structural depth"),
-        "expected structural-depth error"
-    );
+    assert_eq!(run(src), "Node(next=[Node(next=[...])])\n");
 }
 
 #[test]
@@ -19225,7 +19223,7 @@ print(a == c)
 }
 
 #[test]
-fn cyclic_print_is_recoverable() {
+fn cyclic_print_inside_recover_succeeds() {
     let src = "\
 struct Node:
     next: List[Node]
@@ -19239,11 +19237,7 @@ match r:
     Ok(v): print(\"ok\")
     Err(e): print(\"caught: {e.message()}\")
 ";
-    let out = run(src);
-    assert!(
-        out.contains("caught: maximum structural depth"),
-        "expected recovered error, got {out:?}"
-    );
+    assert_eq!(run(src), "Node(next=[Node(next=[...])])\nok\n");
 }
 
 #[test]

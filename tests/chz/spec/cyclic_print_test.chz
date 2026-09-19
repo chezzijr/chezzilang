@@ -1,0 +1,66 @@
+struct SelfRef:
+    me: Any
+
+struct CycNode:
+    next: List[CycNode]
+
+test fn a_self_referencing_list_renders_its_back_edge_as_ellipsis():
+    xs: List[Any] = [1]
+    xs.push(xs)
+    assert str(xs) == "[1, [...]]", str(xs)
+    assert "{xs}" == "[1, [...]]", "{xs}"
+
+test fn a_self_referencing_map_renders_its_back_edge_as_braces():
+    m: Map[str, Any] = {}
+    m["a"] = m
+    assert str(m) == "{{'a': {{...}}}}", str(m)
+
+test fn a_cycle_through_a_tuple_stops_at_the_list():
+    t: List[Any] = [1]
+    t.push((t,))
+    assert str(t) == "[1, ([...],)]", str(t)
+
+test fn a_cycle_through_a_map_and_a_list_renders_both_sides():
+    l: List[Any] = []
+    m: Map[str, Any] = {"k": l}
+    l.push(m)
+    assert str(l) == "[{{'k': [...]}}]", str(l)
+    assert str(m) == "{{'k': [{{...}}]}}", str(m)
+
+test fn a_shared_but_acyclic_list_prints_in_full():
+    x: List[Any] = []
+    assert str([x, x]) == "[[], []]", str([x, x])
+
+test fn a_self_referencing_struct_renders_its_back_edge_as_dots():
+    s := SelfRef(1)
+    s.me = s
+    assert str(s) == "SelfRef(me=...)", str(s)
+
+test fn a_struct_cycle_through_lists_matches_the_dataclass_rendering():
+    a := CycNode([])
+    b := CycNode([])
+    a.next.push(b)
+    b.next.push(a)
+    assert str(a) == "CycNode(next=[CycNode(next=[...])])", str(a)
+
+test fn a_deep_acyclic_nest_still_faults_recoverably():
+    x: Any = 0
+    for _ in range(12000):
+        x = [x]
+    r := recover: str(x)
+    match r:
+        Ok(_): assert false, "a 12000-deep nest must hit the structural depth cap"
+        Err(e): assert e.message().contains("maximum structural depth"), e.message()
+
+test fn a_faulted_render_leaves_no_open_object_behind():
+    x: Any = 0
+    for _ in range(12000):
+        x = [x]
+    first := recover: str(x)
+    match first:
+        Ok(_): assert false, "a 12000-deep nest must hit the structural depth cap"
+        Err(_): pass
+    second := recover: str(x)
+    match second:
+        Ok(s): assert false, "a stale open entry rendered the nest instead of faulting: " + s
+        Err(e): assert e.message().contains("maximum structural depth"), e.message()

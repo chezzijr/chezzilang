@@ -1,4 +1,5 @@
-print caught: maximum structural depth (10000) exceeded (cyclic data structure?)
+Node(val=1, next=[Node(val=2, next=[...])])
+print ok: printed
 eq caught: maximum structural depth (10000) exceeded (cyclic data structure?)
 true
 contains ok: false

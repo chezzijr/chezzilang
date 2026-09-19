@@ -1,7 +1,7 @@
 # examples/cycle_guard.chz — a cyclic data structure (built with ordinary type-safe code) used to
-# crash the host with an UNCATCHABLE stack overflow on `print` / `==`. Now the display and equality
-# walks are depth-guarded, so the fault is a recoverable RuntimeError that `recover:` catches,
-# byte-identically.
+# crash the host with an UNCATCHABLE stack overflow on `print` / `==`. `print` now renders the back
+# edge like CPython (`[...]`, `...`), and the equality walk is depth-guarded, so `==` faults with a
+# recoverable RuntimeError that `recover:` catches.
 
 struct Node:
     val: int
@@ -12,7 +12,7 @@ b := Node(2, [])
 a.next.push(b)
 b.next.push(a)            # a -> b -> a  (cycle)
 
-# print of a cyclic value is now catchable.
+# print of a cyclic value renders the re-entered object as `...` (CPython's dataclass repr).
 pr := recover:
     print(a)
     "printed"

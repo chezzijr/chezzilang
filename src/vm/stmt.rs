@@ -2652,8 +2652,16 @@ impl Vm {
             // `bytearray` interpolates/prints as `bytearray(b'...')` (shared helper).
             Obj::ByteArray(b) => out.push_str(&crate::slice::bytearray_repr(&b)),
             Obj::List(items) => {
+                // W14-35c: a list met again while its own render is open is a back edge.
+                if self.repr_active.contains(&h) {
+                    out.push_str("[...]");
+                    return Ok(());
+                }
                 out.push('[');
-                self.stringify_seq_into(out, &items, span, depth + 1)?;
+                self.repr_active.push(h);
+                let r = self.stringify_seq_into(out, &items, span, depth + 1);
+                self.repr_active.pop();
+                r?;
                 out.push(']');
             }
             Obj::Tuple(items) => {
@@ -2667,28 +2675,52 @@ impl Vm {
                 out.push(')');
             }
             Obj::Map(m) => {
+                if self.repr_active.contains(&h) {
+                    out.push_str("{...}");
+                    return Ok(());
+                }
                 out.push('{');
+                self.repr_active.push(h);
+                let mut r = Ok(());
                 for (i, (_, k, mv)) in m.entries.iter().enumerate() {
                     if i > 0 {
                         out.push_str(", ");
                     }
-                    self.stringify_nested_into(out, *k, span, depth + 1)?;
+                    r = self.stringify_nested_into(out, *k, span, depth + 1);
+                    if r.is_err() {
+                        break;
+                    }
                     out.push_str(": ");
-                    self.stringify_nested_into(out, *mv, span, depth + 1)?;
+                    r = self.stringify_nested_into(out, *mv, span, depth + 1);
+                    if r.is_err() {
+                        break;
+                    }
                 }
+                self.repr_active.pop();
+                r?;
                 out.push('}');
             }
             Obj::Set(s) => {
                 if s.entries.is_empty() {
                     out.push_str("Set()");
+                } else if self.repr_active.contains(&h) {
+                    out.push_str("Set(...)");
+                    return Ok(());
                 } else {
                     out.push('{');
+                    self.repr_active.push(h);
+                    let mut r = Ok(());
                     for (i, (_, e)) in s.entries.iter().enumerate() {
                         if i > 0 {
                             out.push_str(", ");
                         }
-                        self.stringify_nested_into(out, *e, span, depth + 1)?;
+                        r = self.stringify_nested_into(out, *e, span, depth + 1);
+                        if r.is_err() {
+                            break;
+                        }
                     }
+                    self.repr_active.pop();
+                    r?;
                     out.push('}');
                 }
             }
@@ -2738,7 +2770,16 @@ impl Vm {
                     .as_ref()
                     .map(|d| d.display_name.clone())
                     .unwrap_or_else(|| crate::compiler::bare_display(&name));
+                // W14-35c: the DEFAULT repr only (a `str` hook returned above and is never guarded,
+                // like CPython's user `__repr__`). CPython's dataclass repr writes `...` for the
+                // whole re-entered object.
+                if self.repr_active.contains(&h) {
+                    out.push_str("...");
+                    return Ok(());
+                }
                 let _ = write!(out, "{display}(");
+                self.repr_active.push(h);
+                let mut r = Ok(());
                 for (i, fv) in fields.iter().enumerate() {
                     if i > 0 {
                         out.push_str(", ");
@@ -2751,8 +2792,13 @@ impl Vm {
                             let _ = write!(out, "{i}=");
                         }
                     }
-                    self.stringify_nested_into(out, *fv, span, depth + 1)?;
+                    r = self.stringify_nested_into(out, *fv, span, depth + 1);
+                    if r.is_err() {
+                        break;
+                    }
                 }
+                self.repr_active.pop();
+                r?;
                 out.push(')');
             }
             Obj::Enum {

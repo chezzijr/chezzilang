@@ -160,6 +160,7 @@ impl Vm {
             gen_host_ctx: Vec::new(),
             active_generators: Vec::new(),
             gen_fault_prefix: Vec::new(),
+            repr_active: Vec::new(),
             wid: 0,         // D5 owe #3 (Path C) — set in mn_worker_loop
             demoted: false, // D5 owe #3 (Path C)
             width_gated: false,
