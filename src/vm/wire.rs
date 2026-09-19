@@ -390,11 +390,13 @@ impl WireValue {
     /// closure from the wire and closures compare by identity, so the compare could never succeed.
     /// The checker rejects the visible spellings (`reaches_func`); this backstops a payload hidden
     /// behind a type param or protocol. Shaped like [`has_handle`](Self::has_handle): same recursion,
-    /// `Backref` terminates the walk (its target is visited where it is defined), and a
-    /// `Builtin`/`Native` fn is NOT a hit — it is a bare name that compares equal after a round trip.
+    /// `Backref` terminates the walk (its target is visited where it is defined). A std `Native` fn
+    /// (`math.sqrt`) IS a hit — measured on the base binary, `Atomic(math.sqrt).cas(a.load(),
+    /// math.sqrt)` is `false` — but a global `Builtin` (`ord`) is NOT: it compares equal after a
+    /// round trip and `cas` on it succeeds.
     pub fn holds_fn(&self) -> bool {
         match self {
-            WireValue::Closure { .. } | WireValue::Func { .. } => true,
+            WireValue::Closure { .. } | WireValue::Func { .. } | WireValue::Native { .. } => true,
             WireValue::List { items: xs, .. }
             | WireValue::Tuple { items: xs, .. }
             | WireValue::Enum { payload: xs, .. } => xs.iter().any(WireValue::holds_fn),

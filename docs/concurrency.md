@@ -597,7 +597,7 @@ slot, struct field, enum payload or newtype underlying the structural compare wo
 (TICKET-144, W14-24; `Atomic[fn() -> int]`, a struct field or `List` element of `fn` type): every `load()` returns a fresh copy of the closure and
 closures compare by identity, so `cas(a.load(), new)` could never succeed and the standard CAS retry loop would spin forever
 (Go's `atomic.Value.CompareAndSwap` panics `comparing uncomparable type` on the same shape). The error is at the `cas` call, so
-`load`/`store`/`exchange` of a fn stay legal, and a builtin fn value (`Atomic(ord)`) — which compares equal after a load — keeps `cas`. A generic `fn f[T](a: Atomic[T], …)`
+`load`/`store`/`exchange` of a fn stay legal, and a builtin fn value (`Atomic(ord)`) — which compares equal after a load — keeps `cas`; a std native fn (`math.sqrt`) loads back unequal to itself, so it is rejected like a closure. A generic `fn f[T](a: Atomic[T], …)`
 hides the fn from the checker, so the runtime `cas` faults `Atomic.cas: the payload holds a function value, which cas cannot compare` instead of answering `false` forever. Each method is a single
 lock-op-unlock, so the read-modify-write is atomic across threads with no separate update lock. `Atomic`
 vs `Shared`: reach for `Atomic` when a lock-free-style counter/flag/CAS-loop is clearer than

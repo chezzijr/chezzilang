@@ -156,3 +156,14 @@ test fn datetime_fmod_is_floored_like_python():
     assert datetime.fmod(6, 3) == 0
     assert datetime.fmod(-6, 3) == 0
     assert datetime.fmod(-9223372036854775807 - 1, 86400) == 30592
+
+test fn atomic_cas_faults_on_a_std_native_fn_payload_too():
+    # Measured on the base binary: `Atomic(math.sqrt).cas(a.load(), math.sqrt)` is `false` (a std
+    # native fn loads back unequal to itself), unlike the global builtin `ord`.
+    a := Atomic(math.sqrt)
+    r := recover: try_cas(a, math.sqrt)
+    match r:
+        Ok(v): assert false, "cas on a native fn payload returned {v}"
+        Err(e): assert e.message() == "Atomic.cas: the payload holds a function value, which cas cannot compare", e.message()
+    o := Atomic(ord)
+    assert try_cas(o, ord) == true
