@@ -2856,7 +2856,7 @@ cursor); and a numeric `newtype` that DEFINES `add`/`compare`/… gets its own m
 `a + b` keeps auto-flowing to the underlying's native op, so the two spellings disagree for that type
 only. `a.compare(b)` on a **NaN** operand never faults — it answers the same **total order** `sort()` /
 `.min()` / `.max()` use (`f64::total_cmp`, NaN to one end), while `<`/`<=`/`>`/`>=` stay IEEE (`false` for
-every NaN comparison): one shared order, one rule.
+every NaN comparison): one shared order, one rule. `+0.0` and `-0.0` are EQUAL in that order (a stable sort keeps their input order and `[0.0, -0.0].min()` is `0.0`, like CPython).
 
 **Display-hook resolution.** `print`/`str()`/interpolation use your `str` method as the display hook
 **only when it conforms to `Stringable`** — a single `self` parameter and a **`str` return** (whether

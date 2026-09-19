@@ -2406,12 +2406,12 @@ impl Vm {
             return self.value_order(a, *inner);
         }
         // Homogeneous lists only (checker-enforced): both int (inline/boxed) → exact i64; both float
-        // → total_cmp; both str → lexical. A mixed/other pair compares Equal.
+        // → `float_order`; both str → lexical. A mixed/other pair compares Equal.
         if self.is_integral(a) && self.is_integral(b) {
             return self.int_of(a).cmp(&self.int_of(b));
         }
         if a.is_float() && b.is_float() {
-            return self.float_of(a).total_cmp(&self.float_of(b));
+            return float_order(self.float_of(a), self.float_of(b));
         }
         match (a.as_obj(), b.as_obj()) {
             (Some(ha), Some(hb)) => match (self.heap.get(ha), self.heap.get(hb)) {
@@ -2423,6 +2423,19 @@ impl Vm {
     }
 
     // ----- calls -----
+}
+
+/// The ONE float ordering behind `sort`, `sort_by_key`, `min`, `max`, `min_by` and `max_by`:
+/// `f64::total_cmp` (NaN deterministically at one end) except that `+0.0` and `-0.0` are EQUAL,
+/// like `==` and like CPython/Rust `partial_cmp`. `total_cmp` alone ranks `-0.0 < +0.0`, which
+/// broke sort stability and first-wins `min`/`max` (`[0.0, -0.0].min()` is `0.0` in CPython). Do not
+/// put a bare `total_cmp` back at a sort site.
+pub(super) fn float_order(a: f64, b: f64) -> std::cmp::Ordering {
+    if a == 0.0 && b == 0.0 {
+        std::cmp::Ordering::Equal
+    } else {
+        a.total_cmp(&b)
+    }
 }
 
 /// Exact `int` vs `float` comparison, CPython's `float_richcompare` rule: no int-to-f64 coercion,

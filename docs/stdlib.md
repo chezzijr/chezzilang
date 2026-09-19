@@ -203,7 +203,7 @@ quote-doubling with it (unaffected: it always passes a literal `"` as `old`, nev
 | `concat` | `(other: List[T]) -> List[T]` | Returns a **new** list. Operator form: `a + b`. |
 | `extend` | `(other: List[T]) -> nil` | *mutates* — append all of `other`. |
 | `sum` | `() -> T` | Numeric lists (`int`→`int`), or a list of a **scalar numeric `newtype`** — `List[Cents]` (`newtype Cents = int`) sums to `Cents`, and an **empty** one to `Cents(0)`, matching Go's `type Cents int`. Integer sums use checked add — overflow raises a recoverable `integer overflow in Add`, never wraps (the newtype path uses the underlying's same checked op); any-float lists accumulate to `float` with CPython 3.12+'s Neumaier compensation (ints included: `[0.1, 0.2, 0.3].sum()` is `0.6`, `[1e16, 1.0, 1.0].sum()` is `1.0000000000000002e+16`; may reach `inf`, never `nan` from the compensation). A `List[newtype = float]` still folds uncompensated. A newtype OF a newtype, a generic newtype and a non-numeric one (`newtype Name = str`) are rejected, exactly as their `+` is. The ELEMENT TYPE decides the numeric kind, not the runtime elements, so an EMPTY one sums to `0.0` for `List[float]` and to `0` for `List[int]`. |
-| `sort` | `() -> nil` | *mutates* — ascending. Orderable elements (`int`/`float`/`str`) or `Comparable` structs or enums. Float `NaN` is handled by a total order (`NaN` sorts to one end), deterministic. Faults if the callback mutates the receiver (only reachable via a `Comparable` struct's or enum's `compare`). |
+| `sort` | `() -> nil` | *mutates* — ascending. Orderable elements (`int`/`float`/`str`) or `Comparable` structs or enums. Float `NaN` is handled by a total order (`NaN` sorts to one end), deterministic; `+0.0` and `-0.0` are Equal (input order kept, like CPython). Faults if the callback mutates the receiver (only reachable via a `Comparable` struct's or enum's `compare`). |
 | `sort_by` | `(cmp: fn(T, T) -> int) -> nil` | *mutates* — custom comparator (`<0`, `0`, `>0`). Faults if the callback mutates the receiver. |
 | `sort_by_key` | `(key: fn(T) -> K) -> nil` | *mutates* — sort by a derived orderable/`Comparable` key. A `NaN` float key sorts deterministically (total order, `NaN` to one end), consistent with `sort()`. Faults if the callback mutates the receiver. |
 | `map` | `(f: fn(T) -> U) -> List[U]` | Returns a new list. |
@@ -1671,7 +1671,7 @@ and would break that determinism.
 `eq`" rule was dropped 2026-08-11; see `docs/gaps.md` **W7-41**. Its `compare` is **total on floats**: a `NaN` operand
 returns an ordering int (never a fault; the intrinsic `compare` is reachable only through a
 `[T: Comparable]` bound — `1.5.compare(2.0)` on a concrete scalar is `has no method 'compare'`, like `(5).str()`), using the same total order `List.sort()`/`sort_by_key`/`min`/
-`max` use (`f64::total_cmp`, `NaN` to one end). The `<`/`<=`/`>`/`>=` *operators* stay IEEE (`false` for
+`max` use (`f64::total_cmp`, `NaN` to one end; `+0.0` and `-0.0` are Equal, so sort is stable across them and `min`/`max` keep the first). The `<`/`<=`/`>`/`>=` *operators* stay IEEE (`false` for
 every `NaN` comparison) — that is the one divergence. `min` and `max` are written with `<`, so they
 follow the **operator** rule, not the total order: on a non-`<` tie both return the **first** argument
 (Python's rule), so a `NaN` operand propagates from the left (`min(nan, 1.0)` and `max(nan, 1.0)` are

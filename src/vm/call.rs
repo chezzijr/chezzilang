@@ -2561,21 +2561,24 @@ impl Vm {
             let inner = *inner;
             return self.order_key(a, inner, span);
         }
-        // Float keys order by `total_cmp` for the WHOLE comparison (not just the NaN case), exactly
+        // Float keys order by `float_order` for the WHOLE comparison (not just the NaN case), exactly
         // mirroring `sort()`'s `value_order` Float arm — so `sort_by_key` and `sort()` agree on every
-        // float pair, including `-0.0`/`+0.0` (which `partial_cmp` ranks Equal but `total_cmp` orders
-        // `-0.0 < +0.0`) and NaN (deterministic, to one end). Int keys deliberately stay on the int
-        // path below (`Int.cmp`): routing them through `as_f64` would lose precision past 2^53.
+        // float pair: `-0.0`/`+0.0` are Equal (stable, first wins, like CPython) and NaN is
+        // deterministic, to one end. Int keys deliberately stay on the int path below (`Int.cmp`):
+        // routing them through `as_f64` would lose precision past 2^53.
         if a.is_float() && b.is_float() {
-            return Ok(self.float_of(a).total_cmp(&self.float_of(b)));
+            return Ok(super::arith::float_order(
+                self.float_of(a),
+                self.float_of(b),
+            ));
         }
         match self.compare(a, b) {
             Some(ord) => Ok(ord),
             // Numeric `None` means a NaN float — handled above for the Float/Float case; this arm
             // only catches a mixed int/float key pair (not reachable for a single key type K), kept
-            // deterministic via `total_cmp` for safety.
+            // deterministic via `float_order` for safety.
             None if self.is_numeric(a) && self.is_numeric(b) => {
-                Ok(self.as_f64(a).total_cmp(&self.as_f64(b)))
+                Ok(super::arith::float_order(self.as_f64(a), self.as_f64(b)))
             }
             // Genuinely-incomparable types: unreachable from well-typed source; kept for safety.
             None => Err(self.err(
@@ -2748,7 +2751,7 @@ impl Vm {
             //
             // NaN is TOTAL here, and by the SAME order the rest of the language sorts by: route the
             // pair through [`Vm::order_key`] — the one ordering site behind `sort()` / `sort_by_key` /
-            // `.min()` / `.max()` (`f64::total_cmp`, NaN deterministically at one end, numeric-newtype
+            // `.min()` / `.max()` (`float_order`, NaN deterministically at one end, numeric-newtype
             // layers unwrapped first). So there is exactly ONE total order shared by
             // `compare`/`sort`/`min`/`max`, and exactly ONE documented divergence left: that total
             // order (the method) vs IEEE (the operators — `ordered_bool` answers `false` for every NaN

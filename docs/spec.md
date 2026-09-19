@@ -504,14 +504,14 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   matched by `identity or ==`** (Python's rule), so ONE `nan` value stored in a list is still found by
   `==` / `in` / `index_of` / `unique` (`n := nan_expr; xs := [n]` ⇒ `[n] == [n]`, `n in xs`), while two
   SEPARATELY computed `NaN`s stay unequal — the bare `==` operator is untouched. Sorting is deterministic with `NaN`:
-  `sort()` and `sort_by_key` use a total order (`f64::total_cmp`, `NaN` sorts to one end) instead of
+  `sort()` and `sort_by_key` use a total order (`f64::total_cmp`, `NaN` sorts to one end; `+0.0` and `-0.0` are EQUAL, so a stable sort keeps their input order like CPython) instead of
   faulting. **`Comparable`'s `.compare()` shares that SAME total order** — `a.compare(b)` on a `NaN`
   operand returns an ordering int (never a fault; callable only through a `[T: Comparable]` bound — a
   concrete scalar receiver has no `compare` method, like `(5).str()`), landing `NaN` on exactly the side `sort()` puts it, so
   `compare`/`sort`/`sort_by_key`/`.min()`/`.max()` are all one order. The *operators* stay IEEE, and that
   is the single divergence: `nan < 1.0` is `false` while `nan.compare(1.0)` is nonzero. (Two corollaries:
   `a.compare(a)` is `0` for a `NaN` `a` although `a == a` is `false`; and only `NaN` takes the total-order
-  path, so `(-0.0).compare(0.0)` is `0` even though `sort()` orders `-0.0 < +0.0`.) **No `int`→`float` widening at any slot (rule D3, TICKET-138 — Rust/Kotlin, not Go's untyped-constant
+  path, so `(-0.0).compare(0.0)` is `0`, which `sort()` also treats as a tie.) **No `int`→`float` widening at any slot (rule D3, TICKET-138 — Rust/Kotlin, not Go's untyped-constant
   rule):** an `int`-typed expression, literal or not, is never accepted where a `float` is expected. That
   covers a typed binding, a reassignment / index-assign / field-assign, a function / method /
   constructor / enum-payload argument (a call through a function VALUE and an `extern` `double` param
@@ -992,7 +992,7 @@ concrete call uses.
 `compare`/`sort`/`min`/`max` and exactly one rule to remember: the method uses the total order, the
 operators use IEEE. Consequences worth knowing: `a.compare(a)` is `0` for a NaN `a` even though `a == a`
 is `false` (`total_cmp` on identical bits is Equal), and only NaN takes the total-order path — a `±0.0`
-pair still compares Equal by the method (`sort()` orders `-0.0 < +0.0`).
+pair compares Equal by the method and by `sort()`/`min`/`max` alike (`float_order`; CPython keeps `sorted([0.0, -0.0])` as `[0.0, -0.0]`).
 
 **Two documented exceptions to the equivalence** (each with a `docs/gaps.md` entry):
 

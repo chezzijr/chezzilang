@@ -2138,16 +2138,17 @@ fn parity_sort_by_key_nan_float_key_deterministic() {
 }
 
 #[test]
-fn parity_sort_by_key_signed_zero_matches_sort() {
-    // `sort_by_key` over a float key uses `total_cmp` for the WHOLE comparison, exactly like
-    // `sort()` — so they agree even on `-0.0`/`+0.0`, which `partial_cmp` ranks Equal but
-    // `total_cmp` orders `-0.0 < +0.0`. Signed-zero order is invisible to `==` (`-0.0 == +0.0`),
-    // so observe it via `1.0/x` → `-inf` for `-0.0`, `+inf` for `+0.0`. Both sort paths must put
-    // `-0.0` first ⇒ `-inf` then `inf`. Platform-independent (no NaN sign involved).
+fn sort_and_sort_by_key_keep_signed_zeros_in_input_order() {
+    // `-0.0 == +0.0`, so both orderings treat the pair as EQUAL and the stable sort keeps input
+    // order — CPython `sorted([0.0, -0.0])` is `[0.0, -0.0]`. Observe the sign via `1.0/x`
+    // (`inf` for `+0.0`, `-inf` for `-0.0`): input `[0.0, -0.0]` must print `inf` then `-inf`,
+    // and input `[-0.0, 0.0]` must print `-inf` then `inf`. Platform-independent (no NaN sign).
     let by_sort = "fn main():\n    xs := [0.0, -1.0 * 0.0]\n    xs.sort()\n    for v in xs:\n        print(1.0 / v)\nmain()";
-    assert_golden_out(by_sort, "-inf\ninf\n");
+    assert_golden_out(by_sort, "inf\n-inf\n");
     let by_key = "fn main():\n    xs := [0.0, -1.0 * 0.0]\n    xs.sort_by_key(fn(x: float) -> float: x)\n    for v in xs:\n        print(1.0 / v)\nmain()";
-    assert_golden_out(by_key, "-inf\ninf\n");
+    assert_golden_out(by_key, "inf\n-inf\n");
+    let flipped = "fn main():\n    xs := [-1.0 * 0.0, 0.0]\n    xs.sort()\n    for v in xs:\n        print(1.0 / v)\nmain()";
+    assert_golden_out(flipped, "-inf\ninf\n");
 }
 
 #[test]
