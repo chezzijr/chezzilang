@@ -13466,6 +13466,7 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- **TICKET-139 W14-36 (2026-09-19) — a tuple scrutinee accepts a bare catch-all binding.** `MatchKind::Tuple` (`src/checker/pattern.rs`) now takes a payload-free unqualified non-variant name (DEC-107), as the struct arm already did; `rest:` binds the whole tuple, a variant name is still rejected, a guarded one closes nothing. Pinned by `tests/chz/spec/tuple_scrutinee_catch_all_test.chz` and `a_tuple_scrutinee_catch_all_binding_is_irrefutable`.
 - **TICKET-139 W14-1 (2026-09-19) — a closure can capture a bare match catch-all binding.** `pattern_binds` (`src/compiler/mod.rs`) now collects a payload-free unqualified name, the capture-analysis twin of DEC-107's catch-all predicate; before, `match e: 1: ..; whole: (fn() -> int: whole)()` was check-OK then panicked `CellLoad on a non-handle value` (rc=101). Pinned by `tests/chz/spec/match_bare_binding_capture_test.chz`.
 - **TICKET-119 (2026-09-15) — a deep module global reaches its depth-exceeded fault in linear, not
   quadratic, time (W13-9).** `to_snap_depth`'s speculative fast path (`try_wire_speculative`) re-walked

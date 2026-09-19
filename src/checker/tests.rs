@@ -32914,3 +32914,21 @@ fn holed_string_pattern_is_a_compile_error() {
         "expected an error for a holed string pattern, got no errors"
     );
 }
+
+#[test]
+fn a_tuple_scrutinee_catch_all_binding_is_irrefutable() {
+    // W14-36 + DEC-107: a bare name is a whole-value catch-all on a tuple scrutinee too.
+    ok(
+        "fn main():\n    t := (1, 2)\n    match t:\n        (0, y): print(y)\n        rest: print(rest)\nmain()\n",
+    );
+    // A variant name cannot bind a tuple.
+    rejects(
+        "fn main():\n    t := (1, 2)\n    match t:\n        (0, y): print(y)\n        None: print(0)\nmain()\n",
+        "is a variant name",
+    );
+    // A guarded catch-all covers nothing (DEC-017/065/076).
+    rejects(
+        "fn main():\n    t := (1, 2)\n    match t:\n        (0, y): print(y)\n        rest if rest.0 > 0: print(rest)\nmain()\n",
+        "non-exhaustive",
+    );
+}

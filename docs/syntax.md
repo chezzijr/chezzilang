@@ -3138,8 +3138,9 @@ match p:
     rest:        "at {rest.x},{rest.y}"   # a bare name binds the WHOLE struct value (catch-all)
 ```
 
-A bare non-variant name is the same whole-value catch-all on an enum, `Option` or `Result`
-scrutinee (`rest:` binds the whole `E`). A **guarded** one (`x if c:`) closes nothing, and a bare
+A bare non-variant name is the same whole-value catch-all on an enum, `Option`, `Result` or
+**tuple** scrutinee (`rest:` binds the whole `E`, or the whole tuple: `match (1, 2): (0, y): ..;
+rest: print(rest)` prints `(1, 2)`). A **guarded** one (`x if c:`) closes nothing, and a bare
 **variant** name (`None`, or an unqualified user variant) is never a binding — it stays a variant
 lookup, qualified as `E.A` if it needs to match one.
 

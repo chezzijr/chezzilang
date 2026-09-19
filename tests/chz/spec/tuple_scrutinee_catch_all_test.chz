@@ -1,0 +1,8 @@
+# W14-36
+test fn a_tuple_scrutinee_accepts_a_catch_all_binding():
+    t := (1, 2)
+    r := (0, 0)
+    match t:
+        (0, y): r = (y, y)
+        rest: r = rest
+    assert r == (1, 2), "got {r}"

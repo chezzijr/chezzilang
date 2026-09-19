@@ -658,6 +658,32 @@ impl Checker {
                     }
                     return irref;
                 }
+                // TICKET-139/W14-36 + DEC-107: a BARE payload-free unqualified non-variant name is a
+                // whole-scrutinee catch-all on a tuple too (`rest:`), the same predicate the struct
+                // arm uses — irrefutable, and the name binds the whole tuple.
+                if let Pattern::Variant {
+                    name,
+                    bindings,
+                    enum_name: None,
+                    module_name: None,
+                } = pattern
+                    && bindings.is_empty()
+                {
+                    if self.variant_owners.contains_key(name)
+                        || crate::checker::is_builtin_variant(name)
+                    {
+                        self.error(
+                            span,
+                            format!(
+                                "'{name}' is a variant name and cannot bind a scrutinee of type {}; rename the binding",
+                                Ty::Tuple(tys.clone())
+                            ),
+                        );
+                        return false;
+                    }
+                    self.declare(name, Ty::Tuple(tys.clone()));
+                    return true;
+                }
                 self.error(
                     span,
                     "a tuple scrutinee requires a tuple pattern (or `_`)".to_string(),
