@@ -40,6 +40,7 @@ impl Checker {
         let mut c = Checker {
             errors: Vec::new(),
             warnings: Vec::new(),
+            pending_key_reject: None,
             scopes: Vec::new(),
             const_decls: Vec::new(),
             loop_vars: Vec::new(),

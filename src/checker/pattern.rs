@@ -2743,6 +2743,7 @@ impl Checker {
             };
             if !et.is_unknown()
                 && let Some(why) = self.key_ty_reject(&et)
+                && self.pending_key_reject.as_deref() != Some(why.as_str())
             {
                 self.error(e.span, format!("set element type {why}"));
             }
@@ -2809,6 +2810,7 @@ impl Checker {
             let (kt, vt) = (kt.clone(), vt.clone());
             if !kt.is_unknown()
                 && let Some(why) = self.key_ty_reject(&kt)
+                && self.pending_key_reject.as_deref() != Some(why.as_str())
             {
                 self.error(k_expr.span, format!("map key type {why}"));
             }
@@ -2918,6 +2920,7 @@ impl Checker {
                 let et = self.infer_value(elem);
                 if !et.is_unknown()
                     && let Some(why) = self.key_ty_reject(&et)
+                    && self.pending_key_reject.as_deref() != Some(why.as_str())
                 {
                     self.error(elem.span, format!("set element type {why}"));
                 }
@@ -2929,6 +2932,7 @@ impl Checker {
                 let vt = self.infer_value(elem);
                 if !kt.is_unknown()
                     && let Some(why) = self.key_ty_reject(&kt)
+                    && self.pending_key_reject.as_deref() != Some(why.as_str())
                 {
                     self.error(key.span, format!("map key type {why}"));
                 }

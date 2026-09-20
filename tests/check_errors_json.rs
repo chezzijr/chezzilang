@@ -1058,3 +1058,64 @@ fn float_literal_end_col_spans_the_whole_literal() {
         "end_col must cover the 3-char literal `1.5` (col 10..13), stdout={stdout} stderr={stderr}"
     );
 }
+
+#[test]
+fn a_non_hashable_set_annotation_reports_one_error() {
+    let (stdout, stderr) = check_source("s: Set[(int,int)] = {(1,2)}\n", &["--errors=json"]);
+    assert_eq!(
+        error_count(&stdout),
+        1,
+        "the annotation and the literal are one fact:\nstdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("Set element type must implement Hashable"),
+        "stdout={stdout}"
+    );
+}
+
+#[test]
+fn a_non_hashable_map_annotation_reports_one_error() {
+    let (stdout, stderr) =
+        check_source("m: Map[(int,int), int] = {(1,2): 3}\n", &["--errors=json"]);
+    assert_eq!(
+        error_count(&stdout),
+        1,
+        "the annotation and the literal are one fact:\nstdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("Map key type must implement Hashable"),
+        "stdout={stdout}"
+    );
+}
+
+#[test]
+fn a_hashable_annotation_still_reports_a_bad_element() {
+    let (stdout, stderr) = check_source("s: Set[int] = {1.5}\n", &["--errors=json"]);
+    assert_eq!(error_count(&stdout), 2, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("set element type must implement Hashable")
+            && stdout.contains("found float"),
+        "stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("set element: expected int, found float"),
+        "stdout={stdout}"
+    );
+}
+
+/// The annotation's reported reason must not outlive its own statement: the second statement's
+/// literal has the byte-identical reason and no annotation, so it is that line's only diagnostic.
+#[test]
+fn a_later_unannotated_literal_of_the_same_type_still_reports() {
+    let (stdout, stderr) = check_source(
+        "s: Set[(int,int)] = {(1,2)}\nt := {(3,4)}\n",
+        &["--errors=json"],
+    );
+    assert_eq!(error_count(&stdout), 2, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("\"message\":\"Set element type must implement Hashable")
+            && stdout.contains("\"message\":\"set element type must implement Hashable"),
+        "stdout={stdout}"
+    );
+    assert!(stdout.contains("\"line\":2,\"col\":7"), "stdout={stdout}");
+}

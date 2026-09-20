@@ -1788,6 +1788,7 @@ impl Checker {
                         let value = self.resolve_type(v, span);
                         if let Some(why) = self.key_ty_reject(&key) {
                             self.error(span, format!("Map key type {why}"));
+                            self.pending_key_reject = Some(why);
                         }
                         Ty::map(key, value)
                     }
@@ -1795,6 +1796,7 @@ impl Checker {
                         let elem = self.resolve_type(t, span);
                         if let Some(why) = self.key_ty_reject(&elem) {
                             self.error(span, format!("Set element type {why}"));
+                            self.pending_key_reject = Some(why);
                         }
                         Ty::set(elem)
                     }
@@ -2047,6 +2049,7 @@ impl Checker {
     }
 
     pub(super) fn check_stmt(&mut self, stmt: &Stmt) {
+        self.pending_key_reject = None;
         let span = stmt.span;
         match &stmt.kind {
             StmtKind::Let {

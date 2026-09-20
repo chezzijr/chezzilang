@@ -1937,6 +1937,10 @@ struct Checker {
     /// Non-fatal diagnostics (`Severity::Warning`), collected separately so they can never reach the
     /// `Err` arm of a check entry point and turn a warning into a build failure.
     warnings: Vec<CheckError>,
+    /// The bare `key_ty_reject` reason a TYPE-position site (`Map[..]` / `Set[..]`) already reported
+    /// for the statement being checked. A value-position literal with the identical reason skips its
+    /// own report. Cleared at the top of `check_stmt`, so it never outlives one statement.
+    pending_key_reject: Option<String>,
     scopes: Vec<HashMap<String, Ty>>,
     /// Per-scope set of names bound as `for`-loop variables. Mirrors `scopes` index-for-index (a
     /// loop var is immutable — rebound fresh each iteration — so assigning to it is rejected; this
