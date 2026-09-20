@@ -1192,6 +1192,32 @@ fn request_joins_duplicate_headers_against_local_server() {
     assert_eq!(out, "a=1, b=2\nsolo\n");
 }
 
+/// W14-30b — a response header whose value holds a non-ASCII byte must still appear in
+/// `resp.headers` (CPython `urllib` surfaces it; RFC 9110 field values are opaque bytes). The value
+/// is decoded latin-1 (byte -> code point), so UTF-8 `café` on the wire reads back as 5 chars.
+#[test]
+fn request_keeps_non_ascii_header_against_local_server() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 1024];
+        let _ = stream.read(&mut buf);
+        let resp = "HTTP/1.1 200 OK\r\nX-Ascii: ok\r\nX-Cafe: café\r\nConnection: close\r\nContent-Length: 2\r\n\r\nhi";
+        stream.write_all(resp.as_bytes()).unwrap();
+    });
+
+    let src = format!(
+        "import std.request\nmatch request.get(\"http://{addr}/\"):\n    Ok(resp):\n        print(resp.headers[\"x-ascii\"])\n        print(\"x-cafe\" in resp.headers)\n    Err(e): print(e)\n"
+    );
+    let out = golden_entry(&src);
+    server.join().unwrap();
+    assert_eq!(out, "ok\ntrue\n");
+}
+
 /// `std.request` new verbs + custom headers, against a loopback server that records every request's
 /// wire bytes. The M:N run issues a `put` and a header-carrying `request("DELETE", …)`, so the
 /// server accepts twice. Asserts (a) the expected stdout and (b) the right method line + custom
