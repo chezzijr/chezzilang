@@ -1574,7 +1574,15 @@ impl Vm {
                 // `leave_implicit_nursery` report as the body unwinds, then `finish_frame` runs the
                 // defers). `unwind_deferred` does the interleaving; this covers BOTH the uncaught arm
                 // (no handler) and the frames discarded above a catching `recover:`.
-                let rte = self.unwind_deferred(target, true).unwrap_or(rte);
+                // TICKET-152 (W14-37): a FATAL deadlock drops its frames without running their
+                // `defer`s, as Go's all-goroutines-asleep abort does (parked siblings already run
+                // none, DEC-092). Per-call, never a VM latch: `chezzi test` keeps running.
+                let rte = if fatal {
+                    self.unwind_no_defer(target);
+                    rte
+                } else {
+                    self.unwind_deferred(target, true).unwrap_or(rte)
+                };
                 let rte = if fatal { rte.deadlock() } else { rte };
                 // TICKET-148 — relocate a NATIVE std fault to the user's call into std, for the
                 // caught stamp below AND the uncaught headline (the trace keeps its frames). A

@@ -76,8 +76,19 @@ impl Vm {
         target_frame_len: usize,
         report_escaped: bool,
     ) -> Option<RuntimeError> {
-        self.unwind_deferred_escaped(target_frame_len, report_escaped)
+        self.unwind_deferred_escaped(target_frame_len, report_escaped, true)
             .0
+    }
+
+    /// TICKET-152 (W14-37) — the FATAL-deadlock unwind: drop every frame down to
+    /// `target_frame_len` WITHOUT running its `defer`s. A deadlock verdict is the runtime declaring
+    /// that no task can make progress, so a `defer` that itself blocks would run inside a runtime
+    /// that has already said so; Go's `fatal error: all goroutines are asleep - deadlock!` runs
+    /// none, and parked siblings already run none (DEC-092). `report_escaped` stays `true`: DEC-135
+    /// (W14-39) measured that skipping the escaped-nursery abort orphans parked children and hangs
+    /// the join at `CHEZZI_THREADS=1`.
+    pub(super) fn unwind_no_defer(&mut self, target_frame_len: usize) {
+        self.unwind_deferred_escaped(target_frame_len, true, false);
     }
 
     /// TICKET-147 (W14-12) — the cancel funnels' unwind: run [`Vm::unwind_deferred_escaped`] and let a
@@ -93,7 +104,7 @@ impl Vm {
         rte: RuntimeError,
     ) -> RuntimeError {
         let hard_halt = rte.is_over_memory || rte.is_timed_out;
-        let (defer, escaped) = self.unwind_deferred_escaped(target_frame_len, report_escaped);
+        let (defer, escaped) = self.unwind_deferred_escaped(target_frame_len, report_escaped, true);
         let replaced = defer.or(escaped);
         if report_escaped
             && self.cancelled
@@ -109,10 +120,14 @@ impl Vm {
     /// children ended with, as `(defer_fault, first_escaped_child_fault)`. TICKET-147 (W14-12): a
     /// genuine fault keeps the defer fault as its root cause (`unwind_deferred` drops the second
     /// element); the cancel funnels replace their `cancelled` sentinel with either.
+    ///
+    /// `run_defers` — `false` ONLY on the fatal-deadlock unwind, TICKET-152: the frames are dropped
+    /// where they stand.
     pub(super) fn unwind_deferred_escaped(
         &mut self,
         target_frame_len: usize,
         report_escaped: bool,
+        run_defers: bool,
     ) -> (Option<RuntimeError>, Option<RuntimeError>) {
         let mut err = None;
         let mut escaped_err: Option<RuntimeError> = None;
@@ -130,7 +145,7 @@ impl Vm {
                 let child = self.drain_escaped_nursery(floor.min(self.nurseries.len()));
                 escaped_err = escaped_err.or(child);
             }
-            if self.pending_exit.is_none() {
+            if run_defers && self.pending_exit.is_none() {
                 while let Some(d) = self.frames[fi].deferred.pop() {
                     if let Err(e) = self.run_one_deferred(d) {
                         err = Some(e);

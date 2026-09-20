@@ -443,8 +443,12 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
   do not. An `Executor` job's deadlock aborts at `shutdown()`, and `chezzi test` reports a
   deadlocking test as ERROR and runs the rest of the suite. The parked tasks are torn down where
   they stand: §6e's *One deliberate exception: a genuine deadlock does not run `defer`s* still
-  applies to them. The unwound frames on the faulting task's own stack still run their `defer`s,
-  as for any uncaught fault (Go runs none; filed as `docs/gaps.md` W14-37).
+  applies to them. No task runs its `defer`s on a fatal deadlock — not the parked siblings, and not
+  the task that reports it: the frames are dropped where they stand, as Go's `fatal error: all
+  goroutines are asleep - deadlock!` does (TICKET-152). A deadlock message raised inside
+  a native callback that cannot park at all is an ordinary recoverable fault and still runs
+  `defer`s. A `defer` that blocks forever is not that case: it is a counted party, so it reaches the verdict
+  itself, and that verdict is fatal like any other.
 - **Move-on-send** = Go's send without Go's sharing. Nothing is *enforced* — there is no Rust-style
   move checker here, and a sender that keeps using the value it sent is legal and safe: the crossing
   deep-copies, so the two sides simply stop being the same object. Measured: `ch.send(xs)` then
@@ -1201,7 +1205,10 @@ fn serve(tok: Token, io: Channel[str]):
 >
 > **One deliberate exception: a genuine deadlock does not run `defer`s.** When every fiber is parked,
 > nothing is cancelled and nothing can arrive, the parked fibers are torn down where they stand and
-> their `defer`s do **not** run. This is the contract, not a debt — a deadlock is the runtime declaring
+> their `defer`s do **not** run. This covers the task that REPORTS the verdict too (TICKET-152): its
+> frames unwind without running their `defer`s, so a `defer` that closes a file does not run on a
+> deadlock. That is Go's trade-off, taken deliberately: the alternative is cleanup code running inside
+> a runtime that has already declared that no task can make progress. This is the contract, not a debt — a deadlock is the runtime declaring
 > the program cannot proceed, which is not a cancellation, and the ancestors draw the line in the same
 > place: Go's `fatal error: all goroutines are asleep - deadlock!` skips its `defer`s (its `panic` path
 > runs them), and CPython does not even reach the question — a `queue.Queue().get()` or an unset
