@@ -14367,12 +14367,12 @@ fn native_method_harvest_strips_self() {
 fn concurrency_methods_resolve_via_harvested_table_with_subst() {
     // Shared[int].set("x") — the param `T` substitutes to `int`, so a str arg is rejected.
     entry_rejects(
-        "import Shared from std.concurrency\nfn main():\n    s := Shared(0)\n    s.set(\"x\")\nmain()\n",
+        "import std.concurrency\nfn main():\n    s := Shared(0)\n    s.set(\"x\")\nmain()\n",
         "expected int",
     );
     // Shared[str].get() composes as a str (T substitutes to str).
     entry_ok(
-        "import Shared from std.concurrency\nfn main():\n    s := Shared(\"hi\")\n    print(s.get() + \"!\")\nmain()\n",
+        "import std.concurrency\nfn main():\n    s := Shared(\"hi\")\n    print(s.get() + \"!\")\nmain()\n",
     );
     // Atomic add/sub numeric gate residual survives the harvest (str box has no `add`).
     entry_rejects(
@@ -14382,7 +14382,7 @@ fn concurrency_methods_resolve_via_harvested_table_with_subst() {
     // Shared[int].update(fn(x): x+1) — the leading `self` is stripped, so the update closure is the
     // only arg the sig expects; it still type-checks after the 4c-followup strip.
     entry_ok(
-        "import Shared from std.concurrency\nfn main():\n    s := Shared(0)\n    s.update(fn(x): x+1)\nmain()\n",
+        "import std.concurrency\nfn main():\n    s := Shared(0)\n    s.update(fn(x): x+1)\nmain()\n",
     );
 }
 
@@ -16823,7 +16823,7 @@ fn spawn_in_plain_fn_ok() {
 fn shared_construct_and_methods_ok() {
     // `Shared(v)` infers its element type from the value (no `[T]` type arg, unlike Channel).
     entry_ok(
-        "import Shared from std.concurrency\nfn main():\n    s := Shared(0)\n    s.set(5)\n    s.update(fn(x): x + 1)\n    print(s.get())\nmain()\n",
+        "import std.concurrency\nfn main():\n    s := Shared(0)\n    s.set(5)\n    s.update(fn(x): x + 1)\n    print(s.get())\nmain()\n",
     );
 }
 
@@ -16831,14 +16831,14 @@ fn shared_construct_and_methods_ok() {
 fn shared_get_returns_element_type() {
     // `get()` yields `T`, so it must compose where a `T` is expected (here, str concat).
     entry_ok(
-        "import Shared from std.concurrency\nfn main():\n    s := Shared(\"hi\")\n    msg := s.get() + \"!\"\n    print(msg)\nmain()\n",
+        "import std.concurrency\nfn main():\n    s := Shared(\"hi\")\n    msg := s.get() + \"!\"\n    print(msg)\nmain()\n",
     );
 }
 
 #[test]
 fn shared_set_wrong_type_rejected() {
     entry_rejects(
-        "import Shared from std.concurrency\nfn main():\n    s := Shared(0)\n    s.set(\"x\")\nmain()\n",
+        "import std.concurrency\nfn main():\n    s := Shared(0)\n    s.set(\"x\")\nmain()\n",
         "expected int",
     );
 }
@@ -16847,7 +16847,7 @@ fn shared_set_wrong_type_rejected() {
 fn shared_update_fn_arity_rejected() {
     // `update` takes `fn(T) -> T`; a two-param closure must not type-check.
     entry_rejects(
-        "import Shared from std.concurrency\nfn main():\n    s := Shared(0)\n    s.update(fn(x, y): x + y)\nmain()\n",
+        "import std.concurrency\nfn main():\n    s := Shared(0)\n    s.update(fn(x, y): x + y)\nmain()\n",
         "argument 1 of 'update'",
     );
 }
@@ -16857,7 +16857,7 @@ fn shared_accepts_turbofish() {
     // `Shared[T](v)` — the turbofish is OPTIONAL (value-first), and when present pins the element
     // type. It must agree with the value's inferred type.
     entry_ok(
-        "import Shared from std.concurrency\nfn main():\n    s := Shared[int](0)\n    print(s.get())\nmain()\n",
+        "import std.concurrency\nfn main():\n    s := Shared[int](0)\n    print(s.get())\nmain()\n",
     );
 }
 
@@ -17128,7 +17128,7 @@ fn atomic_accepts_turbofish() {
 fn concurrency_ctor_turbofish_checks_value() {
     // A turbofish element type that disagrees with the value's inferred type is rejected.
     entry_rejects(
-        "import Shared from std.concurrency\nfn main():\n    s := Shared[str](0)\nmain()\n",
+        "import std.concurrency\nfn main():\n    s := Shared[str](0)\nmain()\n",
         "expected element type str, found int",
     );
     entry_rejects(
@@ -17144,7 +17144,7 @@ fn concurrency_ctor_turbofish_checks_value() {
 #[test]
 fn concurrency_ctor_turbofish_arity() {
     entry_rejects(
-        "import Shared from std.concurrency\nfn main():\n    s := Shared[int, str](0)\nmain()\n",
+        "import std.concurrency\nfn main():\n    s := Shared[int, str](0)\nmain()\n",
         "Shared[T]() takes exactly one type argument",
     );
     entry_rejects(
@@ -21361,7 +21361,7 @@ fn scalar_cast_still_accepts_the_payload_of_a_rejected_kind() {
         "fn main():\n    ba := bytearray([1, 2])\n    print(int(ba[0]))\n    print(str(ba))\nmain()\n",
     );
     entry_ok(
-        "import Shared from std.concurrency\nfn main():\n    s := Shared(1)\n    print(int(s.get()))\n    print(str(s))\nmain()\n",
+        "import std.concurrency\nfn main():\n    s := Shared(1)\n    print(int(s.get()))\n    print(str(s))\nmain()\n",
     );
     entry_ok(
         "import std.concurrency\nfn main():\n    a := Atomic(1)\n    ai := AtomicInt(1)\n    rw := RwShared(1)\n    print(int(a.load()))\n    print(int(ai.load()))\n    print(int(rw.get()))\nmain()\n",
@@ -24504,7 +24504,7 @@ fn module_fn_docs_all_resolve() {
 #[test]
 fn closure_param_inferred_from_shared_update_conflict_rejected() {
     entry_rejects(
-        "import Shared from std.concurrency\nfn main():\n    s := Shared(0)\n    s.update(fn(x): x.upper())\n",
+        "import std.concurrency\nfn main():\n    s := Shared(0)\n    s.update(fn(x): x.upper())\n",
         "has no method 'upper'",
     );
 }
@@ -24512,7 +24512,7 @@ fn closure_param_inferred_from_shared_update_conflict_rejected() {
 #[test]
 fn closure_param_inferred_from_shared_update_ok() {
     entry_ok(
-        "import Shared from std.concurrency\nfn main():\n    s := Shared(0)\n    s.update(fn(x): x + 1)\n",
+        "import std.concurrency\nfn main():\n    s := Shared(0)\n    s.update(fn(x): x + 1)\n",
     );
 }
 
