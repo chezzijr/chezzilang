@@ -72,7 +72,7 @@ fn no_chz_test_divides_two_wall_clock_samples() {
 /// A name may join the list, but only deliberately, in the commit that adds the clock, with the
 /// reason in that commit message. A test converted to a counted measure must be DELETED from the
 /// list in the same commit that converts it.
-const CLOCK_READING_TESTS: [&str; 28] = [
+const CLOCK_READING_TESTS: [&str; 29] = [
     "a_chezzi_hang_python_survives_is_a_finding",
     "a_cyclic_shared_field_type_graph_is_also_walked_once_per_type",
     "a_shared_field_type_graph_is_walked_once_per_type",
@@ -90,6 +90,11 @@ const CLOCK_READING_TESTS: [&str; 28] = [
     "d5_blocking_sleeps_run_concurrently_not_serialized",
     "d5_owe3_path_c_sleep_in_callback_demotes_frees_worker",
     "deadline_past_fires_immediately",
+    // TICKET-157 (W12-12): the repro for the exponential nested-fn declaration walk. Its bound is
+    // one absolute ceiling over `desugar::run_standalone` + `check`, the same shape and the same
+    // walk as `nested_fn_decl_check_is_not_exponential` below, which is already listed. The cost
+    // is checker re-walking that nothing counts, so there is no counted measure to use.
+    "deep_nested_fn_decl_chain_checks_clean_and_fast",
     "fibers_scale_ready_queue_not_quadratic",
     "nested_fn_decl_check_is_not_exponential",
     "parallel_many_spawns_cheap_and_correct",
