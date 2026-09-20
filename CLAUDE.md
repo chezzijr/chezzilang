@@ -210,13 +210,14 @@ in-progress alongside it.
 > on the release binary, with the archive line for its full history.** Every closed row and all 30
 > bug-hunt session logs (W1..W14) moved verbatim to **`docs/gaps-archive.md`**, so any
 > `docs/gaps.md:NNNN` citation in a closed ticket or in `PROGRESS.md` resolves against the archive at
-> the same line number. **9 open rows** — W8-17, W8-19, W11-13/14/15, W12-5, W12-12, W13-27, W13-28
+> the same line number. **8 open rows** — W8-19, W11-13/14/15, W12-5, W12-12, W13-27, W13-28
 > — plus **6 deferred tickets** in `.project/tickets-deferred/` (082, 083, 084, 086,
 > 087, 090). The pipeline queue is EMPTY: 140 done, 3 rejected, 0 in flight. Wave 14's three
 > redesigns all landed — **D1** a deadlock is fatal (TICKET-135), **D2** a received closure reads the
 > running task's module globals (TICKET-137), **D3** an int never widens into a float slot
-> (TICKET-138). Two W8-17 sub-items the ledger previously carried as open are closed: (e) the `?`
-> unknown-type rendering (TICKET-145) and (f) the `match`-arm caret on the scrutinee (TICKET-149).
+> (TICKET-138). **W8-17 is CLOSED**: (e) the `?` unknown-type rendering (TICKET-145), (f) the
+> `match`-arm caret on the scrutinee (TICKET-149), and (c) the variant-typo triple error, (d) the
+> `unexpected an ...` wording and (g) a literal's one-char `end_col` (TICKET-158).
 >
 > **Wave 11 (2026-09-08)** filed `W11-1..W11-13`, six domains, ticketed as **TICKET-093..098** (093 was
 > the P0, CLOSED 2026-09-08: `fn`-type params were compared COVARIANTLY, so `h: fn(Any) -> Dog = idd`

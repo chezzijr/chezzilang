@@ -223,22 +223,37 @@ fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-/// The 0-based end column of the word starting at 1-based `(line, col)`, or `col` (0-based) + 1 when
-/// the position is not on an identifier char. `pub`: also the `--errors=json` `end_col` renderer
-/// (`main.rs::diags_json`) reuses this rather than writing a second word-boundary scanner — its
-/// `line`/`col` are 1-based, so it adds 1 to this fn's 0-based result.
+/// The 0-based end column of the token starting at 1-based `(line, col)`. Four branches, tested in
+/// this order: a STRING literal (a quote, or a `b`/`r` prefix directly before one — this must come
+/// before the word test, since the prefix letter is a word char), a NUMBER literal, an identifier
+/// word, and otherwise `col` (0-based) + 1. That last branch is also DEC-001's fallback for an
+/// unreadable source (a one-shot fd read returns nothing, so the scan runs on an empty line).
+/// Measures ONE line, so a triple-quoted literal stops at end of line. `pub`: also the
+/// `--errors=json` `end_col` renderer (`main.rs::diags_json`) and the plain-text caret width
+/// (`lexer::render_snippet`) reuse this rather than writing a second scanner — their `line`/`col`
+/// are 1-based, so `diags_json` adds 1 to this fn's 0-based result. Never strips a BOM (DEC-058):
+/// the outermost caller strips once.
 pub fn word_end_col(source: &str, line1: usize, col1: usize) -> u32 {
     let col0 = col1.saturating_sub(1);
     let line = source.lines().nth(line1.saturating_sub(1)).unwrap_or("");
     let chars: Vec<char> = line.chars().collect();
-    let mut end = col0;
-    if end < chars.len() && is_word(chars[end]) {
-        while end < chars.len() && is_word(chars[end]) {
+    let at = |i: usize| chars.get(i).copied();
+    let is_quote = |c: Option<char>| matches!(c, Some('"' | '\''));
+    let end = if is_quote(at(col0))
+        || (matches!(at(col0), Some('b' | 'B' | 'r' | 'R')) && is_quote(at(col0 + 1)))
+    {
+        col0 + measure_string(&chars, col0)
+    } else if matches!(at(col0), Some(c) if c.is_ascii_digit()) {
+        col0 + measure_number(&chars, col0)
+    } else if matches!(at(col0), Some(c) if is_word(c)) {
+        let mut end = col0;
+        while matches!(at(end), Some(c) if is_word(c)) {
             end += 1;
         }
+        end
     } else {
-        end = col0 + 1;
-    }
+        col0 + 1
+    };
     end as u32
 }
 
@@ -2406,9 +2421,9 @@ mod tests {
     /// A5 — a type error inside an IMPORTED module carries its own path (not the entry's), and its
     /// range is computed against the imported module's own text. The entry's `import core.badmod` line
     /// (19 chars) and badmod's own line 1 (16 chars) deliberately differ — and, at the error's column,
-    /// badmod's char is a quote (not a word char, so `word_end_col` stops one past it) while the
-    /// entry's char at that same column sits mid-identifier (`core`, so it would run on) — so computing
-    /// the range against the WRONG source is detectable rather than coincidentally correct.
+    /// badmod's char OPENS a six-char string literal (`"oops"`, so `word_end_col` runs to col 15)
+    /// while the entry's char at that same column is the `r` of `core` (so it would stop at 11) — so
+    /// computing the range against the WRONG source is detectable rather than coincidentally correct.
     #[test]
     fn cross_module_diagnostic_carries_its_own_file_and_range() {
         let dir =
@@ -2433,9 +2448,9 @@ mod tests {
         assert_eq!(d.line, 0);
         assert_eq!(d.col, 9);
         assert_eq!(
-            d.end_col, 10,
-            "range must come from badmod's OWN text (a quote char, not a word) — computed against \
-             the entry's text at the same column it would wrongly run to the end of 'core' (11)"
+            d.end_col, 15,
+            "range must come from badmod's OWN text (a six-char string literal) — computed against \
+             the entry's text at the same column it would wrongly stop at the end of 'core' (11)"
         );
     }
 

@@ -959,6 +959,11 @@ impl Checker {
     /// call sites keeps its own prefix (`"Map key type "`, `"map key type "`, `"Set element type "`,
     /// `"set element type "`). `None` = it may. `Unknown` is tolerated (no cascade).
     ///
+    /// The two TYPE-position sites (`sig.rs`, `Map[..]` / `Set[..]`) store the bare reason in
+    /// `pending_key_reject`; the four literal/comprehension sites (`pattern.rs`) skip their report
+    /// when it carries the identical reason, so one bad annotation prints once. The prefixes differ
+    /// only in capitalization, so the comparison is on the bare reason, never the message.
+    ///
     /// **Two obligations, not one (W7-45).** `Hashable` — the scalars `int`/`str`/`bool`
     /// intrinsically, or a struct/enum/newtype defining `hash(self) -> int`; `float` is refused
     /// (NaN/equality footgun). AND `Eq`: a probe compares candidates with `values_equal` on a hash

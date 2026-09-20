@@ -544,14 +544,14 @@ fn severity_key_is_additive_and_the_clean_case_is_unchanged() {
     // `file` first (checked via `starts_with`, without pinning the exact canonicalized path text —
     // `fs::canonicalize` may not be byte-identical to the literal temp path on every platform), then
     // the fixed key order `line, col, end_line, end_col, severity, message` with their exact values —
-    // `x: int = "s"` puts the error at col 10 (the opening quote), which is not on an identifier char,
-    // so `end_col` is `col + 1` = 11.
+    // `x: int = "s"` puts the error at col 10 (the opening quote); the literal `"s"` is three chars
+    // wide, so `end_col` is 10 + 3 = 13.
     assert!(
         stdout.starts_with("[{\"file\":\""),
         "file key must be first, got: {stdout}"
     );
     assert!(
-        stdout.contains("\"line\":1,\"col\":10,\"end_line\":1,\"end_col\":11,\"severity\":\"error\",\"message\":\""),
+        stdout.contains("\"line\":1,\"col\":10,\"end_line\":1,\"end_col\":13,\"severity\":\"error\",\"message\":\""),
         "JSON must gain file/end_line/end_col keys in the documented order, got: {stdout}"
     );
     assert!(stdout.ends_with("}]"), "got: {stdout}");
@@ -675,7 +675,7 @@ fn cross_module_json_names_the_owning_file_not_the_entry() {
     let stdout = stdout.trim();
 
     let expected = format!(
-        "\"file\":\"{}\",\"line\":1,\"col\":10,\"end_line\":1,\"end_col\":11,",
+        "\"file\":\"{}\",\"line\":1,\"col\":10,\"end_line\":1,\"end_col\":16,",
         badmod.display()
     );
     assert!(
@@ -930,4 +930,214 @@ fn import_from_member_miss_suggests_and_spans_the_member() {
         stdout.contains("\"help\":\"did you mean 'double'?\""),
         "got: {stdout}"
     );
+}
+
+/// Run `chezzi check <file> <extra..>` on `src` and return (stdout, stderr).
+fn check_source(src: &str, extra: &[&str]) -> (String, String) {
+    let t = TmpDir::new();
+    let p = t.write("c.chz", src);
+    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .arg("check")
+        .arg(p.to_str().unwrap())
+        .args(extra)
+        .output()
+        .expect("run chezzi check");
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn match_arm_variant_typo_reports_one_error() {
+    let src = "enum E:\n    Alpha\n    Beta\n\ne := E.Alpha\nmatch e:\n    E.Alpah: print(1)\n    E.Beta: print(2)\n";
+    let (stdout, stderr) = check_source(src, &["--errors=json"]);
+    let n = stdout.matches("\"severity\":\"error\"").count();
+    assert_eq!(
+        n, 1,
+        "a variant typo must report exactly one error, got {n}:\nstdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        stdout.contains("Alpah") && stdout.contains("Alpha"),
+        "stdout={stdout}"
+    );
+}
+
+#[test]
+fn literal_end_col_spans_the_whole_literal() {
+    let (stdout, stderr) = check_source("x: int = \"hello there\"\n", &["--errors=json"]);
+    assert!(
+        stdout.contains("\"end_col\":23"),
+        "end_col must cover the 13-char literal (col 10..23), stdout={stdout} stderr={stderr}"
+    );
+}
+
+#[test]
+fn stray_indent_message_is_english() {
+    let (stdout, stderr) = check_source("x := 1\n    y := 2\n", &[]);
+    let all = format!("{stdout}{stderr}");
+    assert!(
+        !all.contains("unexpected an ") && !all.contains("unexpected a "),
+        "message must not put an article after 'unexpected', got: {all}"
+    );
+}
+
+/// Count `"severity":"error"` objects in `--errors=json` stdout.
+fn error_count(stdout: &str) -> usize {
+    stdout.matches("\"severity\":\"error\"").count()
+}
+
+#[test]
+fn variant_typo_outside_a_match_reports_one_error() {
+    let src = "enum E:\n    Alpha\n    Beta\n\ne := E.Alpah\n";
+    let (stdout, stderr) = check_source(src, &["--errors=json"]);
+    assert_eq!(error_count(&stdout), 1, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("enum 'E' has no variant 'Alpah'")
+            && stdout.contains("\"help\":\"did you mean 'Alpha'?\""),
+        "stdout={stdout}"
+    );
+}
+
+#[test]
+fn a_genuine_non_exhaustive_match_still_reports() {
+    let src = "enum E:\n    Alpha\n    Beta\n\ne := E.Alpha\nmatch e:\n    E.Beta: print(2)\n";
+    let (stdout, stderr) = check_source(src, &["--errors=json"]);
+    assert_eq!(error_count(&stdout), 1, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("non-exhaustive match on E: missing Alpha"),
+        "stdout={stdout}"
+    );
+}
+
+#[test]
+fn a_nested_pattern_variant_typo_reports_one_error() {
+    let src = "enum P:\n    Pair(int, int)\n\nenum Q:\n    One(P)\n\nq := Q.One(P.Pair(1,2))\nmatch q:\n    Q.One(P.Pari(a, b)): print(a)\n";
+    let (stdout, stderr) = check_source(src, &["--errors=json"]);
+    assert_eq!(
+        error_count(&stdout),
+        1,
+        "a nested variant typo must report exactly one error:\nstdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("Pari") && stdout.contains("\"help\":\"did you mean 'Pair'?\""),
+        "stdout={stdout}"
+    );
+}
+
+/// A non-exhaustive match plus one error that is NOT in an arm pattern keeps both errors.
+fn assert_non_exhaustive_plus(src: &str, other: &str) {
+    let (stdout, stderr) = check_source(src, &["--errors=json"]);
+    assert_eq!(
+        error_count(&stdout),
+        2,
+        "expected the non-exhaustive error plus `{other}`:\nstdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("non-exhaustive match on E: missing Alpha"),
+        "stdout={stdout}"
+    );
+    assert!(stdout.contains(other), "stdout={stdout}");
+}
+
+#[test]
+fn a_non_exhaustive_match_with_an_arm_body_error_still_reports() {
+    assert_non_exhaustive_plus(
+        "enum E:\n    Alpha\n    Beta\n\ne := E.Alpha\nmatch e:\n    E.Beta: print(nope)\n",
+        "unknown name 'nope'",
+    );
+}
+
+#[test]
+fn a_non_exhaustive_match_with_a_bad_guard_still_reports() {
+    assert_non_exhaustive_plus(
+        "enum E:\n    Alpha\n    Beta\n\ne := E.Alpha\nmatch e:\n    E.Alpha if 3: print(1)\n    E.Beta: print(2)\n",
+        "match guard must be bool, found int",
+    );
+}
+
+#[test]
+fn a_non_exhaustive_match_expression_with_an_arm_body_error_still_reports() {
+    assert_non_exhaustive_plus(
+        "enum E:\n    Alpha\n    Beta\n\ne := E.Alpha\nv := match e:\n    E.Beta: nope\nprint(v)\n",
+        "unknown name 'nope'",
+    );
+}
+
+#[test]
+fn a_non_exhaustive_recover_tail_match_with_an_arm_body_error_still_reports() {
+    assert_non_exhaustive_plus(
+        "enum E:\n    Alpha\n    Beta\n\nfn pick() -> E:\n    return E.Alpha\n\nr := recover:\n    match pick():\n        E.Beta: nope\nprint(r)\n",
+        "unknown name 'nope'",
+    );
+}
+
+#[test]
+fn float_literal_end_col_spans_the_whole_literal() {
+    let (stdout, stderr) = check_source("x: str = 1.5\n", &["--errors=json"]);
+    assert!(
+        stdout.contains("\"col\":10,\"end_line\":1,\"end_col\":13"),
+        "end_col must cover the 3-char literal `1.5` (col 10..13), stdout={stdout} stderr={stderr}"
+    );
+}
+
+#[test]
+fn a_non_hashable_set_annotation_reports_one_error() {
+    let (stdout, stderr) = check_source("s: Set[(int,int)] = {(1,2)}\n", &["--errors=json"]);
+    assert_eq!(
+        error_count(&stdout),
+        1,
+        "the annotation and the literal are one fact:\nstdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("Set element type must implement Hashable"),
+        "stdout={stdout}"
+    );
+}
+
+#[test]
+fn a_non_hashable_map_annotation_reports_one_error() {
+    let (stdout, stderr) =
+        check_source("m: Map[(int,int), int] = {(1,2): 3}\n", &["--errors=json"]);
+    assert_eq!(
+        error_count(&stdout),
+        1,
+        "the annotation and the literal are one fact:\nstdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("Map key type must implement Hashable"),
+        "stdout={stdout}"
+    );
+}
+
+#[test]
+fn a_hashable_annotation_still_reports_a_bad_element() {
+    let (stdout, stderr) = check_source("s: Set[int] = {1.5}\n", &["--errors=json"]);
+    assert_eq!(error_count(&stdout), 2, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("set element type must implement Hashable")
+            && stdout.contains("found float"),
+        "stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("set element: expected int, found float"),
+        "stdout={stdout}"
+    );
+}
+
+/// The annotation's reported reason must not outlive its own statement: the second statement's
+/// literal has the byte-identical reason and no annotation, so it is that line's only diagnostic.
+#[test]
+fn a_later_unannotated_literal_of_the_same_type_still_reports() {
+    let (stdout, stderr) = check_source(
+        "s: Set[(int,int)] = {(1,2)}\nt := {(3,4)}\n",
+        &["--errors=json"],
+    );
+    assert_eq!(error_count(&stdout), 2, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("\"message\":\"Set element type must implement Hashable")
+            && stdout.contains("\"message\":\"set element type must implement Hashable"),
+        "stdout={stdout}"
+    );
+    assert!(stdout.contains("\"line\":2,\"col\":7"), "stdout={stdout}");
 }

@@ -24,11 +24,10 @@ waves 2–5 `:3057`–`:3286` · the 2026-07-14 four-axis audit `:3568`.
 
 ---
 
-## TABLE — **9 open rows** (all re-verified 2026-09-20)
+## TABLE — **8 open rows** (all re-verified 2026-09-20)
 
 | row | P | domain | what | verified 2026-09-20 | archive |
 |---|---|---|---|---|---|
-| **W8-17** | P3 | diagnostics | Three cosmetics left of the original five (see below for the two that are now stale). | **OPEN** | `:151` |
 | **W8-19** | P2 | affordances | Bundle. Remaining: multi-statement closures (ranked first, own milestone), tuples not `Hashable`, `path.join` rejects `Path`+`str` / no `path.abs`/`path.rel`, `Listener` not selectable in `wait:`, statement-only `recover:`. Global helpers and the `Option` half are DECLINED, do not re-file (the `Result` half closed under TICKET-039). | **OPEN** | `:185` |
 | **W11-13** | P3 | airlock | The isolation warning gates on the READ shape. **Deliberately NOT ticketed** — an under-warn is the acceptable direction; re-open only with a measured runtime-derived table, one program per shape. | **OPEN** | `:12510` |
 | **W11-14** | P3 | cancel | `Vm::guarded_checkpoint` (`src/vm/exec.rs:385`) has the owner hole TICKET-096 fixed at the other two checkpoints. Condition to re-open: the checkpoint runs per ELEMENT and `MnSched::scope_fault` takes the sched lock, so a rung there needs its own `benches/run.chz` measurement. | **OPEN** | `:12511` |
@@ -38,18 +37,19 @@ waves 2–5 `:3057`–`:3286` · the 2026-07-14 four-axis audit `:3568`.
 | **W13-27** | P2 | perf | Introduced by TICKET-131's W13-6 fix. A nursery inside a spawned task costs ~1.8x while its ENCLOSING nursery's body is still open. Identified recovery path, not implemented: farm pool helpers for an outer sched while its body is blocked, not only after `close_body`. **Do not** recover it by restoring the private nested sched at T>=2 — that is W13-6. | **OPEN — not ticketed** | `:12894`, repro `:13233` |
 | **W13-28** | P2 | perf/test | DEBUG binary only. A rendezvous ping-pong whose pair is spawned from INSIDE a spawned task runs bimodally at `CHEZZI_THREADS=8`. The broken pin it caused was already replaced 2026-09-18; what stays open is the bimodality itself. | **not re-verified** — needs a debug test binary and a 10-run sample | `:12895` |
 
-### W8-17 — what is actually left
+### W8-17 — CLOSED (all five sub-items; the row is out of the table)
 
-Two of the five cosmetics this row still listed are **closed**; they were fixed by later tickets that
-did not come back and strike them here.
+Every cosmetic this row listed is closed. (e) and (f) were fixed by later tickets that did not come
+back and strike them here; (c), (d) and (g) closed under TICKET-158 on 2026-09-21. Full history:
+`docs/gaps-archive.md:151`.
 
-| sub-item | 2026-09-20 | |
+| sub-item | 2026-09-21 | |
 |---|---|---|
-| (c) one `match`-arm variant typo prints three errors at one position | **OPEN** | `E.Alpah` prints `enum 'E' has no variant 'Alpah'` and `'Alpah' is not a variant of E` both at `7:5`, plus the derived `non-exhaustive match` |
-| (d) `unexpected an indented block in expression` | **OPEN** | still spelled at `src/parser/mod.rs:3361` + `:3244`; no repro path found in three attempts, so it may be unreachable — check that before fixing |
+| (c) one `match`-arm variant typo prints three errors at one position | **CLOSED** | TICKET-158: `E.Alpah` prints ONE error, `enum 'E' has no variant 'Alpah'` with `did you mean 'Alpha'?`, and no derived `non-exhaustive match`. A nested typo and the `Set`/`set` Hashable duplicate print once too; a non-exhaustive match whose ARM BODY or GUARD holds an unrelated error still reports both |
+| (d) `unexpected an indented block in expression` | **CLOSED** | TICKET-158: reachable via a stray indent (`x := 1` then an indented `y := 2`); now `unexpected indented block in expression`, CPython's `unexpected indent` twin |
 | (e) an unknown type renders as `?` | **CLOSED** | TICKET-145 rewrote the message: `'?' used in a function whose return type is not declared; declare it to return Result or Option (e.g. `-> int?`)` |
 | (f) a `match`-pattern arm carets the scrutinee | **CLOSED** | TICKET-149 (W14-35b) gave arms their own span; the typo above now carets line 7, not the `match e:` line |
-| (g) a literal's `end_col` is one char | **OPEN** | `x: int = "hello there"` → `"col":10,"end_col":11` on a 13-char literal |
+| (g) a literal's `end_col` is one char | **CLOSED** | TICKET-158: `x: int = "hello there"` → `"col":10,"end_col":23`; `word_end_col` now measures a string or number literal, so the LSP squiggle and the plain-text caret span it too |
 
 ### Repros, all run 2026-09-20 on `target/release/chezzi` at `50280d48`
 

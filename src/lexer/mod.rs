@@ -226,9 +226,9 @@ pub fn display_path(p: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// Render a three-line source echo for a diagnostic: a blank gutter line, the source line at
-/// `span.line`, then a caret row underlining the span's column through the end of its word (via
-/// `editor::word_end_col`, the SAME word-boundary scan `--errors=json`'s `end_col` uses — caret
-/// width and `end_col` cannot drift apart). Returns `None` when `span.line` is past the end of
+/// `span.line`, then a caret row underlining the span's column through the end of its identifier
+/// word, string literal or number literal (via `editor::word_end_col`, the SAME scan
+/// `--errors=json`'s `end_col` uses — caret width and `end_col` cannot drift apart). Returns `None` when `span.line` is past the end of
 /// `source`.
 /// Removes at most one leading U+FEFF; a second BOM and a mid-file BOM stay lex errors, matching
 /// CPython measured 2026-09-03.
