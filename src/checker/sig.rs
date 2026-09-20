@@ -2311,6 +2311,23 @@ impl Checker {
                 };
                 self.drop_value_escape_sites(value, sink.as_ref());
                 self.check_assign(target, *op, val_ty, span);
+                // TICKET-089 — `b.get().v = 9` / `s.get()[0] = 9` write into the deep copy a box read
+                // returns, so the write is lost. Walk the target down to its innermost base.
+                let mut base = target;
+                while let ExprKind::Field { obj, .. } | ExprKind::Index { obj, .. } = &base.kind {
+                    base = obj;
+                }
+                if !std::ptr::eq(base, target)
+                    && let Some((bx, reader, _, fix)) = self.read_temporary_of_box(base)
+                {
+                    self.warn(
+                        target.span,
+                        format!(
+                            "this write lands on the copy returned by '{bx}.{reader}()', so it is \
+                             discarded — write through '{bx}.{fix}(…)' instead"
+                        ),
+                    );
+                }
                 // TICKET-032 A1 — `c = b` (both still unrefined empty collections) is a whole-binding
                 // ALIAS, exactly like `c := b`: link the two names so a later pin on either reaches
                 // both. Recorded BELOW `check_assign`, whose funnel unlink (Ident arm) just broke any
@@ -3072,6 +3089,26 @@ impl Checker {
                 // by `infer_recover` / the value-`match`/`if` tails). `?`/`??`/`?.` already yield
                 // the UNWRAPPED payload, so they are not carriers here.
                 let t = self.infer(e);
+                // TICKET-089 — a bare mutating call on a `Shared`/`RwShared`/`Atomic` read temporary
+                // mutates a deep copy and drops it: the write is lost. Returns BEFORE the carrier
+                // match — `s.get().remove(k)` / `.pop()` also return a carrier, and the lost-write
+                // message is the more actionable one, so one statement never carries both.
+                if let ExprKind::Call { callee, .. } = &e.kind
+                    && let ExprKind::Field {
+                        obj, name: method, ..
+                    } = &callee.kind
+                    && let Some((bx, reader, payload, fix)) = self.read_temporary_of_box(obj)
+                    && mutates_receiver(&payload, method)
+                {
+                    self.warn(
+                        e.span,
+                        format!(
+                            "'{method}' mutates the copy returned by '{bx}.{reader}()', so the write \
+                             is discarded — write through '{bx}.{fix}(…)' instead"
+                        ),
+                    );
+                    return;
+                }
                 let carrier = match t {
                     Ty::Result(..) => "Result",
                     Ty::Option(_) => "Option",

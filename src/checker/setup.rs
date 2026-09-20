@@ -2350,6 +2350,39 @@ impl Checker {
     pub(super) fn lookup(&self, name: &str) -> Option<Ty> {
         self.scopes.iter().rev().find_map(|s| s.get(name).cloned())
     }
+    /// TICKET-089 — `e` is a NULLARY read of a `Shared`/`RwShared`/`Atomic` box bound to a bare name
+    /// (`s.get()`, `r.get()`, `a.load()`): the value it returns is a deep copy, so a write to it is
+    /// thrown away (`docs/concurrency.md` §6). Returns `(box name, reader, payload type, write-through
+    /// method)`. Bare-`Ident` receivers only, so the box type comes from `lookup` with no re-inference
+    /// (which would double-report the receiver's diagnostics) — `boxes[0].get()` stays a ceiling.
+    /// `RwShared.read(f)` takes a closure, so it is not this shape.
+    pub(super) fn read_temporary_of_box(
+        &self,
+        e: &Expr,
+    ) -> Option<(String, &'static str, Ty, &'static str)> {
+        let ExprKind::Call { callee, args, .. } = &e.kind else {
+            return None;
+        };
+        let ExprKind::Field {
+            obj, name: reader, ..
+        } = &callee.kind
+        else {
+            return None;
+        };
+        let ExprKind::Ident(name) = &obj.kind else {
+            return None;
+        };
+        if !args.is_empty() {
+            return None;
+        }
+        let (reader, fix, payload) = match (self.lookup(name)?, reader.as_str()) {
+            (Ty::Shared(p), "get") => ("get", "update", *p),
+            (Ty::RwShared(p), "get") => ("get", "write", *p),
+            (Ty::Atomic(p), "load") => ("load", "store", *p),
+            _ => return None,
+        };
+        Some((name.clone(), reader, payload, fix))
+    }
     /// Re-pin `name`'s binding to `ty` **in its OWNING scope** (the same scope `lookup` resolves),
     /// not the innermost one. Used by refine-on-first-use to narrow an empty-collection's `Unknown`
     /// element/key/value slot to the concrete type the first mutating op supplies. `declare` always

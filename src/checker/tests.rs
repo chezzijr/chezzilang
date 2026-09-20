@@ -33559,3 +33559,117 @@ fn entry_warns(src: &str, needle: &str) {
         "expected a warning containing {needle:?}, got: {warns:?}"
     );
 }
+
+/// [`entry_warns`], but the program must carry EXACTLY ONE warning. A `Map`/`List` payload's `remove`/`pop`
+/// returns a carrier, so the W8-2 discarded-`Option` rule would add a second warning to the same statement.
+fn entry_warns_once(src: &str, needle: &str) {
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", src);
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    let (res, warns) = check_graph_diags(&graph, None);
+    assert!(res.is_ok(), "expected no type errors, got: {res:?}");
+    assert_eq!(
+        warns.len(),
+        1,
+        "expected exactly one warning, got: {warns:?}"
+    );
+    assert!(
+        warns[0].message.contains(needle),
+        "expected the warning to contain {needle:?}, got: {warns:?}"
+    );
+}
+
+/// The `RwShared` and `Atomic` twins name their OWN write-through spelling. The needle is the full
+/// `r.write(…)` / `a.store(…)`: the bare word "write" appears in every message of this rule.
+#[test]
+fn mutating_call_on_an_rwshared_or_atomic_read_temporary_warns() {
+    entry_warns(
+        "import std.concurrency\nfn main():\n    r := RwShared[List[int]]([])\n    r.get().push(1)\nmain()\n",
+        "r.write(…)",
+    );
+    entry_warns(
+        "import std.concurrency\nfn main():\n    a := Atomic[List[int]]([])\n    a.load().push(1)\nmain()\n",
+        "a.store(…)",
+    );
+}
+
+/// A field or index assignment through the read temporary loses the write the same way.
+#[test]
+fn an_assign_through_a_read_temporary_warns_for_a_field_and_an_index() {
+    entry_warns(
+        "import std.concurrency\nstruct P:\n    v: int\nfn main():\n    b := Shared(P(0))\n    b.get().v = 9\nmain()\n",
+        "update(…)",
+    );
+    entry_warns(
+        "import std.concurrency\nfn main():\n    s := Shared([7])\n    s.get()[0] = 9\nmain()\n",
+        "update(…)",
+    );
+}
+
+/// The write is lost in every proto: module top level and a `spawn:` block body.
+#[test]
+fn the_read_temporary_warning_fires_at_top_level_and_inside_a_spawn_block() {
+    entry_warns(
+        "import std.concurrency\ns := Shared[List[int]]([])\ns.get().push(1)\n",
+        "update(…)",
+    );
+    entry_warns(
+        "import std.concurrency\nfn main():\n    s := Shared[List[int]]([])\n    parallel:\n        spawn:\n            s.get().push(1)\nmain()\n",
+        "update(…)",
+    );
+}
+
+/// `remove` on a `Map` payload also returns an `Option`, so W8-2 would fire too: the new rule must
+/// return before the carrier match, leaving ONE warning.
+#[test]
+fn a_set_or_map_payload_mutator_on_a_read_temporary_warns_exactly_once() {
+    entry_warns_once(
+        "import std.concurrency\nfn main():\n    s := Shared[Set[int]](Set[int]())\n    s.get().add(1)\nmain()\n",
+        "s.update(…)",
+    );
+    entry_warns_once(
+        "import std.concurrency\nfn main():\n    s := Shared[Map[str, int]]({\"a\": 1})\n    s.get().remove(\"a\")\nmain()\n",
+        "s.update(…)",
+    );
+}
+
+/// A bound temporary or a value-used read is deliberately silent: the binding names a snapshot.
+#[test]
+fn a_used_or_bound_read_temporary_is_not_warned() {
+    entry_no_warn(
+        "import std.concurrency\nfn main():\n    s := Shared[List[int]]([])\n    v := s.get()\n    v.push(1)\n    print(v.len())\nmain()\n",
+    );
+    entry_no_warn(
+        "import std.concurrency\nfn main():\n    s := Shared[List[int]]([1, 2])\n    print(s.get().len())\nmain()\n",
+    );
+}
+
+/// The working spellings, and the same method name on a plain local, never warn.
+#[test]
+fn a_correct_write_through_spelling_and_a_plain_local_are_not_warned() {
+    entry_no_warn(
+        "import std.concurrency\nfn main():\n    s := Shared[List[int]]([])\n    s.update(fn(xs): xs + [1])\n    print(s.get().len())\nmain()\n",
+    );
+    entry_no_warn(
+        "import std.concurrency\nfn main():\n    r := RwShared[List[int]]([])\n    r.write(fn(xs): xs + [1])\n    print(r.get().len())\nmain()\n",
+    );
+    entry_no_warn(
+        "import std.concurrency\nfn main():\n    s := Shared(0)\n    s.set(5)\n    print(s.get())\nmain()\n",
+    );
+    entry_no_warn("fn main():\n    xs := []\n    xs.push(1)\n    print(xs.len())\nmain()\n");
+}
+
+/// Deliberate ceilings, each measured to lose the write at runtime (DEC-097 for the struct method):
+/// a user struct method, a non-mutating bare call, and a `defer` (its own statement arm).
+#[test]
+fn a_struct_method_a_nonmutating_call_and_a_defer_on_a_read_temporary_are_not_warned() {
+    entry_no_warn(
+        "import std.concurrency\nstruct P:\n    v: int\n    fn bump(self):\n        self.v = self.v + 1\nfn main():\n    b := Shared(P(0))\n    b.get().bump()\nmain()\n",
+    );
+    entry_no_warn(
+        "import std.concurrency\nfn main():\n    s := Shared[List[int]]([1])\n    s.get().len()\nmain()\n",
+    );
+    entry_no_warn(
+        "import std.concurrency\nfn main():\n    s := Shared[List[int]]([])\n    defer s.get().push(1)\n    print(1)\nmain()\n",
+    );
+}
