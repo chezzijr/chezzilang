@@ -170,7 +170,7 @@ impl Checker {
                     }
                     return ctor.is_ok() && fields.len() == bindings.len() && sub_irref;
                 }
-                self.check_pattern_qualifier(
+                let qualifier_reported = self.check_pattern_qualifier(
                     module_name,
                     enum_name,
                     name,
@@ -204,7 +204,9 @@ impl Checker {
                                 single_variant && sub_irref
                             }
                             None => {
-                                self.error(span, format!("'{name}' is not a variant of {ty}"));
+                                if !qualifier_reported {
+                                    self.error(span, format!("'{name}' is not a variant of {ty}"));
+                                }
                                 for b in bindings {
                                     self.bind_subpattern(b, &Ty::Unknown, span);
                                 }
@@ -467,7 +469,7 @@ impl Checker {
                             self.declare(name, scrut.clone());
                             return true;
                         }
-                        self.check_pattern_qualifier(
+                        let qualifier_reported = self.check_pattern_qualifier(
                             module_name,
                             enum_name,
                             name,
@@ -475,7 +477,7 @@ impl Checker {
                             span,
                         );
                         let payload = variants.get(name).cloned();
-                        if payload.is_none() {
+                        if payload.is_none() && !qualifier_reported {
                             self.error(
                                 span,
                                 format!(
@@ -1048,6 +1050,7 @@ impl Checker {
         let mut covered = std::collections::HashSet::new();
         let mut has_wildcard = false;
         let mut exh = self.exh_new(&kind);
+        let mut arm_pattern_error = false;
         for arm in arms {
             self.warn_unreachable_arm(
                 has_wildcard,
@@ -1060,6 +1063,9 @@ impl Checker {
             // the binding's OWNING scope survives `pop_scope` (which only removes the arm's binders).
             // The EXPRESSION-position matcher `infer_match` keeps its barrier — value-arms stay
             // independent.
+            // The mark spans the arm PATTERN only, never the guard or the body: an unrelated error
+            // inside an arm must not hide a genuinely non-exhaustive match.
+            let pat_mark = self.errors.len();
             let irref = self.bind_match_arm(
                 &arm.pattern,
                 &kind,
@@ -1067,6 +1073,7 @@ impl Checker {
                 &mut covered,
                 arm.guard.is_some(),
             );
+            arm_pattern_error |= self.errors.len() > pat_mark;
             // The guard is type-checked with the arm's bindings in scope. A guarded arm is never
             // irrefutable — its guard may fail at runtime — so it can't make the match exhaustive.
             if let Some(guard) = &arm.guard {
@@ -1081,7 +1088,9 @@ impl Checker {
             self.pop_scope();
         }
         let help = self.exh_help(&exh);
-        self.check_exhaustive(&kind, &covered, has_wildcard, help, scrutinee.span);
+        if !arm_pattern_error {
+            self.check_exhaustive(&kind, &covered, has_wildcard, help, scrutinee.span);
+        }
     }
 
     /// Infer an expression-position `match`: bind each arm, infer its value, and unify the arm
@@ -1104,11 +1113,13 @@ impl Checker {
         let mut covered = std::collections::HashSet::new();
         let mut has_wildcard = false;
         let mut exh = self.exh_new(&kind);
+        let mut arm_pattern_error = false;
         let mut arm_tys: Vec<(Span, Ty)> = Vec::new();
         for arm in arms {
             self.warn_unreachable_arm(has_wildcard, arm.body.span);
             // No refine-on-first-use barrier here: a pin made in a value arm PERSISTS, exactly like
             // statement position. See the note above `Checker::is_unrefined_empty_coll`.
+            let pat_mark = self.errors.len();
             let irref = self.bind_match_arm(
                 &arm.pattern,
                 &kind,
@@ -1116,6 +1127,7 @@ impl Checker {
                 &mut covered,
                 arm.guard.is_some(),
             );
+            arm_pattern_error |= self.errors.len() > pat_mark;
             if let Some(guard) = &arm.guard {
                 self.expect_bool(guard, "match guard");
             }
@@ -1142,7 +1154,9 @@ impl Checker {
             acc
         };
         let help = self.exh_help(&exh);
-        self.check_exhaustive(&kind, &covered, has_wildcard, help, scrutinee.span);
+        if !arm_pattern_error {
+            self.check_exhaustive(&kind, &covered, has_wildcard, help, scrutinee.span);
+        }
         let res = result.unwrap_or(Ty::Unknown);
         if had_hint || coerced.is_some() {
             res
@@ -2048,6 +2062,7 @@ impl Checker {
         let mut covered = std::collections::HashSet::new();
         let mut has_wildcard = false;
         let mut exh = self.exh_new(&kind);
+        let mut arm_pattern_error = false;
         let mut result: Option<Ty> = None;
         let mut uniform = true;
         for arm in arms {
@@ -2055,6 +2070,7 @@ impl Checker {
                 has_wildcard,
                 arm.body.first().map_or(scrutinee.span, |s| s.span),
             );
+            let pat_mark = self.errors.len();
             let irref = self.bind_match_arm(
                 &arm.pattern,
                 &kind,
@@ -2062,6 +2078,7 @@ impl Checker {
                 &mut covered,
                 arm.guard.is_some(),
             );
+            arm_pattern_error |= self.errors.len() > pat_mark;
             if let Some(guard) = &arm.guard {
                 self.expect_bool(guard, "match guard");
             }
@@ -2094,7 +2111,9 @@ impl Checker {
             }
         }
         let help = self.exh_help(&exh);
-        self.check_exhaustive(&kind, &covered, has_wildcard, help, scrutinee.span);
+        if !arm_pattern_error {
+            self.check_exhaustive(&kind, &covered, has_wildcard, help, scrutinee.span);
+        }
         if uniform {
             result.unwrap_or(Ty::Nil)
         } else {
@@ -3408,13 +3427,30 @@ impl Checker {
         }
     }
 
+    /// [`Self::check_pattern_qualifier_inner`], returning whether it reported an error. The caller
+    /// then skips its own `'{name}' is not a variant of ...` line: it would be the same fact at the
+    /// same position. `Checker::warn` writes to `self.warnings`, so `self.errors` holds errors only
+    /// and the length comparison needs no `severity` test.
+    pub(super) fn check_pattern_qualifier(
+        &mut self,
+        module_name: &Option<String>,
+        enum_name: &Option<String>,
+        name: &str,
+        scrut_enum: Option<&str>,
+        span: Span,
+    ) -> bool {
+        let mark = self.errors.len();
+        self.check_pattern_qualifier_inner(module_name, enum_name, name, scrut_enum, span);
+        self.errors.len() > mark
+    }
+
     /// Validate the `Enum.` qualifier on a `case Enum.Variant:` pattern. The named variant must (a)
     /// belong to `enum_name`, and (b) — since variant names may now be shared across enums — name the
     /// **scrutinee's** enum (`scrut_enum`): owning the name isn't enough, because a foreign qualifier
     /// resolves to a different `variant_id` (a dead arm that would still be miscounted toward
     /// exhaustiveness → a "checked-OK" match that traps at runtime). When *unqualified*, a user variant
     /// name is an error — variants must be written qualified (built-in Ok/Err/Some/None stay bare).
-    pub(super) fn check_pattern_qualifier(
+    fn check_pattern_qualifier_inner(
         &mut self,
         module_name: &Option<String>,
         enum_name: &Option<String>,
