@@ -1079,10 +1079,13 @@ Behaviours to know (backed by ureq 3): custom REQUEST header names go on the wir
 (RFC 9110 field names are case-insensitive); redirects are followed up to **ten** hops and the eleventh
 is `Err("<url>: too many redirects")` (CPython and Go both cap at ten); `get_bytes`' non-2xx `Err` names
 the canonical reason (`HTTP 404 Not Found`), not the server's wire phrase; an `Err` message starts with
-the URL. A response with a control byte or NUL in a header value, an `HTTP/1.2` status line, or an
-obs-fold continuation is an `Err` naming `http parse fail` (it was `Ok` with the header dropped under
-ureq 2; CPython accepts all four, Go rejects the first two — `docs/gaps.md` W14-30c). The proxy
-environment variables (`ALL_PROXY`, `HTTP_PROXY`, `http_proxy`) are **ignored** (W14-30d).
+the URL. A response with an `HTTP/1.2` status line or an obs-fold continuation is `Ok` (the folded
+value joins with one space, Go's rule; CPython and Go both accept these). A control byte or NUL in a
+header value is an `Err` whose message names the offending line
+(`malformed MIME header line: "X-Bad: a\x01b"`), as Go's does; that is deliberately stricter than
+ureq 2, which answered `Ok` with the header dropped, and CPython still accepts it. The proxy
+environment variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and the lowercase twins) are
+**honoured**, except that a loopback target (`127.0.0.0/8`, `::1`, `localhost`) goes direct, as in Go.
 `Match`, `Response`, and `ProcResult` are **module-owned** struct types (of `std.regex`, `std.request`,
 and `std.process` respectively), **not** reserved program-global names. Field access on a returned value
 (`.text`/`.status`/`.code`, …) works with **no import**; naming or constructing the type (`m: Match` /

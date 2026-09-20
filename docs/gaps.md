@@ -24,7 +24,7 @@ waves 2–5 `:3057`–`:3286` · the 2026-07-14 four-axis audit `:3568`.
 
 ---
 
-## TABLE — **11 open rows** (all re-verified 2026-09-20)
+## TABLE — **9 open rows** (all re-verified 2026-09-20)
 
 | row | P | domain | what | verified 2026-09-20 | archive |
 |---|---|---|---|---|---|
@@ -37,8 +37,6 @@ waves 2–5 `:3057`–`:3286` · the 2026-07-14 four-axis audit `:3568`.
 | **W12-12** | P2 | tooling | Checker + compiler are exponential (~1.8x/level) in nested-`fn`-DECLARATION depth. **Guarded, not fixed** (TICKET-109): `desugar` rejects past `MAX_FN_NESTING` = 16. A real fix must make the nested walk idempotent, which needs the rollback to snapshot four pieces of state; then lift the limit. | **OPEN** | `:12640` |
 | **W13-27** | P2 | perf | Introduced by TICKET-131's W13-6 fix. A nursery inside a spawned task costs ~1.8x while its ENCLOSING nursery's body is still open. Identified recovery path, not implemented: farm pool helpers for an outer sched while its body is blocked, not only after `close_body`. **Do not** recover it by restoring the private nested sched at T>=2 — that is W13-6. | **OPEN — not ticketed** | `:12894`, repro `:13233` |
 | **W13-28** | P2 | perf/test | DEBUG binary only. A rendezvous ping-pong whose pair is spawned from INSIDE a spawned task runs bimodally at `CHEZZI_THREADS=8`. The broken pin it caused was already replaced 2026-09-18; what stays open is the bimodality itself. | **not re-verified** — needs a debug test binary and a 10-run sample | `:12895` |
-| **W14-30c** | P3 | std.request | ureq 3's parser is stricter than ureq 2 and than both ancestors on four malformed response shapes, and the message does not name the offending header or line (Go's does). | **OPEN** | `:13366` |
-| **W14-30d** | P3 | std.request | `std.request` ignores `ALL_PROXY`/`HTTPS_PROXY`/`HTTP_PROXY` and the lowercase twins. | **OPEN** | `:13367` |
 
 ### W8-17 — what is actually left
 
@@ -77,13 +75,6 @@ did not come back and strike them here.
     # W13-27 — fan_open vs fan_closed, release, 5 runs each (min/median, ms)
     T=8       fan_open  338/377    fan_closed  185/198
     default   fan_open  342/351    fan_closed  185/188
-
-    # W14-30c — a control byte in a header value
-    ERR http://127.0.0.1:18802/: protocol: http parse fail: invalid header value   # names no header
-
-    # W14-30d — with http_proxy=http://127.0.0.1:1 exported
-    chezzi   200 direct
-    cpython  URLError <urlopen error [Errno 111] Connection refused>
 
 ---
 

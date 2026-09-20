@@ -31,6 +31,7 @@ pub mod process;
 pub mod rand;
 pub mod regex;
 pub mod request;
+mod request_head;
 pub mod time;
 pub mod uuid;
 

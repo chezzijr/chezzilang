@@ -21,16 +21,21 @@
 //! Redirects are followed up to ten hops (ureq 3's default; CPython and Go both cap at ten) and the
 //! eleventh is `Err("... too many redirects")`. Measured wire/message changes the ureq 2 -> 3 move
 //! brought: custom REQUEST header names go out lowercased (the `http` crate normalizes every
-//! `HeaderName`; RFC 9110 field names are case-insensitive); the `HTTP_PROXY`/`ALL_PROXY` family is
-//! still ignored (`.proxy(None)`, W14-30d); `get_bytes`' non-2xx `Err` names the canonical reason,
-//! not the server's wire phrase (`http::StatusCode` drops it); and the parser now REJECTS a control
-//! byte or NUL in a header value, an `HTTP/1.2` status line and an obs-fold continuation, which
-//! ureq 2 accepted with the header dropped (W14-30c).
+//! `HeaderName`; RFC 9110 field names are case-insensitive); the `HTTP_PROXY`/`HTTPS_PROXY`/
+//! `ALL_PROXY` family and the lowercase twins are HONOURED, with Go's loopback exemption (`127.0.0.0/8`,
+//! `::1`, `localhost` go direct; W14-30d); `get_bytes`' non-2xx `Err` names the canonical reason,
+//! not the server's wire phrase (`http::StatusCode` drops it); and the parser REJECTS a control
+//! byte or NUL in a header value, with a message naming the line as Go does (ureq 2 accepted it
+//! with the header dropped). An `HTTP/1.2` status line and an obs-fold continuation are accepted,
+//! the folded value joined with one space, as Go does (W14-30c; see `request_head`).
 
+use super::request_head::LenientHeadConnector;
 use super::{Host, HostError, Kind, NativeFn, NativeRet, expect_args, expect_args_range};
 use std::io::Read;
 use std::time::Duration;
 use ureq::http::{Request, Response};
+use ureq::unversioned::resolver::DefaultResolver;
+use ureq::unversioned::transport::{Connector, DefaultConnector};
 use ureq::{Agent, AsSendBody, Body};
 
 /// Cap on a `get_bytes` download. Mirrors `io::read_bytes`' `MAX_READ_FILE_BYTES` — the text path is
@@ -50,22 +55,55 @@ thread_local! {
     /// - `http_status_as_error(false)`: ureq 3 otherwise turns a `>= 400` into `Error::StatusCode`
     ///   and drops the response, but a `>= 400` is a normal `Response` here.
     /// - `allow_non_standard_methods(true)`: `request("FOO", ...)` is refused otherwise.
-    /// - `proxy(None)`: ureq 3 defaults to `Proxy::try_from_env()`; ureq 2 never read the env, Go
-    ///   exempts loopback and CPython does not, so honouring it would reroute loopback requests
-    ///   (W14-30d).
+    /// - `proxy(None)`: the agent default stays `None`; `send` sets the proxy PER REQUEST from the
+    ///   env (`proxy_for`) so a loopback target goes direct, as in Go (W14-30d). An agent-level
+    ///   proxy would be decided by whichever request built the process-lifetime agent first.
+    ///
+    /// The connector chain ends in `LenientHeadConnector`, which rewrites each response head so an
+    /// `HTTP/1.2` status line and an obs-fold continuation parse (W14-30c).
     ///
     /// The body-phase timeouts stay UNSET: ureq 2's read/write timeouts reset on every socket op, but
     /// ureq 3's are whole-phase deadlines that would kill a slow 64MB download. `max_redirects` is
     /// deliberately left at ureq 3's default of ten, which is what both CPython and Go cap at.
-    static AGENT: Agent = Agent::config_builder()
-        .http_status_as_error(false)
-        .allow_non_standard_methods(true)
-        .proxy(None)
-        .timeout_connect(Some(Duration::from_secs(10)))
-        .timeout_send_request(Some(Duration::from_secs(30)))
-        .timeout_recv_response(Some(Duration::from_secs(30)))
-        .build()
-        .new_agent();
+    static AGENT: Agent = {
+        let config = Agent::config_builder()
+            .http_status_as_error(false)
+            .allow_non_standard_methods(true)
+            .proxy(None)
+            .timeout_connect(Some(Duration::from_secs(10)))
+            .timeout_send_request(Some(Duration::from_secs(30)))
+            .timeout_recv_response(Some(Duration::from_secs(30)))
+            .build();
+        let connector = DefaultConnector::new().chain(LenientHeadConnector);
+        Agent::with_parts(config, connector, DefaultResolver::default())
+    };
+}
+
+/// Whether `url`'s host is loopback, which Go's `useProxy` exempts from the proxy env.
+fn is_loopback_host(url: &str) -> bool {
+    let Ok(uri) = url.parse::<ureq::http::Uri>() else {
+        return false;
+    };
+    let Some(host) = uri.host() else {
+        return false;
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip.is_loopback(),
+        Err(_) => false,
+    }
+}
+
+/// The proxy for one request: the env's, unless the target is loopback (Go's rule).
+fn proxy_for(url: &str) -> Option<ureq::Proxy> {
+    if is_loopback_host(url) {
+        None
+    } else {
+        ureq::Proxy::try_from_env()
+    }
 }
 
 /// Decode header-value bytes latin-1 (byte -> code point). RFC 9110 makes a field value opaque
@@ -88,9 +126,15 @@ fn send<T: AsSendBody>(
         builder = builder.header(k.as_str(), v.as_str());
     }
     let req = builder.body(body).map_err(ureq::Error::Http)?;
-    let req = match timeout {
-        Some(d) => agent.configure_request(req).timeout_global(Some(d)).build(),
-        None => req,
+    let proxy = proxy_for(url);
+    let req = if timeout.is_some() || proxy.is_some() {
+        agent
+            .configure_request(req)
+            .timeout_global(timeout)
+            .proxy(proxy)
+            .build()
+    } else {
+        req
     };
     agent.run(req)
 }
@@ -717,22 +761,27 @@ mod tests {
 
     #[test]
     fn a_control_byte_header_value_is_an_error_not_a_silent_drop() {
-        // ureq 2 answered Ok with the header dropped; ureq 3's parser rejects the response (W14-30c).
+        // ureq 2 answered Ok with the header dropped; ureq 3 refuses the response and the head
+        // wrapper names the offending line, as Go does (W14-30c).
         let (url, handle) = serve_raw(
             b"HTTP/1.1 200 OK\r\nX-Bad: a\x01b\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
         );
         let ret = do_get(&url, None);
         handle.join().unwrap();
         match ret {
-            NativeRet::Err(m) => assert!(m.contains("invalid header value"), "message: {m}"),
+            NativeRet::Err(m) => assert!(
+                m.contains("malformed MIME header line") && m.contains("X-Bad"),
+                "message: {m}"
+            ),
             other => panic!("expected Err, got {other:?}"),
         }
     }
 
     #[test]
-    fn an_http_1_2_status_line_is_an_error() {
+    fn an_http_2_0_status_line_is_still_an_error() {
+        // The relaxation covers only a single-digit `HTTP/1.x` minor, not any other major.
         let (url, handle) =
-            serve_raw(b"HTTP/1.2 200 OK\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+            serve_raw(b"HTTP/2.0 200 OK\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
         let ret = do_get(&url, None);
         handle.join().unwrap();
         match ret {
@@ -770,6 +819,36 @@ mod tests {
         match ret {
             NativeRet::Err(m) => assert!(m.contains("X-Bad"), "message: {m}"),
             other => panic!("expected Err, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_obs_fold_continuation_joins_with_one_space_like_go() {
+        // Go yields `X-Fold="a b"`; CPython keeps the raw CRLF, which a `map[str, str]` cannot hold.
+        let (url, handle) = serve_raw(
+            b"HTTP/1.1 200 OK\r\nX-Fold: a\r\n b\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+        );
+        let ret = do_get(&url, None);
+        handle.join().unwrap();
+        assert!(
+            header_pairs(&ret).contains(&("x-fold".into(), "a b".into())),
+            "x-fold missing or misjoined: {:?}",
+            header_pairs(&ret)
+        );
+    }
+
+    #[test]
+    fn is_loopback_host_matches_gos_useproxy_rule() {
+        for url in [
+            "http://127.0.0.1:8080/",
+            "http://localhost/",
+            "http://[::1]:9/",
+            "http://127.255.255.254/",
+        ] {
+            assert!(is_loopback_host(url), "{url} must be loopback");
+        }
+        for url in ["http://example.com/", "https://1.2.3.4/", "not a url"] {
+            assert!(!is_loopback_host(url), "{url} must not be loopback");
         }
     }
 

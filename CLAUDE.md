@@ -210,8 +210,8 @@ in-progress alongside it.
 > on the release binary, with the archive line for its full history.** Every closed row and all 30
 > bug-hunt session logs (W1..W14) moved verbatim to **`docs/gaps-archive.md`**, so any
 > `docs/gaps.md:NNNN` citation in a closed ticket or in `PROGRESS.md` resolves against the archive at
-> the same line number. **11 open rows** — W8-17, W8-19, W11-13/14/15, W12-5, W12-12, W13-27, W13-28,
-> W14-30c, W14-30d — plus **7 deferred tickets** in `.project/tickets-deferred/` (082, 083, 084, 086,
+> the same line number. **9 open rows** — W8-17, W8-19, W11-13/14/15, W12-5, W12-12, W13-27, W13-28
+> — plus **7 deferred tickets** in `.project/tickets-deferred/` (082, 083, 084, 086,
 > 087, 089, 090). The pipeline queue is EMPTY: 140 done, 3 rejected, 0 in flight. Wave 14's three
 > redesigns all landed — **D1** a deadlock is fatal (TICKET-135), **D2** a received closure reads the
 > running task's module globals (TICKET-137), **D3** an int never widens into a float slot

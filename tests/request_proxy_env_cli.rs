@@ -1,6 +1,8 @@
-//! `std.request` ignores the proxy environment variables (W14-30d). ureq 3 defaults to
-//! `Proxy::try_from_env()`, which would reroute even a loopback request through an exported dead
-//! proxy; ureq 2 never read the env and Go exempts loopback, so the agent sets `.proxy(None)`.
+//! `std.request` honours the proxy environment variables with Go's loopback exemption (W14-30d):
+//! a public host goes through an exported proxy, a loopback target (`127.0.0.1`, `localhost`,
+//! `::1`) goes direct. Without the exemption ureq 3's `Proxy::try_from_env()` would reroute every
+//! loopback test through a developer's proxy; CPython does not exempt loopback, Go does, and this
+//! follows Go.
 //!
 //! The env goes on a CHILD `chezzi` process: the agent is a `thread_local` built on first use, so an
 //! in-process `set_var` would decide another test's agent.
