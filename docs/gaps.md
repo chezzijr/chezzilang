@@ -24,12 +24,12 @@ waves 2–5 `:3057`–`:3286` · the 2026-07-14 four-axis audit `:3568`.
 
 ---
 
-## TABLE — open rows, **11 open** (all re-verified 2026-09-20)
+## TABLE — **11 open rows** (all re-verified 2026-09-20)
 
 | row | P | domain | what | verified 2026-09-20 | archive |
 |---|---|---|---|---|---|
 | **W8-17** | P3 | diagnostics | Three cosmetics left of the original five (see below for the two that are now stale). | **OPEN** | `:151` |
-| **W8-19** | P2 | affordances | Bundle. Remaining: multi-statement closures (ranked first, own milestone), tuples not `Hashable`, `path.join` rejects `Path`+`str` / no `path.abs`/`path.rel`, `Listener` not selectable in `wait:`, statement-only `recover:`. Global helpers and the `Option` half are DECLINED, do not re-file. | **OPEN** | `:185` |
+| **W8-19** | P2 | affordances | Bundle. Remaining: multi-statement closures (ranked first, own milestone), tuples not `Hashable`, `path.join` rejects `Path`+`str` / no `path.abs`/`path.rel`, `Listener` not selectable in `wait:`, statement-only `recover:`. Global helpers and the `Option` half are DECLINED, do not re-file (the `Result` half closed under TICKET-039). | **OPEN** | `:185` |
 | **W11-13** | P3 | airlock | The isolation warning gates on the READ shape. **Deliberately NOT ticketed** — an under-warn is the acceptable direction; re-open only with a measured runtime-derived table, one program per shape. | **OPEN** | `:12510` |
 | **W11-14** | P3 | cancel | `Vm::guarded_checkpoint` (`src/vm/exec.rs:385`) has the owner hole TICKET-096 fixed at the other two checkpoints. Condition to re-open: the checkpoint runs per ELEMENT and `MnSched::scope_fault` takes the sched lock, so a rung there needs its own `benches/run.chz` measurement. | **OPEN** | `:12511` |
 | **W11-15** | P3 | airlock | The three `RwShared` stores (`Op::NewRwShared`, `RwShared.set`, `RwShared.write`) still split a DAG alias into two copies. Re-opens with a rebuild path sharing one map across the piecewise drains. Pinned by `airlock_rwshared_store_dag_alias_is_a_known_residual`. | **OPEN** | `:12512` |

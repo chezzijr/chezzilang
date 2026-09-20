@@ -3,8 +3,10 @@
 //! 18 / 25 / 16, each locally correct when written. TICKET-011 established that all three must
 //! agree; nothing enforced it, because a stale number fails no assertion. This is that assertion.
 //!
-//! The table in `docs/gaps.md` is the source of truth: one `| **W8-n** |` row per OPEN row (a
-//! closed row is struck as `| ~~**W8-n**~~ |` and stops matching). The two prose counters —
+//! The table in `docs/gaps.md` is the source of truth: one `| **W<wave>-n** |` row per OPEN row (a
+//! closed row is struck as `| ~~**W<wave>-n**~~ |` and stops matching, and a closed row now lives in
+//! `docs/gaps-archive.md`). The filter was `| **W8-` until 2026-09-20, when the ledger split left it
+//! holding open rows from W8 through W14; a wave-scoped filter would have counted 2 of 11. The two prose counters —
 //! `docs/gaps.md`'s section header and `CLAUDE.md`'s START HERE paragraph — must equal it.
 
 use std::fs;
@@ -36,7 +38,7 @@ fn claimed(text: &str, path: &str) -> usize {
 #[test]
 fn open_row_counters_agree_with_the_gaps_table() {
     let gaps = read("docs/gaps.md");
-    let rows = gaps.lines().filter(|l| l.starts_with("| **W8-")).count();
+    let rows = gaps.lines().filter(|l| l.starts_with("| **W")).count();
     assert_eq!(
         claimed(&gaps, "docs/gaps.md"),
         rows,
@@ -46,7 +48,7 @@ fn open_row_counters_agree_with_the_gaps_table() {
         claimed(&read("CLAUDE.md"), "CLAUDE.md"),
         rows,
         "CLAUDE.md's START HERE count disagrees with docs/gaps.md's table ({rows} unstruck rows) — \
-         re-derive it with: grep -c '^| \\*\\*W8-' docs/gaps.md"
+         re-derive it with: grep -c '^| \\*\\*W' docs/gaps.md"
     );
 }
 
@@ -59,7 +61,7 @@ fn a_row_that_says_closed_is_struck() {
     let gaps = read("docs/gaps.md");
     let stale: Vec<&str> = gaps
         .lines()
-        .filter(|l| l.starts_with("| **W8-"))
+        .filter(|l| l.starts_with("| **W"))
         .filter(|l| l.get(..400).unwrap_or(l).contains("CLOSED"))
         .map(|l| l.split('|').nth(1).unwrap_or(l).trim())
         .collect();
