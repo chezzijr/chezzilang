@@ -1,0 +1,41 @@
+# TICKET-159 (W13-27) — a nursery inside a spawned task registers a fiber-owned scope on that
+# task's own sched (TICKET-131). While the ENCLOSING nursery's body is still open (main blocks on
+# `recv`), `farm_outermost_eager_helpers` has not run yet, so the inner nursery's children run on
+# the outer drainer alone: 1.75 s vs 0.95 s once the outer body is closed (release, 8 children of
+# burn(1500000), measured at CHEZZI_THREADS=2 and 8). The bound is one absolute wall-clock ceiling
+# with headroom between the two, never a quotient of two samples.
+import std.concurrency
+import std.time
+
+fn burn(n: int) -> int:
+    x := 0
+    i := 0
+    while i < n:
+        x = x + i * i - i
+        i += 1
+    return x
+
+fn fan_open() -> int:
+    ch := Channel[int](0)
+    got := 0
+    parallel:
+        spawn:
+            parallel:
+                spawn: burn(1500000)
+                spawn: burn(1500000)
+                spawn: burn(1500000)
+                spawn: burn(1500000)
+                spawn: burn(1500000)
+                spawn: burn(1500000)
+                spawn: burn(1500000)
+                spawn: burn(1500000)
+            ch.send(1)
+        got = ch.recv()
+    return got
+
+test fn nested_nursery_fans_out_while_outer_body_is_open():
+    t0 := time.monotonic()
+    got := fan_open()
+    ms := (time.monotonic() - t0) * 1000.0
+    assert got == 1
+    assert ms < 1350.0, "fan_open took {ms} ms; the outer-closed shape takes ~950 ms"
