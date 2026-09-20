@@ -6,7 +6,9 @@ a fix sketch with `file:line`. Resolved gaps collapse to a one-line log — full
 
 Legend: 🔴 blocks apps · 🟡 friction · ⚪ latent (unreachable) · 🟢 works.
 
-Last updated: 2026-06-23.
+Last updated: 2026-06-23; open entries re-measured 2026-09-20. **This file is the DESIGN/ergonomics
+backlog** — missing surface and deferred scope. Live BUG rows are `docs/gaps.md`; closed rows and
+bug-hunt session logs are `docs/gaps-archive.md`.
 
 > Core constructs all in place (language **still evolves** — features land via own milestone; M19 is
 > pre-JIT perf, not a freeze). This doc = unified actionable backlog (open language/stdlib gaps + M19
@@ -19,11 +21,11 @@ Last updated: 2026-06-23.
 
 ### 🔴 Soundness / correctness nits
 
-- **`INT_MIN` is unwritable as a literal** — `-9223372036854775808` lexes as unary-minus over
-  `i64::MAX` → "number too large", same as Rust. (The companion soundness nit — left-shift wrapping
-  silently to `INT_MIN` — is **resolved**: `<<` now overflow-checks like `+ - * / %` and raises a
-  recoverable `integer overflow in Shl`; only round-trip-safe shifts incl. `-1 << 63 == INT_MIN`
-  still succeed.)
+- ~~**`INT_MIN` is unwritable as a literal**~~ — **RESOLVED** (re-measured 2026-09-20:
+  `x := -9223372036854775808` runs and prints `-9223372036854775808`). The companion soundness nit —
+  left-shift wrapping silently to `INT_MIN` — was resolved earlier: `<<` now overflow-checks like
+  `+ - * / %` and raises a recoverable `integer overflow in Shl`; only round-trip-safe shifts incl.
+  `-1 << 63 == INT_MIN` still succeed.
 
 ### 🟡 Type-system + runtime depth (latent — unreachable on HEAD)
 
@@ -117,9 +119,11 @@ is a predictable first-hour stumble. Ranked by friction.
 *(`print` newline/sep control (gap #5) and `assert` message (gap #6) — both RESOLVED 2026-06-23, see the
 resolved log.)*
 
-**Minor / noted:** no `map.items()` (have `.keys()`/`.values()` + `for k,v`); no `type()`/`typeof`; no
-`input()` (have `std.io.read_line`); no chained comparison (`1<2<3`); `json.parse` widens all numbers to
-float (int-ness lost). `**`/`//` absence is by-design (no base operator).
+**Minor / noted** (re-measured 2026-09-20): no `map.items()` (have `.keys()`/`.values()` + `for k,v`);
+no `type()`/`typeof`. `**`/`//` absence is by-design (no base operator). ~~no `input()`~~ — `std.io.input`
+exists (`native fn input(prompt: str) -> Option[str]`, `std/io.chz:30`). ~~no chained comparison~~ —
+`print(1 < 2 < 3)` prints `true`. ~~`json.parse` widens all numbers to float~~ — closed by the Int/Num
+split (W8-35, TICKET-013): `json.parse("{{\"n\": 3}}")` gives `Ok(Obj({'n': Int(3)}))`.
 
 **Docs clarity (not a bug):** `/` is integer division and `%`/`/` truncate toward zero (`-7%3 == -1`,
 `-7/2 == -3`) — correct-as-designed (see Verified working) but **conflicts with the "Python-feel"

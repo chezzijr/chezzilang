@@ -181,7 +181,7 @@ UPDATE_EDITOR_ASSETS=1 cargo test --test editor_tmlanguage    # regenerate the V
   heuristic verdict (deadlock detection, resource caps, inference fallbacks): when unsure it must
   **decline** (hang / stay silent / ask), never emit a confident wrong answer — a missing answer is
   recoverable, a wrong one teaches distrust of every answer. Worked example + measured Go/CPython
-  table: `docs/gaps.md` **W7-12**.
+  table: `docs/gaps-archive.md` **W7-12**.
 
 ## Where things stand
 
@@ -203,22 +203,33 @@ Chezzi tests green at two worker counts (up from 590 at the start of `feat/span-
 See **[`PROGRESS.md`](PROGRESS.md)** — single source of truth for "what's next."
 
 Right now: **pre-JIT/pre-freeze bug-hunt + drift-fix hunt** is the active phase (Go-concurrency,
-checker↔runtime, and IO drift — live ledger in `docs/gaps.md`), with **M19 — Perf track** paused
+checker↔runtime, and IO drift — live ledger in `docs/gaps.md`, closed rows + session logs in `docs/gaps-archive.md`), with **M19 — Perf track** paused
 in-progress alongside it.
 
-> **START HERE (2026-09-08): `docs/gaps.md` — bug-hunt WAVE 11 filed `W11-1..W11-13`**, six domains,
-> every row re-verified on the release binary at `699be0d2` and ticketed as **TICKET-093..098** (093 was
+> **START HERE (2026-09-20): `docs/gaps.md` is now a SHORT LEDGER — open rows only, each re-verified
+> on the release binary, with the archive line for its full history.** Every closed row and all 30
+> bug-hunt session logs (W1..W14) moved verbatim to **`docs/gaps-archive.md`**, so any
+> `docs/gaps.md:NNNN` citation in a closed ticket or in `PROGRESS.md` resolves against the archive at
+> the same line number. **11 open rows** — W8-17, W8-19, W11-13/14/15, W12-5, W12-12, W13-27, W13-28,
+> W14-30c, W14-30d — plus **7 deferred tickets** in `.project/tickets-deferred/` (082, 083, 084, 086,
+> 087, 089, 090). The pipeline queue is EMPTY: 140 done, 3 rejected, 0 in flight. Wave 14's three
+> redesigns all landed — **D1** a deadlock is fatal (TICKET-135), **D2** a received closure reads the
+> running task's module globals (TICKET-137), **D3** an int never widens into a float slot
+> (TICKET-138). Two W8-17 sub-items the ledger previously carried as open are closed: (e) the `?`
+> unknown-type rendering (TICKET-145) and (f) the `match`-arm caret on the scrutinee (TICKET-149).
+>
+> **Wave 11 (2026-09-08)** filed `W11-1..W11-13`, six domains, ticketed as **TICKET-093..098** (093 was
 > the P0, CLOSED 2026-09-08: `fn`-type params were compared COVARIANTLY, so `h: fn(Any) -> Dog = idd`
-> type-checked and a `Cat` reached a `List[str]` at rc=0 — now strictly INVARIANT). Read wave 11's session log at the END of `docs/gaps.md` before
+> type-checked and a `Cat` reached a `List[str]` at rc=0 — now strictly INVARIANT). Read wave 11's session log in `docs/gaps-archive.md` before
 > working any of them — it also records what the wave found CLEAN (the whole `std.*` surface at ~28 000
 > differential cases, all 32 FFI null guards, `std.net`'s read contract), the parent→child cross-nursery
 > false `deadlock` (CLOSED 2026-09-09, TICKET-099 — replaced the upward-only `MnSched::parent_wake`
 > chain with a run-wide `wake_run_wide` + a peer-veto deadlock predicate), and one row deliberately NOT ticketed
 > (`W11-13`, an airlock warning under-warn — re-open only with a measured runtime-derived table).
-> Older, still open: **2 rows, `W8-17` and `W8-19`.** Bug-hunt wave 10
+> Bug-hunt wave 10
 > (2026-09-05/06) filed `W10-1..W10-26` and **all 26 are closed**: TICKET-060..069 landed overnight through the
 > pipeline and every fix was re-verified on the merged release binary at both worker counts (read the
-> wave-10 session log in `docs/gaps.md` first; `W9-9` closed under TICKET-059).
+> wave-10 session log in `docs/gaps-archive.md` first; `W9-9` closed under TICKET-059).
 > **Bug-hunt wave 9 (2026-09-03/05) closed `W9-1..W9-8`** — all eight fixed, merged and re-verified on
 > the merged binary (TICKET-051..058); read its session log before working this area, and read
 > **`W9-5`** before filing anything about a name collision: that ticket's premise contradicted an
@@ -229,7 +240,7 @@ in-progress alongside it.
 > program judged against a RUN Go/Rust/CPython reference; and a flake comparison must be sampled so a
 > ~5% rate cannot read as `0/30` — one did, and nearly blocked a correct fix.
 >
-> **Historical (2026-08-18): `docs/gaps.md` W8-1..W8-47.** **2 open rows** — W8-17 and
+> **Historical (2026-08-18): `docs/gaps-archive.md` W8-1..W8-47.** **2 open rows** — W8-17 and
 > W8-19 from **dogfood wave 1** (W8-19's struct-copy sub-item landed 2026-08-30, TICKET-030, but the
 > bundle row stays open for its remaining sub-items) (W8-32 from wave 2 closed 2026-08-30, TICKET-024)
 > (**W8-1**, **W8-28**, **W8-29** closed 2026-08-29, TICKET-018 — a bare-digit interpolation hole
@@ -265,7 +276,7 @@ in-progress alongside it.
 > went 10.110 s → 0.009 s). W8-8 was fixed first because rationales elsewhere in the tree cited
 > `CHEZZI_THREADS=1` measurements that had been taken two-wide; **all nine of those were then
 > re-derived on the genuinely 1-wide binary and every one held** (CONFIRMED or UNCHANGED-BY-DESIGN,
-> none false — the walk is in `docs/gaps.md`'s W8 session log, scheduler section, and the measured
+> none false — the walk is in `docs/gaps-archive.md`'s W8 session log, scheduler section, and the measured
 > tables are in `docs/benchmarks.md`). Five are **diagnostics** (two left: W8-13, W8-17 — W8-17 itself has two of its
 > four cosmetic sub-items closed). **None of them was reachable by the standing gates** — a silent
 > wrong answer has no assertion to fail, no gate measures performance, no gate reads a message, no gate
@@ -284,7 +295,7 @@ in-progress alongside it.
 > ~~**W8-35**~~ CLOSED 2026-08-28 (TICKET-013, the Int/Num split) — JSON
 > numbers used to round-trip through f64 (`-0.0` → `0`, a 19-digit id → `9.2e+18`);
 > ~~**W8-26**~~ CLOSED 2026-08-27 (TICKET-001, read-once fix) — `run` *and* `check` on a pipe used to execute an EMPTY program at rc=0 — which was why
-> a repro at `gaps.md:8664` silently stopped reproducing (now unblocked); **W8-25** a closure over a module global loses it at the airlock
+> a repro at `gaps-archive.md:8664` silently stopped reproducing (now unblocked); **W8-25** a closure over a module global loses it at the airlock
 > (3 at module scope, 300 in a fn, Go/Python 300). The other two P0s are **W8-3**, widened rather than
 > re-filed: a cross-task `set` racing an `update` is silently lost (Go's mutex loses nothing) and a
 > cross-box `update`-in-`update` hangs forever with `--timeout` unable to reach it — both because
