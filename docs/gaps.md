@@ -5429,10 +5429,10 @@ assignment is nondeterministic by design) + the real-binary `task_reads_piped_st
 **Lesson for the remaining hunt: an invariant enforced at one seam is not enforced — enumerate every
 task-entry path.**
 
-**New v1 limit it introduces:** `read_line`/`input` are deliberately `Kind::Inline`, not blocking (the off-heap
-`OffloadHost::read_line` is `unreachable!`), so a task blocked in a read now **pins an M:N core worker** —
-K blocked readers occupy K workers until stdin produces lines. Previously impossible (tasks got instant
-EOF). Accepted; offloading stdin reads is its own milestone.
+**New v1 limit it introduces:** `read_line`/`input` are deliberately not `Kind::Blocking` (the off-heap
+`OffloadHost::read_line` is `unreachable!`), so a task blocked in a read once **pinned an M:N core worker** —
+K blocked readers occupied K workers until stdin produced lines. Superseded 2026-09-20 (TICKET-151, W14-40):
+they are `Kind::HostWait` and the engine demotes the worker around the read, so a blocked reader no longer pins one.
 
 ### 3. Three over-rejections introduced by the Go-model int→float fix
 The wave-5 widening fix (untyped **constant** adapts; a typed int **value** never does) rejects three
@@ -13366,7 +13366,7 @@ whole-program faults (deadlock, `os.exit`, resource caps).
 | W14-30b | P2 | std.request | a response header value with any byte outside 0x20..=0x7E plus tab (latin-1 AND UTF-8, e.g. café) is absent from Response.headers: ureq 2.12.1 Header::value() drops it and Response.headers is pub(crate), so no raw-bytes read exists; fix = migrate src/native/request.rs to ureq 3 (raw HeaderValue bytes, latin-1 decode). The http-crate + catch_unwind route was declined (TICKET-143 gate answer) | open |
 | ~~W14-37~~ | P3 | sched | a fatal deadlock verdict still runs the unwound frames' defers (`main` defer ran); Go 1.27's all-goroutines-asleep abort runs none. Residual of TICKET-135: D1 kept the uncaught path's defer behavior, and parked siblings run none (DEC-092) | CLOSED 2026-09-20, TICKET-152: the fatal-deadlock unwind drops its frames without running their defers (`Vm::unwind_no_defer`), matching Go; a recoverable deadlock message and every cancel still run theirs |
 | ~~W14-39~~ | P1 | sched | a sibling's fault cancels a task parked in its nested nursery's body; the cancel unwind skipped the nested nursery's abort, its parked child was orphaned, and the run hung at CHEZZI_THREADS=1 (Go 1.27: panic: boom) | CLOSED 2026-09-19, TICKET-135: the cancel unwind aborts escaped nurseries |
-| W14-40 | P3 | sched | after a callback preempt, a `Kind::Inline` native that blocks the host thread (a stdin read) keeps its width permit; a gated sibling whose fiber is already dequeued waits until it returns | known-limit |
+| ~~W14-40~~ | P3 | sched | after a callback preempt, a `Kind::Inline` native that blocks the host thread (a stdin read) keeps its width permit; a gated sibling whose fiber is already dequeued waits until it returns | CLOSED 2026-09-20, TICKET-151: the four std.io stdin readers are Kind::HostWait; the engine demotes the worker and releases its width permit for the read, at every re-entry depth (a direct io.input starved a sibling too) |
 
 Not filed: `json.parse` rejecting a lone surrogate escape (defensible — a `str` cannot hold one; Go
 substitutes U+FFFD); a spawned-task fault printing only `at main` (deliberate, B4). Clean: every checker

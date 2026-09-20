@@ -506,7 +506,7 @@ pub type NativeFn = fn(&mut dyn Host) -> Result<NativeRet, HostError>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     /// Run inline on the calling worker: pure CPU (math/crypto/encoding/regex/ffi) or a call that
-    /// touches the host stdio/os state (`print`, `read_line`, `now`) and so *cannot* run off-heap.
+    /// touches the host stdio/os state (`print`, `now`) and so *cannot* run off-heap.
     Inline,
     /// D5 — a blocking, **off-heap-safe** syscall the M:N engine offloads to the dirty/blocking pool
     /// instead of running inline, so it can't pin a core worker (the G3 starvation). "Off-heap-safe"
@@ -532,6 +532,11 @@ pub enum Kind {
     /// `Socket`/`Listener` handle over an `Arc`'d core); run by `Vm::net_connect_or_listen`, and the
     /// registered `net::intercepted` placeholder never executes.
     InterceptNet,
+    /// TICKET-151 (W14-40) — an inline native that WAITS ON THE HOST for an unbounded time (`std.io`'s
+    /// stdin readers). It touches host stdio, so it cannot be offloaded (the off-heap host's
+    /// `read_line` is `unreachable!`); instead the engine demotes the worker around the call and
+    /// gives its width slot back, so a runnable sibling is not starved (`Vm::invoke_native`).
+    HostWait,
 }
 
 impl Kind {
@@ -546,7 +551,21 @@ impl Kind {
     pub fn blocks(self) -> bool {
         match self {
             Kind::Blocking | Kind::TimedWait => true,
-            Kind::Inline | Kind::InterceptIo | Kind::InterceptNet => false,
+            Kind::Inline | Kind::HostWait | Kind::InterceptIo | Kind::InterceptNet => false,
+        }
+    }
+
+    /// Does the engine run this native ON the worker thread while it waits on the host, so the
+    /// worker's runner slot (and width permit) must be given back for the call? True for
+    /// [`Kind::Blocking`] (run in place inside a callback, where the offload is unavailable) and
+    /// [`Kind::HostWait`]; false for the rest. Not [`Kind::blocks`]: that drives the offload gate,
+    /// which a `HostWait` native must never reach.
+    ///
+    /// EXHAUSTIVE on purpose (no `_` arm), for the same reason as [`Kind::blocks`].
+    pub fn holds_host_thread(self) -> bool {
+        match self {
+            Kind::Blocking | Kind::HostWait => true,
+            Kind::Inline | Kind::TimedWait | Kind::InterceptIo | Kind::InterceptNet => false,
         }
     }
 }
@@ -1038,6 +1057,20 @@ mod tests {
         assert!(!Kind::Inline.blocks());
         assert!(!Kind::InterceptIo.blocks());
         assert!(!Kind::InterceptNet.blocks());
+        // TICKET-151: a stdin read waits on the host but must NOT reach the offload gate.
+        assert!(!Kind::HostWait.blocks());
+    }
+
+    /// TICKET-151: the two kinds the engine runs on the worker thread while they wait on the host
+    /// are the ones that give the worker's slot back around the call.
+    #[test]
+    fn holds_host_thread_is_true_for_the_two_kinds_run_in_place() {
+        assert!(Kind::Blocking.holds_host_thread());
+        assert!(Kind::HostWait.holds_host_thread());
+        assert!(!Kind::Inline.holds_host_thread());
+        assert!(!Kind::TimedWait.holds_host_thread());
+        assert!(!Kind::InterceptIo.holds_host_thread());
+        assert!(!Kind::InterceptNet.holds_host_thread());
     }
 
     /// D5 — every member of `std.fs` (filesystem syscalls), `std.request` (HTTP via `ureq`) and
@@ -1153,14 +1186,14 @@ mod tests {
             vec![
                 ("print", Kind::Inline),
                 ("eprint", Kind::Inline),
-                ("read_line", Kind::Inline),
-                ("read_all", Kind::Inline),
-                ("read_char", Kind::Inline),
+                ("read_line", Kind::HostWait),
+                ("read_all", Kind::HostWait),
+                ("read_char", Kind::HostWait),
                 ("flush", Kind::Inline),
                 ("isatty", Kind::Inline),
                 ("isatty_stdin", Kind::Inline),
                 ("isatty_stderr", Kind::Inline),
-                ("input", Kind::Inline),
+                ("input", Kind::HostWait),
                 ("_read_file", Kind::Blocking),
                 ("_write_file", Kind::Blocking),
                 // R1 — the binary whole-file twins (`write_bytes` offloads via `NativeArg::Bytes`).

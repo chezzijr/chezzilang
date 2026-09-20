@@ -1345,7 +1345,7 @@ fault-path. Fault-path is a future migration cluster.
 
 ## 3c. Native-registry hygiene: a native's PROPERTIES belong on its registry entry — **DONE 2026-08-05** (option B, plus the interception fold)
 
-**Landed.** `pub enum Kind { Inline, Blocking, TimedWait, InterceptIo, InterceptNet }` is a field of
+**Landed.** `pub enum Kind { Inline, Blocking, TimedWait, InterceptIo, InterceptNet, HostWait }` is a field of
 every `MEMBERS` tuple (`&[(&str, NativeFn, Kind)]`, 192 entries across 14 tables), copied onto
 `Obj::Native` when the module binds (`vm/exec.rs`) and carried through `WireValue`/`SnapValue` and
 `Callee::Native` into `Vm::invoke_native(func, name, kind, args, span)`. `is_blocking` is **deleted**,

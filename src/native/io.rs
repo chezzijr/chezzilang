@@ -186,19 +186,21 @@ pub fn intercepted(_h: &mut dyn Host) -> Result<NativeRet, HostError> {
 
 /// Callable members. `(name, fn, kind)`. The four file seams are [`Kind::Blocking`] (dirty-pool
 /// offload); the six Writer/Reader openers/handles are [`Kind::InterceptIo`] — the engine runs them
-/// itself and their shared `intercepted` placeholder never executes; the rest touch host stdio and run
-/// inline.
+/// itself and their shared `intercepted` placeholder never executes; the four stdin readers
+/// (`read_line`/`read_all`/`read_char`/`input`) are [`Kind::HostWait`] (TICKET-151 — they touch host
+/// stdio so they run inline, and the engine demotes the worker around the wait); the rest touch host
+/// stdio and run inline.
 pub const MEMBERS: &[(&str, NativeFn, Kind)] = &[
     ("print", print, Kind::Inline),
     ("eprint", eprint, Kind::Inline),
-    ("read_line", read_line, Kind::Inline),
-    ("read_all", read_all, Kind::Inline),
-    ("read_char", read_char, Kind::Inline),
+    ("read_line", read_line, Kind::HostWait),
+    ("read_all", read_all, Kind::HostWait),
+    ("read_char", read_char, Kind::HostWait),
     ("flush", flush, Kind::Inline),
     ("isatty", isatty, Kind::Inline),
     ("isatty_stdin", isatty_stdin, Kind::Inline),
     ("isatty_stderr", isatty_stderr, Kind::Inline),
-    ("input", input, Kind::Inline),
+    ("input", input, Kind::HostWait),
     ("_read_file", read_file, Kind::Blocking),
     ("_write_file", write_file, Kind::Blocking),
     ("_read_bytes", read_bytes, Kind::Blocking),

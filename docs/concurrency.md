@@ -1262,8 +1262,9 @@ takes a slot back in FIFO order (`src/vm/width.rs`, a per-scheduler width gate).
 runners, like Go's `GOMAXPROCS=1`: a callback spin no longer starves a sibling, a sleeper or a
 cancelling fault. It fires only when a sibling is runnable or queued, so a lone spin costs nothing.
 A gated thread releases its slot around every wait in place (demotes, guard waits, inline nursery
-joins and aborts, inline sleeps, `Executor.shutdown()`, blocking natives). Known limit (`W14-40`): a
-`Kind::Inline` native that blocks the host thread (a stdin read) keeps its slot.
+joins and aborts, inline sleeps, `Executor.shutdown()`, blocking natives). A `Kind::HostWait` native
+(the `std.io` stdin readers) demotes the worker and gives its slot back for the read, direct or
+inside a callback, so a runnable sibling runs while stdin is withheld, as under Go's `sysmon`.
 
 > **`--threads=N` means N CPU runners — including `N=1`.** This corrects an earlier warning here that
 > `--threads=1` did **not** serialize: it ran TWO workers (`docs/gaps.md` **W8-8**, 8 CPU-bound tasks at

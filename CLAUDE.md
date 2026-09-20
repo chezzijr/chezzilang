@@ -116,8 +116,9 @@ UPDATE_EDITOR_ASSETS=1 cargo test --test editor_tmlanguage    # regenerate the V
   `native::Kind` says how the engine RUNS it: `Inline` (pure CPU, or it touches host stdio/os state),
   `Blocking` (an off-heap-safe syscall — primitive args in, primitive `NativeRet` out, no heap/stdio
   touch during the call — so the M:N engine offloads it to the dirty pool instead of pinning a core
-  worker), `TimedWait` (a deadline WE own — `std.time.sleep_ms` only), or `InterceptIo`/`InterceptNet`
-  (the engine runs it; the registered fn never executes). Getting it wrong is a live starvation bug, not
+  worker), `TimedWait` (a deadline WE own — `std.time.sleep_ms` only), `HostWait` (a host wait we do
+  not own — the `std.io` stdin readers run inline, and the engine demotes the worker for the call),
+  or `InterceptIo`/`InterceptNet` (the engine runs it; the registered fn never executes). Getting it wrong is a live starvation bug, not
   a style nit; omitting it is a compile error, which is the point (`docs/future.md` §3c).
 - After merging an auto-task branch (post-gate ships): delete the branch + prune its worktree
   (`git worktree remove --force <wt>; git worktree prune; git branch -D <branch>`). Stale worktree

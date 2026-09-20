@@ -72,7 +72,7 @@ fn no_chz_test_divides_two_wall_clock_samples() {
 /// A name may join the list, but only deliberately, in the commit that adds the clock, with the
 /// reason in that commit message. A test converted to a counted measure must be DELETED from the
 /// list in the same commit that converts it.
-const CLOCK_READING_TESTS: [&str; 27] = [
+const CLOCK_READING_TESTS: [&str; 28] = [
     "a_chezzi_hang_python_survives_is_a_finding",
     "a_cyclic_shared_field_type_graph_is_also_walked_once_per_type",
     "a_shared_field_type_graph_is_walked_once_per_type",
@@ -100,6 +100,9 @@ const CLOCK_READING_TESTS: [&str; 27] = [
     // "The sibling never ran" has no counted measure; the clock is the outer bound on how
     // long it may stay silent, the same shape as `d3_thousands_of_fibers_does_not_hang_under_a_narrow_cpu_quota`.
     "sibling_runs_while_a_callback_blocks_on_stdin",
+    // TICKET-151: the same liveness deadline for a DIRECT `io.input` (no callback, no spin); the
+    // clock starts at spawn because the fixture prints nothing before the read.
+    "sibling_runs_while_a_direct_stdin_read_blocks",
     // TICKET-072: `core_method`'s `Obj::Str` arm used to clone the whole receiver `String` before
     // dispatching any method, so a borrow-only method like `starts_with` cost O(len(s)) per call.
     // The cost is a Rust-side `String` clone the VM counts nowhere, so there is no counted measure.

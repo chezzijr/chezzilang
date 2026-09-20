@@ -264,7 +264,7 @@ impl Vm {
         match kind {
             Kind::InterceptNet => return self.net_connect_or_listen(name, args, span),
             Kind::InterceptIo => return self.io_native(name, args, span),
-            Kind::Inline | Kind::Blocking | Kind::TimedWait => {}
+            Kind::Inline | Kind::Blocking | Kind::TimedWait | Kind::HostWait => {}
         }
         // D5 — under the M:N engine, a blocking native call (`read_file` / `sleep_ms` / `fs.*`) is
         // OFFLOADED to the dirty pool rather than run inline, so it can't pin a core worker (the G3
@@ -381,7 +381,20 @@ impl Vm {
         let writes_before = self.stdout_writes;
         // TICKET-141 — a `Kind::Blocking` native run inline (its offload path is unavailable inside a
         // callback) waits on the host thread: hold no width permit across it.
-        let in_place = kind == Kind::Blocking;
+        //
+        // TICKET-151 (W14-40) — a `Kind::HostWait` native (a stdin read) waits on the host the same
+        // way, and does so even OUTSIDE a callback, on a fiber that never preempted. Two halves, both
+        // load-bearing: `demote_enter` hands this thread's runner slot to one replacement worker and
+        // accounts `running -> inflight` (a read returns on the user's input, so it must veto the
+        // deadlock predicate); the width release is DEC-141's bracket, without which a gated thread's
+        // own replacement waits on the permit this thread still holds. With only the width bracket a
+        // thread that never preempted moves nothing (`holds_width` is false). Deliberately NOT gated
+        // on `native_reentry > 0`: a direct `io.input` starves a sibling exactly like one in a callback.
+        let host_wait = kind == Kind::HostWait;
+        if host_wait {
+            self.demote_enter("a stdin read", span)?;
+        }
+        let in_place = kind.holds_host_thread();
         if in_place {
             self.width_release();
         }
@@ -389,6 +402,9 @@ impl Vm {
         let raw = func(&mut host);
         if in_place {
             self.width_acquire();
+        }
+        if host_wait {
+            self.demote_exit();
         }
         let ret = raw.map_err(|e| RuntimeError {
             message: e.message,
