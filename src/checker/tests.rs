@@ -17633,7 +17633,7 @@ fn bare_reserved_type_without_typeparam_still_errors() {
 fn concurrency_whole_module_import_ok() {
     // A whole-module `import std.concurrency` licenses all four (value + annotation positions).
     entry_ok(
-        "import Shared from std.concurrency\nfn main():\n    s := Shared(0)\n    r := RwShared(0)\n    a := Atomic(0)\n    ex := Executor()\n    print(s.get())\nmain()\n",
+        "import std.concurrency\nfn main():\n    s := Shared(0)\n    r := RwShared(0)\n    a := Atomic(0)\n    ex := Executor()\n    print(s.get())\nmain()\n",
     );
     entry_ok(
         "import std.concurrency\nfn f(s: Shared[int], r: RwShared[int], a: Atomic[int], ex: Executor):\n    print(s.get())\nfn main():\n    print(1)\nmain()\n",
