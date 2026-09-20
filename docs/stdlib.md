@@ -1073,10 +1073,16 @@ lowercased). A ≥400 status is **not** an error — the code rides in `Response
 transport/DNS/TLS failures become `Err`. Blocking (offloaded under the OS-thread engine) and
 [uninterruptible while in flight](#blocking-calls-cannot-be-interrupted).
 A response header sent more than once is **joined with `, `** in `Response.headers` (Python `requests`;
-`Set-Cookie: a=1` + `Set-Cookie: b=2` → `a=1, b=2`). A header whose value holds a byte outside visible
-ASCII (`0x20..=0x7E` plus tab) — UTF-8 (`café`) included — is currently **absent** from
-`Response.headers`: the HTTP client (ureq 2.12.1) drops it and exposes no raw bytes (`docs/gaps.md`
-**W14-30b**; the fix is a ureq 3 migration).
+`Set-Cookie: a=1` + `Set-Cookie: b=2` → `a=1, b=2`). Each header value is decoded **latin-1** (byte → code point, never fails), so every header the server
+sends is present; a UTF-8 `café` reads back `cafÃ©`, as CPython `urllib` does (`docs/gaps.md` W14-30b).
+Behaviours to know (backed by ureq 3): custom REQUEST header names go on the wire **lowercased**
+(RFC 9110 field names are case-insensitive); redirects are followed up to **ten** hops and the eleventh
+is `Err("<url>: too many redirects")` (CPython and Go both cap at ten); `get_bytes`' non-2xx `Err` names
+the canonical reason (`HTTP 404 Not Found`), not the server's wire phrase; an `Err` message starts with
+the URL. A response with a control byte or NUL in a header value, an `HTTP/1.2` status line, or an
+obs-fold continuation is an `Err` naming `http parse fail` (it was `Ok` with the header dropped under
+ureq 2; CPython accepts all four, Go rejects the first two — `docs/gaps.md` W14-30c). The proxy
+environment variables (`ALL_PROXY`, `HTTP_PROXY`, `http_proxy`) are **ignored** (W14-30d).
 `Match`, `Response`, and `ProcResult` are **module-owned** struct types (of `std.regex`, `std.request`,
 and `std.process` respectively), **not** reserved program-global names. Field access on a returned value
 (`.text`/`.status`/`.code`, …) works with **no import**; naming or constructing the type (`m: Match` /
