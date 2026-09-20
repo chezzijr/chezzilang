@@ -909,3 +909,53 @@ fn import_from_member_miss_suggests_and_spans_the_member() {
         "got: {stdout}"
     );
 }
+
+/// Run `chezzi check <file> <extra..>` on `src` and return (stdout, stderr).
+fn check_source(src: &str, extra: &[&str]) -> (String, String) {
+    let t = TmpDir::new();
+    let p = t.write("c.chz", src);
+    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .arg("check")
+        .arg(p.to_str().unwrap())
+        .args(extra)
+        .output()
+        .expect("run chezzi check");
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn match_arm_variant_typo_reports_one_error() {
+    let src = "enum E:\n    Alpha\n    Beta\n\ne := E.Alpha\nmatch e:\n    E.Alpah: print(1)\n    E.Beta: print(2)\n";
+    let (stdout, stderr) = check_source(src, &["--errors=json"]);
+    let n = stdout.matches("\"severity\":\"error\"").count();
+    assert_eq!(
+        n, 1,
+        "a variant typo must report exactly one error, got {n}:\nstdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        stdout.contains("Alpah") && stdout.contains("Alpha"),
+        "stdout={stdout}"
+    );
+}
+
+#[test]
+fn literal_end_col_spans_the_whole_literal() {
+    let (stdout, stderr) = check_source("x: int = \"hello there\"\n", &["--errors=json"]);
+    assert!(
+        stdout.contains("\"end_col\":23"),
+        "end_col must cover the 13-char literal (col 10..23), stdout={stdout} stderr={stderr}"
+    );
+}
+
+#[test]
+fn stray_indent_message_is_english() {
+    let (stdout, stderr) = check_source("x := 1\n    y := 2\n", &[]);
+    let all = format!("{stdout}{stderr}");
+    assert!(
+        !all.contains("unexpected an ") && !all.contains("unexpected a "),
+        "message must not put an article after 'unexpected', got: {all}"
+    );
+}
