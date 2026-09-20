@@ -71,7 +71,7 @@ and env, and **stdin is ONE source every task shares** (Go's `os.Stdin` / Python
 entry-task-owned). Any task may `io.read_line()` / `io.input()`; a line goes to **exactly one** task
 (never duplicated, never dropped); **which** task gets it is nondeterministic — order it
 yourself (entry task reads, fans out over a `Channel[str]`), exactly as with concurrent `print`. `None`
-means stdin is genuinely exhausted. Details + the v1 core-worker-pinning limit: `docs/stdlib.md` §`std.io`.
+means stdin is genuinely exhausted. Details (a blocked read demotes its worker, so it pins no core worker): `docs/stdlib.md` §`std.io`.
 
 ### The race you can't write
 

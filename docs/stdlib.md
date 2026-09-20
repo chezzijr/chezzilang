@@ -796,8 +796,11 @@ the whole remainder (so a later read in any task sees EOF), `read_char` consumes
 - `None` means stdin is **genuinely exhausted** (a real EOF).
 - Concurrent `io.input(prompt)` calls may interleave prompt and answer (Python-identical): the prompt
   write and the read are not one atomic unit.
-- **v1 limit:** `read_line`/`read_all`/`read_char`/`input` are not offloaded, so a task blocked in a
-  read **pins an M:N core worker** — K blocked readers occupy K workers until stdin produces lines.
+- **A blocked read does not starve other tasks.** `read_line`/`read_all`/`read_char`/`input` are not
+  offloaded (they touch host stdio), but the engine demotes the worker for the call and hands its slot
+  to a replacement thread, so a runnable sibling runs while a task waits on stdin, even at
+  `--threads=1` (as in Go at `GOMAXPROCS=1`). K blocked readers cost K parked OS threads until stdin
+  produces lines, not K core workers.
 
 ### `std.os`
 | Function | Signature | Notes |
