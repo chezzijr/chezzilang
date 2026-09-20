@@ -72,7 +72,7 @@ fn no_chz_test_divides_two_wall_clock_samples() {
 /// A name may join the list, but only deliberately, in the commit that adds the clock, with the
 /// reason in that commit message. A test converted to a counted measure must be DELETED from the
 /// list in the same commit that converts it.
-const CLOCK_READING_TESTS: [&str; 26] = [
+const CLOCK_READING_TESTS: [&str; 27] = [
     "a_chezzi_hang_python_survives_is_a_finding",
     "a_cyclic_shared_field_type_graph_is_also_walked_once_per_type",
     "a_shared_field_type_graph_is_walked_once_per_type",
@@ -95,6 +95,11 @@ const CLOCK_READING_TESTS: [&str; 26] = [
     "parallel_many_spawns_cheap_and_correct",
     "parity_blocking_native_is_an_entry_cancellation_checkpoint_on_both_engines",
     "rwshared_view_over_shared_bindings_is_not_quadratic",
+    // TICKET-151 (W14-40): the bound is a LIVENESS deadline, not a cost measure -- the test
+    // withholds stdin and asks whether a runnable sibling printed before the read returned.
+    // "The sibling never ran" has no counted measure; the clock is the outer bound on how
+    // long it may stay silent, the same shape as `d3_thousands_of_fibers_does_not_hang_under_a_narrow_cpu_quota`.
+    "sibling_runs_while_a_callback_blocks_on_stdin",
     // TICKET-072: `core_method`'s `Obj::Str` arm used to clone the whole receiver `String` before
     // dispatching any method, so a borrow-only method like `starts_with` cost O(len(s)) per call.
     // The cost is a Rust-side `String` clone the VM counts nowhere, so there is no counted measure.
