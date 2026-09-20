@@ -1218,6 +1218,32 @@ fn request_keeps_non_ascii_header_against_local_server() {
     assert_eq!(out, "ok\ntrue\n");
 }
 
+/// W14-30b — the Chezzi-visible half: a UTF-8 `café` header value reads back latin-1 decoded
+/// (`cafÃ©`), as CPython's `urllib` does, not dropped and not replaced with U+FFFD.
+#[test]
+fn request_decodes_a_non_ascii_header_value_latin1() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 1024];
+        let _ = stream.read(&mut buf);
+        let resp =
+            "HTTP/1.1 200 OK\r\nX-Cafe: café\r\nConnection: close\r\nContent-Length: 2\r\n\r\nhi";
+        stream.write_all(resp.as_bytes()).unwrap();
+    });
+
+    let src = format!(
+        "import std.request\nmatch request.get(\"http://{addr}/\"):\n    Ok(resp): print(resp.headers[\"x-cafe\"])\n    Err(e): print(e)\n"
+    );
+    let out = golden_entry(&src);
+    server.join().unwrap();
+    assert_eq!(out, "cafÃ©\n");
+}
+
 /// `std.request` new verbs + custom headers, against a loopback server that records every request's
 /// wire bytes. The M:N run issues a `put` and a header-carrying `request("DELETE", …)`, so the
 /// server accepts twice. Asserts (a) the expected stdout and (b) the right method line + custom
@@ -1263,7 +1289,9 @@ fn request_verbs_and_headers_parity_against_local_server() {
     let deletes = reqs.iter().filter(|r| r.starts_with("DELETE ")).count();
     let with_header = reqs
         .iter()
-        .filter(|r| r.contains("X-Custom: value"))
+        // Lowercased on the wire: the `http` crate normalizes every `HeaderName` (RFC 9110 field
+        // names are case-insensitive), so ureq 3 sends `x-custom`, not ureq 2's `X-Custom`.
+        .filter(|r| r.contains("x-custom: value"))
         .count();
     assert_eq!(puts, 1, "must send PUT");
     assert_eq!(deletes, 1, "must send DELETE");

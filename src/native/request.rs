@@ -1,11 +1,13 @@
-//! `std.request` — a blocking HTTP/HTTPS client (M9), backed by `ureq` (rustls TLS, no async
+//! `std.request` — a blocking HTTP/HTTPS client (M9), backed by `ureq` 3 (rustls TLS, no async
 //! runtime — fits the single-threaded engine). `get`/`post` return a `Result[Response]`; a non-2xx
 //! status is **not** an error (it comes back as a normal `Response` carrying the status), only
 //! transport/DNS/TLS failures lower to `Err`. `Response` is the synthetic struct
-//! `{ status: int, body: str, headers: map[str, str] }` (header names are lowercased by `ureq`).
+//! `{ status: int, body: str, headers: map[str, str] }` (header names are lowercased by the `http`
+//! crate; each value is read as raw bytes and decoded latin-1, byte -> code point, which never
+//! fails — a UTF-8 `café` reads back `cafÃ©`, as CPython's `urllib` does, W14-30b).
 //!
 //! `get_bytes(url, timeout_ms?)` is the binary-download sibling: it returns `Result[bytes]` (the body
-//! read byte-exact via `into_reader`, no `into_string` UTF-8 decode), GET-only + body-only, and — since
+//! read byte-exact via `into_reader`, no UTF-8 decode), GET-only + body-only, and — since
 //! it has no status channel — a non-2xx status becomes `Err` (a 404 error page can't pose as a
 //! successful download). See `io.read_bytes`, the file twin this mirrors.
 //!
@@ -14,28 +16,88 @@
 //! `request(method, url, body, headers, timeout_ms?)` carrying a `map[str, str]` of custom request
 //! headers (read in insertion order). The optional trailing `timeout_ms: int` sets a per-request
 //! total deadline overriding the agent's default caps for that call (`<= 0`/omitted = defaults; a
-//! timeout lowers to `Err` like any transport failure). Redirect configuration and streaming bodies
-//! are still deferred.
+//! timeout lowers to `Err` like any transport failure). Streaming bodies are still deferred.
+//!
+//! Redirects are followed up to ten hops (ureq 3's default; CPython and Go both cap at ten) and the
+//! eleventh is `Err("... too many redirects")`. Measured wire/message changes the ureq 2 -> 3 move
+//! brought: custom REQUEST header names go out lowercased (the `http` crate normalizes every
+//! `HeaderName`; RFC 9110 field names are case-insensitive); the `HTTP_PROXY`/`ALL_PROXY` family is
+//! still ignored (`.proxy(None)`, W14-30d); `get_bytes`' non-2xx `Err` names the canonical reason,
+//! not the server's wire phrase (`http::StatusCode` drops it); and the parser now REJECTS a control
+//! byte or NUL in a header value, an `HTTP/1.2` status line and an obs-fold continuation, which
+//! ureq 2 accepted with the header dropped (W14-30c).
 
 use super::{Host, HostError, Kind, NativeFn, NativeRet, expect_args, expect_args_range};
 use std::io::Read;
 use std::time::Duration;
+use ureq::http::{Request, Response};
+use ureq::{Agent, AsSendBody, Body};
 
 /// Cap on a `get_bytes` download. Mirrors `io::read_bytes`' `MAX_READ_FILE_BYTES` — the text path is
-/// already capped (ureq's ~10MB `into_string` limit), so the binary path needs its own guard or a
+/// already capped (`MAX_TEXT_BYTES`), so the binary path needs its own guard or a
 /// hostile/huge download would OOM the engine.
 // ponytail: 64MB cap mirrors io.read_bytes; make configurable only if a real download needs more.
 const MAX_DOWNLOAD_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Cap on the text path's body (ureq 2's `into_string` limit, kept so the limit does not move).
+const MAX_TEXT_BYTES: u64 = 10 * 1024 * 1024;
+
 thread_local! {
-    /// A process-lifetime agent with connect/read/write timeouts. The language is single-threaded
-    /// with no way to abort a stuck call, so a hung peer would otherwise block the engine forever;
-    /// these caps guarantee `get`/`post` eventually return (an `Err` on timeout).
-    static AGENT: ureq::Agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(10))
-        .timeout_read(Duration::from_secs(30))
-        .timeout_write(Duration::from_secs(30))
-        .build();
+    /// A process-lifetime agent with connect/send/response-head timeouts. The language is
+    /// single-threaded with no way to abort a stuck call, so a hung peer would otherwise block the
+    /// engine forever; these caps guarantee `get`/`post` eventually return (an `Err` on timeout).
+    /// Three settings are NOT ureq 3's defaults and are load-bearing:
+    /// - `http_status_as_error(false)`: ureq 3 otherwise turns a `>= 400` into `Error::StatusCode`
+    ///   and drops the response, but a `>= 400` is a normal `Response` here.
+    /// - `allow_non_standard_methods(true)`: `request("FOO", ...)` is refused otherwise.
+    /// - `proxy(None)`: ureq 3 defaults to `Proxy::try_from_env()`; ureq 2 never read the env, Go
+    ///   exempts loopback and CPython does not, so honouring it would reroute loopback requests
+    ///   (W14-30d).
+    ///
+    /// The body-phase timeouts stay UNSET: ureq 2's read/write timeouts reset on every socket op, but
+    /// ureq 3's are whole-phase deadlines that would kill a slow 64MB download. `max_redirects` is
+    /// deliberately left at ureq 3's default of ten, which is what both CPython and Go cap at.
+    static AGENT: Agent = Agent::config_builder()
+        .http_status_as_error(false)
+        .allow_non_standard_methods(true)
+        .proxy(None)
+        .timeout_connect(Some(Duration::from_secs(10)))
+        .timeout_send_request(Some(Duration::from_secs(30)))
+        .timeout_recv_response(Some(Duration::from_secs(30)))
+        .build()
+        .new_agent();
+}
+
+/// Decode header-value bytes latin-1 (byte -> code point). RFC 9110 makes a field value opaque
+/// bytes; this never fails, unlike a UTF-8 decode, so no header is ever dropped.
+fn latin1(bytes: &[u8]) -> String {
+    bytes.iter().map(|&b| b as char).collect()
+}
+
+/// Build and run one request. `timeout` is a per-request total deadline over the agent's caps.
+fn send<T: AsSendBody>(
+    agent: &Agent,
+    method: &str,
+    url: &str,
+    headers: &[(String, String)],
+    timeout: Option<Duration>,
+    body: T,
+) -> Result<Response<Body>, ureq::Error> {
+    let mut builder = Request::builder().method(method).uri(url);
+    for (k, v) in headers {
+        builder = builder.header(k.as_str(), v.as_str());
+    }
+    let req = builder.body(body).map_err(ureq::Error::Http)?;
+    let req = match timeout {
+        Some(d) => agent.configure_request(req).timeout_global(Some(d)).build(),
+        None => req,
+    };
+    agent.run(req)
+}
+
+/// ureq 3's `Display` drops the URL that ureq 2 printed, so put the `"<url>: "` prefix back.
+fn transport_msg(url: &str, e: &ureq::Error) -> String {
+    format!("{url}: {e}")
 }
 
 /// Build the `Response` struct value from its parts.
@@ -59,54 +121,72 @@ fn response_ret(status: i64, body: String, headers: Vec<(String, String)>) -> Na
 }
 
 /// Read status, headers (sorted + deduped for determinism and to honor the map unique-key
-/// invariant; a header sent more than once is joined with `, `, as Python `requests` does, W14-30),
-/// and body out of a `ureq::Response`, then build a `Result[Response]`. Headers must be
-/// read before `into_string` consumes the response. A body-read failure (truncated/aborted stream)
-/// becomes `Err` rather than a misleading empty-body success.
-fn lower_response(resp: ureq::Response) -> NativeRet {
-    let status = resp.status() as i64;
-    let mut names = resp.headers_names();
+/// invariant; a header sent more than once is joined with `, `, as Python `requests` does, W14-30;
+/// each value is decoded latin-1, W14-30b), and body out of a `Response<Body>`, then build a
+/// `Result[Response]`. Headers must be read before `into_body` consumes the response. A body-read
+/// failure (truncated/aborted stream) becomes `Err` rather than a misleading empty-body success.
+fn lower_response(resp: Response<Body>) -> NativeRet {
+    let status = resp.status().as_u16() as i64;
+    let mut names: Vec<String> = resp
+        .headers()
+        .keys()
+        .map(|k| k.as_str().to_string())
+        .collect();
     names.sort();
-    names.dedup(); // a header name could be listed more than once; one entry per key.
+    names.dedup(); // `keys()` is already unique; kept so the map invariant does not rest on it.
     let headers: Vec<(String, String)> = names
-        .iter()
-        .filter_map(|n| {
-            let vals = resp.all(n);
-            if vals.is_empty() {
-                None
-            } else {
-                Some((n.clone(), vals.join(", ")))
-            }
+        .into_iter()
+        .map(|n| {
+            let joined = resp
+                .headers()
+                .get_all(n.as_str())
+                .iter()
+                .map(|v| latin1(v.as_bytes()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            (n, joined)
         })
         .collect();
-    match resp.into_string() {
-        Ok(body) => NativeRet::Ok(Box::new(response_ret(status, body, headers))),
+    let mut buf = Vec::new();
+    match resp
+        .into_body()
+        .into_reader()
+        .take(MAX_TEXT_BYTES + 1)
+        .read_to_end(&mut buf)
+    {
+        Ok(_) if buf.len() as u64 > MAX_TEXT_BYTES => {
+            NativeRet::Err("failed to read response body: response too big for into_string".into())
+        }
+        Ok(_) => {
+            let body = String::from_utf8_lossy(&buf).into_owned();
+            NativeRet::Ok(Box::new(response_ret(status, body, headers)))
+        }
         Err(e) => NativeRet::Err(format!("failed to read response body: {e}")),
     }
 }
 
 /// Map a ureq call result to a chezzi `Result[Response]`. A `>= 400` status is a normal `Response`
-/// (ureq models it as `Error::Status`); only transport-level failures (DNS/TLS/timeout/connection)
-/// become `Err`.
-fn lower_result(r: Result<ureq::Response, ureq::Error>) -> NativeRet {
+/// (the agent sets `http_status_as_error(false)`); only transport-level failures
+/// (DNS/TLS/timeout/connection/parse) become `Err`.
+fn lower_result(url: &str, r: Result<Response<Body>, ureq::Error>) -> NativeRet {
     match r {
         Ok(resp) => lower_response(resp),
-        Err(ureq::Error::Status(_, resp)) => lower_response(resp),
-        Err(ureq::Error::Transport(t)) => NativeRet::Err(t.to_string()),
+        Err(e) => NativeRet::Err(transport_msg(url, &e)),
     }
 }
 
-/// Read a `ureq::Response`'s body as raw bytes (byte-exact, no UTF-8 decode) into a `Result[bytes]`.
+/// Read a `Response<Body>`'s body as raw bytes (byte-exact, no UTF-8 decode) into a `Result[bytes]`.
 /// A download exceeding `MAX_DOWNLOAD_BYTES` lowers to `Err`; a read that errors mid-stream (e.g. a
 /// `Content-Length`/chunked body that ends short) also lowers to `Err` rather than a lying empty-body
 /// success. Ceiling: a `Connection: close`-delimited body has no promised length, so a premature peer
 /// close is indistinguishable from a clean end — that returns `Ok(partial)` (no HTTP client can detect
-/// it). Called only for a 2xx response — a non-2xx status is turned into `Err`
+/// it). Called only for a non-`>= 400` response — that status is turned into `Err`
 /// by [`lower_result_bytes`] before we get here, so the caller never mistakes a 404/500 error page for
 /// a successful download. Headers are dropped — a binary download is GET-only and body-only.
-fn lower_response_bytes(resp: ureq::Response) -> NativeRet {
+fn lower_response_bytes(resp: Response<Body>) -> NativeRet {
     let mut buf = Vec::new();
     match resp
+        .into_body()
         .into_reader()
         .take(MAX_DOWNLOAD_BYTES + 1)
         .read_to_end(&mut buf)
@@ -121,55 +201,49 @@ fn lower_response_bytes(resp: ureq::Response) -> NativeRet {
 
 /// Byte twin of [`lower_result`], but NOT status-transparent: `get_bytes` returns a bare
 /// `Result[bytes]` with no status channel, so unlike the text `get` (which surfaces a `>= 400` as a
-/// normal `Response` for the caller to inspect), a non-2xx status here MUST become `Err` — otherwise a
+/// normal `Response` for the caller to inspect), a `>= 400` status here MUST become `Err` — otherwise a
 /// 404/500 HTML error page comes back as `Ok(bytes)` and a caller writes it to disk as if the download
-/// succeeded. This matches `io.read_bytes` semantics (a failed read is `Err`, not empty `Ok`).
-fn lower_result_bytes(r: Result<ureq::Response, ureq::Error>) -> NativeRet {
+/// succeeded. This matches `io.read_bytes` semantics (a failed read is `Err`, not empty `Ok`). The
+/// threshold is `>= 400`, not `!is_success()`, so a body-less 304 still answers `Ok`.
+fn lower_result_bytes(url: &str, r: Result<Response<Body>, ureq::Error>) -> NativeRet {
     match r {
+        Ok(resp) if resp.status().as_u16() >= 400 => NativeRet::Err(format!(
+            "HTTP {} {}",
+            resp.status().as_u16(),
+            resp.status().canonical_reason().unwrap_or("")
+        )),
         Ok(resp) => lower_response_bytes(resp),
-        Err(ureq::Error::Status(code, resp)) => {
-            NativeRet::Err(format!("HTTP {code} {}", resp.status_text()))
-        }
-        Err(ureq::Error::Transport(t)) => NativeRet::Err(t.to_string()),
+        Err(e) => NativeRet::Err(transport_msg(url, &e)),
     }
 }
 
 fn do_get(url: &str, timeout: Option<Duration>) -> NativeRet {
-    AGENT.with(|a| {
-        let mut req = a.get(url);
-        if let Some(d) = timeout {
-            req = req.timeout(d);
-        }
-        lower_result(req.call())
-    })
+    AGENT.with(|a| lower_result(url, send(a, "GET", url, &[], timeout, ())))
 }
 
 fn do_get_bytes(url: &str, timeout: Option<Duration>) -> NativeRet {
-    AGENT.with(|a| {
-        let mut req = a.get(url);
-        if let Some(d) = timeout {
-            req = req.timeout(d);
-        }
-        lower_result_bytes(req.call())
-    })
+    AGENT.with(|a| lower_result_bytes(url, send(a, "GET", url, &[], timeout, ())))
 }
 
 fn do_post(url: &str, body: &str, timeout: Option<Duration>) -> NativeRet {
-    AGENT.with(|a| {
-        let mut req = a.post(url);
-        if let Some(d) = timeout {
-            req = req.timeout(d);
-        }
-        lower_result(req.send_string(body))
-    })
+    AGENT.with(|a| lower_result(url, send(a, "POST", url, &[], timeout, body)))
+}
+
+/// Whether ureq 3 frames an empty body on this verb. A `()` body on these puts
+/// `transfer-encoding: chunked` on the wire where ureq 2 sent nothing, so they take `""` instead.
+fn takes_body(method: &str) -> bool {
+    ["POST", "PUT", "PATCH"]
+        .iter()
+        .any(|m| method.eq_ignore_ascii_case(m))
 }
 
 /// The general request path shared by `request`/`put`/`patch`/`delete`/`head`: build a request for
-/// `method` (UPPERCASE verb), apply each custom header via `set`, then send. An empty `body` uses
-/// `.call()` (no request body — correct for `DELETE`/`HEAD`/header-only calls); a non-empty `body`
-/// uses `.send_string(body)`. A `Some(timeout)` applies a per-request total deadline overriding the
-/// agent's default caps for this one call (a hit lowers to `Err` like any transport failure). Lowers
-/// to `Result[Response]` exactly like `get`/`post`.
+/// `method` (UPPERCASE verb), apply each custom header, then send. A non-empty `body` is sent as is;
+/// an empty `body` on POST/PUT/PATCH sends `""` (framed `content-length: 0`, never chunked) and on any
+/// other verb sends no body at all (no framing — correct for `DELETE`/`HEAD`/header-only calls). A
+/// `Some(timeout)` applies a per-request total deadline overriding the agent's default caps for this
+/// one call (a hit lowers to `Err` like any transport failure). Lowers to `Result[Response]` exactly
+/// like `get`/`post`.
 fn do_request(
     method: &str,
     url: &str,
@@ -178,18 +252,12 @@ fn do_request(
     timeout: Option<Duration>,
 ) -> NativeRet {
     AGENT.with(|a| {
-        let mut req = a.request(method, url);
-        for (k, v) in headers {
-            req = req.set(k, v);
-        }
-        if let Some(d) = timeout {
-            req = req.timeout(d);
-        }
-        lower_result(if body.is_empty() {
-            req.call()
+        let r = if !body.is_empty() || takes_body(method) {
+            send(a, method, url, headers, timeout, body)
         } else {
-            req.send_string(body)
-        })
+            send(a, method, url, headers, timeout, ())
+        };
+        lower_result(url, r)
     })
 }
 
@@ -447,8 +515,10 @@ mod tests {
         );
         // The 7-byte body is announced via Content-Length (the body bytes themselves may arrive in a
         // later TCP segment than the headers, so assert on the header rather than the captured body).
+        // Lowercase: the `http` crate lowercases every `HeaderName` and RFC 9110 makes field names
+        // case-insensitive, so ureq 3 sends `content-length`, not ureq 2's `Content-Length`.
         assert!(
-            req.contains("Content-Length: 7"),
+            req.contains("content-length: 7"),
             "PUT body should be sent: {req:?}"
         );
         assert_eq!(field(&ret, "status"), &NativeRet::Int(200));
@@ -576,10 +646,214 @@ mod tests {
         let ret = do_request("POST", &url, "", &headers, None);
         handle.join().unwrap();
         let req = recorded.lock().unwrap().clone();
+        // Lowercased on the wire: the `http` crate normalizes every `HeaderName` (RFC 9110 field
+        // names are case-insensitive); ureq 3 has no knob that carries the original case.
         assert!(
-            req.contains("X-Custom: value"),
+            req.contains("x-custom: value"),
             "custom header missing: {req:?}"
         );
         assert_eq!(field(&ret, "status"), &NativeRet::Int(200));
+    }
+
+    /// Serve the caller's exact bytes as the whole response (no framing added), so a test can send a
+    /// malformed or non-ASCII head. Returns the bound URL and the server thread's join handle.
+    fn serve_raw(raw: &'static [u8]) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf);
+            let _ = stream.write_all(raw);
+        });
+        (format!("http://{addr}/"), handle)
+    }
+
+    /// The `(name, value)` pairs of a lowered `Response`'s `headers` map, in map order.
+    fn header_pairs(ret: &NativeRet) -> Vec<(String, String)> {
+        let NativeRet::Map(entries) = field(ret, "headers") else {
+            panic!("expected Map headers");
+        };
+        entries
+            .iter()
+            .map(|(k, v)| match (k, v) {
+                (NativeRet::Str(k), NativeRet::Str(v)) => (k.clone(), v.clone()),
+                other => panic!("expected Str pair, got {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_latin1_header_value_reads_back_as_its_code_points() {
+        // `X-Cafe: caf` + the single byte 0xe9: ureq 2 dropped the key, ureq 3 keeps the raw byte
+        // and the latin-1 decode turns 0xe9 into U+00E9.
+        let (url, handle) = serve_raw(
+            b"HTTP/1.1 200 OK\r\nX-Cafe: caf\xe9\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+        );
+        let ret = do_get(&url, None);
+        handle.join().unwrap();
+        assert!(
+            header_pairs(&ret).contains(&("x-cafe".into(), "café".into())),
+            "x-cafe missing or misdecoded: {:?}",
+            header_pairs(&ret)
+        );
+    }
+
+    #[test]
+    fn a_utf8_header_value_reads_back_latin1_decoded() {
+        // UTF-8 `café` is the bytes 63 61 66 c3 a9; latin-1 reads c3 a9 as `Ã©`, as CPython does.
+        let (url, handle) = serve_raw(
+            "HTTP/1.1 200 OK\r\nX-Cafe: café\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+                .as_bytes(),
+        );
+        let ret = do_get(&url, None);
+        handle.join().unwrap();
+        assert!(
+            header_pairs(&ret).contains(&("x-cafe".into(), "cafÃ©".into())),
+            "x-cafe missing or misdecoded: {:?}",
+            header_pairs(&ret)
+        );
+    }
+
+    #[test]
+    fn a_control_byte_header_value_is_an_error_not_a_silent_drop() {
+        // ureq 2 answered Ok with the header dropped; ureq 3's parser rejects the response (W14-30c).
+        let (url, handle) = serve_raw(
+            b"HTTP/1.1 200 OK\r\nX-Bad: a\x01b\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+        );
+        let ret = do_get(&url, None);
+        handle.join().unwrap();
+        match ret {
+            NativeRet::Err(m) => assert!(m.contains("invalid header value"), "message: {m}"),
+            other => panic!("expected Err, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_http_1_2_status_line_is_an_error() {
+        let (url, handle) =
+            serve_raw(b"HTTP/1.2 200 OK\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+        let ret = do_get(&url, None);
+        handle.join().unwrap();
+        match ret {
+            NativeRet::Err(m) => assert!(m.contains("invalid HTTP version"), "message: {m}"),
+            other => panic!("expected Err, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_empty_post_body_is_framed_content_length_zero_not_chunked() {
+        let (url, handle, recorded) = serve_once_recording("ok");
+        let ret = do_request("POST", &url, "", &[], None);
+        handle.join().unwrap();
+        let req = recorded.lock().unwrap().clone().to_ascii_lowercase();
+        assert!(req.contains("content-length: 0"), "wire: {req:?}");
+        assert!(!req.contains("chunked"), "wire: {req:?}");
+        assert_eq!(field(&ret, "status"), &NativeRet::Int(200));
+    }
+
+    #[test]
+    fn an_empty_delete_body_sends_no_framing() {
+        let (url, handle, recorded) = serve_once_recording("ok");
+        let ret = do_request("DELETE", &url, "", &[], None);
+        handle.join().unwrap();
+        let req = recorded.lock().unwrap().clone().to_ascii_lowercase();
+        assert!(!req.contains("content-length"), "wire: {req:?}");
+        assert!(!req.contains("transfer-encoding"), "wire: {req:?}");
+        assert_eq!(field(&ret, "status"), &NativeRet::Int(200));
+    }
+
+    #[test]
+    fn a_non_standard_method_still_reaches_the_wire() {
+        let (url, handle, recorded) = serve_once_recording("ok");
+        let ret = do_request("FOO", &url, "", &[], None);
+        handle.join().unwrap();
+        let req = recorded.lock().unwrap().clone();
+        assert!(req.starts_with("FOO "), "wire: {req:?}");
+        assert_eq!(field(&ret, "status"), &NativeRet::Int(200));
+    }
+
+    #[test]
+    fn a_400_status_is_a_normal_response_not_an_error() {
+        let (url, handle) = serve_raw(
+            b"HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 2\r\n\r\nno",
+        );
+        let ret = do_get(&url, None);
+        handle.join().unwrap();
+        assert_eq!(field(&ret, "status"), &NativeRet::Int(404));
+        assert_eq!(field(&ret, "body"), &NativeRet::Str("no".into()));
+    }
+
+    #[test]
+    fn a_non_2xx_get_bytes_error_names_the_canonical_reason() {
+        // `http::StatusCode` drops the wire phrase (`Nope`), so the message carries the canonical one.
+        let (url, handle) =
+            serve_raw(b"HTTP/1.1 404 Nope\r\nConnection: close\r\nContent-Length: 2\r\n\r\nno");
+        let ret = do_get_bytes(&url, None);
+        handle.join().unwrap();
+        assert_eq!(ret, NativeRet::Err("HTTP 404 Not Found".into()));
+    }
+
+    /// Serve a redirect chain: the first `hops` accepted sockets get a `302` to `/hop<i>`, the next
+    /// one a `200` with body `done`. Non-blocking accept so the thread still ends when the client
+    /// gives up early (over-cap test): it leaves after `hops + 1` sockets, 500 ms with no new socket
+    /// once the first arrived, or a 5 s deadline.
+    fn serve_redirect_chain(hops: usize) -> (String, thread::JoinHandle<()>) {
+        use std::time::Instant;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut served = 0usize;
+            let mut last = None::<Instant>;
+            while served <= hops && Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
+                        let mut buf = [0u8; 1024];
+                        let _ = stream.read(&mut buf);
+                        let resp = if served < hops {
+                            format!(
+                                "HTTP/1.1 302 Found\r\nLocation: /hop{served}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            )
+                        } else {
+                            "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ndone"
+                                .to_string()
+                        };
+                        let _ = stream.write_all(resp.as_bytes());
+                        served += 1;
+                        last = Some(Instant::now());
+                    }
+                    Err(_) => {
+                        if last.is_some_and(|t| t.elapsed() > Duration::from_millis(500)) {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                }
+            }
+        });
+        (format!("http://{addr}/"), handle)
+    }
+
+    #[test]
+    fn a_seven_hop_redirect_chain_is_followed_like_cpython_and_go() {
+        let (url, handle) = serve_redirect_chain(7);
+        let ret = do_get(&url, None);
+        handle.join().unwrap();
+        assert_eq!(field(&ret, "status"), &NativeRet::Int(200));
+        assert_eq!(field(&ret, "body"), &NativeRet::Str("done".into()));
+    }
+
+    #[test]
+    fn a_twelve_hop_redirect_chain_stops_with_too_many_redirects() {
+        let (url, handle) = serve_redirect_chain(12);
+        let ret = do_get(&url, None);
+        handle.join().unwrap();
+        match ret {
+            NativeRet::Err(m) => assert!(m.contains("too many redirects"), "message: {m}"),
+            other => panic!("expected Err, got {other:?}"),
+        }
     }
 }
