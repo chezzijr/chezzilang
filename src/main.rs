@@ -1175,9 +1175,10 @@ fn path_for(files: &[(u32, std::path::PathBuf)], file: u32) -> Option<&std::path
 /// path it hasn't got is worse: a consumer that trusts it points a squiggle at the wrong buffer.
 ///
 /// `end_line` always equals `line` — every `Span` in this compiler is a point, there are no
-/// multi-line spans. `end_col` extends over the identifier word at the position (via
-/// [`chezzi::editor::word_end_col`], the SAME scanner the LSP already uses, reused rather than
-/// duplicated) so an editor's squiggle covers a whole name, not just its first character;
+/// multi-line spans. `end_col` extends over the identifier word, string literal or number literal
+/// at the position (via [`chezzi::editor::word_end_col`], the SAME scanner the LSP already uses,
+/// reused rather than duplicated) so an editor's squiggle covers a whole token, not just its first
+/// character;
 /// `word_end_col` returns a 0-based column while this JSON's `line`/`col` are 1-based, so the
 /// emitted value is `word_end_col(...) + 1`. Each distinct path is read from disk AT MOST ONCE
 /// (`src_cache`) to compute this; if the read fails (e.g. a native/std module with no file on disk,
