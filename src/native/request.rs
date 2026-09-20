@@ -742,6 +742,38 @@ mod tests {
     }
 
     #[test]
+    fn an_http_1_2_status_line_is_accepted_like_cpython_and_go() {
+        let (url, handle) =
+            serve_raw(b"HTTP/1.2 200 OK\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+        let ret = do_get(&url, None);
+        handle.join().unwrap();
+        assert_eq!(field(&ret, "status"), &NativeRet::Int(200));
+    }
+
+    #[test]
+    fn an_obs_fold_header_continuation_is_accepted_like_cpython_and_go() {
+        let (url, handle) = serve_raw(
+            b"HTTP/1.1 200 OK\r\nX-Fold: a\r\n b\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+        );
+        let ret = do_get(&url, None);
+        handle.join().unwrap();
+        assert_eq!(field(&ret, "status"), &NativeRet::Int(200));
+    }
+
+    #[test]
+    fn a_control_byte_header_error_names_the_offending_line() {
+        let (url, handle) = serve_raw(
+            b"HTTP/1.1 200 OK\r\nX-Bad: a\x01b\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+        );
+        let ret = do_get(&url, None);
+        handle.join().unwrap();
+        match ret {
+            NativeRet::Err(m) => assert!(m.contains("X-Bad"), "message: {m}"),
+            other => panic!("expected Err, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn an_empty_post_body_is_framed_content_length_zero_not_chunked() {
         let (url, handle, recorded) = serve_once_recording("ok");
         let ret = do_request("POST", &url, "", &[], None);

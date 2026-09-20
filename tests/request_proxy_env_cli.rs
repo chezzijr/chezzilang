@@ -50,3 +50,27 @@ fn an_exported_proxy_env_var_does_not_reroute_a_request() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn an_exported_proxy_env_var_routes_a_public_host_request() {
+    let dir = std::env::temp_dir().join(format!("chezzi_proxyenv_pub_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let prog = dir.join("p.chz");
+    let src = "import std.request\nmatch request.get(\"http://example.invalid/\"):\n    Ok(resp): print(\"direct\", resp.status)\n    Err(e): print(\"err\", e)\n";
+    std::fs::write(&prog, src).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .arg("run")
+        .arg(&prog)
+        .env("http_proxy", "http://127.0.0.1:1")
+        .env("HTTP_PROXY", "http://127.0.0.1:1")
+        .output()
+        .expect("failed to run chezzi run");
+    let _ = std::fs::remove_dir_all(&dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // Through the dead proxy the failure is a refused connection to the proxy, not a DNS failure
+    // for the public name.
+    assert!(
+        stdout.contains("onnection refused") || stdout.contains("127.0.0.1:1"),
+        "the request must go through the proxy; stdout:\n{stdout}"
+    );
+}
