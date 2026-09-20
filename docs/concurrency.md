@@ -552,6 +552,17 @@ fn bump(s: Shared[int]):
 > new value). Same for `RwShared` (`read`/`write`) and `Atomic` (`load`/`store`). This is *unlike* a
 > plain in-task `struct`/collection, whose reads alias the live value (push-through works) but which
 > can't cross the airlock.
+>
+> The checker **warns** on the bare-statement shape (TICKET-089): a mutating builtin call
+> (`s.get().push(1)`, `.add`, `.remove`, `.pop`, …) or a field/index assign (`b.get().v = 9`,
+> `s.get()[0] = 9`) on a `Shared`/`RwShared` `get()` or `Atomic` `load()` read temporary. The message
+> names the working spelling — `s.update(…)`, `r.write(…)` or `a.store(…)` — and the exit code is
+> unchanged. It is deliberately silent, because the checker cannot tell the write is lost, on four
+> shapes that DO lose it (each measured): a bound temporary (`v := s.get()` then `v.push(1)` — prints
+> `0`), a user struct method (`b.get().bump()` — prints `0`; DEC-097 keeps `mutates_receiver` to
+> builtin containers), `RwShared.read(fn(xs): xs.push(1))` (prints `0`), and `defer s.get().push(1)`
+> (prints `0`). A `get()` whose value is used (`print(s.get().len())`) never warns. Only a bare-name
+> box receiver matches: `boxes[0].get().push(1)` stays silent.
 
 **The ladder:** bare value (copied) → a mutable in-task `struct`/collection → `Shared[T]` (cross-task
 box). An in-task mutable value (a one-field `struct`, a `List`, …) is a shared reference *within one

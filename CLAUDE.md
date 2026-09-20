@@ -193,7 +193,7 @@ static protocol requirements callable through a generic bound via witness passin
 **Tier-D** (`spawn` / `parallel:` nursery, `Channel[T]`, `Shared[T]`, `Executor`, the real
 OS-thread M:N engine, netpoller + `std.net`). The checker also has a **non-fatal warning channel**
 (`Severity::Warning`, `"severity"` in `--errors=json`, `DiagnosticSeverity::WARNING` in the LSP) with
-three rules on it — a discarded `Result`/`Option`, a `spawn:`-task write read after the join, and a
+four rules on it — a discarded `Result`/`Option`, a `spawn:`-task write read after the join, a mutating call or assign on a `Shared`/`RwShared`/`Atomic` read temporary (`s.get().push(1)`), and a
 `match` arm made unreachable by an earlier unguarded irrefutable arm.
 **Rust tests** green across every target (**4458** in the lib target), plus **814**
 Chezzi tests green at two worker counts (up from 590 at the start of `feat/span-file-and-stdlib-contracts`).
@@ -211,8 +211,8 @@ in-progress alongside it.
 > bug-hunt session logs (W1..W14) moved verbatim to **`docs/gaps-archive.md`**, so any
 > `docs/gaps.md:NNNN` citation in a closed ticket or in `PROGRESS.md` resolves against the archive at
 > the same line number. **9 open rows** — W8-17, W8-19, W11-13/14/15, W12-5, W12-12, W13-27, W13-28
-> — plus **7 deferred tickets** in `.project/tickets-deferred/` (082, 083, 084, 086,
-> 087, 089, 090). The pipeline queue is EMPTY: 140 done, 3 rejected, 0 in flight. Wave 14's three
+> — plus **6 deferred tickets** in `.project/tickets-deferred/` (082, 083, 084, 086,
+> 087, 090). The pipeline queue is EMPTY: 140 done, 3 rejected, 0 in flight. Wave 14's three
 > redesigns all landed — **D1** a deadlock is fatal (TICKET-135), **D2** a received closure reads the
 > running task's module globals (TICKET-137), **D3** an int never widens into a float slot
 > (TICKET-138). Two W8-17 sub-items the ledger previously carried as open are closed: (e) the `?`

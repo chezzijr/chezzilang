@@ -78,9 +78,9 @@ did not come back and strike them here.
 
 ---
 
-## Deferred tickets — 7 open, in `.project/tickets-deferred/`
+## Deferred tickets — 6 open, in `.project/tickets-deferred/`
 
-Filed, triaged, parked. All seven re-verified 2026-09-20 on the release binary.
+Filed, triaged, parked. All six re-verified 2026-09-20 on the release binary.
 
 | ticket | what | measured |
 |---|---|---|
@@ -89,7 +89,6 @@ Filed, triaged, parked. All seven re-verified 2026-09-20 on the release binary.
 | **084** | `Map(m)` fails where `List(xs)` and `Set(s)` succeed, and no method spelling exists | `List(xs)` → `[1, 2]`, `Set(xs)` → `{1, 2}`, `Map(m)` → `Map() expects an iterable of (key, value) 2-tuples, found element str` |
 | **086** | no `findall`-shaped API returning `List[str]`, so the obvious tokenizer is several times CPython while `regex.split` is the workaround | `std/regex.chz` still exposes only `find_all(pat, s) -> Result[List[Match]]`. 2.4 MB / 400 000 tokens: `find_all` + a `.text` loop **740 ms**, `regex.split` **136 ms**, CPython `re.findall` **102 ms** |
 | **087** | `std.time` is whole epoch seconds or a process-relative monotonic float; `std.datetime` is second-resolution throughout, so `12:34:56.789` is unreachable | `time.now()` → `1789915422` |
-| **089** | a mutating call on a `Shared`/`RwShared`/`Atomic` read temporary compiles clean, runs, and throws the write away. Deliberate semantics (`docs/concurrency.md` §6) — the ask is a diagnostic, not a behavior change | `s.get().push(1)` twice, then `len()` → `0`, rc=0, `check` clean |
 | **090** | Go's block-scoped `:=` was adopted; Go's `declared and not used`, which is what makes that model survivable, was not | the `total := total + x` typo inside a `for` prints `0`, rc=0, `--errors=json` → `[]` |
 
 `.project/tickets-deferred/` also holds three `*.merged-into-*` stubs (078, 080, 088) — not work items.

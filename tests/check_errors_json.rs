@@ -557,6 +557,28 @@ fn severity_key_is_additive_and_the_clean_case_is_unchanged() {
     assert!(stdout.ends_with("}]"), "got: {stdout}");
 }
 
+/// TICKET-089: a mutating call on a `Shared` read temporary is a WARNING — `"severity":"warning"` in
+/// `--errors=json`, naming the working spelling, and `check` still exits 0.
+#[test]
+fn read_temporary_warning_is_a_warning_in_json_and_check_still_exits_zero() {
+    let t = TmpDir::new();
+    let src = t.write(
+        "lost.chz",
+        "import std.concurrency\ns := Shared[List[int]]([])\ns.get().push(1)\n",
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .args(["check", src.to_str().unwrap(), "--errors=json"])
+        .output()
+        .expect("run chezzi check");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "a warning must not fail check, got: {stdout}"
+    );
+    assert!(stdout.contains("\"severity\":\"warning\""), "got: {stdout}");
+    assert!(stdout.contains("s.update("), "got: {stdout}");
+}
+
 /// TICKET-007 criterion 9 (+ 11, plain-text half): a method typo prints the source line, a caret
 /// row and a `help:` line in plain text, and a `"help"` key after `"message"` under
 /// `--errors=json`.
