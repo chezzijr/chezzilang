@@ -183,7 +183,7 @@ pub fn parse_expr(tokens: Vec<Tok>) -> PResult<Expr> {
     if !p.check(&Token::Eof) {
         return Err(p.err(format!(
             "unexpected {} after expression",
-            describe(p.peek())
+            describe_unexpected(p.peek())
         )));
     }
     Ok(expr)
@@ -3241,7 +3241,7 @@ impl Parser {
             Token::Recover => return self.parse_recover_expr(span),
             other => {
                 return Err(ParseError {
-                    message: format!("unexpected {} in expression", describe(&other)),
+                    message: format!("unexpected {} in expression", describe_unexpected(&other)),
                     span,
                 });
             }
@@ -3377,6 +3377,18 @@ fn describe(tok: &Token) -> String {
     s.to_string()
 }
 
+/// [`describe`] without its leading article, for the two messages that put `unexpected` in front
+/// (`unexpected indented block in expression`, not `unexpected an indented block ...`). CPython 3.14
+/// on a stray indent prints `IndentationError: unexpected indent` — no article. The other callers
+/// read `found {}` / `expected {}` / `{} was never closed`, where the article is correct English.
+fn describe_unexpected(tok: &Token) -> String {
+    let d = describe(tok);
+    match d.strip_prefix("an ").or_else(|| d.strip_prefix("a ")) {
+        Some(rest) => rest.to_string(),
+        None => d,
+    }
+}
+
 /// An infix operator: a normal binary op, the range marker `..`, or the pipe `|>` (M6).
 enum InfixOp {
     Bin(BinaryOp),
@@ -3474,6 +3486,21 @@ mod tests {
     /// The error from a source that must fail to parse.
     fn parse_err(src: &str) -> ParseError {
         parse(lexer::tokenize(src).unwrap()).expect_err("expected a parse error")
+    }
+
+    /// `unexpected` reads without an article; `found` keeps it. A string literal in `describe`
+    /// itself must keep `a`, or the six `found {}` callers lose their grammar.
+    #[test]
+    fn describe_unexpected_drops_only_the_leading_article() {
+        assert_eq!(describe_unexpected(&Token::Indent), "indented block");
+        assert_eq!(describe_unexpected(&Token::Dedent), "dedent");
+        assert_eq!(
+            describe_unexpected(&Token::Str("a".into())),
+            "string literal"
+        );
+        assert_eq!(describe_unexpected(&Token::Newline), "end of line");
+        assert_eq!(describe_unexpected(&Token::Plus), "'+'");
+        assert_eq!(describe(&Token::Str("a".into())), "a string literal");
     }
 
     /// The single statement in a one-statement module.
