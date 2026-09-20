@@ -32626,6 +32626,35 @@ fn nested_fn_decl_check_is_not_exponential() {
     );
 }
 
+/// TICKET-157 / W12-12 -- the fn-nesting cap is a guard, not a fix: a 24-deep chain of nested `fn`
+/// declarations must CHECK (CPython compiles 50 deep in 0.02s), and fast. Before the fix the cap
+/// refuses it at 16.
+#[test]
+fn deep_nested_fn_decl_chain_checks_clean_and_fast() {
+    const N: usize = 24;
+    let mut src = String::new();
+    for i in 0..N {
+        src.push_str(&"    ".repeat(i));
+        src.push_str(&format!("fn f{i}():\n"));
+    }
+    src.push_str(&"    ".repeat(N));
+    src.push_str("pass\n");
+
+    let tokens = lexer::tokenize(&src).expect("lex should succeed");
+    let mut module = parser::parse(tokens).expect("parse should succeed");
+    let start = std::time::Instant::now();
+    let verdict = crate::desugar::run_standalone(&mut module).map(|()| check(&module));
+    let elapsed = start.elapsed();
+
+    if let Err(err) = &verdict {
+        panic!("24 nested fn declarations were refused: {}", err.message);
+    }
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "checking {N} nested fn declarations took {elapsed:?} (>2s ceiling)"
+    );
+}
+
 /// TICKET-120 / W13-11 repro -- two structs each declaring a same-named static method with a
 /// default, resolved through a QUALIFIED `module.Type.new()` head. TICKET-108 (W12-10) added the
 /// bare type-NAME head to `receiver_struct_ty` but not the qualified `module.Type` head, so this
