@@ -939,7 +939,8 @@ provided — `remove_dir` is empty-only to avoid an accidental recursive wipe. `
 list) + `remove_file`/`remove_dir` in Chezzi if you need it.
 
 ### `std.time`
-`now() -> int` (Unix epoch seconds, UTC) · `monotonic() -> float` (seconds, immune to clock changes) ·
+`now() -> int` (Unix epoch seconds, UTC) · `now_ms() -> int` (Unix epoch **milliseconds**, UTC; a wall
+clock that can step backwards and is never clamped — never subtract a `monotonic()` reading from it) · `monotonic() -> float` (seconds, immune to clock changes) ·
 `sleep_ms(ms: int) -> nil` · `format(epoch: int) -> str` (`"YYYY-MM-DD HH:MM:SS"`, UTC).
 Also licenses the opcode-backed `timer(ms) -> Channel[bool]` builtin (one-shot timeout channel; see
 [§3](#3-runtime-types-concurrency--iteration) and `concurrency.md §6c`): `import std.time` (whole-module)
@@ -1467,7 +1468,7 @@ convert to a mutable buffer with `bytearray(p.bytes())` (there is no `bytearray`
 
 ### `std.datetime` — civil-calendar date/time (UTC-only)
 Pure-Chezzi civil-calendar decomposition / construction / duration arithmetic layered on the native
-`std.time` clock (`time.now()` only). Built from pure integer math (Howard Hinnant's branch-free
+`std.time` clock (`time.now_ms()` only). Built from pure integer math (Howard Hinnant's branch-free
 civil-calendar algorithms), so it is **identical across runs**. `import std.datetime`
 (or `as dt`).
 
@@ -1493,24 +1494,26 @@ struct DateTime:
     minute: int
     second: int
     weekday: int    # 0=Sunday .. 6=Saturday (contractual)
+    milli: int = 0  # 0..999, milliseconds past `second`; APPENDED, so 7-arg construction still works
 ```
 
 | fn | signature | semantics |
 | --- | --- | --- |
 | `from_epoch` | `(epoch: int) -> DateTime` | Decompose Unix epoch-seconds (UTC) into a `DateTime`. Negative epochs floored. |
 | `to_epoch` | `(dt: DateTime) -> int` | Recompose to Unix epoch-seconds. `to_epoch(from_epoch(e)) == e`. |
-| `now` | `() -> DateTime` | Current UTC date/time (`from_epoch(time.now())`) — the only clock use. |
+| `to_epoch_ms` | `(dt: DateTime) -> int` | Recompose to Unix epoch **milliseconds**: `to_epoch(dt) * 1000 + dt.milli`. `to_epoch` stays seconds. |
+| `now` | `() -> DateTime` | Current UTC date/time, millisecond precision (`from_epoch(time.now_ms()` seconds `)` plus `milli`) — the only clock use. |
 | `days_from_civil` | `(y, m, d) -> int` | Days since 1970-01-01 (Hinnant). `(1970,1,1)`→0, `(1969,12,31)`→-1, `(2024,2,29)`→19782. A month outside `1..12` or a day outside `1..days_in_month(y, m)` **faults** (`days_from_civil: month out of range: 13`), like CPython `date()` — it never normalizes `(2023,13,1)` to 2024-01-01. `from_epoch`/`to_epoch` round-trip the whole i64 range, including within 86 399 s of `i64::MIN`. |
 | `civil_from_days` | `(z) -> (int, int, int)` | Inverse: `(year, month, day)` tuple. `0`→`(1970,1,1)`, `-1`→`(1969,12,31)`. |
 | `is_leap_year` | `(y) -> bool` | Proleptic Gregorian: `2000`→true, `1900`→false, `2024`→true. |
 | `days_in_month` | `(y, m) -> int` | Leap-aware. `(2024,2)`→29, `(2023,2)`→28, `(2024,4)`→30. A month outside `1..12` is a domain violation and **faults** (recoverable via `recover:`), like Python `calendar.monthrange` — it never returns a plausible-looking 31. |
 | `weekday` | `(epoch: int) -> int` | Weekday (Sunday=0..Saturday=6) of an epoch value. `weekday(0)`→4 (Thu). |
 | `weekday_name` | `(wd: int) -> str` | English name: `weekday_name(0)`→`"Sunday"`, `weekday_name(4)`→`"Thursday"`. |
-| `to_iso8601` | `(dt) -> str` | `"YYYY-MM-DDTHH:MM:SSZ"`. `from_epoch(0)`→`"1970-01-01T00:00:00Z"`. |
+| `to_iso8601` | `(dt) -> str` | `"YYYY-MM-DDTHH:MM:SSZ"`; `".SSS"` is inserted before the `Z` **only when `milli != 0`** (CPython `isoformat`'s rule): `"2026-09-21T12:34:56.789Z"`. `from_epoch(0)`→`"1970-01-01T00:00:00Z"`. |
 | `to_date_string` | `(dt) -> str` | `"YYYY-MM-DD"`. |
 | `to_time_string` | `(dt) -> str` | `"HH:MM:SS"`. |
 | `to_string` | `(dt) -> str` | `std.time.format` style `"YYYY-MM-DD HH:MM:SS"`. |
-| `parse_iso8601` | `(s: str) -> Result[DateTime]` | The **inverse** of `to_iso8601`: parse ISO-8601 / RFC-3339 — a SUBSET of Python's `datetime.fromisoformat`, not a match. Accepts `"YYYY-MM-DD"` **or** the ISO basic `"YYYYMMDD"` (date-only, midnight); a time of `"HH:MM:SS"`, `"HH:MM"` (minute precision, seconds default 0), `"HHMMSS"` or `"HHMM"` (compact); a `'T'` **or** `' '` date/time separator; an optional trailing `'Z'`, `'+HH:MM'`/`'-HH:MM'`, or the colonless `'+HHMM'`/`'-HHMM'` offset (**normalized to UTC**, per Go `time.Parse`); and an optional `.fff` fractional part (**validated then truncated** — `DateTime.second` is an int, no sub-second storage). Malformed or out-of-range fields (month 13, day 32, hour 25, second 60, non-digits, wrong widths) are a **clean `Err`**, never a fault. Every field is **width-checked**: month/day/time are exactly 2 digits and the year is **4+** digits (mirroring `to_iso8601`, which pads to 4 and emits more for an extended year) — so `"24-01-01"` is an `Err`, not year 24. Round-trips: `parse_iso8601(to_iso8601(dt)) == dt` for every year of 9 digits or fewer (a wider year — only reachable from an epoch near the `int` limit — exceeds the parser's overflow bound and `Err`s). **CPython 3.14.7 still accepts more than this**, measured: hour-only time (`"...T12"`), a `"+HH"` offset, a `"+HH:MM:SS"` offset, and ISO week dates (`"2024W011"`) are all `Err` here. |
+| `parse_iso8601` | `(s: str) -> Result[DateTime]` | The **inverse** of `to_iso8601`: parse ISO-8601 / RFC-3339 — a SUBSET of Python's `datetime.fromisoformat`, not a match. Accepts `"YYYY-MM-DD"` **or** the ISO basic `"YYYYMMDD"` (date-only, midnight); a time of `"HH:MM:SS"`, `"HH:MM"` (minute precision, seconds default 0), `"HHMMSS"` or `"HHMM"` (compact); a `'T'` **or** `' '` date/time separator; an optional trailing `'Z'`, `'+HH:MM'`/`'-HH:MM'`, or the colonless `'+HHMM'`/`'-HHMM'` offset (**normalized to UTC**, per Go `time.Parse`); and an optional `.fff` fractional part (the first three digits become `DateTime.milli`, a shorter fraction is right-padded — `.5` → 500 — and digits past the third are **truncated**, not rounded — `.9999` → 999 — as CPython `fromisoformat`). Malformed or out-of-range fields (month 13, day 32, hour 25, second 60, non-digits, wrong widths) are a **clean `Err`**, never a fault. Every field is **width-checked**: month/day/time are exactly 2 digits and the year is **4+** digits (mirroring `to_iso8601`, which pads to 4 and emits more for an extended year) — so `"24-01-01"` is an `Err`, not year 24. Round-trips: `parse_iso8601(to_iso8601(dt)) == dt` for every year of 9 digits or fewer (a wider year — only reachable from an epoch near the `int` limit — exceeds the parser's overflow bound and `Err`s). **CPython 3.14.7 still accepts more than this**, measured: hour-only time (`"...T12"`), a `"+HH"` offset, a `"+HH:MM:SS"` offset, and ISO week dates (`"2024W011"`) are all `Err` here. |
 | `add_seconds` | `(epoch, n) -> int` | `epoch + n`. |
 | `add_days` | `(epoch, n) -> int` | `epoch + n*86400` (negative `n` subtracts). |
 | `diff_seconds` | `(a, b) -> int` | `a - b`. |
@@ -1518,8 +1521,8 @@ struct DateTime:
 
 The string→`DateTime` half is `parse_iso8601` (above); `strftime`-pattern formatting and a general
 `strptime`/`from_string` are still deferred (no format-token vocabulary in v1). Two `parse_iso8601`
-ceilings, both deliberate under the UTC-only contract: sub-second precision is dropped (`.fff` is
-truncated), and a non-`Z` offset normalizes to a UTC epoch rather than round-tripping to itself.
+ceilings, both deliberate under the UTC-only contract: precision below one millisecond is
+truncated, and a non-`Z` offset normalizes to a UTC epoch rather than round-tripping to itself.
 The `DateTime` struct lives in the module
 (`datetime.DateTime`); a user program also defining its own top-level `struct DateTime` could collide
 — use the module-qualified name.
