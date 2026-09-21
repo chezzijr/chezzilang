@@ -1592,10 +1592,14 @@ was retired when module globals started deep-copying per task.)
   receiver two separate copies: a snapshot node registry (`Vm::snapshot_nodes`) ties the spawn
   crossing's id to the module snapshot's, and `fault_module`'s own replay (`Vm::snapshot_adopt`,
   `adopt_active`) installs the capture's rebuilt object as the global's object, matching CPython and
-  Go. Residuals (unchanged): a Channel-sent closure carrying an alias pushed on the receiver side
-  after the send (G6), a node aliased by globals of two DIFFERENT modules, a container on the slow
-  `SnapValue` path (holds a closure or handle), and `bytearray` (no wire id); see `docs/gaps.md`
-  W12-5.
+  Go. Residuals (unchanged): a node aliased by globals of two DIFFERENT modules, a container on the
+  slow `SnapValue` path (holds a closure or handle), and `bytearray` (no wire id); see
+  `docs/gaps.md` W12-5. G6 is not a residual: owner decision D2 (DEC-137, TICKET-137) makes a
+  received closure read the module globals of the task that RUNS it, so the receiver's `gl[0]` is
+  its own spawn-time copy and the sender's push is not meant to reach it. TICKET-154 built the
+  adoption that would have tied them and withdrew it (2026-09-21);
+  `airlock_closure_over_a_captured_alias_pushed_by_the_receiver_is_a_known_residual` pins D2's
+  value, and `docs/gaps.md` W12-5 carries the record.
 
   So a `spawn f()`
   callee whose captured environment contains a nested closure/`fn` (or is itself a bare `fn`) runs
@@ -1624,13 +1628,16 @@ was retired when module globals started deep-copying per task.)
   through one alias in a task is visible through the other, matching same-task reference semantics
   (`b := a`) and CPython's `copy.deepcopy` (which memoizes by source identity). The depth cap
   (`maximum structural depth …`) stays **only** as the backstop for a genuinely-unbounded **acyclic** nest.
-- **The `RwShared` store is the ONE exception, and it is a recorded limit (W11-15), not a design
-  choice.** Its read views (`at`/`for_each`/`fold`/`slice`/`get_key`) drain ONE stored wire through MANY
-  independent rebuild maps, so a cross-element back-reference would force the rebuild side
-  (`from_wire_piece`) to re-materialize the whole container **per element** — the cliff
-  `rwshared_view_over_shared_bindings_is_not_quadratic` exists to catch. So the three `RwShared` stores
-  alone keep the OLD per-crossing-DFS-stack scoping: a DAG alias stored in an `RwShared` still crosses as
-  two independent copies, exactly like every store did before this ticket.
+- **The `RwShared` store is no longer an exception (W11-15 CLOSED 2026-09-21, TICKET-154).**
+  `Op::NewRwShared`, `RwShared.set` and `RwShared.write` serialize through `to_wire_crossable`, so a DAG
+  alias stored in an `RwShared` crosses as ONE object and `r.get()` on `outer = [inner, inner]` reads
+  `2 2` like CPython. The cliff that forced the old rule is answered on the read side: `for_each`,
+  `fold`, `for_each_entry` and `fold_entries` decide ONCE, under ONE read guard, whether the stored
+  wire's pieces stand alone, and when they do not they rebuild the whole container once into one map and
+  materialize every piece before dropping the guard — `RwShared.slice`'s discipline, generalized. The
+  trade is that a looping view over an ALIASED store is a snapshot rather than a live walk, and that
+  `at`/`get_key` pay a whole-root rebuild on the second and later occurrences of an alias (measured in
+  `docs/benchmarks.md`).
 - **A captured BINDING keeps its identity across the whole crossing.** The `Cell` that backs a
   by-reference-captured local is memoized for the ENTIRE serialization, not just the current DFS stack, so
   **two sibling closures over one local still share one cell after crossing** — this was already true

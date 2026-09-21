@@ -2448,3 +2448,45 @@ indentation bound, not a performance bound. The memoized walk is still superline
 exponential; an ANNOTATED chain never was. Probe p1 (TICKET-109 `## Decisions`) is byte-identical to
 base, and a `check` over 396 files (`examples/`, `tests/chz/`, `std/`, `benches/`) has 0 differing
 outputs.
+
+## TICKET-154 — an RwShared store keeps a DAG alias as one object (2026-09-21)
+
+The three `RwShared` stores serialize through `to_wire_crossable` now, so a DAG alias stored in an
+`RwShared` is ONE object. The four looping read views (`for_each`, `fold`, `for_each_entry`,
+`fold_entries`) share one rebuild map under one guard, so they stay linear. The single-piece views
+`at` and `get_key` pay for the change: a piece that is a bare `Backref` takes `from_wire_piece`'s
+whole-root fallback, so the second and later occurrences of an alias cost the root where they cost
+the element before.
+
+### aliased-store at(1)
+
+Release binaries, base `e7d3b7b3` (`main`) against this branch, one `CARGO_TARGET_DIR` each under
+`/home/chezzijr/.cache/chezzi-154-bench`. Ten calls per cell, timed inside the program with
+`time.monotonic()`, seconds, min / median. `uptime` before both runs: load average 3.78 (1 min),
+28 cores. Shape A is `outer = [inner, inner]` with `inner` two hundred thousand ints. Shape B is
+`inner` at fifty thousand ints, aliased at indices 0 and 1, plus eight distinct sibling lists of
+fifty thousand ints. Shape C is shape B as a `Map` (`{0: inner, 1: inner}` plus keys 2..9).
+
+| cell | base min / median | branch min / median |
+|---|---|---|
+| A `at(0)` | 0.0159 / 0.0165 | 0.0170 / 0.0176 |
+| A `at(1)` | 0.0163 / 0.0166 | 0.0132 / 0.0143 |
+| B `at(0)` | 0.0027 / 0.0027 | 0.0027 / 0.0027 |
+| B `at(1)` | 0.0027 / 0.0027 | 0.0287 / 0.0294 |
+| C `get_key(0)` | 0.0027 / 0.0027 | 0.0027 / 0.0027 |
+| C `get_key(1)` | 0.0027 / 0.0028 | 0.0285 / 0.0294 |
+
+Three readings. (1) The literal two-index shape is flat, and `at(1)` is FASTER on the branch (0.0143
+against 0.0166 median): the aliased wire holds one definition plus a back-ref where the split store
+held two definitions. (2) The widening shows on shape B: `at(1)` goes 0.0027 to 0.0294 median, about
+10.7x, on a root ten times its element. That is the ROOT once per call instead of the element, which
+is what the design predicted and no more. (3) `get_key` is reached by the same fallback on a
+cross-entry alias (0.0028 to 0.0294). These numbers agree with the planning-stage prototype (shape B
+`at(1)` 0.0316, `get_key(1)` 0.0315). The absolute bound is
+`rwshared_at_over_an_aliased_store_stays_under_its_ceiling` (`Duration::from_secs(5)`); `at` called
+in a loop over a large aliased store is quadratic, so use `for_each`, which shares one map.
+
+`benches/run.chz` could not run on this box: it needs `hyperfine`, and every case printed
+`FAILED [...]: sh: line 1: hyperfine: command not found`. It also has no `RwShared` or airlock case,
+so no airlock cost of the `RwShared` materialize path was recorded from it. The shape tables above are
+the measurement of that path.
