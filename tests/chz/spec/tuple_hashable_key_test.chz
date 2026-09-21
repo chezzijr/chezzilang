@@ -1,0 +1,9 @@
+# tests/chz/spec/tuple_hashable_key_test.chz — a tuple is Hashable iff every element is (TICKET-161).
+
+test fn tuple_is_a_map_key():
+    m := {(1, 2): "a"}
+    assert m[(1, 2)] == "a"
+
+test fn tuple_is_a_set_element():
+    s := {(1, "x")}
+    assert s.has((1, "x"))
