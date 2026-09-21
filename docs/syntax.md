@@ -1686,7 +1686,8 @@ Every struct has an intrinsic `copy()` returning a **shallow** duplicate. Each f
 copied, so a `List`/`Map`/`Set`, nested-struct, or handle field is referenced by **both** structs
 afterward — exactly like Python's `copy.copy` and unlike `copy.deepcopy`, which Chezzi does not have.
 A struct declaring its own `copy` method, or holding a fn-typed `copy` field, keeps it. A struct holding
-a `Channel`, `Shared`, or `Socket` copies fine and shares the handle.
+a `Channel`, `Shared`, or `Socket` copies fine and shares the handle. `List`, `Map` and `Set` have a
+shallow `copy()` too (see stdlib.md §2).
 
 ```chezzi
 struct P:
@@ -4076,7 +4077,7 @@ iterate with `for c in s:` or `s.chars()`, and bridge to codepoints with `ord`/`
 List methods (built in): `xs.push(x)` `xs.pop()` `xs.len()` `xs.reverse()` `xs.contains(v)`
 `xs.index_of(v)` `xs.sum()` (numeric, or a scalar numeric `newtype` → that newtype; empty `-> T(0)`)
 `xs.sort()` (ascending, in place); `xs.concat(ys)→list` (new list) and
-`xs.extend(ys)` (append in place, → nil); higher-order `xs.map(f)` `xs.filter(p)` `xs.fold(init, f)`;
+`xs.extend(ys)` (append in place, → nil); `xs.copy()→list` (new list, shallow); higher-order `xs.map(f)` `xs.filter(p)` `xs.fold(init, f)`;
 `xs.sort_by(fn(a, b) -> int)` — a custom comparator (negative = `a` before `b`), stable, in place;
 and `xs.sort_by_key(fn(x) -> K)` — sort by a derived key (`K` Comparable: int/float/str, or a struct
 or enum defining `compare`), stable, in place.
@@ -4194,6 +4195,7 @@ or enum defining `compare`), stable, in place.
 > `Err("e")`).
 
 Map methods: `m.get(k)→V?` `m.has(k)` `m.keys()` `m.values()` `m.remove(k)` `m.len()`;
+`m.items()→List[(K, V)]` (insertion order, so `Map(m.items()) == m`) `m.copy()→map` (shallow);
 `m.merge(n)→map` (new map, `n` wins on a key clash) and `m.update(n)` (write `n` into `m` in place,
 → nil); `m[k]` reads (errors on a missing key), `m[k] = v` inserts/updates. Iterate with `for k in m`
 / `for k, v in m`.
@@ -4202,7 +4204,7 @@ Sets: `{a, b, c}` is a set literal (deduped, insertion-ordered; `{}` is the empt
 set is `Set()`; `Set(list)` builds one from a list). Elements are any `Hashable` type (int/str/bool,
 or a struct with `hash(self) -> int`).
 Methods: `s.add(x)` `s.remove(x)→bool` `s.has(x)` `s.len()` `s.union(t)` `s.intersection(t)`
-`s.difference(t)`; iterate with `for x in s`. `==` is order-independent.
+`s.difference(t)` `s.copy()→set` (shallow); iterate with `for x in s`. `==` is order-independent.
 
 ## 11. Pipe operator `|>`
 

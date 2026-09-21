@@ -119,8 +119,7 @@ is a predictable first-hour stumble. Ranked by friction.
 *(`print` newline/sep control (gap #5) and `assert` message (gap #6) — both RESOLVED 2026-06-23, see the
 resolved log.)*
 
-**Minor / noted** (re-measured 2026-09-20): no `map.items()` (have `.keys()`/`.values()` + `for k,v`);
-no `type()`/`typeof`. `**`/`//` absence is by-design (no base operator). ~~no `input()`~~ — `std.io.input`
+**Minor / noted** (re-measured 2026-09-20): no `type()`/`typeof`. `**`/`//` absence is by-design (no base operator). ~~no `input()`~~ — `std.io.input`
 exists (`native fn input(prompt: str) -> Option[str]`, `std/io.chz:30`). ~~no chained comparison~~ —
 `print(1 < 2 < 3)` prints `true`. ~~`json.parse` widens all numbers to float~~ — closed by the Int/Num
 split (W8-35, TICKET-013): `json.parse("{{\"n\": 3}}")` gives `Ok(Obj({'n': Int(3)}))`.

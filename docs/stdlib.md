@@ -223,6 +223,7 @@ quote-doubling with it (unaffected: it always passes a literal `"` as `old`, nev
 | `drop_while` | `(pred: fn(T) -> bool) -> List[T]` | Returns a **new** list of the suffix after the leading prefix where `pred` holds. |
 | `count` | `(pred: fn(T) -> bool) -> int` | Number of elements satisfying `pred`. |
 | `position` | `(pred: fn(T) -> bool) -> Option[int]` | Index of the **first** element satisfying `pred` (`None` if none). The **carrier** twin of `index_of` — a miss is `None`, not a usable `-1`. |
+| `copy` | `() -> List[T]` | Returns a **new** list holding the same elements (**shallow**, Python `list.copy()`): mutating the copy leaves the receiver alone, but a nested `List`/`Map`/struct element is shared. |
 
 > **The `-1` miss hazard (`List.index_of`, `str.index_of`).** These two return a **sentinel**, not a
 > carrier, and indexing is Python-negative — so `xs[xs.index_of(v)]` on a miss silently yields the
@@ -267,9 +268,11 @@ Keep callbacks pure; if you need both, sort a copy and merge after.
 | `get` | `(key: K) -> Option[V]` | |
 | `keys` | `() -> List[K]` | Insertion order. |
 | `values` | `() -> List[V]` | Insertion order. |
+| `items` | `() -> List[(K, V)]` | Insertion order, the same order as `keys()`, so `Map(m.items()) == m`. Returns a fresh list (CPython returns a live view; Chezzi returns a snapshot, like `keys()`). |
 | `remove` | `(key: K) -> Option[V]` | *mutates* — returns the removed value, or `None`. |
 | `merge` | `(other: Map[K, V]) -> Map[K, V]` | Returns a **new** map (`other` wins on key clash). |
 | `update` | `(other: Map[K, V]) -> nil` | *mutates* — merge `other` into self. |
+| `copy` | `() -> Map[K, V]` | Returns a **new** map, shallow in the values (Python `dict.copy()`); struct/enum/newtype keys are snapshotted, as `merge` does. |
 
 Index a map with `m[k]` (read/write); iterate with `for k, v in m:`.
 
@@ -281,6 +284,7 @@ Index a map with `m[k]` (read/write); iterate with `for k, v in m:`.
 | `add` | `(x: T) -> nil` | *mutates* — idempotent insert. |
 | `remove` | `(x: T) -> bool` | *mutates* — returns whether it was present. |
 | `union` / `intersection` / `difference` | `(other: Set[T]) -> Set[T]` | Return a **new** set. Operator forms: `a \| b` / `a & b` / `a - b`. |
+| `copy` | `() -> Set[T]` | Returns a **new** set (shallow, Python `set.copy()`); struct/enum/newtype elements are snapshotted, as `add` does. |
 
 > **Set operators.** `\| & - ^` on two `Set[T]` are union / intersection / difference /
 > symmetric-difference, identical to the methods above (`^` has no method form). Lists support `+`
