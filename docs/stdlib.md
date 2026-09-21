@@ -1711,9 +1711,10 @@ adds on demand). `xs` MUST already be sorted ascending; results are undefined ot
 result cached in a captured `Map[K, V]` (`K: Hashable + Eq` — a map key needs both, `docs/gaps.md`
 W7-53). The cache is a native reference type, so it
 persists across every call to the wrapped fn; `f` runs at most once per distinct arg.
-**v1 limit (not a bug):** single-argument only. A general N-arg cache would key a `Map[tuple, V]` on
-the argument tuple, but tuples aren't Hashable map keys yet — until then curry, or pack args into a
-struct with `hash` and memoize the single-arg wrapper.
+**v1 limit (not a bug):** single-argument only. A general N-arg cache would key a `Map[(A, B), V]` on
+the argument tuple: a tuple of Hashable args is a valid key (TICKET-161), so an N-arg wrapper can be
+written that way; until then curry, or pack args into a struct with `hash` and memoize the
+single-arg wrapper.
 
 ### `std.duration` — Go-like first-class time spans
 Pure-Chezzi (no native seam). `import std.duration`. `Duration` (access as `duration.Duration`) is a

@@ -28,7 +28,7 @@ waves 2–5 `:3057`–`:3286` · the 2026-07-14 four-axis audit `:3568`.
 
 | row | P | domain | what | verified 2026-09-20 | archive |
 |---|---|---|---|---|---|
-| **W8-19** | P2 | affordances | Bundle. Remaining: multi-statement closures (ranked first, own milestone), tuples not `Hashable`, `path.join` rejects `Path`+`str` / no `path.abs`/`path.rel`, `Listener` not selectable in `wait:`, statement-only `recover:`. Global helpers and the `Option` half are DECLINED, do not re-file (the `Result` half closed under TICKET-039). | **OPEN** | `:185` |
+| **W8-19** | P2 | affordances | Bundle. Remaining: multi-statement closures (ranked first, own milestone), `path.join` rejects `Path`+`str` / no `path.abs`/`path.rel`, `Listener` not selectable in `wait:`, statement-only `recover:`. Global helpers and the `Option` half are DECLINED, do not re-file (the `Result` half closed under TICKET-039). | **OPEN** | `:185` |
 | **W11-13** | P3 | airlock | The isolation warning gates on the READ shape. **Deliberately NOT ticketed** — an under-warn is the acceptable direction; re-open only with a measured runtime-derived table, one program per shape. | **OPEN** | `:12510` |
 | ~~**W11-14**~~ | P3 | cancel | `Vm::guarded_checkpoint` (`src/vm/exec.rs:385`) has the owner hole TICKET-096 fixed at the other two checkpoints. Condition to re-open: the checkpoint runs per ELEMENT and `MnSched::scope_fault` takes the sched lock, so a rung there needs its own `benches/run.chz` measurement. | **CLOSED 2026-09-21 (TICKET-155)** — the rung rides the 1-in-1024 `back_edge_tick` sample and `hof_nursery` measured level; see `docs/benchmarks.md` | `:12511` |
 | ~~**W11-15**~~ | P3 | airlock | The three `RwShared` stores (`Op::NewRwShared`, `RwShared.set`, `RwShared.write`) split a DAG alias into two copies. **CLOSED 2026-09-21 (TICKET-154).** All three now serialize through `to_wire_crossable`, and the four looping read views share one rebuild map taken under one guard, so the cliff `rwshared_view_over_shared_bindings_is_not_quadratic` stays green. Pinned by `airlock_rwshared_store_dag_alias_is_one_object`. | **CLOSED** | `:12512` |
@@ -80,7 +80,6 @@ Filed, triaged, parked. All six re-verified 2026-09-20 on the release binary.
 
 | ticket | what | measured |
 |---|---|---|
-| **082** | a tuple is not a `Map` key and a `List[tuple]` has no ordering | `{(1,2): "a"}` → `map key type must implement Hashable … found (int, int)` |
 | **083** | a runtime-computed field width cannot be formatted; both CPython spellings are rejected | `"{s:<{w}}"` → `format spec: unknown type char '{'`; `s.pad_right(…)` → `has no method 'pad_right'` |
 | **084** | `Map(m)` fails where `List(xs)` and `Set(s)` succeed, and no method spelling exists | `List(xs)` → `[1, 2]`, `Set(xs)` → `{1, 2}`, `Map(m)` → `Map() expects an iterable of (key, value) 2-tuples, found element str` |
 | **086** | no `findall`-shaped API returning `List[str]`, so the obvious tokenizer is several times CPython while `regex.split` is the workaround | `std/regex.chz` still exposes only `find_all(pat, s) -> Result[List[Match]]`. 2.4 MB / 400 000 tokens: `find_all` + a `.text` loop **740 ms**, `regex.split` **136 ms**, CPython `re.findall` **102 ms** |

@@ -2944,7 +2944,9 @@ grapheme-extend characters as non-printable. Escaping is the unambiguous directi
 
 The prebuilt **`Hashable`** protocol (`hash(self) -> int`) governs `map` keys and `set` elements:
 `int`/`str`/`bool` satisfy it intrinsically, and a struct satisfies it by defining `hash(self) ->
-int`. `map`/`set` are real insertion-ordered hash tables, so **any `Hashable` type can be a key or
+int`. A tuple is `Hashable` exactly when every element type is (CPython's rule), so `{(1, 2): "a"}`
+and `{("a", true)}` work; a rejection names the offending element (`element List[int] is not
+Hashable`). `map`/`set` are real insertion-ordered hash tables, so **any `Hashable` type can be a key or
 element** — a struct key is hashed via its `hash()` and the probe confirmed by `==`, which is the
 struct's own `eq` when it defines one (§`Eq`, above) and structural equality otherwise.
 `float` is rejected (NaN footgun). Contract: two keys that `==` calls equal must return the same
@@ -4202,7 +4204,7 @@ Map methods: `m.get(k)→V?` `m.has(k)` `m.keys()` `m.values()` `m.remove(k)` `m
 
 Sets: `{a, b, c}` is a set literal (deduped, insertion-ordered; `{}` is the empty *map*, the empty
 set is `Set()`; `Set(list)` builds one from a list). Elements are any `Hashable` type (int/str/bool,
-or a struct with `hash(self) -> int`).
+a struct with `hash(self) -> int`, or a tuple of those).
 Methods: `s.add(x)` `s.remove(x)→bool` `s.has(x)` `s.len()` `s.union(t)` `s.intersection(t)`
 `s.difference(t)` `s.copy()→set` (shallow); iterate with `for x in s`. `==` is order-independent.
 

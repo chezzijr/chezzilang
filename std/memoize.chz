@@ -7,9 +7,9 @@
 #
 # ponytail: single-argument only — `memoize1(f: fn(K) -> V)`, keyed by the arg (`K: Hashable + Eq`,
 # W7-53: a Map key needs both). A
-# general N-arg cache would key a `Map[tuple, V]` on the argument tuple, but tuples aren't Hashable
-# map keys today, so that upgrade waits on hashable tuples. Until then, curry / pack args into a
-# struct-with-`hash` and memoize the single-arg wrapper.
+# general N-arg cache would key a `Map[(A, B), V]` on the argument tuple: a tuple of Hashable args
+# is a valid key (TICKET-161), so an N-arg wrapper can be written that way. Until then, curry / pack
+# args into a struct-with-`hash` and memoize the single-arg wrapper.
 
 # Cache lookup-or-compute, split out because a closure body is a single expression: the returned
 # wrapper delegates here so it can do the `Option` match + compute + store.
