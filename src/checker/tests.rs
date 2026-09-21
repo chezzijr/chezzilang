@@ -24266,6 +24266,21 @@ fn native_prelude_firstclassness_preserved_on_graph_path() {
     entry_rejects("fn w():\n    f := int\nw()\n", "int");
 }
 
+/// TICKET-160 — `Map.items()` and a shallow `copy()` on `List`/`Map`/`Set` type-check with the
+/// CPython-shaped result types.
+#[test]
+fn container_items_and_copy_type_check() {
+    ok(r#"
+m := {"a": 1}
+ps: List[(str, int)] = m.items()
+xs := [1, 2]
+ys: List[int] = xs.copy()
+s := {1, 2}
+t: Set[int] = s.copy()
+n: Map[str, int] = m.copy()
+"#);
+}
+
 /// Phase 5a-containers BEHAVIOR-PRESERVING GUARD: every `List`/`Map`/`Set` method sig harvested from
 /// `std/prelude.chz`'s `native struct` decls (looked up via `native_handle_method` with the value's
 /// element/key/value type substituted) must BYTE-MATCH the sig the retired bespoke `list_method_sig`/
