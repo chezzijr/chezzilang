@@ -1,0 +1,8 @@
+# tests/chz/spec/container_copy_test.chz — TICKET-160: `List`/`Set`/`Map` each have a shallow `copy()`.
+
+test fn list_copy_is_independent_at_the_top_level():
+    xs := [1, 2, 3]
+    ys := xs.copy()
+    ys.push(4)
+    assert xs == [1, 2, 3], "mutating the copy leaves the original alone"
+    assert ys == [1, 2, 3, 4]
