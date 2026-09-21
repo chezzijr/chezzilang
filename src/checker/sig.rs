@@ -355,6 +355,66 @@ impl Checker {
         changed
     }
 
+    /// TICKET-157 (W12-12) — the speculative return inference a nested un-annotated `fn` runs, once
+    /// per decl span per outermost fn walk (`Checker::ret_memo`). Without it each enclosing
+    /// speculative walk repeats this inference AND the nested `check_fn_body`, which doubles per
+    /// nesting level. A hit replays the type plus the diagnostics `infer_fn_ret` emits AFTER its own
+    /// rollback; everything it did before that was erased by the rollback (`DiagMark`).
+    /// `check_fn_body` is deliberately not memoized — see `ret_memo`.
+    fn infer_nested_fn_ret(&mut self, decl: &FnDecl, sig: &FnSig) -> Ty {
+        let hit = if self.memo_enabled {
+            self.ret_memo.get(&decl.name_span).cloned()
+        } else {
+            None
+        };
+        if let Some(stored) = hit {
+            if self.memo_verify && !self.memo_verifying {
+                self.verify_memo_hit(decl, sig, &stored);
+            }
+            let (ty, errs, warns) = stored;
+            self.errors.extend(errs);
+            self.warnings.extend(warns);
+            return ty;
+        }
+        let (e0, w0) = (self.errors.len(), self.warnings.len());
+        let ty = self.infer_fn_ret(decl, None, sig, true);
+        if self.memo_enabled {
+            self.ret_memo.insert(
+                decl.name_span,
+                (
+                    ty.clone(),
+                    self.errors[e0..].to_vec(),
+                    self.warnings[w0..].to_vec(),
+                ),
+            );
+        }
+        ty
+    }
+
+    /// `CHEZZI_MEMO_VERIFY` probe: recompute a memo hit, roll the recompute back, and print a
+    /// `MEMO MISMATCH` line when the stored type or diagnostics differ. Prints rather than panics so
+    /// one run sweeps a whole corpus.
+    fn verify_memo_hit(
+        &mut self,
+        decl: &FnDecl,
+        sig: &FnSig,
+        stored: &(Ty, Vec<CheckError>, Vec<CheckError>),
+    ) {
+        self.memo_verifying = true;
+        let vmark = self.diag_mark();
+        let (e0, w0) = (self.errors.len(), self.warnings.len());
+        let ty = self.infer_fn_ret(decl, None, sig, true);
+        let recomputed = (ty, self.errors[e0..].to_vec(), self.warnings[w0..].to_vec());
+        self.diag_rollback(vmark);
+        self.memo_verifying = false;
+        if format!("{stored:?}") != format!("{recomputed:?}") {
+            eprintln!(
+                "MEMO MISMATCH at {:?}: stored {stored:?} vs recomputed {recomputed:?}",
+                decl.name_span
+            );
+        }
+    }
+
     /// Infer one function's return type by walking its body in inference mode: every `return`'s
     /// type is collected by `check_return` (with errors suppressed — pass 2 re-reports for real).
     /// The pick rule, in order:
@@ -378,6 +438,12 @@ impl Checker {
         sig: &FnSig,
         finalize: bool,
     ) -> Ty {
+        // An OUTERMOST fn walk starts here: drop the nested-fn return memo. `infer_returns` re-infers
+        // the same decls over a fixpoint (`infer_returns_pass`), each pass against different stored
+        // sigs, so an entry from an earlier pass would be stale (span-keyed aliasing, DEC-029/094).
+        if !self.in_fn_body {
+            self.ret_memo.clear();
+        }
         let mark = self.diag_mark();
         let saved_tps = self.enter_type_params(&decl.type_params);
         // `Self` in this body/inline-expr resolves to the enclosing type (`None` for a free fn, which
@@ -2449,7 +2515,7 @@ impl Checker {
                             },
                         );
                         self.kw_certain.insert(kw_key.clone());
-                        let inferred = self.infer_fn_ret(decl, None, &sig, true);
+                        let inferred = self.infer_nested_fn_ret(decl, &sig);
                         sig.ret = inferred;
                     }
                     // Nearest-scope binding: the name resolves to THIS nested fn (not a global
@@ -4344,6 +4410,12 @@ impl Checker {
         // Inside a fn body now: a `?` on a `Nil`-returning body must be REJECTED (would swallow the
         // Err/None), unlike module top-level where `Nil` accepts either. Saved/restored beside
         // `current_ret`.
+        // The other outermost fn walk (see `infer_fn_ret`): `infer_returns`' finalize pass settles
+        // stored rets (the `Result` E-slot among them) before this pass-2 check walk runs, so an
+        // entry computed under the earlier sigs must not be served here.
+        if !self.in_fn_body {
+            self.ret_memo.clear();
+        }
         let saved_in_fn = std::mem::replace(&mut self.in_fn_body, true);
         // W7-51 — is this a synthesized default-argument provider? Read off the name (the `$` prefix
         // is unspellable in source), and saved/restored beside `current_ret` so a closure or nested

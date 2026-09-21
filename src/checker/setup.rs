@@ -33,6 +33,22 @@ pub(super) struct DiagMark {
     /// prepass) records a span, then the rollback discards its error. A rollback that kept the span
     /// would leave the real pass silent. Empty unless the program overflows, so the clone is free.
     const_overflow_seen: std::collections::HashSet<Span>,
+    /// TICKET-157 — a speculative walk's NON-diagnostic effects must be erased too, or the nested-fn
+    /// return memo (`Checker::ret_memo`) is unsound: the memo replays only a walk's type and its
+    /// post-rollback diagnostics, so everything the skipped walk did BEFORE its rollback has to be
+    /// something the rollback already undoes. Each field below is written during a body walk and is
+    /// restored wholesale (never re-derived: DEC-064 first-use-wins, DEC-032 alias reverse walk).
+    /// A NEW `Checker` field written during a body walk must be added here in the same commit.
+    fn_reads: std::collections::HashSet<String>,
+    empty_coll_sites: Vec<(usize, String, Span)>,
+    empty_coll_aliases: Vec<((usize, String), (usize, String))>,
+    carrier_pins: Vec<((usize, String), Ty)>,
+    hover_result: Option<(Ty, HoverKind, Option<String>)>,
+    hover_pending: Option<(usize, String, HoverKind, Option<String>)>,
+    table_conflicts: Vec<(Span, String)>,
+    kw_certain: std::collections::HashSet<(usize, String)>,
+    kw_written: std::collections::HashSet<(usize, String)>,
+    kw_pending: Vec<((usize, String), Span)>,
 }
 
 impl Checker {
@@ -152,6 +168,10 @@ impl Checker {
             kw_written: std::collections::HashSet::new(),
             kw_pending: Vec::new(),
             hover_pending: None,
+            ret_memo: HashMap::new(),
+            memo_enabled: true,
+            memo_verify: std::env::var_os("CHEZZI_MEMO_VERIFY").is_some(),
+            memo_verifying: false,
         };
         c.seed_stdlib_structs();
         c
@@ -1325,6 +1345,16 @@ impl Checker {
             spawn_stale: self.spawn_stale.clone(),
             ret_coerce: self.ret_coerce.clone(),
             const_overflow_seen: self.const_overflow_seen.clone(),
+            fn_reads: self.fn_reads.clone(),
+            empty_coll_sites: self.empty_coll_sites.clone(),
+            empty_coll_aliases: self.empty_coll_aliases.clone(),
+            carrier_pins: self.carrier_pins.clone(),
+            hover_result: self.hover_result.clone(),
+            hover_pending: self.hover_pending.clone(),
+            table_conflicts: self.table_conflicts.clone(),
+            kw_certain: self.kw_certain.clone(),
+            kw_written: self.kw_written.clone(),
+            kw_pending: self.kw_pending.clone(),
         }
     }
 
@@ -1336,6 +1366,16 @@ impl Checker {
         self.spawn_stale = m.spawn_stale;
         self.ret_coerce = m.ret_coerce;
         self.const_overflow_seen = m.const_overflow_seen;
+        self.fn_reads = m.fn_reads;
+        self.empty_coll_sites = m.empty_coll_sites;
+        self.empty_coll_aliases = m.empty_coll_aliases;
+        self.carrier_pins = m.carrier_pins;
+        self.hover_result = m.hover_result;
+        self.hover_pending = m.hover_pending;
+        self.table_conflicts = m.table_conflicts;
+        self.kw_certain = m.kw_certain;
+        self.kw_written = m.kw_written;
+        self.kw_pending = m.kw_pending;
     }
 
     /// Attribute a diagnostic to the module currently being checked (graph path only). Shared by

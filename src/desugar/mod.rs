@@ -1666,12 +1666,14 @@ struct Walker<'a> {
 }
 
 /// TICKET-109 / W12-12 — how deep `fn` declarations may nest. A top-level `fn`, a `test fn` or a
-/// method is level 1; each `fn` declared in its body adds one. The checker walks an un-annotated
-/// nested fn's body twice (`infer_fn_ret`, then `check_fn_body`), and every enclosing inference walk
-/// repeats both, so N levels cost `2^(N+2) - 4` body walks: 16 deep checks in about 0.2 s on release,
-/// 20 deep took 3 s and 30 deep over a minute. Rejecting the 17th level here, before the checker
-/// runs, is a limit, not a fix: `docs/gaps.md` W12-12 records what a real fix needs.
-pub const MAX_FN_NESTING: usize = 16;
+/// method is level 1; each `fn` declared in its body adds one. The bound is CPython's INDENTATION
+/// bound, not a performance bound: `compile()` on a 100-deep `def` chain raises `IndentationError: too
+/// many levels of indentation` (measured on CPython 3.14.7), so 100 is the ancestor's limit and
+/// strictly more permissive than it. TICKET-157 memoized the checker's nested-fn return inference
+/// (`Checker::ret_memo`), which had walked the body `2^(N+2) - 4` times and forced the earlier cap of
+/// 16. The memoized walk is still superlinear at absurd depth (the per-`diag_mark` clone grows with
+/// depth), so the constant stays; lowering it to a performance bound needs a new measurement.
+pub const MAX_FN_NESTING: usize = 100;
 
 impl Walker<'_> {
     /// Enter one `fn` body (TICKET-109): count it, and reject it past [`MAX_FN_NESTING`] at its name.
@@ -3297,37 +3299,42 @@ mod tests {
         src
     }
 
-    /// TICKET-109 / W12-12 — `fn` declarations nest 16 deep (`MAX_FN_NESTING`) and no deeper; a
+    /// TICKET-109 / W12-12 — `fn` declarations nest 100 deep (`MAX_FN_NESTING`) and no deeper; a
     /// top-level `fn` or a method is level 1. A sibling chain starts again at level 1, so the second
-    /// 16-deep chain here fails if a body's walk forgets to decrement the depth.
+    /// 100-deep chain here fails if a body's walk forgets to decrement the depth.
     #[test]
-    fn fn_nesting_sixteen_deep_is_accepted() {
-        desugar_ok(&(fn_chain("f", 16, 0) + &fn_chain("g", 16, 0)));
-        desugar_ok(&format!(
-            "struct S:\n    x: int\n    fn m(self):\n{}",
-            fn_chain("f", 15, 2)
-        ));
+    fn fn_nesting_one_hundred_deep_is_accepted() {
+        // The production front-end stack: a 100-deep parse and walk overflows a 2 MiB test thread.
+        crate::on_frontend_stack_scoped(|| {
+            desugar_ok(&(fn_chain("f", 100, 0) + &fn_chain("g", 100, 0)));
+            desugar_ok(&format!(
+                "struct S:\n    x: int\n    fn m(self):\n{}",
+                fn_chain("f", 99, 2)
+            ));
+        });
     }
 
-    /// TICKET-109 / W12-12 — the 17th level is one resolve error at that fn's name, whether the
+    /// TICKET-109 / W12-12 — the 101st level is one resolve error at that fn's name, whether the
     /// chain starts at a top-level `fn` or at a method.
     #[test]
-    fn fn_nesting_seventeen_deep_is_rejected_at_the_fn_name() {
-        let e = desugar_err(&fn_chain("f", 17, 0));
+    fn fn_nesting_one_hundred_and_one_deep_is_rejected_at_the_fn_name() {
+        let e = crate::on_frontend_stack_scoped(|| desugar_err(&fn_chain("f", 101, 0)));
         assert_eq!(
             e.message,
-            "fn 'f16' is nested 17 deep; fn declarations nest at most 16 deep (declare it at an outer level)"
+            "fn 'f100' is nested 101 deep; fn declarations nest at most 100 deep (declare it at an outer level)"
         );
-        assert_eq!((e.span.line, e.span.col), (17, 68));
-        let e = desugar_err(&format!(
-            "struct S:\n    x: int\n    fn m(self):\n{}",
-            fn_chain("f", 16, 2)
-        ));
+        assert_eq!((e.span.line, e.span.col), (101, 404));
+        let e = crate::on_frontend_stack_scoped(|| {
+            desugar_err(&format!(
+                "struct S:\n    x: int\n    fn m(self):\n{}",
+                fn_chain("f", 100, 2)
+            ))
+        });
         assert_eq!(
             e.message,
-            "fn 'f15' is nested 17 deep; fn declarations nest at most 16 deep (declare it at an outer level)"
+            "fn 'f99' is nested 101 deep; fn declarations nest at most 100 deep (declare it at an outer level)"
         );
-        assert_eq!((e.span.line, e.span.col), (19, 72));
+        assert_eq!((e.span.line, e.span.col), (103, 408));
     }
 
     /// Pull the positional arg ints out of the call inside the last statement (`x := CALL` or `CALL`).

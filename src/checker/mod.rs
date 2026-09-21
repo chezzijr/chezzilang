@@ -864,8 +864,26 @@ pub fn check(module: &crate::ast::Module) -> Result<(), Vec<CheckError>> {
 /// [`check_graph_diags`]. Warnings never affect the `Result`.
 #[cfg(test)]
 pub fn check_diags(module: &crate::ast::Module) -> (Result<(), Vec<CheckError>>, Vec<CheckError>) {
+    check_diags_with(module, true)
+}
+
+/// [`check_diags`] with the nested-fn return memo off (`Checker::ret_memo`), for the twin comparison
+/// in `the_nested_fn_ret_memo_is_invisible_to_diagnostics_and_tables`.
+#[cfg(test)]
+pub fn check_diags_no_memo(
+    module: &crate::ast::Module,
+) -> (Result<(), Vec<CheckError>>, Vec<CheckError>) {
+    check_diags_with(module, false)
+}
+
+#[cfg(test)]
+fn check_diags_with(
+    module: &crate::ast::Module,
+    memo_enabled: bool,
+) -> (Result<(), Vec<CheckError>>, Vec<CheckError>) {
     crate::on_frontend_stack_scoped(move || {
         let mut c = Checker::new();
+        c.memo_enabled = memo_enabled;
         // Single-module path (no graph): the always-linked std/prelude.chz was never hoisted, so seed
         // the eight migrated universe-builtin signatures from it directly (graph path hoists them
         // normally).
@@ -1075,8 +1093,26 @@ pub fn resolve_call_tables(
     RetCoerceTable,
     TableConflicts,
 ) {
+    resolve_call_tables_with(graph, true)
+}
+
+/// [`resolve_call_tables`] with the nested-fn return memo (`Checker::ret_memo`) switchable, so a test
+/// can run the SAME graph both ways. Production always passes `true`.
+fn resolve_call_tables_with(
+    graph: &ModuleGraph,
+    memo_enabled: bool,
+) -> (
+    KeywordTable,
+    WitnessTable,
+    CarrierTable,
+    ProtoEqTable,
+    SumSeedTable,
+    RetCoerceTable,
+    TableConflicts,
+) {
     crate::on_frontend_stack_scoped(move || {
         let mut c = Checker::new();
+        c.memo_enabled = memo_enabled;
         c.harvest_keywords = true;
         c.run_graph_pass(graph, false);
         (
@@ -1112,8 +1148,31 @@ pub fn resolve_call_tables_standalone(
     RetCoerceTable,
     TableConflicts,
 ) {
+    resolve_call_tables_with(&standalone_graph(stmts), true)
+}
+
+/// [`resolve_call_tables_standalone`] with the nested-fn return memo off — the twin
+/// `the_nested_fn_ret_memo_is_invisible_to_diagnostics_and_tables` compares against.
+#[cfg(test)]
+pub fn resolve_call_tables_standalone_no_memo(
+    stmts: &[Stmt],
+) -> (
+    KeywordTable,
+    WitnessTable,
+    CarrierTable,
+    ProtoEqTable,
+    SumSeedTable,
+    RetCoerceTable,
+    TableConflicts,
+) {
+    resolve_call_tables_with(&standalone_graph(stmts), false)
+}
+
+/// The synthetic one-module graph both standalone entry points wrap `stmts` in.
+#[cfg(test)]
+fn standalone_graph(stmts: &[Stmt]) -> ModuleGraph {
     let id = crate::resolver::ModuleId(std::path::PathBuf::from("<main>"));
-    let graph = ModuleGraph {
+    ModuleGraph {
         entry: id.clone(),
         modules: vec![crate::resolver::LoadedModule {
             id,
@@ -1125,8 +1184,7 @@ pub fn resolve_call_tables_standalone(
             imports: Vec::new(),
             native: None,
         }],
-    };
-    resolve_call_tables(&graph)
+    }
 }
 
 /// The [`KeywordTable`] key span for a value call that carries keyword arguments. The AST call-node
@@ -2567,6 +2625,22 @@ struct Checker {
     /// (refined) type. The owning-scope index gates the finalize so an intervening inner fn/method seam
     /// can't resolve it prematurely to the still-unrefined type. Probe-gated; behavior-neutral.
     hover_pending: Option<(usize, String, HoverKind, Option<String>)>,
+    /// TICKET-157 (W12-12) — memo of the SPECULATIVE `infer_fn_ret` a nested un-annotated `fn` runs
+    /// (`sig.rs`'s nested-fn arm), keyed by the decl's name span: the inferred return type, then the
+    /// errors and warnings that inference emitted AFTER its own `diag_rollback` (the finalize
+    /// diagnostic). Everything the walk did before that rollback is erased by it (`DiagMark`), so a
+    /// hit replays these two lists and nothing else. `check_fn_body` is NEVER memoized: the
+    /// enclosing walk reads its `drop_empty_site` pin mid-walk. Cleared at the top of every OUTERMOST
+    /// fn walk (`!in_fn_body`), so an entry never outlives one `infer_returns` pass.
+    ret_memo: HashMap<Span, (Ty, Vec<CheckError>, Vec<CheckError>)>,
+    /// `false` turns the memo off (test-only twin entry points compare with and without it).
+    memo_enabled: bool,
+    /// `CHEZZI_MEMO_VERIFY` — on a memo hit recompute the inference and print `MEMO MISMATCH` when it
+    /// differs from the stored entry. A debugging gate, off by default.
+    memo_verify: bool,
+    /// Re-entrancy guard for `memo_verify`: while set, the recompute's own nested lookups are served
+    /// from the memo, so verification costs one extra walk per hit, not a second exponential tree.
+    memo_verifying: bool,
 }
 
 /// W8-3 — one `spawn_stale` entry: the task-side write that made a binding stale, plus the two

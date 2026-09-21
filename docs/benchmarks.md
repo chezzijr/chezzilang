@@ -2424,3 +2424,27 @@ single run each:
 
 `tests/chz/spec/airlock_received_closure_globals_test.chz::deep_module_global_nursery_opens_stay_linear`
 pins it at depth 2000, six opens, under 3 s (base: 9.8 s measured red on the same file).
+
+### fn-nesting depth (2026-09-21, TICKET-157)
+
+`chezzi check` on a chain of N nested `fn` declarations, each in the last, ending in `pass`
+(`n`), or with the innermost body `print(G)` on a module-level `G` (`c`). RELEASE binaries, one run
+each. "Before" is the base commit with only `MAX_FN_NESTING` raised to 1000 so the deep files reach
+the checker (the shipped base refuses everything past 16). The CPython twin is the same chain of
+`def`s RUN with `python3` (3.14.7, process wall time including interpreter start).
+
+| depth | before `n` | after `n` | before `c` | after `c` | CPython `def` twin |
+|---|---|---|---|---|---|
+| 16 | 0.328 s | 0.011 s | 0.894 s | 0.010 s | 0.020 s |
+| 20 | 4.093 s | 0.012 s | not run | 0.013 s | 0.020 s |
+| 24 | >60 s (timeout) | 0.016 s | not run | 0.018 s | 0.019 s |
+| 30 | not run | 0.036 s | not run | 0.044 s | 0.020 s |
+| 50 | not run | 0.216 s | not run | 0.210 s | 0.021 s |
+| 100 | not run | 2.545 s | not run | 2.716 s | `IndentationError: too many levels of indentation` |
+
+CPython refuses the 100-deep (and 101-deep) chain outright, so `MAX_FN_NESTING = 100` is CPython's
+indentation bound, not a performance bound. The memoized walk is still superlinear (about 0.2 s at 50,
+2.5 s at 100): each `diag_mark` clones state that itself grows with depth. It is no longer
+exponential; an ANNOTATED chain never was. Probe p1 (TICKET-109 `## Decisions`) is byte-identical to
+base, and a `check` over 396 files (`examples/`, `tests/chz/`, `std/`, `benches/`) has 0 differing
+outputs.
