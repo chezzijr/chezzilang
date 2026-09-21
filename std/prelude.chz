@@ -98,6 +98,8 @@ native struct List[T]:
     # The CARRIER twin of `index_of`: a miss is `None`, not a `-1` that indexes as the last element.
     # Reach for this (or `Map.get`, the same shape for keys) when a miss must not be silently usable.
     native fn position(self, pred: fn(T) -> bool) -> Option[int]
+    # TICKET-160 — shallow: a new container holding the same element handles (Python list/dict/set.copy()).
+    native fn copy(self) -> List[T]
 
 native struct Map[K: Hashable + Eq, V]:
     native fn len(self) -> int
@@ -108,6 +110,9 @@ native struct Map[K: Hashable + Eq, V]:
     native fn remove(self, k: K) -> Option[V]
     native fn merge(self, other: Map[K, V]) -> Map[K, V]
     native fn update(self, other: Map[K, V]) -> nil
+    # TICKET-160 — insertion order, identical to keys(); Map(m.items()) == m.
+    native fn items(self) -> List[(K, V)]
+    native fn copy(self) -> Map[K, V]
 
 native struct Set[T: Hashable + Eq]:
     native fn len(self) -> int
@@ -117,6 +122,7 @@ native struct Set[T: Hashable + Eq]:
     native fn union(self, other: Set[T]) -> Set[T]
     native fn intersection(self, other: Set[T]) -> Set[T]
     native fn difference(self, other: Set[T]) -> Set[T]
+    native fn copy(self) -> Set[T]
 
 # `Channel[T]` — the reserved concurrency primitive. Identity stays the reserved `Ty::Channel(T)`
 # (`resolve_type` reserved arm; the `Channel[T](cap)` ctor stays compiler-wired), and runtime dispatch

@@ -24318,6 +24318,7 @@ fn container_method_sigs_byte_match() {
     chk("List", "concat", &int(), vec![li()], li());
     chk("List", "extend", &int(), vec![li()], Ty::Nil);
     chk("List", "sum", &int(), vec![], Ty::Int);
+    chk("List", "copy", &int(), vec![], li());
     // `sort` is now file-backed (`native fn sort(self) -> nil where T: Comparable`): it resolves via
     // the harvested table with a nil return, and carries a `where T: Comparable` bound (enforced at
     // the call site by the Ty::List arm's `enforce_bounds`).
@@ -24360,7 +24361,15 @@ fn container_method_sigs_byte_match() {
         vec![Ty::map(Ty::Int, Ty::Str)],
         Ty::Nil,
     );
-    // Set[Int] — the 7 flat methods.
+    chk(
+        "Map",
+        "items",
+        &kv(),
+        vec![],
+        Ty::list(Ty::Tuple(vec![Ty::Int, Ty::Str])),
+    );
+    chk("Map", "copy", &kv(), vec![], Ty::map(Ty::Int, Ty::Str));
+    // Set[Int] — the flat methods.
     chk("Set", "len", &int(), vec![], Ty::Int);
     chk("Set", "has", &int(), vec![Ty::Int], Ty::Bool);
     chk("Set", "add", &int(), vec![Ty::Int], Ty::Nil);
@@ -24386,6 +24395,7 @@ fn container_method_sigs_byte_match() {
         vec![Ty::set(Ty::Int)],
         Ty::set(Ty::Int),
     );
+    chk("Set", "copy", &int(), vec![], Ty::set(Ty::Int));
     // `map`/`filter`/`fold`/`sort_by`/`sort_by_key` are now file-backed too (the closure-return
     // loop-back landed), so they resolve via the harvested table. `map`/`fold`/`sort_by_key` carry
     // their own `[U]`/`[K]` type param (routed through `infer_generic_method`); `filter`/`sort_by` are

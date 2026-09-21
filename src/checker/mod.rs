@@ -3800,9 +3800,10 @@ const LIST_METHODS: &[&str] = &[
     "drop_while",
     "count",
     "position",
+    "copy",
 ];
 const MAP_METHODS: &[&str] = &[
-    "len", "has", "get", "keys", "values", "remove", "merge", "update",
+    "len", "has", "get", "keys", "values", "remove", "merge", "update", "items", "copy",
 ];
 const SET_METHODS: &[&str] = &[
     "len",
@@ -3812,6 +3813,7 @@ const SET_METHODS: &[&str] = &[
     "union",
     "intersection",
     "difference",
+    "copy",
 ];
 const CHANNEL_METHODS: &[&str] = &[
     "send", "try_send", "recv", "try_recv", "close", "trip", "len", "cap",
