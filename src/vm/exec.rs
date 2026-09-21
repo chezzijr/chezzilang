@@ -386,17 +386,25 @@ impl Vm {
     /// Moving the rungs out of the generic `guarded` body did NOT help (1.520 s); pushing this block
     /// out of line did: 1.446 s, level with the 1.450 s of the same build without the rung.
     /// If this is ever inlined back, re-run `hyperfine` on `loop` before believing it is free.
+    ///
+    /// TICKET-155 — the 1-in-1024 sample is now SHARED with the owner rung (`MnSched::scope_fault`
+    /// takes the sched lock, so that rung cannot run per element either). The caller ticks whenever
+    /// `--timeout` is set OR a nursery is open on this fiber, so the `deadline.is_some()` test lives
+    /// here now. Returns whether this call landed on the sample.
     #[cold]
     #[inline(never)]
-    fn hof_deadline_tick(&mut self) -> Result<(), RuntimeError> {
+    fn hof_sampled_tick(&mut self) -> Result<bool, RuntimeError> {
         self.back_edge_tick = self.back_edge_tick.wrapping_add(1);
-        if self.back_edge_tick.is_multiple_of(1024)
+        if !self.back_edge_tick.is_multiple_of(1024) {
+            return Ok(false);
+        }
+        if self.deadline.is_some()
             && let Some(fr) = self.frames.last()
         {
             let span = fr.call_span;
             self.deadline_halt(span)?;
         }
-        Ok(())
+        Ok(true)
     }
 
     /// The three halt rungs [`Vm::guarded`] runs before re-entering user code — `--timeout`, then
@@ -430,15 +438,22 @@ impl Vm {
         // down, and `--timeout` is the backstop those two suppressions are allowed to lean on.
         //
         // This fn runs per ELEMENT of every `map`/`filter`/`fold`/`sort_by`, so the tick + clock read
-        // live in the out-of-line [`Vm::hof_deadline_tick`] (see it — the placement is measured, not
+        // live in the out-of-line [`Vm::hof_sampled_tick`] (see it — the placement is measured, not
         // stylistic) and are throttled 1/1024 on the shared `back_edge_tick`. The `deadline.is_some()`
         // gate is checked BEFORE the call, so a run with the cap off — the common case, and every
         // `chezzi run` — neither ticks nor reads the clock, same as `jump_checked`. `deadline_halt`
         // produces the `.timed_out()`-marked error the runner reports as `TIMED-OUT`, rather than
         // re-deriving the message here.
-        if self.deadline.is_some() {
-            self.hof_deadline_tick()?;
-        }
+        //
+        // TICKET-155: the tick also runs while a nursery is open on this fiber (`eager_scheds` is
+        // non-empty — the very list `owned_nursery_fault` walks), because the owner rung at the
+        // bottom rides the same sample. A program with no `parallel:` and no cap still neither ticks
+        // nor takes a lock.
+        let sampled = if self.deadline.is_some() || !self.eager_scheds.is_empty() {
+            self.hof_sampled_tick()?
+        } else {
+            false
+        };
         if self.cancel_requested()
             && let Some(fr) = self.frames.last()
         {
@@ -467,6 +482,19 @@ impl Vm {
             if let Some(e) = self.exit_halt(span) {
                 return Err(e);
             }
+        }
+        // TICKET-155 (W11-14) — the owner rung, `jump_checked`'s counterpart for the per-element
+        // re-entry. `cancel_requested()` above reads only cancel flags THIS fiber holds, and a nursery
+        // OWNER holds none of its own scope's, so a doomed owner ran every remaining element of its
+        // `map`/`filter`/`fold` before learning a child faulted. DEC-096 left this hole open until the
+        // rung's cost was measured (`benches/chz/hof_nursery.chz`, `docs/benchmarks.md`). Gated on the
+        // shared 1-in-1024 `sampled` because `scope_fault` takes the sched lock; BELOW the exit halt so
+        // all three checkpoints agree on `Exit > Fault > Deadlocked`.
+        // [`Vm::deliver_owner_fault`] carries the `cancel_suppressed()` guard, so a `defer` body's own
+        // `map` is never truncated, and records `owner_fault_floor` so only a `recover:` INSIDE the
+        // faulting nursery is bypassed.
+        if sampled && let Some(e) = self.deliver_owner_fault() {
+            return Err(e);
         }
         Ok(())
     }

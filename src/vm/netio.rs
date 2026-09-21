@@ -2423,6 +2423,9 @@ impl Vm {
     /// on `is_counted_party()` — a recorded fault is a fact, not a heuristic verdict, so it needs no
     /// judgeability. `cancel_suppressed()` is the same defer/already-unwinding guard
     /// `cancel_requested()` applies, so a `defer` body is never truncated by this rung.
+    // Out of line: it now has a call site on the per-element HOF checkpoint, where `hof_sampled_tick`'s
+    // doc measured +4.5 % on `loop.chz` for letting this class of rung inline.
+    #[inline(never)]
     pub(super) fn deliver_owner_fault(&mut self) -> Option<RuntimeError> {
         if self.cancel_suppressed() {
             return None;
