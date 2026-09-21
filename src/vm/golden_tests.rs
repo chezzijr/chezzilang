@@ -8963,17 +8963,11 @@ main()";
     assert_golden_out(src, "9 9\n");
 }
 
-/// W11-15, a KNOWN RESIDUAL: the three `RwShared` stores keep `elem_split` (`to_wire_crossable_split`),
-/// so `WireMemo::nodes` stays empty for them and a DAG alias stored in an `RwShared` still crosses as
-/// two independent copies, unlike every other cross-heap store after TICKET-100. Deferred because an
-/// `RwShared` read view (`at`/`for_each`/`fold`/`slice`/`get_key`) drains one stored wire through many
-/// independent rebuild maps, so a cross-element back-ref would force `from_wire_piece` to re-materialize
-/// the whole container per element — the cliff `rwshared_view_over_shared_bindings_is_not_quadratic`
-/// exists to catch. Re-opens if a rebuild path ever shares one map across the piecewise drains. `outer :=
-/// [inner, inner]` stored in an `RwShared`, read back with `get()`, then pushed through `v[0]`: the two
-/// slots have DIFFERENT lengths (`2 1`), the pre-TICKET-100 answer for every store.
+/// W11-15 (TICKET-154): a DAG alias stored in an `RwShared` crosses as ONE object. `outer := [inner,
+/// inner]` stored in an `RwShared`, read back with `get()`, then pushed through `v[0]`: both slots see
+/// the push (`2 2`), as CPython and Rust do.
 #[test]
-fn airlock_rwshared_store_dag_alias_is_a_known_residual() {
+fn airlock_rwshared_store_dag_alias_is_one_object() {
     let src = "\
 import std.concurrency
 fn main():
@@ -8984,7 +8978,7 @@ fn main():
     v[0].push(2)
     print(\"{v[0].len()} {v[1].len()}\")
 main()";
-    assert_golden_out(src, "2 1\n");
+    assert_golden_out(src, "2 2\n");
 }
 
 /// TICKET-137 (superseding TICKET-100's reject): a generator now has a node id, so a list holding the
