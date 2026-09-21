@@ -1328,6 +1328,16 @@ fn interpolation_spec_w8_42_missing_forms_accepted() {
     ok("n: int = 42\nprint(\"{n: d}\")\n");
 }
 
+#[test]
+fn interpolation_spec_runtime_width_nested_field_accepted() {
+    // TICKET-162: CPython/Rust/Go take a width measured at runtime (`{s:<{w}}`); Chezzi's spec
+    // parser sees the inner `{` as a type char.
+    ok("w := 6
+s := \"ab\"
+print(\"|{s:<{w}}|\")
+");
+}
+
 // ===== compound assignment (*= /= %= &= |= ^= <<= >>=) =====
 
 #[test]
