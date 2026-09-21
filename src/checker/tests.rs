@@ -32591,15 +32591,14 @@ fn a_bound_naming_a_generic_protocol_alias_is_refused_by_name() {
 
 /// TICKET-109 (W12-12): N nested `fn` declarations (`fn f0(): fn f1(): ... pass`) made `check`
 /// exponential in N. The checker walks an un-annotated nested fn's body twice (`infer_fn_ret`, then
-/// `check_fn_body`), and every enclosing inference walk repeats both. Measured on the release binary
-/// at 3f1300ab: N=18 0.845s, N=20 3.39s, N=24 past 30s. The fix is a limit, not a faster walk:
-/// `desugar` rejects a `fn` nested deeper than `desugar::MAX_FN_NESTING` (16) before the checker
-/// runs. This test drives the production order (`resolver::build_graph`: desugar, then check) at
-/// N=18 and requires that one error inside the 2s ceiling. Before the limit, N=18 checked clean after
-/// about 7.5s in the dev profile.
+/// `check_fn_body`), and every enclosing inference walk repeats both. TICKET-157 memoizes the
+/// speculative `infer_fn_ret` per nested-fn decl span, so the body is walked once per encounter.
+/// Before the memo N=20 took 42.790s in the dev profile and N=24 never finished; with it N=30 is
+/// 0.089s. This test drives the production order (`resolver::build_graph`: desugar, then check) at
+/// N=30 and requires a clean verdict inside the 2s ceiling.
 #[test]
 fn nested_fn_decl_check_is_not_exponential() {
-    const N: usize = 18;
+    const N: usize = 30;
     let mut src = String::new();
     for i in 0..N {
         src.push_str(&"    ".repeat(i));
@@ -32614,16 +32613,149 @@ fn nested_fn_decl_check_is_not_exponential() {
     let verdict = crate::desugar::run_standalone(&mut module).map(|()| check(&module));
     let elapsed = start.elapsed();
 
-    let err = verdict.expect_err("18 nested fn declarations must hit the fn-nesting limit");
-    assert!(
-        err.message.contains("fn declarations nest at most 16 deep"),
-        "got: {err:?}"
-    );
+    match verdict {
+        Ok(Ok(())) => {}
+        other => panic!("{N} nested fn declarations must check clean, got: {other:?}"),
+    }
     assert!(
         elapsed < std::time::Duration::from_secs(2),
-        "rejecting {N} nested fn declarations took {elapsed:?} (>2s ceiling) -- exponential \
+        "checking {N} nested fn declarations took {elapsed:?} (>2s ceiling) -- exponential \
          checker cost in nested-fn-declaration depth (TICKET-109 / W12-12)"
     );
+}
+
+/// TICKET-157 -- the TICKET-109 canary. The nested `g` returns a captured empty list on one branch,
+/// and the enclosing inference walk READS the pin `g`'s body walk puts on `zs` (`drop_empty_site`)
+/// at `return zs[0]`. Skipping the nested `check_fn_body` under `inferring_ret` (design (a), rejected)
+/// moves this to `expected return type int, found str` at 9:16; the memo must not.
+#[test]
+fn a_nested_fn_returning_a_captured_empty_list_reports_the_outer_conflict() {
+    let src = "fn outer(c: bool):\n    zs := []\n    fn g(d: bool):\n        if d:\n            return [\"a\"]\n        return zs\n    g(c)\n    if c:\n        return zs[0]\n    return 1\nprint(outer(true))\n";
+    let errs = check_src(src);
+    assert_eq!(errs.len(), 1, "got: {errs:?}");
+    assert!(
+        errs[0]
+            .message
+            .contains("cannot infer return type: conflicting branches (str vs int)"),
+        "got: {errs:?}"
+    );
+    assert_eq!(
+        (errs[0].span.line, errs[0].span.col),
+        (1, 4),
+        "got: {errs:?}"
+    );
+}
+
+/// A HashMap's entries as sorted `key => value` Debug lines, so two runs compare deterministically.
+fn sorted_debug<K: std::fmt::Debug, V: std::fmt::Debug>(m: &HashMap<K, V>) -> Vec<String> {
+    let mut v: Vec<String> = m.iter().map(|(k, x)| format!("{k:?} => {x:?}")).collect();
+    v.sort();
+    v
+}
+
+/// TICKET-157 -- the nested-fn return memo (`Checker::ret_memo`) must be INVISIBLE: the same program
+/// through the same entry point with `memo_enabled` off renders identical diagnostics AND identical
+/// resolved side tables. The tables are what `DiagMark` deliberately does not snapshot (`carriers`,
+/// `keyword_calls`, `witnesses`, `next_opt_tmp`), so only this comparison sees a memo that drops a
+/// write one of them needed. A memo entry served in the wrong context (a stale finalize-pass type, a
+/// pin the skipped walk would have written) makes one of the eleven programs render differently.
+#[test]
+fn the_nested_fn_ret_memo_is_invisible_to_diagnostics_and_tables() {
+    let programs: [(&str, &str); 11] = [
+        (
+            "p1 canary",
+            "fn outer(c: bool):\n    zs := []\n    fn g(d: bool):\n        if d:\n            return [\"a\"]\n        return zs\n    g(c)\n    if c:\n        return zs[0]\n    return 1\nprint(outer(true))\n",
+        ),
+        (
+            "clean 6-deep chain",
+            "fn f0():\n    fn f1():\n        fn f2():\n            fn f3():\n                fn f4():\n                    fn f5():\n                        return 1\n                    return f5()\n                return f4()\n            return f3()\n        return f2()\n    return f1()\nprint(f0())\n",
+        ),
+        (
+            "reads an enclosing local",
+            "fn outer():\n    x := 5\n    fn a():\n        fn b():\n            return x + 1\n        return b()\n    return a()\nprint(outer())\n",
+        ),
+        (
+            "reads a module global",
+            "G := 3\nfn outer():\n    fn a():\n        fn b():\n            return G\n        return b()\n    return a()\nprint(outer())\n",
+        ),
+        (
+            "self-recursive nested fn",
+            "fn outer(n: int):\n    fn fact(k: int):\n        if k <= 1:\n            return 1\n        return k * fact(k - 1)\n    fn wrap(k: int):\n        return fact(k)\n    return wrap(n)\nprint(outer(4))\n",
+        ),
+        (
+            "nested generator",
+            "fn outer():\n    fn gen():\n        yield 1\n        yield 2\n    fn wrap():\n        for v in gen():\n            yield v\n    return wrap()\nprint(outer())\n",
+        ),
+        (
+            "type error in a nested fn",
+            "fn outer():\n    fn a():\n        fn b():\n            return 1 + \"x\"\n        return b()\n    return a()\nprint(outer())\n",
+        ),
+        (
+            "?. carrier on an Option",
+            "fn geto() -> Option[str]:\n    return Some(\"abc\")\nfn outer():\n    fn a():\n        fn b():\n            return geto()?.len()\n        return b()\n    return a()\nprint(outer())\n",
+        ),
+        (
+            "keyword call through a fn value",
+            "fn kw(a: int, b: int = 2) -> int:\n    return a + b\nfn outer():\n    fn h(x: int, y: int):\n        return x - y\n    fn a():\n        fn b():\n            return h(y=1, x=5) + kw(b=5, a=1)\n        return b()\n    return a()\nprint(outer())\n",
+        ),
+        (
+            "generic call through a static-protocol bound",
+            "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\nfn reset[T: Default](old: T) -> T:\n    return T.default()\nfn outer():\n    fn a():\n        fn b():\n            return reset(Counter(5))\n        return b()\n    return a()\nprint(outer().n)\n",
+        ),
+        (
+            "finalize-pass shape",
+            "fn f(c: bool):\n    if c:\n        return Ok(1)\n    return Err(\"bad\")\nfn h():\n    fn g():\n        return f(true)\n    return g()\nx: int!int = h()\nprint(x)\n",
+        ),
+    ];
+    for (name, src) in programs {
+        let tokens = lexer::tokenize(src).expect("lex should succeed");
+        let mut m = parser::parse(tokens).unwrap_or_else(|e| panic!("{name}: parse failed: {e:?}"));
+        crate::desugar::run_standalone(&mut m)
+            .unwrap_or_else(|e| panic!("{name}: desugar failed: {e:?}"));
+        assert_eq!(
+            format!("{:?}", check_diags(&m)),
+            format!("{:?}", check_diags_no_memo(&m)),
+            "{name}: memo on vs off changed the diagnostics"
+        );
+        let on = resolve_call_tables_standalone(&m.stmts);
+        let off = resolve_call_tables_standalone_no_memo(&m.stmts);
+        assert_eq!(
+            sorted_debug(&on.0),
+            sorted_debug(&off.0),
+            "{name}: keyword_calls"
+        );
+        assert_eq!(
+            sorted_debug(&on.1.fns),
+            sorted_debug(&off.1.fns),
+            "{name}: witnesses.fns"
+        );
+        assert_eq!(
+            sorted_debug(&on.1.calls),
+            sorted_debug(&off.1.calls),
+            "{name}: witnesses.calls"
+        );
+        assert_eq!(
+            sorted_debug(&on.2),
+            sorted_debug(&off.2),
+            "{name}: carriers"
+        );
+        assert_eq!(
+            sorted_debug(&on.3),
+            sorted_debug(&off.3),
+            "{name}: proto_eq_calls"
+        );
+        assert_eq!(
+            sorted_debug(&on.4),
+            sorted_debug(&off.4),
+            "{name}: sum_seeds"
+        );
+        assert_eq!(
+            sorted_debug(&on.5),
+            sorted_debug(&off.5),
+            "{name}: ret_coerce"
+        );
+        assert_eq!(on.6, off.6, "{name}: table_conflicts");
+    }
 }
 
 /// TICKET-157 / W12-12 -- the fn-nesting cap is a guard, not a fix: a 24-deep chain of nested `fn`

@@ -138,6 +138,60 @@ fn hover_round_trip() {
     assert!(saw_hover, "never received a hover response for id 2");
 }
 
+/// TICKET-157 (W12-12) — hover goes through the same nested-fn walk as `check`. The wider `DiagMark`
+/// snapshots `hover_result`/`hover_pending`, and the return-inference memo skips repeat speculative
+/// walks, so a hover inside a deep unannotated chain must still land on the real walk's record. Before
+/// the fix a chain past the old 16-deep cap was refused outright, so the server had no hover for it.
+#[test]
+fn hover_inside_a_deeply_nested_fn_chain_reports_the_binding_type() {
+    const DEPTH: usize = 20;
+    let (mut stdin, rx, _guard, _init_resp) = start_server();
+
+    // `fn f0():` .. `fn f19():`, each nested in the last, then `n := 41` and `print(n)` innermost.
+    // The JSON string carries the newlines as the two-character escape `\n`.
+    let mut text = String::new();
+    for i in 0..DEPTH {
+        text.push_str(&"    ".repeat(i));
+        text.push_str(&format!("fn f{i}():\\n"));
+    }
+    let indent = "    ".repeat(DEPTH);
+    text.push_str(&format!("{indent}n := 41\\n{indent}print(n)\\n"));
+    send(
+        &mut stdin,
+        &format!(
+            r#"{{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{{"textDocument":{{"uri":"file:///tmp/chezzi_lsp_hover_deep.chz","languageId":"chezzi","version":1,"text":"{text}"}}}}}}"#
+        ),
+    );
+    // Hover the `n` inside `print(n)`: line DEPTH + 1, after `print(`.
+    send(
+        &mut stdin,
+        &format!(
+            r#"{{"jsonrpc":"2.0","id":2,"method":"textDocument/hover","params":{{"textDocument":{{"uri":"file:///tmp/chezzi_lsp_hover_deep.chz"}},"position":{{"line":{},"character":{}}}}}}}"#,
+            DEPTH + 1,
+            indent.len() + "print(".len()
+        ),
+    );
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let mut saw_hover = false;
+    while std::time::Instant::now() < deadline {
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(msg) => {
+                if msg.contains("\"id\":2") {
+                    assert!(
+                        msg.contains("int"),
+                        "hover inside a {DEPTH}-deep nested fn chain missing the type: {msg}"
+                    );
+                    saw_hover = true;
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    assert!(saw_hover, "never received a hover response for id 2");
+}
+
 #[test]
 fn hover_doc_comment_round_trip() {
     let (mut stdin, rx, _guard, _init_resp) = start_server();
