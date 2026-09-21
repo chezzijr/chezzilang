@@ -39,3 +39,29 @@ test fn nested_nursery_fans_out_while_outer_body_is_open():
     ms := (time.monotonic() - t0) * 1000.0
     assert got == 1
     assert ms < 1350.0, "fan_open took {ms} ms; the outer-closed shape takes ~950 ms"
+
+# The flat shape: the body spawns every task BEFORE it blocks on `recv`, so no injection follows the
+# block and only a hook at the block itself can farm runners for it.
+fn fan_flat() -> int:
+    ch := Channel[int](0)
+    got := 0
+    parallel:
+        spawn: burn(1500000)
+        spawn: burn(1500000)
+        spawn: burn(1500000)
+        spawn: burn(1500000)
+        spawn: burn(1500000)
+        spawn: burn(1500000)
+        spawn: burn(1500000)
+        spawn:
+            burn(1500000)
+            ch.send(1)
+        got = ch.recv()
+    return got
+
+test fn flat_nursery_fans_out_while_body_is_blocked():
+    t0 := time.monotonic()
+    got := fan_flat()
+    ms := (time.monotonic() - t0) * 1000.0
+    assert got == 1
+    assert ms < 1350.0, "fan_flat took {ms} ms; the outer-closed shape takes ~950 ms"
