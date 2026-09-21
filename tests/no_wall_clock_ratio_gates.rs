@@ -481,11 +481,11 @@ fn no_new_rust_test_sleeps_to_order_two_events() {
     );
 }
 
-/// The 7 `tests/chz` sites that keep a `time.sleep_ms` for a reason recorded on the entry, because
+/// The 8 `tests/chz` sites that keep a `time.sleep_ms` for a reason recorded on the entry, because
 /// nothing else can express the wait: a parked rendezvous sender or a job that must be INSIDE the
 /// sleep when cancelled has no Chezzi-visible predicate, and one entry asserts a window a value must
 /// NOT change across, which is a legitimate clock use, not a happens-before guess (TICKET-059/060).
-const CHZ_SLEEP_SITES: [(&str, &str); 7] = [
+const CHZ_SLEEP_SITES: [(&str, &str); 8] = [
     (
         "tests/chz/spec/rendezvous_channel_test.chz",
         "time.sleep_ms(150)",
@@ -512,6 +512,9 @@ const CHZ_SLEEP_SITES: [(&str, &str); 7] = [
         "tests/chz/spec/cancel_join_and_defer_fault_test.chz",
         "time.sleep_ms(3000)",
     ),
+    // TICKET-163: the sleep IS the measured quantity -- two `time.now_ms()` reads around it must
+    // differ by at least its length. It orders no two events, so no handshake can replace it.
+    ("tests/chz/stdlib/time_ms_test.chz", "time.sleep_ms(50)"),
 ];
 
 /// Every `path:line: text` under `tests/chz` that calls `time.sleep_ms(` and is not one of
