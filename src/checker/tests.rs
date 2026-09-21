@@ -14678,6 +14678,11 @@ fn uuid_fn_sigs_exact() {
 }
 
 #[test]
+fn std_time_exports_now_ms_as_int() {
+    entry_ok("import std.time\nt: int = time.now_ms()\nprint(t)\n");
+}
+
+#[test]
 fn time_fn_sigs_exact() {
     let sig = native_module_sig_via_graph("time");
     let expected: Vec<(&str, Vec<Ty>, Ty)> = vec![
