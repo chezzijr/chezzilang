@@ -6,3 +6,17 @@ test fn list_copy_is_independent_at_the_top_level():
     ys.push(4)
     assert xs == [1, 2, 3], "mutating the copy leaves the original alone"
     assert ys == [1, 2, 3, 4]
+
+test fn set_copy_is_independent_at_the_top_level():
+    s := {1, 2}
+    t := s.copy()
+    t.add(3)
+    assert s == {1, 2}
+    assert t == {1, 2, 3}
+
+test fn map_copy_is_independent_at_the_top_level():
+    m := {"a": 1}
+    n := m.copy()
+    n["b"] = 2
+    assert m == {"a": 1}
+    assert n == {"a": 1, "b": 2}
