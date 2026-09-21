@@ -9,9 +9,14 @@
 //!  - align: `<` left, `>` right, `^` center; an optional `fill` char may precede the align.
 //!  - sign: `+` forces a leading `+` on non-negative numbers.
 //!  - `0`: zero-pad numerics to `width` (sign kept before the zeros).
-//!  - width: minimum field width (decimal). CAPPED at [`MAX_FIELD`] at PARSE time — a pathological
-//!    width like `{x:>9999999999}` is rejected before any allocation (the OOM fix).
-//!  - precision: `.N` — float decimals; on a string it TRUNCATES to N chars (Python parity).
+//!  - width: minimum field width (decimal), or a nested `{expr}` field (`{s:<{w}}`). CAPPED at
+//!    [`MAX_FIELD`]: a literal at PARSE time — a pathological width like `{x:>9999999999}` is
+//!    rejected before any allocation (the OOM fix) — and a nested field's VALUE in
+//!    [`field_from_int`], before any buffer is sized. A negative nested value is an error too.
+//!  - precision: `.N` or `.{expr}` — float decimals; on a string it TRUNCATES to N chars (Python
+//!    parity). Same cap. A nested field must be an `int` and is legal ONLY as the width or the
+//!    precision (CPython also allows one in the fill/align/type slots; Chezzi checks a spec's
+//!    shape at `check` time, which a runtime-built spec would defeat).
 //!  - type: one of `d f x X b o e %` (numeric); a string takes only fill/align/width/precision.
 //!
 //! Errors are returned as `String`; the caller maps them to its own error type with the same
@@ -44,6 +49,12 @@ pub struct FormatSpec {
     /// `0` flag — zero-pad numerics to `width` (with the sign kept ahead of the zeros).
     pub zero_pad: bool,
     pub width: usize,
+    /// The width is a nested `{expr}` field (`{s:<{w}}`): `width` stays 0 and the VM fills it from
+    /// the field's value ([`field_from_int`]) before rendering.
+    pub dyn_width: bool,
+    /// The precision is a nested `{expr}` field (`{x:.{p}f}`); `precision` is `Some(0)` as a
+    /// placeholder so the presence checks in [`spec_valid_for_scalar`] still fire.
+    pub dyn_precision: bool,
     /// `,` or `_` digit-group separator (CPython slot order: `[width][grouping][.precision][type]`).
     pub group: Option<char>,
     pub precision: Option<usize>,
@@ -59,6 +70,8 @@ impl Default for FormatSpec {
             alt: false,
             zero_pad: false,
             width: 0,
+            dyn_width: false,
+            dyn_precision: false,
             group: None,
             precision: None,
             ty: None,
@@ -125,9 +138,29 @@ pub fn split_spec(inner: &str) -> (&str, Option<&str>) {
 
 /// Parse a format spec (the text after the `:`). Width/precision are bounded by [`MAX_FIELD`] at
 /// parse time — the digit accumulator bails to an error the instant it would exceed the cap, so the
-/// parsed integer itself never grows pathologically and NO allocation occurs.
+/// parsed integer itself never grows pathologically and NO allocation occurs. A nested `{expr}`
+/// field is bounded later, when its value is known ([`field_from_int`]).
 pub fn parse(spec: &str) -> Result<FormatSpec, String> {
+    parse_nested(spec).map(|(s, _)| s)
+}
+
+/// A nested `{expr}` field found in the width or precision slot of a spec. `at` is the char index
+/// of its `{` inside the spec text and `src` the text between its braces (untrimmed).
+#[derive(Debug, Clone, PartialEq)]
+pub struct NestedField {
+    pub at: usize,
+    pub src: String,
+}
+
+const NESTED_SLOTS: &str =
+    "format spec: a nested field is allowed only as the width or the precision";
+
+/// [`parse`], also returning the nested fields in evaluation order (width before precision).
+pub fn parse_nested(spec: &str) -> Result<(FormatSpec, Vec<NestedField>), String> {
     let mut out = FormatSpec::default();
+    let mut fields: Vec<NestedField> = Vec::new();
+    // Char index just past the most recent nested field's `}`.
+    let mut field_end: Option<usize> = None;
     let chars: Vec<char> = spec.chars().collect();
     let mut i = 0;
     let mut fill_explicit = false;
@@ -172,7 +205,14 @@ pub fn parse(spec: &str) -> Result<FormatSpec, String> {
     // [width]
     let mut width: usize = 0;
     let mut saw_width = false;
-    while i < chars.len() && chars[i].is_ascii_digit() {
+    if i < chars.len() && chars[i] == '{' {
+        let (f, next) = take_field(&chars, i)?;
+        fields.push(f);
+        out.dyn_width = true;
+        field_end = Some(next);
+        i = next;
+    }
+    while !out.dyn_width && i < chars.len() && chars[i].is_ascii_digit() {
         saw_width = true;
         width = bump(width, chars[i], "width")?;
         i += 1;
@@ -192,7 +232,15 @@ pub fn parse(spec: &str) -> Result<FormatSpec, String> {
         i += 1;
         let mut prec: usize = 0;
         let mut saw = false;
-        while i < chars.len() && chars[i].is_ascii_digit() {
+        if i < chars.len() && chars[i] == '{' {
+            let (f, next) = take_field(&chars, i)?;
+            fields.push(f);
+            out.dyn_precision = true;
+            field_end = Some(next);
+            i = next;
+            saw = true;
+        }
+        while !out.dyn_precision && i < chars.len() && chars[i].is_ascii_digit() {
             saw = true;
             prec = bump(prec, chars[i], "precision")?;
             i += 1;
@@ -200,6 +248,7 @@ pub fn parse(spec: &str) -> Result<FormatSpec, String> {
         if !saw {
             return Err("format spec: '.' must be followed by a precision".to_string());
         }
+        // A nested field leaves `prec` at 0: a placeholder the VM overwrites.
         out.precision = Some(prec);
     }
 
@@ -209,15 +258,67 @@ pub fn parse(spec: &str) -> Result<FormatSpec, String> {
         if is_type(t) {
             out.ty = Some(t);
             i += 1;
+        } else if t == '{' || (field_end == Some(i) && is_align(t)) {
+            return Err(NESTED_SLOTS.to_string());
         } else {
             return Err(format!("format spec: unknown type char '{t}'"));
         }
     }
 
     if i != chars.len() {
+        if chars[i..].contains(&'{') {
+            return Err(NESTED_SLOTS.to_string());
+        }
         return Err(format!("format spec: trailing characters in '{spec}'"));
     }
-    Ok(out)
+    Ok((out, fields))
+}
+
+/// Read the nested field whose `{` is at `chars[start]`: scan brace depth to the matching `}`.
+/// Returns the field and the index just past its `}`.
+fn take_field(chars: &[char], start: usize) -> Result<(NestedField, usize), String> {
+    let mut depth = 0usize;
+    for (k, &c) in chars.iter().enumerate().skip(start) {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    let src: String = chars[start + 1..k].iter().collect();
+                    if src.trim().is_empty() {
+                        return Err(
+                            "format spec: a nested field needs an expression, e.g. '{w}'"
+                                .to_string(),
+                        );
+                    }
+                    if split_spec(&src).1.is_some() {
+                        return Err(
+                            "format spec: a nested field cannot carry its own format spec"
+                                .to_string(),
+                        );
+                    }
+                    return Ok((NestedField { at: start, src }, k + 1));
+                }
+            }
+            _ => {}
+        }
+    }
+    Err("format spec: unterminated nested field".to_string())
+}
+
+/// Turn a nested field's runtime value into a width/precision. `None` (not an int) is an error, as
+/// is a negative value; a value over [`MAX_FIELD`] is rejected with the same text [`bump`] uses for
+/// a literal. The VM calls this BEFORE sizing any buffer, so a huge runtime width is a clean error,
+/// never an allocation (CPython would try to build the string).
+pub fn field_from_int(n: Option<i64>, what: &str) -> Result<usize, String> {
+    match n {
+        None => Err(format!("format spec: a nested {what} field must be an int")),
+        Some(n) if n < 0 => Err(format!("format spec: {what} must not be negative, got {n}")),
+        Some(n) if n as u64 > MAX_FIELD as u64 => {
+            Err(format!("format spec: {what} exceeds maximum {MAX_FIELD}"))
+        }
+        Some(n) => Ok(n as usize),
+    }
 }
 
 /// Accumulate one decimal digit into `acc`, rejecting the moment it would exceed [`MAX_FIELD`].
@@ -1226,5 +1327,73 @@ mod tests {
         assert_eq!(ok_apply(">010f", FmtArg::Float(-2.5)), "0-2.500000");
         assert_eq!(ok_apply("<08.1f", FmtArg::Float(-2.5)), "-2.50000");
         assert_eq!(ok_apply(">08.2f", FmtArg::Int(-42)), "00-42.00");
+    }
+
+    #[test]
+    fn nested_field_slots_parse() {
+        let (s, f) = parse_nested("<{w}").unwrap();
+        assert!(s.dyn_width && !s.dyn_precision);
+        assert_eq!(s.align, Some(Align::Left));
+        assert_eq!(
+            f,
+            vec![NestedField {
+                at: 1,
+                src: "w".to_string()
+            }]
+        );
+
+        let (s, f) = parse_nested("{w}.{p}f").unwrap();
+        assert!(s.dyn_width && s.dyn_precision);
+        assert_eq!(s.ty, Some('f'));
+        assert_eq!(s.precision, Some(0));
+        assert_eq!(
+            f.iter().map(|x| x.src.as_str()).collect::<Vec<_>>(),
+            ["w", "p"]
+        );
+        assert_eq!(f[1].at, 4);
+
+        // A literal spec carries no fields and `parse` is unchanged.
+        let (s, f) = parse_nested(">8.2f").unwrap();
+        assert!(!s.dyn_width && !s.dyn_precision && f.is_empty());
+        assert_eq!(parse(">8.2f").unwrap(), s);
+
+        let slots = "format spec: a nested field is allowed only as the width or the precision";
+        for bad in ["{w}<3", ">5{t}", "{w}{p}", "d{w}"] {
+            assert_eq!(parse_nested(bad).unwrap_err(), slots, "{bad}");
+        }
+        assert_eq!(
+            parse_nested("<{}").unwrap_err(),
+            "format spec: a nested field needs an expression, e.g. '{w}'"
+        );
+        assert_eq!(
+            parse_nested("<{w:3}").unwrap_err(),
+            "format spec: a nested field cannot carry its own format spec"
+        );
+        assert_eq!(
+            parse_nested("<{w").unwrap_err(),
+            "format spec: unterminated nested field"
+        );
+    }
+
+    #[test]
+    fn runtime_field_value_is_bounded() {
+        assert_eq!(field_from_int(Some(6), "width"), Ok(6));
+        assert_eq!(field_from_int(Some(0), "width"), Ok(0));
+        assert_eq!(field_from_int(Some(4096), "width"), Ok(4096));
+        let over = "format spec: width exceeds maximum 4096".to_string();
+        assert_eq!(field_from_int(Some(4097), "width"), Err(over.clone()));
+        assert_eq!(field_from_int(Some(9999999999), "width"), Err(over));
+        assert_eq!(
+            field_from_int(Some(i64::MAX), "precision"),
+            Err("format spec: precision exceeds maximum 4096".to_string())
+        );
+        assert_eq!(
+            field_from_int(Some(-1), "width"),
+            Err("format spec: width must not be negative, got -1".to_string())
+        );
+        assert_eq!(
+            field_from_int(None, "width"),
+            Err("format spec: a nested width field must be an int".to_string())
+        );
     }
 }
