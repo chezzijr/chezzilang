@@ -1,0 +1,64 @@
+# tests/chz/stdlib/time_ms_test.chz — TICKET-163: the wall clock has a millisecond reading.
+#
+# `time.now_ms()` is epoch MILLISECONDS; `time.now()` stays whole seconds. `DateTime` gains an
+# appended `milli` field, `datetime.to_epoch_ms` is the ms twin of `to_epoch`, and ISO-8601 emits
+# `.SSS` only when `milli` is non-zero (CPython's rule). Red on base: `now_ms` does not exist.
+# Run: `cargo run -- test tests/chz/stdlib/time_ms_test.chz`
+
+import std.time
+import std.datetime
+
+test fn now_ms_advances_across_a_sleep():
+    a := time.now_ms()
+    time.sleep_ms(50)
+    b := time.now_ms()
+    assert b - a >= 50
+    assert b - a < 30000
+
+test fn now_ms_agrees_with_now_seconds():
+    s := time.now()
+    ms := time.now_ms()
+    d := ms / 1000 - s
+    assert d >= 0 and d <= 1
+
+test fn datetime_now_populates_milli():
+    dt := datetime.now()
+    assert dt.milli >= 0 and dt.milli <= 999
+
+test fn to_iso8601_is_unchanged_when_milli_is_zero():
+    dt := datetime.from_epoch(1700000000)
+    assert dt.milli == 0
+    assert datetime.to_iso8601(dt) == "2023-11-14T22:13:20Z"
+
+test fn positional_construction_without_milli_defaults_to_zero():
+    dt := datetime.DateTime(2026, 9, 21, 12, 34, 56, 1)
+    assert dt.milli == 0
+    assert datetime.to_iso8601(dt) == "2026-09-21T12:34:56Z"
+
+test fn to_iso8601_emits_three_milli_digits():
+    assert datetime.to_iso8601(datetime.DateTime(2026, 9, 21, 12, 34, 56, 1, 789)) == "2026-09-21T12:34:56.789Z"
+    assert datetime.to_iso8601(datetime.DateTime(2026, 9, 21, 12, 34, 56, 1, 7)) == "2026-09-21T12:34:56.007Z"
+
+test fn to_epoch_ms_adds_milli_to_the_seconds():
+    dt := datetime.DateTime(2026, 9, 21, 12, 34, 56, 1, 789)
+    assert datetime.to_epoch(dt) == 1789994096
+    assert datetime.to_epoch_ms(dt) == 1789994096789
+
+test fn parse_iso8601_reads_the_fraction_as_milli():
+    # CPython 3.14.7 fromisoformat: truncates past 3 digits (.9999 -> 999), right-pads short (.5 -> 500)
+    for pair in [("2026-09-21T12:34:56.789Z", 789), ("2026-09-21T12:34:56.5", 500), ("2026-09-21T12:34:56.123456", 123), ("2026-09-21T12:34:56.9999Z", 999), ("2026-09-21T12:34:56.789+05:30", 789), ("2026-09-21T12:34:56Z", 0), ("2026-09-21T12:34:56.00000000000000000000001", 0)]:
+        iso, want := pair
+        match datetime.parse_iso8601(iso):
+            Ok(d): assert d.milli == want, "{iso} gave milli {d.milli}"
+            Err(msg): assert false, "{iso}: unexpected Err {msg}"
+
+test fn parse_iso8601_round_trips_milli():
+    iso := "2026-09-21T12:34:56.789Z"
+    match datetime.parse_iso8601(iso):
+        Ok(d):
+            assert datetime.to_iso8601(d) == iso
+            assert datetime.to_epoch_ms(d) == 1789994096789
+        Err(msg): assert false, "{msg}"
+    match datetime.parse_iso8601("1969-12-31T23:59:59.999Z"):
+        Ok(d): assert datetime.to_epoch_ms(d) == -1
+        Err(msg): assert false, "{msg}"

@@ -1155,6 +1155,7 @@ mod tests {
             kinds("std.time"),
             vec![
                 ("now", Kind::Inline),
+                ("now_ms", Kind::Inline),
                 ("monotonic", Kind::Inline),
                 ("sleep_ms", Kind::TimedWait),
                 ("format", Kind::Inline),

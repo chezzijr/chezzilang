@@ -14,9 +14,10 @@
 # name→opcode dispatch — it carries NO runtime value. So harvest routes its sig to the checker's
 # `time_timer_sig` field (NOT `sig.functions`, which the From-import arm would bind as a normal callable);
 # the import-license stays in `sig.types` (`native_module_sig("std.time")`). It also stays a reserved,
-# non-renamable name. now/monotonic/sleep_ms/format, by contrast, are ordinary qualified members.
+# non-renamable name. now/now_ms/monotonic/sleep_ms/format, by contrast, are ordinary qualified members.
 
 native fn now() -> int
+native fn now_ms() -> int
 native fn monotonic() -> float
 native fn sleep_ms(ms: int) -> nil
 native fn format(ts: int) -> str

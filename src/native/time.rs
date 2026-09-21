@@ -1,6 +1,7 @@
 //! `std.time` — wall-clock and monotonic time (M8).
 //!
-//! `now()` is whole seconds since the Unix epoch (UTC). `monotonic()` is seconds elapsed since the
+//! `now()` is whole seconds since the Unix epoch (UTC); `now_ms()` is the same wall clock in epoch
+//! milliseconds.`monotonic()` is seconds elapsed since the
 //! first time it (or any time fn) was touched in this process — a steady stopwatch for measuring
 //! durations, immune to wall-clock adjustments. `sleep_ms(n)` parks the thread. `format(epoch)`
 //! renders epoch seconds as a UTC `"YYYY-MM-DD HH:MM:SS"` string, computed directly (no chrono).
@@ -19,6 +20,17 @@ fn now(h: &mut dyn Host) -> Result<NativeRet, HostError> {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     Ok(NativeRet::Int(secs))
+}
+
+/// Milliseconds since the Unix epoch (UTC). A WALL clock: it can step backwards (NTP, a leap second)
+/// and is never clamped. Deliberately separate from `monotonic()`, which is a different clock.
+fn now_ms(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "now_ms", 0)?;
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    Ok(NativeRet::Int(ms))
 }
 
 fn monotonic(h: &mut dyn Host) -> Result<NativeRet, HostError> {
@@ -66,6 +78,7 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 /// Callable members. `(name, fn, kind)`.
 pub const MEMBERS: &[(&str, NativeFn, Kind)] = &[
     ("now", now, Kind::Inline),
+    ("now_ms", now_ms, Kind::Inline),
     ("monotonic", monotonic, Kind::Inline),
     ("sleep_ms", sleep_ms, Kind::TimedWait),
     ("format", format, Kind::Inline),

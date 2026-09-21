@@ -14687,6 +14687,7 @@ fn time_fn_sigs_exact() {
     let sig = native_module_sig_via_graph("time");
     let expected: Vec<(&str, Vec<Ty>, Ty)> = vec![
         ("now", vec![], Ty::Int),
+        ("now_ms", vec![], Ty::Int),
         ("monotonic", vec![], Ty::Float),
         ("sleep_ms", vec![Ty::Int], Ty::Nil),
         ("format", vec![Ty::Int], Ty::Str),
@@ -14694,7 +14695,7 @@ fn time_fn_sigs_exact() {
     assert_eq!(
         sig.functions.len(),
         expected.len(),
-        "std.time must export exactly the 4 native fns (timer is NOT a native fn)"
+        "std.time must export exactly the 5 native fns (timer is NOT a native fn)"
     );
     for (name, params, ret) in &expected {
         let fs = sig
