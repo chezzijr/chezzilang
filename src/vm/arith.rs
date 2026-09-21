@@ -1360,21 +1360,48 @@ impl Vm {
     /// A `u64` hash of `v` for map/set keys, upholding the invariant `values_equal(a,b) ⇒
     /// hash(a)==hash(b)`. Numeric keys hash by their canonical f64 bits (so `Int(3)` and `Float(3.0)`
     /// collide, matching `values_equal`'s numeric unification); str by content; a struct key
-    /// dispatches its user `hash(self) -> int` (re-entrant — may allocate / trigger GC). Floats are
-    /// rejected as keys by the checker (NaN footgun), so only integral-valued floats reach here.
+    /// dispatches its user `hash(self) -> int` (re-entrant — may allocate / trigger GC); a tuple key
+    /// combines its elements' hashes in order (TICKET-161), so it faults exactly when an element
+    /// would. Floats are rejected as keys by the checker (NaN footgun), so only integral-valued
+    /// floats reach here.
     pub(super) fn hash_value(&mut self, v: Value, span: Span) -> Result<u64, RuntimeError> {
+        self.hash_value_d(v, 0, span)
+    }
+
+    /// [`Self::hash_value`] at structural `depth` — the tuple recursion's own level. The guard tests
+    /// `walk_base + depth`, and a user `hash` reached from inside a tuple runs under
+    /// [`Self::guarded_walk`] at that combined base, so nested tuples and re-entrant `hash` hooks
+    /// share the ONE `MAX_STRUCTURAL_DEPTH` allowance like `values_equal_guarded`.
+    fn hash_value_d(&mut self, v: Value, depth: usize, span: Span) -> Result<u64, RuntimeError> {
+        if self.walk_base + depth > MAX_STRUCTURAL_DEPTH {
+            return Err(self.depth_exceeded_err(span));
+        }
         // A struct key dispatches its user `hash()` (re-entrant). Everything else is scalar. A boxed
         // float is Float-tagged (not `as_obj`) so it falls to the scalar arm below; a boxed `BigInt`
         // is Obj-tagged and must be treated as the integral scalar it is.
         if let Some(h) = v.as_obj() {
             match self.heap.get(h) {
-                Obj::Struct { .. } => self.struct_hash(v, span),
-                // An enum key dispatches its user `hash(self) -> int` via the shared enum-aware
-                // resolver, mirroring the struct path (re-entrant — may allocate / trigger GC).
-                Obj::Enum { .. } => self.enum_hash(v, span),
-                // A newtype key dispatches its user `hash(self) -> int` (opt-in — the checker rejects
-                // a newtype with no `hash` as a key, even over an intrinsically-hashable underlying).
-                Obj::NewType { .. } => self.newtype_hash(v, span),
+                Obj::Struct { .. } | Obj::Enum { .. } | Obj::NewType { .. } if depth > 0 => {
+                    let base = self.walk_base + depth;
+                    self.guarded_walk(base, |vm| vm.hash_user(v, span))
+                }
+                Obj::Struct { .. } | Obj::Enum { .. } | Obj::NewType { .. } => {
+                    self.hash_user(v, span)
+                }
+                // A tuple hashes by combining its elements' hashes, in order. Equal tuples hash
+                // equal because `values_equal` compares element-wise and each element's hash
+                // upholds the invariant. The tuple is rooted: an element's user `hash` can collect.
+                Obj::Tuple(items) => {
+                    let items = items.clone();
+                    self.with_roots(&[v], |vm| {
+                        let mut acc: u64 = 0x345678 ^ items.len() as u64;
+                        for &e in &items {
+                            acc = acc.wrapping_mul(1_000_003)
+                                ^ vm.hash_value_d(e, depth + 1, span)?;
+                        }
+                        Ok(acc)
+                    })
+                }
                 Obj::Str(_) | Obj::Bytes(_) | Obj::BigInt(_) => Ok(self.scalar_hash(v)),
                 _ => Err(self.err(
                     format!(
@@ -1386,6 +1413,19 @@ impl Vm {
             }
         } else {
             Ok(self.scalar_hash(v))
+        }
+    }
+
+    /// Dispatch the user `hash(self) -> int` of a struct / enum / newtype key. An enum resolves
+    /// through the shared enum-aware resolver, mirroring the struct path; a newtype's `hash` is
+    /// opt-in (the checker rejects a newtype with no `hash` as a key, even over an
+    /// intrinsically-hashable underlying). All three re-enter the VM — may allocate / trigger GC.
+    fn hash_user(&mut self, v: Value, span: Span) -> Result<u64, RuntimeError> {
+        let Some(h) = v.as_obj() else { unreachable!() };
+        match self.heap.get(h) {
+            Obj::Struct { .. } => self.struct_hash(v, span),
+            Obj::Enum { .. } => self.enum_hash(v, span),
+            _ => self.newtype_hash(v, span),
         }
     }
 
@@ -1547,7 +1587,7 @@ impl Vm {
             ValueView::Obj(h)
                 if matches!(
                     self.heap.get(h),
-                    Obj::Struct { .. } | Obj::Enum { .. } | Obj::NewType { .. }
+                    Obj::Struct { .. } | Obj::Enum { .. } | Obj::NewType { .. } | Obj::Tuple(_)
                 ) =>
             {
                 // A CYCLIC or OVER-DEEP key is stored BY REFERENCE (base behavior): a structural

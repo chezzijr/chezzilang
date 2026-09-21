@@ -356,6 +356,8 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, &str)] = &[
     ("Hashable", "hash", "bytes"),
     ("Hashable", "hash", "bool"),
     ("Hashable", "hash", "struct"),
+    // A tuple is Hashable exactly when every element type is (TICKET-161; CPython's rule).
+    ("Hashable", "hash", "tuple"),
     // Error — `str`'s message is itself (Go model).
     ("Error", "message", "str"),
     // PathLike (W7-8) — the three byte-ish scalars a path can be spelled as. None of them HAS an
@@ -965,7 +967,8 @@ impl Checker {
     /// only in capitalization, so the comparison is on the bare reason, never the message.
     ///
     /// **Two obligations, not one (W7-45).** `Hashable` — the scalars `int`/`str`/`bool`
-    /// intrinsically, or a struct/enum/newtype defining `hash(self) -> int`; `float` is refused
+    /// intrinsically, a tuple whose every element is `Hashable` (TICKET-161), or a struct/enum/newtype
+    /// defining `hash(self) -> int`; `float` is refused
     /// (NaN/equality footgun). AND `Eq`: a probe compares candidates with `values_equal` on a hash
     /// COLLISION, so a key whose `eq` carries `where` bounds this instantiation does not satisfy
     /// check-cleaned and then faulted — and worse, only *sometimes*, since with distinct hashes no
@@ -1014,11 +1017,29 @@ impl Checker {
     /// non-`Hashable` type must keep reporting the `Hashable` text.
     pub(super) fn key_ty_reject(&self, t: &Ty) -> Option<String> {
         if self.satisfies(t, "Hashable").is_err() {
-            return Some(format!(
-                "must implement Hashable (int, str, bool, or a struct/enum/newtype defining hash(self) -> int), found {t}"
-            ));
+            let mut msg = format!(
+                "must implement Hashable (int, str, bool, a tuple of Hashable elements, or a struct/enum/newtype defining hash(self) -> int), found {t}"
+            );
+            if let Some(bad) = self.unhashable_tuple_elem(t) {
+                msg.push_str(&format!(": element {bad} is not Hashable"));
+            }
+            return Some(msg);
         }
         self.eq_bounds_unsatisfied(t)
+    }
+
+    /// TICKET-161 — the first element of tuple type `ty`, depth-first, that is not `Hashable`, so a
+    /// rejection can name the offending ELEMENT the way CPython's `unhashable type: 'list'` does. A
+    /// nested tuple element is searched rather than reported, so the answer is the innermost
+    /// non-tuple type. `None` for a non-tuple, or a tuple whose elements all satisfy `Hashable`.
+    pub(super) fn unhashable_tuple_elem(&self, ty: &Ty) -> Option<Ty> {
+        let Ty::Tuple(elems) = ty else {
+            return None;
+        };
+        elems.iter().find_map(|e| match e {
+            Ty::Tuple(_) => self.unhashable_tuple_elem(e),
+            _ => self.satisfies(e, "Hashable").is_err().then(|| e.clone()),
+        })
     }
 
     /// Refine-on-first-use (empty-slot half of the `Ty::Unknown` soundness family). A bare empty
@@ -2204,6 +2225,17 @@ impl Checker {
         // Structs/enums/newtypes still fall through to the structural `satisfies_methods` below (a type
         // WITHOUT a `str(self) -> str` method stays correctly rejected; newtypes stay opt-in).
         if protocol == "Stringable" && matches!(ty, Ty::Int | Ty::Float | Ty::Bool | Ty::Str) {
+            return self.grant_intrinsic(protocol, ty);
+        }
+        // TICKET-161: a tuple is `Hashable` exactly when every element type is (CPython's rule),
+        // asked through `satisfies` per element like the `Comparable` arm above. The `Err` names the
+        // innermost failing element, the way CPython's `unhashable type: 'list'` does.
+        if protocol == "Hashable" && matches!(ty, Ty::Tuple(_)) {
+            if let Some(bad) = self.unhashable_tuple_elem(ty) {
+                return Err(format!(
+                    "type {ty} does not satisfy Hashable: element {bad} is not Hashable"
+                ));
+            }
             return self.grant_intrinsic(protocol, ty);
         }
         // `Hashable` is satisfied intrinsically by the scalar key types (mirrors the map/set key
