@@ -72,7 +72,7 @@ fn no_chz_test_divides_two_wall_clock_samples() {
 /// A name may join the list, but only deliberately, in the commit that adds the clock, with the
 /// reason in that commit message. A test converted to a counted measure must be DELETED from the
 /// list in the same commit that converts it.
-const CLOCK_READING_TESTS: [&str; 29] = [
+const CLOCK_READING_TESTS: [&str; 31] = [
     "a_chezzi_hang_python_survives_is_a_finding",
     "a_cyclic_shared_field_type_graph_is_also_walked_once_per_type",
     "a_shared_field_type_graph_is_walked_once_per_type",
@@ -99,6 +99,11 @@ const CLOCK_READING_TESTS: [&str; 29] = [
     "nested_fn_decl_check_is_not_exponential",
     "parallel_many_spawns_cheap_and_correct",
     "parity_blocking_native_is_an_entry_cancellation_checkpoint_on_both_engines",
+    // TICKET-154 (W11-15): `at(1)` on an aliased RwShared store pays the whole-root fallback once
+    // per call; the cost is a Rust-side rebuild the VM counts nowhere, so one absolute ceiling.
+    "rwshared_at_over_an_aliased_store_stays_under_its_ceiling",
+    // TICKET-154: the container twin of the cell cliff below -- same defect, a shared list.
+    "rwshared_for_each_over_a_dag_alias_is_not_quadratic",
     "rwshared_view_over_shared_bindings_is_not_quadratic",
     // TICKET-151 (W14-40): the bound is a LIVENESS deadline, not a cost measure -- the test
     // withholds stdin and asks whether a runnable sibling printed before the read returned.

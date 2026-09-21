@@ -405,3 +405,55 @@ test fn map_set_read_view_cross_box_no_deadlock():
                 b.for_each(fn(x): a.set({"a": 1, "b": 2, "c": 3}))
             done.add(1)
     assert done.load() == 2
+
+
+# TICKET-154 (W11-15): an aliased store keeps ONE object. CPython 3.14.7 measured 2026-09-21:
+#     inner = [1]; outer = [inner, inner]
+#     copy.deepcopy(outer) then push through [0]      -> both indices see it (2 2)
+#     two SEPARATE single-element deep copies          -> 2 1
+test fn rwshared_store_dag_alias_survives_get():
+    inner := [1]
+    outer := [inner, inner]
+    box := RwShared(outer)
+    v := box.get()
+    v[0].push(2)
+    assert v[0].len() == 2 and v[1].len() == 2
+
+test fn rwshared_for_each_shares_a_dag_alias_within_one_walk():
+    inner := [1]
+    outer := [inner, inner]
+    box := RwShared(outer)
+    seen: List[List[int]] = []
+    box.for_each(fn(x): seen.push(x))
+    assert seen.len() == 2
+    seen[0].push(2)
+    assert seen[1].len() == 2
+
+# Two separate `at` calls are two crossings, exactly like two separate deep copies.
+test fn rwshared_at_twice_is_still_two_crossings():
+    inner := [1]
+    outer := [inner, inner]
+    box := RwShared(outer)
+    match box.at(0):
+        Some(a): a.push(2)
+        None: assert false, "at(0) must be Some"
+    match box.at(1):
+        Some(b): assert b.len() == 1
+        None: assert false, "at(1) must be Some"
+
+struct Kb:
+    n: int
+    fn hash(self) -> int:
+        return 7
+
+# A value that aliases its own key is ONE object (CPython: copy.deepcopy({b: b}) then v.n = 9 -> k.n == 9).
+test fn rwshared_map_value_aliasing_its_key_is_one_object():
+    b := Kb(1)
+    m: Map[Kb, Kb] = {b: b}
+    r := RwShared(m)
+    seen := AtomicInt(0)
+    fn peek(k: Kb, v: Kb):
+        v.n = 9
+        seen.add(k.n)
+    r.for_each_entry(peek)
+    assert seen.load() == 9

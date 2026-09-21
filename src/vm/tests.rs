@@ -18125,6 +18125,70 @@ main()
     );
 }
 
+/// TICKET-154 (W11-15) -- the CONTAINER twin of the cell test above. One `inner` list pushed three
+/// thousand times into the stored list is an aliased store, so every element after the first is a
+/// bare back-ref. `for_each` must take ONE shared rebuild map for the whole walk; if it fell back
+/// to a whole-root rebuild per element this goes quadratic. Coarse cliff detector, one absolute
+/// ceiling, same shape as its sibling.
+#[test]
+fn rwshared_for_each_over_a_dag_alias_is_not_quadratic() {
+    let src = "\
+import std.concurrency
+fn main():
+    inner := [1]
+    fs: List[List[int]] = [inner]
+    for i in range(0, 3000):
+        fs.push(inner)
+    s := RwShared(fs)
+    c := 0
+    fn tick(x: List[int]):
+        c = c + 1
+    s.for_each(tick)
+    print(c)
+main()
+";
+    let t = std::time::Instant::now();
+    assert_eq!(run_capture(src).unwrap(), "3001\n");
+    let el = t.elapsed();
+    assert!(
+        el < std::time::Duration::from_secs(5),
+        "RwShared.for_each over 3001 aliases of one list took {el:?} -- the view is materializing \
+         the whole container per element again"
+    );
+}
+
+/// TICKET-154 (W11-15) -- the widened single-piece cost. On an aliased store `at(1)` is a bare
+/// back-ref, so it takes `from_wire_piece`'s whole-root fallback: the ROOT once per CALL instead of
+/// the element. This bounds that at an absolute ceiling (measured ~0.19s debug at the time of the
+/// change) so it cannot become the root per ELEMENT.
+#[test]
+fn rwshared_at_over_an_aliased_store_stays_under_its_ceiling() {
+    let src = "\
+import std.concurrency
+fn main():
+    inner := List(range(0, 5000))
+    outer: List[List[int]] = [inner, inner]
+    for k in range(0, 8):
+        outer.push(List(range(0, 5000)))
+    s := RwShared(outer)
+    total := 0
+    for k in range(0, 5):
+        match s.at(1):
+            Some(v): total = total + v.len()
+            None: total = total + 0
+    print(total)
+main()
+";
+    let t = std::time::Instant::now();
+    assert_eq!(run_capture(src).unwrap(), "25000\n");
+    let el = t.elapsed();
+    assert!(
+        el < std::time::Duration::from_secs(5),
+        "RwShared.at(1) over an aliased store took {el:?} -- the whole-root fallback is running per \
+         element instead of per call"
+    );
+}
+
 /// W13-9 -- a module global nested >= 5000 levels deep makes EVERY nursery open take ~22s (release,
 /// `bbac6723`) before the correct, recoverable depth-exceeded fault, because `to_snap_depth`'s
 /// `try_wire_speculative` fast-path re-walks the WHOLE remaining subtree from every node on the chain
