@@ -1,0 +1,27 @@
+# Bench: benches/chz/hof.chz with a nursery open, so TICKET-155's owner rung at
+# `Vm::guarded_checkpoint` actually ticks. In `hof.chz` `eager_scheds` is empty for the whole
+# run, the rung's gate is false, and neither the 1-in-1024 tick nor `MnSched::scope_fault`'s
+# sched lock ever runs. Here the owner runs the same map+filter+fold loop inside a `parallel:`
+# block, so each of the ~6M re-entries reaches the gate and one in 1024 takes the lock.
+# Prints 501000000, the same total as hof.chz.
+
+fn main():
+    xs := []
+    i := 0
+    while i < 1000:
+        xs.push(i)
+        i += 1
+
+    total := 0
+    parallel:
+        spawn:
+            _ := xs.len()
+        round := 0
+        while round < 2000:
+            ys := xs.map(fn(x: int) -> int: x + 1)
+            evens := ys.filter(fn(x: int) -> bool: x % 2 == 0)
+            total += evens.fold(0, fn(acc: int, x: int) -> int: acc + x)
+            round += 1
+    print(total)
+
+main()
