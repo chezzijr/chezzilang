@@ -1394,7 +1394,7 @@ impl Checker {
         let saved_ord = self.kw_frag_ord;
         let mut ord = 0usize;
         for chunk in chunks {
-            if let crate::ast::Chunk::Expr(e, spec, _fields) = chunk {
+            if let crate::ast::Chunk::Expr(e, spec, fields) = chunk {
                 self.kw_frag_ctx = span;
                 self.kw_frag_ord = ord;
                 // No re-anchoring: a fragment is re-lexed with the literal's absolute line AND
@@ -1406,6 +1406,28 @@ impl Checker {
                 // real column there is nothing left to anchor, and the checker finally agrees with
                 // the compiler, which never re-anchored.
                 let ty = self.infer_value(e);
+                // The spec's nested width/precision fields evaluate after the value, width first
+                // (the order `compile_interp` emits them). Each must be an `int`; `Unknown` keeps
+                // the runtime backstop (`fmtspec::field_from_int`).
+                if let Some(fs) = spec {
+                    let mut slots = [(fs.dyn_width, "width"), (fs.dyn_precision, "precision")]
+                        .into_iter()
+                        .filter(|(dynamic, _)| *dynamic)
+                        .map(|(_, what)| what);
+                    for field in fields {
+                        let fty = self.infer_value(field);
+                        if let Some(what) = slots.next()
+                            && !matches!(fty, Ty::Int | Ty::Unknown)
+                        {
+                            self.error(
+                                field.span,
+                                format!(
+                                    "format spec: a nested {what} field must be an int, found {fty}"
+                                ),
+                            );
+                        }
+                    }
+                }
                 // Static format-spec/value-type check: a CONCRETE static type is checked at COMPILE
                 // time (same wording the runtime backstop would emit — single-sourced in
                 // `fmtspec`); only `Unknown`, a generic `Param(T)` and a protocol existential keep

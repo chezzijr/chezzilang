@@ -1338,6 +1338,87 @@ print(\"|{s:<{w}}|\")
 ");
 }
 
+#[test]
+fn interpolation_spec_nested_field_must_be_int() {
+    // A nested width/precision field is an `int` (TICKET-162); CPython's text substitution would
+    // read `{s:<{2.5}}` as width 2, precision 5 — Chezzi rejects it instead.
+    rejects(
+        r#"w := "x"
+s := "ab"
+print("|{s:<{w}}|")
+"#,
+        "a nested width field must be an int, found str",
+    );
+    rejects(
+        r#"w := 2.5
+s := "ab"
+print("|{s:<{w}}|")
+"#,
+        "a nested width field must be an int, found float",
+    );
+    rejects(
+        r#"x := 3.14159
+p := true
+print("{x:.{p}f}")
+"#,
+        "a nested precision field must be an int, found bool",
+    );
+    // The field is inferred like any expression: an unknown name is reported as one.
+    rejects(
+        r#"s := "ab"
+print("{s:<{nope}}")
+"#,
+        "unknown name 'nope'",
+    );
+}
+
+#[test]
+fn interpolation_spec_nested_field_positions() {
+    // A nested field is legal ONLY as the width or the precision.
+    let slots = "allowed only as the width or the precision";
+    rejects(
+        r#"w := 3
+s := "ab"
+print("{s:{w}<3}")
+"#,
+        slots,
+    );
+    rejects(
+        r#"w := 3
+n := 7
+print("{n:>5{w}}")
+"#,
+        slots,
+    );
+    rejects(
+        r#"s := "ab"
+print("{s:<{}}")
+"#,
+        "needs an expression",
+    );
+    // A nested precision is still a precision: the shape check sees it on an int.
+    rejects(
+        r#"p := 2
+n := 7
+print("{n:.{p}}")
+"#,
+        "precision not allowed on an integer",
+    );
+    ok(r#"x := 3.14159
+w := 8
+p := 2
+print("{x:{w}.{p}f}")
+"#);
+    ok(r#"n := 42
+w := 6
+print("{n:0{w}}")
+"#);
+    ok(r#"s := "ab"
+w := 6
+print("{s:*^{w}}|{s:<{w + 2}}|{s:>{s.len()}}")
+"#);
+}
+
 // ===== compound assignment (*= /= %= &= |= ^= <<= >>=) =====
 
 #[test]
