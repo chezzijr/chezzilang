@@ -11,6 +11,61 @@ justify lives in **[`future.md §4`](future.md)**; the scheduled work is roadmap
 > They are kept as the record of what was measured at the time; they are not reproducible on today's
 > binary, and "serial == M:N parity green" in an older section means the gate that existed then.
 
+## TICKET-155 — the owner-fault rung at the native-HOF checkpoint — 2026-09-21
+
+`Vm::guarded_checkpoint` runs once per ELEMENT of every `map`/`filter`/`fold`/`sort_by`. It gained
+the owner rung (`Vm::deliver_owner_fault`, so a child's fault cuts a nursery OWNER's callback loop
+short). `MnSched::scope_fault` takes the sched lock, so the rung rides the existing 1-in-1024
+`back_edge_tick` sample, and that sample now ticks whenever `eager_scheds` is non-empty (a nursery is
+open on this fiber). No bench under `benches/chz/` opened a nursery, so none reached the rung;
+`benches/chz/hof_nursery.chz` is `hof.chz` inside a `parallel:` and is the rung's own cost (~5860 lock
+acquisitions per run over ~6M re-entries). It is Chezzi-only: `benches/run.chz`'s `bench(name)`
+needs a `benches/py/<name>.py` pair.
+
+Conditions: 28 cores (`nproc`), `hyperfine 1.20.0`. BEFORE = release binary at `16f64231` (base plus
+the repro test, no engine change), `uptime` load average 3.08 rising to 2.04 after the run. AFTER =
+release binary at `24aec901`, load average 4.96 falling to 3.06. `benches/run.chz` ran 10+ runs per
+bench; `hof` and `hof_nursery` ran `--warmup 2 --runs 30`. Chezzi means only.
+
+| bench | BEFORE | AFTER | delta |
+|---|---|---|---|
+| fib | 495.1 ms ± 24.3 | 489.7 ms ± 28.3 | −1.1 % |
+| str | 268.2 ms ± 9.4 | 269.0 ms ± 14.2 | +0.3 % |
+| primes | 1.257 s ± 0.054 | 1.257 s ± 0.041 | 0.0 % |
+| loop | 1.715 s ± 0.022 | 1.868 s ± 0.130 | +8.9 % |
+| list | 720.5 ms ± 24.9 | 712.5 ms ± 28.2 | −1.1 % |
+| struct | 862.0 ms ± 23.2 | 916.0 ms ± 26.4 | +6.3 % |
+| poly_method | 2.522 s ± 0.044 | 2.617 s ± 0.104 | +3.8 % |
+| map | 272.2 ms ± 22.7 | 273.7 ms ± 6.8 | +0.6 % |
+| map_str | 382.4 ms ± 28.0 | 379.7 ms ± 33.1 | −0.7 % |
+| unique | 133.0 ms ± 13.1 | 134.9 ms ± 15.7 | +1.4 % |
+| empty | 6.1 ms ± 0.4 | 5.8 ms ± 0.3 | −4.9 % |
+| hof | 629.2 ms ± 24.8 | 655.2 ms ± 25.3 | +4.1 % |
+| hof_nursery | 638.8 ms ± 25.6 | 676.0 ms ± 30.7 | +5.8 % |
+
+**The single-shot table is a box-drift artifact, not the rung.** `loop`, `struct` and `poly_method`
+run no HOF and no nursery, yet read +8.9 %, +6.3 % and +3.8 %; the AFTER pass also ran at a higher
+load average than BEFORE. The control is an A/B on the SAME box at the SAME time: the saved BEFORE
+binary (`/tmp/t155-base-chezzi`) and the AFTER binary alternated in one `hyperfine` call
+(`--warmup 3`, `-N`). Same-binary runs spread by ±4 % on this box (`hof` BEFORE binary: 649.0 then
+674.7 ms), so the comparison is read against sigma.
+
+| bench | BEFORE binary | AFTER binary |
+|---|---|---|
+| loop | 1.803 s ± 0.054, 1.775 s ± 0.076 | 1.773 s ± 0.046, 1.765 s ± 0.079 |
+| struct | 917.9 ms ± 36.2, 918.1 ms ± 54.1 | 925.8 ms ± 34.1, 904.9 ms ± 32.3 |
+| hof | 649.0 ms ± 31.9, 674.7 ms ± 19.7 | 680.3 ms ± 20.2, 673.0 ms ± 17.0 |
+| hof_nursery | 775.4 ms ± 219.1 (outlier), 653.7 ms ± 26.4 | 666.4 ms ± 36.0, 677.0 ms ± 31.5 |
+
+Every AFTER-binary mean sits within one sigma of a BEFORE-binary mean measured in the same call, and
+`hof_nursery` — the only bench that runs the rung — is level (about 1.0 %). `hof` alone read
++4.9 % in a two-command A/B (640.7 vs 672.2 ms) and 0 % in the next four-command one; the
+sigma of that bench (about 3-5 %) is larger than the effect, so this doc does not claim a delta
+smaller than that.
+
+The `--timeout` deadline rung shares the same sample and is unchanged in behaviour: the
+`deadline.is_some()` test moved from the call site into `Vm::hof_sampled_tick`.
+
 ## TICKET-099 — run-wide send wake and the peer-veto deadlock predicate — 2026-09-09
 
 `wake_run_wide` walks `Vm::sched_registry` on every `send`/`close` (replacing the old upward-only

@@ -1084,6 +1084,12 @@ fn serve(tok: Token, io: Channel[str]):
 > - **A STARTED task always runs its straight-line prologue**, so a `defer` it registers is registered
 >   *before* anything can kill it. "Does my cleanup run?" no longer depends on scheduler timing.
 > - **A long-running CPU loop is still cancelled promptly** — the loop back-edge is the checkpoint.
+> - **A nursery OWNER running a native-HOF callback is cut short by a child's fault** (TICKET-155) — the
+>   owner holds none of its own scope's cancel flags, so `List.map`/`filter`/`fold`/`sort_by` and an
+>   operator overload check the nursery for a recorded child `Fault` at the per-element re-entry. The check
+>   rides the loop back-edge's 1-in-1024 sample (it takes the sched lock), so the owner may burn up to that
+>   many further elements. A `defer` body is never truncated by it, and a `recover:` outside the
+>   `parallel:` still catches the child's fault.
 >
 > **Two kinds of blocking checkpoint — a wait whose DEADLINE WE OWN is CONTINUOUS; a syscall-blocking
 > native is ENTRY-only.**
