@@ -2504,7 +2504,7 @@ impl Vm {
         awaiting_builder: bool,
         wait: Option<Arc<quiesce::PartyWait>>,
     ) -> BlockGuard {
-        BlockGuard {
+        let g = BlockGuard {
             _party: None,
             awaiting: awaiting_builder,
             bodies: self
@@ -2522,7 +2522,13 @@ impl Vm {
                 })
                 .collect(),
             wait,
+        };
+        // TICKET-159 (W13-27) — the body just stopped injecting: farm runners for whatever it already
+        // queued. AFTER `set_body_wait` has published `body_blocked`, which the claim reads.
+        for (sched, _) in &g.bodies {
+            self.farm_blocked_body_helpers(sched);
         }
+        g
     }
 
     /// The `chezzi test --timeout` wall-clock halt, on its own so the ops that PARK a fiber can observe

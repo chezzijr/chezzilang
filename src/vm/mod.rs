@@ -2308,6 +2308,20 @@ struct MnSched {
     /// `runnable > 0` but nothing grabbed yet). `recruit` skips waking an idle sleeper while any
     /// worker is already spinning — a spinner will pick up the work on its own next pass.
     spinning: AtomicUsize,
+    /// TICKET-159 (W13-27) — lock-free pre-check for [`MnSched::claim_blocked_body_helpers`]: mirrors
+    /// the OUTERMOST body's (`scope 0`) `body_blocked`, written by `set_body_wait` inside its core-lock
+    /// hold. A stale read only delays or skips a farm attempt; the claim re-reads the real flag under
+    /// the lock.
+    body_blocked_hint: AtomicBool,
+    /// TICKET-159 — latch: the blocked-body helpers of this sched are farmed (or being farmed).
+    /// Released again when nothing could be farmed, so a denied budget never costs the join its inline
+    /// joiner or its pool helpers.
+    blocked_body_claimed: AtomicBool,
+    /// TICKET-159 — the raw `chezzi-eager-helper` threads farmed while the outermost body was blocked,
+    /// with the [`sched::NestedDrainerSlot`] each holds. They live on the sched because the thread that
+    /// farms them (a spawning fiber, or the body at its own block) is not the thread that joins them:
+    /// `join_eager_nursery` / `abort_eager_nursery` take them.
+    blocked_body_helpers: Mutex<Vec<(std::thread::JoinHandle<()>, sched::NestedDrainerSlot)>>,
 }
 
 /// Cross-nursery flat scheduler (M:N) — one nursery's JOIN RECORD (Trio/Go-style: structured
@@ -2822,6 +2836,9 @@ impl MnSched {
             idle_cv: Condvar::new(),
             idle_sleepers: AtomicUsize::new(0),
             spinning: AtomicUsize::new(0),
+            body_blocked_hint: AtomicBool::new(false),
+            blocked_body_claimed: AtomicBool::new(false),
+            blocked_body_helpers: Mutex::new(Vec::new()),
         }
     }
 
@@ -3151,6 +3168,92 @@ impl MnSched {
             .sum()
     }
 
+    /// TICKET-159 (W13-27) — should the caller farm runners for this sched NOW, because its OUTERMOST
+    /// body is blocked on a channel wait and at least two tasks are outstanding? True at most once per
+    /// claim: the caller then owns the farm and MUST end it with `push_blocked_body_helpers` or
+    /// `release_blocked_body_claim`.
+    ///
+    /// Refuses a private nested sched (`body_is_fiber`: its body is a fiber of another sched), a body
+    /// parked in a nested nursery's join (`awaiting_builder`: that join farms its own runners), and a
+    /// fewer-than-two backlog (the same guard `farm_outermost_eager_helpers` keeps).
+    pub(super) fn claim_blocked_body_helpers(&self) -> bool {
+        if self.body_is_fiber
+            || self.blocked_body_claimed.load(Ordering::Acquire)
+            || !self.body_blocked_hint.load(Ordering::Relaxed)
+        {
+            return false;
+        }
+        {
+            let c = self.lock();
+            let s = &c.scopes[0];
+            if !(s.body_open && s.body_blocked && !s.awaiting_builder) {
+                return false;
+            }
+            let outstanding: usize = c
+                .scopes
+                .iter()
+                .map(|s| s.total.saturating_sub(s.done))
+                .sum();
+            if outstanding < 2 {
+                return false;
+            }
+        }
+        self.blocked_body_claimed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    /// TICKET-159 — give the claim back: nothing was farmed.
+    pub(super) fn release_blocked_body_claim(&self) {
+        self.blocked_body_claimed.store(false, Ordering::Release);
+    }
+
+    /// TICKET-159 — are blocked-body helpers farmed on this sched? Read by the join to stand its
+    /// inline joiner down and to skip the join-time pool farm, so the runner count stays at
+    /// `worker_count()`.
+    pub(super) fn has_blocked_body_helpers(&self) -> bool {
+        self.blocked_body_claimed.load(Ordering::Acquire)
+    }
+
+    pub(super) fn push_blocked_body_helpers(
+        &self,
+        v: Vec<(std::thread::JoinHandle<()>, sched::NestedDrainerSlot)>,
+    ) {
+        self.blocked_body_helpers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(v);
+    }
+
+    pub(super) fn take_blocked_body_helpers(
+        &self,
+    ) -> Vec<(std::thread::JoinHandle<()>, sched::NestedDrainerSlot)> {
+        std::mem::take(
+            &mut *self
+                .blocked_body_helpers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+        )
+    }
+
+    /// TICKET-159 — `finish`'s completion latch, for a caller that observed the completion itself:
+    /// every scope done and no body open sets `terminate` and wakes every worker, so farmed SENTINEL
+    /// helpers exit. A no-op otherwise.
+    pub(super) fn latch_terminate_if_done(&self) {
+        {
+            let mut c = self.lock();
+            if c.all_scopes_done() && !c.any_body_open() {
+                c.terminate = true;
+            }
+        }
+        self.notify_waiters();
+    }
+
+    /// TICKET-159 — scope `sid`'s cancel flag, for a shell that serves it.
+    pub(super) fn scope_cancel(&self, sid: usize) -> Option<Arc<AtomicBool>> {
+        self.lock().scopes.get(sid).map(|s| Arc::clone(&s.cancel))
+    }
+
     /// §2c1 — register (or drop) a BLOCKED BODY's channel waits as demoted participants of this
     /// sched, so `is_deadlocked_ignoring_jobs`' demoted-queue peek can see them.
     ///
@@ -3188,6 +3291,9 @@ impl MnSched {
             // TICKET-103 — the whole family, in this same acquisition: an unmarked continuation keeps
             // `all_incomplete_awaiting_builder` false and lets the predicate fault a sibling the body
             // feeds after its nested join.
+            if scope_id == 0 {
+                self.body_blocked_hint.store(blocked, Ordering::Relaxed);
+            }
             if scope_id < c.scopes.len() {
                 let family = c.scope_family(scope_id);
                 for i in family {

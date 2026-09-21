@@ -301,7 +301,15 @@ How a `parallel:` block runs on the M:N engine (`chezzi run` — the default):
    TICKET-131). A `return`, `?`, `break` or `continue` out of such a nursery parks the owner the same
    way, requeuing it once its cancelled tasks settle, instead of waiting on them inline (TICKET-132).
    While the enclosing nursery's body is still open, those tasks share the enclosing scheduler's
-   runners (`docs/gaps.md` W13-27).
+   runners. TICKET-159 (W13-27): once that body BLOCKS (a channel wait) with at least two tasks
+   outstanding, the scheduler farms `worker_count() - 1` extra RAW `chezzi-eager-helper` threads
+   (`Vm::farm_blocked_body_helpers`, wids `2..n+1`, empty at `--threads=1`) from the same
+   `NestedDrainerSlot` budget a nested join uses — never the bounded pool, because the blocked body
+   may be waiting on an `Executor` job queued behind a pool helper that runs to global terminate
+   (DEC-103). The farm fires at both moments the condition becomes true: a task injected after the
+   body blocked (`register_task`) and the body's own block (`blocked_bodies_guard_with`). With those
+   helpers live the join's inline joiner stands down and skips the join-time pool farm, so the runner
+   count stays `worker_count()`.
 2. The task runs **concurrently** with the statements that follow it and with its siblings. There is
    no FIFO order between tasks and no defined order against the parent's own statements.
 3. The first task to error **aborts the remaining siblings** and propagates out of the `parallel:`

@@ -20578,6 +20578,34 @@ fn eager_runner_budget_sums_to_worker_count() {
     );
 }
 
+/// TICKET-159 (W13-27) — the BLOCKED-BODY runner budget: while an outermost eager body is blocked
+/// there is no inline joiner, so the drainer (always 1) plus the farmed raw helpers
+/// (`blocked_body_helper_wids`) must sum to exactly `n`. The range must be EMPTY at `n == 1` (W8-8's
+/// one-CPU-runner rule by construction), start above the joiner's wid 0 and the drainer's wid 1, and
+/// end inside the `locals` `activate_eager_nursery` allocates (`n + 1`). Pure-function check.
+#[test]
+fn blocked_body_helper_wids_leave_one_runner_per_worker() {
+    assert!(sched::blocked_body_helper_wids(1).is_empty());
+    assert_eq!(sched::blocked_body_helper_wids(2).count(), 1);
+    assert_eq!(sched::blocked_body_helper_wids(8).count(), 7);
+    for n in 1..=12usize {
+        let r = sched::blocked_body_helper_wids(n);
+        assert!(
+            r.is_empty() || r.start == 2,
+            "wids 0 and 1 are the joiner and the drainer (n={n})"
+        );
+        assert!(
+            r.end <= n.max(1) + 1,
+            "wid range escapes the allocated locals at n={n}"
+        );
+        assert_eq!(
+            1 + r.len(),
+            n,
+            "blocked-body runner budget mismatch at n={n}"
+        );
+    }
+}
+
 #[test]
 fn cmp_int_f64_is_exact_at_the_i64_and_2_53_boundaries() {
     use std::cmp::Ordering::{Equal, Greater, Less};
