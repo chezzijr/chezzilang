@@ -3481,7 +3481,7 @@ mod tests {
                 .expect("fragment should parse");
         let mut saw_expr = false;
         for c in &chunks {
-            if let crate::ast::Chunk::Expr(e, _) = c {
+            if let crate::ast::Chunk::Expr(e, _, _) = c {
                 saw_expr = true;
                 assert_eq!(
                     e.span.file, 9,

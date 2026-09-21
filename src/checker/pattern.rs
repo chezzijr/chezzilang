@@ -1394,7 +1394,7 @@ impl Checker {
         let saved_ord = self.kw_frag_ord;
         let mut ord = 0usize;
         for chunk in chunks {
-            if let crate::ast::Chunk::Expr(e, spec) = chunk {
+            if let crate::ast::Chunk::Expr(e, spec, _fields) = chunk {
                 self.kw_frag_ctx = span;
                 self.kw_frag_ord = ord;
                 // No re-anchoring: a fragment is re-lexed with the literal's absolute line AND
@@ -4753,8 +4753,11 @@ impl Checker {
             ExprKind::Str(raw) => {
                 if let Ok(chunks) = crate::interpolation::parse_interpolation(raw, e.span) {
                     for chunk in &chunks {
-                        if let crate::ast::Chunk::Expr(frag, _) = chunk {
+                        if let crate::ast::Chunk::Expr(frag, _, fields) = chunk {
                             self.scan_expr_for_pin(name, frag, match_pin, member_pin);
+                            for f in fields {
+                                self.scan_expr_for_pin(name, f, match_pin, member_pin);
+                            }
                         }
                     }
                 }
@@ -4762,8 +4765,11 @@ impl Checker {
             // The desugared form — the fragments are already parsed children here.
             ExprKind::Interp(chunks) => {
                 for chunk in chunks {
-                    if let crate::ast::Chunk::Expr(frag, _) = chunk {
+                    if let crate::ast::Chunk::Expr(frag, _, fields) = chunk {
                         self.scan_expr_for_pin(name, frag, match_pin, member_pin);
+                        for f in fields {
+                            self.scan_expr_for_pin(name, f, match_pin, member_pin);
+                        }
                     }
                 }
             }

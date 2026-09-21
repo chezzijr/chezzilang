@@ -883,11 +883,13 @@ pub struct Expr {
 
 /// One piece of an interpolated string literal ([`ExprKind::Interp`]): either literal text or a
 /// `{expr}` / `{expr:spec}` fragment (the format spec is parsed at compile time; `None` for a bare
-/// `{expr}`). Built by [`crate::interpolation::parse_interpolation`].
+/// `{expr}`). The third field holds the spec's nested `{expr}` fields (`{s:<{w}}`, `{x:.{p}f}`), width
+/// before precision — the order they evaluate in, after the value. Empty without a nested field.
+/// Built by [`crate::interpolation::parse_interpolation`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum Chunk {
     Lit(String),
-    Expr(Expr, Option<crate::fmtspec::FormatSpec>),
+    Expr(Expr, Option<crate::fmtspec::FormatSpec>, Vec<Expr>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1195,8 +1197,9 @@ pub fn expr_recover_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
         // (No fragment can currently hold a `recover:` — `split_spec` claims its `:` — so this arm
         // is a structural completeness guard, not a live path.)
         ExprKind::Interp(chunks) => chunks.iter().for_each(|c| {
-            if let Chunk::Expr(e, _) = c {
+            if let Chunk::Expr(e, _, fields) = c {
                 expr_recover_blocks(e, out);
+                fields.iter().for_each(|f| expr_recover_blocks(f, out));
             }
         }),
         ExprKind::List(es, _) | ExprKind::Tuple(es) | ExprKind::Set(es) => es.iter().for_each(go),

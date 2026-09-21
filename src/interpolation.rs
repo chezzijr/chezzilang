@@ -166,16 +166,21 @@ pub(crate) fn parse_interpolation(lit_tok: &StrLit, span: Span) -> Result<Vec<Ch
                 // (e.g. `{m["a:b"]}`, slices `a[1:2]`) is NOT a separator. Spec parse errors are
                 // surfaced as compile errors (good UX); type/value mismatches are deferred to the VM.
                 let (expr_src, spec_src) = crate::fmtspec::split_spec(&inner);
-                let spec = match spec_src {
-                    Some(s) => Some(crate::fmtspec::parse(s).map_err(|message| InterpError {
-                        message,
-                        // The spec's first char: past the `{`, the expression and the `:`.
-                        // `fmtspec::parse` reports no offset of its own, so the spec's start is the
-                        // most precise position available — and it is inside the fragment, which
-                        // the literal's opening quote never was.
-                        span: map.at(i + 1 + expr_src.chars().count() + 1),
-                    })?),
-                    None => None,
+                // The spec's first char: past the `{`, the expression and the `:`.
+                let spec_start = i + 1 + expr_src.chars().count() + 1;
+                let (spec, nested) = match spec_src {
+                    Some(s) => {
+                        let (spec, nested) =
+                            crate::fmtspec::parse_nested(s).map_err(|message| InterpError {
+                                message,
+                                // `fmtspec::parse_nested` reports no offset of its own, so the
+                                // spec's start is the most precise position available — and it is
+                                // inside the fragment, which the literal's opening quote never was.
+                                span: map.at(spec_start),
+                            })?;
+                        (Some(spec), nested)
+                    }
+                    None => (None, Vec::new()),
                 };
                 // Re-lex the fragment against the enclosing literal's source map, so every token
                 // span it produces is the REAL physical position of that char in the file — line
@@ -195,7 +200,15 @@ pub(crate) fn parse_interpolation(lit_tok: &StrLit, span: Span) -> Result<Vec<Ch
                 let lead = expr_src.chars().take_while(|c| c.is_whitespace()).count();
                 let off = i + 1 + lead;
                 let expr = parse_expr_str(expr_src.trim(), span, map.clone(), off)?;
-                chunks.push(Chunk::Expr(expr, spec));
+                // Each nested width/precision field is an ordinary expression, re-lexed the same
+                // way at its own real position: the spec's start, plus the field's `{`, plus one.
+                let mut fields = Vec::with_capacity(nested.len());
+                for f in &nested {
+                    let lead = f.src.chars().take_while(|c| c.is_whitespace()).count();
+                    let at = spec_start + f.at + 1 + lead;
+                    fields.push(parse_expr_str(f.src.trim(), span, map.clone(), at)?);
+                }
+                chunks.push(Chunk::Expr(expr, spec, fields));
             }
             '}' => {
                 // The offending `}` itself — CPython 3.14 points there too (`f"a\tb}c"` → caret on

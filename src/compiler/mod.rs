@@ -5689,7 +5689,7 @@ impl Compiler {
         for chunk in chunks {
             match chunk {
                 Chunk::Lit(s) => fc.emit(Op::ConstStr(s.clone()), span),
-                Chunk::Expr(e, spec) => {
+                Chunk::Expr(e, spec, _fields) => {
                     self.kw_frag_ctx = span;
                     self.kw_frag_ord = ord;
                     // The fragment root is compiled with its OWN span, so a RUNTIME fault inside a
@@ -6131,9 +6131,11 @@ fn find_boundary_free_block(stmts: &[Stmt], out: &mut HashSet<String>) {
 /// counterpart of [`interp_exprs`], with no re-parse. This is the path a compiled program actually
 /// takes; `interp_exprs` below remains for a literal `desugar` left un-parsed.
 fn chunk_exprs(chunks: &[Chunk]) -> impl Iterator<Item = &Expr> {
-    chunks.iter().filter_map(|c| match c {
-        Chunk::Expr(e, _) => Some(e),
-        Chunk::Lit(_) => None,
+    // The value, then the spec's nested width/precision fields — a name read ONLY inside a nested
+    // field (`"{s:<{w}}"`) must still be seen as a free variable.
+    chunks.iter().flat_map(|c| match c {
+        Chunk::Expr(e, _, fields) => Some(e).into_iter().chain(fields.iter()),
+        Chunk::Lit(_) => None.into_iter().chain([].iter()),
     })
 }
 
@@ -6146,9 +6148,9 @@ fn interp_exprs(raw: &crate::ast::StrLit) -> Vec<Expr> {
     match parse_interpolation(raw, Span::RUNTIME) {
         Ok(chunks) => chunks
             .into_iter()
-            .filter_map(|c| match c {
-                Chunk::Expr(e, _) => Some(e),
-                Chunk::Lit(_) => None,
+            .flat_map(|c| match c {
+                Chunk::Expr(e, _, fields) => std::iter::once(e).chain(fields).collect(),
+                Chunk::Lit(_) => Vec::new(),
             })
             .collect(),
         Err(_) => Vec::new(),
@@ -7664,7 +7666,7 @@ mod interp_tests {
     fn parse_interpolation_attaches_spec() {
         let chunks = parse_interpolation(&StrLit::from("{x:>5}"), sp()).unwrap();
         match &chunks[..] {
-            [Chunk::Expr(_, Some(spec))] => {
+            [Chunk::Expr(_, Some(spec), _)] => {
                 assert_eq!(spec.width, 5);
                 assert_eq!(spec.align, Some(crate::fmtspec::Align::Right));
             }
@@ -7673,9 +7675,42 @@ mod interp_tests {
     }
 
     #[test]
+    fn parse_interpolation_nested_fields_are_exprs() {
+        let lit_span = Span {
+            line: 4,
+            col: 11,
+            file: 9,
+        };
+        let chunks =
+            parse_interpolation(&StrLit::from("{x:{w}.{p}f}"), lit_span).expect("should parse");
+        let [Chunk::Expr(value, Some(spec), fields)] = &chunks[..] else {
+            panic!("expected one spec'd expr chunk, got {chunks:?}");
+        };
+        assert!(spec.dyn_width && spec.dyn_precision);
+        assert_eq!(spec.ty, Some('f'));
+        assert_eq!(fields.len(), 2, "width then precision");
+        assert!(matches!(&fields[0].kind, ExprKind::Ident(n) if n == "w"));
+        assert!(matches!(&fields[1].kind, ExprKind::Ident(n) if n == "p"));
+        // `{x:{w}.{p}f}`: `w` sits 3 chars after `x`, `p` 7 (a real source column, like any fragment).
+        assert_eq!(fields[0].span.col, value.span.col + 3);
+        assert_eq!(fields[1].span.col, value.span.col + 7);
+        assert_eq!(fields[0].span.line, value.span.line);
+        assert_eq!(fields[0].span.file, 9);
+        // Padding inside the nested braces is insignificant, as around the value.
+        let chunks = parse_interpolation(&StrLit::from("{x:<{ w }}"), lit_span).unwrap();
+        let [Chunk::Expr(value, Some(_), fields)] = &chunks[..] else {
+            panic!("expected one spec'd expr chunk");
+        };
+        assert_eq!(fields[0].span.col, value.span.col + 5);
+        // A literal spec carries no nested field.
+        let chunks = parse_interpolation(&StrLit::from("{x:>5}"), lit_span).unwrap();
+        assert!(matches!(&chunks[..], [Chunk::Expr(_, Some(_), f)] if f.is_empty()));
+    }
+
+    #[test]
     fn parse_interpolation_bare_expr_has_no_spec() {
         let chunks = parse_interpolation(&StrLit::from("{x}"), sp()).unwrap();
-        assert!(matches!(&chunks[..], [Chunk::Expr(_, None)]));
+        assert!(matches!(&chunks[..], [Chunk::Expr(_, None, _)]));
     }
 
     #[test]
@@ -7693,12 +7728,12 @@ mod interp_tests {
         // The `:` inside the string-key index is NOT the spec separator; only the trailing one is.
         let chunks = parse_interpolation(&StrLit::from("{m[\"a:b\"]:>3}"), sp()).unwrap();
         match &chunks[..] {
-            [Chunk::Expr(_, Some(spec))] => assert_eq!(spec.width, 3),
+            [Chunk::Expr(_, Some(spec), _)] => assert_eq!(spec.width, 3),
             _ => panic!("expected spec'd expr"),
         }
         // And with no trailing spec, the inner `:` stays part of the expression.
         let chunks = parse_interpolation(&StrLit::from("{m[\"a:b\"]}"), sp()).unwrap();
-        assert!(matches!(&chunks[..], [Chunk::Expr(_, None)]));
+        assert!(matches!(&chunks[..], [Chunk::Expr(_, None, _)]));
     }
 
     #[test]
@@ -7707,14 +7742,14 @@ mod interp_tests {
         let chunks = parse_interpolation(&StrLit::from("v={d['a}}b']}"), sp()).unwrap();
         assert!(matches!(
             &chunks[..],
-            [Chunk::Lit(l), Chunk::Expr(_, None)] if l == "v="
+            [Chunk::Lit(l), Chunk::Expr(_, None, _)] if l == "v="
         ));
         // Nor does one nested inside `{`/`[`/`(` — the set literal's brace is at depth 1.
         let chunks = parse_interpolation(&StrLit::from("{ {1, 2}.len() }"), sp()).unwrap();
-        assert!(matches!(&chunks[..], [Chunk::Expr(_, None)]));
+        assert!(matches!(&chunks[..], [Chunk::Expr(_, None, _)]));
         // Padding around a fragment is insignificant (CPython allows `f"{ x }"`).
         let chunks = parse_interpolation(&StrLit::from("{ x }"), sp()).unwrap();
-        assert!(matches!(&chunks[..], [Chunk::Expr(_, None)]));
+        assert!(matches!(&chunks[..], [Chunk::Expr(_, None, _)]));
         // A depth-0 `}` still terminates, and an unclosed fragment is still an error.
         assert!(
             parse_interpolation(&StrLit::from("{x"), sp())

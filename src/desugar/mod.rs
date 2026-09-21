@@ -1277,8 +1277,9 @@ fn walk_idents_and_types(e: &Expr, f: &mut impl FnMut(&str), tf: &mut impl FnMut
                 && let Ok(chunks) = crate::interpolation::parse_interpolation(raw, e.span)
             {
                 for c in &chunks {
-                    if let Chunk::Expr(inner, _) = c {
+                    if let Chunk::Expr(inner, _, fields) = c {
                         walk_idents_and_types(inner, f, tf);
+                        fields.iter().for_each(|x| walk_idents_and_types(x, f, tf));
                     }
                 }
             }
@@ -1294,8 +1295,9 @@ fn walk_idents_and_types(e: &Expr, f: &mut impl FnMut(&str), tf: &mut impl FnMut
         // A fragment identifier IS a reference (`"{a}"` reads `a`), so descend. Reached once
         // `desugar` has rewritten the literal; before that the raw-`Str` arm above parses it.
         ExprKind::Interp(chunks) => chunks.iter().for_each(|c| {
-            if let Chunk::Expr(e, _) = c {
-                walk_idents_and_types(e, f, tf)
+            if let Chunk::Expr(e, _, fields) = c {
+                walk_idents_and_types(e, f, tf);
+                fields.iter().for_each(|x| walk_idents_and_types(x, f, tf));
             }
         }),
         ExprKind::List(xs, _) | ExprKind::Tuple(xs) | ExprKind::Set(xs) => {
@@ -2418,8 +2420,11 @@ impl Walker<'_> {
                 // literal's `PosMap`, so its own span is the real physical source position (and the
                 // one the checker and compiler report too). See `interpolation::parse_interpolation`.
                 for c in chunks.iter_mut() {
-                    if let crate::ast::Chunk::Expr(e, _) = c {
+                    if let crate::ast::Chunk::Expr(e, _, fields) = c {
                         self.walk_expr(e)?;
+                        for f in fields.iter_mut() {
+                            self.walk_expr(f)?;
+                        }
                     }
                 }
             }
