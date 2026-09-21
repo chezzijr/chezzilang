@@ -18023,8 +18023,8 @@ main()
 /// W7-11 — an `RwShared` copy-out view of an element whose cycle closes through the ROOT container
 /// used to ABORT THE HOST: the piece rebuild hit `from_wire_memo`'s
 /// `.expect("a wire Backref always targets an already-reconstructed node id")` on a legal,
-/// single-threaded, checker-clean program, while `get()` on the same box worked. `elem_split` cannot
-/// cover it — it re-emits CELL definitions per depth-1 subtree, and the missing node is a CONTAINER.
+/// single-threaded, checker-clean program, while `get()` on the same box worked. No store-side
+/// re-emission can cover it: the missing node is the ROOT container itself.
 ///
 /// **This test's failure mode is a dead process, not a red assert** — which is exactly why it is in
 /// Rust and not only in `tests/chz/`: a regression takes libtest down with it.
@@ -18092,8 +18092,9 @@ main()
 /// O(whole container). The first cut resolved a piece's cross-element `Backref` by rebuilding the
 /// ENTIRE stored container once PER ELEMENT, so `for_each`/`fold`/`at` over a container of closures
 /// sharing one binding went quadratic (measured on the pre-fix release binary: n=4000 → 3.7s, n=12000
-/// → 34s, versus 0.02s before W7-4). Stored wires are now self-contained per element, so no view ever
-/// re-materializes the whole. A coarse CLIFF detector, not a benchmark: the budget is ~50× the actual
+/// → 34s, versus 0.02s before W7-4). Since TICKET-154 the looping views share ONE rebuild map over an
+/// aliased store (`rwshared_snapshot_pieces`), so no looping view re-materializes the whole per
+/// element. A coarse CLIFF detector, not a benchmark: the budget is ~50× the actual
 /// debug-build cost and the pre-fix code blew it (measured: 10.5s debug, versus 0.03s fixed).
 #[test]
 fn rwshared_view_over_shared_bindings_is_not_quadratic() {

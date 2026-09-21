@@ -3233,8 +3233,8 @@ impl Vm {
             }
             "set" => {
                 self.arity_err("set", args, 1, span)?;
-                // TICKET-100 — `_split`: this stored wire is drained piecewise by the zero-copy read views below.
-                let w = self.to_wire_crossable_split(args[0], span)?;
+                // TICKET-154: same rule as every other cross-heap store; the read views resolve aliases on the rebuild side.
+                let w = self.to_wire_crossable(args[0], span)?;
                 let core = self.rwshared_core(h);
                 let key = Arc::as_ptr(&core) as usize;
                 let _guard = self.take_update_guard(key, "a RwShared update guard", span)?;
@@ -3273,8 +3273,8 @@ impl Vm {
                 let next = self.guarded(|vm| vm.invoke_value(f, vec![cur], span));
                 self.pop();
                 let next = next?;
-                // TICKET-100 — `_split`: this stored wire is drained piecewise by the zero-copy read views below.
-                let stored = self.to_wire_crossable_split(next, span)?;
+                // TICKET-154: same rule as every other cross-heap store; the read views resolve aliases on the rebuild side.
+                let stored = self.to_wire_crossable(next, span)?;
                 core.store(stored);
                 Ok(Value::nil())
             }
@@ -3415,6 +3415,19 @@ impl Vm {
                     }
                 };
                 self.push(Value::obj(h)); // root the receiver across nested GC
+                // TICKET-154: an aliased store is materialized under ONE map and ONE guard first,
+                // then walked with no guard held. A self-contained store keeps the walk below.
+                if let Some(all) = self.rwshared_snapshot_pieces(&core) {
+                    self.push(Value::obj(all));
+                    let mut i = 0;
+                    while let Some(elem) = self.snapshot_piece(all, i) {
+                        self.guarded(|vm| vm.invoke_value(f, vec![elem], span))?;
+                        i += 1;
+                    }
+                    self.pop();
+                    self.pop();
+                    return Ok(Value::nil());
+                }
                 for i in 0..n {
                     // RE-ACQUIRE the shared guard, clone ONE element, rebuild it, DROP the guard
                     // before the closure — never hold `core.v` across `invoke_value`/GC (see the
@@ -3462,6 +3475,21 @@ impl Vm {
                 self.push(Value::obj(h)); // root the receiver
                 self.push(init); // root the accumulator; its slot sits below every nested frame's base
                 let acc_slot = self.stack.len() - 1;
+                // TICKET-154: see `for_each` -- one map, one guard, then walk with no guard held.
+                if let Some(all) = self.rwshared_snapshot_pieces(&core) {
+                    self.push(Value::obj(all));
+                    let mut i = 0;
+                    while let Some(elem) = self.snapshot_piece(all, i) {
+                        let acc = self.stack[acc_slot];
+                        let new = self.guarded(|vm| vm.invoke_value(f, vec![acc, elem], span))?;
+                        self.stack[acc_slot] = new;
+                        i += 1;
+                    }
+                    self.pop(); // unroot the snapshot
+                    let acc = self.pop();
+                    self.pop();
+                    return Ok(acc);
+                }
                 for i in 0..n {
                     // RE-ACQUIRE per element, rebuild under the guard, DROP before the closure (see
                     // the arm's header comment).
@@ -3638,9 +3666,10 @@ impl Vm {
                             continue;
                         }
                         let (kw, vw) = (entries[i].1.clone(), entries[i].2.clone());
+                        // TICKET-154: ONE map per ENTRY, so a value that aliases its own key
+                        // rebuilds as one object.
                         let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
                         let k = self.from_wire_piece(&g, kw, &mut rb);
-                        let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
                         (k, self.from_wire_piece(&g, vw, &mut rb))
                     };
                     if self.with_roots(&[k, v], |vm| vm.values_equal_guarded(k, key, 0, span))? {
@@ -3670,6 +3699,21 @@ impl Vm {
                     }
                 };
                 self.push(Value::obj(h));
+                // TICKET-154: see `for_each` -- an aliased map is materialized once, flattened
+                // key-then-value, under one map and one guard.
+                if let Some(all) = self.rwshared_snapshot_pieces(&core) {
+                    self.push(Value::obj(all));
+                    let mut i = 0;
+                    while let (Some(k), Some(v)) =
+                        (self.snapshot_piece(all, i), self.snapshot_piece(all, i + 1))
+                    {
+                        self.guarded(|vm| vm.invoke_value(f, vec![k, v], span))?;
+                        i += 2;
+                    }
+                    self.pop();
+                    self.pop();
+                    return Ok(Value::nil());
+                }
                 for i in 0..n {
                     // Clone AND rebuild both halves of the entry under ONE guard, dropped before the
                     // closure (W7-11 — see the arm header).
@@ -3684,12 +3728,12 @@ impl Vm {
                             }
                             _ => break,
                         };
+                        // TICKET-154: ONE map per ENTRY (see `get_key`).
                         let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
                         let k = self.from_wire_piece(&g, kw, &mut rb);
                         // Root the reconstructed key while building the value (both alloc; `alloc`
                         // never collects, but rooting matches the receiver-rooting precedent).
                         self.push(k);
-                        let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
                         let v = self.from_wire_piece(&g, vw, &mut rb);
                         (self.pop(), v)
                     };
@@ -3715,6 +3759,23 @@ impl Vm {
                 self.push(Value::obj(h)); // root the receiver
                 self.push(init); // root the accumulator
                 let acc_slot = self.stack.len() - 1;
+                // TICKET-154: see `for_each_entry`.
+                if let Some(all) = self.rwshared_snapshot_pieces(&core) {
+                    self.push(Value::obj(all));
+                    let mut i = 0;
+                    while let (Some(k), Some(v)) =
+                        (self.snapshot_piece(all, i), self.snapshot_piece(all, i + 1))
+                    {
+                        let acc = self.stack[acc_slot];
+                        let new = self.guarded(|vm| vm.invoke_value(f, vec![acc, k, v], span))?;
+                        self.stack[acc_slot] = new;
+                        i += 2;
+                    }
+                    self.pop(); // unroot the snapshot
+                    let acc = self.pop();
+                    self.pop();
+                    return Ok(acc);
+                }
                 for i in 0..n {
                     // One guard for the clone AND both rebuilds, dropped before the closure (W7-11).
                     let (k, v) = {
@@ -3728,10 +3789,10 @@ impl Vm {
                             }
                             _ => break,
                         };
+                        // TICKET-154: ONE map per ENTRY (see `get_key`).
                         let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
                         let k = self.from_wire_piece(&g, kw, &mut rb);
                         self.push(k); // root key while reconstructing value
-                        let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
                         let v = self.from_wire_piece(&g, vw, &mut rb);
                         (self.pop(), v)
                     };
@@ -3744,6 +3805,72 @@ impl Vm {
                 Ok(acc)
             }
             _ => Err(self.err(format!("type RwShared has no method '{method}'"), span)),
+        }
+    }
+
+    /// TICKET-154 (W11-15) -- the ONE-map snapshot behind `for_each`, `fold`, `for_each_entry` and
+    /// `fold_entries`. Returns `None` when every depth-1 piece of the stored wire stands alone
+    /// ([`Vm::wire_pieces_are_self_contained`]); the caller then keeps its per-element walk, which
+    /// stays flat in memory. Otherwise the stored wire holds an ALIAS (a container or cell reached
+    /// twice, or a cycle through the root), so it rebuilds the WHOLE wire once into ONE map and
+    /// materializes every piece from that map into a fresh list (a `Map` flattens key then value per
+    /// entry). Two elements that alias one node then land on ONE object, which is what `get()` and
+    /// CPython's `copy.deepcopy` give.
+    ///
+    /// Two invariants, both load-bearing:
+    /// 1. ONE read guard spans the decision AND every materialization. The looping arms re-acquire the
+    ///    guard per element, so a map carried across two acquisitions would resolve an id against a
+    ///    serialization a concurrent `set` had already replaced (the torn read of W7-4 round 2).
+    /// 2. The result list is rooted on the operand stack across every piece, matching `slice`; it is
+    ///    popped before return, so the CALLER must root it before anything allocates or collects.
+    ///
+    /// Not used by `at`/`get_key`: materializing a whole container to read one element is strictly
+    /// worse, and two separate calls are two crossings (CPython: two separate deep copies).
+    fn rwshared_snapshot_pieces(&mut self, core: &Arc<RwSharedCore>) -> Option<GcRef> {
+        let g = core.v.read().unwrap();
+        if !matches!(
+            &*g,
+            WireValue::List { .. } | WireValue::Set { .. } | WireValue::Map { .. }
+        ) || Vm::wire_pieces_are_self_contained(&g)
+        {
+            return None;
+        }
+        let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
+        let _whole = self.from_wire_memo((*g).clone(), &mut rb);
+        let res_h = self.heap.alloc(Obj::List(Vec::new()));
+        self.push(Value::obj(res_h));
+        let n = match &*g {
+            WireValue::List { items, .. } => items.len(),
+            WireValue::Set { entries, .. } => entries.len(),
+            WireValue::Map { entries, .. } => entries.len(),
+            _ => unreachable!(),
+        };
+        for i in 0..n {
+            let (first, second) = match &*g {
+                WireValue::List { items, .. } => (items[i].clone(), None),
+                WireValue::Set { entries, .. } => (entries[i].1.clone(), None),
+                WireValue::Map { entries, .. } => {
+                    (entries[i].1.clone(), Some(entries[i].2.clone()))
+                }
+                _ => unreachable!(),
+            };
+            let a = self.from_wire_piece(&g, first, &mut rb);
+            let b = second.map(|w| self.from_wire_piece(&g, w, &mut rb));
+            if let Obj::List(items) = self.heap.get_mut(res_h) {
+                items.push(a);
+                items.extend(b);
+            }
+        }
+        self.pop();
+        Some(res_h)
+    }
+
+    /// Element `i` of a [`rwshared_snapshot_pieces`](Vm::rwshared_snapshot_pieces) list, or `None`
+    /// once `i` runs past it.
+    fn snapshot_piece(&self, all: GcRef, i: usize) -> Option<Value> {
+        match self.heap.get(all) {
+            Obj::List(items) => items.get(i).copied(),
+            _ => None,
         }
     }
 

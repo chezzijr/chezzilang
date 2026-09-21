@@ -213,8 +213,10 @@ test fn module_global_plus_local_capture_shares_its_binding():
 # `from_wire` rebuilds, so the persistent cell memo made a `Backref` reach across sibling elements for
 # the first time and every one of these methods hit a host PANIC (`a wire Backref always targets an
 # already-reconstructed node id`), not a catchable fault. A whole-container `get()` is ONE crossing and
-# still shares the binding; a per-element copy-out view is an independent copy (two `at()` calls are two
-# crossings and can never share), and `slice` — one call returning a container — shares within itself.
+# still shares the binding; a per-element copy-out view is an independent copy, EXCEPT that a looping
+# view (`for_each`/`fold`) now takes one snapshot under one map, so siblings share within one walk
+# (CPython 3.14.7 and Go 1.27 both fold to 2; TICKET-154). Two `at()` calls are two crossings and can
+# never share, and `slice` — one call returning a container — shares within itself.
 test fn rwshared_views_over_sibling_closures():
     n := 0
     fn inc() -> int:
@@ -239,8 +241,8 @@ test fn rwshared_views_over_sibling_closures():
         calls = calls + 1
     s.for_each(tick)
     assert calls == 2
-    # per-element again: the `inc` copy returns 1, the `get` copy reads its OWN (untouched) cell → 0.
-    assert s.fold(0, fn(a: int, f: fn() -> int) -> int: a + f()) == 1
+    # one walk, one shared map: the `inc` copy returns 1 and the `get` copy reads the SAME cell -> 1.
+    assert s.fold(0, fn(a: int, f: fn() -> int) -> int: a + f()) == 2
     m := RwShared({"i": inc, "g": get})
     assert m.has("i")
     match m.get_key("g"):

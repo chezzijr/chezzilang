@@ -441,19 +441,17 @@ test fn rwshared_at_twice_is_still_two_crossings():
         Some(b): assert b.len() == 1
         None: assert false, "at(1) must be Some"
 
-struct Kb:
-    n: int
-    fn hash(self) -> int:
-        return 7
-
-# A value that aliases its own key is ONE object (CPython: copy.deepcopy({b: b}) then v.n = 9 -> k.n == 9).
-test fn rwshared_map_value_aliasing_its_key_is_one_object():
-    b := Kb(1)
-    m: Map[Kb, Kb] = {b: b}
+# Two map values aliasing one list are ONE object within one `for_each_entry` walk (CPython 3.14.7:
+# copy.deepcopy({1: inner, 2: inner}), push through the first value -> the second sees it).
+# A value cannot alias its OWN key: a map literal copies the key on insert, in plain Chezzi too.
+test fn rwshared_map_values_aliasing_each_other_are_one_object():
+    inner := [1]
+    m: Map[int, List[int]] = {1: inner, 2: inner}
     r := RwShared(m)
-    seen := AtomicInt(0)
-    fn peek(k: Kb, v: Kb):
-        v.n = 9
-        seen.add(k.n)
-    r.for_each_entry(peek)
-    assert seen.load() == 9
+    vs: List[List[int]] = []
+    fn grab(k: int, v: List[int]):
+        vs.push(v)
+    r.for_each_entry(grab)
+    assert vs.len() == 2
+    vs[0].push(2)
+    assert vs[1].len() == 2

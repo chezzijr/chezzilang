@@ -142,12 +142,10 @@ pub enum WireValue {
     /// reference semantics (`b := a` means the same thing inside a task as outside) and CPython's
     /// `copy.deepcopy` (memoizes by source identity).
     ///
-    /// **The `RwShared` store is the ONE exception**: its id is memoized for the whole serialization
-    /// scope like everything else, but the store additionally re-emits a cell's full definition once
-    /// per depth-1 subtree (`WireMemo::elem_split`) so `RwShared`'s piecewise read views never see a
-    /// `Backref` into a sibling piece, and an off-stack container/generator alias goes back to being an
-    /// independent copy under that same `elem_split` scope. A repeated cell definition dedupes on
-    /// rebuild, so a whole-value rebuild still ties every reference to one cell.
+    /// TICKET-154: the `RwShared` stores follow this rule too, so a stored wire may carry a `Backref`
+    /// into a SIBLING depth-1 piece. The piecewise read views resolve it on the REBUILD side
+    /// (`Vm::rwshared_snapshot_pieces` for the looping views, `Vm::from_wire_piece`'s whole-root
+    /// fallback for a single piece), never by re-emitting definitions in the store.
     ///
     /// `from_wire` resolves a `Backref` to the placeholder registered under that `id`, tying the knot.
     /// Holds no `GcRef` and terminates the walk, so `has_handle` leaves it `false`.

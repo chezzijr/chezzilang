@@ -8940,7 +8940,7 @@ main()";
     assert_golden_out(src, "2 2\n");
 }
 
-/// TICKET-100: `Channel.send` is an ordinary cross-heap STORE (`to_wire_crossable`, `elem_split` off),
+/// TICKET-100: `Channel.send` is an ordinary cross-heap STORE (`to_wire_crossable`),
 /// so it now keeps identity like `spawn` args do. `xs := [box, box]` holds ONE struct reached twice;
 /// after `ch.send(xs)` the receiving task mutates through `ys[0]` and reads the SAME value through
 /// `ys[1]` (`9 9`).
@@ -8963,9 +8963,12 @@ main()";
     assert_golden_out(src, "9 9\n");
 }
 
-/// W11-15 (TICKET-154): a DAG alias stored in an `RwShared` crosses as ONE object. `outer := [inner,
-/// inner]` stored in an `RwShared`, read back with `get()`, then pushed through `v[0]`: both slots see
-/// the push (`2 2`), as CPython and Rust do.
+/// W11-15 (TICKET-154): the three `RwShared` stores serialize like every other cross-heap store, so a
+/// DAG alias stored in an `RwShared` is ONE object. `outer := [inner, inner]` stored in an
+/// `RwShared`, read back with `get()`, then pushed through `v[0]`: both slots see it (`2 2`).
+/// CPython 3.14.7 (`copy.deepcopy(outer)`) and Rust agree. The piecewise read views resolve the
+/// cross-element back-ref on the rebuild side by sharing one map (`rwshared_snapshot_pieces`), which
+/// is what keeps `rwshared_view_over_shared_bindings_is_not_quadratic` green.
 #[test]
 fn airlock_rwshared_store_dag_alias_is_one_object() {
     let src = "\
