@@ -80,7 +80,7 @@ Filed, triaged, parked. All six re-verified 2026-09-20 on the release binary.
 
 | ticket | what | measured |
 |---|---|---|
-| **083** | a runtime-computed field width cannot be formatted; both CPython spellings are rejected | `"{s:<{w}}"` → `format spec: unknown type char '{'`; `s.pad_right(…)` → `has no method 'pad_right'` |
+| **083** | the nested-field half LANDED in TICKET-162 (`"{s:<{w}}"` and `"{x:.{p}f}"` render at runtime, capped at 4096); only the `pad_right` spelling remains | `s.pad_right(…)` → `has no method 'pad_right'` |
 | **084** | `Map(m)` fails where `List(xs)` and `Set(s)` succeed, and no method spelling exists | `List(xs)` → `[1, 2]`, `Set(xs)` → `{1, 2}`, `Map(m)` → `Map() expects an iterable of (key, value) 2-tuples, found element str` |
 | **086** | no `findall`-shaped API returning `List[str]`, so the obvious tokenizer is several times CPython while `regex.split` is the workaround | `std/regex.chz` still exposes only `find_all(pat, s) -> Result[List[Match]]`. 2.4 MB / 400 000 tokens: `find_all` + a `.text` loop **740 ms**, `regex.split` **136 ms**, CPython `re.findall` **102 ms** |
 | **087** | `std.time` is whole epoch seconds or a process-relative monotonic float; `std.datetime` is second-resolution throughout, so `12:34:56.789` is unreachable | `time.now()` → `1789915422` |

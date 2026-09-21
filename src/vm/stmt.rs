@@ -2527,15 +2527,40 @@ impl Vm {
     /// `Op::ToStrFmt` — render the top-of-stack value per the parsed format spec. Scalars map
     /// straight to a [`crate::fmtspec::FmtArg`]; non-scalars are rendered via the normal
     /// `stringify_into` first (rooted on the operand stack, so a `str` method's nested frames see a
-    /// live object), then formatted as a plain string. The spec's width is already capped at compile
-    /// time, so no pathological allocation is possible here. Lives in its own `#[inline(never)]`
-    /// helper to keep `step`'s frame small (commit 1450077).
+    /// live object), then formatted as a plain string. A LITERAL width/precision is already capped at
+    /// compile time. A nested `{expr}` one (`{s:<{w}}`) sits on the stack above the value — width,
+    /// then precision — and is resolved and capped by [`crate::fmtspec::field_from_int`] BEFORE
+    /// anything is rendered or allocated, so a huge runtime width is a clean error, never an OOM.
+    /// Lives in its own `#[inline(never)]` helper to keep `step`'s frame small (commit 1450077).
     #[inline(never)]
     pub(super) fn op_to_str_fmt(
         &mut self,
         spec: &crate::fmtspec::FormatSpec,
         span: Span,
     ) -> Result<(), RuntimeError> {
+        let nested = spec.dyn_width as usize + spec.dyn_precision as usize;
+        let resolved;
+        let spec = if nested > 0 {
+            let mut fs = spec.clone();
+            let mut slot = self.stack.len() - nested;
+            if fs.dyn_width {
+                fs.width = crate::fmtspec::field_from_int(self.int_val(self.stack[slot]), "width")
+                    .map_err(|m| self.err(m, span))?;
+                slot += 1;
+            }
+            if fs.dyn_precision {
+                let p = crate::fmtspec::field_from_int(self.int_val(self.stack[slot]), "precision")
+                    .map_err(|m| self.err(m, span))?;
+                fs.precision = Some(p);
+            }
+            for _ in 0..nested {
+                self.pop();
+            }
+            resolved = fs;
+            &resolved
+        } else {
+            spec
+        };
         let v = self.stack[self.stack.len() - 1]; // leave rooted; rendering may run user code
         let mut out = String::new();
         // TICKET-142 (W14-19): a newtype over `int`/`float` (through any newtype chain) formats as

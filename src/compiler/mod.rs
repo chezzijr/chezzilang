@@ -5689,7 +5689,7 @@ impl Compiler {
         for chunk in chunks {
             match chunk {
                 Chunk::Lit(s) => fc.emit(Op::ConstStr(s.clone()), span),
-                Chunk::Expr(e, spec, _fields) => {
+                Chunk::Expr(e, spec, fields) => {
                     self.kw_frag_ctx = span;
                     self.kw_frag_ord = ord;
                     // The fragment root is compiled with its OWN span, so a RUNTIME fault inside a
@@ -5700,6 +5700,11 @@ impl Compiler {
                     // `KeywordTable`. `49bd9f80` conflated the two; keeping them separate is what
                     // lets both halves be right.)
                     self.compile_expr(fc, e)?;
+                    // A nested width/precision field evaluates AFTER the value, width first (CPython
+                    // order, and `check_interp_chunks`'s); `ToStrFmt` pops them before the value.
+                    for f in fields {
+                        self.compile_expr(fc, f)?;
+                    }
                     match spec {
                         None => fc.emit(Op::ToStr, span),
                         Some(fs) => fc.emit(Op::ToStrFmt(Box::new(fs.clone())), span),

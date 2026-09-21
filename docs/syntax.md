@@ -3973,6 +3973,9 @@ print("{255:#x}")         # alternate form: radix prefix → "0xff"
 print("{1234567.0:g}")    # general format              → "1.23457e+06"
 print("{42:=10}")         # sign-aware fill              → "        42"
 print("{42: d}")          # leading-space sign           → " 42"
+w := 6
+print("|{name:<{w}}|")    # width measured at runtime    → "|chezzi|" (w=6 → "|ab    |" for "ab")
+print("{3.14159:.{2}f}")  # runtime precision            → "3.14"
 ```
 
 - **align**: `<` left, `>` right, `^` center, `=` sign-aware fill; an optional **fill** char may
@@ -3993,14 +3996,36 @@ print("{42: d}")          # leading-space sign           → " 42"
   `{42:^08}` gives `"00042000"`; `{-42:08}` gives `"-0000042"` against `{-42:>08}`'s `"00000-42"`;
   and `{42:*>08}` gives `"******42"` because an explicit fill beats the flag.
 - **width**: minimum field width. **Capped at 4096** — a larger width (e.g. `{x:>9999999999}`) is a
-  parse error, *not* a multi-gigabyte allocation.
+  parse error, *not* a multi-gigabyte allocation. The width may instead be a **nested `{expr}`
+  field** measured at runtime, as in CPython (`f"{s:<{w}}"`), Go (`%-*s`) and Rust (`{:<w$}`): with
+  `w := 6`, `"|{s:<{w}}|"` is `|ab    |`, `"|{s:>{w}}|"` is `|    ab|`, `"|{s:*^{w}}|"` is
+  `|**ab**|`, `"{42:0{w}}"` is `000042` and `"{s:<{w + 2}}"` is `ab      `. See the nested-field
+  rules below.
 - **grouping**: `,` or `_` separates every three digits of the integer part (`,` → `1,234,567`;
   `_` → `1_234_567`); `_` also groups `x`/`X`/`b`/`o` output in fours (`{0xfffff:_x}` → `f_ffff`).
   `,` is rejected with those four type chars, and both are rejected on a string. Combined with
   zero-pad, the digit count widens so the field never starts with a separator (`{1000:08,}` →
   `"0,001,000"`, nine chars for a width of eight — matching CPython).
 - **precision** `.N`: float decimals; on a **string** it **truncates** to N chars (Python parity);
-  also capped at 4096.
+  also capped at 4096. `.N` may also be a nested field: with `p := 2`, `"{3.14159:.{p}f}"` is
+  `3.14`, `"{3.14159:{w}.{p}f}"` (`w := 6`) is `  3.14` and `"{'hello':.{p}}"` is `he`.
+- **nested width/precision field** `{expr}`: legal in **exactly two slots**, the width and the
+  precision (Go's `%*.*f` and Rust's `width$`/`.prec$` also allow a runtime value only there).
+  CPython also lets a nested field stand in for the fill, align or type (`f"{s:{w}<3}"` is `ab6`)
+  because it substitutes the field's text and re-parses the spec at runtime; Chezzi checks a spec's
+  shape at `check` time, so any other `{` in a spec is `format spec: a nested field is allowed only
+  as the width or the precision`. The field must be an **`int`**: a static `str`, `float` or `bool`
+  is a compile error (`format spec: a nested width field must be an int, found str`; CPython would
+  read `{s:<{2.5}}` as width 2 precision 5, Chezzi rejects it), and a value whose type is unknown
+  until run time faults with the same wording. A field cannot carry its own spec (`{w:3}`) and
+  cannot be empty (`{}`). **Evaluation order** is the value, then the width, then the precision
+  (`"{f():<{g()}}"` runs `f` first, as CPython does), and a name read only inside a nested field is
+  still captured by a closure. The **cap moves with the value**: a nested value over 4096 faults
+  BEFORE any buffer is sized (`format spec: width exceeds maximum 4096`, `format spec: precision
+  exceeds maximum 4096`) — CPython has no cap and tries to allocate the string, so this is a
+  deliberate improvement. A **negative** value faults too (`format spec: width must not be
+  negative, got -1`; CPython raises `ValueError` as well). Both faults are recoverable
+  (`recover:`).
 - **type**: `d` int · `f`/`F` fixed float (default precision 6, NEVER scientific — `{1e16:f}` gives
   `"10000000000000000.000000"`) · `x`/`X` hex · `b` binary · `o` octal · `e`/`E` scientific
   (default precision 6, exponent always signed and zero-padded to ≥2 digits, e.g. `1.234568e+05`) ·

@@ -1,0 +1,87 @@
+# TICKET-162: a format spec's width and precision may be a nested `{expr}` field measured at runtime
+# (`{s:<{w}}`, `{x:.{p}f}`), as in CPython's `f"{s:<{w}}"`, Go's `%-*s` and Rust's `{:<width$}`.
+# Every rendered string below was judged against a RUN CPython 3.14 twin. The huge-width cases run
+# ONLY here, in Chezzi, where the value is capped at `MAX_FIELD` (4096) before any buffer is sized;
+# CPython has no cap and would try to allocate the string.
+
+fn msg_of(r: Result[str, Error]) -> str:
+    match r:
+        Ok(_): return "no fault"
+        Err(e): return e.message()
+    return ""
+
+test fn nested_width_matches_cpython():
+    s := "ab"
+    w := 6
+    assert "|{s:<{w}}|" == "|ab    |"
+    assert "|{s:>{w}}|" == "|    ab|"
+    assert "|{s:*^{w}}|" == "|**ab**|"
+    assert "{s:<{w + 2}}" == "ab      "
+    assert "{s:<{0}}" == "ab"
+    x := 3.14159
+    p := 2
+    assert "{x:.{p}f}" == "3.14"
+    assert "{x:{w}.{p}f}" == "  3.14"
+    assert "{42:0{w}}" == "000042"
+    assert "{'hello':.{p}}" == "he"
+
+test fn the_value_is_evaluated_before_its_nested_width():
+    log: List[str] = []
+    fn val() -> str:
+        log.push("val")
+        return "ab"
+    fn wid() -> int:
+        log.push("wid")
+        return 4
+    assert "{val():<{wid()}}" == "ab  "
+    assert log == ["val", "wid"]
+
+test fn width_is_evaluated_before_precision():
+    log: List[str] = []
+    fn wid() -> int:
+        log.push("wid")
+        return 8
+    fn prec() -> int:
+        log.push("prec")
+        return 1
+    assert "{2.25:{wid()}.{prec()}f}" == "     2.2"
+    assert log == ["wid", "prec"]
+
+fn padder(w: int) -> fn(str) -> str:
+    return fn(s: str) -> str: "|{s:<{w}}|"
+
+test fn a_closure_captures_a_name_read_only_in_a_nested_field():
+    assert padder(5)("ab") == "|ab   |"
+    assert padder(0)("ab") == "|ab|"
+
+test fn a_huge_runtime_width_is_a_clean_fault():
+    s := "ab"
+    big := 9999999999
+    r := recover: "{s:<{big}}"
+    assert msg_of(r) == "format spec: width exceeds maximum 4096"
+
+test fn a_huge_runtime_precision_is_a_clean_fault():
+    x := 3.14159
+    p := 5000
+    r := recover: "{x:.{p}f}"
+    assert msg_of(r) == "format spec: precision exceeds maximum 4096"
+
+test fn a_negative_runtime_width_is_a_clean_fault():
+    s := "ab"
+    w := -1
+    r := recover: "{s:<{w}}"
+    assert msg_of(r) == "format spec: width must not be negative, got -1"
+
+test fn a_negative_runtime_precision_is_a_clean_fault():
+    x := 3.14159
+    p := -2
+    r := recover: "{x:.{p}f}"
+    assert msg_of(r) == "format spec: precision must not be negative, got -2"
+
+test fn the_cap_boundary_is_inclusive():
+    s := "ab"
+    ok := 4096
+    over := 4097
+    assert "{s:<{ok}}".len() == 4096
+    r := recover: "{s:<{over}}"
+    assert msg_of(r) == "format spec: width exceeds maximum 4096"
