@@ -1,0 +1,24 @@
+# tests/chz/spec/map_items_test.chz — TICKET-160: Map.items() returns List[(K, V)] in insertion order.
+
+test fn items_round_trips_through_the_map_ctor():
+    m := {"a": 1, "b": 2}
+    assert Map(m.items()) == m, "Map(m.items()) round-trips"
+    assert m.items() == [("a", 1), ("b", 2)], "items() is insertion-ordered pairs"
+
+test fn items_follows_keys_order_after_remove_and_reinsert():
+    m := {"a": 1, "b": 2, "c": 3}
+    _ := m.remove("b")
+    m["b"] = 4
+    assert m.items() == [("a", 1), ("c", 3), ("b", 4)], "CPython: [('a', 1), ('c', 3), ('b', 4)]"
+    assert m.keys() == ["a", "c", "b"]
+
+test fn items_of_an_empty_map_is_empty():
+    m: Map[str, int] = {}
+    assert m.items().len() == 0
+
+test fn items_returns_a_fresh_list():
+    m := {"a": 1}
+    ps := m.items()
+    ps.push(("z", 9))
+    assert m.len() == 1
+    assert m.items() == [("a", 1)]

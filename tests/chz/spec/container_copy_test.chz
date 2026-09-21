@@ -1,0 +1,64 @@
+# tests/chz/spec/container_copy_test.chz — TICKET-160: List/Set/Map each have a shallow copy().
+
+struct P:
+    x: int
+
+    fn hash(self) -> int:
+        return self.x
+
+test fn list_copy_is_independent_at_the_top_level():
+    xs := [1, 2, 3]
+    ys := xs.copy()
+    ys.push(4)
+    assert xs == [1, 2, 3], "mutating the copy leaves the original alone"
+    assert ys == [1, 2, 3, 4]
+
+test fn set_copy_is_independent_at_the_top_level():
+    s := {1, 2}
+    t := s.copy()
+    t.add(3)
+    assert s == {1, 2}
+    assert t == {1, 2, 3}
+
+test fn map_copy_is_independent_at_the_top_level():
+    m := {"a": 1}
+    n := m.copy()
+    n["b"] = 2
+    assert m == {"a": 1}
+    assert n == {"a": 1, "b": 2}
+
+test fn list_copy_is_shallow():
+    inner := [1]
+    xs := [inner]
+    ys := xs.copy()
+    ys[0].push(9)
+    assert xs[0] == [1, 9], "CPython: L2[0] is L[0]"
+
+test fn map_copy_is_shallow_in_its_values():
+    m := {"a": [1]}
+    n := m.copy()
+    n["a"].push(2)
+    assert m["a"] == [1, 2]
+
+test fn map_copy_snapshots_struct_keys():
+    m: Map[P, str] = {}
+    m[P(1)] = "a"
+    n := m.copy()
+    for k in n:
+        k.x = 5
+    assert m.has(P(1)), "a key reached through the copy must not alias the original's key"
+
+test fn set_copy_snapshots_struct_elements():
+    s := {P(1)}
+    t := s.copy()
+    for e in t:
+        e.x = 5
+    assert s.has(P(1))
+
+test fn copy_of_empty_containers_is_empty():
+    xs: List[int] = []
+    m: Map[str, int] = {}
+    s: Set[int] = Set()
+    assert xs.copy().len() == 0
+    assert m.copy().len() == 0
+    assert s.copy().len() == 0

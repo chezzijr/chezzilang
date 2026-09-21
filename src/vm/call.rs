@@ -3538,6 +3538,15 @@ impl Vm {
                         out.reverse();
                         Ok(Value::obj(self.heap.alloc(Obj::List(out))))
                     }
+                    "copy" => {
+                        // TICKET-160 — a NEW list holding the SAME element handles: shallow, Python list.copy().
+                        self.arity_err("copy", args, 0, span)?;
+                        let Obj::List(items) = self.heap.get(h) else {
+                            unreachable!()
+                        };
+                        let out = items.clone();
+                        Ok(Value::obj(self.heap.alloc(Obj::List(out))))
+                    }
                     "insert" => {
                         // Python-clamp: i>len appends, negatives are len-relative and clamp to 0. Never faults.
                         self.arity_err("insert", args, 2, span)?;
@@ -3723,6 +3732,32 @@ impl Vm {
                     let vals: Vec<Value> = m.entries.iter().map(|(_, _, v)| *v).collect();
                     Ok(Value::obj(self.heap.alloc(Obj::List(vals))))
                 }
+                "items" => {
+                    // TICKET-160 — one (k, v) tuple per entry in m.entries order, the SAME order keys() reads,
+                    // so Map(m.items()) == m. Heap::alloc never collects, so the tuples need no rooting
+                    // before the list alloc.
+                    self.arity_err("items", args, 0, span)?;
+                    let pairs: Vec<(Value, Value)> =
+                        m.entries.iter().map(|(_, k, v)| (*k, *v)).collect();
+                    let out: Vec<Value> = pairs
+                        .into_iter()
+                        .map(|(k, v)| Value::obj(self.heap.alloc(Obj::Tuple(vec![k, v]))))
+                        .collect();
+                    Ok(Value::obj(self.heap.alloc(Obj::List(out))))
+                }
+                "copy" => {
+                    // TICKET-160 — shallow in the VALUES (Python dict.copy()); each struct/enum/newtype KEY is
+                    // snapshotted exactly as merge() does (Go value-key model), so a key reached through the
+                    // copy never aliases the original's. snapshot_key is pure alloc: no rooting.
+                    self.arity_err("copy", args, 0, span)?;
+                    let mine = m.entries.clone();
+                    let mut out = MapData::default();
+                    for (hk, key, val) in mine {
+                        let key = self.snapshot_key(key);
+                        out.push(hk, key, val);
+                    }
+                    Ok(Value::obj(self.heap.alloc(Obj::Map(out))))
+                }
                 "remove" => {
                     self.arity_err("remove", args, 1, span)?;
                     let key = args[0];
@@ -3902,6 +3937,17 @@ impl Vm {
                         }
                         Ok(out)
                     })?;
+                    Ok(Value::obj(self.heap.alloc(Obj::Set(out))))
+                }
+                "copy" => {
+                    // TICKET-160 — insertion order kept; each struct/enum/newtype element snapshotted as Set.add does.
+                    self.arity_err("copy", args, 0, span)?;
+                    let mine = s.entries.clone();
+                    let mut out = SetData::default();
+                    for (he, e) in mine {
+                        let e = self.snapshot_key(e);
+                        out.push(he, e);
+                    }
                     Ok(Value::obj(self.heap.alloc(Obj::Set(out))))
                 }
                 _ => Err(self.err(format!("type set has no method '{method}'"), span)),
