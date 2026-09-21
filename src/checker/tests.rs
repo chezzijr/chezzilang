@@ -3526,7 +3526,7 @@ fn non_hashable_map_key_reports_exactly_once() {
 
 #[test]
 fn non_hashable_set_element_reports_exactly_once() {
-    let errs = check_src("s: Set[(int, int)] = Set()\n");
+    let errs = check_src("s: Set[(int, float)] = Set()\n");
     let matching: Vec<_> = errs
         .iter()
         .filter(|e| {
@@ -3599,7 +3599,7 @@ fn non_hashable_annotation_in_a_re_walked_body_reports_exactly_once() {
 fn annotation_and_ctor_each_report_their_own_hashable_error() {
     // Two distinct occurrences in one statement (the annotation and the constructor's own type
     // argument) must both survive; a fix that dedupes by message or span must not swallow either.
-    let errs = check_src("s: Set[(int, int)] = Set[(int, int)]()\n");
+    let errs = check_src("s: Set[(int, float)] = Set[(int, float)]()\n");
     let cols: Vec<u32> = errs
         .iter()
         .filter(|e| {
@@ -3608,7 +3608,7 @@ fn annotation_and_ctor_each_report_their_own_hashable_error() {
         })
         .map(|e| e.span.col)
         .collect();
-    assert_eq!(cols, vec![1u32, 22]);
+    assert_eq!(cols, vec![1u32, 24]);
 }
 
 // ----- Hashable protocol (M10-G2: bound; M10 map-model: wired to map/set keys) -----
@@ -3645,6 +3645,63 @@ fn keyed[T: Hashable](v: T) -> T:
 x := keyed(Bare(1))
 ";
     rejects(src, "does not satisfy Hashable");
+}
+
+#[test]
+fn tuple_key_rejection_names_the_list_element() {
+    rejects(
+        "m := {(1, [2]): \"a\"}\n",
+        "element List[int] is not Hashable",
+    );
+}
+
+#[test]
+fn tuple_key_rejection_names_a_nested_element() {
+    rejects(
+        "m := {((1, [2]), 3): \"a\"}\n",
+        "element List[int] is not Hashable",
+    );
+}
+
+#[test]
+fn tuple_key_rejection_names_a_set_element() {
+    rejects(
+        "m := {(1, Set([2])): \"a\"}\n",
+        "element Set[int] is not Hashable",
+    );
+}
+
+#[test]
+fn tuple_key_rejection_names_a_no_hash_struct() {
+    rejects(
+        "struct P:\n    x: int\nm := {(1, P(1)): \"a\"}\n",
+        "element P is not Hashable",
+    );
+}
+
+#[test]
+fn tuple_key_rejection_names_a_float_element() {
+    rejects("m := {(1, 0.0): \"a\"}\n", "element float is not Hashable");
+}
+
+#[test]
+fn tuple_key_hashable_bound_rejects_an_unhashable_element() {
+    rejects(
+        "fn f[T: Hashable](x: T) -> int:\n    return x.hash()\nprint(f((1, [2])))\n",
+        "element List[int] is not Hashable",
+    );
+}
+
+#[test]
+fn tuple_key_of_hashable_elements_checks_ok() {
+    ok("m := {(1, 2): \"a\"}\n");
+    ok("m := {(\"a\", true): 1}\n");
+    ok("m := {((1, 2), 3): \"a\"}\n");
+    ok("s: Set[(int, str)] = Set()\n");
+    ok("s := Set([(1, 2)])\n");
+    ok("m := {(i, i): i for i in range(3)}\n");
+    ok("struct Z:\n    pass\nm := {(1, Z()): \"a\"}\n");
+    ok("fn f[T: Hashable](x: T) -> int:\n    return x.hash()\nprint(f((1, 2)))\n");
 }
 
 #[test]

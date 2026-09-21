@@ -1083,7 +1083,7 @@ fn float_literal_end_col_spans_the_whole_literal() {
 
 #[test]
 fn a_non_hashable_set_annotation_reports_one_error() {
-    let (stdout, stderr) = check_source("s: Set[(int,int)] = {(1,2)}\n", &["--errors=json"]);
+    let (stdout, stderr) = check_source("s: Set[(int,float)] = {(1,2.5)}\n", &["--errors=json"]);
     assert_eq!(
         error_count(&stdout),
         1,
@@ -1097,8 +1097,10 @@ fn a_non_hashable_set_annotation_reports_one_error() {
 
 #[test]
 fn a_non_hashable_map_annotation_reports_one_error() {
-    let (stdout, stderr) =
-        check_source("m: Map[(int,int), int] = {(1,2): 3}\n", &["--errors=json"]);
+    let (stdout, stderr) = check_source(
+        "m: Map[(int,float), int] = {(1,2.5): 3}\n",
+        &["--errors=json"],
+    );
     assert_eq!(
         error_count(&stdout),
         1,
@@ -1130,7 +1132,7 @@ fn a_hashable_annotation_still_reports_a_bad_element() {
 #[test]
 fn a_later_unannotated_literal_of_the_same_type_still_reports() {
     let (stdout, stderr) = check_source(
-        "s: Set[(int,int)] = {(1,2)}\nt := {(3,4)}\n",
+        "s: Set[(int,float)] = {(1,2.5)}\nt := {(3,4.5)}\n",
         &["--errors=json"],
     );
     assert_eq!(error_count(&stdout), 2, "stdout={stdout} stderr={stderr}");

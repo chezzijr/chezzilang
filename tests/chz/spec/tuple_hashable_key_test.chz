@@ -1,5 +1,19 @@
 # tests/chz/spec/tuple_hashable_key_test.chz — a tuple is Hashable iff every element is (TICKET-161).
 
+struct P:
+    x: int
+    fn hash(self) -> int:
+        return self.x
+
+fn total(xs: Iterable[(int, int)]) -> int:
+    t := 0
+    for a, b in xs:
+        t += a * 10 + b
+    return t
+
+fn h[T: Hashable](x: T) -> int:
+    return x.hash()
+
 test fn tuple_is_a_map_key():
     m := {(1, 2): "a"}
     assert m[(1, 2)] == "a"
@@ -7,3 +21,35 @@ test fn tuple_is_a_map_key():
 test fn tuple_is_a_set_element():
     s := {(1, "x")}
     assert s.has((1, "x"))
+
+test fn tuple_of_a_struct_with_hash_is_a_key():
+    m := {(1, P(1)): "a"}
+    assert m[(1, P(1))] == "a"
+
+test fn nested_tuple_is_a_key():
+    m := {((1, 2), 3): "a"}
+    assert m[((1, 2), 3)] == "a"
+
+test fn str_bool_tuple_is_a_key():
+    m := {("a", true): 1}
+    assert m[("a", true)] == 1
+
+test fn equal_tuples_dedupe_in_a_set():
+    assert Set([(1, 2), (1, 2), (2, 1)]).len() == 2
+
+test fn a_stored_tuple_key_does_not_alias_its_struct():
+    p := P(1)
+    m := {(1, p): "a"}
+    p.x = 5
+    assert m[(1, P(1))] == "a"
+
+test fn a_map_read_as_an_iterable_of_pairs_destructures_its_keys():
+    assert total({(1, 2): "x"}) == 12
+
+test fn a_map_with_tuple_keys_binds_key_and_value():
+    for k, v in {(1, 2): "x"}:
+        assert k == (1, 2)
+        assert v == "x"
+
+test fn hash_through_a_bound_agrees_for_equal_tuples():
+    assert h((1, "x")) == h((1, "x"))
