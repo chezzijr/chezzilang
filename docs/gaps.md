@@ -74,16 +74,14 @@ back and strike them here; (c), (d) and (g) closed under TICKET-158 on 2026-09-2
 
 ---
 
-## Deferred tickets — 6 open, in `.project/tickets-deferred/`
+## Deferred tickets — 3 open, in `.project/tickets-deferred/`
 
-Filed, triaged, parked. All six re-verified 2026-09-20 on the release binary.
+Filed, triaged, parked. Closed 2026-09-21: **082** (tuple Map key, TICKET-161), **084** (TICKET-160 — the need is met by `m.copy()` and `Map(m.items())`; `Map(m)` itself stays a type error by decision, because a `Map` is `Iterable[K]` like CPython's dict and Go's one-variable `range`), and **087** (sub-second wall clock, TICKET-163 — `time.now_ms()`, `DateTime.milli`).
 
 | ticket | what | measured |
 |---|---|---|
 | **083** | the nested-field half LANDED in TICKET-162 (`"{s:<{w}}"` and `"{x:.{p}f}"` render at runtime, capped at 4096); only the `pad_right` spelling remains | `s.pad_right(…)` → `has no method 'pad_right'` |
-| **084** | `Map(m)` fails where `List(xs)` and `Set(s)` succeed, and no method spelling exists | `List(xs)` → `[1, 2]`, `Set(xs)` → `{1, 2}`, `Map(m)` → `Map() expects an iterable of (key, value) 2-tuples, found element str` |
 | **086** | no `findall`-shaped API returning `List[str]`, so the obvious tokenizer is several times CPython while `regex.split` is the workaround | `std/regex.chz` still exposes only `find_all(pat, s) -> Result[List[Match]]`. 2.4 MB / 400 000 tokens: `find_all` + a `.text` loop **740 ms**, `regex.split` **136 ms**, CPython `re.findall` **102 ms** |
-| **087** | `std.time` is whole epoch seconds or a process-relative monotonic float; `std.datetime` is second-resolution throughout, so `12:34:56.789` is unreachable | `time.now()` → `1789915422` |
 | **090** | Go's block-scoped `:=` was adopted; Go's `declared and not used`, which is what makes that model survivable, was not | the `total := total + x` typo inside a `for` prints `0`, rc=0, `--errors=json` → `[]` |
 
 `.project/tickets-deferred/` also holds three `*.merged-into-*` stubs (078, 080, 088) — not work items.

@@ -213,8 +213,8 @@ in-progress alongside it.
 > the same line number. **4 open rows** — W8-19, W11-13, W12-5, W13-28
 > (W11-15 closed 2026-09-21, TICKET-154 — a DAG alias now crosses the airlock as ONE object at an
 > `RwShared` store; W12-5's last shape (G6) stays listed as a RECORD that D2 (DEC-137) governs it,
-> not as a bug) — plus **5 deferred tickets** in `.project/tickets-deferred/` (082, 083, 084, 086,
-> 090). The pipeline queue is EMPTY: 140 done, 3 rejected, 0 in flight. Wave 14's three
+> not as a bug) — plus **3 deferred tickets** in `.project/tickets-deferred/` (083 — only its
+> `pad_right` half is left, 086, 090). 082, 084 and 087 closed 2026-09-21 under TICKET-161, 160, 163. The pipeline queue is EMPTY: 140 done, 3 rejected, 0 in flight. Wave 14's three
 > redesigns all landed — **D1** a deadlock is fatal (TICKET-135), **D2** a received closure reads the
 > running task's module globals (TICKET-137), **D3** an int never widens into a float slot
 > (TICKET-138). **W8-17 is CLOSED**: (e) the `?` unknown-type rendering (TICKET-145), (f) the
