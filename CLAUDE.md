@@ -210,7 +210,7 @@ in-progress alongside it.
 > on the release binary, with the archive line for its full history.** Every closed row and all 30
 > bug-hunt session logs (W1..W14) moved verbatim to **`docs/gaps-archive.md`**, so any
 > `docs/gaps.md:NNNN` citation in a closed ticket or in `PROGRESS.md` resolves against the archive at
-> the same line number. **5 open rows** — W8-19, W11-13, W12-5, W13-27, W13-28
+> the same line number. **4 open rows** — W8-19, W11-13, W12-5, W13-28
 > (W11-15 closed 2026-09-21, TICKET-154 — a DAG alias now crosses the airlock as ONE object at an
 > `RwShared` store; W12-5's last shape (G6) stays listed as a RECORD that D2 (DEC-137) governs it,
 > not as a bug) — plus **6 deferred tickets** in `.project/tickets-deferred/` (082, 083, 084, 086,

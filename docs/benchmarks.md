@@ -2504,6 +2504,53 @@ exponential; an ANNOTATED chain never was. Probe p1 (TICKET-109 `## Decisions`) 
 base, and a `check` over 396 files (`examples/`, `tests/chz/`, `std/`, `benches/`) has 0 differing
 outputs.
 
+## TICKET-159 — W13-27: a nursery in a spawned task farms runners while the outer body is blocked (2026-09-21)
+
+**Cause.** A nursery entered inside a spawned task registers its scope on that task's own sched
+(TICKET-131). While the ENCLOSING nursery's body was still open, `farm_outermost_eager_helpers` had not
+run (it runs after `close_body`), so the outer sched's `chezzi-eager` drainer was the inner nursery's
+only runner: 8 `burn` tasks ran one at a time.
+
+**Fix.** `Vm::farm_blocked_body_helpers` (`src/vm/sched.rs`) farms `worker_count() - 1` RAW
+`chezzi-eager-helper` threads (wids `2..n+1`, empty at `--threads=1`) from the `NestedDrainerSlot`
+budget the moment the outermost body is blocked with at least two tasks outstanding. It fires at
+`register_task` (a task injected after the block) and at `blocked_bodies_guard_with` (a flat body that
+spawned before it blocked). The join's inline joiner and pool farm stand down while those helpers live,
+so the runner count stays `worker_count()`. Not the pool: DEC-103 bullet 19. `EnterNursery`'s gate
+(`self.mn.is_none()`) is untouched, so W13-6 stays fixed.
+
+**Measured** (release binaries, base = `73c733c8`, branch built from the same tree, 6 interleaved runs
+per cell, wall ms sorted, `uptime` load average 2.43-2.71; `branch mismatches=0` — every run's stdout and
+exit code is identical between base and branch at every count). Programs: `fan_open` (8 x `burn(300000)`
+in a nursery inside a spawned task, main blocks on `recv`), `fan_closed` (same fan-out, outer body
+closed), `fan_flat` (8 `burn` tasks spawned by main's body, then `recv`).
+
+| shape | `CHEZZI_THREADS` | base | branch |
+|---|---|---|---|
+| `fan_open` | 1 | 369-488 | 345-438 |
+| `fan_open` | 2 | 371-418 | 206-236 |
+| `fan_open` | 8 | 348-400 | 68-79 |
+| `fan_open` | default (28) | 341-386 | 97-114 |
+| `fan_closed` | 1 | 364-446 | 364-451 |
+| `fan_closed` | 2 | 199-231 | 192-221 |
+| `fan_closed` | 8 | 194-224 | 188-219 |
+| `fan_closed` | default (28) | 189-224 | 191-220 |
+| `fan_flat` | 1 | 350-471 | 336-363 |
+| `fan_flat` | 2 | 336-433 | 189-212 |
+| `fan_flat` | 8 | 338-380 | 69-74 |
+| `fan_flat` | default (28) | 344-363 | 81-103 |
+
+`fan_open` and `fan_flat` at T=2 land in `fan_closed`'s band (two runners). At T>=8 they beat it: the
+closed shape farms nothing at any count (only one task is outstanding at `close_body`, so
+`farm_outermost_eager_helpers` returns on its `< 2` guard), so it stays drainer plus inline joiner.
+`--threads=1` is unchanged in every shape: the helper range is empty there, W8-8's one-runner rule.
+
+**Test.** `tests/chz/spec/nested_nursery_open_outer_body_test.chz`, 8 x `burn(1500000)`, one ceiling
+of 1350 ms. Base at T=2: `fan_open took 1680.6 ms`, `fan_flat took 1674.9 ms`. Branch, five runs under a
+concurrent `cargo test --lib` (load average 3.49): closed shape 884-974 ms, open shape 940-981 ms, both
+under the ceiling. The test returns early on a build where one solo `burn(1500000)` takes 1000 ms or
+more: the debug binary `cargo test` runs it with takes 1.8-2.1 s per burn and 7.9 s for the closed shape,
+so no honest ceiling exists there.
 ## TICKET-154 — an RwShared store keeps a DAG alias as one object (2026-09-21)
 
 The three `RwShared` stores serialize through `to_wire_crossable` now, so a DAG alias stored in an
