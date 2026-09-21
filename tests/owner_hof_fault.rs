@@ -98,7 +98,17 @@ fn child_fault_cuts_short_owner_fold() {
 
 #[test]
 fn an_owner_defer_running_a_map_is_not_truncated() {
+    // The defer is registered in a callee of the owner (`work`), so it runs while the owner is
+    // still inside the nursery — `eager_scheds` is non-empty and the child's fault is recorded.
+    // `defer report(xs)` passes only `xs`: a `defer print(..{xs.map(..)}..)` evaluates its `map`
+    // eagerly at the `defer` statement, outside `deferring`, and would never reach the guard.
     let src = [
+        "fn report(xs: List[int]):",
+        "    print(\"defer map len={xs.map(fn(x) -> int: x * 2).len()}\")",
+        "fn work(xs: List[int]):",
+        "    defer report(xs)",
+        "    ys := xs.map(fn(x) -> int: x * 2 + 1)",
+        "    print(\"owner finished map len={ys.len()}\")",
         "fn main():",
         "    xs := [0]",
         "    i := 0",
@@ -106,11 +116,9 @@ fn an_owner_defer_running_a_map_is_not_truncated() {
         "        xs.push(i)",
         "        i += 1",
         "    parallel:",
-        "        defer print(\"defer map len={xs.map(fn(x) -> int: x * 2).len()}\")",
         "        spawn:",
         "            panic(\"child boom\")",
-        "        ys := xs.map(fn(x) -> int: x * 2 + 1)",
-        "        print(\"owner finished map len={ys.len()}\")",
+        "        work(xs)",
         "main()",
         "",
     ];
