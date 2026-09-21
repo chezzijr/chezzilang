@@ -20,9 +20,9 @@ use std::fmt;
 
 pub use ty::Ty;
 pub use ty::{
-    CarrierKey, CarrierMode, CarrierTable, FnLabels, KeywordKey, KeywordTable, ProtoEqTable,
-    RetCoerce, RetCoerceTable, SumSeed, SumSeedTable, WitnessCallee, WitnessKey, WitnessSrc,
-    WitnessTable,
+    CarrierKey, CarrierMode, CarrierTable, FnLabels, ForBind, ForBindTable, KeywordKey,
+    KeywordTable, ProtoEqTable, RetCoerce, RetCoerceTable, SumSeed, SumSeedTable, WitnessCallee,
+    WitnessKey, WitnessSrc, WitnessTable,
 };
 use ty::{compatible, param_invariant};
 
@@ -1092,6 +1092,7 @@ pub fn resolve_call_tables(
     SumSeedTable,
     RetCoerceTable,
     TableConflicts,
+    ForBindTable,
 ) {
     resolve_call_tables_with(graph, true)
 }
@@ -1109,6 +1110,7 @@ fn resolve_call_tables_with(
     SumSeedTable,
     RetCoerceTable,
     TableConflicts,
+    ForBindTable,
 ) {
     crate::on_frontend_stack_scoped(move || {
         let mut c = Checker::new();
@@ -1123,6 +1125,7 @@ fn resolve_call_tables_with(
             std::mem::take(&mut c.sum_seeds),
             std::mem::take(&mut c.ret_coerce),
             std::mem::take(&mut c.table_conflicts),
+            std::mem::take(&mut c.for_binds),
         )
     })
 }
@@ -1147,6 +1150,7 @@ pub fn resolve_call_tables_standalone(
     SumSeedTable,
     RetCoerceTable,
     TableConflicts,
+    ForBindTable,
 ) {
     resolve_call_tables_with(&standalone_graph(stmts), true)
 }
@@ -1164,6 +1168,7 @@ pub fn resolve_call_tables_standalone_no_memo(
     SumSeedTable,
     RetCoerceTable,
     TableConflicts,
+    ForBindTable,
 ) {
     resolve_call_tables_with(&standalone_graph(stmts), false)
 }
@@ -2262,6 +2267,10 @@ struct Checker {
     /// compiler (which cannot re-derive it: the decision is whether the returned expression is
     /// already a carrier). See [`RetCoerceTable`].
     ret_coerce: RetCoerceTable,
+    /// TICKET-161 (DEC-113) — the N-name `for` loops whose iterand is statically `Ty::Param` or
+    /// `Ty::Protocol` and so destructure each element, keyed by [`ret_coerce_key`] on the iterand's
+    /// span and consumed verbatim by the compiler. See [`ForBindTable`].
+    for_binds: ForBindTable,
     /// W7-49 — side-table keys that were asked to hold two DIFFERENT decisions at once. Filled by
     /// [`record_call_table_entry`] (never by ordinary type errors) and returned alongside the three
     /// tables, because this pass DISCARDS its type errors — `self.error` would be swallowed here.

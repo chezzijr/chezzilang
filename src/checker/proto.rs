@@ -1430,6 +1430,25 @@ impl Checker {
         );
     }
 
+    /// TICKET-161 (DEC-113) — record that the N-name `for` over the iterand at `span` destructures
+    /// each element (see [`crate::checker::ForBindTable`]), keyed exactly like [`Self::record_ret_coerce`].
+    pub(super) fn record_for_bind(&mut self, span: Span, bind: crate::checker::ForBind) {
+        let key = crate::checker::ret_coerce_key(
+            self.graph_module_idx,
+            self.kw_frag_ctx,
+            self.kw_frag_ord,
+            span,
+        );
+        crate::checker::record_call_table_entry(
+            &mut self.for_binds,
+            &mut self.table_conflicts,
+            key,
+            bind,
+            "for-binding",
+            span,
+        );
+    }
+
     pub(super) fn satisfies(&self, ty: &Ty, protocol: &str) -> Result<(), String> {
         self.satisfies_args(ty, protocol, &[])
     }

@@ -5108,6 +5108,12 @@ impl Checker {
             return vec![(vars[0].clone(), Ty::Int)];
         }
         let it = self.infer(iter);
+        // DEC-113: a runtime Map can only hide behind a type PARAMETER or a protocol existential, and
+        // a tuple is now a legal Map key, so the compiler's runtime `IsMap` test would bind such a
+        // Map's (key, value) where this checker destructures the element. Make the choice static.
+        if vars.len() > 1 && matches!(it, Ty::Param(_) | Ty::Protocol(..)) {
+            self.record_for_bind(iter.span, crate::checker::ForBind::Destructure);
+        }
         match &it {
             Ty::Map(k, v) => match vars.len() {
                 1 => vec![(vars[0].clone(), (**k).clone())],

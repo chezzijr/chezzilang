@@ -28,6 +28,8 @@ pub(super) struct DiagMark {
     /// recording happens on the real (non-speculative) `check_stmt` walk, once every callee sig is
     /// settled.
     ret_coerce: crate::checker::RetCoerceTable,
+    /// TICKET-161 — same reason as `ret_coerce`: decided state, not a diagnostic.
+    for_binds: crate::checker::ForBindTable,
     /// TICKET-142 (W14-33) — the constant-overflow dedupe set is SPECULATIVE STATE like
     /// `spawn_stale`: a speculative pass (return inference of an un-annotated fn, a generic-arg
     /// prepass) records a span, then the rollback discards its error. A rollback that kept the span
@@ -119,6 +121,7 @@ impl Checker {
             proto_eq_calls: crate::checker::ProtoEqTable::new(),
             sum_seeds: crate::checker::SumSeedTable::new(),
             ret_coerce: crate::checker::RetCoerceTable::new(),
+            for_binds: crate::checker::ForBindTable::new(),
             table_conflicts: Vec::new(),
             next_opt_tmp: 0,
             witness_scope: Vec::new(),
@@ -1344,6 +1347,7 @@ impl Checker {
             // `HashMap` clone allocates nothing.
             spawn_stale: self.spawn_stale.clone(),
             ret_coerce: self.ret_coerce.clone(),
+            for_binds: self.for_binds.clone(),
             const_overflow_seen: self.const_overflow_seen.clone(),
             fn_reads: self.fn_reads.clone(),
             empty_coll_sites: self.empty_coll_sites.clone(),
@@ -1365,6 +1369,7 @@ impl Checker {
         self.warnings.truncate(m.warnings);
         self.spawn_stale = m.spawn_stale;
         self.ret_coerce = m.ret_coerce;
+        self.for_binds = m.for_binds;
         self.const_overflow_seen = m.const_overflow_seen;
         self.fn_reads = m.fn_reads;
         self.empty_coll_sites = m.empty_coll_sites;

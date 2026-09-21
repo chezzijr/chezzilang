@@ -107,8 +107,9 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     // witness params and what fills each witness at each call site. The compiler CONSUMES it — it
     // never re-derives which protocols carry a static requirement (that resolves through
     // imports/aliases/embeds, which is checker work).
-    let (kw, wt, ct, pe, ns, rc, conflicts) = crate::checker::resolve_call_tables(graph);
+    let (kw, wt, ct, pe, ns, rc, conflicts, fb) = crate::checker::resolve_call_tables(graph);
     reject_table_conflicts(conflicts)?;
+    c.for_binds = fb;
     c.keyword_calls = kw;
     c.witnesses = wt;
     c.carriers = ct;
@@ -182,9 +183,10 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     // SINGLE-RESOLVER: extern C types come from the checker's standalone pass — the SAME resolver the
     // multi-file CLI uses (no second backend resolver exists). The backend reads this table verbatim.
     c.extern_sigs = crate::checker::resolve_extern_signatures_standalone(&module.stmts);
-    let (kw, wt, ct, pe, ns, rc, conflicts) =
+    let (kw, wt, ct, pe, ns, rc, conflicts, fb) =
         crate::checker::resolve_call_tables_standalone(&module.stmts);
     reject_table_conflicts(conflicts)?;
+    c.for_binds = fb;
     c.keyword_calls = kw;
     c.witnesses = wt;
     c.carriers = ct;
@@ -326,6 +328,10 @@ struct Compiler {
     /// whether the returned expression is already a carrier. A MISS means `NoWrap` — the pre-fix
     /// lowering. See [`crate::checker::RetCoerceTable`].
     ret_coerce: crate::checker::RetCoerceTable,
+    /// TICKET-161 (DEC-113) — the N-name `for` loops the checker says destructure (iterand statically
+    /// `Ty::Param`/`Ty::Protocol`), consumed verbatim; a MISS keeps the runtime `IsMap` test. See
+    /// [`crate::checker::ForBindTable`].
+    for_binds: crate::checker::ForBindTable,
     /// TICKET-054 review fix — which call arguments must widen int→float AT THE CALL SITE (a
     /// W7-43 — counter for the fresh `__optN` temp names the Option lowering mints, mirroring the
     /// checker's own. Frame-local and `__`-prefixed (unwritable by user code), so uniqueness within
@@ -619,6 +625,7 @@ impl Compiler {
             proto_eq_calls: crate::checker::ProtoEqTable::new(),
             sum_seeds: crate::checker::SumSeedTable::new(),
             ret_coerce: crate::checker::RetCoerceTable::new(),
+            for_binds: crate::checker::ForBindTable::new(),
             next_opt_tmp: 0,
             witness_locals: Vec::new(),
             pending_witnesses: Vec::new(),
@@ -2528,14 +2535,16 @@ impl Compiler {
             // `IsMap`: its two names bind (key, value) from a keys + values snapshot indexed in
             // lockstep, so a body that mutates the map cannot perturb the bindings. The checker admits
             // N>1 names only over a `Map` or an element that is statically a tuple of that arity. A
-            // tuple is not `Hashable`, so no map key is ever a tuple and the `IsMap` split never sees a
-            // tuple-yielding map (TICKET-113).
+            // tuple IS `Hashable` (TICKET-161), so a Map with tuple keys can reach an `Iterable[(A, B)]`
+            // slot and the runtime `IsMap` test would bind (key, value) there: the checker records
+            // `ForBind::Destructure` for an iterand statically typed `Ty::Param`/`Ty::Protocol`, and
+            // that loop skips the test (DEC-113).
             let multi = vars.len() > 1;
             self.compile_expr(fc, iter)?;
             let iter_slot = fc.add_hidden();
             fc.emit_hidden_set(iter_slot, span);
             // Map-ness is read off the iterand as written (`IterableToCursor` passes a map through).
-            let map_mode_slot = if multi {
+            let map_mode_slot = if multi && !self.for_destructures(iter.span) {
                 fc.emit_hidden_get(iter_slot, span);
                 fc.emit(Op::IsMap, span);
                 let slot = fc.add_hidden(); // true ⇒ map (key, value) path
@@ -4468,6 +4477,18 @@ impl Compiler {
             }
             crate::checker::SumSeed::Float => fc.emit(Op::ConstFloat(0.0), span),
         }
+    }
+
+    /// TICKET-161 (DEC-113) — does the checker say the N-name `for` over the iterand at `span`
+    /// destructures each element (so the runtime `IsMap` test must be skipped)? A miss keeps it.
+    fn for_destructures(&self, span: Span) -> bool {
+        let key = crate::checker::ret_coerce_key(
+            self.current_module_idx,
+            self.kw_frag_ctx,
+            self.kw_frag_ord,
+            span,
+        );
+        self.for_binds.contains_key(&key)
     }
 
     /// W8-21 — emit the `Op::NewEnum` wrap a declared `T?`/`T!E` return sink's success-coercion
