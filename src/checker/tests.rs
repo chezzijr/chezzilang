@@ -584,6 +584,21 @@ fn a_granular_read_of_a_granular_task_write_declines() {
     );
 }
 
+/// TICKET-165 (W11-13) — the gate is keyed on the READ SHAPE (a bare whole-binding interpolation)
+/// rather than on "a captured binding written inside `spawn:` is read after the join". Measured on
+/// the release binary at 00af4e3b: a task-side `s.v = 2` read back via `print(s.v)` prints `1` (the
+/// pre-spawn value, genuinely stale — CPython's `threading` equivalent prints `2`), the same as the
+/// `print("{s}")` shape that already warns. `a_granular_read_of_a_granular_task_write_declines`
+/// above is about a DIFFERENT field/key than the one written — this is the SAME field, where the
+/// checker can in fact tell, and must not decline.
+#[test]
+fn a_granular_read_of_the_same_field_a_granular_task_write_wrote_warns() {
+    warns(
+        "struct S:\n    v: int\nfn f():\n    s := S(1)\n    parallel:\n        spawn:\n            s.v = 2\n    print(s.v)\nf()\n",
+        "'s' is read here",
+    );
+}
+
 /// At MODULE TOP LEVEL the binding is scope 0, and this is exactly where the sibling W8-2 rule stays
 /// silent because the runtime backstops it. There is NO backstop here — measured, the program prints
 /// 0 and exits 0 with nothing reported — so the rule uses `is_captured` (which includes scope 0)
