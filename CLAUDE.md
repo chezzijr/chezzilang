@@ -217,8 +217,11 @@ in-progress alongside it.
 > on the release binary, with the archive line for its full history.** Every closed row and all 30
 > bug-hunt session logs (W1..W14) moved verbatim to **`docs/gaps-archive.md`**, so any
 > `docs/gaps.md:NNNN` citation in a closed ticket or in `PROGRESS.md` resolves against the archive at
-> the same line number. **3 open rows** — W8-19, W12-5 (revisit D2 later), W13-28
-> (W15-1 closed 2026-09-22, TICKET-166 — `close()` on a `Socket`/`Listener` now wakes a parked
+> the same line number. **4 open rows** — W8-19, W12-5 (revisit D2 later), W13-28, W15-2
+> (found 2026-09-22, TICKET-167 — at `CHEZZI_THREADS=1` a top-level `parallel:` body and its
+> `chezzi-eager` drainer both run as CPU runners, so the seeded scheduler's T=1 replay holds only
+> at a measured rate, not byte-for-byte; W15-1 closed 2026-09-22, TICKET-166 — `close()` on a
+> `Socket`/`Listener` now wakes a parked
 > `accept`/`read`/`write` with an `Err` instead of hanging or crashing the netpoller; W11-15 closed 2026-09-21, TICKET-154 — a DAG alias now crosses the airlock as ONE object at an
 > `RwShared` store; W12-5's last shape (G6) stays listed as a RECORD that D2 (DEC-137) governs it,
 > not as a bug) — and **0 deferred tickets** in `.project/tickets-deferred/` (083 closed
