@@ -167,6 +167,44 @@ fn different_seeds_drive_different_schedules_at_one_worker() {
     );
 }
 
+/// Seeds this smoke test tries at `CHEZZI_THREADS=1`. Widen this range (never narrow it) if a
+/// mutant that should hang stops reproducing within it -- see `## Rollback` fallback step 1.
+const SMOKE_SEEDS: std::ops::RangeInclusive<u64> = 1..=32;
+
+/// The two-leaf nested-nursery deadlock always faults at `CHEZZI_THREADS=1`, for every smoke
+/// seed. This asserts a FAULT, not an output order, so the W15-2 two-runner finding does not
+/// affect it (there is no top-level `parallel:` racing a drainer here -- the whole program is one
+/// fiber tree under the eager nursery). Used by step 4 to prove the gate goes red on a reverted
+/// fix: the mutant must hang instead of faulting, so the seed's assertion catches it.
+#[test]
+fn sched_seed_smoke_two_leaf_always_faults_at_one_worker() {
+    let bin = std::path::PathBuf::from(env!("CARGO_BIN_EXE_chezzi"));
+    let prog = fixture("two_leaf_deadlock.chz");
+    let target = schedfuzz::target_for(&prog);
+    for seed in SMOKE_SEEDS {
+        let cap = schedfuzz::run_target(
+            &bin,
+            &target,
+            Some(seed),
+            1,
+            std::time::Duration::from_secs(20),
+        )
+        .unwrap_or_else(|e| panic!("seed {seed} did not run: {e:?}"));
+        assert_ne!(
+            cap.code,
+            Some(0),
+            "seed {seed} should fault, got rc={:?} stdout={:?}",
+            cap.code,
+            cap.stdout_text()
+        );
+        assert!(
+            cap.stderr_text().contains("deadlock"),
+            "seed {seed} should report a deadlock on stderr; got {:?}",
+            cap.stderr_text()
+        );
+    }
+}
+
 /// An invalid seed warns on stderr and the run still executes, unseeded.
 #[test]
 fn an_invalid_sched_seed_warns_and_runs_unseeded() {
