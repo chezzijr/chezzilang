@@ -755,3 +755,27 @@ done: 177 targets, 8496 runs, 0 finding(s), 0 unstable, 11 known
 
 every remaining divergence is either the documented contract (**W15-4**), a
 load-sensitive test-infra flake (**W15-5**), or an already-filed bug (**W15-3**, **W15-6**, **W15-7**).
+
+## Load hygiene for synthetic-load experiments
+
+Any synthetic-load generator (a loop that repeatedly spawns `chezzi` processes, a `yes`, anything
+meant to hold the box's CPU contended for a measurement) must run under a single named scope:
+
+```sh
+systemd-run --user --scope --unit=<name> -- bash -c 'while true; do ...; done'
+```
+
+and be torn down with:
+
+```sh
+systemctl --user stop <name>
+```
+
+Never start one as a bare background `while` loop. `pkill -9 -f "<pattern>"` kills the PROCESSES the
+loop spawns, not the loop itself — the loop just respawns them, and every later measurement on the
+box (this ticket's own included) is then silently taken under load nobody intended. This is what
+produced **W15-8**: 28 orphaned `while true; do CHEZZI_THREADS=2 timeout 3 chezzi test
+tests/chz/stdlib/regex_test.chz; done` loops plus 4 `yes` processes, left over from an earlier load
+experiment whose `pkill` had only killed the spawned test processes, held `uptime` load at 33-34 for
+hours and made an unrelated test misread as a flaky regression. `systemd-run --scope` ties the whole
+tree to one cgroup that `systemctl stop` tears down in one shot, loops included.
