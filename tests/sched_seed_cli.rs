@@ -169,7 +169,7 @@ fn different_seeds_drive_different_schedules_at_one_worker() {
 
 /// Seeds this smoke test tries at `CHEZZI_THREADS=1`. Widen this range (never narrow it) if a
 /// mutant that should hang stops reproducing within it -- see `## Rollback` fallback step 1.
-const SMOKE_SEEDS: std::ops::RangeInclusive<u64> = 1..=32;
+const SMOKE_SEEDS: std::ops::RangeInclusive<u64> = 1..=64;
 
 /// The two-leaf nested-nursery deadlock always faults at `CHEZZI_THREADS=1`, for every smoke
 /// seed. This asserts a FAULT, not an output order, so the W15-2 two-runner finding does not
