@@ -1525,6 +1525,16 @@ impl Checker {
         for stmt in stmts {
             self.check_stmt(stmt);
         }
+        if !self.current_module_is_stdlib {
+            for (name, span) in super::unused::unused_locals(stmts) {
+                self.warn(
+                    span,
+                    format!(
+                        "unused variable '{name}': it is never read; prefix it with '_' if that is intended"
+                    ),
+                );
+            }
+        }
         let sig = self.capture_sig(stmts);
         self.finalize_empty_coll_sites();
         self.finalize_hover_pending();

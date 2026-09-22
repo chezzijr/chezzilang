@@ -5921,7 +5921,7 @@ fn captured_names_of_body(body: &Block, params: &[crate::ast::Param]) -> HashSet
 }
 
 /// Collect the binding names of a `match`/tuple/variant [`Pattern`] into `out`.
-fn pattern_binds(p: &Pattern, out: &mut HashSet<String>) {
+pub(crate) fn pattern_binds(p: &Pattern, out: &mut HashSet<String>) {
     match p {
         Pattern::Ident(n, _) => {
             out.insert(n.clone());
@@ -6135,7 +6135,7 @@ fn find_boundary_free_block(stmts: &[Stmt], out: &mut HashSet<String>) {
 /// The fragment expressions of an already-parsed interpolation (`ExprKind::Interp`) — the desugared
 /// counterpart of [`interp_exprs`], with no re-parse. This is the path a compiled program actually
 /// takes; `interp_exprs` below remains for a literal `desugar` left un-parsed.
-fn chunk_exprs(chunks: &[Chunk]) -> impl Iterator<Item = &Expr> {
+pub(crate) fn chunk_exprs(chunks: &[Chunk]) -> impl Iterator<Item = &Expr> {
     // The value, then the spec's nested width/precision fields — a name read ONLY inside a nested
     // field (`"{s:<{w}}"`) must still be seen as a free variable.
     chunks.iter().flat_map(|c| match c {
@@ -6149,7 +6149,7 @@ fn chunk_exprs(chunks: &[Chunk]) -> impl Iterator<Item = &Expr> {
 /// as a free variable (and therefore boxed) — in an un-desugared `Str` the interpolation exprs are
 /// embedded in the raw text, so the AST walk would otherwise miss them. A malformed interpolation
 /// yields no exprs here; the real `compile_str` surfaces that error.
-fn interp_exprs(raw: &crate::ast::StrLit) -> Vec<Expr> {
+pub(crate) fn interp_exprs(raw: &crate::ast::StrLit) -> Vec<Expr> {
     match parse_interpolation(raw, Span::RUNTIME) {
         Ok(chunks) => chunks
             .into_iter()

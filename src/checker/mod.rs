@@ -2683,6 +2683,7 @@ pub(crate) mod proto;
 mod setup;
 mod sig;
 pub mod suggest;
+mod unused;
 
 /// Render a resolved type-arg list for a user-facing redirect hint (`int, str`), used by the
 /// removed-gliding-form error to suggest the type-side form `Enum[int, str].Variant(...)`.

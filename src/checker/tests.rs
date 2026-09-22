@@ -331,7 +331,7 @@ fn a_bound_carrier_does_not_warn() {
         "{g}fn f():\n    if true:\n        _ := g()\nf()\n"
     ));
     no_warn(&format!(
-        "{g}fn f():\n    for i in 0..1:\n        _ := g()\nf()\n"
+        "{g}fn f():\n    for _ in 0..1:\n        _ := g()\nf()\n"
     ));
     // A carrier consumed by `match` / `?` is handled, not discarded.
     no_warn(&format!(
@@ -404,7 +404,7 @@ fn a_non_carrier_statement_does_not_warn() {
     no_warn("fn f():\n    xs := [1]\n    xs.push(2)\n    print(xs)\nf()\n");
     no_warn("fn f():\n    print(1)\nf()\n");
     // A void call in the very positions that warn for a carrier.
-    no_warn("fn v():\n    print(1)\nif true:\n    v()\nfor i in 0..1:\n    v()\n");
+    no_warn("fn v():\n    print(1)\nif true:\n    v()\nfor _ in 0..1:\n    v()\n");
 }
 
 /// An `Unknown`-typed expression statement stays silent: it has already produced a hard error, and a
@@ -856,7 +856,8 @@ fn the_two_frame_shaped_ceilings_under_warn() {
 /// `Checker::declare`, which is where the untaint lives.
 #[test]
 fn a_fresh_binding_of_the_name_untaints_it() {
-    let head = "fn f():\n    n: int = 0\n    parallel:\n        spawn:\n            n = 5\n";
+    let head =
+        "fn f():\n    n: int = 0\n    print(n)\n    parallel:\n        spawn:\n            n = 5\n";
     for tail in [
         // `for` loop variable — the reported repro
         "    for n in range(2):\n        print(n)\n",

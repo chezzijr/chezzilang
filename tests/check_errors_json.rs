@@ -579,6 +579,33 @@ fn read_temporary_warning_is_a_warning_in_json_and_check_still_exits_zero() {
     assert!(stdout.contains("s.update("), "got: {stdout}");
 }
 
+/// TICKET-090: a local binding that is never read is a WARNING — `"severity":"warning"` in
+/// `--errors=json`'s FIRST stdout line (ahead of the program's own output), and `run` still executes
+/// and exits 0. The ticket's flagship shape: the `:=` typo shadows the outer accumulator every
+/// iteration and still prints `0` at rc=0.
+#[test]
+fn unused_local_warning_is_a_warning_in_json_and_run_still_prints_zero() {
+    let t = TmpDir::new();
+    let src = t.write(
+        "total.chz",
+        "fn total(xs: List[int]) -> int:\n    total := 0\n    for x in xs:\n        total := total + x\n    return total\nprint(total([1,2,3]))\n",
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .args(["run", "--errors=json", src.to_str().unwrap()])
+        .output()
+        .expect("run chezzi run");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "a warning must not fail run, got: {stdout}"
+    );
+    let mut lines = stdout.lines();
+    let first = lines.next().unwrap_or_default();
+    assert!(first.contains("\"severity\":\"warning\""), "got: {stdout}");
+    assert!(first.contains("unused variable 'total'"), "got: {stdout}");
+    assert_eq!(lines.next(), Some("0"), "got: {stdout}");
+}
+
 /// TICKET-007 criterion 9 (+ 11, plain-text half): a method typo prints the source line, a caret
 /// row and a `help:` line in plain text, and a `"help"` key after `"message"` under
 /// `--errors=json`.

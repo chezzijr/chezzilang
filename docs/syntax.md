@@ -302,6 +302,36 @@ discarded-`Result` warning's own escape (`_ := f()`, then `_ := g()`) works at m
 before. A loop variable, parameter or match pattern named `_` still binds as before. `_ := f()`
 stays a `let`, not an expression statement, so it does not fire the discarded-`Result` warning.
 
+#### Unused locals warn (TICKET-090)
+
+A fn-local or block-local `:=`/`let` binding, or a `for` loop variable, that is never read emits a
+**warning** (never an error — Go's compile error would reject programs that check clean today; Rust's
+shape is the model):
+
+```chezzi
+fn total(xs: List[int]) -> int:
+    total := 0
+    for x in xs:
+        total := total + x    # `:=` typo instead of `=` — a new binding each iteration
+    return total
+print(total([1, 2, 3]))       # 0, silently wrong, before this rule
+```
+
+`chezzi check` now reports `unused variable 'total': it is never read; prefix it with '_' if that is
+intended` at the inner `total := total + x`, `"severity":"warning"` in `--errors=json`, exit code
+unchanged. Prefix the name with `_` (or name it exactly `_`) to opt out — the same escape as the blank
+identifier above.
+
+Measured, silent (never warns), and why:
+- a **parameter** — Go does not warn on an unused parameter either
+- `x += e` — a compound assign reads `x` before writing it (Go counts it a use); a plain `x = e` is a
+  write only and is not a read, but does not itself make `x` a *candidate* — only `:=`/`let`/`for` do
+- a `match` / `wait:` arm binding, or a comprehension `for` variable — pattern-bound, not tracked
+- a name read only inside a closure, `defer:`, `spawn:`/`parallel:` body, a nested `fn`, or an
+  interpolated fragment (`"{x}"`, `"{s:<{w}}"`) — all are reads
+- a module-scope global — an importer may read it, so it can never be judged from one module
+- anything inside a `std.*` module
+
 #### Re-declaring an ordinary binding — rebind anywhere, retype only in a fn
 
 Re-declaring a name with `:=` (or a second typed let) is legal, but what it *means* differs by scope,

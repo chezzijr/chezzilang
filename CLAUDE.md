@@ -193,8 +193,8 @@ static protocol requirements callable through a generic bound via witness passin
 **Tier-D** (`spawn` / `parallel:` nursery, `Channel[T]`, `Shared[T]`, `Executor`, the real
 OS-thread M:N engine, netpoller + `std.net`). The checker also has a **non-fatal warning channel**
 (`Severity::Warning`, `"severity"` in `--errors=json`, `DiagnosticSeverity::WARNING` in the LSP) with
-four rules on it — a discarded `Result`/`Option`, a `spawn:`-task write read after the join, a mutating call or assign on a `Shared`/`RwShared`/`Atomic` read temporary (`s.get().push(1)`), and a
-`match` arm made unreachable by an earlier unguarded irrefutable arm.
+five rules on it — a discarded `Result`/`Option`, a `spawn:`-task write read after the join, a mutating call or assign on a `Shared`/`RwShared`/`Atomic` read temporary (`s.get().push(1)`), a
+`match` arm made unreachable by an earlier unguarded irrefutable arm, and a local binding that is never read (TICKET-090).
 **Rust tests** green across every target (**4458** in the lib target), plus **814**
 Chezzi tests green at two worker counts (up from 590 at the start of `feat/span-file-and-stdlib-contracts`).
 
