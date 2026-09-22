@@ -210,11 +210,11 @@ in-progress alongside it.
 > on the release binary, with the archive line for its full history.** Every closed row and all 30
 > bug-hunt session logs (W1..W14) moved verbatim to **`docs/gaps-archive.md`**, so any
 > `docs/gaps.md:NNNN` citation in a closed ticket or in `PROGRESS.md` resolves against the archive at
-> the same line number. **4 open rows** — W8-19, W11-13, W12-5, W13-28
+> the same line number. **5 open rows** — W8-19, W11-13 (TICKET-165), W12-5 (revisit D2 later), W13-28, W15-1 (listener close hangs a parked accept)
 > (W11-15 closed 2026-09-21, TICKET-154 — a DAG alias now crosses the airlock as ONE object at an
 > `RwShared` store; W12-5's last shape (G6) stays listed as a RECORD that D2 (DEC-137) governs it,
 > not as a bug) — and **0 deferred tickets** in `.project/tickets-deferred/` (083 closed
-> 2026-09-22 — `str.pad_right` landed in place). 082, 084 and 087 closed 2026-09-21 under TICKET-161, 160, 163. 086 and 090 closed 2026-09-22 under TICKET-086 and TICKET-090. The pipeline queue is EMPTY: 140 done, 3 rejected, 0 in flight. Wave 14's three
+> 2026-09-22 — `str.pad_right` landed in place). 082, 084 and 087 closed 2026-09-21 under TICKET-161, 160, 163. 086 and 090 closed 2026-09-22 under TICKET-086 and TICKET-090. Pipeline: TICKET-165 in flight. Wave 14's three
 > redesigns all landed — **D1** a deadlock is fatal (TICKET-135), **D2** a received closure reads the
 > running task's module globals (TICKET-137), **D3** an int never widens into a float slot
 > (TICKET-138). **W8-17 is CLOSED**: (e) the `?` unknown-type rendering (TICKET-145), (f) the

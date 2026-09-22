@@ -24,16 +24,17 @@ waves 2–5 `:3057`–`:3286` · the 2026-07-14 four-axis audit `:3568`.
 
 ---
 
-## TABLE — **4 open rows** (all re-verified 2026-09-20; W11-15 closed 2026-09-21)
+## TABLE — **5 open rows** (all re-verified 2026-09-20; W11-15 closed 2026-09-21)
 
 | row | P | domain | what | verified 2026-09-20 | archive |
 |---|---|---|---|---|---|
 | **W8-19** | P2 | affordances | Bundle. Remaining: multi-statement closures (ranked first, own milestone), `path.join` rejects `Path`+`str` / no `path.abs`/`path.rel`, `Listener` not selectable in `wait:`, statement-only `recover:`. Global helpers and the `Option` half are DECLINED, do not re-file (the `Result` half closed under TICKET-039). | **OPEN** | `:185` |
-| **W11-13** | P3 | airlock | The isolation warning gates on the READ shape. **Deliberately NOT ticketed** — an under-warn is the acceptable direction; re-open only with a measured runtime-derived table, one program per shape. | **OPEN** | `:12510` |
+| **W11-13** | P3 | airlock | The isolation warning gates on the READ shape: 1 of 6 measured stale-read shapes warns (`print("{s}")`); `s.v`, `xs[0]`, `xs` after `s.v = 2` / `xs[0].push(2)` are silent. | **TICKETED 2026-09-22 (TICKET-165)** | `:12510` |
 | ~~**W11-14**~~ | P3 | cancel | `Vm::guarded_checkpoint` (`src/vm/exec.rs:385`) has the owner hole TICKET-096 fixed at the other two checkpoints. Condition to re-open: the checkpoint runs per ELEMENT and `MnSched::scope_fault` takes the sched lock, so a rung there needs its own `benches/run.chz` measurement. | **CLOSED 2026-09-21 (TICKET-155)** — the rung rides the 1-in-1024 `back_edge_tick` sample and `hof_nursery` measured level; see `docs/benchmarks.md` | `:12511` |
 | ~~**W11-15**~~ | P3 | airlock | The three `RwShared` stores (`Op::NewRwShared`, `RwShared.set`, `RwShared.write`) split a DAG alias into two copies. **CLOSED 2026-09-21 (TICKET-154).** All three now serialize through `to_wire_crossable`, and the four looping read views share one rebuild map taken under one guard, so the cliff `rwshared_view_over_shared_bindings_is_not_quadratic` stays green. Pinned by `airlock_rwshared_store_dag_alias_is_one_object`. | **CLOSED** | `:12512` |
-| **W12-5** | P1 | airlock | Five of six spawn-crossing shapes closed (TICKET-111). The sixth, a **sent closure** (G6), is NOT a residual: owner decision D2 (DEC-137, TICKET-137, 2026-09-19) makes a received closure read the running task's own module globals, so `[1, 2] [1]` is the rule's answer, and CPython/Go's `[1, 2] [1, 2]` is a difference BY DECISION. TICKET-154 built the fix and withdrew it for exactly that reason (2026-09-21). Do not re-file. Pinned by `airlock_closure_over_a_captured_alias_pushed_by_the_receiver_is_a_known_residual`. | **OPEN** | `:12633` |
+| **W12-5** | P1 | airlock | Five of six spawn-crossing shapes closed (TICKET-111). The sixth, a **sent closure** (G6), is NOT a residual: owner decision D2 (DEC-137, TICKET-137, 2026-09-19) makes a received closure read the running task's own module globals, so `[1, 2] [1]` is the rule's answer, and CPython/Go's `[1, 2] [1, 2]` is a difference BY DECISION. TICKET-154 built the fix and withdrew it for exactly that reason (2026-09-21). **REVISIT LATER (owner, 2026-09-22):** D2 is consistent but not good UX, and it diverges from both ancestors, so it may be reversed toward Go/CPython. Do not re-file it as a bug; reopen it as a design change to D2, and start from TICKET-154's withdrawn fix. Pinned by `airlock_closure_over_a_captured_alias_pushed_by_the_receiver_is_a_known_residual`. | **OPEN** | `:12633` |
 | ~~**W13-27**~~ | P2 | perf | Introduced by TICKET-131's W13-6 fix. A nursery inside a spawned task costs ~1.8x while its ENCLOSING nursery's body is still open. Identified recovery path, not implemented: farm pool helpers for an outer sched while its body is blocked, not only after `close_body`. **Do not** recover it by restoring the private nested sched at T>=2 — that is W13-6. | **CLOSED 2026-09-21 (TICKET-159)** — blocked-body helpers | `:12894`, repro `:13233` |
+| **W15-1** | P1 | net | Closing a `Listener` from another task while one task is parked in `ln.accept()` never unblocks the accept: the program hangs (5/5 runs, `timeout 5` rc=124, release, default workers) and 2/5 runs also panic `netpoller add: Os { code: 9, ... "Bad file descriptor" }` at `src/vm/poller.rs:269`. Go 1.27: `Accept` returns `use of closed network connection` at once. This is also the Go graceful-shutdown idiom W8-19's "Listener not selectable in `wait:`" asks for. | **OPEN** — not ticketed | found 2026-09-22 |
 | **W13-28** | P2 | perf/test | DEBUG binary only. A rendezvous ping-pong whose pair is spawned from INSIDE a spawned task runs bimodally at `CHEZZI_THREADS=8`. The broken pin it caused was already replaced 2026-09-18; what stays open is the bimodality itself. | **not re-verified** — needs a debug test binary and a 10-run sample | `:12895` |
 
 ### W8-17 — CLOSED (all five sub-items; the row is out of the table)
@@ -84,6 +85,6 @@ Filed, triaged, parked. Closed 2026-09-21: **082** (tuple Map key, TICKET-161), 
 
 ## Pipeline
 
-`.project/tickets/`: 140 done, 3 rejected (031, 127, 133), **0 in flight**. The wave-14 redesigns all
+`.project/tickets/`: 140 done, 3 rejected (031, 127, 133), **1 in flight** (TICKET-165). The wave-14 redesigns all
 landed: **D1** a deadlock is fatal (TICKET-135), **D2** a received closure reads the running task's
 module globals (TICKET-137), **D3** an int never widens into a float slot (TICKET-138).
