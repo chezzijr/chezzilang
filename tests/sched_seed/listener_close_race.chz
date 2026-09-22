@@ -1,0 +1,14 @@
+import std.net
+import std.time
+fn main() -> Result[nil]:
+    ln := net.listen("127.0.0.1:0")?
+    parallel:
+        spawn:
+            r := ln.accept()
+            print("accept returned: {r}")
+        spawn:
+            time.sleep_ms(200)
+            print("closing listener")
+            ln.close()
+    return Ok()
+main()?

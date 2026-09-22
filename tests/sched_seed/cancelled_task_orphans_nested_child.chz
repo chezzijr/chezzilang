@@ -1,0 +1,15 @@
+fn main():
+    x := Channel[int](0)
+    y := Channel[int](0)
+    parallel:
+        spawn:
+            parallel:
+                spawn:
+                    panic("boom")
+        spawn:
+            parallel:
+                spawn:
+                    x.recv()
+                y.recv()
+    print("done")
+main()
