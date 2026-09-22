@@ -254,6 +254,67 @@ fn threads_one_serializes_cpu_bound_parallel_tasks() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// W15-2 (TICKET-168) — `threads_one_serializes_cpu_bound_parallel_tasks` above puts ALL the CPU
+/// work inside spawned tasks, so it never exercises the shape where the top-level `parallel:` BODY
+/// itself burns CPU on the main thread while a spawned sibling burns CPU on the `chezzi-eager`
+/// drainer. `activate_eager_nursery` (`src/vm/sched.rs`) starts that drainer unconditionally; nothing
+/// gates the two against each other at a budget of 1. Measured on the debug binary: 1.85-1.95 s user
+/// over ~1.10 s wall (1.85-1.95 cores), well past `MAX_CORES_AT_ONE_WORKER`.
+#[cfg(unix)]
+#[test]
+fn threads_one_serializes_a_cpu_bound_top_level_body_alongside_a_spawn() {
+    let dir = std::env::temp_dir().join(format!("chz-w15-2-body-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+
+    let burn = "fn burn(n: int) -> int:\n    \
+                 x := 0\n    \
+                 i := 0\n    \
+                 while i < n:\n        \
+                 x = x + i * i - i\n        \
+                 i += 1\n    \
+                 return x\n\n";
+
+    let path_b = dir.join("body_and_spawn.chz");
+    std::fs::write(
+        &path_b,
+        format!(
+            "{burn}fn main():\n    \
+             parallel:\n        \
+             spawn: burn(750000)\n        \
+             y := burn(750000)\n        \
+             print(y)\n\
+             main()\n"
+        ),
+    )
+    .expect("write program");
+
+    for run in 0..SERIALIZATION_RUNS {
+        let (wall, user, sys, status, stdout) =
+            child_rusage::run_timed(&["run", path_b.to_str().unwrap()], "1");
+        assert!(
+            status.success(),
+            "chezzi run {path_b:?} failed (run {run}): {stdout}"
+        );
+        let cpu = user + sys;
+        // Negative control: cpu must be non-trivial, or a near-zero/near-zero ratio could pass by
+        // accident. Measured 2.09-2.16 s.
+        assert!(
+            cpu > std::time::Duration::from_millis(500),
+            "program finished too fast (cpu={cpu:?}, run {run}) to be a meaningful measurement — \
+             recalibrate the burn size"
+        );
+        assert!(
+            cpu <= wall.mul_f64(MAX_CORES_AT_ONE_WORKER),
+            "--threads=1 must run at most one CPU runner when a top-level parallel: BODY burns CPU \
+             alongside a spawned sibling (run {run}): cpu={cpu:?} wall={wall:?} (cpu must be <= \
+             wall * {MAX_CORES_AT_ONE_WORKER}). A second runner means the main-thread body and the \
+             chezzi-eager drainer ran concurrently at a budget of 1 (W15-2)."
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// TICKET-141 (W14-14) — guards the handoff for a CPU loop preempted INSIDE a native callback: the
 /// preempted thread hands its width permit to one replacement thread and takes one back in FIFO
 /// order, so at `CHEZZI_THREADS=1` the two never burn concurrently (DEC-059's 1.00-core bound).
