@@ -1,0 +1,13 @@
+fn main():
+    ch := Channel[int](0)
+    parallel:
+        spawn:
+            parallel:
+                spawn:
+                    ch.recv()
+        spawn:
+            parallel:
+                spawn:
+                    ch.recv()
+    print("unreachable")
+main()

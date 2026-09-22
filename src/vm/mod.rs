@@ -12,6 +12,7 @@ pub mod op;
 mod poller;
 mod pool;
 mod quiesce;
+pub mod sched_seed;
 mod timer;
 pub mod value;
 mod width;
