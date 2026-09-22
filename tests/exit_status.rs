@@ -7,6 +7,9 @@
 //! Rule under test (POSIX `exit(3)` / bash / Python / Go): the process status is the LOW 8 BITS of
 //! the code — `code & 0xff`. So `-1` → 255, `300` → 44, `-256` → 0.
 
+#[path = "support/hang_deadline.rs"]
+mod hang_deadline;
+
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -183,36 +186,18 @@ fn main() -> Result[nil]:
 main()?
 "#,
     );
-    // Racy (see the doc comment above): loop until one run hits the window, using a
-    // NON-panicking watchdog (unlike `run_capped`) so every failure shape — a hang (rc=124)
-    // or the netpoller's `Bad file descriptor` panic (rc=101) — reports through the SAME
-    // literal assertion text below, rather than `run_capped`'s own "hung for >Ns" wording that
-    // only one of the two shapes hits. 300 attempts at a measured ~2% per-attempt hit rate
-    // leaves under 0.25% chance of a false-clean gate run.
+    // Racy (see the doc comment above): loop until one run hits the window. The bounded poll lives
+    // in `hang_deadline::run_with_hang_deadline`, outside this `#[test]` body (DEC-117), so every
+    // failure shape — a hang (killed, status `None`) or the netpoller's `Bad file descriptor` panic
+    // (rc=101) — reports through the SAME literal assertion text below. 300 attempts at a measured
+    // ~2% per-attempt hit rate leaves under 0.25% chance of a false-clean gate run.
     for _ in 0..300 {
-        use std::io::Read;
-        let mut child = Command::new(env!("CARGO_BIN_EXE_chezzi"))
-            .arg("run")
-            .arg(&entry)
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .expect("spawn chezzi");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        let status = loop {
-            match child.try_wait().expect("try_wait") {
-                Some(s) => break Some(s),
-                None if std::time::Instant::now() >= deadline => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break None;
-                }
-                None => std::thread::sleep(std::time::Duration::from_millis(20)),
-            }
-        };
-        let mut out = String::new();
-        if let Some(mut s) = child.stdout.take() {
-            let _ = s.read_to_string(&mut out);
-        }
+        let run = hang_deadline::run_with_hang_deadline(&entry, None);
+        let status = run.as_ref().map(|o| o.status);
+        let out = run
+            .as_ref()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
         let ok = status.is_some_and(|s| s.success())
             && out.contains("closing listener")
             && out.contains("accept returned:");

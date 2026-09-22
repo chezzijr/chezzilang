@@ -317,7 +317,7 @@ fn sleep_synchronised_tests() -> BTreeSet<String> {
 /// rejected it (the walk returns 68). Obtain it by compiling once with an empty array and copying
 /// the "sleeps but is not listed" list `no_new_rust_test_sleeps_to_order_two_events` reports,
 /// verbatim, the same way `stack_trace_reports_call_chain`'s golden was obtained.
-const SLEEP_SYNCHRONISED_TESTS: [&str; 90] = [
+const SLEEP_SYNCHRONISED_TESTS: [&str; 91] = [
     "cousin_fed_recovered_deadlock_is_fatal_not_a_hang_at_two_and_four_workers",
     "a_bailed_join_stops_its_jobs_from_starting_new_work",
     "a_cancelled_siblings_defer_runs_whole_on_both_engines",
@@ -350,6 +350,11 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 90] = [
     "an_executor_jobs_send_wakes_a_task_parked_on_another_scheds_channel",
     "cancel_cascade_crosses_the_airlock",
     "cancel_trip_wakes_parked_wait_under_parallel",
+    // TICKET-166 (W15-1). Its 200ms `time.sleep_ms` is inside the fixture .chz program's SOURCE
+    // STRING, not in this Rust test's own control flow. The assertion holds whichever order the two
+    // tasks run in: a `close()` that beats the `accept()` also makes it return an `Err`, so the sleep
+    // only widens the close-vs-parked-accept race window; it is not a happens-before edge.
+    "closing_a_listener_wakes_a_parked_accept",
     "connect_to_dead_port_reports_refused",
     // TICKET-114: the sleep is a POLL INTERVAL on `try_wait` against the 60 s hang bound (DEC-095's
     // exemption) -- a hung child never closes its pipes, so `output()` would wedge the test binary.
