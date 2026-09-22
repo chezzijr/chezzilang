@@ -1,0 +1,46 @@
+# TICKET-169 — D4 layer C: a spawned task's write to an airlock copy (a captured local, a
+# module-global, or a struct/list it did not itself create) must FAULT at the write, not be
+# silently lost at the join. Currently these all still print the pre-spawn value at rc=0; this
+# suite pins the fault D4 requires. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+
+test fn captured_scalar_write_inside_spawn_faults():
+    n := 1
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            res := recover:
+                n = 5
+            match res:
+                Ok(_): r.send("no-fault")
+                Err(e): r.send(e.message())
+    assert r.recv() != "no-fault"
+
+test fn captured_list_push_inside_spawn_faults():
+    xs := [1]
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            res := recover:
+                xs.push(2)
+            match res:
+                Ok(_): r.send("no-fault")
+                Err(e): r.send(e.message())
+    assert r.recv() != "no-fault"
+
+struct Counter:
+    n: int
+
+    fn bump(self):
+        self.n = self.n + 1
+
+test fn struct_method_write_on_spawned_copy_faults():
+    c := Counter(1)
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            res := recover:
+                c.bump()
+            match res:
+                Ok(_): r.send("no-fault")
+                Err(e): r.send(e.message())
+    assert r.recv() != "no-fault"
