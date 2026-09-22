@@ -14467,6 +14467,24 @@ fn fibers_nested_parallel() {
 /// wall-clock ceiling is the regression guard: the old `pick_runnable` linear-scan-per-turn took
 /// ~2.3 s at 50k (RED), the ready-set takes tens of ms (GREEN). The 5 s ceiling is generous for
 /// CI noise yet far below the old quadratic wall.
+/// TICKET-164(a): `try_recv_drains_residue_after_blocking_recv_resumes` asserts one side of a real
+/// race — nothing orders the producer's second `send` before the consumer's first `try_recv`, so
+/// `try empty` is a legal outcome, not an engine bug. Loop the same program up to 20000 times (the
+/// measured rate on this box is ~55/20000, well within reach) and stop at the first run whose output
+/// diverges from the hard-coded expectation, proving the assertion is not causally forced.
+#[test]
+fn try_recv_drains_residue_assertion_is_not_causally_forced() {
+    let src = "fn producer(ch: Channel[int]):\n    ch.send(1)\n    ch.send(2)\nfn consumer(ch: Channel[int]):\n    a := ch.recv()\n    print(\"recv {a}\")\n    match ch.try_recv():\n        Some(v): print(\"try {v}\")\n        None: print(\"try empty\")\n    match ch.try_recv():\n        Some(v): print(\"try {v}\")\n        None: print(\"try empty\")\nfn main():\n    ch := Channel[int]()\n    parallel:\n        spawn consumer(ch)\n        spawn producer(ch)\nmain()\n";
+    let expected = "recv 1\ntry 2\ntry empty\n";
+    for i in 0..20_000 {
+        let out = run(src);
+        assert_eq!(
+            out, expected,
+            "diverged from the hard-coded expectation on iteration {i}"
+        );
+    }
+}
+
 #[test]
 fn fibers_scale_ready_queue_not_quadratic() {
     let n = 50_000;
