@@ -480,7 +480,8 @@ for r in results:                  # 'results' is read here as its pre-`spawn:` 
 
 It covers a reassignment, a compound assign, `xs[i] = v`, `p.field = v`, `m[k] = v`, and the in-place
 container mutators (`push`/`pop`/`insert`/`remove_at`/`extend`/`sort`/`sort_by`/`sort_by_key`/
-`reverse` on a list, `remove`/`update` on a map, `add`/`remove` on a set, `push`/`pop` on a bytearray).
+`reverse` on a list, `remove`/`update` on a map, `add`/`remove` on a set, `push`/`pop` on a bytearray),
+whether called on the binding or on an element or field of it (`xs[0].push(v)`, `s.xs.push(v)`).
 It stays **silent** where the write really does survive: through a `Shared`/`RwShared`/`Atomic`/
 `AtomicInt`/`Channel`/`Executor`/`Socket`/`Listener`/`Writer`/`Reader` handle (those cross by handle),
 inside a `defer:` block **in the parent** (same frame, same cell, no airlock), when the parent
@@ -519,13 +520,17 @@ Seven deliberate ceilings, all of them under-warning rather than over-warning:
    nested body has its own frame, so `spawn: bump := fn(): xs.push(1)` then `bump()` leaves `xs.len()`
    at 0 after the join with nothing reported (same for the `fn bump():` spelling). Dropping the taint
    there is what stops the nested body reporting the *parent's* pending write as its own.
-7. **A partial *read* of a partial write declines**, the mirror of ceiling 5 and for the same reason: a
-   task-side `p.count = ...` read back as `p.name`, or `m["a"] = 1` read back as `m["b"]`, names a part
-   the checker cannot match up, so it stays silent — a task-side `p.count = 1` read back as `p.count`
-   is genuinely stale and is missed. The three mixed pairs all still report, because there the checker
-   *can* tell: a whole-binding write is observed by any read of it (`p.count = 1` then `print(p)`), and
-   a whole-binding write is stale in every part (`p = P(...)` then `print(p.name)`). An in-place
-   mutator (`xs.push(v)`) is a whole-container write, so `print(xs[0])` after one still warns.
+7. **A partial read the checker cannot match to the partial write declines.** A task-side write
+   through a field or index and a parent read through one are compared segment by segment: the same
+   field name, the same non-negative int literal or the same string literal is a match. A read along
+   the written path, or a prefix or extension of it, warns (`s.v = 2` then `print(s.v)`, `print(s.t)`
+   after `s.t.v = 2`, `print(xs[0])` after `xs[0].push(2)`). A read that diverges at two different
+   constants is correctly silent: `p.count = ...` read back as `p.name`, `m["a"] = 1` read back as
+   `m["b"]` and `xs[0] = v` read back as `xs[1]` never observe the write. Any other segment (a
+   computed index `xs[i]`, a negative literal `xs[-1]`, a field against a key) could alias or not, so
+   the pair stays silent: a task-side `xs[i] = v` read back as `xs[0]` is stale and is missed. A
+   whole-binding write or read on either side always reports, and an in-place mutator (`xs.push(v)`)
+   is a whole-container write, so `print(xs[0])` after one still warns.
 
 **Mutating a captured local.** A **closure body is a single expression** (`fn(x): expr`), so a closure
 cannot contain a reassignment statement — `fn(): n = n + 1` is a *parse error*. Three ways to write

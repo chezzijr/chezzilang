@@ -24,12 +24,12 @@ waves 2–5 `:3057`–`:3286` · the 2026-07-14 four-axis audit `:3568`.
 
 ---
 
-## TABLE — **5 open rows** (all re-verified 2026-09-20; W11-15 closed 2026-09-21)
+## TABLE — **4 open rows** (all re-verified 2026-09-20; W11-15 closed 2026-09-21; W11-13 closed 2026-09-22)
 
 | row | P | domain | what | verified 2026-09-20 | archive |
 |---|---|---|---|---|---|
 | **W8-19** | P2 | affordances | Bundle. Remaining: multi-statement closures (ranked first, own milestone), `path.join` rejects `Path`+`str` / no `path.abs`/`path.rel`, `Listener` not selectable in `wait:`, statement-only `recover:`. Global helpers and the `Option` half are DECLINED, do not re-file (the `Result` half closed under TICKET-039). | **OPEN** | `:185` |
-| **W11-13** | P3 | airlock | The isolation warning gates on the READ shape: 1 of 6 measured stale-read shapes warns (`print("{s}")`); `s.v`, `xs[0]`, `xs` after `s.v = 2` / `xs[0].push(2)` are silent. | **TICKETED 2026-09-22 (TICKET-165)** | `:12510` |
+| ~~**W11-13**~~ | P3 | airlock | The isolation warning gated on the READ shape. **CLOSED 2026-09-22 (TICKET-165).** The taint now records each task write's constant field/key path, and a parent read along that path, a prefix of it or an extension of it warns; a mutator on an element or field (`xs[0].push(v)`) is a task write too. Pinned by `a_same_path_read_of_a_projected_task_write_warns`. | **CLOSED** | `:12510` |
 | ~~**W11-14**~~ | P3 | cancel | `Vm::guarded_checkpoint` (`src/vm/exec.rs:385`) has the owner hole TICKET-096 fixed at the other two checkpoints. Condition to re-open: the checkpoint runs per ELEMENT and `MnSched::scope_fault` takes the sched lock, so a rung there needs its own `benches/run.chz` measurement. | **CLOSED 2026-09-21 (TICKET-155)** — the rung rides the 1-in-1024 `back_edge_tick` sample and `hof_nursery` measured level; see `docs/benchmarks.md` | `:12511` |
 | ~~**W11-15**~~ | P3 | airlock | The three `RwShared` stores (`Op::NewRwShared`, `RwShared.set`, `RwShared.write`) split a DAG alias into two copies. **CLOSED 2026-09-21 (TICKET-154).** All three now serialize through `to_wire_crossable`, and the four looping read views share one rebuild map taken under one guard, so the cliff `rwshared_view_over_shared_bindings_is_not_quadratic` stays green. Pinned by `airlock_rwshared_store_dag_alias_is_one_object`. | **CLOSED** | `:12512` |
 | **W12-5** | P1 | airlock | Five of six spawn-crossing shapes closed (TICKET-111). The sixth, a **sent closure** (G6), is NOT a residual: owner decision D2 (DEC-137, TICKET-137, 2026-09-19) makes a received closure read the running task's own module globals, so `[1, 2] [1]` is the rule's answer, and CPython/Go's `[1, 2] [1, 2]` is a difference BY DECISION. TICKET-154 built the fix and withdrew it for exactly that reason (2026-09-21). **REVISIT LATER (owner, 2026-09-22):** D2 is consistent but not good UX, and it diverges from both ancestors, so it may be reversed toward Go/CPython. Do not re-file it as a bug; reopen it as a design change to D2, and start from TICKET-154's withdrawn fix. Pinned by `airlock_closure_over_a_captured_alias_pushed_by_the_receiver_is_a_known_residual`. | **OPEN** | `:12633` |
@@ -53,14 +53,14 @@ back and strike them here; (c), (d) and (g) closed under TICKET-158 on 2026-09-2
 
 ### Repros, all run 2026-09-20 on `target/release/chezzi` at `50280d48`
 
-    # W11-13 — warns on `print("{s}")`, silent on `print("{s.v}")`
+    # W11-13 (CLOSED 2026-09-22, TICKET-165) — warns on `print("{s}")` and on `print("{s.v}")`
     struct S:
         v: int
     fn main():
         s := S(1)
         parallel:
             spawn: s.v = 2
-        print("{s.v}")        # ok: no type errors   <- the under-warn
+        print("{s.v}")        # warns: 's' is read here as its pre-`spawn:` value
     main()
 
     # W11-14 (CLOSED 2026-09-21, TICKET-155 — the owner map is now cut short) — the child's fault never cuts the owner's straight-line callback short

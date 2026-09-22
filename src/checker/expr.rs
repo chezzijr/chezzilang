@@ -2572,8 +2572,10 @@ impl Checker {
         // receiver binding, so it taints inside a `spawn:` body and untaints in the parent, exactly
         // like `check_assign`'s lvalue arms. Recorded from `lookup` BEFORE `infer(obj)` runs, for the
         // same ordering reason: the receiver read below must not report a taint this very statement
-        // supersedes. Simple-`Ident` receivers only (`xss[0].push(v)` — same documented limitation as
-        // `refine_receiver` below), and `mutates_receiver` is type-keyed so the handle types, whose
+        // supersedes. Simple-`Ident` receivers only here — the PROJECTED case (`xs[0].push(v)`,
+        // `s.xs.push(v)`) is handled below, AFTER `infer(obj)` runs, because it needs `obj`'s own
+        // stale read reported first (W19: a parent-side `xs[0].push(v)` observes the task's stale
+        // write before it supersedes it). `mutates_receiver` is type-keyed so the handle types, whose
         // task-side writes ARE visible, never taint.
         if let ExprKind::Ident(name) = &obj.kind
             && let Some(rty) = self.lookup(name)
@@ -2592,6 +2594,17 @@ impl Checker {
             self.note_task_write(&name, obj.span);
         }
         let obj_ty = self.infer(obj);
+        // TICKET-165 — a mutator on a PROJECTED receiver (`xs[0].push(v)`, `s.xs.push(v)`,
+        // `m[k].push(v)`) mutates the container IN PLACE through the root binding (measured: `ys :=
+        // xs[0]; ys.push(2); print(xs)` prints `[[1, 2]]`), so it is a write through the root at the
+        // projected path, just like a projected `=`/`+=` target. `infer(obj)` above already reported
+        // any parent-side stale read of `obj` itself (W19), so this untaint runs strictly after it,
+        // and it reuses the `obj_ty` `infer(obj)` just computed rather than re-inferring the receiver
+        // (re-inferring would double-report — the same ceiling `note_projected_task_write`'s caller
+        // must not cross).
+        if mutates_receiver(&obj_ty, method) {
+            self.note_projected_task_write(obj);
+        }
         // Refine-on-first-use: if `obj` is a simple variable whose type has an `Unknown` element/
         // key/value/type-arg slot (an empty literal / nullary variant / native `None`), and this is
         // a slot-supplying mutator (`push`/`add`/`insert`/`extend`), re-pin the binding to the

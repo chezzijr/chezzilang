@@ -105,9 +105,10 @@ one of them under-warning rather than over-warning (per frame, so it neither ent
 `fn`; lexical, not dataflow; builtin containers only; keyed by bare name, so any fresh binding of the
 name clears it — though the taint carries a scope coordinate, so a *block-local* shadow's taint is never
 charged to the outer binding; a partial `m[k] = v` / `p.f = v` in the parent untaints silently; a write
-made only through a closure or nested `fn` declared *inside* the task is not tainted at all; and a
-partial *read* of a partial write declines, so a task-side `p.count = ...` read back as `p.name` is
-silent). Full rules and the reasoning for each:
+made only through a closure or nested `fn` declared *inside* the task is not tainted at all; and
+a partial read the checker cannot match to the partial write (a computed or negative index, a
+field against a key) declines, while a read of the same field or key warns). Full rules and the
+reasoning for each:
 [`syntax.md` §capture](syntax.md).
 
 **The copy is taken FRESH, per task, at its `spawn` — at every depth.** A task sees the values current

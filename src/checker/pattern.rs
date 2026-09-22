@@ -1663,9 +1663,10 @@ impl Checker {
                 type_args,
             } => self.infer_call(callee, args, named, type_args, expr.span),
             // W8-3 — a FIELD/INDEX read reaches its binding through a projection, so it observes only
-            // PART of the value. `shield_granular_read` is what makes the read side symmetric with
-            // the write side's long-standing decline on the same ambiguity; see
-            // `report_spawn_stale_read_at` for the ceiling it states.
+            // PART of the value. TICKET-165: `shield_granular_read` now reports a read along the
+            // WRITTEN path itself (at the root's span) and consumes the taint, or otherwise lifts the
+            // entry out so the inner `Ident` read cannot report (or consume) it either; see
+            // `report_spawn_stale_read_at` for the narrowed ceiling it declines on.
             ExprKind::Field {
                 obj,
                 name,

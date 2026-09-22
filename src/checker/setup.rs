@@ -2878,7 +2878,7 @@ impl Checker {
     /// parent-side `xs[0] = v` must untaint *first*, so the receiver read it then performs cannot
     /// report a write the parent has just superseded.
     pub(super) fn note_assign_root(&mut self, target: &Expr, op: AssignOp) {
-        let Some((name, granular)) = chain_root(target) else {
+        let Some((name, root_span, path)) = chain_path(target) else {
             return;
         };
         let name = name.clone();
@@ -2887,7 +2887,7 @@ impl Checker {
         // measured 1, not 2). The plain `=` form has no such read, and any read in the
         // RHS was already inferred (and reported) before `check_assign` was called.
         if op != AssignOp::Eq {
-            self.report_spawn_stale_read_at(&name, target.span, granular);
+            self.report_spawn_stale_read_at(&name, root_span, &path);
         }
         // ponytail: a plain `=` through an INDEX/FIELD target (`m[k] = v`, `p.f = v`)
         // untaints silently even though it too only writes PART of the stale copy —
@@ -2896,7 +2896,7 @@ impl Checker {
         // checker cannot tell (`m["a"] = 2` after a task-side `m["a"] = 1` genuinely
         // supersedes; `m["b"] = 2` does not), so it declines rather than emit a warning
         // that is noise half the time. Upgrade path: constant-key tracking.
-        self.note_task_write_at(&name, target.span, granular);
+        self.note_task_write_at(&name, target.span, path);
     }
     /// W8-3 — enter a body that is its OWN frame: a nested `fn`, a closure, or the speculative
     /// return-inference walk of either. Such a body is NOT the enclosing task (it has its own caller),
@@ -2959,14 +2959,16 @@ impl Checker {
     /// does reach here with `in_spawn_block` true, and taints correctly (measured: `spawn: defer:
     /// xs.push(1)` leaves `xs.len() == 0` after the join, and the read warns).
     pub(super) fn note_task_write(&mut self, name: &str, span: Span) {
-        self.note_task_write_at(name, span, false);
+        self.note_task_write_at(name, span, Vec::new());
     }
-    /// [`Checker::note_task_write`] with the write's granularity spelled out. `granular` means the
-    /// write went through an INDEX/FIELD projection and so replaced only part of the copy — recorded
-    /// so [`Checker::report_spawn_stale_read_at`] can decline a granular read of a granular write.
-    /// The mutator-method site (`xs.push(v)`) passes `false`: every member of `mutates_receiver` is a
+    /// [`Checker::note_task_write`] with the write's constant path spelled out (empty = a
+    /// whole-binding write). Every call APPENDS a new entry to the binding's `writes` list rather than
+    /// keeping only the first — TICKET-165: a later read must be checked against the write it
+    /// OVERLAPS, and `or_insert`-ing only the first write lost a same-field second write entirely
+    /// (`s.w = 2` then `s.v = 2`, a read of `s.v` must cite line 2, not line 1). The mutator-method
+    /// site (`xs.push(v)`) passes an EMPTY path: every member of `mutates_receiver` is a
     /// whole-container read-modify-write, so any read of the binding observes it.
-    pub(super) fn note_task_write_at(&mut self, name: &str, span: Span, granular: bool) {
+    pub(super) fn note_task_write_at(&mut self, name: &str, span: Span, path: Vec<PathSeg>) {
         if !self.in_spawn_block {
             self.spawn_stale.remove(name);
             return;
@@ -2988,10 +2990,24 @@ impl Checker {
             self.spawn_stale
                 .entry(name.to_string())
                 .or_insert(StaleWrite {
-                    span,
                     scope,
-                    granular,
-                });
+                    writes: Vec::new(),
+                })
+                .writes
+                .push((span, path));
+        }
+    }
+    /// TICKET-165 — a mutator (`push`, `add`, …) called on a PROJECTED receiver (`xs[0].push(v)`,
+    /// `s.xs.push(v)`, `m[k].push(v)`) is a write through the root binding at the projected path, not
+    /// through a bare `Ident`. `chain_path` resolves `obj` down to its root and constant path; a
+    /// receiver that does not bottom out on a name (or is a bare `Ident`, already handled at the
+    /// `infer_method_call` call site) is a no-op here.
+    pub(super) fn note_projected_task_write(&mut self, obj: &Expr) {
+        if let Some((name, _, path)) = chain_path(obj)
+            && !path.is_empty()
+        {
+            let name = name.clone();
+            self.note_task_write_at(&name, obj.span, path);
         }
     }
     /// Index into `scopes` of the scope that OWNS `name` — the same binding [`Checker::lookup`]
@@ -3014,43 +3030,68 @@ impl Checker {
     /// flagged even though the write still cannot reach it. Upgrade path: a real CFG, which this
     /// single source-order statement walk deliberately is not.
     pub(super) fn report_spawn_stale_read(&mut self, name: &str, span: Span) {
-        self.report_spawn_stale_read_at(name, span, false);
+        self.report_spawn_stale_read_at(name, span, &[]);
     }
-    /// [`Checker::report_spawn_stale_read`] with the READ's granularity spelled out. `granular` means
-    /// the read reaches the binding through an INDEX/FIELD projection (`p.name`, `m["b"]`) rather than
-    /// observing the whole value.
+    /// TICKET-165 — the first `writes` entry in `name`'s taint whose path overlaps `read`
+    /// ([`paths_overlap`]), if any. Used by both the report and the shield sites so they agree on
+    /// which write a read is charged to.
+    fn stale_write_seen_by(&self, name: &str, read: &[PathSeg]) -> Option<Span> {
+        self.spawn_stale.get(name).and_then(|w| {
+            w.writes
+                .iter()
+                .find(|(_, path)| paths_overlap(path, read) == Some(true))
+                .map(|(span, _)| *span)
+        })
+    }
+    /// [`Checker::report_spawn_stale_read`] with the READ's constant path spelled out (empty = a
+    /// whole-value read).
     ///
-    /// A granular read of a GRANULAR write DECLINES — this is the seventh ceiling. The write side has
-    /// always declined on exactly this ambiguity (`note_assign_root`'s third ceiling: after a task-side
-    /// `m["a"] = 1`, a parent `m["a"] = 2` supersedes it and `m["b"] = 2` does not, and the checker
-    /// cannot tell which), and the read side was NOT symmetric with it: a field-granular task write
-    /// poisoned every later read of the root, so `p.count = p.count + 1` in a task made `print(p.name)`
-    /// warn — about a field that was never written, on a program that printed the right answer. Worse,
-    /// it still warned after the user carried the value out on a Channel exactly as the message told
-    /// them to, and a warning that fires after its own fix is applied destroys trust in every other
-    /// warning. The project rule is `correct > silent > wrong`: when the checker cannot tell, it
-    /// declines. Under-warning here is the intended price — a task-side `p.count = 1` read back as
-    /// `p.count` in the parent is genuinely stale and is now missed. Upgrade path: track the written
-    /// path (constant field/key) rather than just the root, which is the same upgrade the write side's
-    /// ceiling names.
-    ///
-    /// The three mixed pairs all still report, because in each the checker CAN tell: a whole-binding
-    /// write is observed by any read of it, and a whole-binding read observes any write to it.
-    /// W8-3 — about to infer a FIELD/INDEX read `e`. If the binding it projects from carries a
-    /// GRANULAR taint, lift the entry out for the duration so the bare-`Ident` read buried inside
-    /// `infer_field`/`infer_index` cannot report (or consume) it, and hand it back to
-    /// [`Checker::unshield_granular_read`].
+    /// TICKET-165 — the read's path is compared against EVERY task write recorded for `name`
+    /// ([`paths_overlap`]), not just checked for "both granular": a read along the same field or key
+    /// a write went through warns (`s.v = 2` then `print(s.v)`); a read through a DIFFERENT constant
+    /// field or key stays silent (`p.count = ...` read back as `p.name`); a read or write through a
+    /// computed index, a negative literal, or a field compared against a key declines, because the
+    /// checker cannot tell whether the two alias — the narrowed seventh ceiling. A whole-value write
+    /// or read (empty path) always overlaps, so the three mixed pairs still report.
+    pub(super) fn report_spawn_stale_read_at(&mut self, name: &str, span: Span, read: &[PathSeg]) {
+        if self.in_spawn_block {
+            return; // inside the task the copy IS the value being read — nothing is lost
+        }
+        let Some(write) = self.stale_write_seen_by(name, read) else {
+            return;
+        };
+        self.spawn_stale.remove(name);
+        self.warn(
+            span,
+            format!(
+                "'{name}' is read here as its pre-`spawn:` value — a captured binding crosses the \
+                 task airlock as an independent copy, so the write inside the `spawn:` block (line \
+                 {}) is not visible after the join (carry the value out on a Channel, or use a \
+                 Shared)",
+                write.line
+            ),
+        );
+    }
+    /// W8-3 — about to infer a FIELD/INDEX read `e`. If the binding it projects from carries a taint
+    /// whose write the read's path overlaps, report it now (at the root's span) and consume it — the
+    /// bare-`Ident` read buried inside `infer_field`/`infer_index` must never see an entry this arm
+    /// has already judged, or it re-reports it as a whole read. If the taint exists but does NOT
+    /// overlap (a disjoint field/key, or a `Dynamic` segment on either side), lift the entry out for
+    /// the duration and hand it back to [`Checker::unshield_granular_read`], so the inner read cannot
+    /// wrongly report or consume it either.
     ///
     /// Lifting the ONE entry — rather than setting a checker-wide "we're in a projection" flag — is
     /// what keeps an unrelated binding read inside the INDEX expression (`m[k]`, where `k` is itself
     /// stale) fully reportable. Nesting is safe: `a.b.c` shields `a` at the outer arm, the inner arm
     /// finds nothing left to lift and restores nothing.
     pub(super) fn shield_granular_read(&mut self, e: &Expr) -> Option<(String, StaleWrite)> {
-        let (name, _) = chain_root(e)?;
-        if !self.spawn_stale.get(name).is_some_and(|w| w.granular) {
+        let (name, root_span, read) = chain_path(e)?;
+        self.spawn_stale.contains_key(name).then_some(())?;
+        let name = name.clone();
+        if self.stale_write_seen_by(&name, &read).is_some() {
+            self.report_spawn_stale_read_at(&name, root_span, &read);
             return None;
         }
-        let name = name.clone();
         self.spawn_stale.remove_entry(&name)
     }
     /// Put back what [`Checker::shield_granular_read`] lifted. 1:1 — an entry consumed by a report is
@@ -3059,27 +3100,6 @@ impl Checker {
         if let Some((name, w)) = saved {
             self.spawn_stale.insert(name, w);
         }
-    }
-    pub(super) fn report_spawn_stale_read_at(&mut self, name: &str, span: Span, granular: bool) {
-        if self.in_spawn_block {
-            return; // inside the task the copy IS the value being read — nothing is lost
-        }
-        if granular && self.spawn_stale.get(name).is_some_and(|w| w.granular) {
-            return; // both sides partial — which part is anyone's guess, so decline (7th ceiling)
-        }
-        let Some(write) = self.spawn_stale.remove(name) else {
-            return;
-        };
-        self.warn(
-            span,
-            format!(
-                "'{name}' is read here as its pre-`spawn:` value — a captured binding crosses the \
-                 task airlock as an independent copy, so the write inside the `spawn:` block (line \
-                 {}) is not visible after the join (carry the value out on a Channel, or use a \
-                 Shared)",
-                write.span.line
-            ),
-        );
     }
 
     /// Does `name` resolve to the MODULE scope (index 0) — i.e. is it a module-level binding rather
@@ -4403,26 +4423,58 @@ impl Checker {
     }
 }
 
-/// W8-3 — walk an lvalue-shaped chain (`xs`, `xs[i]`, `p.f`, `a.b[0].c`) down to the BINDING it
-/// reaches, and report whether the walk went through any INDEX/FIELD projection. That binding is the
-/// one that crosses the task airlock, and the flag is what the taint's granularity means on both
-/// sides: `Some(("a", true))` for `a.b[0].c`, `Some(("xs", false))` for a bare `xs`. `None` when the
-/// chain bottoms out on something that is not a name (`f().x`) — there is no binding to charge.
+/// TICKET-165 — walk an lvalue-shaped chain (`xs`, `xs[i]`, `p.f`, `a.b[0].c`) down to the BINDING it
+/// reaches, and collect the constant [`PathSeg`] path (root first) the walk went through. That
+/// binding is the one that crosses the task airlock; the path is what
+/// [`paths_overlap`] compares a write and a read by. `None` when the chain bottoms out on something
+/// that is not a name (`f().x`) — there is no binding to charge. An INT index literal becomes
+/// `PathSeg::Int`, a STR index literal `PathSeg::Str`, and anything else (a computed index, a
+/// `Unary { op: Neg, .. }` literal, a field projected onto by an index or vice versa) becomes
+/// `PathSeg::Dynamic` — the checker cannot tell whether it aliases a constant path, so it must not be
+/// treated as either a match or a miss.
 ///
 /// Shared by the write side ([`Checker::note_assign_root`]) and the read side (the `Field`/`Index`
 /// arms of `infer`) so the two cannot drift on what "the same binding, partially written" means —
 /// they drifting apart is exactly what made a field-granular task write poison every read of the root.
-pub(super) fn chain_root(e: &Expr) -> Option<(&String, bool)> {
+pub(super) fn chain_path(e: &Expr) -> Option<(&String, Span, Vec<PathSeg>)> {
     let mut e = e;
-    let mut granular = false;
+    let mut segs = Vec::new();
     loop {
         match &e.kind {
-            ExprKind::Index { obj, .. } | ExprKind::Field { obj, .. } => {
-                granular = true;
+            ExprKind::Field { obj, name, .. } => {
+                segs.push(PathSeg::Field(name.clone()));
                 e = obj;
             }
-            ExprKind::Ident(name) => return Some((name, granular)),
+            ExprKind::Index { obj, index } => {
+                segs.push(match &index.kind {
+                    ExprKind::Int(i) if *i >= 0 => PathSeg::Int(*i),
+                    ExprKind::Str(s) => PathSeg::Str((**s).to_owned()),
+                    _ => PathSeg::Dynamic,
+                });
+                e = obj;
+            }
+            ExprKind::Ident(name) => {
+                segs.reverse();
+                return Some((name, e.span, segs));
+            }
             _ => return None,
         }
     }
+}
+
+/// TICKET-165 — do a task write's path and a read's path overlap? `Some(true)` when a read along
+/// the written path, a prefix of it, or an extension of it, would observe the write; `Some(false)`
+/// when the two diverge at two DIFFERENT constants of the same kind (a different field, a different
+/// int/str key) and so can never alias; `None` when either side hits a [`PathSeg::Dynamic`] before
+/// diverging — the checker cannot tell, so it must decline rather than guess.
+pub(super) fn paths_overlap(write: &[PathSeg], read: &[PathSeg]) -> Option<bool> {
+    for (w, r) in write.iter().zip(read.iter()) {
+        if *w == PathSeg::Dynamic || *r == PathSeg::Dynamic {
+            return None;
+        }
+        if w != r {
+            return Some(false);
+        }
+    }
+    Some(true)
 }

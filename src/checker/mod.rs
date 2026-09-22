@@ -2652,8 +2652,22 @@ struct Checker {
     memo_verifying: bool,
 }
 
-/// W8-3 — one `spawn_stale` entry: the task-side write that made a binding stale, plus the two
-/// coordinates that decide whether a later read may be charged to it.
+/// TICKET-165 — one constant segment of a projected lvalue chain (`xs[i].f` -> `[Dynamic,
+/// Field("f")]`, root first). A task write and a parent read are compared segment by segment
+/// ([`crate::checker::setup::paths_overlap`]): the same field name or the same non-negative int/str
+/// literal is a match, two different constants of the same kind are disjoint, and a `Dynamic`
+/// segment (a computed index, a negative literal, or a field compared against a key) means the
+/// checker cannot tell, so it declines rather than guess.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum PathSeg {
+    Field(String),
+    Int(i64),
+    Str(String),
+    Dynamic,
+}
+
+/// W8-3 — one `spawn_stale` entry: every task-side write that made a binding stale, plus the scope
+/// coordinate that decides whether a later read may be charged to it.
 ///
 /// `scope` is the index (into `Checker::scopes`) of the scope that OWNS the written binding, resolved
 /// at write time. The map is keyed by bare name, which says nothing about WHICH binding of that name
@@ -2664,14 +2678,15 @@ struct Checker {
 /// `xs.len()` and printed the correct `2`). [`Checker::pop_scope`] drops every entry whose owning
 /// scope is the one going away, so a taint dies with the binding it describes.
 ///
-/// `granular` says the write went through an INDEX or FIELD projection (`p.count = v`, `m[k] = v`) and
-/// so replaced only PART of the stale copy. See [`Checker::report_spawn_stale_read`] for what the read
-/// side does with it.
+/// `writes` is every task-side write recorded so far, each with the constant path
+/// ([`PathSeg`]) it went through (empty = a whole-binding write). TICKET-165 keeps ALL of them,
+/// not just the first, because a later read must be checked against the write it actually
+/// OVERLAPS — a write to a different field ahead of the overlapping one must not be the one cited
+/// (`s.w = 2` then `s.v = 2`, and a read of `s.v` cites the `s.v = 2` line, not `s.w = 2`'s).
 #[derive(Clone, Debug)]
 pub(super) struct StaleWrite {
-    span: Span,
     scope: usize,
-    granular: bool,
+    writes: Vec<(Span, Vec<PathSeg>)>,
 }
 
 mod exhaust;

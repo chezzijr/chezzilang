@@ -7,6 +7,13 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-165 (2026-09-22) — the airlock warning fires on a same-path field/index read and on a
+  mutator through an element or field (closes W11-13).** A task write now records its constant
+  field/key path, and a parent read along it, a prefix of it or an extension of it warns (`s.v = 2`
+  then `print(s.v)`; `xs[0].push(2)` then `print(xs)`); a disjoint constant path stays silent, and a
+  computed or negative index declines. Runtime unchanged. Tests:
+  `checker::tests::a_same_path_read_of_a_projected_task_write_warns` and five siblings. Docs:
+  `docs/syntax.md`, `docs/concurrency.md`, `docs/gaps.md`, `CLAUDE.md`.
 - **`str.pad_right(width, fill)` (2026-09-22) — the mirror of `pad_left`, CPython's `str.ljust` (closes deferred TICKET-083).** `"ab".pad_right(6, " ")` → `"ab    "`; the free-fn form `string.pad_right(s, w, fill)` delegates to it. Shares `pad_left`'s VM arm (`src/vm/call.rs`), so it has the same never-shrink rule, exact-width fill cycle and faults (`pad_right: fill must not be empty`, `string pad capacity overflow`). 083's other half, a runtime width in a format spec (`"{s:<{w}}"`), had already landed in TICKET-162. Tests: `tests/chz/stdlib/fault_contracts_test.chz` `string_pad_right_mirrors_pad_left` (values match CPython 3.14 `ljust`). Docs: `docs/stdlib.md`, `docs/syntax.md`, `docs/gaps.md`, `CLAUDE.md`.
 - **TICKET-090 (2026-09-22) — a local binding that is never read now warns.** A fn-local or
   block-local `:=`/`let` binding, or a `for` loop variable, that is never read emits `unused variable
