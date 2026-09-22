@@ -8,7 +8,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and no cross-engine gate; see the entry directly below.
 
 - **TICKET-167 (2026-09-23) — a seeded scheduler mode for the M:N engine, the last of `docs/future.md`
-  §2b's four replacement oracles (closes the first condition of the JIT entry rule below).**
+  §2b's four replacement oracles.**
   `CHEZZI_SCHED_SEED=<u64>` (`src/vm/sched_seed.rs`) drives every scheduler free choice — which
   runnable fiber a pop returns (`LocalQ::pop`, the three `global.pop_front()` sites), the
   step-0/`GLOBAL_CHECK_INTERVAL` cadence, `try_steal`'s start, `handoff_wake`'s `runnext` coin flip,

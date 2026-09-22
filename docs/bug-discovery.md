@@ -662,8 +662,10 @@ target/release/schedfuzz --program tests/sched_seed/interleave.chz       # one p
 A finding prints `FINDING kind=<hang|panic|rc|output> seed=<S> threads=<T> program=<path> replay:
 CHEZZI_SCHED_SEED=<S> CHEZZI_THREADS=<T> chezzi <test|run> <path>` — paste the `replay:` clause
 verbatim to reproduce. Every run is judged against an UNSEEDED baseline of the SAME fixed binary
-(never a mutant's own run), so a target that already hangs unseeded is still comparable, and a target
-whose two unseeded runs disagree is skipped and printed `UNSTABLE` rather than scored.
+(never a mutant's own run), so a target that already hangs unseeded is still comparable. The baseline
+samples `BASELINE_REPS = 5` unseeded reps at the SWEPT worker count: a target whose reps disagree on
+stdout only turns `check_output` off for it, while reps that disagree on rc, or that time out, or that
+panic, mark the whole target `UNSTABLE` and skip it rather than score it.
 
 **Replay a single failing seed directly**, without the harness:
 
@@ -731,7 +733,10 @@ bug), **W15-5** for two wall-clock-ratio-gated `tests/chz` files that flake unde
 contention (measured: `regex_test.chz` 1/10 unseeded under SUSTAINED sibling load, 0/30 with none),
 and one entry each for the still-open **W15-3** (net), **W15-6** (a generator-over-channel hang) and
 **W15-7** (a cancel-propagation hang) so a routine sweep does not keep re-reporting an already-filed
-bug as new. `--program <path>` bypasses the skip list — it always runs the target you name.
+bug as new. `--program <path>` bypasses the skip list — it always runs the target you name. A
+`KNOWN_TARGETS` entry currently skips the WHOLE target, so it also drops that target's hang, panic and
+rc checks, not just the output check its reason names; an output-only skip (leaving the other three
+live) is the upgrade path, not yet built.
 
 Measured 2026-09-23, `--seeds 1..17 --threads 1,2,0`, four full corpus sweeps across the two fixes:
 the first (worker-count-blind baseline, keyword-gated `.expected`) flagged `output` findings only on
@@ -742,5 +747,11 @@ baseline sample happened to disagree). After the worker-count fix, the SAME `nes
 row is no longer a lucky `UNSTABLE` skip: judged at its own swept `T=2`, its baseline is stable and its
 wall-clock-ratio flake now scores as a real `rc` finding, joining `regex_test.chz` in **W15-5**. After
 both fixes and the `KNOWN_TARGETS` skip list, a clean-tree sweep reports 0 unexplained findings and
-exits 0 (quoted below); every remaining divergence is either the documented contract (**W15-4**), a
+exits 0:
+
+```
+done: 177 targets, 8496 runs, 0 finding(s), 0 unstable, 11 known
+```
+
+every remaining divergence is either the documented contract (**W15-4**), a
 load-sensitive test-infra flake (**W15-5**), or an already-filed bug (**W15-3**, **W15-6**, **W15-7**).
