@@ -13442,8 +13442,8 @@ fn regex_chz_match_matches_handbuilt_layouts() {
     assert!(harvested.type_params.is_empty());
     assert!(harvested.methods.is_empty());
     assert!(matches!(harvested.origin, StructOrigin::Builtin));
-    // The harvest must ALSO have populated the 5 fn sigs (whole-module signature source).
-    assert_eq!(sig.functions.len(), 5, "std/regex.chz must harvest 5 fns");
+    // The harvest must ALSO have populated the 6 fn sigs (whole-module signature source).
+    assert_eq!(sig.functions.len(), 6, "std/regex.chz must harvest 6 fns");
     // seed_stdlib_structs's hand-built Match copy (globally-present layout) must agree.
     let seeded = c.structs.get("Match").expect("Match must be seeded");
     assert_eq!(
