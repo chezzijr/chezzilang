@@ -131,11 +131,13 @@ static SERVICE: OnceLock<NetPoller> = OnceLock::new();
 /// Returns `Some(fiber)` WITHOUT registering iff `cancel` — the PARKING FIBER'S SCOPE cancel, handed
 /// in by `poll_park_offload` (NOT the sched's legacy global/outermost `MnSched::cancel`, which a
 /// cancelled INNER scope does not set) — is already set (a sibling faulted while this fiber was on its
-/// way to park). The caller must re-inject it so it resumes and unwinds, rather than parking on a poller
-/// that [`drain_sched`] may have already swept. `None` on a normal park. The cancel read + the insert
-/// happen under the registry lock that `drain_sched` also holds, so park and drain are serialized: the
-/// fiber is either registered-then-drained or rejected.
-#[allow(clippy::too_many_arguments)] // the park identity + the scope cancel + the D6c deadline
+/// way to park), OR iff `closed` (W15-1: the owning `SocketCore`/`ListenerCore` was `close()`d while
+/// this op was on its way to park) is already set. The caller must re-inject it so it resumes and
+/// unwinds or re-faults on the closed handle, rather than parking on a poller that [`drain_sched`] may
+/// have already swept or arming an fd `close` is about to drop. `None` on a normal park. The cancel +
+/// closed reads + the insert happen under the registry lock that `drain_sched` also holds, so park and
+/// drain/close are serialized: the fiber is either registered-then-drained or rejected.
+#[allow(clippy::too_many_arguments)] // the park identity + the scope cancel + the W15-1 closed flag + the D6c deadline
 #[must_use]
 pub fn register(
     key: usize,
@@ -145,11 +147,12 @@ pub fn register(
     sched: Arc<MnSched>,
     cancel: Arc<AtomicBool>,
     in_flight: Arc<AtomicBool>,
+    closed: Arc<AtomicBool>,
     deadline: Option<Instant>,
 ) -> Option<Fiber> {
-    SERVICE
-        .get_or_init(NetPoller::new)
-        .register(key, fd, interest, fiber, sched, cancel, in_flight, deadline)
+    SERVICE.get_or_init(NetPoller::new).register(
+        key, fd, interest, fiber, sched, cancel, in_flight, closed, deadline,
+    )
 }
 
 /// De-register a pending park on `key` (a socket `close` racing the park). If a fiber was still
@@ -215,7 +218,7 @@ impl NetPoller {
         NetPoller { inner }
     }
 
-    #[allow(clippy::too_many_arguments)] // the park identity (key/fd/interest/fiber/sched/cancel/in_flight) + D6c deadline
+    #[allow(clippy::too_many_arguments)] // the park identity (key/fd/interest/fiber/sched/cancel/in_flight) + W15-1 closed + D6c deadline
     fn register(
         &self,
         key: usize,
@@ -225,6 +228,7 @@ impl NetPoller {
         sched: Arc<MnSched>,
         cancel: Arc<AtomicBool>,
         in_flight: Arc<AtomicBool>,
+        closed: Arc<AtomicBool>,
         deadline: Option<Instant>,
     ) -> Option<Fiber> {
         // The whole op runs under the registry lock so that registration is atomic w.r.t. `drain_sched`
@@ -239,7 +243,7 @@ impl NetPoller {
         // would only see the OUTERMOST nursery's flag and let a fiber of a cancelled INNER scope park on
         // an already-swept poller. Read it under the SAME lock `drain_sched` sweeps under, so the two are
         // serialized — hand the fiber back to unwind rather than park it on a poller a past sweep drained.
-        if cancel.load(Ordering::Relaxed) {
+        if cancel.load(Ordering::Relaxed) || closed.load(Ordering::Acquire) {
             return Some(fiber);
         }
         // The key is never a duplicate: a second op on the same socket is rejected by the `in_flight`
@@ -263,9 +267,12 @@ impl NetPoller {
             Interest::Write => Event::writable(key),
         };
         // SAFETY: `fd` is owned by the live `SocketCore`/connecting stream rooted on the parked fiber
-        // (its operand stack, or `pending_connect`), so it stays open until this op is `delete`d (the
-        // fire path / `deregister` / `drain_sched`), all of which precede any stream drop — satisfying
-        // `add`'s delete-before-drop contract.
+        // (its operand stack, or `pending_connect`). `close()` (W15-1) stores `closed` and
+        // `deregister`s BEFORE it drops the stream, and the `closed` check above (under this same
+        // lock) refuses any park that arrives after `closed` is set — so a `close` racing this
+        // `register` either loses (this park runs, then `close`'s `deregister` deletes it before the
+        // drop) or wins (this park is refused before it ever arms the fd). Either way `add` never
+        // arms a closed or reused fd, satisfying `add`'s delete-before-drop contract.
         unsafe { self.inner.poller.add(fd, ev) }.expect("netpoller add");
         // D6c — if this park carries a timeout deadline, wake the poll thread so its in-flight `wait()`
         // re-bounds its timeout (this deadline may be sooner than the one it is sleeping until), exactly
@@ -514,7 +521,7 @@ fn fire_due_timers(inner: &Inner) {
 mod tests {
     use super::*;
     use crate::ast::Span;
-    use crate::vm::core::new_in_flight;
+    use crate::vm::core::{new_closed, new_in_flight};
     use std::io::Write;
     use std::net::{TcpListener, TcpStream};
     use std::os::fd::AsRawFd;
@@ -595,6 +602,7 @@ mod tests {
                 Arc::clone(&sched),
                 no_cancel(),
                 new_in_flight(),
+                new_closed(),
                 None
             )
             .is_none(),
@@ -651,6 +659,7 @@ mod tests {
                 fd: server.as_raw_fd(),
                 interest: Interest::Read,
                 in_flight: new_in_flight(),
+                closed: new_closed(),
                 deadline: None,
             },
         );
@@ -685,6 +694,7 @@ mod tests {
                 Arc::clone(&sched),
                 no_cancel(),
                 new_in_flight(),
+                new_closed(),
                 Some(deadline)
             )
             .is_none(),
@@ -734,6 +744,7 @@ mod tests {
                 Arc::clone(&sched),
                 no_cancel(),
                 new_in_flight(),
+                new_closed(),
                 Some(deadline)
             )
             .is_none(),
@@ -769,6 +780,7 @@ mod tests {
                 Arc::clone(&sched),
                 no_cancel(),
                 new_in_flight(),
+                new_closed(),
                 Some(deadline)
             )
             .is_none(),
@@ -808,6 +820,7 @@ mod tests {
                 Arc::clone(&sched),
                 no_cancel(),
                 new_in_flight(),
+                new_closed(),
                 Some(deadline)
             )
             .is_none(),
@@ -858,6 +871,7 @@ mod tests {
                 Arc::clone(&sched),
                 no_cancel(),
                 Arc::clone(&in_flight),
+                new_closed(),
                 None
             )
             .is_none(),
@@ -893,6 +907,7 @@ mod tests {
                 Arc::clone(&sched),
                 no_cancel(),
                 new_in_flight(),
+                new_closed(),
                 None
             )
             .is_none(),
@@ -945,6 +960,7 @@ mod tests {
                 Arc::clone(&sched_a),
                 no_cancel(),
                 Arc::clone(&if_a1),
+                new_closed(),
                 None
             )
             .is_none(),
@@ -959,6 +975,7 @@ mod tests {
                 Arc::clone(&sched_a),
                 no_cancel(),
                 Arc::clone(&if_a2),
+                new_closed(),
                 None
             )
             .is_none(),
@@ -973,6 +990,7 @@ mod tests {
                 Arc::clone(&sched_b),
                 no_cancel(),
                 Arc::clone(&if_b),
+                new_closed(),
                 None
             )
             .is_none(),
@@ -1037,6 +1055,7 @@ mod tests {
                 Arc::clone(&sched),
                 no_cancel(),
                 Arc::clone(&in_flight),
+                new_closed(),
                 None
             )
             .is_none(),
@@ -1068,6 +1087,37 @@ mod tests {
             "disarmed fd did not double-inject"
         );
         assert!(!deregister(key), "second deregister finds nothing");
+        drop(server);
+    }
+
+    /// W15-1 — a park that arrives after the owning core's `closed` flag is set is refused, not armed:
+    /// `register` returns the fiber unregistered instead of calling `poller.add` on an fd that `close`
+    /// is about to (or already did) drop. Pins the second race window in `## Digest` (the "late
+    /// register" case), independently of the `close`-vs-`deregister` reorder in `netio.rs`.
+    #[test]
+    fn register_refuses_a_closed_socket() {
+        let (_client, server) = loopback_pair();
+        let sched = mk_sched();
+        sched.inflight.fetch_add(1, Ordering::Relaxed);
+        let closed = new_closed();
+        closed.store(true, Ordering::Release);
+        let key = usize::MAX - 9;
+        assert!(
+            register(
+                key,
+                server.as_raw_fd(),
+                Interest::Read,
+                mk_fiber(),
+                Arc::clone(&sched),
+                no_cancel(),
+                new_in_flight(),
+                closed,
+                None
+            )
+            .is_some(),
+            "a park on a closed socket is refused, not armed"
+        );
+        assert!(!deregister(key), "the refused park left no registry row");
         drop(server);
     }
 
@@ -1163,6 +1213,7 @@ mod tests {
                 Arc::clone(&sched),
                 no_cancel(),
                 new_in_flight(),
+                new_closed(),
                 None
             )
             .is_none(),

@@ -641,6 +641,7 @@ impl Vm {
                         listener: Mutex::new(Some(listener)),
                         key: core::next_poll_key(),
                         in_flight: core::new_in_flight(),
+                        closed: core::new_closed(),
                     });
                     let v = Value::obj(self.heap.alloc(Obj::Listener(core)));
                     Ok(self.sock_ok(v))
@@ -665,6 +666,7 @@ impl Vm {
             stream: Mutex::new(Some(stream)),
             key,
             in_flight,
+            closed: core::new_closed(),
             carry: Mutex::new(Vec::new()),
         });
         let v = Value::obj(self.heap.alloc(Obj::Socket(core)));
@@ -707,6 +709,7 @@ impl Vm {
             fd,
             interest: poller::Interest::Write,
             in_flight,
+            closed: core::new_closed(),
             deadline: self.deadline,
         });
     }
@@ -790,6 +793,7 @@ impl Vm {
                     fd,
                     interest: poller::Interest::Read,
                     in_flight: Arc::clone(&core.in_flight),
+                    closed: Arc::clone(&core.closed),
                     deadline,
                 };
                 if self.park_on_fd(h, args, target, span)? {
@@ -989,6 +993,7 @@ impl Vm {
                         fd,
                         interest: poller::Interest::Read,
                         in_flight: Arc::clone(&core.in_flight),
+                        closed: Arc::clone(&core.closed),
                         deadline,
                     };
                     if self.park_on_fd(h, args, target, span)? {
@@ -1138,6 +1143,7 @@ impl Vm {
                     fd,
                     interest: poller::Interest::Write,
                     in_flight: Arc::clone(&core.in_flight),
+                    closed: Arc::clone(&core.closed),
                     deadline,
                 };
                 if self.park_on_fd(h, args, target, span)? {
@@ -1215,10 +1221,15 @@ impl Vm {
             "close" => {
                 self.arity_err("close", args, 0, span)?;
                 let core = self.socket_core(h);
-                // Disarm any pending poller registration (a `close` racing a park) before the fd drops;
-                // a no-op in the common case (the owning fiber is running, not parked).
+                // W15-1 — take the stream out first so a fiber `register`ing concurrently (already past
+                // its `WouldBlock` but not yet under the registry lock) sees `closed` before it can arm
+                // the fd; only then deregister a pending park, and drop the stream (closing the fd) LAST
+                // so `deregister`'s epoll `delete` never races the close. Must not hold `stream`'s guard
+                // across `deregister`: it takes the sched lock via `complete_offload`.
+                let stream = core.stream.lock().unwrap().take();
+                core.closed.store(true, Ordering::Release);
                 poller::deregister(core.key);
-                *core.stream.lock().unwrap() = None;
+                drop(stream);
                 Ok(Value::nil())
             }
             _ => Err(self.err(format!("type Socket has no method '{method}'"), span)),
@@ -1271,6 +1282,7 @@ impl Vm {
                     fd,
                     interest: poller::Interest::Read,
                     in_flight: Arc::clone(&core.in_flight),
+                    closed: Arc::clone(&core.closed),
                     deadline,
                 };
                 if self.park_on_fd(h, args, target, span)? {
@@ -1349,8 +1361,11 @@ impl Vm {
             "close" => {
                 self.arity_err("close", args, 0, span)?;
                 let core = self.listener_core(h);
+                // W15-1 — same order as `Socket.close`: see its comment.
+                let listener = core.listener.lock().unwrap().take();
+                core.closed.store(true, Ordering::Release);
                 poller::deregister(core.key);
-                *core.listener.lock().unwrap() = None;
+                drop(listener);
                 Ok(Value::nil())
             }
             _ => Err(self.err(format!("type Listener has no method '{method}'"), span)),
@@ -1365,6 +1380,7 @@ impl Vm {
             stream: Mutex::new(Some(stream)),
             key: core::next_poll_key(),
             in_flight: core::new_in_flight(),
+            closed: core::new_closed(),
             carry: Mutex::new(Vec::new()),
         });
         let v = Value::obj(self.heap.alloc(Obj::Socket(core)));

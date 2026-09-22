@@ -5134,6 +5134,7 @@ impl MnSched {
             Arc::clone(self),
             cancel,
             Arc::clone(&pp.in_flight),
+            Arc::clone(&pp.closed),
             pp.deadline,
         ) {
             pp.in_flight.store(false, Ordering::Release);
@@ -5893,6 +5894,8 @@ struct PollPark {
     /// D6 — the owning socket's `in_flight` flag, handed to the poller so it can clear it on inject
     /// (see [`core::SocketCore::in_flight`]).
     in_flight: Arc<AtomicBool>,
+    /// W15-1 — the owning core's `closed` flag; `register` refuses the park when set.
+    closed: Arc<AtomicBool>,
     /// D6c — when the poll thread gives up waiting for the fd: it re-injects the fiber with its
     /// `poll_timed_out` marker set, and the rewound op returns `Err("timeout")`. `None` = park
     /// forever (nothing here bounds the poll thread's own wait either — see `next_timeout`).

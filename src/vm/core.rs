@@ -581,6 +581,9 @@ pub struct SocketCore {
     /// and the duplicate registry insert would drop the first fiber (an `inflight` leak + hang). Shared
     /// (`Arc`) so the poller can clear it without holding the type-erased core.
     pub in_flight: Arc<AtomicBool>,
+    /// W15-1 — set once by `close()` before it deregisters; `poller::register` refuses a park while it
+    /// is set, so a would-block op racing `close` never arms a closed or reused fd.
+    pub closed: Arc<AtomicBool>,
     /// B1 — the incomplete-UTF-8 tail (≤3 bytes) of the previous `read`: a multibyte codepoint that
     /// straddled the `read(n)` chunk boundary. `Socket.read -> Result[str]` is a str-only seam, so a
     /// chunk that ends mid-codepoint is NOT decodable on its own — the tail is retained HERE and
@@ -604,10 +607,17 @@ pub struct ListenerCore {
     pub key: usize,
     /// D6 — see [`SocketCore::in_flight`].
     pub in_flight: Arc<AtomicBool>,
+    /// W15-1 — see [`SocketCore::closed`].
+    pub closed: Arc<AtomicBool>,
 }
 
 /// D6 — a fresh, not-yet-parked in-flight flag for a new socket/listener core.
 pub fn new_in_flight() -> Arc<AtomicBool> {
+    Arc::new(AtomicBool::new(false))
+}
+
+/// W15-1 — a fresh, not-yet-closed flag for a new socket/listener core.
+pub fn new_closed() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(false))
 }
 
@@ -1861,12 +1871,14 @@ mod tests {
             stream: Mutex::new(Some(stream)),
             key: next_poll_key(),
             in_flight: new_in_flight(),
+            closed: new_closed(),
             carry: Mutex::new(Vec::new()),
         };
         let s2 = ListenerCore {
             listener: Mutex::new(Some(listener)),
             key: next_poll_key(),
             in_flight: new_in_flight(),
+            closed: new_closed(),
         };
         assert_ne!(s1.key, s2.key, "each core gets a distinct poll key");
         assert!(

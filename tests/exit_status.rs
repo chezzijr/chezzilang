@@ -208,6 +208,51 @@ main()?
     }
 }
 
+/// W15-1 — closing a `Socket` from another task while a sibling is parked in `read()` must wake the
+/// parked task with an `Err`, same contract as [`closing_a_listener_wakes_a_parked_accept`]. Measured
+/// on the base DEBUG binary (TICKET-166 planning, 2026-09-22): 10 of 10 runs hang at
+/// `CHEZZI_THREADS=2` and at the default worker count. No sleep orders anything: a `read` that runs
+/// after the close returns the closed `Err` too, so every interleaving must reach `done`.
+#[test]
+fn closing_a_socket_wakes_a_parked_read() {
+    let t = TmpDir::new();
+    let entry = t.write(
+        "main.chz",
+        r#"import std.net
+fn main() -> Result[nil]:
+    ln := net.listen("127.0.0.1:0")?
+    addr := ln.addr()?
+    for _i in range(200):
+        c := net.connect(addr)?
+        _s := ln.accept()?
+        parallel:
+            spawn:
+                _r := c.read(10)
+            spawn:
+                c.close()
+    print("done")
+    return Ok()
+main()?
+"#,
+    );
+    for threads in [Some("2"), None] {
+        for _ in 0..3 {
+            let run = hang_deadline::run_with_hang_deadline(&entry, threads);
+            let status = run.as_ref().map(|o| o.status);
+            let out = run
+                .as_ref()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default();
+            let ok = status.is_some_and(|s| s.success()) && out.contains("done");
+            assert!(
+                ok,
+                "W15-1: close() must wake the parked read() with an Err, not hang or crash \
+                 the netpoller; got status {status:?} at CHEZZI_THREADS={threads:?} (out: {out:?})"
+            );
+        }
+    }
+}
+
 /// W7-47 — an eager `Executor` job's `os.exit` must terminate the process while `main` is parked in
 /// a socket op, like Go's `os.Exit` from a goroutine (measured: rc=3, immediate). Before the fix the
 /// exit code sat on the job's isolated worker `Vm` until a join `main` could never reach, and the run

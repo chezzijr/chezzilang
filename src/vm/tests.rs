@@ -3908,6 +3908,7 @@ fn poll_park_offload_moves_running_to_inflight() {
             fd: server.as_raw_fd(),
             interest: poller::Interest::Read,
             in_flight: core::new_in_flight(),
+            closed: core::new_closed(),
             deadline: None,
         },
     );
