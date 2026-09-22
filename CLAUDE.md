@@ -209,6 +209,9 @@ in-progress alongside it.
 > **JIT ENTRY RULE (2026-09-22):** the hunt ends when the seeded scheduler oracle is built (TICKET-167), two
 > consecutive sweeps find zero new P0/P1 in the core, no P0/P1 row is open, and features freeze for the
 > window. Full rule: `PROGRESS.md` "JIT entry rule".
+> **D4 (APPROVED 2026-09-22):** a spawned task's write to an airlock copy (captures, module globals) is
+> an error or a runtime fault, never a silent lost write. It supersedes D2's "lost write is correct".
+> Read `docs/decision-d4-airlock.md` before any airlock work. Tickets: TICKET-169 (runtime), TICKET-170 (checker).
 >
 > **START HERE (2026-09-20): `docs/gaps.md` is now a SHORT LEDGER — open rows only, each re-verified
 > on the release binary, with the archive line for its full history.** Every closed row and all 30

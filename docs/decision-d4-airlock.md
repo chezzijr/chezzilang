@@ -1,7 +1,10 @@
-# D4 — no silent copies at the task airlock (PROPOSED, 2026-09-22)
+# D4 — no silent copies at the task airlock (APPROVED, 2026-09-22)
 
-**Status: PROPOSED, awaiting owner approval. Detection design (runtime mark C + checker inference A) chosen by the owner 2026-09-22.** If approved, it supersedes **D2** (DEC-137, TICKET-137:
-"a received closure reads the running task's module globals"). Until then D2 stands.
+**Status: APPROVED by the owner 2026-09-22.** It supersedes **D2** (DEC-137, TICKET-137) as the answer
+to "is a lost task-side write correct": it is not, and it faults. D2's rule survives only as the
+definition of WHICH snapshot of the globals a received closure reads. Detection design: a runtime copy
+mark (C) plus checker inference (A). Implementation: TICKET-169 (layer C, runtime: every rule) and
+TICKET-170 (layer A, checker: the early compile-time errors). Both are sequenced after TICKET-167/168.
 
 ## The problem
 

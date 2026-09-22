@@ -8807,6 +8807,9 @@ Rules for counting:
 - A P0/P1 in the core found by either sweep resets the count to zero once it is fixed.
 - **Not a gate:** the W12-5 / D2 revisit. It is a semantic decision about the airlock copy, and the JIT
   does not generate that code. Decide it before the language freeze, not before the JIT.
+- **D4 (approved 2026-09-22, `docs/decision-d4-airlock.md`) is allowed under the freeze.** It is a sweep-driven
+  design fix that REMOVES silent semantics: a task-side write to an airlock copy faults, TICKET-169
+  (runtime) then TICKET-170 (checker). It lands before the two counted sweeps start.
 - At JIT start, the bytecode and the `Value` layout freeze. The JIT's correctness oracle is interpreter vs
   JIT, byte-identical on `tests/chz` and the CPython differential corpus.
 
