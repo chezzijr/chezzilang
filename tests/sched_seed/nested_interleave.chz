@@ -1,0 +1,19 @@
+fn work() -> str:
+    ch := Channel[str]()
+    parallel:
+        for i in range(4):
+            spawn:
+                for j in range(3):
+                    ch.send("t{i}.{j}")
+    out := []
+    for _ in range(12):
+        out.push(ch.recv())
+    return " ".join(out)
+
+fn main():
+    res := Channel[str](1)
+    parallel:
+        spawn:
+            res.send(work())
+    print(res.recv())
+main()
