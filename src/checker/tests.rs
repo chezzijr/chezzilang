@@ -469,7 +469,8 @@ fn a_task_side_write_read_after_the_join_warns() {
     );
     // Index assign, read WHOLE. A captured `List` deep-copies across the airlock, so the parent's
     // whole-value read observes the lost element write — the checker can tell, so it reports. (The
-    // granular read `xs[0]` of this same granular write declines; see the ceiling test below.)
+    // granular read `xs[0]` of this same granular write now warns too; see
+    // `a_same_path_read_of_a_projected_task_write_warns`.)
     warns(
         "fn f():\n    xs := [0]\n    parallel:\n        spawn:\n            xs[0] = 9\n    print(xs)\nf()\n",
         "'xs' is read here",
@@ -547,12 +548,12 @@ fn a_shadows_taint_is_not_charged_to_the_outer_binding() {
     );
 }
 
-/// The SEVENTH ceiling — a granular READ of a granular WRITE declines. The write side has always
-/// declined on this ambiguity (`note_assign_root`'s third ceiling: the checker cannot tell whether
-/// `m["b"] = 2` supersedes a task's `m["a"] = 1`); the read side was not symmetric with it, so a
-/// field-granular task write poisoned every later read of the ROOT and `print(p.name)` warned about a
-/// field nothing had written, on a program that printed the right answer. `correct > silent > wrong`:
-/// when the checker cannot tell which part, it declines.
+/// The narrowed SEVENTH ceiling (TICKET-165) — a granular read whose path is DISJOINT from the
+/// granular write's path (a different field, a different constant key, or a computed key) declines,
+/// because the checker cannot tell whether the two overlap. This is NOT "any granular read of a
+/// granular write" any more: the SAME field or key now warns (see
+/// `a_same_path_read_of_a_projected_task_write_warns`). `correct > silent > wrong`: when the paths
+/// might or might not overlap, it declines.
 #[test]
 fn a_granular_read_of_a_granular_task_write_declines() {
     // Different field. Correctly prints "bob".
@@ -584,6 +585,23 @@ fn a_granular_read_of_a_granular_task_write_declines() {
     );
 }
 
+/// Build the fn-body row shape shared by the TICKET-165 airlock table tests: `PRE` (the `T`/`S`
+/// structs the table's INIT strings construct against) + `fn main():` + `init` + a `parallel: /
+/// spawn:` block holding `writes` (12-space indent) + `reads` after the join (4-space indent).
+fn airlock_src(init: &str, writes: &[&str], reads: &[&str]) -> String {
+    const PRE: &str =
+        "struct T:\n    v: int\nstruct S:\n    v: int\n    w: int\n    xs: List[int]\n    t: T\n";
+    let mut src = format!("{PRE}fn main():\n{init}    parallel:\n        spawn:\n");
+    for w in writes {
+        src.push_str(&format!("            {w}\n"));
+    }
+    for r in reads {
+        src.push_str(&format!("    {r}\n"));
+    }
+    src.push_str("main()\n");
+    src
+}
+
 /// TICKET-165 (W11-13) — the gate is keyed on the READ SHAPE (a bare whole-binding interpolation)
 /// rather than on "a captured binding written inside `spawn:` is read after the join". Measured on
 /// the release binary at 00af4e3b: a task-side `s.v = 2` read back via `print(s.v)` prints `1` (the
@@ -597,6 +615,257 @@ fn a_granular_read_of_the_same_field_a_granular_task_write_wrote_warns() {
         "struct S:\n    v: int\nfn f():\n    s := S(1)\n    parallel:\n        spawn:\n            s.v = 2\n    print(s.v)\nf()\n",
         "'s' is read here",
     );
+}
+
+/// TICKET-165 rows W1-W11: a read along the SAME constant field/index/key path a task write wrote
+/// warns, whether the read is a bare field, a nested field, a compound RMW, or a second write to a
+/// DIFFERENT field ahead of the overlapping one (W6, which must cite the overlapping write's line,
+/// not the first write's).
+#[test]
+fn a_same_path_read_of_a_projected_task_write_warns() {
+    const MK: &str = "    s := S(1, 5, [1], T(1))\n";
+    const XS: &str = "    xs := [[1], [7]]\n";
+    const M: &str = "    m := {\"a\": 1, \"b\": 7}\n";
+    const TS: &str = "    ts := [T(1)]\n";
+    // W1
+    warns(
+        &airlock_src(MK, &["s.v = 2"], &["print(s.v)"]),
+        "'s' is read here",
+    );
+    // W2
+    warns(
+        &airlock_src(MK, &["s.v = 2"], &["print(\"{s.v}\")"]),
+        "'s' is read here",
+    );
+    // W3
+    warns(
+        &airlock_src(MK, &["s.t.v = 2"], &["print(s.t.v)"]),
+        "'s' is read here",
+    );
+    // W4
+    warns(
+        &airlock_src(MK, &["s.t.v = 2"], &["print(s.t)"]),
+        "'s' is read here",
+    );
+    // W5
+    warns(
+        &airlock_src(MK, &["s.v += 1"], &["print(s.v)"]),
+        "'s' is read here",
+    );
+    // W6 — a DIFFERENT field write (line 12) precedes the overlapping one (line 13); the report
+    // must cite the overlapping write, not the first.
+    let w6 = airlock_src(MK, &["s.w = 2", "s.v = 2"], &["print(s.v)"]);
+    warns(&w6, "'s' is read here");
+    warns(&w6, "block (line 13)");
+    // W7
+    warns(
+        &airlock_src(XS, &["xs[0] = [2]"], &["print(xs[0])"]),
+        "'xs' is read here",
+    );
+    // W8
+    warns(
+        &airlock_src(XS, &["xs[0] = [2]"], &["print(xs[0][0])"]),
+        "'xs' is read here",
+    );
+    // W9
+    warns(
+        &airlock_src(M, &["m[\"a\"] = 2"], &["print(m[\"a\"])"]),
+        "'m' is read here",
+    );
+    // W10
+    warns(
+        &airlock_src(M, &["m[\"a\"] += 1"], &["print(m[\"a\"])"]),
+        "'m' is read here",
+    );
+    // W11
+    warns(
+        &airlock_src(TS, &["ts[0].v = 2"], &["print(ts[0].v)"]),
+        "'ts' is read here",
+    );
+}
+
+/// TICKET-165 rows W12-W19: a mutator called on an element or field of a binding (`xs[0].push(2)`,
+/// `s.xs.push(2)`, `m["a"].push(3)`) is a WRITE through the root, so a read of it — whole, of the
+/// element itself, or via a follow-on parent-side mutator (W19) — warns.
+#[test]
+fn a_mutator_on_a_projected_receiver_is_a_task_write() {
+    const MK: &str = "    s := S(1, 5, [1], T(1))\n";
+    const XS: &str = "    xs := [[1], [7]]\n";
+    const ML: &str = "    m := {\"a\": [1]}\n";
+    // W12
+    warns(
+        &airlock_src(XS, &["xs[0].push(2)"], &["print(xs)"]),
+        "'xs' is read here",
+    );
+    // W13
+    warns(
+        &airlock_src(XS, &["xs[0].push(2)"], &["print(\"{xs}\")"]),
+        "'xs' is read here",
+    );
+    // W14
+    warns(
+        &airlock_src(XS, &["xs[0].push(2)"], &["print(xs[0])"]),
+        "'xs' is read here",
+    );
+    // W15
+    warns(
+        &airlock_src(XS, &["xs[0].push(2)"], &["print(xs[0].len())"]),
+        "'xs' is read here",
+    );
+    // W16
+    warns(
+        &airlock_src(MK, &["s.xs.push(2)"], &["print(s.xs)"]),
+        "'s' is read here",
+    );
+    // W17
+    warns(
+        &airlock_src(MK, &["s.xs.push(2)"], &["print(s)"]),
+        "'s' is read here",
+    );
+    // W18
+    warns(
+        &airlock_src(ML, &["m[\"a\"].push(3)"], &["print(m[\"a\"])"]),
+        "'m' is read here",
+    );
+    // W19 — the parent-side follow-on mutator is itself a read-modify-write; it observes the stale
+    // task write before superseding it.
+    warns(
+        &airlock_src(XS, &["xs[0].push(2)"], &["xs[0].push(3)", "print(xs)"]),
+        "'xs' is read here",
+    );
+}
+
+/// TICKET-165: the warning fires at every position a task write can occur — module top level, a
+/// nested `parallel:`, and a `spawn:` inside a loop — for both a whole-field write (P1-P3) and a
+/// projected-mutator write on a list element (P4-P5).
+#[test]
+fn a_projected_task_write_warns_at_every_position() {
+    const PRE: &str =
+        "struct T:\n    v: int\nstruct S:\n    v: int\n    w: int\n    xs: List[int]\n    t: T\n";
+    const MK: &str = "    s := S(1, 5, [1], T(1))\n";
+    // P1 — module top level.
+    warns(
+        &format!(
+            "{PRE}s := S(1, 5, [1], T(1))\nparallel:\n    spawn:\n        s.v = 2\nprint(s.v)\n"
+        ),
+        "'s' is read here",
+    );
+    // P2 — nested parallel:/spawn:.
+    warns(
+        &format!(
+            "{PRE}fn main():\n{MK}    parallel:\n        spawn:\n            parallel:\n                spawn:\n                    s.v = 2\n    print(s.v)\nmain()\n"
+        ),
+        "'s' is read here",
+    );
+    // P3 — spawn: inside a loop.
+    warns(
+        &format!(
+            "{PRE}fn main():\n{MK}    for _ in 0..2:\n        spawn:\n            s.v = 2\n    print(s.v)\nmain()\n"
+        ),
+        "'s' is read here",
+    );
+    // P4 — module top level, projected mutator on a list element.
+    warns(
+        "xs := [[1]]\nparallel:\n    spawn:\n        xs[0].push(2)\nprint(xs[0])\n",
+        "'xs' is read here",
+    );
+    // P5 — spawn: inside a loop, projected mutator.
+    warns(
+        "fn main():\n    xs := [[1]]\n    for _ in 0..2:\n        spawn:\n            xs[0].push(2)\n    print(xs)\nmain()\n",
+        "'xs' is read here",
+    );
+}
+
+/// TICKET-165 rows S1-S5: a read through a DIFFERENT constant field or key than the one a task
+/// wrote is correctly silent — the checker can tell the two paths never overlap.
+#[test]
+fn a_disjoint_path_read_of_a_projected_task_write_stays_silent() {
+    const MK: &str = "    s := S(1, 5, [1], T(1))\n";
+    const XS: &str = "    xs := [[1], [7]]\n";
+    const M: &str = "    m := {\"a\": 1, \"b\": 7}\n";
+    // S1
+    no_warn(&airlock_src(XS, &["xs[0] = [2]"], &["print(xs[1])"]));
+    // S2
+    no_warn(&airlock_src(M, &["m[\"a\"] = 2"], &["print(m[\"b\"])"]));
+    // S3
+    no_warn(&airlock_src(MK, &["s.xs.push(2)"], &["print(s.v)"]));
+    // S4
+    no_warn(&airlock_src(XS, &["xs[0].push(2)"], &["print(xs[1])"]));
+    // S5
+    no_warn(&airlock_src(MK, &["s.t.v = 2"], &["print(s.w)"]));
+}
+
+/// TICKET-165 rows C1-C2: the narrowed seventh ceiling. A computed or negative index cannot be
+/// matched against a constant path, so it declines rather than guess — both print a stale value on
+/// today's binary and stay silent by design.
+#[test]
+fn an_unmatchable_projected_path_declines() {
+    const XS: &str = "    xs := [[1], [7]]\n";
+    // C1 — a computed index on the write side.
+    no_warn(&airlock_src(
+        &format!("{XS}    n := 1\n"),
+        &["xs[n - 1] = [2]"],
+        &["print(xs[0])"],
+    ));
+    // C2 — a negative index literal on the read side.
+    no_warn(&airlock_src(
+        "    xs := [1]\n",
+        &["xs[0] = 2"],
+        &["print(xs[-1])"],
+    ));
+}
+
+/// TICKET-165 rows H1-H5, L1-L3: a projected write through a handle type (`Shared`/`RwShared`/
+/// `Atomic`/`Channel`, bare or behind a field) carries the write for real, so it never taints; a
+/// task-local `:=` shadow is a different binding than the outer one of the same name; and a read
+/// before the nursery opens sees no write at all.
+#[test]
+fn a_projected_write_through_a_handle_a_task_local_or_before_the_nursery_stays_silent() {
+    const MK: &str = "    s := S(1, 5, [1], T(1))\n";
+    const XS: &str = "    xs := [[1], [7]]\n";
+    // H1 — Shared. `entry_no_warn` (not `no_warn`): `build_graph` is the only wire that resolves a
+    // native `std.concurrency` import (`checker-test-helper-key-divergence`).
+    entry_no_warn(
+        "import std.concurrency\nfn main():\n    hs := [Shared[int](1)]\n    parallel:\n        spawn:\n            hs[0].set(2)\n    print(hs[0].get())\nmain()\n",
+    );
+    // H2 — RwShared.
+    entry_no_warn(
+        "import std.concurrency\nfn main():\n    hs := [RwShared[int](1)]\n    parallel:\n        spawn:\n            hs[0].set(2)\n    print(hs[0].get())\nmain()\n",
+    );
+    // H3 — Atomic.
+    entry_no_warn(
+        "import std.concurrency\nfn main():\n    hs := [Atomic[int](1)]\n    parallel:\n        spawn:\n            hs[0].add(1)\n    print(hs[0].load())\nmain()\n",
+    );
+    // H4 — Channel (a global reserved type, no import needed).
+    no_warn(
+        "fn main():\n    chs := [Channel[int](1)]\n    parallel:\n        spawn:\n            chs[0].send(7)\n    print(chs[0].recv())\nmain()\n",
+    );
+    // H5 — a Shared behind a struct field.
+    entry_no_warn(
+        "import std.concurrency\nstruct H:\n    h: Shared[int]\nfn main():\n    s := H(Shared[int](1))\n    parallel:\n        spawn:\n            s.h.set(2)\n    print(s.h.get())\nmain()\n",
+    );
+    // L1 — the task re-declares both bindings locally with `:=`; its writes are to the SHADOW.
+    no_warn(&airlock_src(
+        &format!("{MK}{XS}"),
+        &[
+            "s := S(9, 9, [9], T(9))",
+            "s.v = 2",
+            "xs := [[5]]",
+            "xs[0].push(2)",
+            "print(s.v + xs[0].len())",
+        ],
+        &["print(s.v)", "print(xs[0])"],
+    ));
+    // L2 — the read is lexically BEFORE the nursery opens.
+    no_warn(&format!(
+        "struct T:\n    v: int\nstruct S:\n    v: int\n    w: int\n    xs: List[int]\n    t: T\nfn main():\n{MK}    print(s.v)\n    parallel:\n        spawn:\n            s.v = 2\nmain()\n"
+    ));
+    // L3 — the task only READS the bindings; there is no write to taint.
+    no_warn(&airlock_src(
+        &format!("{MK}{XS}"),
+        &["print(s.v + xs[0][0])"],
+        &["print(s.v)", "print(xs[0])"],
+    ));
 }
 
 /// At MODULE TOP LEVEL the binding is scope 0, and this is exactly where the sibling W8-2 rule stays
