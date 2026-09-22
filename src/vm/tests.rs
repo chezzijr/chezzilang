@@ -14463,24 +14463,30 @@ fn fibers_nested_parallel() {
 }
 
 /// D0 — the cooperative scheduler must run a large nursery in ~O(N·logN), not O(N²). 50k trivial
-/// fibers each bump one `Shared` counter; the sum proves every fiber was scheduled, and the
-/// wall-clock ceiling is the regression guard: the old `pick_runnable` linear-scan-per-turn took
-/// ~2.3 s at 50k (RED), the ready-set takes tens of ms (GREEN). The 5 s ceiling is generous for
-/// CI noise yet far below the old quadratic wall.
+/// fibers pin this with a COUNT, not a clock: the scheduler must not scan (or requeue) the whole run
+/// queue per pick. TICKET-164: the old wall-clock ceiling was vacuous for its own purpose (the
+/// quadratic engine it names took ~2.3 s at 50k, under its 5 s ceiling, and that engine is gone) and
+/// load-sensitive (measured 6.66-52.25 s under concurrent `cargo test` on this box, same test). The
+/// fibers deliberately touch no `Shared` -- that guard's contention under load is a real, separate
+/// finding, covered by its own ticket, not by this one.
 #[test]
 fn fibers_scale_ready_queue_not_quadratic() {
     let n = 50_000;
     let src = format!(
-        "fn work(s: Shared[int]):\n    s.update(fn(x): x + 1)\n\
-             fn main():\n    s := Shared(0)\n    parallel:\n        for _ in 0..{n}:\n            spawn work(s)\n    print(s.get())\nmain()\n"
+        "fn work(ch: Channel[int], k: int):\n    ch.send(k + 1)\n\
+             fn main():\n    ch := Channel[int]()\n    parallel:\n        for k in 0..{n}:\n            spawn work(ch, k)\n    ch.close()\n    total := 0\n    for v in ch:\n        total += v\n    print(total)\nmain()\n"
     );
-    let start = std::time::Instant::now();
-    let out = run(&src);
-    let elapsed = start.elapsed();
-    assert_eq!(out, format!("{n}\n"), "every fiber must run exactly once");
+    let (out, picks) = run_capture_counting_picks(&src);
+    let out = out.unwrap_or_else(|e| panic!("unexpected runtime error: {e}"));
+    assert_eq!(
+        out,
+        format!("{}\n", n * (n + 1) / 2),
+        "every fiber must run exactly once"
+    );
     assert!(
-        elapsed < std::time::Duration::from_secs(5),
-        "scheduler is quadratic: {n} fibers took {elapsed:?} (ceiling 5s)"
+        (n..=2 * n).contains(&picks),
+        "scheduler picks per fiber out of bounds: {picks} picks for {n} fibers (want {n}..={})",
+        2 * n
     );
 }
 

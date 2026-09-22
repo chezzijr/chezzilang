@@ -740,6 +740,10 @@ impl Vm {
             // until their own joins reduce them — `join_enlisted_scope` releases it at the last).
             sched.wait_for_scope(0);
         }
+        // TICKET-164 — publish this run's pick count on the joining thread (read by
+        // run_capture_counting_picks).
+        #[cfg(test)]
+        super::RUN_PICKS.with(|p| p.set(p.get() + sched.picks.load(Ordering::Relaxed)));
         let slots = sched.take_scope_slots(0);
         if self.mn_enlisted == 0 {
             self.mn_enlist_sched = None;
@@ -1252,6 +1256,10 @@ impl Vm {
             let _ = h.join();
         }
         join_blocked_body_helpers(&sched);
+        // TICKET-164 — publish this run's pick count on the joining thread (read by
+        // run_capture_counting_picks).
+        #[cfg(test)]
+        super::RUN_PICKS.with(|p| p.set(p.get() + sched.picks.load(Ordering::Relaxed)));
         let slots = sched.take_slots();
         self.reduce_task_slots(slots)
     }

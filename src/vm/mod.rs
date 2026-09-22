@@ -2322,6 +2322,11 @@ struct MnSched {
     /// farms them (a spawning fiber, or the body at its own block) is not the thread that joins them:
     /// `join_eager_nursery` / `abort_eager_nursery` take them.
     blocked_body_helpers: Mutex<Vec<(std::thread::JoinHandle<()>, sched::NestedDrainerSlot)>>,
+    /// TICKET-164 — fibers this sched handed to a worker (`Take::Run` from
+    /// [`Self::take_runnable`]). Test-only; published per run by
+    /// [`run_capture_counting_picks`].
+    #[cfg(test)]
+    picks: AtomicUsize,
 }
 
 /// Cross-nursery flat scheduler (M:N) — one nursery's JOIN RECORD (Trio/Go-style: structured
@@ -2839,6 +2844,8 @@ impl MnSched {
             body_blocked_hint: AtomicBool::new(false),
             blocked_body_claimed: AtomicBool::new(false),
             blocked_body_helpers: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            picks: AtomicUsize::new(0),
         }
     }
 
@@ -3336,6 +3343,10 @@ impl MnSched {
     fn take_runnable(&self, wid: usize, tick: u64, scope_id: usize) -> Take {
         let mut spun = false;
         let t = self.take_runnable_inner(wid, tick, scope_id, &mut spun);
+        #[cfg(test)]
+        if matches!(t, Take::Run(_)) {
+            self.picks.fetch_add(1, Ordering::Relaxed);
+        }
         // TICKET-128 (W13-25) — a worker that had to spin before it found this fiber may itself be
         // the one that just consumed a periodic global pull ahead of its own `runnext` (step 0
         // below), or may simply mean other idle siblings should be nudged awake now that there was
@@ -6605,6 +6616,33 @@ pub fn assert_same_lines(cooperative: &str, mn: &str) {
         a, b,
         "line multiset differs between the two runs\n first:\n{cooperative}\n second:\n{mn}"
     );
+}
+
+#[cfg(test)]
+thread_local! {
+    /// TICKET-164 — scheduler picks (`Take::Run` returns) made by the current test's own VM run.
+    /// Thread-local, same reason as `core::CORE_PROBES`: the lib suite runs tests concurrently, so a
+    /// process-global counter would be polluted by another test's run. Published by the outermost
+    /// nursery join (`sched::run_mn_nursery_outermost` / `sched::join_eager_nursery`) on the VM's own
+    /// thread, then read here by [`run_capture_counting_picks`].
+    pub(crate) static RUN_PICKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// [`run_capture`], plus the number of scheduler picks the run made (TICKET-164). Runs on its own
+/// thread like [`run_program_bytes`], since [`RUN_PICKS`] is thread-local to the VM's own thread.
+#[cfg(test)]
+pub fn run_capture_counting_picks(src: &str) -> (Result<String, RuntimeError>, usize) {
+    let src = src.to_string();
+    std::thread::Builder::new()
+        .stack_size(VM_STACK_BYTES)
+        .spawn(move || {
+            RUN_PICKS.with(|p| p.set(0));
+            let (out, result) = run_program_inner(&src);
+            (result.map(|()| captured(out)), RUN_PICKS.with(|p| p.get()))
+        })
+        .expect("failed to spawn VM thread")
+        .join()
+        .expect("VM thread panicked")
 }
 
 /// Run a single-file program and return its full stdout, or the error (test helper).
