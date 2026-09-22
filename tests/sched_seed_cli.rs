@@ -4,6 +4,11 @@
 //! the ticket's part 1 requirement ("A failing run prints its seed, and rerunning with that seed
 //! reproduces the failure"), the seed must appear in the failing run's own diagnostics.
 
+#[path = "../src/difftest/mod.rs"]
+mod difftest;
+#[path = "../src/schedfuzz/mod.rs"]
+mod schedfuzz;
+
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -59,23 +64,20 @@ fn a_failing_run_under_sched_seed_reports_its_seed() {
 /// `(stdout, stderr, exit code)`. Not a clock read, not a sleep — `tests/no_wall_clock_ratio_gates.rs`
 /// scans this file's `#[test]` bodies for both.
 fn run_chezzi(path: &std::path::Path, seed: Option<u64>, threads: usize) -> (String, String, i32) {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
-    cmd.arg("run")
-        .arg(path)
-        .env("CHEZZI_THREADS", threads.to_string());
-    match seed {
-        Some(s) => {
-            cmd.env("CHEZZI_SCHED_SEED", s.to_string());
-        }
-        None => {
-            cmd.env_remove("CHEZZI_SCHED_SEED");
-        }
-    }
-    let out = cmd.output().expect("spawn chezzi");
+    let bin = std::path::PathBuf::from(env!("CARGO_BIN_EXE_chezzi"));
+    let target = schedfuzz::target_for(path);
+    let cap = schedfuzz::run_target(
+        &bin,
+        &target,
+        seed,
+        threads,
+        std::time::Duration::from_secs(20),
+    )
+    .expect("spawn chezzi");
     (
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-        String::from_utf8_lossy(&out.stderr).into_owned(),
-        out.status.code().unwrap_or(-1),
+        cap.stdout_text().into_owned(),
+        cap.stderr_text().into_owned(),
+        cap.code.unwrap_or(-1),
     )
 }
 

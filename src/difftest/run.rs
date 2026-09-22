@@ -458,7 +458,7 @@ fn cleanup(a: &std::path::Path, b: &std::path::Path) {
 /// itself is broken (the child never even started, or we lost track of it) — `run_sources` maps
 /// it to `Outcome::HarnessError`, which callers must treat as fatal, not score as "no finding".
 #[derive(Debug)]
-enum RunErr {
+pub enum RunErr {
     TimedOut,
     /// Carries the underlying `io::Error` text plus the program name, so the message names the
     /// actual problem, e.g. `could not run "chezzi": No such file or directory (os error 2)`.
@@ -471,7 +471,7 @@ enum RunErr {
 ///
 /// stdout/stderr are drained on dedicated threads so a child that fills an OS pipe buffer
 /// before exiting cannot deadlock the poll loop.
-fn run_one(cmd: &mut Command, timeout: Duration) -> Result<Capture, RunErr> {
+pub fn run_one(cmd: &mut Command, timeout: Duration) -> Result<Capture, RunErr> {
     use std::io::Read;
 
     let program = cmd.get_program().to_string_lossy().into_owned();
