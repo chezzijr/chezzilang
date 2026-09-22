@@ -3,6 +3,7 @@
 # Run: `cargo run -- test tests/chz/`. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 
 import std.regex
+import std.time
 
 test fn replace_all_dollar_group_refs_work():
     match regex.replace_all(r"(\d+)-(\d+)", "10-20", r"$2/$1"):
@@ -36,3 +37,32 @@ test fn replace_all_rejects_a_dollar_ref_to_a_missing_group():
     match regex.replace_all(r"(\d+)", "12 34", "$1px"):
         Ok(v): assert false, "expected a missing-group Err, got Ok('" + v + "')"
         Err(e): assert e.message().contains(r"${1}"), e.message()
+
+# TICKET-086: `find_all` materialises a `Match` struct per hit -- text, start, end, and an
+# always-allocated `groups: List[str]` -- so the obvious tokenizer (find_all + a `.text` loop)
+# pays for all of that per match even though this pattern has no capture groups. Measured on the
+# release binary: 1 000 000 space-separated tokens took ~1.70s through find_all + a `.text` loop,
+# consistently across three runs (<1% variance), against a `regex.split`-based tokenizer at a
+# fraction of that on the same input (docs/gaps.md / ticket). The bound below is one absolute
+# ceiling on find_all + the extraction loop alone, generated at runtime so no multi-megabyte
+# fixture is committed.
+test fn find_all_text_extraction_over_a_million_tokens_is_not_too_slow():
+    n := 1000000
+    words := List[str]()
+    i := 0
+    while i < n:
+        words.push("word" + str(i % 10))
+        i = i + 1
+    subject := " ".join(words)
+
+    t0 := time.monotonic()
+    match regex.find_all(r"[A-Za-z0-9']+", subject):
+        Ok(ms):
+            out := List[str]()
+            for m in ms:
+                out.push(m.text)
+            d := time.monotonic() - t0
+            assert out.len() == n
+            assert d < 1.0, "find_all + .text extraction over {n} tokens took {d}s, expected < 1.0s"
+        Err(e):
+            assert false, e.message()
