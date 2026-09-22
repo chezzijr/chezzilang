@@ -159,53 +159,52 @@ fn run_capped(entry: &std::path::Path, secs: u64) -> (i32, String) {
 }
 
 /// W15-1 — closing a `Listener` from another task while a sibling is parked in `accept()` must wake
-/// the parked task with an `Err`, like Go's `Close` cancelling a blocked `Accept`. Pre-fix this hangs:
-/// measured 10/10 `rc=124` on the RELEASE binary at c4669d9a with the default worker count, plus
-/// intermittent `thread 'chezzi-pool' panicked at src/vm/poller.rs:269:50: netpoller add: Os { code:
-/// 9, kind: Uncategorized, message: "Bad file descriptor" }` (4/10 of those runs). The race window is
-/// much narrower on the unoptimized DEBUG binary this gate actually runs — measured 2-3/150 (~2%) at
-/// the default worker count, 0/100 at `CHEZZI_THREADS=2` or `=8` — so the watchdog below retries.
+/// the parked task with an `Err`, like Go's `Close` cancelling a blocked `Accept`. Pre-fix a close
+/// that races the accept's park re-arms the netpoller on the fd `close` is dropping: the run hangs,
+/// or a worker panics with `netpoller add: Os { code: 9, kind: Uncategorized, message: "Bad file
+/// descriptor" }` (`src/vm/poller.rs:269`). One close per run hit that window in only ~0-15% of
+/// DEBUG runs, so the program below closes 200 listeners back to back, each racing its own accept.
+/// Measured on the base DEBUG binary (TICKET-166 planning, 2026-09-22): 10 of 10 runs hang or panic
+/// at `CHEZZI_THREADS=2` and at the default worker count. (`CHEZZI_THREADS=1` never races: the
+/// closing task holds the only worker.) No sleep orders anything: an accept that runs after the
+/// close returns the closed `Err` too, so every interleaving must reach `done`.
 #[test]
 fn closing_a_listener_wakes_a_parked_accept() {
     let t = TmpDir::new();
     let entry = t.write(
         "main.chz",
         r#"import std.net
-import std.time
 fn main() -> Result[nil]:
-    ln := net.listen("127.0.0.1:0")?
-    parallel:
-        spawn:
-            r := ln.accept()
-            print("accept returned: {r}")
-        spawn:
-            time.sleep_ms(200)
-            print("closing listener")
-            ln.close()
+    for _i in range(200):
+        ln := net.listen("127.0.0.1:0")?
+        parallel:
+            spawn:
+                _r := ln.accept()
+            spawn:
+                ln.close()
+    print("done")
     return Ok()
 main()?
 "#,
     );
-    // Racy (see the doc comment above): loop until one run hits the window. The bounded poll lives
-    // in `hang_deadline::run_with_hang_deadline`, outside this `#[test]` body (DEC-117), so every
-    // failure shape — a hang (killed, status `None`) or the netpoller's `Bad file descriptor` panic
-    // (rc=101) — reports through the SAME literal assertion text below. 300 attempts at a measured
-    // ~2% per-attempt hit rate leaves under 0.25% chance of a false-clean gate run.
-    for _ in 0..300 {
-        let run = hang_deadline::run_with_hang_deadline(&entry, None);
-        let status = run.as_ref().map(|o| o.status);
-        let out = run
-            .as_ref()
-            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-            .unwrap_or_default();
-        let ok = status.is_some_and(|s| s.success())
-            && out.contains("closing listener")
-            && out.contains("accept returned:");
-        assert!(
-            ok,
-            "W15-1: close() must wake the parked accept() with an Err, not hang or crash \
-             the netpoller; got status {status:?} (out: {out:?})"
-        );
+    // The bounded poll lives in `hang_deadline::run_with_hang_deadline`, outside this `#[test]` body
+    // (DEC-117), so both failure shapes — a hang (killed, status `None`) and the netpoller panic
+    // (rc=101) — report through the SAME literal assertion text below.
+    for threads in [Some("2"), None] {
+        for _ in 0..3 {
+            let run = hang_deadline::run_with_hang_deadline(&entry, threads);
+            let status = run.as_ref().map(|o| o.status);
+            let out = run
+                .as_ref()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default();
+            let ok = status.is_some_and(|s| s.success()) && out.contains("done");
+            assert!(
+                ok,
+                "W15-1: close() must wake the parked accept() with an Err, not hang or crash \
+                 the netpoller; got status {status:?} at CHEZZI_THREADS={threads:?} (out: {out:?})"
+            );
+        }
     }
 }
 
