@@ -655,8 +655,7 @@ loom/shuttle-style fuzzing does.
 
 ```sh
 cargo build --release --bin schedfuzz --bin chezzi
-target/release/schedfuzz --seeds 1..33 --threads 1,2                     # default corpus sweep
-target/release/schedfuzz --seeds 1..33 --threads 1,2,0                   # 0 = default worker count too
+target/release/schedfuzz --seeds 1..33 --threads 1,2,0                   # default corpus sweep (0 = default worker count too — W15-1 only reproduces there)
 target/release/schedfuzz --program tests/sched_seed/interleave.chz       # one program
 ```
 
@@ -690,19 +689,44 @@ cores this box), full table + method: TICKET-167 `## Thread`.**
 
 **Standing limit, stated for both mutations that DID reproduce:** as landed, seeded perturbation does
 not widen either race's window past what unseeded OS-thread jitter already finds at the SAME worker
-count. It buys deterministic REPLAY of a jitter-found failure — valuable for a bisect or a CI repro —
-not a wider net than raw multi-run unseeded fuzzing at low worker counts. Widening the net further
-would mean perturbation at more or different sync points; not attempted here.
+count. Seeding buys a MEASURED-RATE replay at T=1 only — never at T>=2. At T=1 the same seed reruns
+the same choice sequence, so a T=1 finding replays at a measured rate (see "Replay limit" above). At
+T>=2 the seed drives random yields/spins/sleeps at the sync points, but real OS-thread timing still
+decides the outcome, so the same seed is NOT guaranteed to reproduce a T>=2 finding — W14-39's T=2
+column (78/256) is a run-to-run RATE over the 256-seed sweep, not a per-seed guarantee. Either way it
+is not a wider net than raw multi-run unseeded fuzzing at low worker counts — valuable for a bisect or
+a CI repro, not for finding races unseeded fuzzing can't already reach. Widening the net further would
+mean perturbation at more or different sync points; not attempted here.
 
 **What it already found on `main`:** W15-3 (`docs/gaps.md`) — a `write` parked on a `Socket` that
 another task then `close()`s can return `Ok` instead of TICKET-166's error, at `CHEZZI_THREADS=1`,
 12/16 seeds in the first sweep, 0/10 unseeded at the same worker count. The socket write path was not
 covered by TICKET-166's listener-accept fix.
 
-**A harness false positive to know about, not a real finding:** `corpus()` includes any
-`examples/*.chz` with a sibling `.expected` and a concurrency keyword, and judges byte-exact stdout.
-Some such programs document their own output order as scheduling-dependent (`try_recv.chz`,
-`parallel.chz`) — the two-run unseeded baseline happens to hit the recorded order both times, so
-`check_output` is (wrongly) `true`, and seeding then flags the program's own documented nondeterminism
-as an `output` finding. Treat an `output` finding on such a program as a corpus-selection gap, not a
-scheduler bug, until the harness is taught to read that disclaimer.
+**Fixed: a harness false positive that used to cry wolf on a clean tree.** `corpus()` includes any
+`examples/*.chz` with a sibling `.expected` and a concurrency keyword. Two problems compounded: (1)
+`measure_baseline` sampled only ONE unseeded run at T=1 and ONE at T=2, so a flaky exit code could
+read as stable on luck alone; (2) even a correctly-measured unseeded baseline cannot bound
+byte-exactness for a program that SPAWNS a separate printing task, because `chezzi run`'s cross-task
+print order is nondeterministic BY CONTRACT (`docs/concurrency.md` "Output ordering: streaming CLI
+vs buffered sink") — the true divergence rate can be arbitrarily low unseeded (measured 0/40 for
+`parallel_cross_nursery_ok.chz`) yet still real, so no bounded rep count reliably samples it.
+
+Landed fix (`src/schedfuzz/mod.rs`): `measure_baseline` now takes `BASELINE_REPS = 5` unseeded runs
+at EACH of T=1/T=2 (10 total) before judging rc/panic stability — a stable code with disagreeing
+stdout across the reps turns off `check_output` without marking the whole target `UNSTABLE`, so
+hang/panic/rc checks stay live. Separately, `target_for` never sets `expected` at all for a program
+whose source contains `spawn` or `Executor` (`CROSS_TASK_PRINT_KEYWORDS`) — those two keywords are
+exactly what starts a separate printing task under the streaming-CLI contract; `Channel[`/`Shared[`/
+`Atomic`/`std.net` alone (single execution context) still get `check_output` from a stable baseline.
+Of the 46 `examples/*.chz` `corpus()` currently selects, 42 spawn or use `Executor` and so never carry
+`expected`; the 4 that don't (`atomic.chz`, `atomic_int.chz`, `cancel_timeout_wait.chz`,
+`channel_trip.chz`) still get a byte-exact check. Measured 2026-09-23, `--seeds 1..17 --threads
+1,2,0`: the pre-fix sweep flagged `output` findings on `try_recv.chz`, `parallel.chz`,
+`parallel_cross_nursery_ok.chz`, `channel.chz` and `channel_block.chz` (the last two only turned up
+once `--threads 0` — the default worker count, 28 cores this box — joined the sweep, widening the
+race window past what T=1/T=2 alone had shown); the post-fix sweep has **zero** `output` findings
+across three full corpus runs. Remaining findings on that same sweep are unrelated to this fix: the
+filed, still-open **W15-3** (`net_close_test.chz`, genuine), and pre-existing wall-clock-margin flakes
+in `regex_test.chz` and `nested_nursery_open_outer_body_test.chz` that are sensitive to the sweep's
+own CPU load (documented in the earlier step-6 triage, not filed).

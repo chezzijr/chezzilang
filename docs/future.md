@@ -103,9 +103,11 @@ with it: capture `Vec<u8>`, keep the decode for *display and text heuristics onl
 semantics) is **not**, so the *race-finding* half of what serial did is now covered by an explored
 seed space over the curated corpus, not just two fixed schedules — the seeded oracle already turned
 up one new race on `main` in its first sweep (W15-3, `docs/gaps.md`), and it needed the seed to find
-it: 0/64 unseeded at the winning worker count. Seeded T=1 replay is a measured rate, not
-byte-for-byte, until W15-2 (a top-level `parallel:`'s unseeded body/drainer pair) is fixed — see the
-table row above. None of the live oracles constrain the M:N engine's design, which was the point.
+it: 0/10 unseeded at the same worker count (`CHEZZI_THREADS=1`). Seeding buys a MEASURED-RATE replay
+at T=1 only — never at T>=2, where the seed drives perturbation but real OS-thread timing still
+decides the outcome, so a T>=2 seed is not byte-for-byte replayable either (see the table row above
+and `docs/bug-discovery.md`). None of the live oracles constrain the M:N engine's design, which was
+the point.
 
 **Migration mechanics — DONE 2026-08-16, in this order:** every bare `assert_parity(src)` site was
 first given a real, run-derived golden (so nothing lost its expectation when the second engine went
