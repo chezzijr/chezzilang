@@ -282,6 +282,14 @@ fn do_split(pat: &str, s: &str) -> Result<Vec<String>, String> {
     Ok(compiled(pat)?.split(s).map(|x| x.to_string()).collect())
 }
 
+/// The text of every `find_all` match, with no `Match` struct built per hit (Go `FindAllString`).
+fn do_find_all_text(pat: &str, s: &str) -> Result<Vec<String>, String> {
+    Ok(compiled(pat)?
+        .find_iter(s)
+        .map(|m| m.as_str().to_string())
+        .collect())
+}
+
 // ----- Host seam: thin wrappers mapping (pattern, subject) args → lowered `NativeRet`. -----
 
 /// Lower a `MatchData` to a `Match` struct value (the checker seeds the matching struct shape).
@@ -331,6 +339,14 @@ fn find_all(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     }))
 }
 
+fn find_all_text(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "find_all_text", 2)?;
+    let (pat, s) = (h.arg_str(0)?, h.arg_str(1)?);
+    Ok(result_of(do_find_all_text(&pat, &s), |toks| {
+        NativeRet::List(toks.into_iter().map(NativeRet::Str).collect())
+    }))
+}
+
 fn replace_all(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "replace_all", 3)?;
     let (pat, s, repl) = (h.arg_str(0)?, h.arg_str(1)?, h.arg_str(2)?);
@@ -350,6 +366,7 @@ pub const MEMBERS: &[(&str, NativeFn, Kind)] = &[
     ("is_match", is_match, Kind::Inline),
     ("find", find, Kind::Inline),
     ("find_all", find_all, Kind::Inline),
+    ("find_all_text", find_all_text, Kind::Inline),
     ("replace_all", replace_all, Kind::Inline),
     ("split", split, Kind::Inline),
 ];
@@ -411,6 +428,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn find_all_text_matches_every_find_all_text() {
+        let cases: &[(&str, &str)] = &[
+            (r"\d+", "1 22 333"),
+            (r"a*", "baaa"),
+            (r"(\d+)-(\d+)", "1-2 x 33-44"),
+            (r"\w+", "héllo wörld"),
+            (r"x", ""),
+        ];
+        for (pat, subj) in cases {
+            let texts = do_find_all_text(pat, subj).unwrap();
+            let from_find_all: Vec<String> = do_find_all(pat, subj)
+                .unwrap()
+                .into_iter()
+                .map(|m| m.text)
+                .collect();
+            assert_eq!(texts, from_find_all, "pat={pat} subj={subj}");
+        }
+        assert!(do_find_all_text("(", "x").is_err());
     }
 
     /// The byte→codepoint conversion must be LINEAR in the subject across a whole `find_all`, not a

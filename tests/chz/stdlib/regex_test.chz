@@ -38,15 +38,28 @@ test fn replace_all_rejects_a_dollar_ref_to_a_missing_group():
         Ok(v): assert false, "expected a missing-group Err, got Ok('" + v + "')"
         Err(e): assert e.message().contains(r"${1}"), e.message()
 
-# TICKET-086: `find_all` materialises a `Match` struct per hit -- text, start, end, and an
-# always-allocated `groups: List[str]` -- so the obvious tokenizer (find_all + a `.text` loop)
-# pays for all of that per match even though this pattern has no capture groups. Measured on the
-# release binary: 1 000 000 space-separated tokens took ~1.70s through find_all + a `.text` loop,
-# consistently across three runs (<1% variance), against a `regex.split`-based tokenizer at a
-# fraction of that on the same input (docs/gaps.md / ticket). The bound below is one absolute
-# ceiling on find_all + the extraction loop alone, generated at runtime so no multi-megabyte
-# fixture is committed.
+# TICKET-086: `find_all` builds a `Match` struct per hit (text, start, end, groups), so a tokenizer
+# written as find_all + a `.text` loop took 1.64-1.83s over 1 000 000 tokens on the release binary.
+# `find_all_text` returns the matched strings directly. Measured 2026-09-22 over the same input:
+# 0.31s release, 2.25s debug. The bound is one absolute ceiling (never a quotient, DEC-049). It
+# only discriminates on an optimized build, so `optimized_build()` (TICKET-159's probe) returns
+# early on the debug binary that `cargo test` runs this suite with.
+fn burn(n: int) -> int:
+    x := 0
+    i := 0
+    while i < n:
+        x = x + i * i - i
+        i += 1
+    return x
+
+fn optimized_build() -> bool:
+    t0 := time.monotonic()
+    burn(1500000)
+    return (time.monotonic() - t0) * 1000.0 < 1000.0
+
 test fn find_all_text_extraction_over_a_million_tokens_is_not_too_slow():
+    if not optimized_build():
+        return
     n := 1000000
     words := List[str]()
     i := 0
@@ -56,13 +69,43 @@ test fn find_all_text_extraction_over_a_million_tokens_is_not_too_slow():
     subject := " ".join(words)
 
     t0 := time.monotonic()
-    match regex.find_all(r"[A-Za-z0-9']+", subject):
-        Ok(ms):
-            out := List[str]()
-            for m in ms:
-                out.push(m.text)
+    match regex.find_all_text(r"[A-Za-z0-9']+", subject):
+        Ok(toks):
             d := time.monotonic() - t0
-            assert out.len() == n
-            assert d < 1.0, "find_all + .text extraction over {n} tokens took {d}s, expected < 1.0s"
+            assert toks.len() == n
+            assert toks[0] == "word0"
+            assert toks[n - 1] == "word9"
+            assert d < 1.0, "find_all_text over {n} tokens took {d}s, expected < 1.0s"
         Err(e):
             assert false, e.message()
+
+# `find_all_text` is exactly the `.text` of every `find_all` match: the whole match, never the
+# capture groups (Go `FindAllString`; Python's `re.findall` returns the groups instead), the
+# RE2 empty-match rule, codepoint-correct on non-ASCII, and a bad pattern is an Err.
+fn match_texts(pat: str, subj: str) -> List[str]:
+    out := List[str]()
+    match regex.find_all(pat, subj):
+        Ok(ms):
+            for m in ms:
+                out.push(m.text)
+        Err(e):
+            assert false, e.message()
+    return out
+
+fn all_texts(pat: str, subj: str) -> List[str]:
+    match regex.find_all_text(pat, subj):
+        Ok(v):
+            return v
+        Err(e):
+            assert false, e.message()
+    return List[str]()
+
+test fn find_all_text_is_the_text_of_every_find_all_match():
+    for pat in [r"\d+", r"a*", r"(\d+)-(\d+)", r"\w+"]:
+        for subj in ["1 22 333", "baaa", "1-2 x 33-44", "héllo wörld"]:
+            assert all_texts(pat, subj) == match_texts(pat, subj), pat + " on " + subj
+    assert all_texts(r"(\d+)-(\d+)", "1-2 x 33-44") == ["1-2", "33-44"]
+    assert all_texts(r"a*", "baaa") == ["", "aaa"]
+    match regex.find_all_text(r"(", "x"):
+        Ok(v): assert false, "expected a parse Err"
+        Err(e): assert e.message().contains("unclosed group"), e.message()

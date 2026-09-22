@@ -578,7 +578,7 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   `U+FFFD`-substituted); `std.time` (`now`/`monotonic`/`sleep_ms`/`format`). Plus the **`set`** type
   (`{a, b, c}`), **`s.chars()`** + iterable strings (Python-style; no `char` type).
 - **Std modules — M9 (shipped):** `std.regex` (the `regex` crate; stateless `is_match`/`find`/
-  `find_all`/`replace_all`/`split`, returning a `Match` struct `{text, start, end, groups}` — spans
+  `find_all`/`find_all_text`/`replace_all`/`split`, returning a `Match` struct `{text, start, end, groups}` — spans
   are codepoint offsets, so `subject[m.start:m.end] == m.text`); `std.request` (blocking HTTP/HTTPS via `ureq`+rustls; `get(url)` /
   `post(url, body)` returning a `Response` struct `{status, body, headers: Map[str,str]}`, where a
   ≥400 status is a normal `Response`, not an `Err`). These are Chezzi's **first runtime
@@ -623,7 +623,7 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   `std.math` trig/exp/log intrinsics (`sin cos tan asin acos atan atan2 exp ln log2 log10 log`);
   pure-Chezzi `std.string` (`ends_with index_of count replace strip_prefix strip_suffix`) and `std.iter`
   (`take drop any all find flatten`) helpers.
-- **Shipped:** whole-string `std.regex` (`is_match`, `find`, `find_all`, `replace_all`, `split` —
+- **Shipped:** whole-string `std.regex` (`is_match`, `find`, `find_all`, `find_all_text`, `replace_all`, `split` —
   each takes the pattern as a string, compiled behind an internal cache). **Later:** a first-class
   *compiled* `Regex` handle value (compile once, reuse) — still blocked on Level-3 **Userdata** below.
 - **Shipped:** **enum methods** — `fn name(self, …)` blocks after an enum's variants, mirroring struct

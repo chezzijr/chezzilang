@@ -24,5 +24,6 @@ native struct Match:
 native fn is_match(pat: str, s: str) -> Result[bool]
 native fn find(pat: str, s: str) -> Result[Option[Match]]
 native fn find_all(pat: str, s: str) -> Result[List[Match]]
+native fn find_all_text(pat: str, s: str) -> Result[List[str]]
 native fn replace_all(pat: str, s: str, repl: str) -> Result[str]
 native fn split(pat: str, s: str) -> Result[List[str]]

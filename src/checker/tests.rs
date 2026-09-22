@@ -13352,7 +13352,7 @@ fn regex_sig_from_file_not_native_module_sig() {
     );
 }
 
-/// The 5 regex fn FnSigs + the Match StructInfo in the module's ModuleSig must EXACTLY equal what
+/// The 6 regex fn FnSigs + the Match StructInfo in the module's ModuleSig must EXACTLY equal what
 /// `native_module_sig` used to hand-build — byte-identical provenance move from the deleted arm to the
 /// parsed `std/regex.chz`. (`params`/`ret` compared directly; labels/doc are surface-only.)
 #[test]
@@ -13368,6 +13368,11 @@ fn regex_fn_sigs_exact() {
             Ty::result(Ty::list(m())),
         ),
         (
+            "find_all_text",
+            vec![Ty::Str, Ty::Str],
+            Ty::result(Ty::list(Ty::Str)),
+        ),
+        (
             "replace_all",
             vec![Ty::Str, Ty::Str, Ty::Str],
             Ty::result(Ty::Str),
@@ -13381,7 +13386,7 @@ fn regex_fn_sigs_exact() {
     assert_eq!(
         sig.functions.len(),
         expected.len(),
-        "std.regex must export exactly the 5 regex fns"
+        "std.regex must export exactly the 6 regex fns"
     );
     for (name, params, ret) in &expected {
         let fs = sig
