@@ -85,6 +85,6 @@ Filed, triaged, parked. Closed 2026-09-21: **082** (tuple Map key, TICKET-161), 
 
 ## Pipeline
 
-`.project/tickets/`: 140 done, 3 rejected (031, 127, 133), **2 in flight** (TICKET-165, 166). The wave-14 redesigns all
+`.project/tickets/`: 156 done, 3 rejected (031, 127, 133), **0 in flight**. The wave-14 redesigns all
 landed: **D1** a deadlock is fatal (TICKET-135), **D2** a received closure reads the running task's
 module globals (TICKET-137), **D3** an int never widens into a float slot (TICKET-138).

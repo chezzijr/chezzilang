@@ -215,7 +215,7 @@ in-progress alongside it.
 > `accept`/`read`/`write` with an `Err` instead of hanging or crashing the netpoller; W11-15 closed 2026-09-21, TICKET-154 — a DAG alias now crosses the airlock as ONE object at an
 > `RwShared` store; W12-5's last shape (G6) stays listed as a RECORD that D2 (DEC-137) governs it,
 > not as a bug) — and **0 deferred tickets** in `.project/tickets-deferred/` (083 closed
-> 2026-09-22 — `str.pad_right` landed in place). 082, 084 and 087 closed 2026-09-21 under TICKET-161, 160, 163. 086 and 090 closed 2026-09-22 under TICKET-086 and TICKET-090. Pipeline: TICKET-165, 166 in flight. Wave 14's three
+> 2026-09-22 — `str.pad_right` landed in place). 082, 084 and 087 closed 2026-09-21 under TICKET-161, 160, 163. 086 and 090 closed 2026-09-22 under TICKET-086 and TICKET-090. The pipeline queue is EMPTY: 156 done, 3 rejected, 0 in flight. Wave 14's three
 > redesigns all landed — **D1** a deadlock is fatal (TICKET-135), **D2** a received closure reads the
 > running task's module globals (TICKET-137), **D3** an int never widens into a float slot
 > (TICKET-138). **W8-17 is CLOSED**: (e) the `?` unknown-type rendering (TICKET-145), (f) the
