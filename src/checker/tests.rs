@@ -34018,3 +34018,13 @@ fn a_struct_method_a_nonmutating_call_and_a_defer_on_a_read_temporary_are_not_wa
         "import std.concurrency\nfn main():\n    s := Shared[List[int]]([])\n    defer s.get().push(1)\n    print(1)\nmain()\n",
     );
 }
+
+// ===== TICKET-090 — an unused `:=` binding should warn (Rust's shape: warning, not Go's error) =====
+
+/// `unused := 42` inside a fn body is never read. TICKET-090's whole premise: this is currently
+/// silent (no warning, exit code unchanged), which lets a `:=` typo in place of `=` (the classic
+/// shadowing accumulator bug) print a silently wrong answer at rc=0.
+#[test]
+fn unused_local_binding_warns() {
+    warns("fn f():\n    unused := 42\nf()\n", "unused");
+}
