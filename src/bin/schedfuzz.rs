@@ -15,7 +15,10 @@ mod difftest;
 #[path = "../schedfuzz/mod.rs"]
 mod schedfuzz;
 
-use schedfuzz::{Baseline, corpus, judge, measure_baseline, report_line, run_target, target_for};
+use schedfuzz::{
+    Baseline, BaselineOutcome, Verdict, corpus, judge, measure_baseline, report_line, run_target,
+    target_for,
+};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -197,11 +200,21 @@ fn main() {
 
     let findings = Mutex::new(0usize);
     let unstable = Mutex::new(std::collections::HashSet::new());
+    // A harness error (the binary could not even be spawned) is fatal, never "no finding" — see
+    // `docs/gaps.md` W7-34 / `src/difftest/run.rs`. Set once, checked by every worker so the run
+    // stops pulling new jobs instead of grinding through the rest of the range reporting nothing
+    // wrong. `Mutex<Option<_>>`, not an early `exit()` from inside a worker thread: an in-thread
+    // exit would skip the `done:` line and any findings already confirmed, the same reason
+    // `difffuzz` breaks out of its loop instead of exiting inline.
+    let harness_error: Mutex<Option<String>> = Mutex::new(None);
 
     std::thread::scope(|scope| {
         for _ in 0..args.jobs {
             scope.spawn(|| {
                 loop {
+                    if harness_error.lock().unwrap().is_some() {
+                        break;
+                    }
                     let idx = {
                         let mut c = cursor.lock().unwrap();
                         if *c >= jobs.len() {
@@ -219,8 +232,13 @@ fn main() {
                         Arc::clone(cache.entry((ti, threads)).or_insert_with(|| {
                             Arc::new(
                                 match measure_baseline(&args.baseline_chezzi, t, args.timeout) {
-                                    Ok(b) => CachedBaseline::Stable(b),
-                                    Err(u) => CachedBaseline::Unstable(u.reason()),
+                                    BaselineOutcome::Stable(b) => CachedBaseline::Stable(b),
+                                    BaselineOutcome::Unstable(u) => {
+                                        CachedBaseline::Unstable(u.reason())
+                                    }
+                                    BaselineOutcome::HarnessError(msg) => {
+                                        CachedBaseline::HarnessError(msg)
+                                    }
                                 },
                             )
                         }))
@@ -234,12 +252,38 @@ fn main() {
                             }
                             continue;
                         }
+                        CachedBaseline::HarnessError(msg) => {
+                            let mut h = harness_error.lock().unwrap();
+                            if h.is_none() {
+                                eprintln!(
+                                    "harness error: baseline {} could not run: {msg}",
+                                    t.path.display()
+                                );
+                                *h = Some(msg.clone());
+                            }
+                            break;
+                        }
                     };
 
                     let r = run_target(&args.chezzi, t, Some(seed), threads, args.timeout);
-                    if let Some(finding) = judge(baseline, t, &r) {
-                        *findings.lock().unwrap() += 1;
-                        println!("{}", report_line(t, seed, threads, &finding));
+                    match judge(baseline, t, &r) {
+                        Verdict::Finding(finding) => {
+                            *findings.lock().unwrap() += 1;
+                            println!("{}", report_line(t, seed, threads, &finding));
+                        }
+                        Verdict::Clean => {}
+                        Verdict::HarnessError(msg) => {
+                            let mut h = harness_error.lock().unwrap();
+                            if h.is_none() {
+                                eprintln!(
+                                    "harness error: seed={seed} threads={threads} program={} \
+                                     could not run: {msg}",
+                                    t.path.display()
+                                );
+                                *h = Some(msg);
+                            }
+                            break;
+                        }
                     }
                 }
             });
@@ -248,12 +292,23 @@ fn main() {
 
     let findings = *findings.lock().unwrap();
     let unstable_n = unstable.lock().unwrap().len();
+    let harness_error = harness_error.into_inner().unwrap();
     println!(
         "done: {} targets, {total_runs} runs, {findings} finding(s), {unstable_n} unstable",
         targets.len()
     );
+    if harness_error.is_some() {
+        eprintln!("ABORTED: the harness broke (see above) — not every job ran");
+    }
+    // A real finding outranks the abort: exit 1 so it is never masked, same rule as `difffuzz`.
     if findings > 0 {
+        if harness_error.is_some() {
+            eprintln!("exit 1 (real findings) even though the harness also broke — both above");
+        }
         std::process::exit(1);
+    }
+    if harness_error.is_some() {
+        std::process::exit(2);
     }
 }
 
@@ -262,4 +317,5 @@ fn main() {
 enum CachedBaseline {
     Stable(Baseline),
     Unstable(&'static str),
+    HarnessError(String),
 }

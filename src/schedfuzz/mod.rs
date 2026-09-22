@@ -171,22 +171,41 @@ impl Unstable {
     }
 }
 
+/// The result of measuring a baseline. `HarnessError` (the binary could not even be spawned) is
+/// NOT the same as `Unstable` (the program ran but its own behaviour can't be trusted as a
+/// reference) — a caller must treat the former as fatal, the latter as a per-target skip.
+pub enum BaselineOutcome {
+    Stable(Baseline),
+    Unstable(Unstable),
+    HarnessError(String),
+}
+
 /// Measure a target's baseline on the fixed binary: one unseeded run at T=1 and one at T=2.
-/// `Err(Unstable)` when either run times out or panics, or when the two exit codes differ — such
-/// a target is printed as `UNSTABLE` by the caller and never scored as a finding.
-pub fn measure_baseline(bin: &Path, t: &Target, timeout: Duration) -> Result<Baseline, Unstable> {
+/// `BaselineOutcome::Unstable` when either run times out or panics, or when the two exit codes
+/// differ — such a target is printed as `UNSTABLE` by the caller and never scored as a finding.
+/// `BaselineOutcome::HarnessError` when a run could not even be spawned — that is fatal, not a
+/// per-target skip (same class as `Verdict::HarnessError`; W7-34).
+pub fn measure_baseline(bin: &Path, t: &Target, timeout: Duration) -> BaselineOutcome {
     let r1 = run_target(bin, t, None, 1, timeout);
     let r2 = run_target(bin, t, None, 2, timeout);
+    if let Err(RunErr::CouldNotRun(msg)) = &r1 {
+        return BaselineOutcome::HarnessError(format!("baseline T=1: {msg}"));
+    }
+    if let Err(RunErr::CouldNotRun(msg)) = &r2 {
+        return BaselineOutcome::HarnessError(format!("baseline T=2: {msg}"));
+    }
     let (c1, c2) = match (r1, r2) {
         (Ok(a), Ok(b)) => (a, b),
-        (Err(RunErr::TimedOut), _) | (_, Err(RunErr::TimedOut)) => return Err(Unstable::Timeout),
-        _ => return Err(Unstable::Timeout),
+        (Err(RunErr::TimedOut), _) | (_, Err(RunErr::TimedOut)) => {
+            return BaselineOutcome::Unstable(Unstable::Timeout);
+        }
+        _ => unreachable!("CouldNotRun handled above; only TimedOut remains"),
     };
     if c1.stderr_text().contains("panicked at") || c2.stderr_text().contains("panicked at") {
-        return Err(Unstable::Panic);
+        return BaselineOutcome::Unstable(Unstable::Panic);
     }
     if c1.code != c2.code {
-        return Err(Unstable::RcMismatch);
+        return BaselineOutcome::Unstable(Unstable::RcMismatch);
     }
     let check_output = match &t.kind {
         TargetKind::Program {
@@ -194,7 +213,7 @@ pub fn measure_baseline(bin: &Path, t: &Target, timeout: Duration) -> Result<Bas
         } => c1.stdout == *exp && c2.stdout == *exp,
         _ => false,
     };
-    Ok(Baseline {
+    BaselineOutcome::Stable(Baseline {
         code: c1.code,
         check_output,
     })
@@ -209,21 +228,31 @@ pub enum Finding {
     Output,
 }
 
-/// Judge one run against a target's baseline. `Err(RunErr::CouldNotRun(_))` is a harness error,
-/// never a finding — the child never even ran.
-pub fn judge(b: &Baseline, t: &Target, r: &Result<Capture, RunErr>) -> Option<Finding> {
+/// The result of judging one run. `HarnessError` is NOT a finding and NOT a clean run — the
+/// child never even started (`RunErr::CouldNotRun`), so nothing was compared. Callers must treat
+/// it as fatal, the same rule `src/difftest/run.rs` documents for `Outcome::HarnessError`
+/// (W7-34: a harness error scored as "no finding" hides that the oracle never ran).
+#[derive(Debug)]
+pub enum Verdict {
+    Finding(Finding),
+    Clean,
+    HarnessError(String),
+}
+
+/// Judge one run against a target's baseline.
+pub fn judge(b: &Baseline, t: &Target, r: &Result<Capture, RunErr>) -> Verdict {
     match r {
-        Err(RunErr::TimedOut) => Some(Finding::Hang),
-        Err(RunErr::CouldNotRun(_)) => None,
+        Err(RunErr::TimedOut) => Verdict::Finding(Finding::Hang),
+        Err(RunErr::CouldNotRun(msg)) => Verdict::HarnessError(msg.clone()),
         Ok(cap) => {
             if cap.stderr_text().contains("panicked at") {
-                return Some(Finding::Panic(cap.stderr_text().into_owned()));
+                return Verdict::Finding(Finding::Panic(cap.stderr_text().into_owned()));
             }
             if let Some(sig) = cap.signal {
-                return Some(Finding::Panic(format!("killed by signal {sig}")));
+                return Verdict::Finding(Finding::Panic(format!("killed by signal {sig}")));
             }
             if cap.code != b.code {
-                return Some(Finding::Rc {
+                return Verdict::Finding(Finding::Rc {
                     base: b.code,
                     got: cap.code,
                 });
@@ -234,9 +263,9 @@ pub fn judge(b: &Baseline, t: &Target, r: &Result<Capture, RunErr>) -> Option<Fi
                 && b.check_output
                 && cap.stdout != *exp
             {
-                return Some(Finding::Output);
+                return Verdict::Finding(Finding::Output);
             }
-            None
+            Verdict::Clean
         }
     }
 }
@@ -274,5 +303,29 @@ mod tests {
     fn target_for_names_a_plain_program() {
         let t = target_for(Path::new("examples/hello.chz"));
         assert!(matches!(t.kind, TargetKind::Program { .. }));
+    }
+
+    /// A run that could not even spawn (`RunErr::CouldNotRun`) must not be judged clean — the
+    /// child never ran, so there is nothing to compare. Precedent: `src/difftest/run.rs`
+    /// `a_hang_retry_harness_error_is_not_silently_a_timeout` (W7-34: a harness error must be
+    /// FATAL, never scored as "no finding").
+    #[test]
+    fn judge_reports_a_harness_error_not_a_clean_run() {
+        let b = Baseline {
+            code: Some(0),
+            check_output: false,
+        };
+        let t = Target {
+            path: PathBuf::from("tests/chz/spec/foo_test.chz"),
+            kind: TargetKind::ChzTest,
+        };
+        let r: Result<Capture, RunErr> = Err(RunErr::CouldNotRun(
+            "could not run \"chezzi\": No such file or directory (os error 2)".into(),
+        ));
+        let verdict = judge(&b, &t, &r);
+        assert!(
+            matches!(verdict, Verdict::HarnessError(_)),
+            "a CouldNotRun run must report Verdict::HarnessError, not a clean/finding verdict, got {verdict:?}"
+        );
     }
 }
