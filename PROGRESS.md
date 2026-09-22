@@ -8786,6 +8786,30 @@ the stored-callback abort net, and `std.net`'s sticky-UTF-8 + `read_bytes` drain
 
 ## Current focus
 
+### JIT entry rule (owner decision, 2026-09-22)
+
+The bug-hunt phase ends, and the JIT (Tier 2 quickening and Tier 3 Cranelift, `docs/future.md` §4) starts,
+when **all four** of these hold. The ledger does not have to be empty. Bugs never reach zero; the bar is
+that no serious one is still turning up in the part of the engine the JIT compiles.
+
+| # | condition | status 2026-09-22 |
+|---|---|---|
+| 1 | The seeded scheduler oracle is built and has been shown to re-find reverted historical races (TICKET-167) | filed |
+| 2 | **Two consecutive bug-hunt sweeps with zero new P0/P1 in the core**: lexer, parser, checker, compiler, VM exec/call/arith/stmt, scheduler, GC, value model | not started |
+| 3 | Every open P0/P1 ledger row is closed | met (open: W8-19 P2, W12-5 record, W13-28 P2) |
+| 4 | Feature freeze during the window: no new language surface or std API unless it IS a sweep finding (e.g. a missing ancestor idiom), so the surface under test stops moving | starts now |
+
+Rules for counting:
+- A **sweep** is a hunt wave the size of W11-W14. It covers disjoint domains, reproduces every finding in-repo
+  and judges it against a RUN Go/CPython/Rust program. It also runs the TICKET-167 seed sweep.
+- Findings in `std.*`, `std.net`, FFI, diagnostics wording, LSP and perf do **not** reset the count. They are
+  fixed in parallel; the JIT does not compile them.
+- A P0/P1 in the core found by either sweep resets the count to zero once it is fixed.
+- **Not a gate:** the W12-5 / D2 revisit. It is a semantic decision about the airlock copy, and the JIT
+  does not generate that code. Decide it before the language freeze, not before the JIT.
+- At JIT start, the bytecode and the `Value` layout freeze. The JIT's correctness oracle is interpreter vs
+  JIT, byte-identical on `tests/chz` and the CPython differential corpus.
+
 **Live phase (2026-07-23, engine note updated 2026-08-16):** pre-JIT/pre-freeze **bug-hunt +
 drift-fix hunt** — Go-concurrency, checker↔runtime, and IO drift; live ledger in `docs/gaps.md`.
 **M19 — Perf track** is paused in-progress alongside it (see "Next perf batch" below). The

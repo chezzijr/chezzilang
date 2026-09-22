@@ -206,6 +206,10 @@ Right now: **pre-JIT/pre-freeze bug-hunt + drift-fix hunt** is the active phase 
 checker↔runtime, and IO drift — live ledger in `docs/gaps.md`, closed rows + session logs in `docs/gaps-archive.md`), with **M19 — Perf track** paused
 in-progress alongside it.
 
+> **JIT ENTRY RULE (2026-09-22):** the hunt ends when the seeded scheduler oracle is built (TICKET-167), two
+> consecutive sweeps find zero new P0/P1 in the core, no P0/P1 row is open, and features freeze for the
+> window. Full rule: `PROGRESS.md` "JIT entry rule".
+>
 > **START HERE (2026-09-20): `docs/gaps.md` is now a SHORT LEDGER — open rows only, each re-verified
 > on the release binary, with the archive line for its full history.** Every closed row and all 30
 > bug-hunt session logs (W1..W14) moved verbatim to **`docs/gaps-archive.md`**, so any
