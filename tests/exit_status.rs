@@ -155,6 +155,75 @@ fn run_capped(entry: &std::path::Path, secs: u64) -> (i32, String) {
     run_capped_sub("run", entry, secs)
 }
 
+/// W15-1 — closing a `Listener` from another task while a sibling is parked in `accept()` must wake
+/// the parked task with an `Err`, like Go's `Close` cancelling a blocked `Accept`. Pre-fix this hangs:
+/// measured 10/10 `rc=124` on the RELEASE binary at c4669d9a with the default worker count, plus
+/// intermittent `thread 'chezzi-pool' panicked at src/vm/poller.rs:269:50: netpoller add: Os { code:
+/// 9, kind: Uncategorized, message: "Bad file descriptor" }` (4/10 of those runs). The race window is
+/// much narrower on the unoptimized DEBUG binary this gate actually runs — measured 2-3/150 (~2%) at
+/// the default worker count, 0/100 at `CHEZZI_THREADS=2` or `=8` — so the watchdog below retries.
+#[test]
+fn closing_a_listener_wakes_a_parked_accept() {
+    let t = TmpDir::new();
+    let entry = t.write(
+        "main.chz",
+        r#"import std.net
+import std.time
+fn main() -> Result[nil]:
+    ln := net.listen("127.0.0.1:0")?
+    parallel:
+        spawn:
+            r := ln.accept()
+            print("accept returned: {r}")
+        spawn:
+            time.sleep_ms(200)
+            print("closing listener")
+            ln.close()
+    return Ok()
+main()?
+"#,
+    );
+    // Racy (see the doc comment above): loop until one run hits the window, using a
+    // NON-panicking watchdog (unlike `run_capped`) so every failure shape — a hang (rc=124)
+    // or the netpoller's `Bad file descriptor` panic (rc=101) — reports through the SAME
+    // literal assertion text below, rather than `run_capped`'s own "hung for >Ns" wording that
+    // only one of the two shapes hits. 300 attempts at a measured ~2% per-attempt hit rate
+    // leaves under 0.25% chance of a false-clean gate run.
+    for _ in 0..300 {
+        use std::io::Read;
+        let mut child = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+            .arg("run")
+            .arg(&entry)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn chezzi");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let status = loop {
+            match child.try_wait().expect("try_wait") {
+                Some(s) => break Some(s),
+                None if std::time::Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+                None => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        };
+        let mut out = String::new();
+        if let Some(mut s) = child.stdout.take() {
+            let _ = s.read_to_string(&mut out);
+        }
+        let ok = status.is_some_and(|s| s.success())
+            && out.contains("closing listener")
+            && out.contains("accept returned:");
+        assert!(
+            ok,
+            "W15-1: close() must wake the parked accept() with an Err, not hang or crash \
+             the netpoller; got status {status:?} (out: {out:?})"
+        );
+    }
+}
+
 /// W7-47 — an eager `Executor` job's `os.exit` must terminate the process while `main` is parked in
 /// a socket op, like Go's `os.Exit` from a goroutine (measured: rc=3, immediate). Before the fix the
 /// exit code sat on the job's isolated worker `Vm` until a join `main` could never reach, and the run
