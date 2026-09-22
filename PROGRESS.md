@@ -34,19 +34,27 @@ Single source of truth for "what am I doing next." Update after every work sessi
   `docs/bug-discovery.md`, `CLAUDE.md`, `docs/benchmarks.md`, `docs/gaps.md`.
   **Follow-up (2026-09-23, owner review):** `corpus()`'s two-run unseeded baseline used to score
   `try_recv.chz`/`parallel.chz`/`parallel_cross_nursery_ok.chz` as clean `output` findings on an
-  unmodified tree — a false positive, not a bug. Fixed in `src/schedfuzz/mod.rs`:
-  `measure_baseline` now samples `BASELINE_REPS = 5` unseeded runs per worker count (a stable exit
-  code with disagreeing stdout across the reps turns `check_output` off without marking the whole
-  target `UNSTABLE`), and `target_for` never sets `expected` for a program whose source spawns a
-  separate printing task (`spawn`/`Executor`) — `chezzi run`'s cross-task print order is
-  nondeterministic BY CONTRACT (`docs/concurrency.md` "Output ordering"), so no bounded unseeded
-  sample can bound it. A full corpus sweep (`--seeds 1..17 --threads 1,2,0`) now shows zero `output`
-  findings across three runs; full measurements in `docs/bug-discovery.md` "Seeded scheduler
-  oracle". `--threads 1,2,0` also replaces `--threads 1,2` in the step-6 sweep, `CLAUDE.md` and
-  `docs/bug-discovery.md`'s default-sweep example, per the same review: W15-1 only reproduces at the
-  default worker count, so a sweep without it is the sweep that would have missed it. JIT entry
-  condition 1's status was reverted from `met` to `built, not yet judged` — that condition is the
-  owner's call, not this ticket's to close.
+  unmodified tree — a false positive, not a bug. `--threads 1,2,0` also replaces `--threads 1,2` in
+  the step-6 sweep, `CLAUDE.md` and `docs/bug-discovery.md`'s default-sweep example, per the same
+  review: W15-1 only reproduces at the default worker count, so a sweep without it is the sweep that
+  would have missed it. JIT entry condition 1's status was reverted from `met` to `built, not yet
+  judged` — that condition is the owner's call, not this ticket's to close.
+  **Second follow-up (2026-09-23, owner review of the first fix):** the first fix was itself
+  incomplete on two counts, both fixed in `src/schedfuzz/mod.rs`. (1) `measure_baseline` sampled
+  `BASELINE_REPS = 5` reps at a hardcoded T=1/T=2 pair regardless of the worker count the job it
+  judged actually used — a `CHEZZI_THREADS=0` job was compared against a baseline that never ran at
+  that count. It now takes an explicit `threads` argument and samples only at that count. (2) the
+  `spawn`/`Executor` keyword gate on `target_for` silenced the output check on 42 of 46 examples
+  (`contains("spawn")` also matched comments) — dropped entirely; `target_for` always loads
+  `.expected`, and the SAMPLED baseline alone decides `check_output`. That sampled check still can't
+  bound a real-but-rare race (`parallel_cross_nursery_ok.chz`, measured 0/40 unseeded), so a
+  `KNOWN_TARGETS` list skips such targets BY FILE NAME on a default sweep, citing the `docs/gaps.md`
+  row that explains each (new: **W15-4** the documented streaming-CLI contract, **W15-5** two
+  wall-clock-ratio Chezzi tests that flake under the sweep's own CPU contention, **W15-6** a
+  generator-over-channel hang, **W15-7** a cancel-propagation hang — both real, both open, both a
+  separate ticket to fix). A clean-tree sweep (`--seeds 1..17 --threads 1,2,0`) now exits 0 with 0
+  unexplained findings across four full corpus runs; full measurements in `docs/bug-discovery.md`
+  "Seeded scheduler oracle".
 - **TICKET-166 (2026-09-22) — `close()` on a `Socket`/`Listener` wakes a parked op instead of hanging
   or crashing the netpoller (closes W15-1, and the `Listener` sub-item of W8-19).** Closing a
   `Listener`/`Socket` from another task while a sibling is parked in `accept`/`read`/`read_bytes`/

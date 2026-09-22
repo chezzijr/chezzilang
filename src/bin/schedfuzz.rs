@@ -16,8 +16,8 @@ mod difftest;
 mod schedfuzz;
 
 use schedfuzz::{
-    Baseline, BaselineOutcome, Verdict, corpus, judge, measure_baseline, report_line, run_target,
-    target_for,
+    Baseline, BaselineOutcome, Verdict, corpus, judge, known_target, measure_baseline, report_line,
+    run_target, target_for,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -165,13 +165,34 @@ fn main() {
     let args = parse_args();
 
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let mut targets = if args.programs.is_empty() {
-        corpus(&root)
-    } else {
+    let explicit_programs = !args.programs.is_empty();
+    let mut targets = if explicit_programs {
         args.programs.iter().map(|p| target_for(p)).collect()
+    } else {
+        corpus(&root)
     };
     if let Some(f) = &args.filter {
         targets.retain(|t| t.path.to_string_lossy().contains(f.as_str()));
+    }
+    // A default (no `--program`) sweep skips targets already tracked in `docs/gaps.md`
+    // (`KNOWN_TARGETS`), so a routine clean-tree run does not keep re-reporting the same explained
+    // divergence as a NEW finding every time. `--program` names one explicitly (e.g. to dig into a
+    // filed row), so it is never skipped that way.
+    let mut known_count = 0usize;
+    if !explicit_programs {
+        targets.retain(|t| match known_target(t) {
+            Some(k) => {
+                println!(
+                    "KNOWN program={} row={} reason={}",
+                    t.path.display(),
+                    k.row,
+                    k.reason
+                );
+                known_count += 1;
+                false
+            }
+            None => true,
+        });
     }
     if targets.is_empty() {
         eprintln!("no targets matched");
@@ -231,7 +252,12 @@ fn main() {
                         let mut cache = baseline_cache.lock().unwrap();
                         Arc::clone(cache.entry((ti, threads)).or_insert_with(|| {
                             Arc::new(
-                                match measure_baseline(&args.baseline_chezzi, t, args.timeout) {
+                                match measure_baseline(
+                                    &args.baseline_chezzi,
+                                    t,
+                                    threads,
+                                    args.timeout,
+                                ) {
                                     BaselineOutcome::Stable(b) => CachedBaseline::Stable(b),
                                     BaselineOutcome::Unstable(u) => {
                                         CachedBaseline::Unstable(u.reason())
@@ -294,7 +320,7 @@ fn main() {
     let unstable_n = unstable.lock().unwrap().len();
     let harness_error = harness_error.into_inner().unwrap();
     println!(
-        "done: {} targets, {total_runs} runs, {findings} finding(s), {unstable_n} unstable",
+        "done: {} targets, {total_runs} runs, {findings} finding(s), {unstable_n} unstable, {known_count} known",
         targets.len()
     );
     if harness_error.is_some() {

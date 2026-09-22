@@ -30,24 +30,14 @@ pub struct Target {
     pub kind: TargetKind,
 }
 
-/// Keywords that put a `chezzi run` program's cross-task print order under the DOCUMENTED
-/// "streaming CLI" contract (`docs/concurrency.md` "Output ordering: streaming CLI vs buffered
-/// sink", an ACTIVE decision): "Cross-task print order is nondeterministic by contract; do not
-/// build a program (or a golden) on it." `Executor` jobs are covered by the same contract line.
-/// `corpus()`'s scan already restricts Program targets to ones that touch concurrency at all, but
-/// not every keyword implies a SEPARATE printing task — `Channel[`/`Shared[`/`Atomic`/`std.net` can
-/// all appear in a program with exactly one execution context. Only `spawn`/`Executor` actually
-/// start one, so only those two put a program's `.expected` under the contract. Measured
-/// 2026-09-23: `channel.chz` (spawns 3 workers) diverges from its own `.expected` in 11/60 unseeded
-/// `CHEZZI_THREADS=2` runs, `parallel_cross_nursery_ok.chz` (2 spawned tasks) in 0/40 — a real race
-/// no bounded unseeded sample is guaranteed to catch, which is why this is read from the CONTRACT,
-/// not sampled. Full measurements: `docs/bug-discovery.md` "Seeded scheduler oracle".
-const CROSS_TASK_PRINT_KEYWORDS: &[&str] = &["spawn", "Executor"];
-
 /// Classify a single path: a `_test.chz` file runs under `chezzi test`; anything else runs under
-/// `chezzi run`, picking up a sibling `.expected` file if one exists — unless the program's own
-/// source starts a separate printing task (`CROSS_TASK_PRINT_KEYWORDS`), in which case its output
-/// is never judged byte-exact against `.expected`, matching the documented streaming-CLI contract.
+/// `chezzi run`, picking up a sibling `.expected` file if one exists. Whether that `.expected` is
+/// actually trusted for the output check is decided later, per-target, by `measure_baseline`'s
+/// sampled-disagreement check — never here by a keyword. A prior version skipped `.expected`
+/// whenever the source contained `spawn`/`Executor`, reading `docs/concurrency.md`'s streaming-CLI
+/// contract off a substring; the owner dropped it (review 2026-09-22) because it silenced the
+/// output check on 42 of 46 examples — including ones with exactly one printing context — and
+/// `contains("spawn")` also matched comments.
 pub fn target_for(path: &Path) -> Target {
     let is_test = path
         .file_name()
@@ -59,18 +49,95 @@ pub fn target_for(path: &Path) -> Target {
             kind: TargetKind::ChzTest,
         };
     }
-    let cross_task_prints = std::fs::read_to_string(path)
-        .map(|src| CROSS_TASK_PRINT_KEYWORDS.iter().any(|k| src.contains(k)))
-        .unwrap_or(false);
-    let expected = if cross_task_prints {
-        None
-    } else {
-        std::fs::read(path.with_extension("expected")).ok()
-    };
+    let expected = std::fs::read(path.with_extension("expected")).ok();
     Target {
         path: path.to_path_buf(),
         kind: TargetKind::Program { expected },
     }
+}
+
+/// A corpus target whose schedfuzz divergence is already understood and tracked in `docs/gaps.md`,
+/// so a routine clean-tree sweep does not keep re-reporting the same explained behaviour as a NEW
+/// finding every run. Matched BY FILE NAME, never by a source keyword (the keyword approach is what
+/// the owner dropped from `target_for`, review 2026-09-22) — each entry is hand-picked and cites the
+/// row that explains it. Two classes so far:
+/// - a program that prints across a `spawn`/`Executor` task boundary: `chezzi run`'s cross-task
+///   print order is nondeterministic BY CONTRACT (`docs/concurrency.md` "Output ordering: streaming
+///   CLI vs buffered sink"), so an `output` finding here is that CONTRACT surfacing, not a new race
+///   — W15-4.
+/// - a Chezzi test file gated on a wall-clock ratio (an `optimized_build()`-style
+///   `if not optimized_build(): return` guard before an `assert d < N`): under schedfuzz's own
+///   concurrent job load the ratio flips and the assert genuinely fails UNSEEDED too (measured, not
+///   assumed — `regex_test.chz` failed 1/10 unseeded under sustained sibling load on an otherwise
+///   idle box) — W15-5.
+pub struct KnownTarget {
+    pub file_name: &'static str,
+    pub row: &'static str,
+    pub reason: &'static str,
+}
+
+pub const KNOWN_TARGETS: &[KnownTarget] = &[
+    KnownTarget {
+        file_name: "try_recv.chz",
+        row: "W15-4",
+        reason: "cross-task print order is nondeterministic by contract (docs/concurrency.md)",
+    },
+    KnownTarget {
+        file_name: "parallel.chz",
+        row: "W15-4",
+        reason: "cross-task print order is nondeterministic by contract (docs/concurrency.md)",
+    },
+    KnownTarget {
+        file_name: "parallel_cross_nursery_ok.chz",
+        row: "W15-4",
+        reason: "cross-task print order is nondeterministic by contract (docs/concurrency.md)",
+    },
+    KnownTarget {
+        file_name: "channel.chz",
+        row: "W15-4",
+        reason: "cross-task print order is nondeterministic by contract (docs/concurrency.md)",
+    },
+    KnownTarget {
+        file_name: "channel_block.chz",
+        row: "W15-4",
+        reason: "cross-task print order is nondeterministic by contract (docs/concurrency.md)",
+    },
+    KnownTarget {
+        file_name: "executor_autodrain.chz",
+        row: "W15-4",
+        reason: "cross-task print order is nondeterministic by contract (docs/concurrency.md)",
+    },
+    KnownTarget {
+        file_name: "regex_test.chz",
+        row: "W15-5",
+        reason: "find_all_text_extraction_over_a_million_tokens_is_not_too_slow's wall-clock ratio gate flakes under sweep CPU contention (measured 1/10 unseeded under load)",
+    },
+    KnownTarget {
+        file_name: "nested_nursery_open_outer_body_test.chz",
+        row: "W15-5",
+        reason: "fan_open/fan_flat's wall-clock ratio gate flakes under sweep CPU contention",
+    },
+    KnownTarget {
+        file_name: "net_close_test.chz",
+        row: "W15-3",
+        reason: "a write parked on a closed Socket can return Ok instead of an error, at CHEZZI_THREADS=1",
+    },
+    KnownTarget {
+        file_name: "generator_channel_test.chz",
+        row: "W15-6",
+        reason: "a generator resumed from `for v in ch:` inside a spawned task can hang at CHEZZI_THREADS=0",
+    },
+    KnownTarget {
+        file_name: "cancel_test.chz",
+        row: "W15-7",
+        reason: "a cancel-propagation program can hang at CHEZZI_THREADS=0",
+    },
+];
+
+/// Look up a target's `KnownTarget` entry by file name, if any.
+pub fn known_target(t: &Target) -> Option<&'static KnownTarget> {
+    let name = t.path.file_name().and_then(|n| n.to_str())?;
+    KNOWN_TARGETS.iter().find(|k| k.file_name == name)
 }
 
 /// Keywords that mark a program as touching concurrency, so the corpus scan (`corpus`) does not
@@ -204,34 +271,40 @@ pub enum BaselineOutcome {
     HarnessError(String),
 }
 
-/// Unseeded reps per worker count used to establish a target's baseline. Two reps (one at T=1, one
-/// at T=2) undercounts: an exit code that only occasionally flakes (a load-sensitive wall-clock
-/// margin, `docs/gaps-archive.md` class) can agree on both single samples and read as stable. This
-/// governs the rc/panic/hang baseline only — output byte-exactness for a cross-task-printing
-/// Program target is decided from the documented contract instead (`CROSS_TASK_PRINT_KEYWORDS`),
-/// because that class of divergence can be arbitrarily rare unseeded (measured 0/40 for
-/// `parallel_cross_nursery_ok.chz`) yet still real.
+/// Unseeded reps at the swept worker count used to establish a target's baseline. One rep
+/// undercounts: an exit code that only occasionally flakes (a load-sensitive wall-clock margin,
+/// `docs/gaps-archive.md` class) can agree on a single sample and read as stable. This governs the
+/// rc/panic/hang baseline only — output byte-exactness is decided from a sampled-disagreement check
+/// over the same reps (`check_output`), because that class of divergence can be arbitrarily rare
+/// unseeded (measured 0/40 for `parallel_cross_nursery_ok.chz`) yet still real.
 const BASELINE_REPS: usize = 5;
 
-/// Measure a target's baseline on the fixed binary: `BASELINE_REPS` unseeded runs at T=1 and
-/// `BASELINE_REPS` at T=2. `BaselineOutcome::Unstable` when any run times out or panics, or when
-/// any exit code differs from the first — such a target is printed as `UNSTABLE` by the caller and
-/// never scored as a finding. A stable exit code with DISAGREEING stdout across the reps does not
-/// make the whole target unstable: it only turns off the output check (`check_output = false`),
-/// keeping the hang/panic/rc checks live. `BaselineOutcome::HarnessError` when a run could not even
-/// be spawned — that is fatal, not a per-target skip (same class as `Verdict::HarnessError`;
-/// W7-34).
-pub fn measure_baseline(bin: &Path, t: &Target, timeout: Duration) -> BaselineOutcome {
-    let mut runs = Vec::with_capacity(BASELINE_REPS * 2);
-    for threads in [1usize, 2usize] {
-        for _ in 0..BASELINE_REPS {
-            match run_target(bin, t, None, threads, timeout) {
-                Ok(cap) => runs.push(cap),
-                Err(RunErr::CouldNotRun(msg)) => {
-                    return BaselineOutcome::HarnessError(format!("baseline T={threads}: {msg}"));
-                }
-                Err(RunErr::TimedOut) => return BaselineOutcome::Unstable(Unstable::Timeout),
+/// Measure a target's baseline on the fixed binary: `BASELINE_REPS` unseeded runs, ALL at
+/// `threads` — the same worker count as the job this baseline will judge. Judging a `threads=0` job
+/// against a baseline measured at T=1/T=2 is comparing it to a different program run (review
+/// blocking finding, 2026-09-22: `regex_test.chz`'s `find_all_text_extraction_over_a_million_tokens_is_not_too_slow`
+/// is a wall-clock ratio gate that only flakes under contention, and a baseline taken at the wrong
+/// count could hide or invent that flake). `BaselineOutcome::Unstable` when any run times out or
+/// panics, or when any exit code differs from the first — such a target is printed as `UNSTABLE` by
+/// the caller and never scored as a finding. A stable exit code with DISAGREEING stdout across the
+/// reps does not make the whole target unstable: it only turns off the output check
+/// (`check_output = false`), keeping the hang/panic/rc checks live. `BaselineOutcome::HarnessError`
+/// when a run could not even be spawned — that is fatal, not a per-target skip (same class as
+/// `Verdict::HarnessError`; W7-34).
+pub fn measure_baseline(
+    bin: &Path,
+    t: &Target,
+    threads: usize,
+    timeout: Duration,
+) -> BaselineOutcome {
+    let mut runs = Vec::with_capacity(BASELINE_REPS);
+    for _ in 0..BASELINE_REPS {
+        match run_target(bin, t, None, threads, timeout) {
+            Ok(cap) => runs.push(cap),
+            Err(RunErr::CouldNotRun(msg)) => {
+                return BaselineOutcome::HarnessError(format!("baseline T={threads}: {msg}"));
             }
+            Err(RunErr::TimedOut) => return BaselineOutcome::Unstable(Unstable::Timeout),
         }
     }
     if runs.iter().any(|c| c.stderr_text().contains("panicked at")) {
@@ -339,17 +412,74 @@ mod tests {
         assert!(matches!(t.kind, TargetKind::Program { .. }));
     }
 
-    /// A program that `spawn`s a separate printing task falls under the documented streaming-CLI
-    /// contract (`docs/concurrency.md`) — its `expected` must always be `None`, no matter what a
-    /// sibling `.expected` file says, because `chezzi run`'s cross-task print order is
-    /// nondeterministic by contract.
+    /// The baseline must be measured at the SAME worker count as the job it will judge — a job run
+    /// at `CHEZZI_THREADS=3` must never be judged against a baseline that ran at 1 or 2 instead.
+    /// Fake `chezzi` binary records the `CHEZZI_THREADS` value of every invocation it sees; asking
+    /// `measure_baseline` for `threads=3` must log only `3`, never `1` or `2` (the old hardcoded
+    /// pair).
     #[test]
-    fn target_for_never_checks_output_for_a_spawning_program() {
-        let t = target_for(Path::new("examples/try_recv.chz"));
+    fn measure_baseline_runs_only_at_the_requested_worker_count() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "schedfuzz-baseline-threads-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("threads.log");
+        std::fs::write(&log, b"").unwrap();
+        let bin = dir.join("fake_chezzi.sh");
+        let script = format!(
+            "#!/bin/sh\necho \"$CHEZZI_THREADS\" >> '{l}'\nprintf 'A'\nexit 0\n",
+            l = log.display()
+        );
+        std::fs::write(&bin, script).unwrap();
+        let mut perms = std::fs::metadata(&bin).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&bin, perms).unwrap();
+
+        let target_path = dir.join("prog.chz");
+        std::fs::write(&target_path, b"# fake").unwrap();
+        let t = target_for(&target_path);
+
+        let outcome = measure_baseline(&bin, &t, 3, Duration::from_secs(5));
+        let seen = std::fs::read_to_string(&log).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(
+            matches!(outcome, BaselineOutcome::Stable(_)),
+            "expected a stable baseline, got {outcome:?}"
+        );
+        let lines: Vec<&str> = seen.lines().collect();
+        assert!(!lines.is_empty(), "expected at least one recorded run");
+        assert!(
+            lines.iter().all(|l| *l == "3"),
+            "every baseline run must use the requested threads=3, saw: {lines:?}"
+        );
+    }
+
+    /// The owner dropped the `spawn`/`Executor` keyword skip (review 2026-09-22): it silenced the
+    /// output check on 42 of 46 examples, including ones with exactly one printing context, and a
+    /// bare `contains("spawn")` matched comments too. `target_for` now always loads a sibling
+    /// `.expected` when one exists; whether the output check actually runs is decided later, by
+    /// `measure_baseline`'s sampled-disagreement check, not by a keyword.
+    #[test]
+    fn target_for_loads_expected_even_for_a_spawning_program() {
+        let dir = std::env::temp_dir().join(format!(
+            "schedfuzz-target-for-spawn-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target_path = dir.join("prog.chz");
+        std::fs::write(&target_path, b"parallel:\n    spawn:\n        print(1)\n").unwrap();
+        std::fs::write(target_path.with_extension("expected"), b"1\n").unwrap();
+        let t = target_for(&target_path);
+        let _ = std::fs::remove_dir_all(&dir);
         match t.kind {
-            TargetKind::Program { expected } => assert!(
-                expected.is_none(),
-                "try_recv.chz spawns worker tasks — cross-task print order is nondeterministic by contract, expected must be None"
+            TargetKind::Program { expected } => assert_eq!(
+                expected.as_deref(),
+                Some(&b"1\n"[..]),
+                "a spawning program's .expected must still load; the sampled baseline decides whether to trust it"
             ),
             other => panic!("expected Program, got {other:?}"),
         }
@@ -386,7 +516,7 @@ mod tests {
         std::fs::write(target_path.with_extension("expected"), b"A").unwrap();
         let t = target_for(&target_path);
 
-        let outcome = measure_baseline(&bin, &t, Duration::from_secs(5));
+        let outcome = measure_baseline(&bin, &t, 1, Duration::from_secs(5));
         let _ = std::fs::remove_dir_all(&dir);
         match outcome {
             BaselineOutcome::Stable(b) => assert!(
@@ -395,6 +525,22 @@ mod tests {
             ),
             other => panic!("expected Stable with check_output=false, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn known_target_matches_by_file_name_not_full_path() {
+        let t = target_for(Path::new("/some/other/root/examples/try_recv.chz"));
+        let k = known_target(&t).expect("try_recv.chz must be a known target");
+        assert_eq!(k.row, "W15-4");
+    }
+
+    #[test]
+    fn known_target_is_none_for_an_untracked_program() {
+        let t = target_for(Path::new("examples/hello.chz"));
+        assert!(
+            known_target(&t).is_none(),
+            "hello.chz must not match any known-target entry"
+        );
     }
 
     /// A run that could not even spawn (`RunErr::CouldNotRun`) must not be judged clean — the

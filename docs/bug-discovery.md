@@ -703,30 +703,44 @@ another task then `close()`s can return `Ok` instead of TICKET-166's error, at `
 12/16 seeds in the first sweep, 0/10 unseeded at the same worker count. The socket write path was not
 covered by TICKET-166's listener-accept fix.
 
-**Fixed: a harness false positive that used to cry wolf on a clean tree.** `corpus()` includes any
-`examples/*.chz` with a sibling `.expected` and a concurrency keyword. Two problems compounded: (1)
-`measure_baseline` sampled only ONE unseeded run at T=1 and ONE at T=2, so a flaky exit code could
-read as stable on luck alone; (2) even a correctly-measured unseeded baseline cannot bound
+**Fixed: a harness false positive that used to cry wolf on a clean tree, twice over.** `corpus()`
+includes any `examples/*.chz` with a sibling `.expected` and a concurrency keyword. Three problems
+compounded: (1) `measure_baseline` sampled only ONE unseeded run at T=1 and ONE at T=2 — REGARDLESS
+of the worker count the job it judged actually used — so a job run at `CHEZZI_THREADS=0` (the
+default) was judged against a baseline that never ran at that count at all, and a flaky exit code
+could read as stable on luck alone; (2) even a correctly-measured unseeded baseline cannot bound
 byte-exactness for a program that SPAWNS a separate printing task, because `chezzi run`'s cross-task
 print order is nondeterministic BY CONTRACT (`docs/concurrency.md` "Output ordering: streaming CLI
-vs buffered sink") — the true divergence rate can be arbitrarily low unseeded (measured 0/40 for
-`parallel_cross_nursery_ok.chz`) yet still real, so no bounded rep count reliably samples it.
+vs buffered sink") — a first fix read this off a `spawn`/`Executor` keyword and silenced the output
+check on 42 of 46 examples (`contains("spawn")` also matched comments), which is worse than the false
+findings it hid; (3) the sweep's OWN concurrent job load creates enough CPU contention to make a
+wall-clock-ratio-gated Chezzi test flake, unrelated to scheduling at all.
 
-Landed fix (`src/schedfuzz/mod.rs`): `measure_baseline` now takes `BASELINE_REPS = 5` unseeded runs
-at EACH of T=1/T=2 (10 total) before judging rc/panic stability — a stable code with disagreeing
-stdout across the reps turns off `check_output` without marking the whole target `UNSTABLE`, so
-hang/panic/rc checks stay live. Separately, `target_for` never sets `expected` at all for a program
-whose source contains `spawn` or `Executor` (`CROSS_TASK_PRINT_KEYWORDS`) — those two keywords are
-exactly what starts a separate printing task under the streaming-CLI contract; `Channel[`/`Shared[`/
-`Atomic`/`std.net` alone (single execution context) still get `check_output` from a stable baseline.
-Of the 46 `examples/*.chz` `corpus()` currently selects, 42 spawn or use `Executor` and so never carry
-`expected`; the 4 that don't (`atomic.chz`, `atomic_int.chz`, `cancel_timeout_wait.chz`,
-`channel_trip.chz`) still get a byte-exact check. Measured 2026-09-23, `--seeds 1..17 --threads
-1,2,0`: the pre-fix sweep flagged `output` findings on `try_recv.chz`, `parallel.chz`,
-`parallel_cross_nursery_ok.chz`, `channel.chz` and `channel_block.chz` (the last two only turned up
-once `--threads 0` — the default worker count, 28 cores this box — joined the sweep, widening the
-race window past what T=1/T=2 alone had shown); the post-fix sweep has **zero** `output` findings
-across three full corpus runs. Remaining findings on that same sweep are unrelated to this fix: the
-filed, still-open **W15-3** (`net_close_test.chz`, genuine), and pre-existing wall-clock-margin flakes
-in `regex_test.chz` and `nested_nursery_open_outer_body_test.chz` that are sensitive to the sweep's
-own CPU load (documented in the earlier step-6 triage, not filed).
+Landed fix (`src/schedfuzz/mod.rs`): `measure_baseline` now takes a `threads` argument and runs
+`BASELINE_REPS = 5` unseeded reps ALL AT THAT COUNT — the same one the job it judges will use — never
+a hardcoded T=1/T=2 pair; the `(target, threads)` cache key already existed, it just wasn't being fed
+the right baseline. `target_for` no longer reads any keyword — it always loads a sibling `.expected`,
+and whether the output check is actually trusted is decided purely by SAMPLING: a stable exit code
+with disagreeing stdout across the `BASELINE_REPS` turns off `check_output` without marking the whole
+target `UNSTABLE`, so hang/panic/rc checks stay live. This sampled check does not bound
+`parallel_cross_nursery_ok.chz`-class divergence (measured 0/40 unseeded `CHEZZI_THREADS=2`, yet a
+real race) — a `KNOWN_TARGETS` list (`src/schedfuzz/mod.rs`) now skips such targets BY FILE NAME on a
+default (no `--program`) sweep, citing the `docs/gaps.md` row that explains each: **W15-4** for six
+programs whose printing crosses a `spawn`/`Executor` boundary (the documented contract itself, not a
+bug), **W15-5** for two wall-clock-ratio-gated `tests/chz` files that flake under the sweep's own CPU
+contention (measured: `regex_test.chz` 1/10 unseeded under SUSTAINED sibling load, 0/30 with none),
+and one entry each for the still-open **W15-3** (net), **W15-6** (a generator-over-channel hang) and
+**W15-7** (a cancel-propagation hang) so a routine sweep does not keep re-reporting an already-filed
+bug as new. `--program <path>` bypasses the skip list — it always runs the target you name.
+
+Measured 2026-09-23, `--seeds 1..17 --threads 1,2,0`, four full corpus sweeps across the two fixes:
+the first (worker-count-blind baseline, keyword-gated `.expected`) flagged `output` findings only on
+`try_recv.chz`/`parallel.chz`/`parallel_cross_nursery_ok.chz`/`channel.chz`/`channel_block.chz`,
+`rc`/`hang` findings on `regex_test.chz`/`generator_channel_test.chz`, and printed
+`nested_nursery_open_outer_body_test.chz` as `UNSTABLE` (a SKIP, not a finding — its old T=1/T=2-mixed
+baseline sample happened to disagree). After the worker-count fix, the SAME `nested_nursery_open_outer_body_test.chz`
+row is no longer a lucky `UNSTABLE` skip: judged at its own swept `T=2`, its baseline is stable and its
+wall-clock-ratio flake now scores as a real `rc` finding, joining `regex_test.chz` in **W15-5**. After
+both fixes and the `KNOWN_TARGETS` skip list, a clean-tree sweep reports 0 unexplained findings and
+exits 0 (quoted below); every remaining divergence is either the documented contract (**W15-4**), a
+load-sensitive test-infra flake (**W15-5**), or an already-filed bug (**W15-3**, **W15-6**, **W15-7**).
