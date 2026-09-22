@@ -34028,3 +34028,81 @@ fn a_struct_method_a_nonmutating_call_and_a_defer_on_a_read_temporary_are_not_wa
 fn unused_local_binding_warns() {
     warns("fn f():\n    unused := 42\nf()\n", "unused");
 }
+
+/// The `:=` typo (`total := total + x` instead of `total = total + x`) makes the ticket's block-scoped
+/// `:=` shadow the outer `total` every iteration — the accumulator loses every update but still prints
+/// `0` at rc=0. `docs/syntax.md`'s measured warn table names this the flagship shape.
+#[test]
+fn unused_local_accumulator_typo_warns_once_at_the_inner_binding() {
+    let (errs, warns) = warn_src(
+        "fn total(xs: List[int]) -> int:\n    total := 0\n    for x in xs:\n        total := total + x\n    return total\nprint(total([1,2,3]))\n",
+    );
+    assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+    assert_eq!(
+        warns.len(),
+        1,
+        "expected exactly one warning, got: {warns:?}"
+    );
+    assert!(
+        warns[0].message.contains("unused variable 'total'"),
+        "got: {:?}",
+        warns[0]
+    );
+    assert_eq!(warns[0].span.line, 4, "got: {:?}", warns[0]);
+    assert_eq!(warns[0].span.col, 9, "got: {:?}", warns[0]);
+}
+
+/// The measured fire half of `docs/syntax.md`'s warn table — one program per shape.
+#[test]
+fn unused_local_warn_table_fires() {
+    warns(
+        "fn f():\n    for x in range(2):\n        pass\nf()\n",
+        "unused variable 'x'",
+    );
+    warns(
+        "fn f():\n    x := 1\n    x = 2\nf()\n",
+        "unused variable 'x'",
+    );
+    warns(
+        "fn p() -> (int, int):\n    return (1, 2)\nfn f():\n    a, b := p()\n    print(a)\nf()\n",
+        "unused variable 'b'",
+    );
+    warns(
+        "fn f():\n    z := 1\n    z := 2\n    print(z)\nf()\n",
+        "unused variable 'z'",
+    );
+    warns("test fn t():\n    y := 3\n", "unused variable 'y'");
+    warns("for i in range(1):\n    pass\n", "unused variable 'i'");
+    warns(
+        "struct P:\n    a: int\n    fn m(self) -> int:\n        k := 1\n        return self.a\nprint(P(1).m())\n",
+        "unused variable 'k'",
+    );
+    warns(
+        "fn f():\n    r := recover:\n        1\n    print(\"x\")\nf()\n",
+        "unused variable 'r'",
+    );
+}
+
+/// The measured silent half of `docs/syntax.md`'s warn table — every deliberate under-warn.
+#[test]
+fn unused_local_warn_table_stays_silent() {
+    no_warn("fn f():\n    _u := 42\n    _ := 1\nf()\n");
+    no_warn("fn f(a: int):\n    pass\nf(1)\n");
+    no_warn("fn f():\n    for _ in range(2):\n        pass\nf()\n");
+    no_warn("fn f():\n    x := 1\n    g := fn() -> int: x\n    print(g())\nf()\n");
+    no_warn("fn f():\n    x := 1\n    defer:\n        print(x)\nf()\n");
+    no_warn("fn f():\n    x := 1\n    parallel:\n        spawn:\n            print(x)\nf()\n");
+    no_warn("fn f():\n    x := 1\n    fn g() -> int:\n        return x\n    print(g())\nf()\n");
+    no_warn("fn f():\n    x := 1\n    print(\"{x}\")\nf()\n");
+    no_warn("g := 1\nfn f():\n    pass\nf()\n");
+    no_warn(
+        "fn f():\n    x := 1\n    if true:\n        x := 2\n        print(x)\n    print(x)\nf()\n",
+    );
+    no_warn("fn f():\n    c := 0\n    c += 1\nf()\n");
+    no_warn(
+        "fn f():\n    match Some(1):\n        Some(x):\n            print(\"s\")\n        None:\n            pass\nf()\n",
+    );
+    no_warn("struct P:\n    a: int\nfn f():\n    p := P(1)\n    p.a = 2\nf()\n");
+    no_warn("fn f():\n    w := 5\n    s := \"x\"\n    print(\"{s:<{w}}\")\nf()\n");
+    no_warn("fn f():\n    xs := [1]\n    xs.push(2)\nf()\n");
+}
