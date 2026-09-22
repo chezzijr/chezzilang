@@ -1,0 +1,75 @@
+import std.net
+
+# W15-1 (TICKET-166): `close()` from another task wakes a task parked on the same Listener/Socket,
+# and its call returns an `Err` naming the closed resource -- Go's `Close` cancelling a blocked
+# `Accept`/`Read`/`Write`. The `ready` rendezvous lets the closer run while the op parks or just
+# before it; both orders must give the same `Err`, so nothing here asserts an ordering.
+
+fn err_text[T](r: Result[T]) -> str:
+    match r:
+        Ok(_): return "returned Ok"
+        Err(e): return e.message()
+
+fn accept_racing_close(timeout_ms: int) -> Result[str]:
+    ln := net.listen("127.0.0.1:0")?
+    ready := Channel[bool](0)
+    out := Channel[str](1)
+    parallel:
+        spawn:
+            ready.send(true)
+            if timeout_ms == 0:
+                out.send(err_text(ln.accept()))
+            else:
+                out.send(err_text(ln.accept(timeout_ms)))
+        spawn:
+            ready.recv()
+            ln.close()
+    return Ok(out.recv())
+
+# `op` picks the socket call parked when the sibling closes. The peer end is accepted but never
+# read or written, so a read parks on an empty socket and a 16 MiB write parks once the kernel
+# buffers fill.
+fn socket_op_racing_close(op: str, timeout_ms: int) -> Result[str]:
+    ln := net.listen("127.0.0.1:0")?
+    c := net.connect(ln.addr()?)?
+    peer := ln.accept()?
+    big := "x".repeat(16777216)
+    ready := Channel[bool](0)
+    out := Channel[str](1)
+    parallel:
+        spawn:
+            ready.send(true)
+            if op == "read" and timeout_ms == 0:
+                out.send(err_text(c.read(10)))
+            elif op == "read":
+                out.send(err_text(c.read(10, timeout_ms)))
+            elif op == "read_bytes" and timeout_ms == 0:
+                out.send(err_text(c.read_bytes(10)))
+            elif op == "read_bytes":
+                out.send(err_text(c.read_bytes(10, timeout_ms)))
+            elif op == "write" and timeout_ms == 0:
+                out.send(err_text(c.write(big)))
+            elif op == "write":
+                out.send(err_text(c.write(big, timeout_ms)))
+            elif timeout_ms == 0:
+                out.send(err_text(c.write_bytes(big.encode())))
+            else:
+                out.send(err_text(c.write_bytes(big.encode(), timeout_ms)))
+        spawn:
+            ready.recv()
+            c.close()
+    peer.close()
+    ln.close()
+    return Ok(out.recv())
+
+test fn closing_a_listener_wakes_a_parked_accept_with_an_err():
+    for t in [0, 60000]:
+        msg := accept_racing_close(t) ?? "setup failed"
+        assert msg == "accept on a closed listener", msg
+
+test fn closing_a_socket_wakes_a_parked_op_with_an_err():
+    want := {"read": "read on a closed socket", "read_bytes": "read_bytes on a closed socket", "write": "write on a closed socket", "write_bytes": "write on a closed socket"}
+    for op in ["read", "read_bytes", "write", "write_bytes"]:
+        for t in [0, 60000]:
+            msg := socket_op_racing_close(op, t) ?? "setup failed"
+            assert msg == want[op], "{op} timeout_ms={t}: {msg}"
