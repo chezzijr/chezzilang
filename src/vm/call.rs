@@ -3155,17 +3155,16 @@ impl Vm {
                         self.arity_err("reverse", args, 0, span)?;
                         Ok(self.alloc_str(s.chars().rev().collect::<String>()))
                     }
-                    "pad_left" => {
-                        self.arity_err("pad_left", args, 2, span)?;
-                        let width = self.int_arg("pad_left", &args[0], span)?;
+                    // `pad_right` is the mirror (CPython `str.ljust`): same guards, fill after `s`.
+                    name @ ("pad_left" | "pad_right") => {
+                        self.arity_err(name, args, 2, span)?;
+                        let width = self.int_arg(name, &args[0], span)?;
                         let fill = str_arg(self, 1)?;
                         // An empty `fill` can never reach `width` — the old prepend loop spun
                         // forever. Fault EAGERLY (before the width check) so the diagnostic does
                         // not depend on whether padding was actually needed.
                         if fill.is_empty() {
-                            return Err(
-                                self.err("pad_left: fill must not be empty".to_string(), span)
-                            );
+                            return Err(self.err(format!("{name}: fill must not be empty"), span));
                         }
                         // std.string: pad to `width` CODEPOINTS; never shrinks (a `width` at or below
                         // the current length — including `i64::MIN` — returns `s` unchanged). The
@@ -3199,8 +3198,13 @@ impl Vm {
                                 }
                                 // The fill is a repeating cycle TRUNCATED to fit, so the result is
                                 // EXACTLY `width` codepoints (`"a".pad_left(4, "xy")` -> `"xyxa"`).
-                                out.extend(fill.chars().cycle().take(need));
-                                out.push_str(&s);
+                                if name == "pad_left" {
+                                    out.extend(fill.chars().cycle().take(need));
+                                    out.push_str(&s);
+                                } else {
+                                    out.push_str(&s);
+                                    out.extend(fill.chars().cycle().take(need));
+                                }
                                 Ok(self.alloc_str(out))
                             }
                             None => Err(self.err("string pad capacity overflow".to_string(), span)),

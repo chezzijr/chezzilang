@@ -74,13 +74,9 @@ back and strike them here; (c), (d) and (g) closed under TICKET-158 on 2026-09-2
 
 ---
 
-## Deferred tickets — 1 open, in `.project/tickets-deferred/`
+## Deferred tickets — 0 open, in `.project/tickets-deferred/`
 
-Filed, triaged, parked. Closed 2026-09-21: **082** (tuple Map key, TICKET-161), **084** (TICKET-160 — the need is met by `m.copy()` and `Map(m.items())`; `Map(m)` itself stays a type error by decision, because a `Map` is `Iterable[K]` like CPython's dict and Go's one-variable `range`), and **087** (sub-second wall clock, TICKET-163 — `time.now_ms()`, `DateTime.milli`); **086** closed 2026-09-22 (TICKET-086 — `regex.find_all_text`).
-
-| ticket | what | measured |
-|---|---|---|
-| **083** | the nested-field half LANDED in TICKET-162 (`"{s:<{w}}"` and `"{x:.{p}f}"` render at runtime, capped at 4096); only the `pad_right` spelling remains | `s.pad_right(…)` → `has no method 'pad_right'` |
+Filed, triaged, parked. Closed 2026-09-21: **082** (tuple Map key, TICKET-161), **084** (TICKET-160 — the need is met by `m.copy()` and `Map(m.items())`; `Map(m)` itself stays a type error by decision, because a `Map` is `Iterable[K]` like CPython's dict and Go's one-variable `range`), and **087** (sub-second wall clock, TICKET-163 — `time.now_ms()`, `DateTime.milli`); **086** closed 2026-09-22 (TICKET-086 — `regex.find_all_text`); **083** closed 2026-09-22 — its nested-field half landed in TICKET-162 (`"{s:<{w}}"`, `"{x:.{p}f}"`) and `str.pad_right` / `string.pad_right` (CPython `str.ljust`) landed in place. The archive's decline of `pad_right` as "alias sugar" (`docs/gaps-archive.md:4122`) is superseded.
 
 `.project/tickets-deferred/` also holds three `*.merged-into-*` stubs (078, 080, 088) — not work items.
 

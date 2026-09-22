@@ -188,6 +188,7 @@ native struct str:
     native fn repeat(self, n: int) -> str
     native fn reverse(self) -> str
     native fn pad_left(self, width: int, fill: str) -> str
+    native fn pad_right(self, width: int, fill: str) -> str
     # SENTINEL, NOT A CARRIER — `-1` on a miss, exactly Python's `str.find`. Same hazard as
     # `List.index_of`: `s[s.index_of(t)]` on a miss silently yields the LAST character, and Python does
     # the same (`'hello'['hello'.find('zz')]` is `'o'`, measured). `contains` is the miss-visible check;

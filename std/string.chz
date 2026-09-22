@@ -39,6 +39,11 @@ fn reverse(s: str) -> str:
 fn pad_left(s: str, width: int, fill: str) -> str:
     return s.pad_left(width, fill)
 
+# Right-pad: the mirror of `pad_left` (CPython `str.ljust`), same guards and faults
+# ("ab", 5, "." -> "ab..."). Delegates to the native `s.pad_right(...)` method.
+fn pad_right(s: str, width: int, fill: str) -> str:
+    return s.pad_right(width, fill)
+
 # Split `s` on "\r\n", "\n" or a lone "\r" into a list of lines (delegates to the native method
 # per DEC-068 rather than re-implementing the loop here).
 fn split_lines(s: str) -> List[str]:

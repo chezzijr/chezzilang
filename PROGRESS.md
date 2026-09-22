@@ -7,6 +7,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **`str.pad_right(width, fill)` (2026-09-22) — the mirror of `pad_left`, CPython's `str.ljust` (closes deferred TICKET-083).** `"ab".pad_right(6, " ")` → `"ab    "`; the free-fn form `string.pad_right(s, w, fill)` delegates to it. Shares `pad_left`'s VM arm (`src/vm/call.rs`), so it has the same never-shrink rule, exact-width fill cycle and faults (`pad_right: fill must not be empty`, `string pad capacity overflow`). 083's other half, a runtime width in a format spec (`"{s:<{w}}"`), had already landed in TICKET-162. Tests: `tests/chz/stdlib/fault_contracts_test.chz` `string_pad_right_mirrors_pad_left` (values match CPython 3.14 `ljust`). Docs: `docs/stdlib.md`, `docs/syntax.md`, `docs/gaps.md`, `CLAUDE.md`.
 - **TICKET-090 (2026-09-22) — a local binding that is never read now warns.** A fn-local or
   block-local `:=`/`let` binding, or a `for` loop variable, that is never read emits `unused variable
   '<name>': it is never read; prefix it with '_' if that is intended` — a WARNING (Rust's shape),

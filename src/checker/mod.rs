@@ -3767,6 +3767,7 @@ const STR_METHODS: &[&str] = &[
     "repeat",
     "reverse",
     "pad_left",
+    "pad_right",
     "index_of",
     "count",
     "strip_prefix",

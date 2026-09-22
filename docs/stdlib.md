@@ -161,6 +161,7 @@ than the Python analogue; there is nothing to fix.
 | `repeat` | `(n: int) -> str` | `n <= 0` → `""`. Raises a recoverable `string repeat capacity overflow` fault if `n * len` would exceed allocatable capacity. |
 | `reverse` | `() -> str` | Reversed copy (by codepoint). |
 | `pad_left` | `(width: int, fill: str) -> str` | Left-pad to `width` codepoints; never shrinks (`width` ≤ len → unchanged). A multi-char `fill` is a repeating cycle truncated to fit, so the result is **exactly** `width` codepoints (`"a".pad_left(4, "xy")` → `"xyxa"`). An empty `fill` raises a recoverable `pad_left: fill must not be empty` fault. Raises a recoverable `string pad capacity overflow` fault if the pad would exceed allocatable capacity. |
+| `pad_right` | `(width: int, fill: str) -> str` | Right-pad (CPython `str.ljust`): the mirror of `pad_left` with the fill after the text (`"ab".pad_right(5, ".")` → `"ab..."`); same never-shrink rule, exact-width cycle, and faults (`pad_right: fill must not be empty`, `string pad capacity overflow`). For a runtime column width either this or `"{s:<{w}}"` works. |
 | `index_of` | `(sub: str) -> int` | First **codepoint** index, `-1` if absent, `0` for empty `sub`. A **sentinel, not a carrier** — see the `-1` hazard under `List.index_of`. |
 | `count` | `(sub: str) -> int` | Non-overlapping occurrences; empty `sub` → codepoint length + 1 (`"abc".count("")` → `4`), matching Python/Go/`std.string.count`. |
 | `strip` | `() -> str` | Trim alias (strip leading/trailing whitespace). |
@@ -174,7 +175,7 @@ than the Python analogue; there is nothing to fix.
 | `encode` | `() -> bytes` | UTF-8 encode. |
 | `message` | `() -> str` | Returns self — lets a bare `str` satisfy the `Error` protocol. |
 
-The `ends_with`/`replace`/`repeat`/`reverse`/`pad_left`/`index_of`/`count`/`strip_prefix`/`strip_suffix`/`split_lines`
+The `ends_with`/`replace`/`repeat`/`reverse`/`pad_left`/`pad_right`/`index_of`/`count`/`strip_prefix`/`strip_suffix`/`split_lines`
 methods are receiver-method aliases of the identically-named `std.string` free fns — `s.replace(a, b)` and
 `text.replace(s, a, b)` (after `import std.string as text`) are byte-identical for valid inputs; the free fns
 keep working. **There is no longer any safety divergence between the two spellings** — as of 2026-08-18
@@ -1369,7 +1370,7 @@ reproducible only for *sequential* draws. (Unseeded draws are independent — no
 Written in Chezzi (`std/*.chz`); same `import std.<name>` surface.
 
 ### `std.string` — string helpers
-`is_empty(s)` · `repeat(s, n)` · `reverse(s)` · `pad_left(s, width, fill)` · `split_lines(s)` ·
+`is_empty(s)` · `repeat(s, n)` · `reverse(s)` · `pad_left(s, width, fill)` · `pad_right(s, width, fill)` · `split_lines(s)` ·
 `ends_with(s, suffix)` · `index_of(s, sub) -> int` (or `-1`) · `count(s, sub) -> int` ·
 `replace(s, old, new)` · `strip_prefix(s, p)` · `strip_suffix(s, p)`.
 
