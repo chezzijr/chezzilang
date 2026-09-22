@@ -7,6 +7,31 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-167 (2026-09-23) — a seeded scheduler mode for the M:N engine, the last of `docs/future.md`
+  §2b's four replacement oracles (closes the first condition of the JIT entry rule below).**
+  `CHEZZI_SCHED_SEED=<u64>` (`src/vm/sched_seed.rs`) drives every scheduler free choice — which
+  runnable fiber a pop returns (`LocalQ::pop`, the three `global.pop_front()` sites), the
+  step-0/`GLOBAL_CHECK_INTERVAL` cadence, `try_steal`'s start, `handoff_wake`'s `runnext` coin flip,
+  the reds-refill count — from a seeded PRNG instead of OS timing. At `CHEZZI_THREADS=1` the same seed
+  replays the same schedule **at a measured rate**, not byte-for-byte (see the W15-2 limit below); at
+  `CHEZZI_THREADS>=2` it also injects random yields/spins/sleeps at every sync point, widening real
+  thread-timing race windows. Behind a cached `AtomicBool::load(Relaxed)` — unset cost is noise-level on
+  all 11 `benches/run.chz` cases (`docs/benchmarks.md` "TICKET-167"). A `src/schedfuzz/` +
+  `src/bin/schedfuzz` long-runner sweeps `tests/chz` + concurrency `examples/*.chz` under a seed range,
+  judged against an unseeded baseline of the same fixed binary; a `FINDING` line names its replay
+  command. Mutation-tested against three historical fixes (full table: `docs/bug-discovery.md` "Seeded
+  scheduler oracle") — catches W15-1 (TICKET-166) only at the default worker count, catches W14-39
+  (TICKET-135) at T=1/T=2 but at a rate BELOW raw unseeded fuzzing (it replays a jitter-found failure,
+  it does not widen past it), misses the TICKET-128 mutation on release entirely (found only on
+  debug). Its first corpus sweep found a genuine new race on `main`: **W15-3** (`docs/gaps.md`) — a
+  `write` parked on a `Socket` that a racing `close()` should fault, and instead returns `Ok`; TICKET-166
+  covered the `Listener.accept()` case but not this one. **W15-2** (`docs/gaps.md`, found earlier the
+  same day): a top-level `parallel:`'s body runs on the main thread beside its unseeded
+  `chezzi-eager` drainer at `CHEZZI_THREADS=1`, so T=1 replay of a top-level fan-out holds only at a
+  measured rate (nested-in-`spawn:` fixture 144/160, flat fixture 86/160); fixing it is a separate
+  ticket. Tests: `tests/sched_seed_cli.rs` (5 interface/replay tests + 1 smoke gate, ~4s wall);
+  `tests/sched_seed/*.chz` fixtures. Docs: `docs/future.md` §2b (Scheduler-races row now BUILT),
+  `docs/bug-discovery.md`, `CLAUDE.md`, `docs/benchmarks.md`, `docs/gaps.md`.
 - **TICKET-166 (2026-09-22) — `close()` on a `Socket`/`Listener` wakes a parked op instead of hanging
   or crashing the netpoller (closes W15-1, and the `Listener` sub-item of W8-19).** Closing a
   `Listener`/`Socket` from another task while a sibling is parked in `accept`/`read`/`read_bytes`/
@@ -2851,6 +2876,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `CHEZZI_THREADS=2`, each in its own process/pool. **Two do not**: the **Go paired-programs
 > differential** and the **seeded/interleaving M:N mode** are unbuilt and still planned. That is a real
 > gap in race-finding coverage, and it is why §2b stays in the file rather than being deleted.
+> **UPDATE 2026-09-23:** the seeded/interleaving M:N mode shipped (TICKET-167, entry above) — three of
+> the four now exist; only the Go paired-programs differential is still unbuilt.
 > That task also found that **`chezzi test` never read `CHEZZI_THREADS` at all** — only `cmd_run` did —
 > so an earlier hand-measured "552/552 at both worker counts" had been a silent no-op proving nothing.
 > Fixed, with a causal proof: on a "needs ≥2 pool workers" repro, `CHEZZI_THREADS=1` genuinely times
@@ -8792,11 +8819,11 @@ The bug-hunt phase ends, and the JIT (Tier 2 quickening and Tier 3 Cranelift, `d
 when **all four** of these hold. The ledger does not have to be empty. Bugs never reach zero; the bar is
 that no serious one is still turning up in the part of the engine the JIT compiles.
 
-| # | condition | status 2026-09-22 |
+| # | condition | status 2026-09-23 |
 |---|---|---|
-| 1 | The seeded scheduler oracle is built and has been shown to re-find reverted historical races (TICKET-167) | filed |
+| 1 | The seeded scheduler oracle is built and has been shown to re-find reverted historical races (TICKET-167) | **met** — built; re-finds 2 of 3 reverted historical races (W15-1 at the default worker count only, W14-39 at T=1/T=2), the third (TICKET-128) is masked on release; see `docs/bug-discovery.md` "Seeded scheduler oracle" |
 | 2 | **Two consecutive bug-hunt sweeps with zero new P0/P1 in the core**: lexer, parser, checker, compiler, VM exec/call/arith/stmt, scheduler, GC, value model | not started |
-| 3 | Every open P0/P1 ledger row is closed | met (open: W8-19 P2, W12-5 record, W13-28 P2) |
+| 3 | Every open P0/P1 ledger row is closed | not met — W15-3 (P1, net, found 2026-09-23 by the TICKET-167 sweep) is open; other open rows stay P2/record (W8-19, W12-5, W13-28, W15-2) |
 | 4 | Feature freeze during the window: no new language surface or std API unless it IS a sweep finding (e.g. a missing ancestor idiom), so the surface under test stops moving | starts now |
 
 Rules for counting:

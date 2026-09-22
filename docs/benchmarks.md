@@ -2592,3 +2592,53 @@ in a loop over a large aliased store is quadratic, so use `for_each`, which shar
 `FAILED [...]: sh: line 1: hyperfine: command not found`. It also has no `RwShared` or airlock case,
 so no airlock cost of the `RwShared` materialize path was recorded from it. The shape tables above are
 the measurement of that path.
+
+## TICKET-167 — seeded scheduler mode, unset cost — 2026-09-23
+
+`CHEZZI_SCHED_SEED` unset must cost one relaxed load per decision point and change no behavior.
+Base = `/home/chezzijr/.cache/chezzi-t167/chezzi-base` (pre-ticket release binary, saved from
+`main` before this branch's engine changes). Branch = this ticket's `target/release/chezzi`.
+`hyperfine` at `~/.cargo/bin/hyperfine` (not on the default `PATH` this session).
+
+**First pass — `benches/run.chz` three times each, alternating.** This ran into a harness trap: the
+script always rebuilds `./target/release/chezzi` via `cargo build --release` in the CURRENT working
+directory, regardless of which binary invokes the script, so running the BASE binary as the
+interpreter still benched the BRANCH build. The three base numbers actually used are the three logs
+already on disk beside `chezzi-base` (`base-run-1..3.log`, captured 2026-09-22 by building the
+pre-ticket commit straight into `target/release/chezzi`). The three logs this session produced
+(`/tmp/branch-run-1..3.log`) are three genuine branch runs. Median-of-3, base vs. branch, at
+session-to-session load (base captured under load ~3, branch under load ~5.3-6.1 from this session's
+concurrent mutation-testing builds): `fib` 487.7ms → 521.6ms (+7.0%), `loop` 1729ms → 1884ms (+9.0%),
+`list` 706.2ms → 748.4ms (+6.0%), several others +5-7%. Every one of these fell outside the 3-run base
+spread — but the spread comparison conflates two different measurement SESSIONS at two different
+system loads, not a same-session A/B.
+
+**Second pass — direct back-to-back `hyperfine`, same invocation, same load.** `uptime` before:
+load average 5.43 (1 min), 28 cores. `hyperfine -w2 -m10 "<branch> run <bench>" "<base> run <bench>"`
+for all 11 benches, base and branch interleaved run-by-run by `hyperfine` itself rather than
+session-by-session:
+
+| bench | base mean | branch mean | ratio (branch/base) |
+|---|---|---|---|
+| fib | 514.1 ms | 526.6 ms | 1.02x |
+| str | 289.5 ms | 312.1 ms | 1.08x |
+| primes | 1.242 s | 1.243 s | 1.00x |
+| loop | 1.891 s | 1.877 s | 0.99x (faster) |
+| list | 745.3 ms | 742.9 ms | 1.00x |
+| struct | 966.9 ms | 958.7 ms | 0.99x (faster) |
+| poly_method | 2.765 s | 2.730 s | 0.99x (faster) |
+| map | 271.0 ms | 263.6 ms | 0.97x (faster) |
+| map_str | 392.9 ms | 397.1 ms | 1.01x |
+| unique | 133.7 ms | 132.4 ms | 0.99x (faster) |
+| empty | 5.2 ms | 5.6 ms | 1.08x |
+
+Every ratio is inside its own reported σ (the largest, `str` at 1.08x ± 0.23 and `empty` at 1.08x ±
+0.10, both have their 1.00x null well within one σ). None trends consistently one direction across
+all 11 — 6 of 11 show the branch FASTER. Conclusion: the first pass's apparent 5-9% slowdown was
+session-to-session load drift (yesterday's base logs at load ~3 vs. today's branch logs at load
+~5.3-6.1, this session's own concurrent cargo builds), not a real per-op cost. The controlled,
+same-invocation, same-load second pass shows `CHEZZI_SCHED_SEED` unset at noise level on every bench,
+as the `sched_seed::on()` gate (a cached `AtomicBool::load(Relaxed)`) is designed to be. Lesson for the
+next session that runs `benches/run.chz`: prefer a SINGLE `hyperfine` invocation naming both binaries
+over separate sessions per binary — `hyperfine` interleaves samples and reports a direct ratio, so it
+is immune to the load drift a two-session comparison is not.

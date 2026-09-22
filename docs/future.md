@@ -52,7 +52,7 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
 
 ---
 
-## 2b. Retire the serial engine + rebuild the oracle layer — ✅ **THE REMOVAL SHIPPED 2026-08-16**, the oracle layer is **partly built**
+## 2b. Retire the serial engine + rebuild the oracle layer — ✅ **THE REMOVAL SHIPPED 2026-08-16**, the oracle layer is **partly built** (three of four)
 
 > **Decision (2026-07-22), executed 2026-08-16.** The cooperative `--serial` engine was **not the model
 > Chezzi ships** — the real runtime is M:N (and, post-JIT, a JIT'd M:N). `--serial` existed only as the
@@ -80,14 +80,14 @@ and composes cleanly with `recover:`. **Recommend `defer`.**
    a JIT'd M:N can't be byte-identical to a tree-walking cooperative loop at all, so this debt only grows.
 
 **The replacement oracle layer** (each covers a class serial did, better and without the byte-identity
-tax). **Two of the four are built; two are not** — and that gap is why this section is still here:
+tax). **Three of the four are built; one is not** — and that gap is why this section is still here:
 
 | Bug class | Replacement oracle | Status |
 |---|---|---|
 | Sequential shared wrongness (both engines agree, both wrong) | **CPython differential** — `src/difftest/`, `tests/difftest.rs` gate + `src/bin/difffuzz` long-runner | ✅ **BUILT** (pre-dates the removal; untouched by it) |
 | Accidental *schedule*-dependent divergence — the detector job serial actually did | **Two worker-count differential** — `tests/chezzi_threads_cli.rs` runs the whole `tests/chz` suite through the built binary at the default worker count and again at `CHEZZI_THREADS=2`, each in its own process/pool, and asserts the same verdicts | ✅ **BUILT 2026-08-16** (task 5). Not in the original plan; it is what actually replaced `serial == M:N` as the standing `cargo test` differential. Narrower than what serial covered: a *curated* corpus at *two* worker counts, not arbitrary programs. |
 | Channel/select semantic wrongness (Chezzi's model vs the reference) | **Go paired-programs differential** — restricted to programs with a *deterministic outcome* despite nondeterministic scheduling (sort output lines where only order varies). Go's channels/`select`/close/backpressure map ~1:1 to `Channel[T]`/`wait:`. Catches *shared* wrongness serial couldn't (identical bytecode both engines). Sweet spot only — Go has **no** equivalent for the airlock or structured-nursery semantics. | ❌ **NOT BUILT.** Still planned. Nothing in the repo generates or runs Go programs. |
-| Scheduler races / lost-wakeups | **Seeded / deterministic-interleaving mode for M:N** (the `loom`/`shuttle` pattern): explore many schedules from a seed, replay on failure. This — not an external language — is the real replacement for serial's race-finding job; a reference language's scheduler is *also* nondeterministic, so diffing two nondeterministic schedulers catches nothing. | ❌ **NOT BUILT** — ticketed 2026-09-22 as **TICKET-167** (seeded replay at T=1, seeded perturbation at T>=2, a sweep harness), the first condition of the JIT entry rule in `PROGRESS.md`. The two-worker-count gate above is a weak stand-in: two fixed schedules, not an explored space. |
+| Scheduler races / lost-wakeups | **Seeded / deterministic-interleaving mode for M:N** (the `loom`/`shuttle` pattern): explore many schedules from a seed, replay on failure. This — not an external language — is the real replacement for serial's race-finding job; a reference language's scheduler is *also* nondeterministic, so diffing two nondeterministic schedulers catches nothing. | ✅ **BUILT 2026-09-23 (TICKET-167)**. `CHEZZI_SCHED_SEED=<u64>` (`src/vm/sched_seed.rs`) seeds every scheduler free choice: which runnable fiber a pop returns (`LocalQ::pop`, the three `global.pop_front()` sites), the step-0/`GLOBAL_CHECK_INTERVAL` cadence, `try_steal`'s start, `handoff_wake`'s `runnext` coin flip, and the reds-refill count; at `worker_count() >= 2` it also drives random yield/spin/sleep perturbation at every sync point (`sched_seed_point`/`sched_seed_perturb`). **Covers:** T=1 replay AT A MEASURED RATE (not byte-for-byte — see below), T>=2 perturbation that widens real thread-timing races, a `src/schedfuzz/` + `src/bin/schedfuzz` sweep harness over `tests/chz` + concurrency `examples/*.chz`. **Does not cover:** byte-for-byte T=1 replay of a top-level `parallel:` fan-out (W15-2 — the body runs on the main thread beside the `chezzi-eager` drainer, an unseeded pair); replay of timers, sockets, blocking natives or eager-nursery programs (only the flat/nested in-nursery fan-out fixtures are measured); exhaustive loom-style schedule exploration (random perturbation, not enumeration). Mutation-tested against 3 historical fixes: reliably catches W15-1 (TICKET-166) only at the DEFAULT worker count, not T=1/T=2 (0/256 seeded, matching 0/64 unseeded at those counts); reliably catches W14-39 (TICKET-135) at T=1 (217/256) and T=2 (78/256), though at both counts the SEEDED rate is below the raw UNSEEDED rate, so seeding replays a jitter-found failure rather than widening past it; did not catch the TICKET-128 mutation in 256 seeds at any count on release (found only on debug). Full mutation table, replay-rate data and the T=1 fan-out limit: `docs/bug-discovery.md`. The two-worker-count gate above stays as the accidental-divergence stand-in for what this mode does not reach (timers/sockets/eager nurseries). |
 | Airlock / structured-concurrency semantics (no external equivalent) | Hand-written **known-answer** tests | ✅ the existing hand-written Rust + `tests/chz` tests already are this; no new mechanism was needed |
 
 **Every oracle in that table compares RAW BYTES.** `String::from_utf8_lossy` is not injective (`ff`
@@ -99,11 +99,13 @@ CPython differential itself — `gaps.md` W7-30), so the Go paired-programs diff
 with it: capture `Vec<u8>`, keep the decode for *display and text heuristics only*, never for a verdict.
 
 **Net, and stated honestly:** CPython (sequential) + two-worker-count (accidental schedule divergence)
-+ known-answer (airlock) are live today. Go (channel/select semantics) and seeded-M:N (races) are
-**not**, so the *race-finding* half of what serial did is currently covered only by two fixed
-schedules over a curated corpus. That is a smaller net than the plan promised — recorded here rather
-than papered over, because the two unbuilt rows are the reason this section survives the removal.
-None of the live oracles constrain the M:N engine's design, which was the point.
++ known-answer (airlock) + seeded-M:N (races, TICKET-167) are live today. Only Go (channel/select
+semantics) is **not**, so the *race-finding* half of what serial did is now covered by an explored
+seed space over the curated corpus, not just two fixed schedules — the seeded oracle already turned
+up one new race on `main` in its first sweep (W15-3, `docs/gaps.md`), and it needed the seed to find
+it: 0/64 unseeded at the winning worker count. Seeded T=1 replay is a measured rate, not
+byte-for-byte, until W15-2 (a top-level `parallel:`'s unseeded body/drainer pair) is fixed — see the
+table row above. None of the live oracles constrain the M:N engine's design, which was the point.
 
 **Migration mechanics — DONE 2026-08-16, in this order:** every bare `assert_parity(src)` site was
 first given a real, run-derived golden (so nothing lost its expectation when the second engine went

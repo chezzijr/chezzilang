@@ -634,3 +634,75 @@ failing-then-green unit test per the repo's TDD flow before fixing. Verdicts: `P
 the first differing line) / `FAULT` (Chezzi runtime error + exit code) / `PANIC` (Rust host panic — a
 Chezzi bug for certain) / `TIME` (timeout). A problem with no cases is **skipped**, never failed, so
 the harness is inert until samples are committed or data is fetched.
+
+## Seeded scheduler oracle (`src/schedfuzz/`)
+
+A fourth oracle, replacing the race-finding job the removed `--serial` engine used to do
+(`docs/future.md` §2b). The three oracles above never vary the SCHEDULE — the CPython/DSA
+differentials compare shared wrongness across one fixed run each, and the two-worker-count gate
+(`tests/chezzi_threads_cli.rs`) is two fixed schedules, not an explored space. Every scheduler/netpoller
+race found this project year (W8-7, W8-8, W11-4, W13-26/27/28, W15-1) was found by a person running a
+hand-built program against Go, not by a mechanical oracle — this is the mechanical replacement.
+
+**How it works.** `CHEZZI_SCHED_SEED=<u64>` (`src/vm/sched_seed.rs`) makes every scheduler free choice
+— which fiber a pop returns, the step-0/steal cadence, `handoff_wake`'s `runnext` coin flip, the reds
+refill — come from a seeded PRNG. At `CHEZZI_THREADS=1` this replays the SAME seed to the SAME
+schedule at a MEASURED RATE (see the limit below, not byte-for-byte); at `CHEZZI_THREADS>=2` it also
+injects random yields/spins/sleeps at every sync point, widening real OS-thread race windows the way
+loom/shuttle-style fuzzing does.
+
+**Run it:**
+
+```sh
+cargo build --release --bin schedfuzz --bin chezzi
+target/release/schedfuzz --seeds 1..33 --threads 1,2                     # default corpus sweep
+target/release/schedfuzz --seeds 1..33 --threads 1,2,0                   # 0 = default worker count too
+target/release/schedfuzz --program tests/sched_seed/interleave.chz       # one program
+```
+
+A finding prints `FINDING kind=<hang|panic|rc|output> seed=<S> threads=<T> program=<path> replay:
+CHEZZI_SCHED_SEED=<S> CHEZZI_THREADS=<T> chezzi <test|run> <path>` — paste the `replay:` clause
+verbatim to reproduce. Every run is judged against an UNSEEDED baseline of the SAME fixed binary
+(never a mutant's own run), so a target that already hangs unseeded is still comparable, and a target
+whose two unseeded runs disagree is skipped and printed `UNSTABLE` rather than scored.
+
+**Replay a single failing seed directly**, without the harness:
+
+```sh
+CHEZZI_SCHED_SEED=12345 CHEZZI_THREADS=1 cargo run -- run <file>
+```
+
+**Replay limit (measured 2026-09-22/23, release binary).** T=1 replay is a rate, not a guarantee, for
+two reasons. (1) A top-level `parallel:`'s body runs on the main thread beside its `chezzi-eager`
+drainer — an unseeded pair (W15-2) — so a fan-out NESTED inside one `spawn:` (fiber-owned, runs on the
+drainer alone) replays at a measured 144/160 (seeds 1-8 x 20 runs, per-seed minimum 16/20) against a
+FLAT top-level fan-out's 86/160. (2) Timers, sockets, blocking natives and eager-nursery programs are
+outside what the RNG stream covers at all — only the sync-point-gated fan-out fixtures are measured.
+
+**Mutation-testing results, all release binary, `--seeds 1..257 --threads 1,2,0` (0 = default/28
+cores this box), full table + method: TICKET-167 `## Thread`.**
+
+| mutation | fix reverted | T=1 | T=2 | default | note |
+|---|---|---|---|---|---|
+| W15-1 (TICKET-166, `0ff6a8b9`) | `close()` wakes a parked netpoller op | not found (0/256) | not found (0/256) | **found, 152/256** | only the default worker count reproduces this race at all — unseeded is 62/64 at default vs. 0/64 at T=1/T=2 too; seeding does not widen the low-count window, it only replays what default-count OS jitter already opens |
+| TICKET-128 (`owner_scope_done`) | the T=1 hang the debug smoke test gates on | not found (0/256) | not found (0/256) | not found (0/256) | masked on RELEASE at every count tried (the debug build's smoke gate is red on this same mutation — optimization changes the race window) |
+| W14-39 (TICKET-135, `a5b87cb5`) | cancel-unwind orphaning a nested child | **found, 217/256** | **found, 78/256** | not found (0/256) | seeded rate is LOWER than unseeded at both T=1 (84.8% vs 100%) and T=2 (30.5% vs 46.9%) — seeding replays a jitter-found failure here too, it does not widen past it |
+
+**Standing limit, stated for both mutations that DID reproduce:** as landed, seeded perturbation does
+not widen either race's window past what unseeded OS-thread jitter already finds at the SAME worker
+count. It buys deterministic REPLAY of a jitter-found failure — valuable for a bisect or a CI repro —
+not a wider net than raw multi-run unseeded fuzzing at low worker counts. Widening the net further
+would mean perturbation at more or different sync points; not attempted here.
+
+**What it already found on `main`:** W15-3 (`docs/gaps.md`) — a `write` parked on a `Socket` that
+another task then `close()`s can return `Ok` instead of TICKET-166's error, at `CHEZZI_THREADS=1`,
+12/16 seeds in the first sweep, 0/10 unseeded at the same worker count. The socket write path was not
+covered by TICKET-166's listener-accept fix.
+
+**A harness false positive to know about, not a real finding:** `corpus()` includes any
+`examples/*.chz` with a sibling `.expected` and a concurrency keyword, and judges byte-exact stdout.
+Some such programs document their own output order as scheduling-dependent (`try_recv.chz`,
+`parallel.chz`) — the two-run unseeded baseline happens to hit the recorded order both times, so
+`check_output` is (wrongly) `true`, and seeding then flags the program's own documented nondeterminism
+as an `output` finding. Treat an `output` finding on such a program as a corpus-selection gap, not a
+scheduler bug, until the harness is taught to read that disclaimer.

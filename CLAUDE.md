@@ -43,8 +43,9 @@ cargo test                       # FULL pre-commit suite: lib unit suite + golde
 #   pool is ONE process-wide `OnceLock`, so forcing a count inside `cargo test --lib` either no-ops or
 #   (worse) pins the WHOLE run's pool and starves concurrently-running tests (measured: 8
 #   failures/hangs at `RUST_TEST_THREADS=4`, >54 min unfinished at `=1`) — don't re-attempt an
-#   in-process version of this gate. Also NOT `docs/future.md` §2b's Go-paired-programs differential
-#   or a seeded/interleaving M:N mode; both are unbuilt and separately planned.
+#   in-process version of this gate. Also NOT `docs/future.md` §2b's Go-paired-programs differential,
+#   which is still unbuilt and separately planned (the seeded/interleaving M:N mode shipped under
+#   TICKET-167 — see `CHEZZI_SCHED_SEED` and `schedfuzz` below).
 cargo test --lib                 # INNER LOOP: just the lib unit suite (unit + goldens + conformance, no integration/bin)
 cargo test --lib checker::       # scope to the area you're editing → seconds (use while implementing)
 cargo test --features lsp --test lsp_smoke   # the feature-gated LSP server smoke test (off the default build)
@@ -71,6 +72,8 @@ cargo run -- run --parallel examples/primes_parallel.chz   # accepted no-op alia
 cargo run -- run --threads=4 examples/primes_parallel.chz  # size the OS-thread pool (0/omitted = all cores; env CHEZZI_THREADS)
 cargo run -- test examples/              # run every `test fn` in *_test.chz (M20); file or dir, default cwd
 CHEZZI_THREADS=4 cargo run -- test tests/chz   # `test` sizes the same pool as `run`, env-only (no `--threads` flag on `test`)
+CHEZZI_SCHED_SEED=<u64> cargo run -- run <file>   # seeded scheduler mode (TICKET-167): replay at T=1 (measured rate, docs/bug-discovery.md), perturbation at T>=2; a failing run reports its seed on stderr
+cargo build --release --bin schedfuzz --bin chezzi && target/release/schedfuzz --seeds 1..33 --threads 1,2   # long-running seeded-scheduler sweep over tests/chz + concurrency examples/*.chz; see docs/bug-discovery.md "Seeded scheduler oracle"
 cargo run -- docs                        # print docs: no topic = full LLM reference bundle; `docs <topic>` = one (spec/syntax/stdlib); `docs topics` lists them
 
 cargo run -- run benches/run.chz         # Chezzi-vs-CPython bench harness (see docs/benchmarks.md)
