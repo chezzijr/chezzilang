@@ -262,7 +262,10 @@ impl Vm {
         // EXHAUSTIVE on purpose (no `_` arm): a future `Kind` must be routed here deliberately, or it
         // does not compile — a catch-all would silently run a new variant inline.
         match kind {
-            Kind::InterceptNet => return self.net_connect_or_listen(name, args, span),
+            Kind::InterceptNet => {
+                self.sched_seed_point();
+                return self.net_connect_or_listen(name, args, span);
+            }
             Kind::InterceptIo => return self.io_native(name, args, span),
             Kind::Inline | Kind::Blocking | Kind::TimedWait | Kind::HostWait => {}
         }
@@ -1282,6 +1285,7 @@ impl Vm {
         // Concurrency C4: `Channel` / `Shared` methods mutate the heap object in place (and `update`
         // re-enters the VM), so dispatch them directly off the handle, like the core-type methods.
         if matches!(self.heap.get(h), Obj::Channel(_)) {
+            self.sched_seed_point();
             let result = self.channel_method(h, method, &args, span)?;
             if self.suspend.is_some() || self.send_suspend.is_some() {
                 // B1: `recv` parked this fiber (re-rooted the receiver itself); or a bounded `send`
@@ -1371,6 +1375,7 @@ impl Vm {
                 return Ok(());
             }
             // Native op body per handle — identical to the retired per-arm dispatch, tails included.
+            self.sched_seed_point();
             let result = match key {
                 "Shared" => self.shared_method(h, method, &args, span)?,
                 "RwShared" => self.rwshared_method(h, method, &args, span)?,

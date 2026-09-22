@@ -202,6 +202,7 @@ impl Vm {
         argc: usize,
         span: Span,
     ) -> Result<(), RuntimeError> {
+        self.sched_seed_point();
         let at = self.stack.len() - argc;
         let raw_args: Vec<Value> = self.stack.split_off(at);
         let head = self.pop();
@@ -2347,6 +2348,56 @@ impl Vm {
         self.holds_width = true;
     }
 
+    /// TICKET-167 — seeded-mode reduction budget: `CONTEXT_REDS` unseeded, else a random budget so
+    /// forced preemption fires at varying points instead of the same fixed op count every schedule.
+    /// 1-in-4 draws a short budget (1..=64) to bias toward tighter preemption windows.
+    fn fresh_reds(&self) -> u32 {
+        if !sched_seed::on() {
+            return CONTEXT_REDS;
+        }
+        let Some(sched) = self.mn.clone() else {
+            return CONTEXT_REDS;
+        };
+        let r = sched.rng.next();
+        if r % 4 == 0 {
+            1 + ((r >> 8) % 64) as u32
+        } else {
+            1 + ((r >> 8) % u64::from(CONTEXT_REDS)) as u32
+        }
+    }
+
+    /// TICKET-167 — a seeded-mode sync point: no-op unless `sched_seed::on()`.
+    #[inline]
+    pub(super) fn sched_seed_point(&mut self) {
+        if sched_seed::on() {
+            self.sched_seed_perturb();
+        }
+    }
+
+    /// TICKET-167 — part 2, perturbation at T >= 2: a random yield, short spin or delay, drawn from
+    /// this fiber's sched RNG. Runs only at `worker_count() >= 2` (see `## Decisions`: at T=1 these
+    /// arms would move only OS timing, which replay cannot control).
+    #[cold]
+    fn sched_seed_perturb(&mut self) {
+        let Some(sched) = self.mn.clone() else {
+            return;
+        };
+        let r = sched.rng.next();
+        match r % 8 {
+            0 | 1 => self.reds = 0,
+            2 if worker_count() >= 2 => std::thread::yield_now(),
+            3 if worker_count() >= 2 => {
+                for _ in 0..((r >> 8) % 4096) {
+                    std::hint::spin_loop();
+                }
+            }
+            4 if worker_count() >= 2 => {
+                std::thread::sleep(std::time::Duration::from_micros(1 + (r >> 8) % 50))
+            }
+            _ => {}
+        }
+    }
+
     /// TICKET-141 (W14-14) — the D3 budget ran out inside a native callback. The fiber cannot leave
     /// the thread, so the THREAD hands its runner slot to one replacement and takes one back in FIFO
     /// order, keeping `--threads=N` at N runners. Preempts only when someone can use the slot.
@@ -2643,7 +2694,7 @@ impl Vm {
         // `recover:` in that fiber is wrongly bypassed (`run_until`'s `owner_bypass`).
         self.owner_fault_floor = None;
         self.pending_exit = None;
-        self.reds = CONTEXT_REDS; // D3 — fresh reduction budget on every schedule-in (BEAM semantics)
+        self.reds = self.fresh_reds(); // D3 — fresh reduction budget on every schedule-in (BEAM semantics)
         self.yield_now = false;
         let state = std::mem::replace(&mut fiber.state, FiberState::Ready);
         // D5 — a fiber resumed after a blocking-native offload carries the pool's result. Take it now

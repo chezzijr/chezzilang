@@ -96,8 +96,8 @@ fn main() -> ExitCode {
         "tokens" => cmd_tokens(args.get(1)),
         "ast" => cmd_ast(args.get(1)),
         "check" => cmd_check(&args[1..]),
-        "run" => cmd_run(&args[1..]),
-        "test" => cmd_test(&args[1..]),
+        "run" => report_sched_seed(cmd_run(&args[1..])),
+        "test" => report_sched_seed(cmd_test(&args[1..])),
         "init" => cmd_init(&args[1..]),
         "docs" => cmd_docs(&args[1..]),
         other => {
@@ -342,6 +342,7 @@ fn cmd_run(args: &[String]) -> ExitCode {
     } else {
         apply_env_worker_count("run");
     }
+    apply_env_sched_seed("run");
 
     let Some(source) = read_source(&path) else {
         return ExitCode::FAILURE;
@@ -484,6 +485,32 @@ fn apply_env_worker_count(cmd: &str) {
             "chezzi {cmd}: ignoring invalid CHEZZI_THREADS='{bad}' (expected a non-negative integer; 0 = all cores)"
         ),
     }
+}
+
+/// TICKET-167 — `CHEZZI_SCHED_SEED=<u64>` switches the M:N scheduler's free choices to a seeded PRNG
+/// (see `src/vm/sched_seed.rs`). Unset or blank leaves the engine unseeded.
+fn apply_env_sched_seed(cmd: &str) {
+    match vm::sched_seed::parse(std::env::var("CHEZZI_SCHED_SEED").ok().as_deref()) {
+        Ok(Some(s)) => vm::sched_seed::init(s),
+        Ok(None) => {}
+        Err(bad) => eprintln!(
+            "chezzi {cmd}: ignoring invalid CHEZZI_SCHED_SEED='{bad}' (expected an unsigned 64-bit integer)"
+        ),
+    }
+}
+
+/// TICKET-167 — on a nonzero exit under a seeded run, print the seed and worker count so the failure
+/// replays (`## Decisions`: "The seed line prints only on a nonzero exit, and only to stderr").
+fn report_sched_seed(code: ExitCode) -> ExitCode {
+    if code != ExitCode::SUCCESS
+        && let Some(s) = vm::sched_seed::seed()
+    {
+        let n = vm::worker_count();
+        eprintln!(
+            "chezzi: scheduler seed {s} at {n} worker(s); replay with CHEZZI_SCHED_SEED={s} CHEZZI_THREADS={n}"
+        );
+    }
+    code
 }
 
 /// Resolve what to run for a bare `chezzi run` (no file argument): find the project root by walking
@@ -630,6 +657,7 @@ fn cmd_test(args: &[String]) -> ExitCode {
     // knob as `run`, minus the `--threads` flag (env only; see `apply_env_worker_count`'s doc for
     // why this wasn't wired before).
     apply_env_worker_count("test");
+    apply_env_sched_seed("test");
     let report = test_runner::run_tests_opts(std::path::Path::new(&root), opts);
     // Byte-exact (W6-9r item 4): `report.bytes`, not `report.text`, so a test's `--show-output`
     // capture reaches fd 1 unchanged — matching `chezzi run` (W6-9) and `go test`. No explicit flush:

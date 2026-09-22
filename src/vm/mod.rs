@@ -2078,6 +2078,23 @@ impl LocalQ {
         self.runnext_at = None;
         self.runnext.take().or_else(|| self.ring.pop_front())
     }
+
+    /// TICKET-167 — seeded-mode pop: uniformly at random over `runnext` (if set) plus the whole
+    /// ring, instead of always taking `runnext`/the ring front. `None` when both are empty.
+    fn pop_seeded(&mut self, rng: &sched_seed::SeedRng) -> Option<Fiber> {
+        let has_runnext = self.runnext.is_some();
+        let n = self.ring.len() + usize::from(has_runnext);
+        if n == 0 {
+            return None;
+        }
+        let k = rng.below(n as u64) as usize;
+        if has_runnext && k == 0 {
+            self.runnext_at = None;
+            self.runnext.take()
+        } else {
+            self.ring.remove(k - usize::from(has_runnext))
+        }
+    }
 }
 
 /// Per-connection spawn — the open state of an EAGER `parallel:` nursery (one activated at
@@ -2250,6 +2267,9 @@ struct MnSched {
     /// story. Read by `finish` to decide a scope's retained-backlog verdict — the observation site
     /// the blocked joining fiber cannot provide.
     mem_cap: usize,
+    /// TICKET-167 — this sched's seeded-mode RNG stream, keyed by creation order (see `## Decisions`
+    /// "One RNG stream per `MnSched`"). Draws are cheap under `sched_seed::on()` and unused otherwise.
+    rng: sched_seed::SeedRng,
     /// D5 owe #3 (Path C) — count of fibers currently **demoted**: blocked in place on a channel
     /// condvar after a `recv` reached inside a native callback (a 5th fiber state, distinct from
     /// `inflight`). Mutated only under the core lock by [`Vm::demote_recv_block`] (running→demoted on
@@ -2828,6 +2848,7 @@ impl MnSched {
             inflight: AtomicUsize::new(0),
             blocked_native: AtomicUsize::new(0),
             mem_cap,
+            rng: sched_seed::SeedRng::new(),
             // TICKET-099 — empty by default; both `MnSched` construction sites assign the run's
             // registry. An empty one is today's behaviour (no peers to wake or veto against).
             sched_registry: Default::default(),
@@ -3361,6 +3382,18 @@ impl MnSched {
     /// TICKET-128 (W13-25) — the body of [`Self::take_runnable`], split out so the wrapper can track
     /// whether this call spun (`spun`) before returning. See `take_runnable` for the recruit this
     /// enables.
+    /// TICKET-167 — seeded-mode pop off the global queue: uniformly at random instead of FIFO front.
+    /// Every requeue onto `global` uses `push_back`, so randomizing the pop side also covers timer
+    /// and netpoll completion order (see `## Digest` "Global pick"). `None` on an empty queue.
+    fn pop_global(&self, c: &mut SchedCore) -> Option<Fiber> {
+        if sched_seed::on() && !c.global.is_empty() {
+            let k = self.rng.below(c.global.len() as u64) as usize;
+            c.global.remove(k)
+        } else {
+            c.global.pop_front()
+        }
+    }
+
     fn take_runnable_inner(&self, wid: usize, tick: u64, scope_id: usize, spun: &mut bool) -> Take {
         // gaps.md W7-58 — "this worker has already asked the process-wide verdict since its last
         // wait". Bounds the (relatively expensive, `parties`-locking) escalation below to ONE call per
@@ -3379,9 +3412,14 @@ impl MnSched {
             //    TICKET-128 (W13-25) — this pulled fiber runs AHEAD of this worker's own `runnext`
             //    and may block its thread in a `Kind::Inline` native, so if `runnext` is occupied an
             //    idle worker is recruited to steal it (nobody else is left to run it otherwise).
-            if tick.is_multiple_of(GLOBAL_CHECK_INTERVAL) {
+            let global_first = if sched_seed::on() {
+                self.rng.below(8) == 0
+            } else {
+                tick.is_multiple_of(GLOBAL_CHECK_INTERVAL)
+            };
+            if global_first {
                 let mut c = self.lock();
-                if let Some(f) = c.global.pop_front() {
+                if let Some(f) = self.pop_global(&mut c) {
                     c.running += 1;
                     self.runnable.fetch_sub(1, Ordering::Relaxed); // runnable → running
                     drop(c);
@@ -3393,7 +3431,12 @@ impl MnSched {
                 drop(c);
             }
             // 1. Own local queue — lock B alone, release before touching the core lock.
-            if let Some(f) = self.lock_local(wid).pop() {
+            let popped = if sched_seed::on() {
+                self.lock_local(wid).pop_seeded(&self.rng)
+            } else {
+                self.lock_local(wid).pop()
+            };
+            if let Some(f) = popped {
                 let mut c = self.lock();
                 c.running += 1;
                 self.runnable.fetch_sub(1, Ordering::Relaxed); // runnable → running
@@ -3424,10 +3467,10 @@ impl MnSched {
                 // lock (order A-then-release-then-B → never B-while-holding-A).
                 let g = c.global.len();
                 let take = (g / self.locals.len() + 1).min(g).min(LOCAL_RING_CAP / 2);
-                let first = c.global.pop_front().unwrap();
+                let first = self.pop_global(&mut c).unwrap();
                 c.running += 1;
                 self.runnable.fetch_sub(1, Ordering::Relaxed); // first: runnable → running
-                let extra: Vec<Fiber> = (1..take).filter_map(|_| c.global.pop_front()).collect();
+                let extra: Vec<Fiber> = (1..take).filter_map(|_| self.pop_global(&mut c)).collect();
                 drop(c);
                 if !extra.is_empty() {
                     {
@@ -3926,8 +3969,12 @@ impl MnSched {
         let mut c = self.lock();
         let n = self.wake_bucket(&mut c, key, kind);
         let quiet = quiet_empty && n == 0;
+        // TICKET-167 — seeded mode takes the existing broadcast path (below) on a coin flip instead
+        // of always handing off; the coin is checked BEFORE `pop_back` so a "no" leaves `global`
+        // untouched for the broadcast path to find.
         if n == 1
             && wid < self.locals.len()
+            && !(sched_seed::on() && self.rng.below(2) == 0)
             && let Some(f) = c.global.pop_back()
         {
             drop(c);
@@ -4237,7 +4284,11 @@ impl MnSched {
         if n <= 1 {
             return Vec::new();
         }
-        let r = self.steal_ctr.fetch_add(1, Ordering::Relaxed);
+        let r = if sched_seed::on() {
+            self.rng.next() as usize
+        } else {
+            self.steal_ctr.fetch_add(1, Ordering::Relaxed)
+        };
         for i in 0..n {
             let v = (wid + 1 + r.wrapping_add(i)) % n;
             if v == wid {

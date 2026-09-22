@@ -2685,6 +2685,7 @@ impl Vm {
                 self.push(Value::bool(is_chan));
             }
             Op::ChanRecvOrClosed => {
+                self.sched_seed_point();
                 // `for v in ch:` step: pop a value (parking on empty-open exactly like `recv`) and push
                 // `Some(v)`, or push `None` once the channel is closed-and-drained (the loop's clean
                 // exit). It DOES run inside a native re-entry when the loop sits in a generator body,
@@ -2746,8 +2747,12 @@ impl Vm {
                 };
                 return Err(self.err(format!("no match arm for variant '{variant}'"), span));
             }
-            Op::EnterNursery => self.op_enter_nursery(span),
+            Op::EnterNursery => {
+                self.sched_seed_point();
+                self.op_enter_nursery(span)
+            }
             Op::JoinNursery => {
+                self.sched_seed_point();
                 self.join_nursery_released()?;
                 self.cancel_at_join(span)?;
             }
@@ -2767,7 +2772,10 @@ impl Vm {
             Op::SpawnCall(argc) => self.do_spawn(None, *argc, span)?,
             Op::SpawnMethod(name, argc) => self.do_spawn(Some(name.clone()), *argc, span)?,
             Op::SpawnBlock(proto, entries) => self.do_spawn_block(*proto, entries, span)?,
-            Op::WaitPoll(meta) => self.op_wait_poll(meta, span)?,
+            Op::WaitPoll(meta) => {
+                self.sched_seed_point();
+                self.op_wait_poll(meta, span)?
+            }
             Op::NewChannel(has_cap) => {
                 let cap = if *has_cap {
                     let cap_v = self.pop();
