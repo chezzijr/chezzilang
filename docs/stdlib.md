@@ -536,6 +536,9 @@ works. Details and the residual cases in `docs/gaps.md` (`W7-12r / W7-15`) and `
   - An incomplete codepoint left when the peer closes → `Err("invalid utf-8 at eof: …")`.
   - `close()` returns `nil` (no error channel): a still-carried tail at `close` is dropped silently — the
     EOF error surfaces on the `read` that sees the close, not on `close`.
+  - `close()` from another task wakes a task parked in `accept`/`read`/`read_bytes`/`write`/`write_bytes`
+    on the same handle; that call returns `Err("<op> on a closed listener|socket")` (Go's `Close`
+    cancelling a blocked `Accept`/`Read`).
   - **Binary payloads: use `read_bytes` / `write_bytes`.** They never decode, so any payload survives
     byte-exactly. Contract differences from the `str` `read`: `read_bytes(n)` returns **at most `n`**
     bytes (`read(n)`'s `n` bounds only the NEW fd bytes, so it can return up to `n + 3`); `Ok(b"")` is
@@ -545,6 +548,8 @@ works. Details and the residual cases in `docs/gaps.md` (`W7-12r / W7-15`) and `
     `write_bytes` takes a `bytes` (convert a `bytearray` with `bytes(ba)`). `timeout_ms` behaves exactly
     as for `read`/`write`.
 - `Listener`: `accept(timeout_ms?: int) -> Result[Socket]` · `addr() -> Result[str]` · `close() -> nil`.
+  `close()` from another task wakes a task parked in `accept`; that call returns `Err("accept on a
+  closed listener")` (Go's `Close` cancelling a blocked `Accept`).
 - `Socket`/`Listener` are **reserved type names** (no user `struct Socket`) and a bare annotation
   requires `import std.net` (whole-module, or `import Socket from std.net`) — they are NOT global
   builtins, matching the `Shared`/`Executor` (std.concurrency) and `ptr` (std.ffi) gates.

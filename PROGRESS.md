@@ -7,6 +7,24 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-166 (2026-09-22) — `close()` on a `Socket`/`Listener` wakes a parked op instead of hanging
+  or crashing the netpoller (closes W15-1, and the `Listener` sub-item of W8-19).** Closing a
+  `Listener`/`Socket` from another task while a sibling is parked in `accept`/`read`/`read_bytes`/
+  `write`/`write_bytes` used to `deregister` (which re-injects the parked fiber) BEFORE clearing the
+  handle, so the re-run op could see the listener still open, `WouldBlock` again, and re-park on the
+  fd `close` was about to drop — a hang, or `netpoller add: ... Bad file descriptor` when the fd was
+  already gone. `close` now takes the handle out of its mutex first, sets a new `closed` flag on the
+  core, THEN deregisters, THEN drops the handle; `poller::register` refuses a park once `closed` is
+  set, checked under the same registry lock as the existing scope-cancel check, so a late-arriving
+  park can never arm a closed or reused fd either. The op returns `Err("<op> on a closed
+  listener|socket")`, matching Go's `Close` cancelling a blocked `Accept`/`Read`. Tests:
+  `tests/exit_status.rs::closing_a_listener_wakes_a_parked_accept` /
+  `::closing_a_socket_wakes_a_parked_read` (each 200 close rounds per run, 3 runs at
+  `CHEZZI_THREADS=2` and 3 at the default, bounded by `hang_deadline::run_with_hang_deadline`),
+  `vm::poller::tests::register_refuses_a_closed_socket`, and
+  `tests/chz/stdlib/net_close_test.chz` (`accept`/`read`/`read_bytes`/`write`/`write_bytes`, with and
+  without `timeout_ms`, both worker counts). Docs: `docs/gaps.md`, `CLAUDE.md`, `docs/stdlib.md`,
+  `docs/concurrency.md`.
 - **TICKET-165 (2026-09-22) — the airlock warning fires on a same-path field/index read and on a
   mutator through an element or field (closes W11-13).** A task write now records its constant
   field/key path, and a parent read along it, a prefix of it or an extension of it warns (`s.v = 2`

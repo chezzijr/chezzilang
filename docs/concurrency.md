@@ -1383,6 +1383,10 @@ Compare a line SET, or make the program deterministic by construction, before ca
 >   before that it spun in place for up to 10 s, pinning a pool worker with no cancel or `--timeout`
 >   escape (measured: an outer `shutdown_now()` at 200 ms took **10 009 ms** to end the run, now
 >   **209 ms**). Use `spawn`/`parallel:` for socket work, which parks instead of blocking.
+>
+> **Closing a `Socket`/`Listener` from another task while a sibling is parked on it (W15-1) wakes the
+> parked op with an `Err`** naming the closed resource (`"<op> on a closed listener|socket"`), Go's
+> `Close` cancelling a blocked `Accept`/`Read` — it never hangs or crashes the netpoller.
 
 ---
 
