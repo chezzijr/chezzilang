@@ -644,6 +644,7 @@ impl Checker {
             origin: StructOrigin::Builtin,
             doc: None,
             defaulted_fields: Vec::new(),
+            self_writers: HashSet::new(),
         };
         // The LAYOUT stays globally present (so field access on a native return — `regex.find(...)
         // .text`, `request.get(...).status`, `process.run(...).code` — resolves import-free via
@@ -801,6 +802,7 @@ impl Checker {
                     origin: StructOrigin::Builtin,
                     doc: None,
                     defaulted_fields: Vec::new(),
+                    self_writers: HashSet::new(),
                 };
                 sig.struct_defs.insert(name.clone(), info.clone());
                 sig.types.insert(name.clone());
@@ -1053,6 +1055,7 @@ impl Checker {
                     origin: StructOrigin::Builtin,
                     doc: None,
                     defaulted_fields: Vec::new(),
+                    self_writers: HashSet::new(),
                 });
             }
         }
@@ -2877,26 +2880,14 @@ impl Checker {
     /// Called at the TOP of `check_assign`, before the per-arm code infers the target's receiver: a
     /// parent-side `xs[0] = v` must untaint *first*, so the receiver read it then performs cannot
     /// report a write the parent has just superseded.
-    pub(super) fn note_assign_root(&mut self, target: &Expr, op: AssignOp) {
-        let Some((name, root_span, path)) = chain_path(target) else {
+    pub(super) fn note_assign_root(&mut self, target: &Expr) {
+        let Some((name, _, _)) = chain_path(target) else {
             return;
         };
         let name = name.clone();
-        // A COMPOUND assign is `x = x OP v` (docs/syntax.md §3) — it READS the binding
-        // too, and that read is the stale one (`n += 1` after a task-side `n = n + 1`
-        // measured 1, not 2). The plain `=` form has no such read, and any read in the
-        // RHS was already inferred (and reported) before `check_assign` was called.
-        if op != AssignOp::Eq {
-            self.report_spawn_stale_read_at(&name, root_span, &path);
+        if self.assign_is_checked_write(target) {
+            self.note_task_write(&name, target.span);
         }
-        // ponytail: a plain `=` through an INDEX/FIELD target (`m[k] = v`, `p.f = v`)
-        // untaints silently even though it too only writes PART of the stale copy —
-        // unlike the mutator site, which now reports. The asymmetry is deliberate and is
-        // the third ceiling: the write may or may not supersede the task's, and the
-        // checker cannot tell (`m["a"] = 2` after a task-side `m["a"] = 1` genuinely
-        // supersedes; `m["b"] = 2` does not), so it declines rather than emit a warning
-        // that is noise half the time. Upgrade path: constant-key tracking.
-        self.note_task_write_at(&name, target.span, path);
     }
     /// W8-3 — enter a body that is its OWN frame: a nested `fn`, a closure, or the speculative
     /// return-inference walk of either. Such a body is NOT the enclosing task (it has its own caller),
@@ -2959,42 +2950,8 @@ impl Checker {
     /// does reach here with `in_spawn_block` true, and taints correctly (measured: `spawn: defer:
     /// xs.push(1)` leaves `xs.len() == 0` after the join, and the read warns).
     pub(super) fn note_task_write(&mut self, name: &str, span: Span) {
-        self.note_task_write_at(name, span, Vec::new());
-    }
-    /// [`Checker::note_task_write`] with the write's constant path spelled out (empty = a
-    /// whole-binding write). Every call APPENDS a new entry to the binding's `writes` list rather than
-    /// keeping only the first — TICKET-165: a later read must be checked against the write it
-    /// OVERLAPS, and `or_insert`-ing only the first write lost a same-field second write entirely
-    /// (`s.w = 2` then `s.v = 2`, a read of `s.v` must cite line 2, not line 1). The mutator-method
-    /// site (`xs.push(v)`) passes an EMPTY path: every member of `mutates_receiver` is a
-    /// whole-container read-modify-write, so any read of the binding observes it.
-    pub(super) fn note_task_write_at(&mut self, name: &str, span: Span, path: Vec<PathSeg>) {
-        if !self.in_spawn_block {
-            self.spawn_stale.remove(name);
-            return;
-        }
-        // `is_captured`, NOT `is_local_capture`: a captured module GLOBAL deep-copies into the task
-        // identically (measured: `g.push(1)` in a task leaves `g.len() == 0` after the join), and the
-        // whole `gaps.md` repro written at module TOP LEVEL — where the binding IS scope 0 — is the
-        // shape with no runtime backstop at all. The scope-0 exclusion `is_local_capture` draws exists
-        // for the READ-sendability gate (an imported module resolves per-task like a free function),
-        // which is a different question from "does this write survive the join". Tracking a global
-        // costs nothing extra here because the taint is taken/restored per fn body, so a claim never
-        // crosses a function boundary.
-        //
-        // ponytail: that per-fn scoping IS the ceiling — a global written in a task in `f` and read in
-        // `g` is not flagged. Upgrade path: a module-level pass, not this source-order walk.
-        if self.is_captured(name)
-            && let Some(scope) = self.scope_of(name)
-        {
-            self.spawn_stale
-                .entry(name.to_string())
-                .or_insert(StaleWrite {
-                    scope,
-                    writes: Vec::new(),
-                })
-                .writes
-                .push((span, path));
+        if self.in_spawn_block && self.is_captured(name) {
+            self.error(span, format!("'{name}' {}", crate::vm::COPY_WRITE_TAIL));
         }
     }
     /// TICKET-165 — a mutator (`push`, `add`, …) called on a PROJECTED receiver (`xs[0].push(v)`,
@@ -3005,17 +2962,68 @@ impl Checker {
     pub(super) fn note_projected_task_write(&mut self, obj: &Expr) {
         if let Some((name, _, path)) = chain_path(obj)
             && !path.is_empty()
+            && self.checked_chain_ty(obj).is_some()
         {
             let name = name.clone();
-            self.note_task_write_at(&name, obj.span, path);
+            self.note_task_write(&name, obj.span);
         }
     }
-    /// Index into `scopes` of the scope that OWNS `name` — the same binding [`Checker::lookup`]
-    /// resolves (innermost-first). `None` if the name is unbound.
-    fn scope_of(&self, name: &str) -> Option<usize> {
-        (0..self.scopes.len())
-            .rev()
-            .find(|&i| self.scopes[i].contains_key(name))
+
+    fn checked_link_ty(&self, recv: &Ty, link: &ChainLink) -> Option<Ty> {
+        match (recv, link) {
+            (Ty::Struct(key, targs), ChainLink::Field(field)) => {
+                let info = self.struct_shape(key)?;
+                (info.origin == StructOrigin::User).then_some(())?;
+                let ty = info
+                    .fields
+                    .iter()
+                    .find(|(name, _)| name == field)?
+                    .1
+                    .clone();
+                Some(subst(&ty, &struct_param_map(info, targs)))
+            }
+            (Ty::List(elem), ChainLink::Index) => Some((**elem).clone()),
+            (Ty::Map(_, value), ChainLink::Index) => Some((**value).clone()),
+            (Ty::ByteArray, ChainLink::Index) => Some(Ty::Int),
+            _ => None,
+        }
+    }
+
+    fn checked_chain_ty(&self, expr: &Expr) -> Option<Ty> {
+        match &expr.kind {
+            ExprKind::Ident(name) => self.lookup(name),
+            ExprKind::Field { obj, name, .. } => self.checked_link_ty(
+                &self.checked_chain_ty(obj)?,
+                &ChainLink::Field(name.clone()),
+            ),
+            ExprKind::Index { obj, .. } => {
+                self.checked_link_ty(&self.checked_chain_ty(obj)?, &ChainLink::Index)
+            }
+            _ => None,
+        }
+    }
+
+    fn assign_is_checked_write(&self, target: &Expr) -> bool {
+        match &target.kind {
+            ExprKind::Ident(_) => true,
+            ExprKind::Field { .. } => self.checked_chain_ty(target).is_some(),
+            ExprKind::Index { obj, .. } => match self.checked_chain_ty(obj) {
+                Some(Ty::List(_) | Ty::Map(..) | Ty::ByteArray) => true,
+                Some(Ty::Struct(key, _)) => self.method_writes_self(&key, "set_index"),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    fn method_writes_self(&self, key: &str, method: &str) -> bool {
+        self.struct_shape(key)
+            .is_some_and(|info| info.self_writers.contains(method))
+    }
+
+    pub(super) fn call_writes_receiver(&self, recv: &Ty, method: &str) -> bool {
+        mutates_receiver(recv, method)
+            || matches!(recv, Ty::Struct(key, _) if self.method_writes_self(key, method))
     }
     /// W8-3 — a READ of `name` in the PARENT of a binding whose pending write is inside a `spawn:`
     /// body: the read sees the pre-spawn value. Reports once (the entry is consumed) at the read span,
@@ -3571,6 +3579,7 @@ impl Checker {
                             // only for the module's exported sig; the in-checker layout doesn't need it.
                             doc: None,
                             defaulted_fields,
+                            self_writers: HashSet::new(),
                         },
                     );
                 }

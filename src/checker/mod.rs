@@ -15,7 +15,7 @@ use crate::ast::{
 };
 use crate::native::cffi::CType;
 use crate::resolver::{ModuleGraph, ModuleId, ResolvedImport};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 pub use ty::Ty;
@@ -729,6 +729,7 @@ struct StructInfo {
     /// ctor arity check cannot otherwise tell an omitted DEFAULTED field from a missing required
     /// argument (W8-47).
     defaulted_fields: Vec<String>,
+    self_writers: HashSet<String>,
 }
 
 /// A protocol's required method signatures, in declaration order. `Self` appears as `Ty::Param("Self")`
@@ -2664,6 +2665,12 @@ pub(super) enum PathSeg {
     Int(i64),
     Str(String),
     Dynamic,
+}
+
+#[derive(Clone, Debug)]
+pub(super) enum ChainLink {
+    Field(String),
+    Index,
 }
 
 /// W8-3 — one `spawn_stale` entry: every task-side write that made a binding stale, plus the scope

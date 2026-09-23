@@ -2579,7 +2579,7 @@ impl Checker {
         // task-side writes ARE visible, never taint.
         if let ExprKind::Ident(name) = &obj.kind
             && let Some(rty) = self.lookup(name)
-            && mutates_receiver(&rty, method)
+            && self.call_writes_receiver(&rty, method)
         {
             let name = name.clone();
             // W8-3 — a PARENT-side mutation reads the stale copy before it writes it, exactly like
@@ -2590,7 +2590,6 @@ impl Checker {
             // legitimately supersede the task's write. Measured: task `xs.push("a")` then parent
             // `xs.push("b")` prints `1`, not `2`. Report BEFORE untainting; reporting consumes the
             // entry, so the receiver read in `infer(obj)` below still yields exactly one warning.
-            self.report_spawn_stale_read(&name, obj.span);
             self.note_task_write(&name, obj.span);
         }
         let obj_ty = self.infer(obj);
@@ -2602,7 +2601,7 @@ impl Checker {
         // and it reuses the `obj_ty` `infer(obj)` just computed rather than re-inferring the receiver
         // (re-inferring would double-report — the same ceiling `note_projected_task_write`'s caller
         // must not cross).
-        if mutates_receiver(&obj_ty, method) {
+        if self.call_writes_receiver(&obj_ty, method) {
             self.note_projected_task_write(obj);
         }
         // Refine-on-first-use: if `obj` is a simple variable whose type has an `Unknown` element/

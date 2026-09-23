@@ -451,50 +451,47 @@ fn no_warn_on_a_clean_program() {
 // The filed defect's failure mode is why it ranks: `for r in results:` over the stale empty list ran
 // ZERO iterations, so every `assert` inside was skipped and the program exited 0.
 
-/// The `docs/gaps.md` repro itself, plus the other three lvalue shapes. The warning must name the
-/// binding and cite the line of the write inside the task.
+/// D4 rule 1 rejects each direct task-body write to an airlock copy.
 #[test]
-fn a_task_side_write_read_after_the_join_warns() {
+fn a_task_side_write_read_after_the_join_is_an_error() {
     // Reassignment — the filed repro.
-    warns(
+    rejects(
         "fn f():\n    results: List[str] = []\n    parallel:\n        spawn:\n            results = [\"a\"]\n    print(results.len())\nf()\n",
-        "'results' is read here as its pre-`spawn:` value — a captured binding crosses the task \
-         airlock as an independent copy, so the write inside the `spawn:` block (line 5) is not \
-         visible after the join",
+        "'results' is this task's copy",
     );
     // Mutator method call.
-    warns(
+    rejects(
         "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    print(xs.len())\nf()\n",
-        "'xs' is read here",
+        "'xs' is this task's copy",
     );
     // Index assign, read WHOLE. A captured `List` deep-copies across the airlock, so the parent's
     // whole-value read observes the lost element write — the checker can tell, so it reports. (The
     // granular read `xs[0]` of this same granular write now warns too; see
     // `a_same_path_read_of_a_projected_task_write_warns`.)
-    warns(
+    rejects(
         "fn f():\n    xs := [0]\n    parallel:\n        spawn:\n            xs[0] = 9\n    print(xs)\nf()\n",
-        "'xs' is read here",
+        "'xs' is this task's copy",
     );
     // Field assign — a captured struct deep-copies across the airlock too.
-    warns(
+    rejects(
         "struct P:\n    x: int\nfn f():\n    p := P(1)\n    parallel:\n        spawn:\n            p.x = 9\n    print(p)\nf()\n",
-        "'p' is read here",
+        "'p' is this task's copy",
     );
     // Map key assign.
-    warns(
+    rejects(
         "fn f():\n    m := {\"a\": 1}\n    parallel:\n        spawn:\n            m[\"a\"] = 9\n    print(m)\nf()\n",
-        "'m' is read here",
+        "'m' is this task's copy",
     );
     // The other mixed pair: a WHOLE-binding task write, read back through a projection. The whole
     // copy is stale, so every field of it is — the checker can tell here too.
-    warns(
+    rejects(
         "struct P:\n    x: int\n    s: str\nfn f():\n    p := P(1, \"a\")\n    parallel:\n        spawn:\n            p = P(9, \"z\")\n    print(p.s)\nf()\n",
-        "'p' is read here",
+        "'p' is this task's copy",
     );
     // An IMPLICIT nursery (a bare `spawn:` with no `parallel:`) is the same airlock.
-    warns(
+    rejects(
         "fn f():\n    xs: List[int] = []\n    spawn:\n        xs.push(1)\n    print(xs.len())\nf()\n",
-        "'xs' is read here",
+        "'xs' is this task's copy",
     );
 }
 
@@ -506,7 +503,7 @@ fn a_task_side_write_read_after_the_join_warns() {
 fn spawn_body_direct_write_to_captured_binding_is_a_compile_time_error() {
     rejects(
         "fn f():\n    results: List[str] = []\n    parallel:\n        spawn:\n            results = [\"a\"]\n    print(results.len())\nf()\n",
-        "'results' is read here as its pre-`spawn:` value",
+        "'results' is this task's copy: a write to it would be lost at the join",
     );
 }
 
