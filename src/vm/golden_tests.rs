@@ -1061,8 +1061,11 @@ fn executor_submit_mutating_closure_isolated_parity() {
     // Repro #3: a submitted closure captures + mutates a local list, observed after the drain. WAS a
     // SILENT value divergence: the since-removed cooperative engine shared by reference (prints `2`),
     // M:N isolated by value (prints `1`). NOW it isolates at submit → prints `1`.
+    // TICKET-169 (D4 layer C): the submitted closure's capture of `box` crossed the airlock and
+    // is marked as a copy, so `box.push(1)` inside the job now faults instead of mutating it — the
+    // parent's `box` was always going to read `1` (its own, untouched list) either way.
     let out = golden_entry(
-        "fn main():\n    box := [0]\n    ex := Executor()\n    ex.submit(fn(): box.push(1))\n    ex.shutdown()\n    print(box.len())\nmain()\n",
+        "fn main():\n    box := [0]\n    ex := Executor()\n    ex.submit(fn(): recover: box.push(1))\n    ex.shutdown()\n    print(box.len())\nmain()\n",
     );
     assert_eq!(out, "1\n");
 }
@@ -1074,8 +1077,11 @@ fn executor_submit_module_global_inplace_mutation_isolates_parity() {
     // `install_snapshot`) snapshots the module globals per task, so the parent's post-shutdown read
     // sees the PRE-task value. Before the fix the since-removed cooperative engine's inline drain ran
     // the task against the LIVE shell globals (leaked → serial=4) while M:N isolated (→ 3).
+    // TICKET-169 (D4 layer C): the job's own copy of the module global `xs` is marked, so
+    // `xs.push(99)` now faults instead of mutating it — the parent's read was always going to see
+    // its own (unaffected) `3` regardless.
     let out = golden_entry(
-        "xs := [1, 2, 3]\nfn main():\n    ex := Executor()\n    ex.submit(fn(): xs.push(99))\n    ex.shutdown()\n    print(xs.len())\nmain()\n",
+        "xs := [1, 2, 3]\nfn main():\n    ex := Executor()\n    ex.submit(fn(): recover: xs.push(99))\n    ex.shutdown()\n    print(xs.len())\nmain()\n",
     );
     assert_eq!(out, "3\n");
 }
@@ -1086,8 +1092,11 @@ fn executor_submit_module_global_callee_reassign_isolates_parity() {
     // (`bump()` does `count = count + 1`). Pre-dated the diff and still diverged (serial=2 / M:N=0)
     // because the since-removed cooperative Executor drain aliased the shell globals. Now each
     // submitted task runs against its own module-global copy → the parent reads the frozen 0.
+    // TICKET-169 (D4 layer C): each job's own copy of the module global `count` is marked, so
+    // `count = count + 1` now faults instead of reassigning it — the parent's read was always
+    // going to see its own frozen `0` regardless.
     let out = golden_entry(
-        "count := 0\nfn bump():\n    count = count + 1\nfn main():\n    ex := Executor()\n    ex.submit(fn(): bump())\n    ex.submit(fn(): bump())\n    ex.shutdown()\n    print(count)\nmain()\n",
+        "count := 0\nfn bump():\n    recover: count = count + 1\nfn main():\n    ex := Executor()\n    ex.submit(fn(): bump())\n    ex.submit(fn(): bump())\n    ex.shutdown()\n    print(count)\nmain()\n",
     );
     assert_eq!(out, "0\n");
 }
@@ -2497,7 +2506,7 @@ ch := Channel[fn() -> fn() -> int](1)
 parallel:
     spawn:
         o := ch.recv()
-        n = 100
+        _ := recover: n = 100
         d := o()
         res.send(d())
         res.send(n)
@@ -2506,10 +2515,12 @@ print("nested closure sees : {res.recv()}")
 print("plain global read   : {res.recv()}")
 "#;
     let out = golden_entry(src);
+    // TICKET-169 (D4 layer C): `n = 100` above now faults, so `n` stays `1` and both the nested
+    // closure and the plain read observe the receiver's unwritten copy.
     assert_eq!(
-        out, "nested closure sees : 100\nplain global read   : 100\n",
-        "a closure created AFTER the task's own write, crossing no airlock, must read that \
-         write like any other late load: {out:?}"
+        out, "nested closure sees : 1\nplain global read   : 1\n",
+        "a closure created after the task's own (faulted) write must still read the receiving \
+         task's own copy like any other read: {out:?}"
     );
 }
 
@@ -2535,7 +2546,7 @@ parallel:
     spawn: ch1.send(mk())
     spawn:
         k := ch1.recv()
-        n = 999
+        _ := recover: n = 999
         ch2.send(k)
     spawn:
         k2 := ch2.recv()
@@ -2544,10 +2555,12 @@ parallel:
 print("result: {res.recv()}")
 "#;
     let out = golden_entry(src);
+    // TICKET-169 (D4 layer C): `n = 999` above now faults, so task C's own copy of `n` was already
+    // going to read `1` regardless (D2) — wrapping it changes nothing about the expected value.
     assert_eq!(
         out, "result: 3\n",
         "a forwarded closure must read the receiving task's own copy of the module global, not \
-         the forwarder's write: {out:?}"
+         the forwarder's (faulted) write: {out:?}"
     );
 }
 
@@ -2570,7 +2583,7 @@ fn mk() -> fn() -> int:
 
 parallel:
     spawn:
-        n = 5
+        _ := recover: n = 5
         k := ch.recv()
         res.send(k())
         res.send(n)
@@ -2581,10 +2594,15 @@ print("closure sees : {res.recv()}")
 print("task read    : {res.recv()}")
 "#;
     let out = golden_entry(src);
+    // TICKET-169 (D4 layer C): `n = 5` above now faults (a spawned task may not write its module-
+    // global copy) instead of landing, so both reads fall back to the receiver's UNWRITTEN copy
+    // (`1`) rather than the value this test used to pin (`5`). The property this test guards —
+    // the receiving task's own view always wins over whatever the arriving closure carries — still
+    // holds; there is simply no write left to win with.
     assert_eq!(
-        out, "closure sees : 5\ntask read    : 5\n",
-        "the receiving task's own write to a module global must beat an arriving closure's stale \
-         value for that same global: {out:?}"
+        out, "closure sees : 1\ntask read    : 1\n",
+        "the receiving task's own (unwritten) copy of a module global must beat an arriving \
+         closure's stale value for that same global: {out:?}"
     );
 }
 
@@ -2608,7 +2626,7 @@ fn mk() -> fn() -> int:
 
 parallel:
     spawn:
-        n = 5
+        _ := recover: n = 5
         k := ch.recv()
         res.send(k())
         res.send(n)
@@ -2619,10 +2637,12 @@ print("closure sees : {res.recv()}")
 print("task read    : {res.recv()}")
 "#;
     let out = golden_entry(src);
+    // TICKET-169 (D4 layer C): `n = 5` above now faults, so the receiving task's copy stays at the
+    // `7` it inherited from the top-level assignment before the nursery opened (never `5`).
     assert_eq!(
-        out, "closure sees : 5\ntask read    : 5\n",
-        "the receiving view's own assignment must win even when the sender inherited a different \
-         value for the same global: {out:?}"
+        out, "closure sees : 7\ntask read    : 7\n",
+        "the receiving view's own (unwritten) copy must win even when the sender inherited a \
+         different value for the same global: {out:?}"
     );
 }
 
@@ -2646,7 +2666,7 @@ fn mk() -> fn() -> int:
 
 parallel:
     spawn:
-        xs.push(9)
+        _ := recover: xs.push(9)
         k := ch.recv()
         res.send("{xs} len {k()}")
     spawn:
@@ -2655,10 +2675,12 @@ parallel:
 print(res.recv())
 "#;
     let out = golden_entry(src);
+    // TICKET-169 (D4 layer C): `xs.push(9)` above now faults (a spawned task may not write its
+    // module-global copy), so `xs` stays `[1]` and `k()` (same task, same copy) reads len `1`.
     assert_eq!(
-        out, "[1, 9] len 2\n",
+        out, "[1] len 1\n",
         "an arriving closure's global that no ancestor ever assigned must not replace the \
-         receiver's in-place mutation of that same value: {out:?}"
+         receiver's (unwritten) copy of that same value: {out:?}"
     );
 }
 
@@ -2713,7 +2735,7 @@ res := Channel[int](1)
 
 parallel:
     spawn:
-        n = 999
+        _ := recover: n = 999
         ch1.send(mk())
     spawn:
         k := ch1.recv()
@@ -2725,10 +2747,12 @@ parallel:
 print("result: {res.recv()}")
 "#;
     let out = golden_entry(src);
+    // TICKET-169 (D4 layer C): `n = 999` above now faults, so task C's own copy of `n` was already
+    // going to read `1` regardless (D2) — wrapping it changes nothing about the expected value.
     assert_eq!(
         out, "result: 3\n",
         "a forwarded closure must read the receiving task's own copy of the global, not the \
-         first sender's write: {out:?}"
+         first sender's (faulted) write: {out:?}"
     );
 }
 
@@ -2773,7 +2797,7 @@ c1 := Channel[fn() -> int](1)
 c2 := Channel[fn() -> int](1)
 
 fn producer():
-    n = 100
+    _ := recover: n = 100
     c1.send(fn() -> int: helper())
     c2.send(fn() -> int: n)
 
@@ -2810,7 +2834,7 @@ fn bump() -> int:
 c := Channel[fn() -> int](1)
 
 fn producer():
-    n = 100
+    _ := recover: n = 100
     c.send(fn() -> int: bump())
 
 fn main():
@@ -2841,7 +2865,7 @@ c := Channel[fn() -> int](1)
 fn producer():
     fn helper() -> int:
         return n
-    n = 100
+    _ := recover: n = 100
     c.send(fn() -> int: helper())
 
 fn main():
@@ -2871,8 +2895,8 @@ c := Channel[fn() -> int](1)
 c2 := Channel[fn() -> int](1)
 
 fn producer():
-    xs = [1, 2]
-    ys.push(2)
+    _ := recover: xs = [1, 2]
+    _ := recover: ys.push(2)
     c.send(fn() -> int: xs.len())
     c2.send(fn() -> int: ys.len())
 
@@ -2909,8 +2933,8 @@ c := Channel[fn() -> int](1)
 c2 := Channel[fn() -> int](1)
 
 fn producer():
-    zs[0] = 9
-    p.v = 9
+    _ := recover: zs[0] = 9
+    _ := recover: p.v = 9
     c.send(fn() -> int: zs[0])
     c2.send(fn() -> int: p.v)
 
@@ -2947,8 +2971,8 @@ g := C(1)
 c := Channel[fn() -> int](1)
 
 fn producer():
-    g.bump()
-    g.bump()
+    _ := recover: g.bump()
+    _ := recover: g.bump()
     c.send(fn() -> int: g.n)
 
 fn main():
@@ -3015,7 +3039,7 @@ c := Channel[fn() -> int](1)
 
 fn producer():
     h := g
-    h.n = 5
+    _ := recover: h.n = 5
     c.send(fn() -> int: g.n)
 
 fn main():
@@ -3049,7 +3073,7 @@ fn child():
 
 fn producer():
     xs := g
-    xs.push(2)
+    _ := recover: xs.push(2)
     parallel:
         spawn child()
 
@@ -3115,7 +3139,7 @@ res := Channel[str](1)
 fn main():
     parallel:
         spawn:
-            xs[0].push(9)
+            _ := recover: xs[0].push(9)
             k := ch.recv()
             res.send("{xs} len {k()}")
         a := xs
@@ -3125,19 +3149,23 @@ fn main():
 main()
 "#;
     let out = golden_entry(src);
+    // TICKET-169 (D4 layer C): `xs[0].push(9)` above now faults, so `xs` prints its unwritten
+    // `[[1], [1]]` instead of `[[1, 9], [1, 9]]`. `k()` is unaffected either way (it sums outer
+    // lengths, never the inner push).
     assert_eq!(
-        out, "[[1, 9], [1, 9]] len 4\n",
+        out, "[[1], [1]] len 4\n",
         "an unread alias must not falsely register as changed and clobber the receiver's own \
-         in-place push: {out:?}"
+         (now-faulted) in-place push: {out:?}"
     );
 }
 
 #[test]
-fn airlock_closure_over_a_captured_alias_pushed_by_the_receiver_is_a_known_residual() {
+fn airlock_closure_over_a_captured_alias_pushed_by_the_receiver_faults() {
     // TICKET-105, G6. The push through `inner` runs in the RECEIVER's captured closure body,
-    // AFTER the send — the sender's `gl` never changes, so this is a pure W12-5 identity residual
-    // (TICKET-111), not something a send-time changed-since-baseline check can reach. CPython
-    // 3.14.7 prints `[1, 2] [1, 2]` (measured 2026-09-10); pin today's value.
+    // AFTER the send — the sender's `gl` never changes, so this used to be a pure W12-5 identity
+    // residual (TICKET-111): the receiver's push landed on the adopted alias and both reads
+    // observed it. TICKET-169 (D4 layer C, Decisions item 3): `work`'s capture of `inner` crossed
+    // the airlock with the closure and is marked as a copy, so the push now FAULTS instead.
     let src = r#"
 import std.concurrency
 
@@ -3148,8 +3176,11 @@ fn main():
     done := Channel[str](1)
     inner := gl[0]
     fn work() -> str:
-        inner.push(2)
-        return "{inner} {gl[0]}"
+        res := recover:
+            inner.push(2)
+        match res:
+            Ok(_): return "{inner} {gl[0]}"
+            Err(_): return "fault"
     parallel:
         spawn:
             f := c.recv()
@@ -3160,9 +3191,8 @@ main()
 "#;
     let out = golden_entry(src);
     assert_eq!(
-        out, "channel capture alias: [1, 2] [1]\n",
-        "a receiver-side push through a captured alias after the send is a W12-5 identity \
-         residual (TICKET-111), pinned here: {out:?}"
+        out, "channel capture alias: fault\n",
+        "a receiver-side push through a captured alias now faults under D4 (TICKET-169): {out:?}"
     );
 }
 
@@ -3178,8 +3208,11 @@ import std.concurrency
 gl := [[1]]
 
 fn f(x: List[int], r: Channel[str]):
-    x.push(2)
-    r.send("{x} {gl[0]}")
+    res := recover:
+        x.push(2)
+    match res:
+        Ok(_): r.send("no-fault {x} {gl[0]}")
+        Err(_): r.send("fault {x} {gl[0]}")
 
 fn main():
     r := Channel[str](1)
@@ -3189,10 +3222,12 @@ fn main():
 main()
 "#;
     let out = golden_entry(src);
+    // TICKET-169 (D4 layer C): TICKET-111's adoption still holds (`x` IS `gl[0]`'s copy, one
+    // object), but D4 now faults the write through either name instead of letting it land.
     assert_eq!(
-        out, "spawn arg alias: [1, 2] [1, 2]\n",
-        "a spawn-arg alias of a global element must be adopted as the global's object \
-         (TICKET-111): {out:?}"
+        out, "spawn arg alias: fault [1] [1]\n",
+        "a spawn-arg alias of a global element must fault as the global's own (adopted) copy \
+         (TICKET-111 identity, TICKET-169 write fault): {out:?}"
     );
 
     let src2 = r#"
@@ -3205,16 +3240,19 @@ fn main():
     r := Channel[str](1)
     parallel:
         spawn:
-            a[0].push(2)
-            r.send("{a} {gl}")
+            res := recover:
+                a[0].push(2)
+            match res:
+                Ok(_): r.send("no-fault {a} {gl}")
+                Err(_): r.send("fault {a} {gl}")
     print("whole alias: {r.recv()}")
 main()
 "#;
     let out2 = golden_entry(src2);
     assert_eq!(
-        out2, "whole alias: [[1, 2]] [[1, 2]]\n",
-        "a whole-value alias of a global must be adopted as the global's object \
-         (TICKET-111): {out2:?}"
+        out2, "whole alias: fault [[1]] [[1]]\n",
+        "a whole-value alias of a global must fault as the global's own (adopted) copy \
+         (TICKET-111 identity, TICKET-169 write fault): {out2:?}"
     );
 }
 
@@ -3274,15 +3312,17 @@ fn main():
         spawn:
             m := c.recv()
             m[0].push(5)
-            inner.push(2)
+            _ := recover: inner.push(2)
             r.send("{m} {inner} {gl[0]}")
         c.send([[7]])
     print(r.recv())
 main()
 "#;
     let out = golden_entry(src);
+    // TICKET-169 (D4 layer C): `inner.push(2)` faults (`inner` is `gl[0]`'s adopted copy), so it
+    // stays `[1]` instead of `[1, 2]`; `m` (a fresh Channel message, never marked) is unaffected.
     assert_eq!(
-        out, "[[7, 5]] [1, 2] [1, 2]\n",
+        out, "[[7, 5]] [1] [1]\n",
         "adoption must be scoped to fault_module's replay, never a Channel message's own id \
          space (TICKET-111 gotcha 1): {out:?}"
     );
@@ -5634,7 +5674,7 @@ fn executor_exit_drain_module_globals_survive_gc_stress() {
 import std.concurrency
 xs := [1, 2, 3]
 fn worker():
-    xs.push(99)
+    recover: xs.push(99)
     junk := []
     for i in range(30):
         junk.push([str(i), str(i + 1)])
@@ -8799,12 +8839,17 @@ main()";
 /// the SAME identity rule.
 #[test]
 fn airlock_aliased_closure_shares_its_binding() {
+    // TICKET-169 (D4 layer C, Decisions item 3): `bump`'s crossed capture (`count`) is marked as
+    // an airlock copy, so `count = count + 1` now faults instead of sharing the binding.
     let src = "\
 fn main():
     count := 0
     fn bump() -> int:
-        count = count + 1
-        return count
+        res := recover:
+            count = count + 1
+        match res:
+            Ok(_): return count
+            Err(_): return -1
     pair := [bump, bump]
     r := Channel[int]()
     parallel:
@@ -8814,7 +8859,7 @@ fn main():
             r.send(b)
     print(r.recv())
 main()";
-    assert_golden_out(src, "2\n");
+    assert_golden_out(src, "-1\n");
 }
 
 /// Identity-preserving airlock, DATA path — a self-referential `struct` (`a.next = [b]; b.next = [a]`,
@@ -8902,6 +8947,9 @@ fn airlock_mixed_struct_closure_cycle_round_trips_both() {
 /// is now deleted (this test runs the byte-identical program with the corrected golden).
 #[test]
 fn airlock_struct_alias_preserves_identity() {
+    // TICKET-169 (D4 layer C): the crossed capture `pair` (and its adopted local alias `p`) is
+    // marked as an airlock copy, so `p[0].n = 9` now faults instead of landing through either
+    // alias. Identity is still preserved — the fault is reported once, not per-alias.
     let src = "\
 struct Box:
     n: int
@@ -8912,11 +8960,14 @@ fn main():
     parallel:
         spawn:
             p := pair
-            p[0].n = 9
-            r.send(\"{p[0].n} {p[1].n}\")
+            res := recover:
+                p[0].n = 9
+            match res:
+                Ok(_): r.send(\"{p[0].n} {p[1].n}\")
+                Err(_): r.send(\"fault {p[0].n} {p[1].n}\")
     print(r.recv())
 main()";
-    assert_golden_out(src, "9 9\n");
+    assert_golden_out(src, "fault 1 1\n");
 }
 
 /// W7-4/TICKET-100 fence for the SEAM the fix creates: `do_spawn`/`lower_task` serialize the callee, ALL
@@ -8926,10 +8977,15 @@ main()";
 /// arg `a` in the task must be visible through arg `b` (`2 2`, not `2 1`).
 #[test]
 fn airlock_cross_arg_data_alias_preserves_identity() {
+    // TICKET-169 (D4 layer C): `a` (and its alias `b`) crossed as a spawn arg and is marked as an
+    // airlock copy, so `a.push(2)` now faults instead of landing through either alias.
     let src = "\
 fn work(a: List[int], b: List[int], r: Channel[str]):
-    a.push(2)
-    r.send(\"{a.len()} {b.len()}\")
+    res := recover:
+        a.push(2)
+    match res:
+        Ok(_): r.send(\"{a.len()} {b.len()}\")
+        Err(_): r.send(\"fault {a.len()} {b.len()}\")
 fn main():
     xs := [1]
     r := Channel[str]()
@@ -8937,7 +8993,7 @@ fn main():
         spawn work(xs, xs, r)
     print(r.recv())
 main()";
-    assert_golden_out(src, "2 2\n");
+    assert_golden_out(src, "fault 1 1\n");
 }
 
 /// TICKET-100: `Channel.send` is an ordinary cross-heap STORE (`to_wire_crossable`),
@@ -9062,11 +9118,13 @@ main()";
 /// the closure airlock isolation (F1). Print is post-join → exact-match.
 #[test]
 fn nested_fn_spawn_airlock_isolated_parity() {
+    // TICKET-169 (D4 layer C): the task's write to its isolated copy of `x` now FAULTS (`recover:`
+    // catches it) instead of landing silently — the parent's `x` was always going to stay `0`.
     let src = "\
 fn main():
     x := 0
     fn bump():
-        x = x + 1
+        recover: x = x + 1
     parallel:
         spawn bump()
     print(x)
@@ -12280,7 +12338,9 @@ fn reader_annotation_requires_import() {
 /// sibling boundary: a captured local was already deep-copied and still is.
 #[test]
 fn module_global_aggregate_mutation_in_task_parity() {
-    let src = "fn main():\n    xs := [1, 2, 3]\n    parallel:\n        spawn:\n            xs.push(99)\n    print(xs.len())\nmain()\n";
+    // TICKET-169 (D4 layer C): the task's copy of the captured `xs` is marked, so `xs.push(99)`
+    // now faults instead of mutating it — the parent's list was always going to stay `3` long.
+    let src = "fn main():\n    xs := [1, 2, 3]\n    parallel:\n        spawn:\n            recover: xs.push(99)\n    print(xs.len())\nmain()\n";
     assert_golden_out(src, "3\n");
 }
 
@@ -12292,11 +12352,13 @@ fn module_global_aggregate_mutation_in_task_parity() {
 /// old checker gate) and used to DIVERGE at runtime — the exact gaps.md §B3 (A) residual.
 #[test]
 fn serial_module_global_method_call_mutation_isolates_parity() {
+    // TICKET-169 (D4 layer C): `count = count + 1` inside `bump()` now faults (the task's own
+    // copy of the imported module's global), so the parent's read was always going to stay `0`.
     let out = golden_file_entry(
         &[
             (
                 "counter.chz",
-                "count := 0\nfn bump():\n    count = count + 1\nfn get() -> int:\n    return count\n",
+                "count := 0\nfn bump():\n    recover: count = count + 1\nfn get() -> int:\n    return count\n",
             ),
             (
                 "main.chz",
@@ -12314,7 +12376,9 @@ fn serial_module_global_method_call_mutation_isolates_parity() {
 /// task, the alias points at the task's OWN copy — reads 3.
 #[test]
 fn serial_module_global_task_local_alias_isolates_parity() {
-    let src = "xs := [1, 2, 3]\nfn main():\n    parallel:\n        spawn:\n            local := xs\n            local.push(99)\n    print(xs.len())\nmain()\n";
+    // TICKET-169 (D4 layer C): `local.push(99)` now faults (`local` is the adopted copy of the
+    // module global's), so the parent's read was always going to stay `3`.
+    let src = "xs := [1, 2, 3]\nfn main():\n    parallel:\n        spawn:\n            local := xs\n            recover: local.push(99)\n    print(xs.len())\nmain()\n";
     let out = golden_entry(src);
     assert_eq!(out, "3\n");
 }
@@ -12410,45 +12474,48 @@ fn atomic_int_wide_value_returns_parity() {
 /// bare reassign. Each mutates the task's OWN module-global copy → invisible to the parent.
 #[test]
 fn serial_module_global_direct_mutation_forms_isolate_parity() {
+    // TICKET-169 (D4 layer C): every write below now faults (a spawned task's own module-global
+    // copy) instead of mutating in place — every expected value below was already the pre-task
+    // one, so isolation holds for a stronger reason now.
     // list .push
     assert_eq!(
         golden_entry(
-            "xs := [1, 2, 3]\nfn main():\n    parallel:\n        spawn:\n            xs.push(99)\n    print(xs.len())\nmain()\n"
+            "xs := [1, 2, 3]\nfn main():\n    parallel:\n        spawn:\n            recover: xs.push(99)\n    print(xs.len())\nmain()\n"
         ),
         "3\n",
     );
     // map index-assign
     assert_eq!(
         golden_entry(
-            "m := {1: 2}\nfn main():\n    parallel:\n        spawn:\n            m[1] = 9\n    print(m[1])\nmain()\n"
+            "m := {1: 2}\nfn main():\n    parallel:\n        spawn:\n            recover: m[1] = 9\n    print(m[1])\nmain()\n"
         ),
         "2\n",
     );
     // struct field-assign
     assert_eq!(
         golden_entry(
-            "struct Box:\n    n: int\ns := Box(0)\nfn main():\n    parallel:\n        spawn:\n            s.n = 9\n    print(s.n)\nmain()\n"
+            "struct Box:\n    n: int\ns := Box(0)\nfn main():\n    parallel:\n        spawn:\n            recover: s.n = 9\n    print(s.n)\nmain()\n"
         ),
         "0\n",
     );
     // set .add
     assert_eq!(
         golden_entry(
-            "st := {1, 2}\nfn main():\n    parallel:\n        spawn:\n            st.add(9)\n    print(st.len())\nmain()\n"
+            "st := {1, 2}\nfn main():\n    parallel:\n        spawn:\n            recover: st.add(9)\n    print(st.len())\nmain()\n"
         ),
         "2\n",
     );
     // bytearray .extend
     assert_eq!(
         golden_entry(
-            "ba := bytearray()\nfn main():\n    parallel:\n        spawn:\n            ba.extend([1, 2, 3])\n    print(ba.len())\nmain()\n"
+            "ba := bytearray()\nfn main():\n    parallel:\n        spawn:\n            recover: ba.extend([1, 2, 3])\n    print(ba.len())\nmain()\n"
         ),
         "0\n",
     );
     // bare reassign
     assert_eq!(
         golden_entry(
-            "g := 0\nfn main():\n    parallel:\n        spawn:\n            g = g + 1\n    print(g)\nmain()\n"
+            "g := 0\nfn main():\n    parallel:\n        spawn:\n            recover: g = g + 1\n    print(g)\nmain()\n"
         ),
         "0\n",
     );
@@ -12459,7 +12526,8 @@ fn serial_module_global_direct_mutation_forms_isolate_parity() {
 /// against the task's module-global copy, so the parent's map is untouched.
 #[test]
 fn serial_module_global_spawned_callee_mutation_isolates_parity() {
-    let src = "m := {1: 2}\nfn worker():\n    m[1] = 9\nfn main():\n    parallel:\n        spawn worker()\n    print(m[1])\nmain()\n";
+    // TICKET-169 (D4 layer C): `m[1] = 9` now faults (the callee's own module-global copy).
+    let src = "m := {1: 2}\nfn worker():\n    recover: m[1] = 9\nfn main():\n    parallel:\n        spawn worker()\n    print(m[1])\nmain()\n";
     assert_eq!(golden_entry(src), "2\n");
 }
 
@@ -12468,7 +12536,9 @@ fn serial_module_global_spawned_callee_mutation_isolates_parity() {
 /// its mutation is invisible even to the intermediate task. Guards the recursion in the snapshot path.
 #[test]
 fn nested_serial_spawn_module_global_isolates_parity() {
-    let src = "g := 0\nfn inner():\n    g = g + 100\nfn outer():\n    parallel:\n        spawn inner()\n    g = g + 1\nfn main():\n    parallel:\n        spawn outer()\n    print(g)\nmain()\n";
+    // TICKET-169 (D4 layer C): both writes now fault (each is a spawned task's own module-global
+    // copy: `outer` is itself spawned from `main`, and `inner` from `outer`).
+    let src = "g := 0\nfn inner():\n    recover: g = g + 100\nfn outer():\n    parallel:\n        spawn inner()\n    recover: g = g + 1\nfn main():\n    parallel:\n        spawn outer()\n    print(g)\nmain()\n";
     assert_eq!(golden_entry(src), "0\n");
 }
 
@@ -12478,6 +12548,8 @@ fn nested_serial_spawn_module_global_isolates_parity() {
 /// (0). Guards trap #3 (snapshot survives a park).
 #[test]
 fn channel_park_keeps_module_snapshot_parity() {
+    // TICKET-169 (D4 layer C): `g = g + 1` now faults (the task's own module-global copy), so the
+    // task's snapshot stays `0` across the park — the parent's read was always going to be `0`.
     let src = "\
 import std.concurrency
 g := 0
@@ -12485,7 +12557,7 @@ fn main():
     ch := Channel[int]()
     parallel:
         spawn:
-            g = g + 1
+            recover: g = g + 1
             v := ch.recv()
             print(\"task sees {g} got {v}\")
         spawn:
@@ -12494,7 +12566,7 @@ fn main():
 main()
 ";
     // task-order buffered output (decision F): the task's line flushes before the parent's read.
-    assert_eq!(golden_entry(src), "task sees 1 got 7\nparent sees 0\n");
+    assert_eq!(golden_entry(src), "task sees 0 got 7\nparent sees 0\n");
 }
 
 /// W6-2 (was: …`reads_frozen_parity`, expecting `0`) — a task that mutates a module global and THEN
@@ -12506,8 +12578,12 @@ main()
 /// ISOLATION is unchanged (`nested_serial_spawn_module_global_isolates_parity` still reads `0`).
 #[test]
 fn nested_serial_spawn_mutation_before_nested_reads_fresh_parity() {
-    let src = "g := 0\nfn worker():\n    g = g + 1\n    parallel:\n        spawn:\n            print(g)\nfn main():\n    parallel:\n        spawn worker()\nmain()\n";
-    assert_eq!(golden_entry(src), "1\n");
+    // TICKET-169 (D4 layer C): `g = g + 1` now faults (`worker` is a spawned task's own copy of
+    // `g`), so the grandchild's fresh-snapshot read sees the task's UNCHANGED view (`0`) — the
+    // property this test guards (a nested nursery sees its parent TASK's current view, not the
+    // module's declaration-time one) no longer has a write to demonstrate it with.
+    let src = "g := 0\nfn worker():\n    recover: g = g + 1\n    parallel:\n        spawn:\n            print(g)\nfn main():\n    parallel:\n        spawn worker()\nmain()\n";
+    assert_eq!(golden_entry(src), "0\n");
 }
 
 /// W6-2 (was: …`reads_frozen_parity`, expecting `0\n0\n`) — TWO sequential top-level nurseries with
@@ -12540,8 +12616,10 @@ fn sequential_mutation_between_nurseries_reads_fresh_parity() {
 /// printed the right answer. Rooted at `set_global_slot` (one guard, all callers).
 #[test]
 fn spawn_task_first_global_access_is_write_parity() {
-    let src = "g: int = 1\nfn worker():\n    g = 99\n    print(\"worker g =\", g)\nfn main():\n    parallel:\n        spawn worker()\n    print(\"parent g =\", g)\nmain()\n";
-    assert_eq!(golden_entry(src), "worker g = 99\nparent g = 1\n");
+    // TICKET-169 (D4 layer C): the task's first access being a WRITE now faults cleanly (D4)
+    // instead of the historical W6-19 panic — the worker's own read still sees its unfaulted `1`.
+    let src = "g: int = 1\nfn worker():\n    res := recover:\n        g = 99\n    match res:\n        Ok(_): print(\"worker g =\", g)\n        Err(_): print(\"worker g fault, g =\", g)\nfn main():\n    parallel:\n        spawn worker()\n    print(\"parent g =\", g)\nmain()\n";
+    assert_eq!(golden_entry(src), "worker g fault, g = 1\nparent g = 1\n");
 }
 
 /// W6-2 — the PIN INSTANT, and the reason it exists: a task's view is pinned at its own `spawn`, so an

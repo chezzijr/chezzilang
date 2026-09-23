@@ -73,6 +73,10 @@ fn _w74gen() -> Iterator[int]:
     yield 2
 
 # Headline repro — no concurrency at all, just a Channel round-trip inside one task.
+# TICKET-169 (D4 layer C, Decisions item 3): a crossing closure's captures are ALWAYS marked as an
+# airlock copy, even when the closure crosses back into the SAME task (a plain Channel/Shared
+# round-trip, not a spawn) — so a write through the received closure now faults instead of sharing
+# the cell. Reading through it (`get()`) is unaffected.
 test fn channel_send_keeps_one_binding():
     c := make()
     c.inc()
@@ -80,18 +84,22 @@ test fn channel_send_keeps_one_binding():
     ch := Channel[Ctr](1)
     ch.send(c)
     d := ch.recv()
-    d.inc()
-    assert d.get() == 2
+    res := recover:
+        d.inc()
+    match res:
+        Ok(_): assert false, "expected a fault: d's captures crossed the airlock and are marked"
+        Err(e): assert e.message().starts_with("this value is this task's copy:"), e.message()
 
 # The pair reached through a STRUCT FIELD after crossing (same cell, two field-held closures).
 test fn struct_field_keeps_one_binding():
     ch := Channel[Ctr](1)
     ch.send(make())
     d := ch.recv()
-    d.inc()
-    d.inc()
-    d.inc()
-    assert d.get() == 3
+    res := recover:
+        d.inc()
+    match res:
+        Ok(_): assert false, "expected a fault: d's captures crossed the airlock and are marked"
+        Err(e): assert e.message().starts_with("this value is this task's copy:"), e.message()
 
 # A cursor snapshot carrying both closures — the `Obj::Iter` airlock arm.
 test fn cursor_keeps_one_binding():
@@ -105,52 +113,69 @@ test fn cursor_keeps_one_binding():
     fs: List[fn() -> int] = []
     for f in ch.recv():
         fs.push(f)
-    fs[0]()
-    fs[0]()
-    assert fs[1]() == 2
+    res := recover:
+        fs[0]()
+    match res:
+        Ok(_): assert false, "expected a fault: bump's capture crossed the airlock and is marked"
+        Err(e): assert e.message().starts_with("this value is this task's copy:"), e.message()
+    assert fs[1]() == 0
 
 # A `Shared` box is a cross-heap VALUE STORE (its own airlock arm).
 test fn shared_keeps_one_binding():
     box := Shared(make())
     d := box.get()
-    d.inc()
-    d.inc()
-    assert d.get() == 2
+    res := recover:
+        d.inc()
+    match res:
+        Ok(_): assert false, "expected a fault: d's captures crossed the airlock and are marked"
+        Err(e): assert e.message().starts_with("this value is this task's copy:"), e.message()
 
-# `spawn f(g, h)` — two closures arriving as two SEPARATE spawn args must still share the binding.
+# `spawn f(g, h)` — two closures arriving as two SEPARATE spawn args. TICKET-169: the task's write
+# through either now faults (its captures crossed the airlock and are marked), so the shared-binding
+# question this used to probe no longer arises for a WRITE — the read half (D2) is untouched.
 test fn spawn_named_args_keep_one_binding():
     c := make()
-    r := Channel[int](1)
-    fn work(i: fn() -> nil, g: fn() -> int, out: Channel[int]):
-        i()
-        i()
-        out.send(g())
+    r := Channel[str](1)
+    fn work(i: fn() -> nil, g: fn() -> int, out: Channel[str]):
+        res := recover:
+            i()
+        match res:
+            Ok(_): out.send("no-fault")
+            Err(e): out.send(e.message())
     parallel:
         spawn work(c.inc, c.get, r)
-    assert r.recv() == 2
+    got := r.recv()
+    assert got.starts_with("this value is this task's copy:"), got
 
-# `spawn:` block with TWO separate captured locals over one cell.
+# `spawn:` block with TWO separate captured locals over one cell — same fault, from inside the block.
 test fn spawn_block_two_captures_keeps_one_binding():
     c := make()
     gi := c.inc
     gg := c.get
-    r := Channel[int](1)
+    r := Channel[str](1)
     parallel:
         spawn:
-            gi()
-            gi()
-            r.send(gg())
-    assert r.recv() == 2
+            res := recover:
+                gi()
+            match res:
+                Ok(_): r.send("no-fault")
+                Err(e): r.send(e.message())
+    got := r.recv()
+    assert got.starts_with("this value is this task's copy:"), got
 
-# The module-GLOBAL snapshot serializer (`to_snap`): two globals over one factory-local cell.
+# The module-GLOBAL snapshot serializer (`to_snap`): two globals over one factory-local cell — same
+# fault (the task's copy of the module-global closure crossed the airlock and is marked).
 test fn module_global_snapshot_keeps_one_binding():
-    r := Channel[int](1)
+    r := Channel[str](1)
     parallel:
         spawn:
-            _w74i()
-            _w74i()
-            r.send(_w74g())
-    assert r.recv() == 2
+            res := recover:
+                _w74i()
+            match res:
+                Ok(_): r.send("no-fault")
+                Err(e): r.send(e.message())
+    got := r.recv()
+    assert got.starts_with("this value is this task's copy:"), got
 
 # W7-4 — the per-module snapshot memo is SHARED across globals, so a global whose speculative `to_wire`
 # is DISCARDED must roll its minted cell ids back out of it (see `_w74mk` above). The cycle-parked
@@ -177,20 +202,27 @@ test fn data_dag_alias_is_one_object():
     assert p[1].len() == 2
 
 # FENCE — the OTHER boundary of the new rule: identity is preserved within ONE crossing, never BETWEEN
-# crossings. Two separate tasks each snapshot the binding independently (F1 per-task isolation,
-# docs/syntax.md rule 2), and the parent never sees a task's write. Goes red if the cell memo is ever
-# widened to Vm-lived state.
+# crossings. TICKET-169: the first task's write now faults (its captured cell crossed the airlock and
+# is marked), so it can never reach the parent OR a second task either way; a second task's own read
+# still sees the parent's unwritten `0` (F1 per-task isolation, docs/syntax.md rule 2). Goes red if the
+# cell memo is ever widened to Vm-lived state.
 test fn separate_tasks_each_get_their_own_binding():
     c := make()
-    r := Channel[int](1)
+    r := Channel[str](1)
+    r2 := Channel[int](1)
     parallel:
         spawn:
-            c.inc()
-            c.inc()
+            res := recover:
+                c.inc()
+            match res:
+                Ok(_): r.send("no-fault")
+                Err(e): r.send(e.message())
     parallel:
         spawn:
-            r.send(c.get())
-    assert r.recv() == 0
+            r2.send(c.get())
+    got := r.recv()
+    assert got.starts_with("this value is this task's copy:"), got
+    assert r2.recv() == 0
     assert c.get() == 0
 
 # W7-4c (FIXED 2026-08-06) — ONE TASK reached through TWO serializations now gets ONE binding. A
@@ -198,16 +230,25 @@ test fn separate_tasks_each_get_their_own_binding():
 # rebuilt at different times (the snapshot faults in LAZILY on first module access), but they now agree
 # on the cell's ID: the snapshot is pinned BEFORE the spawn-time clone, the clone carries the
 # snapshot's id forward on the task, and `rebuild_ready` + `fault_module` drain ONE rebuild map. So the
-# task's `_w74i()` writes and its `gg()` reads the same cell. Was `0`; CPython measures `2`.
+# task's `_w74i()` writes and its `gg()` reads the same cell.
+# TICKET-169: the write now faults (both crossed the airlock and are marked), so it can no longer
+# demonstrate the shared-binding rule for a write — `discarded_snapshot_walk_rolls_back_its_cell_ids`
+# above still covers that the snapshot/spawn memos share one rebuild map for a READ.
 test fn module_global_plus_local_capture_shares_its_binding():
     gg := _w74c.get
-    r := Channel[int](1)
+    r := Channel[str](2)
     parallel:
         spawn:
-            _w74i()
-            _w74i()
-            r.send(gg())
-    assert r.recv() == 2
+            res := recover:
+                _w74i()
+            match res:
+                Ok(_): r.send("no-fault")
+                Err(e): r.send(e.message())
+            r.send("{gg()}")
+    got := r.recv()
+    assert got.starts_with("this value is this task's copy:"), got
+    read := r.recv()
+    assert read == "0", "read after the failed write saw {read}"
 
 # W7-4 REGRESSION — `RwShared`'s zero-copy read views DRAIN one stored wire through many independent
 # `from_wire` rebuilds, so the persistent cell memo made a `Backref` reach across sibling elements for
@@ -217,6 +258,16 @@ test fn module_global_plus_local_capture_shares_its_binding():
 # view (`for_each`/`fold`) now takes one snapshot under one map, so siblings share within one walk
 # (CPython 3.14.7 and Go 1.27 both fold to 2; TICKET-154). Two `at()` calls are two crossings and can
 # never share, and `slice` — one call returning a container — shares within itself.
+# TICKET-169 (D4 layer C): every one of these views crosses the airlock, so `inc`'s capture is
+# ALWAYS marked and a call through it now faults; `get`'s reads are unaffected. `call_or_fault`
+# turns that into a value (-1 on fault) so it can sit inside a single-expression closure body.
+fn call_or_fault(f: fn() -> int) -> int:
+    r := recover:
+        f()
+    match r:
+        Ok(v): return v
+        Err(_): return -1
+
 test fn rwshared_views_over_sibling_closures():
     n := 0
     fn inc() -> int:
@@ -225,45 +276,54 @@ test fn rwshared_views_over_sibling_closures():
     fn get() -> int:
         return n
     s := RwShared([inc, get])
-    both := s.get()          # whole container, one crossing → one binding
-    both[0]()
-    assert both[1]() == 1
+    both := s.get()          # whole container, one crossing → captures marked as a copy
+    assert call_or_fault(both[0]) == -1, "expected the inc copy to fault"
+    assert both[1]() == 0
     # per-element view → its own copy of the binding (`at` is the SAFE index: `Option[E]`)
     match s.at(1):
         Some(f): assert f() == 0
         None: assert false, "at(1) on a 2-element list must be Some"
     sl := s.slice(0, 2)      # one call, one container → shared within the slice
-    sl[0]()
-    assert sl[1]() == 1
-    calls := 0
+    assert call_or_fault(sl[0]) == -1, "expected the inc copy to fault"
+    assert sl[1]() == 0
+    faulted := 0
     fn tick(f: fn() -> int):
-        f()
-        calls = calls + 1
+        if call_or_fault(f) == -1:
+            faulted = faulted + 1
     s.for_each(tick)
-    assert calls == 2
-    # one walk, one shared map: the `inc` copy returns 1 and the `get` copy reads the SAME cell -> 1.
-    assert s.fold(0, fn(a: int, f: fn() -> int) -> int: a + f()) == 2
+    assert faulted == 1, "expected exactly the inc copy to fault: {faulted}"
+    assert s.fold(0, fn(a: int, f: fn() -> int) -> int: a + call_or_fault(f)) == -1
     m := RwShared({"i": inc, "g": get})
     assert m.has("i")
     match m.get_key("g"):
         Some(f): assert f() == 0
         None: assert false
-    m.for_each_entry(fn(k: str, f: fn() -> int): f())
+    m_faulted := 0
+    fn tick_entry(k: str, f: fn() -> int):
+        if call_or_fault(f) == -1:
+            m_faulted = m_faulted + 1
+    m.for_each_entry(tick_entry)
+    assert m_faulted == 1, "expected exactly the inc copy to fault: {m_faulted}"
     assert m.fold_entries(0, fn(a: int, k: str, f: fn() -> int) -> int: a + 1) == 2
     # (`contains` shares the code path but is unreachable with closures — a `fn` is not Hashable, so a
     # Set can never hold two sibling closures.)
 
 # FENCE — TICKET-100: same inverted rule across two SEPARATE spawn args (the seam a shared serialize
-# memo could collapse the wrong way).
-test fn data_dag_alias_across_spawn_args_is_one_object():
+# memo could collapse the wrong way). TICKET-169: the task's write now faults (a spawn arg crossed
+# the airlock and is marked).
+test fn data_dag_alias_across_spawn_args_faults():
     xs := [1]
     r := Channel[str](1)
     fn work(a: List[int], b: List[int], out: Channel[str]):
-        a.push(2)
-        out.send("{a.len()} {b.len()}")
+        res := recover:
+            a.push(2)
+        match res:
+            Ok(_): out.send("no-fault")
+            Err(e): out.send(e.message())
     parallel:
         spawn work(xs, xs, r)
-    assert r.recv() == "2 2"
+    got := r.recv()
+    assert got.starts_with("this value is this task's copy:"), got
 
 # W7-4 REVIEW (charge 1/5/7) — a `RwShared` read VIEW run CONCURRENTLY with a writer. The first cut
 # resolved a piece's `Backref` by RE-READING `core.v` after dropping the read guard, so a `set` in that

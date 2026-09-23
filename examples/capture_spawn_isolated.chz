@@ -1,22 +1,22 @@
-# Uniform by-reference capture (F1) — THE ONE DELIBERATE DIVERGENCE FROM GO.
-# A plain captured local sent into a `spawn` task is snapshot-copied into an INDEPENDENT per-task
-# cell (the airlock deep-copies it), so the task's `x = x + 1` mutates its OWN isolated copy — the
-# parent's `x` is untouched. Output is `0`, NOT `1`. Go shares the variable and prints `1` (with a
-# data race); Chezzi trades that one sharing point for memory safety: forgetting `Shared` yields an
-# isolated stale copy (a logic bug), never corruption. To share across tasks, use `Shared[T]`.
-# DO NOT "fix" this toward Go — the isolation is the memory-safety line (design §4 F1).
+# D4 (owner decision, 2026-09-22, docs/decision-d4-airlock.md) — a spawned task's write to a
+# captured local, a module global, or any other object the airlock COPIED into its heap is a
+# runtime FAULT, never a silent lost write. A plain captured local sent into a `spawn` task is
+# snapshot-copied into an INDEPENDENT per-task cell (the airlock deep-copies it), so `x = x + 1`
+# inside the task would write to that copy — TICKET-169 makes that write fault instead of silently
+# landing in a copy the parent never sees. Superseded rule (D2): the old cut let the write land
+# silently and printed the parent's untouched `0`.
 #
-# THIS FILE WARNS ON PURPOSE, and that is the point of it. `print(x)` below reads the pre-`spawn:`
-# value of a binding written inside the `spawn:`, so the checker emits the W8-3 airlock-staleness
-# warning on stderr (`'x' is read here as its pre-`spawn:` value …`) — this example IS the shape the
-# warning was written to catch. The program still runs and still exits 0: the semantics are deliberate,
-# so the diagnostic is a warning, not an error. Goldens compare stdout only, so the warning does not
-# affect the expected output below. See docs/syntax.md §11b for the rule and its ceilings.
+# To mutate state a task and its parent both observe, share it explicitly through `Shared[T]`: the
+# task's `update` runs under the box's own lock, so the parent's `get()` after the join sees the
+# task's write. Go shares the variable directly and prints `1` (with a data race); Chezzi requires
+# the explicit `Shared` instead — the fault above is the line that used to hide that requirement.
+import std.concurrency
+
 fn main():
-    x := 0
+    x := Shared(0)
     parallel:
         spawn:
-            x = x + 1
-    print(x)                # 0 (Go would print 1)
+            x.update(fn(v: int) -> int: v + 1)
+    print(x.get())           # 1
 
 main()

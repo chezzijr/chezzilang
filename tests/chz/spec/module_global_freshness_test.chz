@@ -128,10 +128,13 @@ test fn in_place_mutation_between_two_spawns_of_one_nursery():
 # to a log global). The eager path prepares the task AT the spawn, so its pin must be taken there too.
 nq: List[int] = [1]
 
+# TICKET-169 (D4 layer C): `nq.push(2)` here runs inside a SPAWNED task's own copy of `nq`, so it
+# now faults instead of silently mutating it — wrapped so the pin-instant assertion below still
+# runs untouched by the write that used to (not) refresh it.
 fn nested_pin_worker(out: Shared[int]):
     parallel:
         spawn: out.set(nq.len())
-        nq.push(2)
+        _ := recover: nq.push(2)
 
 test fn nested_nursery_in_a_task_pins_at_its_first_spawn():
     out := Shared(0)
@@ -157,10 +160,12 @@ test fn assignment_between_two_spawns_refreshes_the_view():
 
 # --- ISOLATION control (must stay green: the fix removes staleness, NOT isolation) -------------
 
+# TICKET-169 (D4 layer C): `set_x`'s write now faults (a spawned task may not write its global
+# copy), so `xg` can never leak to the parent for a stronger reason than isolation alone.
 test fn task_side_mutation_does_not_reach_parent():
     xg = 1
     parallel:
-        spawn: set_x(5)
+        spawn: _ := recover: set_x(5)
     assert xg == 1, "task mutation leaked: {xg}"
 
 fn set_x(v: int):
@@ -168,11 +173,14 @@ fn set_x(v: int):
 
 # --- the NESTED rule ---------------------------------------------------------------------------
 
-# A task mutates its OWN copy, then opens a nested `parallel:`: its children must see the TASK's
-# current view (99), not the parent module's (1). Also exercises W6-19 (a task whose FIRST module-
-# global access is a WRITE used to panic the M:N pool on an unfaulted module).
+# A task used to mutate its OWN copy, then open a nested `parallel:`, so its children saw the
+# TASK's current view (99) rather than the parent module's (1).
+# TICKET-169 (D4 layer C): `tg = 99` now faults instead (a spawned task may not write its global
+# copy), so the nested child sees the task's UNCHANGED view (1) — still never the parent's mutation
+# leaking, for a stronger reason. Also exercises W6-19 (a task whose FIRST module-global access is
+# a WRITE used to panic the M:N pool on an unfaulted module).
 fn nested_worker(out: Shared[int]):
-    tg = 99
+    _ := recover: tg = 99
     parallel:
         spawn: out.set(tg)
 
@@ -180,7 +188,7 @@ test fn nested_nursery_sees_the_tasks_current_view():
     out := Shared(0)
     parallel:
         spawn nested_worker(out)
-    assert out.get() == 99, "nested task saw {out.get()}"
+    assert out.get() == 1, "nested task saw {out.get()}"
     assert tg == 1, "nested task mutation leaked: {tg}"
 
 # --- Executor ----------------------------------------------------------------------------------
@@ -209,9 +217,12 @@ test fn executor_task_sees_globals_as_of_its_start():
 eq: List[int] = []
 eqn: int = 0
 
+# TICKET-169 (D4 layer C): an Executor job runs against its own copy of the module's globals too,
+# so `eq.push(7)`/`eqn = 5` now fault instead of silently mutating a copy nobody sees — wrapped so
+# the isolation assertions below still exercise the shape.
 fn eq_job():
-    eq.push(7)
-    eqn = 5
+    _ := recover: eq.push(7)
+    _ := recover: eqn = 5
 
 test fn an_executor_jobs_private_mutation_never_reaches_a_nursery_task():
     seenq := Shared(-1)
@@ -293,9 +304,11 @@ test fn a_faulting_task_still_propagates():
         Err(e): assert e.message().contains("task blew up"), "got {e.message()}"
 
 # A `?`-style escape out of a nursery: the escape propagates and the scope tears down cleanly.
+# TICKET-169 (D4 layer C): `esc = 2` runs inside the spawned task, so it now faults instead of
+# silently mutating a copy the parent never sees — wrapped so it cannot race the escape.
 fn escape_out() -> Result[int, Error]:
     parallel:
-        spawn: esc = 2
+        spawn: _ := recover: esc = 2
         return Err("bail")
     return Ok(0)
 

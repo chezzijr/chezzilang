@@ -1,10 +1,12 @@
 # TICKET-137 (owner decision D2) — supersedes TICKET-097/TICKET-051's install. A closure received
 # from another task reads the module globals of the task that RUNS it: each task owns a deep copy
-# of every module global (taken at its spawn), and a crossing carries captures only. The sender's
-# write (`n = 100`, `xs = [1, 2]`, `ys.push(2)`) lands in the SENDER's copy and never reaches the
-# receiver, whether the closure reads the global directly or through a called helper. To share a
-# value across tasks, use `Shared`/`Channel`. Go and CPython read one live global (100 / 2); the
-# divergence is the deliberate "module globals isolate per task" rule (docs/concurrency.md).
+# of every module global (taken at its spawn), and a crossing carries captures only.
+# TICKET-169 (D4 layer C) supersedes the write half: a spawned task's write to its own global copy
+# (`n = 100`, `xs = [1, 2]`, `ys.push(2)`) now FAULTS instead of silently landing in a copy the
+# receiver never sees. Since the write never lands, the receiver's closures still read the
+# pre-spawn value — D2's isolation still holds, now enforced at the write instead of by a silent
+# drop. Go and CPython read one live global (100 / 2); the divergence is the deliberate "module
+# globals isolate per task, and a task may not write one" rule (docs/concurrency.md).
 import std.concurrency
 
 n: int = 1
@@ -12,16 +14,23 @@ n: int = 1
 fn helper() -> int:
     return n
 
-fn producer_a(c1: Channel[fn() -> int], c2: Channel[fn() -> int]):
-    n = 100
+fn producer_a(c1: Channel[fn() -> int], c2: Channel[fn() -> int], fr: Channel[str]):
+    res := recover:
+        n = 100
+    match res:
+        Ok(_): fr.send("no-fault")
+        Err(e): fr.send(e.message())
     c1.send(fn() -> int: helper())
     c2.send(fn() -> int: n)
 
-test fn call_indirected_global_read_reads_the_receivers_copy():
+test fn call_indirected_global_write_faults_and_read_stays_the_receivers_copy():
     c1 := Channel[fn() -> int]()
     c2 := Channel[fn() -> int]()
+    fr := Channel[str](1)
     parallel:
-        spawn producer_a(c1, c2)
+        spawn producer_a(c1, c2, fr)
+    fault := fr.recv()
+    assert fault.starts_with("'n' is this task's copy:"), fault
     indirect := c1.recv()
     before := indirect()
     direct := c2.recv()
@@ -33,17 +42,31 @@ test fn call_indirected_global_read_reads_the_receivers_copy():
 xs: List[int] = [1]
 ys: List[int] = [1]
 
-fn producer_b(c: Channel[fn() -> int], c2: Channel[fn() -> int]):
-    xs = [1, 2]
-    ys.push(2)
+fn producer_b(c: Channel[fn() -> int], c2: Channel[fn() -> int], fr1: Channel[str], fr2: Channel[str]):
+    res1 := recover:
+        xs = [1, 2]
+    match res1:
+        Ok(_): fr1.send("no-fault")
+        Err(e): fr1.send(e.message())
+    res2 := recover:
+        ys.push(2)
+    match res2:
+        Ok(_): fr2.send("no-fault")
+        Err(e): fr2.send(e.message())
     c.send(fn() -> int: xs.len())
     c2.send(fn() -> int: ys.len())
 
-test fn in_place_mutated_global_reads_the_receivers_copy():
+test fn in_place_mutated_global_write_faults_and_read_stays_the_receivers_copy():
     c := Channel[fn() -> int]()
     c2 := Channel[fn() -> int]()
+    fr1 := Channel[str](1)
+    fr2 := Channel[str](1)
     parallel:
-        spawn producer_b(c, c2)
+        spawn producer_b(c, c2, fr1, fr2)
+    fault1 := fr1.recv()
+    fault2 := fr2.recv()
+    assert fault1.starts_with("'xs' is this task's copy:"), fault1
+    assert fault2.starts_with("this value is this task's copy:"), fault2
     f := c.recv()
     g := c2.recv()
     assert f() == 1, "assigned global via closure saw {f()}"

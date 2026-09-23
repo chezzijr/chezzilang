@@ -1,86 +1,112 @@
 # TICKET-137 (owner decision D2) — supersedes TICKET-105/TICKET-116's carry-and-install. A
 # closure received from another task reads the module globals of the task that RUNS it: each task
-# owns a deep copy of every module global, and a crossing carries captures only. A sender's write
-# to a global (directly, through a local alias, a callee param alias, a spawn-adopted alias, or an
-# element alias) lands in the SENDER's copy, so the receiver's closure still reads its own value.
-# CPython threading and Go see one shared object; the divergence is the deliberate "module globals
-# isolate per task" rule (docs/concurrency.md) — use `Shared`/`Channel` to share.
+# owns a deep copy of every module global, and a crossing carries captures only.
+# TICKET-169 (D4 layer C) supersedes the write half: a sender's write to a global (directly,
+# through a local alias, a callee param alias, a spawn-adopted alias, or an element alias) now
+# FAULTS instead of silently landing in the sender's own copy. Since the write never lands, the
+# receiver's closure still reads its own (unwritten) value — D2's isolation still holds, now
+# enforced at the write instead of by a silent drop. CPython threading and Go see one shared
+# object; the divergence is the deliberate "module globals isolate per task, and a task may not
+# write one" rule (docs/concurrency.md) — use `Shared`/`Channel` to share.
 # TICKET-111 (docs/gaps.md W12-5) — a task-local alias of a global is the SAME object as the
-# task's copy of the global (adoption), not a second copy. That still holds and the tests below
-# that assert it (`*_is_not_a_second_copy`) are unchanged.
+# task's copy of the global (adoption), not a second copy. That still holds; a write through
+# either the alias or the global now faults identically (both denote the one copied object).
 import std.concurrency
 
 gl: List[List[int]] = [[1]]
 
-test fn local_alias_of_global_element_is_not_a_second_copy():
+test fn local_alias_of_global_element_write_through_alias_faults():
     inner := gl[0]
     r := Channel[str](1)
     parallel:
         spawn:
-            inner.push(2)
-            r.send("{inner} {gl[0]}")
+            res := recover:
+                inner.push(2)
+            match res:
+                Ok(_): r.send("no-fault")
+                Err(e): r.send(e.message())
     got := r.recv()
-    assert got == "[1, 2] [1, 2]", "alias/global diverged: {got}"
+    assert got.starts_with("this value is this task's copy:"), got
 
 g: List[int] = [1]
 
-fn producer_alias(c: Channel[fn() -> str]):
+fn producer_alias(c: Channel[fn() -> str], fr: Channel[str]):
     xs := g
-    xs.push(2)
+    res := recover:
+        xs.push(2)
+    match res:
+        Ok(_): fr.send("no-fault")
+        Err(e): fr.send(e.message())
     c.send(fn() -> str: "{g}")
 
-test fn write_through_local_alias_of_global_reads_the_receivers_copy():
+test fn write_through_local_alias_of_global_faults_and_read_stays_the_receivers_copy():
     c := Channel[fn() -> str](1)
+    fr := Channel[str](1)
     parallel:
-        spawn producer_alias(c)
+        spawn producer_alias(c, fr)
+    fault := fr.recv()
+    assert fault.starts_with("this value is this task's copy:"), fault
     f := c.recv()
     got := f()
     assert got == "[1]", "received closure read the sender's alias write: {got}"
 
 h: List[int] = [1]
 
-fn add(xs: List[int]):
-    xs.push(2)
+fn add(xs: List[int], fr: Channel[str]):
+    res := recover:
+        xs.push(2)
+    match res:
+        Ok(_): fr.send("no-fault")
+        Err(e): fr.send(e.message())
 
-fn producer_param(c: Channel[fn() -> str]):
-    add(h)
+fn producer_param(c: Channel[fn() -> str], fr: Channel[str]):
+    add(h, fr)
     c.send(fn() -> str: "{h}")
 
-test fn write_through_param_alias_of_global_reads_the_receivers_copy():
+test fn write_through_param_alias_of_global_faults_and_read_stays_the_receivers_copy():
     c := Channel[fn() -> str](1)
+    fr := Channel[str](1)
     parallel:
-        spawn producer_param(c)
+        spawn producer_param(c, fr)
+    fault := fr.recv()
+    assert fault.starts_with("this value is this task's copy:"), fault
     f := c.recv()
     got := f()
     assert got == "[1]", "received closure read the sender's param-alias write: {got}"
 
 gw: List[List[int]] = [[1]]
 
-test fn local_alias_of_a_whole_global_is_not_a_second_copy():
+test fn local_alias_of_a_whole_global_write_through_alias_faults():
     a := gw
     r := Channel[str](1)
     parallel:
         spawn:
-            a[0].push(2)
-            r.send("{a} {gw}")
+            res := recover:
+                a[0].push(2)
+            match res:
+                Ok(_): r.send("no-fault")
+                Err(e): r.send(e.message())
     got := r.recv()
-    assert got == "[[1, 2]] [[1, 2]]", "whole alias diverged: {got}"
+    assert got.starts_with("this value is this task's copy:"), got
 
 struct P:
     n: int
 
 gm: Map[str, P] = {"k": P(1)}
 
-test fn local_alias_of_a_struct_in_a_global_map_is_not_a_second_copy():
+test fn local_alias_of_a_struct_in_a_global_map_write_through_alias_faults():
     k := "k"
     p := gm[k]
     r := Channel[str](1)
     parallel:
         spawn:
-            p.n = 5
-            r.send("{p.n} {gm[k].n}")
+            res := recover:
+                p.n = 5
+            match res:
+                Ok(_): r.send("no-fault")
+                Err(e): r.send(e.message())
     got := r.recv()
-    assert got == "5 5", "struct alias diverged: {got}"
+    assert got.starts_with("this value is this task's copy:"), got
 
 fn count3() -> Iterator[int]:
     yield 1
@@ -101,152 +127,200 @@ test fn local_alias_of_a_global_generator_is_one_generator():
     assert got == "Some(1) Some(2)", "generator alias is two live copies: {got}"
 
 # W13-1 (docs/gaps.md) — a spawn-ADOPTED alias of a module global (`a := gl` in the parent,
-# `a.push(2)` in the task). Under D2 the adopted alias IS the task's copy of the global, so the
-# task's own `gl2` reads `[1, 2]`, but the closure it sends back is read by the RECEIVER against
-# the receiver's copy of `gl2`: `[1]`. CPython threading and Go see one shared list: `[1, 2]`.
+# `a.push(2)` in the task). Under D2/TICKET-111 the adopted alias IS the task's copy of the global.
+# TICKET-169: writing it now faults instead of silently landing only in the sender's copy.
 gl2: List[int] = [1]
 
-test fn write_through_spawn_adopted_alias_reads_the_receivers_copy():
+test fn write_through_spawn_adopted_alias_faults():
     a := gl2
-    c := Channel[fn() -> str](1)
+    c := Channel[str](1)
     parallel:
         spawn:
-            a.push(2)
-            c.send(fn() -> str: "{gl2}")
-    got := c.recv()()
-    assert got == "[1]", "received closure read the sender's adopted-alias write: {got}"
+            res := recover:
+                a.push(2)
+            match res:
+                Ok(_): c.send("no-fault")
+                Err(e): c.send(e.message())
+    got := c.recv()
+    assert got.starts_with("this value is this task's copy:"), got
 
 # W13-1 neighbours (TICKET-116) — the same shape across container kinds, closure timings and
-# forwarding hops. Each received closure reads the receiver's own copy of the global.
+# forwarding hops. Each write now faults instead of landing only in the sender's copy.
 gl3: List[List[int]] = [[1]]
 
-test fn element_alias_write_reads_the_receivers_copy():
+test fn element_alias_write_faults():
     inner := gl3[0]
-    c := Channel[fn() -> str](1)
+    c := Channel[str](1)
     parallel:
         spawn:
-            inner.push(2)
-            c.send(fn() -> str: "{gl3[0]}")
-    got := c.recv()()
-    assert got == "[1]", "received closure read the sender's element-alias write: {got}"
+            res := recover:
+                inner.push(2)
+            match res:
+                Ok(_): c.send("no-fault")
+                Err(e): c.send(e.message())
+    got := c.recv()
+    assert got.starts_with("this value is this task's copy:"), got
 
 gl4: List[List[int]] = [[1]]
 
-fn w4(xs: List[int], c: Channel[fn() -> str]):
-    xs.push(2)
-    c.send(fn() -> str: "{gl4[0]}")
+fn w4(xs: List[int], c: Channel[str]):
+    res := recover:
+        xs.push(2)
+    match res:
+        Ok(_): c.send("no-fault")
+        Err(e): c.send(e.message())
 
-test fn spawn_arg_alias_write_reads_the_receivers_copy():
-    c := Channel[fn() -> str](1)
+test fn spawn_arg_alias_write_faults():
+    c := Channel[str](1)
     parallel:
         spawn w4(gl4[0], c)
-    got := c.recv()()
-    assert got == "[1]", "received closure read the sender's spawn-arg alias write: {got}"
+    got := c.recv()
+    assert got.starts_with("this value is this task's copy:"), got
 
 struct P116:
     n: int
 
 gm116: Map[str, P116] = {"k": P116(1)}
 
-test fn struct_in_map_alias_write_reads_the_receivers_copy():
+test fn struct_in_map_alias_write_faults():
     p := gm116["k"]
-    c := Channel[fn() -> int](1)
+    c := Channel[str](1)
     parallel:
         spawn:
-            p.n = 5
-            c.send(fn() -> int: gm116["k"].n)
-    got := c.recv()()
-    assert got == 1, "received closure read the sender's struct-alias write: {got}"
+            res := recover:
+                p.n = 5
+            match res:
+                Ok(_): c.send("no-fault")
+                Err(e): c.send(e.message())
+    got := c.recv()
+    assert got.starts_with("this value is this task's copy:"), got
 
 gl5: List[int] = [1]
 
-test fn closure_built_before_the_alias_push_reads_the_receivers_copy():
+test fn closure_built_before_the_alias_push_faults():
     a := gl5
-    c := Channel[fn() -> str](1)
+    c := Channel[str](1)
     parallel:
         spawn:
-            f := fn() -> str: "{gl5}"
-            a.push(2)
-            c.send(f)
-    got := c.recv()()
-    assert got == "[1]", "received closure read the sender's push: {got}"
+            _f := fn() -> str: "{gl5}"
+            res := recover:
+                a.push(2)
+            match res:
+                Ok(_): c.send("no-fault")
+                Err(e): c.send(e.message())
+    got := c.recv()
+    assert got.starts_with("this value is this task's copy:"), got
 
 gl6: List[int] = [1]
 
-test fn nested_nursery_send_reads_the_receivers_copy():
+test fn nested_nursery_send_faults():
     a := gl6
-    c := Channel[fn() -> str](1)
+    c := Channel[str](1)
     parallel:
         spawn:
-            a.push(2)
+            res := recover:
+                a.push(2)
+            match res:
+                Ok(_): c.send("no-fault")
+                Err(e): c.send(e.message())
             parallel:
                 spawn:
-                    c.send(fn() -> str: "{gl6}")
-    got := c.recv()()
-    assert got == "[1]", "received closure read the sender's nested-nursery write: {got}"
+                    pass
+    got := c.recv()
+    assert got.starts_with("this value is this task's copy:"), got
 
 gl8: List[int] = [1]
 
-test fn executor_job_reads_the_receivers_copy():
+test fn executor_job_alias_write_faults():
     r := Channel[str](1)
     ex := Executor()
     parallel:
         spawn:
             a := gl8
-            a.push(2)
+            res := recover:
+                a.push(2)
+            match res:
+                Ok(_): r.send("no-fault")
+                Err(e): r.send(e.message())
             ex.submit(fn(): r.send("{gl8}"))
+    fault := r.recv()
+    assert fault.starts_with("this value is this task's copy:"), fault
     got := r.recv()
-    assert got == "[1]", "executor job read the sender's write: {got}"
+    assert got == "[1]", "executor job read {got}"
 
 gl9: List[int] = [1]
 
-test fn two_hop_closure_reads_the_receivers_copy():
+test fn two_hop_closure_alias_write_faults():
     a := gl9
-    c := Channel[fn() -> str](1)
+    c := Channel[str](1)
+    fc := Channel[fn() -> str](1)
     d := Channel[fn() -> str](1)
     parallel:
         spawn:
-            a.push(2)
-            c.send(fn() -> str: "{gl9}")
+            res := recover:
+                a.push(2)
+            match res:
+                Ok(_): c.send("no-fault")
+                Err(e): c.send(e.message())
+            fc.send(fn() -> str: "{gl9}")
         spawn:
-            f := c.recv()
+            f := fc.recv()
             d.send(f)
+    fault := c.recv()
+    assert fault.starts_with("this value is this task's copy:"), fault
     got := d.recv()()
-    assert got == "[1]", "two-hop forwarded closure read the sender's write: {got}"
+    assert got == "[1]", "two-hop forwarded closure read {got}"
 
-# W13-2 (docs/gaps.md) — a receiver's OWN in-place mutation of a module global is silently
-# overwritten by an arriving closure whose sender also mutated it, instead of both writes
-# landing. Go (mutex) sees `[1, 9, 2]`, CPython sees `[1, 2, 9]`; either order is acceptable,
-# but the receiver's own `9` must never be lost.
+# W13-2 (docs/gaps.md) — a receiver's OWN in-place mutation of a module global used to be silently
+# overwritten by an arriving closure whose sender also mutated it. TICKET-169: the SENDER's mutation
+# now faults (a spawned task may not write its global copy), so it can no longer overwrite anything;
+# the receiver's own write (also inside a spawned task, so it faults identically) is asserted to
+# fault too — both writes are refused, not raced.
 g2: List[int] = [1]
 
-fn producer_w13_2(c: Channel[fn() -> str]):
-    g2.push(2)
+fn producer_w13_2(c: Channel[fn() -> str], fr: Channel[str]):
+    res := recover:
+        g2.push(2)
+    match res:
+        Ok(_): fr.send("no-fault")
+        Err(e): fr.send(e.message())
     c.send(fn() -> str: "{g2}")
 
 test fn receiver_own_write_survives_arriving_closure_write():
     c := Channel[fn() -> str](1)
+    fr := Channel[str](1)
     parallel:
-        spawn producer_w13_2(c)
+        spawn producer_w13_2(c, fr)
         g2.push(9)
+    fault := fr.recv()
+    assert fault.starts_with("this value is this task's copy:"), fault
     f := c.recv()
     got := "{f()} {g2}"
     assert 9 in g2, "receiver's own write to the global was lost: {got}"
 
 # W13-2 neighbours (TICKET-116) — the receiver's own in-place write must survive an arriving
 # closure's install, across write shapes, sibling receivers, and the pre-nursery control that must
-# stay clean.
+# stay clean. `g2.push(9)`/`g18[1] = 9`/`g22.b = 9` above and below run on the ROOT task (the
+# statement beside `spawn` in a `parallel:` block runs in the opening task, never in the spawned
+# child), so they are untouched by D4 — only the SPAWNED producer's write faults.
 g18: List[int] = [1, 0]
 
-fn producer_w13_2_index(c: Channel[fn() -> str]):
-    g18.push(2)
+fn producer_w13_2_index(c: Channel[fn() -> str], fr: Channel[str]):
+    res := recover:
+        g18.push(2)
+    match res:
+        Ok(_): fr.send("no-fault")
+        Err(e): fr.send(e.message())
     c.send(fn() -> str: "{g18}")
 
 test fn receiver_index_assign_survives_arriving_closure():
     c := Channel[fn() -> str](1)
+    fr := Channel[str](1)
     parallel:
-        spawn producer_w13_2_index(c)
+        spawn producer_w13_2_index(c, fr)
         g18[1] = 9
+    fault := fr.recv()
+    assert fault.starts_with("this value is this task's copy:"), fault
     f := c.recv()
     got := "{f()} {g18}"
     assert g18[1] == 9, "receiver's own index write was lost: {got}"
@@ -257,56 +331,84 @@ struct Q116:
 
 g22: Q116 = Q116(0, 0)
 
-fn producer_w13_2_field(c: Channel[fn() -> str]):
-    g22.a = 2
+fn producer_w13_2_field(c: Channel[fn() -> str], fr: Channel[str]):
+    res := recover:
+        g22.a = 2
+    match res:
+        Ok(_): fr.send("no-fault")
+        Err(e): fr.send(e.message())
     c.send(fn() -> str: "{g22.a}")
 
 test fn receiver_field_write_survives_arriving_closure():
     c := Channel[fn() -> str](1)
+    fr := Channel[str](1)
     parallel:
-        spawn producer_w13_2_field(c)
+        spawn producer_w13_2_field(c, fr)
         g22.b = 9
+    fault := fr.recv()
+    assert fault.starts_with("this value is this task's copy:"), fault
     f := c.recv()
     got := "{f()} {g22.a} {g22.b}"
     assert g22.b == 9, "receiver's own field write was lost: {got}"
 
 g21: List[int] = [1]
 
-fn producer_w13_2_sibling(c: Channel[fn() -> str]):
-    g21.push(2)
+fn producer_w13_2_sibling(c: Channel[fn() -> str], fr: Channel[str]):
+    res := recover:
+        g21.push(2)
+    match res:
+        Ok(_): fr.send("no-fault")
+        Err(e): fr.send(e.message())
     c.send(fn() -> str: "{g21}")
 
-fn consumer_w13_2_sibling(c: Channel[fn() -> str], r: Channel[str]):
-    g21.push(9)
+fn consumer_w13_2_sibling(c: Channel[fn() -> str], r: Channel[str], fr: Channel[str]):
+    res := recover:
+        g21.push(9)
+    match res:
+        Ok(_): fr.send("no-fault")
+        Err(e): fr.send(e.message())
     f := c.recv()
     r.send("{f()} {g21}")
 
-test fn sibling_task_receiver_own_write_survives():
+test fn sibling_task_receiver_own_write_faults():
     c := Channel[fn() -> str](1)
     r := Channel[str](1)
+    fr1 := Channel[str](1)
+    fr2 := Channel[str](1)
     parallel:
-        spawn producer_w13_2_sibling(c)
-        spawn consumer_w13_2_sibling(c, r)
+        spawn producer_w13_2_sibling(c, fr1)
+        spawn consumer_w13_2_sibling(c, r, fr2)
+    fault1 := fr1.recv()
+    fault2 := fr2.recv()
+    assert fault1.starts_with("this value is this task's copy:"), fault1
+    assert fault2.starts_with("this value is this task's copy:"), fault2
     got := r.recv()
-    assert "9" in got, "sibling receiver's own write was lost: {got}"
+    assert "1" in got, "expected each sibling's own (unwritten) copy: {got}"
 
 g20: List[int] = [1]
 
-fn producer_w13_2_control(c: Channel[fn() -> str]):
-    g20.push(2)
+fn producer_w13_2_control(c: Channel[fn() -> str], fr: Channel[str]):
+    res := recover:
+        g20.push(2)
+    match res:
+        Ok(_): fr.send("no-fault")
+        Err(e): fr.send(e.message())
     c.send(fn() -> str: "{g20}")
 
-# TICKET-137 — the receiver's `9` is pushed BEFORE the nursery, so it is in the task's snapshot
-# and in the receiver's own copy; the sender's `2` lands only in the sender's copy. The received
-# closure reads the receiver's `[1, 9]`. (Its nursery is not the first the VM opens — every test
-# above it already opened one — so it also covers a re-snapshot after earlier nurseries.)
+# TICKET-137 — the receiver's `9` is pushed BEFORE the nursery, on the ROOT task, so it lands
+# untouched by D4 (`module_snapshot.is_none()` there) and is in the task's snapshot; the sender's
+# `2` now faults instead of landing only in the sender's copy. (Its nursery is not the first the VM
+# opens — every test above it already opened one — so it also covers a re-snapshot after earlier
+# nurseries.)
 test fn receiver_push_before_the_nursery_is_in_the_receivers_copy():
     g20.push(9)
     c := Channel[fn() -> str](1)
+    fr := Channel[str](1)
     parallel:
-        spawn producer_w13_2_control(c)
+        spawn producer_w13_2_control(c, fr)
+    fault := fr.recv()
+    assert fault.starts_with("this value is this task's copy:"), fault
     f := c.recv()
     got := f()
     assert got == "[1, 9]", "received closure read {got}, expected the receiver's [1, 9]"
     assert "{g20}" == "[1, 9]", "receiver's own copy read {g20}"
-

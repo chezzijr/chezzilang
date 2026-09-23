@@ -1,28 +1,37 @@
-# TICKET-100 — the airlock's cross-heap copy is now identity-preserving: one source object stays one
+# TICKET-100 — the airlock's cross-heap copy is identity-preserving: one source object stays one
 # object per crossing, for containers as well as cells (`b := a` inside a task means the same thing it
-# means outside one). `outer := [inner, inner]` holds ONE list reached twice; a write through one
-# alias inside a spawned task is visible through the other. Gated by `chz_suite_passes`
-# (`tests/chz_suite.rs`).
+# means outside one). `outer := [inner, inner]` holds ONE list reached twice.
+# TICKET-169 (D4 layer C) supersedes the write half: a spawned task's write to that copy, through
+# EITHER alias, now faults instead of silently landing (and silently being visible through the other
+# alias). Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 
-test fn container_alias_preserves_identity_across_spawn():
+test fn container_alias_write_through_one_alias_faults():
     inner := [1]
     outer := [inner, inner]
     r := Channel[str](1)
     parallel:
         spawn:
-            outer[0].push(99)
-            r.send("{outer[0].len()} {outer[1].len()}")
-    assert r.recv() == "2 2"
+            res := recover:
+                outer[0].push(99)
+            match res:
+                Ok(_): r.send("no-fault")
+                Err(e): r.send(e.message())
+    got := r.recv()
+    assert got.starts_with("this value is this task's copy:"), got
 
 struct Box:
     n: int
 
-test fn struct_alias_preserves_identity_across_spawn():
+test fn struct_alias_write_through_one_alias_faults():
     box := Box(1)
     pair := [box, box]
     r := Channel[str](1)
     parallel:
         spawn:
-            pair[0].n = 9
-            r.send("{pair[0].n} {pair[1].n}")
-    assert r.recv() == "9 9"
+            res := recover:
+                pair[0].n = 9
+            match res:
+                Ok(_): r.send("no-fault")
+                Err(e): r.send(e.message())
+    got := r.recv()
+    assert got.starts_with("this value is this task's copy:"), got

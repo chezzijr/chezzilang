@@ -18444,11 +18444,13 @@ started := holder.gen.next()
 fn main():
     parallel:
         spawn:
-            holder.a.tag.push(9)
+            recover: holder.a.tag.push(9)
             print(\"{holder.b.tag.len()}\")
 main()
 ";
-    assert_eq!(run(src), "2\n");
+    // TICKET-169 (D4 layer C): the push above now faults (the task's own copy of the module
+    // global), so the alias's length stays at its pre-task value.
+    assert_eq!(run(src), "1\n");
 }
 
 /// TICKET-119 -- a module global just under `MAX_STRUCTURAL_DEPTH` must still cross without ever
@@ -18503,11 +18505,13 @@ gl: N = mk(4000)
 fn main():
     parallel:
         spawn:
-            a.push(2)
+            recover: a.push(2)
             print(\"{b.len()} {gl.next != None}\")
 main()
 ";
-    assert_eq!(run(src), "2 true\n");
+    // TICKET-169 (D4 layer C): the push above now faults, so `b` (aliasing the same copy) stays
+    // at its pre-task length.
+    assert_eq!(run(src), "1 true\n");
 }
 
 /// W7-4 memory-safety lock for the module-scoped REBUILD MAP: `fault_module` now keeps one wire-`id`
@@ -18538,14 +18542,16 @@ fn main():
     r := Channel[int]()
     parallel:
         spawn:
-            gi()
-            gi()
+            recover: gi()
+            recover: gi()
             r.send(gg())
     more := [junk, junk]
     print(\"ok: {r.recv()}\")
 main()
 ";
-    assert_eq!(run_capture_stress(src), "ok: 2\n");
+    // TICKET-169 (D4 layer C): `gi()`'s capture crossed the airlock and is marked, so its write
+    // now faults instead of sharing the binding — `gg()` reads the untouched `0`.
+    assert_eq!(run_capture_stress(src), "ok: 0\n");
     assert_eq!(run_capture_stress(src), run(src));
 }
 
@@ -18587,8 +18593,8 @@ fn main():
     r := Channel[int]()
     parallel:
         spawn:
-            l.GI()
-            l.GI()
+            recover: l.GI()
+            recover: l.GI()
             r.send(GG())
     print(r.recv())
 main()
@@ -18607,16 +18613,18 @@ main()
     assert!(vm_res.is_ok(), "serial faulted: {vm_res:?}");
     assert!(par_res.is_ok(), "M:N faulted: {par_res:?}");
     assert!(stress_res.is_ok(), "gc-stress faulted: {stress_res:?}");
+    // TICKET-169 (D4 layer C): `l.GI()`'s capture crossed the airlock and is marked, so its write
+    // now faults instead of sharing the cell — `GG()` reads the untouched `0`.
     assert_eq!(
-        vm_out, "2\n",
+        vm_out, "0\n",
         "cross-module sibling closures split their cell"
     );
     assert_eq!(
-        par_out, "2\n",
+        par_out, "0\n",
         "cross-module sibling closures split their cell (M:N)"
     );
     assert_eq!(
-        stress_out, "2\n",
+        stress_out, "0\n",
         "the snapshot rebuild map is not GC-rooted"
     );
 }
@@ -18654,8 +18662,8 @@ fn main():
     r := Channel[int]()
     parallel:
         spawn:
-            GA()
-            GA()
+            recover: GA()
+            recover: GA()
             r.send(GC())
     print(r.recv())
 main()
@@ -18669,12 +18677,14 @@ main()
     assert!(vm_res.is_ok(), "serial faulted: {vm_res:?}");
     assert!(par_res.is_ok(), "M:N faulted: {par_res:?}");
     assert!(stress_res.is_ok(), "gc-stress faulted: {stress_res:?}");
+    // TICKET-169 (D4 layer C): `GA()`'s captured cell crossed the airlock and is marked, so its
+    // reassignment now faults instead of sharing the binding — `GC()` reads the untouched `1`.
     assert_eq!(
-        vm_out, "3\n",
+        vm_out, "1\n",
         "a handle-bearing cell split its binding on the snapshot slow arm"
     );
-    assert_eq!(par_out, "3\n", "…and on M:N");
-    assert_eq!(stress_out, "3\n", "…and under GC stress");
+    assert_eq!(par_out, "1\n", "…and on M:N");
+    assert_eq!(stress_out, "1\n", "…and under GC stress");
 }
 
 /// W7-4b's second, unplanned fix — a RECURSIVE local `fn` whose captures embed a module used to abort
@@ -20979,17 +20989,18 @@ n := 1
 f := fn(x: int) -> int: x * n
 parallel:
     spawn:
-        n = 100
+        recover: n = 100
         print(f(3))
 ";
     let entry = write_temp_chz("ticket016_spawn_own_write_visible", src);
     let (out, err, res, _code) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_file(&entry);
     assert!(res.is_ok(), "run faulted: {res:?} err={err}");
+    // TICKET-169 (D4 layer C): `n = 100` above now faults, so `f` reads the receiver's unwritten
+    // `n` (`1`).
     assert_eq!(
-        out, "300\n",
-        "expected the spawned task's own write to n to be visible to f (300, matching Go/CPython), \
-         got {out:?}"
+        out, "3\n",
+        "expected f to read the receiver's unwritten n (3), got {out:?}"
     );
 }
 
@@ -21008,7 +21019,7 @@ fn outer() -> fn(int) -> int:
     return f
 parallel:
     spawn:
-        n = 100
+        recover: n = 100
         ch.send(outer())
 g := ch.recv()
 print(g(3))
@@ -21035,7 +21046,7 @@ n := 1
 ch := Channel[fn(int) -> int]()
 parallel:
     spawn:
-        n = 100
+        recover: n = 100
         ch.send(fn(x: int) -> int: x * (fn() -> int: n)())
 g := ch.recv()
 print(g(3))
@@ -21067,7 +21078,7 @@ n := 1
 ch := Channel[fn(int) -> int]()
 parallel:
     spawn:
-        n = 100
+        recover: n = 100
         ch.send(fn(x: int) -> int: x * n)
 f := ch.recv()
 print(f(3))
@@ -21096,7 +21107,7 @@ fn main():
     ch := Channel[fn(int) -> int]()
     parallel:
         spawn:
-            n = 100
+            recover: n = 100
             ch.send(fn(x: int) -> int: x * n)
     f := ch.recv()
     print(f(3))
@@ -21107,7 +21118,9 @@ main()
     let (out, _err, res, _code) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_file(&entry);
     assert!(res.is_ok(), "run faulted: {res:?}");
-    assert_eq!(out, "300\n", "captured-local shape regressed: {out:?}");
+    // TICKET-169 (D4 layer C): the captured local `n` crossed the airlock and is marked, so
+    // `n = 100` now faults instead of sharing it.
+    assert_eq!(out, "3\n", "captured-local write now faults: {out:?}");
 }
 
 /// TICKET-016 — a bounded acquire returns `Ok(None)` on timeout instead of blocking, still detects
