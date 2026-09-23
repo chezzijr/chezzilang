@@ -11,14 +11,6 @@ use super::*;
 pub(super) struct DiagMark {
     pub(super) errors: usize,
     warnings: usize,
-    /// W8-3 — the airlock-staleness taint is SPECULATIVE STATE, not just a diagnostic: reporting a
-    /// stale read CONSUMES the entry (one warning per name). A speculative walk that reads a tainted
-    /// name therefore eats the taint, and rolling back only `warnings` leaves the real walk with
-    /// nothing to report — a silently LOST warning, the mirror of the double-report this seam already
-    /// guards (measured before the fix: `refine_receiver`'s speculative arg-infer swallowed the
-    /// warning for `ys.push(xs.len())` whenever `ys` was an unrefined empty literal). Snapshotted here
-    /// and restored wholesale, so any future speculative site gets the same protection for free.
-    spawn_stale: HashMap<String, StaleWrite>,
     /// W8-21 — a nested ANNOTATED fn inside an un-annotated one is body-checked for real
     /// (`check_fn_body:4065`'s comment) on every speculative `infer_fn_ret` pass, and a forward-declared
     /// callee can be `Unknown` on an early pass and concrete on a later one — so the SAME return span
@@ -147,7 +139,6 @@ impl Checker {
             current_module_label: None,
             loop_depth: 0,
             capture_floors: Vec::new(),
-            spawn_stale: HashMap::new(),
             current_module_is_stdlib: false,
             net_socket_seed: None,
             net_listener_seed: None,
@@ -1346,9 +1337,6 @@ impl Checker {
         DiagMark {
             errors: self.errors.len(),
             warnings: self.warnings.len(),
-            // Empty in every program that never writes a capture inside a task, and an empty
-            // `HashMap` clone allocates nothing.
-            spawn_stale: self.spawn_stale.clone(),
             ret_coerce: self.ret_coerce.clone(),
             for_binds: self.for_binds.clone(),
             const_overflow_seen: self.const_overflow_seen.clone(),
@@ -1370,7 +1358,6 @@ impl Checker {
     pub(super) fn diag_rollback(&mut self, m: DiagMark) {
         self.errors.truncate(m.errors);
         self.warnings.truncate(m.warnings);
-        self.spawn_stale = m.spawn_stale;
         self.ret_coerce = m.ret_coerce;
         self.for_binds = m.for_binds;
         self.const_overflow_seen = m.const_overflow_seen;
@@ -2309,14 +2296,6 @@ impl Checker {
         self.loop_vars.pop();
         self.const_decls.pop();
         self.capture_table.pop();
-        // W8-3 — a taint describes ONE binding, and that binding is gone once its owning scope is.
-        // `spawn_stale` is keyed by bare name, so without this an inner shadow's taint survived the
-        // pop and was charged to the OUTER binding of the same name (see `StaleWrite`). This is the
-        // ONLY site that needs it: `rg 'scopes\.push|scopes\.pop|push_scope|pop_scope'` over `src/`
-        // shows every checker scope teardown routes through here (the other hits are `desugar`'s own
-        // `scopes`, the VM's `mn_scopes`/join `scopes`, and doc comments), so a scope-popping site
-        // added later cannot forget it — the same reason `declare` owns the re-declaration untaint.
-        self.spawn_stale.retain(|_, w| w.scope < self.scopes.len());
         // TICKET-032 A1 — a pair describes TWO bindings; both are gone once the scope owning either
         // one is. Scope indices are REUSED (every top-level fn body is index 1, and 21 of 23
         // `push_scope` sites have no finalize seam), so an undrained pair false-pins a same-named
@@ -2387,24 +2366,6 @@ impl Checker {
             let key = (scope, name.to_string());
             self.carrier_pins.retain(|(k, _)| *k != key);
         }
-        // W8-3 — `spawn_stale` is keyed by BARE NAME, so it says nothing about which binding it
-        // describes. A NEW binding of the name is a different binding: the task wrote the old one, and
-        // a read of the new one loses nothing. Untainting here rather than at each binding form is
-        // what makes the cut complete — every way a name enters a scope routes through `declare`
-        // (`rg 'self\.declare\('` → 21 sites: `let`/`:=`, `for` target, tuple destructuring, `match`
-        // and enum-payload bindings, `wait` bind, fn/method params, closure params, `import`), so a
-        // form added later cannot forget it. Without this the rule hit the recorded
-        // `scope-blind-guard-over-rejects-shadows` class: `for n in range(2):` after a task-side
-        // `n = 5` warned that the loop variable was a stale read, which is factually false.
-        //
-        // ponytail: the untaint is unconditional, so a shadow declared in the SAME scope as a tainted
-        // binding drops the taint permanently and a later stale read of the outer binding is missed
-        // (fourth ceiling). Under-warning, never over-warning; upgrade path is keying the map on
-        // (scope index, name) so the entry survives alongside the shadow. A BLOCK-local shadow is a
-        // different story and is no longer a ceiling: the entry now carries the owning scope index
-        // (`StaleWrite::scope`) and `pop_scope` drops it with its block, so an inner shadow's taint is
-        // never charged to the outer binding.
-        self.spawn_stale.remove(name);
     }
     pub(super) fn lookup(&self, name: &str) -> Option<Ty> {
         self.scopes.iter().rev().find_map(|s| s.get(name).cloned())
@@ -2889,54 +2850,12 @@ impl Checker {
             self.note_task_write(&name, target.span);
         }
     }
-    /// W8-3 — enter a body that is its OWN frame: a nested `fn`, a closure, or the speculative
-    /// return-inference walk of either. Such a body is NOT the enclosing task (it has its own caller),
-    /// and the enclosing frame's pending airlock taint must not be visible inside it.
-    ///
-    /// The two pieces of state MUST move together, which is the whole reason this is one helper rather
-    /// than two `mem::replace`s per site: clearing `in_spawn_block` alone makes a read in the nested
-    /// body report the PARENT's pending write — a FALSE warning (the body runs inside the task, where
-    /// the write IS visible) that also CONSUMES the entry, silencing the parent's real stale read
-    /// afterwards. Measured on the pre-fix binary: `g := fn() -> int: xs.len()` inside the task warned
-    /// at the closure, printed 1 there, then printed 0 after the join with nothing reported.
-    ///
-    /// Pair with [`Checker::exit_own_frame`]. The site list is the grep
-    /// `rg 'mem::replace\(&mut self\.in_spawn_block'` — every hit that clears to `false` is one of
-    /// these; the single hit that sets `true` is the `spawn:` block itself, which must keep both.
-    ///
-    /// `is_fn_body` says whether the body is a `fn` body (its call site is ELSEWHERE, so it is never
-    /// the enclosing statement's continuation) or a CLOSURE body (an inline expression in the
-    /// enclosing frame). A fn body always drops the taint — that is what keeps one function's taint
-    /// out of the next. A closure body drops it ONLY when declared inside the task; a closure declared
-    /// in the PARENT reads the very same stale copy the parent would (measured: `g := fn() -> int:
-    /// xs.len()` after the join returns 0 AND warns), so taking the taint there would trade one false
-    /// warning for one silent wrong answer.
-    ///
-    /// ponytail: dropping the taint for a body declared INSIDE the task is the sixth ceiling — a write
-    /// made only through such a body is never tainted at all (measured: `bump := fn(): xs.push(1)` /
-    /// `fn bump(): xs.push(1)` declared in the `spawn:` and called there leaves `xs.len() == 0` after
-    /// the join, silently). It is the price of not reporting the parent's pending write inside the
-    /// nested body; under-warning, like every other ceiling. Upgrade path: propagate a call-graph
-    /// summary of each nested body's writes back to its call site instead of dropping the pair.
-    pub(super) fn enter_own_frame(
-        &mut self,
-        is_fn_body: bool,
-    ) -> (bool, Option<HashMap<String, StaleWrite>>) {
-        let was_spawn = std::mem::replace(&mut self.in_spawn_block, false);
-        let stale = (is_fn_body || was_spawn).then(|| std::mem::take(&mut self.spawn_stale));
-        (was_spawn, stale)
+    pub(super) fn enter_own_frame(&mut self) -> bool {
+        std::mem::replace(&mut self.in_spawn_block, false)
     }
-    /// Restore what [`Checker::enter_own_frame`] took. 1:1 — and where it took nothing (a closure in
-    /// the parent) the taint is deliberately left as the body found it, so a report from inside the
-    /// closure stays consumed and cannot fire a second time.
-    pub(super) fn exit_own_frame(
-        &mut self,
-        (was_spawn, stale): (bool, Option<HashMap<String, StaleWrite>>),
-    ) {
+
+    pub(super) fn exit_own_frame(&mut self, was_spawn: bool) {
         self.in_spawn_block = was_spawn;
-        if let Some(m) = stale {
-            self.spawn_stale = m;
-        }
     }
     /// W8-3 — a WRITE to `name`. Inside a `spawn:` body a write to a captured local is lost at the
     /// join (measured: reassign / `push` / `xs[i]=v` / `p.f=v` / `m[k]=v` all read back the pre-spawn
@@ -3025,91 +2944,6 @@ impl Checker {
         mutates_receiver(recv, method)
             || matches!(recv, Ty::Struct(key, _) if self.method_writes_self(key, method))
     }
-    /// W8-3 — a READ of `name` in the PARENT of a binding whose pending write is inside a `spawn:`
-    /// body: the read sees the pre-spawn value. Reports once (the entry is consumed) at the read span,
-    /// citing the write.
-    ///
-    /// The message says "read here as its pre-`spawn:` value" rather than "its ONLY write is inside a
-    /// `spawn:` block" because two callers reach it and the latter is false at one of them: the parent
-    /// read-modify-write sites (`xs.push(v)`, `n += 1`) are themselves writes, and what is wrong there
-    /// is the value they read *before* writing. The wording above is true at both.
-    ///
-    /// ponytail: LEXICAL order, not dataflow — a read placed textually *before* the `spawn:` is not
-    /// flagged even though the write still cannot reach it. Upgrade path: a real CFG, which this
-    /// single source-order statement walk deliberately is not.
-    pub(super) fn report_spawn_stale_read(&mut self, name: &str, span: Span) {
-        self.report_spawn_stale_read_at(name, span, &[]);
-    }
-    /// TICKET-165 — the first `writes` entry in `name`'s taint whose path overlaps `read`
-    /// ([`paths_overlap`]), if any. Used by both the report and the shield sites so they agree on
-    /// which write a read is charged to.
-    fn stale_write_seen_by(&self, name: &str, read: &[PathSeg]) -> Option<Span> {
-        self.spawn_stale.get(name).and_then(|w| {
-            w.writes
-                .iter()
-                .find(|(_, path)| paths_overlap(path, read) == Some(true))
-                .map(|(span, _)| *span)
-        })
-    }
-    /// [`Checker::report_spawn_stale_read`] with the READ's constant path spelled out (empty = a
-    /// whole-value read).
-    ///
-    /// TICKET-165 — the read's path is compared against EVERY task write recorded for `name`
-    /// ([`paths_overlap`]), not just checked for "both granular": a read along the same field or key
-    /// a write went through warns (`s.v = 2` then `print(s.v)`); a read through a DIFFERENT constant
-    /// field or key stays silent (`p.count = ...` read back as `p.name`); a read or write through a
-    /// computed index, a negative literal, or a field compared against a key declines, because the
-    /// checker cannot tell whether the two alias — the narrowed seventh ceiling. A whole-value write
-    /// or read (empty path) always overlaps, so the three mixed pairs still report.
-    pub(super) fn report_spawn_stale_read_at(&mut self, name: &str, span: Span, read: &[PathSeg]) {
-        if self.in_spawn_block {
-            return; // inside the task the copy IS the value being read — nothing is lost
-        }
-        let Some(write) = self.stale_write_seen_by(name, read) else {
-            return;
-        };
-        self.spawn_stale.remove(name);
-        self.warn(
-            span,
-            format!(
-                "'{name}' is read here as its pre-`spawn:` value — a captured binding crosses the \
-                 task airlock as an independent copy, so the write inside the `spawn:` block (line \
-                 {}) is not visible after the join (carry the value out on a Channel, or use a \
-                 Shared)",
-                write.line
-            ),
-        );
-    }
-    /// W8-3 — about to infer a FIELD/INDEX read `e`. If the binding it projects from carries a taint
-    /// whose write the read's path overlaps, report it now (at the root's span) and consume it — the
-    /// bare-`Ident` read buried inside `infer_field`/`infer_index` must never see an entry this arm
-    /// has already judged, or it re-reports it as a whole read. If the taint exists but does NOT
-    /// overlap (a disjoint field/key, or a `Dynamic` segment on either side), lift the entry out for
-    /// the duration and hand it back to [`Checker::unshield_granular_read`], so the inner read cannot
-    /// wrongly report or consume it either.
-    ///
-    /// Lifting the ONE entry — rather than setting a checker-wide "we're in a projection" flag — is
-    /// what keeps an unrelated binding read inside the INDEX expression (`m[k]`, where `k` is itself
-    /// stale) fully reportable. Nesting is safe: `a.b.c` shields `a` at the outer arm, the inner arm
-    /// finds nothing left to lift and restores nothing.
-    pub(super) fn shield_granular_read(&mut self, e: &Expr) -> Option<(String, StaleWrite)> {
-        let (name, root_span, read) = chain_path(e)?;
-        self.spawn_stale.contains_key(name).then_some(())?;
-        let name = name.clone();
-        if self.stale_write_seen_by(&name, &read).is_some() {
-            self.report_spawn_stale_read_at(&name, root_span, &read);
-            return None;
-        }
-        self.spawn_stale.remove_entry(&name)
-    }
-    /// Put back what [`Checker::shield_granular_read`] lifted. 1:1 — an entry consumed by a report is
-    /// never in hand here, so a genuine warning still fires exactly once.
-    pub(super) fn unshield_granular_read(&mut self, saved: Option<(String, StaleWrite)>) {
-        if let Some((name, w)) = saved {
-            self.spawn_stale.insert(name, w);
-        }
-    }
-
     /// Does `name` resolve to the MODULE scope (index 0) — i.e. is it a module-level binding rather
     /// than a local/param shadow? Used by the from-imported-global rebind gate, so a fn-local `:=`
     /// shadow of an imported name stays assignable.
@@ -4469,21 +4303,4 @@ pub(super) fn chain_path(e: &Expr) -> Option<(&String, Span, Vec<PathSeg>)> {
             _ => return None,
         }
     }
-}
-
-/// TICKET-165 — do a task write's path and a read's path overlap? `Some(true)` when a read along
-/// the written path, a prefix of it, or an extension of it, would observe the write; `Some(false)`
-/// when the two diverge at two DIFFERENT constants of the same kind (a different field, a different
-/// int/str key) and so can never alias; `None` when either side hits a [`PathSeg::Dynamic`] before
-/// diverging — the checker cannot tell, so it must decline rather than guess.
-pub(super) fn paths_overlap(write: &[PathSeg], read: &[PathSeg]) -> Option<bool> {
-    for (w, r) in write.iter().zip(read.iter()) {
-        if *w == PathSeg::Dynamic || *r == PathSeg::Dynamic {
-            return None;
-        }
-        if w != r {
-            return Some(false);
-        }
-    }
-    Some(true)
 }

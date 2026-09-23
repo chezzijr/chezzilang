@@ -471,7 +471,7 @@ impl Checker {
         );
         // …and a fn DECLARED inside a `spawn:` block is not itself the task (W7-48), so it also does
         // not inherit the enclosing frame's W8-3 airlock taint (`enter_own_frame` moves the pair).
-        let saved_frame = self.enter_own_frame(true);
+        let saved_frame = self.enter_own_frame();
         let saved_flag = std::mem::replace(&mut self.inferring_ret, true);
         let saved_rets = std::mem::take(&mut self.collected_rets);
         // A generator body's `yield`s must be legal (`in_generator`) and COLLECTED (`collected_yields`)
@@ -4482,7 +4482,7 @@ impl Checker {
         // …nor a spawn block: a fn DECLARED inside a `spawn:` has its own caller, so a `?` in its
         // body targets it normally (W7-48) — and (W8-3) the airlock-staleness taint is per-frame for
         // the same reason. `enter_own_frame` moves the pair so neither can be reset without the other.
-        let saved_frame = self.enter_own_frame(true);
+        let saved_frame = self.enter_own_frame();
         // M24 — the witness params whose `$w:T` binding this body can reach, and the name the
         // contract's fn-half keys them under. A MODULE-LEVEL FREE fn keys on its own name; a MEMBER
         // (Task 5 — a method or static method declaring its own `[T]`) keys on `<type key>.<method>`,

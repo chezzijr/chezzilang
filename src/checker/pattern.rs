@@ -1662,27 +1662,12 @@ impl Checker {
                 named,
                 type_args,
             } => self.infer_call(callee, args, named, type_args, expr.span),
-            // W8-3 — a FIELD/INDEX read reaches its binding through a projection, so it observes only
-            // PART of the value. TICKET-165: `shield_granular_read` now reports a read along the
-            // WRITTEN path itself (at the root's span) and consumes the taint, or otherwise lifts the
-            // entry out so the inner `Ident` read cannot report (or consume) it either; see
-            // `report_spawn_stale_read_at` for the narrowed ceiling it declines on.
             ExprKind::Field {
                 obj,
                 name,
                 name_span,
-            } => {
-                let shield = self.shield_granular_read(expr);
-                let t = self.infer_field(obj, name, *name_span);
-                self.unshield_granular_read(shield);
-                t
-            }
-            ExprKind::Index { obj, index } => {
-                let shield = self.shield_granular_read(expr);
-                let t = self.infer_index(obj, index);
-                self.unshield_granular_read(shield);
-                t
-            }
+            } => self.infer_field(obj, name, *name_span),
+            ExprKind::Index { obj, index } => self.infer_index(obj, index),
             ExprKind::Try(inner) => self.infer_try(inner, expr.span),
             // W7-43 — optional-chaining `?.` / null-coalescing `??` are CARRIER nodes: the checker
             // types the operand, picks the lowering, then clone-lowers and infers the clone. The
@@ -2424,12 +2409,6 @@ impl Checker {
             // reading it inside the task is an error — the read-side counterpart to the reassignment
             // gate. Module globals/imports are excluded (`is_local_capture`): they resolve in every
             // task like free functions, so reading an imported module here is fine.
-            // W8-3 — the mirror image: a read in the PARENT of a binding whose only write is inside a
-            // `spawn:` body. The airlock copy means that write never lands here, so the read silently
-            // sees the pre-spawn value (the filed repro's `for r in results:` ran zero iterations and
-            // skipped every assertion inside it, rc=0). Warning, not an error — the semantics are
-            // deliberate (`docs/syntax.md` §11b).
-            self.report_spawn_stale_read(name, span);
             if self.is_local_capture(name) && !self.sendable(&ty) {
                 self.error(
                     span,
@@ -4982,7 +4961,7 @@ impl Checker {
         // `enter_own_frame` moves the pair so neither can be reset without the other (this site was
         // the one that cleared `in_spawn_block` alone: the closure body then reported the enclosing
         // task's pending write AND ate the entry, so the parent's real stale read went silent).
-        let saved_frame = self.enter_own_frame(false);
+        let saved_frame = self.enter_own_frame();
         // A closure inside a generator is NOT itself a generator: clear the yield context so a stray
         // `yield` in the closure is diagnosed as "outside a generator", not bound to the enclosing
         // one. (Closure bodies are single expressions today, so this is a latent-invariant guard.)
