@@ -1562,22 +1562,29 @@ it; it may NOT write one — `Op::SetGlobalSlot` faults whenever the running tas
 snapshot. The earlier G1 checker rule — a compile error for a task write to a captured/global binding
 — was retired when module globals started deep-copying per task; D4 replaces that compile error's job
 with a runtime fault, and TICKET-170 restores a compile-time diagnostic alongside it.) The fault is
-not universal — three ceilings, all measured, still lose the write silently:
+not universal — measured against the release binary, two shapes still lose the write silently, and a
+third once suspected to depend on send order does not:
 
-1. **Memo visit order.** The mark is set at the copying walk's placeholder `alloc`, never at a
-   `WireValue::Backref`. A value sent as `(xs, f)`, where `f` captures `xs`, builds `xs` first and
-   marks it; `f`'s capture is then a `Backref` to the already-marked object, so `f`'s own push still
-   faults. Sent in the other order, `(f, xs)`, `f`'s capture builds `xs` as `f`'s own (unmarked)
-   subtree, so `f()`'s push is NOT checked and the write is lost. `xs`'s own later, separately-crossed
-   copy is unaffected.
+1. **Closure capture vs. a sibling reference — no order dependence.** A tuple `(xs, f)`, `f` capturing
+   `xs`, sent together in one crossing (over a `Channel`, to a different task): on the release binary,
+   `f()`'s own push FAULTS and a direct write to the tuple's own `xs` element stays silent, in BOTH
+   send orders — `(xs, f)` and `(f, xs)` give the identical split. The two do not alias after the
+   crossing (a write through one is not visible through the other, confirmed by reading each back), so
+   there is no memo-visit-order ceiling for this shape: a genuine cross-task closure crossing marks its
+   own captures unconditionally, and a value received directly (not through a closure) is always the
+   unmarked copy item 3 below already describes. This replaces an earlier, unverified claim that send
+   order changed the outcome.
 2. **Captured iterator/generator cursors.** Advancing a captured `Iterator` cursor and resuming a
    captured generator are not checked at all — neither shape is in the write-site list below.
 3. **A same-task round-trip is not a crossing.** A closure/value sent on a `Channel` or read back
    from a `Shared`/`RwShared` and used by the SAME task that sent it never left that task's heap, so
    the D4 layer-C mark is not set on it (`Heap::id`-gated, TICKET-169) — its write stays silent,
-   exactly as `main` behaves today (owner ruling 2026-09-23, `W7-4c`). Only a crossing into a
-   DIFFERENT task's heap — a `spawn` capture/arg, an `Executor` job, or a `Channel.send` actually
-   received by another task — marks the copy.
+   exactly as `main` behaves today (owner ruling 2026-09-23, `W7-4c`). Only a captured closure/cell
+   crossing into a DIFFERENT task's heap — a `spawn` capture/arg, an `Executor` job's captures, or a
+   closure sent over a `Channel` and actually received by another task — marks the copy. A plain
+   (non-closure) value received over a `Channel`, or read back from a `Shared`/`RwShared` by a
+   DIFFERENT task, never marks either — it belongs to the receiver (pinned by
+   `a_channel_received_list_pushed_by_the_receiver_is_silent`).
 
 **Write sites the mark is checked at** (D4 layer C, TICKET-169): a struct field store (`p.f = v`), an
 index store on a `List`/`Map`/`bytearray` (`xs[i] = v`; a struct's own `set_index` is NOT checked —
