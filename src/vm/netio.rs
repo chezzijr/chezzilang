@@ -3137,6 +3137,8 @@ impl Vm {
                     !g.is_empty() || first.done_latch.load(Ordering::Relaxed)
                 }
             };
+            // TICKET-168 — DEC-141's bracket list missed this wait; a body wait: hangs at T=1 without it.
+            self.width_release();
             let q = first.q.lock().unwrap_or_else(|e| e.into_inner());
             #[cfg_attr(not(test), allow(unused_mut))]
             let (mut guard, waited) = first
@@ -3151,6 +3153,7 @@ impl Vm {
                 }
             }
             drop((guard, waited));
+            self.width_acquire();
             self.frames.last_mut().unwrap().ip -= 1;
             return Ok(());
         }

@@ -1383,6 +1383,7 @@ pub struct Vm {
     /// TICKET-141 — this shell currently holds a width permit. Only meaningful while `width_gated`;
     /// per-shell like `demoted`. See `src/vm/width.rs`.
     holds_width: bool,
+    body_gate: Option<Arc<MnSched>>,
 }
 
 /// D3 — a fiber's reduction budget per schedule-in: how many ops it dispatches before yielding its

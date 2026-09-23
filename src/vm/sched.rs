@@ -1059,6 +1059,10 @@ impl Vm {
         sched.lock().scopes[0].ancestors = self.nursery_ancestors();
         sched.open_body(0);
         let mut shell = self.spawn_shell(&sched, &cancel);
+        let gate_body = self.mn.is_none() && worker_count() == 1;
+        if gate_body {
+            shell.width_gated = true;
+        }
         let drain_sched = Arc::clone(&sched);
         let drainer = std::thread::Builder::new()
             .stack_size(VM_STACK_BYTES)
@@ -1069,6 +1073,11 @@ impl Vm {
                 }));
             })
             .ok()?; // no drainer ⇒ no worker during the body ⇒ fall back to lazy (see the doc above)
+        if gate_body {
+            self.width_gated = true;
+            self.holds_width = true;
+            self.body_gate = Some(Arc::clone(&sched));
+        }
         // §2c1 — an eager nursery publishes itself so the process-wide verdict counts its undone
         // fibers as uncounted senders. Without it, top-level `main` blocked on `ch.recv()` while a
         // live sibling is about to `send` is `parties.len() >= live` with nothing satisfiable — a
@@ -1255,6 +1264,7 @@ impl Vm {
         }
         if let Some(h) = drainer {
             let _ = h.join();
+            self.body_gate_retire(&sched);
         }
         join_blocked_body_helpers(&sched);
         // TICKET-164 — publish this run's pick count on the joining thread (read by
@@ -1464,6 +1474,7 @@ impl Vm {
         }
         if let Some(h) = drainer {
             let _ = h.join();
+            self.body_gate_retire(&sched);
         }
         join_blocked_body_helpers(&sched);
         let slots = sched.take_slots();
@@ -2330,8 +2341,29 @@ impl Vm {
             return;
         }
         self.holds_width = false;
-        if let Some(sched) = self.mn.as_ref() {
+        if let Some(sched) = self.mn.as_ref().or(self.body_gate.as_ref()) {
             sched.width.release();
+        }
+    }
+
+    pub(super) fn body_width_yield(&mut self) {
+        if let Some(g) = self.body_gate.as_ref()
+            && g.width.waiting() > 0
+        {
+            self.width_release();
+            self.width_acquire();
+        }
+    }
+
+    fn body_gate_retire(&mut self, sched: &Arc<MnSched>) {
+        if self
+            .body_gate
+            .as_ref()
+            .is_some_and(|g| Arc::ptr_eq(g, sched))
+        {
+            self.body_gate = None;
+            self.width_gated = false;
+            self.holds_width = false;
         }
     }
 
@@ -2341,7 +2373,7 @@ impl Vm {
         if !self.width_gated || self.holds_width {
             return;
         }
-        let Some(sched) = self.mn.clone() else {
+        let Some(sched) = self.mn.clone().or_else(|| self.body_gate.clone()) else {
             return;
         };
         sched.width.acquire();

@@ -165,6 +165,7 @@ impl Vm {
             demoted: false, // D5 owe #3 (Path C)
             width_gated: false,
             holds_width: false,
+            body_gate: None,
             cancel: None,
             cancel_outer: Vec::new(),
             cancelled: false,
@@ -495,6 +496,9 @@ impl Vm {
         // faulting nursery is bypassed.
         if sampled && let Some(e) = self.deliver_owner_fault() {
             return Err(e);
+        }
+        if sampled && self.holds_width && self.mn.is_none() {
+            self.body_width_yield();
         }
         Ok(())
     }
@@ -1847,6 +1851,9 @@ impl Vm {
             // flagless one gets the exit sentinel, and what suppresses both inside a `defer`.
             if sampled && let Some(e) = self.exit_halt(span) {
                 return Err(e);
+            }
+            if sampled && self.holds_width && self.mn.is_none() {
+                self.body_width_yield();
             }
             // TICKET-096 — the `block_halt_check` rung's counterpart for the loop back-edge.
             // `cancel_requested()` above reads only cancel flags THIS fiber holds, and a nursery OWNER
