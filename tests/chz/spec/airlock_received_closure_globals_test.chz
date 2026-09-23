@@ -9,13 +9,16 @@ import std.time
 
 g: List[int] = [1]
 
+fn d4_push2(xs: List[int]):
+    xs.push(2)
+
 fn alias_case(fr: Channel[str]) -> str:
     a := g
     c := Channel[fn() -> str](1)
     parallel:
         spawn:
             res := recover:
-                g.push(2)
+                d4_push2(g)
             match res:
                 Ok(_): fr.send("no-fault")
                 Err(e): fr.send(e.message())
@@ -58,7 +61,7 @@ fn w_case(fr: Channel[str]) -> str:
     parallel:
         spawn:
             res := recover:
-                w.push(2)
+                d4_push2(w)
             match res:
                 Ok(_): fr.send("no-fault")
                 Err(e): fr.send(e.message())

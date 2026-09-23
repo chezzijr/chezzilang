@@ -13,6 +13,9 @@
 # either the alias or the global now faults identically (both denote the one copied object).
 import std.concurrency
 
+fn d4_push2(xs: List[int]):
+    xs.push(2)
+
 gl: List[List[int]] = [[1]]
 
 test fn local_alias_of_global_element_write_through_alias_faults():
@@ -21,7 +24,7 @@ test fn local_alias_of_global_element_write_through_alias_faults():
     parallel:
         spawn:
             res := recover:
-                inner.push(2)
+                d4_push2(inner)
             match res:
                 Ok(_): r.send("no-fault")
                 Err(e): r.send(e.message())
@@ -82,7 +85,7 @@ test fn local_alias_of_a_whole_global_write_through_alias_faults():
     parallel:
         spawn:
             res := recover:
-                a[0].push(2)
+                d4_push2(a[0])
             match res:
                 Ok(_): r.send("no-fault")
                 Err(e): r.send(e.message())
@@ -91,6 +94,9 @@ test fn local_alias_of_a_whole_global_write_through_alias_faults():
 
 struct P:
     n: int
+
+fn d4_set_p(p: P):
+    p.n = 5
 
 gm: Map[str, P] = {"k": P(1)}
 
@@ -101,7 +107,7 @@ test fn local_alias_of_a_struct_in_a_global_map_write_through_alias_faults():
     parallel:
         spawn:
             res := recover:
-                p.n = 5
+                d4_set_p(p)
             match res:
                 Ok(_): r.send("no-fault")
                 Err(e): r.send(e.message())
@@ -137,7 +143,7 @@ test fn write_through_spawn_adopted_alias_faults():
     parallel:
         spawn:
             res := recover:
-                a.push(2)
+                d4_push2(a)
             match res:
                 Ok(_): c.send("no-fault")
                 Err(e): c.send(e.message())
@@ -154,7 +160,7 @@ test fn element_alias_write_faults():
     parallel:
         spawn:
             res := recover:
-                inner.push(2)
+                d4_push2(inner)
             match res:
                 Ok(_): c.send("no-fault")
                 Err(e): c.send(e.message())
@@ -180,6 +186,9 @@ test fn spawn_arg_alias_write_faults():
 struct P116:
     n: int
 
+fn d4_set_p116(p: P116):
+    p.n = 5
+
 gm116: Map[str, P116] = {"k": P116(1)}
 
 test fn struct_in_map_alias_write_faults():
@@ -188,7 +197,7 @@ test fn struct_in_map_alias_write_faults():
     parallel:
         spawn:
             res := recover:
-                p.n = 5
+                d4_set_p116(p)
             match res:
                 Ok(_): c.send("no-fault")
                 Err(e): c.send(e.message())
@@ -204,7 +213,7 @@ test fn closure_built_before_the_alias_push_faults():
         spawn:
             _f := fn() -> str: "{gl5}"
             res := recover:
-                a.push(2)
+                d4_push2(a)
             match res:
                 Ok(_): c.send("no-fault")
                 Err(e): c.send(e.message())
@@ -219,7 +228,7 @@ test fn nested_nursery_send_faults():
     parallel:
         spawn:
             res := recover:
-                a.push(2)
+                d4_push2(a)
             match res:
                 Ok(_): c.send("no-fault")
                 Err(e): c.send(e.message())
@@ -238,7 +247,7 @@ test fn executor_job_alias_write_faults():
         spawn:
             a := gl8
             res := recover:
-                a.push(2)
+                d4_push2(a)
             match res:
                 Ok(_): r.send("no-fault")
                 Err(e): r.send(e.message())
@@ -258,7 +267,7 @@ test fn two_hop_closure_alias_write_faults():
     parallel:
         spawn:
             res := recover:
-                a.push(2)
+                d4_push2(a)
             match res:
                 Ok(_): c.send("no-fault")
                 Err(e): c.send(e.message())

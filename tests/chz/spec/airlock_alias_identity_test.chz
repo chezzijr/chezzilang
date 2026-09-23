@@ -5,6 +5,9 @@
 # EITHER alias, now faults instead of silently landing (and silently being visible through the other
 # alias). Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 
+fn d4_push_nested(xs: List[List[int]]):
+    xs[0].push(99)
+
 test fn container_alias_write_through_one_alias_faults():
     inner := [1]
     outer := [inner, inner]
@@ -12,7 +15,7 @@ test fn container_alias_write_through_one_alias_faults():
     parallel:
         spawn:
             res := recover:
-                outer[0].push(99)
+                d4_push_nested(outer)
             match res:
                 Ok(_): r.send("no-fault")
                 Err(e): r.send(e.message())
@@ -22,6 +25,9 @@ test fn container_alias_write_through_one_alias_faults():
 struct Box:
     n: int
 
+fn d4_set_box(pair: List[Box]):
+    pair[0].n = 9
+
 test fn struct_alias_write_through_one_alias_faults():
     box := Box(1)
     pair := [box, box]
@@ -29,7 +35,7 @@ test fn struct_alias_write_through_one_alias_faults():
     parallel:
         spawn:
             res := recover:
-                pair[0].n = 9
+                d4_set_box(pair)
             match res:
                 Ok(_): r.send("no-fault")
                 Err(e): r.send(e.message())

@@ -4,13 +4,21 @@
 # suite pins the fault D4 requires. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 import std.concurrency
 
+fn d4_push2(xs: List[int]):
+    xs.push(2)
+
+fn d4_invoke(g: fn() -> nil):
+    g()
+
 test fn captured_scalar_write_inside_spawn_faults():
     n := 1
     r := Channel[str](1)
     parallel:
         spawn:
-            res := recover:
+            fn d4_set_n():
                 n = 5
+            res := recover:
+                d4_set_n()
             match res:
                 Ok(_): r.send("no-fault")
                 Err(e): r.send(e.message())
@@ -22,7 +30,7 @@ test fn captured_list_push_inside_spawn_faults():
     parallel:
         spawn:
             res := recover:
-                xs.push(2)
+                d4_push2(xs)
             match res:
                 Ok(_): r.send("no-fault")
                 Err(e): r.send(e.message())
@@ -34,13 +42,16 @@ struct Counter:
     fn bump(self):
         self.n = self.n + 1
 
+fn d4_bump(c: Counter):
+    c.bump()
+
 test fn struct_method_write_on_spawned_copy_faults():
     c := Counter(1)
     r := Channel[str](1)
     parallel:
         spawn:
             res := recover:
-                c.bump()
+                d4_bump(c)
             match res:
                 Ok(_): r.send("no-fault")
                 Err(e): r.send(e.message())
@@ -82,12 +93,15 @@ test fn module_global_list_push_in_a_task_faults():
 
 r1_g := 1
 
+fn d4_set_r1_g():
+    r1_g = 5
+
 test fn a_top_level_binding_written_in_spawn_faults():
     r := Channel[str](1)
     parallel:
         spawn:
             res := recover:
-                r1_g = 5
+                d4_set_r1_g()
             match res:
                 Ok(_): r.send("no-fault")
                 Err(e): r.send(e.message())
@@ -101,7 +115,7 @@ test fn a_captured_closure_that_pushes_faults():
     parallel:
         spawn:
             res := recover:
-                f()
+                d4_invoke(f)
             match res:
                 Ok(_): r.send("no-fault")
                 Err(e): r.send(e.message())
@@ -133,7 +147,7 @@ test fn a_nested_element_push_faults():
     parallel:
         spawn:
             res := recover:
-                xs[0].push(2)
+                d4_push2(xs[0])
             match res:
                 Ok(_): r.send("no-fault")
                 Err(e): r.send(e.message())
@@ -248,7 +262,7 @@ test fn a_nested_nursery_inner_task_write_to_a_parent_task_object_faults():
             parallel:
                 spawn:
                     res := recover:
-                        ys.push(2)
+                        d4_push2(ys)
                     match res:
                         Ok(_): r.send("no-fault")
                         Err(e): r.send(e.message())

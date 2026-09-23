@@ -38,6 +38,9 @@ fn set_f(v: int):
 
 loopg: int = 0
 esc: int = 1
+
+fn d4_set_esc():
+    esc = 2
 tg: int = 1
 xg: int = 1
 
@@ -308,7 +311,7 @@ test fn a_faulting_task_still_propagates():
 # silently mutating a copy the parent never sees — wrapped so it cannot race the escape.
 fn escape_out() -> Result[int, Error]:
     parallel:
-        spawn: _ := recover: esc = 2
+        spawn: _ := recover: d4_set_esc()
         return Err("bail")
     return Ok(0)
 
