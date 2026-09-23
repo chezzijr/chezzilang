@@ -1536,7 +1536,8 @@ forked child copies the parent's address space. Two deliberate differences from 
    `RwShared`, `Atomic`, `Executor`, and the socket/reader/writer handles carry their one underlying
    `Arc` core across, so all tasks reach the *same* mailbox/box/queue/fd. These handles are the *only*
    way tasks share mutable state; everything else is copied. That is why the shared-mutation data race
-   is unrepresentable — a plain captured value mutated in a task changes only that task's copy.
+   is unrepresentable — a plain captured value mutated in a task changes only that task's copy, and
+   (D4) that write now faults there too, except the documented ceilings below.
 
 **Almost everything is sendable now** (scalars, `str`, containers/structs of sendable contents,
 closures & bare/`fn` and even **recursive** local fns, **protocol existentials**, `.iter()` cursors,
@@ -1562,8 +1563,8 @@ it; it may NOT write one — `Op::SetGlobalSlot` faults whenever the running tas
 snapshot. The earlier G1 checker rule — a compile error for a task write to a captured/global binding
 — was retired when module globals started deep-copying per task; D4 replaces that compile error's job
 with a runtime fault, and TICKET-170 restores a compile-time diagnostic alongside it.) The fault is
-not universal — measured against the release binary, two shapes still lose the write silently, and a
-third once suspected to depend on send order does not:
+not universal — measured against the release binary, three shapes still lose the write silently; item
+1 depends on the order the crossing's memo visits the values:
 
 1. **Closure capture vs. a sibling reference — order-dependent, one shared memo per send.** A tuple
    `(xs, f)`, `f := fn() -> nil: xs.push(2)`, sent in one crossing over a `Channel` to a different

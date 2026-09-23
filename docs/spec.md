@@ -271,8 +271,9 @@ reusing an exhausted one yields nothing.
 > **D4 (2026-09-22, `docs/decision-d4-airlock.md`) — a task's write to its airlock copy faults.**
 > Supersedes D2's "a lost write is correct": a spawned task's write to a captured local, a captured
 > container, or a module global — every object the airlock copied into the task's own heap — is now a
-> recoverable runtime **fault**, never a silent lost write (D2's read half survives: a received
-> closure still reads the running task's own module globals). Landed as layer C, TICKET-169 (runtime);
+> recoverable runtime **fault** (three shapes still lose the write silently — see
+> `docs/concurrency.md`'s ceilings). D2's read half survives: a received closure still reads the
+> running task's own module globals; it may no longer write them. Landed as layer C, TICKET-169 (runtime);
 > layer A, the matching compile-time error, is TICKET-170. The parent's original object is never
 > marked, and writing through a genuine handle (`Shared`/`RwShared`/`Atomic*`/`Channel`) is unaffected
 > — that is real sharing, not a copy.

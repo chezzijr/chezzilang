@@ -574,9 +574,10 @@ fn; it captures the enclosing scope exactly like a closure value:
   A captured loop variable rebinds into a fresh cell each iteration (Go ≥1.22), and across the
   `spawn` / `parallel:` airlock a plain captured local is snapshot-copied (isolated), identical to a
   closure's capture — see the two rules above. A task's write to that copy is a runtime **fault**
-  (D4, `docs/decision-d4-airlock.md`), never a silent lost write: `x = x + 1` on a captured local, a
+  (D4, `docs/decision-d4-airlock.md`): `x = x + 1` on a captured local, a
   `.push`/index-store/field-store on a captured container, and a write to a module global all fault
-  inside the task with a recoverable `'<name>' is this task's copy: ...` error. Share state a task and
+  inside the task with a recoverable `'<name>' is this task's copy: ...` error. Three shapes still
+  lose the write silently (see `docs/concurrency.md`'s ceilings). Share state a task and
   its parent both observe through `Shared`/`RwShared`/`Atomic*`/`Channel` instead.
 
 ```chezzi
