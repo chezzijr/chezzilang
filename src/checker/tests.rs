@@ -498,6 +498,18 @@ fn a_task_side_write_read_after_the_join_warns() {
     );
 }
 
+/// D4 layer A (TICKET-170) — a direct write to a captured binding inside a `spawn:` task body must
+/// be a COMPILE-TIME ERROR, not the W8-3 warning above. As of this commit the checker still only
+/// warns on this shape (see `a_task_side_write_read_after_the_join_warns`'s first case, the exact
+/// same program), so this pins the gap: it currently fails because `check_src` returns zero errors.
+#[test]
+fn spawn_body_direct_write_to_captured_binding_is_a_compile_time_error() {
+    rejects(
+        "fn f():\n    results: List[str] = []\n    parallel:\n        spawn:\n            results = [\"a\"]\n    print(results.len())\nf()\n",
+        "'results' is read here as its pre-`spawn:` value",
+    );
+}
+
 /// TICKET-137 (W14-25, owner decision D2) — the warning is TRUE by construction for a MODULE GLOBAL
 /// too. A `spawn:` write to a global lands in the task's own copy, and a closure sent back over a
 /// `Channel` reads the RECEIVER's copy, so neither the closure nor the later read sees the write —
