@@ -454,40 +454,49 @@ Two rules cover everything:
    exactly as in Go). "Together" means **one task**: two *separate* tasks each get their own snapshot,
    but the two halves of ONE task that reaches a cell through *both* a captured local and a module
    global do share it — those are two separate serializations that are made to agree on the binding
-   (`gaps.md` W7-4c). Writes in
-   the task are **not** visible to the parent. This is the one deliberate divergence from Go
-   (`x := 0; parallel: spawn: x = x + 1; print(x)` → `0`, not `1`); it is the memory-safety line.
-   For genuine cross-task shared mutation use `Shared[T]` / `RwShared[T]` / `Atomic` / `Channel[T]`,
-   which cross the airlock by reference (see [`concurrency.md`](concurrency.md)). The copy is *why*
-   forgetting `Shared` is a harmless logic bug (an isolated stale value) rather than a data race —
-   Chezzi has no borrow checker to prove a shared mutation is locked, so the safe default is to copy.
+   (`gaps.md` W7-4c). **A write inside the task to a copy — the captured cell or a container/struct it
+   points into — is a runtime fault** (D4, TICKET-169): `x := 0; parallel: spawn: x = x + 1;
+   print(x)` faults inside the `spawn:` body (`'x' is this task's copy: a write to it would be lost at
+   the join; share it through Shared/Channel, or make a task-local copy with .copy()`), an ordinary
+   recoverable fault (`recover:` catches it) rather than a silent lost write. This is the one
+   deliberate divergence from Go; it is the memory-safety line, now enforced instead of merely
+   documented. For genuine cross-task shared mutation use `Shared[T]` / `RwShared[T]` / `Atomic` /
+   `Channel[T]`, which cross the airlock by reference (see [`concurrency.md`](concurrency.md)) and are
+   never marked, so writes through them are real sharing and never fault. `.copy()` of a copy is itself
+   unmarked, so `ys := xs.copy(); ys.push(v)` inside a task is a legitimate task-local write.
 
-**The checker WARNS when that copy silently costs you a value.** A captured binding whose only write
-is inside a `spawn:` body, read again after the join, is a **non-fatal warning** on stderr naming the
-binding and citing the write's line (exit code unchanged — the semantics above are deliberate, so this
-is a warning, not an error). It exists because of the failure mode: a `for r in results:` over the
-stale (still-empty) list runs **zero** iterations, so every `assert` inside is skipped and the program
-exits `0` — a green test that tested nothing.
+**The checker also WARNS at compile time** for the same shape, ahead of TICKET-170's compile-time
+error: a captured binding whose only write is inside a `spawn:` body, read again after the join, gets
+a **non-fatal warning** on stderr naming the binding and citing the write's line (exit code from the
+warning alone unchanged; the write itself now faults at runtime as above). It exists because of the
+failure mode a fault alone doesn't cover if the fault is swallowed: a `for r in results:` over the
+stale (still-empty) list would otherwise run **zero** iterations, so every `assert` inside is skipped
+and the program exits `0` — a green test that tested nothing.
 
 ```chezzi
 results: List[str] = []
 parallel:
     spawn:
-        results = ["ok", "ok"]     # ← warning cites this line
-for r in results:                  # 'results' is read here as its pre-`spawn:` value
-    assert r == "ok"               # zero iterations before the warning existed
+        results = ["ok", "ok"]     # ← checker warning cites this line; runtime fault, uncaught
+for r in results:                  # unreached: the spawn: body faults before the join
+    assert r == "ok"
 ```
 
-It covers a reassignment, a compound assign, `xs[i] = v`, `p.field = v`, `m[k] = v`, and the in-place
-container mutators (`push`/`pop`/`insert`/`remove_at`/`extend`/`sort`/`sort_by`/`sort_by_key`/
-`reverse` on a list, `remove`/`update` on a map, `add`/`remove` on a set, `push`/`pop` on a bytearray),
-whether called on the binding or on an element or field of it (`xs[0].push(v)`, `s.xs.push(v)`).
-It stays **silent** where the write really does survive: through a `Shared`/`RwShared`/`Atomic`/
-`AtomicInt`/`Channel`/`Executor`/`Socket`/`Listener`/`Writer`/`Reader` handle (those cross by handle),
-inside a `defer:` block **in the parent** (same frame, same cell, no airlock), when the parent
+Uncaught, that fault propagates like any other uncaught `RuntimeError`: the program exits non-zero
+instead of silently printing a stale `results`. Wrap the write in `recover:` to see the fault as a
+value instead: `r := recover: results = ["ok", "ok"]` binds `r` to `Err(...)`.
+
+The checker warning covers a reassignment, a compound assign, `xs[i] = v`, `p.field = v`, `m[k] = v`,
+and the in-place container mutators (`push`/`pop`/`insert`/`remove_at`/`extend`/`sort`/`sort_by`/
+`sort_by_key`/`reverse` on a list, `remove`/`update` on a map, `add`/`remove` on a set, `push`/`pop` on
+a bytearray), whether called on the binding or on an element or field of it (`xs[0].push(v)`,
+`s.xs.push(v)`) — the same set of writes the runtime now faults on. It stays **silent** where the write
+really does survive: through a `Shared`/`RwShared`/`Atomic`/`AtomicInt`/`Channel`/`Executor`/`Socket`/
+`Listener`/`Writer`/`Reader` handle (those cross by handle and are never marked, so they never fault
+either), inside a `defer:` block **in the parent** (same frame, same cell, no airlock), when the parent
 overwrites the binding before reading it, and when the read happens only inside the task. A `defer:`
 block nested *inside* a `spawn:` body is on the far side of the airlock like any other task statement —
-its write is lost and it warns like one.
+its write now faults like any other task write, and it warns like one.
 
 A parent-side write only **supersedes** the lost one — and so silences the warning — when it replaces
 the *whole* binding (`xs = [...]`). An in-place mutator (`xs.push(v)`) and a compound assign (`n += 1`)
@@ -4493,9 +4502,9 @@ fn fetch_all(urls: List[str]):
 - **`Channel.trip()`** — flip a permanent level-trigger latch: the channel is then ready (`recv`/
   `try_recv`/`wait` → `true`) for every receiver (the manual fan-out behind `std.cancel`'s `done()`).
 - **Sendability:** a captured local — AND every module global — crosses into a task as an **independent
-  per-task copy** (writes in the task stay local; a module global is deep-copied at the
-  spawn boundary just like a captured local, so reassigning or in-place-mutating either inside a task is
-  fine and simply invisible to the parent). Sendable types
+  per-task copy** (a module global is deep-copied at the spawn boundary just like a captured local; a
+  write to either inside a task is a runtime fault, D4/TICKET-169 — reassigning or in-place-mutating
+  a copy raises, it is not silently invisible to the parent). Sendable types
   (scalars/str/containers+structs of sendable/`Channel`/`Atomic`/`AtomicInt`/`Shared`/`RwShared`/a `std.cancel`
   `Token`/closures/**protocol existentials** — Task 2, Go `chan interface` parity) cross the airlock;
   a native handle (or a witness carrying an FFI/native handle) does not. To share mutable state across tasks use a

@@ -2723,9 +2723,13 @@ base vs. branch interleaved one run at a time (A, B, A, B, ...), 10 runs per sid
 binaries, `uptime` load 1.6-2.3 throughout. Base is `main` before this ticket's diff (the pre-fix
 binary the plan's step 1 built); branch is this ticket's `feat(TICKET-169)` + test-migration commits.
 
-**`struct`/`list`/`map`/`hof_nursery` write-heavy benches** (`benches/chz/many_struct.chz`,
-`many_list.chz`, `many_map.chz`, `hof_nursery.chz`) — the mark check (`Heap::is_copied`) sits on every
-one of these benches' hot write paths (`set_field`, `List`/`Map` index stores, `do_method_call`):
+**`many_struct`/`many_list`/`many_map`/`hof_nursery` benches** (`benches/chz/many_struct.chz`,
+`many_list.chz`, `many_map.chz`, `hof_nursery.chz`) — corrected from an earlier pass of this section,
+which claimed these four exercise `set_field`. They don't: `many_struct.chz` and `many_list.chz` only
+`List.push` (a `do_method_call`/`is_mutating_native` write, no field or index store); `many_map.chz`
+does hit `set_index` (`m[i] = P(i, i)`); `hof_nursery.chz` spawns a task, so unlike the other three its
+single-threaded heap is not the only one measured (see below). Kept for continuity with the pass that
+measured them:
 
 | bench | base median (s) | branch median (s) | delta |
 |---|---|---|---|
@@ -2734,12 +2738,28 @@ one of these benches' hot write paths (`set_field`, `List`/`Map` index stores, `
 | many_map | 0.4699 | 0.4823 | +2.6% |
 | hof_nursery | 0.6451 | 0.6325 | -2.0% |
 
-Every delta sits inside the run-to-run spread measured on each side alone (many_struct base's own 10
-runs span 0.719-0.800 s, a 10% band; many_map base spans 0.431-0.557 s, a 25% band) — none of the four
-moves outside its own noise floor, and the sign flips bench to bench (two down, two up), which is what
-noise looks like, not a directional cost. **Level within noise**, as required: `Heap::any_copied` is
-false on every one of these benches' single-threaded run (none of them spawns a task), so
-`is_copied`'s early-out is the only cost paid, and it does not show up above measurement noise.
+**`struct`/`list`/`map` benches** (`benches/chz/struct.chz`, `list.chz`, `map.chz`) — these are the
+ones that actually hit the write sites the earlier pass claimed: `struct.chz` does 4 `set_field` stores
+per loop iteration (`s.a = s.b` etc., ~1M iterations); `list.chz` is `List.push` (`do_method_call`)
+plus a `for`-loop read pass, no field/index store; `map.chz` does 200k `set_index` inserts (`m[i] = i *
+2`) then 1M reads. Same method: base vs. branch interleaved, 10 runs per side, release binaries,
+`uptime` load 0.97-1.48 throughout:
+
+| bench | base median (s) | branch median (s) | delta |
+|---|---|---|---|
+| struct | 0.9018 | 0.8924 | -1.0% |
+| list | 0.6996 | 0.6976 | -0.3% |
+| map | 0.2708 | 0.2464 | -9.0% |
+
+Every delta sits inside the run-to-run spread measured on each side alone: `struct` base's own 10 runs
+span 0.864-0.932 s, an 8% band, past the -1.0% delta; `map` base spans 0.244-0.335 s, a 37% band, well
+past the 9.0% delta between medians — the branch was faster on all 10 of the 10 paired runs, which
+given that spread reads as base being the noisier side that session, not a branch regression (a
+regression would make branch SLOWER; it is not). None of the seven benches across both tables moves
+outside its own noise floor. **Level within noise**, as required: `Heap::any_copied` is false on every
+one of these benches' single-threaded portion (only `hof_nursery` spawns a task at all), so
+`is_copied`'s early-out is the only cost paid on the `set_field`/`set_index`/`do_method_call` hot
+paths, and it does not show up above measurement noise.
 
 **Mark storage.** `Heap::copied: Vec<u64>` is a side bitset next to the existing GC `marks` bitset, not
 a field on `Obj`/`Slot`/`Value` — `slot_element_is_64b`, `obj_iter_within_size_cap` and
