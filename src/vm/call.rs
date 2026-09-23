@@ -15,9 +15,9 @@ fn py_blank(c: char) -> bool {
 /// write to an airlock copy is silently lost again. The checker's `mutates_receiver`
 /// (`src/checker/mod.rs`) is a narrower list (misses `Map::merge`, `bytearray::extend`, the index
 /// stores) — that gate is for the W8-3 warning, not this fault.
-fn is_mutating_native(obj: &Obj, method: &str) -> bool {
-    match obj {
-        Obj::List(_) => matches!(
+pub(crate) fn is_mutating_native_kind(kind: &str, method: &str) -> bool {
+    match kind {
+        "List" => matches!(
             method,
             "push"
                 | "pop"
@@ -29,11 +29,22 @@ fn is_mutating_native(obj: &Obj, method: &str) -> bool {
                 | "insert"
                 | "remove_at"
         ),
-        Obj::Map(_) => matches!(method, "remove" | "merge" | "update"),
-        Obj::Set(_) => matches!(method, "add" | "remove"),
-        Obj::ByteArray(_) => matches!(method, "push" | "pop" | "extend"),
+        "Map" => matches!(method, "remove" | "merge" | "update"),
+        "Set" => matches!(method, "add" | "remove"),
+        "bytearray" => matches!(method, "push" | "pop" | "extend"),
         _ => false,
     }
+}
+
+fn is_mutating_native(obj: &Obj, method: &str) -> bool {
+    let kind = match obj {
+        Obj::List(_) => "List",
+        Obj::Map(_) => "Map",
+        Obj::Set(_) => "Set",
+        Obj::ByteArray(_) => "bytearray",
+        _ => return false,
+    };
+    is_mutating_native_kind(kind, method)
 }
 
 impl Vm {

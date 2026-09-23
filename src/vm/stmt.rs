@@ -5,7 +5,7 @@ use super::*;
 
 /// D4 layer C (TICKET-169): the one copy of the fault message text, quoted once here so every
 /// write site stays byte-identical. `copied_write_err` prefixes it with `'<name>'` or `this value`.
-pub(super) const COPY_WRITE_TAIL: &str = "is this task's copy: a write to it would be lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()";
+pub(crate) const COPY_WRITE_TAIL: &str = "is this task's copy: a write to it would be lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()";
 
 impl Vm {
     /// Build the D4 layer-C fault for a write to an airlock copy. `name` is the binding name when

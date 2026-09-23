@@ -6054,11 +6054,15 @@ struct TimerSleep {
 
 mod arith;
 mod call;
+#[allow(unused_imports)] // consumed by checker once D4 layer A lands
+pub(crate) use call::is_mutating_native_kind;
 mod exec;
 mod fileio;
 mod netio;
 mod sched;
 mod stmt;
+#[allow(unused_imports)] // consumed by checker once D4 layer A lands
+pub(crate) use stmt::COPY_WRITE_TAIL;
 mod stream;
 
 pub use stream::{flush_stream, out_dead_reason, stream_error};
