@@ -267,6 +267,15 @@ reusing an exhausted one yields nothing.
 > boxed into a VM `Obj::Cell` (type-invisible — a boxed `x: int` still types as `int`). This reverses
 > the earlier snapshot-by-value decision. See `PROGRESS.md` "Uniform by-reference capture" and `docs/syntax.md`
 > "Closure capture".
+>
+> **D4 (2026-09-22, `docs/decision-d4-airlock.md`) — a task's write to its airlock copy faults.**
+> Supersedes D2's "a lost write is correct": a spawned task's write to a captured local, a captured
+> container, or a module global — every object the airlock copied into the task's own heap — is now a
+> recoverable runtime **fault**, never a silent lost write (D2's read half survives: a received
+> closure still reads the running task's own module globals). Landed as layer C, TICKET-169 (runtime);
+> layer A, the matching compile-time error, is TICKET-170. The parent's original object is never
+> marked, and writing through a genuine handle (`Shared`/`RwShared`/`Atomic*`/`Channel`) is unaffected
+> — that is real sharing, not a copy.
 
 ### Syntax sketch
 

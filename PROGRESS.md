@@ -8866,7 +8866,7 @@ that no serious one is still turning up in the part of the engine the JIT compil
 |---|---|---|
 | 1 | The seeded scheduler oracle is built and has been shown to re-find reverted historical races (TICKET-167) | built, not yet judged — re-finds 2 of 3 reverted historical races (W15-1 at the default worker count only, W14-39 at T=1/T=2), the third (TICKET-128) is masked on release; whether that clears this condition is the owner's call, held pending the full sweep numbers; see `docs/bug-discovery.md` "Seeded scheduler oracle" |
 | 2 | **Two consecutive bug-hunt sweeps with zero new P0/P1 in the core**: lexer, parser, checker, compiler, VM exec/call/arith/stmt, scheduler, GC, value model | not started |
-| 3 | Every open P0/P1 ledger row is closed | not met — W15-3 (P1, net, found 2026-09-23 by the TICKET-167 sweep) is open; other open rows stay P2/record (W8-19, W12-5, W13-28, W15-9, W15-10) |
+| 3 | Every open P0/P1 ledger row is closed | not met — W15-3 (P1, net, found 2026-09-23 by the TICKET-167 sweep) is open; other open rows stay P2/record (W8-19, W13-28, W15-9, W15-10) |
 | 4 | Feature freeze during the window: no new language surface or std API unless it IS a sweep finding (e.g. a missing ancestor idiom), so the surface under test stops moving | starts now |
 
 Rules for counting:
@@ -8875,11 +8875,11 @@ Rules for counting:
 - Findings in `std.*`, `std.net`, FFI, diagnostics wording, LSP and perf do **not** reset the count. They are
   fixed in parallel; the JIT does not compile them.
 - A P0/P1 in the core found by either sweep resets the count to zero once it is fixed.
-- **Not a gate:** the W12-5 / D2 revisit. It is a semantic decision about the airlock copy, and the JIT
-  does not generate that code. Decide it before the language freeze, not before the JIT.
 - **D4 (approved 2026-09-22, `docs/decision-d4-airlock.md`) is allowed under the freeze.** It is a sweep-driven
-  design fix that REMOVES silent semantics: a task-side write to an airlock copy faults, TICKET-169
-  (runtime) then TICKET-170 (checker). It lands before the two counted sweeps start.
+  design fix that REMOVES silent semantics: a task-side write to an airlock copy faults. Layer C
+  (runtime) landed 2026-09-23, TICKET-169 — this also closes the W12-5 / D2 revisit this row used to
+  carry as "not a gate" (G6 now faults instead of being a documented divergence). Layer A (checker),
+  TICKET-170, is pending. It lands before the two counted sweeps start.
 - At JIT start, the bytecode and the `Value` layout freeze. The JIT's correctness oracle is interpreter vs
   JIT, byte-identical on `tests/chz` and the CPython differential corpus.
 

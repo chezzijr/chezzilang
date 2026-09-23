@@ -214,13 +214,14 @@ in-progress alongside it.
 > window. Full rule: `PROGRESS.md` "JIT entry rule".
 > **D4 (APPROVED 2026-09-22):** a spawned task's write to an airlock copy (captures, module globals) is
 > an error or a runtime fault, never a silent lost write. It supersedes D2's "lost write is correct".
-> Read `docs/decision-d4-airlock.md` before any airlock work. Tickets: TICKET-169 (runtime), TICKET-170 (checker).
+> Layer C (the runtime fault) landed 2026-09-23, TICKET-169; layer A (the compile-time error) is
+> TICKET-170, pending. Read `docs/decision-d4-airlock.md` before any airlock work.
 >
 > **START HERE (2026-09-20): `docs/gaps.md` is now a SHORT LEDGER — open rows only, each re-verified
 > on the release binary, with the archive line for its full history.** Every closed row and all 30
 > bug-hunt session logs (W1..W14) moved verbatim to **`docs/gaps-archive.md`**, so any
 > `docs/gaps.md:NNNN` citation in a closed ticket or in `PROGRESS.md` resolves against the archive at
-> the same line number. **11 open rows** — W8-19, W12-5 (revisit D2 later), W13-28, W15-3,
+> the same line number. **10 open rows** — W8-19, W13-28, W15-3,
 > W15-4, W15-5, W15-6, W15-7 (all four found 2026-09-23, TICKET-167's post-review corpus sweep —
 > W15-4 the documented streaming-CLI contract surfacing as `output` findings, W15-5 two wall-clock
 > ratio gates that flake under the sweep's own CPU contention, W15-6 a generator-over-channel hang

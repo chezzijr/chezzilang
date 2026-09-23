@@ -6,6 +6,8 @@ definition of WHICH snapshot of the globals a received closure reads. Detection 
 mark (C) plus checker inference (A). Implementation: TICKET-169 (layer C, runtime: every rule) and
 TICKET-170 (layer A, checker: the early compile-time errors). Both are sequenced after TICKET-167/168.
 
+Layer C landed (TICKET-169, 2026-09-23); layer A pending (TICKET-170).
+
 ## The problem
 
 A task gets its own deep copy of everything it captures, and of every module global. That is the

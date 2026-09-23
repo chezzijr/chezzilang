@@ -82,18 +82,22 @@ means stdin is genuinely exhausted. Details (a blocked read demotes its worker, 
 # Chezzi — the shared-mutation race is unrepresentable
 counter := 0
 parallel:
-    spawn: counter = counter + 1   # compiles, but each task mutates its OWN isolated copy of
-                                    # `counter` — a module global is deep-copied per spawned task at
-                                    # the spawn boundary, so the parent's `counter`
-                                    # stays 0 — no shared write, no race.
-print(counter)                     # 0  — to actually share, use a Shared[int] (below)
+    spawn: counter = counter + 1   # compiles, but FAULTS at runtime (recoverable): the task got its
+                                    # OWN isolated copy of `counter` at the spawn boundary, and D4
+                                    # (docs/decision-d4-airlock.md) makes a task's write to that copy
+                                    # a runtime error instead of a silent lost write — there is no
+                                    # shared write, and no silent race, to lose.
 ```
 
-**Module globals isolate per task.** A `spawn`ed task gets its own deep copy of every
-module global (and of every captured local) — mutating one inside a task never propagates out. A
-closure or generator, wherever it was created, reads and writes the module globals of the task that
-RUNS it (owner decision D2, TICKET-137), so a closure received over a `Channel` never sees the
-sender's global writes; to share, use `Shared`/`Channel` ([§7](#7-sendability)).
+**Module globals isolate per task, and a task's write to its copy faults (D4).** A `spawn`ed task
+gets its own deep copy of every module global (and of every captured local) — mutating one inside a
+task never propagates out, and since owner decision D4 (`docs/decision-d4-airlock.md`, TICKET-169)
+the write itself is a recoverable runtime fault (`'<name>' is this task's copy: a write to it would
+be lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()`), not a
+silent no-op. This supersedes D2's "the write lands, just invisibly" — D2's READ half survives: a
+closure or generator, wherever it was created, still reads the module globals of the task that RUNS
+it (owner decision D2, TICKET-137), so a closure received over a `Channel` never sees the sender's
+global writes; to share, use `Shared`/`Channel` ([§7](#7-sendability)).
 
 **The checker warns when you read the lost value.** Writing a captured binding inside a `spawn:` body
 and reading it again after the join emits a non-fatal warning naming the binding and citing the write's
@@ -114,11 +118,12 @@ reasoning for each:
 **The copy is taken FRESH, per task, at its `spawn` — at every depth.** A task sees the values current
 when it was spawned (the Go rule: a goroutine reads whatever a package-level var holds when `go` runs).
 So a global first initialized *after* an earlier nursery is visible, a mutation by ordinary sequential
-code *between* two nurseries is visible to the second nursery's tasks, two spawns straddling a global
-assignment see the old and the new value respectively, and a task that mutates its own copy and then
-opens a **nested** `parallel:` gives its children the **task's** current view, not the parent module's.
-In-place mutation of an aggregate global (`q.push(x)`, `m[k] = v`, `p.x = 1`) is picked up by the next
-nursery too. An `Executor` job has no nursery, so it sees the globals as of the instant it **starts**,
+code (the root task, outside any `spawn`) *between* two nurseries is visible to the second nursery's
+tasks, and two spawns straddling such a root-task global assignment see the old and the new value
+respectively. **A spawned task's own attempt to mutate a global** — in-place (`q.push(x)`, `m[k] = v`,
+`p.x = 1`) or by reassignment — **faults instead (D4, `docs/decision-d4-airlock.md`, TICKET-169)**, so
+there is no "task mutates its own copy, then opens a nested `parallel:`" case to describe any more: the
+mutation faults before the nested nursery is ever reached. An `Executor` job has no nursery, so it sees the globals as of the instant it **starts**,
 which under eager execution is its **`submit`**. Reading a global that is mutated between the `submit`
 and the `shutdown()` is racing a running job, not observing a defined state. The view is identical at
 every `--threads`.
@@ -1548,11 +1553,14 @@ engines, **never UB**):
   AND a module-global live generator both cross **by value** now — see the generator note below.)
 
 Crossing a task boundary (a `spawn` capture or a `Channel.send`) is gated on **sendability**. A
-captured **local** crosses as an independent per-task **copy** — a task may reassign it (the write
-stays on the isolated copy, invisible to the parent); a **module global** behaves the same way: a task
-may reassign it or mutate it in place, and the write lands on that task's own copy,
-invisible to the parent and to sibling tasks. (The earlier G1 checker rule — a compile error for both —
-was retired when module globals started deep-copying per task.)
+captured **local** crosses as an independent per-task **copy**, and a **module global** behaves the
+same way. **Since owner decision D4 (`docs/decision-d4-airlock.md`, TICKET-169), a task's write to
+that copy — reassigning it, mutating it in place, or writing through a nested field/index — is a
+recoverable runtime fault, never a silent lost write.** (D2's read half survives: a received closure
+still reads and writes the module globals of the task that RUNS it, and the earlier G1 checker rule —
+a compile error for a task write to a captured/global binding — was retired when module globals
+started deep-copying per task; D4 replaces that compile error's job with a runtime fault, and
+TICKET-170 restores a compile-time diagnostic alongside it.)
 
 - **Sendable:** scalars (`int`/`float`/`bool`), `str`, containers + structs whose contents are all
   sendable, **`Channel`** itself (reply channels), an **`Atomic[T]`** handle, an **`AtomicInt`** handle,
@@ -1580,17 +1588,20 @@ was retired when module globals started deep-copying per task.)
       c := Channel[fn() -> str](1)
       parallel:
           spawn:
-              g.push(2)                    # the task's own copy: [1, 2]
+              recover: g.push(2)           # FAULTS (D4): g is the task's own copy
               c.send(fn() -> str: "{g}")
       f := c.recv()
       print("{f()} {g}")                   # [1] [1] — f runs in main, against main's copy
   main()
   ```
 
-  Go and CPython have ONE global object, so they print `[1, 2] [1, 2]` for the same source, and `300`
-  for W8-25's module-scope closure (`n := 1`, a task writes `n = 100`, sends `fn(x): x * n`, the
-  receiver calls `f(3)`); Chezzi prints `[1] [1]` and `3`. The divergence is the deliberate
-  "module globals isolate per task" rule ([§2](#2-the-model)). The migration path is to make the
+  Go and CPython have ONE global object, so `g.push(2)` there mutates it in place and both prints see
+  `[1, 2] [1, 2]`, and `300` for W8-25's module-scope closure (`n := 1`, a task writes `n = 100`, sends
+  `fn(x): x * n`, the receiver calls `f(3)`); in Chezzi that same task write now **faults** (D4,
+  `docs/decision-d4-airlock.md`, TICKET-169) instead of silently landing on the task's copy, because
+  `g`/`n` are each the task's own copy of a module global. The divergence is the deliberate
+  "module globals isolate per task" rule ([§2](#2-the-model)); D4 only changes what happens to the
+  write itself — a silent no-op became a recoverable fault. The migration path is to make the
   shared value a `Shared`:
 
   ```
@@ -1624,12 +1635,13 @@ was retired when module globals started deep-copying per task.)
   `adopt_active`) installs the capture's rebuilt object as the global's object, matching CPython and
   Go. Residuals (unchanged): a node aliased by globals of two DIFFERENT modules, a container on the
   slow `SnapValue` path (holds a closure or handle), and `bytearray` (no wire id); see
-  `docs/gaps.md` W12-5. G6 is not a residual: owner decision D2 (DEC-137, TICKET-137) makes a
-  received closure read the module globals of the task that RUNS it, so the receiver's `gl[0]` is
-  its own spawn-time copy and the sender's push is not meant to reach it. TICKET-154 built the
-  adoption that would have tied them and withdrew it (2026-09-21);
-  `airlock_closure_over_a_captured_alias_pushed_by_the_receiver_is_a_known_residual` pins D2's
-  value, and `docs/gaps.md` W12-5 carries the record.
+  `docs/gaps.md` W12-5 (CLOSED, TICKET-169). G6 is not a residual: owner decision D2 (DEC-137,
+  TICKET-137) makes a received closure read the module globals of the task that RUNS it, so the
+  receiver's `gl[0]` is its own spawn-time copy. TICKET-154 built the adoption that would have tied
+  them and withdrew it (2026-09-21). Since D4 (`docs/decision-d4-airlock.md`, TICKET-169) the
+  receiver's own push to that copy now **faults** instead of silently landing on it —
+  `airlock_closure_over_a_captured_alias_pushed_by_the_receiver_faults` (renamed from
+  `..._is_a_known_residual`) pins the fault, and `docs/gaps.md` W12-5 carries the record.
 
   So a `spawn f()`
   callee whose captured environment contains a nested closure/`fn` (or is itself a bare `fn`) runs
@@ -1814,20 +1826,23 @@ was retired when module globals started deep-copying per task.)
   `to_wire` serialize point because it crosses only the value actually sent.) (The earlier **Option-B
   reach-gate** model — which scanned each task for a *possible* reach and faulted it — is **retired**:
   by-value crossing removes the "why can a frame-local generator cross but not a module-global one?" drift.)
-- **Captured locals AND module globals are isolated copies — with one narrow, deliberate exception.**
-  Reassigning — or mutating in place (`.push`/`.add`/`m[k]=v`/`s.field=x`) — a captured **local** or a
-  **module global** inside a task is fine: the write lands on that task's own copy, invisible to the
-  parent and to sibling tasks. To produce output visible to the parent, use a `Channel` or a `Shared`.
-  (Reads are always fine, and a task reads the values current when its nursery opened —
-  [§2](#2-the-model).) **There is no exception (owner decision D2, TICKET-137):** a task's write to a
-  module global is NEVER visible to whoever later receives a closure over that global, because a
-  crossing carries captures only (see the closures bullet above). Go and CPython each have exactly
-  one global object, so the write is always visible there; the divergence is deliberate. *(History:
-  TICKET-051 once made a task's assignment visible to a closure receiver by installing the sender's
-  value into the receiver's module copy; D2 removed the install. Also: a G1 checker rule once made both a
-  **compile error**, because the serial engine shared the globals while M:N snapshotted them.
-  Deep-copying per task removed the divergence, and the rule — and its partially-covered indirect
-  forms — was retired with it.)*
+- **Captured locals AND module globals are isolated copies, and a task's write to one now FAULTS
+  (D4).** Reassigning — or mutating in place (`.push`/`.add`/`m[k]=v`/`s.field=x`) — a captured
+  **local** or a **module global** inside a task is a recoverable runtime fault
+  (`docs/decision-d4-airlock.md`, TICKET-169): `'<name>' is this task's copy: a write to it would be
+  lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()`. This
+  supersedes D2's "the write lands, just invisibly on that task's own copy" — the write is no longer
+  allowed to happen silently, because it would never be seen by the parent, by sibling tasks, or by
+  whoever later receives a closure over that global (a crossing carries captures only, never module
+  globals — see the closures bullet above). To produce output visible to the parent, use a `Channel`
+  or a `Shared`. (Reads are always fine, and a task reads the values current when its nursery opened —
+  [§2](#2-the-model).) Go and CPython each have exactly one global object, so the same write is always
+  visible there; the divergence is deliberate. *(History: TICKET-051 once made a task's assignment
+  visible to a closure receiver by installing the sender's value into the receiver's module copy; D2
+  removed the install. A G1 checker rule once made both a **compile error**, because the serial engine
+  shared the globals while M:N snapshotted them; deep-copying per task removed that divergence and the
+  rule was retired with it. D4/TICKET-169 is the runtime half of restoring an error for the write; a
+  matching compile-time diagnostic is TICKET-170.)*
 - **Cyclic sendables round-trip (identity-preserving copy).** The airlock copies a sendable by a
   structural deep walk (`spawn` arg / `Channel.send` / `Shared(...)` / worker return / module-global
   snapshot). A value that is sendable-by-type but contains a **reference cycle** (e.g. `a.next = b;

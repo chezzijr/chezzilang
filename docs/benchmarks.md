@@ -2713,3 +2713,49 @@ header comment says its bound was "measured at CHEZZI_THREADS=2 and 8", never T=
 untested-at-T=1 shape, not a regression from this fix. `chz_suite` and
 `chz_suite_passes_at_a_second_worker_count` (the tickets's actual gates, default count and T=2) both
 pass clean.
+
+## TICKET-169 — D4 layer C: fault a task's write to an airlock copy (2026-09-23)
+
+`hyperfine` is not installed on this box, so `benches/run.chz` could not run its own sub-benches this
+session (each one reports `sh: line 1: hyperfine: command not found` and the harness exits 0 anyway);
+every number below is a direct wall-clock measurement (`date +%s.%N` around a `chezzi run`) instead,
+base vs. branch interleaved one run at a time (A, B, A, B, ...), 10 runs per side per bench, release
+binaries, `uptime` load 1.6-2.3 throughout. Base is `main` before this ticket's diff (the pre-fix
+binary the plan's step 1 built); branch is this ticket's `feat(TICKET-169)` + test-migration commits.
+
+**`struct`/`list`/`map`/`hof_nursery` write-heavy benches** (`benches/chz/many_struct.chz`,
+`many_list.chz`, `many_map.chz`, `hof_nursery.chz`) — the mark check (`Heap::is_copied`) sits on every
+one of these benches' hot write paths (`set_field`, `List`/`Map` index stores, `do_method_call`):
+
+| bench | base median (s) | branch median (s) | delta |
+|---|---|---|---|
+| many_struct | 0.7787 | 0.7649 | -1.8% |
+| many_list | 0.6368 | 0.6532 | +2.6% |
+| many_map | 0.4699 | 0.4823 | +2.6% |
+| hof_nursery | 0.6451 | 0.6325 | -2.0% |
+
+Every delta sits inside the run-to-run spread measured on each side alone (many_struct base's own 10
+runs span 0.719-0.800 s, a 10% band; many_map base spans 0.431-0.557 s, a 25% band) — none of the four
+moves outside its own noise floor, and the sign flips bench to bench (two down, two up), which is what
+noise looks like, not a directional cost. **Level within noise**, as required: `Heap::any_copied` is
+false on every one of these benches' single-threaded run (none of them spawns a task), so
+`is_copied`'s early-out is the only cost paid, and it does not show up above measurement noise.
+
+**Mark storage.** `Heap::copied: Vec<u64>` is a side bitset next to the existing GC `marks` bitset, not
+a field on `Obj`/`Slot`/`Value` — `slot_element_is_64b`, `obj_iter_within_size_cap` and
+`value_is_8_bytes` (the three tests the acceptance criteria name) all still pass on the branch, so no
+per-object size grew.
+
+**Soundness sweep.** `schedfuzz --seeds 1..5 --threads 1,2,0` over the corpus holding
+`tests/chz/spec/airlock_task_local_fault_test.chz`: base `178 targets, 2136 runs, 0 finding(s), 0
+unstable, 11 known`; branch `179 targets, 2148 runs, 0 finding(s), 0 unstable, 11 known` (one more
+target: this ticket added `airlock_task_local_silent_test.chz` to the corpus, net +1 after a rename
+elsewhere in the suite). `comm -13` between the two logs' sorted `program=` sets prints nothing — no
+program gains a finding that wasn't already there. The CPython differential (`cargo test --test
+difftest`) is unaffected by this change (it does not exercise `spawn`/airlock code) and stays green:
+`64 passed, 0 failed, 1 ignored`.
+
+**Full suite.** `cargo test` (includes `chz_suite_passes` and
+`chz_suite_passes_at_a_second_worker_count`) and `cargo clippy -- -D warnings` both exit 0 on the
+branch; `cargo test --lib` is `4876 passed; 0 failed; 2 ignored` (base was `4875 passed; 0 failed; 2
+ignored` before this ticket's `iter_obj_tests::copied_bit_is_per_slot_and_cleared_on_reuse` addition).
