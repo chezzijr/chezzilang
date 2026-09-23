@@ -1048,6 +1048,12 @@ pub struct Vm {
     /// on a legal program. Pure scratch — cleared and read inside one helper call, never across a park,
     /// so it is a `Vm` field and NOT part of [`FiberCtx`].
     wire_backref_missing: bool,
+    /// D4 layer C (TICKET-169): true while `from_wire_memo`/`replay_snap` is running an airlock
+    /// copying walk (`rebuild_ready`'s captures/args/receiver, `fault_module`'s global snapshot, or
+    /// a crossing `Closure`/`Generator`'s captures). Every object allocated while this is set gets
+    /// `Heap::set_copied`, so a later write to it faults. Pure scratch, toggled and restored around
+    /// one call — never part of [`FiberCtx`].
+    pub(super) copy_mark: bool,
     /// D6c — live mirror of [`FiberCtx::poll_timed_out`] while the fiber is swapped in: set by the poll
     /// thread on the detached fiber's ctx when a socket op's `timeout_ms` deadline elapsed before the
     /// fd became ready, swapped in here on schedule-in. `socket_method`/`listener_method` consume it at

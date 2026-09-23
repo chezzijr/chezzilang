@@ -3,7 +3,31 @@
 
 use super::*;
 
+/// D4 layer C (TICKET-169): the one copy of the fault message text, quoted once here so every
+/// write site stays byte-identical. `copied_write_err` prefixes it with `'<name>'` or `this value`.
+pub(super) const COPY_WRITE_TAIL: &str = "is this task's copy: a write to it would be lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()";
+
 impl Vm {
+    /// Build the D4 layer-C fault for a write to an airlock copy. `name` is the binding name when
+    /// the write site knows it (a global slot store); every other site passes `None` and gets the
+    /// generic `this value` subject.
+    pub(super) fn copied_write_err(&self, name: Option<&str>, span: Span) -> RuntimeError {
+        let subject = match name {
+            Some(n) => format!("'{n}'"),
+            None => "this value".to_string(),
+        };
+        self.err(format!("{subject} {COPY_WRITE_TAIL}"), span)
+    }
+
+    /// Fault when `h` is an airlock copy (D4 layer C). Called at every write site that has no
+    /// binding name to report.
+    #[inline]
+    pub(super) fn check_copied_write(&self, h: GcRef, span: Span) -> Result<(), RuntimeError> {
+        if self.heap.is_copied(h) {
+            return Err(self.copied_write_err(None, span));
+        }
+        Ok(())
+    }
     /// Drain the current (top) frame's deferred calls, LIFO, popping one at a time from the frame's
     /// own list so the not-yet-run records stay GC-rooted in the frame. Skipped on a hard
     /// `std.os.exit` (Go: `os.Exit` does not run deferred calls). Returns the latest fault, if any.
@@ -830,6 +854,10 @@ impl Vm {
                 span,
             ));
         };
+        // D4 layer C (TICKET-169): a field store on an airlock copy is a lost write, not a race.
+        if self.heap.is_copied(h) {
+            return Err(self.copied_write_err(None, span));
+        }
         // M19 Phase 5b — IC fast path (see [`Vm::get_field`]): a hit on the `tid` guard writes straight
         // to the cached index (no field-name re-verify); a miss falls through to the probe + cache-fill.
         if ic != NO_IC {
@@ -892,6 +920,13 @@ impl Vm {
         let Some(h) = obj.as_obj() else {
             return Err(self.err(format!("cannot index {}", self.type_name(obj)), span));
         };
+        // D4 layer C (TICKET-169): an index store on an airlock copy is a lost write. A struct
+        // receiver is exempt — its `set_index` protocol method runs USER code, which may write
+        // only through a `Shared`/`RwShared` field (real sharing); that write is checked at
+        // `set_field`/`do_method_call`, not here.
+        if self.heap.is_copied(h) && !matches!(self.heap.get(h), Obj::Struct { .. }) {
+            return Err(self.copied_write_err(None, span));
+        }
         // M19 Tier-2 — Int-key fast path for a Map write: `scalar_hash` on an int needs no rooting
         // (it can't GC or re-enter, unlike a struct key's `hash()`), so skip `hash_key_rooted`. Same
         // `candidates`/`values_equal`/`push` as the general Map arm → byte-identical behavior. A

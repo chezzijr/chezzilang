@@ -9,6 +9,33 @@ fn py_blank(c: char) -> bool {
     c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
 }
 
+/// D4 layer C (TICKET-169): every native method that mutates its receiver in place, enumerated from
+/// every `core_method`/`bytearray_method` arm that `get_mut`s the receiver. A new mutating native
+/// must be added here (and to the `every_mutating_native_faults_on_a_task_copy` test row), or its
+/// write to an airlock copy is silently lost again. The checker's `mutates_receiver`
+/// (`src/checker/mod.rs`) is a narrower list (misses `Map::merge`, `bytearray::extend`, the index
+/// stores) — that gate is for the W8-3 warning, not this fault.
+fn is_mutating_native(obj: &Obj, method: &str) -> bool {
+    match obj {
+        Obj::List(_) => matches!(
+            method,
+            "push"
+                | "pop"
+                | "reverse"
+                | "sort"
+                | "sort_by"
+                | "sort_by_key"
+                | "extend"
+                | "insert"
+                | "remove_at"
+        ),
+        Obj::Map(_) => matches!(method, "remove" | "merge" | "update"),
+        Obj::Set(_) => matches!(method, "add" | "remove"),
+        Obj::ByteArray(_) => matches!(method, "push" | "pop" | "extend"),
+        _ => false,
+    }
+}
+
 impl Vm {
     pub(super) fn do_call(&mut self, argc: usize, span: Span) -> Result<(), RuntimeError> {
         let at = self.stack.len() - argc;
@@ -1206,6 +1233,10 @@ impl Vm {
                 span,
             ));
         };
+        // D4 layer C (TICKET-169): a mutating native call on an airlock copy is a lost write.
+        if self.heap.is_copied(h) && is_mutating_native(self.heap.get(h), method) {
+            return Err(self.copied_write_err(None, span));
+        }
         // M19 Phase 6 / N-way poly — method-call inline-cache fast path (struct methods only). Scan
         // the site's ways for a way whose cached `tid` matches the receiver layout: a hit collapses the
         // `program.structs` clone + name-keyed `def.methods` probe to a short int-compare scan AND

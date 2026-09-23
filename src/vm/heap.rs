@@ -490,6 +490,13 @@ pub struct Heap {
     /// test-and-set also touches a compact word rather than a scattered slot byte). Post-sweep
     /// invariant: all bits 0 (survivors cleared, holes never marked).
     marks: Vec<u64>,
+    /// D4 layer C (TICKET-169): a side bitset marking a heap object as an airlock COPY (a spawned
+    /// task's captures/args/receiver, its module-global snapshot, or a crossing closure's
+    /// captures). Set only in `Sched::from_wire_memo`/`replay_snap` under `Vm::copy_mark`. Never
+    /// grown eagerly — `any_copied` lets a heap that holds no copy (the main task, in every bench)
+    /// skip straight past the bit test.
+    copied: Vec<u64>,
+    any_copied: bool,
     free: Vec<u32>,
     /// Live (allocated, not freed) object count.
     live: usize,
@@ -574,6 +581,8 @@ impl Default for Heap {
         Heap {
             slots: Vec::new(),
             marks: Vec::new(),
+            copied: Vec::new(),
+            any_copied: false,
             free: Vec::new(),
             live: 0,
             since_gc: 0,
@@ -616,6 +625,38 @@ impl Heap {
         }
     }
 
+    /// Mark `h` as an airlock copy (D4 layer C, TICKET-169). Grows `copied` in lockstep, same
+    /// pattern as `marks`.
+    pub fn set_copied(&mut self, h: GcRef) {
+        let i = h.0 as usize;
+        while self.copied.len() <= i >> 6 {
+            self.copied.push(0);
+        }
+        self.copied[i >> 6] |= 1u64 << (i & 63);
+        self.any_copied = true;
+    }
+
+    /// Test whether `h` is an airlock copy. `any_copied` makes this one predictable branch on a
+    /// heap that has never marked anything (the main task in every bench).
+    #[inline]
+    pub fn is_copied(&self, h: GcRef) -> bool {
+        let i = h.0 as usize;
+        self.any_copied
+            && self
+                .copied
+                .get(i >> 6)
+                .is_some_and(|w| (w >> (i & 63)) & 1 == 1)
+    }
+
+    /// Clear the copied bit for slot `i` (no-op if the word is absent) — a freed or reused slot
+    /// must not inherit a stale mark.
+    #[inline]
+    fn clear_copied(&mut self, i: usize) {
+        if let Some(w) = self.copied.get_mut(i >> 6) {
+            *w &= !(1u64 << (i & 63));
+        }
+    }
+
     /// Allocate an object, returning its handle. Reuses a free slot when available.
     pub fn alloc(&mut self, obj: Obj) -> GcRef {
         self.live += 1;
@@ -630,6 +671,7 @@ impl Heap {
         if let Some(idx) = self.free.pop() {
             self.slots[idx as usize].obj = Some(obj);
             self.clear_mark(idx as usize); // defensive: already 0 post-sweep (matches old mark=false)
+            self.clear_copied(idx as usize); // a reused slot must not inherit a stale copy mark
             GcRef(idx)
         } else {
             let idx = self.slots.len() as u32;
@@ -944,6 +986,7 @@ impl Heap {
                     self.slots[idx].obj = None;
                     self.free.push(idx as u32);
                     self.err_spans.remove(&(idx as u32));
+                    self.clear_copied(idx);
                     self.live -= 1;
                 }
             }
@@ -1249,6 +1292,30 @@ mod iter_obj_tests {
     #[test]
     fn slot_element_is_64b() {
         assert_eq!(std::mem::size_of::<Slot>(), 64);
+    }
+
+    /// D4 layer C (TICKET-169): the copy mark is per-slot and cleared when the slot is reused.
+    #[test]
+    fn copied_bit_is_per_slot_and_cleared_on_reuse() {
+        let mut heap = Heap::new();
+        let a = heap.alloc(Obj::List(Vec::new()));
+        let b = heap.alloc(Obj::List(Vec::new()));
+        heap.set_copied(a);
+        assert!(heap.is_copied(a));
+        assert!(!heap.is_copied(b));
+        // Neither GC-marked: sweep frees both. `free` is LIFO (pushed in index order 0,1), so the
+        // first re-alloc reuses `b`'s slot and the second reuses `a`'s — the one that was marked.
+        heap.sweep();
+        let _reuse_b = heap.alloc(Obj::List(Vec::new()));
+        let c = heap.alloc(Obj::List(Vec::new()));
+        assert_eq!(
+            c, a,
+            "the freed slot must be reused for this test to prove anything"
+        );
+        assert!(
+            !heap.is_copied(c),
+            "a reused slot must not inherit the prior copy mark"
+        );
     }
 
     /// M19 lever #1: inline struct fields. `Fields` must fit in ≤32B (`[Value;3]`=24B + len:u8 + the

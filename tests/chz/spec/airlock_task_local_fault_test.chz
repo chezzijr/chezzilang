@@ -162,14 +162,14 @@ fn counter_field_set(c: Counter):
     c.n = 2
 
 test fn every_mutating_native_faults_on_a_task_copy():
+    xs := [1, 2, 3]
+    m := {"a": 1}
+    s := Set([1, 2])
+    b := bytearray([1, 2])
+    c2 := Counter(1)
     r := Channel[str](1)
     parallel:
         spawn:
-            xs := [1, 2, 3]
-            m := {"a": 1}
-            s := Set([1, 2])
-            b := bytearray([1, 2])
-            c2 := Counter(1)
             ok := true
             if not faults(fn(): xs.push(9)): ok = false
             if not faults(fn(): xs.pop()): ok = false

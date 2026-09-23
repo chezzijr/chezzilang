@@ -407,6 +407,9 @@ impl Vm {
             && matches!(self.heap.get(lh), Obj::List(_))
             && matches!(self.heap.get(rh), Obj::List(_))
         {
+            // D4 layer C (TICKET-169): `xs += ys` extends `xs` in place (DEC-015), so it is a write
+            // site like any other mutating method.
+            self.check_copied_write(lh, span)?;
             // Snapshot the right side's elements FIRST so `xs += xs` (self-extend) terminates,
             // mirroring `extend`'s comment (src/vm/call.rs).
             let Obj::List(right) = self.heap.get(rh) else {

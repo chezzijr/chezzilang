@@ -142,6 +142,7 @@ impl Vm {
             poll_park: None,
             pending_connect: None,
             wire_backref_missing: false, // W7-11
+            copy_mark: false,
             poll_timed_out: false,
             poll_deadline: None,
             poll_partial: None,
@@ -2163,6 +2164,21 @@ impl Vm {
             Op::SetGlobalSlot(slot) => {
                 let v = self.pop();
                 let home = self.frames.last().unwrap().home;
+                // D4 layer C (TICKET-169): a spawned task's write to its module-global copy is a
+                // fault, never a silent lost write (owner decision D4 supersedes DEC-137's write
+                // half). The root task (`module_snapshot.is_none()`) writes its globals freely.
+                if self.module_snapshot.is_some() {
+                    self.ensure_module_faulted(home);
+                    let name = match self.heap.get(home) {
+                        Obj::Module(m) => m
+                            .index
+                            .iter()
+                            .find(|&(_, &i)| i == *slot)
+                            .map(|(n, _)| n.to_string()),
+                        _ => None,
+                    };
+                    return Err(self.copied_write_err(name.as_deref(), span));
+                }
                 self.set_global_slot(home, *slot, v);
             }
             Op::GetCaptured(slot) => {
@@ -2453,6 +2469,11 @@ impl Vm {
                 let Some(h) = ch.as_obj() else {
                     unreachable!("CellStore on a non-handle value");
                 };
+                // D4 layer C (TICKET-169): a captured local reassigned inside a spawned task is a
+                // fault, never a silent lost write.
+                if self.heap.is_copied(h) {
+                    return Err(self.copied_write_err(None, span));
+                }
                 if let Obj::Cell(slot) = self.heap.get_mut(h) {
                     *slot = v;
                 } else {

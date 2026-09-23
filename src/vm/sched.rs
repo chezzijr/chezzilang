@@ -4313,7 +4313,13 @@ impl Vm {
             WireValue::Bytes(b) => Value::obj(self.heap.alloc(Obj::Bytes(b))),
             // Rebuild a FRESH, independent heap `bytearray` from the owned raw bytes (deep copy across
             // the airlock, like `list`) — the other side never shares this VM's buffer.
-            WireValue::ByteArray(b) => Value::obj(self.heap.alloc(Obj::ByteArray(b.into_vec()))),
+            WireValue::ByteArray(b) => {
+                let h = self.heap.alloc(Obj::ByteArray(b.into_vec()));
+                if self.copy_mark {
+                    self.heap.set_copied(h);
+                }
+                Value::obj(h)
+            }
             WireValue::Handle(h) => Value::obj(h),
             // B3.1: rebuild a fresh heap handle onto the SAME shared core (`Arc` already cloned in
             // `to_wire`). Not registered in `self.executors` — the original `NewExecutor` handle there
@@ -4359,9 +4365,15 @@ impl Vm {
                 if let Some(h) = self.adopt_node(id) {
                     rebuild.insert(id, h);
                     self.rebuild_items(items, rebuild, |x| x);
+                    if self.copy_mark {
+                        self.heap.set_copied(h);
+                    }
                     return Value::obj(h);
                 }
                 let h = self.heap.alloc(Obj::List(Vec::new()));
+                if self.copy_mark {
+                    self.heap.set_copied(h);
+                }
                 rebuild.insert(id, h);
                 let cloned = self.rebuild_items(items, rebuild, |x| x);
                 *self.heap.get_mut(h) = Obj::List(cloned);
@@ -4404,9 +4416,15 @@ impl Vm {
                         self.from_wire_memo(k, rebuild);
                         self.from_wire_memo(val, rebuild);
                     }
+                    if self.copy_mark {
+                        self.heap.set_copied(h);
+                    }
                     return Value::obj(h);
                 }
                 let h = self.heap.alloc(Obj::Map(MapData::default()));
+                if self.copy_mark {
+                    self.heap.set_copied(h);
+                }
                 rebuild.insert(id, h);
                 // Reconstruction reuses the CARRIED hash (`push(hash, …)`) — never re-hashes a
                 // (possibly cyclic) key, and keeps iteration order + index byte-identical.
@@ -4425,9 +4443,15 @@ impl Vm {
                     for (_, e) in entries {
                         self.from_wire_memo(e, rebuild);
                     }
+                    if self.copy_mark {
+                        self.heap.set_copied(h);
+                    }
                     return Value::obj(h);
                 }
                 let h = self.heap.alloc(Obj::Set(SetData::default()));
+                if self.copy_mark {
+                    self.heap.set_copied(h);
+                }
                 rebuild.insert(id, h);
                 let mut out = SetData::default();
                 for (hash, e) in entries {
@@ -4441,6 +4465,9 @@ impl Vm {
                 if let Some(h) = self.adopt_node(id) {
                     rebuild.insert(id, h);
                     self.rebuild_items(fields, rebuild, |(_, val)| val);
+                    if self.copy_mark {
+                        self.heap.set_copied(h);
+                    }
                     return Value::obj(h);
                 }
                 // Positional layout: the wire fields arrive in declaration order (to_wire emits
@@ -4450,6 +4477,9 @@ impl Vm {
                     tid,
                     fields: Fields::from_vec(Vec::new()),
                 });
+                if self.copy_mark {
+                    self.heap.set_copied(h);
+                }
                 rebuild.insert(id, h);
                 let cloned = self.rebuild_items(fields, rebuild, |(_, val)| val);
                 match self.heap.get_mut(h) {
@@ -4542,6 +4572,9 @@ impl Vm {
                     return Value::obj(prev);
                 }
                 let h = self.heap.alloc(Obj::Cell(Value::nil()));
+                if self.copy_mark {
+                    self.heap.set_copied(h);
+                }
                 rebuild.insert(id, h);
                 let inner = self.from_wire_memo(*inner, rebuild);
                 *self.heap.get_mut(h) = Obj::Cell(inner);
@@ -4572,7 +4605,12 @@ impl Vm {
                 rebuild.insert(id, h);
                 // Lever #3: rebuild positionally — push values in wire (slot) order, discard the
                 // carried names (they live in `proto.capture_names`). `to_wire` emits in slot order.
+                // D4 layer C: a crossing closure's captures are ALWAYS marked as copies, even when
+                // the closure itself crosses outside a `copy_mark` walk (e.g. over a Channel).
+                let saved_copy_mark = self.copy_mark;
+                self.copy_mark = true;
                 let cap = self.rebuild_items(captured, rebuild, |(_k, w)| w);
+                self.copy_mark = saved_copy_mark;
                 // Owner decision D2 (TICKET-137): a crossing carries captures only. The closure's
                 // globals are whatever module copy the RUNNING task owns (`home` resolved above).
                 match self.heap.get_mut(h) {
@@ -5071,6 +5109,10 @@ impl Vm {
         } else {
             super::fxhash::FxHashMap::default()
         };
+        // D4 layer C (TICKET-169): everything this call rebuilds — a spawned callee's captures, a
+        // `spawn f(args)`'s arguments, a `spawn obj.m()`'s receiver — is the task's airlock copy.
+        let saved_copy_mark = self.copy_mark;
+        self.copy_mark = true;
         let rb = &mut owned;
         let out = match lowered {
             Lowered::Closure {
@@ -5123,6 +5165,7 @@ impl Vm {
                 (ReadyCall::Method { recv, name, args }, span)
             }
         };
+        self.copy_mark = saved_copy_mark;
         // TICKET-111 — copy each adopt id's just-rebuilt handle into `snapshot_adopt`, so this task's
         // OWN module-global fault (`fault_module`) can adopt it as the global's object instead of
         // rebuilding a second copy. Must happen before the cell-only prune below (`owned` still holds
@@ -6265,10 +6308,15 @@ impl Vm {
         // any other path, and a `Channel` message's ids are a separate id space that must never be
         // checked against `snapshot_adopt` (gotcha 1).
         self.adopt_active = !self.snapshot_adopt.is_empty();
+        // D4 layer C (TICKET-169): this replay builds the task's OWN copy of the module's globals —
+        // every object it allocates gets the copy mark, so a later write to it faults.
+        let saved_copy_mark = self.copy_mark;
+        self.copy_mark = true;
         for (name, sv) in &snap.modules[idx].globals {
             let val = self.replay_snap(sv, &mut rb);
             self.module_define(module, name, val);
         }
+        self.copy_mark = saved_copy_mark;
         self.adopt_active = false;
         debug_assert!(
             !self.wire_backref_missing,
@@ -6337,10 +6385,14 @@ impl Vm {
             } => {
                 let whome = self.worker_home(*home);
                 // Lever #3: rebuild positionally (slot order), discarding the carried names.
+                // D4 layer C: a crossing closure's captures are always marked as copies.
+                let saved_copy_mark = self.copy_mark;
+                self.copy_mark = true;
                 let cap: Vec<Value> = captured
                     .iter()
                     .map(|(_k, cv)| self.replay_snap(cv, rb))
                     .collect();
+                self.copy_mark = saved_copy_mark;
                 Value::obj(self.heap.alloc(Obj::Closure {
                     proto: *proto,
                     captured: cap,
@@ -6371,7 +6423,11 @@ impl Vm {
             SnapValue::Cffi(c) => Value::obj(self.heap.alloc(Obj::Cffi(Arc::clone(c)))),
             SnapValue::List(xs) => {
                 let v = xs.iter().map(|x| self.replay_snap(x, rb)).collect();
-                Value::obj(self.heap.alloc(Obj::List(v)))
+                let h = self.heap.alloc(Obj::List(v));
+                if self.copy_mark {
+                    self.heap.set_copied(h);
+                }
+                Value::obj(h)
             }
             SnapValue::Iter { items, pos } => {
                 let v = items.iter().map(|x| self.replay_snap(x, rb)).collect();
@@ -6392,10 +6448,14 @@ impl Vm {
                     .map(|(_, fv)| self.replay_snap(fv, rb))
                     .collect();
                 let tid = self.struct_tid(name);
-                Value::obj(self.heap.alloc(Obj::Struct {
+                let h = self.heap.alloc(Obj::Struct {
                     tid,
                     fields: Fields::from_vec(f),
-                }))
+                });
+                if self.copy_mark {
+                    self.heap.set_copied(h);
+                }
+                Value::obj(h)
             }
             SnapValue::Enum {
                 variant_id,
@@ -6427,6 +6487,9 @@ impl Vm {
                 }
                 let h = self.heap.alloc(Obj::Cell(Value::nil()));
                 rb.insert(*id, h);
+                if self.copy_mark {
+                    self.heap.set_copied(h);
+                }
                 let inner = self.replay_snap(inner, rb);
                 *self.heap.get_mut(h) = Obj::Cell(inner);
                 Value::obj(h)
@@ -6446,7 +6509,11 @@ impl Vm {
                     let (ck, cv) = (self.replay_snap(k, rb), self.replay_snap(val, rb));
                     out.push(*hash, ck, cv);
                 }
-                Value::obj(self.heap.alloc(Obj::Map(out)))
+                let h = self.heap.alloc(Obj::Map(out));
+                if self.copy_mark {
+                    self.heap.set_copied(h);
+                }
+                Value::obj(h)
             }
             SnapValue::Set(entries) => {
                 let mut out = SetData::default();
@@ -6454,7 +6521,11 @@ impl Vm {
                     let ce = self.replay_snap(e, rb);
                     out.push(*hash, ce);
                 }
-                Value::obj(self.heap.alloc(Obj::Set(out)))
+                let h = self.heap.alloc(Obj::Set(out));
+                if self.copy_mark {
+                    self.heap.set_copied(h);
+                }
+                Value::obj(h)
             }
         }
     }
