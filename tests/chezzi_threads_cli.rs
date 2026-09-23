@@ -50,6 +50,13 @@ const MAX_CORES_AT_ONE_WORKER: f64 = 1.20;
 /// without averaging away a transient second runner.
 #[cfg(unix)]
 const SERIALIZATION_RUNS: usize = 3;
+/// Bound for a shape that must stay two-wide (not one-wide) at `CHEZZI_THREADS=2` and at the
+/// default (all-cores) count: a top-level `parallel:` body burning CPU alongside one spawned
+/// sibling. This pins ONLY that shape — it does NOT claim the N-runner contract holds at T>=2 in
+/// general. `docs/gaps.md` W15-9 is the open counter-example: a body that blocks once then burns
+/// runs n+1 runners once T>=2 helpers are involved.
+#[cfg(unix)]
+const MAX_CORES_FOR_TWO_RUNNERS: f64 = 2.40;
 
 /// Run `chezzi test <path>`, optionally forcing `CHEZZI_THREADS`, with an optional `--timeout=N`ms
 /// bound (so a genuine "needs more workers than we gave it" hang can't wedge the test binary).
@@ -313,6 +320,357 @@ fn threads_one_serializes_a_cpu_bound_top_level_body_alongside_a_spawn() {
     }
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// W15-2 (TICKET-168) — the body doesn't only burn from the start: it can block on a channel recv
+/// first, then burn once unblocked, while two spawned siblings burn throughout. Measured on the
+/// debug binary at `CHEZZI_THREADS=1` on base: 152% CPU, past `MAX_CORES_AT_ONE_WORKER`.
+#[cfg(unix)]
+#[test]
+fn threads_one_serializes_a_top_level_body_that_burns_after_a_blocking_recv() {
+    let dir = std::env::temp_dir().join(format!("chz-w15-2-blocked-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+
+    let path_b = dir.join("blocked_then_burn.chz");
+    std::fs::write(
+        &path_b,
+        "fn burn(n: int) -> int:\n    \
+         x := 0\n    \
+         i := 0\n    \
+         while i < n:\n        \
+         x = x + i * i - i\n        \
+         i += 1\n    \
+         return x\n\
+         fn main():\n    \
+         go := Channel[int](1)\n    \
+         parallel:\n        \
+         spawn:\n            \
+         burn(50000)\n            \
+         go.send(1)\n        \
+         spawn: burn(750000)\n        \
+         spawn: burn(750000)\n        \
+         v := go.recv()\n        \
+         print(burn(750000) + v)\n\
+         main()\n",
+    )
+    .expect("write program");
+
+    for run in 0..SERIALIZATION_RUNS {
+        let (wall, user, sys, status, stdout) =
+            child_rusage::run_timed(&["run", path_b.to_str().unwrap()], "1");
+        assert!(
+            status.success(),
+            "chezzi run {path_b:?} failed (run {run}): {stdout}"
+        );
+        let cpu = user + sys;
+        assert!(
+            cpu > std::time::Duration::from_millis(500),
+            "program finished too fast (cpu={cpu:?}, run {run}) to be a meaningful measurement — \
+             recalibrate the burn size"
+        );
+        assert!(
+            cpu <= wall.mul_f64(MAX_CORES_AT_ONE_WORKER),
+            "--threads=1 must run at most one CPU runner when a top-level parallel: BODY blocks on \
+             a recv then burns CPU alongside spawned siblings (run {run}): cpu={cpu:?} wall={wall:?} \
+             (cpu must be <= wall * {MAX_CORES_AT_ONE_WORKER}). W15-2."
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// W15-2 (TICKET-168) — the triage shape must stay TWO-wide, not one-wide, once there are >= 2
+/// workers: at `CHEZZI_THREADS=2` and at the default (all-cores) count, the body-gate must be a
+/// no-op (`worker_count() != 1`). Pins ONLY this shape; `docs/gaps.md` W15-9 is the open
+/// counter-example at T>=2 for a body that blocks then burns.
+#[cfg(unix)]
+#[test]
+fn a_cpu_bound_top_level_body_alongside_a_spawn_stays_two_wide_at_two_workers_and_the_default() {
+    let dir = std::env::temp_dir().join(format!("chz-w15-2-twowide-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+
+    let burn = "fn burn(n: int) -> int:\n    \
+                 x := 0\n    \
+                 i := 0\n    \
+                 while i < n:\n        \
+                 x = x + i * i - i\n        \
+                 i += 1\n    \
+                 return x\n\n";
+
+    let path_b = dir.join("body_and_spawn.chz");
+    std::fs::write(
+        &path_b,
+        format!(
+            "{burn}fn main():\n    \
+             parallel:\n        \
+             spawn: burn(750000)\n        \
+             y := burn(750000)\n        \
+             print(y)\n\
+             main()\n"
+        ),
+    )
+    .expect("write program");
+
+    for threads in ["2", "0"] {
+        for run in 0..SERIALIZATION_RUNS {
+            let (wall, user, sys, status, stdout) =
+                child_rusage::run_timed(&["run", path_b.to_str().unwrap()], threads);
+            assert!(
+                status.success(),
+                "chezzi run {path_b:?} failed at CHEZZI_THREADS={threads} (run {run}): {stdout}"
+            );
+            let cpu = user + sys;
+            assert!(
+                cpu > std::time::Duration::from_millis(500),
+                "program finished too fast (cpu={cpu:?}, threads={threads}, run {run}) to be a \
+                 meaningful measurement — recalibrate the burn size"
+            );
+            assert!(
+                cpu <= wall.mul_f64(MAX_CORES_FOR_TWO_RUNNERS),
+                "at CHEZZI_THREADS={threads} the top-level body and its spawned sibling must stay \
+                 at most two CPU runners (run {run}): cpu={cpu:?} wall={wall:?} (cpu must be <= \
+                 wall * {MAX_CORES_FOR_TWO_RUNNERS})."
+            );
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+const BODY_BP_BLOCKING: &str = "fn burn(n: int) -> int:
+    x := 0
+    i := 0
+    while i < n:
+        x = x + i * i - i
+        i += 1
+    return x
+import std.fs
+fn main():
+    ch := Channel[int]()
+    parallel:
+        spawn:
+            burn(200000)
+            ch.send(1)
+        e := fs.exists(\"/tmp\")
+        print(\"fs {e} {ch.recv()}\")
+main()
+";
+
+const BODY_BP_ESCAPE: &str = "fn burn(n: int) -> int:
+    x := 0
+    i := 0
+    while i < n:
+        x = x + i * i - i
+        i += 1
+    return x
+fn f() -> int:
+    ch := Channel[int]()
+    parallel:
+        spawn: ch.send(burn(100000))
+        return 5
+    return 0
+fn main():
+    print(\"escape {f()}\")
+main()
+";
+
+const BODY_BP_HOF: &str = "fn burn(n: int) -> int:
+    x := 0
+    i := 0
+    while i < n:
+        x = x + i * i - i
+        i += 1
+    return x
+import std.concurrency
+fn main():
+    flag := AtomicInt(0)
+    parallel:
+        spawn:
+            burn(200000)
+            flag.store(1)
+        _xs := range(0, 2000000).map(fn(i: int) -> int: flag.load()).filter(fn(v: int) -> bool: v == 1)
+        print(\"hof done\")
+main()
+";
+
+const BODY_BP_NESTED: &str = "fn burn(n: int) -> int:
+    x := 0
+    i := 0
+    while i < n:
+        x = x + i * i - i
+        i += 1
+    return x
+fn main():
+    ch := Channel[int]()
+    parallel:
+        spawn:
+            burn(200000)
+            ch.send(3)
+        parallel:
+            spawn: print(\"inner {ch.recv()}\")
+    print(\"nested ok\")
+main()
+";
+
+const BODY_BP_NET: &str = "fn burn(n: int) -> int:
+    x := 0
+    i := 0
+    while i < n:
+        x = x + i * i - i
+        i += 1
+    return x
+import std.net
+fn main() -> Result[int]:
+    ln := net.listen(\"127.0.0.1:0\")?
+    addr := ln.addr()?
+    parallel:
+        spawn:
+            burn(200000)
+            _c := net.connect(addr)
+        peer := ln.accept()?
+        print(\"accepted\")
+    return Ok(0)
+_ := main()
+";
+
+const BODY_BP_RECV: &str = "fn burn(n: int) -> int:
+    x := 0
+    i := 0
+    while i < n:
+        x = x + i * i - i
+        i += 1
+    return x
+fn main():
+    ch := Channel[int]()
+    parallel:
+        spawn:
+            burn(200000)
+            ch.send(7)
+        print(\"recv {ch.recv()}\")
+main()
+";
+
+const BODY_BP_SEND: &str = "fn burn(n: int) -> int:
+    x := 0
+    i := 0
+    while i < n:
+        x = x + i * i - i
+        i += 1
+    return x
+fn main():
+    ch := Channel[int](1)
+    parallel:
+        spawn:
+            burn(200000)
+            for _ in range(3):
+                ch.recv()
+        for i in range(3):
+            ch.send(i)
+        print(\"send ok\")
+main()
+";
+
+const BODY_BP_SHARED: &str = "import std.concurrency
+fn burn(n: int) -> int:
+    x := 0
+    i := 0
+    while i < n:
+        x = x + i * i - i
+        i += 1
+    return x
+fn hold(go: Channel[int], v: int) -> int:
+    go.send(1)
+    burn(200000)
+    return v + 1
+fn main():
+    box := Shared(0)
+    go := Channel[int]()
+    parallel:
+        spawn:
+            box.update(fn(v: int) -> int: hold(go, v))
+        go.recv()
+        box.update(fn(v: int) -> int: v + 10)
+    print(\"shared {box.get()}\")
+main()
+";
+
+const BODY_BP_SLEEP: &str = "fn burn(n: int) -> int:
+    x := 0
+    i := 0
+    while i < n:
+        x = x + i * i - i
+        i += 1
+    return x
+import std.time
+import std.concurrency
+fn main():
+    flag := AtomicInt(0)
+    parallel:
+        spawn:
+            burn(20000)
+            flag.store(1)
+        time.sleep_ms(1500)
+        print(\"sleep flag {flag.load()}\")
+main()
+";
+
+const BODY_BP_SPIN: &str = "fn burn(n: int) -> int:
+    x := 0
+    i := 0
+    while i < n:
+        x = x + i * i - i
+        i += 1
+    return x
+import std.concurrency
+fn main():
+    flag := AtomicInt(0)
+    parallel:
+        spawn:
+            burn(200000)
+            flag.store(1)
+        n := 0
+        while flag.load() == 0:
+            n += 1
+        print(\"spin saw it\")
+main()
+";
+
+const BODY_BP_WAIT: &str = "fn burn(n: int) -> int:
+    x := 0
+    i := 0
+    while i < n:
+        x = x + i * i - i
+        i += 1
+    return x
+fn main():
+    a := Channel[int]()
+    b := Channel[int]()
+    parallel:
+        spawn:
+            burn(200000)
+            b.send(2)
+        wait:
+            v := a.recv(): print(\"a {v}\")
+            v := b.recv(): print(\"wait b {v}\")
+main()
+";
+
+/// W15-2 (TICKET-168) — every in-place wait a top-level body can sit in while gated must release
+/// its width permit, or the body hangs at `CHEZZI_THREADS=1` once the body holds the only permit.
+/// One probe per blocking-point class found in `## Digest`'s enumeration.
+#[test]
+fn threads_one_top_level_body_blocking_points_release_the_permit() {
+    assert_clean_sampled_at_thread_one("bp_blocking.chz", BODY_BP_BLOCKING, "fs true 1\n");
+    assert_clean_sampled_at_thread_one("bp_escape.chz", BODY_BP_ESCAPE, "escape 5\n");
+    assert_clean_sampled_at_thread_one("bp_hof.chz", BODY_BP_HOF, "hof done\n");
+    assert_clean_sampled_at_thread_one("bp_nested.chz", BODY_BP_NESTED, "inner 3\nnested ok\n");
+    assert_clean_sampled_at_thread_one("bp_net.chz", BODY_BP_NET, "accepted\n");
+    assert_clean_sampled_at_thread_one("bp_recv.chz", BODY_BP_RECV, "recv 7\n");
+    assert_clean_sampled_at_thread_one("bp_send.chz", BODY_BP_SEND, "send ok\n");
+    assert_clean_sampled_at_thread_one("bp_shared.chz", BODY_BP_SHARED, "shared 11\n");
+    assert_clean_sampled_at_thread_one("bp_sleep.chz", BODY_BP_SLEEP, "sleep flag 1\n");
+    assert_clean_sampled_at_thread_one("bp_spin.chz", BODY_BP_SPIN, "spin saw it\n");
+    assert_clean_sampled_at_thread_one("bp_wait.chz", BODY_BP_WAIT, "wait b 2\n");
 }
 
 /// TICKET-141 (W14-14) — guards the handoff for a CPU loop preempted INSIDE a native callback: the

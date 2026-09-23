@@ -1,0 +1,15 @@
+fn burn(n: int) -> int:
+    s := 0
+    for _ in range(n / 5000000):
+        for i in range(5000000):
+            s = s + i % 7
+    return s
+fn main():
+    ch := Channel[int](1)
+    parallel:
+        spawn:
+            ch.send(burn(30000000))
+        x := burn(30000000)
+        print(x)
+    print(ch.recv())
+main()
