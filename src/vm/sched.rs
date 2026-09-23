@@ -3705,6 +3705,7 @@ impl Vm {
                             proto: *proto,
                             captured: wcap,
                             home: self.home_index(*home),
+                            origin_heap: self.heap.id(),
                         }
                     }
                 }
@@ -4594,6 +4595,7 @@ impl Vm {
                 proto,
                 captured,
                 home,
+                origin_heap,
             } => {
                 let home = self.worker_home(home);
                 let n = captured.len();
@@ -4605,10 +4607,18 @@ impl Vm {
                 rebuild.insert(id, h);
                 // Lever #3: rebuild positionally — push values in wire (slot) order, discard the
                 // carried names (they live in `proto.capture_names`). `to_wire` emits in slot order.
-                // D4 layer C: a crossing closure's captures are ALWAYS marked as copies, even when
-                // the closure itself crosses outside a `copy_mark` walk (e.g. over a Channel).
+                // D4 layer C (owner ruling 2026-09-23): a crossing closure's captures are marked as
+                // copies UNLESS this reconstruction lands back in the exact heap it serialized out
+                // of — a same-task `Channel`/`Shared` round-trip, which the value never actually
+                // left (W7-4c: the round-trip preserves one binding, and D4 only faults a write a
+                // DIFFERENT task can no longer see). A genuine cross-task crossing (`origin_heap`
+                // differs from this heap's own id) still forces the mark, even when the closure
+                // itself crosses outside an ambient `copy_mark` walk (e.g. over a Channel to
+                // another task).
                 let saved_copy_mark = self.copy_mark;
-                self.copy_mark = true;
+                if origin_heap != self.heap.id() {
+                    self.copy_mark = true;
+                }
                 let cap = self.rebuild_items(captured, rebuild, |(_k, w)| w);
                 self.copy_mark = saved_copy_mark;
                 // Owner decision D2 (TICKET-137): a crossing carries captures only. The closure's

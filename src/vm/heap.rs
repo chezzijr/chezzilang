@@ -497,6 +497,12 @@ pub struct Heap {
     /// skip straight past the bit test.
     copied: Vec<u64>,
     any_copied: bool,
+    /// A per-heap identity, assigned once at construction from a process-wide counter. Lets
+    /// `Sched::from_wire_memo`'s `Closure` arm tell a same-task `Channel`/`Shared` round-trip
+    /// (the value never actually left this heap) from a genuine cross-task crossing (the D4
+    /// layer-C ruling, TICKET-169 thread 2026-09-23): compare a `WireValue::Closure`'s stamped
+    /// `origin_heap` against this heap's own id.
+    heap_id: u64,
     free: Vec<u32>,
     /// Live (allocated, not freed) object count.
     live: usize,
@@ -576,6 +582,9 @@ pub struct Heap {
     err_spans: FxHashMap<u32, Span>,
 }
 
+/// Process-wide source for [`Heap::heap_id`] — one fresh id per `Heap::default()`, never reused.
+static NEXT_HEAP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 impl Default for Heap {
     fn default() -> Self {
         Heap {
@@ -583,6 +592,7 @@ impl Default for Heap {
             marks: Vec::new(),
             copied: Vec::new(),
             any_copied: false,
+            heap_id: NEXT_HEAP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             free: Vec::new(),
             live: 0,
             since_gc: 0,
@@ -646,6 +656,13 @@ impl Heap {
                 .copied
                 .get(i >> 6)
                 .is_some_and(|w| (w >> (i & 63)) & 1 == 1)
+    }
+
+    /// This heap's identity, stamped once at construction. Never reused — a fresh `Heap::default()`
+    /// (one per task) always gets a fresh id, even after the process has torn down other heaps.
+    #[inline]
+    pub fn id(&self) -> u64 {
+        self.heap_id
     }
 
     /// Clear the copied bit for slot `i` (no-op if the word is absent) — a freed or reused slot

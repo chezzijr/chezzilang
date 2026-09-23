@@ -73,10 +73,10 @@ fn _w74gen() -> Iterator[int]:
     yield 2
 
 # Headline repro — no concurrency at all, just a Channel round-trip inside one task.
-# TICKET-169 (D4 layer C, Decisions item 3): a crossing closure's captures are ALWAYS marked as an
-# airlock copy, even when the closure crosses back into the SAME task (a plain Channel/Shared
-# round-trip, not a spawn) — so a write through the received closure now faults instead of sharing
-# the cell. Reading through it (`get()`) is unaffected.
+# Owner ruling 2026-09-23 (TICKET-169 thread): a same-task Channel round-trip is NOT a D4
+# crossing — the value never leaves this task, so its cell is preserved (W7-4c) and a write
+# through the received closure stays silent, exactly as on `main`. D4 only faults a write a
+# DIFFERENT task can no longer see (see `channel_send_to_a_different_task_faults` below).
 test fn channel_send_keeps_one_binding():
     c := make()
     c.inc()
@@ -84,24 +84,22 @@ test fn channel_send_keeps_one_binding():
     ch := Channel[Ctr](1)
     ch.send(c)
     d := ch.recv()
-    res := recover:
-        d.inc()
-    match res:
-        Ok(_): assert false, "expected a fault: d's captures crossed the airlock and are marked"
-        Err(e): assert e.message().starts_with("this value is this task's copy:"), e.message()
+    d.inc()
+    assert d.get() == 2
 
 # The pair reached through a STRUCT FIELD after crossing (same cell, two field-held closures).
+# Same-task round-trip — see the owner ruling above `channel_send_keeps_one_binding`.
 test fn struct_field_keeps_one_binding():
     ch := Channel[Ctr](1)
     ch.send(make())
     d := ch.recv()
-    res := recover:
-        d.inc()
-    match res:
-        Ok(_): assert false, "expected a fault: d's captures crossed the airlock and are marked"
-        Err(e): assert e.message().starts_with("this value is this task's copy:"), e.message()
+    d.inc()
+    d.inc()
+    d.inc()
+    assert d.get() == 3
 
 # A cursor snapshot carrying both closures — the `Obj::Iter` airlock arm.
+# Same-task round-trip — see the owner ruling above `channel_send_keeps_one_binding`.
 test fn cursor_keeps_one_binding():
     c := make()
     # `inc` returns nil, so wrap it to keep the cursor homogeneous (`fn() -> int`).
@@ -113,22 +111,37 @@ test fn cursor_keeps_one_binding():
     fs: List[fn() -> int] = []
     for f in ch.recv():
         fs.push(f)
-    res := recover:
-        fs[0]()
-    match res:
-        Ok(_): assert false, "expected a fault: bump's capture crossed the airlock and is marked"
-        Err(e): assert e.message().starts_with("this value is this task's copy:"), e.message()
-    assert fs[1]() == 0
+    fs[0]()
+    fs[0]()
+    assert fs[1]() == 2
 
 # A `Shared` box is a cross-heap VALUE STORE (its own airlock arm).
+# Same-task round-trip — see the owner ruling above `channel_send_keeps_one_binding`.
 test fn shared_keeps_one_binding():
     box := Shared(make())
     d := box.get()
-    res := recover:
-        d.inc()
-    match res:
-        Ok(_): assert false, "expected a fault: d's captures crossed the airlock and are marked"
-        Err(e): assert e.message().starts_with("this value is this task's copy:"), e.message()
+    d.inc()
+    d.inc()
+    assert d.get() == 2
+
+# D4 layer C, the genuine cross-task counterpart: the closure crosses INTO a different task's
+# heap (a real airlock copy), so the receiving task's write is lost at the join and must fault
+# instead — the owner ruling above distinguishes this from a same-task round-trip.
+test fn channel_send_to_a_different_task_faults():
+    c := make()
+    ch := Channel[Ctr](1)
+    done := Channel[str](1)
+    parallel:
+        spawn:
+            d := ch.recv()
+            res := recover:
+                d.inc()
+            match res:
+                Ok(_): done.send("no-fault")
+                Err(e): done.send(e.message())
+        ch.send(c)
+    msg := done.recv()
+    assert msg.starts_with("this value is this task's copy:"), msg
 
 # `spawn f(g, h)` — two closures arriving as two SEPARATE spawn args. TICKET-169: the task's write
 # through either now faults (its captures crossed the airlock and are marked), so the shared-binding
@@ -258,16 +271,10 @@ test fn module_global_plus_local_capture_shares_its_binding():
 # view (`for_each`/`fold`) now takes one snapshot under one map, so siblings share within one walk
 # (CPython 3.14.7 and Go 1.27 both fold to 2; TICKET-154). Two `at()` calls are two crossings and can
 # never share, and `slice` — one call returning a container — shares within itself.
-# TICKET-169 (D4 layer C): every one of these views crosses the airlock, so `inc`'s capture is
-# ALWAYS marked and a call through it now faults; `get`'s reads are unaffected. `call_or_fault`
-# turns that into a value (-1 on fault) so it can sit inside a single-expression closure body.
-fn call_or_fault(f: fn() -> int) -> int:
-    r := recover:
-        f()
-    match r:
-        Ok(v): return v
-        Err(_): return -1
-
+# Owner ruling 2026-09-23 (TICKET-169 thread): every one of these views is a same-task round-trip
+# (`RwShared.get`/`at`/`slice`/`for_each`/`fold` all run on the caller's own task), so per the D4
+# ruling above `channel_send_keeps_one_binding` none of them fault — silent and shared exactly as
+# on `main`.
 test fn rwshared_views_over_sibling_closures():
     n := 0
     fn inc() -> int:
@@ -276,34 +283,30 @@ test fn rwshared_views_over_sibling_closures():
     fn get() -> int:
         return n
     s := RwShared([inc, get])
-    both := s.get()          # whole container, one crossing → captures marked as a copy
-    assert call_or_fault(both[0]) == -1, "expected the inc copy to fault"
-    assert both[1]() == 0
+    both := s.get()          # whole container, one crossing → one binding
+    both[0]()
+    assert both[1]() == 1
     # per-element view → its own copy of the binding (`at` is the SAFE index: `Option[E]`)
     match s.at(1):
         Some(f): assert f() == 0
         None: assert false, "at(1) on a 2-element list must be Some"
     sl := s.slice(0, 2)      # one call, one container → shared within the slice
-    assert call_or_fault(sl[0]) == -1, "expected the inc copy to fault"
-    assert sl[1]() == 0
-    faulted := 0
+    sl[0]()
+    assert sl[1]() == 1
+    calls := 0
     fn tick(f: fn() -> int):
-        if call_or_fault(f) == -1:
-            faulted = faulted + 1
+        f()
+        calls = calls + 1
     s.for_each(tick)
-    assert faulted == 1, "expected exactly the inc copy to fault: {faulted}"
-    assert s.fold(0, fn(a: int, f: fn() -> int) -> int: a + call_or_fault(f)) == -1
+    assert calls == 2
+    # one walk, one shared map: the `inc` copy returns 1 and the `get` copy reads the SAME cell -> 1.
+    assert s.fold(0, fn(a: int, f: fn() -> int) -> int: a + f()) == 2
     m := RwShared({"i": inc, "g": get})
     assert m.has("i")
     match m.get_key("g"):
         Some(f): assert f() == 0
         None: assert false
-    m_faulted := 0
-    fn tick_entry(k: str, f: fn() -> int):
-        if call_or_fault(f) == -1:
-            m_faulted = m_faulted + 1
-    m.for_each_entry(tick_entry)
-    assert m_faulted == 1, "expected exactly the inc copy to fault: {m_faulted}"
+    m.for_each_entry(fn(k: str, f: fn() -> int): f())
     assert m.fold_entries(0, fn(a: int, k: str, f: fn() -> int) -> int: a + 1) == 2
     # (`contains` shares the code path but is unreachable with closures — a `fn` is not Hashable, so a
     # Set can never hold two sibling closures.)
