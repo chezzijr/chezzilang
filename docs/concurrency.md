@@ -1305,6 +1305,17 @@ inside a callback, so a runnable sibling runs while stdin is withheld, as under 
 > and the default is now at parity with the best setting. Full tables: `docs/benchmarks.md`
 > §"W8-7 / W8-8 idle-worker-policy fix".
 
+> **At `--threads=1`, a top-level `parallel:` body ALSO counts as a CPU runner (TICKET-168, W15-2,
+> fixed 2026-09-23).** Before this fix, a top-level body doing CPU work raced its own `chezzi-eager`
+> drainer — the two ran at once (196% measured), even though W8-8 had already made every OTHER T=1
+> shape correctly serial. The body and the drainer now share one width permit (`src/vm/width.rs`,
+> TICKET-141), so `--threads=1` runs at most one CPU runner including the main-thread body: fixed
+> measured 96% on the same shape, matching Go `GOMAXPROCS=1`'s 100%. This does NOT close the contract
+> everywhere: `docs/gaps.md` **W15-9** stays open for a body that blocks once then burns at T>=2 (n+1
+> runners, a separate cause — sentinel blocked-body helpers outliving the unblock). An `Executor` job
+> runs in its own `Vm` and is not covered by this gate at all. Full tables: `docs/benchmarks.md`
+> §TICKET-168.
+
 ### 6c'. `Channel.trip()` — the manual level-trigger latch
 
 `trip()` is the one native primitive `std.cancel` needs. It flips a permanent latch on a channel: the

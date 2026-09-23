@@ -2642,3 +2642,74 @@ as the `sched_seed::on()` gate (a cached `AtomicBool::load(Relaxed)`) is designe
 next session that runs `benches/run.chz`: prefer a SINGLE `hyperfine` invocation naming both binaries
 over separate sessions per binary — `hyperfine` interleaves samples and reports a direct ratio, so it
 is immune to the load drift a two-session comparison is not.
+
+---
+
+## TICKET-168 — W15-2: gate the T=1 top-level body against its `chezzi-eager` drainer (2026-09-23)
+
+`hyperfine` is not installed on this box, so `benches/run.chz` (which shells out to it) could not run
+this session; every number below is a direct `bash -c "time ..."` measurement instead, base vs. fixed
+built one after the other on the same idle-ish box (`uptime` load 2.2-3.3 throughout). Base is main
+`66646cf8` (source-identical to this ticket's own pre-fix commit `1f17a547`); fixed is this ticket's
+`fix(TICKET-168)` commit, both release binaries.
+
+**`examples/primes_parallel.chz`** (the W8-7/W8-8 shape) — confirms no regression at any worker count:
+
+| `--threads` | base real | base user | base sys | fixed real | fixed user | fixed sys |
+|---|---|---|---|---|---|---|
+| 1 | 29.347 | 29.752 | 0.725 | 30.391 | 30.870 | 0.626 |
+| 2 | 15.530 | 29.832 | 0.043 | 15.624 | 29.998 | 0.030 |
+| 4 | 10.052 | 30.592 | 0.003 | 10.196 | 31.174 | 0.007 |
+| 0 (default) | 10.616 | 32.538 | 0.007 | 10.601 | 32.001 | 0.010 |
+
+Every column matches base within a few percent (run-to-run noise on this box). `sys` stays at the
+W8-7 fix's shape (≤1 s at every count) — the body/drainer permit share does not reintroduce the idle-
+worker thrash. T=1's `real ≈ user` (both binaries) is the ordinary 1.00-core serial signature; it is
+unaffected because this program has no top-level CPU work racing a spawn (all four tasks are spawned,
+none burns on the main-thread body), so `gate_body` has nothing to serialize here.
+
+**`benches/sched/body_and_spawn.chz`** (the `## Summary` program — a top-level body burning CPU
+alongside one spawned sibling) — this is the shape the fix targets:
+
+| `--threads` | base real | base user | base cores | fixed real | fixed user | fixed cores |
+|---|---|---|---|---|---|---|
+| 1 | 6.909 | 13.505 | **1.96** | 19.652 | 18.784 | **0.96** |
+| 2 | 6.966 | 13.634 | 1.96 | 7.038 | 13.844 | 1.97 |
+| 0 (default) | 7.007 | 13.733 | 1.96 | 7.091 | 13.927 | 1.96 |
+
+T=1 is the whole point: base runs the body and the drainer at once (1.96 cores, matching the ticket's
+`## Summary` measurement of 196%), the fix serializes them to 0.96 cores — a real 1.00-core budget,
+not the phantom two W15-2 named. T=1's wall time roughly triples (6.9 s -> 19.7 s) because the work
+that used to run two-wide now genuinely runs one-wide; that is the fix working as intended, not a
+regression. T=2 and T=0 are unchanged (1.96-1.97 cores both binaries) — `gate_body` requires
+`worker_count() == 1`, so it is a no-op at every other count.
+
+**Go twin** (`benches/go/body_and_spawn.go`, `go build`, `GOMAXPROCS` swept) — the reference this
+fix now matches at T=1:
+
+| `GOMAXPROCS` | real | user | cores |
+|---|---|---|---|
+| 1 | 0.818 | 0.815 | **1.00** |
+| 2 | 0.429 | 0.803 | 1.87 |
+
+Go's `GOMAXPROCS=1` runs the identical shape (one goroutine burning on `main`, one spawned goroutine
+burning the same amount) at exactly 1.00 cores. Chezzi's fixed `--threads=1` (0.96 cores) now sits in
+the same band; base's 1.96 did not.
+
+**Schedutil frequency cost at T=1** (`## Decisions`'s note): one `taskset -c 0,14` run (SMT siblings)
+of the fixed binary at `--threads=1`: `real 13.805s user 13.598s sys 0.227s` — 13.6 s user against the
+unpinned 18.8 s user above, a ~28% cost from the `schedutil` governor clocking down two physical cores
+that each run half the time when the OS is free to migrate the serialized body across cores between
+its own thread and the drainer thread. This is a host power-management artifact, not an engine cost;
+it does not change the CPU-runner-count contract the fix is judged on.
+
+**tests/chz at T=1** (informational, not this ticket's gate): `CHEZZI_THREADS=1 chezzi test tests/chz`
+on the fixed release binary: `1122 test(s): 1120 passed, 2 failed, 0 errored`. Both failures are
+`nested_nursery_open_outer_body_test.chz`'s `fan_open`/`fan_flat` wall-clock-ratio assertions
+(`docs/gaps.md` W15-9's neighbour, `nested_nursery_fans_out_while_outer_body_is_open` and
+`flat_nursery_fans_out_while_body_is_blocked`). Confirmed PRE-EXISTING: the same two tests fail
+identically (3/3 runs, same ~1.65-1.8 s readings) on the base release binary at T=1 — the file's own
+header comment says its bound was "measured at CHEZZI_THREADS=2 and 8", never T=1, so this is an
+untested-at-T=1 shape, not a regression from this fix. `chz_suite` and
+`chz_suite_passes_at_a_second_worker_count` (the tickets's actual gates, default count and T=2) both
+pass clean.

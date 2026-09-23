@@ -7,13 +7,31 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-168 (2026-09-23) — W15-2: gate a T=1 top-level `parallel:` body against its own
+  `chezzi-eager` drainer.**
+  At `CHEZZI_THREADS=1` a top-level body burning CPU alongside a spawned sibling ran at ~196% CPU —
+  the main thread (the body) and the `chezzi-eager` drainer were two ungated runners, even though
+  W8-8 had already made every other T=1 shape correctly serial. `Vm::body_gate` now shares one
+  `src/vm/width.rs` permit between the two, gated only when `worker_count() == 1` and only for the
+  outermost eager nursery; `op_wait_poll`'s in-place wait (`src/vm/netio.rs`) needed its own
+  DEC-141 bracket or a body `wait:` hangs at T=1. Measured (release, `docs/benchmarks.md`
+  §TICKET-168): 196% → 96% CPU (Go `GOMAXPROCS=1` reference: 100%); a second shape (blocked-then-
+  burn) 152% → 99%; T=2/T=0 unchanged. Closes `docs/gaps.md` **W15-2**. Two shapes stay open by
+  owner decision: **W15-9** (a body that blocks once then burns runs n+1 runners at T>=2, a TICKET-159
+  blocked-helper-retirement gap) and **W15-10** (byte-for-byte T=1 seeded replay — two residual races
+  in the drainer's pick-then-acquire order and a woken body's queue timing). Tests:
+  `tests/chezzi_threads_cli.rs` (+4: the triage repro plus a blocked-then-burn repro, a T>=2/default
+  two-wide pin, and 11 blocking-point probes). Docs: `docs/gaps.md`, `docs/concurrency.md`,
+  `docs/bug-discovery.md`, `docs/future.md`, `docs/benchmarks.md`, `CLAUDE.md`,
+  `tests/sched_seed_cli.rs`.
+
 - **TICKET-167 (2026-09-23) — a seeded scheduler mode for the M:N engine, the last of `docs/future.md`
   §2b's four replacement oracles.**
   `CHEZZI_SCHED_SEED=<u64>` (`src/vm/sched_seed.rs`) drives every scheduler free choice — which
   runnable fiber a pop returns (`LocalQ::pop`, the three `global.pop_front()` sites), the
   step-0/`GLOBAL_CHECK_INTERVAL` cadence, `try_steal`'s start, `handoff_wake`'s `runnext` coin flip,
   the reds-refill count — from a seeded PRNG instead of OS timing. At `CHEZZI_THREADS=1` the same seed
-  replays the same schedule **at a measured rate**, not byte-for-byte (see the W15-2 limit below); at
+  replays the same schedule **at a measured rate**, not byte-for-byte (see the W15-10 limit below); at
   `CHEZZI_THREADS>=2` it also injects random yields/spins/sleeps at every sync point, widening real
   thread-timing race windows. Behind a cached `AtomicBool::load(Relaxed)` — unset cost is noise-level on
   all 11 `benches/run.chz` cases (`docs/benchmarks.md` "TICKET-167"). A `src/schedfuzz/` +
@@ -25,11 +43,13 @@ Single source of truth for "what am I doing next." Update after every work sessi
   it does not widen past it), misses the TICKET-128 mutation on release entirely (found only on
   debug). Its first corpus sweep found a genuine new race on `main`: **W15-3** (`docs/gaps.md`) — a
   `write` parked on a `Socket` that a racing `close()` should fault, and instead returns `Ok`; TICKET-166
-  covered the `Listener.accept()` case but not this one. **W15-2** (`docs/gaps.md`, found earlier the
-  same day): a top-level `parallel:`'s body runs on the main thread beside its unseeded
-  `chezzi-eager` drainer at `CHEZZI_THREADS=1`, so T=1 replay of a top-level fan-out holds only at a
-  measured rate (nested-in-`spawn:` fixture 144/160, flat fixture 86/160); fixing it is a separate
-  ticket. Tests: `tests/sched_seed_cli.rs` (5 interface/replay tests + 1 smoke gate, ~4s wall);
+  covered the `Listener.accept()` case but not this one. **W15-10** (`docs/gaps.md`, found 2026-09-23
+  under TICKET-168 once W15-2 — the top-level body racing its unseeded `chezzi-eager` drainer — was
+  fixed): T=1 replay of a top-level fan-out still holds only at a measured rate, not byte-for-byte
+  (nested-in-`spawn:` fixture 144/160 pre-fix, flat fixture 86/160 pre-fix / 58/160 post-fix), because
+  the drainer's pick still runs before its width-permit acquire and a woken body still queues only
+  once its own thread runs; fixing it is a separate ticket. Tests: `tests/sched_seed_cli.rs` (5
+  interface/replay tests + 1 smoke gate, ~4s wall);
   `tests/sched_seed/*.chz` fixtures. Docs: `docs/future.md` §2b (Scheduler-races row now BUILT),
   `docs/bug-discovery.md`, `CLAUDE.md`, `docs/benchmarks.md`, `docs/gaps.md`.
   **Follow-up (2026-09-23, owner review):** `corpus()`'s two-run unseeded baseline used to score
@@ -8846,7 +8866,7 @@ that no serious one is still turning up in the part of the engine the JIT compil
 |---|---|---|
 | 1 | The seeded scheduler oracle is built and has been shown to re-find reverted historical races (TICKET-167) | built, not yet judged — re-finds 2 of 3 reverted historical races (W15-1 at the default worker count only, W14-39 at T=1/T=2), the third (TICKET-128) is masked on release; whether that clears this condition is the owner's call, held pending the full sweep numbers; see `docs/bug-discovery.md` "Seeded scheduler oracle" |
 | 2 | **Two consecutive bug-hunt sweeps with zero new P0/P1 in the core**: lexer, parser, checker, compiler, VM exec/call/arith/stmt, scheduler, GC, value model | not started |
-| 3 | Every open P0/P1 ledger row is closed | not met — W15-3 (P1, net, found 2026-09-23 by the TICKET-167 sweep) is open; other open rows stay P2/record (W8-19, W12-5, W13-28, W15-2) |
+| 3 | Every open P0/P1 ledger row is closed | not met — W15-3 (P1, net, found 2026-09-23 by the TICKET-167 sweep) is open; other open rows stay P2/record (W8-19, W12-5, W13-28, W15-9, W15-10) |
 | 4 | Feature freeze during the window: no new language surface or std API unless it IS a sweep finding (e.g. a missing ancestor idiom), so the surface under test stops moving | starts now |
 
 Rules for counting:

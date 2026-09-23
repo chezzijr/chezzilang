@@ -673,12 +673,16 @@ panic, mark the whole target `UNSTABLE` and skip it rather than score it.
 CHEZZI_SCHED_SEED=12345 CHEZZI_THREADS=1 cargo run -- run <file>
 ```
 
-**Replay limit (measured 2026-09-22/23, release binary).** T=1 replay is a rate, not a guarantee, for
-two reasons. (1) A top-level `parallel:`'s body runs on the main thread beside its `chezzi-eager`
-drainer — an unseeded pair (W15-2) — so a fan-out NESTED inside one `spawn:` (fiber-owned, runs on the
-drainer alone) replays at a measured 144/160 (seeds 1-8 x 20 runs, per-seed minimum 16/20) against a
-FLAT top-level fan-out's 86/160. (2) Timers, sockets, blocking natives and eager-nursery programs are
-outside what the RNG stream covers at all — only the sync-point-gated fan-out fixtures are measured.
+**Replay limit (measured 2026-09-22/23, release binary; W15-2 fixed 2026-09-23, TICKET-168).** T=1
+replay is a rate, not a guarantee, for two reasons. (1) `docs/gaps.md` **W15-10**'s two residual
+races: the `chezzi-eager` drainer's `take_runnable` pick runs BEFORE its `width_acquire`, so a pick
+sees 1..4 injected fibers depending on OS timing, and a woken body only joins the permit queue once
+its own thread runs, so the drainer can re-take the permit first. (W15-2 — the top-level body and the
+drainer racing as two UNGATED CPU runners — is fixed; that fix raised, not lowered, this rate: a
+fan-out NESTED inside one `spawn:` replays at a measured 144/160 pre-fix (seeds 1-8 x 20 runs,
+per-seed minimum 16/20) against a FLAT top-level fan-out's 86/160 pre-fix, 58/160 post-fix on the same
+flat fixture.) (2) Timers, sockets, blocking natives and eager-nursery programs are outside what the
+RNG stream covers at all — only the sync-point-gated fan-out fixtures are measured.
 
 **Mutation-testing results, all release binary, `--seeds 1..257 --threads 1,2,0` (0 = default/28
 cores this box), full table + method: TICKET-167 `## Thread`.**
