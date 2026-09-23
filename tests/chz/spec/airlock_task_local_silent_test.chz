@@ -179,3 +179,31 @@ test fn a_copied_struct_set_index_writing_through_a_shared_field_is_silent():
                 Err(e): r.send(e.message())
     assert r.recv() == "no-fault"
     assert t.s.get() == 5
+
+# Memo-order pin (docs/concurrency.md ceiling 1), known under-fault: a tuple (xs, f), f capturing
+# xs, sent in ONE crossing over a Channel — xs is visited FIRST and stays unmarked, so f's own
+# capture aliases the unmarked xs and NEITHER f()'s push nor the direct write to the tuple's own
+# xs element faults. The mirror order (f, xs) faults both, pinned in
+# airlock_task_local_fault_test.chz's a_closure_visited_first_in_one_crossing_marks_the_shared_capture.
+test fn a_list_visited_first_in_one_crossing_leaves_the_shared_capture_unmarked():
+    xs := [1]
+    f := fn() -> nil: xs.push(2)
+    ch := Channel[(List[int], fn() -> nil)](1)
+    ch.send((xs, f))
+    r1 := Channel[str](1)
+    r2 := Channel[str](1)
+    parallel:
+        spawn:
+            p := ch.recv()
+            res1 := recover:
+                p.1()
+            match res1:
+                Ok(_): r1.send("no-fault")
+                Err(e): r1.send(e.message())
+            res2 := recover:
+                p.0.push(3)
+            match res2:
+                Ok(_): r2.send("no-fault")
+                Err(e): r2.send(e.message())
+    assert r1.recv() == "no-fault"
+    assert r2.recv() == "no-fault"

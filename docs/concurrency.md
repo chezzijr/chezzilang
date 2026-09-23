@@ -1565,15 +1565,19 @@ with a runtime fault, and TICKET-170 restores a compile-time diagnostic alongsid
 not universal — measured against the release binary, two shapes still lose the write silently, and a
 third once suspected to depend on send order does not:
 
-1. **Closure capture vs. a sibling reference — no order dependence.** A tuple `(xs, f)`, `f` capturing
-   `xs`, sent together in one crossing (over a `Channel`, to a different task): on the release binary,
-   `f()`'s own push FAULTS and a direct write to the tuple's own `xs` element stays silent, in BOTH
-   send orders — `(xs, f)` and `(f, xs)` give the identical split. The two do not alias after the
-   crossing (a write through one is not visible through the other, confirmed by reading each back), so
-   there is no memo-visit-order ceiling for this shape: a genuine cross-task closure crossing marks its
-   own captures unconditionally, and a value received directly (not through a closure) is always the
-   unmarked copy item 3 below already describes. This replaces an earlier, unverified claim that send
-   order changed the outcome.
+1. **Closure capture vs. a sibling reference — order-dependent, one shared memo per send.** A tuple
+   `(xs, f)`, `f := fn() -> nil: xs.push(2)`, sent in one crossing over a `Channel` to a different
+   spawned task, both writes done under `recover:`. Measured on the release binary:
+   - `ch.send((xs, f))` (`xs` first): `xf: f() ok` then `xf: xs.push ok` — NEITHER write faults; the
+     push is silently lost, matching D2's old behaviour.
+   - `ch.send((f, xs))` (`f` first): `fx: f() FAULT this value is this task's copy: a write to it
+     would be lost at the join; share it through Shared/Channel, or make a task-local copy with
+     .copy()` then `fx: xs.push FAULT` — BOTH writes fault.
+   Cause: one shared memo per send — whichever element the walk visits first decides whether the
+   closure's captures are rebuilt as marked copies or aliased to an already-visited (unmarked)
+   object. `tests/chz/spec/airlock_task_local_fault_test.chz` and
+   `airlock_task_local_silent_test.chz` each carry one row for this shape, pinning the send-order
+   dependence directly so a future memo-walk change gets a red test instead of a prose claim.
 2. **Captured iterator/generator cursors.** Advancing a captured `Iterator` cursor and resuming a
    captured generator are not checked at all — neither shape is in the write-site list below.
 3. **A same-task round-trip is not a crossing.** A closure/value sent on a `Channel` or read back
