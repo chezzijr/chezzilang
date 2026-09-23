@@ -104,16 +104,23 @@ fn a_passing_run_under_sched_seed_changes_no_output() {
 
 /// Part 1: replay at `CHEZZI_THREADS=1`, held to a MEASURED rate, not byte-for-byte.
 ///
-/// Byte-for-byte replay is not reachable on today's engine. A top-level `parallel:` body runs on the
-/// main thread while its `chezzi-eager` drainer runs the spawned fibers, and nothing gates the two:
-/// at `CHEZZI_THREADS=1` a body and a task that both burn CPU measured 195% CPU on the base binary
-/// (TICKET-167 `## Thread`, `docs/gaps.md`). So the fixture nests its fan-out inside ONE spawned task:
-/// the inner nursery is fiber-owned and runs on the drainer alone. A residual race near the start
-/// remains. Measured on the debug binary, 8 seeds x 20 runs: the modal output per seed appeared in
-/// 144 of 160 runs idle and 143 of 160 under load (per-seed minimum 16 of 20). The flat
-/// `interleave.chz` measured 86 of 160, so this test goes red if a draw reads OS time or a racing
-/// thread's stream, or if the fixture loses its nesting. Raise the bar to byte-for-byte when the
-/// `docs/gaps.md` two-runner row is fixed.
+/// W15-2 (the T=1 top-level body racing its `chezzi-eager` drainer) is FIXED (TICKET-168): the two
+/// now share one width permit, so the CPU-runner count at `--threads=1` is the ceiling the seeded
+/// oracle's replay was originally meant to rely on. Byte-for-byte replay is still not reachable —
+/// `docs/gaps.md` **W15-10** carries two residual races the fix does not touch: the drainer's
+/// `take_runnable` pick runs BEFORE `width_acquire` (so a pick sees 1..4 injected fibers depending on
+/// OS timing), and a woken body only joins the permit queue once its own thread runs (so the drainer
+/// can re-take the permit first). So the fixture still nests its fan-out inside ONE spawned task: the
+/// inner nursery is fiber-owned and runs on the drainer alone, sidestepping the top-level race this
+/// test doesn't exercise. Measured on the pre-fix debug binary, 8 seeds x 20 runs: the modal output
+/// per seed appeared in 144 of 160 runs idle and 143 of 160 under load (per-seed minimum 16 of 20).
+/// The flat `interleave.chz` measured 86 of 160 pre-fix, and TICKET-168's own paired sample (this
+/// fixture, `target/t168/replay.sh`, 8 seeds x 10 runs) read base 75-77 of 80 idle and 51-63 of 80
+/// under 28 bounded spinners, prototype/fixed 75-79 of 80 idle and 71-78 of 80 under the same load —
+/// the fix does not regress this test's own rate, it just doesn't reach byte-for-byte. This test goes
+/// red if a draw reads OS time or a racing thread's stream, or if the fixture loses its nesting.
+/// Raise the bar to byte-for-byte only once W15-10's two races are fixed (owner decision, TICKET-168
+/// `## Decisions`).
 #[test]
 fn the_same_seed_replays_at_one_worker_at_the_measured_rate() {
     const RUNS: usize = 10;
@@ -172,10 +179,10 @@ fn different_seeds_drive_different_schedules_at_one_worker() {
 const SMOKE_SEEDS: std::ops::RangeInclusive<u64> = 1..=64;
 
 /// The two-leaf nested-nursery deadlock always faults at `CHEZZI_THREADS=1`, for every smoke
-/// seed. This asserts a FAULT, not an output order, so the W15-2 two-runner finding does not
-/// affect it (there is no top-level `parallel:` racing a drainer here -- the whole program is one
-/// fiber tree under the eager nursery). Used by step 4 to prove the gate goes red on a reverted
-/// fix: the mutant must hang instead of faulting, so the seed's assertion catches it.
+/// seed. This asserts a FAULT, not an output order, so the `docs/gaps.md` W15-10 residual replay
+/// races do not affect it (there is no top-level `parallel:` racing a drainer here -- the whole
+/// program is one fiber tree under the eager nursery). Used by step 4 to prove the gate goes red on
+/// a reverted fix: the mutant must hang instead of faulting, so the seed's assertion catches it.
 #[test]
 fn sched_seed_smoke_two_leaf_always_faults_at_one_worker() {
     let bin = std::path::PathBuf::from(env!("CARGO_BIN_EXE_chezzi"));
