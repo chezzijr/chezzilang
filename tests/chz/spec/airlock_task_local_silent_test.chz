@@ -1,0 +1,181 @@
+# TICKET-169 — D4 layer C silent table: every shape below must NOT fault under the new mark-and-
+# check rule. Read of a copy, a task's own object, a shallow `.copy()`, and every handle-mediated
+# write stay silent; only a WRITE straight through a copy the airlock made must fault
+# (`airlock_task_local_fault_test.chz`).
+import std.concurrency
+import std.net
+
+gl_read := [1, 2]
+
+test fn a_task_reading_a_captured_list_is_silent():
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            r.send("{gl_read}")
+    assert r.recv() == "[1, 2]"
+
+test fn a_task_reading_a_module_global_is_silent():
+    r := Channel[int](1)
+    parallel:
+        spawn:
+            r.send(gl_read.len())
+    assert r.recv() == 2
+
+test fn a_task_pushing_to_its_own_new_list_is_silent():
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            ys := [1]
+            ys.push(2)
+            r.send("{ys}")
+    assert r.recv() == "[1, 2]"
+
+test fn copy_then_push_in_a_task_is_silent():
+    xs := [1]
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            ys := xs.copy()
+            ys.push(2)
+            r.send("{ys}")
+    assert r.recv() == "[1, 2]"
+
+test fn a_shared_set_from_a_task_is_silent():
+    s := Shared(1)
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            s.set(9)
+            r.send("ok")
+    r.recv()
+    assert s.get() == 9
+
+test fn a_shared_update_from_a_task_is_silent():
+    s := Shared(1)
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            s.update(fn(v: int) -> int: v + 1)
+            r.send("ok")
+    r.recv()
+    assert s.get() == 2
+
+test fn an_rw_shared_write_from_a_task_is_silent():
+    s := RwShared(1)
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            s.write(fn(v: int) -> int: v + 1)
+            r.send("ok")
+    r.recv()
+    assert s.get() == 2
+
+test fn an_atomic_store_from_a_task_is_silent():
+    a := Atomic(1)
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            a.store(9)
+            r.send("ok")
+    r.recv()
+    assert a.load() == 9
+
+test fn an_atomic_int_add_from_a_task_is_silent():
+    a := AtomicInt(0)
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            a.add(1)
+            r.send("ok")
+    r.recv()
+    assert a.load() == 1
+
+test fn a_channel_send_from_a_task_is_silent():
+    c := Channel[int](1)
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            c.send(5)
+            r.send("ok")
+    r.recv()
+    assert c.recv() == 5
+
+test fn closing_a_listener_from_a_task_is_silent():
+    ln := net.listen("127.0.0.1:0")
+    match ln:
+        Ok(l):
+            r := Channel[str](1)
+            parallel:
+                spawn:
+                    res := recover:
+                        l.close()
+                    match res:
+                        Ok(_): r.send("no-fault")
+                        Err(e): r.send(e.message())
+            assert r.recv() == "no-fault"
+        Err(_): assert false, "setup failed: could not bind a listener"
+
+gl_before_after := [1, 2]
+
+test fn a_root_task_writes_its_globals_before_and_after_a_nursery_is_silent():
+    gl_before_after.push(3)
+    assert gl_before_after == [1, 2, 3]
+    done := Channel[bool](1)
+    parallel:
+        spawn:
+            done.send(true)
+    done.recv()
+    gl_before_after.push(4)
+    assert gl_before_after == [1, 2, 3, 4]
+
+fn produce(c: Channel[List[int]]):
+    xs := [1]
+    c.send(xs)
+
+test fn a_channel_received_list_pushed_by_the_receiver_is_silent():
+    c := Channel[List[int]](1)
+    parallel:
+        spawn produce(c)
+    xs := c.recv()
+    xs.push(2)
+    assert xs == [1, 2]
+
+test fn shared_get_temporary_pushed_by_the_receiver_is_silent():
+    s := Shared([1])
+    v := s.get()
+    v.push(1)
+    assert v == [1, 1]
+
+test fn an_outer_task_pushing_after_an_inner_nursery_read_is_silent():
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            ys := [1]
+            parallel:
+                spawn:
+                    r.send("{ys}")
+            r.recv()
+            ys.push(2)
+            assert ys == [1, 2]
+
+struct Tally:
+    s: Shared[int]
+
+    fn index(self, k: int) -> int:
+        return self.s.get()
+
+    fn set_index(self, k: int, v: int):
+        self.s.update(fn(x: int) -> int: x + v)
+
+test fn a_copied_struct_set_index_writing_through_a_shared_field_is_silent():
+    t := Tally(Shared(0))
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            res := recover:
+                t[0] = 5
+            match res:
+                Ok(_): r.send("no-fault")
+                Err(e): r.send(e.message())
+    assert r.recv() == "no-fault"
+    assert t.s.get() == 5
