@@ -1555,12 +1555,39 @@ engines, **never UB**):
 Crossing a task boundary (a `spawn` capture or a `Channel.send`) is gated on **sendability**. A
 captured **local** crosses as an independent per-task **copy**, and a **module global** behaves the
 same way. **Since owner decision D4 (`docs/decision-d4-airlock.md`, TICKET-169), a task's write to
-that copy — reassigning it, mutating it in place, or writing through a nested field/index — is a
-recoverable runtime fault, never a silent lost write.** (D2's read half survives: a received closure
-still reads and writes the module globals of the task that RUNS it, and the earlier G1 checker rule —
-a compile error for a task write to a captured/global binding — was retired when module globals
-started deep-copying per task; D4 replaces that compile error's job with a runtime fault, and
-TICKET-170 restores a compile-time diagnostic alongside it.)
+that copy — reassigning it, mutating it in place, or writing through a nested field/index — is
+usually a recoverable runtime fault, not the silent lost write D2 shipped.** (D2's read half
+survives, restated: a received closure or generator READS the module globals of the task that RUNS
+it; it may NOT write one — `Op::SetGlobalSlot` faults whenever the running task holds a module-global
+snapshot. The earlier G1 checker rule — a compile error for a task write to a captured/global binding
+— was retired when module globals started deep-copying per task; D4 replaces that compile error's job
+with a runtime fault, and TICKET-170 restores a compile-time diagnostic alongside it.) The fault is
+not universal — three ceilings, all measured, still lose the write silently:
+
+1. **Memo visit order.** The mark is set at the copying walk's placeholder `alloc`, never at a
+   `WireValue::Backref`. A value sent as `(xs, f)`, where `f` captures `xs`, builds `xs` first and
+   marks it; `f`'s capture is then a `Backref` to the already-marked object, so `f`'s own push still
+   faults. Sent in the other order, `(f, xs)`, `f`'s capture builds `xs` as `f`'s own (unmarked)
+   subtree, so `f()`'s push is NOT checked and the write is lost. `xs`'s own later, separately-crossed
+   copy is unaffected.
+2. **Captured iterator/generator cursors.** Advancing a captured `Iterator` cursor and resuming a
+   captured generator are not checked at all — neither shape is in the write-site list below.
+3. **A same-task round-trip is not a crossing.** A closure/value sent on a `Channel` or read back
+   from a `Shared`/`RwShared` and used by the SAME task that sent it never left that task's heap, so
+   the D4 layer-C mark is not set on it (`Heap::id`-gated, TICKET-169) — its write stays silent,
+   exactly as `main` behaves today (owner ruling 2026-09-23, `W7-4c`). Only a crossing into a
+   DIFFERENT task's heap — a `spawn` capture/arg, an `Executor` job, or a `Channel.send` actually
+   received by another task — marks the copy.
+
+**Write sites the mark is checked at** (D4 layer C, TICKET-169): a struct field store (`p.f = v`), an
+index store on a `List`/`Map`/`bytearray` (`xs[i] = v`; a struct's own `set_index` is NOT checked —
+whatever it writes through is checked at its own call sites, so writing through a `Shared` field
+stays silent as real sharing), a captured-local cell store, a module-global slot store, `+=`-style
+in-place arithmetic on a container, and every mutating native call: List `push pop reverse sort
+sort_by sort_by_key extend insert remove_at`, Map `remove merge update`, Set `add remove`, bytearray
+`push pop extend`. Reads never check the mark. A write through a `Shared`/`RwShared`/`Atomic*`/
+`Channel`/`Socket`/`Listener` handle is real sharing and is never marked, so it is never checked
+either.
 
 - **Sendable:** scalars (`int`/`float`/`bool`), `str`, containers + structs whose contents are all
   sendable, **`Channel`** itself (reply channels), an **`Atomic[T]`** handle, an **`AtomicInt`** handle,
@@ -1573,8 +1600,10 @@ TICKET-170 restores a compile-time diagnostic alongside it.)
 - **Closures / functions cross by value (B3.3).** At runtime the airlock lowers a closure or
   bare `fn` **by value** — its `proto` (shared, read-only) + its captures deep-copied recursively + its
   home module index, never a by-reference heap handle. **A closure carries captures only — never module
-  globals (owner decision D2, TICKET-137).** A closure or generator, wherever it was created, reads
-  and writes the module globals of the task that RUNS it. Each task owns a deep copy of every module
+  globals (owner decision D2, TICKET-137).** A closure or generator, wherever it was created, READS the
+  module globals of the task that RUNS it, but may not WRITE one: any `Op::SetGlobalSlot` a spawned
+  task executes — from its own body or from a closure it runs — faults (D4, TICKET-169). Each task
+  owns a deep copy of every module
   global (taken at its `spawn`, [§2](#2-the-model)); a crossing installs nothing into it and replaces
   no slot, so a receiver's aliases of its own globals (`a := g`) stay attached. To share a value
   across tasks, use `Shared`/`RwShared`/`Atomic`/`Channel`. This is what the checker's airlock warning

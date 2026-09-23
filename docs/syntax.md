@@ -490,7 +490,9 @@ The checker warning covers a reassignment, a compound assign, `xs[i] = v`, `p.fi
 and the in-place container mutators (`push`/`pop`/`insert`/`remove_at`/`extend`/`sort`/`sort_by`/
 `sort_by_key`/`reverse` on a list, `remove`/`update` on a map, `add`/`remove` on a set, `push`/`pop` on
 a bytearray), whether called on the binding or on an element or field of it (`xs[0].push(v)`,
-`s.xs.push(v)`) — the same set of writes the runtime now faults on. It stays **silent** where the write
+`s.xs.push(v)`) — most of the same writes the runtime now faults on, but not all of them: the runtime
+also faults `Map.merge` and bytearray `.extend`, which the checker's list above omits. It stays
+**silent** where the write
 really does survive: through a `Shared`/`RwShared`/`Atomic`/`AtomicInt`/`Channel`/`Executor`/`Socket`/
 `Listener`/`Writer`/`Reader` handle (those cross by handle and are never marked, so they never fault
 either), inside a `defer:` block **in the parent** (same frame, same cell, no airlock), when the parent

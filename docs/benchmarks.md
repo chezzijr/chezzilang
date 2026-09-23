@@ -2753,9 +2753,10 @@ plus a `for`-loop read pass, no field/index store; `map.chz` does 200k `set_inde
 
 Every delta sits inside the run-to-run spread measured on each side alone: `struct` base's own 10 runs
 span 0.864-0.932 s, an 8% band, past the -1.0% delta; `map` base spans 0.244-0.335 s, a 37% band, well
-past the 9.0% delta between medians — the branch was faster on all 10 of the 10 paired runs, which
-given that spread reads as base being the noisier side that session, not a branch regression (a
-regression would make branch SLOWER; it is not). None of the seven benches across both tables moves
+past the 9.0% delta between medians — the branch was faster on 9 of the 10 paired runs (pair 7: base
+0.2443 s, branch 0.2477 s, branch slower), which given that spread reads as base being the noisier side
+that session, not a branch regression (a regression would make branch SLOWER on the median and across
+the runs, not on one of ten). None of the seven benches across both tables moves
 outside its own noise floor. **Level within noise**, as required: `Heap::any_copied` is false on every
 one of these benches' single-threaded portion (only `hof_nursery` spawns a task at all), so
 `is_copied`'s early-out is the only cost paid on the `set_field`/`set_index`/`do_method_call` hot
