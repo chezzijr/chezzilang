@@ -1065,7 +1065,7 @@ fn executor_submit_mutating_closure_isolated_parity() {
     // is marked as a copy, so `box.push(1)` inside the job now faults instead of mutating it — the
     // parent's `box` was always going to read `1` (its own, untouched list) either way.
     let out = golden_entry(
-        "fn main():\n    box := [0]\n    ex := Executor()\n    ex.submit(fn(): recover: box.push(1))\n    ex.shutdown()\n    print(box.len())\nmain()\n",
+        "fn bump_box(b):\n    recover: b.push(1)\nfn main():\n    box := [0]\n    ex := Executor()\n    ex.submit(fn(): bump_box(box))\n    ex.shutdown()\n    print(box.len())\nmain()\n",
     );
     assert_eq!(out, "1\n");
 }
@@ -1081,7 +1081,7 @@ fn executor_submit_module_global_inplace_mutation_isolates_parity() {
     // `xs.push(99)` now faults instead of mutating it — the parent's read was always going to see
     // its own (unaffected) `3` regardless.
     let out = golden_entry(
-        "xs := [1, 2, 3]\nfn main():\n    ex := Executor()\n    ex.submit(fn(): recover: xs.push(99))\n    ex.shutdown()\n    print(xs.len())\nmain()\n",
+        "xs := [1, 2, 3]\nfn bump_xs():\n    recover: xs.push(99)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): bump_xs())\n    ex.shutdown()\n    print(xs.len())\nmain()\n",
     );
     assert_eq!(out, "3\n");
 }
