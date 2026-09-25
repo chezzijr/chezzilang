@@ -2486,6 +2486,17 @@ struct Checker {
     /// time, mirroring the `spawn:` block form. A module-global (scope 0) capture is EXCLUDED at record
     /// time (a read-only global, not a per-task capture — never gated).
     capture_table: Vec<HashMap<String, Vec<Capture>>>,
+    /// Active closure frames: scope depth before the closure parameter scope, plus outer bindings
+    /// the closure body writes. Nested closures contribute to every frame they capture through.
+    closure_write_frames: Vec<(usize, HashSet<String>)>,
+    /// Write summary produced by the most recently inferred closure literal.
+    last_closure_writes: HashSet<String>,
+    /// Stable write summaries for closure literals, keyed by graph module and body span. Closure
+    /// inference can run repeatedly during generic probing; a later memoized pass must not erase the
+    /// summary produced by the pass that checked the body.
+    closure_literal_writes: HashMap<(usize, Span), Vec<String>>,
+    /// Per-scope write summaries for closure literals bound with `:=`, parallel to `scopes`.
+    written_captures: Vec<HashMap<String, Vec<String>>>,
     /// True while checking a `std.*` module — structs hoisted now are tagged `StructOrigin::Builtin`.
     current_module_is_stdlib: bool,
     /// Phase 4c-net — the harvested `StructInfo` (method table) for std.net's reserved `Socket` /

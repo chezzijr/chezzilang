@@ -2303,6 +2303,26 @@ impl Checker {
                         params.iter().map(|p| p.name.clone()).collect();
                     let free = crate::compiler::free_names_of_expr(body, &bound);
                     self.record_closure_captures(name, &free);
+                    let mut writes = self
+                        .closure_literal_writes
+                        .get(&(self.graph_module_idx, body.span))
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            std::mem::take(&mut self.last_closure_writes)
+                                .into_iter()
+                                .collect()
+                        });
+                    writes.sort();
+                    let binding_scope = self.owning_scope(name);
+                    if let Some(table) =
+                        binding_scope.and_then(|scope| self.written_captures.get_mut(scope))
+                    {
+                        if writes.is_empty() {
+                            table.remove(name);
+                        } else {
+                            table.insert(name.clone(), writes);
+                        }
+                    }
                 }
             }
             StmtKind::Assign { target, op, value } => {
@@ -3070,6 +3090,12 @@ impl Checker {
                             for (sp, caps) in cap_errs {
                                 self.emit_capture_errors(&caps, sp);
                             }
+                            if let Some(written) = self.value_writes(callee).first() {
+                                self.error(
+                                    callee.span,
+                                    format!("'{written}' {}", crate::vm::COPY_WRITE_TAIL),
+                                );
+                            }
                         }
                     }
                     SpawnTarget::Block(body) => {
@@ -3653,6 +3679,12 @@ impl Checker {
                     );
                     return;
                 };
+                if op == AssignOp::Eq
+                    && let Some(scope) = self.owning_scope(name)
+                    && let Some(table) = self.written_captures.get_mut(scope)
+                {
+                    table.remove(name);
+                }
                 // TICKET-139 (W14-2) — a write voids the certainty of a keyword call through `name`.
                 if let Some(s) = self.owning_scope(name) {
                     self.kw_written.insert((s, name.clone()));

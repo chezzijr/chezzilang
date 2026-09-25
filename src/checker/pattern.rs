@@ -4918,6 +4918,8 @@ impl Checker {
         body: &Expr,
         expected: Option<&Ty>,
     ) -> Ty {
+        self.closure_write_frames
+            .push((self.scopes.len(), HashSet::new()));
         // Source #1 — the *expected* type of the slot the closure literal sits in. When it is a
         // `fn(..)` whose arity matches, an UNANNOTATED param binds to the expected param type
         // (checking-mode), and a non-`Unknown` expected return becomes the body's return context.
@@ -5052,6 +5054,17 @@ impl Checker {
         self.ret_coerce_sink = ret.is_some().then(|| self.current_ret.clone());
         let body_ty = self.infer(body);
         self.ret_coerce_sink = None;
+        self.last_closure_writes = self
+            .closure_write_frames
+            .pop()
+            .map(|(_, writes)| writes)
+            .unwrap_or_default();
+        if !self.last_closure_writes.is_empty() {
+            let mut writes: Vec<String> = self.last_closure_writes.iter().cloned().collect();
+            writes.sort();
+            self.closure_literal_writes
+                .insert((self.graph_module_idx, body.span), writes);
+        }
         let closure_had_err = self.errors.len() > closure_mark;
         self.pop_scope();
         self.loop_depth = saved_loop_depth;

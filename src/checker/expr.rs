@@ -32,6 +32,16 @@ impl Checker {
         // threaded into the generic ctor / generic fn-call dispatchers below to pre-seed `T`.
         let expected = self.expected_hint.take();
         let expected = expected.as_ref();
+        if self.in_spawn_block
+            && let ExprKind::Ident(name) = &callee.kind
+            && self.is_captured(name)
+            && let Some(written) = self.value_writes(callee).first()
+        {
+            self.error(
+                callee.span,
+                format!("'{written}' {}", crate::vm::COPY_WRITE_TAIL),
+            );
+        }
         // `print(..., sep=, end=)` is the only call whose named args survive desugar. Type-check the
         // `sep`/`end` value(s) as `str` here (desugar already validated the key names). Any other
         // call should have an empty `named` post-desugar.
@@ -3820,6 +3830,27 @@ impl Checker {
                             self.capture_floors.push(self.scopes.len());
                             self.check_args_range(method, &sig.params, sig.min_params, args, span);
                             self.capture_floors.pop();
+                            if let Some(task) = args.first() {
+                                let mut writes: Vec<String> = match &task.kind {
+                                    ExprKind::Closure { body, .. } => self
+                                        .closure_literal_writes
+                                        .get(&(self.graph_module_idx, body.span))
+                                        .cloned()
+                                        .unwrap_or_else(|| {
+                                            std::mem::take(&mut self.last_closure_writes)
+                                                .into_iter()
+                                                .collect()
+                                        }),
+                                    _ => self.value_writes(task),
+                                };
+                                writes.sort();
+                                if let Some(written) = writes.first() {
+                                    self.error(
+                                        task.span,
+                                        format!("'{written}' {}", crate::vm::COPY_WRITE_TAIL),
+                                    );
+                                }
+                            }
                         } else {
                             self.check_args_range(method, &sig.params, sig.min_params, args, span);
                         }

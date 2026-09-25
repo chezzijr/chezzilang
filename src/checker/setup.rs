@@ -55,6 +55,10 @@ impl Checker {
             const_decls: Vec::new(),
             loop_vars: Vec::new(),
             capture_table: Vec::new(),
+            closure_write_frames: Vec::new(),
+            last_closure_writes: HashSet::new(),
+            closure_literal_writes: HashMap::new(),
+            written_captures: Vec::new(),
             module_global_lets: std::collections::HashSet::new(),
             functions: HashMap::new(),
             local_fn_names: std::collections::HashSet::new(),
@@ -2268,6 +2272,7 @@ impl Checker {
         self.loop_vars.push(std::collections::HashSet::new());
         self.const_decls.push(std::collections::HashSet::new());
         self.capture_table.push(HashMap::new());
+        self.written_captures.push(HashMap::new());
     }
     pub(super) fn pop_scope(&mut self) {
         // TICKET-139 (W14-2) — settle the popped scope's keyword calls BEFORE the scope goes: a
@@ -2297,6 +2302,7 @@ impl Checker {
         self.loop_vars.pop();
         self.const_decls.pop();
         self.capture_table.pop();
+        self.written_captures.pop();
         // TICKET-032 A1 — a pair describes TWO bindings; both are gone once the scope owning either
         // one is. Scope indices are REUSED (every top-level fn body is index 1, and 21 of 23
         // `push_scope` sites have no finalize seam), so an undrained pair false-pins a same-named
@@ -2870,6 +2876,13 @@ impl Checker {
     /// does reach here with `in_spawn_block` true, and taints correctly (measured: `spawn: defer:
     /// xs.push(1)` leaves `xs.len() == 0` after the join, and the read warns).
     pub(super) fn note_task_write(&mut self, name: &str, span: Span) {
+        if let Some(scope) = self.owning_scope(name) {
+            for (floor, writes) in &mut self.closure_write_frames {
+                if scope < *floor {
+                    writes.insert(name.to_string());
+                }
+            }
+        }
         if self.in_spawn_block && self.is_captured(name) {
             self.error(span, format!("'{name}' {}", crate::vm::COPY_WRITE_TAIL));
         }
@@ -2944,6 +2957,20 @@ impl Checker {
     pub(super) fn call_writes_receiver(&self, recv: &Ty, method: &str) -> bool {
         mutates_receiver(recv, method)
             || matches!(recv, Ty::Struct(key, _) if self.method_writes_self(key, method))
+    }
+
+    pub(super) fn value_writes(&self, expr: &Expr) -> Vec<String> {
+        let ExprKind::Ident(name) = &expr.kind else {
+            return Vec::new();
+        };
+        let Some(scope) = self.owning_scope(name) else {
+            return Vec::new();
+        };
+        self.written_captures
+            .get(scope)
+            .and_then(|table| table.get(name))
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn infer_self_writers(&mut self, stmts: &[Stmt]) {

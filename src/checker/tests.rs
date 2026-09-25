@@ -673,6 +673,52 @@ fn d4_user_method_write_inference_declines() {
     );
 }
 
+/// Without rule 3, each closure writes its named capture but crosses an executing task boundary
+/// without a compile-time error.
+#[test]
+fn d4_rule3_writing_closure_crossing_a_task_is_an_error() {
+    rejects(
+        "fn f():\n    xs := [1]\n    g := fn(): xs.push(2)\n    parallel:\n        spawn:\n            g()\nf()\n",
+        "'xs' is this task's copy",
+    );
+    rejects(
+        "fn f():\n    xs := [1]\n    g := fn(): xs.push(2)\n    parallel:\n        spawn g()\nf()\n",
+        "'xs' is this task's copy",
+    );
+    entry_rejects(
+        "import std.concurrency\nfn f():\n    xs := [1]\n    ex := Executor()\n    ex.submit(fn(): xs.push(3))\n    ex.shutdown()\nf()\n",
+        "'xs' is this task's copy",
+    );
+    entry_rejects(
+        "import std.concurrency\nfn f():\n    xs := [1]\n    g := fn(): xs.push(3)\n    ex := Executor()\n    ex.submit(g)\n    ex.shutdown()\nf()\n",
+        "'xs' is this task's copy",
+    );
+    rejects(
+        "G := [1]\ng := fn(): G.push(2)\nparallel:\n    spawn:\n        g()\n",
+        "'G' is this task's copy",
+    );
+}
+
+/// These values either do not execute at the crossing or carry no provable captured write. Treating
+/// a spawn argument or Channel send as execution makes the corresponding row fail.
+#[test]
+fn d4_rule3_declines() {
+    for src in [
+        "fn run(g: fn() -> nil):\n    print(\"not called\")\nfn f():\n    xs := [1]\n    g := fn(): xs.push(3)\n    parallel:\n        spawn run(g)\n    print(xs)\nf()\n",
+        "fn run(g: fn() -> nil):\n    print(\"not called\")\nfn f():\n    xs := [1]\n    parallel:\n        spawn run(fn(): xs.push(3))\n    print(xs)\nf()\n",
+        "fn f():\n    xs := [1]\n    ch := Channel[fn() -> nil](1)\n    ch.send(fn(): xs.push(2))\n    g := ch.recv()\n    print(xs)\n    print(g)\nf()\n",
+        "fn f():\n    xs := [1]\n    g := fn(): print(xs[0])\n    parallel:\n        spawn g()\nf()\n",
+        "fn f():\n    xs := [1]\n    parallel:\n        spawn:\n            g := fn(): xs.push(2)\n            g()\n    print(xs)\nf()\n",
+        "fn f():\n    xs := [1]\n    parallel:\n        spawn:\n            fn g():\n                xs.push(2)\n            g()\n    print(xs)\nf()\n",
+        "fn f():\n    xs := [1]\n    g := fn(): xs.push(2)\n    g = fn(): print(1)\n    parallel:\n        spawn g()\n    print(xs)\nf()\n",
+    ] {
+        no_warn(src);
+    }
+    entry_no_warn(
+        "import std.concurrency\nfn f():\n    seen := Atomic(0)\n    ex := Executor()\n    ex.submit(fn(): seen.add(3))\n    ex.shutdown()\nf()\n",
+    );
+}
+
 /// TICKET-137 (W14-25, owner decision D2) — the warning is TRUE by construction for a MODULE GLOBAL
 /// too. A `spawn:` write to a global lands in the task's own copy, and a closure sent back over a
 /// `Channel` reads the RECEIVER's copy, so neither the closure nor the later read sees the write —
