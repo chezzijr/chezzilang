@@ -227,13 +227,16 @@ test fn a_spawn_arg_written_by_the_callee_faults():
 struct Holder:
     c: Counter
 
+fn d4_bump_holder(h: Holder):
+    h.c.bump()
+
 test fn a_nested_struct_method_write_faults():
     h := Holder(Counter(1))
     r := Channel[str](1)
     parallel:
         spawn:
             res := recover:
-                h.c.bump()
+                d4_bump_holder(h)
             match res:
                 Ok(_): r.send("no-fault")
                 Err(e): r.send(e.message())
