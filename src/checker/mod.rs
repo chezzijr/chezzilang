@@ -3828,7 +3828,7 @@ const EXECUTOR_METHODS: &[&str] = &["submit", "shutdown", "shutdown_now"];
 const BYTES_METHODS: &[&str] = &["decode", "decode_lossy", "len"];
 const BYTEARRAY_METHODS: &[&str] = &["len", "push", "pop", "decode"];
 
-/// W8-3 — does `method` MUTATE its receiver in place (as opposed to returning a new value)? Keyed on
+/// Does `method` mutate its receiver in place (as opposed to returning a new value)? Keyed on
 /// the receiver's type as well as the name, because the same name means different things per type
 /// (`str.reverse` returns a new `str`; `List.reverse` mutates. `Shared.update`/`Map.update` likewise).
 ///
@@ -3842,12 +3842,10 @@ const BYTEARRAY_METHODS: &[&str] = &["len", "push", "pop", "decode"];
 ///
 /// The handle types (`Channel`/`Shared`/`RwShared`/`Atomic`/`Executor`/`Socket`/`Listener`/`Writer`/
 /// `Reader`) are absent BY DESIGN and must stay absent: they cross the airlock by handle, so a
-/// task-side `s.update(...)` / `ch.send(v)` IS visible to the parent (measured) and warning about it
-/// would be a false alarm on correct code.
+/// task-side `s.update(...)` / `ch.send(v)` IS visible to the parent (measured). This predicate feeds
+/// the DEC-089 read-temporary warning plus D4 rules 1 and 2, so handles must stay absent.
 ///
-/// ponytail: builtin containers only. A USER struct method that mutates `self` (`p.bump()`) is not
-/// detected — nothing in the checker says which methods mutate, and treating every struct method as a
-/// write would false-positive on every getter. Upgrade path: a `self`-mutation summary per method.
+/// User-struct methods use the separate `StructInfo.self_writers` fixed-point summary.
 fn mutates_receiver(recv: &Ty, method: &str) -> bool {
     match recv {
         Ty::List(_) => matches!(
@@ -3864,7 +3862,7 @@ fn mutates_receiver(recv: &Ty, method: &str) -> bool {
         ),
         Ty::Map(..) => matches!(method, "remove" | "update"),
         Ty::Set(_) => matches!(method, "add" | "remove"),
-        Ty::ByteArray => matches!(method, "push" | "pop"),
+        Ty::ByteArray => matches!(method, "push" | "pop" | "extend"),
         _ => false,
     }
 }

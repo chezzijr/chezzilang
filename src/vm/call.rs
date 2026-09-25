@@ -13,8 +13,8 @@ fn py_blank(c: char) -> bool {
 /// every `core_method`/`bytearray_method` arm that `get_mut`s the receiver. A new mutating native
 /// must be added here (and to the `every_mutating_native_faults_on_a_task_copy` test row), or its
 /// write to an airlock copy is silently lost again. The checker's `mutates_receiver`
-/// (`src/checker/mod.rs`) is a narrower list (misses `Map::merge`, `bytearray::extend`, the index
-/// stores) — that gate is for the W8-3 warning, not this fault.
+/// (`src/checker/mod.rs`) matches these methods except non-mutating `Map::merge`; index stores use
+/// separate checker paths.
 pub(crate) fn is_mutating_native_kind(kind: &str, method: &str) -> bool {
     match kind {
         "List" => matches!(

@@ -577,6 +577,10 @@ fn d4_rule1_every_task_body_write_form_is_an_error() {
             "struct Box[T]:\n    value: T\nfn f():\n    x := Box([1])\n    parallel:\n        spawn:\n            x.value[0] = 5\nf()\n",
             "x",
         ),
+        (
+            "fn f():\n    ba := bytearray(b\"a\")\n    parallel:\n        spawn:\n            ba.extend(b\"xy\")\nf()\n",
+            "ba",
+        ),
     ];
     for (src, name) in rows {
         rejects(src, &format!("'{name}' is this task's copy"));
@@ -25081,6 +25085,67 @@ fn builtin_method_slices_all_resolve() {
     chk_harvested(&harvested(&conc, "Executor"), EXECUTOR_METHODS, "Executor");
 }
 
+/// Removing `bytearray.extend` from the checker makes the bytearray row disagree with layer C.
+/// Adding an unharvested checker-only mutator fails the second assertion.
+#[test]
+fn mutates_receiver_covers_every_mutating_native() {
+    let c = prelude_container_checker();
+    let cases = [
+        ("List", Ty::list(Ty::Int)),
+        ("Map", Ty::map(Ty::Str, Ty::Int)),
+        ("Set", Ty::set(Ty::Int)),
+        ("bytearray", Ty::ByteArray),
+    ];
+    for (kind, ty) in cases {
+        let mut names: Vec<String> = c
+            .structs
+            .get(kind)
+            .unwrap_or_else(|| panic!("seeded {kind} struct"))
+            .methods
+            .keys()
+            .cloned()
+            .collect();
+        if kind == "bytearray" {
+            names.push("extend".to_string());
+        }
+        names.sort();
+        names.dedup();
+        for method in &names {
+            if kind == "Map" && method == "merge" {
+                assert!(!mutates_receiver(&ty, method));
+                continue;
+            }
+            assert_eq!(
+                mutates_receiver(&ty, method),
+                crate::vm::is_mutating_native_kind(kind, method),
+                "checker/runtime receiver-write drift for {kind}.{method}"
+            );
+        }
+        for method in match kind {
+            "List" => &[
+                "push",
+                "pop",
+                "reverse",
+                "extend",
+                "sort",
+                "sort_by",
+                "sort_by_key",
+                "insert",
+                "remove_at",
+            ][..],
+            "Map" => &["remove", "update"][..],
+            "Set" => &["add", "remove"][..],
+            "bytearray" => &["push", "pop", "extend"][..],
+            _ => unreachable!(),
+        } {
+            assert!(
+                names.iter().any(|name| name == method),
+                "checker lists missing {kind}.{method}"
+            );
+        }
+    }
+}
+
 /// Drift guard (editor hover, Tier C): every `(module, fn)` named in an authored module-fn doc slice
 /// MUST exist in that module's `native_module_sig`, so the module-fn hover doc can only annotate a
 /// function that is really exported. A renamed/removed native fn fails here.
@@ -34315,6 +34380,15 @@ fn comparable_tuple_list_option_protocol_value_element_rejected() {
 fn mutating_call_on_a_shared_read_temporary_warns() {
     entry_warns(
         "import std.concurrency\nfn main():\n    s := Shared[List[int]]([])\n    s.get().push(1)\nmain()\n",
+        "update",
+    );
+}
+
+/// Without the bytearray mutator entry, this lost write emits no DEC-089 warning.
+#[test]
+fn shared_read_temp_bytearray_extend_warns() {
+    entry_warns(
+        "import std.concurrency\nfn main():\n    s := Shared(bytearray(b\"a\"))\n    s.get().extend(b\"b\")\nmain()\n",
         "update",
     );
 }
