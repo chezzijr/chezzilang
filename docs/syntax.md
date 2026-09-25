@@ -465,83 +465,32 @@ Two rules cover everything:
    never marked, so writes through them are real sharing and never fault. `.copy()` of a copy is itself
    unmarked, so `ys := xs.copy(); ys.push(v)` inside a task is a legitimate task-local write.
 
-**The checker also WARNS at compile time** for the same shape, ahead of TICKET-170's compile-time
-error: a captured binding whose only write is inside a `spawn:` body, read again after the join, gets
-a **non-fatal warning** on stderr naming the binding and citing the write's line (exit code from the
-warning alone unchanged; the write itself now faults at runtime as above). It exists because of the
-failure mode a fault alone doesn't cover if the fault is swallowed: a `for r in results:` over the
-stale (still-empty) list would otherwise run **zero** iterations, so every `assert` inside is skipped
-and the program exits `0` — a green test that tested nothing.
+**The checker rejects visible writes before the program runs** (D4 layer A, TICKET-170). A direct
+write inside a `spawn:` task to a captured binding or module global is a compile-time error with the
+same message as the runtime fault. This covers reassignment, compound assignment, field/index stores,
+and mutating native methods on the binding or a declared-type projection. A `defer:` inside the task
+is still inside the task. The checker also infers, to a fixed point, which user methods store through
+`self` or call another such method, so `spawn: counter.bump()` is rejected when `bump` writes `self`.
 
 ```chezzi
 results: List[str] = []
 parallel:
     spawn:
-        results = ["ok", "ok"]     # ← checker warning cites this line; runtime fault, uncaught
-for r in results:                  # unreached: the spawn: body faults before the join
+        results = ["ok", "ok"]     # compile error: 'results' is this task's copy: ...
+for r in results:
     assert r == "ok"
 ```
 
-Uncaught, that fault propagates like any other uncaught `RuntimeError`: the program exits non-zero
-instead of silently printing a stale `results`. Wrap the write in `recover:` to see the fault as a
-value instead: `r := recover: results = ["ok", "ok"]` binds `r` to `Err(...)`.
+The checker also rejects a closure known to write a capture when the closure is executed across a task
+boundary: a captured call inside `spawn:`, `spawn g()`, or `Executor.submit(g)`/an inline literal.
+It does not treat `spawn run(g)` arguments or `Channel.send(g)` as execution, because the receiver may
+never call `g`. A closure rebound with `=`, a protocol/generic/fn-value receiver, a write hidden behind
+a called function or nested `fn`, and an unresolved index link stay silent and rely on the runtime
+fault. `spawn f(args)` evaluates `args` in the parent, so those expressions are not task positions.
 
-The checker warning covers a reassignment, a compound assign, `xs[i] = v`, `p.field = v`, `m[k] = v`,
-and the in-place container mutators (`push`/`pop`/`insert`/`remove_at`/`extend`/`sort`/`sort_by`/
-`sort_by_key`/`reverse` on a list, `remove`/`update` on a map, `add`/`remove` on a set, `push`/`pop` on
-a bytearray), whether called on the binding or on an element or field of it (`xs[0].push(v)`,
-`s.xs.push(v)`) — most of the same writes the runtime now faults on, but not all of them: the runtime
-also faults `Map.merge` and bytearray `.extend`, which the checker's list above omits. It stays
-**silent** where the write
-really does survive: through a `Shared`/`RwShared`/`Atomic`/`AtomicInt`/`Channel`/`Executor`/`Socket`/
-`Listener`/`Writer`/`Reader` handle (those cross by handle and are never marked, so they never fault
-either), inside a `defer:` block **in the parent** (same frame, same cell, no airlock), when the parent
-overwrites the binding before reading it, and when the read happens only inside the task. A `defer:`
-block nested *inside* a `spawn:` body is on the far side of the airlock like any other task statement —
-its write now faults like any other task write, and it warns like one.
-
-A parent-side write only **supersedes** the lost one — and so silences the warning — when it replaces
-the *whole* binding (`xs = [...]`). An in-place mutator (`xs.push(v)`) and a compound assign (`n += 1`)
-both **read** the stale copy before writing it, so they warn at the write itself.
-
-Seven deliberate ceilings, all of them under-warning rather than over-warning:
-
-1. **Per frame** — the taint does not cross a `fn` boundary in either direction. A module global written
-   in a task in one function and read in another is not flagged (it *is* flagged when both happen in
-   the same body, or at module top level); and a read inside a **nested `fn` declared in the parent** is
-   likewise silent, even of a captured local whose write really was lost. The **closure** spelling of
-   the same read *does* warn, because a closure body is an expression evaluated in the parent's own
-   frame: `g := fn() -> int: xs.len()` after the join warns and returns 0, while `fn g() -> int: return
-   xs.len()` returns 0 silently.
-2. **Lexical, not dataflow** — a read placed textually *before* the `spawn:` is not flagged even though
-   the write cannot reach it either.
-3. **Builtin containers only** — a user struct method that mutates `self` (`p.bump()`) is not counted as
-   a write; nothing in the checker says which methods mutate, and treating every method as a write
-   would false-positive on every getter.
-4. **Re-declaring the name clears it** — the taint is keyed by bare name, so any *new* binding of that
-   name (a `:=`, a loop variable, a `match`/`wait:`/destructuring binding, a parameter) drops it. That
-   is what keeps a loop variable that merely *shadows* the name from being reported, at the cost of
-   missing a later stale read of the outer binding once a shadow has appeared in the same scope. The
-   taint *does* carry a scope coordinate, so a **block-local** shadow's taint dies with its block
-   rather than being charged to the outer binding of the same name.
-5. **A partial write through an index/field target** (`m[k] = v`, `p.f = v`) untaints silently, unlike a
-   mutator, because the checker cannot tell whether it supersedes the task's write (`m["a"] = 2` after a
-   task-side `m["a"] = 1` does; `m["b"] = 2` does not), and it declines rather than warn on noise.
-6. **A write made only through a closure or nested `fn` declared inside the task** is not tainted — the
-   nested body has its own frame, so `spawn: bump := fn(): xs.push(1)` then `bump()` leaves `xs.len()`
-   at 0 after the join with nothing reported (same for the `fn bump():` spelling). Dropping the taint
-   there is what stops the nested body reporting the *parent's* pending write as its own.
-7. **A partial read the checker cannot match to the partial write declines.** A task-side write
-   through a field or index and a parent read through one are compared segment by segment: the same
-   field name, the same non-negative int literal or the same string literal is a match. A read along
-   the written path, or a prefix or extension of it, warns (`s.v = 2` then `print(s.v)`, `print(s.t)`
-   after `s.t.v = 2`, `print(xs[0])` after `xs[0].push(2)`). A read that diverges at two different
-   constants is correctly silent: `p.count = ...` read back as `p.name`, `m["a"] = 1` read back as
-   `m["b"]` and `xs[0] = v` read back as `xs[1]` never observe the write. Any other segment (a
-   computed index `xs[i]`, a negative literal `xs[-1]`, a field against a key) could alias or not, so
-   the pair stays silent: a task-side `xs[i] = v` read back as `xs[0]` is stale and is missed. A
-   whole-binding write or read on either side always reports, and an in-place mutator (`xs.push(v)`)
-   is a whole-container write, so `print(xs[0])` after one still warns.
+Reads, parent-side writes, task-created values, `.copy()` followed by mutation, handle writes, and a
+task-local `:=` shadow remain valid. Layer C remains the backstop for every declined shape. An error
+must never fire unless the same program would fault at runtime with checking disabled.
 
 **Mutating a captured local.** A **closure body is a single expression** (`fn(x): expr`), so a closure
 cannot contain a reassignment statement — `fn(): n = n + 1` is a *parse error*. Three ways to write

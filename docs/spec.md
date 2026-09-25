@@ -273,8 +273,10 @@ reusing an exhausted one yields nothing.
 > container, or a module global — every object the airlock copied into the task's own heap — is now a
 > recoverable runtime **fault** (three shapes still lose the write silently — see
 > `docs/concurrency.md`'s ceilings). D2's read half survives: a received closure still reads the
-> running task's own module globals; it may no longer write them. Landed as layer C, TICKET-169 (runtime);
-> layer A, the matching compile-time error, is TICKET-170. The parent's original object is never
+> running task's own module globals; it may no longer write them. Layer C landed in TICKET-169.
+> Layer A landed in TICKET-170: direct visible task writes, inferred `self`-writing user methods, and
+> capture-writing closures at executing crossings are compile-time errors with the same text. Unknown
+> calls and crossings decline to layer C. The parent's original object is never
 > marked, and writing through a genuine handle (`Shared`/`RwShared`/`Atomic*`/`Channel`) is unaffected
 > — that is real sharing, not a copy.
 

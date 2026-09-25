@@ -99,21 +99,13 @@ closure or generator, wherever it was created, still reads the module globals of
 it (owner decision D2, TICKET-137), so a closure received over a `Channel` never sees the sender's
 global writes; to share, use `Shared`/`Channel` ([§7](#7-sendability)).
 
-**The checker warns when you read the lost value.** Writing a captured binding inside a `spawn:` body
-and reading it again after the join emits a non-fatal warning naming the binding and citing the write's
-line (exit code unchanged — the isolation is deliberate). A `Shared`/`RwShared`/`Atomic`/`AtomicInt`/
-`Channel` write is silent: those cross by handle, so the write really is visible. So is a parent-side
-write that replaces the WHOLE binding (`xs = [...]`) — but not `xs.push(v)` or `n += 1`, which read the
-stale copy before writing it and so warn at the write. The rule has **seven** deliberate ceilings, every
-one of them under-warning rather than over-warning (per frame, so it neither enters nor leaves a nested
-`fn`; lexical, not dataflow; builtin containers only; keyed by bare name, so any fresh binding of the
-name clears it — though the taint carries a scope coordinate, so a *block-local* shadow's taint is never
-charged to the outer binding; a partial `m[k] = v` / `p.f = v` in the parent untaints silently; a write
-made only through a closure or nested `fn` declared *inside* the task is not tainted at all; and
-a partial read the checker cannot match to the partial write (a computed or negative index, a
-field against a key) declines, while a read of the same field or key warns). Full rules and the
-reasoning for each:
-[`syntax.md` §capture](syntax.md).
+**The checker rejects writes it can prove will be lost.** D4 layer A (TICKET-170) rejects direct task
+writes to captured bindings or module globals, including compound/projected writes and known mutating
+native or user methods. It also rejects a capture-writing closure executed by `spawn g()`, by a call
+inside `spawn:`, or by `Executor.submit`. The diagnostic is byte-identical to the runtime fault.
+Unknown calls, nested functions, generic/protocol receivers, `spawn` argument expressions, and
+`Channel.send` decline to layer C. Reads, task-local copies, handle writes, and parent-side writes stay
+valid. Full rules and ceilings: [`syntax.md` §capture](syntax.md).
 
 **The copy is taken FRESH, per task, at its `spawn` — at every depth.** A task sees the values current
 when it was spawned (the Go rule: a goroutine reads whatever a package-level var holds when `go` runs).
@@ -1562,7 +1554,7 @@ survives, restated: a received closure or generator READS the module globals of 
 it; it may NOT write one — `Op::SetGlobalSlot` faults whenever the running task holds a module-global
 snapshot. The earlier G1 checker rule — a compile error for a task write to a captured/global binding
 — was retired when module globals started deep-copying per task; D4 replaces that compile error's job
-with a runtime fault, and TICKET-170 restores a compile-time diagnostic alongside it.) The fault is
+with a runtime fault, and TICKET-170 restored the sound compile-time subset alongside it.) The fault is
 not universal — measured against the release binary, three shapes still lose the write silently; item
 1 depends on the order the crossing's memo visits the values:
 
@@ -1618,8 +1610,8 @@ either.
   owns a deep copy of every module
   global (taken at its `spawn`, [§2](#2-the-model)); a crossing installs nothing into it and replaces
   no slot, so a receiver's aliases of its own globals (`a := g`) stay attached. To share a value
-  across tasks, use `Shared`/`RwShared`/`Atomic`/`Channel`. This is what the checker's airlock warning
-  already says, now true by construction, and it supersedes the carry-and-install rules of
+  across tasks, use `Shared`/`RwShared`/`Atomic`/`Channel`. This is what the checker's D4 error now
+  says where the write is visible, and it supersedes the carry-and-install rules of
   TICKET-016/041/051/097/105/116 (`Proto::global_free`, `ModuleData.assigned`/`carried`/`origin`, the
   `Vm::install_global_slot` receive refusal and the changed-since-baseline comparator).
 
@@ -1882,8 +1874,8 @@ either.
   visible to a closure receiver by installing the sender's value into the receiver's module copy; D2
   removed the install. A G1 checker rule once made both a **compile error**, because the serial engine
   shared the globals while M:N snapshotted them; deep-copying per task removed that divergence and the
-  rule was retired with it. D4/TICKET-169 is the runtime half of restoring an error for the write; a
-  matching compile-time diagnostic is TICKET-170.)*
+  rule was retired with it. D4/TICKET-169 is the runtime half of restoring an error for the write;
+  TICKET-170 landed the matching compile-time subset.)*
 - **Cyclic sendables round-trip (identity-preserving copy).** The airlock copies a sendable by a
   structural deep walk (`spawn` arg / `Channel.send` / `Shared(...)` / worker return / module-global
   snapshot). A value that is sendable-by-type but contains a **reference cycle** (e.g. `a.next = b;

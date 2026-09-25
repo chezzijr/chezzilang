@@ -1,12 +1,12 @@
 # D4 — no silent copies at the task airlock (APPROVED, 2026-09-22)
 
-**Status: APPROVED by the owner 2026-09-22.** It supersedes **D2** (DEC-137, TICKET-137) as the answer
+**Status: APPROVED 2026-09-22; layers C and A LANDED in TICKET-169 and TICKET-170.** It supersedes **D2** (DEC-137, TICKET-137) as the answer
 to "is a lost task-side write correct": it is not, and it faults. D2's rule survives only as the
 definition of WHICH snapshot of the globals a received closure reads. Detection design: a runtime copy
 mark (C) plus checker inference (A). Implementation: TICKET-169 (layer C, runtime: every rule) and
 TICKET-170 (layer A, checker: the early compile-time errors). Both are sequenced after TICKET-167/168.
 
-Layer C landed (TICKET-169, 2026-09-23); layer A pending (TICKET-170).
+Layer C landed in TICKET-169. Layer A landed in TICKET-170.
 
 ## The problem
 
@@ -56,9 +56,10 @@ the fact that a write lost to it is silent.
 
 1. **Compile-time error: a write to a captured binding inside a task body.** This covers rows 1–2 and
    every projected form TICKET-165 now tracks (`s.v = 2`, `xs[0] = v`, `xs[0].push(2)`, `m[k] += 1`).
-   The positions are a `spawn:` block, a `spawn f(...)` argument expression, and a `defer:` inside a
-   task. The message names the fix: `cannot write 'xs' inside spawn: the task has its own copy and the
-   write would be lost at the join; share it through Shared/Channel, or declare a task-local with :=`.
+   The positions are a `spawn:` block and a `defer:` inside a task. A `spawn f(...)` argument
+   expression runs in the parent and is not a task position. The message is layer C's exact text:
+   `'xs' is this task's copy: a write to it would be lost at the join; share it through
+   Shared/Channel, or make a task-local copy with .copy()`.
    It replaces the W8-3/W11-13 warning, which becomes redundant.
 2. **Runtime fault: a spawned task writes a module global.** This covers rows 3–4. The checker cannot
    see these writes, because they happen inside an ordinary `fn` that is also legal on the main task.
@@ -68,11 +69,11 @@ the fact that a write lost to it is silent.
    `recover:`. The main task keeps full read/write access to its globals, so single-threaded scripts
    are unaffected. Where the checker can see a global write directly in a task body, it reports it at
    compile time as in rule 1.
-3. **A closure that writes a captured binding cannot cross a task boundary.** This covers rows 5–6.
-   Crossing means being sent on a `Channel`, captured by a `spawn:`, or passed to `spawn f(...)` or an
-   `Executor`. Where the checker knows the closure, this is a compile-time error. Otherwise it is a
-   runtime fault at the airlock, since `ensure_crossable` already walks every crossing closure. A
-   closure that only reads its captures still crosses by value, as today.
+3. **A closure that writes a captured binding cannot execute across a task boundary.** This covers
+   rows 5–6. Layer A rejects a direct captured call inside `spawn:`, `spawn g()`, and
+   `Executor.submit(g)` where it knows the literal. It declines `Channel.send(g)` and a closure passed
+   as a `spawn f(...)` argument because neither crossing proves execution. Layer C covers every
+   crossing closure. A closure that only reads its captures still crosses by value, as today.
 4. **D2 becomes moot.** Rules 2 and 3 mean no task can have written the globals or captures that a
    crossing closure reads. The only divergence left is a write by the MAIN task after it spawned the
    reader, which is the ordinary "a task sees the globals as they were at its spawn" snapshot. That is
@@ -155,9 +156,12 @@ So the migration is limited to the tests that pin the behaviour D4 removes. They
 `rejects` checker tests and `recover:` fault tests. Plus one teaching example, which becomes the
 "use `Shared`" example. Only one non-airlock program in the corpus writes a task-side copy, the `fn_value_tuple_slot_call_test` counter above, and it reads the value back inside the same task. No program writes a copy and then reads the parent's side on purpose.
 
-Not measured yet: rule 3's sites (closures that write their captures and then cross). The checker
-cannot enumerate them without the rule itself. The implementing ticket must measure them before
-committing to compile-time rejection for that rule.
+TICKET-170 measured rule 3 before enabling it: two corpus sites, both direct callee positions
+(`airlock_task_local_fault_test.chz` and `examples/capture_spawn_closure_mutates_isolated.chz`). The
+full measurement found 20 rule-1 sites across six files and one rule-2 method call. All were fault
+pins or examples and were migrated through declined helper-call shapes. A closure passed as a
+`spawn f(...)` argument is not executed by the boundary; measured `spawn run(g)` stayed clean when
+`run` never called `g`, so layer A declines that shape.
 
 ## Risks and open questions for the implementing ticket
 

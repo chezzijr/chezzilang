@@ -196,7 +196,7 @@ static protocol requirements callable through a generic bound via witness passin
 **Tier-D** (`spawn` / `parallel:` nursery, `Channel[T]`, `Shared[T]`, `Executor`, the real
 OS-thread M:N engine, netpoller + `std.net`). The checker also has a **non-fatal warning channel**
 (`Severity::Warning`, `"severity"` in `--errors=json`, `DiagnosticSeverity::WARNING` in the LSP) with
-five rules on it — a discarded `Result`/`Option`, a `spawn:`-task write read after the join, a mutating call or assign on a `Shared`/`RwShared`/`Atomic` read temporary (`s.get().push(1)`), a
+four rules on it — a discarded `Result`/`Option`, a mutating call or assign on a `Shared`/`RwShared`/`Atomic` read temporary (`s.get().push(1)`), a
 `match` arm made unreachable by an earlier unguarded irrefutable arm, and a local binding that is never read (TICKET-090).
 **Rust tests** green across every target (**4458** in the lib target), plus **814**
 Chezzi tests green at two worker counts (up from 590 at the start of `feat/span-file-and-stdlib-contracts`).
@@ -214,8 +214,10 @@ in-progress alongside it.
 > window. Full rule: `PROGRESS.md` "JIT entry rule".
 > **D4 (APPROVED 2026-09-22):** a spawned task's write to an airlock copy (captures, module globals) is
 > an error or a runtime fault, never a silent lost write. It supersedes D2's "lost write is correct".
-> Layer C (the runtime fault) landed 2026-09-23, TICKET-169; layer A (the compile-time error) is
-> TICKET-170, pending. Read `docs/decision-d4-airlock.md` before any airlock work.
+> Layer C (the runtime fault) landed 2026-09-23, TICKET-169. Layer A landed in TICKET-170: the checker
+> rejects direct visible task writes, calls to inferred `self`-writing methods, and capture-writing
+> closures at crossings that execute them. Unknown shapes decline to layer C. Read
+> `docs/decision-d4-airlock.md` before any airlock work.
 >
 > **START HERE (2026-09-20): `docs/gaps.md` is now a SHORT LEDGER — open rows only, each re-verified
 > on the release binary, with the archive line for its full history.** Every closed row and all 30
@@ -254,7 +256,7 @@ in-progress alongside it.
 > differential cases, all 32 FFI null guards, `std.net`'s read contract), the parent→child cross-nursery
 > false `deadlock` (CLOSED 2026-09-09, TICKET-099 — replaced the upward-only `MnSched::parent_wake`
 > chain with a run-wide `wake_run_wide` + a peer-veto deadlock predicate), and one row deliberately NOT ticketed
-> (`W11-13`, an airlock warning under-warn — re-open only with a measured runtime-derived table).
+> (`W11-13`, whose airlock warning was superseded by D4's error in TICKET-170).
 > Bug-hunt wave 10
 > (2026-09-05/06) filed `W10-1..W10-26` and **all 26 are closed**: TICKET-060..069 landed overnight through the
 > pipeline and every fix was re-verified on the merged release binary at both worker counts (read the
@@ -295,8 +297,8 @@ in-progress alongside it.
 > index) are closed, and **W8-42** (2026-08-29, TICKET-022 -- the four remaining format-spec forms —
 > the `#` alternate form, `g`/`G`, `=` sign-aware fill, and a leading-space sign — now match
 > CPython), as is the un-numbered
-> **airlock-trap** section — a `spawn:`-task write read
-> after the join now warns too. The dogfood rows are the first findings in this repo produced by people
+> **airlock-trap** section — its warning later became D4's compile-time error (TICKET-170), backed by
+> the TICKET-169 runtime fault. The dogfood rows are the first findings in this repo produced by people
 > with **no model of the implementation**, and they are disjoint from waves 1–7 (which were almost all
 > soundness). Six were **silent wrong answers** (three left), two were the **scheduler** and **both are
 > now fixed** (2026-08-18, `fix/mn-idle-policy-w8-8-w8-7`): `--threads=1` ran *two* CPU runners

@@ -7,6 +7,19 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-170 (2026-09-26) — D4 layer A rejects statically visible writes to task airlock copies.**
+  Direct writes in a task body now fail at compile time with layer C's byte-identical fault text,
+  including projected stores, native mutators, and module globals. A syntactic least fixed point
+  infers which user methods write `self`, including transitive and mutually recursive calls. The
+  checker also tracks closure literals that write captures and rejects executing crossings through
+  `spawn g()`, a captured call inside `spawn:`, or `Executor.submit`; `spawn` arguments and
+  `Channel.send` decline because those boundaries do not necessarily execute the closure. Protocol,
+  generic, fn-value, nested-function, and unresolved-chain shapes also decline to TICKET-169's runtime
+  backstop. The retired W8-3/W11-13 stale-read warning is gone, leaving four warning-channel rules.
+  The 439-file corpus sweep adds no branch-only failure; migrated runtime pins still fault through
+  helper calls. Tests cover every direct write form, silent boundaries, native drift, method inference,
+  and closure crossings.
+
 - **TICKET-168 (2026-09-23) — W15-2: gate a T=1 top-level `parallel:` body against its own
   `chezzi-eager` drainer.**
   At `CHEZZI_THREADS=1` a top-level body burning CPU alongside a spawned sibling ran at ~196% CPU —
