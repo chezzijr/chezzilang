@@ -1501,6 +1501,7 @@ impl Checker {
         self.collect_names(stmts);
         self.collect_docs(stmts);
         self.hoist(stmts);
+        self.infer_self_writers(stmts);
         // SINGLE-RESOLVER FFI fix: cache every struct declared in THIS module under its identity key,
         // its by-value `CType::Struct` computed HERE — in this (the DEFINING) module's import/alias
         // scope (extends the `AliasSig::ctype` precedent to structs). Done only when harvesting
@@ -2943,6 +2944,136 @@ impl Checker {
     pub(super) fn call_writes_receiver(&self, recv: &Ty, method: &str) -> bool {
         mutates_receiver(recv, method)
             || matches!(recv, Ty::Struct(key, _) if self.method_writes_self(key, method))
+    }
+
+    fn infer_self_writers(&mut self, stmts: &[Stmt]) {
+        type MethodKey = (String, String);
+        let mut summaries: HashMap<MethodKey, (bool, Vec<MethodKey>)> = HashMap::new();
+
+        for stmt in stmts {
+            let StmtKind::Struct {
+                name,
+                type_params,
+                methods,
+                ..
+            } = &stmt.kind
+            else {
+                continue;
+            };
+            let key = self.bare_key(name);
+            if !self.structs.contains_key(&key) {
+                continue;
+            }
+            let self_ty = Ty::Struct(
+                key.clone(),
+                type_params
+                    .iter()
+                    .map(|param| Ty::Param(param.name.clone()))
+                    .collect(),
+            );
+            for method in methods {
+                if method
+                    .params
+                    .first()
+                    .is_none_or(|param| param.name != "self")
+                {
+                    continue;
+                }
+                let mut direct = false;
+                let mut edges = Vec::new();
+                for op in super::self_writes::self_ops(&method.body) {
+                    match op {
+                        super::self_writes::SelfOp::Store(links) => {
+                            let Some((last, prefix)) = links.split_last() else {
+                                continue;
+                            };
+                            let mut recv = self_ty.clone();
+                            let mut resolved = true;
+                            for link in prefix {
+                                let Some(next) = self.checked_link_ty(&recv, link) else {
+                                    resolved = false;
+                                    break;
+                                };
+                                recv = next;
+                            }
+                            if !resolved {
+                                continue;
+                            }
+                            match (last, &recv) {
+                                (ChainLink::Index, Ty::Struct(target, _)) => {
+                                    edges.push((target.clone(), "set_index".to_string()));
+                                }
+                                (ChainLink::Index, Ty::List(_) | Ty::Map(..) | Ty::ByteArray) => {
+                                    direct = true;
+                                }
+                                (ChainLink::Field(_), _) => {
+                                    direct |= self.checked_link_ty(&recv, last).is_some();
+                                }
+                                _ => {}
+                            }
+                        }
+                        super::self_writes::SelfOp::Call(links, called) => {
+                            let mut recv = self_ty.clone();
+                            let mut resolved = true;
+                            for link in &links {
+                                let Some(next) = self.checked_link_ty(&recv, link) else {
+                                    resolved = false;
+                                    break;
+                                };
+                                recv = next;
+                            }
+                            if !resolved {
+                                continue;
+                            }
+                            if mutates_receiver(&recv, &called) {
+                                direct = true;
+                            }
+                            if let Ty::Struct(target, _) = recv {
+                                edges.push((target, called));
+                            }
+                        }
+                    }
+                }
+                summaries.insert((key.clone(), method.name.clone()), (direct, edges));
+            }
+        }
+
+        let mut writers: HashSet<MethodKey> = summaries
+            .iter()
+            .filter(|(_, (direct, _))| *direct)
+            .map(|(key, _)| key.clone())
+            .collect();
+        loop {
+            let mut changed = false;
+            for (method, (_, edges)) in &summaries {
+                if writers.contains(method) {
+                    continue;
+                }
+                let writes = edges.iter().any(|edge| {
+                    if summaries.contains_key(edge) {
+                        writers.contains(edge)
+                    } else {
+                        self.struct_shape(&edge.0)
+                            .is_some_and(|info| info.self_writers.contains(&edge.1))
+                    }
+                });
+                if writes {
+                    writers.insert(method.clone());
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        for ((key, method), _) in summaries {
+            if writers.contains(&(key.clone(), method.clone()))
+                && let Some(info) = self.structs.get_mut(&key)
+            {
+                info.self_writers.insert(method);
+            }
+        }
     }
     /// Does `name` resolve to the MODULE scope (index 0) — i.e. is it a module-level binding rather
     /// than a local/param shadow? Used by the from-imported-global rebind gate, so a fn-local `:=`

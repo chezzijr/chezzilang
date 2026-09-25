@@ -613,6 +613,66 @@ fn d4_rule1_silent_set_stays_clean() {
     );
 }
 
+/// Without the self-write fixed point, every row returns zero D4 errors. The transitive and mutual
+/// recursion rows fail if inference stops after one pass.
+#[test]
+fn d4_user_method_writing_self_is_an_error_in_a_task() {
+    let rows = [
+        (
+            "struct C:\n    n: int\n    fn bump(self):\n        self.n = self.n + 1\nfn f():\n    c := C(0)\n    parallel:\n        spawn:\n            c.bump()\nf()\n",
+            "c",
+        ),
+        (
+            "struct B:\n    v: int\n    fn index(self, i: int) -> int:\n        return self.v\n    fn set_index(self, i: int, v: int):\n        self.v = v\nfn f():\n    b := B(1)\n    parallel:\n        spawn:\n            b[0] = 5\nf()\n",
+            "b",
+        ),
+        (
+            "struct B:\n    xs: List[int]\n    fn add(self, v: int):\n        self.xs.push(v)\n    fn via(self, v: int):\n        self.add(v)\nfn f():\n    b := B([1])\n    parallel:\n        spawn:\n            b.via(3)\nf()\n",
+            "b",
+        ),
+        (
+            "struct C:\n    n: int\n    fn a(self):\n        self.b()\n    fn b(self):\n        if self.n > 0:\n            self.a()\n        self.n = self.n + 1\nfn f():\n    c := C(0)\n    parallel:\n        spawn:\n            c.a()\nf()\n",
+            "c",
+        ),
+        (
+            "struct Inner:\n    n: int\n    fn bump(self):\n        self.n = self.n + 1\nstruct Outer:\n    inner: Inner\n    fn go(self):\n        self.inner.bump()\nfn f():\n    o := Outer(Inner(0))\n    parallel:\n        spawn:\n            o.go()\nf()\n",
+            "o",
+        ),
+        (
+            "struct Inner:\n    n: int\n    fn bump(self):\n        self.n = self.n + 1\nstruct Outer:\n    inner: Inner\nfn f():\n    o := Outer(Inner(0))\n    parallel:\n        spawn:\n            o.inner.bump()\nf()\n",
+            "o",
+        ),
+        (
+            "struct Box[T]:\n    value: T\n    fn set(self, v: T):\n        self.value = v\nfn f():\n    b := Box(1)\n    parallel:\n        spawn:\n            b.set(2)\nf()\n",
+            "b",
+        ),
+    ];
+    for (src, name) in rows {
+        rejects(src, &format!("'{name}' is this task's copy"));
+    }
+}
+
+/// Each row contains a call the syntactic fixed point must decline. Descending through any listed
+/// unknown edge makes the corresponding clean program fail.
+#[test]
+fn d4_user_method_write_inference_declines() {
+    for src in [
+        "struct C:\n    n: int\n    fn get(self) -> int:\n        return self.n\nfn f():\n    c := C(1)\n    parallel:\n        spawn:\n            print(c.get())\nf()\n",
+        "struct C:\n    n: int\n    fn local(self):\n        x := 0\n        x = 1\n        print(x)\nfn f():\n    c := C(1)\n    parallel:\n        spawn:\n            c.local()\nf()\n",
+        "G := 0\nstruct C:\n    fn global(self):\n        G = 1\nfn f():\n    c := C()\n    parallel:\n        spawn:\n            c.global()\nf()\n",
+        "struct C:\n    inc: fn() -> nil\nfn f():\n    c := C(fn(): print(1))\n    parallel:\n        spawn:\n            c.inc()\nf()\n",
+        "protocol P:\n    fn bump(self)\nfn f(p: P):\n    parallel:\n        spawn:\n            p.bump()\n",
+        "protocol P:\n    fn bump(self)\nfn f[T: P](v: T):\n    parallel:\n        spawn:\n            v.bump()\n",
+        "struct C:\n    xs: List[int]\n    fn later(self):\n        f := fn(): self.xs.push(1)\n        f()\nfn run():\n    c := C([1])\n    parallel:\n        spawn:\n            c.later()\nrun()\n",
+        "fn f(it: Iterator[int]):\n    parallel:\n        spawn:\n            print(it.next())\n",
+    ] {
+        no_warn(src);
+    }
+    entry_no_warn(
+        "import std.concurrency\nstruct Counter:\n    n: Shared[int]\n    fn bump(self):\n        self.n.update(fn(v: int) -> int: v + 1)\nfn f():\n    c := Counter(Shared(0))\n    parallel:\n        spawn:\n            c.bump()\nf()\n",
+    );
+}
+
 /// TICKET-137 (W14-25, owner decision D2) — the warning is TRUE by construction for a MODULE GLOBAL
 /// too. A `spawn:` write to a global lands in the task's own copy, and a closure sent back over a
 /// `Channel` reads the RECEIVER's copy, so neither the closure nor the later read sees the write —
