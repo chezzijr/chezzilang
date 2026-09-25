@@ -16,14 +16,14 @@ pub(super) struct DiagMark {
     /// callee can be `Unknown` on an early pass and concrete on a later one — so the SAME return span
     /// can record two different verdicts across passes, which `record_call_table_entry` turns into a
     /// hard `internal:` error on a valid program. `ret_coerce` is DECIDED state exactly like
-    /// `spawn_stale`, not a diagnostic, so it needs the same snapshot-and-restore: the one true
+    /// diagnostic buffers, not a diagnostic itself, so it needs the same snapshot-and-restore: the one true
     /// recording happens on the real (non-speculative) `check_stmt` walk, once every callee sig is
     /// settled.
     ret_coerce: crate::checker::RetCoerceTable,
     /// TICKET-161 — same reason as `ret_coerce`: decided state, not a diagnostic.
     for_binds: crate::checker::ForBindTable,
-    /// TICKET-142 (W14-33) — the constant-overflow dedupe set is SPECULATIVE STATE like
-    /// `spawn_stale`: a speculative pass (return inference of an un-annotated fn, a generic-arg
+    /// TICKET-142 (W14-33) — the constant-overflow dedupe set is speculative state too: a
+    /// speculative pass (return inference of an un-annotated fn, a generic-arg
     /// prepass) records a span, then the rollback discards its error. A rollback that kept the span
     /// would leave the real pass silent. Empty unless the program overflows, so the clone is free.
     const_overflow_seen: std::collections::HashSet<Span>,
@@ -4268,17 +4268,15 @@ impl Checker {
 
 /// TICKET-165 — walk an lvalue-shaped chain (`xs`, `xs[i]`, `p.f`, `a.b[0].c`) down to the BINDING it
 /// reaches, and collect the constant [`PathSeg`] path (root first) the walk went through. That
-/// binding is the one that crosses the task airlock; the path is what
-/// [`paths_overlap`] compares a write and a read by. `None` when the chain bottoms out on something
+/// binding is the one that crosses the task airlock. `None` means the chain bottoms out on something
 /// that is not a name (`f().x`) — there is no binding to charge. An INT index literal becomes
 /// `PathSeg::Int`, a STR index literal `PathSeg::Str`, and anything else (a computed index, a
 /// `Unary { op: Neg, .. }` literal, a field projected onto by an index or vice versa) becomes
 /// `PathSeg::Dynamic` — the checker cannot tell whether it aliases a constant path, so it must not be
 /// treated as either a match or a miss.
 ///
-/// Shared by the write side ([`Checker::note_assign_root`]) and the read side (the `Field`/`Index`
-/// arms of `infer`) so the two cannot drift on what "the same binding, partially written" means —
-/// they drifting apart is exactly what made a field-granular task write poison every read of the root.
+/// The D4 write side uses the root and whether the path is empty. Declared-type resolution uses
+/// [`ChainLink`] separately because constant index values do not determine write semantics.
 pub(super) fn chain_path(e: &Expr) -> Option<(&String, Span, Vec<PathSeg>)> {
     let mut e = e;
     let mut segs = Vec::new();

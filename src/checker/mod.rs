@@ -2644,11 +2644,8 @@ struct Checker {
 }
 
 /// TICKET-165 — one constant segment of a projected lvalue chain (`xs[i].f` -> `[Dynamic,
-/// Field("f")]`, root first). A task write and a parent read are compared segment by segment
-/// ([`crate::checker::setup::paths_overlap`]): the same field name or the same non-negative int/str
-/// literal is a match, two different constants of the same kind are disjoint, and a `Dynamic`
-/// segment (a computed index, a negative literal, or a field compared against a key) means the
-/// checker cannot tell, so it declines rather than guess.
+/// Field("f")]`, root first). D4 retains only whether the chain is projected; declared-type
+/// resolution uses [`ChainLink`] and declines links whose write semantics are unknown.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum PathSeg {
     Field(String),
