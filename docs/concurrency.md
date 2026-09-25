@@ -82,11 +82,9 @@ means stdin is genuinely exhausted. Details (a blocked read demotes its worker, 
 # Chezzi — the shared-mutation race is unrepresentable
 counter := 0
 parallel:
-    spawn: counter = counter + 1   # compiles, but FAULTS at runtime (recoverable): the task got its
-                                    # OWN isolated copy of `counter` at the spawn boundary, and D4
-                                    # (docs/decision-d4-airlock.md) makes a task's write to that copy
-                                    # a runtime error instead of a silent lost write — there is no
-                                    # shared write, and no silent race, to lose.
+    spawn: counter = counter + 1   # checker error: the task got its OWN isolated copy of `counter`
+                                    # at the spawn boundary. D4 rejects this provable lost write;
+                                    # layer C faults at runtime if static checking is bypassed.
 ```
 
 **Module globals isolate per task, and a task's write to its copy faults (D4).** A `spawn`ed task

@@ -646,6 +646,10 @@ fn d4_user_method_writing_self_is_an_error_in_a_task() {
             "struct Box[T]:\n    value: T\n    fn set(self, v: T):\n        self.value = v\nfn f():\n    b := Box(1)\n    parallel:\n        spawn:\n            b.set(2)\nf()\n",
             "b",
         ),
+        (
+            "struct C:\n    n: int\n    fn receive(self, ch: Channel[int]):\n        wait:\n            self.n = ch.recv():\n                print(self.n)\nfn f():\n    ch := Channel[int](1)\n    ch.send(2)\n    c := C(0)\n    parallel:\n        spawn:\n            c.receive(ch)\nf()\n",
+            "c",
+        ),
     ];
     for (src, name) in rows {
         rejects(src, &format!("'{name}' is this task's copy"));
@@ -696,6 +700,10 @@ fn d4_rule3_writing_closure_crossing_a_task_is_an_error() {
     rejects(
         "G := [1]\ng := fn(): G.push(2)\nparallel:\n    spawn:\n        g()\n",
         "'G' is this task's copy",
+    );
+    rejects(
+        "fn f():\n    xs := [1]\n    parallel:\n        spawn (fn(): xs.push(2))()\nf()\n",
+        "'xs' is this task's copy",
     );
 }
 

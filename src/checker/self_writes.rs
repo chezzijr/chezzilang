@@ -108,6 +108,11 @@ impl Scan {
                         WaitArmKind::Recv { target, chan } => {
                             self.expr(chan);
                             if let WaitTarget::Assign(expr) = target {
+                                if let Some(links) = self_chain(expr)
+                                    && !links.is_empty()
+                                {
+                                    self.ops.push(SelfOp::Store(links));
+                                }
                                 self.expr(expr);
                             }
                         }

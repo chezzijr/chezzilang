@@ -2960,17 +2960,20 @@ impl Checker {
     }
 
     pub(super) fn value_writes(&self, expr: &Expr) -> Vec<String> {
-        let ExprKind::Ident(name) = &expr.kind else {
-            return Vec::new();
-        };
-        let Some(scope) = self.owning_scope(name) else {
-            return Vec::new();
-        };
-        self.written_captures
-            .get(scope)
-            .and_then(|table| table.get(name))
-            .cloned()
-            .unwrap_or_default()
+        match &expr.kind {
+            ExprKind::Ident(name) => self
+                .owning_scope(name)
+                .and_then(|scope| self.written_captures.get(scope))
+                .and_then(|table| table.get(name))
+                .cloned()
+                .unwrap_or_default(),
+            ExprKind::Closure { body, .. } => self
+                .closure_literal_writes
+                .get(&(self.graph_module_idx, body.span))
+                .cloned()
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        }
     }
 
     fn infer_self_writers(&mut self, stmts: &[Stmt]) {
