@@ -507,6 +507,16 @@ fn spawn_body_direct_write_to_captured_binding_is_a_compile_time_error() {
     );
 }
 
+/// D4 must follow a statically known free function's parameter write back to the task capture.
+/// This currently returns no checker errors; the runtime faults at `xs.push(2)` instead.
+#[test]
+fn spawn_body_named_function_parameter_write_to_captured_binding_is_a_compile_time_error() {
+    rejects(
+        "fn bump(xs: List[int]):\n    xs.push(2)\n\nfn main():\n    xs := [1]\n    parallel:\n        spawn:\n            bump(xs)\n\nmain()\n",
+        "'xs' is this task's copy: a write to it would be lost at the join",
+    );
+}
+
 /// Removing D4 rule 1 makes this source return zero matching errors. Speculative checking must not
 /// report the same write twice.
 #[test]
