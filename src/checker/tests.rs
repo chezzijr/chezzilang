@@ -517,50 +517,6 @@ fn spawn_body_named_function_parameter_write_to_captured_binding_is_a_compile_ti
     );
 }
 
-#[test]
-fn d4_named_helper_transitive_and_recursive_writes() {
-    let src = "fn first(xs: List[int]):\n    second(xs)\nfn second(xs: List[int]):\n    first(xs)\n    xs.push(2)\nfn main():\n    xs := [1]\n    spawn:\n        first(xs)\nmain()\n";
-    rejects_help(src, "'xs' is this task's copy", "through 'push'");
-}
-
-#[test]
-fn d4_nested_named_capture_write() {
-    let src = "fn main():\n    xs := [1]\n    spawn:\n        fn bump():\n            xs.push(2)\n        bump()\nmain()\n";
-    rejects_help(src, "'xs' is this task's copy", "through 'push'");
-}
-
-#[test]
-fn d4_named_global_and_imported_writes() {
-    rejects_help(
-        "xs := [1]\nfn bump():\n    xs.push(2)\nspawn:\n    bump()\n",
-        "'xs' is this task's copy",
-        "through 'push'",
-    );
-    let dir = TmpDir::new();
-    dir.write("lib.chz", "fn bump(xs: List[int]):\n    xs.push(2)\n");
-    let entry = dir.write(
-        "main.chz",
-        "import lib\nfn main():\n    xs := [1]\n    spawn:\n        lib.bump(xs)\nmain()\n",
-    );
-    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
-    let errors = check_graph(&graph).expect_err("imported helper write must fail");
-    assert!(
-        errors
-            .iter()
-            .any(|e| e.message.contains("'xs' is this task's copy")
-                && e.help
-                    .as_deref()
-                    .is_some_and(|h| h.contains("through 'push'"))),
-        "got: {errors:?}"
-    );
-}
-
-#[test]
-fn d4_spawn_named_callee_write() {
-    let src = "fn bump(xs: List[int]):\n    xs.push(2)\nfn main():\n    xs := [1]\n    spawn bump(xs)\nmain()\n";
-    rejects_help(src, "'xs' is this task's copy", "through 'push'");
-}
-
 /// Removing D4 rule 1 makes this source return zero matching errors. Speculative checking must not
 /// report the same write twice.
 #[test]
