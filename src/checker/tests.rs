@@ -9564,6 +9564,22 @@ fn imported_alias_patterns_resolve() {
 }
 
 #[test]
+fn imported_alias_does_not_license_the_target_enum_name() {
+    // Must still fail (DEC-066): importing `Tone` hydrates `Shade`'s variants so `Tone.Dark`
+    // resolves, but the bare target name `Shade` stays unimported in a pattern too.
+    files_reject(
+        &[
+            ("aliases.chz", ALIAS_LIB),
+            (
+                "main.chz",
+                "import Tone from aliases\nx := Tone.Dark(3)\nmatch x:\n    Shade.Dark(n): print(n)\n    Shade.Light: print(0)\n",
+            ),
+        ],
+        "enum 'Shade' has no variant 'Dark'",
+    );
+}
+
+#[test]
 fn imported_alias_defaults_select_owner() {
     const LIB: &str = "struct Cfg:\n    n: int = 4\n    fn make(k: int = 9) -> Cfg:\n        return Cfg(k)\ntype Conf = Cfg\n";
     files_ok(&[

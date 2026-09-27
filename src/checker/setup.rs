@@ -271,6 +271,18 @@ impl Checker {
         self.nominal_alias_target(&asig.body)
     }
 
+    /// Whether enum `key` reached this module as ITSELF — a named import under any bind name, or a
+    /// whole-module import of its declaring module — and not only as the hydrated target of an
+    /// alias (TICKET-172, DEC-066). Gates the pattern's scrutinee fallback for a bare enum name.
+    pub(super) fn enum_key_imported(&self, key: &str) -> bool {
+        self.bare_types.values().any(|k| k == key)
+            || self.imported_modules.values().any(|mid| {
+                self.module_sigs
+                    .get(mid)
+                    .is_some_and(|sig| sig.enum_defs.keys().any(|n| self.type_key(mid, n) == key))
+            })
+    }
+
     /// Register the SHAPE of an imported alias's nominal target under its canonical key
     /// (TICKET-172), so constructor/variant/static dispatch finds it in the local tables.
     /// Deliberately NOT the bare `*_names` sets or `bare_types`: importing `Position` must not

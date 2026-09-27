@@ -3531,7 +3531,13 @@ impl Checker {
                         None => match self.bare_types.get(en) {
                             Some(k) => k.clone(),
                             None => match scrut_enum {
-                                Some(s) if crate::compiler::bare_display(s) == *en => s.to_string(),
+                                Some(s)
+                                    if crate::compiler::bare_display(s) == *en
+                                        && (self.enum_names.contains(en)
+                                            || self.enum_key_imported(s)) =>
+                                {
+                                    s.to_string()
+                                }
                                 _ => en.to_string(),
                             },
                         },
