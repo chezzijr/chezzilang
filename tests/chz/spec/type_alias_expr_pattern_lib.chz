@@ -1,0 +1,35 @@
+# TICKET-172 fixture for `type_alias_expr_pattern_test.chz`: nominal types and the aliases an
+# importer reaches them through (named, qualified, chained, pinned generic).
+
+struct Point:
+    x: int = 1
+    y: int = 2
+    fn origin(z: int = 0) -> Point:
+        return Point(z, z)
+
+enum Shade:
+    Light
+    Dark(int)
+    fn level(self) -> int:
+        return match self:
+            Shade.Light: 0
+            Shade.Dark(n): n
+
+newtype UserId = int
+
+struct Box[T]:
+    v: T
+    fn of(v: T) -> Box[T]:
+        return Box(v)
+
+type Position = Point
+type Tone = Shade
+type UserRef = UserId
+type IntBox = Box[int]
+type Spot = Position
+
+fn show(p: Point) -> str:
+    return "Point(" + str(p.x) + "," + str(p.y) + ")"
+
+fn uid(u: UserId) -> int:
+    return int(u)

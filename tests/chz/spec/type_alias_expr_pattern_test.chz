@@ -1,6 +1,12 @@
 # W10-4: a LOCAL `type` alias resolves in expression AND pattern position — a variant ctor, a
 # variant pattern, a struct/newtype ctor, a static method call, and a generic instantiation's static
 # method — not just type position. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+# TICKET-172: the same forms through an IMPORTED alias (named and `module.Alias`) and through a
+# LOCAL alias whose body is `module.Type`, against `type_alias_expr_pattern_lib.chz`.
+
+import Position, Tone, UserRef, IntBox, Spot, show, uid from type_alias_expr_pattern_lib
+import Position as Pos from type_alias_expr_pattern_lib
+import type_alias_expr_pattern_lib as tl
 
 enum E:
     A(int)
@@ -19,6 +25,11 @@ struct Box[T]:
 type F = E
 type Q = P
 type IB = Box[int]
+type LP = tl.Point
+type LT = tl.Shade
+type LU = tl.UserId
+type LB = tl.Box[int]
+type LSpot = tl.Spot
 
 test fn alias_variant_pattern():
     y: F = E.A(5)
@@ -36,3 +47,99 @@ test fn alias_struct_ctor_and_static():
 
 test fn alias_generic_static():
     assert IB.of(3).v == 3
+
+# No defaults here: this pins the runtime KEYS (compiler) before any desugar change. A dead alias
+# key faults at construction; a wrong nominal key prints the wrong type name or fails `==`.
+test fn alias_runtime_keys():
+    assert str(Position(3, 4)) == "Point(x=3, y=4)"
+    assert show(Position(3, 4)) == "Point(3,4)"
+    assert show(Spot(5, 6)) == "Point(5,6)"
+    assert show(Pos(7, 8)) == "Point(7,8)"
+    assert show(Position.origin(2)) == "Point(2,2)"
+    assert Tone.Dark(3).level() == 3
+    assert Tone.Light.level() == 0
+    assert Tone.Dark(3) == tl.Shade.Dark(3)
+    assert uid(UserRef(7)) == 7
+    assert IntBox.of(9).v == 9
+    assert tl.show(tl.Position(1, 2)) == "Point(1,2)"
+    assert tl.show(tl.Spot(1, 3)) == "Point(1,3)"
+    assert tl.show(tl.Position.origin(4)) == "Point(4,4)"
+    assert tl.Tone.Dark(4) == tl.Shade.Dark(4)
+    assert tl.Tone.Light == tl.Shade.Light
+    assert tl.uid(tl.UserRef(5)) == 5
+    assert tl.IntBox.of(6).v == 6
+    assert show(LP(1, 1)) == "Point(1,1)"
+    assert show(LSpot(2, 1)) == "Point(2,1)"
+    assert LT.Dark(2) == tl.Shade.Dark(2)
+    assert LT.Light == tl.Shade.Light
+    assert uid(LU(3)) == 3
+    assert LB.of(4).v == 4
+
+fn tone_n(s: tl.Shade) -> int:
+    return match s:
+        Tone.Dark(n): n
+        Tone.Light: -1
+
+fn tone_q(s: tl.Shade) -> int:
+    return match s:
+        tl.Tone.Dark(n): n
+        tl.Tone.Light: -1
+
+fn opt_tone(o: Option[tl.Shade]) -> int:
+    return match o:
+        Some(Tone.Dark(n)): n
+        Some(Tone.Light): -1
+        None: -2
+
+fn pos_sum(p: tl.Point) -> int:
+    return match p:
+        Position(x, y): x + y
+
+fn pos_sum_q(p: tl.Point) -> int:
+    return match p:
+        tl.Position(x, y): x * 10 + y
+
+test fn imported_alias_nominal_paths():
+    assert show(Position()) == "Point(1,2)"
+    assert show(Position(5)) == "Point(5,2)"
+    assert show(Position.origin()) == "Point(0,0)"
+    assert show(Pos()) == "Point(1,2)"
+    assert show(Pos.origin()) == "Point(0,0)"
+    assert show(Spot()) == "Point(1,2)"
+    assert show(tl.Position()) == "Point(1,2)"
+    assert show(tl.Position.origin()) == "Point(0,0)"
+    assert show(tl.Spot.origin()) == "Point(0,0)"
+    assert tone_n(Tone.Dark(6)) == 6
+    assert tone_n(tl.Tone.Light) == -1
+    assert tone_q(Tone.Dark(7)) == 7
+    assert tone_q(Tone.Light) == -1
+    assert opt_tone(Some(Tone.Dark(8))) == 8
+    assert opt_tone(Some(Tone.Light)) == -1
+    assert opt_tone(None) == -2
+    assert pos_sum(Position(2, 3)) == 5
+    assert pos_sum_q(tl.Position(2, 3)) == 23
+    b := IntBox.of(11)
+    assert b.v == 11
+    assert tl.IntBox.of(12).v == 12
+
+fn lt_n(s: LT) -> int:
+    return match s:
+        LT.Dark(n): n
+        LT.Light: -1
+
+fn lp_sum(p: LP) -> int:
+    return match p:
+        LP(x, y): x + y
+
+test fn local_qualified_alias_paths():
+    assert show(LP()) == "Point(1,2)"
+    assert show(LP.origin()) == "Point(0,0)"
+    assert show(LP.origin(3)) == "Point(3,3)"
+    assert show(LSpot()) == "Point(1,2)"
+    assert lt_n(LT.Dark(9)) == 9
+    assert lt_n(LT.Light) == -1
+    assert lt_n(Tone.Dark(4)) == 4
+    assert lp_sum(LP(4, 5)) == 9
+    assert lp_sum(Position(1, 1)) == 2
+    assert uid(LU(13)) == 13
+    assert LB.of(14).v == 14

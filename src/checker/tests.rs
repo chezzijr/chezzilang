@@ -9371,32 +9371,34 @@ fn alias_variant_typo_names_the_alias() {
     );
 }
 
-/// TICKET-065 review finding: an alias of a QUALIFIED type (`type P = geo.Point`) must stay
-/// unresolved in expression position — the compiler's `bare_types` re-point only chases a
-/// `Type::Named`/`Type::Generic` head, never `Type::Qualified`, so accepting this here would be
-/// check-OK-then-compile-miss.
+/// TICKET-172 (was TICKET-065's negative pin): a local alias of a QUALIFIED struct (`type P =
+/// geo.Point`) constructs and calls statics — the compiler now re-points the alias's runtime key to
+/// `geo`'s `Point`, so the checker no longer has to refuse it.
 #[test]
-fn alias_of_qualified_type_is_not_a_constructor() {
-    files_reject(
-        &[
-            ("geo.chz", "struct Point:\n    x: int\n    y: int\n"),
-            ("main.chz", "import geo\ntype P = geo.Point\nx := P(1, 2)\n"),
-        ],
-        "unknown name 'P'",
-    );
+fn alias_of_qualified_type_constructs() {
+    files_ok(&[
+        (
+            "geo.chz",
+            "struct Point:\n    x: int\n    y: int\n    fn zero() -> Point:\n        return Point(0, 0)\n",
+        ),
+        (
+            "main.chz",
+            "import geo\ntype P = geo.Point\nx: geo.Point = P(1, 2)\ny: geo.Point = P.zero()\n",
+        ),
+    ]);
 }
 
-/// TICKET-065 review finding: an alias of a QUALIFIED enum (`type F = geo.E`) must stay
-/// unresolved in a variant call — same reasoning as `alias_of_qualified_type_is_not_a_constructor`.
+/// TICKET-172 (was TICKET-065's negative pin): a local alias of a QUALIFIED enum (`type F = geo.E`)
+/// resolves its payload and nullary variants.
 #[test]
-fn alias_of_qualified_enum_variant_is_not_resolved() {
-    files_reject(
-        &[
-            ("geo.chz", "enum E:\n    A(int)\n"),
-            ("main.chz", "import geo\ntype F = geo.E\nz := F.A(5)\n"),
-        ],
-        "unknown name 'F'",
-    );
+fn alias_of_qualified_enum_variant_resolves() {
+    files_ok(&[
+        ("geo.chz", "enum E:\n    A(int)\n    B\n"),
+        (
+            "main.chz",
+            "import geo\ntype F = geo.E\nz: geo.E = F.A(5)\nw: geo.E = F.B\n",
+        ),
+    ]);
 }
 
 #[test]
@@ -9411,6 +9413,264 @@ fn imported_type_alias_resolves_in_expression_position() {
             "import Position from aliases\np := Position(1)\n",
         ),
     ]);
+}
+
+/// TICKET-172 fixture: nominal types, the aliases a caller imports, and one function per type that
+/// accepts ONLY the canonical type — so a call like `show(Position(1, 2))` proves nominal identity
+/// without the caller ever importing `Point` itself.
+const ALIAS_LIB: &str = "\
+struct Point:
+    x: int
+    y: int
+    fn origin() -> Point:
+        return Point(0, 0)
+enum Shade:
+    Light
+    Dark(int)
+newtype UserId = int
+struct Box[T]:
+    v: T
+    fn of(v: T) -> Box[T]:
+        return Box(v)
+type Position = Point
+type Tone = Shade
+type UserRef = UserId
+type IntBox = Box[int]
+type Spot = Position
+type Count = int
+fn show(p: Point) -> int:
+    return p.x
+fn shade_n(s: Shade) -> int:
+    return 1
+fn uid(u: UserId) -> int:
+    return 2
+fn unbox(b: Box[int]) -> int:
+    return b.v
+";
+
+#[test]
+fn imported_alias_heads_preserve_nominal_identity() {
+    // Named imports, a renamed import, an exported chain (`Spot`), and a local alias of a named
+    // import — none of them imports the canonical type names.
+    files_ok(&[
+        ("aliases.chz", ALIAS_LIB),
+        (
+            "main.chz",
+            "import Position, Tone, UserRef, IntBox, Spot, show, shade_n, uid, unbox from aliases\n\
+             import Position as Pos from aliases\n\
+             type Local = Pos\n\
+             a := show(Position(1, 2)) + show(Position.origin()) + show(Pos(3, 4))\n\
+             b := show(Spot(5, 6)) + show(Local(7, 8)) + show(Local.origin())\n\
+             c := shade_n(Tone.Dark(3)) + shade_n(Tone.Light)\n\
+             d := uid(UserRef(7)) + unbox(IntBox.of(3))\n",
+        ),
+    ]);
+    // Qualified access through a whole-module import.
+    files_ok(&[
+        ("aliases.chz", ALIAS_LIB),
+        (
+            "main.chz",
+            "import aliases as a\n\
+             x := a.show(a.Position(1, 2)) + a.show(a.Position.origin()) + a.show(a.Spot(1, 1))\n\
+             y := a.shade_n(a.Tone.Dark(3)) + a.shade_n(a.Tone.Light)\n\
+             z := a.uid(a.UserRef(7)) + a.unbox(a.IntBox.of(3))\n",
+        ),
+    ]);
+    // A LOCAL alias whose body is `module.Type` (the former TICKET-174 half), including a
+    // qualified alias of an alias and a pinned generic.
+    files_ok(&[
+        ("aliases.chz", ALIAS_LIB),
+        (
+            "main.chz",
+            "import aliases as a\n\
+             type P = a.Point\n\
+             type PP = a.Position\n\
+             type T = a.Shade\n\
+             type U = a.UserId\n\
+             type LB = a.Box[int]\n\
+             x := a.show(P(1, 2)) + a.show(P.origin()) + a.show(PP(3, 4))\n\
+             y := a.shade_n(T.Dark(2)) + a.shade_n(T.Light)\n\
+             z := a.uid(U(3)) + a.unbox(LB.of(4))\n",
+        ),
+    ]);
+}
+
+#[test]
+fn imported_alias_scalar_is_not_a_constructor() {
+    // Must still fail: a scalar alias stays a type spelling, in every spelling.
+    files_reject(
+        &[
+            ("aliases.chz", ALIAS_LIB),
+            ("main.chz", "import Count from aliases\nx := Count(3)\n"),
+        ],
+        "unknown name 'Count'",
+    );
+    files_reject(
+        &[
+            ("aliases.chz", ALIAS_LIB),
+            ("main.chz", "import aliases as a\nx := a.Count(3)\n"),
+        ],
+        "module 'a' has no member 'Count'",
+    );
+    files_reject(
+        &[
+            ("aliases.chz", ALIAS_LIB),
+            (
+                "main.chz",
+                "import aliases as a\ntype C = a.Count\nx := C(3)\n",
+            ),
+        ],
+        "unknown name 'C'",
+    );
+}
+
+#[test]
+fn imported_alias_shadowed_by_a_local_is_a_value() {
+    // Must still fail: a parameter named like the alias shadows it, so `Position(1, 2)` calls the
+    // `int` parameter.
+    files_reject(
+        &[
+            ("aliases.chz", ALIAS_LIB),
+            (
+                "main.chz",
+                "import Position from aliases\nfn f(Position: int) -> int:\n    x := Position(1, 2)\n    return 0\n",
+            ),
+        ],
+        "not callable",
+    );
+}
+
+#[test]
+fn imported_alias_patterns_resolve() {
+    files_ok(&[
+        ("aliases.chz", ALIAS_LIB),
+        (
+            "main.chz",
+            "import Tone, Position from aliases\n\
+             import aliases as a\n\
+             type T = a.Shade\n\
+             type TT = a.Tone\n\
+             type P = a.Point\n\
+             fn named(s: a.Shade) -> int:\n    match s:\n        Tone.Dark(n): return n\n        Tone.Light: return 0\n\
+             fn local_q(s: a.Shade) -> int:\n    match s:\n        T.Dark(n): return n\n        T.Light: return 0\n\
+             fn chain_q(s: a.Shade) -> int:\n    match s:\n        TT.Dark(n): return n\n        TT.Light: return 0\n\
+             fn three_part(s: a.Shade) -> int:\n    match s:\n        a.Tone.Dark(n): return n\n        a.Tone.Light: return 0\n\
+             fn nested(o: Option[a.Shade]) -> int:\n    match o:\n        Some(Tone.Dark(n)): return n\n        Some(Tone.Light): return 1\n        None: return 2\n\
+             fn st(p: a.Point) -> int:\n    match p:\n        Position(x, y): return x + y\n\
+             fn st_q(p: a.Point) -> int:\n    match p:\n        a.Position(x, y): return x + y\n\
+             fn st_l(p: a.Point) -> int:\n    match p:\n        P(x, y): return x + y\n",
+        ),
+    ]);
+}
+
+#[test]
+fn imported_alias_defaults_select_owner() {
+    const LIB: &str = "struct Cfg:\n    n: int = 4\n    fn make(k: int = 9) -> Cfg:\n        return Cfg(k)\ntype Conf = Cfg\n";
+    files_ok(&[
+        ("lib.chz", LIB),
+        (
+            "main.chz",
+            "import Conf from lib\nimport Conf as C2 from lib\nimport lib as l\ntype LC = l.Cfg\n\
+             a := Conf()\nb := Conf.make()\nc := C2()\nd := C2.make()\n\
+             e := l.Conf()\nf := l.Conf.make()\ng := LC()\nh := LC.make()\n",
+        ),
+    ]);
+}
+
+#[test]
+fn local_alias_ctor_fills_struct_defaults() {
+    ok(
+        "struct P:\n    x: int = 5\n    fn mk(a: int = 9) -> P:\n        return P(a)\ntype Q = P\nprint(Q(), Q(1), Q.mk())\n",
+    );
+}
+
+#[test]
+fn alias_static_default_collision_preserves_arity() {
+    // Must still fail: two modules declare `CC.new` with DISAGREEING defaults, so the collision-nulled
+    // `methods_by_struct` key must reach the name-keyed fallback — an alias head may not pick one.
+    let c1 = "struct CC:\n    v: int\n    fn new(n: int = 31) -> CC:\n        return CC(n)\ntype AliasCC = CC\n";
+    let c2 = "struct CC:\n    v: int\n    fn new(n: int = 32) -> CC:\n        return CC(n)\n";
+    files_reject(
+        &[
+            ("lib_c1.chz", c1),
+            ("lib_c2.chz", c2),
+            (
+                "main.chz",
+                "import lib_c1\nimport lib_c2\nprint(lib_c1.AliasCC.new().v)\n",
+            ),
+        ],
+        "'new' expects 1 argument(s), got 0",
+    );
+    files_reject(
+        &[
+            ("lib_c1.chz", c1),
+            ("lib_c2.chz", c2),
+            (
+                "main.chz",
+                "import AliasCC as AC from lib_c1\nimport lib_c2\nprint(AC.new().v)\n",
+            ),
+        ],
+        "'new' expects 1 argument(s), got 0",
+    );
+}
+
+#[test]
+fn imported_alias_pinned_generic_rejects_wrong_argument() {
+    for main in [
+        "import IntBox from aliases\nx := IntBox.of(\"bad\")\n",
+        "import aliases as a\nx := a.IntBox.of(\"bad\")\n",
+        "import aliases as a\ntype LB = a.Box[int]\nx := LB.of(\"bad\")\n",
+        "import aliases as a\ntype LB = a.IntBox\nx := LB(\"bad\")\n",
+    ] {
+        files_reject(
+            &[("aliases.chz", ALIAS_LIB), ("main.chz", main)],
+            "expected",
+        );
+    }
+    for main in [
+        "import IntBox from aliases\nx := IntBox[str](\"s\")\n",
+        "import aliases as a\ntype LB = a.Box[int]\nx := LB[str](\"s\")\n",
+    ] {
+        files_reject(
+            &[("aliases.chz", ALIAS_LIB), ("main.chz", main)],
+            "already fixes its type arguments",
+        );
+    }
+}
+
+#[test]
+fn missing_imported_alias_member_is_precise() {
+    files_reject(
+        &[
+            ("aliases.chz", ALIAS_LIB),
+            ("main.chz", "import aliases as a\nx := a.Missing(1)\n"),
+        ],
+        "module 'a' has no member 'Missing'",
+    );
+    files_reject(
+        &[
+            ("aliases.chz", ALIAS_LIB),
+            (
+                "main.chz",
+                "import aliases as a\nfn f(s: a.Shade) -> int:\n    match s:\n        missing.Tone.Dark(n): return n\n        _: return 0\n",
+            ),
+        ],
+        "unknown module 'missing'",
+    );
+    files_reject(
+        &[
+            ("aliases.chz", ALIAS_LIB),
+            ("main.chz", "import Tone from aliases\nx := Tone.Nope\n"),
+        ],
+        "enum 'Tone' has no variant 'Nope'",
+    );
+    files_reject(
+        &[
+            ("aliases.chz", ALIAS_LIB),
+            ("main.chz", "import aliases as a\nx := a.Tone.Nope(1)\n"),
+        ],
+        "no",
+    );
 }
 
 #[test]
