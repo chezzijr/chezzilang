@@ -9400,6 +9400,20 @@ fn alias_of_qualified_enum_variant_is_not_resolved() {
 }
 
 #[test]
+fn imported_type_alias_resolves_in_expression_position() {
+    files_ok(&[
+        (
+            "aliases.chz",
+            "struct Point:\n    x: int\ntype Position = Point\n",
+        ),
+        (
+            "main.chz",
+            "import Position from aliases\np := Position(1)\n",
+        ),
+    ]);
+}
+
+#[test]
 fn bool_match_expression_both_arms_no_wildcard_is_exhaustive() {
     ok("b := true\nx := match b:\n    true: 1\n    false: 2\n");
 }
