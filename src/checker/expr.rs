@@ -3832,6 +3832,7 @@ impl Checker {
                             self.check_args_range(method, &sig.params, sig.min_params, args, span);
                             self.capture_floors.pop();
                             if let Some(task) = args.first() {
+                                self.report_named_call_writes(task, &[], true);
                                 let mut writes: Vec<String> = match &task.kind {
                                     ExprKind::Closure { body, .. } => self
                                         .closure_literal_writes

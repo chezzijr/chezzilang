@@ -577,6 +577,24 @@ fn d4_spawn_named_callee_write() {
     );
 }
 
+#[test]
+fn d4_executor_submit_named_capture_write_and_read_only() {
+    let errs = check_entry(
+        "import std.concurrency\nfn main():\n    xs := [1]\n    fn bump():\n        xs.push(2)\n    ex := Executor()\n    ex.submit(bump)\n    ex.shutdown()\nmain()\n",
+    );
+    assert!(
+        errs.iter().any(|e| e
+            .message
+            .contains("'xs' is this task's copy: a write to it would be lost at the join")
+            && e.help.as_deref().is_some_and(|h| h.contains("push"))
+            && e.span.line == 7),
+        "expected submit-argument error with push help at line 7, got: {errs:?}"
+    );
+    entry_ok(
+        "import std.concurrency\nfn main():\n    xs := [1]\n    fn read():\n        print(xs.len())\n    ex := Executor()\n    ex.submit(read)\n    ex.shutdown()\nmain()\n",
+    );
+}
+
 /// Each row must stay clean if a named write runs on an ordinary value, or never runs by name.
 #[test]
 fn d4_named_helper_valid_calls_and_indirection() {
