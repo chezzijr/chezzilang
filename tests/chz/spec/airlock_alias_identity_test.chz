@@ -14,8 +14,9 @@ test fn container_alias_write_through_one_alias_faults():
     r := Channel[str](1)
     parallel:
         spawn:
+            write_outer := d4_push_nested
             res := recover:
-                d4_push_nested(outer)
+                write_outer(outer)
             match res:
                 Ok(_): r.send("no-fault")
                 Err(e): r.send(e.message())
@@ -34,8 +35,9 @@ test fn struct_alias_write_through_one_alias_faults():
     r := Channel[str](1)
     parallel:
         spawn:
+            write_pair := d4_set_box
             res := recover:
-                d4_set_box(pair)
+                write_pair(pair)
             match res:
                 Ok(_): r.send("no-fault")
                 Err(e): r.send(e.message())

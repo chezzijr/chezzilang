@@ -483,10 +483,13 @@ for r in results:
 
 The checker also rejects a closure known to write a capture when the closure is executed across a task
 boundary: a captured call inside `spawn:`, `spawn g()`, or `Executor.submit(g)`/an inline literal.
-It does not treat `spawn run(g)` arguments or `Channel.send(g)` as execution, because the receiver may
-never call `g`. A closure rebound with `=`, a protocol/generic/fn-value receiver, a write hidden behind
-a called function or nested `fn`, and an unresolved index link stay silent and rely on the runtime
-fault. `spawn f(args)` evaluates `args` in the parent, so those expressions are not task positions.
+It also reports proven writes made by a directly called named function, including a nested `fn` or
+one reached through another named function (TICKET-171). A function may write through a parameter,
+a lexical capture, or a module global. The diagnostic points at the task-side call and names the
+mutating operation in help. It does not treat `spawn run(g)` arguments or `Channel.send(g)` as
+execution, because the receiver may never call `g`. Calls through function values, unresolved
+projections, and protocol/generic receivers still rely on the runtime fault. `spawn f(args)`
+evaluates `args` in the parent, so those expressions are not task positions.
 
 Reads, parent-side writes, task-created values, `.copy()` followed by mutation, handle writes, and a
 task-local `:=` shadow remain valid. Layer C remains the backstop for every declined shape. An error

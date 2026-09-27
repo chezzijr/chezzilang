@@ -23,8 +23,9 @@ test fn local_alias_of_global_element_write_through_alias_faults():
     r := Channel[str](1)
     parallel:
         spawn:
+            write_inner := d4_push2
             res := recover:
-                d4_push2(inner)
+                write_inner(inner)
             match res:
                 Ok(_): r.send("no-fault")
                 Err(e): r.send(e.message())
@@ -84,8 +85,9 @@ test fn local_alias_of_a_whole_global_write_through_alias_faults():
     r := Channel[str](1)
     parallel:
         spawn:
+            write_a := d4_push2
             res := recover:
-                d4_push2(a[0])
+                write_a(a[0])
             match res:
                 Ok(_): r.send("no-fault")
                 Err(e): r.send(e.message())
@@ -106,8 +108,9 @@ test fn local_alias_of_a_struct_in_a_global_map_write_through_alias_faults():
     r := Channel[str](1)
     parallel:
         spawn:
+            write_p := d4_set_p
             res := recover:
-                d4_set_p(p)
+                write_p(p)
             match res:
                 Ok(_): r.send("no-fault")
                 Err(e): r.send(e.message())
@@ -142,8 +145,9 @@ test fn write_through_spawn_adopted_alias_faults():
     c := Channel[str](1)
     parallel:
         spawn:
+            write_a := d4_push2
             res := recover:
-                d4_push2(a)
+                write_a(a)
             match res:
                 Ok(_): c.send("no-fault")
                 Err(e): c.send(e.message())
@@ -159,8 +163,9 @@ test fn element_alias_write_faults():
     c := Channel[str](1)
     parallel:
         spawn:
+            write_inner := d4_push2
             res := recover:
-                d4_push2(inner)
+                write_inner(inner)
             match res:
                 Ok(_): c.send("no-fault")
                 Err(e): c.send(e.message())
@@ -196,8 +201,9 @@ test fn struct_in_map_alias_write_faults():
     c := Channel[str](1)
     parallel:
         spawn:
+            write_p := d4_set_p116
             res := recover:
-                d4_set_p116(p)
+                write_p(p)
             match res:
                 Ok(_): c.send("no-fault")
                 Err(e): c.send(e.message())
@@ -212,8 +218,9 @@ test fn closure_built_before_the_alias_push_faults():
     parallel:
         spawn:
             _f := fn() -> str: "{gl5}"
+            write_a := d4_push2
             res := recover:
-                d4_push2(a)
+                write_a(a)
             match res:
                 Ok(_): c.send("no-fault")
                 Err(e): c.send(e.message())
@@ -227,8 +234,9 @@ test fn nested_nursery_send_faults():
     c := Channel[str](1)
     parallel:
         spawn:
+            write_a := d4_push2
             res := recover:
-                d4_push2(a)
+                write_a(a)
             match res:
                 Ok(_): c.send("no-fault")
                 Err(e): c.send(e.message())
@@ -266,8 +274,9 @@ test fn two_hop_closure_alias_write_faults():
     d := Channel[fn() -> str](1)
     parallel:
         spawn:
+            write_a := d4_push2
             res := recover:
-                d4_push2(a)
+                write_a(a)
             match res:
                 Ok(_): c.send("no-fault")
                 Err(e): c.send(e.message())

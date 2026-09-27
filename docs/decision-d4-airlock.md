@@ -111,12 +111,13 @@ So D4 detects a write in two layers:
   bit, so a read-only task pays nothing. An object the task creates itself (`ys := xs.copy()`, a new
   list) is unmarked and freely writable. The mark is on the task's COPY; the parent's original is
   never marked, which is the difference from Kotlin/Native's old model below.
-- **A: checker inference is the early error.** The checker infers, per method, whether it writes
-  `self`. A method does if its body writes `self.f`/`self[i]`, or calls a known-writing method on
-  `self` or on one of its fields; this is a fixed point over the call graph, the same kind of
-  inference as return types (no `mut self` annotation). With that it reports rules 1 and 3 at compile
-  time for direct calls. Where it cannot know (a protocol or generic `T` receiver, a fn value, a
-  closure it did not see), it DECLINES and leaves the write to layer C. Per the CLAUDE.md
+- **A: checker inference is the early error.** The checker infers writes through `self` in user
+  methods and through parameters, lexical captures, and globals in named functions. Direct stores,
+  typed mutators, and statically named calls form a fixed point, including recursive calls. At a
+  task-side direct call, it maps those writes to task copies and reports rules 1 and 3. A
+  `spawn f(args)` call evaluates `args` in the parent, then applies `f`'s effects in the task.
+  Passing a function value alone never applies an effect. Indirect calls, unresolved projections,
+  protocol or generic `T` receivers, and opaque closures decline to layer C. Per the CLAUDE.md
   warning-gate convention, it must never reject a program that would not have faulted at runtime.
 - **Rejected: B, an explicit `mut self` (Rust's `&mut self`, Pony's reference capabilities).** It is
   complete at compile time, but it adds syntax and boilerplate on every method and changes every
@@ -174,7 +175,7 @@ pins or examples and were migrated through declined helper-call shapes. A closur
 - **Deep vs shallow mark.** The airlock deep-copies, so every object in the copied graph is marked,
   not just the root. `xs[0].push(2)` must fault as well as `xs.push(2)`. The mark is set in the same
   walk that copies, so it costs no extra traversal.
-- **Layer A's fixed point** runs over user methods only. A native method's write set is its
+- **Layer A's fixed point** runs over user methods and statically named functions. A native method's write set is its
   `mutates_receiver` entry (extended to every mutating native, with a drift test like
   `builtin_method_slices_all_resolve`).
 - **Rule 3 in first-class positions.** A closure stored in a `List` and sent inside it is crossed by

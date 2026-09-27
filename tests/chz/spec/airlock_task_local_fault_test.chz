@@ -17,8 +17,9 @@ test fn captured_scalar_write_inside_spawn_faults():
         spawn:
             fn d4_set_n():
                 n = 5
+            write_n := d4_set_n
             res := recover:
-                d4_set_n()
+                write_n()
             match res:
                 Ok(_): r.send("no-fault")
                 Err(e): r.send(e.message())
@@ -29,8 +30,9 @@ test fn captured_list_push_inside_spawn_faults():
     r := Channel[str](1)
     parallel:
         spawn:
+            write_xs := d4_push2
             res := recover:
-                d4_push2(xs)
+                write_xs(xs)
             match res:
                 Ok(_): r.send("no-fault")
                 Err(e): r.send(e.message())
@@ -50,8 +52,9 @@ test fn struct_method_write_on_spawned_copy_faults():
     r := Channel[str](1)
     parallel:
         spawn:
+            write_c := d4_bump
             res := recover:
-                d4_bump(c)
+                write_c(c)
             match res:
                 Ok(_): r.send("no-fault")
                 Err(e): r.send(e.message())
@@ -66,8 +69,9 @@ test fn module_global_slot_store_in_a_task_faults():
     r := Channel[str](1)
     parallel:
         spawn:
+            write_r3 := r3_bump
             res := recover:
-                r3_bump()
+                write_r3()
             match res:
                 Ok(_): r.send("no-fault")
                 Err(e): r.send(e.message())
@@ -83,8 +87,9 @@ test fn module_global_list_push_in_a_task_faults():
     r := Channel[str](1)
     parallel:
         spawn:
+            write_r4 := r4_bump
             res := recover:
-                r4_bump()
+                write_r4()
             match res:
                 Ok(_): r.send("no-fault")
                 Err(e): r.send(e.message())
@@ -100,8 +105,9 @@ test fn a_top_level_binding_written_in_spawn_faults():
     r := Channel[str](1)
     parallel:
         spawn:
+            write_r1 := d4_set_r1_g
             res := recover:
-                d4_set_r1_g()
+                write_r1()
             match res:
                 Ok(_): r.send("no-fault")
                 Err(e): r.send(e.message())
@@ -146,8 +152,9 @@ test fn a_nested_element_push_faults():
     r := Channel[str](1)
     parallel:
         spawn:
+            write_element := d4_push2
             res := recover:
-                d4_push2(xs[0])
+                write_element(xs[0])
             match res:
                 Ok(_): r.send("no-fault")
                 Err(e): r.send(e.message())
@@ -235,8 +242,9 @@ test fn a_nested_struct_method_write_faults():
     r := Channel[str](1)
     parallel:
         spawn:
+            write_holder := d4_bump_holder
             res := recover:
-                d4_bump_holder(h)
+                write_holder(h)
             match res:
                 Ok(_): r.send("no-fault")
                 Err(e): r.send(e.message())
@@ -264,8 +272,9 @@ test fn a_nested_nursery_inner_task_write_to_a_parent_task_object_faults():
             ys := [1]
             parallel:
                 spawn:
+                    write_ys := d4_push2
                     res := recover:
-                        d4_push2(ys)
+                        write_ys(ys)
                     match res:
                         Ok(_): r.send("no-fault")
                         Err(e): r.send(e.message())
@@ -280,8 +289,9 @@ test fn a_handle_holding_global_list_push_in_a_task_faults():
     r := Channel[str](1)
     parallel:
         spawn:
+            write_hl := r_hl_bump
             res := recover:
-                r_hl_bump()
+                write_hl()
             match res:
                 Ok(_): r.send("no-fault")
                 Err(e): r.send(e.message())
@@ -301,8 +311,9 @@ test fn a_handle_holding_global_struct_field_write_in_a_task_faults():
     r := Channel[str](1)
     parallel:
         spawn:
+            write_hs := r_hs_bump
             res := recover:
-                r_hs_bump()
+                write_hs()
             match res:
                 Ok(_): r.send("no-fault")
                 Err(e): r.send(e.message())

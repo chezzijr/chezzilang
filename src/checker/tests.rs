@@ -39,6 +39,16 @@ fn rejects_help(src: &str, msg_needle: &str, help_needle: &str) {
     );
 }
 
+fn rejects_help_at(src: &str, msg_needle: &str, help_needle: &str, line: u32) {
+    let errs = check_src(src);
+    assert!(
+        errs.iter().any(|e| e.message.contains(msg_needle)
+            && e.help.as_deref().is_some_and(|h| h.contains(help_needle))
+            && e.span.line == line),
+        "expected a task-side error at line {line} with help containing {help_needle:?}, got: {errs:?}"
+    );
+}
+
 /// Type-check a source string, returning the collected WARNINGS (non-fatal diagnostics).
 fn warn_src(src: &str) -> (Vec<CheckError>, Vec<CheckError>) {
     let tokens = lexer::tokenize(src).expect("lex should succeed");
@@ -519,38 +529,73 @@ fn spawn_body_named_function_parameter_write_to_captured_binding_is_a_compile_ti
 
 #[test]
 fn d4_named_helper_transitive_and_recursive_writes() {
-    rejects_help(
+    rejects_help_at(
         "fn bump(xs: List[int], n: int):\n    if n > 0:\n        bump(xs, n - 1)\n    else:\n        xs.push(2)\nfn relay(xs: List[int]):\n    bump(xs, 1)\nfn main():\n    xs := [1]\n    parallel:\n        spawn:\n            relay(xs)\nmain()\n",
         "'xs' is this task's copy: a write to it would be lost at the join",
         "push",
+        12,
     );
 }
 
 #[test]
 fn d4_nested_named_capture_write() {
-    rejects_help(
+    rejects_help_at(
         "fn main():\n    xs := [1]\n    fn bump():\n        xs.push(2)\n    parallel:\n        spawn:\n            bump()\nmain()\n",
         "'xs' is this task's copy: a write to it would be lost at the join",
         "push",
+        7,
     );
 }
 
 #[test]
 fn d4_named_global_and_imported_writes() {
-    rejects_help(
+    rejects_help_at(
         "xs := [1]\nfn bump():\n    xs.push(2)\nfn main():\n    parallel:\n        spawn:\n            bump()\nmain()\n",
         "'xs' is this task's copy: a write to it would be lost at the join",
         "push",
+        7,
+    );
+    files_reject(
+        &[
+            ("lib_w.chz", "fn bump(xs: List[int]):\n    xs.push(2)\n"),
+            (
+                "main.chz",
+                "import lib_w\nfn main():\n    xs := [1]\n    parallel:\n        spawn:\n            lib_w.bump(xs)\nmain()\n",
+            ),
+        ],
+        "'xs' is this task's copy: a write to it would be lost at the join",
     );
 }
 
 #[test]
 fn d4_spawn_named_callee_write() {
-    rejects_help(
+    rejects_help_at(
         "fn bump(xs: List[int]):\n    xs.push(2)\nfn main():\n    xs := [1]\n    parallel:\n        spawn bump(xs)\nmain()\n",
         "'xs' is this task's copy: a write to it would be lost at the join",
         "push",
+        6,
     );
+}
+
+/// Each row must stay clean if a named write runs on an ordinary value, or never runs by name.
+#[test]
+fn d4_named_helper_valid_calls_and_indirection() {
+    for src in [
+        // The same helper may write an ordinary parent-side local.
+        "fn bump(xs: List[int]):\n    xs.push(2)\nfn main():\n    xs := [1]\n    bump(xs)\nmain()\n",
+        // The task creates its own unmarked copy before the call.
+        "fn bump(xs: List[int]):\n    xs.push(2)\nfn main():\n    xs := [1]\n    parallel:\n        spawn:\n            ys := xs.copy()\n            bump(ys)\nmain()\n",
+        // A Channel handle writes shared state, not a task copy.
+        "fn put(c: Channel[int]):\n    c.send(2)\nfn main():\n    c := Channel[int](1)\n    parallel:\n        spawn:\n            put(c)\nmain()\n",
+        // Reading a function value does not execute its body.
+        "fn bump(xs: List[int]):\n    xs.push(2)\nfn main():\n    xs := [1]\n    parallel:\n        spawn:\n            f := bump\n            print(f)\nmain()\n",
+        // An indirect call stays behind the runtime copy-mark backstop.
+        "fn bump(xs: List[int]):\n    xs.push(2)\nfn main():\n    xs := [1]\n    parallel:\n        spawn:\n            f := bump\n            f(xs)\nmain()\n",
+        // A recursive call with no write must not acquire an effect.
+        "fn read(xs: List[int], n: int) -> int:\n    if n == 0:\n        return xs.len()\n    return read(xs, n - 1)\nfn main():\n    xs := [1]\n    parallel:\n        spawn:\n            print(read(xs, 2))\nmain()\n",
+    ] {
+        ok(src);
+    }
 }
 
 /// Removing D4 rule 1 makes this source return zero matching errors. Speculative checking must not

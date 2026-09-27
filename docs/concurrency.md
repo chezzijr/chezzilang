@@ -101,9 +101,12 @@ global writes; to share, use `Shared`/`Channel` ([§7](#7-sendability)).
 writes to captured bindings or module globals, including compound/projected writes and known mutating
 native or user methods. It also rejects a capture-writing closure executed by `spawn g()`, by a call
 inside `spawn:`, or by `Executor.submit`. The diagnostic is byte-identical to the runtime fault.
-Unknown calls, nested functions, generic/protocol receivers, `spawn` argument expressions, and
-`Channel.send` decline to layer C. Reads, task-local copies, handle writes, and parent-side writes stay
-valid. Full rules and ceilings: [`syntax.md` §capture](syntax.md).
+Named function calls now carry proven writes through parameters, captures, and globals, including
+transitive and recursive calls (TICKET-171). A direct call inside `spawn:`, a direct `spawn f(args)`,
+or an `Executor.submit` job reports the write at its task-side call with the mutating operation in
+help. `spawn f(args)` evaluates `args` in the parent. Indirect function values, unresolved paths,
+generic/protocol receivers, and `Channel.send` decline to layer C. Reads, task-local copies, handle
+writes, and parent-side writes stay valid. Full rules and ceilings: [`syntax.md` §capture](syntax.md).
 
 **The copy is taken FRESH, per task, at its `spawn` — at every depth.** A task sees the values current
 when it was spawned (the Go rule: a goroutine reads whatever a package-level var holds when `go` runs).

@@ -168,7 +168,9 @@ test fn assignment_between_two_spawns_refreshes_the_view():
 test fn task_side_mutation_does_not_reach_parent():
     xg = 1
     parallel:
-        spawn: _ := recover: set_x(5)
+        spawn:
+            write_xg := set_x
+            _ := recover: write_xg(5)
     assert xg == 1, "task mutation leaked: {xg}"
 
 fn set_x(v: int):
@@ -311,7 +313,9 @@ test fn a_faulting_task_still_propagates():
 # silently mutating a copy the parent never sees — wrapped so it cannot race the escape.
 fn escape_out() -> Result[int, Error]:
     parallel:
-        spawn: _ := recover: d4_set_esc()
+        spawn:
+            write_esc := d4_set_esc
+            _ := recover: write_esc()
         return Err("bail")
     return Ok(0)
 
