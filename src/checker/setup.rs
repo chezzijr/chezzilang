@@ -188,49 +188,124 @@ impl Checker {
             .unwrap_or_else(|| name.to_string())
     }
 
-    /// Resolve a LOCAL (`self.aliases`) type alias's body, read-only, to a nominal (struct/enum/
-    /// newtype) head — mirrors the compiler's `bare_types` re-point in `compile_module`
-    /// (`src/compiler/mod.rs:1341-1368`) EXACTLY, because that re-point is what makes the resolved
-    /// name lowerable. That walk only ever follows a `Type::Named`/`Type::Generic` head through a
-    /// chain of LOCAL aliases, capped at 64, so this does too: a `Type::Qualified` body (`type P =
-    /// geo.Point`) stops immediately (`None`), and a from-imported alias name is never chased (the
-    /// walk only re-enters `self.aliases`, never `imported_alias_tys`) — hopping either would accept
-    /// a program the compiler can't lower (a review-caught check-OK-then-compile-miss, TICKET-065). A
-    /// cyclic alias also yields `None`: the checker already rejects it as `recursive type alias`
-    /// (`resolve_type`), which stays the only cycle diagnostic.
+    /// Resolve a type alias `name` — LOCAL (`self.aliases`) or named-IMPORTED (`imported_alias_tys`)
+    /// — read-only, to its nominal (struct/enum/newtype) target with the body's pinned type
+    /// arguments. A local chain is walked through `Type::Named`/`Type::Generic` heads, capped at 64
+    /// hops; its last hop may be a named import or a `module.Type` body (TICKET-172). The compiler's
+    /// `assign_type_keys` re-points the same spellings to the same canonical key, so everything
+    /// accepted here lowers. A scalar/protocol/builtin target, or a cycle, is `None`: the checker
+    /// already rejects a cycle as `recursive type alias` (`resolve_type`), which stays the only cycle
+    /// diagnostic.
     pub(super) fn alias_body_ty(&self, name: &str) -> Option<Ty> {
-        let mut head = name.to_string();
-        let mut targs: Vec<Ty>;
+        let Some(mut body) = self.aliases.get(name) else {
+            return self
+                .imported_alias_tys
+                .get(name)
+                .and_then(|t| self.nominal_alias_target(t));
+        };
         let mut depth = 0;
         loop {
-            let body = self.aliases.get(&head)?;
-            match body {
-                Type::Named { name: n, .. } => {
-                    head = n.clone();
-                    targs = Vec::new();
-                }
+            let (head, targs): (&String, Vec<Ty>) = match body {
+                Type::Named { name: n, .. } => (n, Vec::new()),
                 Type::Generic(n, args, ..) => {
-                    head = n.clone();
-                    targs = args.iter().map(|a| self.resolve_ty_ro(a)).collect();
+                    (n, args.iter().map(|a| self.resolve_ty_ro(a)).collect())
+                }
+                Type::Qualified { module, name, args } => {
+                    let args: Vec<Ty> = args.iter().map(|a| self.resolve_ty_ro(a)).collect();
+                    let ty = self.resolve_qualified_ro(module, name, &args);
+                    return self.nominal_alias_target(&ty);
                 }
                 _ => return None,
-            }
+            };
             depth += 1;
             if depth > 64 {
                 return None;
             }
-            if !self.aliases.contains_key(&head) {
-                break;
+            if let Some(next) = self.aliases.get(head) {
+                body = next;
+                continue;
             }
+            let ty = if let Some(t) = self.imported_alias_tys.get(head) {
+                // An imported alias already carries its pinned arguments; it takes no more.
+                if !targs.is_empty() {
+                    return None;
+                }
+                t.clone()
+            } else if self.struct_names.contains(head) {
+                Ty::Struct(self.bare_key(head), targs)
+            } else if self.enum_names.contains(head) {
+                Ty::Enum(self.bare_key(head), targs)
+            } else if self.newtype_names.contains(head) {
+                Ty::NewType(self.bare_key(head), targs)
+            } else {
+                return None;
+            };
+            return self.nominal_alias_target(&ty);
         }
-        if self.struct_names.contains(&head) {
-            Some(Ty::Struct(self.bare_key(&head), targs))
-        } else if self.enum_names.contains(&head) {
-            Some(Ty::Enum(self.bare_key(&head), targs))
-        } else if self.newtype_names.contains(&head) {
-            Some(Ty::NewType(self.bare_key(&head), targs))
-        } else {
-            None
+    }
+
+    /// `ty` when it names a struct/enum/newtype whose shape this module can reach (local table or
+    /// the owning module's sig), else `None` — a scalar, protocol or builtin alias body is a type
+    /// spelling, never a constructor head.
+    fn nominal_alias_target(&self, ty: &Ty) -> Option<Ty> {
+        let known = match ty {
+            Ty::Struct(k, _) => self.struct_shape(k).is_some(),
+            Ty::Enum(k, _) => self.enums.contains_key(k) || self.owning_enum_def(k).is_some(),
+            Ty::NewType(k, _) => {
+                self.newtype_defs.contains_key(k) || self.owning_newtype_def(k).is_some()
+            }
+            _ => false,
+        };
+        known.then(|| ty.clone())
+    }
+
+    /// The nominal target of an EXPORTED alias reached qualified (`mname.Alias`), through the
+    /// module's `ModuleSig::type_aliases`. `None` for a local binding named `mname`, an unbound
+    /// module, a missing member, or a non-nominal body (TICKET-172).
+    pub(super) fn qualified_alias_ty(&self, mname: &str, name: &str) -> Option<Ty> {
+        if self.is_local_binding(mname) {
+            return None;
+        }
+        let mid = self.imported_modules.get(mname)?;
+        let asig = self.module_sigs.get(mid)?.type_aliases.get(name)?;
+        self.nominal_alias_target(&asig.body)
+    }
+
+    /// Register the SHAPE of an imported alias's nominal target under its canonical key
+    /// (TICKET-172), so constructor/variant/static dispatch finds it in the local tables.
+    /// Deliberately NOT the bare `*_names` sets or `bare_types`: importing `Position` must not
+    /// license the name `Point`.
+    pub(super) fn hydrate_alias_target(&mut self, ty: &Ty) {
+        match ty {
+            Ty::Struct(key, _) if !self.structs.contains_key(key) => {
+                if let Some(info) = self.owning_struct_def(key).cloned() {
+                    self.structs.insert(key.clone(), info);
+                }
+            }
+            Ty::Enum(key, _) if !self.enums.contains_key(key) => {
+                if let Some(edef) = self.owning_enum_def(key).cloned() {
+                    self.enums.insert(key.clone(), edef.variant_names.clone());
+                    self.enum_type_params
+                        .insert(key.clone(), edef.type_params.clone());
+                    self.enum_methods.insert(key.clone(), edef.methods.clone());
+                    for (vname, vinfo) in edef.variant_names.iter().zip(&edef.variants) {
+                        let mut vi = vinfo.clone();
+                        vi.enum_name = key.clone();
+                        self.variants.insert((key.clone(), vname.clone()), vi);
+                    }
+                }
+            }
+            Ty::NewType(key, _) if !self.newtype_defs.contains_key(key) => {
+                if let Some(ntdef) = self.owning_newtype_def(key).cloned() {
+                    self.newtype_defs.insert(
+                        key.clone(),
+                        (ntdef.underlying.clone(), ntdef.methods.clone()),
+                    );
+                    self.newtype_type_params
+                        .insert(key.clone(), ntdef.type_params.clone());
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1716,6 +1791,11 @@ impl Checker {
                             self.bare_types.entry(ntname.clone()).or_insert(key);
                         }
                     }
+                    // A `module.Alias` needs its target's shape too — the target may live in a
+                    // module this one never imports (TICKET-172).
+                    for asig in sig.type_aliases.values() {
+                        self.hydrate_alias_target(&asig.body);
+                    }
                 }
                 // A whole-module `import std.ffi` licenses the bare opaque `ptr` type (extern blocks
                 // use it pervasively, so whole-module licensing is the ergonomic default — UNLIKE the
@@ -2082,6 +2162,7 @@ impl Checker {
                                 // a concrete `Ty`, so no width re-check is hit).
                                 self.imported_alias_tys
                                     .insert(bind.clone(), asig.body.clone());
+                                self.hydrate_alias_target(&asig.body);
                                 // Carry the alias's width-bearing CType (computed in its DEFINING
                                 // module's scope) so an extern boundary in THIS module marshals the
                                 // real width through the named-import hop — not the bare flat map.

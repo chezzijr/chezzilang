@@ -9669,7 +9669,14 @@ fn missing_imported_alias_member_is_precise() {
             ("aliases.chz", ALIAS_LIB),
             ("main.chz", "import aliases as a\nx := a.Tone.Nope(1)\n"),
         ],
-        "no",
+        "type 'a.Tone' has no static method 'Nope'",
+    );
+    files_reject(
+        &[
+            ("aliases.chz", ALIAS_LIB),
+            ("main.chz", "import aliases as a\nx := a.Tone.Nope\n"),
+        ],
+        "enum 'a.Tone' has no variant 'Nope'",
     );
 }
 

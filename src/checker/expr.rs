@@ -134,6 +134,15 @@ impl Checker {
                 return self
                     .infer_newtype_call(name, &key, &under, &tps, args, &targs, span, expected);
             }
+            // `module.Alias(args)` — an EXPORTED alias of a struct/newtype reached qualified
+            // (TICKET-172). Constructs the alias's canonical target, with its pinned type arguments.
+            if let ExprKind::Ident(mname) = &obj.kind
+                && let Some(target) = self.qualified_alias_ty(mname, name)
+                && !matches!(target, Ty::Enum(..))
+            {
+                let spelled = format!("{mname}.{name}");
+                return self.infer_alias_ctor_call(&target, &spelled, args, &targs, span, expected);
+            }
             // `module.Enum.Variant(args)` — qualified payload-variant constructor.
             if let ExprKind::Field {
                 obj: inner_obj,
@@ -227,6 +236,30 @@ impl Checker {
                     expected,
                 );
             }
+            // `module.Alias.Variant(args)` / `module.Alias.method(args)` — an EXPORTED alias of an
+            // enum/struct reached qualified (TICKET-172). Same dispatch as a local alias head below.
+            if let ExprKind::Field {
+                obj: inner_obj,
+                name: aname,
+                ..
+            } = &obj.kind
+                && let ExprKind::Ident(mname) = &inner_obj.kind
+                && let Some(Ty::Enum(key, head_targs) | Ty::Struct(key, head_targs)) =
+                    self.qualified_alias_ty(mname, aname)
+            {
+                let spelled = format!("{mname}.{aname}");
+                return self.infer_alias_member_call(
+                    &key,
+                    &head_targs,
+                    &spelled,
+                    name,
+                    args,
+                    &targs,
+                    *name_span,
+                    span,
+                    expected,
+                );
+            }
             // `T.member(args)` where `T` is an in-scope generic TYPE PARAMETER. M24 — this is the
             // STATIC-WITNESS call: legal exactly when one of `T`'s bounds declares `member` as a
             // STATIC requirement AND the enclosing fn's hidden `$w:T` witness local is reachable
@@ -267,31 +300,12 @@ impl Checker {
                     .alias_enum_head(aname)
                     .or_else(|| self.alias_struct_head(aname))
             {
-                if let Some(v) = self.variants.get(&(key.clone(), name.to_string())).cloned() {
-                    if !targs.is_empty() {
-                        self.infer_all(args);
-                        self.error(
-                            span,
-                            format!("variant '{name}' of '{aname}' takes no method type arguments"),
-                        );
-                        return Ty::Unknown;
-                    }
-                    return self.infer_variant_call(
-                        &v,
-                        name,
-                        args,
-                        &head_targs,
-                        *name_span,
-                        span,
-                        expected,
-                    );
-                }
-                return self.infer_static_call(
+                return self.infer_alias_member_call(
                     &key,
+                    &head_targs,
                     aname,
                     name,
                     args,
-                    &head_targs,
                     &targs,
                     *name_span,
                     span,
@@ -1291,6 +1305,96 @@ impl Checker {
         Ty::Enum(v.enum_name.clone(), targs_out)
     }
 
+    /// `Alias.Variant(args)` / `Alias.method(args)` through an alias of an enum or struct whose
+    /// canonical key is `key` and whose body pins `head_targs`. VARIANT-FIRST, mirroring the
+    /// `type_apply_head` arm: look up the variant on the key first, falling back to a static call.
+    /// `head_targs` is threaded through both, so `type IS = Box[str]; IS.of(3)` still infers against
+    /// `Box[str]`. `spelled` is the alias as written (`Tone` / `lib.Tone`), for diagnostics.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn infer_alias_member_call(
+        &mut self,
+        key: &str,
+        head_targs: &[Ty],
+        spelled: &str,
+        name: &str,
+        args: &[Expr],
+        targs: &[Ty],
+        name_span: Span,
+        span: Span,
+        expected: Option<&Ty>,
+    ) -> Ty {
+        if let Some(v) = self
+            .variants
+            .get(&(key.to_string(), name.to_string()))
+            .cloned()
+        {
+            if !targs.is_empty() {
+                self.infer_all(args);
+                self.error(
+                    span,
+                    format!("variant '{name}' of '{spelled}' takes no method type arguments"),
+                );
+                return Ty::Unknown;
+            }
+            return self.infer_variant_call(&v, name, args, head_targs, name_span, span, expected);
+        }
+        self.infer_static_call(
+            key, spelled, name, args, head_targs, targs, name_span, span, expected,
+        )
+    }
+
+    /// `module.Alias(args)` through an exported alias whose `target` is a struct or newtype
+    /// (TICKET-172): the target's constructor, with the alias body's pinned type arguments. An alias
+    /// that pins its arguments takes no more, exactly like the bare alias constructor.
+    pub(super) fn infer_alias_ctor_call(
+        &mut self,
+        target: &Ty,
+        spelled: &str,
+        args: &[Expr],
+        targs: &[Ty],
+        span: Span,
+        expected: Option<&Ty>,
+    ) -> Ty {
+        let (Ty::Struct(key, head_targs) | Ty::NewType(key, head_targs)) = target else {
+            self.infer_all(args);
+            return Ty::Unknown;
+        };
+        if !head_targs.is_empty() && !targs.is_empty() {
+            self.infer_all(args);
+            self.error(
+                span,
+                format!(
+                    "type alias '{spelled}' already fixes its type arguments; write the aliased type to pass your own"
+                ),
+            );
+            return Ty::Unknown;
+        }
+        let targs = if targs.is_empty() {
+            head_targs.as_slice()
+        } else {
+            targs
+        };
+        if matches!(target, Ty::Struct(..)) {
+            let Some(info) = self.struct_shape(key).cloned() else {
+                self.infer_all(args);
+                return Ty::Unknown;
+            };
+            return self
+                .infer_qualified_struct_call(&info, spelled, key, args, targs, span, expected);
+        }
+        let under = self
+            .newtype_defs
+            .get(key)
+            .map(|(u, _)| u.clone())
+            .or_else(|| self.owning_newtype_def(key).map(|n| n.underlying.clone()))
+            .unwrap_or(Ty::Unknown);
+        let tps = self
+            .newtype_type_params_of(key)
+            .cloned()
+            .unwrap_or_default();
+        self.infer_newtype_call(spelled, key, &under, &tps, args, targs, span, expected)
+    }
+
     /// Type-check a module-qualified struct constructor `module.Struct(args)` from the struct's
     /// resolved `StructInfo` (held in the defining module's `ModuleSig`), mirroring the bare struct
     /// path in `infer_named_call`. Returns a `Ty::Struct` keyed by the DECLARING module's runtime key
@@ -1611,7 +1715,13 @@ impl Checker {
         // Explicit call-site type arguments are only meaningful on a *generic* user fn / struct /
         // enum-variant constructor. Reject them on anything else (builtins, non-generic decls)
         // before the dispatch below, so the seeding logic only has to handle the generic paths.
-        if !targs.is_empty() && !self.name_is_generic(name) {
+        // An alias that pins its type arguments passes through, so the constructor branch below
+        // reports "already fixes its type arguments" for it (TICKET-172).
+        let alias_pins_targs = matches!(
+            self.alias_body_ty(name),
+            Some(Ty::Struct(_, p) | Ty::NewType(_, p)) if !p.is_empty()
+        );
+        if !targs.is_empty() && !self.name_is_generic(name) && !alias_pins_targs {
             self.error(span, format!("'{name}' takes no type arguments"));
             for a in args {
                 self.infer(a);

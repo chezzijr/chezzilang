@@ -925,7 +925,11 @@ impl Checker {
         }
         match enum_name {
             None => {
-                if self.bare_key(name) == label {
+                if self.bare_key(name) == label
+                    || self
+                        .alias_struct_head(name)
+                        .is_some_and(|(k, _)| k == label)
+                {
                     Ok(())
                 } else {
                     Err(format!("'{name}' is not a constructor of {shown}"))
@@ -937,7 +941,9 @@ impl Checker {
                         "'{q}' is not a module; write `{shown}(...)` or `<module>.{shown}(...)`"
                     ));
                 };
-                if self.type_key(mid, name) == label {
+                if self.type_key(mid, name) == label
+                    || matches!(self.qualified_alias_ty(q, name), Some(Ty::Struct(k, _)) if k == label)
+                {
                     Ok(())
                 } else {
                     Err(format!("'{q}.{name}' is not a constructor of {shown}"))
@@ -2574,7 +2580,9 @@ impl Checker {
         }
         // A bare use of a name that is a type declared in some (un-imported) module — typically a
         // constructor like `Point(1)` whose module wasn't `from`-imported. Hint how to import it.
-        if self.types_by_name.contains_key(name) {
+        // An IMPORTED scalar alias (`import Count from m; Count(3)`) is already imported, so the
+        // hint would be false; it falls through to the plain "unknown name", like a local one.
+        if self.types_by_name.contains_key(name) && !self.imported_alias_tys.contains_key(name) {
             self.error(span, self.unknown_type_msg(name));
             return Ty::Unknown;
         }
@@ -3484,10 +3492,16 @@ impl Checker {
                 self.error(span, format!("unknown module '{m}'"));
                 return;
             };
+            // An exported alias of an enum (`lib.Tone.Dark(n)`, TICKET-172) keys on its target.
+            let alias_ekey = match self.qualified_alias_ty(m, en) {
+                Some(Ty::Enum(k, _)) => Some(k),
+                _ => None,
+            };
             match self.module_sigs.get(&mid) {
                 Some(sig) if sig.enum_defs.contains_key(en) => {
                     module_ekey = Some(self.type_key(&mid, en));
                 }
+                _ if alias_ekey.is_some() => module_ekey = alias_ekey,
                 _ => {
                     self.error(span, format!("module '{m}' has no enum '{en}'"));
                     return;
@@ -3600,6 +3614,53 @@ impl Checker {
         }
     }
 
+    /// `Alias.Variant` as a value, for an alias (spelled `spelled`) of the enum `ekey` pinning
+    /// `head_targs`. Mirrors the `Enum.Variant`-as-value block in `infer_field`, but keys on the
+    /// alias's resolved identity + its pinned type arguments instead of `enum_type_params`'s count
+    /// alone — a bare alias of a generic enum leaves the args Unknown, same as the bare-enum path.
+    fn alias_variant_value(
+        &mut self,
+        ekey: String,
+        head_targs: Vec<Ty>,
+        spelled: &str,
+        name: &str,
+        obj_span: Span,
+        name_span: Span,
+    ) -> Ty {
+        let resolved = self
+            .variants
+            .get(&(ekey.clone(), name.to_string()))
+            .cloned();
+        match resolved {
+            Some(v) if v.payload.is_empty() => {
+                let nparams = self.enum_type_params.get(&ekey).map_or(0, |t| t.len());
+                if head_targs.len() == nparams {
+                    Ty::Enum(ekey, head_targs)
+                } else {
+                    Ty::Enum(ekey, vec![Ty::Unknown; nparams])
+                }
+            }
+            Some(_) => {
+                self.error(
+                    obj_span,
+                    format!(
+                        "variant '{name}' of enum '{spelled}' carries a payload; construct it as {spelled}.{name}(...)"
+                    ),
+                );
+                Ty::Unknown
+            }
+            None => {
+                let names = self.variant_names(&ekey);
+                self.error_help(
+                    name_span,
+                    format!("enum '{spelled}' has no variant '{name}'"),
+                    suggest::did_you_mean(name, &names),
+                );
+                Ty::Unknown
+            }
+        }
+    }
+
     pub(super) fn infer_field(&mut self, obj: &Expr, name: &str, name_span: Span) -> Ty {
         // A too-deep qualified-path mistake (`std.net.Socket(0)`, `std.concurrency.Shared(0)`,
         // `std.concurrency.collection.Counter(...)`): the receiver `obj` is the BARE first segment of
@@ -3668,6 +3729,19 @@ impl Checker {
                 }
             }
         }
+        // `module.Alias.Variant` used as a value: an EXPORTED alias of an enum reached qualified
+        // (TICKET-172). Same rules as the local `Alias.Variant` value form below.
+        if let ExprKind::Field {
+            obj: inner_obj,
+            name: aname,
+            ..
+        } = &obj.kind
+            && let ExprKind::Ident(mname) = &inner_obj.kind
+            && let Some(Ty::Enum(ekey, head_targs)) = self.qualified_alias_ty(mname, aname)
+        {
+            let spelled = format!("{mname}.{aname}");
+            return self.alias_variant_value(ekey, head_targs, &spelled, name, obj.span, name_span);
+        }
         // MEMBER-as-a-value position, and the same shadowing rule: `Col.Red` inside
         // `fn f[Col: Tagged]` is the PARAMETER, so the enum/struct arms below must never see the
         // name. Nothing is reachable through an erased type parameter except a STATIC method its
@@ -3694,38 +3768,7 @@ impl Checker {
             && !self.is_local_binding(aname)
             && let Some((ekey, head_targs)) = self.alias_enum_head(aname)
         {
-            let resolved = self
-                .variants
-                .get(&(ekey.clone(), name.to_string()))
-                .cloned();
-            match resolved {
-                Some(v) if v.payload.is_empty() => {
-                    let nparams = self.enum_type_params.get(&ekey).map_or(0, |t| t.len());
-                    return if head_targs.len() == nparams {
-                        Ty::Enum(ekey, head_targs)
-                    } else {
-                        Ty::Enum(ekey, vec![Ty::Unknown; nparams])
-                    };
-                }
-                Some(_) => {
-                    self.error(
-                        obj.span,
-                        format!(
-                            "variant '{name}' of enum '{aname}' carries a payload; construct it as {aname}.{name}(...)"
-                        ),
-                    );
-                    return Ty::Unknown;
-                }
-                None => {
-                    let names = self.variant_names(&ekey);
-                    self.error_help(
-                        name_span,
-                        format!("enum '{aname}' has no variant '{name}'"),
-                        suggest::did_you_mean(name, &names),
-                    );
-                    return Ty::Unknown;
-                }
-            }
+            return self.alias_variant_value(ekey, head_targs, aname, name, obj.span, name_span);
         }
         // `Enum.Variant` used as a value: a bare *unbound* name that is an enum, dotted with one of
         // its nullary variants — sugar for the bare `Variant`. A real binding (struct/tuple/local

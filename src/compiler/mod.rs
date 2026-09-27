@@ -694,6 +694,122 @@ impl Compiler {
                 }
             }
         }
+        // TICKET-172 — re-point every `type` alias whose body names a struct/enum/newtype at that
+        // type's canonical key, instead of the dead `<module-key>::<Alias>` key minted above. The
+        // walk runs HERE because only the graph still sees each DECLARING module's imports: a named
+        // import of an alias, `module.Alias`, and a local `type P = geo.Point` then all lower through
+        // the ordinary `type_key` sites. Mirrors the checker's `alias_body_ty`; a scalar, protocol
+        // or builtin target keeps its dead key (never a constructor head on either side).
+        let index: HashMap<&crate::resolver::ModuleId, usize> = graph
+            .modules
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (&m.id, i))
+            .collect();
+        let mut targets = Vec::new();
+        for (idx, lm) in graph.modules.iter().enumerate() {
+            for (name, _) in alias_decls(&lm.ast.stmts) {
+                if let Some(key) = self.alias_member_key(graph, &index, idx, &name, 0) {
+                    targets.push(((idx, name), key));
+                }
+            }
+        }
+        self.type_keys.extend(targets);
+    }
+
+    /// The canonical key of the nominal type that `member`, declared in module `idx`, names: its
+    /// own key for a struct/enum/newtype, or its body's target for a `type` alias (chased across
+    /// modules, capped at 64 hops like every alias walk). `None` for anything else.
+    fn alias_member_key(
+        &self,
+        graph: &ModuleGraph,
+        index: &HashMap<&crate::resolver::ModuleId, usize>,
+        idx: usize,
+        member: &str,
+        depth: usize,
+    ) -> Option<String> {
+        if depth > 64 {
+            return None;
+        }
+        let lm = &graph.modules[idx];
+        if lm.native.is_some() {
+            // A native module's only types are its synthetic structs (`Match`, …), kept bare.
+            return self.module_types[idx]
+                .contains(member)
+                .then(|| self.type_key(idx, member));
+        }
+        for s in &lm.ast.stmts {
+            match &s.kind {
+                StmtKind::TypeAlias { name, ty, .. } if name == member => {
+                    return self.alias_body_key(graph, index, idx, ty, depth + 1);
+                }
+                StmtKind::Struct { name, .. }
+                | StmtKind::Enum { name, .. }
+                | StmtKind::NewType { name, .. }
+                    if name == member =>
+                {
+                    return Some(self.type_key(idx, member));
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// The canonical key an alias BODY written in module `idx` names, resolved in `idx`'s scope: a
+    /// bare head is a local declaration, a `from`-import (under its bind name), or a type of a
+    /// whole-module-imported std module; `module.Type` goes through `idx`'s module binding.
+    fn alias_body_key(
+        &self,
+        graph: &ModuleGraph,
+        index: &HashMap<&crate::resolver::ModuleId, usize>,
+        idx: usize,
+        body: &Type,
+        depth: usize,
+    ) -> Option<String> {
+        let imports = &graph.modules[idx].imports;
+        match body {
+            Type::Named { name, .. } | Type::Generic(name, ..) => {
+                if let Some(key) = self.alias_member_key(graph, index, idx, name, depth) {
+                    return Some(key);
+                }
+                for imp in imports {
+                    let Some(&tidx) = index.get(&imp.target) else {
+                        continue;
+                    };
+                    match &imp.import {
+                        Import::From { names, .. } => {
+                            for (member, alias) in names {
+                                if alias.as_ref().unwrap_or(member) == name {
+                                    return self
+                                        .alias_member_key(graph, index, tidx, member, depth);
+                                }
+                            }
+                        }
+                        Import::Module { path, .. }
+                            if path.first().map(String::as_str) == Some("std")
+                                && self.module_types[tidx].contains(name) =>
+                        {
+                            return self.alias_member_key(graph, index, tidx, name, depth);
+                        }
+                        Import::Module { .. } => {}
+                    }
+                }
+                None
+            }
+            Type::Qualified { module, name, .. } => {
+                imports.iter().find_map(|imp| match &imp.import {
+                    Import::Module { path, alias, .. }
+                        if alias.as_ref().or(path.last()) == Some(module) =>
+                    {
+                        let &tidx = index.get(&imp.target)?;
+                        self.alias_member_key(graph, index, tidx, name, depth)
+                    }
+                    _ => None,
+                })
+            }
+            _ => None,
+        }
     }
 
     /// The IDENTITY KEY for a type `name` declared in module `module_idx` (always `<module-key>::Name`
