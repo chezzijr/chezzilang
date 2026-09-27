@@ -555,6 +555,16 @@ fn d4_nested_named_callee_writes_outer_parameter() {
 }
 
 #[test]
+fn d4_block_scoped_named_callee_writes_outer_parameter() {
+    rejects_help_at(
+        "fn outer(xs: List[int]):\n    if true:\n        fn inner():\n            xs.push(2)\n        inner()\nfn main():\n    xs := [1]\n    parallel:\n        spawn:\n            outer(xs)\nmain()\n",
+        "'xs' is this task's copy: a write to it would be lost at the join",
+        "push",
+        10,
+    );
+}
+
+#[test]
 fn d4_nested_named_capture_write() {
     rejects_help_at(
         "fn main():\n    xs := [1]\n    fn bump():\n        xs.push(2)\n    parallel:\n        spawn:\n            bump()\nmain()\n",
