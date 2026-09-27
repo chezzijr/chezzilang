@@ -35,6 +35,7 @@ pub(super) struct CallEdge {
 pub(super) struct Scan {
     pub direct: Vec<FnWrite>,
     pub calls: Vec<CallEdge>,
+    nested: HashMap<String, Scan>,
     locals: HashSet<String>,
     params: Vec<String>,
 }
@@ -60,10 +61,16 @@ pub(super) fn scan(decl: &FnDecl) -> Scan {
     let mut out = Scan {
         direct: Vec::new(),
         calls: Vec::new(),
+        nested: HashMap::new(),
         locals: HashSet::new(),
         params: decl.params.iter().map(|p| p.name.clone()).collect(),
     };
     out.collect_locals(&decl.body);
+    for stmt in &decl.body {
+        if let StmtKind::Fn(child) = &stmt.kind {
+            out.nested.insert(child.name.clone(), scan(child));
+        }
+    }
     out.block(&decl.body);
     out
 }
@@ -163,9 +170,20 @@ impl Scan {
                     self.block(body);
                 }
             }
-            StmtKind::For { iter, body, .. } => {
+            StmtKind::For {
+                vars, iter, body, ..
+            } => {
                 self.expr(iter);
+                let prior: Vec<_> = vars
+                    .iter()
+                    .map(|name| (name.clone(), self.locals.insert(name.clone())))
+                    .collect();
                 self.block(body);
+                for (name, existed) in prior {
+                    if !existed {
+                        self.locals.remove(&name);
+                    }
+                }
             }
             StmtKind::While { cond, body } => {
                 self.expr(cond);
@@ -207,7 +225,8 @@ impl Scan {
                         self.record(obj, WriteKind::Method(name.clone()), name.clone());
                     }
                     ExprKind::Ident(name)
-                        if !self.locals.contains(name) && !self.params.contains(name) =>
+                        if (self.nested.contains_key(name) || !self.locals.contains(name))
+                            && !self.params.contains(name) =>
                     {
                         self.calls.push(CallEdge {
                             callee: name.clone(),
@@ -263,14 +282,28 @@ impl Checker {
                 }
             })
             .collect();
+        let summaries = self.infer_scan_writes(&scans, &HashMap::new(), true);
+        for (name, writes) in summaries {
+            if let Some(sig) = self.functions.get_mut(&name) {
+                sig.writes = writes;
+            }
+        }
+    }
+
+    fn infer_scan_writes(
+        &self,
+        scans: &HashMap<String, Scan>,
+        known: &HashMap<String, Vec<FnWrite>>,
+        top_level: bool,
+    ) -> HashMap<String, Vec<FnWrite>> {
         let mut summaries: HashMap<String, Vec<FnWrite>> = HashMap::new();
-        for (name, scan) in &scans {
+        for (name, scan) in scans {
             let direct = scan
                 .direct
                 .iter()
                 .filter_map(|effect| {
                     let mut effect = effect.clone();
-                    if let WriteRoot::Capture(root) = &effect.root {
+                    if top_level && let WriteRoot::Capture(root) = &effect.root {
                         if !self.module_global_lets.contains(root) {
                             return None;
                         }
@@ -284,11 +317,16 @@ impl Checker {
         loop {
             let old = summaries.clone();
             let mut changed = false;
-            for (name, scan) in &scans {
+            for (name, scan) in scans {
+                let mut visible = known.clone();
+                visible.extend(old.clone());
+                let nested = self.infer_scan_writes(&scan.nested, &visible, false);
                 for edge in &scan.calls {
-                    let callee = old
-                        .get(&edge.callee)
+                    let local_callee = nested.get(&edge.callee);
+                    let callee = local_callee
                         .cloned()
+                        .or_else(|| old.get(&edge.callee).cloned())
+                        .or_else(|| known.get(&edge.callee).cloned())
                         .or_else(|| self.functions.get(&edge.callee).map(|s| s.writes.clone()))
                         .unwrap_or_default();
                     for effect in callee {
@@ -296,7 +334,8 @@ impl Checker {
                             scan,
                             &effect,
                             &edge.args,
-                            true,
+                            top_level,
+                            local_callee.is_some(),
                             &self.module_global_lets,
                         ) && let Some(writes) = summaries.get_mut(name)
                             && !writes.contains(&mapped)
@@ -311,55 +350,31 @@ impl Checker {
                 break;
             }
         }
-        for (name, writes) in summaries {
-            if let Some(sig) = self.functions.get_mut(&name) {
-                sig.writes = writes;
-            }
-        }
+        summaries
     }
 
     pub(super) fn bind_nested_fn_writes(&mut self, decl: &FnDecl) {
         let scan = scan(decl);
-        let mut writes: Vec<FnWrite> = scan
-            .direct
-            .iter()
-            .filter_map(|effect| {
-                let mut effect = effect.clone();
-                if let WriteRoot::Capture(root) = &effect.root {
-                    let scope = self.owning_scope(root)?;
-                    if scope == 0 {
-                        effect.root = WriteRoot::Global(root.clone());
-                    }
-                }
-                Some(effect)
-            })
-            .collect();
-        loop {
-            let old = writes.clone();
-            for edge in &scan.calls {
-                let callee = if edge.callee == decl.name {
-                    old.clone()
-                } else {
-                    self.fn_write_scopes
-                        .iter()
-                        .rev()
-                        .find_map(|s| s.get(&edge.callee).cloned())
-                        .or_else(|| self.functions.get(&edge.callee).map(|s| s.writes.clone()))
-                        .unwrap_or_default()
-                };
-                for effect in callee {
-                    if let Some(mapped) =
-                        Self::map_write(&scan, &effect, &edge.args, false, &self.module_global_lets)
-                        && !writes.contains(&mapped)
-                    {
-                        writes.push(mapped);
-                    }
-                }
-            }
-            if writes.len() == old.len() {
-                break;
-            }
+        let mut known = HashMap::new();
+        for scope in &self.fn_write_scopes {
+            known.extend(scope.clone());
         }
+        let scans = HashMap::from([(decl.name.clone(), scan)]);
+        let mut writes = self
+            .infer_scan_writes(&scans, &known, false)
+            .remove(&decl.name)
+            .unwrap_or_default();
+        writes.retain_mut(|effect| {
+            if let WriteRoot::Capture(root) = &effect.root {
+                let Some(scope) = self.owning_scope(root) else {
+                    return false;
+                };
+                if scope == 0 {
+                    effect.root = WriteRoot::Global(root.clone());
+                }
+            }
+            true
+        });
         if let Some(scope) = self.fn_write_scopes.last_mut() {
             scope.insert(decl.name.clone(), writes);
         }
@@ -370,6 +385,7 @@ impl Checker {
         effect: &FnWrite,
         args: &[Expr],
         top_level: bool,
+        nested_callee: bool,
         globals: &HashSet<String>,
     ) -> Option<FnWrite> {
         let mut mapped = effect.clone();
@@ -388,14 +404,16 @@ impl Checker {
                 mapped.path = prefix;
             }
             WriteRoot::Capture(name) => {
-                if scan.locals.contains(name) || scan.params.contains(name) {
+                if nested_callee {
+                    mapped.root = scan.root(name)?;
+                } else if scan.locals.contains(name) || scan.params.contains(name) {
                     return None;
                 }
-                if top_level {
-                    if !globals.contains(name) {
+                if top_level && let WriteRoot::Capture(root) = &mapped.root {
+                    if !globals.contains(root) {
                         return None;
                     }
-                    mapped.root = WriteRoot::Global(name.clone());
+                    mapped.root = WriteRoot::Global(root.clone());
                 }
             }
             WriteRoot::Global(_) => {}

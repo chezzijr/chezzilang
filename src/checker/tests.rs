@@ -538,6 +538,23 @@ fn d4_named_helper_transitive_and_recursive_writes() {
 }
 
 #[test]
+fn d4_named_helper_loop_shadow_does_not_write_caller() {
+    ok(
+        "fn bump(xs: List[int]):\n    for xs in [[2]]:\n        xs.push(3)\nfn main():\n    xs := [1]\n    parallel:\n        spawn:\n            bump(xs)\nmain()\n",
+    );
+}
+
+#[test]
+fn d4_nested_named_callee_writes_outer_parameter() {
+    rejects_help_at(
+        "fn outer(xs: List[int]):\n    fn inner():\n        xs.push(2)\n    inner()\nfn main():\n    xs := [1]\n    parallel:\n        spawn:\n            outer(xs)\nmain()\n",
+        "'xs' is this task's copy: a write to it would be lost at the join",
+        "push",
+        9,
+    );
+}
+
+#[test]
 fn d4_nested_named_capture_write() {
     rejects_help_at(
         "fn main():\n    xs := [1]\n    fn bump():\n        xs.push(2)\n    parallel:\n        spawn:\n            bump()\nmain()\n",
