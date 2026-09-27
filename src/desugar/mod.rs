@@ -444,6 +444,14 @@ struct ModReg {
     /// Every type name (struct, enum, newtype) this module declares -- the key space of
     /// `collect_methods_by_struct`. Used to recognise a `module.Type` qualified receiver head.
     types: HashSet<String>,
+    /// This module's `type` aliases: name → body (TICKET-172). With the two import maps below, lets
+    /// an alias head (`Conf()`, `lib.Conf.make()`) resolve to its DEFINING struct's specs.
+    aliases: HashMap<String, Type>,
+    /// `from`-imports: bind name → (target module, ORIGINAL member name), so a renamed alias import
+    /// (`import Conf as C from lib`) still finds `lib`'s `Conf`. Filled by [`build_registries`].
+    from_imports: HashMap<String, (ModuleId, String)>,
+    /// Whole-module imports: bound name → target module. Filled by [`build_registries`].
+    mod_imports: HashMap<String, ModuleId>,
 }
 
 impl ModReg {
@@ -656,10 +664,24 @@ pub fn run_standalone(module: &mut Module) -> Result<(), ResolveError> {
 fn build_registries(graph: &ModuleGraph) -> HashMap<ModuleId, ModReg> {
     let mut regs = HashMap::new();
     for m in &graph.modules {
-        regs.insert(
-            m.id.clone(),
-            collect_module_reg(&m.ast.stmts, &m.id, m.file),
-        );
+        let mut reg = collect_module_reg(&m.ast.stmts, &m.id, m.file);
+        for imp in &m.imports {
+            match &imp.import {
+                Import::Module { path, alias, .. } => {
+                    if let Some(local) = alias.clone().or_else(|| path.last().cloned()) {
+                        reg.mod_imports.insert(local, imp.target.clone());
+                    }
+                }
+                Import::From { names, .. } => {
+                    for (name, alias) in names {
+                        let local = alias.clone().unwrap_or_else(|| name.clone());
+                        reg.from_imports
+                            .insert(local, (imp.target.clone(), name.clone()));
+                    }
+                }
+            }
+        }
+        regs.insert(m.id.clone(), reg);
     }
     regs
 }
@@ -1504,6 +1526,9 @@ fn collect_module_reg(stmts: &[Stmt], id: &ModuleId, file: u32) -> ModReg {
             StmtKind::Enum { name, .. } | StmtKind::NewType { name, .. } => {
                 reg.types.insert(name.clone());
             }
+            StmtKind::TypeAlias { name, ty, .. } => {
+                reg.aliases.insert(name.clone(), ty.clone());
+            }
             StmtKind::Protocol {
                 name,
                 methods,
@@ -1540,6 +1565,15 @@ fn collect_module_reg(stmts: &[Stmt], id: &ModuleId, file: u32) -> ModReg {
     reg
 }
 
+/// What a `type` alias ultimately names (TICKET-172): the declaring module and bare type name, plus
+/// the type arguments its last generic hop pins, written in module `pinned_home`'s scope.
+struct AliasTarget {
+    module: ModuleId,
+    name: String,
+    pinned: Vec<Type>,
+    pinned_home: Option<ModuleId>,
+}
+
 /// Per-module resolution context (all borrows outlive the mutable AST walk).
 struct Ctx<'a> {
     regs: &'a HashMap<ModuleId, ModReg>,
@@ -1566,14 +1600,87 @@ impl Ctx<'_> {
         if let Some(spec) = self.regs.get(self.own_id).and_then(|r| r.callable(name)) {
             return Some(spec);
         }
-        let target = self.bare_from.get(name)?;
-        self.regs.get(target).and_then(|r| r.callable(name))
+        if let Some(spec) = self
+            .bare_from
+            .get(name)
+            .and_then(|t| self.regs.get(t))
+            .and_then(|r| r.callable(name))
+        {
+            return Some(spec);
+        }
+        // A `type` alias head (local, or from-imported under any bind name): its DEFINING
+        // struct's constructor specs (TICKET-172).
+        let t = self.alias_head(self.own_id, name)?;
+        self.regs.get(&t.module)?.structs.get(&t.name)
     }
 
-    /// Resolve a module-qualified name (`alias.f(...)`).
+    /// Resolve a module-qualified name (`alias.f(...)`), including an exported `type` alias of a
+    /// struct (`lib.Conf(...)`, TICKET-172).
     fn resolve_qualified(&self, alias: &str, name: &str) -> Option<&Vec<PSpec>> {
         let target = self.aliases.get(alias)?;
-        self.regs.get(target).and_then(|r| r.callable(name))
+        if let Some(spec) = self.regs.get(target).and_then(|r| r.callable(name)) {
+            return Some(spec);
+        }
+        let t = self.alias_member(target, name, 0)?;
+        self.regs.get(&t.module)?.structs.get(&t.name)
+    }
+
+    /// The target of a `type` alias `name` as written in module `m`: a local alias, or a
+    /// `from`-imported one (followed to its ORIGINAL member name). `None` for any other name.
+    fn alias_head(&self, m: &ModuleId, name: &str) -> Option<AliasTarget> {
+        let reg = self.regs.get(m)?;
+        if reg.aliases.contains_key(name) {
+            return self.alias_member(m, name, 0);
+        }
+        let (t, member) = reg.from_imports.get(name)?;
+        if !self.regs.get(t)?.aliases.contains_key(member) {
+            return None;
+        }
+        self.alias_member(t, member, 0)
+    }
+
+    /// The type that `member`, DECLARED in module `m`, ultimately names: itself for a
+    /// struct/enum/newtype, or its body's target for a `type` alias — chased through local,
+    /// `from`-imported and `module.Type` hops in each declaring module's own scope, capped at 64
+    /// hops like every alias walk. Mirrors the compiler's `alias_member_key`.
+    fn alias_member(&self, m: &ModuleId, member: &str, depth: usize) -> Option<AliasTarget> {
+        if depth > 64 {
+            return None;
+        }
+        let reg = self.regs.get(m)?;
+        if reg.types.contains(member) {
+            return Some(AliasTarget {
+                module: m.clone(),
+                name: member.to_string(),
+                pinned: Vec::new(),
+                pinned_home: None,
+            });
+        }
+        let (mut target, args) = match reg.aliases.get(member)? {
+            Type::Named { name, .. } => (self.alias_scope(m, name, depth + 1)?, Vec::new()),
+            Type::Generic(name, args, ..) => (self.alias_scope(m, name, depth + 1)?, args.clone()),
+            Type::Qualified { module, name, args } => (
+                self.alias_member(reg.mod_imports.get(module)?, name, depth + 1)?,
+                args.clone(),
+            ),
+            _ => return None,
+        };
+        if !args.is_empty() {
+            target.pinned = args;
+            target.pinned_home = Some(m.clone());
+        }
+        Some(target)
+    }
+
+    /// A bare type `name` as visible in module `m`: its own declaration or alias, else a
+    /// `from`-import of one.
+    fn alias_scope(&self, m: &ModuleId, name: &str, depth: usize) -> Option<AliasTarget> {
+        let reg = self.regs.get(m)?;
+        if reg.types.contains(name) || reg.aliases.contains_key(name) {
+            return self.alias_member(m, name, depth);
+        }
+        let (t, member) = reg.from_imports.get(name)?;
+        self.alias_member(t, member, depth)
     }
 
     /// Resolve a bare protocol name to the module that declares it: own module first, then a
@@ -1607,10 +1714,9 @@ impl Ctx<'_> {
     /// target module must declare `name` as a struct/enum/newtype. Mirrors [`Self::find_proto_qualified`].
     fn find_type_qualified(&self, alias: &str, name: &str) -> Option<String> {
         let target = self.aliases.get(alias)?;
-        self.regs
-            .get(target)
-            .is_some_and(|r| r.types.contains(name))
-            .then(|| name.to_string())
+        // An exported `type` alias (`lib.Conf.make()`) answers with its DEFINING type's name, so
+        // `methods_by_struct` keys on the real struct (TICKET-172).
+        self.alias_member(target, name, 0).map(|t| t.name)
     }
 
     /// The EXPLICIT parameter count `proto::method` declares, searching `proto`'s embeds
@@ -1851,7 +1957,12 @@ impl Walker<'_> {
             }
             // (iv) a bare type-NAME head `A.new()`: a type parameter shadows a struct name, so this
             // must never bind a generic body's static call to the wrong type's default.
-            ExprKind::Ident(n) if !self.is_local(n) && !self.is_type_param(n) => Some(n.clone()),
+            // A `type` alias head answers with its DEFINING type's name (TICKET-172).
+            ExprKind::Ident(n) if !self.is_local(n) && !self.is_type_param(n) => Some(
+                self.ctx
+                    .alias_head(self.ctx.own_id, n)
+                    .map_or_else(|| n.clone(), |t| t.name),
+            ),
             // (iii) struct-returning free fn `mk()` — resolved through the SAME module the callee
             // resolves in (own module first, then a `from`-import), mirroring `resolve_bare`.
             ExprKind::Call { callee, .. } => {
@@ -2636,7 +2747,18 @@ impl Walker<'_> {
         // The call's own turbofish, forwarded to a `Dflt::GenericProvider` splice below — a generic
         // struct ctor's field default is generic in the STRUCT's type parameters, so its provider call
         // needs the same type arguments the ctor call itself carries.
-        let call_targs: Vec<Type> = type_args.clone();
+        // A bare alias head that pins its arguments (`type IB = Box[int]; IB()`) forwards them the
+        // same way — but only when they were written in THIS module, the scope the splice lands in
+        // (TICKET-172). Pinned arguments from another module leave a generic slot required.
+        let call_targs: Vec<Type> = match &callee.kind {
+            ExprKind::Ident(n) if type_args.is_empty() && !self.is_local(n) => self
+                .ctx
+                .alias_head(self.ctx.own_id, n)
+                .filter(|t| t.pinned_home.as_ref() == Some(self.ctx.own_id))
+                .map(|t| t.pinned)
+                .unwrap_or_default(),
+            _ => type_args.clone(),
+        };
 
         // Resolve a free function / struct ctor / module-qualified callee (clone the spec so we can
         // then mutate `expr`).

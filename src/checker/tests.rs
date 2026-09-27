@@ -9579,9 +9579,11 @@ fn imported_alias_defaults_select_owner() {
 
 #[test]
 fn local_alias_ctor_fills_struct_defaults() {
-    ok(
+    // `files_ok`, not `ok`: defaults are filled by desugar, which only the graph path runs.
+    files_ok(&[(
+        "main.chz",
         "struct P:\n    x: int = 5\n    fn mk(a: int = 9) -> P:\n        return P(a)\ntype Q = P\nprint(Q(), Q(1), Q.mk())\n",
-    );
+    )]);
 }
 
 #[test]

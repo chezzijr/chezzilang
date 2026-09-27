@@ -143,3 +143,20 @@ test fn local_qualified_alias_paths():
     assert lp_sum(Position(1, 1)) == 2
     assert uid(LU(13)) == 13
     assert LB.of(14).v == 14
+
+fn mk_items[T]() -> List[T]:
+    return []
+
+struct GB[T]:
+    items: List[T] = mk_items()
+    n: int = 1
+
+type IGB = GB[int]
+
+# A local alias that pins its arguments forwards them to a generic field default's provider,
+# exactly like the written `GB[int]()`.
+test fn pinned_alias_forwards_generic_default_arguments():
+    b := IGB()
+    b.items.push(3)
+    assert b.items == [3]
+    assert b.n == 1
