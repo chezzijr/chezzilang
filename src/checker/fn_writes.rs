@@ -156,10 +156,17 @@ impl Scan {
                 };
                 self.record(target, WriteKind::Store, op);
                 self.expr(value);
-                if let ExprKind::Ident(name) = &target.kind
-                    && let Some(scope) = self.visible_fns.last_mut()
-                {
-                    scope.insert(name.clone(), None);
+                if let ExprKind::Ident(name) = &target.kind {
+                    if let Some(scope) = self
+                        .visible_fns
+                        .iter_mut()
+                        .rev()
+                        .find(|scope| scope.contains_key(name))
+                    {
+                        scope.insert(name.clone(), None);
+                    } else if let Some(scope) = self.visible_fns.last_mut() {
+                        scope.insert(name.clone(), None);
+                    }
                 }
             }
             StmtKind::Let { names, value, .. } => {

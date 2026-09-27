@@ -579,6 +579,20 @@ fn d4_assigned_block_scoped_helper_does_not_report_its_old_write() {
 }
 
 #[test]
+fn d4_inner_if_assignment_invalidates_outer_helper_write() {
+    ok(
+        "fn read():\n    print(1)\nfn outer(xs: List[int]):\n    fn inner():\n        xs.push(2)\n    if true:\n        inner = read\n    inner()\nfn main():\n    xs := [1]\n    parallel:\n        spawn:\n            outer(xs)\nmain()\n",
+    );
+}
+
+#[test]
+fn d4_inner_for_assignment_invalidates_outer_helper_write() {
+    ok(
+        "fn read():\n    print(1)\nfn outer(xs: List[int]):\n    fn inner():\n        xs.push(2)\n    for _ in 0..1:\n        inner = read\n    inner()\nfn main():\n    xs := [1]\n    parallel:\n        spawn:\n            outer(xs)\nmain()\n",
+    );
+}
+
+#[test]
 fn d4_nested_named_capture_write() {
     rejects_help_at(
         "fn main():\n    xs := [1]\n    fn bump():\n        xs.push(2)\n    parallel:\n        spawn:\n            bump()\nmain()\n",
