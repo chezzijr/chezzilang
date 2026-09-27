@@ -1,0 +1,7 @@
+import qualified_protocol_bound_lib as qp
+
+fn make[T: qp.QpbFactory](sample: T) -> T:
+    return T.default()
+
+test fn qualified_bound_dispatches_static_witness():
+    assert make(qp.QpbPoint(7)).x == 0
