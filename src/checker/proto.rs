@@ -2591,6 +2591,7 @@ impl Checker {
             let subst_params: Vec<Ty> = msig.params.iter().map(|t| subst(t, &pmap)).collect();
             let min_params = subst_params.len();
             let want = FnSig {
+                writes: Vec::new(),
                 labels: Vec::new(),
                 params: subst_params,
                 ret: subst(&msig.ret, &pmap),
@@ -5384,6 +5385,7 @@ impl Checker {
         // instantiation keeps its own true message instead).
         // The probe reads only `params` / `ret` / `type_params`; the rest is inert padding.
         let msig = FnSig {
+            writes: Vec::new(),
             params: expected.to_vec(),
             labels: Vec::new(),
             ret: ret.clone(),

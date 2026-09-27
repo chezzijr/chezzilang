@@ -645,7 +645,6 @@ fn d4_rule1_silent_set_stays_clean() {
         "fn f():\n    xs := [1]\n    parallel:\n        spawn:\n            xs := [7]\n            xs.push(2)\n    print(xs[0])\nf()\n",
         "fn f():\n    xs := [1]\n    xs.push(2)\n    n := 0\n    n = 9\n    print(xs.len() + n)\nf()\n",
         "fn g(n: int):\n    print(n)\nfn f():\n    xs := [1, 2]\n    parallel:\n        spawn g(xs.pop() ?? 0)\nf()\n",
-        "fn f():\n    xs := [1]\n    parallel:\n        spawn:\n            fn bump():\n                xs.push(2)\n            bump()\n    print(xs[0])\nf()\n",
         "fn put[C: IndexSet[int, int]](c: C):\n    parallel:\n        spawn:\n            c[0] = 5\nput([1])\n",
         "struct Grid:\n    data: List[List[int]]\n    fn index(self, i: int) -> List[int]:\n        return self.data[i]\nfn f():\n    g := Grid([[1, 2]])\n    parallel:\n        spawn:\n            g[0][1] = 5\nf()\n",
     ] {
@@ -763,7 +762,6 @@ fn d4_rule3_declines() {
         "fn f():\n    xs := [1]\n    ch := Channel[fn() -> nil](1)\n    ch.send(fn(): xs.push(2))\n    g := ch.recv()\n    print(xs)\n    print(g)\nf()\n",
         "fn f():\n    xs := [1]\n    g := fn(): print(xs[0])\n    parallel:\n        spawn g()\nf()\n",
         "fn f():\n    xs := [1]\n    parallel:\n        spawn:\n            g := fn(): xs.push(2)\n            g()\n    print(xs)\nf()\n",
-        "fn f():\n    xs := [1]\n    parallel:\n        spawn:\n            fn g():\n                xs.push(2)\n            g()\n    print(xs)\nf()\n",
         "fn f():\n    xs := [1]\n    g := fn(): xs.push(2)\n    g = fn(): print(1)\n    parallel:\n        spawn g()\n    print(xs)\nf()\n",
     ] {
         no_warn(src);
@@ -1403,20 +1401,17 @@ fn a_defer_inside_the_task_is_on_the_far_side_of_the_airlock() {
     );
 }
 
-/// The two frame-shaped ceilings, asserted as under-warns so a later change that closes either one
-/// fails here loudly rather than silently widening the rule (`widening-untested-by-its-own-suite`).
-/// Both measured on the release binary: each program prints 0 — the write IS lost — with nothing
-/// reported. Ceiling 6 (`docs/syntax.md` §11b): a write made only through a closure / nested `fn`
-/// declared inside the task. Ceiling 1: a read inside a nested `fn` declared in the PARENT, whose
-/// closure twin (asserted above) does warn.
+/// A closure value still declines; a direct named nested call reports its proven captured write.
+/// A read inside a parent-side nested function still reports the earlier lost task write.
 #[test]
 fn the_two_frame_shaped_ceilings_under_warn() {
     // Ceiling 6 — the write never leaves the nested body's frame.
     no_warn(
         "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            bump := fn(): xs.push(1)\n            bump()\n    print(xs.len())\nf()\n",
     );
-    no_warn(
+    rejects(
         "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            fn bump():\n                xs.push(1)\n            bump()\n    print(xs.len())\nf()\n",
+        "'xs' is this task's copy",
     );
     // Ceiling 1 — the read never enters the parent-side nested `fn`'s frame.
     rejects(
