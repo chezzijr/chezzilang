@@ -565,6 +565,20 @@ fn d4_block_scoped_named_callee_writes_outer_parameter() {
 }
 
 #[test]
+fn d4_rebound_block_scoped_helper_does_not_report_its_old_write() {
+    ok(
+        "fn read():\n    print(1)\nfn outer(xs: List[int]):\n    if true:\n        fn inner():\n            xs.push(2)\n        inner := read\n        inner()\nfn main():\n    xs := [1]\n    parallel:\n        spawn:\n            outer(xs)\nmain()\n",
+    );
+}
+
+#[test]
+fn d4_assigned_block_scoped_helper_does_not_report_its_old_write() {
+    ok(
+        "fn read():\n    print(1)\nfn outer(xs: List[int]):\n    if true:\n        fn inner():\n            xs.push(2)\n        inner = read\n        inner()\nfn main():\n    xs := [1]\n    parallel:\n        spawn:\n            outer(xs)\nmain()\n",
+    );
+}
+
+#[test]
 fn d4_nested_named_capture_write() {
     rejects_help_at(
         "fn main():\n    xs := [1]\n    fn bump():\n        xs.push(2)\n    parallel:\n        spawn:\n            bump()\nmain()\n",

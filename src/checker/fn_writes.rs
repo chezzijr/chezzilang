@@ -36,7 +36,7 @@ pub(super) struct Scan {
     pub direct: Vec<FnWrite>,
     pub calls: Vec<CallEdge>,
     nested: HashMap<String, Scan>,
-    visible_fns: Vec<HashMap<String, String>>,
+    visible_fns: Vec<HashMap<String, Option<String>>>,
     locals: HashSet<String>,
     params: Vec<String>,
 }
@@ -62,7 +62,7 @@ pub(super) fn scan(decl: &FnDecl) -> Scan {
     scan_with_visible(decl, Vec::new())
 }
 
-fn scan_with_visible(decl: &FnDecl, visible_fns: Vec<HashMap<String, String>>) -> Scan {
+fn scan_with_visible(decl: &FnDecl, visible_fns: Vec<HashMap<String, Option<String>>>) -> Scan {
     let mut out = Scan {
         direct: Vec::new(),
         calls: Vec::new(),
@@ -156,8 +156,20 @@ impl Scan {
                 };
                 self.record(target, WriteKind::Store, op);
                 self.expr(value);
+                if let ExprKind::Ident(name) = &target.kind
+                    && let Some(scope) = self.visible_fns.last_mut()
+                {
+                    scope.insert(name.clone(), None);
+                }
             }
-            StmtKind::Let { value, .. } => self.expr(value),
+            StmtKind::Let { names, value, .. } => {
+                self.expr(value);
+                if let Some(scope) = self.visible_fns.last_mut() {
+                    for name in names {
+                        scope.insert(name.clone(), None);
+                    }
+                }
+            }
             StmtKind::Expr(expr) | StmtKind::Return(Some(expr)) | StmtKind::Yield(expr) => {
                 self.expr(expr)
             }
@@ -217,7 +229,7 @@ impl Scan {
                     decl.name, decl.name_span.file, decl.name_span.line, decl.name_span.col
                 );
                 if let Some(scope) = self.visible_fns.last_mut() {
-                    scope.insert(decl.name.clone(), key.clone());
+                    scope.insert(decl.name.clone(), Some(key.clone()));
                 }
                 let child = scan_with_visible(decl, self.visible_fns.clone());
                 self.nested.insert(key, child);
@@ -239,17 +251,20 @@ impl Scan {
                         self.record(obj, WriteKind::Method(name.clone()), name.clone());
                     }
                     ExprKind::Ident(name) => {
-                        let local = self
+                        let binding = self
                             .visible_fns
                             .iter()
                             .rev()
                             .find_map(|scope| scope.get(name));
-                        if let Some(key) = local {
+                        if let Some(Some(key)) = binding {
                             self.calls.push(CallEdge {
                                 callee: key.clone(),
                                 args: args.clone(),
                             });
-                        } else if !self.locals.contains(name) && !self.params.contains(name) {
+                        } else if binding.is_none()
+                            && !self.locals.contains(name)
+                            && !self.params.contains(name)
+                        {
                             self.calls.push(CallEdge {
                                 callee: name.clone(),
                                 args: args.clone(),
