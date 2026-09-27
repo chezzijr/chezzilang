@@ -2683,9 +2683,27 @@ Q(1)               # struct ctor
 Q.zero()           # static method
 ```
 
-This hop is LOCAL only — an alias of a `from`-imported type works, but a `from`-imported ALIAS itself
-(`from m import F` where `m` declares `type F = E`) is not yet usable this way, and neither is a
-qualified `m.F.A(5)`.
+The same holds for an IMPORTED alias — `import F from m` (renamed with `as` too) or qualified
+`m.F` — and for a local alias whose body is `module.Type`. Each spelling resolves to the aliased
+type itself (same nominal identity, same defaults), and an alias never creates a runtime type value:
+
+```chezzi
+import F, Q from m           # m declares: type F = E, type Q = P
+import m
+type R = m.P                 # a local alias of a qualified type
+F.A(5)                       # m's E.A(5)
+m.F.B                        # qualified alias, nullary variant
+match m.F.A(1):
+    m.F.A(n): print(n)       # qualified alias in a pattern
+    F.B: print("b")
+Q(1) == R(1)                 # both construct m's P
+R.zero()                     # static method through the alias
+```
+
+An alias of a generic instantiation keeps its pinned arguments (`type IB = Box[int]`: `IB.of("x")`
+is a type error, and `IB[str](…)` is rejected — the alias already fixes its arguments). An alias of a
+scalar or a protocol stays a type spelling only: `type M = int` then `M(5)` is `unknown name 'M'` in
+every spelling.
 
 **Newtypes** (`newtype Name = <type>`, M21) are the *distinct-type* counterpart to a transparent
 `type` alias: `Name` wraps the underlying type but is a **separate, nominal** type that does NOT

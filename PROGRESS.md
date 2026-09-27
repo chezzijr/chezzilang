@@ -7,6 +7,14 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-172 (2026-09-28) — imported and qualified `type` aliases work in expression and pattern
+  position.** `import Position from m`, `m.Position`, and a local `type P = m.Point` now construct,
+  call statics, build variants, and match patterns exactly like the aliased type (TICKET-174 folded
+  in). The compiler's `assign_type_keys` re-points each alias at its target's canonical key across
+  modules; the checker follows named-imported and `module.Type` alias bodies and hydrates the
+  target's shape without licensing its bare name. Desugar fills constructor and static defaults
+  through an alias head, and keeps DEC-120's collision fallback. Scalar and protocol aliases stay
+  type spellings. DEC-065's local-only restriction is superseded.
 - **TICKET-170 (2026-09-26) — D4 layer A rejects statically visible writes to task airlock copies.**
   Direct writes in a task body now fail at compile time with layer C's byte-identical fault text,
   including projected stores, native mutators, and module globals. A syntactic least fixed point
