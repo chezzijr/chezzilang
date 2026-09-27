@@ -32,6 +32,7 @@ impl Checker {
         // threaded into the generic ctor / generic fn-call dispatchers below to pre-seed `T`.
         let expected = self.expected_hint.take();
         let expected = expected.as_ref();
+        self.report_named_call_writes(callee, args, false);
         if self.in_spawn_block
             && let ExprKind::Ident(name) = &callee.kind
             && self.is_captured(name)

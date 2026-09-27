@@ -617,6 +617,8 @@ fn is_lifecycle_hook(name: &str) -> bool {
 /// only for generic functions (`fn max[T: Comparable]`), where `params`/`ret` contain `Ty::Param`s.
 #[derive(Clone)]
 struct FnSig {
+    /// Proven writes made when this named function runs.
+    writes: Vec<fn_writes::FnWrite>,
     params: Vec<Ty>,
     /// Swift-style parameter labels parallel to `params` (the declaration's param names; `None` for
     /// `self` or an unnamed slot). Surface-only — used ONLY to build a labelled `Ty::Func` value type
@@ -671,6 +673,7 @@ impl FnSig {
     fn plain(params: Vec<Ty>, ret: Ty) -> FnSig {
         let min_params = params.len();
         FnSig {
+            writes: Vec::new(),
             labels: Vec::new(),
             params,
             ret,
@@ -689,6 +692,7 @@ impl FnSig {
     fn optional_tail(params: Vec<Ty>, ret: Ty, optional: usize) -> FnSig {
         let min_params = params.len() - optional;
         FnSig {
+            writes: Vec::new(),
             labels: Vec::new(),
             params,
             ret,
@@ -2023,6 +2027,7 @@ struct Checker {
     /// (a shadowing `:=` yields a fresh, possibly-mutable binding), same rule as `loop_vars`.
     const_decls: Vec<std::collections::HashSet<String>>,
     functions: HashMap<String, FnSig>,
+    fn_write_scopes: Vec<HashMap<String, Vec<fn_writes::FnWrite>>>,
     /// Names of functions declared in the CURRENT module (top-level `fn`s only — NOT imported names).
     /// Gates the generic-fn-as-value turbofish B-path (`ident[int]`) so the checker only accepts a
     /// turbofish on a SAME-MODULE generic fn — the exact set the compiler's `fn_names` erases at
@@ -2665,7 +2670,7 @@ pub(super) enum PathSeg {
     Dynamic,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) enum ChainLink {
     Field(String),
     Index,
@@ -2673,6 +2678,7 @@ pub(super) enum ChainLink {
 
 mod exhaust;
 mod expr;
+mod fn_writes;
 mod pattern;
 // `pub(crate)` for `proto::INTRINSIC_PROTO_METHODS` — the intrinsic-grant ↔ VM-arm pairing table,
 // which `vm::tests::intrinsic_grants_all_have_vm_arms` reads to assert the pairing (W6-3).

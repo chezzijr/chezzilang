@@ -174,6 +174,7 @@ impl Checker {
             .collect();
         let wparams = self.witness_params_of(decl);
         FnSig {
+            writes: Vec::new(),
             // Trailing defaulted parameters are filled by the CALLEE's own prologue, so a call may
             // omit them. Same predicate the compiler sizes `Proto::min_arity` with — and because
             // this reading DEPENDS on `wparams`, which the hoist fixpoint re-derives (non-monotone:
@@ -2484,6 +2485,7 @@ impl Checker {
                         return;
                     }
                     let mut sig = self.fn_sig(decl, decl.name_span);
+                    self.bind_nested_fn_writes(decl);
                     // TICKET-142 (W14-33) — a nested fn's default is compiled in MODULE scope (the
                     // prologue hides the frame's locals), so a free name that resolves innermost-first
                     // to a non-module scope (a param, a local, a sibling fn, a local shadowing a
@@ -3010,6 +3012,9 @@ impl Checker {
                         // Full type-check of the call (callee, arity, args) — the single source of
                         // type diagnostics for the sub-expressions.
                         self.infer(e);
+                        if let ExprKind::Call { callee, args, .. } = &e.kind {
+                            self.report_named_call_writes(callee, args, true);
+                        }
                         // Every value crossing the airlock must be sendable: the arguments, and
                         // (for a method spawn) the receiver the task talks through. Re-inferring
                         // here would duplicate the type errors `infer(e)` already reported, so we

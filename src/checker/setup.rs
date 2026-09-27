@@ -43,6 +43,7 @@ pub(super) struct DiagMark {
     kw_certain: std::collections::HashSet<(usize, String)>,
     kw_written: std::collections::HashSet<(usize, String)>,
     kw_pending: Vec<((usize, String), Span)>,
+    fn_write_scopes: Vec<HashMap<String, Vec<fn_writes::FnWrite>>>,
 }
 
 impl Checker {
@@ -61,6 +62,7 @@ impl Checker {
             written_captures: Vec::new(),
             module_global_lets: std::collections::HashSet::new(),
             functions: HashMap::new(),
+            fn_write_scopes: Vec::new(),
             local_fn_names: std::collections::HashSet::new(),
             raw_ctor_owner: None,
             fn_reads: std::collections::HashSet::new(),
@@ -1299,6 +1301,7 @@ impl Checker {
         }
         let map = struct_param_map(info, targs);
         Some(FnSig {
+            writes: Vec::new(),
             params: sig.params.iter().map(|p| subst(p, &map)).collect(),
             ret: subst(&sig.ret, &map),
             ..sig.clone()
@@ -1354,6 +1357,7 @@ impl Checker {
             kw_certain: self.kw_certain.clone(),
             kw_written: self.kw_written.clone(),
             kw_pending: self.kw_pending.clone(),
+            fn_write_scopes: self.fn_write_scopes.clone(),
         }
     }
 
@@ -1375,6 +1379,7 @@ impl Checker {
         self.kw_certain = m.kw_certain;
         self.kw_written = m.kw_written;
         self.kw_pending = m.kw_pending;
+        self.fn_write_scopes = m.fn_write_scopes;
     }
 
     /// Attribute a diagnostic to the module currently being checked (graph path only). Shared by
@@ -1506,6 +1511,7 @@ impl Checker {
         self.collect_docs(stmts);
         self.hoist(stmts);
         self.infer_self_writers(stmts);
+        self.infer_fn_writers(stmts);
         // SINGLE-RESOLVER FFI fix: cache every struct declared in THIS module under its identity key,
         // its by-value `CType::Struct` computed HERE — in this (the DEFINING) module's import/alias
         // scope (extends the `AliasSig::ctype` precedent to structs). Done only when harvesting
@@ -2124,7 +2130,13 @@ impl Checker {
             match &s.kind {
                 StmtKind::Fn(decl) => {
                     if let Some(fsig) = self.functions.get(&decl.name) {
-                        sig.functions.insert(decl.name.clone(), fsig.clone());
+                        let mut fsig = fsig.clone();
+                        for effect in &mut fsig.writes {
+                            if let fn_writes::WriteRoot::Global(name) = &effect.root {
+                                effect.global_ty = self.lookup(name);
+                            }
+                        }
+                        sig.functions.insert(decl.name.clone(), fsig);
                     }
                 }
                 // An extern fn is a module global exactly like a top-level `fn` (the compiler binds
@@ -2269,6 +2281,7 @@ impl Checker {
 
     pub(super) fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
+        self.fn_write_scopes.push(HashMap::new());
         self.loop_vars.push(std::collections::HashSet::new());
         self.const_decls.push(std::collections::HashSet::new());
         self.capture_table.push(HashMap::new());
@@ -2299,6 +2312,7 @@ impl Checker {
         self.kw_certain.retain(|k| k.0 < top);
         self.kw_written.retain(|k| k.0 < top);
         self.scopes.pop();
+        self.fn_write_scopes.pop();
         self.loop_vars.pop();
         self.const_decls.pop();
         self.capture_table.pop();
@@ -2885,6 +2899,99 @@ impl Checker {
         }
         if self.in_spawn_block && self.is_captured(name) {
             self.error(span, format!("'{name}' {}", crate::vm::COPY_WRITE_TAIL));
+        }
+    }
+
+    pub(super) fn report_named_call_writes(
+        &mut self,
+        callee: &Expr,
+        args: &[Expr],
+        force_task: bool,
+    ) {
+        if !force_task && !self.in_spawn_block {
+            return;
+        }
+        let Some((callee_name, writes)) = self.named_fn_writes(callee) else {
+            return;
+        };
+        let mut reported = std::collections::HashSet::new();
+        for effect in writes {
+            let (name, mut path, copied) = match &effect.root {
+                fn_writes::WriteRoot::Param(index) => {
+                    let Some(arg) = args.get(*index) else {
+                        continue;
+                    };
+                    let Some((name, path)) = fn_writes::chain(arg) else {
+                        continue;
+                    };
+                    let copied = force_task || self.is_captured(&name);
+                    (name, path, copied)
+                }
+                fn_writes::WriteRoot::Capture(name) => (
+                    name.clone(),
+                    Vec::new(),
+                    force_task || self.is_captured(name),
+                ),
+                fn_writes::WriteRoot::Global(name) => (name.clone(), Vec::new(), true),
+            };
+            if !copied || reported.contains(&name) {
+                continue;
+            }
+            path.extend(effect.path.iter().cloned());
+            let root_ty = self.lookup(&name).or_else(|| effect.global_ty.clone());
+            let Some(mut ty) = root_ty else {
+                continue;
+            };
+            let mut valid = true;
+            let prefix_len = if matches!(effect.kind, fn_writes::WriteKind::Store) {
+                path.len().saturating_sub(1)
+            } else {
+                path.len()
+            };
+            for link in path.iter().take(prefix_len) {
+                let Some(next) = self.checked_link_ty(&ty, link) else {
+                    valid = false;
+                    break;
+                };
+                ty = next;
+            }
+            if !valid {
+                continue;
+            }
+            let proven = match &effect.kind {
+                fn_writes::WriteKind::Method(method) => self.call_writes_receiver(&ty, method),
+                fn_writes::WriteKind::Store => match path.last() {
+                    None => !matches!(effect.root, fn_writes::WriteRoot::Param(_)),
+                    Some(ChainLink::Field(field)) => self
+                        .checked_link_ty(&ty, &ChainLink::Field(field.clone()))
+                        .is_some(),
+                    Some(ChainLink::Index) => {
+                        matches!(ty, Ty::List(_) | Ty::Map(..) | Ty::ByteArray)
+                            || matches!(&ty, Ty::Struct(key, _) if self.method_writes_self(key, "set_index"))
+                    }
+                },
+            };
+            if !proven {
+                continue;
+            }
+            reported.insert(name.clone());
+            let help = format!(
+                "call to '{callee_name}' writes '{name}' through '{}'",
+                effect.operation
+            );
+            let old_errors = self.errors.len();
+            self.note_task_write(&name, callee.span);
+            if self.errors.len() > old_errors {
+                if let Some(error) = self.errors.last_mut() {
+                    error.help = Some(help);
+                }
+            } else {
+                self.error_help(
+                    callee.span,
+                    format!("'{name}' {}", crate::vm::COPY_WRITE_TAIL),
+                    Some(help),
+                );
+            }
         }
     }
     /// TICKET-165 — a mutator (`push`, `add`, …) called on a PROJECTED receiver (`xs[0].push(v)`,

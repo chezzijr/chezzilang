@@ -517,6 +517,42 @@ fn spawn_body_named_function_parameter_write_to_captured_binding_is_a_compile_ti
     );
 }
 
+#[test]
+fn d4_named_helper_transitive_and_recursive_writes() {
+    rejects_help(
+        "fn bump(xs: List[int], n: int):\n    if n > 0:\n        bump(xs, n - 1)\n    else:\n        xs.push(2)\nfn relay(xs: List[int]):\n    bump(xs, 1)\nfn main():\n    xs := [1]\n    parallel:\n        spawn:\n            relay(xs)\nmain()\n",
+        "'xs' is this task's copy: a write to it would be lost at the join",
+        "push",
+    );
+}
+
+#[test]
+fn d4_nested_named_capture_write() {
+    rejects_help(
+        "fn main():\n    xs := [1]\n    fn bump():\n        xs.push(2)\n    parallel:\n        spawn:\n            bump()\nmain()\n",
+        "'xs' is this task's copy: a write to it would be lost at the join",
+        "push",
+    );
+}
+
+#[test]
+fn d4_named_global_and_imported_writes() {
+    rejects_help(
+        "xs := [1]\nfn bump():\n    xs.push(2)\nfn main():\n    parallel:\n        spawn:\n            bump()\nmain()\n",
+        "'xs' is this task's copy: a write to it would be lost at the join",
+        "push",
+    );
+}
+
+#[test]
+fn d4_spawn_named_callee_write() {
+    rejects_help(
+        "fn bump(xs: List[int]):\n    xs.push(2)\nfn main():\n    xs := [1]\n    parallel:\n        spawn bump(xs)\nmain()\n",
+        "'xs' is this task's copy: a write to it would be lost at the join",
+        "push",
+    );
+}
+
 /// Removing D4 rule 1 makes this source return zero matching errors. Speculative checking must not
 /// report the same write twice.
 #[test]
