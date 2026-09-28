@@ -33,6 +33,24 @@
 - **Fully resolve the issue; do not file a residual as a substitute for fixing.** Three consecutive
   fixes each closed one row and opened one or two. A filed residual reads as progress but is a transfer
   of work, and its premise decays (see §7). Filing is right only for something genuinely out of scope.
+- **Derive, don't mirror. Every fact has exactly one owner; everything else reads it.** Wave 16
+  (`docs/root-causes-w16.md`) traced 5 P0 and 7 P1 to one shape: a fact decided in two or more places
+  kept in sync by hand ("Mirrors the checker's …"), with each bug a place the copies drifted. The audit
+  of TICKET-120..176 found 34 of 51 fixes were point patches that added one more copy, clause or veto
+  next to the failing site, and every one of those families came back in the next sweep. The fixes
+  that held all **deleted** code (D1, D2, D3's −1 824 lines, TICKET-154's duplicate encoder). So:
+  - Before fixing a bug in a family that already has a sibling fix, ask **"which duplicate does this
+    delete, or which single source does it add?"**. "Add a clause at the site in the repro" is not a
+    fix for a family; it is a documented interim at best, and only with the owner's agreement.
+  - A second resolver/predicate/list that must agree with a first is the bug, even before it drifts.
+    Make one consume the other (a checker→compiler table, one shared function, a list derived from the
+    declarations) and delete the copy. `ExternTable` replacing the compiler's own extern resolver is
+    the precedent.
+  - A fix that lands with a "mirrors X" comment, a "keep in sync with Y" comment, or a drift test that
+    carries an exemption is a red flag in review.
+  - Every family fix lands with **one test that enumerates the whole grid** (every operation × every
+    context, every binder × every name kind), so a new row cannot ship silently.
+    `intrinsic_grants_all_have_vm_arms` is the existing precedent.
 - **Stdlib gaps are deferred on verified cost, never on "nobody asked."** A reference-language idiom
   *is* the need. `Reader.lines()` was deferred on a claimed cost ("needs a new lazy Obj variant") that
   was false — a generator over `read_line()` streams lazily by construction — and building it surfaced
@@ -91,7 +109,11 @@ the freeze.
 
 - **Fix by narrowing the checker, never by plumbing types into the compiler.** Where the two must
   agree on a syntactic predicate, put one shared predicate in `src/ast/mod.rs` and call it from both
-  (`const_num`, the int→float rule) so they agree by construction. Six of thirteen wave-5 bugs were
+  (`const_num`, the int→float rule) so they agree by construction. **The same holds for name
+  resolution, and it was never applied there:** the checker decides what `name(...)` means and throws
+  the answer away, and the compiler re-decides at ~20 sites in a different order (wave 16 K1–K3:
+  a local `ord` loses to the builtin `ord`). Do not add another "Mirrors the checker" copy (TICKET-120,
+  139, 172, 173 each did); the fix is a checker-recorded resolution the compiler only reads. Six of thirteen wave-5 bugs were
   this one shape: int-under-float (`.sort()` returned an unsorted `List[float]`), range-as-value,
   bound-method-as-value with `self: Unknown`, `return` in `defer:`/`spawn:` silently discarded, nested
   `import` as a no-op.
@@ -143,7 +165,8 @@ the freeze.
   does. A test can be green on `ok()` while `chezzi check` rejects the same program. For anything
   touching module-scoped type resolution, use the graph path or both. The reserved-type method
   surface is likewise harvested on **two** paths (`mod.rs` graph harvest and `setup.rs` single-module
-  harvest); a `native struct` mirror must seed both.
+  harvest). Today a `native struct` mirror must seed both, but that is a known duplicate to remove
+  (one harvest function both paths call), not a pattern to copy: never add a third path.
 - **A native `Ty::Struct`-modeled type missing from the reserved/collision guard is accept-then-trap.**
   `import X from M` + `struct X` must be a clean "already defined" error. A struct-returning native
   threads through four fixed lists (`std/M.chz` decl, compiler layout array, `seed_stdlib_structs`,
@@ -165,7 +188,12 @@ the freeze.
   producer/consumer pipeline is permanently all-parked *by design*, 2–7 of 30 runs); the "obvious"
   progress-counter repair still fired 6/40, because on a polling runtime "nothing moved recently" is
   not "nothing can move". Restrict the verdict to the shape you can prove, decline everything else,
-  fence it with a *looping* test, mutation-check that the test fails against the buggy predicate, and
+  **and derive "can this waiter still be satisfied?" from the waiter itself** (its arms, its deadline,
+  its context) in one registry of blocked waiters — not from a hand-kept list of veto entries that
+  must grow for every new blocking shape. TICKET-125, 129, 134 and 176 each added one more veto, and
+  wave 16 C1 is the next shape the list missed (a demoted `wait:` with a timer deadline). The same
+  goes for "may I block here?": one context, one `block_on`, not a predicate per operation
+  (`docs/root-causes-w16.md` Family 2). Fence it with a *looping* test, mutation-check that the test fails against the buggy predicate, and
   audit the party set for self-reference (a job joining its own `Executor` counted its own slot and
   was unsatisfiable by construction: 9/60 false deadlocks on debug, 0/40 on release). **A verdict that
   is right 85% of the time on the same program is not a verdict.**
