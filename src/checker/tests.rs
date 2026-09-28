@@ -25657,19 +25657,137 @@ fn builtin_method_slices_all_resolve() {
     chk_harvested(&harvested(&conc, "Executor"), EXECUTOR_METHODS, "Executor");
 }
 
-/// Removing `bytearray.extend` from the checker makes the bytearray row disagree with layer C.
-/// Adding an unharvested checker-only mutator fails the second assertion.
+/// TICKET-179 grid 1: the receiver-write table (`crate::vm::is_mutating_native_kind`, the one owner
+/// the checker's `mutates_receiver` reads) is checked against BEHAVIOR. Every harvested native method
+/// of List/Map/Set/bytearray/str/bytes runs on a fresh value, and "did the receiver change" must equal
+/// the table. A harvested method with no sample, or a sample naming an unharvested method, also fails.
 #[test]
-fn mutates_receiver_covers_every_mutating_native() {
+fn receiver_write_table_matches_observed_behavior() {
     let c = prelude_container_checker();
-    let cases = [
-        ("List", Ty::list(Ty::Int)),
-        ("Map", Ty::map(Ty::Str, Ty::Int)),
-        ("Set", Ty::set(Ty::Int)),
-        ("bytearray", Ty::ByteArray),
+    let rows: [(&str, &str, &[&str]); 6] = [
+        (
+            "List",
+            "x := [3, 1, 1, 2]",
+            &[
+                "len()",
+                "push(9)",
+                "pop()",
+                "reverse()",
+                "contains(1)",
+                "index_of(1)",
+                "concat([4])",
+                "extend([4])",
+                "sort()",
+                "sum()",
+                "map(fn(a): a + 1)",
+                "filter(fn(a): a > 1)",
+                "fold(0, fn(acc, a): acc + a)",
+                "sort_by(fn(a, b): a - b)",
+                "sort_by_key(fn(a): 0 - a)",
+                "min()",
+                "max()",
+                "min_by(fn(a): a)",
+                "max_by(fn(a): a)",
+                "first()",
+                "last()",
+                "reversed()",
+                "insert(0, 9)",
+                "remove_at(0)",
+                "unique()",
+                "dedup()",
+                "chunk(2)",
+                "windows(2)",
+                "take_while(fn(a): a > 2)",
+                "drop_while(fn(a): a > 2)",
+                "count(fn(a): a == 1)",
+                "position(fn(a): a == 1)",
+                "copy()",
+            ],
+        ),
+        (
+            "Map",
+            r#"x := {"a": 1}"#,
+            &[
+                "len()",
+                r#"has("a")"#,
+                r#"get("a")"#,
+                "keys()",
+                "values()",
+                r#"remove("a")"#,
+                r#"merge({"b": 2})"#,
+                r#"update({"c": 3})"#,
+                "items()",
+                "copy()",
+            ],
+        ),
+        (
+            "Set",
+            "x := {1, 2}",
+            &[
+                "len()",
+                "has(1)",
+                "add(3)",
+                "remove(1)",
+                "union({9})",
+                "intersection({1})",
+                "difference({1})",
+                "copy()",
+            ],
+        ),
+        (
+            "bytearray",
+            "x := bytearray()\nx.push(97)\nx.push(98)",
+            &[
+                "len()",
+                "push(1)",
+                "pop()",
+                "decode()",
+                r#"extend(b"c")"#,
+                "copy()",
+            ],
+        ),
+        (
+            "str",
+            r#"x := "a,b""#,
+            &[
+                "len()",
+                "upper()",
+                "lower()",
+                "trim()",
+                "message()",
+                r#"split(",")"#,
+                "chars()",
+                r#"join(["x", "y"])"#,
+                r#"starts_with("a")"#,
+                r#"contains("a")"#,
+                r#"ends_with("b")"#,
+                "encode()",
+                r#"replace("a", "z")"#,
+                "repeat(2)",
+                "reverse()",
+                r#"pad_left(5, "*")"#,
+                r#"pad_right(5, "*")"#,
+                r#"index_of("b")"#,
+                r#"count("a")"#,
+                r#"strip_prefix("a")"#,
+                r#"strip_suffix("b")"#,
+                "split_lines()",
+                "strip()",
+                "to_int()",
+                "to_float()",
+                "parse_int()",
+                "parse_float()",
+            ],
+        ),
+        (
+            "bytes",
+            r#"x := b"ab""#,
+            &["decode()", "decode_lossy()", "len()"],
+        ),
     ];
-    for (kind, ty) in cases {
-        let mut names: Vec<String> = c
+    let mut bad: Vec<String> = Vec::new();
+    for (kind, setup, calls) in rows {
+        let mut harvested: Vec<String> = c
             .structs
             .get(kind)
             .unwrap_or_else(|| panic!("seeded {kind} struct"))
@@ -25678,44 +25796,74 @@ fn mutates_receiver_covers_every_mutating_native() {
             .cloned()
             .collect();
         if kind == "bytearray" {
-            names.push("extend".to_string());
+            harvested.push("extend".to_string());
         }
-        names.sort();
-        names.dedup();
-        for method in &names {
-            if kind == "Map" && method == "merge" {
-                assert!(!mutates_receiver(&ty, method));
+        harvested.sort();
+        harvested.dedup();
+        let sampled: Vec<&str> = calls
+            .iter()
+            .map(|call| call.split('(').next().unwrap_or(call))
+            .collect();
+        for m in &harvested {
+            if !sampled.contains(&m.as_str()) {
+                bad.push(format!("{kind}.{m}: harvested but has no sample"));
+            }
+        }
+        for (call, method) in calls.iter().zip(&sampled) {
+            if !harvested.iter().any(|m| m == method) {
+                bad.push(format!("{kind}.{method}: sampled but not harvested"));
                 continue;
             }
-            assert_eq!(
-                mutates_receiver(&ty, method),
-                crate::vm::is_mutating_native_kind(kind, method),
-                "checker/runtime receiver-write drift for {kind}.{method}"
-            );
-        }
-        for method in match kind {
-            "List" => &[
-                "push",
-                "pop",
-                "reverse",
-                "extend",
-                "sort",
-                "sort_by",
-                "sort_by_key",
-                "insert",
-                "remove_at",
-            ][..],
-            "Map" => &["remove", "update"][..],
-            "Set" => &["add", "remove"][..],
-            "bytearray" => &["push", "pop", "extend"][..],
-            _ => unreachable!(),
-        } {
-            assert!(
-                names.iter().any(|name| name == method),
-                "checker lists missing {kind}.{method}"
-            );
+            let src =
+                format!("{setup}\nbefore := \"{{x}}\"\nx.{call}\nprint(\"{{x}}\" != before)\n");
+            let want = crate::vm::is_mutating_native_kind(kind, method);
+            match crate::vm::run_capture(&src) {
+                Ok(out) => {
+                    let got = out.trim() == "true";
+                    if got != want {
+                        bad.push(format!("{kind}.{method}: table {want}, observed {got}"));
+                    }
+                }
+                Err(e) => bad.push(format!("{kind}.{method}: {}", e.message)),
+            }
         }
     }
+    assert!(bad.is_empty(), "receiver-write table vs behavior: {bad:#?}");
+}
+
+/// TICKET-179 grid 2, compile-time cells (the runtime cells are
+/// `tests/chz/spec/airlock_crossing_grid_test.chz`). A write the parent could observe and that every
+/// path reaches is rejected; a read, and a write only some paths reach (left to layer C), are ok.
+#[test]
+fn airlock_crossing_grid_compile_cells() {
+    for write in ["xs.push(9)", "xs[0] = 9", "p.x = 9", "n += 1"] {
+        rejects(
+            &format!(
+                "struct P:\n    x: int\nfn main():\n    xs := [1]\n    p := P(1)\n    n := 0\n    parallel:\n        spawn:\n            {write}\n    print(xs, p.x, n)\nmain()\n"
+            ),
+            "is this task's copy",
+        );
+    }
+    ok(
+        "struct P:\n    x: int\nfn main():\n    xs := [1]\n    p := P(1)\n    n := 0\n    parallel:\n        spawn:\n            _ := xs.len() + p.x + n\n    print(xs, p.x, n)\nmain()\n",
+    );
+    rejects(
+        "g := 0\nfn always():\n    g = 1\nfn main():\n    parallel:\n        spawn: always()\n    print(g)\nmain()\n",
+        "is this task's copy",
+    );
+    // Layer A declines each of these: the write is reached on some paths only.
+    ok(
+        "g := 0\nfn maybe(flag: bool):\n    if flag:\n        g = 1\nfn main():\n    parallel:\n        spawn: maybe(false)\n    print(g)\nmain()\n",
+    );
+    ok(
+        "g := 0\nfn maybe(flag: bool):\n    if not flag:\n        return\n    g = 1\nfn main():\n    parallel:\n        spawn: maybe(false)\n    print(g)\nmain()\n",
+    );
+    ok(
+        "g := 0\nfn step(o: Option[int]) -> Option[int]:\n    v := o?\n    g = v\n    return Some(v)\nfn main():\n    parallel:\n        spawn: _ := step(None)\n    print(g)\nmain()\n",
+    );
+    ok(
+        "g: List[int] = []\nfn each(xs: List[int]):\n    for x in xs:\n        g.push(x)\nfn main():\n    parallel:\n        spawn: each([])\n    print(g)\nmain()\n",
+    );
 }
 
 /// Drift guard (editor hover, Tier C): every `(module, fn)` named in an authored module-fn doc slice

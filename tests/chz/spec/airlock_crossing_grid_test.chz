@@ -1,0 +1,259 @@
+# TICKET-179 -- D4 crossing grid. Every route a value takes into a task x every write op, with the
+# expected outcome derived from one question: can the parent observe this value after the join?
+# "ok" = the write runs; "fault" = D4's runtime fault. The compile-error cells of the same grid live
+# in the Rust test `checker::tests::airlock_crossing_grid_compile_cells`.
+import std.concurrency
+
+struct T179G:
+    x: int
+
+t179_glist: List[int] = [1]
+
+fn t179_try(xs: List[int], p: T179G, op: str) -> str:
+    res := recover:
+        if op == "read":
+            _ := xs.len() + p.x
+        if op == "call":
+            xs.push(9)
+        if op == "index":
+            xs[0] = 9
+        if op == "pluseq":
+            xs += [9]
+        if op == "field":
+            p.x = 9
+        0
+    match res:
+        Ok(_): return "ok"
+        Err(_): return "fault"
+
+fn t179_row(xs: List[int], p: T179G, out: Channel[str]):
+    parts: List[str] = []
+    for op in ["read", "call", "index", "pluseq", "field"]:
+        parts.push(t179_try(xs, p, op))
+    out.send(",".join(parts))
+
+fn t179_id(xs: List[int]) -> List[int]:
+    return xs
+
+fn t179_outcome(res: Result[int]) -> str:
+    match res:
+        Ok(_): return "ok"
+        Err(_): return "fault"
+
+test fn grid_spawn_arg_named():
+    xs := [1]
+    p := T179G(x=1)
+    out := Channel[str](1)
+    parallel:
+        spawn t179_row(xs, p, out)
+    assert out.recv() == "ok,fault,fault,fault,fault"
+    assert xs == [1]
+
+test fn grid_spawn_arg_fresh_literal():
+    out := Channel[str](1)
+    parallel:
+        spawn t179_row([1], T179G(x=1), out)
+    assert out.recv() == "ok,ok,ok,ok,fault"
+
+test fn grid_spawn_arg_comprehension():
+    xs := [1]
+    out := Channel[str](1)
+    parallel:
+        spawn t179_row([v for v in xs], T179G(x=1), out)
+    assert out.recv() == "ok,ok,ok,ok,fault"
+
+test fn grid_spawn_arg_copy():
+    xs := [1]
+    p := T179G(x=1)
+    out := Channel[str](1)
+    parallel:
+        spawn t179_row(xs.copy(), p.copy(), out)
+    assert out.recv() == "ok,ok,ok,ok,fault"
+    assert xs == [1]
+
+test fn grid_spawn_arg_call_result():
+    xs := [1]
+    out := Channel[str](1)
+    parallel:
+        spawn t179_row(t179_id(xs), T179G(x=1), out)
+    assert out.recv() == "ok,fault,fault,fault,fault"
+    assert xs == [1]
+
+test fn grid_spawn_receiver_named():
+    xs := [1]
+    r := recover:
+        parallel:
+            spawn xs.push(9)
+        0
+    assert t179_outcome(r) == "fault"
+    assert xs == [1]
+
+test fn grid_spawn_receiver_fresh():
+    r := recover:
+        parallel:
+            spawn [1].push(9)
+        0
+    assert t179_outcome(r) == "ok"
+
+test fn grid_module_global():
+    out := Channel[str](1)
+    parallel:
+        spawn:
+            t179_row(t179_glist, T179G(x=1), out)
+    assert out.recv() == "ok,fault,fault,fault,ok"
+    assert t179_glist == [1]
+
+fn t179_call(f: fn() -> nil, out: Channel[str]):
+    res := recover:
+        f()
+        0
+    out.send(t179_outcome(res))
+
+test fn grid_closure_capture():
+    xs := [1]
+    out := Channel[str](1)
+    parallel:
+        spawn t179_call(fn(): xs.push(9), out)
+    assert out.recv() == "fault"
+    assert xs == [1]
+
+test fn grid_channel_value():
+    ch := Channel[List[int]](1)
+    ch.send([1])
+    out := Channel[str](1)
+    parallel:
+        spawn:
+            ys := ch.recv()
+            out.send(t179_try(ys, T179G(x=1), "call"))
+    assert out.recv() == "ok"
+
+test fn grid_shared_handle():
+    s := Shared[int](1)
+    parallel:
+        spawn:
+            s.update(fn(v): v + 1)
+    assert s.get() == 2
+
+fn t179_map_row(m: Map[str, int], out: Channel[str]):
+    a := recover:
+        n := m.merge({"b": 2})
+        n.len()
+    b := recover:
+        m.update({"c": 3})
+        0
+    c := recover:
+        _ := m.remove("a")
+        0
+    out.send("{t179_outcome(a)},{t179_outcome(b)},{t179_outcome(c)}")
+
+test fn grid_map_methods_on_a_copy():
+    m := {"a": 1}
+    out := Channel[str](1)
+    parallel:
+        spawn t179_map_row(m, out)
+    assert out.recv() == "ok,fault,fault"
+    assert m == {"a": 1}
+
+fn t179_gen_ops(op: str) -> Iterator[str]:
+    acc := [1]
+    p := T179G(x=1)
+    yield "started"
+    yield t179_try(acc, p, op)
+
+fn t179_second(g: Iterator[str], out: Channel[str]):
+    res := recover:
+        v := g.next() ?? "none"
+        v
+    match res:
+        Ok(v): out.send(v)
+        Err(_): out.send("fault")
+
+test fn grid_generator_suspended_private_frame():
+    out := Channel[str](1)
+    parts: List[str] = []
+    for op in ["read", "call", "index", "pluseq", "field"]:
+        g := t179_gen_ops(op)
+        _ := g.next()
+        parallel:
+            spawn t179_second(g, out)
+        parts.push(out.recv())
+    assert ",".join(parts) == "ok,ok,ok,ok,ok"
+
+fn t179_gen_alias() -> Iterator[List[int]]:
+    acc: List[int] = []
+    yield acc
+    acc.push(1)
+    yield acc
+
+fn t179_drain_lists(g: Iterator[List[int]], out: Channel[str]):
+    res := recover:
+        n := 0
+        for v in g:
+            n += v.len()
+        n
+    out.send(t179_outcome(res))
+
+test fn grid_generator_suspended_yielded_and_held():
+    g := t179_gen_alias()
+    held := g.next()
+    out := Channel[str](1)
+    parallel:
+        spawn t179_drain_lists(g, out)
+    assert out.recv() == "fault"
+    assert held == Some([])
+
+fn t179_pend(xs: List[int]) -> Iterator[int]:
+    xs.push(1)
+    yield xs.len()
+
+fn t179_drain_ints(g: Iterator[int], out: Channel[str]):
+    res := recover:
+        n := 0
+        for v in g:
+            n += v
+        n
+    match res:
+        Ok(n): out.send("{n}")
+        Err(_): out.send("fault")
+
+test fn grid_generator_pending_fresh_arg():
+    out := Channel[str](1)
+    q := t179_pend([])
+    parallel:
+        spawn t179_drain_ints(q, out)
+    assert out.recv() == "1"
+
+test fn grid_generator_pending_parent_arg():
+    xs := [1]
+    out := Channel[str](1)
+    q := t179_pend(xs)
+    parallel:
+        spawn t179_drain_ints(q, out)
+    assert out.recv() == "fault"
+    assert xs == [1]
+
+fn t179_gen_count() -> Iterator[int]:
+    acc: List[int] = []
+    for i in range(3):
+        acc.push(i)
+        yield acc.len()
+
+test fn grid_generator_over_channel_unchanged():
+    g := t179_gen_count()
+    _ := g.next()
+    ch := Channel[Iterator[int]](1)
+    ch.send(g)
+    out := Channel[str](1)
+    parallel:
+        spawn:
+            h := ch.recv()
+            t179_drain_ints(h, out)
+    assert out.recv() == "5"
+
+test fn grid_generator_copy_is_independent_of_the_parent():
+    g := t179_gen_count()
+    _ := g.next()
+    out := Channel[str](1)
+    parallel:
+        spawn t179_drain_ints(g, out)
+    assert g.next() == Some(2)
