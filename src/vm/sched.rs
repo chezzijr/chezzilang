@@ -1629,6 +1629,7 @@ impl Vm {
             // NOT wake it — already unwinding, or blocked inside its own `defer` — which is exactly the
             // fiber that IS a genuine deadlock, and must be reported rather than hang.
             let tok = c.watch_demoted_cancel(self.demote_cancel_flags());
+            c.register_demoted_group(tok, vec![Arc::clone(&core)]);
             drop(c);
             sched.notify_waiters();
             tok
@@ -1821,6 +1822,7 @@ impl Vm {
                 c.register_demoted(*ptr, core);
             }
             let tok = c.watch_demoted_cancel(self.demote_cancel_flags());
+            c.register_demoted_group(tok, arms.iter().map(|(_, core)| Arc::clone(core)).collect());
             drop(c);
             sched.notify_waiters();
             tok

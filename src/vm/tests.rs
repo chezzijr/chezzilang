@@ -3782,6 +3782,96 @@ fn deadlock_predicate_vetoed_by_queued_value_on_demoted_channel() {
     );
 }
 
+/// W15-6 (TICKET-176) — a demoted recv settles `ClosedEmpty` on a closed channel, so a closed
+/// channel under it is progress, not a deadlock.
+#[test]
+fn a_closed_channel_under_a_demoted_recv_vetoes_the_deadlock_verdict() {
+    let sched = mk_sched(2);
+    let core = empty_core();
+    let ptr = core_key(&core);
+    let mut c = sched.lock();
+    c.parked_n = 1;
+    sched.blocked_native.fetch_add(1, Ordering::Relaxed);
+    c.register_demoted(ptr, &core);
+    let tok = c.watch_demoted_cancel(vec![]);
+    c.register_demoted_group(tok, vec![Arc::clone(&core)]);
+    assert!(
+        sched.is_deadlocked(&c),
+        "an open empty demoted channel is a genuine deadlock"
+    );
+    core.q.lock().unwrap().closed = true;
+    assert!(
+        !sched.is_deadlocked(&c),
+        "a closed channel under a demoted recv settles it (ClosedEmpty): no deadlock"
+    );
+    c.unwatch_demoted_cancel(tok);
+    c.unregister_demoted(ptr);
+    assert!(
+        sched.is_deadlocked(&c),
+        "after the demoted recv leaves, the closed channel vetoes nothing"
+    );
+}
+
+/// W15-6 (TICKET-176) — a demoted recv or `wait:` settles on a tripped `done_latch`.
+#[test]
+fn a_tripped_latch_under_a_demoted_recv_vetoes_the_deadlock_verdict() {
+    let sched = mk_sched(2);
+    let core = empty_core();
+    let ptr = core_key(&core);
+    let mut c = sched.lock();
+    c.parked_n = 1;
+    sched.blocked_native.fetch_add(1, Ordering::Relaxed);
+    c.register_demoted(ptr, &core);
+    let tok = c.watch_demoted_cancel(vec![]);
+    c.register_demoted_group(tok, vec![Arc::clone(&core)]);
+    core.done_latch.store(true, Ordering::Relaxed);
+    assert!(
+        !sched.is_deadlocked(&c),
+        "a tripped latch under a demoted recv settles it: no deadlock"
+    );
+}
+
+/// W15-6 (TICKET-176) — a demoted `wait:` returns "wait: all channels closed" once EVERY arm is
+/// closed, so that state is progress.
+#[test]
+fn a_demoted_wait_with_every_arm_closed_vetoes_the_deadlock_verdict() {
+    let sched = mk_sched(2);
+    let (a, b) = (empty_core(), empty_core());
+    let mut c = sched.lock();
+    c.parked_n = 1;
+    sched.blocked_native.fetch_add(1, Ordering::Relaxed);
+    c.register_demoted(core_key(&a), &a);
+    c.register_demoted(core_key(&b), &b);
+    let tok = c.watch_demoted_cancel(vec![]);
+    c.register_demoted_group(tok, vec![Arc::clone(&a), Arc::clone(&b)]);
+    a.q.lock().unwrap().closed = true;
+    b.q.lock().unwrap().closed = true;
+    assert!(
+        !sched.is_deadlocked(&c),
+        "every arm of a demoted wait closed settles it (all channels closed): no deadlock"
+    );
+}
+
+/// W15-6 (TICKET-176) — a demoted `wait:` SKIPS a closed arm, so one closed arm of two is not
+/// progress. Goes red if the closed veto asks `any` arm instead of `all`, or asks per channel.
+#[test]
+fn a_demoted_wait_with_one_arm_still_open_reads_as_deadlocked() {
+    let sched = mk_sched(2);
+    let (a, b) = (empty_core(), empty_core());
+    let mut c = sched.lock();
+    c.parked_n = 1;
+    sched.blocked_native.fetch_add(1, Ordering::Relaxed);
+    c.register_demoted(core_key(&a), &a);
+    c.register_demoted(core_key(&b), &b);
+    let tok = c.watch_demoted_cancel(vec![]);
+    c.register_demoted_group(tok, vec![Arc::clone(&a), Arc::clone(&b)]);
+    a.q.lock().unwrap().closed = true;
+    assert!(
+        sched.is_deadlocked(&c),
+        "a demoted wait with an open empty arm is still a genuine deadlock"
+    );
+}
+
 /// D5 owe #3 Path C (#1) — the registry is REFCOUNTED so 2+ fibers demoted on the SAME channel each
 /// register/unregister independently (one `unregister` must not drop the channel while a second
 /// demoted fiber still waits on it). Drives refcount 0→1→2→1→0 and asserts the veto survives the

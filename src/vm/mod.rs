@@ -2520,6 +2520,11 @@ struct SchedCore {
     /// genuine deadlock. Registered/un-registered under core lock A, 1:1 with `blocked_native`.
     demote_cancel_watch: std::collections::HashMap<u64, Vec<Arc<AtomicBool>>>,
     next_demote_tok: u64,
+    /// W15-6 (TICKET-176) — the arm channels of every demoted recv (one arm) or `wait:` (N arms),
+    /// keyed by the demote token from `watch_demoted_cancel`. A demoted `wait:` skips a closed arm, so
+    /// only a group whose EVERY arm is closed is settled; `is_deadlocked` reads it per group, never
+    /// per channel. Dropped by `unwatch_demoted_cancel`.
+    demoted_groups: std::collections::HashMap<u64, Vec<Arc<ChannelCore>>>,
     /// §2c1 — the waits of every BLOCKED BODY on this sched's thread (`Vm::block_party_guard`).
     ///
     /// A body that is parked on a channel is very often the RENDEZVOUS PARTNER of one of this sched's
@@ -2760,9 +2765,17 @@ impl SchedCore {
         tok
     }
 
-    /// Stop watching a demoted fiber (it resumed / faulted / settled). Caller holds A.
+    /// Stop watching a demoted fiber and drop its arm group (it resumed / faulted / settled). Caller
+    /// holds A.
     fn unwatch_demoted_cancel(&mut self, tok: u64) {
         self.demote_cancel_watch.remove(&tok);
+        self.demoted_groups.remove(&tok);
+    }
+
+    /// W15-6 (TICKET-176) — record the arm channels of the demoted recv / `wait:` holding `tok`, so
+    /// `is_deadlocked` can read a group whose every arm is closed. Caller holds A.
+    fn register_demoted_group(&mut self, tok: u64, arms: Vec<Arc<ChannelCore>>) {
+        self.demoted_groups.insert(tok, arms);
     }
 
     /// N4 (demoted half) — does some demoted fiber have a tripped cancel flag, i.e. is it about to
@@ -2842,6 +2855,7 @@ impl MnSched {
                 demoted_chans: std::collections::HashMap::new(),
                 demote_cancel_watch: std::collections::HashMap::new(),
                 next_demote_tok: 0,
+                demoted_groups: std::collections::HashMap::new(),
                 body_waits: Vec::new(),
                 guard_waits: Vec::new(),
             }),
