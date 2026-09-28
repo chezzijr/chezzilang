@@ -1,0 +1,35 @@
+# TICKET-175: every import spelling of one module names one module instance, and a full path reads
+# in every expression position the desugar fold reaches.
+# Gated by chz_suite_passes (tests/chz_suite.rs).
+
+import qualified_path_pkg.deep
+import qualified_path_pkg.deep as d
+import std.math
+import math from std
+
+fn with_default(n: int = qualified_path_pkg.deep.limit) -> int:
+    return n
+
+test fn as_alias_binds_the_module():
+    assert d.double(3) == 6
+
+test fn every_spelling_names_one_module_instance():
+    qualified_path_pkg.deep.record(1)
+    assert d.seen_count() == 1
+    assert deep.seen_count() == 1
+
+test fn module_initializes_once_under_every_spelling():
+    assert qualified_path_pkg.deep.init_count() == 1
+    assert deep.init_count() == 1
+    assert d.init_count() == 1
+
+test fn full_path_reads_inside_interpolation_and_closure():
+    assert "{qualified_path_pkg.deep.limit}" == "3"
+    f := fn() -> int: qualified_path_pkg.deep.limit
+    assert f() == 3
+
+test fn full_path_in_a_default_argument():
+    assert with_default() == 3
+
+test fn import_from_std_and_full_path_share_the_module():
+    assert math.sqrt(4.0) == std.math.sqrt(4.0)

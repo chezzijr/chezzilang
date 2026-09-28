@@ -1,0 +1,10 @@
+# rule: type, patternPrimary, importStmt
+import std.math
+import math as m from std
+x: a.b.Point = a.b.Point(1)
+fn main():
+    match c:
+        a.b.Color.Blue(n):
+            print(n)
+        _:
+            print(0)

@@ -1966,10 +1966,10 @@ impl Checker {
             Type::Qualified { module, name, args } => {
                 let resolved: Vec<Ty> = args.iter().map(|a| self.resolve_type(a, span)).collect();
                 let Some(mid) = self.imported_modules.get(module).cloned() else {
-                    self.error(
-                        span,
-                        format!("unknown module '{module}' (import it to use `{module}.{name}`)"),
-                    );
+                    let msg = self.ambiguous_bind_msg(module).unwrap_or_else(|| {
+                        format!("unknown module '{module}' (import it to use `{module}.{name}`)")
+                    });
+                    self.error(span, msg);
                     return Ty::Unknown;
                 };
                 let Some(sig) = self.module_sigs.get(&mid).cloned() else {

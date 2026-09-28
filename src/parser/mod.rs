@@ -1978,18 +1978,25 @@ impl Parser {
         // first ident to a module binder, the second to the enum, the third to the variant —
         // symmetric with module-qualified construction (`geo.Color.Red`). This is unambiguous: a
         // 2-part variant pattern can't be followed by a `.` today, so a 3rd dot deterministically
-        // means module-qualified.
-        let (name, enum_name, module_name) = if self.eat(&Token::Dot) {
-            let second = self.expect_ident()?;
-            if self.eat(&Token::Dot) {
-                // `module.Enum.Variant`
-                (self.expect_ident()?, Some(second), Some(name))
-            } else {
+        // means module-qualified. Four or more segments (`pkg.deep.Color.Red`) name the module by
+        // its full dotted path (TICKET-175): the last two are the enum and the variant.
+        let mut segments = vec![name];
+        while self.eat(&Token::Dot) {
+            segments.push(self.expect_ident()?);
+        }
+        let (name, enum_name, module_name) = match segments.len() {
+            1 => (segments.pop().unwrap_or_default(), None, None),
+            2 => {
                 // `Enum.Variant`
-                (second, Some(name), None)
+                let variant = segments.pop().unwrap_or_default();
+                (variant, segments.pop(), None)
             }
-        } else {
-            (name, None, None)
+            _ => {
+                // `module.Enum.Variant`, where `module` may be a dotted full path
+                let variant = segments.pop().unwrap_or_default();
+                let enum_name = segments.pop();
+                (variant, enum_name, Some(segments.join(".")))
+            }
         };
         if self.eat(&Token::LParen) {
             // `Name(p, …)` — a variant with (possibly nested) sub-patterns.
@@ -2415,10 +2422,17 @@ impl Parser {
         let name_span = self.cur_span();
         let name = self.expect_ident()?;
         // A module-qualified type `module.Type` (mirrors how `module.func()` is reached): after the
-        // first ident, a `.` introduces the type's name in the bound module. Any trailing `[args]`
-        // then belongs to the qualified type (`geo.Box[int]`).
+        // first ident, a `.` introduces the type's name in the bound module. A longer path
+        // (`pkg.deep.Point`) is the full path of an imported module (TICKET-175): the LAST segment is
+        // the type and the rest, dot-joined, is the module. Any trailing `[args]` then belongs to the
+        // qualified type (`geo.Box[int]`).
         if self.eat(&Token::Dot) {
-            let member = self.expect_ident()?;
+            let mut segments = vec![name, self.expect_ident()?];
+            while self.eat(&Token::Dot) {
+                segments.push(self.expect_ident()?);
+            }
+            let member = segments.pop().unwrap_or_default();
+            let name = segments.join(".");
             let args = if self.eat(&Token::LBracket) {
                 let mut args = vec![self.parse_type()?];
                 while self.eat(&Token::Comma) {
@@ -2429,19 +2443,6 @@ impl Parser {
             } else {
                 Vec::new()
             };
-            // A THIRD dot (`std.concurrency.Shared`) is a multi-level path. Chezzi type paths are
-            // intentionally TWO-LEVEL (`module.Type`, where `module` is the imported last-segment /
-            // alias name) — multi-level type paths are NOT supported. Emit the targeted two-level hint
-            // here instead of letting the trailing `.` surface as the generic "expected '=', found '.'".
-            // A qualified type has no `.` postfix, so a `.` at this point can ONLY be the 3-level
-            // mistake (never a false positive).
-            if self.check(&Token::Dot) {
-                let third = match self.peek_at(1) {
-                    Token::Ident(s) => s.clone(),
-                    _ => "Type".to_string(),
-                };
-                return Err(self.err(two_level_path_hint(&name, &member, &third)));
-            }
             let ty = Type::Qualified {
                 module: name,
                 name: member,
@@ -3287,16 +3288,6 @@ impl Parser {
 /// definition (its yields are its own) nor into closure expressions (a closure is an expression,
 /// so it is never reached by this statement-only walk — a `yield` inside one stays invisible here
 /// and is later flagged by the checker as "yield outside a generator").
-/// The targeted hint for a multi-level type path `{prefix}.{member}.{last}`: Chezzi type paths are
-/// two-level (`module.Type`). Shared by the type parser and the checker's bound check (TICKET-173).
-pub(crate) fn two_level_path_hint(prefix: &str, member: &str, last: &str) -> String {
-    format!(
-        "Chezzi uses two-level type paths — write `{member}.{last}` (the imported \
-         module's bound name) or alias with `import {prefix}.{member} as {member}` then \
-         `{member}.{last}`; multi-level paths like `{prefix}.{member}.{last}` are not supported"
-    )
-}
-
 fn body_contains_yield(block: &Block) -> bool {
     block.iter().any(stmt_contains_yield)
 }

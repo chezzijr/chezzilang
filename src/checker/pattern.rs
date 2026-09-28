@@ -2586,17 +2586,19 @@ impl Checker {
             self.error(span, self.unknown_type_msg(name));
             return Ty::Unknown;
         }
-        // A multi-level path mistake (`std.concurrency.Shared(0)`): the head `std` is the first
-        // segment of a real imported dotted module path, NOT a bound name. Steer to the two-level form
-        // instead of the misleading bare "unknown name 'std'". Narrow: fires ONLY for a literal import
-        // path head, never a genuine typo (which has no `import_path_heads` entry).
-        if let Some((dotted, bound)) = self.import_path_heads.get(name).cloned() {
+        // A bare name two un-aliased imports both bind (`import a.math` + `import b.math`).
+        if let Some(msg) = self.ambiguous_bind_msg(name) {
+            self.error(span, msg);
+            return Ty::Unknown;
+        }
+        // The head of an imported dotted path used where no full path resolved (`pkg.other.X` after
+        // `import pkg.deep`): the head `pkg` is a path PREFIX, not a bound name. Narrow: fires ONLY
+        // for a literal import path head, never a genuine typo.
+        if self.import_paths.iter().any(|(p, _, _)| p[0] == name) {
             self.error(
                 span,
                 format!(
-                    "Chezzi uses two-level paths — write `{bound}.<Name>` (the imported module's \
-                     bound name) or alias with `import {dotted} as {bound}` then `{bound}.<Name>`; \
-                     multi-level paths like `{name}.….<Name>` are not supported"
+                    "'{name}' is not a bound name — a full path `{name}.<module>.<Name>` needs `import {name}.<module>` in this file"
                 ),
             );
             return Ty::Unknown;
@@ -3489,7 +3491,10 @@ impl Checker {
                 return;
             };
             let Some(mid) = self.imported_modules.get(m).cloned() else {
-                self.error(span, format!("unknown module '{m}'"));
+                let msg = self
+                    .ambiguous_bind_msg(m)
+                    .unwrap_or_else(|| format!("unknown module '{m}'"));
+                self.error(span, msg);
                 return;
             };
             // An exported alias of an enum (`lib.Tone.Dark(n)`, TICKET-172) keys on its target.
@@ -3668,34 +3673,47 @@ impl Checker {
     }
 
     pub(super) fn infer_field(&mut self, obj: &Expr, name: &str, name_span: Span) -> Ty {
-        // A too-deep qualified-path mistake (`std.net.Socket(0)`, `std.concurrency.Shared(0)`,
-        // `std.concurrency.collection.Counter(...)`): the receiver `obj` is the BARE first segment of
-        // an imported dotted module path (`std`) — never a bound name — and `name` is the NEXT segment.
-        // The enclosing call/field already consumed the rest, so we identify the module by its
-        // (head, next) prefix and name its EXACT bound name (correct for 2- and 3+-level imports and
-        // sibling collisions; the trailing type isn't visible here, hence the `<Name>` placeholder).
+        // A full module path that did not resolve (TICKET-175): the receiver `obj` is the BARE first
+        // segment of an imported dotted module path (`pkg`), never a bound name, and `name` is the
+        // NEXT segment. Desugar already folded every full path of an un-aliased import into one
+        // dotted name, so what reaches here is an aliased import's path (`import pkg.deep as d` binds
+        // only `d`) or a prefix no import binds (`std.concurrency` of `import
+        // std.concurrency.collection`). The trailing name isn't visible here, hence `<Name>`.
         if let ExprKind::Ident(head) = &obj.kind
             && self.lookup(head).is_none()
             && !self.imported_modules.contains_key(head)
-            && let Some(slot) = self
-                .module_prefix2
-                .get(&(head.clone(), name.to_string()))
-                .cloned()
         {
-            let hint = match slot {
-                Some((dotted, bound)) => format!(
-                    "Chezzi uses two-level paths — write `{bound}.<Name>` (the imported module's \
-                     bound name) or alias with `import {dotted} as {bound}` then `{bound}.<Name>`; \
-                     multi-level paths like `{head}.{name}.<Name>` are not supported"
-                ),
-                None => format!(
-                    "Chezzi uses two-level paths — reference an imported module by its bound name \
-                     (its last path segment, or an alias); multi-level paths like \
-                     `{head}.{name}.<Name>` are not supported"
-                ),
-            };
-            self.error(obj.span, hint);
-            return Ty::Unknown;
+            let matches: Vec<(String, String, bool)> = self
+                .import_paths
+                .iter()
+                .filter(|(p, _, _)| p[0] == *head && p[1] == name)
+                .map(|(p, bound, full)| (p.join("."), bound.clone(), *full))
+                .collect();
+            // An un-aliased import of exactly `head.name` binds that full path, so the fold only
+            // skipped it because a module-level type name shadows the head: neither hint is true.
+            let exact_full = self
+                .import_paths
+                .iter()
+                .any(|(p, _, full)| *full && p.len() == 2 && p[0] == *head && p[1] == name);
+            if exact_full {
+                // fall through to the ordinary field inference
+            } else if let Some((dotted, bound, _)) = matches.iter().find(|m| !m.2) {
+                self.error(
+                    obj.span,
+                    format!(
+                        "`{dotted}` is imported as `{bound}`, which binds only `{bound}` — write `{bound}.<Name>`, or import it as `import {dotted}` to use the full path"
+                    ),
+                );
+                return Ty::Unknown;
+            } else if !matches.is_empty() {
+                self.error(
+                    obj.span,
+                    format!(
+                        "module `{head}.{name}` is not imported — add `import {head}.{name}` to use `{head}.{name}.<Name>`"
+                    ),
+                );
+                return Ty::Unknown;
+            }
         }
         // `module.Enum.Variant` used as a value: a bound module dotted with one of its enums dotted
         // with a nullary variant — the qualified analogue of the bare `Enum.Variant` value form.

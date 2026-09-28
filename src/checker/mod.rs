@@ -2182,20 +2182,18 @@ struct Checker {
     module_sigs: HashMap<ModuleId, ModuleSig>,
     /// Names bound to an imported module in the *current* module → which module they refer to.
     imported_modules: HashMap<String, ModuleId>,
-    /// First segment of each imported DOTTED module path (`std` from `import std.concurrency`) →
-    /// `(dotted_path, bound_name)` of the FIRST import that introduced it. Used ONLY to give a
-    /// targeted two-level-path hint for a multi-level mistake like `std.concurrency.Shared(0)` (the
-    /// head `std` is a path PREFIX, not a bound name) instead of the misleading "unknown name 'std'".
-    /// Never a bound value/type itself, so it cannot mask a genuine typo.
-    import_path_heads: HashMap<String, (String, String)>,
-    /// The first TWO segments of each imported module's dotted path → its bound name (last segment /
-    /// alias), or `None` when two imports share those two segments (ambiguous). Keyed on two segments
-    /// because a too-deep-path mistake fires from `infer_field` with only the head + the NEXT segment
-    /// visible (the call/field already consumed the rest): `(std, net)` → `net`, and
-    /// `(std, concurrency)` → `collection` for `import std.concurrency.collection`. Correct for 2- and
-    /// 3+-level imports and sibling collisions alike — unlike `import_path_heads` (head-only,
-    /// first-wins), which named the wrong sibling / the wrong segment.
-    module_prefix2: HashMap<(String, String), Option<(String, String)>>,
+    /// Every dotted (2+ segment) whole-module import in the current module, as `(path, bound name,
+    /// full path bound)` (TICKET-175). The third field is `false` for `import a.b as c`, which binds
+    /// only `c`. Read only by the diagnostics for a full path that does not resolve (`a.b.X` after an
+    /// aliased import, or naming an unimported module); never a binding itself.
+    import_paths: Vec<(Vec<String>, String, bool)>,
+    /// Un-aliased dotted import's bound name (its last segment) → its dotted path, first wins
+    /// (TICKET-175). Detects a second un-aliased import that binds the same last segment.
+    implicit_binds: HashMap<String, String>,
+    /// A bare name two un-aliased imports both bind (`import a.math` + `import b.math`) → the two
+    /// dotted paths (TICKET-175). The name is unbound; a use of it reports the ambiguity, and both
+    /// full paths stay usable.
+    ambiguous_binds: HashMap<String, (String, String)>,
     /// Every name an `import`/`import … from` binds in the *current* module → the span of its first
     /// import, across ALL import namespaces (values, functions, modules, type-names). Used to reject
     /// a SECOND import binding the same name (`import f from lib` + `import f from lib2`, or

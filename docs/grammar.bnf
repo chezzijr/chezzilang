@@ -109,6 +109,8 @@
 # <protocolDecl>); in an `enum` body it is a parse error (an enum needs at least one variant).
 <passStmt>     ::= "PASS" "NEWLINE"
 
+# An un-aliased `import a.b` binds `b` AND the full path `a.b` (TICKET-175); `import a.b as c` binds
+# only `c`. `import math from std` names std's module `math` (Python's `from os import path`).
 <importStmt> ::= "IMPORT" <dottedPath> "NEWLINE"
                | "IMPORT" <dottedPath> "AS" "IDENT" "NEWLINE"
                | "IMPORT" <importNames> "FROM" <dottedPath> "NEWLINE"
@@ -196,8 +198,9 @@
 <typeParamList> ::= <typeParam> | <typeParam> "COMMA" <typeParamList>
 <typeParam>     ::= "IDENT" | "IDENT" "COLON" <boundList>
 <boundList>     ::= <bound> | <bound> "PLUS" <boundList>
-# A bound name is bare or a module-qualified dotted path (`m.Factory`, TICKET-173). The grammar takes
-# any depth; the checker refuses a 3+ segment path with the two-level hint.
+# A bound name is bare or a module-qualified dotted path (`m.Factory`, TICKET-173). The last segment
+# is the protocol; the rest is the module: its bound name (`m`), or the full path (`pkg.deep.Factory`)
+# of a module imported un-aliased in this file (TICKET-175).
 <bound>         ::= <dottedPath> | <dottedPath> "LBRACKET" <typeList> "RBRACKET"
 
 <structDecl>    ::= "STRUCT" "IDENT" "COLON" "NEWLINE" "INDENT" <structBody> "DEDENT"
@@ -410,16 +413,18 @@
 # `module.Enum.Variant` ("IDENT" "DOT" "IDENT" "DOT" "IDENT") mirrors module-qualified construction
 # (`geo.Color.Red`): the module binder is the bound module name (last path segment or `as` alias),
 # validated by the checker (module bound, owns the enum) then dropped — runtime keys on the same
-# `(enum, variant)` identity as the bare/from-import form.
+# `(enum, variant)` identity as the bare/from-import form. With four or more segments
+# (`pkg.deep.Color.Red`) the last two are the enum and the variant, and the rest is the full path of
+# a module imported un-aliased in this file (TICKET-175).
 <patternPrimary> ::= "IDENT"
                 | "IDENT" "LPAREN" "RPAREN"
                 | "IDENT" "LPAREN" <subpatterns> "RPAREN"
                 | "IDENT" "DOT" "IDENT"
                 | "IDENT" "DOT" "IDENT" "LPAREN" "RPAREN"
                 | "IDENT" "DOT" "IDENT" "LPAREN" <subpatterns> "RPAREN"
-                | "IDENT" "DOT" "IDENT" "DOT" "IDENT"
-                | "IDENT" "DOT" "IDENT" "DOT" "IDENT" "LPAREN" "RPAREN"
-                | "IDENT" "DOT" "IDENT" "DOT" "IDENT" "LPAREN" <subpatterns> "RPAREN"
+                | "IDENT" "DOT" "IDENT" "DOT" <dottedPath>
+                | "IDENT" "DOT" "IDENT" "DOT" <dottedPath> "LPAREN" "RPAREN"
+                | "IDENT" "DOT" "IDENT" "DOT" <dottedPath> "LPAREN" <subpatterns> "RPAREN"
                 | <tuplePattern>
                 | "INT" | "STR" | "RAWSTR" | "TRUE" | "FALSE"
                 | "INT" "DOTDOT" "INT"
@@ -442,9 +447,9 @@
                 | "IDENT" "DOT" "IDENT"
                 | "IDENT" "DOT" "IDENT" "LPAREN" "RPAREN"
                 | "IDENT" "DOT" "IDENT" "LPAREN" <subpatterns> "RPAREN"
-                | "IDENT" "DOT" "IDENT" "DOT" "IDENT"
-                | "IDENT" "DOT" "IDENT" "DOT" "IDENT" "LPAREN" "RPAREN"
-                | "IDENT" "DOT" "IDENT" "DOT" "IDENT" "LPAREN" <subpatterns> "RPAREN"
+                | "IDENT" "DOT" "IDENT" "DOT" <dottedPath>
+                | "IDENT" "DOT" "IDENT" "DOT" <dottedPath> "LPAREN" "RPAREN"
+                | "IDENT" "DOT" "IDENT" "DOT" <dottedPath> "LPAREN" <subpatterns> "RPAREN"
                 | <tuplePattern>
                 | "INT" | "STR" | "RAWSTR" | "TRUE" | "FALSE"
                 | "INT" "DOTDOT" "INT"
@@ -458,9 +463,11 @@
 # A `IDENT.IDENT` (optionally with `[typeList]`) is a MODULE-QUALIFIED type (`geo.Point`,
 # `geo.Box[int]`): the first ident is a bound module name (the same name `geo.func()` uses), the
 # second is a type in that module. Types are module-scoped — a type declared in one module is
-# reachable elsewhere only via import (qualified `m.Type` or bare after `import Type from m`).
+# reachable elsewhere only via import (qualified `m.Type` or bare after `import Type from m`). A
+# longer path (`pkg.deep.Point`) names the module by its full path: the last segment is the type,
+# and the rest must be a module imported un-aliased in this file (`import pkg.deep`, TICKET-175).
 <type>     ::= "IDENT" | "IDENT" "LBRACKET" <typeList> "RBRACKET"
-             | "IDENT" "DOT" "IDENT" | "IDENT" "DOT" "IDENT" "LBRACKET" <typeList> "RBRACKET"
+             | "IDENT" "DOT" <dottedPath> | "IDENT" "DOT" <dottedPath> "LBRACKET" <typeList> "RBRACKET"
              | "FN" "LPAREN" "RPAREN" "ARROW" <type>
              | "FN" "LPAREN" <fnParamList> "RPAREN" "ARROW" <type>
              | "LPAREN" <typeList> "RPAREN"

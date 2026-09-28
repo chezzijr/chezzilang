@@ -18,3 +18,19 @@ limit := 3
 
 fn double(n: int) -> int:
     return n * 2
+
+seen: List[int] = []
+
+fn record(n: int):
+    seen.push(n)
+
+fn seen_count() -> int:
+    return seen.len()
+
+# TICKET-175: one top-level side effect per module initialization. Every import spelling of this
+# module (`deep`, the full path, an `as` alias) must initialize it once.
+inits: List[int] = []
+inits.push(1)
+
+fn init_count() -> int:
+    return inits.len()

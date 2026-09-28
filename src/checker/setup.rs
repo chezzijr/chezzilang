@@ -105,8 +105,9 @@ impl Checker {
             collected_yields: Vec::new(),
             module_sigs: HashMap::new(),
             imported_modules: HashMap::new(),
-            import_path_heads: HashMap::new(),
-            module_prefix2: HashMap::new(),
+            import_paths: Vec::new(),
+            implicit_binds: HashMap::new(),
+            ambiguous_binds: HashMap::new(),
             import_binds: HashMap::new(),
             imported_alias_tys: HashMap::new(),
             imported_alias_ctypes: HashMap::new(),
@@ -410,17 +411,16 @@ impl Checker {
     /// The protocol key a module-qualified bound spelling `alias.Name` names through a whole-module
     /// import (TICKET-173) — the `import m as alias` twin of [`Checker::protocol_alias_key`]'s
     /// imported arm. `Name` is a protocol in the module's `ModuleSig`, or a no-argument alias of one
-    /// there. `None` for a bare name, a 3+ segment path, an unimported `alias`, or any other member.
-    /// A name containing `::` is skipped: it is already an identity key, and a module label may itself
-    /// contain dots (`a.b::P`), so splitting it at `.` would read the wrong module.
+    /// there. The module is everything before the LAST dot, so a full path `pkg.deep.P` reads the
+    /// synthetic full-path bind `pkg.deep` (TICKET-175). `None` for a bare name, an unimported
+    /// module, or any other member. A name containing `::` is skipped: it is already an identity key,
+    /// and a module label may itself contain dots (`a.b::P`), so splitting it at `.` would read the
+    /// wrong module.
     pub(super) fn qualified_protocol_key(&self, name: &str) -> Option<String> {
         if name.contains("::") {
             return None;
         }
-        let (module, member) = name.split_once('.')?;
-        if member.contains('.') {
-            return None;
-        }
+        let (module, member) = name.rsplit_once('.')?;
         let mid = self.imported_modules.get(module)?;
         let sig = self.module_sigs.get(mid)?;
         if sig.protocol_defs.contains_key(member) {
@@ -1537,8 +1537,9 @@ impl Checker {
         self.name_docs.clear();
         self.type_params.clear();
         self.imported_modules.clear();
-        self.import_path_heads.clear();
-        self.module_prefix2.clear();
+        self.import_paths.clear();
+        self.implicit_binds.clear();
+        self.ambiguous_binds.clear();
         self.import_binds.clear();
         self.imported_alias_tys.clear();
         self.imported_alias_ctypes.clear();
@@ -1672,6 +1673,20 @@ impl Checker {
         false
     }
 
+    /// The use-site diagnostic for a bare name that two un-aliased imports both bind (TICKET-175),
+    /// or `None` when `name` is not ambiguous. The suggested alias is the initials of the first
+    /// path's segments (`a.math` gives `am`).
+    pub(super) fn ambiguous_bind_msg(&self, name: &str) -> Option<String> {
+        let (a, b) = self.ambiguous_binds.get(name)?;
+        let short = a
+            .split('.')
+            .filter_map(|s| s.chars().next())
+            .collect::<String>();
+        Some(format!(
+            "'{name}' is ambiguous: `{a}` and `{b}` both bind it — write the full path (`{a}.<Name>`), or bind one under its own name with `import {a} as {short}`"
+        ))
+    }
+
     /// Bind an import into the current module: a whole-module import becomes a `Ty::Module` name;
     /// a `from` import injects each member (function/value) into scope, validating it exists.
     pub(super) fn bind_import(&mut self, imp: &ResolvedImport) {
@@ -1705,12 +1720,36 @@ impl Checker {
                     self.error(imp.span, msg);
                     return;
                 }
+                // The resolver's synthetic full-path bind (`a.b` for `import a.b`, TICKET-175).
+                let full = crate::ast::is_full_path_bind(&name);
+                let dotted = path.join(".");
+                // Two un-aliased imports sharing a last segment (`import a.math` + `import b.math`):
+                // both full paths stay bound, and the bare name becomes ambiguous (unbound).
+                if !full
+                    && alias.is_none()
+                    && path.len() >= 2
+                    && let Some(prev) = self.implicit_binds.get(&name).cloned()
+                    && prev != dotted
+                {
+                    self.ambiguous_binds.insert(name.clone(), (prev, dotted));
+                    self.imported_modules.remove(&name);
+                    if let Some(scope) = self.scopes.last_mut() {
+                        scope.remove(&name);
+                    }
+                    return;
+                }
                 if self.note_import_bind(&name, imp.span) {
                     return;
                 }
+                if !full && alias.is_none() && path.len() >= 2 {
+                    self.implicit_binds
+                        .entry(name.clone())
+                        .or_insert_with(|| dotted.clone());
+                }
                 // Editor hover (decl-site): record the bound module name's type at the bound-name
                 // token (`math` / the `as` alias). Probe-gated no-op off the probe / outside entry.
-                if self.hover_probe.is_some() {
+                // The synthetic full-path bind shares that token, so it records nothing.
+                if self.hover_probe.is_some() && !full {
                     self.hover_record_at(
                         *name_span,
                         &Ty::Module(name.clone()),
@@ -1720,34 +1759,11 @@ impl Checker {
                 }
                 self.imported_modules
                     .insert(name.clone(), imp.target.clone());
-                // Record the first TWO path segments → bound name (`(std,net)` → `net`,
-                // `(std,concurrency)` → `collection` for `import std.concurrency.collection`) so a
-                // too-deep-path mistake — which fires with only head + next segment visible — names
-                // the EXACT module's bound name. `None` marks a genuine ambiguity (two imports sharing
-                // both segments) so we fall back to a generic hint rather than guess.
-                if path.len() >= 2 {
-                    let key = (path[0].clone(), path[1].clone());
-                    match self.module_prefix2.get(&key) {
-                        Some(Some((_, prev))) if prev != &name => {
-                            self.module_prefix2.insert(key, None);
-                        }
-                        None => {
-                            self.module_prefix2
-                                .insert(key, Some((path.join("."), name.clone())));
-                        }
-                        _ => {}
-                    }
-                }
-                // Record the path HEAD (`std` of `import std.concurrency`) so a multi-level mistake
-                // (`std.concurrency.Shared(...)`) gets the two-level hint, not "unknown name 'std'".
-                // Only for a genuine dotted path whose head isn't itself the bound name (first wins).
-                if path.len() >= 2 {
-                    let head = path[0].clone();
-                    if head != name {
-                        self.import_path_heads
-                            .entry(head)
-                            .or_insert_with(|| (path.join("."), name.clone()));
-                    }
+                // Record each dotted import for the diagnostics of a full path that does not resolve
+                // (`pkg.deep.X` after `import pkg.deep as d`, or `pkg.other.X` never imported).
+                if !full && path.len() >= 2 {
+                    self.import_paths
+                        .push((path.clone(), name.clone(), alias.is_none()));
                 }
                 self.declare(&name, Ty::Module(name.clone()));
                 // Register the imported module's struct/enum LAYOUTS into the per-module shape tables

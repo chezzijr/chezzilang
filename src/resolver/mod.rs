@@ -15,7 +15,7 @@
 
 use crate::ast::{Import, Module, Span, StmtKind};
 use crate::{lexer, parser};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub mod std_embed;
@@ -595,10 +595,17 @@ impl Builder {
         dotted: &[String],
         ast: &Module,
     ) -> Result<Vec<ResolvedImport>, ResolveError> {
-        let imports = self.scan_imports(ast);
+        let imports = expand_std_namespace(self.scan_imports(ast));
         self.on_stack.push((id.clone(), dotted.to_vec()));
         let mut resolved = Vec::with_capacity(imports.len());
+        // Dotted paths already bound by a synthetic full-path import (TICKET-175), so a literal
+        // duplicate `import a.b` adds its full path once; the checker reports the duplicate itself.
+        let mut full_paths: HashSet<String> = HashSet::new();
         for (import, span) in imports {
+            let full = full_path_import(&import).filter(|f| match f {
+                Import::Module { alias: Some(a), .. } => full_paths.insert(a.clone()),
+                _ => false,
+            });
             let path = import_path(&import);
             // Native std modules (std.math/io/os) are virtual: no `.chz` file, members injected by
             // the engines. Bind them to a synthetic, stable id and skip the filesystem entirely.
@@ -618,10 +625,17 @@ impl Builder {
                     self.visit_native(&target, name);
                 }
                 resolved.push(ResolvedImport {
-                    target,
+                    target: target.clone(),
                     import,
                     span,
                 });
+                if let Some(import) = full {
+                    resolved.push(ResolvedImport {
+                        target,
+                        import,
+                        span,
+                    });
+                }
                 continue;
             }
             // A bare `import std` is not a real module: routing it through `module_file` yields the
@@ -651,10 +665,17 @@ impl Builder {
             let target = ModuleId(canonical_or_abs(&file));
             self.visit(&target, &path, span)?;
             resolved.push(ResolvedImport {
-                target,
+                target: target.clone(),
                 import,
                 span,
             });
+            if let Some(import) = full {
+                resolved.push(ResolvedImport {
+                    target,
+                    import,
+                    span,
+                });
+            }
         }
         self.on_stack.pop();
         Ok(resolved)
@@ -797,6 +818,69 @@ impl Builder {
 /// with a real file (it is never canonicalized / read).
 fn native_id(name: &str) -> ModuleId {
     ModuleId(PathBuf::from(format!("<native:{name}>")))
+}
+
+/// The synthetic full-path bind for an un-aliased `import a.b[.c]` (TICKET-175): the same module
+/// again under the dotted alias `a.b[.c]`, so `a.b.X` resolves like `b.X`. An alias is an ident in
+/// source, so a dotted one can never collide with a user name. `None` for any other import.
+fn full_path_import(import: &Import) -> Option<Import> {
+    match import {
+        Import::Module {
+            path,
+            alias: None,
+            name_span,
+        } if path.len() >= 2 => Some(Import::Module {
+            path: path.clone(),
+            alias: Some(path.join(".")),
+            name_span: *name_span,
+        }),
+        _ => None,
+    }
+}
+
+/// Expand `import n1, n2 as a from std` into one `import std.<n> as <bound>` per name (TICKET-175):
+/// `std` is a namespace of modules, so each name is a module, as in Python's `from os import path`.
+/// The full path `std.<n>` is NOT bound. An expanded entry that binds its member under its own name
+/// is dropped when the same file also holds an un-aliased `import std.<n>`: both spellings name one
+/// module and bind one name. At most one entry is dropped per plain import, so a literal duplicate
+/// still reaches the checker's `'<n>' is already imported`.
+fn expand_std_namespace(imports: Vec<(Import, Span)>) -> Vec<(Import, Span)> {
+    let mut plain: HashSet<String> = imports
+        .iter()
+        .filter_map(|(import, _)| match import {
+            Import::Module {
+                path, alias: None, ..
+            } if path.len() == 2 && path[0] == "std" => Some(path[1].clone()),
+            _ => None,
+        })
+        .collect();
+    let mut out = Vec::with_capacity(imports.len());
+    for (import, span) in imports {
+        match import {
+            Import::From {
+                path,
+                names,
+                name_spans,
+            } if path.len() == 1 && path[0] == "std" => {
+                for (i, (member, alias)) in names.into_iter().enumerate() {
+                    let bound = alias.unwrap_or_else(|| member.clone());
+                    if bound == member && plain.remove(&member) {
+                        continue;
+                    }
+                    out.push((
+                        Import::Module {
+                            path: vec!["std".to_string(), member],
+                            alias: Some(bound),
+                            name_span: name_spans.get(i).copied().unwrap_or_default(),
+                        },
+                        span,
+                    ));
+                }
+            }
+            other => out.push((other, span)),
+        }
+    }
+    out
 }
 
 fn import_path(import: &Import) -> Vec<String> {

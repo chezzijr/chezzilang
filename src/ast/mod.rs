@@ -669,6 +669,12 @@ pub enum LitPattern {
     Bool(bool),
 }
 
+/// Is `name` the bound name of the resolver's synthetic full-path import (TICKET-175)? An un-aliased
+/// `import a.b` also binds the module under the dotted alias `a.b`, which no source alias can spell.
+pub fn is_full_path_bind(name: &str) -> bool {
+    name.contains('.')
+}
+
 /// The four import forms (syntax.md §12).
 ///
 /// `PartialEq` is hand-written (NOT derived) so the bound-NAME spans are EQUALITY-NEUTRAL (mirrors

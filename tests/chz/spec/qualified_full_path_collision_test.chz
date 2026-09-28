@@ -1,0 +1,9 @@
+# TICKET-175: two un-aliased imports that share a last segment keep both full paths.
+# Gated by chz_suite_passes (tests/chz_suite.rs).
+
+import qualified_path_pkg.deep
+import qualified_path_alt.deep
+
+test fn both_full_paths_reach_their_own_module():
+    assert qualified_path_pkg.deep.double(1) == 2
+    assert qualified_path_alt.deep.double(1) == 10

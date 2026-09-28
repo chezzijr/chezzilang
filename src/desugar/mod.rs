@@ -513,12 +513,15 @@ pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
             }
         }
 
+        let module_names =
+            module_level_names(&graph.modules[mi].ast.stmts, &graph.modules[mi].imports);
         let ctx = Ctx {
             regs: &regs,
             own_id: &own_id,
             deps,
             bare_from: &bare_from,
             aliases: &aliases,
+            module_names: &module_names,
             methods: &methods,
             methods_by_struct: &methods_by_struct,
             fn_fields: &fn_fields,
@@ -631,6 +634,7 @@ pub fn run_standalone(module: &mut Module) -> Result<(), ResolveError> {
     let bare_from = HashMap::new();
     let aliases = HashMap::new();
     let deps = HashSet::new();
+    let module_names = HashSet::new();
     // ONE pass — see the comment in [`run`]. A standalone module has no imports, so every provider
     // it calls is its own and no synthetic import edge can be needed.
     let ctx = Ctx {
@@ -639,6 +643,7 @@ pub fn run_standalone(module: &mut Module) -> Result<(), ResolveError> {
         deps: &deps,
         bare_from: &bare_from,
         aliases: &aliases,
+        module_names: &module_names,
         methods: &methods,
         methods_by_struct: &methods_by_struct,
         fn_fields: &fn_fields,
@@ -1583,6 +1588,10 @@ struct Ctx<'a> {
     deps: &'a HashSet<ModuleId>,
     bare_from: &'a HashMap<String, ModuleId>,
     aliases: &'a HashMap<String, ModuleId>,
+    /// This module's top-level names that hide a full module path's head (see
+    /// [`module_level_names`]). Precomputed, never read from walk position: a hoisted decl binds
+    /// before any statement runs.
+    module_names: &'a HashSet<String>,
     /// Program-wide struct-method specs (see [`collect_methods`]).
     methods: &'a HashMap<String, Vec<Vec<PSpec>>>,
     /// Receiver-type-keyed struct-method specs (see [`collect_methods_by_struct`]). Lets a method
@@ -1803,6 +1812,51 @@ impl Walker<'_> {
 
     fn is_local(&self, name: &str) -> bool {
         self.scopes.iter().any(|s| s.contains(name))
+    }
+
+    /// Fold a Python full module path (TICKET-175): in `pkg.deep.Point.zero`, the LONGEST prefix
+    /// whose dot-join is an imported module's bound name (`pkg.deep`, the resolver's synthetic
+    /// full-path bind) becomes one `Ident("pkg.deep")`, so checker and compiler see the same
+    /// `module.member` shape as `deep.Point.zero`. Runs at the OUTERMOST `Field` of a chain first
+    /// (the caller walks parents before children), so the longest prefix wins. A head that a local,
+    /// a parameter, a type parameter, or any module-level name shadows is left alone.
+    fn fold_full_path(&self, expr: &mut Expr) {
+        let mut segs: Vec<String> = Vec::new();
+        let mut cur = &*expr;
+        while let ExprKind::Field { obj, name, .. } = &cur.kind {
+            segs.push(name.clone());
+            cur = obj;
+        }
+        let ExprKind::Ident(head) = &cur.kind else {
+            return;
+        };
+        if segs.is_empty()
+            || head.contains('.')
+            || self.is_local(head)
+            || self.is_type_param(head)
+            || self.ctx.module_names.contains(head)
+        {
+            return;
+        }
+        let head_span = cur.span;
+        segs.push(head.clone());
+        segs.reverse();
+        // `segs` is now `[head, s1, s2, …]`; find the longest `head.s1…sk` that is a bound name.
+        let Some(k) = (2..=segs.len())
+            .rev()
+            .find(|&k| self.ctx.aliases.contains_key(&segs[..k].join(".")))
+        else {
+            return;
+        };
+        let joined = segs[..k].join(".");
+        let mut node = expr;
+        for _ in 0..segs.len() - k {
+            let ExprKind::Field { obj, .. } = &mut node.kind else {
+                return;
+            };
+            node = obj;
+        }
+        *node = ident_expr(&joined, head_span);
     }
 
     fn bind(&mut self, name: &str) {
@@ -2371,6 +2425,7 @@ impl Walker<'_> {
     }
 
     fn walk_expr_inner(&mut self, expr: &mut Expr) -> Result<(), ResolveError> {
+        self.fold_full_path(expr);
         // Recurse into children first, so nested calls are normalized regardless of this node.
         match &mut expr.kind {
             ExprKind::Unary { expr: inner, .. } => self.walk_expr(inner)?,
@@ -3362,6 +3417,55 @@ pub fn lower_carrier_try(expr: &mut Expr) {
 }
 
 /// A bare identifier expression at `span`.
+/// A module's top-level names that hide a full module path's head (TICKET-175): `let`, `fn` and
+/// extern fn names, type declarations, every `from` bind, and every whole-module bind except two.
+/// An un-aliased one-segment `import pkg` does not hide `pkg.deep` (it is the same package head),
+/// and the resolver's dotted synthetic bind is the full path itself.
+fn module_level_names(
+    stmts: &[Stmt],
+    imports: &[crate::resolver::ResolvedImport],
+) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for s in stmts {
+        match &s.kind {
+            StmtKind::Let { names, .. } => out.extend(names.iter().cloned()),
+            StmtKind::Fn(d) => {
+                out.insert(d.name.clone());
+            }
+            StmtKind::Extern { fns, .. } => out.extend(fns.iter().map(|f| f.name.clone())),
+            StmtKind::Struct { name, .. }
+            | StmtKind::Enum { name, .. }
+            | StmtKind::NewType { name, .. }
+            | StmtKind::TypeAlias { name, .. }
+            | StmtKind::Protocol { name, .. } => {
+                out.insert(name.clone());
+            }
+            _ => {}
+        }
+    }
+    for imp in imports {
+        match &imp.import {
+            Import::Module { path, alias, .. } => {
+                let Some(bound) = alias.clone().or_else(|| path.last().cloned()) else {
+                    continue;
+                };
+                if crate::ast::is_full_path_bind(&bound) || (alias.is_none() && path.len() == 1) {
+                    continue;
+                }
+                out.insert(bound);
+            }
+            Import::From { names, .. } => {
+                out.extend(
+                    names
+                        .iter()
+                        .map(|(n, a)| a.clone().unwrap_or_else(|| n.clone())),
+                );
+            }
+        }
+    }
+    out
+}
+
 fn ident_expr(name: &str, span: Span) -> Expr {
     Expr {
         kind: ExprKind::Ident(name.to_string()),

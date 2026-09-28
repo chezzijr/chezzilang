@@ -35477,3 +35477,65 @@ fn duplicate_import_from_std_is_rejected() {
         "'math' is already imported",
     );
 }
+
+#[test]
+fn full_path_head_shadowed_by_a_type_keeps_the_import_hints_quiet() {
+    // `struct pkg` hides the head, so the fold leaves `pkg.deep` alone. `pkg.deep` IS imported, so
+    // neither the not-imported nor the imported-as hint may fire.
+    let errs = check_files(&[
+        ("pkg/deep.chz", FP_DEEP),
+        (
+            "main.chz",
+            "import pkg.deep\nimport pkg.deep as d\nstruct pkg:\n    x: int\nprint(pkg.deep.double(1))\n",
+        ),
+    ]);
+    assert!(!errs.is_empty(), "the shadowed head must still be an error");
+    assert!(
+        !errs
+            .iter()
+            .any(|e| e.message.contains("is not imported") || e.message.contains("is imported as")),
+        "got: {errs:?}"
+    );
+}
+
+#[test]
+fn full_path_head_shadowed_by_a_type_param_is_rejected() {
+    let errs = check_files(&[
+        ("pkg/deep.chz", FP_DEEP),
+        (
+            "main.chz",
+            "import pkg.deep\nfn g[pkg]() -> int:\n    return pkg.deep.double(1)\n",
+        ),
+    ]);
+    assert!(
+        !errs.is_empty(),
+        "a type param `pkg` must hide the full path"
+    );
+}
+
+#[test]
+fn full_path_head_shadowed_by_a_later_global_is_rejected() {
+    // The global is declared AFTER the fn that reads `pkg.deep`: module-level shadowing must not
+    // depend on source position (hoisted-decl rule).
+    let errs = check_files(&[
+        ("pkg/deep.chz", FP_DEEP),
+        (
+            "main.chz",
+            "import pkg.deep\nfn f() -> int:\n    return pkg.deep.double(1)\npkg := 3\n",
+        ),
+    ]);
+    assert!(errs.iter().any(|e| e.span.line == 3), "got: {errs:?}");
+}
+
+#[test]
+fn full_path_longest_imported_prefix_wins() {
+    // `a.b` has a member `c`, and `a.b.c` is a module too: `a.b.c.f()` is module `a.b.c`.
+    files_ok(&[
+        ("a/b.chz", "c := 5\n"),
+        ("a/b/c.chz", "fn f() -> int:\n    return 1\n"),
+        (
+            "main.chz",
+            "import a.b\nimport a.b.c\nx: int = a.b.c.f()\nprint(x + a.b.c.f())\n",
+        ),
+    ]);
+}
