@@ -1203,6 +1203,20 @@ mod tests {
         assert!(!err.message.contains(".chz"), "got: {}", err.message);
     }
 
+    // TICKET-175: `import std` stays a reserved namespace, so `std.math.X` after it is not a full
+    // path, and the error names the fix (`import std.math`).
+    #[test]
+    fn bare_std_import_keeps_full_paths_unavailable() {
+        let t = TmpDir::new();
+        let entry = t.write("main.chz", "import std\nprint(std.math.sqrt(9.0))\n");
+        let err = build_graph(&entry).unwrap_err();
+        assert!(
+            err.message.contains("reserved namespace") && err.message.contains("e.g. 'std.math'"),
+            "got: {}",
+            err.message
+        );
+    }
+
     // 8. std.concurrency (phase 4c-concurrency) is FILE-BACKED: it keeps the `native` marker (runtime
     // dispatch stays name-keyed / opcode-backed) but the resolver loads the REAL `std/concurrency.chz`
     // AST — its four `native struct` decls (Shared/RwShared/Atomic/Executor, WITH harvested method

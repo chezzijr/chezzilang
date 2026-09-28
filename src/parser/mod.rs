@@ -7583,6 +7583,24 @@ mod tests {
     }
 
     #[test]
+    fn four_segment_variant_pattern_keeps_a_dotted_module() {
+        // `a.b.Color.Blue(n)` -> module `a.b`, enum `Color`, variant `Blue` (TICKET-175).
+        match first_arm_pattern("match c:\n    a.b.Color.Blue(n): print(n)\n    _: print(1)\n") {
+            Pattern::Variant {
+                name,
+                enum_name,
+                module_name,
+                ..
+            } => {
+                assert_eq!(name, "Blue");
+                assert_eq!(enum_name.as_deref(), Some("Color"));
+                assert_eq!(module_name.as_deref(), Some("a.b"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn module_qualified_variant_pattern_parses() {
         // `geo.Color.Red` (nullary, module-qualified) ->
         // Variant{name:"Red", enum_name:Some("Color"), module_name:Some("geo")}.
@@ -7703,21 +7721,21 @@ mod tests {
         }
     }
 
-    // A three-level type path `std.concurrency.Shared[int]` is NOT supported (paths are two-level).
-    // The parser emits the targeted two-level hint instead of the cryptic "expected '=', found '.'".
+    // A three-level type path `std.concurrency.Shared[int]` is ONE qualified type whose module is the
+    // dotted `std.concurrency` (TICKET-175).
     #[test]
-    fn multilevel_type_path_two_level_hint() {
-        let e = parse_err("x: std.concurrency.Shared[int] = 0\n");
-        assert!(
-            e.message.contains("two-level"),
-            "expected two-level hint, got: {}",
-            e.message
-        );
-        assert!(
-            e.message.contains("concurrency.Shared"),
-            "hint should name the supported form, got: {}",
-            e.message
-        );
+    fn multilevel_type_path_parses_as_one_qualified_module() {
+        let StmtKind::Let { ty, .. } = only("x: std.concurrency.Shared[int] = 0\n") else {
+            panic!("expected a let");
+        };
+        match ty {
+            Some(Type::Qualified { module, name, args }) => {
+                assert_eq!(module, "std.concurrency");
+                assert_eq!(name, "Shared");
+                assert_eq!(args.len(), 1);
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     // A correct two-level qualified type still parses fine (no false positive).

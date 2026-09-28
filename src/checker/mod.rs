@@ -5064,67 +5064,54 @@ mod graph_tests {
 
     // === Two-level path diagnostics (Part 2) ===
 
-    // EXPR position: `std.concurrency.Shared(0)` head `std` is an import-path prefix → two-level hint
-    // (NOT the misleading bare "unknown name 'std'").
+    // EXPR position: `std.concurrency.Shared(0)` after an un-aliased `import std.concurrency` is the
+    // Python full path of that module (TICKET-175), so it checks clean.
     #[test]
-    fn multilevel_expr_path_two_level_hint() {
+    fn full_expr_path_of_an_imported_module_checks_clean() {
         let t = TmpDir::new();
         let entry = t.write(
             "main.chz",
             "import std.concurrency\nfn main():\n    s := std.concurrency.Shared(0)\n    print(s)\n",
         );
-        let errs = errors(&entry);
-        assert!(
-            errs.iter().any(|m| m.contains("two-level")),
-            "expected two-level hint, got: {errs:?}"
-        );
-        assert!(
-            !errs.iter().any(|m| m == "unknown name 'std'"),
-            "should not emit bare unknown-name: {errs:?}"
-        );
+        let errs = check_entry(&entry).err().unwrap_or_default();
+        assert!(errs.is_empty(), "expected no errors, got: {errs:?}");
     }
 
-    // EXPR position, SIBLING COLLISION: two `std.*` imports share head `std`. A `std.net.Socket(0)`
-    // mistake must name the module the user REFERENCED (`net`), not the first-imported sibling
-    // (`concurrency`). Regression for the first-wins head-map bug (3 confirmed adversarial charges).
+    // EXPR position, ALIASED sibling: `import std.net as n` binds only `n`, so a `std.net.X` use
+    // names the bound name `n`, never the un-aliased sibling `concurrency`.
     #[test]
-    fn multilevel_expr_collision_names_referenced_module() {
+    fn aliased_module_full_path_names_its_bound_name() {
         let t = TmpDir::new();
         let entry = t.write(
             "main.chz",
-            "import std.concurrency\nimport std.net\nfn main():\n    s := std.net.Socket(0)\n    print(s)\n",
+            "import std.concurrency\nimport std.net as n\nfn main():\n    s := std.net.Socket(0)\n    print(s)\n",
         );
         let errs = errors(&entry);
         assert!(
             errs.iter()
-                .any(|m| m.contains("two-level") && m.contains("`net.<Name>`")),
-            "expected hint naming the referenced module `net`, got: {errs:?}"
+                .any(|m| m.contains("`std.net` is imported as `n`")),
+            "expected hint naming the bound name `n`, got: {errs:?}"
         );
         assert!(
             !errs.iter().any(|m| m.contains("concurrency")),
-            "must NOT steer to the first-imported sibling `concurrency`: {errs:?}"
+            "must NOT steer to the sibling `concurrency`: {errs:?}"
         );
     }
 
-    // EXPR position, THREE-LEVEL import: `import std.concurrency.collection` binds `collection` (the
-    // LAST segment), NOT `concurrency`. A `std.concurrency.collection.X(...)` mistake must name
-    // `collection`, not the second segment. Regression for the adversarial 3-level charge.
+    // EXPR position, THREE-LEVEL import: `import std.concurrency.collection` binds the full path
+    // `std.concurrency.collection`, NOT its prefix `std.concurrency` (no implicit parents).
     #[test]
-    fn multilevel_expr_three_level_import_names_bound_name() {
+    fn full_path_prefix_of_a_deeper_import_is_not_imported() {
         let t = TmpDir::new();
         let entry = t.write(
             "main.chz",
-            "import std.concurrency.collection\nfn main():\n    c := std.concurrency.collection.Nope(0)\n    print(c)\n",
+            "import std.concurrency.collection\nfn main():\n    c := std.concurrency.Nope(0)\n    print(c)\n",
         );
         let errs = errors(&entry);
         assert!(
             errs.iter()
-                .any(|m| m.contains("two-level") && m.contains("`collection.<Name>`")),
-            "expected hint naming the bound name `collection`, got: {errs:?}"
-        );
-        assert!(
-            !errs.iter().any(|m| m.contains("write `concurrency")),
-            "must NOT name the second segment `concurrency` as the module: {errs:?}"
+                .any(|m| m.contains("module `std.concurrency` is not imported")),
+            "expected the not-imported hint, got: {errs:?}"
         );
     }
 

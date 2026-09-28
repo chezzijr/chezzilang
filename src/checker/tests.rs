@@ -35273,13 +35273,10 @@ fn a_qualified_bound_on_a_bare_protocol_rejects_type_arguments() {
 
 #[test]
 fn a_qualified_bound_with_a_three_level_path_is_rejected() {
-    // The parser accepts any dotted bound path; the checker keeps bounds two-level (TICKET-173).
+    // A 3-segment bound reads module `qp.x` (TICKET-175), which is not imported.
     assert_qpb_error(
         "import lib as qp\nfn make[T: qp.x.QpbFactory](s: T) -> T:\n    return s\n",
-        &[
-            "two-level",
-            "multi-level paths like `qp.x.QpbFactory` are not supported",
-        ],
+        &["unknown module 'qp.x' (import it to use `qp.x.QpbFactory`)"],
         Some(2),
     );
 }
@@ -35305,4 +35302,178 @@ fn pkg_full_path_annotation_checks_clean() {
             "import pkg.deep\nx: pkg.deep.Point = deep.Point(1)\nprint(x.x)\n",
         ),
     ]);
+}
+
+const FP_DEEP: &str = "fn double(n: int) -> int:\n    return n * 2\nstruct Point:\n    x: int\nprotocol Factory:\n    fn make() -> Self\n";
+const FP_OTHER: &str = "fn double(n: int) -> int:\n    return n * 2\n";
+
+#[test]
+fn full_path_after_as_import_names_the_bound_name() {
+    files_reject(
+        &[
+            ("pkg/deep.chz", FP_DEEP),
+            ("pkg/other.chz", FP_OTHER),
+            (
+                "main.chz",
+                "import pkg.deep as d\nprint(pkg.deep.double(1))\n",
+            ),
+        ],
+        "`pkg.deep` is imported as `d`",
+    );
+}
+
+#[test]
+fn full_path_of_an_unimported_module_is_rejected() {
+    files_reject(
+        &[
+            ("pkg/deep.chz", FP_DEEP),
+            ("pkg/other.chz", FP_OTHER),
+            ("main.chz", "import pkg.deep\nprint(pkg.other.double(1))\n"),
+        ],
+        "needs `import pkg.<module>`",
+    );
+}
+
+#[test]
+fn full_path_head_shadowed_by_a_local_is_rejected() {
+    files_reject(
+        &[
+            ("pkg/deep.chz", FP_DEEP),
+            (
+                "main.chz",
+                "import pkg.deep\nfn f() -> int:\n    pkg := 3\n    return pkg.deep.double(1)\n",
+            ),
+        ],
+        "type int has no field 'deep'",
+    );
+}
+
+#[test]
+fn full_path_head_shadowed_by_a_param_is_rejected() {
+    files_reject(
+        &[
+            ("pkg/deep.chz", FP_DEEP),
+            (
+                "main.chz",
+                "import pkg.deep\nfn g(pkg: int) -> int:\n    return pkg.deep.double(1)\n",
+            ),
+        ],
+        "type int has no field 'deep'",
+    );
+}
+
+#[test]
+fn full_path_unknown_member_carets_the_member() {
+    let errs = check_files(&[
+        ("pkg/deep.chz", FP_DEEP),
+        ("main.chz", "import pkg.deep\nprint(pkg.deep.nope(1))\n"),
+    ]);
+    assert!(
+        errs.iter().any(
+            |e| e.message.contains("module 'pkg.deep' has no member 'nope'")
+                && e.span.line == 2
+                && e.span.col == 16
+        ),
+        "got: {errs:?}"
+    );
+}
+
+#[test]
+fn full_path_unknown_module_in_annotation_is_rejected() {
+    let errs = check_files(&[
+        ("pkg/deep.chz", FP_DEEP),
+        (
+            "main.chz",
+            "import pkg.deep\nx: pkg.nope.Point = deep.Point(1)\n",
+        ),
+    ]);
+    assert!(
+        errs.iter().any(|e| e
+            .message
+            .contains("unknown module 'pkg.nope' (import it to use `pkg.nope.Point`)")
+            && e.span.line == 2),
+        "got: {errs:?}"
+    );
+}
+
+#[test]
+fn full_path_bound_resolves_the_protocol() {
+    files_ok(&[
+        ("pkg/deep.chz", FP_DEEP),
+        (
+            "main.chz",
+            "import pkg.deep\nfn build[T: pkg.deep.Factory]() -> T:\n    return T.make()\n",
+        ),
+    ]);
+}
+
+const FP_A_MATH: &str = "fn f() -> int:\n    return 1\n";
+const FP_B_MATH: &str = "fn f() -> int:\n    return 2\n";
+
+#[test]
+fn same_last_segment_imports_keep_both_full_paths() {
+    files_ok(&[
+        ("a/math.chz", FP_A_MATH),
+        ("b/math.chz", FP_B_MATH),
+        (
+            "main.chz",
+            "import a.math\nimport b.math\nprint(a.math.f() + b.math.f())\n",
+        ),
+    ]);
+}
+
+#[test]
+fn same_last_segment_bare_use_is_ambiguous() {
+    let errs = check_files(&[
+        ("a/math.chz", FP_A_MATH),
+        ("b/math.chz", FP_B_MATH),
+        (
+            "main.chz",
+            "import a.math\nimport b.math\nprint(a.math.f() + b.math.f())\nprint(math.f())\n",
+        ),
+    ]);
+    assert!(
+        errs.iter().any(|e| [
+            "'math' is ambiguous",
+            "a.math",
+            "b.math",
+            "import a.math as am"
+        ]
+        .iter()
+        .all(|n| e.message.contains(n))),
+        "got: {errs:?}"
+    );
+}
+
+#[test]
+fn same_module_under_two_spellings_is_one_bind() {
+    files_ok(&[(
+        "main.chz",
+        "import std.math\nimport math from std\nprint(math.sqrt(4.0) + std.math.sqrt(4.0))\n",
+    )]);
+}
+
+#[test]
+fn duplicate_import_of_one_module_is_rejected() {
+    files_reject(
+        &[
+            ("pkg/deep.chz", FP_DEEP),
+            (
+                "main.chz",
+                "import pkg.deep\nimport pkg.deep\nprint(deep.double(1))\n",
+            ),
+        ],
+        "'deep' is already imported",
+    );
+}
+
+#[test]
+fn duplicate_import_from_std_is_rejected() {
+    files_reject(
+        &[(
+            "main.chz",
+            "import math from std\nimport math from std\nprint(math.sqrt(4.0))\n",
+        )],
+        "'math' is already imported",
+    );
 }
