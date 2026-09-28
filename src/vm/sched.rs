@@ -105,6 +105,11 @@ struct WireMemo {
     /// TICKET-119 — highest `doom_ids` stamp touched since the recording; a record is valid only
     /// while its enter stamp is above it.
     doom_invalid_upto: Option<u32>,
+    /// D4 (TICKET-179) — `Some` only for a spawn crossing (`deep_clone_all`, `lower_task`): the
+    /// crossing's own operands, which the sending task still reaches besides its GC roots. A crossing
+    /// generator then decides its frame slots with [`Vm::gen_frame_observable`]. `None` (Channel
+    /// sends, the module snapshot) leaves the ambient mark.
+    gen_roots: Option<Vec<GcRef>>,
 }
 
 impl WireMemo {
@@ -3453,6 +3458,7 @@ impl Vm {
             base_cells,
             base_nodes,
             next_id: seed_ceiling,
+            gen_roots: Some(vs.iter().filter_map(|v| v.child_gcref()).collect()),
             ..WireMemo::default()
         };
         let mut ws = Vec::with_capacity(vs.len());
@@ -3971,7 +3977,13 @@ impl Vm {
                             for a in args {
                                 wargs.push(self.to_wire_depth(*a, depth + 1, memo)?);
                             }
-                            WireGenState::Pending(wargs)
+                            // D4 (TICKET-179) — at a spawn crossing, decide once which frame slots
+                            // the sending task can still observe; the rebuild arm only reads it.
+                            let observable = memo
+                                .gen_roots
+                                .as_deref()
+                                .map(|extra| Box::new(self.gen_frame_observable(h, args, extra)));
+                            WireGenState::Pending(wargs, observable)
                         }
                         GenState::Done => WireGenState::Done,
                         GenState::Unsendable(m) => WireGenState::Unsendable(m.clone()),
@@ -4016,7 +4028,7 @@ impl Vm {
                             // with no value recursion; its indices address the frame/stack serialized
                             // above and are reconstructed coherently in `from_wire`.
                             WireGenState::Suspended {
-                                frame: WireCallFrame {
+                                frame: Box::new(WireCallFrame {
                                     proto: frame.proto,
                                     ip: frame.ip,
                                     base: frame.base,
@@ -4027,11 +4039,14 @@ impl Vm {
                                     has_implicit_nursery: frame.has_implicit_nursery,
                                     call_span: frame.call_span,
                                     argc: frame.argc,
-                                },
+                                }),
                                 stack: wstack,
                                 call_depth: g.ctx.call_depth,
                                 cur_base: g.ctx.cur_base,
                                 handlers: g.ctx.handlers.clone(),
+                                observable: memo.gen_roots.as_deref().map(|extra| {
+                                    Box::new(self.gen_frame_observable(h, &g.ctx.stack, extra))
+                                }),
                             }
                         }
                     };
@@ -4294,6 +4309,74 @@ impl Vm {
             out.push(v);
         }
         out
+    }
+
+    /// Rebuild a crossing generator's frame slots. With a decision from [`Vm::gen_frame_observable`],
+    /// slot `i` is a task copy only when `observable[i]`; an observable slot's root is also marked
+    /// explicitly, so the decision survives onto the parent-side `deep_clone_all` clone that
+    /// `lower_task` serializes next. Without one, every slot keeps the ambient mark.
+    fn rebuild_frame_slots(
+        &mut self,
+        slots: Vec<WireValue>,
+        rebuild: &mut super::fxhash::FxHashMap<u32, GcRef>,
+        observable: super::wire::FrameObservable,
+    ) -> Vec<Value> {
+        let Some(observable) = observable else {
+            return self.rebuild_items(slots, rebuild, |w| w);
+        };
+        debug_assert_eq!(slots.len(), observable.len());
+        let saved = self.copy_mark;
+        let mut out = Vec::with_capacity(slots.len());
+        for (w, seen) in slots.into_iter().zip(*observable) {
+            self.copy_mark = saved && seen;
+            let v = self.from_wire_memo(w, rebuild);
+            if seen && let Some(h) = v.as_obj() {
+                self.heap.set_copied(h);
+            }
+            out.push(v);
+        }
+        self.copy_mark = saved;
+        out
+    }
+
+    /// D4 (TICKET-179) — THE generator frame decision, made once at a spawn crossing: for each frame
+    /// slot of generator `g`, can the sending task still observe it after the join? A slot is
+    /// observable when it is already a copy, or when any object in its subtree is reachable from this
+    /// VM's GC roots or from `extra` (the crossing's other operands), never passing through `g`
+    /// itself. Per-slot is a ceiling: a private list holding a reachable list is observable whole (a
+    /// false fault, never a lost write). A scalar slot is never observable.
+    fn gen_frame_observable(&self, g: GcRef, slots: &[Value], extra: &[GcRef]) -> Vec<bool> {
+        let mut reach = super::fxhash::FxHashSet::<GcRef>::default();
+        let mut work = self.gc_roots();
+        work.extend_from_slice(extra);
+        while let Some(h) = work.pop() {
+            if h != g && reach.insert(h) {
+                work.extend(self.heap.children(h));
+            }
+        }
+        slots
+            .iter()
+            .map(|v| {
+                let Some(root) = v.as_obj() else {
+                    return false;
+                };
+                if self.heap.is_copied(root) {
+                    return true;
+                }
+                let mut seen = super::fxhash::FxHashSet::<GcRef>::default();
+                let mut work = vec![root];
+                while let Some(h) = work.pop() {
+                    if h == g || !seen.insert(h) {
+                        continue;
+                    }
+                    if reach.contains(&h) {
+                        return true;
+                    }
+                    work.extend(self.heap.children(h));
+                }
+                false
+            })
+            .collect()
     }
 
     /// Worker behind [`Vm::from_wire`] — reconstructs into this heap, threading `rebuild` (wire `id` →
@@ -4669,7 +4752,7 @@ impl Vm {
                         self.from_wire_memo(*c, rebuild);
                     }
                     match state {
-                        WireGenState::Pending(wargs) => {
+                        WireGenState::Pending(wargs, _) => {
                             self.rebuild_items(wargs, rebuild, |w| w);
                         }
                         WireGenState::Suspended { stack, .. } => {
@@ -4686,8 +4769,8 @@ impl Vm {
                         .expect("a generator's backing closure wire rebuilds to a heap object")
                 });
                 let g = match state {
-                    WireGenState::Pending(wargs) => {
-                        let args = self.rebuild_items(wargs, rebuild, |w| w);
+                    WireGenState::Pending(wargs, observable) => {
+                        let args = self.rebuild_frame_slots(wargs, rebuild, observable);
                         self.alloc_generator(proto, home, closure, args)
                     }
                     WireGenState::Done | WireGenState::Unsendable(_) => {
@@ -4710,8 +4793,9 @@ impl Vm {
                         call_depth,
                         cur_base,
                         handlers,
+                        observable,
                     } => {
-                        let stack = self.rebuild_items(stack, rebuild, |w| w);
+                        let stack = self.rebuild_frame_slots(stack, rebuild, observable);
                         let rebuilt = CallFrame {
                             proto: frame.proto,
                             ip: frame.ip,
@@ -5007,6 +5091,7 @@ impl Vm {
             cells: cells.into_iter().collect(),
             base_nodes,
             next_id,
+            gen_roots: Some(task.roots().collect()),
             ..WireMemo::default()
         };
         let lowered = match task {

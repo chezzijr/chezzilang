@@ -1709,10 +1709,22 @@ impl Vm {
         Ok(())
     }
 
-    /// Mark-sweep collection. Roots: the whole operand stack (which contains every frame's local
-    /// slots *and* any in-flight expression temporaries), each frame's home module + backing
-    /// closure, and the module namespace cache. Everything else is garbage.
+    /// Mark-sweep collection. Roots: see [`Vm::gc_roots`]. Everything else is garbage.
     pub(super) fn collect(&mut self) {
+        let mut work = self.gc_roots();
+        while let Some(h) = work.pop() {
+            if self.heap.mark(h) {
+                work.extend(self.heap.children(h));
+            }
+        }
+        self.heap.sweep();
+    }
+
+    /// The GC roots: the whole operand stack (which contains every frame's local slots *and* any
+    /// in-flight expression temporaries), each frame's home module + backing closure, and the module
+    /// namespace cache. Also what D4's generator frame decision ([`Vm::gen_frame_observable`]) asks
+    /// "can the sending task still reach this" against.
+    pub(super) fn gc_roots(&self) -> Vec<GcRef> {
         let mut work: Vec<GcRef> = Vec::new();
         for v in &self.stack {
             if let Some(h) = v.child_gcref() {
@@ -1785,12 +1797,7 @@ impl Vm {
         // module-global key): load-bearing the same way, so a capture waiting to be adopted by a
         // module the task has not read yet is never swept out from under it.
         work.extend(self.snapshot_adopt.values().copied());
-        while let Some(h) = work.pop() {
-            if self.heap.mark(h) {
-                work.extend(self.heap.children(h));
-            }
-        }
-        self.heap.sweep();
+        work
     }
 
     pub(super) fn base(&self) -> usize {

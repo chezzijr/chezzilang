@@ -279,13 +279,21 @@ pub enum WireValue {
     },
 }
 
+/// D4 (TICKET-179) — per frame slot (`Pending` arg / `Suspended` stack slot): may the sending task
+/// still reach it. `None` = not decided, keep the ambient mark. Decided only by
+/// `Vm::gen_frame_observable`. Boxed and carried inside [`WireGenState`] (whose `Suspended` frame is
+/// boxed too) so `WireValue` does not grow: the VM's debug-build `step` frame holds several
+/// `WireValue` locals on the per-op recursion path, and 8 bytes more each overflowed
+/// `self_referential_stringable_hits_depth_limit`.
+pub type FrameObservable = Option<Box<Vec<bool>>>;
+
 /// F3 path C — the serialized lifecycle of a [`WireValue::Generator`]. Mirrors the runtime `GenState`
 /// but with parked `Value`s replaced by owned `WireValue`s (and the parked `CallFrame` reduced to its
 /// plain-data [`WireCallFrame`]).
 #[derive(Debug, Clone)]
 pub enum WireGenState {
     /// Created but not yet driven: the not-yet-consumed call args (each wired recursively).
-    Pending(Vec<WireValue>),
+    Pending(Vec<WireValue>, FrameObservable),
     /// Driven at least once, suspended at a `yield`: the single parked body frame plus its private
     /// operand stack (base-0), with the private `call_depth`/`cur_base`, and the live `recover:`
     /// handlers stacked over that frame (backlog arm b). A [`Handler`](super::Handler) is pure
@@ -295,11 +303,12 @@ pub enum WireGenState {
     /// `deferred` (a pending `defer` is a checker-unreachable HARD ARM still rejected in `to_wire`),
     /// so that is not serialized.
     Suspended {
-        frame: WireCallFrame,
+        frame: Box<WireCallFrame>,
         stack: Vec<WireValue>,
         call_depth: usize,
         cur_base: usize,
         handlers: Vec<super::Handler>,
+        observable: FrameObservable,
     },
     /// Body returned / fell off the end: no parked context at all.
     Done,
@@ -379,7 +388,7 @@ impl WireValue {
             WireValue::Generator { closure, state, .. } => {
                 closure.as_ref().is_some_and(|c| c.has_handle())
                     || match state {
-                        WireGenState::Pending(args) => args.iter().any(WireValue::has_handle),
+                        WireGenState::Pending(args, _) => args.iter().any(WireValue::has_handle),
                         WireGenState::Suspended { stack, .. } => {
                             stack.iter().any(WireValue::has_handle)
                         }
@@ -484,7 +493,7 @@ impl WireValue {
                 WireValue::Generator { closure, state, .. } => {
                     closure.as_ref().is_none_or(|c| walk(c, defined, known))
                         && match state {
-                            WireGenState::Pending(args) => all(args, defined),
+                            WireGenState::Pending(args, _) => all(args, defined),
                             WireGenState::Suspended { stack, .. } => all(stack, defined),
                             WireGenState::Done | WireGenState::Unsendable(_) => true,
                         }

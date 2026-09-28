@@ -49,3 +49,22 @@ test fn a_fresh_arg_at_bit_31_is_writable():
     parallel:
         spawn t179e_wide30(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, [1], out)
     assert out.recv() == "ok"
+
+fn t179e_gen() -> Iterator[int]:
+    acc: List[int] = []
+    for i in range(3):
+        acc.push(i)
+        yield acc.len()
+
+test fn started_generator_captured_by_a_spawn_block_runs():
+    g := t179e_gen()
+    _ := g.next()
+    out := Channel[int](1)
+    parallel:
+        spawn:
+            n := 0
+            for v in g:
+                n += v
+            out.send(n)
+    assert out.recv() == 5
+    assert g.next() == Some(2)

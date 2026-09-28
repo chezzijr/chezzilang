@@ -1333,7 +1333,7 @@ pub fn collect_gcrefs_structural(
                 collect_gcrefs_structural(c, out, seen, pending);
             }
             match state {
-                WireGenState::Pending(args) => args
+                WireGenState::Pending(args, _) => args
                     .iter()
                     .for_each(|x| collect_gcrefs_structural(x, out, seen, pending)),
                 WireGenState::Suspended { stack, .. } => stack
@@ -1524,7 +1524,7 @@ pub fn wire_summary(w: &WireValue) -> (usize, bool) {
                 walk(&mut acc, c);
             }
             match state {
-                WireGenState::Pending(args) => args.iter().for_each(|x| walk(&mut acc, x)),
+                WireGenState::Pending(args, _) => args.iter().for_each(|x| walk(&mut acc, x)),
                 WireGenState::Suspended { stack, .. } => {
                     stack.iter().for_each(|x| walk(&mut acc, x))
                 }
@@ -1695,7 +1695,7 @@ fn nested_core_bytes_structural(
                 acc += nested_core_bytes_structural(c, seen, pending);
             }
             match state {
-                WireGenState::Pending(args) => {
+                WireGenState::Pending(args, _) => {
                     for x in args {
                         acc += nested_core_bytes_structural(x, seen, pending);
                     }
