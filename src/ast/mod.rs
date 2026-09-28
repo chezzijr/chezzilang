@@ -542,6 +542,8 @@ pub struct TypeParam {
 /// A single protocol bound on a type parameter. `args` is empty for a bare bound (`Comparable`) and
 /// non-empty for a parameterized one (`Iterator[T]` → name `Iterator`, args `[Named("T")]`). Only
 /// `Iterator` consumes its args today (element-type recovery); other protocols ignore them.
+/// `name` is the SOURCE spelling, bare (`Comparable`) or module-qualified `alias.Name`
+/// (`m.Factory`, TICKET-173); the checker re-spells a stored bound to its protocol key (DEC-027).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Bound {
     pub name: String,

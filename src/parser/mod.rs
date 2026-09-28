@@ -957,9 +957,14 @@ impl Parser {
 
     /// A single protocol bound on a type parameter: a name, optionally with `[T, …]` type arguments
     /// (`Iterator[T]`). The args reuse `parse_type`, so any type expression is accepted syntactically;
-    /// only `Iterator` gives its args meaning in the checker.
+    /// only `Iterator` gives its args meaning in the checker. The name may be module-qualified
+    /// (`m.Factory`, TICKET-173): the parser reads any dotted path and keeps its dotted source
+    /// spelling, which `Checker::protocol_key` resolves; the checker refuses a 3+ segment path.
     fn parse_bound(&mut self) -> PResult<Bound> {
-        let name = self.expect_ident()?;
+        let mut name = self.expect_ident()?;
+        while self.eat(&Token::Dot) {
+            name = format!("{name}.{}", self.expect_ident()?);
+        }
         let mut args = Vec::new();
         if self.eat(&Token::LBracket) {
             args.push(self.parse_type()?);
@@ -4863,6 +4868,52 @@ mod tests {
                 assert_eq!(f.type_params[1].name, "T");
                 assert_eq!(f.type_params[1].bounds, Vec::<Bound>::new());
             }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn qualified_bound_parses_as_a_dotted_name() {
+        // TICKET-173: `m.P` in a bound keeps its dotted source spelling; the checker resolves it.
+        match only("fn f[T: m.P + Q, S: m.Box[int]](x: T, s: S) -> T where T: m.R:\n    return x\n")
+        {
+            StmtKind::Fn(f) => {
+                let names: Vec<&str> = f.type_params[0]
+                    .bounds
+                    .iter()
+                    .map(|b| b.name.as_str())
+                    .collect();
+                assert_eq!(names, ["m.P", "Q"]);
+                assert_eq!(
+                    f.type_params[1].bounds,
+                    vec![Bound {
+                        name: "m.Box".into(),
+                        args: vec![Type::named("int")]
+                    }]
+                );
+                assert_eq!(f.where_bounds[0].bounds[0].name, "m.R");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn qualified_protocol_embed_parses_as_a_dotted_name() {
+        match only("protocol Q:\n    m.Tagged + Add\n") {
+            StmtKind::Protocol { embeds, .. } => {
+                let names: Vec<&str> = embeds.iter().map(|b| b.name.as_str()).collect();
+                assert_eq!(names, ["m.Tagged", "Add"]);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_three_level_bound_path_parses_as_a_dotted_name() {
+        // The parser reads any dotted path; the CHECKER refuses a 3+ segment bound with the
+        // two-level hint (TICKET-173), so multi-level module paths only change resolution.
+        match only("fn f[T: a.b.C](x: T) -> T:\n    return x\n") {
+            StmtKind::Fn(f) => assert_eq!(f.type_params[0].bounds[0].name, "a.b.C"),
             other => panic!("{other:?}"),
         }
     }

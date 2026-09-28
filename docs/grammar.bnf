@@ -196,7 +196,9 @@
 <typeParamList> ::= <typeParam> | <typeParam> "COMMA" <typeParamList>
 <typeParam>     ::= "IDENT" | "IDENT" "COLON" <boundList>
 <boundList>     ::= <bound> | <bound> "PLUS" <boundList>
-<bound>         ::= "IDENT" | "IDENT" "LBRACKET" <typeList> "RBRACKET"
+# A bound name is bare or a module-qualified dotted path (`m.Factory`, TICKET-173). The grammar takes
+# any depth; the checker refuses a 3+ segment path with the two-level hint.
+<bound>         ::= <dottedPath> | <dottedPath> "LBRACKET" <typeList> "RBRACKET"
 
 <structDecl>    ::= "STRUCT" "IDENT" "COLON" "NEWLINE" "INDENT" <structBody> "DEDENT"
                   | "STRUCT" "IDENT" <typeParams> "COLON" "NEWLINE" "INDENT" <structBody> "DEDENT"

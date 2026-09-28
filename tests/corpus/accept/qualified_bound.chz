@@ -1,0 +1,11 @@
+# rule: typeParam, boundList, bound, dottedPath, whereClause, embedLine
+import lib as m
+
+fn make[T: m.Factory + Q, S: m.Box[int]](x: T, s: S) -> T where T: m.Tagged:
+    return x
+
+fn deep[T: a.b.C](x: T) -> T:
+    return x
+
+protocol Q:
+    m.Tagged
