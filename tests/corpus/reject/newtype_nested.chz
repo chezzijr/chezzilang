@@ -1,0 +1,4 @@
+# rule: newtypeDecl
+# expect: newtype must be a top-level declaration
+while true:
+    newtype N = int

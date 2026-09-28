@@ -1,0 +1,5 @@
+# rule: protocolDecl
+# expect: protocol must be a top-level declaration
+fn f():
+    protocol P:
+        fn m(self) -> int

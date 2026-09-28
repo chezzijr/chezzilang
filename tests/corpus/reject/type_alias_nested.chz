@@ -1,0 +1,3 @@
+# rule: typeAliasDecl
+# expect: type must be a top-level declaration
+if true: type T = int

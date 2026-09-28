@@ -31,24 +31,23 @@
 # A file is zero or more statements then EOF. The lexer always emits a trailing NEWLINE before
 # EOF when the last line had content, and one DEDENT per still-open block; blank/comment-only
 # lines emit no tokens, so no stray NEWLINEs appear between statements.
-# `extern "lib":` is a TOP-LEVEL-only declaration: the checker's hoist + the compiler's eager
-# `MakeCffi` only walk module-level statements, so an extern nested in a block would silently skip
-# marshallability validation. It therefore appears in <topLevelStmt> but NOT in <compoundStmt> (the
-# latter feeds <stmts>, which a <block> uses) — so a nested extern is a parse error.
-# `import` is TOP-LEVEL-only for the same reason: the resolver only scans module-level statements,
-# so an import nested in a block would parse + check clean and be a complete NO-OP (never resolved,
-# never bound, never run). It therefore lives in <topLevelStmt>, NOT in <simpleStmt> — a nested
-# import is a parse error.
+# A module-level statement is an <item> or a <stmt>. An <item> is a TOP-LEVEL-ONLY declaration:
+# the checker, compiler and resolver harvest declarations from module-level statements alone, so
+# an item in a block would parse and then do nothing. A <block> holds <stmts>, which never reach
+# <item>, so an item keyword in any block is a parse error ("struct must be a top-level
+# declaration"). `fn` is the one declaration legal in both positions (a nested fn is a first-class
+# local function), so <fnDecl> stays in <compoundStmt> and <topLevelStmt> reaches it via <stmt>.
 <module>        ::= "EOF" | <topLevelStmts> "EOF"
 <topLevelStmts> ::= <topLevelStmt> | <topLevelStmt> <topLevelStmts>
-<topLevelStmt>  ::= <stmt> | <importStmt> | <externDecl> | <nativeDecl> | <nativeStructDecl> | <nativeEnumDecl>
+<topLevelStmt>  ::= <item> | <stmt>
+<item>          ::= <testFnDecl> | <structDecl> | <enumDecl> | <newtypeDecl> | <protocolDecl> | <typeAliasDecl> | <importStmt> | <externDecl> | <nativeDecl> | <nativeStructDecl> | <nativeEnumDecl>
 <stmts>         ::= <stmt> | <stmt> <stmts>
 
 <stmt>         ::= <simpleStmt> | <compoundStmt>
-<compoundStmt> ::= <fnDecl> | <testFnDecl> | <structDecl> | <enumDecl> | <newtypeDecl> | <protocolDecl> | <ifStmt> | <forStmt> | <whileStmt> | <matchStmt> | <parallelStmt> | <spawnStmt> | <waitStmt> | <deferStmt>
+<compoundStmt> ::= <fnDecl> | <ifStmt> | <forStmt> | <whileStmt> | <matchStmt> | <parallelStmt> | <spawnStmt> | <waitStmt> | <deferStmt>
 
 # Line-oriented statements each consume their terminating NEWLINE.
-<simpleStmt> ::= <letStmt> | <assignStmt> | <returnStmt> | <yieldStmt> | <breakStmt> | <continueStmt> | <passStmt> | <typeAliasDecl> | <assertStmt> | <exprStmt>
+<simpleStmt> ::= <letStmt> | <assignStmt> | <returnStmt> | <yieldStmt> | <breakStmt> | <continueStmt> | <passStmt> | <assertStmt> | <exprStmt>
 
 # ===== simple statements =====
 # The third form is a destructuring binding: `a, b, … := expr` binds a tuple's elements positionally.

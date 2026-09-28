@@ -189,6 +189,9 @@ pub fn parse_expr(tokens: Vec<Tok>) -> PResult<Expr> {
     Ok(expr)
 }
 
+/// Parses one `<item>`: the parser [`Parser::item_keyword`] pairs with an item keyword.
+type ItemParser = fn(&mut Parser) -> PResult<StmtKind>;
+
 struct Parser {
     toks: Vec<Tok>,
     pos: usize,
@@ -482,10 +485,56 @@ impl Parser {
         let mut stmts = Vec::new();
         self.skip_newlines();
         while !self.check(&Token::Eof) {
-            stmts.push(self.parse_stmt()?);
+            stmts.push(self.parse_item()?);
             self.skip_newlines();
         }
         Ok(Module { stmts })
+    }
+
+    /// THE list of top-level-only declarations (`<item>` in `docs/grammar.bnf`): each item keyword,
+    /// the name its block-position diagnostic uses, and its parser. [`Self::parse_item`] dispatches
+    /// through it at module level; [`Self::parse_stmt`], which parses every block, rejects every
+    /// keyword on it. The checker, compiler and resolver harvest declarations from module-level
+    /// statements only, so an item in a block would otherwise parse and do nothing (TICKET-178).
+    /// `fn` is not listed: a nested `fn` is a first-class local function, owned by `parse_stmt`.
+    fn item_keyword(tok: &Token) -> Option<(&'static str, ItemParser)> {
+        let item: (&'static str, ItemParser) = match tok {
+            Token::Test => ("test fn", |p| Ok(StmtKind::Fn(p.parse_test_fn(true)?))),
+            Token::Struct => ("struct", Parser::parse_struct),
+            Token::Enum => ("enum", Parser::parse_enum),
+            Token::NewType => ("newtype", Parser::parse_newtype),
+            Token::Protocol => ("protocol", Parser::parse_protocol),
+            Token::Type => ("type", |p| {
+                let k = p.parse_type_alias()?;
+                p.expect_stmt_end()?;
+                Ok(k)
+            }),
+            Token::Import => ("import", |p| {
+                let k = StmtKind::Import(p.parse_import()?);
+                p.expect_stmt_end()?;
+                Ok(k)
+            }),
+            Token::Extern => ("extern block", Parser::parse_extern),
+            Token::Native => ("native declaration", Parser::parse_native_decl),
+            _ => return None,
+        };
+        Some(item)
+    }
+
+    /// `<topLevelStmt>`: an `<item>` at an item keyword, else a `<stmt>`. Charges `depth` like
+    /// `parse_stmt`, so a method body nests exactly as deep as it did before the split.
+    fn parse_item(&mut self) -> PResult<Stmt> {
+        let Some((_, parse)) = Self::item_keyword(self.peek()) else {
+            return self.parse_stmt();
+        };
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            return Err(self.err("statement nested too deeply".to_string()));
+        }
+        let span = self.cur_span();
+        let kind = parse(self)?;
+        self.depth -= 1;
+        Ok(Stmt { kind, span })
     }
 
     // ----- statements -----
@@ -495,50 +544,15 @@ impl Parser {
         if self.depth > MAX_DEPTH {
             return Err(self.err("statement nested too deeply".to_string()));
         }
+        // A block never holds an item: `<stmts>` does not reach `<item>` (`docs/grammar.bnf`).
+        if let Some((kind, _)) = Self::item_keyword(self.peek()) {
+            return Err(self.err(format!("{kind} must be a top-level declaration")));
+        }
         let span = self.cur_span();
-        // An `extern "lib":` block is a top-level-only declaration (it dlopens a library + binds
-        // module-global C fns at init). `parse_stmt` runs at depth 1 for a top-level statement
-        // (entered from `parse_module`) and at depth >1 inside any block, so a nested extern is
-        // rejected here — the checker's hoist + the compiler's eager `MakeCffi` only walk top-level
-        // stmts, so a nested extern would silently skip marshallability validation and later die
-        // with a misleading "unknown name". Reject it at parse time instead.
-        if matches!(self.peek(), Token::Extern) && self.depth > 1 {
-            return Err(self.err("extern block must be a top-level declaration".to_string()));
-        }
-        // A `native fn`/`native ctor` decl is likewise a TOP-LEVEL-only declaration (it declares a
-        // universe-builtin signature, bound natively). The checker further restricts it to
-        // prelude/std modules; a nested one is rejected here at parse time (same seam as `extern`).
-        if matches!(self.peek(), Token::Native) && self.depth > 1 {
-            return Err(self.err("native declaration must be a top-level declaration".to_string()));
-        }
-        // An `import` is likewise TOP-LEVEL-only: the resolver only scans module-level statements
-        // (`Resolver::scan_imports`), so an import nested in a block parsed + checked clean and was a
-        // complete NO-OP — it never resolved (not even "module not found"), never bound, never ran the
-        // module body. Reject it at parse time (same seam as `extern`/`native`).
-        if matches!(self.peek(), Token::Import) && self.depth > 1 {
-            return Err(self.err("import must be a top-level declaration".to_string()));
-        }
         // Compound statements own a block and end at its `Dedent`; line-oriented statements
-        // (let/assign/expr/return/import) must be followed by a line terminator.
+        // (let/assign/expr/return) must be followed by a line terminator.
         let kind = match self.peek() {
             Token::Fn => StmtKind::Fn(self.parse_fn(true)?),
-            // `test fn …` — a `test` modifier before `fn` marks an independent test.
-            Token::Test => StmtKind::Fn(self.parse_test_fn(true)?),
-            Token::Struct => self.parse_struct()?,
-            Token::Enum => self.parse_enum()?,
-            Token::Protocol => self.parse_protocol()?,
-            Token::Extern => self.parse_extern()?,
-            // Extracted into a `#[inline(never)]` helper so its several `StmtKind`-returning call slots
-            // (`parse_native_struct`/`parse_native_enum`/`parse_native`, ~280 B each in a debug build)
-            // do NOT enlarge THIS (`parse_stmt`) frame — `parse_stmt` recurses through nested blocks and
-            // already sits near the `MAX_DEPTH`-vs-stack edge (`deep_nesting_errors_not_crash`).
-            Token::Native => self.parse_native_decl()?,
-            Token::Type => {
-                let k = self.parse_type_alias()?;
-                self.expect_stmt_end()?;
-                k
-            }
-            Token::NewType => self.parse_newtype()?,
             Token::If => self.parse_if()?,
             Token::For => self.parse_for()?,
             Token::While => self.parse_while()?,
@@ -587,11 +601,6 @@ impl Parser {
                 self.advance();
                 self.expect_stmt_end()?;
                 StmtKind::Pass
-            }
-            Token::Import => {
-                let k = StmtKind::Import(self.parse_import()?);
-                self.expect_stmt_end()?;
-                k
             }
             _ => {
                 let k = self.parse_simple_stmt()?;
@@ -1180,8 +1189,8 @@ impl Parser {
 
     /// `native struct NAME[T…]:` then an INDENT block of body-less field declarations — the TYPE-level
     /// analog of [`parse_native`] (`native fn`/`native ctor`). Prelude/std-only (the checker's hoist
-    /// rejects it in a user module); a nested one is already rejected by the depth>1 `Token::Native`
-    /// guard in [`parse_stmt`]. Fields-only for phase 4a: a method sig (`fn`/`test`) or a field
+    /// rejects it in a user module); a nested one is already rejected in [`parse_stmt`], which refuses
+    /// every [`Self::item_keyword`] (`native` included) in a block. Fields-only for phase 4a: a method sig (`fn`/`test`) or a field
     /// `= default` inside the body is a parse error (bodyless native method sigs are a phase-4b
     /// follow-up). Mirrors [`parse_struct`]'s field loop but with no methods/defaults.
     fn parse_native_struct(&mut self) -> PResult<StmtKind> {
@@ -1258,8 +1267,8 @@ impl Parser {
 
     /// `native enum NAME[T…]:` then an INDENT block of body-less variants (optionally followed by
     /// body-less `native fn` methods) — the ENUM-level analog of [`parse_native_struct`]. Prelude/std-
-    /// only (the checker's hoist rejects it in a user module); a nested one is already rejected by the
-    /// depth>1 `Token::Native` guard in [`parse_stmt`]. Reuses [`parse_enum`]'s variant loop (an IDENT
+    /// only (the checker's hoist rejects it in a user module); a nested one is already rejected in
+    /// [`parse_stmt`], which refuses every [`Self::item_keyword`] (`native` included) in a block. Reuses [`parse_enum`]'s variant loop (an IDENT
     /// with an optional `(typeList)` payload) and [`parse_native`]`(true)` for the self-declaring
     /// methods; like `parse_enum`, variants must precede methods, and a plain `fn`/`test` (with a body)
     /// is a parse error. Phase 5b: file-backs the reserved `Option`/`Result` variant shape.
@@ -3861,7 +3870,24 @@ mod tests {
             ("protocol", "protocol P:\n    fn m(self) -> int\n"),
             ("type", "type T = int\n"),
             ("test fn", "test fn t():\n    pass\n"),
+            ("import", "import lib.x\n"),
+            (
+                "extern block",
+                "extern \"libm.so.6\":\n    fn foo() -> int\n",
+            ),
+            ("native declaration", "native fn foo() -> int\n"),
         ];
+        let mut listed: Vec<&str> = lexer::KEYWORDS
+            .iter()
+            .filter_map(|(_, t)| Parser::item_keyword(t).map(|(k, _)| k))
+            .collect();
+        let mut rows: Vec<&str> = kinds.iter().map(|(k, _)| *k).collect();
+        listed.sort_unstable();
+        rows.sort_unstable();
+        assert_eq!(
+            listed, rows,
+            "grid kinds must be exactly Parser::item_keyword's list"
+        );
         // (position name, header lines, indent of the body under the header)
         let positions: &[(&str, &str, usize)] = &[
             ("fn body", "fn f():\n", 4),
@@ -3874,6 +3900,11 @@ mod tests {
             ("spawn", "fn f():\n    spawn:\n", 8),
             ("defer", "fn f():\n    defer:\n", 8),
             ("recover", "fn f():\n    r := recover:\n", 8),
+            (
+                "wait arm",
+                "fn f(ch: Channel[int]):\n    wait:\n        v := ch.recv():\n",
+                12,
+            ),
             ("nested fn body", "fn f():\n    fn g():\n", 8),
             ("top-level if", "if true:\n", 4),
         ];
@@ -3895,7 +3926,15 @@ mod tests {
                     Err(e) if !e.message.contains(&want) => {
                         wrong.push(format!("{kind} @ {pos}: wrong error: {}", e.message))
                     }
-                    Err(_) => {}
+                    Err(e) => {
+                        let at = (header.lines().count() as u32 + 1, *n as u32 + 1);
+                        if (e.span.line, e.span.col) != at {
+                            wrong.push(format!(
+                                "{kind} @ {pos}: error at {}:{}, want {}:{}",
+                                e.span.line, e.span.col, at.0, at.1
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -3958,8 +3997,8 @@ mod tests {
 
     #[test]
     fn native_struct_nested_rejected() {
-        // A `native struct` is TOP-LEVEL-only: nested inside a fn body it is a parse error (the depth>1
-        // `Token::Native` guard fires before dispatch).
+        // A `native struct` is TOP-LEVEL-only: nested inside a fn body it is a parse error (a block
+        // rejects the `native` keyword through `item_keyword` in `parse_stmt`).
         let e = parse_err("fn f():\n    native struct X:\n        a: int\n");
         assert!(
             e.message
@@ -4177,8 +4216,8 @@ mod tests {
 
     #[test]
     fn native_enum_nested_rejected() {
-        // A `native enum` is TOP-LEVEL-only: nested inside a fn body it is a parse error (the depth>1
-        // `Token::Native` guard fires before dispatch).
+        // A `native enum` is TOP-LEVEL-only: nested inside a fn body it is a parse error (a block
+        // rejects the `native` keyword through `item_keyword` in `parse_stmt`).
         let e = parse_err("fn f():\n    native enum X:\n        A\n");
         assert!(
             e.message

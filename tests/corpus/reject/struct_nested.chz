@@ -1,0 +1,5 @@
+# rule: structDecl
+# expect: struct must be a top-level declaration
+fn f():
+    struct S:
+        x: int

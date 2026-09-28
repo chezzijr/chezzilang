@@ -1,0 +1,5 @@
+# rule: enumDecl
+# expect: enum must be a top-level declaration
+fn f():
+    enum E:
+        A

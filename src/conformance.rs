@@ -310,6 +310,7 @@ fn parser_rules_match_fns() {
     // grammar rule -> parser fn
     let rule_to_fn: BTreeMap<&str, &str> = [
         ("module", "parse_module"),
+        ("item", "parse_item"),
         ("stmt", "parse_stmt"),
         ("fnDecl", "parse_fn"),
         ("params", "parse_params"),
