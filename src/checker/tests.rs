@@ -35283,3 +35283,26 @@ fn a_qualified_bound_with_a_three_level_path_is_rejected() {
         Some(2),
     );
 }
+
+// TICKET-175: Python full-path spelling of an imported module, and `import X from std`.
+
+#[test]
+fn std_full_path_checks_clean() {
+    files_ok(&[("main.chz", "import std.math\nprint(std.math.sqrt(9.0))\n")]);
+}
+
+#[test]
+fn import_math_from_std_checks_clean() {
+    files_ok(&[("main.chz", "import math from std\nprint(math.sqrt(9.0))\n")]);
+}
+
+#[test]
+fn pkg_full_path_annotation_checks_clean() {
+    files_ok(&[
+        ("pkg/deep.chz", "struct Point:\n    x: int\n"),
+        (
+            "main.chz",
+            "import pkg.deep\nx: pkg.deep.Point = deep.Point(1)\nprint(x.x)\n",
+        ),
+    ]);
+}
