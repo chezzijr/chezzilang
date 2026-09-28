@@ -1,0 +1,46 @@
+import qualified_protocol_bound_lib as qp
+
+fn make[T: qp.QpbFactory](sample: T) -> T:
+    return T.default()
+
+fn make_where[T](sample: T) -> T where T: qp.QpbFactory:
+    return T.default()
+
+fn make_tagged[T: qp.QpbFactory + qp.QpbTagged](sample: T) -> str:
+    return T.default().tag()
+
+fn unbox[B: qp.QpbBox[int]](b: B) -> int:
+    return b.get() + 1
+
+fn make_alias[T: qp.QpbMaker](sample: T) -> T:
+    return T.default()
+
+protocol LocalTagged:
+    qp.QpbTagged
+
+fn show_local[T: LocalTagged](x: T) -> str:
+    return x.tag()
+
+fn show_value(x: qp.QpbTagged) -> str:
+    return x.tag()
+
+test fn qualified_bound_dispatches_static_witness():
+    assert make(qp.QpbPoint(7)).x == 0
+
+test fn qualified_where_bound_dispatches_static_witness():
+    assert make_where(qp.QpbItem(9)).n == 5
+
+test fn qualified_multi_bound_dispatches_both_protocols():
+    assert make_tagged(qp.QpbItem(9)) == "item5"
+
+test fn qualified_parameterized_bound_carries_its_argument():
+    assert unbox(qp.QpbItem(3)) == 4
+
+test fn qualified_protocol_alias_bound_dispatches_static_witness():
+    assert make_alias(qp.QpbItem(1)).n == 5
+
+test fn qualified_protocol_embed_resolves():
+    assert show_local(qp.QpbItem(2)) == "item2"
+
+test fn a_qualified_protocol_value_annotation_is_unchanged():
+    assert show_value(qp.QpbItem(4)) == "item4"

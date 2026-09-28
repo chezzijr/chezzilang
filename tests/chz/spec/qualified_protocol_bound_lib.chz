@@ -1,0 +1,28 @@
+protocol QpbFactory:
+    fn default() -> Self
+
+struct QpbPoint:
+    x: int
+
+    fn default() -> QpbPoint:
+        return QpbPoint(0)
+
+protocol QpbTagged:
+    fn tag(self) -> str
+
+protocol QpbBox[T]:
+    fn get(self) -> T
+
+type QpbMaker = QpbFactory
+
+struct QpbItem:
+    n: int
+
+    fn default() -> QpbItem:
+        return QpbItem(5)
+
+    fn tag(self) -> str:
+        return "item{self.n}"
+
+    fn get(self) -> int:
+        return self.n

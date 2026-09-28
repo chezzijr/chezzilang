@@ -4816,6 +4816,28 @@ impl Checker {
         let mut seen_iterator = false;
         for b in bounds {
             let Some(arity) = self.protocol_shape(&b.name).map(|p| p.type_params.len()) else {
+                // A module-qualified bound (TICKET-173) that misses: a 3+ segment path gets the
+                // parser's two-level hint, and an unimported module reuses the qualified
+                // annotation's text (`src/checker/sig.rs`, `Type::Qualified`).
+                if !b.name.contains("::")
+                    && let Some((module, member)) = b.name.split_once('.')
+                {
+                    if let Some((prefix, last)) = b.name.rsplit_once('.')
+                        && let Some((prefix, mid)) = prefix.rsplit_once('.')
+                    {
+                        self.error(span, crate::parser::two_level_path_hint(prefix, mid, last));
+                        continue;
+                    }
+                    if !self.imported_modules.contains_key(module) {
+                        self.error(
+                            span,
+                            format!(
+                                "unknown module '{module}' (import it to use `{module}.{member}`)"
+                            ),
+                        );
+                        continue;
+                    }
+                }
                 // A protocol alias that APPLIES TYPE ARGUMENTS (`type IntBag = Bag[int]`) cannot name
                 // a bound: there is no substitution seam to carry `int` into `T`'s bound. Diagnose
                 // this shape by name rather than falling through to the generic "unknown protocol".

@@ -2440,11 +2440,7 @@ impl Parser {
                     Token::Ident(s) => s.clone(),
                     _ => "Type".to_string(),
                 };
-                return Err(self.err(format!(
-                    "Chezzi uses two-level type paths — write `{member}.{third}` (the imported \
-                     module's bound name) or alias with `import {name}.{member} as {member}` then \
-                     `{member}.{third}`; multi-level paths like `{name}.{member}.{third}` are not supported"
-                )));
+                return Err(self.err(two_level_path_hint(&name, &member, &third)));
             }
             let ty = Type::Qualified {
                 module: name,
@@ -3291,6 +3287,16 @@ impl Parser {
 /// definition (its yields are its own) nor into closure expressions (a closure is an expression,
 /// so it is never reached by this statement-only walk — a `yield` inside one stays invisible here
 /// and is later flagged by the checker as "yield outside a generator").
+/// The targeted hint for a multi-level type path `{prefix}.{member}.{last}`: Chezzi type paths are
+/// two-level (`module.Type`). Shared by the type parser and the checker's bound check (TICKET-173).
+pub(crate) fn two_level_path_hint(prefix: &str, member: &str, last: &str) -> String {
+    format!(
+        "Chezzi uses two-level type paths — write `{member}.{last}` (the imported \
+         module's bound name) or alias with `import {prefix}.{member} as {member}` then \
+         `{member}.{last}`; multi-level paths like `{prefix}.{member}.{last}` are not supported"
+    )
+}
+
 fn body_contains_yield(block: &Block) -> bool {
     block.iter().any(stmt_contains_yield)
 }

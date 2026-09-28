@@ -390,8 +390,12 @@ impl Checker {
     /// The runtime key for a protocol name: unchanged (bare) for a [`RESERVED_PROTOCOLS`] member,
     /// else [`Checker::bare_key`] (mirrors the struct/enum treatment, TICKET-027). Falls back to
     /// [`Checker::protocol_alias_key`] ONLY when `name` misses as a protocol directly — alias-first
-    /// could send another module's bare protocol key to a same-named LOCAL alias.
+    /// could send another module's bare protocol key to a same-named LOCAL alias. A module-qualified
+    /// spelling `alias.Name` resolves first, through [`Checker::qualified_protocol_key`] (TICKET-173).
     pub(super) fn protocol_key(&self, name: &str) -> String {
+        if let Some(key) = self.qualified_protocol_key(name) {
+            return key;
+        }
         let key = if is_reserved_protocol(name) {
             name.to_string()
         } else {
@@ -401,6 +405,31 @@ impl Checker {
             return key;
         }
         self.protocol_alias_key(name).unwrap_or(key)
+    }
+
+    /// The protocol key a module-qualified bound spelling `alias.Name` names through a whole-module
+    /// import (TICKET-173) — the `import m as alias` twin of [`Checker::protocol_alias_key`]'s
+    /// imported arm. `Name` is a protocol in the module's `ModuleSig`, or a no-argument alias of one
+    /// there. `None` for a bare name, a 3+ segment path, an unimported `alias`, or any other member.
+    /// A name containing `::` is skipped: it is already an identity key, and a module label may itself
+    /// contain dots (`a.b::P`), so splitting it at `.` would read the wrong module.
+    pub(super) fn qualified_protocol_key(&self, name: &str) -> Option<String> {
+        if name.contains("::") {
+            return None;
+        }
+        let (module, member) = name.split_once('.')?;
+        if member.contains('.') {
+            return None;
+        }
+        let mid = self.imported_modules.get(module)?;
+        let sig = self.module_sigs.get(mid)?;
+        if sig.protocol_defs.contains_key(member) {
+            return Some(self.type_key(mid, member));
+        }
+        match sig.type_aliases.get(member).map(|a| &a.body) {
+            Some(Ty::Protocol(key, args)) if args.is_empty() => Some(key.clone()),
+            _ => None,
+        }
     }
 
     /// The identity key of the protocol a type alias `name` ultimately names, TICKET-108 (W12-16c) —

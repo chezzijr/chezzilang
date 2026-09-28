@@ -35197,3 +35197,89 @@ fn a_qualified_bound_checks_through_a_whole_module_import() {
     let msgs: Vec<&str> = errs.iter().map(|e| e.message.as_str()).collect();
     assert!(errs.is_empty(), "expected no errors, got {msgs:?}");
 }
+
+/// Check `src` as `main.chz` beside `QPB_LIB` and assert some error contains every needle — and,
+/// when `line` is given, sits on that line (TICKET-173's qualified-bound diagnostics).
+fn assert_qpb_error(src: &str, needles: &[&str], line: Option<u32>) {
+    let errs = check_files(&[("lib.chz", QPB_LIB), ("main.chz", src)]);
+    let msgs: Vec<String> = errs
+        .iter()
+        .map(|e| format!("{} @{}", e.message, e.span.line))
+        .collect();
+    assert!(
+        errs.iter()
+            .any(|e| needles.iter().all(|n| e.message.contains(n))
+                && line.is_none_or(|l| e.span.line == l)),
+        "expected an error containing {needles:?} on line {line:?}, got {msgs:?}"
+    );
+}
+
+#[test]
+fn a_qualified_bound_through_an_unimported_module_is_refused() {
+    assert_qpb_error(
+        "import lib as qp\nfn make[T: zz.QpbFactory](s: T) -> T:\n    return s\n",
+        &["unknown module 'zz' (import it to use `zz.QpbFactory`)"],
+        Some(2),
+    );
+}
+
+#[test]
+fn a_qualified_bound_in_a_where_clause_through_an_unimported_module_is_refused() {
+    assert_qpb_error(
+        "import lib as qp\nfn make[T](s: T) -> T where T: zz.QpbFactory:\n    return s\n",
+        &["unknown module 'zz' (import it to use `zz.QpbFactory`)"],
+        Some(2),
+    );
+}
+
+#[test]
+fn a_qualified_bound_naming_a_missing_member_is_refused() {
+    assert_qpb_error(
+        "import lib as qp\nfn make[T: qp.Nope](s: T) -> T:\n    return s\n",
+        &["unknown protocol 'qp.Nope' in bound on 'T'"],
+        Some(2),
+    );
+}
+
+#[test]
+fn a_qualified_bound_naming_a_struct_is_refused() {
+    assert_qpb_error(
+        "import lib as qp\nfn make[T: qp.QpbPoint](s: T) -> T:\n    return s\n",
+        &["unknown protocol 'qp.QpbPoint' in bound on 'T'"],
+        Some(2),
+    );
+}
+
+#[test]
+fn a_qualified_bound_is_enforced_at_the_call_site() {
+    assert_qpb_error(
+        "import lib as qp\nfn make[T: qp.QpbFactory](s: T) -> T:\n    return T.default()\nprint(make(5))\n",
+        &[
+            "type int does not satisfy",
+            "QpbFactory (missing method 'default')",
+        ],
+        None,
+    );
+}
+
+#[test]
+fn a_qualified_bound_on_a_bare_protocol_rejects_type_arguments() {
+    assert_qpb_error(
+        "import lib as qp\nfn f[T: qp.QpbTagged[int]](s: T) -> int:\n    return 1\n",
+        &["protocol 'qp.QpbTagged' takes no type arguments"],
+        Some(2),
+    );
+}
+
+#[test]
+fn a_qualified_bound_with_a_three_level_path_is_rejected() {
+    // The parser accepts any dotted bound path; the checker keeps bounds two-level (TICKET-173).
+    assert_qpb_error(
+        "import lib as qp\nfn make[T: qp.x.QpbFactory](s: T) -> T:\n    return s\n",
+        &[
+            "two-level",
+            "multi-level paths like `qp.x.QpbFactory` are not supported",
+        ],
+        Some(2),
+    );
+}
