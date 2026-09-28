@@ -35539,3 +35539,16 @@ fn full_path_longest_imported_prefix_wins() {
         ),
     ]);
 }
+
+#[test]
+fn full_path_head_shadowed_by_a_wait_recv_bind_reads_the_field() {
+    // A `wait` recv arm binds `pkg` in the arm scope: `pkg.deep.x` reads the received struct's
+    // field, not module `pkg.deep` (owner rule 5).
+    files_ok(&[
+        ("pkg/deep.chz", FP_DEEP),
+        (
+            "main.chz",
+            "import pkg.deep\nstruct Inner:\n    x: int\nstruct Conf:\n    deep: Inner\nch: Channel[Conf] = Channel(1)\nch.send(Conf(Inner(9)))\nwait:\n    pkg := ch.recv(): print(pkg.deep.x)\n",
+        ),
+    ]);
+}

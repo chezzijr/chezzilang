@@ -2259,16 +2259,23 @@ impl Walker<'_> {
             },
             StmtKind::Wait { arms, else_block } => {
                 for arm in arms {
+                    // The arm body is its own scope; a `v := ch.recv()` bind lives in it.
+                    self.push_scope();
                     match &mut arm.kind {
                         WaitArmKind::Recv { target, chan } => {
                             self.walk_expr(chan)?;
-                            if let WaitTarget::Assign(e) = target {
-                                self.walk_expr(e)?;
+                            match target {
+                                WaitTarget::Assign(e) => self.walk_expr(e)?,
+                                WaitTarget::Bind(name) => self.bind(name),
+                                WaitTarget::Discard => {}
                             }
                         }
                         WaitArmKind::Send { call } => self.walk_expr(call)?,
                     }
-                    self.walk_block(&mut arm.body)?;
+                    for s in arm.body.iter_mut() {
+                        self.walk_stmt(s)?;
+                    }
+                    self.pop_scope();
                 }
                 if let Some(b) = else_block {
                     self.walk_block(b)?;
@@ -3416,7 +3423,6 @@ pub fn lower_carrier_try(expr: &mut Expr) {
     };
 }
 
-/// A bare identifier expression at `span`.
 /// A module's top-level names that hide a full module path's head (TICKET-175): `let`, `fn` and
 /// extern fn names, type declarations, every `from` bind, and every whole-module bind except two.
 /// An un-aliased one-segment `import pkg` does not hide `pkg.deep` (it is the same package head),
@@ -3466,6 +3472,7 @@ fn module_level_names(
     out
 }
 
+/// A bare identifier expression at `span`.
 fn ident_expr(name: &str, span: Span) -> Expr {
     Expr {
         kind: ExprKind::Ident(name.to_string()),

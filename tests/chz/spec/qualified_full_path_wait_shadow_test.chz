@@ -1,0 +1,19 @@
+# TICKET-175: a `wait` recv bind named like an import head hides the full path in its arm.
+# Gated by chz_suite_passes (tests/chz_suite.rs).
+
+import qualified_path_pkg.deep
+
+struct Inner:
+    limit: int
+
+struct Conf:
+    deep: Inner
+
+test fn wait_recv_bind_hides_the_full_path():
+    ch: Channel[Conf] = Channel(1)
+    ch.send(Conf(Inner(9)))
+    got := 0
+    wait:
+        qualified_path_pkg := ch.recv(): got = qualified_path_pkg.deep.limit
+    assert got == 9, "got: {got}"
+    assert qualified_path_pkg.deep.limit == 3
