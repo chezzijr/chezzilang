@@ -1339,7 +1339,7 @@ impl Checker {
             // (CPython agrees), so rejecting them would have been a lie about "provably disjoint".
             (Int, Float) | (Float, Int) | (Bytes, ByteArray) | (ByteArray, Bytes) => true,
             // The native generic HANDLES belong here too, not on the `_ => compatible` fall-through:
-            // their `==` is the identity shortcut (`ha == hb`) at the top of `values_equal_guarded`,
+            // their `==` compares cores (`Obj::identity`, TICKET-177) in `values_equal_guarded`,
             // so `Channel[T] == Channel[int]` is a live, true-capable comparison. `compatible` is
             // neither `Param`-tolerant nor conformance-aware, so leaving them there wrong-rejected
             // working code (`fn cmp[T](a: Channel[T], b: Channel[int])`).
@@ -3302,7 +3302,7 @@ impl Checker {
     /// round trip, so `cas` on it keeps working. TICKET-144 (W14-24): `Atomic.cas` on a payload
     /// holding a closure can never succeed — every `load()` builds a fresh copy and closures compare by
     /// identity. `Param`/`Protocol` payloads hide the fn from this walk; the runtime `cas` backstops
-    /// them (`WireValue::holds_fn`).
+    /// them (`Vm::slot_identity_in`).
     pub(super) fn reaches_func(&self, ty: &Ty, stack: &mut Vec<String>) -> Option<String> {
         let any = |s: &Self, ts: &[Ty], stack: &mut Vec<String>| -> Option<String> {
             ts.iter().find_map(|t| s.reaches_func(t, stack))

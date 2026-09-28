@@ -2130,14 +2130,12 @@ fn wire_shares_core_across_a_fresh_handle() {
         let w = vm.to_wire(v).expect("core handle should serialize");
         let wired = vm.from_wire(w);
         assert_ne!(wired, v, "a crossed core gets a fresh handle (new GcRef)");
-        // Same underlying core: an `Arc::ptr_eq` between the two handles' cores.
-        let same = match (vm.heap.get(h), vm.heap.get(wired.as_obj().unwrap())) {
-            (Obj::Channel(a), Obj::Channel(b)) => Arc::ptr_eq(a, b),
-            (Obj::Shared(a), Obj::Shared(b)) => Arc::ptr_eq(a, b),
-            (Obj::RwShared(a), Obj::RwShared(b)) => Arc::ptr_eq(a, b),
-            (Obj::Executor(a), Obj::Executor(b)) => Arc::ptr_eq(a, b),
-            _ => false,
-        };
+        // Same underlying core: both handles carry the same `Obj::identity` core key.
+        let (a, b) = (
+            vm.heap.get(h).identity(),
+            vm.heap.get(wired.as_obj().unwrap()).identity(),
+        );
+        let same = matches!(a, Identity::Core(_)) && a == b;
         assert!(same, "the fresh handle must point at the SAME shared core");
     }
 }

@@ -2545,10 +2545,6 @@ impl Vm {
                         let (ia, ib) = (*ia, *ib);
                         self.elem_equal(ia, ib, depth + 1, span)
                     }
-                    // Two opaque `ptr` handles are equal iff they hold the same raw address (identity).
-                    // Distinct heap slots can wrap the same address (e.g. a re-`from_wire`'d handle or
-                    // `std.ffi.null()` twice), so the same-`GcRef` shortcut above is not enough.
-                    (Obj::Ptr(a), Obj::Ptr(b)) => Ok(a == b),
                     // Two first-class builtin-fn values are equal iff they name the SAME builtin. Each
                     // value-position use emits a fresh `Op::LoadBuiltin` → a distinct handle, so the
                     // `ha == hb` identity short-circuit above never fires; compare by name instead
@@ -2557,11 +2553,40 @@ impl Vm {
                     // Boxed scalars compare by value, identically to the inline `Int`/`Float` arms.
                     (Obj::BigInt(a), Obj::BigInt(b)) => Ok(a == b),
                     (Obj::FloatBox(a), Obj::FloatBox(b)) => Ok(a == b),
-                    _ => Ok(false),
+                    // TICKET-177: a handle (or a `ptr`) is equal iff it names the same core, its
+                    // `Obj::identity` key. A crossing wraps the same core in a fresh slot, so the
+                    // `ha == hb` shortcut above is only the fast path. Anything else reaching here is
+                    // a kind mismatch or a `Slot` object in another slot: unequal.
+                    (a, b) => Ok(matches!(
+                        (a.identity(), b.identity()),
+                        (Identity::Core(x), Identity::Core(y)) if x == y
+                    )),
                 }
             }
             _ => Ok(false),
         }
+    }
+
+    /// The kind of the first heap object reachable from `v` whose `==` is slot identity
+    /// ([`Identity::Slot`]), or `None`. `Atomic.cas` refuses such a payload: every `load()`
+    /// rebuilds that object in a fresh slot, so the compare could never succeed and a CAS retry
+    /// loop would spin forever (TICKET-144, DEC-144). Reads the same [`Obj::identity`] the
+    /// equality arm does. A `Core` handle is not descended: it compares by core, never by what the
+    /// core holds. `seen` makes a cyclic payload terminate.
+    pub(super) fn slot_identity_in(&self, v: Value) -> Option<&'static str> {
+        let mut stack: Vec<GcRef> = v.child_gcref().into_iter().collect();
+        let mut seen = super::fxhash::FxHashSet::default();
+        while let Some(h) = stack.pop() {
+            if !seen.insert(h) {
+                continue;
+            }
+            match self.heap.get(h).identity() {
+                Identity::Slot(what) => return Some(what),
+                Identity::Core(_) => {}
+                Identity::Content => stack.extend(self.heap.children(h)),
+            }
+        }
+        None
     }
 
     /// Total order over scalar values for `sort()`. The checker restricts `sort` to homogeneous

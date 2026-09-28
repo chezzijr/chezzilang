@@ -23,7 +23,7 @@ use core::{
     GUARD_DEMOTE_BUDGET, GuardCycle, ListenerCore, ReaderCore, RwSharedCore, SharedCore,
     SocketCore, WriterCore, acquire_update_guard_within, guard_wait_satisfiable,
 };
-use heap::{Fields, Heap, MapData, ModuleData, Obj, SetData};
+use heap::{Fields, Heap, Identity, MapData, ModuleData, Obj, SetData};
 use op::{CapEntry, CapSrc, NO_IC, Op, Program, ProtoId, TID_NONE, WaitMeta};
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};

@@ -432,6 +432,70 @@ pub enum Obj {
     Generator(Box<super::GeneratorCore>),
 }
 
+/// How `==` decides whether two heap objects are the same value — the ONE classification of
+/// identity (TICKET-177, wave 16 Family 5). `Vm::values_equal_guarded` compares `Core` keys and
+/// `Vm::slot_identity_in` (the `Atomic.cas` refusal) looks for `Slot`. The match below is
+/// exhaustive with no `_` arm, so a new `Obj` variant must pick an answer before the crate builds.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Identity {
+    /// Compared by content (`values_equal_guarded`'s structural arms). A crossing copies the
+    /// content, so equality survives it.
+    Content,
+    /// A handle to a core outside every heap (`Arc`), or a raw C address (`ptr`). Every crossing
+    /// wraps the SAME core in a fresh slot, so this key — not the slot — is the handle's identity.
+    Core(CoreKey),
+    /// Equal only to its own heap slot. A crossing (or an `Atomic` store) re-materializes it in a
+    /// fresh slot, so equality does not survive one. The `str` names the kind for a diagnostic.
+    Slot(&'static str),
+}
+
+/// A handle's identity: its variant plus the core's address. The variant keeps a raw `ptr`
+/// address from ever equalling some core's `Arc` address.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CoreKey(std::mem::Discriminant<Obj>, usize);
+
+impl Obj {
+    pub fn identity(&self) -> Identity {
+        let core = |addr: usize| Identity::Core(CoreKey(std::mem::discriminant(self), addr));
+        match self {
+            Obj::Str(_)
+            | Obj::Bytes(_)
+            | Obj::ByteArray(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::List(_)
+            | Obj::Tuple(_)
+            | Obj::Map(_)
+            | Obj::Set(_)
+            | Obj::Struct { .. }
+            | Obj::Enum { .. }
+            | Obj::NewType { .. } => Identity::Content,
+            // A global builtin fn value is carried by NAME and compares by name — a value, no core.
+            Obj::Builtin(_) => Identity::Content,
+            Obj::Channel(c) => core(Arc::as_ptr(c) as usize),
+            Obj::Shared(c) => core(Arc::as_ptr(c) as usize),
+            Obj::RwShared(c) => core(Arc::as_ptr(c) as usize),
+            Obj::Atomic(c) => core(Arc::as_ptr(c) as usize),
+            Obj::AtomicInt(c) => core(Arc::as_ptr(c) as usize),
+            Obj::Executor(c) => core(Arc::as_ptr(c) as usize),
+            Obj::Socket(c) => core(Arc::as_ptr(c) as usize),
+            Obj::Listener(c) => core(Arc::as_ptr(c) as usize),
+            Obj::Writer(c) => core(Arc::as_ptr(c) as usize),
+            Obj::Reader(c) => core(Arc::as_ptr(c) as usize),
+            // Two `ptr` handles are the same iff they hold the same address; `std.ffi.null()` twice,
+            // or a `ptr` that crossed, is a distinct slot around one address.
+            Obj::Ptr(addr) => core(*addr),
+            Obj::Func { .. } | Obj::Closure { .. } | Obj::Native { .. } | Obj::Cffi(_) => {
+                Identity::Slot("a function value")
+            }
+            Obj::Iter { .. } => Identity::Slot("an iterator"),
+            Obj::Generator(_) => Identity::Slot("a generator"),
+            Obj::Module(_) => Identity::Slot("a module"),
+            Obj::Cell(_) => Identity::Slot("a captured cell"),
+        }
+    }
+}
+
 /// One heap slot: the object, or a hole for swept/free slots. Exactly 64B (`Option<Obj>` niche-packs
 /// `None` free). The GC mark bit is NOT here — it lives in [`Heap::marks`], a dense parallel bitset,
 /// so the `mark:bool` no longer pads the slot from 64B to 72B (the memory win). (Sweep still scans

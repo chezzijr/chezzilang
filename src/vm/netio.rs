@@ -3977,20 +3977,18 @@ impl Vm {
                 // `values_equal` borrow `self`, not the guard (which borrows the cloned `Arc`), so the
                 // lock can stay held while they run.
                 let mut g = core.v.lock().unwrap();
-                // TICKET-144 (W14-24): a payload holding a `fn` value can never compare equal — every
-                // `load()` rebuilds a fresh closure and closures compare by identity — so answering
-                // `false` would spin the standard CAS retry loop forever. The checker rejects the
-                // visible spellings; this catches one hidden behind a type param / protocol. Go's
-                // `atomic.Value.CompareAndSwap` panics `comparing uncomparable type` on the same shape.
-                // (`g` drops on the early return, leaving the box unchanged.)
-                if g.holds_fn() {
+                let cur = self.from_wire(g.clone());
+                // TICKET-144 / TICKET-177: a payload whose `==` is slot identity (a fn value, an
+                // iterator) can never compare equal to a fresh `load()`, so `false` would spin the CAS
+                // retry loop forever — Go's `atomic.Value.CompareAndSwap` panics on the same shape.
+                // `Obj::identity` is the one classification; a handle payload compares by core and is
+                // accepted. (`g` drops on the early return, leaving the box unchanged.)
+                if let Some(what) = self.slot_identity_in(cur) {
                     return Err(self.err(
-                        "Atomic.cas: the payload holds a function value, which cas cannot compare"
-                            .to_string(),
+                        format!("Atomic.cas: the payload holds {what}, which cas cannot compare"),
                         span,
                     ));
                 }
-                let cur = self.from_wire(g.clone());
                 // Propagate a cyclic-operand depth fault (`?`) instead of swallowing it — consistent
                 // with `==` and every container membership site. The `?` runs BEFORE the store, so a
                 // fault leaves the box unchanged (the lock guard `g` drops on the early return).

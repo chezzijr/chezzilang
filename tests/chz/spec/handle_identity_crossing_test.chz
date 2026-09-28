@@ -161,6 +161,14 @@ test fn atomic_cas_refuses_every_payload_whose_equality_does_not_survive_the_sto
         bad.push("builtin-fn-accepted")
     assert bad.len() == 0, " ".join(bad)
 
+# The refusal walk descends into content: a fn inside a list is still refused.
+test fn atomic_cas_refuses_a_function_value_nested_in_content():
+    k := 3
+    closure := fn() -> int: k
+    xs := [closure]
+    r := recover: cas_self(Atomic(xs), xs)
+    assert refused(r, "a function value")
+
 fn a_listener() -> Listener:
     match net.listen("127.0.0.1:0"):
         Ok(l):
