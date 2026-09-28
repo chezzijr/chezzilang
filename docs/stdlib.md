@@ -539,6 +539,10 @@ works. Details and the residual cases in `docs/gaps.md` (`W7-12r / W7-15`) and `
   - `close()` from another task wakes a task parked in `accept`/`read`/`read_bytes`/`write`/`write_bytes`
     on the same handle; that call returns `Err("<op> on a closed listener|socket")` (Go's `Close`
     cancelling a blocked `Accept`/`Read`).
+  - `write`/`write_bytes` return `Ok(len)` only after every byte is sent (Go's `Conn.Write`); if the
+    socket is closed, the `timeout_ms` deadline passes, or the OS reports an error first, the call
+    returns `Err` and the bytes already sent are not reported. `write(s, 0)` returns `Err("timeout")`
+    unless the whole payload fits at once.
   - **Binary payloads: use `read_bytes` / `write_bytes`.** They never decode, so any payload survives
     byte-exactly. Contract differences from the `str` `read`: `read_bytes(n)` returns **at most `n`**
     bytes (`read(n)`'s `n` bounds only the NEW fd bytes, so it can return up to `n + 3`); `Ok(b"")` is

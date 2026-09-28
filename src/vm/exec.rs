@@ -146,6 +146,7 @@ impl Vm {
             poll_timed_out: false,
             poll_deadline: None,
             poll_partial: None,
+            poll_written: None,
             native_reentry: 0,
             guard_token: {
                 static GUARD_TOKENS: std::sync::atomic::AtomicU64 =
@@ -300,6 +301,7 @@ impl Vm {
             // N3(a) — the taken-partial flag is set BEFORE the park and consulted at the re-entry, so
             // it must travel with the fiber exactly like `poll_deadline`.
             std::mem::swap(&mut self.poll_partial, &mut ctx.poll_partial);
+            std::mem::swap(&mut self.poll_written, &mut ctx.poll_written);
         }
     }
 

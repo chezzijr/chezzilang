@@ -189,6 +189,25 @@ fn deadline_gap_wake(
     sched.close_wake(key, core);
 }
 
+/// W15-3 — non-blocking write-all: push `data[*sent..]` until every byte is accepted, advancing
+/// `*sent` per `write(2)`. `Ok(())` once `*sent == data.len()`; a `WouldBlock` (or any other error)
+/// returns with `*sent` holding the bytes already sent, so the caller can park and resume there.
+fn write_from(
+    stream: &mut std::net::TcpStream,
+    data: &[u8],
+    sent: &mut usize,
+) -> std::io::Result<()> {
+    while *sent < data.len() {
+        match std::io::Write::write(stream, &data[*sent..]) {
+            Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+            Ok(n) => *sent += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
 /// B1 — the outcome of decoding one socket chunk (+ the socket's carried tail) as UTF-8.
 pub(super) enum Decoded {
     /// A complete, valid `str` (possibly empty — the EOF sentinel).
@@ -406,6 +425,7 @@ impl Vm {
         if self.poll_park.is_none() {
             self.poll_deadline = None;
             self.poll_partial = None;
+            self.poll_written = None;
         }
     }
 
@@ -1091,6 +1111,11 @@ impl Vm {
     /// rewinds `ip` and re-executes the op, so an un-latched `now + timeout_ms` would re-arm on every
     /// re-park and never expire. Extracted from `socket_method` so the `drop_poll_latch` clear on
     /// completion has ONE seam catching every early return (closed socket, poll-once, would-block).
+    ///
+    /// W15-3 — WRITE-ALL, like Go's `Conn.Write`: `Ok(len)` only once every byte is sent. A full
+    /// buffer parks (or demote-polls) and resumes at the offset latched in [`Vm::poll_written`];
+    /// any early stop — closed socket, deadline, poll-once `write(s, 0)`, OS error — is `Err`, and
+    /// the bytes already sent are not reported.
     fn socket_write(
         &mut self,
         h: GcRef,
@@ -1121,23 +1146,27 @@ impl Vm {
         let deadline = timeout
             .filter(|t| !t.poll_once)
             .map(|t| *self.poll_deadline.get_or_insert(t.deadline));
+        // W15-3 — the bytes already sent, latched on the fiber so a park's ip-rewind re-run resumes
+        // at that offset instead of resending from byte 0.
+        let mut sent = self.poll_written.unwrap_or(0).min(data.len());
         let core = self.socket_core(h);
         let attempt = {
             let mut guard = core.stream.lock().unwrap();
             let Some(stream) = guard.as_mut() else {
                 return Ok(self.sock_err("write on a closed socket"));
             };
-            match std::io::Write::write(stream, &data) {
-                Ok(got) => Ok(got),
+            match write_from(stream, &data, &mut sent) {
+                Ok(()) => Ok(()),
                 Err(e) => Err((e, stream.as_raw_fd())),
             }
         };
         match attempt {
-            Ok(got) => Ok(self.sock_ok(Value::int(got as i64))),
+            Ok(()) => Ok(self.sock_ok(Value::int(data.len() as i64))),
             Err((e, fd)) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 if timeout.is_some_and(|t| t.poll_once) {
                     return Ok(self.sock_err("timeout"));
                 }
+                self.poll_written = Some(sent);
                 let target = PollPark {
                     key: core.key,
                     fd,
@@ -1160,16 +1189,17 @@ impl Vm {
                     ));
                 }
                 let core = Arc::clone(&core);
+                let mut sent = sent;
                 self.demote_block_socket(fd, poller::Interest::Write, deadline, span, move |vm| {
                     let r = {
                         let mut guard = core.stream.lock().unwrap_or_else(|e| e.into_inner());
                         let Some(stream) = guard.as_mut() else {
                             return SockPoll::Ready(Ok(vm.sock_err("write on a closed socket")));
                         };
-                        std::io::Write::write(stream, &data)
+                        write_from(stream, &data, &mut sent)
                     };
                     match r {
-                        Ok(got) => SockPoll::Ready(Ok(vm.sock_ok(Value::int(got as i64)))),
+                        Ok(()) => SockPoll::Ready(Ok(vm.sock_ok(Value::int(data.len() as i64)))),
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                             SockPoll::WouldBlock
                         }

@@ -5,7 +5,7 @@
 # existing Err variant with message "timeout" (the return type is unchanged):
 #
 #   conn.read(n, timeout_ms)     -> str!     # Err("timeout") if no data within timeout_ms
-#   sock.write(s, timeout_ms)    -> int!     # Err("timeout") if not writable within timeout_ms
+#   sock.write(s, timeout_ms)    -> int!     # Ok(len) once every byte is sent; Err("timeout") if not done within timeout_ms
 #   server.accept(timeout_ms)    -> Socket!  # Err("timeout") if no connection within timeout_ms
 #
 # The timeout bounds the wait whether the op parks a fiber (a `spawn`/`parallel:` fiber) or blocks its

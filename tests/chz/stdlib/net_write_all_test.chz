@@ -46,6 +46,28 @@ fn write_all_case(op: str, timeout_ms: int) -> Result[str]:
     ln.close()
     return Ok("{out.recv()} read {got.recv()}")
 
+fn after_a_timed_out_write() -> Result[str]:
+    ln := net.listen("127.0.0.1:0")?
+    stuck := net.connect(ln.addr()?)?
+    stuck_peer := ln.accept()?
+    c := net.connect(ln.addr()?)?
+    peer := ln.accept()?
+    first := count_text(stuck.write("x".repeat(16777216), 200))
+    second := count_text(c.write("hello"))
+    c.close()
+    got := peer.read(5) ?? "read failed"
+    stuck.close()
+    stuck_peer.close()
+    peer.close()
+    ln.close()
+    return Ok("{first} / {second} / {got}")
+
+# A timed-out write leaves its sent offset behind only if `drop_poll_latch` forgets it; the next
+# write on the same task would then skip that many bytes and report Ok without sending them.
+test fn a_write_after_a_timed_out_write_sends_every_byte():
+    msg := after_a_timed_out_write() ?? "setup failed"
+    assert msg == "timeout / Ok 5 / hello", msg
+
 test fn a_large_write_returns_ok_only_after_every_byte_is_sent():
     for op in ["write", "write_bytes"]:
         for t in [0, 60000]:

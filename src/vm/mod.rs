@@ -1077,6 +1077,9 @@ pub struct Vm {
     /// stale `Some` would make the NEXT read's timeout wrongly say "incomplete". Only str `read` sets
     /// it; `read_bytes`/`write`/`accept` never do. `None` = no partial taken.
     poll_partial: Option<usize>,
+    /// W15-3 — bytes of the in-flight `write` already sent; survives a park's ip-rewind re-run,
+    /// cleared by `drop_poll_latch`.
+    poll_written: Option<usize>,
     /// Depth of native (Rust) callbacks currently on the host stack that re-enter Chezzi (operator
     /// overloads, `compare`/`hash`/`str` hooks, list HOFs, sorts, `Shared.update`, the executor
     /// drain, deferred calls). Their loop / recursion state lives on the Rust stack and cannot be
@@ -1596,6 +1599,9 @@ struct FiberCtx {
     /// `incomplete utf-8` rather than `timeout`. Cleared when the read returns. `None` = no partial.
     /// M:N-only.
     poll_partial: Option<usize>,
+    /// W15-3 — bytes of the in-flight `write` already sent; survives a park's ip-rewind re-run,
+    /// cleared by `drop_poll_latch`.
+    poll_written: Option<usize>,
 }
 
 /// Scheduling state of a fiber on the M:N scheduler.

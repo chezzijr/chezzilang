@@ -4646,9 +4646,8 @@ main()
 /// `write` finds it full, parks on writability, and its deadline fires → `Err("timeout")`. This also
 /// exercises the new `poll_deadline` LATCH + `drop_poll_latch` clear on the write path (N2): the
 /// deadline is registered through the same fiber latch as `read`, and cleared on completion so the
-/// following op gets a fresh budget. (A `write` is architecturally single-park — it returns `Ok(got)`
-/// after the first partial write — so the multi-park re-arm the latch guards against is only reachable
-/// on a spurious `EPOLLOUT` wake, not deterministically; this test pins the ordinary timeout path.)
+/// following op gets a fresh budget. (A `write` sends every byte before `Ok` (W15-3), so a buffer-full
+/// write parks and re-parks until its deadline; this test pins the ordinary timeout path.)
 #[test]
 fn net_write_timeout_when_buffer_full() {
     let src = "\
