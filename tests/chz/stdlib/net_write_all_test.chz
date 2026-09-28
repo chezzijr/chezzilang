@@ -1,0 +1,53 @@
+import std.net
+
+# W15-3 (TICKET-176): `write`/`write_bytes` return `Ok(n)` only once every byte is sent -- Go's
+# `Conn.Write`. The payload is larger than the kernel buffers, so the writer parks for room while
+# the sibling drains it; the writer closes its end so the drain sees EOF.
+
+fn count_text(r: Result[int]) -> str:
+    match r:
+        Ok(n): return "Ok {n}"
+        Err(e): return e.message()
+
+fn drain(peer: Socket) -> int:
+    total := 0
+    while true:
+        match peer.read_bytes(65536):
+            Ok(b):
+                if b.len() == 0:
+                    return total
+                total += b.len()
+            Err(_): return total
+    return total
+
+fn write_all_case(op: str, timeout_ms: int) -> Result[str]:
+    ln := net.listen("127.0.0.1:0")?
+    c := net.connect(ln.addr()?)?
+    peer := ln.accept()?
+    big := "x".repeat(16777216)
+    out := Channel[str](1)
+    got := Channel[int](1)
+    parallel:
+        spawn:
+            r := ""
+            if op == "write" and timeout_ms == 0:
+                r = count_text(c.write(big))
+            elif op == "write":
+                r = count_text(c.write(big, timeout_ms))
+            elif timeout_ms == 0:
+                r = count_text(c.write_bytes(big.encode()))
+            else:
+                r = count_text(c.write_bytes(big.encode(), timeout_ms))
+            c.close()
+            out.send(r)
+        spawn:
+            got.send(drain(peer))
+    peer.close()
+    ln.close()
+    return Ok("{out.recv()} read {got.recv()}")
+
+test fn a_large_write_returns_ok_only_after_every_byte_is_sent():
+    for op in ["write", "write_bytes"]:
+        for t in [0, 60000]:
+            msg := write_all_case(op, t) ?? "setup failed"
+            assert msg == "Ok 16777216 read 16777216", "{op} timeout_ms={t}: {msg}"
