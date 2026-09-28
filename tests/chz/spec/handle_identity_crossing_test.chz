@@ -3,6 +3,12 @@
 # received back is `==` to the original. Chezzi compared heap slots, so every crossing
 # (fresh slot around the same core) made the handle unequal to itself.
 import std.concurrency
+import std.net
+import std.io
+import std.os
+import std.fs
+import std.math
+import std.ffi
 
 test fn channel_equal_to_its_alias_inside_a_spawned_task():
     c1 := Channel[int]()
@@ -39,3 +45,584 @@ test fn atomic_of_a_channel_cas_with_its_own_load_succeeds():
     c2 := Channel[int]()
     a := Atomic(c1)
     assert a.cas(a.load(), c2)
+
+# ---- The grid: every handle kind x every identity-sensitive operation x every crossing route. ----
+# Go 1.27 reference (measured 2026-09-28): a channel, a *sync.Mutex, a net.Listener and an *os.File
+# each compare `==` to themselves after a goroutine capture, a channel round trip, inside a struct,
+# `slices.Contains`/`slices.Index`, and `atomic.Value.CompareAndSwap(v.Load(), ...)` succeeds; two
+# distinct `make(chan int)` compare unequal. `ops_<kind>(a, b, c)` returns the name of every cell
+# that disagrees, where `b` is `a` after one crossing and `c` is a distinct handle of the same kind.
+# The ops are one function per kind because a handle type does not satisfy `Eq`, so a `T`-generic
+# body cannot spell `a == b`; the routes and the driver are generic.
+
+struct HBox[T]:
+    v: T
+
+enum HOne[T]:
+    One(T)
+
+# A user-hashed key: `hash` ignores the handle, so a map/set probe reaches `==` on the stored key.
+struct HKey[T]:
+    v: T
+    fn hash(self) -> int:
+        return 7
+
+fn via_channel[T](x: T) -> T:
+    c := Channel[T](1)
+    c.send(x)
+    return c.recv()
+
+fn via_shared[T](x: T) -> T:
+    return Shared(x).get()
+
+fn via_rwshared[T](x: T) -> T:
+    return RwShared(x).get()
+
+fn via_atomic[T](x: T) -> T:
+    return Atomic(x).load()
+
+fn via_executor[T](x: T) -> T:
+    ex := Executor()
+    got := ex.submit_result(fn() -> T: x).recv()
+    ex.shutdown()
+    return got
+
+fn run_ops[T](a: T, b: T, c: T, ops: fn(T, T, T) -> List[str], out: Channel[List[str]]):
+    out.send(ops(a, b, c))
+
+fn tag(bad: List[str], kind: str, route: str, cells: List[str]):
+    for cell in cells:
+        bad.push(kind + "/" + route + "/" + cell)
+
+# Every route for one kind. `same-slot` is the control row (no crossing).
+fn grid[T](kind: str, a: T, c: T, ops: fn(T, T, T) -> List[str]) -> List[str]:
+    bad: List[str] = []
+    tag(bad, kind, "same-slot", ops(a, a, c))
+    b := a
+    out := Channel[List[str]](2)
+    parallel:
+        spawn:
+            out.send(ops(a, b, c))
+        spawn run_ops(a, b, c, ops, out)
+    tag(bad, kind, "task", out.recv())
+    tag(bad, kind, "task", out.recv())
+    tag(bad, kind, "channel-send", ops(a, via_channel(a), c))
+    tag(bad, kind, "shared", ops(a, via_shared(a), c))
+    tag(bad, kind, "rwshared", ops(a, via_rwshared(a), c))
+    tag(bad, kind, "atomic", ops(a, via_atomic(a), c))
+    tag(bad, kind, "executor", ops(a, via_executor(a), c))
+    return bad
+
+# `Atomic.cas` refuses a payload whose equality does not survive the store (TICKET-144's rule, read
+# from `Obj::identity` since TICKET-177): every fn kind and an iterator compare by heap slot, and a
+# store re-materializes them in a fresh one. A handle compares by core, so the grid's `cas` cells above
+# are accepted. `cas_self` is generic so the checker's static fn check cannot see the payload.
+extern "libm.so.6":
+    fn cos(x: float) -> float
+
+fn cas_self[T](a: Atomic[T], v: T) -> bool:
+    return a.cas(a.load(), v)
+
+fn refused(r: Result[bool], want: str) -> bool:
+    match r:
+        Ok(_):
+            return false
+        Err(e):
+            return e.message() == "Atomic.cas: the payload holds " + want + ", which cas cannot compare"
+
+fn named_fn() -> int:
+    return 1
+
+test fn atomic_cas_refuses_every_payload_whose_equality_does_not_survive_the_store():
+    bad: List[str] = []
+    k := 2
+    closure := fn() -> int: k
+    r1 := recover: cas_self(Atomic(closure), closure)
+    if not refused(r1, "a function value"):
+        bad.push("closure")
+    fv := named_fn
+    r2 := recover: cas_self(Atomic(fv), fv)
+    if not refused(r2, "a function value"):
+        bad.push("fn")
+    nv := math.sqrt
+    r3 := recover: cas_self(Atomic(nv), nv)
+    if not refused(r3, "a function value"):
+        bad.push("native-fn")
+    cv := cos
+    r4 := recover: cas_self(Atomic(cv), cv)
+    if not refused(r4, "a function value"):
+        bad.push("extern-fn")
+    it := [1, 2].iter()
+    r5 := recover: cas_self(Atomic(it), it)
+    if not refused(r5, "an iterator"):
+        bad.push("iterator")
+    bv := ord
+    if not cas_self(Atomic(bv), bv):
+        bad.push("builtin-fn-accepted")
+    assert bad.len() == 0, " ".join(bad)
+
+fn a_listener() -> Listener:
+    match net.listen("127.0.0.1:0"):
+        Ok(l):
+            return l
+        Err(e):
+            panic(e.message())
+
+fn a_socket() -> Socket:
+    l := a_listener()
+    addr := match l.addr():
+        Ok(s): s
+        Err(e): panic(e.message())
+    match net.connect(addr):
+        Ok(s):
+            return s
+        Err(e):
+            panic(e.message())
+
+fn a_reader(name: str) -> Reader:
+    p := os.temp_dir().str() + "/chz_t177_" + name + "_" + str(os.getpid())
+    match io.write_file(p, "x"):
+        Ok(_):
+            pass
+        Err(e):
+            panic(e.message())
+    r := match io.open(p):
+        Ok(r): r
+        Err(e): panic(e.message())
+    _ := fs.remove_file(p)
+    return r
+
+fn ops_channel(a: Channel[int], b: Channel[int], c: Channel[int]) -> List[str]:
+    bad: List[str] = []
+    if not (a == b):
+        bad.push("==")
+    if a != b:
+        bad.push("!=")
+    if not (b in [a]):
+        bad.push("in")
+    if not [a].contains(b):
+        bad.push("contains")
+    if [a].index_of(b) != 0:
+        bad.push("index_of")
+    if [a, b].unique().len() != 1:
+        bad.push("unique")
+    if (a, 1) != (b, 1):
+        bad.push("tuple")
+    if HBox(a) != HBox(b):
+        bad.push("struct")
+    if HOne.One(a) != HOne.One(b):
+        bad.push("enum")
+    if Some(a) != Some(b):
+        bad.push("option")
+    if not (HKey(b) in {HKey(a): 1}):
+        bad.push("map-probe")
+    if not {HKey(a)}.has(HKey(b)):
+        bad.push("set-probe")
+    if not Atomic(a).cas(b, a):
+        bad.push("cas")
+    if b == c:
+        bad.push("distinct-==")
+    if c in [b]:
+        bad.push("distinct-in")
+    if Atomic(b).cas(c, b):
+        bad.push("distinct-cas")
+    return bad
+
+fn ops_shared(a: Shared[int], b: Shared[int], c: Shared[int]) -> List[str]:
+    bad: List[str] = []
+    if not (a == b):
+        bad.push("==")
+    if a != b:
+        bad.push("!=")
+    if not (b in [a]):
+        bad.push("in")
+    if not [a].contains(b):
+        bad.push("contains")
+    if [a].index_of(b) != 0:
+        bad.push("index_of")
+    if [a, b].unique().len() != 1:
+        bad.push("unique")
+    if (a, 1) != (b, 1):
+        bad.push("tuple")
+    if HBox(a) != HBox(b):
+        bad.push("struct")
+    if HOne.One(a) != HOne.One(b):
+        bad.push("enum")
+    if Some(a) != Some(b):
+        bad.push("option")
+    if not (HKey(b) in {HKey(a): 1}):
+        bad.push("map-probe")
+    if not {HKey(a)}.has(HKey(b)):
+        bad.push("set-probe")
+    if not Atomic(a).cas(b, a):
+        bad.push("cas")
+    if b == c:
+        bad.push("distinct-==")
+    if c in [b]:
+        bad.push("distinct-in")
+    if Atomic(b).cas(c, b):
+        bad.push("distinct-cas")
+    return bad
+
+fn ops_rwshared(a: RwShared[int], b: RwShared[int], c: RwShared[int]) -> List[str]:
+    bad: List[str] = []
+    if not (a == b):
+        bad.push("==")
+    if a != b:
+        bad.push("!=")
+    if not (b in [a]):
+        bad.push("in")
+    if not [a].contains(b):
+        bad.push("contains")
+    if [a].index_of(b) != 0:
+        bad.push("index_of")
+    if [a, b].unique().len() != 1:
+        bad.push("unique")
+    if (a, 1) != (b, 1):
+        bad.push("tuple")
+    if HBox(a) != HBox(b):
+        bad.push("struct")
+    if HOne.One(a) != HOne.One(b):
+        bad.push("enum")
+    if Some(a) != Some(b):
+        bad.push("option")
+    if not (HKey(b) in {HKey(a): 1}):
+        bad.push("map-probe")
+    if not {HKey(a)}.has(HKey(b)):
+        bad.push("set-probe")
+    if not Atomic(a).cas(b, a):
+        bad.push("cas")
+    if b == c:
+        bad.push("distinct-==")
+    if c in [b]:
+        bad.push("distinct-in")
+    if Atomic(b).cas(c, b):
+        bad.push("distinct-cas")
+    return bad
+
+fn ops_atomic(a: Atomic[int], b: Atomic[int], c: Atomic[int]) -> List[str]:
+    bad: List[str] = []
+    if not (a == b):
+        bad.push("==")
+    if a != b:
+        bad.push("!=")
+    if not (b in [a]):
+        bad.push("in")
+    if not [a].contains(b):
+        bad.push("contains")
+    if [a].index_of(b) != 0:
+        bad.push("index_of")
+    if [a, b].unique().len() != 1:
+        bad.push("unique")
+    if (a, 1) != (b, 1):
+        bad.push("tuple")
+    if HBox(a) != HBox(b):
+        bad.push("struct")
+    if HOne.One(a) != HOne.One(b):
+        bad.push("enum")
+    if Some(a) != Some(b):
+        bad.push("option")
+    if not (HKey(b) in {HKey(a): 1}):
+        bad.push("map-probe")
+    if not {HKey(a)}.has(HKey(b)):
+        bad.push("set-probe")
+    if not Atomic(a).cas(b, a):
+        bad.push("cas")
+    if b == c:
+        bad.push("distinct-==")
+    if c in [b]:
+        bad.push("distinct-in")
+    if Atomic(b).cas(c, b):
+        bad.push("distinct-cas")
+    return bad
+
+fn ops_atomic_int(a: AtomicInt, b: AtomicInt, c: AtomicInt) -> List[str]:
+    bad: List[str] = []
+    if not (a == b):
+        bad.push("==")
+    if a != b:
+        bad.push("!=")
+    if not (b in [a]):
+        bad.push("in")
+    if not [a].contains(b):
+        bad.push("contains")
+    if [a].index_of(b) != 0:
+        bad.push("index_of")
+    if [a, b].unique().len() != 1:
+        bad.push("unique")
+    if (a, 1) != (b, 1):
+        bad.push("tuple")
+    if HBox(a) != HBox(b):
+        bad.push("struct")
+    if HOne.One(a) != HOne.One(b):
+        bad.push("enum")
+    if Some(a) != Some(b):
+        bad.push("option")
+    if not (HKey(b) in {HKey(a): 1}):
+        bad.push("map-probe")
+    if not {HKey(a)}.has(HKey(b)):
+        bad.push("set-probe")
+    if not Atomic(a).cas(b, a):
+        bad.push("cas")
+    if b == c:
+        bad.push("distinct-==")
+    if c in [b]:
+        bad.push("distinct-in")
+    if Atomic(b).cas(c, b):
+        bad.push("distinct-cas")
+    return bad
+
+fn ops_executor(a: Executor, b: Executor, c: Executor) -> List[str]:
+    bad: List[str] = []
+    if not (a == b):
+        bad.push("==")
+    if a != b:
+        bad.push("!=")
+    if not (b in [a]):
+        bad.push("in")
+    if not [a].contains(b):
+        bad.push("contains")
+    if [a].index_of(b) != 0:
+        bad.push("index_of")
+    if [a, b].unique().len() != 1:
+        bad.push("unique")
+    if (a, 1) != (b, 1):
+        bad.push("tuple")
+    if HBox(a) != HBox(b):
+        bad.push("struct")
+    if HOne.One(a) != HOne.One(b):
+        bad.push("enum")
+    if Some(a) != Some(b):
+        bad.push("option")
+    if not (HKey(b) in {HKey(a): 1}):
+        bad.push("map-probe")
+    if not {HKey(a)}.has(HKey(b)):
+        bad.push("set-probe")
+    if not Atomic(a).cas(b, a):
+        bad.push("cas")
+    if b == c:
+        bad.push("distinct-==")
+    if c in [b]:
+        bad.push("distinct-in")
+    if Atomic(b).cas(c, b):
+        bad.push("distinct-cas")
+    return bad
+
+fn ops_socket(a: Socket, b: Socket, c: Socket) -> List[str]:
+    bad: List[str] = []
+    if not (a == b):
+        bad.push("==")
+    if a != b:
+        bad.push("!=")
+    if not (b in [a]):
+        bad.push("in")
+    if not [a].contains(b):
+        bad.push("contains")
+    if [a].index_of(b) != 0:
+        bad.push("index_of")
+    if [a, b].unique().len() != 1:
+        bad.push("unique")
+    if (a, 1) != (b, 1):
+        bad.push("tuple")
+    if HBox(a) != HBox(b):
+        bad.push("struct")
+    if HOne.One(a) != HOne.One(b):
+        bad.push("enum")
+    if Some(a) != Some(b):
+        bad.push("option")
+    if not (HKey(b) in {HKey(a): 1}):
+        bad.push("map-probe")
+    if not {HKey(a)}.has(HKey(b)):
+        bad.push("set-probe")
+    if not Atomic(a).cas(b, a):
+        bad.push("cas")
+    if b == c:
+        bad.push("distinct-==")
+    if c in [b]:
+        bad.push("distinct-in")
+    if Atomic(b).cas(c, b):
+        bad.push("distinct-cas")
+    return bad
+
+fn ops_listener(a: Listener, b: Listener, c: Listener) -> List[str]:
+    bad: List[str] = []
+    if not (a == b):
+        bad.push("==")
+    if a != b:
+        bad.push("!=")
+    if not (b in [a]):
+        bad.push("in")
+    if not [a].contains(b):
+        bad.push("contains")
+    if [a].index_of(b) != 0:
+        bad.push("index_of")
+    if [a, b].unique().len() != 1:
+        bad.push("unique")
+    if (a, 1) != (b, 1):
+        bad.push("tuple")
+    if HBox(a) != HBox(b):
+        bad.push("struct")
+    if HOne.One(a) != HOne.One(b):
+        bad.push("enum")
+    if Some(a) != Some(b):
+        bad.push("option")
+    if not (HKey(b) in {HKey(a): 1}):
+        bad.push("map-probe")
+    if not {HKey(a)}.has(HKey(b)):
+        bad.push("set-probe")
+    if not Atomic(a).cas(b, a):
+        bad.push("cas")
+    if b == c:
+        bad.push("distinct-==")
+    if c in [b]:
+        bad.push("distinct-in")
+    if Atomic(b).cas(c, b):
+        bad.push("distinct-cas")
+    return bad
+
+fn ops_writer(a: Writer, b: Writer, c: Writer) -> List[str]:
+    bad: List[str] = []
+    if not (a == b):
+        bad.push("==")
+    if a != b:
+        bad.push("!=")
+    if not (b in [a]):
+        bad.push("in")
+    if not [a].contains(b):
+        bad.push("contains")
+    if [a].index_of(b) != 0:
+        bad.push("index_of")
+    if [a, b].unique().len() != 1:
+        bad.push("unique")
+    if (a, 1) != (b, 1):
+        bad.push("tuple")
+    if HBox(a) != HBox(b):
+        bad.push("struct")
+    if HOne.One(a) != HOne.One(b):
+        bad.push("enum")
+    if Some(a) != Some(b):
+        bad.push("option")
+    if not (HKey(b) in {HKey(a): 1}):
+        bad.push("map-probe")
+    if not {HKey(a)}.has(HKey(b)):
+        bad.push("set-probe")
+    if not Atomic(a).cas(b, a):
+        bad.push("cas")
+    if b == c:
+        bad.push("distinct-==")
+    if c in [b]:
+        bad.push("distinct-in")
+    if Atomic(b).cas(c, b):
+        bad.push("distinct-cas")
+    return bad
+
+fn ops_reader(a: Reader, b: Reader, c: Reader) -> List[str]:
+    bad: List[str] = []
+    if not (a == b):
+        bad.push("==")
+    if a != b:
+        bad.push("!=")
+    if not (b in [a]):
+        bad.push("in")
+    if not [a].contains(b):
+        bad.push("contains")
+    if [a].index_of(b) != 0:
+        bad.push("index_of")
+    if [a, b].unique().len() != 1:
+        bad.push("unique")
+    if (a, 1) != (b, 1):
+        bad.push("tuple")
+    if HBox(a) != HBox(b):
+        bad.push("struct")
+    if HOne.One(a) != HOne.One(b):
+        bad.push("enum")
+    if Some(a) != Some(b):
+        bad.push("option")
+    if not (HKey(b) in {HKey(a): 1}):
+        bad.push("map-probe")
+    if not {HKey(a)}.has(HKey(b)):
+        bad.push("set-probe")
+    if not Atomic(a).cas(b, a):
+        bad.push("cas")
+    if b == c:
+        bad.push("distinct-==")
+    if c in [b]:
+        bad.push("distinct-in")
+    if Atomic(b).cas(c, b):
+        bad.push("distinct-cas")
+    return bad
+
+fn ops_ptr(a: ptr, b: ptr, c: ptr) -> List[str]:
+    bad: List[str] = []
+    if not (a == b):
+        bad.push("==")
+    if a != b:
+        bad.push("!=")
+    if not (b in [a]):
+        bad.push("in")
+    if not [a].contains(b):
+        bad.push("contains")
+    if [a].index_of(b) != 0:
+        bad.push("index_of")
+    if [a, b].unique().len() != 1:
+        bad.push("unique")
+    if (a, 1) != (b, 1):
+        bad.push("tuple")
+    if HBox(a) != HBox(b):
+        bad.push("struct")
+    if HOne.One(a) != HOne.One(b):
+        bad.push("enum")
+    if Some(a) != Some(b):
+        bad.push("option")
+    if not (HKey(b) in {HKey(a): 1}):
+        bad.push("map-probe")
+    if not {HKey(a)}.has(HKey(b)):
+        bad.push("set-probe")
+    if not Atomic(a).cas(b, a):
+        bad.push("cas")
+    # No distinct cells: every `ffi.null()` is address 0; a distinct ptr needs an extern allocator.
+    return bad
+
+test fn channel_identity_grid():
+    bad := grid("Channel", Channel[int](), Channel[int](), ops_channel)
+    assert bad.len() == 0, " ".join(bad)
+
+test fn shared_identity_grid():
+    bad := grid("Shared", Shared(0), Shared(0), ops_shared)
+    assert bad.len() == 0, " ".join(bad)
+
+test fn rwshared_identity_grid():
+    bad := grid("RwShared", RwShared(0), RwShared(0), ops_rwshared)
+    assert bad.len() == 0, " ".join(bad)
+
+test fn atomic_identity_grid():
+    bad := grid("Atomic", Atomic(0), Atomic(0), ops_atomic)
+    assert bad.len() == 0, " ".join(bad)
+
+test fn atomic_int_identity_grid():
+    bad := grid("AtomicInt", AtomicInt(0), AtomicInt(0), ops_atomic_int)
+    assert bad.len() == 0, " ".join(bad)
+
+test fn executor_identity_grid():
+    bad := grid("Executor", Executor(), Executor(), ops_executor)
+    assert bad.len() == 0, " ".join(bad)
+
+test fn socket_identity_grid():
+    bad := grid("Socket", a_socket(), a_socket(), ops_socket)
+    assert bad.len() == 0, " ".join(bad)
+
+test fn listener_identity_grid():
+    bad := grid("Listener", a_listener(), a_listener(), ops_listener)
+    assert bad.len() == 0, " ".join(bad)
+
+test fn writer_identity_grid():
+    bad := grid("Writer", io.stdout(), io.stdout(), ops_writer)
+    assert bad.len() == 0, " ".join(bad)
+
+test fn reader_identity_grid():
+    bad := grid("Reader", a_reader("a"), a_reader("c"), ops_reader)
+    assert bad.len() == 0, " ".join(bad)
+
+test fn ptr_identity_grid():
+    bad := grid("ptr", ffi.null(), ffi.null(), ops_ptr)
+    assert bad.len() == 0, " ".join(bad)
