@@ -1,0 +1,53 @@
+# TICKET-179 — D4 airlock false faults: a value no parent binding can reach (a fresh spawn
+# argument, a `merge` result, a generator's own frame-local list) is not a write the parent could
+# observe, so it must not fault. Go/Python run each of these.
+
+fn t179_work(acc: List[int], out: Channel[str]):
+    res := recover:
+        acc.push(1)
+        acc.push(2)
+        acc.len()
+    match res:
+        Ok(k): out.send("{k}")
+        Err(e): out.send(e.message())
+
+test fn fresh_list_literal_spawn_arg_is_writable():
+    out := Channel[str](1)
+    parallel:
+        spawn t179_work([], out)
+    assert out.recv() == "2"
+
+test fn map_merge_inside_spawn_is_not_a_write():
+    m := {"a": 1}
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            res := recover:
+                n := m.merge({"b": 2})
+                n.len()
+            match res:
+                Ok(k): r.send("{k}")
+                Err(e): r.send(e.message())
+    assert r.recv() == "2"
+
+fn t179_gen() -> Iterator[int]:
+    acc: List[int] = []
+    for i in range(3):
+        acc.push(i)
+        yield acc.len()
+
+test fn started_generator_drained_in_spawn_runs():
+    g := t179_gen()
+    _ := g.next()
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            res := recover:
+                total := 0
+                for v in g:
+                    total += v
+                total
+            match res:
+                Ok(t): r.send("{t}")
+                Err(e): r.send(e.message())
+    assert r.recv() == "5"
