@@ -1,0 +1,33 @@
+# TICKET-178: `fn` is the one declaration legal inside a block; type declarations are top-level only.
+# Each nested `who` below runs and resolves to its nearest scope, shadowing the top-level `who`.
+
+fn who() -> str:
+    return "outer"
+
+test fn a_nested_fn_runs_in_every_block_position():
+    got: List[str] = []
+    fn who() -> str:
+        return "fn body"
+    got.push(who())
+    if true:
+        fn who() -> str:
+            return "if"
+        got.push(who())
+    for _ in range(1):
+        fn who() -> str:
+            return "for"
+        got.push(who())
+    match 1:
+        _:
+            fn who() -> str:
+                return "match arm"
+            got.push(who())
+    fn outer() -> str:
+        fn who() -> str:
+            return "nested fn body"
+        return who()
+    got.push(outer())
+    assert got == ["fn body", "if", "for", "match arm", "nested fn body"]
+
+test fn the_top_level_fn_is_untouched():
+    assert who() == "outer"
