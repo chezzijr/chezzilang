@@ -35179,3 +35179,21 @@ fn unused_local_warn_table_stays_silent() {
     no_warn("fn f():\n    w := 5\n    s := \"x\"\n    print(\"{s:<{w}}\")\nf()\n");
     no_warn("fn f():\n    xs := [1]\n    xs.push(2)\nf()\n");
 }
+
+// === TICKET-173: module-qualified protocol bounds ===
+
+const QPB_LIB: &str = "protocol QpbFactory:\n    fn default() -> Self\nprotocol QpbTagged:\n    fn tag(self) -> str\nstruct QpbPoint:\n    x: int\n    fn default() -> QpbPoint:\n        return QpbPoint(0)\n";
+
+#[test]
+fn a_qualified_bound_checks_through_a_whole_module_import() {
+    // `[T: qp.QpbFactory]` names the same protocol as `import QpbFactory from lib`.
+    let errs = check_files(&[
+        ("lib.chz", QPB_LIB),
+        (
+            "main.chz",
+            "import lib as qp\nfn make[T: qp.QpbFactory](s: T) -> T:\n    return T.default()\nprint(make(qp.QpbPoint(7)).x)\n",
+        ),
+    ]);
+    let msgs: Vec<&str> = errs.iter().map(|e| e.message.as_str()).collect();
+    assert!(errs.is_empty(), "expected no errors, got {msgs:?}");
+}

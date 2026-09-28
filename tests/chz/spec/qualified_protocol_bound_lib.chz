@@ -1,8 +1,0 @@
-protocol QpbFactory:
-    fn default() -> Self
-
-struct QpbPoint:
-    x: int
-
-    fn default() -> QpbPoint:
-        return QpbPoint(0)
