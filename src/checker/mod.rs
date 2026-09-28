@@ -3842,19 +3842,10 @@ const WRITER_METHODS: &[&str] = &["write", "write_bytes", "flush", "close"];
 const READER_METHODS: &[&str] = &["read_line", "read_bytes", "close"];
 const EXECUTOR_METHODS: &[&str] = &["submit", "shutdown", "shutdown_now"];
 const BYTES_METHODS: &[&str] = &["decode", "decode_lossy", "len"];
-const BYTEARRAY_METHODS: &[&str] = &["len", "push", "pop", "decode"];
+const BYTEARRAY_METHODS: &[&str] = &["len", "push", "pop", "decode", "copy"];
 
-/// Does `method` mutate its receiver in place (as opposed to returning a new value)? Keyed on
-/// the receiver's type as well as the name, because the same name means different things per type
-/// (`str.reverse` returns a new `str`; `List.reverse` mutates. `Shared.update`/`Map.update` likewise).
-///
-/// Enumerated from the declarations, not from memory: every entry below is a `native fn` in
-/// `std/prelude.chz` whose receiver is the mutated container —
-/// `grep -n 'native fn (push|pop|insert|remove_at|extend|sort|sort_by|sort_by_key|reverse|dedup|
-/// unique|remove|merge|update|add|clear|discard)\b' std/prelude.chz` — cross-checked against the
-/// `*_METHODS` tables above for reachability. That grep is also what rules the near-misses OUT:
-/// `unique`/`dedup`/`merge` return a fresh collection (`-> List[T]` / `-> Map[K, V]`), and `clear` /
-/// `discard` do not exist at all.
+/// Does `method` mutate its receiver in place (as opposed to returning a new value)? Maps the
+/// receiver's type to its kind and reads the one table, `crate::vm::is_mutating_native_kind`.
 ///
 /// The handle types (`Channel`/`Shared`/`RwShared`/`Atomic`/`Executor`/`Socket`/`Listener`/`Writer`/
 /// `Reader`) are absent BY DESIGN and must stay absent: they cross the airlock by handle, so a
@@ -3863,24 +3854,14 @@ const BYTEARRAY_METHODS: &[&str] = &["len", "push", "pop", "decode"];
 ///
 /// User-struct methods use the separate `StructInfo.self_writers` fixed-point summary.
 fn mutates_receiver(recv: &Ty, method: &str) -> bool {
-    match recv {
-        Ty::List(_) => matches!(
-            method,
-            "push"
-                | "pop"
-                | "reverse"
-                | "extend"
-                | "sort"
-                | "sort_by"
-                | "sort_by_key"
-                | "insert"
-                | "remove_at"
-        ),
-        Ty::Map(..) => matches!(method, "remove" | "update"),
-        Ty::Set(_) => matches!(method, "add" | "remove"),
-        Ty::ByteArray => matches!(method, "push" | "pop" | "extend"),
-        _ => false,
-    }
+    let kind = match recv {
+        Ty::List(_) => "List",
+        Ty::Map(..) => "Map",
+        Ty::Set(_) => "Set",
+        Ty::ByteArray => "bytearray",
+        _ => return false,
+    };
+    crate::vm::is_mutating_native_kind(kind, method)
 }
 
 // The bespoke `str_method_sig` / `bytes_method_sig` / `bytearray_method_sig` arms are RETIRED (phase

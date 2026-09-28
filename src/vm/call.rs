@@ -9,12 +9,12 @@ fn py_blank(c: char) -> bool {
     c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
 }
 
-/// D4 layer C (TICKET-169): every native method that mutates its receiver in place, enumerated from
-/// every `core_method`/`bytearray_method` arm that `get_mut`s the receiver. A new mutating native
-/// must be added here (and to the `every_mutating_native_faults_on_a_task_copy` test row), or its
-/// write to an airlock copy is silently lost again. The checker's `mutates_receiver`
-/// (`src/checker/mod.rs`) matches these methods except non-mutating `Map::merge`; index stores use
-/// separate checker paths.
+/// D4 (TICKET-169, TICKET-179): the ONE table of native methods that mutate their receiver in place.
+/// Layer C faults a task-side call to one of these on an airlock copy; the checker's
+/// `mutates_receiver` (`src/checker/mod.rs`) reads this function for layer A and the DEC-089
+/// warning. A new mutating native goes here and nowhere else:
+/// `checker::tests::receiver_write_table_matches_observed_behavior` runs every native method and
+/// fails until this table agrees with the observed receiver change.
 pub(crate) fn is_mutating_native_kind(kind: &str, method: &str) -> bool {
     match kind {
         "List" => matches!(
@@ -29,7 +29,7 @@ pub(crate) fn is_mutating_native_kind(kind: &str, method: &str) -> bool {
                 | "insert"
                 | "remove_at"
         ),
-        "Map" => matches!(method, "remove" | "merge" | "update"),
+        "Map" => matches!(method, "remove" | "update"),
         "Set" => matches!(method, "add" | "remove"),
         "bytearray" => matches!(method, "push" | "pop" | "extend"),
         _ => false,
@@ -4082,6 +4082,15 @@ impl Vm {
                 };
                 let bytes = b.clone();
                 self.decode_utf8(&bytes, span)
+            }
+            // `copy() -> bytearray`: a new buffer with the same bytes (Python `bytearray.copy()`).
+            "copy" => {
+                self.arity_err("copy", args, 0, span)?;
+                let Obj::ByteArray(b) = self.heap.get(h) else {
+                    unreachable!()
+                };
+                let dup = b.clone();
+                Ok(Value::obj(self.heap.alloc(Obj::ByteArray(dup))))
             }
             _ => Err(self.err(format!("type bytearray has no method '{method}'"), span)),
         }

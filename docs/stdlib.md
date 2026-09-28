@@ -311,6 +311,7 @@ Index a map with `m[k]` (read/write); iterate with `for k, v in m:`.
 | `bytearray` | `push` | `(byte: int) -> nil` | *mutates* — append a byte (0–255). |
 | `bytearray` | `pop` | `() -> Option[int]` | *mutates* — remove & return last byte. |
 | `bytearray` | `extend` | `(other: bytes \| bytearray) -> nil` | *mutates* — append all of `other`. |
+| `bytearray` | `copy` | `() -> bytearray` | Returns a **new** bytearray (Python `bytearray.copy()`). |
 
 Index either with `b[i]` (byte as `int`); `bytearray` also supports `b[i] = byte`. **Both types slice**
 (`b[1:3]`), and a slice keeps the receiver's type — `bytes[1:3]` is `bytes`, `bytearray[1:3]` is a fresh

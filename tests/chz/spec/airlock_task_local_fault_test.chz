@@ -205,7 +205,6 @@ test fn every_mutating_native_faults_on_a_task_copy():
             if not faults(fn(): arith_extend(xs)): ok = false
             if not faults(fn(): map_idx_set(m)): ok = false
             if not faults(fn(): m.remove("a")): ok = false
-            if not faults(fn(): m.merge({"b": 2})): ok = false
             if not faults(fn(): m.update({"c": 3})): ok = false
             if not faults(fn(): s.add(3)): ok = false
             if not faults(fn(): s.remove(1)): ok = false

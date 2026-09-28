@@ -219,13 +219,15 @@ native struct bytes:
 
 # `bytearray` (mutable byte buffer): `len`, `push(int)` (appends one byte, 0-255 validated at runtime),
 # `pop() -> Option[int]` (removes the last), `decode() -> str` (UTF-8, recoverable fault on invalid
-# UTF-8). `extend` is NOT here — it takes any byte-sequence shape (bytes|bytearray|List[int]) and stays
-# an explicit branch in `infer_method_call` (not a flat FnSig).
+# UTF-8), `copy() -> bytearray` (a new buffer). `extend` is NOT here — it takes any byte-sequence
+# shape (bytes|bytearray|List[int]) and stays an explicit branch in `infer_method_call` (not a flat
+# FnSig).
 native struct bytearray:
     native fn len(self) -> int
     native fn push(self, b: int) -> nil
     native fn pop(self) -> Option[int]
     native fn decode(self) -> str
+    native fn copy(self) -> bytearray
 
 # The two builtin generic ENUMS' variant SHAPE (phase 5b-native-enum). `Option`/`Result` are the most
 # deeply-wired builtin types — the `?` operator, top-level error propagation, exhaustive `match`, and
