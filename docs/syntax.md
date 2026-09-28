@@ -2595,9 +2595,11 @@ does **not** conform to it — supply the args (`Container[int]`) to use it as a
 
 > **A protocol crosses a module boundary like any other declaration.** Both `mod.Named` (qualified) and
 > `import Named from mod` (with or without an `as` rename) resolve, exactly as they already do for a
-> `struct`/`enum`/`newtype`/`type` alias. One limit remains: a qualified generic BOUND (`[T: mod.Named]`)
-> still does not parse — the bound grammar is bare-identifier-only — so import the protocol by name and
-> write the bare form (`import Named from mod` then `[T: Named]`).
+> `struct`/`enum`/`newtype`/`type` alias. That includes a generic bound: `[T: mod.Named]`,
+> `where T: mod.Named`, `[T: mod.A + mod.B]`, `[S: mod.Container[int]]` and a protocol embed line
+> `mod.Named` name the same protocol as the bare import, and a static requirement dispatches through
+> the witness exactly as `[T: Named]` does. The path is two-level only: `[T: a.b.Named]` parses, and the
+> checker rejects it with the two-level-path hint.
 
 The prebuilt **`Iterable[T]`** and **`Iterator[T]`** are parameterized bounds with extra magic: they
 **recover** `T` from the iterand's element (by unifying it), rather than requiring it written out. `T`

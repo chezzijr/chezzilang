@@ -7,6 +7,12 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-173 (2026-09-28) — a generic bound may be module-qualified.** `[T: m.Named]`,
+  `where T: m.Named`, multi-bounds, parameterized bounds, protocol aliases and embed lines resolve
+  through a whole-module import to the same protocol key as `import Named from m`, and static
+  requirements dispatch through the witness. The parser keeps the dotted spelling (any depth);
+  `Checker::protocol_key` resolves it, and `check_bounds` rejects a 3+ segment bound with the
+  two-level-path hint. The "qualified generic bound does not parse" limit in `docs/syntax.md` is gone.
 - **TICKET-172 (2026-09-28) — imported and qualified `type` aliases work in expression and pattern
   position.** `import Position from m`, `m.Position`, and a local `type P = m.Point` now construct,
   call statics, build variants, and match patterns exactly like the aliased type (TICKET-174 folded
