@@ -601,7 +601,7 @@ Functions: `abs`, `floor`, `ceil`, `round`, `pow(base, exp)`, `sqrt`, `sin`, `co
 parameter never accepts an `int` (rule D3, `syntax.md §3`): `sqrt(16)` / `floor(2)` are type errors
 naming `write 1.0 (or float(x))` — write `sqrt(16.0)` / `floor(2.0)`, or `sqrt(float(i))` for a typed
 `int` value.
-`math.round` rounds **half away from zero** (`round(2.5)` → `3`, `round(-2.5)` → `-3`), which differs
+`math.round` rounds **half away from zero** (`round(2.5)` → `3.0`, `round(-2.5)` → `-3.0`), which differs
 from the `:.0f` string-format spec's **banker's rounding** (`"{2.5:.0f}"` → `2`, matching Python) — the
 two rounding conventions coexist by design; pick `math.round` for arithmetic, the format spec for display.
 Math is **total IEEE-754**: out-of-domain inputs return `NaN`/`inf` instead of faulting —

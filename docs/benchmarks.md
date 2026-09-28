@@ -2780,3 +2780,44 @@ difftest`) is unaffected by this change (it does not exercise `spawn`/airlock co
 `chz_suite_passes_at_a_second_worker_count`) and `cargo clippy -- -D warnings` both exit 0 on the
 branch; `cargo test --lib` is `4876 passed; 0 failed; 2 ignored` (base was `4875 passed; 0 failed; 2
 ignored` before this ticket's `iter_obj_tests::copied_bit_is_per_slot_and_cleared_on_reuse` addition).
+
+## GC share of runtime across `benches/chz` (2026-09-28, `8b1d2331`)
+
+**Question:** is the GC a lever for the remaining CPython gap, before the JIT? **Answer: no.** GC is at
+most ~11% of wall time on any bench, and **0%** on `fib`/`loop`/`primes` — the call/dispatch-bound
+benches that set the gap. Scalars are unboxed, so they allocate nothing.
+
+**Method.** Temporary, uncommitted instrumentation: an `Instant` around `Vm::collect`
+(`src/vm/exec.rs`) summed into process-wide atomics, printed under `CHEZZI_HEAP_STATS=1`. Release
+binary, default worker count, median of 3 runs, wall time includes process startup. `perf` is not
+installed on this box, so this is a direct timer, not a sampling profile.
+
+| bench | wall | GC time | GC share | collections |
+|---|---|---|---|---|
+| many_list | 685 ms | 75.7 ms | 11.0% | 9 |
+| closure | 2593 ms | 281.0 ms | 10.8% | 46 875 |
+| many_struct | 811 ms | 76.4 ms | 9.4% | 9 |
+| str | 297 ms | 24.8 ms | 8.4% | 12 |
+| enum | 4008 ms | 291.8 ms | 7.3% | 42 180 |
+| many_map | 485 ms | 24.5 ms | 5.1% | 8 |
+| poly_method | 2595 ms | 37.6 ms | 1.4% | 3 906 |
+| hof / hof_nursery | 663 / 643 ms | 0.9 ms | 0.1% | 62 |
+| map_str | 361 ms | 0.1 ms | 0.0% | 3 |
+| fib, loop, primes, list, struct, map, unique, empty | — | 0 | 0.0% | 0 |
+
+**Collection count is not the cost.** Raising `MIN_GC_THRESHOLD` (`src/vm/heap.rs:446`, 256 objects)
+cut collections by up to 250× but left GC time flat — the cost tracks garbage swept, not pause count:
+
+| MIN_GC_THRESHOLD | closure (n / GC ms) | enum (n / GC ms) | many_struct (n / GC ms) |
+|---|---|---|---|
+| 256 (current) | 46 875 / 281 | 42 180 / 292 | 9 / 76 |
+| 4 096 | 2 929 / 274 | 2 636 / 271 | 6 / 43 |
+| 65 536 | 183 / 293 | 164 / 296 | 4 / 82 |
+
+Wall-time deltas between the three settings are within run-to-run noise. Threshold unchanged.
+
+**Conclusion.** Keep the per-task, non-moving mark-sweep (BEAM-style private heaps; non-moving keeps
+JIT code and FFI pointers valid). The only GC lever this data supports is **generational collection
+per heap** (cheaper short-lived garbage), worth at most ~5–10% on allocation-heavy scripts — a later,
+measured item, not a JIT prerequisite. The GC work the JIT does need is safepoints + stack maps for
+JIT frames.
