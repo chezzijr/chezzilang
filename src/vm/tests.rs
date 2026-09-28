@@ -20463,6 +20463,7 @@ fn a_carried_snapshot_build_error_is_raised_at_task_preparation() {
         },
         snap: Err(carried.clone()),
         cell_ids: Vec::new(),
+        fresh: 0,
     });
     let raised = vm
         .join_nursery()

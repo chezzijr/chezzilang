@@ -732,6 +732,12 @@ impl Heap {
     /// Clear the copied bit for slot `i` (no-op if the word is absent) — a freed or reused slot
     /// must not inherit a stale mark.
     #[inline]
+    /// D4 (TICKET-179): unmark one object — a fresh spawn operand's root, which no parent binding
+    /// can reach.
+    pub fn unset_copied(&mut self, h: GcRef) {
+        self.clear_copied(h.0 as usize)
+    }
+
     fn clear_copied(&mut self, i: usize) {
         if let Some(w) = self.copied.get_mut(i >> 6) {
             *w &= !(1u64 << (i & 63));

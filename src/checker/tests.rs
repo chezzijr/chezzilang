@@ -34176,6 +34176,11 @@ fn the_nested_fn_ret_memo_is_invisible_to_diagnostics_and_tables() {
             "{name}: ret_coerce"
         );
         assert_eq!(on.6, off.6, "{name}: table_conflicts");
+        assert_eq!(
+            sorted_debug(&on.8),
+            sorted_debug(&off.8),
+            "{name}: fresh_operands"
+        );
     }
 }
 

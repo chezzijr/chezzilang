@@ -20,9 +20,9 @@ use std::fmt;
 
 pub use ty::Ty;
 pub use ty::{
-    CarrierKey, CarrierMode, CarrierTable, FnLabels, ForBind, ForBindTable, KeywordKey,
-    KeywordTable, ProtoEqTable, RetCoerce, RetCoerceTable, SumSeed, SumSeedTable, WitnessCallee,
-    WitnessKey, WitnessSrc, WitnessTable,
+    CarrierKey, CarrierMode, CarrierTable, FnLabels, ForBind, ForBindTable, FreshOperandTable,
+    KeywordKey, KeywordTable, ProtoEqTable, RetCoerce, RetCoerceTable, SumSeed, SumSeedTable,
+    WitnessCallee, WitnessKey, WitnessSrc, WitnessTable,
 };
 use ty::{compatible, param_invariant};
 
@@ -1098,6 +1098,7 @@ pub fn resolve_call_tables(
     RetCoerceTable,
     TableConflicts,
     ForBindTable,
+    FreshOperandTable,
 ) {
     resolve_call_tables_with(graph, true)
 }
@@ -1116,6 +1117,7 @@ fn resolve_call_tables_with(
     RetCoerceTable,
     TableConflicts,
     ForBindTable,
+    FreshOperandTable,
 ) {
     crate::on_frontend_stack_scoped(move || {
         let mut c = Checker::new();
@@ -1131,6 +1133,7 @@ fn resolve_call_tables_with(
             std::mem::take(&mut c.ret_coerce),
             std::mem::take(&mut c.table_conflicts),
             std::mem::take(&mut c.for_binds),
+            std::mem::take(&mut c.fresh_operands),
         )
     })
 }
@@ -1156,6 +1159,7 @@ pub fn resolve_call_tables_standalone(
     RetCoerceTable,
     TableConflicts,
     ForBindTable,
+    FreshOperandTable,
 ) {
     resolve_call_tables_with(&standalone_graph(stmts), true)
 }
@@ -1174,6 +1178,7 @@ pub fn resolve_call_tables_standalone_no_memo(
     RetCoerceTable,
     TableConflicts,
     ForBindTable,
+    FreshOperandTable,
 ) {
     resolve_call_tables_with(&standalone_graph(stmts), false)
 }
@@ -2266,6 +2271,9 @@ struct Checker {
     /// re-derive it: the decision is the ELEMENT's type, and an empty list carries none at runtime).
     /// Recorded UNCONDITIONALLY, for the same reason [`Self::carriers`] is. See [`SumSeedTable`].
     sum_seeds: SumSeedTable,
+    /// D4 (TICKET-179) — which `spawn` operands are fresh, recorded by the spawn arm and consumed
+    /// verbatim by the compiler. See [`FreshOperandTable`].
+    fresh_operands: FreshOperandTable,
     /// W8-21 — which implicit success-coercion, if any, each declared `T?`/`T!E` return sink applies,
     /// keyed by [`ret_coerce_key`] on the returned value's own span and consumed verbatim by the
     /// compiler (which cannot re-derive it: the decision is whether the returned expression is

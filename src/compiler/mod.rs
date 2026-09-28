@@ -107,7 +107,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     // witness params and what fills each witness at each call site. The compiler CONSUMES it — it
     // never re-derives which protocols carry a static requirement (that resolves through
     // imports/aliases/embeds, which is checker work).
-    let (kw, wt, ct, pe, ns, rc, conflicts, fb) = crate::checker::resolve_call_tables(graph);
+    let (kw, wt, ct, pe, ns, rc, conflicts, fb, fo) = crate::checker::resolve_call_tables(graph);
     reject_table_conflicts(conflicts)?;
     c.for_binds = fb;
     c.keyword_calls = kw;
@@ -115,6 +115,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     c.carriers = ct;
     c.proto_eq_calls = pe;
     c.sum_seeds = ns;
+    c.fresh_operands = fo;
     c.ret_coerce = rc;
     // Pass 0: collision pre-pass — assign runtime keys for module-scoped user types. A type name
     // declared in exactly one module keeps its BARE name (the common case → unchanged Display/print
@@ -183,7 +184,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     // SINGLE-RESOLVER: extern C types come from the checker's standalone pass — the SAME resolver the
     // multi-file CLI uses (no second backend resolver exists). The backend reads this table verbatim.
     c.extern_sigs = crate::checker::resolve_extern_signatures_standalone(&module.stmts);
-    let (kw, wt, ct, pe, ns, rc, conflicts, fb) =
+    let (kw, wt, ct, pe, ns, rc, conflicts, fb, fo) =
         crate::checker::resolve_call_tables_standalone(&module.stmts);
     reject_table_conflicts(conflicts)?;
     c.for_binds = fb;
@@ -192,6 +193,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     c.carriers = ct;
     c.proto_eq_calls = pe;
     c.sum_seeds = ns;
+    c.fresh_operands = fo;
     c.ret_coerce = rc;
     let toplevel = c.compile_module(0, module, &[], true, None)?;
     let global_slots = std::mem::take(&mut c.global_slots);
@@ -323,6 +325,9 @@ struct Compiler {
     /// CONSUMED from the checker and never re-derived; a MISS means "plain numeric sum", which is the
     /// pre-fix lowering. See [`crate::checker::SumSeedTable`].
     sum_seeds: crate::checker::SumSeedTable,
+    /// D4 (TICKET-179) — the checker's per-operand freshness decision for `spawn`, read by
+    /// [`Self::fresh_bit`]. See [`crate::checker::FreshOperandTable`].
+    fresh_operands: crate::checker::FreshOperandTable,
     /// W8-21 — which implicit success-coercion (if any) each declared `T?`/`T!E` return sink applies
     /// to its bare success value, consumed verbatim: the backend is type-blind and cannot re-derive
     /// whether the returned expression is already a carrier. A MISS means `NoWrap` — the pre-fix
@@ -624,6 +629,7 @@ impl Compiler {
             carriers: crate::checker::CarrierTable::new(),
             proto_eq_calls: crate::checker::ProtoEqTable::new(),
             sum_seeds: crate::checker::SumSeedTable::new(),
+            fresh_operands: crate::checker::FreshOperandTable::new(),
             ret_coerce: crate::checker::RetCoerceTable::new(),
             for_binds: crate::checker::ForBindTable::new(),
             next_opt_tmp: 0,
@@ -2231,7 +2237,7 @@ impl Compiler {
                 // wrapper instead of `Op::SpawnMethod`.
                 if self.receiverless_call_head(fc, callee) {
                     let n = self.compile_receiverless_target(fc, callee, args, named, call.span)?;
-                    fc.emit(Op::SpawnCall(n), call.span);
+                    fc.emit(Op::SpawnCall(n, 0), call.span);
                     return Ok(());
                 }
                 if let ExprKind::Field {
@@ -2249,7 +2255,8 @@ impl Compiler {
                     if let Some(seed) = self.sum_seed(name, args, *name_span) {
                         self.compile_expr(fc, obj)?;
                         self.emit_sum_seed(fc, &seed, call.span);
-                        fc.emit(Op::SpawnMethod(name.clone(), 1), call.span);
+                        let fresh = self.fresh_mask(Some(obj), []);
+                        fc.emit(Op::SpawnMethod(name.clone(), 1, fresh), call.span);
                         return Ok(());
                     }
                     self.compile_expr(fc, obj)?;
@@ -2258,28 +2265,39 @@ impl Compiler {
                     // `Op::CallMethod`, so the widened `argc` reaches the same proto.
                     let w =
                         self.emit_member_witness_args(fc, callee, name, *name_span, call.span)?;
-                    fc.emit(Op::SpawnMethod(name.clone(), args.len() + w), call.span);
+                    let fresh = self.fresh_mask(Some(obj), args.iter());
+                    fc.emit(
+                        Op::SpawnMethod(name.clone(), args.len() + w, fresh),
+                        call.span,
+                    );
                 } else if !named.is_empty() {
                     // A spawned VALUE call carrying keyword arguments: reorder to positional by the
                     // checker-recorded permutation, then spawn positionally (same as the eager form).
                     let perm = self.keyword_perm(named, call.span)?;
                     self.compile_expr(fc, callee)?;
-                    for &ci in &perm {
-                        let e = if ci < args.len() {
-                            &args[ci]
-                        } else {
-                            &named[ci - args.len()].1
-                        };
+                    let permuted: Vec<&Expr> = perm
+                        .iter()
+                        .map(|&ci| {
+                            if ci < args.len() {
+                                &args[ci]
+                            } else {
+                                &named[ci - args.len()].1
+                            }
+                        })
+                        .collect();
+                    for &e in &permuted {
                         self.compile_expr(fc, e)?;
                     }
                     // M24-5: TRAILING — after the permuted args, never in source order.
                     let w = self.emit_indirect_witness_args(fc, callee, call.span)?;
-                    fc.emit(Op::SpawnCall(perm.len() + w), call.span);
+                    let fresh = self.fresh_mask(None, permuted);
+                    fc.emit(Op::SpawnCall(perm.len() + w, fresh), call.span);
                 } else {
                     self.compile_expr(fc, callee)?;
                     self.compile_args(fc, args)?;
                     let w = self.emit_indirect_witness_args(fc, callee, call.span)?;
-                    fc.emit(Op::SpawnCall(args.len() + w), call.span);
+                    let fresh = self.fresh_mask(None, args.iter());
+                    fc.emit(Op::SpawnCall(args.len() + w, fresh), call.span);
                 }
                 Ok(())
             }
@@ -4548,6 +4566,30 @@ impl Compiler {
                 self.kw_frag_ord,
                 name_span,
             )) == Some(&true)
+    }
+
+    /// The spawn op's freshness bitmask (D4, TICKET-179): bit 0 is the method receiver, bit `j + 1`
+    /// the argument compiled at position `j`. Witness args never set a bit; an arg past bit 31 stays
+    /// marked (a false fault, never a lost write).
+    fn fresh_mask<'e>(&self, recv: Option<&Expr>, args: impl IntoIterator<Item = &'e Expr>) -> u32 {
+        let mut mask = u32::from(recv.is_some_and(|r| self.fresh_bit(r)));
+        for (j, a) in args.into_iter().enumerate() {
+            if j + 1 < u32::BITS as usize && self.fresh_bit(a) {
+                mask |= 1 << (j + 1);
+            }
+        }
+        mask
+    }
+
+    /// Is this `spawn` operand fresh, per the checker's [`crate::checker::FreshOperandTable`]? A miss
+    /// means not fresh, so an absent entry keeps today's full mark (a false fault, never a lost write).
+    fn fresh_bit(&self, e: &Expr) -> bool {
+        self.fresh_operands.get(&crate::checker::carrier_key(
+            self.current_module_idx,
+            self.kw_frag_ctx,
+            self.kw_frag_ord,
+            e.span,
+        )) == Some(&true)
     }
 
     /// The seed a `xs.sum()` site needs, per the checker's [`crate::checker::SumSeedTable`] --

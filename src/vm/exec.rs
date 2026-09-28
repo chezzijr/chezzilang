@@ -2799,8 +2799,10 @@ impl Vm {
                     return Err(e);
                 }
             }
-            Op::SpawnCall(argc) => self.do_spawn(None, *argc, span)?,
-            Op::SpawnMethod(name, argc) => self.do_spawn(Some(name.clone()), *argc, span)?,
+            Op::SpawnCall(argc, fresh) => self.do_spawn(None, *argc, *fresh, span)?,
+            Op::SpawnMethod(name, argc, fresh) => {
+                self.do_spawn(Some(name.clone()), *argc, *fresh, span)?
+            }
             Op::SpawnBlock(proto, entries) => self.do_spawn_block(*proto, entries, span)?,
             Op::WaitPoll(meta) => {
                 self.sched_seed_point();

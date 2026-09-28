@@ -2115,6 +2115,37 @@ impl Checker {
         self.pop_scope();
     }
 
+    /// D4 (TICKET-179): is this `spawn` operand FRESH — a value no parent binding can reach, so a
+    /// task-side write to it is not a lost write? True for a list/map/set literal, a comprehension, and
+    /// a zero-argument `.copy()` on a List/Map/Set/bytearray. A call result is never fresh
+    /// (`id(xs)` returns the parent's own list); a struct constructor or struct `.copy()` is not
+    /// either (a known false-fault ceiling). The one decider: see [`FreshOperandTable`].
+    fn spawn_operand_is_fresh(&mut self, a: &Expr) -> bool {
+        match &a.kind {
+            ExprKind::List(..)
+            | ExprKind::Map(..)
+            | ExprKind::Set(..)
+            | ExprKind::Comprehension { .. } => true,
+            ExprKind::Call {
+                callee,
+                args,
+                named,
+                ..
+            } => match &callee.kind {
+                ExprKind::Field { obj, name, .. }
+                    if name == "copy" && args.is_empty() && named.is_empty() =>
+                {
+                    matches!(
+                        self.infer(obj),
+                        Ty::List(_) | Ty::Map(..) | Ty::Set(_) | Ty::ByteArray
+                    )
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
     pub(super) fn check_stmt(&mut self, stmt: &Stmt) {
         self.pending_key_reject = None;
         let span = stmt.span;
@@ -3064,6 +3095,33 @@ impl Checker {
                             // keyword (a value+keyword spawn, `spawn h(f=cb)`, lowers to the same
                             // positional SpawnCall, so a non-sendable value smuggled in by LABEL must
                             // be rejected exactly like the positional form).
+                            // D4 (TICKET-179): record, once, whether each operand is fresh. The
+                            // compiler encodes it on the spawn op; the runtime unmarks its root.
+                            let receiver = match &callee.kind {
+                                ExprKind::Field { obj, .. } => Some(&**obj),
+                                _ => None,
+                            };
+                            for a in receiver
+                                .into_iter()
+                                .chain(args.iter())
+                                .chain(named.iter().map(|(_, v)| v))
+                            {
+                                let fresh = self.spawn_operand_is_fresh(a);
+                                let key = crate::checker::carrier_key(
+                                    self.graph_module_idx,
+                                    self.kw_frag_ctx,
+                                    self.kw_frag_ord,
+                                    a.span,
+                                );
+                                crate::checker::record_call_table_entry(
+                                    &mut self.fresh_operands,
+                                    &mut self.table_conflicts,
+                                    key,
+                                    fresh,
+                                    "spawn operand freshness",
+                                    e.span,
+                                );
+                            }
                             for arg in args.iter().chain(named.iter().map(|(_, v)| v)) {
                                 let aty = self.infer(arg);
                                 if !self.sendable(&aty) {

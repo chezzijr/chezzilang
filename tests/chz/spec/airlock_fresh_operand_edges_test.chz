@@ -1,0 +1,51 @@
+# TICKET-179 -- edges of the fresh spawn operand rule (D4). A fresh operand crosses with its ROOT
+# unmarked; everything else, including a fresh literal's children, stays a task copy.
+
+fn t179e_outcome(res: Result[int]) -> str:
+    match res:
+        Ok(_): return "ok"
+        Err(_): return "fault"
+
+fn t179e_nested(ys: List[List[int]], out: Channel[str]):
+    a := recover:
+        ys.push([2])
+        0
+    b := recover:
+        ys[0].push(9)
+        0
+    out.send("{t179e_outcome(a)},{t179e_outcome(b)}")
+
+test fn fresh_literal_holding_a_parent_list_keeps_the_child_marked():
+    xs := [1]
+    out := Channel[str](1)
+    parallel:
+        spawn t179e_nested([xs], out)
+    assert out.recv() == "ok,fault"
+    assert xs == [1]
+
+fn t179e_kw(xs: List[int], out: Channel[str]):
+    r := recover:
+        xs.push(9)
+        0
+    out.send(t179e_outcome(r))
+
+test fn keyword_spawn_marks_by_compiled_position():
+    named := [1]
+    out := Channel[str](1)
+    f := t179e_kw
+    parallel:
+        spawn f(out=out, xs=[1])
+    assert out.recv() == "ok"
+    parallel:
+        spawn f(out=out, xs=named)
+    assert out.recv() == "fault"
+    assert named == [1]
+
+fn t179e_wide30(a0: int, a1: int, a2: int, a3: int, a4: int, a5: int, a6: int, a7: int, a8: int, a9: int, a10: int, a11: int, a12: int, a13: int, a14: int, a15: int, a16: int, a17: int, a18: int, a19: int, a20: int, a21: int, a22: int, a23: int, a24: int, a25: int, a26: int, a27: int, a28: int, a29: int, xs: List[int], out: Channel[str]):
+    t179e_kw(xs, out)
+
+test fn a_fresh_arg_at_bit_31_is_writable():
+    out := Channel[str](1)
+    parallel:
+        spawn t179e_wide30(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, [1], out)
+    assert out.recv() == "ok"

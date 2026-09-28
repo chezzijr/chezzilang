@@ -222,6 +222,13 @@ pub enum SumSeed {
 }
 pub type SumSeedTable = HashMap<CarrierKey, Option<SumSeed>>;
 
+/// D4 (TICKET-179) — is each `spawn` operand (method receiver or argument) FRESH: a value no parent
+/// binding can reach (a list/map/set literal, a comprehension, a container or bytearray `.copy()`)?
+/// Keyed by [`carrier_key`](super::carrier_key) on the operand's span. The checker decides it once
+/// (`spawn_operand_is_fresh`); the compiler only encodes it as the spawn op's bitmask and the
+/// runtime only unmarks the operand's root. A missing key means not fresh.
+pub type FreshOperandTable = HashMap<CarrierKey, bool>;
+
 /// Surface-only parameter labels on a function type (Swift SE-0111 keyword arguments through a
 /// function VALUE). They ride PARALLEL to a `Ty::Func`'s `params`, but participate in NO type
 /// identity: two function types differing only in labels are the SAME type (mutually assignable,

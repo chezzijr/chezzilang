@@ -773,6 +773,9 @@ struct QueuedTask {
     /// recycled out from under the mapping. Empty when nothing crossed, or when no snapshot was
     /// pinned yet.
     cell_ids: CellIds,
+    /// D4 (TICKET-179) — the spawn op's freshness bitmask, passed to [`Vm::rebuild_ready`]: bit 0 = the
+    /// receiver, bit `i + 1` = arg `i`. `0` for a `spawn:` block.
+    fresh: u32,
 }
 
 impl QueuedTask {

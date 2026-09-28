@@ -119,6 +119,7 @@ impl Checker {
             carriers: crate::checker::CarrierTable::new(),
             proto_eq_calls: crate::checker::ProtoEqTable::new(),
             sum_seeds: crate::checker::SumSeedTable::new(),
+            fresh_operands: crate::checker::FreshOperandTable::new(),
             ret_coerce: crate::checker::RetCoerceTable::new(),
             for_binds: crate::checker::ForBindTable::new(),
             table_conflicts: Vec::new(),

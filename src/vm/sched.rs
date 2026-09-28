@@ -195,11 +195,14 @@ impl Vm {
 impl Vm {
     /// `spawn f(args)` / `spawn recv.m(args)` — pop `argc(+1)` operands, deep-copy the args (and, for
     /// the method form, the receiver) across the airlock, and register the task on the innermost
-    /// nursery. The callee passes by handle (like `defer`); only data crosses the airlock.
+    /// nursery. The callee passes by handle (like `defer`); only data crosses the airlock. `fresh` is
+    /// the checker's freshness bitmask (see [`super::op::Op::SpawnMethod`]), carried to
+    /// [`Vm::rebuild_ready`].
     pub(super) fn do_spawn(
         &mut self,
         method: Option<String>,
         argc: usize,
+        fresh: u32,
         span: Span,
     ) -> Result<(), RuntimeError> {
         self.sched_seed_point();
@@ -249,7 +252,7 @@ impl Vm {
                 span,
             },
         };
-        self.register_task(task, span, pin, cell_ids)
+        self.register_task(task, span, pin, cell_ids, fresh)
     }
 
     /// Does a `spawn f()` **callee** have to cross the task boundary by DEEP value? A closure that
@@ -328,6 +331,7 @@ impl Vm {
             span,
             pin,
             cell_ids,
+            0,
         )
     }
 
@@ -365,6 +369,7 @@ impl Vm {
         span: Span,
         snap: Result<Arc<ModuleSnapshot>, RuntimeError>,
         cell_ids: CellIds,
+        fresh: u32,
     ) -> Result<(), RuntimeError> {
         // The innermost open nursery (`nurseries`, `mn_scopes` and `eager_scheds` are lockstep).
         // W7-4c — `snap` was pinned by `pin_snapshot`, which already ran this guard BEFORE the
@@ -384,7 +389,7 @@ impl Vm {
             // (prepare instant).
             let tail = scope.more_scopes.last().copied().unwrap_or(scope.scope);
             let fiber = self
-                .prepare_worker(task, Some(snap?), &cell_ids)?
+                .prepare_worker(task, Some(snap?), &cell_ids, fresh)?
                 .into_fiber(0, tail);
             if let Some(n) = sched.inject_or_extend(fiber, tail)
                 && let Some(Some(scope)) = self.eager_scheds.last_mut()
@@ -400,6 +405,7 @@ impl Vm {
             call: task,
             snap,
             cell_ids,
+            fresh,
         });
         Ok(())
     }
@@ -670,7 +676,7 @@ impl Vm {
             // W6-2 — each task replays the snapshot pinned at its own spawn. scope 0 — the outermost
             // nursery.
             fibers.push(
-                self.prepare_worker(t.call, Some(t.snap?), &t.cell_ids)?
+                self.prepare_worker(t.call, Some(t.snap?), &t.cell_ids, t.fresh)?
                     .into_fiber(i, 0),
             );
         }
@@ -777,7 +783,7 @@ impl Vm {
         let cancel = Arc::new(AtomicBool::new(false));
         let mut workers = Vec::with_capacity(tasks.len());
         for t in tasks {
-            workers.push(self.prepare_worker(t.call, Some(t.snap?), &t.cell_ids)?);
+            workers.push(self.prepare_worker(t.call, Some(t.snap?), &t.cell_ids, t.fresh)?);
         }
         let scope_id =
             sched.register_scope_seeded(Arc::clone(&cancel), self.scope_ancestors(), workers);
@@ -844,7 +850,7 @@ impl Vm {
             // global mutated in between.
             let mut prepared = Vec::with_capacity(total);
             for t in clones {
-                prepared.push(self.prepare_worker(t.call, Some(t.snap?), &t.cell_ids)?);
+                prepared.push(self.prepare_worker(t.call, Some(t.snap?), &t.cell_ids, t.fresh)?);
             }
             // COMMIT — nothing fallible remains. Discard the originals (the clones became the fibers),
             // register + seed the scope, and record it for its OWN `JoinNursery` to reduce.
@@ -4892,7 +4898,7 @@ impl Vm {
         &mut self,
         task: PendingCall,
     ) -> Result<WorkerResult, RuntimeError> {
-        self.prepare_worker(task, None, &[])?.run()
+        self.prepare_worker(task, None, &[], 0)?.run()
     }
 
     /// B3.3-threads — the parent-thread half of [`Vm::run_task_isolated`]: lower the task to a `Send`
@@ -4910,6 +4916,7 @@ impl Vm {
         task: PendingCall,
         snap: Option<Arc<ModuleSnapshot>>,
         cell_ids: &[(GcRef, u32)],
+        fresh: u32,
     ) -> Result<ReadyWorker, RuntimeError> {
         // TICKET-111 — `cell_ids` now mixes cells and adoptable data-node ids (see `deep_clone_all`'s
         // report filter); split them so `share` (the cell-sharing prune below) only fires on an actual
@@ -4937,7 +4944,7 @@ impl Vm {
         };
         let mut worker = self.spawn_worker();
         worker.install_snapshot(snap);
-        let (call, span) = worker.rebuild_ready(lowered, share, &adopt_ids);
+        let (call, span) = worker.rebuild_ready(lowered, share, &adopt_ids, fresh);
         Ok(ReadyWorker { worker, call, span })
     }
 
@@ -5102,11 +5109,16 @@ impl Vm {
     /// captures; a `Method`'s receiver before its args), so a cell shared between an arg and a capture
     /// is rebuilt once and both references tie to it — and no `Backref` is ever reached before the
     /// `WireValue::Cell` that defines it.
+    ///
+    /// D4 (TICKET-179): `fresh` is the checker's freshness bitmask (bit 0 = the receiver, bit `i + 1` =
+    /// arg `i`). A fresh operand's ROOT is unmarked after the rebuild; its children stay marked
+    /// (`copy()` is shallow, DEC-160).
     pub(super) fn rebuild_ready(
         &mut self,
         lowered: Lowered,
         share: bool,
         adopt_ids: &[u32],
+        fresh: u32,
     ) -> (ReadyCall, Span) {
         // W7-4c — when this task carries snapshot-numbered cells, rebuild into the SAME map
         // `fault_module` drains, so a cell its captures rebuild is the one the module snapshot's later,
@@ -5179,6 +5191,24 @@ impl Vm {
             }
         };
         self.copy_mark = saved_copy_mark;
+        let (recv, args) = match &out.0 {
+            ReadyCall::Invoke { args, .. } => (None, args),
+            ReadyCall::Method { recv, args, .. } => (Some(*recv), args),
+        };
+        let fresh_roots = recv
+            .filter(|_| fresh & 1 == 1)
+            .into_iter()
+            .chain(
+                args.iter()
+                    .enumerate()
+                    .filter(|&(i, _)| i + 1 < u32::BITS as usize && (fresh >> (i + 1)) & 1 == 1)
+                    .map(|(_, &v)| v),
+            )
+            .filter_map(|v| v.as_obj())
+            .collect::<Vec<_>>();
+        for h in fresh_roots {
+            self.heap.unset_copied(h);
+        }
         // TICKET-111 — copy each adopt id's just-rebuilt handle into `snapshot_adopt`, so this task's
         // OWN module-global fault (`fault_module`) can adopt it as the global's object instead of
         // rebuilding a second copy. Must happen before the cell-only prune below (`owned` still holds

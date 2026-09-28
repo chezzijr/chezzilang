@@ -508,11 +508,13 @@ pub enum Op {
     ReclaimNursery,
     /// `spawn f(args)` — stack `[callee, arg0, …]`; pops `argc + 1`, deep-copies the args across the
     /// airlock (the callee passes by handle, like `defer`), and registers the task on the innermost
-    /// nursery. Mirrors `DeferCall`.
-    SpawnCall(usize),
+    /// nursery. Mirrors `DeferCall`. The `u32` is the checker's freshness bitmask (D4, TICKET-179):
+    /// bit `j + 1` set = arg `j` is fresh, so its root is rebuilt unmarked; bit 0 is unused here.
+    SpawnCall(usize, u32),
     /// `spawn recv.name(args)` — stack `[recv, arg0, …]`; pops `argc + 1`, deep-copies the receiver
     /// AND the args across the airlock, and registers the method task. Mirrors `DeferMethod`.
-    SpawnMethod(String, usize),
+    /// The `u32` is the freshness bitmask: bit 0 = the receiver, bit `j + 1` = arg `j`.
+    SpawnMethod(String, usize, u32),
     /// `spawn:` block — snapshot each `CapEntry`'s value from the enclosing frame (like
     /// `MakeClosure`), deep-copy the captured values across the airlock, build a zero-arg closure
     /// over `ProtoId`, and register it as a `Call` task. (Form 2; the block was compiled to a
