@@ -1,0 +1,28 @@
+# TICKET-180: the checker and the compiler must agree on what a name means.
+# Expected values are the CPython / Rust meaning.
+
+struct P:
+    x: int
+
+type Q = P
+
+fn Q(s: str) -> P:
+    if s == "":
+        return P(0)
+    return Q(s[1:])
+
+fn local_shadows_builtin() -> int:
+    ord := fn(s: str) -> int: 1000
+    return ord("a")
+
+fn param_shadows_struct(P: fn(int) -> str) -> str:
+    return P(4)
+
+test fn local_closure_shadows_builtin_ord():
+    assert local_shadows_builtin() == 1000
+
+test fn param_shadows_struct_ctor():
+    assert param_shadows_struct(fn(n: int) -> str: "v" + str(n)) == "v4"
+
+test fn fn_shadows_type_alias_ctor():
+    assert Q("abc").x == 0
