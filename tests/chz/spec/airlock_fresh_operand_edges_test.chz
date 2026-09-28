@@ -68,3 +68,25 @@ test fn started_generator_captured_by_a_spawn_block_runs():
             out.send(n)
     assert out.recv() == 5
     assert g.next() == Some(2)
+
+struct T179eSink:
+    tag: int
+
+    fn drain(self, g: Iterator[int], out: Channel[str]):
+        res := recover:
+            n := 0
+            for v in g:
+                n += v
+            n
+        match res:
+            Ok(n): out.send("{n}")
+            Err(_): out.send("fault")
+
+test fn started_generator_arg_of_a_method_spawn_runs():
+    g := t179e_gen()
+    _ := g.next()
+    out := Channel[str](1)
+    s := T179eSink(tag=1)
+    parallel:
+        spawn s.drain(g, out)
+    assert out.recv() == "5"
