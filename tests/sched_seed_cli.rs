@@ -227,3 +227,74 @@ fn an_invalid_sched_seed_warns_and_runs_unseeded() {
         "got stderr {stderr:?}"
     );
 }
+
+/// TICKET-176 / W15-3 -- task B `close()`s a socket while task A's 16 MiB `write` is parked for
+/// buffer room. The parked write must return `Err("write on a closed socket")`, never `Ok`. At
+/// T=1 the seeded scheduler reaches the losing order on most seeds, so run seeds 1..16 and demand
+/// zero failures.
+#[test]
+fn closing_a_socket_fails_a_parked_write_at_every_seed_one_worker() {
+    let bin = std::path::PathBuf::from(env!("CARGO_BIN_EXE_chezzi"));
+    let target = schedfuzz::target_for(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/chz/stdlib/net_close_test.chz"),
+    );
+    let mut failing = Vec::new();
+    for seed in 1..=16u64 {
+        match schedfuzz::run_target(
+            &bin,
+            &target,
+            Some(seed),
+            1,
+            std::time::Duration::from_secs(60),
+        ) {
+            Ok(c) if c.code == Some(0) => {}
+            Ok(c) => {
+                let text = format!("{}{}", c.stdout_text(), c.stderr_text());
+                let line = text
+                    .lines()
+                    .find(|l| l.contains("returned Ok"))
+                    .unwrap_or("")
+                    .to_string();
+                failing.push(format!("seed {seed}: rc={:?} {line}", c.code));
+            }
+            Err(e) => failing.push(format!("seed {seed}: {e:?}")),
+        }
+    }
+    assert!(
+        failing.is_empty(),
+        "parked write survived close() at T=1: {} of 16 seeds failed: {}",
+        failing.len(),
+        failing.join(" | ")
+    );
+}
+
+/// TICKET-176 / W15-6 -- a generator driven from a spawned task, iterating a channel, must complete
+/// at the default worker count. Seeds 5 and 7 hung (rc=124 at 30 s) on 2026-09-28.
+#[test]
+fn a_generator_over_a_channel_from_a_task_completes_at_seeds_5_and_7_default_workers() {
+    let bin = std::path::PathBuf::from(env!("CARGO_BIN_EXE_chezzi"));
+    let target = schedfuzz::target_for(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/chz/spec/generator_channel_test.chz"),
+    );
+    let mut failing = Vec::new();
+    for seed in [5u64, 7] {
+        match schedfuzz::run_target(
+            &bin,
+            &target,
+            Some(seed),
+            0,
+            std::time::Duration::from_secs(30),
+        ) {
+            Ok(c) if c.code == Some(0) => {}
+            Ok(c) => failing.push(format!("seed {seed}: rc={:?}", c.code)),
+            Err(e) => failing.push(format!("seed {seed}: {e:?}")),
+        }
+    }
+    assert!(
+        failing.is_empty(),
+        "generator-over-channel did not complete at T=0: {}",
+        failing.join("; ")
+    );
+}
