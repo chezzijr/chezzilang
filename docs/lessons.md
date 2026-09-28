@@ -6,7 +6,9 @@
 > strategy in [`bug-discovery.md`](bug-discovery.md). **Read the section for the area you are about
 > to touch before you touch it** — most of these shipped fully green the first time.
 > Every claim here was re-verified against the release binary at `54be64f8` on 2026-09-06 (named
-> symbols grepped, repros re-run); a fact with a date is the state on that date.
+> symbols grepped, repros re-run); a fact with a date is the state on that date. The wave-16 rules
+> (2026-09-28, "Derive, don't mirror" and the notes citing `root-causes-w16.md`) were verified at
+> `8b1d2331`.
 
 ---
 
@@ -204,6 +206,15 @@ the freeze.
   un-gated into a garbage cross-heap `GcRef` — genuine UB. Every new cross-heap store goes through
   `to_wire_crossable`, never bare `to_wire_at`. A missed *runtime* guard is UB; a missed checker
   widening is at worst an uglier error.
+- **D4's "task copy" mark approximates the wrong property, and "is a write" has two owners.** The
+  runtime marks everything *rebuilt by the airlock walk* (spawn args, captures, a started generator's
+  frame), but D4's claim is about writes *the parent could observe*; a fresh `spawn work([], out)`
+  argument and a generator's own frame-local list are marked and falsely fault (wave 16 A1/A2).
+  Separately, "mutates its receiver" lives in two hand lists — the VM's `is_mutating_native_kind` and
+  the checker's `mutates_receiver` — which disagree on `Map.merge` (non-mutating, but the VM faults it;
+  a drift test exempts it instead of failing). TICKET-170 exported the VM list for the checker and then
+  hand-synced a second list instead. Fix both at the source (`docs/root-causes-w16.md` Family 4); never
+  add a third list or a per-method exemption.
 - **Closures cross by value iff every capture is sendable** (Rust `Send` model). The only runtime
   non-sendables today are `Obj::Module` and a generator inside a value cycle (`ref`/`Ref[T]` were
   removed entirely, 2026-07-19). The scoping lesson survives them: when something must be

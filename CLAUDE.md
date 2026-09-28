@@ -20,6 +20,12 @@ Claude implements directly. Ship working, tested code each session.
   `experimental`, `not yet`, `follow-up`, `mooted`) and fix or delete it. A green build with stale docs
   is not done.
 - Match the existing code's style and patterns; reuse before adding new abstractions.
+- **Derive, don't mirror.** Every fact has one owner and everything else reads it. Before fixing a
+  bug, ask **"which duplicate does this delete, or which single source does it add?"** — never add
+  another copy, clause or veto next to the failing site in a family that already has sibling fixes.
+  A new "Mirrors the checker's …" / "keep in sync with …" comment, or a drift test with an exemption,
+  is a red flag. Family fixes land with one test that enumerates the whole grid. Why and where:
+  `docs/lessons.md` §1, `docs/root-causes-w16.md`.
 
 ## Workflow per milestone
 
@@ -38,8 +44,8 @@ cargo build --release    # compile (release; the VM is only fast optimized)
 # conformance run ONCE (in the lib test target). `cargo test` is the normal full command.
 cargo test                       # FULL pre-commit suite: lib unit suite + goldens + conformance + integration
 # ^ includes `tests/chezzi_threads_cli.rs`: with `--serial` gone, the standing differential is
-#   `tests/chz` (630 Chezzi behavioural tests) run at TWO worker counts (default + `CHEZZI_THREADS=2`)
-#   via the built binary, each its own process/pool. NOT a gate over the ~4190 Rust lib tests — that
+#   `tests/chz` (the Chezzi behavioural suite) run at TWO worker counts (default + `CHEZZI_THREADS=2`)
+#   via the built binary, each its own process/pool. NOT a gate over the Rust lib tests — that
 #   pool is ONE process-wide `OnceLock`, so forcing a count inside `cargo test --lib` either no-ops or
 #   (worse) pins the WHOLE run's pool and starves concurrently-running tests (measured: 8
 #   failures/hangs at `RUST_TEST_THREADS=4`, >54 min unfinished at `=1`) — don't re-attempt an
@@ -190,154 +196,55 @@ UPDATE_EDITOR_ASSETS=1 cargo test --test editor_tmlanguage    # regenerate the V
 
 Core language is **implemented through M24 (and still evolving; M19 perf in progress)** (scalars, `List`/`Map`/`Set`/`tuple`,
 generic structs + enums, `Result`/`Option` + `?`, generics + structural protocols,
-exhaustive `match` + guards, closures/HOF, modules, GC, interpolation, pipe, `defer`,
-`recover:`, `Iterator[T]`, slicing/indexing protocols, user-overloadable `==` via `Eq`,
-static protocol requirements callable through a generic bound via witness passing). **Concurrency** has landed through
-**Tier-D** (`spawn` / `parallel:` nursery, `Channel[T]`, `Shared[T]`, `Executor`, the real
-OS-thread M:N engine, netpoller + `std.net`). The checker also has a **non-fatal warning channel**
+exhaustive `match` + guards, closures/HOF, modules (incl. Python full paths `a.b.X`, TICKET-175),
+GC, interpolation, pipe, `defer`, `recover:`, `Iterator[T]`, slicing/indexing protocols,
+user-overloadable `==` via `Eq`, static protocol requirements via witness passing). **Concurrency** has
+landed through **Tier-D** (`spawn` / `parallel:` nursery, `Channel[T]`, `Shared[T]`, `Executor`, the real
+OS-thread M:N engine, netpoller + `std.net`). The checker has a **non-fatal warning channel**
 (`Severity::Warning`, `"severity"` in `--errors=json`, `DiagnosticSeverity::WARNING` in the LSP) with
-four rules on it — a discarded `Result`/`Option`, a mutating call or assign on a `Shared`/`RwShared`/`Atomic` read temporary (`s.get().push(1)`), a
-`match` arm made unreachable by an earlier unguarded irrefutable arm, and a local binding that is never read (TICKET-090).
-**Rust tests** green across every target (**4458** in the lib target), plus **814**
-Chezzi tests green at two worker counts (up from 590 at the start of `feat/span-file-and-stdlib-contracts`).
+four rules — a discarded `Result`/`Option`, a mutating call on a `Shared`/`RwShared`/`Atomic` read
+temporary, an unreachable `match` arm, an unread local (TICKET-090). Test totals move with every ticket;
+read the live counts from `cargo test` / `chezzi test tests/chz`, never from prose.
 
 ## Current focus
 
 See **[`PROGRESS.md`](PROGRESS.md)** — single source of truth for "what's next."
 
-Right now: **pre-JIT/pre-freeze bug-hunt + drift-fix hunt** is the active phase (Go-concurrency,
-checker↔runtime, and IO drift — live ledger in `docs/gaps.md`, closed rows + session logs in `docs/gaps-archive.md`), with **M19 — Perf track** paused
-in-progress alongside it.
+Right now: **pre-JIT bug-hunt**, with **M19 — Perf track** paused alongside it.
 
-> **JIT ENTRY RULE (2026-09-22):** the hunt ends when the seeded scheduler oracle is built (TICKET-167), two
-> consecutive sweeps find zero new P0/P1 in the core, no P0/P1 row is open, and features freeze for the
-> window. Full rule: `PROGRESS.md` "JIT entry rule".
-> **D4 (APPROVED 2026-09-22):** a spawned task's write to an airlock copy (captures, module globals) is
-> an error or a runtime fault, never a silent lost write. It supersedes D2's "lost write is correct".
-> Layer C (the runtime fault) landed 2026-09-23, TICKET-169. Layer A landed in TICKET-170: the checker
-> rejects direct visible task writes, calls to inferred `self`-writing methods, and capture-writing
-> closures at crossings that execute them. Unknown shapes decline to layer C. Read
-> `docs/decision-d4-airlock.md` before any airlock work.
+> **START HERE (2026-09-28): read [`docs/root-causes-w16.md`](docs/root-causes-w16.md) before fixing
+> anything in the core.** Bug-hunt wave 16 (JIT sweep #1) found 5 new P0 and 7 new P1, and traced them
+> to five systemic families — **Names, Blocking, Declarations, Airlock, Identity** — each one fact
+> decided in several places kept in sync by hand. An audit of TICKET-120..176 found 34 of 51 fixes were
+> point patches that added one more copy/clause/veto, and every family patched that way came back.
+> **Rule: derive, don't mirror** (`docs/lessons.md` §1); the pipeline's planning and plan-validation
+> stages enforce a `## Single source` section for these families. Planned fix order: Identity →
+> Declarations (types are top-level only, owner decision 2026-09-28) → Airlock → Names → Blocking, each
+> with one test that enumerates its whole grid.
 >
-> **START HERE (2026-09-20): `docs/gaps.md` is now a SHORT LEDGER — open rows only, each re-verified
-> on the release binary, with the archive line for its full history.** Every closed row and all 30
-> bug-hunt session logs (W1..W14) moved verbatim to **`docs/gaps-archive.md`**, so any
-> `docs/gaps.md:NNNN` citation in a closed ticket or in `PROGRESS.md` resolves against the archive at
-> the same line number. **7 open rows** — W8-19, W13-28,
-> W15-4, W15-5 (both found 2026-09-23, TICKET-167's post-review corpus sweep —
-> W15-4 the documented streaming-CLI contract surfacing as `output` findings, W15-5 two wall-clock
-> ratio gates that flake under the sweep's own CPU contention; both are tracking rows with
-> no fix needed), W15-8 (found 2026-09-23, a
-> pre-existing load-sensitive flake in `an_eager_wait_block_is_woken_by_its_arm_not_by_the_poll_timeout`,
-> reproduced twice at host load ~34-35, unrelated to this ticket's diff), W15-9 (found 2026-09-23,
-> TICKET-168 — at T>=2 a body that blocks once then burns runs n+1 CPU runners, not n, because
-> TICKET-159's blocked-body helpers outlive the block), W15-10 (found 2026-09-23, TICKET-168 —
-> byte-for-byte T=1 seeded replay stays out of reach after W15-2's fix: the drainer's pick runs
-> before its width-permit acquire, and a woken body only queues once its own thread runs)
-> (W15-3, W15-6 closed 2026-09-28, TICKET-176 — a socket `write` now sends every byte before `Ok`,
-> and the deadlock veto counts a closed or latched channel under a demoted fiber; W15-7 closed
-> 2026-09-28 as not reproducing, 0 of 62 loaded samples;
-> W15-2 closed 2026-09-23, TICKET-168 — the T=1 top-level `parallel:` body and its
-> `chezzi-eager` drainer now share one width permit, so `--threads=1` runs at most one CPU runner
-> there too, matching Go `GOMAXPROCS=1`; W15-1 closed 2026-09-22, TICKET-166 — `close()` on a
-> `Socket`/`Listener` now wakes a parked
-> `accept`/`read`/`write` with an `Err` instead of hanging or crashing the netpoller; W11-15 closed 2026-09-21, TICKET-154 — a DAG alias now crosses the airlock as ONE object at an
-> `RwShared` store; W12-5's last shape (G6) stays listed as a RECORD that D2 (DEC-137) governs it,
-> not as a bug) — and **0 deferred tickets** in `.project/tickets-deferred/` (083 closed
-> 2026-09-22 — `str.pad_right` landed in place). 082, 084 and 087 closed 2026-09-21 under TICKET-161, 160, 163. 086 and 090 closed 2026-09-22 under TICKET-086 and TICKET-090. The pipeline queue is EMPTY: 156 done, 3 rejected, 0 in flight. Wave 14's three
-> redesigns all landed — **D1** a deadlock is fatal (TICKET-135), **D2** a received closure reads the
-> running task's module globals (TICKET-137), **D3** an int never widens into a float slot
-> (TICKET-138). **W8-17 is CLOSED**: (e) the `?` unknown-type rendering (TICKET-145), (f) the
-> `match`-arm caret on the scrutinee (TICKET-149), and (c) the variant-typo triple error, (d) the
-> `unexpected an ...` wording and (g) a literal's one-char `end_col` (TICKET-158).
+> **JIT ENTRY RULE (2026-09-22, full text `PROGRESS.md` "JIT entry rule"):** (1) seeded scheduler oracle
+> built and judged — built, re-finds 2 of 3 reverted races, owner's call pending; (2) two consecutive
+> sweeps with zero new P0/P1 in the core — **sweep #1 (wave 16) was not clean**; (3) no open P0/P1 row;
+> (4) feature freeze for the window — not yet declared.
 >
-> **Wave 11 (2026-09-08)** filed `W11-1..W11-13`, six domains, ticketed as **TICKET-093..098** (093 was
-> the P0, CLOSED 2026-09-08: `fn`-type params were compared COVARIANTLY, so `h: fn(Any) -> Dog = idd`
-> type-checked and a `Cat` reached a `List[str]` at rc=0 — now strictly INVARIANT). Read wave 11's session log in `docs/gaps-archive.md` before
-> working any of them — it also records what the wave found CLEAN (the whole `std.*` surface at ~28 000
-> differential cases, all 32 FFI null guards, `std.net`'s read contract), the parent→child cross-nursery
-> false `deadlock` (CLOSED 2026-09-09, TICKET-099 — replaced the upward-only `MnSched::parent_wake`
-> chain with a run-wide `wake_run_wide` + a peer-veto deadlock predicate), and one row deliberately NOT ticketed
-> (`W11-13`, whose airlock warning was superseded by D4's error in TICKET-170).
-> Bug-hunt wave 10
-> (2026-09-05/06) filed `W10-1..W10-26` and **all 26 are closed**: TICKET-060..069 landed overnight through the
-> pipeline and every fix was re-verified on the merged release binary at both worker counts (read the
-> wave-10 session log in `docs/gaps-archive.md` first; `W9-9` closed under TICKET-059).
-> **Bug-hunt wave 9 (2026-09-03/05) closed `W9-1..W9-8`** — all eight fixed, merged and re-verified on
-> the merged binary (TICKET-051..058); read its session log before working this area, and read
-> **`W9-5`** before filing anything about a name collision: that ticket's premise contradicted an
-> ACTIVE decision (DEC-029) and would have deleted a shipped `std.path` API. `W9-9` is the one still
-> open — the wall-clock ratchet scans only `tests/chz`, so it has never reached Rust integration tests
-> (TICKET-059, approved). Two standing lessons from the wave: the mechanical oracles found **nothing**
-> across 23 000 panic-fuzz and 13 000 differential seeds, so every finding came from a hand-built
-> program judged against a RUN Go/Rust/CPython reference; and a flake comparison must be sampled so a
-> ~5% rate cannot read as `0/30` — one did, and nearly blocked a correct fix.
+> **D4 (APPROVED 2026-09-22):** a spawned task's write to an airlock copy is an error or a runtime
+> fault, never a silent lost write (layer C TICKET-169, layer A TICKET-170). Read
+> `docs/decision-d4-airlock.md` before any airlock work, and `docs/root-causes-w16.md` Family 4 for
+> where today's marking is too broad.
 >
-> **Historical (2026-08-18): `docs/gaps-archive.md` W8-1..W8-47.** **2 open rows** — W8-17 and
-> W8-19 from **dogfood wave 1** (W8-19's struct-copy sub-item landed 2026-08-30, TICKET-030, but the
-> bundle row stays open for its remaining sub-items) (W8-32 from wave 2 closed 2026-08-30, TICKET-024)
-> (**W8-1**, **W8-28**, **W8-29** closed 2026-08-29, TICKET-018 — a bare-digit interpolation hole
-> now renders literally, `not` now sits between `and` and the comparisons, and `??` now binds
-> tighter than every binary operator)
-> (2026-08-18, nine agents; 30 findings, 27 reproduced in-repo, 20 filed, 3 folded into open rows, 2
-> NOT reproduced and recorded as such). Both DECIDED language milestones are now closed: **W8-22**
-> (2026-08-30, TICKET-026 — a caught `Error` now carries its origin via `e.line()`/`e.col()`/
-> `e.file()`, stamped at the three `recover:` boundaries into a `GcRef`-keyed side table on `Heap`)
-> and **W8-21**
-> (2026-08-30, TICKET-025 — a bare success value at a declared `T?`/`T!E` return sink now coerces to
-> `Some(v)`/`Ok(v)`), **W8-18** (doc drift), **W8-2** (a discarded
-> `Result`/`Option` now warns), **W8-14** (every runtime stack-trace frame names its file), **W8-15**
-> (both `check`/`test` `--errors=json` halves), **W8-5** (`json.parse`'s and `json.stringify`'s
-> depth aborts), **W8-24** (init never overwrites a file it did not create),
-> **W8-20**/**W8-35**/**W8-36** (std.json -- encode, the Int split, located parse errors),
-> **W8-8**/**W8-7** (the scheduler pair), **W8-4**/**W8-27** (2026-08-29, TICKET-015 — a
-> mutating sort callback now faults instead of vanishing, and `+=` extends a `List` in place instead
-> of copying and rebinding), and **W8-3**/**W8-25** (2026-08-29, TICKET-016 — a same-box `Shared`/
-> `RwShared` re-entry now faults and a cross-task racing write blocks and lands instead of losing the
-> write, and a closure's module-global reference is now snapshot-copied at the airlock like a
-> captured local), and **W8-34** (2026-08-29, TICKET-019 — List.unique() is one pass over a hash
-> index) are closed, and **W8-42** (2026-08-29, TICKET-022 -- the four remaining format-spec forms —
-> the `#` alternate form, `g`/`G`, `=` sign-aware fill, and a leading-space sign — now match
-> CPython), as is the un-numbered
-> **airlock-trap** section — its warning later became D4's compile-time error (TICKET-170), backed by
-> the TICKET-169 runtime fault. The dogfood rows are the first findings in this repo produced by people
-> with **no model of the implementation**, and they are disjoint from waves 1–7 (which were almost all
-> soundness). Six were **silent wrong answers** (three left), two were the **scheduler** and **both are
-> now fixed** (2026-08-18, `fix/mn-idle-policy-w8-8-w8-7`): `--threads=1` ran *two* CPU runners
-> (**W8-8** — now 1.00 cores, matching Go's `GOMAXPROCS=1`), and the default worker count was the
-> *slowest* setting (**W8-7** — every preemption broadcast to every idle worker; `sys` at the default
-> went 10.110 s → 0.009 s). W8-8 was fixed first because rationales elsewhere in the tree cited
-> `CHEZZI_THREADS=1` measurements that had been taken two-wide; **all nine of those were then
-> re-derived on the genuinely 1-wide binary and every one held** (CONFIRMED or UNCHANGED-BY-DESIGN,
-> none false — the walk is in `docs/gaps-archive.md`'s W8 session log, scheduler section, and the measured
-> tables are in `docs/benchmarks.md`). Five are **diagnostics** (two left: W8-13, W8-17 — W8-17 itself has two of its
-> four cosmetic sub-items closed). **None of them was reachable by the standing gates** — a silent
-> wrong answer has no assertion to fail, no gate measures performance, no gate reads a message, no gate
-> executes prose, and the FFI goldens are `#[cfg(target_os = "linux")]` so `cargo test` is green on a
-> Mac with the whole FFI surface unexercised. Read the pass's session log before working any row;
-> several share one fix. **And read a closed row's *prescription* before re-implementing it: W8-2's and
-> W8-7's filed Fixes were both measured wrong** (W8-7's "an idle worker must park on a condvar, not
-> spin" described a defect the engine never had — idle workers already parked; the cost was the wake
-> side) — see the convention below.
+> **Ledger.** `docs/gaps.md` is a SHORT LEDGER of open rows, each re-verified on the release binary;
+> every closed row and every wave's session log (W1..W15) lives verbatim in `docs/gaps-archive.md`, so
+> a `docs/gaps.md:NNNN` citation in an old ticket resolves against the archive. **7 open rows** today —
+> W8-19, W13-28, W15-4, W15-5, W15-8, W15-9, W15-10, all P2/P3 or tracking rows (this count is
+> gate-checked by `tests/gaps_ledger_count.rs`; re-derive it with `grep -c '^| \*\*W' docs/gaps.md`
+> after every merge — merged counters can be silently wrong). Wave 16's findings are recorded in
+> `docs/root-causes-w16.md` and are not yet ledger rows.
 >
-> **Wave 2 (`W8-23..W8-42`) in one paragraph.** Seven P0s, three of which destroy or corrupt data:
-> **W8-24** (**FIXED 2026-08-27**) `chezzi init` silently overwrote an existing `src/main.chz` at rc=0;
-> ~~**W8-23**~~ CLOSED 2026-08-28 (TICKET-014) — mixed `int`/`float` comparison ran in f64, so 4 of 6
-> operators were wrong above 2^53; fixed via the new exact `cmp_int_f64`, and the CPython
-> differential's `MAX_BOUND` raised past 2^53 in the same commit so the gate now looks there;
-> ~~**W8-35**~~ CLOSED 2026-08-28 (TICKET-013, the Int/Num split) — JSON
-> numbers used to round-trip through f64 (`-0.0` → `0`, a 19-digit id → `9.2e+18`);
-> ~~**W8-26**~~ CLOSED 2026-08-27 (TICKET-001, read-once fix) — `run` *and* `check` on a pipe used to execute an EMPTY program at rc=0 — which was why
-> a repro at `gaps-archive.md:8664` silently stopped reproducing (now unblocked); **W8-25** a closure over a module global loses it at the airlock
-> (3 at module scope, 300 in a fn, Go/Python 300). The other two P0s are **W8-3**, widened rather than
-> re-filed: a cross-task `set` racing an `update` is silently lost (Go's mutex loses nothing) and a
-> cross-box `update`-in-`update` hangs forever with `--timeout` unable to reach it — both because
-> `docs/concurrency.md:598` drops the guard *before* running the closure, two lines under `:596`'s
-> promise that concurrent writers can't lose updates. **Dedupe discipline to copy:** all 15 then-open
-> rows were re-run before wave 2 was filed (every one still reproduces), which is what caught that
-> dedupe; and two reported findings did NOT reproduce (a false-`deadlock` shape at 0/320 runs across two
-> binaries, `io.flush` losing stdout at 0/220) and are recorded with their measurements rather than
-> filed, so nobody re-chases them.
+> Standing lessons from past waves, kept here because they still bite: the mechanical oracles
+> (panic-fuzz, CPython differential) find almost nothing — findings come from hand-built programs judged
+> against a RUN Go/Rust/CPython reference; sample a flaky rate (n >= 5 per side) before any causal claim;
+> and read a closed row's *prescription* before re-implementing it — several filed fixes (W8-2, W8-7,
+> W9-5) were measured wrong.
 
 Both share the same bar: **behavior-preserving** on every change — a VM
 speedup that changes observable output, or that only holds at one worker count, is a bug, not a win.
@@ -366,9 +273,9 @@ behind a failing-then-green correctness test, keep the suite green, re-measure, 
 `docs/benchmarks.md` + `PROGRESS.md`. Don't trust a lever's a-priori payoff guess — several in the
 backlog moved a *different* bench than predicted (logged in `docs/benchmarks.md`).
 
-**Remaining levers** (ranked in **[`docs/future.md`](docs/future.md)** §4): Medium — NaN-boxing
-`Value` (16B→8B, the biggest remaining lever; its own milestone), struct-field inline caching, string
-concat/`split` builder. Big/separate — register VM, generational/incremental GC, and **Cranelift
+**Remaining levers** (ranked in **[`docs/future.md`](docs/future.md)** §4): the 8-byte pointer-tagged
+`Value` already shipped (NaN-boxing retired, blocked by full `i64`), and struct-field inline caching is
+landed; string concat/`split` builder remains. Big/separate — register VM, generational GC (measured at most ~11% of runtime, `docs/benchmarks.md` 2026-09-28), and **Cranelift
 AOT/JIT as the stretch end-game** (a whole backend — a late-stage endeavor once the language has
 matured; not next). Frame pooling and general arith-specialization are deprioritized (superinstructions already
 cover the hot int paths; `CallFrame`'s per-call `Vec`s are alloc-free).
