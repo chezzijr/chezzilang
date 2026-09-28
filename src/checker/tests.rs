@@ -530,10 +530,15 @@ fn spawn_body_named_function_parameter_write_to_captured_binding_is_a_compile_ti
 #[test]
 fn d4_named_helper_transitive_and_recursive_writes() {
     rejects_help_at(
-        "fn bump(xs: List[int], n: int):\n    if n > 0:\n        bump(xs, n - 1)\n    else:\n        xs.push(2)\nfn relay(xs: List[int]):\n    bump(xs, 1)\nfn main():\n    xs := [1]\n    parallel:\n        spawn:\n            relay(xs)\nmain()\n",
+        "fn bump(xs: List[int], n: int):\n    xs.push(2)\n    if n > 0:\n        bump(xs, n - 1)\nfn relay(xs: List[int]):\n    bump(xs, 1)\nfn main():\n    xs := [1]\n    parallel:\n        spawn:\n            relay(xs)\nmain()\n",
         "'xs' is this task's copy: a write to it would be lost at the join",
         "push",
-        12,
+        11,
+    );
+    // TICKET-179: a write reached only under `if` is left to layer C, even when every branch
+    // reaches it through recursion.
+    ok(
+        "fn bump(xs: List[int], n: int):\n    if n > 0:\n        bump(xs, n - 1)\n    else:\n        xs.push(2)\nfn relay(xs: List[int]):\n    bump(xs, 1)\nfn main():\n    xs := [1]\n    parallel:\n        spawn:\n            relay(xs)\nmain()\n",
     );
 }
 
@@ -556,11 +561,9 @@ fn d4_nested_named_callee_writes_outer_parameter() {
 
 #[test]
 fn d4_block_scoped_named_callee_writes_outer_parameter() {
-    rejects_help_at(
+    // TICKET-179: the call sits under `if`, so layer A declines it and leaves it to layer C.
+    ok(
         "fn outer(xs: List[int]):\n    if true:\n        fn inner():\n            xs.push(2)\n        inner()\nfn main():\n    xs := [1]\n    parallel:\n        spawn:\n            outer(xs)\nmain()\n",
-        "'xs' is this task's copy: a write to it would be lost at the join",
-        "push",
-        10,
     );
 }
 
@@ -25864,6 +25867,28 @@ fn airlock_crossing_grid_compile_cells() {
     ok(
         "g: List[int] = []\nfn each(xs: List[int]):\n    for x in xs:\n        g.push(x)\nfn main():\n    parallel:\n        spawn: each([])\n    print(g)\nmain()\n",
     );
+    let w = "g := 0\nfn w() -> bool:\n    g = 1\n    return true\nfn wi() -> int:\n    g = 1\n    return 1\n";
+    let spawned = "fn main():\n    parallel:\n        spawn: f(false)\n    print(g)\nmain()\n";
+    for body in [
+        "    _ := flag and w()",
+        "    _ := flag or w()",
+        "    o: Option[int] = Some(1)\n    _ := o ?? wi()",
+        "    while flag:\n        g = 1",
+        "    match flag:\n        true: g = 1\n        false: print(1)",
+    ] {
+        ok(&format!("{w}fn f(flag: bool):\n{body}\n{spawned}"));
+    }
+    // Must still fail: a write after a conditional, and a writer in the first `if` condition, run on
+    // every path.
+    for body in [
+        "    if flag:\n        print(1)\n    g = 1",
+        "    if w():\n        print(1)",
+    ] {
+        rejects(
+            &format!("{w}fn f(flag: bool):\n{body}\n{spawned}"),
+            "is this task's copy",
+        );
+    }
 }
 
 /// Drift guard (editor hover, Tier C): every `(module, fn)` named in an authored module-fn doc slice

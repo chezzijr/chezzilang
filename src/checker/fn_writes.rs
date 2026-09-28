@@ -1,7 +1,7 @@
 //! Proven writes made by statically named functions. Function values remain opaque.
 
 use super::{ChainLink, Checker, FnSig, ModuleSig, Ty};
-use crate::ast::{DeferTarget, Expr, ExprKind, FnDecl, SpawnTarget, Stmt, StmtKind};
+use crate::ast::{BinaryOp, DeferTarget, Expr, ExprKind, FnDecl, SpawnTarget, Stmt, StmtKind};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -39,6 +39,11 @@ pub(super) struct Scan {
     visible_fns: Vec<HashMap<String, Option<String>>>,
     locals: HashSet<String>,
     params: Vec<String>,
+    /// How many conditional constructs (`if`/`match` arm/loop body/short-circuit right side) enclose
+    /// the node being walked.
+    cond: usize,
+    /// A possible early exit (`return`, `break`, `continue`, `?`) has been walked.
+    left: bool,
 }
 
 pub(super) fn chain(expr: &Expr) -> Option<(String, Vec<ChainLink>)> {
@@ -70,6 +75,8 @@ fn scan_with_visible(decl: &FnDecl, visible_fns: Vec<HashMap<String, Option<Stri
         visible_fns,
         locals: HashSet::new(),
         params: decl.params.iter().map(|p| p.name.clone()).collect(),
+        cond: 0,
+        left: false,
     };
     out.collect_locals(&decl.body);
     out.block(&decl.body);
@@ -121,7 +128,23 @@ impl Scan {
             .or_else(|| Some(WriteRoot::Capture(name.to_string())))
     }
 
+    /// Layer A reports a write only when every path through the function reaches it (D4, TICKET-179).
+    /// A write under a condition or after a possible early exit is left to layer C.
+    fn certain(&self) -> bool {
+        self.cond == 0 && !self.left
+    }
+
+    /// Walk `f` inside one more conditional construct.
+    fn conditional(&mut self, f: impl FnOnce(&mut Self)) {
+        self.cond += 1;
+        f(self);
+        self.cond -= 1;
+    }
+
     fn record(&mut self, expr: &Expr, kind: WriteKind, operation: String) {
+        if !self.certain() {
+            return;
+        }
         if let Some((name, path)) = chain(expr)
             && let Some(root) = self.root(&name)
             && (!matches!(root, WriteRoot::Param(_))
@@ -177,20 +200,33 @@ impl Scan {
                     }
                 }
             }
-            StmtKind::Expr(expr) | StmtKind::Return(Some(expr)) | StmtKind::Yield(expr) => {
-                self.expr(expr)
+            StmtKind::Expr(expr) | StmtKind::Yield(expr) => self.expr(expr),
+            StmtKind::Return(value) => {
+                if let Some(expr) = value {
+                    self.expr(expr);
+                }
+                self.left = true;
             }
+            StmtKind::Break | StmtKind::Continue => self.left = true,
             StmtKind::If {
                 branches,
                 else_block,
             } => {
-                for (cond, body) in branches {
+                // Only the first condition runs on every path.
+                if let Some((cond, _)) = branches.first() {
                     self.expr(cond);
-                    self.block(body);
                 }
-                if let Some(body) = else_block {
-                    self.block(body);
-                }
+                self.conditional(|s| {
+                    for (i, (cond, body)) in branches.iter().enumerate() {
+                        if i > 0 {
+                            s.expr(cond);
+                        }
+                        s.block(body);
+                    }
+                    if let Some(body) = else_block {
+                        s.block(body);
+                    }
+                });
             }
             StmtKind::For {
                 vars, iter, body, ..
@@ -200,7 +236,7 @@ impl Scan {
                     .iter()
                     .map(|name| (name.clone(), self.locals.insert(name.clone())))
                     .collect();
-                self.block(body);
+                self.conditional(|s| s.block(body));
                 for (name, existed) in prior {
                     if !existed {
                         self.locals.remove(&name);
@@ -209,7 +245,7 @@ impl Scan {
             }
             StmtKind::While { cond, body } => {
                 self.expr(cond);
-                self.block(body);
+                self.conditional(|s| s.block(body));
             }
             StmtKind::Parallel { body }
             | StmtKind::Spawn(SpawnTarget::Block(body))
@@ -219,9 +255,11 @@ impl Scan {
             }
             StmtKind::Match { scrutinee, arms } => {
                 self.expr(scrutinee);
-                for arm in arms {
-                    self.block(&arm.body);
-                }
+                self.conditional(|s| {
+                    for arm in arms {
+                        s.block(&arm.body);
+                    }
+                });
             }
             StmtKind::Assert { cond, msg } => {
                 self.expr(cond);
@@ -257,7 +295,7 @@ impl Scan {
                     ExprKind::Field { obj, name, .. } => {
                         self.record(obj, WriteKind::Method(name.clone()), name.clone());
                     }
-                    ExprKind::Ident(name) => {
+                    ExprKind::Ident(name) if self.certain() => {
                         let binding = self
                             .visible_fns
                             .iter()
@@ -299,14 +337,33 @@ impl Scan {
                     self.expr(value);
                 }
             }
-            ExprKind::Unary { expr, .. } | ExprKind::Try(expr) => self.expr(expr),
-            ExprKind::Binary { lhs, rhs, .. } | ExprKind::NullCoalesce { lhs, rhs, .. } => {
+            ExprKind::Unary { expr, .. } => self.expr(expr),
+            ExprKind::Try(expr) => {
+                self.expr(expr);
+                self.left = true;
+            }
+            ExprKind::Binary {
+                op: BinaryOp::And | BinaryOp::Or,
+                lhs,
+                rhs,
+                ..
+            }
+            | ExprKind::NullCoalesce { lhs, rhs, .. } => {
+                self.expr(lhs);
+                self.conditional(|s| s.expr(rhs));
+            }
+            ExprKind::Binary { lhs, rhs, .. } => {
                 self.expr(lhs);
                 self.expr(rhs);
             }
             ExprKind::Compare { operands, .. } => {
-                for operand in operands {
-                    self.expr(operand);
+                // A chain `a < b < c` evaluates `c` only when `a < b` holds.
+                for (i, operand) in operands.iter().enumerate() {
+                    if i < 2 {
+                        self.expr(operand);
+                    } else {
+                        self.conditional(|s| s.expr(operand));
+                    }
                 }
             }
             ExprKind::Closure { .. } => {}
