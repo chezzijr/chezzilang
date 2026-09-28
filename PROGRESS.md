@@ -7,6 +7,15 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-175 (2026-09-28) — a module is reachable by its full path, and `import X from std`
+  works.** An un-aliased `import std.math` now binds `math` (Go reading, unchanged) AND `std.math`
+  (Python reading), in expressions, annotations, constructors, statics, variants, `match` patterns
+  and generic bounds; `import math from std` binds `math` like `import std.math`. The resolver adds
+  a synthetic import under the dotted alias `std.math`, and desugar folds the longest imported
+  prefix of a `Field` chain into one name unless a local, parameter, type parameter or module-level
+  name shadows the head. `import a.math` plus `import b.math` keeps both full paths and makes a bare
+  `math` use an ambiguity error. The two-level-path hints are gone; bare `import std` stays an error,
+  struct patterns stay two-level, and `import X from <user package>` stays unsupported.
 - **TICKET-173 (2026-09-28) — a generic bound may be module-qualified.** `[T: m.Named]`,
   `where T: m.Named`, multi-bounds, parameterized bounds, protocol aliases and embed lines resolve
   through a whole-module import to the same protocol key as `import Named from m`, and static

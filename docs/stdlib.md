@@ -337,15 +337,15 @@ These types come from the language/runtime; see [`concurrency.md`](concurrency.m
 > std.time\`)` error. `timer` stays a reserved name too (no user `struct timer`/`fn timer`).
 >
 > **Qualified / aliased path (additive).** Every import-gated native type above is **also** reachable
-> by the two-level module-member path, exactly like a `.chz` module type or `regex.Match`: after
+> by the module-member path, exactly like a `.chz` module type or `regex.Match`: after
 > `import std.concurrency`, `concurrency.Shared[int]` / `concurrency.Shared(0)` resolve and construct;
 > `import std.concurrency as c` gives `c.Shared(0)`. It works in every position — annotation, ctor call,
 > `type S = concurrency.Shared[int]`, `newtype MyS[T] = concurrency.Shared[T]`, method call — and lowers
 > to the same value as the bare name. Likewise `net.Socket` / `net.Listener` (`import std.net`) and the
 > FFI widths / `ptr` (`import std.ffi`, e.g. `ffi.int32`, valid inside an `extern` signature), except
 > those are **type-only**: `net.Socket(...)` is rejected (no from-nothing ctor). `time.timer(ms)` is a
-> qualified call; `time.timer` in **type** position is rejected (it is a function). Paths are two-level
-> (`concurrency.Shared`, not `std.concurrency.Shared`). The qualified form still requires the `import`
+> qualified call; `time.timer` in **type** position is rejected (it is a function). The full path
+> (`std.concurrency.Shared`) works too after an un-aliased `import std.concurrency` (TICKET-175). The qualified form still requires the `import`
 > (qualified access to a non-imported module is an `unknown module` error), so the import gate is
 > unchanged; the bare-after-import spelling stays fully supported.
 

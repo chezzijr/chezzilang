@@ -375,7 +375,27 @@ import std.io                       # whole module → io.read()
 import std.io as fs                 # module alias → fs.read()
 import read, write from std.io      # named (no braces — indentation lang)
 import read as r from std.io        # named + alias
+import math from std                # a std module by name, like `import std.math`
 ```
+
+**Bound name and full path (TICKET-175).** An un-aliased `import a.b` binds the last segment `b`
+(Go reading) AND the full path `a.b` (Python reading), so `b.X` and `a.b.X` name one module, which
+initializes once. The rules:
+
+1. **No implicit children or parents.** `a.b.X` resolves only after `import a.b` in this file.
+   `import a` never binds `a.b`, and a bare `import std` is an error (`std` is a namespace).
+2. **Longest imported prefix wins**, statically at check time: `a.b.c.X` is module `a.b.c` when
+   both `a.b` and `a.b.c` are imported. Packages, types and methods never become runtime values.
+3. **`as` binds only the alias:** `import a.b as c` does not bind `a.b`.
+4. **Shadowing:** a local, parameter, type parameter or module-level name spelled like the head
+   hides the full path.
+5. **Same last segment:** `import a.math` plus `import b.math` keeps both full paths; a bare
+   `math` use is an ambiguity error that suggests `import a.math as am`.
+6. **`import X from std`** binds std's module `X` (Python `from os import path`); it does not bind
+   `std.X`. `import std.math` plus `import math from std` bind `math` once. `import X from` a user
+   package directory is not supported: write `import pkg.X`.
+
+Struct patterns stay two-level (`deep.Point(x)`, never `pkg.deep.Point(x)`).
 
 Resolution — **optional root marker**, kills Python's run-relative footgun:
 

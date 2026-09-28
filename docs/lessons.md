@@ -241,8 +241,9 @@ the freeze.
   reserved namespace.** A global name is a one-way ratchet; a five-task cleanup existed only to undo
   earlier ones. Gate is checker-only name resolution; a pure type/ctor also needs the `bind_import`
   skip or `import X from M` faults at runtime — cover with a test that *runs*.
-- **Qualified paths are exactly two-level** (`net.Socket`, never `std.net.Socket`), Go-style, by
-  decision. A too-deep path gets a targeted diagnostic keyed on the first two segments.
+- **Qualified paths are a Go/Python hybrid** (TICKET-175): an un-aliased `import std.net` binds
+  `net.Socket` AND `std.net.Socket`. The full path is a synthetic dotted-alias import from the resolver
+  plus one scope-aware fold in desugar, so no backend needed an edit. Struct patterns stay two-level.
 - **Making a native type first-class under `module.Type` is three additive touch points** (checker
   `Type::Qualified` arm, compiler field-callee arm emitting the same opcode, `bind_import` skip).
 - **Builtins are declared as bodyless `native` decls in `std/*.chz`, front-end only.** The boundary: a

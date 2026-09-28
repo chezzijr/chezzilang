@@ -2598,8 +2598,8 @@ does **not** conform to it — supply the args (`Container[int]`) to use it as a
 > `struct`/`enum`/`newtype`/`type` alias. That includes a generic bound: `[T: mod.Named]`,
 > `where T: mod.Named`, `[T: mod.A + mod.B]`, `[S: mod.Container[int]]` and a protocol embed line
 > `mod.Named` name the same protocol as the bare import, and a static requirement dispatches through
-> the witness exactly as `[T: Named]` does. The path is two-level only: `[T: a.b.Named]` parses, and the
-> checker rejects it with the two-level-path hint.
+> the witness exactly as `[T: Named]` does. The last segment is the protocol and the rest is the module:
+> `[T: a.b.Named]` names module `a.b` by its full path, which needs an un-aliased `import a.b`.
 
 The prebuilt **`Iterable[T]`** and **`Iterator[T]`** are parameterized bounds with extra magic: they
 **recover** `T` from the iterand's element (by unifying it), rather than requiring it written out. `T`
@@ -3182,7 +3182,8 @@ match shp:
     geo.Shape.Circle(r): r * r        # payload bindings work as usual
 ```
 
-The module binder (`geo`/`g`) is the bound module name (last path segment or `as` alias). The checker
+The module binder (`geo`/`g`) is the bound module name (last path segment or `as` alias), or the
+module's full path after an un-aliased import (`lib.geo.Color.Red` after `import lib.geo`). The checker
 validates that the module is bound and owns the named enum, then it's dropped — matching keys on the
 same `(enum, variant)` identity as the bare/named-import form, so output is byte-identical. (A
 plain `module.Variant` — dropping the enum name — is **not** accepted; the enum name is mandatory.)
@@ -4378,8 +4379,8 @@ fn fetch_all(urls: List[str]):
   may write `concurrency.Shared[int]` / `concurrency.Shared(0)`, and `import std.concurrency as c` gives
   `c.Shared[int]` / `c.Shared(0)`. The qualified form works in every position — annotation, constructor
   call, `type S = concurrency.Shared[int]`, `newtype MyS[T] = concurrency.Shared[T]`, and method calls —
-  and lowers to the same value as the bare name. (Paths are two-level: `concurrency.Shared`, never
-  `std.concurrency.Shared`, like every Chezzi module.) The qualified path still requires the `import`
+  and lowers to the same value as the bare name. (The full path `std.concurrency.Shared` works too
+  after an un-aliased `import std.concurrency`, like every Chezzi module.) The qualified path still requires the `import`
   (qualified access to a non-imported module is an `unknown module` error), so the gate is unchanged.
   `net.Socket` / `net.Listener` (`import std.net`) and the FFI width types / `ptr` (`import std.ffi`,
   usable as `ffi.int32` incl. inside an `extern` signature) resolve the same qualified way but are
@@ -4493,6 +4494,9 @@ import std.io as fs              # module alias → fs.read(...)
 import read, write from std.io   # pull names in (no braces)
 import read as r from std.io     # named + alias
 import core.db.pool              # local module → <root>/core/db/pool.chz
+pool.get()                       # …by its last segment,
+core.db.pool.get()               # …or by its full path (un-aliased import only)
+import math from std             # a std module by name, like `import std.math` (Python `from os import path`)
 ```
 
 **Resolution:** walk up from the file for `chezzi.toml`; found → that's the project root, else the
@@ -4531,7 +4535,9 @@ this rule — name your modules and your types apart.
 *last*, so every import statement starts with the `import` keyword (`from` at statement start is a
 parse error: *unexpected 'from' in expression*). Semantics are Python's; only the word order differs — with one Go-style exception: importing the same
 module or name twice in one file is a type error (`'math' is already imported`), where Python silently
-accepts the duplicate.
+accepts the duplicate. The one accepted re-bind is `import std.math` plus `import math from std`: both
+name one module, which binds `math` once and initializes once. (`import math from std` written twice is
+still the duplicate error.)
 
 **`import X from M` is a SNAPSHOT** (Python-identical): the value is copied into this module at import
 time. A later write to the module's own global (`M.bump()`) is **not** visible through the bare name —
@@ -4594,10 +4600,34 @@ A **qualified type** may also be the receiver of a **static (associated) method*
 bare `Type.static_method()` form after a named import. As on a bare type, an enum **variant** name
 always wins over a static-method name on `module.Enum.x`.
 
-**Type/value paths are TWO-LEVEL** (Go-style): `module.Symbol`, where `module` is the imported
-last-segment name (or an alias). Multi-level paths like `std.concurrency.Shared` are **not supported**
-(even though `import` paths *are* multi-level) — write `concurrency.Shared`, or alias with
-`import std.concurrency as c` then `c.Shared`. The deeper form gets a targeted two-level-path error.
+**A module is reachable by its bound name AND by its full path** (TICKET-175, a hybrid of Go and
+Python). After an un-aliased `import std.concurrency`, both readings work in every position
+(expression, annotation, constructor, static method, variant, `match` pattern, generic bound):
+
+```chezzi
+import std.concurrency
+a := concurrency.Shared(0)        # Go reading: the last segment is bound (unchanged)
+b := std.concurrency.Shared(0)    # Python reading: the full path of the same module
+```
+
+- **Longest imported prefix wins.** `a.b.c.X` splits at the longest prefix that is a module imported
+  un-aliased in this file: with `import a.b` and `import a.b.c`, it is module `a.b.c`, member `X`.
+- **No implicit children or parents.** `import pkg` never makes `pkg.deep.X` available, and
+  `import std.concurrency.collection` does not make `std.concurrency.X` available; each needs its own
+  `import`. A bare `import std` stays an error (`std` is a namespace, not a module): write
+  `import std.math`.
+- **`as` binds only the alias.** After `import pkg.deep as d`, `pkg.deep.X` is an error that names `d`.
+- **Shadowing.** A local, a parameter, a type parameter, or any module-level name (a global, `fn`,
+  type, or imported name) spelled like the path head hides the full path, as in Python.
+- **Same last segment.** `import a.math` plus `import b.math` is legal: `a.math.f()` and `b.math.f()`
+  both work, and a bare `math.f()` is an error (`'math' is ambiguous`) that suggests
+  `import a.math as am`.
+
+Two ceilings stay deliberate. A **struct pattern** stays two-level: after `import pkg.deep`, write
+`deep.Point(x)` (or `Point(x)` after `import Point from pkg.deep`); `pkg.deep.Point(x)` in a pattern
+is an error (`struct patterns use two-level paths`). And **`import X from <package>`** works only for `std`
+(`import math from std`); for a user package directory write `import pkg.deep` (or
+`import pkg.deep as deep`) instead of `import deep from pkg`.
 
 A bare type whose module was imported whole (`import geo`) but not named-imported is a **check-time
 error** (`unknown type 'Point'; import it from geo`). Two modules may declare the same type name —
