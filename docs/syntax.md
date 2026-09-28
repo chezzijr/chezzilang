@@ -530,7 +530,9 @@ fn; it captures the enclosing scope exactly like a closure value:
   `.push`/index-store/field-store on a captured container, and a write to a module global all fault
   inside the task with a recoverable `'<name>' is this task's copy: ...` error. Three shapes still
   lose the write silently (see `docs/concurrency.md`'s ceilings). Share state a task and
-  its parent both observe through `Shared`/`RwShared`/`Atomic*`/`Channel` instead.
+  its parent both observe through `Shared`/`RwShared`/`Atomic*`/`Channel` instead. A value no parent
+  binding can reach is the task's own: a fresh `spawn` operand (`spawn work([], out)`, a
+  comprehension, `xs.copy()`) crosses with its root unmarked and is writable (TICKET-179).
 
 `fn` is the only declaration allowed inside a block. `struct`, `enum`, `newtype`, `protocol`, `type`, `test fn`, `import`, `extern` and `native` are top-level only; inside any block each is a parse error (`struct must be a top-level declaration`).
 
@@ -1516,7 +1518,7 @@ List([5, 6, 7].iter())     # [5, 6, 7]   (a cursor IS an Iterator[T], so List()/
 # so a partial `for … break` then leaves the remainder for a later `next()`/`List()`. A cursor IS sendable across
 # `spawn` — it crosses the airlock as a deep copy, like a `list`. `Iterable` / `Iterator` are reserved type names.
 
-# `yield` / generators (run on the sole M:N VM engine; a live frame-local generator IS sendable across a task airlock — it crosses by value as an independent deep copy of its execution state, incl. one suspended mid-`recover:`; a module-GLOBAL generator crosses by value too — the earlier reach-gate + poison-snapshot model was RETIRED 2026-07-21). Any fn that
+# `yield` / generators (run on the sole M:N VM engine; a live frame-local generator IS sendable across a task airlock — it crosses by value as an independent deep copy of its execution state, incl. one suspended mid-`recover:`; a module-GLOBAL generator crosses by value too — the earlier reach-gate + poison-snapshot model was RETIRED 2026-07-21. D4, TICKET-179: at a `spawn` crossing each frame value is a task copy only when the parent can still reach it — a frame-local list the parent never saw stays writable in the task, a list the generator yielded and the parent still holds faults on write). Any fn that
 # uses `yield` is a generator: calling it returns a suspendable iterator, not a value. It runs lazily,
 # suspending at each `yield` and resuming on the next `.next()`. The `-> Iterator[T]` annotation is
 # OPTIONAL — with no return type the element type `T` is inferred from the FIRST `yield`

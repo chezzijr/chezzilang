@@ -171,6 +171,8 @@ error) and top-level `return` (parses today and ends module execution; undocumen
 
 ## Family 4 — Airlock task copies (A1, A2, A6, A3)
 
+Status: fixed by TICKET-179 (`5ed57c91`..`d4d6ff2c`).
+
 **Mechanism.**
 
 - *What is a task copy.* One flag, `Vm::copy_mark` (`src/vm/mod.rs:1051-1056`), marks every object

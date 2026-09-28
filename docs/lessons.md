@@ -236,7 +236,9 @@ the freeze.
   the checker's `mutates_receiver` — which disagree on `Map.merge` (non-mutating, but the VM faults it;
   a drift test exempts it instead of failing). TICKET-170 exported the VM list for the checker and then
   hand-synced a second list instead. Fix both at the source (`docs/root-causes-w16.md` Family 4); never
-  add a third list or a per-method exemption.
+  add a third list or a per-method exemption. Fixed by TICKET-179: the checker reads the VM's one
+  table, a behavior grid checks it, and the mark now follows "can the parent observe it"
+  (`docs/decision-d4-airlock.md`).
 - **Closures cross by value iff every capture is sendable** (Rust `Send` model). The only runtime
   non-sendables today are `Obj::Module` and a generator inside a value cycle (`ref`/`Ref[T]` were
   removed entirely, 2026-07-19). The scoping lesson survives them: when something must be

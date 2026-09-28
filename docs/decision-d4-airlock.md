@@ -82,10 +82,14 @@ the fact that a write lost to it is silent.
 
 ## How a write is detected: a runtime mark (C) plus checker inference (A)
 
-The checker cannot know by itself whether `xs.method()` writes. Today it has a hand-written list for
-the built-in types only (`mutates_receiver`, `src/checker/mod.rs`: `List.push/pop/sort/...`,
-`Map.remove/update`, `Set.add/remove`). A user method is invisible to it. Measured on the release
-binary at `b3a72263`:
+The checker cannot know by itself whether `xs.method()` writes. For the built-in types it reads ONE
+table, `is_mutating_native_kind` (`src/vm/call.rs`: `List.push/pop/sort/...`, `Map.remove/update`,
+`Set.add/remove`, `bytearray.push/pop/extend`), the same table layer C faults on; the checker's
+`mutates_receiver` only maps a type to that table's kind (TICKET-179). `Map.merge` returns a new
+map and is not a write. `checker::tests::receiver_write_table_matches_observed_behavior` runs every
+native method of List/Map/Set/bytearray/str/bytes and fails when the table disagrees with the
+observed receiver change. A user method is invisible to the table. Measured on the release binary at
+`b3a72263`:
 
     struct C:
         n: int
@@ -119,9 +123,38 @@ So D4 detects a write in two layers:
   Passing a function value alone never applies an effect. Indirect calls, unresolved projections,
   protocol or generic `T` receivers, and opaque closures decline to layer C. Per the CLAUDE.md
   warning-gate convention, it must never reject a program that would not have faulted at runtime.
+  So layer A reports a write only when EVERY path through the function reaches it (TICKET-179):
+  nothing under `if`/`elif`/`else`, a `match` arm, a loop body, or the right side of `and`/`or`/`??`
+  or a chained comparison, and nothing after a possible early exit (`return`, `break`, `continue`,
+  `?`). The first `if` condition runs on every path, so a writer called there is still reported.
+  `fn maybe(flag: bool): if flag: g = 1` spawned as `maybe(false)` now checks clean, and a
+  `maybe(true)` still faults at runtime in layer C.
 - **Rejected: B, an explicit `mut self` (Rust's `&mut self`, Pony's reference capabilities).** It is
   complete at compile time, but it adds syntax and boilerplate on every method and changes every
   protocol's signature. C gives the same completeness at runtime without it.
+
+### What the mark means: "can the parent observe it after the join" (TICKET-179)
+
+The mark is not "arrived by snapshot". It answers one question: can the parent still observe this
+value after the join? Two routes decide it, each in one place:
+
+1. **A fresh spawn operand crosses unmarked.** A `spawn f(args)` argument or `spawn recv.m()`
+   receiver that is a list/map/set literal, a comprehension, or a List/Map/Set/bytearray `.copy()`
+   is reachable by no parent binding. The checker decides this once (`spawn_operand_is_fresh`); the
+   compiler encodes it as the spawn op's bitmask; the runtime unmarks only the operand's ROOT.
+   Children stay marked (`copy()` is shallow), so `spawn f([xs])` may push onto the new list but not
+   onto `xs`. A call result is never fresh (`id(xs)` returns the parent's own list), and a struct
+   constructor or struct `.copy()` is not fresh either: both are known ceilings (a false fault,
+   never a lost write). `spawn f([], out)` now runs, as in Go and Python.
+2. **A crossing generator marks only the frame slots the parent can reach.** A generator crossing
+   into a task stays an independent deep copy (`docs/syntax.md`). At the spawn crossing,
+   `gen_frame_observable` decides per frame slot (a `Pending` argument or a `Suspended` stack slot):
+   the slot is marked when it is already a copy, or when any object in its subtree is reachable from
+   the sending task's GC roots or the crossing's other operands, never through the generator
+   itself. A frame-local list the parent never saw is writable; a list the generator yielded and the
+   parent still holds faults. Per-slot is a deliberate ceiling: a private list holding a reachable
+   list is marked whole. A Channel send and the module snapshot do not decide: a received generator
+   stays unmarked as before, and a module-global generator keeps the full mark.
 
 ## Reference languages
 

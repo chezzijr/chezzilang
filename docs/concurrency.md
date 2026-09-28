@@ -106,7 +106,12 @@ transitive and recursive calls (TICKET-171). A direct call inside `spawn:`, a di
 or an `Executor.submit` job reports the write at its task-side call with the mutating operation in
 help. `spawn f(args)` evaluates `args` in the parent. Indirect function values, unresolved paths,
 generic/protocol receivers, and `Channel.send` decline to layer C. Reads, task-local copies, handle
-writes, and parent-side writes stay valid. Full rules and ceilings: [`syntax.md` §capture](syntax.md).
+writes, and parent-side writes stay valid. Layer A reports a write only when every path through the
+function reaches it: a write under `if`/`match`/a loop/a short-circuit right side, or after a possible
+`return`/`break`/`continue`/`?`, is left to layer C (TICKET-179). A task's own values stay writable:
+a fresh `spawn` operand (a list/map/set literal, a comprehension, a List/Map/Set/bytearray `.copy()`)
+crosses with its root unmarked, so `spawn work([], out)` may push onto its list, as in Go and Python.
+Full rules and ceilings: [`syntax.md` §capture](syntax.md) and `docs/decision-d4-airlock.md`.
 
 **The copy is taken FRESH, per task, at its `spawn` — at every depth.** A task sees the values current
 when it was spawned (the Go rule: a goroutine reads whatever a package-level var holds when `go` runs).
@@ -1575,7 +1580,12 @@ not universal — measured against the release binary, three shapes still lose t
    `airlock_task_local_silent_test.chz` each carry one row for this shape, pinning the send-order
    dependence directly so a future memo-walk change gets a red test instead of a prose claim.
 2. **Captured iterator/generator cursors.** Advancing a captured `Iterator` cursor and resuming a
-   captured generator are not checked at all — neither shape is in the write-site list below.
+   captured generator are not checked — neither shape is in the write-site list below. This is the
+   documented deep-copy semantics, not a lost write: the task's copy is independent, and the
+   parent's own `g.next()` after the join returns its own next value (owner ruling 2026-09-28). What
+   the resumed generator writes inside its frame IS decided (TICKET-179): at the spawn crossing a
+   frame slot is marked only when the parent can still reach it, so a frame-local list the parent
+   never saw is writable and a list the generator yielded and the parent still holds faults.
 3. **A same-task round-trip is not a crossing.** A closure/value sent on a `Channel` or read back
    from a `Shared`/`RwShared` and used by the SAME task that sent it never left that task's heap, so
    the D4 layer-C mark is not set on it (`Heap::id`-gated, TICKET-169) — its write stays silent,
@@ -1591,7 +1601,7 @@ index store on a `List`/`Map`/`bytearray` (`xs[i] = v`; a struct's own `set_inde
 whatever it writes through is checked at its own call sites, so writing through a `Shared` field
 stays silent as real sharing), a captured-local cell store, a module-global slot store, `+=`-style
 in-place arithmetic on a container, and every mutating native call: List `push pop reverse sort
-sort_by sort_by_key extend insert remove_at`, Map `remove merge update`, Set `add remove`, bytearray
+sort_by sort_by_key extend insert remove_at`, Map `remove update`, Set `add remove`, bytearray
 `push pop extend`. Reads never check the mark. A write through a `Shared`/`RwShared`/`Atomic*`/
 `Channel`/`Socket`/`Listener` handle is real sharing and is never marked, so it is never checked
 either.
