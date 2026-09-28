@@ -532,6 +532,8 @@ fn; it captures the enclosing scope exactly like a closure value:
   lose the write silently (see `docs/concurrency.md`'s ceilings). Share state a task and
   its parent both observe through `Shared`/`RwShared`/`Atomic*`/`Channel` instead.
 
+`fn` is the only declaration allowed inside a block. `struct`, `enum`, `newtype`, `protocol`, `type`, `test fn`, `import`, `extern` and `native` are top-level only; inside any block each is a parse error (`struct must be a top-level declaration`).
+
 ```chezzi
 fn main():
     n := 0
@@ -1658,6 +1660,8 @@ The iterable is anything a `for` loop accepts (list/map/set/str/range and struct
 elements and map keys must be `Hashable`.
 
 ## 7. Structs  (M3)
+
+Type declarations (`struct`, `enum`, `newtype`, `protocol`, `type`) are top-level only. Python accepts a `class` inside a function; Chezzi rejects the nested form at parse time (owner decision 2026-09-28, TICKET-178), because a nested type would otherwise be silently ignored.
 
 ```chezzi
 struct Point:
@@ -4505,7 +4509,7 @@ import math from std             # a std module by name, like `import std.math` 
 script's own dir is root. `std.*` is reserved (stdlib). `a.b.c` → `<root>/a/b/c.chz`. No `./` relative imports.
 
 **`import` is TOP-LEVEL only.** An `import` inside a function body or any nested block is a **parse
-error** (`import must be a top-level declaration`) — like `extern`/`native`. (It used to parse and
+error** (`import must be a top-level declaration`) — like every top-level-only declaration (see §7). (It used to parse and
 check clean while being a complete no-op: the resolver only scans module-level statements, so a nested
 import never resolved, never bound, and never ran the module body.)
 

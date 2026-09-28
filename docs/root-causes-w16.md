@@ -136,6 +136,8 @@ must be preserved exactly or safe hangs become false faults; some differences ar
 
 ## Family 3 — Declarations in blocks (S2)
 
+Status: fixed by TICKET-178 (`253eaf82`..`2311ab39`).
+
 **Mechanism.** One statement parser (`Parser::parse_stmt`, `src/parser/mod.rs:493-603`) serves both
 module level and every block, and accepts every declaration keyword in every position. Position is
 policed by a three-keyword denylist keyed on the recursion counter (`self.depth > 1` for `extern`,

@@ -13701,6 +13701,8 @@ no longer a non-goal — complete VM-only support shipped** (see below).
 One bullet per milestone/epic. Full landing detail (TDD notes, review-panel findings, test-count deltas,
 branch names) is in the git log.
 
+- **TICKET-178 (2026-09-28) — type declarations and `test fn` are top-level only.** One list, `Parser::item_keyword`, decides it: `parse_module` dispatches items through it and every block rejects them (`struct must be a top-level declaration`); the `depth > 1` denylist for `extern`/`native`/`import` is gone, and `docs/grammar.bnf` has an `<item>` rule. Grid: `parser::tests::item_declarations_are_top_level_only_grid`.
+
 - **TICKET-160 (2026-09-21) — `Map.items()` and a shallow `copy()` on `List`/`Map`/`Set`.** `m.items()` returns `List[(K, V)]` in `keys()` order, so `Map(m.items()) == m`; `copy()` is shallow like CPython's and snapshots struct keys like `merge`. Declared in `std/prelude.chz`, dispatched in `Vm::core_method` (`src/vm/call.rs`). `Map` still iterates by key.
 - **TICKET-139 W14-2 (2026-09-19) — a keyword call through a fn value needs a binding of ONE known fn; anything else is a compile error.** Labels are surface-only, so `fs := [f, ren]; fs[1](a=1, b=2)` bound by `f`'s names and ran `ren` (`201`; CPython `102`). Decision (owner-approved 2026-09-18): the checker (`kw_certain`/`kw_written`/`kw_pending`, settled at `pop_scope`) accepts a keyword call only through an unannotated `:=` of a top-level fn or closure literal, or a nested `fn`'s name, never written afterwards; a param, list slot, returned value or reassigned binding is rejected with a message naming the positional workaround. CPython-style runtime rebinding was rejected as unsound (`fn(a: int, b: str)` vs `fn(b: int, a: str)` share one type). `kw_value_call_hof_param_labels` became `kw_value_call_through_a_param_is_rejected`; `examples/keyword_value.chz` lost its HOF-param and curried keyword calls. Pinned by `kw_value_call_through_*` and `tests/chz/spec/fn_value_named_arg_labels_test.chz`.
 - **TICKET-139 W14-22 (2026-09-19) — a string-literal match pattern is decoded like the literal, and a hole is a parse error.** `parse_pattern_primary` (`src/parser/mod.rs`) now runs a `Token::Str` pattern through `interpolation::parse_interpolation`: `{{`/`}}` decode to braces (before, pattern `"{{x}}"` did not match the value `"{{x}}"`), an all-digit hole stays text (DEC-018), a real `{x}` hole is `a string pattern cannot interpolate`, and `"{"` reports `unterminated '{'`. `r"..."` is unchanged. Pinned by `holed_string_pattern_is_a_compile_error` and `tests/chz/spec/string_pattern_braces_test.chz`.
@@ -15171,6 +15173,7 @@ VM == interp == `--parallel` on every registered example. Conformance + clippy c
 
 Surfaced by coverage passes; no `src/` changes pending, recorded for when they bite:
 
+- **Top-level `return` — open owner question (TICKET-178).** `return` at module level parses and silently ends module execution (`print(1)` / `return` / `print(2)` prints `1`, exit 0); CPython rejects it with `SyntaxError: 'return' outside function`. Undocumented; left unchanged pending an owner decision.
 - **`match` limits** — no multiple `Some(...)` arms (one arm per outer variant; refine with `_`).
   Nested nullary-variant patterns (`Some(None)`, `Ok(Err(e))`) and **or-patterns** (`p1 | p2`) now
   work — see below.
