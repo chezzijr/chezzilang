@@ -3849,6 +3849,69 @@ mod tests {
         );
     }
 
+    /// TICKET-178 grid: every item kind x every block position must be the parse error
+    /// "`<kind>` must be a top-level declaration"; every kind at module level and a nested `fn`
+    /// anywhere must parse. Owner decision 2026-09-28: types are top-level only.
+    #[test]
+    fn item_declarations_are_top_level_only_grid() {
+        let kinds: &[(&str, &str)] = &[
+            ("struct", "struct S:\n    x: int\n"),
+            ("enum", "enum E:\n    A\n"),
+            ("newtype", "newtype N = int\n"),
+            ("protocol", "protocol P:\n    fn m(self) -> int\n"),
+            ("type", "type T = int\n"),
+            ("test fn", "test fn t():\n    pass\n"),
+        ];
+        // (position name, header lines, indent of the body under the header)
+        let positions: &[(&str, &str, usize)] = &[
+            ("fn body", "fn f():\n", 4),
+            ("method body", "struct H:\n    x: int\n    fn m(self):\n", 8),
+            ("if", "fn f():\n    if true:\n", 8),
+            ("while", "fn f():\n    while true:\n", 8),
+            ("for", "fn f():\n    for i in range(3):\n", 8),
+            ("match arm", "fn f():\n    match 1:\n        _:\n", 12),
+            ("parallel", "fn f():\n    parallel:\n", 8),
+            ("spawn", "fn f():\n    spawn:\n", 8),
+            ("defer", "fn f():\n    defer:\n", 8),
+            ("recover", "fn f():\n    r := recover:\n", 8),
+            ("nested fn body", "fn f():\n    fn g():\n", 8),
+            ("top-level if", "if true:\n", 4),
+        ];
+        let indent = |src: &str, n: usize| -> String {
+            src.lines()
+                .map(|l| format!("{}{}\n", " ".repeat(n), l))
+                .collect()
+        };
+        let mut wrong = Vec::new();
+        for (kind, decl) in kinds {
+            if let Err(e) = parse(lexer::tokenize(decl).unwrap()) {
+                wrong.push(format!("{kind} @ module level: rejected: {}", e.message));
+            }
+            for (pos, header, n) in positions {
+                let src = format!("{header}{}", indent(decl, *n));
+                let want = format!("{kind} must be a top-level declaration");
+                match parse(lexer::tokenize(&src).unwrap()) {
+                    Ok(_) => wrong.push(format!("{kind} @ {pos}: accepted")),
+                    Err(e) if !e.message.contains(&want) => {
+                        wrong.push(format!("{kind} @ {pos}: wrong error: {}", e.message))
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+        for (pos, header, n) in positions {
+            let src = format!("{header}{}", indent("fn k() -> int:\n    return 1\n", *n));
+            if let Err(e) = parse(lexer::tokenize(&src).unwrap()) {
+                wrong.push(format!("fn @ {pos}: rejected: {}", e.message));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "top-level-only grid violations:\n{}",
+            wrong.join("\n")
+        );
+    }
+
     #[test]
     fn import_nested_is_error() {
         // An `import` is TOP-LEVEL-only: nested inside a fn body/block it is a parse error (it used
