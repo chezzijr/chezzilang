@@ -1,0 +1,41 @@
+# TICKET-177 (wave 16 C2, Family 5 Identity) — a handle keeps its identity across a task crossing.
+# Go: `c2 := c1` compared inside a goroutine prints true; a channel sent over a channel and
+# received back is `==` to the original. Chezzi compared heap slots, so every crossing
+# (fresh slot around the same core) made the handle unequal to itself.
+import std.concurrency
+
+test fn channel_equal_to_its_alias_inside_a_spawned_task():
+    c1 := Channel[int]()
+    c2 := c1
+    out := Channel[bool](1)
+    parallel:
+        spawn:
+            out.send(c1 == c2)
+    assert out.recv() == true
+
+test fn channel_received_back_over_a_channel_equals_the_original():
+    c1 := Channel[int]()
+    cc := Channel[Channel[int]](1)
+    cc.send(c1)
+    back := cc.recv()
+    assert back == c1
+
+test fn channel_in_a_list_inside_a_spawned_task():
+    c1 := Channel[int]()
+    xs := [c1]
+    out := Channel[bool](1)
+    parallel:
+        spawn:
+            out.send(c1 in xs)
+    assert out.recv() == true
+
+test fn shared_of_a_channel_get_equals_the_original():
+    c1 := Channel[int]()
+    s := Shared(c1)
+    assert s.get() == c1
+
+test fn atomic_of_a_channel_cas_with_its_own_load_succeeds():
+    c1 := Channel[int]()
+    c2 := Channel[int]()
+    a := Atomic(c1)
+    assert a.cas(a.load(), c2)
