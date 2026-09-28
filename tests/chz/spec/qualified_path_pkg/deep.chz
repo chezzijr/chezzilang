@@ -1,0 +1,20 @@
+protocol Factory:
+    fn make() -> Self
+
+struct Point:
+    x: int
+
+    fn zero() -> Point:
+        return Point(0)
+
+    fn make() -> Point:
+        return Point(7)
+
+enum Color:
+    Red
+    Blue(int)
+
+limit := 3
+
+fn double(n: int) -> int:
+    return n * 2

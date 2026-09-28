@@ -1,0 +1,7 @@
+# TICKET-175: `import math from std` binds `math` like `import std.math` (Python `from os import path`).
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+
+import math from std
+
+test fn import_module_from_std_binds_the_module():
+    assert math.sqrt(9.0) == 3.0
