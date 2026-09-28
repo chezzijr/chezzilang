@@ -208,6 +208,8 @@ deferred until after the JIT. Every mark rule is an approximation of "the parent
 
 ## Family 5 — Handle identity (C2)
 
+Status: fixed by TICKET-177 (2074879f..24a574ed).
+
 **Mechanism.** `values_equal_guarded` (`src/vm/arith.rs:2312`) is the single equality function behind
 `==`, `in`, `contains`, `index_of`, `unique`, map/set probes and `Atomic.cas` (49 call sites). Its only
 identity test is the heap-slot shortcut `ha == hb`. There is no arm for `Channel`, `Shared`,

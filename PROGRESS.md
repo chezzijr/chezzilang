@@ -7,6 +7,17 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-177 (2026-09-28) — handle identity survives a task crossing (wave 16 Family 5, C2).**
+  A `Channel`/`Shared`/`RwShared`/`Atomic`/`AtomicInt`/`Executor`/`Socket`/`Listener`/`Writer`/`Reader`
+  handle compared unequal to itself after any crossing: each crossing wraps the same `Arc` core in a
+  fresh heap slot, and `==` had only the slot shortcut. `Obj::identity` (`src/vm/heap.rs`) is now the
+  one exhaustive classification (`Content` / `Core` / `Slot`, no `_` arm); `values_equal_guarded`
+  compares `Core` keys, and the `ptr` address arm is folded into it. `Atomic.cas` refuses any payload
+  reaching a `Slot` object through the same classification, so the hand-kept `WireValue::holds_fn` is
+  deleted, and an extern fn or iterator payload now faults (`Atomic.cas: the payload holds an
+  iterator, which cas cannot compare`) instead of answering `false` forever. Grid:
+  `tests/chz/spec/handle_identity_crossing_test.chz` (10 kinds + `ptr` × 13 ops × 7 routes; 92 red
+  cells per kind before the fix).
 - **TICKET-176 (2026-09-28) — W15-3 and W15-6 fixed, W15-7 closed as not reproducing.**
   - **W15-3 (P1, net).** Not a close race. `Socket.write` made one non-blocking `write(2)` and
     returned the partial count as `Ok`: a 16 MiB write to a non-reading peer printed

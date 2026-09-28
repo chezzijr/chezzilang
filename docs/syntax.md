@@ -2399,7 +2399,9 @@ everything the runtime can genuinely compare stays legal:
   (above), so `fn f[T](a: T, xs: List[T]): return a == 1` rejects at ITS OWN declaration
   (`T is not bounded by Eq`) even though `int` and `T` would be co-inhabitable once `T` is bound. A
   HANDLE's own element type (`Channel[T]` vs `Channel[int]`) is the identity-compare exception — the
-  handle compares by identity, never by its element, so `cmp`'s `T` needs no `Eq` bound at all.
+  handle compares by identity, never by its element, so `cmp`'s `T` needs no `Eq` bound at all, and that
+  identity survives every crossing (spawn capture or argument, `Channel` send, `Shared`/`RwShared`/`Atomic`
+  store, `Executor` submit) — TICKET-177.
 
 A conforming existential is not a blanket pass: a **non**-conforming concrete stays an error at every
 depth (`sh: Shape` vs a `str`, `List[Shape]` vs `List[str]`, `Container[T]` vs an `int`), and neither
