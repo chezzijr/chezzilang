@@ -1914,8 +1914,9 @@ impl Vm {
                     drop(c);
                     return Ok((idx, WireValue::Bool(true)));
                 }
-                // Every arm closed+empty: no value can ever arrive — the all-closed `wait` fault. (A live
-                // timer arm keeps `all_closed` false, so this fires only with no timer pending.)
+                // Every channel arm closed+empty: no value can ever arrive — the all-closed `wait` fault.
+                // (`all_closed` reads only the channel arms: a timer arm is not in `arms`, so a still-
+                // pending timer does NOT keep it false — this fires before that timer's deadline.)
                 if all_closed {
                     un_account(&mut c);
                     drop(c);

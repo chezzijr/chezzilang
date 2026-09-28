@@ -5010,10 +5010,24 @@ impl MnSched {
         // counters above (a `send` doesn't bump `runnable` for a demoted fiber), but that fiber WILL pop
         // it on its next poll and make progress — so this is NOT a deadlock. Without this peek, a sibling
         // `send` racing the quiesce could spuriously fault an innocent PARKED sibling.
-        if c.demoted_chans
-            .values()
-            .any(|(core, _)| !core.q.lock().unwrap_or_else(|e| e.into_inner()).is_empty())
-        {
+        // W15-6 (TICKET-176) — a demoted fiber also settles on a tripped `done_latch` (any arm) and on
+        // a close: `ClosedEmpty` for a recv, `wait: all channels closed` once EVERY arm of a `wait:` is
+        // closed. A `wait:` skips one closed arm, so `closed` is read per group (`demoted_groups`),
+        // never per channel. Each vetoing state makes the demoted loop return on its next poll and
+        // unregister, so the veto cannot pin a hang. Without it a verdict fires with no victim,
+        // latches `terminate`, and a later requeue of the demoted fiber hangs the join.
+        if c.demoted_chans.values().any(|(core, _)| {
+            !core.q.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
+                || core.done_latch.load(Ordering::Relaxed)
+        }) {
+            return false;
+        }
+        if c.demoted_groups.values().any(|arms| {
+            !arms.is_empty()
+                && arms
+                    .iter()
+                    .all(|core| core.q.lock().unwrap_or_else(|e| e.into_inner()).closed)
+        }) {
             return false;
         }
         // TICKET-063 — the same race for a guard waiter (`SchedCore::guard_waits`): the owner may have
