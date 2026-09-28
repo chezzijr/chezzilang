@@ -7,6 +7,29 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-176 (2026-09-28) — W15-3 and W15-6 fixed, W15-7 closed as not reproducing.**
+  - **W15-3 (P1, net).** Not a close race. `Socket.write` made one non-blocking `write(2)` and
+    returned the partial count as `Ok`: a 16 MiB write to a non-reading peer printed
+    `Ok 2633835 of 16777216` with no `close()`. It never parked, so the closer won only by luck.
+    `write`/`write_bytes` now send every byte before `Ok(len)` (Go's `Conn.Write`). The sent offset
+    is latched on the fiber (`Vm::poll_written`) across a park. Any early stop (close, deadline,
+    poll-once, OS error) is `Err`, and the sent count is not reported. `docs/stdlib.md` states it.
+    Repro `closing_a_socket_fails_a_parked_write_at_every_seed_one_worker`: base 15 of 16 seeds
+    failed, fix 0.
+  - **W15-6 (P2, sched).** The deadlock veto peeked a demoted fiber's channels only for a queued
+    value. A demoted recv on an empty closed channel is about to settle, yet the verdict fired with
+    no victim, latched `terminate`, and the fiber's later requeue hung the join. The veto now also
+    counts a tripped `done_latch` and a demoted recv or `wait:` whose every arm is closed
+    (`SchedCore::demoted_groups`, per group: a `wait:` skips one closed arm). Paired sample,
+    `CHEZZI_THREADS=0`, seeds 1..12 x 6, six concurrent, 20 CPU spinners, load ~20: base 25 of 144
+    hung (rc=124), fix 0 of 144. The planner's own sample was base 9 of 72, fix 0 of 144.
+  - **W15-7 (P2, sched/cancel).** 0 of 62 loaded samples: 0 of 26 on `c607be55`, 0 of 36 on
+    `5001eff3` (seeds 1..12 x 3, six concurrent plus 20 spinners, load 6.59 to 37.99). Last seen at
+    `66646cf8`. No code change.
+  - `schedfuzz --seeds 1..33 --threads 1,2,0` over `net_close_test`, `generator_channel_test`,
+    `cancel_test`, `net_write_all_test`: `384 runs, 0 finding(s), 0 unstable`.
+  - JIT entry rule condition 3 is now met: no P0/P1 row is open.
+
 - **TICKET-175 (2026-09-28) — a module is reachable by its full path, and `import X from std`
   works.** An un-aliased `import std.math` now binds `math` (Go reading, unchanged) AND `std.math`
   (Python reading), in expressions, annotations, constructors, statics, variants, `match` patterns
@@ -8902,7 +8925,7 @@ that no serious one is still turning up in the part of the engine the JIT compil
 |---|---|---|
 | 1 | The seeded scheduler oracle is built and has been shown to re-find reverted historical races (TICKET-167) | built, not yet judged — re-finds 2 of 3 reverted historical races (W15-1 at the default worker count only, W14-39 at T=1/T=2), the third (TICKET-128) is masked on release; whether that clears this condition is the owner's call, held pending the full sweep numbers; see `docs/bug-discovery.md` "Seeded scheduler oracle" |
 | 2 | **Two consecutive bug-hunt sweeps with zero new P0/P1 in the core**: lexer, parser, checker, compiler, VM exec/call/arith/stmt, scheduler, GC, value model | not started |
-| 3 | Every open P0/P1 ledger row is closed | not met — W15-3 (P1, net, found 2026-09-23 by the TICKET-167 sweep) is open; other open rows stay P2/record (W8-19, W13-28, W15-9, W15-10) |
+| 3 | Every open P0/P1 ledger row is closed | met 2026-09-28 — W15-3 closed (TICKET-176); open rows are P2/record only |
 | 4 | Feature freeze during the window: no new language surface or std API unless it IS a sweep finding (e.g. a missing ancestor idiom), so the surface under test stops moving | starts now |
 
 Rules for counting:

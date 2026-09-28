@@ -271,6 +271,8 @@ fn closing_a_socket_fails_a_parked_write_at_every_seed_one_worker() {
 
 /// TICKET-176 / W15-6 -- a generator driven from a spawned task, iterating a channel, must complete
 /// at the default worker count. Seeds 5 and 7 hung (rc=124 at 30 s) on 2026-09-28.
+/// Root cause: the deadlock veto ignored a closed channel under a demoted recv; the deterministic
+/// pins are the `demoted_` veto unit tests in `src/vm/tests.rs`.
 #[test]
 fn a_generator_over_a_channel_from_a_task_completes_at_seeds_5_and_7_default_workers() {
     let bin = std::path::PathBuf::from(env!("CARGO_BIN_EXE_chezzi"));
