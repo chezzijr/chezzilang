@@ -36,7 +36,7 @@ use super::*;
 /// definitions per depth-1 subtree to make pieces self-contained: that is O(n²) wire size, the cliff
 /// `rwshared_view_over_shared_bindings_is_not_quadratic` exists to catch.
 #[derive(Default)]
-struct WireMemo {
+struct WireMemo<'a> {
     /// GcRef of an identity-preserved node (`Closure`/container) currently on the serialize DFS
     /// stack → the `id` assigned on its first visit. A revisit while still in `path` is a true back-edge
     /// → `Backref(id)`. Popped on DFS exit (`WireMemo::exit`) because `try_wire_speculative` asserts
@@ -108,11 +108,30 @@ struct WireMemo {
     /// D4 (TICKET-179) — `Some` only for a spawn crossing (`deep_clone_all`, `lower_task`): the
     /// crossing's own operands, which the sending task still reaches besides its GC roots. A crossing
     /// generator then decides its frame slots with [`Vm::gen_frame_observable`]. `None` (Channel
-    /// sends, the module snapshot) leaves the ambient mark.
-    gen_roots: Option<Vec<GcRef>>,
+    /// sends, the module snapshot) leaves the ambient mark. Borrowed, and read only when a generator
+    /// is serialized, so a crossing without one does no extra work: a per-spawn copy of the operands
+    /// measurably lowered `the_same_seed_replays_at_one_worker_at_the_measured_rate`.
+    gen_operands: Option<SpawnOperands<'a>>,
 }
 
-impl WireMemo {
+/// D4 (TICKET-179) — a spawn crossing's operands: the callee or receiver (`lower_task` only) and the
+/// args. See [`WireMemo::gen_operands`].
+#[derive(Clone, Copy)]
+struct SpawnOperands<'a> {
+    head: Option<Value>,
+    args: &'a [Value],
+}
+
+impl SpawnOperands<'_> {
+    fn gcrefs(self) -> impl Iterator<Item = GcRef> {
+        self.head
+            .into_iter()
+            .chain(self.args.iter().copied())
+            .filter_map(|v| v.child_gcref())
+    }
+}
+
+impl WireMemo<'_> {
     /// TICKET-119 — `h` may be about to become a `Backref` target: invalidate every `doom` record
     /// whose recorded sub-walk contains it.
     fn doom_touch(&mut self, h: GcRef) {
@@ -3458,11 +3477,14 @@ impl Vm {
             base_cells,
             base_nodes,
             next_id: seed_ceiling,
-            gen_roots: Some(vs.iter().filter_map(|v| v.child_gcref()).collect()),
+            gen_operands: Some(SpawnOperands {
+                head: None,
+                args: &vs,
+            }),
             ..WireMemo::default()
         };
         let mut ws = Vec::with_capacity(vs.len());
-        for v in vs {
+        for &v in &vs {
             ws.push(self.to_wire_memo_at(v, span, &mut memo)?);
         }
         let mut rebuild = super::fxhash::FxHashMap::<u32, GcRef>::default();
@@ -3980,8 +4002,7 @@ impl Vm {
                             // D4 (TICKET-179) — at a spawn crossing, decide once which frame slots
                             // the sending task can still observe; the rebuild arm only reads it.
                             let observable = memo
-                                .gen_roots
-                                .as_deref()
+                                .gen_operands
                                 .map(|extra| Box::new(self.gen_frame_observable(h, args, extra)));
                             WireGenState::Pending(wargs, observable)
                         }
@@ -4044,7 +4065,7 @@ impl Vm {
                                 call_depth: g.ctx.call_depth,
                                 cur_base: g.ctx.cur_base,
                                 handlers: g.ctx.handlers.clone(),
-                                observable: memo.gen_roots.as_deref().map(|extra| {
+                                observable: memo.gen_operands.map(|extra| {
                                     Box::new(self.gen_frame_observable(h, &g.ctx.stack, extra))
                                 }),
                             }
@@ -4345,10 +4366,10 @@ impl Vm {
     /// VM's GC roots or from `extra` (the crossing's other operands), never passing through `g`
     /// itself. Per-slot is a ceiling: a private list holding a reachable list is observable whole (a
     /// false fault, never a lost write). A scalar slot is never observable.
-    fn gen_frame_observable(&self, g: GcRef, slots: &[Value], extra: &[GcRef]) -> Vec<bool> {
+    fn gen_frame_observable(&self, g: GcRef, slots: &[Value], extra: SpawnOperands) -> Vec<bool> {
         let mut reach = super::fxhash::FxHashSet::<GcRef>::default();
         let mut work = self.gc_roots();
-        work.extend_from_slice(extra);
+        work.extend(extra.gcrefs());
         while let Some(h) = work.pop() {
             if h != g && reach.insert(h) {
                 work.extend(self.heap.children(h));
@@ -5091,12 +5112,15 @@ impl Vm {
             cells: cells.into_iter().collect(),
             base_nodes,
             next_id,
-            gen_roots: Some(task.roots().collect()),
             ..WireMemo::default()
         };
         let lowered = match task {
             PendingCall::Call { callee, args, span } => {
-                let wargs = self.wire_args(args, span, &mut memo)?;
+                memo.gen_operands = Some(SpawnOperands {
+                    head: Some(callee),
+                    args: &args,
+                });
+                let wargs = self.wire_args(&args, span, &mut memo)?;
                 match callee.as_obj() {
                     Some(h) => match self.heap.get(h).clone() {
                         Obj::Closure {
@@ -5170,9 +5194,13 @@ impl Vm {
                 args,
                 span,
             } => {
+                memo.gen_operands = Some(SpawnOperands {
+                    head: Some(recv),
+                    args: &args,
+                });
                 let wrecv = self.to_wire_memo_at(recv, span, &mut memo)?;
                 self.ensure_crossable(&wrecv, span)?;
-                let wargs = self.wire_args(args, span, &mut memo)?;
+                let wargs = self.wire_args(&args, span, &mut memo)?;
                 Lowered::Method {
                     recv: wrecv,
                     name,
@@ -5699,12 +5727,12 @@ impl Vm {
     /// [`deep_clone_all`](Vm::deep_clone_all) for the scope invariant.
     pub(super) fn wire_args(
         &self,
-        args: Vec<Value>,
+        args: &[Value],
         span: Span,
         memo: &mut WireMemo,
     ) -> Result<Vec<WireValue>, RuntimeError> {
-        args.into_iter()
-            .map(|a| {
+        args.iter()
+            .map(|&a| {
                 // `to_wire_memo_at` re-stamps a generator's placeholder span with this call site's.
                 let w = self.to_wire_memo_at(a, span, memo)?;
                 self.ensure_crossable(&w, span)?;
