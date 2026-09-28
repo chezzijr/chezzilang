@@ -53,6 +53,28 @@
   - Every family fix lands with **one test that enumerates the whole grid** (every operation × every
     context, every binder × every name kind), so a new row cannot ship silently.
     `intrinsic_grants_all_have_vm_arms` is the existing precedent.
+- **How to find the root cause (the method that produced wave 16's analysis).** A bug report names a
+  symptom in one cell. Before designing any fix:
+  1. **Name the fact the bug is about**, not the program: "what does this name refer to", "may this
+     operation block here", "is this call a write", "are these two handles the same object", "may a
+     declaration appear here". Group all findings by that fact — twelve wave-16 bugs were five facts.
+  2. **Find every place that decides that fact** by grep, with `file:line`: checker, desugar,
+     compiler, runtime, native tables, docs. Two or more deciders is the bug, even before they drift.
+     Tell-tales: "Mirrors the checker's …", "keep in sync with …", a drift test with an exemption, a
+     per-keyword/per-op denylist, a veto list that grows per shape.
+  3. **Draw the grid the fact spans** (operations × contexts, binders × name kinds, kinds × positions,
+     handle kinds × identity operations) and mark which cells are broken. Probe a few unreported
+     cells: the root-cause pass for Blocking found four more broken cells nobody had reported.
+  4. **Count the history**: how many past tickets/rows patched this same class (`git log -S`,
+     `docs/gaps-archive.md`). Three or more means the fix is structural, not another patch.
+  5. **Name the wrong assumption** — usually "the same AST gives the same answer" or a leftover from an
+     earlier design (one heap, one engine, top-level-only declarations) that nobody re-checked when the
+     design moved.
+  6. **Design the single source and the deletion**: which component owns the fact, what everyone else
+     reads, which copies are deleted, and the whole-grid test. Write it down (`docs/root-causes-wNN.md`)
+     and get the owner's decision on anything that changes the language before filing.
+  The fixes that held on this project all *deleted* a copy; a fix that only adds code in a family with
+  siblings is almost always the next bug's parent.
 - **Stdlib gaps are deferred on verified cost, never on "nobody asked."** A reference-language idiom
   *is* the need. `Reader.lines()` was deferred on a claimed cost ("needs a new lazy Obj variant") that
   was false — a generator over `read_line()` streams lazily by construction — and building it surfaced

@@ -193,9 +193,17 @@ Every finding so far falls into one of these (use as a "what am I hunting" check
    - **Evidence-gated, reproduced-only.** Each finding: minimal repro + exact command + EXPECTED (cite
      spec) + ACTUAL (quoted) + does the worker count change it? + severity. No speculation; "clean" if
      an angle yields nothing, with the angles covered listed.
-4. **Triage each confirmed bug** through `auto-task` (research → plan → TDD → prosecute/defend) →
-   merge → `post-merge-gate`. Batch by file seam (most checker bugs touch `src/checker/mod.rs` in
-   *disjoint functions* — safe to parallelize as separate auto-tasks, merge serially).
+4. **Root-cause pass BEFORE any fix** (added 2026-09-28 after wave 16). Group the confirmed findings
+   by the fact they share, and for each group find every place that decides that fact, the grid it
+   spans, the broken cells, and how many past tickets patched the same class — the method is
+   `docs/lessons.md` §1 "How to find the root cause"; the worked example is `docs/root-causes-w16.md`
+   (12 P0/P1 → 5 families; an audit showed 34 of 51 earlier fixes were point patches whose families
+   all came back). Show the write-up to the owner before filing.
+5. **File one structural ticket per family** (delete the duplicated decision, add the single source,
+   land one whole-grid test), through the pipeline; its planning and plan-validation stages reject a
+   point patch in a systemic family. Only an isolated defect with no sibling copies (a one-site
+   arithmetic guard, a stdlib edge) is fixed directly. Order the tickets by file seam so two tickets
+   editing the same code never run concurrently.
 
 ### Domain checklist (the reusable target list)
 
