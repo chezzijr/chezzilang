@@ -383,9 +383,8 @@ impl Vm {
         // and pin the worker for `ms`, DEMOTE the worker: spawn a replacement + sleep in place +
         // resume. A non-positive / non-int arg has nothing to wait for → falls through to the inline
         // no-op.
-        if self.mn.is_some()
-            && self.native_reentry > 0
-            && kind == Kind::TimedWait
+        if kind == Kind::TimedWait
+            && self.block_mode(WaitSpec::Sleep) == BlockMode::Demote
             && let Some(ms) = args.first().and_then(|v| self.int_val(*v))
             && ms > 0
         {
@@ -405,7 +404,7 @@ impl Vm {
         // OURS, so it stays a checkpoint for its whole duration — see [`Vm::block_until_deadline`].
         //
         // Deliberately NOT gated on `native_reentry == 0`: a native callback loop is already a
-        // documented cancellation checkpoint, `demote_block_sleep` above already faults from inside
+        // documented cancellation checkpoint, `demote_block_until` above already faults from inside
         // one, and `block_halt_check` only ever returns `Err` — it never unwinds VM state.
         //
         // `checked_add` saturates a pathological `ms` (centuries) to a far-future deadline rather than
@@ -427,17 +426,30 @@ impl Vm {
         //
         // TICKET-151 (W14-40) — a `Kind::HostWait` native (a stdin read) waits on the host the same
         // way, and does so even OUTSIDE a callback, on a fiber that never preempted. Two halves, both
-        // load-bearing: `demote_enter` hands this thread's runner slot to one replacement worker and
+        // load-bearing: `block_enter` hands this thread's runner slot to one replacement worker and
         // accounts `running -> inflight` (a read returns on the user's input, so it must veto the
         // deadlock predicate); the width release is DEC-141's bracket, without which a gated thread's
         // own replacement waits on the permit this thread still holds. With only the width bracket a
         // thread that never preempted moves nothing (`holds_width` is false). Deliberately NOT gated
         // on `native_reentry > 0`: a direct `io.input` starves a sibling exactly like one in a callback.
-        let host_wait = kind == Kind::HostWait;
-        if host_wait {
-            self.demote_enter("a stdin read", span)?;
-        }
+        // TICKET-181 — ONE bracket for every native that holds its host thread (`Blocking`,
+        // `HostWait`), picked by the table: stdin demotes in every context (DEC-151; with no M:N
+        // scheduler the bracket is DEC-052's pool-slot yield), and an off-heap blocking native in a
+        // Demote context demotes too (changed cell (f), F1: holding the runner hung `request.get`
+        // to a sibling-served socket at T=1). Gated on `holds_host_thread`, so `sleep_ms(<=0)`
+        // never demotes for a no-op. The DEC-141 width bracket stays inside it.
         let in_place = kind.holds_host_thread();
+        let reg = match WaitSpec::of_native(kind) {
+            Some(spec) if in_place && self.block_mode(spec) == BlockMode::Demote => {
+                let what = if spec == WaitSpec::Stdin {
+                    "a stdin read"
+                } else {
+                    "a blocking call"
+                };
+                Some(self.block_enter(spec, None, what, span)?)
+            }
+            _ => None,
+        };
         if in_place {
             self.width_release();
         }
@@ -446,8 +458,8 @@ impl Vm {
         if in_place {
             self.width_acquire();
         }
-        if host_wait {
-            self.demote_exit();
+        if let Some(reg) = reg {
+            self.block_exit(reg);
         }
         let ret = raw.map_err(|e| RuntimeError {
             message: e.message,

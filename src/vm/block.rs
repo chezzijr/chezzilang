@@ -143,10 +143,15 @@ pub(super) fn mode(ctx: BlockCtx, spec: WaitSpec) -> BlockMode {
         BlockCtx::Demote => match spec {
             // v1 limit: the demote loop cannot block a sender. Go blocks.
             W::Send | W::Wait { has_send: true, .. } => Refuse,
-            W::Offload | W::Connect | W::Join | W::Nursery => InPlace,
-            W::Recv | W::Timer | W::Wait { .. } | W::Sleep | W::Stdin | W::Socket | W::Guard => {
-                Demote
-            }
+            W::Connect | W::Join | W::Nursery => InPlace,
+            W::Recv
+            | W::Timer
+            | W::Wait { .. }
+            | W::Sleep
+            | W::Offload
+            | W::Stdin
+            | W::Socket
+            | W::Guard => Demote,
         },
         BlockCtx::Builder { job } => match spec {
             W::Recv
@@ -400,7 +405,7 @@ mod tests {
         ("Wait+deadline", "PDSI IIII IIII", true),
         ("Wait+deadline+send", "PRSI IIII IIII", true),
         ("Sleep", "PDSS SSSS SSSS", true),
-        ("Offload", "PIII IIII IIII", true),
+        ("Offload", "PDII IIII IIII", true),
         ("Stdin", "DDDD DDDD DDDD", true),
         ("Socket", "PDRR RRRR IRIR", true),
         ("Connect", "PIIR RRRR IIII", true),

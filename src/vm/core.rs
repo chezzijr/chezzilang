@@ -59,7 +59,7 @@ impl Drop for UpdateGuard {
 }
 
 /// TICKET-016 — `GUARD_DEMOTE_BUDGET` is how long a guard acquire waits IN PLACE on its worker before
-/// paying for a replacement OS thread. `Vm::demote_enter` spawns one OS thread per demoting worker
+/// paying for a replacement OS thread. `Vm::block_enter` spawns one OS thread per demoting worker
 /// shell, so an unconditional demote on every guarded `set`/`update`/`write` made 50 000 one-`update`
 /// fibers exhaust a 32 768-task ceiling and never finish. Measured budgets on that test
 /// (`TasksMax=32768`): 0 ms still peaks at 1091 threads, 1 ms at 35, 5 ms at 19.

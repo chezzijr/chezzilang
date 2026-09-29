@@ -595,7 +595,7 @@ impl Vm {
                         // default engine, a `connect` inside a native callback on M:N: block, but
                         // through the SHARED demote loop rather than a private sleep-spin, so the wait
                         // gets that loop's escapes (`--timeout`, `cancel`, a run-wide `os.exit` — W7-47 —
-                        // and a torn-down nursery) and, on a worker shell, `demote_socket_enter`'s
+                        // and a torn-down nursery) and, on a worker shell, `block_enter`'s
                         // replacement worker.
                         //
                         // The 10 s connect cap is deliberately NOT clamped by `self.deadline`, unlike the

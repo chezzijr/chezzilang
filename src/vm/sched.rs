@@ -2001,7 +2001,7 @@ impl Vm {
     ///
     /// - **In a native callback on an M:N worker** (`native_reentry > 0` — the callback's `for`-loop state
     ///   lives on the un-snapshottable Rust host stack). This is the original D5 owe #3 Path C case:
-    ///   DEMOTE like [`Vm::demote_block_sleep`] — spin a replacement worker once so the pool keeps its
+    ///   DEMOTE like [`Vm::demote_block_until`] — spin a replacement worker once so the pool keeps its
     ///   width, then backoff-poll in place.
     /// - **Top-level `main` on the DEFAULT engine** (`parallel`, `mn == None`, no `eager_core`, no
     ///   scheduler, `native_reentry == 0`). There is no pool to demote FROM, so the scheduler bookkeeping
@@ -2126,7 +2126,7 @@ impl Vm {
             // W7-17's ordering). An in-callback socket op is accounted `inflight`, so it VETOES the
             // deadlock predicate: without this an untimed `accept` here hangs exactly like the
             // netpoller-park shape. `break`, NOT `?` — this loop is bracketed by
-            // `demote_socket_enter`/`demote_socket_exit`, and returning past the exit would leak
+            // `block_enter`/`block_exit`, and returning past the exit would leak
             // `running -= 1` / `inflight += 1` for the rest of the process (which is why every other
             // exit below is a `break` too).
             if let Err(e) = self.deadline_halt(span) {
@@ -2195,7 +2195,7 @@ impl Vm {
     /// socket-only version used to carry.
     /// TICKET-052 — hand this thread's pool slot to a replacement worker before blocking in place.
     /// A no-op on an M:N worker shell (`self.mn.is_some()`): those already compensate through
-    /// [`Vm::demote_enter`], and yielding here too would spawn two replacements for one block.
+    /// [`Vm::block_enter`], and yielding here too would spawn two replacements for one block.
     /// TICKET-118 (W13-7) — a job's top-level `Vm` joining a nursery hands its slot over in
     /// `MnSched::joiner_wait` and `MnSched::take_runnable` instead, marked by
     /// `MnSched::pool_joiner_guard` and only while that sched has no running or runnable fiber; an
@@ -2205,48 +2205,6 @@ impl Vm {
             return;
         }
         crate::vm::pool::yield_slot(budget);
-    }
-
-    pub(super) fn demote_enter(&mut self, what: &str, span: Span) -> Result<(), RuntimeError> {
-        let Some(sched) = self.mn.as_ref().map(Arc::clone) else {
-            self.yield_pool_slot(None);
-            return Ok(());
-        };
-        {
-            let mut c = sched.lock();
-            c.running -= 1;
-            sched.inflight.fetch_add(1, Ordering::Relaxed);
-            drop(c);
-            sched.notify_waiters();
-        }
-        if !self.demoted {
-            if !self.spawn_replacement_worker(&sched, self.wid) {
-                let mut c = sched.lock();
-                c.running += 1;
-                sched.inflight.fetch_sub(1, Ordering::Relaxed);
-                drop(c);
-                return Err(self.err(
-                    format!(
-                        "{what} inside a native callback could not demote the worker (OS thread limit \
-                         reached) — reduce concurrent in-callback blocking or raise the thread limit"
-                    ),
-                    span,
-                ));
-            }
-            self.demoted = true;
-        }
-        Ok(())
-    }
-
-    /// TICKET-016 (W8-3) generalisation of the demote-exit bracket — see [`Vm::demote_enter`]. A
-    /// no-op when `self.mn` is `None`.
-    pub(super) fn demote_exit(&mut self) {
-        let Some(sched) = self.mn.as_ref().map(Arc::clone) else {
-            return;
-        };
-        let mut c = sched.lock();
-        c.running += 1;
-        sched.inflight.fetch_sub(1, Ordering::Relaxed);
     }
 
     /// TICKET-141 (W14-14) — give this thread's width permit back. A no-op unless it holds one.
@@ -2527,8 +2485,8 @@ impl Vm {
             // the requeued fiber has ZERO live consumers: not this thread (leaving), not the
             // replacement (asleep, untimed). `wait_for_completion` is ALSO an untimed `cv.wait`, so the
             // joiner never wakes either — a hang, not a slow path. All four demote entry points route
-            // here (`demote_recv_block`, `demote_wait_block`, `demote_block_sleep`,
-            // `demote_socket_enter`), so the notify must be unconditional on this exit, not shaped to
+            // here (`demote_recv_block`, `demote_wait_block`, `demote_block_until`,
+            // `block_enter`), so the notify must be unconditional on this exit, not shaped to
             // any one of them. Cost: once per demoted-thread exit, not once per `CONTEXT_REDS`
             // dispatched ops — off the hot path W8-7 is about.
             //
