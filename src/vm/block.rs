@@ -29,16 +29,28 @@ pub(super) enum BlockCtx {
 }
 
 impl BlockCtx {
-    /// May the process-wide deadlock verdict JUDGE this party (DEC-136)? A thread that owns itself
-    /// whose every native re-entry is a `defer` drain. Never widen this to a callback re-entry:
-    /// `src/vm/quiesce.rs`'s live-count argument needs such a party live and unregistered.
+    /// May the process-wide deadlock verdict JUDGE this party (DEC-136)?
+    ///
+    /// `quiesce`'s `live` count is `1 (main) + Σ outstanding` over the run's executors, so exactly
+    /// two kinds of thread are counted: `main` and an eager `Executor` job — the two with no
+    /// scheduler of any kind under them — and only while every native re-entry is a `defer` drain
+    /// (`native_reentry == deferring`; a `defer` body is VM code on the same thread). A worker
+    /// shell, the inline builder, or a party inside a real callback is not counted; each can only
+    /// run user code while some counted party is inside a nursery or a native call, and such a
+    /// party is live and unregistered, which vetoes the verdict. Never widen this to a callback
+    /// re-entry: registering such a party deletes that veto and turns a safe hang into a false
+    /// fault. See [`crate::vm::quiesce`] for the full argument.
     pub(super) fn judged(self) -> bool {
-        matches!(self, BlockCtx::OwnThread { judged: true, .. })
+        matches!(
+            self,
+            BlockCtx::OwnThread { judged: true, .. } | BlockCtx::PoolJob { judged: true, .. }
+        )
     }
 }
 
 /// What a blocking op waits for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[allow(dead_code)] // TICKET-181: Timer, Connect, Guard and Join gain their sites in steps 5-10
 pub(super) enum WaitSpec {
     /// an empty `recv` on an ordinary channel
     Recv,
@@ -71,6 +83,7 @@ impl WaitSpec {
     /// Such a demoted wait is accounted `inflight` (it vetoes the verdict); every other one
     /// registers a waiter the verdict asks "can you still be satisfied?". A guard is never
     /// `inflight` (DEC-063).
+    #[allow(dead_code)] // TICKET-181: read by `block_enter` (step 7)
     pub(super) fn will_return(self) -> bool {
         match self {
             WaitSpec::Timer

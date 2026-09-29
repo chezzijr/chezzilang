@@ -507,7 +507,7 @@ impl Vm {
     /// `MnSched::park_join` requeues the fiber; `drain_escaped_nursery`'s re-run then finds the
     /// family settled and pops normally.
     pub(super) fn park_escaped_abort(&mut self, from_len: usize) -> bool {
-        if self.native_reentry != 0 {
+        if !matches!(self.block_mode(WaitSpec::Nursery), BlockMode::Park) {
             return false;
         }
         for i in (from_len..self.nurseries.len()).rev() {
@@ -567,7 +567,7 @@ impl Vm {
         // Rust stack holds the native frame), so `join_fiber_owned_nursery` runs the loop inline.
         // Both callers stop after a park: `Op::JoinNursery` has nothing after the call, and
         // `do_return` returns early on `join_suspend`.
-        if self.native_reentry == 0
+        if matches!(self.block_mode(WaitSpec::Nursery), BlockMode::Park)
             && let Some(Some(scope)) = self.eager_scheds.last()
             && scope.fiber_owned
             && !scope.sched.lock().family_done(scope.scope)
@@ -5609,7 +5609,7 @@ impl Vm {
                 // The deadlock verdict keeps BOTH of its old gates: only on a timed-out wait (a
                 // notified wake means something just moved, so the party set is least trustworthy
                 // right then), and only from a party the count can judge.
-                if !timed.timed_out() || !self.is_counted_party() {
+                if !timed.timed_out() || !self.block_ctx().judged() {
                     continue;
                 }
                 // W7-58 residual — DROP `eager` (G) before taking `parties` (P). See the doc above:

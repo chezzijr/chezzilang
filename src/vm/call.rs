@@ -327,9 +327,7 @@ impl Vm {
             self.cancelled = true;
             return Err(self.err("cancelled".to_string(), span));
         }
-        if self.mn.is_some()
-            && self.native_reentry == 0
-            && kind.blocks()
+        if WaitSpec::of_native(kind).is_some_and(|s| matches!(self.block_mode(s), BlockMode::Park))
             && let Some(nargs) = self.extract_native_args(&args)
         {
             // D5 owe #2 — a TIMED WAIT (`sleep_ms`) rides the timer thread (park + deadline-wake), not

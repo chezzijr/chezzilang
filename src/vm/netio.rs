@@ -821,7 +821,7 @@ impl Vm {
                 }
                 // No fiber to park: block the thread in place only where that starves nobody
                 // ([`Vm::may_block_socket_in_place`]) — else the pre-existing loud error.
-                if !self.may_block_socket_in_place() {
+                if matches!(self.block_mode(WaitSpec::Socket), BlockMode::Refuse) {
                     return Ok(self.sock_err(
                         "read_bytes would block: an Executor job doesn't own its thread — \
                         blocking here would starve every other job and `parallel:` nursery \
@@ -1025,7 +1025,7 @@ impl Vm {
                     // engine blocks in place too (Go-identical). Anywhere else the calling thread is
                     // shared, so blocking it starves the peer that would make the fd ready → fail loud
                     // ([`Vm::may_block_socket_in_place`]).
-                    if !self.may_block_socket_in_place() {
+                    if matches!(self.block_mode(WaitSpec::Socket), BlockMode::Refuse) {
                         return Ok(self.sock_err(
                             "read would block: an Executor job doesn't own its thread — \
                             blocking here would starve every other job and `parallel:` nursery \
@@ -1180,7 +1180,7 @@ impl Vm {
                 }
                 // In-callback on M:N (or top-level `main` on the default engine) → demote +
                 // backoff-poll the non-blocking write in place (#3 socket half).
-                if !self.may_block_socket_in_place() {
+                if matches!(self.block_mode(WaitSpec::Socket), BlockMode::Refuse) {
                     return Ok(self.sock_err(
                         "write would block: an Executor job doesn't own its thread — \
                         blocking here would starve every other job and `parallel:` nursery \
@@ -1320,7 +1320,7 @@ impl Vm {
                 }
                 // In-callback on M:N (or top-level `main` on the default engine) → demote +
                 // backoff-poll the non-blocking accept in place (#3 socket half).
-                if !self.may_block_socket_in_place() {
+                if matches!(self.block_mode(WaitSpec::Socket), BlockMode::Refuse) {
                     return Ok(self.sock_err(
                         "accept would block: an Executor job doesn't own its thread — \
                         blocking here would starve every other job and `parallel:` nursery \
@@ -1839,7 +1839,7 @@ impl Vm {
         // and only on this path, so an ordinary bounded `send` is untouched. Retries the ONE atomic
         // `enqueue_bounded` rather than check-then-enqueue, so a racing sender still can't push either
         // send past `cap`.
-        if self.can_block_in_place() {
+        if matches!(self.block_mode(WaitSpec::Send), BlockMode::InPlace) {
             // First attempt OUTSIDE the party registration: `submit_result`'s cap-1 result channel
             // always has space, so every such job would otherwise register as blocked on its last
             // instruction and hand the verdict a free (if satisfiable) party.
@@ -2244,7 +2244,7 @@ impl Vm {
         // program. When nothing can in fact send — a top-level `recv` on a channel with no producer at
         // all — the verdict is reached on the FIRST halt check, before any wait, so that program still
         // faults with no added latency.
-        if self.can_block_in_place() {
+        if matches!(self.block_mode(WaitSpec::Recv), BlockMode::InPlace) {
             return self.block_recv(&core, span);
         }
         // A native callback with no thread of its own to block on: the host stack cannot be unwound
@@ -2346,99 +2346,6 @@ impl Vm {
         Ok(())
     }
 
-    /// Is this thread one of the parties the process-wide deadlock verdict counts?
-    ///
-    /// `quiesce`'s `live` count is `1 (main) + Σ outstanding` over the run's executors, so exactly two
-    /// kinds of thread are counted: the top-level `main` thread and an eagerly-dispatched `Executor`
-    /// job. Both are OS threads with NO scheduler of any kind under them — which is precisely what
-    /// this tests, and it is also what makes the count sound. An `MnSched` worker, a netpoller/timer
-    /// callback or a blocking-pool thread is NOT counted; each can only be running user code while
-    /// some counted party is inside a nursery or a native call, and such a party is live and
-    /// unregistered, which vetoes the verdict. So an uncounted sender always implies a veto.
-    ///
-    /// Registering is therefore gated on this, and forgetting to register somewhere is a HANG
-    /// (`blocked < live` ⇒ veto), never a false fault. See [`crate::vm::quiesce`] for the full
-    /// argument and the error-direction table.
-    ///
-    /// **A party whose every native re-entry is a `defer` drain IS counted** (TICKET-136, W14-11):
-    /// `native_reentry == deferring`. `run_one_deferred` raises both by one, and a `defer` body is VM
-    /// code on the same thread, so it cannot drive an uncounted thread — the invariant above holds. Any
-    /// other re-entry (a callback, a generator resume, a `test fn` body) leaves `native_reentry >
-    /// deferring` and stays unjudged. Without this, a `main`-thread or module-top-level `defer` that
-    /// can never complete blocked in place, unregistered, and hung forever.
-    pub(super) fn is_counted_party(&self) -> bool {
-        self.owns_os_thread() && self.native_reentry == self.deferring
-    }
-
-    /// Does this context own the OS thread it is running on — no scheduler of ANY kind under it?
-    ///
-    /// [`Vm::is_counted_party`] is exactly this plus `native_reentry == deferring` (every re-entry a
-    /// `defer` drain), and the split matters: the extra clause answers "may the process-wide verdict
-    /// JUDGE this party?", not "may it block?". A `main` thread inside a native callback owns its
-    /// thread just as much — it simply cannot be judged, because it is not reachable as a counted
-    /// party while a host frame sits under it.
-    ///
-    /// Use this only where a block is provably FINITE on its own (W7-14's timed `wait:` — the deadline
-    /// ends it whatever anyone else does). For an unbounded block, [`Vm::can_block_in_place`] is the
-    /// right question: an unjudgeable party that blocks forever is a hang where a fault was the honest
-    /// answer.
-    fn owns_os_thread(&self) -> bool {
-        self.mn.is_none() && self.mn_enlist_sched.is_none()
-    }
-
-    /// May this context WAIT on a channel condvar in place, rather than parking a fiber or faulting?
-    ///
-    /// A counted party can (it owns its whole OS thread), and so can an eager `Executor` job that is
-    /// currently inside a native callback: blocking in place does not unwind the host stack, which is
-    /// the only thing a callback frame forbids. That second case is deliberately WIDER than
-    /// [`Vm::is_counted_party`] — it blocks without registering, so the verdict simply declines to
-    /// judge it (a hang, the safe direction), rather than the fault it would otherwise take.
-    ///
-    /// TICKET-062 (W10-1) widened this from [`Vm::is_counted_party`] to [`Vm::owns_os_thread`]: the
-    /// extra admitted shape is `main` inside a native re-entry (`mn == None`, `mn_enlist_sched ==
-    /// None`, `native_reentry > 0` — a generator resume, a `list.map`/`Shared.update` callback, a
-    /// `test fn` body). Such a party blocks WITHOUT registering, exactly like the eager-callback case
-    /// above, so the verdict declines to judge it rather than asserting a wrong `deadlock`.
-    /// [`Vm::is_counted_party`] is NOT widened to such a re-entry: `src/vm/quiesce.rs`'s live-count
-    /// argument requires a party inside a native call to stay live-and-unregistered, so registering it
-    /// here would delete that veto and turn a genuine uncounted sender into a false deadlock. The one
-    /// exception is a `defer` drain (TICKET-136), which is VM code and not a host call.
-    fn can_block_in_place(&self) -> bool {
-        self.eager_core.is_some() || self.owns_os_thread()
-    }
-
-    /// May a would-block socket op BLOCK ITS THREAD in place ([`Vm::demote_block_socket`]) instead of
-    /// surfacing `Err("<op> would block: an Executor job doesn't own its thread …")`?
-    ///
-    /// Only where the calling thread runs nothing else, so blocking it starves nobody:
-    /// - an M:N worker INSIDE a native callback (`mn.is_some() && native_reentry > 0`) — the original
-    ///   D5 owe #3 Path C demote: the callback's `for`-loop state lives on the un-snapshottable Rust
-    ///   host stack so the fiber can't park, but [`Vm::demote_socket_enter`] spins a replacement worker
-    ///   so the pool keeps its width;
-    /// - top-level `main` — not a worker shell, not an eager
-    ///   `Executor` job, no scheduler under it ([`Vm::owns_os_thread`] + `native_reentry == 0`; NOT
-    ///   [`Vm::is_counted_party`], which since TICKET-136 also admits a `defer` drain — widening this to
-    ///   it would turn a would-block socket op in a `defer` from `Err` into a block). Go-identical: `ln.Accept()` on the main goroutine blocks until a
-    ///   client arrives, and until this landed the hello-world TCP server was unwritable (the old gate
-    ///   was `mn.is_some()`, which means "worker shell", not "parallel is on").
-    ///
-    /// Everything else keeps the immediate `Err`. **An eager `Executor` job** is excluded not because
-    /// it starves the pool — TICKET-052 gave [`crate::vm::pool`] a yield bracket (`pool::yield_slot`),
-    /// so a blocked job now hands its thread to a replacement and no longer starves a sibling — but
-    /// because widening `accept`/`read`/`write` to block in place changes what those ops RETURN on a
-    /// would-block fd (a hang instead of the `Err` this arm keeps returning), which is a separate
-    /// behaviour change TICKET-052 does not make;
-    /// - **`main` inside a native callback** (`native_reentry > 0` with `mn == None`): unjudgeable by
-    ///   the deadlock verdict ([`Vm::is_counted_party`]'s doc), so an unbounded block there is a hang
-    ///   where a fault is the honest answer.
-    ///
-    /// A `spawn`/`parallel:` fiber never reaches this question — it parks on the netpoller
-    /// ([`Vm::park_on_fd`]) — so the narrowing costs the M:N server shapes nothing.
-    pub(super) fn may_block_socket_in_place(&self) -> bool {
-        (self.mn.is_some() && self.native_reentry > 0)
-            || (self.eager_core.is_none() && self.owns_os_thread() && self.native_reentry == 0)
-    }
-
     /// TICKET-062 (W10-16) — the lowest-index `Fault` recorded by a task of a `parallel:` nursery open
     /// on THIS thread, innermost scope first, alongside the `nurseries` index `n` of that nursery.
     /// `.rev()` because `eager_scheds` is innermost-LAST, the same walk
@@ -2526,7 +2433,8 @@ impl Vm {
         let wait = Arc::new(wait);
         let mut g = self.blocked_bodies_guard_with(false, Some(Arc::clone(&wait)));
         g._party = self
-            .is_counted_party()
+            .block_ctx()
+            .judged()
             .then(|| self.quiesce.block_shared(wait));
         g
     }
@@ -2671,7 +2579,7 @@ impl Vm {
         // out "a value landed a microsecond before I looked", and the satisfiability re-check
         // ([`quiesce::PartyWait::satisfiable`]) answers that question directly instead of waiting a
         // tick to guess at it — a value that landed IS a satisfiable wait, so the verdict declines.
-        if self.is_counted_party() && self.quiesce.quiesced(&self.exec_registry) {
+        if self.block_ctx().judged() && self.quiesce.quiesced(&self.exec_registry) {
             // TICKET-134 — the child can record its fault and complete between the rung above and
             // this verdict. A verdict that saw the nursery complete took the SchedCore lock after the
             // child's fault-slot write, so this re-read sees the fault.
@@ -2941,6 +2849,10 @@ impl Vm {
         // message as a received value. Fault here, matching the plain in-callback full-send fault
         // (`chan_send_step`, netio.rs:1383) and the FULL_SEND_DEADLOCK doc-comment's parity contract.
         // ponytail: upgrade path = a demote-in-place send block (mirror `demote_recv_block`).
+        let wait_spec = WaitSpec::Wait {
+            deadline: soonest.is_some(),
+            has_send: keys.iter().any(|&(_, is_send)| is_send),
+        };
         if self.native_reentry > 0 && keys.iter().any(|&(_, is_send)| is_send) {
             return Err(self.err(FULL_SEND_DEADLOCK.to_string(), span));
         }
@@ -3057,7 +2969,7 @@ impl Vm {
         // (the COOPERATIVE fiber that inline-slept past a runnable sibling) is closed by construction:
         // that fiber no longer exists.
         if let Some((i, deadline)) = soonest
-            && !self.can_block_in_place()
+            && matches!(self.block_mode(wait_spec), BlockMode::InlineSleep)
         {
             // W7-17 — CHUNKED, not a bare `thread::sleep`: this is the one inline-sleep W7-16 missed
             // (its four seams were `invoke_native`, `chan_recv_step`'s timer branch, the M:N timer
@@ -3075,7 +2987,7 @@ impl Vm {
         // a deadlock, like the empty-`recv` and full-`send` cases, then REWINDs so the dispatch loop
         // re-runs this `WaitPoll` and re-polls every arm. Rewinding rather than looping in place also
         // means the halts land on the ordinary back-edge checkpoint.
-        if self.can_block_in_place() {
+        if matches!(self.block_mode(wait_spec), BlockMode::InPlace) {
             // Registered FIRST, before the halt check, so this party counts ITSELF as blocked; after
             // it, a lone `wait:`-blocked party would forever see `blocked < live` and never fault.
             // The registration is an OR-set over every arm (§2d's OR-edge: ready on ANY arm is
