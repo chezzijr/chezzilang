@@ -46,6 +46,21 @@ pub(super) struct DiagMark {
     fn_write_scopes: Vec<HashMap<String, Vec<fn_writes::FnWrite>>>,
 }
 
+/// What a bare head names (`Checker::head_binding`), in precedence order (TICKET-180).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HeadBinding {
+    /// A binding in scope >= 1: a local, parameter, loop or pattern variable, or a capture.
+    Local,
+    /// A type parameter of an enclosing fn or type (DEC-108).
+    TypeParam,
+    /// A module-scope value: a top-level let, a top-level fn slot or an imported value.
+    Global,
+    /// A whole-module import binding (`Ty::Module` in scope 0).
+    Module,
+    /// No scope holds the name.
+    Unbound,
+}
+
 impl Checker {
     pub(super) fn new() -> Self {
         let mut c = Checker {
@@ -96,6 +111,7 @@ impl Checker {
             const_scan_visits: 0,
             const_overflow_seen: std::collections::HashSet::new(),
             inferring_ret: false,
+            resolving_returns: false,
             collected_rets: Vec::new(),
             in_generator: false,
             in_fn_body: false,
@@ -270,7 +286,7 @@ impl Checker {
     /// module's `ModuleSig::type_aliases`. `None` for a local binding named `mname`, an unbound
     /// module, a missing member, or a non-nominal body (TICKET-172).
     pub(super) fn qualified_alias_ty(&self, mname: &str, name: &str) -> Option<Ty> {
-        if self.is_local_binding(mname) {
+        if self.head_is_value(mname) {
             return None;
         }
         let mid = self.imported_modules.get(mname)?;
@@ -2602,6 +2618,27 @@ impl Checker {
             .rev()
             .find(|&i| self.scope_has(i, name))
     }
+    /// The one answer to what a bare head names, over `owning_scope`: a binding in scope >= 1, then
+    /// a type parameter (DEC-108), then scope 0, then unbound (TICKET-180).
+    pub(super) fn head_binding(&self, name: &str) -> HeadBinding {
+        match self.owning_scope(name) {
+            Some(i) if i > 0 => HeadBinding::Local,
+            _ if self.type_params.contains_key(name) => HeadBinding::TypeParam,
+            Some(_) if matches!(self.scopes[0].get(name), Some(Ty::Module(_))) => {
+                HeadBinding::Module
+            }
+            Some(_) => HeadBinding::Global,
+            None => HeadBinding::Unbound,
+        }
+    }
+    /// Does a binding hide the type named `name` at a type-head site (`T.m()`, `E.V`)?
+    pub(super) fn head_hides_type(&self, name: &str) -> bool {
+        matches!(self.head_binding(name), HeadBinding::Local)
+    }
+    /// Is the module name `name` a value here (a module-head site yields to it)?
+    pub(super) fn head_is_value(&self, name: &str) -> bool {
+        matches!(self.head_binding(name), HeadBinding::Local)
+    }
     /// TICKET-032 A1 — record that `alias` (in `alias_scope`) and `src` name the SAME runtime
     /// collection. Self-referential and duplicate pairs are dropped.
     ///
@@ -2948,15 +2985,6 @@ impl Checker {
                 "cannot infer element type of empty collection; add a type annotation".to_string(),
             );
         }
-    }
-    /// Is `name` bound *below* the module-global scope (scope 0) — i.e. a local, parameter, or
-    /// captured binding? The qualified enum-variant form `Enum.Variant` yields to such a binding but
-    /// NOT to a module global or function, mirroring the VM's locals-only precedence gate
-    /// (`resolve_local`/`captures`). Using full [`Self::lookup`] here would let a
-    /// top-level global named like the enum shadow in the checker but not the VM — a soundness
-    /// hole (the checker would validate a different program than the one that runs).
-    pub(super) fn is_local_binding(&self, name: &str) -> bool {
-        self.scopes.iter().skip(1).any(|s| s.contains_key(name))
     }
     /// Mark `name` (already declared in the current scope) as an immutable `for`-loop variable.
     pub(super) fn mark_loop_var(&mut self, name: &str) {

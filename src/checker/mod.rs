@@ -2140,6 +2140,10 @@ struct Checker {
     /// True while pass-1 is inferring a function's return type: `check_return` records each
     /// return's type into `collected_rets` instead of diagnosing against `current_ret`.
     inferring_ret: bool,
+    /// True for the whole `infer_returns` call (its return fixpoint, `type_globals_pass` and
+    /// `report_untyped_globals`). `record_resolution` writes nothing while it is set: the main walk
+    /// is the one writer of every NodeId's Resolution (TICKET-180).
+    resolving_returns: bool,
     /// Return types gathered from the body during return-type inference (see `infer_fn_ret`).
     collected_rets: Vec<Ty>,
     /// True while checking (or inferring the return of) a generator function body — the sole signal

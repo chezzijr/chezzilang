@@ -32190,6 +32190,14 @@ fn witness_type_param_shadows_in_every_type_name_position() {
         "LIM := 10\nfn f[LIM](x: LIM) -> int:\n    return LIM + 1\nfn main():\n    print(f(1))\nmain()\n",
         SHADOW,
     );
+    // A module GLOBAL named like the parameter, called bare: still exactly one shadow error.
+    let errs = check_entry(
+        "foo := fn() -> int: 5\nfn f[foo](x: foo) -> int:\n    return foo()\nprint(f(1))\n",
+    );
+    assert!(
+        errs.len() == 1 && errs[0].message.contains(SHADOW),
+        "expected exactly one shadow error, got: {errs:?}"
+    );
     // A real LOCAL binding still wins over the parameter — that is the ordinary value/type split,
     // not this rule. (A module GLOBAL does NOT: the parameter is the inner scope.)
     entry_ok(
@@ -32384,7 +32392,7 @@ fn a_qualified_native_constructor_is_not_a_spawn_or_defer_target_rejected() {
 fn a_native_module_function_is_a_defer_target_ok() {
     entry_ok("import std.math\nfn main():\n    defer math.abs(-3)\n    print(\"done\")\nmain()\n");
     // …and a LOCAL that merely SHADOWS a std module's bound name is a RECEIVER, not a module: this
-    // `time.timer(10)` is an ordinary method call and must stay one. (The arm's `!is_local_binding`
+    // `time.timer(10)` is an ordinary method call and must stay one. (The arm's `head_is_value` test
     // guard — a scope-blind name test would reject this with a factually false message.)
     entry_ok(
         "import std.time\nstruct Clock:\n    n: int\n    fn timer(self, ms: int) -> int:\n        return ms\nfn main(time: Clock):\n    defer time.timer(10)\nmain(Clock(1))\n",
@@ -35881,4 +35889,37 @@ fn resolution_records_the_raw_ctor_inside_fn_named_like_its_struct() {
         12,
     );
     assert!(matches!(&r, Resolution::StructCtor(_)), "{r:?}");
+}
+
+/// TICKET-180 step 7: a let named like a type or a builtin is seeded like any other module
+/// global (DEC-183), so a fn body reads the global whether the let is above or below the fn.
+/// CPython `class P: ...; def g(): return P(4); P = lambda n: f"v{n}"; print(g())` prints `v4`.
+#[test]
+fn a_fn_body_resolves_a_type_named_global_in_both_orders() {
+    const P_BIND: &str = "P := fn(n: int) -> str: \"v{n}\"\n";
+    const ORD_BIND: &str = "ord := fn(s: str) -> int: 1000\n";
+    const G_ORD: &str = "fn g():\n    h := ord\n    return h(\"a\")\n";
+    // (1) an inferred body above the let returns the global's `str`, not the struct.
+    rejects(
+        &format!("struct P:\n    x: int\nfn g():\n    return P(4)\n{P_BIND}y: int = g()\n"),
+        "cannot assign str to variable of type int",
+    );
+    // (2) an annotated body above the let calls the global.
+    ok(&format!(
+        "struct P:\n    x: int\nfn g() -> str:\n    return P(4)\n{P_BIND}print(g())\n"
+    ));
+    // (3) a builtin-named global read in a body above its let.
+    rejects(
+        &format!("{G_ORD}{ORD_BIND}y: str = g()\n"),
+        "cannot assign int to variable of type str",
+    );
+    // (4) the same with the let above the fn.
+    rejects(
+        &format!("{ORD_BIND}{G_ORD}y: str = g()\n"),
+        "cannot assign int to variable of type str",
+    );
+    // (5) a top-level `fn f` keeps its slot: a later `f := ..` does not replace it in a body.
+    ok(
+        "fn f() -> int:\n    return 1\nfn g() -> int:\n    return f()\nf := fn() -> int: 2\nprint(g())\n",
+    );
 }

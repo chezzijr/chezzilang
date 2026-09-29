@@ -232,6 +232,9 @@ impl Checker {
     /// A global left `Unknown` because its callee returns it is reported by
     /// `report_untyped_globals` as a named initialization cycle.
     pub(super) fn infer_returns(&mut self, stmts: &[Stmt]) {
+        // The main walk records every Resolution; this pre-pass records none (TICKET-180).
+        // `inferring_ret` cannot gate it: `check_fn_body` clears that for a nested fn.
+        let saved_resolving = std::mem::replace(&mut self.resolving_returns, true);
         self.seed_module_globals(stmts);
         // Bound: each productive pass resolves at least one more `Unknown`→concrete (a return or a
         // global); `+1` lets the final pass confirm no change (the fixpoint). A non-productive pass
@@ -272,6 +275,7 @@ impl Checker {
             }
         }
         self.report_untyped_globals(stmts);
+        self.resolving_returns = saved_resolving;
     }
 
     /// TICKET-183 — each top-level `let` that is the FIRST let of at least one seeded global, with
@@ -299,21 +303,16 @@ impl Checker {
     /// body sees a global declared below it. Writes three of the four per-binding facts the `Let` arm
     /// records (type from the annotation or `Unknown`, `const`, keyword certainty); the fixpoint
     /// refines the type and `infer_returns` adds the closure writes. Never calls `declare` (it would
-    /// untaint the import, const and alias tables and mark `kw_written`). A name another hoisted
-    /// binding owns (import, fn, extern, native, type, reserved builtin or ctor) is not seeded: its
-    /// slot holds the hoisted value until the let runs (W7-42).
+    /// untaint the import, const and alias tables and mark `kw_written`). A name that a hoisted
+    /// binding with a runtime slot owns (import, fn, extern, native) is not seeded: its slot holds
+    /// the hoisted value until the let runs (W7-42). A let named like a type, a builtin or a builtin
+    /// ctor IS seeded: those have no slot, so in every body the name is the global, in both source
+    /// orders (TICKET-180).
     pub(super) fn seed_module_globals(&mut self, stmts: &[Stmt]) {
         let mut hoisted: HashSet<&str> = HashSet::new();
         let mut consts: HashSet<&str> = HashSet::new();
         for s in stmts {
             match &s.kind {
-                StmtKind::Struct { name, .. }
-                | StmtKind::Enum { name, .. }
-                | StmtKind::NewType { name, .. }
-                | StmtKind::TypeAlias { name, .. }
-                | StmtKind::Protocol { name, .. } => {
-                    hoisted.insert(name);
-                }
                 StmtKind::Native(d) => {
                     hoisted.insert(&d.name);
                 }
@@ -340,8 +339,6 @@ impl Checker {
                     || hoisted.contains(n.as_str())
                     || self.scopes[0].contains_key(n)
                     || self.functions.contains_key(n)
-                    || self.bare_types.contains_key(n)
-                    || is_reserved_module_bind(n)
                 {
                     continue;
                 }
@@ -3349,7 +3346,7 @@ impl Checker {
                                 let namespace_head = matches!(rty, Ty::Module(_))
                                     && matches!(&obj.kind, ExprKind::Ident(n)
                                         if self.imported_modules.contains_key(n)
-                                            && !self.is_local_binding(n));
+                                            && !self.head_is_value(n));
                                 if !namespace_head && !self.sendable(&rty) {
                                     bad.push((
                                         obj.span,
@@ -5850,7 +5847,7 @@ impl Checker {
         };
         // `Enum.Variant(…)` / `Enum[T].Variant(…)`
         if let Some(ename) = bare_head_name(&obj.kind)
-            && !self.is_local_binding(ename)
+            && !self.head_hides_type(ename)
             && self.enum_names.contains(ename)
             && self
                 .variants
@@ -5862,7 +5859,7 @@ impl Checker {
         // A reserved native handle (`net.Socket`) has a `struct_defs` entry for its method table but
         // no constructor; `infer_call` skips it the same way, so its own diagnostic stays single.
         if let ExprKind::Ident(mname) = &obj.kind
-            && !self.is_local_binding(mname)
+            && !self.head_is_value(mname)
             && self.qualified_builtin_ty(name, &[]).is_none()
             && let Some(mid) = self.imported_modules.get(mname)
             && let Some(sig) = self.module_sigs.get(mid)
@@ -5880,7 +5877,7 @@ impl Checker {
         // native names (`net.Socket`) are excluded: `infer_call` gives them their own, better
         // message ("has no constructor"), and doubling it would say less.
         if let ExprKind::Ident(mname) = &obj.kind
-            && !self.is_local_binding(mname)
+            && !self.head_is_value(mname)
             && Self::qualified_native_ctor(name)
             && let Some(mid) = self.imported_modules.get(mname)
             && let Some(sig) = self.module_sigs.get(mid)
@@ -5890,7 +5887,7 @@ impl Checker {
         }
         // `module.Enum.Variant(…)` / `module.Enum[T].Variant(…)`
         if let Some((mname, ename)) = qualified_head_names(&obj.kind)
-            && !self.is_local_binding(mname)
+            && !self.head_is_value(mname)
             && let Some(mid) = self.imported_modules.get(mname)
             && let Some(sig) = self.module_sigs.get(mid)
             && let Some(edef) = sig.enum_defs.get(ename)

@@ -540,7 +540,7 @@ impl Checker {
             }
             ExprKind::Field { obj, name, .. } => {
                 if let ExprKind::Ident(module) = &obj.kind
-                    && !self.is_local_binding(module)
+                    && !self.head_is_value(module)
                     && let Some(mid) = self.imported_modules.get(module)
                     && let Some(ModuleSig { functions, .. }) = self.module_sigs.get(mid)
                 {

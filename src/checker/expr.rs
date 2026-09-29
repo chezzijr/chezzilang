@@ -1,6 +1,7 @@
 // checker::expr — split out of checker/mod.rs. `super::*` == the `checker` module.
 // Expression & call inference, keyword calls, type application, indexing.
 
+use super::setup::HeadBinding;
 use super::*;
 
 /// Result of resolving a bodied/native method on one of the reserved native handles
@@ -109,7 +110,7 @@ impl Checker {
             // has NO from-nothing constructor — exclude it here so `net.Socket()` falls through to the
             // "has no constructor" arm below (a value comes only from `connect`/`listen`/`accept`).
             if let ExprKind::Ident(mname) = &obj.kind
-                && !self.is_local_binding(mname)
+                && !self.head_is_value(mname)
                 && self.qualified_builtin_ty(name, &[]).is_none()
                 && let Some(mid) = self.imported_modules.get(mname).cloned()
                 && let Some(sig) = self.module_sigs.get(&mid).cloned()
@@ -124,7 +125,7 @@ impl Checker {
             // type, returns the newtype keyed to the declaring module (mirrors the bare newtype
             // ctor in `infer_named_call`; the struct arm above already consumed any struct name).
             if let ExprKind::Ident(mname) = &obj.kind
-                && !self.is_local_binding(mname)
+                && !self.head_is_value(mname)
                 && let Some(mid) = self.imported_modules.get(mname).cloned()
                 && let Some(sig) = self.module_sigs.get(&mid).cloned()
                 && let Some(info) = sig.newtype_defs.get(name)
@@ -152,7 +153,7 @@ impl Checker {
                 ..
             } = &obj.kind
                 && let ExprKind::Ident(mname) = &inner_obj.kind
-                && !self.is_local_binding(mname)
+                && !self.head_is_value(mname)
                 && let Some(mid) = self.imported_modules.get(mname).cloned()
                 && let Some(sig) = self.module_sigs.get(&mid).cloned()
                 && let Some(edef) = sig.enum_defs.get(ename)
@@ -217,7 +218,7 @@ impl Checker {
                 ..
             } = &obj.kind
                 && let ExprKind::Ident(mname) = &inner_obj.kind
-                && !self.is_local_binding(mname)
+                && !self.head_is_value(mname)
                 && let Some(mid) = self.imported_modules.get(mname).cloned()
                 && let Some(sig) = self.module_sigs.get(&mid).cloned()
                 && sig.struct_defs.contains_key(tname)
@@ -297,7 +298,7 @@ impl Checker {
             // static call. `head_targs` (the alias body's pinned type arguments) is threaded through
             // both, so `type IS = Box[str]; IS.of(3)` still infers against `Box[str]`, not `Box[int]`.
             if let ExprKind::Ident(aname) = &obj.kind
-                && !self.is_local_binding(aname)
+                && !self.head_hides_type(aname)
                 && let Some((key, head_targs)) = self
                     .alias_enum_head(aname)
                     .or_else(|| self.alias_struct_head(aname))
@@ -319,7 +320,7 @@ impl Checker {
             // bare-written enum name is gated by `enum_names` (bare visibility) and resolved to its
             // runtime key (`bare_key`) for the layout lookup.
             if let ExprKind::Ident(ename) = &obj.kind
-                && !self.is_local_binding(ename)
+                && !self.head_hides_type(ename)
                 && self.enum_names.contains(ename)
             {
                 let ekey = self.bare_key(ename);
@@ -384,7 +385,7 @@ impl Checker {
             // enum branch above already handled enums; this covers structs. The type name must be a
             // known (unbound) struct; a static method is one whose first param is not `self`.
             if let ExprKind::Ident(tname) = &obj.kind
-                && !self.is_local_binding(tname)
+                && !self.head_hides_type(tname)
                 && self.struct_names.contains(tname)
             {
                 let key = self.bare_key(tname);
@@ -417,7 +418,7 @@ impl Checker {
             // there is no other valid `Newtype.member` form, so any such call is rejected with a clear
             // message here rather than falling through to the value path's cryptic "unknown name".
             if let ExprKind::Ident(tname) = &obj.kind
-                && !self.is_local_binding(tname)
+                && !self.head_hides_type(tname)
                 && self.newtype_names.contains(tname)
             {
                 self.infer_all(args);
@@ -476,7 +477,7 @@ impl Checker {
             // user-type qualified arms above and BEFORE the method-call fallthrough (so a genuine
             // module method like `time.now()` still reaches `infer_method_call`).
             if let ExprKind::Ident(mname) = &obj.kind
-                && !self.is_local_binding(mname)
+                && !self.head_is_value(mname)
                 && let Some(mid) = self.imported_modules.get(mname).cloned()
                 && let Some(sig) = self.module_sigs.get(&mid).cloned()
                 && sig.types.contains(name)
@@ -535,7 +536,7 @@ impl Checker {
             // NO enclosing type args; a `Box[int].member[U]` head carries them via `type_apply_head`.
             let resolved_head = self.type_apply_head(head).or_else(|| match &head.kind {
                 ExprKind::Ident(tn)
-                    if !self.is_local_binding(tn)
+                    if !self.head_hides_type(tn)
                         && (self.struct_names.contains(tn) || self.enum_names.contains(tn)) =>
                 {
                     Some((tn.clone(), self.bare_key(tn), Vec::new()))
@@ -574,20 +575,25 @@ impl Checker {
             }
         }
         if let ExprKind::Ident(name) = &callee.kind {
-            // Shadowing local (e.g. a closure bound to a variable) wins over a global of the same name.
-            if let Some(scope) = self.owning_scope(name) {
+            // Shadowing local (e.g. a closure bound to a variable) wins over a global of the same
+            // name; a type parameter sits between the two (DEC-108) and takes the named-call path,
+            // which reports the shadow.
+            let head = self.head_binding(name);
+            if matches!(
+                head,
+                HeadBinding::Local | HeadBinding::Global | HeadBinding::Module
+            ) {
                 // A module-level `fn` and a module global of the same name are ONE slot, so a scope-0
-                // hit on a declared fn's name is that fn (the body may be walked before and after the
-                // `:=` that re-binds it, and both walks must record one answer).
-                let r = if scope == 0 && self.functions.contains_key(name) {
+                // hit on a declared fn's name is that fn.
+                let r = if head == HeadBinding::Local {
+                    Resolution::Local
+                } else if self.functions.contains_key(name) {
                     self.fn_resolution(name)
-                } else if scope == 0 {
+                } else {
                     Resolution::Global {
                         module: self.graph_module_idx,
                         name: name.clone(),
                     }
-                } else {
-                    Resolution::Local
                 };
                 self.record_resolution(callee.id, r, callee.span);
             } else {
@@ -993,7 +999,7 @@ impl Checker {
     pub(super) fn type_apply_head(&self, obj: &Expr) -> Option<(String, String, Vec<Type>)> {
         match &obj.kind {
             ExprKind::TypeApply { name, args } => {
-                if !self.is_local_binding(name)
+                if !self.head_hides_type(name)
                     && (self.struct_names.contains(name) || self.enum_names.contains(name))
                 {
                     Some((name.clone(), self.bare_key(name), args.clone()))
@@ -1004,7 +1010,7 @@ impl Checker {
             ExprKind::Index { obj: tobj, index } => {
                 // Bare `Type[int]` — a bare-visible struct/enum name resolved via `bare_key`.
                 if let ExprKind::Ident(tname) = &tobj.kind
-                    && !self.is_local_binding(tname)
+                    && !self.head_hides_type(tname)
                     && (self.struct_names.contains(tname) || self.enum_names.contains(tname))
                 {
                     return Some((
@@ -1024,7 +1030,7 @@ impl Checker {
                     ..
                 } = &tobj.kind
                     && let ExprKind::Ident(m) = &mobj.kind
-                    && !self.is_local_binding(m)
+                    && !self.head_is_value(m)
                     && let Some(mid) = self.imported_modules.get(m)
                     && let Some(sig) = self.module_sigs.get(mid)
                     && (sig.struct_defs.contains_key(typename)
@@ -1724,8 +1730,17 @@ impl Checker {
     /// closure body is walked there with its params unbound, DEC-025). Two different answers for one
     /// node are a hard `TableConflicts` error ([`crate::checker::record_call_table_entry`]).
     pub(super) fn record_resolution(&mut self, id: crate::ast::NodeId, r: Resolution, span: Span) {
-        if id.0 == crate::ast::NodeId::SYNTH.0 || self.generic_arg_prepass {
+        if id.0 == crate::ast::NodeId::SYNTH.0 || self.generic_arg_prepass || self.resolving_returns
+        {
             return;
+        }
+        // One writer per NodeId: a second, different write means a second walk records.
+        if let Some(prev) = self.resolutions.get(&(self.graph_module_idx, id.0)) {
+            debug_assert!(
+                *prev == r,
+                "NodeId {} resolved twice: {prev:?} then {r:?}",
+                id.0
+            );
         }
         crate::checker::record_call_table_entry(
             &mut self.resolutions,

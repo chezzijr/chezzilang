@@ -378,8 +378,10 @@ fn f():
   - A body above an un-annotated global whose type is not yet known there (an empty collection
     `xs := []`) is rejected with "annotate its declaration".
   - An `import` below a body that uses it stays rejected (`'pi' is used before its import`, Go's rule).
-  - A let that shares its name with a `fn`, `extern`, import, type, or reserved builtin keeps the
-    lexical view: the hoisted binding owns the name until the let runs.
+  - A let that shares its name with a `fn`, `extern`, `native` declaration or an import keeps the
+    lexical view: the hoisted binding owns the name until the let runs. A let named like a type, a
+    builtin or a builtin ctor (`P := fn..` beside `struct P`, `ord := fn..`) is an ordinary global: a
+    body sees it in both orders, and a call before the let runs faults as any other global's does.
 - **A fn-local (or block-local) re-declare is a genuinely fresh binding**, so it may change type and a
   closure made earlier keeps the *old* one — the same as Rust's `let` shadowing. This includes a
   binding inside a top-level `if:`/`for:`/`while:` body: those are inner scopes, not the module scope.

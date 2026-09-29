@@ -1,6 +1,7 @@
 // checker::proto — split out of checker/mod.rs. `super::*` == the `checker` module.
 // Protocol hoisting/embedding, satisfies, receiver refinement, hashability.
 
+use super::setup::HeadBinding;
 use super::*;
 use std::collections::{HashMap, HashSet};
 
@@ -4533,7 +4534,7 @@ impl Checker {
     /// A real local binding still wins over both — that is the ordinary value/type split, not this
     /// rule.
     pub(super) fn shadowing_type_param(&self, name: &str) -> bool {
-        !self.is_local_binding(name) && self.type_params.contains_key(name)
+        matches!(self.head_binding(name), HeadBinding::TypeParam)
     }
 
     /// The dead end that [`Self::shadowing_type_param`] leads to in every position except the

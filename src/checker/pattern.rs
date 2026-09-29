@@ -3623,7 +3623,7 @@ impl Checker {
     /// shadows a struct name (W12-22).
     fn struct_value_head(&self, obj: &Expr) -> Option<(String, String)> {
         match &obj.kind {
-            ExprKind::Ident(t) if !self.is_local_binding(t) && self.struct_names.contains(t) => {
+            ExprKind::Ident(t) if !self.head_hides_type(t) && self.struct_names.contains(t) => {
                 Some((self.bare_key(t), t.clone()))
             }
             ExprKind::Field {
@@ -3634,7 +3634,7 @@ impl Checker {
                 let ExprKind::Ident(m) = &inner.kind else {
                     return None;
                 };
-                if self.is_local_binding(m) {
+                if self.head_is_value(m) {
                     return None;
                 }
                 let mid = self.imported_modules.get(m)?;
@@ -3746,7 +3746,7 @@ impl Checker {
             ..
         } = &obj.kind
             && let ExprKind::Ident(mname) = &inner_obj.kind
-            && !self.is_local_binding(mname)
+            && !self.head_is_value(mname)
             && let Some(mid) = self.imported_modules.get(mname).cloned()
             && let Some(sig) = self.module_sigs.get(&mid).cloned()
             && let Some(edef) = sig.enum_defs.get(ename)
@@ -3812,7 +3812,7 @@ impl Checker {
         // `enum_type_params`'s count alone — a bare alias of a generic enum leaves the args Unknown,
         // same as the bare-enum path.
         if let ExprKind::Ident(aname) = &obj.kind
-            && !self.is_local_binding(aname)
+            && !self.head_hides_type(aname)
             && let Some((ekey, head_targs)) = self.alias_enum_head(aname)
         {
             return self.alias_variant_value(ekey, head_targs, aname, name, obj.span, name_span);
@@ -3822,7 +3822,7 @@ impl Checker {
         // named like the enum) wins, so only when `lookup` finds nothing. The bare enum name is gated
         // by `enum_names` (visibility) and resolved to its runtime key for the layout lookup.
         if let ExprKind::Ident(ename) = &obj.kind
-            && !self.is_local_binding(ename)
+            && !self.head_hides_type(ename)
             && self.enum_names.contains(ename)
         {
             let ekey = self.bare_key(ename);
