@@ -199,15 +199,20 @@ fn named_rejection(binder: &str, k: &Kind) -> Option<&'static str> {
         ("import_alias", "builtin_fn" | "builtin_ctor" | "std_ctor") => Some("is reserved"),
         // Two imports under one name.
         ("import_alias", "imported_fn" | "imported_type" | "module") => Some("already"),
+        // A whole-module import and a same-module `fn` or type under one name (owner decisions
+        // 2026-09-29; Go: `redeclared in this block`).
+        ("import_alias", "struct" | "newtype" | "enum" | "alias" | "defaulted_fn") => {
+            Some("is already imported")
+        }
         // A top-level `fn` may not take a builtin / reserved name (`is_reserved_name`).
         ("toplevel_fn", "builtin_fn" | "builtin_ctor" | "std_ctor") => Some("is reserved"),
         // Two top-level declarations of one name.
         ("toplevel_fn", "imported_fn" | "defaulted_fn") => Some("is already defined"),
         // A module global's type is frozen at its first declaration (the import).
         ("toplevel_let", "module") => Some("cannot re-declare module-level binding"),
-        // A top-level `fn` over an imported module name: Go and Rust reject the redeclaration.
-        // The message belongs to the Declarations family; the cell pins that it is rejected.
-        ("toplevel_fn", "module") => Some("module math is not callable"),
+        // A top-level `fn` over an imported module name: the import and the fn would share one
+        // runtime global slot; Go rejects the redeclaration.
+        ("toplevel_fn", "module") => Some("is already imported"),
         _ => None,
     }
 }
@@ -538,6 +543,10 @@ fn field_rejection(binder: &str, tag: &str) -> Option<&'static str> {
             Some("cannot re-declare module-level binding")
         }
         ("import_alias", "module" | "qualified_enum" | "imported_type") => Some("already"),
+        // A whole-module import and a same-module type under one name.
+        ("import_alias", "struct" | "newtype" | "enum" | "enum_alias" | "alias") => {
+            Some("is already imported")
+        }
         _ => None,
     }
 }
@@ -664,15 +673,16 @@ fn order_cells() -> Vec<Cell> {
             format!("{p}{g_p}{fn_p}print(g())\n"),
             Expect::Prints("B4".into()),
         ),
+        // A whole-module import and a same-module type may not share a name, in either order.
         (
             "swap/import_first/enum_field",
             format!("{e}{imp}{g_e}print(g())\n"),
-            Expect::Prints("4".into()),
+            Expect::Rejects("'E' is already imported"),
         ),
         (
             "swap/import_last/enum_field",
             format!("{e}{g_e}{imp}print(g())\n"),
-            Expect::Prints("4".into()),
+            Expect::Rejects("'E' is already imported"),
         ),
         // Top-level statements keep lexical order (owner 07:27Z, Q2 (b); CPython).
         (
@@ -770,46 +780,8 @@ const INTERIM_182: &[&str] = &["nested_fn/defaulted_fn/call"];
 /// pattern heads, alias bodies). The ticket is not done until this list is empty. They must stay
 /// red here; when one turns green, delete it from the list.
 const PENDING_180: &[&str] = &[
-    "toplevel_let/struct/member",
-    "import_alias/struct/member",
-    "toplevel_let/newtype/member",
-    "import_alias/newtype/member",
-    "toplevel_let/enum/member",
-    "import_alias/enum/member",
-    "toplevel_let/alias/member",
-    "import_alias/alias/member",
-    "toplevel_let/imported_type/member",
-    "import_alias/defaulted_fn/member",
     "p2/alias_of_ambiguous_module_type",
     "p2/generic_alias_turbofish",
-    // Step 9 (identifier and value-field reads; a module-scope binding hides a type head)
-    // removes these.
-    "order/before/inferred/E_field",
-    "order/after/inferred/E_field",
-    "order/before/annotated/E_field",
-    "order/after/annotated/E_field",
-    "swap/import_first/enum_field",
-    "swap/import_last/enum_field",
-    "toplevel/enum_field_above_let",
-    "toplevel/builtin_read_above_let",
-    "typed_use/before/E_field",
-    "typed_use/after/E_field",
-    "toplevel_let/enum/field_read",
-    "toplevel_let/enum/field_arg",
-    "toplevel_let/enum/field_scrutinee",
-    "toplevel_let/enum/field_return",
-    "toplevel_let/enum_alias/field_read",
-    "toplevel_let/enum_alias/field_arg",
-    "toplevel_let/enum_alias/field_scrutinee",
-    "toplevel_let/enum_alias/field_return",
-    "import_alias/enum/field_read",
-    "import_alias/enum/field_arg",
-    "import_alias/enum/field_scrutinee",
-    "import_alias/enum/field_return",
-    "import_alias/enum_alias/field_read",
-    "import_alias/enum_alias/field_arg",
-    "import_alias/enum_alias/field_scrutinee",
-    "import_alias/enum_alias/field_return",
 ];
 
 #[test]

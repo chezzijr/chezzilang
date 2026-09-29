@@ -623,18 +623,8 @@ impl Checker {
                 head,
                 HeadBinding::Local | HeadBinding::Global | HeadBinding::Module
             ) {
-                // A module-level `fn` and a module global of the same name are ONE slot, so a scope-0
-                // hit on a declared fn's name is that fn.
-                let r = if head == HeadBinding::Local {
-                    Resolution::Local
-                } else if self.functions.contains_key(name) {
-                    self.fn_resolution(name)
-                } else {
-                    Resolution::Global {
-                        module: self.graph_module_idx,
-                        name: name.clone(),
-                    }
-                };
+                // The same answer `infer_ident` records when the value call infers the callee.
+                let r = self.value_head_resolution(name);
                 self.record_resolution(callee.id, r, callee.span);
             } else {
                 // A DIRECT call of a from-imported fn (`h()`) above its own `import` is the same
@@ -1800,6 +1790,45 @@ impl Checker {
             .cloned()
             .unwrap_or((self.graph_module_idx, name.to_string()));
         Resolution::Fn { module, name }
+    }
+
+    /// Record `Resolution::Variant` for a nullary variant read `Enum.V`.
+    pub(super) fn record_variant(
+        &mut self,
+        id: crate::ast::NodeId,
+        enum_key: &str,
+        variant: &str,
+        span: Span,
+    ) {
+        let r = Resolution::Variant {
+            enum_key: enum_key.to_string(),
+            variant: variant.to_string(),
+        };
+        self.record_resolution(id, r, span);
+    }
+
+    /// What a bare value head that a scope holds names: a scope >= 1 binding, a module-level fn
+    /// slot, a whole-module import, or another module-scope value.
+    pub(super) fn value_head_resolution(&self, name: &str) -> Resolution {
+        match self.head_binding(name) {
+            HeadBinding::Local => Resolution::Local,
+            _ if self.functions.contains_key(name) => self.fn_resolution(name),
+            HeadBinding::Module => match self
+                .imported_modules
+                .get(name)
+                .and_then(|mid| self.module_idx_of.get(mid))
+            {
+                Some(&idx) => Resolution::Module(idx),
+                None => Resolution::Global {
+                    module: self.graph_module_idx,
+                    name: name.to_string(),
+                },
+            },
+            _ => Resolution::Global {
+                module: self.graph_module_idx,
+                name: name.to_string(),
+            },
+        }
     }
 
     /// Record `Resolution::Static` for the callee `Type.method`.

@@ -1580,7 +1580,7 @@ impl Checker {
             ExprKind::Bytes(_) => Ty::Bytes,
             ExprKind::Bool(_) => Ty::Bool,
             ExprKind::Pass => Ty::Nil,
-            ExprKind::Ident(name) => self.infer_ident(name, expr.span),
+            ExprKind::Ident(name) => self.infer_ident(expr.id, name, expr.span),
             ExprKind::List(items, _) => {
                 // Consume any expected-type hint (a `List[E]` slot: an annotated `let`, a call
                 // arg, a return position — or the synthesized variadic list). `take()` so the
@@ -1681,7 +1681,7 @@ impl Checker {
                 obj,
                 name,
                 name_span,
-            } => self.infer_field(obj, name, *name_span),
+            } => self.infer_field(expr.id, obj, name, *name_span),
             ExprKind::Index { obj, index } => self.infer_index(obj, index),
             ExprKind::Try(inner) => self.infer_try(inner, expr.span),
             // W7-43 — optional-chaining `?.` / null-coalescing `??` are CARRIER nodes: the checker
@@ -2389,7 +2389,7 @@ impl Checker {
         );
     }
 
-    pub(super) fn infer_ident(&mut self, name: &str, span: Span) -> Ty {
+    pub(super) fn infer_ident(&mut self, id: crate::ast::NodeId, name: &str, span: Span) -> Ty {
         // BARE-VALUE position, and the same shadowing rule (`Checker::shadowing_type_param`): a type
         // parameter shadows a same-named FUNCTION or module GLOBAL for the whole body, so `g := foo`
         // and `LIM + 1` must not quietly read the outer one while `foo()` / `LIM.m()` resolve to the
@@ -2404,6 +2404,9 @@ impl Checker {
             );
         }
         if let Some(ty) = self.lookup(name) {
+            // What the name means does not depend on whether its type is known here.
+            let r = self.value_head_resolution(name);
+            self.record_resolution(id, r, span);
             // TICKET-183 — a body reads a module global declared below it through the type
             // `seed_module_globals` gave it. An `Unknown` in that type (an un-annotated empty
             // collection, a value of un-inferable type) is pinned by walk-order code this body cannot
@@ -2461,6 +2464,8 @@ impl Checker {
             // W7-42r: this expression's type is now fixed against the fn's signature, so a later
             // module-scope `name := …` would retype the ONE slot underneath it (see `fn_reads`).
             self.record_fn_read(name);
+            let r = self.fn_resolution(name);
+            self.record_resolution(id, r, span);
             // …and a FROM-IMPORTED fn read above its own `import` is the same use-before-import the
             // value arm rejects (`g := h` above `import h from lib.fns`). Leaving it accepted gave
             // two verdicts for one user-visible concept; both ancestors reject it too (CPython:
@@ -2563,35 +2568,38 @@ impl Checker {
         // first-class fns; type/ctor names fall through to the "unknown/not first-class" arms below
         // (uniform with `f := Point`).
         //
-        // BUT a same-named MODULE-LEVEL global read here is NOT the builtin: `lookup` already resolved
-        // a binding that is in scope (the first arm above), so reaching here with a declared global
-        // name means it is used BEFORE its definition line — a use-before-def error, exactly like a
-        // non-builtin `x := y` before `y := …` (which errors `unknown name 'y'`). Suppress the
-        // first-class arm for such a name so it falls through to the same error, keeping the VM (whose
-        // `collect_globals` pre-slots every top-level `let` to `nil`) and the interp (source-order
-        // env → `Value::Builtin`) from diverging on a program that would otherwise wrongly type-check.
+        // A body reaches here only for a name no scope holds: every module global is seeded into
+        // scope 0 before any body (TICKET-183, TICKET-180). At top level a name whose `:=` is below
+        // the read is the builtin, as in CPython; the compiler loads it from the checker's `Builtin`
+        // record, never from the not-yet-initialized slot.
         // `print`'s VALUE form is a FIXED 1-arg function, NOT its variadic call signature: the
         // variadic + `sep=`/`end=` shapes need the specialized `CallPrint`/`CallPrintSep` opcodes,
         // which are unreachable through a bound value (`p := print`). So force the canonical 1-arg
         // `Ty::BuiltinFn` here rather than the harvested variadic sig from `builtin_sig` — this is the
         // design-sanctioned split (the call authority is the variadic prelude decl; the value form is
-        // fixed). Suppressed for a use-before-def module global, exactly like the general arm below.
-        if name == "print" && !self.module_global_lets.contains(name) {
+        // fixed).
+        if name == "print" {
+            self.record_resolution(id, Resolution::Builtin(name.to_string()), span);
             return Ty::BuiltinFn {
                 params: vec![Ty::Unknown],
                 ret: Box::new(Ty::Nil),
             };
         }
-        if is_firstclass_builtin_fn(name)
-            && !self.module_global_lets.contains(name)
-            && let Some(sig) = self.builtin_sig(name)
-        {
-            return Ty::BuiltinFn {
-                params: sig.params,
-                ret: Box::new(sig.ret),
-            };
+        if is_firstclass_builtin_fn(name) {
+            self.record_resolution(id, Resolution::Builtin(name.to_string()), span);
+            if let Some(sig) = self.builtin_sig(name) {
+                return Ty::BuiltinFn {
+                    params: sig.params,
+                    ret: Box::new(sig.ret),
+                };
+            }
         }
         if name == "None" {
+            let r = Resolution::Variant {
+                enum_key: "Option".to_string(),
+                variant: name.to_string(),
+            };
+            self.record_resolution(id, r, span);
             return Ty::option(Ty::Unknown);
         }
         // A bare user-variant name used as a value (`Red`, `Leaf`) is no longer allowed — variants are
@@ -3695,7 +3703,13 @@ impl Checker {
         }
     }
 
-    pub(super) fn infer_field(&mut self, obj: &Expr, name: &str, name_span: Span) -> Ty {
+    pub(super) fn infer_field(
+        &mut self,
+        id: crate::ast::NodeId,
+        obj: &Expr,
+        name: &str,
+        name_span: Span,
+    ) -> Ty {
         // A full module path that did not resolve (TICKET-175): the receiver `obj` is the BARE first
         // segment of an imported dotted module path (`pkg`), never a bound name, and `name` is the
         // NEXT segment. Desugar already folded every full path of an un-aliased import into one
@@ -3753,6 +3767,11 @@ impl Checker {
         {
             match edef.variant_names.iter().position(|v| v == name) {
                 Some(i) if edef.variants[i].payload.is_empty() => {
+                    let r = Resolution::Variant {
+                        enum_key: self.type_key(&mid, ename),
+                        variant: name.to_string(),
+                    };
+                    self.record_resolution(id, r, name_span);
                     return Ty::Enum(
                         self.type_key(&mid, ename),
                         vec![Ty::Unknown; edef.type_params.len()],
@@ -3787,6 +3806,7 @@ impl Checker {
             && let Some(Ty::Enum(ekey, head_targs)) = self.qualified_alias_ty(mname, aname)
         {
             let spelled = format!("{mname}.{aname}");
+            self.record_variant(id, &ekey, name, name_span);
             return self.alias_variant_value(ekey, head_targs, &spelled, name, obj.span, name_span);
         }
         // MEMBER-as-a-value position, and the same shadowing rule: `Col.Red` inside
@@ -3815,6 +3835,7 @@ impl Checker {
             && !self.head_hides_type(aname)
             && let Some((ekey, head_targs)) = self.alias_enum_head(aname)
         {
+            self.record_variant(id, &ekey, name, name_span);
             return self.alias_variant_value(ekey, head_targs, aname, name, obj.span, name_span);
         }
         // `Enum.Variant` used as a value: a bare *unbound* name that is an enum, dotted with one of
@@ -3833,6 +3854,7 @@ impl Checker {
             match resolved {
                 Some(v) if v.payload.is_empty() => {
                     let nparams = self.enum_type_params.get(&ekey).map_or(0, |t| t.len());
+                    self.record_variant(id, &ekey, name, name_span);
                     return Ty::Enum(ekey, vec![Ty::Unknown; nparams]);
                 }
                 Some(_) => {
@@ -3880,6 +3902,7 @@ impl Checker {
                 .cloned()
             {
                 Some(v) if v.payload.is_empty() => {
+                    self.record_variant(id, &ekey, name, name_span);
                     return Ty::Enum(ekey, resolved);
                 }
                 Some(_) => {
@@ -3925,6 +3948,8 @@ impl Checker {
             self.error(name_span, msg);
             return Ty::Unknown;
         }
+        let r = self.member_resolution(obj, name);
+        self.record_resolution(id, r, name_span);
         let obj_ty = self.infer(obj);
         match &obj_ty {
             // `t.0`, `t.1`, … — tuple element access. The field name is the element index as a
@@ -4041,6 +4066,8 @@ impl Checker {
                     .get(name)
                     .is_some_and(|s| !s.type_params.is_empty());
             if is_local_generic && let Some(ty_expr) = self.index_as_type(index) {
+                let r = self.fn_resolution(name);
+                self.record_resolution(obj.id, r, obj.span);
                 let (type_params, params, ret, labels, wparams) = {
                     let s = &self.functions[name];
                     (
@@ -4372,6 +4399,7 @@ impl Checker {
             // one here would be the cascade `Ty::Unknown` exists to suppress.
             Ty::Unknown => {
                 self.record_carrier(key, CarrierMode::Unknown, span, "?.");
+                self.walk_unknown_carrier(carrier);
                 Ty::Unknown
             }
             other => {
@@ -4390,6 +4418,26 @@ impl Checker {
     /// The decision is recorded under `op_span`, never `Expr::span`: `parse_bp` reuses `lhs.span`
     /// for every infix node and `(e)` grouping keeps the inner span, so in `(a ?? b) ?? c` both
     /// `NullCoalesce` nodes would otherwise share one key.
+    /// An `Unknown` operand: the compiler lowers the carrier as an Option (`CarrierMode::Unknown`),
+    /// so walk that same lowering to record the names it compiles (TICKET-180). Its diagnostics
+    /// are dropped: the operand's own were already reported.
+    fn walk_unknown_carrier(&mut self, carrier: &Expr) {
+        let mut c = carrier.clone();
+        let scratch = self.scratch_operand(Ty::Unknown);
+        match &mut c.kind {
+            ExprKind::OptChain { obj, .. } => **obj = scratch,
+            ExprKind::NullCoalesce { lhs, .. } => **lhs = scratch,
+            _ => {}
+        }
+        let tmp = self.next_opt_tmp;
+        self.next_opt_tmp += 1;
+        crate::desugar::lower_carrier_option(&mut c, tmp);
+        let mark = self.diag_mark();
+        self.infer(&c);
+        self.diag_rollback(mark);
+        self.pop_scope();
+    }
+
     pub(super) fn infer_null_coalesce(&mut self, carrier: &Expr, lhs: &Expr, op_span: Span) -> Ty {
         // Same operand-scratch shape as `infer_opt_chain`, same reason.
         let t = self.infer_value(lhs);
@@ -4444,6 +4492,7 @@ impl Checker {
             }
             Ty::Unknown => {
                 self.record_carrier(key, CarrierMode::Unknown, op_span, "??");
+                self.walk_unknown_carrier(carrier);
                 Ty::Unknown
             }
             other => {

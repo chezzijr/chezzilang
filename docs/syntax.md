@@ -3743,8 +3743,9 @@ spawned task, on both the serial and the OS-thread engine; likewise **`spawn pri
 directly, symmetric with `defer print(...)`. A **user binding shadows** one of these
 names in value position exactly like any other name: `fn f(ord: int): print(ord)` (a param),
 `for chr in xs:` (a loop var), or a top-level `chr := "…"` all read the *binding*, not the builtin —
-only an unbound name resolves to the first-class builtin (and a same-named module global read *before*
-its definition line is a use-before-def error, just like any other global). `defer` composes with
+only an unbound name resolves to the first-class builtin (at top level a read or call above a
+same-named global's `:=` is the builtin, as in CPython; inside a fn, method or closure body the name is
+that global in every position and both source orders). `defer` composes with
 `recover:` — a defer inside a `recover:` block runs as that block unwinds, before the boundary binds
 its value. Top-level defers run LIFO when the program ends (or while unwinding an unhandled
 top-level error). `std.os.exit` is a hard halt and does **not** run deferred calls (matching Go's
@@ -4564,8 +4565,7 @@ import Shared from std.concurrency   # ok — a reserved TYPE member licensing t
 
 The reserved set is the builtin callables + reserved type names + `nil` + the builtin variant ctors
 (`Ok`/`Err`/`Some`/`None`). (The std string module is `std.string` for exactly this reason: `str` is a
-reserved scalar/ctor name.) A collision with a *user-declared* type of the same name is not covered by
-this rule — name your modules and your types apart.
+reserved scalar/ctor name.) A collision with a *user-declared* top-level `fn` or type is the next rule.
 
 **The named-import form is `import X from M`, not Python's `from M import X`** — the module path comes
 *last*, so every import statement starts with the `import` keyword (`from` at statement start is a
@@ -4573,7 +4573,12 @@ parse error: *unexpected 'from' in expression*). Semantics are Python's; only th
 module or name twice in one file is a type error (`'math' is already imported`), where Python silently
 accepts the duplicate. The one accepted re-bind is `import std.math` plus `import math from std`: both
 name one module, which binds `math` once and initializes once. (`import math from std` written twice is
-still the duplicate error.)
+still the duplicate error.) A same-module top-level `fn`, `struct`, `enum`, `newtype`, `protocol` or
+`type` alias may not take a whole-module import's bound name either (`import lib as f` plus `fn f`,
+`import lib` plus `struct lib`, `import a.b` plus `enum b`), in either order: the same error, on the
+later of the two declarations, as Go's `f redeclared in this block`. The import and a `fn` would share
+one runtime slot, and a type head would have two meanings. A from-imported type (`import P from lib`)
+beside `fn P` is not a collision.
 
 **`import X from M` is a SNAPSHOT** (Python-identical): the value is copied into this module at import
 time. A later write to the module's own global (`M.bump()`) is **not** visible through the bare name —

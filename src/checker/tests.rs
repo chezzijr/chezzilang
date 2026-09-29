@@ -17008,18 +17008,14 @@ fn print_value_form_is_fixed_arity() {
 }
 
 #[test]
-fn use_before_def_global_shadowing_builtin_rejected() {
-    // Bug 1: a top-level global named like a first-class builtin fn, READ BEFORE its definition line,
-    // must be a use-before-def error — EXACTLY like any other global (`x := y` before `y := 5` errors
-    // `unknown name 'y'`). It must NOT silently resolve to the builtin: otherwise the VM (whose
-    // `collect_globals` pre-scans every top-level `let` into a slot pre-initialised to `nil`) prints
-    // `nil`, while the interp (source-order env; the name isn't defined yet) returns `Value::Builtin`
-    // — a VM≠interp divergence on a program that (wrongly) type-checked. Suppress the first-class arm
-    // whenever the name is a declared module-level global; a genuine `f := print` (no such global)
-    // still resolves to the builtin.
-    rejects("x := chr\nchr := \"z\"\nprint(x)\n", "unknown name 'chr'");
-    // Sanity: the plain non-builtin case behaves identically (base semantics we mirror).
+fn top_level_read_above_a_global_is_the_builtin() {
+    // CPython `x = chr` above `chr = 'z'` binds the builtin; the compiler reads the checker's
+    // `Builtin` record, so the old VM `nil`-slot reason is gone.
+    ok("x := chr\nchr := \"z\"\nprint(x(97))\n");
+    // A name with no builtin meaning read above its `:=` is still unknown at top level.
     rejects("x := y\ny := 5\nprint(x)\n", "unknown name 'y'");
+    // A body sees the seeded global in both orders (TICKET-180 step 7).
+    ok("fn w() -> str:\n    return chr(97)\nchr := fn(n: int) -> str: \"z\"\nprint(w())\n");
 }
 
 #[test]
@@ -35922,4 +35918,55 @@ fn a_fn_body_resolves_a_type_named_global_in_both_orders() {
     ok(
         "fn f() -> int:\n    return 1\nfn g() -> int:\n    return f()\nf := fn() -> int: 2\nprint(g())\n",
     );
+}
+
+/// A whole-module import bind and a same-module top-level `fn` or type may not share a name, in
+/// either source order (owner decisions 2026-09-29; Go: `f redeclared in this block`). The error
+/// lands on the later of the two declarations. A from-imported type beside `fn P` is legal.
+#[test]
+fn a_fn_or_type_named_like_a_module_import_is_rejected() {
+    const LIB: &str = "fn h(n: int) -> str:\n    return \"L{n}\"\nstruct P:\n    x: int\n";
+    let reject_at = |main: &str, name: &str, line: u32| {
+        let errs = check_files(&[("main.chz", main), ("lib.chz", LIB)]);
+        let want = format!("'{name}' is already imported");
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains(&want) && e.span.line == line),
+            "expected {want:?} at line {line} for {main:?}, got: {errs:?}"
+        );
+    };
+    let decls = [
+        ("fn f(a: int) -> int:\n    return a\n", "f"),
+        ("struct f:\n    x: int\n", "f"),
+        ("enum f:\n    A\n", "f"),
+        ("newtype f = int\n", "f"),
+        ("type f = int\n", "f"),
+        ("protocol f:\n    fn m(self) -> int\n", "f"),
+    ];
+    for (decl, name) in decls {
+        let lines = decl.lines().count() as u32;
+        // Import first: the declaration (line 2) is the later one.
+        reject_at(&format!("import lib as f\n{decl}print(1)\n"), name, 2);
+        // Declaration first: the import is the later one.
+        reject_at(
+            &format!("{decl}import lib as f\nprint(1)\n"),
+            name,
+            lines + 1,
+        );
+    }
+    // The un-aliased spelling binds the last path segment.
+    reject_at(
+        "import lib\nfn lib(a: int) -> int:\n    return a\nprint(1)\n",
+        "lib",
+        2,
+    );
+    reject_at("struct lib:\n    x: int\nimport lib\nprint(1)\n", "lib", 3);
+    // A from-imported type is not a module bind.
+    files_ok(&[
+        (
+            "main.chz",
+            "import P from lib\nfn P(a: int) -> int:\n    return a\nprint(1)\n",
+        ),
+        ("lib.chz", LIB),
+    ]);
 }

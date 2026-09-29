@@ -1613,10 +1613,8 @@ impl Checker {
         imports: &[ResolvedImport],
     ) -> ModuleSig {
         self.push_scope();
-        // Record every top-level `let`/`:=` name in THIS module (rebuilt per module — `check_module`
-        // is called once per module, never nested). Lets `infer_ident` tell a genuine first-class
-        // builtin (`f := print`) from a same-named module global used before its definition line (a
-        // use-before-def error). Mirrors the compiler's `collect_globals` top-level `Let` sweep.
+        // The complete set of this module's top-level `let`/`:=` names, built before any body is
+        // walked. `seed_module_globals` and the fn-writes pass read it.
         self.module_global_lets.clear();
         self.unreached_globals.clear();
         self.seeded_globals.clear();
@@ -1650,6 +1648,7 @@ impl Checker {
         for imp in imports {
             self.bind_import(imp);
         }
+        self.reject_import_decl_collisions(stmts);
         self.collect_names(stmts);
         self.collect_docs(stmts);
         self.hoist(stmts);
@@ -1699,6 +1698,36 @@ impl Checker {
         false
     }
 
+    /// A whole-module import bind (`import lib`, `import lib as E`, `import a.b`) and a same-module
+    /// top-level `fn` or type may not share a name, in either source order (Go: `E redeclared in
+    /// this block`). The module-level name registry is `import_binds` (import vs import) plus this
+    /// one check (import vs declaration); the error lands on the later of the two. Without it the
+    /// import and a `fn` would share one runtime global slot, and a type head would have two
+    /// meanings with no source order to choose between them.
+    fn reject_import_decl_collisions(&mut self, stmts: &[Stmt]) {
+        for s in stmts {
+            let name = match &s.kind {
+                StmtKind::Fn(decl) => &decl.name,
+                StmtKind::Struct { name, .. }
+                | StmtKind::Enum { name, .. }
+                | StmtKind::NewType { name, .. }
+                | StmtKind::TypeAlias { name, .. }
+                | StmtKind::Protocol { name, .. } => name,
+                _ => continue,
+            };
+            if !self.imported_modules.contains_key(name) {
+                continue;
+            }
+            let imp = self.import_binds.get(name).copied().unwrap_or(s.span);
+            let later = if (imp.line, imp.col) > (s.span.line, s.span.col) {
+                imp
+            } else {
+                s.span
+            };
+            self.error(later, format!("'{name}' is already imported"));
+        }
+    }
+
     /// The use-site diagnostic for a bare name that two un-aliased imports both bind (TICKET-175),
     /// or `None` when `name` is not ambiguous. The suggested alias is the initials of the first
     /// path's segments (`a.math` gives `am`).
@@ -1732,8 +1761,8 @@ impl Checker {
                 // un-aliased — is REJECTED here; the module stays usable under a non-reserved alias,
                 // which the un-aliased diagnostic names. `is_reserved_module_bind` = reserved CALLABLE +
                 // reserved TYPE names + `nil` + the builtin variant ctors (`Ok`/`Err`/`Some`/`None`).
-                // (A collision with a USER-declared ctor of the same name is a separate, unhandled
-                // residual — see `is_reserved_module_bind`'s doc.)
+                // (A collision with a USER-declared `fn` or type of the same name is rejected by
+                // `reject_import_decl_collisions`.)
                 if crate::checker::is_reserved_module_bind(&name) {
                     let msg = if alias.is_some() {
                         format!("import alias '{name}' is reserved (builtin)")
@@ -2631,13 +2660,21 @@ impl Checker {
             None => HeadBinding::Unbound,
         }
     }
-    /// Does a binding hide the type named `name` at a type-head site (`T.m()`, `E.V`)?
+    /// Does a binding hide the type named `name` at a type-head site (`T.m()`, `E.V`)? Every
+    /// binding does, a module-scope one and a whole-module import included (CPython rebinding).
     pub(super) fn head_hides_type(&self, name: &str) -> bool {
-        matches!(self.head_binding(name), HeadBinding::Local)
+        matches!(
+            self.head_binding(name),
+            HeadBinding::Local | HeadBinding::Global | HeadBinding::Module
+        )
     }
-    /// Is the module name `name` a value here (a module-head site yields to it)?
+    /// Is the module name `name` a value here (a module-head site yields to it)? A whole-module
+    /// import is not a value.
     pub(super) fn head_is_value(&self, name: &str) -> bool {
-        matches!(self.head_binding(name), HeadBinding::Local)
+        matches!(
+            self.head_binding(name),
+            HeadBinding::Local | HeadBinding::Global
+        )
     }
     /// TICKET-032 A1 — record that `alias` (in `alias_scope`) and `src` name the SAME runtime
     /// collection. Self-referential and duplicate pairs are dropped.

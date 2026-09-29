@@ -6263,13 +6263,14 @@ fn m24_2_a_parameter_shadowing_a_user_module_keeps_the_witness() {
 }
 
 #[test]
-fn m24_2_a_type_named_like_a_user_module_keeps_the_witness() {
-    // The head of `Shape.mk[T](x)` is the STRUCT declared in `main.chz`, which wins the name over
-    // the `import Shape` module bind. The predicate's second cut asked whether an enclosing VALUE
-    // binding shadowed the module — a TYPE is in no value table, so the head read as a module, the
-    // fn-key lookup missed, and `$w:T` was dropped: clean `chezzi check`, then "internal: no type
-    // witness in scope to forward as 'T' into the call to 'mk'". Multi-file because
-    // a USER module bind takes two files to express; the std-module spelling is
+fn m24_2_a_type_named_like_a_user_module_is_rejected() {
+    // `import Shape` beside `struct Shape` gave the head `Shape` two meanings and no source order
+    // to pick one, so the checker rejects the pair: "'Shape' is already imported" (TICKET-180; Go:
+    // "Shape redeclared in this block"). The witness half keeps its coverage under a struct of its
+    // own name, `Form`, beside a live `import Shape`: the head of `Form.mk[T](x)` is the struct,
+    // and the closure still forwards `$w:T` (the old fault was "internal: no type witness in scope
+    // to forward as 'T' into the call to 'mk'"). Multi-file because a USER module bind takes two
+    // files; the std-module spelling is
     // `tests/chz/spec/static_witness_test.chz::a_type_named_like_a_std_module_keeps_the_witness`.
     let dir = std::env::temp_dir().join(format!("chezzi_m24_2_typehead_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -6279,28 +6280,38 @@ fn m24_2_a_type_named_like_a_user_module_keeps_the_witness() {
     )
     .unwrap();
     let entry = dir.join("main.chz");
-    std::fs::write(
-        &entry,
-        "protocol Default:\n    fn default() -> Self\n\
-         struct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\n\
-         import Shape\n\
-         struct Shape:\n    k: int\n    fn mk[T: Default](x: T) -> T:\n        return T.default()\n\
-         fn outer[T: Default](x: T) -> T:\n    seed := T.default()\n    \
-         f := fn(): Shape.mk[T](x)\n    return f()\n\
-         print(outer(Counter(9)).n)\n",
-    )
-    .unwrap();
+    let main = |ty: &str| {
+        format!(
+            "protocol Default:\n    fn default() -> Self\n\
+             struct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\n\
+             import Shape\n\
+             struct {ty}:\n    k: int\n    fn mk[T: Default](x: T) -> T:\n        return T.default()\n\
+             fn outer[T: Default](x: T) -> T:\n    seed := T.default()\n    \
+             f := fn(): {ty}.mk[T](x)\n    return f()\n\
+             print(outer(Counter(9)).n)\n\
+             print(Shape.area(2))\n"
+        )
+    };
+    std::fs::write(&entry, main("Shape")).unwrap();
+    let graph = crate::resolver::build_graph(&entry).expect("resolve");
+    let errs = crate::checker::check_graph(&graph)
+        .err()
+        .unwrap_or_default();
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("'Shape' is already imported")),
+        "a type named like a module import must be rejected, got: {errs:?}"
+    );
+    std::fs::write(&entry, main("Form")).unwrap();
     let graph = crate::resolver::build_graph(&entry).expect("resolve");
     if let Err(errs) = crate::checker::check_graph(&graph) {
         let _ = std::fs::remove_dir_all(&dir);
         panic!("program must type-check, got: {errs:?}");
     }
     let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (_io, _ie, ir, _ic) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vr.is_ok(), "VM faulted: {vr:?}");
-    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
-    assert_eq!(vo, "0\n", "VM output");
+    assert_eq!(vo, "0\n4\n", "VM output");
 }
 
 #[test]

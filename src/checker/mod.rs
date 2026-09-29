@@ -401,12 +401,9 @@ pub(super) fn is_builtin_variant(name: &str) -> bool {
 /// `import m as nil` would silently retype the `nil` literal — reject it here.
 /// The FROM-import path guards the same VALUE namespace with `is_reserved_alias_target ||
 /// is_builtin_variant` (this predicate minus `nil`) — see `bind_import`.
-/// RESIDUAL (deliberately NOT gated here): a module bind colliding with a USER struct/enum ctor of
-/// the same name (`import lib.Point` + `struct Point`) still wins in expression position. Unlike a
-/// reserved name that would be silently destroyed, this one is a hard TYPE ERROR at the ctor call and
-/// the alias is the cure (Python-normal), so it stays a DIAGNOSTIC — the not-callable arm in
-/// `expr.rs` names the collision. Rejecting it here would need the checker to know the user's type
-/// names at import-bind time; a real module namespace is the principled fix, and is a resolver change.
+/// A module bind colliding with a USER `fn` or type of the same name (`import lib.Point` +
+/// `struct Point`) is not gated here: `Checker::reject_import_decl_collisions` rejects it once the
+/// module's declarations are known ("'Point' is already imported", TICKET-180).
 pub(super) fn is_reserved_module_bind(name: &str) -> bool {
     is_reserved_alias_target(name) || name == "nil" || is_builtin_variant(name)
 }
@@ -4546,22 +4543,18 @@ mod graph_tests {
         );
     }
 
-    // 28. A *module-global* binding named like an enum does NOT shadow qualified access — the VM
-    // gates on locals/captures only, so the checker must too (else it validates a different program
-    // than the one that runs → runtime fault). `Color.Red` here is the variant (type Color), so
-    // returning it as `int` is a *checker* error, not a clean compile + runtime crash.
+    // 28. A *module-global* binding named like an enum shadows qualified access. The compiler reads
+    // the checker's Resolution, so the checker's order is the only one; CPython rebinding
+    // `Color = Box(7)` then `Color.Red` gives 7. `Color.Red` is the `Box` field, an `int`.
     #[test]
-    fn global_binding_does_not_shadow_qualified_variant() {
+    fn global_binding_shadows_qualified_variant() {
         let t = TmpDir::new();
-        let bad = t.write(
-            "bad.chz",
+        let good = t.write(
+            "good.chz",
             "enum Color:\n    Red\n    Green\nstruct Box:\n    Red: int\nColor := Box(7)\nfn show() -> int:\n    return Color.Red\nfn main(): print(show())\n",
         );
-        let errs = errors(&bad);
-        assert!(
-            errs.iter().any(|m| m.contains("Color")),
-            "expected a checker type error (Color variant returned as int), got: {errs:?}"
-        );
+        let res = check_entry(&good);
+        assert!(res.is_ok(), "expected no type errors, got: {res:?}");
     }
 
     // 29. The `Enum.` qualifier is validated even under an int/str/bool scrutinee: `case Color.Bogus:`

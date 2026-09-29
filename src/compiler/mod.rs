@@ -387,22 +387,6 @@ fn static_key(type_key: &str, method: &str) -> String {
     format!("{type_key}\u{1}{method}")
 }
 
-/// The TYPE name in a declaration-site turbofish member-access head — the `obj` of a
-/// `Type[T…].member`/`Type[T…].member(args)`. Both carriers converge: the SINGLE-arg `Index{Ident,
-/// …}` (the parser can't tell it from `arr[i].field`, so the type args ride the index) and the
-/// MULTI-arg `TypeApply{name, …}`. The type args are runtime-erased, so the compiler needs only the
-/// name. Returns `None` for any other `obj` shape.
-fn type_apply_head_name(kind: &ExprKind) -> Option<&str> {
-    match kind {
-        ExprKind::TypeApply { name, .. } => Some(name),
-        ExprKind::Index { obj, .. } => match &obj.kind {
-            ExprKind::Ident(n) => Some(n),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
 /// Decompose a validated send-arm call `chan.send(value)` into `(&chan, &value)`. The CHECKER has
 /// already rejected any other shape (`wait_send_arm_shape`), so a compiled program is guaranteed to
 /// match — an unexpected shape here is a checker/compiler drift bug, not user error.
@@ -810,30 +794,6 @@ impl Compiler {
             .get(&(module_idx, name.to_string()))
             .cloned()
             .unwrap_or_else(|| name.to_string())
-    }
-
-    /// The TYPE name + module-scoped identity key of a QUALIFIED declaration-site turbofish head —
-    /// the `mod.Type[int]` carrier (`Index{obj: Field{Ident(mod), Type}, ..}`) of a
-    /// `mod.Type[int].Variant(args)` / `.staticmethod(args)`. The type args are runtime-erased, so
-    /// only the key is needed. Gated on a non-local, non-captured bound module Ident declaring the
-    /// type (mirrors the bare `type_apply_head_name` but for a whole-module-imported base — B1).
-    /// Multi-arg (`mod.Type[int, str]`) has no qualified parser carrier, so it is not recognized here.
-    fn qualified_turbofish_key(&self, fc: &FnComp, kind: &ExprKind) -> Option<(String, String)> {
-        if let ExprKind::Index { obj, .. } = kind
-            && let ExprKind::Field {
-                obj: mobj, name, ..
-            } = &obj.kind
-            && let ExprKind::Ident(mname) = &mobj.kind
-            && fc.is_unbound(mname)
-            && let Some(&tidx) = self.imported_modules.get(mname)
-            && self
-                .module_types
-                .get(tidx)
-                .is_some_and(|t| t.contains(name))
-        {
-            return Some((name.clone(), self.type_key(tidx, name)));
-        }
-        None
     }
 
     /// ROOT REDESIGN — build the module-aware [`crate::json_decode::DecodeEnv`] for the CURRENT module
@@ -3657,7 +3617,7 @@ impl Compiler {
             // `parse_interpolation`, so braces stay literal and backslashes are verbatim.
             ExprKind::RawStr(s) => fc.emit(Op::ConstStr(s.clone()), expr.span),
             ExprKind::Bytes(b) => fc.emit(Op::ConstBytes(b.clone().into_boxed_slice()), expr.span),
-            ExprKind::Ident(name) => self.compile_ident(fc, name, expr.span),
+            ExprKind::Ident(_) => self.compile_ident(fc, expr)?,
             ExprKind::List(items, _) => {
                 for it in items {
                     self.compile_expr(fc, it)?;
@@ -3776,112 +3736,34 @@ impl Compiler {
                 ..
             } => self.compile_call(fc, callee, args, named, expr.span)?,
             ExprKind::Field { obj, name, .. } => {
-                // `module.Enum.Variant` (nullary, qualified value form) → construct the variant.
-                if let ExprKind::Field {
-                    obj: inner,
-                    name: ename,
-                    ..
-                } = &obj.kind
-                    && let ExprKind::Ident(mname) = &inner.kind
-                    && fc.is_unbound(mname)
-                    && let Some(&tidx) = self.imported_modules.get(mname)
-                    && self
-                        .module_types
-                        .get(tidx)
-                        .is_some_and(|t| t.contains(ename))
-                    && self
-                        .program
-                        .variants
-                        .get(&(self.type_key(tidx, ename), name.clone()))
-                        .is_some_and(|d| d.arity == 0)
-                {
-                    let ekey = self.type_key(tidx, ename);
-                    let variant_id = self.variant_id_of_key(&ekey, name);
-                    fc.emit(
-                        Op::NewEnum {
-                            variant: name.clone(),
-                            variant_id,
-                            argc: 0,
-                        },
-                        expr.span,
-                    );
-                    return Ok(());
-                }
-                // `Type[T…].Variant` (nullary, declaration-site turbofish value form) → construct
-                // the variant. The type args are runtime-erased — identical bytecode to the bare
-                // `Enum.Variant` value form. Both carriers converge via `type_apply_head_name`.
-                if let Some(tname) = type_apply_head_name(&obj.kind)
-                    && fc.is_unbound(tname)
-                    && let ekey = self.enum_bare_key(tname)
-                    && self
-                        .program
-                        .variants
-                        .get(&(ekey.clone(), name.clone()))
-                        .is_some_and(|d| d.arity == 0)
-                {
-                    let variant_id = self.variant_id_of_key(&ekey, name);
-                    fc.emit(
-                        Op::NewEnum {
-                            variant: name.clone(),
-                            variant_id,
-                            argc: 0,
-                        },
-                        expr.span,
-                    );
-                    return Ok(());
-                }
-                // `mod.Type[T…].Variant` (nullary, module-qualified declaration-site turbofish
-                // value form) → construct the variant. Byte-identical to the bare and unqualified-
-                // turbofish forms above; only the key lookup differs (module-qualified).
-                if let Some((_, key)) = self.qualified_turbofish_key(fc, &obj.kind)
-                    && self
-                        .program
-                        .variants
-                        .get(&(key.clone(), name.clone()))
-                        .is_some_and(|d| d.arity == 0)
-                {
-                    let variant_id = self.variant_id_of_key(&key, name);
-                    fc.emit(
-                        Op::NewEnum {
-                            variant: name.clone(),
-                            variant_id,
-                            argc: 0,
-                        },
-                        expr.span,
-                    );
-                    return Ok(());
-                }
-                // `Enum.Variant` (nullary) → construct the variant, mirroring bare `compile_ident`.
-                // A real binding (local/captured) named like the enum wins, matching the checker.
-                // The enum resolves to its bare-visible runtime key (`enum_bare_key`).
-                if let ExprKind::Ident(ename) = &obj.kind
-                    && fc.is_unbound(ename)
-                    && let ekey = self.enum_bare_key(ename)
-                    && self
-                        .program
-                        .variants
-                        .get(&(ekey.clone(), name.clone()))
-                        .is_some_and(|d| d.arity == 0)
-                {
-                    let variant_id = self.variant_id_of_key(&ekey, name);
-                    fc.emit(
-                        Op::NewEnum {
-                            variant: name.clone(),
-                            variant_id,
-                            argc: 0,
-                        },
-                        expr.span,
-                    );
+                // A tuple slot (`t.0`) is a value, never a name; everything else reads the
+                // checker's record on the `Field`.
+                let res = if crate::ast::is_tuple_index(name) {
+                    Resolution::Member
                 } else {
-                    self.compile_expr(fc, obj)?;
-                    let ic = self.next_field_ic(name);
-                    fc.emit(
-                        Op::GetField {
-                            name: name.clone(),
-                            ic,
-                        },
-                        expr.span,
-                    );
+                    self.resolution(expr)?.clone()
+                };
+                match res {
+                    Resolution::Variant { enum_key, variant } => {
+                        self.emit_new_enum(fc, &enum_key, &variant, 0, expr.span);
+                    }
+                    Resolution::Member | Resolution::ModuleMember { .. } => {
+                        self.compile_expr(fc, obj)?;
+                        let ic = self.next_field_ic(name);
+                        fc.emit(
+                            Op::GetField {
+                                name: name.clone(),
+                                ic,
+                            },
+                            expr.span,
+                        );
+                    }
+                    other => {
+                        return Err(CompileError {
+                            message: format!("internal: a value field resolved to {other:?}"),
+                            span: expr.span,
+                        });
+                    }
                 }
             }
             ExprKind::Index { obj, index } => {
@@ -3892,9 +3774,8 @@ impl Compiler {
                 // `fn`-typed Index, so the only fn Index that reaches codegen is exactly this case;
                 // a shadowing local/capture (`xs := [1,2]; xs[0]`) is never in `fn_names`, so a real
                 // index still compiles below.
-                if let ExprKind::Ident(name) = &obj.kind
-                    && self.fn_names.contains(name)
-                    && fc.is_unbound(name)
+                if let ExprKind::Ident(_) = &obj.kind
+                    && matches!(self.resolution(obj)?, Resolution::Fn { .. })
                 {
                     self.compile_expr(fc, obj)?;
                     return Ok(());
@@ -4342,51 +4223,29 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_ident(&mut self, fc: &mut FnComp, name: &str, span: Span) {
-        // A bare nullary *built-in* variant used as a value (`None`) — resolved before any env
-        // lookup. User variants are qualified (handled in the `Field`
-        // arm), so only built-ins resolve bare here.
-        if let Some(def) = self
-            .variant_pair(None, name)
-            .and_then(|k| self.program.variants.get(&k))
-            && def.arity == 0
-        {
-            let variant_id = def.variant_id;
-            fc.emit(
-                Op::NewEnum {
-                    variant: name.to_string(),
-                    variant_id,
-                    argc: 0,
-                },
-                span,
-            );
-            return;
+    fn compile_ident(&mut self, fc: &mut FnComp, e: &Expr) -> Result<(), CompileError> {
+        let ExprKind::Ident(name) = &e.kind else {
+            unreachable!("compile_ident on a non-Ident");
+        };
+        match self.resolution(e)?.clone() {
+            Resolution::Variant { enum_key, variant } => {
+                self.emit_new_enum(fc, &enum_key, &variant, 0, e.span);
+            }
+            Resolution::Builtin(b) => fc.emit(Op::LoadBuiltin(b), e.span),
+            Resolution::Local
+            | Resolution::Global { .. }
+            | Resolution::Fn { .. }
+            | Resolution::Module(_) => self.emit_load(fc, name, e.span),
+            other => {
+                return Err(CompileError {
+                    message: format!("internal: a value name resolved to {other:?}"),
+                    span: e.span,
+                });
+            }
         }
-        // A first-class universe builtin fn (`print`/`ord`/`chr`/`panic`) used in VALUE position
-        // (`f := ord`, HOF arg, bare `defer print(...)`) — emit a dedicated `LoadBuiltin` that pushes
-        // an `Obj::Builtin` handle. DIRECT calls never reach here: `compile_call` intercepts `print`
-        // and `is_builtin(name)` before the generic value fallthrough, so `print(x)`/`ord(c)` keep
-        // their specialized `CallPrint`/`CallBuiltin` opcodes (no hot-path change).
-        //
-        // A USER BINDING SHADOWS THE BUILTIN. `is_reserved_name` bans only `fn print`/type/import-alias
-        // declarations — NOT local/param/loop/global bindings (`ord := 5`, `fn f(ord: int)`,
-        // `for chr in xs`), so those are legal. The checker's `infer_ident` resolves `lookup(name)`
-        // (locals/params/globals) BEFORE the first-class-builtin arm, so it types the binding; the
-        // runtime MUST match, or a shadowed name type-checks as the binding but prints `<builtin fn …>`.
-        // Emit `LoadBuiltin` ONLY when no local/capture/global binding owns the name.
-        if crate::checker::is_firstclass_builtin_fn(name)
-            && fc.is_unbound(name)
-            && !self.globals.contains_key(name)
-        {
-            fc.emit(Op::LoadBuiltin(name.to_string()), span);
-            return;
-        }
-        self.emit_load(fc, name, span);
+        Ok(())
     }
 
-    /// `defer <call>` — evaluate the receiver/args now (Go semantics) and register a deferred call
-    /// on the frame; the call runs LIFO when the frame exits. Mirrors `compile_call`'s method-vs-value
-    /// split: `DeferMethod` for `obj.m(a)`, `DeferCall` for a value callee.
     fn compile_defer(
         &mut self,
         fc: &mut FnComp,
@@ -7502,12 +7361,6 @@ impl FnComp {
             // that legitimately skips it.
             WitnessRef::Captured(slot) => self.emit(Op::GetCaptured(slot), span),
         }
-    }
-
-    /// A free/global name in this frame: neither a local nor a captured binding. The guard used to
-    /// decide whether a bare identifier resolves to a module/type/variant/builtin rather than a value.
-    fn is_unbound(&self, name: &str) -> bool {
-        self.resolve_local(name).is_none() && !self.captures(name)
     }
 
     /// All bindings visible in this frame, to snapshot into a closure being created here. Locals
