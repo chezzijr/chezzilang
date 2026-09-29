@@ -1020,6 +1020,23 @@ pub enum Resolution {
     NewTypeCtor(String),
     /// A desugar-synthesized default provider the module cannot name (`Op::MakeFuncIn`).
     Provider,
+    /// An enum variant, by the enum's runtime key (`Op::NewEnum`).
+    Variant { enum_key: String, variant: String },
+    /// A static method of a struct or enum, by the type's runtime key (`Op::CallStatic`).
+    Static { type_key: String, method: String },
+    /// A static-witness call `T.m()` on the named type parameter (`Op::CallStaticDyn`).
+    WitnessStatic(String),
+    /// A member of a whole-module import reached as `m.x` (`Op::CallMethod` / `Op::GetField` on
+    /// the module object): the imported module's index and the member name.
+    ModuleMember { module: usize, name: String },
+    /// A whole-module import name read as a head (`m` in `m.x`): the module's index.
+    Module(usize),
+    /// A field or method of a VALUE (`Op::GetField` / `Op::CallMethod` on the receiver).
+    Member,
+    /// A pattern head that binds the scrutinee (a bare catch-all name).
+    PatBinding,
+    /// A struct pattern head, by the struct's runtime key.
+    PatStruct(String),
 }
 
 /// Every [`Resolution`] the checker recorded; see there.

@@ -260,11 +260,6 @@ struct Compiler {
     /// `module_idx → its declared user type names` (struct/enum/alias). Drives the collision detection
     /// and resolves a qualified `geo.X` to the right module's key.
     module_types: Vec<std::collections::HashSet<String>>,
-    /// `module_idx → its declared top-level fn names` (TICKET-029). Twin of `module_types`, filled in
-    /// the same per-module AST loop: lets `ctor_shadowed` decide, from one predicate the checker
-    /// mirrors, whether a module-level fn named after a same-module struct wins over the
-    /// field-derived constructor.
-    module_fns: Vec<std::collections::HashSet<String>>,
     /// STATIC (associated) methods, keyed `"{type_runtime_key}\u{1}{method}"` — a struct/enum method
     /// whose first param is not `self` (the "no self ⇒ static" rule). Populated in `hoist_types` (all
     /// types across all modules are seen there before any body compiles), so a `Type.method(...)` call
@@ -613,7 +608,6 @@ impl Compiler {
             method_ic_next: 0,
             type_keys: HashMap::new(),
             module_types: Vec::new(),
-            module_fns: Vec::new(),
             static_methods: std::collections::HashSet::new(),
             imported_modules: HashMap::new(),
             current_module_idx: 0,
@@ -647,7 +641,6 @@ impl Compiler {
     /// type members) and `module_types` (per-module declared names, deps-first).
     fn assign_type_keys(&mut self, graph: &ModuleGraph) {
         self.module_types = vec![std::collections::HashSet::new(); graph.modules.len()];
-        self.module_fns = vec![std::collections::HashSet::new(); graph.modules.len()];
         let mkeys = crate::resolver::module_keys(graph);
         for (idx, lm) in graph.modules.iter().enumerate() {
             if let Some(nat) = lm.native {
@@ -689,11 +682,6 @@ impl Compiler {
                 // runtime LAYOUTS a protocol never has.
                 if let StmtKind::Protocol { name, .. } = &s.kind {
                     self.program.type_names.insert(name.clone());
-                }
-                // TICKET-029 — a module-level fn named after a same-module struct wins over its
-                // field-derived ctor; `ctor_shadowed` reads this set from both emit sites.
-                if let StmtKind::Fn(decl) = &s.kind {
-                    self.module_fns[idx].insert(decl.name.clone());
                 }
             }
         }
@@ -1146,16 +1134,10 @@ impl Compiler {
                                 .is_some_and(|t| t.contains(member))
                             {
                                 // TICKET-029 — a name that is BOTH a type and a fn in the source
-                                // module (`fn Path` beside `struct Path`) binds BOTH tables: the
-                                // fn table is what `ctor_shadowed` reads to redirect a call.
-                                if self
-                                    .module_fns
-                                    .get(tidx)
-                                    .is_some_and(|f| f.contains(member))
-                                {
-                                    self.imported_fns
-                                        .insert(bind.clone(), (tidx, member.clone()));
-                                }
+                                // module (`fn Path` beside `struct Path`) binds BOTH tables; a
+                                // bind that is only a type is never a witness callee.
+                                self.imported_fns
+                                    .insert(bind.clone(), (tidx, member.clone()));
                                 let key = self.type_key(tidx, member);
                                 self.bare_types.insert(bind, key);
                             } else {
@@ -2210,7 +2192,7 @@ impl Compiler {
                 };
                 // M24-5b — `spawn Type.m(..)`: no receiver value to hold, so it rides the eager-args
                 // wrapper instead of `Op::SpawnMethod`.
-                if self.receiverless_call_head(fc, callee) {
+                if self.receiverless_call_head(callee)? {
                     let n = self.compile_receiverless_target(fc, callee, args, named, call.span)?;
                     fc.emit(Op::SpawnCall(n, 0), call.span);
                     return Ok(());
@@ -3106,6 +3088,26 @@ impl Compiler {
     /// module's `bare_types` would mis-key a qualified `mod.E.V` whenever the *constructing* module
     /// also declares a colliding `E` (it'd pick the local loser's id), so the produced value could
     /// never match in its declaring module. `variant_id_of` stays the pattern/built-in entry point.
+    /// `Op::NewEnum` for variant `variant` of the enum keyed `enum_key`, over `argc` pushed args.
+    fn emit_new_enum(
+        &self,
+        fc: &mut FnComp,
+        enum_key: &str,
+        variant: &str,
+        argc: usize,
+        span: Span,
+    ) {
+        let variant_id = self.variant_id_of_key(enum_key, variant);
+        fc.emit(
+            Op::NewEnum {
+                variant: variant.to_string(),
+                variant_id,
+                argc,
+            },
+            span,
+        );
+    }
+
     fn variant_id_of_key(&self, enum_key: &str, name: &str) -> u32 {
         self.program
             .variants
@@ -4027,27 +4029,20 @@ impl Compiler {
                 )
             }
             ExprKind::DecodeCall { obj, ty, arg } => {
-                // Reuse the module's own `parse` (`obj.parse(arg)` → Result[Json]), then coerce the
-                // parsed value into the target type with a descriptor built from `ty`.
-                let parse_call = Expr {
-                    id: crate::ast::NodeId::SYNTH,
-                    kind: ExprKind::Call {
-                        callee: Box::new(Expr {
-                            id: crate::ast::NodeId::SYNTH,
-                            kind: ExprKind::Field {
-                                obj: obj.clone(),
-                                name: "parse".to_string(),
-                                name_span: expr.span,
-                            },
-                            span: expr.span,
-                        }),
-                        args: vec![(**arg).clone()],
-                        named: Vec::new(),
-                        type_args: Vec::new(),
+                // Reuse the module's own `parse` (`obj.parse(arg)` → Result[Json]) as the method
+                // call the module-member path emits, then coerce the parsed value into the target
+                // type with a descriptor built from `ty`. No `Field` is synthesized over `obj`.
+                self.compile_expr(fc, obj)?;
+                self.compile_expr(fc, arg)?;
+                let ic = self.next_method_ic();
+                fc.emit(
+                    Op::CallMethod {
+                        name: "parse".to_string(),
+                        argc: 1,
+                        ic,
                     },
-                    span: expr.span,
-                };
-                self.compile_expr(fc, &parse_call)?;
+                    expr.span,
+                );
                 // ROOT REDESIGN — resolve the decode target (and its nested field struct types) to
                 // their qualified IDENTITY KEYS via a module-aware env, so the descriptor tags the
                 // produced struct with the right key and decodes against the right layout.
@@ -4451,7 +4446,7 @@ impl Compiler {
         };
         // M24-5b — `defer Type.m(..)`: no receiver value to hold, so it rides the eager-args wrapper
         // instead of `Op::DeferMethod`.
-        if self.receiverless_call_head(fc, callee) {
+        if self.receiverless_call_head(callee)? {
             let n = self.compile_receiverless_target(fc, callee, args, named, call.span)?;
             fc.emit(Op::DeferCall(n), call.span);
             return Ok(());
@@ -4717,61 +4712,29 @@ impl Compiler {
     /// that is a local/capture (including one SHADOWING a type or module name) or any other value
     /// never answers yes, so every genuine receiver shape keeps its `SpawnMethod`/`DeferMethod`
     /// lowering.
-    fn receiverless_call_head(&self, fc: &FnComp, callee: &Expr) -> bool {
+    fn receiverless_call_head(&self, callee: &Expr) -> Result<bool, CompileError> {
         // A member-side turbofish (`Type[T].member[U](x)`) wraps the `Field` in an `Index`.
         let inner = match &callee.kind {
             ExprKind::Index { obj, .. } => obj,
             _ => callee,
         };
-        let ExprKind::Field { obj, .. } = &inner.kind else {
-            return false;
-        };
-        // `module.Type` / `module.Type[T…]` — a type reached through a bound module name.
-        if self.qualified_turbofish_key(fc, &obj.kind).is_some() {
-            return true;
+        // A tuple slot (`t.0`) is a value, never a name (`compile_call` skips it the same way).
+        match &inner.kind {
+            ExprKind::Field { name, .. } if !crate::ast::is_tuple_index(name) => {}
+            _ => return Ok(false),
         }
-        // `module.helper(…)` — a plain call through a NAMESPACE. A module is not a receiver value,
-        // so lowering it as one pushed the module HANDLE as the receiver: `defer` survives that
-        // (it runs in the same task) but `spawn` cannot — the airlock refuses a module handle at
-        // run time, on a program `chezzi check` had just passed. Replaying the call through the
-        // wrapper proto emits exactly the module-member call the eager spelling emits, so nothing
-        // module-shaped crosses. `is_unbound` first, so a local that merely SHADOWS the module name
-        // — or is BOUND to it (`m := math`) — stays a genuine receiver. The checker's spawn-receiver
-        // skip (`sig.rs`) asks this same question, on the same two clauses, so the check-time verdict
-        // and the lowering cannot disagree; keying it there on the resolved `Ty::Module` alone was
-        // exactly that disagreement (check ok, then a run-time airlock fault).
-        if let ExprKind::Ident(mname) = &obj.kind
-            && fc.is_unbound(mname)
-            && self.imported_modules.contains_key(mname)
-        {
-            return true;
-        }
-        if let ExprKind::Field {
-            obj: mobj,
-            name: tname,
-            ..
-        } = &obj.kind
-            && let ExprKind::Ident(mname) = &mobj.kind
-            && fc.is_unbound(mname)
-            && let Some(&tidx) = self.imported_modules.get(mname)
-            && self
-                .module_types
-                .get(tidx)
-                .is_some_and(|t| t.contains(tname))
-        {
-            return true;
-        }
-        // A bare `Type` / `Type[T…]` (local, `from`-imported or std — exactly `bare_types`), or a
-        // generic type PARAM whose hidden `$w:T` witness is reachable here. `is_unbound` first, so a
-        // local/param/loop var that merely SHADOWS a type name stays an ordinary receiver.
-        let Some(head) = type_apply_head_name(&obj.kind).or(match &obj.kind {
-            ExprKind::Ident(n) => Some(n.as_str()),
-            _ => None,
-        }) else {
-            return false;
-        };
-        fc.is_unbound(head)
-            && (self.bare_types.contains_key(head) || fc.witness_ref(head).is_some())
+        // A type member, a native ctor or a module member is receiverless; a value's member (a
+        // local that merely SHADOWS a type or module name included) is a genuine receiver.
+        Ok(matches!(
+            self.resolution(inner)?,
+            Resolution::Static { .. }
+                | Resolution::Variant { .. }
+                | Resolution::StructCtor(_)
+                | Resolution::NewTypeCtor(_)
+                | Resolution::WitnessStatic(_)
+                | Resolution::Builtin(_)
+                | Resolution::ModuleMember { .. }
+        ))
     }
 
     /// M24-5b — lower a receiverless `defer Type.m(a, b)` / `spawn Type.m(a, b)`. The arguments are
@@ -4845,7 +4808,7 @@ impl Compiler {
         let ExprKind::Ident(fname) = &callee.kind else {
             return Ok(0);
         };
-        match self.witness_srcs(fc, callee, fname, span)? {
+        match self.witness_srcs(callee, fname, span)? {
             Some(srcs) => {
                 let fname = fname.clone();
                 self.emit_witness_args(fc, &srcs, &fname, span)
@@ -4867,7 +4830,7 @@ impl Compiler {
         name_span: Span,
         span: Span,
     ) -> Result<usize, CompileError> {
-        let srcs = match self.witness_srcs(fc, callee, name, span)? {
+        let srcs = match self.witness_srcs(callee, name, span)? {
             Some(srcs) => Some(srcs),
             None => self.member_witness_srcs(name_span).cloned(),
         };
@@ -4883,14 +4846,9 @@ impl Compiler {
     /// [`Self::imported_fns`] and a qualified one (`lib.reset(...)`) through the module bind. Callees
     /// this cannot classify (a value, a method, a local shadow) answer `false` — and the stray-entry
     /// guard in [`Self::witness_srcs`] is what keeps such a miss loud instead of one `argc` short.
-    fn callee_takes_witnesses(
-        &self,
-        fc: &FnComp,
-        callee: &Expr,
-        fname: &str,
-    ) -> Result<bool, CompileError> {
+    fn callee_takes_witnesses(&self, callee: &Expr) -> Result<bool, CompileError> {
         Ok(self
-            .witness_fn_key(fc, callee, fname)?
+            .witness_fn_key(callee)?
             .is_some_and(|k| self.witnesses.fns.contains_key(&k)))
     }
 
@@ -4898,21 +4856,18 @@ impl Compiler {
     /// under — the module that DECLARES it and the name it is DECLARED as (an `import reset as again`
     /// binding is keyed `reset`, not `again`) — or `None` when the callee is not a by-name call on a
     /// module-level fn.
-    fn witness_fn_key(
-        &self,
-        fc: &FnComp,
-        callee: &Expr,
-        fname: &str,
-    ) -> Result<Option<(usize, String)>, CompileError> {
+    fn witness_fn_key(&self, callee: &Expr) -> Result<Option<(usize, String)>, CompileError> {
         Ok(match &callee.kind {
             ExprKind::Ident(_) => match self.resolution(callee)? {
                 Resolution::Fn { module, name } => Some((*module, name.clone())),
                 _ => None,
             },
-            ExprKind::Field { obj, .. } => match &obj.kind {
-                ExprKind::Ident(m) if fc.is_unbound(m) => self.witness_fn_key_named(Some(m), fname),
-                _ => None,
-            },
+            ExprKind::Field { name, .. } if !crate::ast::is_tuple_index(name) => {
+                match self.resolution(callee)? {
+                    Resolution::ModuleMember { module, name } => Some((*module, name.clone())),
+                    _ => None,
+                }
+            }
             _ => None,
         })
     }
@@ -4995,7 +4950,6 @@ impl Compiler {
     /// checker recorded a witness the backend is about to drop).
     fn witness_srcs(
         &self,
-        fc: &FnComp,
         callee: &Expr,
         fname: &str,
         span: Span,
@@ -5004,7 +4958,7 @@ impl Compiler {
         // held to the stray-entry half of the guard below. A chained postfix link shares its
         // primary expression's span (`lib.reset(c).tag(1)` keys where `lib.reset(c)` recorded), so a
         // blanket check would read the head link's entry and reject a legal program.
-        if self.witness_fn_key(fc, callee, fname)?.is_none() {
+        if self.witness_fn_key(callee)?.is_none() {
             return Ok(None);
         }
         let key = crate::checker::witness_key(
@@ -5014,7 +4968,7 @@ impl Compiler {
             crate::checker::witness_key_span(callee, span),
         );
         let recorded = self.witnesses.calls.get(&key);
-        match (self.callee_takes_witnesses(fc, callee, fname)?, recorded) {
+        match (self.callee_takes_witnesses(callee)?, recorded) {
             (true, Some(srcs)) => Ok(Some(srcs.clone())),
             (true, None) => Err(CompileError {
                 message: format!(
@@ -5215,9 +5169,7 @@ impl Compiler {
         // `desugar::Walker::splice_default`. Same-module and in-closure providers have a global slot
         // and fall through to the ordinary path below.
         if let ExprKind::Ident(n) = &callee.kind
-            && n.starts_with(crate::desugar::PROVIDER_PREFIX)
-            && fc.is_unbound(n)
-            && !self.globals.contains_key(n)
+            && matches!(self.resolution(callee)?, Resolution::Provider)
         {
             let id = self.provider_id(n);
             fc.emit(Op::MakeFuncIn(id), span);
@@ -5232,259 +5184,56 @@ impl Compiler {
         } = &callee.kind
             && !crate::ast::is_tuple_index(name)
         {
-            // `module.Struct(args)` → qualified struct constructor. `module` is a bound module name
-            // whose target declares struct `name`; emit `NewStruct` keyed by that module's runtime key.
-            if let ExprKind::Ident(mname) = &obj.kind
-                && fc.is_unbound(mname)
-                && let Some(&tidx) = self.imported_modules.get(mname)
-                && self
-                    .module_types
-                    .get(tidx)
-                    .is_some_and(|t| t.contains(name))
-            {
-                let key = self.type_key(tidx, name);
-                if self.program.structs.contains_key(&key)
-                    && !self.module_fns.get(tidx).is_some_and(|f| f.contains(name))
-                {
+            // TICKET-180: the checker's record on the callee `Field` is the only answer to what
+            // `obj.name` names; a type head is never compiled, a module or value receiver is.
+            match self.resolution(callee)?.clone() {
+                Resolution::StructCtor(key) => {
                     self.compile_args(fc, args)?;
                     fc.emit(Op::NewStruct(key, args.len()), span);
                     return Ok(());
                 }
-                // `module.NewType(args)` → qualified newtype constructor; emit `Op::NewType` keyed
-                // by the target module's runtime key (mirrors the bare newtype ctor below).
-                if self.program.newtype_home.contains_key(&key)
-                    && !self.module_fns.get(tidx).is_some_and(|f| f.contains(name))
-                {
+                Resolution::NewTypeCtor(key) => {
                     self.compile_args(fc, args)?;
                     fc.emit(Op::NewType(key), span);
                     return Ok(());
                 }
-            }
-            // `module.Enum.Variant(args)` → qualified payload-variant constructor. `obj` is the
-            // qualified `module.Enum`; resolve the enum's runtime key in the target module.
-            if let ExprKind::Field {
-                obj: inner,
-                name: ename,
-                ..
-            } = &obj.kind
-                && let ExprKind::Ident(mname) = &inner.kind
-                && fc.is_unbound(mname)
-                && let Some(&tidx) = self.imported_modules.get(mname)
-                && self
-                    .module_types
-                    .get(tidx)
-                    .is_some_and(|t| t.contains(ename))
-            {
-                let ekey = self.type_key(tidx, ename);
-                if self
-                    .program
-                    .variants
-                    .contains_key(&(ekey.clone(), name.clone()))
-                {
+                Resolution::Variant { enum_key, variant } => {
                     self.compile_args(fc, args)?;
-                    let variant_id = self.variant_id_of_key(&ekey, name);
+                    self.emit_new_enum(fc, &enum_key, &variant, args.len(), span);
+                    return Ok(());
+                }
+                Resolution::Static { type_key, method } => {
+                    self.emit_call_static(fc, type_key, &method, args, *name_span, span)?;
+                    return Ok(());
+                }
+                Resolution::WitnessStatic(t) => {
+                    let w = fc.witness_ref(&t).ok_or_else(|| CompileError {
+                        message: format!("internal: no witness for type parameter '{t}' here"),
+                        span,
+                    })?;
+                    self.compile_args(fc, args)?;
+                    fc.emit_witness(w, span);
                     fc.emit(
-                        Op::NewEnum {
-                            variant: name.clone(),
-                            variant_id,
+                        Op::CallStaticDyn {
+                            method: name.clone(),
                             argc: args.len(),
                         },
                         span,
                     );
                     return Ok(());
                 }
-            }
-            // `module.Type.method(args)` → QUALIFIED static method call on a struct/enum reached
-            // through a bound module name. The qualified-variant arm ran first (variant-first), so a
-            // variant always wins; here the member is a STATIC method (the checker validated it). Emit
-            // the SAME `Op::CallStatic` (NO receiver pushed) the bare `Type.method()` form emits, keyed
-            // by the type's module-scoped runtime key — byte-identical bytecode regardless of spelling.
-            if let ExprKind::Field {
-                obj: inner,
-                name: tname,
-                ..
-            } = &obj.kind
-                && let ExprKind::Ident(mname) = &inner.kind
-                && fc.is_unbound(mname)
-                && let Some(&tidx) = self.imported_modules.get(mname)
-                && self
-                    .module_types
-                    .get(tidx)
-                    .is_some_and(|t| t.contains(tname))
-                && let key = self.type_key(tidx, tname)
-                && self.static_methods.contains(&static_key(&key, name))
-            {
-                self.emit_call_static(fc, key, name, args, *name_span, span)?;
-                return Ok(());
-            }
-            // M24 — `T.method(args)` through a generic bound's STATIC requirement. NO table lookup is
-            // needed here: `T` is a type PARAM, and this compiler itself created the `$w:T` binding —
-            // a trailing param of the fns the checker's `fns` table named, or (Task 4) a capture of
-            // one in a nested body — so "a `Field` call on a bare `T` for which a `$w:T` binding is
-            // reachable" IS the witness call. That reach (`FnComp::witness_ref`) is the compiler's
-            // half of `Checker::witness_scope`.
-            //
-            // PLACED FIRST among the bare-`Ident` receiver arms, because that is where the CHECKER
-            // puts it (`infer_call`: the type-param arm runs before the enum/struct static arms). A
-            // type param SHADOWS a real type name (`fn f[Item: Tagged](x: Item)` next to a `struct
-            // Item` means the PARAM — Rust's and Go's answer, measured 2026-08-10), and both halves
-            // must mean the same `Item`: resolving the struct here while the checker resolved the
-            // param is a green `chezzi check` followed by a wrong runtime answer.
-            if let ExprKind::Ident(t) = &obj.kind
-                && fc.is_unbound(t)
-                && let Some(w) = fc.witness_ref(t)
-            {
-                self.compile_args(fc, args)?;
-                // The SAME `witness_ref` that admitted this call emits it — there is no second
-                // lookup that could come back empty and leave `CallStaticDyn` reading an operand.
-                fc.emit_witness(w, span);
-                fc.emit(
-                    Op::CallStaticDyn {
-                        method: name.clone(),
-                        argc: args.len(),
-                    },
-                    span,
-                );
-                return Ok(());
-            }
-            // `Enum.Variant(args)` → variant constructor, mirroring the bare-ident variant path
-            // below. Gated like the value form: an unbound enum name dotted with one of its variants.
-            // The enum name resolves to its bare-visible runtime key (`enum_bare_key`).
-            if let ExprKind::Ident(ename) = &obj.kind
-                && fc.is_unbound(ename)
-                && let ekey = self.enum_bare_key(ename)
-                && self
-                    .program
-                    .variants
-                    .contains_key(&(ekey.clone(), name.clone()))
-            {
-                self.compile_args(fc, args)?;
-                let variant_id = self.variant_id_of_key(&ekey, name);
-                fc.emit(
-                    Op::NewEnum {
-                        variant: name.clone(),
-                        variant_id,
-                        argc: args.len(),
-                    },
-                    span,
-                );
-                return Ok(());
-            }
-            // `Type.method(args)` → STATIC method call (the "no self ⇒ static" rule). A bare,
-            // unbound struct/enum type name dotted with a static method. The checker has already
-            // validated the shape; emit `Op::CallStatic` (NO receiver pushed) keyed by the type's
-            // runtime key. The enum-variant branch ran first, so a variant always wins.
-            if let ExprKind::Ident(tname) = &obj.kind
-                && fc.is_unbound(tname)
-                && let Some(key) = self.bare_types.get(tname).cloned()
-                && self.static_methods.contains(&static_key(&key, name))
-            {
-                self.emit_call_static(fc, key, name, args, *name_span, span)?;
-                return Ok(());
-            }
-            // `Type[T…].Variant(args)` → declaration-site turbofish VARIANT constructor
-            // (`Box[int].Full(9)`, `E[int, str].Pair(…)`). The type args are RUNTIME-erased (they
-            // only drove the checker), so emit `Op::NewEnum` by the bare key — identical bytecode to
-            // the bare `Enum.Variant(args)` form. Both carriers converge: single-arg `Index{Ident}`
-            // and multi-arg `TypeApply{name}`. VARIANT-FIRST (a same-named static is barred at decl
-            // time), mirroring the checker.
-            if let Some(tname) = type_apply_head_name(&obj.kind)
-                && fc.is_unbound(tname)
-                && let ekey = self.enum_bare_key(tname)
-                && self
-                    .program
-                    .variants
-                    .contains_key(&(ekey.clone(), name.clone()))
-            {
-                self.compile_args(fc, args)?;
-                let variant_id = self.variant_id_of_key(&ekey, name);
-                fc.emit(
-                    Op::NewEnum {
-                        variant: name.clone(),
-                        variant_id,
-                        argc: args.len(),
-                    },
-                    span,
-                );
-                return Ok(());
-            }
-            // `Type[T…].method(args)` → generic-static turbofish (`Box[int].empty()`). Single-arg
-            // parses as `Field{obj: Index{obj: Ident(Type), index}, name}` and multi-arg as
-            // `Field{obj: TypeApply{name}, name}`. The type args are RUNTIME-erased (they only drive
-            // the checker's types) so we ignore them and emit `Op::CallStatic` by the bare key.
-            if let Some(tname) = type_apply_head_name(&obj.kind)
-                && fc.is_unbound(tname)
-                && let Some(key) = self.bare_types.get(tname).cloned()
-                && self.static_methods.contains(&static_key(&key, name))
-            {
-                self.emit_call_static(fc, key, name, args, *name_span, span)?;
-                return Ok(());
-            }
-            // `module.Type[T…].Variant(args)` / `.staticmethod(args)` → QUALIFIED declaration-site
-            // turbofish (B1). The single-arg carrier is `Field{obj: Index{obj: Field{Ident(mod),
-            // Type}, idx}, name}`; `type_apply_head_name` misses it (its Index.obj is a Field, not an
-            // Ident), so recognize the qualified base here. Type args are runtime-erased, so emit the
-            // SAME `Op::NewEnum` (variant-first) / `Op::CallStatic` bytecode as the bare turbofish
-            // forms, keyed by the type's module-scoped runtime key — byte-identical to `mod.Type.X`.
-            if let Some((_, key)) = self.qualified_turbofish_key(fc, &obj.kind) {
-                if self
-                    .program
-                    .variants
-                    .contains_key(&(key.clone(), name.clone()))
-                {
-                    self.compile_args(fc, args)?;
-                    let variant_id = self.variant_id_of_key(&key, name);
-                    fc.emit(
-                        Op::NewEnum {
-                            variant: name.clone(),
-                            variant_id,
-                            argc: args.len(),
-                        },
+                Resolution::Builtin(b) => {
+                    return self.compile_builtin_call(fc, &b, args, named, span);
+                }
+                Resolution::Member | Resolution::ModuleMember { .. } => {}
+                other => {
+                    return Err(CompileError {
+                        message: format!("internal: a call callee resolved to {other:?}"),
                         span,
-                    );
-                    return Ok(());
-                }
-                if self.static_methods.contains(&static_key(&key, name)) {
-                    self.emit_call_static(fc, key, name, args, *name_span, span)?;
-                    return Ok(());
+                    });
                 }
             }
-            // `module.Ctor(args)` → a qualified native builtin CONSTRUCTOR (`concurrency.Shared(0)`,
-            // aliased `c.Shared(0)`, `time.timer(100)`). Lower to the SAME opcode the bare name emits
-            // (3387-3429) so the bytecode — and thus the runtime value — is byte-identical regardless
-            // of how the ctor was spelled. The discriminator is the imported module's `.native` path
-            // (NOT `module_types`: `assign_type_keys` does not register opaque builtin names for a
-            // native module). Gated on a non-local, non-captured module Ident so a local var named
-            // `concurrency` can't be hijacked. A non-matching (native-module, name) pair falls through
-            // to `CallMethod` (so `time.now()` and qualified methods still dispatch normally). The
-            // type-only handles (net.Socket/Listener, ffi widths/ptr) have no ctor — the checker
-            // already rejected `net.Socket(...)`, so they never reach here.
-            if let ExprKind::Ident(mname) = &obj.kind
-                && fc.is_unbound(mname)
-                && let Some(&tidx) = self.imported_modules.get(mname)
-                && let Some(nat) = self.program.modules.get(tidx).and_then(|m| m.native)
-            {
-                let op = match (nat, name.as_str()) {
-                    ("std.concurrency", "Shared") => Some(Op::NewShared),
-                    ("std.concurrency", "RwShared") => Some(Op::NewRwShared),
-                    ("std.concurrency", "Atomic") => Some(Op::NewAtomic),
-                    ("std.concurrency", "AtomicInt") => Some(Op::NewAtomicInt),
-                    ("std.concurrency", "Executor") => Some(Op::NewExecutor),
-                    ("std.time", "timer") => Some(Op::NewTimer),
-                    _ => None,
-                };
-                if let Some(op) = op {
-                    self.compile_args(fc, args)?;
-                    fc.emit(op, span);
-                    return Ok(());
-                }
-            }
-            // M24 Task 3 — `module.fn(args)` where the member is a generic fn that takes hidden
-            // trailing witness params. Same shape as the bare spelling, one opcode later: the member
-            // is looked up on the module object and the witness arguments ride on top of the declared
-            // ones, so `CallMethod`'s widened `argc` reaches the SAME proto (which the declaring
-            // module compiled with those hidden params) as `reset(...)` would.
-            if let Some(srcs) = self.witness_srcs(fc, callee, name, span)? {
+            if let Some(srcs) = self.witness_srcs(callee, name, span)? {
                 self.compile_expr(fc, obj)?;
                 self.compile_args(fc, args)?;
                 let w = self.emit_witness_args(fc, &srcs, name, span)?;
@@ -5566,76 +5315,25 @@ impl Compiler {
             obj: callee_obj, ..
         } = &callee.kind
             && let ExprKind::Field {
-                obj: head,
-                name,
-                name_span,
+                name, name_span, ..
             } = &callee_obj.kind
         {
-            // Combined QUALIFIED turbofish `mod.Type[int].member[U](args)` — the checker accepts it
-            // once it recognizes the qualified enclosing head, so lower it the same way (variant-first,
-            // then static), keyed by the type's module-scoped runtime key. Both method + enclosing type
-            // args are runtime-erased (B1).
-            if let Some((_, key)) = self.qualified_turbofish_key(fc, &head.kind) {
-                if self
-                    .program
-                    .variants
-                    .contains_key(&(key.clone(), name.clone()))
-                {
+            // A member-side turbofish (`Type[T].m[U](..)`, `Type.m[U](..)`, `m.f[int](..)`): the
+            // record is on the inner `Field`. Anything but a type member is a value, called below.
+            match self.resolution(callee_obj)?.clone() {
+                Resolution::Variant { enum_key, variant } => {
                     self.compile_args(fc, args)?;
-                    let variant_id = self.variant_id_of_key(&key, name);
-                    fc.emit(
-                        Op::NewEnum {
-                            variant: name.clone(),
-                            variant_id,
-                            argc: args.len(),
-                        },
-                        span,
-                    );
+                    self.emit_new_enum(fc, &enum_key, &variant, args.len(), span);
                     return Ok(());
                 }
-                if self.static_methods.contains(&static_key(&key, name)) {
-                    self.emit_call_static(fc, key, name, args, *name_span, span)?;
+                Resolution::Static { type_key, method } => {
+                    debug_assert_eq!(&method, name);
+                    self.emit_call_static(fc, type_key, name, args, *name_span, span)?;
                     return Ok(());
                 }
-            }
-            let tname = type_apply_head_name(&head.kind).or(match &head.kind {
-                ExprKind::Ident(n) => Some(n.as_str()),
-                _ => None,
-            });
-            if let Some(tname) = tname
-                && fc.is_unbound(tname)
-            {
-                // VARIANT-FIRST (a same-named static is barred at decl time), mirroring the checker.
-                let ekey = self.enum_bare_key(tname);
-                if self
-                    .program
-                    .variants
-                    .contains_key(&(ekey.clone(), name.clone()))
-                {
-                    self.compile_args(fc, args)?;
-                    let variant_id = self.variant_id_of_key(&ekey, name);
-                    fc.emit(
-                        Op::NewEnum {
-                            variant: name.clone(),
-                            variant_id,
-                            argc: args.len(),
-                        },
-                        span,
-                    );
-                    return Ok(());
-                }
-                if let Some(key) = self.bare_types.get(tname).cloned()
-                    && self.static_methods.contains(&static_key(&key, name))
-                {
-                    self.emit_call_static(fc, key, name, args, *name_span, span)?;
-                    return Ok(());
-                }
+                _ => {}
             }
         }
-        // Bare-ident callees resolve by name in this order:
-        // print → builtin → struct ctor → variant ctor → value.
-        // TICKET-180 — what a bare call head means is the checker's recorded `Resolution`, never a
-        // re-decision from the name here.
         if let ExprKind::Ident(_) = &callee.kind {
             match self.resolution(callee)?.clone() {
                 Resolution::Builtin(name) => {
@@ -5668,7 +5366,7 @@ impl Compiler {
         // slot, and call with the widened `argc`. The compiler CONSUMES the checker's table; a
         // mismatch either way is a hard error, never a short `argc` (see `witness_srcs`).
         if let ExprKind::Ident(fname) = &callee.kind
-            && let Some(srcs) = self.witness_srcs(fc, callee, fname, span)?
+            && let Some(srcs) = self.witness_srcs(callee, fname, span)?
         {
             // `named` needs no handling here: desugar has already normalized every keyword argument
             // of a by-name call into its positional slot, so `args` is the full argument list.
@@ -5716,12 +5414,25 @@ impl Compiler {
     /// ONLY source. A miss is an internal error: a checker arm returned without recording, so fix
     /// that arm and never add a fallback here. A compiler-synthesized node
     /// ([`crate::ast::NodeId::SYNTH`]) is answered by its shape: the only SYNTH `Ident`s are the
-    /// `$`-named locals the compiler itself declares, and the lexer never produces a `$`.
+    /// `$`-named locals the compiler itself declares, and the lexer never produces a `$`; a SYNTH
+    /// `Field` is `$comp.push`/`$comp.add`, a member of that local.
+    ///
+    /// The position rule: the compiler calls this only on a node it lowers as a name.
+    /// (1) A call callee `Ident`. (2) A call callee `Field`, and the `Field` inside a callee
+    /// `Index { obj: Field }` (`Type[T].m[U](..)`, `Type.m[U](..)`, `m.f[int](..)`). (3) An `Ident`
+    /// it compiles as a value. (4) A value `Field`. (5) The `obj` of a `Field` is compiled, and so
+    /// falls under (3), only when that `Field`'s entry is `Member` or `ModuleMember`. It never asks
+    /// about a type head (`T` in `T.m()`, `E` in `E.V`, `Box` in `Box[int].of()`) or a type
+    /// argument, because it never lowers them. No `ast` shape predicate can state this rule:
+    /// `xs[i].k` and `Box[int].k` share one shape.
     fn resolution(&self, e: &Expr) -> Result<&Resolution, CompileError> {
         static SYNTH_LOCAL: Resolution = Resolution::Local;
+        static SYNTH_MEMBER: Resolution = Resolution::Member;
         if e.id.0 == crate::ast::NodeId::SYNTH.0 {
             return match &e.kind {
                 ExprKind::Ident(_) => Ok(&SYNTH_LOCAL),
+                // `$comp.push` / `$comp.add` (`method_call_stmt`).
+                ExprKind::Field { .. } => Ok(&SYNTH_MEMBER),
                 _ => Err(CompileError {
                     message: "internal: a synthesized node has no name resolution".to_string(),
                     span: e.span,

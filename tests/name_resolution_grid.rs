@@ -250,7 +250,106 @@ fn grid() -> Vec<Cell> {
     cells.extend(field_cells());
     cells.extend(order_cells());
     cells.extend(typed_use_cells());
+    cells.extend(head_shape_cells());
     cells
+}
+
+const SHAPES_LIB: &str = r#"struct T:
+    x: int
+enum E:
+    A
+    B(int)
+fn f(n: int) -> str:
+    return "L{n}"
+fn g[U](v: U) -> U:
+    return v
+struct Box[V]:
+    v: V
+    fn of(v: V) -> Box[V]:
+        return Box(v)
+fn say(n: int):
+    print("D{n}")
+"#;
+
+const SHAPES_MAIN: &str = r#"import lib
+import std.json
+struct S:
+    k: int
+    fn make(k: int) -> S:
+        return S(k)
+    fn shout(n: int):
+        print("S{n}")
+    fn get(self) -> int:
+        return self.k
+enum C:
+    Red
+    Val(int)
+struct Box[V]:
+    v: V
+    fn of(v: V) -> Box[V]:
+        return Box(v)
+    fn pick[W](v: V, w: W) -> W:
+        return w
+struct Pair[A, B]:
+    a: A
+    b: B
+    fn of(a: A, b: B) -> Pair[A, B]:
+        return Pair(a, b)
+fn run_defer():
+    defer lib.say(21)
+    defer S.shout(22)
+    print("body")
+fn h(n: int) -> int:
+    return n + 1
+fn id[U](v: U) -> U:
+    return v
+print(h(1))
+print(lib.f(2))
+print(lib.T(3))
+print(S.make(4))
+print(C.Red)
+print(C.Val(5))
+print(lib.E.A)
+print(lib.E.B(6))
+print(Box[int].of(7))
+print(Pair[int, str].of(8, "p"))
+s := S(9)
+print(s.get())
+print(lib.g[int](10))
+print(Box[int].pick[str](11, "w"))
+print(S.make(12).k)
+xs := [S(13)]
+print(xs[0].k)
+fi := id[int]
+print(fi(14))
+lf := lib.f
+print(lf(15))
+m := match C.Val(18):
+    C.Val(n): n
+    C.Red: 0
+print(m)
+n2 := match lib.E.B(19):
+    lib.E.B(n): n
+    _: 0
+print(n2)
+r := json.decode[lib.T]("{{\"x\": 20}}")
+print(r)
+run_defer()
+parallel:
+    spawn lib.say(23)
+"#;
+
+const SHAPES_OUT: &str = "2\nL2\nT(x=3)\nS(k=4)\nRed\nVal(5)\nA\nB(6)\nBox(v=7)\nPair(a=8, b='p')\n9\n10\nw\n12\n13\n14\nL15\n18\n19\nOk(T(x=20))\nbody\nS22\nD21\nD23";
+
+/// One program with every head position the compiler lowers as a name. A node the compiler reads
+/// without a checker record turns it red with `internal: no name resolution recorded`.
+fn head_shape_cells() -> Vec<Cell> {
+    vec![with_lib(
+        "shapes/every_head_position",
+        SHAPES_MAIN,
+        SHAPES_LIB,
+        Expect::Prints(SHAPES_OUT.into()),
+    )]
 }
 
 fn one(name: &str, main: String, expect: Expect) -> Cell {
@@ -681,8 +780,6 @@ const PENDING_180: &[&str] = &[
     "import_alias/alias/member",
     "toplevel_let/imported_type/member",
     "import_alias/defaulted_fn/member",
-    "importer/alias/k3_str_arg",
-    "importer/alias/k3_int_arg",
     "p2/alias_of_ambiguous_module_type",
     "p2/generic_alias_turbofish",
     // Step 9 (identifier and value-field reads; a module-scope binding hides a type head)

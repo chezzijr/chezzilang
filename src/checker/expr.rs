@@ -118,6 +118,7 @@ impl Checker {
                 && !sig.functions.contains_key(name)
             {
                 let key = self.type_key(&mid, name);
+                self.record_resolution(callee.id, Resolution::StructCtor(key.clone()), callee.span);
                 return self
                     .infer_qualified_struct_call(info, name, &key, args, &targs, span, expected);
             }
@@ -132,6 +133,11 @@ impl Checker {
                 && !sig.functions.contains_key(name)
             {
                 let key = self.type_key(&mid, name);
+                self.record_resolution(
+                    callee.id,
+                    Resolution::NewTypeCtor(key.clone()),
+                    callee.span,
+                );
                 let under = info.underlying.clone();
                 let tps = info.type_params.clone();
                 return self
@@ -142,7 +148,16 @@ impl Checker {
             if let ExprKind::Ident(mname) = &obj.kind
                 && let Some(target) = self.qualified_alias_ty(mname, name)
                 && !matches!(target, Ty::Enum(..))
+                && !self.module_declares_fn(mname, name)
             {
+                let r = match &target {
+                    Ty::Struct(key, _) => Some(Resolution::StructCtor(key.clone())),
+                    Ty::NewType(key, _) => Some(Resolution::NewTypeCtor(key.clone())),
+                    _ => None,
+                };
+                if let Some(r) = r {
+                    self.record_resolution(callee.id, r, callee.span);
+                }
                 let spelled = format!("{mname}.{name}");
                 return self.infer_alias_ctor_call(&target, &spelled, args, &targs, span, expected);
             }
@@ -182,6 +197,11 @@ impl Checker {
                     // The result `Ty::Enum` carries the DECLARING module's runtime key (bare unless a
                     // genuine clash), matching the layout tables + the declaring module's signatures.
                     vi.enum_name = self.type_key(&mid, ename);
+                    let r = Resolution::Variant {
+                        enum_key: vi.enum_name.clone(),
+                        variant: name.clone(),
+                    };
+                    self.record_resolution(callee.id, r, callee.span);
                     return self
                         .infer_variant_call(&vi, name, args, &targs, *name_span, span, expected);
                 }
@@ -195,6 +215,7 @@ impl Checker {
                 // (`WitnessCallee::Dotted`) has to name a form that actually compiles: bare
                 // `Enum.method[T](...)` here answers "unknown type 'Enum'".
                 let spelled = format!("{mname}.{ename}");
+                self.record_static(callee, &key, name);
                 return self.infer_static_call(
                     &key,
                     &spelled,
@@ -227,6 +248,7 @@ impl Checker {
                 // …and the same for a qualified STRUCT static (`lib.Holder.build()`): the advice
                 // must carry `lib.`, which is the prefix the user reached it by (an alias included).
                 let spelled = format!("{mname}.{tname}");
+                self.record_static(callee, &key, name);
                 return self.infer_static_call(
                     &key,
                     &spelled,
@@ -251,6 +273,7 @@ impl Checker {
                     self.qualified_alias_ty(mname, aname)
             {
                 let spelled = format!("{mname}.{aname}");
+                self.record_type_member(callee, &key, name);
                 return self.infer_alias_member_call(
                     &key,
                     &head_targs,
@@ -276,6 +299,8 @@ impl Checker {
             if let ExprKind::Ident(tname) = &obj.kind
                 && self.shadowing_type_param(tname)
             {
+                let r = Resolution::WitnessStatic(tname.clone());
+                self.record_resolution(callee.id, r, callee.span);
                 return self.infer_witness_static_call(tname, name, args, span);
             }
             // …and the same head under a TYPE-LEVEL turbofish (`Item[int].tag()`, in either carrier)
@@ -303,6 +328,7 @@ impl Checker {
                     .alias_enum_head(aname)
                     .or_else(|| self.alias_struct_head(aname))
             {
+                self.record_type_member(callee, &key, name);
                 return self.infer_alias_member_call(
                     &key,
                     &head_targs,
@@ -334,6 +360,7 @@ impl Checker {
                         None,
                     );
                 }
+                self.record_type_member(callee, &ekey, name);
                 if self
                     .variants
                     .contains_key(&(ekey.clone(), name.to_string()))
@@ -389,6 +416,7 @@ impl Checker {
                 && self.struct_names.contains(tname)
             {
                 let key = self.bare_key(tname);
+                self.record_static(callee, &key, name);
                 // Editor hover (probe-gated no-op): record the receiver `Foo` of `Foo.default()` as
                 // its struct type.
                 if self.hover_probe.is_some() {
@@ -441,6 +469,7 @@ impl Checker {
             // VARIANT-FIRST (a same-named static method is barred at decl time by disjointness); if
             // no variant matches the member name, fall to the static-method path.
             if let Some((tname, key, type_exprs)) = self.type_apply_head(obj) {
+                self.record_type_member(callee, &key, name);
                 let resolved: Vec<Ty> = type_exprs
                     .iter()
                     .map(|t| self.resolve_type(t, span))
@@ -483,6 +512,11 @@ impl Checker {
                 && sig.types.contains(name)
             {
                 if Self::qualified_native_ctor(name) {
+                    self.record_resolution(
+                        callee.id,
+                        Resolution::Builtin(name.clone()),
+                        callee.span,
+                    );
                     return self
                         .infer_named_call(
                             name,
@@ -512,6 +546,8 @@ impl Checker {
                     return Ty::Unknown;
                 }
             }
+            let r = self.member_resolution(obj, name);
+            self.record_resolution(callee.id, r, callee.span);
             return self.infer_method_call(obj, name, *name_span, args, &targs, span, expected);
         }
         // Combined member-side turbofish — DEFENSIVE FALLBACK. Since the parser steal was broadened to
@@ -546,6 +582,7 @@ impl Checker {
             if let Some((tname, key, type_exprs)) = resolved_head
                 && let Some(mt_ty) = self.index_as_type(mt).map(|t| self.resolve_type(&t, span))
             {
+                self.record_type_member(callee_obj, &key, name);
                 let enclosing: Vec<Ty> = type_exprs
                     .iter()
                     .map(|t| self.resolve_type(t, span))
@@ -573,6 +610,9 @@ impl Checker {
                     expected,
                 );
             }
+            // Not a type head: a member of a module or a value, read then called.
+            let r = self.member_resolution(head, name);
+            self.record_resolution(callee_obj.id, r, callee_obj.span);
         }
         if let ExprKind::Ident(name) = &callee.kind {
             // Shadowing local (e.g. a closure bound to a variable) wins over a global of the same
@@ -1760,6 +1800,57 @@ impl Checker {
             .cloned()
             .unwrap_or((self.graph_module_idx, name.to_string()));
         Resolution::Fn { module, name }
+    }
+
+    /// Record `Resolution::Static` for the callee `Type.method`.
+    fn record_static(&mut self, callee: &Expr, type_key: &str, method: &str) {
+        let r = Resolution::Static {
+            type_key: type_key.to_string(),
+            method: method.to_string(),
+        };
+        self.record_resolution(callee.id, r, callee.span);
+    }
+
+    /// Record what `Type.member` names on the type keyed `key`: a variant first, else a static
+    /// method (the variant-first order every type-head arm uses).
+    fn record_type_member(&mut self, callee: &Expr, key: &str, member: &str) {
+        if self
+            .variants
+            .contains_key(&(key.to_string(), member.to_string()))
+        {
+            let r = Resolution::Variant {
+                enum_key: key.to_string(),
+                variant: member.to_string(),
+            };
+            self.record_resolution(callee.id, r, callee.span);
+        } else {
+            self.record_static(callee, key, member);
+        }
+    }
+
+    /// What `obj.name` names when `obj` is not a type head: a member of a whole-module import when
+    /// `obj` is that import's name, else a member of a value.
+    pub(super) fn member_resolution(&self, obj: &Expr, name: &str) -> Resolution {
+        if let ExprKind::Ident(m) = &obj.kind
+            && !self.head_is_value(m)
+            && let Some(mid) = self.imported_modules.get(m)
+            && let Some(&module) = self.module_idx_of.get(mid)
+        {
+            return Resolution::ModuleMember {
+                module,
+                name: name.to_string(),
+            };
+        }
+        Resolution::Member
+    }
+
+    /// Does the whole-module import bound as `mname` declare a fn `name`? A same-named fn replaces
+    /// a type's ctor (DEC-029/055/172), so `lib.Q(..)` is that fn.
+    fn module_declares_fn(&self, mname: &str, name: &str) -> bool {
+        self.imported_modules
+            .get(mname)
+            .and_then(|mid| self.module_sigs.get(mid))
+            .is_some_and(|sig| sig.functions.contains_key(name))
     }
 
     #[allow(clippy::too_many_arguments)] // call shape + enum qualifier + hint + the head's NodeId
