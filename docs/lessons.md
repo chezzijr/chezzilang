@@ -48,6 +48,10 @@
     Make one consume the other (a checker→compiler table, one shared function, a list derived from the
     declarations) and delete the copy. `ExternTable` replacing the compiler's own extern resolver is
     the precedent.
+  - Names (TICKET-180): the checker records a `Resolution` per `NodeId` from ONE head decider over
+    `owning_scope` (`head_binding`), the compiler reads that table and nothing else, and a missing
+    entry is an `internal:` error, never a fallback. A shadow rule moves only in the commit that
+    makes every compiler arm lowering that position read the table.
   - A fix that lands with a "mirrors X" comment, a "keep in sync with Y" comment, or a drift test that
     carries an exemption is a red flag in review.
   - Every family fix lands with **one test that enumerates the whole grid** (every operation × every

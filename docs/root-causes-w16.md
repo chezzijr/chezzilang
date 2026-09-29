@@ -51,6 +51,9 @@ listed in the wave-16 ledger rows.
 
 ## Family 1 — Names (K1, K2, K3)
 
+Status: compiler copy removed by TICKET-180 (`0eaefd33`..`7a3054f8`, docs in the commit after);
+desugar copy scheduled in TICKET-182.
+
 **Mechanism.** The checker resolves each call head (`src/checker/expr.rs`) with the order: local
 binding → type parameter → builtin → newtype ctor → struct ctor → user fn. It uses the answer to
 compute types and then discards it. The compiler (`src/compiler/mod.rs` ~5470–5630) re-resolves from

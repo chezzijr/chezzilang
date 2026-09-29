@@ -776,11 +776,6 @@ fn run_cell(root: &Path, idx: usize, c: &Cell) -> Result<(), String> {
 /// TICKET-182 removes. They must stay red here; when one turns green, move it back.
 const INTERIM_182: &[&str] = &["nested_fn/defaulted_fn/call"];
 
-/// TICKET-180 cells whose fix is a later step of that ticket (qualified heads, identifier reads,
-/// pattern heads, alias bodies). The ticket is not done until this list is empty. They must stay
-/// red here; when one turns green, delete it from the list.
-const PENDING_180: &[&str] = &[];
-
 #[test]
 fn name_resolution_grid() {
     let root = std::env::temp_dir().join(format!("chezzi-name-grid-{}", std::process::id()));
@@ -788,9 +783,7 @@ fn name_resolution_grid() {
     let cells = grid();
     let mut fails = Vec::new();
     for (i, c) in cells.iter().enumerate() {
-        let pinned = [INTERIM_182, PENDING_180]
-            .iter()
-            .any(|l| l.contains(&c.name.as_str()));
+        let pinned = INTERIM_182.contains(&c.name.as_str());
         match (run_cell(&root, i, c), pinned) {
             (Err(e), false) => fails.push(e),
             (Ok(()), true) => {

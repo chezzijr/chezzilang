@@ -7,16 +7,22 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
-- **TICKET-180 (2026-09-29, IN PROGRESS) — bare call heads resolve once, in the checker (wave 16
-  Family 1, K1/K2).** Every `Expr` and pattern head carries an equality-neutral `ast::NodeId`
-  (desugar renumbers what it places twice; a debug assertion after `desugar::run` rejects a shared
-  id). The checker records a `checker::Resolution` for every bare call head, keyed `(module, NodeId)`;
-  `compile_call` lowers a bare call from that record alone (a miss is `internal:`), and
-  `ctor_shadowed`, `raw_ctor_owner`, `is_builtin` and the nested-fn name veto are deleted. So a
-  local/param/loop/match/closure/comprehension/`wait:` binding named like a builtin, struct, newtype
-  or alias now wins at runtime (`ord := fn...; ord("a")` → `1000`, CPython too), and K2 prints
-  `P(x=0)`. Qualified heads, identifier reads, pattern heads, `json.decode[T]`, K3 and the two P2s
-  are not yet moved; the grid `tests/name_resolution_grid.rs` names the 14 cells still red.
+- **TICKET-180 (2026-09-29) — every name resolves once, in the checker (wave 16 Family 1, K1/K2/K3
+  and two P2s).** Every `Expr` and pattern head carries an equality-neutral `ast::NodeId` (desugar
+  renumbers what it places twice; a debug assertion after `desugar::run` rejects a shared id). The
+  checker records a `checker::Resolution` keyed `(module, NodeId)` for every call head, identifier
+  read, qualified head, value field read, pattern head and `json.decode[T]` target (the descriptor
+  itself); the compiler lowers each from that record alone, and a miss is `internal:`. One head
+  decider, `Checker::head_binding` over `owning_scope`, replaces `is_local_binding`; type- and
+  builtin-named module globals are seeded, so a body sees `P := fn..` beside `struct P` in both
+  orders. Deleted: `ctor_shadowed`, `raw_ctor_owner`, `is_unbound`, `module_fns`, `bare_types`,
+  `alias_member_key`, `CompilerDecodeEnv`, `is_nullary_variant`, `struct_key_of_pattern`,
+  `enum_bare_key`, the checker's `is_decodable` copy and the nested-fn name veto. New rule: a
+  whole-module import and a same-module `fn` or type may not share a name (`'E' is already
+  imported`, either order; Go's `redeclared in this block`). `type R = b.P` with `b` ambiguous is
+  rejected at the declaration; `type BB = Box; BB[int](9)` runs. At top level a read above a
+  same-named global's `:=` is the builtin (CPython). The grid `tests/name_resolution_grid.rs` (619
+  cells) is green except `nested_fn/defaulted_fn/call`, desugar's interim (TICKET-182).
 - **TICKET-183 (2026-09-29) — module scope is order-free for function bodies (wave 16 Family 3).**
   `fn f(): return x` above `x := 5` was `unknown name 'x'`, and `x := "s"` / `fn f(): return x` /
   `y: int = f()` checked clean and printed `s` (P0): `infer_returns` ran before any top-level let was
