@@ -22,7 +22,17 @@ Single source of truth for "what am I doing next." Update after every work sessi
   imported`, either order; Go's `redeclared in this block`). `type R = b.P` with `b` ambiguous is
   rejected at the declaration; `type BB = Box; BB[int](9)` runs. At top level a read above a
   same-named global's `:=` is the builtin (CPython). The grid `tests/name_resolution_grid.rs` (619
-  cells) is green except `nested_fn/defaulted_fn/call`, desugar's interim (TICKET-182).
+  cells) is green; TICKET-182 removed the one interim cell.
+- **TICKET-182 (2026-09-30) — the checker binds call arguments (wave 16 Family 1, desugar copy).**
+  `Checker::bind_call` binds named, omitted and variadic arguments for every call, after the
+  checker's own dispatch picked the callee, and records a `CallPlanTable` (keyed by call NodeId)
+  the compiler lowers from. Deleted: desugar's call binder and its resolvers (`normalize_call`,
+  `resolve_bare`, `alias_head`, `receiver_struct_ty`, ...), the checker's value binder and the
+  span-keyed `KeywordTable`. Fixed: a nested fn shadowing a defaulted fn no longer gets that fn's
+  defaults spliced. Changed: a builtin/native callee refuses named arguments (`'chr' takes no
+  named arguments`; `chr(65, n=66)` and `Set(xs=[1])` used to drop the keyword silently); value
+  calls share the direct-call messages. Provider cycles are detected by the checker. Grid
+  `tests/call_binding_grid.rs` (143 cells) green.
 - **TICKET-183 (2026-09-29) — module scope is order-free for function bodies (wave 16 Family 3).**
   `fn f(): return x` above `x := 5` was `unknown name 'x'`, and `x := "s"` / `fn f(): return x` /
   `y: int = f()` checked clean and printed `s` (P0): `infer_returns` ran before any top-level let was

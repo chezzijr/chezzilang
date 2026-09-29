@@ -1102,20 +1102,14 @@ prints `arg-x`, `d-y`, `arg-z`. Scope: free functions
 (own module, `from`-imported, or module-qualified `mod.f(...)`), struct constructors, **and struct
 methods** (`p.greet(punct="?")`, `p.scale()` filling a default) — a method's default is compiled in
 its declaring module like any other, and resolves there however the caller reaches it (see *"Where a
-default is compiled"* below). Because a method's receiver type is
-unknown to the desugar pass, methods are resolved by name: if two structs define a same-named method
-with **different** parameters, a named call to it is rejected as ambiguous and — since the binding
-can't be chosen safely — its **defaults aren't filled** either (the call then fails the arity check),
-so give same-named methods the same parameter shape or unique names. A method that **reuses a built-in
-method name** (`map`, `push`, `len`, `add`, …) does still get default/named support, but **only when
-the receiver's struct/enum type is statically known** at this pre-type pass — a typed local
-(`c := Counter(0)` or `t: Tag = …`), an inline constructor call (`Counter(0).add(amount=5)`), a
-struct-returning function call (`mk().add(...)`), a bare type head such as `Counter.mk()`, or a
-module-qualified type head such as `mod.Counter.mk()`. A genuine builtin receiver (a `List`/`Set`/`Map`/`str`
-value) keeps routing to the builtin method untouched; a named call to a builtin-colliding method whose
-receiver type is *not* statically known (e.g. an unannotated parameter, or an inferred `m := E.Variant`)
-is rejected with an accurate "reuses a built-in method name — bind it to a typed local or pass
-positionally" error. A **static** method (no `self` parameter) takes defaults like any other — its explicit arguments
+default is compiled"* below). Named and default arguments bind against the declaration the
+checker resolved (TICKET-182): for any struct or enum receiver of known type, and for a protocol or
+bound-type-parameter receiver through its implementors' shared parameter shape (implementors whose
+parameters differ cannot bind named arguments: pass them positionally). A call through a function
+value uses the same binder and the same messages (`unknown named argument 'x'`, `missing required
+argument 'a'`, ...). A builtin, native or `extern` callee takes **no** named arguments, as in CPython:
+`s.add(x=3)` on a `Set` is `'add' takes no named arguments; pass its arguments positionally`, and so
+are `chr(65, n=66)` and `Set(xs=[1])`. A **static** method (no `self` parameter) takes defaults like any other — its explicit arguments
 start at parameter 0, so `S.mk()` fills them. Defaults are **not**
 supported on **closures** or on **enum variant constructors** — note this is the variant
 *constructor*; an enum's *methods* take defaults just like struct methods. (Per §above, a default may
