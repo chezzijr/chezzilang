@@ -389,7 +389,11 @@ impl Vm {
             && let Some(ms) = args.first().and_then(|v| self.int_val(*v))
             && ms > 0
         {
-            return self.demote_block_sleep(ms as u64, span);
+            let now = std::time::Instant::now();
+            let deadline = now
+                .checked_add(std::time::Duration::from_millis(ms as u64))
+                .unwrap_or_else(|| now + std::time::Duration::from_secs(86_400 * 365));
+            return self.demote_block_until(deadline, WaitSpec::Sleep, "sleep_ms", span);
         }
         // W7-16 — every OTHER timed wait with `ms > 0`: an eager `Executor` job (`mn == None`), the
         // top-level `main` thread, the inline outermost-`parallel:` builder VM, or a `mn == None`

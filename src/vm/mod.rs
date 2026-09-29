@@ -5968,7 +5968,9 @@ struct TimerSleep {
 
 mod arith;
 mod block;
-use block::{BlockMode, WaitSpec, Waiter};
+#[cfg(test)]
+use block::Waiter;
+use block::{BlockMode, DemoteReg, WaitSpec};
 mod call;
 pub(crate) use call::is_mutating_native_kind;
 mod exec;

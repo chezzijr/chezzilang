@@ -7,8 +7,8 @@
 //! The per-op MECHANISM (park on a channel bucket, park on the netpoller, the timer thread) stays
 //! with each op; only the decision lives here.
 
-use super::Vm;
 use super::quiesce::PartyWait;
+use super::{MnSched, RuntimeError, SchedCore, Span, Vm};
 use crate::native::Kind;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -86,7 +86,6 @@ impl WaitSpec {
     /// Such a demoted wait is accounted `inflight` (it vetoes the verdict); every other one
     /// registers a waiter the verdict asks "can you still be satisfied?". A guard is never
     /// `inflight` (DEC-063).
-    #[allow(dead_code)] // TICKET-181: read by `block_enter` (step 7)
     pub(super) fn will_return(self) -> bool {
         match self {
             WaitSpec::Timer
@@ -144,9 +143,10 @@ pub(super) fn mode(ctx: BlockCtx, spec: WaitSpec) -> BlockMode {
         BlockCtx::Demote => match spec {
             // v1 limit: the demote loop cannot block a sender. Go blocks.
             W::Send | W::Wait { has_send: true, .. } => Refuse,
-            W::Timer => InlineSleep,
             W::Offload | W::Connect | W::Join | W::Nursery => InPlace,
-            W::Recv | W::Wait { .. } | W::Sleep | W::Stdin | W::Socket | W::Guard => Demote,
+            W::Recv | W::Timer | W::Wait { .. } | W::Sleep | W::Stdin | W::Socket | W::Guard => {
+                Demote
+            }
         },
         BlockCtx::Builder { job } => match spec {
             W::Recv
@@ -221,7 +221,94 @@ impl Waiter {
     }
 }
 
+/// A demote bracket entered by [`Vm::block_enter`]: how the wait is accounted while this worker
+/// is off `running`. Ended by [`DemoteReg::release`] (a waiter-registered wait, in the same lock
+/// hold as the pop or settle that ends it — DEC-176) or [`Vm::block_exit`] (a `will_return` wait).
+pub(super) struct DemoteReg {
+    /// the `SchedCore::waiters` token, or `None` for an `inflight` wait
+    tok: Option<u64>,
+}
+
+impl DemoteReg {
+    /// End the bracket under core lock A: back onto `running`, and un-account the wait.
+    pub(super) fn release(self, sched: &MnSched, c: &mut SchedCore) {
+        c.running += 1;
+        match self.tok {
+            Some(tok) => c.unregister_waiter(tok),
+            None => {
+                sched.inflight.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
 impl Vm {
+    /// THE demote bracket: take this worker off `running` and account the wait by its spec — a
+    /// `will_return` wait is `inflight` (it vetoes the verdict), every other one registers a
+    /// [`Waiter`] on `wait` the verdict asks "can you still be satisfied?". Spawns this thread's
+    /// replacement worker once. With no M:N scheduler (`mn == None`) it keeps DEC-052's
+    /// `yield_pool_slot(None)` and accounts nothing.
+    pub(super) fn block_enter(
+        &mut self,
+        spec: WaitSpec,
+        wait: Option<PartyWait>,
+        what: &str,
+        span: Span,
+    ) -> Result<DemoteReg, RuntimeError> {
+        debug_assert_eq!(spec.will_return(), wait.is_none());
+        let Some(sched) = self.mn.as_ref().map(Arc::clone) else {
+            self.yield_pool_slot(None);
+            return Ok(DemoteReg { tok: None });
+        };
+        let reg = {
+            let mut c = sched.lock();
+            c.running -= 1;
+            let tok = match wait {
+                Some(w) => Some(c.register_waiter(Waiter {
+                    wait: Arc::new(w),
+                    cancel: self.demote_cancel_flags(),
+                    fiber: true,
+                })),
+                None => {
+                    sched.inflight.fetch_add(1, Ordering::Relaxed);
+                    None
+                }
+            };
+            drop(c);
+            // An idle puller in an untimed `take_runnable` wait re-evaluates the verdict now that
+            // this fiber left `running`; without it a genuine all-blocked quiesce hangs.
+            sched.notify_waiters();
+            DemoteReg { tok }
+        };
+        if !self.demoted {
+            if !self.spawn_replacement_worker(&sched, self.wid) {
+                reg.release(&sched, &mut sched.lock());
+                return Err(self.err(
+                    format!(
+                        "{what} inside a native callback could not demote the worker (OS thread \
+                         limit reached) — reduce concurrent in-callback blocking or raise the \
+                         thread limit"
+                    ),
+                    span,
+                ));
+            }
+            self.demoted = true;
+        }
+        Ok(reg)
+    }
+
+    /// End a `will_return` bracket: takes core lock A itself. With no M:N scheduler there is
+    /// nothing to undo, exactly as before (DEC-052).
+    pub(super) fn block_exit(&mut self, reg: DemoteReg) {
+        debug_assert!(
+            reg.tok.is_none(),
+            "a waiter-registered wait releases under its own pop"
+        );
+        if let Some(sched) = self.mn.as_ref().map(Arc::clone) {
+            reg.release(&sched, &mut sched.lock());
+        }
+    }
+
     /// The blocking context of the running code, derived from `mn`, `mn_enlist_sched`,
     /// `eager_core`, `native_reentry` and `deferring` on every call.
     pub(super) fn block_ctx(&self) -> BlockCtx {
@@ -306,7 +393,7 @@ mod tests {
     /// `will_return`.
     const TABLE: [(&str, &str, bool); 15] = [
         ("Recv", "PDRI IIII IIII", false),
-        ("Timer", "PSSS SSSS SSSS", true),
+        ("Timer", "PDSS SSSS SSSS", true),
         ("Send", "PRRI IIII IIII", false),
         ("Wait", "PDRI IIII IIII", false),
         ("Wait+send", "PRRI IIII IIII", false),

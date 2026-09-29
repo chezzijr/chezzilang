@@ -281,7 +281,7 @@ impl Vm {
         what: &str,
         span: Span,
     ) -> Result<Result<core::UpdateGuard, GuardCycle>, RuntimeError> {
-        let tok = self.guard_wait_enter(key, what, span)?;
+        let reg = self.guard_wait_enter(key, what, span)?;
         // TICKET-141 — the holder of this guard may be a preempted `update` closure on a gated
         // sibling thread; hold no width permit while waiting for it.
         self.width_release();
@@ -313,7 +313,7 @@ impl Vm {
                 }
             }
         };
-        self.guard_wait_exit(tok);
+        self.guard_wait_exit(reg);
         self.width_acquire();
         out
     }
@@ -2089,7 +2089,9 @@ impl Vm {
         } else {
             WaitSpec::Recv
         };
-        if self.block_mode(spec) == BlockMode::Demote {
+        // A timer's Demote cell is served inside `chan_recv_step`: its value is synthesised at the
+        // deadline, never queued, so `demote_recv_block`'s pop loop cannot serve it.
+        if spec == WaitSpec::Recv && self.block_mode(spec) == BlockMode::Demote {
             return self.demote_recv_block(h, span);
         }
         self.chan_recv_step(h, span)
@@ -2190,16 +2192,19 @@ impl Vm {
                     self.park_recv(h);
                     return Ok(RecvStep::Parked);
                 }
-                // `mn.is_none()` (the top-level VM, the inline outermost-`parallel:` builder VM, or
-                // an eager `Executor` job's `Vm` — mod.rs:1101 enumerates the same three) / an M:N
-                // callback (`native_reentry > 0`): inline-sleep to the deadline (single-thread, or an
-                // already-blocking host-stack context), synthesise.
-                // Limitation (vs `sleep_ms`, which DEMOTES at `native_reentry > 0`): a `timer.recv()`
-                // reached inside a native callback under `--parallel` pins THIS worker for the timeout
-                // (no replacement is spun). Sound — siblings on the other N-1 workers still progress —
-                // but lower throughput than `sleep_ms`'s demote. Acceptable for v1; demote-reuse is a
-                // future improvement. This inline-sleep blocks in place the same way an un-demoted
-                // `sleep_ms` already does (single-thread).
+                // TICKET-181 changed cell (e) — an M:N fiber inside a native callback DEMOTES for
+                // the timeout, like `sleep_ms`: it used to inline-sleep and pin its worker, so at
+                // `CHEZZI_THREADS=1` a sibling it then sent to had never run (`send on a rendezvous
+                // channel: deadlock`; Go prints the value). The value is synthesised at the
+                // deadline, never queued, so `demote_recv_block`'s pop loop cannot serve it — it
+                // takes the sleep bracket, accounted `inflight`.
+                if self.block_mode(WaitSpec::Timer) == BlockMode::Demote {
+                    self.demote_block_until(deadline, WaitSpec::Timer, "timer.recv()", span)?;
+                    return Ok(RecvStep::Got(WireValue::Bool(true)));
+                }
+                // Every other context (`BlockMode::InlineSleep`: the top-level VM, the inline
+                // outermost-`parallel:` builder VM, an eager `Executor` job's `Vm`): inline-sleep to
+                // the deadline, synthesise.
                 //
                 // W7-16 — the wait is CHUNKED, not one `thread::sleep`: this deadline is ours, so it
                 // stays a cancellation + `--timeout` checkpoint for its whole duration. Pre-fix an

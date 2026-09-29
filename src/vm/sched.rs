@@ -1646,25 +1646,12 @@ impl Vm {
         //    all-blocked quiesce would never be detected — a hang). The registration lets
         //    `is_deadlocked` peek this fiber's queue so a value a sibling races in isn't misread as a
         //    deadlock (the #1 false-positive against an innocent parked sibling).
-        let tok = {
-            let mut c = sched.lock();
-            c.running -= 1;
-            // N4 — a cancel can still WAKE this fiber (the `cancel_requested()` check below ranks above
-            // `terminate` / the self-detect), and that is progress the deadlock predicate's counters
-            // cannot see: it is a registered waiter, not `parked`. The waiter carries the flags it
-            // would honour so `is_deadlocked` vetoes while one of them is tripped. Empty (⇒ no veto)
-            // when a cancel could NOT wake it — already unwinding, or blocked inside its own `defer` —
-            // which is exactly the fiber that IS a genuine deadlock, and must be reported rather than
-            // hang.
-            let tok = c.register_waiter(Waiter {
-                wait: Arc::new(quiesce::PartyWait::Recv(Arc::clone(&core))),
-                cancel: self.demote_cancel_flags(),
-                fiber: true,
-            });
-            drop(c);
-            sched.notify_waiters();
-            tok
-        };
+        let reg = self.block_enter(
+            WaitSpec::Recv,
+            Some(quiesce::PartyWait::Recv(Arc::clone(&core))),
+            "recv",
+            span,
+        )?;
         // TICKET-028 — arm this demoted receiver's presence guard for the whole block loop, then
         // (rendezvous only) wake any parked sender now that the guard is live.
         let _recv = crate::vm::core::RecvWait::arm(&core);
@@ -1677,21 +1664,6 @@ impl Vm {
         //    If the OS refuses the thread (a real mode for this raw-thread-per-demotion design under
         //    `RLIMIT_NPROC`/ENOMEM with many fibers blocked-in-callback), DON'T panic mid-accounting:
         //    un-roll step 1 (account + registry) and fault this fiber cleanly so the join still completes.
-        if !self.demoted {
-            if !self.spawn_replacement_worker(&sched, self.wid) {
-                let mut c = sched.lock();
-                c.running += 1;
-                c.unregister_waiter(tok);
-                drop(c);
-                return Err(self.err(
-                    "recv inside a native callback could not demote the worker (OS thread limit \
-                     reached) — reduce concurrent in-callback blocking or raise the thread limit"
-                        .to_string(),
-                    span,
-                ));
-            }
-            self.demoted = true;
-        }
         // 3. Block in place. The pop + un-account (unregister_waiter/running++) + un-register are ATOMIC
         //    under core lock A (A-then-q — the order `send_wake` uses → no ABBA), so the deadlock checker
         //    never observes an emptied-but-still-counted/registered demoted fiber (the #1 window). The
@@ -1705,8 +1677,7 @@ impl Vm {
                 let mut qg = core.q.lock().unwrap_or_else(|e| e.into_inner());
                 let popped = qg.pop();
                 if let Some(w) = popped {
-                    c.running += 1;
-                    c.unregister_waiter(tok);
+                    reg.release(&sched, &mut c);
                     drop(qg);
                     drop(c);
                     return Ok(RecvStep::Got(w));
@@ -1715,8 +1686,7 @@ impl Vm {
                 // queued value, above closed/terminate/deadlock (a `done().recv()` on a cancelled token
                 // reached inside a native callback must not false-deadlock).
                 if core.done_latch.load(Ordering::Relaxed) {
-                    c.running += 1;
-                    c.unregister_waiter(tok);
+                    reg.release(&sched, &mut c);
                     drop(qg);
                     drop(c);
                     return Ok(RecvStep::Got(WireValue::Bool(true)));
@@ -1739,22 +1709,19 @@ impl Vm {
                 // scope's cancel), which a raw read misses.
                 if self.cancel_requested() {
                     self.cancelled = true;
-                    c.running += 1;
-                    c.unregister_waiter(tok);
+                    reg.release(&sched, &mut c);
                     drop(c);
                     return Err(self.err("cancelled".to_string(), span));
                 }
                 // W7-47 — a run-wide `os.exit` from another party, below cancel like every other site.
                 // Un-account first (same bookkeeping as the cancel arm above), or the counters leak.
                 if let Some(e) = self.run_exit_err(span) {
-                    c.running += 1;
-                    c.unregister_waiter(tok);
+                    reg.release(&sched, &mut c);
                     drop(c);
                     return Err(e);
                 }
                 if closed {
-                    c.running += 1;
-                    c.unregister_waiter(tok);
+                    reg.release(&sched, &mut c);
                     drop(c);
                     return Ok(RecvStep::ClosedEmpty);
                 }
@@ -1765,15 +1732,13 @@ impl Vm {
                 // means OUR channel is empty here, and `is_deadlocked` now also peeks OTHER demoted
                 // channels (#1), so firing can never strand a value destined for any demoted fiber.
                 if c.terminate {
-                    c.running += 1;
-                    c.unregister_waiter(tok);
+                    reg.release(&sched, &mut c);
                     drop(c);
                     return Err(sched.deadlock_err.clone());
                 }
                 if sched.is_deadlocked(&c) {
                     c.flag_deadlock(&sched.deadlock_err);
-                    c.running += 1;
-                    c.unregister_waiter(tok);
+                    reg.release(&sched, &mut c);
                     drop(c);
                     sched.notify_waiters();
                     return Err(sched.deadlock_err.clone());
@@ -1829,22 +1794,20 @@ impl Vm {
         //    notify so an idle puller re-evaluates the deadlock predicate now this fiber left `running`.
         // (the waiter's cancel flags: see `demote_recv_block` — a cancel can still wake this fiber, and
         // that is progress `is_deadlocked`'s counters cannot see.)
-        let tok = {
-            let mut c = sched.lock();
-            c.running -= 1;
-            let tok = c.register_waiter(Waiter {
-                wait: Arc::new(quiesce::PartyWait::Wait(
-                    arms.iter()
-                        .map(|(_, core)| (Arc::clone(core), false))
-                        .collect(),
-                )),
-                cancel: self.demote_cancel_flags(),
-                fiber: true,
-            });
-            drop(c);
-            sched.notify_waiters();
-            tok
+        // TICKET-181 — a timed `wait:` returns at its deadline whatever anyone does, so it is
+        // `inflight` (changed cell (a), C1); an untimed one registers its arms as a waiter.
+        let spec = WaitSpec::Wait {
+            deadline: timer.is_some(),
+            has_send: false,
         };
+        let wait = (!spec.will_return()).then(|| {
+            quiesce::PartyWait::Wait(
+                arms.iter()
+                    .map(|(_, core)| (Arc::clone(core), false))
+                    .collect(),
+            )
+        });
+        let reg = self.block_enter(spec, wait, "wait", span)?;
         // TICKET-028 — every arm reaching this fn is a RECV arm; arm one RecvWait per arm, then wake
         // any parked sender on a rendezvous arm now that the guards are live.
         let _recvs: Vec<crate::vm::core::RecvWait> = arms
@@ -1856,27 +1819,8 @@ impl Vm {
                 self.wake_senders_core(core);
             }
         }
-        // Un-account helper: reverse step 1 (called on every exit path), caller holds core lock A.
-        let un_account = |c: &mut SchedCore| {
-            c.running += 1;
-            c.unregister_waiter(tok);
-        };
         // 2. Spin a replacement worker ONCE per demoted thread (covers this `wid` while we block). If the
         //    OS refuses the thread, un-roll step 1 and fault cleanly so the join still completes.
-        if !self.demoted {
-            if !self.spawn_replacement_worker(&sched, self.wid) {
-                let mut c = sched.lock();
-                un_account(&mut c);
-                drop(c);
-                return Err(self.err(
-                    "wait inside a native callback could not demote the worker (OS thread limit \
-                     reached) — reduce concurrent in-callback blocking or raise the thread limit"
-                        .to_string(),
-                    span,
-                ));
-            }
-            self.demoted = true;
-        }
         // 3. Block in place. Each poll: under core lock A, scan all N arms in source order — the first
         //    with a queued value wins (un-account + return). Then rank cancel > all-closed > terminate
         //    > self-detected-deadlock, exactly like `demote_recv_block`, but generalized over N arms.
@@ -1889,14 +1833,14 @@ impl Vm {
                     let mut qg = core.q.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(w) = qg.pop() {
                         drop(qg);
-                        un_account(&mut c);
+                        reg.release(&sched, &mut c);
                         drop(c);
                         return Ok((idx, w));
                     }
                     // A tripped latch (`trip()`) makes this arm ready with `true` (after the value scan).
                     if core.done_latch.load(Ordering::Relaxed) {
                         drop(qg);
-                        un_account(&mut c);
+                        reg.release(&sched, &mut c);
                         drop(c);
                         return Ok((idx, WireValue::Bool(true)));
                     }
@@ -1907,13 +1851,13 @@ impl Vm {
                 // Cancel (a sibling faulted): swallow the outcome (mirror the snapshot-park cancel arm).
                 if self.cancel_requested() {
                     self.cancelled = true;
-                    un_account(&mut c);
+                    reg.release(&sched, &mut c);
                     drop(c);
                     return Err(self.err("cancelled".to_string(), span));
                 }
                 // W7-47 — a run-wide `os.exit` from another party, below cancel like every other site.
                 if let Some(e) = self.run_exit_err(span) {
-                    un_account(&mut c);
+                    reg.release(&sched, &mut c);
                     drop(c);
                     return Err(e);
                 }
@@ -1924,7 +1868,7 @@ impl Vm {
                 if let Some((idx, deadline)) = timer
                     && std::time::Instant::now() >= deadline
                 {
-                    un_account(&mut c);
+                    reg.release(&sched, &mut c);
                     drop(c);
                     return Ok((idx, WireValue::Bool(true)));
                 }
@@ -1932,20 +1876,20 @@ impl Vm {
                 // (`all_closed` reads only the channel arms: a timer arm is not in `arms`, so a still-
                 // pending timer does NOT keep it false — this fires before that timer's deadline.)
                 if all_closed {
-                    un_account(&mut c);
+                    reg.release(&sched, &mut c);
                     drop(c);
                     return Err(self.err("wait: all channels closed".to_string(), span));
                 }
                 if c.terminate {
-                    un_account(&mut c);
+                    reg.release(&sched, &mut c);
                     drop(c);
                     return Err(sched.deadlock_err.clone());
                 }
                 // A pending timer guarantees future progress (its deadline send), so it vetoes the
                 // self-detected deadlock just like an `inflight` job does on the snapshot-park path.
-                if timer.is_none() && sched.is_deadlocked(&c) {
+                if sched.is_deadlocked(&c) {
                     c.flag_deadlock(&sched.deadlock_err);
-                    un_account(&mut c);
+                    reg.release(&sched, &mut c);
                     drop(c);
                     sched.notify_waiters();
                     return Err(sched.deadlock_err.clone());
@@ -1993,56 +1937,27 @@ impl Vm {
     /// (no worse than the inline pin it replaces — the worker is now freed).
     ///
     /// TICKET-141 — releases this thread's width permit for the whole wait and re-takes it after.
-    pub(super) fn demote_block_sleep(
+    pub(super) fn demote_block_until(
         &mut self,
-        ms: u64,
+        deadline: std::time::Instant,
+        spec: WaitSpec,
+        what: &str,
         span: Span,
     ) -> Result<Value, RuntimeError> {
         self.width_release();
-        let r = self.demote_block_sleep_in_place(ms, span);
+        let r = self.demote_block_until_in_place(deadline, spec, what, span);
         self.width_acquire();
         r
     }
 
-    fn demote_block_sleep_in_place(&mut self, ms: u64, span: Span) -> Result<Value, RuntimeError> {
-        let sched =
-            Arc::clone(self.mn.as_ref().expect(
-                "demote_block_sleep called with no active M:N scheduler (self.mn is None)",
-            ));
-        // 1. Account running → inflight under the core lock, then notify idle pullers (a worker sitting in
-        //    an untimed `cv.wait` re-evaluates now that this fiber left `running`).
-        {
-            let mut c = sched.lock();
-            c.running -= 1;
-            sched.inflight.fetch_add(1, Ordering::Relaxed);
-            drop(c);
-            sched.notify_waiters();
-        }
-        // 2. Spin up a replacement worker ONCE per demoted thread (reuse the `self.demoted` coverage the
-        //    recv demote sets — one spawn + one eventual exit per demoted thread regardless of how many
-        //    times it blocks). Un-roll the accounting + fault cleanly if the OS refuses the thread.
-        if !self.demoted {
-            if !self.spawn_replacement_worker(&sched, self.wid) {
-                let mut c = sched.lock();
-                c.running += 1;
-                sched.inflight.fetch_sub(1, Ordering::Relaxed);
-                drop(c);
-                return Err(self.err(
-                    "sleep_ms inside a native callback could not demote the worker (OS thread limit \
-                     reached) — reduce concurrent in-callback blocking or raise the thread limit"
-                        .to_string(),
-                    span,
-                ));
-            }
-            self.demoted = true;
-        }
-        // 3. Sleep in place (the worker is covered by the replacement), CHUNKED at `DEMOTE_POLL_BACKOFF`
-        //    exactly like `Vm::block_until_deadline` — W7-57. One uninterruptible `thread::sleep(ms)`
-        //    made the cancel / `os.exit` rungs below reachable only AFTER the full sleep (measured: an
-        //    `xs.map(fn(x): sleep_ms(3000))` in a nursery task survived a sibling job's `os.exit(3)` for
-        //    3012 ms). The loop decides only WHEN to stop sleeping; classification stays entirely with
-        //    the two arms below, in their existing order, so no state is touched here.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+    fn demote_block_until_in_place(
+        &mut self,
+        deadline: std::time::Instant,
+        spec: WaitSpec,
+        what: &str,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        let reg = self.block_enter(spec, None, what, span)?;
         loop {
             let now = std::time::Instant::now();
             if now >= deadline {
@@ -2059,11 +1974,7 @@ impl Vm {
         }
         // 4. Un-account inflight → running (the `+1` is essential — the fiber's next dispatch does
         //    `running -= 1`, which would underflow without this restore).
-        {
-            let mut c = sched.lock();
-            c.running += 1;
-            sched.inflight.fetch_sub(1, Ordering::Relaxed);
-        }
+        self.block_exit(reg);
         // Cancel observed during/after the sleep (a sibling faulted): set `cancelled` and fault so the
         // outcome is SWALLOWED (a cancelled task is dropped, not reported), mirroring `demote_recv_block`
         // + the snapshot-park recv. Without this, a cancelled task would sleep through every remaining
@@ -2205,9 +2116,11 @@ impl Vm {
         // calling thread is its own, so there is nothing to demote FROM and the scheduler bookkeeping
         // below is skipped. The wait loop itself does not care either way.
         let sched = self.mn.as_ref().map(Arc::clone);
-        if sched.is_some() {
-            self.demote_socket_enter(span)?;
-        }
+        let reg = if self.block_mode(WaitSpec::Socket) == BlockMode::Demote {
+            Some(self.block_enter(WaitSpec::Socket, None, "a socket op", span)?)
+        } else {
+            None
+        };
         let out = loop {
             // W7-18 — the run's `--timeout` deadline, ABOVE the cancel check (it outranks a cancel,
             // W7-17's ordering). An in-callback socket op is accounted `inflight`, so it VETOES the
@@ -2269,26 +2182,10 @@ impl Vm {
                 }
             }
         };
-        if sched.is_some() {
-            self.demote_socket_exit();
+        if let Some(reg) = reg {
+            self.block_exit(reg);
         }
         out
-    }
-
-    /// D5 owe #3 Path C (#3 socket half) — enter the in-callback socket demote: account `running → inflight`
-    /// under core lock A + notify idle pullers (a worker in an untimed `cv.wait` re-evaluates now that this
-    /// fiber left `running`), then spin a replacement worker ONCE (reuse the `self.demoted` coverage the
-    /// recv/sleep demote also uses — one spawn + one eventual exit per demoted thread). On OS-refuse, un-roll
-    /// the accounting and fault cleanly so the join still completes. Mirrors [`Vm::demote_block_sleep`] 1–2.
-    pub(super) fn demote_socket_enter(&mut self, span: Span) -> Result<(), RuntimeError> {
-        self.demote_enter("a socket op", span)
-    }
-
-    /// D5 owe #3 Path C (#3 socket half) — exit the in-callback socket demote: un-account `inflight →
-    /// running` (the `+1` is essential — the fiber's next dispatch does `running -= 1`, which would
-    /// underflow without this restore). Mirrors [`Vm::demote_block_sleep`] step 4.
-    pub(super) fn demote_socket_exit(&mut self) {
-        self.demote_exit();
     }
 
     /// TICKET-016 (W8-3) generalisation of the demote bracket: "I am about to block in place" for any
@@ -2497,67 +2394,31 @@ impl Vm {
         r
     }
 
-    /// TICKET-063 — enter a `Shared`/`RwShared` update-guard wait. Unlike [`Vm::demote_enter`] (which
-    /// accounts `inflight`, correct for its socket/sleep callers), this accounts the wait
-    /// a `PartyWait::Guard` waiter on `SchedCore::waiters`, because a
-    /// guard wait has no promised external progress source — it returns only when the owner (one of
-    /// the parties the deadlock predicate is already judging) releases. With `self.mn` `None` (no
-    /// nursery), keeps DEC-052's `demote_enter` path — its `mn.is_none()` arm's immediate
-    /// `yield_pool_slot(None)` stays unchanged — and returns `Ok(None)`.
+    /// TICKET-063 — enter a `Shared`/`RwShared` update-guard wait through the one demote bracket
+    /// ([`Vm::block_enter`]). A guard wait has no promised external progress — it returns only
+    /// when the owner (one of the parties the verdict already judges) releases — so it registers
+    /// a `PartyWait::Guard` waiter, never `inflight` (DEC-063). With `self.mn` `None` the bracket
+    /// keeps DEC-052's immediate `yield_pool_slot(None)`.
     pub(super) fn guard_wait_enter(
         &mut self,
         key: usize,
         what: &str,
         span: Span,
-    ) -> Result<Option<u64>, RuntimeError> {
-        let Some(sched) = self.mn.as_ref().map(Arc::clone) else {
-            self.demote_enter(what, span)?;
-            return Ok(None);
-        };
-        let tok = {
-            let mut c = sched.lock();
-            c.running -= 1;
-            let tok = c.register_waiter(Waiter {
-                wait: Arc::new(quiesce::PartyWait::Guard(key, self.guard_token)),
-                cancel: self.demote_cancel_flags(),
-                fiber: true,
-            });
-            drop(c);
-            sched.notify_waiters();
-            tok
-        };
-        if !self.demoted {
-            if !self.spawn_replacement_worker(&sched, self.wid) {
-                let mut c = sched.lock();
-                c.running += 1;
-                c.unregister_waiter(tok);
-                drop(c);
-                return Err(self.err(
-                    format!(
-                        "{what} inside a native callback could not demote the worker (OS thread \
-                         limit reached) — reduce concurrent in-callback blocking or raise the \
-                         thread limit"
-                    ),
-                    span,
-                ));
-            }
-            self.demoted = true;
-        }
-        Ok(Some(tok))
+    ) -> Result<DemoteReg, RuntimeError> {
+        self.block_enter(
+            WaitSpec::Guard,
+            Some(quiesce::PartyWait::Guard(key, self.guard_token)),
+            what,
+            span,
+        )
     }
 
-    /// TICKET-063 — exit a guard wait entered via [`Vm::guard_wait_enter`]. `tok` is the value that
-    /// call returned: with `self.mn` `None` mirrors [`Vm::demote_exit`] (`tok` is `None`); otherwise
-    /// unregisters the guard waiter and, with it, its cancel flags — `tok` is
-    /// always `Some` here because `guard_wait_enter` returns `Some` on every path that takes this arm.
-    pub(super) fn guard_wait_exit(&mut self, tok: Option<u64>) {
-        let Some(sched) = self.mn.as_ref().map(Arc::clone) else {
-            self.demote_exit();
-            return;
-        };
-        let mut c = sched.lock();
-        c.running += 1;
-        c.unregister_waiter(tok.expect("an M:N guard wait always carries a waiter token"));
+    /// TICKET-063 — exit a guard wait entered via [`Vm::guard_wait_enter`]: unregister its waiter
+    /// under core lock A. With `self.mn` `None` there is nothing to undo.
+    pub(super) fn guard_wait_exit(&mut self, reg: DemoteReg) {
+        if let Some(sched) = self.mn.as_ref().map(Arc::clone) {
+            reg.release(&sched, &mut sched.lock());
+        }
     }
 
     /// D5 owe #3 (Path C) — spawn a fresh OS thread running a replacement M:N worker shell over the
