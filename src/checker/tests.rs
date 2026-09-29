@@ -36084,3 +36084,12 @@ fn a_generic_alias_takes_its_targets_type_arguments() {
         "'Q' takes no type arguments",
     );
 }
+
+// TICKET-182: desugar binds a call's defaults through its own resolver, which misses a nested fn
+// shadowing a defaulted top-level fn and splices the top-level fn's default into the call.
+#[test]
+fn a_nested_fn_shadowing_a_defaulted_fn_binds_to_the_nested_fn() {
+    ok_desugared(
+        "fn f(a: int, b: int = 10) -> int:\n    return a + b\n\nfn g() -> str:\n    fn f(n: int) -> str:\n        return \"B{n}\"\n    return f(1)\n",
+    );
+}
