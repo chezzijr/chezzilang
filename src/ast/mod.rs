@@ -937,7 +937,7 @@ pub enum ExprKind {
     Ident(String),
     /// `[a, b, c]` — plus the node's ORIGIN, which is `None` for every list the user wrote and
     /// `Some(callee_key_span)` for the ONE synthesized list in the compiler: the variadic argument
-    /// pack `desugar::normalize_call` collapses a call's surplus positionals into
+    /// pack `checker::Checker::bind_call` collapses a call's surplus positionals into
     /// (`src/desugar/mod.rs`, the `is_variadic` arm).
     ///
     /// That second component is a TABLE KEY component, not decoration. The pack carries the CALL's

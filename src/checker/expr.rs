@@ -13,13 +13,46 @@ enum NativeHandleMethod {
     /// solver; the returned `Ty` is the arm's result.
     Generic(Ty),
     /// A non-generic sig; the caller runs its own residual (`check_args_range` + any special case).
-    Concrete(FnSig),
+    Concrete(Box<FnSig>),
     /// Lookup miss; the caller runs `infer_all(args)` + "no method" error.
     Miss,
 }
 
 impl Checker {
     pub(super) fn infer_call(
+        &mut self,
+        callee: &Expr,
+        args: &[Expr],
+        named: &[(String, Expr)],
+        type_args: &[Type],
+        span: Span,
+        call_id: crate::ast::NodeId,
+    ) -> Ty {
+        let ctx = CallCtx {
+            id: call_id,
+            named: named.to_vec(),
+            pack_origin: crate::checker::witness_key_span(callee, span),
+            consumed: false,
+            span,
+        };
+        let saved = self.call_ctx.replace(ctx);
+        let t = self.infer_call_dispatch(callee, args, named, type_args, span);
+        let consumed = std::mem::replace(&mut self.call_ctx, saved).is_some_and(|c| c.consumed);
+        // A call whose named arguments no binder and no refusal consumed: its callee binds none.
+        if !named.is_empty() && !consumed {
+            self.error(
+                span,
+                "named arguments are only supported on functions, struct constructors, and struct methods"
+                    .to_string(),
+            );
+            for (_, v) in named {
+                self.infer_value(v);
+            }
+        }
+        t
+    }
+
+    fn infer_call_dispatch(
         &mut self,
         callee: &Expr,
         args: &[Expr],
@@ -44,15 +77,25 @@ impl Checker {
                 format!("'{written}' {}", crate::vm::COPY_WRITE_TAIL),
             );
         }
-        // `print(..., sep=, end=)` is the only call whose named args survive desugar. Type-check the
-        // `sep`/`end` value(s) as `str` here (desugar already validated the key names). Any other
-        // call should have an empty `named` post-desugar.
+        // `print(..., sep=, end=)`: its only named arguments are `sep` and `end`, typed `str`.
         if !named.is_empty()
             && let ExprKind::Ident(name) = &callee.kind
             && name == "print"
             && self.lookup(name).is_none()
         {
             self.record_resolution(callee.id, Resolution::Builtin(name.clone()), callee.span);
+            self.consume_named();
+            let mut seen: Vec<&str> = Vec::new();
+            for (k, _) in named {
+                if !matches!(k.as_str(), "sep" | "end") || seen.contains(&k.as_str()) {
+                    self.error(
+                        span,
+                        "print() only accepts the named arguments 'sep' and 'end'".to_string(),
+                    );
+                    break;
+                }
+                seen.push(k);
+            }
             for a in args {
                 self.infer_value(a);
             }
@@ -83,7 +126,7 @@ impl Checker {
         // (`$def$…`), so this arm can only ever see an expression `desugar` synthesized.
         if let ExprKind::Ident(n) = &callee.kind
             && n.starts_with(crate::desugar::PROVIDER_PREFIX)
-            && !self.functions.contains_key(n)
+            && (callee.id.0 == crate::ast::NodeId::SYNTH.0 || !self.functions.contains_key(n))
         {
             self.record_resolution(callee.id, Resolution::Provider, callee.span);
             return expected.cloned().unwrap_or(Ty::Unknown);
@@ -662,6 +705,10 @@ impl Checker {
                     };
                     self.hover_record_at(callee.span, &fty, HoverKind::Func, doc);
                 }
+                if !named.is_empty() && self.lookup(name).is_none() && super::is_reserved_name(name)
+                {
+                    self.refuse_named(name, named, span);
+                }
                 if let Some(ty) = self.infer_named_call(
                     name,
                     args,
@@ -714,6 +761,7 @@ impl Checker {
                         .filter(|k| self.kw_certain.contains(k)),
                     _ => None,
                 };
+                self.consume_named();
                 let Some(key) = key else {
                     for a in args {
                         self.infer(a);
@@ -733,8 +781,21 @@ impl Checker {
                 if !self.generic_arg_prepass && !self.kw_pending.contains(&(key.clone(), span)) {
                     self.kw_pending.push((key, span));
                 }
+                // A value's slots are its labels; its omitted slots are callee-filled from
+                // `min_params` on, so they must be a trailing run.
                 let minp = labels.min_or(params.len());
-                self.check_value_keyword_call(&params, &labels.names, minp, args, named, span);
+                let value_slots: Vec<crate::desugar::SlotSpec> = (0..params.len())
+                    .map(|i| crate::desugar::SlotSpec {
+                        name: labels.names.get(i).cloned().flatten(),
+                        default: (i >= minp).then_some(crate::desugar::Dflt::CalleeFilled),
+                        is_variadic: false,
+                    })
+                    .collect();
+                let Some(bound) = self.bind_call(Some(&value_slots), "closure", args, 0, span)
+                else {
+                    return *ret;
+                };
+                self.check_args_range("closure", &params, minp, &bound, span);
                 *ret
             }
             // A first-class builtin fn value (`f := ord; f("a")`) checks its args against the builtin's
@@ -742,6 +803,7 @@ impl Checker {
             // fixed 1-arg call — the variadic / `sep=`/`end=` surface stays direct-call-only. Its value
             // form takes NO keyword arguments (labels are a user-fn surface).
             Ty::BuiltinFn { params: _, ret } if !named.is_empty() => {
+                self.consume_named();
                 for a in args {
                     self.infer(a);
                 }
@@ -776,6 +838,7 @@ impl Checker {
                 *ret
             }
             Ty::Unknown => {
+                self.consume_named();
                 for a in args {
                     self.infer(a);
                 }
@@ -812,203 +875,355 @@ impl Checker {
         }
     }
 
-    /// Resolve + type-check a VALUE call carrying keyword arguments (`g(name="Bob", greeting="Hi")`)
-    /// against the value's surface parameter `labels` (parallel to `params`). Builds the slot
-    /// PERMUTATION `perm[i]` = index into the combined `[positional args ++ named exprs]` list that
-    /// fills parameter slot `i`, records it into [`Self::keyword_calls`] (when harvesting) for the
-    /// backends to lower to a positional `Op::Call`, and type-checks each slot.
-    ///
-    /// A TRAILING run of defaulted parameters may be omitted (`min_params`): those are filled by the
-    /// callee's own prologue, so the recorded permutation covers only the SUPPLIED prefix and the
-    /// emitted call is short by the rest. A hole BEFORE a supplied argument is refused — a short call
-    /// pushes fewer values and cannot express a gap. (This used to be an unconditional Swift SE-0111
-    /// scope-cut, "every parameter must be supplied, defaults do not apply through a value".)
-    /// Eval order is slot order, matching how direct keyword calls already reorder in desugar, so
-    /// argument side-effect order stays consistent with that path.
-    pub(super) fn check_value_keyword_call(
-        &mut self,
-        params: &[Ty],
-        labels: &[Option<String>],
-        min_params: usize,
-        args: &[Expr],
-        named: &[(String, Expr)],
-        span: Span,
-    ) {
-        // `fill[i]` = which combined-list index fills slot `i`. Combined index space: `0..args.len()`
-        // are the positional args; `args.len() + j` is `named[j]`.
-        let mut fill: Vec<Option<usize>> = vec![None; params.len()];
-        let mut ok = true;
-
-        if args.len() > params.len() {
-            self.error(
-                span,
-                format!(
-                    "too many arguments in call through a function value: expected {}, got {} positional",
-                    params.len(),
-                    args.len()
-                ),
-            );
-            ok = false;
-        }
-        // Leading positional slots fill in order.
-        for (i, slot) in fill
-            .iter_mut()
-            .enumerate()
-            .take(args.len().min(params.len()))
-        {
-            *slot = Some(i);
-        }
-        // Named args resolve by label.
-        for (j, (label, _)) in named.iter().enumerate() {
-            let combined = args.len() + j;
-            match labels
-                .iter()
-                .position(|l| l.as_deref() == Some(label.as_str()))
-            {
-                Some(k) if k < params.len() => {
-                    if k < args.len() {
-                        self.error(
-                            span,
-                            format!("parameter '{label}' was already given positionally"),
-                        );
-                        ok = false;
-                    } else if fill[k].is_some() {
-                        self.error(span, format!("duplicate keyword argument '{label}'"));
-                        ok = false;
-                    } else {
-                        fill[k] = Some(combined);
-                    }
-                }
-                _ => {
-                    let known: Vec<&str> = labels.iter().filter_map(|l| l.as_deref()).collect();
-                    let hint = if known.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" (its parameters are: {})", known.join(", "))
-                    };
-                    self.error(
-                        span,
-                        format!(
-                            "unknown parameter label '{label}' in call through a function value{hint}"
-                        ),
-                    );
-                    ok = false;
-                }
-            }
-        }
-        // A slot may be left unfilled only if the CALLEE can fill it, and the callee fills a
-        // trailing run: a short call simply pushes fewer values, which cannot express a hole before a
-        // supplied argument. So the unfilled slots must be exactly the suffix `min_params..`.
-        let filled_upto = (0..params.len())
-            .position(|i| fill[i].is_none())
-            .unwrap_or(params.len());
-        let hole: Option<usize> = (filled_upto..params.len()).find(|&i| fill[i].is_some());
-        if let Some(h) = hole {
-            // A genuine middle hole: `f(1, c=3)` over `fn f(a, b=2, c=3)` through a VALUE.
-            let name_of = |i: usize| {
-                labels
-                    .get(i)
-                    .and_then(|l| l.clone())
-                    .unwrap_or_else(|| format!("#{}", i + 1))
-            };
-            let missing: Vec<String> = (filled_upto..h)
-                .filter(|&i| fill[i].is_none())
-                .map(name_of)
-                .collect();
-            self.error(
-                span,
-                format!(
-                    "a call through a function value can only omit TRAILING defaulted parameters, and {} come(s) before the supplied '{}' — supply it, or call the function directly by name",
-                    missing.join(", "),
-                    name_of(h)
-                ),
-            );
-            ok = false;
-        } else if filled_upto < min_params {
-            let missing: Vec<String> = (filled_upto..min_params)
-                .map(|i| {
-                    labels
-                        .get(i)
-                        .and_then(|l| l.clone())
-                        .unwrap_or_else(|| format!("#{}", i + 1))
-                })
-                .collect();
-            self.error(
-                span,
-                format!(
-                    "a call through a function value must supply every parameter that has no default; missing: {}",
-                    missing.join(", ")
-                ),
-            );
-            ok = false;
-        }
-
-        if !ok {
-            // Resolution failed: still infer every argument once (surface any body errors) and bail —
-            // no permutation is recorded, so the backends never lower this (invalid) call.
-            for a in args {
-                self.infer(a);
-            }
-            for (_, v) in named {
-                self.infer(v);
-            }
+    /// The one refusal for a callee that takes no named arguments: a native, builtin or `extern`
+    /// callee, whose sig has no [`FnSig::slots`]. Infers each named value once (so its own errors
+    /// still surface) and marks the call's named arguments consumed.
+    pub(super) fn refuse_named(&mut self, head: &str, named: &[(String, Expr)], span: Span) {
+        if !self.consume_named() {
             return;
         }
+        self.error(
+            span,
+            format!("'{head}' takes no named arguments; pass its arguments positionally"),
+        );
+        for (_, v) in named {
+            self.infer_value(v);
+        }
+    }
 
-        // Type-check each SUPPLIED slot against the combined expr that fills it (slot order = eval
-        // order). Slots past `filled_upto` were omitted and the callee fills them from its own
-        // declared defaults, which its own module already type-checked.
-        for (i, pt) in params.iter().enumerate().take(filled_upto) {
-            let ci = fill[i].expect("every slot below `filled_upto` is filled");
-            let e = if ci < args.len() {
-                &args[ci]
+    /// **The one call binder.** Binds `args` and `named` against the slots of the declaration (or
+    /// `kw_certain` function value) the checker's own dispatch already picked, and returns the
+    /// positional argument list for the caller's existing arg check:
+    ///
+    /// * `Some(Borrowed(args))` — nothing to bind (a positional call that fills no default), or a
+    ///   native callee (`slots` `None`), whose named arguments [`Self::refuse_named`] reports;
+    /// * `Some(Owned(bound))` — the bound list: supplied arguments in slot order, each omitted
+    ///   default as a synthetic fill node, the variadic surplus packed into one `List`. Its
+    ///   [`ArgFill`] plan is recorded in [`Self::call_plans`] for the compiler;
+    /// * `None` — a binding error was reported and every argument inferred once; the caller
+    ///   returns `Ty::Unknown` and adds no arity error.
+    ///
+    /// The call's named arguments and NodeId come from [`Self::call_ctx`], which `infer_call` sets
+    /// for the call it dispatches. `n_targs` is the count of type arguments the call forwards to a
+    /// generic field provider (DEC-035): a `Dflt::GenericProvider` slot without a full turbofish
+    /// stays unfilled.
+    pub(super) fn bind_call<'a>(
+        &mut self,
+        slots: Option<&[crate::desugar::SlotSpec]>,
+        head: &str,
+        args: &'a [Expr],
+        n_targs: usize,
+        span: Span,
+    ) -> Option<std::borrow::Cow<'a, [Expr]>> {
+        use std::borrow::Cow;
+        let (call_id, named, pack_origin) = match &self.call_ctx {
+            Some(c) => (c.id, c.named.clone(), c.pack_origin),
+            None => (crate::ast::NodeId::SYNTH, Vec::new(), span),
+        };
+        let named = &named[..];
+        let Some(slots) = slots else {
+            if !named.is_empty() {
+                self.refuse_named(head, named, span);
+            }
+            return Some(Cow::Borrowed(args));
+        };
+        if !named.is_empty() {
+            self.consume_named();
+        }
+        let plan = match self.plan_call(slots, args, named, n_targs, span) {
+            Err((msg, at)) => {
+                self.error(at, msg);
+                for a in args {
+                    self.infer_value(a);
+                }
+                for (_, v) in named {
+                    self.infer_value(v);
+                }
+                return None;
+            }
+            Ok(None) => return Some(Cow::Borrowed(args)),
+            Ok(Some(plan)) => plan,
+        };
+        let pick = |ci: usize| -> Expr {
+            if ci < args.len() {
+                args[ci].clone()
             } else {
-                &named[ci - args.len()].1
-            };
-            let at = self.infer_arg(e, Some(pt));
-            if !self.assignable(pt, &at) {
-                let pname = labels
-                    .get(i)
-                    .and_then(|l| l.as_deref())
-                    .map(|s| format!("parameter '{s}'"))
-                    .unwrap_or_else(|| format!("argument {}", i + 1));
-                let note = self.protocol_note(pt, &at);
-                let [pt_s, at_s] = Ty::render_distinct([pt, &at]);
-                self.error(
-                    e.span,
-                    format!(
-                        "{pname} of a function-value call: expected {pt_s}, found {at_s}{note}{}",
-                        float_fix_note(pt, &at)
+                named[ci - args.len()].1.clone()
+            }
+        };
+        let bound: Vec<Expr> = plan
+            .iter()
+            .map(|f| match f {
+                ArgFill::Arg(ci) => pick(*ci),
+                ArgFill::Pack(cis) => Expr {
+                    id: crate::ast::NodeId::SYNTH,
+                    kind: ExprKind::List(
+                        cis.iter().map(|&ci| pick(ci)).collect(),
+                        Some(pack_origin),
                     ),
-                );
+                    span,
+                },
+                ArgFill::Provider(name) => Expr {
+                    id: crate::ast::NodeId::SYNTH,
+                    kind: ExprKind::Call {
+                        callee: Box::new(Expr {
+                            id: crate::ast::NodeId::SYNTH,
+                            kind: ExprKind::Ident(name.clone()),
+                            span,
+                        }),
+                        args: Vec::new(),
+                        named: Vec::new(),
+                        type_args: Vec::new(),
+                    },
+                    span,
+                },
+                // The checker types a renumbered clone; the compiler compiles the declaration's
+                // own node, in its declaring module.
+                ArgFill::Inline { expr, .. } => {
+                    let mut e = expr.clone();
+                    crate::ast::renumber_expr(&mut e);
+                    e
+                }
+            })
+            .collect();
+        if let Some((from, _)) = self
+            .current_provider
+            .clone()
+            .filter(|_| self.records_node(call_id))
+        {
+            for f in &plan {
+                if let ArgFill::Provider(to) = f {
+                    let e = self.provider_edges.entry(from.clone()).or_default();
+                    if !e.0.contains(to) {
+                        e.0.push(to.clone());
+                    }
+                }
             }
         }
-
-        // Record the permutation for the backends (only while harvesting; the error-gate discards it).
-        if self.harvest_keywords {
-            // Only the SUPPLIED prefix: the backends push exactly these, and a short `Op::Call`
-            // is what tells the callee's prologue to fill the rest from its own defaults.
-            let perm: Vec<usize> = fill
-                .iter()
-                .take(filled_upto)
-                .map(|f| f.expect("every slot below `filled_upto` is filled"))
-                .collect();
-            let key = keyword_key(
-                self.graph_module_idx,
-                self.kw_frag_ctx,
-                self.kw_frag_ord,
-                named,
-                span,
-            );
+        if self.harvest_keywords && self.records_node(call_id) {
             crate::checker::record_call_table_entry(
-                &mut self.keyword_calls,
+                &mut self.call_plans,
                 &mut self.table_conflicts,
-                key,
-                perm,
-                "keyword-argument",
+                (self.graph_module_idx, call_id.0),
+                plan,
+                "call-plan",
                 span,
             );
         }
+        Some(Cow::Owned(bound))
+    }
+
+    /// Bind a call through a protocol or bound-type-param receiver (DEC-075). A protocol method
+    /// declares no defaults, so the receiver borrows an implementor's slots by method name, keeping
+    /// the candidates whose explicit parameter count is the protocol method's `arity`. Candidates
+    /// that differ cannot bind named arguments; positional calls then go unbound.
+    pub(super) fn lend_bind<'a>(
+        &mut self,
+        method: &str,
+        arity: usize,
+        args: &'a [Expr],
+        span: Span,
+    ) -> Option<std::borrow::Cow<'a, [Expr]>> {
+        let cands: Vec<Vec<crate::desugar::SlotSpec>> = self
+            .lend_specs
+            .get(method)
+            .map(|v| v.iter().filter(|s| s.len() == arity).cloned().collect())
+            .unwrap_or_default();
+        let Some(first) = cands.first() else {
+            return Some(std::borrow::Cow::Borrowed(args));
+        };
+        if cands.iter().all(|c| c == first) {
+            let first = first.clone();
+            return self.bind_call(Some(&first), method, args, 0, span);
+        }
+        let Some(ctx) = self.call_ctx.clone().filter(|c| !c.named.is_empty()) else {
+            return Some(std::borrow::Cow::Borrowed(args));
+        };
+        self.consume_named();
+        self.error(
+            span,
+            format!(
+                "cannot bind named arguments for method '{method}': multiple structs define it with different parameters — pass arguments positionally"
+            ),
+        );
+        self.infer_all(args);
+        for (_, v) in &ctx.named {
+            self.infer_value(v);
+        }
+        None
+    }
+
+    /// Mark the named arguments of the call being dispatched ([`Self::call_ctx`]) consumed: a binder
+    /// or a refusal answered them. Returns `false` when they already were.
+    pub(super) fn consume_named(&mut self) -> bool {
+        match &mut self.call_ctx {
+            Some(c) => !std::mem::replace(&mut c.consumed, true),
+            None => true,
+        }
+    }
+
+    /// The call-binding slots of `method` on a struct, newtype or enum receiver.
+    fn method_slots(&self, recv: &Ty, method: &str) -> Option<Vec<crate::desugar::SlotSpec>> {
+        match recv {
+            Ty::Struct(k, _) => self.struct_shape(k)?.methods.get(method)?.slots.clone(),
+            Ty::NewType(k, _) => self.newtype_methods_of(k)?.get(method)?.slots.clone(),
+            Ty::Enum(k, _) => self.enum_methods_of(k)?.get(method)?.slots.clone(),
+            _ => None,
+        }
+    }
+
+    /// [`Self::native_handle_method`] for a call: a builtin receiver method takes no named
+    /// arguments, so the call's named arguments get [`Self::refuse_named`].
+    pub(super) fn native_method_sig(
+        &mut self,
+        key: &str,
+        method: &str,
+        targs: &[Ty],
+    ) -> Option<FnSig> {
+        let sig = self.native_handle_method(key, method, targs)?;
+        if let Some(c) = self.call_ctx.clone()
+            && !c.named.is_empty()
+        {
+            self.refuse_named(method, &c.named, c.span);
+        }
+        Some(sig)
+    }
+
+    /// [`Self::bind_call`]'s decision: `Ok(None)` when the call needs no binding (no named
+    /// argument, not variadic, and some omitted slot has no default), else the slot plan, or the
+    /// binding error and its span. A message about one named argument points at its value.
+    fn plan_call(
+        &self,
+        slots: &[crate::desugar::SlotSpec],
+        args: &[Expr],
+        named: &[(String, Expr)],
+        n_targs: usize,
+        span: Span,
+    ) -> Result<Option<Vec<ArgFill>>, (String, Span)> {
+        use crate::desugar::Dflt;
+        let np = args.len();
+        let n = slots.len();
+        let slot_name = |i: usize| -> String {
+            slots[i]
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("#{}", i + 1))
+        };
+        let unknown = |k: &str| -> String {
+            let known: Vec<&str> = slots.iter().filter_map(|s| s.name.as_deref()).collect();
+            if known.is_empty() {
+                format!("unknown named argument '{k}'")
+            } else {
+                format!(
+                    "unknown named argument '{k}' (its parameters are: {})",
+                    known.join(", ")
+                )
+            }
+        };
+        // An omitted slot's fill, or `None` for a hole the callee's prologue fills (legal only as a
+        // trailing run).
+        let fill_default = |d: &Dflt| -> Option<ArgFill> {
+            match d {
+                Dflt::CalleeFilled => None,
+                Dflt::GenericProvider { tps, .. } if n_targs != *tps => None,
+                Dflt::Provider { name, .. } | Dflt::GenericProvider { name, .. } => {
+                    Some(ArgFill::Provider(name.clone()))
+                }
+                Dflt::Inline(e) => Some(ArgFill::Inline {
+                    module: self
+                        .module_idx_of_file
+                        .get(&e.span.file)
+                        .copied()
+                        .unwrap_or(self.graph_module_idx),
+                    expr: e.clone(),
+                }),
+            }
+        };
+        let variadic = slots.iter().position(|s| s.is_variadic);
+        if variadic.is_none() {
+            let fillable = np < n && (np..n).all(|i| slots[i].default.is_some());
+            if named.is_empty() && !fillable {
+                return Ok(None);
+            }
+            if np > n {
+                return Err((
+                    format!("too many arguments: expected at most {n}, got {np}"),
+                    span,
+                ));
+            }
+        }
+        // `by_slot[i]` = the combined index (`args ++ named values`) supplied for slot `i`.
+        let mut by_slot: Vec<Option<usize>> = vec![None; n];
+        let pos_limit = variadic.unwrap_or(n);
+        for (i, s) in by_slot.iter_mut().enumerate().take(np.min(pos_limit)) {
+            *s = Some(i);
+        }
+        for (j, (k, v)) in named.iter().enumerate() {
+            let Some(idx) = slots.iter().position(|s| s.name.as_deref() == Some(k)) else {
+                return Err((unknown(k), v.span));
+            };
+            if Some(idx) == variadic {
+                return Err((
+                    format!(
+                        "argument '{k}' is the variadic parameter and cannot be passed by name (it collects the surplus positionals)"
+                    ),
+                    v.span,
+                ));
+            }
+            if idx < np.min(pos_limit) {
+                return Err((
+                    format!("argument '{k}' specified both positionally and by name"),
+                    v.span,
+                ));
+            }
+            if by_slot[idx].is_some() {
+                return Err((format!("duplicate named argument '{k}'"), v.span));
+            }
+            by_slot[idx] = Some(np + j);
+        }
+        let mut out: Vec<Option<ArgFill>> = Vec::with_capacity(n);
+        for (i, s) in by_slot.into_iter().enumerate() {
+            if Some(i) == variadic {
+                out.push(Some(ArgFill::Pack((i..np).collect())));
+                continue;
+            }
+            match (s, &slots[i].default) {
+                (Some(ci), _) => out.push(Some(ArgFill::Arg(ci))),
+                (None, Some(d)) => out.push(fill_default(d)),
+                (None, None) => {
+                    let kind = if variadic.is_some_and(|v| i > v) {
+                        "missing required keyword argument"
+                    } else {
+                        "missing required argument"
+                    };
+                    return Err((format!("{kind} '{}'", slot_name(i)), span));
+                }
+            }
+        }
+        // A trailing run of callee-filled slots is what a short call encodes.
+        while matches!(out.last(), Some(None)) {
+            out.pop();
+        }
+        // Anything still unfilled sits BEFORE a supplied argument, which a short call cannot
+        // express: it pushes fewer values, it cannot leave a gap.
+        if let Some(i) = out.iter().position(Option::is_none) {
+            let later = (i + 1..out.len())
+                .find(|&j| out[j].is_some())
+                .map(slot_name)
+                .unwrap_or_default();
+            let p = slot_name(i);
+            return Err((
+                format!(
+                    "the default for '{p}' is filled by the callee and can only be omitted from the END of a call, but '{later}' is supplied after it — pass '{p}' explicitly"
+                ),
+                span,
+            ));
+        }
+        Ok(Some(
+            out.into_iter()
+                .map(|f| f.expect("no hole remains"))
+                .collect(),
+        ))
     }
 
     /// Resolve a `Type[T…]` member-access head — the receiver of `Type[T…].member(args)` /
@@ -1203,6 +1418,10 @@ impl Checker {
             );
             return Ty::Unknown;
         }
+        let Some(bound) = self.bind_call(sig.slots.as_deref(), method, args, 0, span) else {
+            return Ty::Unknown;
+        };
+        let args: &[Expr] = &bound;
         // Non-generic static (no enclosing AND no method params): the simple substitution-free path.
         if tps.is_empty() && sig.type_params.is_empty() {
             if !targs.is_empty() {
@@ -1491,6 +1710,12 @@ impl Checker {
     ) -> Ty {
         let tps = info.type_params.clone();
         let field_tys: Vec<Ty> = info.fields.iter().map(|(_, t)| t.clone()).collect();
+        let Some(bound) =
+            self.bind_call(info.field_slots.as_deref(), name, args, targs.len(), span)
+        else {
+            return Ty::Unknown;
+        };
+        let args: &[Expr] = &bound;
         if tps.is_empty() {
             if !targs.is_empty() {
                 self.error(span, format!("'{name}' takes no type arguments"));
@@ -1759,9 +1984,15 @@ impl Checker {
     /// ([`crate::ast::NodeId::SYNTH`]) is never recorded, and neither is the generic-arg prepass (a
     /// closure body is walked there with its params unbound, DEC-025). Two different answers for one
     /// node are a hard `TableConflicts` error ([`crate::checker::record_call_table_entry`]).
+    /// Whether this walk may write a per-node side table ([`Self::record_resolution`], the call
+    /// plans of [`Self::bind_call`]): never for a synthesized node, the generic-arg prepass, or the
+    /// return-inference walk, whose scope is not the final one.
+    fn records_node(&self, id: crate::ast::NodeId) -> bool {
+        id.0 != crate::ast::NodeId::SYNTH.0 && !self.generic_arg_prepass && !self.resolving_returns
+    }
+
     pub(super) fn record_resolution(&mut self, id: crate::ast::NodeId, r: Resolution, span: Span) {
-        if id.0 == crate::ast::NodeId::SYNTH.0 || self.generic_arg_prepass || self.resolving_returns
-        {
+        if !self.records_node(id) {
             return;
         }
         // One writer per NodeId: a second, different write means a second walk records.
@@ -2589,6 +2820,13 @@ impl Checker {
                     } else {
                         targs
                     };
+                    let slots = self.structs.get(&key).and_then(|i| i.field_slots.clone());
+                    let Some(bound) =
+                        self.bind_call(slots.as_deref(), name, args, targs.len(), span)
+                    else {
+                        return Some(Ty::Unknown);
+                    };
+                    let args: &[Expr] = &bound;
                     let field_tys: Vec<Ty> = fields.iter().map(|(_, t)| t.clone()).collect();
                     if tps.is_empty() {
                         // Struct ctor float fields are coerced per-field by the `NewStruct` site.
@@ -2667,6 +2905,11 @@ impl Checker {
                     if self.imported_poly.contains(name) {
                         return Some(self.infer_numeric_poly(name, sig.params.len(), args, span));
                     }
+                    let Some(bound) = self.bind_call(sig.slots.as_deref(), name, args, 0, span)
+                    else {
+                        return Some(Ty::Unknown);
+                    };
+                    let args: &[Expr] = &bound;
                     // A generic function: infer its type parameters from the arguments, enforce
                     // bounds, and substitute into the return type.
                     if !sig.type_params.is_empty() {
@@ -2836,7 +3079,7 @@ impl Checker {
         // harvested native method carrying its own `[U]` may have it only in the return type.
         hint: Option<&Ty>,
     ) -> NativeHandleMethod {
-        let Some(sig) = self.native_handle_method(key, method, targs) else {
+        let Some(sig) = self.native_method_sig(key, method, targs) else {
             return NativeHandleMethod::Miss;
         };
         self.record_method_hover(name_span, &sig);
@@ -2864,7 +3107,7 @@ impl Checker {
                 hint,
             ));
         }
-        NativeHandleMethod::Concrete(sig)
+        NativeHandleMethod::Concrete(Box::new(sig))
     }
 
     /// The plain reserved-handle arm shared by `Socket`/`Listener`/`Writer`/`Reader`: no element type
@@ -3041,6 +3284,11 @@ impl Checker {
                     return self.infer_numeric_poly(method, arity, args, span);
                 }
                 if let Some(fsig) = fsig {
+                    let Some(bound) = self.bind_call(fsig.slots.as_deref(), method, args, 0, span)
+                    else {
+                        return Ty::Unknown;
+                    };
+                    let args: &[Expr] = &bound;
                     // A generic module function (`cmp.max`): infer its type parameters from the
                     // arguments, enforce bounds, and substitute into the return type.
                     if !fsig.type_params.is_empty() {
@@ -3187,7 +3435,10 @@ impl Checker {
                         .iter()
                         .map(|t| subst(t, &pmap))
                         .collect();
-                    self.check_args_subst(method, &expected, expected.len(), args, span);
+                    let Some(bound) = self.lend_bind(method, expected.len(), args, span) else {
+                        return Ty::Unknown;
+                    };
+                    self.check_args_subst(method, &expected, expected.len(), &bound, span);
                     return subst(&msig.ret, &pmap);
                 }
                 self.infer_all(args);
@@ -3277,6 +3528,12 @@ impl Checker {
                     // receiver bound is enforced on the static-dispatch path (`infer_static_call`).
                     // No-op when `where_bounds` empty. Mirrors the native `Ty::List` enforcement.
                     self.enforce_bounds(&where_bounds, &rmap, span);
+                    let slots = self.method_slots(&obj_ty, method);
+                    let Some(bound) = self.bind_call(slots.as_deref(), method, args, 0, span)
+                    else {
+                        return ret;
+                    };
+                    let args: &[Expr] = &bound;
                     // A generic method introduces its own type params `[U]` (beyond the struct's
                     // `[T]`, already substituted above). Infer them from the call arguments —
                     // mirrors the free generic-fn path (`infer_generic_call`).
@@ -3461,6 +3718,12 @@ impl Checker {
                     // after the is_static rejection so a static-on-value call stays single-diagnostic.
                     // No-op when `where_bounds` empty.
                     self.enforce_bounds(&where_bounds, &rmap, span);
+                    let slots = self.method_slots(&obj_ty, method);
+                    let Some(bound) = self.bind_call(slots.as_deref(), method, args, 0, span)
+                    else {
+                        return ret;
+                    };
+                    let args: &[Expr] = &bound;
                     if !mtps.is_empty() {
                         return self.infer_generic_method(
                             method, &params, &declared, &ret, &mtps, &mwitness, &obj_ty, type_args,
@@ -3553,6 +3816,12 @@ impl Checker {
                     // receiver bound is enforced on the static-dispatch path (`infer_static_call`).
                     // No-op when `where_bounds` empty.
                     self.enforce_bounds(&where_bounds, &rmap, span);
+                    let slots = self.method_slots(&obj_ty, method);
+                    let Some(bound) = self.bind_call(slots.as_deref(), method, args, 0, span)
+                    else {
+                        return ret;
+                    };
+                    let args: &[Expr] = &bound;
                     if !mtps.is_empty() {
                         return self.infer_generic_method(
                             method, &params, &declared, &ret, &mtps, &mwitness, &obj_ty, type_args,
@@ -3590,7 +3859,7 @@ impl Checker {
             Ty::Str => {
                 // The sigs are harvested from `std/prelude.chz`'s `native struct str` (re-seeded by
                 // `seed_stdlib_structs`); `str` is non-generic so no type args are substituted.
-                if let Some(sig) = self.native_handle_method("str", method, &[]) {
+                if let Some(sig) = self.native_method_sig("str", method, &[]) {
                     self.record_method_hover(name_span, &sig);
                     self.check_args(method, &sig.params, args, span);
                     return sig.ret;
@@ -3665,7 +3934,7 @@ impl Checker {
                 // (`Comparable`) and `sum` (`Add`) are the List methods carrying a where-clause today —
                 // `min`/`max` pair one with an `Option[T]` return; it is a no-op for every other method.
                 if let Some(sig) =
-                    self.native_handle_method("List", method, std::slice::from_ref(&elem))
+                    self.native_method_sig("List", method, std::slice::from_ref(&elem))
                 {
                     self.record_method_hover(name_span, &sig);
                     // A method carrying its OWN `[U]` params (`map`/`fold`/`sort_by_key`, the
@@ -3717,7 +3986,7 @@ impl Checker {
             Ty::Bytes => {
                 // The sigs are harvested from `std/prelude.chz`'s `native struct bytes` (re-seeded by
                 // `seed_stdlib_structs`); `bytes` is non-generic so no type args are substituted.
-                if let Some(sig) = self.native_handle_method("bytes", method, &[]) {
+                if let Some(sig) = self.native_method_sig("bytes", method, &[]) {
                     self.record_method_hover(name_span, &sig);
                     self.check_args(method, &sig.params, args, span);
                     return sig.ret;
@@ -3753,7 +4022,7 @@ impl Checker {
                 // bytearray` (re-seeded by `seed_stdlib_structs`); `bytearray` is non-generic so no type
                 // args are substituted. `extend` is handled above (its arg may be any of three
                 // byte-sequence shapes, not a flat FnSig).
-                if let Some(sig) = self.native_handle_method("bytearray", method, &[]) {
+                if let Some(sig) = self.native_method_sig("bytearray", method, &[]) {
                     self.record_method_hover(name_span, &sig);
                     self.check_args(method, &sig.params, args, span);
                     return sig.ret;
@@ -3772,7 +4041,7 @@ impl Checker {
                 // `seed_stdlib_structs`); the key/value types are substituted for `Ty::Param("K")`/
                 // `Ty::Param("V")` here (DECLARATION order — `[k, v]`).
                 let targs = [(**k).clone(), (**v).clone()];
-                if let Some(sig) = self.native_handle_method("Map", method, &targs) {
+                if let Some(sig) = self.native_method_sig("Map", method, &targs) {
                     self.record_method_hover(name_span, &sig);
                     self.check_args_range(method, &sig.params, sig.min_params, args, span);
                     return sig.ret;
@@ -3791,7 +4060,7 @@ impl Checker {
                 // `seed_stdlib_structs`); the element type is substituted for `Ty::Param("T")` here.
                 let elem = (**elem).clone();
                 if let Some(sig) =
-                    self.native_handle_method("Set", method, std::slice::from_ref(&elem))
+                    self.native_method_sig("Set", method, std::slice::from_ref(&elem))
                 {
                     self.record_method_hover(name_span, &sig);
                     self.check_args_range_coll(method, &sig.params, sig.min_params, args, span);
@@ -3814,7 +4083,7 @@ impl Checker {
                 // well-typed `send` is always sendable.
                 let elem = (**elem).clone();
                 if let Some(sig) =
-                    self.native_handle_method("Channel", method, std::slice::from_ref(&elem))
+                    self.native_method_sig("Channel", method, std::slice::from_ref(&elem))
                 {
                     self.record_method_hover(name_span, &sig);
                     self.check_args(method, &sig.params, args, span);
@@ -4270,7 +4539,10 @@ impl Checker {
                         Some((_recv, rest)) => rest.iter().map(|t| subst(t, &map)).collect(),
                         None => Vec::new(),
                     };
-                    self.check_args_subst(method, &expected, expected.len(), args, span);
+                    let Some(bound) = self.lend_bind(method, expected.len(), args, span) else {
+                        return Ty::Unknown;
+                    };
+                    self.check_args_subst(method, &expected, expected.len(), &bound, span);
                     // `Iterator[T].next()` yields `Option[T]` — its return is the bound's element arg,
                     // not `Self` (the registered placeholder). Resolve the arg with sibling params in
                     // scope (we're inside the bounded type's own generic context).

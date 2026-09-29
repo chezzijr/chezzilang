@@ -92,7 +92,7 @@ const KINDS: &[Kind] = &[
         decl: "import std.math\n",
         arg: 4,
     },
-    // Desugar's pre-check call binding (the TICKET-182 interim) sees this one.
+    // A defaulted fn: the checker binds its omitted argument (TICKET-182).
     Kind {
         tag: "defaulted_fn",
         name: "f",
@@ -772,10 +772,6 @@ fn run_cell(root: &Path, idx: usize, c: &Cell) -> Result<(), String> {
     ))
 }
 
-/// Cells desugar's pre-check call binding still gets wrong: the owner-accepted interim that
-/// TICKET-182 removes. They must stay red here; when one turns green, move it back.
-const INTERIM_182: &[&str] = &["nested_fn/defaulted_fn/call"];
-
 #[test]
 fn name_resolution_grid() {
     let root = std::env::temp_dir().join(format!("chezzi-name-grid-{}", std::process::id()));
@@ -783,13 +779,8 @@ fn name_resolution_grid() {
     let cells = grid();
     let mut fails = Vec::new();
     for (i, c) in cells.iter().enumerate() {
-        let pinned = INTERIM_182.contains(&c.name.as_str());
-        match (run_cell(&root, i, c), pinned) {
-            (Err(e), false) => fails.push(e),
-            (Ok(()), true) => {
-                fails.push(format!("{}: green; remove it from its pinned list", c.name))
-            }
-            _ => {}
+        if let Err(e) = run_cell(&root, i, c) {
+            fails.push(e);
         }
     }
     let _ = std::fs::remove_dir_all(&root);

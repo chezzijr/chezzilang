@@ -1458,7 +1458,7 @@ impl Checker {
         // A value+keyword call inside a `{…}` fragment is keyed by (string span, fragment ordinal).
         // That pair used to be what kept two fragments whose first named-arg value shared a
         // fragment-relative column off one table slot; since M24-6 a fragment's spans are real
-        // physical positions, so the pair is belt-and-braces (see `KeywordKey`'s doc).
+        // physical positions, so the pair is belt-and-braces (see `WitnessKey`'s doc).
         // Save/restore for nested interpolations. The compiler keeps the identical pair.
         let saved_ctx = self.kw_frag_ctx;
         let saved_ord = self.kw_frag_ord;
@@ -1733,7 +1733,7 @@ impl Checker {
                 args,
                 named,
                 type_args,
-            } => self.infer_call(callee, args, named, type_args, expr.span),
+            } => self.infer_call(callee, args, named, type_args, expr.span, expr.id),
             ExprKind::Field {
                 obj,
                 name,
@@ -4335,7 +4335,7 @@ impl Checker {
     ///   No lowered node derives its span from the operand's (both `lower_carrier_*` stamp everything
     ///   from the carrier's own `span`/`name_span`), and a default span can never equal the 1-based
     ///   `hover_probe` position, so the LSP probe keeps landing on the real operand.
-    /// * **Side tables are untouched.** `KeywordTable`/`WitnessTable`/`CarrierTable` are all keyed by
+    /// * **Side tables are untouched.** `WitnessTable`/`CarrierTable` are keyed by
     ///   source spans and are `HashMap`s, so the operand's entries — recorded by the caller's
     ///   `infer_value` from the ORIGINAL spans — are simply no longer overwritten with themselves.
     fn scratch_operand(&mut self, t: Ty) -> Expr {
@@ -4403,7 +4403,7 @@ impl Checker {
     /// ZERO new gate code, because the clone literally CONTAINS an `ExprKind::Try` at the right
     /// nesting. Both `lower_carrier_*` stamp every synthesized node from the carrier's own
     /// `span`/`name_span`, so the compiler — calling the same function on the same input — derives
-    /// identical spans, and therefore identical `KeywordKey`/`WitnessKey`s.
+    /// identical spans, and therefore identical `WitnessKey`s.
     ///
     /// ponytail: the reused gates' messages say `'?'`, not `'?.'`. Left verbatim — each message is
     /// TRUE of `?.`, and threading the spelling through would need a saved/restored `self.carrier_op`

@@ -1,27 +1,19 @@
-//! Call-argument desugaring: normalize **named arguments** (`f(x=1)`) and **default arguments**
-//! (`fn f(x: int, y: int = 10)`) into a plain positional `args` list.
+//! Syntactic desugaring, run inside [`crate::resolver::build_graph`] before the checker: validate
+//! parameter and field defaults ([`validate_defaults`]), synthesize default providers
+//! ([`synthesize_providers`]), fold Python full module paths (`fold_full_path`, DEC-175), and bound
+//! `fn` nesting ([`MAX_FN_NESTING`], DEC-109).
 //!
-//! This pass runs inside [`crate::resolver::build_graph`], so the checker and the VM
-//! consume the already-normalized AST — they only ever see
-//! `Call.named` empty and a fully positional `Call.args`. That keeps the front-end and VM in lockstep by
-//! construction: there is no per-phase call-binding logic for defaults/named args.
+//! **This pass does not bind call arguments.** Which declaration a call binds against, and which
+//! slot each named, omitted or variadic argument fills, is the checker's decision alone
+//! (`Checker::bind_call`, TICKET-182); the compiler lowers from the checker's `CallPlanTable`.
 //!
-//! Scope: free functions (own module + `from`-imported + module-qualified `alias.f(...)`) and struct
-//! constructors. Enum-variant constructors are excluded (payloads are unnamed) and methods are
-//! deferred (resolving a receiver type needs the checker). A default may be any expression that does
-//! not reference another parameter/field — `validate_defaults` enforces this (no parameter/field is
-//! bound where a default is evaluated).
-//!
-//! **How an omitted argument is materialised (W7-51).** A self-contained literal (`= 10`, `= -1`,
-//! `= None`, `= []`) is cloned into the call site. Anything else is compiled ONCE, as a hidden
-//! zero-arg `fn` appended to the module that DECLARES the parameter ([`synthesize_providers`]), and
-//! the call site gets a call to it. That is what makes a default resolve — and evaluate — in the
-//! definer's namespace (as Python, Ruby and Kotlin all do) instead of the caller's, and what lets
-//! default chains compose to any depth. See [`Dflt`] and [`Walker::splice_default`].
-//!
-//! The pass is **scope-aware**: a local binding may shadow a top-level function name, so a call is
-//! only rewritten when its callee resolves to a registered callable and is *not* shadowed by a local
-//! (mirroring the checker, which treats a call as a named function only when the name is not a local).
+//! **How an omitted argument is materialised (W7-51).** [`dflt_for`] is the one default classifier.
+//! A self-contained literal (`= 10`, `= -1`, `= None`, `= []`) is filled from the declaration's own
+//! node, compiled in the declaring module. Anything else is compiled ONCE, as a hidden zero-arg `fn`
+//! appended to the module that DECLARES the parameter ([`synthesize_providers`]), and an omitting
+//! call calls it through `Op::MakeFuncIn`. That is what makes a default resolve — and evaluate — in
+//! the definer's namespace (as Python, Ruby and Kotlin all do) instead of the caller's, and what lets
+//! default chains compose to any depth. See [`Dflt`] and [`SlotSpec`].
 
 use crate::ast::{
     Block, Chunk, DeferTarget, Expr, ExprKind, Import, MatchExprArm, Module, OptCall, Param,
@@ -125,11 +117,11 @@ fn provider_label(name: &str) -> String {
 /// provider body therefore resolves — and evaluates — in the DEFINER's namespace (`Obj::Func` carries
 /// its `home`), which is what Python, Ruby and Kotlin all do, and what a spliced clone could not do.
 #[derive(Clone, PartialEq)]
-enum Dflt {
+pub(crate) enum Dflt {
     /// Cloned inline at the call site (and re-walked there, so it still spends the depth budget).
     Inline(Expr),
     /// Call the zero-arg provider synthesized in the module named by `module`.
-    Provider { module: ModuleId, name: String },
+    Provider { name: String },
     /// **Left to the CALLEE.** The default cannot be hoisted into a free top-level provider `fn` — its
     /// type or expression names `Self` on a GENERIC host (`Q[T]`, whose `T` is unbound outside the
     /// signature) or an enclosing type parameter. Rather than clone it into the caller and resolve it
@@ -137,7 +129,7 @@ enum Dflt {
     /// the argument: the callee's own prologue fills it from the declaration, in the declaring module,
     /// where `Self` and `T` are both in scope (`crate::vm::op::Op::JumpIfProvided`).
     ///
-    /// Only expressible as a TRAILING omission — see [`Walker::normalize_call`] for the one shape
+    /// Only expressible as a TRAILING omission — see `Checker::bind_call` for the one shape
     /// that cannot be (a keyword call supplying a LATER parameter), which is refused rather than
     /// silently cloned.
     CalleeFilled,
@@ -146,11 +138,7 @@ enum Dflt {
     /// takes its field count from the call site. So the provider is made GENERIC in the struct's
     /// type parameters (`tps` is their count), and the call site must forward its own turbofish to
     /// it — a ctor call with no turbofish, or a partial one, keeps the field required instead.
-    GenericProvider {
-        module: ModuleId,
-        name: String,
-        tps: usize,
-    },
+    GenericProvider { name: String, tps: usize },
 }
 
 /// Is `e` a **self-contained literal** — an expression that can be cloned into any number of call
@@ -214,14 +202,13 @@ fn is_inline_default(e: &Expr) -> bool {
 ///
 /// The type-parameter shapes are compile errors today and stay at exactly the errors they already
 /// had; the `Self` shapes are working programs and stay working. Both keep the caller-scope
-/// resolution an inline clone implies — the same known hazard [`Walker::splice_default`]'s fallback
+/// resolution an inline clone implies — the same known hazard the pre-TICKET-182 splice fallback
 /// documents.
-fn dflt_for(
+pub(crate) fn dflt_for(
     d: &Expr,
     ty: Option<&Type>,
     type_params: &[String],
     self_ty: Option<&str>,
-    module: &ModuleId,
     name: String,
     field_owner_tps: Option<&[crate::ast::TypeParam]>,
 ) -> Dflt {
@@ -258,7 +245,6 @@ fn dflt_for(
                 && !expr_mentions_type_param(d, std::slice::from_ref(&self_name))
             {
                 return Dflt::GenericProvider {
-                    module: module.clone(),
                     name,
                     tps: otps.len(),
                 };
@@ -274,10 +260,7 @@ fn dflt_for(
     if expr_mentions_type_param(d, &expr_unbound) {
         return Dflt::CalleeFilled;
     }
-    Dflt::Provider {
-        module: module.clone(),
-        name,
-    }
+    Dflt::Provider { name }
 }
 
 /// Rewrite `Self` to the owner type's name throughout a declared type, so a method's default can be
@@ -344,273 +327,119 @@ fn tp_names(decl: &crate::ast::FnDecl, extra: &[String]) -> Vec<String> {
     v
 }
 
-/// A type-parameter name → its FIRST declared bound name, for `owner_type_params` (an enclosing
-/// struct/enum/native-struct's own params; empty for a free fn) plus `method`'s own `type_params`
-/// and `where_bounds`. TICKET-075 — lets [`Walker::annot_proto_ty`] resolve a `[T: P]`-bound
-/// receiver's protocol the same way it resolves a directly `P`-typed one.
-fn tp_bounds_of(
-    owner_type_params: &[TypeParam],
-    method: &crate::ast::FnDecl,
-) -> HashMap<String, String> {
-    owner_type_params
+/// One declaration slot a call binds against: a parameter (receiver dropped) or a struct field, in
+/// declaration order. `name` is `None` only for an unlabelled slot of a function VALUE's type. Built
+/// here, from the declaration, by [`param_slots`] / [`field_slots`], so every default is classified
+/// by the one classifier [`dflt_for`] that [`synthesize_providers`] also calls; the checker's
+/// `bind_call` is the one reader.
+#[derive(Clone, PartialEq)]
+pub(crate) struct SlotSpec {
+    pub name: Option<String>,
+    pub default: Option<Dflt>,
+    /// A variadic parameter (`...xs: T`): it collects the surplus positionals; every later slot is
+    /// keyword-only. At most one per declaration; struct fields are never variadic.
+    pub is_variadic: bool,
+}
+
+/// The [`SlotSpec`]s of `decl`'s explicit parameters (a leading `self` is dropped). `owner` is the
+/// name [`synthesize_providers`] passed for the same declaration (`f`, or `S.m` for a method),
+/// `self_ty` is [`self_ty_for`]'s answer for the host, and `host_tps` are the host's type
+/// parameter names (empty for a free fn).
+pub(crate) fn param_slots(
+    decl: &crate::ast::FnDecl,
+    file: u32,
+    owner: &str,
+    self_ty: Option<&str>,
+    host_tps: &[String],
+) -> Vec<SlotSpec> {
+    let tps = tp_names(decl, host_tps);
+    let skip = usize::from(decl.params.first().is_some_and(|p| p.name == "self"));
+    decl.params
         .iter()
-        .chain(method.type_params.iter())
-        .chain(method.where_bounds.iter())
-        .filter_map(|tp| tp.bounds.first().map(|b| (tp.name.clone(), b.name.clone())))
+        .skip(skip)
+        .map(|p| SlotSpec {
+            name: Some(p.name.clone()),
+            default: p.default.as_ref().map(|d| {
+                dflt_for(
+                    d,
+                    p.ty.as_ref(),
+                    &tps,
+                    self_ty,
+                    provider_name(file, Slot::Param, owner, &p.name),
+                    None,
+                )
+            }),
+            is_variadic: p.is_variadic,
+        })
         .collect()
 }
 
-/// A callable's parameter (or struct field), in declaration order, with its optional
-/// default. Cloned out of the AST so the per-module registry is independent of the graph we mutate.
-/// `PartialEq` lets us decide whether several same-named struct methods share one binding shape.
-#[derive(Clone, PartialEq)]
-struct PSpec {
-    name: String,
-    default: Option<Dflt>,
-    /// True for a variadic parameter (`...xs: T`). `normalize_call` sweeps all surplus trailing
-    /// positional args into a synthesized `List` literal at this slot; everything after it is
-    /// keyword-only. At most one per spec. Struct fields are never variadic.
-    is_variadic: bool,
+/// The [`SlotSpec`]s of struct `owner`'s fields, as [`synthesize_providers`] classifies them.
+pub(crate) fn field_slots(
+    fields: &[crate::ast::Field],
+    file: u32,
+    owner: &str,
+    owner_tps: &[TypeParam],
+) -> Vec<SlotSpec> {
+    let tps: Vec<String> = owner_tps.iter().map(|t| t.name.clone()).collect();
+    fields
+        .iter()
+        .map(|f| SlotSpec {
+            name: Some(f.name.clone()),
+            default: f.default.as_ref().map(|d| {
+                dflt_for(
+                    d,
+                    Some(&f.ty),
+                    &tps,
+                    None,
+                    provider_name(file, Slot::Field, owner, &f.name),
+                    Some(owner_tps),
+                )
+            }),
+            is_variadic: false,
+        })
+        .collect()
 }
 
-/// Built-in / core methods on `str`/`list`/`map`/`set` (kept in sync with the checker's
-/// `*_method_sig` tables + the HOF/`sort` handling in `infer_method_call`). The receiver of a call
-/// whose name is one of these MIGHT be a builtin type whose shape we cannot see here, so the
-/// name-keyed method path skips it. A user struct/enum that reuses one of these names DOES still get
-/// default/named support — but only when the receiver's struct type is statically knowable pre-type
-/// (a typed local, an inline ctor call, or a struct-returning fn call: see `receiver_struct_ty`),
-/// resolved through `methods_by_struct`. A genuine builtin receiver (List/Set/Map/str) — or a
-/// receiver whose type is not statically knowable (e.g. an unannotated param, an inferred enum
-/// value) — is left untouched; a named-arg call there is an accurate error, not the misleading
-/// "only supported on … struct methods".
-const BUILTIN_METHODS: &[&str] = &[
-    "len",
-    "upper",
-    "lower",
-    "trim",
-    "message",
-    "split",
-    "chars",
-    "join",
-    "starts_with",
-    "contains",
-    "push",
-    "pop",
-    "reverse",
-    "index_of",
-    "sum",
-    "sort",
-    "map",
-    "filter",
-    "fold",
-    "sort_by",
-    "sort_by_key",
-    "has",
-    "get",
-    "keys",
-    "values",
-    "remove",
-    "add",
-    "union",
-    "intersection",
-    "difference",
-];
-
-fn is_builtin_method(name: &str) -> bool {
-    BUILTIN_METHODS.contains(&name)
-}
-
-/// One module's protocols: for each protocol name, the EXPLICIT parameter count of each of its
-/// methods (`self` dropped, exactly like [`method_spec`]) plus its embedded (super-)protocol names.
-/// TICKET-075 — lets a protocol-typed receiver's method call filter the name-keyed fallback down to
-/// candidates whose declared arity could actually satisfy the protocol.
-#[derive(Default)]
-struct ProtoReg {
-    arity: HashMap<String, usize>,
-    embeds: Vec<String>,
-}
-
-/// Free functions and struct constructors declared by one module.
-#[derive(Default)]
-struct ModReg {
-    fns: HashMap<String, Vec<PSpec>>,
-    structs: HashMap<String, Vec<PSpec>>,
-    /// For a free fn whose declared return type is a struct of THIS module, the bare struct name.
-    /// Lets a struct-returning-fn-call receiver (`mk().apply(r)`) resolve its method by receiver
-    /// type pre-type, exactly like a named-local or ctor-call receiver.
-    fn_ret_struct: HashMap<String, String>,
-    /// This module's own protocols, keyed by name (see [`ProtoReg`]).
-    protos: HashMap<String, ProtoReg>,
-    /// Every type name (struct, enum, newtype) this module declares -- the key space of
-    /// `collect_methods_by_struct`. Used to recognise a `module.Type` qualified receiver head.
-    types: HashSet<String>,
-    /// This module's `type` aliases: name → body (TICKET-172). With the two import maps below, lets
-    /// an alias head (`Conf()`, `lib.Conf.make()`) resolve to its DEFINING struct's specs.
-    aliases: HashMap<String, Type>,
-    /// `from`-imports: bind name → (target module, ORIGINAL member name), so a renamed alias import
-    /// (`import Conf as C from lib`) still finds `lib`'s `Conf`. Filled by [`build_registries`].
-    from_imports: HashMap<String, (ModuleId, String)>,
-    /// Whole-module imports: bound name → target module. Filled by [`build_registries`].
-    mod_imports: HashMap<String, ModuleId>,
-}
-
-impl ModReg {
-    /// Look up a name as either a function or a struct constructor (functions take precedence; a
-    /// well-formed module never declares both with the same name).
-    fn callable(&self, name: &str) -> Option<&Vec<PSpec>> {
-        self.fns.get(name).or_else(|| self.structs.get(name))
-    }
-}
-
-/// Desugar every module's calls in place. Errors carry the offending call's span.
+/// Desugar every module in place: validate defaults, synthesize default providers, fold full
+/// module paths, lower carriers, bound fn nesting. Errors carry the offending node's span. Call
+/// arguments are bound by the checker (`Checker::bind_call`), not here.
 pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
     for m in &graph.modules {
         validate_defaults(&m.ast.stmts)?;
     }
-    // W7-51 — every non-inline default becomes a zero-arg `fn` in the module that DECLARES it,
-    // BEFORE the registries are snapshotted (so a collector's `Dflt::Provider` always names a
-    // function that exists) and before the walk (so a provider body is normalized like any other).
+    // W7-51 — every non-inline default becomes a zero-arg `fn` in the module that DECLARES it.
     synthesize_providers(graph);
-    let regs = build_registries(graph);
-    let methods = collect_methods(graph);
-    let methods_by_struct = collect_methods_by_struct(graph);
-    let fn_fields = collect_fn_fields(graph);
-    // Index modules by id so we can resolve each module's imports against the others' registries.
-    let mut module_index: HashMap<ModuleId, usize> = HashMap::new();
-    for (i, m) in graph.modules.iter().enumerate() {
-        module_index.insert(m.id.clone(), i);
-    }
-    let closures = import_closures(graph, &module_index);
-    // ONE pass (W7-51). The old driver ran twice because a default was spliced RAW into the tail of
-    // `walk_expr_inner`, after that node's children had already been walked — so a carrier or a
-    // nested defaulted call inside a default needed a second sweep, and a chain three deep needed a
-    // third that never came. Now a non-inline default is never spliced at all (the call site gets a
-    // complete zero-arg call to its provider, which needs no further rewriting) and an inline one is
-    // walked by `splice_default` at the moment it is cloned. Nothing is ever pushed into a subtree
-    // the pass has already walked past, so depth is structural rather than pass-bounded.
-    for (mi, deps) in closures.iter().enumerate() {
-        // Build this module's resolution context: own id + bare from-imports + module aliases.
-        let own_id = graph.modules[mi].id.clone();
-        let mut bare_from: HashMap<String, ModuleId> = HashMap::new();
+    for mi in 0..graph.modules.len() {
         let mut aliases: HashMap<String, ModuleId> = HashMap::new();
         for imp in &graph.modules[mi].imports {
-            match &imp.import {
-                Import::Module { path, alias, .. } => {
-                    let local = alias
-                        .clone()
-                        .or_else(|| path.last().cloned())
-                        .unwrap_or_default();
-                    if !local.is_empty() {
-                        aliases.insert(local, imp.target.clone());
-                    }
-                }
-                Import::From { names, .. } => {
-                    for (name, alias) in names {
-                        let local = alias.clone().unwrap_or_else(|| name.clone());
-                        bare_from.insert(local, imp.target.clone());
-                    }
+            if let Import::Module { path, alias, .. } = &imp.import {
+                let local = alias
+                    .clone()
+                    .or_else(|| path.last().cloned())
+                    .unwrap_or_default();
+                if !local.is_empty() {
+                    aliases.insert(local, imp.target.clone());
                 }
             }
         }
-
         let module_names =
             module_level_names(&graph.modules[mi].ast.stmts, &graph.modules[mi].imports);
         let ctx = Ctx {
-            regs: &regs,
-            own_id: &own_id,
-            deps,
-            bare_from: &bare_from,
             aliases: &aliases,
             module_names: &module_names,
-            methods: &methods,
-            methods_by_struct: &methods_by_struct,
-            fn_fields: &fn_fields,
         };
         let mut walker = Walker {
             ctx,
             scopes: Vec::new(),
-            local_struct: Vec::new(),
-            local_proto: Vec::new(),
             type_params: Vec::new(),
-            needed: std::collections::BTreeMap::new(),
             depth: 0,
             fn_depth: 0,
         };
-        {
-            // Borrow the module's AST mutably; everything `walker` reads lives in `regs`/the maps above.
-            let ast: &mut Module = &mut graph.modules[mi].ast;
-            walker.walk_block(&mut ast.stmts)?;
-        }
-        // Give this module an import edge for every OTHER module's provider it now calls. The
-        // provider then binds like any ordinary `from`-imported function — no new AST node, no new
-        // opcode: the checker (`Checker::bind_import`), the compiler (`collect_globals`) and the VM
-        // (`Vm::bind_import`) all read `LoadedModule.imports`, and `desugar::run` is called from
-        // `resolver::build_graph` before every one of them. Drained in NAME order (a `BTreeMap`)
-        // because import order feeds `ModuleProto::global_slots`, which must be deterministic.
-        for (name, (target, span)) in std::mem::take(&mut walker.needed) {
-            let dotted = graph.modules[module_index[&target]].dotted.clone();
-            graph.modules[mi]
-                .imports
-                .push(crate::resolver::ResolvedImport {
-                    target,
-                    import: Import::From {
-                        path: dotted,
-                        names: vec![(name, None)],
-                        name_spans: vec![span],
-                    },
-                    span,
-                });
-        }
+        let ast: &mut Module = &mut graph.modules[mi].ast;
+        walker.walk_block(&mut ast.stmts)?;
     }
-    check_provider_cycles(graph)
-}
-
-/// Each module's **transitive import closure**, parallel to `graph.modules`: every module reachable
-/// from it by following `import` edges, at any depth, excluding itself.
-///
-/// This is the predicate [`Walker::splice_default`] refuses on, and it is a *dependency* rule, not a
-/// load-order one — the same three files must compile the same way however the entry happens to
-/// order its `import` lines. Load order is only a consequence, and relying on it made a cosmetic
-/// reorder in a third module flip a compile error (measured: `import z` / `import a` refused,
-/// `import a` / `import z` accepted, same files).
-///
-/// One forward sweep suffices, and that is also where the load-order invariant the VM needs is
-/// checked: `resolver::Builder::visit` recurses into a module's imports BEFORE pushing the module
-/// itself and rejects cycles, so `graph.modules` is a topological order — a dependency always sits
-/// at a strictly lower index, and `out[t]` below is therefore already complete when read. That is
-/// exactly the property `Vm::bind_import` needs (it indexes `module_objs[target_idx]`, pushed as
-/// each module RUNS, and panics on a target that has not run yet), so a synthetic edge to a
-/// transitive dependency can never outrun its target. The `debug_assert` is the standing check that
-/// the resolver has not stopped producing that order.
-fn import_closures(
-    graph: &ModuleGraph,
-    index: &HashMap<ModuleId, usize>,
-) -> Vec<HashSet<ModuleId>> {
-    let mut out: Vec<HashSet<ModuleId>> = Vec::with_capacity(graph.modules.len());
-    for (i, m) in graph.modules.iter().enumerate() {
-        let mut set: HashSet<ModuleId> = HashSet::new();
-        for imp in &m.imports {
-            let Some(&t) = index.get(&imp.target) else {
-                continue;
-            };
-            debug_assert!(
-                t < i,
-                "graph.modules must be in dependency order (deps first): module {i} imports {t}"
-            );
-            // Both statements sit INSIDE the guard, so the same event degrades the same way: if the
-            // resolver ever stopped producing dependency order, this target is simply absent from
-            // the closure and `splice_default` refuses the default, instead of admitting an edge
-            // whose closure was never read — which `Vm::bind_import` would meet as an index panic on
-            // `module_objs[target_idx]` (`src/vm/exec.rs`) in a RELEASE build, where the
-            // `debug_assert` above is compiled out.
-            if t < i {
-                set.extend(out[t].iter().cloned());
-                set.insert(imp.target.clone());
-            }
-        }
-        out.push(set);
-    }
-    out
+    Ok(())
 }
 
 /// Desugar a single standalone module (no imports) in place. Used by the test/standalone runners,
@@ -619,76 +448,25 @@ fn import_closures(
 #[cfg(test)]
 pub fn run_standalone(module: &mut Module) -> Result<(), ResolveError> {
     validate_defaults(&module.stmts)?;
-    let id = ModuleId(std::path::PathBuf::from("<main>"));
     // Mirror [`run`]: synthesize providers into the single module first. Its `file` id is whatever
     // the test's lexer stamped; there is only one module, so any value is unique by construction.
     let file = module.stmts.first().map_or(0, |s| s.span.file);
-    synthesize_providers_into(&mut module.stmts, &id, file);
-    let mut regs = HashMap::new();
-    regs.insert(id.clone(), collect_module_reg(&module.stmts, &id, file));
-    let mut methods = HashMap::new();
-    collect_methods_into(&module.stmts, &mut methods, &id, file);
-    let methods_by_struct = collect_methods_by_struct_into_standalone(&module.stmts, &id, file);
-    let mut fn_fields = HashSet::new();
-    collect_fn_fields_into(&module.stmts, &mut fn_fields);
-    let bare_from = HashMap::new();
+    synthesize_providers_into(&mut module.stmts, file);
     let aliases = HashMap::new();
-    let deps = HashSet::new();
     let module_names = HashSet::new();
-    // ONE pass — see the comment in [`run`]. A standalone module has no imports, so every provider
-    // it calls is its own and no synthetic import edge can be needed.
     let ctx = Ctx {
-        regs: &regs,
-        own_id: &id,
-        deps: &deps,
-        bare_from: &bare_from,
         aliases: &aliases,
         module_names: &module_names,
-        methods: &methods,
-        methods_by_struct: &methods_by_struct,
-        fn_fields: &fn_fields,
     };
     let mut walker = Walker {
         ctx,
         scopes: Vec::new(),
-        local_struct: Vec::new(),
-        local_proto: Vec::new(),
         type_params: Vec::new(),
-        needed: std::collections::BTreeMap::new(),
         depth: 0,
         fn_depth: 0,
     };
     walker.walk_block(&mut module.stmts)?;
-    debug_assert!(walker.needed.is_empty(), "standalone module has no imports");
-    let mut edges = HashMap::new();
-    collect_provider_edges(&module.stmts, &mut edges);
-    check_provider_cycles_in(&edges)
-}
-
-/// Snapshot each module's free functions and struct constructors into a registry keyed by module id.
-fn build_registries(graph: &ModuleGraph) -> HashMap<ModuleId, ModReg> {
-    let mut regs = HashMap::new();
-    for m in &graph.modules {
-        let mut reg = collect_module_reg(&m.ast.stmts, &m.id, m.file);
-        for imp in &m.imports {
-            match &imp.import {
-                Import::Module { path, alias, .. } => {
-                    if let Some(local) = alias.clone().or_else(|| path.last().cloned()) {
-                        reg.mod_imports.insert(local, imp.target.clone());
-                    }
-                }
-                Import::From { names, .. } => {
-                    for (name, alias) in names {
-                        let local = alias.clone().unwrap_or_else(|| name.clone());
-                        reg.from_imports
-                            .insert(local, (imp.target.clone(), name.clone()));
-                    }
-                }
-            }
-        }
-        regs.insert(m.id.clone(), reg);
-    }
-    regs
+    Ok(())
 }
 
 /// One synthesized provider: `fn <name>() -> <ret>: return <default>`.
@@ -731,7 +509,6 @@ fn provider_fn(
 /// Append the provider `fn`s for one signature's non-inline defaults.
 fn push_param_providers(
     out: &mut Vec<Stmt>,
-    id: &ModuleId,
     file: u32,
     owner: &str,
     decl: &crate::ast::FnDecl,
@@ -748,7 +525,6 @@ fn push_param_providers(
             p.ty.as_ref(),
             &tps,
             self_ty,
-            id,
             provider_name(file, Slot::Param, owner, &p.name),
             None,
         ) {
@@ -794,18 +570,17 @@ fn self_ty_for<'a>(owner_type: &'a str, host_type_params: &[String]) -> Option<&
 /// checker's signature pre-pass, so declaration position is irrelevant.
 fn synthesize_providers(graph: &mut ModuleGraph) {
     for m in graph.modules.iter_mut() {
-        let (id, file) = (m.id.clone(), m.file);
-        synthesize_providers_into(&mut m.ast.stmts, &id, file);
+        synthesize_providers_into(&mut m.ast.stmts, m.file);
     }
 }
 
 /// [`synthesize_providers`] for one module's top-level statements.
-fn synthesize_providers_into(stmts: &mut Vec<Stmt>, id: &ModuleId, file: u32) {
+fn synthesize_providers_into(stmts: &mut Vec<Stmt>, file: u32) {
     let mut new_fns: Vec<Stmt> = Vec::new();
     for stmt in stmts.iter() {
         match &stmt.kind {
             StmtKind::Fn(decl) => {
-                push_param_providers(&mut new_fns, id, file, &decl.name, decl, &[], None);
+                push_param_providers(&mut new_fns, file, &decl.name, decl, &[], None);
             }
             StmtKind::Struct {
                 name,
@@ -822,7 +597,6 @@ fn synthesize_providers_into(stmts: &mut Vec<Stmt>, id: &ModuleId, file: u32) {
                         Some(&f.ty),
                         &stps,
                         None,
-                        id,
                         provider_name(file, Slot::Field, name, &f.name),
                         Some(type_params),
                     ) {
@@ -844,7 +618,6 @@ fn synthesize_providers_into(stmts: &mut Vec<Stmt>, id: &ModuleId, file: u32) {
                     let owner = format!("{name}.{}", mth.name);
                     push_param_providers(
                         &mut new_fns,
-                        id,
                         file,
                         &owner,
                         mth,
@@ -870,7 +643,6 @@ fn synthesize_providers_into(stmts: &mut Vec<Stmt>, id: &ModuleId, file: u32) {
                     let owner = format!("{name}.{}", mth.name);
                     push_param_providers(
                         &mut new_fns,
-                        id,
                         file,
                         &owner,
                         mth,
@@ -890,7 +662,6 @@ fn synthesize_providers_into(stmts: &mut Vec<Stmt>, id: &ModuleId, file: u32) {
                     let owner = format!("{name}.{}", mth.name);
                     push_param_providers(
                         &mut new_fns,
-                        id,
                         file,
                         &owner,
                         mth,
@@ -921,37 +692,7 @@ fn synthesize_providers_into(stmts: &mut Vec<Stmt>, id: &ModuleId, file: u32) {
 /// call edges too would mean deciding recursion over the whole program's call graph, which is a
 /// confident-wrong-answer risk the project declines to take (`docs/gaps.md` W7-12); the runtime
 /// fault is the documented, accepted outcome (`docs/syntax.md` §5).
-fn check_provider_cycles(graph: &ModuleGraph) -> Result<(), ResolveError> {
-    let mut edges: HashMap<String, (Vec<String>, Span)> = HashMap::new();
-    for m in &graph.modules {
-        collect_provider_edges(&m.ast.stmts, &mut edges);
-    }
-    check_provider_cycles_in(&edges)
-}
-
-/// One module's provider→provider edges, keyed by provider name (globally unique — the name embeds
-/// the declaring module's `file` id).
-fn collect_provider_edges(stmts: &[Stmt], edges: &mut HashMap<String, (Vec<String>, Span)>) {
-    for stmt in stmts {
-        if let StmtKind::Fn(decl) = &stmt.kind
-            && decl.name.starts_with(PROVIDER_PREFIX)
-        {
-            let mut outs: Vec<String> = Vec::new();
-            for s in &decl.body {
-                if let StmtKind::Return(Some(e)) = &s.kind {
-                    walk_idents(e, &mut |n| {
-                        if n.starts_with(PROVIDER_PREFIX) {
-                            outs.push(n.to_string());
-                        }
-                    });
-                }
-            }
-            edges.insert(decl.name.clone(), (outs, stmt.span));
-        }
-    }
-}
-
-fn check_provider_cycles_in(
+pub(crate) fn check_provider_cycles_in(
     edges: &HashMap<String, (Vec<String>, Span)>,
 ) -> Result<(), ResolveError> {
     // Iterative DFS with an explicit on-stack set: `state` is 1 = in progress, 2 = done.
@@ -1001,60 +742,31 @@ fn check_provider_cycles_in(
 /// unknown in this pre-type pass, so a method call is resolved by name; each entry holds one param
 /// spec (the params *after* the receiver `self`) per struct that defines that name. Spans all modules
 /// since a receiver may be an imported struct's value.
-fn collect_methods(graph: &ModuleGraph) -> HashMap<String, Vec<Vec<PSpec>>> {
-    let mut map: HashMap<String, Vec<Vec<PSpec>>> = HashMap::new();
+pub(crate) fn collect_methods(graph: &ModuleGraph) -> HashMap<String, Vec<Vec<SlotSpec>>> {
+    let mut map: HashMap<String, Vec<Vec<SlotSpec>>> = HashMap::new();
     for m in &graph.modules {
-        collect_methods_into(&m.ast.stmts, &mut map, &m.id, m.file);
+        collect_methods_into(&m.ast.stmts, &mut map, m.file);
     }
     map
 }
 
-/// The `[PSpec]` for one method's explicit parameters. The receiver (`self`, params[0]) is dropped —
-/// a call's explicit args correspond to params[1..]. `owner` is `<Type>.<method>`, matching what
-/// [`synthesize_providers`] passed for the same declaration.
+/// The [`SlotSpec`]s of one method's explicit parameters (the receiver dropped). `owner` is
+/// `<Type>.<method>`, matching what [`synthesize_providers`] passed for the same declaration.
 fn method_spec(
     method: &crate::ast::FnDecl,
     owner_type: &str,
     type_params: &[TypeParam],
-    id: &ModuleId,
     file: u32,
-) -> Vec<PSpec> {
+) -> Vec<SlotSpec> {
     let owner = format!("{owner_type}.{}", method.name);
     let stps: Vec<String> = type_params.iter().map(|t| t.name.clone()).collect();
-    let tps = tp_names(method, &stps);
-    // Drop the RECEIVER slot only when there is one. A STATIC method (the "no `self` ⇒ static" rule
-    // the checker classifies by, `FnSig::is_static`) has no receiver, so its explicit arguments start
-    // at param 0; skipping unconditionally dropped its FIRST real parameter, which silently deleted
-    // that parameter's default from the spec — `struct S: fn mk(a: int = 5)` called as `S.mk()` was
-    // `'mk' expects 1 argument(s), got 0` on `0104d57b`, i.e. a default that could never be filled.
-    let skip = usize::from(method.params.first().is_some_and(|p| p.name == "self"));
-    method
-        .params
-        .iter()
-        .skip(skip)
-        .map(|p| PSpec {
-            name: p.name.clone(),
-            default: p.default.as_ref().map(|d| {
-                dflt_for(
-                    d,
-                    p.ty.as_ref(),
-                    &tps,
-                    self_ty_for(owner_type, &stps),
-                    id,
-                    provider_name(file, Slot::Param, &owner, &p.name),
-                    None,
-                )
-            }),
-            is_variadic: p.is_variadic,
-        })
-        .collect()
+    param_slots(method, file, &owner, self_ty_for(owner_type, &stps), &stps)
 }
 
 /// Add one module's struct methods to `map`.
-fn collect_methods_into(
+pub(crate) fn collect_methods_into(
     stmts: &[Stmt],
-    map: &mut HashMap<String, Vec<Vec<PSpec>>>,
-    id: &ModuleId,
+    map: &mut HashMap<String, Vec<Vec<SlotSpec>>>,
     file: u32,
 ) {
     for stmt in stmts {
@@ -1092,111 +804,9 @@ fn collect_methods_into(
         for method in methods {
             map.entry(method.name.clone())
                 .or_default()
-                .push(method_spec(method, owner_type, type_params, id, file));
+                .push(method_spec(method, owner_type, type_params, file));
         }
     }
-}
-
-/// Program-wide struct-method specs keyed by `(struct_name, method_name)` — the receiver-type-aware
-/// sibling of [`collect_methods`]. Used to resolve a method call's `ref` param flags when the
-/// receiver's struct type is known locally (so `a.apply(r)` picks `A`'s `apply`, not a sibling
-/// struct's same-named method). The receiver (`self`, params[0]) is dropped, like `collect_methods`.
-fn collect_methods_by_struct(graph: &ModuleGraph) -> HashMap<(String, String), Vec<PSpec>> {
-    // Value `None` marks a key whose per-module specs DISAGREE (a struct-name collision): dropped at
-    // the end so the conflicting entry never drives a coercion decision.
-    let mut map: HashMap<(String, String), Option<Vec<PSpec>>> = HashMap::new();
-    for m in &graph.modules {
-        for stmt in &m.ast.stmts {
-            let (name, type_params, methods) = match &stmt.kind {
-                StmtKind::Struct {
-                    name,
-                    type_params,
-                    methods,
-                    ..
-                }
-                | StmtKind::Enum {
-                    name,
-                    type_params,
-                    methods,
-                    ..
-                }
-                | StmtKind::NewType {
-                    name,
-                    type_params,
-                    methods,
-                    ..
-                } => (name, type_params, methods),
-                _ => continue,
-            };
-            {
-                for method in methods {
-                    let spec: Vec<PSpec> = method_spec(method, name, type_params, &m.id, m.file);
-                    let key = (name.clone(), method.name.clone());
-                    // Struct names are program-global (a reused name is a hard collision error in the
-                    // checker), but two modules CAN parse a same-named struct. If their specs for the
-                    // same method disagree we must NOT pick one by collection order — null the entry so
-                    // resolution falls back to the name-keyed agreement check (which won't mis-coerce).
-                    match map.entry(key) {
-                        std::collections::hash_map::Entry::Vacant(v) => {
-                            v.insert(Some(spec));
-                        }
-                        std::collections::hash_map::Entry::Occupied(mut o) => {
-                            if o.get().as_ref() != Some(&spec) {
-                                o.insert(None);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    map.into_iter()
-        .filter_map(|(k, v)| v.map(|spec| (k, spec)))
-        .collect()
-}
-
-/// Single-module [`collect_methods_by_struct`] for the standalone (test/compiler/interp) path.
-#[cfg(test)]
-fn collect_methods_by_struct_into_standalone(
-    stmts: &[Stmt],
-    id: &ModuleId,
-    file: u32,
-) -> HashMap<(String, String), Vec<PSpec>> {
-    let mut map: HashMap<(String, String), Vec<PSpec>> = HashMap::new();
-    for stmt in stmts {
-        let (name, type_params, methods) = match &stmt.kind {
-            StmtKind::Struct {
-                name,
-                type_params,
-                methods,
-                ..
-            }
-            | StmtKind::Enum {
-                name,
-                type_params,
-                methods,
-                ..
-            }
-            | StmtKind::NewType {
-                name,
-                type_params,
-                methods,
-                ..
-            } => (name, type_params, methods),
-            StmtKind::NativeStruct {
-                name,
-                type_params,
-                bodied_methods,
-                ..
-            } => (name, type_params, bodied_methods),
-            _ => continue,
-        };
-        for method in methods {
-            let spec: Vec<PSpec> = method_spec(method, name, type_params, id, file);
-            map.insert((name.clone(), method.name.clone()), spec);
-        }
-    }
-    map
 }
 
 /// Reject any parameter/field default that references another parameter/field in the same signature.
@@ -1446,337 +1056,21 @@ fn walk_idents_and_types(e: &Expr, f: &mut impl FnMut(&str), tf: &mut impl FnMut
     }
 }
 
-/// Program-wide set of struct **field** names whose declared type is a function (`f: fn(T) -> U`).
-/// A `recv.f(args)` call on such a field parses identically to a method call; we use this set to keep
-/// `normalize_call` from injecting a same-named *method*'s defaults into a fn-field call (the field
-/// is field-access-then-call, resolved by the checker + engines, not a method). Spans all modules
-/// since the receiver may be an imported struct's value.
-fn collect_fn_fields(graph: &ModuleGraph) -> HashSet<String> {
-    let mut set = HashSet::new();
-    for m in &graph.modules {
-        collect_fn_fields_into(&m.ast.stmts, &mut set);
-    }
-    set
-}
-
-fn collect_fn_fields_into(stmts: &[Stmt], set: &mut HashSet<String>) {
-    for stmt in stmts {
-        if let StmtKind::Struct { fields, .. } = &stmt.kind {
-            for f in fields {
-                if matches!(f.ty, Type::Func { .. }) {
-                    set.insert(f.name.clone());
-                }
-            }
-        }
-    }
-}
-
-/// Build the callable registry (free functions + struct constructors) for one module's top level.
-fn collect_module_reg(stmts: &[Stmt], id: &ModuleId, file: u32) -> ModReg {
-    let mut reg = ModReg::default();
-    for stmt in stmts {
-        match &stmt.kind {
-            StmtKind::Fn(decl) => {
-                let tps = tp_names(decl, &[]);
-                reg.fns.insert(
-                    decl.name.clone(),
-                    decl.params
-                        .iter()
-                        .map(|p| PSpec {
-                            name: p.name.clone(),
-                            default: p.default.as_ref().map(|d| {
-                                dflt_for(
-                                    d,
-                                    p.ty.as_ref(),
-                                    &tps,
-                                    None,
-                                    id,
-                                    provider_name(file, Slot::Param, &decl.name, &p.name),
-                                    None,
-                                )
-                            }),
-                            is_variadic: p.is_variadic,
-                        })
-                        .collect(),
-                );
-            }
-            StmtKind::Struct {
-                name,
-                type_params,
-                fields,
-                ..
-            } => {
-                let tps: Vec<String> = type_params.iter().map(|t| t.name.clone()).collect();
-                reg.types.insert(name.clone());
-                reg.structs.insert(
-                    name.clone(),
-                    fields
-                        .iter()
-                        .map(|f| PSpec {
-                            name: f.name.clone(),
-                            default: f.default.as_ref().map(|d| {
-                                dflt_for(
-                                    d,
-                                    Some(&f.ty),
-                                    &tps,
-                                    None,
-                                    id,
-                                    provider_name(file, Slot::Field, name, &f.name),
-                                    Some(type_params),
-                                )
-                            }),
-                            is_variadic: false,
-                        })
-                        .collect(),
-                );
-            }
-            StmtKind::Enum { name, .. } | StmtKind::NewType { name, .. } => {
-                reg.types.insert(name.clone());
-            }
-            StmtKind::TypeAlias { name, ty, .. } => {
-                reg.aliases.insert(name.clone(), ty.clone());
-            }
-            StmtKind::Protocol {
-                name,
-                methods,
-                embeds,
-                ..
-            } => {
-                let mut preg = ProtoReg::default();
-                for m in methods {
-                    let skip = usize::from(m.params.first().is_some_and(|p| p.name == "self"));
-                    preg.arity.insert(m.name.clone(), m.params.len() - skip);
-                }
-                preg.embeds = embeds.iter().map(|b| b.name.clone()).collect();
-                reg.protos.insert(name.clone(), preg);
-            }
-            _ => {}
-        }
-    }
-    // Second pass: a free fn whose declared return type names a struct of THIS module records the
-    // bare struct head (so `mk().m(r)` resolves `m` by the receiver's struct type pre-type). Done
-    // after both maps are filled so a fn declared before its return struct still resolves.
-    for stmt in stmts {
-        if let StmtKind::Fn(decl) = &stmt.kind {
-            let head = match &decl.ret {
-                Some(Type::Named { name: n, .. }) | Some(Type::Generic(n, ..)) => Some(n.clone()),
-                _ => None,
-            };
-            if let Some(h) = head
-                && reg.structs.contains_key(&h)
-            {
-                reg.fn_ret_struct.insert(decl.name.clone(), h);
-            }
-        }
-    }
-    reg
-}
-
-/// What a `type` alias ultimately names (TICKET-172): the declaring module and bare type name, plus
-/// the type arguments its last generic hop pins, written in module `pinned_home`'s scope.
-struct AliasTarget {
-    module: ModuleId,
-    name: String,
-    pinned: Vec<Type>,
-    pinned_home: Option<ModuleId>,
-}
-
-/// Per-module resolution context (all borrows outlive the mutable AST walk).
+/// Per-module context for the full-path fold (all borrows outlive the mutable AST walk).
 struct Ctx<'a> {
-    regs: &'a HashMap<ModuleId, ModReg>,
-    own_id: &'a ModuleId,
-    /// This module's **transitive import closure** ([`import_closures`]). A synthetic provider
-    /// import is only legal to a module in here; see [`Walker::splice_default`].
-    deps: &'a HashSet<ModuleId>,
-    bare_from: &'a HashMap<String, ModuleId>,
+    /// Whole-module imports: bound name → target module.
     aliases: &'a HashMap<String, ModuleId>,
     /// This module's top-level names that hide a full module path's head (see
     /// [`module_level_names`]). Precomputed, never read from walk position: a hoisted decl binds
     /// before any statement runs.
     module_names: &'a HashSet<String>,
-    /// Program-wide struct-method specs (see [`collect_methods`]).
-    methods: &'a HashMap<String, Vec<Vec<PSpec>>>,
-    /// Receiver-type-keyed struct-method specs (see [`collect_methods_by_struct`]). Lets a method
-    /// call resolve its `ref` param flags from the receiver's struct type when that type is known
-    /// locally — the precise sibling of `methods` (which is keyed by name only).
-    methods_by_struct: &'a HashMap<(String, String), Vec<PSpec>>,
-    /// Program-wide function-typed field names (see [`collect_fn_fields`]).
-    fn_fields: &'a HashSet<String>,
-}
-
-impl Ctx<'_> {
-    /// Resolve a bare name (`f(...)`) to a callable's param spec: own module first, then a
-    /// `from`-imported name. Returns `None` for builtins, native-module members, or unknown names.
-    fn resolve_bare(&self, name: &str) -> Option<&Vec<PSpec>> {
-        if let Some(spec) = self.regs.get(self.own_id).and_then(|r| r.callable(name)) {
-            return Some(spec);
-        }
-        if let Some(spec) = self
-            .bare_from
-            .get(name)
-            .and_then(|t| self.regs.get(t))
-            .and_then(|r| r.callable(name))
-        {
-            return Some(spec);
-        }
-        // A `type` alias head (local, or from-imported under any bind name): its DEFINING
-        // struct's constructor specs (TICKET-172).
-        let t = self.alias_head(self.own_id, name)?;
-        self.regs.get(&t.module)?.structs.get(&t.name)
-    }
-
-    /// Resolve a module-qualified name (`alias.f(...)`), including an exported `type` alias of a
-    /// struct (`lib.Conf(...)`, TICKET-172).
-    fn resolve_qualified(&self, alias: &str, name: &str) -> Option<&Vec<PSpec>> {
-        let target = self.aliases.get(alias)?;
-        if let Some(spec) = self.regs.get(target).and_then(|r| r.callable(name)) {
-            return Some(spec);
-        }
-        let t = self.alias_member(target, name, 0)?;
-        self.regs.get(&t.module)?.structs.get(&t.name)
-    }
-
-    /// The target of a `type` alias `name` as written in module `m`: a local alias, or a
-    /// `from`-imported one (followed to its ORIGINAL member name). `None` for any other name.
-    fn alias_head(&self, m: &ModuleId, name: &str) -> Option<AliasTarget> {
-        let reg = self.regs.get(m)?;
-        if reg.aliases.contains_key(name) {
-            return self.alias_member(m, name, 0);
-        }
-        let (t, member) = reg.from_imports.get(name)?;
-        if !self.regs.get(t)?.aliases.contains_key(member) {
-            return None;
-        }
-        self.alias_member(t, member, 0)
-    }
-
-    /// The type that `member`, DECLARED in module `m`, ultimately names: itself for a
-    /// struct/enum/newtype, or its body's target for a `type` alias — chased through local,
-    /// `from`-imported and `module.Type` hops in each declaring module's own scope, capped at 64
-    /// hops like every alias walk. Interim pre-check copy of the checker's alias resolution
-    /// (owner-accepted); TICKET-182 removes it.
-    fn alias_member(&self, m: &ModuleId, member: &str, depth: usize) -> Option<AliasTarget> {
-        if depth > 64 {
-            return None;
-        }
-        let reg = self.regs.get(m)?;
-        if reg.types.contains(member) {
-            return Some(AliasTarget {
-                module: m.clone(),
-                name: member.to_string(),
-                pinned: Vec::new(),
-                pinned_home: None,
-            });
-        }
-        let (mut target, args) = match reg.aliases.get(member)? {
-            Type::Named { name, .. } => (self.alias_scope(m, name, depth + 1)?, Vec::new()),
-            Type::Generic(name, args, ..) => (self.alias_scope(m, name, depth + 1)?, args.clone()),
-            Type::Qualified { module, name, args } => (
-                self.alias_member(reg.mod_imports.get(module)?, name, depth + 1)?,
-                args.clone(),
-            ),
-            _ => return None,
-        };
-        if !args.is_empty() {
-            target.pinned = args;
-            target.pinned_home = Some(m.clone());
-        }
-        Some(target)
-    }
-
-    /// A bare type `name` as visible in module `m`: its own declaration or alias, else a
-    /// `from`-import of one.
-    fn alias_scope(&self, m: &ModuleId, name: &str, depth: usize) -> Option<AliasTarget> {
-        let reg = self.regs.get(m)?;
-        if reg.types.contains(name) || reg.aliases.contains_key(name) {
-            return self.alias_member(m, name, depth);
-        }
-        let (t, member) = reg.from_imports.get(name)?;
-        self.alias_member(t, member, depth)
-    }
-
-    /// Resolve a bare protocol name to the module that declares it: own module first, then a
-    /// `from`-imported name. Mirrors [`Self::resolve_bare`].
-    fn find_proto(&self, name: &str) -> Option<(ModuleId, String)> {
-        if self
-            .regs
-            .get(self.own_id)
-            .is_some_and(|r| r.protos.contains_key(name))
-        {
-            return Some((self.own_id.clone(), name.to_string()));
-        }
-        let target = self.bare_from.get(name)?;
-        self.regs
-            .get(target)
-            .is_some_and(|r| r.protos.contains_key(name))
-            .then(|| (target.clone(), name.to_string()))
-    }
-
-    /// Resolve a module-qualified protocol name (`alias.P`). Mirrors [`Self::resolve_qualified`].
-    fn find_proto_qualified(&self, alias: &str, name: &str) -> Option<(ModuleId, String)> {
-        let target = self.aliases.get(alias)?;
-        self.regs
-            .get(target)
-            .is_some_and(|r| r.protos.contains_key(name))
-            .then(|| (target.clone(), name.to_string()))
-    }
-
-    /// Resolve a module-qualified TYPE name (`alias.Type`) to the bare type name, for a
-    /// `receiver_struct_ty` head like `lib.L.new()`. `alias` must be a real import alias, and the
-    /// target module must declare `name` as a struct/enum/newtype. Mirrors [`Self::find_proto_qualified`].
-    fn find_type_qualified(&self, alias: &str, name: &str) -> Option<String> {
-        let target = self.aliases.get(alias)?;
-        // An exported `type` alias (`lib.Conf.make()`) answers with its DEFINING type's name, so
-        // `methods_by_struct` keys on the real struct (TICKET-172).
-        self.alias_member(target, name, 0).map(|t| t.name)
-    }
-
-    /// The EXPLICIT parameter count `proto::method` declares, searching `proto`'s embeds
-    /// (breadth-first, within `home` only) when `proto` itself does not declare `method`. `None` for
-    /// an unknown protocol, an unresolvable embed, or a method no reachable protocol declares — the
-    /// caller then leaves the name-keyed fallback unfiltered, never refusing the call.
-    fn proto_method_arity(&self, home: &ModuleId, proto: &str, method: &str) -> Option<usize> {
-        let mut visited: HashSet<String> = HashSet::new();
-        let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
-        queue.push_back(proto.to_string());
-        while let Some(p) = queue.pop_front() {
-            if !visited.insert(p.clone()) {
-                continue;
-            }
-            let Some(preg) = self.regs.get(home).and_then(|r| r.protos.get(&p)) else {
-                continue;
-            };
-            if let Some(n) = preg.arity.get(method) {
-                return Some(*n);
-            }
-            for embed in &preg.embeds {
-                queue.push_back(embed.clone());
-            }
-        }
-        None
-    }
 }
 
 struct Walker<'a> {
     ctx: Ctx<'a>,
     scopes: Vec<HashSet<String>>,
-    /// Per-scope map of a LOCAL name to the struct type it was constructed/annotated as (parallel to
-    /// `scopes`). Populated by `x := StructName(...)` and `x: StructName = ...`. Lets a method call
-    /// `recv.m(args)` resolve `m`'s param defaults/variadic against the receiver's *actual* struct (so
-    /// a sibling struct's same-named method does not derail the decision).
-    local_struct: Vec<HashMap<String, String>>,
-    /// Per-scope map of a LOCAL name to the protocol it was annotated as, `name → (declaring module,
-    /// protocol name)` (parallel to `scopes`, like `local_struct`). Populated by a protocol-typed or
-    /// protocol-bounded parameter and a protocol-typed `let`. TICKET-075 — lets a method call
-    /// `recv.m(args)` filter the name-keyed fallback to candidates the protocol's own arity admits.
-    local_proto: Vec<HashMap<String, (ModuleId, String)>>,
-    /// Per-scope type-parameter names, parallel to `scopes`; a type parameter shadows a struct name.
+    /// Per-scope type-parameter names, parallel to `scopes`; a type parameter shadows a module name.
     type_params: Vec<HashSet<String>>,
-    /// Providers in OTHER modules this module's call sites now call, `name → (declaring module,
-    /// first call site)`. Drained into synthetic `from` imports after the walk. A `BTreeMap` so the
-    /// drain order is the (globally unique) provider name — import order feeds the compiler's
-    /// `global_slots`, which must not depend on hash iteration order.
-    needed: std::collections::BTreeMap<String, (ModuleId, Span)>,
     /// Current [`Walker::walk_expr`] recursion depth — see that method. This counter is what turns
     /// [`crate::parser::MAX_AST_DEPTH`] into a **global** bound instead of a per-`Parser` one.
     depth: usize,
@@ -1870,209 +1164,17 @@ impl Walker<'_> {
 
     fn push_scope(&mut self) {
         self.scopes.push(HashSet::new());
-        self.local_struct.push(HashMap::new());
-        self.local_proto.push(HashMap::new());
         self.type_params.push(HashSet::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
-        self.local_struct.pop();
-        self.local_proto.pop();
         self.type_params.pop();
     }
 
     /// Whether `name` is a type-parameter name in scope. A type parameter shadows a struct name.
     fn is_type_param(&self, name: &str) -> bool {
         self.type_params.iter().any(|s| s.contains(name))
-    }
-
-    /// Record that LOCAL `name` holds a value of struct type `sname`, in the innermost scope.
-    fn bind_local_struct(&mut self, name: &str, sname: &str) {
-        if let Some(top) = self.local_struct.last_mut() {
-            top.insert(name.to_string(), sname.to_string());
-        }
-    }
-
-    /// Record that LOCAL `name` holds a value typed (or bounded) as protocol `proto`, declared in
-    /// module `home`, in the innermost scope. TICKET-075 sibling of [`Self::bind_local_struct`].
-    fn bind_local_proto(&mut self, name: &str, home: ModuleId, proto: String) {
-        if let Some(top) = self.local_proto.last_mut() {
-            top.insert(name.to_string(), (home, proto));
-        }
-    }
-
-    /// The protocol a local receiver `name` was annotated/bounded as (innermost wins). TICKET-075
-    /// sibling of [`Self::local_struct_ty`].
-    fn local_proto_ty(&self, name: &str) -> Option<&(ModuleId, String)> {
-        for (vars, protos) in self.scopes.iter().zip(self.local_proto.iter()).rev() {
-            if vars.contains(name) {
-                return protos.get(name);
-            }
-        }
-        None
-    }
-
-    /// If `ty` names a struct known to this module (a bare `Type::Named` or a `Type::Generic` head
-    /// that resolves to a declared struct), return that struct name — so a typed parameter (`x: A`)
-    /// records its receiver struct type just like a `x := A()` let binding. Mirrors the struct check
-    /// in [`Self::struct_value_ty`].
-    fn annot_struct_ty(&self, ty: &Type) -> Option<String> {
-        let name = match ty {
-            Type::Named { name, .. } => name,
-            Type::Generic(name, ..) => name,
-            _ => return None,
-        };
-        self.ctx
-            .regs
-            .get(self.ctx.own_id)
-            .filter(|r| r.structs.contains_key(name))
-            .map(|_| name.clone())
-    }
-
-    /// If `ty` names a protocol reachable from this module, return `(declaring module, protocol
-    /// name)` — so a protocol-typed or protocol-bounded receiver records what to filter the
-    /// name-keyed method fallback against. `tp_bounds` maps a type-parameter name to its FIRST bound
-    /// name (the `[T: P]` case), checked before the type is resolved as a protocol name directly (the
-    /// `x: P` case). TICKET-075 sibling of [`Self::annot_struct_ty`].
-    fn annot_proto_ty(
-        &self,
-        ty: &Type,
-        tp_bounds: &HashMap<String, String>,
-    ) -> Option<(ModuleId, String)> {
-        match ty {
-            Type::Named { name, .. } => {
-                if let Some(bound) = tp_bounds.get(name) {
-                    return self.ctx.find_proto(bound);
-                }
-                self.ctx.find_proto(name)
-            }
-            Type::Generic(name, ..) => self.ctx.find_proto(name),
-            Type::Qualified { module, name, .. } => self.ctx.find_proto_qualified(module, name),
-            _ => None,
-        }
-    }
-
-    /// Bind a function/method parameter into the current scope, additionally recording its receiver
-    /// struct type when the annotation names a known struct — so a typed-parameter receiver
-    /// (`fn f(x: A): x.m(...)`) resolves through [`Self::receiver_struct_ty`] like a let-bound local.
-    /// `tp_bounds` is the owner+method's type-parameter-name → first-bound-name map (the `[T: P]`
-    /// case); TICKET-075 also records a protocol annotation/bound, mirroring the struct case.
-    fn bind_param(&mut self, p: &Param, tp_bounds: &HashMap<String, String>) {
-        self.bind(&p.name);
-        if let Some(ty) = &p.ty {
-            if let Some(sname) = self.annot_struct_ty(ty) {
-                self.bind_local_struct(&p.name, &sname);
-            } else if let Some((home, proto)) = self.annot_proto_ty(ty, tp_bounds) {
-                self.bind_local_proto(&p.name, home, proto);
-            }
-        }
-    }
-
-    /// The struct type a local receiver `name` was constructed/annotated as (innermost wins).
-    fn local_struct_ty(&self, name: &str) -> Option<&String> {
-        for (vars, sts) in self.scopes.iter().zip(self.local_struct.iter()).rev() {
-            if vars.contains(name) {
-                return sts.get(name);
-            }
-        }
-        None
-    }
-
-    /// If `value` is a bare struct-constructor call (`StructName(...)`), the struct's name — so a
-    /// `x := StructName(...)` binding can later resolve a method call on `x` by receiver type.
-    fn struct_value_ty(&self, value: &Expr) -> Option<String> {
-        if let ExprKind::Call { callee, .. } = &value.kind
-            && let ExprKind::Ident(n) = &callee.kind
-            && !self.is_local(n)
-            && self
-                .ctx
-                .regs
-                .get(self.ctx.own_id)
-                .is_some_and(|r| r.structs.contains_key(n))
-        {
-            return Some(n.clone());
-        }
-        None
-    }
-
-    /// The struct name of a method-call receiver `obj`, when knowable pre-type — so a shared method
-    /// name (siblings disagreeing on a param's ref-ness) resolves to the RIGHT sibling regardless of
-    /// the receiver's syntactic shape. Covers: (i) a named local, (ii) an inline ctor call
-    /// `StructName(...)`, (iii) a free-fn call `mk()` whose declared return type is a struct, (iv) a
-    /// bare type-NAME head `A.new()`: `methods_by_struct[(A, m)]` decides, and a miss (module name,
-    /// unknown name, collision-nulled key) falls through to the name-keyed table unchanged. Returns
-    /// `None` for any receiver whose struct type cannot be determined syntactically (the caller then
-    /// falls back to the agreement-gated name-keyed table).
-    fn receiver_struct_ty(&self, obj: &Expr) -> Option<String> {
-        match &obj.kind {
-            // (i) a named local receiver: its constructed/annotated struct type.
-            ExprKind::Ident(recv) if self.is_local(recv) => self.local_struct_ty(recv).cloned(),
-            // (ii) inline ctor call `StructName(...)` — struct head is syntactic.
-            ExprKind::Call { .. } if self.struct_value_ty(obj).is_some() => {
-                self.struct_value_ty(obj)
-            }
-            // (iv) a bare type-NAME head `A.new()`: a type parameter shadows a struct name, so this
-            // must never bind a generic body's static call to the wrong type's default.
-            // A `type` alias head answers with its DEFINING type's name (TICKET-172).
-            ExprKind::Ident(n) if !self.is_local(n) && !self.is_type_param(n) => Some(
-                self.ctx
-                    .alias_head(self.ctx.own_id, n)
-                    .map_or_else(|| n.clone(), |t| t.name),
-            ),
-            // (iii) struct-returning free fn `mk()` — resolved through the SAME module the callee
-            // resolves in (own module first, then a `from`-import), mirroring `resolve_bare`.
-            ExprKind::Call { callee, .. } => {
-                let ExprKind::Ident(n) = &callee.kind else {
-                    return None;
-                };
-                if self.is_local(n) {
-                    return None;
-                }
-                if let Some(s) = self
-                    .ctx
-                    .regs
-                    .get(self.ctx.own_id)
-                    .and_then(|r| r.fn_ret_struct.get(n))
-                {
-                    return Some(s.clone());
-                }
-                let target = self.ctx.bare_from.get(n)?;
-                self.ctx
-                    .regs
-                    .get(target)
-                    .and_then(|r| r.fn_ret_struct.get(n))
-                    .cloned()
-            }
-            // (v) a module-qualified type head `alias.Type.new()`: `alias` must be a REAL import
-            // alias, not a local or a type parameter shadowing one -- the same DEC-108 rule arm (iv)
-            // applies, one spelling over. This is what keeps a local field chain (`x.y.m()`) and a
-            // module GLOBAL of struct type (`lib.counter_val.add()`) out: neither's head resolves
-            // through `find_type_qualified`, which only recognises a declared struct/enum/newtype.
-            ExprKind::Field {
-                obj: head, name, ..
-            } => {
-                let ExprKind::Ident(alias) = &head.kind else {
-                    return None;
-                };
-                if self.is_local(alias) || self.is_type_param(alias) {
-                    return None;
-                }
-                self.ctx.find_type_qualified(alias, name)
-            }
-            _ => None,
-        }
-    }
-
-    /// The `(declaring module, protocol name)` a method-call receiver `obj` was annotated/bounded
-    /// as, when knowable pre-type — the protocol-typed sibling of [`Self::receiver_struct_ty`],
-    /// covering only a named local (a protocol has no ctor-call or struct-returning-fn receiver
-    /// shape). TICKET-075.
-    fn receiver_proto(&self, obj: &Expr) -> Option<(ModuleId, String)> {
-        match &obj.kind {
-            ExprKind::Ident(recv) if self.is_local(recv) => self.local_proto_ty(recv).cloned(),
-            _ => None,
-        }
     }
 
     /// Walk a block in its own lexical scope (sequential `let`s bind into this scope).
@@ -2090,43 +1192,15 @@ impl Walker<'_> {
             StmtKind::Let {
                 names,
                 name_spans: _,
-                ty,
+                ty: _,
                 value,
                 // `const` is not lowered here (compile-time-only; the checker enforces it) — ignore.
                 is_const: _,
                 doc: _,
             } => {
-                // Record the RHS's struct type (a `x: StructName = ...` annotation or a
-                // `x := StructName(...)` ctor call) so a later method call on `x` resolves its
-                // param defaults/variadic against the receiver's actual struct.
-                let struct_ty = if names.len() == 1 {
-                    match ty {
-                        Some(Type::Named { name: n, .. }) => Some(n.clone()),
-                        _ => self.struct_value_ty(value),
-                    }
-                } else {
-                    None
-                };
-                // TICKET-075: a protocol-typed `let` (`x: P = w`) records the same annotation a
-                // protocol-typed param would, so a later method call on `x` filters the name-keyed
-                // fallback like it does for a param receiver. Guarded on the annotation NOT naming a
-                // genuine struct (`struct_ty` above accepts any bare `Type::Named` without checking
-                // the registry, so it is not itself a safe guard here).
-                let proto_ty = if names.len() == 1
-                    && ty.as_ref().is_some_and(|t| self.annot_struct_ty(t).is_none())
-                {
-                    ty.as_ref().and_then(|t| self.annot_proto_ty(t, &HashMap::new()))
-                } else {
-                    None
-                };
                 self.walk_expr(value)?;
                 for n in names.iter() {
                     self.bind(n);
-                }
-                if let Some((home, proto)) = proto_ty {
-                    self.bind_local_proto(&names[0], home, proto);
-                } else if let Some(sname) = struct_ty {
-                    self.bind_local_struct(&names[0], &sname);
                 }
             }
             StmtKind::Assign { target, value, op: _ } => {
@@ -2146,14 +1220,13 @@ impl Walker<'_> {
                 }
                 // Nested/top-level function body: params are a fresh scope.
                 self.enter_fn(&decl.name, decl.name_span)?;
-                let tp_bounds = tp_bounds_of(&[], decl);
                 self.push_scope();
                 self.type_params
                     .last_mut()
                     .unwrap()
                     .extend(decl.type_params.iter().map(|t| t.name.clone()));
                 for p in &decl.params {
-                    self.bind_param(p, &tp_bounds);
+                    self.bind(&p.name);
                 }
                 self.walk_block(&mut decl.body)?;
                 self.pop_scope();
@@ -2179,7 +1252,6 @@ impl Walker<'_> {
                         }
                     }
                     self.enter_fn(&m.name, m.name_span)?;
-                    let tp_bounds = tp_bounds_of(type_params, m);
                     self.push_scope();
                     self.type_params.last_mut().unwrap().extend(
                         type_params
@@ -2188,7 +1260,7 @@ impl Walker<'_> {
                             .map(|t| t.name.clone()),
                     );
                     for p in &m.params {
-                        self.bind_param(p, &tp_bounds);
+                        self.bind(&p.name);
                     }
                     self.walk_block(&mut m.body)?;
                     self.pop_scope();
@@ -2303,7 +1375,6 @@ impl Walker<'_> {
                         }
                     }
                     self.enter_fn(&m.name, m.name_span)?;
-                    let tp_bounds = tp_bounds_of(type_params, m);
                     self.push_scope();
                     self.type_params.last_mut().unwrap().extend(
                         type_params
@@ -2312,7 +1383,7 @@ impl Walker<'_> {
                             .map(|t| t.name.clone()),
                     );
                     for p in &m.params {
-                        self.bind_param(p, &tp_bounds);
+                        self.bind(&p.name);
                     }
                     self.walk_block(&mut m.body)?;
                     self.pop_scope();
@@ -2334,7 +1405,6 @@ impl Walker<'_> {
                         }
                     }
                     self.enter_fn(&m.name, m.name_span)?;
-                    let tp_bounds = tp_bounds_of(type_params, m);
                     self.push_scope();
                     self.type_params.last_mut().unwrap().extend(
                         type_params
@@ -2343,7 +1413,7 @@ impl Walker<'_> {
                             .map(|t| t.name.clone()),
                     );
                     for p in &m.params {
-                        self.bind_param(p, &tp_bounds);
+                        self.bind(&p.name);
                     }
                     self.walk_block(&mut m.body)?;
                     self.pop_scope();
@@ -2400,7 +1470,7 @@ impl Walker<'_> {
     /// no third pass to catch it. There is now no such splice. A non-literal default is never
     /// cloned at all (the call site gets a call to its provider, whose body is walked as an
     /// ordinary top-level `fn`), and the literal class that IS cloned excludes any `Str` carrying
-    /// `{`/`}` *and* is re-walked by [`Self::splice_default`] anyway.
+    /// `{`/`}` *and* is filled from the declaration node anyway.
     ///
     /// Measured on the same fixture the residual was recorded with —
     /// `fn g(a: int = "{ 1+1×15990 }".len())` / `fn h(b: int = g())` / `x := h()+1×15990` — with a
@@ -2556,7 +1626,7 @@ impl Walker<'_> {
             // W7-43 — optional chaining `?.` / null-coalescing `??` SURVIVE this pass: the choice
             // between the Option lowering and the Result (`?` then `.`) one needs the operand's
             // TYPE, which only the checker has. Walk the children like any other node, then
-            // normalize the `?.` call part explicitly (see `normalize_opt_call` — the carrier no
+            // normalize the `?.` call part explicitly (the checker binds the `?.` call part — the carrier no
             // longer becomes a `Call` here, so `walk_expr`'s tail can't do it).
             ExprKind::NullCoalesce { lhs, rhs, .. } => {
                 self.walk_expr(lhs)?;
@@ -2572,7 +1642,6 @@ impl Walker<'_> {
                         self.walk_expr(v)?;
                     }
                 }
-                self.normalize_opt_call(expr)?;
             }
             ExprKind::Ident(_) => {}
             // A string literal carrying `{…}` is PARSED HERE, once, into `ExprKind::Interp` — before
@@ -2615,591 +1684,6 @@ impl Walker<'_> {
             | ExprKind::Bool(_)
             | ExprKind::Pass => {}
         }
-
-        // Now normalize this node if it is a resolvable call.
-        if let ExprKind::Call { .. } = &expr.kind {
-            self.normalize_call(expr)?;
-        }
-        Ok(())
-    }
-
-    /// Materialise one omitted argument into `out` — the single replacement for the three
-    /// `default.clone()` sites this pass used to have.
-    ///
-    /// [`Dflt::Inline`] still clones, but is WALKED here, in the caller's own walk: that charges the
-    /// composed tree's [`crate::parser::MAX_AST_DEPTH`] budget for the clone (a spliced default nests
-    /// inside the expression around it) and means the single pass never has to assume a literal needs
-    /// no lowering. [`Dflt::Provider`] emits a complete zero-arg call — nothing left to rewrite.
-    ///
-    /// **The cross-module edge is a DEPENDENCY rule, and where it does not hold the default falls
-    /// back to the caller-scope clone.** A synthetic import to the definer is emitted only when the
-    /// definer is in this module's transitive import closure ([`import_closures`]); otherwise the
-    /// call site gets [`Dflt::Inline`]'s clone of the same expression, which is exactly what
-    /// `b1307258` did for every default. The rule is a dependency one and not a load-order one
-    /// because the predicate must not read import ORDER, or a cosmetic reorder in a third file flips
-    /// the behaviour of an unrelated call. Measured, three files, only `main`'s two import lines
-    /// swapped (`main` imports `z` and `a`; `a` declares `struct S: fn mprobe(self, x: int = av())`
-    /// and `fn av() -> int: return 11`; `z` declares its own `av() -> 500` and calls `p.mprobe()`
-    /// through a protocol-typed param): with a load-order predicate, `import z` / `import a` was a
-    /// compile error while `import a` / `import z` printed `11`. Under the closure rule both orders
-    /// behave the same.
-    ///
-    /// **The fallback is not safe; it is the lesser of two evils, chosen deliberately.** In the
-    /// program above the clone resolves `av` in `z`, so the call prints `500` where the definer
-    /// wrote `11` — a silent wrong value, the very defect W7-51 exists to fix. It is still the right
-    /// call here, because the alternative refuses a shape with no workaround: the path that reaches
-    /// this is the name-keyed METHOD path, which resolves `recv.m()` by method NAME across every
-    /// module in the graph, so the definer need not be related to the caller at all. That is the
-    /// ordinary protocol/implementation split — `z` declares `protocol P` and takes a `P`, `a`
-    /// declares the struct that satisfies it — and it cannot know the receiver's module. The remedy
-    /// a refusal would suggest (make `z` import `a`) is an import cycle whenever `a` imports `z` for
-    /// the protocol, so refusing made a defaulted method argument unusable through a protocol at
-    /// all: measured, that program printed `12` on `b1307258` and on CPython, and was refused with
-    /// `cannot use the default … does not import` between `e2d9bd4e` and `dfdc7a1b`. Refusing a
-    /// working, ancestor-agreeing program is the larger harm; the caller-scope corner is narrow (a
-    /// method default whose free names resolve to something DIFFERENT in the caller) and is
-    /// documented in `docs/syntax.md` §5 and `docs/gaps.md` W7-51.
-    ///
-    /// Where the definer IS reachable — every same-module call, and every cross-module call that
-    /// imports the definer, which is the common case — the provider is used and the default resolves
-    /// in its own module.
-    ///
-    /// **Load-order safety.** `Vm::bind_import` indexes `self.module_objs[target_idx]`, a `Vec`
-    /// pushed as each module RUNS, so an edge to a module that has not run yet panics. A transitive
-    /// dependency always loads first — see the topological-order argument and its `debug_assert` in
-    /// [`import_closures`] — so a synthetic edge can never outrun its target.
-    fn splice_default(
-        &mut self,
-        d: &Dflt,
-        site: Span,
-        out: &mut Vec<Expr>,
-        targs: &[Type],
-    ) -> Result<(), ResolveError> {
-        match d {
-            // Never reached: `normalize_call` handles this by NOT calling here (the argument is
-            // simply omitted and the callee fills it). Kept exhaustive so a future producer of this
-            // variant cannot silently fall into the clone path.
-            Dflt::CalleeFilled => {
-                debug_assert!(
-                    false,
-                    "a callee-filled default must not be spliced at the call site"
-                );
-            }
-            Dflt::Inline(e) => {
-                let mut e = e.clone();
-                // The default is placed once per call that omits it: each copy is a new node.
-                crate::ast::renumber_expr(&mut e);
-                self.walk_expr(&mut e)?;
-                out.push(e);
-            }
-            Dflt::Provider { module, name } => {
-                // A cross-module provider is reached one of two ways, and BOTH resolve in the
-                // definer's namespace — the difference is only how the caller names it.
-                //
-                //   * **In this module's transitive import closure** — synthesize a `from` import
-                //     and call the bound name. The checker types the call fully.
-                //   * **Out of the closure** — no import may be synthesized (`Vm::bind_import`
-                //     resolves its target when the CALLER's module loads, and a non-dependency can
-                //     load later), so nothing is recorded here: the compiler lowers the bare
-                //     provider ident to a direct, call-time reference to the definer's proto
-                //     (`Op::MakeFuncIn`), and the checker types the call from the parameter slot it
-                //     fills. This is the path the name-keyed METHOD lookup reaches — the ordinary
-                //     protocol/implementation split, where the definer need not be related to the
-                //     caller at all.
-                if module != self.ctx.own_id && self.ctx.deps.contains(module) {
-                    self.needed
-                        .entry(name.clone())
-                        .or_insert_with(|| (module.clone(), site));
-                }
-                out.push(Expr {
-                    id: crate::ast::NodeId::fresh(),
-                    kind: ExprKind::Call {
-                        callee: Box::new(ident_expr(name, site)),
-                        args: Vec::new(),
-                        named: Vec::new(),
-                        type_args: Vec::new(),
-                    },
-                    span: site,
-                });
-            }
-            // A generic struct field's provider, called with the ctor's own turbofish forwarded — the
-            // same two resolution paths as `Dflt::Provider`, since only the callee ident differs.
-            Dflt::GenericProvider { module, name, .. } => {
-                if module != self.ctx.own_id && self.ctx.deps.contains(module) {
-                    self.needed
-                        .entry(name.clone())
-                        .or_insert_with(|| (module.clone(), site));
-                }
-                out.push(Expr {
-                    id: crate::ast::NodeId::fresh(),
-                    kind: ExprKind::Call {
-                        callee: Box::new(ident_expr(name, site)),
-                        args: Vec::new(),
-                        named: Vec::new(),
-                        type_args: targs.to_vec(),
-                    },
-                    span: site,
-                });
-            }
-        }
-        Ok(())
-    }
-
-    /// W7-43 — normalize the CALL PART of an optional-chained method call (`obj?.m(args)`): named →
-    /// positional binding, omitted defaults, variadic collapse.
-    ///
-    /// Before W7-43 the carrier was lowered here and its arm body — a real `Call { callee: Field }` —
-    /// fell through [`Self::walk_expr`]'s tail into [`Self::normalize_call`]. The carrier now survives
-    /// the pass, so nothing would otherwise normalize it and `u?.greet(greeting="hi")` would reach the
-    /// checker with `named` un-rewritten. Runs `normalize_call` on the exact `Call { callee: Field }`
-    /// shape both `lower_carrier_*` build, then moves the (possibly rewritten) args back.
-    ///
-    /// The synthetic receiver is the REAL `obj`, not a placeholder: `receiver_struct_ty` yields `None`
-    /// for an `Option`/`Result`-typed receiver in every reachable case (an `Option` annotation is
-    /// never `Type::Named`, and `Some(...)`/`Ok(...)` is not a registered struct ctor), so this
-    /// reproduces the old `__optN` receiver's behaviour exactly — while not being WRONG if
-    /// `local_struct` ever learns to track more receivers.
-    fn normalize_opt_call(&mut self, expr: &mut Expr) -> Result<(), ResolveError> {
-        let span = expr.span;
-        let ExprKind::OptChain {
-            obj,
-            name,
-            name_span,
-            call: Some(c),
-        } = &mut expr.kind
-        else {
-            return Ok(());
-        };
-        let mut tmp = Expr {
-            id: crate::ast::NodeId::fresh(),
-            kind: ExprKind::Call {
-                callee: Box::new(Expr {
-                    id: crate::ast::NodeId::fresh(),
-                    kind: ExprKind::Field {
-                        obj: obj.clone(),
-                        name: name.clone(),
-                        name_span: *name_span,
-                    },
-                    span,
-                }),
-                args: std::mem::take(&mut c.args),
-                named: std::mem::take(&mut c.named),
-                type_args: c.type_args.clone(),
-            },
-            span,
-        };
-        let res = self.normalize_call(&mut tmp);
-        if let ExprKind::Call { args, named, .. } = tmp.kind {
-            c.args = args;
-            c.named = named;
-        }
-        res
-    }
-
-    /// Resolve `expr` (a `Call`) to a callable and rewrite named/omitted args into positional. Leaves
-    /// the call untouched when the callee is not a registered callable (unless it carries named args,
-    /// which is then an error).
-    fn normalize_call(&mut self, expr: &mut Expr) -> Result<(), ResolveError> {
-        let span = expr.span;
-        let ExprKind::Call {
-            callee,
-            args,
-            named,
-            type_args,
-        } = &expr.kind
-        else {
-            return Ok(());
-        };
-        // The ORIGIN stamp for a synthesized variadic pack (see `ExprKind::List`). Captured here, in
-        // the immutable borrow, because the collapse below re-borrows `expr.kind` mutably. It is the
-        // callee's own token — the one component that stays distinct per link of a pipe/postfix chain,
-        // where the CALL span does not.
-        let pack_origin = crate::checker::witness_key_span(callee, span);
-        // The call's own turbofish, forwarded to a `Dflt::GenericProvider` splice below — a generic
-        // struct ctor's field default is generic in the STRUCT's type parameters, so its provider call
-        // needs the same type arguments the ctor call itself carries.
-        // A bare alias head that pins its arguments (`type IB = Box[int]; IB()`) forwards them the
-        // same way — but only when they were written in THIS module, the scope the splice lands in
-        // (TICKET-172). Pinned arguments from another module leave a generic slot required.
-        let call_targs: Vec<Type> = match &callee.kind {
-            ExprKind::Ident(n) if type_args.is_empty() && !self.is_local(n) => self
-                .ctx
-                .alias_head(self.ctx.own_id, n)
-                .filter(|t| t.pinned_home.as_ref() == Some(self.ctx.own_id))
-                .map(|t| t.pinned)
-                .unwrap_or_default(),
-            _ => type_args.clone(),
-        };
-
-        // Resolve a free function / struct ctor / module-qualified callee (clone the spec so we can
-        // then mutate `expr`).
-        let module_spec: Option<Vec<PSpec>> = match &callee.kind {
-            ExprKind::Ident(name) if !self.is_local(name) => self.ctx.resolve_bare(name).cloned(),
-            ExprKind::Field { obj, name, .. } => match &obj.kind {
-                ExprKind::Ident(alias) if !self.is_local(alias) => {
-                    self.ctx.resolve_qualified(alias, name).cloned()
-                }
-                _ => None,
-            },
-            _ => None,
-        };
-
-        // Otherwise, a method call `recv.m(...)`: resolve `m`'s params by name across user structs
-        // (the receiver type is unknown in this pre-type pass). Builtin/core method names are skipped
-        // — their receiver may be a list/str/map/set. When several structs define `m` with *different*
-        // params, a named call can't be bound unambiguously, so that is an error; a plain (no-named)
-        // call is left untouched for the checker rather than guessing a default fill.
-        // Field-aware: a `recv.f(...)` call where `f` is a function-typed *field* also parses as a
-        // `Field` callee but is field-access-then-call (resolved by the checker + engines), not a
-        // method. Skip method-default normalization for such names so a same-named method's default
-        // can't be injected into a fn-field call.
-        let method_spec: Option<Vec<PSpec>> = match (&module_spec, &callee.kind) {
-            (None, ExprKind::Field { obj, name, .. }) if !self.ctx.fn_fields.contains(name) => {
-                // Receiver-aware FIRST: when the receiver's struct type is statically knowable
-                // (a typed local/param, an inline ctor call, or a struct-returning fn — see
-                // `receiver_struct_ty`), bind `m` against THAT exact struct's spec. This is the ONLY
-                // path that resolves a call when several structs define `m` with DIFFERENT parameter
-                // lists (a variadic method next to a fixed-arity sibling, or two variadics differing
-                // only in the variadic param's NAME): the name-keyed `methods` table below bails on
-                // any disagreement, so without this a valid variadic method call would reach the
-                // checker uncollapsed and be rejected against its single `List[T]` slot.
-                let recv_spec = self.receiver_struct_ty(obj).and_then(|sname| {
-                    self.ctx
-                        .methods_by_struct
-                        .get(&(sname, name.clone()))
-                        .cloned()
-                });
-                if recv_spec.is_some() {
-                    recv_spec
-                } else if is_builtin_method(name) {
-                    // A builtin-named method (`add`, `map`, `push`, …) with an unknowable receiver:
-                    // the receiver might be a genuine builtin value (List/Set/Map/str), so there is
-                    // NO name-keyed fallback that could mis-bind a builtin call.
-                    None
-                } else {
-                    match self.ctx.methods.get(name.as_str()) {
-                        Some(cands) if !cands.is_empty() => {
-                            // TICKET-075: when the receiver is typed (or bounded) as a protocol,
-                            // narrow the name-keyed candidates to those whose EXPLICIT parameter
-                            // count matches the protocol's own arity for this method — an exact
-                            // count is a necessary condition for satisfying the protocol, so this
-                            // can never drop a candidate that could have been the real receiver.
-                            // Either lookup missing (unknown protocol, unresolvable embed, or a
-                            // method no reachable protocol declares) leaves `cands` untouched.
-                            let filtered: Vec<Vec<PSpec>>;
-                            let cands: &[Vec<PSpec>] =
-                                match self.receiver_proto(obj).and_then(|(home, proto)| {
-                                    self.ctx.proto_method_arity(&home, &proto, name)
-                                }) {
-                                    Some(n) => {
-                                        filtered = cands
-                                            .iter()
-                                            .filter(|c| c.len() == n)
-                                            .cloned()
-                                            .collect();
-                                        &filtered
-                                    }
-                                    None => cands,
-                                };
-                            if cands.is_empty() {
-                                None
-                            } else if cands.iter().all(|c| *c == cands[0]) {
-                                Some(cands[0].clone())
-                            } else if !named.is_empty() {
-                                return Err(err(
-                                    span,
-                                    format!(
-                                        "cannot bind named arguments for method '{name}': multiple structs define it with different parameters — pass arguments positionally"
-                                    ),
-                                ));
-                            } else {
-                                None
-                            }
-                        }
-                        _ => None,
-                    }
-                }
-            }
-            _ => None,
-        };
-
-        let Some(params) = module_spec.or(method_spec) else {
-            // Not a registered callable. Named args here are unsupported (closures / builtin methods)
-            // — EXCEPT the `print` builtin, which accepts `sep=`/`end=` (str expressions). For print
-            // we validate the keys here and LEAVE them in `named` (un-rewritten) so the checker and
-            // the compiler can read them off the Call AST.
-            if !named.is_empty() {
-                if let ExprKind::Ident(n) = &callee.kind
-                    && n == "print"
-                    && !self.is_local(n)
-                {
-                    let mut seen_sep = false;
-                    let mut seen_end = false;
-                    for (k, _) in named.iter() {
-                        let dup = match k.as_str() {
-                            "sep" => std::mem::replace(&mut seen_sep, true),
-                            "end" => std::mem::replace(&mut seen_end, true),
-                            _ => {
-                                return Err(err(
-                                    span,
-                                    "print() only accepts the named arguments 'sep' and 'end'"
-                                        .to_string(),
-                                ));
-                            }
-                        };
-                        if dup {
-                            return Err(err(
-                                span,
-                                "print() only accepts the named arguments 'sep' and 'end'"
-                                    .to_string(),
-                            ));
-                        }
-                    }
-                    // Keys are valid (subset of {sep,end}, no dups): keep `named` intact.
-                    return Ok(());
-                }
-                // A method call whose name collides with a builtin, where the receiver's struct type
-                // is NOT statically knowable (an unannotated param, an inferred enum value, or a
-                // genuine builtin receiver). Named/default support needs a known receiver — say so,
-                // instead of the misleading "only supported on … struct methods" (it IS a method).
-                if let ExprKind::Field { name, .. } = &callee.kind
-                    && is_builtin_method(name)
-                    && !self.ctx.fn_fields.contains(name)
-                {
-                    return Err(err(
-                        span,
-                        format!(
-                            "method '{name}' reuses a built-in method name, so named/default arguments can't be bound here unless the receiver's struct type is statically known — if it's a user-struct method, bind the receiver to a typed local or inline constructor; a built-in method takes no named arguments"
-                        ),
-                    ));
-                }
-                // A genuine call through a first-class function VALUE reached by an Ident (a local /
-                // param bound to a fn) or an arbitrary expression, carrying keyword arguments
-                // (`g(name="Bob")`, Swift-style). LEAVE the named args intact so the checker can
-                // resolve each label against the value's labelled function type and record the
-                // positional permutation for the backends. A METHOD-syntax callee (`recv.f(name=…)`)
-                // still routes to the method path, which does not resolve value keywords — keep the
-                // historical error for it (no silent drop of a keyword).
-                if !matches!(&callee.kind, ExprKind::Field { .. }) {
-                    return Ok(());
-                }
-                return Err(err(
-                    span,
-                    "named arguments are only supported on functions, struct constructors, and struct methods"
-                        .to_string(),
-                ));
-            }
-            return Ok(());
-        };
-
-        // A VARIADIC callable (`fn f(pre..., ...xs: T, kwonly...)`) collapses the surplus trailing
-        // positionals into a synthesized `List` literal at the variadic slot, and binds the
-        // keyword-only tail (everything after the variadic) from named args / defaults. After this the
-        // call is an ordinary fully-positional call, so the checker AND the compiler need zero
-        // variadic-specific logic (correct by construction). This must run BEFORE the fixed-arity gates
-        // below (a `f(1,2,3)` into a single `List` slot is "too many" by those rules).
-        // Un-gated since W7-51: the driver walks each module ONCE, so the collapse (which is not
-        // idempotent — a second run would wrap the synthesized `List` in another `List`) fires
-        // exactly once by construction.
-        if let Some(v) = params.iter().position(|p| p.is_variadic) {
-            let ExprKind::Call { args, named, .. } = &mut expr.kind else {
-                return Ok(());
-            };
-            let mut positional: Vec<Option<Expr>> =
-                std::mem::take(args).into_iter().map(Some).collect();
-            let np = positional.len();
-            let named_list = std::mem::take(named);
-            let mut out: Vec<Expr> = Vec::with_capacity(params.len());
-            // Bind named args BEFORE filling pre-variadic slots, exactly like the non-variadic path:
-            // a name for a pre-variadic parameter (idx < v) binds it, just as CPython does. Only the
-            // variadic slot itself (idx == v) is unnameable (it collects the positional surplus); a
-            // keyword-only tail slot (idx > v) goes to `kw`, unchanged.
-            let mut pre_kw: HashMap<usize, Expr> = HashMap::new();
-            let mut kw: HashMap<String, Expr> = HashMap::new();
-            for (n, e) in named_list {
-                match params.iter().position(|p| p.name == n) {
-                    None => return Err(err(span, format!("unknown named argument '{n}'"))),
-                    Some(idx) if idx == v => {
-                        return Err(err(
-                            span,
-                            format!(
-                                "argument '{n}' is the variadic parameter and cannot be passed by name (it collects the surplus positionals)"
-                            ),
-                        ));
-                    }
-                    Some(idx) if idx < v => {
-                        if idx < np {
-                            return Err(err(
-                                span,
-                                format!("argument '{n}' specified both positionally and by name"),
-                            ));
-                        }
-                        if pre_kw.insert(idx, e).is_some() {
-                            return Err(err(span, format!("duplicate named argument '{n}'")));
-                        }
-                    }
-                    Some(_) => {
-                        if kw.insert(n.clone(), e).is_some() {
-                            return Err(err(span, format!("duplicate named argument '{n}'")));
-                        }
-                    }
-                }
-            }
-            // Pre-variadic slots (indices 0..v): one positional each, else a name, else its default,
-            // else error.
-            for (i, pspec) in params.iter().enumerate().take(v) {
-                let supplied = positional
-                    .get_mut(i)
-                    .and_then(Option::take)
-                    .or_else(|| pre_kw.remove(&i));
-                match supplied {
-                    Some(e) => out.push(e),
-                    None => match &pspec.default {
-                        Some(d) => self.splice_default(d, span, &mut out, &call_targs)?,
-                        None => {
-                            return Err(err(
-                                span,
-                                format!("missing required argument '{}'", pspec.name),
-                            ));
-                        }
-                    },
-                }
-            }
-            // The variadic slot sweeps EVERY remaining positional (index >= v) into a `List` literal —
-            // so a positional can never land in a keyword-only slot.
-            let elems: Vec<Expr> = positional.into_iter().skip(v).flatten().collect();
-            out.push(Expr {
-                id: crate::ast::NodeId::fresh(),
-                // `Some(..)` marks this as the synthesized pack, NOT a list the user wrote: `span` is
-                // the CALL's, which a pipe shares with the LHS primary, so the pack and a piped list
-                // literal would otherwise key the same span-keyed table slot. See `ExprKind::List`.
-                kind: ExprKind::List(elems, Some(pack_origin)),
-                span,
-            });
-            for pspec in params.iter().skip(v + 1) {
-                if let Some(e) = kw.remove(&pspec.name) {
-                    out.push(e);
-                } else if let Some(d) = &pspec.default {
-                    self.splice_default(d, span, &mut out, &call_targs)?;
-                } else {
-                    return Err(err(
-                        span,
-                        format!("missing required keyword argument '{}'", pspec.name),
-                    ));
-                }
-            }
-            *args = out;
-            return Ok(());
-        }
-
-        // Decide whether this call needs rewriting. Plain positional calls whose arity is wrong (too
-        // many, or too few without defaults to fill) are left untouched so the type checker reports
-        // its usual arity error. We only rewrite when there are named args, or when every omitted
-        // trailing slot has a default to fill.
-        let under_arity_fillable = args.len() < params.len()
-            && (args.len()..params.len()).all(|i| params[i].default.is_some());
-        if named.is_empty() && !under_arity_fillable {
-            return Ok(());
-        }
-        // Named args present alongside too many positional ones: a clear error.
-        if args.len() > params.len() {
-            return Err(err(
-                span,
-                format!(
-                    "too many arguments: expected at most {}, got {}",
-                    params.len(),
-                    args.len()
-                ),
-            ));
-        }
-
-        // Re-borrow mutably to take ownership of the existing arg lists.
-        let ExprKind::Call { args, named, .. } = &mut expr.kind else {
-            return Ok(());
-        };
-        let positional = std::mem::take(args);
-        let named_list = std::mem::take(named);
-        let np = positional.len();
-
-        let mut slots: Vec<Option<Expr>> = (0..params.len()).map(|_| None).collect();
-        for (i, a) in positional.into_iter().enumerate() {
-            slots[i] = Some(a);
-        }
-        for (n, e) in named_list {
-            let Some(idx) = params.iter().position(|p| p.name == n) else {
-                return Err(err(span, format!("unknown named argument '{n}'")));
-            };
-            if idx < np {
-                return Err(err(
-                    span,
-                    format!("argument '{n}' specified both positionally and by name"),
-                ));
-            }
-            if slots[idx].is_some() {
-                return Err(err(span, format!("duplicate named argument '{n}'")));
-            }
-            slots[idx] = Some(e);
-        }
-
-        // Build the positional list. A `Dflt::CalleeFilled` slot contributes NOTHING: the callee's
-        // own prologue fills it, so the call is simply short by that many trailing arguments.
-        let mut out: Vec<Option<Expr>> = Vec::with_capacity(params.len());
-        for (i, slot) in slots.into_iter().enumerate() {
-            match slot {
-                Some(e) => out.push(Some(e)),
-                None => match &params[i].default {
-                    Some(Dflt::CalleeFilled) => out.push(None),
-                    // A ctor call with no turbofish, or a partial one, cannot forward the field's
-                    // provider its type arguments: keep the field required (today's short call and
-                    // today's refusal) instead of splicing an under-pinned provider call.
-                    Some(Dflt::GenericProvider { tps, .. }) if call_targs.len() != *tps => {
-                        out.push(None)
-                    }
-                    Some(d) => {
-                        let mut one = Vec::new();
-                        self.splice_default(d, span, &mut one, &call_targs)?;
-                        out.extend(one.into_iter().map(Some));
-                    }
-                    None => {
-                        return Err(err(
-                            span,
-                            format!("missing required argument '{}'", params[i].name),
-                        ));
-                    }
-                },
-            }
-        }
-        // Drop the trailing run of callee-filled slots — that is exactly what a short call encodes.
-        while matches!(out.last(), Some(None)) {
-            out.pop();
-        }
-        // Anything still unfilled now sits BEFORE a supplied argument, which a short call cannot
-        // express (it pushes fewer values; it cannot leave a gap). Refuse instead of falling back to
-        // the caller-scope clone: that clone resolving in the caller is the defect this design
-        // removes, and it must not survive in the one corner nobody looks at. Reachable only by a
-        // KEYWORD call that supplies a later parameter while omitting a `Self`-on-a-generic-host
-        // default — the parser already forbids a required parameter after a defaulted one, so
-        // positional calls can never produce this shape.
-        if let Some(i) = out.iter().position(Option::is_none) {
-            let later = params
-                .iter()
-                .enumerate()
-                .skip(i + 1)
-                .find(|(j, _)| out.get(*j).is_some_and(Option::is_some))
-                .map(|(_, p)| p.name.clone())
-                .unwrap_or_default();
-            return Err(err(
-                span,
-                format!(
-                    "the default for '{}' is filled by the callee and can only be omitted from the END of a call, but '{later}' is supplied after it — pass '{}' explicitly",
-                    params[i].name, params[i].name
-                ),
-            ));
-        }
-        *args = out
-            .into_iter()
-            .map(|e| e.expect("no holes remain"))
-            .collect();
         Ok(())
     }
 }
@@ -3250,7 +1734,7 @@ fn variant_pat(id: crate::ast::NodeId, name: &str, bindings: Vec<Pattern>) -> Pa
 /// only nodes the checker + the compiler already handle.
 ///
 /// Ctx-free and free-standing on purpose: every consumer that needs this lowering must call THIS
-/// function, so the synthesized spans (and therefore the `KeywordKey`/`WitnessKey`s derived from
+/// function, so the synthesized spans (and therefore the `WitnessKey`s derived from
 /// them) cannot drift between consumers.
 pub fn lower_carrier_option(expr: &mut Expr, tmp: usize) {
     let span = expr.span;
@@ -3641,77 +2125,6 @@ mod tests {
     }
 
     #[test]
-    fn fills_trailing_default() {
-        let s = desugar_ok("fn f(x: int, y: int = 10):\n    print(x)\nr := f(1)\n");
-        assert_eq!(call_arg_ints(&s), vec![1, 10]);
-    }
-
-    /// A BODIED method on a `native struct` must go through desugar exactly like a struct/enum method.
-    /// Before the fix the `NativeStruct` desugar arm was a no-op, so a bodied method's body was never
-    /// walked and its call sites never got default-arg splicing. Here `compute`'s body calls
-    /// `helper(1)`; after desugar it must be `helper(1, 9)` — proving the body is now desugared.
-    #[test]
-    fn native_struct_bodied_method_body_is_desugared() {
-        let stmts = desugar_ok(
-            "fn helper(a: int, b: int = 9) -> int:\n    return a + b\n\
-             native struct R:\n    native fn read_line(self) -> str\n    \
-             fn compute(self) -> int:\n        return helper(1)\n",
-        );
-        let bodied = stmts
-            .iter()
-            .find_map(|s| match &s.kind {
-                StmtKind::NativeStruct { bodied_methods, .. } => bodied_methods.first(),
-                _ => None,
-            })
-            .expect("a native struct with a bodied method");
-        let ret = match &bodied.body.last().expect("a body statement").kind {
-            StmtKind::Return(Some(e)) => e,
-            other => panic!("expected a return, got {other:?}"),
-        };
-        let ExprKind::Call { args, .. } = &ret.kind else {
-            panic!("expected a call, got {:?}", ret.kind)
-        };
-        let ints: Vec<i64> = args
-            .iter()
-            .map(|a| match a.kind {
-                ExprKind::Int(n) => n,
-                ref other => panic!("expected an int arg, got {other:?}"),
-            })
-            .collect();
-        assert_eq!(ints, vec![1, 9], "the bodied method body was not desugared");
-    }
-
-    #[test]
-    fn fills_multiple_defaults() {
-        let s = desugar_ok("fn f(x: int, y: int = 2, z: int = 3):\n    print(x)\nr := f(1)\n");
-        assert_eq!(call_arg_ints(&s), vec![1, 2, 3]);
-    }
-
-    #[test]
-    fn reorders_named() {
-        let s = desugar_ok("fn f(x: int, y: int):\n    print(x)\nr := f(y=2, x=1)\n");
-        assert_eq!(call_arg_ints(&s), vec![1, 2]);
-    }
-
-    #[test]
-    fn positional_plus_named() {
-        let s = desugar_ok("fn f(x: int, y: int):\n    print(x)\nr := f(1, y=2)\n");
-        assert_eq!(call_arg_ints(&s), vec![1, 2]);
-    }
-
-    #[test]
-    fn named_fills_remaining_default() {
-        let s = desugar_ok("fn f(x: int, y: int = 2, z: int = 3):\n    print(x)\nr := f(1, z=9)\n");
-        assert_eq!(call_arg_ints(&s), vec![1, 2, 9]);
-    }
-
-    #[test]
-    fn struct_ctor_named_and_default() {
-        let s = desugar_ok("struct P:\n    x: int\n    y: int = 0\nr := P(x=5)\n");
-        assert_eq!(call_arg_ints(&s), vec![5, 0]);
-    }
-
-    #[test]
     fn plain_full_arity_unchanged() {
         let s = desugar_ok("fn f(x: int, y: int):\n    print(x)\nr := f(1, 2)\n");
         assert_eq!(call_arg_ints(&s), vec![1, 2]);
@@ -3725,33 +2138,6 @@ mod tests {
         assert_eq!(call_arg_ints(&s), vec![1]);
     }
 
-    #[test]
-    fn unknown_named_errors() {
-        assert!(
-            desugar_err("fn f(x: int):\n    print(x)\nr := f(z=1)\n")
-                .message
-                .contains("unknown named argument 'z'")
-        );
-    }
-
-    #[test]
-    fn duplicate_positional_and_named_errors() {
-        assert!(
-            desugar_err("fn f(x: int, y: int):\n    print(x)\nr := f(1, x=2)\n")
-                .message
-                .contains("both positionally and by name")
-        );
-    }
-
-    #[test]
-    fn missing_required_with_named_errors() {
-        assert!(
-            desugar_err("fn f(x: int, y: int):\n    print(x)\nr := f(y=2)\n")
-                .message
-                .contains("missing required argument 'x'")
-        );
-    }
-
     // TICKET-066 W10-17: a named argument for a parameter that PRECEDES a variadic is falsely
     // rejected as "missing required argument", even though it IS supplied. Named args work with no
     // variadic present (`missing_required_with_named_errors` above passes), and a post-variadic
@@ -3761,40 +2147,6 @@ mod tests {
         desugar_ok("fn f(a: int, ...rest: int) -> int:\n    return a + rest.len()\nr := f(a=1)\n");
         desugar_ok(
             "fn g(a: int, b: int, ...r: int) -> int:\n    return a + b + r.len()\nr1 := g(1, b=2)\nr2 := g(b=2, a=1)\n",
-        );
-    }
-
-    #[test]
-    fn named_arg_at_or_after_the_variadic_is_rejected() {
-        assert!(
-            desugar_err(
-                "fn f(a: int, ...rest: int) -> int:\n    return a + rest.len()\nr := f(1, rest=2)\n"
-            )
-            .message
-            .contains("is the variadic parameter and cannot be passed by name")
-        );
-        assert!(
-            desugar_err(
-                "fn f(a: int, ...rest: int) -> int:\n    return a + rest.len()\nr := f(1, a=2)\n"
-            )
-            .message
-            .contains("specified both positionally and by name")
-        );
-    }
-
-    #[test]
-    fn named_on_value_call_left_intact_for_checker() {
-        // Swift-style keyword args through a function VALUE: a value call (Ident/expr callee) carrying
-        // named args is LEFT INTACT by desugar (named preserved) so the checker resolves it against the
-        // value's labels — no longer a desugar error.
-        let stmts = desugar_ok("g := fn(x: int): x\nr := g(x=1)\n");
-        assert_eq!(call_named_keys(&stmts), vec!["x".to_string()]);
-        // A METHOD-syntax callee (`recv.f(name=…)`) still routes to the method path and keeps the
-        // historical error (it does not resolve value keywords — no silent keyword drop).
-        assert!(
-            desugar_err("struct S:\n    v: int\nfn go(s: S):\n    s.missing(name=1)\n")
-                .message
-                .contains("only supported on functions, struct constructors, and struct methods")
         );
     }
 
@@ -3826,24 +2178,6 @@ mod tests {
         assert_eq!(
             call_named_keys(&s),
             vec!["sep".to_string(), "end".to_string()]
-        );
-    }
-
-    #[test]
-    fn print_unknown_kwarg_errors() {
-        assert!(
-            desugar_err("print(\"a\", foo=\"x\")\n")
-                .message
-                .contains("only accepts the named arguments 'sep' and 'end'")
-        );
-    }
-
-    #[test]
-    fn print_duplicate_kwarg_errors() {
-        assert!(
-            desugar_err("print(\"a\", sep=\"-\", sep=\".\")\n")
-                .message
-                .contains("only accepts the named arguments 'sep' and 'end'")
         );
     }
 
@@ -3900,39 +2234,6 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn method_fills_trailing_default() {
-        let s = desugar_ok(
-            "struct P:\n    n: int\n    fn bump(self, x: int = 5) -> int:\n        return self.n + x\np := P(1)\nr := p.bump()\n",
-        );
-        assert_eq!(method_call_arg_ints(&s), vec![5]);
-    }
-
-    #[test]
-    fn method_reorders_named() {
-        let s = desugar_ok(
-            "struct P:\n    n: int\n    fn span(self, a: int, b: int) -> int:\n        return a + b\np := P(1)\nr := p.span(b=2, a=1)\n",
-        );
-        assert_eq!(method_call_arg_ints(&s), vec![1, 2]);
-    }
-
-    #[test]
-    fn method_positional_plus_named() {
-        let s = desugar_ok(
-            "struct P:\n    n: int\n    fn span(self, a: int, b: int) -> int:\n        return a + b\np := P(1)\nr := p.span(1, b=2)\n",
-        );
-        assert_eq!(method_call_arg_ints(&s), vec![1, 2]);
-    }
-
-    #[test]
-    fn method_unknown_named_errors() {
-        assert!(desugar_err(
-            "struct P:\n    n: int\n    fn bump(self, x: int) -> int:\n        return x\np := P(1)\nr := p.bump(z=2)\n",
-        )
-        .message
-        .contains("unknown named argument 'z'"));
-    }
-
     /// A default may not reference a parameter — **including through an interpolated fragment**.
     ///
     /// `validate_defaults` runs BEFORE the `Str -> Interp` rewrite, so the name walk saw only a raw
@@ -3964,49 +2265,6 @@ mod tests {
         );
     }
 
-    /// The ONE shape a callee-filled default cannot cover, refused rather than silently cloned.
-    ///
-    /// A `Self`-typed default on a GENERIC host cannot become a free provider `fn`, so the CALLEE
-    /// fills it — which a short call encodes by pushing fewer values, and which therefore cannot
-    /// leave a HOLE before a supplied argument. The parser already forbids a required parameter
-    /// after a defaulted one, so only a KEYWORD call supplying a later parameter can produce this.
-    /// Falling back to the caller-scope clone here would keep, in the one corner nobody looks at,
-    /// exactly the defect this design removes.
-    #[test]
-    fn a_callee_filled_default_cannot_be_omitted_before_a_supplied_argument() {
-        assert!(
-            desugar_err(
-                "struct G[T]:\n    v: T\n    fn m(self, xs: List[Self] = mkl(), k: int = 9) -> int:\n        return xs.len() + k\nfn mkl[T]() -> List[G[T]]:\n    return []\nfn main():\n    print(G(1).m(k=3))\n",
-            )
-            .message
-            .contains("can only be omitted from the END of a call")
-        );
-    }
-
-    #[test]
-    fn ambiguous_method_named_errors() {
-        // Two structs define `set` with different params; a named call on an UNRESOLVABLE receiver
-        // (an unannotated closure param — no static struct type) can't be bound unambiguously.
-        // (A named call on a KNOWN receiver — `a := A(0); a.set(x=1)` — now resolves receiver-aware
-        // to A.set; see `ambiguous_method_named_resolves_on_known_receiver`.)
-        assert!(desugar_err(
-            "struct A:\n    n: int\n    fn set(self, x: int) -> int:\n        return x\nstruct B:\n    n: int\n    fn set(self, y: int) -> int:\n        return y\ng := fn(a): a.set(x=1)\n",
-        )
-        .message
-        .contains("multiple structs"));
-    }
-
-    #[test]
-    fn ambiguous_method_named_resolves_on_known_receiver() {
-        // With a statically-known receiver (`a := A(0)`), a named call to a name-colliding method
-        // binds receiver-aware to the RIGHT struct's spec — no "multiple structs" error (mirrors
-        // `builtin_named_method_known_receiver_normalized`, now extended to plain method names).
-        let s = desugar_ok(
-            "struct A:\n    n: int\n    fn set(self, x: int) -> int:\n        return x\nstruct B:\n    n: int\n    fn set(self, y: int) -> int:\n        return y\na := A(0)\nr := a.set(x=1)\n",
-        );
-        assert_eq!(method_call_arg_ints(&s), vec![1]);
-    }
-
     #[test]
     fn builtin_method_name_not_normalized() {
         // `push` is a builtin list method; a 0-arg call must NOT be rewritten even if a struct
@@ -4019,52 +2277,6 @@ mod tests {
     }
 
     #[test]
-    fn builtin_named_method_known_receiver_normalized() {
-        // A user struct method whose name collides with a builtin (`add`) DOES get named/default
-        // support when the receiver's struct type is statically known (a named local).
-        let s = desugar_ok(
-            "struct Counter:\n    n: int\n    fn add(self, amount: int = 1) -> int:\n        return self.n + amount\nc := Counter(0)\nr := c.add(amount=5)\n",
-        );
-        assert_eq!(method_call_arg_ints(&s), vec![5]);
-    }
-
-    #[test]
-    fn builtin_named_method_inline_ctor() {
-        // Inline ctor receiver `Counter(0).add(amount=5)` — struct type knowable syntactically.
-        let s = desugar_ok(
-            "struct Counter:\n    n: int\n    fn add(self, amount: int = 1) -> int:\n        return self.n + amount\nr := Counter(0).add(amount=5)\n",
-        );
-        assert_eq!(method_call_arg_ints(&s), vec![5]);
-    }
-
-    #[test]
-    fn builtin_default_filled_positional() {
-        // A 0-arg builtin-named user-method call on a known receiver fills the default.
-        let s = desugar_ok(
-            "struct Counter:\n    n: int\n    fn add(self, amount: int = 1) -> int:\n        return self.n + amount\nr := Counter(0).add()\n",
-        );
-        assert_eq!(method_call_arg_ints(&s), vec![1]);
-    }
-
-    #[test]
-    fn builtin_named_method_struct_returning_fn() {
-        // Struct-returning free fn receiver `mk().add(amount=5)` — return type names a struct.
-        let s = desugar_ok(
-            "struct Counter:\n    n: int\n    fn add(self, amount: int = 1) -> int:\n        return self.n + amount\nfn mk() -> Counter:\n    return Counter(0)\nr := mk().add(amount=5)\n",
-        );
-        assert_eq!(method_call_arg_ints(&s), vec![5]);
-    }
-
-    #[test]
-    fn enum_builtin_named_method_annotated_receiver() {
-        // An enum method reusing a builtin name (`map`) resolves on a type-annotated local receiver.
-        let s = desugar_ok(
-            "enum E:\n    A\n    B\n    fn map(self, n: int = 2) -> int:\n        return n\nm: E = E.A\nr := m.map(n=5)\n",
-        );
-        assert_eq!(method_call_arg_ints(&s), vec![5]);
-    }
-
-    #[test]
     fn real_builtin_set_add_untouched() {
         // A genuine builtin-type receiver: `s.add(3)` on a Set must NOT be rewritten, even though a
         // struct also defines `add` with a default. receiver_struct_ty is None for a Set local.
@@ -4072,72 +2284,6 @@ mod tests {
             "struct Counter:\n    n: int\n    fn add(self, amount: int = 1) -> int:\n        return self.n + amount\ns := Set([1, 2])\ns.add(3)\n",
         );
         assert_eq!(method_call_arg_ints(&s), vec![3]);
-    }
-
-    #[test]
-    fn builtin_named_unknowable_receiver_accurate_error() {
-        // Named args on a builtin-colliding name whose receiver type is NOT statically known: the
-        // diagnostic must be accurate (mentions the builtin-name clash), not the misleading
-        // "only supported on functions, struct constructors, and struct methods".
-        let e = desugar_err(
-            "struct Counter:\n    n: int\n    fn add(self, amount: int = 1) -> int:\n        return self.n + amount\ns := Set([1, 2])\ns.add(x=3)\n",
-        );
-        assert!(
-            e.message.contains("reuses a built-in method name"),
-            "got: {}",
-            e.message
-        );
-        assert!(
-            !e.message.contains("only supported on"),
-            "must not use the misleading message; got: {}",
-            e.message
-        );
-    }
-
-    #[test]
-    fn builtin_named_no_struct_defines_no_panic() {
-        // A builtin-named named-arg call where NO user struct defines it: clean error, no panic.
-        let e = desugar_err("s := Set([1, 2])\ns.add(x=3)\n");
-        assert!(
-            e.message.contains("reuses a built-in method name"),
-            "got: {}",
-            e.message
-        );
-    }
-
-    #[test]
-    fn builtin_named_fn_field_not_mislabeled_as_method() {
-        // A function-typed struct FIELD whose name collides with a builtin (`map`), called with a
-        // named arg, is field-access-then-call — NOT a method. It must fall through to the generic
-        // unsupported-named-args error, never the "reuses a built-in method name" method diagnostic
-        // (which would wrongly imply a typed-local would help). Guards the fn_fields omission.
-        let e = desugar_err(
-            "struct S:\n    map: fn(int) -> int\ns := S(fn(x: int) -> int: x)\ns.map(arg=1)\n",
-        );
-        assert!(
-            !e.message.contains("reuses a built-in method name"),
-            "fn-field call must not get the builtin-method-name diagnostic; got: {}",
-            e.message
-        );
-    }
-
-    #[test]
-    fn nested_call_normalized() {
-        // a defaulted call nested as an argument is also filled
-        let s = desugar_ok(
-            "fn g(a: int, b: int = 7):\n    print(a)\nfn f(x: int):\n    print(x)\nr := f(g(1))\n",
-        );
-        let last = s.last().unwrap();
-        let StmtKind::Let { value, .. } = &last.kind else {
-            panic!()
-        };
-        let ExprKind::Call { args, .. } = &value.kind else {
-            panic!()
-        };
-        let ExprKind::Call { args: inner, .. } = &args[0].kind else {
-            panic!("inner call")
-        };
-        assert_eq!(inner.len(), 2, "nested g(1) should fill default -> g(1, 7)");
     }
 
     /// TICKET-180 — a default spliced into two calls is two nodes, not one node placed twice.
@@ -4153,51 +2299,6 @@ mod tests {
         match &stmts.last().expect("a statement").kind {
             StmtKind::Let { value, .. } => value.clone(),
             other => panic!("expected a let, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn null_coalesce_survives_desugar() {
-        // W7-43 inverted this: the carrier is NOT lowered here any more (the choice needs the
-        // operand's type). What desugar still owes it is a NORMALIZED child on each side.
-        let stmts = desugar_ok(
-            "fn g(x: int, y: int = 7) -> int?:\n    return Some(x)\nx := g(1) ?? g(2, y=9)\n",
-        );
-        match last_let_value(&stmts).kind {
-            ExprKind::NullCoalesce { lhs, rhs, .. } => {
-                let args_of = |e: &Expr| -> usize {
-                    let ExprKind::Call { args, named, .. } = &e.kind else {
-                        panic!("expected a Call, got {:?}", e.kind)
-                    };
-                    assert!(named.is_empty(), "named must be bound to positional slots");
-                    args.len()
-                };
-                assert_eq!(args_of(&lhs), 2, "omitted default filled on the lhs");
-                assert_eq!(args_of(&rhs), 2, "named arg bound to a slot on the rhs");
-            }
-            other => panic!("expected a NullCoalesce, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn opt_chain_survives_desugar_with_a_normalized_call() {
-        // The carrier survives; `normalize_opt_call` still binds its named args and fills defaults
-        // (before W7-43 the lowered arm body got this from `walk_expr`'s ordinary `Call` tail).
-        let stmts = desugar_ok(
-            "struct P:\n    x: int\n    fn tag(self, a: int, b: int = 4) -> int:\n        return a\na := Some(P(1))\nv := a?.tag(1, b=9)\n",
-        );
-        match last_let_value(&stmts).kind {
-            ExprKind::OptChain { name, call, .. } => {
-                assert_eq!(name, "tag");
-                let c = call.expect("a method call");
-                assert!(
-                    c.named.is_empty(),
-                    "named must be bound to positional slots"
-                );
-                assert_eq!(c.args.len(), 2);
-                assert!(matches!(c.args[1].kind, ExprKind::Int(9)));
-            }
-            other => panic!("expected an OptChain, got {other:?}"),
         }
     }
 
@@ -4347,131 +2448,16 @@ mod tests {
 
     // ===== non-constant default expressions =====
 
-    /// The last `let` in a module — NOT `stmts.last()`, since W7-51 APPENDS the synthesized
-    /// providers after the user's own statements (top-level `fn`s are hoisted, so position is
-    /// irrelevant to behavior, but it moves the tail).
-    fn last_let(stmts: &[Stmt]) -> &Expr {
-        stmts
-            .iter()
-            .rev()
-            .find_map(|st| match &st.kind {
-                StmtKind::Let { value, .. } => Some(value),
-                _ => None,
-            })
-            .expect("a let statement")
-    }
-
-    /// The single zero-arg argument an omitting call site now carries, and the body of the provider
-    /// it names. Panics with a readable message if the call was not rewritten into a provider call.
-    fn provider_arg<'a>(stmts: &'a [Stmt], call: &Expr) -> &'a Expr {
-        let ExprKind::Call { args, .. } = &call.kind else {
-            panic!("expected a Call, got {:?}", call.kind)
-        };
-        assert_eq!(args.len(), 1, "the omitted default was filled");
-        let ExprKind::Call {
-            callee,
-            args: pargs,
-            ..
-        } = &args[0].kind
-        else {
-            panic!(
-                "the filled slot must be a provider CALL, got {:?}",
-                args[0].kind
-            )
-        };
-        assert!(pargs.is_empty(), "a provider takes no arguments");
-        let ExprKind::Ident(name) = &callee.kind else {
-            panic!("provider callee must be a bare Ident")
-        };
-        assert!(
-            name.starts_with(PROVIDER_PREFIX),
-            "expected a `$def$…` provider, got '{name}'"
-        );
-        for st in stmts {
-            if let StmtKind::Fn(decl) = &st.kind
-                && &decl.name == name
-            {
-                assert!(
-                    !decl.is_test,
-                    "a provider must not be discovered by `chezzi test`"
-                );
-                assert!(decl.ret.is_some(), "a provider declares its return type");
-                let [
-                    Stmt {
-                        kind: StmtKind::Return(Some(e)),
-                        ..
-                    },
-                ] = decl.body.as_slice()
-                else {
-                    panic!("a provider body is exactly `return <default>`")
-                };
-                return e;
-            }
-        }
-        panic!("no provider named '{name}' was synthesized into the module")
-    }
-
-    #[test]
-    fn non_const_default_filled() {
-        // W7-51 — a non-literal default is no longer cloned into the caller: the call site gets a
-        // zero-arg call to a provider synthesized in the DECLARING module, whose body is the
-        // default expression.
-        let s = desugar_ok(
-            "fn g() -> int:\n    return 9\nfn f(x: int = g() + 1):\n    print(x)\nr := f()\n",
-        );
-        let body = provider_arg(&s, last_let(&s));
-        assert!(
-            matches!(body.kind, ExprKind::Binary { .. }),
-            "the provider returns the `g() + 1` expr, got {:?}",
-            body.kind
-        );
-    }
-
     #[test]
     fn a_literal_default_is_still_cloned_inline() {
-        // The inline class costs no call and records no side-table key — `= 1 + 2` is spliced as
-        // the literal expression itself, exactly as before W7-51.
+        // The inline class is not provided: `= 1 + 2` is filled from the declaration itself.
         let s = desugar_ok("fn f(x: int = 1 + 2):\n    print(x)\nr := f()\n");
-        let ExprKind::Call { args, .. } = &last_let(&s).kind else {
-            panic!("call")
-        };
-        assert!(
-            matches!(args[0].kind, ExprKind::Binary { .. }),
-            "an inline literal default is cloned, not provided — got {:?}",
-            args[0].kind
-        );
         assert!(
             !s.iter().any(
                 |st| matches!(&st.kind, StmtKind::Fn(d) if d.name.starts_with(PROVIDER_PREFIX))
             ),
             "no provider is synthesized for a self-contained literal"
         );
-    }
-
-    #[test]
-    fn a_self_referencing_default_is_a_cycle_error() {
-        // Before W7-51 this silently expanded to a three-deep `f(f(f()))` (the two-pass fixed
-        // point) and was then rejected as an arity cascade, not as a cycle; as a provider it would
-        // be unbounded recursion, so it is refused here, naming the parameter.
-        let e = desugar_err("fn f(x: int = f()) -> int:\n    return x\nr := f()\n");
-        assert!(
-            e.to_string().contains("is cyclic") && e.to_string().contains("'x' of 'f'"),
-            "got: {e}"
-        );
-    }
-
-    #[test]
-    fn a_self_referencing_field_default_is_a_cycle_error_without_calling_it_a_parameter() {
-        // A provider name records the slot but NOT whether it is a parameter or a struct field, so
-        // the label is noun-free. Measured before that change: `the default value for parameter 'n'
-        // of 'S' is cyclic` — a field called a parameter.
-        let e = desugar_err("struct S:\n    n: int = S().n\nr := S().n\n");
-        let s = e.to_string();
-        assert!(
-            s.contains("is cyclic") && s.contains("'n' of 'S'"),
-            "got: {e}"
-        );
-        assert!(!s.contains("parameter"), "a field is not a parameter: {e}");
     }
 
     #[test]
@@ -4503,153 +2489,5 @@ mod tests {
         );
     }
 
-    #[test]
-    fn defaulted_fn_call_in_default_is_normalized() {
-        // `f(x = g())` where `g(a = 7)`: the spliced default `g()` must itself be normalized to
-        // `g(7)` (second pass), not left under-arity.
-        let s = desugar_ok(
-            "fn g(a: int = 7) -> int:\n    return a\nfn f(x: int = g()):\n    print(x)\nr := f()\n",
-        );
-        // f's provider body is `g(7)` — `g`'s own omitted default was filled by the same one pass.
-        let body = provider_arg(&s, last_let(&s));
-        let ExprKind::Call { args: ginner, .. } = &body.kind else {
-            panic!("inner call g, got {:?}", body.kind)
-        };
-        assert_eq!(
-            ginner.len(),
-            1,
-            "g()'s own default was filled inside the provider body"
-        );
-    }
-
-    #[test]
-    fn carrier_in_default_survives_with_a_normalized_child() {
-        // W7-43 inverted this: a `??` carrier in a default SURVIVES desugar. What must still hold is
-        // that the walk normalized its children — here `h()`'s own omitted default is filled inside
-        // the carrier's lhs, now in the provider body rather than a spliced clone.
-        let s = desugar_ok(
-            "fn h(k: int = 3) -> int?:\n    return Some(k)\nfn f(x: int = h() ?? 0):\n    print(x)\nr := f()\n",
-        );
-        let body = provider_arg(&s, last_let(&s));
-        let ExprKind::NullCoalesce { lhs, .. } = &body.kind else {
-            panic!("carrier survives, got {:?}", body.kind)
-        };
-        let ExprKind::Call { args: hargs, .. } = &lhs.kind else {
-            panic!("call h")
-        };
-        assert_eq!(
-            hargs.len(),
-            1,
-            "h()'s own default was filled inside the carrier"
-        );
-    }
-
     // ===== variadic collapse =====
-
-    /// Pull the last call's positional args as an ExprKind slice.
-    fn last_call_args(stmts: &[Stmt]) -> Vec<ExprKind> {
-        let last = stmts.last().expect("a statement");
-        let expr = match &last.kind {
-            StmtKind::Let { value, .. } => value,
-            StmtKind::Expr(e) => e,
-            other => panic!("expected let/expr, got {other:?}"),
-        };
-        let ExprKind::Call { args, named, .. } = &expr.kind else {
-            panic!("expected a Call, got {:?}", expr.kind)
-        };
-        assert!(
-            named.is_empty(),
-            "named must be cleared after variadic collapse"
-        );
-        args.iter().map(|a| a.kind.clone()).collect()
-    }
-
-    fn list_ints(k: &ExprKind) -> Vec<i64> {
-        let ExprKind::List(es, _) = k else {
-            panic!("expected a List literal, got {k:?}");
-        };
-        es.iter()
-            .map(|e| match e.kind {
-                ExprKind::Int(n) => n,
-                ref o => panic!("expected int, got {o:?}"),
-            })
-            .collect()
-    }
-
-    #[test]
-    fn variadic_sweeps_positionals_into_list() {
-        let s = desugar_ok("fn f(...xs: int):\n    return\nr := f(1, 2, 3)\n");
-        let args = last_call_args(&s);
-        assert_eq!(args.len(), 1);
-        assert_eq!(list_ints(&args[0]), vec![1, 2, 3]);
-    }
-
-    #[test]
-    fn variadic_zero_args_is_empty_list() {
-        let s = desugar_ok("fn f(...xs: int):\n    return\nr := f()\n");
-        let args = last_call_args(&s);
-        assert_eq!(args.len(), 1);
-        assert_eq!(list_ints(&args[0]), Vec::<i64>::new());
-    }
-
-    #[test]
-    fn variadic_keyword_only_tail_bound_by_name() {
-        let s = desugar_ok("fn g(...xs: int, flag: bool):\n    return\nr := g(1, flag=true)\n");
-        let args = last_call_args(&s);
-        assert_eq!(args.len(), 2);
-        assert_eq!(list_ints(&args[0]), vec![1]);
-        assert!(matches!(args[1], ExprKind::Bool(true)));
-    }
-
-    #[test]
-    fn variadic_missing_required_keyword_errors() {
-        let e = desugar_err("fn g(...xs: int, flag: bool):\n    return\nr := g(1)\n");
-        assert!(
-            e.message
-                .contains("missing required keyword argument 'flag'"),
-            "got: {}",
-            e.message
-        );
-    }
-
-    #[test]
-    fn variadic_stray_positional_swept_not_placed_in_kwonly() {
-        // `true` is swept into xs (a positional can never occupy the keyword-only slot); flag then
-        // has no value → missing required keyword arg.
-        let e = desugar_err("fn g(...xs: int, flag: bool):\n    return\nr := g(1, 2, true)\n");
-        assert!(
-            e.message
-                .contains("missing required keyword argument 'flag'"),
-            "got: {}",
-            e.message
-        );
-    }
-
-    #[test]
-    fn variadic_naming_the_variadic_errors() {
-        let e = desugar_err("fn f(...xs: int):\n    return\nr := f(xs=1)\n");
-        assert!(
-            e.message.contains("positional") && e.message.contains("xs"),
-            "got: {}",
-            e.message
-        );
-    }
-
-    #[test]
-    fn variadic_keyword_only_default_filled() {
-        let s = desugar_ok("fn g(...xs: int, flag: bool = false):\n    return\nr := g(1, 2)\n");
-        let args = last_call_args(&s);
-        assert_eq!(args.len(), 2);
-        assert_eq!(list_ints(&args[0]), vec![1, 2]);
-        assert!(matches!(args[1], ExprKind::Bool(false)));
-    }
-
-    #[test]
-    fn variadic_with_leading_positional() {
-        let s = desugar_ok("fn f(a: str, ...xs: int):\n    return\nr := f(\"h\", 1, 2)\n");
-        let args = last_call_args(&s);
-        assert_eq!(args.len(), 2);
-        assert!(matches!(args[0], ExprKind::Str(ref s) if s == "h"));
-        assert_eq!(list_ints(&args[1]), vec![1, 2]);
-    }
 }

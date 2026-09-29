@@ -6346,9 +6346,9 @@ fn m24_2_a_spawn_and_defer_block_without_a_witness_capture_none() {
 // alignment has to be readable. Shift either side by one column and the fault disappears — which is
 // what isolates it to the key rather than to the lowering.
 
-/// W7-49 (1/3) — `KeywordTable`. `lib.chz`'s default `g(a=7, b=9)` and `main.chz`'s own
+/// W7-49 (1/3) — the retired span-keyed keyword table (now `CallPlanTable`, keyed by call NodeId). `lib.chz`'s default `g(a=7, b=9)` and `main.chz`'s own
 /// `g(b=1, a=2)` put their FIRST NAMED-ARG VALUE at the same `line:col`, so before `Span::file` they
-/// shared one `KeywordKey`: the later insert won and lib's identity permutation was applied to
+/// shared one key: the later insert won and lib's identity permutation was applied to
 /// main's reversed call.
 ///
 /// Fails on `19f7696a` with `709` / **`102`** — `h2(a=1, b=2)`, lib's permutation on main's call —

@@ -188,7 +188,7 @@ pub(crate) fn parse_interpolation(lit_tok: &StrLit, span: Span) -> Result<Vec<Ch
                 // depth alike (`docs/gaps.md` M24-6).
                 //
                 // This is not cosmetic. A span is a cross-half TABLE KEY (`WitnessTable`,
-                // `KeywordTable`, `CarrierTable`), so two fragments sharing a span means the second
+                // `WitnessTable`, `CarrierTable`), so two fragments sharing a span means the second
                 // call silently takes the first's entry — a wrong value under a green `chezzi
                 // check`, measured and fixed once already in `2a27697e` (which bought the property
                 // by keeping a monotone OFFSET; this buys it outright, because two distinct source

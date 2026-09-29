@@ -95,7 +95,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
         crate::checker::resolve_call_tables(graph);
     reject_table_conflicts(conflicts)?;
     c.for_binds = fb;
-    c.keyword_calls = kw;
+    c.call_plans = kw;
     c.witnesses = wt;
     c.carriers = ct;
     c.proto_eq_calls = pe;
@@ -177,7 +177,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
         crate::checker::resolve_call_tables_standalone(&module.stmts);
     reject_table_conflicts(conflicts)?;
     c.for_binds = fb;
-    c.keyword_calls = kw;
+    c.call_plans = kw;
     c.witnesses = wt;
     c.carriers = ct;
     c.proto_eq_calls = pe;
@@ -205,6 +205,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     c.program.field_ic_sites = c.field_ic_next;
     c.program.method_ic_sites = c.method_ic_next;
     c.program.rebuild_struct_names();
+    c.build_provider_table()?;
     c.build_eq_hooks();
     Ok(c.program)
 }
@@ -282,11 +283,10 @@ struct Compiler {
     /// (collision-proof). Filled once in `compile_graph` (multi-file) or by
     /// `resolve_extern_signatures_standalone` (single-file) — the ONE extern-type resolver.
     extern_sigs: crate::checker::ExternTable,
-    /// Swift-style keyword-arg resolution for VALUE calls, keyed `(graph module index, call span)`;
-    /// `perm[i]` = index into `[positional args ++ named exprs]` that fills parameter slot `i`. Filled
-    /// in `compile_graph`/`compile_module_standalone` from the checker's `resolve_keyword_calls`;
-    /// consumed by the value path of `compile_call` to emit a positional `Op::Call`.
-    keyword_calls: crate::checker::KeywordTable,
+    /// The checker's argument slot plan per bound call, keyed `(graph module index, call NodeId)`
+    /// (see [`crate::checker::CallPlanTable`]). Filled in `compile_graph`/`compile_module_standalone`
+    /// from `resolve_call_tables`; read only by [`Self::compile_plan_args`].
+    call_plans: crate::checker::CallPlanTable,
     /// M24 — the checker-produced static-witness contract (see [`crate::checker::WitnessTable`]),
     /// consumed verbatim: `fns` drives the hidden trailing `$w:T` params a generic fn's proto gets,
     /// `calls` drives the extra argument each call site pushes.
@@ -342,7 +342,8 @@ struct Compiler {
     /// argument short. A name this module declares as a top-level `fn` is never in here (the checker
     /// rejects that collision outright), so a local fn always wins by construction.
     imported_fns: HashMap<String, (usize, String)>,
-    /// String-interpolation fragment discriminators for the [`crate::checker::KeywordKey`]: the
+    /// String-interpolation fragment discriminators for the [`crate::checker::WitnessKey`] and
+    /// [`crate::checker::CarrierKey`]: the
     /// whole-string span + the fragment's 0-based ordinal, maintained (save/restore) around each
     /// fragment in `compile_str`. Mirrors the checker's `kw_frag_ctx`/`kw_frag_ord` so the keyword-call
     /// key computed at lookup matches the one the checker recorded. Inert (`Span::default()`/`0`)
@@ -577,7 +578,7 @@ impl Compiler {
             current_module_idx: 0,
             json_to_value_home: None,
             extern_sigs: crate::checker::ExternTable::new(),
-            keyword_calls: crate::checker::KeywordTable::new(),
+            call_plans: crate::checker::CallPlanTable::new(),
             witnesses: crate::checker::WitnessTable::default(),
             carriers: crate::checker::CarrierTable::new(),
             proto_eq_calls: crate::checker::ProtoEqTable::new(),
@@ -1920,7 +1921,11 @@ impl Compiler {
                 // M24-5b — `spawn Type.m(..)`: no receiver value to hold, so it rides the eager-args
                 // wrapper instead of `Op::SpawnMethod`.
                 if self.receiverless_call_head(callee)? {
-                    let n = self.compile_receiverless_target(fc, callee, args, named, call.span)?;
+                    let n = self.compile_receiverless_target(
+                        fc,
+                        (call.id, callee, args, named),
+                        call.span,
+                    )?;
                     fc.emit(Op::SpawnCall(n, 0), call.span);
                     return Ok(());
                 }
@@ -1944,44 +1949,28 @@ impl Compiler {
                         return Ok(());
                     }
                     self.compile_expr(fc, obj)?;
-                    self.compile_args(fc, args)?;
+                    let srcs =
+                        self.compile_call_srcs(fc, call.id, callee, args, named, call.span)?;
                     // M24-5: the hidden witness arguments ride LAST, exactly as they do on the eager
                     // `Op::CallMethod`, so the widened `argc` reaches the same proto.
                     let w =
                         self.emit_member_witness_args(fc, callee, name, *name_span, call.span)?;
-                    let fresh = self.fresh_mask(Some(obj), args.iter());
+                    let fresh = self.fresh_mask_srcs(Some(obj), &srcs);
                     fc.emit(
-                        Op::SpawnMethod(name.clone(), args.len() + w, fresh),
+                        Op::SpawnMethod(name.clone(), srcs.len() + w, fresh),
                         call.span,
                     );
-                } else if !named.is_empty() {
-                    // A spawned VALUE call carrying keyword arguments: reorder to positional by the
-                    // checker-recorded permutation, then spawn positionally (same as the eager form).
-                    let perm = self.keyword_perm(named, call.span)?;
-                    self.compile_expr(fc, callee)?;
-                    let permuted: Vec<&Expr> = perm
-                        .iter()
-                        .map(|&ci| {
-                            if ci < args.len() {
-                                &args[ci]
-                            } else {
-                                &named[ci - args.len()].1
-                            }
-                        })
-                        .collect();
-                    for &e in &permuted {
-                        self.compile_expr(fc, e)?;
-                    }
-                    // M24-5: TRAILING — after the permuted args, never in source order.
-                    let w = self.emit_indirect_witness_args(fc, callee, call.span)?;
-                    let fresh = self.fresh_mask(None, permuted);
-                    fc.emit(Op::SpawnCall(perm.len() + w, fresh), call.span);
                 } else {
+                    // A spawned value call: its arguments -- default fills included -- are
+                    // evaluated here, at the statement, in the checker's slot plan when it bound
+                    // the call.
                     self.compile_expr(fc, callee)?;
-                    self.compile_args(fc, args)?;
+                    let srcs =
+                        self.compile_call_srcs(fc, call.id, callee, args, named, call.span)?;
+                    // M24-5: TRAILING — after the arguments, never in source order.
                     let w = self.emit_indirect_witness_args(fc, callee, call.span)?;
-                    let fresh = self.fresh_mask(None, args.iter());
-                    fc.emit(Op::SpawnCall(args.len() + w, fresh), call.span);
+                    let fresh = self.fresh_mask_srcs(None, &srcs);
+                    fc.emit(Op::SpawnCall(srcs.len() + w, fresh), call.span);
                 }
                 Ok(())
             }
@@ -3448,7 +3437,7 @@ impl Compiler {
                 args,
                 named,
                 ..
-            } => self.compile_call(fc, callee, args, named, expr.span)?,
+            } => self.compile_call(fc, callee, args, named, expr.span, expr.id)?,
             ExprKind::Field { obj, name, .. } => {
                 // A tuple slot (`t.0`) is a value, never a name; everything else reads the
                 // checker's record on the `Field`.
@@ -4013,7 +4002,8 @@ impl Compiler {
         // M24-5b — `defer Type.m(..)`: no receiver value to hold, so it rides the eager-args wrapper
         // instead of `Op::DeferMethod`.
         if self.receiverless_call_head(callee)? {
-            let n = self.compile_receiverless_target(fc, callee, args, named, call.span)?;
+            let n =
+                self.compile_receiverless_target(fc, (call.id, callee, args, named), call.span)?;
             fc.emit(Op::DeferCall(n), call.span);
             return Ok(());
         }
@@ -4036,35 +4026,18 @@ impl Compiler {
                 return Ok(());
             }
             self.compile_expr(fc, obj)?;
-            self.compile_args(fc, args)?;
+            let argc = self.compile_call_args(fc, call.id, callee, args, named, call.span)?;
             // M24-5: the hidden witness arguments ride LAST, exactly as on the eager `Op::CallMethod`.
             let w = self.emit_member_witness_args(fc, callee, name, *name_span, call.span)?;
-            fc.emit(Op::DeferMethod(name.clone(), args.len() + w), call.span);
+            fc.emit(Op::DeferMethod(name.clone(), argc + w), call.span);
             return Ok(());
         }
-        // A deferred VALUE call carrying keyword arguments (Swift-style): reorder the combined
-        // `[positional ++ named]` args by the checker-recorded permutation, then defer positionally —
-        // same lowering as the eager value keyword call, just via `DeferCall`.
-        if !named.is_empty() {
-            let perm = self.keyword_perm(named, call.span)?;
-            self.compile_expr(fc, callee)?;
-            for &ci in &perm {
-                let e = if ci < args.len() {
-                    &args[ci]
-                } else {
-                    &named[ci - args.len()].1
-                };
-                self.compile_expr(fc, e)?;
-            }
-            // M24-5: TRAILING — after the permuted args, never in source order.
-            let w = self.emit_indirect_witness_args(fc, callee, call.span)?;
-            fc.emit(Op::DeferCall(perm.len() + w), call.span);
-            return Ok(());
-        }
+        // A deferred value call: its arguments -- default fills included -- are evaluated here, at
+        // the statement, in the checker's slot plan when it bound the call.
         self.compile_expr(fc, callee)?;
-        self.compile_args(fc, args)?;
+        let argc = self.compile_call_args(fc, call.id, callee, args, named, call.span)?;
         let w = self.emit_indirect_witness_args(fc, callee, call.span)?;
-        fc.emit(Op::DeferCall(args.len() + w), call.span);
+        fc.emit(Op::DeferCall(argc + w), call.span);
         Ok(())
     }
 
@@ -4244,11 +4217,12 @@ impl Compiler {
         fc: &mut FnComp,
         type_key: String,
         name: &str,
-        args: &[Expr],
+        call: (crate::ast::NodeId, &Expr, &[Expr], &[(String, Expr)]),
         name_span: Span,
         span: Span,
     ) -> Result<(), CompileError> {
-        self.compile_args(fc, args)?;
+        let (call_id, callee, args, named) = call;
+        let argc = self.compile_call_args(fc, call_id, callee, args, named, span)?;
         let w = match self.member_witness_srcs(name_span).cloned() {
             Some(srcs) => self.emit_witness_args(fc, &srcs, name, span)?,
             None => 0,
@@ -4257,7 +4231,7 @@ impl Compiler {
             Op::CallStatic {
                 type_key,
                 method: name.to_string(),
-                argc: args.len() + w,
+                argc: argc + w,
             },
             span,
         );
@@ -4317,12 +4291,16 @@ impl Compiler {
     fn compile_receiverless_target(
         &mut self,
         fc: &mut FnComp,
-        callee: &Expr,
-        args: &[Expr],
-        named: &[(String, Expr)],
+        call: (crate::ast::NodeId, &Expr, &[Expr], &[(String, Expr)]),
         span: Span,
     ) -> Result<usize, CompileError> {
-        let argc = args.len() + named.len();
+        let (call_id, callee, args, named) = call;
+        // The arguments -- default fills included -- are evaluated here, at the statement; the
+        // replay is a positional call of that many values with no plan (SYNTH id).
+        let argc = self
+            .call_plans
+            .get(&(self.current_module_idx, call_id.0))
+            .map_or(args.len(), Vec::len);
         let snap = fc.snapshot_entries();
         // No free-name walk exists for a SYNTHESIZED body: the wrapper replays `callee(args)`, which
         // is a call site of the ENCLOSING body — so every witness rides (`None`), and the replay's
@@ -4343,19 +4321,18 @@ impl Compiler {
                 }
             })
             .collect();
-        let kw: Vec<(String, Expr)> = named
-            .iter()
-            .map(|(k, _)| k.clone())
-            .zip(params[args.len()..].iter().cloned())
-            .collect();
-        self.compile_call(&mut child, callee, &params[..args.len()], &kw, span)?;
+        self.compile_call(
+            &mut child,
+            callee,
+            &params,
+            &[],
+            span,
+            crate::ast::NodeId::SYNTH,
+        )?;
         child.emit(Op::Return, span);
         let pid = self.finish(child);
         fc.emit(Op::MakeClosure(pid, entries), span);
-        self.compile_args(fc, args)?;
-        for (_, e) in named {
-            self.compile_expr(fc, e)?;
-        }
+        self.compile_call_args(fc, call_id, callee, args, named, span)?;
         Ok(argc)
     }
 
@@ -4726,11 +4703,12 @@ impl Compiler {
         args: &[Expr],
         named: &[(String, Expr)],
         span: Span,
+        call_id: crate::ast::NodeId,
     ) -> Result<(), CompileError> {
         // A default-argument provider call whose declaring module this one cannot name — no synthetic
         // import was (or could be) emitted for it, so there is no global slot to read. Lower it to a
         // direct, call-time reference to the definer's proto. See [`Op::MakeFuncIn`] and
-        // `desugar::Walker::splice_default`. Same-module and in-closure providers have a global slot
+        // `Checker::bind_call`. Same-module and in-closure providers have a global slot
         // and fall through to the ordinary path below.
         if let ExprKind::Ident(n) = &callee.kind
             && matches!(self.resolution(callee)?, Resolution::Provider)
@@ -4752,8 +4730,8 @@ impl Compiler {
             // `obj.name` names; a type head is never compiled, a module or value receiver is.
             match self.resolution(callee)?.clone() {
                 Resolution::StructCtor(key) => {
-                    self.compile_args(fc, args)?;
-                    fc.emit(Op::NewStruct(key, args.len()), span);
+                    let argc = self.compile_call_args(fc, call_id, callee, args, named, span)?;
+                    fc.emit(Op::NewStruct(key, argc), span);
                     return Ok(());
                 }
                 Resolution::NewTypeCtor(key) => {
@@ -4767,7 +4745,14 @@ impl Compiler {
                     return Ok(());
                 }
                 Resolution::Static { type_key, method } => {
-                    self.emit_call_static(fc, type_key, &method, args, *name_span, span)?;
+                    self.emit_call_static(
+                        fc,
+                        type_key,
+                        &method,
+                        (call_id, callee, args, named),
+                        *name_span,
+                        span,
+                    )?;
                     return Ok(());
                 }
                 Resolution::WitnessStatic(t) => {
@@ -4775,12 +4760,12 @@ impl Compiler {
                         message: format!("internal: no witness for type parameter '{t}' here"),
                         span,
                     })?;
-                    self.compile_args(fc, args)?;
+                    let argc = self.compile_call_args(fc, call_id, callee, args, named, span)?;
                     fc.emit_witness(w, span);
                     fc.emit(
                         Op::CallStaticDyn {
                             method: name.clone(),
-                            argc: args.len(),
+                            argc,
                         },
                         span,
                     );
@@ -4799,13 +4784,13 @@ impl Compiler {
             }
             if let Some(srcs) = self.witness_srcs(callee, name, span)? {
                 self.compile_expr(fc, obj)?;
-                self.compile_args(fc, args)?;
+                let argc = self.compile_call_args(fc, call_id, callee, args, named, span)?;
                 let w = self.emit_witness_args(fc, &srcs, name, span)?;
                 let ic = self.next_method_ic();
                 fc.emit(
                     Op::CallMethod {
                         name: name.clone(),
-                        argc: args.len() + w,
+                        argc: argc + w,
                         ic,
                     },
                     span,
@@ -4851,7 +4836,7 @@ impl Compiler {
             // checker's record is keyed on the method-name token, which is unique per link of a
             // postfix chain (`h.make(a).make(b)` shares one call span, not one name token).
             self.compile_expr(fc, obj)?;
-            self.compile_args(fc, args)?;
+            let argc = self.compile_call_args(fc, call_id, callee, args, named, span)?;
             let w = match self.member_witness_srcs(*name_span).cloned() {
                 Some(srcs) => self.emit_witness_args(fc, &srcs, name, span)?,
                 None => 0,
@@ -4860,7 +4845,7 @@ impl Compiler {
             fc.emit(
                 Op::CallMethod {
                     name: name.clone(),
-                    argc: args.len() + w,
+                    argc: argc + w,
                     ic,
                 },
                 span,
@@ -4892,7 +4877,14 @@ impl Compiler {
                 }
                 Resolution::Static { type_key, method } => {
                     debug_assert_eq!(&method, name);
-                    self.emit_call_static(fc, type_key, name, args, *name_span, span)?;
+                    self.emit_call_static(
+                        fc,
+                        type_key,
+                        name,
+                        (call_id, callee, args, named),
+                        *name_span,
+                        span,
+                    )?;
                     return Ok(());
                 }
                 _ => {}
@@ -4904,8 +4896,8 @@ impl Compiler {
                     return self.compile_builtin_call(fc, &name, args, named, span);
                 }
                 Resolution::StructCtor(key) => {
-                    self.compile_args(fc, args)?;
-                    fc.emit(Op::NewStruct(key, args.len()), span);
+                    let argc = self.compile_call_args(fc, call_id, callee, args, named, span)?;
+                    fc.emit(Op::NewStruct(key, argc), span);
                     return Ok(());
                 }
                 Resolution::NewTypeCtor(key) => {
@@ -4932,48 +4924,20 @@ impl Compiler {
         if let ExprKind::Ident(fname) = &callee.kind
             && let Some(srcs) = self.witness_srcs(callee, fname, span)?
         {
-            // `named` needs no handling here: desugar has already normalized every keyword argument
-            // of a by-name call into its positional slot, so `args` is the full argument list.
             self.compile_expr(fc, callee)?;
-            self.compile_args(fc, args)?;
+            let argc = self.compile_call_args(fc, call_id, callee, args, named, span)?;
             let w = self.emit_witness_args(fc, &srcs, fname, span)?;
-            fc.emit(Op::Call(args.len() + w), span);
+            fc.emit(Op::Call(argc + w), span);
             return Ok(());
         }
-        // General callable value.
-        // Swift-style keyword arguments through a function VALUE (`g(name="Bob")`): the checker
-        // recorded a slot PERMUTATION over the combined `[positional args ++ named exprs]` list. Emit
-        // the callee, then the combined exprs in slot order, and a plain positional `Op::Call` — the
-        // runtime ABI is unchanged. Positional-only calls (`named` empty) never consult the table.
-        if !named.is_empty() {
-            let perm = self.keyword_perm(named, span)?;
-            self.compile_expr(fc, callee)?;
-            for &ci in &perm {
-                let e = if ci < args.len() {
-                    &args[ci]
-                } else {
-                    &named[ci - args.len()].1
-                };
-                self.compile_expr(fc, e)?;
-            }
-            fc.emit(Op::Call(perm.len()), span);
-            return Ok(());
-        }
+        // General callable value: the checker's slot plan, when it bound this call, else the
+        // arguments as written.
         self.compile_expr(fc, callee)?;
-        self.compile_args(fc, args)?;
-        fc.emit(Op::Call(args.len()), span);
+        let argc = self.compile_call_args(fc, call_id, callee, args, named, span)?;
+        fc.emit(Op::Call(argc), span);
         Ok(())
     }
 
-    /// The checker-recorded slot PERMUTATION for a value call carrying keyword arguments. A MISSING
-    /// entry is a hard error, never a fall-through: the plain positional `Op::Call(args.len())` this
-    /// used to fall through to silently DROPPED every named argument — a wrong value under a green
-    /// `chezzi check`, where the carrier (`compile_expr`'s `?.` arm) and witness (`witness_srcs`)
-    /// lookups both faulted (`docs/gaps.md` W7-49). Only ever called with `named` non-empty, which is
-    /// exactly the condition the checker records under; `print(sep=…, end=…)` — the one path that
-    /// deliberately leaves `named` populated without a table entry — returns from the `prelude_fn`
-    /// arm long before any of the three call sites, and `spawn`/`defer` of a `print` with named args
-    /// is a type error.
     /// TICKET-180 — what the name head `e` denotes: the checker's recorded [`Resolution`], the
     /// ONLY source. A miss is an internal error: a checker arm returned without recording, so fix
     /// that arm and never add a fallback here. A compiler-synthesized node
@@ -5013,26 +4977,130 @@ impl Compiler {
             })
     }
 
-    fn keyword_perm(
-        &self,
-        named: &[(String, Expr)],
+    /// Push the arguments of the call `call_id` in the checker's slot plan
+    /// ([`crate::checker::CallPlanTable`]), and return, per pushed value, the user expression it came
+    /// from (`None` for a default fill or a variadic pack). With no plan: `Ok(None)` when `named` is
+    /// empty (the call is positional as written), and an internal error otherwise -- a positional
+    /// fall-through would silently drop every named argument.
+    fn compile_plan_args<'e>(
+        &mut self,
+        fc: &mut FnComp,
+        call_id: crate::ast::NodeId,
+        callee: &Expr,
+        args: &'e [Expr],
+        named: &'e [(String, Expr)],
         span: Span,
-    ) -> Result<Vec<usize>, CompileError> {
-        self.keyword_calls
-            .get(&crate::checker::keyword_key(
-                self.current_module_idx,
-                self.kw_frag_ctx,
-                self.kw_frag_ord,
-                named,
-                span,
-            ))
+    ) -> Result<Option<Vec<Option<&'e Expr>>>, CompileError> {
+        let Some(plan) = self
+            .call_plans
+            .get(&(self.current_module_idx, call_id.0))
             .cloned()
-            .ok_or_else(|| CompileError {
-                message: "internal: no keyword-argument permutation recorded for this call — the \
-                          type-checker and the backend disagree about this expression"
+        else {
+            if named.is_empty() {
+                return Ok(None);
+            }
+            return Err(CompileError {
+                message: "internal: no call plan recorded for this call -- the type-checker and \
+                          the backend disagree"
                     .to_string(),
                 span,
-            })
+            });
+        };
+        let pick = |ci: usize| -> &'e Expr {
+            if ci < args.len() {
+                &args[ci]
+            } else {
+                &named[ci - args.len()].1
+            }
+        };
+        let mut srcs = Vec::with_capacity(plan.len());
+        for fill in &plan {
+            match fill {
+                crate::checker::ArgFill::Arg(ci) => {
+                    let e = pick(*ci);
+                    self.compile_expr(fc, e)?;
+                    srcs.push(Some(e));
+                }
+                crate::checker::ArgFill::Pack(cis) => {
+                    let pack = Expr::synthetic(
+                        ExprKind::List(
+                            cis.iter().map(|&ci| pick(ci).clone()).collect(),
+                            Some(crate::checker::witness_key_span(callee, span)),
+                        ),
+                        span,
+                    );
+                    self.compile_expr(fc, &pack)?;
+                    srcs.push(None);
+                }
+                crate::checker::ArgFill::Provider(name) => {
+                    let id = self.provider_id(name);
+                    fc.emit(Op::MakeFuncIn(id), span);
+                    fc.emit(Op::Call(0), span);
+                    srcs.push(None);
+                }
+                // The declaration's own node, under its declaring module's records, so a literal
+                // default resolves in the definer, never in the caller.
+                crate::checker::ArgFill::Inline { module, expr } => {
+                    let saved = std::mem::replace(&mut self.current_module_idx, *module);
+                    let r = self.compile_expr(fc, expr);
+                    self.current_module_idx = saved;
+                    r?;
+                    srcs.push(None);
+                }
+            }
+        }
+        Ok(Some(srcs))
+    }
+
+    /// Push a call's arguments -- by its plan when the checker bound it, else as written -- and
+    /// return how many values were pushed.
+    fn compile_call_args(
+        &mut self,
+        fc: &mut FnComp,
+        call_id: crate::ast::NodeId,
+        callee: &Expr,
+        args: &[Expr],
+        named: &[(String, Expr)],
+        span: Span,
+    ) -> Result<usize, CompileError> {
+        match self.compile_plan_args(fc, call_id, callee, args, named, span)? {
+            Some(srcs) => Ok(srcs.len()),
+            None => {
+                self.compile_args(fc, args)?;
+                Ok(args.len())
+            }
+        }
+    }
+
+    /// [`Self::compile_plan_args`], or the arguments as written: the user expression behind each
+    /// pushed value.
+    fn compile_call_srcs<'e>(
+        &mut self,
+        fc: &mut FnComp,
+        call_id: crate::ast::NodeId,
+        callee: &Expr,
+        args: &'e [Expr],
+        named: &'e [(String, Expr)],
+        span: Span,
+    ) -> Result<Vec<Option<&'e Expr>>, CompileError> {
+        match self.compile_plan_args(fc, call_id, callee, args, named, span)? {
+            Some(srcs) => Ok(srcs),
+            None => {
+                self.compile_args(fc, args)?;
+                Ok(args.iter().map(Some).collect())
+            }
+        }
+    }
+
+    /// [`Self::fresh_mask`] over a plan's value sources: a default fill or a pack is never fresh.
+    fn fresh_mask_srcs(&self, recv: Option<&Expr>, srcs: &[Option<&Expr>]) -> u32 {
+        let mut mask = u32::from(recv.is_some_and(|r| self.fresh_bit(r)));
+        for (j, a) in srcs.iter().enumerate() {
+            if j + 1 < u32::BITS as usize && a.is_some_and(|a| self.fresh_bit(a)) {
+                mask |= 1 << (j + 1);
+            }
+        }
+        mask
     }
 
     fn compile_closure(
@@ -5144,8 +5212,8 @@ impl Compiler {
                     // fragment keeps the span it had before M24. (The checker re-anchors its
                     // fragment-root DIAGNOSTIC at the string literal — a diagnostic anchor, not a
                     // key: every per-call table keys on a sub-node the rewrite cannot touch, the
-                    // CALLEE TOKEN for `WitnessTable::calls` and the first named-arg value for
-                    // `KeywordTable`. `49bd9f80` conflated the two; keeping them separate is what
+                    // CALLEE TOKEN for `WitnessTable::calls`, the call NodeId for
+                    // `CallPlanTable`. `49bd9f80` conflated the two; keeping them separate is what
                     // lets both halves be right.)
                     self.compile_expr(fc, e)?;
                     // A nested width/precision field evaluates AFTER the value, width first (CPython
@@ -5832,6 +5900,9 @@ pub(crate) struct CallSite {
     pub closed_arg_heads: Option<Vec<String>>,
     /// The call's explicit type arguments (`f[T](n)` → `[T]`); empty for an inferred call.
     pub type_args: Vec<crate::ast::Type>,
+    /// How many positional arguments the call supplies, and the labels of its named ones: the
+    /// parameters it fills. An omitted defaulted parameter pins no type parameter.
+    pub supplied: (usize, Vec<String>),
 }
 
 /// Record `f(…)` / `m.f(…)` on `out`. A callee that is neither a free name nor a free name's field
@@ -5871,6 +5942,7 @@ fn record_call_site(
         name,
         closed_arg_heads: closed_arg_heads(args, named, type_args, bound),
         type_args: type_args.to_vec(),
+        supplied: (args.len(), named.iter().map(|(k, _)| k.clone()).collect()),
     });
 }
 
@@ -7511,8 +7583,8 @@ mod carrier_lowering_tests {
 
     #[test]
     fn result_carrier_with_named_args_compiles_identically() {
-        // Named args + an omitted default are bound by `normalize_opt_call` in desugar; the spaced
-        // spelling is an ordinary `Call` bound by `normalize_call`. Identical bytecode is the proof
+        // Named args + an omitted default are bound by the checker (`Checker::bind_call`); the spaced
+        // spelling is an ordinary `Call` bound the same way. Identical bytecode is the proof
         // that the two normalizations agree.
         assert_spellings_agree(
             "struct B:\n    v: int\n    fn tag(self, prefix: str = \"p\", n: int = 1) -> str:\n        return \"{prefix}{self.v + n}\"\nfn f() -> B!str:\n    return Ok(B(1))\nfn g() -> str!str:\n    return Ok(f()?C?tag(n=5))\ng()\n",

@@ -110,7 +110,9 @@ fn kinds() -> Vec<Kind> {
                 ))
             },
             ctor: false,
-            exceptions: &[("mixed", Some(CALLEE_FILLED_HOLE))],
+            // `dflt_param` is skipped: a nested fn's default naming an earlier parameter is not
+            // rejected at the declaration (a compiler panic, pre-existing, not call binding).
+            exceptions: &[("mixed", Some(CALLEE_FILLED_HOLE)), ("dflt_param", None)],
         },
         Kind {
             tag: "value_alias",
@@ -626,6 +628,39 @@ fn native_cells() -> Vec<Cell> {
     ]
 }
 
+/// Two modules declare `CC.new` with different defaults: each qualified or aliased head binds
+/// against the declaration it resolves to.
+fn collision_cells() -> Vec<Cell> {
+    let c1 = "struct CC:\n    v: int\n    fn new(n: int = 31) -> CC:\n        return CC(n)\ntype AliasCC = CC\n";
+    let c2 = "struct CC:\n    v: int\n    fn new(n: int = 32) -> CC:\n        return CC(n)\n";
+    let files = |main: &str| {
+        vec![
+            ("main.chz".to_string(), main.to_string()),
+            ("lib_c1.chz".to_string(), c1.to_string()),
+            ("lib_c2.chz".to_string(), c2.to_string()),
+        ]
+    };
+    vec![
+        Cell {
+            name: "collision/qualified_static".to_string(),
+            files: files(
+                "import lib_c1\nimport lib_c2\nprint(lib_c1.CC.new().v)\nprint(lib_c2.CC.new().v)\n",
+            ),
+            expect: prints("31\n32"),
+        },
+        Cell {
+            name: "collision/alias_static".to_string(),
+            files: files("import lib_c1\nimport lib_c2\nprint(lib_c1.AliasCC.new().v)\n"),
+            expect: prints("31"),
+        },
+        Cell {
+            name: "collision/imported_alias_static".to_string(),
+            files: files("import AliasCC as AC from lib_c1\nimport lib_c2\nprint(AC.new().v)\n"),
+            expect: prints("31"),
+        },
+    ]
+}
+
 fn grid() -> Vec<Cell> {
     let mut cells = fixed_cells();
     cells.extend(value_cells());
@@ -634,6 +669,7 @@ fn grid() -> Vec<Cell> {
     cells.extend(shadow_cells());
     cells.extend(stmt_fill_cells());
     cells.extend(native_cells());
+    cells.extend(collision_cells());
     cells
 }
 
@@ -673,27 +709,7 @@ fn run_cell(root: &Path, idx: usize, c: &Cell) -> Result<(), String> {
 
 /// Cells red on the pre-TICKET-182 binary. They must stay red here; when one turns green, remove
 /// it from the list.
-const PINNED_RED: &[&str] = &[
-    "nested_fn/mixed",
-    "nested_fn/dflt_param",
-    "value_alias/mixed",
-    "local_closure/mixed",
-    "newtype_ctor/kw",
-    "top_fn/shadow_nested_fn/omit",
-    "top_fn/shadow_nested_fn/kw",
-    "imported_fn/shadow_nested_fn/omit",
-    "imported_fn/shadow_nested_fn/kw",
-    "struct_ctor/shadow_nested_fn/omit",
-    "struct_ctor/shadow_nested_fn/kw",
-    "alias_ctor/shadow_nested_fn/omit",
-    "alias_ctor/shadow_nested_fn/kw",
-    "builtin_receiver/kw",
-    "builtin_receiver_user_twin/kw",
-    "native_method/kw",
-    "native_module_fn/kw",
-    "native_free_fn/kw",
-    "builtin_ctor/kw",
-];
+const PINNED_RED: &[&str] = &[];
 
 #[test]
 fn call_binding_grid() {

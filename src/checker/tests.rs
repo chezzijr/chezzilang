@@ -1610,9 +1610,8 @@ fn a_parent_side_mutator_reads_the_stale_value_and_warns() {
     );
 }
 
-/// Type-check a source string after running the desugar pass (call normalization: named args,
-/// omitted defaults, variadic collapse — and, before W7-43, `?.`/`??` carrier lowering, which is
-/// now the CHECKER's job). Production always desugars before the checker (`resolver::build_graph`);
+/// Type-check a source string after running the desugar pass (default validation, provider
+/// synthesis, full-path folding; call binding and `?.`/`??` carrier lowering are the CHECKER's job). Production always desugars before the checker (`resolver::build_graph`);
 /// these tests otherwise bypass it. Returns the collected errors.
 fn check_desugared(src: &str) -> Vec<CheckError> {
     let tokens = lexer::tokenize(src).expect("lex should succeed");
@@ -9598,33 +9597,28 @@ fn local_alias_ctor_fills_struct_defaults() {
 }
 
 #[test]
-fn alias_static_default_collision_preserves_arity() {
-    // Must still fail: two modules declare `CC.new` with DISAGREEING defaults, so the collision-nulled
-    // `methods_by_struct` key must reach the name-keyed fallback — an alias head may not pick one.
+fn alias_static_default_collision_binds_the_aliased_declaration() {
+    // Two modules declare `CC.new` with DIFFERENT defaults. The checker binds against the one the
+    // alias resolves to (lib_c1's, default 31), as CPython does; `call_binding_grid`'s
+    // `collision/*` cells run these programs and pin the printed value.
     let c1 = "struct CC:\n    v: int\n    fn new(n: int = 31) -> CC:\n        return CC(n)\ntype AliasCC = CC\n";
     let c2 = "struct CC:\n    v: int\n    fn new(n: int = 32) -> CC:\n        return CC(n)\n";
-    files_reject(
-        &[
-            ("lib_c1.chz", c1),
-            ("lib_c2.chz", c2),
-            (
-                "main.chz",
-                "import lib_c1\nimport lib_c2\nprint(lib_c1.AliasCC.new().v)\n",
-            ),
-        ],
-        "'new' expects 1 argument(s), got 0",
-    );
-    files_reject(
-        &[
-            ("lib_c1.chz", c1),
-            ("lib_c2.chz", c2),
-            (
-                "main.chz",
-                "import AliasCC as AC from lib_c1\nimport lib_c2\nprint(AC.new().v)\n",
-            ),
-        ],
-        "'new' expects 1 argument(s), got 0",
-    );
+    files_ok(&[
+        ("lib_c1.chz", c1),
+        ("lib_c2.chz", c2),
+        (
+            "main.chz",
+            "import lib_c1\nimport lib_c2\nprint(lib_c1.AliasCC.new().v)\n",
+        ),
+    ]);
+    files_ok(&[
+        ("lib_c1.chz", c1),
+        ("lib_c2.chz", c2),
+        (
+            "main.chz",
+            "import AliasCC as AC from lib_c1\nimport lib_c2\nprint(AC.new().v)\n",
+        ),
+    ]);
 }
 
 #[test]
@@ -26887,11 +26881,11 @@ fn kw_value_call_through_a_param_is_rejected() {
 fn kw_value_unknown_label_rejected() {
     rejects(
         "fn greet(name: str):\n    print(name)\ng := greet\ng(nope=\"x\")\n",
-        "unknown parameter label 'nope'",
+        "unknown named argument 'nope'",
     );
     entry_rejects(
         "fn greet(name: str):\n    print(name)\nfn main():\n    g := greet\n    g(nope=\"x\")\nmain()\n",
-        "unknown parameter label 'nope'",
+        "unknown named argument 'nope'",
     );
 }
 
@@ -26917,7 +26911,7 @@ fn kw_value_defaults_fill_a_trailing_gap_but_not_a_middle_one() {
     // A genuine MIDDLE hole is still refused, and says why.
     rejects_desugared(
         "fn f(a: int, b: int = 2, c: int = 3) -> int:\n    return a\nh := f\nprint(h(1, c=9))\n",
-        "can only omit TRAILING defaulted parameters",
+        "is filled by the callee and can only be omitted from the END of a call",
     );
     // A parameter with NO default is still required through a value.
     rejects_desugared(
@@ -30570,14 +30564,10 @@ fn interpolation_fragment_wrong_arity_still_rejected_with_real_count() {
 /// from the same pass, as the identical call outside a string (it used to reach the checker as a
 /// raw `Call` with `named` still populated, which the checker counted as "got 0" positional args).
 #[test]
-fn interpolation_fragment_unknown_named_arg_rejected_by_desugar() {
-    let src = "fn f(a: int, b: int = 2) -> int:\n    return a + b\nprint(\"{f(nope=1)}\")\n";
-    let tokens = lexer::tokenize(src).expect("lex should succeed");
-    let mut module = parser::parse(tokens).expect("parse should succeed");
-    let err = crate::desugar::run_standalone(&mut module).expect_err("expected a desugar error");
-    assert!(
-        err.message.contains("unknown named argument 'nope'"),
-        "got: {err:?}"
+fn interpolation_fragment_unknown_named_arg_rejected_by_the_checker() {
+    rejects(
+        "fn f(a: int, b: int = 2) -> int:\n    return a + b\nprint(\"{f(nope=1)}\")\n",
+        "unknown named argument 'nope'",
     );
 }
 
@@ -34057,7 +34047,7 @@ fn sorted_debug<K: std::fmt::Debug, V: std::fmt::Debug>(m: &HashMap<K, V>) -> Ve
 /// TICKET-157 -- the nested-fn return memo (`Checker::ret_memo`) must be INVISIBLE: the same program
 /// through the same entry point with `memo_enabled` off renders identical diagnostics AND identical
 /// resolved side tables. The tables are what `DiagMark` deliberately does not snapshot (`carriers`,
-/// `keyword_calls`, `witnesses`, `next_opt_tmp`), so only this comparison sees a memo that drops a
+/// `call_plans`, `witnesses`, `next_opt_tmp`), so only this comparison sees a memo that drops a
 /// write one of them needed. A memo entry served in the wrong context (a stale finalize-pass type, a
 /// pin the skipped walk would have written) makes one of the eleven programs render differently.
 #[test]
@@ -34123,7 +34113,7 @@ fn the_nested_fn_ret_memo_is_invisible_to_diagnostics_and_tables() {
         assert_eq!(
             sorted_debug(&on.0),
             sorted_debug(&off.0),
-            "{name}: keyword_calls"
+            "{name}: call_plans"
         );
         assert_eq!(
             sorted_debug(&on.1.fns),
@@ -34321,24 +34311,23 @@ fn a_qualified_static_call_with_too_many_arguments_still_rejects() {
 /// rejected: `collect_methods_by_struct` nulls the disagreeing key, and the new arm must not
 /// invent an agreement that isn't there.
 #[test]
-fn a_cross_module_struct_name_collision_keeps_the_qualified_static_call_rejected() {
-    files_reject(
-        &[
-            (
-                "lib_c1.chz",
-                "struct CC:\n    v: int\n    fn new(n: int = 31) -> CC:\n        return CC(n)\n",
-            ),
-            (
-                "lib_c2.chz",
-                "struct CC:\n    v: int\n    fn new(n: int = 32) -> CC:\n        return CC(n)\n",
-            ),
-            (
-                "main.chz",
-                "import lib_c1\nimport lib_c2\nprint(lib_c1.CC.new().v)\n",
-            ),
-        ],
-        "'new' expects 1 argument(s), got 0",
-    );
+fn a_cross_module_struct_name_collision_binds_each_qualified_static_call() {
+    // Each `lib.CC.new()` binds against its own module's declaration; `call_binding_grid`'s
+    // `collision/qualified_static` cell runs it and pins `31` then `32`.
+    files_ok(&[
+        (
+            "lib_c1.chz",
+            "struct CC:\n    v: int\n    fn new(n: int = 31) -> CC:\n        return CC(n)\n",
+        ),
+        (
+            "lib_c2.chz",
+            "struct CC:\n    v: int\n    fn new(n: int = 32) -> CC:\n        return CC(n)\n",
+        ),
+        (
+            "main.chz",
+            "import lib_c1\nimport lib_c2\nprint(lib_c1.CC.new().v)\nprint(lib_c2.CC.new().v)\n",
+        ),
+    ]);
 }
 
 // ===== TICKET-124: expected-type widening missing at generic ctor / nested ctor / =====
@@ -36091,5 +36080,123 @@ fn a_generic_alias_takes_its_targets_type_arguments() {
 fn a_nested_fn_shadowing_a_defaulted_fn_binds_to_the_nested_fn() {
     ok_desugared(
         "fn f(a: int, b: int = 10) -> int:\n    return a + b\n\nfn g() -> str:\n    fn f(n: int) -> str:\n        return \"B{n}\"\n    return f(1)\n",
+    );
+}
+
+// ===== TICKET-182: the checker binds every call's arguments =====
+
+/// Every message of `Checker::bind_call`, once for a direct call and once for a call through a
+/// `kw_certain` function value (DEC-066: one message set for every call shape).
+#[test]
+fn bind_call_reports_each_named_argument_error() {
+    let f = "fn f(a: int, b: int = 2, c: int = 3) -> int:\n    return a\n";
+    let v = "fn v(a: int, ...rest: int) -> int:\n    return a\n";
+    let kw = "fn k(a: int, ...rest: int, t: int) -> int:\n    return a\n";
+    for (decl, call, needle) in [
+        (
+            f,
+            "f(nope=1)",
+            "unknown named argument 'nope' (its parameters are: a, b, c)",
+        ),
+        (
+            f,
+            "f(1, a=2)",
+            "argument 'a' specified both positionally and by name",
+        ),
+        (f, "f(b=1, b=2)", "duplicate named argument 'b'"),
+        (f, "f(b=1)", "missing required argument 'a'"),
+        (
+            f,
+            "f(1, 2, 3, 4, c=5)",
+            "too many arguments: expected at most 3, got 4",
+        ),
+        (
+            v,
+            "v(1, rest=2)",
+            "argument 'rest' is the variadic parameter",
+        ),
+        (kw, "k(1, 2)", "missing required keyword argument 't'"),
+    ] {
+        rejects(&format!("{decl}print({call})\n"), needle);
+        if decl != f {
+            continue;
+        }
+        let g = call.replacen(&call[..1], "g", 1);
+        rejects(
+            &format!(
+                "{decl}fn main():\n    g := {}\n    print({g})\nmain()\n",
+                &call[..1]
+            ),
+            needle,
+        );
+    }
+    // The callee-filled hole: through a value, every default is filled by the callee.
+    rejects(
+        &format!("{f}fn main():\n    g := f\n    print(g(1, c=9))\nmain()\n"),
+        "the default for 'b' is filled by the callee and can only be omitted from the END of a call",
+    );
+}
+
+/// A native, builtin or `extern` callee has no Chezzi parameter list (`FnSig::slots` is `None`), so
+/// it takes no named arguments, and says so by name.
+#[test]
+fn builtin_and_native_callees_refuse_named_arguments() {
+    for (src, head) in [
+        ("s := Set([1, 2])\ns.add(x=3)\n", "add"),
+        (
+            "import std.net\nfn f(sk: net.Socket) -> str:\n    r := sk.read(10, timeout_ms=5)\n    return \"{r}\"\n",
+            "read",
+        ),
+        (
+            "import std.request\nfn f() -> str:\n    r := request.get(\"http://x\", timeout_ms=5)\n    return \"{r}\"\n",
+            "get",
+        ),
+        ("print(chr(65, n=66))\n", "chr"),
+        ("s: Set[int] = Set(xs=[1])\nprint(s.len())\n", "Set"),
+    ] {
+        entry_rejects(src, &format!("'{head}' takes no named arguments"));
+    }
+    // A user struct that declares a same-named method changes nothing for a builtin receiver.
+    let src = "struct Counter:\n    n: int\n    fn add(self, amount: int = 1) -> int:\n        return self.n + amount\ns := Set([1, 2])\ns.add(x=3)\n";
+    let errs = check_entry(src);
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("'add' takes no named arguments")),
+        "got: {errs:?}"
+    );
+    assert!(
+        !errs.iter().any(|e| e.message.contains("only supported on")
+            || e.message.contains("unknown named argument")),
+        "got: {errs:?}"
+    );
+}
+
+/// A default whose provider fills its own slot again is refused at compile time, naming the slot
+/// (moved from desugar: the checker's binder now records the provider edges).
+#[test]
+fn a_self_referencing_default_is_a_cycle_error() {
+    rejects_desugared(
+        "fn f(x: int = f()) -> int:\n    return x\nr := f()\n",
+        "the default for 'x' of 'f' is cyclic",
+    );
+    // A field is not called a parameter: the label is noun-free.
+    rejects_desugared(
+        "struct S:\n    n: int = S().n\nr := S().n\n",
+        "the default for 'n' of 'S' is cyclic",
+    );
+}
+
+/// A call through a fn-typed FIELD binds no declaration: it keeps the generic refusal.
+#[test]
+fn fn_field_named_call_keeps_the_generic_refusal() {
+    let src =
+        "struct S:\n    map: fn(int) -> int\ns := S(fn(x: int) -> int: x)\nprint(s.map(arg=1))\n";
+    entry_rejects(src, "only supported on");
+    let errs = check_entry(src);
+    assert!(
+        !errs
+            .iter()
+            .any(|e| e.message.contains("takes no named arguments")),
+        "got: {errs:?}"
     );
 }

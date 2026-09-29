@@ -8,36 +8,9 @@ use crate::lexer::Span;
 use std::collections::HashMap;
 use std::fmt;
 
-/// The [`KeywordTable`] key. `(graph module index, fragment-context span, fragment ordinal,
-/// first-named-arg span)`:
-/// * `module index` — module-scoped exactly like [`ExternTable`] so line:col collisions across
-///   modules can't alias.
-/// * `fragment-context span` + `fragment ordinal` — disambiguate string-interpolation fragments.
-///   Each `{…}` fragment is re-lexed from a fresh source; that source used to restart at
-///   `(line 1, col 1)`, so two keyword calls in different fragments whose first named-arg value
-///   landed at the same fragment-relative column collided. Since **M24-6** a fragment is re-lexed
-///   against the literal's `PosMap` and every span is the char's real physical position, so these
-///   two components are now belt-and-braces rather than load-bearing — kept because the cost is a
-///   tuple field and removing a key component is a widening (see project memory, "a widening is
-///   untested by its own suite"). The context is the whole-string span and the ordinal is the
-///   fragment's 0-based index in that string (both computed identically by the checker, compiler,
-///   and interp at the interpolation boundary). Outside interpolation both are the inert defaults
-///   (`Span::default()`, `0`).
-/// * `first-named-arg span` — see [`keyword_key_span`]; distinguishes chained postfix calls (which
-///   share the primary-expression span) and multiple keyword calls within one fragment.
-pub type KeywordKey = (usize, Span, usize, Span);
-
-/// Checker-resolved keyword-argument reordering for VALUE calls that carry labels (`g(name="Bob")`).
-/// Keyed by [`KeywordKey`]. The value is the slot PERMUTATION: `perm[i]` is the index into the
-/// combined `[positional args ++ named-arg exprs]` list that fills parameter slot `i`. Both backends
-/// read it to lower a value+keyword call to a plain POSITIONAL `Op::Call` — the runtime ABI stays
-/// positional and UNCHANGED. Only consulted when a call's `named` list is non-empty (the positional
-/// hot path never touches it). Produced by `resolve_keyword_calls{,_standalone}`.
-pub type KeywordTable = HashMap<KeywordKey, Vec<usize>>;
-
-/// M24 — the [`WitnessTable::calls`] key. Same four components as [`KeywordKey`] and built by the
-/// same rules (see [`crate::checker::witness_key`]), except the last component is the CALLEE TOKEN's
-/// span ([`crate::checker::witness_key_span`]) rather than a first-named-arg span.
+/// M24 — the [`WitnessTable::calls`] key. `(graph module index, fragment-context span, fragment
+/// ordinal, key span)`, built by one helper (see [`crate::checker::witness_key`]), except the last component is the CALLEE TOKEN's
+/// span ([`crate::checker::witness_key_span`]).
 ///
 /// It is deliberately NOT the call node's span: that span is shared by every link of a chained
 /// postfix expression AND of a pipe chain (`a |> f() |> g()` desugars to nested `Call`s that all
@@ -99,7 +72,7 @@ pub struct WitnessTable {
     pub calls: HashMap<WitnessKey, Vec<WitnessSrc>>,
 }
 
-/// W7-43 — the [`CarrierTable`] key. The same four components as [`KeywordKey`]/[`WitnessKey`],
+/// W7-43 — the [`CarrierTable`] key. The same four components as [`WitnessKey`],
 /// built by the same rules (see [`crate::checker::carrier_key`]), except the last component is the
 /// `?.` carrier's NAME-TOKEN span (`ExprKind::OptChain`'s `name_span`).
 ///
@@ -115,7 +88,7 @@ pub struct WitnessTable {
 /// splices a callee's default-parameter expression into the CALLER's AST as a clone that keeps the
 /// DEFINING module's spans, while the key is built with the CALLING module's index — so a `?.`
 /// inside a default in `lib.chz` and a `?.` at the same `line:col` in `main.chz` used to share one
-/// key (measured, in [`KeywordKey`] and [`WitnessKey`] too, both of which had shipped with it). The
+/// key (measured, in [`WitnessKey`] too, which had shipped with it). The
 /// fix is a file identity on [`Span`] itself, so this tuple and every record/lookup site are
 /// unchanged. One residual, backstopped loudly rather than silently: the same default spliced twice
 /// into the SAME module — see `docs/gaps.md` W7-49 and `Checker::record_carrier`.
@@ -1044,3 +1017,26 @@ pub enum Resolution {
 
 /// Every [`Resolution`] the checker recorded; see there.
 pub type ResolutionTable = HashMap<(usize, u32), Resolution>;
+
+/// One declaration slot of a bound call, as `Checker::bind_call` filled it. The compiler pushes the
+/// fills of a [`CallPlanTable`] entry in slot order, so the runtime call stays positional.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ArgFill {
+    /// The `i`-th expression of the combined `[positional args ++ named-arg values]` list.
+    Arg(usize),
+    /// The variadic slot: these combined-list indices, packed into one `List`.
+    Pack(Vec<usize>),
+    /// An omitted slot filled by calling this zero-arg default provider (`Op::MakeFuncIn`).
+    Provider(String),
+    /// An omitted slot filled from the declaration's own default node, compiled in the declaring
+    /// module (graph index `module`).
+    Inline {
+        module: usize,
+        expr: crate::ast::Expr,
+    },
+}
+
+/// The argument slot plan of every call that `Checker::bind_call` bound, keyed `(graph module
+/// index, call NodeId)` like [`ResolutionTable`]. A trailing run of callee-filled slots is absent
+/// from the plan: the callee's prologue fills it. Written only under `harvest_keywords`.
+pub type CallPlanTable = HashMap<(usize, u32), Vec<ArgFill>>;

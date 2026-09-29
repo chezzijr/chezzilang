@@ -20,8 +20,8 @@ use std::fmt;
 
 pub use ty::Ty;
 pub use ty::{
-    CarrierKey, CarrierMode, CarrierTable, FnLabels, ForBind, ForBindTable, FreshOperandTable,
-    KeywordKey, KeywordTable, ProtoEqTable, Resolution, ResolutionTable, RetCoerce, RetCoerceTable,
+    ArgFill, CallPlanTable, CarrierKey, CarrierMode, CarrierTable, FnLabels, ForBind, ForBindTable,
+    FreshOperandTable, ProtoEqTable, Resolution, ResolutionTable, RetCoerce, RetCoerceTable,
     SumSeed, SumSeedTable, WitnessCallee, WitnessKey, WitnessSrc, WitnessTable,
 };
 use ty::{compatible, param_invariant};
@@ -610,6 +610,20 @@ fn is_lifecycle_hook(name: &str) -> bool {
     crate::vm::op::LIFECYCLE_HOOKS.contains(&name)
 }
 
+/// The call [`Checker::infer_call`] is dispatching (see [`Checker::call_ctx`]).
+#[derive(Clone)]
+struct CallCtx {
+    id: crate::ast::NodeId,
+    named: Vec<(String, Expr)>,
+    /// The span a synthesized variadic pack is keyed by (`witness_key_span` of the callee).
+    pack_origin: Span,
+    /// A binder or a refusal answered the call's named arguments; otherwise `infer_call` reports
+    /// the generic refusal.
+    consumed: bool,
+    /// The call span, where a refusal is reported.
+    span: Span,
+}
+
 /// A function (or method) signature: parameter types and return type. `type_params` is non-empty
 /// only for generic functions (`fn max[T: Comparable]`), where `params`/`ret` contain `Ty::Param`s.
 #[derive(Clone)]
@@ -663,6 +677,12 @@ struct FnSig {
     /// keyword-only enforcement in desugar. Excluded from `fn_sig_eq` (not type identity). `None` for
     /// every ordinary signature.
     variadic: Option<usize>,
+    /// The declaration's call-binding slots (receiver dropped), which `Checker::bind_call` binds
+    /// named, omitted and variadic arguments against. `None` for a native, builtin or `extern` sig
+    /// (built by [`FnSig::plain`] / [`FnSig::optional_tail`]): it has no Chezzi parameter list, takes
+    /// no named arguments, and its `= 0` defaults are arity markers the runtime reads from the
+    /// supplied argument count. Excluded from `fn_sig_eq`.
+    slots: Option<Vec<crate::desugar::SlotSpec>>,
 }
 
 impl FnSig {
@@ -681,6 +701,7 @@ impl FnSig {
             doc: None,
             witness_params: Vec::new(),
             variadic: None,
+            slots: None,
         }
     }
 
@@ -700,6 +721,7 @@ impl FnSig {
             doc: None,
             witness_params: Vec::new(),
             variadic: None,
+            slots: None,
         }
     }
 }
@@ -730,6 +752,9 @@ struct StructInfo {
     /// ctor arity check cannot otherwise tell an omitted DEFAULTED field from a missing required
     /// argument (W8-47).
     defaulted_fields: Vec<String>,
+    /// The ctor's call-binding slots, one per field (see [`FnSig::slots`]). `None` for a native or
+    /// builtin struct.
+    field_slots: Option<Vec<crate::desugar::SlotSpec>>,
     self_writers: HashSet<String>,
 }
 
@@ -890,7 +915,10 @@ fn check_diags_with(
         // the eight migrated universe-builtin signatures from it directly (graph path hoists them
         // normally).
         c.seed_native_prelude_sigs();
+        let file = module.stmts.first().map_or(0, |s| s.span.file);
+        crate::desugar::collect_methods_into(&module.stmts, &mut c.lend_specs, file);
         c.check_module(&module.stmts, None, &[]);
+        c.check_provider_cycles();
         let warnings = std::mem::take(&mut c.warnings);
         let res = if c.errors.is_empty() {
             Ok(())
@@ -1087,7 +1115,7 @@ pub fn resolve_extern_signatures_standalone(stmts: &[Stmt]) -> ExternTable {
 pub fn resolve_call_tables(
     graph: &ModuleGraph,
 ) -> (
-    KeywordTable,
+    CallPlanTable,
     WitnessTable,
     CarrierTable,
     ProtoEqTable,
@@ -1107,7 +1135,7 @@ fn resolve_call_tables_with(
     graph: &ModuleGraph,
     memo_enabled: bool,
 ) -> (
-    KeywordTable,
+    CallPlanTable,
     WitnessTable,
     CarrierTable,
     ProtoEqTable,
@@ -1124,7 +1152,7 @@ fn resolve_call_tables_with(
         c.harvest_keywords = true;
         c.run_graph_pass(graph, false);
         (
-            std::mem::take(&mut c.keyword_calls),
+            std::mem::take(&mut c.call_plans),
             std::mem::take(&mut c.witnesses),
             std::mem::take(&mut c.carriers),
             std::mem::take(&mut c.proto_eq_calls),
@@ -1151,7 +1179,7 @@ pub type TableConflicts = Vec<(Span, String)>;
 pub fn resolve_call_tables_standalone(
     stmts: &[Stmt],
 ) -> (
-    KeywordTable,
+    CallPlanTable,
     WitnessTable,
     CarrierTable,
     ProtoEqTable,
@@ -1171,7 +1199,7 @@ pub fn resolve_call_tables_standalone(
 pub fn resolve_call_tables_standalone_no_memo(
     stmts: &[Stmt],
 ) -> (
-    KeywordTable,
+    CallPlanTable,
     WitnessTable,
     CarrierTable,
     ProtoEqTable,
@@ -1202,39 +1230,6 @@ fn standalone_graph(stmts: &[Stmt]) -> ModuleGraph {
             native: None,
         }],
     }
-}
-
-/// The [`KeywordTable`] key span for a value call that carries keyword arguments. The AST call-node
-/// span is NOT unique across chained postfix calls: the parser gives every link of a `g(a=..)(b=..)`
-/// chain the SAME primary-expression span (`parse_postfix`'s `let span = e.span;`), so keying the
-/// table on it would alias two distinct keyword calls into one slot (the later insert wins and the
-/// wrong permutation is applied — an out-of-range index or silent mis-routing). The FIRST named-arg
-/// VALUE expression is, by contrast, a distinct source node per call, so its span uniquely identifies
-/// the call WITHIN one lexed source (a module, or ONE interpolation fragment). Recording and the
-/// backend lookup run this helper, so they agree on the key. Only used when `named` is non-empty
-/// (the sole record/lookup condition), so `first()` is always `Some`; the `call_span` fallback is
-/// unreachable defensive code.
-pub fn keyword_key_span(named: &[(String, Expr)], call_span: Span) -> Span {
-    named.first().map(|(_, v)| v.span).unwrap_or(call_span)
-}
-
-/// Build the full [`KeywordKey`] for a value+keyword call: `(module, fragment-context span, fragment
-/// ordinal, first-named-arg span)`. The checker's record site and the backend's lookup site call this
-/// one helper so they can never disagree on the key. `frag_ctx`/`frag_ord` are the interpolation
-/// fragment discriminators (inert `Span::default()`/`0` outside interpolation); see [`KeywordKey`].
-pub fn keyword_key(
-    module_idx: usize,
-    frag_ctx: Span,
-    frag_ord: usize,
-    named: &[(String, Expr)],
-    call_span: Span,
-) -> crate::checker::KeywordKey {
-    (
-        module_idx,
-        frag_ctx,
-        frag_ord,
-        keyword_key_span(named, call_span),
-    )
 }
 
 /// W7-49 — record ONE entry into a checker→compiler side table, refusing to overwrite a key that is
@@ -1286,8 +1281,7 @@ pub(crate) fn record_call_table_entry<K, V>(
 /// fragment-context span, fragment ordinal, CALLEE-TOKEN span)`. The checker's record site and the
 /// compiler's lookup site call this one helper so they can never disagree on the key. `key_span` is
 /// always a [`witness_key_span`] result — the callee's own token, never the call node's span; see
-/// [`WitnessKey`]. `frag_ctx`/`frag_ord` are the same interpolation discriminators [`keyword_key`]
-/// uses.
+/// [`WitnessKey`]. `frag_ctx`/`frag_ord` are the interpolation discriminators.
 pub fn witness_key(
     module_idx: usize,
     frag_ctx: Span,
@@ -1302,7 +1296,7 @@ pub fn witness_key(
 /// site call this one helper so they can never disagree on the key. `name_span` is always the
 /// carrier's own `name_span`, never its node span — see [`CarrierKey`] for why (a mixed
 /// `Result`/`Option` chain shares one node span across links with DIFFERENT modes).
-/// `frag_ctx`/`frag_ord` are the same interpolation discriminators [`keyword_key`] uses.
+/// `frag_ctx`/`frag_ord` are the interpolation discriminators.
 pub fn carrier_key(
     module_idx: usize,
     frag_ctx: Span,
@@ -1375,6 +1369,7 @@ impl Checker {
     /// signatures into `self.extern_sigs`.
     fn run_graph_pass(&mut self, graph: &ModuleGraph, harvest_externs: bool) {
         let c = self;
+        c.lend_specs = crate::desugar::collect_methods(graph);
         // ROOT REDESIGN — module-scoped IDENTITY KEYS: scan every non-native module's struct/enum/alias
         // names and key EACH one `<module-key>::Name` (via the shared `resolver::module_keys`, the SAME
         // derivation the compiler uses), so the checker, compiler, and VM agree on every key (parity) and
@@ -1471,6 +1466,7 @@ impl Checker {
         }
         for (idx, lm) in graph.modules.iter().enumerate() {
             c.module_idx_of.insert(lm.id.clone(), idx);
+            c.module_idx_of_file.insert(lm.file, idx);
             // Keys every checker->compiler table this module's bodies record, the bodied fns of a native
             // std module included (they are checked below, before the AST-module branch sets it).
             c.graph_module_idx = idx;
@@ -1746,6 +1742,16 @@ impl Checker {
                 }
             }
             c.module_sigs.insert(lm.id.clone(), sig);
+        }
+        c.check_provider_cycles();
+    }
+
+    /// A default whose provider, directly or through other providers, fills its own slot again is
+    /// unbounded recursion: report it (`fn f(x: int = f())`).
+    fn check_provider_cycles(&mut self) {
+        let edges = std::mem::take(&mut self.provider_edges);
+        if let Err(e) = crate::desugar::check_provider_cycles_in(&edges) {
+            self.error(e.span, e.message);
         }
     }
 }
@@ -2257,15 +2263,28 @@ struct Checker {
     /// extern fn's resolved C signature is keyed under the SAME index the backends derive. `None`
     /// for a lone `check`.
     extern_module_idx: Option<usize>,
-    /// Swift-style keyword-argument resolution for VALUE calls: `perm[i]` = index into the combined
-    /// `[positional args ++ named exprs]` list that fills parameter slot `i`. Keyed `(module idx,
-    /// call span)` — module-scoped exactly like [`Self::extern_sigs`]. Recorded during `infer_call`
-    /// (only when [`Self::harvest_keywords`] is set — the error-gate `check_graph` leaves it empty) and
-    /// consumed by both backends to lower a value+keyword call to a positional `Op::Call`. Produced by
+    /// The argument slot plan of every call [`Self::bind_call`] bound, keyed `(module idx, call
+    /// NodeId)`. Recorded only when [`Self::harvest_keywords`] is set (the error-gate `check_graph`
+    /// leaves it empty) and consumed by the compiler's `compile_plan_args`. Produced by
     /// [`resolve_call_tables`].
-    keyword_calls: KeywordTable,
+    call_plans: CallPlanTable,
+    /// The call `infer_call` is dispatching: its NodeId, named arguments and variadic-pack origin,
+    /// read by [`Self::bind_call`] in whichever arm picks the callee. Saved and restored around a
+    /// nested call.
+    call_ctx: Option<CallCtx>,
+    /// Every struct, enum and newtype method's call-binding slots, program-wide, by method name.
+    /// A protocol or bound-type-param receiver borrows an implementor's defaults from here, keeping
+    /// only candidates of the protocol method's arity (DEC-075).
+    lend_specs: HashMap<String, Vec<Vec<crate::desugar::SlotSpec>>>,
+    /// The default provider whose body is being checked, and its declaration span.
+    current_provider: Option<(String, Span)>,
+    /// Provider → the providers its body's calls fill a default from ([`Self::bind_call`]), for the
+    /// cycle check [`Self::check_provider_cycles`] runs once the pass is done.
+    provider_edges: HashMap<String, (Vec<String>, Span)>,
+    /// Graph module index by module file id, so an inline default fill names its declaring module.
+    module_idx_of_file: HashMap<u32, usize>,
     /// True only while [`resolve_call_tables`] drives the pass, licensing `infer_call` to record
-    /// into [`Self::keyword_calls`] / [`Self::witnesses`]. Off during the normal error-gate check
+    /// into [`Self::call_plans`] / [`Self::witnesses`]. Off during the normal error-gate check
     /// (which discards both tables).
     harvest_keywords: bool,
     /// M24 — both halves of the static-witness contract (which fns need hidden witness params, and
@@ -2363,7 +2382,7 @@ struct Checker {
     /// interpolation currently being inferred (or `Span::default()` outside interpolation) paired with
     /// [`Self::kw_frag_ord`], the fragment's 0-based index in that string. Because each `{…}` fragment
     /// is re-lexed from a fresh source its sub-expression spans restart at `(1,1)`, so span alone
-    /// cannot tell two fragments apart; these two fields disambiguate them in the [`KeywordKey`]. Set
+    /// cannot tell two fragments apart; these two fields disambiguate them in the [`WitnessKey`] and [`CarrierKey`]. Set
     /// (save/restore for nesting) around each fragment in `check_interpolation`; the compiler and
     /// interp maintain the identical pair at their own interpolation boundaries.
     kw_frag_ctx: Span,

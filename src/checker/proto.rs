@@ -2606,6 +2606,7 @@ impl Checker {
                 doc: None,
                 witness_params: Vec::new(),
                 variadic: None,
+                slots: None,
             };
             let msig = &want;
             // Pre-substitute the receiving type's params into the ACTUAL (user) method signature so
@@ -4661,7 +4662,10 @@ impl Checker {
         }
         // A STATIC requirement has NO receiver slot, so every declared param is a real argument.
         let expected: Vec<Ty> = msig.params.iter().map(|t| subst(t, &map)).collect();
-        self.check_args(method, &expected, args, span);
+        let Some(bound) = self.lend_bind(method, expected.len(), args, span) else {
+            return Ty::Unknown;
+        };
+        self.check_args(method, &expected, &bound, span);
         subst(&msig.ret, &map)
     }
 
@@ -5397,6 +5401,7 @@ impl Checker {
             doc: None,
             witness_params: Vec::new(),
             variadic: None,
+            slots: None,
         };
         let probed = self.probe_uninferable_dependent_result_params(&msig, &mut mmap, span);
         let before = self.errors.len();

@@ -131,7 +131,12 @@ impl Checker {
             imported_alias_ctypes: HashMap::new(),
             extern_sigs: ExternTable::new(),
             extern_module_idx: None,
-            keyword_calls: KeywordTable::new(),
+            call_plans: CallPlanTable::new(),
+            call_ctx: None,
+            lend_specs: HashMap::new(),
+            current_provider: None,
+            provider_edges: HashMap::new(),
+            module_idx_of_file: HashMap::new(),
             harvest_keywords: false,
             witnesses: crate::checker::WitnessTable::default(),
             carriers: crate::checker::CarrierTable::new(),
@@ -780,6 +785,7 @@ impl Checker {
             origin: StructOrigin::Builtin,
             doc: None,
             defaulted_fields: Vec::new(),
+            field_slots: None,
             self_writers: HashSet::new(),
         };
         // The LAYOUT stays globally present (so field access on a native return — `regex.find(...)
@@ -938,6 +944,7 @@ impl Checker {
                     origin: StructOrigin::Builtin,
                     doc: None,
                     defaulted_fields: Vec::new(),
+                    field_slots: None,
                     self_writers: HashSet::new(),
                 };
                 sig.struct_defs.insert(name.clone(), info.clone());
@@ -1191,6 +1198,7 @@ impl Checker {
                     origin: StructOrigin::Builtin,
                     doc: None,
                     defaulted_fields: Vec::new(),
+                    field_slots: None,
                     self_writers: HashSet::new(),
                 });
             }
@@ -3826,6 +3834,8 @@ impl Checker {
                             );
                         }
                     }
+                    let field_slots =
+                        crate::desugar::field_slots(fields, s.span.file, name, type_params);
                     let defaulted_fields: Vec<String> = fields
                         .iter()
                         .filter(|f| f.default.is_some())
@@ -3875,6 +3885,7 @@ impl Checker {
                             // only for the module's exported sig; the in-checker layout doesn't need it.
                             doc: None,
                             defaulted_fields,
+                            field_slots: Some(field_slots),
                             self_writers: HashSet::new(),
                         },
                     );

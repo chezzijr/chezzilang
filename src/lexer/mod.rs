@@ -149,7 +149,7 @@ pub enum Token {
 /// synthesized span never matches an editor hover/overlay key. Diagnostic-only; runtime-inert.
 ///
 /// `file` is NOT diagnostic sugar and it is NOT dead — **a `Span` is a cross-half TABLE KEY**, and
-/// `file` is what makes that key injective across modules. `KeywordKey`, `WitnessKey` and
+/// `file` is what makes that key injective across modules. `WitnessKey` and
 /// `CarrierKey` (`src/checker/ty.rs:24,43,109`) are all `(graph_module_idx, frag_ctx: Span,
 /// frag_ord, key_span: Span)`: the checker records a decision under one and the type-blind compiler
 /// looks it up under the same one. `desugar` splices a callee's default-parameter expression into
@@ -270,7 +270,7 @@ pub fn render_snippet(span: Span, source: &str) -> Option<String> {
 /// (`docs/gaps.md` M24-6). With it they are real positions.
 ///
 /// **Injectivity on `[0, raw_len)` is the load-bearing property, not the diagnostics.** A `Span` is
-/// a cross-half TABLE KEY (`WitnessKey`/`KeywordKey`/`CarrierKey` — see [`Span`]), so two fragments
+/// a cross-half TABLE KEY (`WitnessKey`/`CarrierKey` — see [`Span`]), so two fragments
 /// that share a span silently share a table entry: a wrong value under a green `chezzi check`
 /// (measured 2026-08-10, commit `2a27697e`). Proof that `at` is injective here:
 ///
@@ -3447,7 +3447,7 @@ mod tests {
         );
     }
 
-    // W7-49 — `Span::file` is a cross-half TABLE KEY component (`KeywordKey`/`WitnessKey`/
+    // W7-49 — `Span::file` is a cross-half TABLE KEY component (`WitnessKey`/
     // `CarrierKey`), so what the stamp must guarantee is: `tokenize` (standalone/synthesized) is 0,
     // the base-position form carries whatever the caller assigned, and a re-lexed interpolation
     // fragment INHERITS its enclosing literal's file (a fragment belongs to its literal's module by

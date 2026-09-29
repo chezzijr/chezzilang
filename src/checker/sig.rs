@@ -199,7 +199,29 @@ impl Checker {
             // consumer reads this one answer instead of re-deriving it.
             witness_params: wparams,
             variadic: decl.params.iter().position(|p| p.is_variadic),
+            slots: Some(self.decl_param_slots(decl, span.file)),
         }
+    }
+
+    /// The call-binding slots of `decl`, named as `desugar::synthesize_providers` named its
+    /// providers: owner `f` for a free fn, `S.m` for a method of the host `current_self_ty`.
+    fn decl_param_slots(&self, decl: &FnDecl, file: u32) -> Vec<crate::desugar::SlotSpec> {
+        let (owner, bare, host_tps) = match &self.current_self_ty {
+            Some(Ty::Struct(k, a) | Ty::Enum(k, a) | Ty::NewType(k, a)) => {
+                let bare = k.rsplit("::").next().unwrap_or(k.as_str()).to_string();
+                let tps: Vec<String> = a
+                    .iter()
+                    .filter_map(|t| match t {
+                        Ty::Param(p) => Some(p.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                (format!("{bare}.{}", decl.name), Some(bare), tps)
+            }
+            _ => (decl.name.clone(), None, Vec::new()),
+        };
+        let self_ty = bare.as_deref().filter(|_| host_tps.is_empty());
+        crate::desugar::param_slots(decl, file, &owner, self_ty, &host_tps)
     }
 
     /// Pass-1.5: for every function/method that omitted `-> T`, infer its return type from the
@@ -1513,7 +1535,7 @@ impl Checker {
             && sig
                 .witness_params
                 .iter()
-                .all(|w| Self::ty_param_in_params(sig, w));
+                .all(|w| Self::ty_param_in_params(sig, w, &c.supplied));
         !args_pin_the_witnesses
     }
 
@@ -1617,9 +1639,18 @@ impl Checker {
     /// early return deleted — re-opens the hole silently. The defaulted-parameter case in
     /// `witness_forwarding_still_charges_every_unpinned_shape_rejected` is the pin, alongside
     /// `w8_47_a_witness_taking_callee_keeps_its_full_arity`.
-    fn ty_param_in_params(sig: &FnSig, w: &str) -> bool {
+    fn ty_param_in_params(sig: &FnSig, w: &str, supplied: &(usize, Vec<String>)) -> bool {
         let probe: HashMap<String, Ty> = [(w.to_string(), Ty::Unknown)].into_iter().collect();
-        sig.params.iter().any(|p| subst(p, &probe) != *p)
+        let (npos, named) = supplied;
+        sig.params.iter().enumerate().any(|(i, p)| {
+            let filled = i < *npos
+                || sig
+                    .labels
+                    .get(i)
+                    .and_then(|l| l.as_deref())
+                    .is_some_and(|l| named.iter().any(|n| n == l));
+            filled && subst(p, &probe) != *p
+        })
     }
 
     /// M24 — does type param `t` occur in `decl`'s own signature (any parameter's annotation and,
@@ -4762,6 +4793,21 @@ impl Checker {
     }
 
     pub(super) fn check_fn_body(&mut self, decl: &FnDecl, self_ty: Option<Ty>, sig: FnSig) {
+        let provider = decl
+            .name
+            .starts_with(crate::desugar::PROVIDER_PREFIX)
+            .then(|| (decl.name.clone(), decl.name_span));
+        if let Some((n, sp)) = &provider {
+            self.provider_edges
+                .entry(n.clone())
+                .or_insert_with(|| (Vec::new(), *sp));
+        }
+        let saved_provider = std::mem::replace(&mut self.current_provider, provider);
+        self.check_fn_body_inner(decl, self_ty, sig);
+        self.current_provider = saved_provider;
+    }
+
+    fn check_fn_body_inner(&mut self, decl: &FnDecl, self_ty: Option<Ty>, sig: FnSig) {
         // Enter the sig's type params (NOT `decl.type_params`): `fn_sig` folds any `where T: Bound`
         // clause into them, so the body sees a `where`-bounded param as satisfying its bound (e.g. a
         // `where T: Comparable` param may use `<` in the body). Same names as `decl.type_params`
