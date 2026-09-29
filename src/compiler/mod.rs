@@ -802,32 +802,6 @@ impl Compiler {
         CompilerDecodeEnv { c: self }
     }
 
-    /// The IDENTITY KEY for a bare-written enum name `ename` in the CURRENT module: its `bare_types`
-    /// key when it is a bare-visible user enum (local / `from`-imported / std). ROOT REDESIGN — a
-    /// WHOLE-module-imported enum (`Color` matched as `Color.Red` against a `geo::Color` value) is NOT
-    /// bare-visible, so resolve it through the imported modules: pick an imported module that declares
-    /// `ename` whose qualified key is a registered enum (deterministic — a match pattern's enum is
-    /// uniquely the scrutinee's, and a genuine local collision is resolved first via `bare_types`).
-    /// Falls back to the bare name (built-in `Result`/`Option`, or a miss that fall-throughs).
-    fn enum_bare_key(&self, ename: &str) -> String {
-        if let Some(k) = self.bare_types.get(ename) {
-            return k.clone();
-        }
-        for &tidx in self.imported_modules.values() {
-            if self
-                .module_types
-                .get(tidx)
-                .is_some_and(|t| t.contains(ename))
-            {
-                let key = self.type_key(tidx, ename);
-                if self.program.variants.keys().any(|(e, _)| *e == key) {
-                    return key;
-                }
-            }
-        }
-        ename.to_string()
-    }
-
     /// M19 Phase 6 — allocate an inline-cache site id for a `CallMethod` op. Every method/module-member
     /// call gets a fresh dense id (the VM fills it only for struct-method dispatch; module/core-type
     /// calls leave it empty, costing one unused `method_ic` slot — negligible).
@@ -2952,102 +2926,56 @@ impl Compiler {
         patterns.into_iter().all(|p| self.pattern_is_literal(p))
     }
 
-    /// Resolve a variant reference to its `(enum, variant)` registry key. The enum is the explicit
-    /// qualifier when present (user variants are always qualified post-check); a bare name resolves
-    /// only as a built-in (`Ok`/`Err`→`Result`, `Some`/`None`→`Option`). `None` for any other bare
-    /// name (a binding, not a variant).
-    fn variant_pair(&self, enum_name: Option<&str>, name: &str) -> Option<(String, String)> {
-        let en = match enum_name {
-            // A pattern carries the BARE written enum name (`Color` from `Color.Red`); resolve it to
-            // the module-scoped runtime key the construction path uses (`enum_bare_key`), so a
-            // disambiguated enum (`cb::Color`) MATCHES — producer and consumer agree on the key. In
-            // the no-collision common case this resolves back to the bare name, unchanged.
-            Some(en) => self.enum_bare_key(en),
-            None => match name {
-                "Ok" | "Err" => "Result".to_string(),
-                "Some" | "None" => "Option".to_string(),
-                _ => return None,
-            },
+    /// The `(enum, variant)` registry key of a built-in variant (`Ok`/`Err` in `Result`,
+    /// `Some`/`None` in `Option`), or `None` for any other name. Callers reach it only after the
+    /// checker decided the name is that built-in (a `Builtin` call record, a `RetCoerce` wrap).
+    fn builtin_variant_pair(name: &str) -> Option<(String, String)> {
+        let en = match name {
+            "Ok" | "Err" => "Result",
+            "Some" | "None" => "Option",
+            _ => return None,
         };
-        Some((en, name.to_string()))
+        Some((en.to_string(), name.to_string()))
     }
 
-    /// The IDENTITY KEY of a struct pattern in the current module (L2). Two spellings: BARE
-    /// `Point(x, y)` (`name` resolves via `bare_types` to a registered STRUCT, not an enum variant),
-    /// or QUALIFIED `geo.Point(x, y)` (the qualifier — the `enum_name` slot filled by the 2-part parse
-    /// — is an imported MODULE binder whose `type_key(mod, name)` is a registered struct; the only
-    /// spelling for a whole-module-imported struct, symmetric with qualified construction).
-    ///
-    /// `None` for an enum variant, an ENUM-name qualifier (`E.Point` — not a module), or an unknown
-    /// name. This is what separates a struct pattern from an enum-variant pattern at lowering time; it
-    /// must AGREE with the checker's `resolve_struct_ctor` so nothing check-accepted fails to lower.
-    fn struct_key_of_pattern(&self, enum_name: Option<&str>, name: &str) -> Option<String> {
-        if let Some(q) = enum_name {
-            let &tidx = self.imported_modules.get(q)?;
-            let key = self.type_key(tidx, name);
-            return self.program.structs.contains_key(&key).then_some(key);
-        }
-        if self.variant_pair(None, name).is_some() {
-            return None;
-        }
-        let key = self.bare_types.get(name)?;
-        self.program.structs.contains_key(key).then(|| key.clone())
+    /// What the checker recorded for a pattern head (`Pattern::Variant` or a nested
+    /// `Pattern::Ident`): `Variant`, `PatStruct` or `PatBinding`. The checker records every head
+    /// of a pattern it accepts, so a miss is an internal error. `None` for a pattern with no head.
+    fn pat_resolution(&self, p: &Pattern, span: Span) -> Option<Result<&Resolution, CompileError>> {
+        let id = match p {
+            Pattern::Variant { id, .. } | Pattern::Ident(_, _, id) => id,
+            _ => return None,
+        };
+        Some(
+            self.resolutions
+                .get(&(self.current_module_idx, id.0))
+                .ok_or_else(|| CompileError {
+                    message: "internal: no name resolution recorded for this pattern -- the \
+                              type-checker and the backend disagree"
+                        .to_string(),
+                    span,
+                }),
+        )
+    }
+
+    /// Whether the checker recorded this pattern head as a variant test.
+    fn pat_is_variant(&self, p: &Pattern) -> bool {
+        matches!(
+            self.pat_resolution(p, Span::RUNTIME),
+            Some(Ok(Resolution::Variant { .. }))
+        )
     }
 
     /// Whether an arm pattern is a GENUINE enum-variant pattern (so `compile_match_general` must
-    /// emit the `EnsureEnum` scrutinee guard). A `Pattern::Variant` is NOT one when it resolves to a
-    /// struct (`Point(x, y)`, L2) or is a bare whole-value catch-all binding (`rest:` — no qualifier,
-    /// no payload, not a registered variant). Everything else (a payload/qualified/nullary-variant
-    /// arm) needs the guard.
+    /// emit the `EnsureEnum` scrutinee guard). A struct pattern (`Point(x, y)`, L2) and a bare
+    /// whole-value catch-all binding (`rest:`) are not.
     fn pattern_needs_enum(&self, p: &Pattern) -> bool {
-        let Pattern::Variant {
-            name,
-            bindings,
-            enum_name,
-            ..
-        } = p
-        else {
-            return false;
-        };
-        if self
-            .struct_key_of_pattern(enum_name.as_deref(), name)
-            .is_some()
-        {
-            return false;
-        }
-        // Bare whole-value catch-all binding — binds, never tests an enum tag.
-        if enum_name.is_none() && bindings.is_empty() && self.variant_pair(None, name).is_none() {
-            return false;
-        }
-        true
+        matches!(p, Pattern::Variant { .. }) && self.pat_is_variant(p)
     }
 
-    /// Whether `(enum_name, name)` is a registered NULLARY variant (`None`, a user enum's
-    /// empty-payload variant). A nested bare `Ident` naming a built-in nullary variant is a refutable
-    /// variant match (the checker has promoted it), not a binding — routed by the same registry the
-    /// runtime uses.
-    fn is_nullary_variant(&self, enum_name: Option<&str>, name: &str) -> bool {
-        self.variant_pair(enum_name, name)
-            .and_then(|k| self.program.variants.get(&k))
-            .is_some_and(|v| v.arity == 0)
-    }
-
-    /// M19 lever #2 — the dense `variant_id` of `(enum_name, name)`, baked into `Op::NewEnum`/
-    /// `Op::MatchArm` so the VM stamps / compares it without a runtime hash lookup. `VID_NONE` if
-    /// unregistered (the compiler always emits these for known variants, so the fallback is defensive).
-    fn variant_id_of(&self, enum_name: Option<&str>, name: &str) -> u32 {
-        self.variant_pair(enum_name, name)
-            .and_then(|k| self.program.variants.get(&k))
-            .map_or(crate::vm::op::VID_NONE, |v| v.variant_id)
-    }
-
-    /// Like `variant_id_of`, but `enum_key` is the ALREADY-RESOLVED module-scoped runtime key (the
-    /// `type_key`/`enum_bare_key` the *construction call site* computed to decide WHICH module's enum
-    /// it is building). Looks `(enum_key, name)` up directly — NO second pass through `enum_bare_key`.
-    /// This is the construction-side entry point: re-resolving the key against the currently-compiled
-    /// module's `bare_types` would mis-key a qualified `mod.E.V` whenever the *constructing* module
-    /// also declares a colliding `E` (it'd pick the local loser's id), so the produced value could
-    /// never match in its declaring module. `variant_id_of` stays the pattern/built-in entry point.
+    /// M19 lever #2 — the dense `variant_id` of the variant `name` of the enum keyed `enum_key` (the
+    /// module-scoped runtime key the checker recorded), baked into `Op::NewEnum`/`Op::MatchArm` so the
+    /// VM stamps / compares it without a runtime hash lookup. `VID_NONE` if unregistered.
     /// `Op::NewEnum` for variant `variant` of the enum keyed `enum_key`, over `argc` pushed args.
     fn emit_new_enum(
         &self,
@@ -3089,7 +3017,7 @@ impl Compiler {
 
     fn collect_binding_names(&self, p: &Pattern, out: &mut std::collections::BTreeSet<String>) {
         match p {
-            Pattern::Ident(n, _, _) if !self.is_nullary_variant(None, n) => {
+            Pattern::Ident(n, _, _) if !self.pat_is_variant(p) => {
                 out.insert(n.clone());
             }
             Pattern::Ident(..) => {}
@@ -3109,15 +3037,12 @@ impl Compiler {
     fn pattern_is_literal(&self, p: &Pattern) -> bool {
         match p {
             Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard => true,
-            // empty-binding `Name`: a binding unless it's a real variant.
-            Pattern::Variant {
-                name,
-                bindings,
-                enum_name,
-                ..
-            } if bindings.is_empty() => self
-                .variant_pair(enum_name.as_deref(), name)
-                .is_none_or(|k| !self.program.variants.contains_key(&k)),
+            // empty-binding `Name`: a binding unless the checker recorded a variant. A missing
+            // record takes the general path, whose `emit_pattern` reports it.
+            Pattern::Variant { bindings, .. } if bindings.is_empty() => matches!(
+                self.pat_resolution(p, Span::RUNTIME),
+                Some(Ok(r)) if !matches!(r, Resolution::Variant { .. })
+            ),
             Pattern::Or(alts) => alts.iter().all(|a| self.pattern_is_literal(a)),
             _ => false,
         }
@@ -3226,13 +3151,14 @@ impl Compiler {
         match pattern {
             Pattern::Wildcard => {}
             Pattern::Ident(name, _, _) => {
-                // A nested bare identifier naming a known NULLARY variant is a refutable
-                // variant match (`Some(None)`, `Ok(Err(e))` — the checker has promoted it); it
-                // binds nothing and is tested like a top-level nullary variant. Otherwise it is a
-                // binding capturing the whole sub-value.
-                if self.is_nullary_variant(None, name) {
+                // A nested bare identifier the checker recorded as a NULLARY variant is a
+                // refutable variant match (`Some(None)`); it binds nothing and is tested like a
+                // top-level nullary variant. Otherwise it is a binding capturing the whole
+                // sub-value.
+                let res = self.pat_resolution(pattern, span).transpose()?.cloned();
+                if let Some(Resolution::Variant { enum_key, variant }) = res {
                     let bind_start = fc.next_slot();
-                    let variant_id = self.variant_id_of(None, name);
+                    let variant_id = self.variant_id_of_key(&enum_key, &variant);
                     let arm_op = fc.emit_jump(
                         Op::MatchArm {
                             scrut,
@@ -3284,20 +3210,18 @@ impl Compiler {
                 enum_name,
                 ..
             } => {
+                let res = self
+                    .pat_resolution(pattern, span)
+                    .transpose()?
+                    .cloned()
+                    .expect("a Variant pattern has a head");
                 // Struct pattern (L2): `Point(x, y)` destructures a struct by DECLARED FIELD NAME.
                 // A struct has one constructor, so this is structurally IRREFUTABLE — no `MatchArm`
                 // tag test, no fail-jump of its own; refutable SUB-patterns (`Point(0, y)`) push their
                 // own fails when they recurse. Mirrors the `Pattern::Tuple` arm but keys `GetField` on
                 // the field name instead of a numeric index (the VM resolves both the same way).
-                // Gate on NON-empty bindings: a BARE name with no payload (`Node:`) is never a
-                // destructure — even when it happens to resolve to an in-scope struct — it is the
-                // whole-value catch-all binding the checker declared (`!is_ctor && bindings.is_empty()`
-                // in checker/pattern.rs). Taking the destructure branch here (type-blind, by NAME)
-                // would bind NOTHING, leaving the name unbound in the body → `global has no slot` panic.
-                if !bindings.is_empty()
-                    && let Some(key) = self.struct_key_of_pattern(enum_name.as_deref(), name)
-                {
-                    let field_names = self.program.structs[&key].fields.clone();
+                if let Resolution::PatStruct(key) = &res {
+                    let field_names = self.program.structs[key].fields.clone();
                     for (b, fname) in bindings.iter().zip(field_names.iter()) {
                         fc.emit_hidden_get(scrut, span);
                         fc.emit(
@@ -3316,14 +3240,11 @@ impl Compiler {
                 // A bare whole-value binding catch-all (`rest:` after a refutable struct arm) —
                 // reachable in a struct, enum, `Option` or `Result` match (TICKET-107). Bind the
                 // scrutinee like a plain `Pattern::Ident`.
-                if enum_name.is_none()
-                    && bindings.is_empty()
-                    && self.variant_pair(None, name).is_none()
-                {
+                let Resolution::Variant { enum_key, variant } = res else {
                     fc.emit_hidden_get(scrut, span);
                     fc.emit_decl_named(name.clone(), span);
                     return Ok(());
-                }
+                };
                 // One slot per payload element, written positionally by `MatchArm`. An UNBOXED plain
                 // `Ident` binding names its slot directly (so `Some(c)` binds `c` with no copy); a
                 // BOXED plain ident (captured by a closure in the arm) needs a cell, but `MatchArm`
@@ -3334,7 +3255,7 @@ impl Compiler {
                 for b in bindings {
                     match b {
                         Pattern::Ident(n, _, _)
-                            if !self.is_nullary_variant(None, n) && !fc.is_boxed_name(n) =>
+                            if !self.pat_is_variant(b) && !fc.is_boxed_name(n) =>
                         {
                             fc.add_local(n.clone());
                         }
@@ -3343,11 +3264,11 @@ impl Compiler {
                         }
                     }
                 }
-                let variant_id = self.variant_id_of(enum_name.as_deref(), name);
+                let variant_id = self.variant_id_of_key(&enum_key, &variant);
                 let arm_op = fc.emit_jump(
                     Op::MatchArm {
                         scrut,
-                        variant: name.clone(),
+                        variant,
                         variant_id,
                         // SCRUTINEE-DRIVEN fallback — carry the BARE written enum qualifier so the
                         // VM can resolve an id-compare MISS against the scrutinee's own enum key
@@ -3364,9 +3285,9 @@ impl Compiler {
                     match b {
                         // Unboxed plain binding — the VM wrote it straight into its user slot.
                         Pattern::Ident(n, _, _)
-                            if !self.is_nullary_variant(None, n) && !fc.is_boxed_name(n) => {}
+                            if !self.pat_is_variant(b) && !fc.is_boxed_name(n) => {}
                         // Boxed plain binding — bind the user cell from the raw slot the VM wrote.
-                        Pattern::Ident(n, _, _) if !self.is_nullary_variant(None, n) => {
+                        Pattern::Ident(n, _, _) if !self.pat_is_variant(b) => {
                             fc.emit_hidden_get(bind_start + i, span);
                             fc.emit_decl_named(n.clone(), span);
                         }
@@ -4498,8 +4419,7 @@ impl Compiler {
             Some(crate::checker::RetCoerce::WrapSome) => "Some",
             Some(crate::checker::RetCoerce::WrapOk | crate::checker::RetCoerce::WrapOkNil) => "Ok",
         };
-        let variant_id = self
-            .variant_pair(None, name)
+        let variant_id = Self::builtin_variant_pair(name)
             .and_then(|k| self.program.variants.get(&k))
             .map(|def| def.variant_id)
             .ok_or_else(|| CompileError {
@@ -4977,9 +4897,8 @@ impl Compiler {
         }
         // A bare *built-in* variant constructor (`Ok(x)`, `Some(x)`) — user variants are qualified
         // (handled in the `Field` arm above), so only built-ins resolve bare here.
-        if let Some(def) = self
-            .variant_pair(None, name)
-            .and_then(|k| self.program.variants.get(&k))
+        if let Some(def) =
+            Self::builtin_variant_pair(name).and_then(|k| self.program.variants.get(&k))
         {
             let variant_id = def.variant_id;
             // Zero-arg `Ok()` is `Result[nil, E]`'s success value (checker arm:

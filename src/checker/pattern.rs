@@ -9,7 +9,34 @@ use super::*;
 pub(super) const RANGE_NOT_A_VALUE: &str = "a range is only valid as the iterable of a `for` loop or comprehension, as a slice receiver, \
      or as a `match` pattern — use `range(a, b)` to materialize a `List[int]`";
 
+/// The enum a built-in variant belongs to: `Ok`/`Err` are `Result`'s, `Some`/`None` are `Option`'s.
+fn builtin_variant_enum(name: &str) -> &'static str {
+    if matches!(name, "Ok" | "Err") {
+        "Result"
+    } else {
+        "Option"
+    }
+}
+
 impl Checker {
+    /// Record a built-in variant head (`Some(x)`, `Option.None`) that no scrutinee type confirms:
+    /// an un-inferable or literal scrutinee. The checker has already reported the arm unless it is
+    /// inside a rolled-back carrier walk; the lowering tests the variant tag either way.
+    fn record_builtin_pattern_variant(
+        &mut self,
+        id: crate::ast::NodeId,
+        enum_name: &Option<String>,
+        name: &str,
+        span: Span,
+    ) {
+        let owner = builtin_variant_enum(name);
+        if crate::checker::is_builtin_variant(name)
+            && enum_name.as_deref().is_none_or(|e| e == owner)
+        {
+            self.record_variant(id, owner, name, span);
+        }
+    }
+
     /// Type-check a *nested* sub-pattern (a variant payload slot or tuple element — gap #15) against
     /// its expected type `ty`, declaring any bindings into the current scope. Returns whether the
     /// sub-pattern is **irrefutable** (matches every value of `ty`): a binding/wildcard is, a
@@ -17,7 +44,7 @@ impl Checker {
     pub(super) fn bind_subpattern(&mut self, pattern: &Pattern, ty: &Ty, span: Span) -> bool {
         match pattern {
             Pattern::Wildcard => true,
-            Pattern::Ident(name, bind_span, _) => {
+            Pattern::Ident(name, bind_span, id) => {
                 // A nested bare identifier names a *built-in* nullary variant of the matched type (a
                 // refutable variant match — `Some(None)`, `Ok(Err(e))`), or a fresh binding. User
                 // variants must be written qualified (handled below), never resolved bare here.
@@ -28,6 +55,7 @@ impl Checker {
                     {
                         if payload.is_empty() {
                             // A nullary built-in variant of `ty`: a refutable match, binds nothing.
+                            self.record_variant(*id, builtin_variant_enum(name), name, span);
                             return false;
                         }
                         // A non-nullary variant used without its payload — needs `Name(...)`.
@@ -44,6 +72,12 @@ impl Checker {
                         self.error(span, format!("'{name}' is not a variant of {ty}"));
                         return false;
                     }
+                    // Over an un-inferable slot the nullary `None` is still the variant (a
+                    // refutable test that binds nothing); a payload variant name binds.
+                    if name == "None" {
+                        self.record_variant(*id, "Option", name, span);
+                        return false;
+                    }
                 }
                 // A *user* variant must be written qualified — never resolved bare, never silently a
                 // binding (the bare→binding trap). Reject with a hint to the qualified form.
@@ -57,6 +91,7 @@ impl Checker {
                 // token's OWN span (`bind_span`, not the arm-level `span`), exactly as the for-loop
                 // uses `var_spans`. No-op unless a probe is armed → zero overhead on normal checks.
                 self.hover_record_at(*bind_span, ty, HoverKind::Local, None);
+                self.record_resolution(*id, Resolution::PatBinding, span);
                 self.declare(name, ty.clone());
                 true
             }
@@ -128,7 +163,7 @@ impl Checker {
                 }
             },
             Pattern::Variant {
-                id: _,
+                id,
                 name,
                 bindings,
                 enum_name,
@@ -154,16 +189,19 @@ impl Checker {
                     );
                     if let Err(msg) = &ctor {
                         self.error(span, msg.clone());
-                    } else if fields.len() != bindings.len() {
-                        self.error(
-                            span,
-                            format!(
-                                "struct '{}' binds {} field(s), but {} given",
-                                crate::compiler::bare_display(sname),
-                                fields.len(),
-                                bindings.len()
-                            ),
-                        );
+                    } else {
+                        self.record_resolution(*id, Resolution::PatStruct(sname.clone()), span);
+                        if fields.len() != bindings.len() {
+                            self.error(
+                                span,
+                                format!(
+                                    "struct '{}' binds {} field(s), but {} given",
+                                    crate::compiler::bare_display(sname),
+                                    fields.len(),
+                                    bindings.len()
+                                ),
+                            );
+                        }
                     }
                     let mut sub_irref = true;
                     for (b, t) in bindings.iter().zip(fields.iter()) {
@@ -188,6 +226,9 @@ impl Checker {
                         let single_variant = vmap.len() == 1;
                         match vmap.get(name) {
                             Some(payload) => {
+                                if let Some(ekey) = Self::scrutinee_enum(ty) {
+                                    self.record_variant(*id, ekey, name, span);
+                                }
                                 if payload.len() != bindings.len() {
                                     self.error(
                                         span,
@@ -404,7 +445,7 @@ impl Checker {
                 self.push_scope();
                 match pattern {
                     Pattern::Variant {
-                        id: _,
+                        id,
                         name,
                         bindings,
                         enum_name,
@@ -427,9 +468,14 @@ impl Checker {
                             && bindings.is_empty()
                             && !is_known_variant
                         {
+                            self.record_resolution(*id, Resolution::PatBinding, span);
                             self.declare(name, Ty::Unknown);
                             return true;
                         }
+                        // A structural arm over an un-inferable scrutinee is rejected upstream
+                        // (`reconstruct_unknown_kind`), except inside a rolled-back carrier walk,
+                        // whose lowering names only the built-in variants.
+                        self.record_builtin_pattern_variant(*id, enum_name, name, span);
                         covered.insert(name.clone());
                         for b in bindings {
                             self.bind_subpattern(b, &Ty::Unknown, span);
@@ -451,7 +497,7 @@ impl Checker {
                 self.push_scope();
                 match pattern {
                     Pattern::Variant {
-                        id: _,
+                        id,
                         name,
                         bindings,
                         enum_name,
@@ -469,6 +515,7 @@ impl Checker {
                             && !self.variant_owners.contains_key(name)
                             && !crate::checker::is_builtin_variant(name)
                         {
+                            self.record_resolution(*id, Resolution::PatBinding, span);
                             self.declare(name, scrut.clone());
                             return true;
                         }
@@ -480,6 +527,9 @@ impl Checker {
                             span,
                         );
                         let payload = variants.get(name).cloned();
+                        if payload.is_some() {
+                            self.record_variant(*id, &label.clone(), name, span);
+                        }
                         if payload.is_none() && !qualifier_reported {
                             self.error(
                                 span,
@@ -605,7 +655,7 @@ impl Checker {
                     // registry, so a colliding name would trap on the VM; reject
                     // it here at check time instead. (Rename the binding to fix.)
                     Pattern::Variant {
-                        id: _,
+                        id,
                         name,
                         bindings,
                         enum_name,
@@ -635,11 +685,12 @@ impl Checker {
                             );
                             return false;
                         }
+                        self.record_resolution(*id, Resolution::PatBinding, span);
                         self.declare(name, ty.clone());
                         return true;
                     }
                     Pattern::Variant {
-                        id: _,
+                        id,
                         bindings,
                         enum_name,
                         name,
@@ -647,6 +698,7 @@ impl Checker {
                     } => {
                         self.check_pattern_qualifier(module_name, enum_name, name, None, span);
                         self.error(span, format!("cannot match a variant against {ty}"));
+                        self.record_builtin_pattern_variant(*id, enum_name, name, span);
                         // Still bind the payload sub-patterns (as Unknown) so the arm body doesn't
                         // cascade into spurious "unknown name" errors — notably the desugared `?.`
                         // case, where the payload binding is an internal `__opt` temp the user can't
@@ -686,7 +738,7 @@ impl Checker {
                 // whole-scrutinee catch-all on a tuple too (`rest:`), the same predicate the struct
                 // arm uses — irrefutable, and the name binds the whole tuple.
                 if let Pattern::Variant {
-                    id: _,
+                    id,
                     name,
                     bindings,
                     enum_name: None,
@@ -706,6 +758,7 @@ impl Checker {
                         );
                         return false;
                     }
+                    self.record_resolution(*id, Resolution::PatBinding, span);
                     self.declare(name, Ty::Tuple(tys.clone()));
                     return true;
                 }
@@ -722,7 +775,7 @@ impl Checker {
                 self.push_scope();
                 match pattern {
                     Pattern::Variant {
-                        id: _,
+                        id,
                         name,
                         bindings,
                         enum_name,
@@ -757,12 +810,16 @@ impl Checker {
                                 );
                                 return false;
                             }
+                            self.record_resolution(*id, Resolution::PatBinding, span);
                             self.declare(name, Ty::Struct(label.clone(), targs.clone()));
                             return true;
                         }
                         // A constructor pattern: the name must be the struct's own name, and the
                         // field count must match (a clean checker error, never a runtime panic).
                         let is_ctor = ctor.is_ok();
+                        if is_ctor {
+                            self.record_resolution(*id, Resolution::PatStruct(label.clone()), span);
+                        }
                         if let Err(msg) = &ctor {
                             self.error(span, msg.clone());
                         } else if fields.len() != bindings.len() {

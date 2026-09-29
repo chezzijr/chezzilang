@@ -35970,3 +35970,57 @@ fn a_fn_or_type_named_like_a_module_import_is_rejected() {
         ("lib.chz", LIB),
     ]);
 }
+
+/// TICKET-180 step 11 — the checker records what every pattern head names: a variant (keyed by the
+/// scrutinee's enum), a struct destructure, or a binding. A nested bare `None` is the variant, a
+/// nested bare `v` is a binding, and a bare top-level name over an `int` is a binding.
+#[test]
+fn resolution_records_every_pattern_head() {
+    let src = "enum C:\n    Red\n    Val(int)\nstruct P:\n    x: int\n    y: int\n\
+               fn f(c: C) -> int:\n    return match c:\n        C.Red: 0\n        C.Val(n): n\n\
+               fn g(o: Option[Option[int]]) -> int:\n    return match o:\n        Some(None): 1\n        Some(Some(v)): v\n        None: 0\n\
+               fn h(p: P) -> int:\n    return match p:\n        P(a, b): a + b\n\
+               fn k(n: int) -> int:\n    return match n:\n        1: 1\n        other: other\n";
+    let mut m = parser::parse(lexer::tokenize(src).expect("lex")).expect("parse");
+    crate::desugar::run_standalone(&mut m).expect("desugar");
+    let table = resolve_call_tables_standalone(&m.stmts).9;
+    let mut got: Vec<String> = crate::ast::node_ids(&m)
+        .into_iter()
+        .filter_map(|(id, _)| table.get(&(0, id)))
+        .filter(|r| {
+            matches!(
+                r,
+                Resolution::Variant { .. } | Resolution::PatStruct(_) | Resolution::PatBinding
+            )
+        })
+        .map(|r| format!("{r:?}"))
+        .collect();
+    got.sort();
+    let v = |e: &str, n: &str| {
+        format!(
+            "{:?}",
+            Resolution::Variant {
+                enum_key: e.to_string(),
+                variant: n.to_string(),
+            }
+        )
+    };
+    // A user type's key is its runtime identity key (`<main>::C` in a standalone module).
+    let mut want = vec![v("<main>::C", "Red"), v("<main>::C", "Val")];
+    want.extend([
+        v("Option", "Some"),
+        v("Option", "Some"),
+        v("Option", "Some"),
+    ]);
+    want.extend([v("Option", "None"), v("Option", "None")]);
+    want.push(format!(
+        "{:?}",
+        Resolution::PatStruct("<main>::P".to_string())
+    ));
+    want.extend(std::iter::repeat_n(
+        format!("{:?}", Resolution::PatBinding),
+        5,
+    ));
+    want.sort();
+    assert_eq!(got, want);
+}
