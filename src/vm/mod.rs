@@ -6090,6 +6090,9 @@ struct TimerSleep {
 }
 
 mod arith;
+// TICKET-181 step 3: the table lands before its consumers (step 4 removes this allow).
+#[allow(dead_code)]
+mod block;
 mod call;
 pub(crate) use call::is_mutating_native_kind;
 mod exec;
