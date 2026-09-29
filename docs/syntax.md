@@ -590,13 +590,11 @@ The checker memoizes an un-annotated nested fn's return inference, so depth is n
 fn may **not** be generic (`fn id[T](x: T)` inside a body is rejected — declare
 it at the top level), and **mutual recursion** between two sibling nested fns is unsupported: a nested
 fn is only in scope *after* its own declaration, so `a` referencing a later-declared sibling `b` is a
-`unknown name 'b'` error (declare such a pair at the top level instead). A nested fn may **not** be
-named after a **builtin / constructor** the runtime resolves before a local — a reserved builtin
-(`print`/`range`/`int`/`List`/`Channel`/…), a same-module **struct** or **newtype** constructor, or a
-builtin **variant** ctor (`Ok`/`Err`/`Some`/`None`) — because the backend would run the builtin while
-the checker saw the local; it is a `nested function name '…' is reserved` compile error (a nested fn
-*may* share a **user enum variant's** name — those aren't bare-callable, so there is no divergence).
-All of these are clean compile-time rejects, never a check-OK/run-fault.
+`unknown name 'b'` error (declare such a pair at the top level instead). Both are clean compile-time
+rejects, never a check-OK/run-fault. A nested fn may take **any name a local may take**, including a
+builtin (`ord`), a builtin ctor (`Channel`), a same-module **struct** or **newtype**, and it shadows
+that name in its scope, as a `def ord` inside a Python function does (TICKET-180: the checker records
+what each call head means and the backend reads that record, so the local wins at runtime too).
 
 ### Built-in types
 

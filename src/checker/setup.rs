@@ -125,6 +125,9 @@ impl Checker {
             ret_coerce: crate::checker::RetCoerceTable::new(),
             for_binds: crate::checker::ForBindTable::new(),
             table_conflicts: Vec::new(),
+            resolutions: HashMap::new(),
+            module_idx_of: HashMap::new(),
+            fn_homes: HashMap::new(),
             next_opt_tmp: 0,
             witness_scope: Vec::new(),
             witness_member_names: std::collections::HashSet::new(),
@@ -1536,6 +1539,7 @@ impl Checker {
         self.scopes.clear();
         self.loop_vars.clear();
         self.functions.clear();
+        self.fn_homes.clear();
         self.local_fn_names.clear();
         self.fn_reads.clear();
         self.name_docs.clear();
@@ -1967,6 +1971,9 @@ impl Checker {
                     }
                     if let Some(fsig) = sig.functions.get(member) {
                         self.functions.insert(bind.clone(), fsig.clone());
+                        if let Some(&home) = self.module_idx_of.get(&imp.target) {
+                            self.fn_homes.insert(bind.clone(), (home, member.clone()));
+                        }
                         // Carry the numeric-polymorphism marker onto the imported name (gap #12).
                         if sig.numeric_poly.contains(member) {
                             self.imported_poly.insert(bind.clone());

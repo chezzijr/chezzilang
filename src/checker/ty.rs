@@ -997,3 +997,30 @@ mod tests {
         assert_eq!(nominal("pkg.b::Col").to_string(), "Col");
     }
 }
+
+/// TICKET-180 — what one name in expression position denotes, decided ONCE by the checker and read
+/// by the compiler (`Compiler::resolution`). Keyed `(graph module index, NodeId)` in a
+/// [`ResolutionTable`]. A compiler lookup miss is an `internal:` error, never a fallback.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Resolution {
+    /// A binding in a fn, closure, block or pattern scope. The compiler maps it to a slot or an
+    /// upvalue (storage is the capture analysis's job, not the checker's).
+    Local,
+    /// A module-level binding of the current module (scope 0): a top-level `:=` or an imported value.
+    Global { module: usize, name: String },
+    /// A module-level `fn`: the DECLARING module and the DECLARED name (an
+    /// `import reset as again from m` binding records `reset`). Lowers to a load + `Op::Call`.
+    Fn { module: usize, name: String },
+    /// A builtin fn or ctor (`print`, `ord`, `Channel`, `timer`, `Ok`): the opcode the compiler
+    /// emits is chosen by this name (`NewChannel`, `CallBuiltin`, `NewEnum`, ...).
+    Builtin(String),
+    /// A struct ctor, by runtime key (`Op::NewStruct`).
+    StructCtor(String),
+    /// A newtype ctor, by runtime key (`Op::NewType`).
+    NewTypeCtor(String),
+    /// A desugar-synthesized default provider the module cannot name (`Op::MakeFuncIn`).
+    Provider,
+}
+
+/// Every [`Resolution`] the checker recorded; see there.
+pub type ResolutionTable = HashMap<(usize, u32), Resolution>;

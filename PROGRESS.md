@@ -7,6 +7,16 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-180 (2026-09-29, IN PROGRESS) — bare call heads resolve once, in the checker (wave 16
+  Family 1, K1/K2).** Every `Expr` and pattern head carries an equality-neutral `ast::NodeId`
+  (desugar renumbers what it places twice; a debug assertion after `desugar::run` rejects a shared
+  id). The checker records a `checker::Resolution` for every bare call head, keyed `(module, NodeId)`;
+  `compile_call` lowers a bare call from that record alone (a miss is `internal:`), and
+  `ctor_shadowed`, `raw_ctor_owner`, `is_builtin` and the nested-fn name veto are deleted. So a
+  local/param/loop/match/closure/comprehension/`wait:` binding named like a builtin, struct, newtype
+  or alias now wins at runtime (`ord := fn...; ord("a")` → `1000`, CPython too), and K2 prints
+  `P(x=0)`. Qualified heads, identifier reads, pattern heads, `json.decode[T]`, K3 and the two P2s
+  are not yet moved; the grid `tests/name_resolution_grid.rs` names the 14 cells still red.
 - **TICKET-183 (2026-09-29) — module scope is order-free for function bodies (wave 16 Family 3).**
   `fn f(): return x` above `x := 5` was `unknown name 'x'`, and `x := "s"` / `fn f(): return x` /
   `y: int = f()` checked clean and printed `s` (P0): `infer_returns` ran before any top-level let was

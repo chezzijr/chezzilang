@@ -8986,51 +8986,43 @@ fn nested_generic_fn_clean_reject() {
 }
 
 /// A nested fn named after a RESERVED builtin/ctor (`print`, `range`, `int`, `List`, `Channel`, …)
-/// must be REJECTED, not declared as a shadowing local: the compiler resolves the builtin BEFORE a
-/// local value-call, so binding it would type calls to the nested fn while the VM runs the builtin —
-/// the exact check-OK/run-divergent hole this task exists to close. (Base branch bug 2.)
+/// is a shadowing local (TICKET-180 deleted the veto that rejected it: the backend now reads the
+/// checker's recorded resolution, so the local wins at runtime too; the grid in
+/// `tests/name_resolution_grid.rs` runs these shapes).
 #[test]
-fn nested_fn_shadows_reserved_builtin_rejected() {
+fn nested_fn_shadows_reserved_builtin_accepted() {
     // `fn print(...)` inside a wrapper: checker typed `print(5)` as the nested int fn, VM ran the
-    // builtin print → `v` nil → run-fault. Now a clean check-time reject.
-    entry_rejects(
+    // builtin print → `v` nil → run-fault. Now the nested fn wins.
+    entry_ok(
         "fn wrapper() -> int:\n    fn print(x: int) -> int:\n        return x + 1\n    return print(5)\nv := wrapper()\nprint(v)\n",
-        "reserved",
     );
     // `fn range(...)` — same family, silent wrong value on base.
-    entry_rejects(
+    entry_ok(
         "fn wrapper() -> int:\n    fn range(x: int) -> int:\n        return x\n    return range(5)\nprint(wrapper())\n",
-        "reserved",
     );
 }
 
-/// A nested fn named after a same-module STRUCT constructor is REJECTED (the compiler resolves the
-/// bare struct ctor before a local → check-OK/run-fault on base).
+/// A nested fn named after a same-module STRUCT constructor is accepted as a local (TICKET-180).
 #[test]
-fn nested_fn_shadows_struct_ctor_rejected() {
-    entry_rejects(
+fn nested_fn_shadows_struct_ctor_accepted() {
+    entry_ok(
         "struct P:\n    x: int\nfn outer() -> int:\n    fn P() -> int:\n        return 99\n    return P()\nprint(outer())\n",
-        "reserved",
     );
 }
 
-/// A nested fn named after a same-module NEWTYPE constructor is REJECTED (bare newtype ctor wins in
-/// the compiler → check-OK/run-divergent on base, printed `UserId(<closure>)`).
+/// A nested fn named after a same-module NEWTYPE constructor is accepted as a local (TICKET-180).
 #[test]
-fn nested_fn_shadows_newtype_ctor_rejected() {
-    entry_rejects(
+fn nested_fn_shadows_newtype_ctor_accepted() {
+    entry_ok(
         "newtype UserId = int\nfn outer() -> int:\n    fn UserId() -> int:\n        return 99\n    return UserId()\nprint(outer())\n",
-        "reserved",
     );
 }
 
-/// A nested fn named after a BUILTIN variant ctor (`Ok`/`Err`/`Some`/`None`) is REJECTED (the
-/// compiler resolves the bare builtin variant before a local → check-OK/run-fault on base).
+/// A nested fn named after a BUILTIN variant ctor (`Ok`/`Err`/`Some`/`None`) is accepted as a local.
 #[test]
-fn nested_fn_shadows_builtin_variant_rejected() {
-    entry_rejects(
+fn nested_fn_shadows_builtin_variant_accepted() {
+    entry_ok(
         "fn outer() -> int:\n    fn Ok() -> int:\n        return 99\n    return Ok()\nprint(outer())\n",
-        "reserved",
     );
 }
 
@@ -25145,24 +25137,8 @@ fn prelude_table_is_single_source_of_truth() {
         }
     }
 
-    // (4) Cross-phase invariant: the `intrinsic` column decides `compiler::is_builtin` membership —
-    //     `Builtin`/`Ctor` ⇒ handled by `is_builtin` (CallBuiltin-dispatched); `Print` ⇒ excluded
-    //     (its own CallPrint/CallPrintSep opcodes).
-    for p in PRELUDE {
-        let comp = crate::compiler::is_builtin(p.name);
-        match p.intrinsic {
-            Intrinsic::Builtin | Intrinsic::Ctor => assert!(
-                comp,
-                "'{}' is CallBuiltin-dispatched but is_builtin is false",
-                p.name
-            ),
-            Intrinsic::Print => assert!(
-                !comp,
-                "'{}' is Intrinsic::Print but is_builtin is true (must keep CallPrint path)",
-                p.name
-            ),
-        }
-    }
+    // (4) was the `compiler::is_builtin` cross-check. TICKET-180 deleted that dead dispatch arm: the
+    //     compiler lowers a `Resolution::Builtin` head through `prelude_fn(..).intrinsic` alone.
 
     // (5) PHASE 3a — the nine migrated universe builtins are now DECLARED in std/prelude.chz. Build a
     //     real graph (which always-links std.prelude), read the prelude module's `native` decls, and
@@ -35854,4 +35830,55 @@ fn fn_body_keyword_call_through_closure_global_below_checks() {
     ok(
         "fn g() -> int:\n    return h(b=1, a=2)\nh := fn(a: int, b: int) -> int: a - b\nprint(g())\n",
     );
+}
+
+/// TICKET-180 — the recorded [`Resolution`] of the name head at `line`:`col` in `src`. A call node
+/// shares its callee's span, so the head is the one node at that position with an entry.
+fn head_resolution(src: &str, line: u32, col: u32) -> Resolution {
+    let mut m = parser::parse(lexer::tokenize(src).expect("lex")).expect("parse");
+    crate::desugar::run_standalone(&mut m).expect("desugar");
+    let table = resolve_call_tables_standalone(&m.stmts).9;
+    let hits: Vec<Resolution> = crate::ast::node_ids(&m)
+        .into_iter()
+        .filter(|(_, sp)| sp.line == line && sp.col == col)
+        .filter_map(|(id, _)| table.get(&(0, id)).cloned())
+        .collect();
+    assert_eq!(hits.len(), 1, "entries at {line}:{col}: {hits:?}");
+    hits[0].clone()
+}
+
+/// TICKET-180 K1 — a local closure named like a builtin is the local, not the builtin.
+#[test]
+fn resolution_records_local_for_a_closure_named_like_a_builtin() {
+    let r = head_resolution(
+        "fn g() -> int:\n    ord := fn(s: str) -> int: 1000\n    return ord(\"a\")\nprint(g())\n",
+        3,
+        12,
+    );
+    assert_eq!(r, Resolution::Local);
+}
+
+/// TICKET-180 K2 — inside `fn Q` over `type Q = P`, the recursive `Q(...)` is the fn.
+#[test]
+fn resolution_records_fn_for_a_recursive_call_inside_fn_named_like_an_alias() {
+    let r = head_resolution(
+        "struct P:\n    x: int\ntype Q = P\nfn Q(s: str) -> P:\n    if s == \"\":\n        return P(0)\n    return Q(s[1:])\nprint(Q(\"abc\"))\n",
+        7,
+        12,
+    );
+    assert!(
+        matches!(&r, Resolution::Fn { name, .. } if name == "Q"),
+        "{r:?}"
+    );
+}
+
+/// TICKET-180 / DEC-029 — inside `fn P` over `struct P`, the bare `P(...)` is the raw ctor.
+#[test]
+fn resolution_records_the_raw_ctor_inside_fn_named_like_its_struct() {
+    let r = head_resolution(
+        "struct P:\n    x: int\nfn P(n: int) -> P:\n    return P(n)\nprint(P(4))\n",
+        4,
+        12,
+    );
+    assert!(matches!(&r, Resolution::StructCtor(_)), "{r:?}");
 }

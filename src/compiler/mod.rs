@@ -16,6 +16,7 @@ use crate::ast::{
     LitPattern, MatchArm, MatchExprArm, Module, Pattern, Span, SpawnTarget, Stmt, StmtKind, Type,
     UnaryOp, WaitArm, WaitArmKind, WaitTarget,
 };
+use crate::checker::Resolution;
 use crate::interpolation::{Chunk, parse_interpolation};
 use crate::native::cffi::CType;
 use crate::resolver::{ModuleGraph, ResolvedImport};
@@ -44,23 +45,6 @@ pub struct CompileError {
 /// the test-only standalone paths use it (the CLI always runs the module-graph path).
 #[cfg(test)]
 pub(crate) const STANDALONE_MODULE_KEY: &str = "<main>";
-
-/// Names dispatched to `Op::CallBuiltin(name, argc)` (name-keyed to the VM's `do_builtin`). A PURE
-/// READ of the native-prelude table: the `Intrinsic::Builtin` fns (`ord`/`chr`/`panic`) plus every
-/// `Intrinsic::Ctor` row — the phase-2a scalar conversions (`int`/`float`/`str`/`bytes`/`bytearray`)
-/// AND the phase-2b GENERIC / reserved-type container ctors (`range`/`List`/`Map`/`Set`). The table is
-/// the single source of truth for this whitelist (drift-guarded by
-/// `prelude_table_is_single_source_of_truth`); the container ctors' generic TYPE-IDENTITY still lives
-/// in the checker's `resolve_type`/`infer_named_call` (dispatch here, identity there). `print` is
-/// `Intrinsic::Print`, NOT here — it keeps its own `CallPrint`/`CallPrintSep` opcodes. (`panic(msg)` →
-/// `CallBuiltin("panic", 1)`; the VM's `do_builtin` arm raises the recoverable `RuntimeError` instead
-/// of pushing a value.)
-pub(crate) fn is_builtin(name: &str) -> bool {
-    matches!(
-        crate::checker::prelude_fn(name).map(|p| p.intrinsic),
-        Some(crate::checker::Intrinsic::Builtin | crate::checker::Intrinsic::Ctor)
-    )
-}
 
 /// M24 — the UNSPELLABLE local name holding the runtime type witness for type param `t`. `$` is not
 /// an identifier character, so no source binding can shadow or read it.
@@ -107,7 +91,8 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     // witness params and what fills each witness at each call site. The compiler CONSUMES it — it
     // never re-derives which protocols carry a static requirement (that resolves through
     // imports/aliases/embeds, which is checker work).
-    let (kw, wt, ct, pe, ns, rc, conflicts, fb, fo) = crate::checker::resolve_call_tables(graph);
+    let (kw, wt, ct, pe, ns, rc, conflicts, fb, fo, rs) =
+        crate::checker::resolve_call_tables(graph);
     reject_table_conflicts(conflicts)?;
     c.for_binds = fb;
     c.keyword_calls = kw;
@@ -116,6 +101,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     c.proto_eq_calls = pe;
     c.sum_seeds = ns;
     c.fresh_operands = fo;
+    c.resolutions = rs;
     c.ret_coerce = rc;
     // Pass 0: collision pre-pass — assign runtime keys for module-scoped user types. A type name
     // declared in exactly one module keeps its BARE name (the common case → unchanged Display/print
@@ -187,7 +173,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     // SINGLE-RESOLVER: extern C types come from the checker's standalone pass — the SAME resolver the
     // multi-file CLI uses (no second backend resolver exists). The backend reads this table verbatim.
     c.extern_sigs = crate::checker::resolve_extern_signatures_standalone(&module.stmts);
-    let (kw, wt, ct, pe, ns, rc, conflicts, fb, fo) =
+    let (kw, wt, ct, pe, ns, rc, conflicts, fb, fo, rs) =
         crate::checker::resolve_call_tables_standalone(&module.stmts);
     reject_table_conflicts(conflicts)?;
     c.for_binds = fb;
@@ -197,6 +183,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     c.proto_eq_calls = pe;
     c.sum_seeds = ns;
     c.fresh_operands = fo;
+    c.resolutions = rs;
     c.ret_coerce = rc;
     let toplevel = c.compile_module(0, module, &[], true, None)?;
     let global_slots = std::mem::take(&mut c.global_slots);
@@ -278,10 +265,6 @@ struct Compiler {
     /// mirrors, whether a module-level fn named after a same-module struct wins over the
     /// field-derived constructor.
     module_fns: Vec<std::collections::HashSet<String>>,
-    /// `Some(key)` while compiling the body of a module-level fn whose name shadows a same-module
-    /// struct ctor (TICKET-029) — mirrors the checker's `raw_ctor_owner`. There, and only there, the
-    /// bare name still emits `Op::NewStruct` instead of a recursive call.
-    raw_ctor_owner: Option<String>,
     /// STATIC (associated) methods, keyed `"{type_runtime_key}\u{1}{method}"` — a struct/enum method
     /// whose first param is not `self` (the "no self ⇒ static" rule). Populated in `hoist_types` (all
     /// types across all modules are seen there before any body compiles), so a `Type.method(...)` call
@@ -338,6 +321,9 @@ struct Compiler {
     /// D4 (TICKET-179) — the checker's per-operand freshness decision for `spawn`, read by
     /// [`Self::fresh_bit`]. See [`crate::checker::FreshOperandTable`].
     fresh_operands: crate::checker::FreshOperandTable,
+    /// TICKET-180 — the checker's answer to what every name head means; the ONLY source for
+    /// it. Read through [`Compiler::resolution`].
+    resolutions: crate::checker::ResolutionTable,
     /// W8-21 — which implicit success-coercion (if any) each declared `T?`/`T!E` return sink applies
     /// to its bare success value, consumed verbatim: the backend is type-blind and cannot re-derive
     /// whether the returned expression is already a carrier. A MISS means `NoWrap` — the pre-fix
@@ -628,7 +614,6 @@ impl Compiler {
             type_keys: HashMap::new(),
             module_types: Vec::new(),
             module_fns: Vec::new(),
-            raw_ctor_owner: None,
             static_methods: std::collections::HashSet::new(),
             imported_modules: HashMap::new(),
             current_module_idx: 0,
@@ -641,6 +626,7 @@ impl Compiler {
             proto_eq_calls: crate::checker::ProtoEqTable::new(),
             sum_seeds: crate::checker::SumSeedTable::new(),
             fresh_operands: crate::checker::FreshOperandTable::new(),
+            resolutions: crate::checker::ResolutionTable::new(),
             ret_coerce: crate::checker::RetCoerceTable::new(),
             for_binds: crate::checker::ForBindTable::new(),
             next_opt_tmp: 0,
@@ -836,21 +822,6 @@ impl Compiler {
             .get(&(module_idx, name.to_string()))
             .cloned()
             .unwrap_or_else(|| name.to_string())
-    }
-
-    /// Is `name` shadowed by a module-level fn of the same name (TICKET-029)? True for a name
-    /// declared as a fn in the CURRENT module, or `from`-imported as a fn from its declaring module
-    /// (`imported_fns` then also carries a type binding for it — see the `Import::From` loop). Mirrors
-    /// the checker's `Checker::functions.contains_key`; both halves must read the SAME predicate or a
-    /// check-clean program lowers to the wrong opcode.
-    fn ctor_shadowed(&self, name: &str) -> bool {
-        self.module_fns
-            .get(self.current_module_idx)
-            .is_some_and(|f| f.contains(name))
-            || self
-                .imported_fns
-                .get(name)
-                .is_some_and(|(t, m)| self.module_fns.get(*t).is_some_and(|f| f.contains(m)))
     }
 
     /// The TYPE name + module-scoped identity key of a QUALIFIED declaration-site turbofish head —
@@ -1378,20 +1349,7 @@ impl Compiler {
                     .get(&(module_idx, decl.name.clone()))
                     .cloned()
                     .unwrap_or_default();
-                // TICKET-029 — inside this fn's own body, if it shadows a same-named struct ctor, the
-                // bare name is still the RAW field constructor (else `fn Path(...): return Path(...)`
-                // is infinite recursion). Mirrors the checker's `raw_ctor_owner` save/restore.
-                let saved_raw = if self.ctor_shadowed(&decl.name) {
-                    self.bare_types
-                        .get(&decl.name)
-                        .cloned()
-                        .map(|k| self.raw_ctor_owner.replace(k))
-                        .unwrap_or_else(|| self.raw_ctor_owner.clone())
-                } else {
-                    self.raw_ctor_owner.clone()
-                };
                 let pid = self.compile_fn(decl, false)?;
-                self.raw_ctor_owner = saved_raw;
                 // A hidden default-argument provider is reachable from a module that cannot name it
                 // (`Op::MakeFuncIn`); record where it lives so `build_provider_table` can resolve it.
                 if decl.name.starts_with(crate::desugar::PROVIDER_PREFIX) {
@@ -4887,9 +4845,6 @@ impl Compiler {
         let ExprKind::Ident(fname) = &callee.kind else {
             return Ok(0);
         };
-        if !fc.is_unbound(fname) {
-            return Ok(0);
-        }
         match self.witness_srcs(fc, callee, fname, span)? {
             Some(srcs) => {
                 let fname = fname.clone();
@@ -4928,24 +4883,38 @@ impl Compiler {
     /// [`Self::imported_fns`] and a qualified one (`lib.reset(...)`) through the module bind. Callees
     /// this cannot classify (a value, a method, a local shadow) answer `false` — and the stray-entry
     /// guard in [`Self::witness_srcs`] is what keeps such a miss loud instead of one `argc` short.
-    fn callee_takes_witnesses(&self, fc: &FnComp, callee: &Expr, fname: &str) -> bool {
-        self.witness_fn_key(fc, callee, fname)
-            .is_some_and(|k| self.witnesses.fns.contains_key(&k))
+    fn callee_takes_witnesses(
+        &self,
+        fc: &FnComp,
+        callee: &Expr,
+        fname: &str,
+    ) -> Result<bool, CompileError> {
+        Ok(self
+            .witness_fn_key(fc, callee, fname)?
+            .is_some_and(|k| self.witnesses.fns.contains_key(&k)))
     }
 
     /// The `(module index, fn name)` [`crate::checker::WitnessTable::fns`] would key this callee
     /// under — the module that DECLARES it and the name it is DECLARED as (an `import reset as again`
     /// binding is keyed `reset`, not `again`) — or `None` when the callee is not a by-name call on a
     /// module-level fn.
-    fn witness_fn_key(&self, fc: &FnComp, callee: &Expr, fname: &str) -> Option<(usize, String)> {
-        match &callee.kind {
-            ExprKind::Ident(_) if fc.is_unbound(fname) => self.witness_fn_key_named(None, fname),
+    fn witness_fn_key(
+        &self,
+        fc: &FnComp,
+        callee: &Expr,
+        fname: &str,
+    ) -> Result<Option<(usize, String)>, CompileError> {
+        Ok(match &callee.kind {
+            ExprKind::Ident(_) => match self.resolution(callee)? {
+                Resolution::Fn { module, name } => Some((*module, name.clone())),
+                _ => None,
+            },
             ExprKind::Field { obj, .. } => match &obj.kind {
                 ExprKind::Ident(m) if fc.is_unbound(m) => self.witness_fn_key_named(Some(m), fname),
                 _ => None,
             },
             _ => None,
-        }
+        })
     }
 
     /// The module-resolution half of [`Self::witness_fn_key`], for a callee already reduced to the
@@ -5035,7 +5004,7 @@ impl Compiler {
         // held to the stray-entry half of the guard below. A chained postfix link shares its
         // primary expression's span (`lib.reset(c).tag(1)` keys where `lib.reset(c)` recorded), so a
         // blanket check would read the head link's entry and reject a legal program.
-        if self.witness_fn_key(fc, callee, fname).is_none() {
+        if self.witness_fn_key(fc, callee, fname)?.is_none() {
             return Ok(None);
         }
         let key = crate::checker::witness_key(
@@ -5045,7 +5014,7 @@ impl Compiler {
             crate::checker::witness_key_span(callee, span),
         );
         let recorded = self.witnesses.calls.get(&key);
-        match (self.callee_takes_witnesses(fc, callee, fname), recorded) {
+        match (self.callee_takes_witnesses(fc, callee, fname)?, recorded) {
             (true, Some(srcs)) => Ok(Some(srcs.clone())),
             (true, None) => Err(CompileError {
                 message: format!(
@@ -5096,6 +5065,140 @@ impl Compiler {
             }
         }
         Ok(srcs.len())
+    }
+
+    /// The opcode for a call whose head the checker resolved to [`Resolution::Builtin`].
+    fn compile_builtin_call(
+        &mut self,
+        fc: &mut FnComp,
+        name: &String,
+        args: &[Expr],
+        named: &[(String, Expr)],
+        span: Span,
+    ) -> Result<(), CompileError> {
+        // Concurrency C4: `Channel[T]()` → a fresh mailbox; `Shared(v)` → a fresh box over the
+        // deep-copied init value. The checker validated arity (Channel: 0 args, Shared: 1).
+        if name == "Channel" {
+            // `Channel[T](cap)` — compile the optional capacity expr so it sits on the operand
+            // stack for `NewChannel(true)` to pop. `Channel[T]()` → `NewChannel(false)` (unbounded).
+            let has_cap = !args.is_empty();
+            if has_cap {
+                self.compile_expr(fc, &args[0])?;
+            }
+            fc.emit(Op::NewChannel(has_cap), span);
+            return Ok(());
+        }
+        if name == "Shared" {
+            self.compile_args(fc, args)?;
+            fc.emit(Op::NewShared, span);
+            return Ok(());
+        }
+        // `RwShared(v)` → a fresh read-write box over the deep-copied init value (checker: 1 arg).
+        if name == "RwShared" {
+            self.compile_args(fc, args)?;
+            fc.emit(Op::NewRwShared, span);
+            return Ok(());
+        }
+        // `Atomic(v)` → a fresh atomic box over the deep-copied init value (checker validated 1 arg).
+        if name == "Atomic" {
+            self.compile_args(fc, args)?;
+            fc.emit(Op::NewAtomic, span);
+            return Ok(());
+        }
+        // `AtomicInt(v)` → a fresh lock-free int atomic (checker validated 1 int arg).
+        if name == "AtomicInt" {
+            self.compile_args(fc, args)?;
+            fc.emit(Op::NewAtomicInt, span);
+            return Ok(());
+        }
+        // `timer(ms)` → a fresh one-shot timeout channel (checker validated 1 int arg).
+        if name == "timer" {
+            self.compile_args(fc, args)?;
+            fc.emit(Op::NewTimer, span);
+            return Ok(());
+        }
+        // C5: `Executor()` → a fresh work queue (checker validated 0 args).
+        if name == "Executor" {
+            fc.emit(Op::NewExecutor, span);
+            return Ok(());
+        }
+        // Native-prelude direct-call dispatch (single source of truth): a table row lowers by its
+        // `intrinsic`. `Print` → the dedicated `CallPrint`/`CallPrintSep` opcodes; `Builtin`
+        // (ord/chr/panic) and `Ctor` → `CallBuiltin` — the phase-2a scalar conversions
+        // (int/float/str/bytes/bytearray) AND the phase-2b GENERIC / reserved-type container ctors
+        // (range/List/Map/Set). This is byte-identical to the old `if name == "print"` +
+        // `is_builtin` arms; type-args are type-erased before the compiler, so `List[int]()`
+        // resolves to `Ident("List")` → the SAME `CallBuiltin`.
+        if let Some(p) = crate::checker::prelude_fn(name) {
+            self.compile_args(fc, args)?;
+            match p.intrinsic {
+                crate::checker::Intrinsic::Print => {
+                    if named.is_empty() {
+                        // Plain `print(...)`: byte-identical (space-join, trailing newline).
+                        fc.emit(Op::CallPrint(args.len()), span);
+                    } else {
+                        // `print(..., sep=, end=)`: push `sep` then `end` (each the user expr or
+                        // its default str), then a dedicated op joins+terminates. Eval order:
+                        // positional args, then sep, then end.
+                        let sep = named.iter().find(|(k, _)| k == "sep").map(|(_, v)| v);
+                        let end = named.iter().find(|(k, _)| k == "end").map(|(_, v)| v);
+                        match sep {
+                            Some(e) => self.compile_expr(fc, e)?,
+                            None => fc.emit(Op::ConstStr(" ".to_string()), span),
+                        }
+                        match end {
+                            Some(e) => self.compile_expr(fc, e)?,
+                            None => fc.emit(Op::ConstStr("\n".to_string()), span),
+                        }
+                        fc.emit(Op::CallPrintSep { argc: args.len() }, span);
+                    }
+                }
+                // `Builtin` (ord/chr/panic) and `Ctor` (int/float/str/bytes/bytearray, phase 2a)
+                // both lower to the name-keyed `CallBuiltin` — byte-identical to the old
+                // `is_builtin` fall-through the scalar ctors took before the table folded them in.
+                crate::checker::Intrinsic::Builtin | crate::checker::Intrinsic::Ctor => {
+                    fc.emit(Op::CallBuiltin(name.clone(), args.len()), span);
+                }
+            }
+            return Ok(());
+        }
+        // A bare *built-in* variant constructor (`Ok(x)`, `Some(x)`) — user variants are qualified
+        // (handled in the `Field` arm above), so only built-ins resolve bare here.
+        if let Some(def) = self
+            .variant_pair(None, name)
+            .and_then(|k| self.program.variants.get(&k))
+        {
+            let variant_id = def.variant_id;
+            // Zero-arg `Ok()` is `Result[nil, E]`'s success value (checker arm:
+            // `src/checker/expr.rs`, the `"Ok"` case) — synthesize the `nil` payload `Op::NewEnum`
+            // expects, since `Ok`'s registered arity stays 1.
+            if name == "Ok" && args.is_empty() {
+                fc.emit(Op::Nil, span);
+                fc.emit(
+                    Op::NewEnum {
+                        variant: name.clone(),
+                        variant_id,
+                        argc: 1,
+                    },
+                    span,
+                );
+                return Ok(());
+            }
+            self.compile_args(fc, args)?;
+            fc.emit(
+                Op::NewEnum {
+                    variant: name.clone(),
+                    variant_id,
+                    argc: args.len(),
+                },
+                span,
+            );
+            return Ok(());
+        }
+        Err(CompileError {
+            message: format!("internal: no lowering for the builtin call '{name}'"),
+            span,
+        })
     }
 
     fn compile_call(
@@ -5531,168 +5634,33 @@ impl Compiler {
         }
         // Bare-ident callees resolve by name in this order:
         // print → builtin → struct ctor → variant ctor → value.
-        if let ExprKind::Ident(name) = &callee.kind {
-            // Concurrency C4: `Channel[T]()` → a fresh mailbox; `Shared(v)` → a fresh box over the
-            // deep-copied init value. The checker validated arity (Channel: 0 args, Shared: 1).
-            if name == "Channel" {
-                // `Channel[T](cap)` — compile the optional capacity expr so it sits on the operand
-                // stack for `NewChannel(true)` to pop. `Channel[T]()` → `NewChannel(false)` (unbounded).
-                let has_cap = !args.is_empty();
-                if has_cap {
-                    self.compile_expr(fc, &args[0])?;
+        // TICKET-180 — what a bare call head means is the checker's recorded `Resolution`, never a
+        // re-decision from the name here.
+        if let ExprKind::Ident(_) = &callee.kind {
+            match self.resolution(callee)?.clone() {
+                Resolution::Builtin(name) => {
+                    return self.compile_builtin_call(fc, &name, args, named, span);
                 }
-                fc.emit(Op::NewChannel(has_cap), span);
-                return Ok(());
-            }
-            if name == "Shared" {
-                self.compile_args(fc, args)?;
-                fc.emit(Op::NewShared, span);
-                return Ok(());
-            }
-            // `RwShared(v)` → a fresh read-write box over the deep-copied init value (checker: 1 arg).
-            if name == "RwShared" {
-                self.compile_args(fc, args)?;
-                fc.emit(Op::NewRwShared, span);
-                return Ok(());
-            }
-            // `Atomic(v)` → a fresh atomic box over the deep-copied init value (checker validated 1 arg).
-            if name == "Atomic" {
-                self.compile_args(fc, args)?;
-                fc.emit(Op::NewAtomic, span);
-                return Ok(());
-            }
-            // `AtomicInt(v)` → a fresh lock-free int atomic (checker validated 1 int arg).
-            if name == "AtomicInt" {
-                self.compile_args(fc, args)?;
-                fc.emit(Op::NewAtomicInt, span);
-                return Ok(());
-            }
-            // `timer(ms)` → a fresh one-shot timeout channel (checker validated 1 int arg).
-            if name == "timer" {
-                self.compile_args(fc, args)?;
-                fc.emit(Op::NewTimer, span);
-                return Ok(());
-            }
-            // `_to_json(x)` — `json.encode`'s runtime seam, a bodyless `native fn` declared only in
-            // `std/json.chz` (`json_to_value_home` names that module). The gate is what keeps a
-            // user's own `_to_json` (which cannot exist — a user module can't declare `native fn`
-            // at all) from ever being hijacked here.
-            if name == "_to_json" && self.json_to_value_home == Some(self.current_module_idx) {
-                self.compile_args(fc, args)?;
-                fc.emit(Op::JsonToValue, span);
-                return Ok(());
-            }
-            // C5: `Executor()` → a fresh work queue (checker validated 0 args).
-            if name == "Executor" {
-                fc.emit(Op::NewExecutor, span);
-                return Ok(());
-            }
-            // Native-prelude direct-call dispatch (single source of truth): a table row lowers by its
-            // `intrinsic`. `Print` → the dedicated `CallPrint`/`CallPrintSep` opcodes; `Builtin`
-            // (ord/chr/panic) and `Ctor` → `CallBuiltin` — the phase-2a scalar conversions
-            // (int/float/str/bytes/bytearray) AND the phase-2b GENERIC / reserved-type container ctors
-            // (range/List/Map/Set). This is byte-identical to the old `if name == "print"` +
-            // `is_builtin` arms; type-args are type-erased before the compiler, so `List[int]()`
-            // resolves to `Ident("List")` → the SAME `CallBuiltin`.
-            if let Some(p) = crate::checker::prelude_fn(name) {
-                self.compile_args(fc, args)?;
-                match p.intrinsic {
-                    crate::checker::Intrinsic::Print => {
-                        if named.is_empty() {
-                            // Plain `print(...)`: byte-identical (space-join, trailing newline).
-                            fc.emit(Op::CallPrint(args.len()), span);
-                        } else {
-                            // `print(..., sep=, end=)`: push `sep` then `end` (each the user expr or
-                            // its default str), then a dedicated op joins+terminates. Eval order:
-                            // positional args, then sep, then end.
-                            let sep = named.iter().find(|(k, _)| k == "sep").map(|(_, v)| v);
-                            let end = named.iter().find(|(k, _)| k == "end").map(|(_, v)| v);
-                            match sep {
-                                Some(e) => self.compile_expr(fc, e)?,
-                                None => fc.emit(Op::ConstStr(" ".to_string()), span),
-                            }
-                            match end {
-                                Some(e) => self.compile_expr(fc, e)?,
-                                None => fc.emit(Op::ConstStr("\n".to_string()), span),
-                            }
-                            fc.emit(Op::CallPrintSep { argc: args.len() }, span);
-                        }
-                    }
-                    // `Builtin` (ord/chr/panic) and `Ctor` (int/float/str/bytes/bytearray, phase 2a)
-                    // both lower to the name-keyed `CallBuiltin` — byte-identical to the old
-                    // `is_builtin` fall-through the scalar ctors took before the table folded them in.
-                    crate::checker::Intrinsic::Builtin | crate::checker::Intrinsic::Ctor => {
-                        fc.emit(Op::CallBuiltin(name.clone(), args.len()), span);
-                    }
-                }
-                return Ok(());
-            }
-            // DEFENSIVE / never-taken for a DIRECT call after phase 2b: every `is_builtin` name is now
-            // a PRELUDE `Builtin`/`Ctor` row, so the `prelude_fn` arm above already emitted its
-            // `CallBuiltin` and returned. Kept as a belt-and-suspenders fall-through (minimal diff) — if
-            // a future builtin lands in `is_builtin` without a table row it still lowers correctly.
-            if is_builtin(name) {
-                self.compile_args(fc, args)?;
-                fc.emit(Op::CallBuiltin(name.clone(), args.len()), span);
-                return Ok(());
-            }
-            // A bare newtype ctor: `UserId(x)` wraps the single arg. Resolved exactly like the struct
-            // ctor — only a BARE-resolvable newtype in THIS module — keyed by its runtime key.
-            if let Some(nt_key) = self.bare_types.get(name).cloned()
-                && self.program.newtype_home.contains_key(&nt_key)
-                && (self.raw_ctor_owner.as_deref() == Some(nt_key.as_str())
-                    || !self.ctor_shadowed(name))
-            {
-                self.compile_args(fc, args)?;
-                fc.emit(Op::NewType(nt_key), span);
-                return Ok(());
-            }
-            // A bare struct ctor: only a BARE-resolvable struct in THIS module (locally declared,
-            // `from`-imported, or a std type) — keyed by its declaring module's runtime key. A struct
-            // merely present in the global `program.structs` (another module's, imported whole or not
-            // imported) is NOT bare-constructible here, so the name falls through (e.g. to a
-            // `from`-imported FUNCTION of the same name).
-            if let Some(struct_key) = self.bare_types.get(name).cloned()
-                && self.program.structs.contains_key(&struct_key)
-                && (self.raw_ctor_owner.as_deref() == Some(struct_key.as_str())
-                    || !self.ctor_shadowed(name))
-            {
-                self.compile_args(fc, args)?;
-                fc.emit(Op::NewStruct(struct_key, args.len()), span);
-                return Ok(());
-            }
-            // A bare *built-in* variant constructor (`Ok(x)`, `Some(x)`) — user variants are qualified
-            // (handled in the `Field` arm above), so only built-ins resolve bare here.
-            if let Some(def) = self
-                .variant_pair(None, name)
-                .and_then(|k| self.program.variants.get(&k))
-            {
-                let variant_id = def.variant_id;
-                // Zero-arg `Ok()` is `Result[nil, E]`'s success value (checker arm:
-                // `src/checker/expr.rs`, the `"Ok"` case) — synthesize the `nil` payload `Op::NewEnum`
-                // expects, since `Ok`'s registered arity stays 1.
-                if name == "Ok" && args.is_empty() {
-                    fc.emit(Op::Nil, span);
-                    fc.emit(
-                        Op::NewEnum {
-                            variant: name.clone(),
-                            variant_id,
-                            argc: 1,
-                        },
-                        span,
-                    );
+                Resolution::StructCtor(key) => {
+                    self.compile_args(fc, args)?;
+                    fc.emit(Op::NewStruct(key, args.len()), span);
                     return Ok(());
                 }
-                self.compile_args(fc, args)?;
-                fc.emit(
-                    Op::NewEnum {
-                        variant: name.clone(),
-                        variant_id,
-                        argc: args.len(),
-                    },
-                    span,
-                );
-                return Ok(());
+                Resolution::NewTypeCtor(key) => {
+                    self.compile_args(fc, args)?;
+                    fc.emit(Op::NewType(key), span);
+                    return Ok(());
+                }
+                // `std.json`'s own `_to_json` lowers to its opcode. A user module cannot declare a
+                // `native fn`, so no user fn is ever this pair.
+                Resolution::Fn { module, name }
+                    if name == "_to_json" && self.json_to_value_home == Some(module) =>
+                {
+                    self.compile_args(fc, args)?;
+                    fc.emit(Op::JsonToValue, span);
+                    return Ok(());
+                }
+                _ => {}
             }
         }
         // M24 — a call to a generic fn that takes hidden trailing witness params, by its bare name
@@ -5700,7 +5668,6 @@ impl Compiler {
         // slot, and call with the widened `argc`. The compiler CONSUMES the checker's table; a
         // mismatch either way is a hard error, never a short `argc` (see `witness_srcs`).
         if let ExprKind::Ident(fname) = &callee.kind
-            && fc.is_unbound(fname)
             && let Some(srcs) = self.witness_srcs(fc, callee, fname, span)?
         {
             // `named` needs no handling here: desugar has already normalized every keyword argument
@@ -5745,6 +5712,32 @@ impl Compiler {
     /// deliberately leaves `named` populated without a table entry — returns from the `prelude_fn`
     /// arm long before any of the three call sites, and `spawn`/`defer` of a `print` with named args
     /// is a type error.
+    /// TICKET-180 — what the name head `e` denotes: the checker's recorded [`Resolution`], the
+    /// ONLY source. A miss is an internal error: a checker arm returned without recording, so fix
+    /// that arm and never add a fallback here. A compiler-synthesized node
+    /// ([`crate::ast::NodeId::SYNTH`]) is answered by its shape: the only SYNTH `Ident`s are the
+    /// `$`-named locals the compiler itself declares, and the lexer never produces a `$`.
+    fn resolution(&self, e: &Expr) -> Result<&Resolution, CompileError> {
+        static SYNTH_LOCAL: Resolution = Resolution::Local;
+        if e.id.0 == crate::ast::NodeId::SYNTH.0 {
+            return match &e.kind {
+                ExprKind::Ident(_) => Ok(&SYNTH_LOCAL),
+                _ => Err(CompileError {
+                    message: "internal: a synthesized node has no name resolution".to_string(),
+                    span: e.span,
+                }),
+            };
+        }
+        self.resolutions
+            .get(&(self.current_module_idx, e.id.0))
+            .ok_or_else(|| CompileError {
+                message: "internal: no name resolution recorded for this expression -- the \
+                          type-checker and the backend disagree"
+                    .to_string(),
+                span: e.span,
+            })
+    }
+
     fn keyword_perm(
         &self,
         named: &[(String, Expr)],

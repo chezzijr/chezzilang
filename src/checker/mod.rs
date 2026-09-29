@@ -21,8 +21,8 @@ use std::fmt;
 pub use ty::Ty;
 pub use ty::{
     CarrierKey, CarrierMode, CarrierTable, FnLabels, ForBind, ForBindTable, FreshOperandTable,
-    KeywordKey, KeywordTable, ProtoEqTable, RetCoerce, RetCoerceTable, SumSeed, SumSeedTable,
-    WitnessCallee, WitnessKey, WitnessSrc, WitnessTable,
+    KeywordKey, KeywordTable, ProtoEqTable, Resolution, ResolutionTable, RetCoerce, RetCoerceTable,
+    SumSeed, SumSeedTable, WitnessCallee, WitnessKey, WitnessSrc, WitnessTable,
 };
 use ty::{compatible, param_invariant};
 
@@ -1099,6 +1099,7 @@ pub fn resolve_call_tables(
     TableConflicts,
     ForBindTable,
     FreshOperandTable,
+    ResolutionTable,
 ) {
     resolve_call_tables_with(graph, true)
 }
@@ -1118,6 +1119,7 @@ fn resolve_call_tables_with(
     TableConflicts,
     ForBindTable,
     FreshOperandTable,
+    ResolutionTable,
 ) {
     crate::on_frontend_stack_scoped(move || {
         let mut c = Checker::new();
@@ -1134,6 +1136,7 @@ fn resolve_call_tables_with(
             std::mem::take(&mut c.table_conflicts),
             std::mem::take(&mut c.for_binds),
             std::mem::take(&mut c.fresh_operands),
+            std::mem::take(&mut c.resolutions),
         )
     })
 }
@@ -1160,6 +1163,7 @@ pub fn resolve_call_tables_standalone(
     TableConflicts,
     ForBindTable,
     FreshOperandTable,
+    ResolutionTable,
 ) {
     resolve_call_tables_with(&standalone_graph(stmts), true)
 }
@@ -1179,6 +1183,7 @@ pub fn resolve_call_tables_standalone_no_memo(
     TableConflicts,
     ForBindTable,
     FreshOperandTable,
+    ResolutionTable,
 ) {
     resolve_call_tables_with(&standalone_graph(stmts), false)
 }
@@ -1468,6 +1473,10 @@ impl Checker {
                 .push(owner.to_string());
         }
         for (idx, lm) in graph.modules.iter().enumerate() {
+            c.module_idx_of.insert(lm.id.clone(), idx);
+            // Keys every checker->compiler table this module's bodies record, the bodied fns of a native
+            // std module included (they are checked below, before the AST-module branch sets it).
+            c.graph_module_idx = idx;
             // A native std module (std.math/io/os) has no AST: its public surface is a static table.
             if let Some(name) = lm.native {
                 // A native std module is always stdlib. The file-backed harvest resolves its own decls'
@@ -2296,6 +2305,12 @@ struct Checker {
     /// The compiler turns the first entry into a hard `CompileError`: an aliased key means the
     /// backend cannot tell two expressions apart, which is a silent wrong VALUE, not a slow path.
     table_conflicts: Vec<(Span, String)>,
+    /// TICKET-180 — the one record of what each name head means; see [`Resolution`].
+    resolutions: ResolutionTable,
+    /// Graph index of every module, so a from-imported fn's [`Resolution::Fn`] names its home.
+    module_idx_of: HashMap<crate::resolver::ModuleId, usize>,
+    /// The current module's from-imported fns: bound name -> (declaring module, declared name).
+    fn_homes: HashMap<String, (usize, String)>,
     /// W7-43 — a monotonic counter for the `__opt{n}` binding the Option lowering synthesizes, so a
     /// carrier nested inside another carrier's operand can never shadow it. Mirrors the desugar
     /// walker's `next_tmp`; never reset (uniqueness within one checked graph is free).

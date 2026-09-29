@@ -387,6 +387,26 @@ fn run_cell(root: &Path, idx: usize, c: &Cell) -> Result<(), String> {
 /// TICKET-182 removes. They must stay red here; when one turns green, move it back.
 const INTERIM_182: &[&str] = &["nested_fn/defaulted_fn/call"];
 
+/// TICKET-180 cells whose fix is a later step of that ticket (qualified heads, identifier reads,
+/// pattern heads, alias bodies). The ticket is not done until this list is empty. They must stay
+/// red here; when one turns green, delete it from the list.
+const PENDING_180: &[&str] = &[
+    "toplevel_let/struct/member",
+    "import_alias/struct/member",
+    "toplevel_let/newtype/member",
+    "import_alias/newtype/member",
+    "toplevel_let/enum/member",
+    "import_alias/enum/member",
+    "toplevel_let/alias/member",
+    "import_alias/alias/member",
+    "toplevel_let/imported_type/member",
+    "import_alias/defaulted_fn/member",
+    "importer/alias/k3_str_arg",
+    "importer/alias/k3_int_arg",
+    "p2/alias_of_ambiguous_module_type",
+    "p2/generic_alias_turbofish",
+];
+
 #[test]
 fn name_resolution_grid() {
     let root = std::env::temp_dir().join(format!("chezzi-name-grid-{}", std::process::id()));
@@ -394,12 +414,14 @@ fn name_resolution_grid() {
     let cells = grid();
     let mut fails = Vec::new();
     for (i, c) in cells.iter().enumerate() {
-        match (
-            run_cell(&root, i, c),
-            INTERIM_182.contains(&c.name.as_str()),
-        ) {
+        let pinned = [INTERIM_182, PENDING_180]
+            .iter()
+            .any(|l| l.contains(&c.name.as_str()));
+        match (run_cell(&root, i, c), pinned) {
             (Err(e), false) => fails.push(e),
-            (Ok(()), true) => fails.push(format!("{}: green; remove it from INTERIM_182", c.name)),
+            (Ok(()), true) => {
+                fails.push(format!("{}: green; remove it from its pinned list", c.name))
+            }
             _ => {}
         }
     }

@@ -1780,15 +1780,19 @@ pub fn renumber_pattern(p: &mut Pattern) {
 /// Every id that appears on two live nodes of `m`, with the second node's span.
 /// [`NodeId::SYNTH`] is ignored. Debug-only callers: it clones the module.
 pub fn duplicate_ids(m: &Module) -> Vec<(u32, Span)> {
-    let mut m = m.clone();
     let mut seen = std::collections::HashSet::new();
-    let mut dups = Vec::new();
-    ids_in_block(&mut m.stmts, &mut |id, span, _| {
-        if id.0 != NodeId::SYNTH.0 && !seen.insert(id.0) {
-            dups.push((id.0, span));
-        }
-    });
-    dups
+    node_ids(m)
+        .into_iter()
+        .filter(|(id, _)| *id != NodeId::SYNTH.0 && !seen.insert(*id))
+        .collect()
+}
+
+/// Every node id in `m` with its node's span, in walk order. Debug and test use: it clones `m`.
+pub fn node_ids(m: &Module) -> Vec<(u32, Span)> {
+    let mut m = m.clone();
+    let mut out = Vec::new();
+    ids_in_block(&mut m.stmts, &mut |id, span, _| out.push((id.0, span)));
+    out
 }
 
 #[cfg(test)]
