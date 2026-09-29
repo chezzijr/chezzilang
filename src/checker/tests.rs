@@ -35730,3 +35730,18 @@ fn full_path_head_shadowed_by_a_wait_recv_bind_reads_the_field() {
         ),
     ]);
 }
+
+// TICKET-183: module scope is order-free for function bodies.
+#[test]
+fn fn_body_reads_global_declared_below() {
+    ok("fn f() -> int:\n    return x\nx := 5\nprint(f())\n");
+}
+
+// TICKET-183: an inferred return that reads a global must carry its type.
+#[test]
+fn inferred_return_of_global_is_typed() {
+    rejects(
+        "x := \"s\"\nfn f():\n    return x\ny: int = f()\nprint(y)\n",
+        "str",
+    );
+}
