@@ -1370,6 +1370,11 @@ impl Checker {
     fn run_graph_pass(&mut self, graph: &ModuleGraph, harvest_externs: bool) {
         let c = self;
         c.lend_specs = crate::desugar::collect_methods(graph);
+        // `lend_specs` lends a default program-wide, so a caller can borrow an inline default from a
+        // module the loop below has not reached yet; every file's index is known before any body.
+        for (idx, lm) in graph.modules.iter().enumerate() {
+            c.module_idx_of_file.insert(lm.file, idx);
+        }
         // ROOT REDESIGN — module-scoped IDENTITY KEYS: scan every non-native module's struct/enum/alias
         // names and key EACH one `<module-key>::Name` (via the shared `resolver::module_keys`, the SAME
         // derivation the compiler uses), so the checker, compiler, and VM agree on every key (parity) and
@@ -1466,7 +1471,6 @@ impl Checker {
         }
         for (idx, lm) in graph.modules.iter().enumerate() {
             c.module_idx_of.insert(lm.id.clone(), idx);
-            c.module_idx_of_file.insert(lm.file, idx);
             // Keys every checker->compiler table this module's bodies record, the bodied fns of a native
             // std module included (they are checked below, before the AST-module branch sets it).
             c.graph_module_idx = idx;

@@ -661,6 +661,41 @@ fn collision_cells() -> Vec<Cell> {
     ]
 }
 
+/// A protocol receiver in `lib` borrows `main`'s inline `None` default (DEC-075). The entry module
+/// is checked last, so the fill must still compile under the declaring module's index.
+fn lent_default_cells() -> Vec<Cell> {
+    let s = "struct S:\n    x: int\n    fn m(self, a: int, b: int? = None) -> str:\n        return \"m:{a},{b == None}\"\n    fn mk(a: int, b: int? = None) -> str:\n        return \"s:{a},{b == None}\"\n";
+    let cell = |name: &str, lib: &str, call: &str, want: &str| Cell {
+        name: format!("lent_default/{name}"),
+        files: with_lib(
+            "lib.chz",
+            lib.to_string(),
+            format!("import lib\n{s}print({call})\n"),
+        ),
+        expect: prints(want),
+    };
+    vec![
+        cell(
+            "protocol_receiver",
+            "protocol P:\n    fn m(self, a: int, b: int?) -> str\nfn use_it(p: P) -> str:\n    return p.m(1)\n",
+            "lib.use_it(S(0))",
+            "m:1,true",
+        ),
+        cell(
+            "bound_param_receiver",
+            "protocol P:\n    fn m(self, a: int, b: int?) -> str\nfn use_it[T: P](p: T) -> str:\n    return p.m(2)\n",
+            "lib.use_it(S(0))",
+            "m:2,true",
+        ),
+        cell(
+            "bound_static",
+            "protocol Mk:\n    fn mk(a: int, b: int?) -> str\nfn use_it[T: Mk]() -> str:\n    return T.mk(3)\n",
+            "lib.use_it[S]()",
+            "s:3,true",
+        ),
+    ]
+}
+
 fn grid() -> Vec<Cell> {
     let mut cells = fixed_cells();
     cells.extend(value_cells());
@@ -670,6 +705,7 @@ fn grid() -> Vec<Cell> {
     cells.extend(stmt_fill_cells());
     cells.extend(native_cells());
     cells.extend(collision_cells());
+    cells.extend(lent_default_cells());
     cells
 }
 
