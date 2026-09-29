@@ -7,6 +7,23 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-183 (2026-09-29) — module scope is order-free for function bodies (wave 16 Family 3).**
+  `fn f(): return x` above `x := 5` was `unknown name 'x'`, and `x := "s"` / `fn f(): return x` /
+  `y: int = f()` checked clean and printed `s` (P0): `infer_returns` ran before any top-level let was
+  typed. Now one joint fixpoint with return inference (`seed_module_globals`, `type_globals_pass`,
+  `infer_returns`, `src/checker/sig.rs`) types every let-only global before any body is walked, and
+  seeds its `const`, keyword-certainty and closure-write facts. One resolver (`owning_scope` over
+  `scope_has`, `src/checker/setup.rs`) replaces thirteen hand-rolled scope walks; top-level statements
+  stay lexical. A typing cycle (`x := f()`, `f` returns `x`) is `initialization cycle`. At run time a
+  let slot starts as `Value::uninit(line)`, so a body that reads it before the let runs faults
+  `'x' is read before its initialization at line N` instead of reading `nil` (a spawn snapshot carries
+  the marker as `SnapValue::Uninit`). A speculative (`inferring_ret`) walk skips the constant-overflow
+  scan. Grid `vm::golden_tests::module_scope_order_grid`: 38 of 67 cells red on base, 0 on the branch.
+  Chezzi cells `tests/chz/spec/module_scope_order_test.chz`. Rule: `docs/syntax.md` "Module scope and
+  initialization order". Perf (`docs/benchmarks.md`): run-time
+  benches within box noise (medians ±3.5 %); `chezzi check` on the largest tests/chz and examples
+  files is level; a synthetic file of 3000 chained globals checks in 44 ms vs 24 ms on base (the
+  globals fixpoint re-walks each let value), linear in the global count.
 - **TICKET-177 (2026-09-28) — handle identity survives a task crossing (wave 16 Family 5, C2).**
   A `Channel`/`Shared`/`RwShared`/`Atomic`/`AtomicInt`/`Executor`/`Socket`/`Listener`/`Writer`/`Reader`
   handle compared unequal to itself after any crossing: each crossing wraps the same `Arc` core in a

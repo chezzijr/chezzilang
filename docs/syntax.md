@@ -352,6 +352,34 @@ fn f():
   type: a closure written before it (`f := fn() -> int: x`) would hand a `str` out of a fn declared
   `-> int`, and a `fn` that *writes* the slot (`fn setx(): x = 42`) would put an `int` into what is now
   a `str`. Rebinding the value is fine; **changing the type is a type error**.
+- **Module scope and initialization order (TICKET-183).** A function body (a top-level `fn`, a
+  method, a nested `fn`, a closure) sees every top-level binding, including one declared *below* it,
+  as Go's package scope and Python's module globals do. It sees the binding's type, whether it is
+  `const`, and whether it holds one known function (so keyword arguments work through it). Top-level
+  *statements* stay lexical: `print(x)` above `x := 5` is `unknown name 'x'`, and `X = 7` above it is
+  `cannot assign to undeclared variable 'X'`.
+
+  ```chezzi
+  fn f() -> int:
+      return x        # ✓ x is declared below
+  print(f())          # ✗ runtime error: 'x' is read before its initialization at line 4
+  x := 5
+  print(f())          # 5
+  ```
+
+  - A body that reads a global before the top-level statement that initializes it has *run* faults
+    `'x' is read before its initialization at line N` (CPython's `NameError`). It is a runtime fault,
+    not a compile error, because the read may sit on a branch the call does not take.
+  - A body that *writes* the global first initializes the slot (a Go or CPython `global` write); the
+    let then rebinds it when it runs.
+  - Global types are computed once, before any body is checked, in dependency order. A typing cycle
+    (`x := f()` where `f` returns `x`) is a compile error naming the `initialization cycle`; annotate
+    `x` (`x: int = f()`) or give `f` a return type. An annotated cycle checks, and its read faults.
+  - A body above an un-annotated global whose type is not yet known there (an empty collection
+    `xs := []`) is rejected with "annotate its declaration".
+  - An `import` below a body that uses it stays rejected (`'pi' is used before its import`, Go's rule).
+  - A let that shares its name with a `fn`, `extern`, import, type, or reserved builtin keeps the
+    lexical view: the hoisted binding owns the name until the let runs.
 - **A fn-local (or block-local) re-declare is a genuinely fresh binding**, so it may change type and a
   closure made earlier keeps the *old* one — the same as Rust's `let` shadowing. This includes a
   binding inside a top-level `if:`/`for:`/`while:` body: those are inner scopes, not the module scope.

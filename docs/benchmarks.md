@@ -11,6 +11,48 @@ justify lives in **[`future.md §4`](future.md)**; the scheduled work is roadmap
 > They are kept as the record of what was measured at the time; they are not reproducible on today's
 > binary, and "serial == M:N parity green" in an older section means the gate that existed then.
 
+## TICKET-183 — module globals typed before any body; uninit check on `GetGlobalSlot` — 2026-09-29
+
+Two costs are new. At run time, `Op::GetGlobalSlot` gains one branch (`is_uninit`). At check time,
+`type_globals_pass` re-walks each top-level let value: the joint fixpoint with return inference runs
+at least two passes plus one final pass before the real walk.
+
+Conditions: 28 cores, no `hyperfine` on the box, so `benches/run.chz` could not run. A Python
+driver ran the same 11 benches, alternating BASE (release binary at `58691616`, `main`) and BRANCH
+(release binary at `bd0f737b`) in one process: 1 warmup and 7 runs per binary. Load average 5.00
+before, 2.44 after. Chezzi only.
+
+| bench | BASE median (min) ms | BRANCH median (min) ms | median delta |
+|---|---|---|---|
+| fib | 471.2 (450.7) | 486.2 (453.1) | +3.2 % |
+| str | 277.3 (253.2) | 270.8 (249.9) | −2.3 % |
+| primes | 1127.4 (1112.5) | 1151.4 (1104.8) | +2.1 % |
+| loop | 1722.4 (1698.1) | 1734.3 (1702.4) | +0.7 % |
+| list | 681.9 (674.9) | 704.9 (673.9) | +3.4 % |
+| struct | 891.6 (879.3) | 873.9 (857.6) | −2.0 % |
+| poly_method | 2546.8 (2515.5) | 2521.8 (2489.0) | −1.0 % |
+| map | 239.8 (235.0) | 248.2 (238.0) | +3.5 % |
+| map_str | 348.8 (335.0) | 354.9 (341.9) | +1.7 % |
+| unique | 120.1 (112.8) | 121.0 (113.1) | +0.7 % |
+| empty | 6.5 (5.9) | 6.5 (5.8) | 0.0 % |
+| `check tests/chz/spec/static_witness_test.chz` (largest in tests/chz, 52 KB) | 37.5 (32.0) | 36.6 (31.7) | −2.3 % |
+| `check examples/concurrent_jobs.chz` (largest example, 16 KB) | 13.9 (12.9) | 13.7 (12.7) | −1.1 % |
+
+Every run-time median moves by 3.5 % or less, in both directions, and every min is within 1.1 %.
+Same-binary spread on this box is about ±4 % (TICKET-155 above), so this doc claims no run-time
+delta. The two largest real files hold few top-level lets, so their check time is level.
+
+The re-walk shows on a let-only file. A synthetic chain `g0 := 1` / `gN := gN-1 + N * 2 - 1` with
+one fn reading the last global (untracked, 7 runs; 5 runs for 12000):
+
+| globals | BASE check median (min) ms | BRANCH check median (min) ms |
+|---|---|---|
+| 3000 | 24.3 (22.4) | 44.2 (42.6) |
+| 12000 | 86.4 (83.6) | 171.1 (153.8) |
+
+The check is about 2× slower on such a file and stays linear: 4× the globals is 3.6× the time on
+BASE and 3.9× on BRANCH.
+
 ## TICKET-155 — the owner-fault rung at the native-HOF checkpoint — 2026-09-21
 
 `Vm::guarded_checkpoint` runs once per ELEMENT of every `map`/`filter`/`fold`/`sort_by`. It gained

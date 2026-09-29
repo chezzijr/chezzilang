@@ -140,7 +140,11 @@ must be preserved exactly or safe hangs become false faults; some differences ar
 
 ## Family 3 — Declarations in blocks (S2)
 
-Status: fixed by TICKET-178 (`253eaf82`..`2311ab39`).
+Status: fixed by TICKET-178 (`253eaf82`..`2311ab39`). TICKET-183 fixed the module-scope order
+root in the same family: a function body now sees every top-level `let` (type, `const`, keyword
+certainty, closure writes) from one joint fixpoint with return inference, and one resolver
+(`owning_scope` / `scope_has`) decides which scope owns a name. A read before the let runs faults
+`'x' is read before its initialization`. Grid: `vm::golden_tests::module_scope_order_grid`.
 
 **Mechanism.** One statement parser (`Parser::parse_stmt`, `src/parser/mod.rs:493-603`) serves both
 module level and every block, and accepts every declaration keyword in every position. Position is
