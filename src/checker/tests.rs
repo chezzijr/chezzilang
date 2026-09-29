@@ -35755,6 +35755,25 @@ fn module_global_initialization_cycle_is_named() {
     );
 }
 
+// TICKET-183 review: a global that stays `Unknown` in the pre-pass (an empty collection refined by
+// a later top-level statement) is not an error when no body reads it; the walk types it (main
+// checks these clean, CPython prints `2`).
+#[test]
+fn top_level_only_refined_empty_globals_check_clean() {
+    ok("xs := []\nxs.push(1)\ny := xs[0]\nprint(y + 1)\n");
+    ok("m := {}\nm[\"a\"] = 2\nv := m[\"a\"]\nprint(v + 1)\n");
+}
+
+// TICKET-183 review: a body BELOW such a global that returns it still cannot hide the `Unknown`:
+// return inference rejects it, so dropping the plain "annotate it" report opens no type hole.
+#[test]
+fn inferred_return_of_refined_empty_global_stays_rejected() {
+    rejects(
+        "xs := []\nxs.push(1)\ny := xs[0]\nfn f():\n    return y\nz: str = f()\n",
+        "cannot infer return type of 'f'",
+    );
+}
+
 // TICKET-183: an annotation breaks the typing cycle; the read faults at run time instead.
 #[test]
 fn annotated_initialization_cycle_checks_clean() {

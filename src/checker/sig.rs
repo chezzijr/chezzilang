@@ -229,8 +229,8 @@ impl Checker {
     /// return, which may itself read another global). `seed_module_globals` writes four facts into
     /// scope 0 — type, `const`, keyword certainty (`kw_certain`) and closure writes
     /// (`written_captures`) — and `type_globals_pass` refines the type alongside each return pass.
-    /// A global left `Unknown` is reported by `report_untyped_globals` (a named cycle or "annotate
-    /// it").
+    /// A global left `Unknown` because its callee returns it is reported by
+    /// `report_untyped_globals` as a named initialization cycle.
     pub(super) fn infer_returns(&mut self, stmts: &[Stmt]) {
         self.seed_module_globals(stmts);
         // Bound: each productive pass resolves at least one more `Unknown`→concrete (a return or a
@@ -416,9 +416,11 @@ impl Checker {
     }
 
     /// TICKET-183 — report each seeded, single-name, un-annotated global whose type is still
-    /// `Unknown` after the joint fixpoint. `x := f()` where `f`'s return is computed from `x` is a
-    /// named initialization cycle; anything else asks for an annotation. A let whose value itself
-    /// errors is skipped: the walk reports that error.
+    /// `Unknown` after the joint fixpoint when it is a named initialization cycle: `x := f()` where
+    /// `f`'s return is computed from `x`. Any other `Unknown` global is not reported here: the walk
+    /// types it (`xs := []` refined by a later `xs.push(1)`), a body above it is declined in
+    /// `infer_ident`, and a body below it that returns it fails return inference. A let whose value
+    /// itself errors is skipped: the walk reports that error.
     fn report_untyped_globals(&mut self, stmts: &[Stmt]) {
         let saved_unreached = self.unreached_globals.clone();
         let saved_flag = std::mem::replace(&mut self.inferring_ret, true);
@@ -446,8 +448,8 @@ impl Checker {
                 self.let_value_ty(names, ty, value, s.span);
                 let errored = self.errors.len() > mark.errors;
                 self.diag_rollback(mark);
-                if !errored {
-                    reports.push((s.span, self.untyped_global_message(stmts, x, value)));
+                if !errored && let Some(msg) = self.initialization_cycle_message(stmts, x, value) {
+                    reports.push((s.span, msg));
                 }
             }
             for n in names {
@@ -462,10 +464,15 @@ impl Checker {
         }
     }
 
-    /// The message for an `Unknown`-typed seeded global `x` (see `report_untyped_globals`): probe
-    /// whether `x := f()`'s callee return depends on `x` by typing `x` as a fresh parameter and
-    /// re-inferring `f`.
-    fn untyped_global_message(&mut self, stmts: &[Stmt], x: &str, value: &Expr) -> String {
+    /// The cycle message for an `Unknown`-typed seeded global `x` (see `report_untyped_globals`),
+    /// or `None` when it is not a cycle: probe whether `x := f()`'s callee return depends on `x` by
+    /// typing `x` as a fresh parameter and re-inferring `f`.
+    fn initialization_cycle_message(
+        &mut self,
+        stmts: &[Stmt],
+        x: &str,
+        value: &Expr,
+    ) -> Option<String> {
         if let ExprKind::Call { callee, .. } = &value.kind
             && let ExprKind::Ident(f) = &callee.kind
             && self.local_fn_names.contains(f)
@@ -484,12 +491,12 @@ impl Checker {
             self.scopes[0].insert(x.to_string(), Ty::Unknown);
             let dependent = subst(&r, &HashMap::from([(probe, Ty::Nil)])) != r;
             if dependent {
-                return format!(
+                return Some(format!(
                     "initialization cycle: the type of '{x}' comes from '{f}()', and '{f}' returns a value computed from '{x}' -- annotate '{x}' (`{x}: T = {f}()`) or give '{f}' a return type"
-                );
+                ));
             }
         }
-        format!("cannot infer the type of '{x}' -- annotate it (`{x}: T = ...`)")
+        None
     }
 
     /// The `Let` arm's value typing, shared with the TICKET-183 globals pass: resolve the annotation
