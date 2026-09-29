@@ -176,8 +176,7 @@ pub(super) fn mode(ctx: BlockCtx, spec: WaitSpec) -> BlockMode {
             }
             W::Offload | W::Join | W::Nursery => InPlace,
         },
-        BlockCtx::PoolJob { reentered, .. } => match spec {
-            W::Wait { has_send: true, .. } if reentered => Refuse,
+        BlockCtx::PoolJob { .. } => match spec {
             W::Timer | W::Sleep => InlineSleep,
             W::Stdin | W::Guard => Demote,
             // An Executor job does not own its thread: a socket op returns its `Err`.
@@ -185,7 +184,6 @@ pub(super) fn mode(ctx: BlockCtx, spec: WaitSpec) -> BlockMode {
             W::Recv | W::Send | W::Wait { .. } | W::Offload | W::Join | W::Nursery => InPlace,
         },
         BlockCtx::OwnThread { reentered, .. } => match spec {
-            W::Wait { has_send: true, .. } if reentered => Refuse,
             W::Socket if reentered => Refuse,
             W::Timer | W::Sleep => InlineSleep,
             W::Stdin | W::Guard => Demote,
@@ -289,9 +287,9 @@ mod tests {
         ("Timer", "PSSS SSSS SSSS", true),
         ("Send", "PRRI IIII IIII", false),
         ("Wait", "PDRI IIII IIII", false),
-        ("Wait+send", "PRRI IRIR IRIR", false),
+        ("Wait+send", "PRRI IIII IIII", false),
         ("Wait+deadline", "PDSI IIII IIII", true),
-        ("Wait+deadline+send", "PRSI IRIR IRIR", true),
+        ("Wait+deadline+send", "PRSI IIII IIII", true),
         ("Sleep", "PDSS SSSS SSSS", true),
         ("Offload", "PIII IIII IIII", true),
         ("Stdin", "DDDD DDDD DDDD", true),

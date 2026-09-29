@@ -1839,7 +1839,8 @@ impl Vm {
         // and only on this path, so an ordinary bounded `send` is untouched. Retries the ONE atomic
         // `enqueue_bounded` rather than check-then-enqueue, so a racing sender still can't push either
         // send past `cap`.
-        if matches!(self.block_mode(WaitSpec::Send), BlockMode::InPlace) {
+        let send_mode = self.block_mode(WaitSpec::Send);
+        if send_mode == BlockMode::InPlace {
             // First attempt OUTSIDE the party registration: `submit_result`'s cap-1 result channel
             // always has space, so every such job would otherwise register as blocked on its last
             // instruction and hand the verdict a free (if satisfiable) party.
@@ -1950,14 +1951,12 @@ impl Vm {
         if self.enqueue_bounded(h, &core, w) {
             return Ok(SendStep::Sent);
         }
-        // FULL. Inside a native callback the caller's host-stack loop frame is not capturable, so we
-        // cannot snapshot-park — fault for v1 (the `ponytail:` upgrade path is a demote-in-place send
-        // block, like `demote_recv_block`).
-        if self.native_reentry > 0 {
-            return Err(self.err(send_deadlock_msg(core.cap).to_string(), span));
-        }
+        // FULL. The table decides: a fiber with no host frame parks; everything else (a Demote
+        // context, whose host-stack loop frame is not capturable, and the inline builder, which has
+        // no worker loop) faults — the v1 `Refuse` cell (the `ponytail:` upgrade path is a
+        // demote-in-place send block, like `demote_recv_block`).
         // A real M:N WORKER snapshot-parks: the worker loop drives `send_suspend` → `Disp::SendPark`.
-        if self.mn.is_some() {
+        if send_mode == BlockMode::Park {
             // TICKET-042a — a rendezvous send (cap 0) DEPOSITS its value into `core.q` before it
             // parks (Go's `sudog` model), so a non-blocking poll (`try_recv`, a `wait:` `else` arm)
             // can take it. A `cap > 0` full send keeps the historical value-dropping park: the
@@ -2085,7 +2084,12 @@ impl Vm {
         h: GcRef,
         span: Span,
     ) -> Result<RecvStep, RuntimeError> {
-        if self.mn.is_some() && self.native_reentry > 0 && self.channel_core(h).timer.is_none() {
+        let spec = if self.channel_core(h).timer.is_some() {
+            WaitSpec::Timer
+        } else {
+            WaitSpec::Recv
+        };
+        if self.block_mode(spec) == BlockMode::Demote {
             return self.demote_recv_block(h, span);
         }
         self.chan_recv_step(h, span)
@@ -2148,7 +2152,7 @@ impl Vm {
                 if now >= deadline {
                     return Ok(RecvStep::Got(WireValue::Bool(true)));
                 }
-                if self.mn.is_some() && self.native_reentry == 0 {
+                if self.block_mode(WaitSpec::Timer) == BlockMode::Park {
                     // W7-17 — the `--timeout` checkpoint sits HERE, at the park, not at the top of this
                     // fn: everything above settles without blocking (a queued value, a tripped latch, an
                     // already-fired timer), and a hard abort has no business preempting a `recv` that
@@ -2209,7 +2213,8 @@ impl Vm {
         // M:N snapshot-park path (empty-open parks the fiber; the worker loop files it into the wait
         // set). A fiber woken only to be cancelled must not re-park — the top-of-fn checkpoint above
         // already returned in that case (on BOTH engines).
-        if self.mn.is_some() && self.native_reentry == 0 {
+        let recv_mode = self.block_mode(WaitSpec::Recv);
+        if recv_mode == BlockMode::Park {
             let core = self.channel_core(h);
             let mut g = core.q.lock().unwrap();
             if let Some(w) = g.pop() {
@@ -2244,7 +2249,7 @@ impl Vm {
         // program. When nothing can in fact send — a top-level `recv` on a channel with no producer at
         // all — the verdict is reached on the FIRST halt check, before any wait, so that program still
         // faults with no added latency.
-        if matches!(self.block_mode(WaitSpec::Recv), BlockMode::InPlace) {
+        if recv_mode == BlockMode::InPlace {
             return self.block_recv(&core, span);
         }
         // A native callback with no thread of its own to block on: the host stack cannot be unwound
@@ -2842,8 +2847,9 @@ impl Vm {
             }
             v
         };
-        // v1 limit (§6d): a live SEND arm reaching the block section INSIDE a native callback
-        // (`native_reentry > 0`) can only be a FULL bounded send (a ready arm — unbounded/closed/
+        // v1 limit (§6d), the `Refuse` cell of `block::mode` for a send arm: a live SEND arm reaching
+        // the block section in a Demote context (an M:N fiber inside a native callback) can only be
+        // a FULL bounded send (a ready arm — unbounded/closed/
         // free-slot — was taken at poll), and it cannot be parked or demoted: the M:N demote path
         // POPS recv queues (`demote_wait_block`) and would wrongly steal a send-arm channel's queued
         // message as a received value. Fault here, matching the plain in-callback full-send fault
@@ -2853,7 +2859,10 @@ impl Vm {
             deadline: soonest.is_some(),
             has_send: keys.iter().any(|&(_, is_send)| is_send),
         };
-        if self.native_reentry > 0 && keys.iter().any(|&(_, is_send)| is_send) {
+        let wait_mode = self.block_mode(wait_spec);
+        if wait_mode == BlockMode::Refuse
+            && matches!(wait_spec, WaitSpec::Wait { has_send: true, .. })
+        {
             return Err(self.err(FULL_SEND_DEADLOCK.to_string(), span));
         }
         // M:N (`--parallel`) snapshot-park, top level: rewind to re-run `WaitPoll` on wake and set
@@ -2861,7 +2870,7 @@ impl Vm {
         // (`Disp::WaitPark`) and `MnSched::park_wait` files ONE shared token in every arm bucket. A
         // `send`/`close` to any arm claims the fiber once and sweeps the rest (lost-wakeup-safe via the
         // park-gap re-check). Mirrors the single-`recv` `park_recv`/`Disp::Park` path, generalized to N.
-        if self.mn.is_some() && self.native_reentry == 0 {
+        if wait_mode == BlockMode::Park {
             // W7-17 — the ungated park checkpoint (see `chan_recv_step`'s): everything above settled
             // without blocking, so a hard abort had no business preempting it, but a PARK past the
             // deadline reaches no back-edge and no `block_halt_check` and would hang — including inside
@@ -2929,7 +2938,7 @@ impl Vm {
         // timer arm (`soonest`) is threaded in: after the source-order channel scan fails, the demote
         // loop takes the timer arm once `now >= deadline` (so a real send still beats the timer), and
         // clamps its backoff to the deadline. Lower throughput but sound — the documented v1 limit (§6d).
-        if self.mn.is_some() {
+        if wait_mode == BlockMode::Demote {
             // (A live SEND arm reaching this demote path already faulted above, before the engine
             // split — on BOTH engines — so every arm here is a recv/timer arm the demote loop pops.)
             let arms: Vec<(usize, Arc<ChannelCore>)> = keys
@@ -2969,7 +2978,7 @@ impl Vm {
         // (the COOPERATIVE fiber that inline-slept past a runnable sibling) is closed by construction:
         // that fiber no longer exists.
         if let Some((i, deadline)) = soonest
-            && matches!(self.block_mode(wait_spec), BlockMode::InlineSleep)
+            && wait_mode == BlockMode::InlineSleep
         {
             // W7-17 — CHUNKED, not a bare `thread::sleep`: this is the one inline-sleep W7-16 missed
             // (its four seams were `invoke_native`, `chan_recv_step`'s timer branch, the M:N timer
@@ -2987,7 +2996,7 @@ impl Vm {
         // a deadlock, like the empty-`recv` and full-`send` cases, then REWINDs so the dispatch loop
         // re-runs this `WaitPoll` and re-polls every arm. Rewinding rather than looping in place also
         // means the halts land on the ordinary back-edge checkpoint.
-        if matches!(self.block_mode(wait_spec), BlockMode::InPlace) {
+        if wait_mode == BlockMode::InPlace {
             // Registered FIRST, before the halt check, so this party counts ITSELF as blocked; after
             // it, a lone `wait:`-blocked party would forever see `blocked < live` and never fault.
             // The registration is an OR-set over every arm (§2d's OR-edge: ready on ANY arm is
