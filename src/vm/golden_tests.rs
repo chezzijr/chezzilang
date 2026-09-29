@@ -13010,3 +13010,259 @@ fn from_imported_newtype_ctor_fn_wins() {
     );
     assert_eq!(out, "N(4)\n", "the fn must build the newtype; got: {out:?}");
 }
+
+/// TICKET-183: the verdict of one program through the real pipeline (`build_graph` resolves a
+/// native std import; the single-module `check` does not): `type error: <every message, joined by
+/// " | ">`, else `fault: <message>`, else the trimmed stdout.
+fn module_scope_verdict(src: &str) -> String {
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", src);
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    if let Err(errs) = crate::checker::check_graph(&graph) {
+        let msgs: Vec<&str> = errs.iter().map(|e| e.message.as_str()).collect();
+        return format!("type error: {}", msgs.join(" | "));
+    }
+    let (out, _err, result, _code) = run_file(&entry);
+    match result {
+        Err(e) => format!("fault: {}", e.message),
+        Ok(()) => out.trim().to_string(),
+    }
+}
+
+/// TICKET-183 grid: module scope is order-free for function bodies, top-level statements stay
+/// lexical, and a body that reads a let-only global before its let runs faults. Axes: the op (read,
+/// call, field, match, write) x X's kind (`:=`, typed, `const`, fn, enum type, import alias) x X
+/// above or below the fn x the printing statement above or below X's statement. Every value cell
+/// prints `3` (`7` for a write). CPython prints the same value in every value cell (a write through
+/// `global X`); a read-before-init cell is CPython's `NameError`.
+#[test]
+fn module_scope_order_grid() {
+    const FAULT: &str = "fault: 'X' is read before its initialization";
+    struct Kind {
+        label: &'static str,
+        prelude: &'static str,
+        decl: &'static str,
+        fns: &'static str,
+        print: &'static str,
+    }
+    let read_fn = "fn f():\n    return X\n";
+    let write_fns = "fn w():\n    X = 7\nfn r():\n    return X\n";
+    let write_print = "w()\nprint(r())\n";
+    let match_e = "fn f() -> int:\n    match X:\n        E.A:\n            return 1\n        E.B:\n            return 3\n";
+    let kinds = [
+        Kind {
+            label: "read :=",
+            prelude: "",
+            decl: "X := 3\n",
+            fns: read_fn,
+            print: "print(f())\n",
+        },
+        Kind {
+            label: "read typed",
+            prelude: "",
+            decl: "X: int = 3\n",
+            fns: read_fn,
+            print: "print(f())\n",
+        },
+        Kind {
+            label: "read const",
+            prelude: "",
+            decl: "X: const int = 3\n",
+            fns: read_fn,
+            print: "print(f())\n",
+        },
+        Kind {
+            label: "call :=",
+            prelude: "",
+            decl: "X := fn(n: int) -> int: n + 2\n",
+            fns: "fn f():\n    return X(1)\n",
+            print: "print(f())\n",
+        },
+        Kind {
+            label: "field :=",
+            prelude: "struct P:\n    v: int\n",
+            decl: "X := P(3)\n",
+            fns: "fn f():\n    return X.v\n",
+            print: "print(f())\n",
+        },
+        Kind {
+            label: "field typed",
+            prelude: "struct P:\n    v: int\n",
+            decl: "X: P = P(3)\n",
+            fns: "fn f():\n    return X.v\n",
+            print: "print(f())\n",
+        },
+        Kind {
+            label: "match :=",
+            prelude: "enum E:\n    A\n    B\n",
+            decl: "X := E.B\n",
+            fns: match_e,
+            print: "print(f())\n",
+        },
+        Kind {
+            label: "match typed",
+            prelude: "enum E:\n    A\n    B\n",
+            decl: "X: E = E.B\n",
+            fns: match_e,
+            print: "print(f())\n",
+        },
+        Kind {
+            label: "call fn",
+            prelude: "",
+            decl: "fn X(n: int) -> int:\n    return n + 2\n",
+            fns: "fn f():\n    return X(1)\n",
+            print: "print(f())\n",
+        },
+        Kind {
+            label: "match type",
+            prelude: "",
+            decl: "enum X:\n    A\n    B\n",
+            fns: "fn f() -> int:\n    match X.B:\n        X.A:\n            return 1\n        X.B:\n            return 3\n",
+            print: "print(f())\n",
+        },
+        Kind {
+            label: "field import",
+            prelude: "",
+            decl: "import std.math as X\n",
+            fns: "fn f() -> int:\n    return int(X.floor(3.9))\n",
+            print: "print(f())\n",
+        },
+        Kind {
+            label: "write :=",
+            prelude: "",
+            decl: "X := 3\n",
+            fns: write_fns,
+            print: write_print,
+        },
+        Kind {
+            label: "write typed",
+            prelude: "",
+            decl: "X: int = 3\n",
+            fns: write_fns,
+            print: write_print,
+        },
+        Kind {
+            label: "write const",
+            prelude: "",
+            decl: "X: const int = 3\n",
+            fns: write_fns,
+            print: write_print,
+        },
+    ];
+    let mut got = Vec::new();
+    let mut bad = Vec::new();
+    for k in &kinds {
+        // (X above the fn, print after X's statement): the four layouts of {print, X, fns}.
+        for (above, after) in [(true, false), (true, true), (false, false), (false, true)] {
+            let (d, f, p) = (k.decl, k.fns, k.print);
+            let body = match (above, after) {
+                (true, false) => format!("{p}{d}{f}"),
+                (true, true) => format!("{d}{f}{p}"),
+                (false, false) => format!("{f}{p}{d}"),
+                (false, true) => format!("{f}{d}{p}"),
+            };
+            let src = format!("{}{body}", k.prelude);
+            let hoisted = matches!(k.label, "call fn" | "match type");
+            let want = if k.label == "field import" {
+                if above {
+                    "3"
+                } else {
+                    "type error: 'X' is used before its `import`"
+                }
+            } else if k.label == "write const" {
+                "type error: cannot reassign const binding 'X'"
+            } else if k.label.starts_with("write") {
+                "7"
+            } else if hoisted || after {
+                "3"
+            } else {
+                FAULT
+            };
+            let v = module_scope_verdict(&src);
+            let cell = format!(
+                "{:<13} X {:<5} print {:<6} -> {v}",
+                k.label,
+                if above { "above" } else { "below" },
+                if after { "after" } else { "before" }
+            );
+            if !v.starts_with(want) {
+                bad.push(format!("{cell}\n    want: {want}\n{src}"));
+            }
+            got.push(cell);
+        }
+    }
+    // Extra rows: (label, program, expected verdict prefix).
+    let extras = [
+        (
+            "swap a,b",
+            "a := 1\nb := 2\nfn f():\n    return a * 10 + b\nprint(f())\n",
+            "12",
+        ),
+        (
+            "swap b,a",
+            "b := 2\na := 1\nfn f():\n    return a * 10 + b\nprint(f())\n",
+            "12",
+        ),
+        (
+            "swap fn above",
+            "fn f():\n    return a * 10 + b\nb := 2\na := 1\nprint(f())\n",
+            "12",
+        ),
+        (
+            "type hole :=",
+            "x := \"s\"\nfn f():\n    return x\ny: int = f()\nprint(y)\n",
+            "type error: cannot assign str",
+        ),
+        (
+            "type hole typed",
+            "x: int = 5\nfn f():\n    return x\ny: str = f()\nprint(y)\n",
+            "type error: cannot assign int",
+        ),
+        (
+            "cycle",
+            "x := f()\nfn f():\n    return x\nprint(x)\n",
+            "type error: cannot infer return type of 'f'; add a -> annotation | initialization cycle",
+        ),
+        (
+            "annotated cycle",
+            "x: int = f()\nfn f():\n    return x\nprint(x)\n",
+            "fault: 'x' is read before its initialization at line 1",
+        ),
+        (
+            "spawn",
+            "fn g():\n    print(X)\nparallel:\n    spawn g()\nX := 3\n",
+            FAULT,
+        ),
+        (
+            "keyword call",
+            "fn g() -> int:\n    return h(b=1, a=2)\nh := fn(a: int, b: int) -> int: a - b\nprint(g())\n",
+            "1",
+        ),
+        (
+            "decline",
+            "fn f() -> List[str]:\n    return xs\nxs := []\nxs.push(1)\n",
+            "type error: 'xs' is declared below",
+        ),
+        (
+            "top-level read above",
+            "print(X)\nX := 3\n",
+            "type error: unknown name 'X'",
+        ),
+    ];
+    for (label, src, want) in extras {
+        let v = module_scope_verdict(src);
+        let cell = format!("{label:<34} -> {v}");
+        if !v.starts_with(want) {
+            bad.push(format!("{cell}\n    want: {want}\n{src}"));
+        }
+        got.push(cell);
+    }
+    assert!(
+        bad.is_empty(),
+        "{} of {} cells differ:\n{}\n\nfull grid:\n{}",
+        bad.len(),
+        got.len(),
+        bad.join("\n"),
+        got.join("\n")
+    );
+}

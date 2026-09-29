@@ -1,0 +1,45 @@
+# Module scope is order-free for function bodies (TICKET-183).
+#
+# A function body sees every top-level binding, including one declared below it, as Go's package
+# scope and Python's module globals do. Top-level statements stay lexical. A body that reads a
+# global before the top-level statement that initializes it has run faults with
+# "'x' is read before its initialization at line N" (CPython: NameError), never a nil read.
+# A write before that statement initializes the slot, and the let then rebinds it.
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+
+# Runs before `x := 3`, so `read_x` faults.
+early := recover: read_x()
+x := 3
+
+fn read_x() -> int:
+    return x
+
+# The body sits above `y`; the call runs after `y := 4`.
+fn late() -> int:
+    return y
+
+y := 4
+
+fn set_z():
+    z = 9
+
+fn get_z() -> int:
+    return z
+
+# The write initializes `z`, and `z := 1` then rebinds it.
+set_z()
+z := 1
+
+test fn a_body_reads_a_global_declared_below_it():
+    assert late() == 4, "late() = {late()}"
+
+test fn a_body_reads_a_global_after_its_let_runs():
+    assert read_x() == 3, "read_x() = {read_x()}"
+
+test fn a_read_before_the_let_runs_faults():
+    match early:
+        Ok(v): assert false, "expected a fault, got {v}"
+        Err(e): assert e.message().contains("is read before its initialization"), "got {e.message()}"
+
+test fn the_let_rebinds_a_global_an_earlier_write_initialized():
+    assert get_z() == 1, "get_z() = {get_z()}"
