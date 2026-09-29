@@ -35745,3 +35745,94 @@ fn inferred_return_of_global_is_typed() {
         "str",
     );
 }
+
+// TICKET-183: `x := f()` where `f` returns `x` has no type to start from -- a named cycle.
+#[test]
+fn module_global_initialization_cycle_is_named() {
+    rejects(
+        "x := f()\nfn f():\n    return x\nprint(x)\n",
+        "initialization cycle",
+    );
+}
+
+// TICKET-183: an annotation breaks the typing cycle; the read faults at run time instead.
+#[test]
+fn annotated_initialization_cycle_checks_clean() {
+    ok("x: int = f()\nfn f():\n    return x\n");
+}
+
+// TICKET-183: an empty-collection global's element type is pinned by walk-order code a body
+// above it cannot see, so the body read is declined with "annotate it".
+#[test]
+fn fn_body_above_unrefined_empty_global_is_declined() {
+    rejects(
+        "fn f() -> List[str]:\n    return xs\nxs := []\nxs.push(1)\n",
+        "is declared below",
+    );
+}
+
+// TICKET-183: top-level statements stay lexical, and the hidden global is no "did you mean".
+#[test]
+fn top_level_read_above_global_stays_unknown() {
+    let errs = check_src("print(x)\nx := 5\n");
+    let e = errs
+        .iter()
+        .find(|e| e.message.contains("unknown name 'x'"))
+        .unwrap_or_else(|| panic!("expected unknown name 'x', got: {errs:?}"));
+    assert_eq!(e.help, None, "expected no suggestion, got: {e:?}");
+}
+
+// TICKET-183: a top-level write above the global's let stays an undeclared write.
+#[test]
+fn top_level_write_above_global_stays_undeclared() {
+    rejects(
+        "X = 7\nX := 3\n",
+        "cannot assign to undeclared variable 'X'",
+    );
+}
+
+// TICKET-183: an inferred return that reads a typed global carries the annotation's type.
+#[test]
+fn typed_global_return_is_typed() {
+    rejects("x: int = 5\nfn f():\n    return x\ny: str = f()\n", "int");
+}
+
+// TICKET-183: closure and method bodies see a global declared below them.
+#[test]
+fn closure_and_method_bodies_read_global_declared_below() {
+    ok(
+        "h := fn() -> int: x\nstruct S:\n    v: int\n    fn get(self) -> int:\n        return x\nx := 5\nprint(h())\nprint(S(1).get())\n",
+    );
+}
+
+// TICKET-183: a below-position import stays rejected in a body (Go's rule).
+#[test]
+fn fn_body_above_import_stays_rejected() {
+    entry_rejects(
+        "fn f() -> float:\n    return pi\nimport pi from std.math\n",
+        "before its `import`",
+    );
+}
+
+// TICKET-183: a body's write to a global declared below is checked against its type.
+#[test]
+fn fn_body_write_above_global_is_typed() {
+    rejects("fn w():\n    X = \"s\"\nX := 3\n", "cannot assign str");
+}
+
+// TICKET-183: a body's write to a `const` global declared below is rejected.
+#[test]
+fn fn_body_write_above_const_global_is_rejected() {
+    rejects(
+        "fn w():\n    X = 7\nX: const int = 3\n",
+        "cannot reassign const binding 'X'",
+    );
+}
+
+// TICKET-183: a keyword call through a closure global declared below keeps keyword certainty.
+#[test]
+fn fn_body_keyword_call_through_closure_global_below_checks() {
+    ok(
+        "fn g() -> int:\n    return h(b=1, a=2)\nh := fn(a: int, b: int) -> int: a - b\nprint(g())\n",
+    );
+}
