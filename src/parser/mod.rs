@@ -2634,7 +2634,7 @@ impl Parser {
                     span,
                 },
                 InfixOp::Coalesce => Expr {
-                    id: crate::ast::NodeId::fresh(),
+                    id: crate::ast::NodeId::fresh_block(crate::ast::CARRIER_IDS),
                     kind: ExprKind::NullCoalesce {
                         lhs: Box::new(lhs),
                         rhs: Box::new(rhs),
@@ -2891,7 +2891,7 @@ impl Parser {
                         None
                     };
                     Expr {
-                        id: crate::ast::NodeId::fresh(),
+                        id: crate::ast::NodeId::fresh_block(crate::ast::CARRIER_IDS),
                         kind: ExprKind::OptChain {
                             obj: Box::new(e),
                             name,

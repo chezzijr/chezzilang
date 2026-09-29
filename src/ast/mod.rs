@@ -1406,6 +1406,9 @@ impl PartialEq for NodeId {
     }
 }
 
+/// The id block a `?.` or `??` carrier reserves; see [`NodeId::fresh_block`].
+pub const CARRIER_IDS: u32 = 12;
+
 static NEXT_NODE_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
 
 impl NodeId {
@@ -1414,7 +1417,24 @@ impl NodeId {
     pub const SYNTH: NodeId = NodeId(0);
 
     pub fn fresh() -> NodeId {
-        NodeId(NEXT_NODE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+        NodeId::fresh_block(1)
+    }
+
+    /// A fresh id followed by `n - 1` reserved ones. A carrier (`?.`, `??`) takes a block of
+    /// [`CARRIER_IDS`]: the checker and the compiler each lower it with `desugar::lower_carrier_*`,
+    /// and both lowerings number their synthesized nodes from the carrier's id
+    /// ([`NodeId::carrier_child`]), so both read the same entries.
+    pub fn fresh_block(n: u32) -> NodeId {
+        NodeId(NEXT_NODE_ID.fetch_add(n, std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// The `k`th synthesized node of the carrier whose id is `self` (`1 <= k < CARRIER_IDS`).
+    pub fn carrier_child(self, k: u32) -> NodeId {
+        debug_assert!(
+            (1..CARRIER_IDS).contains(&k),
+            "carrier child {k} out of its block"
+        );
+        NodeId(self.0 + k)
     }
 }
 
@@ -1440,13 +1460,13 @@ impl Expr {
 
 /// Every node id in a statement list, expression or pattern, with the node's span. One walker
 /// serves renumbering and the uniqueness check, so they cannot disagree about which nodes exist.
-fn ids_in_block(b: &mut [Stmt], f: &mut dyn FnMut(&mut NodeId, Span)) {
+fn ids_in_block(b: &mut [Stmt], f: &mut dyn FnMut(&mut NodeId, Span, u32)) {
     for s in b {
         ids_in_stmt(s, f);
     }
 }
 
-fn ids_in_params(ps: &mut [Param], f: &mut dyn FnMut(&mut NodeId, Span)) {
+fn ids_in_params(ps: &mut [Param], f: &mut dyn FnMut(&mut NodeId, Span, u32)) {
     for p in ps {
         if let Some(d) = &mut p.default {
             ids_in_expr(d, f);
@@ -1454,12 +1474,12 @@ fn ids_in_params(ps: &mut [Param], f: &mut dyn FnMut(&mut NodeId, Span)) {
     }
 }
 
-fn ids_in_fn(d: &mut FnDecl, f: &mut dyn FnMut(&mut NodeId, Span)) {
+fn ids_in_fn(d: &mut FnDecl, f: &mut dyn FnMut(&mut NodeId, Span, u32)) {
     ids_in_params(&mut d.params, f);
     ids_in_block(&mut d.body, f);
 }
 
-fn ids_in_stmt(s: &mut Stmt, f: &mut dyn FnMut(&mut NodeId, Span)) {
+fn ids_in_stmt(s: &mut Stmt, f: &mut dyn FnMut(&mut NodeId, Span, u32)) {
     match &mut s.kind {
         StmtKind::Let { value, .. } => ids_in_expr(value, f),
         StmtKind::Assign { target, value, .. } => {
@@ -1591,11 +1611,11 @@ fn ids_in_stmt(s: &mut Stmt, f: &mut dyn FnMut(&mut NodeId, Span)) {
     }
 }
 
-fn ids_in_pattern(p: &mut Pattern, f: &mut dyn FnMut(&mut NodeId, Span)) {
+fn ids_in_pattern(p: &mut Pattern, f: &mut dyn FnMut(&mut NodeId, Span, u32)) {
     match p {
-        Pattern::Ident(_, span, id) => f(id, *span),
+        Pattern::Ident(_, span, id) => f(id, *span, 1),
         Pattern::Variant { bindings, id, .. } => {
-            f(id, Span::default());
+            f(id, Span::default(), 1);
             for b in bindings {
                 ids_in_pattern(b, f);
             }
@@ -1609,9 +1629,17 @@ fn ids_in_pattern(p: &mut Pattern, f: &mut dyn FnMut(&mut NodeId, Span)) {
     }
 }
 
-fn ids_in_expr(e: &mut Expr, f: &mut dyn FnMut(&mut NodeId, Span)) {
-    f(&mut e.id, e.span);
-    let go = |x: &mut Expr, f: &mut dyn FnMut(&mut NodeId, Span)| ids_in_expr(x, f);
+/// How many ids a node of this kind holds: a carrier reserves a block for its lowering.
+pub fn id_width(kind: &ExprKind) -> u32 {
+    match kind {
+        ExprKind::OptChain { .. } | ExprKind::NullCoalesce { .. } => CARRIER_IDS,
+        _ => 1,
+    }
+}
+
+fn ids_in_expr(e: &mut Expr, f: &mut dyn FnMut(&mut NodeId, Span, u32)) {
+    f(&mut e.id, e.span, id_width(&e.kind));
+    let go = |x: &mut Expr, f: &mut dyn FnMut(&mut NodeId, Span, u32)| ids_in_expr(x, f);
     match &mut e.kind {
         ExprKind::Int(_)
         | ExprKind::Float(_)
@@ -1741,12 +1769,12 @@ fn ids_in_expr(e: &mut Expr, f: &mut dyn FnMut(&mut NodeId, Span)) {
 
 /// Give every node of `e` a fresh id: desugar calls it on a subtree it places a second time.
 pub fn renumber_expr(e: &mut Expr) {
-    ids_in_expr(e, &mut |id, _| *id = NodeId::fresh());
+    ids_in_expr(e, &mut |id, _, w| *id = NodeId::fresh_block(w));
 }
 
 /// [`renumber_expr`] for a pattern.
 pub fn renumber_pattern(p: &mut Pattern) {
-    ids_in_pattern(p, &mut |id, _| *id = NodeId::fresh());
+    ids_in_pattern(p, &mut |id, _, w| *id = NodeId::fresh_block(w));
 }
 
 /// Every id that appears on two live nodes of `m`, with the second node's span.
@@ -1755,7 +1783,7 @@ pub fn duplicate_ids(m: &Module) -> Vec<(u32, Span)> {
     let mut m = m.clone();
     let mut seen = std::collections::HashSet::new();
     let mut dups = Vec::new();
-    ids_in_block(&mut m.stmts, &mut |id, span| {
+    ids_in_block(&mut m.stmts, &mut |id, span, _| {
         if id.0 != NodeId::SYNTH.0 && !seen.insert(id.0) {
             dups.push((id.0, span));
         }

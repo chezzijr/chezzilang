@@ -702,8 +702,10 @@ fn provider_fn(
     name: String,
     type_params: Vec<crate::ast::TypeParam>,
     ret: Type,
-    default: Expr,
+    mut default: Expr,
 ) -> Stmt {
+    // The declaration keeps its own default; the provider body is a second node.
+    crate::ast::renumber_expr(&mut default);
     let span = default.span;
     Stmt {
         kind: StmtKind::Fn(crate::ast::FnDecl {
@@ -2684,6 +2686,8 @@ impl Walker<'_> {
             }
             Dflt::Inline(e) => {
                 let mut e = e.clone();
+                // The default is placed once per call that omits it: each copy is a new node.
+                crate::ast::renumber_expr(&mut e);
                 self.walk_expr(&mut e)?;
                 out.push(e);
             }
@@ -3225,9 +3229,9 @@ fn err(span: crate::lexer::Span, message: String) -> ResolveError {
 }
 
 /// A nullary-or-payload variant pattern (`Some(__c)` / `None`) for desugared opt-chain `match` arms.
-fn variant_pat(name: &str, bindings: Vec<Pattern>) -> Pattern {
+fn variant_pat(id: crate::ast::NodeId, name: &str, bindings: Vec<Pattern>) -> Pattern {
     Pattern::Variant {
-        id: crate::ast::NodeId::fresh(),
+        id,
         name: name.to_string(),
         bindings,
         enum_name: None,
@@ -3249,6 +3253,11 @@ fn variant_pat(name: &str, bindings: Vec<Pattern>) -> Pattern {
 /// them) cannot drift between consumers.
 pub fn lower_carrier_option(expr: &mut Expr, tmp: usize) {
     let span = expr.span;
+    let (base, k) = (expr.id, std::cell::Cell::new(0));
+    let nid = || {
+        k.set(k.get() + 1);
+        base.carrier_child(k.get())
+    };
     let c = format!("__opt{tmp}");
     let kind = std::mem::replace(&mut expr.kind, ExprKind::Bool(false));
     expr.kind = match kind {
@@ -3261,19 +3270,16 @@ pub fn lower_carrier_option(expr: &mut Expr, tmp: usize) {
                     MatchExprArm {
                         span: arm_span,
                         pattern: variant_pat(
+                            nid(),
                             "Some",
-                            vec![Pattern::Ident(
-                                c.clone(),
-                                Span::default(),
-                                crate::ast::NodeId::fresh(),
-                            )],
+                            vec![Pattern::Ident(c.clone(), Span::default(), nid())],
                         ),
                         guard: None,
-                        body: ident_expr(&c, span),
+                        body: ident_expr_at(nid(), &c, span),
                     },
                     MatchExprArm {
                         span: arm_span,
-                        pattern: variant_pat("None", vec![]),
+                        pattern: variant_pat(nid(), "None", vec![]),
                         guard: None,
                         body: *rhs,
                     },
@@ -3290,9 +3296,9 @@ pub fn lower_carrier_option(expr: &mut Expr, tmp: usize) {
             // `span` is the primary's span, shared by every link of a chain, so two synthesized
             // method callees in one chain would collide on a single `WitnessKey`.
             let field = Expr {
-                id: crate::ast::NodeId::fresh(),
+                id: nid(),
                 kind: ExprKind::Field {
-                    obj: Box::new(ident_expr(&c, span)),
+                    obj: Box::new(ident_expr_at(nid(), &c, span)),
                     name,
                     name_span,
                 },
@@ -3306,7 +3312,7 @@ pub fn lower_carrier_option(expr: &mut Expr, tmp: usize) {
                     named,
                     type_args,
                 }) => Expr {
-                    id: crate::ast::NodeId::fresh(),
+                    id: nid(),
                     kind: ExprKind::Call {
                         callee: Box::new(field),
                         args,
@@ -3317,9 +3323,9 @@ pub fn lower_carrier_option(expr: &mut Expr, tmp: usize) {
                 },
             };
             let some_body = Expr {
-                id: crate::ast::NodeId::fresh(),
+                id: nid(),
                 kind: ExprKind::Call {
-                    callee: Box::new(ident_expr("Some", span)),
+                    callee: Box::new(ident_expr_at(nid(), "Some", span)),
                     args: vec![access],
                     named: vec![],
                     type_args: vec![],
@@ -3333,21 +3339,18 @@ pub fn lower_carrier_option(expr: &mut Expr, tmp: usize) {
                     MatchExprArm {
                         span: arm_span,
                         pattern: variant_pat(
+                            nid(),
                             "Some",
-                            vec![Pattern::Ident(
-                                c,
-                                Span::default(),
-                                crate::ast::NodeId::fresh(),
-                            )],
+                            vec![Pattern::Ident(c, Span::default(), nid())],
                         ),
                         guard: None,
                         body: some_body,
                     },
                     MatchExprArm {
                         span: arm_span,
-                        pattern: variant_pat("None", vec![]),
+                        pattern: variant_pat(nid(), "None", vec![]),
                         guard: None,
-                        body: ident_expr("None", span),
+                        body: ident_expr_at(nid(), "None", span),
                     },
                 ],
             }
@@ -3367,6 +3370,11 @@ pub fn lower_carrier_option(expr: &mut Expr, tmp: usize) {
 /// `??`.
 pub fn lower_carrier_result_coalesce(expr: &mut Expr, tmp: usize) {
     let span = expr.span;
+    let (base, k) = (expr.id, std::cell::Cell::new(0));
+    let nid = || {
+        k.set(k.get() + 1);
+        base.carrier_child(k.get())
+    };
     let c = format!("__opt{tmp}");
     let kind = std::mem::replace(&mut expr.kind, ExprKind::Bool(false));
     let ExprKind::NullCoalesce { lhs, rhs, .. } = kind else {
@@ -3379,19 +3387,16 @@ pub fn lower_carrier_result_coalesce(expr: &mut Expr, tmp: usize) {
             MatchExprArm {
                 span: arm_span,
                 pattern: variant_pat(
+                    nid(),
                     "Ok",
-                    vec![Pattern::Ident(
-                        c.clone(),
-                        Span::default(),
-                        crate::ast::NodeId::fresh(),
-                    )],
+                    vec![Pattern::Ident(c.clone(), Span::default(), nid())],
                 ),
                 guard: None,
-                body: ident_expr(&c, span),
+                body: ident_expr_at(nid(), &c, span),
             },
             MatchExprArm {
                 span: arm_span,
-                pattern: variant_pat("Err", vec![Pattern::Wildcard]),
+                pattern: variant_pat(nid(), "Err", vec![Pattern::Wildcard]),
                 guard: None,
                 body: *rhs,
             },
@@ -3412,6 +3417,11 @@ pub fn lower_carrier_result_coalesce(expr: &mut Expr, tmp: usize) {
 /// `Result` discards via [`lower_carrier_result_coalesce`].
 pub fn lower_carrier_try(expr: &mut Expr) {
     let span = expr.span;
+    let (base, k) = (expr.id, std::cell::Cell::new(0));
+    let nid = || {
+        k.set(k.get() + 1);
+        base.carrier_child(k.get())
+    };
     let kind = std::mem::replace(&mut expr.kind, ExprKind::Bool(false));
     let ExprKind::OptChain {
         obj,
@@ -3425,10 +3435,10 @@ pub fn lower_carrier_try(expr: &mut Expr) {
         );
     };
     let field = Expr {
-        id: crate::ast::NodeId::fresh(),
+        id: nid(),
         kind: ExprKind::Field {
             obj: Box::new(Expr {
-                id: crate::ast::NodeId::fresh(),
+                id: nid(),
                 kind: ExprKind::Try(obj),
                 span,
             }),
@@ -3503,8 +3513,12 @@ fn module_level_names(
 
 /// A bare identifier expression at `span`.
 fn ident_expr(name: &str, span: Span) -> Expr {
+    ident_expr_at(crate::ast::NodeId::fresh(), name, span)
+}
+
+fn ident_expr_at(id: crate::ast::NodeId, name: &str, span: Span) -> Expr {
     Expr {
-        id: crate::ast::NodeId::fresh(),
+        id,
         kind: ExprKind::Ident(name.to_string()),
         span,
     }
@@ -4123,6 +4137,14 @@ mod tests {
             panic!("inner call")
         };
         assert_eq!(inner.len(), 2, "nested g(1) should fill default -> g(1, 7)");
+    }
+
+    /// TICKET-180 — a default spliced into two calls is two nodes, not one node placed twice.
+    #[test]
+    fn a_spliced_default_gets_fresh_node_ids() {
+        let stmts = desugar_ok("fn f(x: int = 5) -> int:\n    return x\nprint(f())\nprint(f())\n");
+        let m = crate::ast::Module { stmts };
+        assert_eq!(crate::ast::duplicate_ids(&m), vec![]);
     }
 
     /// The value expr of the last `name := <expr>` statement.

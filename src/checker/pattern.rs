@@ -4259,7 +4259,7 @@ impl Checker {
         self.push_scope();
         self.declare(&name, t);
         Expr {
-            id: crate::ast::NodeId::fresh(),
+            id: crate::ast::NodeId::SYNTH,
             kind: ExprKind::Ident(name),
             span: Span::default(),
         }

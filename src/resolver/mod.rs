@@ -423,6 +423,14 @@ fn build_graph_impl(
         }
         e
     })?;
+    // TICKET-180: checker->compiler tables key on `(module, NodeId)`, so a subtree desugar placed
+    // twice without `ast::renumber_expr` would alias two nodes. Catch the new clone site here.
+    #[cfg(debug_assertions)]
+    for lm in &graph.modules {
+        if let Some((id, span)) = crate::ast::duplicate_ids(&lm.ast).first() {
+            panic!("internal: duplicate AST node id {id} at {span:?}");
+        }
+    }
     Ok(graph)
 }
 
