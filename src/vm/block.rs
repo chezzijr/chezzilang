@@ -191,8 +191,7 @@ pub(super) fn mode(ctx: BlockCtx, spec: WaitSpec) -> BlockMode {
             W::Socket | W::Connect => Refuse,
             W::Recv | W::Send | W::Wait { .. } | W::Offload | W::Join | W::Nursery => InPlace,
         },
-        BlockCtx::OwnThread { reentered, .. } => match spec {
-            W::Socket if reentered => Refuse,
+        BlockCtx::OwnThread { .. } => match spec {
             W::Timer | W::Sleep => InlineSleep,
             W::Stdin | W::Guard => Demote,
             W::Recv
@@ -407,7 +406,7 @@ mod tests {
         ("Sleep", "PDSS SSSS SSSS", true),
         ("Offload", "PDII IIII IIII", true),
         ("Stdin", "DDDD DDDD DDDD", true),
-        ("Socket", "PDRR RRRR IRIR", true),
+        ("Socket", "PDRR RRRR IIII", true),
         ("Connect", "PIIR RRRR IIII", true),
         ("Guard", "DDDD DDDD DDDD", false),
         ("Join", "IIII IIII IIII", true),

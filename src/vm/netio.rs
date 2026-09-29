@@ -65,6 +65,17 @@ const RENDEZVOUS_SEND_DEADLOCK: &str = "send on a rendezvous channel: deadlock �
     channel is spawned with `spawn:` and is still running.)";
 
 /// The send-deadlock text for a channel of capacity `cap` (`Some(0)` = rendezvous).
+/// The `Err` text of a would-block socket op in a context whose table cell is `Refuse` (an eager
+/// `Executor` job, `block::mode`'s Socket/Connect row). One copy for every socket op.
+fn sock_would_block_msg(op: &str) -> String {
+    format!(
+        "{op} would block: an Executor job doesn't own its thread — blocking here would starve \
+         every other job and `parallel:` nursery sharing the pool. Do this socket op inside \
+         `spawn:` or a `parallel:` nursery instead, where it parks rather than blocking a shared \
+         thread."
+    )
+}
+
 fn send_deadlock_msg(cap: Option<usize>) -> &'static str {
     if cap == Some(0) {
         RENDEZVOUS_SEND_DEADLOCK
@@ -564,10 +575,11 @@ impl Vm {
                 // block until the handshake settles — everywhere except an eager `Executor` job,
                 // whose thread is shared (W7-59).
                 Ok((stream, true)) => {
-                    if self.mn.is_some() && self.native_reentry == 0 {
+                    let connect_mode = self.block_mode(WaitSpec::Connect);
+                    if connect_mode == BlockMode::Park {
                         self.park_on_connect(stream, span);
                         Ok(Value::nil()) // parked sentinel; `poll_park` gates the result-push at `do_call`
-                    } else if self.eager_core.is_some() {
+                    } else if connect_mode == BlockMode::Refuse {
                         // W7-59 — an eager `Executor` job. A job does not own its thread: it runs on the
                         // bounded, process-wide `vm::pool` (`worker_count()`, never grown on demand) with
                         // no `MnSched` under it to spin a replacement, so blocking here steals width from
@@ -584,12 +596,7 @@ impl Vm {
                         // block: CPython `socket.connect` from the main thread returns in 0.1 ms, Go
                         // `net.Dial` from the main goroutine in 314 µs — refusing it here would be a
                         // divergence with nothing behind it.
-                        Ok(self.sock_err(
-                            "connect would block: an Executor job doesn't own its thread — \
-                            blocking here would starve every other job and `parallel:` nursery \
-                            sharing the pool. Do this socket op inside `spawn:` or a `parallel:` \
-                            nursery instead, where it parks rather than blocking a shared thread.",
-                        ))
+                        Ok(self.sock_err(sock_would_block_msg("connect")))
                     } else {
                         // Everywhere the thread is the program's own — top-level `main` on the
                         // default engine, a `connect` inside a native callback on M:N: block, but
@@ -822,12 +829,7 @@ impl Vm {
                 // No fiber to park: block the thread in place only where that starves nobody
                 // ([`Vm::may_block_socket_in_place`]) — else the pre-existing loud error.
                 if matches!(self.block_mode(WaitSpec::Socket), BlockMode::Refuse) {
-                    return Ok(self.sock_err(
-                        "read_bytes would block: an Executor job doesn't own its thread — \
-                        blocking here would starve every other job and `parallel:` nursery \
-                        sharing the pool. Do this socket op inside `spawn:` or a `parallel:` \
-                        nursery instead, where it parks rather than blocking a shared thread.",
-                    ));
+                    return Ok(self.sock_err(sock_would_block_msg("read_bytes")));
                 }
                 let core = Arc::clone(&core);
                 self.demote_block_socket(fd, poller::Interest::Read, deadline, span, move |vm| {
@@ -1026,12 +1028,7 @@ impl Vm {
                     // shared, so blocking it starves the peer that would make the fd ready → fail loud
                     // ([`Vm::may_block_socket_in_place`]).
                     if matches!(self.block_mode(WaitSpec::Socket), BlockMode::Refuse) {
-                        return Ok(self.sock_err(
-                            "read would block: an Executor job doesn't own its thread — \
-                            blocking here would starve every other job and `parallel:` nursery \
-                            sharing the pool. Do this socket op inside `spawn:` or a `parallel:` \
-                            nursery instead, where it parks rather than blocking a shared thread.",
-                        ));
+                        return Ok(self.sock_err(sock_would_block_msg("read")));
                     }
                     let core = Arc::clone(&core);
                     return self.demote_block_socket(
@@ -1181,12 +1178,7 @@ impl Vm {
                 // In-callback on M:N (or top-level `main` on the default engine) → demote +
                 // backoff-poll the non-blocking write in place (#3 socket half).
                 if matches!(self.block_mode(WaitSpec::Socket), BlockMode::Refuse) {
-                    return Ok(self.sock_err(
-                        "write would block: an Executor job doesn't own its thread — \
-                        blocking here would starve every other job and `parallel:` nursery \
-                        sharing the pool. Do this socket op inside `spawn:` or a `parallel:` \
-                        nursery instead, where it parks rather than blocking a shared thread.",
-                    ));
+                    return Ok(self.sock_err(sock_would_block_msg("write")));
                 }
                 let core = Arc::clone(&core);
                 let mut sent = sent;
@@ -1321,12 +1313,7 @@ impl Vm {
                 // In-callback on M:N (or top-level `main` on the default engine) → demote +
                 // backoff-poll the non-blocking accept in place (#3 socket half).
                 if matches!(self.block_mode(WaitSpec::Socket), BlockMode::Refuse) {
-                    return Ok(self.sock_err(
-                        "accept would block: an Executor job doesn't own its thread — \
-                        blocking here would starve every other job and `parallel:` nursery \
-                        sharing the pool. Do this socket op inside `spawn:` or a `parallel:` \
-                        nursery instead, where it parks rather than blocking a shared thread.",
-                    ));
+                    return Ok(self.sock_err(sock_would_block_msg("accept")));
                 }
                 let core = Arc::clone(&core);
                 self.demote_block_socket(fd, poller::Interest::Read, deadline, span, move |vm| {
@@ -1522,7 +1509,7 @@ impl Vm {
             self.cancelled = true;
             return Err(self.err("cancelled".to_string(), span));
         }
-        if self.mn.is_some() && self.native_reentry == 0 {
+        if self.block_mode(WaitSpec::Socket) == BlockMode::Park {
             // The `in_flight` guard: at most one op may be parked on a socket at a time. A second
             // concurrent op on a shared socket (`Arc`) faults rather than overwrite the registry entry
             // (which would drop the first fiber + leak `inflight`) or double-`add` the fd (EEXIST panic).
