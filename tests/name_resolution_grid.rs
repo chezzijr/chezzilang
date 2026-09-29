@@ -247,6 +247,9 @@ fn grid() -> Vec<Cell> {
     }
     cells.extend(same_module_fn_cells());
     cells.extend(p2_cells());
+    cells.extend(field_cells());
+    cells.extend(order_cells());
+    cells.extend(typed_use_cells());
     cells
 }
 
@@ -349,6 +352,283 @@ fn p2_cells() -> Vec<Cell> {
     ]
 }
 
+const FIELD_LIB: &str = "struct T:\n    x: int\nfn f(n: int) -> str:\n    return \"L{n}\"\nfn h(n: int) -> str:\n    return \"B{n}\"\nenum E:\n    A\nA := 4\nk := 4\n";
+
+const FIELD_DECLS: &str = "struct V:\n    A: int\n    k: int\n    pi: int\nstruct W:\n    E: V\nfn id(v: int) -> int:\n    return v\n";
+
+/// A head a value binder can hide in a value-field read `X.m`.
+struct FieldHead {
+    tag: &'static str,
+    name: &'static str,
+    decl: &'static str,
+    member: &'static str,
+    ty: &'static str,
+    value: &'static str,
+}
+
+const VV: &str = "V(A=4, k=4, pi=4)";
+
+#[rustfmt::skip]
+const FIELD_HEADS: &[FieldHead] = &[
+    FieldHead { tag: "struct", name: "P", decl: "struct P:\n    x: int\n", member: "k", ty: "V", value: VV },
+    FieldHead { tag: "newtype", name: "N", decl: "newtype N = int\n", member: "k", ty: "V", value: VV },
+    FieldHead { tag: "enum", name: "E", decl: "enum E:\n    A\n", member: "A", ty: "V", value: VV },
+    FieldHead { tag: "enum_alias", name: "R", decl: "enum E:\n    A\ntype R = E\n", member: "A", ty: "V", value: VV },
+    FieldHead { tag: "alias", name: "Q", decl: "struct P:\n    x: int\ntype Q = P\n", member: "k", ty: "V", value: VV },
+    FieldHead { tag: "imported_type", name: "T", decl: "import T from lib\n", member: "k", ty: "V", value: VV },
+    FieldHead { tag: "module", name: "math", decl: "import std.math\n", member: "pi", ty: "V", value: VV },
+    FieldHead { tag: "qualified_enum", name: "lib", decl: "import lib\n", member: "E.A", ty: "W", value: "W(E=V(A=4, k=4, pi=4))" },
+];
+
+/// The read `r` in one context, every line indented `ind` spaces.
+fn field_block(r: &str, ctx: &str, ind: usize) -> String {
+    let lines: Vec<String> = match ctx {
+        "read" => vec![format!("print({r})")],
+        "arg" => vec![format!("print(id({r}))")],
+        "scrutinee" => vec![
+            format!("m := match {r}:"),
+            "    v: v".into(),
+            "print(m)".into(),
+        ],
+        _ => vec![
+            "fn ret() -> int:".into(),
+            format!("    return {r}"),
+            "print(ret())".into(),
+        ],
+    };
+    let pad = " ".repeat(ind);
+    lines.iter().map(|l| format!("{pad}{l}\n")).collect()
+}
+
+fn field_bind(binder: &str, n: &str, ty: &str, e: &str, r: &str, ctx: &str) -> Option<String> {
+    let b = |ind| field_block(r, ctx, ind);
+    Some(match binder {
+        "param" => format!("fn g({n}: {ty}):\n{}g({e})\n", b(4)),
+        "local" => format!("fn g():\n    {n} := {e}\n{}g()\n", b(4)),
+        "toplevel_let" => format!("{n} := {e}\n{}", b(0)),
+        "for_var" => format!("for {n} in [{e}]:\n{}", b(4)),
+        "match_binding" => format!(
+            "match Some({e}):\n    Some({n}):\n{}    None: print(\"none\")\n",
+            b(8)
+        ),
+        "wait_recv" => format!(
+            "fn g():\n    ch := Channel[{ty}](1)\n    ch.send({e})\n    wait:\n        {n} := ch.recv():\n{}g()\n",
+            b(12)
+        ),
+        "import_alias" => format!("import lib as {n}\n{}", b(0)),
+        "closure_param" | "comprehension_var" => {
+            // A closure body is one expression: only the `read` and `arg` contexts fit.
+            let x = match ctx {
+                "read" => r.to_string(),
+                "arg" => format!("id({r})"),
+                _ => return None,
+            };
+            if binder == "closure_param" {
+                format!("print((fn({n}: {ty}) -> int: {x})({e}))\n")
+            } else {
+                format!("print([{x} for {n} in [{e}]][0])\n")
+            }
+        }
+        _ => return None,
+    })
+}
+
+fn field_rejection(binder: &str, tag: &str) -> Option<&'static str> {
+    match (binder, tag) {
+        ("toplevel_let", "module" | "qualified_enum") => {
+            Some("cannot re-declare module-level binding")
+        }
+        ("import_alias", "module" | "qualified_enum" | "imported_type") => Some("already"),
+        _ => None,
+    }
+}
+
+/// The value-field read position: a value binder named like a type or module, read as `X.m`
+/// (not called) in a print, an argument, a match scrutinee and a return.
+fn field_cells() -> Vec<Cell> {
+    let binders = [
+        "param",
+        "local",
+        "toplevel_let",
+        "for_var",
+        "match_binding",
+        "closure_param",
+        "comprehension_var",
+        "wait_recv",
+        "import_alias",
+    ];
+    let mut cells = Vec::new();
+    for h in FIELD_HEADS {
+        for ctx in ["read", "arg", "scrutinee", "return"] {
+            for binder in binders {
+                let r = format!("{}.{}", h.name, h.member);
+                let Some(body) = field_bind(binder, h.name, h.ty, h.value, &r, ctx) else {
+                    continue;
+                };
+                let expect = match field_rejection(binder, h.tag) {
+                    Some(frag) => Expect::Rejects(frag),
+                    None => Expect::Prints("4".into()),
+                };
+                cells.push(with_lib(
+                    &format!("{binder}/{}/field_{ctx}", h.tag),
+                    &format!("{}{FIELD_DECLS}{body}", h.decl),
+                    FIELD_LIB,
+                    expect,
+                ));
+            }
+        }
+    }
+    cells
+}
+
+const ORDER_PRE: &str = "struct P:\n    x: int\nenum E:\n    A\nstruct V:\n    A: int\n";
+
+const ORDER_LIB: &str = "A := 4\n";
+
+/// A top-level binding named like a builtin, a type or an enum, read in a fn body.
+struct OrderHead {
+    tag: &'static str,
+    binding: &'static str,
+    body: &'static [&'static str],
+    ret: &'static str,
+    out: &'static str,
+    /// The typed-use cell's `y: <wrong> = g()` and the rejection it expects.
+    wrong: &'static str,
+    rejects: &'static str,
+}
+
+const ORD_BIND: &str = "ord := fn(s: str) -> int: 1000\n";
+const P_BIND: &str = "P := fn(n: int) -> str: \"v{n}\"\n";
+const INT_AS_STR: &str = "cannot assign int to variable of type str";
+const STR_AS_INT: &str = "cannot assign str to variable of type int";
+
+#[rustfmt::skip]
+const ORDER_HEADS: &[OrderHead] = &[
+    OrderHead { tag: "ord_call", binding: ORD_BIND, body: &["return ord(\"a\")"], ret: "int", out: "1000", wrong: "str", rejects: INT_AS_STR },
+    OrderHead { tag: "ord_read", binding: ORD_BIND, body: &["h := ord", "return h(\"a\")"], ret: "int", out: "1000", wrong: "str", rejects: INT_AS_STR },
+    OrderHead { tag: "P_call", binding: P_BIND, body: &["return P(4)"], ret: "str", out: "v4", wrong: "int", rejects: STR_AS_INT },
+    OrderHead { tag: "P_read", binding: P_BIND, body: &["h := P", "return h(4)"], ret: "str", out: "v4", wrong: "int", rejects: STR_AS_INT },
+    OrderHead { tag: "E_field", binding: "E := V(4)\n", body: &["return E.A"], ret: "int", out: "4", wrong: "str", rejects: INT_AS_STR },
+    OrderHead { tag: "x_read", binding: "x := 5\n", body: &["return x"], ret: "int", out: "5", wrong: "str", rejects: INT_AS_STR },
+];
+
+/// `fn g` over the head's body, with an inferred or an annotated return.
+fn order_fn(h: &OrderHead, annotated: bool) -> String {
+    let sig = if annotated {
+        format!("fn g() -> {}:\n", h.ret)
+    } else {
+        "fn g():\n".into()
+    };
+    let body: String = h.body.iter().map(|l| format!("    {l}\n")).collect();
+    format!("{sig}{body}")
+}
+
+fn order_pair(h: &OrderHead, before: bool, annotated: bool) -> String {
+    let f = order_fn(h, annotated);
+    if before {
+        format!("{ORDER_PRE}{}{f}", h.binding)
+    } else {
+        format!("{ORDER_PRE}{f}{}", h.binding)
+    }
+}
+
+/// Walk order (owner notes 06:58Z, 08:31Z): a fn body's head is the top-level binding whether
+/// the binding is above or below the fn, and no answer depends on which checker walk decides it.
+fn order_cells() -> Vec<Cell> {
+    let mut cells = Vec::new();
+    for h in ORDER_HEADS {
+        for (ann, annotated) in [("inferred", false), ("annotated", true)] {
+            for (order, before) in [("before", true), ("after", false)] {
+                cells.push(with_lib(
+                    &format!("order/{order}/{ann}/{}", h.tag),
+                    &format!("{}print(g())\n", order_pair(h, before, annotated)),
+                    ORDER_LIB,
+                    Expect::Prints(h.out.into()),
+                ));
+            }
+        }
+    }
+    let p = "struct P:\n    x: int\n";
+    let fn_p = "fn P(n: int) -> str:\n    return \"B{n}\"\n";
+    let g_p = "fn g():\n    return P(4)\n";
+    let e = "enum E:\n    A\n";
+    let g_e = "fn g():\n    return E.A\n";
+    let imp = "import lib as E\n";
+    let raw = [
+        (
+            "swap/fn_first/call",
+            format!("{p}{fn_p}{g_p}print(g())\n"),
+            Expect::Prints("B4".into()),
+        ),
+        (
+            "swap/fn_last/call",
+            format!("{p}{g_p}{fn_p}print(g())\n"),
+            Expect::Prints("B4".into()),
+        ),
+        (
+            "swap/import_first/enum_field",
+            format!("{e}{imp}{g_e}print(g())\n"),
+            Expect::Prints("4".into()),
+        ),
+        (
+            "swap/import_last/enum_field",
+            format!("{e}{g_e}{imp}print(g())\n"),
+            Expect::Prints("4".into()),
+        ),
+        // Top-level statements keep lexical order (owner 07:27Z, Q2 (b); CPython).
+        (
+            "toplevel/builtin_call_above_let",
+            format!("print(ord(\"a\"))\n{ORD_BIND}print(ord(\"a\"))\n"),
+            Expect::Prints("97\n1000".into()),
+        ),
+        (
+            "toplevel/builtin_read_above_let",
+            format!("f := ord\nprint(f(\"a\"))\n{ORD_BIND}print(ord(\"a\"))\n"),
+            Expect::Prints("97\n1000".into()),
+        ),
+        (
+            "toplevel/enum_field_above_let",
+            format!("{ORDER_PRE}print(E.A)\nE := V(4)\nprint(E.A)\n"),
+            Expect::Prints("A\n4".into()),
+        ),
+        (
+            "order/after/closure/ord_call",
+            format!("f := fn() -> int: ord(\"a\")\n{ORD_BIND}print(f())\n"),
+            Expect::Prints("1000".into()),
+        ),
+        (
+            "order/inferred_return_type_of_a_global",
+            "x := \"s\"\nfn f():\n    return x\ny: int = f()\nprint(y)\n".into(),
+            Expect::Rejects(STR_AS_INT),
+        ),
+    ];
+    for (name, main, expect) in raw {
+        cells.push(with_lib(name, &main, ORDER_LIB, expect));
+    }
+    cells
+}
+
+/// Typed use (plan-validation 08:28Z): an inferred `fn g` returns the global's type in both
+/// orders, so a wrong annotation at the use site is rejected with the exact type.
+fn typed_use_cells() -> Vec<Cell> {
+    let mut cells = Vec::new();
+    for h in ORDER_HEADS {
+        for (order, before) in [("before", true), ("after", false)] {
+            cells.push(with_lib(
+                &format!("typed_use/{order}/{}", h.tag),
+                &format!(
+                    "{}y: {} = g()\nprint(y)\n",
+                    order_pair(h, before, false),
+                    h.wrong
+                ),
+                ORDER_LIB,
+                Expect::Rejects(h.rejects),
+            ));
+        }
+    }
+    cells
+}
+
 fn run_cell(root: &Path, idx: usize, c: &Cell) -> Result<(), String> {
     let dir: PathBuf = root.join(format!("c{idx}"));
     for (rel, src) in &c.files {
@@ -405,6 +685,52 @@ const PENDING_180: &[&str] = &[
     "importer/alias/k3_int_arg",
     "p2/alias_of_ambiguous_module_type",
     "p2/generic_alias_turbofish",
+    // Step 7 (seed type- and builtin-named globals; one head decider) removes these.
+    "order/before/inferred/ord_call",
+    "order/after/inferred/ord_call",
+    "order/after/annotated/ord_call",
+    "order/after/inferred/ord_read",
+    "order/after/annotated/ord_read",
+    "order/before/inferred/P_call",
+    "order/after/inferred/P_call",
+    "order/after/annotated/P_call",
+    "order/after/inferred/P_read",
+    "order/after/annotated/P_read",
+    "order/after/closure/ord_call",
+    "typed_use/before/ord_read",
+    "typed_use/after/ord_read",
+    "typed_use/before/P_call",
+    "typed_use/after/P_call",
+    "typed_use/before/P_read",
+    "typed_use/after/P_read",
+    // Step 9 (identifier and value-field reads; a module-scope binding hides a type head)
+    // removes these.
+    "order/before/inferred/E_field",
+    "order/after/inferred/E_field",
+    "order/before/annotated/E_field",
+    "order/after/annotated/E_field",
+    "swap/import_first/enum_field",
+    "swap/import_last/enum_field",
+    "toplevel/enum_field_above_let",
+    "toplevel/builtin_read_above_let",
+    "typed_use/before/E_field",
+    "typed_use/after/E_field",
+    "toplevel_let/enum/field_read",
+    "toplevel_let/enum/field_arg",
+    "toplevel_let/enum/field_scrutinee",
+    "toplevel_let/enum/field_return",
+    "toplevel_let/enum_alias/field_read",
+    "toplevel_let/enum_alias/field_arg",
+    "toplevel_let/enum_alias/field_scrutinee",
+    "toplevel_let/enum_alias/field_return",
+    "import_alias/enum/field_read",
+    "import_alias/enum/field_arg",
+    "import_alias/enum/field_scrutinee",
+    "import_alias/enum/field_return",
+    "import_alias/enum_alias/field_read",
+    "import_alias/enum_alias/field_arg",
+    "import_alias/enum_alias/field_scrutinee",
+    "import_alias/enum_alias/field_return",
 ];
 
 #[test]
