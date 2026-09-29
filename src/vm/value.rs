@@ -11,7 +11,8 @@
 //!    000            → Obj   : (gcref as u64) << 3            ; recover (v >> 3) as u32
 //!    010            → Float : (floatbox_gcref << 3) | 0b010  ; its OWN tag → `is_float` is heap-free
 //!    100            → Immediate (payload-less singleton); discriminate bits 3-4:
-//!                      0b00_100 → NIL, 0b01_100 → FALSE, 0b10_100 → TRUE
+//!                      0b00_100 → NIL, 0b01_100 → FALSE, 0b10_100 → TRUE,
+//!                      0b11_100 → UNINIT (let slot not yet run; bits 5.. carry its line)
 //!    110            → RESERVED (future immediates)
 //! ```
 //!
@@ -44,6 +45,7 @@ const TAG_FLOAT: u64 = 0b010;
 const NIL: u64 = 0b00_100;
 const FALSE: u64 = 0b01_100;
 const TRUE: u64 = 0b10_100;
+const UNINIT: u64 = 0b11_100;
 
 impl Value {
     /// Largest i64 stored inline (larger boxes as `Obj::BigInt`). Inclusive.
@@ -69,6 +71,23 @@ impl Value {
     #[inline]
     pub fn nil() -> Value {
         Value(NIL)
+    }
+    /// The marker a top-level `let` slot holds until its statement runs (TICKET-183). The payload
+    /// is the let's source line, so a read-before-initialization fault names it with no lookup. It
+    /// never leaves a module slot: `Op::GetGlobalSlot` and the `GetCaptured` home fallback fault on
+    /// it, and a spawn snapshot copies it as `SnapValue::Uninit`.
+    #[inline]
+    pub fn uninit(line: u32) -> Value {
+        Value(((line as u64) << 5) | UNINIT)
+    }
+    #[inline]
+    pub fn is_uninit(self) -> bool {
+        self.0 & 0b11_111 == UNINIT
+    }
+    /// The let line an [`Value::uninit`] marker carries.
+    #[inline]
+    pub fn uninit_line(self) -> u32 {
+        (self.0 >> 5) as u32
     }
     #[inline]
     pub fn obj(r: GcRef) -> Value {
@@ -254,5 +273,9 @@ mod tests {
         assert_eq!(Value::int(9).child_gcref(), None);
         assert_eq!(Value::bool(true).child_gcref(), None);
         assert_eq!(Value::nil().child_gcref(), None);
+        assert_eq!(Value::uninit(7).child_gcref(), None);
+        assert!(!Value::uninit(7).is_nil());
+        assert!(Value::uninit(7).is_uninit() && !Value::nil().is_uninit());
+        assert_eq!(Value::uninit(7).uninit_line(), 7);
     }
 }

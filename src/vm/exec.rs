@@ -996,7 +996,14 @@ impl Vm {
             .collect();
         let mod_obj = self.heap.alloc(Obj::Module(Box::new(ModuleData {
             name: m.label.clone().into_boxed_str(),
-            slots: vec![Value::nil(); m.global_slots.len()],
+            // TICKET-183: a let-created slot starts uninitialized (its line rides in the marker), so a
+            // read before the let runs faults; a hoisted slot starts nil until its binding runs.
+            slots: (0..m.global_slots.len())
+                .map(|i| match m.let_lines.get(i).copied().unwrap_or(0) {
+                    0 => Value::nil(),
+                    line => Value::uninit(line),
+                })
+                .collect(),
             index,
         })));
         debug_assert_eq!(self.module_objs.len(), idx);
@@ -2163,6 +2170,9 @@ impl Vm {
                 // always agrees with a closure's read of the same slot.
                 self.ensure_module_faulted(home); // D1: lazily reconstruct the worker's home module
                 let v = self.global_slot(home, *slot);
+                if v.is_uninit() {
+                    return Err(self.uninit_read_err(home, *slot, v, span));
+                }
                 self.push(v);
             }
             Op::DefineGlobalSlot(slot) => {
@@ -2178,14 +2188,7 @@ impl Vm {
                 // half). The root task (`module_snapshot.is_none()`) writes its globals freely.
                 if self.module_snapshot.is_some() {
                     self.ensure_module_faulted(home);
-                    let name = match self.heap.get(home) {
-                        Obj::Module(m) => m
-                            .index
-                            .iter()
-                            .find(|&(_, &i)| i == *slot)
-                            .map(|(n, _)| n.to_string()),
-                        _ => None,
-                    };
+                    let name = self.global_slot_name(home, *slot);
                     return Err(self.copied_write_err(name.as_deref(), span));
                 }
                 self.set_global_slot(home, *slot, v);
@@ -2216,9 +2219,18 @@ impl Vm {
                             .as_deref()
                             .and_then(|n| self.module_global(home, n))
                             .ok_or_else(|| {
-                                let label = name.unwrap_or_else(|| format!("capture#{slot}"));
+                                let label =
+                                    name.clone().unwrap_or_else(|| format!("capture#{slot}"));
                                 self.err(format!("undefined name '{label}'"), span)
                             })?;
+                        if v.is_uninit() {
+                            let slot = match self.heap.get(home) {
+                                Obj::Module(m) => name.as_deref().and_then(|n| m.index.get(n)),
+                                _ => None,
+                            };
+                            let slot = slot.copied().unwrap_or(u32::MAX);
+                            return Err(self.uninit_read_err(home, slot, v, span));
+                        }
                         self.push(v);
                     }
                 }

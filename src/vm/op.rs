@@ -662,6 +662,10 @@ pub struct ModuleProto {
     /// run driver pre-sizes the module's `slots` vector to this length and builds its name→slot
     /// index from it. Empty for native modules (their members are populated by name at run time).
     pub global_slots: Vec<String>,
+    /// TICKET-183 — slot `i` ⇒ the source line of the top-level let that created slot `i`; `0` when
+    /// an import, fn, extern or native created it. `run_module` starts a let slot as
+    /// `Value::uninit(line)`, so a read before the let runs faults instead of reading `nil`.
+    pub let_lines: Vec<u32>,
     /// The module's [`crate::lexer::Span::file`] id (`1..n`, never 0 for a graph-compiled module),
     /// copied from `resolver::LoadedModule::file`. This is what lets a runtime diagnostic map a
     /// `Span` back to the file it came from. `0` for the synthetic single-module compile path.

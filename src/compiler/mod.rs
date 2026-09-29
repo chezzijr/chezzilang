@@ -133,6 +133,8 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     for (idx, lm) in graph.modules.iter().enumerate() {
         let toplevel = c.compile_module(idx, &lm.ast, &lm.imports, idx == entry_idx, lm.native)?;
         let global_slots = std::mem::take(&mut c.global_slots);
+        let let_lines = std::mem::take(&mut c.global_let_lines);
+        debug_assert_eq!(let_lines.len(), global_slots.len());
         c.program.modules.push(ModuleProto {
             id: lm.id.clone(),
             label: lm.label(),
@@ -141,6 +143,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
             native: lm.native,
             std: lm.is_std(),
             global_slots,
+            let_lines,
             file: lm.file,
         });
     }
@@ -197,6 +200,8 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     c.ret_coerce = rc;
     let toplevel = c.compile_module(0, module, &[], true, None)?;
     let global_slots = std::mem::take(&mut c.global_slots);
+    let let_lines = std::mem::take(&mut c.global_let_lines);
+    debug_assert_eq!(let_lines.len(), global_slots.len());
     // A synthetic module id so the run driver has something to key the namespace cache on.
     let id = crate::resolver::ModuleId(std::path::PathBuf::from("<main>"));
     c.program.modules.push(ModuleProto {
@@ -207,6 +212,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
         native: None,
         std: false,
         global_slots,
+        let_lines,
         file: 0,
     });
     c.program.field_ic_sites = c.field_ic_next;
@@ -245,6 +251,10 @@ struct Compiler {
     /// The current module's globals in slot order (slot `i` ⇒ `global_slots[i]`), recorded into the
     /// module's [`ModuleProto`] so the run driver can pre-size storage + build its name→slot index.
     global_slots: Vec<String>,
+    /// TICKET-183 — parallel to `global_slots`: the source line of the top-level let that created
+    /// slot `i`, `0` when an import, fn, extern or native created it. Recorded into
+    /// [`ModuleProto::let_lines`].
+    global_let_lines: Vec<u32>,
     /// M19 Phase 4 — next struct-field inline-cache site id. Allocated densely across the WHOLE
     /// program (every module shares this `Compiler`), so each `GetField`/`SetField` on a struct
     /// field gets a unique slot into the VM's `field_ic` vector. Recorded into `Program::field_ic_sites`.
@@ -612,6 +622,7 @@ impl Compiler {
             provider_defs: HashMap::new(),
             fn_names: std::collections::HashSet::new(),
             global_slots: Vec::new(),
+            global_let_lines: Vec::new(),
             field_ic_next: 0,
             method_ic_next: 0,
             type_keys: HashMap::new(),
@@ -946,6 +957,7 @@ impl Compiler {
         use crate::ast::Import;
         self.globals.clear();
         self.global_slots.clear();
+        self.global_let_lines.clear();
         self.fn_names.clear();
         let add = |name: String, globals: &mut HashMap<String, u32>, slots: &mut Vec<String>| {
             if !globals.contains_key(&name) {
@@ -1003,16 +1015,21 @@ impl Compiler {
                 }
             }
         }
+        // Every slot so far holds a hoisted value from the start: no let line.
+        self.global_let_lines.resize(self.global_slots.len(), 0);
         for stmt in stmts {
             if let StmtKind::Let { names, .. } = &stmt.kind {
                 for name in names {
                     // TICKET-142 (W14-32): `_` is the blank identifier — it gets no global slot.
-                    if name != "_" {
+                    // TICKET-183: only a slot this let CREATES starts uninitialized at its line.
+                    if name != "_" && !self.globals.contains_key(name) {
                         add(name.clone(), &mut self.globals, &mut self.global_slots);
+                        self.global_let_lines.push(stmt.span.line);
                     }
                 }
             }
         }
+        debug_assert_eq!(self.global_let_lines.len(), self.global_slots.len());
     }
 
     /// Pass 1: register struct / enum declarations into the program-global tables under their

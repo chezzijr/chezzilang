@@ -2027,6 +2027,37 @@ impl Vm {
         }
     }
 
+    /// The name the module `index` gives compile-time slot `slot`, if any.
+    pub(super) fn global_slot_name(&self, module: GcRef, slot: u32) -> Option<String> {
+        match self.heap.get(module) {
+            Obj::Module(m) => m
+                .index
+                .iter()
+                .find(|&(_, &i)| i == slot)
+                .map(|(n, _)| n.to_string()),
+            _ => None,
+        }
+    }
+
+    /// TICKET-183 — the fault for a read of a module global whose let has not run yet (`v` is the
+    /// slot's `Value::uninit` marker, which carries the let's line). CPython's `NameError`.
+    pub(super) fn uninit_read_err(
+        &self,
+        home: GcRef,
+        slot: u32,
+        v: Value,
+        span: Span,
+    ) -> RuntimeError {
+        let name = self
+            .global_slot_name(home, slot)
+            .unwrap_or_else(|| format!("global#{slot}"));
+        let line = v.uninit_line();
+        self.err(
+            format!("'{name}' is read before its initialization at line {line}"),
+            span,
+        )
+    }
+
     /// M19 Phase 2b — write a module global by compile-time slot (`DefineGlobalSlot`/`SetGlobalSlot`).
     pub(super) fn set_global_slot(&mut self, module: GcRef, slot: u32, value: Value) {
         // W6-19 — a WRITE can be a task's FIRST module-global access (`fn worker(): g = 99`), and on a

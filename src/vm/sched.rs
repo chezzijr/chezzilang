@@ -5916,6 +5916,9 @@ impl Vm {
         if self.walk_base + depth > MAX_STRUCTURAL_DEPTH {
             return Err(self.depth_exceeded_err(Span::default()));
         }
+        if v.is_uninit() {
+            return Ok(SnapValue::Uninit(v.uninit_line()));
+        }
         let h = match v.as_obj() {
             Some(h) => h,
             // A scalar (inline Int/Bool/Nil) or a boxed float (Float tag) is always sendable — never
@@ -6389,6 +6392,7 @@ impl Vm {
             })),
             // Re-alloc a fresh `Obj::Builtin` from the carried name (pure code, no state to share).
             SnapValue::Builtin(name) => Value::obj(self.heap.alloc(Obj::Builtin(name.clone()))),
+            SnapValue::Uninit(line) => Value::uninit(*line),
             // Re-alloc from the SAME shared `Arc<Cffi>` — no re-dlopen (shared address space).
             SnapValue::Cffi(c) => Value::obj(self.heap.alloc(Obj::Cffi(Arc::clone(c)))),
             SnapValue::List(xs) => {

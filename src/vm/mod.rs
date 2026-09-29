@@ -1858,6 +1858,9 @@ enum SnapValue {
     /// A first-class universe builtin fn (`print`/`ord`/`chr`/`panic`) — SENDABLE (pure code). Carries
     /// only the name; replayed as a fresh `Obj::Builtin`.
     Builtin(Box<str>),
+    /// TICKET-183 — an uninitialized let slot (its let had not run at the spawn); replays to
+    /// `Value::uninit(line)`, so the task's read faults like the parent's would.
+    Uninit(u32),
     /// A dynamic C-ABI FFI fn — shares its `Arc<Cffi>` to the worker (same address space; no
     /// re-dlopen). `Cffi` is `Send + Sync`, so the Arc crosses the OS-thread boundary safely.
     Cffi(Arc<crate::native::cffi::Cffi>),
