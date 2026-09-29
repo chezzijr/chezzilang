@@ -61,6 +61,8 @@ impl Checker {
             closure_literal_writes: HashMap::new(),
             written_captures: Vec::new(),
             module_global_lets: std::collections::HashSet::new(),
+            unreached_globals: HashSet::new(),
+            seeded_globals: HashSet::new(),
             functions: HashMap::new(),
             fn_write_scopes: Vec::new(),
             local_fn_names: std::collections::HashSet::new(),
@@ -619,7 +621,8 @@ impl Checker {
         let mut names: Vec<String> = self
             .scopes
             .iter()
-            .flat_map(|sc| sc.keys())
+            .enumerate()
+            .flat_map(|(i, sc)| sc.keys().filter(move |n| self.scope_has(i, n)))
             .chain(self.functions.keys())
             .cloned()
             .collect();
@@ -1595,6 +1598,8 @@ impl Checker {
         // builtin (`f := print`) from a same-named module global used before its definition line (a
         // use-before-def error). Mirrors the compiler's `collect_globals` top-level `Let` sweep.
         self.module_global_lets.clear();
+        self.unreached_globals.clear();
+        self.seeded_globals.clear();
         for s in stmts {
             if let StmtKind::Let { names, .. } = &s.kind {
                 for n in names {
@@ -2478,12 +2483,8 @@ impl Checker {
     /// captured by a nested fn stays const inside the closure body — the enclosing scope is still on
     /// the stack, so this resolves through it.
     pub(super) fn is_const_decl(&self, name: &str) -> bool {
-        for (vars, consts) in self.scopes.iter().zip(self.const_decls.iter()).rev() {
-            if vars.contains_key(name) {
-                return consts.contains(name);
-            }
-        }
-        false
+        self.owning_scope(name)
+            .is_some_and(|i| self.const_decls[i].contains(name))
     }
     pub(super) fn declare(&mut self, name: &str, ty: Ty) {
         // TICKET-139 (W14-2) — a same-scope re-declaration can share the runtime slot, so it counts
@@ -2528,7 +2529,8 @@ impl Checker {
         }
     }
     pub(super) fn lookup(&self, name: &str) -> Option<Ty> {
-        self.scopes.iter().rev().find_map(|s| s.get(name).cloned())
+        self.owning_scope(name)
+            .map(|i| self.scopes[i][name].clone())
     }
     /// TICKET-089 — `e` is a NULLARY read of a `Shared`/`RwShared`/`Atomic` box bound to a bare name
     /// (`s.get()`, `r.get()`, `a.load()`): the value it returns is a deep copy, so a write to it is
@@ -2571,21 +2573,27 @@ impl Checker {
     /// and overwrite the first scope that owns `name`. Returns the scope index written (so the
     /// flow-sensitivity snapshot/restore barrier can revert THIS scope's binding precisely).
     pub(super) fn repin(&mut self, name: &str, ty: Ty) -> Option<usize> {
-        for i in (0..self.scopes.len()).rev() {
-            if self.scopes[i].contains_key(name) {
-                self.scopes[i].insert(name.to_string(), ty.clone());
-                self.propagate_alias_pin(i, name, &ty);
-                return Some(i);
-            }
-        }
-        None
+        let i = self.owning_scope(name)?;
+        self.scopes[i].insert(name.to_string(), ty.clone());
+        self.propagate_alias_pin(i, name, &ty);
+        Some(i)
     }
-    /// TICKET-032 A1 — resolve `name`'s OWNING scope (the reverse walk `repin`/`drop_empty_site`
-    /// already spell inline).
+    /// Does scope `i` hold a binding of `name` visible from here? The ONE raw membership test over
+    /// `scopes` (TICKET-183). A module global seeded before any body is walked
+    /// (`seed_module_globals`) is visible in every fn/closure body, but a top-level statement sees
+    /// it only once the walk reaches its first let — module scope is order-free for bodies and
+    /// lexical for statements.
+    pub(super) fn scope_has(&self, i: usize, name: &str) -> bool {
+        self.scopes[i].contains_key(name)
+            && !(i == 0 && !self.in_fn_body && self.unreached_globals.contains(name))
+    }
+    /// Which scope owns `name` (innermost binding wins, shadowing-aware)? The ONE innermost-first
+    /// walk over `scopes` (TICKET-183): every "which scope owns this name" question calls it, so the
+    /// top-level lexical rule in [`Checker::scope_has`] applies to all of them.
     pub(super) fn owning_scope(&self, name: &str) -> Option<usize> {
         (0..self.scopes.len())
             .rev()
-            .find(|&i| self.scopes[i].contains_key(name))
+            .find(|&i| self.scope_has(i, name))
     }
     /// TICKET-032 A1 — record that `alias` (in `alias_scope`) and `src` name the SAME runtime
     /// collection. Self-referential and duplicate pairs are dropped.
@@ -2767,9 +2775,7 @@ impl Checker {
     /// carrier binding (only `check_assign`'s write path does that) — W8-46 measured that as a false
     /// rejection of the read-only shape (`e := Box.Empty` / `a: Box[int] = e` / `b: Box[str] = e`).
     pub(super) fn drop_empty_site(&mut self, name: &str, shape: Option<&Ty>) {
-        let owner = (0..self.scopes.len())
-            .rev()
-            .find(|&i| self.scopes[i].contains_key(name));
+        let owner = self.owning_scope(name);
         if let Some(owner) = owner {
             self.empty_coll_sites
                 .retain(|(o, n, _)| !(*o == owner && n == name));
@@ -2954,12 +2960,8 @@ impl Checker {
     /// Is `name`'s nearest binding a `for`-loop variable? Resolves to the binding's defining scope
     /// so an inner `:=` shadow (a fresh local) is correctly reported as not-a-loop-var.
     pub(super) fn is_loop_var(&self, name: &str) -> bool {
-        for i in (0..self.scopes.len()).rev() {
-            if self.scopes[i].contains_key(name) {
-                return self.loop_vars[i].contains(name);
-            }
-        }
-        false
+        self.owning_scope(name)
+            .is_some_and(|i| self.loop_vars[i].contains(name))
     }
     /// Is `name` a binding **captured** by an enclosing `spawn:` task — i.e. defined in a local
     /// scope below the innermost task's floor? Such bindings are read-only inside the task body
@@ -2969,12 +2971,7 @@ impl Checker {
         let Some(&floor) = self.capture_floors.last() else {
             return false;
         };
-        for i in (0..self.scopes.len()).rev() {
-            if self.scopes[i].contains_key(name) {
-                return i < floor;
-            }
-        }
-        false
+        self.owning_scope(name).is_some_and(|i| i < floor)
     }
     /// Like [`is_captured`], but excludes module-level (scope 0) bindings — imports and top-level
     /// declarations are globals resolvable identically in every task (like free functions), not
@@ -2985,12 +2982,7 @@ impl Checker {
         let Some(&floor) = self.capture_floors.last() else {
             return false;
         };
-        for i in (0..self.scopes.len()).rev() {
-            if self.scopes[i].contains_key(name) {
-                return i > 0 && i < floor;
-            }
-        }
-        false
+        self.owning_scope(name).is_some_and(|i| i > 0 && i < floor)
     }
 
     /// W8-3 — record (or clear) the airlock-staleness taint for the binding an assignment TARGET
@@ -3355,12 +3347,7 @@ impl Checker {
     /// than a local/param shadow? Used by the from-imported-global rebind gate, so a fn-local `:=`
     /// shadow of an imported name stays assignable.
     pub(super) fn resolves_at_module_scope(&self, name: &str) -> bool {
-        for i in (0..self.scopes.len()).rev() {
-            if self.scopes[i].contains_key(name) {
-                return i == 0;
-            }
-        }
-        false
+        self.owning_scope(name) == Some(0)
     }
 
     // ===== B3.3 (Task 2a): capture-sendability gate at spawn callee/arg sites =====
@@ -3379,14 +3366,10 @@ impl Checker {
     ) -> Vec<Capture> {
         let mut caps = Vec::new();
         for name in free {
-            let mut resolved = None;
-            for i in (0..self.scopes.len()).rev() {
-                if let Some(ty) = self.scopes[i].get(name) {
-                    resolved = Some((i, ty.clone()));
-                    break;
-                }
-            }
-            let Some((i, ty)) = resolved else { continue };
+            let Some(i) = self.owning_scope(name) else {
+                continue;
+            };
+            let ty = self.scopes[i][name.as_str()].clone();
             // Scope 0 = module globals: read-only across tasks, NOT a per-task capture (PITFALL —
             // a module-global `ref` must never be gated).
             if i == 0 || self.sendable(&ty) {

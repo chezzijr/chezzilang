@@ -1535,10 +1535,12 @@ impl Checker {
     /// scan already entered it); a child of any other node (a call argument under a `+`) starts its
     /// own tree. Each node is scanned at most once, so the check is linear even on a
     /// `MAX_AST_DEPTH` chain. Must not touch `ret_coerce_sink` (the inner fn takes it first).
+    /// A walk with `inferring_ret` set rolls back its diagnostics and `const_overflow_seen`, so it
+    /// skips the scan and the real walk reports each overflow once (TICKET-183).
     pub(super) fn infer_kind(&mut self, expr: &Expr) -> Ty {
         let covered = self.arith_parent;
         let is_arith = matches!(expr.kind, ExprKind::Unary { .. } | ExprKind::Binary { .. });
-        if is_arith && !covered {
+        if is_arith && !covered && !self.inferring_ret {
             let mut found = Vec::new();
             crate::ast::const_int_scan(expr, &mut self.const_scan_visits, &mut found);
             for (sp, op) in found {
@@ -1764,9 +1766,8 @@ impl Checker {
                 // so an intervening inner fn/method `check_fn_body` seam doesn't finalize it prematurely
                 // (correctness-0). Fall back to the innermost scope if the binding isn't declared yet
                 // (a decl-site hover recorded before `declare`) — at top level that is the module scope.
-                let owning = (0..self.scopes.len())
-                    .rev()
-                    .find(|&i| self.scopes[i].contains_key(name))
+                let owning = self
+                    .owning_scope(name)
                     .unwrap_or(self.scopes.len().saturating_sub(1));
                 self.hover_pending = Some((owning, name.to_string(), kind, doc));
             } else {
@@ -1881,10 +1882,7 @@ impl Checker {
                     // Only a TRUE module-top-level binding (resolves at scope 0) owns its `name_docs`
                     // entry; a shadowing param/local of the same name has no doc of its own and must
                     // NOT borrow the global's (`name_docs` is keyed by bare name).
-                    let at_top_level = (0..self.scopes.len())
-                        .rev()
-                        .find(|&i| self.scopes[i].contains_key(name))
-                        == Some(0);
+                    let at_top_level = self.owning_scope(name) == Some(0);
                     let doc = if at_top_level {
                         self.name_docs.get(name).cloned()
                     } else {
@@ -2399,6 +2397,24 @@ impl Checker {
             );
         }
         if let Some(ty) = self.lookup(name) {
+            // TICKET-183 — a body reads a module global declared below it through the type
+            // `seed_module_globals` gave it. An `Unknown` in that type (an un-annotated empty
+            // collection, a value of un-inferable type) is pinned by walk-order code this body cannot
+            // see, so decline rather than guess: ask for an annotation.
+            if self.in_fn_body
+                && !self.inferring_ret
+                && self.unreached_globals.contains(name)
+                && self.owning_scope(name) == Some(0)
+                && (ty.is_unknown() || contains_unknown_in_slot(&ty))
+            {
+                self.error(
+                    span,
+                    format!(
+                        "'{name}' is declared below this function and its type is not known here ({ty}) -- annotate its declaration (`{name}: <type> = ...`)"
+                    ),
+                );
+                return Ty::Unknown;
+            }
             // …and only when the read actually RESOLVED to the module-global slot the import fills.
             // `imported_values`/`Ty::Module` are keyed by BARE NAME and say nothing about the scope
             // the read resolved in, but `lookup` walks innermost-first: a parameter, fn-local `:=`,

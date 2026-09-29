@@ -2026,6 +2026,13 @@ struct Checker {
     /// falls through to the same `unknown name` error, keeping the VM (pre-slotted `nil`) and the
     /// interp (source-order env) from diverging. Rebuilt at the start of each `check_module`.
     module_global_lets: std::collections::HashSet<String>,
+    /// TICKET-183 — seeded module globals (`seed_module_globals`) whose FIRST top-level let the
+    /// current walk has not reached. [`Checker::scope_has`] hides them from top-level statements
+    /// (lexical) while every fn/closure body sees them (order-free). The `Let` arm removes a name at
+    /// its first let. Rebuilt at the start of each `check_module`.
+    unreached_globals: HashSet<String>,
+    /// TICKET-183 — every module global `seed_module_globals` typed before any body is walked.
+    seeded_globals: HashSet<String>,
     /// Per-scope set of names declared `const T` (mirrors `scopes` index-for-index). A const binding
     /// is immutable: `check_assign` rejects any later reassignment of the name. Compile-time-only
     /// (freezes the NAME; the object stays mutable — shallow). Cleared on re-declaration by `declare`

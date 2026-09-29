@@ -222,12 +222,25 @@ impl Checker {
     /// also produced by non-recursive paths (e.g. `return x[0]` of an empty-collection literal) and
     /// by already-errored bodies. Rejecting the genuinely-un-inferable recursive case soundly needs
     /// call-graph cycle detection; tracked as a follow-up gap.
+    ///
+    /// TICKET-183 — the fixpoint is JOINT with the module globals: a body may read a top-level
+    /// `let` declared anywhere in the module, so every let-only global is typed here, before any
+    /// body is walked, and in dependency order (a global typed from a call waits on that callee's
+    /// return, which may itself read another global). `seed_module_globals` writes four facts into
+    /// scope 0 — type, `const`, keyword certainty (`kw_certain`) and closure writes
+    /// (`written_captures`) — and `type_globals_pass` refines the type alongside each return pass.
+    /// A global left `Unknown` is reported by `report_untyped_globals` (a named cycle or "annotate
+    /// it").
     pub(super) fn infer_returns(&mut self, stmts: &[Stmt]) {
-        // Bound: each productive pass resolves at least one more `Unknown`→concrete; `+1` lets the
-        // final pass confirm no change (the fixpoint). A non-productive pass breaks the loop early.
-        let cap = self.count_uninferred(stmts) + 1;
+        self.seed_module_globals(stmts);
+        // Bound: each productive pass resolves at least one more `Unknown`→concrete (a return or a
+        // global); `+1` lets the final pass confirm no change (the fixpoint). A non-productive pass
+        // breaks the loop early.
+        let cap = self.count_uninferred(stmts) + self.seeded_globals.len() + 1;
         for _ in 0..cap {
-            if !self.infer_returns_pass(stmts, false) {
+            let a = self.infer_returns_pass(stmts, false);
+            let b = self.type_globals_pass(stmts);
+            if !a && !b {
                 break;
             }
         }
@@ -238,6 +251,314 @@ impl Checker {
         // the passes above stay permissive: a callee's ret must be free to be `Unknown` mid-fixpoint
         // (it resolves on a later pass) without being prematurely rejected or E-defaulted.
         self.infer_returns_pass(stmts, true);
+        // Global types read the finalized returns.
+        self.type_globals_pass(stmts);
+        // Closure writes: a body above `h := fn(): ...` calling `h()` must see which captures `h`
+        // writes. The walk above recorded them per closure literal (`closure_literal_writes` is not
+        // in `DiagMark`, so the rollback kept them).
+        for (s, firsts) in self.seeded_first_lets(stmts) {
+            if let StmtKind::Let { names, value, .. } = &s.kind
+                && names.len() == 1
+                && firsts.len() == 1
+                && let ExprKind::Closure { body, .. } = &value.kind
+                && let Some(writes) = self
+                    .closure_literal_writes
+                    .get(&(self.graph_module_idx, body.span))
+                && !writes.is_empty()
+            {
+                let mut writes = writes.clone();
+                writes.sort();
+                self.written_captures[0].insert(names[0].clone(), writes);
+            }
+        }
+        self.report_untyped_globals(stmts);
+    }
+
+    /// TICKET-183 — each top-level `let` that is the FIRST let of at least one seeded global, with
+    /// the index of each such name in the let's `names`, in source order.
+    fn seeded_first_lets<'a>(&self, stmts: &'a [Stmt]) -> Vec<(&'a Stmt, Vec<usize>)> {
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut out = Vec::new();
+        for s in stmts {
+            let StmtKind::Let { names, .. } = &s.kind else {
+                continue;
+            };
+            let firsts: Vec<usize> = (0..names.len())
+                .filter(|&i| {
+                    seen.insert(names[i].as_str()) && self.seeded_globals.contains(&names[i])
+                })
+                .collect();
+            if !firsts.is_empty() {
+                out.push((s, firsts));
+            }
+        }
+        out
+    }
+
+    /// TICKET-183 — seed scope 0 with every let-only module global before any body is walked, so a
+    /// body sees a global declared below it. Writes three of the four per-binding facts the `Let` arm
+    /// records (type from the annotation or `Unknown`, `const`, keyword certainty); the fixpoint
+    /// refines the type and `infer_returns` adds the closure writes. Never calls `declare` (it would
+    /// untaint the import, const and alias tables and mark `kw_written`). A name another hoisted
+    /// binding owns (import, fn, extern, native, type, reserved builtin or ctor) is not seeded: its
+    /// slot holds the hoisted value until the let runs (W7-42).
+    pub(super) fn seed_module_globals(&mut self, stmts: &[Stmt]) {
+        let mut hoisted: HashSet<&str> = HashSet::new();
+        let mut consts: HashSet<&str> = HashSet::new();
+        for s in stmts {
+            match &s.kind {
+                StmtKind::Struct { name, .. }
+                | StmtKind::Enum { name, .. }
+                | StmtKind::NewType { name, .. }
+                | StmtKind::TypeAlias { name, .. }
+                | StmtKind::Protocol { name, .. } => {
+                    hoisted.insert(name);
+                }
+                StmtKind::Native(d) => {
+                    hoisted.insert(&d.name);
+                }
+                StmtKind::Extern { fns, .. } => hoisted.extend(fns.iter().map(|f| f.name.as_str())),
+                StmtKind::Let {
+                    names,
+                    is_const: true,
+                    ..
+                } => consts.extend(names.iter().map(String::as_str)),
+                _ => {}
+            }
+        }
+        let mut seen: HashSet<&str> = HashSet::new();
+        for s in stmts {
+            let StmtKind::Let {
+                names, ty, value, ..
+            } = &s.kind
+            else {
+                continue;
+            };
+            for n in names {
+                if n == "_"
+                    || !seen.insert(n.as_str())
+                    || hoisted.contains(n.as_str())
+                    || self.scopes[0].contains_key(n)
+                    || self.functions.contains_key(n)
+                    || self.bare_types.contains_key(n)
+                    || is_reserved_module_bind(n)
+                {
+                    continue;
+                }
+                let mark = self.diag_mark();
+                let t = match ty {
+                    Some(t) if names.len() == 1 => self.resolve_type(t, s.span),
+                    _ => Ty::Unknown,
+                };
+                self.diag_rollback(mark);
+                // After the rollback: `DiagMark` restores `kw_certain`.
+                self.seeded_globals.insert(n.clone());
+                self.unreached_globals.insert(n.clone());
+                self.scopes[0].insert(n.clone(), t);
+                if consts.contains(n.as_str()) {
+                    self.const_decls[0].insert(n.clone());
+                }
+                if self.let_holds_one_known_fn(names, ty, value) {
+                    self.kw_certain.insert((0, n.clone()));
+                }
+            }
+        }
+    }
+
+    /// TICKET-183 — one speculative walk over the first let of every seeded global, in source
+    /// order, writing each value's type into scope 0. Top-level lexical visibility is replayed (a
+    /// let's value sees the globals above it; a closure body sees them all). Returns `true` iff any
+    /// global's type changed (drives the joint fixpoint in `infer_returns`).
+    pub(super) fn type_globals_pass(&mut self, stmts: &[Stmt]) -> bool {
+        let mut changed = false;
+        let mark = self.diag_mark();
+        let saved_flag = std::mem::replace(&mut self.inferring_ret, true);
+        self.ret_memo.clear();
+        let saved_unreached = self.unreached_globals.clone();
+        let firsts: std::collections::HashMap<Span, Vec<usize>> = self
+            .seeded_first_lets(stmts)
+            .into_iter()
+            .map(|(s, f)| (s.span, f))
+            .collect();
+        for s in stmts {
+            let StmtKind::Let {
+                names, ty, value, ..
+            } = &s.kind
+            else {
+                continue;
+            };
+            if let Some(idxs) = firsts.get(&s.span) {
+                let (annotated, val_ty) = self.let_value_ty(names, ty, value, s.span);
+                for &i in idxs {
+                    let t = if names.len() == 1 {
+                        annotated.clone().unwrap_or_else(|| val_ty.clone())
+                    } else {
+                        match &val_ty {
+                            Ty::Tuple(ts) if ts.len() == names.len() => ts[i].clone(),
+                            _ => Ty::Unknown,
+                        }
+                    };
+                    if self.scopes[0].get(&names[i]) != Some(&t) {
+                        self.scopes[0].insert(names[i].clone(), t);
+                        changed = true;
+                    }
+                }
+            }
+            for n in names {
+                self.unreached_globals.remove(n);
+            }
+        }
+        self.unreached_globals = saved_unreached;
+        self.ret_memo.clear();
+        self.inferring_ret = saved_flag;
+        self.diag_rollback(mark);
+        changed
+    }
+
+    /// TICKET-183 — report each seeded, single-name, un-annotated global whose type is still
+    /// `Unknown` after the joint fixpoint. `x := f()` where `f`'s return is computed from `x` is a
+    /// named initialization cycle; anything else asks for an annotation. A let whose value itself
+    /// errors is skipped: the walk reports that error.
+    fn report_untyped_globals(&mut self, stmts: &[Stmt]) {
+        let saved_unreached = self.unreached_globals.clone();
+        let saved_flag = std::mem::replace(&mut self.inferring_ret, true);
+        let firsts: HashSet<Span> = self
+            .seeded_first_lets(stmts)
+            .into_iter()
+            .map(|(s, _)| s.span)
+            .collect();
+        let mut reports: Vec<(Span, String)> = Vec::new();
+        for s in stmts {
+            let StmtKind::Let {
+                names, ty, value, ..
+            } = &s.kind
+            else {
+                continue;
+            };
+            if firsts.contains(&s.span)
+                && names.len() == 1
+                && ty.is_none()
+                && self.scopes[0].get(&names[0]) == Some(&Ty::Unknown)
+            {
+                let x = &names[0];
+                let mark = self.diag_mark();
+                self.ret_memo.clear();
+                self.let_value_ty(names, ty, value, s.span);
+                let errored = self.errors.len() > mark.errors;
+                self.diag_rollback(mark);
+                if !errored {
+                    reports.push((s.span, self.untyped_global_message(stmts, x, value)));
+                }
+            }
+            for n in names {
+                self.unreached_globals.remove(n);
+            }
+        }
+        self.ret_memo.clear();
+        self.inferring_ret = saved_flag;
+        self.unreached_globals = saved_unreached;
+        for (span, msg) in reports {
+            self.error(span, msg);
+        }
+    }
+
+    /// The message for an `Unknown`-typed seeded global `x` (see `report_untyped_globals`): probe
+    /// whether `x := f()`'s callee return depends on `x` by typing `x` as a fresh parameter and
+    /// re-inferring `f`.
+    fn untyped_global_message(&mut self, stmts: &[Stmt], x: &str, value: &Expr) -> String {
+        if let ExprKind::Call { callee, .. } = &value.kind
+            && let ExprKind::Ident(f) = &callee.kind
+            && self.local_fn_names.contains(f)
+            && let Some(sig) = self.functions.get(f).cloned()
+            && sig.ret == Ty::Unknown
+            && let Some(decl) = stmts.iter().find_map(|s| match &s.kind {
+                StmtKind::Fn(d) if &d.name == f => Some(d),
+                _ => None,
+            })
+        {
+            let probe = format!("${x}");
+            self.scopes[0].insert(x.to_string(), Ty::Param(probe.clone()));
+            let mark = self.diag_mark();
+            let r = self.infer_fn_ret(decl, None, &sig, false);
+            self.diag_rollback(mark);
+            self.scopes[0].insert(x.to_string(), Ty::Unknown);
+            let dependent = subst(&r, &HashMap::from([(probe, Ty::Nil)])) != r;
+            if dependent {
+                return format!(
+                    "initialization cycle: the type of '{x}' comes from '{f}()', and '{f}' returns a value computed from '{x}' -- annotate '{x}' (`{x}: T = {f}()`) or give '{f}' a return type"
+                );
+            }
+        }
+        format!("cannot infer the type of '{x}' -- annotate it (`{x}: T = ...`)")
+    }
+
+    /// The `Let` arm's value typing, shared with the TICKET-183 globals pass: resolve the annotation
+    /// (once — `resolve_type` reports as a side effect) and infer the value against it. Returns
+    /// `(annotated, val_ty)`.
+    pub(super) fn let_value_ty(
+        &mut self,
+        names: &[String],
+        ty: &Option<Type>,
+        value: &Expr,
+        span: Span,
+    ) -> (Option<Ty>, Ty) {
+        // `resolve_type` REPORTS as a side effect of resolving (`unknown type 'X'`, the
+        // Map-key/Set-element Hashable ban at `sig.rs:1753-1767`), so the annotation must be
+        // resolved exactly once per statement or every diagnostic it emits doubles. A
+        // destructuring `let` cannot carry an annotation (`a, b: T = ...` is the parse error
+        // `expected '=' after a multi-target assignment list`), so `names.len() == 1` holds
+        // whenever `ty` is `Some`. `hover_record_at` is first-write-wins, so the second call
+        // this replaces never contributed a hover record.
+        let annotated: Option<Ty> = match ty {
+            Some(t) if names.len() == 1 => Some(self.resolve_type(t, span)),
+            _ => None,
+        };
+        // A closure bound to a `fn`-typed annotation is inferred in checking-mode (source #1):
+        // resolve the annotation first so its unannotated params bind to the slot's param
+        // types. Only the single-name, `fn`-typed case (destructuring never binds one).
+        // Otherwise ordinary bottom-up inference.
+        let val_ty = match &annotated {
+            Some(expected) if matches!(value.kind, ExprKind::Closure { .. }) => {
+                if matches!(expected, Ty::Func { .. }) {
+                    let expected = expected.clone();
+                    self.infer_arg(value, Some(&expected))
+                } else {
+                    self.infer_value(value)
+                }
+            }
+            // Expected-type checking-mode for a NON-closure value bound to an annotation:
+            // thread the annotation as a hint into the value's inference so a generic
+            // ctor / generic fn-call pre-seeds its type params from it — `a: Heap[int] =
+            // Heap([], fn(x, y): x < y)` pins `T=int`, which then pins the comparator's
+            // params. `infer_call` clears the hint, but pair the set with an immediate clear
+            // so a non-call value never leaks it into the next statement.
+            Some(expected) => {
+                self.expected_hint = Some(expected.clone());
+                let vt = self.infer_value(value);
+                self.expected_hint = None;
+                vt
+            }
+            None => self.infer_value(value),
+        };
+        (annotated, val_ty)
+    }
+
+    /// TICKET-139 (W14-2) — an unannotated single-name `:=` of a closure literal or of a top-level
+    /// user fn (no local shadow) holds exactly ONE known function, so its labels are certain. Shared
+    /// by the `Let` arm and `seed_module_globals` (TICKET-183).
+    pub(super) fn let_holds_one_known_fn(
+        &self,
+        names: &[String],
+        ty: &Option<Type>,
+        value: &Expr,
+    ) -> bool {
+        names.len() == 1
+            && ty.is_none()
+            && match &value.kind {
+                ExprKind::Closure { .. } => true,
+                ExprKind::Ident(n) => self.lookup(n).is_none() && self.functions.contains_key(n),
+                _ => false,
+            }
     }
 
     /// Count the un-annotated free fns + struct/enum methods that `infer_returns` infers — the
@@ -2159,44 +2480,18 @@ impl Checker {
                 ..
             } => {
                 let is_const = *is_const;
-                // `resolve_type` REPORTS as a side effect of resolving (`unknown type 'X'`, the
-                // Map-key/Set-element Hashable ban at `sig.rs:1753-1767`), so the annotation must be
-                // resolved exactly once per statement or every diagnostic it emits doubles. A
-                // destructuring `let` cannot carry an annotation (`a, b: T = ...` is the parse error
-                // `expected '=' after a multi-target assignment list`), so `names.len() == 1` holds
-                // whenever `ty` is `Some`. `hover_record_at` is first-write-wins, so the second call
-                // this replaces never contributed a hover record.
-                let annotated: Option<Ty> = match ty {
-                    Some(t) if names.len() == 1 => Some(self.resolve_type(t, span)),
-                    _ => None,
-                };
-                // A closure bound to a `fn`-typed annotation is inferred in checking-mode (source #1):
-                // resolve the annotation first so its unannotated params bind to the slot's param
-                // types. Only the single-name, `fn`-typed case (destructuring never binds one).
-                // Otherwise ordinary bottom-up inference.
-                let val_ty = match &annotated {
-                    Some(expected) if matches!(value.kind, ExprKind::Closure { .. }) => {
-                        if matches!(expected, Ty::Func { .. }) {
-                            let expected = expected.clone();
-                            self.infer_arg(value, Some(&expected))
-                        } else {
-                            self.infer_value(value)
-                        }
+                let (annotated, val_ty) = self.let_value_ty(names, ty, value, span);
+                // TICKET-183: a seeded module global's first let. `seed_module_globals` put its type
+                // (and `const` mark) in scope 0 so bodies could see it; remove them here so
+                // `reject_redeclare`, `declare` and `check_destructure` see exactly the state they
+                // would without the seed, and from here on top-level statements see the let's own
+                // binding.
+                for n in names {
+                    if self.scopes.len() == 1 && self.unreached_globals.remove(n) {
+                        self.scopes[0].remove(n);
+                        self.const_decls[0].remove(n);
                     }
-                    // Expected-type checking-mode for a NON-closure value bound to an annotation:
-                    // thread the annotation as a hint into the value's inference so a generic
-                    // ctor / generic fn-call pre-seeds its type params from it — `a: Heap[int] =
-                    // Heap([], fn(x, y): x < y)` pins `T=int`, which then pins the comparator's
-                    // params. `infer_call` clears the hint, but pair the set with an immediate clear
-                    // so a non-call value never leaks it into the next statement.
-                    Some(expected) => {
-                        self.expected_hint = Some(expected.clone());
-                        let vt = self.infer_value(value);
-                        self.expected_hint = None;
-                        vt
-                    }
-                    None => self.infer_value(value),
-                };
+                }
                 if names.len() > 1 {
                     // destructuring let `a, b := expr` — `expr` must be a tuple of matching arity.
                     self.check_destructure(names, name_spans, &val_ty, value.span);
@@ -2302,18 +2597,8 @@ impl Checker {
                     None
                 };
                 self.reject_redeclare(name, &declared, span);
-                // TICKET-139 (W14-2) — an unannotated single-name `:=` of a closure literal or of a
-                // top-level user fn (no local shadow) holds exactly ONE known function, so its
-                // labels are certain. Computed BEFORE `declare` so `h := h` cannot see itself.
-                let one_known_fn = names.len() == 1
-                    && ty.is_none()
-                    && match &value.kind {
-                        ExprKind::Closure { .. } => true,
-                        ExprKind::Ident(n) => {
-                            self.lookup(n).is_none() && self.functions.contains_key(n)
-                        }
-                        _ => false,
-                    };
+                // Computed BEFORE `declare` so `h := h` cannot see itself.
+                let one_known_fn = self.let_holds_one_known_fn(names, ty, value);
                 self.declare(name, declared);
                 if one_known_fn && let Some(s) = self.owning_scope(name) {
                     self.kw_certain.insert((s, name.to_string()));
@@ -2530,12 +2815,9 @@ impl Checker {
                         .into_iter()
                         .collect();
                         free.sort();
-                        let local = free.iter().find(|n| {
-                            self.scopes
-                                .iter()
-                                .rposition(|s| s.contains_key(n.as_str()))
-                                .is_some_and(|i| i > 0)
-                        });
+                        let local = free
+                            .iter()
+                            .find(|n| self.owning_scope(n).is_some_and(|i| i > 0));
                         if let Some(n) = local {
                             self.error(
                                 def.span,
