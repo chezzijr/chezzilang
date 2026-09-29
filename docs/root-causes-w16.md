@@ -93,6 +93,10 @@ only.
 
 ## Family 2 — Blocking contexts (C1, X1, X2)
 
+Status: fixed by TICKET-181 (`4767d5b3`..`e91fa46d`, docs in the commit after): one table
+(`src/vm/block.rs`, `block::mode`), one demote bracket (`Vm::block_enter`) and one waiter registry
+(`SchedCore::waiters`); grid `tests/blocking_context_grid.rs::grid_every_op_in_every_context`.
+
 **Mechanism.** No single "blocking context" exists. Each blocking operation derives "may I block here,
 and how?" from `mn`, `native_reentry`, `eager_core`, `deferring` and `holds_width` in its own order —
 at least 11 distinct predicates (`can_block_in_place`, `owns_os_thread`, `is_counted_party`,

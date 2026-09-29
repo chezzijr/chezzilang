@@ -2821,3 +2821,21 @@ JIT code and FFI pointers valid). The only GC lever this data supports is **gene
 per heap** (cheaper short-lived garbage), worth at most ~5–10% on allocation-heavy scripts — a later,
 measured item, not a JIT prerequisite. The GC work the JIT does need is safepoints + stack maps for
 JIT frames.
+
+## TICKET-181 — the blocking-context table (2026-09-29)
+
+`benches/sched`, `CHEZZI_THREADS=4`, release binaries of base `9b6f85fd` and the branch at
+`e91fa46d`, wall time via `date +%s.%N` (this box has no `/usr/bin/time` and no `hyperfine`, so
+`benches/run.chz` prints `FAILED [...]: hyperfine: command not found` for every row and was not
+run). Base and branch runs are interleaved so both see the same load.
+
+| bench | base median | branch median | delta | runs | load |
+|---|---|---|---|---|---|
+| `send_one_channel` | 1.274 s | 1.311 s | +2.9% | 11 each | 2.76 |
+| `deep_nurseries` | 0.452 s | 0.441 s | −2.4% | 11 each | 2.80 |
+| `body_and_spawn` | 7.414 s | 7.438 s | +0.3% | 5 each | 2.40 |
+
+An earlier non-interleaved pass on base alone measured `send_one_channel` 1.420 s, `deep_nurseries`
+0.412 s and `body_and_spawn` 7.625 s (load 3.3) — the run-to-run spread on this box is about ±7%, so
+none of the deltas above is a measured change. The channel fast path registers nothing: a waiter is
+registered only when a fiber demotes.

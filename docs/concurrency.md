@@ -1293,7 +1293,9 @@ takes a slot back in FIFO order (`src/vm/width.rs`, a per-scheduler width gate).
 runners, like Go's `GOMAXPROCS=1`: a callback spin no longer starves a sibling, a sleeper or a
 cancelling fault. It fires only when a sibling is runnable or queued, so a lone spin costs nothing.
 A gated thread releases its slot around every wait in place (demotes, guard waits, inline nursery
-joins and aborts, inline sleeps, `Executor.shutdown()`, blocking natives). A `Kind::HostWait` native
+joins and aborts, inline sleeps, `Executor.shutdown()`, blocking natives). Since TICKET-181 an
+`Executor.shutdown()` in a fiber also DEMOTES for the join, so the slot promise holds at T=1 too
+(see the "Blocking-context table" section). A `Kind::HostWait` native
 (the `std.io` stdin readers) demotes the worker and gives its slot back for the read, direct or
 inside a callback, so a runnable sibling runs while stdin is withheld, as under Go's `sysmon`.
 
@@ -1358,9 +1360,11 @@ Compare a line SET, or make the program deterministic by construction, before ca
 
 > **`std.net` — exactly where a would-block socket op blocks.** A `spawn`/`parallel:`
 > fiber parks on the netpoller (that is the whole D6 design). A socket op reached
-> where there is no fiber to park **blocks its thread in place** in exactly two contexts — top-level
-> `main` (Go-identical: `ln.Accept()` on the main goroutine blocks until a
-> client arrives) and an M:N worker inside a native callback (which spins a replacement worker first).
+> where there is no fiber to park **blocks its thread in place** in exactly two contexts — a thread
+> that owns itself: `main`, a `main` `defer:`, `main` inside a native callback (Go-identical: `ln.Accept()`
+> on the main goroutine blocks until a client arrives; TICKET-181 widened it to the callback and
+> `defer:` shapes, where CPython and Go block and read) — and an M:N worker inside a native callback
+> (which spins a replacement worker first).
 > Everywhere else — an eager `Executor` job — it returns `Err("<op> would block: an Executor job
 > doesn't own its thread — blocking here would starve every other job and `parallel:` nursery
 > sharing the pool. Do this socket op inside `spawn:` or a `parallel:` nursery instead, where it
@@ -1523,6 +1527,77 @@ stays uninterruptible until its own follow-on. Both remain documented in `docs/s
 a residual of this milestone.
 
 ---
+
+## Blocking-context table
+
+TICKET-181 (wave 16 Family 2). Every blocking op asks ONE table how to block in the running
+context: `block::mode(ctx, spec)` in `src/vm/block.rs`. The context is derived on every call by
+`Vm::block_ctx()` from `mn`, `mn_enlist_sched`, `eager_core`, `native_reentry` and `deferring`
+(never cached). `block::tests::every_cell_matches_the_table` pins every cell, and
+`tests/blocking_context_grid.rs::grid_every_op_in_every_context` runs every op in every context
+at T=1, T=2 and T=0 against the Go answer. Changing a cell means changing `block::mode`, its unit
+test and this table in one commit.
+
+Contexts: **Park** = an M:N fiber with no host frame under it; **Demote** = an M:N fiber inside a
+native callback, `defer:`, generator resume or `Shared.update` closure; **Builder** = the inline
+outermost-`parallel:` builder (`job` = it carries an eager `Executor` core); **PoolJob** = an eager
+`Executor` job; **OwnThread** = `main`, a `main` `defer:`, `main` inside a callback.
+
+Modes: P park the fiber on the op's own bucket; D demote (block in place, hand the runner slot to
+a replacement worker); I block this thread in place; S sleep to the op's own deadline; R refuse
+(the op's documented error or fault).
+
+| wait (`WaitSpec`) | Park | Demote | Builder | Builder `job` | PoolJob | OwnThread | `will_return` |
+|---|---|---|---|---|---|---|---|
+| `recv` (empty) | P | D | R | I | I | I | no |
+| `timer(ms).recv()` | P | D | S | S | S | S | yes |
+| full `send` | P | R | R | I | I | I | no |
+| `wait:` (recv arms) | P | D | R | I | I | I | no |
+| `wait:` with a send arm | P | R | R | I | I | I | no |
+| `wait:` with a timer arm | P | D | S | I | I | I | yes |
+| `wait:` with timer + send arms | P | R | S | I | I | I | yes |
+| `sleep_ms` | P | D | S | S | S | S | yes |
+| blocking native (`fs`, `request`, `process`) | P | D | I | I | I | I | yes |
+| stdin (`io.input`, …) | D | D | D | D | D | D | yes |
+| socket `accept`/`read`/`write` | P | D | R | R | R | I | yes |
+| `net.connect` handshake | P | I | I | R | R | I | yes |
+| `Shared` update guard | D | D | D | D | D | D | no |
+| `Executor.shutdown()` / join | D | D | I | I | I | I | yes |
+| `parallel:` nursery join | P | I | I | I | I | I | no |
+
+**Accounting derives from `will_return`.** A demoted wait that ends on a deadline or an external
+completion is `inflight` (it vetoes the deadlock verdict); every other one registers a waiter in
+the ONE registry `SchedCore::waiters`, and the verdict vetoes while any waiter can still be
+satisfied (`Waiter::satisfiable`: a cancel flag it would honour, or its `PartyWait`). A guard wait
+is never `inflight` (DEC-063). A new blocking shape adds a `PartyWait` arm or a table row, never a
+new list or veto.
+
+**Cells TICKET-181 changed**, each red in the grid before the fix and judged against Go 1.27 at
+`GOMAXPROCS=1` (or CPython where Go has no twin):
+
+1. A timed `wait:` in a Demote context is `inflight` (C1, E1-E4). It faulted `deadlock` at every
+   worker count; Go's `select` with `time.After` in a goroutine callback returns.
+2. A socket op on a thread that owns itself blocks in a callback or `defer:` (X2). It returned
+   `Err("read would block: an Executor job doesn't own its thread …")`; CPython and Go block and
+   read.
+3. An Executor join (`ex.shutdown()`) in a fiber demotes (X1). It held the only runner and hung at
+   T=1; Go and CPython complete.
+4. A `wait:` send arm on a thread that owns itself (or a job) blocks in a callback or `defer:`. It
+   faulted `send on a full channel: deadlock`; Go blocks until a receiver frees the slot.
+5. A `timer(ms).recv()` in a Demote context demotes. It pinned its worker, so at T=1 a sibling it
+   then sent to never ran (`send on a rendezvous channel: deadlock`); Go prints the value.
+6. A blocking native (`request.get`, `fs`, `process`) in a Demote context demotes (F1). It held the
+   runner, so `request.get` to a sibling-served socket timed out at T=1; Go prints `[200]`.
+
+**Deliberate differences from Go**, each a `R` or hang cell of the table:
+
+- A full `send` (or a `wait:` send arm) in a Demote context faults, where Go blocks: the demote
+  loop pops recv queues and cannot yet block a sender (v1 limit).
+- A socket op in an Executor job returns the "doesn't own its thread" `Err`; `connect` there too.
+- An unjudged context (`main` inside a real callback, a job inside a callback) with nothing that
+  can satisfy it HANGS, where Go faults: the verdict declines rather than risk a false fault
+  (DEC-136; `docs/lessons.md` §4). The grid pins it (`recv/main_cb/Nothing` hangs,
+  `recv/main_defer/Nothing` faults).
 
 ## 7. Sendability
 
