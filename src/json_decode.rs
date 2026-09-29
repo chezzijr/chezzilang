@@ -6,7 +6,7 @@
 //! VM needs no type metadata at decode time. Recursive struct targets are therefore rejected
 //! (they would make the descriptor infinite); decode them via the dynamic `Json` enum instead.
 
-use crate::ast::{Field, Type};
+use crate::checker::Ty;
 
 /// A resolved, self-contained description of a type `json.decode` can target.
 #[derive(Debug, Clone, PartialEq)]
@@ -37,125 +37,67 @@ pub enum TypeDescriptor {
     },
 }
 
-/// ROOT REDESIGN — module-aware resolution context for building a decode descriptor. The VM
-/// implements it; it maps a syntactic struct reference (a bare `Named` or a qualified `module.Name`,
-/// resolved *in a given module*) to its program-global IDENTITY KEY + declared fields + declaring
-/// module — so nested field struct types expand in their OWN defining module's scope, never the call
-/// site's. This is why one canonical key kills the whole "decode against the wrong layout" bug class.
-pub trait DecodeEnv {
-    /// Resolve a bare type `name` written in module `module_idx` to its identity key, or `None` if it
-    /// is not a (visible) user struct there. Reserved scalars are handled before this is consulted.
-    fn resolve_bare(&self, module_idx: usize, name: &str) -> Option<String>;
-    /// Resolve a module-qualified `binder.name` written in module `module_idx` to its identity key.
-    fn resolve_qualified(&self, module_idx: usize, binder: &str, name: &str) -> Option<String>;
-    /// The declared fields + declaring-module index for a struct identity `key`, or `None`.
-    fn struct_def(&self, key: &str) -> Option<(usize, &[Field])>;
-    /// The bare display name for a struct identity `key` (`Point` for `dep::Point`).
-    fn display_of(&self, key: &str) -> String;
-}
+/// A struct identity key's declared `(field, type)` list, or `None` for a key with no user layout.
+pub type StructShape<'a> = dyn Fn(&str) -> Option<Vec<(String, Ty)>> + 'a;
 
-/// Build a descriptor for a `json.decode[T]` target type `ty` written in module `call_module`,
-/// resolving every struct reference (and the field types it transitively names) through `env`.
-/// Returns a human-readable error if the type is not decodable (functions, generic/recursive
-/// structs, `Result`, unknown names). `visiting` tracks the (identity-key) struct-expansion stack to
-/// reject recursive targets — two modules' same-named structs are correctly distinct keys.
-pub fn from_type(
-    ty: &Type,
-    call_module: usize,
-    env: &dyn DecodeEnv,
+/// Build the descriptor for a `json.decode[T]` target the checker has already resolved to `ty`.
+/// The checker is the only caller: it reports the `Err` as the diagnostic and records the `Ok` for
+/// the compiler (TICKET-180), so what is accepted and what is lowered is one decision. `shape`
+/// gives a struct identity key's declared field types (`None` for a key with no user layout).
+/// Accepted: scalars, `list`/`tuple`/`map[str,_]`/`Option` of decodables, and non-generic,
+/// non-recursive structs of decodable fields; `visiting` holds the struct-expansion stack.
+/// An `Unknown` anywhere gives an EMPTY `Err`: the checker already reported why, and adds nothing.
+pub fn from_ty(
+    ty: &Ty,
+    shape: &StructShape<'_>,
     visiting: &mut Vec<String>,
 ) -> Result<TypeDescriptor, String> {
+    let sub = |t: &Ty, visiting: &mut Vec<String>| from_ty(t, shape, visiting).map(Box::new);
     match ty {
-        Type::Named { name: n, .. } => match n.as_str() {
-            "int" => Ok(TypeDescriptor::Int),
-            "float" => Ok(TypeDescriptor::Float),
-            "str" => Ok(TypeDescriptor::Str),
-            "bool" => Ok(TypeDescriptor::Bool),
-            _ => {
-                let key = env
-                    .resolve_bare(call_module, n)
-                    .ok_or_else(|| format!("decode: '{n}' is not a decodable type"))?;
-                struct_descriptor(&key, env, visiting)
-            }
-        },
-        Type::Generic(n, args, ..) => match (n.as_str(), args.as_slice()) {
-            ("List", [t]) => Ok(TypeDescriptor::List(Box::new(from_type(
-                t,
-                call_module,
-                env,
-                visiting,
-            )?))),
-            ("Map", [k, v]) => {
-                if !matches!(k, Type::Named { name: s, .. } if s == "str") {
-                    return Err("decode: Map keys must be str, found a non-str key".to_string());
-                }
-                Ok(TypeDescriptor::Map(Box::new(from_type(
-                    v,
-                    call_module,
-                    env,
-                    visiting,
-                )?)))
-            }
-            ("Option", [t]) => Ok(TypeDescriptor::Option(Box::new(from_type(
-                t,
-                call_module,
-                env,
-                visiting,
-            )?))),
-            (other, _) => Err(format!("decode: cannot decode into generic type '{other}'")),
-        },
-        Type::Func { .. } => Err("decode: cannot decode into a function type".to_string()),
-        Type::Tuple(ts) => ts
+        Ty::Unknown => Err(String::new()),
+        Ty::Int => Ok(TypeDescriptor::Int),
+        Ty::Float => Ok(TypeDescriptor::Float),
+        Ty::Str => Ok(TypeDescriptor::Str),
+        Ty::Bool => Ok(TypeDescriptor::Bool),
+        Ty::List(t) => Ok(TypeDescriptor::List(sub(t, visiting)?)),
+        Ty::Option(t) => Ok(TypeDescriptor::Option(sub(t, visiting)?)),
+        Ty::Tuple(ts) => ts
             .iter()
-            .map(|t| from_type(t, call_module, env, visiting))
+            .map(|t| from_ty(t, shape, visiting))
             .collect::<Result<Vec<_>, _>>()
             .map(TypeDescriptor::Tuple),
-        // A module-qualified struct target (`json.decode[geo.Point]`): resolve `module.name` to its
-        // identity key in the call-site module. Generic qualified targets are not decodable.
-        Type::Qualified { module, name, args } => {
-            if args.is_empty() {
-                let key = env
-                    .resolve_qualified(call_module, module, name)
-                    .ok_or_else(|| format!("decode: '{name}' is not a decodable type"))?;
-                struct_descriptor(&key, env, visiting)
-            } else {
-                Err(format!("decode: cannot decode into generic type '{name}'"))
+        Ty::Map(k, v) => {
+            if !matches!(**k, Ty::Str) {
+                return Err(format!("decode: map keys must be str, found {k}"));
             }
+            Ok(TypeDescriptor::Map(sub(v, visiting)?))
         }
+        Ty::Struct(name, args) => {
+            if !args.is_empty() {
+                return Err(format!("decode: cannot decode into generic struct {ty}"));
+            }
+            if visiting.iter().any(|s| s == name) {
+                return Err(format!(
+                    "decode: recursive struct '{name}' is not decodable; use the Json enum instead"
+                ));
+            }
+            let Some(fields) = shape(name) else {
+                return Err(format!("decode: '{name}' is not a decodable type"));
+            };
+            visiting.push(name.clone());
+            let mut descs = Vec::with_capacity(fields.len());
+            for (fname, fty) in &fields {
+                descs.push((fname.clone(), from_ty(fty, shape, visiting)?));
+            }
+            visiting.pop();
+            Ok(TypeDescriptor::Struct {
+                key: name.clone(),
+                display: crate::compiler::bare_display(name),
+                fields: descs,
+            })
+        }
+        other => Err(format!("decode: cannot decode into {other}")),
     }
-}
-
-fn struct_descriptor(
-    key: &str,
-    env: &dyn DecodeEnv,
-    visiting: &mut Vec<String>,
-) -> Result<TypeDescriptor, String> {
-    let (decl_module, fields) = env
-        .struct_def(key)
-        .map(|(m, f)| (m, f.to_vec()))
-        .ok_or_else(|| format!("decode: '{}' is not a decodable type", env.display_of(key)))?;
-    if visiting.iter().any(|s| s == key) {
-        return Err(format!(
-            "decode: recursive struct '{}' is not decodable; use the Json enum instead",
-            env.display_of(key)
-        ));
-    }
-    visiting.push(key.to_string());
-    let mut field_descs = Vec::with_capacity(fields.len());
-    // ROOT REDESIGN — each field's named types expand in THIS struct's DECLARING module, not the call
-    // site's, so a nested `Inner` resolves to the defining module's `Inner` (the nested-collision fix).
-    for f in &fields {
-        field_descs.push((
-            f.name.clone(),
-            from_type(&f.ty, decl_module, env, visiting)?,
-        ));
-    }
-    visiting.pop();
-    Ok(TypeDescriptor::Struct {
-        key: key.to_string(),
-        display: env.display_of(key),
-        fields: field_descs,
-    })
 }
 
 /// The human-readable kind of a parsed `Json` value, named by its enum variant — used in decode

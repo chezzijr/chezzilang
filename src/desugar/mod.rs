@@ -1653,7 +1653,8 @@ impl Ctx<'_> {
     /// The type that `member`, DECLARED in module `m`, ultimately names: itself for a
     /// struct/enum/newtype, or its body's target for a `type` alias — chased through local,
     /// `from`-imported and `module.Type` hops in each declaring module's own scope, capped at 64
-    /// hops like every alias walk. Mirrors the compiler's `alias_member_key`.
+    /// hops like every alias walk. Interim pre-check copy of the checker's alias resolution
+    /// (owner-accepted); TICKET-182 removes it.
     fn alias_member(&self, m: &ModuleId, member: &str, depth: usize) -> Option<AliasTarget> {
         if depth > 64 {
             return None;

@@ -1921,13 +1921,21 @@ impl Checker {
         // Explicit call-site type arguments are only meaningful on a *generic* user fn / struct /
         // enum-variant constructor. Reject them on anything else (builtins, non-generic decls)
         // before the dispatch below, so the seeding logic only has to handle the generic paths.
-        // An alias that pins its type arguments passes through, so the constructor branch below
-        // reports "already fixes its type arguments" for it (TICKET-172).
-        let alias_pins_targs = matches!(
-            self.alias_body_ty(name),
-            Some(Ty::Struct(_, p) | Ty::NewType(_, p)) if !p.is_empty()
-        );
-        if !targs.is_empty() && !self.name_is_generic(name) && !alias_pins_targs {
+        // An alias is asked about the type it resolves to, not its own name: an unpinned alias of a
+        // generic type takes the target's type arguments (`type BB = Box; BB[int](9)`, TICKET-180
+        // P2), and one that pins them passes through so the constructor branch below reports
+        // "already fixes its type arguments" (TICKET-172).
+        let alias_takes_targs = match self.alias_body_ty(name) {
+            Some(Ty::Struct(k, p)) => {
+                !p.is_empty()
+                    || self
+                        .struct_shape(&k)
+                        .is_some_and(|i| !i.type_params.is_empty())
+            }
+            Some(Ty::NewType(k, p)) => !p.is_empty() || self.newtype_is_generic(&k),
+            _ => false,
+        };
+        if !targs.is_empty() && !self.name_is_generic(name) && !alias_takes_targs {
             self.error(span, format!("'{name}' takes no type arguments"));
             for a in args {
                 self.infer(a);

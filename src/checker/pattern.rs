@@ -1751,7 +1751,9 @@ impl Checker {
             ExprKind::NullCoalesce { lhs, op_span, .. } => {
                 self.infer_null_coalesce(expr, lhs, *op_span)
             }
-            ExprKind::DecodeCall { obj, ty, arg } => self.infer_decode(obj, ty, arg, expr.span),
+            ExprKind::DecodeCall { obj, ty, arg } => {
+                self.infer_decode(expr.id, obj, ty, arg, expr.span)
+            }
             ExprKind::Closure { params, ret, body } => {
                 // No expected type at the generic `infer` seam — free-closure inference (sources
                 // #2/#3) and the ambiguity check happen inside `infer_closure`.
@@ -4729,62 +4731,32 @@ impl Checker {
     /// `json.decode[T](s)` — the source must be `str`, the target `T` must be decodable. Yields
     /// `Result[T]`. (`obj` is the json-module expression; we infer it only to surface a bad-module
     /// error, but place no constraint on it — any module exposing `parse` works at runtime.)
-    pub(super) fn infer_decode(&mut self, obj: &Expr, ty: &Type, arg: &Expr, span: Span) -> Ty {
+    pub(super) fn infer_decode(
+        &mut self,
+        id: crate::ast::NodeId,
+        obj: &Expr,
+        ty: &Type,
+        arg: &Expr,
+        span: Span,
+    ) -> Ty {
         let _ = self.infer(obj);
         let arg_ty = self.infer_value(arg);
         if !compatible(&Ty::Str, &arg_ty) {
             self.error(span, format!("decode source must be str, found {arg_ty}"));
         }
         let target = self.resolve_type(ty, span);
-        if let Err(msg) = self.is_decodable(&target, &mut Vec::new()) {
-            self.error(span, msg);
-            return Ty::Unknown;
+        // One decision for what is decodable and what the VM decodes: the descriptor built here is
+        // the diagnostic when it fails and the compiler's `Op::JsonDecode` operand when it succeeds.
+        let shape = |key: &str| self.structs.get(key).map(|s| s.fields.clone());
+        match crate::json_decode::from_ty(&target, &shape, &mut Vec::new()) {
+            Ok(desc) => self.record_resolution(id, Resolution::Decode(desc), span),
+            Err(msg) if msg.is_empty() => {}
+            Err(msg) => {
+                self.error(span, msg);
+                return Ty::Unknown;
+            }
         }
         Ty::result(target)
-    }
-
-    /// Whether `json.decode` can produce a value of this type. Mirrors `json_decode::from_type`'s
-    /// acceptance (kept in sync): scalars, `list`/`tuple`/`map[str,_]`/`Option` of decodables, and
-    /// non-generic, non-recursive structs of decodable fields. `visiting` rejects recursive structs.
-    pub(super) fn is_decodable(&self, ty: &Ty, visiting: &mut Vec<String>) -> Result<(), String> {
-        match ty {
-            Ty::Int | Ty::Float | Ty::Str | Ty::Bool => Ok(()),
-            Ty::Unknown => Ok(()), // an error was already reported; don't pile on
-            Ty::List(t) | Ty::Option(t) => self.is_decodable(t, visiting),
-            Ty::Tuple(ts) => {
-                for t in ts {
-                    self.is_decodable(t, visiting)?;
-                }
-                Ok(())
-            }
-            Ty::Map(k, v) => {
-                if !matches!(**k, Ty::Str) {
-                    return Err(format!("decode: map keys must be str, found {k}"));
-                }
-                self.is_decodable(v, visiting)
-            }
-            Ty::Struct(name, args) => {
-                if !args.is_empty() {
-                    return Err(format!("decode: cannot decode into generic struct {ty}"));
-                }
-                if visiting.iter().any(|s| s == name) {
-                    return Err(format!(
-                        "decode: recursive struct '{name}' is not decodable; use the Json enum instead"
-                    ));
-                }
-                let Some(info) = self.structs.get(name) else {
-                    return Err(format!("decode: '{name}' is not a decodable type"));
-                };
-                visiting.push(name.clone());
-                let fields = info.fields.clone();
-                for (_, fty) in &fields {
-                    self.is_decodable(fty, visiting)?;
-                }
-                visiting.pop();
-                Ok(())
-            }
-            other => Err(format!("decode: cannot decode into {other}")),
-        }
     }
 
     /// A free closure's param type, inferred from how its body USES the param (sources #2/#3 — only

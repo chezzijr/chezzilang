@@ -1722,6 +1722,25 @@ impl Checker {
         }
     }
 
+    /// The module a qualified type `module.name` is read from, or `None` after reporting why the
+    /// binder names no module (ambiguous between two imports, or not imported). The one decider for
+    /// a qualified type's binder: `resolve_type` and a `type` alias declaration both call it.
+    pub(super) fn qualified_type_module(
+        &mut self,
+        module: &str,
+        name: &str,
+        span: Span,
+    ) -> Option<ModuleId> {
+        if let Some(mid) = self.imported_modules.get(module) {
+            return Some(mid.clone());
+        }
+        let msg = self.ambiguous_bind_msg(module).unwrap_or_else(|| {
+            format!("unknown module '{module}' (import it to use `{module}.{name}`)")
+        });
+        self.error(span, msg);
+        None
+    }
+
     pub(super) fn resolve_type(&mut self, t: &Type, span: Span) -> Ty {
         match t {
             Type::Named {
@@ -2290,11 +2309,7 @@ impl Checker {
             // struct/enum targets.
             Type::Qualified { module, name, args } => {
                 let resolved: Vec<Ty> = args.iter().map(|a| self.resolve_type(a, span)).collect();
-                let Some(mid) = self.imported_modules.get(module).cloned() else {
-                    let msg = self.ambiguous_bind_msg(module).unwrap_or_else(|| {
-                        format!("unknown module '{module}' (import it to use `{module}.{name}`)")
-                    });
-                    self.error(span, msg);
+                let Some(mid) = self.qualified_type_module(module, name, span) else {
                     return Ty::Unknown;
                 };
                 let Some(sig) = self.module_sigs.get(&mid).cloned() else {
@@ -3085,8 +3100,15 @@ impl Checker {
                 name,
                 name_span,
                 doc,
+                ty,
                 ..
             } => {
+                // A qualified body's binder is checked here, at the declaration, by the same
+                // decider an annotation uses: `type R = b.P` with `b` bound by two imports is
+                // ambiguous, as `b.P(1)` is (TICKET-180 P2).
+                if let Type::Qualified { module, name, .. } = ty {
+                    self.qualified_type_module(module, name, span);
+                }
                 // Editor hover (decl-site): record the ALIASED type at the alias-name token. Gated
                 // strictly on the probe so the extra `resolve_type` never runs in normal checking; on
                 // an invalid alias it may add a duplicate error, but hover returns None on ANY error,

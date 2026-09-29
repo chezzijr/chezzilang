@@ -211,8 +211,6 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
 
 struct Compiler {
     program: Program,
-    /// Struct name → declared fields (with types), kept for building `json.decode` descriptors.
-    struct_fields: HashMap<String, Vec<crate::ast::Field>>,
     /// M23 — struct/enum runtime key → its `Eq` protocol hook (`(proto, home module index)`), for the
     /// types whose `eq` method [`binds_eq_hook`] accepts. Materialized into the `tid`- and
     /// `variant_id`-indexed `Program::eq_struct` / `eq_enum` by [`Compiler::build_eq_hooks`] once every
@@ -278,12 +276,6 @@ struct Compiler {
     /// `Op::JsonToValue` so a user module cannot spell that name and hijack the opcode — a user
     /// module can't declare `native fn` at all, so the name is otherwise self-scoping too.
     json_to_value_home: Option<usize>,
-    /// The CURRENT module's bare-resolvable type names → their runtime key: locally-declared types
-    /// plus `from`-imported ones (rebuilt per `compile_module`). The bare struct/enum constructor
-    /// only fires for a name in this set — a type merely present in the global `program.structs`
-    /// (declared in another module, imported whole or not at all) is NOT bare-constructible here, so
-    /// a `from`-imported function named like some other module's type still resolves as a call.
-    bare_types: HashMap<String, String>,
     /// FFI ROOT FIX (fix4): the checker-resolved C signature of every `extern` fn, keyed by `(graph
     /// module index, fn name)`. The extern lowering consumes THIS instead of re-resolving alias names
     /// itself — so every qualified/imported/aliased width resolves in its DEFINING module's scope
@@ -357,17 +349,6 @@ struct Compiler {
     /// outside interpolation.
     kw_frag_ctx: crate::lexer::Span,
     kw_frag_ord: usize,
-}
-
-/// The top-level `type X = …` declarations of a module.
-fn alias_decls(stmts: &[Stmt]) -> Vec<(String, Type)> {
-    stmts
-        .iter()
-        .filter_map(|s| match &s.kind {
-            StmtKind::TypeAlias { name, ty, .. } => Some((name.clone(), ty.clone())),
-            _ => None,
-        })
-        .collect()
 }
 
 /// M19 lever #2 — register an enum variant into BOTH program tables, assigning it the next dense
@@ -580,7 +561,6 @@ impl Compiler {
         }
         Compiler {
             program,
-            struct_fields: HashMap::new(),
             eq_hooks: HashMap::new(),
             globals: HashMap::new(),
             provider_ids: HashMap::new(),
@@ -596,7 +576,6 @@ impl Compiler {
             imported_modules: HashMap::new(),
             current_module_idx: 0,
             json_to_value_home: None,
-            bare_types: HashMap::new(),
             extern_sigs: crate::checker::ExternTable::new(),
             keyword_calls: crate::checker::KeywordTable::new(),
             witnesses: crate::checker::WitnessTable::default(),
@@ -669,122 +648,6 @@ impl Compiler {
                 }
             }
         }
-        // TICKET-172 — re-point every `type` alias whose body names a struct/enum/newtype at that
-        // type's canonical key, instead of the dead `<module-key>::<Alias>` key minted above. The
-        // walk runs HERE because only the graph still sees each DECLARING module's imports: a named
-        // import of an alias, `module.Alias`, and a local `type P = geo.Point` then all lower through
-        // the ordinary `type_key` sites. Mirrors the checker's `alias_body_ty`; a scalar, protocol
-        // or builtin target keeps its dead key (never a constructor head on either side).
-        let index: HashMap<&crate::resolver::ModuleId, usize> = graph
-            .modules
-            .iter()
-            .enumerate()
-            .map(|(i, m)| (&m.id, i))
-            .collect();
-        let mut targets = Vec::new();
-        for (idx, lm) in graph.modules.iter().enumerate() {
-            for (name, _) in alias_decls(&lm.ast.stmts) {
-                if let Some(key) = self.alias_member_key(graph, &index, idx, &name, 0) {
-                    targets.push(((idx, name), key));
-                }
-            }
-        }
-        self.type_keys.extend(targets);
-    }
-
-    /// The canonical key of the nominal type that `member`, declared in module `idx`, names: its
-    /// own key for a struct/enum/newtype, or its body's target for a `type` alias (chased across
-    /// modules, capped at 64 hops like every alias walk). `None` for anything else.
-    fn alias_member_key(
-        &self,
-        graph: &ModuleGraph,
-        index: &HashMap<&crate::resolver::ModuleId, usize>,
-        idx: usize,
-        member: &str,
-        depth: usize,
-    ) -> Option<String> {
-        if depth > 64 {
-            return None;
-        }
-        let lm = &graph.modules[idx];
-        if lm.native.is_some() {
-            // A native module's only types are its synthetic structs (`Match`, …), kept bare.
-            return self.module_types[idx]
-                .contains(member)
-                .then(|| self.type_key(idx, member));
-        }
-        for s in &lm.ast.stmts {
-            match &s.kind {
-                StmtKind::TypeAlias { name, ty, .. } if name == member => {
-                    return self.alias_body_key(graph, index, idx, ty, depth + 1);
-                }
-                StmtKind::Struct { name, .. }
-                | StmtKind::Enum { name, .. }
-                | StmtKind::NewType { name, .. }
-                    if name == member =>
-                {
-                    return Some(self.type_key(idx, member));
-                }
-                _ => {}
-            }
-        }
-        None
-    }
-
-    /// The canonical key an alias BODY written in module `idx` names, resolved in `idx`'s scope: a
-    /// bare head is a local declaration, a `from`-import (under its bind name), or a type of a
-    /// whole-module-imported std module; `module.Type` goes through `idx`'s module binding.
-    fn alias_body_key(
-        &self,
-        graph: &ModuleGraph,
-        index: &HashMap<&crate::resolver::ModuleId, usize>,
-        idx: usize,
-        body: &Type,
-        depth: usize,
-    ) -> Option<String> {
-        let imports = &graph.modules[idx].imports;
-        match body {
-            Type::Named { name, .. } | Type::Generic(name, ..) => {
-                if let Some(key) = self.alias_member_key(graph, index, idx, name, depth) {
-                    return Some(key);
-                }
-                for imp in imports {
-                    let Some(&tidx) = index.get(&imp.target) else {
-                        continue;
-                    };
-                    match &imp.import {
-                        Import::From { names, .. } => {
-                            for (member, alias) in names {
-                                if alias.as_ref().unwrap_or(member) == name {
-                                    return self
-                                        .alias_member_key(graph, index, tidx, member, depth);
-                                }
-                            }
-                        }
-                        Import::Module { path, .. }
-                            if path.first().map(String::as_str) == Some("std")
-                                && self.module_types[tidx].contains(name) =>
-                        {
-                            return self.alias_member_key(graph, index, tidx, name, depth);
-                        }
-                        Import::Module { .. } => {}
-                    }
-                }
-                None
-            }
-            Type::Qualified { module, name, .. } => {
-                imports.iter().find_map(|imp| match &imp.import {
-                    Import::Module { path, alias, .. }
-                        if alias.as_ref().or(path.last()) == Some(module) =>
-                    {
-                        let &tidx = index.get(&imp.target)?;
-                        self.alias_member_key(graph, index, tidx, name, depth)
-                    }
-                    _ => None,
-                })
-            }
-            _ => None,
-        }
     }
 
     /// The IDENTITY KEY for a type `name` declared in module `module_idx` (always `<module-key>::Name`
@@ -794,12 +657,6 @@ impl Compiler {
             .get(&(module_idx, name.to_string()))
             .cloned()
             .unwrap_or_else(|| name.to_string())
-    }
-
-    /// ROOT REDESIGN — build the module-aware [`crate::json_decode::DecodeEnv`] for the CURRENT module
-    /// so `json.decode[T]` resolves its target (and nested field types) to qualified identity keys.
-    fn decode_env(&self) -> CompilerDecodeEnv<'_> {
-        CompilerDecodeEnv { c: self }
     }
 
     /// M19 Phase 6 — allocate an inline-cache site id for a `CallMethod` op. Every method/module-member
@@ -968,7 +825,6 @@ impl Compiler {
                             display_name: name.clone(),
                         },
                     );
-                    self.struct_fields.insert(key, fields.clone());
                 }
                 // Type-erased: type parameters are checker-only, the runtime is identical for
                 // `Tree[int]` and `Tree[str]`.
@@ -1027,14 +883,6 @@ impl Compiler {
         self.current_module_idx = module_idx;
         self.imported_modules.clear();
         self.imported_fns.clear();
-        // Bare-resolvable type names in THIS module → runtime key: locally declared first.
-        self.bare_types.clear();
-        if let Some(own) = self.module_types.get(module_idx) {
-            for name in own.clone() {
-                let key = self.type_key(module_idx, &name);
-                self.bare_types.insert(name, key);
-            }
-        }
         for imp in imports {
             match &imp.import {
                 Import::Module { path, alias, .. } => {
@@ -1043,75 +891,20 @@ impl Compiler {
                         .unwrap_or_else(|| path.last().cloned().unwrap_or_default());
                     if let Some(tidx) = self.program.module_index(&imp.target) {
                         self.imported_modules.insert(bind, tidx);
-                        // A whole-module import of a STDLIB module exposes its types BARE too (mirrors
-                        // the checker's std exception). User
-                        // whole-module imports do NOT (their types are only reachable qualified).
-                        if path.first().map(String::as_str) == Some("std")
-                            && let Some(types) = self.module_types.get(tidx)
-                        {
-                            for name in types.clone() {
-                                let key = self.type_key(tidx, &name);
-                                self.bare_types.entry(name).or_insert(key);
-                            }
-                        }
                     }
                 }
                 Import::From { names, .. } => {
                     if let Some(tidx) = self.program.module_index(&imp.target) {
                         for (member, alias) in names {
                             let bind = alias.clone().unwrap_or_else(|| member.clone());
-                            // A `from`-imported user type becomes bare-resolvable under its bind name,
-                            // keyed by the DECLARING module's runtime key.
-                            if self
-                                .module_types
-                                .get(tidx)
-                                .is_some_and(|t| t.contains(member))
-                            {
-                                // TICKET-029 — a name that is BOTH a type and a fn in the source
-                                // module (`fn Path` beside `struct Path`) binds BOTH tables; a
-                                // bind that is only a type is never a witness callee.
-                                self.imported_fns
-                                    .insert(bind.clone(), (tidx, member.clone()));
-                                let key = self.type_key(tidx, member);
-                                self.bare_types.insert(bind, key);
-                            } else {
-                                // …anything else is a value/function member: remember where it was
-                                // DECLARED, so a call site can read the callee's witness arity out of
-                                // the checker's declaring-module-keyed table (M24 Task 3).
-                                self.imported_fns.insert(bind, (tidx, member.clone()));
-                            }
+                            // Remember where every from-imported member was DECLARED, so a call
+                            // site can read the callee's witness arity out of the checker's
+                            // declaring-module-keyed table (M24 Task 3). A bind that is only a
+                            // type is never a witness callee.
+                            self.imported_fns.insert(bind, (tidx, member.clone()));
                         }
                     }
                 }
-            }
-        }
-        // Re-point every LOCAL `type` alias's `bare_types` entry at the runtime key its body's HEAD
-        // ultimately names, instead of the dead `<module>::<alias>` key the loop above minted (the
-        // compiler is type-blind, so `module_types` registered the alias NAME like any other type —
-        // this is what lets `enum_bare_key`/`struct_key_of_pattern`/the bare newtype+struct ctors
-        // lower an alias with no change of their own). Walks a chain of aliases (`type A = B; type B
-        // = C`), capped at 64 — the checker already rejects a genuine cycle, so this cap only
-        // terminates walking an otherwise-ill-typed program that reaches here anyway.
-        let alias_bodies: std::collections::HashMap<String, Type> =
-            alias_decls(&module.stmts).into_iter().collect();
-        for (name, body) in &alias_bodies {
-            let mut head = match body {
-                Type::Named { name: n, .. } => n.clone(),
-                Type::Generic(n, ..) => n.clone(),
-                _ => continue,
-            };
-            let mut depth = 0;
-            while depth < 64 {
-                match alias_bodies.get(&head) {
-                    Some(Type::Named { name: n, .. }) | Some(Type::Generic(n, ..)) => {
-                        head = n.clone();
-                        depth += 1;
-                    }
-                    _ => break,
-                }
-            }
-            if let Some(key) = self.bare_types.get(&head).cloned() {
-                self.bare_types.insert(name.clone(), key);
             }
         }
         // Compile struct methods first, recording their proto ids + this module as their home.
@@ -3830,10 +3623,10 @@ impl Compiler {
                     "type-application head `{name}[…]` must be consumed by the checker before compiling"
                 )
             }
-            ExprKind::DecodeCall { obj, ty, arg } => {
+            ExprKind::DecodeCall { obj, arg, .. } => {
                 // Reuse the module's own `parse` (`obj.parse(arg)` → Result[Json]) as the method
                 // call the module-member path emits, then coerce the parsed value into the target
-                // type with a descriptor built from `ty`. No `Field` is synthesized over `obj`.
+                // type with the descriptor the checker built. No `Field` is synthesized over `obj`.
                 self.compile_expr(fc, obj)?;
                 self.compile_expr(fc, arg)?;
                 let ic = self.next_method_ic();
@@ -3845,21 +3638,14 @@ impl Compiler {
                     },
                     expr.span,
                 );
-                // ROOT REDESIGN — resolve the decode target (and its nested field struct types) to
-                // their qualified IDENTITY KEYS via a module-aware env, so the descriptor tags the
-                // produced struct with the right key and decodes against the right layout.
-                let env = self.decode_env();
-                let desc = crate::json_decode::from_type(
-                    ty,
-                    self.current_module_idx,
-                    &env,
-                    &mut Vec::new(),
-                )
-                .map_err(|message| CompileError {
-                    message,
-                    span: expr.span,
-                })?;
-                fc.emit(Op::JsonDecode(desc), expr.span);
+                let Resolution::Decode(desc) = self.resolution(expr)? else {
+                    return Err(CompileError {
+                        message: "internal: a decode call has no recorded target descriptor"
+                            .to_string(),
+                        span: expr.span,
+                    });
+                };
+                fc.emit(Op::JsonDecode(desc.clone()), expr.span);
             }
             ExprKind::Closure { params, body, .. } => {
                 self.compile_closure(fc, params, body, expr.span)?
@@ -6625,59 +6411,6 @@ fn collect_frame_binds_expr(e: &Expr, out: &mut HashSet<String>) {
 /// Map an extern fn's surface [`Type`] annotation to its runtime [`CType`]. Only the v1 marshallable
 /// set (`int`/`float`/`bool`/`str`/`ptr`) is supported, resolving transparent type aliases (`type Len = int`)
 /// through `aliases` first. Everything else (incl. a `None` annotation) returns `None`. The checker
-/// ROOT REDESIGN — the compiler's [`crate::json_decode::DecodeEnv`]: resolves a decode target and its
-/// nested field struct types to qualified identity keys, using the compiler's per-module type tables.
-struct CompilerDecodeEnv<'a> {
-    c: &'a Compiler,
-}
-
-impl crate::json_decode::DecodeEnv for CompilerDecodeEnv<'_> {
-    fn resolve_bare(&self, module_idx: usize, name: &str) -> Option<String> {
-        // In the CALL module, a bare name may be local / from-imported / std — use `bare_types`.
-        // In any other (declaring) module, a nested field type resolves to that module's own type.
-        if module_idx == self.c.current_module_idx
-            && let Some(k) = self.c.bare_types.get(name)
-        {
-            return Some(k.clone());
-        }
-        self.c
-            .type_keys
-            .get(&(module_idx, name.to_string()))
-            .cloned()
-    }
-
-    fn resolve_qualified(&self, _module_idx: usize, binder: &str, name: &str) -> Option<String> {
-        // A qualified `binder.name` is only written at the call site; resolve `binder` against the
-        // current module's imported-module bindings, then key `name` in that target module.
-        let tidx = *self.c.imported_modules.get(binder)?;
-        if self
-            .c
-            .module_types
-            .get(tidx)
-            .is_some_and(|t| t.contains(name))
-        {
-            self.c.type_keys.get(&(tidx, name.to_string())).cloned()
-        } else {
-            None
-        }
-    }
-
-    fn struct_def(&self, key: &str) -> Option<(usize, &[crate::ast::Field])> {
-        let module_idx = self.c.program.structs.get(key)?.module_idx;
-        let fields = self.c.struct_fields.get(key)?;
-        Some((module_idx, fields.as_slice()))
-    }
-
-    fn display_of(&self, key: &str) -> String {
-        self.c
-            .program
-            .structs
-            .get(key)
-            .map(|d| d.display_name.clone())
-            .unwrap_or_else(|| bare_display(key))
-    }
-}
-
 /// ROOT REDESIGN — strip a qualified identity key `<module-key>::Name` back to its bare `Name` for a
 /// display fallback when no `StructDef` is registered (defensive). Splits on the LAST `::`.
 pub(crate) fn bare_display(key: &str) -> String {

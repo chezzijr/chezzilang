@@ -779,10 +779,7 @@ const INTERIM_182: &[&str] = &["nested_fn/defaulted_fn/call"];
 /// TICKET-180 cells whose fix is a later step of that ticket (qualified heads, identifier reads,
 /// pattern heads, alias bodies). The ticket is not done until this list is empty. They must stay
 /// red here; when one turns green, delete it from the list.
-const PENDING_180: &[&str] = &[
-    "p2/alias_of_ambiguous_module_type",
-    "p2/generic_alias_turbofish",
-];
+const PENDING_180: &[&str] = &[];
 
 #[test]
 fn name_resolution_grid() {

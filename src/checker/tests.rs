@@ -36024,3 +36024,63 @@ fn resolution_records_every_pattern_head() {
     want.sort();
     assert_eq!(got, want);
 }
+
+/// TICKET-180 step 12 — the checker builds the `json.decode[T]` descriptor from the type it
+/// resolved and records it; the compiler emits it. `lib.Q` is `lib`'s alias of `lib`'s `P`, and
+/// `main` declares its own `P` too, so the descriptor must carry `lib`'s key and fields.
+#[test]
+fn decode_target_is_recorded_for_an_imported_alias() {
+    use crate::json_decode::TypeDescriptor;
+    let t = TmpDir::new();
+    t.write("lib.chz", "struct P:\n    x: int\ntype Q = P\n");
+    let main = t.write(
+        "main.chz",
+        "import lib\nimport std.json\nstruct P:\n    y: str\nr := json.decode[lib.Q](\"{{}}\")\nprint(r)\nprint(P(\"a\"))\n",
+    );
+    let graph = crate::resolver::build_graph(&main).expect("resolve");
+    assert!(check_graph(&graph).is_ok(), "{:?}", check_graph(&graph));
+    let table = resolve_call_tables(&graph).9;
+    let decodes: Vec<&TypeDescriptor> = table
+        .values()
+        .filter_map(|r| match r {
+            Resolution::Decode(d) => Some(d),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(decodes.len(), 1, "{decodes:?}");
+    let TypeDescriptor::Struct {
+        key,
+        display,
+        fields,
+    } = decodes[0]
+    else {
+        panic!("{decodes:?}");
+    };
+    assert_eq!(display, "P");
+    assert_eq!(fields, &vec![("x".to_string(), TypeDescriptor::Int)]);
+    let main_p = table.values().find_map(|r| match r {
+        Resolution::StructCtor(k) => Some(k.clone()),
+        _ => None,
+    });
+    assert_ne!(
+        Some(key.clone()),
+        main_p,
+        "the descriptor is main's P, not lib's"
+    );
+}
+
+/// TICKET-180 P2 — an unpinned alias of a generic struct takes the target's type arguments, and
+/// they seed the target's parameters. A non-generic alias still takes none.
+#[test]
+fn a_generic_alias_takes_its_targets_type_arguments() {
+    const BB: &str = "struct Box[T]:\n    v: T\ntype BB = Box\n";
+    ok(&format!("{BB}print(BB[int](9))\n"));
+    rejects(
+        &format!("{BB}x := BB[int](\"no\")\n"),
+        "argument to 'BB' has type str, expected int",
+    );
+    rejects(
+        "struct P:\n    x: int\ntype Q = P\nprint(Q[int](1))\n",
+        "'Q' takes no type arguments",
+    );
+}

@@ -1037,6 +1037,9 @@ pub enum Resolution {
     PatBinding,
     /// A struct pattern head, by the struct's runtime key.
     PatStruct(String),
+    /// A `json.decode[T]` call: the descriptor of the target the checker resolved
+    /// (`Op::JsonDecode`).
+    Decode(crate::json_decode::TypeDescriptor),
 }
 
 /// Every [`Resolution`] the checker recorded; see there.
