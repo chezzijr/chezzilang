@@ -18,7 +18,7 @@ pub(super) struct BlockGuard {
     awaiting: bool,
     bodies: Vec<(Arc<MnSched>, usize)>,
     /// This block's wait, published on every sched in `bodies` for the duration. See
-    /// `SchedCore::body_waits` — this is what keeps the `body_blocked` relaxation from false-faulting
+    /// `SchedCore::waiters` — this is what keeps the `body_blocked` relaxation from false-faulting
     /// a rendezvous. `None` for a nested-join block, which waits on no channel.
     wait: Option<Arc<quiesce::PartyWait>>,
 }
@@ -269,8 +269,8 @@ impl Vm {
     }
 
     /// TICKET-063 — the unbounded half of [`Vm::take_update_guard`], reached once the 5 ms bounded
-    /// acquire has given up. Accounts the wait `blocked_native` (never `inflight` — a guard wait has
-    /// no promised external progress; see `SchedCore::guard_waits`' doc), registers this thread as a
+    /// acquire has given up. Registers the wait as a waiter (never `inflight` — a guard wait has
+    /// no promised external progress; see `SchedCore::waiters`' doc), registers this thread as a
     /// blocked party so the process-wide verdict can see it, and polls
     /// [`Vm::block_halt_check`] every [`super::DEMOTE_POLL_BACKOFF`] so `--timeout`, cancel and
     /// `os.exit` reach a guard waiter exactly like every other blocking-in-place site. The counters
@@ -313,7 +313,7 @@ impl Vm {
                 }
             }
         };
-        self.guard_wait_exit(key, tok);
+        self.guard_wait_exit(tok);
         self.width_acquire();
         out
     }
@@ -2523,7 +2523,7 @@ impl Vm {
     /// which is the opposite of what an exit needs.
     ///
     /// Returns the error rather than a `Result` because most call sites are demote loops that must run
-    /// their un-accounting (`running += 1`, `blocked_native`, `unregister_demoted`, …) BETWEEN learning
+    /// their un-accounting (`running += 1`, `unregister_waiter`, …) BETWEEN learning
     /// of the exit and returning it, exactly as their cancel arms do.
     pub(super) fn run_exit_err(&mut self, span: Span) -> Option<RuntimeError> {
         // gaps.md W7-57 — NEVER while a `defer` is running, the one suppression `cancel_requested`

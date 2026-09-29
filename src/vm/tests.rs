@@ -3746,17 +3746,24 @@ fn deadlock_predicate_suppressed_by_inflight_offload() {
 /// `runnable`). Registering the demoted channel lets `is_deadlocked` peek it: a non-empty queue
 /// means that fiber WILL pop + make progress (possibly waking a parked sibling), so an apparent
 /// all-blocked quiesce is NOT a deadlock — don't fault an innocent parked sibling.
+/// TICKET-181 — a demoted fiber's waiter on an empty `recv` of `core`, watching `cancel`.
+fn recv_waiter(core: &Arc<ChannelCore>, cancel: Vec<Arc<AtomicBool>>) -> Waiter {
+    Waiter {
+        wait: Arc::new(quiesce::PartyWait::Recv(Arc::clone(core))),
+        cancel,
+        fiber: true,
+    }
+}
+
 #[test]
 fn deadlock_predicate_vetoed_by_queued_value_on_demoted_channel() {
     let sched = mk_sched(2);
     let core = empty_core();
-    let ptr = core_key(&core);
     let mut c = sched.lock();
-    // The #1 race: one demoted fiber (blocked_native) + one parked sibling, nothing running /
+    // The #1 race: one demoted fiber (a registered waiter) + one parked sibling, nothing running /
     // runnable / inflight — the counter-only predicate fires (the false positive).
     c.parked_n = 1;
-    sched.blocked_native.fetch_add(1, Ordering::Relaxed);
-    c.register_demoted(ptr, &core);
+    let tok = c.register_waiter(recv_waiter(&core, vec![]));
     // A sibling already queued a value on the demoted fiber's channel: it will pop + progress.
     core.q.lock().unwrap().push(
         crate::vm::core::wire_summary(&WireValue::Int(7)),
@@ -3773,7 +3780,7 @@ fn deadlock_predicate_vetoed_by_queued_value_on_demoted_channel() {
         "an empty demoted channel with all fibers blocked IS a genuine deadlock"
     );
     // Un-register restores the pre-demote predicate (no stale registry entry vetoing forever).
-    c.unregister_demoted(ptr);
+    c.unregister_waiter(tok);
     assert!(
         sched.is_deadlocked(&c),
         "after un-register the predicate is unchanged (still all-blocked)"
@@ -3786,13 +3793,9 @@ fn deadlock_predicate_vetoed_by_queued_value_on_demoted_channel() {
 fn a_closed_channel_under_a_demoted_recv_vetoes_the_deadlock_verdict() {
     let sched = mk_sched(2);
     let core = empty_core();
-    let ptr = core_key(&core);
     let mut c = sched.lock();
     c.parked_n = 1;
-    sched.blocked_native.fetch_add(1, Ordering::Relaxed);
-    c.register_demoted(ptr, &core);
-    let tok = c.watch_demoted_cancel(vec![]);
-    c.register_demoted_group(tok, vec![Arc::clone(&core)]);
+    let tok = c.register_waiter(recv_waiter(&core, vec![]));
     assert!(
         sched.is_deadlocked(&c),
         "an open empty demoted channel is a genuine deadlock"
@@ -3802,8 +3805,7 @@ fn a_closed_channel_under_a_demoted_recv_vetoes_the_deadlock_verdict() {
         !sched.is_deadlocked(&c),
         "a closed channel under a demoted recv settles it (ClosedEmpty): no deadlock"
     );
-    c.unwatch_demoted_cancel(tok);
-    c.unregister_demoted(ptr);
+    c.unregister_waiter(tok);
     assert!(
         sched.is_deadlocked(&c),
         "after the demoted recv leaves, the closed channel vetoes nothing"
@@ -3815,13 +3817,9 @@ fn a_closed_channel_under_a_demoted_recv_vetoes_the_deadlock_verdict() {
 fn a_tripped_latch_under_a_demoted_recv_vetoes_the_deadlock_verdict() {
     let sched = mk_sched(2);
     let core = empty_core();
-    let ptr = core_key(&core);
     let mut c = sched.lock();
     c.parked_n = 1;
-    sched.blocked_native.fetch_add(1, Ordering::Relaxed);
-    c.register_demoted(ptr, &core);
-    let tok = c.watch_demoted_cancel(vec![]);
-    c.register_demoted_group(tok, vec![Arc::clone(&core)]);
+    c.register_waiter(recv_waiter(&core, vec![]));
     core.done_latch.store(true, Ordering::Relaxed);
     assert!(
         !sched.is_deadlocked(&c),
@@ -3837,11 +3835,14 @@ fn a_demoted_wait_with_every_arm_closed_vetoes_the_deadlock_verdict() {
     let (a, b) = (empty_core(), empty_core());
     let mut c = sched.lock();
     c.parked_n = 1;
-    sched.blocked_native.fetch_add(1, Ordering::Relaxed);
-    c.register_demoted(core_key(&a), &a);
-    c.register_demoted(core_key(&b), &b);
-    let tok = c.watch_demoted_cancel(vec![]);
-    c.register_demoted_group(tok, vec![Arc::clone(&a), Arc::clone(&b)]);
+    c.register_waiter(Waiter {
+        wait: Arc::new(quiesce::PartyWait::Wait(vec![
+            (Arc::clone(&a), false),
+            (Arc::clone(&b), false),
+        ])),
+        cancel: vec![],
+        fiber: true,
+    });
     a.q.lock().unwrap().closed = true;
     b.q.lock().unwrap().closed = true;
     assert!(
@@ -3858,11 +3859,14 @@ fn a_demoted_wait_with_one_arm_still_open_reads_as_deadlocked() {
     let (a, b) = (empty_core(), empty_core());
     let mut c = sched.lock();
     c.parked_n = 1;
-    sched.blocked_native.fetch_add(1, Ordering::Relaxed);
-    c.register_demoted(core_key(&a), &a);
-    c.register_demoted(core_key(&b), &b);
-    let tok = c.watch_demoted_cancel(vec![]);
-    c.register_demoted_group(tok, vec![Arc::clone(&a), Arc::clone(&b)]);
+    c.register_waiter(Waiter {
+        wait: Arc::new(quiesce::PartyWait::Wait(vec![
+            (Arc::clone(&a), false),
+            (Arc::clone(&b), false),
+        ])),
+        cancel: vec![],
+        fiber: true,
+    });
     a.q.lock().unwrap().closed = true;
     assert!(
         sched.is_deadlocked(&c),
@@ -3881,13 +3885,11 @@ fn a_demoted_wait_with_one_arm_still_open_reads_as_deadlocked() {
 fn demoted_channel_registry_is_refcounted_for_two_fibers_on_one_channel() {
     let sched = mk_sched(3);
     let core = empty_core();
-    let ptr = core_key(&core);
     let mut c = sched.lock();
     // Two fibers demoted on the SAME channel + one parked sibling; nothing else running.
     c.parked_n = 1;
-    sched.blocked_native.fetch_add(2, Ordering::Relaxed);
-    c.register_demoted(ptr, &core);
-    c.register_demoted(ptr, &core); // refcount now 2
+    let t1 = c.register_waiter(recv_waiter(&core, vec![]));
+    let t2 = c.register_waiter(recv_waiter(&core, vec![]));
     // A value queued on the shared channel → at least one demoted fiber pops + progresses.
     core.q.lock().unwrap().push(
         crate::vm::core::wire_summary(&WireValue::Int(7)),
@@ -3898,10 +3900,10 @@ fn demoted_channel_registry_is_refcounted_for_two_fibers_on_one_channel() {
         "queued value on the shared demoted channel vetoes deadlock"
     );
     // One fiber pops + un-registers (refcount 2→1); the OTHER is still demoted on this channel, so
-    // the entry must remain. Queue now empty → but the entry's presence alone does NOT veto; the
+    // its waiter must remain. Queue now empty → but the waiter's presence alone does NOT veto; the
     // peek is queue-driven, so an empty registered channel is a genuine all-blocked deadlock.
     core.q.lock().unwrap().pop();
-    c.unregister_demoted(ptr); // refcount 2→1, entry retained
+    c.unregister_waiter(t1); // one of two waiters leaves; the other stays registered
     assert!(
         sched.is_deadlocked(&c),
         "refcount 1 + empty queue = genuine deadlock (the surviving demoted fiber has nothing)"
@@ -3914,14 +3916,11 @@ fn demoted_channel_registry_is_refcounted_for_two_fibers_on_one_channel() {
     );
     assert!(
         !sched.is_deadlocked(&c),
-        "the retained refcount-1 entry still peeks the queue (entry not dropped at refcount 1)"
+        "the surviving waiter still peeks the queue (unregistering one waiter kept the other)"
     );
     core.q.lock().unwrap().pop();
-    c.unregister_demoted(ptr); // refcount 1→0, entry removed
-    assert!(
-        c.demoted_chans.is_empty(),
-        "the entry is removed only at refcount 0"
-    );
+    c.unregister_waiter(t2); // the last waiter leaves
+    assert!(c.waiters.is_empty(), "both waiters are gone");
     assert!(
         sched.is_deadlocked(&c),
         "all demoted fibers gone, still all-blocked = deadlock"
@@ -5220,8 +5219,8 @@ main()
 
 /// D5 owe #3 (Path C) — a `recv` inside a native callback with **no possible sender** must still
 /// **fault `deadlock`**, not hang. This is the load-bearing half of the pragmatic deadlock scope:
-/// the demoted thread is accounted as `blocked_native` (a 5th fiber state), which feeds
-/// [`MnSched::is_deadlocked`] (`parked_n>0 || blocked_native>0`). The demote's `blocked_native++`
+/// the demoted thread is registered as a fiber waiter (a 5th fiber state), which feeds
+/// [`MnSched::is_deadlocked`] (`parked_n>0 || any_fiber_waiter()`). The demote's registration
 /// notifies `cv` so the idle replacement worker re-evaluates the predicate; on fire, `flag_deadlock`
 /// sets `terminate`, the demoted thread observes it within `DEMOTE_POLL_BACKOFF` and faults in place,
 /// and `wait_for_completion` lets the join reduce the deadlock outcome. Watchdog 30 s: a regressed
@@ -5264,7 +5263,7 @@ main()
             Ok(()) => panic!("Path C: no-sender recv-in-callback unexpectedly succeeded"),
         },
         Err(_) => panic!(
-            "hung — D5 owe #3 Path C deadlock detection regressed (blocked_native predicate / notify)"
+            "hung — D5 owe #3 Path C deadlock detection regressed (fiber-waiter predicate / notify)"
         ),
     }
 }
@@ -8280,19 +8279,16 @@ fn mnsched_cancelled_scope_whose_only_fiber_is_demoted_is_deadlock() {
     let cancel = Arc::new(AtomicBool::new(false));
     let sched = MnSched::new(2, 4, Arc::clone(&cancel), dl_err(), 0);
     let core = empty_core();
-    let ptr = core_key(&core);
     sched.seed(vec![mk_fiber(0), mk_fiber(1)]);
     let a = take_run(&sched);
     let b = take_run(&sched);
-    // Fiber b enters its `defer` and blocks in place on an empty channel (running → blocked_native).
+    // Fiber b enters its `defer` and blocks in place on an empty channel (running → a registered waiter).
     // Inside a `defer` a cancel is SUPPRESSED (`cancel_requested()`'s `deferring == 0` term), so it
     // registers NO cancel watch — nothing can ever wake it. That is what makes it a real deadlock.
     {
         let mut c = sched.lock();
         c.running -= 1;
-        sched.blocked_native.fetch_add(1, Ordering::Relaxed);
-        c.register_demoted(ptr, &core);
-        c.watch_demoted_cancel(vec![]);
+        c.register_waiter(recv_waiter(&core, vec![]));
     }
     // Sibling a faults: trips the scope cancel, then finishes. No fiber of the scope is parked.
     cancel.store(true, Ordering::Relaxed);
@@ -8320,11 +8316,11 @@ fn mnsched_cancelled_scope_whose_only_fiber_is_demoted_is_deadlock() {
 /// self-detect (sched.rs), so it resumes within one `DEMOTE_POLL_BACKOFF`, unwinds and runs its
 /// `defer`s (which can `send`, waking parked siblings). CANCEL is a wakeup source the park/inflight/
 /// `runnable` counters do not model, so without a veto an idle worker's `take_runnable` sees
-/// `running == 0 && runnable == 0 && inflight == 0 && blocked_native > 0` and declares a SPURIOUS
+/// `running == 0 && runnable == 0 && inflight == 0 && any_fiber_waiter()` and declares a SPURIOUS
 /// deadlock: `flag_deadlock` then reaps every parked fiber of EVERY scope with no `unwind_deferred`
 /// (their `defer`s silently skipped — the exact N4 harm) and LATCHES `terminate`, which truncates the
 /// cleanup of any sibling demoted inside its own `defer`. The parked-only veto
-/// (`any_cancelled_scope_awaiting_drain`) cannot see this fiber — it is in `blocked_native`, not
+/// (`any_cancelled_scope_awaiting_drain`) cannot see this fiber — it is a registered waiter, not
 /// `parked` — hence the explicit watch. Boundary vs the test above: a fiber demoted INSIDE a `defer`
 /// registers no watch and stays a genuine deadlock, so the hang fix is preserved.
 #[test]
@@ -8332,7 +8328,6 @@ fn mnsched_demoted_fiber_with_a_tripped_cancel_is_not_deadlock() {
     let cancel = Arc::new(AtomicBool::new(false));
     let sched = MnSched::new(2, 4, Arc::clone(&cancel), dl_err(), 0);
     let core = empty_core();
-    let ptr = core_key(&core);
     sched.seed(vec![mk_fiber(0), mk_fiber(1)]);
     let a = take_run(&sched);
     let b = take_run(&sched);
@@ -8341,9 +8336,7 @@ fn mnsched_demoted_fiber_with_a_tripped_cancel_is_not_deadlock() {
     let tok = {
         let mut c = sched.lock();
         c.running -= 1;
-        sched.blocked_native.fetch_add(1, Ordering::Relaxed);
-        c.register_demoted(ptr, &core);
-        c.watch_demoted_cancel(vec![Arc::clone(&cancel)])
+        c.register_waiter(recv_waiter(&core, vec![Arc::clone(&cancel)]))
     };
     // Sibling a faults: trips the scope cancel, then finishes. No fiber of the scope is parked, so
     // the parked-window veto is silent — only the demoted watch can save b.
@@ -8366,11 +8359,13 @@ fn mnsched_demoted_fiber_with_a_tripped_cancel_is_not_deadlock() {
              not a deadlock (declaring one latches `terminate` and skips every parked fiber's defers)"
         );
     }
-    // It resumes, unwinds and settles: the watch is dropped on the way out and the veto lifts, so a
-    // genuine post-teardown quiesce still fires (no stale entry vetoing forever).
+    // It resumes, unwinds and blocks again inside its own `defer`, where a cancel is no longer
+    // honoured: its waiter carries no cancel flag, the veto lifts, and a genuine post-teardown
+    // quiesce still fires (no stale cancel entry vetoing forever).
     {
         let mut c = sched.lock();
-        c.unwatch_demoted_cancel(tok);
+        c.unregister_waiter(tok);
+        c.register_waiter(recv_waiter(&core, vec![]));
         assert!(
             sched.is_deadlocked(&c),
             "once the demoted fiber has settled the veto must lift"
@@ -8389,7 +8384,6 @@ fn mnsched_cancelled_scope_with_a_parked_and_a_demoted_fiber_is_not_deadlock() {
     let sched = MnSched::new(3, 4, Arc::clone(&cancel), dl_err(), 0);
     let park_core = empty_core();
     let demote_core = empty_core();
-    let ptr = core_key(&demote_core);
     sched.seed(vec![mk_fiber(0), mk_fiber(1), mk_fiber(2)]);
     let a = take_run(&sched);
     let b = take_run(&sched);
@@ -8398,8 +8392,7 @@ fn mnsched_cancelled_scope_with_a_parked_and_a_demoted_fiber_is_not_deadlock() {
     {
         let mut c = sched.lock();
         c.running -= 1;
-        sched.blocked_native.fetch_add(1, Ordering::Relaxed);
-        c.register_demoted(ptr, &demote_core);
+        c.register_waiter(recv_waiter(&demote_core, vec![]));
     }
     cancel.store(true, Ordering::Relaxed);
     sched.finish(
@@ -8645,7 +8638,7 @@ fn mnsched_a_peer_blocked_only_in_a_nested_join_does_not_veto() {
 
 /// TICKET-101 — same property as the fixture above, but B's ONLY fiber (not a second one alongside a
 /// parked first) is the join-blocked owner, so `parked_n` is 0 on B. The predecessor fixture's peer
-/// parks a first fiber before taking the second, which satisfies the D5 Path-C parked-or-blocked_native
+/// parks a first fiber before taking the second, which satisfies the D5 Path-C parked-or-demoted
 /// clause by accident and passes even when the peer question still wrongly demands a parked victim.
 /// This fixture removes that accident.
 #[test]
@@ -9284,15 +9277,17 @@ fn w758_nursery_party_is_satisfiable_whenever_the_sched_can_still_move() {
     sched.inflight.fetch_add(1, Ordering::Relaxed);
     assert!(party.satisfiable(), "inflight > 0");
     sched.inflight.fetch_sub(1, Ordering::Relaxed);
-    // `blocked_native` is deliberately NOT a veto, and that asymmetry with `inflight` is the point: an
+    // A demoted fiber waiter is deliberately NOT a veto, and that asymmetry with `inflight` is the point: an
     // `inflight` fiber WILL come back from the pool, a demoted one comes back only if a sibling sends,
     // so an all-parked-or-demoted quiesce IS a deadlock. Assert it rather than describe it.
-    sched.blocked_native.fetch_add(1, Ordering::Relaxed);
+    let tok = sched
+        .lock()
+        .register_waiter(recv_waiter(&empty_core(), vec![]));
     assert!(
         !party.satisfiable(),
-        "a demoted fiber is not a feeder — `blocked_native` must NOT veto the way `inflight` does"
+        "a demoted fiber is not a feeder — an unsatisfiable waiter must NOT veto the way `inflight` does"
     );
-    sched.blocked_native.fetch_sub(1, Ordering::Relaxed);
+    sched.lock().unregister_waiter(tok);
     // `body_open` (eager nursery still injecting):
     sched.open_body(0);
     assert!(party.satisfiable(), "body_open");

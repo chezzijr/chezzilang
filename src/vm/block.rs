@@ -8,7 +8,10 @@
 //! with each op; only the decision lives here.
 
 use super::Vm;
+use super::quiesce::PartyWait;
 use crate::native::Kind;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Where the running code sits, as far as blocking is concerned. Derived by [`Vm::block_ctx`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -196,6 +199,25 @@ pub(super) fn mode(ctx: BlockCtx, spec: WaitSpec) -> BlockMode {
             | W::Join
             | W::Nursery => InPlace,
         },
+    }
+}
+
+/// One blocked waiter in `SchedCore::waiters`, the registry the deadlock verdict asks.
+pub(super) struct Waiter {
+    /// what it waits for
+    pub(super) wait: Arc<PartyWait>,
+    /// the cancel flags it would honour (empty where a cancel cannot wake it, e.g. inside its own
+    /// uncancellable `defer`)
+    pub(super) cancel: Vec<Arc<AtomicBool>>,
+    /// a demoted fiber (a victim the verdict may claim), not a blocked body
+    pub(super) fiber: bool,
+}
+
+impl Waiter {
+    /// Could this waiter already resume? Generous by design (DEC-028): a false `true` only
+    /// declines the verdict, a false `false` faults a live program.
+    pub(super) fn satisfiable(&self) -> bool {
+        self.cancel.iter().any(|f| f.load(Ordering::Relaxed)) || self.wait.satisfiable()
     }
 }
 

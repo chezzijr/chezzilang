@@ -1954,7 +1954,7 @@ impl Vm {
     /// N4 (M:N) — the cancel flags a DEMOTED fiber must be watched on, i.e. the exact flags
     /// `cancel_requested()` reads. EMPTY when a cancel could not wake it at all (`cancel_suppressed`:
     /// already unwinding, or inside a `defer`) — a fiber a cancel can never wake is exactly the one
-    /// that IS a genuine deadlock. Handed to `SchedCore::watch_demoted_cancel`
+    /// that IS a genuine deadlock. Handed to `SchedCore::register_waiter`
     /// (`demote_recv_block` / `demote_wait_block`).
     pub(super) fn demote_cancel_flags(&self) -> Vec<Arc<AtomicBool>> {
         if self.cancel_suppressed() {

@@ -11880,8 +11880,8 @@ fn parity_a_nursery_inside_a_cancelled_tasks_defer_runs_to_completion() {
 }
 
 /// N4 (demoted half), at the PROGRAM level: a DEMOTED fiber (a `recv` inside a native HOF callback —
-/// `blocked_native`, not `parked`) whose cancel flag is tripped is about to resume and unwind, which is
-/// live progress `is_deadlocked`'s counters cannot see. Without the `any_demoted_cancel_pending` veto
+/// a registered waiter, not `parked`) whose cancel flag is tripped is about to resume and unwind, which is
+/// live progress `is_deadlocked`'s counters cannot see. Without the waiter veto
 /// the quiesce between the faulting sibling's `finish` and that fiber's next `DEMOTE_POLL_BACKOFF` poll
 /// reads as a deadlock, and `flag_deadlock` then drops EVERY parked fiber in the sched — including the
 /// INNOCENT outer-scope sibling `b`, which is waiting for the value the cleanup is about to send. Fails

@@ -21,7 +21,7 @@ pub mod wire;
 use core::{
     AtomicCore, AtomicIntCore, Backing, ChannelCore, ExecRegistry, ExecutorCore,
     GUARD_DEMOTE_BUDGET, GuardCycle, ListenerCore, ReaderCore, RwSharedCore, SharedCore,
-    SocketCore, WriterCore, acquire_update_guard_within, guard_wait_satisfiable,
+    SocketCore, WriterCore, acquire_update_guard_within,
 };
 use heap::{Fields, Heap, Identity, MapData, ModuleData, Obj, SetData};
 use op::{CapEntry, CapSrc, NO_IC, Op, Program, ProtoId, TID_NONE, WaitMeta};
@@ -2286,17 +2286,6 @@ struct MnSched {
     /// TICKET-167 — this sched's seeded-mode RNG stream, keyed by creation order (see `## Decisions`
     /// "One RNG stream per `MnSched`"). Draws are cheap under `sched_seed::on()` and unused otherwise.
     rng: sched_seed::SeedRng,
-    /// D5 owe #3 (Path C) — count of fibers currently **demoted**: blocked in place on a channel
-    /// condvar after a `recv` reached inside a native callback (a 5th fiber state, distinct from
-    /// `inflight`). Mutated only under the core lock by [`Vm::demote_recv_block`] (running→demoted on
-    /// block, demoted→running on resume). Distinct from `inflight` because the two un-account by
-    /// different paths AND feed the deadlock predicate differently: an `inflight` fiber WILL come back
-    /// from the pool/poller (external progress guaranteed) so it vetoes a deadlock, but a `blocked_native`
-    /// fiber comes back ONLY if a sibling sends — so when every remaining fiber is parked or
-    /// blocked_native with nothing running/runnable/inflight, that IS a deadlock and the predicate must
-    /// fire (see [`MnSched::is_deadlocked`]). The block loop checks the channel queue before `terminate`,
-    /// so a value that was genuinely sent always wins over a spuriously-fired terminate.
-    blocked_native: AtomicUsize,
     /// TICKET-099 — every live `MnSched` of this run (the same registry `Vm::sched_registry` publishes
     /// to and `Vm::wake_on_send_key` already walks). A `send`/`close` on THIS sched must be able to
     /// wake a receiver parked on ANY other sched — sibling, ancestor or descendant — not just an
@@ -2509,51 +2498,16 @@ struct SchedCore {
     /// is the single-nursery FAST PATH (the common case + `benches/run.chz`).
     scopes: Vec<JoinScope>,
     terminate: bool, // every worker loop exits once set (all scopes done, deadlock, or os.exit/fault)
-    /// D5 owe #3 Path C (#1 false-positive fix) — `ChannelCore`s that a demoted (blocked-in-callback)
-    /// fiber is waiting on, keyed by core ptr ([`Vm::channel_core_ptr`]) → (core, refcount). A demoted
-    /// fiber polls its OWN queue (a `send` `push_back`s + notifies the channel condvar, NOT `runnable`),
-    /// so a value queued for it is invisible to the counter-only predicate. [`MnSched::is_deadlocked`]
-    /// peeks each registered queue before firing: a non-empty one means that fiber WILL pop + progress,
-    /// so it is not a deadlock. Registered/un-registered under core lock A by [`Vm::demote_recv_block`];
-    /// the refcount handles 2+ fibers demoted on the same channel.
-    demoted_chans: std::collections::HashMap<usize, (Arc<ChannelCore>, usize)>,
-    /// N4 (demoted half) — the cancel flags each DEMOTED fiber that a CANCEL can still wake is
-    /// watching (its own scope's flag + `Vm::cancel_outer`), keyed by a demote token. CANCEL is a
-    /// wakeup source the park/inflight/`runnable` counters do not model: [`Vm::demote_recv_block`]
-    /// ranks `cancel_requested()` ABOVE its own deadlock self-detect, so a demoted fiber whose flag
-    /// is set resumes within one `DEMOTE_POLL_BACKOFF`, unwinds, and runs its `defer`s (which can
-    /// `send` — waking parked siblings). Declaring deadlock against it would latch `terminate` and
-    /// truncate that cleanup. Only a fiber that a cancel WOULD honour is registered (`!cancelled &&
-    /// deferring == 0` at demote time — neither can change while it is blocked), so the fiber that
-    /// is demoted-blocked forever INSIDE its own uncancellable `defer` registers nothing and stays a
-    /// genuine deadlock. Registered/un-registered under core lock A, 1:1 with `blocked_native`.
-    demote_cancel_watch: std::collections::HashMap<u64, Vec<Arc<AtomicBool>>>,
-    next_demote_tok: u64,
-    /// W15-6 (TICKET-176) — the arm channels of every demoted recv (one arm) or `wait:` (N arms),
-    /// keyed by the demote token from `watch_demoted_cancel`. A demoted `wait:` skips a closed arm, so
-    /// only a group whose EVERY arm is closed is settled; `is_deadlocked` reads it per group, never
-    /// per channel. Dropped by `unwatch_demoted_cancel`.
-    demoted_groups: std::collections::HashMap<u64, Vec<Arc<ChannelCore>>>,
-    /// §2c1 — the waits of every BLOCKED BODY on this sched's thread (`Vm::block_party_guard`).
-    ///
-    /// A body that is parked on a channel is very often the RENDEZVOUS PARTNER of one of this sched's
-    /// own fibers, and the counter-only predicate cannot see it — so lifting the `body_open` veto for
-    /// a blocked body (`JoinScope::body_blocked`) is only sound once the body's wait is visible HERE.
-    /// `is_deadlocked_ignoring_jobs` vetoes while any of these is satisfiable.
-    ///
-    /// **It carries the wait, not the channel, because DIRECTION decides satisfiability.** The
-    /// pre-existing `demoted_chans` peek asks `!q.is_empty()`, which is the RECEIVER's question; for a
-    /// body blocked on a full `send` the answer is inverted — an empty queue means it can proceed.
-    /// Reusing that peek killed a live consumer 12 runs in 12 on `Channel[int](1)` with the sender in
-    /// the body. `PartyWait::satisfiable` already answers both directions, so it is what is stored.
-    body_waits: Vec<Arc<crate::vm::quiesce::PartyWait>>,
-    /// TICKET-063 — every worker currently parked in [`Vm::guard_wait_block`]'s poll loop, as
-    /// `(guard key, task token)`. A guard wait is accounted `blocked_native`, which the counter-only
-    /// predicate treats as a parked party with no promised progress, so without this list one live
-    /// guard waiter would be judged deadlocked the instant it and every counted party quiesce even
-    /// though the owner may release the guard a moment later. `is_deadlocked_ignoring_jobs` vetoes
-    /// while `core::guard_wait_satisfiable` says any entry could acquire right now.
-    guard_waits: Vec<(usize, u64)>,
+    /// TICKET-181 — THE registry of blocked waiters the counters cannot see: every demoted recv
+    /// or `wait:`, every M:N guard wait, and every blocked body of this sched's thread
+    /// (`Vm::block_party_guard`), keyed by a token. Each entry answers "can you still be
+    /// satisfied?" ([`crate::vm::block::Waiter::satisfiable`]: a cancel flag it would honour, or its
+    /// `PartyWait`), and `quiesced_core_given` vetoes while any can — the ONE veto clause. A new
+    /// blocking shape adds a `PartyWait` arm, never a new list here. `fiber` entries are the demoted
+    /// victims the verdict may claim. Registered/un-registered under core lock A; a demoted wait's
+    /// entry is removed in the same lock hold as the pop that ends it (DEC-176).
+    waiters: std::collections::HashMap<u64, crate::vm::block::Waiter>,
+    next_waiter_tok: u64,
 }
 
 impl SchedCore {
@@ -2733,78 +2687,31 @@ impl SchedCore {
         self.running > 0 && self.running == self.blocked_owners && self.parked_n == 0
     }
 
-    /// Register a demoted fiber's channel (refcounted). Caller holds core lock A.
-    fn register_demoted(&mut self, ptr: usize, core: &Arc<ChannelCore>) {
-        self.demoted_chans
-            .entry(ptr)
-            .or_insert_with(|| (Arc::clone(core), 0))
-            .1 += 1;
-    }
-
-    /// TICKET-063 — register a worker parked in [`Vm::guard_wait_block`]'s poll loop. Caller holds
-    /// core lock A.
-    fn register_guard_wait(&mut self, key: usize, me: u64) {
-        self.guard_waits.push((key, me));
-    }
-
-    /// TICKET-063 — unregister a guard wait (resumed / faulted / settled). Removes the first matching
-    /// entry only, so two waiters on the same key never clobber each other's registration. Caller
-    /// holds core lock A.
-    fn unregister_guard_wait(&mut self, key: usize, me: u64) {
-        if let Some(i) = self
-            .guard_waits
-            .iter()
-            .position(|&(k, m)| k == key && m == me)
-        {
-            self.guard_waits.swap_remove(i);
-        }
-    }
-
-    /// N4 (demoted half) — start watching a demoted fiber's cancel flags. `flags` is `Vm::cancel`
-    /// followed by `Vm::cancel_outer` and is passed EMPTY when a cancel could not wake this fiber
-    /// anyway (it is already unwinding, or it is blocked inside a `defer` — `cancel_requested()`'s
-    /// `!cancelled && deferring == 0` terms, neither of which can change while it is blocked). Returns
-    /// the token to hand back to `unwatch_demoted_cancel`. Caller holds core lock A.
-    fn watch_demoted_cancel(&mut self, flags: Vec<Arc<AtomicBool>>) -> u64 {
-        let tok = self.next_demote_tok;
-        self.next_demote_tok += 1;
-        if !flags.is_empty() {
-            self.demote_cancel_watch.insert(tok, flags);
-        }
+    /// TICKET-181 — register a blocked waiter; returns its token for [`Self::unregister_waiter`].
+    /// Caller holds core lock A.
+    pub(super) fn register_waiter(&mut self, w: crate::vm::block::Waiter) -> u64 {
+        let tok = self.next_waiter_tok;
+        self.next_waiter_tok += 1;
+        self.waiters.insert(tok, w);
         tok
     }
 
-    /// Stop watching a demoted fiber and drop its arm group (it resumed / faulted / settled). Caller
-    /// holds A.
-    fn unwatch_demoted_cancel(&mut self, tok: u64) {
-        self.demote_cancel_watch.remove(&tok);
-        self.demoted_groups.remove(&tok);
+    /// TICKET-181 — drop the waiter `tok` names. Caller holds core lock A.
+    pub(super) fn unregister_waiter(&mut self, tok: u64) {
+        self.waiters.remove(&tok);
     }
 
-    /// W15-6 (TICKET-176) — record the arm channels of the demoted recv / `wait:` holding `tok`, so
-    /// `is_deadlocked` can read a group whose every arm is closed. Caller holds A.
-    fn register_demoted_group(&mut self, tok: u64, arms: Vec<Arc<ChannelCore>>) {
-        self.demoted_groups.insert(tok, arms);
-    }
-
-    /// N4 (demoted half) — does some demoted fiber have a tripped cancel flag, i.e. is it about to
-    /// resume and unwind? That is live progress the deadlock predicate's counters cannot see, so it
-    /// VETOES the fire (see [`MnSched::is_deadlocked`]). Self-lifting: the entry disappears the moment
-    /// the fiber leaves `demote_recv_block`/`demote_wait_block`, on every exit path.
-    fn any_demoted_cancel_pending(&self) -> bool {
-        self.demote_cancel_watch
+    /// TICKET-181 — the ONE waiter veto: could any registered waiter already be satisfied? Runs
+    /// under A and takes only Q and the guard registry G (a leaf), the order `send_wake` uses.
+    fn any_waiter_satisfiable(&self) -> bool {
+        self.waiters
             .values()
-            .any(|flags| flags.iter().any(|f| f.load(Ordering::Relaxed)))
+            .any(crate::vm::block::Waiter::satisfiable)
     }
 
-    /// Drop a demoted fiber's channel registration (removes the entry at refcount 0). Caller holds A.
-    fn unregister_demoted(&mut self, ptr: usize) {
-        if let Some(entry) = self.demoted_chans.get_mut(&ptr) {
-            entry.1 -= 1;
-            if entry.1 == 0 {
-                self.demoted_chans.remove(&ptr);
-            }
-        }
+    /// TICKET-181 — is any demoted fiber blocked here (a victim the verdict may claim)?
+    fn any_fiber_waiter(&self) -> bool {
+        self.waiters.values().any(|w| w.fiber)
     }
 }
 
@@ -2861,12 +2768,8 @@ impl MnSched {
                     parent_scope: None,
                 }],
                 terminate: false,
-                demoted_chans: std::collections::HashMap::new(),
-                demote_cancel_watch: std::collections::HashMap::new(),
-                next_demote_tok: 0,
-                demoted_groups: std::collections::HashMap::new(),
-                body_waits: Vec::new(),
-                guard_waits: Vec::new(),
+                waiters: std::collections::HashMap::new(),
+                next_waiter_tok: 0,
             }),
             cv: Condvar::new(),
             deadlock_err,
@@ -2876,7 +2779,6 @@ impl MnSched {
                 .collect(),
             steal_ctr: AtomicUsize::new(0),
             inflight: AtomicUsize::new(0),
-            blocked_native: AtomicUsize::new(0),
             mem_cap,
             rng: sched_seed::SeedRng::new(),
             // TICKET-099 — empty by default; both `MnSched` construction sites assign the run's
@@ -3345,7 +3247,11 @@ impl MnSched {
             // ON: publish the wait BEFORE lifting the veto. OFF: drop the veto BEFORE retracting it.
             // Either way the un-vetoed state is never observable without the wait.
             if blocked && let Some(w) = wait {
-                c.body_waits.push(Arc::clone(w));
+                c.register_waiter(crate::vm::block::Waiter {
+                    wait: Arc::clone(w),
+                    cancel: Vec::new(),
+                    fiber: false,
+                });
             }
             // TICKET-103 — the whole family, in this same acquisition: an unmarked continuation keeps
             // `all_incomplete_awaiting_builder` false and lets the predicate fault a sibling the body
@@ -3373,9 +3279,13 @@ impl MnSched {
             }
             if !blocked
                 && let Some(w) = wait
-                && let Some(i) = c.body_waits.iter().position(|x| Arc::ptr_eq(x, w))
+                && let Some(tok) = c
+                    .waiters
+                    .iter()
+                    .find(|(_, x)| Arc::ptr_eq(&x.wait, w))
+                    .map(|(t, _)| *t)
             {
-                c.body_waits.swap_remove(i);
+                c.unregister_waiter(tok);
             }
         }
         if blocked {
@@ -4796,7 +4706,7 @@ impl MnSched {
     /// joining thread calls this AFTER its `mn_worker_loop` returns and BEFORE `take_slots`, because
     /// under Path C the loop can return in two ways that race slot-completion: (a) the joining thread
     /// itself demoted and early-exited (its replacement is still draining the nursery), or (b) a
-    /// `terminate` (deadlock) was set before the `blocked_native` threads finished faulting in place.
+    /// `terminate` (deadlock) was set before the demoted threads finished faulting in place.
     /// In the common case `mn_worker_loop` already returned because `done == total`, so this is a
     /// non-blocking re-check. Poison-tolerant (a panicked worker must not wedge the join). Liveness
     /// rests on the invariant that EVERY demote-loop exit settles its fiber (value → resume → finish;
@@ -4846,7 +4756,7 @@ impl MnSched {
         // W7-56 (a live program declared deadlocked).
         //
         // Lock order: this holds `SchedCore` (A) and takes `exec_registry` → one `ExecutorCore::eager`
-        // beneath it, matching the V4 `demoted_chans` peek's A-then-`q`. Nothing acquires a sched core
+        // beneath it, matching the waiter veto's A-then-`q`. Nothing acquires a sched core
         // lock while holding either, so no cycle.
         if crate::vm::quiesce::QuiesceState::outstanding_jobs(&self.exec_registry) > 0 {
             return false;
@@ -4893,7 +4803,7 @@ impl MnSched {
     }
 
     /// TICKET-101 — `local_quiesced`'s body, parameterised on whether the D5 Path-C clause (below)
-    /// demands a visible parked-or-`blocked_native` victim. `require_parked = true` is "may THIS sched
+    /// demands a visible parked-or-demoted victim. `require_parked = true` is "may THIS sched
     /// fault?" — the fault path and the two process-wide-verdict inputs
     /// (`quiesce::PartyWait::Nursery::satisfiable`, `quiesce::QuiesceState::live_eager_bodies`) all want
     /// a victim in view before declaring deadlock, per DEC-099. `require_parked = false` is
@@ -4970,14 +4880,14 @@ impl MnSched {
         if !(c.running == c.blocked_owners
             && self.runnable.load(Ordering::Relaxed) == 0
             && self.inflight.load(Ordering::Relaxed) == 0
-            // D5 owe #3 (Path C) — a `blocked_native` fiber (demoted, waiting in place on a channel
+            // D5 owe #3 (Path C) — a demoted fiber waiter (waiting in place on a channel
             // condvar) comes back only via a sibling `send`; if nothing is running/runnable/inflight,
-            // no send can ever arrive, so an all-parked-or-blocked_native quiesce IS a deadlock. The
+            // no send can ever arrive, so an all-parked-or-demoted quiesce IS a deadlock. The
             // demoted thread observes the resulting `terminate` (via its bounded condvar poll) and
-            // faults in place. (`blocked_native++` notifies `cv` so an idle puller re-evaluates this.)
+            // faults in place. (registering a waiter notifies `cv` so an idle puller re-evaluates this.)
             && (!require_parked
                 || c.parked_n > 0
-                || self.blocked_native.load(Ordering::Relaxed) > 0))
+                || c.any_fiber_waiter()))
         {
             return false;
         }
@@ -4988,8 +4898,8 @@ impl MnSched {
         //   cancel trip and its `cancel_drain` are two core-lock acquisitions apart (three seams), and
         //   an idle worker landing in that gap sees the pre-drain quiesce. `cancel_drain` is about to
         //   requeue those fibers so they unwind their `defer`s;
-        // * a DEMOTED fiber whose cancel flag is tripped (`any_demoted_cancel_pending`): it is
-        //   `blocked_native`, not `parked`, so the first scan cannot see it — but `demote_recv_block`
+        // * a DEMOTED fiber whose cancel flag is tripped (`any_waiter_satisfiable`): it is
+        //   a registered waiter, not `parked`, so the first scan cannot see it — but `demote_recv_block`
         //   ranks `cancel_requested()` above `terminate`/self-detect, so it resumes within one
         //   `DEMOTE_POLL_BACKOFF`, unwinds and runs its `defer`s (which can `send`).
         //
@@ -5002,51 +4912,18 @@ impl MnSched {
         // `deferring > 0`) IS a genuine deadlock and is reported, not hung. Evaluated only at the
         // quiesce (after the counter gate above), so the scan is off the idle/steal hot path. A GENUINE
         // deadlock (nothing cancelled anywhere) is untouched.
-        if awaiting_drain.unwrap_or_else(|| c.any_cancelled_scope_awaiting_drain())
-            || c.any_demoted_cancel_pending()
-        {
+        if awaiting_drain.unwrap_or_else(|| c.any_cancelled_scope_awaiting_drain()) {
             return false;
         }
-        // D5 owe #3 Path C (#1 false-positive fix) — before declaring deadlock, peek every demoted
-        // fiber's channel queue (A-then-q — the caller holds the `SchedCore` guard, the same order
-        // `send_wake` uses, so no ABBA). A value already queued for a demoted fiber is invisible to the
-        // counters above (a `send` doesn't bump `runnable` for a demoted fiber), but that fiber WILL pop
-        // it on its next poll and make progress — so this is NOT a deadlock. Without this peek, a sibling
-        // `send` racing the quiesce could spuriously fault an innocent PARKED sibling.
-        // W15-6 (TICKET-176) — a demoted fiber also settles on a tripped `done_latch` (any arm) and on
-        // a close: `ClosedEmpty` for a recv, `wait: all channels closed` once EVERY arm of a `wait:` is
-        // closed. A `wait:` skips one closed arm, so `closed` is read per group (`demoted_groups`),
-        // never per channel. Each vetoing state makes the demoted loop return on its next poll and
-        // unregister, so the veto cannot pin a hang. Without it a verdict fires with no victim,
-        // latches `terminate`, and a later requeue of the demoted fiber hangs the join.
-        if c.demoted_chans.values().any(|(core, _)| {
-            !core.q.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
-                || core.done_latch.load(Ordering::Relaxed)
-        }) {
-            return false;
-        }
-        if c.demoted_groups.values().any(|arms| {
-            !arms.is_empty()
-                && arms
-                    .iter()
-                    .all(|core| core.q.lock().unwrap_or_else(|e| e.into_inner()).closed)
-        }) {
-            return false;
-        }
-        // TICKET-063 — the same race for a guard waiter (`SchedCore::guard_waits`): the owner may have
-        // released the `Shared`/`RwShared` update guard and then parked microseconds before this
-        // quiesce, in which case the waiter's own next poll would already succeed. A-then-G, below the
-        // A-then-Q order above — the guard registry is a leaf lock, so no ABBA.
-        if c.guard_waits
-            .iter()
-            .any(|&(key, me)| guard_wait_satisfiable(key, me))
-        {
-            return false;
-        }
-        // §2c1 — the same question for a BLOCKED BODY of this sched's thread, asked in the direction
-        // that body actually waits in (`SchedCore::body_waits`). A satisfiable body is about to
-        // resume and feed one of the fibers below, so this is not a deadlock. Chain A → Q, as above.
-        if c.body_waits.iter().any(|w| w.satisfiable()) {
+        // TICKET-181 — the ONE waiter veto. A registered waiter the counters cannot see (a demoted
+        // recv or `wait:`, an M:N guard wait, a blocked body of this thread) that could already be
+        // satisfied is about to resume: a value, a latch or a close landed on its channels (DEC-176:
+        // a `wait:` settles on a close of EVERY arm), its guard came free, or a cancel it would
+        // honour tripped (N4: it unwinds and runs its `defer`s, which can `send`). Declaring
+        // deadlock would drop every parked fiber without its `defer`s and latch `terminate`.
+        // Each vetoing state makes the waiter return on its next poll and unregister, so the veto
+        // cannot pin a hang. Lock order A → Q, A → G (a leaf), as `send_wake`.
+        if c.any_waiter_satisfiable() {
             return false;
         }
         true
@@ -5640,7 +5517,7 @@ impl SchedCore {
     /// means "cannot prove", never "definitely not" — the scan is conservative in the safe direction
     /// (DEC-101's leaf-policy condition 1): any holder it cannot see (another heap, a `Shared`/
     /// `RwShared`/`Atomic` box, a buffered `WireValue::Channel`, an Executor job, a module global, an
-    /// FFI value, a generator frame, a timer, `demoted_chans`, a `PartyWait`) holds a strong `Arc`,
+    /// FFI value, a generator frame, a timer, a `Waiter`, a `PartyWait`) holds a strong `Arc`,
     /// which only RAISES `Arc::strong_count` above what the scan counts inside its own heaps — so an
     /// incomplete scan can only return `false` where a complete one would return `true`, never the
     /// reverse.
@@ -6091,7 +5968,7 @@ struct TimerSleep {
 
 mod arith;
 mod block;
-use block::{BlockMode, WaitSpec};
+use block::{BlockMode, WaitSpec, Waiter};
 mod call;
 pub(crate) use call::is_mutating_native_kind;
 mod exec;

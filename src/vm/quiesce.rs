@@ -121,7 +121,7 @@ pub(super) enum PartyWait {
     /// TICKET-063 — a thread blocked waiting for a `Shared`/`RwShared` update guard (the box's core
     /// identity, the waiting task's token). Covers a guard wait reached by the top-level/eager body
     /// itself, e.g. `main` running `s.update(f)` where `f` runs `parallel: spawn: s.update(...)`; the
-    /// M:N-worker-side guard wait is registered separately, on `SchedCore::guard_waits`.
+    /// M:N-worker-side guard wait is registered separately, on `SchedCore::waiters`.
     ///
     /// The `usize` is the box core's `Arc` address — aliasing-safe because the party holding this wait
     /// also holds a live handle to that box (a `GcRef`/task token pinning it) for the whole lifetime of
@@ -170,16 +170,24 @@ impl PartyWait {
             // `trip()` latch — NOT on `closed`, which the poll SKIPS — while a SEND arm is ready on
             // free space or on `closed` (the poll faults `CLOSED_SEND` there). A timer arm delivers on
             // its own deadline with nobody sending, so it is never judged.
-            PartyWait::Wait(arms) => arms.iter().any(|(core, is_send)| {
-                let g = core.q.lock().unwrap_or_else(|e| e.into_inner());
-                if *is_send {
-                    g.has_send_slot(core.cap) || g.closed
-                } else {
-                    !g.is_empty()
-                        || core.done_latch.load(std::sync::atomic::Ordering::Relaxed)
-                        || core.timer.is_some()
-                }
-            }),
+            //
+            // DEC-176 — the poll skips ONE closed recv arm, but a `wait:` whose EVERY arm is a closed
+            // recv arm settles (`wait: all channels closed`), so the group is judged as a whole.
+            PartyWait::Wait(arms) => {
+                arms.iter().any(|(core, is_send)| {
+                    let g = core.q.lock().unwrap_or_else(|e| e.into_inner());
+                    if *is_send {
+                        g.has_send_slot(core.cap) || g.closed
+                    } else {
+                        !g.is_empty()
+                            || core.done_latch.load(std::sync::atomic::Ordering::Relaxed)
+                            || core.timer.is_some()
+                    }
+                }) || (!arms.is_empty()
+                    && arms.iter().all(|(core, is_send)| {
+                        !is_send && core.q.lock().unwrap_or_else(|e| e.into_inner()).closed
+                    }))
+            }
             // A join is over exactly when the executor owes nothing BUT this joiner's own job. See
             // the variant's doc: answering a flat `false` here faulted an already-drained
             // `shutdown()`, and ignoring `slack` faulted a job that shut down its own executor.
@@ -215,7 +223,7 @@ impl PartyWait {
                 // `live_eager_bodies` above).
                 !sched.quiesced_core(&c, !c.only_blocked_owners())
             }
-            // TICKET-063 — mirrors `SchedCore::guard_waits`' veto in `local_quiesced`.
+            // TICKET-063 — mirrors `SchedCore::waiters`' veto in `local_quiesced`.
             PartyWait::Guard(key, me) => super::core::guard_wait_satisfiable(*key, *me),
         }
     }
@@ -321,7 +329,7 @@ impl QuiesceState {
     }
 
     /// §2c1 — [`Self::block`] over an `Arc` the caller already holds, so ONE `PartyWait` can be both
-    /// the registered party AND the sched-side `SchedCore::body_waits` entry. Two separately-built
+    /// the registered party AND the sched-side `SchedCore::waiters` entry. Two separately-built
     /// waits for the same block could disagree about what the thread waits for; one cannot.
     pub(super) fn block_shared(self: &Arc<Self>, wait: Arc<PartyWait>) -> PartyGuard {
         self.parties
