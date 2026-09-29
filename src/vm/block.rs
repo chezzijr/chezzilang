@@ -53,7 +53,6 @@ impl BlockCtx {
 
 /// What a blocking op waits for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[allow(dead_code)] // TICKET-181: Timer, Connect, Guard and Join gain their sites in steps 5-10
 pub(super) enum WaitSpec {
     /// an empty `recv` on an ordinary channel
     Recv,
@@ -135,20 +134,21 @@ pub(super) fn mode(ctx: BlockCtx, spec: WaitSpec) -> BlockMode {
     match ctx {
         BlockCtx::Park => match spec {
             // DEC-151: stdin is a host wait we do not own; DEC-016: a guard waits in place, then
-            // demotes.
-            W::Stdin | W::Guard => Demote,
-            W::Join => InPlace,
+            // demotes; changed cell (c), X1: an Executor join cannot snapshot-park (the join loop
+            // holds its state on the host stack), so it hands its runner slot over.
+            W::Stdin | W::Guard | W::Join => Demote,
             _ => Park,
         },
         BlockCtx::Demote => match spec {
             // v1 limit: the demote loop cannot block a sender. Go blocks.
             W::Send | W::Wait { has_send: true, .. } => Refuse,
-            W::Connect | W::Join | W::Nursery => InPlace,
+            W::Connect | W::Nursery => InPlace,
             W::Recv
             | W::Timer
             | W::Wait { .. }
             | W::Sleep
             | W::Offload
+            | W::Join
             | W::Stdin
             | W::Socket
             | W::Guard => Demote,
@@ -409,7 +409,7 @@ mod tests {
         ("Socket", "PDRR RRRR IIII", true),
         ("Connect", "PIIR RRRR IIII", true),
         ("Guard", "DDDD DDDD DDDD", false),
-        ("Join", "IIII IIII IIII", true),
+        ("Join", "DDII IIII IIII", true),
         ("Nursery", "PIII IIII IIII", false),
     ];
 

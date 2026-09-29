@@ -2195,7 +2195,8 @@ impl Vm {
     /// socket-only version used to carry.
     /// TICKET-052 — hand this thread's pool slot to a replacement worker before blocking in place.
     /// A no-op on an M:N worker shell (`self.mn.is_some()`): those already compensate through
-    /// [`Vm::block_enter`], and yielding here too would spawn two replacements for one block.
+    /// [`Vm::block_enter`], and yielding here too would spawn two replacements for one block. This
+    /// is the POOL-side half only: which bracket a wait takes is `block::mode`'s decision.
     /// TICKET-118 (W13-7) — a job's top-level `Vm` joining a nursery hands its slot over in
     /// `MnSched::joiner_wait` and `MnSched::take_runnable` instead, marked by
     /// `MnSched::pool_joiner_guard` and only while that sched has no running or runnable fiber; an
@@ -5356,6 +5357,17 @@ impl Vm {
                 .as_ref()
                 .is_some_and(|mine| Arc::ptr_eq(mine, core)),
         );
+        // TICKET-181 changed cell (c), X1 — a fiber joining an Executor hands its runner slot to a
+        // replacement for the whole join, accounted `inflight` (the join returns once the jobs
+        // finish). Entered and ended OUTSIDE the `core.eager` lock below: the fixed order is core
+        // lock A, then `ExecutorCore::eager`, so taking A under `eager` would be an ABBA against
+        // `is_deadlocked_given`. The bail path carries its error out of the block, so no `?` sits
+        // between the enter and the exit.
+        let join_reg = if self.block_mode(WaitSpec::Join) == BlockMode::Demote {
+            Some(self.block_enter(WaitSpec::Join, None, "an Executor join", span)?)
+        } else {
+            None
+        };
         // A self-join reduces NOTHING (see the slot rule at the end of this fn), so it owes the core
         // to a LATER join — and the caller marked the core `shut` a moment ago, which is what used to
         // make `drain_live_executors` skip it and drop every sibling's buffered output and fault.
@@ -5478,6 +5490,9 @@ impl Vm {
                 g.take_slots()
             }
         };
+        if let Some(reg) = join_reg {
+            self.block_exit(reg);
+        }
         drop(_party);
         if let Some(e) = bail {
             // W7-60 review, charge A1 — ASK THE WORK TO STOP, don't just stop waiting for it. Every
