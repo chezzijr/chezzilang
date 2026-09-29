@@ -53,6 +53,16 @@ one fn reading the last global (untracked, 7 runs; 5 runs for 12000):
 The check is about 2× slower on such a file and stays linear: 4× the globals is 3.6× the time on
 BASE and 3.9× on BRANCH.
 
+**Post-merge re-check (2026-09-29, approver).** Three rows above exceed +3% on the median (`fib`, `list`, `map`), but their minimums barely moved. Re-measured interleaved (old/new alternating, 10 runs each, load ~5) with the pre-183 binary (`58691616`) vs merged `main`:
+
+| bench | pre-183 median (min) ms | post-183 median (min) ms | median | min |
+|---|---|---|---|---|
+| fib | 489.5 (457.8) | 496.6 (458.1) | +1.5 % | +0.1 % |
+| list | 698.9 (679.4) | 705.6 (681.4) | +1.0 % | +0.3 % |
+| map | 258.7 (248.3) | 248.7 (237.1) | −3.9 % | −4.5 % |
+
+Within noise: the `Op::GetGlobalSlot` uninit check has no measurable cost.
+
 ## TICKET-155 — the owner-fault rung at the native-HOF checkpoint — 2026-09-21
 
 `Vm::guarded_checkpoint` runs once per ELEMENT of every `map`/`filter`/`fold`/`sort_by`. It gained
