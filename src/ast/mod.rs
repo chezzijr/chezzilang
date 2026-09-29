@@ -630,9 +630,11 @@ pub enum Pattern {
     /// nullary `Variant` instead (it names a variant like `None`). The `Span` is the binding-name
     /// token's source position — diagnostic-only (the LSP records a decl-site hover there);
     /// runtime-inert (pattern matching routes by NAME and ignores the span, like `For.var_spans`).
-    Ident(String, Span),
+    Ident(String, Span, NodeId),
     Variant {
         name: String,
+        /// Equality-neutral identity of the pattern head; see [`NodeId`].
+        id: NodeId,
         bindings: Vec<Pattern>,
         /// Optional `Enum.` qualifier from `case Enum.Variant:` (`None` for the bare `case Variant:`).
         /// A pure spelling aid: validated by the checker, then ignored at runtime (variant names
@@ -887,6 +889,8 @@ pub fn is_tuple_index(name: &str) -> bool {
 pub struct Expr {
     pub kind: ExprKind,
     pub span: Span,
+    /// Equality-neutral identity; see [`NodeId`].
+    pub id: NodeId,
 }
 
 /// One piece of an interpolated string literal ([`ExprKind::Interp`]): either literal text or a
@@ -1386,12 +1390,431 @@ pub fn const_int_scan(
     }
 }
 
+/// A parser-assigned identity for one AST node that carries a checker->compiler fact (TICKET-180).
+///
+/// A `Span` is not an identity: a spliced default, a re-lexed fragment and a chained postfix link
+/// share spans (`docs/lessons.md`, span-keyed aliasing). Every `Expr`, `Pattern::Variant` and
+/// `Pattern::Ident` gets a fresh id from the parser or from desugar; side tables key on the raw
+/// `u32`. EQUALITY-NEUTRAL, like `Import`'s spans: parser tests compare whole trees, so two parses
+/// of the same text must still compare equal.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NodeId(pub u32);
+
+impl PartialEq for NodeId {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+static NEXT_NODE_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+impl NodeId {
+    /// The id of a node the COMPILER synthesizes. It never keys a table; `Compiler::resolution`
+    /// answers it from the node's shape.
+    pub const SYNTH: NodeId = NodeId(0);
+
+    pub fn fresh() -> NodeId {
+        NodeId(NEXT_NODE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
+impl Expr {
+    /// A parser- or desugar-built node with a fresh id.
+    pub fn new(kind: ExprKind, span: Span) -> Expr {
+        Expr {
+            kind,
+            span,
+            id: NodeId::fresh(),
+        }
+    }
+
+    /// A compiler-synthesized node ([`NodeId::SYNTH`]). Never use it before the checker runs.
+    pub fn synthetic(kind: ExprKind, span: Span) -> Expr {
+        Expr {
+            kind,
+            span,
+            id: NodeId::SYNTH,
+        }
+    }
+}
+
+/// Every node id in a statement list, expression or pattern, with the node's span. One walker
+/// serves renumbering and the uniqueness check, so they cannot disagree about which nodes exist.
+fn ids_in_block(b: &mut [Stmt], f: &mut dyn FnMut(&mut NodeId, Span)) {
+    for s in b {
+        ids_in_stmt(s, f);
+    }
+}
+
+fn ids_in_params(ps: &mut [Param], f: &mut dyn FnMut(&mut NodeId, Span)) {
+    for p in ps {
+        if let Some(d) = &mut p.default {
+            ids_in_expr(d, f);
+        }
+    }
+}
+
+fn ids_in_fn(d: &mut FnDecl, f: &mut dyn FnMut(&mut NodeId, Span)) {
+    ids_in_params(&mut d.params, f);
+    ids_in_block(&mut d.body, f);
+}
+
+fn ids_in_stmt(s: &mut Stmt, f: &mut dyn FnMut(&mut NodeId, Span)) {
+    match &mut s.kind {
+        StmtKind::Let { value, .. } => ids_in_expr(value, f),
+        StmtKind::Assign { target, value, .. } => {
+            ids_in_expr(target, f);
+            ids_in_expr(value, f);
+        }
+        StmtKind::Fn(d) => ids_in_fn(d, f),
+        StmtKind::Struct {
+            fields, methods, ..
+        } => {
+            for fl in fields {
+                if let Some(d) = &mut fl.default {
+                    ids_in_expr(d, f);
+                }
+            }
+            for m in methods {
+                ids_in_fn(m, f);
+            }
+        }
+        StmtKind::Enum { methods, .. } | StmtKind::NewType { methods, .. } => {
+            for m in methods {
+                ids_in_fn(m, f);
+            }
+        }
+        StmtKind::NativeStruct {
+            fields,
+            bodied_methods,
+            methods,
+            ..
+        } => {
+            for fl in fields {
+                if let Some(d) = &mut fl.default {
+                    ids_in_expr(d, f);
+                }
+            }
+            for m in methods {
+                ids_in_params(&mut m.params, f);
+            }
+            for m in bodied_methods {
+                ids_in_fn(m, f);
+            }
+        }
+        StmtKind::NativeEnum { methods, .. } => {
+            for m in methods {
+                ids_in_params(&mut m.params, f);
+            }
+        }
+        StmtKind::Native(d) => ids_in_params(&mut d.params, f),
+        StmtKind::Extern { fns, .. } => {
+            for x in fns {
+                ids_in_params(&mut x.params, f);
+            }
+        }
+        StmtKind::Protocol { methods, .. } => {
+            for m in methods {
+                ids_in_params(&mut m.params, f);
+            }
+        }
+        StmtKind::If {
+            branches,
+            else_block,
+        } => {
+            for (c, b) in branches {
+                ids_in_expr(c, f);
+                ids_in_block(b, f);
+            }
+            if let Some(b) = else_block {
+                ids_in_block(b, f);
+            }
+        }
+        StmtKind::For { iter, body, .. } => {
+            ids_in_expr(iter, f);
+            ids_in_block(body, f);
+        }
+        StmtKind::While { cond, body } => {
+            ids_in_expr(cond, f);
+            ids_in_block(body, f);
+        }
+        StmtKind::Match { scrutinee, arms } => {
+            ids_in_expr(scrutinee, f);
+            for a in arms {
+                ids_in_pattern(&mut a.pattern, f);
+                if let Some(g) = &mut a.guard {
+                    ids_in_expr(g, f);
+                }
+                ids_in_block(&mut a.body, f);
+            }
+        }
+        StmtKind::Return(e) => {
+            if let Some(e) = e {
+                ids_in_expr(e, f);
+            }
+        }
+        StmtKind::Yield(e) | StmtKind::Expr(e) => ids_in_expr(e, f),
+        StmtKind::Defer(DeferTarget::Call(e)) | StmtKind::Spawn(SpawnTarget::Call(e)) => {
+            ids_in_expr(e, f)
+        }
+        StmtKind::Defer(DeferTarget::Block(b))
+        | StmtKind::Spawn(SpawnTarget::Block(b))
+        | StmtKind::Parallel { body: b } => ids_in_block(b, f),
+        StmtKind::Wait { arms, else_block } => {
+            for a in arms {
+                match &mut a.kind {
+                    WaitArmKind::Recv { target, chan } => {
+                        if let WaitTarget::Assign(t) = target {
+                            ids_in_expr(t, f);
+                        }
+                        ids_in_expr(chan, f);
+                    }
+                    WaitArmKind::Send { call } => ids_in_expr(call, f),
+                }
+                ids_in_block(&mut a.body, f);
+            }
+            if let Some(b) = else_block {
+                ids_in_block(b, f);
+            }
+        }
+        StmtKind::Assert { cond, msg } => {
+            ids_in_expr(cond, f);
+            if let Some(m) = msg {
+                ids_in_expr(m, f);
+            }
+        }
+        StmtKind::TypeAlias { .. }
+        | StmtKind::Break
+        | StmtKind::Continue
+        | StmtKind::Pass
+        | StmtKind::Import(_) => {}
+    }
+}
+
+fn ids_in_pattern(p: &mut Pattern, f: &mut dyn FnMut(&mut NodeId, Span)) {
+    match p {
+        Pattern::Ident(_, span, id) => f(id, *span),
+        Pattern::Variant { bindings, id, .. } => {
+            f(id, Span::default());
+            for b in bindings {
+                ids_in_pattern(b, f);
+            }
+        }
+        Pattern::Tuple(ps) | Pattern::Or(ps) => {
+            for b in ps {
+                ids_in_pattern(b, f);
+            }
+        }
+        Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard => {}
+    }
+}
+
+fn ids_in_expr(e: &mut Expr, f: &mut dyn FnMut(&mut NodeId, Span)) {
+    f(&mut e.id, e.span);
+    let go = |x: &mut Expr, f: &mut dyn FnMut(&mut NodeId, Span)| ids_in_expr(x, f);
+    match &mut e.kind {
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Str(_)
+        | ExprKind::Bytes(_)
+        | ExprKind::RawStr(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Pass
+        | ExprKind::Ident(_)
+        | ExprKind::TypeApply { .. } => {}
+        ExprKind::Interp(chunks) => {
+            for c in chunks {
+                if let Chunk::Expr(x, _, nested) = c {
+                    go(x, f);
+                    for n in nested {
+                        go(n, f);
+                    }
+                }
+            }
+        }
+        ExprKind::List(xs, _) | ExprKind::Tuple(xs) | ExprKind::Set(xs) => {
+            for x in xs {
+                go(x, f);
+            }
+        }
+        ExprKind::Compare { operands, .. } => {
+            for x in operands {
+                go(x, f);
+            }
+        }
+        ExprKind::Map(kvs) => {
+            for (k, v) in kvs {
+                go(k, f);
+                go(v, f);
+            }
+        }
+        ExprKind::Comprehension {
+            key, elem, clauses, ..
+        } => {
+            for c in clauses {
+                go(&mut c.iter, f);
+                for g in &mut c.guards {
+                    go(g, f);
+                }
+            }
+            if let Some(k) = key {
+                go(k, f);
+            }
+            go(elem, f);
+        }
+        ExprKind::Unary { expr, .. } => go(expr, f),
+        ExprKind::Binary { lhs, rhs, .. } | ExprKind::NullCoalesce { lhs, rhs, .. } => {
+            go(lhs, f);
+            go(rhs, f);
+        }
+        ExprKind::Range { start, end } => {
+            go(start, f);
+            go(end, f);
+        }
+        ExprKind::Call {
+            callee,
+            args,
+            named,
+            ..
+        } => {
+            go(callee, f);
+            for a in args {
+                go(a, f);
+            }
+            for (_, a) in named {
+                go(a, f);
+            }
+        }
+        ExprKind::Field { obj, .. } | ExprKind::Try(obj) => go(obj, f),
+        ExprKind::Index { obj, index } => {
+            go(obj, f);
+            go(index, f);
+        }
+        ExprKind::Slice {
+            obj,
+            start,
+            end,
+            step,
+        } => {
+            go(obj, f);
+            for x in [start, end, step].into_iter().flatten() {
+                go(x, f);
+            }
+        }
+        ExprKind::OptChain { obj, call, .. } => {
+            go(obj, f);
+            if let Some(c) = call {
+                for a in &mut c.args {
+                    go(a, f);
+                }
+                for (_, a) in &mut c.named {
+                    go(a, f);
+                }
+            }
+        }
+        ExprKind::DecodeCall { obj, arg, .. } => {
+            go(obj, f);
+            go(arg, f);
+        }
+        ExprKind::Closure { params, body, .. } => {
+            ids_in_params(params, f);
+            go(body, f);
+        }
+        ExprKind::Match { scrutinee, arms } => {
+            go(scrutinee, f);
+            for a in arms {
+                ids_in_pattern(&mut a.pattern, f);
+                if let Some(g) = &mut a.guard {
+                    go(g, f);
+                }
+                go(&mut a.body, f);
+            }
+        }
+        ExprKind::IfElse { cond, then, els } => {
+            go(cond, f);
+            go(then, f);
+            go(els, f);
+        }
+        ExprKind::Recover(b) => ids_in_block(b, f),
+    }
+}
+
+/// Give every node of `e` a fresh id: desugar calls it on a subtree it places a second time.
+pub fn renumber_expr(e: &mut Expr) {
+    ids_in_expr(e, &mut |id, _| *id = NodeId::fresh());
+}
+
+/// [`renumber_expr`] for a pattern.
+pub fn renumber_pattern(p: &mut Pattern) {
+    ids_in_pattern(p, &mut |id, _| *id = NodeId::fresh());
+}
+
+/// Every id that appears on two live nodes of `m`, with the second node's span.
+/// [`NodeId::SYNTH`] is ignored. Debug-only callers: it clones the module.
+pub fn duplicate_ids(m: &Module) -> Vec<(u32, Span)> {
+    let mut m = m.clone();
+    let mut seen = std::collections::HashSet::new();
+    let mut dups = Vec::new();
+    ids_in_block(&mut m.stmts, &mut |id, span| {
+        if id.0 != NodeId::SYNTH.0 && !seen.insert(id.0) {
+            dups.push((id.0, span));
+        }
+    });
+    dups
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn parse_module(src: &str) -> Module {
         crate::parser::parse(crate::lexer::tokenize(src).expect("lex")).expect("parse")
+    }
+
+    /// TICKET-180 — two parses of one text get different ids and still compare equal.
+    #[test]
+    fn node_ids_are_equality_neutral() {
+        let a = parse_module("f(1)\n");
+        let b = parse_module("f(1)\n");
+        let id = |m: &Module| match &m.stmts[0].kind {
+            StmtKind::Expr(e) => e.id.0,
+            _ => unreachable!(),
+        };
+        assert_ne!(id(&a), id(&b));
+        assert_eq!(a, b);
+    }
+
+    /// TICKET-180 — a statement placed twice shares every id of its subtree.
+    #[test]
+    fn duplicate_ids_reports_a_cloned_subtree() {
+        let mut m = parse_module("print(1)\n");
+        assert!(duplicate_ids(&m).is_empty());
+        m.stmts.push(m.stmts[0].clone());
+        // `print(1)` is three nodes: the call, its callee and its argument.
+        assert_eq!(duplicate_ids(&m).len(), 3);
+    }
+
+    /// TICKET-180 — renumbering the clone clears the duplicates.
+    #[test]
+    fn renumber_clears_a_duplicate() {
+        let mut m = parse_module("match x:\n    Some(y): print(y)\n    None: pass\n");
+        let mut copy = m.stmts[0].clone();
+        match &mut copy.kind {
+            StmtKind::Match { scrutinee, arms } => {
+                renumber_expr(scrutinee);
+                for a in arms {
+                    renumber_pattern(&mut a.pattern);
+                    for s in &mut a.body {
+                        if let StmtKind::Expr(e) = &mut s.kind {
+                            renumber_expr(e);
+                        }
+                    }
+                }
+            }
+            _ => unreachable!(),
+        }
+        m.stmts.push(copy);
+        assert_eq!(duplicate_ids(&m), vec![]);
     }
 
     /// W12-21 / TICKET-109 — below the depth cap, `chezzi ast` prints exactly the pretty `{:#?}` form.

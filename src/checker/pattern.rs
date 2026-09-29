@@ -17,7 +17,7 @@ impl Checker {
     pub(super) fn bind_subpattern(&mut self, pattern: &Pattern, ty: &Ty, span: Span) -> bool {
         match pattern {
             Pattern::Wildcard => true,
-            Pattern::Ident(name, bind_span) => {
+            Pattern::Ident(name, bind_span, _) => {
                 // A nested bare identifier names a *built-in* nullary variant of the matched type (a
                 // refutable variant match — `Some(None)`, `Ok(Err(e))`), or a fresh binding. User
                 // variants must be written qualified (handled below), never resolved bare here.
@@ -128,6 +128,7 @@ impl Checker {
                 }
             },
             Pattern::Variant {
+                id: _,
                 name,
                 bindings,
                 enum_name,
@@ -403,6 +404,7 @@ impl Checker {
                 self.push_scope();
                 match pattern {
                     Pattern::Variant {
+                        id: _,
                         name,
                         bindings,
                         enum_name,
@@ -449,6 +451,7 @@ impl Checker {
                 self.push_scope();
                 match pattern {
                     Pattern::Variant {
+                        id: _,
                         name,
                         bindings,
                         enum_name,
@@ -602,6 +605,7 @@ impl Checker {
                     // registry, so a colliding name would trap on the VM; reject
                     // it here at check time instead. (Rename the binding to fix.)
                     Pattern::Variant {
+                        id: _,
                         name,
                         bindings,
                         enum_name,
@@ -635,6 +639,7 @@ impl Checker {
                         return true;
                     }
                     Pattern::Variant {
+                        id: _,
                         bindings,
                         enum_name,
                         name,
@@ -681,6 +686,7 @@ impl Checker {
                 // whole-scrutinee catch-all on a tuple too (`rest:`), the same predicate the struct
                 // arm uses — irrefutable, and the name binds the whole tuple.
                 if let Pattern::Variant {
+                    id: _,
                     name,
                     bindings,
                     enum_name: None,
@@ -716,6 +722,7 @@ impl Checker {
                 self.push_scope();
                 match pattern {
                     Pattern::Variant {
+                        id: _,
                         name,
                         bindings,
                         enum_name,
@@ -4252,6 +4259,7 @@ impl Checker {
         self.push_scope();
         self.declare(&name, t);
         Expr {
+            id: crate::ast::NodeId::fresh(),
             kind: ExprKind::Ident(name),
             span: Span::default(),
         }

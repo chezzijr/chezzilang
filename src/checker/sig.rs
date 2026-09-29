@@ -5742,6 +5742,7 @@ impl Checker {
                     structural.get_or_insert("tuple");
                 }
                 Pattern::Variant {
+                    id: _,
                     name,
                     enum_name,
                     module_name,

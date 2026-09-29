@@ -2954,6 +2954,7 @@ impl Compiler {
         let acc_slot = fc.emit_decl_named(acc_name.clone(), span);
 
         let acc = Expr {
+            id: crate::ast::NodeId::SYNTH,
             kind: ExprKind::Ident(acc_name),
             span,
         };
@@ -2965,6 +2966,7 @@ impl Compiler {
                 Stmt {
                     kind: StmtKind::Assign {
                         target: Expr {
+                            id: crate::ast::NodeId::SYNTH,
                             kind: ExprKind::Index {
                                 obj: Box::new(acc),
                                 index: Box::new(key),
@@ -3167,7 +3169,7 @@ impl Compiler {
 
     fn collect_binding_names(&self, p: &Pattern, out: &mut std::collections::BTreeSet<String>) {
         match p {
-            Pattern::Ident(n, _) if !self.is_nullary_variant(None, n) => {
+            Pattern::Ident(n, _, _) if !self.is_nullary_variant(None, n) => {
                 out.insert(n.clone());
             }
             Pattern::Ident(..) => {}
@@ -3303,7 +3305,7 @@ impl Compiler {
     ) -> Result<(), CompileError> {
         match pattern {
             Pattern::Wildcard => {}
-            Pattern::Ident(name, _) => {
+            Pattern::Ident(name, _, _) => {
                 // A nested bare identifier naming a known NULLARY variant is a refutable
                 // variant match (`Some(None)`, `Ok(Err(e))` — the checker has promoted it); it
                 // binds nothing and is tested like a top-level nullary variant. Otherwise it is a
@@ -3411,7 +3413,7 @@ impl Compiler {
                 let bind_start = fc.next_slot();
                 for b in bindings {
                     match b {
-                        Pattern::Ident(n, _)
+                        Pattern::Ident(n, _, _)
                             if !self.is_nullary_variant(None, n) && !fc.is_boxed_name(n) =>
                         {
                             fc.add_local(n.clone());
@@ -3441,10 +3443,10 @@ impl Compiler {
                 for (i, b) in bindings.iter().enumerate() {
                     match b {
                         // Unboxed plain binding — the VM wrote it straight into its user slot.
-                        Pattern::Ident(n, _)
+                        Pattern::Ident(n, _, _)
                             if !self.is_nullary_variant(None, n) && !fc.is_boxed_name(n) => {}
                         // Boxed plain binding — bind the user cell from the raw slot the VM wrote.
-                        Pattern::Ident(n, _) if !self.is_nullary_variant(None, n) => {
+                        Pattern::Ident(n, _, _) if !self.is_nullary_variant(None, n) => {
                             fc.emit_hidden_get(bind_start + i, span);
                             fc.emit_decl_named(n.clone(), span);
                         }
@@ -4070,8 +4072,10 @@ impl Compiler {
                 // Reuse the module's own `parse` (`obj.parse(arg)` → Result[Json]), then coerce the
                 // parsed value into the target type with a descriptor built from `ty`.
                 let parse_call = Expr {
+                    id: crate::ast::NodeId::SYNTH,
                     kind: ExprKind::Call {
                         callee: Box::new(Expr {
+                            id: crate::ast::NodeId::SYNTH,
                             kind: ExprKind::Field {
                                 obj: obj.clone(),
                                 name: "parse".to_string(),
@@ -4847,6 +4851,7 @@ impl Compiler {
                 let n = format!("$a{i}");
                 child.add_local(n.clone());
                 Expr {
+                    id: crate::ast::NodeId::SYNTH,
                     kind: ExprKind::Ident(n),
                     span,
                 }
@@ -5899,6 +5904,7 @@ impl Compiler {
 /// accumulation into a method call the existing codegen already handles).
 fn method_call_stmt(obj: Expr, method: &str, args: Vec<Expr>, span: Span) -> Stmt {
     let callee = Expr {
+        id: crate::ast::NodeId::SYNTH,
         kind: ExprKind::Field {
             obj: Box::new(obj),
             name: method.to_string(),
@@ -5908,6 +5914,7 @@ fn method_call_stmt(obj: Expr, method: &str, args: Vec<Expr>, span: Span) -> Stm
     };
     Stmt {
         kind: StmtKind::Expr(Expr {
+            id: crate::ast::NodeId::SYNTH,
             kind: ExprKind::Call {
                 callee: Box::new(callee),
                 args,
@@ -6098,7 +6105,7 @@ fn captured_names_of_body(body: &Block, params: &[crate::ast::Param]) -> HashSet
 /// Collect the binding names of a `match`/tuple/variant [`Pattern`] into `out`.
 pub(crate) fn pattern_binds(p: &Pattern, out: &mut HashSet<String>) {
     match p {
-        Pattern::Ident(n, _) => {
+        Pattern::Ident(n, _, _) => {
             out.insert(n.clone());
         }
         // TICKET-139/W14-1 + DEC-107: a bare, payload-free, unqualified name (`whole:`) is a
@@ -6106,6 +6113,7 @@ pub(crate) fn pattern_binds(p: &Pattern, out: &mut HashSet<String>) {
         // so capture analysis must see it or the slot is never boxed and the closure's `CellLoad`
         // reads a raw value.
         Pattern::Variant {
+            id: _,
             name,
             bindings,
             enum_name: None,

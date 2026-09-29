@@ -2729,7 +2729,7 @@ fn first_duplicate_binder(p: &Pattern, is_binder: &impl Fn(&str) -> bool) -> Opt
         is_binder: &impl Fn(&str) -> bool,
     ) -> Option<String> {
         match p {
-            Pattern::Ident(n, _) => {
+            Pattern::Ident(n, _, _) => {
                 if !is_binder(n) {
                     return None;
                 }
@@ -3644,7 +3644,7 @@ fn lit_pattern_ty(lit: &LitPattern) -> Ty {
 /// top-level bare catch-all of the same spelling (parsed as a nullary `Variant`).
 fn pattern_binds(p: &Pattern, name: &str) -> bool {
     match p {
-        Pattern::Ident(s, _) => s == name,
+        Pattern::Ident(s, _, _) => s == name,
         // A nullary bare-name pattern (`Variant{ bindings: [] }`) is a catch-all binding when it
         // names neither a qualified variant nor a payload — scope-conservatively, a same-spelling one
         // shadows. A payload variant's bindings are sub-positions; recurse.

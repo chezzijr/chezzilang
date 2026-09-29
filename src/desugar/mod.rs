@@ -2707,6 +2707,7 @@ impl Walker<'_> {
                         .or_insert_with(|| (module.clone(), site));
                 }
                 out.push(Expr {
+                    id: crate::ast::NodeId::fresh(),
                     kind: ExprKind::Call {
                         callee: Box::new(ident_expr(name, site)),
                         args: Vec::new(),
@@ -2725,6 +2726,7 @@ impl Walker<'_> {
                         .or_insert_with(|| (module.clone(), site));
                 }
                 out.push(Expr {
+                    id: crate::ast::NodeId::fresh(),
                     kind: ExprKind::Call {
                         callee: Box::new(ident_expr(name, site)),
                         args: Vec::new(),
@@ -2764,8 +2766,10 @@ impl Walker<'_> {
             return Ok(());
         };
         let mut tmp = Expr {
+            id: crate::ast::NodeId::fresh(),
             kind: ExprKind::Call {
                 callee: Box::new(Expr {
+                    id: crate::ast::NodeId::fresh(),
                     kind: ExprKind::Field {
                         obj: obj.clone(),
                         name: name.clone(),
@@ -3060,6 +3064,7 @@ impl Walker<'_> {
             // so a positional can never land in a keyword-only slot.
             let elems: Vec<Expr> = positional.into_iter().skip(v).flatten().collect();
             out.push(Expr {
+                id: crate::ast::NodeId::fresh(),
                 // `Some(..)` marks this as the synthesized pack, NOT a list the user wrote: `span` is
                 // the CALL's, which a pipe shares with the LHS primary, so the pack and a piped list
                 // literal would otherwise key the same span-keyed table slot. See `ExprKind::List`.
@@ -3197,7 +3202,7 @@ impl Walker<'_> {
 /// Collect the binding names introduced by a `match` pattern.
 fn bind_pattern(pat: &Pattern, f: &mut impl FnMut(String)) {
     match pat {
-        Pattern::Ident(n, _) => f(n.clone()),
+        Pattern::Ident(n, _, _) => f(n.clone()),
         Pattern::Variant { bindings, .. } | Pattern::Tuple(bindings) | Pattern::Or(bindings) => {
             for b in bindings {
                 bind_pattern(b, f);
@@ -3222,6 +3227,7 @@ fn err(span: crate::lexer::Span, message: String) -> ResolveError {
 /// A nullary-or-payload variant pattern (`Some(__c)` / `None`) for desugared opt-chain `match` arms.
 fn variant_pat(name: &str, bindings: Vec<Pattern>) -> Pattern {
     Pattern::Variant {
+        id: crate::ast::NodeId::fresh(),
         name: name.to_string(),
         bindings,
         enum_name: None,
@@ -3256,7 +3262,11 @@ pub fn lower_carrier_option(expr: &mut Expr, tmp: usize) {
                         span: arm_span,
                         pattern: variant_pat(
                             "Some",
-                            vec![Pattern::Ident(c.clone(), Span::default())],
+                            vec![Pattern::Ident(
+                                c.clone(),
+                                Span::default(),
+                                crate::ast::NodeId::fresh(),
+                            )],
                         ),
                         guard: None,
                         body: ident_expr(&c, span),
@@ -3280,6 +3290,7 @@ pub fn lower_carrier_option(expr: &mut Expr, tmp: usize) {
             // `span` is the primary's span, shared by every link of a chain, so two synthesized
             // method callees in one chain would collide on a single `WitnessKey`.
             let field = Expr {
+                id: crate::ast::NodeId::fresh(),
                 kind: ExprKind::Field {
                     obj: Box::new(ident_expr(&c, span)),
                     name,
@@ -3295,6 +3306,7 @@ pub fn lower_carrier_option(expr: &mut Expr, tmp: usize) {
                     named,
                     type_args,
                 }) => Expr {
+                    id: crate::ast::NodeId::fresh(),
                     kind: ExprKind::Call {
                         callee: Box::new(field),
                         args,
@@ -3305,6 +3317,7 @@ pub fn lower_carrier_option(expr: &mut Expr, tmp: usize) {
                 },
             };
             let some_body = Expr {
+                id: crate::ast::NodeId::fresh(),
                 kind: ExprKind::Call {
                     callee: Box::new(ident_expr("Some", span)),
                     args: vec![access],
@@ -3319,7 +3332,14 @@ pub fn lower_carrier_option(expr: &mut Expr, tmp: usize) {
                 arms: vec![
                     MatchExprArm {
                         span: arm_span,
-                        pattern: variant_pat("Some", vec![Pattern::Ident(c, Span::default())]),
+                        pattern: variant_pat(
+                            "Some",
+                            vec![Pattern::Ident(
+                                c,
+                                Span::default(),
+                                crate::ast::NodeId::fresh(),
+                            )],
+                        ),
                         guard: None,
                         body: some_body,
                     },
@@ -3358,7 +3378,14 @@ pub fn lower_carrier_result_coalesce(expr: &mut Expr, tmp: usize) {
         arms: vec![
             MatchExprArm {
                 span: arm_span,
-                pattern: variant_pat("Ok", vec![Pattern::Ident(c.clone(), Span::default())]),
+                pattern: variant_pat(
+                    "Ok",
+                    vec![Pattern::Ident(
+                        c.clone(),
+                        Span::default(),
+                        crate::ast::NodeId::fresh(),
+                    )],
+                ),
                 guard: None,
                 body: ident_expr(&c, span),
             },
@@ -3398,8 +3425,10 @@ pub fn lower_carrier_try(expr: &mut Expr) {
         );
     };
     let field = Expr {
+        id: crate::ast::NodeId::fresh(),
         kind: ExprKind::Field {
             obj: Box::new(Expr {
+                id: crate::ast::NodeId::fresh(),
                 kind: ExprKind::Try(obj),
                 span,
             }),
@@ -3475,6 +3504,7 @@ fn module_level_names(
 /// A bare identifier expression at `span`.
 fn ident_expr(name: &str, span: Span) -> Expr {
     Expr {
+        id: crate::ast::NodeId::fresh(),
         kind: ExprKind::Ident(name.to_string()),
         span,
     }
@@ -4252,7 +4282,7 @@ mod tests {
         };
         assert_eq!(name, "Ok");
         assert_eq!(bindings.len(), 1);
-        assert!(matches!(&bindings[0], Pattern::Ident(n, _) if n == "__opt0"));
+        assert!(matches!(&bindings[0], Pattern::Ident(n, _, _) if n == "__opt0"));
         let Pattern::Variant { name, bindings, .. } = &arms[1].pattern else {
             panic!("expected a variant pattern, got {:?}", arms[1].pattern)
         };
@@ -4284,7 +4314,7 @@ mod tests {
             let Pattern::Variant { bindings, .. } = &arms[0].pattern else {
                 panic!("variant")
             };
-            let Pattern::Ident(n, _) = &bindings[0] else {
+            let Pattern::Ident(n, _, _) = &bindings[0] else {
                 panic!("ident binding")
             };
             n.clone()

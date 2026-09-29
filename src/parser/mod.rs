@@ -678,6 +678,7 @@ impl Parser {
                     }
                     let value_span = values[0].span;
                     Expr {
+                        id: crate::ast::NodeId::fresh(),
                         kind: ExprKind::Tuple(values),
                         span: value_span,
                     }
@@ -758,12 +759,14 @@ impl Parser {
                     });
                 }
                 Expr {
+                    id: crate::ast::NodeId::fresh(),
                     kind: ExprKind::Tuple(values),
                     span: value_span,
                 }
             };
             return Ok(StmtKind::Assign {
                 target: Expr {
+                    id: crate::ast::NodeId::fresh(),
                     kind: ExprKind::Tuple(targets),
                     span: target_span,
                 },
@@ -1821,6 +1824,7 @@ impl Parser {
         }
         self.expect(&Token::Dedent)?;
         Ok(Expr {
+            id: crate::ast::NodeId::fresh(),
             kind: ExprKind::Match {
                 scrutinee: Box::new(scrutinee),
                 arms,
@@ -1848,6 +1852,7 @@ impl Parser {
             self.parse_expr()?
         };
         Ok(Expr {
+            id: crate::ast::NodeId::fresh(),
             kind: ExprKind::IfElse {
                 cond: Box::new(cond),
                 then: Box::new(then),
@@ -1862,6 +1867,7 @@ impl Parser {
     fn parse_recover_expr(&mut self, span: Span) -> PResult<Expr> {
         let body = self.parse_block()?;
         Ok(Expr {
+            id: crate::ast::NodeId::fresh(),
             kind: ExprKind::Recover(body),
             span,
         })
@@ -2020,6 +2026,7 @@ impl Parser {
             }
             self.expect(&Token::RParen)?;
             return Ok(Pattern::Variant {
+                id: crate::ast::NodeId::fresh(),
                 name,
                 bindings,
                 enum_name,
@@ -2030,13 +2037,14 @@ impl Parser {
         // A qualified `Enum.Variant` is unambiguously a nullary variant in either position.
         if top || enum_name.is_some() {
             Ok(Pattern::Variant {
+                id: crate::ast::NodeId::fresh(),
                 name,
                 bindings: Vec::new(),
                 enum_name,
                 module_name,
             })
         } else {
-            Ok(Pattern::Ident(name, name_span))
+            Ok(Pattern::Ident(name, name_span, crate::ast::NodeId::fresh()))
         }
     }
 
@@ -2545,6 +2553,7 @@ impl Parser {
             self.advance();
             let expr = self.parse_bp(NOT_BP)?;
             Expr {
+                id: crate::ast::NodeId::fresh(),
                 kind: ExprKind::Unary {
                     op: UnaryOp::Not,
                     expr: Box::new(expr),
@@ -2591,6 +2600,7 @@ impl Parser {
                     }
                     if ops.len() == 1 {
                         Expr {
+                            id: crate::ast::NodeId::fresh(),
                             kind: ExprKind::Binary {
                                 op: ops[0],
                                 lhs: Box::new(operands.remove(0)),
@@ -2600,12 +2610,14 @@ impl Parser {
                         }
                     } else {
                         Expr {
+                            id: crate::ast::NodeId::fresh(),
                             kind: ExprKind::Compare { operands, ops },
                             span,
                         }
                     }
                 }
                 InfixOp::Bin(op) => Expr {
+                    id: crate::ast::NodeId::fresh(),
                     kind: ExprKind::Binary {
                         op,
                         lhs: Box::new(lhs),
@@ -2614,6 +2626,7 @@ impl Parser {
                     span,
                 },
                 InfixOp::Range => Expr {
+                    id: crate::ast::NodeId::fresh(),
                     kind: ExprKind::Range {
                         start: Box::new(lhs),
                         end: Box::new(rhs),
@@ -2621,6 +2634,7 @@ impl Parser {
                     span,
                 },
                 InfixOp::Coalesce => Expr {
+                    id: crate::ast::NodeId::fresh(),
                     kind: ExprKind::NullCoalesce {
                         lhs: Box::new(lhs),
                         rhs: Box::new(rhs),
@@ -2648,6 +2662,7 @@ impl Parser {
                         new_args.push(lhs);
                         new_args.extend(args);
                         Expr {
+                            id: crate::ast::NodeId::fresh(),
                             kind: ExprKind::Call {
                                 callee,
                                 args: new_args,
@@ -2689,12 +2704,14 @@ impl Parser {
             if matches!(op, UnaryOp::Neg) && matches!(self.peek(), Token::IntMinMagnitude) {
                 self.advance();
                 Ok(Expr {
+                    id: crate::ast::NodeId::fresh(),
                     kind: ExprKind::Int(i64::MIN),
                     span,
                 })
             } else {
                 let expr = self.parse_unary()?;
                 Ok(Expr {
+                    id: crate::ast::NodeId::fresh(),
                     kind: ExprKind::Unary {
                         op,
                         expr: Box::new(expr),
@@ -2730,6 +2747,7 @@ impl Parser {
                     self.advance();
                     let (args, named) = self.parse_call_args()?;
                     Expr {
+                        id: crate::ast::NodeId::fresh(),
                         kind: ExprKind::Call {
                             callee: Box::new(e),
                             args,
@@ -2780,6 +2798,7 @@ impl Parser {
                     match decode {
                         Some(expr) => expr,
                         None => Expr {
+                            id: crate::ast::NodeId::fresh(),
                             kind: ExprKind::Field {
                                 obj: Box::new(e),
                                 name,
@@ -2838,6 +2857,7 @@ impl Parser {
                 Token::Question => {
                     self.advance();
                     Expr {
+                        id: crate::ast::NodeId::fresh(),
                         kind: ExprKind::Try(Box::new(e)),
                         span,
                     }
@@ -2871,6 +2891,7 @@ impl Parser {
                         None
                     };
                     Expr {
+                        id: crate::ast::NodeId::fresh(),
                         kind: ExprKind::OptChain {
                             obj: Box::new(e),
                             name,
@@ -2911,6 +2932,7 @@ impl Parser {
                 span,
             })?;
             return Ok(Expr {
+                id: crate::ast::NodeId::fresh(),
                 kind: ExprKind::Index {
                     obj: Box::new(obj),
                     index,
@@ -2928,6 +2950,7 @@ impl Parser {
         };
         self.expect(&Token::RBracket)?;
         Ok(Expr {
+            id: crate::ast::NodeId::fresh(),
             kind: ExprKind::Slice {
                 obj: Box::new(obj),
                 start,
@@ -3024,6 +3047,7 @@ impl Parser {
             return Ok(None);
         }
         Ok(Some(Expr {
+            id: crate::ast::NodeId::fresh(),
             kind: ExprKind::TypeApply {
                 name: name.clone(),
                 args,
@@ -3074,6 +3098,7 @@ impl Parser {
             ));
         }
         Ok(Some(Expr {
+            id: crate::ast::NodeId::fresh(),
             kind: ExprKind::Call {
                 callee: Box::new(callee.clone()),
                 args,
@@ -3097,6 +3122,7 @@ impl Parser {
             return None;
         }
         Some(Expr {
+            id: crate::ast::NodeId::fresh(),
             kind: ExprKind::DecodeCall {
                 obj: Box::new(obj),
                 ty,
@@ -3257,7 +3283,11 @@ impl Parser {
                 });
             }
         };
-        Ok(Expr { kind, span })
+        Ok(Expr {
+            id: crate::ast::NodeId::fresh(),
+            kind,
+            span,
+        })
     }
 
     /// `fn(params) [-> ret]: expr` — the `fn` keyword has already been consumed.
@@ -3275,6 +3305,7 @@ impl Parser {
             let pass_span = self.cur_span();
             self.advance();
             Expr {
+                id: crate::ast::NodeId::fresh(),
                 kind: ExprKind::Pass,
                 span: pass_span,
             }
@@ -3282,6 +3313,7 @@ impl Parser {
             self.parse_expr()?
         };
         Ok(Expr {
+            id: crate::ast::NodeId::fresh(),
             kind: ExprKind::Closure {
                 params,
                 ret,
@@ -5562,13 +5594,14 @@ mod tests {
                     Pattern::Variant { name, bindings, .. } => {
                         assert_eq!(name, "Circle");
                         assert_eq!(bindings.len(), 1);
-                        assert!(matches!(&bindings[0], Pattern::Ident(n, _) if n == "r"));
+                        assert!(matches!(&bindings[0], Pattern::Ident(n, _, _) if n == "r"));
                     }
                     other => panic!("{other:?}"),
                 }
                 assert!(
                     arms[2].pattern
                         == Pattern::Variant {
+                            id: crate::ast::NodeId::fresh(),
                             name: "Point".into(),
                             bindings: vec![],
                             enum_name: None,
@@ -6975,6 +7008,7 @@ mod tests {
         assert_eq!(arms.len(), 2);
         match &arms[0].pattern {
             Pattern::Variant {
+                id: _,
                 name,
                 bindings,
                 enum_name,
@@ -6984,7 +7018,7 @@ mod tests {
                 assert_eq!(enum_name.as_deref(), Some("Shape"));
                 assert_eq!(module_name, &None);
                 assert_eq!(bindings.len(), 1);
-                assert!(matches!(&bindings[0], Pattern::Ident(n, _) if n == "r"));
+                assert!(matches!(&bindings[0], Pattern::Ident(n, _, _) if n == "r"));
             }
             other => panic!("{other:?}"),
         }
@@ -7627,7 +7661,7 @@ mod tests {
             Pattern::Tuple(elems) => {
                 assert_eq!(elems.len(), 2);
                 assert!(matches!(&elems[0], Pattern::Or(a) if a.len() == 2));
-                assert!(matches!(&elems[1], Pattern::Ident(n, _) if n == "x"));
+                assert!(matches!(&elems[1], Pattern::Ident(n, _, _) if n == "x"));
             }
             other => panic!("{other:?}"),
         }
@@ -7659,7 +7693,7 @@ mod tests {
             } => {
                 assert_eq!(name, "Circle");
                 assert_eq!(enum_name.as_deref(), Some("Shape"));
-                assert!(matches!(&bindings[0], Pattern::Ident(n, _) if n == "r"));
+                assert!(matches!(&bindings[0], Pattern::Ident(n, _, _) if n == "r"));
             }
             other => panic!("{other:?}"),
         }
@@ -7699,6 +7733,7 @@ mod tests {
         // Variant{name:"Red", enum_name:Some("Color"), module_name:Some("geo")}.
         match first_arm_pattern("match c:\n    geo.Color.Red: print(0)\n    _: print(1)\n") {
             Pattern::Variant {
+                id: _,
                 name,
                 bindings,
                 enum_name,
@@ -7728,6 +7763,7 @@ mod tests {
         // Payload binding `geo.Shape.Circle(r)`.
         match first_arm_pattern("match s:\n    geo.Shape.Circle(r): print(r)\n    _: print(0)\n") {
             Pattern::Variant {
+                id: _,
                 name,
                 bindings,
                 enum_name,
@@ -7736,7 +7772,7 @@ mod tests {
                 assert_eq!(name, "Circle");
                 assert_eq!(enum_name.as_deref(), Some("Shape"));
                 assert_eq!(module_name.as_deref(), Some("geo"));
-                assert!(matches!(&bindings[0], Pattern::Ident(n, _) if n == "r"));
+                assert!(matches!(&bindings[0], Pattern::Ident(n, _, _) if n == "r"));
             }
             other => panic!("{other:?}"),
         }
@@ -7764,8 +7800,8 @@ mod tests {
                 match &bindings[0] {
                     Pattern::Or(alts) => {
                         assert_eq!(alts.len(), 2);
-                        assert!(matches!(&alts[0], Pattern::Ident(n, _) if n == "a"));
-                        assert!(matches!(&alts[1], Pattern::Ident(n, _) if n == "b"));
+                        assert!(matches!(&alts[0], Pattern::Ident(n, _, _) if n == "a"));
+                        assert!(matches!(&alts[1], Pattern::Ident(n, _, _) if n == "b"));
                     }
                     other => panic!("{other:?}"),
                 }
@@ -7790,7 +7826,7 @@ mod tests {
             Pattern::Variant { name, bindings, .. } => {
                 assert_eq!(name, "Some");
                 assert_eq!(bindings.len(), 1);
-                assert!(matches!(&bindings[0], Pattern::Ident(n, _) if n == "None"));
+                assert!(matches!(&bindings[0], Pattern::Ident(n, _, _) if n == "None"));
             }
             other => panic!("{other:?}"),
         }
@@ -7805,7 +7841,7 @@ mod tests {
                 match &bindings[0] {
                     Pattern::Variant { name, bindings, .. } => {
                         assert_eq!(name, "Err");
-                        assert!(matches!(&bindings[0], Pattern::Ident(n, _) if n == "e"));
+                        assert!(matches!(&bindings[0], Pattern::Ident(n, _, _) if n == "e"));
                     }
                     other => panic!("{other:?}"),
                 }

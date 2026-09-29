@@ -149,7 +149,7 @@ impl Checker {
         }
         match pattern {
             Pattern::Wildcard => vec![Pat::Wild],
-            Pattern::Ident(name, _) => {
+            Pattern::Ident(name, _, _) => {
                 if let Dom::Sum(_, members) = dom
                     && members.iter().any(|(n, p)| n == name && p.is_empty())
                     && crate::checker::is_builtin_variant(name)
@@ -179,6 +179,7 @@ impl Checker {
                 _ => vec![Pat::Never],
             },
             Pattern::Variant {
+                id: _,
                 name,
                 bindings,
                 enum_name,
