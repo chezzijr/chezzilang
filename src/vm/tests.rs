@@ -21435,3 +21435,37 @@ fn ticket126_cancel_gen_bump_is_release_and_the_gate_read_is_acquire() {
         );
     }
 }
+
+/// TICKET-185 (Family A, wave 17): a cap-0 `send` must return only once a receiver has TAKEN the
+/// value. A sender that `recv`s right after its `send` must never take its own value back.
+/// Go prints `got 1` / `back 2`; Chezzi printed `back 1` then a false `deadlock`.
+#[test]
+fn unbuffered_send_never_returns_its_own_value_to_the_sender() {
+    let src = r#"fn main():
+    ch := Channel[int](0)
+    parallel:
+        spawn:
+            print("got", ch.recv())
+            ch.send(2)
+        spawn:
+            spin := 0
+            for i in 0..2000000:
+                spin += i
+            ch.send(1)
+            print("back", ch.recv())
+main()
+"#;
+    for _ in 0..5 {
+        let out = run_capture(src);
+        let lines: Vec<String> = match &out {
+            Ok(s) => s.lines().map(str::to_string).collect(),
+            Err(e) => vec![format!("fault: {}", e.message)],
+        };
+        assert!(
+            out.is_ok()
+                && lines.contains(&"got 1".to_string())
+                && lines.contains(&"back 2".to_string()),
+            "sender took its own value back: {out:?}"
+        );
+    }
+}
