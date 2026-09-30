@@ -3995,6 +3995,61 @@ fn chan_state_offer_commits_exactly_once() {
     assert!(cs.pop().is_none(), "a cancelled offer is dead");
 }
 
+/// TICKET-185 — a `recv` whose own slot a sender's `give` filled wakes no sender: the giver
+/// committed and already returned, and a slot fill commits nobody else. The wake it used to run
+/// took the registry and sched locks on the hand-off's critical path while the other side ran,
+/// which is most of `rendezvous_pingpong`'s cost at T>=2. The `wait:` settle path already skips it.
+#[test]
+fn a_recv_settled_from_its_own_filled_slot_wakes_no_sender() {
+    use crate::vm::core::{Pending, PendingOp, SendOutcome};
+    let mut vm = Vm::new(Arc::new(empty_program()));
+    let sched = Arc::new(mk_sched(1));
+    vm.mn = Some(Arc::clone(&sched));
+    let core = t185_core(Some(0));
+    let h = vm.heap.alloc(Obj::Channel(Arc::clone(&core)));
+    let p = Pending::new();
+    core.q.lock().unwrap().slot(&p, 0);
+    let out = core
+        .q
+        .lock()
+        .unwrap()
+        .send(Some(0), t185_sum(5), WireValue::Int(5), None);
+    assert!(matches!(out, SendOutcome::Sent), "the give fills the slot");
+    vm.pending = Some(PendingOp::new(p, vec![(Arc::clone(&core), 0, false)]));
+    let v = vm.channel_method(h, "recv", &[], Span::RUNTIME).unwrap();
+    assert_eq!(v.as_int(), 5);
+    assert_eq!(
+        sched.recv_side_wakes.load(Ordering::Relaxed),
+        0,
+        "a recv from its own filled slot must wake no sender"
+    );
+}
+
+/// TICKET-185 — the neighbour that must keep its wake: a `recv` that takes a parked sender's offer
+/// commits that sender, so it wakes it.
+#[test]
+fn a_recv_that_takes_an_offer_still_wakes_its_sender() {
+    use crate::vm::core::{PENDING_DONE, Pending};
+    let mut vm = Vm::new(Arc::new(empty_program()));
+    let sched = Arc::new(mk_sched(1));
+    vm.mn = Some(Arc::clone(&sched));
+    let core = t185_core(Some(0));
+    let h = vm.heap.alloc(Obj::Channel(Arc::clone(&core)));
+    let q = Pending::new();
+    core.q
+        .lock()
+        .unwrap()
+        .offer(&q, 0, t185_sum(7), WireValue::Int(7));
+    let v = vm.channel_method(h, "recv", &[], Span::RUNTIME).unwrap();
+    assert_eq!(v.as_int(), 7);
+    assert_eq!(q.state(), PENDING_DONE, "the recv committed the offer");
+    assert_eq!(
+        sched.recv_side_wakes.load(Ordering::Relaxed),
+        1,
+        "a recv that took an offer must wake its sender"
+    );
+}
+
 /// TICKET-185: `give` fills only a live, unfilled slot that is not the caller's own. A cancelled
 /// slot is skipped (and dropped), a filled one is skipped, and the caller's own slot — a `wait:`
 /// with a send arm and a recv arm on one cap-0 channel — is never committed.

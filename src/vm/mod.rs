@@ -2359,6 +2359,9 @@ struct MnSched {
     /// [`run_capture_counting_picks`].
     #[cfg(test)]
     picks: AtomicUsize,
+    /// TICKET-185 — receiver-side sender wakes ([`Self::handoff_wake`] calls). Test-only.
+    #[cfg(test)]
+    recv_side_wakes: AtomicUsize,
 }
 
 /// Cross-nursery flat scheduler (M:N) — one nursery's JOIN RECORD (Trio/Go-style: structured
@@ -2806,6 +2809,8 @@ impl MnSched {
             blocked_body_helpers: Mutex::new(Vec::new()),
             #[cfg(test)]
             picks: AtomicUsize::new(0),
+            #[cfg(test)]
+            recv_side_wakes: AtomicUsize::new(0),
         }
     }
 
@@ -3886,6 +3891,8 @@ impl MnSched {
         wid: usize,
         recruit: bool,
     ) {
+        #[cfg(test)]
+        self.recv_side_wakes.fetch_add(1, Ordering::Relaxed);
         let mut c = self.lock();
         let n = self.wake_bucket(&mut c, key, kind);
         self.hand_off(c, n, wid, recruit);
@@ -5880,8 +5887,14 @@ enum SockPoll {
 /// a value was dequeued, the channel is closed-and-drained, or the fiber parked (re-runs on wake).
 /// Shared by bare `recv` (`Got` → value, `ClosedEmpty` → "receive on a closed channel" fault) and
 /// the `ChanRecvOrClosed` op driving `for v in ch:` (`Got` → `Some(v)`, `ClosedEmpty` → `None`).
+///
+/// TICKET-185 — `Filled` is a value a sender's `give` put into this receiver's own slot. That
+/// `give` committed the receiver and nobody else, and the giver has already returned, so the
+/// caller wakes no sender for it (the `wait:` settle path in `Vm::op_wait_poll` never did). `Got`
+/// is every other value — a buffered one, or a parked sender's offer, whose sender must be woken.
 enum RecvStep {
     Got(WireValue),
+    Filled(WireValue),
     ClosedEmpty,
     Parked,
 }

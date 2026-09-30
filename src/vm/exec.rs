@@ -2752,6 +2752,12 @@ impl Vm {
                         let opt = self.alloc_enum("Option", "Some", vec![val]);
                         self.push(opt);
                     }
+                    // A `give` filled this receiver's own slot: it committed no sender.
+                    RecvStep::Filled(w) => {
+                        let val = self.from_wire(w);
+                        let opt = self.alloc_enum("Option", "Some", vec![val]);
+                        self.push(opt);
+                    }
                     RecvStep::ClosedEmpty => {
                         let opt = self.alloc_enum("Option", "None", vec![]);
                         self.push(opt);

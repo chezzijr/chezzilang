@@ -1655,7 +1655,7 @@ impl Vm {
         // A filled slot is a delivered value: it outranks every other way out of this block.
         let finish =
             |op: crate::vm::core::PendingOp, r: Result<RecvStep, RuntimeError>| match op.settle() {
-                crate::vm::core::Settled::Got(_, w) => Ok(RecvStep::Got(w)),
+                crate::vm::core::Settled::Got(_, w) => Ok(RecvStep::Filled(w)),
                 _ => r,
             };
         // 1. Account running → a registered waiter AND register the channel (#1 fix), under core lock A, then

@@ -1601,6 +1601,8 @@ impl Vm {
                         self.wake_senders(h); // freed a slot — wake a parked bounded sender
                         Ok(self.from_wire(w))
                     }
+                    // A `give` filled this receiver's own slot: it committed no sender.
+                    RecvStep::Filled(w) => Ok(self.from_wire(w)),
                     // `chan_recv_step` already re-rooted the receiver + set `suspend`; the sentinel is
                     // never observed (`do_method_call` gates the result-push on `suspend`).
                     RecvStep::Parked => Ok(Value::nil()),
@@ -1949,7 +1951,7 @@ impl Vm {
         if let Some(op) = self.pending.take()
             && let Settled::Got(_, w) = op.settle()
         {
-            return Ok(RecvStep::Got(w));
+            return Ok(RecvStep::Filled(w));
         }
         // W7-17 — `--timeout` ABOVE the cancellation checkpoint, because the deadline outranks a cancel
         // and because ending a timer park early TRIPS this fiber's cancel to close the park gap
@@ -2572,7 +2574,7 @@ impl Vm {
             drop(party);
             // Settle before acting on a fault: a filled slot is a delivered value.
             if let Settled::Got(_, w) = op.settle() {
-                return Ok(RecvStep::Got(w));
+                return Ok(RecvStep::Filled(w));
             }
             r?;
         }
