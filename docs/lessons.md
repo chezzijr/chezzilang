@@ -79,6 +79,15 @@
      and get the owner's decision on anything that changes the language before filing.
   The fixes that held on this project all *deleted* a copy; a fix that only adds code in a family with
   siblings is almost always the next bug's parent.
+- **Derive the grid's axes from every CONSUMER of the fact, never from the repros** (wave 17,
+  `docs/root-causes-w17.md`). Three wave-16 structural fixes were correct for the cells their grids
+  enumerated and wrong just outside them: TICKET-179 unified "can the parent observe it" for `spawn`
+  only (its grid varied the spawn form; Executor/default/import rows appear once in the file),
+  TICKET-180's name grid had no type position, TICKET-182's binding grid had no builtin or
+  multi-implementor protocol receiver. Before writing the grid, grep every place that CONSUMES the
+  fact (every crossing route, every syntactic position a name can occupy, every receiver kind) and
+  make each one an axis. A single source that only some consumers read is a single source for part
+  of the grid.
 - **Stdlib gaps are deferred on verified cost, never on "nobody asked."** A reference-language idiom
   *is* the need. `Reader.lines()` was deferred on a claimed cost ("needs a new lazy Obj variant") that
   was false — a generator over `read_line()` streams lazily by construction — and building it surfaced
