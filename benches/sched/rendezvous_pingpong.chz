@@ -1,0 +1,15 @@
+# TICKET-185 — the channel hand-off hot path: two fibers pass one int back and forth over two
+# rendezvous channels, 200000 round trips.
+fn main():
+    ping := Channel[int](0)
+    pong := Channel[int](0)
+    parallel:
+        spawn:
+            for _ in range(200000):
+                pong.send(ping.recv() + 1)
+        n := 0
+        for _ in range(200000):
+            ping.send(n)
+            n = pong.recv()
+        print(n)
+main()

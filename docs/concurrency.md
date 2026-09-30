@@ -396,7 +396,7 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
 
 | Method | Signature | Notes |
 |--------|-----------|-------|
-| `send` | `send(self, v: T) -> nil` | enqueue (move/copy at the airlock); the sender MAY keep using the value — the crossing copies, so its later writes are simply not seen by the receiver. On a **bounded** channel a `send` **blocks/parks** while the queue is at capacity (backpressure), resuming once a `recv` frees a slot — the send-side mirror of a blocking `recv`. On a **rendezvous** channel (`cap == 0`) a `send` blocks until a receiver is already waiting, exactly like a bounded `send` at capacity 0 conceptually would, except capacity 0 is otherwise inexpressible as `queue.len() < cap` — on a rendezvous channel the parked sender publishes its value to the channel, so a poll can take it; `len()` still reports 0 |
+| `send` | `send(self, v: T) -> nil` | enqueue (move/copy at the airlock); the sender MAY keep using the value — the crossing copies, so its later writes are simply not seen by the receiver. On a **bounded** channel a `send` **blocks/parks** while the queue is at capacity (backpressure), resuming once a `recv` frees a slot — the send-side mirror of a blocking `recv`. On a **rendezvous** channel (`cap == 0`) a `send` blocks until a receiver is already waiting, exactly like a bounded `send` at capacity 0 conceptually would, except capacity 0 is otherwise inexpressible as `queue.len() < cap` — a blocked sender (rendezvous or full bounded) publishes its value as an OFFER, so a poll can take it, and `send` returns only once a receiver took it; `len()` does not count it |
 | `try_send` | `try_send(self, v: T) -> bool` | **non-blocking** send: `true` once queued, `false` if the send can't proceed — the channel is **closed**, a **bounded** channel is **full**, or a **rendezvous** channel has no receiver already waiting. Never blocks/parks |
 | `recv` | `recv(self) -> T` | dequeue (FIFO); blocking surface (see below) |
 | `try_recv` | `try_recv(self) -> T?` | **non-blocking** poll (A1): `Some(v)` if queued, `None` if empty, or a value handed over by a parked rendezvous sender — never blocks, never faults, never suspends a fiber. Drain a mailbox without guarding on `len()` |
@@ -414,6 +414,17 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
   nursery, or inside a native callback) is a **deadlock fault**, not a silent over-fill or hang.
   As with `try_recv`, `try_send`'s full-vs-not decision under multi-sender contention is nondeterministic
   — the same class as `try_recv`'s `None`-vs-`Some` under contention; it is not "fixed".
+- **One hand-off protocol (TICKET-185, Go's `hchan` model).** A value is delivered at exactly one
+  commit point: a CAS on the blocked party's `Pending`, under the channel lock. A blocked sender (plain
+  `send` or a `wait:` send arm, in any context, on a rendezvous or FULL bounded channel) publishes an
+  OFFER; a receiver takes it (`recv`, `try_recv`, `for`, a `wait:` recv arm), and on a bounded channel a
+  receiver that frees a buffer place moves the next parked offer into it in the same hold. A blocked
+  rendezvous receiver publishes a SLOT; a sender (`send`, `try_send`, a `wait:` send-arm poll) fills it.
+  `send` returns only once its value was taken, so a value is received exactly once and never by its
+  own sender. `close()` closes every live offer (that sender faults `send on a closed channel`) but a
+  value already taken stays delivered — a receiver that takes a parked sender's value and then closes
+  lets that send complete, as Go prints `sent both`. A `wait:` publishes ONE `Pending` for all its arms,
+  so the CAS that moves a value also picks the arm. Pinned by `tests/channel_handoff_grid.rs`.
 - **DIVERGENCE from Go: `Channel[T]()` is NOT `make(chan T)`.** Go's no-argument channel is the
   rendezvous shape; Chezzi's no-argument `Channel[T]()` is UNBOUNDED instead, and this is
   DELIBERATE — see `## Decisions` in TICKET-028. A Go programmer porting `make(chan T)` should write
@@ -897,13 +908,10 @@ recv-arm is **DEAD**, not ready — it is skipped by the re-poll), a send-arm wi
 dead recv-arm ready, would spin requeue→re-poll→re-park; but an **all-dead** re-check must requeue, or a
 `close()` landing in the poll→park window is a lost wakeup (W7-2) — see §6d.)*
 
-> **v1 limitation — send-arm inside a native callback.** A **full bounded** send-arm reached *inside a
-> native callback* (a `Shared.update` closure, a list-HOF, an `Executor` task) can only block, and neither
-> engine path can carry it: the M:N engine can't snapshot-park there and its in-callback demote path pops
-> arm queues (recv semantics). So a `wait` with a live send-arm on that path **faults** — with the
-> full-send-in-callback message `chan_send_step` already raises — rather than blocking. Same class as the
-> existing in-callback full-`send` / `timer.recv()` v1 limits; the upgrade path is a demote-in-place send
-> block.
+> **Send-arm inside a native callback (TICKET-185).** A send-arm that cannot move its value, reached
+> *inside a native callback* (a `Shared.update` closure, a list-HOF), DEMOTES and blocks on its offer,
+> as Go blocks — like a plain full `send` there. (Before TICKET-185 both faulted: the demote loop could
+> not block a sender.)
 
 > **Timer arm — timed-park, not inline-sleep.** A live `timer(ms)` arm is handled differently per
 > *waiter*. A waiter with no worker loop under it — the INLINE body of an outermost `parallel:` builder
@@ -1551,11 +1559,11 @@ a replacement worker); I block this thread in place; S sleep to the op's own dea
 |---|---|---|---|---|---|---|---|
 | `recv` (empty) | P | D | R | I | I | I | no |
 | `timer(ms).recv()` | P | D | S | S | S | S | yes |
-| full `send` | P | R | R | I | I | I | no |
+| full `send` | P | D | R | I | I | I | no |
 | `wait:` (recv arms) | P | D | R | I | I | I | no |
-| `wait:` with a send arm | P | R | R | I | I | I | no |
+| `wait:` with a send arm | P | D | R | I | I | I | no |
 | `wait:` with a timer arm | P | D | S | I | I | I | yes |
-| `wait:` with timer + send arms | P | R | S | I | I | I | yes |
+| `wait:` with timer + send arms | P | D | S | I | I | I | yes |
 | `sleep_ms` | P | D | S | S | S | S | yes |
 | blocking native (`fs`, `request`, `process`) | P | D | I | I | I | I | yes |
 | stdin (`io.input`, …) | D | D | D | D | D | D | yes |
@@ -1591,8 +1599,6 @@ new list or veto.
 
 **Deliberate differences from Go**, each a `R` or hang cell of the table:
 
-- A full `send` (or a `wait:` send arm) in a Demote context faults, where Go blocks: the demote
-  loop pops recv queues and cannot yet block a sender (v1 limit).
 - A socket op in an Executor job returns the "doesn't own its thread" `Err`; `connect` there too.
 - An unjudged context (`main` inside a real callback, a job inside a callback) with nothing that
   can satisfy it HANGS, where Go faults: the verdict declines rather than risk a false fault

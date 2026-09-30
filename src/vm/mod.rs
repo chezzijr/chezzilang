@@ -3787,12 +3787,14 @@ impl MnSched {
     /// false faults on `d2a` at `CHEZZI_THREADS=2` before that fix). Never reintroduce a stack-held
     /// channel Arc that outlives this fn's lock hold.
     fn park(&self, key: usize, core: Arc<ChannelCore>, mut fiber: Fiber) {
+        // Allocated BEFORE the sched lock: this critical section serializes every fiber's park.
+        let p = crate::vm::core::Pending::new();
+        let mut op = crate::vm::core::PendingOp::new(Arc::clone(&p), Vec::with_capacity(1));
         let mut c = self.lock();
         c.running -= 1;
         // Close the park gap: re-check (under the core lock) whether a message is waiting, the channel
         // was CLOSED (a concurrent `close()` between `recv`'s empty-check and here — the fiber must
         // re-run to observe `closed` and end its `for`/fault, not park forever), or cancel was tripped.
-        let p = crate::vm::core::Pending::new();
         let (message_waiting, closed) = {
             let mut g = core.q.lock().unwrap_or_else(|e| e.into_inner());
             let ready = (g.recv_ready_for(None), g.closed);
@@ -3811,7 +3813,8 @@ impl MnSched {
         let cancelled = c.scope_cancel_tripped(fiber.scope_id);
         // The fiber carries its slot (and, with or without one, its channel) until its re-run
         // `recv` settles it; a requeued fiber settles at once on that re-run.
-        fiber.pending = Some(crate::vm::core::PendingOp::new(p, vec![(core, 0, false)]));
+        op.at.push((core, 0, false));
+        fiber.pending = Some(op);
         if message_waiting || closed || latched || cancelled {
             fiber.state = FiberState::Ready;
             c.global.push_back(fiber);

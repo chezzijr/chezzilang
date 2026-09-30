@@ -234,6 +234,13 @@ the freeze.
   audit the party set for self-reference (a job joining its own `Executor` counted its own slot and
   was unsatisfiable by construction: 9/60 false deadlocks on debug, 0/40 on release). **A verdict that
   is right 85% of the time on the same program is not a verdict.**
+  **A readiness question counts only the OTHER side's entries** (TICKET-185): a `wait:` with a send
+  arm and a recv arm on one rendezvous channel publishes an offer and a slot, and a predicate that
+  counts its own offer as "a value is waiting" takes its own value back or spins. Every readiness
+  helper takes `me` (`ChanState::recv_ready_for(me)`, `send_ready_for(cap, me)`), in the park gap
+  checks and in `PartyWait::satisfiable` alike. And "delivered" has one commit point (a CAS on the
+  party's `Pending` under the channel lock); an anonymous counter of waiting parties (`recv_waiting`)
+  let a counted receiver leave for another arm and strand the value.
 - **The airlock has two layers, and only the runtime one is load-bearing for memory safety.** The
   checker's `assignable` sendable clause is an early nice error; `to_wire` + `has_handle` +
   `ensure_crossable` is the real net. But the net only covers sites that *call* the guard: value-store

@@ -64,6 +64,15 @@ Two families are new: channel hand-off (A) and control-flow summary (E).
 
 ## Family A — channel hand-off has no commit point (NEW)
 
+**Status (2026-09-30): fixed by TICKET-185.** One transfer protocol in `ChanState`
+(`src/vm/core.rs`): a blocked sender publishes an OFFER, a blocked rendezvous receiver a SLOT, and a
+value moves only by a CAS on the party's `Pending` under the channel lock (`ChanState::give` /
+`ChanState::pop`); `ChanState::send` is the one send decision. `recv_waiting`, `has_send_slot`,
+`RecvWait`, the deposits, the retry loops and the re-run closed guards are deleted. A `wait:` has one
+`Pending` for all its arms. DEC-181's `Demote` × `Send`/`Wait+send` cells are now `Demote`. Grid:
+`tests/channel_handoff_grid.rs` (5 sender contexts × 3 sender kinds × 6 receivers × 3 caps × 2
+orders × 3 close cells, plus H1, H3 and the own-value repro, at T=1, 2, 0 and one seed).
+
 **Fact:** "this value has been delivered to exactly one receiver."
 
 **Deciders (3 mechanisms, 5 outcome sites):** a presence counter (`has_send_slot` =

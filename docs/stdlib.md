@@ -358,10 +358,10 @@ are queued and resumes once a `recv` frees a slot (Go's buffered channel; a full
 with no possible consumer is a deadlock fault, not an over-fill or a hang). Methods: `send(x: T) -> nil`
 · `try_send(x: T) -> bool` (`false` = closed, full, **or** rendezvous with no waiting receiver — never
 blocks) · `recv() -> T` ·
-`try_recv() -> Option[T]` (`Some(v)` if queued, `None` if empty, or a value handed over by a parked rendezvous sender)
+`try_recv() -> Option[T]` (`Some(v)` if queued or offered by a parked sender, `None` otherwise)
 · `close() -> nil` ·
 `trip() -> nil` (permanent level-trigger latch — **`Channel[bool]` only**, gated by `where T: bool`, since
-it always delivers `true`; the primitive behind `std.cancel`'s `done()`) · `len() -> int` · `cap() -> int`
+it always delivers `true`; the primitive behind `std.cancel`'s `done()`) · `len() -> int` (buffered values only — a parked sender's value is not counted, as in Go) · `cap() -> int`
 (`-1` for unbounded, `0` for rendezvous, the bound otherwise). Iterate received values with
 `for v in ch:` (ends when closed and drained). Backpressure only changes *which* task runs *when*,
 never the value sequence a consumer sees — bounded/rendezvous channels are byte-identical across runs.
