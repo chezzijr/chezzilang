@@ -27,9 +27,11 @@ fn main():
 
     for i in 0..rows.len():
         h := handles[i]
-        if h.done():
-            print("{rows[i]} -> {h.get()}")
-        else:
-            print("{rows[i]} -> no result")
+        # `done()` is true for a faulted job too; its `get()` re-raises that job's fault (CPython
+        # `Future.result()`), so read it under `recover:`.
+        r := recover: h.get()
+        match r:
+            Ok(v):  print("{rows[i]} -> {v}")
+            Err(_): print("{rows[i]} -> no result")
 
 main()
