@@ -1,0 +1,17 @@
+# cargo-nextest config (2026-09-30). Runs every test binary IN PARALLEL, one process per test,
+# instead of `cargo test`'s one-binary-after-another. The scheduler/timing targets below share
+# the box badly (every M:N test spawns its own worker pool), so they run in the capped `timing` group.
+# Sampled n=5 on main (2026-09-30): 146-211 s vs `cargo test` 764-800 s, same flakes (W15-10, 2/5 each).
+# `timing` at 1 thread made the group itself the bottleneck (~500 s); 4 matches cargo test's in-binary parallelism.
+
+[profile.default]
+test-threads = 8
+slow-timeout = { period = "60s", terminate-after = 5 }
+fail-fast = false
+
+[test-groups]
+timing = { max-threads = 4 }
+
+[[profile.default.overrides]]
+filter = 'binary(chezzi_threads_cli) | binary(blocking_context_grid) | binary(channel_handoff_grid) | binary(native_callback_stdin_read_frees_width) | binary(mn_pool_ignores_cpu_quota_hangs) | binary(sched_seed_cli) | binary(chezzi_nested_nursery_deadlock) | binary(deadlock_verdict_misses) | binary(chz_suite)'
+test-group = 'timing'

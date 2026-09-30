@@ -52,6 +52,7 @@ cargo test                       # FULL pre-commit suite: lib unit suite + golde
 #   in-process version of this gate. Also NOT `docs/future.md` §2b's Go-paired-programs differential,
 #   which is still unbuilt and separately planned (the seeded/interleaving M:N mode shipped under
 #   TICKET-167 — see `CHEZZI_SCHED_SEED` and `schedfuzz` below).
+cargo nextest run               # SAME full suite, test binaries in parallel (~3 min vs ~13; config .config/nextest.toml; the pipeline's verifying gate uses this)
 cargo test --lib                 # INNER LOOP: just the lib unit suite (unit + goldens + conformance, no integration/bin)
 cargo test --lib checker::       # scope to the area you're editing → seconds (use while implementing)
 cargo test --features lsp --test lsp_smoke   # the feature-gated LSP server smoke test (off the default build)
