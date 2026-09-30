@@ -2472,11 +2472,11 @@ impl Checker {
             // see, so decline rather than guess: ask for an annotation.
             if self.in_fn_body
                 && !self.inferring_ret
-                && self.unreached_globals.contains(name)
+                && self.globals.get(name).is_some_and(|g| g.unreached())
                 && self.owning_scope(name) == Some(0)
                 && (ty.is_unknown() || contains_unknown_in_slot(&ty))
             {
-                if self.cycle_globals.contains(name) {
+                if self.globals.get(name).is_some_and(|g| g.cycle) {
                     return Ty::Unknown;
                 }
                 self.error(

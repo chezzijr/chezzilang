@@ -75,10 +75,7 @@ impl Checker {
             last_closure_writes: HashSet::new(),
             closure_literal_writes: HashMap::new(),
             written_captures: Vec::new(),
-            module_global_lets: std::collections::HashSet::new(),
-            unreached_globals: HashSet::new(),
-            cycle_globals: HashSet::new(),
-            seeded_globals: HashSet::new(),
+            globals: HashMap::new(),
             functions: HashMap::new(),
             fn_write_scopes: Vec::new(),
             local_fn_names: std::collections::HashSet::new(),
@@ -1622,19 +1619,9 @@ impl Checker {
         imports: &[ResolvedImport],
     ) -> ModuleSig {
         self.push_scope();
-        // The complete set of this module's top-level `let`/`:=` names, built before any body is
-        // walked. `seed_module_globals` and the fn-writes pass read it.
-        self.module_global_lets.clear();
-        self.unreached_globals.clear();
-        self.cycle_globals.clear();
-        self.seeded_globals.clear();
-        for s in stmts {
-            if let StmtKind::Let { names, .. } = &s.kind {
-                for n in names {
-                    self.module_global_lets.insert(n.clone());
-                }
-            }
-        }
+        // The one record per module slot, built before any body is walked (TICKET-186).
+        // `seed_module_globals` and the fn-writes pass read it.
+        self.collect_module_globals(stmts);
         // Module-scoped types: record THIS module's id and seed its locally-declared type names into
         // `bare_types` under their runtime key (bare unless disambiguated), so a bare annotation /
         // constructor resolves to the same key the layout is registered under. `bind_import` then adds
@@ -2643,7 +2630,9 @@ impl Checker {
     /// lexical for statements.
     pub(super) fn scope_has(&self, i: usize, name: &str) -> bool {
         self.scopes[i].contains_key(name)
-            && !(i == 0 && !self.in_fn_body && self.unreached_globals.contains(name))
+            && !(i == 0
+                && !self.in_fn_body
+                && self.globals.get(name).is_some_and(|g| g.unreached()))
     }
     /// Which scope owns `name` (innermost binding wins, shadowing-aware)? The ONE innermost-first
     /// walk over `scopes` (TICKET-183): every "which scope owns this name" question calls it, so the

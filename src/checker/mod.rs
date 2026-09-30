@@ -2040,24 +2040,10 @@ struct Checker {
     /// loop var is immutable — rebound fresh each iteration — so assigning to it is rejected; this
     /// sidesteps a VM/interp divergence where the VM's counter slot IS the loop var).
     loop_vars: Vec<std::collections::HashSet<String>>,
-    /// Every name declared by a TOP-LEVEL `let`/`:=` in the module currently being checked. Used to
-    /// distinguish a genuine first-class builtin (`f := print`, no such global) from a same-named
-    /// module global read before its definition line (a use-before-def error, like any other global):
-    /// `infer_ident` suppresses the first-class-builtin arm when the name is in this set so the read
-    /// falls through to the same `unknown name` error, keeping the VM (pre-slotted `nil`) and the
-    /// interp (source-order env) from diverging. Rebuilt at the start of each `check_module`.
-    module_global_lets: std::collections::HashSet<String>,
-    /// TICKET-183 — seeded module globals (`seed_module_globals`) whose FIRST top-level let the
-    /// current walk has not reached. [`Checker::scope_has`] hides them from top-level statements
-    /// (lexical) while every fn/closure body sees them (order-free). The `Let` arm removes a name at
-    /// its first let. Rebuilt at the start of each `check_module`.
-    unreached_globals: HashSet<String>,
-    /// Module globals `report_untyped_globals` reported as an initialization cycle. The cycle is
-    /// the cause; a body's "declared below ... type is not known" decline on the same global is its
-    /// consequence and is not reported again. Rebuilt at the start of each `check_module`.
-    cycle_globals: HashSet<String>,
-    /// TICKET-183 — every module global `seed_module_globals` typed before any body is walked.
-    seeded_globals: HashSet<String>,
+    /// TICKET-186 — the one record per module slot of the module being checked
+    /// ([`globals::GlobalBinding`]: its declarations, seeded / reached / cycle state). Built by
+    /// `collect_module_globals` at the start of each `check_module`, before any body is walked.
+    globals: HashMap<String, globals::GlobalBinding>,
     /// Per-scope set of names declared `const T` (mirrors `scopes` index-for-index). A const binding
     /// is immutable: `check_assign` rejects any later reassignment of the name. Compile-time-only
     /// (freezes the NAME; the object stays mutable — shallow). Cleared on re-declaration by `declare`
@@ -2745,6 +2731,7 @@ mod exhaust;
 mod expr;
 mod flow;
 mod fn_writes;
+mod globals;
 mod pattern;
 // `pub(crate)` for `proto::INTRINSIC_PROTO_METHODS` — the intrinsic-grant ↔ VM-arm pairing table,
 // which `vm::tests::intrinsic_grants_all_have_vm_arms` reads to assert the pairing (W6-3).

@@ -261,7 +261,8 @@ impl Checker {
         // Bound: each productive pass resolves at least one more `Unknown`→concrete (a return or a
         // global); `+1` lets the final pass confirm no change (the fixpoint). A non-productive pass
         // breaks the loop early.
-        let cap = self.count_uninferred(stmts) + self.seeded_globals.len() + 1;
+        let seeded = self.globals.values().filter(|g| g.seeded).count();
+        let cap = self.count_uninferred(stmts) + seeded + 1;
         for _ in 0..cap {
             let a = self.infer_returns_pass(stmts, false);
             let b = self.type_globals_pass(stmts);
@@ -311,7 +312,8 @@ impl Checker {
             };
             let firsts: Vec<usize> = (0..names.len())
                 .filter(|&i| {
-                    seen.insert(names[i].as_str()) && self.seeded_globals.contains(&names[i])
+                    seen.insert(names[i].as_str())
+                        && self.globals.get(&names[i]).is_some_and(|g| g.seeded)
                 })
                 .collect();
             if !firsts.is_empty() {
@@ -371,8 +373,9 @@ impl Checker {
                 };
                 self.diag_rollback(mark);
                 // After the rollback: `DiagMark` restores `kw_certain`.
-                self.seeded_globals.insert(n.clone());
-                self.unreached_globals.insert(n.clone());
+                let g = self.globals.entry(n.clone()).or_default();
+                g.seeded = true;
+                g.reached = false;
                 self.scopes[0].insert(n.clone(), t);
                 if consts.contains(n.as_str()) {
                     self.const_decls[0].insert(n.clone());
@@ -393,7 +396,7 @@ impl Checker {
         let mark = self.diag_mark();
         let saved_flag = std::mem::replace(&mut self.inferring_ret, true);
         self.ret_memo.clear();
-        let saved_unreached = self.unreached_globals.clone();
+        let saved_reached = self.save_reached();
         let firsts: std::collections::HashMap<Span, Vec<usize>> = self
             .seeded_first_lets(stmts)
             .into_iter()
@@ -424,10 +427,10 @@ impl Checker {
                 }
             }
             for n in names {
-                self.unreached_globals.remove(n);
+                self.reach_global(n);
             }
         }
-        self.unreached_globals = saved_unreached;
+        self.restore_reached(saved_reached);
         self.ret_memo.clear();
         self.inferring_ret = saved_flag;
         self.diag_rollback(mark);
@@ -441,7 +444,7 @@ impl Checker {
     /// `infer_ident`, and a body below it that returns it fails return inference. A let whose value
     /// itself errors is skipped: the walk reports that error.
     fn report_untyped_globals(&mut self, stmts: &[Stmt]) {
-        let saved_unreached = self.unreached_globals.clone();
+        let saved_reached = self.save_reached();
         let saved_flag = std::mem::replace(&mut self.inferring_ret, true);
         let firsts: HashSet<Span> = self
             .seeded_first_lets(stmts)
@@ -471,16 +474,18 @@ impl Checker {
                     && let Some((msg, f_span)) = self.initialization_cycle_message(stmts, x, value)
                 {
                     reports.push((s.span, msg, f_span));
-                    self.cycle_globals.insert(x.clone());
+                    if let Some(g) = self.globals.get_mut(x) {
+                        g.cycle = true;
+                    }
                 }
             }
             for n in names {
-                self.unreached_globals.remove(n);
+                self.reach_global(n);
             }
         }
         self.ret_memo.clear();
         self.inferring_ret = saved_flag;
-        self.unreached_globals = saved_unreached;
+        self.restore_reached(saved_reached);
         for (span, msg, f_span) in reports {
             // The cycle is the cause; `f`'s residual-`Unknown` return error (emitted earlier by
             // `finalize_ret` at `f`'s name) is its consequence. Report the cause once.
@@ -2549,7 +2554,9 @@ impl Checker {
                 // would without the seed, and from here on top-level statements see the let's own
                 // binding.
                 for n in names {
-                    if self.scopes.len() == 1 && self.unreached_globals.remove(n) {
+                    if self.scopes.len() == 1 && self.globals.get(n).is_some_and(|g| g.unreached())
+                    {
+                        self.reach_global(n);
                         self.scopes[0].remove(n);
                         self.const_decls[0].remove(n);
                     }

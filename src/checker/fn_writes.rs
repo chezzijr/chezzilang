@@ -405,7 +405,7 @@ impl Checker {
                 .filter_map(|effect| {
                     let mut effect = effect.clone();
                     if top_level && let WriteRoot::Capture(root) = &effect.root {
-                        if !self.module_global_lets.contains(root) {
+                        if !self.globals.get(root).is_some_and(|g| g.has_let()) {
                             return None;
                         }
                         effect.root = WriteRoot::Global(root.clone());
@@ -437,7 +437,7 @@ impl Checker {
                             &edge.args,
                             top_level,
                             local_callee.is_some(),
-                            &self.module_global_lets,
+                            &self.globals,
                         ) && let Some(writes) = summaries.get_mut(name)
                             && !writes.contains(&mapped)
                         {
@@ -487,8 +487,9 @@ impl Checker {
         args: &[Expr],
         top_level: bool,
         nested_callee: bool,
-        globals: &HashSet<String>,
+        globals: &HashMap<String, super::globals::GlobalBinding>,
     ) -> Option<FnWrite> {
+        let has_let = |n: &str| globals.get(n).is_some_and(|g| g.has_let());
         let mut mapped = effect.clone();
         match &effect.root {
             WriteRoot::Param(i) => {
@@ -496,7 +497,7 @@ impl Checker {
                 mapped.root = scan.root(&root)?;
                 mapped.global_ty = None;
                 if top_level && let WriteRoot::Capture(name) = &mapped.root {
-                    if !globals.contains(name) {
+                    if !has_let(name) {
                         return None;
                     }
                     mapped.root = WriteRoot::Global(name.clone());
@@ -511,7 +512,7 @@ impl Checker {
                     return None;
                 }
                 if top_level && let WriteRoot::Capture(root) = &mapped.root {
-                    if !globals.contains(root) {
+                    if !has_let(root) {
                         return None;
                     }
                     mapped.root = WriteRoot::Global(root.clone());
