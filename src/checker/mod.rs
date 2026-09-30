@@ -2335,6 +2335,11 @@ struct Checker {
     table_conflicts: Vec<(Span, String)>,
     /// TICKET-180 — the one record of what each name head means; see [`Resolution`].
     resolutions: ResolutionTable,
+    /// TICKET-184 — whether each call head never returns, keyed like `resolutions`: the one input
+    /// `flow::stmt` takes beyond the AST ([`Checker::call_diverges`]). Written by
+    /// `record_resolution` in EVERY walk and overwritten, because inference passes read it; the
+    /// Resolution table itself stays main-pass-only (DEC-180).
+    callee_diverges: HashMap<(usize, u32), bool>,
     /// Graph index of every module, so a from-imported fn's [`Resolution::Fn`] names its home.
     module_idx_of: HashMap<crate::resolver::ModuleId, usize>,
     /// The current module's from-imported fns: bound name -> (declaring module, declared name).
@@ -2408,9 +2413,6 @@ struct Checker {
     /// `from`-imported names that are numeric-polymorphic native fns (`abs`/`min`/`max`), so a bare
     /// call resolves their result type by argument type instead of the float-only `FnSig` (gap #12).
     imported_poly: std::collections::HashSet<String>,
-    /// `from`-imported names that are diverging native fns (`exit`, via `import exit from std.os`),
-    /// so a bare call bottom-types like `panic` (TICKET-077). Per-module: cleared in `begin_module`.
-    imported_diverging: std::collections::HashSet<String>,
     /// `from`-imported module GLOBALS (`import COUNT from lib.st`) → the dotted module path they came
     /// from. A from-imported global is a SNAPSHOT copy (Python-identical), so REBINDING the bare name
     /// would write a local alias that is silently lost — rejected in `check_assign`, consistent with
@@ -2734,6 +2736,7 @@ pub(super) enum ChainLink {
 
 mod exhaust;
 mod expr;
+mod flow;
 mod fn_writes;
 mod pattern;
 // `pub(crate)` for `proto::INTRINSIC_PROTO_METHODS` — the intrinsic-grant ↔ VM-arm pairing table,
@@ -3724,85 +3727,6 @@ fn op_sym(op: BinaryOp) -> &'static str {
         In => "in",
         _ => "?",
     }
-}
-
-/// Built-in method signatures on `str` (M6). Must mirror the runtime handler
-/// (`vm::Vm::do_method_call`).
-/// Find a control-flow statement that would escape a `recover:` / `defer:` / `spawn:` block — a
-/// `return`, or a `break`/`continue` not contained by a loop *inside* the block. Recurses through
-/// nested blocks but stops at nested `fn` declarations (their control flow is their own). `?` is an
-/// expression, not a statement, so it is never flagged (a closure body is an expression too, so it
-/// cannot hold a `return` at all).
-/// Callers that already zero `loop_depth` (defer/spawn, whose own `break outside loop` guard fires)
-/// pass `in_loop = true` so only `return` can be reported here — no double diagnostic.
-/// It also does NOT descend into a nested `defer:` or `spawn:` block: each has its own guard at its
-/// own site, which names the block the statement is LEXICALLY in — descending here would report the
-/// same `return` twice, under the outer block's (wrong) noun.
-fn escaping_flow(stmts: &[Stmt], in_loop: bool) -> Option<(Span, &'static str)> {
-    for s in stmts {
-        match &s.kind {
-            StmtKind::Return(_) => return Some((s.span, "return")),
-            StmtKind::Break if !in_loop => return Some((s.span, "break")),
-            StmtKind::Continue if !in_loop => return Some((s.span, "continue")),
-            StmtKind::Break | StmtKind::Continue => {}
-            StmtKind::If {
-                branches,
-                else_block,
-            } => {
-                for (_, body) in branches {
-                    if let Some(x) = escaping_flow(body, in_loop) {
-                        return Some(x);
-                    }
-                }
-                if let Some(eb) = else_block
-                    && let Some(x) = escaping_flow(eb, in_loop)
-                {
-                    return Some(x);
-                }
-            }
-            // A loop makes its own `break`/`continue` local; a `return` inside still escapes.
-            StmtKind::For { body, .. } | StmtKind::While { body, .. } => {
-                if let Some(x) = escaping_flow(body, true) {
-                    return Some(x);
-                }
-            }
-            StmtKind::Match { arms, .. } => {
-                for arm in arms {
-                    if let Some(x) = escaping_flow(&arm.body, in_loop) {
-                        return Some(x);
-                    }
-                }
-            }
-            // A `parallel:` body runs within this function frame (it has no guard of its own), so an
-            // escaping `return`/`break`/`continue` inside it must still be detected here. A `for`/loop
-            // is not introduced, so `in_loop` is unchanged.
-            StmtKind::Parallel { body } => {
-                if let Some(x) = escaping_flow(body, in_loop) {
-                    return Some(x);
-                }
-            }
-            // A `wait:` arm body / `else` block is an ordinary lexical sub-scope of this block, so a
-            // `return` there escapes exactly like a bare one (it was silently discarded at runtime).
-            StmtKind::Wait { arms, else_block } => {
-                for arm in arms {
-                    if let Some(x) = escaping_flow(&arm.body, in_loop) {
-                        return Some(x);
-                    }
-                }
-                if let Some(eb) = else_block
-                    && let Some(x) = escaping_flow(eb, in_loop)
-                {
-                    return Some(x);
-                }
-            }
-            StmtKind::Fn(_) => {} // nested function: its control flow is its own
-            // `Spawn(Block)` / `Defer(Block)`: NOT descended into — each is guarded at its own site
-            // (`check_stmt`), which names the block the statement is lexically in. Descending would
-            // double-report the same `return` under this (outer) block's noun.
-            _ => {}
-        }
-    }
-    None
 }
 
 // Editor hover (Tier C): authored method-NAME lists per built-in type, rendered by `builtin_type_doc`

@@ -42,7 +42,9 @@ pub(super) struct Scan {
     /// How many conditional constructs (`if`/`match` arm/loop body/short-circuit right side) enclose
     /// the node being walked.
     cond: usize,
-    /// A possible early exit (`return`, `break`, `continue`, `?`) has been walked.
+    /// A possible early exit (`return`, `break`, `continue`, `?`) has been walked. The statement side
+    /// derives from `flow::stmt` (TICKET-184): set after any statement that escapes or cannot fall
+    /// through. Its divergence oracle is `false`, because fn_writes runs before any body is checked.
     left: bool,
 }
 
@@ -165,6 +167,8 @@ impl Scan {
         self.visible_fns.push(HashMap::new());
         for stmt in body {
             self.stmt(stmt);
+            let f = super::flow::stmt(stmt, &|_| false);
+            self.left |= !f.falls_through || f.escapes();
         }
         self.visible_fns.pop();
     }
@@ -200,14 +204,9 @@ impl Scan {
                     }
                 }
             }
-            StmtKind::Expr(expr) | StmtKind::Yield(expr) => self.expr(expr),
-            StmtKind::Return(value) => {
-                if let Some(expr) = value {
-                    self.expr(expr);
-                }
-                self.left = true;
+            StmtKind::Expr(expr) | StmtKind::Yield(expr) | StmtKind::Return(Some(expr)) => {
+                self.expr(expr)
             }
-            StmtKind::Break | StmtKind::Continue => self.left = true,
             StmtKind::If {
                 branches,
                 else_block,

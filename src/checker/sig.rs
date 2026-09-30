@@ -877,7 +877,7 @@ impl Checker {
             // anyway. Gated on `is_unknown()` so a diverging call that somehow typed concrete is
             // untouched; `self.infer(e)` still runs so panic's arg checks fire in pass 2.
             let t = self.infer(e);
-            Some(if t.is_unknown() && Self::expr_is_diverging_call(e) {
+            Some(if t.is_unknown() && self.call_diverges(e) {
                 Ty::Nil
             } else {
                 t
@@ -3290,9 +3290,12 @@ impl Checker {
                 // legitimate loop INSIDE the block re-increments from 0, keeping its own break legal.
                 // A `return` here can never mean anything (Chezzi has no named return values and the
                 // block is its own closure) — the compiler silently dropped it, so reject it, like
-                // `recover:`. `in_loop = true`: the `loop_depth` reset above owns break/continue.
-                if let Some((sp, kw)) = escaping_flow(body, true) {
-                    self.error(sp, format!("'{kw}' is not allowed inside a defer block"));
+                // `recover:`. Only `return` is checked: the `loop_depth` reset owns break/continue.
+                if let Some(sp) = self.block_flow(body).returns {
+                    self.error(
+                        sp,
+                        "'return' is not allowed inside a defer block".to_string(),
+                    );
                 }
                 let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
                 // The `defer:` block is its own closure with a `?`-DISCARDING contract: a fired
@@ -3499,9 +3502,12 @@ impl Checker {
                         self.capture_floors.push(floor);
                         // A spawned task outlives the frame — there is nothing for a `return` here
                         // to return to (it was silently dropped). Reject it, like `recover:`.
-                        // `in_loop = true`: the `loop_depth` reset below owns break/continue.
-                        if let Some((sp, kw)) = escaping_flow(body, true) {
-                            self.error(sp, format!("'{kw}' is not allowed inside a spawn block"));
+                        // Only `return` is checked: the `loop_depth` reset below owns break/continue.
+                        if let Some(sp) = self.block_flow(body).returns {
+                            self.error(
+                                sp,
+                                "'return' is not allowed inside a spawn block".to_string(),
+                            );
                         }
                         // A `spawn:` block compiles to a fresh child proto with an empty loop stack,
                         // so a `break`/`continue` lexically nested in an enclosing loop but placed
@@ -4681,93 +4687,10 @@ impl Checker {
         }
     }
 
-    /// Sound "this block provably cannot fall off its end" analysis, used to enforce that a function
-    /// with a *declared* non-void return type returns a value on every control-flow path (Option B).
-    /// Conservative by design: returns `true` only when a path PROVABLY diverges or returns a value,
-    /// so it can never false-positive on valid code (which would break the build). A genuine
-    /// fall-through that this misses is an acceptable false-negative (misses the error), not a hazard.
-    ///
-    /// A block terminates iff ANY statement in it terminates (the first terminator dominates; no
-    /// dead-code diagnosis — out of scope).
-    pub(super) fn block_terminates(body: &[Stmt]) -> bool {
-        body.iter().any(Self::stmt_terminates)
-    }
-
-    pub(super) fn stmt_terminates(s: &Stmt) -> bool {
-        match &s.kind {
-            // `return <expr>` and bare `return` both leave the function (a bare `return` under a
-            // non-nil signature is already its own error in `check_return`; don't double-report).
-            StmtKind::Return(_) => true,
-            // An `if` terminates only with an `else` AND every branch body + the else body terminate.
-            StmtKind::If {
-                branches,
-                else_block: Some(eb),
-            } => {
-                branches.iter().all(|(_, b)| Self::block_terminates(b))
-                    && Self::block_terminates(eb)
-            }
-            // No `else` -> the all-conditions-false path falls through.
-            StmtKind::If {
-                else_block: None, ..
-            } => false,
-            // A `match` terminates iff every arm body terminates. Exhaustiveness (coverage by the
-            // unguarded arms) is enforced separately by the match checker, so once every arm
-            // terminates the eventually-chosen arm terminates too.
-            StmtKind::Match { arms, .. } => arms.iter().all(|a| Self::block_terminates(&a.body)),
-            // `while true:` with no reachable `break` loops forever (never falls through).
-            StmtKind::While { cond, body } => {
-                matches!(cond.kind, ExprKind::Bool(true)) && !Self::block_has_break(body)
-            }
-            // A trailing `exit(...)` / `panic(...)` diverges (neither returns to the caller). A
-            // narrow, syntactic special-case on the callee name; a user shadowing the name only
-            // causes an acceptable false-negative (missed error), never a false-positive.
-            StmtKind::Expr(e) => Self::expr_is_diverging_call(e),
-            _ => false,
-        }
-    }
-
-    /// Whether `e` is a call to a diverging builtin — `exit` (`std.os.exit`, typed `nil`, never
-    /// returns) or `panic` (raises a recoverable `RuntimeError`, bottom-typed, never returns
-    /// normally). Matches both a bare `exit(...)`/`panic(...)` and the module-qualified
-    /// `os.exit(...)` form. A narrow, syntactic special-case: a user shadowing the name only causes
-    /// an acceptable false-negative (a missed error), never a false-positive that breaks a valid build.
-    pub(super) fn expr_is_diverging_call(e: &Expr) -> bool {
-        if let ExprKind::Call { callee, .. } = &e.kind {
-            match &callee.kind {
-                ExprKind::Ident(name) => name == "exit" || name == "panic",
-                // Only `exit` has a module-qualified form (`os.exit`); `panic` is bare-call only.
-                // A user method named `panic` (`obj.panic()`) compiles to CallMethod and RETURNS
-                // normally, so treating it as divergence would suppress missing-return and let a
-                // typed body fall through to nil. Keep the Field arm to `exit`.
-                ExprKind::Field { name, .. } => name == "exit",
-                _ => false,
-            }
-        } else {
-            false
-        }
-    }
-
-    /// Whether `body` contains a `break` that targets THIS loop level — descends into `if`/`match`
-    /// arms (a `break` there exits the enclosing loop) but NOT into nested `while`/`for` loops (their
-    /// `break` is theirs) nor into closures/nested fns (those open a fresh loop context).
-    pub(super) fn block_has_break(body: &[Stmt]) -> bool {
-        body.iter().any(Self::stmt_has_break)
-    }
-
-    pub(super) fn stmt_has_break(s: &Stmt) -> bool {
-        match &s.kind {
-            StmtKind::Break => true,
-            StmtKind::If {
-                branches,
-                else_block,
-            } => {
-                branches.iter().any(|(_, b)| Self::block_has_break(b))
-                    || else_block.as_deref().is_some_and(Self::block_has_break)
-            }
-            StmtKind::Match { arms, .. } => arms.iter().any(|a| Self::block_has_break(&a.body)),
-            // A nested `while`/`for` owns its own `break`; do not descend.
-            _ => false,
-        }
+    /// TICKET-184 — the control-flow summary of `body` ([`flow::block`]), with divergence read from
+    /// each call's resolved callee. Read it only after `body` has been walked in this pass.
+    pub(super) fn block_flow(&self, body: &[Stmt]) -> flow::Flow {
+        flow::block(body, &|e| self.call_diverges(e))
     }
 
     /// `yield <expr>` — legal only inside a generator function (one whose return type is
@@ -5160,7 +5083,7 @@ impl Checker {
             && !decl.inline_expr_body
             && decl.ret.is_some()
             && sig.ret != Ty::Nil
-            && !Self::block_terminates(&decl.body)
+            && self.block_flow(&decl.body).falls_through
             && let Some(span) = decl.body.first().map(|s| s.span)
         {
             let ret = &sig.ret;

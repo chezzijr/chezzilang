@@ -36437,6 +36437,24 @@ fn ticket184_flow_grid() {
             "fn exit(c: int) -> int:\n    return c\nfn main():\n    r: Result[int, str] = Err(\"boom\")\n    x := match r:\n        Ok(v): v\n        Err(e): exit(2)\n    print(x)\nmain()\n",
             "ok",
         ),
+        // A `for` body may run zero times: its `return` does not stop the fall-off.
+        (
+            "N1",
+            "fn g(xs: List[int]) -> int:\n    for x in xs:\n        return x\nprint(g([1]))\n",
+            "fall off the end",
+        ),
+        // A diverging call in one `match` arm and a `return` in the other.
+        (
+            "N2",
+            "fn g(n: int) -> int:\n    match n:\n        0: return 1\n        _: panic(\"x\")\nprint(g(0))\n",
+            "ok",
+        ),
+        // The recover escape check names the escape that comes first in source order.
+        (
+            "N3",
+            "fn f():\n    for i in range(2):\n        r := recover:\n            if i == 0:\n                continue\n            return\n        print(r)\nf()\n",
+            "'continue' is not allowed inside a recover block",
+        ),
     ];
     let mut bad = Vec::new();
     for (label, src, want) in rows {

@@ -1992,6 +1992,12 @@ impl Checker {
     }
 
     pub(super) fn record_resolution(&mut self, id: crate::ast::NodeId, r: Resolution, span: Span) {
+        // Every walk (inference passes included) records divergence, before the main-pass guard.
+        if id.0 != crate::ast::NodeId::SYNTH.0 {
+            let d = self.resolution_diverges(&r);
+            self.callee_diverges
+                .insert((self.graph_module_idx, id.0), d);
+        }
         if !self.records_node(id) {
             return;
         }
@@ -2011,6 +2017,27 @@ impl Checker {
             "name resolution",
             span,
         );
+    }
+
+    /// TICKET-184 — whether a callee resolved to `r` never returns: the `panic` builtin, or a fn of a
+    /// native module that [`is_diverging_native`] names (`std.os.exit`, under any bound name). Never
+    /// a name test: a user fn, method, local or parameter named `exit`/`panic` returns normally.
+    pub(super) fn resolution_diverges(&self, r: &Resolution) -> bool {
+        match r {
+            Resolution::Builtin(n) => n == "panic",
+            Resolution::Fn { module, name } | Resolution::ModuleMember { module, name } => self
+                .module_idx_of
+                .iter()
+                .any(|(id, i)| *i == *module && is_diverging_native(id, name)),
+            _ => false,
+        }
+    }
+
+    /// TICKET-184 — whether `e` is a call whose resolved callee never returns (the divergence oracle
+    /// of `flow::stmt`). Reads what [`Self::record_resolution`] recorded for the callee.
+    pub(super) fn call_diverges(&self, e: &Expr) -> bool {
+        matches!(&e.kind, ExprKind::Call { callee, .. }
+            if self.callee_diverges.get(&(self.graph_module_idx, callee.id.0)) == Some(&true))
     }
 
     /// The [`Resolution::Fn`] of a module-level fn bound as `name` in the current module.
@@ -2194,7 +2221,7 @@ impl Checker {
             // OOB/decode faults (caught by the nearest `recover:` as `Err`, else aborts the program).
             // It never returns, so it is bottom-typed (`Ty::Unknown`): in value position it absorbs
             // into the other branch's concrete type via `unify_branch`, and in tail position
-            // `stmt_terminates` (via `expr_is_diverging_call`) treats it as a divergence.
+            // `flow::stmt` (via `call_diverges` on this Resolution) treats it as a divergence.
             "panic" => {
                 self.record_resolution(id, Resolution::Builtin("panic".into()), name_span);
                 self.check_arity("panic", 1, args, span);
@@ -2895,6 +2922,7 @@ impl Checker {
                 // Global function?
                 if let Some(sig) = self.functions.get(name).cloned() {
                     let r = self.fn_resolution(name);
+                    let diverges = self.resolution_diverges(&r);
                     self.record_resolution(id, r, name_span);
                     // W7-42r: this call site's arity/defaults/arg types are now fixed against the
                     // fn's signature, so a later module-scope `name := …` retypes the ONE slot it
@@ -2932,9 +2960,9 @@ impl Checker {
                     // `from`-imported fn with an optional arg); for plain sigs `min_params ==
                     // params.len()`, so this is identical to the old exact-arity check.
                     self.check_args_range(name, &sig.params, sig.min_params, args, span);
-                    // TICKET-077: a `from`-imported diverging native fn (`exit`) bottom-types like
-                    // `panic`, so it type-checks in value position (e.g. a `match` arm).
-                    if self.imported_diverging.contains(name) {
+                    // TICKET-077: a `from`-imported diverging native fn (`exit`, under any bound
+                    // name) bottom-types like `panic`, so it type-checks in value position.
+                    if diverges {
                         return Some(Ty::Unknown);
                     }
                     return Some(sig.ret);

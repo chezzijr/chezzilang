@@ -148,6 +148,7 @@ impl Checker {
             for_binds: crate::checker::ForBindTable::new(),
             table_conflicts: Vec::new(),
             resolutions: HashMap::new(),
+            callee_diverges: HashMap::new(),
             module_idx_of: HashMap::new(),
             fn_homes: HashMap::new(),
             next_opt_tmp: 0,
@@ -162,7 +163,6 @@ impl Checker {
             struct_ctypes: HashMap::new(),
             types_by_name: HashMap::new(),
             imported_poly: std::collections::HashSet::new(),
-            imported_diverging: std::collections::HashSet::new(),
             imported_values: HashMap::new(),
             imported_consts: std::collections::HashSet::new(),
             imported_ffi_types: std::collections::HashSet::new(),
@@ -1577,7 +1577,6 @@ impl Checker {
         self.imported_alias_tys.clear();
         self.imported_alias_ctypes.clear();
         self.imported_poly.clear();
-        self.imported_diverging.clear();
         self.imported_values.clear();
         self.imported_consts.clear();
         self.imported_ffi_types.clear();
@@ -2032,10 +2031,6 @@ impl Checker {
                         // Carry the numeric-polymorphism marker onto the imported name (gap #12).
                         if sig.numeric_poly.contains(member) {
                             self.imported_poly.insert(bind.clone());
-                        }
-                        // Carry the diverging marker onto the imported name (TICKET-077).
-                        if is_diverging_native(&imp.target, member) {
-                            self.imported_diverging.insert(bind.clone());
                         }
                         // Editor hover (decl-site): record the imported function's signature at the
                         // bound-name token (probe-gated no-op off the probe / outside the entry module).

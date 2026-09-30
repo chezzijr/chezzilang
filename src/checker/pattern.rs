@@ -2043,7 +2043,7 @@ impl Checker {
     pub(super) fn infer_recover(&mut self, block: &Block) -> Ty {
         // A `recover:` block is a value, not a control-flow target: `return`/`break`/`continue` that
         // would escape it are rejected. `?` is fine — it propagates normally.
-        if let Some((span, kw)) = escaping_flow(block, false) {
+        if let Some((span, kw)) = self.block_flow(block).first_escape() {
             self.error(
                 span,
                 format!("'{kw}' is not allowed inside a recover block"),
@@ -2085,8 +2085,8 @@ impl Checker {
             // its `Ok(v)` is wrongly nil-banned in value position. Guarding on `== Ty::Nil` keeps every
             // concrete-tail recover (`recover: 5` -> `int`) and non-diverging statement tail
             // (`recover: x := 5` -> `Result[nil]`) untouched. Reuses the sound, conservative
-            // `stmt_terminates` divergence predicate.
-            if value_ty == Ty::Nil && Self::stmt_terminates(last) {
+            // `flow::stmt` summary (divergence read from the resolved callee).
+            if value_ty == Ty::Nil && !flow::stmt(last, &|e| self.call_diverges(e)).falls_through {
                 value_ty = Ty::Unknown;
             }
         }
