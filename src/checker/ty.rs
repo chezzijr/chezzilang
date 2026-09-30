@@ -1018,6 +1018,11 @@ pub enum Resolution {
 /// Every [`Resolution`] the checker recorded; see there.
 pub type ResolutionTable = HashMap<(usize, u32), Resolution>;
 
+/// TICKET-184 — fns whose annotated non-nil return the checker proved cannot fall off the end, keyed
+/// by graph module index and `FnDecl::name_span`. The compiler traps after such a fn's end instead of
+/// returning a silent `nil`.
+pub type NoFallOffTable = std::collections::HashSet<(usize, Span)>;
+
 /// One declaration slot of a bound call, as `Checker::bind_call` filled it. The compiler pushes the
 /// fills of a [`CallPlanTable`] entry in slot order, so the runtime call stays positional.
 #[derive(Debug, Clone, PartialEq)]

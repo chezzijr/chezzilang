@@ -181,6 +181,14 @@ for every read path.
 
 ## Family E — "can this code fall through?" decided by 7 walkers (NEW)
 
+**Status (2026-09-30): fixed by TICKET-184.** One walker, `src/checker/flow.rs` (`flow::stmt` /
+`flow::block`, every statement kind incl. `wait:` and `parallel:`), feeds missing-return, the
+`recover:` tail, inline-body inference, the `recover:`/`defer:`/`spawn:` escape checks and fn_writes'
+"left". Divergence comes from the resolved callee (`Checker::resolution_diverges`), never a name.
+`stmt_terminates`, `block_terminates`, `stmt_has_break`, `block_has_break`, `expr_is_diverging_call`,
+`escaping_flow` and `imported_diverging` are deleted. The compiler traps after an end the checker
+proved unreachable (`NoFallOffTable`) instead of returning `nil`. Grid: `ticket184_flow_grid`.
+
 **Deciders:** `stmt_terminates`, `stmt_has_break`, `expr_is_diverging_call` (a **name test** on
 `exit`/`panic`/`.exit`, sig.rs:4734), `escaping_flow`, fn_writes' "left", the type-side divergence
 facts (these ARE resolved correctly), and the compiler's unconditional `Op::Nil; Op::Return`

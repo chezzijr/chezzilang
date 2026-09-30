@@ -21,8 +21,8 @@ use std::fmt;
 pub use ty::Ty;
 pub use ty::{
     ArgFill, CallPlanTable, CarrierKey, CarrierMode, CarrierTable, FnLabels, ForBind, ForBindTable,
-    FreshOperandTable, ProtoEqTable, Resolution, ResolutionTable, RetCoerce, RetCoerceTable,
-    SumSeed, SumSeedTable, WitnessCallee, WitnessKey, WitnessSrc, WitnessTable,
+    FreshOperandTable, NoFallOffTable, ProtoEqTable, Resolution, ResolutionTable, RetCoerce,
+    RetCoerceTable, SumSeed, SumSeedTable, WitnessCallee, WitnessKey, WitnessSrc, WitnessTable,
 };
 use ty::{compatible, param_invariant};
 
@@ -1125,6 +1125,7 @@ pub fn resolve_call_tables(
     ForBindTable,
     FreshOperandTable,
     ResolutionTable,
+    NoFallOffTable,
 ) {
     resolve_call_tables_with(graph, true)
 }
@@ -1145,6 +1146,7 @@ fn resolve_call_tables_with(
     ForBindTable,
     FreshOperandTable,
     ResolutionTable,
+    NoFallOffTable,
 ) {
     crate::on_frontend_stack_scoped(move || {
         let mut c = Checker::new();
@@ -1162,6 +1164,7 @@ fn resolve_call_tables_with(
             std::mem::take(&mut c.for_binds),
             std::mem::take(&mut c.fresh_operands),
             std::mem::take(&mut c.resolutions),
+            std::mem::take(&mut c.no_fall_off),
         )
     })
 }
@@ -1189,6 +1192,7 @@ pub fn resolve_call_tables_standalone(
     ForBindTable,
     FreshOperandTable,
     ResolutionTable,
+    NoFallOffTable,
 ) {
     resolve_call_tables_with(&standalone_graph(stmts), true)
 }
@@ -1209,6 +1213,7 @@ pub fn resolve_call_tables_standalone_no_memo(
     ForBindTable,
     FreshOperandTable,
     ResolutionTable,
+    NoFallOffTable,
 ) {
     resolve_call_tables_with(&standalone_graph(stmts), false)
 }
@@ -2340,6 +2345,8 @@ struct Checker {
     /// `record_resolution` in EVERY walk and overwritten, because inference passes read it; the
     /// Resolution table itself stays main-pass-only (DEC-180).
     callee_diverges: HashMap<(usize, u32), bool>,
+    /// TICKET-184 — fns proved unable to fall off their end; see [`NoFallOffTable`].
+    no_fall_off: NoFallOffTable,
     /// Graph index of every module, so a from-imported fn's [`Resolution::Fn`] names its home.
     module_idx_of: HashMap<crate::resolver::ModuleId, usize>,
     /// The current module's from-imported fns: bound name -> (declaring module, declared name).

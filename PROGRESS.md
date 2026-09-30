@@ -7,6 +7,21 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-184 (2026-09-30): Family E, one control-flow summary.** `src/checker/flow.rs` is the one
+  walker for "falls through / breaks / continues / returns" over every statement kind; divergence is
+  read from the resolved callee (`Checker::resolution_diverges`), never a name. Fixed: K7 (a user fn,
+  method, local or parameter named `exit`/`panic` no longer counts as diverging, so `-> int` bodies
+  that fell off to a silent `nil` are rejected, as Rust E0308); K8 (a `break` in a `wait:` arm or
+  `parallel:` body leaves `while true:`); false rejects of a `wait:` whose every arm returns (Go
+  compiles the `select` twin), `return` inside `parallel:`, `import exit as quit from std.os`, a
+  diverging `wait:` arm in a `recover:` tail. fn_writes' "left" now sees an escape inside `wait:`
+  (layer A no longer rejects a write after it). Deleted: `stmt_terminates`, `block_terminates`,
+  `stmt_has_break`, `block_has_break`, `expr_is_diverging_call`, `escaping_flow`,
+  `imported_diverging`. The compiler traps (`internal: function ... fell off the end`) after an end
+  the checker proved unreachable (`NoFallOffTable`) instead of returning `nil`. Tests:
+  `ticket184_flow_grid` (44 cells), `fall_off_trap_only_after_a_proved_unreachable_end`,
+  `tests/chz/spec/control_flow_summary_test.chz`.
+
 - **Wave-16 in-place fixes (2026-09-30), each against the CPython 3.14.7 value.** (1) **S1, P1:**
   a slice step near `i64::MAX` wrapped the stepping index negative and panicked the VM thread, even
   under `recover:` (`xs[1::9223372036854775807]`); `slice::slice_indices` now stops on an

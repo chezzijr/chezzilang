@@ -91,9 +91,10 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     // witness params and what fills each witness at each call site. The compiler CONSUMES it — it
     // never re-derives which protocols carry a static requirement (that resolves through
     // imports/aliases/embeds, which is checker work).
-    let (kw, wt, ct, pe, ns, rc, conflicts, fb, fo, rs) =
+    let (kw, wt, ct, pe, ns, rc, conflicts, fb, fo, rs, nf) =
         crate::checker::resolve_call_tables(graph);
     reject_table_conflicts(conflicts)?;
+    c.no_fall_off = nf;
     c.for_binds = fb;
     c.call_plans = kw;
     c.witnesses = wt;
@@ -173,9 +174,10 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     // SINGLE-RESOLVER: extern C types come from the checker's standalone pass — the SAME resolver the
     // multi-file CLI uses (no second backend resolver exists). The backend reads this table verbatim.
     c.extern_sigs = crate::checker::resolve_extern_signatures_standalone(&module.stmts);
-    let (kw, wt, ct, pe, ns, rc, conflicts, fb, fo, rs) =
+    let (kw, wt, ct, pe, ns, rc, conflicts, fb, fo, rs, nf) =
         crate::checker::resolve_call_tables_standalone(&module.stmts);
     reject_table_conflicts(conflicts)?;
+    c.no_fall_off = nf;
     c.for_binds = fb;
     c.call_plans = kw;
     c.witnesses = wt;
@@ -311,6 +313,8 @@ struct Compiler {
     /// TICKET-180 — the checker's answer to what every name head means; the ONLY source for
     /// it. Read through [`Compiler::resolution`].
     resolutions: crate::checker::ResolutionTable,
+    /// TICKET-184 — fns the checker proved cannot fall off their end; their fall-off traps.
+    no_fall_off: crate::checker::NoFallOffTable,
     /// W8-21 — which implicit success-coercion (if any) each declared `T?`/`T!E` return sink applies
     /// to its bare success value, consumed verbatim: the backend is type-blind and cannot re-derive
     /// whether the returned expression is already a carrier. A MISS means `NoWrap` — the pre-fix
@@ -585,6 +589,7 @@ impl Compiler {
             sum_seeds: crate::checker::SumSeedTable::new(),
             fresh_operands: crate::checker::FreshOperandTable::new(),
             resolutions: crate::checker::ResolutionTable::new(),
+            no_fall_off: crate::checker::NoFallOffTable::new(),
             ret_coerce: crate::checker::RetCoerceTable::new(),
             for_binds: crate::checker::ForBindTable::new(),
             next_opt_tmp: 0,
@@ -1275,6 +1280,21 @@ impl Compiler {
         self.compile_block_scoped(&mut fc, &decl.body)?;
         if implicit {
             fc.nursery_scopes -= 1;
+        }
+        // TICKET-184: the checker proved this end unreachable, so reaching it means the proof is
+        // wrong — trap loudly instead of returning a silent `nil`. Fix `checker/flow.rs`, never this.
+        if self
+            .no_fall_off
+            .contains(&(self.current_module_idx, decl.name_span))
+        {
+            fc.emit(
+                Op::ConstStr(format!(
+                    "internal: function '{}' fell off the end, but the type-checker proved every path returns",
+                    decl.name
+                )),
+                Span::RUNTIME,
+            );
+            fc.emit(Op::CallBuiltin("panic".to_string(), 1), Span::RUNTIME);
         }
         // Fall off the end → return Nil (do_return joins the implicit nursery).
         fc.emit(Op::Nil, Span::RUNTIME);
@@ -7326,6 +7346,21 @@ mod capture_layout_tests {
             .iter()
             .flat_map(|p| p.code.iter().cloned())
             .collect()
+    }
+
+    /// TICKET-184 — the fall-off of an annotated non-nil fn the checker proved cannot fall off traps
+    /// instead of returning a silent `nil`; a legal fall-off (unannotated, alias to `nil`) does not.
+    #[test]
+    fn fall_off_trap_only_after_a_proved_unreachable_end() {
+        let traps = |src: &str| {
+            all_ops(&compile(src))
+                .iter()
+                .filter(|op| matches!(op, Op::ConstStr(s) if s.contains("fell off the end")))
+                .count()
+        };
+        assert_eq!(traps("fn a() -> int:\n    return 1\nprint(a())\n"), 1);
+        assert_eq!(traps("fn b():\n    print(1)\nb()\n"), 0);
+        assert_eq!(traps("type N = nil\nfn f() -> N:\n    print(1)\nf()\n"), 0);
     }
 
     #[test]

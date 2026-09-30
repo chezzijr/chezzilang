@@ -5079,11 +5079,24 @@ impl Checker {
         // annotation) is exempt; generators (`-> Iterator[T]`, value-produced via `yield`) too. If
         // the body can fall off the end, that silently yields nil at runtime — turn it into a loud
         // static error.
-        if !decl.is_generator
+        let must_return = !decl.is_generator
             && !decl.inline_expr_body
             && decl.ret.is_some()
-            && sig.ret != Ty::Nil
-            && self.block_flow(&decl.body).falls_through
+            && sig.ret != Ty::Nil;
+        let falls_through = self.block_flow(&decl.body).falls_through;
+        // TICKET-184: a proved-unreachable end is recorded, so the compiler traps there instead of
+        // returning a silent `nil`. Main pass only; a decl with a default span has no key.
+        if must_return
+            && !falls_through
+            && !self.generic_arg_prepass
+            && !self.resolving_returns
+            && decl.name_span != Span::default()
+        {
+            self.no_fall_off
+                .insert((self.graph_module_idx, decl.name_span));
+        }
+        if must_return
+            && falls_through
             && let Some(span) = decl.body.first().map(|s| s.span)
         {
             let ret = &sig.ret;

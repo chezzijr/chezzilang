@@ -1021,9 +1021,12 @@ fn a() -> int:
 fn a() -> int: 10          # OK: an inline-expr body implicitly returns its expression
 ```
 
-The check is path-aware and conservative: an `if`/`else` where every branch returns, an exhaustive
-`match` where every arm returns, a `while true:` with no `break`, and a tail call to `exit` all count
-as terminating. An inline-expr body is exempt (it implicitly returns). A bare `fn a(): 10` with **no**
+The check is path-aware and conservative. These count as terminating: an `if`/`else`, exhaustive
+`match`, or `wait:` whose every branch/arm (and `else`) returns; a `return` inside `parallel:`; a
+`while true:` with no `break` of its own (a `break` in an `if`/`match`/`wait:` arm or a `parallel:`
+body counts); a tail call whose resolved callee diverges (`panic`, `os.exit`, `exit` imported from
+`std.os` under any name — a user fn, method, local or parameter named `exit`/`panic` does not count).
+A `for` body may run zero times, so a `return` inside it does not terminate. An inline-expr body is exempt (it implicitly returns). A bare `fn a(): 10` with **no**
 return annotation infers `int` from the inline expr and is unaffected — the enforcement only fires on a
 multiline body whose *declared* non-void return can be reached by falling off the end.
 

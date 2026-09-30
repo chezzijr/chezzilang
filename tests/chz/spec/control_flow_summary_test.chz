@@ -1,0 +1,45 @@
+# TICKET-184: one control-flow summary decides fall-off, loop exits and early exits.
+# Gated by chz_suite_passes (tests/chz_suite.rs).
+
+fn par_ret() -> int:
+    parallel:
+        return 1
+
+fn first(c: Channel[int]) -> int:
+    wait:
+        v := c.recv():
+            return v
+
+fn drain(c: Channel[int]) -> int:
+    while true:
+        wait:
+            _ := c.recv():
+                break
+    return 5
+
+fn skip_write(xs: List[int], c: Channel[int]):
+    wait:
+        _ := c.recv():
+            return
+    xs.push(1)
+
+test fn a_return_inside_parallel_returns_from_the_fn():
+    assert par_ret() == 1
+
+test fn a_wait_whose_every_arm_returns_cannot_fall_off():
+    c := Channel[int](1)
+    c.send(7)
+    assert first(c) == 7
+
+test fn a_break_in_a_wait_arm_leaves_while_true():
+    c := Channel[int](1)
+    c.send(1)
+    assert drain(c) == 5
+
+test fn a_return_in_a_wait_arm_is_an_early_exit_for_task_writes():
+    xs := [0]
+    c := Channel[int](1)
+    c.send(1)
+    parallel:
+        spawn skip_write(xs, c)
+    assert xs.len() == 1, "got: {xs}"
