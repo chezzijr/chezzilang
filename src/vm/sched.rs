@@ -3005,9 +3005,10 @@ impl Vm {
         self.wake_on_send_key_kind(key, WakeKind::All);
     }
 
-    /// Same as [`Vm::wake_on_send_key`] but with the wake kind carried by the caller (TICKET-117 —
-    /// a cap-0 receiver-side wake must pass `WakeKind::Send`, per DEC-028; every sender/close/trip
-    /// caller keeps going through `wake_on_send_key` above, which stays `WakeKind::All`).
+    /// Same as [`Vm::wake_on_send_key`] but with the wake kind carried by the caller (TICKET-117,
+    /// TICKET-185 — the receiver-side wake passes `WakeKind::Settled` on every cap; every
+    /// sender/close/trip caller keeps going through `wake_on_send_key` above, which stays
+    /// `WakeKind::All`).
     pub(super) fn wake_on_send_key_kind(&mut self, key: usize, kind: WakeKind) {
         {
             let mut g = self

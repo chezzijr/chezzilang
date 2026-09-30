@@ -1905,22 +1905,14 @@ impl Vm {
             // TICKET-128 (W13-25) — this waker (the receiver) keeps running after the handoff, so
             // `recruit: true`: it may block its own thread (e.g. `io.input`) before anyone else
             // reaches the handed-off sender, and nobody else would steal it before `HANDOFF_GRACE`.
-            let kind = if core.cap == Some(0) {
-                WakeKind::Send
-            } else {
-                WakeKind::All
-            };
-            sched.handoff_wake(key, core, kind, self.wid, false, true);
+            // TICKET-185 — `Settled` on every cap: only a party whose `Pending` left QUEUED (the
+            // sender whose offer this receive took, or moved into the buffer) can proceed.
+            sched.handoff_wake(key, core, WakeKind::Settled, self.wid, false, true);
         } else if let Some(sched) = self.mn_enlist_sched.clone() {
             sched.recv_wake(key, core);
         } else {
             core.cv.notify_all();
-            let kind = if core.cap == Some(0) {
-                WakeKind::Send
-            } else {
-                WakeKind::All
-            };
-            self.wake_on_send_key_kind(Arc::as_ptr(core) as usize, kind);
+            self.wake_on_send_key_kind(Arc::as_ptr(core) as usize, WakeKind::Settled);
         }
     }
 

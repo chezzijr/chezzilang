@@ -2985,27 +2985,48 @@ fn run_one_fiber_resets_owner_fault_floor_left_by_the_previous_fiber() {
     );
 }
 
-/// TICKET-028 — a `WakeKind::Send` wake on a cap-0 channel requeues a parked SENDER without waking
-/// a parked receiver sharing the same bucket. Pins the pair-spin guard's other half.
+/// TICKET-185 — a receiver-side (`recv_wake`) wake requeues exactly the parked parties whose
+/// `Pending` left QUEUED, whatever their entry type: a committed sender and a receiver whose slot
+/// was filled wake; a queued receiver and a queued sender stay parked (DEC-028's pair-spin guard).
 #[test]
-fn rendezvous_bucket_wake_is_kind_selective() {
-    let sched = mk_sched(2);
+fn a_settled_wake_requeues_only_committed_parties() {
+    use crate::vm::core::{Pending, PendingOp};
+    let with = |mut f: Fiber, committed: bool| {
+        let p = Pending::new();
+        if committed {
+            assert!(p.try_commit(0));
+        }
+        f.pending = Some(PendingOp::new(p, Vec::new()));
+        f
+    };
+    let sched = mk_sched(4);
     let core = cap0_core();
     let key = core_key(&core);
-    sched.seed(vec![mk_fiber(0), mk_fiber(1)]);
-    let f0 = take_run(&sched);
-    let f1 = take_run(&sched);
+    sched.seed(vec![mk_fiber(0), mk_fiber(1), mk_fiber(2), mk_fiber(3)]);
+    let f0 = with(take_run(&sched), true);
+    let f1 = with(take_run(&sched), false);
+    let f2 = with(take_run(&sched), true);
+    let f3 = with(take_run(&sched), false);
     {
         let mut c = sched.lock();
-        c.parked.entry(key).or_default().push(ParkedEntry::Send(f0));
-        c.parked.entry(key).or_default().push(ParkedEntry::Recv(f1));
-        c.parked_n += 2;
-        c.running -= 2;
+        let b = c.parked.entry(key).or_default();
+        b.push(ParkedEntry::Send(f0));
+        b.push(ParkedEntry::Recv(f1));
+        b.push(ParkedEntry::Recv(f2));
+        b.push(ParkedEntry::Send(f3));
+        c.parked_n += 4;
+        c.running -= 4;
     }
     sched.recv_wake(key, &core);
-    assert_eq!(sched.lock().parked_n, 1);
-    assert_eq!(take_run(&sched).task_index, 0);
-    assert!(matches!(sched.lock().parked[&key][0], ParkedEntry::Recv(_)));
+    assert_eq!(sched.lock().parked_n, 2);
+    let mut woke = vec![take_run(&sched).task_index, take_run(&sched).task_index];
+    woke.sort();
+    assert_eq!(woke, vec![0, 2], "only the committed parties wake");
+    let c = sched.lock();
+    let kept = &c.parked[&key];
+    assert_eq!(kept.len(), 2);
+    assert!(matches!(&kept[0], ParkedEntry::Recv(f) if f.task_index == 1));
+    assert!(matches!(&kept[1], ParkedEntry::Send(f) if f.task_index == 3));
 }
 
 /// TICKET-185 — `MnSched::park` on a rendezvous channel publishes a SLOT bound to the parked

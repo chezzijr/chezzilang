@@ -2190,26 +2190,35 @@ struct WaitPark {
     fiber: Mutex<Option<Fiber>>,
     /// Every bucket key this token was filed under — the sweep set the winner removes itself from.
     keys: Vec<usize>,
-    /// TICKET-028 — the subset of `keys` whose arm is a SEND arm. A `WakeKind::Send` wake (a
-    /// receiver arriving on a rendezvous channel) claims this token ONLY when the woken key is in
-    /// here, because two `wait:` fibers each holding a RECV arm on one cap-0 channel would otherwise
-    /// claim each other's tokens forever — a hot livelock that never quiesces, so `deadlock` never
-    /// fires and the program hangs burning CPU.
-    send_keys: Vec<usize>,
+    /// TICKET-185 — the `wait:`'s one `Pending` (the fiber's `pending.p`), readable without taking
+    /// `fiber`. A [`WakeKind::Settled`] wake claims this token only once it left QUEUED; two `wait:`
+    /// fibers each holding a RECV arm on one cap-0 channel would otherwise claim each other's tokens
+    /// forever (DEC-028's hot livelock).
+    p: Option<Arc<crate::vm::core::Pending>>,
     /// Wake-once gate: the first waker to win the CAS owns the fiber; all later wakers see it set and
     /// drop their (stale) token. Distinct from `parked_n` (a fiber count, not a key count).
     claimed: AtomicBool,
 }
 
-/// TICKET-028 — which parked entries a bucket wake may claim. `All` is every existing wake site's
-/// behaviour, unchanged. `Send` is a rendezvous-channel receiver arriving: it must wake parked
-/// SENDERS without waking parked receivers, else a receiver re-runs `recv`, finds nothing, and
-/// re-parks (a livelock). There is no `Recv` kind — no caller needs one, and a never-constructed
-/// enum variant is `dead_code` under `cargo clippy -- -D warnings`.
+/// Which parked entries a bucket wake may claim. `All` wakes every entry (close, trip, a buffered
+/// push). `Settled` (TICKET-185) requeues only a parked party whose `Pending` left QUEUED; every
+/// other entry stays parked. Requeuing an uncommitted party re-runs its op, finds nothing, and
+/// re-parks — DEC-028's livelock.
 #[derive(Clone, Copy, PartialEq)]
 enum WakeKind {
     All,
-    Send,
+    Settled,
+}
+
+/// TICKET-185 — whether a parked entry's hand-off committed (its `Pending` left QUEUED): the one
+/// fact a [`WakeKind::Settled`] wake reads. A `None` pending reads as not settled.
+fn entry_settled(e: &ParkedEntry) -> bool {
+    match e {
+        ParkedEntry::Recv(f) | ParkedEntry::Send(f) => {
+            f.pending.as_ref().is_some_and(|op| !op.p.is_queued())
+        }
+        ParkedEntry::Wait(wp) => wp.p.as_ref().is_some_and(|p| !p.is_queued()),
+    }
 }
 
 /// gaps.md W7-56 — every `MnSched` alive in this run, by `Weak` (see [`Vm::sched_registry`] for why
@@ -2227,9 +2236,8 @@ pub(super) type SchedRegistry = Arc<Mutex<Vec<std::sync::Weak<MnSched>>>>;
 enum ParkedEntry {
     Recv(Fiber),
     Wait(Arc<WaitPark>),
-    /// TICKET-028 — a fiber parked on a rendezvous `send` (`cap == Some(0)`). Filed by
-    /// `MnSched::park_send` instead of `Recv` so a receiver's `WakeKind::Send` wake can requeue only
-    /// this variant (plus matching `Wait` tokens) without waking a parked receiver in the same bucket.
+    /// TICKET-028 — a fiber parked on a blocked `send` (its offer published). Filed by
+    /// `MnSched::park_send`; a [`WakeKind::Settled`] wake requeues it once its offer was taken.
     Send(Fiber),
 }
 
@@ -3833,8 +3841,8 @@ impl MnSched {
     /// Bounded-channel backpressure — the send-side twin of [`MnSched::park`]. The running fiber
     /// blocked on a `send` that published its OFFER (TICKET-185, `ChanState::send`); park it in
     /// `key`'s bucket, filed as [`ParkedEntry::Send`] (TICKET-028 — at cap 0 the bucket is NOT
-    /// homogeneous per-instant: a parked sender and a parked receiver can share a bucket, and a
-    /// receiver's `WakeKind::Send` wake must be able to tell them apart). The gap re-check reads the
+    /// homogeneous per-instant: a parked sender and a parked receiver can share a bucket; a
+    /// receiver's `WakeKind::Settled` wake requeues only the one whose offer it took). The gap re-check reads the
     /// offer's own `Pending`: requeue `Ready` once a receiver took the offer or `close()` closed it
     /// (the re-run `send` settles it), or the scope was cancelled; else park. Lock order core-OUTER /
     /// q-INNER matches `park`. A receiver that takes the offer wakes this fiber via
@@ -3861,7 +3869,7 @@ impl MnSched {
     /// TICKET-185 — wake receivers after a sender published its OFFER into `core.q`
     /// (`ChanState::send` → `Offered`, from `Vm::chan_send_step` before it parks or blocks, and from
     /// a `wait:` send arm). No enqueue here — the value already waits as an offer; this is
-    /// [`Self::send_commit`]'s wake-fan-out tail. `WakeKind::All` (not `Send`) because the wake
+    /// [`Self::send_commit`]'s wake-fan-out tail. `WakeKind::All` (not `Settled`) because the wake
     /// follows an offered value: a woken receiver should TAKE it, not re-park waiting for one. A
     /// receiver that holds a slot is parked, and only this wake makes it take the offer.
     ///
@@ -3951,18 +3959,11 @@ impl MnSched {
         core.cv.notify_all();
         out
     }
-    /// Bounded-channel backpressure — a `recv` freed a slot on `key`, so wake every parked SENDER
-    /// (all filed as [`ParkedEntry::Recv`]) to re-run and grab the space. Identical fan-out to
-    /// [`MnSched::close_wake`] (wake the bucket + notify + walk the parent chain) — a recv freeing a
-    /// slot and a close both just "make the waiters on this key runnable"; only the reason differs.
-    /// The woken senders race for the one slot; losers re-park (the documented multi-sender
-    /// nondeterminism). No-op fan-out cost is bounded by the (usually 0 or 1) parked senders.
+    /// A `recv` took a value on `key` (TICKET-185): requeue every parked party whose hand-off
+    /// committed ([`WakeKind::Settled`]) — the sender whose offer `pop_for` took or moved into the
+    /// buffer — and leave every queued party parked. The enlist route of [`Vm::wake_senders_core`].
     fn recv_wake(&self, key: usize, core: &Arc<ChannelCore>) {
-        let kind = if core.cap == Some(0) {
-            WakeKind::Send
-        } else {
-            WakeKind::All
-        };
+        let kind = WakeKind::Settled;
         let mut c = self.lock();
         self.wake_bucket(&mut c, key, kind);
         drop(c);
@@ -4056,15 +4057,10 @@ impl MnSched {
         }
         fiber.state = FiberState::Blocked; // running → parked: runnable unchanged
         let keys: Vec<usize> = arms.iter().map(|(k, _, _)| *k).collect();
-        let send_keys: Vec<usize> = arms
-            .iter()
-            .filter(|(_, _, is_send)| *is_send)
-            .map(|(k, _, _)| *k)
-            .collect();
         let wp = Arc::new(WaitPark {
             fiber: Mutex::new(Some(fiber)),
             keys: keys.clone(),
-            send_keys,
+            p,
             claimed: AtomicBool::new(false),
         });
         for key in keys {
@@ -4255,14 +4251,14 @@ impl MnSched {
         let mut woken = 0usize;
         let mut keep: Vec<ParkedEntry> = Vec::new();
         for entry in entries {
+            if kind == WakeKind::Settled && !entry_settled(&entry) {
+                // TICKET-185 — this party's hand-off has not committed; waking it would re-run its
+                // op, find nothing, and re-park (DEC-028's livelock). Leave it parked.
+                keep.push(entry);
+                continue;
+            }
             match entry {
                 ParkedEntry::Recv(f) => {
-                    if kind == WakeKind::Send {
-                        // TICKET-028 — a rendezvous receiver-arrival wake must not wake a parked
-                        // receiver in the same bucket (livelock guard); leave it parked.
-                        keep.push(ParkedEntry::Recv(f));
-                        continue;
-                    }
                     c.parked_n -= 1;
                     self.runnable.fetch_add(1, Ordering::Relaxed); // parked → ready
                     woken += 1;
@@ -4278,12 +4274,6 @@ impl MnSched {
                     c.global.push_back(f);
                 }
                 ParkedEntry::Wait(wp) => {
-                    if kind == WakeKind::Send && !wp.send_keys.contains(&key) {
-                        // TICKET-028 — this token's arm on `key` is a RECV arm, not a SEND arm; a
-                        // `WakeKind::Send` wake must not claim it (the pair-spin guard).
-                        keep.push(ParkedEntry::Wait(wp));
-                        continue;
-                    }
                     // CAS the wake-once gate: only the winner takes the fiber + sweeps.
                     if wp
                         .claimed
