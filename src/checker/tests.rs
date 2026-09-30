@@ -36522,6 +36522,27 @@ fn t186_module_level_return_rejected() {
     rejects("return\nx := 5\n", "'return' outside a function");
 }
 
+#[test]
+fn ticket186_return_in_top_level_block_reports_once() {
+    // Named outside the `t186_` filter, which the acceptance criteria pin at 6 tests.
+    // A top-level `defer:` / `recover:` / `spawn:` block rejects its own `return`; the
+    // module-level rule must not report the same token a second time.
+    for (src, want) in [
+        ("defer:\n    return\nprint(1)\n", "inside a defer block"),
+        (
+            "r := recover:\n    return\nprint(r)\n",
+            "inside a recover block",
+        ),
+        ("spawn:\n    return\n", "inside a spawn block"),
+    ] {
+        let errs = check_src(src);
+        assert!(
+            errs.len() == 1 && errs[0].message.contains(want),
+            "want one {want:?} error, got: {errs:?}"
+        );
+    }
+}
+
 /// TICKET-186 grid: one record per module slot. Axes: the fact (Option refinement,
 /// empty-collection refinement, const, keyword labels, init) x the writer's position (a body
 /// above the first let, below it, between two lets, none) x the reader's position (a fn body, a

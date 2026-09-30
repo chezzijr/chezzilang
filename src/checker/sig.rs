@@ -4580,6 +4580,22 @@ impl Checker {
             self.collected_rets.push(ty);
             return;
         }
+        // Owner decision 2026-09-30 (TICKET-186): a module-level `return` is an error, as in
+        // CPython (`SyntaxError: 'return' outside function`). It skipped every later let, whose
+        // slot kept the uninit marker. The compiler still lowers it, so `run_file` tests in
+        // `src/vm/golden_tests.rs` (which skip the checker) reach the runtime check. A `defer:`,
+        // `spawn:` or `recover:` block already rejects its own `return`.
+        if !self.in_fn_body
+            && !self.in_defer_block
+            && !self.in_spawn_block
+            && self.recover_depth == 0
+        {
+            if let Some(e) = value {
+                self.infer(e);
+            }
+            self.error(span, "'return' outside a function");
+            return;
+        }
         // Inside a generator, a `return` may only be bare (stop the iterator early). A returned
         // value is meaningless — the generator's result type is the stream, not a single value.
         if self.yield_ty.is_some() {
