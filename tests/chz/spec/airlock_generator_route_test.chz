@@ -1,0 +1,46 @@
+# tests/chz/spec/airlock_generator_route_test.chz — TICKET-190: a started generator with a private
+# frame crosses every route the same way. CPython runs the same generator in a pool thread.
+import std.concurrency
+import std.time as time
+
+fn t190_gen() -> Iterator[int]:
+    acc: List[int] = []
+    for i in range(3):
+        acc.push(i)
+        yield acc.len()
+
+fn t190_drain(g: Iterator[int]) -> str:
+    res := recover:
+        total := 0
+        for v in g:
+            total += v
+        total
+    match res:
+        Ok(t): return "{t}"
+        Err(e): return e.message()
+
+test fn started_generator_drained_in_executor_job_runs():
+    g := t190_gen()
+    _ := g.next()
+    ex := Executor()
+    got := ex.submit_result(fn() -> str: t190_drain(g)).recv()
+    ex.shutdown()
+    assert got == "5"
+
+# A7: a generator crossing costs O(frame), not O(heap). 200 started-generator crossings with a
+# 200k-object parent took ~4 s on the release binary before TICKET-190 (a whole-heap reach scan).
+test fn generator_crossing_cost_is_independent_of_parent_heap():
+    big: List[List[int]] = []
+    for i in range(200000):
+        big.push([i])
+    t0 := time.now_ms()
+    for _ in range(200):
+        g := t190_gen()
+        _ := g.next()
+        r := Channel[str](1)
+        parallel:
+            spawn: r.send(t190_drain(g))
+        assert r.recv() == "5"
+    elapsed := time.now_ms() - t0
+    assert big.len() == 200000
+    assert elapsed < 1000, "{elapsed} ms"
