@@ -121,6 +121,7 @@ impl Checker {
             collected_yields: Vec::new(),
             module_sigs: HashMap::new(),
             imported_modules: HashMap::new(),
+            json_module: None,
             import_paths: Vec::new(),
             implicit_binds: HashMap::new(),
             ambiguous_binds: HashMap::new(),

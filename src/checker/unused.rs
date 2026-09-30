@@ -325,10 +325,6 @@ impl Scan {
                     self.expr(o);
                 }
             }
-            ExprKind::DecodeCall { obj, arg, .. } => {
-                self.expr(obj);
-                self.expr(arg);
-            }
             ExprKind::Closure { params, body, .. } => self.scoped(|s| {
                 s.params(params);
                 s.expr(body);

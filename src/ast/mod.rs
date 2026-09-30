@@ -1078,15 +1078,6 @@ pub enum ExprKind {
         /// `a`'s `Expr::span` and one key would collide two different carrier modes.
         op_span: Span,
     },
-    /// `module.decode[Type](arg)` — type-directed JSON decode (M8). `obj` is the json-module
-    /// expression (so the engine can reach its `parse`), `ty` is the target type to decode into,
-    /// `arg` is the source string. Evaluates to `Result[ty]`. Scoped to the `.decode[T](…)` shape;
-    /// not general call-site type arguments.
-    DecodeCall {
-        obj: Box<Expr>,
-        ty: Type,
-        arg: Box<Expr>,
-    },
     /// `fn(params) [-> ret]: body` — an anonymous function; body is a single expression.
     Closure {
         params: Vec<Param>,
@@ -1281,10 +1272,6 @@ pub fn expr_recover_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
                     .iter()
                     .for_each(|(_, v)| expr_recover_blocks(v, out));
             }
-        }
-        ExprKind::DecodeCall { obj, arg, .. } => {
-            go(obj);
-            go(arg);
         }
         // A closure is its own scope: a `yield`/restricted statement inside it belongs to the closure
         // (which can never be a generator), not the enclosing function. Do not descend.
@@ -1739,10 +1726,6 @@ fn ids_in_expr(e: &mut Expr, f: &mut dyn FnMut(&mut NodeId, Span, u32)) {
                     go(a, f);
                 }
             }
-        }
-        ExprKind::DecodeCall { obj, arg, .. } => {
-            go(obj, f);
-            go(arg, f);
         }
         ExprKind::Closure { params, body, .. } => {
             ids_in_params(params, f);

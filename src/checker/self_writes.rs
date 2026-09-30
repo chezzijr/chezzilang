@@ -223,10 +223,6 @@ impl Scan {
                     self.expr(expr);
                 }
             }
-            ExprKind::DecodeCall { obj, arg, .. } => {
-                self.expr(obj);
-                self.expr(arg);
-            }
             // A closure owns a different capture frame. Rule 3 summarizes it separately.
             ExprKind::Closure { .. } => {}
             ExprKind::Match { scrutinee, arms } => {

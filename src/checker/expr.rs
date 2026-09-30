@@ -137,7 +137,28 @@ impl Checker {
             .iter()
             .map(|t| self.resolve_type(t, span))
             .collect();
-        // Method call: `obj.method(args)`. The parser never attaches type args to a method callee.
+        // TICKET-187: `.decode[T](s)` is an ordinary member call; only `decode` on the `std.json`
+        // module is JSON decode, recorded as `Resolution::Decode` on the callee for the compiler.
+        if let ExprKind::Field { obj, name, .. } = &callee.kind
+            && name == "decode"
+            && let ExprKind::Ident(m) = &obj.kind
+            && matches!(self.head_binding(m), HeadBinding::Module)
+            && self.json_module.is_some()
+            && self.imported_modules.get(m) == self.json_module.as_ref()
+        {
+            if args.len() != 1 || type_args.len() != 1 || !named.is_empty() {
+                self.consume_named();
+                self.infer_all(args);
+                self.error(
+                    span,
+                    "decode takes one type argument and one str argument: `json.decode[T](s)`"
+                        .to_string(),
+                );
+                return Ty::Unknown;
+            }
+            return self.infer_decode(callee.id, obj, &type_args[0], &args[0], span);
+        }
+        // Method call: `obj.method(args)`.
         if let ExprKind::Field {
             obj,
             name,

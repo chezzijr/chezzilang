@@ -903,11 +903,6 @@ fn overlay_expr(expr: &crate::ast::Expr, map: &mut std::collections::HashMap<(us
                 }
             }
         }
-        ExprKind::DecodeCall { obj, ty, arg } => {
-            overlay_expr(obj, map);
-            overlay_type(ty, map);
-            overlay_expr(arg, map);
-        }
         ExprKind::Closure { params, ret, body } => {
             overlay_params(params, map);
             if let Some(r) = ret {

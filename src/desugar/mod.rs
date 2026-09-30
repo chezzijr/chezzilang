@@ -947,11 +947,6 @@ fn walk_idents_and_types(e: &Expr, f: &mut impl FnMut(&str), tf: &mut impl FnMut
             walk_idents_and_types(lhs, f, tf);
             walk_idents_and_types(rhs, f, tf);
         }
-        ExprKind::DecodeCall { obj, ty, arg } => {
-            walk_idents_and_types(obj, f, tf);
-            tf(ty);
-            walk_idents_and_types(arg, f, tf);
-        }
         // A closure's parameter NAMES are bindings, not references, so only their annotations and
         // the return annotation go down the type channel; `f` is untouched.
         ExprKind::Closure { params, ret, body } => {
@@ -1479,10 +1474,6 @@ impl Walker<'_> {
                 }
             }
             ExprKind::Try(inner) => self.walk_expr(inner)?,
-            ExprKind::DecodeCall { obj, arg, .. } => {
-                self.walk_expr(obj)?;
-                self.walk_expr(arg)?;
-            }
             ExprKind::Closure { params, body, .. } => {
                 self.push_scope();
                 for p in params.iter() {

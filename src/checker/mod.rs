@@ -1375,6 +1375,9 @@ impl Checker {
         // Every file's index is known before any body is checked.
         for (idx, lm) in graph.modules.iter().enumerate() {
             c.module_idx_of_file.insert(lm.file, idx);
+            if lm.dotted == ["std", "json"] {
+                c.json_module = Some(lm.id.clone());
+            }
         }
         // ROOT REDESIGN — module-scoped IDENTITY KEYS: scan every non-native module's struct/enum/alias
         // names and key EACH one `<module-key>::Name` (via the shared `resolver::module_keys`, the SAME
@@ -2206,6 +2209,9 @@ struct Checker {
     module_sigs: HashMap<ModuleId, ModuleSig>,
     /// Names bound to an imported module in the *current* module → which module they refer to.
     imported_modules: HashMap<String, ModuleId>,
+    /// TICKET-187 — the `std.json` module's id, when the graph holds it. `decode[T](s)` on this
+    /// module (and only this one) is JSON decode (`Resolution::Decode`).
+    json_module: Option<ModuleId>,
     /// Every dotted (2+ segment) whole-module import in the current module, as `(path, bound name,
     /// full path bound)` (TICKET-175). The third field is `false` for `import a.b as c`, which binds
     /// only `c`. Read only by the diagnostics for a full path that does not resolve (`a.b.X` after an

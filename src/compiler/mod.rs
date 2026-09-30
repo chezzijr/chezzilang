@@ -3543,9 +3543,9 @@ impl Compiler {
             // W7-43 — `?.`/`??` carriers reach the backend intact; clone-and-lower here, then
             // recurse, so the synthesized nodes route through the ordinary `Field`/`compile_call`
             // arms and pick up method inline caches, keyword permutations and witness args exactly
-            // as the equivalent hand-written spelling does. Same house pattern as `DecodeCall`
-            // below. `lower_carrier_*` are the SAME functions the checker lowered with, on the same
-            // input, so spans (and therefore every table key derived from them) cannot drift.
+            // as the equivalent hand-written spelling does. `lower_carrier_*` are the SAME
+            // functions the checker lowered with, on the same input, so spans (and therefore every
+            // table key derived from them) cannot drift.
             ExprKind::NullCoalesce { op_span, .. } => {
                 let key = crate::checker::carrier_key(
                     self.current_module_idx,
@@ -3631,30 +3631,6 @@ impl Compiler {
                 unreachable!(
                     "type-application head `{name}[…]` must be consumed by the checker before compiling"
                 )
-            }
-            ExprKind::DecodeCall { obj, arg, .. } => {
-                // Reuse the module's own `parse` (`obj.parse(arg)` → Result[Json]) as the method
-                // call the module-member path emits, then coerce the parsed value into the target
-                // type with the descriptor the checker built. No `Field` is synthesized over `obj`.
-                self.compile_expr(fc, obj)?;
-                self.compile_expr(fc, arg)?;
-                let ic = self.next_method_ic();
-                fc.emit(
-                    Op::CallMethod {
-                        name: "parse".to_string(),
-                        argc: 1,
-                        ic,
-                    },
-                    expr.span,
-                );
-                let Resolution::Decode(desc) = self.resolution(expr)? else {
-                    return Err(CompileError {
-                        message: "internal: a decode call has no recorded target descriptor"
-                            .to_string(),
-                        span: expr.span,
-                    });
-                };
-                fc.emit(Op::JsonDecode(desc.clone()), expr.span);
             }
             ExprKind::Closure { params, body, .. } => {
                 self.compile_closure(fc, params, body, expr.span)?
@@ -4738,6 +4714,30 @@ impl Compiler {
             fc.emit(Op::Call(0), span);
             return Ok(());
         }
+        // TICKET-187: `json.decode[T](s)` — the checker recorded `Resolution::Decode` on the callee
+        // only for `decode` on the `std.json` module. Reuse the module's own `parse`
+        // (`obj.parse(arg)` → Result[Json]), then coerce into the target with the descriptor.
+        if let ExprKind::Field { obj, .. } = &callee.kind
+            && let Some(Resolution::Decode(desc)) = self
+                .resolutions
+                .get(&(self.current_module_idx, callee.id.0))
+            && let [arg] = args
+        {
+            let desc = desc.clone();
+            self.compile_expr(fc, obj)?;
+            self.compile_expr(fc, arg)?;
+            let ic = self.next_method_ic();
+            fc.emit(
+                Op::CallMethod {
+                    name: "parse".to_string(),
+                    argc: 1,
+                    ic,
+                },
+                span,
+            );
+            fc.emit(Op::JsonDecode(desc), span);
+            return Ok(());
+        }
         // Method / module-member call: `obj.name(args)`.
         if let ExprKind::Field {
             obj,
@@ -5800,10 +5800,6 @@ fn find_boundary_free_expr(e: &Expr, out: &mut HashSet<String>) {
                 find_boundary_free_expr(o, out);
             }
         }
-        ExprKind::DecodeCall { obj, arg, .. } => {
-            find_boundary_free_expr(obj, out);
-            find_boundary_free_expr(arg, out);
-        }
         ExprKind::Match { scrutinee, arms } => {
             find_boundary_free_expr(scrutinee, out);
             for arm in arms {
@@ -6329,10 +6325,6 @@ pub(crate) fn free_names_expr(e: &Expr, bound: &HashSet<String>, out: &mut FreeN
                 free_names_expr(o, bound, out);
             }
         }
-        ExprKind::DecodeCall { obj, arg, .. } => {
-            free_names_expr(obj, bound, out);
-            free_names_expr(arg, bound, out);
-        }
         ExprKind::Closure { params, body, .. } => {
             let mut b = bound.clone();
             b.extend(params.iter().map(|p| p.name.clone()));
@@ -6470,10 +6462,6 @@ fn collect_frame_binds_expr(e: &Expr, out: &mut HashSet<String>) {
                 collect_frame_binds_expr(o, out);
             }
         }
-        ExprKind::DecodeCall { obj, arg, .. } => {
-            collect_frame_binds_expr(obj, out);
-            collect_frame_binds_expr(arg, out);
-        }
         ExprKind::Match { scrutinee, arms } => {
             collect_frame_binds_expr(scrutinee, out);
             for arm in arms {
@@ -6597,9 +6585,6 @@ fn expr_has_bare_spawn(e: &Expr) -> bool {
                     .into_iter()
                     .flatten()
                     .any(|o| expr_has_bare_spawn(o))
-        }
-        ExprKind::DecodeCall { obj, arg, .. } => {
-            expr_has_bare_spawn(obj) || expr_has_bare_spawn(arg)
         }
         ExprKind::Match { scrutinee, arms } => {
             expr_has_bare_spawn(scrutinee)

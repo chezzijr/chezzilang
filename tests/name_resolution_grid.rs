@@ -834,7 +834,7 @@ fn t187_cells() -> Vec<Cell> {
         one(
             "t187/decode/int_receiver",
             "n := 5\nprint(n.decode[int](\"7\"))\n".into(),
-            Expect::Rejects("has no method 'decode'"),
+            Expect::Rejects("method 'decode' takes no type argument(s)"),
         ),
         one(
             "t187/decode/user_generic_method",
@@ -887,11 +887,7 @@ fn run_cell(root: &Path, idx: usize, c: &Cell) -> Result<(), String> {
 
 /// Cells red on the pre-TICKET-187 binary. They must stay red here; when one turns green, remove
 /// it from the list.
-const PINNED_RED: &[&str] = &[
-    "t187/decode/int_receiver",
-    "t187/decode/user_generic_method",
-    "t187/decode/local_shadows_json",
-];
+const PINNED_RED: &[&str] = &[];
 
 #[test]
 fn name_resolution_grid() {

@@ -1752,9 +1752,6 @@ impl Checker {
             ExprKind::NullCoalesce { lhs, op_span, .. } => {
                 self.infer_null_coalesce(expr, lhs, *op_span)
             }
-            ExprKind::DecodeCall { obj, ty, arg } => {
-                self.infer_decode(expr.id, obj, ty, arg, expr.span)
-            }
             ExprKind::Closure { params, ret, body } => {
                 // No expected type at the generic `infer` seam — free-closure inference (sources
                 // #2/#3) and the ambiguity check happen inside `infer_closure`.
@@ -4988,10 +4985,6 @@ impl Checker {
                 }
             }
             ExprKind::Try(inner) => self.scan_expr_for_pin(name, inner, match_pin, member_pin),
-            ExprKind::DecodeCall { obj, arg, .. } => {
-                self.scan_expr_for_pin(name, obj, match_pin, member_pin);
-                self.scan_expr_for_pin(name, arg, match_pin, member_pin);
-            }
             ExprKind::IfElse { cond, then, els } => {
                 self.scan_expr_for_pin(name, cond, match_pin, member_pin);
                 self.scan_expr_for_pin(name, then, match_pin, member_pin);
