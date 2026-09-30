@@ -10076,8 +10076,11 @@ fn ran_graph(entry: &std::path::Path) -> Vm {
 /// Look up a top-level global in the entry module (modules run deps-first, entry last).
 fn entry_global(vm: &Vm, name: &str) -> Value {
     let m = *vm.module_objs.last().expect("at least one module");
-    vm.module_global(m, name)
-        .unwrap_or_else(|| panic!("no global '{name}'"))
+    let i = vm
+        .slot_index(m, name)
+        .unwrap_or_else(|| panic!("no global '{name}'"));
+    vm.read_slot(m, i, sp())
+        .unwrap_or_else(|e| panic!("global '{name}': {}", e.message))
 }
 
 fn sp() -> Span {

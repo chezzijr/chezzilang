@@ -506,8 +506,9 @@ impl Vm {
                     }
                 }
             }
-            Obj::Module(m) => match m.index.get(name).map(|&i| m.slots[i as usize]) {
-                Some(v) => {
+            Obj::Module(m) => match m.index.get(name).copied() {
+                Some(i) => {
+                    let v = self.read_slot(h, i, span)?;
                     self.push(v);
                     Ok(())
                 }
@@ -2006,25 +2007,37 @@ impl Vm {
 
     // ----- module namespace helpers -----
 
-    /// Read a module global. **D1 invariant:** on a `--parallel` worker VM a module's globals are
-    /// faulted in lazily, so any NEW caller that reads globals on a worker must call
-    /// [`Vm::ensure_module_faulted`] for `module` first (the existing op/field/method read sites do);
-    /// otherwise it may observe an empty, not-yet-faulted module and spuriously fail to resolve.
-    pub(super) fn module_global(&self, module: GcRef, name: &str) -> Option<Value> {
+    /// The slot index of module global `name`, for [`Vm::read_slot`]. **D1 invariant:** on a
+    /// `--parallel` worker VM a module's globals are faulted in lazily, so any NEW caller that
+    /// reads globals on a worker must call [`Vm::ensure_module_faulted`] for `module` first (the
+    /// existing op/field/method read sites do); otherwise it may observe an empty, not-yet-faulted
+    /// module and spuriously fail to resolve.
+    pub(super) fn slot_index(&self, module: GcRef, name: &str) -> Option<u32> {
         match self.heap.get(module) {
-            Obj::Module(m) => m.index.get(name).map(|&i| m.slots[i as usize]),
+            Obj::Module(m) => m.index.get(name).copied(),
             _ => None,
         }
     }
 
-    /// M19 Phase 2b — read a module global by compile-time slot. The home module is always pre-sized
-    /// before any `GetGlobalSlot`: the top-level engine sizes it from `global_slots` in `run_module`,
-    /// and a worker faults it fully in (`fault_module`) before reading. So the index is always valid.
-    pub(super) fn global_slot(&self, module: GcRef, slot: u32) -> Value {
-        match self.heap.get(module) {
+    /// TICKET-186 — the one read of a module slot. It faults on the TICKET-183 uninit marker (a
+    /// let that has not run yet); a raw `slots[..]` read elsewhere leaks the marker, which once
+    /// reached the heap as an index (K10). The home module is always pre-sized before any read:
+    /// the top-level engine sizes it from `global_slots` in `run_module`, and a worker faults it
+    /// fully in (`fault_module`) before reading. So the index is always valid.
+    pub(super) fn read_slot(
+        &self,
+        module: GcRef,
+        slot: u32,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        let v = match self.heap.get(module) {
             Obj::Module(m) => m.slots[slot as usize],
             _ => Value::nil(),
+        };
+        if v.is_uninit() {
+            return Err(self.uninit_read_err(module, slot, v, span));
         }
+        Ok(v)
     }
 
     /// The name the module `index` gives compile-time slot `slot`, if any.

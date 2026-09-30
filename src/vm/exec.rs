@@ -790,11 +790,7 @@ impl Vm {
         let span = Span::RUNTIME;
         let home = self.entry_home();
         // Read the binding by name from the entry module's slot table (mirrors `module_define`).
-        let callee = match self.heap.get(home) {
-            Obj::Module(m) => m.index.get(fn_name).map(|&i| m.slots[i as usize]),
-            _ => None,
-        };
-        let callee = callee.ok_or_else(|| {
+        let idx = self.slot_index(home, fn_name).ok_or_else(|| {
             self.err(
                 format!(
                     "entrypoint function `{fn_name}` not found in module `{}`",
@@ -803,6 +799,7 @@ impl Vm {
                 span,
             )
         })?;
+        let callee = self.read_slot(home, idx, span)?;
         // Guard with a clear message before `invoke_value`'s generic "not callable" fault.
         let callable = matches!(
             callee.as_obj(),
@@ -1130,8 +1127,9 @@ impl Vm {
                     // global that IS a known type name is skipped (not an error). A member that is
                     // neither a value nor a type is a genuine "no member". The value bind is tried
                     // FIRST so a fn named like a type IN ANOTHER MODULE is still bound here.
-                    match self.module_global(target_obj, member) {
-                        Some(value) => {
+                    match self.slot_index(target_obj, member) {
+                        Some(idx) => {
+                            let value = self.read_slot(target_obj, idx, imp.span)?;
                             self.module_define(into, alias.as_ref().unwrap_or(member), value);
                         }
                         None if self.program.type_names.contains(member) => {}
@@ -2169,10 +2167,7 @@ impl Vm {
                 // the airlock (`from_wire_memo`'s `WireValue::Closure` arm), so a plain live read
                 // always agrees with a closure's read of the same slot.
                 self.ensure_module_faulted(home); // D1: lazily reconstruct the worker's home module
-                let v = self.global_slot(home, *slot);
-                if v.is_uninit() {
-                    return Err(self.uninit_read_err(home, *slot, v, span));
-                }
+                let v = self.read_slot(home, *slot, span)?;
                 self.push(v);
             }
             Op::DefineGlobalSlot(slot) => {
@@ -2215,22 +2210,15 @@ impl Vm {
                             .capture_names
                             .get(*slot as usize)
                             .cloned();
-                        let v = name
+                        let idx = name
                             .as_deref()
-                            .and_then(|n| self.module_global(home, n))
+                            .and_then(|n| self.slot_index(home, n))
                             .ok_or_else(|| {
                                 let label =
                                     name.clone().unwrap_or_else(|| format!("capture#{slot}"));
                                 self.err(format!("undefined name '{label}'"), span)
                             })?;
-                        if v.is_uninit() {
-                            let slot = match self.heap.get(home) {
-                                Obj::Module(m) => name.as_deref().and_then(|n| m.index.get(n)),
-                                _ => None,
-                            };
-                            let slot = slot.copied().unwrap_or(u32::MAX);
-                            return Err(self.uninit_read_err(home, slot, v, span));
-                        }
+                        let v = self.read_slot(home, idx, span)?;
                         self.push(v);
                     }
                 }

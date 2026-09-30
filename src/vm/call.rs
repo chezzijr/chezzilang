@@ -1564,16 +1564,13 @@ impl Vm {
         match self.heap.get(h).clone() {
             // `module.fn(args)` — plain call on the looked-up member, no `self`.
             Obj::Module(m) => {
-                let member = m
-                    .index
-                    .get(method)
-                    .map(|&i| m.slots[i as usize])
-                    .ok_or_else(|| {
-                        self.err(
-                            format!("module '{}' has no member '{method}'", m.name),
-                            span,
-                        )
-                    })?;
+                let idx = self.slot_index(h, method).ok_or_else(|| {
+                    self.err(
+                        format!("module '{}' has no member '{method}'", m.name),
+                        span,
+                    )
+                })?;
+                let member = self.read_slot(h, idx, span)?;
                 // W7-8 — a module member can now be a BODIED Chezzi fn (`std.fs`'s `PathLike`
                 // wrappers), not only an `Obj::Native`. `do_call` FLATTENS such a callee (installs the
                 // frame for the *running* `run_until` to execute), which is only correct on the real
