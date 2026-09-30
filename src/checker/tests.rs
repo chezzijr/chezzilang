@@ -36214,3 +36214,21 @@ fn fn_field_named_call_keeps_the_generic_refusal() {
         "got: {errs:?}"
     );
 }
+
+// TICKET-184 (Family E, wave 17): divergence must come from the resolved callee, not a name.
+#[test]
+fn ticket184_user_fn_named_exit_does_not_diverge() {
+    rejects(
+        "fn exit(code: int) -> int:\n    return code\nfn f(x: int) -> int:\n    if x > 0:\n        return x\n    exit(1)\nprint(f(-1))\n",
+        "fall off the end",
+    );
+}
+
+// TICKET-184: a `break` inside a `wait:` arm leaves `while true:`, so the fn can fall off.
+#[test]
+fn ticket184_break_in_wait_arm_leaves_while_true() {
+    rejects(
+        "fn g(c: Channel[int]) -> int:\n    while true:\n        wait:\n            _ := c.recv():\n                break\nprint(g(Channel[int](1)))\n",
+        "fall off the end",
+    );
+}
