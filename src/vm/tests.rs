@@ -3963,20 +3963,6 @@ fn t185_core(cap: Option<usize>) -> Arc<crate::vm::core::ChannelCore> {
     })
 }
 
-/// TICKET-185 lever 1: a send that publishes no offer and finds no taker hands its value back,
-/// so the caller can publish the offer on a second attempt without re-serializing.
-#[test]
-fn a_send_without_an_offer_hands_back_its_value_when_full() {
-    use crate::vm::core::SendOutcome;
-    let core = t185_core(Some(0));
-    let out = core
-        .q
-        .lock()
-        .unwrap()
-        .send(Some(0), t185_sum(5), WireValue::Int(5), None);
-    assert!(matches!(out, SendOutcome::Full(WireValue::Int(5))));
-}
-
 /// TICKET-185: a parked sender's offer commits exactly once. The first `pop` takes it and CASes
 /// its `Pending` to `DONE + arm`; a second `pop` finds nothing, and the sender's `settle` reads
 /// `Sent`. `len()` never counts an offer (Go's `len: 0` with a parked sender).
@@ -4053,7 +4039,7 @@ fn chan_state_pop_refills_the_buffer_from_a_parked_offer() {
     ));
     assert!(matches!(
         g.send(Some(1), t185_sum(2), WireValue::Int(2), None),
-        SendOutcome::Full(_)
+        SendOutcome::Full
     ));
     let p = Pending::new();
     assert!(matches!(

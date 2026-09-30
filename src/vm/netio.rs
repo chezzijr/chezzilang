@@ -1759,26 +1759,18 @@ impl Vm {
             self.cancelled = true;
             return Err(self.err("cancelled".to_string(), span));
         }
-        // Try the send before allocating an offer: a buffer place or a live slot needs none.
-        let w = match self.send_commit(h, &core, w, None) {
-            SendOutcome::Sent => return Ok(SendStep::Sent),
-            SendOutcome::Closed => return Err(self.err(CLOSED_SEND.to_string(), span)),
-            SendOutcome::Full(w) => w,
-            SendOutcome::Offered => unreachable!("no offer was passed"),
-        };
         // The table decides how this send blocks; a `Refuse` context publishes no offer.
         let mode = self.block_mode(WaitSpec::Send);
-        if mode == BlockMode::Refuse {
-            return Err(self.err(send_deadlock_msg(core.cap).to_string(), span));
-        }
-        let p = Pending::new();
-        match self.send_commit(h, &core, w, Some((&p, 0))) {
+        let p = (mode != BlockMode::Refuse).then(Pending::new);
+        match self.send_commit(h, &core, w, p.as_ref().map(|p| (p, 0))) {
             SendOutcome::Sent => return Ok(SendStep::Sent),
             SendOutcome::Closed => return Err(self.err(CLOSED_SEND.to_string(), span)),
-            SendOutcome::Full(_) => unreachable!("an offer was passed"),
+            SendOutcome::Full => {
+                return Err(self.err(send_deadlock_msg(core.cap).to_string(), span));
+            }
             SendOutcome::Offered => {}
         }
-        let op = PendingOp::new(p, vec![(Arc::clone(&core), 0, true)]);
+        let op = PendingOp::new(p.unwrap(), vec![(Arc::clone(&core), 0, true)]);
         // An `Offered` send wakes no parked fiber: every parked cap-0 receiver holds a live slot,
         // published in the same `core.q` hold as its "not ready" check, so the failed `give` proves
         // no parked fiber can take this offer. Only a party blocking in place (or demoted) re-checks
@@ -2650,7 +2642,7 @@ impl Vm {
                         return Ok(());
                     }
                     SendOutcome::Closed => return Err(self.err(CLOSED_SEND.to_string(), span)),
-                    SendOutcome::Full(_) | SendOutcome::Offered => {
+                    SendOutcome::Full | SendOutcome::Offered => {
                         all_closed = false; // live — a receiver will take its offer
                         continue;
                     }
