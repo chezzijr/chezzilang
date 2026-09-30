@@ -1,0 +1,48 @@
+# tests/chz/stdlib/task_memoize_shared_state_test.chz — TICKET-191.
+#
+# A `Task` handle and a `memoize1` wrapper must work from a spawned task, like CPython
+# `fut.result()` from a thread and `functools.cache` from any thread.
+
+import std.concurrency
+import submit_task, Task from std.concurrency.task
+import memoize1 from std.memoize
+
+fn forty_two() -> int:
+    return 42
+
+fn double(x: int) -> int:
+    return x * 2
+
+fn _child_get(t: Task[int], ch: Channel[str]):
+    r := recover: t.get()
+    match r:
+        Ok(v): ch.send(str(v))
+        Err(e): ch.send(e.message())
+
+fn _child_memo(m: fn(int) -> int, ch: Channel[str]):
+    r := recover: m(21)
+    match r:
+        Ok(v): ch.send(str(v))
+        Err(e): ch.send(e.message())
+
+test fn task_get_in_spawned_task_then_parent_get_sees_same_result():
+    ex := Executor()
+    t := submit_task(ex, forty_two)
+    ex.shutdown()
+    ch := Channel[str](1)
+    parallel:
+        spawn _child_get(t, ch)
+    child := ch.recv()
+    assert child == "42", child
+    r := recover: t.get()
+    match r:
+        Ok(v): assert v == 42, "parent get() after child get()"
+        Err(e): assert false, e.message()
+
+test fn memoize_wrapper_called_in_spawned_task_returns_value():
+    m := memoize1(double)
+    ch := Channel[str](1)
+    parallel:
+        spawn _child_memo(m, ch)
+    got := ch.recv()
+    assert got == "42", got
