@@ -3895,6 +3895,24 @@ impl MnSched {
     ) {
         let mut c = self.lock();
         let n = self.wake_bucket(&mut c, key, kind);
+        self.hand_off(c, n, wid, quiet_empty, recruit);
+        core.cv.notify_all();
+        self.wake_run_wide(key, kind);
+    }
+
+    /// TICKET-128's hand-off tail, shared by [`Self::handoff_wake`] and a cap-0 give in
+    /// [`Self::send_commit`]: `n` fibers were just woken into `global` under `c`. One woken fiber
+    /// goes to `wid`'s `runnext`; otherwise (or on the seeded coin flip, or an occupied `runnext`)
+    /// the idle workers are broadcast to.
+    fn hand_off(
+        &self,
+        c: std::sync::MutexGuard<'_, SchedCore>,
+        n: usize,
+        wid: usize,
+        quiet_empty: bool,
+        recruit: bool,
+    ) {
+        let mut c = c;
         let quiet = quiet_empty && n == 0;
         // TICKET-167 — seeded mode takes the existing broadcast path (below) on a coin flip instead
         // of always handing off; the coin is checked BEFORE `pop_back` so a "no" leaves `global`
@@ -3924,13 +3942,12 @@ impl MnSched {
                 self.notify_waiters();
             }
         }
-        core.cv.notify_all();
-        self.wake_run_wide(key, kind);
     }
 
     /// TICKET-185 — the M:N `send`: [`ChanState::send`]'s one decision (closed / buffer / give to a
-    /// slot / offer / full) made under the sched lock, then, when the value MOVED, the wake of
-    /// every receiver parked on `key`. An `Offered` result wakes nobody here: the caller wakes the
+    /// slot / offer / full) made under the sched lock, then, when the value MOVED, the wake: a
+    /// cap-0 give hands the one slot owner to `wid`'s `runnext`; a buffered push wakes every
+    /// receiver parked on `key`. An `Offered` result wakes nobody here: the caller wakes the
     /// receivers once, through [`MnSched::handoff_wake`] (a parked fiber, TICKET-128's `runnext`) or
     /// [`MnSched::close_wake`]'s fan-out (a party blocking in place).
     fn send_commit(
@@ -3939,6 +3956,7 @@ impl MnSched {
         core: &Arc<ChannelCore>,
         w: WireValue,
         offer: Option<(&Arc<crate::vm::core::Pending>, u32)>,
+        wid: usize,
     ) -> crate::vm::core::SendOutcome {
         // W6-7/W6-10 — summarise the message BEFORE taking core lock A: `wire_summary` is
         // O(payload), and this critical section serializes every fiber's park/wake/finish.
@@ -3950,6 +3968,16 @@ impl MnSched {
             .unwrap_or_else(|e| e.into_inner())
             .send(core.cap, sum, w, offer);
         if !matches!(out, crate::vm::core::SendOutcome::Sent) {
+            return out;
+        }
+        if core.cap == Some(0) {
+            // A cap-0 `Sent` is a `give`: it filled exactly one slot, so only that slot's owner can
+            // proceed. Hand it to this worker's `runnext` (DEC-128; `recruit` because the giver
+            // keeps running) — a global push plus a broadcast migrates the pair every message.
+            let n = self.wake_bucket(&mut c, key, WakeKind::Settled);
+            self.hand_off(c, n, wid, false, true);
+            core.cv.notify_all();
+            self.wake_run_wide(key, WakeKind::Settled);
             return out;
         }
         self.wake_bucket(&mut c, key, WakeKind::All);

@@ -4485,6 +4485,27 @@ fn handoff_wake_files_one_woken_fiber_in_the_wakers_runnext() {
     assert_eq!(sched.runnable.load(Ordering::Relaxed), 1);
 }
 
+/// TICKET-185 — a cap-0 `give` fills exactly one parked receiver's slot, so that receiver goes to
+/// the giver's `runnext` (DEC-128), not the global queue plus a broadcast.
+#[test]
+fn a_give_hands_the_slot_owner_to_the_givers_runnext() {
+    let sched = mk_sched(2);
+    let core = cap0_core();
+    let key = core_key(&core);
+    sched.seed(vec![mk_fiber(0), mk_fiber(1)]);
+    let f0 = take_run(&sched);
+    let _f1 = take_run(&sched);
+    sched.park(key, Arc::clone(&core), f0);
+    let out = sched.send_commit(key, &core, WireValue::Int(5), None, 1);
+    assert!(matches!(out, crate::vm::core::SendOutcome::Sent));
+    assert!(
+        sched.lock_local(1).runnext.is_some(),
+        "the slot owner must land in the giver's runnext"
+    );
+    assert!(sched.lock().global.is_empty());
+    assert_eq!(sched.lock().parked_n, 0);
+}
+
 /// TICKET-130 (W13-26) — `wake_key` on a sched whose bucket for `key` holds NO fiber changes no
 /// counter that sched's workers read, so it must not wake them. `wake_run_wide` calls `wake_key` on
 /// every peer sched once per wake; with an unconditional `notify_waiters` a four-deep nested

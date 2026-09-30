@@ -1839,7 +1839,15 @@ impl Vm {
     ) -> SendOutcome {
         if let Some(sched) = self.mn.clone().or_else(|| self.mn_enlist_sched.clone()) {
             let key = self.channel_core_ptr(h);
-            return sched.send_commit(key, core, w, offer);
+            // TICKET-185 — a give hands its receiver to this worker's `runnext`. A builder VM
+            // (`mn == None`, enlisted) owns no worker slot, so it passes an out-of-range `wid`
+            // and the hand-off falls back to the broadcast.
+            let wid = if self.mn.is_some() {
+                self.wid
+            } else {
+                usize::MAX
+            };
+            return sched.send_commit(key, core, w, offer, wid);
         }
         let sum = crate::vm::core::wire_summary(&w); // OFF-LOCK — see `ChanState::push`
         let out = core
