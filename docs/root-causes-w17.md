@@ -173,8 +173,11 @@ the `Let` arm refines it and never removes it; every checker reader consults it.
 **Grid:** fact × writer position {above first let, below, between two lets} × read path {bare, closure
 capture, qualified `m.x`, from-import, `module.fn()`, entrypoint, spawn snapshot}.
 
-**Open owner decisions:** is a global const if *any* of its lets says const (rejects today's legal
-`X := 1 … X: const = 1`)? Is top-level `return` legal (it causes K10; CPython rejects it)?
+**Owner decisions (2026-09-30):** (1) a global declared twice with one plain and one `const`
+declaration (either order) is a **compile error** (JavaScript `let`/`const` redeclaration rule);
+(2) a **module-level `return` is rejected** at compile time ("'return' outside a function", CPython's
+SyntaxError), which removes K10's path at its source — the runtime `read_slot` check is still added
+for every read path.
 
 ## Family E — "can this code fall through?" decided by 7 walkers (NEW)
 
@@ -222,9 +225,9 @@ conformer, permuted-name implementor, several implementors); fn-value source (ba
 from-import, generic, variadic-with-default); position (annotation, bound, alias body, import with a
 fn/type twin); same-named vs differently-named type params; syntax-special forms under shadowing.
 
-**Open owner decision:** protocol calls with named arguments — bind by the protocol's declared
-names and require implementors to use the same names (Go/Rust-like; rejects some programs accepted
-today), or make protocol method calls positional-only?
+**Owner decision (2026-09-30):** named arguments on a protocol method call bind to the
+**protocol's declared parameter names**, and an implementor's method conforms only if it uses the
+same parameter names (the interface is the contract). Builtin conformers bind by the same names.
 
 ## Isolated (fix in place, no family)
 
