@@ -77,6 +77,7 @@ impl Checker {
             written_captures: Vec::new(),
             module_global_lets: std::collections::HashSet::new(),
             unreached_globals: HashSet::new(),
+            cycle_globals: HashSet::new(),
             seeded_globals: HashSet::new(),
             functions: HashMap::new(),
             fn_write_scopes: Vec::new(),
@@ -1625,6 +1626,7 @@ impl Checker {
         // walked. `seed_module_globals` and the fn-writes pass read it.
         self.module_global_lets.clear();
         self.unreached_globals.clear();
+        self.cycle_globals.clear();
         self.seeded_globals.clear();
         for s in stmts {
             if let StmtKind::Let { names, .. } = &s.kind {

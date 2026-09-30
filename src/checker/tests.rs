@@ -35724,6 +35724,20 @@ fn module_global_initialization_cycle_is_named() {
     );
 }
 
+// The cycle is reported ONCE, as the cause: `f`'s derived "cannot infer return type" error (its
+// consequence) is dropped, in both declaration orders.
+#[test]
+fn module_global_initialization_cycle_is_the_only_error() {
+    for src in [
+        "x := f()\nfn f():\n    return x\nprint(x)\n",
+        "fn f():\n    return x\nx := f()\nprint(x)\n",
+    ] {
+        let errs = check_src(src);
+        assert_eq!(errs.len(), 1, "{src:?}: {errs:?}");
+        assert!(errs[0].message.contains("initialization cycle"), "{errs:?}");
+    }
+}
+
 // TICKET-183 review: a global that stays `Unknown` in the pre-pass (an empty collection refined by
 // a later top-level statement) is not an error when no body reads it; the walk types it (main
 // checks these clean, CPython prints `2`).

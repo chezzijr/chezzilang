@@ -448,7 +448,7 @@ impl Checker {
             .into_iter()
             .map(|(s, _)| s.span)
             .collect();
-        let mut reports: Vec<(Span, String)> = Vec::new();
+        let mut reports: Vec<(Span, String, Span)> = Vec::new();
         for s in stmts {
             let StmtKind::Let {
                 names, ty, value, ..
@@ -467,8 +467,11 @@ impl Checker {
                 self.let_value_ty(names, ty, value, s.span);
                 let errored = self.errors.len() > mark.errors;
                 self.diag_rollback(mark);
-                if !errored && let Some(msg) = self.initialization_cycle_message(stmts, x, value) {
-                    reports.push((s.span, msg));
+                if !errored
+                    && let Some((msg, f_span)) = self.initialization_cycle_message(stmts, x, value)
+                {
+                    reports.push((s.span, msg, f_span));
+                    self.cycle_globals.insert(x.clone());
                 }
             }
             for n in names {
@@ -478,12 +481,18 @@ impl Checker {
         self.ret_memo.clear();
         self.inferring_ret = saved_flag;
         self.unreached_globals = saved_unreached;
-        for (span, msg) in reports {
+        for (span, msg, f_span) in reports {
+            // The cycle is the cause; `f`'s residual-`Unknown` return error (emitted earlier by
+            // `finalize_ret` at `f`'s name) is its consequence. Report the cause once.
+            self.errors.retain(|e| {
+                !(e.span == f_span && e.message.contains("cannot infer return type of '"))
+            });
             self.error(span, msg);
         }
     }
 
     /// The cycle message for an `Unknown`-typed seeded global `x` (see `report_untyped_globals`),
+    /// with the span of the callee's name (whose derived return-type error the report replaces),
     /// or `None` when it is not a cycle: probe whether `x := f()`'s callee return depends on `x` by
     /// typing `x` as a fresh parameter and re-inferring `f`.
     fn initialization_cycle_message(
@@ -491,7 +500,7 @@ impl Checker {
         stmts: &[Stmt],
         x: &str,
         value: &Expr,
-    ) -> Option<String> {
+    ) -> Option<(String, Span)> {
         if let ExprKind::Call { callee, .. } = &value.kind
             && let ExprKind::Ident(f) = &callee.kind
             && self.local_fn_names.contains(f)
@@ -510,8 +519,11 @@ impl Checker {
             self.scopes[0].insert(x.to_string(), Ty::Unknown);
             let dependent = subst(&r, &HashMap::from([(probe, Ty::Nil)])) != r;
             if dependent {
-                return Some(format!(
-                    "initialization cycle: the type of '{x}' comes from '{f}()', and '{f}' returns a value computed from '{x}' -- annotate '{x}' (`{x}: T = {f}()`) or give '{f}' a return type"
+                return Some((
+                    format!(
+                        "initialization cycle: the type of '{x}' comes from '{f}()', and '{f}' returns a value computed from '{x}' -- annotate '{x}' (`{x}: T = {f}()`) or give '{f}' a return type"
+                    ),
+                    decl.name_span,
                 ));
             }
         }

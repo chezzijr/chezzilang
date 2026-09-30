@@ -2047,6 +2047,10 @@ struct Checker {
     /// (lexical) while every fn/closure body sees them (order-free). The `Let` arm removes a name at
     /// its first let. Rebuilt at the start of each `check_module`.
     unreached_globals: HashSet<String>,
+    /// Module globals `report_untyped_globals` reported as an initialization cycle. The cycle is
+    /// the cause; a body's "declared below ... type is not known" decline on the same global is its
+    /// consequence and is not reported again. Rebuilt at the start of each `check_module`.
+    cycle_globals: HashSet<String>,
     /// TICKET-183 — every module global `seed_module_globals` typed before any body is walked.
     seeded_globals: HashSet<String>,
     /// Per-scope set of names declared `const T` (mirrors `scopes` index-for-index). A const binding

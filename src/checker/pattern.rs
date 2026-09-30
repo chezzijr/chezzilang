@@ -2476,6 +2476,9 @@ impl Checker {
                 && self.owning_scope(name) == Some(0)
                 && (ty.is_unknown() || contains_unknown_in_slot(&ty))
             {
+                if self.cycle_globals.contains(name) {
+                    return Ty::Unknown;
+                }
                 self.error(
                     span,
                     format!(
