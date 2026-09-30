@@ -36696,3 +36696,12 @@ fn t187_protocol_call_omitting_an_argument_is_an_arity_error() {
         "expects 1 argument",
     );
 }
+
+/// TICKET-189 A1: a spawned callee that REBINDS its parameter before writing it writes a fresh
+/// local, not the parent's copy -- Go prints `3 [1]`. Layer A must drop the rebound parameter.
+#[test]
+fn spawn_callee_rebinding_its_param_before_writing_is_not_a_task_copy_write() {
+    ok(
+        "fn f5(ys: List[int], out: Channel[int]):\n    ys = [1, 2]\n    ys.push(3)\n    out.send(ys.len())\nfn main():\n    xs := [1]\n    out := Channel[int](1)\n    parallel:\n        spawn f5(xs, out)\n    print(out.recv())\n    print(xs)\nmain()\n",
+    );
+}
