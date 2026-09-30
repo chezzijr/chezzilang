@@ -36232,3 +36232,229 @@ fn ticket184_break_in_wait_arm_leaves_while_true() {
         "fall off the end",
     );
 }
+
+// TICKET-184: the control-flow summary grid. Statement kind x {break, continue, return, diverging
+// call, non-diverging call named exit/panic} x nesting position x consumer (C1 missing-return, C2
+// recover tail, C3 inline-body inference, C4 escape checks, C5 fn_writes `left`, C6 value-position
+// typing). `want` is "ok" (no errors) or a needle one error must contain.
+#[test]
+fn ticket184_flow_grid() {
+    let rows: &[(&str, &str, &str)] = &[
+        (
+            "B1",
+            "fn g() -> int:\n    while true:\n        break\nprint(g())\n",
+            "fall off the end",
+        ),
+        (
+            "B2",
+            "fn g(c: bool) -> int:\n    while true:\n        if c:\n            break\nprint(g(true))\n",
+            "fall off the end",
+        ),
+        (
+            "B3",
+            "fn g(n: int) -> int:\n    while true:\n        match n:\n            0: break\n            _: pass\nprint(g(0))\n",
+            "fall off the end",
+        ),
+        (
+            "B4",
+            "fn g(c: Channel[int]) -> int:\n    while true:\n        wait:\n            _ := c.recv():\n                break\nprint(g(Channel[int](1)))\n",
+            "fall off the end",
+        ),
+        (
+            "B5",
+            "fn g() -> int:\n    while true:\n        parallel:\n            break\nprint(g())\n",
+            "fall off the end",
+        ),
+        (
+            "B6",
+            "fn g(xs: List[int]) -> int:\n    while true:\n        for x in xs:\n            break\nprint(g([1]))\n",
+            "ok",
+        ),
+        (
+            "B7",
+            "fn g() -> int:\n    while true:\n        while true:\n            break\nprint(g())\n",
+            "ok",
+        ),
+        (
+            "B8",
+            "fn g() -> int:\n    while true:\n        continue\nprint(g())\n",
+            "ok",
+        ),
+        (
+            "R1",
+            "fn g(c: bool) -> int:\n    if c:\n        return 1\n    else:\n        return 2\nprint(g(true))\n",
+            "ok",
+        ),
+        (
+            "R2",
+            "fn g(n: int) -> int:\n    match n:\n        0: return 1\n        _: return 2\nprint(g(0))\n",
+            "ok",
+        ),
+        (
+            "R3",
+            "fn g(c: Channel[int]) -> int:\n    wait:\n        v := c.recv():\n            return v\nprint(g(Channel[int](1)))\n",
+            "ok",
+        ),
+        (
+            "R4",
+            "fn g(c: Channel[int]) -> int:\n    wait:\n        v := c.recv():\n            return v\n        else:\n            return 0\nprint(g(Channel[int](1)))\n",
+            "ok",
+        ),
+        (
+            "R5",
+            "fn g(c: Channel[int]) -> int:\n    wait:\n        v := c.recv():\n            return v\n        else:\n            pass\nprint(g(Channel[int](1)))\n",
+            "fall off the end",
+        ),
+        (
+            "R6",
+            "fn g() -> int:\n    parallel:\n        return 1\nprint(g())\n",
+            "ok",
+        ),
+        (
+            "R7",
+            "fn g(c: bool) -> int:\n    if c:\n        return 1\nprint(g(true))\n",
+            "fall off the end",
+        ),
+        ("D1", "fn g() -> int:\n    panic(\"x\")\nprint(g())\n", "ok"),
+        (
+            "D2",
+            "import std.os\nfn g() -> int:\n    os.exit(1)\nprint(g())\n",
+            "ok",
+        ),
+        (
+            "D3",
+            "import exit from std.os\nfn g() -> int:\n    exit(1)\nprint(g())\n",
+            "ok",
+        ),
+        (
+            "D4",
+            "import exit as quit from std.os\nfn g() -> int:\n    quit(1)\nprint(g())\n",
+            "ok",
+        ),
+        (
+            "D5",
+            "fn g(c: bool) -> int:\n    if c:\n        return 1\n    else:\n        panic(\"x\")\nprint(g(true))\n",
+            "ok",
+        ),
+        (
+            "D6",
+            "fn g(c: Channel[int]) -> int:\n    wait:\n        v := c.recv():\n            panic(\"x\")\nprint(g(Channel[int](1)))\n",
+            "ok",
+        ),
+        (
+            "S1",
+            "fn exit(code: int) -> int:\n    return code\nfn f(x: int) -> int:\n    if x > 0:\n        return x\n    exit(1)\nprint(f(-1))\n",
+            "fall off the end",
+        ),
+        (
+            "S2",
+            "struct D:\n    n: int\n    fn exit(self) -> int:\n        return self.n\nfn f(d: D) -> int:\n    d.exit()\nprint(f(D(1)))\n",
+            "fall off the end",
+        ),
+        (
+            "S3",
+            "fn f() -> int:\n    panic := fn(s: str): print(s)\n    panic(\"x\")\nprint(f())\n",
+            "fall off the end",
+        ),
+        (
+            "S4",
+            "fn f(exit: fn(int) -> int) -> int:\n    exit(1)\nprint(f(fn(c: int) -> int: c))\n",
+            "fall off the end",
+        ),
+        (
+            "S5",
+            "fn f() -> int:\n    exit := fn(c: int): print(c)\n    exit(1)\nprint(f())\n",
+            "fall off the end",
+        ),
+        (
+            "T1",
+            "fn exit(c: int):\n    print(c)\nfn f():\n    r := recover:\n        exit(1)\n    match r:\n        Ok(v): print(v)\n        Err(e): print(e.message())\nf()\n",
+            "returns no value",
+        ),
+        (
+            "T2",
+            "fn f(c: Channel[int]):\n    r := recover:\n        wait:\n            v := c.recv():\n                panic(\"x\")\n    match r:\n        Ok(v): print(v)\n        Err(e): print(e.message())\nf(Channel[int](1))\n",
+            "ok",
+        ),
+        (
+            "T3",
+            "fn f():\n    r := recover:\n        panic(\"x\")\n    match r:\n        Ok(v): print(v)\n        Err(e): print(e.message())\nf()\n",
+            "ok",
+        ),
+        (
+            "I1",
+            "import exit as quit from std.os\nfn g(): quit(1)\ng()\n",
+            "ok",
+        ),
+        ("I2", "fn g(): panic(\"x\")\ng()\n", "ok"),
+        (
+            "E1",
+            "fn f(c: Channel[int]):\n    defer:\n        wait:\n            _ := c.recv():\n                return\nf(Channel[int](1))\n",
+            "'return' is not allowed inside a defer block",
+        ),
+        (
+            "E2",
+            "fn f():\n    spawn:\n        parallel:\n            return\nf()\n",
+            "'return' is not allowed inside a spawn block",
+        ),
+        (
+            "E3",
+            "fn f():\n    for i in range(2):\n        r := recover:\n            parallel:\n                break\n        print(r)\nf()\n",
+            "'break' is not allowed inside a recover block",
+        ),
+        (
+            "E4",
+            "fn f():\n    r := recover:\n        for i in range(2):\n            break\n    print(r)\nf()\n",
+            "ok",
+        ),
+        (
+            "E5",
+            "fn f():\n    defer:\n        spawn:\n            return\nf()\n",
+            "'return' is not allowed inside a spawn block",
+        ),
+        (
+            "W1",
+            "fn f(xs: List[int], c: Channel[int]):\n    wait:\n        _ := c.recv():\n            return\n    xs.push(1)\nxs := [0]\nc := Channel[int](1)\nc.send(1)\nspawn f(xs, c)\nprint(xs)\n",
+            "ok",
+        ),
+        (
+            "W2",
+            "fn f(xs: List[int]):\n    xs.push(1)\nxs := [0]\nspawn f(xs)\nprint(xs)\n",
+            "task's copy",
+        ),
+        (
+            "W3",
+            "fn f(xs: List[int], c: bool):\n    if c:\n        return\n    xs.push(1)\nxs := [0]\nspawn f(xs, true)\nprint(xs)\n",
+            "ok",
+        ),
+        (
+            "V1",
+            "import exit as quit from std.os\nfn main():\n    r: Result[int, str] = Err(\"boom\")\n    x := match r:\n        Ok(v): v\n        Err(e): quit(2)\n    print(x)\nmain()\n",
+            "ok",
+        ),
+        (
+            "V2",
+            "fn exit(c: int) -> int:\n    return c\nfn main():\n    r: Result[int, str] = Err(\"boom\")\n    x := match r:\n        Ok(v): v\n        Err(e): exit(2)\n    print(x)\nmain()\n",
+            "ok",
+        ),
+    ];
+    let mut bad = Vec::new();
+    for (label, src, want) in rows {
+        let errs = check_entry(src);
+        let pass = if *want == "ok" {
+            errs.is_empty()
+        } else {
+            errs.iter().any(|e| e.message.contains(want))
+        };
+        if !pass {
+            bad.push(format!("{label}: want {want:?}, got {errs:?}"));
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "{} of {} cells differ:\n{}",
+        bad.len(),
+        rows.len(),
+        bad.join("\n")
+    );
+}
