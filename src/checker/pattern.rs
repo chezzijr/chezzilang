@@ -1,6 +1,7 @@
 // checker::pattern — split out of checker/mod.rs. `super::*` == the `checker` module.
 // Pattern / match-arm binding and or-pattern consistency.
 
+use super::setup::HeadBinding;
 use super::*;
 
 /// The one diagnostic for a range used where it has no runtime value. It names every legal position
@@ -2352,6 +2353,126 @@ impl Checker {
         }
     }
 
+    /// TICKET-187 — the one pin-or-reject rule for a GENERIC fn read as a value, shared by every
+    /// read: same-module and from-imported bare names (Scope A in `infer_ident`) and qualified
+    /// `m.f` (the `Ty::Module` field read). `Some(ty)` when the rule decided (pinned, or rejected
+    /// as `Ty::Unknown`); `None` to fall through to the rigid `fn(T) -> T`, whose assignability
+    /// diagnostic is the accurate one there. A rigid callee `T` must never reach a caller's scope,
+    /// because `Ty::Param` compares by name (G1).
+    pub(super) fn generic_fn_value_ty(
+        &mut self,
+        name: &str,
+        sig: &FnSig,
+        span: Span,
+    ) -> Option<Ty> {
+        if sig.type_params.is_empty() {
+            return None;
+        }
+        let type_params = sig.type_params.clone();
+        let params = sig.params.clone();
+        let ret = sig.ret.clone();
+        let labels = sig.labels.clone();
+        let minp = sig.min_params;
+        let declared = Ty::Func {
+            params: params.clone(),
+            ret: Box::new(ret.clone()),
+            labels: FnLabels::new(labels.clone()),
+        };
+        // A hint of `Unknown` DETERMINES NOTHING and must count as no hint at all, or the rule
+        // cancels itself on an INFERRED return type (`fn get(): return id`): the
+        // return-inference pass reads the body, takes the `Ty::Unknown` this arm returns as the
+        // inferred return, and the real pass re-checks the same `return id` against a
+        // `Some(Unknown)` hint — turning a reject into a silent ACCEPT (measured: `g := get();
+        // g(1)` printed `1`, check-clean).
+        let hint = match &self.expected_hint {
+            Some(Ty::Unknown) | None => None,
+            Some(h) => Some(h.clone()),
+        };
+        let verdict = match &hint {
+            Some(h) => pin_generic_fn_value(&type_params, &declared, h),
+            // No hint at all: nothing in this position can determine anything.
+            None => FnValuePin::Undetermined,
+        };
+        match verdict {
+            FnValuePin::Pinned(map, refined) => {
+                self.enforce_bounds(&type_params, &map, span);
+                return Some(refined);
+            }
+            // …the value can never be formed. Go refuses exactly this spelling, at the READ:
+            // `cannot use generic function id without instantiation` (and, in argument
+            // position, `in call to takeBool, cannot infer T`). Chezzi used to accept it and
+            // blame the eventual call ("argument 1 of 'closure': expected T, found int" — a
+            // `closure` the user never wrote, naming a `T` there is no way to act on), or
+            // accept it silently when the value was never called. Reported here, where the name
+            // and its parameters are still known. `generic_fn_value_prepass` holds the wall
+            // back for the ONE pass whose bare-ident arg is re-pinned afterwards — there the
+            // read is not the final word, and the deferred end-of-call check
+            // (`report_undetermined_generic_fn_value_args`) owns the verdict instead. The
+            // witness wall above wins first — its advice differs (a turbofish does not help).
+            // …gated by the hint's own parameter positions (see `fn_slot_params_concrete`):
+            // a hint that is not concrete there cannot answer the question, so the rigid
+            // arm's assignability diagnostic owns it. No hint at all still reports (`g := id`).
+            FnValuePin::Undetermined
+                if !self.generic_fn_value_prepass
+                    && hint.as_ref().is_none_or(fn_slot_params_concrete) =>
+            {
+                self.reject_undetermined_generic_fn_value(
+                    name,
+                    &type_params,
+                    &params,
+                    &ret,
+                    &labels,
+                    minp,
+                    span,
+                );
+                return Some(Ty::Unknown);
+            }
+            // Not this rule's business (see [`FnValuePin::Skip`]) — fall through to the rigid
+            // `fn(T) -> T` arm and let the existing assignability diagnostic, which is the
+            // accurate one there, speak.
+            _ => {}
+        }
+        None
+    }
+
+    /// TICKET-187 — is `e` a read of a GENERIC fn as a value, and which one: a bare name bound to
+    /// no local (a same-module or from-imported fn), or `m.f` on a whole-module import. Returns the
+    /// display name (`f` or `m.f`) and the callee's sig. The one answer for the read rule
+    /// ([`Self::generic_fn_value_ty`]) and the deferred argument check.
+    pub(super) fn generic_fn_value_sig(&self, e: &Expr) -> Option<(String, FnSig)> {
+        let (display, sig) = match &e.kind {
+            ExprKind::Ident(name) => {
+                if !matches!(
+                    self.head_binding(name),
+                    HeadBinding::Unbound | HeadBinding::Global
+                ) || self.lookup(name).is_some()
+                {
+                    return None;
+                }
+                (name.clone(), self.functions.get(name)?)
+            }
+            ExprKind::Field { obj, name, .. } => {
+                let ExprKind::Ident(m) = &obj.kind else {
+                    return None;
+                };
+                return self.generic_module_fn(m, name);
+            }
+            _ => return None,
+        };
+        (!sig.type_params.is_empty()).then(|| (display, sig.clone()))
+    }
+
+    /// The `m.f` half of [`Self::generic_fn_value_sig`]: `m` is a whole-module import here and `f`
+    /// is one of its GENERIC fns.
+    fn generic_module_fn(&self, m: &str, name: &str) -> Option<(String, FnSig)> {
+        if !matches!(self.head_binding(m), HeadBinding::Module) {
+            return None;
+        }
+        let msig = self.module_sigs.get(self.imported_modules.get(m)?)?;
+        let sig = msig.functions.get(name)?;
+        (!sig.type_params.is_empty()).then(|| (format!("{m}.{name}"), sig.clone()))
+    }
+
     /// THE ONE diagnostic for "this read of generic fn `name` cannot become a function value here",
     /// shared by both positions that can reach the verdict: the immediate read (`infer_ident`, whose
     /// expected-type hint either determines the params or does not) and the DEFERRED end-of-call
@@ -2396,7 +2517,9 @@ impl Checker {
         // a fix for a single-parameter generic — offering it for two would be advice that cannot work
         // (measured: `pair[int]` → "expects 2 type argument(s), found 1"; `pair[int, str]` → a parse
         // error).
-        let turbofish = if type_params.len() == 1 {
+        // TICKET-187: the value-position turbofish exists for a same-module fn only; an imported one
+        // (`max[int]`, `cmp.max[int]`) is `unknown name 'int'`, so it is not offered there.
+        let turbofish = if type_params.len() == 1 && self.local_fn_names.contains(name) {
             format!("instantiate it (`{name}[<{names}>]`), or ")
         } else {
             String::new()
@@ -2554,65 +2677,10 @@ impl Checker {
             // Gated on a SAME-MODULE fn (`local_fn_names`) — the identical same-module restriction the
             // turbofish B-path + the compiler's erase set use, so accept ⟺ runtime stays in lockstep
             // (an imported generic-fn-as-value stays the rigid error, a documented v1 limit).
-            if !type_params.is_empty() && self.local_fn_names.contains(name) {
-                let declared = Ty::Func {
-                    params: params.clone(),
-                    ret: Box::new(ret.clone()),
-                    labels: FnLabels::new(labels.clone()),
-                };
-                // A hint of `Unknown` DETERMINES NOTHING and must count as no hint at all, or the rule
-                // cancels itself on an INFERRED return type (`fn get(): return id`): the
-                // return-inference pass reads the body, takes the `Ty::Unknown` this arm returns as the
-                // inferred return, and the real pass re-checks the same `return id` against a
-                // `Some(Unknown)` hint — turning a reject into a silent ACCEPT (measured: `g := get();
-                // g(1)` printed `1`, check-clean).
-                let hint = match &self.expected_hint {
-                    Some(Ty::Unknown) | None => None,
-                    Some(h) => Some(h.clone()),
-                };
-                let verdict = match &hint {
-                    Some(h) => pin_generic_fn_value(&type_params, &declared, h),
-                    // No hint at all: nothing in this position can determine anything.
-                    None => FnValuePin::Undetermined,
-                };
-                match verdict {
-                    FnValuePin::Pinned(map, refined) => {
-                        self.enforce_bounds(&type_params, &map, span);
-                        return refined;
-                    }
-                    // …the value can never be formed. Go refuses exactly this spelling, at the READ:
-                    // `cannot use generic function id without instantiation` (and, in argument
-                    // position, `in call to takeBool, cannot infer T`). Chezzi used to accept it and
-                    // blame the eventual call ("argument 1 of 'closure': expected T, found int" — a
-                    // `closure` the user never wrote, naming a `T` there is no way to act on), or
-                    // accept it silently when the value was never called. Reported here, where the name
-                    // and its parameters are still known. `generic_fn_value_prepass` holds the wall
-                    // back for the ONE pass whose bare-ident arg is re-pinned afterwards — there the
-                    // read is not the final word, and the deferred end-of-call check
-                    // (`report_undetermined_generic_fn_value_args`) owns the verdict instead. The
-                    // witness wall above wins first — its advice differs (a turbofish does not help).
-                    // …gated by the hint's own parameter positions (see `fn_slot_params_concrete`):
-                    // a hint that is not concrete there cannot answer the question, so the rigid
-                    // arm's assignability diagnostic owns it. No hint at all still reports (`g := id`).
-                    FnValuePin::Undetermined
-                        if !self.generic_fn_value_prepass
-                            && hint.as_ref().is_none_or(fn_slot_params_concrete) =>
-                    {
-                        self.reject_undetermined_generic_fn_value(
-                            name,
-                            &type_params,
-                            &params,
-                            &ret,
-                            &labels,
-                            minp,
-                            span,
-                        );
-                        return Ty::Unknown;
-                    }
-                    // Not this rule's business (see [`FnValuePin::Skip`]) — fall through to the rigid
-                    // `fn(T) -> T` arm and let the existing assignability diagnostic, which is the
-                    // accurate one there, speak.
-                    _ => {}
+            if !type_params.is_empty() {
+                let sig = self.functions.get(name).cloned().expect("read above");
+                if let Some(ty) = self.generic_fn_value_ty(name, &sig, span) {
+                    return ty;
                 }
             }
             return Ty::Func {
@@ -4071,6 +4139,14 @@ impl Checker {
                     .unwrap_or_default();
                 if self.reject_witness_fn_value(name, &wparams, obj.span) {
                     return Ty::Unknown;
+                }
+                // TICKET-187: a generic member read as a value pins or is rejected, exactly like a
+                // bare read — its rigid `T` must never reach the caller's scope.
+                if let ExprKind::Ident(m) = &obj.kind
+                    && let Some((display, sig)) = self.generic_module_fn(m, name)
+                    && let Some(ty) = self.generic_fn_value_ty(&display, &sig, name_span)
+                {
+                    return ty;
                 }
                 let member = self
                     .imported_modules

@@ -2486,7 +2486,7 @@ struct Checker {
     /// rule exists to replace.
     ///
     /// What the helper DOES do is SCOPE it: the licence is re-applied per argument, and only to a
-    /// bare `ExprKind::Ident` — the one shape [`Checker::bare_generic_fn_value_arg`] can re-pin. A
+    /// bare `ExprKind::Ident` — the one shape [`Checker::generic_fn_value_sig`] can re-pin. A
     /// non-identifier argument is a whole subtree the caller will never revisit, so it is inferred
     /// with the licence OFF; otherwise `take2(Bx(ident), 5)` on a generic callee silences the nested
     /// ctor's wall too and check-cleanly builds a `Bx[fn(T) -> T]`. Separate from

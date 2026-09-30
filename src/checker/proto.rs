@@ -4949,7 +4949,7 @@ impl Checker {
             // LATER argument that really determines `U` could never correct it (`applyg(ident, 5)`).
             // Same shape as `infer_generic_method`'s deferral, one level up. `try_pin_…` only fires on
             // a bare-ident generic fn that pins FULLY concrete; otherwise nothing changes here.
-            if self.bare_generic_fn_value_arg(&args[i]).is_some() {
+            if self.generic_fn_value_sig(&args[i]).is_some() {
                 let want = subst(decl, &subst_map);
                 if let Some(refined) = self.try_pin_generic_fn_value_arg(&args[i], &want, span) {
                     arg_tys[i] = refined;
@@ -5331,7 +5331,7 @@ impl Checker {
             let want = subst(decl, &mmap);
             if let Some(refined) = self.try_pin_generic_fn_value_arg(&args[i], &want, span) {
                 arg_tys[i] = refined;
-            } else if self.bare_generic_fn_value_arg(&args[i]).is_some() {
+            } else if self.generic_fn_value_sig(&args[i]).is_some() {
                 // …and when the slot can NOT pin it yet, the rigid prepass type (`fn(T) -> T`, the
                 // CALLEE's own free params) must not unify either: it carries no information about
                 // this call, and `unify` is first-binding-wins, so binding the method's `[U]` to that
@@ -5503,7 +5503,7 @@ impl Checker {
     /// preserving the Category-1 leak guard and every clean reject. A FRESH substitution map per call
     /// means two distinct pins never launder.
     fn try_pin_generic_fn_value_arg(&mut self, arg: &Expr, want: &Ty, span: Span) -> Option<Ty> {
-        let (_, sig) = self.bare_generic_fn_value_arg(arg)?;
+        let (_, sig) = self.generic_fn_value_sig(arg)?;
         let declared = Ty::Func {
             params: sig.params.clone(),
             ret: Box::new(sig.ret.clone()),
@@ -5523,23 +5523,6 @@ impl Checker {
         // Enforce the arg fn's declared bounds against the bindings, exactly as Scope A does.
         self.enforce_bounds(&sig.type_params, &m, span);
         Some(refined)
-    }
-
-    /// The gate both halves of the argument-position rule share: is `arg` a BARE reference to a
-    /// same-module GENERIC fn — an identifier not shadowed by an in-scope binding (`lookup` None)?
-    /// Mirrors `infer_ident`'s Scope A gate exactly. Returns the name and a clone of its signature.
-    pub(super) fn bare_generic_fn_value_arg(&self, arg: &Expr) -> Option<(String, FnSig)> {
-        let ExprKind::Ident(name) = &arg.kind else {
-            return None;
-        };
-        if self.lookup(name).is_some() || !self.local_fn_names.contains(name) {
-            return None;
-        }
-        let sig = self.functions.get(name)?;
-        if sig.type_params.is_empty() {
-            return None;
-        }
-        Some((name.clone(), sig.clone()))
     }
 
     /// The DEFERRED half of the uninstantiated-generic-fn-value rule: after EVERYTHING that could pin
@@ -5564,7 +5547,7 @@ impl Checker {
         span: Span,
     ) {
         for (decl, arg) in arg_decls.iter().zip(args) {
-            let Some((name, sig)) = self.bare_generic_fn_value_arg(arg) else {
+            let Some((name, sig)) = self.generic_fn_value_sig(arg) else {
                 continue;
             };
             // The witness wall (`reject_witness_fn_value`) is a stricter, unconditional refusal with

@@ -2989,7 +2989,7 @@ impl Checker {
                         let expected = self.resolve_type(&field.ty, def.span);
                         // Same seeding, same gate, same reasons as the parameter default above.
                         let fseed = ty_fully_concrete(&expected)
-                            || self.bare_generic_fn_value_arg(def).is_none();
+                            || self.generic_fn_value_sig(def).is_none();
                         let fhint = fseed.then(|| expected.clone());
                         let saved_dsd = std::mem::replace(&mut self.decl_site_default, true);
                         let actual = self.infer_arg(def, fhint.as_ref());
@@ -5068,7 +5068,7 @@ impl Checker {
                 // Measured, that shape was accepted for `fn ident[U]` and rejected for the
                 // alpha-renamed `fn ident[T]`, with the true diagnostic deleted; excluded, both
                 // spellings report the true *'ident' is generic and … is not determined here*.
-                let seed = ty_fully_concrete(&ty) || self.bare_generic_fn_value_arg(def).is_none();
+                let seed = ty_fully_concrete(&ty) || self.generic_fn_value_sig(def).is_none();
                 let hint = seed.then(|| ty.clone());
                 let saved_dsd = std::mem::replace(&mut self.decl_site_default, true);
                 let actual = self.infer_arg(def, hint.as_ref());

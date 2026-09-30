@@ -1426,8 +1426,15 @@ undetermined `T` (Go: `cannot infer B`), and `applyg(mk, 5)` cannot match the sh
 One position is deliberately **not** covered, because the concrete type is present but does not reach
 the read: a parameter or field **default value** (`fn run(f: fn(int) -> int = id)`) has a concrete slot
 the checker does not thread into the expected-type hint, so the bare read is refused there and
-`= id[int]` is the spelling that works. (v1 limit: the pin requires a **same-module** generic fn — an
-*imported* generic fn used bare as a value stays rejected on every path.)
+`= id[int]` is the spelling that works.
+
+**Imported generic fns follow the same rule** (TICKET-187). A from-imported (`import max from
+std.cmp`) or qualified (`cmp.max`) generic fn read as a value pins from the expected type exactly like
+a same-module one: `g: fn(int, int) -> int = cmp.max` and `[1, 5, 3].fold(0, cmp.max)` work, and
+`f := cmp.max` with nothing to pin it is `'cmp.max' is generic and T is not determined here` (Go:
+`cannot use generic function cmp.Max without instantiation`). The callee's own `T` never reaches the
+caller, so inside `fn pick[T](a: T, b: T)`, `f := cmp.max; f(a, b)` is that error too, not a call that
+merges the caller's `T` with `max`'s.
 
 **`?` inside a closure.** A closure body may use `?` (§9) — but only when the closure carries an
 **explicit `-> Result[…]`/`-> Option[…]`** return type. The `?` propagates to *that closure's*

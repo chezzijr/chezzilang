@@ -817,6 +817,11 @@ fn t187_cells() -> Vec<Cell> {
             Expect::Prints("5".into()),
         ),
         one(
+            "t187/generic_value/from_import/hof_arg",
+            "import max from std.cmp\nprint([1, 5, 3].fold(0, max))\n".into(),
+            Expect::Prints("5".into()),
+        ),
+        one(
             "t187/decode/json_module",
             "import std.json\nprint(json.decode[int](\"7\"))\n".into(),
             Expect::Prints("Ok(7)".into()),
@@ -885,12 +890,6 @@ fn run_cell(root: &Path, idx: usize, c: &Cell) -> Result<(), String> {
 const PINNED_RED: &[&str] = &[
     "t187/bound/qualified_alias",
     "t187/from_import/alias_with_fn_twin",
-    "t187/generic_value/qualified/same_name",
-    "t187/generic_value/qualified/other_name",
-    "t187/generic_value/from_import/same_name",
-    "t187/generic_value/qualified/pinned",
-    "t187/generic_value/from_import/pinned",
-    "t187/generic_value/qualified/hof_arg",
     "t187/decode/int_receiver",
     "t187/decode/user_generic_method",
     "t187/decode/local_shadows_json",

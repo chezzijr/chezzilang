@@ -36639,6 +36639,21 @@ fn t187_generic_fn_value_same_named_param_rejected() {
     );
 }
 
+/// The rejection of an unpinned imported generic value offers only advice that works: a
+/// value-position turbofish (`cmp.max[int]`) does not resolve on an imported fn.
+#[test]
+fn t187_imported_generic_value_advice_omits_the_turbofish() {
+    let errs = check_entry("import std.cmp\nf := cmp.max\n");
+    let e = errs
+        .iter()
+        .find(|e| {
+            e.message
+                .contains("'cmp.max' is generic and T is not determined here")
+        })
+        .unwrap_or_else(|| panic!("expected the generic-value error, got: {errs:?}"));
+    assert!(!e.message.contains("instantiate it"), "{}", e.message);
+}
+
 /// Owner answer 2(a): a one-parameter implementor that renames the parameter does not conform.
 #[test]
 fn t187_protocol_one_param_name_mismatch_rejected() {
