@@ -20,5 +20,5 @@ test-group = 'timing'
 # (the `cargo test` gate failed W15-10 in 2 of 5 runs on clean main, 2026-09-30). A retry that then
 # passes is reported as FLAKY, never hidden. Delete an entry when its ledger row closes.
 [[profile.default.overrides]]
-filter = 'test(~the_same_seed_replays_at_one_worker_at_the_measured_rate) | test(~an_eager_wait_block_is_woken_by_its_arm_not_by_the_poll_timeout) | test(~two_leaf_deadlock_on_a_main_channel_still_faults_at_every_worker_count)'
+filter = 'test(~the_same_seed_replays_at_one_worker_at_the_measured_rate) | test(~an_eager_wait_block_is_woken_by_its_arm_not_by_the_poll_timeout)'
 retries = 2
