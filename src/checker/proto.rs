@@ -4674,7 +4674,8 @@ impl Checker {
         }
         // A STATIC requirement has NO receiver slot, so every declared param is a real argument.
         let expected: Vec<Ty> = msig.params.iter().map(|t| subst(t, &map)).collect();
-        let Some(bound) = self.lend_bind(method, expected.len(), args, span) else {
+        let slots = super::expr::callable_slots(&msig.labels, expected.len(), None, expected.len());
+        let Some(bound) = self.bind_call(Some(&slots), method, args, 0, span) else {
             return Ty::Unknown;
         };
         self.check_args(method, &expected, &bound, span);

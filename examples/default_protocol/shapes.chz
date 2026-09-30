@@ -9,4 +9,4 @@ protocol Sized:
     fn area(self, scale: int) -> int
 
 fn describe(p: Sized) -> str:
-    return "area={p.area()}"
+    return "area={p.area(1)}"

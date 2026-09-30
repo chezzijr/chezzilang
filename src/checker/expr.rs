@@ -1017,46 +1017,6 @@ impl Checker {
         Some(Cow::Owned(bound))
     }
 
-    /// Bind a call through a protocol or bound-type-param receiver (DEC-075). A protocol method
-    /// declares no defaults, so the receiver borrows an implementor's slots by method name, keeping
-    /// the candidates whose explicit parameter count is the protocol method's `arity`. Candidates
-    /// that differ cannot bind named arguments; positional calls then go unbound.
-    pub(super) fn lend_bind<'a>(
-        &mut self,
-        method: &str,
-        arity: usize,
-        args: &'a [Expr],
-        span: Span,
-    ) -> Option<std::borrow::Cow<'a, [Expr]>> {
-        let cands: Vec<Vec<crate::desugar::SlotSpec>> = self
-            .lend_specs
-            .get(method)
-            .map(|v| v.iter().filter(|s| s.len() == arity).cloned().collect())
-            .unwrap_or_default();
-        let Some(first) = cands.first() else {
-            return Some(std::borrow::Cow::Borrowed(args));
-        };
-        if cands.iter().all(|c| c == first) {
-            let first = first.clone();
-            return self.bind_call(Some(&first), method, args, 0, span);
-        }
-        let Some(ctx) = self.call_ctx.clone().filter(|c| !c.named.is_empty()) else {
-            return Some(std::borrow::Cow::Borrowed(args));
-        };
-        self.consume_named();
-        self.error(
-            span,
-            format!(
-                "cannot bind named arguments for method '{method}': multiple structs define it with different parameters — pass arguments positionally"
-            ),
-        );
-        self.infer_all(args);
-        for (_, v) in &ctx.named {
-            self.infer_value(v);
-        }
-        None
-    }
-
     /// Mark the named arguments of the call being dispatched ([`Self::call_ctx`]) consumed: a binder
     /// or a refusal answered them. Returns `false` when they already were.
     pub(super) fn consume_named(&mut self) -> bool {
@@ -3486,7 +3446,14 @@ impl Checker {
                         .iter()
                         .map(|t| subst(t, &pmap))
                         .collect();
-                    let Some(bound) = self.lend_bind(method, expected.len(), args, span) else {
+                    // The receiver's label is dropped with its param.
+                    let slots = callable_slots(
+                        msig.labels.get(1..).unwrap_or(&[]),
+                        expected.len(),
+                        None,
+                        expected.len(),
+                    );
+                    let Some(bound) = self.bind_call(Some(&slots), method, args, 0, span) else {
                         return Ty::Unknown;
                     };
                     self.check_args_subst(method, &expected, expected.len(), &bound, span);
@@ -4590,7 +4557,14 @@ impl Checker {
                         Some((_recv, rest)) => rest.iter().map(|t| subst(t, &map)).collect(),
                         None => Vec::new(),
                     };
-                    let Some(bound) = self.lend_bind(method, expected.len(), args, span) else {
+                    // The receiver's label is dropped with its param.
+                    let slots = callable_slots(
+                        msig.labels.get(1..).unwrap_or(&[]),
+                        expected.len(),
+                        None,
+                        expected.len(),
+                    );
+                    let Some(bound) = self.bind_call(Some(&slots), method, args, 0, span) else {
                         return Ty::Unknown;
                     };
                     self.check_args_subst(method, &expected, expected.len(), &bound, span);
@@ -5458,6 +5432,26 @@ impl Checker {
             }
         }
     }
+}
+
+/// TICKET-187 — the one slot builder for a callee with no declaration to bind against: a protocol
+/// requirement (it binds by the PROTOCOL's parameter names and declares no defaults, so `min` is
+/// its arity) and a fn value (its labels, callee-filled tail from `min`, and variadic slot). Slot
+/// `i` is named `names[i]`, callee-filled from `min` on, and variadic when `i == variadic`.
+pub(super) fn callable_slots(
+    names: &[Option<String>],
+    min: usize,
+    variadic: Option<usize>,
+    len: usize,
+) -> Vec<crate::desugar::SlotSpec> {
+    (0..len)
+        .map(|i| crate::desugar::SlotSpec {
+            name: names.get(i).cloned().flatten(),
+            default: (i >= min && Some(i) != variadic)
+                .then_some(crate::desugar::Dflt::CalleeFilled),
+            is_variadic: Some(i) == variadic,
+        })
+        .collect()
 }
 
 /// The bare head NAME of a type-level turbofish, in either carrier the parser produces:

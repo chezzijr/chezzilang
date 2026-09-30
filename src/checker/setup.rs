@@ -131,7 +131,6 @@ impl Checker {
             extern_module_idx: None,
             call_plans: CallPlanTable::new(),
             call_ctx: None,
-            lend_specs: HashMap::new(),
             current_provider: None,
             provider_edges: HashMap::new(),
             module_idx_of_file: HashMap::new(),

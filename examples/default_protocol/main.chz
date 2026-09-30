@@ -1,19 +1,21 @@
-# A default argument on a method reached through a PROTOCOL resolves in the module that DECLARED it,
-# even though that module is not — and cannot be — importable from the one making the call.
+# A default argument on a method resolves in the module that DECLARED it, even when the caller
+# cannot see the names the default spells.
 #
 # `shapes` declares `protocol Sized` + `describe(p: Sized)`; `boxes` imports `shapes` and declares the
-# struct satisfying it. So `shapes` cannot import `boxes` (cycle), and `describe` calls `p.area()`
-# with no idea where the default lives.
+# struct satisfying it. `main` omits `area`'s argument on a concrete `boxes.Box`, and the default
+# `units.factor() * unit()` reads `boxes`'s names, not `main`'s. A call through the protocol
+# (`describe`) must pass the argument: the protocol's parameter list is the whole contract, so
+# `p.area()` there is an arity error (TICKET-187, as in Go and Rust).
 #
-# Before this was fixed, the default expression was COPIED into `shapes` and resolved there: it read
-# `shapes`'s own `unit()` (1000) and failed to compile at all on `units.factor()`, a name `shapes`
-# cannot see. The equivalent CPython program prints what this one prints.
+# Before this was fixed, the default expression was COPIED into the caller and resolved there. The
+# equivalent CPython program prints what this one prints.
 
 import shapes
 import boxes
 
 # boxes: units.factor() * unit() == 5 * 2 == 10; 3 * 4 * 10
-print(shapes.describe(boxes.Box(3, 4)))
+b := boxes.Box(3, 4)
+print("area={b.area()}")
 # Passing the argument explicitly reads MAIN's scope, which is the difference between passing a
 # value and omitting one.
 print(boxes.Box(3, 4).area(2))

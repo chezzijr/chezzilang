@@ -286,7 +286,12 @@ fn kinds() -> Vec<Kind> {
                 ))
             },
             ctor: false,
-            exceptions: &[],
+            // TICKET-187: the protocol's parameter list is the whole contract; an implementor's
+            // defaults are not reachable through it.
+            exceptions: &[
+                ("omit", Some("expects")),
+                ("mixed", Some("missing required argument 'b'")),
+            ],
         },
         Kind {
             tag: "protocol_static_via_bound",
@@ -298,7 +303,10 @@ fn kinds() -> Vec<Kind> {
                 ))
             },
             ctor: false,
-            exceptions: &[],
+            exceptions: &[
+                ("omit", Some("expects")),
+                ("mixed", Some("missing required argument 'b'")),
+            ],
         },
     ]
 }
@@ -661,37 +669,37 @@ fn collision_cells() -> Vec<Cell> {
     ]
 }
 
-/// A protocol receiver in `lib` borrows `main`'s inline `None` default (DEC-075). The entry module
-/// is checked last, so the fill must still compile under the declaring module's index.
+/// TICKET-187 (supersedes DEC-075): a protocol receiver never borrows an implementor's default, so
+/// each call below, which omits `b`, is an arity error against the protocol's own parameter list.
 fn lent_default_cells() -> Vec<Cell> {
     let s = "struct S:\n    x: int\n    fn m(self, a: int, b: int? = None) -> str:\n        return \"m:{a},{b == None}\"\n    fn mk(a: int, b: int? = None) -> str:\n        return \"s:{a},{b == None}\"\n";
-    let cell = |name: &str, lib: &str, call: &str, want: &str| Cell {
+    let cell = |name: &str, lib: &str, call: &str, want: &'static str| Cell {
         name: format!("lent_default/{name}"),
         files: with_lib(
             "lib.chz",
             lib.to_string(),
             format!("import lib\n{s}print({call})\n"),
         ),
-        expect: prints(want),
+        expect: Expect::Rejects(want),
     };
     vec![
         cell(
             "protocol_receiver",
             "protocol P:\n    fn m(self, a: int, b: int?) -> str\nfn use_it(p: P) -> str:\n    return p.m(1)\n",
             "lib.use_it(S(0))",
-            "m:1,true",
+            "expects",
         ),
         cell(
             "bound_param_receiver",
             "protocol P:\n    fn m(self, a: int, b: int?) -> str\nfn use_it[T: P](p: T) -> str:\n    return p.m(2)\n",
             "lib.use_it(S(0))",
-            "m:2,true",
+            "expects",
         ),
         cell(
             "bound_static",
             "protocol Mk:\n    fn mk(a: int, b: int?) -> str\nfn use_it[T: Mk]() -> str:\n    return T.mk(3)\n",
             "lib.use_it[S]()",
-            "s:3,true",
+            "expects",
         ),
     ]
 }
@@ -867,8 +875,6 @@ fn run_cell(root: &Path, idx: usize, c: &Cell) -> Result<(), String> {
 /// Cells red on the pre-TICKET-182 binary. They must stay red here; when one turns green, remove
 /// it from the list.
 const PINNED_RED: &[&str] = &[
-    "t187/protocol/builtin_conformer_named",
-    "t187/protocol/omitted_argument",
     "t187/fn_value/bare/variadic",
     "t187/fn_value/qualified/named",
     "t187/fn_value/qualified/variadic",

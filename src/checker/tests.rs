@@ -33173,13 +33173,13 @@ fn ticket_075_a_let_annotated_protocol_local_does_not_splice_an_unrelated_struct
     );
 }
 
-// TICKET-075 ceiling: a witness whose method declares the SAME explicit parameter count as the
-// protocol still lends its default through a protocol receiver -- this is the shipped W7-51 path
-// and must not regress.
+// TICKET-187 (supersedes DEC-075's lending): a witness's default is not reachable through a
+// protocol receiver; the protocol's parameter list is the whole contract, as in Go and Rust.
 #[test]
-fn ticket_075_a_matching_witnesss_default_still_fills_a_protocol_call() {
-    ok_desugared(
+fn ticket_075_a_matching_witnesss_default_does_not_fill_a_protocol_call() {
+    rejects_desugared(
         "protocol P:\n    fn f(self, a: int) -> int\nstruct W:\n    v: int\n    fn f(self, a: int = 7) -> int:\n        return self.v + a\nfn use1(x: P) -> int:\n    return x.f()\n",
+        "expects",
     );
 }
 

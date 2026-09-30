@@ -915,8 +915,6 @@ fn check_diags_with(
         // the eight migrated universe-builtin signatures from it directly (graph path hoists them
         // normally).
         c.seed_native_prelude_sigs();
-        let file = module.stmts.first().map_or(0, |s| s.span.file);
-        crate::desugar::collect_methods_into(&module.stmts, &mut c.lend_specs, file);
         c.check_module(&module.stmts, None, &[]);
         c.check_provider_cycles();
         let warnings = std::mem::take(&mut c.warnings);
@@ -1374,9 +1372,7 @@ impl Checker {
     /// signatures into `self.extern_sigs`.
     fn run_graph_pass(&mut self, graph: &ModuleGraph, harvest_externs: bool) {
         let c = self;
-        c.lend_specs = crate::desugar::collect_methods(graph);
-        // `lend_specs` lends a default program-wide, so a caller can borrow an inline default from a
-        // module the loop below has not reached yet; every file's index is known before any body.
+        // Every file's index is known before any body is checked.
         for (idx, lm) in graph.modules.iter().enumerate() {
             c.module_idx_of_file.insert(lm.file, idx);
         }
@@ -2272,10 +2268,6 @@ struct Checker {
     /// read by [`Self::bind_call`] in whichever arm picks the callee. Saved and restored around a
     /// nested call.
     call_ctx: Option<CallCtx>,
-    /// Every struct, enum and newtype method's call-binding slots, program-wide, by method name.
-    /// A protocol or bound-type-param receiver borrows an implementor's defaults from here, keeping
-    /// only candidates of the protocol method's arity (DEC-075).
-    lend_specs: HashMap<String, Vec<Vec<crate::desugar::SlotSpec>>>,
     /// The default provider whose body is being checked, and its declaration span.
     current_provider: Option<(String, Span)>,
     /// Provider → the providers its body's calls fill a default from ([`Self::bind_call`]), for the

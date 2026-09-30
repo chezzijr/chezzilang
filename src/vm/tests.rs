@@ -7091,6 +7091,23 @@ fn a_default_in_a_diamonds_shared_base_is_the_same_in_either_import_order() {
     }
 }
 
+/// TICKET-187: the check rejects the program with the arity error, before anything runs.
+fn assert_protocol_call_omitting_a_default_is_an_arity_error(
+    dir: &std::path::Path,
+    entry: &std::path::Path,
+    tag: &str,
+) {
+    let graph = crate::resolver::build_graph(entry).expect("resolve");
+    let res = crate::checker::check_graph(&graph);
+    let _ = std::fs::remove_dir_all(dir);
+    let errs = res.expect_err("a protocol call omitting an argument must be rejected");
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("'mprobe' expects 1 argument(s), got 0")),
+        "[{tag}] expected the arity error, got: {errs:?}"
+    );
+}
+
 /// **The hazard this row exists to delete.** A method default declared in module `a` and reached
 /// from module `z` that does not import `a` used to be CLONED into `z` and resolved in `z`'s scope,
 /// so `z`'s own `av()` won: the call printed `510` where `a`'s author wrote `1` (+ the receiver's
@@ -7102,6 +7119,9 @@ fn a_default_in_a_diamonds_shared_base_is_the_same_in_either_import_order() {
 /// It now prints `11`: the default is compiled once, in `a`, and the call site reaches that provider
 /// through a direct call-time reference (`Op::MakeFuncIn`) instead of needing an import edge it
 /// cannot have — `a` imports `z` for the protocol, so `z` importing `a` would be a cycle.
+/// TICKET-187 (supersedes DEC-075): a protocol call binds by the protocol's own parameter list, so
+/// `p.mprobe()` omitting `x` is an arity error even though the implementor declares a default (Go:
+/// `not enough arguments in call`, Rust: `E0061`).
 #[test]
 fn a_method_default_from_a_sibling_module_resolves_in_its_definer() {
     for (tag, entry_src) in [
@@ -7123,21 +7143,7 @@ fn a_method_default_from_a_sibling_module_resolves_in_its_definer() {
         .unwrap();
         let entry = dir.join("main.chz");
         std::fs::write(&entry, entry_src).unwrap();
-        let graph = crate::resolver::build_graph(&entry).expect("resolve");
-        if let Err(errs) = crate::checker::check_graph(&graph) {
-            let _ = std::fs::remove_dir_all(&dir);
-            panic!("[{tag}] program must type-check, got: {errs:?}");
-        }
-        let (vo, _ve, vr, _vc) = run_file(&entry);
-        let (_io, _ie, ir, _ic) = run_file(&entry);
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(vr.is_ok(), "[{tag}] VM faulted: {vr:?}");
-        assert!(ir.is_ok(), "[{tag}] M:N engine faulted: {ir:?}");
-        assert_eq!(
-            vo, "11\n",
-            "[{tag}] the default must resolve in its DEFINER (a: 1 + 10), not the caller (z: 500); \
-             `0104d57b` printed 510 and CPython prints 11"
-        );
+        assert_protocol_call_omitting_a_default_is_an_arity_error(&dir, &entry, tag);
     }
 }
 
@@ -7153,8 +7159,11 @@ fn a_method_default_from_a_sibling_module_resolves_in_its_definer() {
 /// 'z' does not import`. Both engines, both import orders. Here `u.av()` is reachable from `z` as
 /// well, so this case agreed with the definer even under the old clone; its sibling below is the
 /// one that could not.
+/// TICKET-187 (supersedes DEC-075): a protocol call binds by the protocol's own parameter list, so
+/// `p.mprobe()` omitting `x` is an arity error even though the implementor declares a default (Go:
+/// `not enough arguments in call`, Rust: `E0061`).
 #[test]
-fn a_defaulted_method_argument_is_reachable_through_a_protocol() {
+fn a_protocol_call_omitting_an_implementors_default_is_an_arity_error() {
     for (tag, entry_src) in [
         ("zfirst", "import z\nimport a\nprint(z.use(a.S(1)))\n"),
         ("afirst", "import a\nimport z\nprint(z.use(a.S(1)))\n"),
@@ -7175,17 +7184,7 @@ fn a_defaulted_method_argument_is_reachable_through_a_protocol() {
         .unwrap();
         let entry = dir.join("main.chz");
         std::fs::write(&entry, entry_src).unwrap();
-        let graph = crate::resolver::build_graph(&entry).expect("resolve");
-        if let Err(errs) = crate::checker::check_graph(&graph) {
-            let _ = std::fs::remove_dir_all(&dir);
-            panic!("[{tag}] program must type-check, got: {errs:?}");
-        }
-        let (vo, _ve, vr, _vc) = run_file(&entry);
-        let (_io, _ie, ir, _ic) = run_file(&entry);
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(vr.is_ok(), "[{tag}] VM faulted: {vr:?}");
-        assert!(ir.is_ok(), "[{tag}] M:N engine faulted: {ir:?}");
-        assert_eq!(vo, "12\n", "[{tag}] base and CPython both print 12");
+        assert_protocol_call_omitting_a_default_is_an_arity_error(&dir, &entry, tag);
     }
 }
 
@@ -7199,6 +7198,9 @@ fn a_defaulted_method_argument_is_reachable_through_a_protocol() {
 /// where `u` IS imported, and reached by a direct call-time reference. This is the clearest
 /// user-visible consequence of the change — a whole class of program that could not be written now
 /// can be.
+/// TICKET-187 (supersedes DEC-075): a protocol call binds by the protocol's own parameter list, so
+/// `p.mprobe()` omitting `x` is an arity error even though the implementor declares a default (Go:
+/// `not enough arguments in call`, Rust: `E0061`).
 #[test]
 fn a_default_naming_an_import_the_caller_cannot_see_now_compiles_and_resolves_in_its_definer() {
     for (tag, entry_src) in [
@@ -7222,17 +7224,7 @@ fn a_default_naming_an_import_the_caller_cannot_see_now_compiles_and_resolves_in
         .unwrap();
         let entry = dir.join("main.chz");
         std::fs::write(&entry, entry_src).unwrap();
-        let graph = crate::resolver::build_graph(&entry).expect("resolve");
-        if let Err(errs) = crate::checker::check_graph(&graph) {
-            let _ = std::fs::remove_dir_all(&dir);
-            panic!("[{tag}] must now type-check (was `unknown name 'u'`), got: {errs:?}");
-        }
-        let (vo, _ve, vr, _vc) = run_file(&entry);
-        let (_io, _ie, ir, _ic) = run_file(&entry);
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(vr.is_ok(), "[{tag}] VM faulted: {vr:?}");
-        assert!(ir.is_ok(), "[{tag}] M:N engine faulted: {ir:?}");
-        assert_eq!(vo, "12\n", "[{tag}] definer's u.av() (11) + 1");
+        assert_protocol_call_omitting_a_default_is_an_arity_error(&dir, &entry, tag);
     }
 }
 
@@ -7312,6 +7304,9 @@ fn a_generic_host_self_default_resolves_in_its_definer() {
 /// worker whose `module_objs` copy holds the definer unfaulted. It resolves because the provider's
 /// own frame reads its home through `Op::GetGlobalSlot`, which faults first; `Op::MakeFuncIn`
 /// deliberately forces nothing, keeping the "no eager cascade" property snapshots rely on.
+/// TICKET-187 (supersedes DEC-075): a protocol call binds by the protocol's own parameter list, so
+/// `p.mprobe()` omitting `x` is an arity error even though the implementor declares a default (Go:
+/// `not enough arguments in call`, Rust: `E0061`).
 #[test]
 fn an_out_of_closure_default_resolves_on_an_m_n_worker() {
     let dir = std::env::temp_dir().join(format!("chezzi_w751_worker_{}", std::process::id()));
@@ -7330,17 +7325,7 @@ fn an_out_of_closure_default_resolves_on_an_m_n_worker() {
     .unwrap();
     let entry = dir.join("main.chz");
     std::fs::write(&entry, "import z\nimport a\nprint(z.use(a.S(1)))\n").unwrap();
-    let graph = crate::resolver::build_graph(&entry).expect("resolve");
-    if let Err(errs) = crate::checker::check_graph(&graph) {
-        let _ = std::fs::remove_dir_all(&dir);
-        panic!("must type-check, got: {errs:?}");
-    }
-    let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (_io, _ie, ir, _ic) = run_file(&entry);
-    let _ = std::fs::remove_dir_all(&dir);
-    assert!(vr.is_ok(), "VM faulted: {vr:?}");
-    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
-    assert_eq!(vo, "12\n", "definer's u.av() (11) + 1 on a worker");
+    assert_protocol_call_omitting_a_default_is_an_arity_error(&dir, &entry, "-");
 }
 
 /// The definer's module is still RUNNING when its own default is first needed: `a`'s toplevel calls
@@ -7349,6 +7334,9 @@ fn an_out_of_closure_default_resolves_on_an_m_n_worker() {
 /// other statements — so the provider and the name it spells are both bound before any toplevel
 /// expression runs. Pinned because the lazy reference is what made this shape reachable at all, and
 /// because it is the closest thing to a load-order counterexample that exists.
+/// TICKET-187 (supersedes DEC-075): a protocol call binds by the protocol's own parameter list, so
+/// `p.mprobe()` omitting `x` is an arity error even though the implementor declares a default (Go:
+/// `not enough arguments in call`, Rust: `E0061`).
 #[test]
 fn an_out_of_closure_default_resolves_while_its_definers_toplevel_is_running() {
     let dir = std::env::temp_dir().join(format!("chezzi_w751_midrun_{}", std::process::id()));
@@ -7365,17 +7353,7 @@ fn an_out_of_closure_default_resolves_while_its_definers_toplevel_is_running() {
     .unwrap();
     let entry = dir.join("main.chz");
     std::fs::write(&entry, "import a\n").unwrap();
-    let graph = crate::resolver::build_graph(&entry).expect("resolve");
-    if let Err(errs) = crate::checker::check_graph(&graph) {
-        let _ = std::fs::remove_dir_all(&dir);
-        panic!("must type-check, got: {errs:?}");
-    }
-    let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (_io, _ie, ir, _ic) = run_file(&entry);
-    let _ = std::fs::remove_dir_all(&dir);
-    assert!(vr.is_ok(), "VM faulted: {vr:?}");
-    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
-    assert_eq!(vo, "12\n");
+    assert_protocol_call_omitting_a_default_is_an_arity_error(&dir, &entry, "-");
 }
 
 /// **The relaxed call-site typing is not a bypass.** An out-of-closure provider call is typed from
@@ -7418,6 +7396,9 @@ fn an_explicit_argument_is_still_type_checked_where_a_default_would_be_relaxed()
 /// same `1` that `a`'s does, and the clone reads THAT one and still prints `11` — the right answer,
 /// by name coincidence. `b1307258` printed `11` here too. Recorded so nobody reads the fallback as
 /// "the caller's name is the intended one": it is intended only in that refusing costs more.
+/// TICKET-187 (supersedes DEC-075): a protocol call binds by the protocol's own parameter list, so
+/// `p.mprobe()` omitting `x` is an arity error even though the implementor declares a default (Go:
+/// `not enough arguments in call`, Rust: `E0061`).
 #[test]
 fn a_default_whose_name_the_caller_also_declares_reads_the_definers() {
     for (tag, entry_src) in [
@@ -7442,17 +7423,7 @@ fn a_default_whose_name_the_caller_also_declares_reads_the_definers() {
         .unwrap();
         let entry = dir.join("main.chz");
         std::fs::write(&entry, entry_src).unwrap();
-        let graph = crate::resolver::build_graph(&entry).expect("resolve");
-        if let Err(errs) = crate::checker::check_graph(&graph) {
-            let _ = std::fs::remove_dir_all(&dir);
-            panic!("[{tag}] program must type-check, got: {errs:?}");
-        }
-        let (vo, _ve, vr, _vc) = run_file(&entry);
-        let (_io, _ie, ir, _ic) = run_file(&entry);
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(vr.is_ok(), "[{tag}] VM faulted: {vr:?}");
-        assert!(ir.is_ok(), "[{tag}] M:N engine faulted: {ir:?}");
-        assert_eq!(vo, "11\n", "[{tag}] a's own av() (1) + 10; got: {vo}");
+        assert_protocol_call_omitting_a_default_is_an_arity_error(&dir, &entry, tag);
     }
 }
 

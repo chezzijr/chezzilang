@@ -1214,18 +1214,13 @@ consequences are worth writing down, because each is a rule you can hit:
    the same shape as CPython's `RecursionError` on the equivalent program. A documented limit, not a
    defect: the compile-time check sees provider→provider edges, and this cycle's edge runs through
    `mk`.
-6. **A call through a protocol-typed or protocol-bounded receiver only borrows a default from a
-   witness whose method declares the SAME number of parameters as the protocol does.** A candidate
-   whose explicit parameter count DIFFERS from the protocol's contributes no defaults to the call, so
-   an unrelated struct's defaulted trailing parameter never changes whether the call compiles: given
-   `protocol P: fn f(self, a: int)` and an unrelated `struct Deco: fn f(self, a: int, b: int = 10)`,
-   `fn use1(x: P) -> int: return x.f(2)` compiles whether or not `Deco` exists, because `Deco`'s count
-   (2) differs from `P.f`'s (1). A candidate whose count MATCHES still lends its default through the
-   protocol receiver, even when the protocol itself declares none for that parameter — this is the
-   surprising direction: `protocol P: fn f(self, a: int, b: int)` (no default) with
-   `struct A: fn f(self, a: int, b: int = 10)` and `x: P = A(100)` accepts `x.f(1)` and prints `111`,
-   reading `A`'s default for `b` through the protocol-typed receiver, exactly as it would through a
-   direct `A`-typed one.
+6. **A call through a protocol-typed or protocol-bounded receiver binds against the PROTOCOL's
+   parameter list, and never borrows an implementor's default** (TICKET-187). Given
+   `protocol P: fn f(self, a: int, b: int)` and `struct A: fn f(self, a: int, b: int = 10)`,
+   `x: P = A(100)` rejects `x.f(1)` with `'f' expects 2 argument(s), got 1`; pass `b` explicitly.
+   A direct `A`-typed receiver still takes the default. Go (`not enough arguments in call`) and Rust
+   (`E0061`) do the same: the interface or trait signature is the whole contract. Named arguments
+   bind by the protocol's parameter names (see "Protocol parameter names" in §7b).
 
 A default may also be a **variadic call** (`fn f(a: int = sum_all(1, 2), ...xs: int, tail: int =
 sum_all(3, 4))`), in the pre-variadic slot and in the keyword-only tail alike; that shape used to be
@@ -2176,6 +2171,36 @@ structural way, out of its own method table: `protocol Sized: fn len(self) -> in
 **W8-32**). The three bare scalars (`int`/`float`/`bool`) have no methods, so they satisfy only an
 empty protocol. The concurrency/net handles (`Channel`, `Shared`, `RwShared`, `Atomic`, `Executor`,
 `Socket`, `Listener`, `Writer`, `Reader`) are excluded — they do not witness a user protocol.
+
+**Protocol parameter names** (TICKET-187). A protocol's parameter NAMES are part of its contract,
+for user and built-in protocols alike, at every arity (as Swift's argument labels are). A call
+through a protocol binds named arguments by the protocol's names, so a method conforms only when
+it uses the same names in the same positions:
+
+```chezzi
+protocol Rep:
+    fn replace(self, old: str, new: str) -> str
+
+struct Doc:
+    text: str
+    fn replace(self, new: str, old: str) -> str:   # before: accepted, and p.replace(old="a", new="b")
+        return self.text.replace(old, new)         #   swapped the two arguments
+# ERROR: type Doc does not satisfy Rep (method 'replace' parameter 1 is named 'new', but Rep declares 'old')
+
+struct Doc2:
+    text: str
+    fn replace(self, old: str, new: str) -> str:   # after: same names, conforms
+        return self.text.replace(old, new)
+```
+
+The built-in protocols take their names from `std/prelude.chz`: `compare`/`eq` and the operator
+methods (`add`/`sub`/`mul`/`div`/`mod`) name their operand `other`, `Index.index` names `k`,
+`IndexSet.set_index` names `k`, `v`, `Slice.slice` names `start`, `end`, `step`, and
+`Contains.contains` names `item`. So `fn compare(self, o: P) -> int` no longer makes `P`
+`Comparable`; write `fn compare(self, other: P) -> int`. A built-in type conforms through its native
+method's declared names (`str.replace(self, old, new)` satisfies `Rep`), though a direct call to a
+native method still takes no named arguments. `==` is not affected: it dispatches a user `eq` by its
+shape, whatever the operand is called.
 
 `Self` is also usable in an **inherent** `struct`/`enum`/`newtype` method's signature and body
 (param type, return type, local annotation), where it names the enclosing type — `fn dup(self) ->
