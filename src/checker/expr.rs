@@ -37,6 +37,9 @@ impl Checker {
         };
         let saved = self.call_ctx.replace(ctx);
         let t = self.infer_call_dispatch(callee, args, named, type_args, span);
+        // D4 layer A inside a `spawn:` body, through the plan the dispatch just bound.
+        let slots = self.bound_slots(call_id, args, named);
+        self.report_named_call_writes(callee, &slots, None, false);
         let consumed = std::mem::replace(&mut self.call_ctx, saved).is_some_and(|c| c.consumed);
         // A call whose named arguments no binder and no refusal consumed: its callee binds none.
         if !named.is_empty() && !consumed {
@@ -66,7 +69,6 @@ impl Checker {
         // threaded into the generic ctor / generic fn-call dispatchers below to pre-seed `T`.
         let expected = self.expected_hint.take();
         let expected = expected.as_ref();
-        self.report_named_call_writes(callee, args, false);
         if self.in_spawn_block
             && let ExprKind::Ident(name) = &callee.kind
             && self.is_captured(name)
@@ -1024,7 +1026,7 @@ impl Checker {
                 }
             }
         }
-        if self.harvest_keywords && self.records_node(call_id) {
+        if self.records_node(call_id) {
             crate::checker::record_call_table_entry(
                 &mut self.call_plans,
                 &mut self.table_conflicts,
@@ -1971,7 +1973,7 @@ impl Checker {
     /// Whether this walk may write a per-node side table ([`Self::record_resolution`], the call
     /// plans of [`Self::bind_call`]): never for a synthesized node, the generic-arg prepass, or the
     /// return-inference walk, whose scope is not the final one.
-    fn records_node(&self, id: crate::ast::NodeId) -> bool {
+    pub(super) fn records_node(&self, id: crate::ast::NodeId) -> bool {
         id.0 != crate::ast::NodeId::SYNTH.0 && !self.generic_arg_prepass && !self.resolving_returns
     }
 
@@ -4493,7 +4495,7 @@ impl Checker {
                             self.check_args_range(method, &sig.params, sig.min_params, args, span);
                             self.capture_floors.pop();
                             if let Some(task) = args.first() {
-                                self.report_named_call_writes(task, &[], true);
+                                self.report_named_call_writes(task, &[], None, true);
                                 let mut writes: Vec<String> = match &task.kind {
                                     ExprKind::Closure { body, .. } => self
                                         .closure_literal_writes

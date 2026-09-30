@@ -26,6 +26,18 @@ pub(super) struct FnWrite {
     pub global_ty: Option<Ty>,
 }
 
+/// TICKET-189 — where one declaration slot of a bound call gets its value, read from the checker's
+/// call plan (`Checker::bound_slots`).
+#[derive(Clone, Copy, Debug)]
+pub(super) enum SlotSrc<'a> {
+    /// A caller-written expression, positional or keyword.
+    Arg(&'a Expr),
+    /// The variadic slot: a list built at the call site.
+    Pack,
+    /// An omitted slot filled from the declaration's default.
+    Default { literal_container: bool },
+}
+
 #[derive(Clone)]
 pub(super) struct CallEdge {
     pub callee: String,
@@ -183,6 +195,14 @@ impl Scan {
                 };
                 self.record(target, WriteKind::Store, op);
                 self.expr(value);
+                // TICKET-189: a rebound parameter names a new value from here on, at any depth (a
+                // conditional rebind too, so a later write is no longer certain to reach the
+                // argument). Writes walked before the rebind stay recorded.
+                if let ExprKind::Ident(name) = &target.kind
+                    && self.params.contains(name)
+                {
+                    self.locals.insert(name.clone());
+                }
                 if let ExprKind::Ident(name) = &target.kind {
                     if let Some(scope) = self
                         .visible_fns

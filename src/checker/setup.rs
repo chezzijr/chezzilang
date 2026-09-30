@@ -140,7 +140,7 @@ impl Checker {
             carriers: crate::checker::CarrierTable::new(),
             proto_eq_calls: crate::checker::ProtoEqTable::new(),
             sum_seeds: crate::checker::SumSeedTable::new(),
-            fresh_operands: crate::checker::FreshOperandTable::new(),
+            crossings: crate::checker::CrossingTable::new(),
             ret_coerce: crate::checker::RetCoerceTable::new(),
             for_binds: crate::checker::ForBindTable::new(),
             table_conflicts: Vec::new(),
@@ -3095,10 +3095,48 @@ impl Checker {
         }
     }
 
+    /// TICKET-189 — the source of each declaration slot of call `call_id`, read from the one binder's
+    /// plan ([`Self::bind_call`], `call_plans`), so keyword arguments, default fills and a variadic
+    /// pack land in their compiled slot. With no plan the call is positional. A value callee's
+    /// callee-filled trailing slots are absent from the plan: they are built inside the task.
+    pub(super) fn bound_slots<'a>(
+        &self,
+        call_id: crate::ast::NodeId,
+        args: &'a [Expr],
+        named: &'a [(String, Expr)],
+    ) -> Vec<fn_writes::SlotSrc<'a>> {
+        let Some(plan) = self.call_plans.get(&(self.graph_module_idx, call_id.0)) else {
+            return args.iter().map(fn_writes::SlotSrc::Arg).collect();
+        };
+        let combined = |i: usize| {
+            args.get(i)
+                .or_else(|| named.get(i - args.len()).map(|(_, v)| v))
+        };
+        plan.iter()
+            .filter_map(|fill| match fill {
+                crate::checker::ArgFill::Arg(i) => combined(*i).map(fn_writes::SlotSrc::Arg),
+                crate::checker::ArgFill::Pack(_) => Some(fn_writes::SlotSrc::Pack),
+                crate::checker::ArgFill::Inline { expr, .. } => Some(fn_writes::SlotSrc::Default {
+                    literal_container: matches!(
+                        expr.kind,
+                        ExprKind::List(..) | ExprKind::Map(..) | ExprKind::Set(..)
+                    ),
+                }),
+                crate::checker::ArgFill::Provider(_) => Some(fn_writes::SlotSrc::Default {
+                    literal_container: false,
+                }),
+            })
+            .collect()
+    }
+
+    /// D4 layer A: report a certain write the statically named callee makes to a parent binding.
+    /// Parameter `i` reads `slots[i]`; a slot that is not a caller-written expression, or whose
+    /// `crossings` entry is `Move`, reaches no parent binding.
     pub(super) fn report_named_call_writes(
         &mut self,
         callee: &Expr,
-        args: &[Expr],
+        slots: &[fn_writes::SlotSrc],
+        crossings: Option<&[crate::checker::Crossing]>,
         force_task: bool,
     ) {
         if !force_task && !self.in_spawn_block {
@@ -3111,7 +3149,12 @@ impl Checker {
         for effect in writes {
             let (name, mut path, copied) = match &effect.root {
                 fn_writes::WriteRoot::Param(index) => {
-                    let Some(arg) = args.get(*index) else {
+                    if crossings.and_then(|c| c.get(*index))
+                        == Some(&crate::checker::Crossing::Move)
+                    {
+                        continue;
+                    }
+                    let Some(fn_writes::SlotSrc::Arg(arg)) = slots.get(*index) else {
                         continue;
                     };
                     let Some((name, path)) = fn_writes::chain(arg) else {

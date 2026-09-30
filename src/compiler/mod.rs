@@ -101,7 +101,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     c.carriers = ct;
     c.proto_eq_calls = pe;
     c.sum_seeds = ns;
-    c.fresh_operands = fo;
+    c.crossings = fo;
     c.resolutions = rs;
     c.ret_coerce = rc;
     // Pass 0: collision pre-pass — assign runtime keys for module-scoped user types. A type name
@@ -184,7 +184,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     c.carriers = ct;
     c.proto_eq_calls = pe;
     c.sum_seeds = ns;
-    c.fresh_operands = fo;
+    c.crossings = fo;
     c.resolutions = rs;
     c.ret_coerce = rc;
     let toplevel = c.compile_module(0, module, &[], true, None)?;
@@ -307,9 +307,9 @@ struct Compiler {
     /// CONSUMED from the checker and never re-derived; a MISS means "plain numeric sum", which is the
     /// pre-fix lowering. See [`crate::checker::SumSeedTable`].
     sum_seeds: crate::checker::SumSeedTable,
-    /// D4 (TICKET-179) — the checker's per-operand freshness decision for `spawn`, read by
-    /// [`Self::fresh_bit`]. See [`crate::checker::FreshOperandTable`].
-    fresh_operands: crate::checker::FreshOperandTable,
+    /// D4 (TICKET-179, TICKET-189) — the checker's per-slot crossing decision for each `spawn` call,
+    /// read by [`Self::crossing_mask`]. See [`crate::checker::CrossingTable`].
+    crossings: crate::checker::CrossingTable,
     /// TICKET-180 — the checker's answer to what every name head means; the ONLY source for
     /// it. Read through [`Compiler::resolution`].
     resolutions: crate::checker::ResolutionTable,
@@ -587,7 +587,7 @@ impl Compiler {
             carriers: crate::checker::CarrierTable::new(),
             proto_eq_calls: crate::checker::ProtoEqTable::new(),
             sum_seeds: crate::checker::SumSeedTable::new(),
-            fresh_operands: crate::checker::FreshOperandTable::new(),
+            crossings: crate::checker::CrossingTable::new(),
             resolutions: crate::checker::ResolutionTable::new(),
             no_fall_off: crate::checker::NoFallOffTable::new(),
             ret_coerce: crate::checker::RetCoerceTable::new(),
@@ -1946,7 +1946,7 @@ impl Compiler {
                         (call.id, callee, args, named),
                         call.span,
                     )?;
-                    fc.emit(Op::SpawnCall(n, 0), call.span);
+                    fc.emit(Op::SpawnCall(n, self.crossing_mask(call.id)), call.span);
                     return Ok(());
                 }
                 if let ExprKind::Field {
@@ -1964,33 +1964,28 @@ impl Compiler {
                     if let Some(seed) = self.sum_seed(name, args, *name_span) {
                         self.compile_expr(fc, obj)?;
                         self.emit_sum_seed(fc, &seed, call.span);
-                        let fresh = self.fresh_mask(Some(obj), []);
+                        let fresh = self.crossing_mask(call.id);
                         fc.emit(Op::SpawnMethod(name.clone(), 1, fresh), call.span);
                         return Ok(());
                     }
                     self.compile_expr(fc, obj)?;
-                    let srcs =
-                        self.compile_call_srcs(fc, call.id, callee, args, named, call.span)?;
+                    let n = self.compile_call_args(fc, call.id, callee, args, named, call.span)?;
                     // M24-5: the hidden witness arguments ride LAST, exactly as they do on the eager
                     // `Op::CallMethod`, so the widened `argc` reaches the same proto.
                     let w =
                         self.emit_member_witness_args(fc, callee, name, *name_span, call.span)?;
-                    let fresh = self.fresh_mask_srcs(Some(obj), &srcs);
-                    fc.emit(
-                        Op::SpawnMethod(name.clone(), srcs.len() + w, fresh),
-                        call.span,
-                    );
+                    let fresh = self.crossing_mask(call.id);
+                    fc.emit(Op::SpawnMethod(name.clone(), n + w, fresh), call.span);
                 } else {
                     // A spawned value call: its arguments -- default fills included -- are
                     // evaluated here, at the statement, in the checker's slot plan when it bound
                     // the call.
                     self.compile_expr(fc, callee)?;
-                    let srcs =
-                        self.compile_call_srcs(fc, call.id, callee, args, named, call.span)?;
+                    let n = self.compile_call_args(fc, call.id, callee, args, named, call.span)?;
                     // M24-5: TRAILING — after the arguments, never in source order.
                     let w = self.emit_indirect_witness_args(fc, callee, call.span)?;
-                    let fresh = self.fresh_mask_srcs(None, &srcs);
-                    fc.emit(Op::SpawnCall(srcs.len() + w, fresh), call.span);
+                    let fresh = self.crossing_mask(call.id);
+                    fc.emit(Op::SpawnCall(n + w, fresh), call.span);
                 }
                 Ok(())
             }
@@ -4077,28 +4072,13 @@ impl Compiler {
             )) == Some(&true)
     }
 
-    /// The spawn op's freshness bitmask (D4, TICKET-179): bit 0 is the method receiver, bit `j + 1`
-    /// the argument compiled at position `j`. Witness args never set a bit; an arg past bit 31 stays
-    /// marked (a false fault, never a lost write).
-    fn fresh_mask<'e>(&self, recv: Option<&Expr>, args: impl IntoIterator<Item = &'e Expr>) -> u32 {
-        let mut mask = u32::from(recv.is_some_and(|r| self.fresh_bit(r)));
-        for (j, a) in args.into_iter().enumerate() {
-            if j + 1 < u32::BITS as usize && self.fresh_bit(a) {
-                mask |= 1 << (j + 1);
-            }
-        }
-        mask
-    }
-
-    /// Is this `spawn` operand fresh, per the checker's [`crate::checker::FreshOperandTable`]? A miss
-    /// means not fresh, so an absent entry keeps today's full mark (a false fault, never a lost write).
-    fn fresh_bit(&self, e: &Expr) -> bool {
-        self.fresh_operands.get(&crate::checker::carrier_key(
-            self.current_module_idx,
-            self.kw_frag_ctx,
-            self.kw_frag_ord,
-            e.span,
-        )) == Some(&true)
+    /// The spawn op's crossing bitmask (D4, TICKET-179, TICKET-189): the checker's decision for call
+    /// `call_id`, encoded by [`crate::checker::Crossing::mask`], which owns the bit layout. Witness
+    /// args never set a bit. A miss is all `Copy` (a false fault, never a lost write).
+    fn crossing_mask(&self, call_id: crate::ast::NodeId) -> u32 {
+        self.crossings
+            .get(&(self.current_module_idx, call_id.0))
+            .map_or(0, |c| crate::checker::Crossing::mask(c.recv, &c.args))
     }
 
     /// The seed a `xs.sum()` site needs, per the checker's [`crate::checker::SumSeedTable`] --
@@ -5090,37 +5070,6 @@ impl Compiler {
                 Ok(args.len())
             }
         }
-    }
-
-    /// [`Self::compile_plan_args`], or the arguments as written: the user expression behind each
-    /// pushed value.
-    fn compile_call_srcs<'e>(
-        &mut self,
-        fc: &mut FnComp,
-        call_id: crate::ast::NodeId,
-        callee: &Expr,
-        args: &'e [Expr],
-        named: &'e [(String, Expr)],
-        span: Span,
-    ) -> Result<Vec<Option<&'e Expr>>, CompileError> {
-        match self.compile_plan_args(fc, call_id, callee, args, named, span)? {
-            Some(srcs) => Ok(srcs),
-            None => {
-                self.compile_args(fc, args)?;
-                Ok(args.iter().map(Some).collect())
-            }
-        }
-    }
-
-    /// [`Self::fresh_mask`] over a plan's value sources: a default fill or a pack is never fresh.
-    fn fresh_mask_srcs(&self, recv: Option<&Expr>, srcs: &[Option<&Expr>]) -> u32 {
-        let mut mask = u32::from(recv.is_some_and(|r| self.fresh_bit(r)));
-        for (j, a) in srcs.iter().enumerate() {
-            if j + 1 < u32::BITS as usize && a.is_some_and(|a| self.fresh_bit(a)) {
-                mask |= 1 << (j + 1);
-            }
-        }
-        mask
     }
 
     fn compile_closure(

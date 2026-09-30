@@ -6,6 +6,7 @@
 mod blocking_pool;
 pub mod chzstr;
 pub mod core;
+pub mod crossing;
 mod fxhash;
 pub mod heap;
 pub mod op;

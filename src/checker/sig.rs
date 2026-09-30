@@ -2517,13 +2517,13 @@ impl Checker {
         self.pop_scope();
     }
 
-    /// D4 (TICKET-179): is this `spawn` operand FRESH — a value no parent binding can reach, so a
-    /// task-side write to it is not a lost write? True for a list/map/set literal, a comprehension, and
-    /// a zero-argument `.copy()` on a List/Map/Set/bytearray. A call result is never fresh
-    /// (`id(xs)` returns the parent's own list); a struct constructor or struct `.copy()` is not
-    /// either (a known false-fault ceiling). The one decider: see [`FreshOperandTable`].
-    fn spawn_operand_is_fresh(&mut self, a: &Expr) -> bool {
-        match &a.kind {
+    /// D4 (TICKET-179, TICKET-189): how this `spawn` operand crosses. `Move` for a value no parent
+    /// binding can reach, so a task-side write to it is not a lost write: a list/map/set literal, a
+    /// comprehension, and a zero-argument `.copy()` on a List/Map/Set/bytearray. A call result is
+    /// `Copy` (`id(xs)` returns the parent's own list); a struct constructor or struct `.copy()` is
+    /// too (a known false-fault ceiling). The one operand decider: see [`CrossingTable`].
+    fn crossing_of(&mut self, a: &Expr) -> Crossing {
+        let fresh = match &a.kind {
             ExprKind::List(..)
             | ExprKind::Map(..)
             | ExprKind::Set(..)
@@ -2545,6 +2545,28 @@ impl Checker {
                 _ => false,
             },
             _ => false,
+        };
+        if fresh {
+            Crossing::Move
+        } else {
+            Crossing::Copy
+        }
+    }
+
+    /// TICKET-189: how one bound slot of a spawn call crosses. A variadic pack is a list built at the
+    /// call site (its elements stay marked); an all-literal inline default is fresh; a provider
+    /// default is a call result, which may return a global (a known false-fault ceiling).
+    fn slot_crossing(&mut self, s: &super::fn_writes::SlotSrc) -> Crossing {
+        match *s {
+            super::fn_writes::SlotSrc::Arg(e) => self.crossing_of(e),
+            super::fn_writes::SlotSrc::Pack => Crossing::Move,
+            super::fn_writes::SlotSrc::Default { literal_container } => {
+                if literal_container {
+                    Crossing::Move
+                } else {
+                    Crossing::Copy
+                }
+            }
         }
     }
 
@@ -3402,9 +3424,6 @@ impl Checker {
                         // Full type-check of the call (callee, arity, args) — the single source of
                         // type diagnostics for the sub-expressions.
                         self.infer(e);
-                        if let ExprKind::Call { callee, args, .. } = &e.kind {
-                            self.report_named_call_writes(callee, args, true);
-                        }
                         // Every value crossing the airlock must be sendable: the arguments, and
                         // (for a method spawn) the receiver the task talks through. Re-inferring
                         // here would duplicate the type errors `infer(e)` already reported, so we
@@ -3454,30 +3473,27 @@ impl Checker {
                             // keyword (a value+keyword spawn, `spawn h(f=cb)`, lowers to the same
                             // positional SpawnCall, so a non-sendable value smuggled in by LABEL must
                             // be rejected exactly like the positional form).
-                            // D4 (TICKET-179): record, once, whether each operand is fresh. The
-                            // compiler encodes it on the spawn op; the runtime unmarks its root.
+                            // D4 (TICKET-179, TICKET-189): decide, once, how each operand crosses,
+                            // per bound slot (keyword args, default fills and a pack at their
+                            // compiled position). For a `lib.f` / `lib.K.f` head the receiver is the
+                            // namespace expression, which is `Copy`. The compiler encodes it on the
+                            // spawn op; the runtime unmarks each `Move` root.
                             let receiver = match &callee.kind {
                                 ExprKind::Field { obj, .. } => Some(&**obj),
                                 _ => None,
                             };
-                            for a in receiver
-                                .into_iter()
-                                .chain(args.iter())
-                                .chain(named.iter().map(|(_, v)| v))
-                            {
-                                let fresh = self.spawn_operand_is_fresh(a);
-                                let key = crate::checker::carrier_key(
-                                    self.graph_module_idx,
-                                    self.kw_frag_ctx,
-                                    self.kw_frag_ord,
-                                    a.span,
-                                );
+                            let slots = self.bound_slots(e.id, args, named);
+                            let crossing = CallCrossing {
+                                recv: receiver.map(|r| self.crossing_of(r)),
+                                args: slots.iter().map(|s| self.slot_crossing(s)).collect(),
+                            };
+                            if self.records_node(e.id) {
                                 crate::checker::record_call_table_entry(
-                                    &mut self.fresh_operands,
+                                    &mut self.crossings,
                                     &mut self.table_conflicts,
-                                    key,
-                                    fresh,
-                                    "spawn operand freshness",
+                                    (self.graph_module_idx, e.id.0),
+                                    crossing.clone(),
+                                    "spawn crossing",
                                     e.span,
                                 );
                             }
@@ -3494,6 +3510,14 @@ impl Checker {
                             for (sp, msg) in bad {
                                 self.error(sp, msg);
                             }
+                            // D4 layer A: the callee's certain writes, through the same slots and
+                            // crossings the compiler encodes.
+                            self.report_named_call_writes(
+                                callee,
+                                &slots,
+                                Some(&crossing.args),
+                                true,
+                            );
                             // B3.3 (Task 2a): a closure/nested-fn VALUE at the callee or an arg crosses
                             // the airlock by value — reject each of its non-sendable LOCAL captures (a
                             // captured `ref` etc.) at compile time, matching the `spawn:` block form.

@@ -195,12 +195,23 @@ pub enum SumSeed {
 }
 pub type SumSeedTable = HashMap<CarrierKey, Option<SumSeed>>;
 
-/// D4 (TICKET-179) — is each `spawn` operand (method receiver or argument) FRESH: a value no parent
-/// binding can reach (a list/map/set literal, a comprehension, a container or bytearray `.copy()`)?
-/// Keyed by [`carrier_key`](super::carrier_key) on the operand's span. The checker decides it once
-/// (`spawn_operand_is_fresh`); the compiler only encodes it as the spawn op's bitmask and the
-/// runtime only unmarks the operand's root. A missing key means not fresh.
-pub type FreshOperandTable = HashMap<CarrierKey, bool>;
+pub use crate::vm::crossing::Crossing;
+
+/// D4 (TICKET-179, TICKET-189) — how each operand of one `spawn` call crosses into its task. A
+/// [`Crossing::Move`] operand is fresh: a value no parent binding can reach (a list/map/set literal,
+/// a comprehension, a container or bytearray `.copy()`, a variadic pack, an all-literal default
+/// fill). `args` is in bound-slot order, so default fills and packs sit at their compiled position.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CallCrossing {
+    pub recv: Option<Crossing>,
+    pub args: Vec<Crossing>,
+}
+
+/// Every spawn call's [`CallCrossing`], keyed `(graph module index, call NodeId)` like
+/// [`CallPlanTable`]. The checker decides it once (`crossing_of`); the compiler only encodes it with
+/// [`Crossing::mask`] and the runtime only unmarks each `Move` operand's root. A missing key means
+/// every operand is `Copy`.
+pub type CrossingTable = HashMap<(usize, u32), CallCrossing>;
 
 /// Surface-only parameter labels on a function type (Swift SE-0111 keyword arguments through a
 /// function VALUE). They ride PARALLEL to a `Ty::Func`'s `params`, but participate in NO type
@@ -1058,5 +1069,6 @@ pub enum ArgFill {
 
 /// The argument slot plan of every call that `Checker::bind_call` bound, keyed `(graph module
 /// index, call NodeId)` like [`ResolutionTable`]. A trailing run of callee-filled slots is absent
-/// from the plan: the callee's prologue fills it. Written only under `harvest_keywords`.
+/// from the plan: the callee's prologue fills it. Written in every main walk: the error-gate pass
+/// reads it too (layer A's `bound_slots`, TICKET-189).
 pub type CallPlanTable = HashMap<(usize, u32), Vec<ArgFill>>;

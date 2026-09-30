@@ -34153,7 +34153,7 @@ fn the_nested_fn_ret_memo_is_invisible_to_diagnostics_and_tables() {
         assert_eq!(
             sorted_debug(&on.8),
             sorted_debug(&off.8),
-            "{name}: fresh_operands"
+            "{name}: crossings"
         );
     }
 }
@@ -36784,8 +36784,11 @@ struct K:\n    n: int\n\n    fn w(xs: List[int], out: Channel[int]):\n        xs
         wrong.join("\n")
     );
     // Executor has no `map` (`std/concurrency.chz` declares submit/submit_result/submit_outcome).
-    rejects(
-        "import std.concurrency\nfn main():\n    ex := Executor()\n    print(ex.map(fn(x: int) -> int: x, [1]))\nmain()\n",
+    files_reject(
+        &[(
+            "main.chz",
+            "import std.concurrency\nfn main():\n    ex := Executor()\n    print(ex.map(fn(x: int) -> int: x, [1]))\nmain()\n",
+        )],
         "has no method 'map'",
     );
 }

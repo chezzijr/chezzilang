@@ -20,9 +20,10 @@ use std::fmt;
 
 pub use ty::Ty;
 pub use ty::{
-    ArgFill, CallPlanTable, CarrierKey, CarrierMode, CarrierTable, FnLabels, ForBind, ForBindTable,
-    FreshOperandTable, NoFallOffTable, ProtoEqTable, Resolution, ResolutionTable, RetCoerce,
-    RetCoerceTable, SumSeed, SumSeedTable, WitnessCallee, WitnessKey, WitnessSrc, WitnessTable,
+    ArgFill, CallCrossing, CallPlanTable, CarrierKey, CarrierMode, CarrierTable, Crossing,
+    CrossingTable, FnLabels, ForBind, ForBindTable, NoFallOffTable, ProtoEqTable, Resolution,
+    ResolutionTable, RetCoerce, RetCoerceTable, SumSeed, SumSeedTable, WitnessCallee, WitnessKey,
+    WitnessSrc, WitnessTable,
 };
 use ty::{compatible, param_invariant};
 
@@ -1121,7 +1122,7 @@ pub fn resolve_call_tables(
     RetCoerceTable,
     TableConflicts,
     ForBindTable,
-    FreshOperandTable,
+    CrossingTable,
     ResolutionTable,
     NoFallOffTable,
 ) {
@@ -1142,7 +1143,7 @@ fn resolve_call_tables_with(
     RetCoerceTable,
     TableConflicts,
     ForBindTable,
-    FreshOperandTable,
+    CrossingTable,
     ResolutionTable,
     NoFallOffTable,
 ) {
@@ -1160,7 +1161,7 @@ fn resolve_call_tables_with(
             std::mem::take(&mut c.ret_coerce),
             std::mem::take(&mut c.table_conflicts),
             std::mem::take(&mut c.for_binds),
-            std::mem::take(&mut c.fresh_operands),
+            std::mem::take(&mut c.crossings),
             std::mem::take(&mut c.resolutions),
             std::mem::take(&mut c.no_fall_off),
         )
@@ -1188,7 +1189,7 @@ pub fn resolve_call_tables_standalone(
     RetCoerceTable,
     TableConflicts,
     ForBindTable,
-    FreshOperandTable,
+    CrossingTable,
     ResolutionTable,
     NoFallOffTable,
 ) {
@@ -1209,7 +1210,7 @@ pub fn resolve_call_tables_standalone_no_memo(
     RetCoerceTable,
     TableConflicts,
     ForBindTable,
-    FreshOperandTable,
+    CrossingTable,
     ResolutionTable,
     NoFallOffTable,
 ) {
@@ -2266,8 +2267,8 @@ struct Checker {
     /// for a lone `check`.
     extern_module_idx: Option<usize>,
     /// The argument slot plan of every call [`Self::bind_call`] bound, keyed `(module idx, call
-    /// NodeId)`. Recorded only when [`Self::harvest_keywords`] is set (the error-gate `check_graph`
-    /// leaves it empty) and consumed by the compiler's `compile_plan_args`. Produced by
+    /// NodeId)`. Recorded in every main walk (TICKET-189: the error-gate pass reads it through
+    /// `bound_slots`) and consumed by the compiler's `compile_plan_args`. Produced by
     /// [`resolve_call_tables`].
     call_plans: CallPlanTable,
     /// The call `infer_call` is dispatching: its NodeId, named arguments and variadic-pack origin,
@@ -2282,7 +2283,7 @@ struct Checker {
     /// Graph module index by module file id, so an inline default fill names its declaring module.
     module_idx_of_file: HashMap<u32, usize>,
     /// True only while [`resolve_call_tables`] drives the pass, licensing `infer_call` to record
-    /// into [`Self::call_plans`] / [`Self::witnesses`]. Off during the normal error-gate check
+    /// into [`Self::witnesses`]. Off during the normal error-gate check
     /// (which discards both tables).
     harvest_keywords: bool,
     /// M24 — both halves of the static-witness contract (which fns need hidden witness params, and
@@ -2306,8 +2307,8 @@ struct Checker {
     /// Recorded UNCONDITIONALLY, for the same reason [`Self::carriers`] is. See [`SumSeedTable`].
     sum_seeds: SumSeedTable,
     /// D4 (TICKET-179) — which `spawn` operands are fresh, recorded by the spawn arm and consumed
-    /// verbatim by the compiler. See [`FreshOperandTable`].
-    fresh_operands: FreshOperandTable,
+    /// verbatim by the compiler. See [`CrossingTable`].
+    crossings: CrossingTable,
     /// W8-21 — which implicit success-coercion, if any, each declared `T?`/`T!E` return sink applies,
     /// keyed by [`ret_coerce_key`] on the returned value's own span and consumed verbatim by the
     /// compiler (which cannot re-derive it: the decision is whether the returned expression is

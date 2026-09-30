@@ -1,6 +1,7 @@
 // vm::sched — split out of vm/mod.rs. `super::*` == the `vm` module.
 // Concurrency: spawn/nursery/fibers, MN scheduler, wire (airlock), module snapshots.
 
+use super::crossing::{self, Crossing, Route};
 use super::*;
 
 /// Identity-preservation state threaded through [`Vm::to_wire_depth`] — every identity-preserved node
@@ -4022,7 +4023,12 @@ impl Vm {
         // inside resolves to the already-alloc'd (and about-to-be-patched) node — tying a serialized
         // value cycle back together.
         let mut rebuild = super::fxhash::FxHashMap::<u32, GcRef>::default();
+        // TICKET-189: every `from_wire` caller is a hand-off read (Channel/Shared/RwShared/Atomic,
+        // an Executor job root), which `crossing::marks` never marks.
+        let saved_copy_mark = self.copy_mark;
+        self.copy_mark = crossing::marks(Route::Handoff, saved_copy_mark);
         let v = self.from_wire_memo(w, &mut rebuild);
+        self.copy_mark = saved_copy_mark;
         // W7-11 — every caller of `from_wire` rebuilds a WHOLE crossing, so its rebuild map spans the
         // same scope the serialize memo did and a `Backref` can never dangle. A piecewise drain goes
         // through [`from_wire_piece`](Vm::from_wire_piece) instead. Keep the invariant loud where it is
@@ -4571,18 +4577,18 @@ impl Vm {
                 rebuild.insert(id, h);
                 // Lever #3: rebuild positionally — push values in wire (slot) order, discard the
                 // carried names (they live in `proto.capture_names`). `to_wire` emits in slot order.
-                // D4 layer C (owner ruling 2026-09-23): a crossing closure's captures are marked as
-                // copies UNLESS this reconstruction lands back in the exact heap it serialized out
-                // of — a same-task `Channel`/`Shared` round-trip, which the value never actually
-                // left (W7-4c: the round-trip preserves one binding, and D4 only faults a write a
-                // DIFFERENT task can no longer see). A genuine cross-task crossing (`origin_heap`
-                // differs from this heap's own id) still forces the mark, even when the closure
-                // itself crosses outside an ambient `copy_mark` walk (e.g. over a Channel to
-                // another task).
+                // D4 layer C (owner ruling 2026-09-23): the captures follow
+                // `Route::ClosureCaptures` (TICKET-189). Back in the exact heap they serialized out
+                // of — a same-task `Channel`/`Shared` round-trip the value never left (W7-4c) —
+                // they keep the enclosing mark. In any other heap they are marked, even when the
+                // closure crosses outside an ambient `copy_mark` walk (a Channel to another task).
                 let saved_copy_mark = self.copy_mark;
-                if origin_heap != self.heap.id() {
-                    self.copy_mark = true;
-                }
+                self.copy_mark = crossing::marks(
+                    Route::ClosureCaptures {
+                        same_heap: origin_heap == self.heap.id(),
+                    },
+                    saved_copy_mark,
+                );
                 let cap = self.rebuild_items(captured, rebuild, |(_k, w)| w);
                 self.copy_mark = saved_copy_mark;
                 // Owner decision D2 (TICKET-137): a crossing carries captures only. The closure's
@@ -5099,9 +5105,9 @@ impl Vm {
             super::fxhash::FxHashMap::default()
         };
         // D4 layer C (TICKET-169): everything this call rebuilds — a spawned callee's captures, a
-        // `spawn f(args)`'s arguments, a `spawn obj.m()`'s receiver — is the task's airlock copy.
+        // `spawn f(args)`'s arguments, a `spawn obj.m()`'s receiver — follows `Route::Spawn`.
         let saved_copy_mark = self.copy_mark;
-        self.copy_mark = true;
+        self.copy_mark = crossing::marks(Route::Spawn, saved_copy_mark);
         let rb = &mut owned;
         let out = match lowered {
             Lowered::Closure {
@@ -5160,12 +5166,12 @@ impl Vm {
             ReadyCall::Method { recv, args, .. } => (Some(*recv), args),
         };
         let fresh_roots = recv
-            .filter(|_| fresh & 1 == 1)
+            .filter(|_| Crossing::from_mask(fresh, 0) == Crossing::Move)
             .into_iter()
             .chain(
                 args.iter()
                     .enumerate()
-                    .filter(|&(i, _)| i + 1 < u32::BITS as usize && (fresh >> (i + 1)) & 1 == 1)
+                    .filter(|&(i, _)| Crossing::from_mask(fresh, i + 1) == Crossing::Move)
                     .map(|(_, &v)| v),
             )
             .filter_map(|v| v.as_obj())
@@ -6342,9 +6348,9 @@ impl Vm {
         // checked against `snapshot_adopt` (gotcha 1).
         self.adopt_active = !self.snapshot_adopt.is_empty();
         // D4 layer C (TICKET-169): this replay builds the task's OWN copy of the module's globals —
-        // every object it allocates gets the copy mark, so a later write to it faults.
+        // `Route::ModuleSnapshot` marks every object it allocates, so a later write to it faults.
         let saved_copy_mark = self.copy_mark;
-        self.copy_mark = true;
+        self.copy_mark = crossing::marks(Route::ModuleSnapshot, saved_copy_mark);
         for (name, sv) in &snap.modules[idx].globals {
             let val = self.replay_snap(sv, &mut rb);
             self.module_define(module, name, val);
@@ -6418,9 +6424,11 @@ impl Vm {
             } => {
                 let whome = self.worker_home(*home);
                 // Lever #3: rebuild positionally (slot order), discarding the carried names.
-                // D4 layer C: a crossing closure's captures are always marked as copies.
+                // D4 layer C: a snapshot closure never replays into the heap it left, so its
+                // captures are marked (`Route::ClosureCaptures`).
                 let saved_copy_mark = self.copy_mark;
-                self.copy_mark = true;
+                self.copy_mark =
+                    crossing::marks(Route::ClosureCaptures { same_heap: false }, saved_copy_mark);
                 let cap: Vec<Value> = captured
                     .iter()
                     .map(|(_k, cv)| self.replay_snap(cv, rb))

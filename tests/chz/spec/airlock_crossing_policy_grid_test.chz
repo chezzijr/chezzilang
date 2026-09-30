@@ -136,6 +136,47 @@ test fn grid_policy_r7_fn_variadic():
         spawn t189_pack(out, 1, 2)
     assert out.recv() == "ok 3"
 
+fn t189_pack_elem(out: Channel[str], ...rest: List[int]):
+    out.send(t189_try(rest[0]))
+
+test fn grid_policy_r8_fn_variadic_element_named():
+    # The pack list is fresh; its element is the parent's list, so it stays a copy.
+    xs := [1]
+    out := Channel[str](4)
+    parallel:
+        spawn t189_pack_elem(out, xs)
+    assert out.recv() == "fault"
+    assert xs == [1]
+
+fn t189_rebind(ys: List[int], out: Channel[str]):
+    ys = [1, 2]
+    ys.push(3)
+    out.send("ok {ys.len()}")
+
+test fn grid_policy_r23_fn_rebound_param():
+    xs := [1]
+    out := Channel[str](4)
+    parallel:
+        spawn t189_rebind(xs, out)
+    assert out.recv() == "ok 3"
+    assert xs == [1]
+
+t189_dg: List[int] = [1]
+
+fn t189_dg_get() -> List[int]:
+    return t189_dg
+
+fn t189_dprov(out: Channel[str], acc: List[int] = t189_dg_get()):
+    out.send(t189_try(acc))
+
+test fn grid_policy_r53_fn_provider_default_is_copy():
+    # Ceiling: a provider default is a call result, which may return a parent global.
+    out := Channel[str](4)
+    parallel:
+        spawn t189_dprov(out)
+    assert out.recv() == "fault"
+    assert t189_dg == [1]
+
 test fn grid_policy_r14_fn_conditional_named():
     xs := [1]
     out := Channel[str](4)
