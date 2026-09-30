@@ -7,6 +7,25 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-189 (2026-10-01): Family C1, one crossing policy per bound slot.** The checker's
+  `crossing_of` decides each spawn operand once; `bound_slots` maps every parameter through
+  `bind_call`'s plan, so keyword arguments, default fills and a variadic pack sit in their compiled
+  slot. `CrossingTable` (keyed `(module, call NodeId)`) replaces the span-keyed `FreshOperandTable`;
+  the compiler encodes it with `Crossing::mask` on every spawn form (the qualified `lib.f()` /
+  `lib.K.f()` mask is no longer a literal `0`); the VM decodes it with `Crossing::from_mask`. Route
+  constants live only in `vm::crossing::marks` (spawn, closure captures, module snapshot, hand-off
+  reads). Layer A reads the slots and crossings, and a rebound parameter is a local from the rebind
+  on. Deleted: `spawn_operand_is_fresh`, `fresh_mask`, `fresh_bit`, `fresh_mask_srcs`,
+  `compile_call_srcs`, the four `copy_mark = true` literals, layer A's positional `args.get(i)`.
+  Now runs: a literal default fill (`spawn f(out)` with `acc: List[int] = []`), a variadic pack, a
+  fresh operand to `lib.f()` / `lib.K.f()`, a param rebound before its write. Now rejected: a
+  keyword-bound named argument an `f()` / `lib.f()` callee writes (`spawn w(out=out, xs=xs)`).
+  Ceilings kept: a provider default is Copy; layer A declines method, static and value callees
+  (layer C faults). Generators (C2, TICKET-190) and std `Task`/`memoize` (C3) are open. Grids:
+  `checker::tests::airlock_crossing_policy_grid_compile_cells` (9 cells flip),
+  `tests/chz/spec/airlock_crossing_policy_grid_test.chz` (13 rows flip: R6, R7, R10, R11, R24, R25,
+  R31–R33, R35–R37, R40), `vm::crossing::tests`.
+
 - **TICKET-188 (2026-10-01): Family B, a child's fault is pushed to its owner.** One decider,
   `block::halt_of` (cancel first, then a recorded fault of a child of an owned nursery), read by
   `Vm::halt_requested`/`take_halt`/`deliver_halt` and `WakeSet::halt`; one wake set,

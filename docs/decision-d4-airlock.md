@@ -128,7 +128,10 @@ So D4 detects a write in two layers:
   or a chained comparison, and nothing after a possible early exit (`return`, `break`, `continue`,
   `?`). The first `if` condition runs on every path, so a writer called there is still reported.
   `fn maybe(flag: bool): if flag: g = 1` spawned as `maybe(false)` now checks clean, and a
-  `maybe(true)` still faults at runtime in layer C.
+  `maybe(true)` still faults at runtime in layer C. Layer A maps parameter `i` to its source through
+  the checker's call plan (`bound_slots`, TICKET-189), never positionally: a keyword argument lands
+  in its declared slot, and a default fill or variadic pack is no parent binding. A parameter the
+  callee rebinds is a local from the rebind on. Method, static `T.f` and value callees still decline.
 - **Rejected: B, an explicit `mut self` (Rust's `&mut self`, Pony's reference capabilities).** It is
   complete at compile time, but it adds syntax and boilerplate on every method and changes every
   protocol's signature. C gives the same completeness at runtime without it.
@@ -140,8 +143,9 @@ value after the join? Two routes decide it, each in one place:
 
 1. **A fresh spawn operand crosses unmarked.** A `spawn f(args)` argument or `spawn recv.m()`
    receiver that is a list/map/set literal, a comprehension, or a List/Map/Set/bytearray `.copy()`
-   is reachable by no parent binding. The checker decides this once (`spawn_operand_is_fresh`); the
-   compiler encodes it as the spawn op's bitmask; the runtime unmarks only the operand's ROOT.
+   is reachable by no parent binding. The checker decides this once per bound slot (`crossing_of`,
+   TICKET-189, which also counts a literal default fill and a variadic pack); the compiler encodes it
+   as the spawn op's bitmask (`vm::crossing::Crossing::mask`); the runtime unmarks only the ROOT.
    Children stay marked (`copy()` is shallow), so `spawn f([xs])` may push onto the new list but not
    onto `xs`. A call result is never fresh (`id(xs)` returns the parent's own list), and a struct
    constructor or struct `.copy()` is not fresh either: both are known ceilings (a false fault,

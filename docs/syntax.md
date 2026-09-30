@@ -583,7 +583,10 @@ fn; it captures the enclosing scope exactly like a closure value:
   lose the write silently (see `docs/concurrency.md`'s ceilings). Share state a task and
   its parent both observe through `Shared`/`RwShared`/`Atomic*`/`Channel` instead. A value no parent
   binding can reach is the task's own: a fresh `spawn` operand (`spawn work([], out)`, a
-  comprehension, `xs.copy()`) crosses with its root unmarked and is writable (TICKET-179).
+  comprehension, `xs.copy()`) crosses with its root unmarked and is writable (TICKET-179). So does a
+  literal default fill (`acc: List[int] = []`) and a variadic pack, through every spawn callee form
+  (`f()`, `obj.m()`, `lib.f()`, `lib.K.f()`, a function value); a parameter the callee rebinds
+  before writing it (`ys = [1, 2]; ys.push(3)`) is not a task copy (TICKET-189).
 
 `fn` is the only declaration allowed inside a block. `struct`, `enum`, `newtype`, `protocol`, `type`, `test fn`, `import`, `extern` and `native` are top-level only; inside any block each is a parse error (`struct must be a top-level declaration`).
 

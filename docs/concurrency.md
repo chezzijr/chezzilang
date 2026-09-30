@@ -111,6 +111,15 @@ function reaches it: a write under `if`/`match`/a loop/a short-circuit right sid
 `return`/`break`/`continue`/`?`, is left to layer C (TICKET-179). A task's own values stay writable:
 a fresh `spawn` operand (a list/map/set literal, a comprehension, a List/Map/Set/bytearray `.copy()`)
 crosses with its root unmarked, so `spawn work([], out)` may push onto its list, as in Go and Python.
+The same holds for a literal default fill (`acc: List[int] = []`), a variadic pack (its elements stay
+copies), and every spawn callee form: `f()`, `obj.m()`, `lib.f()`, `lib.K.f()` and a function value
+(TICKET-189). Layer A maps each parameter through the checker's call plan, so a parameter the callee
+rebinds before writing is not a task copy, and a keyword-bound named argument that an `f()` or
+`lib.f()` callee writes (`spawn w(out=out, xs=xs)`) is a compile error. Two ceilings stay, each pinned
+by a row of `tests/chz/spec/airlock_crossing_policy_grid_test.chz`: a provider default (any default
+that is not all-literal) is a call result and stays a copy, so a write to it faults (R53); and layer A
+declines method, static and value callees, so their write to a named argument compiles and faults at
+run time in layer C (R27, R38, R41).
 Full rules and ceilings: [`syntax.md` §capture](syntax.md) and `docs/decision-d4-airlock.md`.
 
 **The copy is taken FRESH, per task, at its `spawn` — at every depth.** A task sees the values current
