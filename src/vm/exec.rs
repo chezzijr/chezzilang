@@ -459,11 +459,11 @@ impl Vm {
         } else {
             false
         };
-        // TICKET-188 — a cancel, or a child fault of a nursery this party owns (it was a separate
-        // owner rung riding the 1-in-1024 sample, DEC-155; `halt_of` is lock-free until a flag trips).
+        // TICKET-188 — a cancel, or a child fault of a nursery this party owns: one predicate. The
+        // owned half rides the 1-in-1024 sample (see `halt_read`); the cancel half runs every time.
         if let Some(fr) = self.frames.last() {
             let span = fr.call_span;
-            if let Some(e) = self.take_halt(span) {
+            if let Some(e) = self.take_halt_at(span, sampled) {
                 return Err(e);
             }
         }
@@ -1854,7 +1854,8 @@ impl Vm {
                     .timed_out());
             }
             // TICKET-188 — a cancel, or a child fault of a nursery this party owns: one predicate.
-            if let Some(e) = self.take_halt(span) {
+            // The owned half rides the 1-in-1024 sample (see `halt_read`).
+            if let Some(e) = self.take_halt_at(span, sampled) {
                 return Err(e);
             }
             // gaps.md W7-57 — a run-wide `os.exit` from another party. This is the checkpoint for the
@@ -1892,10 +1893,18 @@ impl Vm {
     ///   flag is already tripped by a faulted sibling; without this, the first checkpoint inside the
     ///   first deferred call returns `cancelled` and the defer body never executes.
     pub(super) fn halt_requested(&self) -> Option<Halt> {
+        self.halt_read(true)
+    }
+
+    /// [`Vm::halt_requested`], with the owned half read only when `owned`. The two CPU checkpoints
+    /// ([`Vm::jump_checked`], [`Vm::guarded_checkpoint`]) pass their 1-in-1024 sample: walking the
+    /// open nurseries on every element cost +11.6 % on `benches/chz/hof_nursery.chz` (TICKET-188,
+    /// `docs/benchmarks.md`). The cancel half still runs every time; it is the same `halt_of`.
+    fn halt_read(&self, owned: bool) -> Option<Halt> {
         if self.cancel_suppressed() {
             return None;
         }
-        if self.eager_scheds.is_empty() {
+        if !owned || self.eager_scheds.is_empty() {
             return block::halt_of(self.cancel_flags().map(|a| &**a), std::iter::empty(), false);
         }
         self.halt_requested_owned()
@@ -1917,13 +1926,21 @@ impl Vm {
     /// sentinel; a child fault records `owner_fault_floor` (DEC-096: only a `recover:` INSIDE the
     /// faulting nursery is bypassed) and returns the child's error.
     pub(super) fn take_halt(&mut self, span: Span) -> Option<RuntimeError> {
-        let h = self.halt_requested()?;
+        self.take_halt_at(span, true)
+    }
+
+    /// [`Vm::take_halt`] over [`Vm::halt_read`]: the owned half only when `owned`.
+    fn take_halt_at(&mut self, span: Span, owned: bool) -> Option<RuntimeError> {
+        let h = self.halt_read(owned)?;
         Some(self.deliver_halt(h, span))
     }
 
     /// Deliver a [`Halt`] read by [`Vm::halt_requested`]. A wait that settles under its sched's core
     /// lock reads the halt BEFORE taking that lock (a child fault's `scope_fault` takes it too, and a
-    /// fiber-owned nursery lives on the same sched) and delivers it here, below its settle.
+    /// fiber-owned nursery lives on the same sched) and delivers it here, below its settle. Out of
+    /// line: it runs once per halt, and inlined it bloats the per-element checkpoints.
+    #[cold]
+    #[inline(never)]
     pub(super) fn deliver_halt(&mut self, h: Halt, span: Span) -> RuntimeError {
         match h {
             Halt::Cancelled => {
