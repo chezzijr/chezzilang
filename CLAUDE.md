@@ -234,8 +234,8 @@ Right now: **pre-JIT bug-hunt**, with **M19 — Perf track** paused alongside it
 >
 > **Ledger.** `docs/gaps.md` is a SHORT LEDGER of open rows, each re-verified on the release binary;
 > every closed row and every wave's session log (W1..W15) lives verbatim in `docs/gaps-archive.md`, so
-> a `docs/gaps.md:NNNN` citation in an old ticket resolves against the archive. **7 open rows** today —
-> W8-19, W13-28, W15-4, W15-5, W15-8, W15-9, W15-10, all P2/P3 or tracking rows (this count is
+> a `docs/gaps.md:NNNN` citation in an old ticket resolves against the archive. **8 open rows** today —
+> W8-19, W13-28, W15-4, W15-5, W15-8, W15-9, W15-10, W17-1, all P2/P3 or tracking rows (this count is
 > gate-checked by `tests/gaps_ledger_count.rs`; re-derive it with `grep -c '^| \*\*W' docs/gaps.md`
 > after every merge — merged counters can be silently wrong). Wave 16's findings are recorded in
 > `docs/root-causes-w16.md` and are not yet ledger rows.

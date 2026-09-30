@@ -11,6 +11,80 @@ justify lives in **[`future.md §4`](future.md)**; the scheduled work is roadmap
 > They are kept as the record of what was measured at the time; they are not reproducible on today's
 > binary, and "serial == M:N parity green" in an older section means the gate that existed then.
 
+## TICKET-185 — channel hand-off protocol (2026-09-30)
+
+**Accepted by the owner 2026-09-30; residual tracked as W17-1.** Unpinned, `rendezvous_pingpong`
+is +16% (T=0) and +25% (T=4) over base at n=11, and its runs are bimodal. Pinned to two distinct
+cores it is ~10% faster than base. `send_one_channel` is below base at T=4 and +3% at T=0. The fix
+closes Family A's lost and duplicated values (`docs/root-causes-w17.md`).
+
+Conditions: 28 cores, no `hyperfine`/`perf`/`strace` on the box. Base is the release binary at
+`d84bb2ba` (`main`, the merge base). Every run is `CHEZZI_THREADS=<T> chezzi run
+benches/sched/<bench>.chz`, base and branch interleaved, wall seconds, `uptime` beside each batch.
+T=0 means the default worker count.
+
+**Per-lever medians** (n=7, base / branch). Every lever gate was green: the `vm::` tests, the repro,
+`tests/channel_handoff_grid.rs`, and `tests/chz` at the default count and at T=2.
+
+| lever | commit | ping T=4 | ping T=0 | send_one T=4 | send_one T=0 | load | kept |
+|---|---|---|---|---|---|---|---|
+| lever 0: protocol only | `0c855374` | 2.788 / 4.759 | 2.810 / 5.225 | 1.374 / 1.047 | 5.098 / 4.655 | 2.33-3.43 | - |
+| lever 4a: settled-only wake | `746eae75` | 2.727 / 4.978 | 2.739 / 5.051 | 1.349 / 1.035 | 4.848 / 4.858 | 3.42-4.21 | yes |
+| lever 4b: give to `runnext` | `3164b0e5` | 2.773 / 4.485 | 2.750 / 4.968 | 1.295 / 1.024 | 5.075 / 4.895 | 3.32-4.23 | yes |
+| lever 4c: offered send wakes no fiber | `7bc277b2` | 2.930 / 4.433 | 2.819 / 4.754 | 1.352 / 1.076 | 4.803 / 4.871 | 2.45-3.85 | yes |
+| lever 1: send before allocating | `925a8579` | 2.743 / 4.750 | 2.807 / 4.399 | 1.387 / 1.117 | 5.150 / 4.800 | 2.23-3.48 | reverted `f308f9f3` |
+| lever 2: one lock hold in settle | `be3f18bf` | 2.737 / 4.964 | 2.759 / 4.625 | 1.327 / 1.020 | 5.119 / 4.675 | 2.23-3.22 | reverted `cd3940ae` |
+| lever 3: recycle `PendingOp` | `2c8674f7` | 2.799 / 4.459 | 2.756 / 4.289 | 1.275 / 0.974 | 5.084 / 4.610 | 2.47-2.85 | reverted `e40ca6bb` |
+| own-slot recv wakes no sender | `8eb08914` | see the n=11 table | | | | | yes |
+
+The base column alone moves 2.727-2.930 s (7%), so the per-lever 3% keep rule decided on noise.
+Levers 1-3 restored together did not help either (n=11 table below), so they stay reverted.
+
+**Second pass: counters** (env-gated, removed before commit; `rendezvous_pingpong`, one run per
+cell). "In-place waits" are `block_wait_tick_in_place` waits on the channel condvar.
+
+| T | side | in-place waits | timed out | slept while ready | idle broadcasts | `hand_off` broadcasts | mean recv wait |
+|---|---|---|---|---|---|---|---|
+| 1 | base | 200000 | 0 | 0 | 392312 | 400000 | - |
+| 1 | branch | 200000 | 0 | 0 | 399664 | 365184 | - |
+| 2 | base | 200100 | 0 | 0 | 386313 | 250156 | 7.3 µs |
+| 2 | branch | 200006 | 0 | 0 | 399368 | 394435 | 12.7 µs |
+| 4 | base | 200160 | 0 | 0 | 350661 | 297796 | 8.2 µs |
+| 4 | branch | 200006 | 0 | 0 | 399885 | 399522 | 9.9-15.3 µs |
+
+No in-place wait timed out, so the cost is not a missed wake. The one cause found and fixed
+(`8eb08914`): a `recv` that settled its own filled slot still ran the sender wake. That wake finds
+nobody, but it takes the registry and sched locks on the hand-off's critical path.
+
+**Final, unpinned** (n=11 interleaved, `rendezvous_pingpong`, `uptime` 19:55:07-19:58:41, load
+3.28-4.21):
+
+| T | side | median | runs |
+|---|---|---|---|
+| 0 | base | 2.75 | 2.65 2.70 2.71 2.72 2.74 2.75 2.75 2.75 2.79 2.79 2.91 |
+| 0 | `8eb08914` | 3.18 (+16%) | 2.53 2.70 2.70 2.74 3.06 3.17 3.54 3.69 3.82 3.92 4.47 |
+| 0 | + levers 1-3 | 3.27 | 2.56 2.85 3.11 3.15 3.18 3.27 3.68 3.72 3.90 4.28 4.33 |
+| 4 | base | 2.74 | 2.54 2.65 2.66 2.67 2.68 2.74 2.80 2.85 2.90 2.92 3.01 |
+| 4 | `8eb08914` | 3.42 (+25%) | 2.47 2.56 2.72 2.94 2.97 3.41 3.45 3.72 4.00 4.68 5.46 |
+| 4 | + levers 1-3 | 3.62 | 2.48 2.92 2.99 3.18 3.57 3.62 3.96 4.06 4.12 4.45 4.82 |
+
+`send_one_channel` at `8eb08914`, n=7 interleaved, load 9.16-9.91 (other runs on the box): T=4
+base 1.460 / branch 1.284 (-12%); T=0 base 5.306 / branch 5.452 (+3%).
+
+**Pinned** (`taskset`, `rendezvous_pingpong`, T=4, 3 runs each, `8eb08914` vs base):
+
+| CPUs | branch | base |
+|---|---|---|
+| 2,3 | 2.40-2.44 | 2.66-2.77 |
+| 2,13 | 2.35-2.42 | 2.60-2.76 |
+| 5,9 | 2.36-2.39 | 2.68-2.77 |
+| 2,16 (hyperthread pair) | 2.78-2.92 | 2.82-3.07 |
+
+On one CPU the branch took 2.83-2.97 s and base 2.99-3.04 s. The residual depends on where the
+kernel places the threads when all cores are free; it is not a protocol CPU cost. Its cause is
+unknown. The instrumentation is saved as `~/.cache/chezzi-t185-diag2.patch` (env
+`CHEZZI_T185_DIAG=1`).
+
 ## TICKET-183 — module globals typed before any body; uninit check on `GetGlobalSlot` — 2026-09-29
 
 Two costs are new. At run time, `Op::GetGlobalSlot` gains one branch (`is_uninit`). At check time,

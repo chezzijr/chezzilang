@@ -71,7 +71,12 @@ value moves only by a CAS on the party's `Pending` under the channel lock (`Chan
 `RecvWait`, the deposits, the retry loops and the re-run closed guards are deleted. A `wait:` has one
 `Pending` for all its arms. DEC-181's `Demote` × `Send`/`Wait+send` cells are now `Demote`. Grid:
 `tests/channel_handoff_grid.rs` (5 sender contexts × 3 sender kinds × 6 receivers × 3 caps × 2
-orders × 3 close cells, plus H1, H3 and the own-value repro, at T=1, 2, 0 and one seed).
+orders × 3 close cells, plus H1, H3 and the own-value repro, at T=1, 2, 0 and one seed). A wake
+requeues only a parked party whose `Pending` left QUEUED (`WakeKind::Settled`; `send_keys` is
+deleted), and a cap-0 `give` hands its receiver to the giver's `runnext`. Perf: accepted by the owner
+2026-09-30 with a residual. Unpinned `rendezvous_pingpong` is +16% (T=0) / +25% (T=4) over base,
+and ~10% faster when pinned to two distinct cores. Tracked as **W17-1** (`docs/gaps.md`); tables in
+`docs/benchmarks.md` §TICKET-185.
 
 **Fact:** "this value has been delivered to exactly one receiver."
 

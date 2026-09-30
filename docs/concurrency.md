@@ -436,8 +436,8 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
   wait — which is Go's own detector (`fatal error: all goroutines are asleep - deadlock!`). Since
   §2c1 a `spawn`ed producer is already running when the body reaches its `recv`, so Go's plainest
   channel idiom works verbatim. This holds for a nested `parallel:` whose outer body is itself
-  parked on a rendezvous `recv`: a blocked receiver's own poll wakes only parked senders, never a
-  receiver parked on another scheduler.
+  parked on a rendezvous `recv`: a receiver's wake requeues only a party whose hand-off committed,
+  never a receiver parked on another scheduler.
 
   ```chezzi
   ch := Channel[int]()

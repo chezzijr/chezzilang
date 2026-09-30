@@ -7,6 +7,25 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-185 (2026-09-30): Family A, one channel hand-off protocol.** A blocked sender publishes
+  an OFFER and a blocked rendezvous receiver a SLOT (`Pending`, `src/vm/core.rs`). A value moves
+  only by a CAS on the party's `Pending` under the channel lock (`ChanState::give` / `pop_for`), and
+  `send` returns only after that commit. Fixed: H1 (an unbuffered `send` returned while its value sat
+  in the channel; the worker-pool idiom lost 2 of 100 values), a sender taking its own value back,
+  H2 (a parked sender faulting `send on a closed channel` after its value was taken; Go `sent both`)
+  and H3 (a false `deadlock` with a `wait:` send arm and a receiver in a native callback). Deleted:
+  `recv_waiting`, `has_send_slot`, `RecvWait`, the deposits, the retry loops, the re-run closed
+  guards, `send_keys` and `WakeKind::Send`. A wake requeues only a party whose `Pending` left QUEUED
+  (`WakeKind::Settled`), a cap-0 `give` hands its receiver to the giver's `runnext`, and an offered
+  send wakes no parked fiber. DEC-181's `Demote` × `Send`/`Wait+send` cells are now `Demote`.
+  Grid: `tests/channel_handoff_grid.rs` (every sender context × kind × receiver × cap × order ×
+  close, at T=1, 2, 0 and one seed); repro `unbuffered_send_never_returns_its_own_value_to_the_sender`.
+  Perf, accepted by the owner with a residual: `send_one_channel` -12% (T=4) / +3% (T=0);
+  unpinned `rendezvous_pingpong` +16% (T=0) / +25% (T=4) and bimodal, ~10% faster than base pinned
+  to two distinct cores. The residual is **W17-1** (`docs/gaps.md`); per-lever and counter tables in
+  `docs/benchmarks.md` §TICKET-185. Levers 1-3 (send before allocating, one lock hold in settle,
+  recycle `PendingOp`) were measured and reverted.
+
 - **TICKET-184 (2026-09-30): Family E, one control-flow summary.** `src/checker/flow.rs` is the one
   walker for "falls through / breaks / continues / returns" over every statement kind; divergence is
   read from the resolved callee (`Checker::resolution_diverges`), never a name. Fixed: K7 (a user fn,
