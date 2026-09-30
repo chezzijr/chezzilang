@@ -2489,13 +2489,7 @@ impl Checker {
             if key.0 < top {
                 self.kw_pending.push((key, span));
             } else if self.kw_written.contains(&key) {
-                let n = &key.1;
-                self.error(
-                    span,
-                    format!(
-                        "keyword arguments through '{n}' are ambiguous: '{n}' is reassigned, so it may hold a function with different parameter names; pass the arguments positionally"
-                    ),
-                );
+                self.error(span, super::globals::kw_ambiguous_msg(&key.1));
             }
         }
         self.kw_certain.retain(|k| k.0 < top);

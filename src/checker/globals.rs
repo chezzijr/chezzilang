@@ -37,6 +37,22 @@ pub(super) struct GlobalBinding {
     pub(super) cycle: bool,
 }
 
+/// Why `Checker::labels_certain` denies a keyword call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum KwDeny {
+    /// The binding is not certain to hold one known function.
+    NotOneFn,
+    /// The module slot is declared more than once and this code may run after any of them.
+    Redeclared,
+}
+
+/// The denial for a keyword call through a name that may hold functions with different labels.
+pub(super) fn kw_ambiguous_msg(name: &str) -> String {
+    format!(
+        "keyword arguments through '{name}' are ambiguous: '{name}' is reassigned, so it may hold a function with different parameter names; pass the arguments positionally"
+    )
+}
+
 impl GlobalBinding {
     pub(super) fn is_const(&self) -> bool {
         self.decls.iter().any(|(k, _)| *k == DeclKind::ConstLet)
@@ -184,6 +200,50 @@ impl Checker {
             merge_unknown(&prev, declared)
         };
         (merge_unknown(declared, &merged) == merged).then_some(merged)
+    }
+
+    /// May the code being checked run after a LATER top-level declaration? True in a fn or
+    /// closure body (it runs when called), a `defer:` block (it runs at scope exit) and a `spawn:`
+    /// block (it runs concurrently). False at top level and in a `parallel:` body, which run in
+    /// source order. A `defer f(..)` call form evaluates its callee at the `defer` (c26), so it is
+    /// not a deferred block.
+    pub(super) fn runs_after_later_decls(&self) -> bool {
+        self.in_fn_body || self.in_defer_block || self.in_spawn_block
+    }
+
+    /// The one decider for keyword-label certainty (TICKET-186): may a keyword call bind `name`'s
+    /// labels, and under which `kw_certain` key? A body may run before or after any declaration
+    /// of a module slot, so where `runs_after_later_decls` holds, a slot declared more than once
+    /// (fn, import, let, extern, native) is never certain: it holds different functions at
+    /// different times. A top-level statement runs in source order and keeps the lexical answer
+    /// (cells c22, c23, c26). `kw_certain` is asked first, so every denial it made before keeps
+    /// its message.
+    pub(super) fn labels_certain(&self, name: &str) -> Result<(usize, String), KwDeny> {
+        let body_redeclared =
+            self.runs_after_later_decls() && self.globals.get(name).is_some_and(|g| g.redeclared());
+        match self.owning_scope(name) {
+            Some(s) if s >= 1 => {
+                let key = (s, name.to_string());
+                if self.kw_certain.contains(&key) {
+                    Ok(key)
+                } else {
+                    Err(KwDeny::NotOneFn)
+                }
+            }
+            Some(_) => {
+                let key = (0, name.to_string());
+                if !self.kw_certain.contains(&key) {
+                    Err(KwDeny::NotOneFn)
+                } else if body_redeclared {
+                    Err(KwDeny::Redeclared)
+                } else {
+                    Ok(key)
+                }
+            }
+            // A fn reached by name through `functions`.
+            None if body_redeclared => Err(KwDeny::Redeclared),
+            None => Ok((0, name.to_string())),
+        }
     }
 
     /// Mark `name`'s first let as reached, if it is a seeded global.

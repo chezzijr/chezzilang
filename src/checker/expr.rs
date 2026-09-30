@@ -754,26 +754,30 @@ impl Checker {
                 // names: `fs := [f, ren]; fs[1](a=1, b=2)` bound `a`/`b` by `f`'s labels and ran
                 // `ren`. Only a `kw_certain` `Ident` binding keeps keyword calls; everything else
                 // is a compile error (positional calls are unaffected).
+                // TICKET-186: `labels_certain` is the one decider, shared with the by-name path.
                 let key = match &callee.kind {
-                    ExprKind::Ident(n) => self
-                        .owning_scope(n)
-                        .map(|s| (s, n.clone()))
-                        .filter(|k| self.kw_certain.contains(k)),
-                    _ => None,
+                    ExprKind::Ident(n) => self.labels_certain(n),
+                    _ => Err(super::globals::KwDeny::NotOneFn),
                 };
                 self.consume_named();
-                let Some(key) = key else {
-                    for a in args {
-                        self.infer(a);
+                let key = match key {
+                    Ok(key) => key,
+                    Err(deny) => {
+                        for a in args {
+                            self.infer(a);
+                        }
+                        for (_, v) in named {
+                            self.infer(v);
+                        }
+                        let msg = match (&callee.kind, deny) {
+                            (ExprKind::Ident(n), super::globals::KwDeny::Redeclared) => {
+                                super::globals::kw_ambiguous_msg(n)
+                            }
+                            _ => "keyword arguments through a function value need a binding that holds one known function (`g := some_fn`, a closure literal, or a nested `fn`, never reassigned); this callee may hold any function of its type, whose parameter names can differ, so pass the arguments positionally".to_string(),
+                        };
+                        self.error(span, msg);
+                        return *ret;
                     }
-                    for (_, v) in named {
-                        self.infer(v);
-                    }
-                    self.error(
-                        span,
-                        "keyword arguments through a function value need a binding that holds one known function (`g := some_fn`, a closure literal, or a nested `fn`, never reassigned); this callee may hold any function of its type, whose parameter names can differ, so pass the arguments positionally".to_string(),
-                    );
-                    return *ret;
                 };
                 // Settled at the binding's `pop_scope` (a write may come after this call). Nothing
                 // is recorded under the generic-arg prepass, and a closure body inferred more than
@@ -2928,6 +2932,25 @@ impl Checker {
                     // fn's signature, so a later module-scope `name := …` retypes the ONE slot it
                     // dispatches through (see `fn_reads`).
                     self.record_fn_read(name);
+                    // TICKET-186: keyword labels through a module slot bind only where
+                    // `labels_certain` says the slot holds this fn (K5).
+                    if let Some(named) = self
+                        .call_ctx
+                        .as_ref()
+                        .filter(|c| !c.named.is_empty())
+                        .map(|c| c.named.clone())
+                        && self.labels_certain(name).is_err()
+                    {
+                        self.consume_named();
+                        for a in args {
+                            self.infer_value(a);
+                        }
+                        for (_, v) in &named {
+                            self.infer_value(v);
+                        }
+                        self.error(span, super::globals::kw_ambiguous_msg(name));
+                        return Some(sig.ret.clone());
+                    }
                     // A `from`-imported numeric-polymorphic native fn (abs/min/max) types by its
                     // argument type, not the float-only `FnSig` (gap #12).
                     if self.imported_poly.contains(name) {
