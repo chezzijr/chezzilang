@@ -635,36 +635,35 @@ impl PendingOp {
         self.settle_mut()
     }
 
+    /// Decide the outcome from the `Pending` state, then walk `at` once, taking each `core.q` at
+    /// most once. The committed arm's SEND entry takes no lock: `take_offer` already removed it.
+    /// The committed arm's RECV entry takes its value and withdraws in one hold. `at` is cleared
+    /// in place, so its capacity survives for a reuse.
     fn settle_mut(&mut self) -> Settled {
-        let at = std::mem::take(&mut self.at);
-        let r = match self.p.try_cancel() {
-            Ok(()) | Err(PENDING_CANCELLED) => Settled::Cancelled,
-            Err(PENDING_CLOSED) => Settled::Closed,
-            Err(s) => {
-                let arm = s - PENDING_DONE;
-                match at.iter().find(|(_, a, _)| *a == arm) {
-                    Some((_, _, true)) => Settled::Sent(arm),
-                    Some((core, _, false)) => {
-                        let w = core
-                            .q
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .take(&self.p);
-                        match w {
-                            Some(w) => Settled::Got(arm, w),
-                            None => Settled::Cancelled,
-                        }
-                    }
-                    None => Settled::Cancelled,
-                }
-            }
+        let (mut r, arm) = match self.p.try_cancel() {
+            Ok(()) | Err(PENDING_CANCELLED) => (Settled::Cancelled, None),
+            Err(PENDING_CLOSED) => (Settled::Closed, None),
+            Err(s) => (Settled::Cancelled, Some(s - PENDING_DONE)),
         };
-        for (core, _, _) in &at {
+        for (core, a, is_send) in &self.at {
+            if arm == Some(*a) {
+                if *is_send {
+                    r = Settled::Sent(*a);
+                    continue;
+                }
+                let mut g = core.q.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(w) = g.take(&self.p) {
+                    r = Settled::Got(*a, w);
+                }
+                g.withdraw(&self.p);
+                continue;
+            }
             core.q
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .withdraw(&self.p);
         }
+        self.at.clear();
         r
     }
 }

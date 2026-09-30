@@ -3977,6 +3977,44 @@ fn a_send_without_an_offer_hands_back_its_value_when_full() {
     assert!(matches!(out, SendOutcome::Full(WireValue::Int(5))));
 }
 
+/// TICKET-185 lever 2: settling a receiver whose slot was filled returns the value and leaves no
+/// entry of its `Pending` on any core — the filled slot, nor its other arm's slot elsewhere.
+#[test]
+fn settle_takes_a_filled_slot_and_leaves_no_entry() {
+    use crate::vm::core::{Pending, PendingOp, Settled};
+    let core = t185_core(Some(0));
+    let other = t185_core(Some(0));
+    let p = Pending::new();
+    core.q.lock().unwrap().slot(&p, 0);
+    other.q.lock().unwrap().slot(&p, 1);
+    assert!(
+        core.q
+            .lock()
+            .unwrap()
+            .give(t185_sum(5), WireValue::Int(5), None)
+            .is_ok()
+    );
+    let op = PendingOp::new(
+        Arc::clone(&p),
+        vec![
+            (Arc::clone(&core), 0, false),
+            (Arc::clone(&other), 1, false),
+        ],
+    );
+    assert!(matches!(op.settle(), Settled::Got(0, WireValue::Int(5))));
+    for c in [&core, &other] {
+        let g = c.q.lock().unwrap();
+        assert!(!g.send_ready_for(Some(0), None));
+        assert_eq!(g.iter().count(), 0);
+    }
+    // Every queue entry holds a clone of `p`: a slot left on either core keeps the count above 1.
+    assert_eq!(
+        Arc::strong_count(&p),
+        1,
+        "an entry of the settled party survived"
+    );
+}
+
 /// TICKET-185: a parked sender's offer commits exactly once. The first `pop` takes it and CASes
 /// its `Pending` to `DONE + arm`; a second `pop` finds nothing, and the sender's `settle` reads
 /// `Sent`. `len()` never counts an offer (Go's `len: 0` with a parked sender).
