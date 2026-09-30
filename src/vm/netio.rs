@@ -1732,14 +1732,16 @@ impl Vm {
         let core = self.channel_core(h);
         // A re-run after a park: settle the offer this `send` published before it parked, BEFORE
         // the cancel checkpoint — a taken offer means the `send` happened.
-        if let Some(op) = self.pending.take() {
+        if let Some(mut op) = self.pending.take() {
             if op.p.is_queued() && !(self.native_reentry == 0 && self.cancel_requested()) {
                 // A stray wake: still queued — re-park on the same offer.
                 self.pending = Some(op);
                 self.park_send(h, orig);
                 return Ok(SendStep::Parked);
             }
-            match op.settle() {
+            let settled = op.settle_in_place();
+            self.spare = op.recycle().or(self.spare.take());
+            match settled {
                 Settled::Sent(_) => return Ok(SendStep::Sent),
                 Settled::Closed => return Err(self.err(CLOSED_SEND.to_string(), span)),
                 Settled::Cancelled | Settled::Got(..) => {}
@@ -1771,14 +1773,23 @@ impl Vm {
         if mode == BlockMode::Refuse {
             return Err(self.err(send_deadlock_msg(core.cap).to_string(), span));
         }
-        let p = Pending::new();
-        match self.send_commit(h, &core, w, Some((&p, 0))) {
-            SendOutcome::Sent => return Ok(SendStep::Sent),
-            SendOutcome::Closed => return Err(self.err(CLOSED_SEND.to_string(), span)),
+        let mut op = self
+            .spare
+            .take()
+            .unwrap_or_else(|| PendingOp::new(Pending::new(), Vec::with_capacity(1)));
+        match self.send_commit(h, &core, w, Some((&op.p, 0))) {
+            SendOutcome::Sent => {
+                self.spare = op.recycle(); // never published, so it is still QUEUED
+                return Ok(SendStep::Sent);
+            }
+            SendOutcome::Closed => {
+                self.spare = op.recycle();
+                return Err(self.err(CLOSED_SEND.to_string(), span));
+            }
             SendOutcome::Full(_) => unreachable!("an offer was passed"),
             SendOutcome::Offered => {}
         }
-        let op = PendingOp::new(p, vec![(Arc::clone(&core), 0, true)]);
+        op.at.push((Arc::clone(&core), 0, true));
         // An `Offered` send wakes no parked fiber: every parked cap-0 receiver holds a live slot,
         // published in the same `core.q` hold as its "not ready" check, so the failed `give` proves
         // no parked fiber can take this offer. Only a party blocking in place (or demoted) re-checks
@@ -1954,10 +1965,12 @@ impl Vm {
         // TICKET-185 — a re-run after a park settles this receiver's slot FIRST, before the deadline
         // and cancel checkpoints: a filled slot means a sender's `send` already returned, so the
         // value is this receiver's.
-        if let Some(op) = self.pending.take()
-            && let Settled::Got(_, w) = op.settle()
-        {
-            return Ok(RecvStep::Got(w));
+        if let Some(mut op) = self.pending.take() {
+            let settled = op.settle_in_place();
+            self.spare = op.recycle().or(self.spare.take());
+            if let Settled::Got(_, w) = settled {
+                return Ok(RecvStep::Got(w));
+            }
         }
         // W7-17 — `--timeout` ABOVE the cancellation checkpoint, because the deadline outranks a cancel
         // and because ending a timer park early TRIPS this fiber's cancel to close the park gap

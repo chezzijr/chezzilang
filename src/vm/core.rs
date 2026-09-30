@@ -632,14 +632,14 @@ impl PendingOp {
 
     /// Cancel if still queued, take a filled slot's value, and withdraw every remaining entry.
     pub fn settle(mut self) -> Settled {
-        self.settle_mut()
+        self.settle_in_place()
     }
 
     /// Decide the outcome from the `Pending` state, then walk `at` once, taking each `core.q` at
     /// most once. The committed arm's SEND entry takes no lock: `take_offer` already removed it.
     /// The committed arm's RECV entry takes its value and withdraws in one hold. `at` is cleared
     /// in place, so its capacity survives for a reuse.
-    fn settle_mut(&mut self) -> Settled {
+    pub fn settle_in_place(&mut self) -> Settled {
         let (mut r, arm) = match self.p.try_cancel() {
             Ok(()) | Err(PENDING_CANCELLED) => (Settled::Cancelled, None),
             Err(PENDING_CLOSED) => (Settled::Closed, None),
@@ -666,12 +666,24 @@ impl PendingOp {
         self.at.clear();
         r
     }
+
+    /// Reset a settled op to QUEUED for the next blocking operation, or `None` when anything
+    /// else could still commit its `Pending`: an entry left in `at`, or a live clone (a queue
+    /// entry, a `WaitPark::p`, a `PartyWait`). Resetting a shared one lets a stale entry commit a
+    /// later operation.
+    pub fn recycle(self) -> Option<PendingOp> {
+        if !self.at.is_empty() || Arc::strong_count(&self.p) != 1 {
+            return None;
+        }
+        self.p.0.store(PENDING_QUEUED, Ordering::Release);
+        Some(self)
+    }
 }
 
 impl Drop for PendingOp {
     fn drop(&mut self) {
         if !self.at.is_empty() {
-            let _ = self.settle_mut();
+            let _ = self.settle_in_place();
         }
     }
 }

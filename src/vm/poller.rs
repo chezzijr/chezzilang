@@ -564,6 +564,7 @@ mod tests {
             span: Span::RUNTIME,
             resume_native: None,
             pending: None,
+            spare: None,
         }
     }
 
