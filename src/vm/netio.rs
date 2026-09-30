@@ -1771,17 +1771,18 @@ impl Vm {
             SendOutcome::Offered => {}
         }
         let op = PendingOp::new(p.unwrap(), vec![(Arc::clone(&core), 0, true)]);
-        // Publishing an offer wakes the channel's receivers: a receiver holding a slot is parked,
-        // and only this wake makes it take the offer.
+        // An `Offered` send wakes no parked fiber: every parked cap-0 receiver holds a live slot,
+        // published in the same `core.q` hold as its "not ready" check, so the failed `give` proves
+        // no parked fiber can take this offer. Only a party blocking in place (or demoted) re-checks
+        // a predicate, and the channel's condvar reaches it.
+        core.cv.notify_all();
         if mode == BlockMode::Park {
             // A real M:N WORKER snapshot-parks: the worker loop drives `send_suspend` →
-            // `Disp::SendPark`. TICKET-128's `runnext` hand-off wakes the receiver.
+            // `Disp::SendPark`.
             self.pending = Some(op);
-            self.offer_wake(h, &core, true);
             self.park_send(h, orig);
             return Ok(SendStep::Parked);
         }
-        self.offer_wake(h, &core, false);
         if mode == BlockMode::Demote {
             return self.demote_send_block(core, op, span);
         }
@@ -1862,22 +1863,6 @@ impl Vm {
         out
     }
 
-    /// TICKET-185 — wake `h`'s receivers after this party published an offer on it. `park`: the
-    /// caller is a fiber about to snapshot-park, so TICKET-128's `runnext` hand-off applies.
-    pub(super) fn offer_wake(&mut self, h: GcRef, core: &Arc<ChannelCore>, park: bool) {
-        let key = self.channel_core_ptr(h);
-        match (self.mn.clone(), self.mn_enlist_sched.clone()) {
-            (Some(sched), _) if park => {
-                sched.handoff_wake(key, core, WakeKind::All, self.wid, true, false)
-            }
-            (Some(sched), _) | (None, Some(sched)) => sched.close_wake(key, core),
-            (None, None) => {
-                core.cv.notify_all();
-                self.wake_on_send(h);
-            }
-        }
-    }
-
     /// Park the running fiber on a full bounded `send`: re-root the receiver AND the value argument on
     /// the operand stack (send is 1-arg, unlike recv's 0-arg — both must be re-pushed or the rewound
     /// `CallMethod(send)` mis-reads the stack), rewind `ip` so the send re-executes on resume, and set
@@ -1915,7 +1900,7 @@ impl Vm {
             // reaches the handed-off sender, and nobody else would steal it before `HANDOFF_GRACE`.
             // TICKET-185 — `Settled` on every cap: only a party whose `Pending` left QUEUED (the
             // sender whose offer this receive took, or moved into the buffer) can proceed.
-            sched.handoff_wake(key, core, WakeKind::Settled, self.wid, false, true);
+            sched.handoff_wake(key, core, WakeKind::Settled, self.wid, true);
         } else if let Some(sched) = self.mn_enlist_sched.clone() {
             sched.recv_wake(key, core);
         } else {
@@ -2786,11 +2771,11 @@ impl Vm {
                     Ok(())
                 });
         }
-        // Publishing an offer wakes that channel's receivers (a receiver holding a slot is parked,
-        // and only this wake makes it take the offer).
+        // A published offer wakes no parked fiber (see `chan_send_step`): a parked cap-0 receiver
+        // holds a live slot, so the failed `give` proves none can take it. Only a party blocking in
+        // place re-checks a predicate, and the channel's condvar reaches it.
         for h in offered {
-            let core = self.channel_core(h);
-            self.offer_wake(h, &core, wait_mode == BlockMode::Park);
+            self.channel_core(h).cv.notify_all();
         }
         // M:N (`--parallel`) snapshot-park, top level: rewind to re-run `WaitPoll` on wake and set
         // `wait_suspend`; the worker loop captures each arm's (key, core) WHILE the fiber heap is live

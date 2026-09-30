@@ -3866,36 +3866,29 @@ impl MnSched {
             c.parked_n += 1;
         }
     }
-    /// TICKET-185 — wake receivers after a sender published its OFFER into `core.q`
-    /// (`ChanState::send` → `Offered`, from `Vm::chan_send_step` before it parks or blocks, and from
-    /// a `wait:` send arm). No enqueue here — the value already waits as an offer; this is
-    /// [`Self::send_commit`]'s wake-fan-out tail. `WakeKind::All` (not `Settled`) because the wake
-    /// follows an offered value: a woken receiver should TAKE it, not re-park waiting for one. A
-    /// receiver that holds a slot is parked, and only this wake makes it take the offer.
+    /// Wake `kind`'s parked entries on `key` (TICKET-185: the receive side passes
+    /// [`WakeKind::Settled`], so only the sender whose offer it took wakes).
     ///
     /// TICKET-128 (W13-25) — replaces the old always-broadcast wake. When exactly ONE fiber was
     /// woken (`n == 1`), file it in `wid`'s own `LocalQ.runnext` (Go's `runnext` handoff) instead of
     /// requeuing it to the global queue and broadcasting: the pair stays on one worker and no
     /// broadcast-to-every-idle-worker cost is paid per message. `recruit` controls whether that
-    /// worker is ALSO nudged awake: the send-side caller (`park_send` runs on the very next line, so
-    /// the worker is never idle) passes `false`; the receive-side caller passes `true`, because its
-    /// own waker may keep running and block its thread in a `Kind::Inline` native before anyone else
-    /// reaches the handed-off fiber. `quiet_empty` (only ever `true` from the send-side deposit path)
-    /// skips the notify entirely when `n == 0` — a deposit that woke nobody has no consumer to reach.
-    /// Falls back to the old broadcast path when more than one fiber woke, or the `runnext` slot was
-    /// already occupied by a fresher handoff.
+    /// worker is ALSO nudged awake: a waker that keeps running passes `true`, because it may block
+    /// its own thread in a `Kind::Inline` native before anyone else reaches the handed-off fiber.
+    /// With `n == 0` it still notifies (DEC-128's receive-side rule). Falls back to the old
+    /// broadcast path when more than one fiber woke, or the `runnext` slot was already occupied by a
+    /// fresher handoff.
     fn handoff_wake(
         &self,
         key: usize,
         core: &Arc<ChannelCore>,
         kind: WakeKind,
         wid: usize,
-        quiet_empty: bool,
         recruit: bool,
     ) {
         let mut c = self.lock();
         let n = self.wake_bucket(&mut c, key, kind);
-        self.hand_off(c, n, wid, quiet_empty, recruit);
+        self.hand_off(c, n, wid, recruit);
         core.cv.notify_all();
         self.wake_run_wide(key, kind);
     }
@@ -3909,11 +3902,9 @@ impl MnSched {
         c: std::sync::MutexGuard<'_, SchedCore>,
         n: usize,
         wid: usize,
-        quiet_empty: bool,
         recruit: bool,
     ) {
         let mut c = c;
-        let quiet = quiet_empty && n == 0;
         // TICKET-167 — seeded mode takes the existing broadcast path (below) on a coin flip instead
         // of always handing off; the coin is checked BEFORE `pop_back` so a "no" leaves `global`
         // untouched for the broadcast path to find.
@@ -3938,9 +3929,7 @@ impl MnSched {
             }
         } else {
             drop(c);
-            if !quiet {
-                self.notify_waiters();
-            }
+            self.notify_waiters();
         }
     }
 
@@ -3975,7 +3964,7 @@ impl MnSched {
             // proceed. Hand it to this worker's `runnext` (DEC-128; `recruit` because the giver
             // keeps running) — a global push plus a broadcast migrates the pair every message.
             let n = self.wake_bucket(&mut c, key, WakeKind::Settled);
-            self.hand_off(c, n, wid, false, true);
+            self.hand_off(c, n, wid, true);
             core.cv.notify_all();
             self.wake_run_wide(key, WakeKind::Settled);
             return out;

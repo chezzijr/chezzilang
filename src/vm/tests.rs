@@ -4473,7 +4473,7 @@ fn handoff_wake_files_one_woken_fiber_in_the_wakers_runnext() {
     let f0 = take_run(&sched);
     let _f1 = take_run(&sched);
     sched.park(key, Arc::clone(&core), f0);
-    sched.handoff_wake(key, &core, WakeKind::All, 1, true, false);
+    sched.handoff_wake(key, &core, WakeKind::All, 1, false);
     assert!(
         sched.lock_local(1).runnext.is_some(),
         "the woken fiber must land in worker 1's runnext"
