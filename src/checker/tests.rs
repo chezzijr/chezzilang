@@ -36523,7 +36523,7 @@ fn t186_module_level_return_rejected() {
 }
 
 #[test]
-fn ticket186_return_in_top_level_block_reports_once() {
+fn module_return_in_top_level_block_reports_once() {
     // Named outside the `t186_` filter, which the acceptance criteria pin at 6 tests.
     // A top-level `defer:` / `recover:` / `spawn:` block rejects its own `return`; the
     // module-level rule must not report the same token a second time.
