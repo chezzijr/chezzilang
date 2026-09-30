@@ -58,7 +58,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use super::block::WakeSet;
+use super::block::{Halt, WakeSet};
 use super::core::{ChannelCore, ExecRegistry, Pending};
 
 /// What one registered party is waiting for — and, through [`PartyWait::satisfiable`], whether that
@@ -413,12 +413,14 @@ impl QuiesceState {
         if parties.len() < live {
             return None; // somebody is still running — they may yet send.
         }
-        // TICKET-188 — a party whose wake set holds a halt resumes at its next halt read, so its
-        // cut is progress; `WakeSet::halt` takes owned scheds' core locks (A), legal under P. A
-        // tripped flag with no recorded fault is not a halt, so a genuine deadlock still faults.
+        // TICKET-188 — a party whose wake set holds a recorded child fault resumes at its next halt
+        // read, so its cut is progress; `WakeSet::halt` takes owned scheds' core locks (A), legal
+        // under P. A tripped flag with no recorded fault is not a halt, so a genuine deadlock still
+        // faults. The veto reads only `Halt::ChildFault`: a pending cancel is not a promise of
+        // progress (a cancelled owner at its join waits on a child in an uncancellable `defer`).
         if parties
             .iter()
-            .any(|p| p.wait.satisfiable() || p.wake.halt().is_some())
+            .any(|p| p.wait.satisfiable() || matches!(p.wake.halt(), Some(Halt::ChildFault { .. })))
         {
             return None;
         }

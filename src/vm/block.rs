@@ -717,6 +717,30 @@ mod tests {
     }
 
     #[test]
+    fn a_cancelled_party_does_not_veto_the_verdict() {
+        let state: Arc<crate::vm::quiesce::QuiesceState> = Arc::default();
+        let registry: crate::vm::core::ExecRegistry = Arc::default();
+        let exec = Arc::new(crate::vm::core::ExecutorCore::default());
+        registry.lock().unwrap().push(Arc::clone(&exec));
+        let _slot = exec.eager.lock().unwrap().reserve(); // live == 1 (main) + 1 (the job)
+        let _job = state.block(
+            PartyWait::Recv(Arc::new(crate::vm::core::ChannelCore::default()), None),
+            WakeSet::default(),
+        );
+        let _owner = state.block(
+            PartyWait::Join(Arc::clone(&exec), 0),
+            WakeSet {
+                cancel: vec![Arc::new(AtomicBool::new(true))],
+                owned: vec![],
+            },
+        );
+        assert!(
+            state.quiesced(&registry),
+            "a pending cancel is not a promise of progress: the verdict must still judge"
+        );
+    }
+
+    #[test]
     fn of_native_maps_each_blocking_kind_to_its_row() {
         assert_eq!(WaitSpec::of_native(Kind::TimedWait), Some(WaitSpec::Sleep));
         assert_eq!(WaitSpec::of_native(Kind::Blocking), Some(WaitSpec::Offload));

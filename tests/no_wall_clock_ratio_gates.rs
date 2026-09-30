@@ -317,7 +317,7 @@ fn sleep_synchronised_tests() -> BTreeSet<String> {
 /// rejected it (the walk returns 68). Obtain it by compiling once with an empty array and copying
 /// the "sleeps but is not listed" list `no_new_rust_test_sleeps_to_order_two_events` reports,
 /// verbatim, the same way `stack_trace_reports_call_chain`'s golden was obtained.
-const SLEEP_SYNCHRONISED_TESTS: [&str; 91] = [
+const SLEEP_SYNCHRONISED_TESTS: [&str; 93] = [
     "cousin_fed_recovered_deadlock_is_fatal_not_a_hang_at_two_and_four_workers",
     "a_bailed_join_stops_its_jobs_from_starting_new_work",
     "a_cancelled_siblings_defer_runs_whole_on_both_engines",
@@ -463,6 +463,11 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 91] = [
     // a happens-before edge in this Rust test's own control flow -- it delays the sibling's write so
     // the callback's `peer.read` would block. The fixed engine prints `['ok']` in either order.
     "x2_socket_read_in_main_callback_blocks_and_reads",
+    // TICKET-188. Their 50ms and 3000ms `time.sleep_ms` are inside the fixture .chz programs' SOURCE
+    // STRINGS, not a happens-before edge in these Rust tests' own control flow -- the child faults
+    // after 50ms while its owner is blocked; the tests assert the owner is cut.
+    "child_fault_cuts_owner_blocked_in_socket_read",
+    "child_fault_cuts_spawned_owner_in_sleep",
 ];
 
 #[test]
