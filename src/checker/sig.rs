@@ -324,9 +324,10 @@ impl Checker {
     }
 
     /// TICKET-183 — seed scope 0 with every let-only module global before any body is walked, so a
-    /// body sees a global declared below it. Writes three of the four per-binding facts the `Let` arm
-    /// records (type from the annotation or `Unknown`, `const`, keyword certainty); the fixpoint
-    /// refines the type and `infer_returns` adds the closure writes. Never calls `declare` (it would
+    /// body sees a global declared below it. Writes two of the per-binding facts the `Let` arm
+    /// records (type from the annotation or `Unknown`, keyword certainty); `const` is the record's
+    /// (`GlobalBinding::is_const`, TICKET-186). The fixpoint refines the type and `infer_returns`
+    /// adds the closure writes. Never calls `declare` (it would
     /// untaint the import, const and alias tables and mark `kw_written`). A name that a hoisted
     /// binding with a runtime slot owns (import, fn, extern, native) is not seeded: its slot holds
     /// the hoisted value until the let runs (W7-42). A let named like a type, a builtin or a builtin
@@ -334,18 +335,12 @@ impl Checker {
     /// orders (TICKET-180).
     pub(super) fn seed_module_globals(&mut self, stmts: &[Stmt]) {
         let mut hoisted: HashSet<&str> = HashSet::new();
-        let mut consts: HashSet<&str> = HashSet::new();
         for s in stmts {
             match &s.kind {
                 StmtKind::Native(d) => {
                     hoisted.insert(&d.name);
                 }
                 StmtKind::Extern { fns, .. } => hoisted.extend(fns.iter().map(|f| f.name.as_str())),
-                StmtKind::Let {
-                    names,
-                    is_const: true,
-                    ..
-                } => consts.extend(names.iter().map(String::as_str)),
                 _ => {}
             }
         }
@@ -377,9 +372,6 @@ impl Checker {
                 g.seeded = true;
                 g.reached = false;
                 self.scopes[0].insert(n.clone(), t);
-                if consts.contains(n.as_str()) {
-                    self.const_decls[0].insert(n.clone());
-                }
                 if self.let_holds_one_known_fn(names, ty, value) {
                     self.kw_certain.insert((0, n.clone()));
                 }
@@ -2558,7 +2550,6 @@ impl Checker {
                     {
                         self.reach_global(n);
                         self.scopes[0].remove(n);
-                        self.const_decls[0].remove(n);
                     }
                 }
                 if names.len() > 1 {
@@ -3871,8 +3862,13 @@ impl Checker {
         // re-bind would defeat the guarantee, not shadow it (`declare` would otherwise drop the
         // const mark). An INNER-scope binding of the same name is a genuine fresh shadow and is
         // untouched (the outer scope's const set is not `.last()`). Skipped during return
-        // inference, whose truncate-and-rerun can re-walk a body within one open scope.
-        if !self.inferring_ret && self.const_decls.last().is_some_and(|s| s.contains(name)) {
+        // inference, whose truncate-and-rerun can re-walk a body within one open scope. Module
+        // scope is decided once by `collect_module_globals` (TICKET-186), so this branch runs only
+        // at scope depth 2 or more.
+        if !self.inferring_ret
+            && self.scopes.len() > 1
+            && self.const_decls.last().is_some_and(|s| s.contains(name))
+        {
             self.error(
                 span,
                 format!("cannot re-declare const binding '{name}' (a const cannot be rebound — not even with ':=' or a new typed let)"),
@@ -3934,8 +3930,11 @@ impl Checker {
         // before the body"; `desugar/mod.rs:689`: "declaration position is irrelevant"), so the rule
         // stays symmetric in the fn's position — `f := fn() -> int: helper()` / `helper := 3` /
         // `fn helper() -> int` rejects, and a source-order test on the fn would let it through.
+        // A const module global declared twice was reported once by `collect_module_globals`, and
+        // it must report that message alone (TICKET-186).
         else if !self.inferring_ret
             && self.scopes.len() == 1
+            && !self.globals.get(name).is_some_and(|g| g.is_const())
             && let Some((prev, from_fn)) = self.scopes[0]
                 .get(name)
                 .cloned()

@@ -109,6 +109,27 @@ impl Checker {
                 _ => {}
             }
         }
+        // Module const-ness is decided here, once per slot: a module global is one storage slot,
+        // so a `const` declaration next to any other declaration of the name is an error, in
+        // either order (owner decision 2026-09-30, JavaScript's let/const rule). This runs outside
+        // every speculative walk, so it needs no `inferring_ret` gate.
+        let mut reports: Vec<(Span, String)> = self
+            .globals
+            .iter()
+            .filter(|(_, g)| g.is_const() && g.redeclared())
+            .map(|(name, g)| {
+                let msg = if g.decls[0].0 == DeclKind::ConstLet {
+                    format!("cannot re-declare const binding '{name}' (a const cannot be rebound — not even with ':=' or a new typed let)")
+                } else {
+                    format!("'{name}' is declared both const and plain at module scope — a module global is one storage slot, so it cannot be const at one line and rebindable at another (declare it once)")
+                };
+                (g.decls[1].1, msg)
+            })
+            .collect();
+        reports.sort_by_key(|(s, _)| (s.line, s.col));
+        for (span, msg) in reports {
+            self.error(span, msg);
+        }
     }
 
     /// The `reached` bit of every record, for a speculative walk to restore.

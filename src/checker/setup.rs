@@ -2518,18 +2518,25 @@ impl Checker {
         // undrained entry would false-pin a same-named binding in the next fn.
         self.carrier_pins.retain(|(k, _)| k.0 < self.scopes.len());
     }
-    /// Record `name` (already declared in the current scope) as a `const T` binding.
+    /// Record `name` (already declared in the current scope) as a `const T` binding. At module
+    /// scope it writes nothing: module const-ness is `GlobalBinding::is_const` (TICKET-186).
     pub(super) fn declare_const(&mut self, name: &str) {
+        if self.scopes.len() == 1 {
+            return;
+        }
         if let Some(set) = self.const_decls.last_mut() {
             set.insert(name.to_string());
         }
     }
     /// Is `name` an in-scope `const T` binding (innermost binding wins, shadowing-aware)? A `const`
     /// captured by a nested fn stays const inside the closure body — the enclosing scope is still on
-    /// the stack, so this resolves through it.
+    /// the stack, so this resolves through it. A module global asks its record (TICKET-186).
     pub(super) fn is_const_decl(&self, name: &str) -> bool {
-        self.owning_scope(name)
-            .is_some_and(|i| self.const_decls[i].contains(name))
+        match self.owning_scope(name) {
+            Some(0) => self.globals.get(name).is_some_and(|g| g.is_const()),
+            Some(i) => self.const_decls[i].contains(name),
+            None => false,
+        }
     }
     pub(super) fn declare(&mut self, name: &str, ty: Ty) {
         // TICKET-139 (W14-2) — a same-scope re-declaration can share the runtime slot, so it counts

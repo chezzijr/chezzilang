@@ -13379,18 +13379,22 @@ fn destructuring_repeated_name_is_judged_on_the_element_that_lands() {
 fn destructuring_error_arms_do_not_double_report() {
     // The other three `check_destructure` arms declare `Unknown` to suppress a cascade; the helper is
     // called from the Tuple SUCCESS arm only, so an already-errored destructure reports once.
-    let errs = check_src("X: const int = 1\nX, y := (1, 2, 3)\n");
-    assert_eq!(
-        errs.len(),
-        1,
-        "an arity-mismatch destructure must report once, got: {errs:?}"
-    );
-    let errs = check_src("X: const int = 1\nX, y := 5\n");
-    assert_eq!(
-        errs.len(),
-        1,
-        "a non-tuple destructure must report once, got: {errs:?}"
-    );
+    // TICKET-186: a module-scope const redeclaration is decided once per slot, before the walk, so
+    // it is reported next to the destructure's own error; nothing else cascades.
+    for src in [
+        "X: const int = 1\nX, y := (1, 2, 3)\n",
+        "X: const int = 1\nX, y := 5\n",
+    ] {
+        let errs = check_src(src);
+        let consts = errs
+            .iter()
+            .filter(|e| e.message.contains("cannot re-declare const binding 'X'"))
+            .count();
+        assert!(
+            errs.len() == 2 && consts == 1,
+            "an errored destructure over a const must report its own error and the const once, got: {errs:?}"
+        );
+    }
 }
 
 #[test]
