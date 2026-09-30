@@ -9546,13 +9546,19 @@ fn w758_quiesced_counts_a_nursery_owner_against_live() {
     let chan = empty_core();
     sched.park(core_key(&chan), Arc::clone(&chan), f);
 
-    let job = state.block(crate::vm::quiesce::PartyWait::Recv(empty_core(), None));
+    let job = state.block(
+        crate::vm::quiesce::PartyWait::Recv(empty_core(), None),
+        crate::vm::block::WakeSet::default(),
+    );
     assert!(
         !state.quiesced(&registry),
         "the owner is not registered yet — 1 party < live 2, so the verdict must decline (this IS \
          the W7-58 hang)"
     );
-    let owner = state.block(crate::vm::quiesce::PartyWait::Nursery(Arc::clone(&sched)));
+    let owner = state.block(
+        crate::vm::quiesce::PartyWait::Nursery(Arc::clone(&sched)),
+        crate::vm::block::WakeSet::default(),
+    );
     assert!(
         state.quiesced(&registry),
         "owner + job == live, both unsatisfiable → the run really is stuck"

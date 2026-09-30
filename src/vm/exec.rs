@@ -2088,9 +2088,11 @@ impl Vm {
         // …and the flags of every nursery this party has open, outermost first. §2c1: on `main` there
         // is no fiber, so `cancel`/`cancel_outer` are empty and a nested scope would observe no
         // ancestor at all. TICKET-188: a child fault in an enclosing nursery of the SAME owner cancels
-        // the inner nursery's tasks, so an owner parked at an inner join (or an `Executor.shutdown()`)
-        // is freed (CPython `TaskGroup` cancels the body, which cancels the inner group). This used to
-        // be a second walk, `nursery_ancestors`, read by only the eager-nursery seams.
+        // the inner nursery's tasks, so an owner parked at an inner join is freed (CPython
+        // `TaskGroup` cancels the body, which cancels the inner group). An `Executor` created outside
+        // an eager job inherits nothing (`creator_cancel` in `Op::NewExecutor`); an owner in its
+        // `shutdown()` is cut by its own halt read in `join_eager_jobs_in_place`. This used to be a
+        // second walk, `nursery_ancestors`, read by only the eager-nursery seams.
         a.extend(super::open_nurseries(&self.eager_scheds).map(|o| Arc::clone(o.flag)));
         a
     }

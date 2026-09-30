@@ -674,6 +674,48 @@ mod tests {
         );
     }
 
+    /// TICKET-188 — the process-wide verdict reads the wake set too: an owner whose child faulted
+    /// resumes at its next halt read, so it is not stuck (the `Join#15` false `deadlock` under load).
+    #[test]
+    fn a_party_whose_owned_nursery_faulted_vetoes_the_verdict() {
+        let state: Arc<crate::vm::quiesce::QuiesceState> = Arc::default();
+        let registry: crate::vm::core::ExecRegistry = Arc::default();
+        let exec = Arc::new(crate::vm::core::ExecutorCore::default());
+        registry.lock().unwrap().push(Arc::clone(&exec));
+        let _slot = exec.eager.lock().unwrap().reserve(); // live == 1 (main) + 1 (the job)
+        let _job = state.block(
+            PartyWait::Recv(Arc::new(crate::vm::core::ChannelCore::default()), None),
+            WakeSet::default(),
+        );
+
+        let (flag, sched) = owned_sched(true, true);
+        let owner = state.block(
+            PartyWait::Join(Arc::clone(&exec), 0),
+            WakeSet {
+                cancel: vec![],
+                owned: vec![OwnedScope::of(&owned_ref(0, &flag, &sched))],
+            },
+        );
+        assert!(
+            !state.quiesced(&registry),
+            "an owner whose child faulted will be cut: the verdict must decline"
+        );
+        drop(owner);
+
+        let (flag, sched) = owned_sched(true, false);
+        let _owner = state.block(
+            PartyWait::Join(Arc::clone(&exec), 0),
+            WakeSet {
+                cancel: vec![],
+                owned: vec![OwnedScope::of(&owned_ref(0, &flag, &sched))],
+            },
+        );
+        assert!(
+            state.quiesced(&registry),
+            "a tripped flag with no recorded fault is not a halt: a genuine deadlock still faults"
+        );
+    }
+
     #[test]
     fn of_native_maps_each_blocking_kind_to_its_row() {
         assert_eq!(WaitSpec::of_native(Kind::TimedWait), Some(WaitSpec::Sleep));

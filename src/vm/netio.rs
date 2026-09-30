@@ -2250,7 +2250,7 @@ impl Vm {
         g._party = self
             .block_ctx()
             .judged()
-            .then(|| self.quiesce.block_shared(wait));
+            .then(|| self.quiesce.block_shared(wait, self.wake_set()));
         g
     }
 

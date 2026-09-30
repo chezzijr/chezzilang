@@ -3094,8 +3094,10 @@ impl Vm {
         sched: &Arc<MnSched>,
     ) -> Option<crate::vm::quiesce::PartyGuard> {
         self.mn.is_none().then(|| {
-            self.quiesce
-                .block(crate::vm::quiesce::PartyWait::Nursery(Arc::clone(sched)))
+            self.quiesce.block(
+                crate::vm::quiesce::PartyWait::Nursery(Arc::clone(sched)),
+                self.wake_set(),
+            )
         })
     }
 

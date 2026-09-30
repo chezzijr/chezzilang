@@ -58,6 +58,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use super::block::WakeSet;
 use super::core::{ChannelCore, ExecRegistry, Pending};
 
 /// What one registered party is waiting for — and, through [`PartyWait::satisfiable`], whether that
@@ -228,10 +229,16 @@ impl PartyWait {
     }
 }
 
+/// TICKET-188 — one registered blocked party: what it waits for, and the wake set that may cut it.
+struct Party {
+    wait: Arc<PartyWait>,
+    wake: WakeSet,
+}
+
 /// The run's registry of blocked parties. One per `Vm::new`, shared by `Arc` with every worker.
 #[derive(Default)]
 pub(super) struct QuiesceState {
-    parties: Mutex<Vec<Arc<PartyWait>>>,
+    parties: Mutex<Vec<Party>>,
     /// §2c1 — every eager nursery alive in this run, by `Weak` (like [`super::SchedRegistry`]) —
     /// every eager nursery (nested ones since TICKET-112, which is sound only with
     /// `MnSched::body_is_fiber`).
@@ -323,18 +330,25 @@ impl QuiesceState {
     }
 
     /// Register a blocked party for as long as the returned guard lives.
-    pub(super) fn block(self: &Arc<Self>, wait: PartyWait) -> PartyGuard {
-        self.block_shared(Arc::new(wait))
+    pub(super) fn block(self: &Arc<Self>, wait: PartyWait, wake: WakeSet) -> PartyGuard {
+        self.block_shared(Arc::new(wait), wake)
     }
 
     /// §2c1 — [`Self::block`] over an `Arc` the caller already holds, so ONE `PartyWait` can be both
     /// the registered party AND the sched-side `SchedCore::waiters` entry. Two separately-built
     /// waits for the same block could disagree about what the thread waits for; one cannot.
-    pub(super) fn block_shared(self: &Arc<Self>, wait: Arc<PartyWait>) -> PartyGuard {
+    pub(super) fn block_shared(
+        self: &Arc<Self>,
+        wait: Arc<PartyWait>,
+        wake: WakeSet,
+    ) -> PartyGuard {
         self.parties
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push(Arc::clone(&wait));
+            .push(Party {
+                wait: Arc::clone(&wait),
+                wake,
+            });
         PartyGuard {
             state: Arc::clone(self),
             wait,
@@ -399,10 +413,20 @@ impl QuiesceState {
         if parties.len() < live {
             return None; // somebody is still running — they may yet send.
         }
-        if parties.iter().any(|p| p.satisfiable()) {
+        // TICKET-188 — a party whose wake set holds a halt resumes at its next halt read, so its
+        // cut is progress; `WakeSet::halt` takes owned scheds' core locks (A), legal under P. A
+        // tripped flag with no recorded fault is not a halt, so a genuine deadlock still faults.
+        if parties
+            .iter()
+            .any(|p| p.wait.satisfiable() || p.wake.halt().is_some())
+        {
             return None;
         }
-        Some(parties.iter().all(|p| matches!(**p, PartyWait::Join(..))))
+        Some(
+            parties
+                .iter()
+                .all(|p| matches!(*p.wait, PartyWait::Join(..))),
+        )
     }
 
     /// §2c1 — publish an eager nursery's sched (every eager nursery since TICKET-112), so
@@ -497,7 +521,7 @@ pub(super) struct PartyGuard {
 impl Drop for PartyGuard {
     fn drop(&mut self) {
         let mut g = self.state.parties.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(i) = g.iter().position(|p| Arc::ptr_eq(p, &self.wait)) {
+        if let Some(i) = g.iter().position(|p| Arc::ptr_eq(&p.wait, &self.wait)) {
             g.swap_remove(i);
         }
     }
