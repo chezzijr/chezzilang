@@ -867,10 +867,7 @@ fn run_cell(root: &Path, idx: usize, c: &Cell) -> Result<(), String> {
 /// Cells red on the pre-TICKET-182 binary. They must stay red here; when one turns green, remove
 /// it from the list.
 const PINNED_RED: &[&str] = &[
-    "t187/protocol/permuted_implementor",
     "t187/protocol/builtin_conformer_named",
-    "t187/protocol/one_param_mismatch",
-    "t187/protocol/prelude_mismatch",
     "t187/protocol/omitted_argument",
     "t187/fn_value/bare/variadic",
     "t187/fn_value/qualified/named",

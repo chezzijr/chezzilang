@@ -81,11 +81,11 @@ fn struct_sort_survives_gc_stress() {
     let src = "\
 struct M:
     c: int
-    fn compare(self, o: M) -> int:
-        junk := [str(self.c), str(o.c)]
-        return self.c - o.c
-    fn eq(self, o: M) -> bool:
-        return self.c == o.c
+    fn compare(self, other: M) -> int:
+        junk := [str(self.c), str(other.c)]
+        return self.c - other.c
+    fn eq(self, other: M) -> bool:
+        return self.c == other.c
 fn make() -> List[M]:
     xs := []
     i := 0
@@ -113,11 +113,11 @@ fn tuple_ordering_survives_gc_stress() {
     let src = "\
 struct M:
     c: int
-    fn compare(self, o: M) -> int:
-        junk := [str(self.c), str(o.c)]
-        return self.c - o.c
-    fn eq(self, o: M) -> bool:
-        return self.c == o.c
+    fn compare(self, other: M) -> int:
+        junk := [str(self.c), str(other.c)]
+        return self.c - other.c
+    fn eq(self, other: M) -> bool:
+        return self.c == other.c
 fn make() -> List[(M, int)]:
     xs := []
     i := 0
@@ -149,8 +149,8 @@ fn struct_eq_dispatch_survives_gc_stress() {
     let src = "\
 struct M:
     c: int
-    fn eq(self, o: M) -> bool:
-        junk := [str(self.c), str(o.c)]
+    fn eq(self, other: M) -> bool:
+        junk := [str(self.c), str(other.c)]
         return junk[0] == junk[1]
 fn make(n: int) -> M:
     return M(n)
@@ -247,8 +247,8 @@ struct K:
     n: int
     fn hash(self) -> int:
         return self.n % 3
-    fn eq(self, o: K) -> bool:
-        junk := [str(self.n), str(o.n)]
+    fn eq(self, other: K) -> bool:
+        junk := [str(self.n), str(other.n)]
         return junk[0] == junk[1]
 fn make_set() -> Set[K]:
     return Set([K(1), K(2), K(2), K(3)])
@@ -302,8 +302,8 @@ struct K:
     n: int
     fn hash(self) -> int:
         return self.n % 3
-    fn eq(self, o: K) -> bool:
-        junk := [str(self.n), str(o.n)]
+    fn eq(self, other: K) -> bool:
+        junk := [str(self.n), str(other.n)]
         return junk[0] == junk[1]
 fn main():
     # LIST values, not str: a freshly-rebuilt list can never alias an interned program constant,
@@ -344,7 +344,7 @@ struct K:
     n: int
     fn hash(self) -> int:
         return 0
-    fn eq(self, o: K) -> bool:
+    fn eq(self, other: K) -> bool:
         # ONE mutation per armed walk: EMPTY the two source lists in place, so the only remaining
         # reference to the elements the caller already snapshotted is that Rust-local snapshot —
         # then allocate, so the stress collector actually runs while the walk still holds them.
@@ -354,8 +354,8 @@ struct K:
                 xs.remove_at(0)
             while ys.len() > 0:
                 ys.remove_at(0)
-            junk := [str(self.n), str(o.n)]
-        return self.n == o.n
+            junk := [str(self.n), str(other.n)]
+        return self.n == other.n
 
 fn reset():
     while armed.len() > 0:
@@ -423,7 +423,7 @@ struct K:
     n: int
     fn hash(self) -> int:
         return self.n
-    fn eq(self, o: K) -> bool:
+    fn eq(self, other: K) -> bool:
         if armed.len() > 0:
             armed.remove_at(0)
             sa.remove(K(1))
@@ -434,8 +434,8 @@ struct K:
             ma.remove(K(2))
             mb.remove(K(1))
             mb.remove(K(2))
-            junk := [str(self.n), str(o.n)]
-        return self.n == o.n
+            junk := [str(self.n), str(other.n)]
+        return self.n == other.n
 
 fn reset():
     while armed.len() > 0:
@@ -467,11 +467,11 @@ fn struct_sort_by_inline_temporary_survives_gc_stress() {
     let src = "\
 struct M:
     c: int
-    fn compare(self, o: M) -> int:
+    fn compare(self, other: M) -> int:
         junk := [str(self.c)]
-        return self.c - o.c
-    fn eq(self, o: M) -> bool:
-        return self.c == o.c
+        return self.c - other.c
+    fn eq(self, other: M) -> bool:
+        return self.c == other.c
 fn make() -> List[M]:
     xs := []
     i := 0
@@ -978,11 +978,11 @@ fn min_max_some_payload_survives_gc() {
 struct P:
     tag: str
     k: int
-    fn compare(self, o: P) -> int:
+    fn compare(self, other: P) -> int:
         pts.remove_at(0)
-        return self.k - o.k
-    fn eq(self, o: P) -> bool:
-        return self.k == o.k
+        return self.k - other.k
+    fn eq(self, other: P) -> bool:
+        return self.k == other.k
 pts: List[P] = [P(str(3), 3), P(str(1), 1), P(str(2), 2)]
 fn main():
     match pts.min():

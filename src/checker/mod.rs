@@ -1696,6 +1696,7 @@ impl Checker {
                 // `harvest_protocol_shape` production-live (no dead_code) AND is assert-only (no effect on
                 // resolution/output), so behavior + output are unchanged.
                 c.assert_native_protocol_shape_matches(&lm.ast);
+                c.adopt_reserved_protocol_labels(&lm.ast);
             }
             // M24 — the manifest's `[project] entrypoint = "mod:fn"` names a function the runtime
             // invokes BY NAME at a fixed arity of ZERO, exactly like a `test fn`. A hidden witness
@@ -3468,7 +3469,7 @@ fn mentions_self(ty: &Ty) -> bool {
 ///
 /// True when `Self` appears in a non-receiver PARAMETER position. A protocol value erases which
 /// concrete type it holds, so two values of one protocol need not be the same witness: with
-/// `fn add(self, o: Self) -> Self`, `a + b` over two `Vecish` values would hand a `W` to `V::add`
+/// `fn add(self, other: Self) -> Self`, `a + b` over two `Vecish` values would hand a `W` to `V::add`
 /// and fault on the first field access. Rust states the same rule as object safety (a `Self`-typed
 /// parameter makes a trait non-`dyn`-able); Go bans `Self` from interfaces outright.
 ///
@@ -3476,6 +3477,29 @@ fn mentions_self(ty: &Ty) -> bool {
 /// whatever the witness returns. That is what keeps unary `-` (`neg(self) -> Self`) usable.
 fn self_in_param_position(sig: &FnSig) -> bool {
     sig.params.iter().skip(1).any(mentions_self)
+}
+
+/// TICKET-187 — the one name-conformance test: the first parameter (1-based, receiver not counted)
+/// that both `proto` and `actual` name, under different names, as `(pos, expected, found)`. A call
+/// through a protocol binds by the protocol's names, so an implementor that spells a parameter
+/// differently would receive the wrong argument (Swift labels are part of the requirement the same
+/// way). `None` when either side has no labels (a synthetic sig) or every name agrees.
+fn param_name_mismatch(proto: &FnSig, actual: &FnSig) -> Option<(usize, String, String)> {
+    if proto.labels.is_empty() || actual.labels.is_empty() {
+        return None;
+    }
+    let receiver = usize::from(!proto.is_static);
+    proto
+        .labels
+        .iter()
+        .zip(&actual.labels)
+        .enumerate()
+        .find_map(|(i, pair)| match pair {
+            (Some(want), Some(got)) if want != got => {
+                Some((i + 1 - receiver, want.clone(), got.clone()))
+            }
+            _ => None,
+        })
 }
 
 /// Does a struct method `actual` match a protocol method `proto` (with `Self` bound to `self_ty`)?

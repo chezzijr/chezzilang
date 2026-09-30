@@ -989,7 +989,7 @@ native `stringify` that `str(x)` uses). Structs/enums/newtypes opt in with their
 or through a protocol-typed value — and it is defined as **exactly** the operator/primitive form:
 `a.add(b)` ≡ `a + b` (same overflow / divide-by-zero faults, same int↔float coercion), `a.neg()` ≡ `-a`,
 `a.compare(b)` is what `<` orders by, `a.eq(b)` ≡ `a == b` for a struct/enum (M23 — one dispatch,
-both directions: a struct/enum defining `fn eq(self, o: Self) -> bool` OWNS its `==`; a *newtype*'s
+both directions: a struct/enum defining `fn eq(self, other: Self) -> bool` OWNS its `==`; a *newtype*'s
 `==` still unwraps to the underlying, so declaring `eq` on one is a compile error; and on a struct/enum
 an `eq` with a GENERIC operand is an ordinary method the operator leaves alone — but only on a
 CONCRETE receiver: **through a protocol bound `a.eq(b)` is always the protocol's equality, so the

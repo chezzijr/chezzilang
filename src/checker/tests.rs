@@ -767,7 +767,7 @@ fn d4_rule1_silent_set_stays_clean() {
         "fn f():\n    xs := [1]\n    xs.push(2)\n    n := 0\n    n = 9\n    print(xs.len() + n)\nf()\n",
         "fn g(n: int):\n    print(n)\nfn f():\n    xs := [1, 2]\n    parallel:\n        spawn g(xs.pop() ?? 0)\nf()\n",
         "fn put[C: IndexSet[int, int]](c: C):\n    parallel:\n        spawn:\n            c[0] = 5\nput([1])\n",
-        "struct Grid:\n    data: List[List[int]]\n    fn index(self, i: int) -> List[int]:\n        return self.data[i]\nfn f():\n    g := Grid([[1, 2]])\n    parallel:\n        spawn:\n            g[0][1] = 5\nf()\n",
+        "struct Grid:\n    data: List[List[int]]\n    fn index(self, k: int) -> List[int]:\n        return self.data[k]\nfn f():\n    g := Grid([[1, 2]])\n    parallel:\n        spawn:\n            g[0][1] = 5\nf()\n",
     ] {
         no_warn(src);
     }
@@ -775,7 +775,7 @@ fn d4_rule1_silent_set_stays_clean() {
         "import std.concurrency\nfn f():\n    sh := Shared(1)\n    parallel:\n        spawn:\n            sh.update(fn(x: int) -> int: x + 1)\nf()\n",
     );
     entry_no_warn(
-        "import std.concurrency\nstruct T:\n    value: Shared[int]\n    fn index(self, i: int) -> int:\n        return self.value.get()\n    fn set_index(self, i: int, v: int):\n        self.value.set(v)\nfn f():\n    t := T(Shared(1))\n    parallel:\n        spawn:\n            t[0] = 5\nf()\n",
+        "import std.concurrency\nstruct T:\n    value: Shared[int]\n    fn index(self, k: int) -> int:\n        return self.value.get()\n    fn set_index(self, k: int, v: int):\n        self.value.set(v)\nfn f():\n    t := T(Shared(1))\n    parallel:\n        spawn:\n            t[0] = 5\nf()\n",
     );
 }
 
@@ -789,7 +789,7 @@ fn d4_user_method_writing_self_is_an_error_in_a_task() {
             "c",
         ),
         (
-            "struct B:\n    v: int\n    fn index(self, i: int) -> int:\n        return self.v\n    fn set_index(self, i: int, v: int):\n        self.v = v\nfn f():\n    b := B(1)\n    parallel:\n        spawn:\n            b[0] = 5\nf()\n",
+            "struct B:\n    v: int\n    fn index(self, k: int) -> int:\n        return self.v\n    fn set_index(self, k: int, v: int):\n        self.v = v\nfn f():\n    b := B(1)\n    parallel:\n        spawn:\n            b[0] = 5\nf()\n",
             "b",
         ),
         (
@@ -4506,10 +4506,10 @@ const VEC2: &str = "\
 struct Vec2:
     x: int
     y: int
-    fn add(self, o: Vec2) -> Vec2:
-        return Vec2(self.x + o.x, self.y + o.y)
-    fn mul(self, o: Vec2) -> Vec2:
-        return Vec2(self.x * o.x, self.y * o.y)
+    fn add(self, other: Vec2) -> Vec2:
+        return Vec2(self.x + other.x, self.y + other.y)
+    fn mul(self, other: Vec2) -> Vec2:
+        return Vec2(self.x * other.x, self.y * other.y)
 ";
 
 #[test]
@@ -4541,8 +4541,8 @@ fn multi_bound_missing_one_protocol_rejected() {
     let src = "\
 struct PointA:
     x: int
-    fn add(self, o: PointA) -> PointA:
-        return PointA(self.x + o.x)
+    fn add(self, other: PointA) -> PointA:
+        return PointA(self.x + other.x)
 fn fma[T: Add + Mul](a: T, b: T, c: T) -> T:
     return a + b * c
 v := fma(PointA(1), PointA(2), PointA(3))
@@ -4562,7 +4562,7 @@ fn generic_struct_add_satisfies_and_overloads() {
     let src = "\
 struct Box[T]:
     v: T
-    fn add(self, o: Box[T]) -> Box[T]:
+    fn add(self, other: Box[T]) -> Box[T]:
         return Box(self.v)
 fn twice[T: Add](x: T) -> T:
     return x + x
@@ -4580,9 +4580,9 @@ struct Box[T]:
     v: T
     fn neg(self) -> Box[T]:
         return Box(self.v)
-    fn compare(self, o: Box[T]) -> int:
+    fn compare(self, other: Box[T]) -> int:
         return 0
-    fn eq(self, o: Box[T]) -> bool:
+    fn eq(self, other: Box[T]) -> bool:
         return true
 a := (-Box(5)).v
 b := Box(5) < Box(10)
@@ -4601,7 +4601,7 @@ fn generic_enum_add_satisfies() {
     let src = "\
 enum Num[T]:
     Val(T)
-    fn add(self, o: Num[T]) -> Num[T]:
+    fn add(self, other: Num[T]) -> Num[T]:
         return self
 fn twice[T: Add](x: T) -> T:
     return x + x
@@ -4618,7 +4618,7 @@ fn multi_param_generic_operator() {
 struct Pair[A, B]:
     a: A
     b: B
-    fn add(self, o: Pair[A, B]) -> Pair[A, B]:
+    fn add(self, other: Pair[A, B]) -> Pair[A, B]:
         return self
 p := Pair(1, \"x\") + Pair(2, \"y\")
 ";
@@ -4651,8 +4651,8 @@ fn generic_struct_heterogeneous_add_rejected() {
     let src = "\
 struct Box[T]:
     v: T
-    fn add(self, o: Box[T]) -> Box[T]:
-        return o
+    fn add(self, other: Box[T]) -> Box[T]:
+        return other
 x := Box(5) + Box(\"hello\")
 ";
     entry_rejects(src, "cannot apply + to Box[int] and Box[str]");
@@ -4665,7 +4665,7 @@ fn generic_struct_heterogeneous_compare_rejected() {
     let src = "\
 struct Box[T]:
     v: T
-    fn compare(self, o: Box[T]) -> int:
+    fn compare(self, other: Box[T]) -> int:
         return 0
 b := Box(5) < Box(\"hello\")
 ";
@@ -4678,8 +4678,8 @@ fn generic_enum_heterogeneous_add_rejected() {
     let src = "\
 enum Num[T]:
     Val(T)
-    fn add(self, o: Num[T]) -> Num[T]:
-        return o
+    fn add(self, other: Num[T]) -> Num[T]:
+        return other
 x := Num.Val(1) + Num.Val(\"hello\")
 ";
     entry_rejects(src, "cannot apply + to Num[int] and Num[str]");
@@ -4696,7 +4696,7 @@ fn generic_newtype_compare_via_method_rejected() {
     // just Add/Sub/Mul/Div/Mod/Neg.
     let src = "\
 newtype Wrap[T] = T:
-    fn compare(self, o: Wrap[T]) -> int:
+    fn compare(self, other: Wrap[T]) -> int:
         return 0
 b := Wrap(3) < Wrap(5)
 ";
@@ -4709,7 +4709,7 @@ fn generic_newtype_compare_satisfies_comparable_rejected() {
     // `compare` method (no runtime dispatch path), so it cannot flow into a `[T: Comparable]` bound.
     let src = "\
 newtype Wrap[T] = T:
-    fn compare(self, o: Wrap[T]) -> int:
+    fn compare(self, other: Wrap[T]) -> int:
         return 0
 fn pick[T: Comparable](x: T, y: T) -> T:
     if x < y:
@@ -5175,7 +5175,7 @@ struct P:
 newtype Name = str
 struct Box[T]:
     val: T
-    fn eq(self, o: Box[T]) -> bool where T: Eq:
+    fn eq(self, other: Box[T]) -> bool where T: Eq:
         return true
 fn g(x: int) -> int:
     return x
@@ -5235,7 +5235,7 @@ fn g(x: int) -> int:
     // `self.b == o.b` is where the fault lives, and it is caught when the body is checked.
     entry_rejects(
         &format!(
-            "{COND}struct W:\n    b: Box[Tag]\n    fn eq(self, o: Self) -> bool:\n        return self.b == o.b\nprint(W(a) == W(b))\n"
+            "{COND}struct W:\n    b: Box[Tag]\n    fn eq(self, other: Self) -> bool:\n        return self.b == other.b\nprint(W(a) == W(b))\n"
         ),
         WHY,
     );
@@ -5262,7 +5262,7 @@ struct Box[T]:
     v: T
     fn tag(self) -> int:
         return 0
-    fn eq(self, o: Box[T]) -> bool where T: Comparable:
+    fn eq(self, other: Box[T]) -> bool where T: Comparable:
         return true
 a: Tagged = Box(Tag(1))
 b: Tagged = Box(Tag(2))
@@ -5292,7 +5292,7 @@ struct Box[T]:
     v: T
     fn tag(self) -> int:
         return 0
-    fn eq(self, o: Box[T]) -> bool where T: Comparable:
+    fn eq(self, other: Box[T]) -> bool where T: Comparable:
         return true
 ";
     // (a) bare erasure, no comparison anywhere.
@@ -5346,7 +5346,7 @@ struct MyErr[T]:
     v: T
     fn message(self) -> str:
         return \"boom\"
-    fn eq(self, o: MyErr[T]) -> bool where T: Comparable:
+    fn eq(self, other: MyErr[T]) -> bool where T: Comparable:
         return true
 ";
     // Same nested-container note gap as row (c): `protocol_note`'s expected here is `Result[int,
@@ -5375,8 +5375,8 @@ struct Tag:
 struct Box[T]:
     val: T
     tag: str
-    fn eq(self, o: Box[T]) -> bool where T: Comparable:
-        return self.val.compare(o.val) == 0
+    fn eq(self, other: Box[T]) -> bool where T: Comparable:
+        return self.val.compare(other.val) == 0
     fn size(self) -> int:
         return 1
 ";
@@ -5556,8 +5556,8 @@ struct Box[T]:
     val: T
     fn hash(self) -> int:
         return 0
-    fn eq(self, o: Box[T]) -> bool where T: Comparable:
-        return self.val.compare(o.val) == 0
+    fn eq(self, other: Box[T]) -> bool where T: Comparable:
+        return self.val.compare(other.val) == 0
 ";
     // Instance 1 — the `==` operator, both operands bare `T`.
     rejects(
@@ -5777,7 +5777,7 @@ fn same[T: Eq](a: T, b: T) -> bool:
     // And a type whose own `eq` is unconditional keeps it even when a type ARG is not equatable
     // through its own bounded `eq`: `Plain`'s `eq` never touches `Box[Tag]`'s.
     entry_ok(&format!(
-        "{COND}struct Plain[T]:\n    v: T\n    fn eq(self, o: Self) -> bool:\n        return true\nprint(same(Plain(Box(Tag(1))), Plain(Box(Tag(2)))))\n"
+        "{COND}struct Plain[T]:\n    v: T\n    fn eq(self, other: Self) -> bool:\n        return true\nprint(same(Plain(Box(Tag(1))), Plain(Box(Tag(2)))))\n"
     ));
 }
 
@@ -5794,7 +5794,7 @@ fn conditional_eq_bound_recursion_terminates() {
     const CYCLE: &str = "\
 struct C[T]:
     v: T
-    fn eq(self, o: Self) -> bool where T: Eq:
+    fn eq(self, other: Self) -> bool where T: Eq:
         return true
 struct D:
     x: C[D]
@@ -5841,10 +5841,10 @@ struct Tag:
     n: int
 struct Bad[T]:
     val: T
-    fn compare(self, o: Self) -> int where T: Comparable:
+    fn compare(self, other: Self) -> int where T: Comparable:
         return 0
-    fn eq(self, o: Self) -> bool where T: Comparable:
-        return self.compare(o) == 0
+    fn eq(self, other: Self) -> bool where T: Comparable:
+        return self.compare(other) == 0
 struct R[T]:
     v: Bad[T]
     w: Option[R[Tag]]
@@ -5903,10 +5903,10 @@ fn a_long_chain_of_conditional_eq_types_is_decided_not_waved_through() {
         let mut s = String::from(
             "struct Tag:\n    n: int\n\
              struct Box[T]:\n    val: T\n    \
-             fn compare(self, o: Self) -> int where T: Comparable:\n        return 0\n    \
-             fn eq(self, o: Self) -> bool where T: Comparable:\n        return self.compare(o) == 0\n\
+             fn compare(self, other: Self) -> int where T: Comparable:\n        return 0\n    \
+             fn eq(self, other: Self) -> bool where T: Comparable:\n        return self.compare(other) == 0\n\
              struct C[T]:\n    v: T\n    \
-             fn eq(self, o: Self) -> bool where T: Eq:\n        return true\n",
+             fn eq(self, other: Self) -> bool where T: Eq:\n        return true\n",
         );
         s.push_str(&format!("struct A0:\n    v: {innermost}\n"));
         for i in 1..=n {
@@ -6355,13 +6355,13 @@ struct Tag:
     n: int
 struct Bad[T]:
     val: T
-    fn compare(self, o: Self) -> int where T: Comparable:
+    fn compare(self, other: Self) -> int where T: Comparable:
         return 0
-    fn eq(self, o: Self) -> bool where T: Comparable:
-        return self.compare(o) == 0
+    fn eq(self, other: Self) -> bool where T: Comparable:
+        return self.compare(other) == 0
 struct Cond[T]:
     v: T
-    fn eq(self, o: Self) -> bool where T: Eq:
+    fn eq(self, other: Self) -> bool where T: Eq:
         return true
 struct A:
     m: M
@@ -6395,7 +6395,7 @@ fn q2(x: M, y: M) -> bool:
 #[test]
 fn struct_with_eq_satisfies_eq() {
     entry_ok(
-        "struct P:\n    x: int\n    fn eq(self, o: P) -> bool:\n        return self.x == o.x\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(P(1), P(2)))\n",
+        "struct P:\n    x: int\n    fn eq(self, other: P) -> bool:\n        return self.x == other.x\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(P(1), P(2)))\n",
     );
     entry_ok(
         "struct Q:\n    x: int\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(Q(1), Q(2)))\n",
@@ -6456,7 +6456,7 @@ fn struct_with_eq_satisfies_eq() {
 #[test]
 fn eq_wrong_return_type_rejected() {
     entry_rejects(
-        "struct P:\n    x: int\n    fn eq(self, o: P) -> int:\n        return 0\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(P(1), P(2)))\n",
+        "struct P:\n    x: int\n    fn eq(self, other: P) -> int:\n        return 0\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(P(1), P(2)))\n",
         "wrong signature",
     );
     // The ARITY half of the same signature rule — `eq` takes exactly one `Self` besides the
@@ -6497,7 +6497,7 @@ fn malformed_eq_rejected_at_decl() {
     );
     // a non-bool return, now caught at the DECLARATION (it was only reachable via a `[T: Eq]` bound)
     entry_rejects(
-        "struct A:\n    v: int\n    fn eq(self, o: A) -> int:\n        return 1\nprint(A(1) == A(2))\n",
+        "struct A:\n    v: int\n    fn eq(self, other: A) -> int:\n        return 1\nprint(A(1) == A(2))\n",
         "it must return bool, found int",
     );
     // the enum arm of the same rule
@@ -6528,18 +6528,18 @@ fn generic_operand_eq_stays_an_ordinary_method() {
     );
     // …and every spelling of the hook itself stays legal: the bare name, `Self`, and a generic Self
     entry_ok(
-        "struct P:\n    x: int\n    fn eq(self, o: P) -> bool:\n        return self.x == o.x\nprint(P(1) == P(2))\n",
+        "struct P:\n    x: int\n    fn eq(self, other: P) -> bool:\n        return self.x == other.x\nprint(P(1) == P(2))\n",
     );
     entry_ok(
-        "struct P:\n    x: int\n    fn eq(self, o: Self) -> bool:\n        return self.x == o.x\nprint(P(1) == P(2))\n",
+        "struct P:\n    x: int\n    fn eq(self, other: Self) -> bool:\n        return self.x == other.x\nprint(P(1) == P(2))\n",
     );
     entry_ok(
-        "struct Box[T]:\n    v: T\n    fn eq(self, o: Box[T]) -> bool:\n        return true\nprint(Box(1) == Box(2))\n",
+        "struct Box[T]:\n    v: T\n    fn eq(self, other: Box[T]) -> bool:\n        return true\nprint(Box(1) == Box(2))\n",
     );
     // a type ALIAS of the enclosing type is still the hook — the rule is the operand's TYPE, not its
     // spelling (the backend's syntactic twin dispatches it too: `alias` is not a type-param name)
     entry_ok(
-        "struct Ver:\n    maj: int\n    fn eq(self, o: V2) -> bool:\n        return self.maj == o.maj\ntype V2 = Ver\nprint(Ver(1) == Ver(2))\n",
+        "struct Ver:\n    maj: int\n    fn eq(self, other: V2) -> bool:\n        return self.maj == other.maj\ntype V2 = Ver\nprint(Ver(1) == Ver(2))\n",
     );
 }
 
@@ -6550,7 +6550,7 @@ fn generic_struct_heterogeneous_eq_rejected() {
     let src = "\
 struct Box[T]:
     v: T
-    fn eq(self, o: Box[T]) -> bool:
+    fn eq(self, other: Box[T]) -> bool:
         return true
 b := Box(5) == Box(\"hello\")
 ";
@@ -6571,7 +6571,7 @@ b := Box(5) == Box(\"hello\")
 #[test]
 fn newtype_eq_method_rejected_at_decl() {
     // numeric — was already rejected by W6-3d's list; still is, and with ONE diagnostic.
-    let numeric = "newtype Meters = float:\n    fn eq(self, o: Meters) -> bool:\n        return true\nm := Meters(1.0)\nprint(m == m)\n";
+    let numeric = "newtype Meters = float:\n    fn eq(self, other: Meters) -> bool:\n        return true\nm := Meters(1.0)\nprint(m == m)\n";
     entry_rejects(numeric, "never dispatched as an operator");
     assert_eq!(
         check_entry(numeric).len(),
@@ -6580,14 +6580,14 @@ fn newtype_eq_method_rejected_at_decl() {
     );
     // NON-numeric — the L5 hole. `Name("a") == Name("b")` was `false` while `.eq()` said `true`.
     entry_rejects(
-        "newtype Name = str:\n    fn eq(self, o: Name) -> bool:\n        return true\nn := Name(\"a\")\nprint(n == n)\n",
+        "newtype Name = str:\n    fn eq(self, other: Name) -> bool:\n        return true\nn := Name(\"a\")\nprint(n == n)\n",
         "always unwraps to str's native equality",
     );
     // GENERIC — Task 3's generic-operand carve-out does NOT transfer: it disambiguates the hook from
     // an ordinary method on a type whose `==` dispatches, and a newtype's never does. Both operand
     // shapes are rejected, so no `eq` on a newtype can be read as equality-that-`==`-ignores.
     entry_rejects(
-        "newtype Wrap[T] = T:\n    fn eq(self, o: Wrap[T]) -> bool:\n        return true\nw := Wrap(1)\nprint(w == w)\n",
+        "newtype Wrap[T] = T:\n    fn eq(self, other: Wrap[T]) -> bool:\n        return true\nw := Wrap(1)\nprint(w == w)\n",
         "never dispatched as an operator",
     );
     entry_rejects(
@@ -6597,7 +6597,7 @@ fn newtype_eq_method_rejected_at_decl() {
     // BOUNDARY: only the name `eq` moves. Ordinary methods on a non-numeric newtype stay legal, and
     // so do its `add`/`compare` (no `+`/`<` exists on a `str` newtype to disagree with them).
     entry_ok(
-        "newtype Name = str:\n    fn same(self, o: Name) -> bool:\n        return true\n    fn compare(self, o: Name) -> int:\n        return 0\nn := Name(\"a\")\nprint(n.same(n))\n",
+        "newtype Name = str:\n    fn same(self, o: Name) -> bool:\n        return true\n    fn compare(self, other: Name) -> int:\n        return 0\nn := Name(\"a\")\nprint(n.same(n))\n",
     );
 }
 
@@ -6777,7 +6777,7 @@ fn comparable_types_equality_still_ok() {
 /// admitting it would silently answer a different question than `==` does.
 #[test]
 fn atomic_payload_with_eq_rejected() {
-    let decl = "import std.concurrency\nstruct P:\n    x: int\n    fn eq(self, o: P) -> bool:\n        return true\n";
+    let decl = "import std.concurrency\nstruct P:\n    x: int\n    fn eq(self, other: P) -> bool:\n        return true\n";
     entry_rejects(
         &format!("{decl}fn main():\n    a := Atomic(P(1))\n    print(a.load().x)\nmain()\n"),
         "Atomic[P] payload",
@@ -6852,7 +6852,7 @@ fn atomic_cas_on_fn_payload_rejected() {
 /// the compare (`vm/netio.rs`). M23 adversarial review, CRITICAL 2.
 #[test]
 fn atomic_payload_reaching_a_nested_eq_rejected() {
-    let decl = "import std.concurrency\nstruct P:\n    x: int\n    fn eq(self, o: P) -> bool:\n        return true\nstruct W:\n    p: P\nenum E:\n    Has(P)\n    Nope\nnewtype NP = List[P]\n";
+    let decl = "import std.concurrency\nstruct P:\n    x: int\n    fn eq(self, other: P) -> bool:\n        return true\nstruct W:\n    p: P\nenum E:\n    Has(P)\n    Nope\nnewtype NP = List[P]\n";
     for (payload, rendered) in [
         ("[P(1)]", "Atomic[List[P]]"),
         ("[[P(1)]]", "Atomic[List[List[P]]]"),
@@ -7475,10 +7475,10 @@ fn sort_on_comparable_struct_list_ok() {
     let src = "\
 struct P:
     n: int
-    fn compare(self, o: P) -> int:
-        return self.n - o.n
-    fn eq(self, o: P) -> bool:
-        return self.n == o.n
+    fn compare(self, other: P) -> int:
+        return self.n - other.n
+    fn eq(self, other: P) -> bool:
+        return self.n == other.n
 xs := [P(2), P(1)]
 xs.sort()
 ";
@@ -7508,8 +7508,8 @@ fn ordering_on_a_compare_only_struct_is_allowed() {
     ok("\
 struct Ver:
     maj: int
-    fn compare(self, o: Ver) -> int:
-        return self.maj - o.maj
+    fn compare(self, other: Ver) -> int:
+        return self.maj - other.maj
 print(Ver(1) < Ver(2))
 ");
     let errs = check_src("struct P:\n    n: int\nprint(P(1) < P(2))\n");
@@ -7525,8 +7525,8 @@ fn comparable_bound_on_a_compare_only_struct_is_allowed() {
     ok("\
 struct Ver:
     maj: int
-    fn compare(self, o: Ver) -> int:
-        return self.maj - o.maj
+    fn compare(self, other: Ver) -> int:
+        return self.maj - other.maj
 fn mx[T: Comparable](a: T, b: T) -> T:
     if a < b:
         return b
@@ -7540,8 +7540,8 @@ protocol Ord2:
     fn tag(self) -> str
 struct Ver:
     maj: int
-    fn compare(self, o: Ver) -> int:
-        return self.maj - o.maj
+    fn compare(self, other: Ver) -> int:
+        return self.maj - other.maj
     fn tag(self) -> str:
         return \"v\"
 fn u[T: Ord2](a: T) -> int:
@@ -7578,8 +7578,8 @@ print(mx(Ver(1), Ver(2)))
     ok("\
 struct Ver:
     maj: int
-    fn compare(self, o: Ver) -> int:
-        return self.maj - o.maj
+    fn compare(self, other: Ver) -> int:
+        return self.maj - other.maj
 fn u[T: Eq](a: T, b: T) -> bool:
     return a == b
 print(u(Ver(1), Ver(2)))
@@ -7588,10 +7588,10 @@ print(u(Ver(1), Ver(2)))
     bare(
         "\
 protocol MyCmp:
-    fn compare(self, o: Self) -> int
+    fn compare(self, other: Self) -> int
 struct Ver:
     maj: int
-    fn compare(self, o: Ver) -> str:
+    fn compare(self, other: Ver) -> str:
         return \"x\"
 fn u[T: MyCmp](a: T) -> int:
     return 0
@@ -7608,7 +7608,7 @@ print(u(Ver(1)))
 fn comparable_bound_on_newtype_says_it_is_unsatisfiable() {
     let src = "\
 newtype Box[T] = T:
-    fn compare(self, o: Box[T]) -> int:
+    fn compare(self, other: Box[T]) -> int:
         return 0
 fn mx[T: Comparable](a: T, b: T) -> T:
     if a < b:
@@ -7630,7 +7630,7 @@ print(mx(Box(1), Box(2)))
     // The advice must be REACHABLE: adding `eq` — what the struct/enum sentence would tell them — is
     // itself an error on a newtype, which is exactly why that sentence is wrong here.
     rejects(
-        "newtype Box[T] = T:\n    fn eq(self, o: Box[T]) -> bool:\n        return true\n",
+        "newtype Box[T] = T:\n    fn eq(self, other: Box[T]) -> bool:\n        return true\n",
         "operator method 'eq' on a newtype is never dispatched as an operator",
     );
     // A newtype with NO `compare` keeps the bare wording (same non-over-fire rule as the struct case).
@@ -9088,7 +9088,7 @@ fn inferred_struct_compare_rejected_for_comparable() {
     // An inferred `compare(self,o)` body yielding bool must be REJECTED where Comparable (needs
     // `-> int`) is required (the `<` operator), exactly like an explicit `-> bool`.
     entry_rejects(
-        "struct P:\n    x: int\n    fn compare(self, o: P):\n        return self.x < o.x\n    fn eq(self, o: P) -> bool:\n        return self.x == o.x\nfn main():\n    a := P(1)\n    b := P(2)\n    c := a < b\n    print(c)\nmain()\n",
+        "struct P:\n    x: int\n    fn compare(self, other: P):\n        return self.x < other.x\n    fn eq(self, other: P) -> bool:\n        return self.x == other.x\nfn main():\n    a := P(1)\n    b := P(2)\n    c := a < b\n    print(c)\nmain()\n",
         "compare",
     );
 }
@@ -9098,7 +9098,7 @@ fn inferred_compare_generic_bound_rejected() {
     // A generic bound `[T: Comparable]` over a struct whose `compare` infers bool must reject at
     // check, not fault later.
     entry_rejects(
-        "struct P:\n    x: int\n    fn compare(self, o: P):\n        return self.x < o.x\n    fn eq(self, o: P) -> bool:\n        return self.x == o.x\nfn cmp[T: Comparable](a: T, b: T) -> int:\n    return a.compare(b)\nfn main():\n    print(cmp(P(1), P(2)))\nmain()\n",
+        "struct P:\n    x: int\n    fn compare(self, other: P):\n        return self.x < other.x\n    fn eq(self, other: P) -> bool:\n        return self.x == other.x\nfn cmp[T: Comparable](a: T, b: T) -> int:\n    return a.compare(b)\nfn main():\n    print(cmp(P(1), P(2)))\nmain()\n",
         "Comparable",
     );
 }
@@ -10557,8 +10557,8 @@ fn numeric_newtype_operator_named_method_is_rejected() {
 #[test]
 fn numeric_newtype_ordinary_method_and_non_numeric_operator_name_still_ok() {
     ok("newtype Score = int:\n    fn double(self) -> Score: return Score(int(self) * 2)\n");
-    ok("newtype Name = str:\n    fn add(self, o: Name) -> Name: return self\n");
-    ok("newtype Box[T] = T:\n    fn add(self, o: Box[T]) -> Box[T]: return self\n");
+    ok("newtype Name = str:\n    fn add(self, other: Name) -> Name: return self\n");
+    ok("newtype Box[T] = T:\n    fn add(self, other: Box[T]) -> Box[T]: return self\n");
     // `neg` is NOT rejected: unary `-` has no newtype path (`Neg` is never granted — see
     // `proto.rs`), so `-m` is already a type error and a `neg` method is the ONLY spelling of
     // negation on a numeric newtype. Rejecting it would delete working code with no operator to
@@ -11058,8 +11058,8 @@ fn list_sum_struct_with_add_still_rejected_at_check() {
     let src = "\
 struct M:
     n: int
-    fn add(self, o: M) -> M:
-        return M(self.n + o.n)
+    fn add(self, other: M) -> M:
+        return M(self.n + other.n)
 xs := [M(1), M(2)]
 s := xs.sum()
 ";
@@ -11096,7 +11096,7 @@ fn list_sum_non_numeric_newtype_still_rejected() {
     );
     let with_method = "\
 newtype N = str:
-    fn add(self, o: N) -> N:
+    fn add(self, other: N) -> N:
         return N(\"x\")
 xs := [N(\"a\")]
 s := xs.sum()
@@ -11540,10 +11540,10 @@ fn stack_probe_eq_bounds_depth() {
         "cond" => String::from(
             "struct Tag:\n    n: int\n\
              struct Box[T]:\n    val: T\n    \
-             fn compare(self, o: Self) -> int where T: Comparable:\n        return 0\n    \
-             fn eq(self, o: Self) -> bool where T: Comparable:\n        return self.compare(o) == 0\n\
+             fn compare(self, other: Self) -> int where T: Comparable:\n        return 0\n    \
+             fn eq(self, other: Self) -> bool where T: Comparable:\n        return self.compare(other) == 0\n\
              struct C[T]:\n    v: T\n    \
-             fn eq(self, o: Self) -> bool where T: Eq:\n        return true\n\
+             fn eq(self, other: Self) -> bool where T: Eq:\n        return true\n\
              struct A0:\n    v: Box[int]\n",
         ),
         // M7's shape: a chain of generic structs with NO custom `eq` at all — every level proves
@@ -12301,7 +12301,7 @@ fn cmp_min_int_returns_int() {
 #[test]
 fn cmp_max_over_comparable_struct_ok() {
     entry_ok(
-        "import std.cmp\nstruct P:\n    n: int\n    fn compare(self, o: P) -> int:\n        return self.n - o.n\n    fn eq(self, o: P) -> bool:\n        return self.n == o.n\nfn main():\n    p := cmp.max(P(1), P(2))\n    print(p.n)\n",
+        "import std.cmp\nstruct P:\n    n: int\n    fn compare(self, other: P) -> int:\n        return self.n - other.n\n    fn eq(self, other: P) -> bool:\n        return self.n == other.n\nfn main():\n    p := cmp.max(P(1), P(2))\n    print(p.n)\n",
     );
 }
 
@@ -16761,10 +16761,10 @@ fn map_is_not_sliceable() {
 const BUF: &str = "\
 struct Buf:
     xs: List[int]
-    fn index(self, key: int) -> int:
-        return self.xs[key]
-    fn set_index(self, key: int, val: int):
-        self.xs[key] = val
+    fn index(self, k: int) -> int:
+        return self.xs[k]
+    fn set_index(self, k: int, v: int):
+        self.xs[k] = v
     fn slice(self, start: int? = None, end: int? = None, step: int? = None) -> Buf:
         return self
 ";
@@ -16805,8 +16805,8 @@ fn struct_without_set_index_assign_rejected() {
     let read_only = "\
 struct RO:
     xs: List[int]
-    fn index(self, key: int) -> int:
-        return self.xs[key]
+    fn index(self, k: int) -> int:
+        return self.xs[k]
 ";
     rejects(
         &format!("{read_only}b := RO([1, 2, 3])\nb[0] = 9\n"),
@@ -16819,8 +16819,8 @@ fn struct_without_slice_rejected() {
     let no_slice = "\
 struct NS:
     xs: List[int]
-    fn index(self, key: int) -> int:
-        return self.xs[key]
+    fn index(self, k: int) -> int:
+        return self.xs[k]
 ";
     rejects(
         &format!("{no_slice}b := NS([1, 2, 3])\nc := b[0:2]\n"),
@@ -16845,8 +16845,8 @@ fn index_assign_requires_index_not_just_set_index() {
     let set_only = "\
 struct WO:
     xs: List[int]
-    fn set_index(self, key: int, val: int):
-        self.xs[key] = val
+    fn set_index(self, k: int, v: int):
+        self.xs[k] = v
 ";
     rejects(
         &format!("{set_only}b := WO([1, 2, 3])\nb[0] = 9\n"),
@@ -17454,7 +17454,7 @@ fn sort_by_key_int_key_ok() {
 fn sort_by_key_struct_key_ok() {
     // A key function returning a Comparable struct is accepted (compared via `compare`).
     ok(
-        "struct M:\n    n: int\n    fn compare(self, o: M) -> int:\n        return self.n - o.n\n    fn eq(self, o: M) -> bool:\n        return self.n == o.n\nxs := [M(2), M(1)]\nxs.sort_by_key(fn(m: M) -> M: m)\n",
+        "struct M:\n    n: int\n    fn compare(self, other: M) -> int:\n        return self.n - other.n\n    fn eq(self, other: M) -> bool:\n        return self.n == other.n\nxs := [M(2), M(1)]\nxs.sort_by_key(fn(m: M) -> M: m)\n",
     );
 }
 
@@ -20024,7 +20024,7 @@ fn protocol_bound_and_typeparam_named_protocol_still_ok() {
     // like a protocol. (a) a user type that satisfies a prebuilt protocol used via its bound; and
     // (b) a type param spelled `Comparable` shadowing the protocol locally — both stay legal.
     entry_ok(
-        "struct P:\n    v: int\n    fn compare(self, o: P) -> int:\n        return self.v - o.v\n    fn eq(self, o: P) -> bool:\n        return self.v == o.v\nfn pick[T: Comparable](a: T) -> T:\n    return a\nfn main():\n    print(pick(P(v=5)).compare(P(v=3)))\nmain()\n",
+        "struct P:\n    v: int\n    fn compare(self, other: P) -> int:\n        return self.v - other.v\n    fn eq(self, other: P) -> bool:\n        return self.v == other.v\nfn pick[T: Comparable](a: T) -> T:\n    return a\nfn main():\n    print(pick(P(v=5)).compare(P(v=3)))\nmain()\n",
     );
     entry_ok(
         "fn id[Comparable](x: Comparable) -> Comparable:\n    return x\nfn main():\n    print(id(1))\nmain()\n",
@@ -22326,7 +22326,7 @@ fn enum_str_satisfies_stringable_ok() {
 #[test]
 fn enum_add_bound_into_generic_fn_ok() {
     ok(
-        "enum Money:\n    Cents(int)\n    fn add(self, o: Money) -> Money:\n        match self:\n            Money.Cents(a):\n                match o:\n                    Money.Cents(b): return Money.Cents(a + b)\nfn twice[T: Add](x: T) -> T:\n    return x + x\nfn main():\n    m := twice(Money.Cents(3))\n    print(m.add(m) == Money.Cents(12))\nmain()\n",
+        "enum Money:\n    Cents(int)\n    fn add(self, other: Money) -> Money:\n        match self:\n            Money.Cents(a):\n                match other:\n                    Money.Cents(b): return Money.Cents(a + b)\nfn twice[T: Add](x: T) -> T:\n    return x + x\nfn main():\n    m := twice(Money.Cents(3))\n    print(m.add(m) == Money.Cents(12))\nmain()\n",
     );
 }
 
@@ -23687,10 +23687,10 @@ struct Tag:
     n: int
 struct Box[T]:
     val: T
-    fn compare(self, o: Self) -> int where T: Comparable:
+    fn compare(self, other: Self) -> int where T: Comparable:
         return 0
-    fn eq(self, o: Self) -> bool where T: Comparable:
-        return self.compare(o) == 0
+    fn eq(self, other: Self) -> bool where T: Comparable:
+        return self.compare(other) == 0
 struct Holder:
     b: Box[Tag]
 enum Carrier:
@@ -23756,10 +23756,10 @@ struct Tag:
     n: int
 struct Bad[T]:
     val: T
-    fn compare(self, o: Self) -> int where T: Comparable:
+    fn compare(self, other: Self) -> int where T: Comparable:
         return 0
-    fn eq(self, o: Self) -> bool where T: Comparable:
-        return self.compare(o) == 0
+    fn eq(self, other: Self) -> bool where T: Comparable:
+        return self.compare(other) == 0
 struct H:
     v: Bad[Tag]
 fn mk_a(n: int) -> H:
@@ -23767,7 +23767,7 @@ fn mk_a(n: int) -> H:
 ";
     let b = |name: &str| {
         format!(
-            "import a\nstruct C[T]:\n    v: T\n    fn eq(self, o: Self) -> bool where T: Eq:\n        return self.v == o.v\nstruct {name}:\n    v: C[a.H]\nfn mk_b(n: int) -> {name}:\n    return {name}(C(a.mk_a(n)))\n"
+            "import a\nstruct C[T]:\n    v: T\n    fn eq(self, other: Self) -> bool where T: Eq:\n        return self.v == other.v\nstruct {name}:\n    v: C[a.H]\nfn mk_b(n: int) -> {name}:\n    return {name}(C(a.mk_a(n)))\n"
         )
     };
     const MAIN: &str = "import b\nfn needs[U: Eq](x: U, y: U) -> bool:\n    return x == y\nprint(needs(b.mk_b(1), b.mk_b(2)))\n";
@@ -23784,7 +23784,7 @@ fn mk_a(n: int) -> H:
     // CONTROL 2 — the same shape in ONE module with distinct names. Also always rejected.
     entry_rejects(
         &format!(
-            "{A}struct C[T]:\n    v: T\n    fn eq(self, o: Self) -> bool where T: Eq:\n        return self.v == o.v\nstruct H2:\n    v: C[H]\nfn needs[U: Eq](x: U, y: U) -> bool:\n    return x == y\nfn use_it(p: H2, q: H2) -> bool:\n    return needs(p, q)\n"
+            "{A}struct C[T]:\n    v: T\n    fn eq(self, other: Self) -> bool where T: Eq:\n        return self.v == other.v\nstruct H2:\n    v: C[H]\nfn needs[U: Eq](x: U, y: U) -> bool:\n    return x == y\nfn use_it(p: H2, q: H2) -> bool:\n    return needs(p, q)\n"
         ),
         "type H2 does not satisfy Eq (C[H]'s `eq` requires H: Eq)",
     );
@@ -24452,7 +24452,7 @@ fn pascal_ctor_calls() {
 #[test]
 fn div_mod_neg_struct_overload_typechecks() {
     ok(
-        "struct V:\n    n: int\n    fn div(self, o: V) -> V:\n        return V(self.n / o.n)\n    fn mod(self, o: V) -> V:\n        return V(self.n % o.n)\n    fn neg(self) -> V:\n        return V(-self.n)\nfn main():\n    a := V(7)\n    b := V(2)\n    print((a / b).n)\n    print((a % b).n)\n    print((-a).n)\nmain()\n",
+        "struct V:\n    n: int\n    fn div(self, other: V) -> V:\n        return V(self.n / other.n)\n    fn mod(self, other: V) -> V:\n        return V(self.n % other.n)\n    fn neg(self) -> V:\n        return V(-self.n)\nfn main():\n    a := V(7)\n    b := V(2)\n    print((a / b).n)\n    print((a % b).n)\n    print((-a).n)\nmain()\n",
     );
 }
 
@@ -24544,11 +24544,11 @@ fn empty_struct_with_valid_hash_ok() {
 #[test]
 fn div_mod_neg_are_reserved_protocols() {
     rejects(
-        "protocol Div:\n    fn div(self, o: Self) -> Self\n",
+        "protocol Div:\n    fn div(self, other: Self) -> Self\n",
         "reserved",
     );
     rejects(
-        "protocol Mod:\n    fn mod(self, o: Self) -> Self\n",
+        "protocol Mod:\n    fn mod(self, other: Self) -> Self\n",
         "reserved",
     );
     rejects("protocol Neg:\n    fn neg(self) -> Self\n", "reserved");
@@ -24571,12 +24571,12 @@ fn div_mod_neg_bound_flows() {
 /// missing div (error mentions div).
 #[test]
 fn arithmetic_bundle_accepts_and_rejects() {
-    let prelude = "struct V:\n    n: int\n    fn add(self, o: V) -> V:\n        return V(self.n + o.n)\n    fn sub(self, o: V) -> V:\n        return V(self.n - o.n)\n    fn mul(self, o: V) -> V:\n        return V(self.n * o.n)\n    fn div(self, o: V) -> V:\n        return V(self.n / o.n)\n";
+    let prelude = "struct V:\n    n: int\n    fn add(self, other: V) -> V:\n        return V(self.n + other.n)\n    fn sub(self, other: V) -> V:\n        return V(self.n - other.n)\n    fn mul(self, other: V) -> V:\n        return V(self.n * other.n)\n    fn div(self, other: V) -> V:\n        return V(self.n / other.n)\n";
     ok(&format!(
         "{prelude}fn calc[T: Arithmetic](a: T, b: T) -> T:\n    return a + b - a * b\nfn main():\n    print(calc(V(6), V(2)).n)\nmain()\n"
     ));
     // A struct lacking div fails an Arithmetic bound, mentioning div.
-    let no_div = "struct W:\n    n: int\n    fn add(self, o: W) -> W:\n        return W(self.n + o.n)\n    fn sub(self, o: W) -> W:\n        return W(self.n - o.n)\n    fn mul(self, o: W) -> W:\n        return W(self.n * o.n)\nfn calc[T: Arithmetic](a: T, b: T) -> T:\n    return a + b\nfn main():\n    print(calc(W(1), W(2)).n)\nmain()\n";
+    let no_div = "struct W:\n    n: int\n    fn add(self, other: W) -> W:\n        return W(self.n + other.n)\n    fn sub(self, other: W) -> W:\n        return W(self.n - other.n)\n    fn mul(self, other: W) -> W:\n        return W(self.n * other.n)\nfn calc[T: Arithmetic](a: T, b: T) -> T:\n    return a + b\nfn main():\n    print(calc(W(1), W(2)).n)\nmain()\n";
     rejects(no_div, "div");
 }
 
@@ -24592,7 +24592,7 @@ fn arithmetic_body_uses_ops() {
 #[test]
 fn user_protocol_embeds_arithmetic_and_own_methods() {
     ok(
-        "protocol Field:\n    Arithmetic\n    fn zero(self) -> Self\nstruct V:\n    n: int\n    fn add(self, o: V) -> V:\n        return V(self.n + o.n)\n    fn sub(self, o: V) -> V:\n        return V(self.n - o.n)\n    fn mul(self, o: V) -> V:\n        return V(self.n * o.n)\n    fn div(self, o: V) -> V:\n        return V(self.n / o.n)\n    fn zero(self) -> V:\n        return V(0)\nfn g[T: Field](a: T, b: T) -> T:\n    return a / b\nfn main():\n    print(g(V(9), V(3)).n)\nmain()\n",
+        "protocol Field:\n    Arithmetic\n    fn zero(self) -> Self\nstruct V:\n    n: int\n    fn add(self, other: V) -> V:\n        return V(self.n + other.n)\n    fn sub(self, other: V) -> V:\n        return V(self.n - other.n)\n    fn mul(self, other: V) -> V:\n        return V(self.n * other.n)\n    fn div(self, other: V) -> V:\n        return V(self.n / other.n)\n    fn zero(self) -> V:\n        return V(0)\nfn g[T: Field](a: T, b: T) -> T:\n    return a / b\nfn main():\n    print(g(V(9), V(3)).n)\nmain()\n",
     );
 }
 
@@ -24606,7 +24606,7 @@ fn embed_diamond_dedup_ok() {
 #[test]
 fn own_fn_vs_embed_collision_errors() {
     rejects(
-        "protocol P:\n    Add\n    fn add(self, o: Self) -> Self\n",
+        "protocol P:\n    Add\n    fn add(self, other: Self) -> Self\n",
         "conflicts with embedded",
     );
 }
@@ -24691,7 +24691,7 @@ fn protocol_value_arg_invariance_survives_embed_widening() {
 #[test]
 fn ordering_through_embedded_comparable_bound() {
     ok(
-        "protocol Ord2:\n    Comparable\n    fn tag(self) -> str\nstruct N:\n    v: int\n    fn compare(self, o: N) -> int:\n        return self.v - o.v\n    fn eq(self, o: N) -> bool:\n        return self.v == o.v\n    fn tag(self) -> str:\n        return \"n\"\nfn lt[T: Ord2](a: T, b: T) -> bool:\n    return a < b\nfn main():\n    print(lt(N(1), N(2)))\nmain()\n",
+        "protocol Ord2:\n    Comparable\n    fn tag(self) -> str\nstruct N:\n    v: int\n    fn compare(self, other: N) -> int:\n        return self.v - other.v\n    fn eq(self, other: N) -> bool:\n        return self.v == other.v\n    fn tag(self) -> str:\n        return \"n\"\nfn lt[T: Ord2](a: T, b: T) -> bool:\n    return a < b\nfn main():\n    print(lt(N(1), N(2)))\nmain()\n",
     );
 }
 
@@ -24699,7 +24699,7 @@ fn ordering_through_embedded_comparable_bound() {
 #[test]
 fn membership_through_embedded_contains_bound() {
     ok(
-        "protocol Bag:\n    Contains[int]\n    fn tag(self) -> str\nstruct B:\n    xs: List[int]\n    fn contains(self, x: int) -> bool:\n        return x in self.xs\n    fn tag(self) -> str:\n        return \"b\"\nfn has[T: Bag](b: T, x: int) -> bool:\n    return x in b\nfn main():\n    print(has(B([1, 2]), 2))\nmain()\n",
+        "protocol Bag:\n    Contains[int]\n    fn tag(self) -> str\nstruct B:\n    xs: List[int]\n    fn contains(self, item: int) -> bool:\n        return item in self.xs\n    fn tag(self) -> str:\n        return \"b\"\nfn has[T: Bag](b: T, x: int) -> bool:\n    return x in b\nfn main():\n    print(has(B([1, 2]), 2))\nmain()\n",
     );
 }
 
@@ -24724,7 +24724,7 @@ fn parameterized_embed_substitutes_its_arg_into_the_item_type() {
 // ===== OBJECT SAFETY — `Self` in a PARAMETER slot is not dispatchable through an existential.
 //
 // A protocol value erases which witness it holds, so two values of one protocol need not be the same
-// concrete type. `fn add(self, o: Self) -> Self` through a `Vecish` would hand a `W` to `V::add` —
+// concrete type. `fn add(self, other: Self) -> Self` through a `Vecish` would hand a `W` to `V::add` —
 // `check: ok`, then `runtime error: no field 'x' on W(s=q)`. Rust states the same
 // rule (a `Self`-typed parameter makes a trait non-`dyn`-able) and Go bans `Self` from interfaces
 // outright, so neither ancestor admits the program. Every operator protocol's method is
@@ -24736,17 +24736,17 @@ fn parameterized_embed_substitutes_its_arg_into_the_item_type() {
 #[test]
 fn operator_rejected_on_a_protocol_existential_pair() {
     rejects(
-        "protocol Vecish:\n    fn add(self, o: Self) -> Self\nstruct V:\n    x: int\n    fn add(self, o: V) -> V:\n        return V(self.x + o.x)\nfn plus(a: Vecish, b: Vecish) -> Vecish:\n    return a + b\n",
+        "protocol Vecish:\n    fn add(self, other: Self) -> Self\nstruct V:\n    x: int\n    fn add(self, other: V) -> V:\n        return V(self.x + other.x)\nfn plus(a: Vecish, b: Vecish) -> Vecish:\n    return a + b\n",
         "cannot apply + to Vecish and Vecish",
     );
     // The builtin operator protocol used directly as the annotation is the same case…
     rejects(
-        "struct V:\n    x: int\n    fn add(self, o: V) -> V:\n        return V(self.x + o.x)\nfn plus(a: Add, b: Add) -> Add:\n    return a + b\n",
+        "struct V:\n    x: int\n    fn add(self, other: V) -> V:\n        return V(self.x + other.x)\nfn plus(a: Add, b: Add) -> Add:\n    return a + b\n",
         "cannot apply + to Add and Add",
     );
     // …and so is reaching it through an EMBED.
     rejects(
-        "protocol Vecish:\n    Add\n    fn tag(self) -> str\nstruct V:\n    x: int\n    fn add(self, o: V) -> V:\n        return V(self.x + o.x)\n    fn tag(self) -> str:\n        return \"v\"\nfn plus(a: Vecish, b: Vecish) -> Vecish:\n    return a + b\n",
+        "protocol Vecish:\n    Add\n    fn tag(self) -> str\nstruct V:\n    x: int\n    fn add(self, other: V) -> V:\n        return V(self.x + other.x)\n    fn tag(self) -> str:\n        return \"v\"\nfn plus(a: Vecish, b: Vecish) -> Vecish:\n    return a + b\n",
         "cannot apply + to Vecish and Vecish",
     );
     // `<` through an embedded `Comparable` is the same shape (`compare(self, o: Self)`).
@@ -24761,7 +24761,7 @@ fn operator_rejected_on_a_protocol_existential_pair() {
 #[test]
 fn the_generic_bound_spelling_of_an_operator_over_a_protocol_is_accepted() {
     ok(
-        "protocol Vecish:\n    Add\n    fn tag(self) -> str\nstruct V:\n    x: int\n    fn add(self, o: V) -> V:\n        return V(self.x + o.x)\n    fn tag(self) -> str:\n        return \"v\"\nfn plus[T: Vecish](a: T, b: T) -> T:\n    return a + b\nfn main():\n    print(plus(V(1), V(2)).tag())\nmain()\n",
+        "protocol Vecish:\n    Add\n    fn tag(self) -> str\nstruct V:\n    x: int\n    fn add(self, other: V) -> V:\n        return V(self.x + other.x)\n    fn tag(self) -> str:\n        return \"v\"\nfn plus[T: Vecish](a: T, b: T) -> T:\n    return a + b\nfn main():\n    print(plus(V(1), V(2)).tag())\nmain()\n",
     );
 }
 
@@ -24770,7 +24770,7 @@ fn the_generic_bound_spelling_of_an_operator_over_a_protocol_is_accepted() {
 #[test]
 fn self_typed_method_rejected_on_a_protocol_existential() {
     rejects(
-        "protocol Vecish:\n    fn add(self, o: Self) -> Self\nstruct V:\n    x: int\n    fn add(self, o: V) -> V:\n        return V(self.x + o.x)\nfn plus(a: Vecish, b: Vecish) -> Vecish:\n    return a.add(b)\n",
+        "protocol Vecish:\n    fn add(self, other: Self) -> Self\nstruct V:\n    x: int\n    fn add(self, other: V) -> V:\n        return V(self.x + other.x)\nfn plus(a: Vecish, b: Vecish) -> Vecish:\n    return a.add(b)\n",
         "not callable through the protocol value Vecish",
     );
 }
@@ -24781,7 +24781,7 @@ fn self_typed_method_rejected_on_a_protocol_existential() {
 /// protocol's OWN or arrives through an EMBED, and whichever protocol the bound names.
 #[test]
 fn a_self_parameterized_protocol_value_cannot_witness_a_type_param() {
-    let v = "protocol Vecish:\n    Add\n    fn tag(self) -> str\nstruct V:\n    x: int\n    fn add(self, o: V) -> V:\n        return V(self.x + o.x)\n    fn tag(self) -> str:\n        return \"v\"\n";
+    let v = "protocol Vecish:\n    Add\n    fn tag(self) -> str\nstruct V:\n    x: int\n    fn add(self, other: V) -> V:\n        return V(self.x + other.x)\n    fn tag(self) -> str:\n        return \"v\"\n";
     // `Self` via an EMBED — the spelling an own-methods-only guard misses.
     rejects(
         &format!(
@@ -24798,7 +24798,7 @@ fn a_self_parameterized_protocol_value_cannot_witness_a_type_param() {
     );
     // `Self` declared directly on the protocol is the same rejection.
     rejects(
-        "protocol Vecish:\n    fn add(self, o: Self) -> Self\nfn sum2[T: Vecish](a: T, b: T) -> T:\n    return a.add(b)\nfn f(a: Vecish, b: Vecish) -> Vecish:\n    return sum2(a, b)\n",
+        "protocol Vecish:\n    fn add(self, other: Self) -> Self\nfn sum2[T: Vecish](a: T, b: T) -> T:\n    return a.add(b)\nfn f(a: Vecish, b: Vecish) -> Vecish:\n    return sum2(a, b)\n",
         "cannot use the protocol value Vecish as type parameter 'T'",
     );
 }
@@ -24810,12 +24810,12 @@ fn a_self_parameterized_protocol_value_cannot_witness_a_type_param() {
 #[test]
 fn a_self_parameterized_protocol_value_still_passes_to_its_own_annotation() {
     ok(
-        "protocol Vecish:\n    fn add(self, o: Self) -> Self\n    fn tag(self) -> str\nstruct V:\n    x: int\n    fn add(self, o: V) -> V:\n        return V(self.x + o.x)\n    fn tag(self) -> str:\n        return \"v\"\nfn takes(p: Vecish) -> str:\n    return p.tag()\nfn forward(p: Vecish) -> str:\n    return takes(p)\nfn main():\n    a: Vecish = V(1)\n    print(takes(a))\n    print(forward(a))\nmain()\n",
+        "protocol Vecish:\n    fn add(self, other: Self) -> Self\n    fn tag(self) -> str\nstruct V:\n    x: int\n    fn add(self, other: V) -> V:\n        return V(self.x + other.x)\n    fn tag(self) -> str:\n        return \"v\"\nfn takes(p: Vecish) -> str:\n    return p.tag()\nfn forward(p: Vecish) -> str:\n    return takes(p)\nfn main():\n    a: Vecish = V(1)\n    print(takes(a))\n    print(forward(a))\nmain()\n",
     );
     // …and it still satisfies a protocol it EMBEDS (the interface-to-interface case), which also
     // routes through `satisfies_args_d` and so would have been collateral of the same misplacement.
     ok(
-        "protocol Named:\n    fn name(self) -> str\nprotocol Person:\n    Named\n    fn add(self, o: Self) -> Self\nstruct Dev:\n    n: str\n    fn name(self) -> str:\n        return self.n\n    fn add(self, o: Dev) -> Dev:\n        return self\nfn only_named(n: Named) -> str:\n    return n.name()\nfn take(p: Person) -> str:\n    return only_named(p)\nfn main():\n    print(take(Dev(\"ada\")))\nmain()\n",
+        "protocol Named:\n    fn name(self) -> str\nprotocol Person:\n    Named\n    fn add(self, other: Self) -> Self\nstruct Dev:\n    n: str\n    fn name(self) -> str:\n        return self.n\n    fn add(self, other: Dev) -> Dev:\n        return self\nfn only_named(n: Named) -> str:\n    return n.name()\nfn take(p: Person) -> str:\n    return only_named(p)\nfn main():\n    print(take(Dev(\"ada\")))\nmain()\n",
     );
 }
 
@@ -24823,7 +24823,7 @@ fn a_self_parameterized_protocol_value_still_passes_to_its_own_annotation() {
 #[test]
 fn operator_rejects_mismatched_protocol_operands() {
     rejects(
-        "protocol Vecish:\n    fn add(self, o: Self) -> Self\nprotocol Other:\n    fn add(self, o: Self) -> Self\nfn plus(a: Vecish, b: Other) -> Vecish:\n    return a + b\n",
+        "protocol Vecish:\n    fn add(self, other: Self) -> Self\nprotocol Other:\n    fn add(self, other: Self) -> Self\nfn plus(a: Vecish, b: Other) -> Vecish:\n    return a + b\n",
         "cannot apply + to Vecish and Other",
     );
 }
@@ -24878,7 +24878,7 @@ fn a_branching_embed_graph_terminates() {
 #[test]
 fn an_unknown_type_in_an_embed_arg_is_rejected() {
     rejects(
-        "protocol Bag:\n    Contains[T]\nstruct B:\n    n: int\n    fn contains(self, x: int) -> bool:\n        return x + self.n > 0\nfn has(b: Bag) -> bool:\n    return \"oops\" in b\n",
+        "protocol Bag:\n    Contains[T]\nstruct B:\n    n: int\n    fn contains(self, item: int) -> bool:\n        return item + self.n > 0\nfn has(b: Bag) -> bool:\n    return \"oops\" in b\n",
         "unknown type 'T' in the type argument",
     );
     ok("protocol Bag:\n    Contains[int]\n");
@@ -24927,7 +24927,7 @@ fn index_and_slice_on_a_protocol_existential() {
         "struct S:\n    xs: List[int]\n    fn index(self, k: int) -> int:\n        return self.xs[k]\nfn read(o: Index[int, int]) -> int:\n    return o[0]\nfn main():\n    print(read(S([7])))\nmain()\n",
     );
     ok(
-        "struct S:\n    xs: List[int]\n    fn slice(self, a: int? = None, b: int? = None, c: int? = None) -> List[int]:\n        return self.xs\nfn cut(o: Slice[List[int]]) -> List[int]:\n    return o[0:1]\nfn main():\n    print(cut(S([7])))\nmain()\n",
+        "struct S:\n    xs: List[int]\n    fn slice(self, start: int? = None, end: int? = None, step: int? = None) -> List[int]:\n        return self.xs\nfn cut(o: Slice[List[int]]) -> List[int]:\n    return o[0:1]\nfn main():\n    print(cut(S([7])))\nmain()\n",
     );
     // The key type still has to match.
     rejects(
@@ -24960,7 +24960,7 @@ fn newtype_neg_method_rejected() {
 #[test]
 fn newtype_nonnumeric_div_method_rejected() {
     rejects(
-        "newtype Name = str:\n    fn div(self, o: Name) -> Name:\n        return self\nfn use(a: Name) -> Name:\n    return a / a\n",
+        "newtype Name = str:\n    fn div(self, other: Name) -> Name:\n        return self\nfn use(a: Name) -> Name:\n    return a / a\n",
         "cannot apply /",
     );
 }
@@ -24969,7 +24969,7 @@ fn newtype_nonnumeric_div_method_rejected() {
 #[test]
 fn newtype_nonnumeric_mod_method_rejected() {
     rejects(
-        "newtype Name = str:\n    fn mod(self, o: Name) -> Name:\n        return self\nfn use(a: Name) -> Name:\n    return a % a\n",
+        "newtype Name = str:\n    fn mod(self, other: Name) -> Name:\n        return self\nfn use(a: Name) -> Name:\n    return a % a\n",
         "cannot apply %",
     );
 }
@@ -24988,7 +24988,7 @@ fn numeric_newtype_div_mod_still_ok() {
 #[test]
 fn newtype_operator_method_fails_generic_bound() {
     rejects(
-        "newtype Name = str:\n    fn div(self, o: Name) -> Name:\n        return self\nfn d[T: Div](a: T, b: T) -> T:\n    return a / b\nfn use(x: Name) -> Name:\n    return d(x, x)\n",
+        "newtype Name = str:\n    fn div(self, other: Name) -> Name:\n        return self\nfn d[T: Div](a: T, b: T) -> T:\n    return a / b\nfn use(x: Name) -> Name:\n    return d(x, x)\n",
         "Div",
     );
 }
@@ -28558,7 +28558,7 @@ fn invariance_preserves_legit_container_neighbors() {
 fn self_type_in_struct_method_sig() {
     // `-> Self` and a `Self` param resolve to the enclosing struct.
     entry_ok(
-        "struct P:\n    x: int\n    fn dup(self) -> Self:\n        return self\n    fn add(self, o: Self) -> Self:\n        return P(self.x + o.x)\nfn main():\n    print(P(5).dup().x)\n    print(P(1).add(P(2)).x)\nmain()\n",
+        "struct P:\n    x: int\n    fn dup(self) -> Self:\n        return self\n    fn add(self, other: Self) -> Self:\n        return P(self.x + other.x)\nfn main():\n    print(P(5).dup().x)\n    print(P(1).add(P(2)).x)\nmain()\n",
     );
 }
 
@@ -28630,7 +28630,7 @@ fn self_type_generic_struct_method() {
 fn compound_assign_struct_overload() {
     // `a += V(10)` accepted exactly when `a = a + V(10)` is (V has an `add` overload).
     entry_ok(
-        "struct V:\n    x: int\n    fn add(self, o: V) -> V:\n        return V(self.x + o.x)\n    fn str(self) -> str:\n        return \"V({self.x})\"\nfn main():\n    a := V(1)\n    a = a + V(10)\n    a += V(10)\n    print(a)\nmain()\n",
+        "struct V:\n    x: int\n    fn add(self, other: V) -> V:\n        return V(self.x + other.x)\n    fn str(self) -> str:\n        return \"V({self.x})\"\nfn main():\n    a := V(1)\n    a = a + V(10)\n    a += V(10)\n    print(a)\nmain()\n",
     );
 }
 
@@ -28646,7 +28646,7 @@ fn compound_assign_newtype_numeric() {
 fn compound_assign_enum_sub_overload() {
     // `-=` on an enum with a matching `sub` overload.
     entry_ok(
-        "enum Cnt:\n    N(int)\n    fn amt(self) -> int:\n        match self:\n            Cnt.N(a): return a\n    fn sub(self, o: Cnt) -> Cnt:\n        return Cnt.N(self.amt() - o.amt())\nfn main():\n    c := Cnt.N(10)\n    c -= Cnt.N(3)\n    print(c.amt())\nmain()\n",
+        "enum Cnt:\n    N(int)\n    fn amt(self) -> int:\n        match self:\n            Cnt.N(a): return a\n    fn sub(self, other: Cnt) -> Cnt:\n        return Cnt.N(self.amt() - other.amt())\nfn main():\n    c := Cnt.N(10)\n    c -= Cnt.N(3)\n    print(c.amt())\nmain()\n",
     );
 }
 
@@ -28663,7 +28663,7 @@ fn compound_assign_rejected_no_overload() {
 fn compound_assign_rejected_heterogeneous() {
     // `V += int` where `V + int` is a type error → still rejected.
     entry_rejects(
-        "struct V:\n    x: int\n    fn add(self, o: V) -> V:\n        return V(self.x + o.x)\nfn main():\n    a := V(1)\n    a += 5\nmain()\n",
+        "struct V:\n    x: int\n    fn add(self, other: V) -> V:\n        return V(self.x + other.x)\nfn main():\n    a := V(1)\n    a += 5\nmain()\n",
         "cannot apply +=",
     );
 }
@@ -29561,10 +29561,10 @@ fn method_neighbors_still_ok() {
 const INCOHERENT_V: &str = "\
 struct S:
     d: List[str]
-    fn index(self, key: int) -> str:
-        return self.d[key]
-    fn set_index(self, key: int, val: int):
-        print(\"set {val}\")
+    fn index(self, k: int) -> str:
+        return self.d[k]
+    fn set_index(self, k: int, v: int):
+        print(\"set {v}\")
 s := S([\"a\", \"b\"])
 ";
 
@@ -29582,12 +29582,12 @@ fn index_set_incoherent_rejected() {
     );
     // K mismatch is a compound-path incoherence too: the read keys by int, the write-back by str.
     entry_rejects(
-        "struct S:\n    d: List[str]\n    fn index(self, key: int) -> str:\n        return self.d[key]\n    fn set_index(self, key: str, val: str):\n        print(\"set {val}\")\ns := S([\"a\", \"b\"])\ns[0] += \"x\"\n",
+        "struct S:\n    d: List[str]\n    fn index(self, k: int) -> str:\n        return self.d[k]\n    fn set_index(self, k: str, v: str):\n        print(\"set {v}\")\ns := S([\"a\", \"b\"])\ns[0] += \"x\"\n",
         "does not satisfy IndexSet (index's key is int but set_index's key is str)",
     );
     // A NON-int key routes through the same arm — no spurious "index must be int" companion.
     let errs = check_entry(
-        "struct M:\n    d: Map[str, str]\n    fn index(self, key: str) -> str:\n        return self.d[key]\n    fn set_index(self, key: str, val: int):\n        print(\"set {val}\")\nm := M({\"a\": \"x\"})\nm[\"a\"] += 1\n",
+        "struct M:\n    d: Map[str, str]\n    fn index(self, k: str) -> str:\n        return self.d[k]\n    fn set_index(self, k: str, v: int):\n        print(\"set {v}\")\nm := M({\"a\": \"x\"})\nm[\"a\"] += 1\n",
     );
     assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
     assert!(
@@ -29602,7 +29602,7 @@ fn index_set_asymmetric_plain_write_still_ok() {
     // (it type-checks AND runs today). Only the COMPOUND form reads, and only it is gated.
     // (a) a safe-read container: `index -> V?`, `set_index(_, V)`.
     entry_ok(
-        "struct T:\n    d: Map[int, int]\n    fn index(self, key: int) -> int?:\n        return self.d.get(key)\n    fn set_index(self, key: int, val: int):\n        self.d[key] = val\nt := T({})\nt[0] = 9\nprint(t[0])\n",
+        "struct T:\n    d: Map[int, int]\n    fn index(self, k: int) -> int?:\n        return self.d.get(k)\n    fn set_index(self, k: int, v: int):\n        self.d[k] = v\nt := T({})\nt[0] = 9\nprint(t[0])\n",
     );
     // (b) a widening writer: `index -> str`, `set_index(_, val: int)` — write-only use is sound.
     entry_ok(&format!("{INCOHERENT_V}s[0] = 1\n"));
@@ -29613,11 +29613,11 @@ fn index_set_missing_method_messages_unchanged() {
     // The vague wording is PRESERVED for the missing-method cases; only a disagreeing PAIR gets the
     // new coherence message.
     entry_rejects(
-        "struct RO:\n    xs: List[int]\n    fn index(self, key: int) -> int:\n        return self.xs[key]\nb := RO([1, 2, 3])\nb[0] = 9\n",
+        "struct RO:\n    xs: List[int]\n    fn index(self, k: int) -> int:\n        return self.xs[k]\nb := RO([1, 2, 3])\nb[0] = 9\n",
         "cannot index-assign into RO",
     );
     entry_rejects(
-        "struct WO:\n    xs: List[int]\n    fn set_index(self, key: int, val: int):\n        self.xs[key] = val\nb := WO([1, 2, 3])\nb[0] = 9\n",
+        "struct WO:\n    xs: List[int]\n    fn set_index(self, k: int, v: int):\n        self.xs[k] = v\nb := WO([1, 2, 3])\nb[0] = 9\n",
         "cannot index-assign into WO",
     );
 }
@@ -29626,11 +29626,11 @@ fn index_set_missing_method_messages_unchanged() {
 fn index_set_coherent_still_ok() {
     // NO-OVER-REJECTION: a coherent pair -- read / write / compound / negative index.
     entry_ok(
-        "struct S:\n    d: List[str]\n    fn index(self, key: int) -> str:\n        return self.d[key]\n    fn set_index(self, key: int, val: str):\n        self.d[key] = val\ns := S([\"a\", \"b\"])\nprint(s[0])\ns[0] = \"x\"\ns[1] += \"y\"\nprint(s[-1])\n",
+        "struct S:\n    d: List[str]\n    fn index(self, k: int) -> str:\n        return self.d[k]\n    fn set_index(self, k: int, v: str):\n        self.d[k] = v\ns := S([\"a\", \"b\"])\nprint(s[0])\ns[0] = \"x\"\ns[1] += \"y\"\nprint(s[-1])\n",
     );
     // A GENERIC coherent pair must survive EVERY instantiation (the compare happens AFTER the
     // struct param substitution).
-    let g = "struct Buf[T]:\n    xs: List[T]\n    fn index(self, key: int) -> T:\n        return self.xs[key]\n    fn set_index(self, key: int, val: T):\n        self.xs[key] = val\n";
+    let g = "struct Buf[T]:\n    xs: List[T]\n    fn index(self, k: int) -> T:\n        return self.xs[k]\n    fn set_index(self, k: int, v: T):\n        self.xs[k] = v\n";
     entry_ok(&format!(
         "{g}b := Buf[int]([1, 2])\nb[0] = 9\nb[1] += 1\nprint(b[0])\n"
     ));
@@ -29804,7 +29804,7 @@ fn bytes_native_seam_takes_bytes_only_bytearray_needs_an_explicit_convert() {
 #[test]
 fn contains_protocol_struct_ok() {
     ok(
-        "struct Bag:\n    xs: List[int]\n    fn contains(self, x: int) -> bool:\n        return false\nfn main():\n    b := Bag([1])\n    print(2 in b)\nmain()\n",
+        "struct Bag:\n    xs: List[int]\n    fn contains(self, item: int) -> bool:\n        return false\nfn main():\n    b := Bag([1])\n    print(2 in b)\nmain()\n",
     );
 }
 
@@ -29812,7 +29812,7 @@ fn contains_protocol_struct_ok() {
 #[test]
 fn contains_item_type_mismatch_rejects() {
     rejects(
-        "struct Bag:\n    xs: List[int]\n    fn contains(self, x: int) -> bool:\n        return false\nfn main():\n    b := Bag([1])\n    print(\"s\" in b)\nmain()\n",
+        "struct Bag:\n    xs: List[int]\n    fn contains(self, item: int) -> bool:\n        return false\nfn main():\n    b := Bag([1])\n    print(\"s\" in b)\nmain()\n",
         "membership",
     );
 }
@@ -29832,7 +29832,7 @@ fn contains_missing_method_rejects_with_hint() {
 #[test]
 fn contains_wrong_return_rejects_with_hint() {
     rejects(
-        "struct Bag:\n    n: int\n    fn contains(self, x: int) -> int:\n        return 0\nfn main():\n    print(2 in Bag(0))\nmain()\n",
+        "struct Bag:\n    n: int\n    fn contains(self, item: int) -> int:\n        return 0\nfn main():\n    print(2 in Bag(0))\nmain()\n",
         "contains",
     );
 }
@@ -29844,10 +29844,10 @@ fn contains_generic_struct_substitutes_item() {
     // `Box[T]`'s own `contains` body compares `x == self.v`, both `T` — W7-53 requires `T: Eq` at
     // the struct's OWN declaration, same as a generic fn.
     ok(
-        "struct Box[T: Eq]:\n    v: T\n    fn contains(self, x: T) -> bool:\n        return x == self.v\nfn main():\n    print(2 in Box[int](5))\nmain()\n",
+        "struct Box[T: Eq]:\n    v: T\n    fn contains(self, item: T) -> bool:\n        return item == self.v\nfn main():\n    print(2 in Box[int](5))\nmain()\n",
     );
     rejects(
-        "struct Box[T: Eq]:\n    v: T\n    fn contains(self, x: T) -> bool:\n        return x == self.v\nfn main():\n    print(\"s\" in Box[int](5))\nmain()\n",
+        "struct Box[T: Eq]:\n    v: T\n    fn contains(self, item: T) -> bool:\n        return item == self.v\nfn main():\n    print(\"s\" in Box[int](5))\nmain()\n",
         "membership",
     );
 }
@@ -29858,10 +29858,10 @@ fn contains_generic_struct_substitutes_item() {
 #[test]
 fn contains_through_bound_ok_and_item_mismatch_rejects() {
     ok(
-        "struct Bag:\n    xs: List[int]\n    fn contains(self, x: int) -> bool:\n        return false\nfn has[C: Contains[int]](c: C, n: int) -> bool:\n    return n in c\nfn main():\n    print(has(Bag([1]), 1))\nmain()\n",
+        "struct Bag:\n    xs: List[int]\n    fn contains(self, item: int) -> bool:\n        return false\nfn has[C: Contains[int]](c: C, n: int) -> bool:\n    return n in c\nfn main():\n    print(has(Bag([1]), 1))\nmain()\n",
     );
     rejects(
-        "struct Bag:\n    xs: List[int]\n    fn contains(self, x: int) -> bool:\n        return false\nfn has[C: Contains[int]](c: C, s: str) -> bool:\n    return s in c\nfn main():\n    print(has(Bag([1]), \"x\"))\nmain()\n",
+        "struct Bag:\n    xs: List[int]\n    fn contains(self, item: int) -> bool:\n        return false\nfn has[C: Contains[int]](c: C, s: str) -> bool:\n    return s in c\nfn main():\n    print(has(Bag([1]), \"x\"))\nmain()\n",
         "membership",
     );
 }
@@ -32854,7 +32854,7 @@ fn binary_op_hint_reaches_both_operands_in_every_hinted_position() {
     ));
 
     // operator column: arithmetic overloads on Box[T]
-    const BOX_PRELUDE: &str = "struct Box[T]:\n    v: T\n    fn add(self, o: Box[T]) -> Box[T]:\n        return self\n    fn sub(self, o: Box[T]) -> Box[T]:\n        return self\n    fn mul(self, o: Box[T]) -> Box[T]:\n        return self\n    fn div(self, o: Box[T]) -> Box[T]:\n        return self\n    fn mod(self, o: Box[T]) -> Box[T]:\n        return self\nfn mkb[T]() -> Box[T]:\n    return mkb[T]()\n";
+    const BOX_PRELUDE: &str = "struct Box[T]:\n    v: T\n    fn add(self, other: Box[T]) -> Box[T]:\n        return self\n    fn sub(self, other: Box[T]) -> Box[T]:\n        return self\n    fn mul(self, other: Box[T]) -> Box[T]:\n        return self\n    fn div(self, other: Box[T]) -> Box[T]:\n        return self\n    fn mod(self, other: Box[T]) -> Box[T]:\n        return self\nfn mkb[T]() -> Box[T]:\n    return mkb[T]()\n";
     for op in ["+", "-", "*", "/", "%"] {
         ok(&format!(
             "{BOX_PRELUDE}fn use[Z]():\n    a: Box[Z] = mkb() {op} mkb()\n    print(1)\nuse[int]()\n"

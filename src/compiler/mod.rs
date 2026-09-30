@@ -401,7 +401,7 @@ fn register_variant(program: &mut Program, enum_name: &str, variant: &str, arity
         .insert((enum_name.to_string(), variant.to_string()), def);
 }
 
-/// Does this struct/enum method declaration bind the `Eq` protocol hook — the `fn eq(self, o: Self)
+/// Does this struct/enum method declaration bind the `Eq` protocol hook — the `fn eq(self, other: Self)
 /// -> bool` that `==`/`!=` dispatch to (`Vm::user_eq_method`)?
 ///
 /// The backend is type-blind, so this is the SYNTACTIC twin of the checker's `validate_eq_shape`

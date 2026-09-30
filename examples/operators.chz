@@ -6,12 +6,12 @@
 struct Vec2:
     x: int
     y: int
-    fn add(self, o: Vec2) -> Vec2:
-        return Vec2(self.x + o.x, self.y + o.y)
-    fn sub(self, o: Vec2) -> Vec2:
-        return Vec2(self.x - o.x, self.y - o.y)
-    fn mul(self, o: Vec2) -> Vec2:
-        return Vec2(self.x * o.x, self.y * o.y)
+    fn add(self, other: Vec2) -> Vec2:
+        return Vec2(self.x + other.x, self.y + other.y)
+    fn sub(self, other: Vec2) -> Vec2:
+        return Vec2(self.x - other.x, self.y - other.y)
+    fn mul(self, other: Vec2) -> Vec2:
+        return Vec2(self.x * other.x, self.y * other.y)
     fn str(self) -> str:
         return "<{self.x}, {self.y}>"
 

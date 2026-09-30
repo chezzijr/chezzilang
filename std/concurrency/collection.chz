@@ -65,8 +65,8 @@ struct ConcurrentMap[K: Hashable + Eq, V]:
         self.inner.write(fn(m): _remove(m, key))
 
     # True iff `key` is present. CONCURRENT READ.
-    fn contains(self, key: K) -> bool:
-        return self.inner.read(fn(m): m.has(key))
+    fn contains(self, item: K) -> bool:
+        return self.inner.read(fn(m): m.has(item))
 
     # Number of entries. CONCURRENT READ.
     fn len(self) -> int:

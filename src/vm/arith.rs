@@ -2234,7 +2234,7 @@ impl Vm {
 
     /// Can ANY equality in this program dispatch a user `eq` — i.e. can a compare re-enter the VM and
     /// therefore collect? Both hook tables are left EMPTY unless the program declares at least one
-    /// `fn eq(self, o: Self) -> bool` (`Compiler::build_eq_hooks`), so this is a whole-program answer,
+    /// `fn eq(self, other: Self) -> bool` (`Compiler::build_eq_hooks`), so this is a whole-program answer,
     /// and `false` for the overwhelming majority of programs. Used to skip the probe rooting on the
     /// hot map/set/`==` paths, where it would otherwise be pure overhead.
     #[inline]

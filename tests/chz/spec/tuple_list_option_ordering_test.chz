@@ -4,10 +4,10 @@ import std.cmp
 
 struct P:
     n: int
-    fn compare(self, o: P) -> int:
-        return self.n - o.n
-    fn eq(self, o: P) -> bool:
-        return self.n == o.n
+    fn compare(self, other: P) -> int:
+        return self.n - other.n
+    fn eq(self, other: P) -> bool:
+        return self.n == other.n
 
 fn key(s: str) -> (int, str):
     return (s.len(), s)
@@ -85,11 +85,11 @@ mut_xs := [(Mut(1), 0), (Mut(0), 1)]
 
 struct Mut:
     n: int
-    fn compare(self, o: Mut) -> int:
+    fn compare(self, other: Mut) -> int:
         mut_xs.push((Mut(9), 9))
-        return self.n - o.n
-    fn eq(self, o: Mut) -> bool:
-        return self.n == o.n
+        return self.n - other.n
+    fn eq(self, other: Mut) -> bool:
+        return self.n == other.n
 
 test fn sort_mutation_through_tuple_faults():
     r := recover: mut_xs.sort()

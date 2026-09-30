@@ -12011,7 +12011,7 @@ fn golden_generic_operator_overload_chz_matches_expected_and_interp() {
 /// on the VM and the M:N parallel engine.
 #[test]
 fn struct_div_mod_neg_runs() {
-    let src = "struct V:\n    n: int\n    fn div(self, o: V) -> V:\n        return V(self.n / o.n)\n    fn mod(self, o: V) -> V:\n        return V(self.n % o.n)\n    fn neg(self) -> V:\n        return V(-self.n)\nfn main():\n    a := V(7)\n    b := V(2)\n    print((a / b).n)\n    print((a % b).n)\n    print((-a).n)\nmain()\n";
+    let src = "struct V:\n    n: int\n    fn div(self, other: V) -> V:\n        return V(self.n / other.n)\n    fn mod(self, other: V) -> V:\n        return V(self.n % other.n)\n    fn neg(self) -> V:\n        return V(-self.n)\nfn main():\n    a := V(7)\n    b := V(2)\n    print((a / b).n)\n    print((a % b).n)\n    print((-a).n)\nmain()\n";
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, "3\n1\n-7\n");
 }
@@ -19276,10 +19276,10 @@ fn sort_over_comparable_structs_on_vm() {
 struct P:
     n: int
     t: str
-    fn compare(self, o: P) -> int:
-        return self.n - o.n
-    fn eq(self, o: P) -> bool:
-        return self.n == o.n
+    fn compare(self, other: P) -> int:
+        return self.n - other.n
+    fn eq(self, other: P) -> bool:
+        return self.n == other.n
     fn show(self) -> str:
         return self.t + str(self.n)
 xs := [P(3, \"c\"), P(1, \"a\"), P(2, \"b\"), P(1, \"z\")]
@@ -19314,9 +19314,9 @@ fn contains_protocol_struct_dispatches() {
     let src = "\
 struct Bag:
     items: List[int]
-    fn contains(self, x: int) -> bool:
+    fn contains(self, item: int) -> bool:
         for it in self.items:
-            if it == x:
+            if it == item:
                 return true
         return false
 b := Bag([1, 2, 3])
@@ -19333,8 +19333,8 @@ fn contains_generic_box_runs() {
     let src = "\
 struct Box[T]:
     v: T
-    fn contains(self, x: T) -> bool:
-        return x == self.v
+    fn contains(self, item: T) -> bool:
+        return item == self.v
 b := Box[int](2)
 print(2 in b)
 print(3 in b)
@@ -19349,8 +19349,8 @@ fn contains_protocol_enum_dispatches() {
 enum Dir:
     N
     S
-    fn contains(self, x: int) -> bool:
-        return x == 0
+    fn contains(self, item: int) -> bool:
+        return item == 0
 d := Dir.N
 print(0 in d)
 print(1 in d)
@@ -19366,9 +19366,9 @@ fn contains_through_generic_bound_runs() {
     let src = "\
 struct Bag:
     xs: List[int]
-    fn contains(self, x: int) -> bool:
+    fn contains(self, item: int) -> bool:
         for e in self.xs:
-            if e == x:
+            if e == item:
                 return true
         return false
 fn has[C: Contains[int]](c: C, n: int) -> bool:

@@ -58,7 +58,7 @@ native struct List[T]:
     native fn push(self, v: T) -> nil
     native fn pop(self) -> Option[T]
     native fn reverse(self) -> nil
-    native fn contains(self, v: T) -> bool
+    native fn contains(self, item: T) -> bool
     # SENTINEL, NOT A CARRIER — `-1` on a miss, the shape of Python's `str.find` (`'hi'.find('zz')` is
     # `-1`, measured). HAZARD: indexing is Python-negative, so `xs[xs.index_of(v)]` on a miss silently
     # returns the LAST element instead of faulting — Python has the identical trap
@@ -176,7 +176,7 @@ native struct str:
     native fn chars(self) -> List[str]
     native fn join(self, parts: List[str]) -> str
     native fn starts_with(self, prefix: str) -> bool
-    native fn contains(self, needle: str) -> bool
+    native fn contains(self, item: str) -> bool
     native fn ends_with(self, suffix: str) -> bool
     # `encode()` -> `bytes`: UTF-8 encode (str is UTF-8 internally; copies the bytes out). No
     # encoding-name argument — UTF-8 only (other codecs are an explicit future non-goal).

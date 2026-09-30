@@ -3753,7 +3753,7 @@ impl Checker {
     /// its signature is enforced at the DECLARATION rather than left to answer wrongly (or fault) at
     /// the operator. Exactly two shapes survive:
     ///
-    /// * `fn eq(self, o: Self) -> bool` — the hook. `==` dispatches to it.
+    /// * `fn eq(self, other: Self) -> bool` — the hook. `==` dispatches to it.
     /// * `fn eq(self, x: T) -> bool` with a GENERIC operand — an ordinary method (`Opt[T].eq(self,
     ///   x: T)`); `==` leaves it alone and stays structural. `eq` is not a reserved name (Rust puts it
     ///   in `PartialEq` and still allows an inherent `eq`; Python namespaces the hook as `__eq__`), so
@@ -3803,7 +3803,7 @@ impl Checker {
             self.error(
                 span,
                 format!(
-                    "'eq' on {self_ty} is {hint}: it must take exactly one operand — `fn eq(self, o: Self) -> bool`"
+                    "'eq' on {self_ty} is {hint}: it must take exactly one operand — `fn eq(self, other: Self) -> bool`"
                 ),
             );
             return;

@@ -541,7 +541,7 @@ the probe body, which is why it was not taken here).
 
 ## `Eq`-hook lookup table (M23 slice 3 follow-up) — 2026-08-08 — correctness fix that also pays
 
-Not a lever either — the `==` operator must be able to tell the `Eq` HOOK (`fn eq(self, o: Self) ->
+Not a lever either — the `==` operator must be able to tell the `Eq` HOOK (`fn eq(self, other: Self) ->
 bool`) from an ordinary method that merely shares the name, which a `methods.get("eq")` name lookup
 cannot do. The compiler now records the hook in `Program::eq_struct`/`eq_enum`, dense
 `Vec<Option<(proto, module)>>` indexed by the `tid`/`variant_id` the operands already carry, so the

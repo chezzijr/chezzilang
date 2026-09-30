@@ -644,6 +644,9 @@ impl Checker {
                 // methods (`is_static == false`), unchanged.
                 let mut sig = FnSig::plain(params, ret);
                 sig.is_static = m.params.first().is_none_or(|p| p.name != "self");
+                // TICKET-187: a protocol's parameter names are part of its contract — a call through
+                // the protocol binds by them, and an implementor conforms only with the same names.
+                sig.labels = protocol_labels(&m.params);
                 (m.name.clone(), sig)
             })
             .collect();
@@ -2593,7 +2596,7 @@ impl Checker {
             let min_params = subst_params.len();
             let want = FnSig {
                 writes: Vec::new(),
-                labels: Vec::new(),
+                labels: msig.labels.clone(),
                 params: subst_params,
                 ret: subst(&msig.ret, &pmap),
                 type_params: Vec::new(),
@@ -2625,6 +2628,11 @@ impl Checker {
             });
             match actual_owned.as_ref() {
                 Some(actual) if method_matches(msig, actual, ty) => {
+                    if let Some((pos, expected, found)) = param_name_mismatch(msig, actual) {
+                        return Err(format!(
+                            "type {ty} does not satisfy {protocol_display} (method '{mname}' parameter {pos} is named '{found}', but {protocol_display} declares '{expected}')"
+                        ));
+                    }
                     // Conditional conformance: a method whose `where` bounds the RECEIVER's own type
                     // param (e.g. `compare(self, o: Box[T]) -> int where T: Comparable` on `Box[T]`)
                     // only makes the type satisfy `protocol` when that bound HOLDS for this concrete
@@ -2717,10 +2725,14 @@ impl Checker {
             let mut params = Vec::with_capacity(sig.params.len() + 1);
             params.push(ty.clone());
             params.extend(sig.params.iter().cloned());
+            let mut labels = Vec::with_capacity(sig.labels.len() + 1);
+            labels.push(None);
+            labels.extend(sig.labels.iter().cloned());
             table.insert(
                 mname.clone(),
                 FnSig {
                     params,
+                    labels,
                     min_params: sig.min_params + 1,
                     ..sig.clone()
                 },
@@ -5726,6 +5738,16 @@ impl Checker {
             }
         }
     }
+}
+
+/// TICKET-187 — a protocol method's parameter labels, parallel to its `params` (`None` for the
+/// `self` receiver). The one builder for user protocols (`hoist_protocol`) and the reserved ones
+/// declared in `std/prelude.chz` (`harvest_protocol_shape`).
+pub(super) fn protocol_labels(params: &[crate::ast::Param]) -> Vec<Option<String>> {
+    params
+        .iter()
+        .map(|p| (p.name != "self").then(|| p.name.clone()))
+        .collect()
 }
 
 /// Does `ty` mention the built-in `Error` protocol existential anywhere (the E side of a bare `T!`,

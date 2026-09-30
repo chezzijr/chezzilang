@@ -1853,7 +1853,7 @@ fn cmp_max_float_parity() {
 #[test]
 fn cmp_max_struct_parity() {
     // The generic max over a Comparable struct must be byte-identical.
-    let src = "import std.cmp\nstruct P:\n    n: int\n    fn compare(self, o: P) -> int:\n        return self.n - o.n\n    fn eq(self, o: P) -> bool:\n        return self.n == o.n\nfn main():\n    print(cmp.max(P(2), P(9)).n)\n    print(cmp.min(P(2), P(9)).n)\nmain()\n";
+    let src = "import std.cmp\nstruct P:\n    n: int\n    fn compare(self, other: P) -> int:\n        return self.n - other.n\n    fn eq(self, other: P) -> bool:\n        return self.n == other.n\nfn main():\n    print(cmp.max(P(2), P(9)).n)\n    print(cmp.min(P(2), P(9)).n)\nmain()\n";
     assert_eq!(golden_entry(src), "9\n2\n");
 }
 
@@ -8439,10 +8439,10 @@ fn negative_index_parity() {
 const BUF_PROG: &str = "\
 struct Buf:
     xs: List[int]
-    fn index(self, key: int) -> int:
-        return self.xs[key]
-    fn set_index(self, key: int, val: int):
-        self.xs[key] = val
+    fn index(self, k: int) -> int:
+        return self.xs[k]
+    fn set_index(self, k: int, v: int):
+        self.xs[k] = v
     fn slice(self, start: int? = None, end: int? = None, step: int? = None) -> List[int]:
         match (start, end, step):
             (Some(s), Some(e), Some(c)): return self.xs[s:e:c]
@@ -11240,10 +11240,10 @@ fn coherent_index_set_str_parity() {
         "\
 struct S:
     d: List[str]
-    fn index(self, key: int) -> str:
-        return self.d[key]
-    fn set_index(self, key: int, val: str):
-        self.d[key] = val
+    fn index(self, k: int) -> str:
+        return self.d[k]
+    fn set_index(self, k: int, v: str):
+        self.d[k] = v
 s := S([\"a\", \"b\"])
 print(s[0])
 s[0] = \"x\"
@@ -11264,10 +11264,10 @@ fn compound_index_assign_evaluates_index_once_parity() {
         "\
 struct S:
     d: List[int]
-    fn index(self, key: int) -> int:
-        return self.d[key]
-    fn set_index(self, key: int, val: int):
-        self.d[key] = val
+    fn index(self, k: int) -> int:
+        return self.d[k]
+    fn set_index(self, k: int, v: int):
+        self.d[k] = v
 fn bump(tag: str) -> int:
     print(\"idx {tag}\")
     return 0
@@ -11316,16 +11316,16 @@ fn asymmetric_index_set_plain_write_parity() {
         "\
 struct T:
     d: Map[int, int]
-    fn index(self, key: int) -> int?:
-        return self.d.get(key)
-    fn set_index(self, key: int, val: int):
-        self.d[key] = val
+    fn index(self, k: int) -> int?:
+        return self.d.get(k)
+    fn set_index(self, k: int, v: int):
+        self.d[k] = v
 struct W:
     d: List[str]
-    fn index(self, key: int) -> str:
-        return self.d[key]
-    fn set_index(self, key: int, val: int):
-        print(\"set {val}\")
+    fn index(self, k: int) -> str:
+        return self.d[k]
+    fn set_index(self, k: int, v: int):
+        print(\"set {v}\")
 t := T({})
 t[0] = 9
 match t[0]:
@@ -12830,8 +12830,8 @@ fn parity_struct_slice_wide_bound() {
     let src = "\
 struct Cut:
     xs: List[int]
-    fn index(self, key: int) -> int:
-        return self.xs[key]
+    fn index(self, k: int) -> int:
+        return self.xs[k]
     fn slice(self, start: int? = None, end: int? = None, step: int? = None) -> int:
         match start:
             Some(s): return s

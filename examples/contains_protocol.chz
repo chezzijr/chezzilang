@@ -5,9 +5,9 @@
 # A struct membership test over its own field.
 struct Bag:
     items: List[int]
-    fn contains(self, x: int) -> bool:
+    fn contains(self, item: int) -> bool:
         for it in self.items:
-            if it == x:
+            if it == item:
                 return true
         return false
 
@@ -15,15 +15,15 @@ struct Bag:
 # compares two `T`s, so `T` must be bounded by `Eq` (W7-53), matching rustc/Go at the definition.
 struct Box[T: Eq]:
     v: T
-    fn contains(self, x: T) -> bool:
-        return x == self.v
+    fn contains(self, item: T) -> bool:
+        return item == self.v
 
 # Enums satisfy `Contains` for free via the shared protocol machinery.
 enum Palette:
     RGB
     Gray
-    fn contains(self, name: str) -> bool:
-        return name == "red" or name == "green" or name == "blue"
+    fn contains(self, item: str) -> bool:
+        return item == "red" or item == "green" or item == "blue"
 
 fn main():
     b := Bag([1, 2, 3])

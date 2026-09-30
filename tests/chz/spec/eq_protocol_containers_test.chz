@@ -25,8 +25,8 @@ struct K:
     b: str
     fn hash(self) -> int:
         return self.a
-    fn eq(self, o: K) -> bool:
-        return self.a == o.a
+    fn eq(self, other: K) -> bool:
+        return self.a == other.a
 
 test fn operator_membership_and_map_lookup_agree():
     x := K(1, "x")
@@ -46,8 +46,8 @@ struct CI:
         for c in self.s.lower():
             h = h * 31 + ord(c)
         return h
-    fn eq(self, o: CI) -> bool:
-        return self.s.lower() == o.s.lower()
+    fn eq(self, other: CI) -> bool:
+        return self.s.lower() == other.s.lower()
 
 test fn ci_map_probes_dispatch_eq():
     m: Map[CI, int] = {}
@@ -147,7 +147,7 @@ struct Never:
     a: int
     fn hash(self) -> int:
         return 1
-    fn eq(self, o: Never) -> bool:
+    fn eq(self, other: Never) -> bool:
         return false
 
 test fn containers_keep_the_identity_short_circuit():
@@ -162,7 +162,7 @@ struct Boom2:
     n: int
     fn hash(self) -> int:
         return self.n
-    fn eq(self, o: Boom2) -> bool:
+    fn eq(self, other: Boom2) -> bool:
         return 1 / 0 == 0
 
 test fn a_faulting_eq_propagates_from_container_probes():
@@ -185,8 +185,8 @@ struct Alloc:
     a: int
     fn hash(self) -> int:
         return self.a
-    fn eq(self, o: Alloc) -> bool:
-        junk := [self.a, o.a, 1, 2, 3]
+    fn eq(self, other: Alloc) -> bool:
+        junk := [self.a, other.a, 1, 2, 3]
         pad := "x".repeat(64)
         return junk[0] == junk[1] and pad.len() == 64
 
@@ -228,8 +228,8 @@ struct Mut:
     n: int
     fn hash(self) -> int:
         return 0
-    fn eq(self, o: Mut) -> bool:
-        r := self.n == o.n
+    fn eq(self, other: Mut) -> bool:
+        r := self.n == other.n
         # fire on the TRUE compare only — the position the caller is about to use
         if r and mut_armed.len() > 0:
             mut_armed.remove_at(0)
@@ -298,14 +298,14 @@ test fn a_set_probe_whose_eq_removes_an_earlier_entry_answers_the_new_container(
 struct Cond[T]:
     val: T
     n_calls_marker: int
-    fn compare(self, o: Self) -> int where T: Comparable:
-        if self.val < o.val:
+    fn compare(self, other: Self) -> int where T: Comparable:
+        if self.val < other.val:
             return -1
-        if o.val < self.val:
+        if other.val < self.val:
             return 1
         return 0
-    fn eq(self, o: Self) -> bool where T: Comparable:
-        return self.compare(o) == 0
+    fn eq(self, other: Self) -> bool where T: Comparable:
+        return self.compare(other) == 0
     fn hash(self) -> int:
         return 7
 
@@ -356,7 +356,7 @@ test fn a_satisfied_conditional_eq_dispatches_from_set_and_map_on_a_collision():
 
 struct DeepLeaf:
     d: int
-    fn eq(self, o: DeepLeaf) -> bool:
+    fn eq(self, other: DeepLeaf) -> bool:
         if self.d <= 0:
             return true
         a := deep_chain(100, DeepLeaf(self.d - 1))
@@ -432,7 +432,7 @@ struct SnapKey:
 struct KeyProbe:
     n: int
 
-    fn eq(self, o: KeyProbe) -> bool:
+    fn eq(self, other: KeyProbe) -> bool:
         k := SnapKey(xs=[1])
         m := {k: 1}
         k.xs.push(2)          # must NOT reach the stored key: it was snapshotted on insert

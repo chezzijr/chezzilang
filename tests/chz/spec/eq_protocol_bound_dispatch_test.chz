@@ -64,8 +64,8 @@ test fn the_bound_and_the_operator_agree_on_a_non_hook_receiver():
 
 struct Parity:
     n: int
-    fn eq(self, o: Parity) -> bool:
-        return self.n % 2 == o.n % 2   # disagrees with structural equality in BOTH directions
+    fn eq(self, other: Parity) -> bool:
+        return self.n % 2 == other.n % 2   # disagrees with structural equality in BOTH directions
 
 test fn a_real_hook_still_dispatches_through_the_bound():
     # structural would say false; the hook says true
@@ -89,8 +89,8 @@ test fn a_real_hook_agrees_on_every_spelling():
 
 struct Ranked:
     n: int
-    fn compare(self, o: Ranked) -> int:
-        return self.n - o.n
+    fn compare(self, other: Ranked) -> int:
+        return self.n - other.n
     fn eq[U](self, o: U) -> bool:
         return true          # non-hook again: `==` stays structural
 

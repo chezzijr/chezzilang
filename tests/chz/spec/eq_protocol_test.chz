@@ -1,6 +1,6 @@
 # tests/chz/spec/eq_protocol_test.chz — M23: `==` / `!=` dispatch to a user `eq`.
 #
-# A struct/enum defining `fn eq(self, o: Self) -> bool` OWNS its `==`, exactly as `compare` owns
+# A struct/enum defining `fn eq(self, other: Self) -> bool` OWNS its `==`, exactly as `compare` owns
 # its `<`. Before M23 the operator was hardwired structural, so a `Ver` whose identity is its major
 # version answered `Ver(1,"alpha") == Ver(1,"beta")` false while `<` and `>` (its `compare`) both
 # said false too — three answers that cannot all be right. Python's twin (`__lt__`/`__gt__`/`__eq__`
@@ -21,10 +21,10 @@ fn msg_of[T](r: Result[T, Error], where_: str) -> str:
 struct Ver:
     maj: int
     pre: str
-    fn compare(self, o: Ver) -> int:
-        return self.maj - o.maj
-    fn eq(self, o: Ver) -> bool:
-        return self.maj == o.maj
+    fn compare(self, other: Ver) -> int:
+        return self.maj - other.maj
+    fn eq(self, other: Ver) -> bool:
+        return self.maj == other.maj
 
 test fn user_eq_owns_the_equality_operator():
     a := Ver(1, "alpha")
@@ -52,7 +52,7 @@ test fn eq_method_and_operator_agree():
 enum Tag:
     Num(int)
     Word(str)
-    fn eq(self, o: Tag) -> bool:
+    fn eq(self, other: Tag) -> bool:
         # every `Tag` is equal to every other — deliberately unstructural, so a structural
         # answer is distinguishable from the dispatched one
         return true
@@ -94,7 +94,7 @@ struct Sq:
     s: int
     fn size(self) -> int:
         return self.s
-    fn eq(self, o: Sq) -> bool:
+    fn eq(self, other: Sq) -> bool:
         return true
 
 struct Ci:
@@ -116,7 +116,7 @@ test fn two_different_types_behind_one_protocol_stay_structural():
 # Python namespaces the hook as `__eq__`. So a method that merely SHARES the name, one whose operand
 # is a type PARAMETER rather than `Self`, must stay callable and must NOT be dispatched by `==`:
 # doing so handed the body an operand of a type it never declared, and answered with whatever came
-# back. Only `fn eq(self, o: Self) -> bool` is the hook.
+# back. Only `fn eq(self, other: Self) -> bool` is the hook.
 
 enum Opt2[T]:
     Some(T)
@@ -177,7 +177,7 @@ test fn non_hook_eq_satisfies_eq_too():
 
 struct Boom:
     n: int
-    fn eq(self, o: Boom) -> bool:
+    fn eq(self, other: Boom) -> bool:
         return 1 / 0 == 0
 
 test fn a_faulting_eq_propagates():
@@ -233,7 +233,7 @@ struct Witness:
     n: int
     fn name(self) -> str:
         return "w"
-    fn eq(self, o: Witness) -> bool:
+    fn eq(self, other: Witness) -> bool:
         eq_calls.push(1)
         return true
 
@@ -310,8 +310,8 @@ test fn one_eq_bound_covers_every_join_point():
 
 struct EBox[T: Comparable]:
     v: T
-    fn eq(self, o: EBox[T]) -> bool:
-        return self.v < o.v or self.v == o.v
+    fn eq(self, other: EBox[T]) -> bool:
+        return self.v < other.v or self.v == other.v
 
 test fn a_cross_instantiation_eq_faults_recoverably():
     a: Any = EBox(1)

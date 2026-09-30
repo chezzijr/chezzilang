@@ -32,10 +32,10 @@ print(xs[4])           # 50
 # `None` when omitted — so the body forwards them straight to the backing list's slice.
 struct Ring:
     data: List[int]
-    fn index(self, key: int) -> int:
-        return self.data[key % self.data.len()]
-    fn set_index(self, key: int, val: int):
-        self.data[key % self.data.len()] = val
+    fn index(self, k: int) -> int:
+        return self.data[k % self.data.len()]
+    fn set_index(self, k: int, v: int):
+        self.data[k % self.data.len()] = v
     fn slice(self, start: int? = None, end: int? = None, step: int? = None) -> List[int]:
         match (start, end, step):
             (Some(s), Some(e), Some(c)): return self.data[s:e:c]

@@ -1158,6 +1158,14 @@ impl Checker {
         // inference path (`infer_generic_method`), not the fixed-arity path (empty for the common case).
         sig.type_params = decl.type_params.clone();
         sig.variadic = variadic;
+        // TICKET-187: names serve protocol conformance only; `slots` stays `None`, so a direct
+        // native call still takes no named arguments (DEC-182).
+        sig.labels = decl
+            .params
+            .iter()
+            .skip(skip)
+            .map(|p| Some(p.name.clone()))
+            .collect();
         sig
     }
 
@@ -1345,7 +1353,9 @@ impl Checker {
                             .as_ref()
                             .map(|t| self.resolve_type(t, s.span))
                             .unwrap_or(Ty::Nil);
-                        (m.name.clone(), FnSig::plain(params, ret))
+                        let mut sig = FnSig::plain(params, ret);
+                        sig.labels = super::proto::protocol_labels(&m.params);
+                        (m.name.clone(), sig)
                     })
                     .collect();
                 self.type_params = saved;
@@ -1375,6 +1385,26 @@ impl Checker {
     /// byte-matches too. Called only on the always-linked prelude module; the body is
     /// `cfg!(debug_assertions)`-guarded so it is a NO-OP in release yet stays COMPILED (so
     /// `harvest_protocol_shape` is never dead code).
+    /// TICKET-187 — copy each reserved protocol method's parameter names from its `std/prelude.chz`
+    /// declaration onto the live [`prebuilt_protocols`] entry, which carries none. The prelude decl is
+    /// the one source of those names; conformance (`param_name_mismatch`) and protocol-call binding
+    /// read them. Runs on both prelude paths (graph and single-module `seed_native_prelude_sigs`).
+    pub(super) fn adopt_reserved_protocol_labels(&mut self, prelude: &crate::ast::Module) {
+        for &name in crate::checker::RESERVED_PROTOCOLS {
+            let Some(shape) = self.harvest_protocol_shape(prelude, name) else {
+                continue;
+            };
+            let Some(live) = self.protocols.get_mut(name) else {
+                continue;
+            };
+            for (mname, sig) in &mut live.methods {
+                if let Some((_, decl)) = shape.methods.iter().find(|(n, _)| n == mname) {
+                    sig.labels = decl.labels.clone();
+                }
+            }
+        }
+    }
+
     pub(super) fn assert_native_protocol_shape_matches(&mut self, ast: &crate::ast::Module) {
         if !cfg!(debug_assertions) {
             return;
@@ -4545,6 +4575,7 @@ impl Checker {
                 self.structs.insert(tn.to_string(), info);
             }
         }
+        self.adopt_reserved_protocol_labels(&module);
     }
 
     /// Is this surface extern `Type` a RETURN-ONLY marshalling form (`owned_str`, `str?`, or

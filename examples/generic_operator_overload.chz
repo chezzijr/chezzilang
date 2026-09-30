@@ -6,18 +6,18 @@
 
 struct Box[T]:
     v: T
-    fn add(self, o: Box[T]) -> Box[T]:
+    fn add(self, other: Box[T]) -> Box[T]:
         return Box(self.v)
     fn neg(self) -> Box[T]:
         return Box(self.v)
-    fn compare(self, o: Box[T]) -> int:
+    fn compare(self, other: Box[T]) -> int:
         return 0
-    fn eq(self, o: Box[T]) -> bool:
+    fn eq(self, other: Box[T]) -> bool:
         return true
 
 enum Num[T]:
     Val(T)
-    fn add(self, o: Num[T]) -> Num[T]:
+    fn add(self, other: Num[T]) -> Num[T]:
         return self
     fn get(self) -> T:
         match self:

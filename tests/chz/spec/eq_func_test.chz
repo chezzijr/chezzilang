@@ -76,8 +76,8 @@ test fn a_closure_equals_itself():
 
 struct Box[T]:
     val: T
-    fn eq(self, o: Box[T]) -> bool where T: Eq:
-        return self.val == o.val
+    fn eq(self, other: Box[T]) -> bool where T: Eq:
+        return self.val == other.val
 
 test fn box_over_a_function_payload_satisfies_eq():
     assert (Box(g) == Box(g)) == true

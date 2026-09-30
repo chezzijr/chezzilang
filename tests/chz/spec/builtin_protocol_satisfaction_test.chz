@@ -10,7 +10,7 @@ protocol Sortable:
     fn sort(self) -> nil
 
 protocol Has:
-    fn contains(self, v: int) -> bool
+    fn contains(self, item: int) -> bool
 
 fn total(x: Sized) -> int:
     return x.len()

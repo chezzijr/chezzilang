@@ -720,7 +720,7 @@ pub struct Program {
     pub struct_names: Vec<Box<str>>,
     /// Modules in dependency order (deps first, entry last) — the run order.
     pub modules: Vec<ModuleProto>,
-    /// M23 — the `Eq` protocol hook (`fn eq(self, o: Self) -> bool`) a struct type declares, indexed
+    /// M23 — the `Eq` protocol hook (`fn eq(self, other: Self) -> bool`) a struct type declares, indexed
     /// by `tid`, carrying `(hook proto, home module index)` so a `==` HIT needs no further lookup and
     /// a MISS is one bounds-checked index instead of a string hash. `None` ⇒ that type has no hook —
     /// either no `eq` at all, or an `eq` with a GENERIC operand (`Opt[T].eq(self, x: T)`), which is an

@@ -8,8 +8,8 @@ import std.collections as col
 enum Lv:
     Lo
     Hi(int)
-    fn compare(self, o: Lv) -> int:
-        return self.rank() - o.rank()
+    fn compare(self, other: Lv) -> int:
+        return self.rank() - other.rank()
     fn rank(self) -> int:
         return match self:
             Lv.Lo: 0
@@ -17,8 +17,8 @@ enum Lv:
 
 struct LvS:
     n: int
-    fn compare(self, o: LvS) -> int:
-        return self.n - o.n
+    fn compare(self, other: LvS) -> int:
+        return self.n - other.n
 
 fn es() -> List[Lv]:
     return [Lv.Hi(3), Lv.Lo, Lv.Hi(1)]

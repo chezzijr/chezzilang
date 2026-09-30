@@ -4,8 +4,8 @@
 
 struct V:
     x: int
-    fn add(self, o: V) -> V:
-        return V(self.x + o.x)
+    fn add(self, other: V) -> V:
+        return V(self.x + other.x)
     fn str(self) -> str:
         return "V({self.x})"
 

@@ -2125,7 +2125,7 @@ the bound:
 protocol Tagged: fn tag(self) -> int
 struct Box[T]:
     v: T
-    fn eq(self, o: Box[T]) -> bool where T: Comparable: return true
+    fn eq(self, other: Box[T]) -> bool where T: Comparable: return true
 a: Tagged = Box(Tag(1))  →  type error: cannot assign Box[Tag] to variable of type Tagged
                              — Box[Tag]'s `eq` requires Tag: Comparable
 ```
@@ -2251,10 +2251,10 @@ body is checked once with `T` abstract).
 struct Ver:
     maj: int
     pre: str
-    fn compare(self, o: Ver) -> int:
-        return self.maj - o.maj
-    fn eq(self, o: Ver) -> bool:                 # `==` asks THIS, not the fields
-        return self.maj == o.maj
+    fn compare(self, other: Ver) -> int:
+        return self.maj - other.maj
+    fn eq(self, other: Ver) -> bool:                 # `==` asks THIS, not the fields
+        return self.maj == other.maj
 
 print(Ver(1, "alpha") == Ver(1, "beta"))         # true  — `pre` differs, `eq` says equal
 print(Ver(1, "alpha") != Ver(1, "beta"))         # false — `!=` is the same dispatch, negated
@@ -2269,7 +2269,7 @@ it is the *enum* that decides — one `eq` also answers `Shape.Circle == Shape.S
 Python `__eq__` compare across variants).
 
 `eq` is **not** a reserved name, so the operator dispatches only to the hook's exact signature,
-`fn eq(self, o: Self) -> bool`. A wrong arity, a concrete non-`Self` operand, or a non-`bool` return
+`fn eq(self, other: Self) -> bool`. A wrong arity, a concrete non-`Self` operand, or a non-`bool` return
 is rejected at the **declaration**, not left to answer wrongly at the operator:
 
 ```chezzi
@@ -2332,7 +2332,7 @@ struct K:
     a: int
     b: str
     fn hash(self) -> int: return self.a
-    fn eq(self, o: K) -> bool: return self.a == o.a
+    fn eq(self, other: K) -> bool: return self.a == o.a
 
 x := K(1, "x")
 y := K(1, "y")
@@ -2368,7 +2368,7 @@ cannot) enforce.
   struct Never:
       a: int
       fn hash(self) -> int: return self.a
-      fn eq(self, o: Never) -> bool: return false     # never reflexive — a bug, not a feature
+      fn eq(self, other: Never) -> bool: return false     # never reflexive — a bug, not a feature
 
   x := Never(1)
   s: Set[Never] = {x}
@@ -2404,8 +2404,8 @@ still does — but since a struct/enum satisfies `Eq` structurally, **`compare` 
 ```chezzi
 struct Ver:
     maj: int
-    fn compare(self, o: Ver) -> int:
-        return self.maj - o.maj
+    fn compare(self, other: Ver) -> int:
+        return self.maj - other.maj
     # no `eq` needed — Ver satisfies Comparable, and `==` stays structural
 ```
 
@@ -2473,10 +2473,10 @@ powering unary `-`). A struct/enum defining the matching method gets that operat
 struct Vec2:
     x: int
     y: int
-    fn add(self, o: Vec2) -> Vec2:
-        return Vec2(self.x + o.x, self.y + o.y)
-    fn div(self, o: Vec2) -> Vec2:
-        return Vec2(self.x / o.x, self.y / o.y)
+    fn add(self, other: Vec2) -> Vec2:
+        return Vec2(self.x + other.x, self.y + other.y)
+    fn div(self, other: Vec2) -> Vec2:
+        return Vec2(self.x / other.x, self.y / other.y)
     fn neg(self) -> Vec2:
         return Vec2(-self.x, -self.y)
 
@@ -2578,10 +2578,10 @@ runtime fault it used to be. A **plain** `obj[k] = v` never reads, so an asymmet
 ```chezzi
 struct Ring:
     data: List[int]
-    fn index(self, key: int) -> int:
-        return self.data[key % self.data.len()]
-    fn set_index(self, key: int, val: int):
-        self.data[key % self.data.len()] = val
+    fn index(self, k: int) -> int:
+        return self.data[k % self.data.len()]
+    fn set_index(self, k: int, v: int):
+        self.data[k % self.data.len()] = v
     fn slice(self, start: int? = None, end: int? = None, step: int? = None) -> List[int]:
         s := start ?? 0
         e := end ?? self.data.len()
@@ -2604,8 +2604,8 @@ dispatch to it, yielding `bool`. Built-in `list`/`set`/`str` test element/substr
 ```chezzi
 struct Bag:
     items: List[int]
-    fn contains(self, x: int) -> bool:
-        return x in self.items
+    fn contains(self, item: int) -> bool:
+        return item in self.items
 
 b := Bag([1, 2, 3])
 print(2 in b)          # true   — `contains` dispatched
@@ -2828,7 +2828,7 @@ inherits (`add`/`sub`/`mul`/`div`/`mod`/`compare`) — and **no** newtype, numer
 
 ```chezzi
 newtype Score = int:
-    fn add(self, o: Score) -> Score:      # error: operator method 'add' on a numeric newtype
+    fn add(self, other: Score) -> Score:      # error: operator method 'add' on a numeric newtype
         return Score(99)                  # is never dispatched as an operator …
     fn doubled(self) -> Score:            # fine — ordinary methods are unaffected
         return Score(int(self) * 2)
@@ -2849,7 +2849,7 @@ shape, one type-kind over:
 
 ```chezzi
 newtype Name = str:
-    fn eq(self, o: Name) -> bool:   # error: operator method 'eq' on a newtype is never dispatched
+    fn eq(self, other: Name) -> bool:   # error: operator method 'eq' on a newtype is never dispatched
         return true                 # as an operator — a newtype's '==' always unwraps to str's …
 ```
 

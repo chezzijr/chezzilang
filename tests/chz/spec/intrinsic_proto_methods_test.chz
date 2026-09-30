@@ -323,9 +323,9 @@ test fn numeric_newtype_operator_methods():
 
 struct Tol:
     n: int
-    fn eq(self, o: Tol) -> bool:
+    fn eq(self, other: Tol) -> bool:
         # deliberately unstructural: equal within ±1, so a structural answer is distinguishable
-        d := self.n - o.n
+        d := self.n - other.n
         return d == 0 or d == 1 or d == -1
 
 test fn eq_method_matches_the_equality_operator():

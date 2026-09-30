@@ -7,8 +7,8 @@ struct P:
     fn dup(self) -> Self:
         return self
     # `Self` as a parameter type.
-    fn add(self, o: Self) -> Self:
-        return P(self.x + o.x)
+    fn add(self, other: Self) -> Self:
+        return P(self.x + other.x)
 
 # Generic struct: `Self` carries the struct's own type args.
 struct Box[T]:

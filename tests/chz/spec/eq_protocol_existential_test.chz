@@ -54,8 +54,8 @@ struct Tag:
 struct Box[T]:
     val: T
     tag: str
-    fn eq(self, o: Box[T]) -> bool where T: Comparable:
-        return self.val.compare(o.val) == 0
+    fn eq(self, other: Box[T]) -> bool where T: Comparable:
+        return self.val.compare(other.val) == 0
     fn size(self) -> int:
         return 1
 

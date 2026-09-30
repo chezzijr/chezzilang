@@ -51,10 +51,10 @@ protocol Ord2:
 
 struct N:
     v: int
-    fn compare(self, o: N) -> int:
-        return self.v - o.v
-    fn eq(self, o: N) -> bool:
-        return self.v == o.v
+    fn compare(self, other: N) -> int:
+        return self.v - other.v
+    fn eq(self, other: N) -> bool:
+        return self.v == other.v
     fn tag(self) -> str:
         return "n"
 
@@ -73,8 +73,8 @@ protocol Bag:
 
 struct B:
     xs: List[int]
-    fn contains(self, x: int) -> bool:
-        return x in self.xs
+    fn contains(self, item: int) -> bool:
+        return item in self.xs
     fn tag(self) -> str:
         return "b"
 
@@ -107,8 +107,8 @@ protocol Vecish:
 
 struct V:
     x: int
-    fn add(self, o: V) -> V:
-        return V(self.x + o.x)
+    fn add(self, other: V) -> V:
+        return V(self.x + other.x)
     fn neg(self) -> V:
         return V(-self.x)
     fn tag(self) -> str:
