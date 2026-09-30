@@ -1,0 +1,484 @@
+# TICKET-189 -- the crossing-policy grid (D4, docs/decision-d4-airlock.md): "can the parent observe
+# this operand after the join?" is decided ONCE per bound slot by the checker and read by every
+# non-generator crossing route.
+#
+# Axes: route x argument source (explicit, keyword, default fill, variadic) x operand shape (fresh
+# literal, .copy(), named, call result, fresh holding a named) x callee body (writes, conditional).
+# Routes (every consumer of the fact, ticket `## Single source` item 1b): spawn f(), spawn obj.m(),
+# spawn lib.f(), spawn lib.K.f(), spawn value(), spawn: block, Executor submit/submit_result,
+# Channel receive, Shared/RwShared get, Atomic load, Shared store, module global (the spawn
+# snapshot), closure capture. `Executor.map` does not exist (`std/concurrency.chz`). A hand-off read
+# (Channel/Shared/RwShared/Atomic) is never marked, so those routes have no fresh-operand axis.
+# Generator rows belong to TICKET-190.
+#
+# Each row sends "ok <len>" when the task's push succeeded, or "fault" when the task wrote its copy
+# of parent data (layer C).
+
+import std.concurrency
+import airlock_crossing_policy_lib as lib
+
+fn t189_out(res: Result[int]) -> str:
+    match res:
+        Ok(n): return "ok {n}"
+        Err(_): return "fault"
+
+fn t189_try(xs: List[int]) -> str:
+    res := recover:
+        xs.push(3)
+        xs.len()
+    return t189_out(res)
+
+fn t189_w(xs: List[int], out: Channel[str]):
+    out.send(t189_try(xs))
+
+fn t189_dflt(out: Channel[str], acc: List[int] = []):
+    out.send(t189_try(acc))
+
+fn t189_pack(out: Channel[str], ...rest: int):
+    res := recover:
+        rest.push(3)
+        rest.len()
+    out.send(t189_out(res))
+
+fn t189_nested(xss: List[List[int]], out: Channel[str]):
+    res := recover:
+        xss.push([2])
+        xss.len()
+    out.send(t189_out(res))
+    out.send(t189_try(xss[0]))
+
+fn t189_cond(xs: List[int], out: Channel[str], c: bool):
+    res := recover:
+        if c:
+            xs.push(3)
+        xs.len()
+    out.send(t189_out(res))
+
+fn t189_id(xs: List[int]) -> List[int]:
+    return xs
+
+fn t189_add(xs: List[int]) -> int:
+    xs.push(2)
+    return xs.len()
+
+struct T189R:
+    n: int
+
+    fn w(self, xs: List[int], out: Channel[str]):
+        t189_w(xs, out)
+
+    fn dflt(self, out: Channel[str], acc: List[int] = []):
+        out.send(t189_try(acc))
+
+    fn pack(self, out: Channel[str], ...rest: int):
+        out.send(t189_try(rest))
+
+struct T189C:
+    n: int
+
+    fn bump(self, out: Channel[str]):
+        res := recover:
+            self.n += 1
+            self.n
+        out.send(t189_out(res))
+
+fn t189_mk() -> T189C:
+    return T189C(n=1)
+
+# ---- spawn f() ----
+
+test fn grid_policy_r1_fn_fresh_literal():
+    out := Channel[str](4)
+    parallel:
+        spawn t189_w([1], out)
+    assert out.recv() == "ok 2"
+
+test fn grid_policy_r2_fn_copy():
+    xs := [1]
+    out := Channel[str](4)
+    parallel:
+        spawn t189_w(xs.copy(), out)
+    assert out.recv() == "ok 2"
+    assert xs == [1]
+
+test fn grid_policy_r3_fn_call_result():
+    xs := [1]
+    out := Channel[str](4)
+    parallel:
+        spawn t189_w(t189_id(xs), out)
+    assert out.recv() == "fault"
+    assert xs == [1]
+
+test fn grid_policy_r4_fn_fresh_holding_named():
+    xs := [1]
+    out := Channel[str](4)
+    parallel:
+        spawn t189_nested([xs], out)
+    assert out.recv() == "ok 2"
+    assert out.recv() == "fault"
+    assert xs == [1]
+
+test fn grid_policy_r5_fn_keyword_fresh():
+    out := Channel[str](4)
+    parallel:
+        spawn t189_w(out=out, xs=[1])
+    assert out.recv() == "ok 2"
+
+test fn grid_policy_r6_fn_default_fill():
+    out := Channel[str](4)
+    parallel:
+        spawn t189_dflt(out)
+    assert out.recv() == "ok 1"
+
+test fn grid_policy_r7_fn_variadic():
+    out := Channel[str](4)
+    parallel:
+        spawn t189_pack(out, 1, 2)
+    assert out.recv() == "ok 3"
+
+test fn grid_policy_r14_fn_conditional_named():
+    xs := [1]
+    out := Channel[str](4)
+    parallel:
+        spawn t189_cond(xs, out, true)
+    assert out.recv() == "fault"
+    assert xs == [1]
+
+test fn grid_policy_r15_fn_conditional_fresh():
+    out := Channel[str](4)
+    parallel:
+        spawn t189_cond([1], out, true)
+    assert out.recv() == "ok 2"
+
+# ---- spawn obj.m() ----
+
+test fn grid_policy_r13_method_fresh_literal():
+    r := T189R(n=1)
+    out := Channel[str](4)
+    parallel:
+        spawn r.w([1], out)
+    assert out.recv() == "ok 2"
+
+test fn grid_policy_r24_method_default_fill():
+    r := T189R(n=1)
+    out := Channel[str](4)
+    parallel:
+        spawn r.dflt(out)
+    assert out.recv() == "ok 1"
+
+test fn grid_policy_r25_method_variadic():
+    r := T189R(n=1)
+    out := Channel[str](4)
+    parallel:
+        spawn r.pack(out, 1, 2)
+    assert out.recv() == "ok 3"
+
+test fn grid_policy_r26_method_keyword_fresh():
+    r := T189R(n=1)
+    out := Channel[str](4)
+    parallel:
+        spawn r.w(out=out, xs=[1])
+    assert out.recv() == "ok 2"
+
+test fn grid_policy_r27_method_named():
+    xs := [1]
+    r := T189R(n=1)
+    out := Channel[str](4)
+    parallel:
+        spawn r.w(xs, out)
+    assert out.recv() == "fault"
+    assert xs == [1]
+
+# ---- the receiver: no struct receiver is fresh (DEC-179 item 2) ----
+
+test fn grid_policy_r28_receiver_named():
+    c := T189C(n=1)
+    out := Channel[str](4)
+    parallel:
+        spawn c.bump(out)
+    assert out.recv() == "fault"
+    assert c.n == 1
+
+test fn grid_policy_r29_receiver_constructor():
+    out := Channel[str](4)
+    parallel:
+        spawn T189C(n=1).bump(out)
+    assert out.recv() == "fault"
+
+test fn grid_policy_r30_receiver_call_result():
+    out := Channel[str](4)
+    parallel:
+        spawn t189_mk().bump(out)
+    assert out.recv() == "fault"
+
+# ---- spawn lib.f() ----
+
+test fn grid_policy_r10_qualified_fresh_literal():
+    out := Channel[str](4)
+    parallel:
+        spawn lib.push_len([1], out)
+    assert out.recv() == "ok 2"
+
+test fn grid_policy_r31_qualified_default_fill():
+    out := Channel[str](4)
+    parallel:
+        spawn lib.dflt(out)
+    assert out.recv() == "ok 1"
+
+test fn grid_policy_r32_qualified_variadic():
+    out := Channel[str](4)
+    parallel:
+        spawn lib.pack(out, 1, 2)
+    assert out.recv() == "ok 3"
+
+test fn grid_policy_r33_qualified_keyword_fresh():
+    out := Channel[str](4)
+    parallel:
+        spawn lib.push_len(out=out, xs=[1])
+    assert out.recv() == "ok 2"
+
+test fn grid_policy_r34_qualified_named():
+    xs := [1]
+    out := Channel[str](4)
+    parallel:
+        spawn lib.push_len(xs, out)
+    assert out.recv() == "fault"
+    assert xs == [1]
+
+# ---- spawn lib.K.f() ----
+
+test fn grid_policy_r11_static_fresh_literal():
+    out := Channel[str](4)
+    parallel:
+        spawn lib.PolicyK.push_len([1], out)
+    assert out.recv() == "ok 2"
+
+test fn grid_policy_r35_static_default_fill():
+    out := Channel[str](4)
+    parallel:
+        spawn lib.PolicyK.dflt(out)
+    assert out.recv() == "ok 1"
+
+test fn grid_policy_r36_static_variadic():
+    out := Channel[str](4)
+    parallel:
+        spawn lib.PolicyK.pack(out, 1, 2)
+    assert out.recv() == "ok 3"
+
+test fn grid_policy_r37_static_keyword_fresh():
+    out := Channel[str](4)
+    parallel:
+        spawn lib.PolicyK.push_len(out=out, xs=[1])
+    assert out.recv() == "ok 2"
+
+test fn grid_policy_r38_static_named():
+    xs := [1]
+    out := Channel[str](4)
+    parallel:
+        spawn lib.PolicyK.push_len(xs, out)
+    assert out.recv() == "fault"
+    assert xs == [1]
+
+# ---- spawn value() ----
+
+test fn grid_policy_r9_value_fresh_literal():
+    g := t189_w
+    out := Channel[str](4)
+    parallel:
+        spawn g([1], out)
+    assert out.recv() == "ok 2"
+
+test fn grid_policy_r39_value_default_fill():
+    # The omitted slot is filled by the callee, inside the task.
+    g := t189_dflt
+    out := Channel[str](4)
+    parallel:
+        spawn g(out)
+    assert out.recv() == "ok 1"
+
+test fn grid_policy_r40_value_variadic():
+    g := t189_pack
+    out := Channel[str](4)
+    parallel:
+        spawn g(out, 1, 2)
+    assert out.recv() == "ok 3"
+
+test fn grid_policy_r41_value_named():
+    xs := [1]
+    g := t189_w
+    out := Channel[str](4)
+    parallel:
+        spawn g(xs, out)
+    assert out.recv() == "fault"
+    assert xs == [1]
+
+test fn grid_policy_r42_value_keyword_named():
+    xs := [1]
+    g := t189_w
+    out := Channel[str](4)
+    parallel:
+        spawn g(out=out, xs=xs)
+    assert out.recv() == "fault"
+    assert xs == [1]
+
+# ---- spawn: block (a capture is always a copy) ----
+
+test fn grid_policy_r43_block_fresh_literal():
+    # The literal is built inside the task.
+    out := Channel[str](4)
+    parallel:
+        spawn: t189_w([1], out)
+    assert out.recv() == "ok 2"
+
+test fn grid_policy_r44_block_copy():
+    xs := [1]
+    out := Channel[str](4)
+    parallel:
+        spawn: t189_w(xs.copy(), out)
+    assert out.recv() == "ok 2"
+    assert xs == [1]
+
+test fn grid_policy_r45_block_named_capture():
+    xs := [1]
+    h := t189_w
+    out := Channel[str](4)
+    parallel:
+        spawn: h(xs, out)
+    assert out.recv() == "fault"
+    assert xs == [1]
+
+# ---- Executor (the job's captures are a copy; its root is a hand-off) ----
+
+test fn grid_policy_r16_executor_submit_fresh():
+    out := Channel[str](4)
+    ex := Executor()
+    ex.submit(fn(): t189_w([1], out))
+    ex.shutdown()
+    assert out.recv() == "ok 2"
+
+test fn grid_policy_r17_executor_submit_named():
+    xs := [1]
+    h := t189_w
+    out := Channel[str](4)
+    ex := Executor()
+    ex.submit(fn(): h(xs, out))
+    ex.shutdown()
+    assert out.recv() == "fault"
+    assert xs == [1]
+
+test fn grid_policy_r46_executor_submit_result_named():
+    xs := [1]
+    ex := Executor()
+    got := ex.submit_result(fn() -> str: t189_try(xs)).recv()
+    ex.shutdown()
+    assert got == "fault"
+    assert xs == [1]
+
+test fn grid_policy_r47_executor_submit_result_fresh():
+    ex := Executor()
+    got := ex.submit_result(fn() -> str: t189_try([1])).recv()
+    ex.shutdown()
+    assert got == "ok 2"
+
+# ---- Channel (a receive is never marked, fresh or named send alike) ----
+
+test fn grid_policy_r18_channel_named_send():
+    ys := [1]
+    ch := Channel[List[int]](1)
+    out := Channel[str](4)
+    ch.send(ys)
+    parallel:
+        spawn: out.send(t189_try(ch.recv()))
+    assert out.recv() == "ok 2"
+    assert ys == [1]
+
+test fn grid_policy_r48_channel_fresh_send():
+    ch := Channel[List[int]](1)
+    out := Channel[str](4)
+    ch.send([1])
+    parallel:
+        spawn: out.send(t189_try(ch.recv()))
+    assert out.recv() == "ok 2"
+
+test fn grid_policy_r49_channel_task_to_parent():
+    xs := [1]
+    ch := Channel[List[int]](1)
+    parallel:
+        spawn: ch.send(xs)
+    assert t189_try(ch.recv()) == "ok 2"
+    assert xs == [1]
+
+# ---- Shared / RwShared / Atomic (a read is never marked) ----
+
+test fn grid_policy_r21_shared_get():
+    s := Shared[List[int]]([1])
+    out := Channel[str](4)
+    parallel:
+        spawn: out.send(t189_try(s.get()))
+    assert out.recv() == "ok 2"
+    assert s.get() == [1]
+
+test fn grid_policy_r50_rwshared_get():
+    s := RwShared[List[int]]([1])
+    out := Channel[str](4)
+    parallel:
+        spawn: out.send(t189_try(s.get()))
+    assert out.recv() == "ok 2"
+    assert s.get() == [1]
+
+test fn grid_policy_r51_atomic_load():
+    a := Atomic[List[int]]([1])
+    out := Channel[str](4)
+    parallel:
+        spawn: out.send(t189_try(a.load()))
+    assert out.recv() == "ok 2"
+    assert a.load() == [1]
+
+test fn grid_policy_r52_shared_store():
+    s := Shared[List[int]]([])
+    parallel:
+        spawn: s.set([1])
+    assert t189_try(s.get()) == "ok 2"
+
+# ---- module global (the spawn snapshot is always a copy) ----
+
+t189_g: List[int] = [1]
+
+fn t189_gpush(out: Channel[str]):
+    out.send(t189_try(t189_g))
+
+test fn grid_policy_r22_module_global():
+    h := t189_gpush
+    out := Channel[str](4)
+    parallel:
+        spawn h(out)
+    assert out.recv() == "fault"
+    assert t189_g == [1]
+
+# ---- closure capture (a copy across heaps, the enclosing mark in the same heap) ----
+
+fn t189_call(c: Channel[fn() -> int], out: Channel[str]):
+    f := c.recv()
+    res := recover:
+        f()
+    out.send(t189_out(res))
+
+test fn grid_policy_r19_closure_other_heap():
+    xs := [1]
+    c := Channel[fn() -> int](1)
+    out := Channel[str](4)
+    c.send(fn() -> int: t189_add(xs))
+    parallel:
+        spawn t189_call(c, out)
+    assert out.recv() == "fault"
+    assert xs == [1]
+
+test fn grid_policy_r20_closure_same_heap():
+    # The received closure is not marked, so its write runs. The send copied its captures by value,
+    # so the parent's `xs` is unchanged.
+    xs := [1]
+    c := Channel[fn() -> int](1)
+    c.send(fn() -> int: t189_add(xs))
+    f := c.recv()
+    assert f() == 2
+    assert xs == [1]

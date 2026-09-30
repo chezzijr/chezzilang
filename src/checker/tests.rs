@@ -36705,3 +36705,87 @@ fn spawn_callee_rebinding_its_param_before_writing_is_not_a_task_copy_write() {
         "fn f5(ys: List[int], out: Channel[int]):\n    ys = [1, 2]\n    ys.push(3)\n    out.send(ys.len())\nfn main():\n    xs := [1]\n    out := Channel[int](1)\n    parallel:\n        spawn f5(xs, out)\n    print(out.recv())\n    print(xs)\nmain()\n",
     );
 }
+
+/// TICKET-189 G1: layer A's compile-time verdict for every non-generator spawn route × argument
+/// source × callee body. A param is mapped through the checker's call plan (`bound_slots`), so a
+/// keyword-bound named arg a callee writes is rejected, and a variadic pack, a literal default fill
+/// or a param rebound before the write is not a task copy. Method, static and value callees decline
+/// to layer C (the runtime fault, G2 in `tests/chz/spec/airlock_crossing_policy_grid_test.chz`).
+#[test]
+fn airlock_crossing_policy_grid_compile_cells() {
+    const COPY: &str = "is this task's copy";
+    let prelude = "import std.concurrency\n\
+fn w(xs: List[int], out: Channel[int]):\n    xs.push(3)\n    out.send(xs.len())\n\
+fn rb(ys: List[int], out: Channel[int]):\n    ys = [1, 2]\n    ys.push(3)\n    out.send(ys.len())\n\
+fn rbc(ys: List[int], out: Channel[int], c: bool):\n    if c:\n        ys = [1]\n    ys.push(3)\n    out.send(ys.len())\n\
+fn wr(ys: List[int], out: Channel[int]):\n    ys.push(3)\n    ys = [1]\n    out.send(ys.len())\n\
+fn pk(out: Channel[int], ...rest: List[int]):\n    rest.push([9])\n    out.send(rest.len())\n\
+fn df(out: Channel[int], acc: List[int] = []):\n    acc.push(3)\n    out.send(acc.len())\n\
+struct R:\n    n: int\n\n    fn w(self, xs: List[int], out: Channel[int]):\n        xs.push(3)\n        out.send(xs.len())\n\n    fn rb(self, ys: List[int], out: Channel[int]):\n        ys = [1, 2]\n        ys.push(3)\n        out.send(ys.len())\n";
+    let single = |cell: &str| {
+        format!(
+            "{prelude}fn main():\n    xs := [1]\n    out := Channel[int](8)\n    r := R(n=1)\n    g := w\n    parallel:\n        {cell}\n    print(xs)\n    print(r.n)\n    print(g)\nmain()\n"
+        )
+    };
+    let lib = "fn w(xs: List[int], out: Channel[int]):\n    xs.push(3)\n    out.send(xs.len())\n\
+fn dflt(out: Channel[int], acc: List[int] = []):\n    acc.push(3)\n    out.send(acc.len())\n\
+fn pk(out: Channel[int], ...rest: List[int]):\n    rest.push([9])\n    out.send(rest.len())\n\
+struct K:\n    n: int\n\n    fn w(xs: List[int], out: Channel[int]):\n        xs.push(3)\n        out.send(xs.len())\n";
+    let graph = |cell: &str| {
+        format!(
+            "import std.concurrency\nimport g1lib as lib\nfn main():\n    xs := [1]\n    out := Channel[int](8)\n    parallel:\n        {cell}\n    print(xs)\nmain()\n"
+        )
+    };
+    // (cell, graph program?, expected: None = ok, Some(needle) = rejected)
+    let cells: &[(&str, bool, Option<&str>)] = &[
+        ("spawn rb(xs, out)", false, None),
+        ("spawn rbc(xs, out, true)", false, None),
+        ("spawn wr(xs, out)", false, Some(COPY)),
+        ("spawn pk(out, xs)", false, None),
+        ("spawn w(out=out, xs=xs)", false, Some(COPY)),
+        ("spawn w(out=out, xs=[1])", false, None),
+        ("spawn df(out)", false, None),
+        ("spawn w(xs, out)", false, Some(COPY)),
+        ("spawn w([1], out)", false, None),
+        ("spawn lib.w(xs, out)", true, Some(COPY)),
+        ("spawn lib.w(out=out, xs=xs)", true, Some(COPY)),
+        ("spawn lib.pk(out, xs)", true, None),
+        ("spawn lib.dflt(out)", true, None),
+        ("spawn lib.K.w(xs, out)", true, None),
+        ("spawn r.w(xs, out)", false, None),
+        ("spawn r.w(out=out, xs=xs)", false, None),
+        ("spawn r.rb(xs, out)", false, None),
+        ("spawn g(xs, out)", false, None),
+        ("spawn: w(out=out, xs=xs)", false, Some(COPY)),
+        ("spawn: w(xs, out)", false, Some(COPY)),
+        ("spawn: pk(out, xs)", false, None),
+        ("spawn: rb(xs, out)", false, None),
+        ("spawn: lib.w(xs, out)", true, Some(COPY)),
+    ];
+    let mut wrong = Vec::new();
+    for &(cell, is_graph, want) in cells {
+        let errs = if is_graph {
+            check_files(&[("g1lib.chz", lib), ("main.chz", &graph(cell))])
+        } else {
+            check_src(&single(cell))
+        };
+        let pass = match want {
+            None => errs.is_empty(),
+            Some(needle) => errs.iter().any(|e| e.message.contains(needle)),
+        };
+        if !pass {
+            wrong.push(format!("cell `{cell}`: expected {want:?}, got: {errs:?}"));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "{} wrong cell(s):\n{}",
+        wrong.len(),
+        wrong.join("\n")
+    );
+    // Executor has no `map` (`std/concurrency.chz` declares submit/submit_result/submit_outcome).
+    rejects(
+        "import std.concurrency\nfn main():\n    ex := Executor()\n    print(ex.map(fn(x: int) -> int: x, [1]))\nmain()\n",
+        "has no method 'map'",
+    );
+}

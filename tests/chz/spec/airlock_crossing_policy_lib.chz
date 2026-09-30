@@ -1,0 +1,34 @@
+# TICKET-189 -- module-qualified spawn callees for `airlock_crossing_policy_grid_test.chz`. Every
+# body pushes under `recover:` and sends "ok <len>" or "fault".
+
+fn policy_out(res: Result[int]) -> str:
+    match res:
+        Ok(n): return "ok {n}"
+        Err(_): return "fault"
+
+fn policy_try(xs: List[int]) -> str:
+    res := recover:
+        xs.push(3)
+        xs.len()
+    return policy_out(res)
+
+fn push_len(xs: List[int], out: Channel[str]):
+    out.send(policy_try(xs))
+
+fn dflt(out: Channel[str], acc: List[int] = []):
+    out.send(policy_try(acc))
+
+fn pack(out: Channel[str], ...rest: int):
+    out.send(policy_try(rest))
+
+struct PolicyK:
+    n: int
+
+    fn push_len(xs: List[int], out: Channel[str]):
+        out.send(policy_try(xs))
+
+    fn dflt(out: Channel[str], acc: List[int] = []):
+        out.send(policy_try(acc))
+
+    fn pack(out: Channel[str], ...rest: int):
+        out.send(policy_try(rest))
