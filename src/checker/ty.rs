@@ -225,6 +225,11 @@ pub struct FnLabels {
     /// equality-neutrality: two function types that differ only in how many arguments may be OMITTED
     /// are still the same type for assignment, unification, protocol conformance and display.
     pub min: Option<usize>,
+    /// `Some(i)` when the underlying declaration's parameter `i` is variadic (`...xs: T`, typed as
+    /// the collapsed `List[T]`), so a call through a value certain to hold that one function
+    /// (`labels_certain`) packs its surplus positionals there (TICKET-187). Equality-neutral like
+    /// `min`: a function type is not changed by how a call through it may be spelled.
+    pub variadic: Option<usize>,
 }
 
 impl PartialEq for FnLabels {
@@ -253,12 +258,22 @@ impl FnLabels {
 
     /// Labels with nothing known about optional arity.
     pub fn new(names: Vec<Option<String>>) -> FnLabels {
-        FnLabels { names, min: None }
+        FnLabels {
+            names,
+            min: None,
+            variadic: None,
+        }
     }
 
     /// Record that a call through this value may supply as few as `min` arguments.
     pub fn with_min(mut self, min: usize) -> FnLabels {
         self.min = Some(min);
+        self
+    }
+
+    /// Record the declaration's variadic parameter index, if any.
+    pub fn with_variadic(mut self, variadic: Option<usize>) -> FnLabels {
+        self.variadic = variadic;
         self
     }
 

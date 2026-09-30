@@ -808,6 +808,18 @@ fn t187_cells() -> Vec<Cell> {
             prints("1\n3"),
         ),
     ];
+    // Must still fail: packing and keywords need a binding certain to hold ONE function.
+    cells.push(cell(
+        "t187/fn_value/uncertain/variadic",
+        &format!("{v}fs := [v]\nprint(fs[0](1, 2, 3))\n"),
+        Expect::Rejects("expects 2 argument(s), got 3"),
+    ));
+    cells.push(lib_cell(
+        "fn_value/qualified/reassigned_named",
+        "fn f(a: int, b: int) -> str:\n    return \"{a}{b}\"\nfn h(b: int, a: int) -> str:\n    return \"{a}{b}\"\n",
+        "import m\ng := m.f\ng = m.h\nprint(g(b=1, a=2))\n",
+        Expect::Rejects("keyword arguments through 'g' are ambiguous"),
+    ));
     let local_print = "    print := fn(x: int, sep: str) -> int: x\n";
     for stmt in ["defer", "spawn"] {
         cells.push(cell(
@@ -874,14 +886,7 @@ fn run_cell(root: &Path, idx: usize, c: &Cell) -> Result<(), String> {
 
 /// Cells red on the pre-TICKET-182 binary. They must stay red here; when one turns green, remove
 /// it from the list.
-const PINNED_RED: &[&str] = &[
-    "t187/fn_value/bare/variadic",
-    "t187/fn_value/qualified/named",
-    "t187/fn_value/qualified/variadic",
-    "t187/fn_value/from_import/variadic",
-    "t187/print/defer/local_closure",
-    "t187/print/spawn/local_closure",
-];
+const PINNED_RED: &[&str] = &[];
 
 #[test]
 fn call_binding_grid() {

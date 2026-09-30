@@ -1,6 +1,7 @@
 // checker::sig — split out of checker/mod.rs. `super::*` == the `checker` module.
 // Function signatures and return-type inference passes.
 
+use super::setup::HeadBinding;
 use super::*;
 
 impl Checker {
@@ -584,6 +585,12 @@ impl Checker {
     /// TICKET-139 (W14-2) — an unannotated single-name `:=` of a closure literal or of a top-level
     /// user fn (no local shadow) holds exactly ONE known function, so its labels are certain. Shared
     /// by the `Let` arm and `seed_module_globals` (TICKET-183).
+    /// TICKET-187 — the one "this call head is the builtin" test: a first-class builtin name that
+    /// no binding in scope shadows (a local `print := fn(...)` is the local, not the builtin).
+    pub(super) fn names_builtin_fn(&self, name: &str) -> bool {
+        matches!(self.head_binding(name), HeadBinding::Unbound) && is_firstclass_builtin_fn(name)
+    }
+
     pub(super) fn let_holds_one_known_fn(
         &self,
         names: &[String],
@@ -595,6 +602,18 @@ impl Checker {
             && match &value.kind {
                 ExprKind::Closure { .. } => true,
                 ExprKind::Ident(n) => self.lookup(n).is_none() && self.functions.contains_key(n),
+                // TICKET-187: `g := m.f` holds one known function exactly as `g := f` does.
+                ExprKind::Field { obj, name, .. } => match &obj.kind {
+                    ExprKind::Ident(m) => {
+                        matches!(self.head_binding(m), HeadBinding::Module)
+                            && self
+                                .imported_modules
+                                .get(m)
+                                .and_then(|id| self.module_sigs.get(id))
+                                .is_some_and(|sig| sig.functions.contains_key(name))
+                    }
+                    _ => false,
+                },
                 _ => false,
             }
     }
@@ -3255,7 +3274,7 @@ impl Checker {
                         ExprKind::Ident(name)
                             if self.lookup(name).is_none()
                                 && !self.functions.contains_key(name)
-                                && !is_firstclass_builtin_fn(name) =>
+                                && !self.names_builtin_fn(name) =>
                         {
                             self.error(
                                 e.span,
@@ -3269,7 +3288,7 @@ impl Checker {
                         // typing would otherwise accept `defer print(a, sep="-")` and then print `a`
                         // with the default separator, a wrong result vs. the accepted contract.
                         ExprKind::Ident(name)
-                            if is_firstclass_builtin_fn(name) && !named.is_empty() =>
+                            if self.names_builtin_fn(name) && !named.is_empty() =>
                         {
                             self.error(
                                 e.span,
@@ -3357,7 +3376,7 @@ impl Checker {
                                 ExprKind::Ident(name)
                                     if self.lookup(name).is_none()
                                         && !self.functions.contains_key(name)
-                                        && !is_firstclass_builtin_fn(name) =>
+                                        && !self.names_builtin_fn(name) =>
                                 {
                                     self.error(
                                         e.span,
@@ -3369,7 +3388,7 @@ impl Checker {
                                 // which cannot carry `sep=`/`end=` — reject rather than silently drop
                                 // (mirrors the deferred-builtin guard).
                                 ExprKind::Ident(name)
-                                    if is_firstclass_builtin_fn(name) && !named.is_empty() =>
+                                    if self.names_builtin_fn(name) && !named.is_empty() =>
                                 {
                                     self.error(
                                         e.span,

@@ -2520,6 +2520,7 @@ impl Checker {
             let ret = sig.ret.clone();
             let labels = sig.labels.clone();
             let minp = sig.min_params;
+            let variadic = sig.variadic;
             // M24 — the fn-as-value wall, at the BARE read (`g := reset`): both for the Scope-A pin
             // below and for the rigid fallback after it.
             let wparams = sig.witness_params.clone();
@@ -2620,7 +2621,7 @@ impl Checker {
                 // A user fn's value type carries its param NAMES as labels, so `g := greet` yields a
                 // labelled function value and `g(name="Bob")` resolves through it — and its optional
                 // arity, so `f := g; f()` may omit the trailing defaults the CALLEE fills.
-                labels: FnLabels::new(labels).with_min(minp),
+                labels: FnLabels::new(labels).with_min(minp).with_variadic(variadic),
             };
         }
         // A first-class universe builtin fn used in value position (`f := ord`, HOF arg, bare
@@ -4084,8 +4085,9 @@ impl Checker {
                             Some(Ty::Func {
                                 params: fsig.params.clone(),
                                 ret: Box::new(fsig.ret.clone()),
-                                labels: crate::checker::FnLabels::none(fsig.params.len())
-                                    .with_min(fsig.min_params),
+                                labels: crate::checker::FnLabels::new(fsig.labels.clone())
+                                    .with_min(fsig.min_params)
+                                    .with_variadic(fsig.variadic),
                             })
                         } else {
                             sig.values.get(name).cloned()

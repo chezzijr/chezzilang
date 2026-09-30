@@ -34312,8 +34312,8 @@ fn a_qualified_static_call_with_too_many_arguments_still_rejects() {
 }
 
 /// TICKET-120 step 2 -- a cross-module struct-name collision keeps the qualified static call
-/// rejected: `collect_methods_by_struct` nulls the disagreeing key, and the new arm must not
-/// invent an agreement that isn't there.
+/// rejected: the two declarations disagree, and the new arm must not invent an agreement that
+/// isn't there.
 #[test]
 fn a_cross_module_struct_name_collision_binds_each_qualified_static_call() {
     // Each `lib.CC.new()` binds against its own module's declaration; `call_binding_grid`'s

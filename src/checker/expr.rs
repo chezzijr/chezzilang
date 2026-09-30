@@ -81,7 +81,7 @@ impl Checker {
         if !named.is_empty()
             && let ExprKind::Ident(name) = &callee.kind
             && name == "print"
-            && self.lookup(name).is_none()
+            && self.names_builtin_fn(name)
         {
             self.record_resolution(callee.id, Resolution::Builtin(name.clone()), callee.span);
             self.consume_named();
@@ -744,11 +744,15 @@ impl Checker {
             // A user fn / closure VALUE carrying keyword arguments (`g := greet; g(name="Bob")`):
             // resolve each label to a positional slot against the value's surface labels (Swift-style
             // keyword args through a value). Positional-only value calls skip this entirely (hot path).
+            // TICKET-187: a variadic value packs its surplus the same way, under the same certainty.
             Ty::Func {
                 params,
                 ret,
                 labels,
-            } if !named.is_empty() => {
+            } if !named.is_empty()
+                || (labels.variadic.is_some()
+                    && matches!(&callee.kind, ExprKind::Ident(n) if self.labels_certain(n).is_ok())) =>
+            {
                 // TICKET-139 (W14-2) — labels are surface-only (equality-neutral, DEC-108), so a
                 // callee that is not certain to hold ONE known function may bind a permuted set of
                 // names: `fs := [f, ren]; fs[1](a=1, b=2)` bound `a`/`b` by `f`'s labels and ran
@@ -788,13 +792,8 @@ impl Checker {
                 // A value's slots are its labels; its omitted slots are callee-filled from
                 // `min_params` on, so they must be a trailing run.
                 let minp = labels.min_or(params.len());
-                let value_slots: Vec<crate::desugar::SlotSpec> = (0..params.len())
-                    .map(|i| crate::desugar::SlotSpec {
-                        name: labels.names.get(i).cloned().flatten(),
-                        default: (i >= minp).then_some(crate::desugar::Dflt::CalleeFilled),
-                        is_variadic: false,
-                    })
-                    .collect();
+                let value_slots =
+                    callable_slots(&labels.names, minp, labels.variadic, params.len());
                 let Some(bound) = self.bind_call(Some(&value_slots), "closure", args, 0, span)
                 else {
                     return *ret;
