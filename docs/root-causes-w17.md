@@ -219,7 +219,18 @@ callee's type. Every consumer derives from it.
 **Grid:** statement kind × {break / return / diverging call at each nesting position} × consumer,
 including shadowed `exit`/`panic` (local, user fn, method) and qualified `os.exit`.
 
-## Family F — names: type positions, receivers, generic values, `.decode` (Family 1, incomplete)
+## Family F — names: type positions, receivers, generic values, `.decode` (Family 1)
+
+**Status: fixed by TICKET-187 (2026-09-30).** Four single sources replace the deciders below:
+(1) a call's parameter list — `callable_slots` builds the slots of every callee with no declaration
+(protocol requirement, fn value, with its variadic slot), `param_name_mismatch` is the one
+name-conformance test, `names_builtin_fn` is the one "this head is the builtin" test; `lend_specs`,
+`lend_bind` and `desugar::collect_methods` are deleted. (2) Type positions — both alias hand walks
+read `resolve_ty_ro`, and `bind_imported_type` binds a from-import's type whatever its value twin is.
+(3) Generic fn values — `generic_fn_value_sig` / `generic_fn_value_ty` pin or reject every read
+(bare, from-import, qualified). (4) `.decode[T]` — `ExprKind::DecodeCall` and the parser steal are
+deleted; only `decode` on `std.json` records `Resolution::Decode`. Grids:
+`tests/call_binding_grid.rs` and `tests/name_resolution_grid.rs` (`t187_cells`).
 
 **Facts and deciders:**
 - *A call's parameter list:* 6 deciders. `bind_call` covers user types only; builtin receivers have

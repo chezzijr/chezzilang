@@ -7,6 +7,17 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-187 (2026-09-30): Family F, names resolved in one place.** (1) Protocol parameter names
+  are part of conformance for user and prelude protocols (`param_name_mismatch`); a protocol call
+  binds by the protocol's own parameter list and omitting an argument is an arity error (DEC-075's
+  lending and `lend_specs` deleted; Go/Rust precedent). Corpus renamed to the prelude names (`other`,
+  `k`, `v`, `start`/`end`/`step`, `item`). (2) Fn values carry their variadic slot and a qualified
+  `g := m.f` keeps its labels (`callable_slots`); a local `print` in `defer`/`spawn` is the local.
+  (3) Imported and qualified generic fn values pin or are rejected like same-module ones
+  (`generic_fn_value_sig`). (4) Alias bounds through `module.Proto` and a from-imported alias with a
+  fn twin work (`bind_imported_type`). (5) `.decode[T]` is an ordinary member call; only
+  `std.json`'s `decode` is JSON (`ExprKind::DecodeCall` deleted). Grids in
+  `tests/call_binding_grid.rs` / `tests/name_resolution_grid.rs`.
 - **TICKET-186 (2026-09-30): Family D, one record per module slot.** `Checker::globals`
   (`src/checker/globals.rs`, `GlobalBinding`) holds every top-level declaration of a name plus its
   seeded / reached / cycle state, built before any body is walked; `scopes[0]` stays the one type

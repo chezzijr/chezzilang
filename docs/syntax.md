@@ -1366,7 +1366,7 @@ both) is a type error, a **bound violation** (`addone[str]` where `str` is not `
 **turbofish arity mismatch** (`pair[int]` for a two-param `pair[A, B]`) is a clean error, and the value
 keeps its **concrete** type downstream (`g := ident[int]` then `s: str = g(5)` is rejected — `g(5)` is
 `int`). The pin works through a **builtin container HOF parameter slot** exactly as through a
-user-defined HOF: passing a bare same-module generic fn to `.map`/`.filter`/`.fold` (and the other
+user-defined HOF: passing a bare generic fn (same-module or imported) to `.map`/`.filter`/`.fold` (and the other
 closure-taking container methods) pins its `[T]` from the element type — `[1,2,3].map(conv)` for a
 `conv[T](x: T) -> str` type-checks to `List[str]`, and `[1,2,3].fold(0, add)` for an `add[T: Add]` pins
 `T=int` and enforces the bound — even though those methods also carry their own result type parameter.

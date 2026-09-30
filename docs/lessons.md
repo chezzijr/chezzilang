@@ -88,6 +88,12 @@
   fact (every crossing route, every syntactic position a name can occupy, every receiver kind) and
   make each one an axis. A single source that only some consumers read is a single source for part
   of the grid.
+- **A structural protocol's parameter names are part of its contract** (TICKET-187). A call through
+  a protocol binds keywords by the protocol's names, so an implementor that permutes them
+  (`replace(self, new, old)`) silently swapped arguments. Conformance now checks names at every
+  arity, and a protocol call never borrows an implementor's default (Go and Rust have none through
+  an interface). A table keyed by METHOD NAME across every struct is never a substitute for the
+  receiver's own declaration.
 - **Stdlib gaps are deferred on verified cost, never on "nobody asked."** A reference-language idiom
   *is* the need. `Reader.lines()` was deferred on a claimed cost ("needs a new lazy Obj variant") that
   was false — a generator over `read_line()` streams lazily by construction — and building it surfaced
