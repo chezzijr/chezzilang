@@ -148,6 +148,44 @@ impl Checker {
         }
     }
 
+    /// Is the top-level let at `stmt_span` the first let of the seeded global `name`?
+    pub(super) fn first_let_refines(&self, name: &str, stmt_span: Span) -> bool {
+        self.scopes.len() == 1
+            && self
+                .globals
+                .get(name)
+                .is_some_and(|g| g.seeded && g.first_let() == Some(stmt_span))
+    }
+
+    /// The first let of a seeded global writes the slot the bodies above it already typed and
+    /// refined (TICKET-186, K4): merge `declared` into the seed in `scopes[0]` and return `true`.
+    /// It never calls `declare`, `reject_redeclare` or `declare_const`: DEC-032's untaint is for a
+    /// fresh binding, and this is not one. Returns `false` when this is not that let, or when
+    /// `declared` is not a refinement of the seed (a retype; the caller's `reject_redeclare`
+    /// reports it against the seed).
+    pub(super) fn refine_first_let(&mut self, name: &str, declared: Ty, stmt_span: Span) -> bool {
+        let Some(merged) = self.first_let_merge(name, &declared, stmt_span) else {
+            return false;
+        };
+        self.reach_global(name);
+        self.scopes[0].insert(name.to_string(), merged);
+        true
+    }
+
+    /// The type `refine_first_let` would write, or `None` when it would return `false`.
+    pub(super) fn first_let_merge(&self, name: &str, declared: &Ty, stmt_span: Span) -> Option<Ty> {
+        if !self.first_let_refines(name, stmt_span) {
+            return None;
+        }
+        let prev = self.scopes[0].get(name).cloned().unwrap_or(Ty::Unknown);
+        let merged = if prev.is_unknown() {
+            declared.clone()
+        } else {
+            merge_unknown(&prev, declared)
+        };
+        (merge_unknown(declared, &merged) == merged).then_some(merged)
+    }
+
     /// Mark `name`'s first let as reached, if it is a seeded global.
     pub(super) fn reach_global(&mut self, name: &str) {
         if let Some(g) = self.globals.get_mut(name) {

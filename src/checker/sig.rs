@@ -302,9 +302,9 @@ impl Checker {
     }
 
     /// TICKET-183 — each top-level `let` that is the FIRST let of at least one seeded global, with
-    /// the index of each such name in the let's `names`, in source order.
+    /// the index of each such name in the let's `names`, in source order. A name repeated in one
+    /// destructure gives its LAST index: that element is the one the slot holds (TICKET-186).
     fn seeded_first_lets<'a>(&self, stmts: &'a [Stmt]) -> Vec<(&'a Stmt, Vec<usize>)> {
-        let mut seen: HashSet<&str> = HashSet::new();
         let mut out = Vec::new();
         for s in stmts {
             let StmtKind::Let { names, .. } = &s.kind else {
@@ -312,8 +312,11 @@ impl Checker {
             };
             let firsts: Vec<usize> = (0..names.len())
                 .filter(|&i| {
-                    seen.insert(names[i].as_str())
-                        && self.globals.get(&names[i]).is_some_and(|g| g.seeded)
+                    !names[i + 1..].contains(&names[i])
+                        && self
+                            .globals
+                            .get(&names[i])
+                            .is_some_and(|g| g.seeded && g.first_let() == Some(s.span))
                 })
                 .collect();
             if !firsts.is_empty() {
@@ -2540,25 +2543,21 @@ impl Checker {
             } => {
                 let is_const = *is_const;
                 let (annotated, val_ty) = self.let_value_ty(names, ty, value, span);
-                // TICKET-183: a seeded module global's first let. `seed_module_globals` put its type
-                // (and `const` mark) in scope 0 so bodies could see it; remove them here so
-                // `reject_redeclare`, `declare` and `check_destructure` see exactly the state they
-                // would without the seed, and from here on top-level statements see the let's own
-                // binding.
-                for n in names {
-                    if self.scopes.len() == 1 && self.globals.get(n).is_some_and(|g| g.unreached())
-                    {
+                // TICKET-183: from a seeded module global's first let on, top-level statements see
+                // it. Its seed in scope 0 stays: the first let refines it (`refine_first_let`,
+                // TICKET-186), because the bodies above were typed against it.
+                if self.scopes.len() == 1 {
+                    for n in names {
                         self.reach_global(n);
-                        self.scopes[0].remove(n);
                     }
                 }
                 if names.len() > 1 {
                     // destructuring let `a, b := expr` — `expr` must be a tuple of matching arity.
-                    self.check_destructure(names, name_spans, &val_ty, value.span);
+                    self.check_destructure(names, name_spans, &val_ty, value.span, span);
                     return;
                 }
                 let name = &names[0];
-                let declared = match annotated {
+                let mut declared = match annotated {
                     Some(expected) => {
                         if !self.assignable(&expected, &val_ty) {
                             let note = self.protocol_note(&expected, &val_ty);
@@ -2581,6 +2580,12 @@ impl Checker {
                 // and it may repeat with any types). The annotation check above still ran.
                 if name == "_" {
                     return;
+                }
+                // TICKET-186: the first let of a seeded module global refines the seed the bodies
+                // above it typed and pinned; it never wipes it. `declared` is the refined type.
+                let refined = self.refine_first_let(name, declared.clone(), span);
+                if refined {
+                    declared = self.scopes[0][name].clone();
                 }
                 // PART A: an UN-annotated empty literal (`b := []`/`{}`/`Set()`) whose element/key/value
                 // slot is still `Unknown` records a pending site; if no later op constrains it, the
@@ -2656,10 +2661,14 @@ impl Checker {
                 } else {
                     None
                 };
-                self.reject_redeclare(name, &declared, span);
+                if !refined {
+                    self.reject_redeclare(name, &declared, span);
+                }
                 // Computed BEFORE `declare` so `h := h` cannot see itself.
                 let one_known_fn = self.let_holds_one_known_fn(names, ty, value);
-                self.declare(name, declared);
+                if !refined {
+                    self.declare(name, declared);
+                }
                 if one_known_fn && let Some(s) = self.owning_scope(name) {
                     self.kw_certain.insert((s, name.to_string()));
                 }
@@ -3996,11 +4005,14 @@ impl Checker {
         name_spans: &[Span],
         val_ty: &Ty,
         span: Span,
+        stmt_span: Span,
     ) {
+        // TICKET-186: a name whose first let this is refines its seed (`refine_first_let`)
+        // instead of being re-declared.
         match val_ty {
             Ty::Unknown => {
                 for name in names {
-                    if name != "_" {
+                    if name != "_" && !self.refine_first_let(name, Ty::Unknown, stmt_span) {
                         self.declare(name, Ty::Unknown);
                     }
                 }
@@ -4018,12 +4030,24 @@ impl Checker {
                 // the sound `x := "a"` / `x, x := (1, "b")`; judging only the FIRST occurrence would
                 // instead miss the real retype in `x := 1` / closure `-> int` / `x, x := (2, "s")`.
                 // TICKET-142 (W14-32): a `_` element is the blank identifier — never declared.
+                // TICKET-186: a name whose first let this is, and whose element refines its seed, is
+                // not re-declared (`refine_first_let`); a retype of the seed is judged as before.
+                let refines: Vec<bool> = names
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| {
+                        !names[i + 1..].contains(name)
+                            && self.first_let_merge(name, &elems[i], stmt_span).is_some()
+                    })
+                    .collect();
                 for (i, name) in names.iter().enumerate() {
-                    if name != "_" && !names[i + 1..].contains(name) {
+                    if name != "_" && !names[i + 1..].contains(name) && !refines[i] {
                         self.reject_redeclare(name, &elems[i], name_spans[i]);
                     }
                 }
-                for ((name, ty), name_span) in names.iter().zip(elems).zip(name_spans.iter()) {
+                for (i, ((name, ty), name_span)) in
+                    names.iter().zip(elems).zip(name_spans.iter()).enumerate()
+                {
                     if name == "_" {
                         continue;
                     }
@@ -4031,6 +4055,17 @@ impl Checker {
                     // not an `Expr` the probe visits; record its tuple-element type at its own span
                     // (no-op unless a probe is armed → zero overhead on normal checks).
                     self.hover_record_at(*name_span, ty, HoverKind::Local, None);
+                    // An earlier occurrence of a refined name is a transient no code observes.
+                    let refined_later = names[i + 1..].contains(name)
+                        && names
+                            .iter()
+                            .rposition(|n| n == name)
+                            .is_some_and(|j| refines[j]);
+                    if refined_later
+                        || (refines[i] && self.refine_first_let(name, ty.clone(), stmt_span))
+                    {
+                        continue;
+                    }
                     self.declare(name, ty.clone());
                 }
             }
@@ -4044,7 +4079,7 @@ impl Checker {
                     ),
                 );
                 for name in names {
-                    if name != "_" {
+                    if name != "_" && !self.refine_first_let(name, Ty::Unknown, stmt_span) {
                         self.declare(name, Ty::Unknown);
                     }
                 }
@@ -4055,7 +4090,7 @@ impl Checker {
                     format!("cannot destructure non-tuple value of type {other}"),
                 );
                 for name in names {
-                    if name != "_" {
+                    if name != "_" && !self.refine_first_let(name, Ty::Unknown, stmt_span) {
                         self.declare(name, Ty::Unknown);
                     }
                 }
