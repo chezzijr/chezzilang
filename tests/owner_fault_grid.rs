@@ -7,14 +7,14 @@
 //! `DEADLINE_MS`, well past the child's 50 ms fault. CPython `asyncio.TaskGroup` cancels the body at
 //! once; Go's `panic` ends the process at 50 ms. A `defer` body is never cut (it is uncancellable).
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 /// Runs `src` at `threads` workers; `None` = still running after `limit` (killed). With `stdin`,
-/// stdin is a pipe nobody ever writes to.
+/// stdin is a pipe that receives one line, [`FED_LINE`], at `DEADLINE_MS` and is then held open.
 fn run_with(
     name: &str,
     src: &str,
@@ -45,12 +45,25 @@ fn run_with(
         cmd.env_remove("CHEZZI_SCHED_SEED");
     }
     let mut child = cmd.spawn().expect("spawn chezzi");
-    // Held open, never written, until the child exits.
-    let held_stdin = child.stdin.take();
+    // A blocking stdin read has no checkpoint until it returns (`docs/stdlib.md` "Blocking calls
+    // cannot be interrupted"; Go's `os.Stdin.Read` and CPython's `input()` are not cancelled either),
+    // so the Stdin row is satisfied at `DEADLINE_MS` and the cut is judged AT the return.
+    let mut held_stdin = child.stdin.take();
+    let mut fed = false;
+    let feed_at = Duration::from_millis(DEADLINE_MS.parse().expect("DEADLINE_MS is an integer"));
     let start = Instant::now();
     let status = loop {
         if let Some(s) = child.try_wait().expect("wait") {
             break Some(s);
+        }
+        if !fed
+            && start.elapsed() >= feed_at
+            && let Some(w) = held_stdin.as_mut()
+        {
+            // The child may already be gone (a cut), so a broken pipe is not a failure.
+            let _ = w.write_all(format!("{FED_LINE}\n").as_bytes());
+            let _ = w.flush();
+            fed = true;
         }
         if start.elapsed() > limit {
             let _ = child.kill();
@@ -79,7 +92,10 @@ fn run_with(
 }
 
 /// The deadline of every self-ending op, in ms: it only has to outlast the child's 50 ms fault.
-const DEADLINE_MS: &str = "1500";
+const DEADLINE_MS: &str = "600";
+
+/// The one line the Stdin row's pipe receives at `DEADLINE_MS`. A cut owner never prints it.
+const FED_LINE: &str = "fedline";
 
 /// One blocking op: `spec` is its `TABLE` name in `src/vm/block.rs` (or `"Cpu"`), `body` the text
 /// of `fn op`, `prelude` top-level setup, `self_ends` = the op returns on its own deadline.
@@ -165,6 +181,7 @@ fn rows() -> Vec<Row> {
         Row {
             spec: "Stdin",
             body: "    print(io.input(\"\"))",
+            self_ends: true,
             stdin: true,
             ..R
         },
@@ -392,6 +409,7 @@ fn check_cell(c: &Cell) -> Vec<String> {
                     && err.contains("boom")
                     && !out.contains("after")
                     && !out.contains("sibling sent")
+                    && !out.contains(FED_LINE)
             }
             (Some((code, out, err)), Expect::NotCut) => {
                 *code != 0 && err.contains("boom") && out.contains("after")
