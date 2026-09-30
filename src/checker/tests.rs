@@ -36517,3 +36517,70 @@ fn t186_module_level_return_rejected() {
     // Owner decision 2026-09-30: CPython `SyntaxError: 'return' outside function`.
     rejects("return\nx := 5\n", "'return' outside a function");
 }
+
+/// TICKET-186 grid: one record per module slot. Axes: the fact (Option refinement,
+/// empty-collection refinement, const, keyword labels, init) x the writer's position (a body
+/// above the first let, below it, between two lets, none) x the reader's position (a fn body, a
+/// closure, a `defer:`/`spawn:` block, a top-level statement). `None` = check clean, `Some("")` =
+/// any error, `Some(s)` = an error containing `s`.
+#[test]
+fn t186_module_global_record_grid() {
+    const MIX: &str = "is declared both const and plain";
+    const AMB: &str = "keyword arguments through 'f' are ambiguous";
+    const RET: &str = "'return' outside a function";
+    let f = "fn f(a: int, b: int) -> int:\n    return a * 10 + b\n";
+    let l1 = "f := fn(a: int, b: int) -> int: a * 10 + b\n";
+    let l2 = "f := fn(b: int, a: int) -> int: a * 10 + b\n";
+    let cells: Vec<(&str, String, Option<&str>)> = vec![
+        ("c01", "fn w():\n    z = Some(\"ab\")\nz := None\nw()\nfn r() -> int:\n    return z ?? 0\nprint(r())\n".into(), Some("")),
+        ("c02", "z := None\nfn w():\n    z = Some(\"ab\")\nw()\nfn r() -> int:\n    return z ?? 0\nprint(r())\n".into(), Some("")),
+        ("c03", "z := None\nfn w():\n    z = Some(\"ab\")\nz := None\nw()\nfn r() -> int:\n    return z ?? 0\nprint(r())\n".into(), Some("")),
+        ("c04", "fn w():\n    xs = [\"a\"]\nxs := []\nw()\nfn r() -> int:\n    return xs[0]\nprint(r())\n".into(), Some("")),
+        ("c05", "xs := []\nfn w():\n    xs = [\"a\"]\nw()\nfn r() -> int:\n    return xs[0]\nprint(r())\n".into(), Some("")),
+        ("c06", "xs := []\nfn w():\n    xs = [\"a\"]\nxs := []\nw()\nfn r() -> int:\n    return xs[0]\nprint(r())\n".into(), Some("")),
+        ("c07", "PI := 2.0\nfn bump():\n    PI = 3.0\nPI: const float = 3.14\nbump()\nprint(PI)\n".into(), Some(MIX)),
+        ("c20", "PI := 1.0\nPI: const float = 2.0\nprint(PI)\n".into(), Some(MIX)),
+        ("c08", "PI: const float = 3.14\nPI := 2.0\nprint(PI)\n".into(), Some("cannot re-declare const binding 'PI'")),
+        ("c09", "fn bump():\n    PI = 3.0\nPI: const float = 3.14\nbump()\nprint(PI)\n".into(), Some("cannot reassign const binding 'PI'")),
+        ("c10", "PI: const float = 3.14\nfn bump():\n    PI = 3.0\nbump()\nprint(PI)\n".into(), Some("cannot reassign const binding 'PI'")),
+        ("c11", "PI: const float = 1.0\nPI: const float = 2.0\nprint(PI)\n".into(), Some("cannot re-declare const binding 'PI'")),
+        ("c12", format!("{f}fn call() -> int:\n    return f(a=1, b=2)\n{l2}print(call())\n"), Some(AMB)),
+        ("c13", format!("{f}x := call()\n{l2}fn call() -> int:\n    return f(a=1, b=2)\nprint(x)\n"), Some(AMB)),
+        ("c14", format!("{l1}fn call() -> int:\n    return f(a=1, b=2)\n{l2}print(call())\n"), Some(AMB)),
+        ("c15", format!("{f}fn call() -> int:\n    return f(1, 2)\n{l2}print(call())\n"), None),
+        ("c16", format!("{f}fn call() -> int:\n    return f(a=1, b=2)\nprint(call())\n"), None),
+        ("c22", format!("{f}print(f(a=1, b=2))\n{l2}"), None),
+        ("c23", format!("{f}{l2}print(f(a=1, b=2))\n"), None),
+        ("c24", format!("{l1}{l2}print(f(a=1, b=2))\n"), Some(AMB)),
+        ("c25", format!("{l1}{l2}fn call() -> int:\n    return f(a=1, b=2)\nprint(call())\n"), Some(AMB)),
+        ("c26", format!("{f}defer print(f(a=1, b=2))\n{l2}print(0)\n"), None),
+        // Owner note 2026-09-30: a closure, a top-level `defer:` block and a `spawn:` block run
+        // after later declarations; a `parallel:` body runs in place.
+        ("c27", format!("{l1}g := fn() -> int: f(a=1, b=2)\n{l2}print(g())\n"), Some(AMB)),
+        ("c28", format!("{f}defer:\n    print(f(a=1, b=2))\n{l2}"), Some(AMB)),
+        ("c29", format!("{f}spawn:\n    print(f(a=1, b=2))\n{l2}"), Some(AMB)),
+        ("c30", format!("{f}parallel:\n    print(f(a=1, b=2))\n{l2}"), None),
+        ("c17", "return\nx := 5\n".into(), Some(RET)),
+        ("c18", "if true:\n    return\nx := 5\n".into(), Some(RET)),
+        ("c19", "fn f():\n    return\nf()\n".into(), None),
+    ];
+    let mut bad = Vec::new();
+    for (label, src, want) in &cells {
+        let errs = check_src(src);
+        let pass = match want {
+            None => errs.is_empty(),
+            Some("") => !errs.is_empty(),
+            Some(s) => errs.iter().any(|e| e.message.contains(s)),
+        };
+        if !pass {
+            bad.push(format!("{label}: want {want:?}, got {errs:?}"));
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "{} of {} cells differ:\n{}",
+        bad.len(),
+        cells.len(),
+        bad.join("\n")
+    );
+}

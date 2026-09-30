@@ -13266,3 +13266,98 @@ fn module_scope_order_grid() {
         got.join("\n")
     );
 }
+
+/// TICKET-186 grid: every read path of a module slot faults on the TICKET-183 uninit marker.
+/// `run_file` skips the checker, so a module-level `return` (a check error since TICKET-186)
+/// still leaves a let slot uninitialized at run time. A cell passes only on `Err` with the quoted
+/// message; `Ok`, a VM panic or another message fails it. Cell c21 is the checker verdict for a
+/// fn reached through `import f from lib` and redeclared by a later let.
+#[test]
+fn t186_uninit_read_paths_fault() {
+    let ret = "return\nx := 5\n";
+    let at2 = "'x' is read before its initialization at line 2";
+    let at4 = "'x' is read before its initialization at line 4";
+    let cells: &[(&str, &str, &str, &str)] = &[
+        ("R1 m.x + 1", ret, "import m\nprint(m.x + 1)\n", at2),
+        ("R2 print(m.x)", ret, "import m\nprint(m.x)\n", at2),
+        (
+            "R3 m.f()",
+            "return\nf := fn() -> int: 1\n",
+            "import m\nprint(m.f())\n",
+            "'f' is read before its initialization at line 2",
+        ),
+        ("R4 from-import", ret, "import x from m\nprint(x)\n", at2),
+        (
+            "R6 body read",
+            "fn g() -> int:\n    return x\nreturn\nx := 5\n",
+            "import m\nprint(m.g())\n",
+            at4,
+        ),
+        (
+            "R7 spawn snapshot",
+            "fn g():\n    print(x)\nfn h():\n    parallel:\n        spawn g()\nreturn\nx := 5\n",
+            "import m\nm.h()\n",
+            "'x' is read before its initialization",
+        ),
+        (
+            "R8 generator frame",
+            "fn gen() -> Iterator[int]:\n    yield x\nreturn\nx := 5\n",
+            "import m\nfor v in m.gen():\n    print(v)\n",
+            at4,
+        ),
+    ];
+    let verdict = |r: std::thread::Result<RunOutput>, want: &str| -> Option<String> {
+        match r {
+            Err(_) => Some("VM panic".to_string()),
+            Ok((out, _, Ok(()), _)) => Some(format!("Ok, stdout {out:?}")),
+            Ok((_, _, Err(e), _)) if e.message.contains(want) => None,
+            Ok((_, _, Err(e), _)) => Some(format!("fault {:?}", e.message)),
+        }
+    };
+    let mut bad = Vec::new();
+    for (label, m_src, main_src, want) in cells {
+        let t = TmpDir::new();
+        t.write("m.chz", m_src);
+        let entry = t.write("main.chz", main_src);
+        let r = std::panic::catch_unwind(|| run_file(&entry));
+        if let Some(got) = verdict(r, want) {
+            bad.push(format!("{label}: want {want:?}, got {got}"));
+        }
+    }
+    // R5: the manifest entrypoint reads its fn from the module slot.
+    {
+        let want = "'main' is read before its initialization at line 2";
+        let t = TmpDir::new();
+        let entry = t.write("main.chz", "return\nmain := fn(): print(1)\n");
+        let r = std::panic::catch_unwind(|| run_file_entry(&entry, "main"));
+        if let Some(got) = verdict(r, want) {
+            bad.push(format!("R5 entrypoint: want {want:?}, got {got}"));
+        }
+    }
+    // c21: keyword labels through an imported fn the module redeclares below the body.
+    {
+        let want = "keyword arguments through 'f' are ambiguous";
+        let t = TmpDir::new();
+        t.write(
+            "lib.chz",
+            "fn f(a: int, b: int) -> int:\n    return a * 10 + b\n",
+        );
+        let entry = t.write(
+            "main.chz",
+            "import f from lib\nfn call() -> int:\n    return f(a=1, b=2)\nf := fn(b: int, a: int) -> int: a * 10 + b\nprint(call())\n",
+        );
+        let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+        let errs = crate::checker::check_graph(&graph)
+            .err()
+            .unwrap_or_default();
+        if !errs.iter().any(|e| e.message.contains(want)) {
+            bad.push(format!("c21: want {want:?}, got {errs:?}"));
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "{} cells differ:\n{}",
+        bad.len(),
+        bad.join("\n")
+    );
+}
