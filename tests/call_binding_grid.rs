@@ -696,8 +696,129 @@ fn lent_default_cells() -> Vec<Cell> {
     ]
 }
 
+/// TICKET-187: receiver kind (builtin, protocol with a builtin conformer, permuted or mismatched
+/// implementor, two implementors), fn-value source (bare, qualified, from-import) x (named,
+/// variadic omit, variadic pack), and `print` in `defer`/`spawn` under shadowing.
+fn t187_cells() -> Vec<Cell> {
+    let rep = "protocol Rep:\n    fn replace(self, old: str, new: str) -> str\nfn run(p: Rep) -> str:\n    return p.replace(old=\"a\", new=\"b\")\n";
+    let doc = |params: &str| {
+        format!(
+            "struct Doc:\n    text: str\n    fn replace(self, {params}) -> str:\n        return self.text.replace(old, new)\n"
+        )
+    };
+    let f2 = "fn f(a: int, b: int) -> str:\n    return \"{a}{b}\"\n";
+    let v = "fn v(a: int, ...xs: int) -> int:\n    return a + xs.len()\n";
+    let lib_cell = |name: &str, lib: &str, main: &str, want: Expect| Cell {
+        name: format!("t187/{name}"),
+        files: with_lib("m.chz", lib.to_string(), main.to_string()),
+        expect: want,
+    };
+    let mut cells = vec![
+        cell(
+            "t187/protocol/permuted_implementor",
+            &format!(
+                "{rep}{}print(run(Doc(\"aaa\")))\n",
+                doc("new: str, old: str")
+            ),
+            Expect::Rejects("declares 'old'"),
+        ),
+        cell(
+            "t187/protocol/matching_implementor",
+            &format!(
+                "{rep}{}print(run(Doc(\"aaa\")))\n",
+                doc("old: str, new: str")
+            ),
+            prints("bbb"),
+        ),
+        cell(
+            "t187/protocol/builtin_conformer_named",
+            &format!("{rep}print(run(\"aaa\"))\n"),
+            prints("bbb"),
+        ),
+        cell(
+            "t187/protocol/builtin_conformer_positional",
+            "protocol Rep:\n    fn replace(self, old: str, new: str) -> str\nfn run(p: Rep) -> str:\n    return p.replace(\"a\", \"b\")\nprint(run(\"aaa\"))\n",
+            prints("bbb"),
+        ),
+        cell(
+            "t187/builtin_str/named",
+            "print(\"aaa\".replace(old=\"a\", new=\"b\"))\n",
+            Expect::Rejects("takes no named arguments"),
+        ),
+        cell(
+            "t187/protocol/one_param_mismatch",
+            "protocol Sh:\n    fn put(self, item: int) -> int\nstruct B:\n    fn put(self, x: int) -> int:\n        return x\nfn use_it(s: Sh) -> int:\n    return s.put(1)\nprint(use_it(B()))\n",
+            Expect::Rejects("declares 'item'"),
+        ),
+        cell(
+            "t187/protocol/prelude_mismatch",
+            "struct P:\n    x: int\n    fn eq(self, other: P) -> bool:\n        return self.x == other.x\n    fn compare(self, o: P) -> int:\n        return self.x - o.x\nfn lo[T: Comparable](a: T, b: T) -> T:\n    return a\nprint(lo(P(1), P(2)).x)\n",
+            Expect::Rejects("declares 'other'"),
+        ),
+        cell(
+            "t187/protocol/two_implementors_named",
+            "protocol Sh:\n    fn put(self, item: int, n: int) -> str\nstruct A:\n    fn put(self, item: int, n: int) -> str:\n        return \"A{item}{n}\"\nstruct B:\n    fn put(self, item: int, n: int) -> str:\n        return \"B{item}{n}\"\nfn use_it(s: Sh) -> str:\n    return s.put(n=2, item=1)\nprint(use_it(A()))\nprint(use_it(B()))\n",
+            prints("A12\nB12"),
+        ),
+        cell(
+            "t187/protocol/omitted_argument",
+            "protocol P:\n    fn probe(self, n: int) -> int\nstruct S:\n    fn probe(self, n: int = 5) -> int:\n        return n\nfn f(p: P) -> int:\n    return p.probe()\nprint(f(S()))\n",
+            Expect::Rejects("expects"),
+        ),
+        cell(
+            "t187/fn_value/bare/named",
+            &format!("{f2}g := f\nprint(g(b=1, a=2))\n"),
+            prints("21"),
+        ),
+        cell(
+            "t187/fn_value/bare/variadic",
+            &format!("{v}g := v\nprint(g(1))\nprint(g(1, 2, 3))\n"),
+            prints("1\n3"),
+        ),
+        lib_cell(
+            "fn_value/qualified/named",
+            f2,
+            "import m\ng := m.f\nprint(g(b=1, a=2))\n",
+            prints("21"),
+        ),
+        lib_cell(
+            "fn_value/qualified/variadic",
+            v,
+            "import m\ng := m.v\nprint(g(1))\nprint(g(1, 2, 3))\n",
+            prints("1\n3"),
+        ),
+        lib_cell(
+            "fn_value/from_import/named",
+            f2,
+            "import f from m\ng := f\nprint(g(b=1, a=2))\n",
+            prints("21"),
+        ),
+        lib_cell(
+            "fn_value/from_import/variadic",
+            v,
+            "import v from m\ng := v\nprint(g(1))\nprint(g(1, 2, 3))\n",
+            prints("1\n3"),
+        ),
+    ];
+    let local_print = "    print := fn(x: int, sep: str) -> int: x\n";
+    for stmt in ["defer", "spawn"] {
+        cells.push(cell(
+            &format!("t187/print/{stmt}/local_closure"),
+            &format!("fn main():\n{local_print}    {stmt} print(1, sep=\"-\")\nmain()\n"),
+            prints(""),
+        ));
+        cells.push(cell(
+            &format!("t187/print/{stmt}/builtin"),
+            &format!("fn main():\n    {stmt} print(1, sep=\"-\")\nmain()\n"),
+            Expect::Rejects("only supported on a direct print"),
+        ));
+    }
+    cells
+}
+
 fn grid() -> Vec<Cell> {
     let mut cells = fixed_cells();
+    cells.extend(t187_cells());
     cells.extend(value_cells());
     cells.extend(variadic_cells());
     cells.extend(provider_ctor_cells());
@@ -745,7 +866,19 @@ fn run_cell(root: &Path, idx: usize, c: &Cell) -> Result<(), String> {
 
 /// Cells red on the pre-TICKET-182 binary. They must stay red here; when one turns green, remove
 /// it from the list.
-const PINNED_RED: &[&str] = &[];
+const PINNED_RED: &[&str] = &[
+    "t187/protocol/permuted_implementor",
+    "t187/protocol/builtin_conformer_named",
+    "t187/protocol/one_param_mismatch",
+    "t187/protocol/prelude_mismatch",
+    "t187/protocol/omitted_argument",
+    "t187/fn_value/bare/variadic",
+    "t187/fn_value/qualified/named",
+    "t187/fn_value/qualified/variadic",
+    "t187/fn_value/from_import/variadic",
+    "t187/print/defer/local_closure",
+    "t187/print/spawn/local_closure",
+];
 
 #[test]
 fn call_binding_grid() {

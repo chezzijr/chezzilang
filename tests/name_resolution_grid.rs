@@ -256,6 +256,7 @@ fn grid() -> Vec<Cell> {
     cells.extend(order_cells());
     cells.extend(typed_use_cells());
     cells.extend(head_shape_cells());
+    cells.extend(t187_cells());
     cells
 }
 
@@ -738,6 +739,113 @@ fn typed_use_cells() -> Vec<Cell> {
     cells
 }
 
+fn files(name: &str, fs: &[(&str, &str)], expect: Expect) -> Cell {
+    Cell {
+        name: name.into(),
+        files: fs
+            .iter()
+            .map(|(p, s)| (p.to_string(), s.to_string()))
+            .collect(),
+        expect,
+    }
+}
+
+/// TICKET-187: type position (bound through a local or qualified alias, from-import of an alias
+/// with a fn twin), generic fn value (qualified and from-import; same-named and differently-named
+/// caller `T`; pinned by annotation; HOF argument), and `.decode[T]` on every receiver kind.
+fn t187_cells() -> Vec<Cell> {
+    let named = "protocol Named:\n    fn name(self) -> str\n";
+    let show = "struct A:\n    fn name(self) -> str:\n        return \"a\"\nfn show[T: N](x: T) -> str:\n    return x.name()\nprint(show(A()))\n";
+    let pick = |tp: &str, f: &str| {
+        format!(
+            "import std.cmp\nstruct P:\n    x: int\nfn pick[{tp}](a: {tp}, b: {tp}) -> {tp}:\n    f := {f}\n    return f(a, b)\nprint(pick(P(1), P(2)).x)\n"
+        )
+    };
+    let user_decode =
+        "struct S:\n    fn decode[T](self, s: str) -> str:\n        return \"user\"\n";
+    vec![
+        one(
+            "t187/bound/local_alias",
+            format!("{named}type N = Named\n{show}"),
+            Expect::Prints("a".into()),
+        ),
+        files(
+            "t187/bound/qualified_alias",
+            &[
+                (
+                    "main.chz",
+                    &format!("import named\ntype N = named.Named\n{show}"),
+                ),
+                ("named.chz", named),
+            ],
+            Expect::Prints("a".into()),
+        ),
+        with_lib(
+            "t187/from_import/alias_with_fn_twin",
+            "import Q from lib\nq: Q = Q(\"ab\")\nprint(q.s.len())\n",
+            "struct P:\n    s: str\ntype Q = P\nfn Q(s: str) -> P:\n    return P(s)\n",
+            Expect::Prints("2".into()),
+        ),
+        one(
+            "t187/generic_value/qualified/same_name",
+            pick("T", "cmp.max"),
+            Expect::Rejects("is generic and"),
+        ),
+        one(
+            "t187/generic_value/qualified/other_name",
+            pick("U", "cmp.max"),
+            Expect::Rejects("is generic and"),
+        ),
+        one(
+            "t187/generic_value/from_import/same_name",
+            pick("T", "max").replace("import std.cmp", "import max from std.cmp"),
+            Expect::Rejects("is generic and"),
+        ),
+        one(
+            "t187/generic_value/qualified/pinned",
+            "import std.cmp\ng: fn(int, int) -> int = cmp.max\nprint(g(3, 4))\n".into(),
+            Expect::Prints("4".into()),
+        ),
+        one(
+            "t187/generic_value/from_import/pinned",
+            "import max from std.cmp\ng: fn(int, int) -> int = max\nprint(g(3, 4))\n".into(),
+            Expect::Prints("4".into()),
+        ),
+        one(
+            "t187/generic_value/qualified/hof_arg",
+            "import std.cmp\nprint([1, 5, 3].fold(0, cmp.max))\n".into(),
+            Expect::Prints("5".into()),
+        ),
+        one(
+            "t187/decode/json_module",
+            "import std.json\nprint(json.decode[int](\"7\"))\n".into(),
+            Expect::Prints("Ok(7)".into()),
+        ),
+        one(
+            "t187/decode/json_alias",
+            "import std.json as j\nprint(j.decode[List[int]](\"[1]\"))\n".into(),
+            Expect::Prints("Ok([1])".into()),
+        ),
+        one(
+            "t187/decode/int_receiver",
+            "n := 5\nprint(n.decode[int](\"7\"))\n".into(),
+            Expect::Rejects("has no method 'decode'"),
+        ),
+        one(
+            "t187/decode/user_generic_method",
+            format!("{user_decode}print(S().decode[int](\"7\"))\n"),
+            Expect::Prints("user".into()),
+        ),
+        one(
+            "t187/decode/local_shadows_json",
+            format!(
+                "import std.json\n{user_decode}fn main():\n    json := S()\n    print(json.decode[int](\"7\"))\nmain()\n"
+            ),
+            Expect::Prints("user".into()),
+        ),
+    ]
+}
+
 fn run_cell(root: &Path, idx: usize, c: &Cell) -> Result<(), String> {
     let dir: PathBuf = root.join(format!("c{idx}"));
     for (rel, src) in &c.files {
@@ -772,6 +880,22 @@ fn run_cell(root: &Path, idx: usize, c: &Cell) -> Result<(), String> {
     ))
 }
 
+/// Cells red on the pre-TICKET-187 binary. They must stay red here; when one turns green, remove
+/// it from the list.
+const PINNED_RED: &[&str] = &[
+    "t187/bound/qualified_alias",
+    "t187/from_import/alias_with_fn_twin",
+    "t187/generic_value/qualified/same_name",
+    "t187/generic_value/qualified/other_name",
+    "t187/generic_value/from_import/same_name",
+    "t187/generic_value/qualified/pinned",
+    "t187/generic_value/from_import/pinned",
+    "t187/generic_value/qualified/hof_arg",
+    "t187/decode/int_receiver",
+    "t187/decode/user_generic_method",
+    "t187/decode/local_shadows_json",
+];
+
 #[test]
 fn name_resolution_grid() {
     let root = std::env::temp_dir().join(format!("chezzi-name-grid-{}", std::process::id()));
@@ -779,8 +903,11 @@ fn name_resolution_grid() {
     let cells = grid();
     let mut fails = Vec::new();
     for (i, c) in cells.iter().enumerate() {
-        if let Err(e) = run_cell(&root, i, c) {
-            fails.push(e);
+        let pinned = PINNED_RED.contains(&c.name.as_str());
+        match (run_cell(&root, i, c), pinned) {
+            (Err(e), false) => fails.push(e),
+            (Ok(()), true) => fails.push(format!("{}: green; remove it from PINNED_RED", c.name)),
+            _ => {}
         }
     }
     let _ = std::fs::remove_dir_all(&root);

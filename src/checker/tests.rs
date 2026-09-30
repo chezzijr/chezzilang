@@ -36635,6 +36635,49 @@ fn t187_decode_on_int_receiver_rejected() {
 fn t187_generic_fn_value_same_named_param_rejected() {
     rejects_entry(
         "import std.cmp\nstruct P:\n    x: int\nfn pick[T](a: T, b: T) -> T:\n    f := cmp.max\n    return f(a, b)\nfn main():\n    print(pick(P(1), P(2)).x)\n",
-        "does not satisfy Comparable",
+        "is generic and T is not determined here",
+    );
+}
+
+/// Owner answer 2(a): a one-parameter implementor that renames the parameter does not conform.
+#[test]
+fn t187_protocol_one_param_name_mismatch_rejected() {
+    rejects_desugared(
+        "protocol Sh:\n    fn put(self, item: int)\nstruct B:\n    fn put(self, x: int):\n        pass\ns: Sh = B()\n",
+        "declares 'item'",
+    );
+}
+
+/// Owner answer 2(a): prelude protocols take their names from `std/prelude.chz` (`other`).
+#[test]
+fn t187_prelude_protocol_name_mismatch_rejected() {
+    rejects_desugared(
+        "struct P:\n    x: int\n    fn compare(self, o: P) -> int:\n        return self.x - o.x\nfn lo[T: Comparable](a: T, b: T) -> T:\n    return a\nprint(lo(P(1), P(2)).x)\n",
+        "declares 'other'",
+    );
+}
+
+/// The K6 program with the protocol's own parameter order conforms.
+#[test]
+fn t187_matching_implementor_accepted() {
+    ok_desugared(
+        "protocol Rep:\n    fn replace(self, old: str, new: str) -> str\nstruct Doc:\n    text: str\n    fn replace(self, old: str, new: str) -> str:\n        return self.text.replace(old, new)\nfn run(p: Rep) -> str:\n    return p.replace(old=\"a\", new=\"b\")\nprint(run(Doc(\"aaa\")))\n",
+    );
+}
+
+/// `str` conforms to `Rep`: its native `replace(self, old, new)` carries the same names.
+#[test]
+fn t187_builtin_conformer_binds_by_protocol_names() {
+    ok_desugared(
+        "protocol Rep:\n    fn replace(self, old: str, new: str) -> str\nfn run(p: Rep) -> str:\n    return p.replace(old=\"a\", new=\"b\")\nprint(run(\"aaa\"))\n",
+    );
+}
+
+/// Owner answer 1(a): an implementor's default is not reachable through the protocol.
+#[test]
+fn t187_protocol_call_omitting_an_argument_is_an_arity_error() {
+    rejects_desugared(
+        "protocol P:\n    fn probe(self, n: int) -> int\nstruct S:\n    fn probe(self, n: int = 5) -> int:\n        return n\nfn f(p: P) -> int:\n    return p.probe()\nprint(f(S()))\n",
+        "expects 1 argument",
     );
 }
