@@ -36609,3 +36609,32 @@ fn t186_module_global_record_grid() {
         bad.join("\n")
     );
 }
+
+// ===== TICKET-187: Family F — names resolved outside the single sources =====
+
+/// K6: a protocol call binds named args by the PROTOCOL's parameter names, so an
+/// implementor that permutes them (`new, old`) must not conform (owner decision 2026-09-30).
+#[test]
+fn t187_protocol_impl_with_permuted_param_names_rejected() {
+    rejects_desugared(
+        "protocol Rep:\n    fn replace(self, old: str, new: str) -> str\nstruct Doc:\n    text: str\n    fn replace(self, new: str, old: str) -> str:\n        return self.text.replace(old, new)\nfn run(p: Rep) -> str:\n    return p.replace(old=\"a\", new=\"b\")\nprint(run(Doc(\"aaa\")))\n",
+        "old",
+    );
+}
+
+/// K9: `x.decode[T](s)` on a non-json receiver is an ordinary member call; `int` has no
+/// `decode` method, so check must reject it (today: check OK, runtime "no method 'parse'").
+#[test]
+fn t187_decode_on_int_receiver_rejected() {
+    rejects("n := 5\nprint(n.decode[int](\"7\"))\n", "decode");
+}
+
+/// G1: a caller's `T` and the imported generic's `T` must not merge by name; calling
+/// `cmp.max` through a value with a non-Comparable `T` stays rejected like the direct call.
+#[test]
+fn t187_generic_fn_value_same_named_param_rejected() {
+    rejects_entry(
+        "import std.cmp\nstruct P:\n    x: int\nfn pick[T](a: T, b: T) -> T:\n    f := cmp.max\n    return f(a, b)\nfn main():\n    print(pick(P(1), P(2)).x)\n",
+        "does not satisfy Comparable",
+    );
+}
