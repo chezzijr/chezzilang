@@ -324,8 +324,8 @@ pub enum SendOutcome {
     Sent,
     /// The value waits in `sendq` as the caller's offer.
     Offered,
-    /// Nothing can take the value now and the caller published no offer.
-    Full,
+    /// Nothing can take the value now and the caller published no offer; the value comes back.
+    Full(WireValue),
     Closed,
 }
 
@@ -456,7 +456,7 @@ impl ChanState {
                 self.offer(p, arm, sum, w);
                 SendOutcome::Offered
             }
-            None => SendOutcome::Full,
+            None => SendOutcome::Full(w),
         }
     }
 
