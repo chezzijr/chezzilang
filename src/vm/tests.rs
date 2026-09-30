@@ -2366,12 +2366,12 @@ fn wait_send_arm_closed_channel_faults_both_engines() {
     assert_eq!(e, ep, "serial and M:N closed-send fault text must match");
 }
 
-/// A full bounded send-arm reached INSIDE a native callback (`list.map`, `native_reentry > 0`) can
-/// only block, and cannot be parked/demoted — so it FAULTS. The fault text must be
-/// byte-identical: before this fix M:N emitted FULL_SEND_DEADLOCK while
-/// the since-removed serial engine fell through to the generic "wait on channels that are all empty" deadlock.
+/// A full bounded send-arm reached INSIDE a native callback (`list.map`, `native_reentry > 0`)
+/// DEMOTES and blocks on its offer (TICKET-185 changed DEC-181's `Demote` × `Wait+send` cell from
+/// `Refuse`). With no receiver anywhere, the deadlock verdict ends it, as Go's `all goroutines are
+/// asleep` does; it used to fault `send on a full channel` without blocking.
 #[test]
-fn wait_send_arm_in_callback_faults_same_on_both_engines() {
+fn wait_send_arm_in_callback_blocks_until_the_deadlock_verdict() {
     let src = "c := Channel[int](1)\n\
                fn f(x: int) -> int:\n\
                \x20   wait:\n\
@@ -2383,15 +2383,10 @@ fn wait_send_arm_in_callback_faults_same_on_both_engines() {
                \x20       spawn:\n\
                \x20           print([1].map(f))\n\
                main()\n";
-    let serial = run_capture(src).expect_err("serial should fault").message;
-    let par = run_capture(src).expect_err("M:N should fault").message;
-    assert_eq!(
-        serial, par,
-        "wait send-arm in-callback fault text must be byte-identical"
-    );
+    let e = run_capture(src).expect_err("a send nobody can take must end in the verdict");
     assert!(
-        serial.contains("send on a full channel"),
-        "expected the bounded full-send deadlock message, got: {serial}"
+        e.is_deadlock && e.message.starts_with("deadlock:"),
+        "expected the deadlock verdict, got: {e:?}"
     );
 }
 
@@ -2936,8 +2931,7 @@ fn mk_fiber(task_index: usize) -> Fiber {
         scope_id: 0,
         span: Span::RUNTIME,
         resume_native: None,
-        recv_waits: Vec::new(),
-        send_deposit: None,
+        pending: None,
     }
 }
 /// An UNSTARTED fiber (`Pending`) — what `inject`/`seed` require so `run_one_fiber` runs the task
@@ -2955,8 +2949,7 @@ fn mk_pending_fiber(task_index: usize) -> Fiber {
         scope_id: 0,
         span: Span::RUNTIME,
         resume_native: None,
-        recv_waits: Vec::new(),
-        send_deposit: None,
+        pending: None,
     }
 }
 fn empty_core() -> Arc<ChannelCore> {
@@ -3015,33 +3008,44 @@ fn rendezvous_bucket_wake_is_kind_selective() {
     assert!(matches!(sched.lock().parked[&key][0], ParkedEntry::Recv(_)));
 }
 
-/// TICKET-028 — `MnSched::park` on a rendezvous channel arms `RecvWait` and wakes a parked sender,
-/// all under its own lock hold.
+/// TICKET-185 — `MnSched::park` on a rendezvous channel publishes a SLOT bound to the parked
+/// fiber, in the same hold as its gap check: a sender then sees a receiver
+/// (`send_ready_for(Some(0), None)`), one `give` fills that slot, and the fiber's `pending`
+/// settles to `Got` with the value. No anonymous counter, and no wake of a parked sender.
 #[test]
-fn rendezvous_park_wakes_a_parked_sender_in_one_lock_hold() {
+fn rendezvous_park_publishes_a_bound_slot() {
     let sched = mk_sched(2);
     let core = cap0_core();
     let key = core_key(&core);
-    sched.seed(vec![mk_fiber(0), mk_fiber(1)]);
+    sched.seed(vec![mk_fiber(0)]);
     let f0 = take_run(&sched);
-    let f1 = take_run(&sched);
-    {
-        let mut c = sched.lock();
-        c.parked.entry(key).or_default().push(ParkedEntry::Send(f0));
-        c.parked_n += 1;
-        c.running -= 1;
-    }
-    sched.park(key, Arc::clone(&core), f1);
+    sched.park(key, Arc::clone(&core), f0);
     assert_eq!(sched.lock().parked_n, 1);
-    assert_eq!(
+    assert!(
         core.q
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .recv_waiting,
-        1
+            .send_ready_for(Some(0), None)
     );
-    assert_eq!(take_run(&sched).task_index, 0);
-    assert!(matches!(sched.lock().parked[&key][0], ParkedEntry::Recv(_)));
+    let sum = crate::vm::core::wire_summary(&WireValue::Int(5));
+    assert!(
+        core.q
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .give(sum, WireValue::Int(5), None)
+            .is_ok()
+    );
+    let op = {
+        let mut c = sched.lock();
+        match c.parked.get_mut(&key).and_then(|b| b.pop()) {
+            Some(ParkedEntry::Recv(mut f)) => f.pending.take().expect("the park bound a slot"),
+            _ => panic!("the receiver is parked as a Recv entry"),
+        }
+    };
+    assert!(matches!(
+        op.settle(),
+        crate::vm::core::Settled::Got(0, WireValue::Int(5))
+    ));
 }
 
 /// TICKET-028 — the pair-spin guard: two `wait:` fibers each holding ONE recv arm on the same
@@ -3749,7 +3753,7 @@ fn deadlock_predicate_suppressed_by_inflight_offload() {
 /// TICKET-181 — a demoted fiber's waiter on an empty `recv` of `core`, watching `cancel`.
 fn recv_waiter(core: &Arc<ChannelCore>, cancel: Vec<Arc<AtomicBool>>) -> Waiter {
     Waiter {
-        wait: Arc::new(quiesce::PartyWait::Recv(Arc::clone(core))),
+        wait: Arc::new(quiesce::PartyWait::Recv(Arc::clone(core), None)),
         cancel,
         fiber: true,
     }
@@ -3836,10 +3840,10 @@ fn a_demoted_wait_with_every_arm_closed_vetoes_the_deadlock_verdict() {
     let mut c = sched.lock();
     c.parked_n = 1;
     c.register_waiter(Waiter {
-        wait: Arc::new(quiesce::PartyWait::Wait(vec![
-            (Arc::clone(&a), false),
-            (Arc::clone(&b), false),
-        ])),
+        wait: Arc::new(quiesce::PartyWait::Wait(
+            vec![(Arc::clone(&a), false), (Arc::clone(&b), false)],
+            None,
+        )),
         cancel: vec![],
         fiber: true,
     });
@@ -3860,10 +3864,10 @@ fn a_demoted_wait_with_one_arm_still_open_reads_as_deadlocked() {
     let mut c = sched.lock();
     c.parked_n = 1;
     c.register_waiter(Waiter {
-        wait: Arc::new(quiesce::PartyWait::Wait(vec![
-            (Arc::clone(&a), false),
-            (Arc::clone(&b), false),
-        ])),
+        wait: Arc::new(quiesce::PartyWait::Wait(
+            vec![(Arc::clone(&a), false), (Arc::clone(&b), false)],
+            None,
+        )),
         cancel: vec![],
         fiber: true,
     });
@@ -3927,46 +3931,161 @@ fn demoted_channel_registry_is_refcounted_for_two_fibers_on_one_channel() {
     );
 }
 
-/// TICKET-042a: `ChanState::deposit` (a rendezvous sender's published-but-not-yet-taken value) is
-/// counted by `len()` but excluded by `msg_len()`; `pop` marks a taken deposit's handle
-/// `DEPOSIT_TAKEN`, and `withdraw_all_deposits` (close()'s job) marks a still-queued one
-/// `DEPOSIT_WITHDRAWN` and clears it out.
+fn t185_sum(v: i64) -> (usize, bool) {
+    crate::vm::core::wire_summary(&WireValue::Int(v))
+}
+
+fn t185_core(cap: Option<usize>) -> Arc<crate::vm::core::ChannelCore> {
+    Arc::new(crate::vm::core::ChannelCore {
+        cap,
+        ..Default::default()
+    })
+}
+
+/// TICKET-185: a parked sender's offer commits exactly once. The first `pop` takes it and CASes
+/// its `Pending` to `DONE + arm`; a second `pop` finds nothing, and the sender's `settle` reads
+/// `Sent`. `len()` never counts an offer (Go's `len: 0` with a parked sender).
 #[test]
-fn chan_state_deposit_is_taken_by_pop_and_withdrawn_by_close() {
-    let mut cs = crate::vm::core::ChanState::default();
-    let h1 = cs.deposit(
-        crate::vm::core::wire_summary(&WireValue::Int(7)),
-        WireValue::Int(7),
-    );
-    let h2 = cs.deposit(
-        crate::vm::core::wire_summary(&WireValue::Int(9)),
-        WireValue::Int(9),
-    );
-    assert_eq!(cs.len(), 2);
-    assert_eq!(cs.msg_len(), 0);
-    assert!(cs.summary().0 > 0);
+fn chan_state_offer_commits_exactly_once() {
+    use crate::vm::core::{ChanState, Pending, PendingOp, SendOutcome, Settled};
+    let core = t185_core(Some(0));
+    let p = Pending::new();
+    let out = core
+        .q
+        .lock()
+        .unwrap()
+        .send(Some(0), t185_sum(7), WireValue::Int(7), Some((&p, 0)));
+    assert!(matches!(out, SendOutcome::Offered));
+    assert_eq!(core.q.lock().unwrap().len(), 0);
+    assert!(matches!(
+        core.q.lock().unwrap().pop(),
+        Some(WireValue::Int(7))
+    ));
+    assert_eq!(p.state(), crate::vm::core::PENDING_DONE);
+    assert!(core.q.lock().unwrap().pop().is_none());
+    let op = PendingOp::new(p, vec![(Arc::clone(&core), 0, true)]);
+    assert!(matches!(op.settle(), Settled::Sent(0)));
+    assert_eq!(core.q.lock().unwrap().summary(), (0, false));
+    // A withdrawn offer can never commit afterwards.
+    let mut cs = ChanState::default();
+    let q = Pending::new();
+    cs.offer(&q, 0, t185_sum(1), WireValue::Int(1));
+    assert!(q.try_cancel().is_ok());
+    assert!(cs.pop().is_none(), "a cancelled offer is dead");
+}
 
-    let popped = cs.pop();
-    assert!(matches!(popped, Some(WireValue::Int(7))));
-    assert_eq!(
-        h1.load(Ordering::Relaxed),
-        crate::vm::core::DEPOSIT_TAKEN,
-        "a popped deposit's handle reads DEPOSIT_TAKEN"
+/// TICKET-185: `give` fills only a live, unfilled slot that is not the caller's own. A cancelled
+/// slot is skipped (and dropped), a filled one is skipped, and the caller's own slot — a `wait:`
+/// with a send arm and a recv arm on one cap-0 channel — is never committed.
+#[test]
+fn chan_state_give_fills_only_a_live_slot() {
+    use crate::vm::core::{ChanState, PENDING_DONE, Pending};
+    let mut cs = ChanState::default();
+    assert!(cs.give(t185_sum(1), WireValue::Int(1), None).is_err());
+    let dead = Pending::new();
+    cs.slot(&dead, 0);
+    assert!(dead.try_cancel().is_ok());
+    let me = Pending::new();
+    cs.slot(&me, 1);
+    assert!(
+        cs.give(t185_sum(2), WireValue::Int(2), Some(&me)).is_err(),
+        "a party never fills its own slot"
     );
-    assert_eq!(
-        h2.load(Ordering::Relaxed),
-        crate::vm::core::DEPOSIT_QUEUED,
-        "the still-queued deposit's handle is unchanged"
+    assert!(me.is_queued());
+    let live = Pending::new();
+    cs.slot(&live, 3);
+    assert!(cs.give(t185_sum(4), WireValue::Int(4), Some(&me)).is_ok());
+    assert_eq!(live.state(), PENDING_DONE + 3);
+    assert!(
+        cs.give(t185_sum(5), WireValue::Int(5), Some(&me)).is_err(),
+        "a filled slot takes no second value"
     );
+    assert!(matches!(cs.take(&live), Some(WireValue::Int(4))));
+    assert_eq!(cs.len(), 0, "a filled slot is not buffered");
+}
 
-    cs.withdraw_all_deposits();
-    assert_eq!(
-        h2.load(Ordering::Relaxed),
-        crate::vm::core::DEPOSIT_WITHDRAWN,
-        "close() withdraws every still-queued deposit"
+/// TICKET-185 (H2): on a bounded channel, a `pop` that frees a buffer place moves the first live
+/// parked offer into it in the same hold (Go's recv refill), so that sender's `send` has happened
+/// before any later `close()`.
+#[test]
+fn chan_state_pop_refills_the_buffer_from_a_parked_offer() {
+    use crate::vm::core::{Pending, PendingOp, SendOutcome, Settled};
+    let core = t185_core(Some(1));
+    let mut g = core.q.lock().unwrap();
+    assert!(matches!(
+        g.send(Some(1), t185_sum(1), WireValue::Int(1), None),
+        SendOutcome::Sent
+    ));
+    assert!(matches!(
+        g.send(Some(1), t185_sum(2), WireValue::Int(2), None),
+        SendOutcome::Full
+    ));
+    let p = Pending::new();
+    assert!(matches!(
+        g.send(Some(1), t185_sum(2), WireValue::Int(2), Some((&p, 0))),
+        SendOutcome::Offered
+    ));
+    assert!(matches!(g.pop(), Some(WireValue::Int(1))));
+    assert_eq!(g.len(), 1, "the offer moved into the buffer");
+    assert!(!p.is_queued());
+    g.close();
+    drop(g);
+    let op = PendingOp::new(p, vec![(Arc::clone(&core), 0, true)]);
+    assert!(
+        matches!(op.settle(), Settled::Sent(0)),
+        "close came after the send"
     );
-    assert_eq!(cs.len(), 0);
+    assert!(matches!(
+        core.q.lock().unwrap().pop(),
+        Some(WireValue::Int(2))
+    ));
+}
+
+/// TICKET-185: `close()` closes every live offer (that sender faults) and drops unfilled slots,
+/// but keeps a filled slot, whose value was delivered before the close.
+#[test]
+fn chan_state_close_closes_offers_and_keeps_filled_slots() {
+    use crate::vm::core::{ChanState, PENDING_CLOSED, Pending, SendOutcome};
+    let mut cs = ChanState::default();
+    let sender = Pending::new();
+    cs.offer(&sender, 0, t185_sum(1), WireValue::Int(1));
+    let filled = Pending::new();
+    cs.slot(&filled, 0);
+    let empty = Pending::new();
+    cs.slot(&empty, 0);
+    assert!(cs.give(t185_sum(2), WireValue::Int(2), None).is_ok());
+    cs.close();
+    assert_eq!(sender.state(), PENDING_CLOSED);
+    assert!(cs.pop().is_none(), "a closed offer is never received");
+    assert!(
+        cs.give(t185_sum(3), WireValue::Int(3), None).is_err(),
+        "the unfilled slot is gone"
+    );
+    assert!(matches!(cs.take(&filled), Some(WireValue::Int(2))));
+    assert!(matches!(
+        cs.send(Some(0), t185_sum(4), WireValue::Int(4), None),
+        SendOutcome::Closed
+    ));
     assert_eq!(cs.summary(), (0, false));
+}
+
+/// TICKET-185: readiness ignores the caller's own entries, so a `wait:` with a send arm and a recv
+/// arm on one cap-0 channel neither takes back its own value nor reads itself as ready.
+#[test]
+fn chan_state_readiness_ignores_the_callers_own_entries() {
+    use crate::vm::core::{ChanState, Pending};
+    let mut cs = ChanState::default();
+    let me = Pending::new();
+    cs.offer(&me, 0, t185_sum(1), WireValue::Int(1));
+    cs.slot(&me, 1);
+    assert!(!cs.recv_ready_for(Some(&me)));
+    assert!(!cs.send_ready_for(Some(0), Some(&me)));
+    assert!(cs.pop_for(Some(&me)).is_none(), "never my own offer");
+    let other = Pending::new();
+    assert!(cs.recv_ready_for(Some(&other)));
+    assert!(cs.send_ready_for(Some(0), Some(&other)));
+    assert!(cs.send_ready_for(None, Some(&me)));
+    assert!(matches!(cs.pop_for(Some(&other)), Some(WireValue::Int(1))));
 }
 
 /// D6: `poll_park_offload` hands a fiber whose socket op `WouldBlock`ed to the netpoller —
@@ -9359,7 +9478,7 @@ fn w758_quiesced_counts_a_nursery_owner_against_live() {
     let chan = empty_core();
     sched.park(core_key(&chan), Arc::clone(&chan), f);
 
-    let job = state.block(crate::vm::quiesce::PartyWait::Recv(empty_core()));
+    let job = state.block(crate::vm::quiesce::PartyWait::Recv(empty_core(), None));
     assert!(
         !state.quiesced(&registry),
         "the owner is not registered yet — 1 party < live 2, so the verdict must decline (this IS \

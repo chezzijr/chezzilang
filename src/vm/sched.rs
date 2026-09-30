@@ -1640,100 +1640,190 @@ impl Vm {
                 .expect("demote_recv_block called with no active M:N scheduler (self.mn is None)"),
         );
         let core = self.channel_core(h);
+        // TICKET-185 — a rendezvous receiver publishes its SLOT before it registers (H3: a sender that
+        // looks for a receiver while this one is registering must find the slot). Published only when
+        // no value is waiting, in the same hold; the loop below takes a waiting value itself.
+        let p = crate::vm::core::Pending::new();
+        {
+            let mut g = core.q.lock().unwrap_or_else(|e| e.into_inner());
+            if core.cap == Some(0) && !g.recv_ready_for(None) && !g.closed {
+                g.slot(&p, 0);
+            }
+        }
+        let op =
+            crate::vm::core::PendingOp::new(Arc::clone(&p), vec![(Arc::clone(&core), 0, false)]);
+        // A filled slot is a delivered value: it outranks every other way out of this block.
+        let finish =
+            |op: crate::vm::core::PendingOp, r: Result<RecvStep, RuntimeError>| match op.settle() {
+                crate::vm::core::Settled::Got(_, w) => Ok(RecvStep::Got(w)),
+                _ => r,
+            };
         // 1. Account running → a registered waiter AND register the channel (#1 fix), under core lock A, then
         //    notify so an idle puller sitting in an untimed `take_runnable` `cv.wait` re-evaluates the
         //    deadlock predicate now that this fiber left `running` (without this notify a genuine
         //    all-blocked quiesce would never be detected — a hang). The registration lets
         //    `is_deadlocked` peek this fiber's queue so a value a sibling races in isn't misread as a
         //    deadlock (the #1 false-positive against an innocent parked sibling).
-        let reg = self.block_enter(
+        let reg = match self.block_enter(
             WaitSpec::Recv,
-            Some(quiesce::PartyWait::Recv(Arc::clone(&core))),
+            Some(quiesce::PartyWait::Recv(
+                Arc::clone(&core),
+                Some(Arc::clone(&p)),
+            )),
             "recv",
             span,
-        )?;
-        // TICKET-028 — arm this demoted receiver's presence guard for the whole block loop, then
-        // (rendezvous only) wake any parked sender now that the guard is live.
-        let _recv = crate::vm::core::RecvWait::arm(&core);
-        if core.cap == Some(0) {
-            self.wake_senders_core(&core);
-        }
+        ) {
+            Ok(reg) => reg,
+            Err(e) => return finish(op, Err(e)),
+        };
         // 2. Spin up a replacement worker ONCE per demoted thread (covers this `wid` while we block).
         //    Subsequent re-entries of this loop on the SAME thread (a callback that recvs repeatedly)
         //    reuse the already-spawned coverage — one spawn + one eventual exit per demoted thread.
         //    If the OS refuses the thread (a real mode for this raw-thread-per-demotion design under
         //    `RLIMIT_NPROC`/ENOMEM with many fibers blocked-in-callback), DON'T panic mid-accounting:
         //    un-roll step 1 (account + registry) and fault this fiber cleanly so the join still completes.
-        // 3. Block in place. The pop + un-account (unregister_waiter/running++) + un-register are ATOMIC
-        //    under core lock A (A-then-q — the order `send_wake` uses → no ABBA), so the deadlock checker
-        //    never observes an emptied-but-still-counted/registered demoted fiber (the #1 window). The
-        //    QUEUE is checked FIRST so a genuinely-sent value always wins over a spuriously-set
-        //    `terminate`. Each exit path un-accounts under A and returns directly (no separate "step 4");
-        //    lost condvar wakeups are bounded by `DEMOTE_POLL_BACKOFF` (≤ latency, never a hang).
+        // 3. Block in place. The take + un-account (unregister_waiter/running++) + un-register are
+        //    ATOMIC under core lock A (A-then-q — the order `send_wake` uses → no ABBA), so the deadlock
+        //    checker never observes an emptied-but-still-counted/registered demoted fiber (the #1
+        //    window). A filled slot, then the QUEUE, are checked FIRST so a genuinely-sent value always
+        //    wins over a spuriously-set `terminate`. Each exit path un-accounts under A; lost condvar
+        //    wakeups are bounded by `DEMOTE_POLL_BACKOFF` (≤ latency, never a hang).
         loop {
-            // --- settle under core lock A: pop wins over cancel / terminate / deadlock ---
-            {
+            // --- settle under core lock A: a delivered value wins over cancel / terminate / deadlock ---
+            let exit: Result<RecvStep, RuntimeError> = {
                 let mut c = sched.lock();
                 let mut qg = core.q.lock().unwrap_or_else(|e| e.into_inner());
-                let popped = qg.pop();
-                if let Some(w) = popped {
+                if !p.is_queued() {
+                    // A sender filled the slot: `finish` takes the value.
                     reg.release(&sched, &mut c);
-                    drop(qg);
-                    drop(c);
-                    return Ok(RecvStep::Got(w));
-                }
-                // A tripped latch (`trip()`) delivers `true` like a passed timer — ranks below a real
-                // queued value, above closed/terminate/deadlock (a `done().recv()` on a cancelled token
-                // reached inside a native callback must not false-deadlock).
-                if core.done_latch.load(Ordering::Relaxed) {
+                    Ok(RecvStep::ClosedEmpty)
+                } else if let Some(w) = qg.pop() {
+                    // Withdraw the slot in the same hold, so no second sender fills it.
+                    let _ = p.try_cancel();
+                    qg.withdraw(&p);
                     reg.release(&sched, &mut c);
+                    Ok(RecvStep::Got(w))
+                } else if core.done_latch.load(Ordering::Relaxed) {
+                    // A tripped latch (`trip()`) delivers `true` like a passed timer — ranks below a
+                    // real value, above closed/terminate/deadlock (a `done().recv()` on a cancelled
+                    // token reached inside a native callback must not false-deadlock).
+                    reg.release(&sched, &mut c);
+                    Ok(RecvStep::Got(WireValue::Bool(true)))
+                } else {
+                    // Closed-and-drained: nothing is waiting here and the channel is closed, so no value
+                    // will ever arrive — signal `ClosedEmpty` (the caller faults "receive on a closed
+                    // channel"). Ranks below a delivered value, above terminate/deadlock.
+                    let closed = qg.closed;
                     drop(qg);
-                    drop(c);
-                    return Ok(RecvStep::Got(WireValue::Bool(true)));
+                    // Cancel (a sibling faulted): set `cancelled` BEFORE returning the Err so the
+                    // outcome is SWALLOWED (a cancelled task is dropped, not reported). MUST go through
+                    // `cancel_requested()`, never a raw `self.cancel` load: a `defer` body runs under
+                    // `guarded` (native_reentry > 0), and the predicate's `deferring == 0` term is what
+                    // keeps cleanup atomic; it also folds in `cancel_outer`.
+                    if self.cancel_requested() {
+                        self.cancelled = true;
+                        reg.release(&sched, &mut c);
+                        Err(self.err("cancelled".to_string(), span))
+                    } else if let Some(e) = self.run_exit_err(span) {
+                        // W7-47 — a run-wide `os.exit` from another party, below cancel.
+                        reg.release(&sched, &mut c);
+                        Err(e)
+                    } else if closed {
+                        reg.release(&sched, &mut c);
+                        Ok(RecvStep::ClosedEmpty)
+                    } else if c.terminate {
+                        // Terminate without a delivered value (genuine deadlock / nursery torn down).
+                        reg.release(&sched, &mut c);
+                        Err(sched.deadlock_err.clone())
+                    } else if sched.is_deadlocked(&c) {
+                        // Path C self-sufficient deadlock detection: evaluate the predicate HERE rather
+                        // than depending on a separate idle puller being alive to fire it.
+                        c.flag_deadlock(&sched.deadlock_err);
+                        reg.release(&sched, &mut c);
+                        drop(c);
+                        sched.notify_waiters();
+                        Err(sched.deadlock_err.clone())
+                    } else {
+                        drop(c);
+                        // --- wait on the channel's OWN condvar (q-only; core lock A released) ---
+                        let q = core.q.lock().unwrap_or_else(|e| e.into_inner());
+                        if p.is_queued() && !q.recv_ready_for(Some(&p)) {
+                            let _ = core.cv.wait_timeout(q, DEMOTE_POLL_BACKOFF);
+                        }
+                        continue;
+                    }
                 }
-                // Closed-and-drained: the queue is empty here (pop-first) and the channel is closed, so
-                // no value will ever arrive — signal `ClosedEmpty` (the caller faults "receive on a
-                // closed channel"). Read while still holding the queue lock so it is atomic with the
-                // pop above. Ranks below a delivered value, above terminate/deadlock.
-                let closed = qg.closed;
-                drop(qg);
-                // Cancel (a sibling faulted): set `cancelled` BEFORE returning the Err so the outcome is
-                // SWALLOWED (a cancelled task is dropped, not reported) instead of surfacing as a Fault —
-                // mirrors the snapshot-park recv's cancel branch.
-                //
-                // MUST go through `cancel_requested()`, never a raw `self.cancel` load: a `defer` body
-                // runs under `guarded` (native_reentry > 0), so a blocking op INSIDE cleanup (a
-                // `sock.close()`, a `ch.send()`, a `sleep`) lands here. A raw read fires on the already-
-                // tripped flag and truncates the defer mid-body. The predicate's `deferring == 0` term
-                // is what keeps cleanup atomic, and it also folds in `cancel_outer` (an ENCLOSING
-                // scope's cancel), which a raw read misses.
+            };
+            return finish(op, exit);
+        }
+    }
+
+    /// TICKET-185 — a blocking `send` reached INSIDE a native callback, whose offer is already
+    /// published: the send-side twin of [`Vm::demote_recv_block`]. The worker thread demotes and
+    /// blocks in place until a receiver takes the offer (`Sent`) or `close()` closes it
+    /// (`CLOSED_SEND`). Cancel / exit / terminate / self-detected deadlock fault in place, unless
+    /// the offer was already taken — then the `send` happened.
+    ///
+    /// Releases this thread's width permit for the whole wait and re-takes it after (TICKET-141).
+    pub(super) fn demote_send_block(
+        &mut self,
+        core: Arc<ChannelCore>,
+        op: crate::vm::core::PendingOp,
+        span: Span,
+    ) -> Result<SendStep, RuntimeError> {
+        self.width_release();
+        let r = self.demote_send_block_in_place(&core, &op.p, span);
+        self.width_acquire();
+        match op.settle() {
+            crate::vm::core::Settled::Sent(_) => Ok(SendStep::Sent),
+            crate::vm::core::Settled::Closed => {
+                Err(self.err(super::netio::CLOSED_SEND.to_string(), span))
+            }
+            _ => r.map(|()| SendStep::Sent),
+        }
+    }
+
+    fn demote_send_block_in_place(
+        &mut self,
+        core: &Arc<ChannelCore>,
+        p: &Arc<crate::vm::core::Pending>,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        let sched = Arc::clone(
+            self.mn
+                .as_ref()
+                .expect("demote_send_block called with no active M:N scheduler (self.mn is None)"),
+        );
+        let reg = self.block_enter(
+            WaitSpec::Send,
+            Some(quiesce::PartyWait::Send(Arc::clone(p))),
+            "send",
+            span,
+        )?;
+        loop {
+            {
+                let mut c = sched.lock();
+                // The offer's commit happens under `core.q`; read it in that hold, and release the
+                // registration in the same hold (DEC-181).
+                let settled = {
+                    let _q = core.q.lock().unwrap_or_else(|e| e.into_inner());
+                    !p.is_queued()
+                };
+                if settled {
+                    reg.release(&sched, &mut c);
+                    return Ok(());
+                }
                 if self.cancel_requested() {
                     self.cancelled = true;
                     reg.release(&sched, &mut c);
-                    drop(c);
                     return Err(self.err("cancelled".to_string(), span));
                 }
-                // W7-47 — a run-wide `os.exit` from another party, below cancel like every other site.
-                // Un-account first (same bookkeeping as the cancel arm above), or the counters leak.
                 if let Some(e) = self.run_exit_err(span) {
                     reg.release(&sched, &mut c);
-                    drop(c);
                     return Err(e);
                 }
-                if closed {
-                    reg.release(&sched, &mut c);
-                    drop(c);
-                    return Ok(RecvStep::ClosedEmpty);
-                }
-                // Terminate without a delivered value (genuine deadlock / nursery torn down): fault in
-                // place. Path C self-sufficient deadlock detection: evaluate the predicate HERE rather
-                // than depending on a separate idle puller being alive to fire it (the replacement could
-                // be the last worker and itself demoted → otherwise a hang). The queue-first pop above
-                // means OUR channel is empty here, and `is_deadlocked` now also peeks OTHER demoted
-                // channels (#1), so firing can never strand a value destined for any demoted fiber.
                 if c.terminate {
                     reg.release(&sched, &mut c);
-                    drop(c);
                     return Err(sched.deadlock_err.clone());
                 }
                 if sched.is_deadlocked(&c) {
@@ -1744,9 +1834,8 @@ impl Vm {
                     return Err(sched.deadlock_err.clone());
                 }
             }
-            // --- wait on the channel's OWN condvar (q-only; core lock A released) ---
             let q = core.q.lock().unwrap_or_else(|e| e.into_inner());
-            if q.is_empty() {
+            if p.is_queued() {
                 let _ = core.cv.wait_timeout(q, DEMOTE_POLL_BACKOFF);
             }
         }
@@ -1754,99 +1843,76 @@ impl Vm {
 
     /// §6d M:N — a blocking multi-channel `wait` reached INSIDE a native callback (`native_reentry > 0`).
     /// A host-stack loop frame sits between the worker loop and the `wait`, so the fiber CANNOT
-    /// snapshot-park (`park_wait`); it demotes — blocks this worker in place, polling all N arm queues
-    /// in **source order** on a bounded `DEMOTE_POLL_BACKOFF` backoff. The N-arm analogue of
-    /// [`Vm::demote_recv_block`]: account `running → a registered waiter`, register EVERY arm channel in
-    /// `SchedCore::waiters` (so `is_deadlocked` peeks them all and a value racing onto any arm vetoes a false
-    /// fire), spin a replacement worker once, then loop. Because there are N channel condvars (no single
-    /// one to block on), the wait is a bounded poll rather than a targeted condvar wait — lower
-    /// throughput but sound (the documented v1 limitation, same shape as the timer-in-callback note).
-    /// Returns `(arm_index, value)` for the first source-order arm to deliver. A per-arm `close`+empty
-    /// is SKIPPED; once EVERY arm is closed+empty it returns "all channels closed". Cancel/terminate/
-    /// self-detected-deadlock fault in place. Never parks. Only called on the M:N engine inside a
-    /// callback (gated `mn.is_some() && native_reentry > 0`).
+    /// snapshot-park (`park_wait`); it demotes — blocks this worker in place until an arm MAY be
+    /// ready, then returns so `op_wait_poll` settles and re-polls in source order. The N-arm analogue
+    /// of [`Vm::demote_recv_block`]: account `running → a registered waiter`, register EVERY arm (so
+    /// `is_deadlocked` peeks them all and a value racing onto any arm vetoes a false fire), then loop.
+    ///
+    /// TICKET-185 — the `wait:`'s offers (send arms) and slots (rendezvous recv arms) are published
+    /// under `p` before this is called, so a send arm blocks here like a recv arm (Go blocks it
+    /// too). Ready == `p` settled, a recv arm has a value to take (a buffered value or another
+    /// party's live offer) or a `trip()` latch, the timer arm's deadline passed, or every arm is a
+    /// closed recv arm (the re-poll then faults `wait: all channels closed`). Cancel / exit /
+    /// terminate / self-detected deadlock fault in place. Never parks.
     ///
     /// TICKET-141 — releases this thread's width permit for the whole wait and re-takes it after.
     pub(super) fn demote_wait_block(
         &mut self,
-        arms: Vec<(usize, Arc<ChannelCore>)>,
+        arms: Vec<(Arc<ChannelCore>, bool)>,
+        p: &Arc<crate::vm::core::Pending>,
         timer: Option<(usize, std::time::Instant)>,
         span: Span,
-    ) -> Result<(usize, WireValue), RuntimeError> {
+    ) -> Result<(), RuntimeError> {
         self.width_release();
-        let r = self.demote_wait_block_in_place(arms, timer, span);
+        let r = self.demote_wait_block_in_place(arms, p, timer, span);
         self.width_acquire();
         r
     }
 
     fn demote_wait_block_in_place(
         &mut self,
-        arms: Vec<(usize, Arc<ChannelCore>)>,
+        arms: Vec<(Arc<ChannelCore>, bool)>,
+        p: &Arc<crate::vm::core::Pending>,
         timer: Option<(usize, std::time::Instant)>,
         span: Span,
-    ) -> Result<(usize, WireValue), RuntimeError> {
+    ) -> Result<(), RuntimeError> {
         let sched = Arc::clone(
             self.mn
                 .as_ref()
                 .expect("demote_wait_block called with no active M:N scheduler (self.mn is None)"),
         );
-        // 1. Account running → a registered waiter AND register EVERY arm channel, under core lock A, then
-        //    notify so an idle puller re-evaluates the deadlock predicate now this fiber left `running`.
-        // (the waiter's cancel flags: see `demote_recv_block` — a cancel can still wake this fiber, and
-        // that is progress `is_deadlocked`'s counters cannot see.)
         // TICKET-181 — a timed `wait:` returns at its deadline whatever anyone does, so it is
         // `inflight` (changed cell (a), C1); an untimed one registers its arms as a waiter.
         let spec = WaitSpec::Wait {
             deadline: timer.is_some(),
-            has_send: false,
+            has_send: arms.iter().any(|(_, is_send)| *is_send),
         };
-        let wait = (!spec.will_return()).then(|| {
-            quiesce::PartyWait::Wait(
-                arms.iter()
-                    .map(|(_, core)| (Arc::clone(core), false))
-                    .collect(),
-            )
-        });
+        let wait = (!spec.will_return())
+            .then(|| quiesce::PartyWait::Wait(arms.clone(), Some(Arc::clone(p))));
         let reg = self.block_enter(spec, wait, "wait", span)?;
-        // TICKET-028 — every arm reaching this fn is a RECV arm; arm one RecvWait per arm, then wake
-        // any parked sender on a rendezvous arm now that the guards are live.
-        let _recvs: Vec<crate::vm::core::RecvWait> = arms
-            .iter()
-            .map(|(_, core)| crate::vm::core::RecvWait::arm(core))
-            .collect();
-        for (_, core) in &arms {
-            if core.cap == Some(0) {
-                self.wake_senders_core(core);
-            }
-        }
-        // 2. Spin a replacement worker ONCE per demoted thread (covers this `wid` while we block). If the
-        //    OS refuses the thread, un-roll step 1 and fault cleanly so the join still completes.
-        // 3. Block in place. Each poll: under core lock A, scan all N arms in source order — the first
-        //    with a queued value wins (un-account + return). Then rank cancel > all-closed > terminate
-        //    > self-detected-deadlock, exactly like `demote_recv_block`, but generalized over N arms.
+        let recv_ready = |core: &Arc<ChannelCore>, g: &crate::vm::core::ChanState| {
+            g.recv_ready_for(Some(p)) || core.done_latch.load(Ordering::Relaxed)
+        };
         loop {
             {
                 let mut c = sched.lock();
-                // Source-order poll: pop the first arm with a queued value (atomic with the A hold).
+                let mut ready = !p.is_queued();
                 let mut all_closed = true;
-                for (idx, (_, core)) in arms.iter().enumerate() {
-                    let mut qg = core.q.lock().unwrap_or_else(|e| e.into_inner());
-                    if let Some(w) = qg.pop() {
-                        drop(qg);
-                        reg.release(&sched, &mut c);
-                        drop(c);
-                        return Ok((idx, w));
-                    }
-                    // A tripped latch (`trip()`) makes this arm ready with `true` (after the value scan).
-                    if core.done_latch.load(Ordering::Relaxed) {
-                        drop(qg);
-                        reg.release(&sched, &mut c);
-                        drop(c);
-                        return Ok((idx, WireValue::Bool(true)));
-                    }
-                    if !qg.closed {
+                for (core, is_send) in &arms {
+                    if *is_send {
                         all_closed = false;
+                        continue;
                     }
+                    let g = core.q.lock().unwrap_or_else(|e| e.into_inner());
+                    ready |= recv_ready(core, &g);
+                    all_closed &= g.closed;
+                }
+                // WAIT-1 (demote path) — a live timer arm is ready once `now >= deadline`; the
+                // re-poll scans the channel arms first, so a real `send` still beats the timer.
+                ready |= timer.is_some_and(|(_, d)| std::time::Instant::now() >= d);
+                if ready || all_closed {
+                    reg.release(&sched, &mut c);
+                    return Ok(());
                 }
                 // Cancel (a sibling faulted): swallow the outcome (mirror the snapshot-park cancel arm).
                 if self.cancel_requested() {
@@ -1860,25 +1926,6 @@ impl Vm {
                     reg.release(&sched, &mut c);
                     drop(c);
                     return Err(e);
-                }
-                // WAIT-1 (demote path) — a live timer arm fires only AFTER the source-order channel scan
-                // failed (so a real `send` to any arm beats the timer on a tie). Once `now >= deadline`,
-                // take the timer arm with `true`. A still-pending timer vetoes the deadlock fault below
-                // (a value WILL arrive at the deadline — like an `inflight` job on the snapshot path).
-                if let Some((idx, deadline)) = timer
-                    && std::time::Instant::now() >= deadline
-                {
-                    reg.release(&sched, &mut c);
-                    drop(c);
-                    return Ok((idx, WireValue::Bool(true)));
-                }
-                // Every channel arm closed+empty: no value can ever arrive — the all-closed `wait` fault.
-                // (`all_closed` reads only the channel arms: a timer arm is not in `arms`, so a still-
-                // pending timer does NOT keep it false — this fires before that timer's deadline.)
-                if all_closed {
-                    reg.release(&sched, &mut c);
-                    drop(c);
-                    return Err(self.err("wait: all channels closed".to_string(), span));
                 }
                 if c.terminate {
                     reg.release(&sched, &mut c);
@@ -1898,7 +1945,7 @@ impl Vm {
             // No single condvar to wait on (N arms, N condvars) → bounded backoff poll. Sleep on the
             // FIRST arm's condvar with a timeout so a `send`/`close` to arm 0 wakes promptly, and any
             // other arm is observed within `DEMOTE_POLL_BACKOFF` (the documented lower-throughput path).
-            let first = &arms[0].1;
+            let (first, is_send0) = &arms[0];
             let q = first.q.lock().unwrap_or_else(|e| e.into_inner());
             // Clamp the backoff to the timer deadline so the loop re-polls and fires the timer arm
             // by its deadline (saturating, so a deadline that already passed yields ~zero wait).
@@ -1908,18 +1955,12 @@ impl Vm {
                 }
                 None => DEMOTE_POLL_BACKOFF,
             };
-            // W7-13r(b) — arm 0 is ready on a queued value OR a `trip()` latch, and the latch belongs
-            // here for the same reason it belongs in the eager `wait:` predicate: the poll above
-            // SETTLES on `done_latch`, so sleeping through one costs a full tick on a channel that is
-            // permanently ready. The old form tested `q.is_empty()` only, which is why `trip()` moving
-            // under `core.q` did not by itself make every waiter prompt.
-            //
-            // `closed` is deliberately NOT a ready condition: the poll SKIPS a closed+empty recv arm,
-            // so reporting ready would return instantly, re-poll, skip, and spin — the parity-perf-0
-            // live-lock, which the eager `wait:` predicate reintroduced once already. (Send arms never
-            // reach this function: an in-callback `wait:` with a send arm faults before the demote.)
+            // W7-13r(b) — arm 0 is ready on what the loop above SETTLES on: `p` settled, or (recv arm)
+            // a value to take or a `trip()` latch. `closed` is deliberately NOT a ready condition: the
+            // re-poll SKIPS a closed+empty recv arm, so reporting ready would return instantly,
+            // re-poll, skip, and spin — the parity-perf-0 live-lock.
             let _ = first.cv.wait_timeout_while(q, backoff, |g| {
-                !(!g.is_empty() || first.done_latch.load(Ordering::Relaxed))
+                !(!p.is_queued() || (!is_send0 && recv_ready(first, g)))
             });
         }
     }
@@ -2440,7 +2481,7 @@ impl Vm {
             match disp {
                 Disp::Park(key, core) => sched.park(key, core, fiber),
                 // Bounded backpressure — the send-side park (gap re-check = space, not a message).
-                Disp::SendPark(key, core) => sched.park_send(key, &core, fiber),
+                Disp::SendPark(key) => sched.park_send(key, fiber),
                 // §6d — multi-channel `wait` park: file ONE shared token in every arm's bucket.
                 Disp::WaitPark(arms) => sched.park_wait(arms, fiber),
                 Disp::Yield => sched.yield_fiber(fiber),
@@ -2521,9 +2562,6 @@ impl Vm {
     /// reads), then swap the context back out. The run is panic-guarded so a worker-VM panic becomes a
     /// task `Fault` (keeps the loop alive + the slot filled — the join can't hang).
     pub(super) fn run_one_fiber(&mut self, fiber: &mut Fiber, span: Span) -> Disp {
-        // TICKET-028 — drop any armed `RecvWait` guards now that this fiber is RUNNING again, not
-        // when it was woken. See `ChanState::recv_waiting`'s doc comment for why.
-        fiber.recv_waits.clear();
         self.swap_ctx(&mut fiber.ctx);
         // Cross-nursery flat scheduler — RE-POINT the shell's `self.cancel` to THIS fiber's SCOPE cancel
         // on every swap-in. One shell runs fibers from MULTIPLE scopes off the global queue; the
@@ -2566,7 +2604,7 @@ impl Vm {
         // (heap is swapped in) and push it below so the suspended `Call` completes and dispatch
         // continues past it.
         let resume_native = fiber.resume_native.take();
-        self.send_deposit = fiber.send_deposit.take();
+        self.pending = fiber.pending.take();
         let disp = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // D5 — lower + push the offloaded native's result before resuming, so the operand stack
             // holds what the `Call` would have pushed and `run_until` continues correctly. The `Err`
@@ -2671,7 +2709,7 @@ impl Vm {
                 // Bounded backpressure — the fiber blocked on a full `send`. Capture the key + core
                 // WHILE the fiber heap is live (like `Disp::Park`); `park_send` re-checks SPACE.
                 let h = self.send_suspend.take().unwrap();
-                Disp::SendPark(self.channel_core_ptr(h), self.channel_core(h))
+                Disp::SendPark(self.channel_core_ptr(h))
             } else if res.is_ok() && self.wait_suspend.is_some() {
                 // §6d — the fiber blocked on a multi-channel `wait`. Capture each arm's (key, core)
                 // WHILE the fiber heap is live (the `GcRef`s index into it), exactly as `Disp::Park`
@@ -2692,7 +2730,7 @@ impl Vm {
             }
         }))
         .unwrap_or_else(|p| Disp::Finish(self.panic_outcome(p, span)));
-        fiber.send_deposit = self.send_deposit.take();
+        fiber.pending = self.pending.take();
         self.swap_ctx(&mut fiber.ctx);
         disp
     }

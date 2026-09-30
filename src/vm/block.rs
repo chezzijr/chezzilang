@@ -140,10 +140,10 @@ pub(super) fn mode(ctx: BlockCtx, spec: WaitSpec) -> BlockMode {
             _ => Park,
         },
         BlockCtx::Demote => match spec {
-            // v1 limit: the demote loop cannot block a sender. Go blocks.
-            W::Send | W::Wait { has_send: true, .. } => Refuse,
             W::Connect | W::Nursery => InPlace,
-            W::Recv
+            // TICKET-185: a demoted sender blocks on its published offer, as Go blocks.
+            W::Send
+            | W::Recv
             | W::Timer
             | W::Wait { .. }
             | W::Sleep
@@ -398,11 +398,11 @@ mod tests {
     const TABLE: [(&str, &str, bool); 15] = [
         ("Recv", "PDRI IIII IIII", false),
         ("Timer", "PDSS SSSS SSSS", true),
-        ("Send", "PRRI IIII IIII", false),
+        ("Send", "PDRI IIII IIII", false),
         ("Wait", "PDRI IIII IIII", false),
-        ("Wait+send", "PRRI IIII IIII", false),
+        ("Wait+send", "PDRI IIII IIII", false),
         ("Wait+deadline", "PDSI IIII IIII", true),
-        ("Wait+deadline+send", "PRSI IIII IIII", true),
+        ("Wait+deadline+send", "PDSI IIII IIII", true),
         ("Sleep", "PDSS SSSS SSSS", true),
         ("Offload", "PDII IIII IIII", true),
         ("Stdin", "DDDD DDDD DDDD", true),

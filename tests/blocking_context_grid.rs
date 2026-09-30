@@ -143,8 +143,6 @@ enum Expect {
     Starts(&'static str),
     /// exit non-zero with this text on stderr
     Fault(&'static str),
-    /// `Out(.0)` or `Fault(.1)`: a documented refusal that fires only if the op would block
-    OutOrFault(&'static str, &'static str),
     /// still running at the 2 s probe (a declined verdict: nothing can satisfy it)
     Hang,
 }
@@ -153,8 +151,6 @@ enum Expect {
 struct Ctx {
     name: &'static str,
     call: &'static str,
-    /// an M:N fiber inside a native callback, `defer:`, generator or `Shared.update`
-    demote: bool,
     /// an Executor job
     job: bool,
     /// the outcome when nothing can satisfy the op
@@ -180,7 +176,6 @@ struct Cell {
 }
 
 const DEADLOCK: &str = "deadlock";
-const FULL_SEND: &str = "send on a full channel: deadlock";
 const SOCK_IN_JOB: &str = "err read would block: an Executor job doesn't own its thread";
 
 const PROGRAM: &str = "import std.concurrency
@@ -232,10 +227,9 @@ fn main():
 ";
 
 fn contexts() -> Vec<Ctx> {
-    let ctx = |name, call, demote, job, nothing| Ctx {
+    let ctx = |name, call, _demote: bool, job, nothing| Ctx {
         name,
         call,
-        demote,
         job,
         nothing,
     };
@@ -460,14 +454,8 @@ fn ops() -> Vec<Op> {
 /// The expected outcome of `op` in `ctx` with `sat`: `out`, unless a documented table cell
 /// (`docs/concurrency.md` "Blocking-context table") says otherwise.
 fn expect(op: &Op, ctx: &Ctx, sat: Sat, out: &'static str) -> Expect {
-    // Refuse: a full send (or a `wait:` send arm) in a Demote context faults when it would block;
-    // Go blocks (v1 limit). With a sibling the send may find the slot already free.
-    if ctx.demote && (op.name == "send" || op.name == "wait_send") {
-        return match sat {
-            Sat::Nothing => Expect::Fault(FULL_SEND),
-            _ => Expect::OutOrFault(out, FULL_SEND),
-        };
-    }
+    // TICKET-185: a full send (or a `wait:` send arm) in a Demote context blocks on its offer, as
+    // Go blocks — the old v1 `Refuse` cell is gone, so it takes the generic rule below.
     // A nested nursery's own verdict judges its children: Go faults, and so does every context.
     if op.name == "nested" && sat == Sat::Nothing {
         return Expect::Fault(DEADLOCK);
@@ -543,8 +531,6 @@ fn check_cell(c: &Cell) -> Vec<String> {
             (Some((0, out, _)), Expect::Out(w)) => out == w,
             (Some((0, out, _)), Expect::Starts(w)) => out.starts_with(w),
             (Some((code, _, err)), Expect::Fault(w)) => *code != 0 && err.contains(w),
-            (Some((0, out, _)), Expect::OutOrFault(w, _)) => out == w,
-            (Some((code, _, err)), Expect::OutOrFault(_, w)) => *code != 0 && err.contains(w),
             _ => false,
         };
         if !ok {

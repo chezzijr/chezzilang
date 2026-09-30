@@ -19,9 +19,10 @@
 //! "unfeedable", which no progress counter or debounce window could (see `gaps.md` W7-12's rejected
 //! experiment, and the `parked-is-not-stuck` lesson).
 //!
-//! TICKET-028 — a rendezvous `Channel[T](0)` is simultaneously empty AND full (`queue.len() < cap`
-//! is `0 < 0`, always false), so its send side is judged against `ChanState::recv_waiting`, never
-//! against `cap` — see [`ChanState::has_send_slot`](super::core::ChanState::has_send_slot).
+//! TICKET-185 — a rendezvous `Channel[T](0)` has no buffer: a blocked sender waits on its OFFER
+//! and a blocked receiver on its SLOT, each committed by CAS on the party's own `Pending`, so both
+//! sides are judged by that `Pending` and by the OTHER side's entries (`ChanState::recv_ready_for`),
+//! never against `cap`.
 //!
 //! # Counted parties, and why the count is sound
 //!
@@ -54,10 +55,10 @@
 //! runs many programs concurrently in ONE process, and a process-global registry would let one run's
 //! blocked parties be counted against another run's.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use super::core::{ChannelCore, ExecRegistry};
+use super::core::{ChannelCore, ExecRegistry, Pending};
 
 /// What one registered party is waiting for — and, through [`PartyWait::satisfiable`], whether that
 /// wait could already be over.
@@ -65,13 +66,12 @@ use super::core::{ChannelCore, ExecRegistry};
 /// The channel cores are held by `Arc` rather than by `GcRef`: a party's heap is not reachable from
 /// the thread evaluating the verdict, and a core outlives every handle to it.
 pub(super) enum PartyWait {
-    /// A single blocking `recv` on an empty channel.
-    Recv(Arc<ChannelCore>),
-    /// A `send` blocked on a full bounded channel. The second field is `Some(handle)` for a
-    /// block-in-place rendezvous sender that has DEPOSITED its value (TICKET-042a) — its wait is
-    /// also over once that deposit is taken/withdrawn, even with no free slot (a cap-0 channel's
-    /// `has_send_slot` does not track a deposit already claimed).
-    Send(Arc<ChannelCore>, Option<Arc<AtomicU8>>),
+    /// A single blocking `recv` on an empty channel, with the receiver's own `Pending` when it
+    /// published a rendezvous slot (TICKET-185): its wait is over once a sender fills that slot.
+    Recv(Arc<ChannelCore>, Option<Arc<Pending>>),
+    /// A `send` blocked on its published OFFER (TICKET-185 — a full bounded or a rendezvous
+    /// channel): its wait is over exactly when the offer's `Pending` settles (taken, or closed).
+    Send(Arc<Pending>),
     /// A `wait:` over N arms — an OR-edge (§2d's table): ready on ANY arm. `is_send` marks a SEND
     /// arm, which is ready on free space rather than on a value.
     ///
@@ -82,7 +82,9 @@ pub(super) enum PartyWait {
     /// the verdict forever. `c1.close(); wait: c1.recv() / c2.recv()` with nobody able to feed `c2`
     /// faulted `wait on channels that are all empty: deadlock` before this detector and hung with the
     /// two folded into one variant. Fenced by `a_wait_with_a_closed_arm_still_reports_the_deadlock`.
-    Wait(Vec<(Arc<ChannelCore>, bool)>),
+    ///
+    /// TICKET-185 — the second field is the `wait:`'s ONE `Pending` (its offers and slots).
+    Wait(Vec<(Arc<ChannelCore>, bool)>, Option<Arc<Pending>>),
     /// A thread inside an `Executor` join (`shutdown()` or the program-exit drain), waiting on that
     /// core's `outstanding` to reach 0. This is the node whose absence made W7-12's arms unable to
     /// see `main`-inside-`shutdown()`.
@@ -150,43 +152,40 @@ impl PartyWait {
             // `Vm::block_recv` settles on a queued value, a `trip()` latch, or `closed` (which
             // returns `ClosedEmpty` — the `for v in ch:` ends, a bare `recv` faults; either is
             // progress).
-            PartyWait::Recv(core) => {
+            PartyWait::Recv(core, me) => {
                 let g = core.q.lock().unwrap_or_else(|e| e.into_inner());
-                !g.is_empty()
+                g.recv_ready_for(me.as_ref())
                     || g.closed
-                    || core.done_latch.load(std::sync::atomic::Ordering::Relaxed)
+                    || core.done_latch.load(Ordering::Relaxed)
+                    || me.as_ref().is_some_and(|p| !p.is_queued())
             }
-            // The blocking `send` loop settles on free space, or on `closed` (it faults `CLOSED_SEND`
-            // — W7-13r(c)).
-            PartyWait::Send(core, deposit) => {
-                let g = core.q.lock().unwrap_or_else(|e| e.into_inner());
-                deposit
-                    .as_ref()
-                    .is_some_and(|d| d.load(Ordering::Relaxed) != super::core::DEPOSIT_QUEUED)
-                    || g.has_send_slot(core.cap)
-                    || g.closed
-            }
-            // `Vm::op_wait_poll`, arm kind by arm kind: a RECV arm is ready on a queued value or a
-            // `trip()` latch — NOT on `closed`, which the poll SKIPS — while a SEND arm is ready on
-            // free space or on `closed` (the poll faults `CLOSED_SEND` there). A timer arm delivers on
-            // its own deadline with nobody sending, so it is never judged.
+            // The blocking `send` settles once its offer does — taken by a receiver, or closed by
+            // `close()` (it faults `CLOSED_SEND`).
+            PartyWait::Send(p) => !p.is_queued(),
+            // `Vm::op_wait_poll`, arm kind by arm kind: the `wait:` settles once its `Pending` does
+            // (an offer taken or closed, a slot filled); a RECV arm is also ready on a value it can
+            // take (a buffered value or another party's live offer) or a `trip()` latch — NOT on
+            // `closed`, which the poll SKIPS. A timer arm delivers on its own deadline with nobody
+            // sending, so it is never judged.
             //
             // DEC-176 — the poll skips ONE closed recv arm, but a `wait:` whose EVERY arm is a closed
             // recv arm settles (`wait: all channels closed`), so the group is judged as a whole.
-            PartyWait::Wait(arms) => {
-                arms.iter().any(|(core, is_send)| {
-                    let g = core.q.lock().unwrap_or_else(|e| e.into_inner());
-                    if *is_send {
-                        g.has_send_slot(core.cap) || g.closed
-                    } else {
-                        !g.is_empty()
-                            || core.done_latch.load(std::sync::atomic::Ordering::Relaxed)
-                            || core.timer.is_some()
-                    }
-                }) || (!arms.is_empty()
-                    && arms.iter().all(|(core, is_send)| {
-                        !is_send && core.q.lock().unwrap_or_else(|e| e.into_inner()).closed
-                    }))
+            PartyWait::Wait(arms, me) => {
+                me.as_ref().is_some_and(|p| !p.is_queued())
+                    || arms.iter().any(|(core, is_send)| {
+                        let g = core.q.lock().unwrap_or_else(|e| e.into_inner());
+                        if *is_send {
+                            me.is_none() && (g.send_ready_for(core.cap, None) || g.closed)
+                        } else {
+                            g.recv_ready_for(me.as_ref())
+                                || core.done_latch.load(Ordering::Relaxed)
+                                || core.timer.is_some()
+                        }
+                    })
+                    || (!arms.is_empty()
+                        && arms.iter().all(|(core, is_send)| {
+                            !is_send && core.q.lock().unwrap_or_else(|e| e.into_inner()).closed
+                        }))
             }
             // A join is over exactly when the executor owes nothing BUT this joiner's own job. See
             // the variant's doc: answering a flat `false` here faulted an already-drained

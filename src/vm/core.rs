@@ -17,7 +17,7 @@ use super::wire::{WireGenState, WireValue};
 use crate::lexer::Span;
 use std::collections::{HashMap, VecDeque};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
@@ -192,8 +192,8 @@ pub struct ChannelCore {
     pub q: Mutex<ChanState>,
     pub cv: Condvar,
     /// Bounded-channel capacity: `None` = unbounded (`send` never blocks); `Some(0)` = rendezvous
-    /// (TICKET-028) — the send side is judged against `recv_waiting`, never against `cap`, because a
-    /// cap-0 channel is simultaneously empty and full; `Some(n>0)` = a bounded FIFO whose `send` parks
+    /// (TICKET-028) — a send moves only into a parked receiver's slot (TICKET-185,
+    /// [`ChanState::send`]), because a cap-0 channel has no buffer; `Some(n>0)` = a bounded FIFO whose `send` parks
     /// the fiber once `n` messages are queued and whose `try_send` returns `false` when full.
     /// Immutable after construction (set once by `Op::NewChannel`).
     pub cap: Option<usize>,
@@ -229,206 +229,451 @@ pub struct ChannelCore {
 /// TOCTOU gap (check empty, then close happens, then park) that could strand a parked fiber. Once
 /// `closed`: `send`/`try_send` are rejected, `recv` drains then faults, and `for v in ch:` ends once
 /// drained. `close()` wakes every parked/demoted receiver via `cv` + the scheduler.
-#[derive(Debug, Clone)]
-enum EntryKind {
-    Msg,
-    Deposit(Arc<AtomicU8>),
+/// TICKET-185 — a blocked party's commit record (Go's `sudog` + `selectDone`). One `Pending` per
+/// blocked `send`, `recv` or `wait:`; a `wait:` shares ONE across all its arms, so the CAS that
+/// takes a value also decides which arm fired. Every commit is a CAS from [`PENDING_QUEUED`] made
+/// under the channel lock `core.q` of the entry it commits ([`ChanState::give`] fills a slot,
+/// [`ChanState::pop`] takes an offer). Nothing else decides "delivered".
+#[derive(Debug, Default)]
+pub struct Pending(AtomicU32);
+
+/// Nobody has committed this party yet: its offers may be taken and its slots filled.
+pub const PENDING_QUEUED: u32 = 0;
+/// The party withdrew (it re-polls, or it unwound); none of its entries can commit any more.
+pub const PENDING_CANCELLED: u32 = 1;
+/// `close()` closed one of this party's offers: its `send` faults `send on a closed channel`.
+pub const PENDING_CLOSED: u32 = 2;
+/// `PENDING_DONE + arm`: the value moved on that arm (an offer was taken or a slot was filled).
+pub const PENDING_DONE: u32 = 3;
+
+impl Pending {
+    pub fn new() -> Arc<Pending> {
+        Arc::new(Pending(AtomicU32::new(PENDING_QUEUED)))
+    }
+
+    pub fn state(&self) -> u32 {
+        self.0.load(Ordering::Acquire)
+    }
+
+    pub fn is_queued(&self) -> bool {
+        self.state() == PENDING_QUEUED
+    }
+
+    /// Commit `arm`: the one CAS every hand-off goes through.
+    pub fn try_commit(&self, arm: u32) -> bool {
+        self.0
+            .compare_exchange(
+                PENDING_QUEUED,
+                PENDING_DONE + arm,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    /// Withdraw; `Err(state)` when somebody settled the party first.
+    pub fn try_cancel(&self) -> Result<(), u32> {
+        self.0
+            .compare_exchange(
+                PENDING_QUEUED,
+                PENDING_CANCELLED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map(|_| ())
+    }
+
+    pub fn try_close(&self) -> bool {
+        self.0
+            .compare_exchange(
+                PENDING_QUEUED,
+                PENDING_CLOSED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
 }
 
-/// States a [`EntryKind::Deposit`] handle can read (TICKET-042a — Go's `sudog` model: a rendezvous
-/// `send` publishes its value into the queue, marked as a deposit, before it parks, so a poll
-/// (`try_recv`, `wait:`'s `else` arm) can take it with no change to the poll itself).
-pub const DEPOSIT_QUEUED: u8 = 0;
-/// A `pop` took this deposit's value normally (the taker owns it now).
-pub const DEPOSIT_TAKEN: u8 = 1;
-/// `close()` withdrew this deposit before anyone took it (Go: the parked value is not delivered).
-pub const DEPOSIT_WITHDRAWN: u8 = 2;
+fn is_me(p: &Arc<Pending>, me: Option<&Arc<Pending>>) -> bool {
+    me.is_some_and(|m| Arc::ptr_eq(m, p))
+}
+
+/// A blocked sender's value, published so a receiver can take it (TICKET-185). Lives in
+/// `ChanState::sendq`, never in the buffer, so it never counts toward `len()` or `cap`.
+#[derive(Debug)]
+struct Offer {
+    p: Arc<Pending>,
+    arm: u32,
+    sum: usize,
+    w: WireValue,
+}
+
+/// A blocked rendezvous receiver's place (TICKET-185): a sender that finds it commits it and
+/// stores the value in `got`, where the receiver takes it on its next run.
+#[derive(Debug)]
+struct Slot {
+    p: Arc<Pending>,
+    arm: u32,
+    got: Option<(usize, WireValue)>,
+}
+
+/// What one `send` attempt did ([`ChanState::send`]).
+pub enum SendOutcome {
+    /// The value moved: into the buffer, or into a receiver's slot.
+    Sent,
+    /// The value waits in `sendq` as the caller's offer.
+    Offered,
+    /// Nothing can take the value now and the caller published no offer.
+    Full,
+    Closed,
+}
 
 #[derive(Debug, Default)]
 pub struct ChanState {
-    /// PRIVATE on purpose (W6-7/W6-10): every mutation must go through [`push`](Self::push) /
-    /// [`pop`](Self::pop) / [`clear`](Self::clear) so the cached GC summary (`bytes`/`dirty`) can
-    /// never go stale. A stale `dirty == false` would stop the GC tracing a live handle queued in
-    /// this channel — a use-after-free. Rust module privacy is what makes "did I catch every push
-    /// site?" a compile error instead of a code review.
+    /// PRIVATE on purpose (W6-7/W6-10): every mutation must go through the methods below so the
+    /// cached GC summary (`bytes`/`dirty`) can never go stale. A stale `dirty == false` would stop
+    /// the GC tracing a live handle queued in this channel — a use-after-free. Rust module privacy
+    /// is what makes "did I catch every push site?" a compile error instead of a code review.
     ///
     /// Each message carries its own [`wire_summary`] byte count so `pop` is O(1): these queues are
     /// popped under the GLOBAL `MnSched` lock (`sched.rs` demote paths), and re-deriving the count
     /// on removal would put an O(payload) walk in that critical section.
-    queue: VecDeque<(usize, EntryKind, WireValue)>,
-    /// Approximate owned bytes of the queued messages (see [`wire_summary`]) — the off-heap storage
-    /// `Heap::live_bytes` could not see before W6-10.
+    queue: VecDeque<(usize, WireValue)>,
+    /// TICKET-185 — offers of blocked senders (a cap-0 channel, or a FULL bounded one).
+    sendq: VecDeque<Offer>,
+    /// TICKET-185 — slots of blocked cap-0 receivers.
+    recvq: VecDeque<Slot>,
+    /// Approximate owned bytes of every value held here (buffer, offers, filled slots — see
+    /// [`wire_summary`]) — the off-heap storage `Heap::live_bytes` could not see before W6-10.
     bytes: usize,
-    /// True while ANY queued message can root a heap object (a `Handle` or a nested core). Cleared
-    /// only when the queue empties, so it is conservative (over-walk = safe) and self-healing.
+    /// True while ANY held value can root a heap object (a `Handle` or a nested core). Cleared
+    /// only when all three queues empty, so it is conservative (over-walk = safe) and self-healing.
     dirty: bool,
     pub closed: bool,
-    /// Count of queued entries that are [`EntryKind::Deposit`]s rather than ordinary messages
-    /// (TICKET-042a). Subtracted out of [`len`](Self::len) by [`msg_len`](Self::msg_len) so a
-    /// deposit — a rendezvous sender's published-but-not-yet-taken value — stays invisible to
-    /// `Channel.len()`, matching Go's `len: 0` on an unbuffered channel with a parked sender.
-    deposits: usize,
-    /// Count of receivers currently WAITING on this channel (TICKET-028). Read only when `cap` is
-    /// `Some(0)`: the rendezvous send-ready predicate is `queue.len() < recv_waiting`. Maintained by
-    /// [`RecvWait`], armed at every receiver-wait site and dropped when the receiver's fiber next
-    /// RUNS (not when it is woken), so this count errs HIGH by design — an over-count lets one
-    /// rendezvous `send` enqueue without blocking (a momentary Go divergence); an under-count parks a
-    /// sender nothing can wake (a false `deadlock` fault on a healthy program, the unacceptable
-    /// direction).
-    pub recv_waiting: usize,
 }
 
 impl ChanState {
-    /// Enqueue a message with its PRE-COMPUTED [`wire_summary`].
-    ///
-    /// The summary MUST be computed by the caller **before taking any lock**: `send_wake` /
-    /// `send_wake_bounded` hold `MnSched::core` — the process-wide lock that serializes every
-    /// fiber's park/wake/finish — across this call, and `wire_summary` is O(payload). Global-lock
-    /// hold time must not scale with user payload size.
-    pub fn push(&mut self, sum: (usize, bool), w: WireValue) {
+    fn add(&mut self, sum: (usize, bool)) {
         self.bytes += sum.0;
         self.dirty |= sum.1;
-        self.queue.push_back((sum.0, EntryKind::Msg, w));
     }
 
-    /// Enqueue a rendezvous sender's value as a deposit (TICKET-042a) instead of an ordinary
-    /// message, and return the handle a poll/park/close observes it through. See
-    /// [`EntryKind::Deposit`]'s states.
-    pub fn deposit(&mut self, sum: (usize, bool), w: WireValue) -> Arc<AtomicU8> {
-        self.bytes += sum.0;
-        self.dirty |= sum.1;
-        let handle = Arc::new(AtomicU8::new(DEPOSIT_QUEUED));
-        self.queue
-            .push_back((sum.0, EntryKind::Deposit(Arc::clone(&handle)), w));
-        self.deposits += 1;
-        handle
-    }
-
-    pub fn pop(&mut self) -> Option<WireValue> {
-        let (b, kind, w) = self.queue.pop_front()?;
-        if let EntryKind::Deposit(h) = kind {
-            h.store(DEPOSIT_TAKEN, Ordering::Relaxed);
-            self.deposits -= 1;
-        }
+    fn sub(&mut self, b: usize) {
         self.bytes = self.bytes.saturating_sub(b);
-        if self.queue.is_empty() {
+        if self.queue.is_empty() && self.sendq.is_empty() && self.recvq.is_empty() {
             self.bytes = 0;
             self.dirty = false;
         }
+    }
+
+    /// Buffer a message with its PRE-COMPUTED [`wire_summary`].
+    ///
+    /// The summary MUST be computed by the caller **before taking any lock**: `send_commit` holds
+    /// `MnSched::core` — the process-wide lock that serializes every fiber's park/wake/finish —
+    /// across this call, and `wire_summary` is O(payload). Global-lock hold time must not scale
+    /// with user payload size.
+    pub fn push(&mut self, sum: (usize, bool), w: WireValue) {
+        self.add(sum);
+        self.queue.push_back((sum.0, w));
+    }
+
+    /// Publish a blocked sender's value as `p`'s offer on `arm`.
+    pub fn offer(&mut self, p: &Arc<Pending>, arm: u32, sum: (usize, bool), w: WireValue) {
+        self.add(sum);
+        self.sendq.push_back(Offer {
+            p: Arc::clone(p),
+            arm,
+            sum: sum.0,
+            w,
+        });
+    }
+
+    /// Publish a blocked rendezvous receiver's slot for `p` on `arm`.
+    pub fn slot(&mut self, p: &Arc<Pending>, arm: u32) {
+        self.recvq.push_back(Slot {
+            p: Arc::clone(p),
+            arm,
+            got: None,
+        });
+    }
+
+    /// Hand `w` to the first live, unfilled slot that is not `me`'s, committing it. Dead slots are
+    /// dropped on the way. `Err(w)` when no such slot exists.
+    pub fn give(
+        &mut self,
+        sum: (usize, bool),
+        w: WireValue,
+        me: Option<&Arc<Pending>>,
+    ) -> Result<(), WireValue> {
+        let mut i = 0;
+        while i < self.recvq.len() {
+            let s = &self.recvq[i];
+            if s.got.is_some() || is_me(&s.p, me) {
+                i += 1;
+                continue;
+            }
+            if s.p.try_commit(s.arm) {
+                self.recvq[i].got = Some((sum.0, w));
+                self.add(sum);
+                return Ok(());
+            }
+            self.recvq.remove(i);
+        }
+        Err(w)
+    }
+
+    /// THE send decision (TICKET-185), made in one `core.q` hold. In order: closed; unbounded
+    /// buffers; rendezvous gives to a slot; bounded buffers while there is room; otherwise the
+    /// value becomes `offer`'s offer, or the send is [`SendOutcome::Full`].
+    pub fn send(
+        &mut self,
+        cap: Option<usize>,
+        sum: (usize, bool),
+        w: WireValue,
+        offer: Option<(&Arc<Pending>, u32)>,
+    ) -> SendOutcome {
+        if self.closed {
+            return SendOutcome::Closed;
+        }
+        let w = match cap {
+            None => {
+                self.push(sum, w);
+                return SendOutcome::Sent;
+            }
+            Some(0) => match self.give(sum, w, offer.map(|(p, _)| p)) {
+                Ok(()) => return SendOutcome::Sent,
+                Err(w) => w,
+            },
+            Some(n) if self.queue.len() < n => {
+                self.push(sum, w);
+                return SendOutcome::Sent;
+            }
+            Some(_) => w,
+        };
+        match offer {
+            Some((p, arm)) => {
+                self.offer(p, arm, sum, w);
+                SendOutcome::Offered
+            }
+            None => SendOutcome::Full,
+        }
+    }
+
+    /// Take the next value: the buffer front (then move the first live offer into the freed
+    /// place — Go's recv refill), else the first live offer that is not `me`'s. Each offer taken
+    /// is committed by CAS; dead offers are dropped on the way.
+    pub fn pop_for(&mut self, me: Option<&Arc<Pending>>) -> Option<WireValue> {
+        if let Some((b, w)) = self.queue.pop_front() {
+            self.bytes = self.bytes.saturating_sub(b);
+            if let Some((sum, ow)) = self.take_offer(me) {
+                self.queue.push_back((sum, ow));
+            }
+            self.sub(0);
+            return Some(w);
+        }
+        let (sum, w) = self.take_offer(me)?;
+        self.sub(sum);
         Some(w)
     }
 
-    /// Withdraw the one queued deposit matching `handle` (TICKET-042a) — used by a re-parking
-    /// sender to pull its own not-yet-taken deposit back out before re-depositing, and by a
-    /// cancelled sender. `Arc::ptr_eq` identifies the entry: two deposits never share a handle.
-    pub fn withdraw(&mut self, handle: &Arc<AtomicU8>) {
-        let Some(pos) = self.queue.iter().position(
-            |(_, kind, _)| matches!(kind, EntryKind::Deposit(h) if Arc::ptr_eq(h, handle)),
-        ) else {
-            return;
-        };
-        let (b, _, _) = self.queue.remove(pos).unwrap();
-        handle.store(DEPOSIT_WITHDRAWN, Ordering::Relaxed);
-        self.deposits -= 1;
-        self.bytes = self.bytes.saturating_sub(b);
-        if self.queue.is_empty() {
-            self.bytes = 0;
-            self.dirty = false;
+    /// Commit and remove the first live offer that is not `me`'s; dead offers are dropped.
+    fn take_offer(&mut self, me: Option<&Arc<Pending>>) -> Option<(usize, WireValue)> {
+        let mut i = 0;
+        while i < self.sendq.len() {
+            if is_me(&self.sendq[i].p, me) {
+                i += 1;
+                continue;
+            }
+            let o = self.sendq.remove(i).unwrap();
+            if o.p.try_commit(o.arm) {
+                return Some((o.sum, o.w));
+            }
+            self.bytes = self.bytes.saturating_sub(o.sum);
         }
+        None
     }
 
-    /// Withdraw every queued deposit (TICKET-042a) — `close()`'s job: Go measures that a parked
-    /// sender's value is NOT delivered once the channel is closed.
-    pub fn withdraw_all_deposits(&mut self) {
-        if self.deposits == 0 {
-            return;
-        }
+    pub fn pop(&mut self) -> Option<WireValue> {
+        self.pop_for(None)
+    }
+
+    /// Remove `p`'s filled slot and return its value.
+    pub fn take(&mut self, p: &Arc<Pending>) -> Option<WireValue> {
+        let i = self
+            .recvq
+            .iter()
+            .position(|s| s.got.is_some() && Arc::ptr_eq(&s.p, p))?;
+        let (b, w) = self.recvq.remove(i)?.got?;
+        self.sub(b);
+        Some(w)
+    }
+
+    /// Remove every offer and slot of `p`.
+    pub fn withdraw(&mut self, p: &Arc<Pending>) {
         let mut freed = 0;
-        self.queue.retain(|(b, kind, _)| match kind {
-            EntryKind::Deposit(h) => {
-                h.store(DEPOSIT_WITHDRAWN, Ordering::Relaxed);
-                freed += b;
-                false
+        self.sendq.retain(|o| {
+            let mine = Arc::ptr_eq(&o.p, p);
+            if mine {
+                freed += o.sum;
             }
-            EntryKind::Msg => true,
+            !mine
         });
-        self.deposits = 0;
-        self.bytes = self.bytes.saturating_sub(freed);
-        if self.queue.is_empty() {
-            self.bytes = 0;
-            self.dirty = false;
+        self.recvq.retain(|s| {
+            let mine = Arc::ptr_eq(&s.p, p);
+            if mine && let Some((b, _)) = &s.got {
+                freed += b;
+            }
+            !mine
+        });
+        self.sub(freed);
+    }
+
+    /// `close()` (TICKET-185): in this one hold, set `closed`, close every offer (each such sender
+    /// faults `send on a closed channel`) and drop the unfilled slots. A filled slot stays: its
+    /// value was delivered before the close.
+    pub fn close(&mut self) {
+        self.closed = true;
+        let mut freed = 0;
+        for o in self.sendq.drain(..) {
+            o.p.try_close();
+            freed += o.sum;
         }
+        self.recvq.retain(|s| s.got.is_some());
+        self.sub(freed);
     }
 
     pub fn clear(&mut self) {
         self.queue.clear();
+        self.sendq.clear();
+        self.recvq.clear();
         self.bytes = 0;
         self.dirty = false;
-        self.deposits = 0;
     }
 
+    /// The buffered message count — Go's `len`: offers and slots never count.
     pub fn len(&self) -> usize {
         self.queue.len()
     }
 
-    /// Message-visible length (TICKET-042a): [`len`](Self::len) minus queued deposits, so a
-    /// parked rendezvous sender's not-yet-taken value stays invisible to `Channel.len()`.
-    pub fn msg_len(&self) -> usize {
-        self.queue.len() - self.deposits
-    }
-
+    /// The buffer is empty — like [`len`](Self::len), offers and slots never count.
     pub fn is_empty(&self) -> bool {
         self.queue.is_empty()
     }
 
+    /// Every value held here — buffer, offers and filled slots — for the GC trace.
     pub fn iter(&self) -> impl Iterator<Item = &WireValue> {
-        self.queue.iter().map(|(_, _, w)| w)
+        self.queue
+            .iter()
+            .map(|(_, w)| w)
+            .chain(self.sendq.iter().map(|o| &o.w))
+            .chain(
+                self.recvq
+                    .iter()
+                    .filter_map(|s| s.got.as_ref().map(|(_, w)| w)),
+            )
     }
 
-    /// Cached GC summary of the queued messages: `(approximate owned bytes, can-root-a-heap-object)`.
+    /// Cached GC summary of the held values: `(approximate owned bytes, can-root-a-heap-object)`.
     pub fn summary(&self) -> (usize, bool) {
         (self.bytes, self.dirty)
     }
 
-    /// Send-side readiness (TICKET-028). `None` = unbounded, always ready. `Some(0)` = rendezvous:
-    /// ready only while fewer messages are queued than receivers are waiting. `Some(n)` = bounded:
-    /// ready while under capacity.
-    pub fn has_send_slot(&self, cap: Option<usize>) -> bool {
+    /// Would a `recv` by `me` take a value now? A buffered value, or a live offer of another party.
+    pub fn recv_ready_for(&self, me: Option<&Arc<Pending>>) -> bool {
+        !self.queue.is_empty()
+            || self
+                .sendq
+                .iter()
+                .any(|o| o.p.is_queued() && !is_me(&o.p, me))
+    }
+
+    /// Would a `send` by `me` move its value now? Unbounded: always. Rendezvous: a live unfilled
+    /// slot of another party. Bounded: room in the buffer.
+    pub fn send_ready_for(&self, cap: Option<usize>, me: Option<&Arc<Pending>>) -> bool {
         match cap {
             None => true,
-            Some(0) => self.queue.len() < self.recv_waiting,
+            Some(0) => self
+                .recvq
+                .iter()
+                .any(|s| s.got.is_none() && s.p.is_queued() && !is_me(&s.p, me)),
             Some(n) => self.queue.len() < n,
         }
     }
 }
 
-/// RAII receiver-presence marker for a rendezvous channel (TICKET-028). `arm` increments
-/// `ChanState::recv_waiting` under `core.q`; `Drop` decrements it, also under `core.q`. Both take
-/// ONLY `core.q`, so both are legal everywhere under the core-OUTER / q-INNER lock order. The count
-/// errs HIGH by design: see the doc comment on [`ChanState::recv_waiting`].
+/// What a blocked party's [`PendingOp`] settled to.
 #[derive(Debug)]
-pub struct RecvWait(std::sync::Arc<ChannelCore>);
+pub enum Settled {
+    /// Nobody committed it; every entry is withdrawn and the party polls again.
+    Cancelled,
+    /// `close()` closed one of its offers.
+    Closed,
+    /// Its offer on this arm was taken.
+    Sent(u32),
+    /// Its slot on this arm was filled with this value.
+    Got(u32, WireValue),
+}
 
-impl RecvWait {
-    pub fn arm(core: &std::sync::Arc<ChannelCore>) -> Self {
-        let mut g = core.q.lock().unwrap_or_else(|e| e.into_inner());
-        g.recv_waiting += 1;
-        drop(g);
-        RecvWait(std::sync::Arc::clone(core))
+/// TICKET-185 — a blocked party's [`Pending`] and every channel it has entries on, as
+/// `(core, arm, is_send)`. Held by the running `Vm` or its parked `Fiber` until
+/// [`settle`](Self::settle). Dropping it settles it, so a fault that unwinds never leaves a live
+/// offer or slot behind. Never drop one while holding a `core.q` guard: settling takes that lock.
+#[derive(Debug)]
+pub struct PendingOp {
+    pub p: Arc<Pending>,
+    pub at: Vec<(Arc<ChannelCore>, u32, bool)>,
+}
+
+impl PendingOp {
+    pub fn new(p: Arc<Pending>, at: Vec<(Arc<ChannelCore>, u32, bool)>) -> Self {
+        PendingOp { p, at }
     }
 
-    /// TICKET-125 — the channel core this park is armed against, so the provable-leaf scan
-    /// (`SchedCore::provable`) can key on it. The field is private to this module; every other
-    /// caller reaches the core only through this accessor.
-    pub fn core(&self) -> &std::sync::Arc<ChannelCore> {
-        &self.0
+    /// Cancel if still queued, take a filled slot's value, and withdraw every remaining entry.
+    pub fn settle(mut self) -> Settled {
+        self.settle_mut()
+    }
+
+    fn settle_mut(&mut self) -> Settled {
+        let at = std::mem::take(&mut self.at);
+        let r = match self.p.try_cancel() {
+            Ok(()) | Err(PENDING_CANCELLED) => Settled::Cancelled,
+            Err(PENDING_CLOSED) => Settled::Closed,
+            Err(s) => {
+                let arm = s - PENDING_DONE;
+                match at.iter().find(|(_, a, _)| *a == arm) {
+                    Some((_, _, true)) => Settled::Sent(arm),
+                    Some((core, _, false)) => {
+                        let w = core
+                            .q
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .take(&self.p);
+                        match w {
+                            Some(w) => Settled::Got(arm, w),
+                            None => Settled::Cancelled,
+                        }
+                    }
+                    None => Settled::Cancelled,
+                }
+            }
+        };
+        for (core, _, _) in &at {
+            core.q
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .withdraw(&self.p);
+        }
+        r
     }
 }
 
-impl Drop for RecvWait {
+impl Drop for PendingOp {
     fn drop(&mut self) {
-        let mut g = self.0.q.lock().unwrap_or_else(|e| e.into_inner());
-        g.recv_waiting = g.recv_waiting.saturating_sub(1);
+        if !self.at.is_empty() {
+            let _ = self.settle_mut();
+        }
     }
 }
 

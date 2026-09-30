@@ -167,19 +167,91 @@ test fn try_recv_sees_a_blocked_in_place_rendezvous_sender():
     ex.shutdown()
     assert got.get() == 7, "try_recv must see a block-in-place rendezvous sender"
 
-# TICKET-136 (W14-35) — a rendezvous channel has no slots, so a send that can never complete names
-# the missing RECEIVER, not a full buffer. The `map` callback is a native re-entry, so the send
-# cannot park and takes the in-callback fault.
+# TICKET-185 — a send inside a native callback (`map`) demotes and blocks until a receiver takes
+# the value, as Go blocks it. Before, the in-callback send could not block and faulted
+# `send on a rendezvous channel: deadlock` (TICKET-136's message, still used where nothing can block).
 fn send_one(rz: Channel[int], x: int) -> int:
     rz.send(x)
     return x
 
-test fn rendezvous_send_that_cannot_park_names_the_missing_receiver():
+test fn rendezvous_send_in_a_callback_blocks_until_a_receiver_takes_it():
     rz := Channel[int](0)
-    msg := Shared("")
+    out := Shared("")
+    got := Shared(0)
     parallel:
         spawn:
-            r := recover: [1].map(fn(x: int) -> int: send_one(rz, x))
-            msg.set(fault_msg(r))
-    assert msg.get().starts_with("send on a rendezvous channel: deadlock"), msg.get()
-    assert not msg.get().contains("at capacity"), msg.get()
+            out.set("{[1].map(fn(x: int) -> int: send_one(rz, x))}")
+        spawn: got.set(rz.recv())
+    assert out.get() == "[1]", out.get()
+    assert got.get() == 1
+
+# TICKET-185 (H2) — a receiver takes one value from a cap-1 channel, closes it, and drains it. A
+# second `send` that returned has delivered its value (Go: a receive that frees a place completes
+# the parked sender's send, `sent both`); one that faulted `send on a closed channel` delivered
+# nothing. The spin only shapes the usual order (the sender parks in `send(2)` first); the rule
+# holds in either order. It used to break: the woken sender retried after the close and pushed its
+# value into the closed channel, so `send(2)` returned but `2` was never received.
+test fn a_parked_bounded_sender_completes_when_the_receiver_takes_then_closes():
+    ch := Channel[int](1)
+    status := Shared("")
+    out := Channel[int]()
+    parallel:
+        spawn:
+            i := 0
+            while i < 200000:
+                i += 1
+            out.send(ch.recv())
+            ch.close()
+            for v in ch:
+                out.send(v)
+        ch.send(1)
+        r := recover: ch.send(2)
+        status.set(fault_msg(r))
+    assert out.try_recv() == Some(1)
+    if status.get() == "NO FAULT":
+        assert out.try_recv() == Some(2), "a completed send's value must be received"
+    else:
+        assert status.get() == "send on a closed channel", status.get()
+    assert out.try_recv() == None
+
+fn pool_worker(done: Channel[bool], work: Channel[int], n: AtomicInt):
+    while true:
+        wait:
+            _ := done.recv():
+                return
+            v := work.recv():
+                n.add(v)
+
+# TICKET-185 (H1) — the worker-pool idiom: every rendezvous value reaches a `wait:` worker and none
+# is left in the channel (Go: 0 of 200 runs bad). It used to strand values: a `send` returned while
+# its value still sat in the channel.
+test fn a_wait_receiver_never_strands_a_rendezvous_value():
+    done := Channel[bool]()
+    work := Channel[int](0)
+    n := AtomicInt(0)
+    parallel:
+        for _ in 0..4:
+            spawn pool_worker(done, work, n)
+        spawn:
+            for _ in 0..100:
+                work.send(1)
+            done.trip()
+    assert n.load() == 100, "received {n.load()}"
+    assert work.len() == 0
+
+# TICKET-185 — `try_send` succeeds once a receiver is parked on a rendezvous channel (Go:
+# `try_send true` / `got 5`): the receiver's slot takes the value. It returns `false` until then,
+# so the spin ends exactly when the receiver is parked.
+test fn try_send_hands_off_to_a_parked_receiver():
+    ch := Channel[int](0)
+    got := Shared(0)
+    tries := Shared(0)
+    parallel:
+        spawn: got.set(ch.recv())
+        spawn:
+            n := 1
+            while not ch.try_send(5):
+                n += 1
+            tries.set(n)
+    assert tries.get() >= 1
+    assert got.get() == 5
