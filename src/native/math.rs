@@ -244,6 +244,18 @@ fn parse_int_base_impl(s: &str, base: i64) -> Result<i64, String> {
             "parse_int_base: cannot parse '{s}' in base {radix}"
         ));
     };
+    // Base 0 with no prefix is decimal WITHOUT leading zeros unless the value is zero (CPython
+    // `int('017', 0)` is a ValueError -- an octal-looking literal is ambiguous; `int('00', 0)` is 0).
+    if base == 0
+        && radix == 10
+        && digits.len() > 1
+        && digits.starts_with('0')
+        && digits.bytes().any(|b| b != b'0')
+    {
+        return Err(format!(
+            "parse_int_base: leading zeros in '{s}' are not allowed in base 0 (use a 0o prefix for octal)"
+        ));
+    }
     // Re-attach the sign and let `from_str_radix` parse it directly, so i64::MIN (whose magnitude
     // is i64::MAX+1 and cannot be parsed-then-negated) round-trips like Python/Go.
     let signed = if neg {
@@ -556,6 +568,34 @@ mod tests {
         assert!(parse_int_base_impl("1__0", 10).is_err());
         assert!(parse_int_base_impl("_10", 10).is_err());
         assert!(parse_int_base_impl("10_", 10).is_err());
+    }
+
+    #[test]
+    fn parse_int_base_base0_rejects_leading_zeros_like_cpython() {
+        // CPython 3.14.7 `int(s, 0)` for each row.
+        for (s, want) in [
+            ("017", None),
+            ("010", None),
+            ("0_1", None),
+            ("-017", None),
+            (" 017 ", None),
+            ("0", Some(0)),
+            ("00", Some(0)),
+            ("000", Some(0)),
+            ("0_0", Some(0)),
+            ("-0", Some(0)),
+            ("+00", Some(0)),
+            ("0x17", Some(23)),
+            ("0o17", Some(15)),
+            ("0b1", Some(1)),
+            ("7", Some(7)),
+            ("10", Some(10)),
+            ("1_0", Some(10)),
+        ] {
+            assert_eq!(parse_int_base_impl(s, 0).ok(), want, "{s:?}");
+        }
+        // Only base 0 is strict: an explicit base 10 keeps accepting leading zeros (int('017', 10) == 17).
+        assert_eq!(parse_int_base_impl("017", 10).ok(), Some(17));
     }
 
     #[test]

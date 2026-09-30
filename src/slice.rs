@@ -110,7 +110,12 @@ pub fn slice_indices(
     if step > 0 {
         while i < hi {
             out.push(i as usize);
-            i += step;
+            // A step near `i64::MAX` would wrap `i` negative (and past `hi`'s check) in release;
+            // an overflowing step is simply past the end, as in CPython's `slice.indices`.
+            match i.checked_add(step) {
+                Some(next) => i = next,
+                None => break,
+            }
         }
     } else {
         while i > hi {

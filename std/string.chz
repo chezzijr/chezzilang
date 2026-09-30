@@ -191,20 +191,19 @@ fn split(s: str, sep: str, maxsplit: int = -1) -> List[str]:
     return out
 
 # Split `s` on `sep` from the RIGHT, at most `maxsplit + 1` pieces (Python `str.rsplit(sep,
-# maxsplit)`). `maxsplit < 0` (default) is unlimited and identical to `split`. Empty `sep` faults.
+# maxsplit)`). `maxsplit < 0` (default) is unlimited. Empty `sep` faults. Matching from the right in
+# `s` is exactly matching from the left in `s` reversed (codepoint-wise), so this is `split` on the
+# reversed string with each piece and the piece order reversed back -- one splitter, and a
+# separator that overlaps itself ("aaa" on "aa") matches at the right end as CPython does.
 fn rsplit(s: str, sep: str, maxsplit: int = -1) -> List[str]:
     if sep.len() == 0:
         panic("rsplit: sep must not be empty")
-    parts := s.split(sep)
-    if maxsplit < 0 or maxsplit >= parts.len() - 1:
-        return parts
-    keep := parts.len() - maxsplit
+    rev := split(s.reverse(), sep.reverse(), maxsplit)
     out: List[str] = []
-    out.push(sep.join(parts[0 : keep]))
-    i := keep
-    while i < parts.len():
-        out.push(parts[i])
-        i += 1
+    i := rev.len() - 1
+    while i >= 0:
+        out.push(rev[i].reverse())
+        i -= 1
     return out
 
 # Split `s` on runs of whitespace, dropping empty pieces (Python no-arg `str.split()`):

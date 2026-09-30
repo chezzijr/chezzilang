@@ -7,6 +7,18 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **Wave-16 in-place fixes (2026-09-30), each against the CPython 3.14.7 value.** (1) **S1, P1:**
+  a slice step near `i64::MAX` wrapped the stepping index negative and panicked the VM thread, even
+  under `recover:` (`xs[1::9223372036854775807]`); `slice::slice_indices` now stops on an
+  overflowing step, covering list/str/bytes/bytearray/range (`tests/chz/spec/slice_huge_step_test.chz`).
+  (2) `std.string.rsplit` matched from the left and regrouped, so a self-overlapping separator split
+  at the wrong end (`rsplit("aaa", "aa")` gave `['', 'a']`, CPython `['a', '']`); it is now `split`
+  on the reversed string with pieces reversed back -- one splitter
+  (`tests/chz/stdlib/string_rsplit_test.chz`). (3) `math.parse_int_base(s, 0)` accepted a leading
+  zero (`"017"` → `Ok(17)`); base 0 decimal now Errs on a leading zero unless the value is zero, as
+  CPython `int(s, 0)`; an explicit base 10 still accepts it (`native::math` test
+  `parse_int_base_base0_rejects_leading_zeros_like_cpython`). Docs: `docs/stdlib.md` rsplit and
+  parse_int_base entries.
 - **Wave-16 cleanup (2026-09-30).** (1) A module-global initialization cycle (`x := f()` where `f`
   returns `x`) is now reported ONCE, as `initialization cycle: ...` — the derived `cannot infer
   return type of 'f'` and the body's "declared below ... type is not known" decline are its

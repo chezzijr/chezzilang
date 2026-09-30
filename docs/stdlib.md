@@ -629,7 +629,8 @@ Number / integer functions (Python `math` semantics):
   at `20!` (`21!` exceeds i64, so it Errs — the ceiling is the i64 limit, not a design choice). `comb`/`perm`
   yield `0` when `k > n` (Python), compute in i128 internally, and Err only when the true result exceeds i64.
 - `parse_int_base(s: str, base: int) -> Result[int]` — parse `s` in `base` (`0` or `2..=36`); malformed
-  input Errs (never faults). `base 0` auto-detects a `0x`/`0o`/`0b` prefix (else decimal); bases `2`/`8`/`16`
+  input Errs (never faults). `base 0` auto-detects a `0x`/`0o`/`0b` prefix (else decimal, and then a leading
+  zero is an Err unless the value is zero, as CPython `int(s, 0)`: `"017"` Errs, `"00"` → `0`); bases `2`/`8`/`16`
   also accept the matching prefix. A leading `+`/`-` sign is allowed (`parse_int_base("-2a", 16)` → `-42`).
   Trims surrounding whitespace and accepts PEP-515 single underscores between digits at every base,
   exactly as `str.to_int` does (`parse_int_base("1_0", 10)` → `10`; `parse_int_base("ff_ff", 16)` →
@@ -1390,7 +1391,7 @@ Written in Chezzi (`std/*.chz`); same `import std.<name>` surface.
 - `swapcase(s) -> str` — flip the case of each cased char; uncased chars unchanged.
 - `find(s, sub, from_index) -> int` — first codepoint index of `sub` at or after `from_index`, `-1` if absent. Negative `from_index` counts from the end (`len + from_index`, clamped to `0`); `from_index` past the end → `-1` (empty `sub` → `from_index` up to `len`). `index_of(s, sub)` is exactly `find(s, sub, 0)`.
 - `split(s, sep, maxsplit = -1) -> List[str]` — split from the left into at most `maxsplit + 1` pieces; `maxsplit < 0` (default) is unlimited. Empty `sep` raises a recoverable `split: sep must not be empty` fault (Python `ValueError`).
-- `rsplit(s, sep, maxsplit = -1) -> List[str]` — as `split` but from the RIGHT; unlimited `maxsplit` is identical to `split`. Empty `sep` faults.
+- `rsplit(s, sep, maxsplit = -1) -> List[str]` — as `split` but matching from the RIGHT (CPython `str.rsplit`): a separator that overlaps itself splits at the right end (`rsplit("aaa", "aa")` → `["a", ""]`). Empty `sep` faults.
 - `split_whitespace(s) -> List[str]` — split on runs of whitespace, dropping empty pieces (Python no-arg `str.split()`): `"  a  b "` → `["a", "b"]`, `""` → `[]`.
 
 The case fns are ASCII-guaranteed; exotic full-Unicode case-folding follows Rust (e.g. `ß`→`SS`) and may differ from Python. `split_whitespace`'s blank class is the native `trim`'s (see `trim` above), which matches Python's `str.split()` blank class exactly.
