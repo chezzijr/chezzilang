@@ -1019,9 +1019,6 @@ pub struct Vm {
     /// `recv`'s slot, a `wait:`'s offers and slots), carried across a park by [`Fiber::pending`].
     /// The re-run op settles it first ([`crate::vm::core::PendingOp::settle`]).
     pending: Option<crate::vm::core::PendingOp>,
-    /// TICKET-185 — a settled op kept for reuse ([`crate::vm::core::PendingOp::recycle`]), so the
-    /// next blocking `send`/`recv` allocates no `Pending` and no `Vec`. Carried by [`Fiber::spare`].
-    spare: Option<crate::vm::core::PendingOp>,
     /// D5 — set when a blocking native call ([`crate::native::Kind::blocks`]) is reached under the M:N
     /// engine: instead
     /// of running inline (pinning the worker), `invoke_native` records the call here and returns a
@@ -1644,8 +1641,6 @@ struct Fiber {
     /// parked `recv` holds its channel here even without a slot, which [`SchedCore::provable`]
     /// counts. Dropping a parked fiber settles it, so none of its entries outlive it.
     pending: Option<crate::vm::core::PendingOp>,
-    /// TICKET-185 — this fiber's carried [`Vm::spare`] while it is not the running fiber.
-    spare: Option<crate::vm::core::PendingOp>,
 }
 
 // D2a — a `Fiber` now carries its own `Heap` (via `FiberCtx::heap`), and D2b parks fibers across
@@ -3800,12 +3795,9 @@ impl MnSched {
     /// false faults on `d2a` at `CHEZZI_THREADS=2` before that fix). Never reintroduce a stack-held
     /// channel Arc that outlives this fn's lock hold.
     fn park(&self, key: usize, core: Arc<ChannelCore>, mut fiber: Fiber) {
-        // Reused from the fiber's last settled op, else allocated BEFORE the sched lock: this
-        // critical section serializes every fiber's park.
-        let mut op = fiber.spare.take().unwrap_or_else(|| {
-            crate::vm::core::PendingOp::new(crate::vm::core::Pending::new(), Vec::with_capacity(1))
-        });
-        let p = Arc::clone(&op.p);
+        // Allocated BEFORE the sched lock: this critical section serializes every fiber's park.
+        let p = crate::vm::core::Pending::new();
+        let mut op = crate::vm::core::PendingOp::new(Arc::clone(&p), Vec::with_capacity(1));
         let mut c = self.lock();
         c.running -= 1;
         // Close the park gap: re-check (under the core lock) whether a message is waiting, the channel
@@ -5805,7 +5797,6 @@ impl ReadyWorker {
             span,
             resume_native: None,
             pending: None,
-            spare: None,
         }
     }
 }

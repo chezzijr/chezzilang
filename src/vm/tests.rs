@@ -2932,7 +2932,6 @@ fn mk_fiber(task_index: usize) -> Fiber {
         span: Span::RUNTIME,
         resume_native: None,
         pending: None,
-        spare: None,
     }
 }
 /// An UNSTARTED fiber (`Pending`) — what `inject`/`seed` require so `run_one_fiber` runs the task
@@ -2951,7 +2950,6 @@ fn mk_pending_fiber(task_index: usize) -> Fiber {
         span: Span::RUNTIME,
         resume_native: None,
         pending: None,
-        spare: None,
     }
 }
 fn empty_core() -> Arc<ChannelCore> {
@@ -4015,28 +4013,6 @@ fn settle_takes_a_filled_slot_and_leaves_no_entry() {
         1,
         "an entry of the settled party survived"
     );
-}
-
-/// TICKET-185 lever 3: a settled `PendingOp` is reused only when nothing else can still commit
-/// its `Pending` — no live clone of it and no entry left in `at` — and comes back QUEUED.
-#[test]
-fn a_pending_op_is_recycled_only_when_unshared() {
-    use crate::vm::core::{PENDING_QUEUED, Pending, PendingOp};
-    let p = Pending::new();
-    let clone = Arc::clone(&p);
-    assert!(p.try_commit(0));
-    assert!(PendingOp::new(p, Vec::new()).recycle().is_none());
-    drop(clone);
-    let listed = Pending::new();
-    assert!(listed.try_commit(0));
-    let at = vec![(t185_core(Some(0)), 0, true)];
-    assert!(PendingOp::new(listed, at).recycle().is_none());
-    let p2 = Pending::new();
-    assert!(p2.try_commit(0));
-    let op = PendingOp::new(p2, Vec::new())
-        .recycle()
-        .expect("an unshared op is reused");
-    assert_eq!(op.p.state(), PENDING_QUEUED);
 }
 
 /// TICKET-185: a parked sender's offer commits exactly once. The first `pop` takes it and CASes

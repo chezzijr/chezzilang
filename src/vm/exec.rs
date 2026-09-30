@@ -138,7 +138,6 @@ impl Vm {
             wait_suspend: None,
             send_suspend: None,
             pending: None,
-            spare: None,
             offload: None,
             poll_park: None,
             pending_connect: None,
