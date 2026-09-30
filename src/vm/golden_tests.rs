@@ -13221,7 +13221,7 @@ fn module_scope_order_grid() {
         (
             "cycle",
             "x := f()\nfn f():\n    return x\nprint(x)\n",
-            "type error: cannot infer return type of 'f'; add a -> annotation | initialization cycle",
+            "type error: initialization cycle: the type of 'x' comes from 'f()'",
         ),
         (
             "annotated cycle",
