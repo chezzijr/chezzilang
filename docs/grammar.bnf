@@ -87,6 +87,7 @@
            | <postfix> "DOT" "IDENT"
            | <postfix> "LBRACKET" <expr> "RBRACKET"
 
+# A "RETURN" is legal only inside a fn, method or closure body; at module level the checker reports 'return' outside a function (TICKET-186; CPython's SyntaxError).
 <returnStmt> ::= "RETURN" "NEWLINE" | "RETURN" <expr> "NEWLINE"
 
 # `yield <expr>` (generators) — always carries a value. Legal only inside a generator

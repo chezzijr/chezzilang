@@ -7,6 +7,23 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-186 (2026-09-30): Family D, one record per module slot.** `Checker::globals`
+  (`src/checker/globals.rs`, `GlobalBinding`) holds every top-level declaration of a name plus its
+  seeded / reached / cycle state, built before any body is walked; `scopes[0]` stays the one type
+  store. Fixed: K4 (the first let of a seeded global refined by a body above it no longer wipes the
+  seed, so `z = Some("ab")` above `z := None` types `z` as `Option[str]` and `-> int` cannot return
+  `abab`); K11 and owner decision 1 (a module global declared both `const` and plain is a compile
+  error in either order, decided once per slot); K5 (one label-certainty decider,
+  `Checker::labels_certain`, for the value and by-name keyword-call paths: a fn/closure body,
+  `defer:` or `spawn:` block cannot bind keyword labels through a module slot declared more than
+  once — CPython binds the live fn's labels; top-level statements keep the lexical answer); K10 and
+  owner decision 2 (a module-level `return` is `'return' outside a function`, and `Vm::read_slot`
+  is the one module-slot reader, so qualified `m.x`, `module.fn()`, from-import and the entrypoint
+  fault on an uninitialized slot instead of panicking the heap). Deleted: `unreached_globals`,
+  `seeded_globals`, `cycle_globals`, `module_global_lets`, every `const_decls[0]` write, the
+  first-let wipe, `Vm::module_global`, `Vm::global_slot`, two hand uninit checks. Tests:
+  `t186_module_global_record_grid` (29 cells), `t186_uninit_read_paths_fault` (8 cells).
+
 - **TICKET-185 (2026-09-30): Family A, one channel hand-off protocol.** A blocked sender publishes
   an OFFER and a blocked rendezvous receiver a SLOT (`Pending`, `src/vm/core.rs`). A value moves
   only by a CAS on the party's `Pending` under the channel lock (`ChanState::give` / `pop_for`), and

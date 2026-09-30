@@ -168,11 +168,13 @@ generator state × route; heap size (perf cell).
 
 ## Family D — module scope: no single record per global (Family 3, incomplete)
 
+Status: fixed by TICKET-186 — one GlobalBinding record per module slot (src/checker/globals.rs) and one runtime reader Vm::read_slot; module-level return and const/plain mixes are rejected.
+
 **Deciders:** 15+ tables keyed by name (`scopes[0]`, `const_decls`, `kw_certain`/`kw_written`/
 `kw_pending`, `written_captures`, `empty_coll_sites`, `carrier_pins`, `unreached_globals`,
 `seeded_globals`, `cycle_globals`, `functions` labels, `fn_reads`, …), hand-synced by `declare` and
 the `Let` arm. TICKET-183 seeds three facts (type, const, kw_certain) before bodies — then the first
-`let` **wipes the seed** (`sig.rs:2551-2555`) and rebuilds from walk order. A body is checked against
+`let` **wiped the seed** (`sig.rs:2551-2555`, deleted by TICKET-186: the first let now refines it) and rebuilt from walk order. A body is checked against
 the state at its source position but runs against the state at call time (K4, K11). The redeclare
 guard compares `Ty`, and `FnLabels` equality is always true, so a rebinding with swapped parameter
 names passes (K5). At runtime the uninitialized check lives on 3 opcodes; 4 read paths (qualified

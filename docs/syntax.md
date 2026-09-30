@@ -378,6 +378,27 @@ fn f():
   - A body above an un-annotated global whose type is not yet known there (an empty collection
     `xs := []`) is rejected with "annotate its declaration".
   - An `import` below a body that uses it stays rejected (`'pi' is used before its import`, Go's rule).
+  - A body above the first let refines the global's type (TICKET-186): with `fn w(): z = Some("ab")`
+    above `z := None`, `z` is an `Option[str]`, so `fn r() -> int: return z ?? 0` is
+    `branches have incompatible types: str and int`.
+  - A module-level `return` is an error: `return` then `x := 5` at top level is
+    `'return' outside a function` (CPython's `SyntaxError`). A `return` belongs in a fn body.
+  - One name declared both `const` and plain at module scope is an error, in either order:
+    `PI := 1.0` then `PI: const float = 2.0` is `'PI' is declared both const and plain at module
+    scope` (JavaScript's `let`/`const` rule). A module global is one storage slot.
+  - Keyword arguments through a module name declared more than once (a `fn` and a `:=`, an import
+    and a `:=`, two `:=`) are an error in code that may run after a later declaration: a fn or
+    closure body, a `defer:` block, a `spawn:` block. Positional calls stay legal. A top-level
+    statement runs in source order, so it binds the declaration above it.
+
+    ```chezzi
+    fn f(a: int, b: int) -> int:
+        return a * 10 + b
+    fn call() -> int:
+        return f(a=1, b=2)   # ✗ keyword arguments through 'f' are ambiguous
+    print(f(a=1, b=2))       # ✓ 12: this statement runs before the let below
+    f := fn(b: int, a: int) -> int: a * 10 + b
+    ```
   - A let that shares its name with a `fn`, `extern`, `native` declaration or an import keeps the
     lexical view: the hoisted binding owns the name until the let runs. A let named like a type, a
     builtin or a builtin ctor (`P := fn..` beside `struct P`, `ord := fn..`) is an ordinary global: a
