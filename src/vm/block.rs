@@ -206,12 +206,121 @@ pub(super) fn mode(ctx: BlockCtx, spec: WaitSpec) -> BlockMode {
     }
 }
 
+/// TICKET-188 (W17 Family B) — why a party must stop now: [`halt_of`]'s answer.
+#[derive(Debug)]
+pub(super) enum Halt {
+    /// a cancel flag this party holds is tripped
+    Cancelled,
+    /// a child of a nursery this party owns faulted; `floor` is that nursery's `nurseries` index,
+    /// below which a `recover:` must not catch the fault (DEC-096)
+    ChildFault { floor: usize, err: RuntimeError },
+}
+
+/// One open nursery of a party, borrowed: what [`halt_of`] reads.
+pub(super) struct OwnedRef<'a> {
+    /// the nursery's `nurseries` index
+    pub(super) n: usize,
+    /// the nursery's cancel flag, which a faulting child trips before `finish` records the fault
+    pub(super) flag: &'a Arc<AtomicBool>,
+    pub(super) sched: &'a Arc<MnSched>,
+    pub(super) scope: usize,
+    /// TICKET-103 continuation scopes of the same family
+    pub(super) more: &'a [usize],
+}
+
+/// One open nursery of a party, owned, for a wait that outlives the borrow of the party's `Vm`.
+pub(super) struct OwnedScope {
+    n: usize,
+    flag: Arc<AtomicBool>,
+    sched: Arc<MnSched>,
+    scope: usize,
+    more: Vec<usize>,
+}
+
+impl OwnedScope {
+    pub(super) fn of(o: &OwnedRef<'_>) -> Self {
+        OwnedScope {
+            n: o.n,
+            flag: Arc::clone(o.flag),
+            sched: Arc::clone(o.sched),
+            scope: o.scope,
+            more: o.more.to_vec(),
+        }
+    }
+
+    fn as_ref(&self) -> OwnedRef<'_> {
+        OwnedRef {
+            n: self.n,
+            flag: &self.flag,
+            sched: &self.sched,
+            scope: self.scope,
+            more: &self.more,
+        }
+    }
+}
+
+/// TICKET-188 — THE wake set of a blocked party: its cancel flags plus the flags of the nurseries
+/// it owns. Every wait registration reads it ([`Vm::wake_set`]); empty where nothing may cut the
+/// party (inside its own `defer`, or already unwinding).
+#[derive(Default)]
+pub(super) struct WakeSet {
+    pub(super) cancel: Vec<Arc<AtomicBool>>,
+    pub(super) owned: Vec<OwnedScope>,
+}
+
+impl WakeSet {
+    /// Every flag whose trip may end the wait: the cancel flags, then the owned flags. A hint only.
+    pub(super) fn flags(&self) -> Vec<Arc<AtomicBool>> {
+        self.cancel
+            .iter()
+            .cloned()
+            .chain(self.owned.iter().map(|o| Arc::clone(&o.flag)))
+            .collect()
+    }
+
+    /// [`halt_of`] over this set. Takes the owned nurseries' sched locks: never call it under one.
+    pub(super) fn halt(&self) -> Option<Halt> {
+        halt_of(
+            self.cancel.iter().map(|a| &**a),
+            self.owned.iter().map(OwnedScope::as_ref),
+            false,
+        )
+    }
+}
+
+/// TICKET-188 — THE decider of "must this party stop now, and why?". Cancel first; then, unless a
+/// run-wide exit is pending (DEC-096: `Exit > Fault`), the innermost owned nursery whose flag is
+/// tripped AND whose family recorded a `Fault`. A flag is only a wake hint: a child trips it just
+/// before `finish` records the fault, so a tripped flag with no recorded fault is not a halt.
+pub(super) fn halt_of<'a>(
+    cancel: impl Iterator<Item = &'a AtomicBool>,
+    owned: impl DoubleEndedIterator<Item = OwnedRef<'a>>,
+    exit_pending: bool,
+) -> Option<Halt> {
+    let mut cancel = cancel;
+    if cancel.any(|f| f.load(Ordering::Relaxed)) {
+        return Some(Halt::Cancelled);
+    }
+    if exit_pending {
+        return None;
+    }
+    owned.rev().find_map(|o| {
+        if !o.flag.load(Ordering::Acquire) {
+            return None;
+        }
+        let err = std::iter::once(o.scope)
+            .chain(o.more.iter().copied())
+            .find_map(|sid| o.sched.scope_fault(sid))?;
+        Some(Halt::ChildFault { floor: o.n, err })
+    })
+}
+
 /// One blocked waiter in `SchedCore::waiters`, the registry the deadlock verdict asks.
 pub(super) struct Waiter {
     /// what it waits for
     pub(super) wait: Arc<PartyWait>,
-    /// the cancel flags it would honour (empty where a cancel cannot wake it, e.g. inside its own
-    /// uncancellable `defer`)
+    /// the wake set's flags ([`WakeSet::flags`]); a hint only -- `satisfiable` runs under core
+    /// lock A and must not call `scope_fault`
     pub(super) cancel: Vec<Arc<AtomicBool>>,
     /// a demoted fiber (a victim the verdict may claim), not a blocked body
     pub(super) fiber: bool,
@@ -270,7 +379,7 @@ impl Vm {
             let tok = match wait {
                 Some(w) => Some(c.register_waiter(Waiter {
                     wait: Arc::new(w),
-                    cancel: self.demote_cancel_flags(),
+                    cancel: self.wake_set().flags(),
                     fiber: true,
                 })),
                 None => {
@@ -433,6 +542,136 @@ mod tests {
             assert_eq!(got, want, "row {name} ({spec:?})");
             assert_eq!(spec.will_return(), will_return, "will_return of {name}");
         }
+    }
+
+    /// TICKET-188 — the owner-fault grid derives its op rows from [`TABLE`]: a new spec without a
+    /// row there is a wait nobody proved a child fault reaches.
+    #[test]
+    fn every_wait_spec_has_an_owner_fault_grid_row() {
+        const GRID: &str = include_str!("../../tests/owner_fault_grid.rs");
+        for (name, _, _) in TABLE {
+            assert!(
+                GRID.contains(&format!("spec: \"{name}\"")),
+                "WaitSpec row {name} has no owner-fault grid row in tests/owner_fault_grid.rs"
+            );
+        }
+    }
+
+    fn boom() -> RuntimeError {
+        RuntimeError {
+            message: "boom".to_string(),
+            span: Span::RUNTIME,
+            is_assert: false,
+            is_over_memory: false,
+            is_timed_out: false,
+            is_deadlock: false,
+            is_panic: false,
+        }
+    }
+
+    /// A one-task nursery sched whose scope-0 flag is `tripped`, with a recorded `Fault` or not.
+    fn owned_sched(tripped: bool, fault: bool) -> (Arc<AtomicBool>, Arc<MnSched>) {
+        let flag = Arc::new(AtomicBool::new(tripped));
+        let sched = Arc::new(MnSched::new(1, 1, Arc::clone(&flag), boom(), 0));
+        if fault {
+            sched.lock().slots[0] = Some(super::super::TaskOutcome::Fault {
+                err: boom(),
+                out: Vec::new(),
+                stderr: Vec::new(),
+            });
+        }
+        (flag, sched)
+    }
+
+    fn owned_ref<'a>(n: usize, flag: &'a Arc<AtomicBool>, sched: &'a Arc<MnSched>) -> OwnedRef<'a> {
+        OwnedRef {
+            n,
+            flag,
+            sched,
+            scope: 0,
+            more: &[],
+        }
+    }
+
+    #[test]
+    fn halt_of_prefers_cancel_over_a_child_fault() {
+        let (flag, sched) = owned_sched(true, true);
+        let cancel = AtomicBool::new(true);
+        let got = halt_of(
+            std::iter::once(&cancel),
+            std::iter::once(owned_ref(0, &flag, &sched)),
+            false,
+        );
+        assert!(matches!(got, Some(Halt::Cancelled)), "{got:?}");
+        // With no cancel, the recorded child fault is the halt, at its nursery's floor.
+        let idle = AtomicBool::new(false);
+        let got = halt_of(
+            std::iter::once(&idle),
+            std::iter::once(owned_ref(2, &flag, &sched)),
+            false,
+        );
+        assert!(
+            matches!(&got, Some(Halt::ChildFault { floor: 2, err }) if err.message == "boom"),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn halt_of_declines_a_tripped_flag_with_no_recorded_fault() {
+        // Gotcha 2: the child trips its flag before `finish` records the fault.
+        let (flag, sched) = owned_sched(true, false);
+        let got = halt_of(
+            std::iter::empty(),
+            std::iter::once(owned_ref(0, &flag, &sched)),
+            false,
+        );
+        assert!(got.is_none(), "{got:?}");
+        // …and a recorded fault behind an untripped flag is not read at all (the flag is the hint).
+        let (flag, sched) = owned_sched(false, true);
+        let got = halt_of(
+            std::iter::empty(),
+            std::iter::once(owned_ref(0, &flag, &sched)),
+            false,
+        );
+        assert!(got.is_none(), "{got:?}");
+    }
+
+    #[test]
+    fn halt_of_yields_to_a_pending_exit() {
+        let (flag, sched) = owned_sched(true, true);
+        let got = halt_of(
+            std::iter::empty(),
+            std::iter::once(owned_ref(0, &flag, &sched)),
+            true,
+        );
+        assert!(got.is_none(), "Exit outranks a child Fault: {got:?}");
+        // A cancel still outranks the exit rung, as in `jump_checked`.
+        let cancel = AtomicBool::new(true);
+        let got = halt_of(
+            std::iter::once(&cancel),
+            std::iter::once(owned_ref(0, &flag, &sched)),
+            true,
+        );
+        assert!(matches!(got, Some(Halt::Cancelled)), "{got:?}");
+    }
+
+    #[test]
+    fn halt_of_reports_the_innermost_faulted_nursery() {
+        let (outer_flag, outer) = owned_sched(true, true);
+        let (inner_flag, inner) = owned_sched(true, true);
+        let got = halt_of(
+            std::iter::empty(),
+            [
+                owned_ref(0, &outer_flag, &outer),
+                owned_ref(1, &inner_flag, &inner),
+            ]
+            .into_iter(),
+            false,
+        );
+        assert!(
+            matches!(got, Some(Halt::ChildFault { floor: 1, .. })),
+            "{got:?}"
+        );
     }
 
     #[test]

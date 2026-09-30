@@ -323,9 +323,11 @@ impl Vm {
         // teardown for its full duration, and then keep executing the straight-line statements after
         // it. On an M:N worker it also stops a post-cancel `sleep_ms` from delaying the teardown by
         // the full sleep.
-        if self.native_reentry == 0 && kind.blocks() && self.cancel_requested() {
-            self.cancelled = true;
-            return Err(self.err("cancelled".to_string(), span));
+        if self.native_reentry == 0
+            && kind.blocks()
+            && let Some(e) = self.take_halt(span)
+        {
+            return Err(e);
         }
         if WaitSpec::of_native(kind).is_some_and(|s| matches!(self.block_mode(s), BlockMode::Park))
             && let Some(nargs) = self.extract_native_args(&args)
@@ -359,7 +361,7 @@ impl Vm {
                             span,
                             timer: Some(crate::vm::TimerSleep {
                                 deadline,
-                                cancel: self.demote_cancel_flags(),
+                                wake: self.wake_set(),
                                 run_deadline: self.deadline,
                                 timeout_ms: self.timeout_ms,
                             }),
@@ -460,6 +462,12 @@ impl Vm {
         }
         if let Some(reg) = reg {
             self.block_exit(reg);
+        }
+        // TICKET-188 — a native that held its host thread has no checkpoint until it returns
+        // (`docs/stdlib.md` "Blocking calls cannot be interrupted"), so the halt is delivered AT the
+        // return, as the offload resume delivers it: the value that completed with it is dropped.
+        if in_place && let Some(e) = self.take_halt(span) {
+            return Err(e);
         }
         let ret = raw.map_err(|e| RuntimeError {
             message: e.message,
@@ -4312,7 +4320,7 @@ impl Vm {
     /// can't be collected before they're re-rooted.
     pub(super) fn run_one_deferred(&mut self, d: Deferred) -> Result<(), RuntimeError> {
         // A defer is the cleanup a cancel exists to run, so NO cancellation checkpoint fires inside
-        // it: `deferring > 0` ⇒ `cancel_requested()` is false (exec.rs). It must be raised BEFORE
+        // it: `deferring > 0` ⇒ `halt_requested()` is `None` (exec.rs). It must be raised BEFORE
         // `guarded` (whose own checkpoint would otherwise eat this very call) and lowered on every
         // exit path, including a fault thrown by the deferred body itself.
         // Panic-safe, same reasoning as `guarded`'s `native_reentry` (exec.rs): `run_one_deferred_inner`

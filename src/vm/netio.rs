@@ -1425,7 +1425,7 @@ impl Vm {
     ///    caught on, and no existing fence sees it (their `defer`s only `print`).
     /// 2. **Inside a `defer`, a run-deadline wake is NOT this op's timeout** — hence `Ok(false)`, which
     ///    retries the syscall so a cleanup write that can complete immediately still does (W7-17's
-    ///    `deferring > 0` suppression, same term `cancel_requested` uses). If the retry would block,
+    ///    `deferring > 0` suppression, same term `halt_requested` uses). If the retry would block,
     ///    `park_on_fd`'s ungated check halts it there — which is what makes that check load-bearing.
     ///
     /// Accepted degeneracy: with an op deadline SHORTER than the run deadline by less than the
@@ -1506,9 +1506,10 @@ impl Vm {
         // re-injects a poller-parked fiber on cancel and the rewound op re-runs here — without this
         // check it would would-block and re-park forever (the every-instruction check that used to
         // kill it at the dispatch loop top is gone; see `run_until`), wedging the nursery.
-        if self.native_reentry == 0 && self.cancel_requested() {
-            self.cancelled = true;
-            return Err(self.err("cancelled".to_string(), span));
+        if self.native_reentry == 0
+            && let Some(e) = self.take_halt(span)
+        {
+            return Err(e);
         }
         if self.block_mode(WaitSpec::Socket) == BlockMode::Park {
             // The `in_flight` guard: at most one op may be parked on a socket at a time. A second
@@ -1735,7 +1736,7 @@ impl Vm {
         // A re-run after a park: settle the offer this `send` published before it parked, BEFORE
         // the cancel checkpoint — a taken offer means the `send` happened.
         if let Some(op) = self.pending.take() {
-            if op.p.is_queued() && !(self.native_reentry == 0 && self.cancel_requested()) {
+            if op.p.is_queued() && !(self.native_reentry == 0 && self.halt_requested().is_some()) {
                 // A stray wake: still queued — re-park on the same offer.
                 self.pending = Some(op);
                 self.park_send(h, orig);
@@ -1757,9 +1758,10 @@ impl Vm {
         // A fiber woken by `cancel_drain` (its scope faulted) must fault here rather than re-park
         // (mirrors `chan_recv_step`'s checkpoint). `native_reentry == 0` gates it exactly as the park
         // gate does — inside a callback the host stack can't be unwound.
-        if self.native_reentry == 0 && self.cancel_requested() {
-            self.cancelled = true;
-            return Err(self.err("cancelled".to_string(), span));
+        if self.native_reentry == 0
+            && let Some(e) = self.take_halt(span)
+        {
+            return Err(e);
         }
         // The table decides how this send blocks; a `Refuse` context publishes no offer.
         let mode = self.block_mode(WaitSpec::Send);
@@ -1957,7 +1959,7 @@ impl Vm {
         // and because ending a timer park early TRIPS this fiber's cancel to close the park gap
         // ([`deadline_gap_wake`]): read in the other order, that fiber would report `cancelled` instead
         // of the honest hard halt. Suppressed inside a `defer` by the SAME `deferring > 0` term
-        // `cancel_requested` uses — a cleanup body's `ch.recv()` on an already-queued value must still
+        // `halt_requested` uses — a cleanup body's `ch.recv()` on an already-queued value must still
         // complete (measured: ungated, it silently truncated the defer at that `recv`, which is exactly
         // the "stopped promptly ≠ cleaned up" failure W7-16 was caught on). A defer that would PARK is
         // still aborted, at the park checkpoint below — that one is a hang, not cleanup.
@@ -1969,9 +1971,10 @@ impl Vm {
         // checkpoint CANCEL WINS over a queued value, a tripped done-latch and a fired timer.
         // `native_reentry == 0` mirrors the park gate: inside a native callback the caller's Rust-stack
         // state cannot be unwound here.
-        if self.native_reentry == 0 && self.cancel_requested() {
-            self.cancelled = true;
-            return Err(self.err("cancelled".to_string(), span));
+        if self.native_reentry == 0
+            && let Some(e) = self.take_halt(span)
+        {
+            return Err(e);
         }
         // A tripped latch (`trip()`) delivers `true` immediately and forever, on every engine — a
         // pending queued value (if any) still wins first. Checked before the timer/park logic so a
@@ -2202,48 +2205,6 @@ impl Vm {
         Ok(())
     }
 
-    /// TICKET-062 (W10-16) — the lowest-index `Fault` recorded by a task of a `parallel:` nursery open
-    /// on THIS thread, innermost scope first, alongside the `nurseries` index `n` of that nursery.
-    /// `.rev()` because `eager_scheds` is innermost-LAST, the same walk
-    /// [`Vm::blocked_bodies_guard_with`] uses. `eager_scheds` is lockstep with `nurseries` (DEC-048:
-    /// both push/pop together, `src/vm/exec.rs:1757`/`:1791`, `src/vm/sched.rs:353-359`), so the index
-    /// `i` at which a fault is found IS that nursery's `nurseries` index — TICKET-096 reads it as the
-    /// floor below which a `recover:` must not catch this fault. A nursery OWNER blocked in its own
-    /// body never passes through `reduce_task_slots`'s `Exit > Fault > Deadlocked` precedence
-    /// (`src/vm/sched.rs:2150-2158`), so this restores that precedence for the owner.
-    pub(super) fn owned_nursery_fault(&self) -> Option<(usize, RuntimeError)> {
-        self.eager_scheds
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(i, s)| {
-                let s = s.as_ref()?;
-                // TICKET-103 — every scope of the nursery's family, continuations included.
-                s.sids()
-                    .into_iter()
-                    .find_map(|sid| s.sched.scope_fault(sid))
-                    .map(|e| (i, e))
-            })
-    }
-
-    /// TICKET-062 (W10-16) / TICKET-096 — a sibling task's recorded fault outranks the synthesized
-    /// deadlock verdict for a `parallel:` nursery OWNER. Records `owner_fault_floor` so `run_until`
-    /// can bypass only a handler installed INSIDE the faulting nursery's body. Deliberately NOT gated
-    /// on `BlockCtx::judged` — a recorded fault is a fact, not a heuristic verdict, so it needs no
-    /// judgeability. `cancel_suppressed()` is the same defer/already-unwinding guard
-    /// `cancel_requested()` applies, so a `defer` body is never truncated by this rung.
-    // Out of line: it now has a call site on the per-element HOF checkpoint, where `hof_sampled_tick`'s
-    // doc measured +4.5 % on `loop.chz` for letting this class of rung inline.
-    #[inline(never)]
-    pub(super) fn deliver_owner_fault(&mut self) -> Option<RuntimeError> {
-        if self.cancel_suppressed() {
-            return None;
-        }
-        let (n, e) = self.owned_nursery_fault()?;
-        self.owner_fault_floor = Some(n);
-        Some(e)
-    }
-
     /// TICKET-134 — test-only: hold the window between the owner-fault rung and the verdict open
     /// until the owner's nursery has recorded a fault, so the check-then-check race
     /// [`Vm::block_halt_check`] closes is deterministically reachable. No-op unless armed via
@@ -2264,9 +2225,7 @@ impl Vm {
             return;
         }
         let t0 = std::time::Instant::now();
-        while self.owned_nursery_fault().is_none()
-            && t0.elapsed() < std::time::Duration::from_secs(10)
-        {
+        while self.halt_requested().is_none() && t0.elapsed() < std::time::Duration::from_secs(10) {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
     }
@@ -2377,7 +2336,7 @@ impl Vm {
     /// their un-accounting (`running += 1`, `unregister_waiter`, …) BETWEEN learning
     /// of the exit and returning it, exactly as their cancel arms do.
     pub(super) fn run_exit_err(&mut self, span: Span) -> Option<RuntimeError> {
-        // gaps.md W7-57 — NEVER while a `defer` is running, the one suppression `cancel_requested`
+        // gaps.md W7-57 — NEVER while a `defer` is running, the one suppression `halt_requested`
         // has always had. A `defer` IS the cleanup a halt exists to run; killing it PART-WAY leaves
         // inconsistent state and is worse than either running it or skipping it — and it is
         // nondeterministic, since whether the exit lands mid-body depends on timing (measured: a
@@ -2405,10 +2364,10 @@ impl Vm {
         // kill a job blocked forever on a channel — exactly the hang eager execution makes easier to
         // write. No `back_edge_tick` throttle: this runs once per `DEMOTE_POLL_BACKOFF`, not per op.
         self.deadline_halt(span)?;
-        // `shutdown_now`'s cooperative stop (D4) and an enclosing scope's cancel both arrive here.
-        if self.cancel_requested() {
-            self.cancelled = true;
-            return Err(self.err("cancelled".to_string(), span));
+        // `shutdown_now`'s cooperative stop (D4), an enclosing scope's cancel and (TICKET-188) a child
+        // fault of a nursery this party owns all arrive here.
+        if let Some(e) = self.take_halt(span) {
+            return Err(e);
         }
         // W7-47 — a run-wide `os.exit` from another party. BELOW cancel, so a party that already holds
         // a cancel flag keeps unwinding as `Cancelled` exactly as before (only a party with no cancel
@@ -2419,8 +2378,9 @@ impl Vm {
         if let Some(e) = self.run_exit_err(span) {
             return Err(e);
         }
-        // TICKET-062 (W10-16) / TICKET-096 — see `Vm::deliver_owner_fault`.
-        if let Some(e) = self.deliver_owner_fault() {
+        // TICKET-062 (W10-16) / TICKET-096 — a child fault recorded while the exit rung ran (DEC-134:
+        // read again below the exit, and again after a positive verdict).
+        if let Some(e) = self.take_halt(span) {
             return Err(e);
         }
         // TICKET-134 — test-only seam: widen the check-then-check window between the rung above and
@@ -2439,7 +2399,7 @@ impl Vm {
             // TICKET-134 — the child can record its fault and complete between the rung above and
             // this verdict. A verdict that saw the nursery complete took the SchedCore lock after the
             // child's fault-slot write, so this re-read sees the fault.
-            if let Some(e) = self.deliver_owner_fault() {
+            if let Some(e) = self.take_halt(span) {
                 return Err(e);
             }
             // TICKET-136 — `run_exit_err` is suppressed inside a `defer` (W7-57), so a pending run-wide
@@ -2617,9 +2577,10 @@ impl Vm {
         }
         // CANCELLATION CHECKPOINT — engine-agnostic, mirroring `chan_recv_step`: cancel wins over a
         // ready arm / a fired timer.
-        if self.native_reentry == 0 && self.cancel_requested() {
-            self.cancelled = true;
-            return Err(self.err("cancelled".to_string(), span));
+        if self.native_reentry == 0
+            && let Some(e) = self.take_halt(span)
+        {
+            return Err(e);
         }
         let mut soonest: Option<(usize, std::time::Instant)> = None;
         let mut all_closed = true;

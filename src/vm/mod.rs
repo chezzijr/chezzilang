@@ -1643,6 +1643,40 @@ struct Fiber {
     pending: Option<crate::vm::core::PendingOp>,
 }
 
+impl Fiber {
+    /// TICKET-188 — is a flag of a nursery this parked fiber OWNS tripped? Its wake set's owned half,
+    /// read by every park gap re-check; `halt_of` decides on resume whether it is a halt.
+    fn owned_tripped(&self) -> bool {
+        open_nurseries(&self.ctx.eager_scheds).any(|o| o.flag.load(Ordering::Relaxed))
+    }
+
+    /// TICKET-188 — does a cancel of scope `family` wake this parked fiber? It is a member of the
+    /// family, or it owns one of the family's scopes (its child faulted). Every per-fiber drain
+    /// matcher reads this.
+    fn woken_by(&self, family: &[usize]) -> bool {
+        family.contains(&self.scope_id)
+            || open_nurseries(&self.ctx.eager_scheds)
+                .any(|o| family.contains(&o.scope) || o.more.iter().any(|s| family.contains(s)))
+    }
+}
+
+/// TICKET-188 — THE walk of a party's open nurseries, outermost first: `n` is the `nurseries`
+/// index (`eager_scheds` is lockstep with `nurseries`, DEC-048), `None` entries skipped.
+fn open_nurseries(
+    eager: &[Option<EagerScope>],
+) -> impl DoubleEndedIterator<Item = block::OwnedRef<'_>> {
+    eager.iter().enumerate().filter_map(|(n, s)| {
+        let s = s.as_ref()?;
+        Some(block::OwnedRef {
+            n,
+            flag: &s.cancel,
+            sched: &s.sched,
+            scope: s.scope,
+            more: &s.more_scopes,
+        })
+    })
+}
+
 // D2a — a `Fiber` now carries its own `Heap` (via `FiberCtx::heap`), and D2b parks fibers across
 // worker threads (parked on one worker, requeued by a `send` on another, resumed on a third). That
 // requires `Fiber: Send`. `Heap` is already `Send` (a plain `Vec` of `Obj`, no `Rc`/`RefCell`; a
@@ -2667,14 +2701,14 @@ impl SchedCore {
     /// set/cleared at every trip + drain seam; a missed clear re-creates the hang).
     fn scope_has_undrained_park(&self, sid: usize) -> bool {
         self.parked.values().flatten().any(|e| match e {
-            ParkedEntry::Recv(f) => f.scope_id == sid,
-            ParkedEntry::Send(f) => f.scope_id == sid,
+            ParkedEntry::Recv(f) => f.woken_by(&[sid]),
+            ParkedEntry::Send(f) => f.woken_by(&[sid]),
             ParkedEntry::Wait(wp) => wp
                 .fiber
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .as_ref()
-                .is_some_and(|f| f.scope_id == sid),
+                .is_some_and(|f| f.woken_by(&[sid])),
         })
     }
 
@@ -3823,7 +3857,7 @@ impl MnSched {
         let latched = core.done_latch.load(Ordering::Relaxed);
         // Cross-nursery flat scheduler — read the PARKING fiber's SCOPE cancel (not the sched's global
         // `cancel`), so an inner fault that tripped only its scope re-checks the right flag here.
-        let cancelled = c.scope_cancel_tripped(fiber.scope_id);
+        let cancelled = c.scope_cancel_tripped(fiber.scope_id) || fiber.owned_tripped();
         // The fiber carries its slot (and, with or without one, its channel) until its re-run
         // `recv` settles it; a requeued fiber settles at once on that re-run.
         op.at.push((core, 0, false));
@@ -3855,7 +3889,7 @@ impl MnSched {
     fn park_send(&self, key: usize, mut fiber: Fiber) {
         let mut c = self.lock();
         c.running -= 1;
-        let cancelled = c.scope_cancel_tripped(fiber.scope_id);
+        let cancelled = c.scope_cancel_tripped(fiber.scope_id) || fiber.owned_tripped();
         let settled = fiber.pending.as_ref().is_none_or(|op| !op.p.is_queued());
         if settled || cancelled {
             fiber.state = FiberState::Ready;
@@ -4021,8 +4055,9 @@ impl MnSched {
         // — read the parking fiber's SCOPE cancel (not the sched's global `cancel`). A SEND arm is
         // ready exactly when its offer settled — taken by a receiver, or closed by `close()` — which
         // the shared `Pending`'s state says for every send arm at once.
-        let mut ready_now =
-            c.scope_cancel_tripped(fiber.scope_id) || p.as_ref().is_some_and(|p| !p.is_queued());
+        let mut ready_now = c.scope_cancel_tripped(fiber.scope_id)
+            || fiber.owned_tripped()
+            || p.as_ref().is_some_and(|p| !p.is_queued());
         // W7-2 — arm accounting is THREE-way, mirroring `op_wait_poll` exactly: READY (take the arm
         // now), DEAD (closed+empty recv arm — the poll SKIPS it and only counts it toward
         // `all_closed`), or LIVE (empty but still wakeable). `any_live` tracks the third.
@@ -4558,7 +4593,7 @@ impl MnSched {
             for entry in v {
                 match entry {
                     ParkedEntry::Recv(mut f) => {
-                        if family.contains(&f.scope_id) {
+                        if f.woken_by(&family) {
                             drained += 1;
                             f.state = FiberState::Ready;
                             c.global.push_back(f);
@@ -4567,7 +4602,7 @@ impl MnSched {
                         }
                     }
                     ParkedEntry::Send(mut f) => {
-                        if family.contains(&f.scope_id) {
+                        if f.woken_by(&family) {
                             drained += 1;
                             f.state = FiberState::Ready;
                             c.global.push_back(f);
@@ -4582,7 +4617,7 @@ impl MnSched {
                         // token copy. Only a matching-scope, still-present fiber is claimed + requeued.
                         let in_scope = {
                             let g = wp.fiber.lock().unwrap_or_else(|e| e.into_inner());
-                            g.as_ref().is_some_and(|f| family.contains(&f.scope_id))
+                            g.as_ref().is_some_and(|f| f.woken_by(&family))
                         };
                         if !in_scope {
                             // Either a different scope (keep parked) OR already claimed (drop). Keep the
@@ -5167,7 +5202,10 @@ fn arm_timer_sleep(sched: Arc<MnSched>, mut fiber: Fiber, t: TimerSleep, span: S
             }
             .timed_out(),
         )
-    } else if t.cancel.iter().any(|c| c.load(Ordering::Relaxed)) {
+    } else if t.wake.halt().is_some() {
+        // TICKET-188 — a cancel, or a child fault of a nursery this fiber owns. `cancelled` is only
+        // the resume marker: the resume re-derives the halt through `Vm::take_halt`. A tripped flag
+        // with no recorded fault yet (the child is between its trip and `finish`) re-arms below.
         Some(RuntimeError {
             message: "cancelled".to_string(),
             span,
@@ -5943,11 +5981,12 @@ struct OffloadReq {
 struct TimerSleep {
     /// When the sleep is over.
     deadline: std::time::Instant,
-    /// The fiber's scope cancel flag plus its ancestors' ([`Vm::demote_cancel_flags`] — which is
-    /// deliberately EMPTY inside a `defer`, so a sleeping cleanup stays uncancellable, as contracted).
-    /// Read the flags snapshotted HERE, not `c.scopes[id].cancel` inside `offload`: the latter is this
-    /// scope's own flag only, and would miss an enclosing nursery's cancel.
-    cancel: Vec<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// The fiber's wake set ([`Vm::wake_set`] — deliberately EMPTY inside a `defer`, so a sleeping
+    /// cleanup stays uncancellable, as contracted): its cancel flags and ancestors', plus the flags of
+    /// the nurseries it owns (TICKET-188). Snapshotted HERE, not `c.scopes[id].cancel` inside
+    /// `offload`: the latter is this scope's own flag only, and would miss an enclosing nursery's
+    /// cancel and every owned child's fault.
+    wake: block::WakeSet,
     /// The run's absolute `--timeout` deadline, if any.
     run_deadline: Option<std::time::Instant>,
     /// …and its configured value, for the fault message.

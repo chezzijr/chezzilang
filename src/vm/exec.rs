@@ -1,6 +1,7 @@
 // vm::exec — split out of vm/mod.rs. `super::*` == the `vm` module.
 // VM core: construction, frames, generators, run/run_until/step dispatch.
 
+use super::block::{self, Halt, OwnedScope, WakeSet};
 use super::*;
 
 impl Vm {
@@ -427,7 +428,7 @@ impl Vm {
         // per-element re-entry IS this loop's back-edge, so it is where the cancel is delivered; the
         // `?` on `guarded` aborts the native loop, exactly as the old every-instruction check did via
         // the callback's nested `run_until`. A DEFERRED call also runs through `guarded`
-        // (`run_one_deferred`) — `cancel_requested` is false while `deferring > 0`, so the defer body
+        // (`run_one_deferred`) — `halt_requested` is `None` while `deferring > 0`, so the defer body
         // itself is never killed here (that bug swallowed the LIFO-first defer of any task that
         // returned normally / faulted on its own under a tripped scope flag).
         // `chezzi test --timeout` — FIRST, because a wall-clock cap outranks both cancel and exit
@@ -450,20 +451,21 @@ impl Vm {
         // re-deriving the message here.
         //
         // TICKET-155: the tick also runs while a nursery is open on this fiber (`eager_scheds` is
-        // non-empty — the very list `owned_nursery_fault` walks), because the owner rung at the
-        // bottom rides the same sample. A program with no `parallel:` and no cap still neither ticks
-        // nor takes a lock.
+        // non-empty), for the width yield at the bottom. (The owner-fault rung that first rode this
+        // sample is now the `take_halt` below, TICKET-188.) A program with no `parallel:` and no cap
+        // still neither ticks nor takes a lock.
         let sampled = if self.deadline.is_some() || !self.eager_scheds.is_empty() {
             self.hof_sampled_tick()?
         } else {
             false
         };
-        if self.cancel_requested()
-            && let Some(fr) = self.frames.last()
-        {
+        // TICKET-188 — a cancel, or a child fault of a nursery this party owns (it was a separate
+        // owner rung riding the 1-in-1024 sample, DEC-155; `halt_of` is lock-free until a flag trips).
+        if let Some(fr) = self.frames.last() {
             let span = fr.call_span;
-            self.cancelled = true;
-            return Err(self.err("cancelled".to_string(), span));
+            if let Some(e) = self.take_halt(span) {
+                return Err(e);
+            }
         }
         // gaps.md W7-57 — the run-wide `os.exit` rung, BELOW cancel exactly as in `jump_checked`. The
         // per-element re-entry is this Rust loop's only back-edge, so without it a party with no
@@ -486,19 +488,6 @@ impl Vm {
             if let Some(e) = self.exit_halt(span) {
                 return Err(e);
             }
-        }
-        // TICKET-155 (W11-14) — the owner rung, `jump_checked`'s counterpart for the per-element
-        // re-entry. `cancel_requested()` above reads only cancel flags THIS fiber holds, and a nursery
-        // OWNER holds none of its own scope's, so a doomed owner ran every remaining element of its
-        // `map`/`filter`/`fold` before learning a child faulted. DEC-096 left this hole open until the
-        // rung's cost was measured (`benches/chz/hof_nursery.chz`, `docs/benchmarks.md`). Gated on the
-        // shared 1-in-1024 `sampled` because `scope_fault` takes the sched lock; BELOW the exit halt so
-        // all three checkpoints agree on `Exit > Fault > Deadlocked`.
-        // [`Vm::deliver_owner_fault`] carries the `cancel_suppressed()` guard, so a `defer` body's own
-        // `map` is never truncated, and records `owner_fault_floor` so only a `recover:` INSIDE the
-        // faulting nursery is bypassed.
-        if sampled && let Some(e) = self.deliver_owner_fault() {
-            return Err(e);
         }
         if sampled && self.holds_width && self.mn.is_none() {
             self.body_width_yield();
@@ -1502,205 +1491,7 @@ impl Vm {
                 other => self.step(other, span),
             };
             if let Err(rte) = step_result {
-                // `std.os.exit(code)` is a hard halt: unwind past every `recover:` to the top.
-                if self.pending_exit.is_some() {
-                    return Err(rte);
-                }
-                // B3.4: a cancel observed deeper in this step (a blocking `recv` that woke on the
-                // nursery cancel flag set `self.cancelled` and returned the sentinel) unwinds the
-                // whole worker — run defers, bypass `recover:`, mirroring the loop-top check. A
-                // cancelled task must not be caught and resumed.
-                //
-                // `--max-heap`: an over-memory hard-abort raised in a NESTED `run_until` (a HOF
-                // callback / operator overload / deferred call) bubbles here as an ordinary `?`-error
-                // carrying the `is_over_memory` marker. It gets the SAME bypass-recover unwind as a
-                // cancel — the loop-top check only fires within its own `run_until` level, so without
-                // this sibling arm an outer `recover:` would catch the fault and defeat the guard. Re-
-                // stamp the marker onto whatever emerges (a mid-unwind `defer` fault) so it keeps
-                // travelling up.
-                //
-                // `--timeout`: identical treatment for the `is_timed_out` marker — a wall-clock abort
-                // raised at a back-edge in a nested `run_until` (a HOF callback's own loop) bubbles
-                // here and must keep bypassing `recover:` the same way.
-                //
-                // W7-3 CARVE-OUT — the (a) `self.cancelled` marker ONLY. `self.cancelled` is a
-                // task-wide LATCH that stays set while the cancelled task's `defer`s run, but "a
-                // `defer` is never itself cancelled" (docs/concurrency.md) and `cancel_suppressed`
-                // already carries the same `deferring > 0` suppression. So a `recover:` owned by
-                // THIS nested dispatch loop (`frame_len > base_level` — i.e. installed inside the
-                // defer body, not outside it) catches while `deferring > 0`. A `recover:` OUTSIDE
-                // the defer sits at/below `base_level`, so it still cannot defeat the cancel, and
-                // once the defer body finishes the pending cancel resumes travelling up.
-                // (b) `is_over_memory` and (c) `is_timed_out` are NOT gated: a `--max-heap` /
-                // `--timeout` abort stays recover-proof everywhere, including inside a defer.
-                //
-                // `caught_here` is the CONSERVATIVE arm, not a load-bearing one: measured on the real
-                // binary, dropping it (`!(self.deferring > 0)`) leaves every test in
-                // `tests/chz/spec/cancel_defer_recover_test.chz` byte-identical — with
-                // no handler above `base_level` the fault returns `Err` either way. It is kept because
-                // it preserves the bypass in MORE cases (a cancelled task is more likely to die), which
-                // is the safe direction. Do not "simplify" it away without re-deriving that.
-                // W13-20 — take the parked generator prefix UNCONDITIONALLY, above the bypass block
-                // and the capture below. The prefix must be consumed exactly once per fault: a fault
-                // this level CATCHES, or that leaves via the cancel / `--max-heap` / `--timeout`
-                // bypass just below, drops it here instead of surviving to decorate an unrelated
-                // later fault.
-                let gen_prefix = std::mem::take(&mut self.gen_fault_prefix);
-                // TICKET-135 (D1): a deadlock verdict is fatal like Go's `all goroutines are asleep`.
-                // `recover:` is transparent to it: the fault takes the uncaught path (defers and
-                // escaped-nursery reports unchanged) and the marker is re-stamped so a faulting
-                // `defer` cannot strip it.
-                let fatal = rte.is_deadlock;
-                let caught_here = !fatal
-                    && matches!(self.handlers.last().copied(), Some(h) if h.frame_len > base_level);
-                let cancel_bypass = self.cancelled && !(self.deferring > 0 && caught_here);
-                // TICKET-096 — a nursery OWNER's `owner_fault_floor` is `Some(n)` while a child fault
-                // recorded at `nurseries` index `n` is unwinding it. A handler with `Handler::nursery_len
-                // > n` was installed INSIDE nursery `n`'s body — in the cancelled scope — and must not
-                // catch (measured: `recover:` wrapping a `parallel:` whose child panics keeps printing
-                // `outer r=Err('boom')` at rc=0, since that handler sits at `nursery_len <= n`, outside
-                // the nursery). The `n < self.nurseries.len()` term is a liveness guard: a floor left by a
-                // fault that was neither caught nor propagated cannot bypass an unrelated later handler.
-                // This makes the delivery happen ONCE — the owner aborts at the first delivery instead of
-                // catching and re-reading the recorded fault at every later checkpoint.
-                let owner_bypass = matches!(
-                    (self.owner_fault_floor, self.handlers.last()),
-                    (Some(n), Some(h)) if caught_here && n < self.nurseries.len() && h.nursery_len > n
-                );
-                if cancel_bypass || owner_bypass || rte.is_over_memory || rte.is_timed_out {
-                    let over_mem = rte.is_over_memory;
-                    let timed = rte.is_timed_out;
-                    // TICKET-135 (W14-39): a cancelled task aborts and joins every nursery it unwinds
-                    // past, like a faulting one. With `false` its nested nursery's parked children
-                    // were orphaned, and at CHEZZI_THREADS=1 the join hung. The hard halts
-                    // (`--max-heap`, `--timeout`) keep `false`.
-                    let rte = self.unwind_cancelled(base_level, cancel_bypass, rte);
-                    let rte = if over_mem { rte.over_memory() } else { rte };
-                    let rte = if timed { rte.timed_out() } else { rte };
-                    return Err(rte);
-                }
-                // Capture the stack trace of an uncaught fault now, while the frames are still intact
-                // (the unwind below drops them). The deepest fault wins: the original fault captures
-                // first, and a deeper deferred-call fault (run while its frame is still live) replaces
-                // it. A fault this loop CAN catch resets the capture below, so no stale trace survives
-                // a `recover:`.
-                if !caught_here && self.frames.len() > self.fault_trace_depth {
-                    let mut trace = gen_prefix;
-                    trace.extend(self.capture_trace());
-                    self.fault_trace = Some(trace);
-                    self.fault_trace_depth = self.frames.len();
-                }
-                // The nearest `recover:` boundary owned by THIS dispatch loop catches the fault; a
-                // handler at/below `base_level` belongs to an outer loop, so we unwind to
-                // `base_level` and propagate. Either way, every frame discarded on the way runs its
-                // deferred calls first (Go: defers run as the panic unwinds, before recover regains
-                // control). A fault inside a deferred call supersedes the original.
-                // TICKET-148 — computed while the frames are intact; applied below (at the catch's
-                // stamp, and to the uncaught headline) only if the error is still this one (a
-                // faulting `defer` may supersede it).
-                let std_site = if !fatal && !rte.is_panic && self.program.file_is_std(rte.span.file)
-                {
-                    self.std_entry_call_site().map(|site| (rte.span, site))
-                } else {
-                    None
-                };
-                let target = match self.handlers.last().copied() {
-                    Some(h) if !fatal && h.frame_len > base_level => h.frame_len,
-                    _ => base_level,
-                };
-                // A genuine fault (not a B3.4 cancel / `std.os.exit`, both handled above) cancels-and-
-                // reports each unwound frame's escaped nurseries — emitted PER FRAME, BEFORE that
-                // frame's `defer`s, matching the interp oracle (whose `exec_parallel` /
-                // `leave_implicit_nursery` report as the body unwinds, then `finish_frame` runs the
-                // defers). `unwind_deferred` does the interleaving; this covers BOTH the uncaught arm
-                // (no handler) and the frames discarded above a catching `recover:`.
-                // TICKET-152 (W14-37): a FATAL deadlock drops its frames without running their
-                // `defer`s, as Go's all-goroutines-asleep abort does (parked siblings already run
-                // none, DEC-092). Per-call, never a VM latch: `chezzi test` keeps running.
-                let rte = if fatal {
-                    self.unwind_no_defer(target);
-                    rte
-                } else {
-                    self.unwind_deferred(target, true).unwrap_or(rte)
-                };
-                let rte = if fatal { rte.deadlock() } else { rte };
-                // TICKET-148 — relocate a NATIVE std fault to the user's call into std, for the
-                // caught stamp below AND the uncaught headline (the trace keeps its frames). A
-                // superseding `defer` fault (a different span) and a `panic` stay where they are.
-                let rte = match std_site {
-                    Some((raised, site)) if raised == rte.span && !rte.is_panic => {
-                        RuntimeError { span: site, ..rte }
-                    }
-                    _ => rte,
-                };
-                // A deferred `std.os.exit` turns the unwind into a hard halt.
-                if self.pending_exit.is_some() {
-                    return Err(rte);
-                }
-                match self.handlers.last().copied() {
-                    Some(h) if !fatal && h.frame_len > base_level => {
-                        self.handlers.pop();
-                        // This `recover:` caught the fault — discard any trace captured deeper in (it
-                        // belongs to a fault that is now handled), so a later uncaught fault re-captures.
-                        self.fault_trace = None;
-                        self.fault_trace_depth = 0;
-                        // TICKET-096 — this handler is outside the faulting nursery, so the fault is
-                        // handled; the floor must not survive it and bypass an unrelated later handler.
-                        self.owner_fault_floor = None;
-                        self.cancel_unwind_faulted = false;
-                        // `unwind_deferred` already dropped frames down to `h.frame_len`; restore the
-                        // operand stack / call-depth / ip to the boundary's snapshot.
-                        self.stack.truncate(h.stack_len);
-                        self.call_depth = h.call_depth;
-                        self.cur_base = self.frames.last().map(|f| f.base).unwrap_or(0);
-                        self.frames[h.frame_len - 1].ip = h.ip;
-                        // `unwind_deferred` ran the defers of frames ABOVE the boundary, but the
-                        // boundary frame's own (recover-block) defers remain — drain them now, before
-                        // binding the result. A fault in one supersedes the original.
-                        let rte = self.drain_frame_to(h.defer_len).unwrap_or(rte);
-                        // W13-20 — clear the prefix HERE, after every drain this catch runs
-                        // (`unwind_deferred` above AND this recover-block drain), not before either
-                        // one. A deferred `.next()` — whether outside the recover block (drained by
-                        // `unwind_deferred`) or DIRECTLY INSIDE it (drained by `drain_frame_to` just
-                        // above) — can fault and park its own frames here without ever passing back
-                        // through this loop's error arm to be taken (that only happens for a fault
-                        // THIS dispatch loop raises directly). Clearing before either drain leaves the
-                        // second drain's fault to survive uncleared and decorate a later, unrelated
-                        // uncaught fault — the review finding this fixes.
-                        self.gen_fault_prefix.clear();
-                        // Drop the scope markers of any defer scopes opened inside the recover block:
-                        // the fault jumped past their `LeaveDeferScope`s, so they would otherwise leak
-                        // and corrupt later drains in this frame.
-                        self.frames[h.frame_len - 1]
-                            .defer_markers
-                            .truncate(h.markers_len);
-                        // Reclaim any `parallel:` nursery the fault unwound past (its `JoinNursery`
-                        // never ran) — the nursery list is always reclaimed on unwind.
-                        // TASK B: route through `drain_escaped_nursery` so a `?` caught by `recover:`
-                        // cancels its tasks IDENTICALLY to an uncaught `?`.
-                        // TICKET-147 — the caught fault is the root cause; a child's fault is dropped.
-                        let _ = self.drain_escaped_nursery(h.nursery_len);
-                        if self.pending_exit.is_some() {
-                            return Err(rte);
-                        }
-                        // Convert the fault message (a `str`, i.e. an `Error`) into `Err(msg)`; the
-                        // boundary's `done` label receives a ready `Result`.
-                        let sp = rte.span;
-                        let msg = self.alloc_str(rte.message);
-                        // W8-22 — stamp the fault's origin on the message handle so `e.line()` etc.
-                        // can read it back later. `msg` is always a fresh `Obj::Str`
-                        // (`alloc_str` allocates one per call), so this can never alias an
-                        // unrelated string's span. A stdlib-raised span is not stamped
-                        // (TICKET-045), except a NATIVE fault, which is relocated above to the
-                        // user's call into std (TICKET-148).
-                        self.stamp_err_span(msg, sp);
-                        let err = self.alloc_enum("Result", "Err", vec![msg]);
-                        self.push(err);
-                    }
-                    // Uncaught: `unwind_deferred(target, true)` above already cancelled-and-reported
-                    // every unwound frame's escaped nurseries (the toplevel module nursery preserved).
-                    _ => return Err(rte),
-                }
+                self.on_step_fault(base_level, rte)?;
             }
             // B1/D3: the running fiber paused — a blocking `recv` parked it, or (D3) it exhausted its
             // reduction budget at the safepoint above and is yielding. Stop the dispatch loop WITHOUT
@@ -1710,6 +1501,218 @@ impl Vm {
             if self.paused() {
                 return Ok(());
             }
+        }
+        Ok(())
+    }
+
+    /// `run_until`'s post-step fault arm, out of line: a caught fault resumes at its `recover:`
+    /// boundary (`Ok`), anything else propagates (`Err`). TICKET-188: `run_one_fiber`'s offload
+    /// resume delivers a halt through this same arm, so a `recover:` outside the faulting nursery
+    /// still catches a child fault that arrives there (DEC-096).
+    #[cold]
+    #[inline(never)]
+    pub(super) fn on_step_fault(
+        &mut self,
+        base_level: usize,
+        rte: RuntimeError,
+    ) -> Result<(), RuntimeError> {
+        // `std.os.exit(code)` is a hard halt: unwind past every `recover:` to the top.
+        if self.pending_exit.is_some() {
+            return Err(rte);
+        }
+        // B3.4: a cancel observed deeper in this step (a blocking `recv` that woke on the
+        // nursery cancel flag set `self.cancelled` and returned the sentinel) unwinds the
+        // whole worker — run defers, bypass `recover:`, mirroring the loop-top check. A
+        // cancelled task must not be caught and resumed.
+        //
+        // `--max-heap`: an over-memory hard-abort raised in a NESTED `run_until` (a HOF
+        // callback / operator overload / deferred call) bubbles here as an ordinary `?`-error
+        // carrying the `is_over_memory` marker. It gets the SAME bypass-recover unwind as a
+        // cancel — the loop-top check only fires within its own `run_until` level, so without
+        // this sibling arm an outer `recover:` would catch the fault and defeat the guard. Re-
+        // stamp the marker onto whatever emerges (a mid-unwind `defer` fault) so it keeps
+        // travelling up.
+        //
+        // `--timeout`: identical treatment for the `is_timed_out` marker — a wall-clock abort
+        // raised at a back-edge in a nested `run_until` (a HOF callback's own loop) bubbles
+        // here and must keep bypassing `recover:` the same way.
+        //
+        // W7-3 CARVE-OUT — the (a) `self.cancelled` marker ONLY. `self.cancelled` is a
+        // task-wide LATCH that stays set while the cancelled task's `defer`s run, but "a
+        // `defer` is never itself cancelled" (docs/concurrency.md) and `cancel_suppressed`
+        // already carries the same `deferring > 0` suppression. So a `recover:` owned by
+        // THIS nested dispatch loop (`frame_len > base_level` — i.e. installed inside the
+        // defer body, not outside it) catches while `deferring > 0`. A `recover:` OUTSIDE
+        // the defer sits at/below `base_level`, so it still cannot defeat the cancel, and
+        // once the defer body finishes the pending cancel resumes travelling up.
+        // (b) `is_over_memory` and (c) `is_timed_out` are NOT gated: a `--max-heap` /
+        // `--timeout` abort stays recover-proof everywhere, including inside a defer.
+        //
+        // `caught_here` is the CONSERVATIVE arm, not a load-bearing one: measured on the real
+        // binary, dropping it (`!(self.deferring > 0)`) leaves every test in
+        // `tests/chz/spec/cancel_defer_recover_test.chz` byte-identical — with
+        // no handler above `base_level` the fault returns `Err` either way. It is kept because
+        // it preserves the bypass in MORE cases (a cancelled task is more likely to die), which
+        // is the safe direction. Do not "simplify" it away without re-deriving that.
+        // W13-20 — take the parked generator prefix UNCONDITIONALLY, above the bypass block
+        // and the capture below. The prefix must be consumed exactly once per fault: a fault
+        // this level CATCHES, or that leaves via the cancel / `--max-heap` / `--timeout`
+        // bypass just below, drops it here instead of surviving to decorate an unrelated
+        // later fault.
+        let gen_prefix = std::mem::take(&mut self.gen_fault_prefix);
+        // TICKET-135 (D1): a deadlock verdict is fatal like Go's `all goroutines are asleep`.
+        // `recover:` is transparent to it: the fault takes the uncaught path (defers and
+        // escaped-nursery reports unchanged) and the marker is re-stamped so a faulting
+        // `defer` cannot strip it.
+        let fatal = rte.is_deadlock;
+        let caught_here =
+            !fatal && matches!(self.handlers.last().copied(), Some(h) if h.frame_len > base_level);
+        let cancel_bypass = self.cancelled && !(self.deferring > 0 && caught_here);
+        // TICKET-096 — a nursery OWNER's `owner_fault_floor` is `Some(n)` while a child fault
+        // recorded at `nurseries` index `n` is unwinding it. A handler with `Handler::nursery_len
+        // > n` was installed INSIDE nursery `n`'s body — in the cancelled scope — and must not
+        // catch (measured: `recover:` wrapping a `parallel:` whose child panics keeps printing
+        // `outer r=Err('boom')` at rc=0, since that handler sits at `nursery_len <= n`, outside
+        // the nursery). The `n < self.nurseries.len()` term is a liveness guard: a floor left by a
+        // fault that was neither caught nor propagated cannot bypass an unrelated later handler.
+        // This makes the delivery happen ONCE — the owner aborts at the first delivery instead of
+        // catching and re-reading the recorded fault at every later checkpoint.
+        let owner_bypass = matches!(
+            (self.owner_fault_floor, self.handlers.last()),
+            (Some(n), Some(h)) if caught_here && n < self.nurseries.len() && h.nursery_len > n
+        );
+        if cancel_bypass || owner_bypass || rte.is_over_memory || rte.is_timed_out {
+            let over_mem = rte.is_over_memory;
+            let timed = rte.is_timed_out;
+            // TICKET-135 (W14-39): a cancelled task aborts and joins every nursery it unwinds
+            // past, like a faulting one. With `false` its nested nursery's parked children
+            // were orphaned, and at CHEZZI_THREADS=1 the join hung. The hard halts
+            // (`--max-heap`, `--timeout`) keep `false`.
+            let rte = self.unwind_cancelled(base_level, cancel_bypass, rte);
+            let rte = if over_mem { rte.over_memory() } else { rte };
+            let rte = if timed { rte.timed_out() } else { rte };
+            return Err(rte);
+        }
+        // Capture the stack trace of an uncaught fault now, while the frames are still intact
+        // (the unwind below drops them). The deepest fault wins: the original fault captures
+        // first, and a deeper deferred-call fault (run while its frame is still live) replaces
+        // it. A fault this loop CAN catch resets the capture below, so no stale trace survives
+        // a `recover:`.
+        if !caught_here && self.frames.len() > self.fault_trace_depth {
+            let mut trace = gen_prefix;
+            trace.extend(self.capture_trace());
+            self.fault_trace = Some(trace);
+            self.fault_trace_depth = self.frames.len();
+        }
+        // The nearest `recover:` boundary owned by THIS dispatch loop catches the fault; a
+        // handler at/below `base_level` belongs to an outer loop, so we unwind to
+        // `base_level` and propagate. Either way, every frame discarded on the way runs its
+        // deferred calls first (Go: defers run as the panic unwinds, before recover regains
+        // control). A fault inside a deferred call supersedes the original.
+        // TICKET-148 — computed while the frames are intact; applied below (at the catch's
+        // stamp, and to the uncaught headline) only if the error is still this one (a
+        // faulting `defer` may supersede it).
+        let std_site = if !fatal && !rte.is_panic && self.program.file_is_std(rte.span.file) {
+            self.std_entry_call_site().map(|site| (rte.span, site))
+        } else {
+            None
+        };
+        let target = match self.handlers.last().copied() {
+            Some(h) if !fatal && h.frame_len > base_level => h.frame_len,
+            _ => base_level,
+        };
+        // A genuine fault (not a B3.4 cancel / `std.os.exit`, both handled above) cancels-and-
+        // reports each unwound frame's escaped nurseries — emitted PER FRAME, BEFORE that
+        // frame's `defer`s, matching the interp oracle (whose `exec_parallel` /
+        // `leave_implicit_nursery` report as the body unwinds, then `finish_frame` runs the
+        // defers). `unwind_deferred` does the interleaving; this covers BOTH the uncaught arm
+        // (no handler) and the frames discarded above a catching `recover:`.
+        // TICKET-152 (W14-37): a FATAL deadlock drops its frames without running their
+        // `defer`s, as Go's all-goroutines-asleep abort does (parked siblings already run
+        // none, DEC-092). Per-call, never a VM latch: `chezzi test` keeps running.
+        let rte = if fatal {
+            self.unwind_no_defer(target);
+            rte
+        } else {
+            self.unwind_deferred(target, true).unwrap_or(rte)
+        };
+        let rte = if fatal { rte.deadlock() } else { rte };
+        // TICKET-148 — relocate a NATIVE std fault to the user's call into std, for the
+        // caught stamp below AND the uncaught headline (the trace keeps its frames). A
+        // superseding `defer` fault (a different span) and a `panic` stay where they are.
+        let rte = match std_site {
+            Some((raised, site)) if raised == rte.span && !rte.is_panic => {
+                RuntimeError { span: site, ..rte }
+            }
+            _ => rte,
+        };
+        // A deferred `std.os.exit` turns the unwind into a hard halt.
+        if self.pending_exit.is_some() {
+            return Err(rte);
+        }
+        match self.handlers.last().copied() {
+            Some(h) if !fatal && h.frame_len > base_level => {
+                self.handlers.pop();
+                // This `recover:` caught the fault — discard any trace captured deeper in (it
+                // belongs to a fault that is now handled), so a later uncaught fault re-captures.
+                self.fault_trace = None;
+                self.fault_trace_depth = 0;
+                // TICKET-096 — this handler is outside the faulting nursery, so the fault is
+                // handled; the floor must not survive it and bypass an unrelated later handler.
+                self.owner_fault_floor = None;
+                self.cancel_unwind_faulted = false;
+                // `unwind_deferred` already dropped frames down to `h.frame_len`; restore the
+                // operand stack / call-depth / ip to the boundary's snapshot.
+                self.stack.truncate(h.stack_len);
+                self.call_depth = h.call_depth;
+                self.cur_base = self.frames.last().map(|f| f.base).unwrap_or(0);
+                self.frames[h.frame_len - 1].ip = h.ip;
+                // `unwind_deferred` ran the defers of frames ABOVE the boundary, but the
+                // boundary frame's own (recover-block) defers remain — drain them now, before
+                // binding the result. A fault in one supersedes the original.
+                let rte = self.drain_frame_to(h.defer_len).unwrap_or(rte);
+                // W13-20 — clear the prefix HERE, after every drain this catch runs
+                // (`unwind_deferred` above AND this recover-block drain), not before either
+                // one. A deferred `.next()` — whether outside the recover block (drained by
+                // `unwind_deferred`) or DIRECTLY INSIDE it (drained by `drain_frame_to` just
+                // above) — can fault and park its own frames here without ever passing back
+                // through this loop's error arm to be taken (that only happens for a fault
+                // THIS dispatch loop raises directly). Clearing before either drain leaves the
+                // second drain's fault to survive uncleared and decorate a later, unrelated
+                // uncaught fault — the review finding this fixes.
+                self.gen_fault_prefix.clear();
+                // Drop the scope markers of any defer scopes opened inside the recover block:
+                // the fault jumped past their `LeaveDeferScope`s, so they would otherwise leak
+                // and corrupt later drains in this frame.
+                self.frames[h.frame_len - 1]
+                    .defer_markers
+                    .truncate(h.markers_len);
+                // Reclaim any `parallel:` nursery the fault unwound past (its `JoinNursery`
+                // never ran) — the nursery list is always reclaimed on unwind.
+                // TASK B: route through `drain_escaped_nursery` so a `?` caught by `recover:`
+                // cancels its tasks IDENTICALLY to an uncaught `?`.
+                // TICKET-147 — the caught fault is the root cause; a child's fault is dropped.
+                let _ = self.drain_escaped_nursery(h.nursery_len);
+                if self.pending_exit.is_some() {
+                    return Err(rte);
+                }
+                // Convert the fault message (a `str`, i.e. an `Error`) into `Err(msg)`; the
+                // boundary's `done` label receives a ready `Result`.
+                let sp = rte.span;
+                let msg = self.alloc_str(rte.message);
+                // W8-22 — stamp the fault's origin on the message handle so `e.line()` etc.
+                // can read it back later. `msg` is always a fresh `Obj::Str`
+                // (`alloc_str` allocates one per call), so this can never alias an
+                // unrelated string's span. A stdlib-raised span is not stamped
+                // (TICKET-045), except a NATIVE fault, which is relocated above to the
+                // user's call into std (TICKET-148).
+                self.stamp_err_span(msg, sp);
+                let err = self.alloc_enum("Result", "Err", vec![msg]);
+                self.push(err);
+            }
+            // Uncaught: `unwind_deferred(target, true)` above already cancelled-and-reported
+            // every unwound frame's escaped nurseries (the toplevel module nursery preserved).
+            _ => return Err(rte),
         }
         Ok(())
     }
@@ -1850,9 +1853,9 @@ impl Vm {
                     )
                     .timed_out());
             }
-            if self.cancel_requested() {
-                self.cancelled = true;
-                return Err(self.err("cancelled".to_string(), span));
+            // TICKET-188 — a cancel, or a child fault of a nursery this party owns: one predicate.
+            if let Some(e) = self.take_halt(span) {
+                return Err(e);
             }
             // gaps.md W7-57 — a run-wide `os.exit` from another party. This is the checkpoint for the
             // shapes NO blocking wait can reach: a spinning top-level `main` (`cancel == None`,
@@ -1870,37 +1873,68 @@ impl Vm {
             if sampled && self.holds_width && self.mn.is_none() {
                 self.body_width_yield();
             }
-            // TICKET-096 — the `block_halt_check` rung's counterpart for the loop back-edge.
-            // `cancel_requested()` above reads only cancel flags THIS fiber holds, and a nursery OWNER
-            // holds none of its own scope's, so a doomed owner loop ran to completion (measured: the
-            // top-level loop took seconds, cut to 31 ms by this rung). Same precedence slot as
-            // `block_halt_check`'s rung, below the exit halt. Rides the existing 1/1024 `sampled` gate
-            // because `MnSched::scope_fault` takes the sched lock.
-            if sampled
-                && !self.cancel_suppressed()
-                && let Some((n, e)) = self.owned_nursery_fault()
-            {
-                self.owner_fault_floor = Some(n);
-                return Err(e);
-            }
         }
         self.frames.last_mut().unwrap().ip = target;
         Ok(())
     }
 
-    /// THE cancel predicate — every cancellation checkpoint (`jump_checked`'s loop back-edge,
-    /// `guarded`'s native-HOF re-entry, the blocking-native offload, `chan_recv_step`, `op_wait_poll`,
-    /// [`Vm::demote_block_socket`], [`Vm::join_eager_jobs`]) asks exactly this. Two
-    /// suppressions, both load-bearing:
+    /// TICKET-188 — THE halt predicate: must this party stop now, and why? Every checkpoint (`jump_checked`'s
+    /// loop back-edge, `guarded`'s native-HOF re-entry, the blocking-native offload, `chan_recv_step`,
+    /// `op_wait_poll`, every demote loop, [`Vm::join_eager_jobs`]) asks exactly this, through
+    /// [`Vm::take_halt`]. It is [`block::halt_of`] over this party's cancel flags and open nurseries: a
+    /// cancel, or a recorded fault of a child of a nursery it owns (unless a run-wide exit is pending).
+    /// `None` while [`Vm::cancel_suppressed`]: two suppressions, both load-bearing:
     ///
-    /// * `!self.cancelled` — latch: once the cancel unwind is in flight, a checkpoint inside it must
+    /// * `self.cancelled` — latch: once the cancel unwind is in flight, a checkpoint inside it must
     ///   not re-fire and skip the remaining `defer`s.
-    /// * `self.deferring == 0` — a deferred call is the cleanup the cancel exists to run. Defers drain
+    /// * `self.deferring > 0` — a deferred call is the cleanup the cancel exists to run. Defers drain
     ///   on the normal-return / own-fault paths too, where `cancelled` is still false while the scope
     ///   flag is already tripped by a faulted sibling; without this, the first checkpoint inside the
     ///   first deferred call returns `cancelled` and the defer body never executes.
-    pub(super) fn cancel_requested(&self) -> bool {
-        !self.cancel_suppressed() && self.cancel_flags().any(|c| c.load(Ordering::Relaxed))
+    pub(super) fn halt_requested(&self) -> Option<Halt> {
+        if self.cancel_suppressed() {
+            return None;
+        }
+        if self.eager_scheds.is_empty() {
+            return block::halt_of(self.cancel_flags().map(|a| &**a), std::iter::empty(), false);
+        }
+        self.halt_requested_owned()
+    }
+
+    /// [`Vm::halt_requested`] for a party with an open nursery. Out of line so a nursery-free loop
+    /// pays one `is_empty()`.
+    #[cold]
+    #[inline(never)]
+    fn halt_requested_owned(&self) -> Option<Halt> {
+        block::halt_of(
+            self.cancel_flags().map(|a| &**a),
+            super::open_nurseries(&self.eager_scheds),
+            self.quiesce.exit_pending(),
+        )
+    }
+
+    /// [`Vm::halt_requested`], delivered: a cancel latches `cancelled` and returns the `cancelled`
+    /// sentinel; a child fault records `owner_fault_floor` (DEC-096: only a `recover:` INSIDE the
+    /// faulting nursery is bypassed) and returns the child's error.
+    pub(super) fn take_halt(&mut self, span: Span) -> Option<RuntimeError> {
+        let h = self.halt_requested()?;
+        Some(self.deliver_halt(h, span))
+    }
+
+    /// Deliver a [`Halt`] read by [`Vm::halt_requested`]. A wait that settles under its sched's core
+    /// lock reads the halt BEFORE taking that lock (a child fault's `scope_fault` takes it too, and a
+    /// fiber-owned nursery lives on the same sched) and delivers it here, below its settle.
+    pub(super) fn deliver_halt(&mut self, h: Halt, span: Span) -> RuntimeError {
+        match h {
+            Halt::Cancelled => {
+                self.cancelled = true;
+                self.err("cancelled".to_string(), span)
+            }
+            Halt::ChildFault { floor, err } => {
+                self.owner_fault_floor = Some(floor);
+                err
+            }
+        }
     }
 
     /// gaps.md W7-57 — how the two CPU-side checkpoints ([`Vm::jump_checked`]'s loop back-edge,
@@ -1937,11 +1971,11 @@ impl Vm {
         self.run_exit_err(span)
     }
 
-    /// The flags `cancel_requested()` reads: this fiber's own scope flag plus every ENCLOSING scope's
+    /// The cancel flags [`Vm::halt_requested`] reads: this fiber's own scope flag plus every ENCLOSING scope's
     /// (structured concurrency — an outer cancel cancels this one too; a nested nursery keeps its own
     /// flag for its own faults, and `cancel_outer` is normally empty).
     ///
-    /// SINGLE SOURCE — `demote_cancel_flags` (the N4 watch set) MUST stay exactly the flags the resume
+    /// SINGLE SOURCE — [`Vm::wake_set`] (the N4 watch set) MUST stay exactly the flags the resume
     /// path re-reads, so both go through this + [`Vm::cancel_suppressed`] rather than hand-copying the
     /// set. (A watch that misses a flag ⇒ a cancel-wakeable demoted fiber is called a deadlock and its
     /// cleanup is truncated; a watch that misses a suppression ⇒ the veto never lifts and a genuine
@@ -1956,16 +1990,21 @@ impl Vm {
         self.cancelled || self.deferring > 0
     }
 
-    /// N4 (M:N) — the cancel flags a DEMOTED fiber must be watched on, i.e. the exact flags
-    /// `cancel_requested()` reads. EMPTY when a cancel could not wake it at all (`cancel_suppressed`:
-    /// already unwinding, or inside a `defer`) — a fiber a cancel can never wake is exactly the one
-    /// that IS a genuine deadlock. Handed to `SchedCore::register_waiter`
-    /// (`demote_recv_block` / `demote_wait_block`).
-    pub(super) fn demote_cancel_flags(&self) -> Vec<Arc<AtomicBool>> {
+    /// TICKET-188 — THE wake set of this party: the cancel flags [`Vm::halt_requested`] reads plus
+    /// the flags of every nursery it owns, i.e. every flag whose trip may make it halt. EMPTY when
+    /// nothing could cut it at all (`cancel_suppressed`: already unwinding, or inside a `defer`) — a
+    /// party nothing can wake is exactly the one that IS a genuine deadlock. Every wait registration
+    /// reads it: a demoted `Waiter` ([`Vm::block_enter`]) and a fiber's timer sleep (`TimerSleep`).
+    pub(super) fn wake_set(&self) -> WakeSet {
         if self.cancel_suppressed() {
-            return Vec::new();
+            return WakeSet::default();
         }
-        self.cancel_flags().cloned().collect()
+        WakeSet {
+            cancel: self.cancel_flags().cloned().collect(),
+            owned: super::open_nurseries(&self.eager_scheds)
+                .map(|o| OwnedScope::of(&o))
+                .collect(),
+        }
     }
 
     /// The cancel-flag chain a nursery CREATED FROM THIS VM must inherit: the scopes enclosing it, i.e.
@@ -2046,6 +2085,13 @@ impl Vm {
         if let Some(c) = &self.cancel {
             a.push(Arc::clone(c));
         }
+        // …and the flags of every nursery this party has open, outermost first. §2c1: on `main` there
+        // is no fiber, so `cancel`/`cancel_outer` are empty and a nested scope would observe no
+        // ancestor at all. TICKET-188: a child fault in an enclosing nursery of the SAME owner cancels
+        // the inner nursery's tasks, so an owner parked at an inner join (or an `Executor.shutdown()`)
+        // is freed (CPython `TaskGroup` cancels the body, which cancels the inner group). This used to
+        // be a second walk, `nursery_ancestors`, read by only the eager-nursery seams.
+        a.extend(super::open_nurseries(&self.eager_scheds).map(|o| Arc::clone(o.flag)));
         a
     }
 

@@ -1029,7 +1029,7 @@ impl Vm {
             let cancel = Arc::new(AtomicBool::new(false));
             let scope = sched.register_scope_seeded(
                 Arc::clone(&cancel),
-                self.nursery_ancestors(),
+                self.scope_ancestors(),
                 Vec::new(),
             );
             sched.open_body(scope);
@@ -1086,7 +1086,7 @@ impl Vm {
         self.register_sched(&sched);
         // Structured concurrency — an eager nursery is a nested scope: its handlers must observe the
         // enclosing scopes' cancel too (`JoinScope::ancestors`).
-        sched.lock().scopes[0].ancestors = self.nursery_ancestors();
+        sched.lock().scopes[0].ancestors = self.scope_ancestors();
         sched.open_body(0);
         let mut shell = self.spawn_shell(&sched, &cancel);
         let gate_body = self.mn.is_none() && worker_count() == 1;
@@ -1147,7 +1147,7 @@ impl Vm {
         let sched = self.mn.clone()?;
         let cancel = Arc::new(AtomicBool::new(false));
         let scope =
-            sched.register_scope_seeded(Arc::clone(&cancel), self.nursery_ancestors(), Vec::new());
+            sched.register_scope_seeded(Arc::clone(&cancel), self.scope_ancestors(), Vec::new());
         {
             let mut c = sched.lock();
             c.scopes[scope].deadlock_err =
@@ -1166,27 +1166,6 @@ impl Vm {
             fiber_owned: true,
             more_scopes: Vec::new(),
         })
-    }
-
-    /// §2c1 — the cancel chain a new nursery scope must observe: this fiber's own chain
-    /// ([`Vm::scope_ancestors`]) PLUS every eager nursery scope still open on this thread, outermost
-    /// first.
-    ///
-    /// `scope_ancestors` alone is not enough once the top level is eager: on `main` there is no fiber,
-    /// so `cancel`/`cancel_outer` are empty and a nested scope would observe no ancestor at all —
-    /// an outer escape could then leave its inner scope's fibers uncancellable, which is the
-    /// structured-concurrency invariant.
-    pub(super) fn nursery_ancestors(&self) -> Vec<Arc<AtomicBool>> {
-        let mut a = self.scope_ancestors();
-        if self.deferring == 0 {
-            a.extend(
-                self.eager_scheds
-                    .iter()
-                    .flatten()
-                    .map(|s| Arc::clone(&s.cancel)),
-            );
-        }
-        a
     }
 
     /// Per-connection spawn — `JoinNursery` for an eager nursery (the normal fall-through path). Close
@@ -1689,6 +1668,8 @@ impl Vm {
         //    wins over a spuriously-set `terminate`. Each exit path un-accounts under A; lost condvar
         //    wakeups are bounded by `DEMOTE_POLL_BACKOFF` (≤ latency, never a hang).
         loop {
+            // TICKET-188 — read before core lock A: a child fault's `scope_fault` takes that lock.
+            let halt = self.halt_requested();
             // --- settle under core lock A: a delivered value wins over cancel / terminate / deadlock ---
             let exit: Result<RecvStep, RuntimeError> = {
                 let mut c = sched.lock();
@@ -1717,13 +1698,13 @@ impl Vm {
                     drop(qg);
                     // Cancel (a sibling faulted): set `cancelled` BEFORE returning the Err so the
                     // outcome is SWALLOWED (a cancelled task is dropped, not reported). MUST go through
-                    // `cancel_requested()`, never a raw `self.cancel` load: a `defer` body runs under
+                    // `halt_requested()`, never a raw `self.cancel` load: a `defer` body runs under
                     // `guarded` (native_reentry > 0), and the predicate's `deferring == 0` term is what
-                    // keeps cleanup atomic; it also folds in `cancel_outer`.
-                    if self.cancel_requested() {
-                        self.cancelled = true;
+                    // keeps cleanup atomic; it also folds in `cancel_outer` and (TICKET-188) a child
+                    // fault of a nursery this party owns.
+                    if let Some(h) = halt {
                         reg.release(&sched, &mut c);
-                        Err(self.err("cancelled".to_string(), span))
+                        Err(self.deliver_halt(h, span))
                     } else if let Some(e) = self.run_exit_err(span) {
                         // W7-47 — a run-wide `os.exit` from another party, below cancel.
                         reg.release(&sched, &mut c);
@@ -1801,6 +1782,8 @@ impl Vm {
             span,
         )?;
         loop {
+            // TICKET-188 — read before core lock A: a child fault's `scope_fault` takes that lock.
+            let halt = self.halt_requested();
             {
                 let mut c = sched.lock();
                 // The offer's commit happens under `core.q`; read it in that hold, and release the
@@ -1813,10 +1796,9 @@ impl Vm {
                     reg.release(&sched, &mut c);
                     return Ok(());
                 }
-                if self.cancel_requested() {
-                    self.cancelled = true;
+                if let Some(h) = halt {
                     reg.release(&sched, &mut c);
-                    return Err(self.err("cancelled".to_string(), span));
+                    return Err(self.deliver_halt(h, span));
                 }
                 if let Some(e) = self.run_exit_err(span) {
                     reg.release(&sched, &mut c);
@@ -1894,6 +1876,8 @@ impl Vm {
             g.recv_ready_for(Some(p)) || core.done_latch.load(Ordering::Relaxed)
         };
         loop {
+            // TICKET-188 — read before core lock A: a child fault's `scope_fault` takes that lock.
+            let halt = self.halt_requested();
             {
                 let mut c = sched.lock();
                 let mut ready = !p.is_queued();
@@ -1915,11 +1899,10 @@ impl Vm {
                     return Ok(());
                 }
                 // Cancel (a sibling faulted): swallow the outcome (mirror the snapshot-park cancel arm).
-                if self.cancel_requested() {
-                    self.cancelled = true;
+                if let Some(h) = halt {
                     reg.release(&sched, &mut c);
                     drop(c);
-                    return Err(self.err("cancelled".to_string(), span));
+                    return Err(self.deliver_halt(h, span));
                 }
                 // W7-47 — a run-wide `os.exit` from another party, below cancel like every other site.
                 if let Some(e) = self.run_exit_err(span) {
@@ -2008,7 +1991,8 @@ impl Vm {
             // `deferring == 0` mirrors the suppression `run_exit_err` (and `cancel_requested`) apply
             // below: inside a `defer` neither arm will fire, so cutting the sleep short here would
             // silently SHORTEN a deferred `sleep_ms` instead of halting anything.
-            if self.cancel_requested() || (self.deferring == 0 && self.quiesce.pending().is_some())
+            if self.halt_requested().is_some()
+                || (self.deferring == 0 && self.quiesce.pending().is_some())
             {
                 break;
             }
@@ -2022,9 +2006,8 @@ impl Vm {
         // callback element and then fault NORMALLY at a later back-edge — wrong classification (a
         // cancelled-task Fault masking the real sibling error) and wasted in-callback sleeps. Faulting
         // here aborts the native callback loop immediately, so no further elements sleep.
-        if self.cancel_requested() {
-            self.cancelled = true;
-            return Err(self.err("cancelled".to_string(), span));
+        if let Some(e) = self.take_halt(span) {
+            return Err(e);
         }
         // W7-47 — a run-wide `os.exit` observed during/after the sleep, below cancel like every other
         // site. Since W7-57 chunked step 3 this aborts the sleep ITSELF within one
@@ -2175,9 +2158,10 @@ impl Vm {
             }
             // Observe teardown/cancel BEFORE doing more work each iteration. Cancel (a sibling faulted):
             // set `cancelled` so the outcome is SWALLOWED (a cancelled task is dropped, not reported).
-            if self.cancel_requested() {
-                self.cancelled = true;
-                break Err(self.err("cancelled".to_string(), span));
+            // TICKET-188 — …or a child of a nursery this party owns faulted (F2: a `main` owner blocked
+            // in a socket op never saw it).
+            if let Some(e) = self.take_halt(span) {
+                break Err(e);
             }
             // W7-47 — a run-wide `os.exit` from another party (an eager `Executor` job). This is the one
             // blocking wait not routed through `block_halt_check`, so it needs the rung explicitly, in
@@ -2379,9 +2363,10 @@ impl Vm {
     /// nursery's fault via `owned_nursery_fault`), and never inside a `defer`. A join that parked
     /// (`join_suspend`) re-runs after the wake, so it is not checked here.
     pub(super) fn cancel_at_join(&mut self, span: Span) -> Result<(), RuntimeError> {
-        if self.join_suspend.is_none() && self.cancel_requested() {
-            self.cancelled = true;
-            return Err(self.err("cancelled".to_string(), span));
+        if self.join_suspend.is_none()
+            && let Some(e) = self.take_halt(span)
+        {
+            return Err(e);
         }
         Ok(())
     }
@@ -2613,6 +2598,26 @@ impl Vm {
             // native panic does via `run_one_fiber`'s outer `catch_unwind`), or it returned a
             // `HostError` (unreachable for the scoped fns — fs/io surface I/O failures as `Result`
             // *values* and arg types are checker-guaranteed). Either way the task faults.
+            // TICKET-188 — a halt observed at the resume (a cancel, or a child fault of a nursery this
+            // fiber owns — the timer job ends a sleep on either) goes through `run_until`'s own fault
+            // arm, so defers run and a `recover:` outside the faulting nursery still catches a child
+            // fault (DEC-096). A value that completed together with the halt is dropped. A hard halt
+            // (`--timeout` / over-memory) keeps its own funnel below.
+            let resume_native = match resume_native {
+                Some(r) if !matches!(&r, Err(e) if executor_hard_halt(e)) => {
+                    let span = self.frames.last().map(|f| f.call_span).unwrap_or_default();
+                    match self.take_halt(span) {
+                        Some(e) => {
+                            if let Err(e) = self.on_step_fault(0, e) {
+                                return Disp::Finish(self.classify_mn_outcome(Err(e)));
+                            }
+                            None
+                        }
+                        None => Some(r),
+                    }
+                }
+                other => other,
+            };
             if let Some(result) = resume_native {
                 match result {
                     Ok(nr) => {
@@ -2620,15 +2625,10 @@ impl Vm {
                         self.push(v);
                     }
                     Err(rte) => {
-                        // W7-16 — …or the offloaded `sleep_ms` was ENDED by a cancel (the timer job
-                        // observes the scope flags mid-sleep now). `self.cancelled` was just reset
-                        // above, so without this the cancelled sleeper classifies as a **Fault**,
-                        // trips its siblings and MASKS the real error that cancelled it. The
-                        // `executor_hard_halt` guard keeps the other direction honest: a `--timeout`
-                        // / over-memory abort must never be swallowed into a silent `Cancelled`.
-                        if !executor_hard_halt(&rte) && self.cancel_requested() {
-                            self.cancelled = true;
-                        }
+                        // W7-16 — an offloaded `sleep_ms` ENDED by a cancel is delivered by the halt
+                        // branch above (TICKET-188), so `self.cancelled` is never set here: this arm
+                        // is a native fault or a hard halt (`--timeout` / over-memory), which must
+                        // never be swallowed into a silent `Cancelled`.
                         // …and it must UNWIND, not merely finish. This arm returns WITHOUT re-entering
                         // `run_until`, so nothing else would run the task's `defer`s — a cancel
                         // delivered mid-sleep would silently skip every registered cleanup, while the
@@ -2680,8 +2680,18 @@ impl Vm {
                     let rte = self.unwind_deferred(0, false).unwrap_or(rte).timed_out();
                     return Disp::Finish(self.classify_mn_outcome(Err(rte)));
                 }
-                let v = self.finish_pending_connect(cip);
-                self.push(v);
+                // TICKET-188 — a halt that woke the connect park (a cancel, or a child fault of a
+                // nursery this fiber owns) is delivered like the offload resume's, before
+                // `finish_pending_connect` could report `Ok` for a handshake still in flight.
+                if let Some(e) = self.take_halt(cip.span) {
+                    drop(cip);
+                    if let Err(e) = self.on_step_fault(0, e) {
+                        return Disp::Finish(self.classify_mn_outcome(Err(e)));
+                    }
+                } else {
+                    let v = self.finish_pending_connect(cip);
+                    self.push(v);
+                }
             }
             let res = match state {
                 FiberState::Pending(task) => self.start_task(task),
@@ -5313,9 +5323,10 @@ impl Vm {
     /// job, it now does unconditionally: it trips `core.cancel` (see the store below), so every job
     /// that owns a checkpoint stops at it.
     ///
-    /// **Both rungs are evaluated while `eager` (G) is HELD, deliberately.** `deadline_halt` takes no
-    /// lock and `cancel_requested` takes none either, so there is no inversion to avoid — and holding
-    /// G means there is no window in which a job could finish between the check and the decision.
+    /// **Both rungs are decided while `eager` (G) is HELD, deliberately.** `deadline_halt` takes no
+    /// lock. `halt_requested` can take a sched core lock (a child fault's `scope_fault`), so it is
+    /// READ with G dropped and delivered only after re-checking progress under the re-taken G
+    /// (TICKET-188) — holding G at the decision means no job can finish between the check and it.
     /// That matters because the cancel rung LATCHES (`self.cancelled = true`): a halt observed in
     /// such a window and then discarded as stale would leave this fiber permanently
     /// `cancel_suppressed`, no-opping every later checkpoint. Only the verdict needs the drop, and
@@ -5451,9 +5462,17 @@ impl Vm {
                     bail = Some(e);
                     break;
                 }
-                if self.cancel_requested() {
-                    self.cancelled = true;
-                    bail = Some(self.err("cancelled".to_string(), span));
+                // TICKET-188 — a child fault's `scope_fault` takes a sched core lock, which must not
+                // nest inside G: read the halt with G dropped (it latches nothing), then re-check
+                // progress under the re-taken G before delivering it, exactly as the verdict does.
+                drop(g);
+                let halt = self.halt_requested();
+                g = core.eager.lock().unwrap_or_else(|e| e.into_inner());
+                if g.outstanding() <= slack {
+                    continue;
+                }
+                if let Some(h) = halt {
+                    bail = Some(self.deliver_halt(h, span));
                     break;
                 }
                 // The deadlock verdict keeps BOTH of its old gates: only on a timed-out wait (a

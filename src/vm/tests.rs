@@ -4299,7 +4299,7 @@ fn timer_offload_parks_then_requeues_fiber_with_nil() {
         span: Span::RUNTIME,
         timer: Some(crate::vm::TimerSleep {
             deadline: std::time::Instant::now() + std::time::Duration::from_millis(40),
-            cancel: vec![],
+            wake: crate::vm::block::WakeSet::default(),
             run_deadline: None,
             timeout_ms: 0,
         }),

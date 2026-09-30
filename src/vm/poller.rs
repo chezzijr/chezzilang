@@ -243,7 +243,9 @@ impl NetPoller {
         // would only see the OUTERMOST nursery's flag and let a fiber of a cancelled INNER scope park on
         // an already-swept poller. Read it under the SAME lock `drain_sched` sweeps under, so the two are
         // serialized — hand the fiber back to unwind rather than park it on a poller a past sweep drained.
-        if cancel.load(Ordering::Relaxed) || closed.load(Ordering::Acquire) {
+        // TICKET-188: a tripped flag of a nursery this fiber OWNS (a child faulted) hands it back too.
+        if cancel.load(Ordering::Relaxed) || fiber.owned_tripped() || closed.load(Ordering::Acquire)
+        {
             return Some(fiber);
         }
         // The key is never a duplicate: a second op on the same socket is rejected by the `in_flight`
@@ -327,7 +329,7 @@ impl NetPoller {
             let keys: Vec<usize> = reg
                 .iter()
                 .filter(|(_, p)| {
-                    Arc::ptr_eq(&p.sched, sched) && scope_id.is_none_or(|s| p.fiber.scope_id == s)
+                    Arc::ptr_eq(&p.sched, sched) && scope_id.is_none_or(|s| p.fiber.woken_by(&[s]))
                 })
                 .map(|(k, _)| *k)
                 .collect();
