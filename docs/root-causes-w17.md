@@ -115,6 +115,10 @@ similar change); keep TICKET-128's runnext hand-off.
 
 ## Family B — a child's fault is polled, not pushed (NEW, next to Blocking)
 
+**Status (2026-10-01): fixed by TICKET-188.** One decider `block::halt_of`, one wake set
+`Vm::wake_set` read by every wait registration and by every quiesce party (the verdict vetoes only a
+recorded child fault), and the grid `tests/owner_fault_grid.rs`.
+
 **Fact:** "must this blocked owner stop now?"
 
 **Deciders:** cancellation is **pushed** — a flag wakes every registered wait — and checked at

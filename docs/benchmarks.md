@@ -11,6 +11,29 @@ justify lives in **[`future.md §4`](future.md)**; the scheduled work is roadmap
 > They are kept as the record of what was measured at the time; they are not reproducible on today's
 > binary, and "serial == M:N parity green" in an older section means the gate that existed then.
 
+## TICKET-188 — one halt predicate at every checkpoint (2026-10-01)
+
+**Within 3% on all three checkpoint benches.** `Vm::halt_requested` (`block::halt_of`) replaced
+`cancel_requested()` and the owner-fault polls. Two levers were needed to get there:
+
+1. The owned half of the halt read (the walk over open nurseries) rides the 1-in-1024
+   `back_edge_tick` sample at `jump_checked` and `guarded_checkpoint`. The cancel half runs every
+   time. Latency cost: a CPU-bound owner burns up to 1024 more back-edges or HOF elements after its
+   child's fault, the same bound DEC-155's owner rung had. Every blocking wait reads both halves.
+2. `Vm::deliver_halt` is `#[cold] #[inline(never)]`.
+
+Conditions: base is the release binary at `53d48523` (`main`); branch at `fa7b11fd`. `hyperfine -N
+-w 3 -r 30`, medians in seconds, load average 1.6-1.9 (`uptime`).
+
+| bench | base | branch | delta |
+|---|---|---|---|
+| `loop.chz` | 1.702 | 1.700 | -0.2% |
+| `hof.chz` | 0.609 | 0.623 | +2.4% |
+| `hof_nursery.chz` | 0.624 / 0.632 | 0.638 / 0.632 | +2.2% / -0.0% (two runs) |
+
+Before the levers, with the owned half read at every checkpoint: `hof_nursery.chz` 0.622 -> 0.712
+(+14.3%) and 0.626 -> 0.698 (+11.6%). With lever 1 only: +4.3% and +5.6% on two runs.
+
 ## TICKET-185 — channel hand-off protocol (2026-09-30)
 
 **Accepted by the owner 2026-09-30; residual tracked as W17-1.** Unpinned, `rendezvous_pingpong`

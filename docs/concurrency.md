@@ -1106,12 +1106,20 @@ fn serve(tok: Token, io: Channel[str]):
 > - **A STARTED task always runs its straight-line prologue**, so a `defer` it registers is registered
 >   *before* anything can kill it. "Does my cleanup run?" no longer depends on scheduler timing.
 > - **A long-running CPU loop is still cancelled promptly** — the loop back-edge is the checkpoint.
-> - **A nursery OWNER running a native-HOF callback is cut short by a child's fault** (TICKET-155) — the
->   owner holds none of its own scope's cancel flags, so `List.map`/`filter`/`fold`/`sort_by` and an
->   operator overload check the nursery for a recorded child `Fault` at the per-element re-entry. The check
->   rides the loop back-edge's 1-in-1024 sample (it takes the sched lock), so the owner may burn up to that
->   many further elements. A `defer` body is never truncated by it, and a `recover:` outside the
->   `parallel:` still catches the child's fault.
+> - **A child's fault reaches its owner at every wait: one wake set, one halt predicate**
+>   (TICKET-188). A nursery OWNER holds none of its own scope's cancel flags, so its wake set
+>   (`Vm::wake_set`) is its cancel flags plus the flags of every nursery it owns, and every checkpoint
+>   asks one question, `block::halt_of`: "cancelled, or did a child of a nursery I own fault?". Every
+>   wait registers that wake set (a parked or demoted wait, a socket wait, a timer sleep, a join), so
+>   an owner blocked in `peer.read(10)`, `ln.accept()`, `recv`, `sleep_ms` or `wait:` is cut when
+>   its child faults, in `main`, in a fn body, in a spawned task and in an Executor job. A nested
+>   nursery inherits its owner's open-nursery flags, so an owner parked at an inner join is freed.
+>   A blocking host call (offload, stdin) is cut at its return: a value that completes together with
+>   the fault is dropped. An `Executor` created outside an eager job is not cancelled; its owner is
+>   cut at `shutdown()`. At the two CPU checkpoints (loop back-edge, native-HOF re-entry) the owned
+>   half rides the 1-in-1024 sample, so a CPU-bound owner may burn up to that many further
+>   iterations. A `defer` body is never truncated by it, and a `recover:` outside the `parallel:`
+>   still catches the child's fault.
 >
 > **Two kinds of blocking checkpoint — a wait whose DEADLINE WE OWN is CONTINUOUS; a syscall-blocking
 > native is ENTRY-only.**

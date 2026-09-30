@@ -1148,7 +1148,7 @@ pub struct Vm {
     cancel: Option<Arc<AtomicBool>>,
     /// The cancel flags of the ENCLOSING scopes of the scope this VM currently runs in (outermost
     /// first; empty at the top level and in the outermost nursery). Cancelling a scope must cancel its
-    /// descendants, so every checkpoint reads these too ([`Vm::cancel_requested`]) — a nested nursery
+    /// descendants, so every checkpoint reads these too ([`Vm::halt_requested`]) — a nested nursery
     /// keeps its OWN `cancel` (an inner fault must not cancel an outer sibling) but its fibers still
     /// die when an outer scope is cancelled. Re-pointed per fiber swap-in from
     /// [`JoinScope::ancestors`], exactly like `cancel`.
@@ -1213,7 +1213,7 @@ pub struct Vm {
     /// run to completion. Defers also drain on the NORMAL-return and own-fault paths, where
     /// `cancelled` is still false while the scope flag is already tripped by a faulted sibling —
     /// without this counter the first checkpoint inside the first deferred call would eat it.
-    /// See [`Vm::cancel_requested`].
+    /// See [`Vm::halt_requested`].
     deferring: usize,
     /// D1 — on a `--parallel` **worker** fiber, the read-only [`ModuleSnapshot`] its `module_objs` were
     /// built from and fault into its own heap lazily, one module at a time, on first global access
@@ -2461,7 +2461,7 @@ struct JoinScope {
     /// invariant), but its fibers must still observe an outer cancel at their checkpoints, or a nested
     /// nursery entered from a task that is later cancelled becomes UNCANCELLABLE and a spinning
     /// grandchild hangs the teardown forever. Read at every checkpoint via the shell's re-pointed
-    /// `Vm::cancel_outer` (`Vm::cancel_requested`).
+    /// `Vm::cancel_outer` (`Vm::halt_requested`).
     ancestors: Vec<Arc<AtomicBool>>,
     /// This scope's own deadlock fault, used instead of `MnSched::deadlock_err` when set. `flag_deadlock`
     /// clones ONE error into every parked fiber's slot (DEC-048), so a scope with a more specific span
@@ -2630,7 +2630,7 @@ impl SchedCore {
     ///
     /// BOUNDED TO THAT WINDOW (this is the whole liveness argument): the veto asks for an UNDRAINED
     /// PARKED fiber of the cancelled scope, not merely `done < total`. "Some incomplete cancelled scope"
-    /// was too wide and could never lift: a `defer` is not itself cancellable (`cancel_requested`'s
+    /// was too wide and could never lift: a `defer` is not itself cancellable (`halt_requested`'s
     /// `deferring == 0` term), so a cleanup body that blocks FOREVER (`ch.recv()` nobody will ever
     /// answer) demotes and sits there — the scope is then incomplete *because of* that fiber, the veto
     /// held forever and the M:N engine hung SILENTLY (serial reports it). The harm the veto exists to
@@ -4910,7 +4910,7 @@ impl MnSched {
         //   requeue those fibers so they unwind their `defer`s;
         // * a DEMOTED fiber whose cancel flag is tripped (`any_waiter_satisfiable`): it is
         //   a registered waiter, not `parked`, so the first scan cannot see it — but `demote_recv_block`
-        //   ranks `cancel_requested()` above `terminate`/self-detect, so it resumes within one
+        //   ranks `halt_requested()` above `terminate`/self-detect, so it resumes within one
         //   `DEMOTE_POLL_BACKOFF`, unwinds and runs its `defer`s (which can `send`).
         //
         // Either way `flag_deadlock` would drop every parked fiber WITHOUT `unwind_deferred` (silently
@@ -4918,7 +4918,7 @@ impl MnSched {
         // deadlock never even surfaced; the lost `defer` was the only symptom) and LATCH `terminate`,
         // truncating the cleanup of anything demoted inside its own `defer`. BOUNDED to real progress:
         // a cancelled scope with no undrained park whose last fiber is demoted-blocked forever INSIDE
-        // an uncancellable `defer` (no cancel watch — `cancel_requested()` is false while
+        // an uncancellable `defer` (no cancel watch — `halt_requested()` is `None` while
         // `deferring > 0`) IS a genuine deadlock and is reported, not hung. Evaluated only at the
         // quiesce (after the counter gate above), so the scan is off the idle/steal hot path. A GENUINE
         // deadlock (nothing cancelled anywhere) is untouched.

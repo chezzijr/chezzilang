@@ -7,6 +7,16 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-188 (2026-10-01): Family B, a child's fault is pushed to its owner.** One decider,
+  `block::halt_of` (cancel first, then a recorded fault of a child of an owned nursery), read by
+  `Vm::halt_requested`/`take_halt`/`deliver_halt` and `WakeSet::halt`; one wake set,
+  `Vm::wake_set`, registered by every wait and carried by every quiesce party. The deadlock verdict
+  vetoes a party only for a recorded child fault; a pending cancel is not a promise of progress.
+  Deleted: `cancel_requested`, `demote_cancel_flags`, `owned_nursery_fault`, `deliver_owner_fault`,
+  `nursery_ancestors`. An owner blocked in a socket read/accept/write, `recv`, `sleep_ms`, `wait:`
+  or a join is now cut at its child's fault (it hung or ran on for seconds). Grid:
+  `tests/owner_fault_grid.rs` (every `WaitSpec` × owner kind × context). Benches within 3%
+  (`docs/benchmarks.md`).
 - **TICKET-187 (2026-09-30): Family F, names resolved in one place.** (1) Protocol parameter names
   are part of conformance for user and prelude protocols (`param_name_mismatch`); a protocol call
   binds by the protocol's own parameter list and omitting an argument is an arity error (DEC-075's

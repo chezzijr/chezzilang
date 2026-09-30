@@ -1988,7 +1988,7 @@ impl Vm {
                 break;
             }
             std::thread::sleep(DEMOTE_POLL_BACKOFF.min(deadline - now));
-            // `deferring == 0` mirrors the suppression `run_exit_err` (and `cancel_requested`) apply
+            // `deferring == 0` mirrors the suppression `run_exit_err` (and `halt_requested`) apply
             // below: inside a `defer` neither arm will fire, so cutting the sleep short here would
             // silently SHORTEN a deferred `sleep_ms` instead of halting anything.
             if self.halt_requested().is_some()
@@ -2060,7 +2060,7 @@ impl Vm {
     /// - `--timeout` is a **`chezzi test` flag only**; `chezzi run --timeout=500 f.chz` is rejected by
     ///   the CLI with `chezzi run: unknown flag '--timeout=500'` (`src/main.rs:243`), so `self.deadline`
     ///   is `None` and [`Vm::deadline_halt`] is a no-op on this path.
-    /// - `main` has no scope — no `cancel`, no `cancel_outer` — so `cancel_requested()` reads an EMPTY
+    /// - `main` has no scope — no `cancel`, no `cancel_outer` — so `halt_requested()` reads an EMPTY
     ///   flag set and nothing can ever trip it.
     ///
     /// So an `accept`/`read`/`write` reached on `main` with **no explicit `timeout_ms`** has no escape at
@@ -2358,9 +2358,9 @@ impl Vm {
     /// TICKET-147 (W14-15) — a nursery join is a cancellation point for its OWNER. `join_nursery`
     /// reduces an all-`Cancelled` slot vector to `Ok(())`, so a cancelled owner would otherwise run the
     /// straight-line code after its join (asyncio never runs code after a cancelled `async with`).
-    /// Runs after the join returns; it reads [`Vm::cancel_requested`], i.e. only the flags the owner
-    /// holds from an ENCLOSING scope — never its own nursery's (DEC-096: the owner learns its own
-    /// nursery's fault via `owned_nursery_fault`), and never inside a `defer`. A join that parked
+    /// Runs after the join returns; it reads [`Vm::take_halt`]: the flags the owner holds from an
+    /// ENCLOSING scope and the nurseries it still owns — never the one just joined (DEC-096: the
+    /// owner learns that nursery's fault from the join itself), and never inside a `defer`. A join that parked
     /// (`join_suspend`) re-runs after the wake, so it is not checked here.
     pub(super) fn cancel_at_join(&mut self, span: Span) -> Result<(), RuntimeError> {
         if self.join_suspend.is_none()
@@ -5559,7 +5559,7 @@ impl Vm {
             // other `--timeout`/cancel observation happens INSIDE a job, where `run_outcome` trips the
             // executor's cancel for us; this one is on the JOINER, and without this store the abandoned
             // jobs never learn. That is not merely untidy: `Vm::do_call`'s blocking-native offload gates
-            // on `cancel_requested()`, so a job part-way through a sequence of blocking calls would
+            // on `take_halt`, so a job part-way through a sequence of blocking calls would
             // launch the NEXT one after the run had already reported TIMED-OUT (measured: a fresh
             // subprocess spawned at ~1.3 s under `--timeout=300`). The executor is already `shut`, and
             // for an ORDINARY (non-self, `slack == 0`) join this path deliberately leaves `unreduced`

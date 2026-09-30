@@ -88,6 +88,8 @@
   fact (every crossing route, every syntactic position a name can occupy, every receiver kind) and
   make each one an axis. A single source that only some consumers read is a single source for part
   of the grid.
+- **A fact pushed for one cause and polled for another is two deciders** (TICKET-188). Derive both
+  from one wake set, including the deadlock verdict's registry.
 - **A structural protocol's parameter names are part of its contract** (TICKET-187). A call through
   a protocol binds keywords by the protocol's names, so an implementor that permutes them
   (`replace(self, new, old)`) silently swapped arguments. Conformance now checks names at every

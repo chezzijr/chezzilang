@@ -585,7 +585,9 @@ they never pin an OS-thread worker. The price: a thread sitting inside one has *
 checkpoint until the call returns**. A sibling's fault (scope cancel), a `cancel.Token`, `os.exit` and
 `chezzi test --timeout` therefore do **not** abort a call already in flight — the halt takes effect
 when the call returns, not before. Size the operation itself (a subprocess `timeout 5 …`, a request
-timeout) if you need a bound.
+timeout) if you need a bound. A fault of a child of a nursery the caller owns is delivered the same
+way: at the return, and the call's result is dropped. The `std.io` stdin readers follow the same
+rule (Go's `os.Stdin.Read` and CPython's `input()` are not cancelled either).
 
 **Planned:** `std.process` calls will become killable — a cancelled task will signal the child's
 process group instead of waiting it out (`docs/concurrency.md` §6h, milestone M25). `std.fs`/`std.io`
