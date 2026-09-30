@@ -216,58 +216,21 @@ impl Checker {
 
     /// Resolve a type alias `name` — LOCAL (`self.aliases`) or named-IMPORTED (`imported_alias_tys`)
     /// — read-only, to its nominal (struct/enum/newtype) target with the body's pinned type
-    /// arguments. A local chain is walked through `Type::Named`/`Type::Generic` heads, capped at 64
-    /// hops; its last hop may be a named import or a `module.Type` body (TICKET-172). The compiler's
+    /// arguments. A local body resolves through `resolve_ty_ro`, so a chain, a named import or a
+    /// `module.Type` body (TICKET-172) all resolve the way an annotation does. The compiler's
     /// `assign_type_keys` re-points the same spellings to the same canonical key, so everything
     /// accepted here lowers. A scalar/protocol/builtin target, or a cycle, is `None`: the checker
     /// already rejects a cycle as `recursive type alias` (`resolve_type`), which stays the only cycle
     /// diagnostic.
     pub(super) fn alias_body_ty(&self, name: &str) -> Option<Ty> {
-        let Some(mut body) = self.aliases.get(name) else {
+        let Some(body) = self.aliases.get(name) else {
             return self
                 .imported_alias_tys
                 .get(name)
                 .and_then(|t| self.nominal_alias_target(t));
         };
-        let mut depth = 0;
-        loop {
-            let (head, targs): (&String, Vec<Ty>) = match body {
-                Type::Named { name: n, .. } => (n, Vec::new()),
-                Type::Generic(n, args, ..) => {
-                    (n, args.iter().map(|a| self.resolve_ty_ro(a)).collect())
-                }
-                Type::Qualified { module, name, args } => {
-                    let args: Vec<Ty> = args.iter().map(|a| self.resolve_ty_ro(a)).collect();
-                    let ty = self.resolve_qualified_ro(module, name, &args);
-                    return self.nominal_alias_target(&ty);
-                }
-                _ => return None,
-            };
-            depth += 1;
-            if depth > 64 {
-                return None;
-            }
-            if let Some(next) = self.aliases.get(head) {
-                body = next;
-                continue;
-            }
-            let ty = if let Some(t) = self.imported_alias_tys.get(head) {
-                // An imported alias already carries its pinned arguments; it takes no more.
-                if !targs.is_empty() {
-                    return None;
-                }
-                t.clone()
-            } else if self.struct_names.contains(head) {
-                Ty::Struct(self.bare_key(head), targs)
-            } else if self.enum_names.contains(head) {
-                Ty::Enum(self.bare_key(head), targs)
-            } else if self.newtype_names.contains(head) {
-                Ty::NewType(self.bare_key(head), targs)
-            } else {
-                return None;
-            };
-            return self.nominal_alias_target(&ty);
-        }
+        // TICKET-187: the body resolves through the one type-position resolver (DEC-180).
+        self.nominal_alias_target(&self.resolve_ty_ro(body))
     }
 
     /// `ty` when it names a struct/enum/newtype whose shape this module can reach (local table or
@@ -459,25 +422,21 @@ impl Checker {
 
     /// The identity key of the protocol a type alias `name` ultimately names, TICKET-108 (W12-16c) —
     /// so `type N = Named` (local) or `import N from m` (where `m` declares `type N = Named`) makes
-    /// `N` a valid bound (`fn f[T: N]`), interchangeably with `Named` itself. Walks LOCAL aliases
-    /// through `Type::Named` heads only (any other body shape, or a cycle capped at 64 hops, is
-    /// `None` — mirrors `alias_body_ty`), then checks whether the final head is an imported protocol
-    /// alias. An alias that APPLIES TYPE ARGUMENTS (`type IntBag = Bag[int]`) is `None`: no bound-
+    /// `N` a valid bound (`fn f[T: N]`), interchangeably with `Named` itself. A LOCAL alias body
+    /// resolves through `resolve_ty_ro` (so `type N = named.Named` works too, TICKET-187); otherwise
+    /// `name` may be an imported protocol alias or a protocol. An alias that APPLIES TYPE ARGUMENTS (`type IntBag = Bag[int]`) is `None`: no bound-
     /// argument substitution exists to make that a sound bound by name (see `check_bounds`'s own
     /// diagnostic for that shape). `None` when the resolved head is not a protocol at all.
     pub(super) fn protocol_alias_key(&self, name: &str) -> Option<String> {
-        let mut head = name.to_string();
-        let mut depth = 0;
-        while let Some(body) = self.aliases.get(&head).cloned() {
-            match body {
-                Type::Named { name: n, .. } => head = n,
-                _ => return None,
-            }
-            depth += 1;
-            if depth > 64 {
-                return None;
-            }
+        // TICKET-187: a local alias body resolves through the one type-position resolver, so a
+        // qualified body (`type N = named.Named`) is a bound like a bare one.
+        if let Some(body) = self.aliases.get(name) {
+            return match self.resolve_ty_ro(body) {
+                Ty::Protocol(key, args) if args.is_empty() => Some(key),
+                _ => None,
+            };
         }
+        let head = name.to_string();
         if let Some(Ty::Protocol(key, args)) = self.imported_alias_tys.get(&head) {
             return args.is_empty().then(|| key.clone());
         }
@@ -1768,6 +1727,253 @@ impl Checker {
         ))
     }
 
+    /// TICKET-187 — bind the TYPE a from-import names (`import Q from lib`), whatever the value
+    /// branch bound for the same member: a struct, enum, newtype, alias, protocol or `std` type
+    /// name. The one type binder for a from-import; a fn twin never needs its own clause.
+    #[allow(clippy::too_many_arguments, clippy::ptr_arg)] // the branch body, moved verbatim
+    fn bind_imported_type(
+        &mut self,
+        bind: &String,
+        member: &String,
+        alias: &Option<String>,
+        sig: &ModuleSig,
+        imp: &ResolvedImport,
+        path: &[String],
+        name_span: &Span,
+    ) {
+        // A type name imported from a module. For `std.ffi`'s exported FFI marshalling
+        // TYPE names — the fixed-width integers (`int32`) AND the opaque `ptr` handle —
+        // this is a special case: record it into the per-module `imported_ffi_types`
+        // set so `resolve_type` accepts the bare name in THIS module (it's a type, not
+        // a callable value). Only `std.ffi` lists these in `sig.types`, so the check is
+        // already scoped to it.
+        if member == "timer" {
+            // A selective `import timer from std.time` licenses the opcode-backed
+            // `timer(ms)` builtin in THIS module. `timer` is a reserved name, so ONLY
+            // `std.time`'s `sig.types` can carry it (no user module can export a member
+            // named `timer`) — matching the member name alone is unambiguous. Like the
+            // concurrency ctors, `timer` carries no runtime value (it lowers via
+            // name→opcode), so an alias would bind nothing usable AND the runtime
+            // `bind_import` skip keys on the original member name — reject the rename.
+            if alias.as_ref().is_some_and(|a| a != member) {
+                self.error(
+                    imp.span,
+                    "timer cannot be renamed on import — \
+                     write `import timer from std.time`"
+                        .to_string(),
+                );
+            } else {
+                self.imported_time.insert(member.clone());
+                // Editor hover: `timer` is a reserved FUNCTION (`timer(ms) ->
+                // Channel[bool]`), not a type — record a function-style import-line
+                // hover (probe-gated no-op off the probe).
+                if self.hover_probe.is_some() {
+                    let fty = Ty::Func {
+                        params: vec![Ty::Int],
+                        ret: Box::new(Ty::channel(Ty::Bool)),
+                        labels: crate::checker::FnLabels::default(),
+                    };
+                    self.hover_record_at(
+                        *name_span,
+                        &fty,
+                        HoverKind::Func,
+                        Some(
+                            "one-shot timeout channel — timer(ms) delivers `true` \
+                             once after ms milliseconds (import std.time)"
+                                .to_string(),
+                        ),
+                    );
+                }
+            }
+        } else if matches!(
+            member.as_str(),
+            "Shared" | "RwShared" | "Atomic" | "AtomicInt" | "Executor"
+        ) {
+            // A selective `import Shared from std.concurrency` licenses just the named
+            // ctor/TYPE in THIS module (mirrors the per-name FFI width imports). Like
+            // the FFI types these carry no runtime value (ctor lowers via name→opcode),
+            // so an alias would bind nothing usable AND the runtime `bind_import` skip
+            // keys on the original member name — reject the rename to keep it honest.
+            if alias.as_ref().is_some_and(|a| a != member) {
+                self.error(
+                    imp.span,
+                    format!(
+                        "concurrency type '{member}' cannot be renamed on import — \
+                         write `import {member} from std.concurrency`"
+                    ),
+                );
+            } else {
+                self.imported_concurrency.insert(member.clone());
+                self.record_native_type_import_hover(member, *name_span, path);
+            }
+        } else if crate::native::ffi::TYPE_NAMES.contains(&member.as_str()) || member == "ptr" {
+            // An FFI marshalling type CANNOT be RENAMED on import: the backends'
+            // `ctype_of` keys off the literal surface name (`int32`/`ptr`), so an alias
+            // would resolve to a type the marshaller can't lower. Reject `import int32
+            // as W` / `import ptr as P` (name unusable) and `import int8 as int32`
+            // (silently the wrong width). A redundant identical self-rename (`import
+            // ptr as ptr`) is harmless — the as-name equals the member, no wrong-type
+            // risk — so it falls through to the normal no-op import of `ptr`.
+            if alias.as_ref().is_some_and(|a| a != member) {
+                self.error(
+                    imp.span,
+                    format!(
+                        "FFI type '{member}' cannot be renamed on import — \
+                         write `import {member} from std.ffi`"
+                    ),
+                );
+            } else {
+                self.imported_ffi_types.insert(member.clone());
+                self.record_native_type_import_hover(member, *name_span, path);
+            }
+        } else if matches!(member.as_str(), "Socket" | "Listener") {
+            // A selective `import Socket from std.net` licenses just the named TCP
+            // handle TYPE in THIS module (mirrors the per-name concurrency imports).
+            // Like those, a net handle carries no runtime value (the type resolves
+            // directly to `Ty::Socket`; a value comes from `connect`/`listen`) AND the
+            // runtime `bind_import` skip keys on the original member name — so an alias
+            // would bind nothing usable: reject the rename. Only `std.net`'s `sig.types`
+            // carries these names (they're reserved, so no user module can export them).
+            if alias.as_ref().is_some_and(|a| a != member) {
+                self.error(
+                    imp.span,
+                    format!(
+                        "net type '{member}' cannot be renamed on import — \
+                         write `import {member} from std.net`"
+                    ),
+                );
+            } else {
+                self.imported_net.insert(member.clone());
+                self.record_native_type_import_hover(member, *name_span, path);
+            }
+        } else if (member == "Writer" || member == "Reader")
+            && path == ["std".to_string(), "io".to_string()]
+        {
+            // R2/R2b — a selective `import Writer from std.io` / `import Reader from
+            // std.io` licenses just that TYPE in THIS module. Like the net handles, it
+            // carries no runtime value (the type resolves directly to `Ty::Writer`/
+            // `Ty::Reader`; a value comes from `create`/`open`/…) AND the runtime
+            // `bind_import` skip keys on the original member name — so an alias would
+            // bind nothing usable: reject the rename.
+            if alias.as_ref().is_some_and(|a| a != member) {
+                self.error(
+                    imp.span,
+                    format!(
+                        "io type '{member}' cannot be renamed on import — \
+                         write `import {member} from std.io`"
+                    ),
+                );
+            } else {
+                self.imported_io.insert(member.clone());
+                self.record_native_type_import_hover(member, *name_span, path);
+            }
+        } else if let Some(info) = sig.struct_defs.get(member) {
+            // A user struct imported by name: inject its resolved shape under the
+            // DECLARING module's runtime key (so it unifies with that module's
+            // signatures + a value's `Ty`), and make it BARE-VISIBLE under the bind
+            // name via `struct_names`/`bare_types` so `S(...)`/`x: S` resolve here.
+            let key = self.type_key(&imp.target, member);
+            self.bind_imported_struct_name(bind, &key, info);
+            // Editor hover (Tier C): the imported type's doc — its own decl docstring
+            // carried across the boundary, else a `kind (from module)` fallback. Seed
+            // `name_docs[bind]` so a later bare/annotation/generic-head use surfaces it
+            // (the `Type::Named`/`Type::Generic` hover arms read `name_docs`), AND record
+            // the import-line token hover here. Both are probe-gated no-ops off-probe.
+            self.record_imported_type_hover(
+                bind,
+                *name_span,
+                &Ty::strukt(key),
+                info.doc.as_deref(),
+                "struct",
+                path,
+            );
+        } else if let Some(edef) = sig.enum_defs.get(member) {
+            // A user enum imported by name: inject its variant names, type params, and
+            // each variant's payload under the declaring module's runtime key; expose
+            // it bare under the bind name.
+            let key = self.type_key(&imp.target, member);
+            self.enums.insert(key.clone(), edef.variant_names.clone());
+            self.enum_names.insert(bind.clone());
+            self.bare_types.insert(bind.clone(), key.clone());
+            self.enum_type_params
+                .insert(key.clone(), edef.type_params.clone());
+            self.enum_methods.insert(key.clone(), edef.methods.clone());
+            for (vname, vinfo) in edef.variant_names.iter().zip(&edef.variants) {
+                let mut vi = vinfo.clone();
+                vi.enum_name = key.clone();
+                self.variants.insert((key.clone(), vname.clone()), vi);
+                self.variant_owners
+                    .entry(vname.clone())
+                    .or_default()
+                    .push(bind.clone());
+            }
+            self.record_imported_type_hover(
+                bind,
+                *name_span,
+                &Ty::Enum(key, vec![]),
+                edef.doc.as_deref(),
+                "enum",
+                path,
+            );
+        } else if let Some(ntdef) = sig.newtype_defs.get(member).cloned() {
+            // A user newtype imported by name: inject its underlying + methods under
+            // the declaring module's runtime key; expose it bare under the bind name.
+            let key = self.type_key(&imp.target, member);
+            self.bind_imported_newtype_name(bind, &key, &ntdef);
+            self.record_imported_type_hover(
+                bind,
+                *name_span,
+                &Ty::NewType(key, vec![]),
+                ntdef.doc.as_deref(),
+                "newtype",
+                path,
+            );
+        } else if let Some(asig) = sig.type_aliases.get(member) {
+            // A user type alias imported by name. An unlicensed alias embedding an
+            // un-imported FFI width cannot be laundered — reject it here, mirroring the
+            // old use-site "unknown type" error.
+            if let Some(w) = &asig.unlicensed_width {
+                self.error(
+                    imp.span,
+                    format!(
+                        "unknown type '{w}' (import it from std.ffi: `import {w} from std.ffi`)"
+                    ),
+                );
+            } else {
+                // Inject the alias's RESOLVED body so bare use (`x: Len`) resolves to
+                // the underlying type. A licensed FFI-width alias re-seeds
+                // `ffi_alias_ok` under the bind name (defensive; the body is already
+                // a concrete `Ty`, so no width re-check is hit).
+                self.imported_alias_tys
+                    .insert(bind.clone(), asig.body.clone());
+                self.hydrate_alias_target(&asig.body);
+                // Carry the alias's width-bearing CType (computed in its DEFINING
+                // module's scope) so an extern boundary in THIS module marshals the
+                // real width through the named-import hop — not the bare flat map.
+                self.imported_alias_ctypes
+                    .insert(bind.clone(), asig.ctype.clone());
+                if asig.licensed {
+                    self.ffi_alias_ok.insert(bind.clone());
+                }
+            }
+        } else if let Some(pdef) = sig.protocol_defs.get(member) {
+            // A protocol carries no runtime value and no layout, so registering the
+            // exported shape under its declaring-module KEY (TICKET-027) plus a
+            // bare-visible entry under the BIND name is the whole binding.
+            let key = self.type_key(&imp.target, member);
+            self.protocols.insert(key.clone(), pdef.info.clone());
+            self.bare_types.insert(bind.clone(), key.clone());
+            self.record_imported_type_hover(
+                bind,
+                *name_span,
+                &Ty::Protocol(key, Vec::new()),
+                pdef.doc.as_deref(),
+                "protocol",
+                path,
+            );
+        }
+    }
+
     /// Bind an import into the current module: a whole-module import becomes a `Ty::Module` name;
     /// a `from` import injects each member (function/value) into scope, validating it exists.
     pub(super) fn bind_import(&mut self, imp: &ResolvedImport) {
@@ -2064,19 +2270,6 @@ impl Checker {
                                 fsig.doc.clone(),
                             );
                         }
-                        // TICKET-029 — a name that is BOTH a fn and a struct in the source module
-                        // (e.g. `fn Path` beside `struct Path`) must bind the TYPE too, or the bind
-                        // name is unusable as an annotation and a Builtin-origin reservation is lost.
-                        if let Some(info) = sig.struct_defs.get(member).cloned() {
-                            let key = self.type_key(&imp.target, member);
-                            self.bind_imported_struct_name(bind, &key, &info);
-                        }
-                        // TICKET-055 — the newtype twin: `fn N` beside `newtype N` (e.g. `Cents`)
-                        // must bind the TYPE too, or `v: N` is unusable after the fn wins the call.
-                        if let Some(ntdef) = sig.newtype_defs.get(member).cloned() {
-                            let key = self.type_key(&imp.target, member);
-                            self.bind_imported_newtype_name(bind, &key, &ntdef);
-                        }
                     } else if let Some(vty) = sig.values.get(member) {
                         // Editor hover (decl-site): record the imported value's type at the bound name.
                         if self.hover_probe.is_some() {
@@ -2091,241 +2284,7 @@ impl Checker {
                         if sig.const_values.contains(member) {
                             self.imported_consts.insert(bind.clone());
                         }
-                    } else if sig.types.contains(member) {
-                        // A type name imported from a module. For `std.ffi`'s exported FFI marshalling
-                        // TYPE names — the fixed-width integers (`int32`) AND the opaque `ptr` handle —
-                        // this is a special case: record it into the per-module `imported_ffi_types`
-                        // set so `resolve_type` accepts the bare name in THIS module (it's a type, not
-                        // a callable value). Only `std.ffi` lists these in `sig.types`, so the check is
-                        // already scoped to it.
-                        if member == "timer" {
-                            // A selective `import timer from std.time` licenses the opcode-backed
-                            // `timer(ms)` builtin in THIS module. `timer` is a reserved name, so ONLY
-                            // `std.time`'s `sig.types` can carry it (no user module can export a member
-                            // named `timer`) — matching the member name alone is unambiguous. Like the
-                            // concurrency ctors, `timer` carries no runtime value (it lowers via
-                            // name→opcode), so an alias would bind nothing usable AND the runtime
-                            // `bind_import` skip keys on the original member name — reject the rename.
-                            if alias.as_ref().is_some_and(|a| a != member) {
-                                self.error(
-                                    imp.span,
-                                    "timer cannot be renamed on import — \
-                                     write `import timer from std.time`"
-                                        .to_string(),
-                                );
-                            } else {
-                                self.imported_time.insert(member.clone());
-                                // Editor hover: `timer` is a reserved FUNCTION (`timer(ms) ->
-                                // Channel[bool]`), not a type — record a function-style import-line
-                                // hover (probe-gated no-op off the probe).
-                                if self.hover_probe.is_some() {
-                                    let fty = Ty::Func {
-                                        params: vec![Ty::Int],
-                                        ret: Box::new(Ty::channel(Ty::Bool)),
-                                        labels: crate::checker::FnLabels::default(),
-                                    };
-                                    self.hover_record_at(
-                                        *name_span,
-                                        &fty,
-                                        HoverKind::Func,
-                                        Some(
-                                            "one-shot timeout channel — timer(ms) delivers `true` \
-                                             once after ms milliseconds (import std.time)"
-                                                .to_string(),
-                                        ),
-                                    );
-                                }
-                            }
-                        } else if matches!(
-                            member.as_str(),
-                            "Shared" | "RwShared" | "Atomic" | "AtomicInt" | "Executor"
-                        ) {
-                            // A selective `import Shared from std.concurrency` licenses just the named
-                            // ctor/TYPE in THIS module (mirrors the per-name FFI width imports). Like
-                            // the FFI types these carry no runtime value (ctor lowers via name→opcode),
-                            // so an alias would bind nothing usable AND the runtime `bind_import` skip
-                            // keys on the original member name — reject the rename to keep it honest.
-                            if alias.as_ref().is_some_and(|a| a != member) {
-                                self.error(
-                                    imp.span,
-                                    format!(
-                                        "concurrency type '{member}' cannot be renamed on import — \
-                                         write `import {member} from std.concurrency`"
-                                    ),
-                                );
-                            } else {
-                                self.imported_concurrency.insert(member.clone());
-                                self.record_native_type_import_hover(member, *name_span, path);
-                            }
-                        } else if crate::native::ffi::TYPE_NAMES.contains(&member.as_str())
-                            || member == "ptr"
-                        {
-                            // An FFI marshalling type CANNOT be RENAMED on import: the backends'
-                            // `ctype_of` keys off the literal surface name (`int32`/`ptr`), so an alias
-                            // would resolve to a type the marshaller can't lower. Reject `import int32
-                            // as W` / `import ptr as P` (name unusable) and `import int8 as int32`
-                            // (silently the wrong width). A redundant identical self-rename (`import
-                            // ptr as ptr`) is harmless — the as-name equals the member, no wrong-type
-                            // risk — so it falls through to the normal no-op import of `ptr`.
-                            if alias.as_ref().is_some_and(|a| a != member) {
-                                self.error(
-                                    imp.span,
-                                    format!(
-                                        "FFI type '{member}' cannot be renamed on import — \
-                                         write `import {member} from std.ffi`"
-                                    ),
-                                );
-                            } else {
-                                self.imported_ffi_types.insert(member.clone());
-                                self.record_native_type_import_hover(member, *name_span, path);
-                            }
-                        } else if matches!(member.as_str(), "Socket" | "Listener") {
-                            // A selective `import Socket from std.net` licenses just the named TCP
-                            // handle TYPE in THIS module (mirrors the per-name concurrency imports).
-                            // Like those, a net handle carries no runtime value (the type resolves
-                            // directly to `Ty::Socket`; a value comes from `connect`/`listen`) AND the
-                            // runtime `bind_import` skip keys on the original member name — so an alias
-                            // would bind nothing usable: reject the rename. Only `std.net`'s `sig.types`
-                            // carries these names (they're reserved, so no user module can export them).
-                            if alias.as_ref().is_some_and(|a| a != member) {
-                                self.error(
-                                    imp.span,
-                                    format!(
-                                        "net type '{member}' cannot be renamed on import — \
-                                         write `import {member} from std.net`"
-                                    ),
-                                );
-                            } else {
-                                self.imported_net.insert(member.clone());
-                                self.record_native_type_import_hover(member, *name_span, path);
-                            }
-                        } else if (member == "Writer" || member == "Reader")
-                            && path.as_slice() == ["std".to_string(), "io".to_string()]
-                        {
-                            // R2/R2b — a selective `import Writer from std.io` / `import Reader from
-                            // std.io` licenses just that TYPE in THIS module. Like the net handles, it
-                            // carries no runtime value (the type resolves directly to `Ty::Writer`/
-                            // `Ty::Reader`; a value comes from `create`/`open`/…) AND the runtime
-                            // `bind_import` skip keys on the original member name — so an alias would
-                            // bind nothing usable: reject the rename.
-                            if alias.as_ref().is_some_and(|a| a != member) {
-                                self.error(
-                                    imp.span,
-                                    format!(
-                                        "io type '{member}' cannot be renamed on import — \
-                                         write `import {member} from std.io`"
-                                    ),
-                                );
-                            } else {
-                                self.imported_io.insert(member.clone());
-                                self.record_native_type_import_hover(member, *name_span, path);
-                            }
-                        } else if let Some(info) = sig.struct_defs.get(member) {
-                            // A user struct imported by name: inject its resolved shape under the
-                            // DECLARING module's runtime key (so it unifies with that module's
-                            // signatures + a value's `Ty`), and make it BARE-VISIBLE under the bind
-                            // name via `struct_names`/`bare_types` so `S(...)`/`x: S` resolve here.
-                            let key = self.type_key(&imp.target, member);
-                            self.bind_imported_struct_name(bind, &key, info);
-                            // Editor hover (Tier C): the imported type's doc — its own decl docstring
-                            // carried across the boundary, else a `kind (from module)` fallback. Seed
-                            // `name_docs[bind]` so a later bare/annotation/generic-head use surfaces it
-                            // (the `Type::Named`/`Type::Generic` hover arms read `name_docs`), AND record
-                            // the import-line token hover here. Both are probe-gated no-ops off-probe.
-                            self.record_imported_type_hover(
-                                bind,
-                                *name_span,
-                                &Ty::strukt(key),
-                                info.doc.as_deref(),
-                                "struct",
-                                path,
-                            );
-                        } else if let Some(edef) = sig.enum_defs.get(member) {
-                            // A user enum imported by name: inject its variant names, type params, and
-                            // each variant's payload under the declaring module's runtime key; expose
-                            // it bare under the bind name.
-                            let key = self.type_key(&imp.target, member);
-                            self.enums.insert(key.clone(), edef.variant_names.clone());
-                            self.enum_names.insert(bind.clone());
-                            self.bare_types.insert(bind.clone(), key.clone());
-                            self.enum_type_params
-                                .insert(key.clone(), edef.type_params.clone());
-                            self.enum_methods.insert(key.clone(), edef.methods.clone());
-                            for (vname, vinfo) in edef.variant_names.iter().zip(&edef.variants) {
-                                let mut vi = vinfo.clone();
-                                vi.enum_name = key.clone();
-                                self.variants.insert((key.clone(), vname.clone()), vi);
-                                self.variant_owners
-                                    .entry(vname.clone())
-                                    .or_default()
-                                    .push(bind.clone());
-                            }
-                            self.record_imported_type_hover(
-                                bind,
-                                *name_span,
-                                &Ty::Enum(key, vec![]),
-                                edef.doc.as_deref(),
-                                "enum",
-                                path,
-                            );
-                        } else if let Some(ntdef) = sig.newtype_defs.get(member).cloned() {
-                            // A user newtype imported by name: inject its underlying + methods under
-                            // the declaring module's runtime key; expose it bare under the bind name.
-                            let key = self.type_key(&imp.target, member);
-                            self.bind_imported_newtype_name(bind, &key, &ntdef);
-                            self.record_imported_type_hover(
-                                bind,
-                                *name_span,
-                                &Ty::NewType(key, vec![]),
-                                ntdef.doc.as_deref(),
-                                "newtype",
-                                path,
-                            );
-                        } else if let Some(asig) = sig.type_aliases.get(member) {
-                            // A user type alias imported by name. An unlicensed alias embedding an
-                            // un-imported FFI width cannot be laundered — reject it here, mirroring the
-                            // old use-site "unknown type" error.
-                            if let Some(w) = &asig.unlicensed_width {
-                                self.error(
-                                    imp.span,
-                                    format!(
-                                        "unknown type '{w}' (import it from std.ffi: `import {w} from std.ffi`)"
-                                    ),
-                                );
-                            } else {
-                                // Inject the alias's RESOLVED body so bare use (`x: Len`) resolves to
-                                // the underlying type. A licensed FFI-width alias re-seeds
-                                // `ffi_alias_ok` under the bind name (defensive; the body is already
-                                // a concrete `Ty`, so no width re-check is hit).
-                                self.imported_alias_tys
-                                    .insert(bind.clone(), asig.body.clone());
-                                self.hydrate_alias_target(&asig.body);
-                                // Carry the alias's width-bearing CType (computed in its DEFINING
-                                // module's scope) so an extern boundary in THIS module marshals the
-                                // real width through the named-import hop — not the bare flat map.
-                                self.imported_alias_ctypes
-                                    .insert(bind.clone(), asig.ctype.clone());
-                                if asig.licensed {
-                                    self.ffi_alias_ok.insert(bind.clone());
-                                }
-                            }
-                        } else if let Some(pdef) = sig.protocol_defs.get(member) {
-                            // A protocol carries no runtime value and no layout, so registering the
-                            // exported shape under its declaring-module KEY (TICKET-027) plus a
-                            // bare-visible entry under the BIND name is the whole binding.
-                            let key = self.type_key(&imp.target, member);
-                            self.protocols.insert(key.clone(), pdef.info.clone());
-                            self.bare_types.insert(bind.clone(), key.clone());
-                            self.record_imported_type_hover(
-                                bind,
-                                *name_span,
-                                &Ty::Protocol(key, Vec::new()),
-                                pdef.doc.as_deref(),
-                                "protocol",
-                                path,
-                            );
-                        }
-                    } else {
+                    } else if !sig.types.contains(member) {
                         let candidates = Self::sig_member_names(&sig);
                         self.error_help(
                             *name_span,
@@ -2335,6 +2294,11 @@ impl Checker {
                             ),
                             suggest::did_you_mean(member, &candidates),
                         );
+                    }
+                    // TICKET-187: the value namespace and the type namespace bind independently, so
+                    // a fn twin of a struct, newtype, alias, enum or protocol leaves the type usable.
+                    if sig.types.contains(member) {
+                        self.bind_imported_type(bind, member, alias, &sig, imp, path, name_span);
                     }
                 }
             }

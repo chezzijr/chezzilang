@@ -888,8 +888,6 @@ fn run_cell(root: &Path, idx: usize, c: &Cell) -> Result<(), String> {
 /// Cells red on the pre-TICKET-187 binary. They must stay red here; when one turns green, remove
 /// it from the list.
 const PINNED_RED: &[&str] = &[
-    "t187/bound/qualified_alias",
-    "t187/from_import/alias_with_fn_twin",
     "t187/decode/int_receiver",
     "t187/decode/user_generic_method",
     "t187/decode/local_shadows_json",
