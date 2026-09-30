@@ -253,6 +253,15 @@ fn/type twin); same-named vs differently-named type params; syntax-special forms
 **protocol's declared parameter names**, and an implementor's method conforms only if it uses the
 same parameter names (the interface is the contract). Builtin conformers bind by the same names.
 
+**Owner decisions (2026-09-30, from TICKET-187 planning):** (1) a protocol's parameter list is the
+whole contract: a call through a protocol that omits an argument is an arity error even when every
+implementor declares a default (Go and Rust have no defaults through an interface). This deletes the
+name-keyed default lending (`lend_specs`) and reverses DEC-075's W7-51 lending. (2) The name rule
+applies to every protocol method of every arity, user and prelude protocols alike (names are part of
+the signature, as Swift's argument labels are); `eq(self, o)` must be `eq(self, other)`. (3) A
+qualified generic read with no determinable type argument reports `is generic and T is not determined
+here` (Go: `cannot use generic function cmp.Max without instantiation`).
+
 ## Isolated (fix in place, no family)
 
 - a builtin fn (`ord`) passed where a generic fn type is expected is rejected;
