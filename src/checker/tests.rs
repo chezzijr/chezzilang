@@ -36476,3 +36476,44 @@ fn ticket184_flow_grid() {
         bad.join("\n")
     );
 }
+
+// TICKET-186 (Family D, wave 17): module scope has one record per global. Each program below is
+// check-OK today and runs to a wrong value; each must be a compile error.
+fn t186_rejected(src: &str) {
+    let errs = check_src(src);
+    assert!(
+        !errs.is_empty(),
+        "TICKET-186: expected a compile error, check accepted the program"
+    );
+}
+
+#[test]
+fn t186_option_refined_by_body_above_let_rejected() {
+    // Runs to `abab` from an `-> int` fn (Go: `var z = nil` does not compile).
+    t186_rejected(
+        "fn w():\n    z = Some(\"ab\")\nz := None\nw()\nfn r() -> int:\n    return z ?? 0\nprint(r() + r())\n",
+    );
+}
+
+#[test]
+fn t186_fn_redeclared_with_other_labels_rejected() {
+    // Prints 21 (bound by the OLD fn's labels); CPython binds by the live fn's labels (12).
+    t186_rejected(
+        "fn f(a: int, b: int) -> int:\n    return a * 10 + b\nfn call() -> int:\n    return f(a=1, b=2)\nf := fn(b: int, a: int) -> int: a * 10 + b\nprint(call())\n",
+    );
+}
+
+#[test]
+fn t186_plain_then_const_redeclare_rejected() {
+    // Owner decision 2026-09-30: plain + const declaration of one global is an error, either order.
+    t186_rejected(
+        "PI := 2.0\nfn bump():\n    PI = 3.0\nPI: const float = 3.14\nbump()\nprint(PI)\n",
+    );
+    t186_rejected("PI: const float = 3.14\nPI := 2.0\nprint(PI)\n");
+}
+
+#[test]
+fn t186_module_level_return_rejected() {
+    // Owner decision 2026-09-30: CPython `SyntaxError: 'return' outside function`.
+    rejects("return\nx := 5\n", "'return' outside a function");
+}
