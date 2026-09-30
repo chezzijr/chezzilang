@@ -460,13 +460,12 @@ fn composed_interp_depth_is_bounded_globally() {
         );
     }
 
-    // (c) THE KNOWN RESIDUAL, pinned at the only invariant that actually holds today. A default
-    // argument spliced in on desugar's SECOND pass is never walked (`regs` is raw, `normalize_call`
-    // splices in the walk's tail, there is no pass 3), so a well-formed interpolated literal inside
-    // one still reaches the checker and compiler un-converted and doubles the reachable depth to
-    // ~31 986 nodes — ~1.03× the measured ~33 100-node cliff. Latent and PRE-EXISTING (accepted on
-    // `e1137096` too), and the fix belongs in the two-pass driver W7-51 is rewriting, so this does
-    // not assert a refusal. What it asserts is the line that must never be crossed: it may be
+    // (c) THE FORMER RESIDUAL, pinned at the only invariant that must always hold. A default
+    // argument spliced in on desugar's SECOND pass was never walked, so a well-formed interpolated
+    // literal inside one reached the checker and compiler un-converted and doubled the reachable
+    // depth to ~31 986 nodes — ~1.03× the measured ~33 100-node cliff. W7-51 closed it (a
+    // non-literal default is now a provider, never spliced), so this does not assert a refusal.
+    // What it asserts is the line that must never be crossed: it may be
     // accepted, it may be refused, it must NEVER signal-crash the host. See
     // `desugar::Walker::walk_expr`'s residual note and `docs/gaps.md` W7-50.
     let f = 15_990;

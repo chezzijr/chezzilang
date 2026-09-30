@@ -31,8 +31,8 @@ struct Box:
         return self.v
     fn add(self, n: int) -> int:
         return self.v + n
-    # a default parameter + a named one — `normalize_opt_call` is the only thing that binds these
-    # for an optional-chained call now that the carrier is no longer rewritten into a `Call`
+    # a default parameter + a named one — `Checker::bind_call` binds these for an optional-chained
+    # call too, though the carrier is no longer rewritten into a `Call`
     fn tag(self, prefix: str = "p", n: int = 1) -> str:
         return "{prefix}{self.v + n}"
     fn apply(self, f: fn(int) -> int) -> int:
@@ -106,7 +106,7 @@ test fn result_carrier_method_call_with_args():
 #
 # The subtlest regression in W7-43: named-arg binding and default filling used to happen only
 # because the lowered carrier WAS a `Call` and fell through the desugar walker's tail. The carrier
-# now survives, so `normalize_opt_call` has to do it explicitly.
+# now survives, so `Checker::bind_call` has to bind it explicitly.
 
 fn tag_dot() -> str!MyErr:
     return Ok(bok()?.tag(n=5))

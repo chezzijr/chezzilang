@@ -63,7 +63,7 @@
 >   (`SchedCore::cross_sched_blocked_owners`), so a sched whose only join-blocked fiber's child sched is
 >   elsewhere does not conclude a FALSE deadlock about itself. **As shipped 2026-09-09 the peer veto
 >   still made a GENUINE nested deadlock hang** instead of fault, at `CHEZZI_THREADS` 2/4/8 — it demanded
->   a visible parked-or-`blocked_native` victim on the peer, which a peer whose only fiber was a
+>   a visible parked-or-demoted victim on the peer, which a peer whose only fiber was a
 >   join-blocked owner never had. **CLOSED 2026-09-10, TICKET-101:**
 >   `MnSched::quiesced_core(c, require_parked)` drops that demand ONLY for the peer question; the fault
 >   path keeps it. A genuine nested deadlock now faults again in single-digit ms, and both directions

@@ -7,6 +7,19 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **Wave-16 cleanup (2026-09-30).** (1) A module-global initialization cycle (`x := f()` where `f`
+  returns `x`) is now reported ONCE, as `initialization cycle: ...` — the derived `cannot infer
+  return type of 'f'` and the body's "declared below ... type is not known" decline are its
+  consequences and are no longer emitted (`Checker::cycle_globals`, filled by
+  `report_untyped_globals`; test `module_global_initialization_cycle_is_the_only_error`, both
+  declaration orders). (2) ~55 stale comments/doc lines that still named functions deleted by
+  TICKET-180/181/182 (`is_counted_party`, `owns_os_thread`, `can_block_in_place`,
+  `may_block_socket_in_place`, `blocked_native`, the old waiter registries, `normalize_call`,
+  `KeywordTable`, ...) now name the current single sources (`vm/block.rs` `BlockCtx`/`block::mode`/
+  `Waiter`, `Checker::bind_call`/`CallPlanTable`); historical records (`gaps-archive.md`,
+  `root-causes-w16.md`) unchanged. Open: `fold_full_path` still decides module-path heads in desugar
+  and misses a nested `fn` shadowing the path head (`fn pkg()` then `pkg.deep.f()` runs the module;
+  should reject) — Names-family follow-up.
 - **TICKET-180 (2026-09-29) — every name resolves once, in the checker (wave 16 Family 1, K1/K2/K3
   and two P2s).** Every `Expr` and pattern head carries an equality-neutral `ast::NodeId` (desugar
   renumbers what it places twice; a debug assertion after `desugar::run` rejects a shared id). The

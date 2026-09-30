@@ -960,8 +960,8 @@ dead recv-arm ready, would spin requeue→re-poll→re-park; but an **all-dead**
   `vm_wait_single_arm_recv_park_unchanged_under_parallel`).
 - *A waiter with no worker loop* (the inline outermost-`parallel:` body): poll arms once in source order; first ready wins; else if `else`,
   run it; else if any arm is timer-backed **and the waiter has no worker loop to drive a park**
-  (`!can_block_in_place() && !timed_block`, netio.rs:2599 — a party that owns its OS thread blocks in
-  place with the timer clamped instead, `timed_block`, W7-14),
+  (the `InlineSleep` cell of `block::mode` for `BlockCtx::Builder { job: false }` — a party that owns
+  its OS thread blocks in place with the timer clamped instead, W7-14),
   inline-sleep to the soonest deadline and take that arm; else
   fault (all-closed or the existing deadlock fault). Deterministic → matches a worker-thread party's
   behavior **except** when a timer arm races a runnable sibling (`docs/gaps.md` N10, closed for the
@@ -970,8 +970,8 @@ dead recv-arm ready, would spin requeue→re-poll→re-park; but an **all-dead**
   known limit (the worker-thread behavior is correct). Proper fix = park first, inline-sleep the timer
   only when the quiesce path would idle-deadlock.
 - *`native_reentry > 0`* (inside a native callback) on `--parallel`: snapshot-park is impossible — mirror
-  `demote_recv_block` with a **multi-channel demote-poll** (`demote_wait_block`: register all N arm
-  channels in `demoted_chans`, poll all N queues source-order under the core lock on a bounded
+  `demote_recv_block` with a **multi-channel demote-poll** (`demote_wait_block`: register the wait as
+  one `Waiter` in `SchedCore::waiters`, poll all N queues source-order under the core lock on a bounded
   `DEMOTE_POLL_BACKOFF`). **v1 limitation (sound, lower-throughput):** there are N channel condvars and no
   single one to block on, so the demote loop polls on a backoff timer rather than waiting on a targeted
   condvar — same shape as the timer-in-callback note in §6c. The snapshot-park (reentry == 0) is the fast
@@ -2624,7 +2624,7 @@ reinvented; none is scheduled. (B3–B5 itself is planned in [`concurrency-b3.md
   (`d5_owe3_recv_in_iter_map_callback_parks`); **Path C** Go-`handoffp`-demotes the fiber to a thread
   for the intrinsically-native islands (`d5_owe3_path_c_*_demotes`). Path B (stackful) rejected.
   **TICKET-062 (W10-1):** the top-level `main` task inside a native re-entry now also blocks in place
-  (`can_block_in_place` widened from `is_counted_party` to `owns_os_thread`), instead of taking the
+  (today the `InPlace` cells of `block::mode` for `BlockCtx::OwnThread`), instead of taking the
   "fault, as before" arm main used to fall to. Residual, split by party: a **spawned fiber**'s `recv`
   with no possible sender is still the *correct* deadlock
   (`d5_owe3_path_c_recv_in_callback_no_sender_still_deadlocks`); **`main`** in that same shape now

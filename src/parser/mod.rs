@@ -139,7 +139,7 @@ pub const MAX_DEPTH: usize = 512;
 /// zero is a live zero (see `desugar::Walker::walk_expr` and `docs/gaps.md` W7-50).
 ///
 /// The five bisected shapes are identical before and after — but that is not "non-interpolated
-/// programs are unaffected": a default argument spliced by `normalize_call` composes with the
+/// programs are unaffected": a default argument filled in at the call site composes with the
 /// caller's expression the same way an interpolated fragment does, and is a SIXTH shape the
 /// bisection above never covered. Measured, release binary: `fn f(a: int = <15 000-deep chain>) ->
 /// int: return a` called as `x := f() + <2000-deep chain>` — `check` accepted it (rc 0) and `run`

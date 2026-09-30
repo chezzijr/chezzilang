@@ -372,8 +372,8 @@ rather than to thread a remaining budget through each re-entry, which is only as
 that remember to pass it.
 
 **And the second half of that lesson, which the review had to supply: "finished" is a claim to check,
-not a word to use.** The chosen seam is finished for everything the walk *reaches*, and `desugar`'s
-`normalize_call` spliced default arguments in the **tail** of the walk, after that node's children
+not a word to use.** The chosen seam is finished for everything the walk *reaches*, and `desugar`
+then spliced default arguments in the **tail** of the walk, after that node's children
 had already been visited — so a splice performed on the second (last) pass was never walked, and a
 well-formed interpolated literal inside it still reached the checker and compiler un-converted, at
 ~2× the bound. When you enforce on an artifact, enumerate every writer that can still mutate it after

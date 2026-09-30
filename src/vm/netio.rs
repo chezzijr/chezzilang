@@ -587,8 +587,8 @@ impl Vm {
                         // `CHEZZI_THREADS=1` as a 10 s pin on a black-hole address. Same family as
                         // `W7-40`'s R2, and the same message the four sibling ops give this context.
                         //
-                        // This gate is deliberately NARROWER than the siblings'
-                        // [`Vm::may_block_socket_in_place`], and the difference is not an oversight.
+                        // This `Connect` row is deliberately NARROWER than the siblings' `Socket`
+                        // row of `block::mode`, and the difference is not an oversight.
                         // `accept`/`read` wait on a CHEZZI peer — a fiber that can only run on the very
                         // thread they would block — so blocking the one thread that owns it is
                         // self-starvation (`W7-40` R1). A `connect` handshake is completed by the
@@ -827,7 +827,7 @@ impl Vm {
                     return Ok(Value::nil()); // parked (sentinel)
                 }
                 // No fiber to park: block the thread in place only where that starves nobody
-                // ([`Vm::may_block_socket_in_place`]) — else the pre-existing loud error.
+                // (the `Socket` row of `block::mode`) — else the pre-existing loud error.
                 if matches!(self.block_mode(WaitSpec::Socket), BlockMode::Refuse) {
                     return Ok(self.sock_err(sock_would_block_msg("read_bytes")));
                 }
@@ -1026,7 +1026,7 @@ impl Vm {
                     // non-blocking read in place (#3 socket half); top-level `main` on the default
                     // engine blocks in place too (Go-identical). Anywhere else the calling thread is
                     // shared, so blocking it starves the peer that would make the fd ready → fail loud
-                    // ([`Vm::may_block_socket_in_place`]).
+                    // (a `Refuse` cell of the `Socket` row of `block::mode`).
                     if matches!(self.block_mode(WaitSpec::Socket), BlockMode::Refuse) {
                         return Ok(self.sock_err(sock_would_block_msg("read")));
                     }
@@ -1448,7 +1448,7 @@ impl Vm {
     /// D6 — the M:N park half shared by every would-block socket op. Returns `Ok(true)` if the fiber
     /// was parked on the netpoller; `Ok(false)` when this Vm is not an M:N worker shell (top-level
     /// `main`, an eager `Executor` job) or is inside a native callback whose Rust-stack
-    /// state can't be parked. The caller then asks [`Vm::may_block_socket_in_place`]: on the two
+    /// state can't be parked. The caller then asks `block_mode(WaitSpec::Socket)`: on the two
     /// contexts that own their whole thread (an M:N in-callback demote, and top-level `main` on the
     /// default engine — Go-identical, and what makes the hello-world TCP server writable) it falls
     /// through to [`Vm::demote_block_socket`] and BLOCKS there, bounded only by the op's `timeout_ms`,
@@ -2370,7 +2370,7 @@ impl Vm {
     /// TICKET-062 (W10-16) / TICKET-096 — a sibling task's recorded fault outranks the synthesized
     /// deadlock verdict for a `parallel:` nursery OWNER. Records `owner_fault_floor` so `run_until`
     /// can bypass only a handler installed INSIDE the faulting nursery's body. Deliberately NOT gated
-    /// on `is_counted_party()` — a recorded fault is a fact, not a heuristic verdict, so it needs no
+    /// on `BlockCtx::judged` — a recorded fault is a fact, not a heuristic verdict, so it needs no
     /// judgeability. `cancel_suppressed()` is the same defer/already-unwinding guard
     /// `cancel_requested()` applies, so a `defer` body is never truncated by this rung.
     // Out of line: it now has a call site on the per-element HOF checkpoint, where `hof_sampled_tick`'s
@@ -2722,8 +2722,8 @@ impl Vm {
     /// or block: an M:N snapshot-park, an M:N in-callback demote, or an in-place condvar wait for a
     /// party that owns its OS thread (an eager `Executor` job / top-level `main`, plus — for a TIMED
     /// wait only — either of those inside a native callback). A live timer arm is just another arm on
-    /// every one of those; only the inline outermost-`parallel:` builder mid-body, for which
-    /// `owns_os_thread()` is false, still inline-sleeps to the soonest deadline (`gaps.md` N10, and
+    /// every one of those; only the inline outermost-`parallel:` builder mid-body with no eager core
+    /// (`BlockCtx::Builder { job: false }`) still inline-sleeps to the soonest deadline (`gaps.md` N10, and
     /// W7-14 for why the remaining inline-sleep is exactly that narrow).
     pub(super) fn op_wait_poll(&mut self, meta: &WaitMeta, span: Span) -> Result<(), RuntimeError> {
         // W7-17 — `--timeout` above the cancellation checkpoint and suppressed inside a `defer`, for
@@ -2955,16 +2955,14 @@ impl Vm {
         // `self.mn` — does not port here and does not need to: it exists to wake a fiber that has no
         // thread, and this party IS a thread.
         //
-        // TICKET-062 (W10-1) widened [`Vm::can_block_in_place`] from [`Vm::is_counted_party`] to
-        // [`Vm::owns_os_thread`], so it now already admits every party this rung used to add a
-        // separate `timed_block` term for: the top-level `main` thread inside a native callback blocks
-        // in place unconditionally, not only when a live timer arm bounds the wait. The old
-        // `timed_block` term (`soonest.is_some() && self.owns_os_thread()`) is therefore always implied
-        // by `can_block_in_place()` and has been deleted.
+        // `block::mode` maps every `wait:` to `InPlace` in each `OwnThread`/`PoolJob` context, with or
+        // without a callback frame under it, so the top-level `main` thread inside a native callback
+        // blocks in place unconditionally, not only when a live timer arm bounds the wait. (The old
+        // separate `timed_block` term was made redundant by TICKET-062 and deleted.)
         //
-        // The one caller left after `--serial`'s removal: the INLINE outermost-`parallel:` builder
-        // mid-body (`mn == None`, `mn_enlist_sched == Some`, so `owns_os_thread()` and
-        // `can_block_in_place()` are both false) with no eager `Executor` core. It has no worker loop
+        // The one `InlineSleep` cell left after `--serial`'s removal: the INLINE outermost-`parallel:`
+        // builder mid-body (`BlockCtx::Builder { job: false }`: `mn == None`, `mn_enlist_sched ==
+        // Some`) with no eager `Executor` core. It has no worker loop
         // to drive a park, so a live timer arm inline-sleeps to the soonest deadline and takes it — the
         // alternative is the all-parties-blocked fault below, which would be wrong here. `gaps.md` N10
         // (the COOPERATIVE fiber that inline-slept past a runnable sibling) is closed by construction:

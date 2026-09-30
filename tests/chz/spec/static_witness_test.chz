@@ -367,7 +367,7 @@ test fn sibling_nested_fragments_across_a_real_newline_keep_their_own_witness():
 { "{reset(c)}" }""" == "Tag(s='none')\nCounter(n=0)"
 
 test fn a_keyword_argument_survives_a_nested_fragment():
-    # `KeywordTable` is keyed by (string span, fragment ordinal) and rides the same re-lexed spans
+    # the call plan is keyed by NodeId, so a re-lexed fragment's keyword call keeps its own entry
     assert "{ \"{greet(1, b=2)}\" }" == "1-2"
     assert "{ \"{greet(1, b=2)}\" }{ \"{greet(3, b=4)}\" }" == "1-23-4"
 
@@ -943,7 +943,7 @@ test fn a_witness_call_inside_a_nested_interpolation_keeps_its_key():
     assert "{ \"{ \\\"{reset(c).n}\\\" }\" }" == "0"
 
 test fn a_keyword_call_inside_a_nested_interpolation_keeps_its_key():
-    # the KeywordTable twin of the case above — it keys off the same fragment context
+    # the call-plan twin of the case above — one nesting level deeper
     assert "{ \"{greet(1, b=2)}\" }" == "1-2"
 
 # ---- M24-5b: a STATIC-METHOD head is an ordinary `defer` / `spawn` statement target ----

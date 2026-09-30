@@ -28,7 +28,7 @@ g := ab
 fn geto() -> Option[str]:
     return Some("abc")
 
-# A keyword call INSIDE a default (a `KeywordTable` entry recorded from a spliced clone), and a `?.`
+# A keyword call INSIDE a default (one `CallPlanTable` entry, in the default's provider), and a `?.`
 # carrier inside a default over BOTH carrier kinds (two `CarrierTable` entries, one per mode).
 fn kw_default(x: int = g(a=7, b=9)) -> int:
     return x

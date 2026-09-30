@@ -11,7 +11,7 @@
 //! the CLI they fail.
 //!
 //! **Stated plainly: at `cargo test` this is a SMOKE CHECK, not a strong guard.** `CARGO_BIN_EXE_chezzi`
-//! is the DEBUG binary, and the window is release-speed-only — with `SchedCore::body_waits` reverted,
+//! is the DEBUG binary, and the window is release-speed-only — with the body's wait `Waiter` reverted,
 //! measured: RELEASE 7/10 and 3/10 runs faulted, DEBUG 0/20 and 1/20, and raising the exchange count
 //! to 200 did not move debug off 0/10. So a green run here does not prove the fix present; what it
 //! does prove is that the shipping semantics are right on every run it makes, and it fails loudly if

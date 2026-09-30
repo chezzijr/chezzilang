@@ -185,7 +185,7 @@ already the right machinery and is what jobs are now dispatched onto.
   to `swap_ctx`'s `ctx.heap`-only gate — the STOP condition the previous attempt halted at.
 - **`exec_cores` / `exec_outstanding` never existed.** The rejected attempt's post-mortem blamed a
   predicate keyed on them; no such identifiers are in the repo — it *invented* that state. The real
-  scheduler state is `MnSched::{runnable, inflight, blocked_native}` + `SchedCore::parked_n`, and the
+  scheduler state is `MnSched::{runnable, inflight}` + `SchedCore::{parked_n, waiters}`, and the
   existing contract is that `Executor` work stays **outside** the detector (decision D,
   `src/vm/sched.rs`: "**No deadlock watch**"). **This milestone changed no deadlock predicate.**
 
@@ -399,7 +399,7 @@ were mandatory — see the correction under them.
    nursery owned one), and the `worker_count() >= 2` clause of the `EnterNursery` gate, which is
    RESTORED for `mn.is_some()` — see item 8.
 
-7. **`SchedCore::body_waits` (`src/vm/mod.rs`)** — the blocked body's own wait, published on every
+7. **The blocked body's own wait** (today a `fiber: false` `Waiter` in `SchedCore::waiters`, `src/vm/mod.rs`) — published on every
    eager sched of its thread, and vetoing `is_deadlocked_ignoring_jobs` while it is satisfiable.
 
    This is what makes item 5's relaxation SOUND, and without it §2c1 shipped a **false deadlock on a
@@ -419,7 +419,7 @@ were mandatory — see the correction under them.
    Go prints `0 1`. This printed `0` and then `recv on an empty channel: deadlock`, **4 runs in 8**.
 
    Two details are load-bearing, each measured:
-   - **It carries the WAIT, not the channel.** Reusing the pre-existing `demoted_chans` peek — which
+   - **It carries the WAIT, not the channel.** Reusing the then-existing demoted-channel peek — which
      asks `!q.is_empty()`, the RECEIVER's question — is inverted for a body blocked on a full `send`:
      an empty queue means it can proceed. That killed a live consumer after one `recv` and faulted
      `send on a full channel`, **12 runs in 12**. `PartyWait::satisfiable` already answers both
@@ -636,7 +636,7 @@ All of these shipped in the same commit:
 
 | | `MnSched::is_deadlocked` (`src/vm/mod.rs`) | the fault arms in `src/vm/netio.rs` |
 |---|---|---|
-| decides by | live state: `running`/`runnable`/`inflight`/`blocked_native`/`parked_n`, plus veto terms | **nothing** — an unconditional `else` |
+| decides by | live state: `running`/`runnable`/`inflight`/`waiters`/`parked_n`, plus veto terms | **nothing** — an unconditional `else` |
 | the question it asks | "can anything in this nursery still move?" | "am I inside a scheduler? no → therefore nobody can ever send" |
 | scope | one nursery | any blocked party with no scheduler: top-level `main`, an `Executor` job, a native callback |
 | catches | total quiescence of a nursery | nothing; it *asserts* |

@@ -1996,8 +1996,8 @@ impl Vm {
 
     /// **Block a would-block socket op IN PLACE when the fiber cannot park.** [`Vm::park_on_fd`] parks on
     /// the netpoller only when this Vm is an M:N worker shell AND `native_reentry == 0`. Callers do NOT
-    /// route every other context here — the precondition is exactly [`Vm::may_block_socket_in_place`],
-    /// i.e. the two contexts whose thread runs nothing else:
+    /// route every other context here — the precondition is exactly the `Demote`/`InPlace` cells of the
+    /// `WaitSpec::Socket` row of `block::mode`, i.e. the two contexts whose thread runs nothing else:
     ///
     /// - **In a native callback on an M:N worker** (`native_reentry > 0` — the callback's `for`-loop state
     ///   lives on the un-snapshottable Rust host stack). This is the original D5 owe #3 Path C case:
@@ -2024,7 +2024,7 @@ impl Vm {
     /// which only `accept`/`read`/`write` do. A `connect` handshake is completed by the KERNEL, so no
     /// chezzi party is starved by waiting for it — and both ancestors block (measured: CPython
     /// `socket.connect` 0.1 ms, Go `net.Dial` 314 µs, each from the sole/main thread). `connect`
-    /// therefore gates on `eager_core.is_some()` alone, not on [`Vm::may_block_socket_in_place`].
+    /// therefore has its own `WaitSpec::Connect` row in `block::mode`, not the `Socket` row.
     ///
     /// **Consequence, deliberate: an fd that never becomes ready is now a HANG, not an immediate `Err`.**
     /// That is Go-identical (`ln.Accept()` on the main goroutine with nobody dialing blocks forever) and
@@ -3024,8 +3024,8 @@ impl Vm {
     /// to the process-wide verdict, so `parties.len() < live` vetoes forever and a genuinely stuck
     /// job + stuck nursery hangs instead of faulting.
     ///
-    /// **The gate is deliberately NOT [`Vm::is_counted_party`].** `owns_os_thread` additionally
-    /// requires `mn_enlist_sched.is_none()`, which is false for the very builder that owns an
+    /// **The gate is deliberately NOT `BlockCtx::judged`.** That is false for
+    /// `BlockCtx::Builder` (`mn_enlist_sched.is_some()`), which is the very builder that owns an
     /// early-enlisted scope — the commonest owner there is. What `quiesce`'s `live` actually counts is
     /// "threads with no scheduler UNDER them": top-level `main` (the `1 +`) and an eager `Executor`
     /// job (the `Σ outstanding`). That is exactly `mn.is_none()`.
@@ -5258,7 +5258,7 @@ impl Vm {
     /// inner wait made its joiner both uncancellable and immune to the wall-clock cap: measured, an
     /// outer `shutdown_now()` at 200 ms did not end a run until **10 009 ms**, against
     /// `docs/stdlib.md`'s own promise that "a scope cancel or an `Executor.shutdown_now()` ends the
-    /// wait within ~5 ms". Neither rung is gated on [`Vm::is_counted_party`] — they are facts about
+    /// wait within ~5 ms". Neither rung is gated on `BlockCtx::judged` — they are facts about
     /// the RUN, not about who may judge it — which is exactly how `block_halt_check` gates its own
     /// three (only the verdict at the bottom carries that test).
     ///
@@ -5294,7 +5294,7 @@ impl Vm {
     /// `outstanding_jobs` and through the `Join` arm's own satisfiability). Holding G across that call
     /// is a lock inversion, i.e. a real hang.
     ///
-    /// Gated on [`Vm::is_counted_party`] for the same reason the registration below is: a joiner
+    /// Gated on `BlockCtx::judged` for the same reason the registration below is: a joiner
     /// running inside a nursery task is not in `live`, so it must neither register nor judge.
     ///
     /// **A joiner is a blocked party** (`future.md` §2d step 0), and registering it here is what makes

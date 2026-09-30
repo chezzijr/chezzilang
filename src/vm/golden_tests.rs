@@ -4335,7 +4335,7 @@ main()
 }
 
 /// W7-59 — the `connect` twin of the test above. `net.connect` was the FIFTH would-block socket op
-/// and the only one that never asked `may_block_socket_in_place()`: it tested a bare `mn.is_some()`,
+/// and the only one that never asked the socket block-in-place gate: it tested a bare `mn.is_some()`,
 /// so an eager `Executor` job fell into the private blocking spin and pinned a pool worker for up to
 /// the 10 s connect cap. Same family as `W7-40`'s R2, which the four other ops closed.
 ///
@@ -4980,7 +4980,7 @@ main()
 /// change and would not have noticed either engine losing its answer.
 ///
 /// The engine must report the kernel's refusal. `W7-59` narrowed the block-in-place gate to
-/// the eager-`Executor` job alone — NOT to `may_block_socket_in_place()`, which would have refused
+/// the eager-`Executor` job alone — NOT to the siblings' `Socket` gate, which would have refused
 /// the cooperative engine too, while it existed. The difference is load-bearing: `accept`/`read` wait
 /// on a chezzi peer fiber that can only run on the very thread they would block, so refusing there
 /// prevented

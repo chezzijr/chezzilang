@@ -284,7 +284,7 @@ fn assert_live_defer_completes(name: &str, src: &[&str], expect_out: &str) {
 
 // Negative controls (parked is not stuck): each `defer` recvs from a channel a STILL-LIVE task will
 // send to, ordered by a handshake (`go`), never a sleep (DEC-050). A false `deadlock` here is worse
-// than the hang the widening of `is_counted_party` fixes.
+// than the hang the widening of `BlockCtx::judged` fixes.
 
 #[test]
 fn main_defer_that_a_live_job_will_feed_still_completes() {

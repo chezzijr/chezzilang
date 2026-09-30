@@ -239,7 +239,7 @@ void fn-type param `fn(T)` doesn't parse yet — use a bare `for`).
 
 **Path C LANDED (the intrinsically-native islands).** A blocking `recv`/`sleep_ms`/socket op reached
 inside a native callback (`native_reentry > 0`) under `--parallel` no longer faults — the worker thread
-**demotes**: accounts the op as a 5th fiber state (`blocked_native` for recv AND for a `Shared`/
+**demotes**: accounts the op by `WaitSpec::will_return` (a registered `Waiter` for recv AND for a `Shared`/
 `RwShared` update-guard wait — TICKET-063 — / `inflight` for sleep+socket, which retain a promised
 external progress source a guard wait does not have), spins up **one raw replacement OS thread**
 (`spawn_replacement_worker`, net-zero worker
@@ -252,21 +252,21 @@ observable behaviour at a fraction of the risk.
 
 **TICKET-062 (W10-1) — the `mn == None` main-task case needs no demote.** Path C's demote exists
 because a worker thread inside a `parallel:` nursery cannot simply block: it would starve the pool
-of a thread and, before this ticket, `can_block_in_place` excluded it from blocking at all
-(`is_counted_party` requires `native_reentry == 0`), so it faulted `deadlock` instead. The top-level
+of a thread and, before this ticket, the block-in-place gate excluded it from blocking at all
+(it required `native_reentry == 0`), so it faulted `deadlock` instead. The top-level
 `main` task has neither problem: it owns its OS thread outright (`mn == None`, `mn_enlist_sched ==
-None`), so it can block on the channel condvar directly — no replacement worker to spin up. Widening
-`can_block_in_place` from `is_counted_party` to `owns_os_thread` admits exactly this case; `main`
+None`), so it can block on the channel condvar directly — no replacement worker to spin up. Today
+`block::mode` maps every `BlockCtx::OwnThread` recv to `InPlace`, callback frame or not; `main`
 blocks in place and registers no party, so the process-wide verdict declines to judge it rather than
 asserting a wrong `deadlock`.
 
-**TICKET-136 (W14-11) — `is_counted_party` now admits a `defer`-only re-entry.** `run_one_deferred`
-raises `deferring` and `native_reentry` together, so `is_counted_party` is `owns_os_thread() &&
-native_reentry == deferring`: a `main`-thread (or module-top-level) `defer` that blocks now registers
+**TICKET-136 (W14-11) — a `defer`-only re-entry is judged.** `run_one_deferred`
+raises `deferring` and `native_reentry` together, so `BlockCtx::judged` holds for `main` or a pool
+job while `native_reentry == deferring`: a `main`-thread (or module-top-level) `defer` that blocks now registers
 and the verdict can judge it, where it used to block in place unregistered and hang. A `defer` body
 is VM code on the same thread, so the live-count invariant in `src/vm/quiesce.rs` still holds; a
 callback, generator resume or `test fn` body still leaves `native_reentry > deferring` and stays
-unjudged. `may_block_socket_in_place` keeps the old `native_reentry == 0` meaning.
+unjudged. The `Socket` row of `block::mode` does not read `judged`.
 
 **`Shared.update` same-box hold-and-wait — WON'T FIX by design.** `update(f)` holds the box's lock
 across `f`; if `f` blocks on a `recv` needing the **same** box, any such sender deadlocks. This is the
@@ -277,7 +277,7 @@ that needs the same `Shared` box** — `update` is a fast RMW, never park inside
 deliberately: it is the only atomic read-modify-write, so removing it for bare `get`/`set` would
 reintroduce a silent lost-update race (a worse, non-local footgun than this narrow same-box deadlock).
 **TICKET-063 landed the fix for this same-box shape too.** A `Shared`/`RwShared` update-guard wait is
-now accounted `blocked_native` (a counted, judgeable party) rather than `inflight` (which vetoed the
+now registered as a `Waiter` (a counted, judgeable party) rather than `inflight` (which vetoed the
 verdict unconditionally). The sender that `f`'s `recv` is waiting on needs that same box's guard to
 send, and it is now a registered guard waiter itself, so the process-wide verdict sees `f` parked on
 the recv and the sender parked on the guard `f` already holds — a hold-and-wait with no possible

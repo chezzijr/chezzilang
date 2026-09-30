@@ -1290,7 +1290,7 @@ test fn hof_completes():
 // A guard wait used to be accounted `inflight`, which vetoes the process-wide deadlock verdict
 // unconditionally, so this run used to hang past its own `--timeout=500` and rely on
 // `run_capped_timed`'s external wall-clock kill (its "hung for >{secs}s" panic WAS the
-// reproduction). The fix accounts the wait `blocked_native` instead, so the deadlock verdict now
+// reproduction). The fix registers the wait as a `Waiter` instead, so the deadlock verdict now
 // fires on its own well inside the cap: the runner self-terminates reporting `ERROR`, not
 // `TIMED-OUT` at the 500ms cap.
 #[test]

@@ -176,7 +176,7 @@ fn sibling_runs_while_a_direct_stdin_read_blocks() {
     );
 }
 
-/// A read must veto the deadlock verdict (DEC-063: `inflight`, not `blocked_native`). While the
+/// A read must veto the deadlock verdict (DEC-063: `inflight`, not a registered `Waiter`). While the
 /// reader waits, the other task is parked on a channel only the reader can feed; the run must
 /// neither fault nor exit before stdin arrives, then finish with the line the reader got.
 #[test]

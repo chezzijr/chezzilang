@@ -3861,8 +3861,8 @@ fn w8_47_a_witness_taking_callee_keeps_its_full_arity() {
     );
 }
 
-/// W8-47 -- an UNPINNED generic ctor default is still refused: `normalize_call` has no type
-/// arguments to forward, so `desugar` never splices the field's provider and the field stays
+/// W8-47 -- an UNPINNED generic ctor default is still refused: `Checker::bind_call` has no type
+/// arguments to forward, so it leaves the `Dflt::GenericProvider` slot unfilled and the field stays
 /// required. Measured before this fix: `Holder() expects 2 argument(s), got 1`. The wording matches
 /// Rust's `error[E0282]: type annotations needed for Holder<_>` on the same shape.
 ///
@@ -33160,8 +33160,8 @@ fn ticket_075_a_bound_receiver_does_not_splice_an_unrelated_structs_default() {
     );
 }
 
-// TICKET-075: a `let`-annotated protocol-typed local (`x: P = w`) resolves to `None` in
-// `receiver_struct_ty` exactly like a bare param, so it must be filtered too.
+// TICKET-075: a `let`-annotated protocol-typed local (`x: P = w`) has no concrete struct receiver,
+// exactly like a bare param, so it must be filtered too.
 #[test]
 fn ticket_075_a_let_annotated_protocol_local_does_not_splice_an_unrelated_structs_default() {
     ok_desugared(
@@ -33911,8 +33911,8 @@ fn ticket_107_rebinding_compound_assign_stays_rejected_on_loop_var_and_const() {
 
 /// TICKET-108 / W12-10 repro -- two structs each declaring a same-named static method with a
 /// default (`fn new(n: int = 1) -> Self`) must resolve `Type.new()` from the struct it is
-/// called on. `receiver_struct_ty` has no arm for a bare struct-name ident head, so `A.new()`
-/// falls into the name-keyed `methods` table and bails on the cross-struct collision.
+/// called on. Desugar's old receiver lookup (gone since TICKET-182) had no arm for a bare
+/// struct-name head, so `A.new()` fell into the name-keyed `methods` table and bailed.
 #[test]
 fn a_same_named_static_method_on_two_structs_type_checks() {
     ok_desugared(
@@ -34185,8 +34185,8 @@ fn deep_nested_fn_decl_chain_checks_clean_and_fast() {
 
 /// TICKET-120 / W13-11 repro -- two structs each declaring a same-named static method with a
 /// default, resolved through a QUALIFIED `module.Type.new()` head. TICKET-108 (W12-10) added the
-/// bare type-NAME head to `receiver_struct_ty` but not the qualified `module.Type` head, so this
-/// falls into the name-keyed `methods` table and bails on the cross-struct collision, same as the
+/// bare type-NAME head to desugar's receiver lookup (gone since TICKET-182) but not the qualified
+/// `module.Type` head, so this fell into the name-keyed `methods` table and bailed, same as the
 /// bare-name form did before TICKET-108.
 #[test]
 fn a_same_named_static_method_via_qualified_module_type_head_type_checks() {

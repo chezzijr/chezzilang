@@ -5429,9 +5429,9 @@ main()
 }
 
 /// gaps.md W10-1 — a main-task `recv` inside a native re-entry (here: a generator resume) must not
-/// fault `deadlock` while a live sibling can still send. `can_block_in_place` (`src/vm/netio.rs`)
-/// requires `is_counted_party`, which requires `native_reentry == 0`, so main-in-callback falls to
-/// the "fault, as before" arm even though the sender is alive. Go (main goroutine pulling through a
+/// fault `deadlock` while a live sibling can still send. Before TICKET-062 the block-in-place gate
+/// required a judged party (`native_reentry == 0`), so main-in-callback fell to the "fault, as
+/// before" arm even though the sender was alive; `block::mode` now blocks it in place. Go (main goroutine pulling through a
 /// closure) prints `0 1 2`. The no-sender case (`d5_owe3_path_c_recv_in_callback_no_sender_still_deadlocks`)
 /// must stay green — a genuinely unsendable recv must still fault deadlock.
 #[test]
@@ -9392,8 +9392,8 @@ fn w758_quiesced_counts_a_nursery_owner_against_live() {
 /// registering it would let `parties.len()` exceed `live`, which is the one error direction that
 /// faults a live program (`quiesce`'s error-direction table).
 ///
-/// Also pins the deliberate WIDENING versus `is_counted_party`: a builder holding an early-enlisted
-/// sched (`mn_enlist_sched.is_some()`) is NOT a counted party by `owns_os_thread`, yet it is exactly
+/// Also pins the deliberate WIDENING versus `BlockCtx::judged`: a builder holding an early-enlisted
+/// sched (`mn_enlist_sched.is_some()`, `BlockCtx::Builder`) is NOT judged, yet it is exactly
 /// `main`, i.e. the `1 +` in `live` — so it MUST register.
 #[test]
 fn w758_only_a_thread_with_no_scheduler_under_it_registers_a_nursery_party() {
@@ -9406,7 +9406,7 @@ fn w758_only_a_thread_with_no_scheduler_under_it_registers_a_nursery_party() {
     vm.mn_enlist_sched = Some(Arc::clone(&sched));
     assert!(
         vm.nursery_party_guard(&sched).is_some(),
-        "an early-enlisted builder is still main; `is_counted_party` would wrongly exclude it"
+        "an early-enlisted builder is still main; a `BlockCtx::judged` gate would wrongly exclude it"
     );
     vm.mn_enlist_sched = None;
     vm.mn = Some(Arc::clone(&sched));
@@ -16544,15 +16544,13 @@ ex.shutdown()
 /// `Shared.update` and an FFI callback are the same shape). Found by adversarial review of the first
 /// two, which shipped green while this path still answered `timer` @ 308 ms.
 ///
-/// It is the reason the gate is not simply [`Vm::can_block_in_place`]: that folds in
-/// `is_counted_party`, which requires `native_reentry == 0`, so a `main` thread with a host frame
-/// under it fell through to the inline-sleep. The exclusion is about the deadlock verdict being
-/// unable to JUDGE such a party — not about whether it may block — and a LIVE TIMER ARM removes the
-/// risk it guards, because the wait then provably ends at the deadline no matter what anyone else
-/// does. Hence `timed_block = soonest.is_some() && owns_os_thread()`, deliberately narrower than
-/// "always block here": with no timer arm an unjudgeable party that blocked forever would hang where
-/// the `wait on channels that are all empty: deadlock` fault is the honest answer
-/// (`vm_wait_in_native_callback_no_sender_deadlocks` fences that half).
+/// The block-in-place gate of the time required `native_reentry == 0`, so a `main` thread with a
+/// host frame under it fell through to the inline-sleep. The exclusion was about the deadlock
+/// verdict being unable to JUDGE such a party — not about whether it may block — and a LIVE TIMER
+/// ARM removes that risk, because the wait provably ends at the deadline. The first fix was a
+/// separate `timed_block` term; TICKET-062 made it redundant, and `block::mode` now blocks every
+/// `OwnThread` `wait:` in place (`vm_wait_in_native_callback_no_sender_deadlocks` fences the
+/// no-timer half).
 #[test]
 fn a_wait_timer_arm_in_a_native_callback_loses_to_a_sibling_value() {
     let src = "
