@@ -8013,6 +8013,10 @@ fn g30() -> Iterator[int]:
     acc := [1]
     _ := h.hgen(acc)
     yield 0
+fn g31() -> Iterator[int]:
+    acc := [1]
+    _ := h.hesc(acc)
+    yield 0
 xs := [1]
 a := g1([])
 b := g1(xs)
@@ -8026,6 +8030,12 @@ fn hkeep(xs: List[int]):
     HG.push(xs)
 fn hgen(xs: List[int]) -> Iterator[int]:
     yield xs.len()
+fn hpush(xs: List[int]) -> int:
+    HG.push(xs)
+    return 0
+fn hesc(xs: List[int]) -> int:
+    return xs.len()
+hesc := fn(xs: List[int]) -> int: hpush(xs)
 "#;
 
     #[test]
@@ -8039,7 +8049,7 @@ fn hgen(xs: List[int]) -> Iterator[int]:
             panic!("the grid program must type-check: {errs:?}");
         }
         let program = compile_graph(&graph).expect("compile");
-        let want: [(&str, u64); 30] = [
+        let want: [(&str, u64); 31] = [
             ("g1", 0b1),
             ("g2", 0),
             ("g3", 0b1),
@@ -8070,6 +8080,8 @@ fn hgen(xs: List[int]) -> Iterator[int]:
             ("g28", 0b1),
             ("g29", 0),
             ("g30", 0),
+            // TICKET-196: h's slot 'hesc' is redeclared; the final closure escapes 'acc' into HG.
+            ("g31", 0),
         ];
         for (name, mask) in want {
             let p = program
