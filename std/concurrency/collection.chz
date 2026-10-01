@@ -28,87 +28,49 @@
 # the entry program's import order. Without it, `r.read(...)`/`r.write(...)` here can fail to resolve.
 import std.concurrency
 
-# A private one-field mutable box (a local struct, so there is no cross-module constructor
-# dependency). A struct is a shared reference, so a write closure that closes over a
-# `_Cell` and `set`s it persists the value to the caller — the trick that lets `get_or_insert` capture
-# its result inside the single write lock.
-struct _Cell[T]:
-    value: T
-
-    fn get(self) -> T:
-        return self.value
-
-    fn set(self, v: T):
-        self.value = v
-
 # ============================================================================
 # ConcurrentMap[K, V] — a thread-safe map over `RwShared[Map[K, V]]` (K must be Hashable + Eq, W7-53:
 # a Map key needs both).
 # ============================================================================
 #
-# CONCURRENCY: get/contains/len/snapshot are CONCURRENT READS (many at once); set/remove/get_or_insert
-# take the EXCLUSIVE WRITE lock. `get_or_insert` is COMPOUND-ATOMIC — its check-and-insert happens in
-# ONE write lock, so it cannot lose a race.
+# CONCURRENCY: every method is one `RwShared` map view call (TICKET-192), so none copies the whole
+# map except `snapshot`. get/contains/len are CONCURRENT READS (O(1) expected lookups over the stored
+# map's hash index); set/remove/get_or_insert are single-entry writers that take the box's ONE update
+# guard, the same guard `write` takes, and splice one entry in place. `get_or_insert` is
+# COMPOUND-ATOMIC: its check and its insert happen under that one guard, so it cannot lose a race.
 struct ConcurrentMap[K: Hashable + Eq, V]:
     inner: RwShared[Map[K, V]]
 
     # Look up `key`. CONCURRENT READ. Returns Some(value) or None.
     fn get(self, key: K) -> Option[V]:
-        return self.inner.read(fn(m): _get(m, key))
+        return self.inner.get_key(key)
 
-    # Insert or overwrite `key` -> `val`. EXCLUSIVE WRITE.
+    # Insert or overwrite `key` -> `val`. One update guard.
     fn set(self, key: K, val: V):
-        self.inner.write(fn(m): _put(m, key, val))
+        self.inner.set_key(key, val)
 
-    # Remove `key` if present (no-op if absent). EXCLUSIVE WRITE.
+    # Remove `key` if present (no-op if absent). One update guard.
     fn remove(self, key: K):
-        self.inner.write(fn(m): _remove(m, key))
+        _ := self.inner.remove_key(key)
 
     # True iff `key` is present. CONCURRENT READ.
     fn contains(self, item: K) -> bool:
-        return self.inner.read(fn(m): m.has(item))
+        return self.inner.has(item)
 
     # Number of entries. CONCURRENT READ.
     fn len(self) -> int:
-        return self.inner.read(fn(m): m.len())
+        return self.inner.len()
 
     # COMPOUND-ATOMIC insert-if-absent: if `key` is present return its value; otherwise insert
-    # `default` and return it. The check, the insert, AND capturing the value to return all happen
-    # inside ONE exclusive write lock — the value is stashed into a captured `_Cell` (a shared box) by
-    # the write closure, so there is NO second lock and no window in which a concurrent `remove` could
-    # delete the just-inserted key. After the write returns, the captured value is read back locally.
+    # `default` and return it. The probe and the insert run under ONE update guard with no user
+    # closure, so a concurrent `remove` cannot slip between them.
     fn get_or_insert(self, key: K, default: V) -> V:
-        out := _Cell(default)
-        self.inner.write(fn(m): _ensure_capture(m, key, default, out))
-        return out.get()
+        return self.inner.get_or_insert(key, default)
 
     # A COPY of the whole map (snapshot). CONCURRENT READ. `read` already copies the value out, so the
     # returned map is independent of later mutations.
     fn snapshot(self) -> Map[K, V]:
         return self.inner.read(fn(m): m)
-
-fn _get[K: Hashable + Eq, V](m: Map[K, V], key: K) -> Option[V]:
-    return m.get(key)
-
-fn _put[K: Hashable + Eq, V](m: Map[K, V], key: K, val: V) -> Map[K, V]:
-    m[key] = val
-    return m
-
-fn _remove[K: Hashable + Eq, V](m: Map[K, V], key: K) -> Map[K, V]:
-    _ := m.remove(key)
-    return m
-
-# Insert `default` if `key` is absent, and capture the resulting value (the existing one, or the
-# freshly inserted `default`) into `out` — ALL inside the one write lock. Returns the map (the write
-# closure's value). Because the value is captured here, get_or_insert needs no second lock: it is
-# compound-atomic with no remove-in-the-window race.
-fn _ensure_capture[K: Hashable + Eq, V](m: Map[K, V], key: K, default: V, out: _Cell[V]) -> Map[K, V]:
-    match m.get(key):
-        Some(v): out.set(v)
-        None:
-            m[key] = default
-            out.set(default)
-    return m
 
 # ============================================================================
 # ConcurrentCounter[K] — a thread-safe frequency table over `RwShared[Map[K, int]]` (K Hashable + Eq,

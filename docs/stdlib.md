@@ -413,6 +413,12 @@ to the element's HEAD constructor (Tuple **excluded** — heterogeneous):
   `for_each(f: fn(E) -> _) -> nil` · `fold(init: R, f: fn(R, E) -> R) -> R`.
 - `RwShared[Map[K,V]]`: `len() -> int` · `get_key(k: K) -> Option[V]` · `has(k: K) -> bool` ·
   `for_each_entry(f: fn(K, V) -> _) -> nil` · `fold_entries(init: R, f: fn(R, K, V) -> R) -> R`.
+  Single-entry writers (TICKET-192): `set_key(k: K, v: V) -> nil` (insert or overwrite; an overwrite
+  keeps the stored key, as `d[k] = v`) · `remove_key(k: K) -> Option[V]` · `get_or_insert(k: K, v: V)
+  -> V` (the stored value, else inserts `v` and returns it). Each takes the box's update guard, the one
+  `set`/`write` take, so a same-box re-entry from a user `eq`/`hash` faults like `write` does.
+  `get_key`/`has`/`contains` and `set_key`/`get_or_insert` are **O(1) expected**: the stored map keeps
+  the heap map's hash index. `remove_key` is O(n), as `Map.remove`.
 - `RwShared[Set[E]]`: `len() -> int` · `contains(e: E) -> bool` · `for_each(f: fn(E) -> _) -> nil` ·
   `fold(init: R, f: fn(R, E) -> R) -> R`.
 
@@ -1662,18 +1668,19 @@ FAULTS (TICKET-016 / W8-3), instead of hanging or silently losing the inner writ
 method is flat (no nested locking), so user code hits this only if it calls a wrapper method from
 inside another wrapper's closure over the same box.
 
-**`ConcurrentMap[K: Hashable + Eq, V]`** — thread-safe map over `RwShared[Map[K, V]]`. `get`/`contains`/
-`len`/`snapshot` are **concurrent reads**; `set`/`remove`/`get_or_insert` take the **exclusive write
-lock**.
+**`ConcurrentMap[K: Hashable + Eq, V]`** — thread-safe map over `RwShared[Map[K, V]]`. Every method is
+one `RwShared` map view call, so none copies the whole map except `snapshot` (TICKET-192).
+`get`/`contains`/`len`/`snapshot` are **concurrent reads**; `set`/`remove`/`get_or_insert` are
+single-entry writers under the box's **one update guard**. Lookups and inserts are O(1) expected.
 
 | member | signature | concurrency / semantics |
 | --- | --- | --- |
-| `.get(key)` | `(K) -> Option[V]` | **concurrent read**. `Some(v)` / `None`. |
-| `.set(key, val)` | `(K, V) -> nil` | **exclusive write**. Insert or overwrite. |
-| `.remove(key)` | `(K) -> nil` | **exclusive write**. No-op if absent. |
+| `.get(key)` | `(K) -> Option[V]` | **concurrent read** (`get_key`). `Some(v)` / `None`. |
+| `.set(key, val)` | `(K, V) -> nil` | **update guard** (`set_key`). Insert or overwrite. |
+| `.remove(key)` | `(K) -> nil` | **update guard** (`remove_key`). No-op if absent. |
 | `.contains(key)` | `(K) -> bool` | **concurrent read**. |
 | `.len()` | `() -> int` | **concurrent read**. |
-| `.get_or_insert(key, default)` | `(K, V) -> V` | **COMPOUND-ATOMIC**: the check, the insert, AND capturing the value to return all happen inside ONE **exclusive write** lock (the value is stashed into a captured shared box by the write closure) — so there is no second lock, and no window in which a concurrent `remove` could delete the just-inserted key. Returns the existing value, or `default` if it was absent. |
+| `.get_or_insert(key, default)` | `(K, V) -> V` | **COMPOUND-ATOMIC** (`RwShared.get_or_insert`): the probe and the insert run under ONE update guard with no user closure, so a concurrent `remove` cannot slip between them. Returns the existing value, or `default` if it was absent. |
 | `.snapshot()` | `() -> Map[K, V]` | **concurrent read** returning a **copy** independent of later mutations. |
 
 **`ConcurrentCounter[K: Hashable + Eq]`** — thread-safe frequency table over `RwShared[Map[K, int]]`.
@@ -1753,14 +1760,18 @@ adds on demand). `xs` MUST already be sorted ascending; results are undefined ot
 
 ### `std.memoize` — result caching (`functools.cache`)
 `memoize1(f: fn(K) -> V) -> fn(K) -> V` wraps `f` so each distinct argument is computed once and the
-result cached in a captured `Map[K, V]` (`K: Hashable + Eq` — a map key needs both, `docs/gaps.md`
-W7-53). The cache is a native reference type, so it
-persists across every call to the wrapped fn; `f` runs at most once per distinct arg.
+result cached (`K: Hashable + Eq` — a map key needs both, `docs/gaps.md` W7-53). The cache is an
+`RwShared[Map[K, V]]` (TICKET-192), so the wrapper works from any task: a call in a spawned task or an
+Executor job reads and fills the same cache as its creator, as CPython `functools.cache` does from any
+thread. Lookups and inserts are O(1) expected. The task holding the original wrapper gets the **same
+object** on every call (CPython `f(1) is f(1)`; a mutation of the result stays visible), through a
+private alias map; a task copy of the wrapper gets a fresh snapshot of the cached value
+(`concurrency.is_task_copy`, DEC-191). Two tasks missing one key at the same moment may both run `f`,
+as with CPython's `functools.cache`.
 **v1 limit (not a bug):** single-argument only. A general N-arg cache would key a `Map[(A, B), V]` on
 the argument tuple: a tuple of Hashable args is a valid key (TICKET-161), so an N-arg wrapper can be
 written that way; until then curry, or pack args into a struct with `hash` and memoize the
 single-arg wrapper.
-**Known limit (TICKET-192):** a `memoize1` wrapper called inside a spawned task or an Executor job faults `this value is this task's copy`, because its cache is a captured `Map`. Call it from the task that built it until TICKET-192 gives it a shared O(1) cache.
 
 ### `std.duration` — Go-like first-class time spans
 Pure-Chezzi (no native seam). `import std.duration`. `Duration` (access as `duration.Duration`) is a

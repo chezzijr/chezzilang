@@ -1,9 +1,15 @@
 # std.memoize — functools.cache-style result caching (M-B3.3: closures-as-data).
 #
 # Written entirely in Chezzi. `memoize1(f)` returns a wrapped function that caches `f`'s result per
-# argument in a captured `Map` — a native reference type, so the cache persists across every call to
-# the wrapped fn (a captured bare scalar would snapshot by value and lose the cache).
-# `f` runs at most once per distinct argument.
+# argument. The cache is an `RwShared[Map[K, V]]` (TICKET-192), so a wrapper called in a spawned task
+# or an Executor job reads and fills the SAME cache as its creator, as CPython `functools.cache` does
+# from any thread. Lookups and single-entry inserts on it are O(1) expected.
+#
+# Identity (DEC-191): the task that holds the original wrapper also keeps a private alias map, so it
+# gets the SAME object on every call (CPython `f(1) is f(1)`; a mutation of the result stays visible).
+# A task copy of the wrapper (`concurrency.is_task_copy`) never writes that alias and gets a fresh
+# snapshot of the cached value instead. Two tasks missing one key at the same moment may both run `f`;
+# CPython's `functools.cache` does the same.
 #
 # ponytail: single-argument only — `memoize1(f: fn(K) -> V)`, keyed by the arg (`K: Hashable + Eq`,
 # W7-53: a Map key needs both). A
@@ -11,19 +17,33 @@
 # is a valid key (TICKET-161), so an N-arg wrapper can be written that way. Until then, curry / pack
 # args into a struct-with-`hash` and memoize the single-arg wrapper.
 
+import std.concurrency
+
 # Cache lookup-or-compute, split out because a closure body is a single expression: the returned
 # wrapper delegates here so it can do the `Option` match + compute + store.
-fn _memo_get[K: Hashable + Eq, V](cache: Map[K, V], f: fn(K) -> V, k: K) -> V:
-    match cache.get(k):
-        Some(v):
-            return v
-        None:
-            v := f(k)
-            cache[k] = v
-            return v
+fn _memo_get[K: Hashable + Eq, V](shared: RwShared[Map[K, V]], own: Map[K, V], f: fn(K) -> V, k: K) -> V:
+    owner := not concurrency.is_task_copy(own)
+    if owner:
+        match own.get(k):
+            Some(v):
+                return v
+            None:
+                pass
+    v := match shared.get_key(k):
+        Some(x): x
+        None: _memo_fill(shared, f, k)
+    if owner:
+        own[k] = v
+    return v
+
+fn _memo_fill[K: Hashable + Eq, V](shared: RwShared[Map[K, V]], f: fn(K) -> V, k: K) -> V:
+    v := f(k)
+    shared.set_key(k, v)
+    return v
 
 # Wrap `f` so each distinct argument is computed once and cached. Returns a fn with the same
 # signature as `f`.
 fn memoize1[K: Hashable + Eq, V](f: fn(K) -> V) -> fn(K) -> V:
-    cache: Map[K, V] = {}
-    return fn(k: K) -> V: _memo_get(cache, f, k)
+    shared: RwShared[Map[K, V]] = RwShared({})
+    own: Map[K, V] = {}
+    return fn(k: K) -> V: _memo_get(shared, own, f, k)

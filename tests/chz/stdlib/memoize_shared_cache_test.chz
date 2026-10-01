@@ -21,3 +21,14 @@ test fn memoize_wrapper_called_in_spawned_task_returns_value():
         spawn _child_memo(m, ch)
     got := ch.recv()
     assert got == "42", got
+
+fn listed(x: int) -> List[int]:
+    return [x]
+
+# The task holding the original wrapper gets the SAME object every call, as CPython
+# `functools.cache` (`f(1) is f(1)`): a mutation of the result shows on the next call (DEC-191).
+test fn memoize_owner_gets_the_same_object_every_call():
+    m := memoize1(listed)
+    a := m(1)
+    a.push(9)
+    assert m(1) == [1, 9], str(m(1))

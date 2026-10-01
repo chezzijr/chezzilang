@@ -35,7 +35,11 @@ native struct Shared[T]:
 #     range is `None`, never a fault; negative index normalizes like `xs[i]`), `slice(self, lo, hi) -> List[E]`,
 #     `for_each(self, f: fn(E) -> _) -> nil`, `fold(self, init: R, f: fn(R, E) -> R) -> R`.
 #   `RwShared[Map[K,V]]`: `len(self) -> int`, `get_key(self, k: K) -> Option[V]`, `has(self, k: K) -> bool`,
-#     `for_each_entry(self, f: fn(K, V) -> _) -> nil`, `fold_entries(self, init: R, f: fn(R, K, V) -> R) -> R`.
+#     `for_each_entry(self, f: fn(K, V) -> _) -> nil`, `fold_entries(self, init: R, f: fn(R, K, V) -> R) -> R`,
+#     and the single-entry WRITERS (TICKET-192) `set_key(self, k: K, v: V) -> nil`,
+#     `remove_key(self, k: K) -> Option[V]`, `get_or_insert(self, k: K, v: V) -> V`: each takes the box's
+#     update guard (the one `set`/`write` take) and splices one entry, never re-encoding the map. The stored
+#     map keeps the heap map's hash index, so lookups and inserts are O(1) expected; `remove_key` is O(n).
 #   `RwShared[Set[E]]`: `len(self) -> int`, `contains(self, e: E) -> bool`,
 #     `for_each(self, f: fn(E) -> _) -> nil`, `fold(self, init: R, f: fn(R, E) -> R) -> R`.
 # (`fold*`'s R is inferred from `init`.) They walk the stored heap-independent wire container and

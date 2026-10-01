@@ -11,6 +11,27 @@ justify lives in **[`future.md §4`](future.md)**; the scheduled work is roadmap
 > They are kept as the record of what was measured at the time; they are not reproducible on today's
 > binary, and "serial == M:N parity green" in an older section means the gate that existed then.
 
+## TICKET-192 — a shared map is O(1) per lookup and per insert (2026-10-01)
+
+A stored `RwShared` map now keeps the heap map's hash index, and `set_key`/`remove_key`/
+`get_or_insert` splice one entry instead of re-encoding the map. `std.memoize` caches in an
+`RwShared[Map]`. Release binaries, three runs each, back to back, `uptime` load 4.46–5.00. Base is
+`d055f1a4`; rows marked "filed" are the ticket's own measurements at load 0.9.
+
+| program | base | after |
+|---|---|---|
+| 40k `get_key` on a 40k-entry map (`rwshared_map_get_key_is_not_linear`) | 14.58 s (filed) | 0.06 s (whole test) |
+| `benches/shared_map/lookup_100k.chz` (100k `get_key`, 100k entries) | ~100 s (filed) | 0.175–0.185 s |
+| `benches/shared_map/memoize_8k.chz` (`memoize1`, 8000 keys, two passes) | 0.029–0.032 s (private `Map` cache, faults in a task) | 0.065–0.067 s |
+| same workload, cache in `RwShared` + `write` (the pre-fix shared option) | 6.2 s (filed) | — |
+| `benches/shared_map/memoize_8k_private.chz` (private `Map` baseline) | 0.028–0.030 s | 0.027–0.029 s |
+| `benches/shared_map/cross_map.chz` (10k-entry map, 200 `Shared.set` + `get`) | 0.416–0.452 s | 0.516–0.533 s |
+
+`memoize_8k` is 2.3x the private-map baseline: every call is a shared-cache probe plus the owner's
+alias map. The cost of the shared cache over the 240x `write` version is gone. The last row is the
+price of the index: every map crossing (channel, spawn, `Shared.set`) builds it, about +18% on a
+crossing-bound loop of 10k-entry maps.
+
 ## TICKET-190 — a generator crossing costs O(frame), not O(heap) (2026-10-01)
 
 A started generator crossing into a task with a 200k-object (function-local) parent. Before, every

@@ -754,7 +754,10 @@ read-view** instead — gated by a constructor-kind `where T: List/Map/Set` boun
 (Tuple **excluded**): a `RwShared[List[E]]` gains `len`/`at`/`slice`/`for_each`/`fold`, a
 `RwShared[Map[K,V]]` gains `len`/`get_key`/`has`/`for_each_entry`/`fold_entries`, and a `RwShared[Set[E]]`
 gains `len`/`contains`/`for_each`/`fold`. They walk the stored container **entry-at-a-time** and
-materialize one entry per step, so each worker scans/reduces in **O(1) memory**.
+materialize one entry per step, so each worker scans/reduces in **O(1) memory**. A `RwShared[Map[K,V]]`
+also has the single-entry writers `set_key`/`remove_key`/`get_or_insert` (TICKET-192), which take the
+box's update guard and splice one entry instead of re-encoding the map. The stored map keeps the heap
+map's hash index, so `get_key`/`has`/`contains`, `set_key` and `get_or_insert` are O(1) expected.
 
 ```chezzi
 # Each spawned worker reduces its own view of the SAME shared container — no per-worker copy of the inner.
