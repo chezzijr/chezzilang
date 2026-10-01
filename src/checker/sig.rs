@@ -2995,7 +2995,6 @@ impl Checker {
                         return;
                     }
                     let mut sig = self.fn_sig(decl, decl.name_span);
-                    self.bind_nested_fn_writes(decl);
                     // TICKET-142 (W14-33) — a nested fn's default is compiled in MODULE scope (the
                     // prologue hides the frame's locals), so a free name that resolves innermost-first
                     // to a non-module scope (a param, a local, a sibling fn, a local shadowing a
@@ -3047,6 +3046,8 @@ impl Checker {
                             },
                         );
                         self.kw_certain.insert(kw_key.clone());
+                        // After the declare, which drops a same-scope shadow's summary (TICKET-190).
+                        self.bind_nested_fn_writes(decl);
                         let inferred = self.infer_nested_fn_ret(decl, &sig);
                         sig.ret = inferred;
                     }
@@ -3063,6 +3064,7 @@ impl Checker {
                         },
                     );
                     self.kw_certain.insert(kw_key.clone());
+                    self.bind_nested_fn_writes(decl);
                     if !kw_was_written {
                         self.kw_written.remove(&kw_key);
                     }

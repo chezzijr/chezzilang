@@ -2548,6 +2548,11 @@ impl Checker {
         if let Some(set) = self.const_decls.last_mut() {
             set.remove(name);
         }
+        // Same rule for a nested fn's summary: a re-declaration is a value binding, not that fn
+        // (TICKET-190). A nested fn binds its summary after its own declares.
+        if let Some(scope) = self.fn_write_scopes.last_mut() {
+            scope.remove(name);
+        }
         // Same rule for a `from`-imported global: re-declaring it at MODULE scope (`COUNT := COUNT + 1`)
         // hands the name back to this module, so the from-import rebind gate (`imported_values`, keyed
         // by bare name) must stop firing — the binding it names is gone. Module scope only (the sole

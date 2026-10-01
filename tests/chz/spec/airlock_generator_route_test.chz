@@ -264,6 +264,25 @@ test fn value_callee_shadowing_a_nested_generator_gets_no_stamp():
     assert out.recv() == "fault"
     assert named == [1]
 
+# Review round 2 (TICKET-190): the same shadow in the nested fn's OWN scope. The re-declare drops
+# the generator's summary, so the value call gets no stamp and the task's second push faults.
+fn t190_shadow_same_scope(named: List[int]) -> Iterator[int]:
+    fn gen(xs: List[int]) -> Iterator[int]:
+        yield xs.len()
+    gen := fn(a: List[int]) -> Iterator[int]: t190_gen2(named)
+    return gen([])
+
+test fn same_scope_value_shadowing_a_nested_generator_gets_no_stamp():
+    named: List[int] = []
+    g := t190_shadow_same_scope(named)
+    _ := g.next()
+    assert named == [1]
+    out := Channel[str](1)
+    parallel:
+        spawn: out.send(t190_cell(g))
+    assert out.recv() == "fault"
+    assert named == [1]
+
 # Beside it: the nested generator itself, called by name with a fresh argument, keeps its stamp.
 fn t190_nested_outer() -> Iterator[int]:
     fn gen(xs: List[int]) -> Iterator[int]:
