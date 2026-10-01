@@ -328,7 +328,10 @@ fn judge(cell: &Cell, line: &str) -> Result<(), String> {
     }
 }
 
-const LIMIT: Duration = Duration::from_secs(20);
+/// A whole grid program is one run of every cell: the fiber `send` program takes ~12 s of CPU at
+/// T=1 on a debug binary (measured 2026-10-02, base and TICKET-194 alike), so 20 s read as a
+/// "hang" under nextest load. A real hang still never finishes.
+const LIMIT: Duration = Duration::from_secs(90);
 
 /// The runs every program gets: `(CHEZZI_THREADS, CHEZZI_SCHED_SEED)`.
 const RUNS: [(&str, Option<u32>); 4] = [("1", None), ("2", None), ("0", None), ("2", Some(185))];
@@ -359,7 +362,7 @@ fn check_program(ctx: usize, sk: usize) -> Vec<String> {
                 }
                 None => {
                     let how = match code {
-                        None => "hang (killed after 20s)".to_string(),
+                        None => format!("hang (killed after {}s)", LIMIT.as_secs()),
                         Some(c) => format!("rc={c} stderr={}", err.trim()),
                     };
                     failures.push(format!("{label} cell {}: missing -- {how}", cell.name));
