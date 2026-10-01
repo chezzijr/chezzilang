@@ -1382,10 +1382,19 @@ pub(super) fn halt_over_backlog(
                 err,
                 out: r.out,
                 stderr: r.stderr,
+                trace: Vec::new(),
             },
             true,
         ),
-        T::Cancelled { out, stderr } => (T::Fault { err, out, stderr }, true),
+        T::Cancelled { out, stderr } => (
+            T::Fault {
+                err,
+                out,
+                stderr,
+                trace: Vec::new(),
+            },
+            true,
+        ),
         other => (other, false),
     }
 }

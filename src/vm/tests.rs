@@ -2965,23 +2965,23 @@ fn cap0_core() -> Arc<ChannelCore> {
 fn core_key(core: &Arc<ChannelCore>) -> usize {
     Arc::as_ptr(core) as usize
 }
-/// TICKET-096 review finding — `owner_fault_floor` indexes the RUNNING fiber's `nurseries` stack
-/// (per-fiber, swapped by `swap_ctx`), but the field itself lives on the worker-shell `Vm` and is
+/// TICKET-096 review finding — a delivered cut's floor indexes the RUNNING fiber's `nurseries`
+/// stack (per-fiber, swapped by `swap_ctx`), but `Vm::cut` lives on the worker-shell `Vm` and is
 /// not carried in `FiberCtx`. A floor left by the fiber that just died on this shell must not
 /// leak into the next fiber scheduled in here, or an unrelated `recover:` in that fiber is wrongly
 /// bypassed by `run_until`'s `owner_bypass` check. `run_one_fiber` must reset it on every swap-in,
-/// exactly like `self.cancelled`.
+/// exactly like a `Cut::Cancelled` (TICKET-195 merged both into `Vm::cut`).
 #[test]
-fn run_one_fiber_resets_owner_fault_floor_left_by_the_previous_fiber() {
+fn run_one_fiber_resets_a_delivered_cut_left_by_the_previous_fiber() {
     let mut vm = Vm::new(Arc::new(empty_program()));
     // Simulate a floor left dangling by a fiber that died via the `owner_bypass` path (uncaught —
     // never reached the catch arm that clears it).
-    vm.owner_fault_floor = Some(3);
+    vm.cut = Some(block::Cut::Delivered { floor: Some(3) });
     let mut fiber = mk_pending_fiber(0);
     vm.run_one_fiber(&mut fiber, Span::RUNTIME);
     assert_eq!(
-        vm.owner_fault_floor, None,
-        "a stale owner_fault_floor must not survive into the next fiber scheduled on this shell"
+        vm.cut, None,
+        "a stale delivered cut must not survive into the next fiber scheduled on this shell"
     );
 }
 
@@ -8497,6 +8497,7 @@ fn mnsched_cancelled_scope_whose_only_fiber_is_demoted_is_deadlock() {
             err: dl_err(),
             out: Vec::new(),
             stderr: Vec::new(),
+            trace: Vec::new(),
         },
     );
     let c = sched.lock();
@@ -8546,6 +8547,7 @@ fn mnsched_demoted_fiber_with_a_tripped_cancel_is_not_deadlock() {
             err: dl_err(),
             out: Vec::new(),
             stderr: Vec::new(),
+            trace: Vec::new(),
         },
     );
     {
@@ -8600,6 +8602,7 @@ fn mnsched_cancelled_scope_with_a_parked_and_a_demoted_fiber_is_not_deadlock() {
             err: dl_err(),
             out: Vec::new(),
             stderr: Vec::new(),
+            trace: Vec::new(),
         },
     );
     let c = sched.lock();

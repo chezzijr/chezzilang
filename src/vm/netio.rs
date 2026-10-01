@@ -2329,7 +2329,7 @@ impl Vm {
     /// `reduce_task_slots` already produces for a joined child's exit (`sched.rs`): `pending_exit` set
     /// plus the `"exit"` sentinel `Err`, which unwinds past every `recover:` to the driver.
     ///
-    /// Deliberately does NOT set `self.cancelled` — that would SWALLOW the outcome (`run_outcome`),
+    /// Deliberately does NOT set `Cut::Cancelled` — that would SWALLOW the outcome (`run_outcome`),
     /// which is the opposite of what an exit needs.
     ///
     /// Returns the error rather than a `Result` because most call sites are demote loops that must run

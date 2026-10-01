@@ -8,7 +8,7 @@
 //! with each op; only the decision lives here.
 
 use super::quiesce::PartyWait;
-use super::{MnSched, RuntimeError, SchedCore, Span, Vm};
+use super::{MnSched, RuntimeError, SchedCore, Span, TraceFrame, Vm};
 use crate::native::Kind;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -206,6 +206,20 @@ pub(super) fn mode(ctx: BlockCtx, spec: WaitSpec) -> BlockMode {
     }
 }
 
+/// TICKET-195 (W18 Family B2) — THE record of why a party is unwinding when the fault is not its
+/// own. `None` (on `Vm::cut`) means the party unwinds its OWN fault. Every rule keyed on "was this
+/// party cut" reads it: the recover bypass, the defer ranking (`Vm::unwind_result`), the outcome
+/// classification and the trace. `Vm::adopt_child_fault` is the only writer of `Delivered`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Cut {
+    /// a cancel flag this party holds tripped (a sibling faulted or exited); latches for the unwind
+    Cancelled,
+    /// another party's fault was delivered to this one: a child's halt (`floor = Some(n)`, the
+    /// nursery below which a `recover:` must not catch, DEC-096), a join that reduced a child's or
+    /// a job's fault, or an unjoined job fault reported in place of a verdict (`floor = None`)
+    Delivered { floor: Option<usize> },
+}
+
 /// TICKET-188 (W17 Family B) — why a party must stop now: [`halt_of`]'s answer.
 #[derive(Debug)]
 pub(super) enum Halt {
@@ -213,7 +227,12 @@ pub(super) enum Halt {
     Cancelled,
     /// a child of a nursery this party owns faulted; `floor` is that nursery's `nurseries` index,
     /// below which a `recover:` must not catch the fault (DEC-096)
-    ChildFault { floor: usize, err: RuntimeError },
+    /// TICKET-195: `trace` is the faulting child's own stack trace
+    ChildFault {
+        floor: usize,
+        err: RuntimeError,
+        trace: Vec<TraceFrame>,
+    },
 }
 
 /// One open nursery of a party, borrowed: what [`halt_of`] reads.
@@ -308,10 +327,14 @@ pub(super) fn halt_of<'a>(
         if !o.flag.load(Ordering::Acquire) {
             return None;
         }
-        let err = std::iter::once(o.scope)
+        let (err, trace) = std::iter::once(o.scope)
             .chain(o.more.iter().copied())
             .find_map(|sid| o.sched.scope_fault(sid))?;
-        Some(Halt::ChildFault { floor: o.n, err })
+        Some(Halt::ChildFault {
+            floor: o.n,
+            err,
+            trace,
+        })
     })
 }
 
@@ -592,6 +615,7 @@ mod tests {
                 err: boom(),
                 out: Vec::new(),
                 stderr: Vec::new(),
+                trace: Vec::new(),
             });
         }
         (flag, sched)
@@ -625,7 +649,7 @@ mod tests {
             false,
         );
         assert!(
-            matches!(&got, Some(Halt::ChildFault { floor: 2, err }) if err.message == "boom"),
+            matches!(&got, Some(Halt::ChildFault { floor: 2, err, .. }) if err.message == "boom"),
             "{got:?}"
         );
     }

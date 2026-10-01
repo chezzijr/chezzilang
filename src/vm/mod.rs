@@ -1158,19 +1158,18 @@ pub struct Vm {
     /// die when an outer scope is cancelled. Re-pointed per fiber swap-in from
     /// [`JoinScope::ancestors`], exactly like `cancel`.
     cancel_outer: Vec<Arc<AtomicBool>>,
-    /// B3.4: set true only when *this* worker observed [`Vm::cancel`] and bailed, so the join can
-    /// tell a swallowed cooperative abort apart from a real fault (a cancelled task is dropped, not
-    /// reported). Not in [`FiberCtx`] — like `pending_exit`, cancellation is a per-VM concern.
-    cancelled: bool,
+    /// TICKET-195 — why this party is unwinding when the fault is not its own ([`block::Cut`]).
+    /// `Cut::Cancelled` (B3.4): this worker observed [`Vm::cancel`] and bailed, so the join can tell
+    /// a swallowed cooperative abort apart from a real fault. `Cut::Delivered { floor }`
+    /// (TICKET-096): a recorded child fault — or a reduced job fault — is unwinding this owner; with
+    /// `floor = Some(n)`, a `recover:` installed INSIDE nursery `n`'s body must not catch it, while
+    /// one installed outside it still must (`tests/chz/spec/nursery_fault_verdict_test.chz`). Not in
+    /// [`FiberCtx`] — like `pending_exit`, it is reset at every fiber schedule-in.
+    cut: Option<block::Cut>,
     /// TICKET-147 (W14-12): set by a cancel funnel when a `defer` (or a nested nursery it aborted)
     /// replaced the `cancelled` sentinel with a real, non-deadlock fault. Read (and cleared) by
     /// [`Vm::classify_mn_outcome`], which then reports `CancelledFault` instead of swallowing it.
     cancel_unwind_faulted: bool,
-    /// The `nurseries` index of the nursery whose recorded child fault is currently unwinding this
-    /// OWNER (TICKET-096). `Some(n)` means a `recover:` installed INSIDE nursery `n`'s body must not
-    /// catch this fault, while one installed outside it still must — that is what TICKET-062's
-    /// `tests/chz/spec/nursery_fault_verdict_test.chz` asserts. Not in [`FiberCtx`], like `cancelled`.
-    owner_fault_floor: Option<usize>,
     /// Set only on the worker `Vm` of an EAGERLY-dispatched `Executor` job (M:N) — to that job's own
     /// executor core. Such a worker has no nursery scheduler and no [`MnSched`], so a blocking op
     /// falls to the "no scheduler" arm of `chan_recv_step` / `send` / `wait:`, which faults
@@ -1990,6 +1989,9 @@ enum TaskOutcome {
         err: RuntimeError,
         out: Vec<u8>,
         stderr: Vec<u8>,
+        /// TICKET-195 — the faulting party's own stack trace, so a party that receives this fault
+        /// reports the faulting party's frames, never its own (`Vm::adopt_child_fault`).
+        trace: Vec<TraceFrame>,
     },
     /// The M:N deadlock detector aborted a nursery: EVERY still-parked fiber was recorded with this
     /// synthetic `DEADLOCK_MSG` outcome (see [`SchedCore::flag_deadlock`]). It is DISTINCT from
@@ -4693,14 +4695,14 @@ impl MnSched {
     /// taking any slot. `MnSched::finish` writes a slot and bumps `scopes[sid].done` under this SAME
     /// lock, so a fault this call sees is final: the join still reduces every slot afterward exactly
     /// as if this peek never ran.
-    fn scope_fault(&self, scope_id: usize) -> Option<RuntimeError> {
+    fn scope_fault(&self, scope_id: usize) -> Option<(RuntimeError, Vec<TraceFrame>)> {
         let c = self.lock();
         let (base, total) = {
             let s = &c.scopes[scope_id];
             (s.base_index, s.total)
         };
         c.slots[base..base + total].iter().find_map(|s| match s {
-            Some(TaskOutcome::Fault { err, .. }) => Some(err.clone()),
+            Some(TaskOutcome::Fault { err, trace, .. }) => Some((err.clone(), trace.clone())),
             _ => None,
         })
     }
@@ -5715,7 +5717,7 @@ impl ReadyWorker {
     /// raised on a dead stdout is ORDINARY and does not trip it, so a broken pipe kills the printing
     /// job and leaves its siblings alone — see [`executor_hard_halt`] for the measured ancestors.
     /// Precedence: a deliberate `os.exit` (worker `pending_exit`) → `Exit`; an observed sibling
-    /// cancel (`worker.cancelled`) → `Cancelled` (swallowed); else the invoke result maps to
+    /// cancel (`worker.is_cancelled()`) → `Cancelled` (swallowed); else the invoke result maps to
     /// `Fault`/`Done`. Output buffers are moved out only on the paths that flush them.
     fn run_outcome(mut self) -> TaskOutcome {
         let span = self.span;
@@ -5730,7 +5732,7 @@ impl ReadyWorker {
                 out: std::mem::take(&mut self.worker.out),
                 stderr: std::mem::take(&mut self.worker.stderr),
             }
-        } else if self.worker.cancelled {
+        } else if self.worker.is_cancelled() {
             // This worker observed a sibling's cancel and unwound — its output still flushes.
             // TICKET-147 — unless its own `defer` faulted during that unwind (see `classify_mn_outcome`).
             match res {
@@ -5756,6 +5758,7 @@ impl ReadyWorker {
                         err: e,
                         out: std::mem::take(&mut self.worker.out),
                         stderr: std::mem::take(&mut self.worker.stderr),
+                        trace: self.worker.take_fault_trace(),
                     }
                 }
                 Ok(ret) => {
@@ -5789,6 +5792,7 @@ impl ReadyWorker {
                                 err: e,
                                 out: std::mem::take(&mut self.worker.out),
                                 stderr: std::mem::take(&mut self.worker.stderr),
+                                trace: Vec::new(),
                             }
                         }
                     }

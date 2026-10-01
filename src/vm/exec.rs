@@ -1,7 +1,7 @@
 // vm::exec — split out of vm/mod.rs. `super::*` == the `vm` module.
 // VM core: construction, frames, generators, run/run_until/step dispatch.
 
-use super::block::{self, Halt, OwnedScope, WakeSet};
+use super::block::{self, Cut, Halt, OwnedScope, WakeSet};
 use super::*;
 
 impl Vm {
@@ -171,9 +171,8 @@ impl Vm {
             body_gate: None,
             cancel: None,
             cancel_outer: Vec::new(),
-            cancelled: false,
+            cut: None,
             cancel_unwind_faulted: false,
-            owner_fault_floor: None,
             eager_core: None,
             quiesce: Arc::new(crate::vm::quiesce::QuiesceState::default()),
             timeout_ms: 0,
@@ -776,6 +775,10 @@ impl Vm {
         self.fault_trace = None;
         self.fault_trace_depth = 0;
         self.gen_fault_prefix.clear();
+        // TICKET-195 — a delivered cut belongs to the invoke it unwound; a cancel stays (DEC-010).
+        if matches!(self.cut, Some(Cut::Delivered { .. })) {
+            self.cut = None;
+        }
     }
 
     /// W13-21 — the declaration span of the entry callee, if it has one. `Some` for a callee backed
@@ -1337,7 +1340,7 @@ impl Vm {
             if self.gc_stress || self.heap.should_collect() {
                 self.collect();
                 // `chezzi test --max-heap` — if this test's live heap tripped the cap during the
-                // sweep just run, hard-abort it. Modeled on the `self.cancelled` funnel below: unwind
+                // sweep just run, hard-abort it. Modeled on the `Cut::Cancelled` funnel below: unwind
                 // with `report = false` so `recover:` CANNOT catch it. The check is RE-OBSERVED like a
                 // cancel checkpoint — no latch — so a `defer` that itself allocates runaway during the
                 // abort's cleanup unwind is bounded too (its own nested `run_until` re-trips here and
@@ -1358,11 +1361,8 @@ impl Vm {
                     // boundary — that is what keeps the abort un-catchable by `recover:` (the Err
                     // funnel below bypasses `recover:` whenever the marker is set) and correctly
                     // bucketed `OverMemory`.
-                    let rte = self
-                        .unwind_deferred(base_level, false)
-                        .map(RuntimeError::over_memory)
-                        .unwrap_or(over_rte);
-                    return Err(rte);
+                    let d = self.unwind_deferred(base_level, false);
+                    return Err(self.unwind_result(over_rte, d, false).over_memory());
                 }
             }
             // CANCELLATION POINTS (the every-instruction cancel check that used to sit here is GONE).
@@ -1372,7 +1372,7 @@ impl Vm {
             // its straight-line prologue, so a `defer` it registers is ALWAYS registered before
             // anything can kill it — "does my cleanup run?" no longer depends on scheduler timing.
             // The cancel still unwinds like an uncaught fault that bypasses `recover:` — see the
-            // post-step funnel below (`self.cancelled` ⇒ `unwind_deferred(base_level, false)`).
+            // post-step funnel below (`Cut::Cancelled` ⇒ `unwind_deferred(base_level, false)`).
             //
             // D3: reduction-counting preemption — gated on `self.mn` (an M:N worker shell running fibers
             // off the shared queue); a shell with no sched in scope is never preempted. Decrement the budget per dispatched op; at
@@ -1542,7 +1542,7 @@ impl Vm {
             return Err(rte);
         }
         // B3.4: a cancel observed deeper in this step (a blocking `recv` that woke on the
-        // nursery cancel flag set `self.cancelled` and returned the sentinel) unwinds the
+        // nursery cancel flag set `Cut::Cancelled` and returned the sentinel) unwinds the
         // whole worker — run defers, bypass `recover:`, mirroring the loop-top check. A
         // cancelled task must not be caught and resumed.
         //
@@ -1558,7 +1558,7 @@ impl Vm {
         // raised at a back-edge in a nested `run_until` (a HOF callback's own loop) bubbles
         // here and must keep bypassing `recover:` the same way.
         //
-        // W7-3 CARVE-OUT — the (a) `self.cancelled` marker ONLY. `self.cancelled` is a
+        // W7-3 CARVE-OUT — the (a) `Cut::Cancelled` marker ONLY. `Cut::Cancelled` is a
         // task-wide LATCH that stays set while the cancelled task's `defer`s run, but "a
         // `defer` is never itself cancelled" (docs/concurrency.md) and `cancel_suppressed`
         // already carries the same `deferring > 0` suppression. So a `recover:` owned by
@@ -1588,8 +1588,8 @@ impl Vm {
         let fatal = rte.is_deadlock;
         let caught_here =
             !fatal && matches!(self.handlers.last().copied(), Some(h) if h.frame_len > base_level);
-        let cancel_bypass = self.cancelled && !(self.deferring > 0 && caught_here);
-        // TICKET-096 — a nursery OWNER's `owner_fault_floor` is `Some(n)` while a child fault
+        let cancel_bypass = self.is_cancelled() && !(self.deferring > 0 && caught_here);
+        // TICKET-096 — a nursery OWNER's cut is `Delivered { floor: Some(n) }` while a child fault
         // recorded at `nurseries` index `n` is unwinding it. A handler with `Handler::nursery_len
         // > n` was installed INSIDE nursery `n`'s body — in the cancelled scope — and must not
         // catch (measured: `recover:` wrapping a `parallel:` whose child panics keeps printing
@@ -1599,8 +1599,9 @@ impl Vm {
         // This makes the delivery happen ONCE — the owner aborts at the first delivery instead of
         // catching and re-reading the recorded fault at every later checkpoint.
         let owner_bypass = matches!(
-            (self.owner_fault_floor, self.handlers.last()),
-            (Some(n), Some(h)) if caught_here && n < self.nurseries.len() && h.nursery_len > n
+            (self.cut, self.handlers.last()),
+            (Some(Cut::Delivered { floor: Some(n) }), Some(h))
+                if caught_here && n < self.nurseries.len() && h.nursery_len > n
         );
         if cancel_bypass || owner_bypass || rte.is_over_memory || rte.is_timed_out {
             let over_mem = rte.is_over_memory;
@@ -1655,7 +1656,8 @@ impl Vm {
             self.unwind_no_defer(target);
             rte
         } else {
-            self.unwind_deferred(target, true).unwrap_or(rte)
+            let d = self.unwind_deferred(target, true);
+            self.unwind_result(rte, d, false)
         };
         let rte = if fatal { rte.deadlock() } else { rte };
         // TICKET-148 — relocate a NATIVE std fault to the user's call into std, for the
@@ -1678,9 +1680,6 @@ impl Vm {
                 // belongs to a fault that is now handled), so a later uncaught fault re-captures.
                 self.fault_trace = None;
                 self.fault_trace_depth = 0;
-                // TICKET-096 — this handler is outside the faulting nursery, so the fault is
-                // handled; the floor must not survive it and bypass an unrelated later handler.
-                self.owner_fault_floor = None;
                 self.cancel_unwind_faulted = false;
                 // `unwind_deferred` already dropped frames down to `h.frame_len`; restore the
                 // operand stack / call-depth / ip to the boundary's snapshot.
@@ -1691,7 +1690,15 @@ impl Vm {
                 // `unwind_deferred` ran the defers of frames ABOVE the boundary, but the
                 // boundary frame's own (recover-block) defers remain — drain them now, before
                 // binding the result. A fault in one supersedes the original.
-                let rte = self.drain_frame_to(h.defer_len).unwrap_or(rte);
+                let d = self.drain_frame_to(h.defer_len);
+                let rte = self.unwind_result(rte, d, false);
+                // TICKET-096 — this handler is outside the faulting nursery, so the fault is
+                // handled; the floor must not survive it and bypass an unrelated later handler.
+                // TICKET-195 — cleared only AFTER the recover-block drain just above, which still
+                // ranks its `defer` fault below the delivered one.
+                if matches!(self.cut, Some(Cut::Delivered { .. })) {
+                    self.cut = None;
+                }
                 // W13-20 — clear the prefix HERE, after every drain this catch runs
                 // (`unwind_deferred` above AND this recover-block drain), not before either
                 // one. A deferred `.next()` — whether outside the recover block (drained by
@@ -1843,7 +1850,7 @@ impl Vm {
     /// CPU loop therefore stays promptly cancellable, while straight-line code (a task's prologue,
     /// its `defer` registration) runs to completion first.
     ///
-    /// `!self.cancelled` latches on the first observation: a `defer` containing a loop must not
+    /// `!self.is_cancelled()` latches on the first observation: a `defer` containing a loop must not
     /// re-fire the check and skip the remaining defers while the cancel unwind is already in flight.
     /// The `Err` is funnelled by `run_until`'s post-step handler into `unwind_deferred(base_level,
     /// false)` — defers run, `recover:` inside the task is bypassed (a cancelled task must die).
@@ -1856,7 +1863,7 @@ impl Vm {
             // `spawn`ed fiber (its loop routes through here too), so a single check catches both.
             // Zero clock reads when the cap is OFF: the `Some` guard short-circuits before any
             // `Instant::now()`. Throttled to one read per 1024 back-edges (the read is the cost). The
-            // `is_timed_out` marker alone drives the recover-bypass — no `self.cancelled` latch.
+            // `is_timed_out` marker alone drives the recover-bypass — no `Cut::Cancelled` latch.
             // The 1/1024 sample is shared by both wall-clock rungs below. Hoisted OUT of the `deadline`
             // guard (W7-57) because the exit rung needs it even when `--timeout` is off; the clock read
             // itself stays behind `Some(dl)`, so an uncapped run still reads no clock.
@@ -1906,7 +1913,7 @@ impl Vm {
     /// cancel, or a recorded fault of a child of a nursery it owns (unless a run-wide exit is pending).
     /// `None` while [`Vm::cancel_suppressed`]: two suppressions, both load-bearing:
     ///
-    /// * `self.cancelled` — latch: once the cancel unwind is in flight, a checkpoint inside it must
+    /// * `Cut::Cancelled` — latch: once the cancel unwind is in flight, a checkpoint inside it must
     ///   not re-fire and skip the remaining `defer`s.
     /// * `self.deferring > 0` — a deferred call is the cleanup the cancel exists to run. Defers drain
     ///   on the normal-return / own-fault paths too, where `cancelled` is still false while the scope
@@ -1943,7 +1950,7 @@ impl Vm {
     }
 
     /// [`Vm::halt_requested`], delivered: a cancel latches `cancelled` and returns the `cancelled`
-    /// sentinel; a child fault records `owner_fault_floor` (DEC-096: only a `recover:` INSIDE the
+    /// sentinel; a child fault records `Cut::Delivered { floor }` (DEC-096: only a `recover:` INSIDE the
     /// faulting nursery is bypassed) and returns the child's error.
     pub(super) fn take_halt(&mut self, span: Span) -> Option<RuntimeError> {
         self.take_halt_at(span, true)
@@ -1964,14 +1971,32 @@ impl Vm {
     pub(super) fn deliver_halt(&mut self, h: Halt, span: Span) -> RuntimeError {
         match h {
             Halt::Cancelled => {
-                self.cancelled = true;
+                self.cut = Some(Cut::Cancelled);
                 self.err("cancelled".to_string(), span)
             }
-            Halt::ChildFault { floor, err } => {
-                self.owner_fault_floor = Some(floor);
+            Halt::ChildFault { floor, err, trace } => {
+                self.adopt_child_fault(Some(floor), trace);
                 err
             }
         }
+    }
+
+    /// TICKET-195 — THE one writer of [`Cut::Delivered`]: another party's fault (a child's, or a
+    /// job's) is about to unwind this party. Installs the faulting party's own trace with
+    /// `fault_trace_depth = usize::MAX`, so the capture in [`Vm::on_step_fault`] never replaces it
+    /// with this party's frames. A cancel already latched keeps precedence (`halt_of`: cancel first).
+    pub(super) fn adopt_child_fault(&mut self, floor: Option<usize>, trace: Vec<TraceFrame>) {
+        if self.is_cancelled() {
+            return;
+        }
+        self.cut = Some(Cut::Delivered { floor });
+        self.fault_trace = Some(trace);
+        self.fault_trace_depth = usize::MAX;
+    }
+
+    /// TICKET-195 — is this party unwinding a cancel ([`Cut::Cancelled`])?
+    pub(super) fn is_cancelled(&self) -> bool {
+        matches!(self.cut, Some(Cut::Cancelled))
     }
 
     /// gaps.md W7-57 — how the two CPU-side checkpoints ([`Vm::jump_checked`]'s loop back-edge,
@@ -2002,7 +2027,7 @@ impl Vm {
             return None;
         }
         if self.cancel_flags().next().is_some() {
-            self.cancelled = true;
+            self.cut = Some(Cut::Cancelled);
             return Some(self.err("cancelled".to_string(), span));
         }
         self.run_exit_err(span)
@@ -2024,7 +2049,7 @@ impl Vm {
     /// The two suppressions of the cancel predicate — a tripped flag does NOT cancel this fiber while
     /// either holds, and neither can change while it is blocked in place.
     pub(super) fn cancel_suppressed(&self) -> bool {
-        self.cancelled || self.deferring > 0
+        self.is_cancelled() || self.deferring > 0
     }
 
     /// TICKET-188 — THE wake set of this party: the cancel flags [`Vm::halt_requested`] reads plus

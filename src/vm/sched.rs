@@ -975,8 +975,11 @@ impl Vm {
     /// TICKET-147 — reduce an aborted (escaped) nursery's slots into the fault its children ended
     /// with. An `os.exit` sets `pending_exit` inside the reduce and is not reported here: the catch
     /// sites honor it through `pending_exit`.
+    /// TICKET-195 — it reduces through [`Vm::reduce_slots`], never [`Vm::reduce_task_slots`]: this
+    /// runs inside the party's OWN fault's unwind, so the child's fault must not become a cut.
     fn escape_child_fault(&mut self, slots: Vec<Option<TaskOutcome>>) -> Option<RuntimeError> {
-        self.reduce_task_slots(slots)
+        self.reduce_slots(slots)
+            .0
             .err()
             .filter(|_| self.pending_exit.is_none())
     }
@@ -2561,13 +2564,12 @@ impl Vm {
         self.send_suspend = None; // set by a full bounded `send` (→ `Disp::SendPark`)
         self.offload = None;
         self.poll_park = None;
-        self.cancelled = false;
-        self.cancel_unwind_faulted = false;
-        // TICKET-096 review fix — `owner_fault_floor` indexes THIS fiber's `nurseries` (swapped by
-        // `swap_ctx`, not carried in `FiberCtx`), so a floor left by the fiber that just parked/died
+        // TICKET-096 review fix — a delivered cut's floor indexes THIS fiber's `nurseries` (swapped
+        // by `swap_ctx`, not carried in `FiberCtx`), so a cut left by the fiber that just parked/died
         // on this shell must not survive into the next fiber scheduled in here, or an unrelated
         // `recover:` in that fiber is wrongly bypassed (`run_until`'s `owner_bypass`).
-        self.owner_fault_floor = None;
+        self.cut = None;
+        self.cancel_unwind_faulted = false;
         self.pending_exit = None;
         self.reds = self.fresh_reds(); // D3 — fresh reduction budget on every schedule-in (BEAM semantics)
         self.yield_now = false;
@@ -2613,7 +2615,7 @@ impl Vm {
                     }
                     Err(rte) => {
                         // W7-16 — an offloaded `sleep_ms` ENDED by a cancel is delivered by the halt
-                        // branch above (TICKET-188), so `self.cancelled` is never set here: this arm
+                        // branch above (TICKET-188), so `Cut::Cancelled` is never set here: this arm
                         // is a native fault or a hard halt (`--timeout` / over-memory), which must
                         // never be swallowed into a silent `Cancelled`.
                         // …and it must UNWIND, not merely finish. This arm returns WITHOUT re-entering
@@ -2626,11 +2628,11 @@ impl Vm {
                         // re-stamping the hard-halt markers a mid-unwind `defer` fault would strip, so
                         // `--timeout`/`--max-heap` stay un-catchable. A native PANIC keeps its
                         // documented no-defer behavior: it sets neither the cancel latch nor a marker.
-                        let rte = if self.cancelled || rte.is_over_memory || rte.is_timed_out {
+                        let rte = if self.is_cancelled() || rte.is_over_memory || rte.is_timed_out {
                             let (over_mem, timed) = (rte.is_over_memory, rte.is_timed_out);
                             // TICKET-135 (W14-39): as in `run_until`'s cancel bypass, abort the
                             // escaped nurseries of a task whose offloaded sleep a cancel ended.
-                            let r = self.unwind_cancelled(0, self.cancelled, rte);
+                            let r = self.unwind_cancelled(0, self.is_cancelled(), rte);
                             let r = if over_mem { r.over_memory() } else { r };
                             if timed { r.timed_out() } else { r }
                         } else {
@@ -2664,7 +2666,8 @@ impl Vm {
                             cip.span,
                         )
                         .timed_out();
-                    let rte = self.unwind_deferred(0, false).unwrap_or(rte).timed_out();
+                    let d = self.unwind_deferred(0, false);
+                    let rte = self.unwind_result(rte, d, false).timed_out();
                     return Disp::Finish(self.classify_mn_outcome(Err(rte)));
                 }
                 // TICKET-188 — a halt that woke the connect park (a cancel, or a child fault of a
@@ -2751,6 +2754,7 @@ impl Vm {
             err: panic_to_fault(p, span),
             out: Vec::new(),
             stderr: Vec::new(),
+            trace: Vec::new(),
         }
     }
 
@@ -2767,7 +2771,7 @@ impl Vm {
                 out: std::mem::take(&mut self.out),
                 stderr: std::mem::take(&mut self.stderr),
             }
-        } else if self.cancelled {
+        } else if self.is_cancelled() {
             // TICKET-147 (W14-12) — the cancel funnel replaced the `cancelled` sentinel with a real
             // fault from the task's own `defer` / an aborted nested nursery: report it, ranked below
             // every ordinary fault. No `trip_cancel`: the scope is already cancelled.
@@ -2792,6 +2796,7 @@ impl Vm {
                         err: e,
                         out: std::mem::take(&mut self.out),
                         stderr: std::mem::take(&mut self.stderr),
+                        trace: self.take_fault_trace(),
                     }
                 }
                 Ok(()) => TaskOutcome::Done(WorkerResult {
@@ -2827,12 +2832,29 @@ impl Vm {
     /// lowest index winning within each kind (scan order + `is_none()`). TICKET-147: a
     /// `CancelledFault` (a cancelled task's own `defer` fault) ranks below every ordinary fault —
     /// the cancel's root cause is the more useful report.
+    ///
+    /// TICKET-195 — a JOIN's reduce: a fault it returns was raised by another party, so this party
+    /// adopts it as a delivered cut and reports that party's trace ([`Vm::adopt_child_fault`]).
     pub(super) fn reduce_task_slots(
         &mut self,
         slots: Vec<Option<TaskOutcome>>,
     ) -> Result<(), RuntimeError> {
+        let (res, trace) = self.reduce_slots(slots);
+        if let (Err(_), Some(trace)) = (&res, trace) {
+            self.adopt_child_fault(None, trace);
+        }
+        res
+    }
+
+    /// The reduce itself (see [`Vm::reduce_task_slots`]). Also returns the trace of the slot whose
+    /// fault it returns: a `Fault`'s own trace, an empty one for a `CancelledFault`, and `None` for
+    /// an exit or a synthesized deadlock.
+    fn reduce_slots(
+        &mut self,
+        slots: Vec<Option<TaskOutcome>>,
+    ) -> (Result<(), RuntimeError>, Option<Vec<TraceFrame>>) {
         let mut first_exit: Option<i32> = None;
-        let mut first_fault: Option<RuntimeError> = None;
+        let mut first_fault: Option<(RuntimeError, Vec<TraceFrame>)> = None;
         // W7-5 review Fix 1: the lowest-index HARD-HALT fault (`executor_hard_halt` —
         // over-memory/timeout), tracked separately from `first_fault` above. It must win
         // final propagation over an earlier ordinary fault, or a later `--max-heap`/`--timeout` abort
@@ -2840,10 +2862,10 @@ impl Vm {
         // swallow a hard halt it must never be able to catch — `exec.rs`'s cancel-bypass check is
         // keyed on these markers). This does NOT change flush behavior — every fault flushes its
         // buffered output regardless of index (W7-5c) — only which error `reduce_task_slots` returns.
-        let mut first_hard_fault: Option<RuntimeError> = None;
+        let mut first_hard_fault: Option<(RuntimeError, Vec<TraceFrame>)> = None;
         let mut deadlock_err: Option<RuntimeError> = None;
         // TICKET-147 — the lowest-index `CancelledFault`; used only when no ordinary fault exists.
-        let mut first_cancel_fault: Option<RuntimeError> = None;
+        let mut first_cancel_fault: Option<(RuntimeError, Vec<TraceFrame>)> = None;
         for slot in slots {
             // W7-60 — a `None` here means the slot was already drained by `EagerState::take_finished`
             // on a `join_eager_jobs` bail-out (its output is flushed, its outcome consumed), which is
@@ -2864,7 +2886,12 @@ impl Vm {
                         first_exit = Some(code);
                     }
                 }
-                TaskOutcome::Fault { err, out, stderr } => {
+                TaskOutcome::Fault {
+                    err,
+                    out,
+                    stderr,
+                    trace,
+                } => {
                     // EVERY faulting task flushes its buffered output at its task-order slot,
                     // unconditionally (W7-5c) — after lower-index Done/Exit, before the fault
                     // propagates — like the `Deadlocked` arm below. Under the W7-5 run-all drain a
@@ -2888,12 +2915,12 @@ impl Vm {
                     // single-producer case covered by the test
                     // `parallel_faulting_task_flushes_partial_output_3engine`).
                     if first_hard_fault.is_none() && (executor_hard_halt(&err) || err.is_deadlock) {
-                        first_hard_fault = Some(err.clone());
+                        first_hard_fault = Some((err.clone(), trace.clone()));
                     }
                     self.out.extend_from_slice(&out);
                     self.stderr.extend_from_slice(&stderr);
                     if first_fault.is_none() {
-                        first_fault = Some(err);
+                        first_fault = Some((err, trace));
                     }
                 }
                 TaskOutcome::Deadlocked { err, out, stderr } => {
@@ -2916,7 +2943,7 @@ impl Vm {
                     self.out.extend_from_slice(&out);
                     self.stderr.extend_from_slice(&stderr);
                     if first_cancel_fault.is_none() {
-                        first_cancel_fault = Some(err);
+                        first_cancel_fault = Some((err, Vec::new()));
                     }
                 }
                 TaskOutcome::Cancelled { out, stderr } => {
@@ -2950,15 +2977,15 @@ impl Vm {
             // It wins over any sibling fault — a hard halt is never demoted to a catchable error.
             (Some(code), _, _) => {
                 self.pending_exit = Some(code);
-                Err(self.err("exit".to_string(), Span::RUNTIME))
+                (Err(self.err("exit".to_string(), Span::RUNTIME)), None)
             }
             // A real fault propagates normally so an outer `recover:` can still catch it (unless it
             // carries a hard-halt marker, in which case `first_hard_fault` already selected it above
             // and `exec.rs`'s cancel-bypass check keeps `recover:` from swallowing it anyway).
-            (None, Some(e), _) => Err(e),
+            (None, Some((e, trace)), _) => (Err(e), Some(trace)),
             // Deadlock abort: all parked buffers already flushed above; propagate ONE deadlock error.
-            (None, None, Some(e)) => Err(e),
-            (None, None, None) => Ok(()),
+            (None, None, Some(e)) => (Err(e), None),
+            (None, None, None) => (Ok(()), None),
         }
     }
 
@@ -5276,24 +5303,24 @@ impl Vm {
     /// fix that either — it would unblock the WAITER while the uninterruptible child kept running,
     /// which is the documented ceiling of a blocking native (`docs/stdlib.md` §"blocking calls cannot
     /// be interrupted"), not something a join can lift. What the bail-out CAN do about an abandoned
-    /// job, it now does unconditionally: it trips `core.cancel` (see the store below), so every job
-    /// that owns a checkpoint stops at it.
+    /// job, a STOPPED joiner (`--timeout`, the verdict) does: it trips `core.cancel` (see the store
+    /// below), so every job that owns a checkpoint stops at it. A CUT joiner (TICKET-195: a cancel or
+    /// a child fault delivered to it) does not — its jobs run on for a later join.
     ///
     /// **Both rungs are decided while `eager` (G) is HELD, deliberately.** `deadline_halt` takes no
     /// lock. `halt_requested` can take a sched core lock (a child fault's `scope_fault`), so it is
     /// READ with G dropped and delivered only after re-checking progress under the re-taken G
     /// (TICKET-188) — holding G at the decision means no job can finish between the check and it.
-    /// That matters because the cancel rung LATCHES (`self.cancelled = true`): a halt observed in
+    /// That matters because the cancel rung LATCHES (`self.cut = Some(Cut::Cancelled)`): a halt observed in
     /// such a window and then discarded as stale would leave this fiber permanently
     /// `cancel_suppressed`, no-opping every later checkpoint. Only the verdict needs the drop, and
     /// only because `quiesced_only_joins` takes P and then G.
     ///
-    /// **Collateral of the cancel rung, accepted:** unwinding here leaves the joined executor marked
-    /// `shut` with jobs still outstanding, so the exit drain skips it. That is not a new class — the
-    /// pre-existing deadlock bail-out below leaves exactly the same state — and it is what
-    /// `shutdown_now`'s documented "ask running jobs to stop cooperatively" means for a job that is
-    /// itself parked in a join. The cancelled joiner's own outcome is SWALLOWED, as every cancelled
-    /// task's is.
+    /// **The cancel rung leaves the jobs running (TICKET-195).** Unwinding here leaves the joined
+    /// executor marked `shut` AND `unreduced`, so a later `shutdown()` or the exit drain reduces it.
+    /// A job that is itself parked in a join still stops on `shutdown_now`, because its nested
+    /// executor inherits the job's cancel flag (DEC-059). The cancelled joiner's own outcome is
+    /// SWALLOWED, as every cancelled task's is.
     ///
     /// **Lock order.** `core.eager` (G) is DROPPED before `quiesced` is called: the one total order is
     /// `parties` (P) → … → `ExecutorCore::eager` (G), and `quiesced` takes G under P (both through
@@ -5333,6 +5360,15 @@ impl Vm {
         core: &Arc<ExecutorCore>,
         span: Span,
     ) -> Result<(), RuntimeError> {
+        /// TICKET-195 — why a join left before its jobs finished.
+        enum JoinBail {
+            /// the run stopped wanting the jobs (`--timeout`, the join verdict): flush the finished
+            /// slots and trip `core.cancel` (W7-60's last chance to ask)
+            Stop(RuntimeError),
+            /// the joiner itself was cut (a cancel, a delivered child fault): leave every slot and
+            /// the jobs running for a later join
+            Cut(RuntimeError),
+        }
         // A JOIN NEVER WAITS FOR ITSELF. When this thread is an eager job OF THIS CORE — a job that
         // calls `ex.shutdown()`/`ex.shutdown_now()` on the executor it is running under — its own
         // slot is one of the `outstanding` below and stays so until it returns from here. Waiting
@@ -5396,7 +5432,7 @@ impl Vm {
         // W7-60 — carried out of the loop rather than `?`-ed, so the slot rule below can read it: on
         // EVERY bail-out the jobs that own the remaining slots are still outstanding, so this thread must
         // not empty the vec they will `finish` into (the FINISHED ones are flushed instead).
-        let mut bail: Option<RuntimeError> = None;
+        let mut bail: Option<JoinBail> = None;
         let slots = {
             let mut g = core.eager.lock().unwrap_or_else(|e| e.into_inner());
             while g.outstanding() > slack {
@@ -5415,7 +5451,7 @@ impl Vm {
                 // only a timed-out one: they are free, and a notified wake is as good a moment as
                 // any to notice the run is over.
                 if let Err(e) = self.deadline_halt(span) {
-                    bail = Some(e);
+                    bail = Some(JoinBail::Stop(e));
                     break;
                 }
                 // TICKET-188 — a child fault's `scope_fault` takes a sched core lock, which must not
@@ -5428,7 +5464,7 @@ impl Vm {
                     continue;
                 }
                 if let Some(h) = halt {
-                    bail = Some(self.deliver_halt(h, span));
+                    bail = Some(JoinBail::Cut(self.deliver_halt(h, span)));
                     break;
                 }
                 // The deadlock verdict keeps BOTH of its old gates: only on a timed-out wait (a
@@ -5445,7 +5481,9 @@ impl Vm {
                 // Re-check under the re-taken lock: a job may have finished in the gap, which is
                 // progress and makes the verdict stale.
                 if verdict && g.outstanding() > slack {
-                    bail = Some(self.err(JOIN_DEADLOCK_MSG.to_string(), span).deadlock());
+                    bail = Some(JoinBail::Stop(
+                        self.err(JOIN_DEADLOCK_MSG.to_string(), span).deadlock(),
+                    ));
                     break;
                 }
             }
@@ -5472,7 +5510,18 @@ impl Vm {
             // streamed `print` already reached fd 1 at the moment it ran; on the buffered sink — every
             // embedder, `run_capture` — the slot IS the only copy.) `ExecutorCore::unreduced`, set
             // above, is the hand-off: the exit drain picks such a core up exactly once.
-            if bail.is_some() {
+            if let Some(JoinBail::Cut(_)) = bail {
+                // TICKET-195 — a CUT joiner (a cancel, or a child fault delivered to it) leaves
+                // because of its own party, not because the jobs are stuck or the run is over. It
+                // takes nothing and hands the WHOLE vector to a later join: a later `shutdown()`,
+                // or the exit drain through the `unreduced` mark, reduces it in submission order.
+                // A self-join (`slack > 0`) already set the mark above, so this leaves it as found.
+                if slack == 0 {
+                    core.unreduced.store(true, Ordering::Release);
+                }
+                drop(g);
+                Vec::new()
+            } else if bail.is_some() {
                 // Debt discharged the only way an ORDINARY (non-self) bail can: flush what finished,
                 // and CLEAR the mark — this thread was never going to `take_slots` on success either,
                 // so a bail truly has no successor to promise, and re-joining at exit a core whose
@@ -5508,8 +5557,16 @@ impl Vm {
             self.block_exit(reg);
         }
         drop(_party);
-        if let Some(e) = bail {
-            // W7-60 review, charge A1 — ASK THE WORK TO STOP, don't just stop waiting for it. Every
+        if let Some(JoinBail::Cut(e)) = bail {
+            return Err(e);
+        }
+        if let Some(JoinBail::Stop(e)) = bail {
+            // W7-60 review, charge A1 — ASK THE WORK TO STOP, don't just stop waiting for it. This
+            // serves a STOPPED joiner only — `--timeout` and the join verdict, both of which end the
+            // run's interest in the jobs. A CUT joiner (TICKET-195: a cancel or a child fault
+            // delivered to it) returned just above without tripping: it leaves the jobs running for
+            // a later `shutdown()` or the exit drain, as CPython does. A job's own nested executor
+            // still stops, because it inherits the job's cancel flag. Every
             // other `--timeout`/cancel observation happens INSIDE a job, where `run_outcome` trips the
             // executor's cancel for us; this one is on the JOINER, and without this store the abandoned
             // jobs never learn. That is not merely untidy: `Vm::do_call`'s blocking-native offload gates
@@ -6675,6 +6732,7 @@ pub(super) fn dispatch_eager_job(
                 err: panic_to_fault(p, span),
                 out: Vec::new(),
                 stderr: Vec::new(),
+                trace: Vec::new(),
             });
         // W7-26 — summarised for the `--max-heap` byte walk BEFORE the lock is taken: the walk is
         // O(result) and this lock is contended by every `submit` (`reserve`, below, runs while the

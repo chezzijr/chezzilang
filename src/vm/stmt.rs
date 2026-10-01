@@ -1,6 +1,7 @@
 // vm::stmt — split out of vm/mod.rs. `super::*` == the `vm` module.
 // Statement exec: try/defer unwind, struct/enum ctor, index/field, print, builtins, display/stringify.
 
+use super::block::Cut;
 use super::*;
 
 /// D4 layer C (TICKET-169): the one copy of the fault message text, quoted once here so every
@@ -115,29 +116,54 @@ impl Vm {
         self.unwind_deferred_escaped(target_frame_len, true, false);
     }
 
-    /// TICKET-147 (W14-12) — the cancel funnels' unwind: run [`Vm::unwind_deferred_escaped`] and let a
-    /// real fault raised by the cancelled task's own `defer`, or by a nested nursery it aborted,
-    /// replace the `cancelled` sentinel `rte`. Such a fault latches `cancel_unwind_faulted` so
-    /// `classify_mn_outcome` reports `CancelledFault` rather than swallowing it. A deadlock-marked
-    /// fault (a stuck cleanup's verdict) and a hard halt stay swallowed / stay hard halts, and a
-    /// non-cancel unwind (`report_escaped == false`) never latches.
+    /// TICKET-147 (W14-12) — the bypass funnels' unwind: run [`Vm::unwind_deferred_escaped`] and rank
+    /// what it raised (a `defer` fault, or a fault of a nested nursery it aborted) against `rte`
+    /// through [`Vm::unwind_result`].
     pub(super) fn unwind_cancelled(
         &mut self,
         target_frame_len: usize,
         report_escaped: bool,
         rte: RuntimeError,
     ) -> RuntimeError {
-        let hard_halt = rte.is_over_memory || rte.is_timed_out;
         let (defer, escaped) = self.unwind_deferred_escaped(target_frame_len, report_escaped, true);
-        let replaced = defer.or(escaped);
-        if report_escaped
-            && self.cancelled
-            && !hard_halt
-            && replaced.as_ref().is_some_and(|e| !e.is_deadlock)
-        {
-            self.cancel_unwind_faulted = true;
+        self.unwind_result(rte, defer.or(escaped), report_escaped)
+    }
+
+    /// TICKET-195 — THE defer ranking of an unwind that has a cause: `cause` is the fault that
+    /// started the unwind, `replaced` the fault its cleanup raised, if any. In order:
+    /// 1. a hard-halt cause (`--timeout`, `--max-heap`) keeps the cleanup's fault, whatever the cut
+    ///    (the caller re-stamps the marker, so the halt stays a halt);
+    /// 2. a [`Cut::Delivered`] party reports the delivered fault — its own cleanup's fault or stuck
+    ///    verdict ranks below the root cause — unless that cleanup itself hit a hard halt;
+    /// 3. a [`Cut::Cancelled`] party lets a real cleanup fault replace the `cancelled` sentinel and,
+    ///    on a cancel funnel (`report_escaped`), latches `cancel_unwind_faulted` so
+    ///    `classify_mn_outcome` reports `CancelledFault`; a deadlock-marked one stays swallowed;
+    /// 4. an own fault keeps Go's rule: the `defer`'s fault supersedes it.
+    ///
+    /// A drain with no cause to rank (`Op::DrainHandlerDefers`, `unwind_escaped_levels`,
+    /// `leave_defer_scope`) does not call it.
+    pub(super) fn unwind_result(
+        &mut self,
+        cause: RuntimeError,
+        replaced: Option<RuntimeError>,
+        report_escaped: bool,
+    ) -> RuntimeError {
+        if cause.is_over_memory || cause.is_timed_out {
+            return replaced.unwrap_or(cause);
         }
-        replaced.unwrap_or(rte)
+        match self.cut {
+            Some(Cut::Delivered { .. }) => match replaced {
+                Some(r) if r.is_over_memory || r.is_timed_out => r,
+                _ => cause,
+            },
+            Some(Cut::Cancelled) => {
+                if report_escaped && replaced.as_ref().is_some_and(|e| !e.is_deadlock) {
+                    self.cancel_unwind_faulted = true;
+                }
+                replaced.unwrap_or(cause)
+            }
+            None => replaced.unwrap_or(cause),
+        }
     }
 
     /// [`Vm::unwind_deferred`] that also reports the first fault an aborted (escaped) nursery's
