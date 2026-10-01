@@ -267,6 +267,25 @@ test fn single_entry_writes_keep_their_own_aliases():
     assert m["a"][1] == [1, 7], str(m)
     assert m["b"] == [[2], [2]], str(m)
 
+# The same with cells, where an id collision IS visible: a rebuild reuses the first cell it built for
+# an id, so entry b's closure would share entry a's counter. Fails with the splice memo seeded at 0, or
+# without raising the ceiling after a splice.
+fn _counter(start: int) -> fn() -> int:
+    n := start
+    fn bump() -> int:
+        n = n + 1
+        return n
+    return bump
+
+test fn single_entry_writes_keep_their_own_cells():
+    b: RwShared[Map[str, fn() -> int]] = RwShared({})
+    _rw_put(b, "a", _counter(0))
+    _rw_put(b, "b", _counter(100))
+    m := b.get()
+    a := m["a"]()
+    c := m["b"]()
+    assert a == 1 and c == 101, "a() = " + str(a) + ", b() = " + str(c)
+
 # A store whose entries alias one list across entries is not piece-self-contained: removing or
 # overwriting the entry that defines the list must not leave the other entry's back-reference dangling.
 test fn remove_and_overwrite_keep_a_cross_entry_alias_alive():
