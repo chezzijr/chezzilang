@@ -274,21 +274,23 @@ impl Checker {
     /// different times. A top-level statement runs in source order and keeps the lexical answer
     /// (cells c22, c23, c26). `kw_certain` is asked first, so every denial it made before keeps
     /// its message.
-    pub(super) fn labels_certain(&self, name: &str) -> Result<(usize, String), KwDeny> {
+    pub(super) fn labels_certain(&self, name: &str) -> Result<Vec<(usize, String)>, KwDeny> {
         let body_redeclared =
             self.runs_after_later_decls() && self.globals.get(name).is_some_and(|g| g.redeclared());
         match self.owning_scope(name) {
             Some(s) if s >= 1 => {
                 let key = (s, name.to_string());
-                if self.kw_certain.contains(&key) {
-                    Ok(key)
+                if let Some(deps) = self.kw_certain.get(&key) {
+                    Ok(std::iter::once(key.clone())
+                        .chain(deps.iter().cloned())
+                        .collect())
                 } else {
                     Err(KwDeny::NotOneFn)
                 }
             }
             Some(_) => {
                 let key = (0, name.to_string());
-                if !self.kw_certain.contains(&key) {
+                if !self.kw_certain.contains_key(&key) {
                     if self
                         .globals
                         .get(name)
@@ -301,12 +303,14 @@ impl Checker {
                 } else if body_redeclared {
                     Err(KwDeny::Redeclared)
                 } else {
-                    Ok(key)
+                    Ok(std::iter::once(key.clone())
+                        .chain(self.kw_certain[&key].iter().cloned())
+                        .collect())
                 }
             }
             // A fn reached by name through `functions`.
             None if body_redeclared => Err(KwDeny::Redeclared),
-            None => Ok((0, name.to_string())),
+            None => Ok(vec![(0, name.to_string())]),
         }
     }
 

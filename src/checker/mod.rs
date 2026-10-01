@@ -2779,16 +2779,20 @@ struct Checker {
     /// `:=` of a top-level user fn or a closure literal, or a nested `fn`'s own name. Only a
     /// keyword call through such a binding is legal (labels are surface-only, so any other callee
     /// may hold a fn with different parameter names). Keyed `(owning_scope_idx, name)`; drained at
-    /// `pop_scope` (DEC-032: scope indices are reused).
-    kw_certain: std::collections::HashSet<(usize, String)>,
+    /// `pop_scope` (DEC-032: scope indices are reused). TICKET-197: the value lists the keys of the
+    /// bindings this binding's certainty was read from (`w := v` over a nested fn lists `v`), so a
+    /// write to any of them voids it.
+    kw_certain: HashMap<(usize, String), Vec<(usize, String)>>,
     /// TICKET-139 (W14-2) — bindings written after their declaration: a `check_assign` Ident write
     /// or a same-scope re-declaration. Same key and drain as `kw_certain`.
     kw_written: std::collections::HashSet<(usize, String)>,
     /// TICKET-139 (W14-2) — every accepted keyword call through a `kw_certain` binding, settled at
     /// the binding's `pop_scope` against `kw_written` so the verdict does not depend on whether the
-    /// write comes before or after the call. Deduplicated by `(key, use)` (DEC-025: a closure body
+    /// write comes before or after the call. Deduplicated by `(keys, use)` (DEC-025: a closure body
     /// is inferred more than once). TICKET-190: a generator creation stamp waits here too.
-    kw_pending: Vec<((usize, String), globals::KwUse)>,
+    /// TICKET-197: an entry waits on every key it lists (the binding, then its `kw_certain`
+    /// dependencies); each key settles at its own scope's `pop_scope`, and a write to any voids it.
+    kw_pending: Vec<(Vec<(usize, String)>, globals::KwUse)>,
     /// PART B — retroactive hover: when the hover probe lands on an occurrence of a binding whose
     /// recorded type still carries `Unknown`-in-slot (a not-yet-refined empty collection), we stash the
     /// binding's `(owning_scope_idx, name, kind, doc)` here INSTEAD of locking `hover_result`, then at

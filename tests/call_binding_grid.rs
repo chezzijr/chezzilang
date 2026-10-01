@@ -112,7 +112,9 @@ fn kinds() -> Vec<Kind> {
             ctor: false,
             // `dflt_param` is skipped: a nested fn's default naming an earlier parameter is not
             // rejected at the declaration (a compiler panic, pre-existing, not call binding).
-            exceptions: &[("mixed", Some(CALLEE_FILLED_HOLE)), ("dflt_param", None)],
+            // TICKET-197: `mixed` binds like a direct call here and through `value_alias` below:
+            // a certain value carries its declaration's slots, so the middle default is filled.
+            exceptions: &[("dflt_param", None)],
         },
         Kind {
             tag: "value_alias",
@@ -124,7 +126,7 @@ fn kinds() -> Vec<Kind> {
                 ))
             },
             ctor: false,
-            exceptions: &[("mixed", Some(CALLEE_FILLED_HOLE)), ("dflt_param", None)],
+            exceptions: &[("dflt_param", None)],
         },
         Kind {
             tag: "imported_fn",
@@ -409,6 +411,11 @@ fn value_cells() -> Vec<Cell> {
             "newtype_ctor/kw",
             "newtype N = int\nprint(N(x=5))\n",
             Expect::Rejects(ONLY_SUPPORTED),
+        ),
+        cell(
+            "value_alias/generic_callee_filled_hole",
+            "fn f[T](a: T, b: List[T] = List[T](), c: int = 3) -> int:\n    return c\nk := f[int]\nprint(k(1, c=9))\n",
+            Expect::Rejects(CALLEE_FILLED_HOLE),
         ),
     ]
 }

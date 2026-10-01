@@ -40,9 +40,9 @@ pub(super) struct DiagMark {
     hover_result: Option<(Ty, HoverKind, Option<String>)>,
     hover_pending: Option<(usize, String, HoverKind, Option<String>)>,
     table_conflicts: Vec<(Span, String)>,
-    kw_certain: std::collections::HashSet<(usize, String)>,
+    kw_certain: HashMap<(usize, String), Vec<(usize, String)>>,
     kw_written: std::collections::HashSet<(usize, String)>,
-    kw_pending: Vec<((usize, String), super::globals::KwUse)>,
+    kw_pending: Vec<(Vec<(usize, String)>, super::globals::KwUse)>,
     fn_write_scopes: Vec<HashMap<String, fn_writes::FnSummary>>,
 }
 
@@ -192,7 +192,7 @@ impl Checker {
             empty_coll_sites: Vec::new(),
             empty_coll_aliases: Vec::new(),
             carrier_pins: Vec::new(),
-            kw_certain: std::collections::HashSet::new(),
+            kw_certain: HashMap::new(),
             kw_written: std::collections::HashSet::new(),
             kw_pending: Vec::new(),
             hover_pending: None,
@@ -2481,17 +2481,23 @@ impl Checker {
         // here.
         let top = self.scopes.len().saturating_sub(1);
         let pending = std::mem::take(&mut self.kw_pending);
-        for (key, kw_use) in pending {
-            if key.0 < top {
-                self.kw_pending.push((key, kw_use));
+        for (mut keys, kw_use) in pending {
+            let written = keys
+                .iter()
+                .find(|k| k.0 >= top && self.kw_written.contains(*k))
+                .cloned();
+            keys.retain(|k| k.0 < top);
+            if written.is_none() && !keys.is_empty() {
+                self.kw_pending.push((keys, kw_use));
                 continue;
             }
-            let written = self.kw_written.contains(&key);
             match kw_use {
-                super::globals::KwUse::Keyword(span) if written => {
-                    self.error(span, super::globals::kw_ambiguous_msg(&key.1));
+                super::globals::KwUse::Keyword(span) => {
+                    if let Some(key) = written {
+                        self.error(span, super::globals::kw_ambiguous_msg(&key.1));
+                    }
                 }
-                super::globals::KwUse::GenStamp(call, crossing, span) if !written => {
+                super::globals::KwUse::GenStamp(call, crossing, span) if written.is_none() => {
                     crate::checker::record_call_table_entry(
                         &mut self.gen_crossings.calls,
                         &mut self.table_conflicts,
@@ -2504,7 +2510,7 @@ impl Checker {
                 _ => {}
             }
         }
-        self.kw_certain.retain(|k| k.0 < top);
+        self.kw_certain.retain(|k, _| k.0 < top);
         self.kw_written.retain(|k| k.0 < top);
         self.scopes.pop();
         self.fn_write_scopes.pop();

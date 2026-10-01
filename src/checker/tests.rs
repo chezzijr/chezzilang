@@ -26974,9 +26974,10 @@ fn kw_value_unknown_label_rejected() {
 /// callee had no prologue. The callee fills its own trailing defaults now, so `h := hasdefault; h()`
 /// is legal and prints `5`. Measured on `0104d57b`: `'closure' expects 1 argument(s), got 0`.
 ///
-/// What it can NOT do is fill a hole before a supplied argument: a short call pushes fewer values,
-/// which cannot express a middle gap. That stays an error, with a message that says so instead of
-/// the now-false "defaults do not apply through a value".
+/// TICKET-197: a value read from one declaration fills every default it can name at the call site,
+/// so a middle hole (`h(1, c=9)`) is legal too. Only a callee-filled default (one naming a type
+/// parameter) still refuses a middle hole: a short call pushes fewer values, which cannot express
+/// a middle gap, and the message says so.
 #[test]
 fn kw_value_defaults_fill_a_trailing_gap_but_not_a_middle_one() {
     // Direct call fills the default (a desugar rewrite) — unchanged.
@@ -26987,9 +26988,13 @@ fn kw_value_defaults_fill_a_trailing_gap_but_not_a_middle_one() {
     ok_desugared(
         "fn f(a: int, b: int = 2, c: int = 3) -> int:\n    return a\nh := f\nprint(h(a=1, b=7))\n",
     );
-    // A genuine MIDDLE hole is still refused, and says why.
-    rejects_desugared(
+    // A MIDDLE hole is filled at the call site: the value carries its declaration's defaults.
+    ok_desugared(
         "fn f(a: int, b: int = 2, c: int = 3) -> int:\n    return a\nh := f\nprint(h(1, c=9))\n",
+    );
+    // Only a callee-filled default (one naming a type parameter) still refuses a middle hole.
+    rejects_desugared(
+        "fn f[T](a: T, b: List[T] = List[T](), c: int = 3) -> int:\n    return c\nh := f[int]\nprint(h(1, c=9))\n",
         "is filled by the callee and can only be omitted from the END of a call",
     );
     // A parameter with NO default is still required through a value.
@@ -36229,9 +36234,9 @@ fn bind_call_reports_each_named_argument_error() {
             needle,
         );
     }
-    // The callee-filled hole: through a value, every default is filled by the callee.
+    // The callee-filled hole: through a value, a default naming a type parameter is callee-filled.
     rejects(
-        &format!("{f}fn main():\n    g := f\n    print(g(1, c=9))\nmain()\n"),
+        "fn f2[T](a: T, b: List[T] = List[T](), c: int = 3) -> int:\n    return c\nfn main():\n    g := f2[int]\n    print(g(1, c=9))\nmain()\n",
         "the default for 'b' is filled by the callee and can only be omitted from the END of a call",
     );
 }
@@ -37241,5 +37246,19 @@ fn fn_value_slot_grid() {
     for (bname, lib, main) in witness {
         cells.push((format!("w_{bname}"), lib, main, false));
     }
+    // An alias waits on its source: a write to EITHER name voids a keyword call through the alias.
+    const VU: &str = "    fn v(a: int, b: int = 10) -> int:\n        return a * 100 + b\n    fn u(b: int, a: int = 10) -> int:\n        return a * 100 + b\n";
+    cells.push((
+        "ambiguous_alias_loop".to_string(),
+        String::new(),
+        format!("fn outer():\n{VU}    for _i in range(2):\n        w := v\n        print(w(b=5, a=1))\n        v = u\nouter()\n"),
+        false,
+    ));
+    cells.push((
+        "ambiguous_alias_inner".to_string(),
+        String::new(),
+        format!("fn outer():\n{VU}    w := v\n    if true:\n        z := w\n        print(z(b=5, a=1))\n    w = u\nouter()\n"),
+        false,
+    ));
     assert_clean_files_grid(&cells);
 }

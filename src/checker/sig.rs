@@ -379,8 +379,8 @@ impl Checker {
                 g.seeded = true;
                 g.reached = false;
                 self.scopes[0].insert(n.clone(), t);
-                if self.let_holds_one_known_fn(names, ty, value) {
-                    self.kw_certain.insert((0, n.clone()));
+                if let Some(deps) = self.let_holds_one_known_fn(names, ty, value) {
+                    self.kw_certain.insert((0, n.clone()), deps);
                 }
             }
         }
@@ -585,40 +585,49 @@ impl Checker {
         (annotated, val_ty)
     }
 
-    /// TICKET-139 (W14-2) — an unannotated single-name `:=` of a closure literal or of a top-level
-    /// user fn (no local shadow) holds exactly ONE known function, so its labels are certain. Shared
-    /// by the `Let` arm and `seed_module_globals` (TICKET-183).
     /// TICKET-187 — the one "this call head is the builtin" test: a first-class builtin name that
     /// no binding in scope shadows (a local `print := fn(...)` is the local, not the builtin).
     pub(super) fn names_builtin_fn(&self, name: &str) -> bool {
         matches!(self.head_binding(name), HeadBinding::Unbound) && is_firstclass_builtin_fn(name)
     }
 
+    /// TICKET-139 (W14-2) — an unannotated single-name `:=` of a closure literal or of a top-level
+    /// user fn (no local shadow) holds exactly ONE known function, so its labels are certain. Shared
+    /// by the `Let` arm and `seed_module_globals` (TICKET-183). TICKET-197 adds two arms: a local
+    /// `Ident` source is certain when `labels_certain` says so (a nested fn or a certain alias), and
+    /// a turbofish `Index` over a generic fn value is certain. The result is the dependency keys
+    /// `kw_certain` records: a write to any of them voids the binding.
     pub(super) fn let_holds_one_known_fn(
         &self,
         names: &[String],
         ty: &Option<Type>,
         value: &Expr,
-    ) -> bool {
-        names.len() == 1
-            && ty.is_none()
-            && match &value.kind {
-                ExprKind::Closure { .. } => true,
-                ExprKind::Ident(n) => self.lookup(n).is_none() && self.functions.contains_key(n),
-                // TICKET-187: `g := m.f` holds one known function exactly as `g := f` does.
-                ExprKind::Field { obj, name, .. } => match &obj.kind {
-                    ExprKind::Ident(m) => {
-                        matches!(self.head_binding(m), HeadBinding::Module)
-                            && self
-                                .imported_modules
-                                .get(m)
-                                .and_then(|id| self.module_sigs.get(id))
-                                .is_some_and(|sig| sig.certain_fn(name).is_some())
-                    }
-                    _ => false,
-                },
-                _ => false,
+    ) -> Option<Vec<(usize, String)>> {
+        if names.len() != 1 || ty.is_some() {
+            return None;
+        }
+        match &value.kind {
+            ExprKind::Closure { .. } => Some(Vec::new()),
+            ExprKind::Ident(n) if self.lookup(n).is_none() => {
+                self.functions.contains_key(n).then(Vec::new)
             }
+            ExprKind::Ident(n) => self.labels_certain(n).ok(),
+            ExprKind::Index { obj, index } => (self.index_as_type(index).is_some()
+                && self.generic_fn_value_sig(obj).is_some())
+            .then(Vec::new),
+            // TICKET-187: `g := m.f` holds one known function exactly as `g := f` does.
+            ExprKind::Field { obj, name, .. } => match &obj.kind {
+                ExprKind::Ident(m) => (matches!(self.head_binding(m), HeadBinding::Module)
+                    && self
+                        .imported_modules
+                        .get(m)
+                        .and_then(|id| self.module_sigs.get(id))
+                        .is_some_and(|sig| sig.certain_fn(name).is_some()))
+                .then(Vec::new),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     /// Count the un-annotated free fns + struct/enum methods that `infer_returns` infers — the
@@ -2790,8 +2799,10 @@ impl Checker {
                 if !refined {
                     self.declare(name, declared);
                 }
-                if one_known_fn && let Some(s) = self.owning_scope(name) {
-                    self.kw_certain.insert((s, name.to_string()));
+                if let Some(deps) = one_known_fn
+                    && let Some(s) = self.owning_scope(name)
+                {
+                    self.kw_certain.insert((s, name.to_string()), deps);
                 }
                 if is_const {
                     self.declare_const(name);
@@ -3039,7 +3050,7 @@ impl Checker {
                     if decl.ret.is_none() && matches!(sig.ret, Ty::Unknown) {
                         // `sig.ret` is `Unknown` here, so this is the provisional `-> ?` type.
                         self.declare(&decl.name, fn_value_ty(&sig));
-                        self.kw_certain.insert(kw_key.clone());
+                        self.kw_certain.insert(kw_key.clone(), Vec::new());
                         let inferred = self.infer_nested_fn_ret(decl, &sig);
                         sig.ret = inferred;
                     }
@@ -3047,7 +3058,7 @@ impl Checker {
                     // namesake) at every call site, and recursion type-checks. Declared BEFORE
                     // `check_fn_body`.
                     self.declare(&decl.name, fn_value_ty(&sig));
-                    self.kw_certain.insert(kw_key.clone());
+                    self.kw_certain.insert(kw_key.clone(), Vec::new());
                     if !kw_was_written {
                         self.kw_written.remove(&kw_key);
                     }

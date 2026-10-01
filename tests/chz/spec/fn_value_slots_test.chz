@@ -1,0 +1,47 @@
+# TICKET-197 (N3): a fn value certain to hold one fn carries its declaration's slots, so a call
+# through it fills defaults and packs a variadic exactly like a direct call. Values match CPython 3.
+fn dv(a: int, b: int = 10, ...rest: int) -> int:
+    return a * 100 + b + rest.len()
+
+fn vk(...xs: int, tail: int = 3) -> int:
+    return xs.len() * 100 + tail
+
+fn g[T](x: T, b: int = 10, ...r: int) -> int:
+    return b + r.len()
+
+fn kk(a: int = 1, b: int = 2) -> int:
+    return a * 10 + b
+
+test fn a_top_level_alias_fills_defaults_and_packs_a_variadic():
+    w := dv
+    x := vk
+    h := kk
+    assert w(1) == 110, "got {w(1)}"
+    assert w(1, 2, 3) == 103, "got {w(1, 2, 3)}"
+    assert w(b=5, a=1) == 105, "got {w(b=5, a=1)}"
+    assert x() == 3, "got {x()}"
+    assert x(1, 2) == 203, "got {x(1, 2)}"
+    assert x(1, tail=9) == 109, "got {x(1, tail=9)}"
+    assert h(b=5) == 15, "got {h(b=5)}"
+
+test fn a_nested_fn_alias_fills_defaults_and_packs_a_variadic():
+    fn dv(a: int, b: int = 10, ...rest: int) -> int:
+        return a * 100 + b + rest.len()
+    fn vk(...xs: int, tail: int = 3) -> int:
+        return xs.len() * 100 + tail
+    w := dv
+    x := vk
+    y := w
+    assert w(1) == 110, "got {w(1)}"
+    assert w(1, 2, 3) == 103, "got {w(1, 2, 3)}"
+    assert w(b=5, a=1) == 105, "got {w(b=5, a=1)}"
+    assert x() == 3, "got {x()}"
+    assert x(1, 2) == 203, "got {x(1, 2)}"
+    assert x(1, tail=9) == 109, "got {x(1, tail=9)}"
+    assert y(1, 2, 3, 4) == 104, "got {y(1, 2, 3, 4)}"
+
+test fn a_turbofish_value_fills_defaults_and_packs_a_variadic():
+    t := g[str]
+    assert t("x") == 10, "got {t(\"x\")}"
+    assert t("x", 1, 2, 3) == 3, "got {t(\"x\", 1, 2, 3)}"
+    assert t("x", b=4) == 4, "got {t(\"x\", b=4)}"
