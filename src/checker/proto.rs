@@ -2628,9 +2628,10 @@ impl Checker {
             });
             match actual_owned.as_ref() {
                 Some(actual) if method_matches(msig, actual, ty) => {
-                    if let Some((pos, expected, found)) = param_name_mismatch(msig, actual) {
+                    if let Some(mm) = param_name_mismatch(msig, actual) {
                         return Err(format!(
-                            "type {ty} does not satisfy {protocol_display} (method '{mname}' parameter {pos} is named '{found}', but {protocol_display} declares '{expected}')"
+                            "type {ty} does not satisfy {protocol_display} ({})",
+                            name_mismatch_text(&protocol_display, mname, mm)
                         ));
                     }
                     // Conditional conformance: a method whose `where` bounds the RECEIVER's own type

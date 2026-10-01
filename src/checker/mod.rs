@@ -3706,6 +3706,18 @@ fn param_name_mismatch(proto: &FnSig, actual: &FnSig) -> Option<(usize, String, 
         })
 }
 
+/// TICKET-197 — the one rendering of a [`param_name_mismatch`] verdict, shared by `satisfies` and
+/// every operator and hook error that a misnamed hook method explains.
+fn name_mismatch_text(
+    protocol: &str,
+    method: &str,
+    (pos, expected, found): (usize, String, String),
+) -> String {
+    format!(
+        "method '{method}' parameter {pos} is named '{found}', but {protocol} declares '{expected}'"
+    )
+}
+
 /// Does a struct method `actual` match a protocol method `proto` (with `Self` bound to `self_ty`)?
 fn method_matches(proto: &FnSig, actual: &FnSig, self_ty: &Ty) -> bool {
     if proto.params.len() != actual.params.len() {

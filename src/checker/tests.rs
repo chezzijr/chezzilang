@@ -37078,6 +37078,95 @@ fn assert_clean_files_grid(cells: &[(String, String, String, bool)]) {
     );
 }
 
+/// TICKET-197 (N5): an operator or direct hook method conforms to its protocol's parameter names
+/// (`Checker::hook_impl` asks `param_name_mismatch`), and the operator error names the misnamed
+/// parameter. `==` is not governed by the name rule (DEC-187).
+#[test]
+fn hook_param_name_grid() {
+    let arith = |m: &str, op: &str, p: &str| {
+        (
+            format!("    fn {m}(self, {p}: V) -> V:\n        return V(n=self.n + {p}.n)\n"),
+            format!("x := V(1) {op} V(2)\nprint(x.n)\n"),
+        )
+    };
+    // (hook, method text, use, misnamed parameter or None for the protocol's names)
+    let mut cells: Vec<(String, String, String, Option<&str>)> = Vec::new();
+    for (m, op) in [("add", "+"), ("sub", "-"), ("mul", "*")] {
+        for p in ["o", "other"] {
+            let (meth, use_) = arith(m, op, p);
+            cells.push((m.to_string(), meth, use_, (p == "o").then_some("o")));
+        }
+    }
+    for p in ["o", "other"] {
+        cells.push((
+            "compare".to_string(),
+            format!("    fn eq(self, other: V) -> bool:\n        return self.n == other.n\n    fn compare(self, {p}: V) -> int:\n        return self.n - {p}.n\n"),
+            "print(V(1) < V(2))\n".to_string(),
+            (p == "o").then_some("o"),
+        ));
+    }
+    for (p, bad) in [("i", true), ("k", false)] {
+        cells.push((
+            "index".to_string(),
+            format!("    fn index(self, {p}: int) -> int:\n        return self.n + {p}\n"),
+            "print(V(3)[2])\n".to_string(),
+            bad.then_some("i"),
+        ));
+    }
+    for (p, bad) in [("x", true), ("item", false)] {
+        cells.push((
+            "contains".to_string(),
+            format!("    fn contains(self, {p}: int) -> bool:\n        return self.n == {p}\n"),
+            "print(3 in V(3))\n".to_string(),
+            bad.then_some("x"),
+        ));
+    }
+    for ((a, b, c), bad) in [(("a", "b", "c"), true), (("start", "end", "step"), false)] {
+        cells.push((
+            "slice".to_string(),
+            format!("    fn slice(self, {a}: int?, {b}: int?, {c}: int?) -> int:\n        return self.n\n"),
+            "print(V(1)[1:2])\n".to_string(),
+            bad.then_some("a"),
+        ));
+    }
+    for ((k, v), bad) in [(("i", "val"), true), (("k", "v"), false)] {
+        cells.push((
+            "set_index".to_string(),
+            format!("    fn index(self, k: int) -> int:\n        return self.n\n    fn set_index(self, {k}: int, {v}: int) -> nil:\n        self.n = {v}\n"),
+            "v := V(1)\nv[0] = 4\nprint(v.n)\n".to_string(),
+            bad.then_some("i"),
+        ));
+    }
+    cells.push((
+        "eq".to_string(),
+        "    fn eq(self, o: V) -> bool:\n        return self.n == o.n\n".to_string(),
+        "print(V(1) == V(1))\n".to_string(),
+        None,
+    ));
+    let mut wrong = Vec::new();
+    for (hook, meth, use_, bad) in &cells {
+        let src = format!("struct V:\n    n: int\n{meth}{use_}");
+        let errs = check_src(&src);
+        let msgs: Vec<&str> = errs.iter().map(|e| e.message.as_str()).collect();
+        let verdict = match bad {
+            None => errs.is_empty(),
+            Some(p) => {
+                let needle = format!("parameter 1 is named '{p}'");
+                msgs.iter().any(|m| m.contains(&needle))
+            }
+        };
+        if !verdict {
+            wrong.push(format!("cell {hook} misnamed={bad:?}: got {msgs:?}"));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "{} wrong cell(s):\n{}",
+        wrong.len(),
+        wrong.join("\n")
+    );
+}
+
 /// TICKET-197 (N4): a turbofish head is a generic fn value wherever `generic_fn_value_sig` finds
 /// one: same module, from-import or `m.f`, in value, call, argument and parameter-default position.
 /// A local that shadows the imported name is indexed as itself.

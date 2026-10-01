@@ -4498,7 +4498,11 @@ impl Checker {
                             }
                         } else {
                             self.expect_int(index, "index");
-                            self.error(target.span, format!("cannot index-assign into {other}"));
+                            let note = self.hook_name_note(&other, "IndexSet", "set_index");
+                            self.error(
+                                target.span,
+                                format!("cannot index-assign into {other}{note}"),
+                            );
                         }
                     }
                 }
@@ -5350,7 +5354,7 @@ impl Checker {
             return None;
         };
         let info = self.structs.get(name)?;
-        let sig = structural_impl(info.methods.get("next")?)?;
+        let sig = self.hook_impl("Iterator", "next", info.methods.get("next")?)?;
         if sig.params.len() != 1 {
             return None; // (self) only — no extra args
         }
@@ -5383,7 +5387,7 @@ impl Checker {
         if info.methods.contains_key("next") {
             return None; // the runtime would drive `next`; only `struct_iter_elem` may admit it
         }
-        let sig = structural_impl(info.methods.get("iter")?)?;
+        let sig = self.hook_impl("Iterable", "iter", info.methods.get("iter")?)?;
         if sig.params.len() != 1 {
             return None; // (self) only
         }
@@ -5455,7 +5459,7 @@ impl Checker {
             Ty::Map(k, v) => Some(((**k).clone(), (**v).clone())),
             Ty::Struct(name, targs) => {
                 let info = self.structs.get(name)?;
-                let sig = structural_impl(info.methods.get("index")?)?;
+                let sig = self.hook_impl("Index", "index", info.methods.get("index")?)?;
                 if sig.params.len() != 2 {
                     return None; // (self, key)
                 }
@@ -5546,12 +5550,16 @@ impl Checker {
             Ty::Struct(name, targs) => {
                 let info = self.structs.get(name)?;
                 (
-                    structural_impl(info.methods.get("contains")?)?,
+                    self.hook_impl("Contains", "contains", info.methods.get("contains")?)?,
                     struct_param_map(info, targs),
                 )
             }
             Ty::Enum(name, targs) => (
-                structural_impl(self.enum_methods_of(name)?.get("contains")?)?,
+                self.hook_impl(
+                    "Contains",
+                    "contains",
+                    self.enum_methods_of(name)?.get("contains")?,
+                )?,
                 self.enum_param_map(name, targs),
             ),
             _ => return None,
@@ -5588,12 +5596,12 @@ impl Checker {
             return None;
         };
         let info = self.structs.get(name)?;
-        let sig = structural_impl(info.methods.get("set_index")?)?;
+        let sig = self.hook_impl("IndexSet", "set_index", info.methods.get("set_index")?)?;
         if sig.params.len() != 3 {
             return None; // (self, key, val)
         }
         // Must also be readable — `index(self, key) -> val` — or compound index-assign would crash.
-        let read = structural_impl(info.methods.get("index")?)?;
+        let read = self.hook_impl("Index", "index", info.methods.get("index")?)?;
         if read.params.len() != 2 {
             return None; // (self, key)
         }
@@ -5610,7 +5618,7 @@ impl Checker {
             Ty::List(_) | Ty::Str | Ty::Bytes | Ty::ByteArray => Some(ty.clone()),
             Ty::Struct(name, targs) => {
                 let info = self.structs.get(name)?;
-                let sig = structural_impl(info.methods.get("slice")?)?;
+                let sig = self.hook_impl("Slice", "slice", info.methods.get("slice")?)?;
                 // The `Slice` protocol fixes the bounds: `slice(self, int? , int?, int?) -> R`.
                 // The runtime always passes three `Option[int]` components (start/end/step, each
                 // `None` when omitted), so a non-conforming signature (wrong arity or non-`int?`
@@ -6153,16 +6161,61 @@ fn qualified_head_names(kind: &ExprKind) -> Option<(&str, &str)> {
     }
 }
 
-/// M24 Task 5 — the gate every STRUCTURAL protocol lookup passes its candidate through: a method the
-/// RUNTIME dispatches BY NAME at a fixed argument count (`next`/`iter`/`index`/`set_index`/
-/// `contains`/`slice`, and `eq` via `validate_eq_shape`) may not take hidden witness arguments. Those
-/// emit sites push exactly the declared operands, so a witness-taking method would read one of them
-/// as its type key — a check-OK-then-runtime-fault. Such a method simply does not implement the
-/// protocol, which is what `None` says here (the shape errors stay the arity/type ones each site
-/// already reports). The protocol-DECLARED family (`Add`/`Eq`/`Comparable`/…) is walled by the same
-/// rule inside `method_matches`.
-fn structural_impl(sig: &FnSig) -> Option<&FnSig> {
-    sig.witness_params.is_empty().then_some(sig)
+impl Checker {
+    /// M24 Task 5 — the gate every STRUCTURAL protocol lookup passes its candidate through: a
+    /// method the RUNTIME dispatches BY NAME at a fixed argument count (`next`/`iter`/`index`/
+    /// `set_index`/`contains`/`slice`, and `eq` via `validate_eq_shape`) may not take hidden witness
+    /// arguments. Those emit sites push exactly the declared operands, so a witness-taking method
+    /// would read one of them as its type key — a check-OK-then-runtime-fault. Such a method simply
+    /// does not implement the protocol, which is what `None` says here (the shape errors stay the
+    /// arity/type ones each site already reports). The protocol-DECLARED family (`Add`/`Eq`/
+    /// `Comparable`/…) is walled by the same rule inside `method_matches`.
+    ///
+    /// TICKET-197: a hook also conforms to the reserved `protocol`'s parameter names
+    /// (`param_name_mismatch`, DEC-187), exactly as `satisfies` requires of a declared protocol.
+    pub(super) fn hook_impl<'a>(
+        &self,
+        protocol: &str,
+        method: &str,
+        sig: &'a FnSig,
+    ) -> Option<&'a FnSig> {
+        if !sig.witness_params.is_empty()
+            || self.hook_name_mismatch(protocol, method, sig).is_some()
+        {
+            return None;
+        }
+        Some(sig)
+    }
+
+    /// The `param_name_mismatch` verdict of hook `sig` against the reserved `protocol`'s own
+    /// `method` requirement; `None` when the protocol declares no such method.
+    fn hook_name_mismatch(
+        &self,
+        protocol: &str,
+        method: &str,
+        sig: &FnSig,
+    ) -> Option<(usize, String, String)> {
+        let pinfo = self.protocol_shape(protocol)?;
+        let (_, req) = pinfo.methods.iter().find(|(n, _)| n == method)?;
+        param_name_mismatch(req, sig)
+    }
+
+    /// TICKET-197 — why an operator or hook on `ty` failed, when the reason is a misnamed
+    /// parameter: ` (method 'add' parameter 1 is named 'o', but Add declares 'other')` for a
+    /// struct, enum or newtype whose `method` misnames a parameter of `protocol`, else empty.
+    pub(super) fn hook_name_note(&self, ty: &Ty, protocol: &str, method: &str) -> String {
+        let methods = match ty {
+            Ty::Struct(name, _) => self.structs.get(name).map(|info| &info.methods),
+            Ty::Enum(name, _) => self.enum_methods_of(name),
+            Ty::NewType(name, _) => self.newtype_methods_of(name),
+            _ => None,
+        };
+        methods
+            .and_then(|ms| ms.get(method))
+            .and_then(|sig| self.hook_name_mismatch(protocol, method, sig))
+            .map(|mm| format!(" ({})", name_mismatch_text(protocol, method, mm)))
+            .unwrap_or_default()
+    }
 }
 
 /// The FEWEST arguments a call through this value may pass — `params.len()` unless the underlying

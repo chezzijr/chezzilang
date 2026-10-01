@@ -3156,10 +3156,11 @@ impl Checker {
                     Ty::Unknown
                 } else {
                     let [l_s, r_s] = Ty::render_distinct([&l, &r]);
+                    let note = self.hook_name_note(&l, "Add", "add");
                     self.error(
                         lhs.span,
                         format!(
-                            "cannot apply + to {l_s} and {r_s}{}",
+                            "cannot apply + to {l_s} and {r_s}{}{note}",
                             float_fix_note_join(&l, &r)
                         ),
                     );
@@ -3202,10 +3203,11 @@ impl Checker {
                     Ty::Unknown
                 } else {
                     let [l_s, r_s] = Ty::render_distinct([&l, &r]);
+                    let note = self.hook_name_note(&l, proto, &proto.to_lowercase());
                     self.error(
                         lhs.span,
                         format!(
-                            "cannot apply {} to {l_s} and {r_s}{}",
+                            "cannot apply {} to {l_s} and {r_s}{}{note}",
                             op_sym(op),
                             float_fix_note_join(&l, &r)
                         ),
@@ -3226,10 +3228,11 @@ impl Checker {
                     Ty::Unknown
                 } else {
                     let [l_s, r_s] = Ty::render_distinct([&l, &r]);
+                    let note = self.hook_name_note(&l, proto, &proto.to_lowercase());
                     self.error(
                         lhs.span,
                         format!(
-                            "cannot apply {} to {l_s} and {r_s}{}",
+                            "cannot apply {} to {l_s} and {r_s}{}{note}",
                             op_sym(op),
                             float_fix_note_join(&l, &r)
                         ),
@@ -3331,7 +3334,8 @@ impl Checker {
                     || self.ordering_allowed(l, r);
                 if !ok && !either_unknown {
                     let [l_s, r_s] = Ty::render_distinct([l, r]);
-                    self.error(lspan, format!("cannot compare {l_s} and {r_s}"));
+                    let note = self.hook_name_note(l, "Comparable", "compare");
+                    self.error(lspan, format!("cannot compare {l_s} and {r_s}{note}"));
                 }
                 Ty::Bool
             }
@@ -3511,10 +3515,11 @@ impl Checker {
                                 );
                             }
                         } else {
+                            let note = self.hook_name_note(other, "Contains", "contains");
                             self.error(
                                 rspan,
                                 format!(
-                                    "cannot use `in` on {other} (expected a list, set, map, str, or a type with `contains(self, item) -> bool`)"
+                                    "cannot use `in` on {other} (expected a list, set, map, str, or a type with `contains(self, item) -> bool`){note}"
                                 ),
                             );
                         }
@@ -4232,7 +4237,8 @@ impl Checker {
                     return v;
                 }
                 self.expect_int(index, "index");
-                self.error(obj.span, format!("cannot index into {other}"));
+                let note = self.hook_name_note(&other, "Index", "index");
+                self.error(obj.span, format!("cannot index into {other}{note}"));
                 Ty::Unknown
             }
         }
@@ -4327,7 +4333,8 @@ impl Checker {
         match self.slice_result(&obj_ty) {
             Some(r) => r,
             None => {
-                self.error(span, format!("cannot slice {obj_ty}"));
+                let note = self.hook_name_note(&obj_ty, "Slice", "slice");
+                self.error(span, format!("cannot slice {obj_ty}{note}"));
                 Ty::Unknown
             }
         }
