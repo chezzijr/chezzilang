@@ -4067,7 +4067,7 @@ literal brace inside it is still doubled (`'a}}b'` above is the key `a}b`).
 `{expr:spec}`. The mini-language is a coherent subset:
 
 ```
-{expr:[[fill]align][sign][#][0][width][grouping][.precision][type]}
+{expr:[[fill]align][sign][z][#][0][width][grouping][.precision][type]}
 ```
 
 ```chezzi
@@ -4083,6 +4083,8 @@ print("{255:x} {255:X}")  # hex (lower/upper)          → "ff FF"
 print("{255:b} {255:o}")  # binary / octal             → "11111111 377"
 print("{12345.678:.2e}")  # scientific (signed 2-digit exp) → "1.23e+04"
 print("{5:+d}")           # force a leading '+'         → "+5"
+print("{-0.0001:z.1f}")   # z: a rounded-to-zero float drops its '-' → "0.0" (CPython 3.11+;
+                          # rejected on an int type and a string, as in CPython)
 print("{greeting:.5}")    # string precision truncates → "hello"
 print("{1234567:,}")      # thousands grouping         → "1,234,567"
 print("{1234567:_}")      # underscore grouping        → "1_234_567"

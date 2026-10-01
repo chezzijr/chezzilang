@@ -56,7 +56,7 @@ re-wrapped.
   enums may share a variant name (`Color.Red` / `Light.Red`). The built-in `Ok`/`Err`/`Some`/`None`
   (Result/Option) stay bare.
 - **String interpolation** — `"hi {name}, sum {a+b}"`. First-class; string ops are a UX priority.
-  Supports Python-style **format specifiers** after a `:` — `{expr:[[fill]align][sign][#][0][width][.precision][type]}`,
+  Supports Python-style **format specifiers** after a `:` — `{expr:[[fill]align][sign][z][#][0][width][.precision][type]}`,
   e.g. `{name:>10}` (right-align width 10), `{f:.2f}` (2 decimals), `{n:04d}` (zero-pad), `{pct:.1%}`
   (percent), `{255:x}` (hex). Type chars: `d f x X b o e E g G %` (`f` and `e`/`E` are CPython-style with
   default precision 6; `e`/`E`'s exponent is signed and zero-padded to ≥2 digits). Plain float `str()`/`print()` also matches

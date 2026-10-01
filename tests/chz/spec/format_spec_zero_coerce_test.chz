@@ -1,0 +1,23 @@
+# The `z` format option (CPython 3.11+): a float that rounds to zero prints without its minus sign.
+# Every expected string below is CPython's output for the same f-string.
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+test fn z_drops_the_sign_of_a_rounded_zero():
+    assert "{-0.0001:z.1f}" == "0.0"
+    assert "{-0.04:z.1f}" == "0.0"
+    assert "{-0.0:z}" == "0.0"
+    assert "{-0.0:z.0g}" == "0"
+    assert "{-0.0001:z,.1f}" == "0.0"
+
+test fn z_keeps_the_sign_of_a_nonzero_result():
+    assert "{-1.5:z.1f}" == "-1.5"
+    assert "{-0.0001:z.1e}" == "-1.0e-04"
+    assert "{-0.0004:z.2%}" == "-0.04%"
+
+test fn z_composes_with_sign_alt_and_zero_pad():
+    assert "{-0.0001:+z.1f}" == "+0.0"
+    assert "{-0.0001: z.1f}" == " 0.0"
+    assert "{-0.0001:z08.2f}" == "00000.00"
+    assert "{-0.0001:z#.0f}" == "0."
+
+test fn without_z_the_negative_zero_stays():
+    assert "{-0.0001:.1f}" == "-0.0"

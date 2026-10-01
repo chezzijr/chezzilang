@@ -5,9 +5,11 @@
 //! own runtime `Value` into the neutral [`FmtArg`]. Spec parsing ([`parse`]) and rendering
 //! ([`apply`]) live here so there is a single source of truth.
 //!
-//! Supported mini-language (a coherent subset of Python's): `[[fill]align][sign][0][width][.precision][type]`
+//! Supported mini-language (a coherent subset of Python's): `[[fill]align][sign][z][#][0][width][grouping][.precision][type]`
 //!  - align: `<` left, `>` right, `^` center; an optional `fill` char may precede the align.
 //!  - sign: `+` forces a leading `+` on non-negative numbers.
+//!  - `z`: a float that rounds to zero prints without its minus sign (`{-0.0001:z.1f}` is `0.0`;
+//!    CPython 3.11+). Rejected on an integer type and on a string, as CPython does.
 //!  - `0`: zero-pad numerics to `width` (sign kept before the zeros).
 //!  - width: minimum field width (decimal), or a nested `{expr}` field (`{s:<{w}}`). CAPPED at
 //!    [`MAX_FIELD`]: a literal at PARSE time — a pathological width like `{x:>9999999999}` is
@@ -44,6 +46,8 @@ pub struct FormatSpec {
     /// The sign char written before the digits: `'+'`, `'-'` or `' '`. `None` means the default
     /// (a leading `-` on negatives only, nothing on non-negatives).
     pub sign: Option<char>,
+    /// `z` — coerce a negative zero (after rounding to the precision) to positive zero.
+    pub zero_coerce: bool,
     /// `#` alternate form — a radix prefix on `x`/`X`/`o`/`b`, a forced decimal point on a float.
     pub alt: bool,
     /// `0` flag — zero-pad numerics to `width` (with the sign kept ahead of the zeros).
@@ -67,6 +71,7 @@ impl Default for FormatSpec {
             fill: ' ',
             align: None,
             sign: None,
+            zero_coerce: false,
             alt: false,
             zero_pad: false,
             width: 0,
@@ -179,6 +184,12 @@ pub fn parse_nested(spec: &str) -> Result<(FormatSpec, Vec<NestedField>), String
     // [sign]
     if i < chars.len() && matches!(chars[i], '+' | '-' | ' ') {
         out.sign = Some(chars[i]);
+        i += 1;
+    }
+
+    // [z] negative-zero coercion (CPython 3.11; its slot is after the sign, before `#`).
+    if i < chars.len() && chars[i] == 'z' {
+        out.zero_coerce = true;
         i += 1;
     }
 
@@ -504,6 +515,15 @@ pub fn spec_valid_for_scalar(spec: &FormatSpec, kind: ScalarKind) -> Result<(), 
         // Precision on an integer is meaningful only via a float type char; every parse-allowed type
         // char (d/x/X/b/o and the f/e/%/g/G promoters) is otherwise valid for an int.
         ScalarKind::Int => {
+            let float_ty = matches!(
+                spec.ty,
+                Some('f') | Some('F') | Some('e') | Some('E') | Some('%') | Some('g') | Some('G')
+            );
+            if spec.zero_coerce && !float_ty {
+                return Err(
+                    "format spec: negative-zero coercion 'z' not allowed on an integer".to_string(),
+                );
+            }
             if spec.precision.is_some()
                 && !matches!(
                     spec.ty,
@@ -540,6 +560,11 @@ pub fn spec_valid_for_scalar(spec: &FormatSpec, kind: ScalarKind) -> Result<(), 
         },
         // A string takes only fill/align/width/precision — no sign, no zero-pad, no type char.
         ScalarKind::Str => {
+            if spec.zero_coerce {
+                return Err(
+                    "format spec: negative-zero coercion 'z' not allowed on a string".to_string(),
+                );
+            }
             if let Some(c) = spec.sign {
                 return Err(format!("format spec: sign '{c}' not allowed on a string"));
             }
@@ -656,6 +681,9 @@ fn render_float(spec: &FormatSpec, x: f64) -> Result<(String, String, bool), Str
     } else {
         body
     };
+    // `z`: a value that ROUNDED to zero (no nonzero digit left in the body) loses its minus sign.
+    let neg = neg
+        && !(spec.zero_coerce && x.is_finite() && body.chars().all(|c| !matches!(c, '1'..='9')));
     Ok((sign_prefix(neg, spec.sign), body, true))
 }
 
@@ -908,6 +936,22 @@ mod tests {
         assert_eq!(ok_apply("05", FmtArg::Int(-7)), "-0007"); // sign before zeros
         assert_eq!(ok_apply("04d", FmtArg::Int(7)), "0007");
         assert_eq!(ok_apply("04x", FmtArg::Int(255)), "00ff");
+    }
+
+    #[test]
+    fn z_is_rejected_on_an_int_type_and_a_string() {
+        let z = parse("z").unwrap();
+        assert!(z.zero_coerce);
+        assert_eq!(
+            spec_valid_for_scalar(&z, ScalarKind::Int).unwrap_err(),
+            "format spec: negative-zero coercion 'z' not allowed on an integer"
+        );
+        assert_eq!(
+            spec_valid_for_scalar(&z, ScalarKind::Str).unwrap_err(),
+            "format spec: negative-zero coercion 'z' not allowed on a string"
+        );
+        // An int under a float type char is rendered as a float, so `z` applies (CPython: `0.0`).
+        assert!(spec_valid_for_scalar(&parse("z.1f").unwrap(), ScalarKind::Int).is_ok());
     }
 
     #[test]

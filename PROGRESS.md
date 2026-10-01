@@ -7,6 +7,11 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **Wave-18 in-place fix (2026-10-01): the `z` format option.** `"{-0.0001:z.1f}"` is `0.0` (CPython
+  3.11+): a float that rounds to zero drops its minus sign; `z` is rejected on an integer type and on a
+  string, as CPython does. `src/fmtspec.rs`, tests `tests/chz/spec/format_spec_zero_coerce_test.chz`.
+  Wave 18 (JIT sweep #3) was not clean: `docs/root-causes-w18.md`, tickets TICKET-194..197.
+
 - **Wave-17 isolated fixes (2026-10-01, in place).** `a, _ = (1, 2)` and `_, b[0] = t` now
   discard the `_` element (was `cannot assign to undeclared variable '_'`; Python and Go accept both):
   `Expr::is_blank` is the one blank-target test, read by `check_assign`'s tuple recursion, the

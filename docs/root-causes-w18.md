@@ -154,8 +154,8 @@ cancel, shutdown_now, child fault} -> {completed, cut}; plus the guard grid unde
 
 ## Isolated (fix in place)
 
-- S1 `json.decode[T]`: a missing key whose struct field has a default takes the default (owner decision below).
-- S2 the `z` format option (CPython 3.11): coerce negative zero to zero after rounding.
+- S1 `json.decode[T]`: a missing key whose struct field has a default takes the default (owner decision below). Not a one-site fix: field defaults are lowered at each constructor call (inline or a `$def$` provider), which the decoder cannot reach; filed as its own ticket.
+- S2 the `z` format option (CPython 3.11): coerce negative zero to zero after rounding. **Fixed in place 2026-10-01** (`src/fmtspec.rs`, `tests/chz/spec/format_spec_zero_coerce_test.chz`, byte-identical to CPython on 13 cases).
 
 ## Owner decisions (2026-10-01)
 
