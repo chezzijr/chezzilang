@@ -1,0 +1,18 @@
+# A builtin fn value (`ord`, `chr`) passed where a GENERIC fn type is expected infers the type
+# parameters from its signature, exactly as a user fn does (CPython: `list(map(ord, "ab"))` is
+# `[97, 98]`). Generic inference reads both fn variants through `Ty::fn_parts`.
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+fn apply[T, U](x: T, f: fn(T) -> U) -> U:
+    return f(x)
+
+test fn map_with_a_builtin_fn():
+    assert ["a", "b"].map(ord) == [97, 98]
+    assert [97, 98].map(chr) == ["a", "b"]
+
+test fn generic_param_bound_from_a_builtin_fn():
+    assert apply("a", ord) == 97
+    assert apply(98, chr) == "b"
+
+test fn builtin_fn_through_a_binding():
+    f := ord
+    assert ["c"].map(f) == [99]

@@ -286,10 +286,10 @@ here` (Go: `cannot use generic function cmp.Max without instantiation`).
 
 ## Isolated (fix in place, no family)
 
-- a builtin fn (`ord`) passed where a generic fn type is expected is rejected;
-- `a, _ = (1, 2)` rejected;
-- contended `Shared.update` at T=2 is bimodal (0.03–3.6 s) — measure before deciding it is a defect;
-- `docs/syntax.md:2057` names `Comparable` where the error says `Eq`.
+- a builtin fn (`ord`) passed where a generic fn type is expected is rejected; **fixed 2026-10-01**: generic inference reads both fn variants through `Ty::fn_parts` (`tests/chz/spec/builtin_fn_generic_arg_test.chz`);
+- `a, _ = (1, 2)` rejected; **fixed 2026-10-01** (`Expr::is_blank`, `f3822211`);
+- contended `Shared.update` at T=2 is bimodal (0.03–3.6 s) — measure before deciding it is a defect; **measured 2026-10-01: a defect**, 15.6–19.6 s at T=2 on every run (T=1 0.03 s, Go 0.007 s), present before wave 17 too; **TICKET-193**;
+- `docs/syntax.md:2057` names `Comparable` where the error says `Eq`. **Fixed 2026-10-01** (the example now quotes the real error).
 
 ## Plan
 

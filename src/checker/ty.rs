@@ -488,6 +488,16 @@ impl Ty {
     pub fn is_unknown(&self) -> bool {
         matches!(self, Ty::Unknown)
     }
+
+    /// The parameter and return types of any function value: a user [`Ty::Func`] or a builtin
+    /// [`Ty::BuiltinFn`] (`ord`, `chr`). They differ only in sendability, never in shape, so a
+    /// structural question (generic inference, arity) asks this instead of matching one variant.
+    pub fn fn_parts(&self) -> Option<(&[Ty], &Ty)> {
+        match self {
+            Ty::Func { params, ret, .. } | Ty::BuiltinFn { params, ret } => Some((params, ret)),
+            _ => None,
+        }
+    }
 }
 
 /// Structural compatibility for assignment / argument passing. [`Ty::Unknown`] on either side

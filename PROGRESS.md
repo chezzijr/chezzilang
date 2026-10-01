@@ -11,7 +11,11 @@ Single source of truth for "what am I doing next." Update after every work sessi
   discard the `_` element (was `cannot assign to undeclared variable '_'`; Python and Go accept both):
   `Expr::is_blank` is the one blank-target test, read by `check_assign`'s tuple recursion, the
   statement-level `_ = e`, `compile_assign`/`compile_assign_element` and the closure free-name scan
-  (tests in `tests/chz/spec/blank_identifier_test.chz`). `docs/syntax.md`'s `Box.top()` example now
+  (tests in `tests/chz/spec/blank_identifier_test.chz`). A builtin fn value passed where a generic fn
+  type is expected (`["a", "b"].map(ord)`, `apply("a", ord)`) now infers `U` like a user fn does:
+  generic `unify` reads both fn variants through the new `Ty::fn_parts`
+  (`tests/chz/spec/builtin_fn_generic_arg_test.chz`). Contended `Shared.update` at T=2 measured
+  15.6–19.6 s (T=1 0.03 s, Go 0.007 s), also before wave 17: filed as TICKET-193. `docs/syntax.md`'s `Box.top()` example now
   quotes the real error (`type Socket does not satisfy Eq` — `Comparable` embeds `Eq`). The
   `two_leaf_deadlock_on_a_main_channel_still_faults_at_every_worker_count` T=1 hang no longer
   reproduces after TICKET-188 (0 of 150 debug runs at T=1; 0 of 210 release runs at T=1/2/0, idle and

@@ -3647,21 +3647,22 @@ fn unify(decl: &Ty, actual: &Ty, map: &mut HashMap<String, Ty>) {
         (Ty::Tuple(ds), Ty::Tuple(as_)) if ds.len() == as_.len() => {
             ds.iter().zip(as_).for_each(|(d, a)| unify(d, a, map));
         }
-        // Labels are surface-only: unify on params + ret only, ignoring labels (`..`).
+        // Labels are surface-only: unify on params + ret only, ignoring labels (`..`). The actual
+        // side may be a builtin fn value (`xs.map(ord)`): `fn_parts` reads both function variants.
         (
             Ty::Func {
                 params: dp,
                 ret: dr,
                 ..
             },
-            Ty::Func {
-                params: ap,
-                ret: ar,
-                ..
-            },
-        ) if dp.len() == ap.len() => {
-            dp.iter().zip(ap).for_each(|(d, a)| unify(d, a, map));
-            unify(dr, ar, map);
+            a,
+        ) => {
+            if let Some((ap, ar)) = a.fn_parts()
+                && dp.len() == ap.len()
+            {
+                dp.iter().zip(ap).for_each(|(d, a)| unify(d, a, map));
+                unify(dr, ar, map);
+            }
         }
         _ => {}
     }
