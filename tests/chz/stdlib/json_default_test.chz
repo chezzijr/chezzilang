@@ -1,0 +1,15 @@
+# tests/chz/stdlib/json_default_test.chz — TICKET-198 (W18 S1).
+# A missing key whose struct field has a default takes that default (as `Cfg(name="x")` does).
+
+import std.json as json
+
+struct Cfg:
+    name: str
+    retries: int = 3
+
+test fn missing_key_takes_field_default():
+    match json.decode[Cfg](r'{"name":"x"}'):
+        Ok(c):
+            assert c.name == "x"
+            assert c.retries == 3, str(c.retries)
+        Err(e): assert false, e.message()
