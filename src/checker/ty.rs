@@ -1064,7 +1064,7 @@ pub enum Resolution {
     PatStruct(String),
     /// A `json.decode[T]` call: the descriptor of the target the checker resolved
     /// (`Op::JsonDecode`).
-    Decode(crate::json_decode::TypeDescriptor),
+    Decode(crate::json_decode::TypeDescriptor<ArgFill>),
 }
 
 /// Every [`Resolution`] the checker recorded; see there.

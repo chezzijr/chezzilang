@@ -4773,7 +4773,25 @@ impl Checker {
         let target = self.resolve_type(ty, span);
         // One decision for what is decodable and what the VM decodes: the descriptor built here is
         // the diagnostic when it fails and the compiler's `Op::JsonDecode` operand when it succeeds.
-        let shape = |key: &str| self.structs.get(key).map(|s| s.fields.clone());
+        // Each field's default is the fill `S(...)` takes for it (decodable structs are non-generic,
+        // so no type arguments), so a missing key and an omitted argument share one default.
+        let shape = |key: &str| {
+            self.structs.get(key).map(|s| {
+                s.fields
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (name, ty))| {
+                        let fill = s
+                            .field_slots
+                            .as_ref()
+                            .and_then(|sl| sl.get(i))
+                            .and_then(|sl| sl.default.as_ref())
+                            .and_then(|d| self.default_fill(d, 0));
+                        (name.clone(), ty.clone(), fill)
+                    })
+                    .collect()
+            })
+        };
         match crate::json_decode::from_ty(&target, &shape, &mut Vec::new()) {
             Ok(desc) => self.record_resolution(id, Resolution::Decode(desc), span),
             Err(msg) if msg.is_empty() => {}

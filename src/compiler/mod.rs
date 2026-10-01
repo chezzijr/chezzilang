@@ -4756,6 +4756,7 @@ impl Compiler {
             && let [arg] = args
         {
             let desc = desc.clone();
+            let desc = desc.try_map_defaults(&mut |f| self.compile_default_thunk(f, span))?;
             self.compile_expr(fc, obj)?;
             self.compile_expr(fc, arg)?;
             let ic = self.next_method_ic();
@@ -5085,24 +5086,63 @@ impl Compiler {
                     self.compile_expr(fc, &pack)?;
                     srcs.push(None);
                 }
-                crate::checker::ArgFill::Provider(name) => {
-                    let id = self.provider_id(name);
-                    fc.emit(Op::MakeFuncIn(id), span);
-                    fc.emit(Op::Call(0), span);
-                    srcs.push(None);
-                }
-                // The declaration's own node, under its declaring module's records, so a literal
-                // default resolves in the definer, never in the caller.
-                crate::checker::ArgFill::Inline { module, expr } => {
-                    let saved = std::mem::replace(&mut self.current_module_idx, *module);
-                    let r = self.compile_expr(fc, expr);
-                    self.current_module_idx = saved;
-                    r?;
+                crate::checker::ArgFill::Provider(_) | crate::checker::ArgFill::Inline { .. } => {
+                    self.compile_default_fill(fc, fill, span)?;
                     srcs.push(None);
                 }
             }
         }
         Ok(Some(srcs))
+    }
+
+    /// Push one omitted slot's default value: the ONE lowering of a default fill, shared by a
+    /// call's plan and a `json.decode` default thunk (TICKET-198).
+    fn compile_default_fill(
+        &mut self,
+        fc: &mut FnComp,
+        fill: &crate::checker::ArgFill,
+        span: Span,
+    ) -> Result<(), CompileError> {
+        match fill {
+            crate::checker::ArgFill::Provider(name) => {
+                let id = self.provider_id(name);
+                fc.emit(Op::MakeFuncIn(id), span);
+                fc.emit(Op::Call(0), span);
+                Ok(())
+            }
+            // The declaration's own node, under its declaring module's records, so a literal
+            // default resolves in the definer, never in the caller.
+            crate::checker::ArgFill::Inline { module, expr } => {
+                let saved = std::mem::replace(&mut self.current_module_idx, *module);
+                let r = self.compile_expr(fc, expr);
+                self.current_module_idx = saved;
+                r
+            }
+            crate::checker::ArgFill::Arg(_) | crate::checker::ArgFill::Pack(_) => {
+                Err(CompileError {
+                    message: "internal: not a default fill".into(),
+                    span,
+                })
+            }
+        }
+    }
+
+    /// A zero-arg proto that returns one field default, for `json.decode` to call when its key is
+    /// absent; homed in the declaring module for an inline fill.
+    fn compile_default_thunk(
+        &mut self,
+        fill: &crate::checker::ArgFill,
+        span: Span,
+    ) -> Result<crate::json_decode::DefaultThunk, CompileError> {
+        let mut fc = FnComp::new("json.decode".to_string(), 0, false);
+        self.compile_default_fill(&mut fc, fill, span)?;
+        fc.emit(Op::Return, span);
+        let proto = self.finish(fc);
+        let module = match fill {
+            crate::checker::ArgFill::Inline { module, .. } => *module,
+            _ => self.current_module_idx,
+        };
+        Ok(crate::json_decode::DefaultThunk { proto, module })
     }
 
     /// Push a call's arguments -- by its plan when the checker bound it, else as written -- and

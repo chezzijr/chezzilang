@@ -308,7 +308,7 @@ pub enum Op {
     /// `Result[Json]` produced by `json.parse(s)`. Pops it and pushes `Result[T]`: if the parse
     /// errored, the `Err` passes through; otherwise the inner `Json` is coerced against the
     /// descriptor (→ `Ok(value)` or `Err(msg)`).
-    JsonDecode(crate::json_decode::TypeDescriptor),
+    JsonDecode(crate::json_decode::TypeDescriptor<crate::json_decode::DefaultThunk>),
     /// `json.encode(x)`'s runtime seam (`std/json.chz`'s bodyless `native fn _to_json`). Pops one
     /// runtime value and pushes the `Json` enum tree that `std.json`'s own `stringify` then renders
     /// — `encode` is `stringify(_to_json(x))` in Chezzi, so number/string formatting have exactly

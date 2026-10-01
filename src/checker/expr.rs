@@ -1107,6 +1107,27 @@ impl Checker {
         Some(sig)
     }
 
+    /// The ONE map from a classified default to its fill: `S(...)` and `json.decode[S]` both read
+    /// it (TICKET-198). `None` is a hole the callee's prologue fills (legal only as a trailing run).
+    pub(super) fn default_fill(&self, d: &crate::desugar::Dflt, n_targs: usize) -> Option<ArgFill> {
+        use crate::desugar::Dflt;
+        match d {
+            Dflt::CalleeFilled => None,
+            Dflt::GenericProvider { tps, .. } if n_targs != *tps => None,
+            Dflt::Provider { name, .. } | Dflt::GenericProvider { name, .. } => {
+                Some(ArgFill::Provider(name.clone()))
+            }
+            Dflt::Inline(e) => Some(ArgFill::Inline {
+                module: self
+                    .module_idx_of_file
+                    .get(&e.span.file)
+                    .copied()
+                    .unwrap_or(self.graph_module_idx),
+                expr: e.clone(),
+            }),
+        }
+    }
+
     /// [`Self::bind_call`]'s decision: `Ok(None)` when the call needs no binding (no named
     /// argument, not variadic, and some omitted slot has no default), else the slot plan, or the
     /// binding error and its span. A message about one named argument points at its value.
@@ -1118,7 +1139,6 @@ impl Checker {
         n_targs: usize,
         span: Span,
     ) -> Result<Option<Vec<ArgFill>>, (String, Span)> {
-        use crate::desugar::Dflt;
         let np = args.len();
         let n = slots.len();
         let slot_name = |i: usize| -> String {
@@ -1136,25 +1156,6 @@ impl Checker {
                     "unknown named argument '{k}' (its parameters are: {})",
                     known.join(", ")
                 )
-            }
-        };
-        // An omitted slot's fill, or `None` for a hole the callee's prologue fills (legal only as a
-        // trailing run).
-        let fill_default = |d: &Dflt| -> Option<ArgFill> {
-            match d {
-                Dflt::CalleeFilled => None,
-                Dflt::GenericProvider { tps, .. } if n_targs != *tps => None,
-                Dflt::Provider { name, .. } | Dflt::GenericProvider { name, .. } => {
-                    Some(ArgFill::Provider(name.clone()))
-                }
-                Dflt::Inline(e) => Some(ArgFill::Inline {
-                    module: self
-                        .module_idx_of_file
-                        .get(&e.span.file)
-                        .copied()
-                        .unwrap_or(self.graph_module_idx),
-                    expr: e.clone(),
-                }),
             }
         };
         let variadic = slots.iter().position(|s| s.is_variadic);
@@ -1207,7 +1208,7 @@ impl Checker {
             }
             match (s, &slots[i].default) {
                 (Some(ci), _) => out.push(Some(ArgFill::Arg(ci))),
-                (None, Some(d)) => out.push(fill_default(d)),
+                (None, Some(d)) => out.push(self.default_fill(d, n_targs)),
                 (None, None) => {
                     let kind = if variadic.is_some_and(|v| i > v) {
                         "missing required keyword argument"

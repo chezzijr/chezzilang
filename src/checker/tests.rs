@@ -36123,7 +36123,7 @@ fn resolution_records_every_pattern_head() {
 /// `main` declares its own `P` too, so the descriptor must carry `lib`'s key and fields.
 #[test]
 fn decode_target_is_recorded_for_an_imported_alias() {
-    use crate::json_decode::TypeDescriptor;
+    use crate::json_decode::{FieldDesc, TypeDescriptor};
     let t = TmpDir::new();
     t.write("lib.chz", "struct P:\n    x: int\ntype Q = P\n");
     let main = t.write(
@@ -36133,7 +36133,7 @@ fn decode_target_is_recorded_for_an_imported_alias() {
     let graph = crate::resolver::build_graph(&main).expect("resolve");
     assert!(check_graph(&graph).is_ok(), "{:?}", check_graph(&graph));
     let table = resolve_call_tables(&graph).9;
-    let decodes: Vec<&TypeDescriptor> = table
+    let decodes: Vec<&TypeDescriptor<ArgFill>> = table
         .values()
         .filter_map(|r| match r {
             Resolution::Decode(d) => Some(d),
@@ -36150,7 +36150,14 @@ fn decode_target_is_recorded_for_an_imported_alias() {
         panic!("{decodes:?}");
     };
     assert_eq!(display, "P");
-    assert_eq!(fields, &vec![("x".to_string(), TypeDescriptor::Int)]);
+    assert_eq!(
+        fields,
+        &vec![FieldDesc {
+            name: "x".to_string(),
+            desc: TypeDescriptor::Int,
+            default: None,
+        }]
+    );
     let main_p = table.values().find_map(|r| match r {
         Resolution::StructCtor(k) => Some(k.clone()),
         _ => None,
@@ -36160,6 +36167,44 @@ fn decode_target_is_recorded_for_an_imported_alias() {
         main_p,
         "the descriptor is main's P, not lib's"
     );
+}
+
+/// TICKET-198 — `json.decode[P]` fills a missing defaulted field with the SAME fill `P()` uses:
+/// the descriptor's per-field defaults equal the ctor's `CallPlanTable` fills, one inline literal
+/// and one provider (a module-global read).
+#[test]
+fn decode_descriptor_fills_equal_the_ctor_plan_fills() {
+    use crate::json_decode::TypeDescriptor;
+    let t = TmpDir::new();
+    let main = t.write(
+        "main.chz",
+        "import std.json\nK := 2\nstruct P:\n    a: int = 3\n    b: int = K\nprint(P())\nprint(json.decode[P](r'{}'))\n",
+    );
+    let graph = crate::resolver::build_graph(&main).expect("resolve");
+    assert!(check_graph(&graph).is_ok(), "{:?}", check_graph(&graph));
+    let tables = resolve_call_tables(&graph);
+    let plans: Vec<&Vec<ArgFill>> = tables.0.values().filter(|p| p.len() == 2).collect();
+    assert_eq!(plans.len(), 1, "{plans:?}");
+    let decodes: Vec<&TypeDescriptor<ArgFill>> = tables
+        .9
+        .values()
+        .filter_map(|r| match r {
+            Resolution::Decode(d) => Some(d),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(decodes.len(), 1, "{decodes:?}");
+    let TypeDescriptor::Struct { fields, .. } = decodes[0] else {
+        panic!("{decodes:?}");
+    };
+    let fills: Vec<Option<ArgFill>> = fields.iter().map(|f| f.default.clone()).collect();
+    let want: Vec<Option<ArgFill>> = plans[0].iter().cloned().map(Some).collect();
+    assert_eq!(fills, want);
+    assert!(
+        matches!(fills[0], Some(ArgFill::Inline { .. })),
+        "{fills:?}"
+    );
+    assert!(matches!(fills[1], Some(ArgFill::Provider(_))), "{fills:?}");
 }
 
 /// TICKET-180 P2 — an unpinned alias of a generic struct takes the target's type arguments, and

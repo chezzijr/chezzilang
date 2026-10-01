@@ -3,6 +3,19 @@
 
 use super::*;
 
+/// Why `coerce_json` stopped: a decode mismatch (the `Err` of the decode's `Result`), or a fault
+/// raised by a field default it ran, which propagates as a runtime fault (TICKET-198).
+pub(super) enum DecodeFail {
+    Msg(String),
+    Fault(RuntimeError),
+}
+
+impl From<String> for DecodeFail {
+    fn from(msg: String) -> Self {
+        DecodeFail::Msg(msg)
+    }
+}
+
 /// CPython's `str.isspace()` is true for 29 codepoints; Rust's `char::is_whitespace` covers 25. The
 /// four extras are U+001C..U+001F (the C0 "information separator" controls), measured 2026-09-08.
 fn py_blank(c: char) -> bool {
@@ -704,38 +717,47 @@ impl Vm {
     /// descriptor (passing through an `Err`), push the resulting `Result[T]`.
     pub(super) fn json_decode(
         &mut self,
-        desc: &crate::json_decode::TypeDescriptor,
+        desc: &crate::json_decode::TypeDescriptor<crate::json_decode::DefaultThunk>,
         span: Span,
     ) -> Result<(), RuntimeError> {
-        let res = self.pop();
+        // `res` stays on the operand stack while the coercion runs: a field default re-enters the
+        // VM, which collects, and the parsed tree must survive it. `base - 1` is `res`'s slot.
+        let res = self.stack[self.stack.len() - 1];
+        let base = self.stack.len();
         let bad = "decode: parse did not return a Result".to_string();
-        let (rty, variant, payload) = self
-            .enum_parts(res)
-            .ok_or_else(|| self.err(bad.clone(), span))?;
+        let Some((rty, variant, payload)) = self.enum_parts(res) else {
+            self.stack.truncate(base - 1);
+            return Err(self.err(bad, span));
+        };
         if rty != "Result" {
+            self.stack.truncate(base - 1);
             return Err(self.err(bad, span));
         }
         match variant.as_str() {
-            "Err" => {
-                self.push(res); // a Result Err(str) is already a valid Result[T]
-                Ok(())
-            }
+            // a Result Err(str) is already a valid Result[T]; it stays where it is
+            "Err" => Ok(()),
             "Ok" if payload.len() == 1 => {
                 let jv = payload[0];
-                match self.coerce_json(jv, desc, "$") {
+                let r = self.coerce_json(jv, desc, "$", span);
+                self.stack.truncate(base - 1);
+                match r {
                     Ok(v) => {
                         let r = self.alloc_enum("Result", "Ok", vec![v]);
                         self.push(r);
                     }
-                    Err(msg) => {
+                    Err(DecodeFail::Msg(msg)) => {
                         let s = self.alloc_str(msg);
                         let r = self.alloc_enum("Result", "Err", vec![s]);
                         self.push(r);
                     }
+                    Err(DecodeFail::Fault(e)) => return Err(e),
                 }
                 Ok(())
             }
-            _ => Err(self.err(bad, span)),
+            _ => {
+                self.stack.truncate(base - 1);
+                Err(self.err(bad, span))
+            }
         }
     }
 
@@ -755,14 +777,37 @@ impl Vm {
         }
     }
 
+    /// Run a missing field's default thunk, as `S(...)` runs it for an omitted field: afresh each
+    /// time, homed in the declaring module. A fault inside it is a fault, never a decode `Err`.
+    fn run_decode_default(
+        &mut self,
+        t: crate::json_decode::DefaultThunk,
+        span: Span,
+    ) -> Result<Value, DecodeFail> {
+        let Some(&home) = self.module_objs.get(t.module) else {
+            return Err(DecodeFail::Fault(self.err(
+                "json.decode: the module that declares this default has not been initialized yet"
+                    .to_string(),
+                span,
+            )));
+        };
+        let f = Value::obj(self.heap.alloc(Obj::Func {
+            proto: t.proto,
+            home,
+        }));
+        self.guarded(|vm| vm.invoke_value(f, Vec::new(), span))
+            .map_err(DecodeFail::Fault)
+    }
+
     /// Coerce a parsed `Json` value into a concrete value of the descriptor's type. `path` is a
     /// JSON-pointer-ish breadcrumb for error messages.
     pub(super) fn coerce_json(
         &mut self,
         jv: Value,
-        desc: &crate::json_decode::TypeDescriptor,
+        desc: &crate::json_decode::TypeDescriptor<crate::json_decode::DefaultThunk>,
         path: &str,
-    ) -> Result<Value, String> {
+        span: Span,
+    ) -> Result<Value, DecodeFail> {
         use crate::json_decode::TypeDescriptor as D;
         let (_jty, variant, payload) = self
             .enum_parts(jv)
@@ -785,15 +830,15 @@ impl Vm {
                     .json_num(&variant, &payload)
                     .ok_or_else(|| mismatch("int"))?;
                 if f.fract() != 0.0 || !f.is_finite() {
-                    return Err(format!("decode: expected an integer at {path}, found {f}"));
+                    return Err(format!("decode: expected an integer at {path}, found {f}").into());
                 }
                 // `f as i64` saturates, so range-check first. Use a strict `> 2^63` upper bound so
                 // i64::MAX (which f64-rounds to exactly 2^63) still round-trips via the saturating
                 // cast, while everything strictly above 2^63 / below -2^63 is rejected.
                 if f < i64::MIN as f64 || f > 9_223_372_036_854_775_808.0 {
-                    return Err(format!(
-                        "decode: integer {f} at {path} is out of range for int"
-                    ));
+                    return Err(
+                        format!("decode: integer {f} at {path} is out of range for int").into(),
+                    );
                 }
                 Ok(self.make_int(f as i64))
             }
@@ -805,71 +850,87 @@ impl Vm {
             }
             D::Bool => match (variant.as_str(), payload.first().and_then(|v| v.as_bool())) {
                 ("Bool", Some(b)) => Ok(Value::bool(b)),
-                _ => Err(mismatch("bool")),
+                _ => Err(mismatch("bool").into()),
             },
             D::Str => {
                 if variant == "Str" {
                     let s = self.val_str(payload[0]).unwrap_or_default();
                     Ok(self.alloc_str(s))
                 } else {
-                    Err(mismatch("str"))
+                    Err(mismatch("str").into())
                 }
             }
             D::Option(inner) => {
                 if variant == "Null" {
                     Ok(self.alloc_enum("Option", "None", Vec::new()))
                 } else {
-                    let v = self.coerce_json(jv, inner, path)?;
+                    let v = self.coerce_json(jv, inner, path, span)?;
                     Ok(self.alloc_enum("Option", "Some", vec![v]))
                 }
             }
             D::List(inner) => {
                 if variant != "Arr" {
-                    return Err(mismatch("array"));
+                    return Err(mismatch("array").into());
                 }
                 let items = match self.heap.get(self.as_obj(payload[0])) {
                     Obj::List(items) => items.clone(),
-                    _ => return Err(mismatch("array")),
+                    _ => return Err(mismatch("array").into()),
                 };
-                let mut out = Vec::with_capacity(items.len());
+                // Each decoded element is rooted on the operand stack until the list owns it: a
+                // later element's field default can collect (`json_decode` truncates on a failure).
+                let child_base = self.stack.len();
                 for (i, it) in items.into_iter().enumerate() {
-                    out.push(self.coerce_json(it, inner, &format!("{path}[{i}]"))?);
+                    let v = self.coerce_json(it, inner, &format!("{path}[{i}]"), span)?;
+                    self.push(v);
                 }
+                let out = self.stack.split_off(child_base);
                 Ok(Value::obj(self.heap.alloc(Obj::List(out))))
             }
             D::Tuple(elems) => {
                 if variant != "Arr" {
-                    return Err(mismatch("array"));
+                    return Err(mismatch("array").into());
                 }
                 let items = match self.heap.get(self.as_obj(payload[0])) {
                     Obj::List(items) => items.clone(),
-                    _ => return Err(mismatch("array")),
+                    _ => return Err(mismatch("array").into()),
                 };
                 if items.len() != elems.len() {
                     return Err(format!(
                         "decode: expected an array of {} elements at {path}, found {}",
                         elems.len(),
                         items.len()
-                    ));
+                    )
+                    .into());
                 }
-                let mut out = Vec::with_capacity(items.len());
+                // Rooted on the operand stack, as in the list arm.
+                let child_base = self.stack.len();
                 for (i, (it, d)) in items.into_iter().zip(elems).enumerate() {
-                    out.push(self.coerce_json(it, d, &format!("{path}[{i}]"))?);
+                    let v = self.coerce_json(it, d, &format!("{path}[{i}]"), span)?;
+                    self.push(v);
                 }
+                let out = self.stack.split_off(child_base);
                 Ok(Value::obj(self.heap.alloc(Obj::Tuple(out))))
             }
             D::Map(inner) => {
                 if variant != "Obj" {
-                    return Err(mismatch("object"));
+                    return Err(mismatch("object").into());
                 }
                 let entries = match self.heap.get(self.as_obj(payload[0])) {
                     Obj::Map(m) => m.entries.clone(),
-                    _ => return Err(mismatch("object")),
+                    _ => return Err(mismatch("object").into()),
                 };
-                let mut out = MapData::default();
+                // Values are rooted on the operand stack, as in the list arm; the keys belong to
+                // the parsed tree, which `json_decode` keeps rooted.
+                let child_base = self.stack.len();
+                let mut keys = Vec::with_capacity(entries.len());
                 for (hk, k, v) in entries {
                     let key = self.val_str(k).unwrap_or_default();
-                    let coerced = self.coerce_json(v, inner, &format!("{path}.{key}"))?;
+                    let coerced = self.coerce_json(v, inner, &format!("{path}.{key}"), span)?;
+                    self.push(coerced);
+                    keys.push((hk, k));
+                }
+                let mut out = MapData::default();
+                for ((hk, k), coerced) in keys.into_iter().zip(self.stack.split_off(child_base)) {
                     out.push(hk, k, coerced); // str keys unchanged → reuse the cached hash
                 }
                 Ok(Value::obj(self.heap.alloc(Obj::Map(out))))
@@ -881,30 +942,41 @@ impl Vm {
             } => {
                 if variant != "Obj" {
                     // ROOT REDESIGN — error text shows the BARE display name, never the identity key.
-                    return Err(mismatch(&format!("object for {display}")));
+                    return Err(mismatch(&format!("object for {display}")).into());
                 }
                 let entries = match self.heap.get(self.as_obj(payload[0])) {
                     Obj::Map(m) => m.entries.clone(),
-                    _ => return Err(mismatch("object")),
+                    _ => return Err(mismatch("object").into()),
                 };
                 // Positional layout: `fields` (the type descriptor) is already in the struct's
                 // declaration order (see `json_decode::struct_descriptor`), so push values in order.
-                let mut field_vals: Vec<Value> = Vec::with_capacity(fields.len());
-                for (fname, fdesc) in fields {
+                // Each value is rooted on the operand stack, as in the list arm: a later field's
+                // default can collect.
+                let child_base = self.stack.len();
+                for field in fields {
                     let found = entries
                         .iter()
-                        .find(|(_, k, _)| self.val_str(*k).as_deref() == Some(fname.as_str()));
-                    let fpath = format!("{path}.{fname}");
+                        .find(|(_, k, _)| self.val_str(*k).as_deref() == Some(field.name.as_str()));
+                    let fpath = format!("{path}.{}", field.name);
                     let v = match found {
-                        Some((_, _, jval)) => self.coerce_json(*jval, fdesc, &fpath)?,
-                        None => match fdesc {
-                            // A missing Option field decodes to None; anything else is an error.
-                            D::Option(_) => self.alloc_enum("Option", "None", Vec::new()),
-                            _ => return Err(format!("decode: missing key '{fname}' at {path}")),
+                        Some((_, _, jval)) => self.coerce_json(*jval, &field.desc, &fpath, span)?,
+                        // A missing key takes the field's default, as `S(...)` does; with no
+                        // default an `Option` field is None and anything else is an error.
+                        None => match (&field.default, &field.desc) {
+                            (Some(t), _) => self.run_decode_default(*t, span)?,
+                            (None, D::Option(_)) => self.alloc_enum("Option", "None", Vec::new()),
+                            (None, _) => {
+                                return Err(format!(
+                                    "decode: missing key '{}' at {path}",
+                                    field.name
+                                )
+                                .into());
+                            }
                         },
                     };
-                    field_vals.push(v);
+                    self.push(v);
                 }
+                let field_vals = self.stack.split_off(child_base);
                 // ROOT REDESIGN — tag the value with the qualified IDENTITY KEY (so downstream
                 // field/method lookups + `struct_tid` hit the right layout); display renders bare.
                 let tid = self.struct_tid(key);

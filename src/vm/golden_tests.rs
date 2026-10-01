@@ -5654,6 +5654,61 @@ fn vm_run_file_stress(src: &str, cfg: crate::native::HostConfig) -> String {
     captured(vm.out)
 }
 
+/// TICKET-198 — a missing defaulted field runs its default re-entrantly while `coerce_json` holds
+/// decoded siblings, list elements and map values. Under GC stress (collect before every
+/// instruction) they must stay rooted: before the operand-stack rooting this frees `xs[0]`.
+#[test]
+fn json_decode_field_defaults_survive_gc_stress() {
+    let src = r#"import std.json
+fn mk() -> List[str]:
+    junk := []
+    for i in range(20):
+        junk.push(str(i))
+    return [str(junk.len())]
+struct In:
+    w: str
+    tags: List[str] = mk()
+struct Out:
+    xs: List[In]
+    m: Map[str, In]
+    name: str = "d" + str(1)
+match json.decode[Out](r'{"xs":[{"w":"a"},{"w":"b"},{"w":"c"}],"m":{"k":{"w":"q"}}}'):
+    Ok(o): print(o)
+    Err(e): print(e)
+"#;
+    assert_eq!(
+        vm_run_file_stress(src, crate::native::HostConfig::default()),
+        "Out(xs=[In(w='a', tags=['20']), In(w='b', tags=['20']), In(w='c', tags=['20'])], m={'k': In(w='q', tags=['20'])}, name='d1')\n"
+    );
+}
+
+/// TICKET-198 — the map and tuple arms: a map value and a tuple element are decoded, then a later
+/// sibling runs a default. Under GC stress each built child must stay rooted until its container
+/// owns it.
+#[test]
+fn json_decode_map_and_tuple_children_survive_gc_stress() {
+    let src = r#"import std.json
+fn mk() -> List[str]:
+    junk := []
+    for i in range(20):
+        junk.push(str(i))
+    return [str(junk.len())]
+struct In:
+    w: str
+    tags: List[str] = mk()
+match json.decode[Map[str, In]](r'{"a":{"w":"x"},"b":{"w":"y"}}'):
+    Ok(m): print(m)
+    Err(e): print(e)
+match json.decode[(In, In)](r'[{"w":"p"},{"w":"q"}]'):
+    Ok(t): print(t)
+    Err(e): print(e)
+"#;
+    assert_eq!(
+        vm_run_file_stress(src, crate::native::HostConfig::default()),
+        "{'a': In(w='x', tags=['20']), 'b': In(w='y', tags=['20'])}\n(In(w='p', tags=['20']), In(w='q', tags=['20']))\n"
+    );
+}
+
 /// Task 1 — the `Executor` PROGRAM-EXIT drain (`drain_live_executors`) runs each queued job
 /// against EMPTY frames (it runs AFTER `run()` popped the top-level
 /// frame). This exercises that path under `gc_stress` (collect before every instruction): both
