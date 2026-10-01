@@ -230,7 +230,7 @@ test fn grid_policy_r27_method_named():
     assert out.recv() == "fault"
     assert xs == [1]
 
-# ---- the receiver: no struct receiver is fresh (DEC-179 item 2) ----
+# ---- the receiver: a struct constructor is fresh (TICKET-190); a named or call-result struct is not ----
 
 test fn grid_policy_r28_receiver_named():
     c := T189C(n=1)
@@ -244,7 +244,24 @@ test fn grid_policy_r29_receiver_constructor():
     out := Channel[str](4)
     parallel:
         spawn T189C(n=1).bump(out)
+    assert out.recv() == "ok 2"
+
+# A constructor is fresh only at its root (DEC-160 shallow): a named list in a field stays marked.
+struct T190H:
+    xs: List[int]
+    fn push_inner(self, out: Channel[str]):
+        res := recover:
+            self.xs.push(2)
+            self.xs.len()
+        out.send(t189_out(res))
+
+test fn grid_policy_r29b_constructor_holding_a_named_list():
+    xs := [1]
+    out := Channel[str](4)
+    parallel:
+        spawn T190H(xs=xs).push_inner(out)
     assert out.recv() == "fault"
+    assert xs == [1]
 
 test fn grid_policy_r30_receiver_call_result():
     out := Channel[str](4)

@@ -39,6 +39,36 @@ impl Crossing {
             Crossing::Copy
         }
     }
+
+    /// TICKET-190: encode a generator frame: bit `k` = frame slot `k` is `Move` (private, the
+    /// parent cannot reach its root). A slot at 64 or above stays `Copy` (a false fault, never a
+    /// lost write).
+    pub fn frame_mask(slots: &[Crossing]) -> u64 {
+        slots
+            .iter()
+            .enumerate()
+            .filter(|&(k, &c)| c == Crossing::Move && k < u64::BITS as usize)
+            .fold(0, |m, (k, _)| m | 1 << k)
+    }
+
+    /// Decode frame slot `k` of a [`frame_mask`](Crossing::frame_mask). A slot at 64 or above is
+    /// `Copy`.
+    pub fn frame_slot(mask: u64, k: usize) -> Crossing {
+        if k < u64::BITS as usize && (mask >> k) & 1 == 1 {
+            Crossing::Move
+        } else {
+            Crossing::Copy
+        }
+    }
+}
+
+/// The frame-mask bits of a proto's `arity` param slots (params are slots `0..arity`).
+pub fn param_bits(arity: usize) -> u64 {
+    if arity >= u64::BITS as usize {
+        u64::MAX
+    } else {
+        (1u64 << arity) - 1
+    }
 }
 
 /// A runtime crossing route whose mark does not depend on the operand.
@@ -92,6 +122,24 @@ mod tests {
         wide.push(Move);
         assert_eq!(Crossing::from_mask(Crossing::mask(None, &wide), 32), Copy);
         assert_eq!(Crossing::from_mask(u32::MAX, 32), Copy);
+        // TICKET-190: a generator frame mask, one bit per frame slot.
+        let slots = [Move, Copy, Move];
+        let fm = Crossing::frame_mask(&slots);
+        assert_eq!(fm, 0b101);
+        for (k, &c) in slots.iter().enumerate() {
+            assert_eq!(Crossing::frame_slot(fm, k), c);
+        }
+        let mut frame = vec![Copy; 64];
+        frame[63] = Move;
+        assert_eq!(Crossing::frame_slot(Crossing::frame_mask(&frame), 63), Move);
+        // Slot 64 cannot be encoded, so it stays Copy.
+        frame.push(Move);
+        assert_eq!(Crossing::frame_mask(&frame), 1 << 63);
+        assert_eq!(Crossing::frame_slot(u64::MAX, 64), Copy);
+        assert_eq!(param_bits(0), 0);
+        assert_eq!(param_bits(2), 0b11);
+        assert_eq!(param_bits(64), u64::MAX);
+        assert_eq!(param_bits(70), u64::MAX);
         for enclosing in [false, true] {
             assert!(marks(Route::Spawn, enclosing));
             assert!(marks(Route::ModuleSnapshot, enclosing));

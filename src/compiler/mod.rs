@@ -1409,6 +1409,7 @@ impl Compiler {
             decl_span: fc.decl_span,
             // Lever #3: cold-path capture-name metadata in slot order (empty for non-closures).
             capture_names: fc.captured_names,
+            private_slots: 0,
         });
         pid
     }
@@ -7612,15 +7613,15 @@ mod file_id_tests {
 
     static TMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-    struct TmpDir(PathBuf);
+    pub(super) struct TmpDir(PathBuf);
     impl TmpDir {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             let n = TMP_COUNTER.fetch_add(1, Ordering::SeqCst);
             let dir = std::env::temp_dir().join(format!("chezzi_fid_{}_{}", std::process::id(), n));
             std::fs::create_dir_all(&dir).unwrap();
             TmpDir(dir)
         }
-        fn write(&self, rel: &str, contents: &str) -> PathBuf {
+        pub(super) fn write(&self, rel: &str, contents: &str) -> PathBuf {
             let p = self.0.join(rel);
             if let Some(parent) = p.parent() {
                 std::fs::create_dir_all(parent).unwrap();
@@ -7776,6 +7777,246 @@ mod assert_lowering_tests {
             code.iter().filter(|op| matches!(op, Op::Dup2)).count(),
             0,
             "{code:?}"
+        );
+    }
+}
+
+/// TICKET-190 — a generator frame slot is private (`Proto.private_slots` bit set) only when the
+/// parent cannot reach its root; a param slot is then stamped at the creating call site. One cell
+/// per rule direction (the cell map is the plan's step 3d).
+#[cfg(test)]
+mod gen_frame_tests {
+    use super::*;
+    use crate::vm::op::Op;
+
+    const MAIN: &str = r#"import h
+struct P:
+    x: int
+    fn bump(self):
+        self.x += 1
+struct R:
+    d: List[int]
+    fn index(self, k: int) -> R:
+        return self
+    fn iter(self) -> Iterator[int]:
+        return self.d.iter()
+G: List[List[int]] = []
+fn t_id(xs: List[int]) -> List[int]:
+    return xs
+fn count(xs: List[int]) -> int:
+    return xs.len()
+fn keep(xs: List[int]):
+    G.push(xs)
+fn fwd(xs: List[int]):
+    keep(xs)
+fn vcount(...xs: List[int]) -> int:
+    return xs.len()
+fn vfirst(first: List[int], ...rest: int) -> int:
+    return first.len()
+fn gi(xs: List[int]) -> Iterator[int]:
+    yield xs.len()
+fn g1(xs: List[int]) -> Iterator[int]:
+    xs.push(1)
+    yield xs.len()
+fn g2(xs: List[int]) -> Iterator[List[int]]:
+    yield xs
+fn g3() -> Iterator[int]:
+    acc := [1]
+    acc.push(2)
+    yield acc.len()
+fn g4() -> Iterator[int]:
+    acc := t_id([1])
+    yield acc.len()
+fn g5() -> Iterator[int]:
+    p := P(x=1)
+    p.x = 2
+    yield p.x
+fn g6(sink: List[List[int]]) -> Iterator[int]:
+    acc: List[int] = []
+    sink.push(acc)
+    yield 0
+fn g7() -> Iterator[int]:
+    acc := [1]
+    _ := count(acc)
+    yield 0
+fn g8() -> Iterator[int]:
+    acc := [1]
+    keep(acc)
+    yield 0
+fn g9() -> Iterator[int]:
+    acc := [1]
+    fwd(acc)
+    yield 0
+fn g10() -> Iterator[int]:
+    acc := [1]
+    f := fn() -> int: acc.len()
+    yield f()
+fn g11() -> Iterator[int]:
+    for v in [[1]]:
+        v.push(2)
+        yield 0
+fn g12() -> Iterator[int]:
+    acc := [1]
+    b := acc
+    yield b.len()
+fn g13() -> Iterator[int]:
+    acc := [1]
+    acc = t_id([2])
+    yield acc.len()
+fn g14() -> Iterator[int]:
+    p := P(x=1)
+    p.bump()
+    yield p.x
+fn g15() -> Iterator[int]:
+    acc := [1]
+    _ := count(xs=acc)
+    yield 0
+fn g16() -> Iterator[int]:
+    acc := [1]
+    acc = [2]
+    acc += [3]
+    yield acc.len()
+fn g17() -> Iterator[int]:
+    acc := [1]
+    acc[0] = 5
+    yield acc[0]
+fn g18() -> Iterator[int]:
+    r := R(d=[1])
+    s := r[0]
+    yield s.d.len()
+fn g19() -> Iterator[int]:
+    acc := [1]
+    for v in acc:
+        yield v
+fn g20() -> Iterator[int]:
+    r := R(d=[1])
+    for v in r:
+        yield v
+fn g21() -> Iterator[int]:
+    acc := [1]
+    n := acc + [2]
+    yield n.len()
+fn g22() -> Iterator[int]:
+    p := P(x=1)
+    _ := p == P(x=2)
+    p.x = 3
+    yield p.x
+fn g23(t: (List[int], int)) -> Iterator[int]:
+    yield t.1
+fn g24() -> Iterator[int]:
+    acc := [1]
+    _ := h.hcount(acc)
+    yield 0
+fn g25() -> Iterator[int]:
+    acc := [1]
+    h.hkeep(acc)
+    yield 0
+fn g26() -> Iterator[int]:
+    a, b := [1], [2]
+    a.push(3)
+    yield a.len() + b.len()
+fn g27() -> Iterator[int]:
+    acc := [1]
+    _ := vcount(acc)
+    yield 0
+fn g28() -> Iterator[int]:
+    acc := [1]
+    _ := vfirst(acc, 1)
+    yield 0
+fn g29() -> Iterator[int]:
+    acc := [1]
+    _ := gi(acc)
+    yield 0
+fn g30() -> Iterator[int]:
+    acc := [1]
+    _ := h.hgen(acc)
+    yield 0
+xs := [1]
+a := g1([])
+b := g1(xs)
+c := count([1])
+"#;
+
+    const H: &str = r#"HG: List[List[int]] = []
+fn hcount(xs: List[int]) -> int:
+    return xs.len()
+fn hkeep(xs: List[int]):
+    HG.push(xs)
+fn hgen(xs: List[int]) -> Iterator[int]:
+    yield xs.len()
+"#;
+
+    #[test]
+    fn generator_slot_privacy_grid() {
+        let t = super::file_id_tests::TmpDir::new();
+        t.write("chezzi.toml", "[project]\nname = \"g\"\n");
+        t.write("h.chz", H);
+        let entry = t.write("main.chz", MAIN);
+        let graph = crate::resolver::build_graph(&entry).expect("graph should build");
+        if let Err(errs) = crate::checker::check_graph(&graph) {
+            panic!("the grid program must type-check: {errs:?}");
+        }
+        let program = compile_graph(&graph).expect("compile");
+        let want: [(&str, u64); 30] = [
+            ("g1", 0b1),
+            ("g2", 0),
+            ("g3", 0b1),
+            ("g4", 0),
+            ("g5", 0b1),
+            ("g6", 0b1),
+            ("g7", 0b1),
+            ("g8", 0),
+            ("g9", 0),
+            ("g10", 0),
+            ("g11", 0),
+            ("g12", 0),
+            ("g13", 0),
+            ("g14", 0),
+            ("g15", 0),
+            ("g16", 0b1),
+            ("g17", 0b1),
+            ("g18", 0),
+            ("g19", 0b1),
+            ("g20", 0),
+            ("g21", 0b1),
+            ("g22", 0),
+            ("g23", 0b1),
+            ("g24", 0b1),
+            ("g25", 0),
+            ("g26", 0),
+            ("g27", 0),
+            ("g28", 0b1),
+            ("g29", 0),
+            ("g30", 0),
+        ];
+        for (name, mask) in want {
+            let p = program
+                .protos
+                .iter()
+                .find(|p| p.name == name)
+                .unwrap_or_else(|| panic!("no proto {name}"));
+            assert_eq!(p.private_slots, mask, "cell {name}: private_slots");
+        }
+        // The creating call site stamps a generator's param slots: `g1([])` is fresh, `g1(xs)`
+        // names a parent value, and `count([1])` makes no generator.
+        let main_top = program.modules.last().expect("entry module").toplevel;
+        let stamps = |code: &[Op]| -> Vec<u64> {
+            code.iter()
+                .filter_map(|op| match op {
+                    Op::StampGen(m) => Some(*m),
+                    _ => None,
+                })
+                .collect()
+        };
+        for (pid, p) in program.protos.iter().enumerate() {
+            if p.name == "<toplevel>" && pid != main_top {
+                assert_eq!(stamps(&p.code), Vec::<u64>::new(), "stamps: h.chz toplevel");
+            }
+        }
+        assert_eq!(
+            stamps(&program.protos[main_top].code),
+            vec![1, 0],
+            "stamps: main.chz toplevel"
         );
     }
 }

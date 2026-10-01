@@ -2161,6 +2161,7 @@ impl Vm {
             Op::Pop => {
                 self.pop();
             }
+            Op::StampGen(_) => {}
             Op::Assert { has_msg, cmp } => {
                 // Reached only on the failing path: the compiler emits `Op::Assert` after a
                 // `JumpIfFalse` that already consumed (and tested) `cond`, so this op always faults.

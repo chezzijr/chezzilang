@@ -44,3 +44,195 @@ test fn generator_crossing_cost_is_independent_of_parent_heap():
     elapsed := time.now_ms() - t0
     assert big.len() == 200000
     assert elapsed < 1000, "{elapsed} ms"
+
+# ---- TICKET-190 route grid: every crossing route x generator state x slot kind x writer ----
+# A marking route (spawn forms, Executor jobs, the module snapshot) faults a write to a frame slot
+# the parent can still reach and runs one to a private slot; a hand-off (Channel, Shared, RwShared,
+# Atomic) gives the generator away, so every write runs.
+
+fn t190_cell(g: Iterator[int]) -> str:
+    res := recover:
+        total := 0
+        for v in g:
+            total += v
+        total
+    match res:
+        Ok(t): return "{t}"
+        Err(_): return "fault"
+
+fn t190_push(xs: List[int], v: int):
+    xs.push(v)
+
+fn t190_send(g: Iterator[int], out: Channel[str]):
+    out.send(t190_cell(g))
+
+fn t190_gp(xs: List[int]) -> Iterator[int]:
+    xs.push(1)
+    yield xs.len()
+    xs.push(2)
+    yield xs.len()
+
+fn t190_gpu(xs: List[int]) -> Iterator[int]:
+    t190_push(xs, 1)
+    yield xs.len()
+    t190_push(xs, 2)
+    yield xs.len()
+
+fn t190_gl() -> Iterator[int]:
+    acc: List[int] = []
+    acc.push(1)
+    yield acc.len()
+    acc.push(2)
+    yield acc.len()
+
+fn t190_glu() -> Iterator[int]:
+    acc: List[int] = []
+    t190_push(acc, 1)
+    yield acc.len()
+    t190_push(acc, 2)
+    yield acc.len()
+
+fn t190_gesc(sink: List[List[int]]) -> Iterator[int]:
+    acc: List[int] = []
+    sink.push(acc)
+    yield 0
+    acc.push(1)
+    yield acc.len()
+
+fn t190_started(g: Iterator[int]) -> Iterator[int]:
+    _ := g.next()
+    return g
+
+fn t190_done(g: Iterator[int]) -> Iterator[int]:
+    for v in g:
+        _ := v
+    return g
+
+# The caller owns `named` and `sink`, so every named list stays reachable from the parent.
+fn t190_cells(named: List[List[int]], sink: List[List[int]]) -> List[Iterator[int]]:
+    xs1 := named[0]
+    xs2 := named[1]
+    xs3 := named[2]
+    xs4 := named[3]
+    return [
+        t190_gp([]),
+        t190_gp(xs1),
+        t190_started(t190_gp([])),
+        t190_started(t190_gp(xs2)),
+        t190_gpu([]),
+        t190_gpu(xs3),
+        t190_started(t190_gpu([])),
+        t190_started(t190_gpu(xs4)),
+        t190_gl(),
+        t190_started(t190_gl()),
+        t190_glu(),
+        t190_started(t190_glu()),
+        t190_started(t190_gesc(sink)),
+        t190_done(t190_gl()),
+    ]
+
+fn t190_route(route: str, g: Iterator[int]) -> str:
+    out := Channel[str](1)
+    if route == "spawn_fn":
+        parallel:
+            spawn t190_send(g, out)
+    elif route == "spawn_block":
+        parallel:
+            spawn: out.send(t190_cell(g))
+    elif route == "spawn_value":
+        f := fn(): out.send(t190_cell(g))
+        parallel:
+            spawn f()
+    elif route == "submit":
+        ex := Executor()
+        ex.submit(fn(): out.send(t190_cell(g)))
+        ex.shutdown()
+    elif route == "submit_result":
+        ex := Executor()
+        r := ex.submit_result(fn() -> str: t190_cell(g)).recv()
+        ex.shutdown()
+        return r
+    elif route == "channel":
+        ch := Channel[Iterator[int]](1)
+        ch.send(g)
+        parallel:
+            spawn: out.send(t190_cell(ch.recv()))
+    elif route == "shared":
+        sh := Shared[Iterator[int]](g)
+        parallel:
+            spawn: out.send(t190_cell(sh.get()))
+    elif route == "rwshared":
+        sh := RwShared[Iterator[int]](g)
+        parallel:
+            spawn: out.send(t190_cell(sh.get()))
+    else:
+        sh := Atomic[Iterator[int]](g)
+        parallel:
+            spawn: out.send(t190_cell(sh.load()))
+    return out.recv()
+
+t190_mcells: List[Iterator[int]] = []
+
+fn t190_snapshot_row(named: List[List[int]], sink: List[List[int]]) -> str:
+    for g in t190_cells(named, sink):
+        t190_mcells.push(g)
+    got: List[str] = []
+    for i in range(t190_mcells.len()):
+        out := Channel[str](1)
+        parallel:
+            spawn: out.send(t190_cell(t190_mcells[i]))
+        got.push(out.recv())
+    return ",".join(got)
+
+test fn generator_route_grid():
+    marking := "3,fault,2,fault,3,fault,2,fault,3,2,3,2,fault,0"
+    handoff := "3,3,2,2,3,3,2,2,3,2,3,2,1,0"
+    routes := ["spawn_fn", "spawn_block", "spawn_value", "submit", "submit_result", "channel", "shared", "rwshared", "atomic"]
+    for route in routes:
+        named: List[List[int]] = [[], [], [], []]
+        sink: List[List[int]] = []
+        got: List[str] = []
+        for g in t190_cells(named, sink):
+            got.push(t190_route(route, g))
+        row := ",".join(got)
+        want := if route == "channel" or route == "shared" or route == "rwshared" or route == "atomic": handoff else: marking
+        assert row == want, "{route}: {row}"
+        assert named == [[], [1], [], [1]], "{route}: named {named}"
+        assert sink == [[]], "{route}: sink {sink}"
+    named: List[List[int]] = [[], [], [], []]
+    sink: List[List[int]] = []
+    row := t190_snapshot_row(named, sink)
+    assert row == marking, "module_snapshot: {row}"
+    assert named == [[], [1], [], [1]], "module_snapshot: named {named}"
+    assert sink == [[]], "module_snapshot: sink {sink}"
+
+t190_mg := t190_gl()
+
+test fn module_global_started_generator_runs_in_a_task():
+    _ := t190_mg.next()
+    out := Channel[str](1)
+    parallel:
+        spawn: out.send(t190_cell(t190_mg))
+    assert out.recv() == "2"
+
+# A generator callee stores its arguments in the new frame without running its body, so `acc`
+# escapes into `t190_inner`'s frame and stays marked: a write to it would be lost at the join.
+fn t190_inner(xs: List[int]) -> Iterator[int]:
+    yield xs.len()
+
+fn t190_gin(sink: List[Iterator[int]]) -> Iterator[int]:
+    acc := [1]
+    sink.push(t190_inner(acc))
+    yield 0
+    acc.push(2)
+    yield acc.len()
+
+test fn generator_arg_to_a_generator_callee_stays_marked():
+    s: List[Iterator[int]] = []
+    x := t190_gin(s)
+    _ := x.next()
+    out := Channel[str](1)
+    parallel:
+        spawn: out.send(t190_cell(x))
+    assert out.recv() == "fault"
+    assert t190_cell(s[0]) == "1"
