@@ -18182,6 +18182,28 @@ fn rwshared_map_readview_methods() {
 }
 
 #[test]
+fn rwshared_map_write_entry_methods() {
+    // TICKET-192: the single-entry writers of a `RwShared[Map[K, V]]`.
+    entry_ok(
+        "import std.concurrency\nfn main():\n    box := RwShared({\"a\": 1})\n    box.set_key(\"a\", 2)\n    match box.remove_key(\"a\"):\n        Some(v): print(v + 1)\n        None: print(-1)\n    print(box.get_or_insert(\"a\", 3) + 1)\nmain()\n",
+    );
+    // Wrong key type, wrong value type.
+    entry_rejects(
+        "import std.concurrency\nfn main():\n    box := RwShared({\"a\": 1})\n    box.set_key(1, 2)\nmain()\n",
+        "expected",
+    );
+    entry_rejects(
+        "import std.concurrency\nfn main():\n    box := RwShared({\"a\": 1})\n    box.set_key(\"a\", \"x\")\nmain()\n",
+        "expected",
+    );
+    // A List element has no map writers.
+    entry_rejects(
+        "import std.concurrency\nfn main():\n    box := RwShared([1])\n    box.set_key(0, 1)\nmain()\n",
+        "has no method 'set_key'",
+    );
+}
+
+#[test]
 fn rwshared_set_readview_methods() {
     // Set read-view: len/contains/for_each/fold. E arm-recovered from the concrete Set[E].
     entry_ok(

@@ -6,8 +6,7 @@
 # Executor job). A child's writes must be visible to the parent afterwards. `memoize1` gets the
 # same key kinds and callers: the value is right and `f` runs once per distinct key across tasks.
 #
-# The three `_rw_*` writers are the RwShared single-entry write path. Before TICKET-192 lands they
-# go through `write` (a whole-map re-encode); the fix points them at `set_key`/`remove_key`/
+# The three `_rw_*` writers are the RwShared single-entry write path: `set_key`/`remove_key`/
 # `get_or_insert`.
 
 import std.concurrency
@@ -98,18 +97,13 @@ fn _shared_goi[K: Hashable + Eq](s: Shared[Map[K, int]], k: K, v: int) -> int:
 
 # The RwShared single-entry writers (see the header).
 fn _rw_put[K: Hashable + Eq, V](b: RwShared[Map[K, V]], k: K, v: V):
-    b.write(fn(m): _map_put_ret(m, k, v))
+    b.set_key(k, v)
 
 fn _rw_del[K: Hashable + Eq, V](b: RwShared[Map[K, V]], k: K):
-    b.write(fn(m): _map_del_ret(m, k))
+    _ := b.remove_key(k)
 
 fn _rw_goi[K: Hashable + Eq, V](b: RwShared[Map[K, V]], k: K, v: V) -> V:
-    match b.get_key(k):
-        Some(x):
-            return x
-        None:
-            b.write(fn(m): _map_put_ret(m, k, v))
-            return v
+    return b.get_or_insert(k, v)
 
 fn _rw_ops[K: Hashable + Eq](b: RwShared[Map[K, int]], keys: List[K]) -> str:
     return _ops(keys, fn(k: K, v: int): _rw_put(b, k, v), fn(k: K): _rw_del(b, k), fn(k: K) -> Option[int]: b.get_key(k), fn(k: K) -> bool: b.has(k), fn() -> int: b.len(), fn(k: K, v: int) -> int: _rw_goi(b, k, v), fn() -> str: _rw_items(b))
@@ -240,6 +234,23 @@ test fn shared_map_grid_struct_keys_with_colliding_hash():
 
 test fn shared_map_grid_enum_keys():
     r := _grid([Tag.A, Tag.B(1), Tag.B(2), Tag.B(3), Tag.B(4), Tag.B(5)])
+    assert r == "", r
+
+# ---- the memoize grid ------------------------------------------------------------------------------
+test fn memoize_grid_int_keys():
+    r := _memo_grid([0, 1, 2, 3, 4, 5])
+    assert r == "", r
+
+test fn memoize_grid_str_keys():
+    r := _memo_grid(["a", "b", "c", "d", "e", "f"])
+    assert r == "", r
+
+test fn memoize_grid_struct_keys_with_colliding_hash():
+    r := _memo_grid([P(0), P(1), P(2), P(3), P(4), P(5)])
+    assert r == "", r
+
+test fn memoize_grid_enum_keys():
+    r := _memo_grid([Tag.A, Tag.B(1), Tag.B(2), Tag.B(3), Tag.B(4), Tag.B(5)])
     assert r == "", r
 
 # ---- wire identity under single-entry writes -------------------------------------------------------

@@ -21682,3 +21682,18 @@ fn rwshared_map_get_key_is_not_linear() {
         "40k RwShared.get_key on a 40k-entry map took {elapsed:?} (>1s ceiling) -- O(n) per lookup"
     );
 }
+
+/// TICKET-192: `RwShared[Map].set_key` writes one entry in place instead of re-encoding the whole map
+/// (what `write` does). 40k inserts then 40k overwrites on one box, sized for the release binary.
+#[test]
+fn rwshared_map_set_key_is_not_linear() {
+    let src = "import std.concurrency\nfn main():\n    n := 40000\n    m: Map[int, int] = {}\n    box := RwShared(m)\n    i := 0\n    while i < n:\n        box.set_key(i, i)\n        i = i + 1\n    i = 0\n    while i < n:\n        box.set_key(i, i + 1)\n        i = i + 1\n    print(box.len())\n    match box.get_key(39999):\n        Some(v): print(v)\n        None: print(-1)\nmain()\n";
+    let start = std::time::Instant::now();
+    let out = run(src);
+    let elapsed = start.elapsed();
+    assert_eq!(out, "40000\n40000\n");
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "40k RwShared.set_key inserts + 40k overwrites took {elapsed:?} (>1s ceiling) -- O(n) per write"
+    );
+}
