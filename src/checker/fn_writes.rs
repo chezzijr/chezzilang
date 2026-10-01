@@ -38,6 +38,331 @@ pub(super) enum SlotSrc<'a> {
     Default { literal_container: bool },
 }
 
+/// A statically named function's summary: its proven writes and, per declared param, whether the
+/// argument can escape the call (TICKET-190). Both come from one least fixed point.
+#[derive(Clone, Debug, Default)]
+pub(super) struct FnSummary {
+    pub writes: Vec<FnWrite>,
+    /// `escapes[i]`: argument `i` may be stored, returned or aliased past the call. An index at or
+    /// past the end escapes (native and extern sigs carry an empty vector).
+    pub escapes: Vec<bool>,
+    /// A generator call stores its arguments in the new frame without running the body, so every
+    /// argument escapes.
+    pub is_generator: bool,
+}
+
+/// TICKET-190 — a use of a bare name that keeps its root in the frame when the name's type allows
+/// it ([`Checker::root_escapes`] owns the type rules).
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum RootUse {
+    /// The receiver of method `m`.
+    Recv(String),
+    /// `n.f`, read or written.
+    Field(String),
+    /// `n[i]` or a slice of `n`, read or written.
+    Index,
+    /// An operand of an arithmetic, comparison or unary operator, or a compound assignment target.
+    Op,
+    /// `for v in n`.
+    Iter,
+    /// Positional argument `j` of a statically named callee.
+    Arg(ArgCallee, usize),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum ArgCallee {
+    /// A bare callee `f(..)` that no binding of the function shadows.
+    Fn(String),
+    /// `m.f(..)` where `m` is no binding of the function.
+    Module(String, String),
+}
+
+/// Every use of every bare name in one function body (TICKET-190). A name in `escaped` was used as
+/// a plain value somewhere; `kept` holds the uses whose verdict depends on the name's type.
+#[derive(Clone, Debug, Default)]
+pub(super) struct Uses {
+    pub escaped: HashSet<String>,
+    pub kept: Vec<(String, RootUse)>,
+}
+
+/// Can a native method's declared return type hold its receiver? Only a value with no heap
+/// reference cannot: a scalar, `bool`, `str`/`bytes` by value, `nil`, or an `Option`/`Result` of
+/// those. A type parameter, a container or the receiver's own type (`own`) may hold it.
+pub(super) fn ret_may_hold_receiver(ret: &Ty, own: &Ty) -> bool {
+    if ret == own {
+        return true;
+    }
+    match ret {
+        Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Bytes | Ty::Nil => false,
+        Ty::Option(t) => ret_may_hold_receiver(t, own),
+        Ty::Result(t, e) => ret_may_hold_receiver(t, own) || ret_may_hold_receiver(e, own),
+        _ => true,
+    }
+}
+
+/// The native method table that owns a receiver type's methods, and the receiver type itself.
+pub(super) fn native_receiver(t: &Ty) -> Option<(&'static str, Ty)> {
+    match t {
+        Ty::List(_) => Some(("List", t.clone())),
+        Ty::Map(..) => Some(("Map", t.clone())),
+        Ty::Set(_) => Some(("Set", t.clone())),
+        Ty::Str => Some(("str", Ty::Str)),
+        Ty::Bytes => Some(("bytes", Ty::Bytes)),
+        Ty::ByteArray => Some(("bytearray", Ty::ByteArray)),
+        _ => None,
+    }
+}
+
+/// Collects [`Uses`] for one body. `bound` holds every name the function binds (params, lets, loop
+/// and pattern variables, nested fns), so a callee outside it names a top-level fn or a module.
+struct UseWalk<'a> {
+    bound: &'a HashSet<String>,
+    uses: Uses,
+}
+
+impl UseWalk<'_> {
+    fn escape_free(&mut self, e: &Expr) {
+        self.uses
+            .escaped
+            .extend(crate::compiler::free_names_of_expr(e, &HashSet::new()));
+    }
+
+    fn keep(&mut self, n: &str, u: RootUse) {
+        self.uses.kept.push((n.to_string(), u));
+    }
+
+    fn block(&mut self, body: &[Stmt]) {
+        for s in body {
+            self.stmt(s);
+        }
+    }
+
+    fn stmt(&mut self, stmt: &Stmt) {
+        match &stmt.kind {
+            StmtKind::Let { value, .. } => self.value(value),
+            StmtKind::Assign { target, op, value } => {
+                match &target.kind {
+                    ExprKind::Ident(n) => {
+                        if *op != crate::ast::AssignOp::Eq {
+                            self.keep(n, RootUse::Op);
+                        }
+                    }
+                    ExprKind::Field { obj, name, .. } => match &obj.kind {
+                        ExprKind::Ident(n) => self.keep(n, RootUse::Field(name.clone())),
+                        _ => self.value(obj),
+                    },
+                    ExprKind::Index { obj, index } => {
+                        match &obj.kind {
+                            ExprKind::Ident(n) => self.keep(n, RootUse::Index),
+                            _ => self.value(obj),
+                        }
+                        self.value(index);
+                    }
+                    _ => self.escape_free(target),
+                }
+                self.value(value);
+            }
+            StmtKind::Expr(e) | StmtKind::Yield(e) | StmtKind::Return(Some(e)) => self.value(e),
+            StmtKind::Assert { cond, msg } => {
+                self.value(cond);
+                if let Some(m) = msg {
+                    self.value(m);
+                }
+            }
+            StmtKind::If {
+                branches,
+                else_block,
+            } => {
+                for (cond, body) in branches {
+                    self.value(cond);
+                    self.block(body);
+                }
+                if let Some(body) = else_block {
+                    self.block(body);
+                }
+            }
+            StmtKind::While { cond, body } => {
+                self.value(cond);
+                self.block(body);
+            }
+            StmtKind::For { iter, body, .. } => {
+                match &iter.kind {
+                    ExprKind::Ident(n) => self.keep(n, RootUse::Iter),
+                    _ => self.value(iter),
+                }
+                self.block(body);
+            }
+            StmtKind::Match { scrutinee, arms } => {
+                self.value(scrutinee);
+                for arm in arms {
+                    if let Some(g) = &arm.guard {
+                        self.value(g);
+                    }
+                    self.block(&arm.body);
+                }
+            }
+            StmtKind::Parallel { body } => self.block(body),
+            StmtKind::Return(None) | StmtKind::Break | StmtKind::Continue | StmtKind::Pass => {}
+            // A nested fn, `spawn`, `defer`, `wait` or anything else: every name it reads escapes.
+            _ => self
+                .uses
+                .escaped
+                .extend(crate::compiler::free_names_of_block(
+                    std::slice::from_ref(stmt),
+                    &HashSet::new(),
+                )),
+        }
+    }
+
+    /// Walk `e` in value position: a bare name here is a plain value, so it escapes.
+    fn value(&mut self, e: &Expr) {
+        match &e.kind {
+            ExprKind::Ident(n) => {
+                self.uses.escaped.insert(n.clone());
+            }
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Bytes(_)
+            | ExprKind::RawStr(_)
+            | ExprKind::Bool(_)
+            | ExprKind::Pass => {}
+            ExprKind::List(items, _) | ExprKind::Tuple(items) | ExprKind::Set(items) => {
+                for item in items {
+                    self.value(item);
+                }
+            }
+            ExprKind::Map(pairs) => {
+                for (k, v) in pairs {
+                    self.value(k);
+                    self.value(v);
+                }
+            }
+            ExprKind::Unary { expr, .. } => self.operand(expr),
+            ExprKind::Binary {
+                op: BinaryOp::And | BinaryOp::Or,
+                lhs,
+                rhs,
+            }
+            | ExprKind::NullCoalesce { lhs, rhs, .. } => {
+                self.value(lhs);
+                self.value(rhs);
+            }
+            ExprKind::Binary { lhs, rhs, .. } => {
+                self.operand(lhs);
+                self.operand(rhs);
+            }
+            ExprKind::Compare { operands, .. } => {
+                for o in operands {
+                    self.operand(o);
+                }
+            }
+            ExprKind::Range { start, end } => {
+                self.value(start);
+                self.value(end);
+            }
+            ExprKind::Call {
+                callee,
+                args,
+                named,
+                ..
+            } => {
+                let target = match &callee.kind {
+                    ExprKind::Ident(f) if !self.bound.contains(f) => Some(ArgCallee::Fn(f.clone())),
+                    ExprKind::Field { obj, name, .. } => match &obj.kind {
+                        ExprKind::Ident(m) if !self.bound.contains(m) => {
+                            Some(ArgCallee::Module(m.clone(), name.clone()))
+                        }
+                        ExprKind::Ident(n) => {
+                            self.keep(n, RootUse::Recv(name.clone()));
+                            None
+                        }
+                        _ => {
+                            self.value(obj);
+                            None
+                        }
+                    },
+                    _ => {
+                        self.value(callee);
+                        None
+                    }
+                };
+                for (j, a) in args.iter().enumerate() {
+                    match (&target, &a.kind) {
+                        (Some(c), ExprKind::Ident(n)) => self.keep(n, RootUse::Arg(c.clone(), j)),
+                        _ => self.value(a),
+                    }
+                }
+                for (_, a) in named {
+                    self.value(a);
+                }
+            }
+            ExprKind::Field { obj, name, .. } => match &obj.kind {
+                ExprKind::Ident(n) => self.keep(n, RootUse::Field(name.clone())),
+                _ => self.value(obj),
+            },
+            ExprKind::Index { obj, index } => {
+                self.indexed(obj);
+                self.value(index);
+            }
+            ExprKind::Slice {
+                obj,
+                start,
+                end,
+                step,
+            } => {
+                self.indexed(obj);
+                for b in [start, end, step].into_iter().flatten() {
+                    self.value(b);
+                }
+            }
+            ExprKind::IfElse { cond, then, els } => {
+                self.value(cond);
+                self.value(then);
+                self.value(els);
+            }
+            ExprKind::Match { scrutinee, arms } => {
+                self.value(scrutinee);
+                for arm in arms {
+                    if let Some(g) = &arm.guard {
+                        self.value(g);
+                    }
+                    self.value(&arm.body);
+                }
+            }
+            ExprKind::Recover(body) => self.block(body),
+            // A closure, comprehension, interpolation, `?`, `?.` or anything else.
+            _ => self.escape_free(e),
+        }
+    }
+
+    fn operand(&mut self, e: &Expr) {
+        match &e.kind {
+            ExprKind::Ident(n) => self.keep(n, RootUse::Op),
+            _ => self.value(e),
+        }
+    }
+
+    fn indexed(&mut self, obj: &Expr) {
+        match &obj.kind {
+            ExprKind::Ident(n) => self.keep(n, RootUse::Index),
+            _ => self.value(obj),
+        }
+    }
+}
+
+/// [`Uses`] of one function body.
+fn uses_of(decl: &FnDecl) -> Uses {
+    let mut bound: HashSet<String> = decl.params.iter().map(|p| p.name.clone()).collect();
+    crate::compiler::collect_frame_binds(&decl.body, &mut bound);
+    let mut w = UseWalk {
+        bound: &bound,
+        uses: Uses::default(),
+    };
+    w.block(&decl.body);
+    w.uses
+}
+
 #[derive(Clone)]
 pub(super) struct CallEdge {
     pub callee: String,
@@ -48,6 +373,10 @@ pub(super) struct Scan {
     pub direct: Vec<FnWrite>,
     pub calls: Vec<CallEdge>,
     nested: HashMap<String, Scan>,
+    /// TICKET-190: every use of every bare name, for the param-escape summary.
+    pub uses: Uses,
+    /// The scanned fn is a generator: calling it stores its arguments without running the body.
+    is_generator: bool,
     visible_fns: Vec<HashMap<String, Option<String>>>,
     locals: HashSet<String>,
     params: Vec<String>,
@@ -86,6 +415,8 @@ fn scan_with_visible(decl: &FnDecl, visible_fns: Vec<HashMap<String, Option<Stri
         direct: Vec::new(),
         calls: Vec::new(),
         nested: HashMap::new(),
+        uses: uses_of(decl),
+        is_generator: decl.is_generator,
         visible_fns,
         locals: HashSet::new(),
         params: decl.params.iter().map(|p| p.name.clone()).collect(),
@@ -404,20 +735,23 @@ impl Checker {
             })
             .collect();
         let summaries = self.infer_scan_writes(&scans, &HashMap::new(), true);
-        for (name, writes) in summaries {
+        for (name, summary) in summaries {
             if let Some(sig) = self.functions.get_mut(&name) {
-                sig.writes = writes;
+                sig.summary = summary;
             }
         }
     }
 
+    /// The least fixed point of every scanned fn's [`FnSummary`]: writes grow through call edges;
+    /// for a top-level fn a param escapes once [`Self::root_escapes`] says so under this pass's
+    /// summaries. A nested fn's params all escape (nested callees decline).
     fn infer_scan_writes(
         &self,
         scans: &HashMap<String, Scan>,
-        known: &HashMap<String, Vec<FnWrite>>,
+        known: &HashMap<String, FnSummary>,
         top_level: bool,
-    ) -> HashMap<String, Vec<FnWrite>> {
-        let mut summaries: HashMap<String, Vec<FnWrite>> = HashMap::new();
+    ) -> HashMap<String, FnSummary> {
+        let mut summaries: HashMap<String, FnSummary> = HashMap::new();
         for (name, scan) in scans {
             let direct = scan
                 .direct
@@ -433,7 +767,17 @@ impl Checker {
                     Some(effect)
                 })
                 .collect();
-            summaries.insert(name.clone(), direct);
+            // A generator escapes every param, and so does a nested fn; a top-level fn starts
+            // from "nothing escapes" and only grows.
+            let escapes = vec![scan.is_generator || !top_level; scan.params.len()];
+            summaries.insert(
+                name.clone(),
+                FnSummary {
+                    writes: direct,
+                    escapes,
+                    is_generator: scan.is_generator,
+                },
+            );
         }
         loop {
             let old = summaries.clone();
@@ -445,10 +789,14 @@ impl Checker {
                 for edge in &scan.calls {
                     let local_callee = nested.get(&edge.callee);
                     let callee = local_callee
-                        .cloned()
-                        .or_else(|| old.get(&edge.callee).cloned())
-                        .or_else(|| known.get(&edge.callee).cloned())
-                        .or_else(|| self.functions.get(&edge.callee).map(|s| s.writes.clone()))
+                        .map(|s| s.writes.clone())
+                        .or_else(|| old.get(&edge.callee).map(|s| s.writes.clone()))
+                        .or_else(|| known.get(&edge.callee).map(|s| s.writes.clone()))
+                        .or_else(|| {
+                            self.functions
+                                .get(&edge.callee)
+                                .map(|s| s.summary.writes.clone())
+                        })
                         .unwrap_or_default();
                     for effect in callee {
                         if let Some(mapped) = Self::map_write(
@@ -458,10 +806,31 @@ impl Checker {
                             top_level,
                             local_callee.is_some(),
                             &self.globals,
-                        ) && let Some(writes) = summaries.get_mut(name)
-                            && !writes.contains(&mapped)
+                        ) && let Some(summary) = summaries.get_mut(name)
+                            && !summary.writes.contains(&mapped)
                         {
-                            writes.push(mapped);
+                            summary.writes.push(mapped);
+                            changed = true;
+                        }
+                    }
+                }
+                if top_level && !scan.is_generator {
+                    let params = self.functions.get(name).map(|s| s.params.clone());
+                    let callee = |c: &ArgCallee, j: usize| self.arg_escapes(c, j, Some(&old));
+                    for (i, p) in scan.params.iter().enumerate() {
+                        if old[name].escapes[i] {
+                            continue;
+                        }
+                        let tys: Vec<Ty> = params
+                            .as_ref()
+                            .and_then(|ps| ps.get(i))
+                            .cloned()
+                            .into_iter()
+                            .collect();
+                        if self.root_escapes(&scan.uses, p, &tys, &callee)
+                            && let Some(summary) = summaries.get_mut(name)
+                        {
+                            summary.escapes[i] = true;
                             changed = true;
                         }
                     }
@@ -481,11 +850,11 @@ impl Checker {
             known.extend(scope.clone());
         }
         let scans = HashMap::from([(decl.name.clone(), scan)]);
-        let mut writes = self
+        let mut summary = self
             .infer_scan_writes(&scans, &known, false)
             .remove(&decl.name)
             .unwrap_or_default();
-        writes.retain_mut(|effect| {
+        summary.writes.retain_mut(|effect| {
             if let WriteRoot::Capture(root) = &effect.root {
                 let Some(scope) = self.owning_scope(root) else {
                     return false;
@@ -497,7 +866,7 @@ impl Checker {
             true
         });
         if let Some(scope) = self.fn_write_scopes.last_mut() {
-            scope.insert(decl.name.clone(), writes);
+            scope.insert(decl.name.clone(), summary);
         }
     }
 
@@ -543,7 +912,7 @@ impl Checker {
         Some(mapped)
     }
 
-    pub(super) fn named_fn_writes(&self, callee: &Expr) -> Option<(String, Vec<FnWrite>)> {
+    pub(super) fn named_fn_summary(&self, callee: &Expr) -> Option<(String, FnSummary)> {
         match &callee.kind {
             ExprKind::Ident(name) => {
                 if self.lookup(name).is_some() {
@@ -551,11 +920,11 @@ impl Checker {
                         .iter()
                         .rev()
                         .find_map(|scope| scope.get(name).cloned())
-                        .map(|writes| (name.clone(), writes))
+                        .map(|summary| (name.clone(), summary))
                 } else {
                     self.functions
                         .get(name)
-                        .map(|sig| (name.clone(), sig.writes.clone()))
+                        .map(|sig| (name.clone(), sig.summary.clone()))
                 }
             }
             ExprKind::Field { obj, name, .. } => {
@@ -566,12 +935,116 @@ impl Checker {
                 {
                     functions
                         .get(name)
-                        .map(|sig: &FnSig| (name.clone(), sig.writes.clone()))
+                        .map(|sig: &FnSig| (name.clone(), sig.summary.clone()))
                 } else {
                     None
                 }
             }
             _ => None,
+        }
+    }
+
+    /// TICKET-190 — does argument `j` of callee `c` escape the call? `local` holds this pass's
+    /// same-module summaries during the fixed point. A missing, shadowed or value callee escapes,
+    /// as do a generator's arguments, an index at or past `escapes.len()` and a variadic slot.
+    pub(super) fn arg_escapes(
+        &self,
+        c: &ArgCallee,
+        j: usize,
+        local: Option<&HashMap<String, FnSummary>>,
+    ) -> bool {
+        let (sig, summary) = match c {
+            ArgCallee::Fn(f) => {
+                if self.lookup(f).is_some() {
+                    return true;
+                }
+                let Some(sig) = self.functions.get(f) else {
+                    return true;
+                };
+                (sig, local.and_then(|l| l.get(f)).unwrap_or(&sig.summary))
+            }
+            ArgCallee::Module(m, f) => {
+                if self.head_is_value(m) {
+                    return true;
+                }
+                let Some(sig) = self
+                    .imported_modules
+                    .get(m)
+                    .and_then(|mid| self.module_sigs.get(mid))
+                    .and_then(|ms| ms.functions.get(f))
+                else {
+                    return true;
+                };
+                (sig, &sig.summary)
+            }
+        };
+        summary.is_generator
+            || sig.summary.is_generator
+            || sig.variadic.is_some_and(|v| j >= v)
+            || summary.escapes.get(j).copied().unwrap_or(true)
+    }
+
+    /// TICKET-190 — the one reader of [`Uses`]: can root `name`, of every type in `tys`, escape
+    /// the body? It escapes when it is used as a plain value, when its type is unknown, when a
+    /// kept use fails its type rule, or when `callee` lets its argument escape.
+    pub(super) fn root_escapes(
+        &self,
+        uses: &Uses,
+        name: &str,
+        tys: &[Ty],
+        callee: &dyn Fn(&ArgCallee, usize) -> bool,
+    ) -> bool {
+        if uses.escaped.contains(name) || tys.is_empty() {
+            return true;
+        }
+        uses.kept
+            .iter()
+            .filter(|(n, _)| n == name)
+            .any(|(_, u)| match u {
+                RootUse::Arg(c, j) => callee(c, *j),
+                _ => tys.iter().any(|t| !self.use_keeps_root(u, t)),
+            })
+    }
+
+    /// The type rule of one kept use: its result cannot alias a root of type `t`.
+    fn use_keeps_root(&self, u: &RootUse, t: &Ty) -> bool {
+        match u {
+            // A native method keeps its receiver only when its declared return type cannot hold it.
+            RootUse::Recv(m) => native_receiver(t).is_some_and(|(key, own)| {
+                self.structs
+                    .get(key)
+                    .and_then(|info| info.methods.get(m))
+                    .is_some_and(|sig| !ret_may_hold_receiver(&sig.ret, &own))
+            }),
+            RootUse::Field(f) => match t {
+                Ty::Tuple(_) => true,
+                Ty::Struct(key, _) => self
+                    .struct_shape(key)
+                    .is_some_and(|info| info.fields.iter().any(|(n, _)| n == f)),
+                _ => false,
+            },
+            RootUse::Index => matches!(
+                t,
+                Ty::List(_) | Ty::Map(..) | Ty::Str | Ty::Bytes | Ty::ByteArray | Ty::Tuple(_)
+            ),
+            RootUse::Op => matches!(
+                t,
+                Ty::Int
+                    | Ty::Float
+                    | Ty::Bool
+                    | Ty::Str
+                    | Ty::Bytes
+                    | Ty::List(_)
+                    | Ty::Map(..)
+                    | Ty::Set(_)
+                    | Ty::ByteArray
+                    | Ty::Tuple(_)
+            ),
+            RootUse::Iter => matches!(
+                t,
+                Ty::List(_) | Ty::Map(..) | Ty::Set(_) | Ty::Str | Ty::Bytes | Ty::ByteArray
+            ),
+            RootUse::Arg(..) => false,
         }
     }
 }

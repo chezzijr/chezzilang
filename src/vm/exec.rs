@@ -519,12 +519,15 @@ impl Vm {
         closure: Option<GcRef>,
         args: Vec<Value>,
     ) -> Value {
+        let p = &self.program.protos[proto];
+        let private = p.private_slots & !super::crossing::param_bits(p.arity);
         let core = GeneratorCore {
             proto,
             home,
             closure,
             state: GenState::Pending(args),
             ctx: GenCtx::default(),
+            private,
         };
         Value::obj(self.heap.alloc(Obj::Generator(Box::new(core))))
     }
@@ -1730,8 +1733,7 @@ impl Vm {
 
     /// The GC roots: the whole operand stack (which contains every frame's local slots *and* any
     /// in-flight expression temporaries), each frame's home module + backing closure, and the module
-    /// namespace cache. Also what D4's generator frame decision ([`Vm::gen_frame_observable`]) asks
-    /// "can the sending task still reach this" against.
+    /// namespace cache.
     pub(super) fn gc_roots(&self) -> Vec<GcRef> {
         let mut work: Vec<GcRef> = Vec::new();
         for v in &self.stack {
@@ -2161,7 +2163,15 @@ impl Vm {
             Op::Pop => {
                 self.pop();
             }
-            Op::StampGen(_) => {}
+            Op::StampGen(m) => {
+                if let Some(h) = self.stack.last().and_then(|v| v.as_obj())
+                    && let Obj::Generator(g) = self.heap.get_mut(h)
+                    && matches!(g.state, GenState::Pending(_))
+                {
+                    let p = &self.program.protos[g.proto];
+                    g.private |= m & p.private_slots & super::crossing::param_bits(p.arity);
+                }
+            }
             Op::Assert { has_msg, cmp } => {
                 // Reached only on the failing path: the compiler emits `Op::Assert` after a
                 // `JumpIfFalse` that already consumed (and tested) `cond`, so this op always faults.

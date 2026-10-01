@@ -40,6 +40,23 @@ impl Checker {
         // D4 layer A inside a `spawn:` body, through the plan the dispatch just bound.
         let slots = self.bound_slots(call_id, args, named);
         self.report_named_call_writes(callee, &slots, None, false);
+        // TICKET-190: a call that creates a generator stamps its param slots with how each
+        // argument crosses (a fresh argument is private to the new frame).
+        if self.records_node(call_id)
+            && self
+                .named_fn_summary(callee)
+                .is_some_and(|(_, s)| s.is_generator)
+        {
+            let crossing = self.call_crossing(None, &slots);
+            crate::checker::record_call_table_entry(
+                &mut self.gen_crossings.calls,
+                &mut self.table_conflicts,
+                (self.graph_module_idx, call_id.0),
+                crossing,
+                "generator crossing",
+                span,
+            );
+        }
         let consumed = std::mem::replace(&mut self.call_ctx, saved).is_some_and(|c| c.consumed);
         // A call whose named arguments no binder and no refusal consumed: its callee binds none.
         if !named.is_empty() && !consumed {

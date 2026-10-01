@@ -14294,6 +14294,85 @@ fn prelude_container_checker() -> Checker {
     c
 }
 
+/// TICKET-190 — a native container method keeps its receiver root in a generator frame only when
+/// its DECLARED return type cannot hold the receiver (`fn_writes::ret_may_hold_receiver`). Walks
+/// every method of every native container table, so a new method is classified by its type; this
+/// list only pins the answer the type gives.
+#[test]
+fn every_native_container_method_is_classified_by_its_return_type() {
+    let c = prelude_container_checker();
+    let mut keeps: Vec<String> = Vec::new();
+    let mut total = 0;
+    for (key, own) in [
+        ("List", Ty::list(Ty::Param("T".into()))),
+        (
+            "Map",
+            Ty::Map(
+                Box::new(Ty::Param("K".into())),
+                Box::new(Ty::Param("V".into())),
+            ),
+        ),
+        ("Set", Ty::Set(Box::new(Ty::Param("T".into())))),
+        ("str", Ty::Str),
+        ("bytes", Ty::Bytes),
+        ("bytearray", Ty::ByteArray),
+    ] {
+        assert_eq!(
+            fn_writes::native_receiver(&own).map(|(k, _)| k),
+            Some(key),
+            "{key}: receiver table"
+        );
+        let info = c.structs.get(key).expect("native container table");
+        for (m, sig) in &info.methods {
+            total += 1;
+            if !fn_writes::ret_may_hold_receiver(&sig.ret, &own) {
+                keeps.push(format!("{key}.{m}"));
+            }
+        }
+    }
+    keeps.sort();
+    assert!(total > keeps.len(), "some method must escape");
+    // `str.parse_int` (`Result[int, str]`) escapes: its error type is the receiver's own type.
+    let want = [
+        "List.contains",
+        "List.count",
+        "List.extend",
+        "List.index_of",
+        "List.insert",
+        "List.len",
+        "List.position",
+        "List.push",
+        "List.reverse",
+        "List.sort",
+        "List.sort_by",
+        "List.sort_by_key",
+        "Map.has",
+        "Map.len",
+        "Map.update",
+        "Set.add",
+        "Set.has",
+        "Set.len",
+        "Set.remove",
+        "bytearray.decode",
+        "bytearray.len",
+        "bytearray.pop",
+        "bytearray.push",
+        "bytes.decode",
+        "bytes.decode_lossy",
+        "bytes.len",
+        "str.contains",
+        "str.count",
+        "str.encode",
+        "str.ends_with",
+        "str.index_of",
+        "str.len",
+        "str.starts_with",
+        "str.to_float",
+        "str.to_int",
+    ];
+    assert_eq!(keeps, want, "{total} methods");
+}
+
 /// PROVENANCE — the `"std.regex" =>` arm is DELETED from `native_module_sig`; the whole regex signature
 /// (Match type + the 5 fns) now comes from parsing `std/regex.chz`. So `native_module_sig("std.regex")`
 /// exports NOTHING (empty functions, no Match), while a full graph check that `import std.regex` still
@@ -34155,6 +34234,12 @@ fn the_nested_fn_ret_memo_is_invisible_to_diagnostics_and_tables() {
             sorted_debug(&off.8),
             "{name}: crossings"
         );
+        assert_eq!(
+            sorted_debug(&on.11.calls),
+            sorted_debug(&off.11.calls),
+            "{name}: gen_crossings.calls"
+        );
+        assert_eq!(on.11.frames, off.11.frames, "{name}: gen_crossings.frames");
     }
 }
 

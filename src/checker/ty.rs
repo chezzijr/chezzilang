@@ -5,7 +5,7 @@
 //! doesn't cascade into a storm of follow-on errors.
 
 use crate::lexer::Span;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 /// M24 — the [`WitnessTable::calls`] key. `(graph module index, fragment-context span, fragment
@@ -212,6 +212,16 @@ pub struct CallCrossing {
 /// [`Crossing::mask`] and the runtime only unmarks each `Move` operand's root. A missing key means
 /// every operand is `Copy`.
 pub type CrossingTable = HashMap<(usize, u32), CallCrossing>;
+
+/// TICKET-190 — the generator frame verdicts the compiler encodes. `calls` holds each call that
+/// creates a generator from a statically named fn, keyed like [`CrossingTable`]: its param
+/// crossings become the generator's creation stamp. `frames` holds, per generator decl keyed
+/// `(graph module index, decl name span)`, the names of its private frame slots.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GenCrossings {
+    pub calls: CrossingTable,
+    pub frames: HashMap<(usize, Span), HashSet<String>>,
+}
 
 /// Surface-only parameter labels on a function type (Swift SE-0111 keyword arguments through a
 /// function VALUE). They ride PARALLEL to a `Ty::Func`'s `params`, but participate in NO type

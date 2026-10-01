@@ -91,7 +91,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     // witness params and what fills each witness at each call site. The compiler CONSUMES it — it
     // never re-derives which protocols carry a static requirement (that resolves through
     // imports/aliases/embeds, which is checker work).
-    let (kw, wt, ct, pe, ns, rc, conflicts, fb, fo, rs, nf) =
+    let (kw, wt, ct, pe, ns, rc, conflicts, fb, fo, rs, nf, gc) =
         crate::checker::resolve_call_tables(graph);
     reject_table_conflicts(conflicts)?;
     c.no_fall_off = nf;
@@ -102,6 +102,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     c.proto_eq_calls = pe;
     c.sum_seeds = ns;
     c.crossings = fo;
+    c.gen_crossings = gc;
     c.resolutions = rs;
     c.ret_coerce = rc;
     // Pass 0: collision pre-pass — assign runtime keys for module-scoped user types. A type name
@@ -174,7 +175,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     // SINGLE-RESOLVER: extern C types come from the checker's standalone pass — the SAME resolver the
     // multi-file CLI uses (no second backend resolver exists). The backend reads this table verbatim.
     c.extern_sigs = crate::checker::resolve_extern_signatures_standalone(&module.stmts);
-    let (kw, wt, ct, pe, ns, rc, conflicts, fb, fo, rs, nf) =
+    let (kw, wt, ct, pe, ns, rc, conflicts, fb, fo, rs, nf, gc) =
         crate::checker::resolve_call_tables_standalone(&module.stmts);
     reject_table_conflicts(conflicts)?;
     c.no_fall_off = nf;
@@ -185,6 +186,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     c.proto_eq_calls = pe;
     c.sum_seeds = ns;
     c.crossings = fo;
+    c.gen_crossings = gc;
     c.resolutions = rs;
     c.ret_coerce = rc;
     let toplevel = c.compile_module(0, module, &[], true, None)?;
@@ -310,6 +312,9 @@ struct Compiler {
     /// D4 (TICKET-179, TICKET-189) — the checker's per-slot crossing decision for each `spawn` call,
     /// read by [`Self::crossing_mask`]. See [`crate::checker::CrossingTable`].
     crossings: crate::checker::CrossingTable,
+    /// TICKET-190 — the checker's generator creation stamps and private frame slot names. See
+    /// [`crate::checker::GenCrossings`].
+    gen_crossings: crate::checker::GenCrossings,
     /// TICKET-180 — the checker's answer to what every name head means; the ONLY source for
     /// it. Read through [`Compiler::resolution`].
     resolutions: crate::checker::ResolutionTable,
@@ -588,6 +593,7 @@ impl Compiler {
             proto_eq_calls: crate::checker::ProtoEqTable::new(),
             sum_seeds: crate::checker::SumSeedTable::new(),
             crossings: crate::checker::CrossingTable::new(),
+            gen_crossings: crate::checker::GenCrossings::default(),
             resolutions: crate::checker::ResolutionTable::new(),
             no_fall_off: crate::checker::NoFallOffTable::new(),
             ret_coerce: crate::checker::RetCoerceTable::new(),
@@ -1235,8 +1241,16 @@ impl Compiler {
         fc.is_generator = decl.is_generator;
         fc.is_test = decl.is_test;
         fc.decl_span = decl.name_span;
+        if decl.is_generator
+            && let Some(names) = self
+                .gen_crossings
+                .frames
+                .get(&(self.current_module_idx, decl.name_span))
+        {
+            fc.gen_private = names.clone();
+        }
         for p in &decl.params {
-            fc.add_local(p.name.clone());
+            fc.add_frame_local(p.name.clone());
         }
         for w in &self.witness_locals {
             fc.add_local(witness_local(w));
@@ -1409,7 +1423,21 @@ impl Compiler {
             decl_span: fc.decl_span,
             // Lever #3: cold-path capture-name metadata in slot order (empty for non-closures).
             capture_names: fc.captured_names,
-            private_slots: 0,
+            private_slots: {
+                use crate::vm::crossing::Crossing;
+                let slots: Vec<Crossing> = fc
+                    .slot_private
+                    .iter()
+                    .map(|&c| {
+                        if c == Some(true) {
+                            Crossing::Move
+                        } else {
+                            Crossing::Copy
+                        }
+                    })
+                    .collect();
+                Crossing::frame_mask(&slots)
+            },
         });
         pid
     }
@@ -1542,7 +1570,7 @@ impl Compiler {
                 } else if fc.is_global_scope() {
                     fc.emit(Op::DefineGlobalSlot(self.global_slot(&names[0])), stmt.span);
                 } else {
-                    fc.emit_decl_named(names[0].clone(), stmt.span);
+                    fc.emit_decl_frame(names[0].clone(), stmt.span);
                 }
                 Ok(())
             }
@@ -3453,7 +3481,18 @@ impl Compiler {
                 args,
                 named,
                 ..
-            } => self.compile_call(fc, callee, args, named, expr.span, expr.id)?,
+            } => {
+                self.compile_call(fc, callee, args, named, expr.span, expr.id)?;
+                // TICKET-190: a call that creates a generator stamps its param crossings.
+                if let Some(c) = self
+                    .gen_crossings
+                    .calls
+                    .get(&(self.current_module_idx, expr.id.0))
+                {
+                    let mask = crate::vm::crossing::Crossing::frame_mask(&c.args);
+                    fc.emit(Op::StampGen(mask), expr.span);
+                }
+            }
             ExprKind::Field { obj, name, .. } => {
                 // A tuple slot (`t.0`) is a value, never a name; everything else reads the
                 // checker's record on the `Field`.
@@ -5436,7 +5475,7 @@ pub(crate) fn pattern_binds(p: &Pattern, out: &mut HashSet<String>) {
 /// Names bound in THIS frame reachable through `stmts`'s control flow (descends if/for/while/match/
 /// wait/parallel sub-blocks — those share the frame — but STOPS at capture boundaries, whose bodies
 /// are separate frames). Adds let/for/match/wait/nested-fn binding names to `out`.
-fn collect_frame_binds(stmts: &[Stmt], out: &mut HashSet<String>) {
+pub(crate) fn collect_frame_binds(stmts: &[Stmt], out: &mut HashSet<String>) {
     for s in stmts {
         match &s.kind {
             StmtKind::Let { names, value, .. } => {
@@ -6748,6 +6787,12 @@ struct FnComp {
     /// This proto is a `test fn` body (free test or suite method). Stamped onto the [`Proto`] in
     /// `finish`; used only by `chezzi test` discovery.
     is_test: bool,
+    /// TICKET-190 — the checker's private frame slot names for this generator body (empty for
+    /// every other body). Read only by [`FnComp::add_frame_local`].
+    gen_private: std::collections::HashSet<String>,
+    /// TICKET-190 — per slot, the AND of every binder's privacy claim (`None` = never claimed). A
+    /// slot reused by sibling scopes is private only if every binding in it is.
+    slot_private: Vec<Option<bool>>,
 }
 
 impl FnComp {
@@ -6777,6 +6822,8 @@ impl FnComp {
             has_implicit_nursery: false,
             is_generator: false,
             is_test: false,
+            gen_private: std::collections::HashSet::new(),
+            slot_private: Vec::new(),
         }
     }
 
@@ -6868,6 +6915,17 @@ impl FnComp {
     /// `match`/`if let` bind, wait-assign) — each fresh binding gets its own cell.
     fn emit_decl_named(&mut self, name: String, span: Span) -> usize {
         let slot = self.add_local(name);
+        self.emit_decl_into(slot, span)
+    }
+
+    /// TICKET-190 — [`Self::emit_decl_named`] for a single-name `let`: its slot claims the checker's
+    /// frame privacy verdict ([`Self::add_frame_local`]).
+    fn emit_decl_frame(&mut self, name: String, span: Span) -> usize {
+        let slot = self.add_frame_local(name);
+        self.emit_decl_into(slot, span)
+    }
+
+    fn emit_decl_into(&mut self, slot: usize, span: Span) -> usize {
         if self.is_boxed_slot(slot) {
             self.emit(Op::NewCell, span);
         }
@@ -6982,7 +7040,23 @@ impl FnComp {
     /// Add a named local, returning its slot. A redeclaration in the same scope shadows by getting
     /// a fresh slot (later lookups find the newest).
     fn add_local(&mut self, name: String) -> usize {
+        self.add_local_claiming(name, false)
+    }
+
+    /// TICKET-190 — [`Self::add_local`] for a declared param or a single-name `let`: the slot is
+    /// private when the checker named `name` private in this generator frame. Every other binder
+    /// claims `false`.
+    fn add_frame_local(&mut self, name: String) -> usize {
+        let claim = self.gen_private.contains(&name);
+        self.add_local_claiming(name, claim)
+    }
+
+    fn add_local_claiming(&mut self, name: String, claim: bool) -> usize {
         let slot = self.slot_count;
+        if self.slot_private.len() <= slot {
+            self.slot_private.resize(slot + 1, None);
+        }
+        self.slot_private[slot] = Some(self.slot_private[slot].unwrap_or(true) && claim);
         self.locals.push(LocalVar {
             name,
             depth: self.scope_depth,

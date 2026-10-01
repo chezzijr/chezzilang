@@ -43,7 +43,7 @@ pub(super) struct DiagMark {
     kw_certain: std::collections::HashSet<(usize, String)>,
     kw_written: std::collections::HashSet<(usize, String)>,
     kw_pending: Vec<((usize, String), Span)>,
-    fn_write_scopes: Vec<HashMap<String, Vec<fn_writes::FnWrite>>>,
+    fn_write_scopes: Vec<HashMap<String, fn_writes::FnSummary>>,
 }
 
 /// What a bare head names (`Checker::head_binding`), in precedence order (TICKET-180).
@@ -141,6 +141,8 @@ impl Checker {
             proto_eq_calls: crate::checker::ProtoEqTable::new(),
             sum_seeds: crate::checker::SumSeedTable::new(),
             crossings: crate::checker::CrossingTable::new(),
+            gen_crossings: crate::checker::GenCrossings::default(),
+            gen_frame: None,
             ret_coerce: crate::checker::RetCoerceTable::new(),
             for_binds: crate::checker::ForBindTable::new(),
             table_conflicts: Vec::new(),
@@ -1436,7 +1438,7 @@ impl Checker {
         }
         let map = struct_param_map(info, targs);
         Some(FnSig {
-            writes: Vec::new(),
+            summary: fn_writes::FnSummary::default(),
             params: sig.params.iter().map(|p| subst(p, &map)).collect(),
             ret: subst(&sig.ret, &map),
             ..sig.clone()
@@ -2314,7 +2316,7 @@ impl Checker {
                 StmtKind::Fn(decl) => {
                     if let Some(fsig) = self.functions.get(&decl.name) {
                         let mut fsig = fsig.clone();
-                        for effect in &mut fsig.writes {
+                        for effect in &mut fsig.summary.writes {
                             if let fn_writes::WriteRoot::Global(name) = &effect.root {
                                 effect.global_ty = self.lookup(name);
                             }
@@ -3142,11 +3144,11 @@ impl Checker {
         if !force_task && !self.in_spawn_block {
             return;
         }
-        let Some((callee_name, writes)) = self.named_fn_writes(callee) else {
+        let Some((callee_name, summary)) = self.named_fn_summary(callee) else {
             return;
         };
         let mut reported = std::collections::HashSet::new();
-        for effect in writes {
+        for effect in summary.writes {
             let (name, mut path, copied) = match &effect.root {
                 fn_writes::WriteRoot::Param(index) => {
                     if crossings.and_then(|c| c.get(*index))

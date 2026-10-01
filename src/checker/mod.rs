@@ -21,9 +21,9 @@ use std::fmt;
 pub use ty::Ty;
 pub use ty::{
     ArgFill, CallCrossing, CallPlanTable, CarrierKey, CarrierMode, CarrierTable, Crossing,
-    CrossingTable, FnLabels, ForBind, ForBindTable, NoFallOffTable, ProtoEqTable, Resolution,
-    ResolutionTable, RetCoerce, RetCoerceTable, SumSeed, SumSeedTable, WitnessCallee, WitnessKey,
-    WitnessSrc, WitnessTable,
+    CrossingTable, FnLabels, ForBind, ForBindTable, GenCrossings, NoFallOffTable, ProtoEqTable,
+    Resolution, ResolutionTable, RetCoerce, RetCoerceTable, SumSeed, SumSeedTable, WitnessCallee,
+    WitnessKey, WitnessSrc, WitnessTable,
 };
 use ty::{compatible, param_invariant};
 
@@ -625,12 +625,22 @@ struct CallCtx {
     span: Span,
 }
 
+/// TICKET-190 — the facts a generator body's check collects for its frame verdict.
+#[derive(Clone, Debug, Default)]
+struct GenFrameAcc {
+    /// Per name: every single-name `let` and plain assignment of it was fresh (`crossing_of`
+    /// `Move`); `false` once any was not, or once a destructuring `let` bound it.
+    fresh: HashMap<String, bool>,
+    /// Per name: the declared type of each single-name `let` of it.
+    tys: HashMap<String, Vec<Ty>>,
+}
+
 /// A function (or method) signature: parameter types and return type. `type_params` is non-empty
 /// only for generic functions (`fn max[T: Comparable]`), where `params`/`ret` contain `Ty::Param`s.
 #[derive(Clone)]
 struct FnSig {
-    /// Proven writes made when this named function runs.
-    writes: Vec<fn_writes::FnWrite>,
+    /// Proven writes and param escapes of this named function (TICKET-190: one summary).
+    summary: fn_writes::FnSummary,
     params: Vec<Ty>,
     /// Swift-style parameter labels parallel to `params` (the declaration's param names; `None` for
     /// `self` or an unnamed slot). Surface-only — used ONLY to build a labelled `Ty::Func` value type
@@ -691,7 +701,7 @@ impl FnSig {
     fn plain(params: Vec<Ty>, ret: Ty) -> FnSig {
         let min_params = params.len();
         FnSig {
-            writes: Vec::new(),
+            summary: fn_writes::FnSummary::default(),
             labels: Vec::new(),
             params,
             ret,
@@ -711,7 +721,7 @@ impl FnSig {
     fn optional_tail(params: Vec<Ty>, ret: Ty, optional: usize) -> FnSig {
         let min_params = params.len() - optional;
         FnSig {
-            writes: Vec::new(),
+            summary: fn_writes::FnSummary::default(),
             labels: Vec::new(),
             params,
             ret,
@@ -1125,6 +1135,7 @@ pub fn resolve_call_tables(
     CrossingTable,
     ResolutionTable,
     NoFallOffTable,
+    GenCrossings,
 ) {
     resolve_call_tables_with(graph, true)
 }
@@ -1146,6 +1157,7 @@ fn resolve_call_tables_with(
     CrossingTable,
     ResolutionTable,
     NoFallOffTable,
+    GenCrossings,
 ) {
     crate::on_frontend_stack_scoped(move || {
         let mut c = Checker::new();
@@ -1164,6 +1176,7 @@ fn resolve_call_tables_with(
             std::mem::take(&mut c.crossings),
             std::mem::take(&mut c.resolutions),
             std::mem::take(&mut c.no_fall_off),
+            std::mem::take(&mut c.gen_crossings),
         )
     })
 }
@@ -1192,6 +1205,7 @@ pub fn resolve_call_tables_standalone(
     CrossingTable,
     ResolutionTable,
     NoFallOffTable,
+    GenCrossings,
 ) {
     resolve_call_tables_with(&standalone_graph(stmts), true)
 }
@@ -1213,6 +1227,7 @@ pub fn resolve_call_tables_standalone_no_memo(
     CrossingTable,
     ResolutionTable,
     NoFallOffTable,
+    GenCrossings,
 ) {
     resolve_call_tables_with(&standalone_graph(stmts), false)
 }
@@ -2051,7 +2066,7 @@ struct Checker {
     /// (a shadowing `:=` yields a fresh, possibly-mutable binding), same rule as `loop_vars`.
     const_decls: Vec<std::collections::HashSet<String>>,
     functions: HashMap<String, FnSig>,
-    fn_write_scopes: Vec<HashMap<String, Vec<fn_writes::FnWrite>>>,
+    fn_write_scopes: Vec<HashMap<String, fn_writes::FnSummary>>,
     /// Names of functions declared in the CURRENT module (top-level `fn`s only — NOT imported names).
     /// Gates the generic-fn-as-value turbofish B-path (`ident[int]`) so the checker only accepts a
     /// turbofish on a SAME-MODULE generic fn — the exact set the compiler's `fn_names` erases at
@@ -2309,6 +2324,12 @@ struct Checker {
     /// D4 (TICKET-179) — which `spawn` operands are fresh, recorded by the spawn arm and consumed
     /// verbatim by the compiler. See [`CrossingTable`].
     crossings: CrossingTable,
+    /// TICKET-190 — generator creation stamps and private frame slots, consumed verbatim by the
+    /// compiler. See [`GenCrossings`].
+    gen_crossings: GenCrossings,
+    /// TICKET-190 — while a generator body is checked: per name, whether every binding of it is
+    /// fresh, and the types it was declared with. `None` outside a generator body.
+    gen_frame: Option<GenFrameAcc>,
     /// W8-21 — which implicit success-coercion, if any, each declared `T?`/`T!E` return sink applies,
     /// keyed by [`ret_coerce_key`] on the returned value's own span and consumed verbatim by the
     /// compiler (which cannot re-derive it: the decision is whether the returned expression is

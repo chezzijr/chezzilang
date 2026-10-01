@@ -37,7 +37,7 @@ use super::*;
 /// definitions per depth-1 subtree to make pieces self-contained: that is O(n²) wire size, the cliff
 /// `rwshared_view_over_shared_bindings_is_not_quadratic` exists to catch.
 #[derive(Default)]
-struct WireMemo<'a> {
+struct WireMemo {
     /// GcRef of an identity-preserved node (`Closure`/container) currently on the serialize DFS
     /// stack → the `id` assigned on its first visit. A revisit while still in `path` is a true back-edge
     /// → `Backref(id)`. Popped on DFS exit (`WireMemo::exit`) because `try_wire_speculative` asserts
@@ -106,33 +106,9 @@ struct WireMemo<'a> {
     /// TICKET-119 — highest `doom_ids` stamp touched since the recording; a record is valid only
     /// while its enter stamp is above it.
     doom_invalid_upto: Option<u32>,
-    /// D4 (TICKET-179) — `Some` only for a spawn crossing (`deep_clone_all`, `lower_task`): the
-    /// crossing's own operands, which the sending task still reaches besides its GC roots. A crossing
-    /// generator then decides its frame slots with [`Vm::gen_frame_observable`]. `None` (Channel
-    /// sends, the module snapshot) leaves the ambient mark. Borrowed, and read only when a generator
-    /// is serialized, so a crossing without one does no extra work: a per-spawn copy of the operands
-    /// measurably lowered `the_same_seed_replays_at_one_worker_at_the_measured_rate`.
-    gen_operands: Option<SpawnOperands<'a>>,
 }
 
-/// D4 (TICKET-179) — a spawn crossing's operands: the callee or receiver (`lower_task` only) and the
-/// args. See [`WireMemo::gen_operands`].
-#[derive(Clone, Copy)]
-struct SpawnOperands<'a> {
-    head: Option<Value>,
-    args: &'a [Value],
-}
-
-impl SpawnOperands<'_> {
-    fn gcrefs(self) -> impl Iterator<Item = GcRef> {
-        self.head
-            .into_iter()
-            .chain(self.args.iter().copied())
-            .filter_map(|v| v.child_gcref())
-    }
-}
-
-impl WireMemo<'_> {
+impl WireMemo {
     /// TICKET-119 — `h` may be about to become a `Backref` target: invalidate every `doom` record
     /// whose recorded sub-walk contains it.
     fn doom_touch(&mut self, h: GcRef) {
@@ -3329,10 +3305,6 @@ impl Vm {
             base_cells,
             base_nodes,
             next_id: seed_ceiling,
-            gen_operands: Some(SpawnOperands {
-                head: None,
-                args: &vs,
-            }),
             ..WireMemo::default()
         };
         let mut ws = Vec::with_capacity(vs.len());
@@ -3851,12 +3823,8 @@ impl Vm {
                             for a in args {
                                 wargs.push(self.to_wire_depth(*a, depth + 1, memo)?);
                             }
-                            // D4 (TICKET-179) — at a spawn crossing, decide once which frame slots
-                            // the sending task can still observe; the rebuild arm only reads it.
-                            let observable = memo
-                                .gen_operands
-                                .map(|extra| Box::new(self.gen_frame_observable(h, args, extra)));
-                            WireGenState::Pending(wargs, observable)
+                            // TICKET-190: the frame mask rides along; the rebuild arm reads it.
+                            WireGenState::Pending(wargs, g.private)
                         }
                         GenState::Done => WireGenState::Done,
                         GenState::Unsendable(m) => WireGenState::Unsendable(m.clone()),
@@ -3917,9 +3885,7 @@ impl Vm {
                                 call_depth: g.ctx.call_depth,
                                 cur_base: g.ctx.cur_base,
                                 handlers: g.ctx.handlers.clone(),
-                                observable: memo.gen_operands.map(|extra| {
-                                    Box::new(self.gen_frame_observable(h, &g.ctx.stack, extra))
-                                }),
+                                private: g.private,
                             }
                         }
                     };
@@ -4189,72 +4155,28 @@ impl Vm {
         out
     }
 
-    /// Rebuild a crossing generator's frame slots. With a decision from [`Vm::gen_frame_observable`],
-    /// slot `i` is a task copy only when `observable[i]`; an observable slot's root is also marked
-    /// explicitly, so the decision survives onto the parent-side `deep_clone_all` clone that
-    /// `lower_task` serializes next. Without one, every slot keeps the ambient mark.
+    /// Rebuild a crossing generator's frame slots (TICKET-190). Every slot takes the route's
+    /// ambient mark; then, on a marking route, the ROOT of each slot `private` names is unmarked.
+    /// Only the root: its children keep the mark (DEC-160 shallow), and unmarking runs after the
+    /// whole frame is rebuilt, so a root also reached from another slot is unmarked once.
     fn rebuild_frame_slots(
         &mut self,
         slots: Vec<WireValue>,
         rebuild: &mut super::fxhash::FxHashMap<u32, GcRef>,
-        observable: super::wire::FrameObservable,
+        private: u64,
     ) -> Vec<Value> {
-        let Some(observable) = observable else {
-            return self.rebuild_items(slots, rebuild, |w| w);
-        };
-        debug_assert_eq!(slots.len(), observable.len());
-        let saved = self.copy_mark;
-        let mut out = Vec::with_capacity(slots.len());
-        for (w, seen) in slots.into_iter().zip(*observable) {
-            self.copy_mark = saved && seen;
-            let v = self.from_wire_memo(w, rebuild);
-            if seen && let Some(h) = v.as_obj() {
-                self.heap.set_copied(h);
+        let out = self.rebuild_items(slots, rebuild, |w| w);
+        if self.copy_mark {
+            for (k, v) in out.iter().enumerate() {
+                if super::crossing::Crossing::frame_slot(private, k)
+                    == super::crossing::Crossing::Move
+                    && let Some(h) = v.as_obj()
+                {
+                    self.heap.unset_copied(h);
+                }
             }
-            out.push(v);
         }
-        self.copy_mark = saved;
         out
-    }
-
-    /// D4 (TICKET-179) — THE generator frame decision, made once at a spawn crossing: for each frame
-    /// slot of generator `g`, can the sending task still observe it after the join? A slot is
-    /// observable when it is already a copy, or when any object in its subtree is reachable from this
-    /// VM's GC roots or from `extra` (the crossing's other operands), never passing through `g`
-    /// itself. Per-slot is a ceiling: a private list holding a reachable list is observable whole (a
-    /// false fault, never a lost write). A scalar slot is never observable.
-    fn gen_frame_observable(&self, g: GcRef, slots: &[Value], extra: SpawnOperands) -> Vec<bool> {
-        let mut reach = super::fxhash::FxHashSet::<GcRef>::default();
-        let mut work = self.gc_roots();
-        work.extend(extra.gcrefs());
-        while let Some(h) = work.pop() {
-            if h != g && reach.insert(h) {
-                work.extend(self.heap.children(h));
-            }
-        }
-        slots
-            .iter()
-            .map(|v| {
-                let Some(root) = v.as_obj() else {
-                    return false;
-                };
-                if self.heap.is_copied(root) {
-                    return true;
-                }
-                let mut seen = super::fxhash::FxHashSet::<GcRef>::default();
-                let mut work = vec![root];
-                while let Some(h) = work.pop() {
-                    if h == g || !seen.insert(h) {
-                        continue;
-                    }
-                    if reach.contains(&h) {
-                        return true;
-                    }
-                    work.extend(self.heap.children(h));
-                }
-                false
-            })
-            .collect()
     }
 
     /// Worker behind [`Vm::from_wire`] — reconstructs into this heap, threading `rebuild` (wire `id` →
@@ -4647,9 +4569,15 @@ impl Vm {
                         .expect("a generator's backing closure wire rebuilds to a heap object")
                 });
                 let g = match state {
-                    WireGenState::Pending(wargs, observable) => {
-                        let args = self.rebuild_frame_slots(wargs, rebuild, observable);
-                        self.alloc_generator(proto, home, closure, args)
+                    WireGenState::Pending(wargs, private) => {
+                        let args = self.rebuild_frame_slots(wargs, rebuild, private);
+                        let g = self.alloc_generator(proto, home, closure, args);
+                        if let Some(h) = g.as_obj()
+                            && let Obj::Generator(core) = self.heap.get_mut(h)
+                        {
+                            core.private = private;
+                        }
+                        g
                     }
                     WireGenState::Done | WireGenState::Unsendable(_) => {
                         let state = match state {
@@ -4662,6 +4590,7 @@ impl Vm {
                             closure,
                             state,
                             ctx: GenCtx::default(),
+                            private: 0,
                         };
                         Value::obj(self.heap.alloc(Obj::Generator(Box::new(core))))
                     }
@@ -4671,9 +4600,9 @@ impl Vm {
                         call_depth,
                         cur_base,
                         handlers,
-                        observable,
+                        private,
                     } => {
-                        let stack = self.rebuild_frame_slots(stack, rebuild, observable);
+                        let stack = self.rebuild_frame_slots(stack, rebuild, private);
                         let rebuilt = CallFrame {
                             proto: frame.proto,
                             ip: frame.ip,
@@ -4707,6 +4636,7 @@ impl Vm {
                             closure,
                             state: GenState::Suspended,
                             ctx,
+                            private,
                         };
                         Value::obj(self.heap.alloc(Obj::Generator(Box::new(core))))
                     }
@@ -4973,10 +4903,6 @@ impl Vm {
         };
         let lowered = match task {
             PendingCall::Call { callee, args, span } => {
-                memo.gen_operands = Some(SpawnOperands {
-                    head: Some(callee),
-                    args: &args,
-                });
                 let wargs = self.wire_args(&args, span, &mut memo)?;
                 match callee.as_obj() {
                     Some(h) => match self.heap.get(h).clone() {
@@ -5051,10 +4977,6 @@ impl Vm {
                 args,
                 span,
             } => {
-                memo.gen_operands = Some(SpawnOperands {
-                    head: Some(recv),
-                    args: &args,
-                });
                 let wrecv = self.to_wire_memo_at(recv, span, &mut memo)?;
                 self.ensure_crossable(&wrecv, span)?;
                 let wargs = self.wire_args(&args, span, &mut memo)?;

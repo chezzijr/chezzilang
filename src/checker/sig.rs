@@ -175,7 +175,10 @@ impl Checker {
             .collect();
         let wparams = self.witness_params_of(decl);
         FnSig {
-            writes: Vec::new(),
+            summary: fn_writes::FnSummary {
+                is_generator: decl.is_generator,
+                ..Default::default()
+            },
             // Trailing defaulted parameters are filled by the CALLEE's own prologue, so a call may
             // omit them. Same predicate the compiler sizes `Proto::min_arity` with — and because
             // this reading DEPENDS on `wparams`, which the hoist fixpoint re-derives (non-monotone:
@@ -856,6 +859,7 @@ impl Checker {
         // A generator body's `yield`s must be legal (`in_generator`) and COLLECTED (`collected_yields`)
         // during inference; a non-generator resets both so a stray `yield` is diagnosed.
         let saved_ig = std::mem::replace(&mut self.in_generator, decl.is_generator);
+        let saved_gf = self.gen_frame.take();
         let saved_yields = std::mem::take(&mut self.collected_yields);
         // M24 — same rule as `check_fn_body` (a module-level free fn or a member, never a nested fn).
         // Without it an UNANNOTATED `fn reset[T: Default](old: T): return T.default()` would infer
@@ -911,6 +915,7 @@ impl Checker {
         let found = std::mem::replace(&mut self.collected_rets, saved_rets);
         let found_yields = std::mem::replace(&mut self.collected_yields, saved_yields);
         self.in_generator = saved_ig;
+        self.gen_frame = saved_gf;
         self.inferring_ret = saved_flag;
         self.current_ret = saved_ret;
         self.ret_declared = saved_ret_decl;
@@ -2519,9 +2524,10 @@ impl Checker {
 
     /// D4 (TICKET-179, TICKET-189): how this `spawn` operand crosses. `Move` for a value no parent
     /// binding can reach, so a task-side write to it is not a lost write: a list/map/set literal, a
-    /// comprehension, and a zero-argument `.copy()` on a List/Map/Set/bytearray. A call result is
-    /// `Copy` (`id(xs)` returns the parent's own list); a struct constructor or struct `.copy()` is
-    /// too (a known false-fault ceiling). The one operand decider: see [`CrossingTable`].
+    /// comprehension, a zero-argument `.copy()` on a List/Map/Set/bytearray, and a resolved struct
+    /// constructor (TICKET-190; shallow, so a named value in a field stays marked). A call result is
+    /// `Copy` (`id(xs)` returns the parent's own list); a struct `.copy()` is too (a known
+    /// false-fault ceiling). The one operand decider: see [`CrossingTable`].
     fn crossing_of(&mut self, a: &Expr) -> Crossing {
         let fresh = match &a.kind {
             ExprKind::List(..)
@@ -2542,7 +2548,10 @@ impl Checker {
                         Ty::List(_) | Ty::Map(..) | Ty::Set(_) | Ty::ByteArray
                     )
                 }
-                _ => false,
+                _ => matches!(
+                    self.resolutions.get(&(self.graph_module_idx, callee.id.0)),
+                    Some(Resolution::StructCtor(_))
+                ),
             },
             _ => false,
         };
@@ -2570,6 +2579,59 @@ impl Checker {
         }
     }
 
+    /// TICKET-190: record a generator decl's private frame slot names. A param is private when no
+    /// assignment rebinds it to a non-fresh value and its root cannot escape the body; a local
+    /// when every single-name `let` and assignment of it is fresh and its root cannot escape.
+    /// Main pass only; a second walk of the same decl intersects.
+    fn record_gen_frame(&mut self, decl: &FnDecl) {
+        let Some(acc) = self.gen_frame.take() else {
+            return;
+        };
+        if self.generic_arg_prepass || self.resolving_returns || decl.name_span == Span::default() {
+            return;
+        }
+        let uses = super::fn_writes::scan(decl).uses;
+        let callee = |c: &super::fn_writes::ArgCallee, j: usize| self.arg_escapes(c, j, None);
+        let no_tys = Vec::new();
+        let tys = |n: &str| acc.tys.get(n).unwrap_or(&no_tys);
+        let mut private = std::collections::HashSet::new();
+        for p in &decl.params {
+            if acc.fresh.get(&p.name) != Some(&false)
+                && !self.root_escapes(&uses, &p.name, tys(&p.name), &callee)
+            {
+                private.insert(p.name.clone());
+            }
+        }
+        for (n, fresh) in &acc.fresh {
+            if *fresh
+                && !decl.params.iter().any(|p| &p.name == n)
+                && !self.root_escapes(&uses, n, tys(n), &callee)
+            {
+                private.insert(n.clone());
+            }
+        }
+        let key = (self.graph_module_idx, decl.name_span);
+        match self.gen_crossings.frames.get_mut(&key) {
+            Some(prev) => prev.retain(|n| private.contains(n)),
+            None => {
+                self.gen_crossings.frames.insert(key, private);
+            }
+        }
+    }
+
+    /// TICKET-189: how a call's receiver and bound slots cross. Read by the spawn arm and, for a
+    /// call that creates a generator, by its creation stamp (TICKET-190).
+    pub(super) fn call_crossing(
+        &mut self,
+        receiver: Option<&Expr>,
+        slots: &[super::fn_writes::SlotSrc],
+    ) -> CallCrossing {
+        CallCrossing {
+            recv: receiver.map(|r| self.crossing_of(r)),
+            args: slots.iter().map(|s| self.slot_crossing(s)).collect(),
+        }
+    }
+
     pub(super) fn check_stmt(&mut self, stmt: &Stmt) {
         self.pending_key_reject = None;
         let span = stmt.span;
@@ -2593,6 +2655,12 @@ impl Checker {
                     }
                 }
                 if names.len() > 1 {
+                    // TICKET-190: a destructured name is never a private frame slot.
+                    if let Some(acc) = &mut self.gen_frame {
+                        for n in names {
+                            acc.fresh.insert(n.clone(), false);
+                        }
+                    }
                     // destructuring let `a, b := expr` — `expr` must be a tuple of matching arity.
                     self.check_destructure(names, name_spans, &val_ty, value.span, span);
                     return;
@@ -2621,6 +2689,18 @@ impl Checker {
                 // and it may repeat with any types). The annotation check above still ran.
                 if name == "_" {
                     return;
+                }
+                // TICKET-190: a frame slot is private only if every binding of it is fresh.
+                if self.gen_frame.is_some() {
+                    let fresh = self.crossing_of(value) == Crossing::Move;
+                    if let Some(acc) = &mut self.gen_frame {
+                        let f = acc.fresh.entry(name.clone()).or_insert(true);
+                        *f = *f && fresh;
+                        acc.tys
+                            .entry(name.clone())
+                            .or_default()
+                            .push(declared.clone());
+                    }
                 }
                 // TICKET-186: the first let of a seeded module global refines the seed the bodies
                 // above it typed and pinned; it never wipes it. `declared` is the refined type.
@@ -2805,6 +2885,34 @@ impl Checker {
                 } else {
                     self.infer_value(value)
                 };
+                // TICKET-190: a plain rebind keeps a frame slot private only with a fresh value; a
+                // compound one only on a type whose operator cannot return a parent's value.
+                if self.gen_frame.is_some()
+                    && let ExprKind::Ident(n) = &target.kind
+                {
+                    let fresh = if *op == AssignOp::Eq {
+                        self.crossing_of(value) == Crossing::Move
+                    } else {
+                        matches!(
+                            self.lookup(n),
+                            Some(
+                                Ty::Int
+                                    | Ty::Float
+                                    | Ty::Bool
+                                    | Ty::Str
+                                    | Ty::Bytes
+                                    | Ty::List(_)
+                                    | Ty::Map(..)
+                                    | Ty::Set(_)
+                                    | Ty::ByteArray
+                            )
+                        )
+                    };
+                    if let Some(acc) = &mut self.gen_frame {
+                        let f = acc.fresh.entry(n.clone()).or_insert(true);
+                        *f = *f && fresh;
+                    }
+                }
                 // An empty binding read as the assignment VALUE escapes into the target slot (`c = b`,
                 // `bx.items = b`) — drop the source's pending empty-collection site AND pin from the
                 // TARGET's type, mirroring the typed-binding-value guard for `c: List[int] = b`.
@@ -3483,10 +3591,7 @@ impl Checker {
                                 _ => None,
                             };
                             let slots = self.bound_slots(e.id, args, named);
-                            let crossing = CallCrossing {
-                                recv: receiver.map(|r| self.crossing_of(r)),
-                                args: slots.iter().map(|s| self.slot_crossing(s)).collect(),
-                            };
+                            let crossing = self.call_crossing(receiver, &slots);
                             if self.records_node(e.id) {
                                 crate::checker::record_call_table_entry(
                                     &mut self.crossings,
@@ -4931,6 +5036,11 @@ impl Checker {
         // sync with `yield_ty` here so pass-2 `check_yield` validates a generator's yields (and a
         // stray `yield` in a non-generator body is diagnosed as out-of-bounds).
         let saved_ig = std::mem::replace(&mut self.in_generator, decl.is_generator);
+        // TICKET-190: a generator body collects its frame facts; any other body collects none.
+        let saved_gf = std::mem::replace(
+            &mut self.gen_frame,
+            decl.is_generator.then(super::GenFrameAcc::default),
+        );
         // A nested function checked while pass-1 is inferring an *outer* function's return must not
         // feed the outer `collected_rets` — this body's `return`s are diagnosed, not collected.
         let saved_inferring = std::mem::replace(&mut self.inferring_ret, false);
@@ -5008,6 +5118,12 @@ impl Checker {
             } else {
                 sig.params.get(i).cloned().unwrap_or(Ty::Unknown)
             };
+            if let Some(acc) = &mut self.gen_frame {
+                acc.tys
+                    .entry(param.name.clone())
+                    .or_default()
+                    .push(ty.clone());
+            }
             // A constant-literal default must itself be assignable to the parameter's type — checked
             // here (where type params are in scope) so a wrong-typed default is caught at the
             // declaration even when every call overrides it.
@@ -5208,6 +5324,7 @@ impl Checker {
                 ),
             );
         }
+        self.record_gen_frame(decl);
         self.finalize_empty_coll_sites();
         self.finalize_hover_pending();
         self.pop_scope();
@@ -5219,6 +5336,7 @@ impl Checker {
         self.raw_ctor_owner = saved_raw;
         self.yield_ty = saved_yield;
         self.in_generator = saved_ig;
+        self.gen_frame = saved_gf;
         self.inferring_ret = saved_inferring;
         self.loop_depth = saved_loop_depth;
         self.recover_depth = saved_recover;

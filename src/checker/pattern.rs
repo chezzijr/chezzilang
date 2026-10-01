@@ -5215,6 +5215,7 @@ impl Checker {
         // not seed the enclosing generator's `collected_yields` during inference. (Defensive — mirrors
         // `yield_ty.take()`; closures are single-expression so a closure `yield` is unparseable today.)
         let saved_ig = std::mem::replace(&mut self.in_generator, false);
+        let saved_gf = self.gen_frame.take();
         // M24 Task 4: the witness scope CARRIES INTO a closure body. `$w:T` is never a free variable
         // (it is unspellable), so `compile_closure` appends it to the capture entries explicitly —
         // and, since M24-2, only where the body can REACH it, which is a strict superset of what
@@ -5319,6 +5320,7 @@ impl Checker {
         self.exit_own_frame(saved_frame);
         self.yield_ty = saved_yield;
         self.in_generator = saved_ig;
+        self.gen_frame = saved_gf;
         let ret_ty = match ret {
             Some(t) => {
                 let declared = self.resolve_type(t, body.span);

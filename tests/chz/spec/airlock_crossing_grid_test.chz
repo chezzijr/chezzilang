@@ -53,14 +53,15 @@ test fn grid_spawn_arg_fresh_literal():
     out := Channel[str](1)
     parallel:
         spawn t179_row([1], T179G(x=1), out)
-    assert out.recv() == "ok,ok,ok,ok,fault"
+    # A struct constructor is fresh (TICKET-190), so its field write runs.
+    assert out.recv() == "ok,ok,ok,ok,ok"
 
 test fn grid_spawn_arg_comprehension():
     xs := [1]
     out := Channel[str](1)
     parallel:
         spawn t179_row([v for v in xs], T179G(x=1), out)
-    assert out.recv() == "ok,ok,ok,ok,fault"
+    assert out.recv() == "ok,ok,ok,ok,ok"
 
 test fn grid_spawn_arg_copy():
     xs := [1]
@@ -76,7 +77,7 @@ test fn grid_spawn_arg_call_result():
     out := Channel[str](1)
     parallel:
         spawn t179_row(t179_id(xs), T179G(x=1), out)
-    assert out.recv() == "ok,fault,fault,fault,fault"
+    assert out.recv() == "ok,fault,fault,fault,ok"
     assert xs == [1]
 
 test fn grid_spawn_receiver_named():
