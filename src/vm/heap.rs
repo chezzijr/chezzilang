@@ -12,66 +12,11 @@ use super::core::{
 use super::fxhash::FxHashMap;
 use super::op::ProtoId;
 use super::value::{GcRef, Value};
+use super::wire::HashIndex;
 use crate::lexer::Span;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
-
-/// A single key's position(s) in `entries`. Numeric keys hash injectively (`(n as f64).to_bits()`),
-/// so the overwhelmingly common case is a single candidate — [`Pos::One`] inlines it with **zero
-/// heap allocation** (the old `Vec<usize>` paid one tiny alloc per distinct key). [`Pos::Many`]
-/// holds the overflow for genuine hash collisions only (string `DefaultHasher`, or a user `hash()`
-/// that returns a constant); boxing the `Vec` keeps `Pos` at two words so `MapData`/`SetData` size
-/// is unchanged. Probing always confirms a hit with `values_equal`, so a collision is still correct.
-#[derive(Debug, Clone)]
-enum Pos {
-    One(usize),
-    // `Box` keeps `Pos` at 2 words (`usize` + tag) instead of 4; the alloc only happens on a real
-    // collision, which is off the numeric-key hot path entirely.
-    #[allow(clippy::box_collection)]
-    Many(Box<Vec<usize>>),
-}
-
-/// `cached-hash → candidate position(s)`, FxHash-keyed (the `u64` is already a content hash; see
-/// [`super::fxhash`]). Shared by [`MapData`] and [`SetData`] — the index logic is identical for both.
-/// Holds plain `usize`s, **not** GC children (only `entries`' keys/values are traced).
-#[derive(Debug, Clone, Default)]
-struct HashIndex(FxHashMap<u64, Pos>);
-
-impl HashIndex {
-    /// Positions whose key hashed to `h` (the probe candidates). One → a 1-element slice in place;
-    /// Many → the overflow vec; absent → empty.
-    #[inline]
-    fn candidates(&self, h: u64) -> &[usize] {
-        match self.0.get(&h) {
-            Some(Pos::One(p)) => std::slice::from_ref(p),
-            Some(Pos::Many(v)) => v.as_slice(),
-            None => &[],
-        }
-    }
-    /// Record that `entries[pos]`'s key hashed to `h`. Absent → `One`; first collision → upgrade to
-    /// `Many` carrying BOTH the prior and the new position; further collisions → push.
-    #[inline]
-    fn insert(&mut self, h: u64, pos: usize) {
-        use std::collections::hash_map::Entry;
-        match self.0.entry(h) {
-            Entry::Vacant(e) => {
-                e.insert(Pos::One(pos));
-            }
-            Entry::Occupied(mut e) => match e.get_mut() {
-                Pos::One(prev) => {
-                    let prev = *prev;
-                    e.insert(Pos::Many(Box::new(vec![prev, pos])));
-                }
-                Pos::Many(v) => v.push(pos),
-            },
-        }
-    }
-    #[inline]
-    fn clear(&mut self) {
-        self.0.clear();
-    }
-}
 
 /// A real hash table that *also* preserves insertion order. `entries` is the insertion-ordered
 /// store (so iteration, `keys()`, set equality, and GC tracing stay deterministic); `index` maps a

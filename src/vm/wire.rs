@@ -13,10 +13,182 @@ use super::core::{
     AtomicCore, AtomicIntCore, ChannelCore, ExecutorCore, ListenerCore, ReaderCore, RwSharedCore,
     SharedCore, SocketCore, WriterCore,
 };
+use super::fxhash::FxHashMap;
 use super::op::ProtoId;
 use super::value::GcRef;
 use crate::ast::Span;
 use std::sync::Arc;
+
+/// A single key's position(s) in `entries`. Numeric keys hash injectively (`(n as f64).to_bits()`),
+/// so the overwhelmingly common case is a single candidate — [`Pos::One`] inlines it with **zero
+/// heap allocation** (the old `Vec<usize>` paid one tiny alloc per distinct key). [`Pos::Many`]
+/// holds the overflow for genuine hash collisions only (string `DefaultHasher`, or a user `hash()`
+/// that returns a constant); boxing the `Vec` keeps `Pos` at two words so `MapData`/`SetData` size
+/// is unchanged. Probing always confirms a hit with `values_equal`, so a collision is still correct.
+#[derive(Debug, Clone)]
+pub(crate) enum Pos {
+    One(usize),
+    // `Box` keeps `Pos` at 2 words (`usize` + tag) instead of 4; the alloc only happens on a real
+    // collision, which is off the numeric-key hot path entirely.
+    #[allow(clippy::box_collection)]
+    Many(Box<Vec<usize>>),
+}
+
+/// `cached-hash → candidate position(s)`, FxHash-keyed (the `u64` is already a content hash; see
+/// [`super::fxhash`]). Shared by [`MapData`](super::heap::MapData), [`SetData`](super::heap::SetData)
+/// and the wire tables ([`WireMap`]/[`WireSet`]) — the index logic is identical for both.
+/// Holds plain `usize`s, **not** GC children (only `entries`' keys/values are traced).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct HashIndex(FxHashMap<u64, Pos>);
+
+impl HashIndex {
+    /// Positions whose key hashed to `h` (the probe candidates). One → a 1-element slice in place;
+    /// Many → the overflow vec; absent → empty.
+    #[inline]
+    pub(crate) fn candidates(&self, h: u64) -> &[usize] {
+        match self.0.get(&h) {
+            Some(Pos::One(p)) => std::slice::from_ref(p),
+            Some(Pos::Many(v)) => v.as_slice(),
+            None => &[],
+        }
+    }
+    /// Record that `entries[pos]`'s key hashed to `h`. Absent → `One`; first collision → upgrade to
+    /// `Many` carrying BOTH the prior and the new position; further collisions → push.
+    #[inline]
+    pub(crate) fn insert(&mut self, h: u64, pos: usize) {
+        use std::collections::hash_map::Entry;
+        match self.0.entry(h) {
+            Entry::Vacant(e) => {
+                e.insert(Pos::One(pos));
+            }
+            Entry::Occupied(mut e) => match e.get_mut() {
+                Pos::One(prev) => {
+                    let prev = *prev;
+                    e.insert(Pos::Many(Box::new(vec![prev, pos])));
+                }
+                Pos::Many(v) => v.push(pos),
+            },
+        }
+    }
+    #[inline]
+    pub(crate) fn clear(&mut self) {
+        self.0.clear();
+    }
+    /// The index of a table whose `i`-th entry's key hashed to the `i`-th item of `hashes`.
+    pub(crate) fn from_hashes(hashes: impl Iterator<Item = u64>) -> HashIndex {
+        let mut ix = HashIndex::default();
+        for (pos, h) in hashes.enumerate() {
+            ix.insert(h, pos);
+        }
+        ix
+    }
+}
+
+/// An entry that carries its key's cached hash (the `u64` the heap map computed at insert).
+pub trait CachedHash {
+    fn cached_hash(&self) -> u64;
+}
+
+impl CachedHash for (u64, WireValue, WireValue) {
+    #[inline]
+    fn cached_hash(&self) -> u64 {
+        self.0
+    }
+}
+
+impl CachedHash for (u64, WireValue) {
+    #[inline]
+    fn cached_hash(&self) -> u64 {
+        self.0
+    }
+}
+
+/// TICKET-192 — the entries of a wire `Map`/`Set` plus the SAME [`HashIndex`] the heap
+/// `MapData`/`SetData` carry, so a stored `RwShared` map answers `get_key`/`has` in O(1) expected
+/// instead of scanning. Insertion order stays the iteration order.
+///
+/// Read through `Deref` to a slice; there is deliberately no `DerefMut`. Every mutation goes
+/// through a method that keeps `index` in step with `entries`.
+///
+/// `id_ceiling` is the serializing memo's `next_id` after the entries were written: every wire id
+/// inside the table is below it, so an entry spliced in later mints its ids from the ceiling up and
+/// never collides with a stored one. `flat` caches whether every entry stands alone (no `Backref`
+/// outside itself, `Vm::wire_pieces_are_self_contained`); `None` means not yet computed.
+#[derive(Debug, Clone)]
+pub struct WireTable<E> {
+    entries: Vec<E>,
+    index: HashIndex,
+    id_ceiling: u32,
+    flat: Option<bool>,
+}
+
+pub type WireMap = WireTable<(u64, WireValue, WireValue)>;
+pub type WireSet = WireTable<(u64, WireValue)>;
+
+impl<E: CachedHash> WireTable<E> {
+    pub fn new(entries: Vec<E>, id_ceiling: u32) -> Self {
+        let index = HashIndex::from_hashes(entries.iter().map(CachedHash::cached_hash));
+        WireTable {
+            entries,
+            index,
+            id_ceiling,
+            flat: None,
+        }
+    }
+    /// Positions whose key hashed to `h` (the probe candidates).
+    #[inline]
+    pub fn candidates(&self, h: u64) -> &[usize] {
+        self.index.candidates(h)
+    }
+    /// Append an entry whose key the caller has confirmed absent.
+    pub fn push(&mut self, e: E) {
+        let pos = self.entries.len();
+        self.index.insert(e.cached_hash(), pos);
+        self.entries.push(e);
+    }
+    /// Remove the entry at `i`, shifting the tail and rebuilding the index from the cached hashes
+    /// (O(n), as heap `MapData::remove_at`).
+    pub fn remove_at(&mut self, i: usize) -> E {
+        let removed = self.entries.remove(i);
+        self.index = HashIndex::from_hashes(self.entries.iter().map(CachedHash::cached_hash));
+        removed
+    }
+    #[inline]
+    pub fn id_ceiling(&self) -> u32 {
+        self.id_ceiling
+    }
+    /// Raise the ceiling to `c` (never lowers it).
+    #[inline]
+    pub fn raise_ceiling(&mut self, c: u32) {
+        self.id_ceiling = self.id_ceiling.max(c);
+    }
+    #[inline]
+    pub fn flat(&self) -> Option<bool> {
+        self.flat
+    }
+    #[inline]
+    pub fn set_flat(&mut self, flat: bool) {
+        self.flat = Some(flat);
+    }
+    pub fn into_entries(self) -> Vec<E> {
+        self.entries
+    }
+}
+
+impl WireMap {
+    /// Replace entry `i`'s value, keeping its stored key; returns the old value.
+    pub fn replace_value(&mut self, i: usize, v: WireValue) -> WireValue {
+        std::mem::replace(&mut self.entries[i].2, v)
+    }
+}
+
+impl<E> std::ops::Deref for WireTable<E> {
+    type Target = [E];
+    #[inline]
+    fn deref(&self) -> &[E] {
+        &self.entries
+    }
+}
 
 /// A `Send`-able serialization of a sendable [`Value`](super::value::Value).
 ///
@@ -61,12 +233,12 @@ pub enum WireValue {
     /// cyclic key).
     Map {
         id: u32,
-        entries: Vec<(u64, WireValue, WireValue)>,
+        entries: WireMap,
     },
     /// `(cached hash, element)` pairs in insertion order. `id` as [`List`](WireValue::List).
     Set {
         id: u32,
-        entries: Vec<(u64, WireValue)>,
+        entries: WireSet,
     },
     /// B3.3a — a `str` carried across the airlock **by value** (owned bytes). `str` is immutable and
     /// value-compared (Chezzi has no identity operator), so `from_wire` allocating a fresh heap `str`

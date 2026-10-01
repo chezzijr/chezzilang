@@ -2,6 +2,7 @@
 // Concurrency: spawn/nursery/fibers, MN scheduler, wire (airlock), module snapshots.
 
 use super::crossing::{self, Crossing, Route};
+use super::wire::{WireMap, WireSet};
 use super::*;
 
 /// Identity-preservation state threaded through [`Vm::to_wire_depth`] — every identity-preserved node
@@ -3661,7 +3662,10 @@ impl Vm {
                             ));
                         }
                         memo.exit(h);
-                        WireValue::Map { id, entries: out }
+                        WireValue::Map {
+                            id,
+                            entries: WireMap::new(out, memo.next_id),
+                        }
                     }
                 }
                 Obj::Set(s) => {
@@ -3675,7 +3679,10 @@ impl Vm {
                             out.push((*hash, self.to_wire_depth(*e, depth + 1, memo)?));
                         }
                         memo.exit(h);
-                        WireValue::Set { id, entries: out }
+                        WireValue::Set {
+                            id,
+                            entries: WireSet::new(out, memo.next_id),
+                        }
                     }
                 }
                 // Identity-preserved container (see `Obj::List`): a self-referential struct
@@ -4305,7 +4312,7 @@ impl Vm {
             WireValue::Map { id, entries } => {
                 if let Some(h) = self.adopt_node(id) {
                     rebuild.insert(id, h);
-                    for (_, k, val) in entries {
+                    for (_, k, val) in entries.into_entries() {
                         self.from_wire_memo(k, rebuild);
                         self.from_wire_memo(val, rebuild);
                     }
@@ -4322,7 +4329,7 @@ impl Vm {
                 // Reconstruction reuses the CARRIED hash (`push(hash, …)`) — never re-hashes a
                 // (possibly cyclic) key, and keeps iteration order + index byte-identical.
                 let mut out = MapData::default();
-                for (hash, k, val) in entries {
+                for (hash, k, val) in entries.into_entries() {
                     let ck = self.from_wire_memo(k, rebuild);
                     let cv = self.from_wire_memo(val, rebuild);
                     out.push(hash, ck, cv);
@@ -4333,7 +4340,7 @@ impl Vm {
             WireValue::Set { id, entries } => {
                 if let Some(h) = self.adopt_node(id) {
                     rebuild.insert(id, h);
-                    for (_, e) in entries {
+                    for (_, e) in entries.into_entries() {
                         self.from_wire_memo(e, rebuild);
                     }
                     if self.copy_mark {
@@ -4347,7 +4354,7 @@ impl Vm {
                 }
                 rebuild.insert(id, h);
                 let mut out = SetData::default();
-                for (hash, e) in entries {
+                for (hash, e) in entries.into_entries() {
                     let ce = self.from_wire_memo(e, rebuild);
                     out.push(hash, ce);
                 }

@@ -1907,13 +1907,13 @@ fn nested_core_bytes_structural(
             }
         }
         WireValue::Map { entries, .. } => {
-            for (_, k, v) in entries {
+            for (_, k, v) in entries.iter() {
                 acc += nested_core_bytes_structural(k, seen, pending)
                     + nested_core_bytes_structural(v, seen, pending);
             }
         }
         WireValue::Set { entries, .. } => {
-            for (_, e) in entries {
+            for (_, e) in entries.iter() {
                 acc += nested_core_bytes_structural(e, seen, pending);
             }
         }
