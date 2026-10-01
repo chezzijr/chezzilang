@@ -2,6 +2,7 @@
 # A missing key whose struct field has a default takes that default (as `Cfg(name="x")` does).
 
 import std.json as json
+import json_default_lib as lib
 
 struct Cfg:
     name: str
@@ -13,3 +14,156 @@ test fn missing_key_takes_field_default():
             assert c.name == "x"
             assert c.retries == 3, str(c.retries)
         Err(e): assert false, e.message()
+
+K := 5
+KF := 2.5
+LK := 99
+
+fn mk() -> int:
+    return K + 1
+
+fn mks() -> str:
+    return "s" + str(K)
+
+fn mkl() -> List[int]:
+    return [K, K]
+
+fn boom() -> int:
+    assert false, "default evaluated"
+    return 0
+
+struct In:
+    w: str
+    v: int = 7
+
+# Every decodable field type, each with a default of one kind: literal, literal container,
+# a call to a fn, a read of a module global, a nested struct with its own defaults.
+struct G:
+    i_lit: int = 3
+    i_call: int = mk()
+    i_glob: int = K
+    s_lit: str = "d"
+    s_call: str = mks()
+    f_lit: float = 1.5
+    f_glob: float = KF
+    b_lit: bool = true
+    l_lit: List[int] = [1, 2]
+    l_empty: List[int] = []
+    l_call: List[int] = mkl()
+    m_lit: Map[str, int] = {"a": 1}
+    m_empty: Map[str, int] = {}
+    o_none: Option[int] = None
+    o_some: Option[int] = Some(4)
+    n_struct: In = In(w="x")
+    n_list: List[In] = []
+
+fn dec(s: str) -> G:
+    match json.decode[G](s):
+        Ok(g): return g
+        Err(e):
+            assert false, e.message()
+            return G()
+
+# key ABSENT -> the field's default: the value `G()` builds.
+test fn absent_keys_take_their_defaults():
+    g := dec(r'{}')
+    assert g.i_lit == 3 and g.i_call == 6 and g.i_glob == 5, str(g)
+    assert g.s_lit == "d" and g.s_call == "s5", str(g)
+    assert g.f_lit == 1.5 and g.f_glob == 2.5, str(g)
+    assert g.b_lit == true, str(g)
+    assert g.l_lit == [1, 2] and g.l_empty == [] and g.l_call == [5, 5], str(g)
+    assert g.m_lit == {"a": 1} and g.m_empty.len() == 0, str(g)
+    assert g.o_none == None and g.o_some == Some(4), str(g)
+    assert g.n_struct.v == 7 and g.n_struct.w == "x" and g.n_list.len() == 0, str(g)
+    assert str(g) == str(G()), str(g) + " vs " + str(G())
+
+# key PRESENT -> the JSON value; the default is not used.
+test fn present_keys_override_their_defaults():
+    src := r'{"i_lit":30,"i_call":60,"i_glob":50,"s_lit":"D","s_call":"S","f_lit":0.5,"f_glob":0.25,"b_lit":false,"l_lit":[9],"l_empty":[8],"l_call":[7],"m_lit":{"b":2},"m_empty":{"c":3},"o_none":1,"o_some":2,"n_struct":{"v":70,"w":"y"},"n_list":[{"w":"z"}]}'
+    g := dec(src)
+    assert g.i_lit == 30 and g.i_call == 60 and g.i_glob == 50, str(g)
+    assert g.s_lit == "D" and g.s_call == "S", str(g)
+    assert g.f_lit == 0.5 and g.f_glob == 0.25 and g.b_lit == false, str(g)
+    assert g.l_lit == [9] and g.l_empty == [8] and g.l_call == [7], str(g)
+    assert g.m_lit == {"b": 2} and g.m_empty == {"c": 3}, str(g)
+    assert g.o_none == Some(1) and g.o_some == Some(2), str(g)
+    assert g.n_struct.v == 70 and g.n_list[0].v == 7 and g.n_list[0].w == "z", str(g)
+
+# key NULL -> an Option field is None, default or not; any other field is a type error, default or not.
+test fn null_keys_are_none_for_option_and_an_error_otherwise():
+    g := dec(r'{"o_none":null,"o_some":null}')
+    assert g.o_none == None and g.o_some == None, str(g)
+    cells := [("i_lit", "int"), ("i_call", "int"), ("i_glob", "int"), ("s_lit", "str"), ("s_call", "str"), ("f_lit", "float"), ("f_glob", "float"), ("b_lit", "bool"), ("l_lit", "array"), ("l_empty", "array"), ("l_call", "array"), ("m_lit", "object"), ("m_empty", "object"), ("n_struct", "object for In"), ("n_list", "array")]
+    for cell in cells:
+        f := cell.0
+        want := cell.1
+        match json.decode[G](r'{' + json.encode(f) + r':null}'):
+            Ok(g2): assert false, f + " null decoded to " + str(g2)
+            Err(e):
+                msg := "decode: expected " + want + " at $." + f + ", found null"
+                assert e.message() == msg, e.message()
+
+struct Ob:
+    p: Option[int]
+
+# An Option field with NO default keeps its rule: absent -> None.
+test fn an_option_field_without_a_default_is_none_when_absent():
+    match json.decode[Ob](r'{}'):
+        Ok(o): assert o.p == None, str(o)
+        Err(e): assert false, e.message()
+
+# A missing key with NO default is still an error, at the top level and inside a nested struct.
+test fn missing_key_without_default_is_still_an_error():
+    match json.decode[Cfg](r'{}'):
+        Ok(c): assert false, str(c)
+        Err(e): assert e.message() == "decode: missing key 'name' at $", e.message()
+    match json.decode[G](r'{"n_struct":{}}'):
+        Ok(g): assert false, str(g)
+        Err(e): assert e.message() == "decode: missing key 'w' at $.n_struct", e.message()
+
+# Each decode evaluates the default afresh, as each `G()` does: two decodes never share a container.
+test fn each_decode_builds_a_fresh_default():
+    a := dec(r'{}')
+    b := dec(r'{}')
+    a.l_empty.push(1)
+    a.m_empty["k"] = 1
+    assert b.l_empty.len() == 0 and b.m_empty.len() == 0, str(b)
+
+struct Lazy:
+    z: int = boom()
+
+# A default runs only when its key is absent, and a fault inside it is a fault, as in `Lazy()`.
+test fn a_default_runs_only_when_its_key_is_absent():
+    match json.decode[Lazy](r'{"z":1}'):
+        Ok(l): assert l.z == 1, str(l)
+        Err(e): assert false, e.message()
+    r := recover: json.decode[Lazy](r'{}')
+    match r:
+        Ok(v): assert false, "the default did not run: " + str(v)
+        Err(e): assert "default evaluated" in e.message(), e.message()
+
+# A struct declared in another module reads THAT module's globals, never the decoding module's `LK`.
+test fn a_default_resolves_in_the_declaring_module():
+    match json.decode[lib.LibCfg](r'{}'):
+        Ok(c):
+            assert c.k == 11 and c.j == 12 and c.lit == "lib", str(c)
+            assert str(c) == str(lib.LibCfg()), str(c)
+        Err(e): assert false, e.message()
+
+# A list of structs fills each element's defaults.
+test fn list_elements_take_their_defaults():
+    match json.decode[List[In]](r'[{"w":"a"},{"v":2,"w":"b"}]'):
+        Ok(xs): assert xs[0].v == 7 and xs[1].v == 2, str(xs)
+        Err(e): assert false, e.message()
+
+fn decode_in_task(out: Channel[int]):
+    match json.decode[G](r'{}'):
+        Ok(g): out.send(g.i_call + g.i_glob)
+        Err(e): out.send(-1)
+
+# A decode inside a spawned task fills defaults in the task's own copy of the module.
+test fn a_decode_inside_a_spawned_task_takes_its_defaults():
+    out := Channel[int](1)
+    parallel:
+        spawn decode_in_task(out)
+    assert out.recv() == 11, "task decode failed"

@@ -1,0 +1,10 @@
+# Helper module for json_default_test.chz (TICKET-198): a struct whose defaults read THIS module's globals.
+LK := 11
+
+fn lk_plus(n: int) -> int:
+    return LK + n
+
+struct LibCfg:
+    k: int = LK
+    j: int = lk_plus(1)
+    lit: str = "lib"
