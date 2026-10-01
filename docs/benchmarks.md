@@ -11,6 +11,23 @@ justify lives in **[`future.md §4`](future.md)**; the scheduled work is roadmap
 > They are kept as the record of what was measured at the time; they are not reproducible on today's
 > binary, and "serial == M:N parity green" in an older section means the gate that existed then.
 
+## TICKET-190 — a generator crossing costs O(frame), not O(heap) (2026-10-01)
+
+A started generator crossing into a task with a 200k-object (function-local) parent. Before, every
+spawn crossing of a generator ran `gen_frame_observable`, a reach scan from every GC root; now the
+generator carries a static frame mask and the rebuild only unmarks private slot roots. Release
+binary, three runs each, `uptime` load 1.53–1.57 (before: base `9bba7166`, load 1.13–1.23 per the
+ticket's gate runs).
+
+| crossings | before | after |
+|---|---|---|
+| 200 (`generator_crossing_cost_is_independent_of_parent_heap`) | 3705–3971 ms | 80–84 ms |
+| 2000 (same test, 2000 iterations) | not run (~39 s filed) | 729–756 ms |
+
+For scale, the ticket measured the same parent with plain spawns and no generator at 63 ms per 200
+and 641 ms per 2000 on base: a generator crossing now costs about what a plain spawn costs. CPython
+runs 2000 pool-thread crossings in 0.4 s (filed).
+
 ## TICKET-188 — one halt predicate at every checkpoint (2026-10-01)
 
 **Within 3% on all three checkpoint benches.** `Vm::halt_requested` (`block::halt_of`) replaced

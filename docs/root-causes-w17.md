@@ -147,10 +147,12 @@ Generate from `block.rs`'s own context/spec lists.
 
 ## Family C — airlock: "can the parent observe it?" still decided per route (Family 4, incomplete)
 
-**Status:** C1 landed (TICKET-189); C2 generators and C3 std open. One checker crossing policy per
+**Status:** C1 landed (TICKET-189); C2 landed (TICKET-190); C3 std open. One checker crossing policy per
 bound slot (`crossing_of` + `bound_slots`, `CrossingTable`), encoded by `vm::crossing::Crossing::mask`
 on every spawn form, route constants only in `vm::crossing::marks`; layer A maps through the call plan
-and drops a rebound param. A1, A4 and A5 fixed; A2/A3 (C3) and A6/A7 (C2, TICKET-190) remain.
+and drops a rebound param. Generator frames: one static mask per proto (`Proto.private_slots`) ANDed
+with the creating call's param stamp, read by every route; `gen_frame_observable` deleted. A1, A4, A5,
+A6 and A7 fixed; A2/A3 (C3) remain.
 
 **Deciders (7):** checker freshness (`spawn_operand_is_fresh`, sig.rs:2505) → compiler mask
 (`fresh_mask`, `fresh_mask_srcs`: a default fill or pack is "never fresh", compiler/mod.rs:5095);

@@ -142,23 +142,31 @@ The mark is not "arrived by snapshot". It answers one question: can the parent s
 value after the join? Two routes decide it, each in one place:
 
 1. **A fresh spawn operand crosses unmarked.** A `spawn f(args)` argument or `spawn recv.m()`
-   receiver that is a list/map/set literal, a comprehension, or a List/Map/Set/bytearray `.copy()`
-   is reachable by no parent binding. The checker decides this once per bound slot (`crossing_of`,
-   TICKET-189, which also counts a literal default fill and a variadic pack); the compiler encodes it
+   receiver that is a list/map/set literal, a comprehension, a List/Map/Set/bytearray `.copy()`, or
+   a struct constructor (TICKET-190) is reachable by no parent binding. The checker decides this
+   once per bound slot (`crossing_of`, TICKET-189, which also counts a literal default fill and a
+   variadic pack); the compiler encodes it
    as the spawn op's bitmask (`vm::crossing::Crossing::mask`); the runtime unmarks only the ROOT.
    Children stay marked (`copy()` is shallow), so `spawn f([xs])` may push onto the new list but not
-   onto `xs`. A call result is never fresh (`id(xs)` returns the parent's own list), and a struct
-   constructor or struct `.copy()` is not fresh either: both are known ceilings (a false fault,
-   never a lost write). `spawn f([], out)` now runs, as in Go and Python.
-2. **A crossing generator marks only the frame slots the parent can reach.** A generator crossing
-   into a task stays an independent deep copy (`docs/syntax.md`). At the spawn crossing,
-   `gen_frame_observable` decides per frame slot (a `Pending` argument or a `Suspended` stack slot):
-   the slot is marked when it is already a copy, or when any object in its subtree is reachable from
-   the sending task's GC roots or the crossing's other operands, never through the generator
-   itself. A frame-local list the parent never saw is writable; a list the generator yielded and the
-   parent still holds faults. Per-slot is a deliberate ceiling: a private list holding a reachable
-   list is marked whole. A Channel send and the module snapshot do not decide: a received generator
-   stays unmarked as before, and a module-global generator keeps the full mark.
+   onto `xs`, and `spawn T(xs=xs).m()` may write the new struct's own fields but not `xs`. A call
+   result is never fresh (`id(xs)` returns the parent's own list), and a struct `.copy()` is not
+   fresh either: a known ceiling (a false fault, never a lost write). `spawn f([], out)` now runs,
+   as in Go and Python.
+2. **A crossing generator marks only the frame slots the parent can reach (TICKET-190).** A
+   generator crossing into a task stays an independent deep copy (`docs/syntax.md`). Each generator
+   carries one static frame mask (`vm::crossing::Crossing::frame_mask`), and every route reads it:
+   a marking route (spawn forms, Executor jobs through their closure captures, the module snapshot)
+   rebuilds the frame marked, then unmarks the ROOT of each private slot. A hand-off (Channel,
+   Shared, RwShared, Atomic) marks nothing, so the mask changes nothing there. A local slot is
+   private when every single-name `let` and assignment of it is fresh and its root never escapes
+   (yield, return, store, plain-value use, a callee that keeps its argument); the checker decides
+   it once per generator decl (`root_escapes`, reading the one param-escape summary
+   `FnSummary.escapes`). A param slot is private only when that holds AND the creating call passed
+   a fresh argument (`Op::StampGen`): `g([])` runs, `g(xs)` faults on a write. Private is shallow
+   (children keep the mark). Ceilings, each a false fault: a generator created through a method or
+   a function value gets no stamp; slots 64 and up stay marked; a native method keeps its receiver
+   private only when its declared return type cannot hold the receiver. The cost is O(frame): the
+   old per-crossing heap reach scan (`gen_frame_observable`) is gone.
 
 ## Reference languages
 

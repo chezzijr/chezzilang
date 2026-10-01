@@ -7,6 +7,25 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-190 (2026-10-01): Family C2, generator frames read one static mask on every route.**
+  A generator frame slot is private when the parent cannot reach its root. The checker decides it
+  once per generator decl: a local is private when every single-name `let`/assignment of it is fresh
+  and `root_escapes` finds no escaping use; `root_escapes` reads the one param-escape summary,
+  `FnSummary.escapes`, computed in the write summaries' fixed point (a generator callee escapes
+  every param; a native receiver method keeps its root only when its declared return type cannot
+  hold it). The compiler encodes it as `Proto.private_slots` and stamps a creating call's fresh
+  arguments with `Op::StampGen`; every crossing route rebuilds the frame and unmarks private roots
+  (shallow). A struct constructor is now a fresh operand on every route (owner answer 2a; R29 reads
+  `ok 2`, and the three `airlock_crossing_grid_test` constructor field cells read `ok`).
+  Deleted: `gen_frame_observable`, `SpawnOperands`, `WireMemo::gen_operands`, `FrameObservable`,
+  the DEC-179 `set_copied` carry. Now runs: an Executor job draining a started generator (A6), a
+  module-global started generator in a task. Perf (A7): 200 crossings with a 200k-object parent
+  3971 ms -> 84 ms (`docs/benchmarks.md`). Ceilings, each a false fault: a generator created
+  through a method or a function value has no stamp; slots 64 and up; a struct `.copy()`. Grids:
+  `compiler::gen_frame_tests::generator_slot_privacy_grid`,
+  `checker::tests::every_native_container_method_is_classified_by_its_return_type`,
+  `tests/chz/spec/airlock_generator_route_test.chz::generator_route_grid`.
+
 - **TICKET-189 (2026-10-01): Family C1, one crossing policy per bound slot.** The checker's
   `crossing_of` decides each spawn operand once; `bound_slots` maps every parameter through
   `bind_call`'s plan, so keyword arguments, default fills and a variadic pack sit in their compiled
