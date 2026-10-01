@@ -6327,6 +6327,12 @@ impl crate::native::Host for VmHost<'_> {
         }
         Ok(pairs)
     }
+    fn arg_is_task_copy(&self, i: usize) -> Result<bool, crate::native::HostError> {
+        match self.args.get(i).copied() {
+            Some(v) => Ok(v.as_obj().is_some_and(|h| self.vm.heap.is_copied(h))),
+            None => Err(crate::native::HostError::missing_arg(i)),
+        }
+    }
     fn arg_str_list(&mut self, i: usize) -> Result<Vec<String>, crate::native::HostError> {
         let Some(av) = self.args.get(i).copied() else {
             return Err(crate::native::HostError::missing_arg(i));

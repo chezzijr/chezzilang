@@ -1,0 +1,34 @@
+# tests/chz/stdlib/concurrency_is_task_copy_test.chz — TICKET-191.
+#
+# `concurrency.is_task_copy(v)` reads the airlock mark that D4's write check reads: false for a
+# value the calling task owns and for a scalar, true for a value a spawned task or an Executor job
+# received as a copy.
+
+import std.concurrency
+
+fn child_is_copy(xs: List[int], n: int, out: Channel[str]):
+    out.send("{concurrency.is_task_copy(xs)} {concurrency.is_task_copy(n)}")
+
+test fn is_task_copy_is_false_for_an_owned_value_and_a_scalar():
+    xs := [1]
+    assert not concurrency.is_task_copy(xs)
+    assert not concurrency.is_task_copy(7)
+    assert not concurrency.is_task_copy("s")
+
+test fn is_task_copy_is_true_for_a_spawned_task_copy():
+    xs := [1]
+    out := Channel[str](1)
+    parallel:
+        spawn child_is_copy(xs, 7, out)
+    got := out.recv()
+    assert got == "true false", got
+    assert not concurrency.is_task_copy(xs)
+
+test fn is_task_copy_is_true_for_an_executor_job_capture():
+    xs := [1]
+    out := Channel[str](1)
+    ex := Executor()
+    ex.submit(fn(): child_is_copy(xs, 7, out))
+    ex.shutdown()
+    got := out.recv()
+    assert got == "true false", got

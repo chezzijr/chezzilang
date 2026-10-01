@@ -19,6 +19,7 @@
 // only reached on unix. All supported Chezzi targets are unix; non-unix is unsupported by design.
 #[cfg(unix)]
 pub mod cffi;
+pub mod concurrency;
 pub mod crypto;
 pub mod encoding;
 pub mod ffi;
@@ -420,6 +421,16 @@ pub trait Host {
             message: "this host does not support list arguments".into(),
         })
     }
+    /// Whether `args[i]` is an airlock copy in this task: the one predicate D4's write check reads
+    /// (`Heap::is_copied`). A non-heap value is never a copy. Used by `std.concurrency.is_task_copy`.
+    /// The default errors so a host with no heap (the off-heap host, the test fixtures) needn't
+    /// implement it.
+    fn arg_is_task_copy(&self, i: usize) -> Result<bool, HostError> {
+        let _ = i;
+        Err(HostError {
+            message: "this host does not support airlock-copy queries".into(),
+        })
+    }
     /// R1 — `args[i]` as raw bytes, copied out at the boundary (no heap aliasing). A `bytes` only:
     /// every seam param is typed `bytes`, and a `bytearray` is NOT assignable to a `bytes` sink
     /// (commit 7b29552 — a mutable buffer aliased as immutable `bytes` is the hole that rule closes);
@@ -649,8 +660,8 @@ pub fn native_name(path: &[String]) -> Option<&'static str> {
             "encoding" => Some("std.encoding"),
             "crypto" => Some("std.crypto"),
             "uuid" => Some("std.uuid"),
-            // `std.concurrency` is a FILE-BACKED native module (phase 4c-concurrency): it has NO
-            // callable members — it only declares the four runtime concurrency TYPE/ctor names
+            // `std.concurrency` is a FILE-BACKED native module (phase 4c-concurrency): its one
+            // callable member is `is_task_copy` (TICKET-191); otherwise it declares the four runtime concurrency TYPE/ctor names
             // (`Shared`/`RwShared`/`Atomic`/`Executor`) as `native struct`s in `std/concurrency.chz`,
             // harvested for their sigs + method tables (the ctors still lower via the compiler's
             // name→opcode dispatch, not a bound module member). Only the len-2 path is the native module
@@ -720,9 +731,9 @@ pub fn native_members(module: &str) -> &'static [(&'static str, NativeFn, Kind)]
         "std.encoding" => encoding::MEMBERS,
         "std.crypto" => crypto::MEMBERS,
         "std.uuid" => uuid::MEMBERS,
-        // A type-licensing-only native module: no callable members (it carries the four concurrency
-        // ctor TYPE names, which have no runtime value — they lower via the compiler name→opcode path).
-        "std.concurrency" => &[],
+        // One callable member, is_task_copy (TICKET-191); the four concurrency TYPE names have no
+        // runtime value -- they lower via the compiler name→opcode path.
+        "std.concurrency" => concurrency::MEMBERS,
         _ => &[],
     }
 }
@@ -763,6 +774,7 @@ mod tests {
         "std.encoding",
         "std.crypto",
         "std.uuid",
+        "std.concurrency",
     ];
 
     /// Each name in [`NATIVE_MODULES`] really names a native module with a member table — so a typo or
@@ -799,8 +811,8 @@ mod tests {
             .lines()
             .filter_map(|l| {
                 let l = l.trim();
-                // `"std.math" => math::MEMBERS,` — the empty `std.concurrency => &[]` arm has no
-                // `::MEMBERS` and is skipped, matching the const.
+                // `"std.math" => math::MEMBERS,` — the `_ => &[]` fallback has no `::MEMBERS`
+                // and is skipped, matching the const.
                 let name = l.strip_prefix('"')?.split('"').next()?;
                 l.contains("::MEMBERS").then_some(name)
             })
@@ -1031,8 +1043,8 @@ mod tests {
             native_name(&["std".into(), "concurrency".into()]),
             Some("std.concurrency")
         );
-        // ...but it has NO callable members (it only licenses the four concurrency ctor TYPE names).
-        assert!(native_members("std.concurrency").is_empty());
+        // ...and its one callable member is is_task_copy (TICKET-191).
+        assert_eq!(kinds("std.concurrency"), [("is_task_copy", Kind::Inline)]);
         // The len-3 `std.concurrency.collection` is the REAL file — NOT native (no collision).
         assert_eq!(
             native_name(&["std".into(), "concurrency".into(), "collection".into()]),

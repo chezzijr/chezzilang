@@ -122,3 +122,8 @@ fn run_outcome[T](f: fn() -> T, out: Channel[T], err: Channel[str]):
             out.close()
             settled.send(true)
             panic(e.message())
+
+# True when `v` is an airlock copy in the calling task: a write to it would fault `this value is
+# this task's copy`. Reads the same predicate as that write check (`Heap::is_copied`), so std code
+# can pick write-or-share without attempting the write. A scalar is never a copy (TICKET-191).
+native fn is_task_copy(v) -> bool
