@@ -2017,7 +2017,7 @@ numeral's start where CPython names its second digit.
 
 For a known shape, `json.decode[T](s) -> Result[T]` (a `std.json` member called with one type
 argument — not a global builtin) deserializes straight into a struct / `Map[str, V]` /
-`List[T]` / tuple / scalar: `Option` fields accept null-or-absent, extra keys are ignored, and
+`List[T]` / tuple / scalar: a missing key whose struct field has a default takes that default, evaluated afresh exactly as `S(...)` evaluates it (a default that faults is a fault, not an `Err`); a missing key with no default is `Err` (`decode: missing key 'f' at $`); an `Option` field with no default accepts null-or-absent, and `null` for any non-`Option` field is `Err` even when it has a default (serde's rule; Go's `json.Unmarshal` would keep the default); extra keys are ignored, and
 recursive/generic struct targets are rejected (use the `Json` enum for those). A **tuple** target takes
 a JSON array of exactly the tuple's arity — what `encode` emits, so `decode[(int, str)](encode((1, "x")))`
 round-trips (also as a struct field or a `List` element); a shorter or longer array is an `Err`
