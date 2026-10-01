@@ -35,3 +35,20 @@ test fn blank_let_twice_in_fn():
     _ := f()
     _ := g()
     assert true
+
+# A `_` element of a multi-target `=` discards its element, as in Python and Go (`a, _ = 1, 2`).
+test fn blank_element_in_tuple_assign():
+    a := 0
+    b := [0]
+    a, _ = (1, 2)
+    _, b[0] = (3, 4)
+    _, _ = (5, 6)
+    assert a == 1
+    assert b == [4]
+
+test fn blank_element_in_tuple_assign_inside_nested_fn():
+    fn inner() -> int:
+        x := 0
+        x, _ = (7, 8)
+        return x
+    assert inner() == 7

@@ -2067,7 +2067,7 @@ impl Compiler {
             ExprKind::Ident(name) => match op.to_binop() {
                 None => {
                     self.compile_expr(fc, value)?;
-                    if name == "_" {
+                    if target.is_blank() {
                         // TICKET-142 (W14-32): `_ = e` evaluates `e` and discards it; `_` has no
                         // slot to store to (the checker never declares it).
                         fc.emit(Op::Pop, span);
@@ -2166,6 +2166,10 @@ impl Compiler {
         i: usize,
         span: Span,
     ) -> Result<(), CompileError> {
+        // A blank `_` element discards its tuple element: nothing to load or store.
+        if target.is_blank() {
+            return Ok(());
+        }
         match &target.kind {
             ExprKind::Ident(name) => {
                 fc.emit_hidden_get(tuple_slot, span);
@@ -6104,9 +6108,13 @@ pub(crate) fn free_names_block(stmts: &[Stmt], bound: &HashSet<String>, out: &mu
             StmtKind::Assign { target, op, value } => {
                 // TICKET-142 (W14-32): a plain `_ = e` target is the blank identifier, never a
                 // variable — listing it would make a nested fn capture a non-existent `_`.
-                let blank =
-                    *op == AssignOp::Eq && matches!(&target.kind, ExprKind::Ident(n) if n == "_");
-                if !blank {
+                if *op != AssignOp::Eq {
+                    free_names_expr(target, &b, out);
+                } else if let ExprKind::Tuple(ts) = &target.kind {
+                    for t in ts.iter().filter(|t| !t.is_blank()) {
+                        free_names_expr(t, &b, out);
+                    }
+                } else if !target.is_blank() {
                     free_names_expr(target, &b, out);
                 }
                 free_names_expr(value, &b, out);

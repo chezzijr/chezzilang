@@ -7,6 +7,16 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **Wave-17 isolated fixes (2026-10-01, in place).** `a, _ = (1, 2)` and `_, b[0] = t` now
+  discard the `_` element (was `cannot assign to undeclared variable '_'`; Python and Go accept both):
+  `Expr::is_blank` is the one blank-target test, read by `check_assign`'s tuple recursion, the
+  statement-level `_ = e`, `compile_assign`/`compile_assign_element` and the closure free-name scan
+  (tests in `tests/chz/spec/blank_identifier_test.chz`). `docs/syntax.md`'s `Box.top()` example now
+  quotes the real error (`type Socket does not satisfy Eq` — `Comparable` embeds `Eq`). The
+  `two_leaf_deadlock_on_a_main_channel_still_faults_at_every_worker_count` T=1 hang no longer
+  reproduces after TICKET-188 (0 of 150 debug runs at T=1; 0 of 210 release runs at T=1/2/0, idle and
+  10 at once), so the stage notes stop excusing it.
+
 - **TICKET-190 (2026-10-01): Family C2, generator frames read one static mask on every route.**
   A generator frame slot is private when the parent cannot reach its root. The checker decides it
   once per generator decl: a local is private when every single-name `let`/assignment of it is fresh

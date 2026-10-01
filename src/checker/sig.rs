@@ -2835,7 +2835,7 @@ impl Checker {
             StmtKind::Assign { target, op, value } => {
                 // TICKET-142 (W14-32): `_ = e` is the blank identifier — evaluate and discard, at
                 // every scope. A compound `_ += 1` keeps the ordinary path (and its error).
-                if *op == AssignOp::Eq && matches!(&target.kind, ExprKind::Ident(n) if n == "_") {
+                if *op == AssignOp::Eq && target.is_blank() {
                     self.infer_value(value);
                     return;
                 }
@@ -4257,6 +4257,11 @@ impl Checker {
         // this `match` is the sole lvalue dispatch, its `Tuple` arm recurses back into `check_assign`
         // per element, and the ident/index/field arms all write THROUGH the same root binding. Done
         // before the arms run so a parent-side `xs[0] = v` untaints ahead of its own receiver read.
+        // A blank `_` element of a tuple target (`a, _ = t`) discards its element, exactly as a
+        // whole `_ = e` statement does; it is never a variable to resolve or store.
+        if op == AssignOp::Eq && target.is_blank() {
+            return;
+        }
         self.note_assign_root(target);
         match &target.kind {
             ExprKind::Ident(name) => {

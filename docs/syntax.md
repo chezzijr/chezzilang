@@ -297,6 +297,8 @@ ANSWER += 1                   # ✗ every compound form is caught too
 `_` is Go's blank identifier in `:=`, `=` and destructuring, at **every** scope (TICKET-142):
 `_ := e` and `_ = e` evaluate `e` and discard it, any number of times, with any types — so the
 discarded-`Result` warning's own escape (`_ := f()`, then `_ := g()`) works at module top level too.
+A `_` element of a multi-target `=` discards its element too: `a, _ = (1, 2)` and `_, b[0] = t`
+(Python and Go accept both).
 `_` is never declared, so it has no type to freeze and no global slot, and reading it is an error
 (`cannot use '_' as a value`; Go: `cannot use _ as value or type`). `_ := 5; print(_)` printed `5`
 before. A loop variable, parameter or match pattern named `_` still binds as before. `_ := f()`
@@ -2083,7 +2085,8 @@ print(b.max2(9))                     # 9
 import std.net
 fn f(s: net.Socket):
     bad := Box(s)
-    bad.top()                        # ERROR at check time: Socket does not satisfy Comparable
+    bad.top()                        # ERROR at check time: type Socket does not satisfy Eq
+                                     # (Comparable embeds Eq; the first unmet bound is named)
 ```
 
 Just like a free fn's `where`, the method **body** may use the bounded operation (`<` above needs

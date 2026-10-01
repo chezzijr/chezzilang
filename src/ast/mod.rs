@@ -1426,6 +1426,13 @@ impl NodeId {
 }
 
 impl Expr {
+    /// The blank identifier `_` as a plain-`=` assignment target (TICKET-142): evaluate and discard,
+    /// never a variable. The one test for it, whether the target stands alone (`_ = e`) or is one
+    /// element of a tuple target (`a, _ = t`).
+    pub fn is_blank(&self) -> bool {
+        matches!(&self.kind, ExprKind::Ident(n) if n == "_")
+    }
+
     /// A parser- or desugar-built node with a fresh id.
     pub fn new(kind: ExprKind, span: Span) -> Expr {
         Expr {
