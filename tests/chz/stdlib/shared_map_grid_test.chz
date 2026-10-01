@@ -1,0 +1,275 @@
+# tests/chz/stdlib/shared_map_grid_test.chz — TICKET-192 grid.
+#
+# One op sequence (`_ops`) runs against every map holder: a private `Map` (the oracle), `Shared`,
+# `RwShared`, `ConcurrentMap`. Each holder's log must equal the oracle's, for every key kind (int,
+# str, struct with a colliding user `hash` + `eq`, enum) and every caller (parent, spawned task,
+# Executor job). A child's writes must be visible to the parent afterwards. `memoize1` gets the
+# same key kinds and callers: the value is right and `f` runs once per distinct key across tasks.
+#
+# The three `_rw_*` writers are the RwShared single-entry write path. Before TICKET-192 lands they
+# go through `write` (a whole-map re-encode); the fix points them at `set_key`/`remove_key`/
+# `get_or_insert`.
+
+import std.concurrency
+import ConcurrentMap from std.concurrency.collection
+import memoize1 from std.memoize
+
+struct P:
+    n: int
+    fn hash(self) -> int:
+        return self.n % 2
+    fn eq(self, other: P) -> bool:
+        return self.n == other.n
+
+enum Tag:
+    A
+    B(int)
+    fn rank(self) -> int:
+        return match self:
+            Tag.A: 0
+            Tag.B(n): n
+    fn hash(self) -> int:
+        return self.rank()
+    fn eq(self, other: Tag) -> bool:
+        return self.rank() == other.rank()
+
+# ---- the one op sequence -------------------------------------------------------------------------
+# keys[0..5] are inserted; keys[5] is never inserted before the last `goi` (the miss probe).
+fn _ops[K: Hashable + Eq](keys: List[K], put: fn(K, int) -> nil, del: fn(K) -> nil, get: fn(K) -> Option[int], has: fn(K) -> bool, len: fn() -> int, goi: fn(K, int) -> int, items: fn() -> str) -> str:
+    i := 0
+    while i < 5:
+        put(keys[i], i)
+        i = i + 1
+    put(keys[1], 10)
+    del(keys[2])
+    put(keys[2], 20)
+    log := items()
+    log = log + "|" + str(get(keys[1])) + str(get(keys[2])) + str(get(keys[5]))
+    log = log + "|" + str(has(keys[3])) + str(has(keys[5])) + "|" + str(len())
+    log = log + "|" + str(goi(keys[0], 99)) + str(goi(keys[5], 55)) + "|" + str(len())
+    return log
+
+fn _show[K](k: K, v: int) -> str:
+    return str(k) + "=" + str(v) + ";"
+
+# ---- holders ---------------------------------------------------------------------------------------
+fn _map_ops[K: Hashable + Eq](keys: List[K]) -> str:
+    m: Map[K, int] = {}
+    return _ops(keys, fn(k: K, v: int): _map_put(m, k, v), fn(k: K): _map_del(m, k), fn(k: K) -> Option[int]: m.get(k), fn(k: K) -> bool: m.has(k), fn() -> int: m.len(), fn(k: K, v: int) -> int: _map_goi(m, k, v), fn() -> str: _map_items(m))
+
+fn _map_put[K: Hashable + Eq](m: Map[K, int], k: K, v: int):
+    m[k] = v
+
+fn _map_del[K: Hashable + Eq](m: Map[K, int], k: K):
+    _ := m.remove(k)
+
+fn _map_goi[K: Hashable + Eq](m: Map[K, int], k: K, v: int) -> int:
+    match m.get(k):
+        Some(x):
+            return x
+        None:
+            m[k] = v
+            return v
+
+fn _map_items[K: Hashable + Eq](m: Map[K, int]) -> str:
+    s := ""
+    for k, v in m:
+        s = s + _show(k, v)
+    return s
+
+fn _map_put_ret[K: Hashable + Eq, V](m: Map[K, V], k: K, v: V) -> Map[K, V]:
+    m[k] = v
+    return m
+
+fn _map_del_ret[K: Hashable + Eq, V](m: Map[K, V], k: K) -> Map[K, V]:
+    _ := m.remove(k)
+    return m
+
+fn _shared_ops[K: Hashable + Eq](s: Shared[Map[K, int]], keys: List[K]) -> str:
+    return _ops(keys, fn(k: K, v: int): s.update(fn(m): _map_put_ret(m, k, v)), fn(k: K): s.update(fn(m): _map_del_ret(m, k)), fn(k: K) -> Option[int]: s.get().get(k), fn(k: K) -> bool: s.get().has(k), fn() -> int: s.get().len(), fn(k: K, v: int) -> int: _shared_goi(s, k, v), fn() -> str: _map_items(s.get()))
+
+fn _shared_goi[K: Hashable + Eq](s: Shared[Map[K, int]], k: K, v: int) -> int:
+    match s.get().get(k):
+        Some(x):
+            return x
+        None:
+            s.update(fn(m): _map_put_ret(m, k, v))
+            return v
+
+# The RwShared single-entry writers (see the header).
+fn _rw_put[K: Hashable + Eq, V](b: RwShared[Map[K, V]], k: K, v: V):
+    b.write(fn(m): _map_put_ret(m, k, v))
+
+fn _rw_del[K: Hashable + Eq, V](b: RwShared[Map[K, V]], k: K):
+    b.write(fn(m): _map_del_ret(m, k))
+
+fn _rw_goi[K: Hashable + Eq, V](b: RwShared[Map[K, V]], k: K, v: V) -> V:
+    match b.get_key(k):
+        Some(x):
+            return x
+        None:
+            b.write(fn(m): _map_put_ret(m, k, v))
+            return v
+
+fn _rw_ops[K: Hashable + Eq](b: RwShared[Map[K, int]], keys: List[K]) -> str:
+    return _ops(keys, fn(k: K, v: int): _rw_put(b, k, v), fn(k: K): _rw_del(b, k), fn(k: K) -> Option[int]: b.get_key(k), fn(k: K) -> bool: b.has(k), fn() -> int: b.len(), fn(k: K, v: int) -> int: _rw_goi(b, k, v), fn() -> str: _rw_items(b))
+
+fn _rw_items[K: Hashable + Eq](b: RwShared[Map[K, int]]) -> str:
+    return b.fold_entries("", fn(a, k, v): a + _show(k, v))
+
+fn _cm_ops[K: Hashable + Eq](c: ConcurrentMap[K, int], keys: List[K]) -> str:
+    return _ops(keys, fn(k: K, v: int): c.set(k, v), fn(k: K): c.remove(k), fn(k: K) -> Option[int]: c.get(k), fn(k: K) -> bool: c.contains(k), fn() -> int: c.len(), fn(k: K, v: int) -> int: c.get_or_insert(k, v), fn() -> str: _map_items(c.snapshot()))
+
+# ---- callers ---------------------------------------------------------------------------------------
+fn _child_shared[K: Hashable + Eq](s: Shared[Map[K, int]], keys: List[K], ch: Channel[str]):
+    ch.send(_shared_ops(s, keys))
+
+fn _child_rw[K: Hashable + Eq](b: RwShared[Map[K, int]], keys: List[K], ch: Channel[str]):
+    ch.send(_rw_ops(b, keys))
+
+fn _child_cm[K: Hashable + Eq](c: ConcurrentMap[K, int], keys: List[K], ch: Channel[str]):
+    ch.send(_cm_ops(c, keys))
+
+# The final state after `_ops`: its logged items plus the `goi(keys[5], 55)` insert at the end.
+fn _final[K](want: str, keys: List[K]) -> str:
+    return want.split("|")[0] + _show(keys[5], 55)
+
+# Every holder x caller cell for one key kind. Returns "" when every cell matches the oracle,
+# else one line per mismatching cell.
+fn _grid[K: Hashable + Eq](keys: List[K]) -> str:
+    want := _map_ops(keys)
+    bad := ""
+    # parent
+    s0: Shared[Map[K, int]] = Shared({})
+    b0: RwShared[Map[K, int]] = RwShared({})
+    c0: ConcurrentMap[K, int] = ConcurrentMap(RwShared({}))
+    for got in [_shared_ops(s0, keys), _rw_ops(b0, keys), _cm_ops(c0, keys)]:
+        if got != want:
+            bad = bad + "parent: " + got + " != " + want + "\n"
+    # spawned task: the child runs the ops; the parent then reads the child's writes
+    s1: Shared[Map[K, int]] = Shared({})
+    b1: RwShared[Map[K, int]] = RwShared({})
+    c1: ConcurrentMap[K, int] = ConcurrentMap(RwShared({}))
+    ch := Channel[str](3)
+    parallel:
+        spawn _child_shared(s1, keys, ch)
+        spawn _child_rw(b1, keys, ch)
+        spawn _child_cm(c1, keys, ch)
+    for _ in range(3):
+        got := ch.recv()
+        if got != want:
+            bad = bad + "spawn: " + got + " != " + want + "\n"
+    for seen in [_map_items(s1.get()), _rw_items(b1), _map_items(c1.snapshot())]:
+        if seen != _final(want, keys):
+            bad = bad + "spawn, parent view: " + seen + "\n"
+    # Executor job: same, through submit_result
+    s2: Shared[Map[K, int]] = Shared({})
+    b2: RwShared[Map[K, int]] = RwShared({})
+    c2: ConcurrentMap[K, int] = ConcurrentMap(RwShared({}))
+    ex := Executor()
+    o1 := ex.submit_result(fn(): _shared_ops(s2, keys))
+    o2 := ex.submit_result(fn(): _rw_ops(b2, keys))
+    o3 := ex.submit_result(fn(): _cm_ops(c2, keys))
+    ex.shutdown()
+    for got in [o1.recv(), o2.recv(), o3.recv()]:
+        if got != want:
+            bad = bad + "executor: " + got + " != " + want + "\n"
+    for seen in [_map_items(s2.get()), _rw_items(b2), _map_items(c2.snapshot())]:
+        if seen != _final(want, keys):
+            bad = bad + "executor, parent view: " + seen + "\n"
+    return bad
+
+# ---- memoize ---------------------------------------------------------------------------------------
+fn _tagged[K](calls: AtomicInt, k: K) -> str:
+    calls.add(1)
+    return "v" + str(k)
+
+fn _child_memo[K: Hashable + Eq](m: fn(K) -> str, keys: List[K], ch: Channel[str]):
+    r := recover: _call_all(m, keys)
+    match r:
+        Ok(v): ch.send(v)
+        Err(e): ch.send(e.message())
+
+fn _call_all[K: Hashable + Eq](m: fn(K) -> str, keys: List[K]) -> str:
+    s := ""
+    for k in keys:
+        s = s + m(k) + ";"
+    return s
+
+# Every caller cell for one key kind: the values are right, and `f` runs once per distinct key no
+# matter which task filled the cache.
+fn _memo_grid[K: Hashable + Eq](keys: List[K]) -> str:
+    want := ""
+    for k in keys:
+        want = want + "v" + str(k) + ";"
+    bad := ""
+    c0 := AtomicInt(0)
+    m0 := memoize1(fn(k: K) -> str: _tagged(c0, k))
+    if _call_all(m0, keys) != want or _call_all(m0, keys) != want or c0.load() != keys.len():
+        bad = bad + "parent: calls=" + str(c0.load()) + "\n"
+    c1 := AtomicInt(0)
+    m1 := memoize1(fn(k: K) -> str: _tagged(c1, k))
+    ch := Channel[str](1)
+    parallel:
+        spawn _child_memo(m1, keys, ch)
+    got := ch.recv()
+    if got != want or _call_all(m1, keys) != want or c1.load() != keys.len():
+        bad = bad + "spawn: " + got + " calls=" + str(c1.load()) + "\n"
+    c2 := AtomicInt(0)
+    m2 := memoize1(fn(k: K) -> str: _tagged(c2, k))
+    ex := Executor()
+    o := ex.submit_result(fn(): _call_all(m2, keys))
+    ex.shutdown()
+    got2 := o.recv()
+    if got2 != want or _call_all(m2, keys) != want or c2.load() != keys.len():
+        bad = bad + "executor: " + got2 + " calls=" + str(c2.load()) + "\n"
+    return bad
+
+# ---- the map grid ----------------------------------------------------------------------------------
+test fn shared_map_grid_int_keys():
+    r := _grid([0, 1, 2, 3, 4, 5])
+    assert r == "", r
+
+test fn shared_map_grid_str_keys():
+    r := _grid(["a", "b", "c", "d", "e", "f"])
+    assert r == "", r
+
+test fn shared_map_grid_struct_keys_with_colliding_hash():
+    r := _grid([P(0), P(1), P(2), P(3), P(4), P(5)])
+    assert r == "", r
+
+test fn shared_map_grid_enum_keys():
+    r := _grid([Tag.A, Tag.B(1), Tag.B(2), Tag.B(3), Tag.B(4), Tag.B(5)])
+    assert r == "", r
+
+# ---- wire identity under single-entry writes -------------------------------------------------------
+# Each single-entry write serializes one entry; its ids must not collide with the stored map's, or a
+# whole `get()` ties entry b's inner list to entry a's.
+test fn single_entry_writes_keep_their_own_aliases():
+    b: RwShared[Map[str, List[List[int]]]] = RwShared({})
+    xs := [1]
+    _rw_put(b, "a", [xs, xs])
+    ys := [2]
+    _rw_put(b, "b", [ys, ys])
+    m := b.get()
+    m["a"][0].push(7)
+    assert m["a"][1] == [1, 7], str(m)
+    assert m["b"] == [[2], [2]], str(m)
+
+# A store whose entries alias one list across entries is not piece-self-contained: removing or
+# overwriting the entry that defines the list must not leave the other entry's back-reference dangling.
+test fn remove_and_overwrite_keep_a_cross_entry_alias_alive():
+    xs := [1, 2]
+    m: Map[str, List[int]] = {}
+    m["a"] = xs
+    m["b"] = xs
+    m["c"] = [3]
+    b := RwShared(m)
+    _rw_del(b, "a")
+    match b.get_key("b"):
+        Some(v): assert v == [1, 2], str(v)
+        None: assert false, "b missing after removing a"
+    _rw_put(b, "c", [4])
+    _rw_put(b, "b", [5])
+    want: Map[str, List[int]] = {"b": [5], "c": [4]}
+    assert b.get() == want, str(b.get())
