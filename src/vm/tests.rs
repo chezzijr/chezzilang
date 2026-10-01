@@ -21718,3 +21718,40 @@ fn rwshared_map_set_key_is_not_linear() {
         "40k RwShared.set_key inserts + 40k overwrites took {elapsed:?} (>1s ceiling) -- O(n) per write"
     );
 }
+
+/// TICKET-194 X1: an op that does not wait is not a cancellation point. A job that already returned
+/// 7 must deliver it even when `shutdown_now()` lands before its `out.send(v)` (a send into a buffer
+/// with room never waits). Go and CPython keep a finished job's result.
+#[test]
+fn returned_job_keeps_its_result_across_shutdown_now() {
+    let src = r#"
+import std.concurrency
+lost := 0
+both := 0
+for _ in 0..20:
+    ex := Executor()
+    gate := Channel[int](0)
+    fn job() -> int:
+        v := gate.recv()
+        return v
+    out := Channel[int](1)
+    err := Channel[str](1)
+    ex.submit_outcome(job, out, err)
+    gate.send(7)
+    ex.shutdown_now()
+    got := out.try_recv()
+    bad := err.try_recv()
+    match got:
+        Some(_):
+            match bad:
+                Some(_): both += 1
+                None: pass
+        None: lost += 1
+print("lost={lost} both={both}")
+"#;
+    let out = pmap_both("t194_x1", src);
+    assert_eq!(
+        out, "lost=0 both=0\n",
+        "a returned job's result was cut by shutdown_now"
+    );
+}
