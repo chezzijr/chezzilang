@@ -144,8 +144,8 @@ struct PI:
     x: int
     fn index(self, k: int) -> int:
         return self.x + k
-    fn contains(self, k: int) -> bool:
-        return k == self.x
+    fn contains(self, item: int) -> bool:
+        return item == self.x
 
 struct PT:
     xs: List[int]
