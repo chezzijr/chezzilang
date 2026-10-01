@@ -1747,13 +1747,8 @@ impl Vm {
         self.width_release();
         let r = self.demote_send_block_in_place(&core, &op.p, span);
         self.width_acquire();
-        match op.settle() {
-            crate::vm::core::Settled::Sent(_) => Ok(SendStep::Sent),
-            crate::vm::core::Settled::Closed => {
-                Err(self.err(super::netio::CLOSED_SEND.to_string(), span))
-            }
-            _ => r.map(|()| SendStep::Sent),
-        }
+        self.send_settled(op, span)
+            .unwrap_or_else(|| r.map(|()| SendStep::Sent))
     }
 
     fn demote_send_block_in_place(

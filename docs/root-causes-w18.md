@@ -139,6 +139,11 @@ task, job, nested owner, owner in `shutdown()`} x cleanup {none, stuck defer, fa
 
 ## Family A2 — what may stop a party mid-operation (X1, G1)
 
+**Status (2026-10-01): fixed by TICKET-194.** `Vm::wait_halt` (`block.rs`) is the one cancellation
+check, made only on an op's would-wait path; `ChannelCore::recv_ready`, `Vm::send_settled`,
+`Vm::reentered` and `guard_free_then_take` are the other single sources. Grids:
+`tests/cancellation_point_grid.rs`, `tests/shared_update_contention.rs::seeded_two_box_update_is_fast_at_every_worker_count`.
+
 **X1 fact:** is an op that does not wait a cancellation point. Today the rule is "is the channel
 bounded": `chan_send_step` calls `take_halt` (`netio.rs:1774`) BEFORE `send_commit`, even with room;
 an unbounded send has no checkpoint; a recv with a queued value checks cancel first (`netio.rs:1987`).

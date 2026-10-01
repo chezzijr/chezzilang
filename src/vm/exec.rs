@@ -325,13 +325,29 @@ impl Vm {
 
     /// Run `f` with the native-reentry guard raised (B1). A blocking `recv` reached while the guard
     /// is up cannot park (its caller's loop/recursion state lives on the Rust stack, not in a
-    /// [`Fiber`]), so it faults `deadlock` instead of suspending. Wraps every site that re-enters
-    /// Chezzi code from native Rust.
+    /// [`Fiber`]), so it faults `deadlock` instead of suspending.
+    ///
+    /// `guarded` is the back-edge of a native LOOP: one call per element (list HOFs, the sort-key
+    /// and merge-comparator loops, `Shared`/`RwShared` each/fold, the struct-iterator collect), so it
+    /// runs [`Vm::guarded_checkpoint`] before [`Vm::reentered`]. A native that calls user code once
+    /// uses `reentered` (TICKET-194).
     pub(super) fn guarded<T>(
         &mut self,
         f: impl FnOnce(&mut Self) -> Result<T, RuntimeError>,
     ) -> Result<T, RuntimeError> {
         self.guarded_checkpoint()?;
+        self.reentered(f)
+    }
+
+    /// TICKET-194 — THE re-entry bracket: raises `native_reentry` around `f`, with no cancellation
+    /// checkpoint. A native that calls user code ONCE (an operator or protocol hook, a generator
+    /// resume, `update`/`read`/`write`) enters it here: that call does not wait, so it is not a
+    /// cancellation point (owner decision 1, `docs/root-causes-w18.md`). The callee's own back-edges
+    /// and waits still cut it.
+    pub(super) fn reentered<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<T, RuntimeError>,
+    ) -> Result<T, RuntimeError> {
         self.native_reentry += 1;
         // The guard counter MUST return to its entry value on every exit path, including an unwind:
         // it gates park-vs-demote for all blocking concurrency ops, and a re-entered FFI callback's
@@ -350,16 +366,16 @@ impl Vm {
         }
     }
 
-    /// [`Vm::guarded`], plus: run `f` with [`Vm::walk_base`] set to `base`, the structural depth the
+    /// [`Vm::reentered`], plus: run `f` with [`Vm::walk_base`] set to `base`, the structural depth the
     /// ENCLOSING native walk had already consumed. Every FAULTING `MAX_STRUCTURAL_DEPTH` guard tests
     /// `walk_base + depth` (the two DEGRADING ones — the map/set key-store pair — deliberately do
     /// not; see [`MAX_STRUCTURAL_DEPTH`]), so a chain of nested `eq`/`str` hooks shares ONE 10 000 allowance instead
     /// of each re-entry restarting at 0 — without this, hook-nesting depth × per-hook walk depth is
     /// unbounded and the process dies by host stack overflow (uncatchable, rc=134).
     ///
-    /// The `catch_unwind` is load-bearing, not decoration: `guarded` catches the unwind, decrements
+    /// The `catch_unwind` is load-bearing, not decoration: `reentered` catches the unwind, decrements
     /// `native_reentry`, and **resumes the unwind from inside itself**, so any `self.walk_base =
-    /// saved` written AFTER the `guarded(...)` call would be skipped on a panic. Panics really do
+    /// saved` written AFTER the `reentered(...)` call would be skipped on a panic. Panics really do
     /// traverse this seam — `callback_trampoline`'s `catch_unwind` converts an FFI-callback panic
     /// into a recoverable error, and `run_one_fiber`'s turns a worker panic into `Disp::Finish` and
     /// keeps the shell `Vm` alive for the next fiber. A leaked `walk_base` on a shell would make
@@ -373,7 +389,7 @@ impl Vm {
         f: impl FnOnce(&mut Self) -> Result<T, RuntimeError>,
     ) -> Result<T, RuntimeError> {
         let saved = std::mem::replace(&mut self.walk_base, base);
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.guarded(f)));
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.reentered(f)));
         self.walk_base = saved;
         match r {
             Ok(v) => v,
@@ -419,9 +435,11 @@ impl Vm {
     /// monomorphized at every call site and these rungs would be duplicated into all of them.
     #[inline(never)]
     fn guarded_checkpoint(&mut self) -> Result<(), RuntimeError> {
-        // CANCELLATION CHECKPOINT — a native that re-enters user code drives it from a RUST loop
-        // (`list.map`/`filter`/`fold`, `sort`'s comparator, an operator overload, an `Executor`
-        // handler: `for e in .. { self.guarded(|vm| vm.invoke_value(f, ..))? }`, call.rs). That Rust
+        // CANCELLATION CHECKPOINT — a native LOOP that re-enters user code per element drives it
+        // from a RUST loop (`list.map`/`filter`/`fold`, `sort`'s comparator, an `Executor` handler:
+        // `for e in .. { self.guarded(|vm| vm.invoke_value(f, ..))? }`, call.rs). A single-call
+        // re-entry (an operator or protocol hook, a generator resume, `update`) uses `reentered`
+        // and is not a checkpoint (TICKET-194). That Rust
         // loop emits no `Op::Jump`, so `jump_checked`'s back-edge never fires inside it and a
         // straight-line callback body has no back-edge of its own — a cancelled task would burn every
         // remaining element (with its prints / `Shared` writes / fs writes) to completion. The
@@ -535,7 +553,7 @@ impl Vm {
     /// Resume a generator until its next `yield` (→ `Some(v)`) or until its body ends (→ `None`,
     /// state `Done`). Driven intrinsically by `.next()` (see `do_method_call`). The generator runs in
     /// its own private base-0 context swapped into the live `Vm`; the host context is parked in
-    /// `gen_host_ctx` (GC-rooted) for the duration. Runs `guarded`, so a would-be blocking op inside a
+    /// `gen_host_ctx` (GC-rooted) for the duration. Runs `reentered`, so a would-be blocking op inside a
     /// generator faults `deadlock` rather than parking the host.
     pub(super) fn generator_next(&mut self, h: GcRef, span: Span) -> Result<Value, RuntimeError> {
         // A RE-ENTRANT resume — `.next()` (or a `for`) on a generator that is already running, from
@@ -630,9 +648,9 @@ impl Vm {
             Ok(())
         };
 
-        // Run to the next suspension / end (guarded: no parking inside a generator).
+        // Run to the next suspension / end (re-entered: no parking inside a generator).
         self.gen_yielding = false;
-        let run = push_res.and_then(|()| self.guarded(|s| s.run_until(0)));
+        let run = push_res.and_then(|()| self.reentered(|s| s.run_until(0)));
         let yielded = self.gen_yielding;
         self.gen_yielding = false;
 
@@ -1882,8 +1900,8 @@ impl Vm {
     }
 
     /// TICKET-188 — THE halt predicate: must this party stop now, and why? Every checkpoint (`jump_checked`'s
-    /// loop back-edge, `guarded`'s native-HOF re-entry, the blocking-native offload, `chan_recv_step`,
-    /// `op_wait_poll`, every demote loop, [`Vm::join_eager_jobs`]) asks exactly this, through
+    /// loop back-edge, `guarded`'s native-HOF re-entry, the would-wait path of every blocking op ([`Vm::wait_halt`]),
+    /// every demote loop, [`Vm::join_eager_jobs`]) asks exactly this, through
     /// [`Vm::take_halt`]. It is [`block::halt_of`] over this party's cancel flags and open nurseries: a
     /// cancel, or a recorded fault of a child of a nursery it owns (unless a run-wide exit is pending).
     /// `None` while [`Vm::cancel_suppressed`]: two suppressions, both load-bearing:

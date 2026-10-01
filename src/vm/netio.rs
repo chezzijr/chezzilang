@@ -252,18 +252,43 @@ impl Vm {
     /// pair so a blocking wait does not starve the pool. Faults with a specific message for a
     /// self-held re-entry (a nested `set`/`update`/`write` on the SAME box inside its own closure)
     /// vs. a longer cross-task/cross-box wait-for cycle (e.g. AB-BA).
+    ///
+    /// TICKET-194: a free guard is taken with no cancellation point. Only a guard that would wait
+    /// reaches `wait_halt`. Stage 1 (bounded by `GUARD_DEMOTE_BUDGET`, in place, DEC-016) then waits
+    /// holding no permit (DEC-141), the same order as `guard_wait_block` ([`Vm::guard_free_then_take`]).
     pub(super) fn take_update_guard(
         &mut self,
         key: usize,
         what: &str,
         span: Span,
     ) -> Result<core::UpdateGuard, RuntimeError> {
-        let result =
-            match acquire_update_guard_within(key, self.guard_token, Some(GUARD_DEMOTE_BUDGET)) {
-                Ok(Some(guard)) => Ok(guard),
-                Err(cycle) => Err(cycle),
-                Ok(None) => self.guard_wait_block(key, what, span)?,
-            };
+        let result = match acquire_update_guard_within(
+            key,
+            self.guard_token,
+            Some(std::time::Duration::ZERO),
+        ) {
+            Ok(Some(guard)) => Ok(guard),
+            Err(cycle) => Err(cycle),
+            Ok(None) => {
+                self.wait_halt(span)?;
+                let until = std::time::Instant::now() + GUARD_DEMOTE_BUDGET;
+                self.width_release();
+                let staged = loop {
+                    let left = until.saturating_duration_since(std::time::Instant::now());
+                    match self.guard_free_then_take(key, left) {
+                        Ok(Some(g)) => break Some(Ok(g)),
+                        Err(c) => break Some(Err(c)),
+                        Ok(None) if left.is_zero() => break None,
+                        Ok(None) => {}
+                    }
+                };
+                self.width_acquire();
+                match staged {
+                    Some(r) => r,
+                    None => self.guard_wait_block(key, what, span)?,
+                }
+            }
+        };
         result.map_err(|cycle| match cycle {
             GuardCycle::SelfHeld => self.err(
                 "deadlock: this task already holds the update guard on this Shared box — a \
@@ -278,6 +303,29 @@ impl Vm {
                 span,
             ),
         })
+    }
+
+    /// TICKET-193/194 — THE guard order: wait for the guard to look free holding NO width permit
+    /// (DEC-141), take the permit, then take the guard with a zero budget. The caller holds no
+    /// permit. `Ok(Some)` and `Err` return holding the permit; `Ok(None)` (still held after
+    /// `budget`, or lost the race) returns without it. Stage 1 of [`Vm::take_update_guard`] and
+    /// [`Vm::guard_wait_block`] both call it.
+    fn guard_free_then_take(
+        &mut self,
+        key: usize,
+        budget: std::time::Duration,
+    ) -> Result<Option<core::UpdateGuard>, GuardCycle> {
+        if !core::await_update_guard_free(key, self.guard_token, Some(budget))? {
+            return Ok(None);
+        }
+        self.width_acquire();
+        match acquire_update_guard_within(key, self.guard_token, Some(std::time::Duration::ZERO)) {
+            Ok(None) => {
+                self.width_release();
+                Ok(None)
+            }
+            r => r,
+        }
     }
 
     /// TICKET-063 — the unbounded half of [`Vm::take_update_guard`], reached once the 5 ms bounded
@@ -304,25 +352,10 @@ impl Vm {
             // take the permit, then take the guard without waiting. Taking the guard first parks
             // its OWNER behind permit holders that wait in place for that same guard, so every
             // handoff cost one GUARD_DEMOTE_BUDGET (T=2: 7172 timeouts, 18.9 s).
-            match core::await_update_guard_free(
-                key,
-                self.guard_token,
-                Some(super::DEMOTE_POLL_BACKOFF),
-            ) {
+            match self.guard_free_then_take(key, super::DEMOTE_POLL_BACKOFF) {
+                Ok(Some(g)) => break Ok(Ok(g)),
                 Err(cycle) => break Ok(Err(cycle)),
-                Ok(false) => {}
-                Ok(true) => {
-                    self.width_acquire();
-                    match acquire_update_guard_within(
-                        key,
-                        self.guard_token,
-                        Some(std::time::Duration::ZERO),
-                    ) {
-                        Ok(Some(g)) => break Ok(Ok(g)),
-                        Err(cycle) => break Ok(Err(cycle)),
-                        Ok(None) => self.width_release(),
-                    }
-                }
+                Ok(None) => {}
             }
             if let Err(e) = self.block_halt_check(super::DEADLOCK_MSG, span) {
                 break Err(e);
@@ -1518,11 +1551,7 @@ impl Vm {
         // re-injects a poller-parked fiber on cancel and the rewound op re-runs here — without this
         // check it would would-block and re-park forever (the every-instruction check that used to
         // kill it at the dispatch loop top is gone; see `run_until`), wedging the nursery.
-        if self.native_reentry == 0
-            && let Some(e) = self.take_halt(span)
-        {
-            return Err(e);
-        }
+        self.wait_halt(span)?;
         if self.block_mode(WaitSpec::Socket) == BlockMode::Park {
             // The `in_flight` guard: at most one op may be parked on a socket at a time. A second
             // concurrent op on a shared socket (`Arc`) faults rather than overwrite the registry entry
@@ -1629,28 +1658,22 @@ impl Vm {
                 // `Option`: `Some(v)` if queued, `None` if empty.
                 self.arity_err("try_recv", args, 0, span)?;
                 let core = self.channel_core(h);
-                let popped = core.q.lock().unwrap().pop();
-                if popped.is_some() {
-                    self.wake_senders(h); // a real pop freed a slot — wake a parked bounded sender
-                }
                 // A `timer(ms)` channel reports ready (`Some(true)`) once its deadline has passed, even
                 // with nothing queued — the level-triggered, non-blocking poll (used by `wait`'s
                 // source-order scan and the `else` arm). `--parallel` may also have a real `true`
                 // queued by the background send; either way `Some(true)`.
                 // A tripped latch (`trip()`) reports ready forever, like a passed timer deadline.
-                let popped = popped.or_else(|| {
-                    if core.done_latch.load(Ordering::Relaxed) {
-                        return Some(WireValue::Bool(true));
+                let ready = core.recv_ready(&mut core.q.lock().unwrap());
+                let got = match ready {
+                    core::RecvReady::Value(w) => {
+                        self.wake_senders(h); // a real pop freed a slot — wake a parked bounded sender
+                        Some(self.from_wire(w))
                     }
-                    core.timer
-                        .filter(|d| std::time::Instant::now() >= *d)
-                        .map(|_| WireValue::Bool(true))
-                });
-                Ok(match popped {
-                    Some(w) => {
-                        let v = self.from_wire(w);
-                        self.alloc_enum("Option", "Some", vec![v])
-                    }
+                    core::RecvReady::Fired => Some(Value::bool(true)),
+                    core::RecvReady::Closed | core::RecvReady::Wait => None,
+                };
+                Ok(match got {
+                    Some(v) => self.alloc_enum("Option", "Some", vec![v]),
                     None => self.alloc_enum("Option", "None", vec![]),
                 })
             }
@@ -1754,10 +1777,8 @@ impl Vm {
                 self.park_send(h, orig);
                 return Ok(SendStep::Parked);
             }
-            match op.settle() {
-                Settled::Sent(_) => return Ok(SendStep::Sent),
-                Settled::Closed => return Err(self.err(CLOSED_SEND.to_string(), span)),
-                Settled::Cancelled | Settled::Got(..) => {}
+            if let Some(r) = self.send_settled(op, span) {
+                return r;
             }
         }
         if core.cap.is_none() {
@@ -1767,14 +1788,6 @@ impl Vm {
                 _ => Ok(SendStep::Sent),
             };
         }
-        // A fiber woken by `cancel_drain` (its scope faulted) must fault here rather than re-park
-        // (mirrors `chan_recv_step`'s checkpoint). `native_reentry == 0` gates it exactly as the park
-        // gate does — inside a callback the host stack can't be unwound.
-        if self.native_reentry == 0
-            && let Some(e) = self.take_halt(span)
-        {
-            return Err(e);
-        }
         // The table decides how this send blocks; a `Refuse` context publishes no offer.
         let mode = self.block_mode(WaitSpec::Send);
         let p = (mode != BlockMode::Refuse).then(Pending::new);
@@ -1782,11 +1795,17 @@ impl Vm {
             SendOutcome::Sent => return Ok(SendStep::Sent),
             SendOutcome::Closed => return Err(self.err(CLOSED_SEND.to_string(), span)),
             SendOutcome::Full => {
+                self.wait_halt(span)?;
                 return Err(self.err(send_deadlock_msg(core.cap).to_string(), span));
             }
             SendOutcome::Offered => {}
         }
         let op = PendingOp::new(p.unwrap(), vec![(Arc::clone(&core), 0, true)]);
+        // A send with room or a waiting receiver committed above and is never cut. A halt here
+        // withdraws the offer, unless a receiver already took it (DEC-185).
+        if let Err(e) = self.wait_halt(span) {
+            return self.send_settled(op, span).unwrap_or(Err(e));
+        }
         // An `Offered` send wakes no parked fiber: every parked cap-0 receiver holds a live slot,
         // published in the same `core.q` hold as its "not ready" check, so the failed `give` proves
         // no parked fiber can take this offer. Only a party blocking in place (or demoted) re-checks
@@ -1821,22 +1840,31 @@ impl Vm {
             FULL_SEND_DEADLOCK
         };
         let p = Arc::clone(&op.p);
+        let mut r = Ok(());
         while p.is_queued() {
             let party = self.block_party_guard(quiesce::PartyWait::Send(Arc::clone(&p)));
-            let r = self.block_wait_tick(core, msg, span, |_| !p.is_queued());
+            r = self.block_wait_tick(core, msg, span, |_| !p.is_queued());
             drop(party);
-            if let Err(e) = r {
-                // A deadline/cancel/exit/deadlock fault unwinds, unless a receiver already took
-                // the value: then the `send` happened.
-                return match op.settle() {
-                    Settled::Sent(_) => Ok(SendStep::Sent),
-                    _ => Err(e),
-                };
+            if r.is_err() {
+                break;
             }
         }
+        self.send_settled(op, span)
+            .unwrap_or_else(|| r.map(|()| SendStep::Sent))
+    }
+
+    /// TICKET-194 — THE mapping from a send's settled offer to its result. A taken offer means the
+    /// `send` happened; a closed one faults `CLOSED_SEND` (Go: `send on closed channel`). `None`:
+    /// the offer was withdrawn untaken, so the caller's own outcome (a halt, a re-poll) stands.
+    pub(super) fn send_settled(
+        &self,
+        op: PendingOp,
+        span: Span,
+    ) -> Option<Result<SendStep, RuntimeError>> {
         match op.settle() {
-            Settled::Sent(_) => Ok(SendStep::Sent),
-            _ => Err(self.err(CLOSED_SEND.to_string(), span)),
+            Settled::Sent(_) => Some(Ok(SendStep::Sent)),
+            Settled::Closed => Some(Err(self.err(CLOSED_SEND.to_string(), span))),
+            Settled::Cancelled | Settled::Got(..) => None,
         }
     }
 
@@ -1978,43 +2006,24 @@ impl Vm {
         if self.deferring == 0 {
             self.deadline_halt(span)?;
         }
-        // CANCELLATION CHECKPOINT — unified here rather than duplicated (it replaces the two
-        // `mn`-gated checks that used to sit inside the timer and snapshot-park branches). At a `recv`
-        // checkpoint CANCEL WINS over a queued value, a tripped done-latch and a fired timer.
-        // `native_reentry == 0` mirrors the park gate: inside a native callback the caller's Rust-stack
-        // state cannot be unwound here.
-        if self.native_reentry == 0
-            && let Some(e) = self.take_halt(span)
-        {
-            return Err(e);
+        // TICKET-194 — a receive with a value, a tripped latch, a fired timer or a close ready does
+        // not wait, so it is not a cancellation point (owner decision 1): `recv_ready` decides what
+        // it gets, and only a receive that would wait reaches `wait_halt`.
+        let core = self.channel_core(h);
+        let ready = core.recv_ready(&mut core.q.lock().unwrap());
+        match ready {
+            core::RecvReady::Value(w) => return Ok(RecvStep::Got(w)),
+            core::RecvReady::Fired => return Ok(RecvStep::Got(WireValue::Bool(true))),
+            core::RecvReady::Closed => return Ok(RecvStep::ClosedEmpty),
+            core::RecvReady::Wait => {}
         }
-        // A tripped latch (`trip()`) delivers `true` immediately and forever, on every engine — a
-        // pending queued value (if any) still wins first. Checked before the timer/park logic so a
-        // `done().recv()` on a manually-cancelled token never parks.
-        {
-            let core = self.channel_core(h);
-            if core.done_latch.load(Ordering::Relaxed) {
-                if let Some(w) = core.q.lock().unwrap().pop() {
-                    return Ok(RecvStep::Got(w));
-                }
-                return Ok(RecvStep::Got(WireValue::Bool(true)));
-            }
-        }
+        self.wait_halt(span)?;
         // A `timer(ms)` channel delivers `true` once its deadline passes. Handled here (uniformly,
         // before the ordinary park logic) so it works regardless of the engine the receiver runs in
         // and where the timer was created. Delivery is scheduled at RECV time, in the recv's own
         // scheduler — not at construction (a timer made at the top level can be recv'd in a child).
         {
-            let core = self.channel_core(h);
             if let Some(deadline) = core.timer {
-                // A prior park's timer `send` may already have delivered — consume it first.
-                if let Some(w) = core.q.lock().unwrap().pop() {
-                    return Ok(RecvStep::Got(w));
-                }
-                let now = std::time::Instant::now();
-                if now >= deadline {
-                    return Ok(RecvStep::Got(WireValue::Bool(true)));
-                }
                 if self.block_mode(WaitSpec::Timer) == BlockMode::Park {
                     // W7-17 — the `--timeout` checkpoint sits HERE, at the park, not at the top of this
                     // fn: everything above settles without blocking (a queued value, a tripped latch, an
@@ -2027,7 +2036,7 @@ impl Vm {
                     // --parallel, top level: schedule a one-shot background `send(true)` at the deadline
                     // (in THIS scheduler) and park. The pending timer is accounted `inflight` so it
                     // vetoes the deadlock predicate while the lone fiber waits; the job un-accounts it.
-                    // (Cancel was checked at the top of this fn — the engine-agnostic checkpoint.)
+                    // (Cancel was checked by `wait_halt` above — the engine-agnostic checkpoint.)
                     let sched = self.mn.clone().unwrap();
                     let key = self.channel_core_ptr(h);
                     let core_job = Arc::clone(&core);
@@ -2077,32 +2086,14 @@ impl Vm {
             }
         }
         // M:N snapshot-park path (empty-open parks the fiber; the worker loop files it into the wait
-        // set). A fiber woken only to be cancelled must not re-park — the top-of-fn checkpoint above
-        // already returned in that case (on BOTH engines).
+        // set). A fiber woken only to be cancelled must not re-park — `wait_halt` above already
+        // returned in that case. `MnSched::park` re-checks the queue, close, latch and cancel under
+        // the sched lock, so no pre-park pop is needed here; an in-place waiter re-reads
+        // `recv_ready` at `block_recv`'s loop head.
         let recv_mode = self.block_mode(WaitSpec::Recv);
         if recv_mode == BlockMode::Park {
-            let core = self.channel_core(h);
-            let mut g = core.q.lock().unwrap();
-            if let Some(w) = g.pop() {
-                return Ok(RecvStep::Got(w));
-            }
-            if g.closed {
-                return Ok(RecvStep::ClosedEmpty);
-            }
-            drop(g);
             self.park_recv(h);
             return Ok(RecvStep::Parked);
-        }
-        // Cooperative / no-scheduler path. Pop + closed read are atomic under one lock.
-        let core = self.channel_core(h);
-        let mut g = core.q.lock().unwrap();
-        if let Some(w) = g.pop() {
-            return Ok(RecvStep::Got(w));
-        }
-        let closed = g.closed;
-        drop(g);
-        if closed {
-            return Ok(RecvStep::ClosedEmpty);
         }
         // An eagerly-dispatched `Executor` job has no scheduler, and neither does the top-level `main`
         // thread — but "no scheduler" has not meant "nobody can send" since eager execution put
@@ -2503,15 +2494,11 @@ impl Vm {
             let p = Pending::new();
             {
                 let mut q = core.q.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(w) = q.pop() {
-                    return Ok(RecvStep::Got(w));
-                }
-                let closed = q.closed;
-                if core.done_latch.load(Ordering::Relaxed) {
-                    return Ok(RecvStep::Got(WireValue::Bool(true)));
-                }
-                if closed {
-                    return Ok(RecvStep::ClosedEmpty);
+                match core.recv_ready(&mut q) {
+                    core::RecvReady::Value(w) => return Ok(RecvStep::Got(w)),
+                    core::RecvReady::Fired => return Ok(RecvStep::Got(WireValue::Bool(true))),
+                    core::RecvReady::Closed => return Ok(RecvStep::ClosedEmpty),
+                    core::RecvReady::Wait => {}
                 }
                 if core.cap == Some(0) {
                     q.slot(&p, 0);
@@ -2587,13 +2574,6 @@ impl Vm {
         if self.deferring == 0 {
             self.deadline_halt(span)?;
         }
-        // CANCELLATION CHECKPOINT — engine-agnostic, mirroring `chan_recv_step`: cancel wins over a
-        // ready arm / a fired timer.
-        if self.native_reentry == 0
-            && let Some(e) = self.take_halt(span)
-        {
-            return Err(e);
-        }
         let mut soonest: Option<(usize, std::time::Instant)> = None;
         let mut all_closed = true;
         let mut off = 0usize;
@@ -2623,34 +2603,27 @@ impl Vm {
                     }
                 }
             }
-            let (popped, closed) = {
-                let mut g = core.q.lock().unwrap();
-                (g.pop(), g.closed)
-            };
-            if let Some(w) = popped {
-                self.wake_senders(h); // a `wait:` arm freed a slot — wake a parked bounded sender
-                let v = self.from_wire(w);
-                self.take_wait_arm(base, v, meta.arm_targets[i]);
-                return Ok(());
-            }
-            // A tripped latch (`trip()`) is ready like a fired timer — take the arm with `true`.
-            if core.done_latch.load(Ordering::Relaxed) {
-                self.take_wait_arm(base, Value::bool(true), meta.arm_targets[i]);
-                return Ok(());
-            }
-            if let Some(deadline) = core.timer {
-                // A timer channel is never closed and always eventually ready: fired now → take it;
-                // otherwise a live waiter whose deadline we may sleep to below.
-                if std::time::Instant::now() >= deadline {
+            let ready = core.recv_ready(&mut core.q.lock().unwrap());
+            match ready {
+                core::RecvReady::Value(w) => {
+                    self.wake_senders(h); // a `wait:` arm freed a slot — wake a parked bounded sender
+                    let v = self.from_wire(w);
+                    self.take_wait_arm(base, v, meta.arm_targets[i]);
+                    return Ok(());
+                }
+                core::RecvReady::Fired => {
                     self.take_wait_arm(base, Value::bool(true), meta.arm_targets[i]);
                     return Ok(());
                 }
-                all_closed = false;
-                if soonest.is_none_or(|(_, d)| deadline < d) {
-                    soonest = Some((i, deadline));
+                core::RecvReady::Closed => {}
+                core::RecvReady::Wait => {
+                    all_closed = false;
+                    if let Some(deadline) = core.timer
+                        && soonest.is_none_or(|(_, d)| deadline < d)
+                    {
+                        soonest = Some((i, deadline));
+                    }
                 }
-            } else if !closed {
-                all_closed = false;
             }
         }
         // Nothing ready → the non-blocking `else` fallback.
@@ -2659,6 +2632,8 @@ impl Vm {
             self.frames.last_mut().unwrap().ip = t;
             return Ok(());
         }
+        // TICKET-194 — a ready arm or an `else` never waits, so neither is a cancellation point.
+        self.wait_halt(span)?;
         // Every arm closed+empty, no `else`, no timer → distinct fault. (A live timer arm set
         // `all_closed = false` above, so this fires only when there is genuinely nothing to wait on.)
         if all_closed {
@@ -3011,7 +2986,7 @@ impl Vm {
                 let w = core.v.lock().unwrap().clone();
                 let cur = self.from_wire(w);
                 self.push(Value::obj(h));
-                let next = self.guarded(|vm| vm.invoke_value(f, vec![cur], span));
+                let next = self.reentered(|vm| vm.invoke_value(f, vec![cur], span));
                 self.pop();
                 let next = next?;
                 let stored = self.to_wire_crossable(next, span)?;
@@ -3311,7 +3286,7 @@ impl Vm {
                 let w = core.v.read().unwrap().clone();
                 let cur = self.from_wire(w);
                 self.push(Value::obj(h));
-                let result = self.guarded(|vm| vm.invoke_value(f, vec![cur], span));
+                let result = self.reentered(|vm| vm.invoke_value(f, vec![cur], span));
                 self.pop();
                 result
             }
@@ -3343,7 +3318,7 @@ impl Vm {
                 let w = core.v.write().unwrap().clone();
                 let cur = self.from_wire(w);
                 self.push(Value::obj(h));
-                let next = self.guarded(|vm| vm.invoke_value(f, vec![cur], span));
+                let next = self.reentered(|vm| vm.invoke_value(f, vec![cur], span));
                 self.pop();
                 let next = next?;
                 // TICKET-154: same rule as every other cross-heap store; the read views resolve aliases on the rebuild side.

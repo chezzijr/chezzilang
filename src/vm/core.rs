@@ -364,6 +364,37 @@ struct Slot {
     got: Option<(usize, WireValue)>,
 }
 
+/// TICKET-194 — what a `recv` on a channel gets WITHOUT waiting ([`ChannelCore::recv_ready`]).
+pub enum RecvReady {
+    /// A buffered value or a live sender's offer, taken.
+    Value(WireValue),
+    /// A tripped `done()` latch or a fired `timer(ms)`: the receive yields `true`.
+    Fired,
+    /// Closed and drained.
+    Closed,
+    /// Nothing is ready: the receive would wait (an unfired timer included).
+    Wait,
+}
+
+impl ChannelCore {
+    /// TICKET-194 — THE ready decision of a channel receive, made in the caller's `core.q` hold `q`:
+    /// a value > a tripped latch > a fired timer > closed.
+    pub fn recv_ready(&self, q: &mut ChanState) -> RecvReady {
+        if let Some(w) = q.pop() {
+            return RecvReady::Value(w);
+        }
+        if self.done_latch.load(Ordering::Relaxed)
+            || self.timer.is_some_and(|d| std::time::Instant::now() >= d)
+        {
+            return RecvReady::Fired;
+        }
+        if q.closed {
+            return RecvReady::Closed;
+        }
+        RecvReady::Wait
+    }
+}
+
 /// What one `send` attempt did ([`ChanState::send`]).
 pub enum SendOutcome {
     /// The value moved: into the buffer, or into a receiver's slot.

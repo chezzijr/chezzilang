@@ -323,11 +323,8 @@ impl Vm {
         // teardown for its full duration, and then keep executing the straight-line statements after
         // it. On an M:N worker it also stops a post-cancel `sleep_ms` from delaying the teardown by
         // the full sleep.
-        if self.native_reentry == 0
-            && kind.blocks()
-            && let Some(e) = self.take_halt(span)
-        {
-            return Err(e);
+        if kind.blocks() {
+            self.wait_halt(span)?;
         }
         if WaitSpec::of_native(kind).is_some_and(|s| matches!(self.block_mode(s), BlockMode::Park))
             && let Some(nargs) = self.extract_native_args(&args)

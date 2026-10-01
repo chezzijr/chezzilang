@@ -102,6 +102,10 @@
   arity, and a protocol call never borrows an implementor's default (Go and Rust have none through
   an interface). A table keyed by METHOD NAME across every struct is never a substitute for the
   receiver's own declaration.
+- **A remaining, bounded exception in a Decisions section is a cell to measure** (wave 18,
+  TICKET-194). TICKET-193 called its guard's first 5 ms wait "bounded" and left it; seeded mode forced
+  that wait on about 25% of updates and the two-box program took 9 s. Put every named exception in
+  the grid and measure it under the seeded scheduler before you accept it.
 - **Stdlib gaps are deferred on verified cost, never on "nobody asked."** A reference-language idiom
   *is* the need. `Reader.lines()` was deferred on a claimed cost ("needs a new lazy Obj variant") that
   was false — a generator over `read_line()` streams lazily by construction — and building it surfaced

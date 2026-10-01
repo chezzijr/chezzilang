@@ -660,10 +660,10 @@ impl Vm {
             .get(method)
             .ok_or_else(|| self.err(format!("struct '{name}' has no method '{method}'"), span))?;
         let home = self.module_objs[def.module_idx];
-        // Guarded (B1): `index`/`slice`/`set_index` overloads run from native opcode handlers whose
+        // Re-entered (B1): `index`/`slice`/`set_index` overloads run from native opcode handlers whose
         // operand state is on the host stack, so a blocking `recv` inside one cannot park — it faults
         // `deadlock` instead of suspending (matches `struct_arith`/`compare`/`hash`).
-        self.guarded(|vm| vm.run_proto(proto, home, None, args, true, false, span))
+        self.reentered(|vm| vm.run_proto(proto, home, None, args, true, false, span))
     }
 
     pub(super) fn get_index(&mut self, span: Span) -> Result<(), RuntimeError> {
@@ -1311,7 +1311,7 @@ impl Vm {
         // Root the receiver across the call (guarded GC).
         self.push(v);
         let cursor =
-            self.guarded(|vm| vm.run_proto(proto, home, None, vec![v], true, false, span))?;
+            self.reentered(|vm| vm.run_proto(proto, home, None, vec![v], true, false, span))?;
         self.pop(); // unroot receiver
         Ok(cursor)
     }

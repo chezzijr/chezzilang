@@ -742,7 +742,10 @@ re-enter `get`/`read` — or `write`/`set` on a **different** box.
 > exhaust a 32 768-task ceiling and never finish (TICKET-016). A waiter that demoted waits for the
 > guard to come FREE holding no width permit, then takes the permit, then the guard. Taking the guard
 > first made 6 tasks x 2000 `update`s take 16-22 s at `--threads=2`, one 5 ms timeout per handoff
-> (TICKET-193).
+> (TICKET-193). The 5 ms in-place stage waits the same way, holding no width permit (TICKET-194): a
+> waiter that held its permit sat out the full 5 ms whenever the holder was preempted inside its
+> closure, and the seeded two-box program (`CHEZZI_SCHED_SEED=1`, `--threads=1`) took about 9 s; it
+> now runs under the 3 s debug `GRID_CEILING` (`tests/shared_update_contention.rs`).
 
 `RwShared` vs `Shared`: reach for `RwShared` when reads vastly outnumber writes (concurrent readers
 matter); reach for `Shared` when access is write-heavy or you don't need concurrent reads (one lock is
@@ -1115,7 +1118,20 @@ fn serve(tok: Token, io: Channel[str]):
 > join, `Executor.shutdown()` / `shutdown_now()`): a cancelled owner never runs the code after its join
 > — the join itself raises the cancel (asyncio never runs code after a cancelled `async with`). The
 > join checks the cancel the owner holds from an ENCLOSING scope, never its own nursery's fault, and
-> never inside a `defer`. It is *not* observed at every instruction. Two consequences, both intended
+> never inside a `defer`. It is *not* observed at every instruction.
+>
+> **A blocking op is a cancellation point only when it is about to WAIT** (TICKET-194). A send with
+> room, a recv with a value ready, a ready `wait:` arm, an `else`, a `try_*` op, and a
+> `Shared.update`/`RwShared.read`/`write` whose guard is free are never cut: the op completes and the
+> task is cut at its next wait or back-edge. A function that returned never loses its result to a
+> cancel (Go and CPython keep a finished job's result too). An operator or protocol hook (`+`, `<`,
+> `==`, `[]`, `in`, `hash`, `str`, `iter()`) and a generator `.next()` are calls, not checkpoints. A
+> native loop that calls user code per element (`map`, `filter`, `fold`, `sort_by`, `sort_by_key`,
+> `Shared`/`RwShared` each/fold) is checked once per element. A container walk that calls a hook per
+> element (a sort of `compare` structs, `xs == ys` over `eq` structs, a `Map` build by `hash`, `str`
+> of a list) is one op and is not checked inside; the hook body's own loops still are.
+>
+> Two consequences of checkpoint delivery, both intended
 > (this is Trio-style structured concurrency; Go never preemptively kills a goroutine at all):
 >
 > - **A STARTED task always runs its straight-line prologue**, so a `defer` it registers is registered
@@ -1173,8 +1189,9 @@ fn serve(tok: Token, io: Channel[str]):
 > on a `recv`/`wait:`, while parked on a socket, or while parked when a *sibling*'s fault tore the
 > nursery down. A cancelled task first cancels and joins every `parallel:` it is inside, so its own
 > children finish before its `defer`s run (TICKET-135, W14-39). `defer` is the language's only cleanup
-> mechanism (no destructors, no `with`), so this is the guarantee cleanup rests on. At a `recv`/`wait:`
-> checkpoint **cancel wins** over a queued value, a tripped `done()` latch and a fired timer.
+> mechanism (no destructors, no `with`), so this is the guarantee cleanup rests on. At a `recv`/`wait:`,
+> a queued value, a tripped `done()` latch and a fired timer win over a cancel; the task is cut at its
+> next wait or back-edge (TICKET-194).
 >
 > Exactly one thing deliberately skips a `defer`: **`std.os.exit`**, a hard halt by design. (An
 > `os.exit` executed *by* a cancelled task's `defer` is honored — it beats the sibling's fault and sets

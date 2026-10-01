@@ -596,7 +596,7 @@ impl Vm {
             // M22: unary `-` on a struct/enum dispatches to its `neg(self) -> Self` method
             // (the `Neg` protocol). Mirrors `struct_arith`, but self-only (no `other`).
             let (proto, home) = self.resolve_overload_method(v, "neg", span)?;
-            self.guarded(|vm| vm.run_proto(proto, home, None, vec![v], true, false, span))
+            self.reentered(|vm| vm.run_proto(proto, home, None, vec![v], true, false, span))
         } else {
             Err(self.err(format!("cannot apply Neg to {}", self.type_name(v)), span))
         }
@@ -761,7 +761,7 @@ impl Vm {
             _ => unreachable!("struct_arith only handles + - * / %"),
         };
         let (proto, home) = self.resolve_overload_method(l, method, span)?;
-        self.guarded(|vm| vm.run_proto(proto, home, None, vec![l, r], true, false, span))
+        self.reentered(|vm| vm.run_proto(proto, home, None, vec![l, r], true, false, span))
     }
 
     /// Do `ha` and `hb` both hold a newtype with the SAME runtime key? (Drives same-type operator
@@ -1019,7 +1019,7 @@ impl Vm {
             && matches!(self.heap.get(h), Obj::Struct { .. } | Obj::Enum { .. })
         {
             let (proto, home) = self.resolve_overload_method(container, "contains", span)?;
-            let res = self.guarded(|vm| {
+            let res = self.reentered(|vm| {
                 vm.run_proto(
                     proto,
                     home,
@@ -1233,7 +1233,7 @@ impl Vm {
     ) -> Result<std::cmp::Ordering, RuntimeError> {
         let (proto, home) = self.resolve_overload_method(l, "compare", span)?;
         let res =
-            self.guarded(|vm| vm.run_proto(proto, home, None, vec![l, r], true, false, span))?;
+            self.reentered(|vm| vm.run_proto(proto, home, None, vec![l, r], true, false, span))?;
         match self.int_val(res) {
             Some(n) => Ok(n.cmp(&0)),
             None => Err(self.err(
@@ -1518,7 +1518,8 @@ impl Vm {
             )
         })?;
         let home = self.module_objs[def.module_idx];
-        let res = self.guarded(|vm| vm.run_proto(proto, home, None, vec![v], true, false, span))?;
+        let res =
+            self.reentered(|vm| vm.run_proto(proto, home, None, vec![v], true, false, span))?;
         match self.int_val(res) {
             Some(n) => Ok(n as u64),
             None => Err(self.err(
@@ -1532,7 +1533,8 @@ impl Vm {
     /// [`resolve_overload_method`], mirroring [`struct_hash`] (re-entrant via `run_proto`).
     pub(super) fn enum_hash(&mut self, v: Value, span: Span) -> Result<u64, RuntimeError> {
         let (proto, home) = self.resolve_overload_method(v, "hash", span)?;
-        let res = self.guarded(|vm| vm.run_proto(proto, home, None, vec![v], true, false, span))?;
+        let res =
+            self.reentered(|vm| vm.run_proto(proto, home, None, vec![v], true, false, span))?;
         match self.int_val(res) {
             Some(n) => Ok(n as u64),
             None => Err(self.err(
@@ -1546,7 +1548,8 @@ impl Vm {
     /// re-entrant via `run_proto`). The checker guarantees a key-used newtype defines `hash`.
     pub(super) fn newtype_hash(&mut self, v: Value, span: Span) -> Result<u64, RuntimeError> {
         let (proto, home) = self.resolve_overload_method(v, "hash", span)?;
-        let res = self.guarded(|vm| vm.run_proto(proto, home, None, vec![v], true, false, span))?;
+        let res =
+            self.reentered(|vm| vm.run_proto(proto, home, None, vec![v], true, false, span))?;
         match self.int_val(res) {
             Some(n) => Ok(n as u64),
             None => Err(self.err(
