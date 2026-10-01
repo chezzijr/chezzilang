@@ -1121,7 +1121,7 @@ fn serve(tok: Token, io: Channel[str]):
 > never inside a `defer`. It is *not* observed at every instruction.
 >
 > **A blocking op is a cancellation point only when it is about to WAIT** (TICKET-194). A send with
-> room, a recv with a value ready, a ready `wait:` arm, an `else`, a `try_*` op, and a
+> room, a recv with a value ready, a ready `wait:` arm, an `else`, a `try_*` op, a socket op an `Executor` job refuses (`would block`), and a
 > `Shared.update`/`RwShared.read`/`write` whose guard is free are never cut: the op completes and the
 > task is cut at its next wait or back-edge. A function that returned never loses its result to a
 > cancel (Go and CPython keep a finished job's result too). An operator or protocol hook (`+`, `<`,

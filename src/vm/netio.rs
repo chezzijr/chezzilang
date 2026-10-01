@@ -873,14 +873,11 @@ impl Vm {
                     closed: Arc::clone(&core.closed),
                     deadline,
                 };
-                if self.park_on_fd(h, args, target, span)? {
-                    return Ok(Value::nil()); // parked (sentinel)
+                if let Some(v) = self.park_on_fd(h, args, target, "read_bytes", span)? {
+                    return Ok(v); // parked (sentinel), or refused (`would block`)
                 }
-                // No fiber to park: block the thread in place only where that starves nobody
-                // (the `Socket` row of `block::mode`) — else the pre-existing loud error.
-                if matches!(self.block_mode(WaitSpec::Socket), BlockMode::Refuse) {
-                    return Ok(self.sock_err(sock_would_block_msg("read_bytes")));
-                }
+                // No fiber to park: block the thread in place, where that starves nobody
+                // (the `Socket` row of `block::mode`; `park_on_fd` returned the refusal elsewhere).
                 self.demote_block_socket(fd, poller::Interest::Read, deadline, span, move |vm| {
                     let mut b = vec![0u8; n];
                     let r = {
@@ -1067,18 +1064,16 @@ impl Vm {
                         closed: Arc::clone(&core.closed),
                         deadline,
                     };
-                    if self.park_on_fd(h, args, target, span)? {
-                        return Ok(Value::nil()); // parked (sentinel; `poll_park` gates the push)
+                    if let Some(v) = self.park_on_fd(h, args, target, "read", span)? {
+                        return Ok(v); // parked (sentinel; `poll_park` gates the push), or refused
                     }
                     // No netpoller-park: inside a native callback on M:N (`native_reentry > 0`, the
                     // Rust-stack `map`/sort loop can't snapshot-park) → DEMOTE + backoff-poll the
                     // non-blocking read in place (#3 socket half); top-level `main` on the default
                     // engine blocks in place too (Go-identical). Anywhere else the calling thread is
-                    // shared, so blocking it starves the peer that would make the fd ready → fail loud
-                    // (a `Refuse` cell of the `Socket` row of `block::mode`).
-                    if matches!(self.block_mode(WaitSpec::Socket), BlockMode::Refuse) {
-                        return Ok(self.sock_err(sock_would_block_msg("read")));
-                    }
+                    // shared, so blocking it starves the peer that would make the fd ready, and
+                    // `park_on_fd` already returned the loud refusal (a `Refuse` cell of the `Socket`
+                    // row of `block::mode`).
                     return self.demote_block_socket(
                         fd,
                         poller::Interest::Read,
@@ -1220,14 +1215,11 @@ impl Vm {
                     closed: Arc::clone(&core.closed),
                     deadline,
                 };
-                if self.park_on_fd(h, args, target, span)? {
-                    return Ok(Value::nil());
+                if let Some(v) = self.park_on_fd(h, args, target, "write", span)? {
+                    return Ok(v);
                 }
                 // In-callback on M:N (or top-level `main` on the default engine) → demote +
                 // backoff-poll the non-blocking write in place (#3 socket half).
-                if matches!(self.block_mode(WaitSpec::Socket), BlockMode::Refuse) {
-                    return Ok(self.sock_err(sock_would_block_msg("write")));
-                }
                 let mut sent = sent;
                 self.demote_block_socket(fd, poller::Interest::Write, deadline, span, move |vm| {
                     let r = {
@@ -1354,14 +1346,11 @@ impl Vm {
                     closed: Arc::clone(&core.closed),
                     deadline,
                 };
-                if self.park_on_fd(h, args, target, span)? {
-                    return Ok(Value::nil());
+                if let Some(v) = self.park_on_fd(h, args, target, "accept", span)? {
+                    return Ok(v);
                 }
                 // In-callback on M:N (or top-level `main` on the default engine) → demote +
                 // backoff-poll the non-blocking accept in place (#3 socket half).
-                if matches!(self.block_mode(WaitSpec::Socket), BlockMode::Refuse) {
-                    return Ok(self.sock_err(sock_would_block_msg("accept")));
-                }
                 self.demote_block_socket(fd, poller::Interest::Read, deadline, span, move |vm| {
                     let r = {
                         let guard = core.listener.lock().unwrap_or_else(|e| e.into_inner());
@@ -1491,10 +1480,10 @@ impl Vm {
         }
     }
 
-    /// D6 — the M:N park half shared by every would-block socket op. Returns `Ok(true)` if the fiber
-    /// was parked on the netpoller; `Ok(false)` when this Vm is not an M:N worker shell (top-level
-    /// `main`, an eager `Executor` job) or is inside a native callback whose Rust-stack
-    /// state can't be parked. The caller then asks `block_mode(WaitSpec::Socket)`: on the two
+    /// D6 — the would-wait decision shared by every would-block socket op (`op` names it). Returns
+    /// `Ok(Some(v))` when the op settles here: `v` is the parked sentinel (the fiber was parked on
+    /// the netpoller) or, in a `Refuse` cell of the `Socket` row of `block::mode`, the op's
+    /// `would block` `Err` value. Returns `Ok(None)` when the caller must block in place: on the two
     /// contexts that own their whole thread (an M:N in-callback demote, and top-level `main` on the
     /// default engine — Go-identical, and what makes the hello-world TCP server writable) it falls
     /// through to [`Vm::demote_block_socket`] and BLOCKS there, bounded only by the op's `timeout_ms`,
@@ -1535,16 +1524,24 @@ impl Vm {
         h: GcRef,
         args: &[Value],
         target: PollPark,
+        op: &str,
         span: Span,
-    ) -> Result<bool, RuntimeError> {
+    ) -> Result<Option<Value>, RuntimeError> {
         // W7-18 — `--timeout` ABOVE the cancellation checkpoint, mirroring W7-17's ordering in
         // `chan_recv_step`: the deadline outranks a cancel, so a fiber reaching here after the run
         // deadline reports the honest hard halt rather than `cancelled`. UNGATED by `deferring`
         // (unlike `poll_timeout_check`'s entry check): everything above a park settles without
         // blocking, and a `defer` that would PARK past the deadline is a hang, not cleanup.
         self.deadline_halt(span)?;
-        // CANCELLATION CHECKPOINT — a socket op is a blocking op, so it is a cancel-delivery point
-        // (the single choke point for `accept`/`read`/`write`/`connect`): the check sits OUTSIDE the
+        // TICKET-194 — a refused op never waits, so it is not a cancellation point (owner decision
+        // 1): `Refuse` is decided BEFORE `wait_halt`, or a pending cancel cuts an op that returns its
+        // `would block` `Err` at once.
+        let mode = self.block_mode(WaitSpec::Socket);
+        if mode == BlockMode::Refuse {
+            return Ok(Some(self.sock_err(sock_would_block_msg(op))));
+        }
+        // CANCELLATION CHECKPOINT — a socket op that would wait is a cancel-delivery point
+        // (the single choke point for `accept`/`read`/`write`): the check sits OUTSIDE the
         // `mn.is_some()` gate, because top-level `main` (and any other non-worker-shell context) runs
         // the op as a BLOCKING syscall below and would otherwise have no cancel-delivery point at a
         // socket at all. On M:N a cancelled fiber must also not RE-park: `poller::drain_sched`
@@ -1552,7 +1549,7 @@ impl Vm {
         // check it would would-block and re-park forever (the every-instruction check that used to
         // kill it at the dispatch loop top is gone; see `run_until`), wedging the nursery.
         self.wait_halt(span)?;
-        if self.block_mode(WaitSpec::Socket) == BlockMode::Park {
+        if mode == BlockMode::Park {
             // The `in_flight` guard: at most one op may be parked on a socket at a time. A second
             // concurrent op on a shared socket (`Arc`) faults rather than overwrite the registry entry
             // (which would drop the first fiber + leak `inflight`) or double-`add` the fd (EEXIST panic).
@@ -1585,9 +1582,9 @@ impl Vm {
                 ..target
             };
             self.poll_park = Some(target);
-            Ok(true)
+            Ok(Some(Value::nil())) // parked sentinel; `poll_park` gates the result-push at `do_call`
         } else {
-            Ok(false)
+            Ok(None)
         }
     }
 
