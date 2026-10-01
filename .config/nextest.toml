@@ -13,7 +13,7 @@ fail-fast = false
 timing = { max-threads = 4 }
 
 [[profile.default.overrides]]
-filter = 'binary(chezzi_threads_cli) | binary(blocking_context_grid) | binary(channel_handoff_grid) | binary(native_callback_stdin_read_frees_width) | binary(mn_pool_ignores_cpu_quota_hangs) | binary(sched_seed_cli) | binary(chezzi_nested_nursery_deadlock) | binary(deadlock_verdict_misses) | binary(chz_suite)'
+filter = 'binary(chezzi_threads_cli) | binary(blocking_context_grid) | binary(channel_handoff_grid) | binary(examples_golden) | binary(native_callback_stdin_read_frees_width) | binary(mn_pool_ignores_cpu_quota_hangs) | binary(sched_seed_cli) | binary(chezzi_nested_nursery_deadlock) | binary(deadlock_verdict_misses) | binary(chz_suite)'
 test-group = 'timing'
 
 # Known flakes tracked in docs/gaps.md, retried so they do not fail the verifying gate on load alone

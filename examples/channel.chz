@@ -1,3 +1,4 @@
+# golden: unordered (concurrent prints; tests/examples_golden.rs compares the sorted line sets)
 # C2 concurrency: `Channel[T]` fan-out. Workers run at the nursery's dedent and drop their results
 # into a shared mailbox; the parent collects them after the join. Move-on-send keeps each task's
 # heap isolated — only the channel handle is shared.

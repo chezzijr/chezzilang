@@ -1,3 +1,4 @@
+# golden: unordered (concurrent prints; tests/examples_golden.rs compares the sorted line sets)
 # Concurrency A1: `Channel[T].try_recv()` — a non-blocking poll returning `T?`. Workers run at the
 # nursery's dedent and queue their results FIFO; the parent then DRAINS the mailbox with `try_recv`
 # (`Some(v)` per queued value, `None` once empty) instead of guarding every `recv` with `len()`.

@@ -153,7 +153,10 @@ UPDATE_EDITOR_ASSETS=1 cargo test --test editor_tmlanguage    # regenerate the V
   (don't reach for Rust just because a test expects a panic). **Fall back to Rust `#[cfg(test)]` ONLY
   for what `assert` genuinely can't express:** compile-time checker diagnostics (`rejects`/`ok`),
   token/AST/bytecode/GC internals, gc-stress rooting (`run_capture_stress`), and concurrency
-  timing/scheduler behavior. Golden `examples/*.chz` + `.expected` stay fine for print-shape demos.
+  timing/scheduler behavior. Golden `examples/*.chz` + `.expected` stay fine for print-shape demos:
+  `tests/examples_golden.rs` runs EVERY example that has a `.expected` (discovered from disk); an
+  example whose prints race declares `# golden: unordered` in its header, one that pins stderr
+  `# golden: stderr`.
   When you delete a Rust behavioral test after porting, the `tests/chz` gates must stay green. Full
   rationale + ranked runner follow-ups: `docs/future.md §3b`; the suite's own guide:
   `tests/chz/README.md`.

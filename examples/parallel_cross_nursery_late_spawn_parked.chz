@@ -1,3 +1,4 @@
+# golden: unordered (concurrent prints; tests/examples_golden.rs compares the sorted line sets)
 # Cross-nursery late-spawn into a MIDDLE nursery, with a PARKED outer receiver (M:N / --parallel).
 #
 # Regression guard for the register->seed atomicity of the late-spawn trailing scope. `main`'s O parks

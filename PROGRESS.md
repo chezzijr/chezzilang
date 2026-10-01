@@ -15,7 +15,12 @@ Single source of truth for "what am I doing next." Update after every work sessi
   type is expected (`["a", "b"].map(ord)`, `apply("a", ord)`) now infers `U` like a user fn does:
   generic `unify` reads both fn variants through the new `Ty::fn_parts`
   (`tests/chz/spec/builtin_fn_generic_arg_test.chz`). Contended `Shared.update` at T=2 measured
-  15.6–19.6 s (T=1 0.03 s, Go 0.007 s), also before wave 17: filed as TICKET-193. `docs/syntax.md`'s `Box.top()` example now
+  15.6–19.6 s (T=1 0.03 s, Go 0.007 s), also before wave 17: filed as TICKET-193.
+  New gate `tests/examples_golden.rs`: every `examples/**/*.chz` with a `.expected` (215 today) runs
+  on the built binary and must produce it; only hand-picked examples had a golden before, which is
+  how `executor_results` stayed broken unseen. Eight examples whose prints race declare
+  `# golden: unordered`, `log_demo` declares `# golden: stderr`. 0 failures in 12 runs at
+  CHEZZI_THREADS=1/2/4/0 after marking; an injected break in two examples is caught. `docs/syntax.md`'s `Box.top()` example now
   quotes the real error (`type Socket does not satisfy Eq` — `Comparable` embeds `Eq`). The
   `two_leaf_deadlock_on_a_main_channel_still_faults_at_every_worker_count` T=1 hang no longer
   reproduces after TICKET-188 (0 of 150 debug runs at T=1; 0 of 210 release runs at T=1/2/0, idle and

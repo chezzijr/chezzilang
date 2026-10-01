@@ -1,3 +1,4 @@
+# golden: unordered (concurrent prints; tests/examples_golden.rs compares the sorted line sets)
 # Cross-nursery LATE SPAWN (M:N / --parallel ONLY) — regression guard for the enlist-then-spawn drop.
 #
 # The outer `parallel:` spawns O1, then calls inner() whose nested join EARLY-ENLISTS the outer nursery

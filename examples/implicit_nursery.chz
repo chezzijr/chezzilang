@@ -1,3 +1,4 @@
+# golden: unordered (concurrent prints; tests/examples_golden.rs compares the sorted line sets)
 # M-C: implicit nurseries. Every function body is itself a nursery — a bare `spawn` (no enclosing
 # `parallel:`) is legal anywhere and joins at the function's `return`/end. `parallel:` still works as
 # an explicit *inner* sub-nursery that joins earlier (at its dedent).

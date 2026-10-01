@@ -1,3 +1,4 @@
+# golden: unordered (concurrent prints; tests/examples_golden.rs compares the sorted line sets)
 # Cross-nursery flat scheduler (M:N / --parallel ONLY) — a MULTI-TASK inner nursery.
 # `inner` spawns TWO fibers (I1, I2); the outer `parallel:` spawns sibling O and calls inner(). I1
 # needs O (recv b after O sends b); I2 needs O (recv c after O sends c); O needs I1 (recv a after I1

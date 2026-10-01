@@ -1,3 +1,4 @@
+# golden: unordered (concurrent prints; tests/examples_golden.rs compares the sorted line sets)
 # Concurrency: `parallel:` nursery + `spawn`.
 # A spawned task STARTS at its `spawn`, like Go's `go f()`. The block's dedent is a join BARRIER:
 # the parent continues only after every child has finished — no leaks, no WaitGroup.

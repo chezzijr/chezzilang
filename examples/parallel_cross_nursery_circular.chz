@@ -1,3 +1,4 @@
+# golden: unordered (concurrent prints; tests/examples_golden.rs compares the sorted line sets)
 # Cross-nursery circular wakeup — the case-A flat-scheduler fix (M:N / --parallel ONLY).
 #
 # `inner` spawns an implicit (nested) nursery; the OUTER `parallel:` spawns sibling O and then calls

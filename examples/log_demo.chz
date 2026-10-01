@@ -1,3 +1,4 @@
+# golden: stderr (log lines land on stderr; tests/examples_golden.rs compares that stream)
 # std.log demo — leveled logging, exercising gating, all 4 formats, set_level, an injectable
 # prefix, the pure format_line, and the stderr-default + stdout target in one program.
 import std.log
