@@ -915,11 +915,12 @@ impl Checker {
     pub(super) fn named_fn_summary(&self, callee: &Expr) -> Option<(String, FnSummary)> {
         match &callee.kind {
             ExprKind::Ident(name) => {
-                if self.lookup(name).is_some() {
+                if let Some(i) = self.owning_scope(name) {
+                    // Only the scope that owns the binding: a local value shadowing a nested fn
+                    // is a value callee and has no summary (TICKET-190 review).
                     self.fn_write_scopes
-                        .iter()
-                        .rev()
-                        .find_map(|scope| scope.get(name).cloned())
+                        .get(i)
+                        .and_then(|scope| scope.get(name).cloned())
                         .map(|summary| (name.clone(), summary))
                 } else {
                     self.functions

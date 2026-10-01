@@ -236,3 +236,47 @@ test fn generator_arg_to_a_generator_callee_stays_marked():
         spawn: out.send(t190_cell(x))
     assert out.recv() == "fault"
     assert t190_cell(s[0]) == "1"
+
+# Review finding (TICKET-190): a local value that shadows a nested generator is a value callee, so
+# its call gets no creation stamp and `gen2`'s param stays marked. The task's second push faults.
+fn t190_gen2(xs: List[int]) -> Iterator[int]:
+    xs.push(1)
+    yield 0
+    xs.push(2)
+    yield xs.len()
+
+fn t190_shadow_outer(named: List[int]) -> Iterator[int]:
+    fn gen(xs: List[int]) -> Iterator[int]:
+        yield xs.len()
+    if true:
+        gen := fn(a: List[int]) -> Iterator[int]: t190_gen2(named)
+        return gen([])
+    return gen([])
+
+test fn value_callee_shadowing_a_nested_generator_gets_no_stamp():
+    named: List[int] = []
+    g := t190_shadow_outer(named)
+    _ := g.next()
+    assert named == [1]
+    out := Channel[str](1)
+    parallel:
+        spawn: out.send(t190_cell(g))
+    assert out.recv() == "fault"
+    assert named == [1]
+
+# Beside it: the nested generator itself, called by name with a fresh argument, keeps its stamp.
+fn t190_nested_outer() -> Iterator[int]:
+    fn gen(xs: List[int]) -> Iterator[int]:
+        xs.push(1)
+        yield 0
+        xs.push(2)
+        yield xs.len()
+    return gen([])
+
+test fn nested_generator_called_with_a_fresh_argument_runs():
+    g := t190_nested_outer()
+    _ := g.next()
+    out := Channel[str](1)
+    parallel:
+        spawn: out.send(t190_cell(g))
+    assert out.recv() == "2"

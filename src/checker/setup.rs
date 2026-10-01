@@ -1551,6 +1551,8 @@ impl Checker {
     /// `module_sigs`) and accumulated `errors` are kept.
     pub(super) fn begin_module(&mut self, label: Option<String>) {
         self.scopes.clear();
+        // `push_scope` pushes both stacks; index `i` of one is scope `i` of the other (TICKET-190).
+        self.fn_write_scopes.clear();
         self.loop_vars.clear();
         self.functions.clear();
         self.fn_homes.clear();
