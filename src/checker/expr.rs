@@ -4326,6 +4326,25 @@ impl Checker {
                                 self.check_args_range("has", &[k], 1, args, span);
                                 return Ty::Bool;
                             }
+                            // TICKET-192: the single-entry writers (update guard, O(1) expected).
+                            "set_key" => {
+                                self.check_args_range("set_key", &[k, v], 2, args, span);
+                                return Ty::Nil;
+                            }
+                            "remove_key" => {
+                                self.check_args_range("remove_key", &[k], 1, args, span);
+                                return Ty::option(v);
+                            }
+                            "get_or_insert" => {
+                                self.check_args_range(
+                                    "get_or_insert",
+                                    &[k, v.clone()],
+                                    2,
+                                    args,
+                                    span,
+                                );
+                                return v;
+                            }
                             "for_each_entry" => {
                                 self.check_args_range(
                                     "for_each_entry",
