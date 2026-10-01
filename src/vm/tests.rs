@@ -21755,3 +21755,30 @@ print("lost={lost} both={both}")
         "a returned job's result was cut by shutdown_now"
     );
 }
+
+/// TICKET-195 C2: a child's panic must be reported when the owner's `defer: ch.recv()` can never
+/// complete; today the owner's stuck defer reports `deadlock` and `boom` is lost.
+#[test]
+fn child_fault_survives_owner_stuck_defer() {
+    let src = r#"import std.time
+fn viadefer(ch: Channel[int]):
+    defer:
+        print(ch.recv())
+    time.sleep_ms(1000)
+
+fn main():
+    ch := Channel[int](0)
+    parallel:
+        spawn:
+            time.sleep_ms(50)
+            panic("boom")
+        viadefer(ch)
+
+main()
+"#;
+    let entry = write_temp_chz("t195_c2", src);
+    let (_out, _err, res, _code) = run_file(&entry);
+    let _ = std::fs::remove_file(&entry);
+    let msg = res.expect_err("expected a fault").message;
+    assert!(msg.contains("boom"), "child fault lost, got: {msg}");
+}
