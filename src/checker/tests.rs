@@ -36899,3 +36899,46 @@ struct K:\n    n: int\n\n    fn w(xs: List[int], out: Channel[int]):\n        xs
         "has no method 'map'",
     );
 }
+
+/// TICKET-196 K5x: a module that rebinds a fn name (`f := fn(b, a)`) exports the OLD fn's labels, so a
+/// keyword call from another module binds the stale labels (CPython prints `12`, Chezzi `21`).
+#[test]
+fn imported_rebound_fn_denies_keyword_call_qualified() {
+    files_reject(
+        &[
+            (
+                "lib.chz",
+                "fn f(a: int, b: int) -> str:\n    return \"{a}{b}\"\nf := fn(b: int, a: int) -> str: \"{a}{b}\"\n",
+            ),
+            ("main.chz", "import lib\nprint(lib.f(a=1, b=2))\n"),
+        ],
+        "keyword arguments through 'f' are ambiguous",
+    );
+}
+
+/// TICKET-196 K5x, from-import call form.
+#[test]
+fn imported_rebound_fn_denies_keyword_call_from_import() {
+    files_reject(
+        &[
+            (
+                "lib.chz",
+                "fn f(a: int, b: int) -> str:\n    return \"{a}{b}\"\nf := fn(b: int, a: int) -> str: \"{a}{b}\"\n",
+            ),
+            ("main.chz", "import f from lib\nprint(f(a=1, b=2))\n"),
+        ],
+        "keyword arguments through 'f' are ambiguous",
+    );
+}
+
+/// TICKET-196 K6x: an imported const cannot be re-declared in the importer.
+#[test]
+fn imported_const_cannot_be_redeclared() {
+    files_reject(
+        &[
+            ("lib.chz", "Y: const int = 5\n"),
+            ("main.chz", "import Y from lib\nY := 7\nprint(Y)\n"),
+        ],
+        "cannot re-declare const binding 'Y'",
+    );
+}
