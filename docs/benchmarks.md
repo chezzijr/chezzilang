@@ -3026,3 +3026,45 @@ An earlier non-interleaved pass on base alone measured `send_one_channel` 1.420 
 0.412 s and `body_and_spawn` 7.625 s (load 3.3) — the run-to-run spread on this box is about ±7%, so
 none of the deltas above is a measured change. The channel fast path registers nothing: a waiter is
 registered only when a fiber demotes.
+
+## TICKET-193 — contended update guard: permit before guard (2026-10-01)
+
+6 tasks x 2000 `s.update(inc)` on one `Shared[int]` (`tests/shared_update_contention.rs` `SRC`),
+release binary. Cause: `guard_wait_block` took the update guard holding no width permit, then queued
+for a permit, while the permit holders waited in place (`GUARD_DEMOTE_BUDGET`, 5 ms) for that guard.
+Every handoff cost one 5 ms timeout. Fix: a waiter waits for the guard to come free, takes the permit,
+then the guard.
+
+Counters (env-gated, scratch tree, not committed), one run each, base `0bb25b73`, load 3.6:
+
+| T | wall | acquires fast / in-place ok / in-place timed out | width waits (total) | real preempts | replacement threads |
+|---|---|---|---|---|---|
+| 1 | 0.037 s | 12000 / 0 / 0 | 6 (2 ms) | 6 | 6 |
+| 2 | 18.86 s | 3528 / 1300 / 7172 | 3814 (18.9 s) | 2 | 60 |
+| 4 | 3.75 s | 4502 / 5412 / 2086 | 743 (3.7 s) | 2 | 20 |
+| 0 | 0.064 s | 4082 / 7918 / 0 | 2 (0.5 ms) | 2 | 2 |
+
+7172 timeouts x 5 ms / 2 runners = 17.9 s, the T=2 wall time. With the prototype fix: T=2 3 in-place
+timeouts, T=4 4.
+
+Grid, release, seconds, min-max of 3 runs, 12000 ops in total per cell (base `0bb25b73` -> fix):
+
+| op | tasks | T=1 | T=2 | T=4 | T=0 |
+|---|---|---|---|---|---|
+| Shared.update | 6 | 0.03 -> 0.04 | 15.6-19.6 -> 0.03-0.04 | 0.70-4.68 -> 0.05-0.06 | 0.05-0.07 -> 0.05 |
+| RwShared.write | 6 | 0.03-0.11 -> 0.03 | 16.44-22.23 -> 0.03-0.04 | 0.88-2.46 -> 0.05-0.06 | 0.06 -> 0.05 |
+| RwShared.write | 2 | 0.03 | 0.03 -> 0.02-0.03 | 0.03 | 0.03 |
+| RwShared.read | 6 and 2 | 0.02 | 0.02 | 0.02 | 0.02 |
+| Atomic.add | 6 and 2 | 0.02 | 0.02 | 0.02 | 0.02 |
+| ConcurrentMap.set | 6 | 0.04 | 0.04 | 0.05 -> 0.04-0.05 | 0.06 |
+| ConcurrentMap.set | 2 | 0.03-0.04 | 0.03-0.04 | 0.03-0.04 | 0.04 |
+
+Re-measured on the fixed branch binary, `su.chz`, 8 runs each, ms (load average 2.81):
+
+| T=1 | T=2 | T=4 | T=0 |
+|---|---|---|---|
+| 31-36 | 30-46 | 42-59 | 41-47 |
+
+Every grid cell, 5 runs each at T=2 and T=4 on the fixed binary (load 2.80): max 59 ms
+(`RwShared.write` x6 T=4); every run printed `12000`. Go (`sync.Mutex`, GOMAXPROCS=2, same work):
+0.007 s.

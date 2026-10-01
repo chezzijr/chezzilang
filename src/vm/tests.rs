@@ -21468,6 +21468,27 @@ fn ticket_063_guard_wait_satisfiable_answers_the_acquire_outcome() {
     );
 }
 
+/// TICKET-193 — `await_update_guard_free` reports a free guard without taking it, times out on a
+/// held one, and still faults a self-held re-entry.
+#[test]
+fn ticket_193_await_update_guard_free_never_takes_the_guard() {
+    use crate::vm::core::await_update_guard_free;
+    let key = usize::MAX - 9003;
+    let (waiter, holder) = (u64::MAX - 13, u64::MAX - 14);
+    let budget = Some(std::time::Duration::from_millis(5));
+    assert_eq!(await_update_guard_free(key, waiter, budget), Ok(true));
+    let held = acquire_update_guard_within(key, holder, Some(std::time::Duration::ZERO))
+        .expect("a free box must not report a cycle")
+        .expect("await must not have taken the guard");
+    assert_eq!(await_update_guard_free(key, waiter, budget), Ok(false));
+    assert_eq!(
+        await_update_guard_free(key, holder, budget),
+        Err(GuardCycle::SelfHeld)
+    );
+    drop(held);
+    assert_eq!(await_update_guard_free(key, waiter, budget), Ok(true));
+}
+
 /// W8-22: an error with no recorded span answers `None`, never a guess. A user-constructed
 /// `Err("boom")` was never stamped by `recover:`, and a struct error's only requirement is
 /// `message()` — neither carries an origin.

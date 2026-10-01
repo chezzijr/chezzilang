@@ -85,46 +85,96 @@ pub fn acquire_update_guard_within(
     me: u64,
     budget: Option<Duration>,
 ) -> Result<Option<UpdateGuard>, GuardCycle> {
+    match wait_update_guard(key, me, budget, true)? {
+        GuardWait::Taken(g) => Ok(Some(g)),
+        GuardWait::TimedOut => Ok(None),
+        GuardWait::Free => unreachable!("a taking wait never reports Free"),
+    }
+}
+
+/// TICKET-193 — what an acquire of `key` by task `me` would do right now. The ONE decider: the wait
+/// loop ([`wait_update_guard`]) and the deadlock verdict ([`guard_wait_satisfiable`]) both read it.
+/// The cycle walk starts at `waiting[me]`, so a caller that wants the cycle answer registers first.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum GuardState {
+    Free,
+    SelfHeld,
+    Cycle,
+    Busy,
+}
+
+fn guard_state(g: &GuardGraph, key: usize, me: u64) -> GuardState {
+    match g.owner.get(&key) {
+        None => GuardState::Free,
+        Some(&o) if o == me => GuardState::SelfHeld,
+        Some(_) if wait_for_cycle(g, me) => GuardState::Cycle,
+        Some(_) => GuardState::Busy,
+    }
+}
+
+/// How a [`wait_update_guard`] ended without a cycle.
+enum GuardWait {
+    Taken(UpdateGuard),
+    Free,
+    TimedOut,
+}
+
+/// The one guard wait loop. `take` = take the guard once free; else report `Free` and leave it.
+/// Clears `waiting[me]` on every return (DEC-016).
+fn wait_update_guard(
+    key: usize,
+    me: u64,
+    budget: Option<Duration>,
+    take: bool,
+) -> Result<GuardWait, GuardCycle> {
     let deadline = budget.map(|d| std::time::Instant::now() + d);
     let (mtx, cv) = guard_registry();
     let mut g = mtx.lock().unwrap();
     loop {
-        match g.owner.get(&key).copied() {
-            None => {
-                g.owner.insert(key, me);
-                g.waiting.remove(&me);
-                return Ok(Some(UpdateGuard { key }));
-            }
-            Some(owner) if owner == me => {
-                g.waiting.remove(&me);
-                return Err(GuardCycle::SelfHeld);
-            }
-            Some(_) => {
-                let left = match deadline {
-                    None => Duration::from_millis(50),
-                    Some(d) => match d.checked_duration_since(std::time::Instant::now()) {
-                        None => {
-                            g.waiting.remove(&me);
-                            return Ok(None);
-                        }
-                        Some(l) => l.min(Duration::from_millis(50)),
-                    },
-                };
-                g.waiting.insert(me, key);
-                if wait_for_cycle(&g, me) {
-                    g.waiting.remove(&me);
-                    return Err(GuardCycle::Cycle);
-                }
-                let (guard, _timeout) = cv.wait_timeout(g, left).unwrap();
-                g = guard;
-            }
+        g.waiting.insert(me, key);
+        let state = guard_state(&g, key, me);
+        if state != GuardState::Busy {
+            g.waiting.remove(&me);
         }
+        let left = match state {
+            GuardState::Free if take => {
+                g.owner.insert(key, me);
+                return Ok(GuardWait::Taken(UpdateGuard { key }));
+            }
+            GuardState::Free => return Ok(GuardWait::Free),
+            GuardState::SelfHeld => return Err(GuardCycle::SelfHeld),
+            GuardState::Cycle => return Err(GuardCycle::Cycle),
+            GuardState::Busy => match deadline {
+                None => Duration::from_millis(50),
+                Some(d) => match d.checked_duration_since(std::time::Instant::now()) {
+                    None => {
+                        g.waiting.remove(&me);
+                        return Ok(GuardWait::TimedOut);
+                    }
+                    Some(l) => l.min(Duration::from_millis(50)),
+                },
+            },
+        };
+        g = cv.wait_timeout(g, left).unwrap().0;
     }
 }
 
-/// TICKET-063 — satisfiability mirror of [`acquire_update_guard_within`]: answers whether an acquire
-/// of `key` by task `me`, issued right now, would NOT block (free, or `me` already holds it, or the
-/// wait-for walk from `me` finds a cycle). Change the two together.
+/// TICKET-193 — wait until `key` is free WITHOUT taking it: `Ok(true)` free, `Ok(false)` budget spent,
+/// `Err` a cycle. `Vm::guard_wait_block` waits here holding no width permit, then takes the permit,
+/// then the guard (permit before guard; DEC-141).
+pub fn await_update_guard_free(
+    key: usize,
+    me: u64,
+    budget: Option<Duration>,
+) -> Result<bool, GuardCycle> {
+    match wait_update_guard(key, me, budget, false)? {
+        GuardWait::Free => Ok(true),
+        GuardWait::TimedOut => Ok(false),
+        GuardWait::Taken(_) => unreachable!("a non-taking wait never takes the guard"),
+    }
+}
+
+/// TICKET-063 — would an acquire of `key` by `me`, issued now, NOT block? Reads [`guard_state`].
 ///
 /// The cycle arm answers `false` between polls, not `true`: `acquire_update_guard_within` removes
 /// `me` from `waiting` before it returns `Ok(None)` (see its deadline arm above), so once a bounded
@@ -134,11 +184,7 @@ pub fn acquire_update_guard_within(
 pub fn guard_wait_satisfiable(key: usize, me: u64) -> bool {
     let (mtx, _cv) = guard_registry();
     let g = mtx.lock().unwrap();
-    match g.owner.get(&key) {
-        None => true,
-        Some(&o) if o == me => true,
-        Some(_) => wait_for_cycle(&g, me),
-    }
+    guard_state(&g, key, me) != GuardState::Busy
 }
 
 /// Walk `waiting` -> `owner` -> `waiting` -> ... from `start`, bounded by the number of owned boxes

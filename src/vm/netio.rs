@@ -295,18 +295,34 @@ impl Vm {
     ) -> Result<Result<core::UpdateGuard, GuardCycle>, RuntimeError> {
         let reg = self.guard_wait_enter(key, what, span)?;
         // TICKET-141 — the holder of this guard may be a preempted `update` closure on a gated
-        // sibling thread; hold no width permit while waiting for it.
+        // sibling thread; hold no width permit while the guard is busy. TICKET-193 — take the
+        // permit back BEFORE the guard (the loop below).
         self.width_release();
         let _party = self.block_party_guard(quiesce::PartyWait::Guard(key, self.guard_token));
         let out = loop {
-            match acquire_update_guard_within(
+            // TICKET-193 — permit BEFORE guard. Wait for the guard to come free holding no permit,
+            // take the permit, then take the guard without waiting. Taking the guard first parks
+            // its OWNER behind permit holders that wait in place for that same guard, so every
+            // handoff cost one GUARD_DEMOTE_BUDGET (T=2: 7172 timeouts, 18.9 s).
+            match core::await_update_guard_free(
                 key,
                 self.guard_token,
                 Some(super::DEMOTE_POLL_BACKOFF),
             ) {
-                Ok(Some(g)) => break Ok(Ok(g)),
                 Err(cycle) => break Ok(Err(cycle)),
-                Ok(None) => {}
+                Ok(false) => {}
+                Ok(true) => {
+                    self.width_acquire();
+                    match acquire_update_guard_within(
+                        key,
+                        self.guard_token,
+                        Some(std::time::Duration::ZERO),
+                    ) {
+                        Ok(Some(g)) => break Ok(Ok(g)),
+                        Err(cycle) => break Ok(Err(cycle)),
+                        Ok(None) => self.width_release(),
+                    }
+                }
             }
             if let Err(e) = self.block_halt_check(super::DEADLOCK_MSG, span) {
                 break Err(e);

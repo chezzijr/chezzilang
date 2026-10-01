@@ -739,7 +739,10 @@ re-enter `get`/`read` — or `write`/`set` on a **different** box.
 > waits in place on its worker for up to 5 ms (`GUARD_DEMOTE_BUDGET`, `src/vm/core.rs`) before it
 > demotes the worker and spawns one replacement OS thread — almost every wait is microseconds, so
 > almost none pays for a thread. Demoting on every acquire instead made 50 000 one-`update` fibers
-> exhaust a 32 768-task ceiling and never finish (TICKET-016).
+> exhaust a 32 768-task ceiling and never finish (TICKET-016). A waiter that demoted waits for the
+> guard to come FREE holding no width permit, then takes the permit, then the guard. Taking the guard
+> first made 6 tasks x 2000 `update`s take 16-22 s at `--threads=2`, one 5 ms timeout per handoff
+> (TICKET-193).
 
 `RwShared` vs `Shared`: reach for `RwShared` when reads vastly outnumber writes (concurrent readers
 matter); reach for `Shared` when access is write-heavy or you don't need concurrent reads (one lock is

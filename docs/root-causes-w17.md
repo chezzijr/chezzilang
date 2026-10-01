@@ -60,7 +60,7 @@ Two families are new: channel hand-off (A) and control-flow summary (E).
 | G2, G3, P2s | P2 | F | kwargs via `g := m.f`; variadic value omitting its default; local `print` in `defer` | false rejects | CPython works |
 | — | P1 | isolated | `["a","b"].map(ord)` | builtin rejected as a generic fn argument | CPython `[97, 98]` |
 | — | P1 | isolated | `a, _ = (1, 2)` | rejected | Go `1` |
-| — | P2 | isolated | 6 tasks × 2000 `Shared.update` at T=2 | bimodal 0.03–3.6 s | Go 2.5 ms |
+| — | P2 | isolated | 6 tasks × 2000 `Shared.update` at T=2 | 16-22 s, fixed by TICKET-193 | Go 2.5 ms |
 
 ## Family A — channel hand-off has no commit point (NEW)
 
@@ -288,7 +288,7 @@ here` (Go: `cannot use generic function cmp.Max without instantiation`).
 
 - a builtin fn (`ord`) passed where a generic fn type is expected is rejected; **fixed 2026-10-01**: generic inference reads both fn variants through `Ty::fn_parts` (`tests/chz/spec/builtin_fn_generic_arg_test.chz`);
 - `a, _ = (1, 2)` rejected; **fixed 2026-10-01** (`Expr::is_blank`, `f3822211`);
-- contended `Shared.update` at T=2 is bimodal (0.03–3.6 s) — measure before deciding it is a defect; **measured 2026-10-01: a defect**, 15.6–19.6 s at T=2 on every run (T=1 0.03 s, Go 0.007 s), present before wave 17 too; **TICKET-193**;
+- contended `Shared.update` at T=2: consistently slow, a permit/guard lock-order convoy, 16-22 s — fixed by TICKET-193;
 - `docs/syntax.md:2057` names `Comparable` where the error says `Eq`. **Fixed 2026-10-01** (the example now quotes the real error).
 
 ## Plan
