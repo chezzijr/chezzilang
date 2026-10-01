@@ -4226,6 +4226,25 @@ impl Vm {
         self.drain_live_executors_from(0)
     }
 
+    /// TICKET-195 — THE end of a run, for every driver: `r` is what the run returned. A clean
+    /// finish drains the live executors and reports the drain's result. A run that ended in a
+    /// deadlock verdict drains them too, so a finished job's buffered output still reaches the sink
+    /// (`run_file`'s in-process sink holds it only in the job's slot); the drain's own result is
+    /// discarded, and the verdict and its trace stand. Any other fault, and a pending exit, skip the
+    /// drain as before.
+    pub(crate) fn finish_run(&mut self, r: Result<(), RuntimeError>) -> Result<(), RuntimeError> {
+        match r {
+            Ok(()) => self.drain_live_executors(),
+            Err(e) if e.is_deadlock && self.pending_exit.is_none() => {
+                let trace = (self.fault_trace.take(), self.fault_trace_depth);
+                let _ = self.drain_live_executors();
+                (self.fault_trace, self.fault_trace_depth) = trace;
+                Err(e)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// Like [`Vm::drain_live_executors`], but skips the first `from` registry entries. `from` is a
     /// registry index taken earlier (e.g. [`Vm::exec_registry_mark`]) and is safe to reuse across
     /// this whole drain: `exec_registry`'s one mutation is an append (`push`), so indices never shift.

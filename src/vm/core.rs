@@ -1207,6 +1207,18 @@ impl EagerState {
         self.outstanding -= 1;
     }
 
+    /// TICKET-195 — the first finished job that FAULTED and is not yet reduced by a join, with its
+    /// own trace. A job's deadlock verdict is skipped: it is the verdict, not a fault that outranks
+    /// one.
+    pub(super) fn first_fault(&self) -> Option<(super::RuntimeError, Vec<super::TraceFrame>)> {
+        self.slots.iter().find_map(|s| match s {
+            Some(super::TaskOutcome::Fault { err, trace, .. }) if !err.is_deadlock => {
+                Some((err.clone(), trace.clone()))
+            }
+            _ => None,
+        })
+    }
+
     /// Take the collected outcomes, leaving the slot vector empty. A second `shutdown` therefore
     /// reduces an empty vector — a clean no-op.
     pub(super) fn take_slots(&mut self) -> Vec<Option<super::TaskOutcome>> {

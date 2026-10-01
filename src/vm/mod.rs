@@ -6617,7 +6617,8 @@ fn run_program_inner(src: &str) -> (Vec<u8>, Result<(), RuntimeError>) {
         }
     };
     let mut vm = Vm::new(Arc::new(program));
-    let result = vm.run().and_then(|()| vm.drain_live_executors());
+    let result = vm.run();
+    let result = vm.finish_run(result);
     (vm.out, result)
 }
 
@@ -6754,7 +6755,8 @@ pub fn run_with_cfg(src: &str, stress: bool) -> (Result<String, RuntimeError>, u
             };
             let mut vm = Vm::new(Arc::new(program));
             vm.gc_stress = stress;
-            let result = vm.run().and_then(|()| vm.drain_live_executors());
+            let result = vm.run();
+            let result = vm.finish_run(result);
             let live = vm.heap.live();
             (result.map(|()| captured(vm.out)), live)
         })
@@ -6802,9 +6804,8 @@ pub fn run_capture_on_stack(src: &str, stack_bytes: usize) -> Result<String, Run
                     is_panic: false,
                 })?;
             let mut vm = Vm::new(Arc::new(program));
-            vm.run()
-                .and_then(|()| vm.drain_live_executors())
-                .map(|()| captured(vm.out))
+            let result = vm.run();
+            vm.finish_run(result).map(|()| captured(vm.out))
         })
         .expect("failed to spawn VM thread")
         .join()
@@ -6882,7 +6883,8 @@ pub fn run_capture_nursery_len(src: &str) -> (Result<String, RuntimeError>, usiz
                 }
             };
             let mut vm = Vm::new(Arc::new(program));
-            let result = vm.run().and_then(|()| vm.drain_live_executors());
+            let result = vm.run();
+            let result = vm.finish_run(result);
             let nursery_depth = vm.nurseries.len();
             (result.map(|()| captured(vm.out)), nursery_depth)
         })
@@ -7074,17 +7076,18 @@ fn run_file_inner(
     let mut vm = Vm::new(Arc::new(program));
     vm.host = cfg;
     vm.gc_stress = stress;
-    // On a clean finish, gracefully reap any Executor never explicitly shut down (C5 / A2). Skipped
-    // on a fault (the program is already erroring) and on a hard `std.os.exit` (handled inside
-    // `drain_live_executors` via `pending_exit`).
+    // On a clean finish, gracefully reap any Executor never explicitly shut down (C5 / A2). A
+    // deadlock verdict still drains, so finished jobs' buffered output reaches the sink (TICKET-195);
+    // skipped on any other fault (the program is already erroring) and on a hard `std.os.exit`
+    // (`Vm::finish_run`).
     let result = vm
         .run()
         // A `module:function` entrypoint calls the named function once the modules are initialized.
         .and_then(|()| match entry_fn {
             Some(name) => vm.invoke_entrypoint(name),
             None => Ok(()),
-        })
-        .and_then(|()| vm.drain_live_executors());
+        });
+    let result = vm.finish_run(result);
     // Memory probe (8B-`Value` gate): report the peak live-bytes high-water mark to real stderr,
     // gated on `CHEZZI_HEAP_STATS=1`. `.max(live_bytes())` covers workloads under the GC threshold
     // that never `sweep()` (peak would otherwise be 0). Real stderr, never `vm.out`/`vm.stderr`, so

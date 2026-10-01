@@ -1581,6 +1581,21 @@ impl Vm {
         // bypass just below, drops it here instead of surviving to decorate an unrelated
         // later fault.
         let gen_prefix = std::mem::take(&mut self.gen_fault_prefix);
+        // TICKET-195 — an `Executor` job's fault that no join has reduced outranks a deadlock
+        // verdict: the job is why nobody can make progress (Go prints the job's panic). Every
+        // verdict reaches user code through this funnel, so this is the one place to swap it in.
+        // It stays deadlock-marked, so it is still fatal and recover-transparent (DEC-135,
+        // DEC-152); a pending exit outranks both (DEC-181).
+        let rte = match (rte.is_deadlock && self.pending_exit.is_none())
+            .then(|| crate::vm::quiesce::QuiesceState::unjoined_job_fault(&self.exec_registry))
+            .flatten()
+        {
+            Some((e, trace)) => {
+                self.adopt_child_fault(None, trace);
+                e.deadlock()
+            }
+            None => rte,
+        };
         // TICKET-135 (D1): a deadlock verdict is fatal like Go's `all goroutines are asleep`.
         // `recover:` is transparent to it: the fault takes the uncaught path (defers and
         // escaped-nursery reports unchanged) and the marker is re-stamped so a faulting

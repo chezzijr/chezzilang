@@ -511,6 +511,25 @@ impl QuiesceState {
             })
             .sum()
     }
+
+    /// TICKET-195 — THE "unjoined job fault": the first fault an `Executor` job recorded that no
+    /// join has reduced yet, derived from the executor slots (never kept in a cell of its own).
+    /// `Vm::on_step_fault` reports it in place of a deadlock verdict — Go prints the job's panic.
+    /// Same clone-then-lock pattern as [`QuiesceState::outstanding_jobs`].
+    pub(super) fn unjoined_job_fault(
+        exec_registry: &ExecRegistry,
+    ) -> Option<(super::RuntimeError, Vec<super::TraceFrame>)> {
+        let cores: Vec<_> = exec_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        cores.iter().find_map(|c| {
+            c.eager
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .first_fault()
+        })
+    }
 }
 
 /// RAII registration of one blocked party. Dropped the moment the block ends — successfully or with a
