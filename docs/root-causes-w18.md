@@ -157,14 +157,20 @@ cancel, shutdown_now, child fault} -> {completed, cut}; plus the guard grid unde
 - S1 `json.decode[T]`: a missing key whose struct field has a default takes the default (owner decision below).
 - S2 the `z` format option (CPython 3.11): coerce negative zero to zero after rounding.
 
-## Owner decisions needed
+## Owner decisions (2026-10-01)
 
-1. **A recv when a value is queued AND a cancel is pending:** today the cancel wins. Go's `select`
-   picks randomly; a plain Go `<-ch` never consults the context. Recommendation: an op that does not
-   wait is never a cancellation point (the value is taken), the same rule as the send fix.
-2. **`json.decode[T]` with a missing key and a field default:** recommendation: use the default (Go
-   keeps the pre-set value; serde `#[serde(default)]`); a missing key with no default stays an error.
-3. **`z` format option:** recommendation: support it (CPython 3.11+).
+1. **Automatic cancellation lands only where a task is about to WAIT, or at a loop back-edge**
+   (option A). An op that does not wait (a `send` into a channel with room, a `recv` with a value
+   ready, a `try_*` op) is never a cancellation point; the value is taken or delivered and the task is
+   cut at its next real wait or back-edge. A function that has returned can therefore never lose its
+   result to a cancel. `std.cancel` tokens stay the explicit, user-chosen mechanism (Go's
+   `ctx.Done()`). Considered and rejected: B (waits only, asyncio — a CPU-bound sibling would run to
+   its end before the group finishes) and C (Go-style, no automatic cancel — every sibling failure
+   hangs the group unless each task checks a token; contradicts the documented structured
+   concurrency).
+2. **`json.decode[T]`: a missing key whose struct field has a default takes the default** (Go keeps
+   the preset value; serde `#[serde(default)]`). A missing key with no default stays an error.
+3. **The `z` format option is supported** (CPython 3.11+: negative zero after rounding prints as zero).
 
 ## Plan order
 
