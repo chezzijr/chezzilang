@@ -21666,3 +21666,19 @@ main()
         );
     }
 }
+
+/// TICKET-192: `RwShared[Map].get_key` scans the flat `WireValue::Map` entry vector, so one lookup is
+/// O(n) and n lookups on an n-entry shared map are O(n^2). Go `sync.Map` / a CPython `dict` behind a
+/// `Lock` are O(1) per lookup. Sized for the release binary: 40k lookups on a 40k-entry map (~16 s on base, ms once O(1)).
+#[test]
+fn rwshared_map_get_key_is_not_linear() {
+    let src = "import std.concurrency\nfn main():\n    n := 40000\n    m: Map[int, int] = {}\n    i := 0\n    while i < n:\n        m[i] = i\n        i = i + 1\n    box := RwShared(m)\n    s := 0\n    i = 0\n    while i < n:\n        match box.get_key(i):\n            Some(v): s = s + 1\n            None: s = s\n        i = i + 1\n    print(s)\nmain()\n";
+    let start = std::time::Instant::now();
+    let out = run(src);
+    let elapsed = start.elapsed();
+    assert_eq!(out, "40000\n");
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "40k RwShared.get_key on a 40k-entry map took {elapsed:?} (>1s ceiling) -- O(n) per lookup"
+    );
+}

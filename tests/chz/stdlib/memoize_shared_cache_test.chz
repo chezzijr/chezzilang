@@ -1,0 +1,23 @@
+# tests/chz/stdlib/memoize_shared_cache_test.chz — TICKET-192 (A3).
+#
+# A `memoize1` wrapper called in a spawned task must return its value, as CPython
+# `functools.cache` does from any thread.
+
+import memoize1 from std.memoize
+
+fn double(x: int) -> int:
+    return x * 2
+
+fn _child_memo(m: fn(int) -> int, ch: Channel[str]):
+    r := recover: m(21)
+    match r:
+        Ok(v): ch.send(str(v))
+        Err(e): ch.send(e.message())
+
+test fn memoize_wrapper_called_in_spawned_task_returns_value():
+    m := memoize1(double)
+    ch := Channel[str](1)
+    parallel:
+        spawn _child_memo(m, ch)
+    got := ch.recv()
+    assert got == "42", got
