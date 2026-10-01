@@ -832,7 +832,6 @@ impl Vm {
                 if matches!(self.block_mode(WaitSpec::Socket), BlockMode::Refuse) {
                     return Ok(self.sock_err(sock_would_block_msg("read_bytes")));
                 }
-                let core = Arc::clone(&core);
                 self.demote_block_socket(fd, poller::Interest::Read, deadline, span, move |vm| {
                     let mut b = vec![0u8; n];
                     let r = {
@@ -1031,7 +1030,6 @@ impl Vm {
                     if matches!(self.block_mode(WaitSpec::Socket), BlockMode::Refuse) {
                         return Ok(self.sock_err(sock_would_block_msg("read")));
                     }
-                    let core = Arc::clone(&core);
                     return self.demote_block_socket(
                         fd,
                         poller::Interest::Read,
@@ -1181,7 +1179,6 @@ impl Vm {
                 if matches!(self.block_mode(WaitSpec::Socket), BlockMode::Refuse) {
                     return Ok(self.sock_err(sock_would_block_msg("write")));
                 }
-                let core = Arc::clone(&core);
                 let mut sent = sent;
                 self.demote_block_socket(fd, poller::Interest::Write, deadline, span, move |vm| {
                     let r = {
@@ -1316,7 +1313,6 @@ impl Vm {
                 if matches!(self.block_mode(WaitSpec::Socket), BlockMode::Refuse) {
                     return Ok(self.sock_err(sock_would_block_msg("accept")));
                 }
-                let core = Arc::clone(&core);
                 self.demote_block_socket(fd, poller::Interest::Read, deadline, span, move |vm| {
                     let r = {
                         let guard = core.listener.lock().unwrap_or_else(|e| e.into_inner());
@@ -3010,6 +3006,70 @@ impl Vm {
         }
     }
 
+    /// TICKET-192 — the ONE probe of a stored `RwShared` `Map`/`Set`: which position holds a key equal
+    /// to `needle` (whose hash is `qh`)? Walks the `HashIndex` candidates for `qh`, so it is O(1)
+    /// expected. Returns the position and, when `with_value`, the rebuilt value of a `Map` entry.
+    ///
+    /// Per candidate it takes the read guard, clones the key wire (and the value wire), rebuilds both
+    /// with ONE `from_wire_piece` map per entry (DEC-154), and DROPS the guard before the `eq`, which
+    /// may run user code that re-enters this box. Each guard re-reads `core.generation`: if it moved
+    /// since the first guard, a write shifted positions under the probe and it restarts from the first
+    /// candidate. A miss is therefore exact as of the last guard, and a hit was present as of its own.
+    ///
+    /// `Ok(None)` also covers a stored value that is no longer a `Map`/`Set` (a concurrent `set`);
+    /// the callers check the element kind before probing.
+    pub(super) fn rwshared_probe(
+        &mut self,
+        core: &Arc<RwSharedCore>,
+        qh: u64,
+        needle: Value,
+        with_value: bool,
+        span: Span,
+    ) -> Result<Option<(usize, Option<Value>)>, RuntimeError> {
+        'restart: loop {
+            let mut first_gen: Option<u64> = None;
+            let mut j = 0;
+            loop {
+                let (pos, k, v) = {
+                    let g = core.v.read().unwrap();
+                    let now = core.generation.load(std::sync::atomic::Ordering::Relaxed);
+                    match first_gen {
+                        None => first_gen = Some(now),
+                        Some(was) if was != now => continue 'restart,
+                        Some(_) => {}
+                    }
+                    let (pos, kw, vw) = match &*g {
+                        WireValue::Map { entries, .. } => match entries.candidates(qh).get(j) {
+                            Some(&p) => (
+                                p,
+                                entries[p].1.clone(),
+                                with_value.then(|| entries[p].2.clone()),
+                            ),
+                            None => return Ok(None),
+                        },
+                        WireValue::Set { entries, .. } => match entries.candidates(qh).get(j) {
+                            Some(&p) => (p, entries[p].1.clone(), None),
+                            None => return Ok(None),
+                        },
+                        _ => return Ok(None),
+                    };
+                    // TICKET-154: ONE map per ENTRY, so a value that aliases its own key rebuilds as
+                    // one object.
+                    let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
+                    let k = self.from_wire_piece(&g, kw, &mut rb);
+                    let v = vw.map(|vw| self.from_wire_piece(&g, vw, &mut rb));
+                    (pos, k, v)
+                };
+                // ROOT both reconstructions (fresh, Rust-local) across the possibly re-entrant eq.
+                let roots = [k, v.unwrap_or_else(Value::nil)];
+                if self.with_roots(&roots, |vm| vm.values_equal_guarded(k, needle, 0, span))? {
+                    return Ok(Some((pos, v)));
+                }
+                j += 1;
+            }
+        }
+    }
+
     /// `RwShared[T]` methods: `get`/`set` (read/write-guarded copy out/in), `read(f)` (SHARED read
     /// guard: clone out, drop guard, run `f`, return its result — NO write-back), `write(f)`
     /// (EXCLUSIVE write guard: a write-locked read-modify-write, the `Shared.update` shape under a
@@ -3326,10 +3386,9 @@ impl Vm {
                 Ok(acc)
             }
             // Set[E] membership: hash the query element ONCE (guard NOT held — `hash_value` may
-            // dispatch a user `hash`/GC), then LINEAR probe: per element re-lock, compare the cached
-            // wire hash under the guard, and only on a hash-match clone the element wire, DROP the
-            // guard, `from_wire`, and `values_equal_guarded` (collisions keep scanning). The guard is
-            // NEVER held across hash/eq (same deadlock invariant as `for_each`/`fold`).
+            // dispatch a user `hash`/GC), then `rwshared_probe` (TICKET-192): the stored table's
+            // `HashIndex` candidates only, each cloned under a guard that is DROPPED before the eq.
+            // The guard is NEVER held across hash/eq (same deadlock invariant as `for_each`/`fold`).
             "contains" => {
                 self.arity_err("contains", args, 1, span)?;
                 let needle = args[0];
@@ -3340,8 +3399,8 @@ impl Vm {
                 // non-RwShared Set `in` path (arith.rs:913).
                 let qh = self.hash_key_rooted(needle, &[Value::obj(h), needle], span)?;
                 let core = self.rwshared_core(h);
-                let n = match &*core.v.read().unwrap() {
-                    WireValue::Set { entries, .. } => entries.len(),
+                match &*core.v.read().unwrap() {
+                    WireValue::Set { .. } => {}
                     _ => {
                         return Err(
                             self.err("RwShared.contains requires a set element".into(), span)
@@ -3350,33 +3409,9 @@ impl Vm {
                 };
                 self.push(Value::obj(h)); // root the receiver
                 self.push(needle); // root the query element across from_wire/eq (may GC)
-                let mut found = false;
-                for i in 0..n {
-                    // Clone AND rebuild the element under ONE guard (W7-11 — see the arm header), then
-                    // drop it at block end, before the `eq` probe re-enters the VM.
-                    let e = {
-                        let g = core.v.read().unwrap();
-                        let entries = match &*g {
-                            WireValue::Set { entries, .. } => entries,
-                            _ => break,
-                        };
-                        if i >= entries.len() {
-                            break;
-                        }
-                        if entries[i].0 != qh {
-                            continue; // hash miss — keep scanning
-                        }
-                        let ew = entries[i].1.clone();
-                        let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
-                        self.from_wire_piece(&g, ew, &mut rb)
-                    };
-                    // ROOT the wire-reconstructed element: it is a fresh allocation held only in a
-                    // Rust local, and since M23 the eq may dispatch a user `eq` (VM re-entry → GC).
-                    if self.with_roots(&[e], |vm| vm.values_equal_guarded(e, needle, 0, span))? {
-                        found = true;
-                        break;
-                    }
-                }
+                let found = self
+                    .rwshared_probe(&core, qh, needle, false, span)?
+                    .is_some();
                 self.pop();
                 self.pop();
                 Ok(Value::bool(found))
@@ -3391,44 +3426,19 @@ impl Vm {
                 // non-RwShared Map path (arith.rs:921).
                 let qh = self.hash_key_rooted(key, &[Value::obj(h), key], span)?;
                 let core = self.rwshared_core(h);
-                let n = match &*core.v.read().unwrap() {
-                    WireValue::Map { entries, .. } => entries.len(),
+                match &*core.v.read().unwrap() {
+                    WireValue::Map { .. } => {}
                     _ => return Err(self.err("RwShared.has requires a map element".into(), span)),
                 };
                 self.push(Value::obj(h));
                 self.push(key);
-                let mut found = false;
-                for i in 0..n {
-                    // Clone AND rebuild the key under ONE guard (W7-11 — see the arm header).
-                    let k = {
-                        let g = core.v.read().unwrap();
-                        let entries = match &*g {
-                            WireValue::Map { entries, .. } => entries,
-                            _ => break,
-                        };
-                        if i >= entries.len() {
-                            break;
-                        }
-                        if entries[i].0 != qh {
-                            continue;
-                        }
-                        let kw = entries[i].1.clone();
-                        let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
-                        self.from_wire_piece(&g, kw, &mut rb)
-                    };
-                    // ROOT the wire-reconstructed key (fresh, Rust-local) across the possibly
-                    // re-entrant eq — see the `contains` arm.
-                    if self.with_roots(&[k], |vm| vm.values_equal_guarded(k, key, 0, span))? {
-                        found = true;
-                        break;
-                    }
-                }
+                let found = self.rwshared_probe(&core, qh, key, false, span)?.is_some();
                 self.pop();
                 self.pop();
                 Ok(Value::bool(found))
             }
-            // Map[K,V].get_key(k) -> Option[V] — probe as `has`, but on an eq-match `from_wire` the
-            // VALUE wire and return `Some(v)`; `None` on a full miss.
+            // Map[K,V].get_key(k) -> Option[V] — probe as `has`, rebuilding the VALUE wire under the
+            // same guard as the key; `Some(v)` on an eq-match, `None` on a miss.
             "get_key" => {
                 self.arity_err("get_key", args, 1, span)?;
                 let key = args[0];
@@ -3437,8 +3447,8 @@ impl Vm {
                 // non-RwShared Map path (arith.rs:921).
                 let qh = self.hash_key_rooted(key, &[Value::obj(h), key], span)?;
                 let core = self.rwshared_core(h);
-                let n = match &*core.v.read().unwrap() {
-                    WireValue::Map { entries, .. } => entries.len(),
+                match &*core.v.read().unwrap() {
+                    WireValue::Map { .. } => {}
                     _ => {
                         return Err(
                             self.err("RwShared.get_key requires a map element".into(), span)
@@ -3447,41 +3457,9 @@ impl Vm {
                 };
                 self.push(Value::obj(h));
                 self.push(key);
-                let mut result: Option<Value> = None;
-                for i in 0..n {
-                    // Clone AND rebuild BOTH key and value on a hash-match under ONE lock acquire
-                    // (W7-11 — the rebuild must see the same serialization the wires came from), DROP
-                    // the guard, then eq the reconstructed key — if it matches, the value is in hand.
-                    // The value is rebuilt eagerly rather than after the eq, which is what keeps this
-                    // to one guard; the cost is one extra rebuild per hash COLLISION that then fails
-                    // eq (rare by construction) and the wires were already cloned eagerly for the same
-                    // reason. BOTH reconstructions must be ROOTED across the eq: since M23
-                    // `values_equal_guarded` takes `&mut self` and may dispatch a user `eq` (VM
-                    // re-entry → GC), and `k`/`v` are fresh objects held only in Rust locals.
-                    let (k, v) = {
-                        let g = core.v.read().unwrap();
-                        let entries = match &*g {
-                            WireValue::Map { entries, .. } => entries,
-                            _ => break,
-                        };
-                        if i >= entries.len() {
-                            break;
-                        }
-                        if entries[i].0 != qh {
-                            continue;
-                        }
-                        let (kw, vw) = (entries[i].1.clone(), entries[i].2.clone());
-                        // TICKET-154: ONE map per ENTRY, so a value that aliases its own key
-                        // rebuilds as one object.
-                        let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
-                        let k = self.from_wire_piece(&g, kw, &mut rb);
-                        (k, self.from_wire_piece(&g, vw, &mut rb))
-                    };
-                    if self.with_roots(&[k, v], |vm| vm.values_equal_guarded(k, key, 0, span))? {
-                        result = Some(v);
-                        break;
-                    }
-                }
+                let result = self
+                    .rwshared_probe(&core, qh, key, true, span)?
+                    .and_then(|(_, v)| v);
                 self.pop();
                 self.pop();
                 Ok(match result {

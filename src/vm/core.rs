@@ -17,7 +17,7 @@ use super::wire::{WireGenState, WireValue};
 use crate::lexer::Span;
 use std::collections::{HashMap, VecDeque};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
@@ -736,6 +736,12 @@ pub struct RwSharedCore {
     pub v: RwLock<WireValue>,
     /// W6-7/W6-10 — cached GC summary of `v`. MUST be re-`set` under `v`'s write lock by every store.
     pub summary: WireSummary,
+    /// TICKET-192 — write generation of `v`, bumped under `v`'s write lock by every mutation. A probe
+    /// that drops the read guard to run a user `eq` re-reads it under the next guard and restarts when
+    /// it moved, so a concurrent remove that shifts positions cannot make a present key read as
+    /// missing. It lives on the core, not the table: a whole `set` replaces the table, and a counter
+    /// restarting with it could return to an old value.
+    pub generation: AtomicU64,
 }
 
 impl RwSharedCore {
@@ -745,6 +751,7 @@ impl RwSharedCore {
         let sum = wire_summary(&w);
         let mut g = self.v.write().unwrap();
         self.summary.store(sum.0, sum.1);
+        self.generation.fetch_add(1, Ordering::Relaxed);
         *g = w;
     }
 }
