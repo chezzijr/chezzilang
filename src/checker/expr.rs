@@ -211,7 +211,7 @@ impl Checker {
                 && let Some(mid) = self.imported_modules.get(mname).cloned()
                 && let Some(sig) = self.module_sigs.get(&mid).cloned()
                 && let Some(info) = sig.struct_defs.get(name)
-                && !sig.functions.contains_key(name)
+                && !sig.member(name).is_some_and(MemberSig::holds_fn)
             {
                 let key = self.type_key(&mid, name);
                 self.record_resolution(callee.id, Resolution::StructCtor(key.clone()), callee.span);
@@ -226,7 +226,7 @@ impl Checker {
                 && let Some(mid) = self.imported_modules.get(mname).cloned()
                 && let Some(sig) = self.module_sigs.get(&mid).cloned()
                 && let Some(info) = sig.newtype_defs.get(name)
-                && !sig.functions.contains_key(name)
+                && !sig.member(name).is_some_and(MemberSig::holds_fn)
             {
                 let key = self.type_key(&mid, name);
                 self.record_resolution(
@@ -826,13 +826,11 @@ impl Checker {
                         for (_, v) in named {
                             self.infer(v);
                         }
-                        let msg = match (&callee.kind, deny) {
-                            (ExprKind::Ident(n), super::globals::KwDeny::Redeclared) => {
-                                super::globals::kw_ambiguous_msg(n)
-                            }
-                            _ => "keyword arguments through a function value need a binding that holds one known function (`g := some_fn`, a closure literal, or a nested `fn`, never reassigned); this callee may hold any function of its type, whose parameter names can differ, so pass the arguments positionally".to_string(),
+                        let name = match &callee.kind {
+                            ExprKind::Ident(n) => Some(n.as_str()),
+                            _ => None,
                         };
-                        self.error(span, msg);
+                        self.error(span, super::globals::kw_deny_msg(name, deny));
                         return *ret;
                     }
                 };
@@ -2148,13 +2146,14 @@ impl Checker {
         Resolution::Member
     }
 
-    /// Does the whole-module import bound as `mname` declare a fn `name`? A same-named fn replaces
-    /// a type's ctor (DEC-029/055/172), so `lib.Q(..)` is that fn.
+    /// Does the slot `name` of the whole-module import bound as `mname` hold a function? A
+    /// same-named fn (or a `:=` fn value, TICKET-196) replaces a type's ctor (DEC-029/055/172), so
+    /// `lib.Q(..)` calls the slot.
     fn module_declares_fn(&self, mname: &str, name: &str) -> bool {
         self.imported_modules
             .get(mname)
             .and_then(|mid| self.module_sigs.get(mid))
-            .is_some_and(|sig| sig.functions.contains_key(name))
+            .is_some_and(|sig| sig.member(name).is_some_and(MemberSig::holds_fn))
     }
 
     #[allow(clippy::too_many_arguments)] // call shape + enum qualifier + hint + the head's NodeId
@@ -3035,7 +3034,7 @@ impl Checker {
                 .imported_modules
                 .get(mname)
                 .and_then(|id| self.module_sigs.get(id))
-                .and_then(|s| s.functions.get(method))
+                .and_then(|s| s.certain_fn(method))
                 .is_some_and(|sig| !sig.type_params.is_empty()),
             // Reserved built-in receiver types: their harvested methods live in the re-seeded bare
             // `structs` tables (setup.rs phases 4c/5a), same as a user struct. Without these arms a
@@ -3333,10 +3332,11 @@ impl Checker {
                     .get(mname)
                     .and_then(|id| self.module_sigs.get(id));
                 let is_poly = sig.is_some_and(|s| s.numeric_poly.contains(method));
-                let fsig = sig.and_then(|s| s.functions.get(method).cloned());
-                // W7-21 — the same member name in the VALUES namespace (a top-level `let`/`:=`),
-                // cloned here so the `sig` borrow ends before the first `&mut self` call below.
-                let vty = sig.and_then(|s| s.values.get(method).cloned());
+                // TICKET-196: the module's one export record for the slot, cloned here so the
+                // `sig` borrow ends before the first `&mut self` call below.
+                let member = sig.and_then(|s| s.member(method)).cloned();
+                let fsig = member.as_ref().and_then(|m| m.certain_fn.clone());
+                let vty = member.as_ref().map(|m| m.ty.clone());
                 // Editor hover (CASE 2): record `module.fn`'s native signature at the method name —
                 // covers plain, numeric-poly (`abs` has an arity fsig), and generic module fns.
                 if let Some(f) = &fsig {
@@ -3385,15 +3385,27 @@ impl Checker {
                     }
                     return fsig.ret;
                 }
+                // TICKET-196: a slot without `certain_fn` binds no labels, so a keyword call through
+                // it is denied, as through a same-module value callee.
+                if let Some(m) = member.as_ref().filter(|m| m.holds_fn())
+                    && let Some(c) = &self.call_ctx
+                    && !c.named.is_empty()
+                    && let Err(deny) = m.labels()
+                {
+                    let named = c.named.clone();
+                    self.consume_named();
+                    self.infer_all(args);
+                    for (_, v) in &named {
+                        self.infer(v);
+                    }
+                    self.error(span, super::globals::kw_deny_msg(Some(method), deny));
+                    return Ty::Unknown;
+                }
                 // W7-21 — a module GLOBAL that HOLDS a function value is callable through the module
-                // (`m.G()`), like CPython's `m.G()` and Go's `pkg.G()`. `ModuleSig` splits the member
-                // surface in two: a declared `fn` lands in `functions`, a top-level `let`/`:=` binding
-                // in `values` whatever its type. Only the VALUE path read `values`, so a `Ty::Func`
-                // there resolved as a value (`m.G`) but not as a call — with a diagnostic that denied
-                // the member existed at all. Mirrors the fn-typed-FIELD fallback in the struct arm.
-                // Editor hover, same as the `fsig` path above: the member's own `Ty::Func` IS what
-                // `record_method_hover` would build from an `FnSig`, so record it directly (no doc —
-                // a `values` member carries none).
+                // (`m.G()`), like CPython's `m.G()` and Go's `pkg.G()`. Mirrors the fn-typed-FIELD
+                // fallback in the struct arm. Editor hover, same as the `fsig` path above: the
+                // member's own `Ty::Func` IS what `record_method_hover` would build from an `FnSig`,
+                // so record it directly (no doc — a slot without `certain_fn` carries none).
                 if self.hover_probe.is_some()
                     && let Some(t @ (Ty::Func { .. } | Ty::BuiltinFn { .. })) = &vty
                 {

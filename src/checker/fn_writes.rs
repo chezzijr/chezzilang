@@ -1,6 +1,6 @@
 //! Proven writes made by statically named functions. Function values remain opaque.
 
-use super::{ChainLink, Checker, FnSig, ModuleSig, Ty};
+use super::{ChainLink, Checker, FnSig, Ty};
 use crate::ast::{BinaryOp, DeferTarget, Expr, ExprKind, FnDecl, SpawnTarget, Stmt, StmtKind};
 use std::collections::{HashMap, HashSet};
 
@@ -932,10 +932,9 @@ impl Checker {
                 if let ExprKind::Ident(module) = &obj.kind
                     && !self.head_is_value(module)
                     && let Some(mid) = self.imported_modules.get(module)
-                    && let Some(ModuleSig { functions, .. }) = self.module_sigs.get(mid)
+                    && let Some(msig) = self.module_sigs.get(mid)
                 {
-                    functions
-                        .get(name)
+                    msig.certain_fn(name)
                         .map(|sig: &FnSig| (name.clone(), sig.summary.clone()))
                 } else {
                     None
@@ -972,7 +971,7 @@ impl Checker {
                     .imported_modules
                     .get(m)
                     .and_then(|mid| self.module_sigs.get(mid))
-                    .and_then(|ms| ms.functions.get(f))
+                    .and_then(|ms| ms.certain_fn(f))
                 else {
                     return true;
                 };

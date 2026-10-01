@@ -9,9 +9,18 @@ pub(super) enum DeclKind {
     Let,
     ConstLet,
     Fn,
-    Import,
+    /// A whole-module or from-import; a from-import carries the facts of its home slot.
+    Import(ImportFacts),
     /// An `extern` fn or a `native` decl.
     Hoisted,
+}
+
+/// What an importer knows about the home slot of a from-imported name (TICKET-196), read from the
+/// home module's `MemberSig`. Default for a whole-module import.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) struct ImportFacts {
+    pub(super) is_const: bool,
+    pub(super) redeclared: bool,
 }
 
 /// The one record per module slot (TICKET-186), built by `collect_module_globals` before any body
@@ -64,9 +73,27 @@ pub(super) fn kw_ambiguous_msg(name: &str) -> String {
     )
 }
 
+/// The one keyword-deny text, for a callee `name` (`None`: not a bare name).
+pub(super) fn kw_deny_msg(name: Option<&str>, deny: KwDeny) -> String {
+    match (name, deny) {
+        (Some(name), KwDeny::Redeclared) => kw_ambiguous_msg(name),
+        _ => "keyword arguments through a function value need a binding that holds one known function (`g := some_fn`, a closure literal, or a nested `fn`, never reassigned); this callee may hold any function of its type, whose parameter names can differ, so pass the arguments positionally".to_string(),
+    }
+}
+
 impl GlobalBinding {
     pub(super) fn is_const(&self) -> bool {
-        self.decls.iter().any(|(k, _)| *k == DeclKind::ConstLet)
+        self.decls.iter().any(|(k, _)| match k {
+            DeclKind::ConstLet => true,
+            DeclKind::Import(f) => f.is_const,
+            _ => false,
+        })
+    }
+    /// A from-import of a slot its home module declares more than once.
+    pub(super) fn imported_redeclared(&self) -> bool {
+        self.decls
+            .iter()
+            .any(|(k, _)| matches!(k, DeclKind::Import(f) if f.redeclared))
     }
     pub(super) fn has_let(&self) -> bool {
         self.decls
@@ -90,7 +117,9 @@ impl GlobalBinding {
 
 impl Checker {
     /// Build `self.globals` from the module's top-level statements, in source order.
-    pub(super) fn collect_module_globals(&mut self, stmts: &[Stmt]) {
+    /// `imports` pairs each from-import with its home module, whose sig is already in
+    /// `module_sigs` (dependencies are checked first).
+    pub(super) fn collect_module_globals(&mut self, stmts: &[Stmt], imports: &[ResolvedImport]) {
         self.globals.clear();
         for s in stmts {
             let mut add = |name: &str, kind: DeclKind| {
@@ -120,11 +149,22 @@ impl Checker {
                     let name = alias
                         .clone()
                         .unwrap_or_else(|| path.last().cloned().unwrap_or_default());
-                    add(&name, DeclKind::Import);
+                    add(&name, DeclKind::Import(ImportFacts::default()));
                 }
                 StmtKind::Import(Import::From { names, .. }) => {
+                    let home = imports
+                        .iter()
+                        .find(|ri| ri.span == s.span)
+                        .and_then(|ri| self.module_sigs.get(&ri.target));
                     for (member, alias) in names {
-                        add(alias.as_ref().unwrap_or(member), DeclKind::Import);
+                        let facts = home.and_then(|sig| sig.member(member)).map_or_else(
+                            ImportFacts::default,
+                            |m| ImportFacts {
+                                is_const: m.is_const,
+                                redeclared: m.redeclared,
+                            },
+                        );
+                        add(alias.as_ref().unwrap_or(member), DeclKind::Import(facts));
                     }
                 }
                 StmtKind::Extern { fns, .. } => {
@@ -145,7 +185,12 @@ impl Checker {
             .iter()
             .filter(|(_, g)| g.is_const() && g.redeclared())
             .map(|(name, g)| {
-                let msg = if g.decls[0].0 == DeclKind::ConstLet {
+                let first_const = match g.decls[0].0 {
+                    DeclKind::ConstLet => true,
+                    DeclKind::Import(f) => f.is_const,
+                    _ => false,
+                };
+                let msg = if first_const {
                     format!("cannot re-declare const binding '{name}' (a const cannot be rebound — not even with ':=' or a new typed let)")
                 } else {
                     format!("'{name}' is declared both const and plain at module scope — a module global is one storage slot, so it cannot be const at one line and rebindable at another (declare it once)")
@@ -244,7 +289,15 @@ impl Checker {
             Some(_) => {
                 let key = (0, name.to_string());
                 if !self.kw_certain.contains(&key) {
-                    Err(KwDeny::NotOneFn)
+                    if self
+                        .globals
+                        .get(name)
+                        .is_some_and(|g| g.imported_redeclared())
+                    {
+                        Err(KwDeny::Redeclared)
+                    } else {
+                        Err(KwDeny::NotOneFn)
+                    }
                 } else if body_redeclared {
                     Err(KwDeny::Redeclared)
                 } else {

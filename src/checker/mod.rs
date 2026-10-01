@@ -793,16 +793,13 @@ struct VariantInfo {
     payload: Vec<Ty>,
 }
 
-/// A module's public surface, computed when it's checked, consumed by its importers: its top-level
-/// functions, top-level values (`:=` / typed lets), and the type names it declares.
+/// A module's public surface, computed when it's checked, consumed by its importers: one record
+/// per top-level slot (`members`), and the type names it declares.
 #[derive(Clone, Default)]
 struct ModuleSig {
-    functions: HashMap<String, FnSig>,
-    values: HashMap<String, Ty>,
-    /// Subset of `values` declared `const` (a `const` top-level let, or a native constant). Carried
-    /// across the module boundary so an importer's rebind of the name (`import PI from m; PI = x`, or
-    /// qualified `m.PI = x`) reports a const-specific message instead of the generic snapshot/field one.
-    const_values: std::collections::HashSet<String>,
+    /// TICKET-196: ONE export record per module slot (fn, extern, native, let, const let), built
+    /// from the defining module's `GlobalBinding`. Every importer path reads this and nothing else.
+    members: HashMap<String, MemberSig>,
     types: std::collections::HashSet<String>,
     /// Native functions whose result type follows their argument type (int args → int, float args
     /// → float) instead of the fixed `FnSig` (gap #12: `std.math` `abs`/`min`/`max`). The `FnSig`
@@ -829,6 +826,84 @@ struct ModuleSig {
     /// `ProtocolInfo` record (unlike a struct/enum, spread over several maps), so this wraps it
     /// rather than re-listing its fields.
     protocol_defs: HashMap<String, ProtocolSigInfo>,
+}
+
+/// What an importer may know about one exported module slot (TICKET-196). A new fact about an
+/// exported name is a new field here, never a new per-kind table on `ModuleSig`.
+#[derive(Clone)]
+struct MemberSig {
+    /// The slot's final type, once its module has finished initialising.
+    ty: Ty,
+    /// The one declaration the slot holds: set only when the module declares the name once as
+    /// `fn` / extern / native, which a fn slot keeps because it can never be assigned. Labels,
+    /// defaults, variadic, type params, witnesses, the write summary and the escape verdict are
+    /// read from here and nowhere else.
+    certain_fn: Option<FnSig>,
+    /// A `const` top-level let, or a native constant.
+    is_const: bool,
+    /// The home `GlobalBinding::redeclared()`.
+    redeclared: bool,
+}
+
+impl MemberSig {
+    /// May a keyword call bind this slot's labels?
+    fn labels(&self) -> Result<&FnSig, globals::KwDeny> {
+        match &self.certain_fn {
+            Some(f) => Ok(f),
+            None if self.redeclared => Err(globals::KwDeny::Redeclared),
+            None => Err(globals::KwDeny::NotOneFn),
+        }
+    }
+
+    /// The slot holds a function value.
+    fn holds_fn(&self) -> bool {
+        matches!(self.ty, Ty::Func { .. } | Ty::BuiltinFn { .. })
+    }
+}
+
+impl ModuleSig {
+    fn member(&self, n: &str) -> Option<&MemberSig> {
+        self.members.get(n)
+    }
+
+    fn certain_fn(&self, n: &str) -> Option<&FnSig> {
+        self.members.get(n).and_then(|m| m.certain_fn.as_ref())
+    }
+
+    fn fns(&self) -> impl Iterator<Item = (&String, &FnSig)> {
+        self.members
+            .iter()
+            .filter_map(|(n, m)| m.certain_fn.as_ref().map(|f| (n, f)))
+    }
+
+    fn value_ty(&self, n: &str) -> Option<&Ty> {
+        self.members.get(n).map(|m| &m.ty)
+    }
+
+    fn insert_fn(&mut self, n: String, f: FnSig) {
+        let ty = fn_value_ty(&f);
+        self.members.insert(
+            n,
+            MemberSig {
+                ty,
+                certain_fn: Some(f),
+                is_const: false,
+                redeclared: false,
+            },
+        );
+    }
+}
+
+/// The value type of a named fn: the FULL parameter list plus the optional arity, so both
+/// `f := request.get; f(url)` and `f(url, 5)` work.
+fn fn_value_ty(f: &FnSig) -> Ty {
+    Ty::Func {
+        params: f.params.clone(),
+        ret: Box::new(f.ret.clone()),
+        labels: FnLabels::new(f.labels.clone())
+            .with_min(f.min_params)
+            .with_variadic(f.variadic),
+    }
 }
 
 /// A protocol's exported shape inside a `ModuleSig`: the checker's own `ProtocolInfo`, plus the
@@ -1571,7 +1646,7 @@ impl Checker {
                     }
                 }
                 // A HYBRID native module carries BODIED Chezzi decls alongside its bodyless native
-                // ones: module-level `fn`s (PASS 2b harvested them into `sig.functions`) and
+                // ones: module-level `fn`s (PASS 2b harvested them into `sig.members`) and
                 // native-struct `bodied_methods` (`Reader.lines`, in the struct method table). The
                 // native arm skips `check_module`, so those bodies would go UNCHECKED — a `str`
                 // returned under an `int` sig would slip straight through. Type-check them here via the
@@ -1595,7 +1670,7 @@ impl Checker {
                     // `begin_module` cleared the live tables; repopulate the callables/types the
                     // harvested `sig` holds so a bodied body can call a sibling fn or name a sibling
                     // native struct (`-> Reader`).
-                    for (n, f) in &sig.functions {
+                    for (n, f) in sig.fns() {
                         c.functions.insert(n.clone(), f.clone());
                     }
                     for (n, info) in &sig.struct_defs {
@@ -1607,7 +1682,7 @@ impl Checker {
                     // align by index exactly as `check_module`'s top-level-fn path.
                     for s in &lm.ast.stmts {
                         if let StmtKind::Fn(decl) = &s.kind
-                            && let Some(fsig) = sig.functions.get(&decl.name).cloned()
+                            && let Some(fsig) = sig.certain_fn(&decl.name).cloned()
                         {
                             c.check_fn_body(decl, None, fsig);
                         }
@@ -1788,7 +1863,7 @@ impl Checker {
 fn native_module_sig(name: &str) -> ModuleSig {
     // Only the residual opcode/type-license modules still have a hand-built arm (concurrency's ctor
     // type names, time's `timer`, ffi's C-ABI type-license tail) — every one inserts ONLY `sig.types`,
-    // so there is no `func()`/`sig.functions` helper here anymore (all callable fns are file-backed and
+    // so there is no `func()`/`sig.members` helper here anymore (all callable fns are file-backed and
     // harvested from `std/<M>.chz`). See `is_file_backed_native` + `harvest_native_module`.
     let mut sig = ModuleSig::default();
     match name {
@@ -1823,10 +1898,10 @@ fn native_module_sig(name: &str) -> ModuleSig {
             // `timer` is ALSO declared there (as `native fn timer`) — but it's an opcode-backed builtin
             // (NOT a callable native member): it carries NO runtime value and lowers via the compiler's
             // name→opcode dispatch. Harvest routes its sig to the `time_timer_sig` field (NOT
-            // `sig.functions`, which the From-import arm would bind as a real callable). This arm keeps
+            // `sig.members`, which the From-import arm would bind as a real callable). This arm keeps
             // `timer` in `sig.types` ONLY so `import timer from std.time` validates membership and
             // `bind_import` records it into the per-module `imported_time` set; `infer_named_call` then
-            // accepts the bare `timer(ms)` call only in a module that imported it. (Its `sig.functions`
+            // accepts the bare `timer(ms)` call only in a module that imported it. (Its `sig.members`
             // entry stays absent by design — see `harvest_native_module` PASS 2.)
             sig.types.insert("timer".to_string());
         }
@@ -1884,16 +1959,27 @@ fn native_module_sig(name: &str) -> ModuleSig {
 fn attach_native_module_metadata(name: &str, sig: &mut ModuleSig) {
     if let Some((_, docs)) = MODULE_FN_DOCS.iter().find(|(m, _)| *m == name) {
         for (fname, doc) in *docs {
-            if let Some(f) = sig.functions.get_mut(*fname) {
+            if let Some(f) = sig
+                .members
+                .get_mut(*fname)
+                .and_then(|m| m.certain_fn.as_mut())
+            {
                 f.doc = Some((*doc).to_string());
             }
         }
     }
     for (cname, _) in crate::native::native_consts(name) {
-        sig.values.insert((*cname).to_string(), Ty::Float);
         // A native module constant (`math.pi`/`e`/`inf`/`nan`) is immutable — mark it const so a
         // rebind (`m.pi = x` or `import pi from m; pi = x`) reports it as const, not a mutable field.
-        sig.const_values.insert((*cname).to_string());
+        sig.members.insert(
+            (*cname).to_string(),
+            MemberSig {
+                ty: Ty::Float,
+                certain_fn: None,
+                is_const: true,
+                redeclared: false,
+            },
+        );
     }
     if let Some((_, polys)) = MODULE_NUMERIC_POLY.iter().find(|(m, _)| *m == name) {
         for p in *polys {
@@ -2433,10 +2519,6 @@ struct Checker {
     /// the qualified form (`st.COUNT = 5`). Mutating THROUGH the binding (`LST.push(7)`) is untouched:
     /// a container is the same heap object. Per-module: cleared in `begin_module`.
     imported_values: HashMap<String, String>,
-    /// Subset of `imported_values` whose source binding was `const` (a native constant, or a `const`
-    /// top-level let). The rebind guard reports these as const rather than as a mutable snapshot copy.
-    /// Per-module: cleared in `begin_module` alongside `imported_values`.
-    imported_consts: std::collections::HashSet<String>,
     /// Fixed-width C-ABI integer TYPE names (`int8`..`uint64`) imported into the *current* module from
     /// `std.ffi` (`import int32 from std.ffi`). These are NOT callable values — they only gate
     /// `resolve_type`, which maps a width name to `Ty::Int` iff it's in this set (else an unknown-type
@@ -2614,7 +2696,7 @@ struct Checker {
     /// The harvested `FnSig` for `std.time`'s `timer(ms) -> Channel[bool]`, captured from the
     /// file-backed `std/time.chz` harvest. `timer` is a BARE-CALLABLE opcode builtin (lowers to
     /// `Op::NewTimer`, carries no runtime value), so — unlike now/monotonic/sleep_ms/format — its sig is
-    /// routed HERE by `harvest_native_module` rather than into `sig.functions` (which the From-import arm
+    /// routed HERE by `harvest_native_module` rather than into `sig.members` (which the From-import arm
     /// would bind as a normal callable, breaking bare-callability). The bare `timer(...)` expr arm reads
     /// its arg/return types from this field; the import-license stays in `sig.types`. `None` until
     /// std.time is harvested (and on the lone single-module `check` path with no graph — the arm falls

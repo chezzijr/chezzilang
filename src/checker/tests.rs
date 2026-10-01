@@ -14381,7 +14381,7 @@ fn every_native_container_method_is_classified_by_its_return_type() {
 fn regex_sig_from_file_not_native_module_sig() {
     let sig = native_module_sig("std.regex");
     assert!(
-        sig.functions.is_empty(),
+        sig.fns().next().is_none(),
         "regex fns must no longer be hand-built in native_module_sig (harvested from std/regex.chz)"
     );
     assert!(
@@ -14397,7 +14397,7 @@ fn regex_sig_from_file_not_native_module_sig() {
     // `native_module_sig` exports NOTHING for them (the whole sig comes from the parsed .chz).
     let req = native_module_sig("std.request");
     assert!(
-        req.functions.is_empty(),
+        req.fns().next().is_none(),
         "std.request fns must be harvested from std/request.chz, not native_module_sig"
     );
     assert!(
@@ -14407,7 +14407,7 @@ fn regex_sig_from_file_not_native_module_sig() {
     assert!(!req.types.contains("Response"));
     let proc = native_module_sig("std.process");
     assert!(
-        proc.functions.is_empty(),
+        proc.fns().next().is_none(),
         "std.process fns must be harvested from std/process.chz, not native_module_sig"
     );
     assert!(
@@ -14453,14 +14453,13 @@ fn regex_fn_sigs_exact() {
         ),
     ];
     assert_eq!(
-        sig.functions.len(),
+        sig.fns().count(),
         expected.len(),
         "std.regex must export exactly the 6 regex fns"
     );
     for (name, params, ret) in &expected {
         let fs = sig
-            .functions
-            .get(*name)
+            .certain_fn(*name)
             .unwrap_or_else(|| panic!("std.regex ModuleSig missing fn '{name}'"));
         assert_eq!(&fs.params, params, "fn '{name}' params drifted");
         assert_eq!(&fs.ret, ret, "fn '{name}' return drifted");
@@ -14512,7 +14511,7 @@ fn regex_chz_match_matches_handbuilt_layouts() {
     assert!(harvested.methods.is_empty());
     assert!(matches!(harvested.origin, StructOrigin::Builtin));
     // The harvest must ALSO have populated the 6 fn sigs (whole-module signature source).
-    assert_eq!(sig.functions.len(), 6, "std/regex.chz must harvest 6 fns");
+    assert_eq!(sig.fns().count(), 6, "std/regex.chz must harvest 6 fns");
     // seed_stdlib_structs's hand-built Match copy (globally-present layout) must agree.
     let seeded = c.structs.get("Match").expect("Match must be seeded");
     assert_eq!(
@@ -14565,7 +14564,7 @@ fn harvest_optional_tail_from_trailing_default() {
     let mut c = Checker::new();
     let mut sig = ModuleSig::default();
     c.harvest_native_module(&ast, &mut sig);
-    let fs = sig.functions.get("f").expect("harvest must export fn f");
+    let fs = sig.certain_fn("f").expect("harvest must export fn f");
     assert_eq!(fs.params, vec![Ty::Str, Ty::Int], "params drifted");
     assert_eq!(fs.min_params, 1, "trailing default → min_params = len-1");
     assert_eq!(fs.params.len(), 2);
@@ -14573,7 +14572,7 @@ fn harvest_optional_tail_from_trailing_default() {
     let ast2 = parse_native_src("native fn g(a: str, b: int) -> Result[bool]\n");
     let mut sig2 = ModuleSig::default();
     c.harvest_native_module(&ast2, &mut sig2);
-    let gs = sig2.functions.get("g").unwrap();
+    let gs = sig2.certain_fn("g").unwrap();
     assert_eq!(gs.min_params, 2, "no defaults → min_params == len");
 }
 
@@ -14601,11 +14600,10 @@ fn process_fn_sigs_exact() {
             2,
         ),
     ];
-    assert_eq!(sig.functions.len(), expected.len(), "std.process fn count");
+    assert_eq!(sig.fns().count(), expected.len(), "std.process fn count");
     for (name, params, ret, minp) in &expected {
         let fs = sig
-            .functions
-            .get(*name)
+            .certain_fn(*name)
             .unwrap_or_else(|| panic!("std.process missing fn '{name}'"));
         assert_eq!(&fs.params, params, "fn '{name}' params drifted");
         assert_eq!(&fs.ret, ret, "fn '{name}' return drifted");
@@ -14665,11 +14663,10 @@ fn request_fn_sigs_exact() {
         ("delete", vec![Ty::Str], Ty::result(resp()), 1),
         ("head", vec![Ty::Str], Ty::result(resp()), 1),
     ];
-    assert_eq!(sig.functions.len(), expected.len(), "std.request fn count");
+    assert_eq!(sig.fns().count(), expected.len(), "std.request fn count");
     for (name, params, ret, minp) in &expected {
         let fs = sig
-            .functions
-            .get(*name)
+            .certain_fn(*name)
             .unwrap_or_else(|| panic!("std.request missing fn '{name}'"));
         assert_eq!(&fs.params, params, "fn '{name}' params drifted");
         assert_eq!(&fs.ret, ret, "fn '{name}' return drifted");
@@ -14733,7 +14730,7 @@ fn procresult_chz_matches_handbuilt_layouts() {
     assert!(harvested.methods.is_empty());
     assert!(matches!(harvested.origin, StructOrigin::Builtin));
     // 3 str-returning fns + the 2 W6-4 bytes twins (`run_bytes` / `run_args_bytes`).
-    assert_eq!(sig.functions.len(), 5, "std/process.chz must harvest 5 fns");
+    assert_eq!(sig.fns().count(), 5, "std/process.chz must harvest 5 fns");
     // seed_stdlib_structs's copy must agree.
     let seeded = c.structs.get("ProcResult").expect("ProcResult seeded");
     assert_eq!(seeded.fields, expected, "seeded ProcResult drifted");
@@ -14767,7 +14764,7 @@ fn response_chz_matches_handbuilt_layouts() {
     assert!(harvested.type_params.is_empty());
     assert!(harvested.methods.is_empty());
     assert!(matches!(harvested.origin, StructOrigin::Builtin));
-    assert_eq!(sig.functions.len(), 8, "std/request.chz must harvest 8 fns");
+    assert_eq!(sig.fns().count(), 8, "std/request.chz must harvest 8 fns");
     let seeded = c.structs.get("Response").expect("Response seeded");
     assert_eq!(seeded.fields, expected, "seeded Response drifted");
     assert!(
@@ -14788,11 +14785,11 @@ fn math_io_os_rand_fs_sig_from_file_not_native_module_sig() {
     for m in ["std.math", "std.io", "std.os", "std.rand", "std.fs"] {
         let sig = native_module_sig(m);
         assert!(
-            sig.functions.is_empty(),
+            sig.fns().next().is_none(),
             "{m} fns must no longer be hand-built in native_module_sig (harvested from std/<M>.chz)"
         );
         assert!(
-            sig.values.is_empty(),
+            sig.members.values().all(|m| m.certain_fn.is_some()),
             "{m} values must no longer be hand-built in native_module_sig"
         );
         assert!(
@@ -14814,26 +14811,26 @@ fn math_io_os_rand_fs_sig_from_file_not_native_module_sig() {
 fn math_io_os_rand_fs_representative_sigs_exact() {
     // (module, fn, params, ret)
     let math = native_module_sig_via_graph("math");
-    let sqrt = math.functions.get("sqrt").expect("math.sqrt");
+    let sqrt = math.certain_fn("sqrt").expect("math.sqrt");
     assert_eq!(sqrt.params, vec![Ty::Float]);
     assert_eq!(sqrt.ret, Ty::Float);
-    let pow = math.functions.get("pow").expect("math.pow");
+    let pow = math.certain_fn("pow").expect("math.pow");
     assert_eq!(pow.params, vec![Ty::Float, Ty::Float]);
     assert_eq!(pow.ret, Ty::Float);
-    let is_nan = math.functions.get("is_nan").expect("math.is_nan");
+    let is_nan = math.certain_fn("is_nan").expect("math.is_nan");
     assert_eq!(is_nan.ret, Ty::Bool);
     // math.pi / math.e are float module VALUES (not fns) — reattached from native_consts.
-    assert_eq!(math.values.get("pi"), Some(&Ty::Float));
-    assert_eq!(math.values.get("e"), Some(&Ty::Float));
+    assert_eq!(math.value_ty("pi"), Some(&Ty::Float));
+    assert_eq!(math.value_ty("e"), Some(&Ty::Float));
     // math.abs is numeric-polymorphic — reattached from MODULE_NUMERIC_POLY.
     assert!(math.numeric_poly.contains("abs"));
     // `divmod` is a BODIED Chezzi fn harvested as a module member alongside the native decls (the
     // hybrid native+Chezzi module form) — it counts as an exported fn.
-    let divmod = math.functions.get("divmod").expect("math.divmod");
+    let divmod = math.certain_fn("divmod").expect("math.divmod");
     assert_eq!(divmod.params, vec![Ty::Int, Ty::Int]);
     assert_eq!(divmod.ret, Ty::Tuple(vec![Ty::Int, Ty::Int]));
     assert_eq!(
-        math.functions.len(),
+        math.fns().count(),
         32,
         "std.math must export exactly 32 fns (31 native + bodied `divmod`)"
     );
@@ -14843,40 +14840,31 @@ fn math_io_os_rand_fs_representative_sigs_exact() {
         Ty::Protocol("PathLike".into(), vec![])
     }
     let io = native_module_sig_via_graph("io");
-    let print = io.functions.get("print").expect("io.print");
+    let print = io.certain_fn("print").expect("io.print");
     assert_eq!(print.params, vec![Ty::Str]);
     assert_eq!(print.ret, Ty::Nil, "io.print must return nil, not Unknown");
     // W7-8 — every path param is `PathLike` now (a bare `str` literal still binds to it).
-    let write_file = io.functions.get("write_file").expect("io.write_file");
+    let write_file = io.certain_fn("write_file").expect("io.write_file");
     assert_eq!(write_file.params, vec![pathlike(), Ty::Str]);
     assert_eq!(write_file.ret, Ty::result(Ty::Nil));
-    assert_eq!(
-        io.functions.get("read_line").unwrap().ret,
-        Ty::option(Ty::Str)
-    );
-    assert_eq!(io.functions.get("input").unwrap().params, vec![Ty::Str]);
-    assert_eq!(io.functions.get("input").unwrap().ret, Ty::option(Ty::Str));
-    assert_eq!(io.functions.get("flush").unwrap().ret, Ty::Nil);
+    assert_eq!(io.certain_fn("read_line").unwrap().ret, Ty::option(Ty::Str));
+    assert_eq!(io.certain_fn("input").unwrap().params, vec![Ty::Str]);
+    assert_eq!(io.certain_fn("input").unwrap().ret, Ty::option(Ty::Str));
+    assert_eq!(io.certain_fn("flush").unwrap().ret, Ty::Nil);
     // R1 — the binary whole-file twins.
-    let read_bytes = io.functions.get("read_bytes").expect("io.read_bytes");
+    let read_bytes = io.certain_fn("read_bytes").expect("io.read_bytes");
     assert_eq!(read_bytes.params, vec![pathlike()]);
     assert_eq!(read_bytes.ret, Ty::result(Ty::Bytes));
-    let write_bytes = io.functions.get("write_bytes").expect("io.write_bytes");
+    let write_bytes = io.certain_fn("write_bytes").expect("io.write_bytes");
     assert_eq!(write_bytes.params, vec![pathlike(), Ty::Bytes]);
     assert_eq!(write_bytes.ret, Ty::result(Ty::Nil));
     // R2 — the Writer openers/handles. `create`/`append` -> Result[Writer]; `stdout`/`stderr` -> Writer;
     // `buffered(w, size = 8192)` -> Writer (optional-tail size ⇒ min_params 1).
-    assert_eq!(io.functions.get("create").unwrap().params, vec![pathlike()]);
-    assert_eq!(
-        io.functions.get("create").unwrap().ret,
-        Ty::result(Ty::Writer)
-    );
-    assert_eq!(
-        io.functions.get("append").unwrap().ret,
-        Ty::result(Ty::Writer)
-    );
-    assert_eq!(io.functions.get("stdout").unwrap().ret, Ty::Writer);
-    let buffered = io.functions.get("buffered").expect("io.buffered");
+    assert_eq!(io.certain_fn("create").unwrap().params, vec![pathlike()]);
+    assert_eq!(io.certain_fn("create").unwrap().ret, Ty::result(Ty::Writer));
+    assert_eq!(io.certain_fn("append").unwrap().ret, Ty::result(Ty::Writer));
+    assert_eq!(io.certain_fn("stdout").unwrap().ret, Ty::Writer);
+    let buffered = io.certain_fn("buffered").expect("io.buffered");
     assert_eq!(buffered.params, vec![Ty::Writer, Ty::Int]);
     assert_eq!(buffered.min_params, 1);
     assert_eq!(buffered.ret, Ty::Writer);
@@ -14892,11 +14880,8 @@ fn math_io_os_rand_fs_representative_sigs_exact() {
     );
     // R2b — the Reader opener + method table. `open` -> Result[Reader]; `read_line` -> Option[str];
     // `read_bytes(n)` -> Result[bytes]; `close` -> Result[nil].
-    assert_eq!(io.functions.get("open").unwrap().params, vec![pathlike()]);
-    assert_eq!(
-        io.functions.get("open").unwrap().ret,
-        Ty::result(Ty::Reader)
-    );
+    assert_eq!(io.certain_fn("open").unwrap().params, vec![pathlike()]);
+    assert_eq!(io.certain_fn("open").unwrap().ret, Ty::result(Ty::Reader));
     let reader = io.struct_defs.get("Reader").expect("io Reader struct_def");
     assert_eq!(
         reader.methods.get("read_line").unwrap().ret,
@@ -14910,87 +14895,81 @@ fn math_io_os_rand_fs_representative_sigs_exact() {
         reader.methods.get("close").unwrap().ret,
         Ty::result(Ty::Nil)
     );
-    assert_eq!(io.functions.get("isatty").unwrap().params, Vec::<Ty>::new());
-    assert_eq!(io.functions.get("isatty").unwrap().ret, Ty::Bool);
+    assert_eq!(io.certain_fn("isatty").unwrap().params, Vec::<Ty>::new());
+    assert_eq!(io.certain_fn("isatty").unwrap().ret, Ty::Bool);
     // 20 public fns + the 7 `_`-prefixed internal byte-seam natives (W7-8).
-    assert_eq!(io.functions.len(), 27);
+    assert_eq!(io.fns().count(), 27);
 
     let os = native_module_sig_via_graph("os");
     // W7-8 — `getcwd` hands back a `path.Path` (raw OS bytes), NOT a lossily-decoded `str`.
     assert_eq!(
-        os.functions.get("getcwd").unwrap().ret,
+        os.certain_fn("getcwd").unwrap().ret,
         Ty::result(Ty::Struct("Path".into(), vec![]))
     );
-    assert_eq!(os.functions.get("args").unwrap().ret, Ty::list(Ty::Str));
-    assert_eq!(os.functions.get("env").unwrap().ret, Ty::option(Ty::Str));
-    let exit = os.functions.get("exit").expect("os.exit");
+    assert_eq!(os.certain_fn("args").unwrap().ret, Ty::list(Ty::Str));
+    assert_eq!(os.certain_fn("env").unwrap().ret, Ty::option(Ty::Str));
+    let exit = os.certain_fn("exit").expect("os.exit");
     assert_eq!(exit.params, vec![Ty::Int]);
     assert_eq!(exit.ret, Ty::Nil);
     // gaps §6 system query + mutation fns.
-    assert_eq!(os.functions.get("getpid").unwrap().ret, Ty::Int);
-    assert_eq!(os.functions.get("platform").unwrap().ret, Ty::Str);
-    assert_eq!(
-        os.functions.get("hostname").unwrap().ret,
-        Ty::option(Ty::Str)
-    );
-    assert_eq!(
-        os.functions.get("home_dir").unwrap().ret,
-        Ty::option(Ty::Str)
-    );
+    assert_eq!(os.certain_fn("getpid").unwrap().ret, Ty::Int);
+    assert_eq!(os.certain_fn("platform").unwrap().ret, Ty::Str);
+    assert_eq!(os.certain_fn("hostname").unwrap().ret, Ty::option(Ty::Str));
+    assert_eq!(os.certain_fn("home_dir").unwrap().ret, Ty::option(Ty::Str));
     // W7-8 (review) — `temp_dir` hands back a `path.Path` too: `$TMPDIR` is raw OS bytes, and
     // decoding it left a path-RETURNING API through which a U+FFFD path was still constructible.
     assert_eq!(
-        os.functions.get("temp_dir").unwrap().ret,
+        os.certain_fn("temp_dir").unwrap().ret,
         Ty::Struct("Path".into(), vec![])
     );
     assert_eq!(
-        os.functions.get("environ").unwrap().ret,
+        os.certain_fn("environ").unwrap().ret,
         Ty::map(Ty::Str, Ty::Str)
     );
-    let setenv = os.functions.get("setenv").expect("os.setenv");
+    let setenv = os.certain_fn("setenv").expect("os.setenv");
     assert_eq!(setenv.params, vec![Ty::Str, Ty::Str]);
     assert_eq!(setenv.ret, Ty::Nil);
-    assert_eq!(os.functions.get("chdir").unwrap().ret, Ty::result(Ty::Nil));
+    assert_eq!(os.certain_fn("chdir").unwrap().ret, Ty::result(Ty::Nil));
     // 12 public fns + the 3 `_`-prefixed internal byte-seam natives (W7-8).
-    assert_eq!(os.functions.len(), 15);
+    assert_eq!(os.fns().count(), 15);
 
     let rand = native_module_sig_via_graph("rand");
-    let ri = rand.functions.get("int").expect("rand.int");
+    let ri = rand.certain_fn("int").expect("rand.int");
     assert_eq!(ri.params, vec![Ty::Int, Ty::Int]);
     assert_eq!(ri.ret, Ty::Int);
-    assert_eq!(rand.functions.get("float").unwrap().ret, Ty::Float);
-    assert_eq!(rand.functions.get("bool").unwrap().ret, Ty::Bool);
-    assert_eq!(rand.functions.get("seed").unwrap().ret, Ty::Nil);
-    assert_eq!(rand.functions.len(), 4);
+    assert_eq!(rand.certain_fn("float").unwrap().ret, Ty::Float);
+    assert_eq!(rand.certain_fn("bool").unwrap().ret, Ty::Bool);
+    assert_eq!(rand.certain_fn("seed").unwrap().ret, Ty::Nil);
+    assert_eq!(rand.fns().count(), 4);
 
     let fs = native_module_sig_via_graph("fs");
     // W7-8 — `PathLike` in, `path.Path` out.
-    let list_dir = fs.functions.get("list_dir").expect("fs.list_dir");
+    let list_dir = fs.certain_fn("list_dir").expect("fs.list_dir");
     assert_eq!(list_dir.params, vec![pathlike()]);
     assert_eq!(
         list_dir.ret,
         Ty::result(Ty::list(Ty::Struct("Path".into(), vec![])))
     );
-    assert_eq!(fs.functions.get("exists").unwrap().ret, Ty::Bool);
-    assert_eq!(fs.functions.get("size").unwrap().ret, Ty::result(Ty::Int));
-    assert_eq!(fs.functions.get("mkdir").unwrap().ret, Ty::result(Ty::Nil));
+    assert_eq!(fs.certain_fn("exists").unwrap().ret, Ty::Bool);
+    assert_eq!(fs.certain_fn("size").unwrap().ret, Ty::result(Ty::Int));
+    assert_eq!(fs.certain_fn("mkdir").unwrap().ret, Ty::result(Ty::Nil));
     // fs-trio (fs grab-bag): canonicalize -> Result[str], chmod(str,int) -> Result[nil], atomic_write.
     assert_eq!(
-        fs.functions.get("canonicalize").unwrap().ret,
+        fs.certain_fn("canonicalize").unwrap().ret,
         Ty::result(Ty::Struct("Path".into(), vec![]))
     );
     assert_eq!(
-        fs.functions.get("chmod").unwrap().params,
+        fs.certain_fn("chmod").unwrap().params,
         vec![pathlike(), Ty::Int]
     );
     assert_eq!(
-        fs.functions.get("atomic_write").unwrap().ret,
+        fs.certain_fn("atomic_write").unwrap().ret,
         Ty::result(Ty::Nil)
     );
     // --- fs.stat/fs.walk (gaps §6 metadata READ + recursive walk): 15 + stat + walk = 17.
     // (FileInfo is a native struct, not a function — not counted here.)
     // 17 public fns + the 17 `_`-prefixed internal byte-seam natives + the `_wrap_many` helper (W7-8).
-    assert_eq!(fs.functions.len(), 35);
+    assert_eq!(fs.fns().count(), 35);
 }
 
 /// Hybrid native+Chezzi module: a BODIED `fn` (`math.divmod`) declared alongside the bodyless
@@ -15013,17 +14992,17 @@ fn hybrid_native_module_bodied_fn_is_a_member() {
 fn math_io_os_fn_hover_doc_preserved() {
     let math = native_module_sig_via_graph("math");
     assert_eq!(
-        math.functions.get("sqrt").unwrap().doc.as_deref(),
+        math.certain_fn("sqrt").unwrap().doc.as_deref(),
         Some("square root (NaN for a negative argument)")
     );
     let io = native_module_sig_via_graph("io");
     assert_eq!(
-        io.functions.get("print").unwrap().doc.as_deref(),
+        io.certain_fn("print").unwrap().doc.as_deref(),
         Some("write a line to stdout (with a trailing newline)")
     );
     let os = native_module_sig_via_graph("os");
     assert_eq!(
-        os.functions.get("getcwd").unwrap().doc.as_deref(),
+        os.certain_fn("getcwd").unwrap().doc.as_deref(),
         Some("the current working directory (Result)")
     );
 }
@@ -15065,15 +15044,15 @@ fn net_sig_from_file_not_native_module_sig() {
     // The hand-built arm is retired — `native_module_sig("std.net")` exports NOTHING now.
     let raw = native_module_sig("std.net");
     assert!(
-        raw.functions.is_empty() && raw.types.is_empty(),
+        raw.fns().next().is_none() && raw.types.is_empty(),
         "std.net must no longer be hand-built in native_module_sig (harvested from std/net.chz)"
     );
     // The graph-built sig carries the free fns + both native types WITH their method tables.
     let sig = native_module_sig_via_graph("net");
-    let connect = sig.functions.get("connect").expect("net.connect");
+    let connect = sig.certain_fn("connect").expect("net.connect");
     assert_eq!(connect.params, vec![Ty::Str]);
     assert_eq!(connect.ret, Ty::result(Ty::Socket));
-    let listen = sig.functions.get("listen").expect("net.listen");
+    let listen = sig.certain_fn("listen").expect("net.listen");
     assert_eq!(listen.params, vec![Ty::Str]);
     assert_eq!(listen.ret, Ty::result(Ty::Listener));
     let socket = sig
@@ -15379,7 +15358,7 @@ fn regex_harvest_immune_to_sibling_generic_match() {
 fn enc_crypto_uuid_time_sig_from_file_not_native_module_sig() {
     for m in ["std.encoding", "std.crypto", "std.uuid", "std.time"] {
         assert!(
-            native_module_sig(m).functions.is_empty(),
+            native_module_sig(m).fns().next().is_none(),
             "{m} fns must no longer be hand-built in native_module_sig (harvested from std/*.chz)"
         );
     }
@@ -15400,7 +15379,7 @@ fn enc_crypto_uuid_time_sig_from_file_not_native_module_sig() {
     // for a bare type-license name aliasing Ty::Int/Ty::Ptr).
     let ffi = native_module_sig("std.ffi");
     assert!(
-        ffi.functions.is_empty(),
+        ffi.fns().next().is_none(),
         "std.ffi fns must be harvested from std/ffi.chz, not native_module_sig"
     );
     assert!(
@@ -15446,11 +15425,10 @@ fn enc_fn_sigs_exact() {
             Ty::Map(Box::new(Ty::Str), Box::new(Ty::Str)),
         ),
     ];
-    assert_eq!(sig.functions.len(), expected.len(), "std.encoding fn count");
+    assert_eq!(sig.fns().count(), expected.len(), "std.encoding fn count");
     for (name, params, ret) in &expected {
         let fs = sig
-            .functions
-            .get(*name)
+            .certain_fn(*name)
             .unwrap_or_else(|| panic!("std.encoding missing fn '{name}'"));
         assert_eq!(&fs.params, params, "fn '{name}' params drifted");
         assert_eq!(&fs.ret, ret, "fn '{name}' return drifted");
@@ -15675,14 +15653,13 @@ fn ffi_fn_sigs_exact() {
 
     assert_eq!(expected.len(), 59, "expected exactly 59 std.ffi fns");
     assert_eq!(
-        sig.functions.len(),
+        sig.fns().count(),
         59,
         "std.ffi must harvest exactly 59 native fns from std/ffi.chz"
     );
     for (name, params, ret) in &expected {
         let fs = sig
-            .functions
-            .get(name)
+            .certain_fn(name)
             .unwrap_or_else(|| panic!("std.ffi missing fn '{name}'"));
         assert_eq!(&fs.params, params, "fn '{name}' params drifted");
         assert_eq!(&fs.ret, ret, "fn '{name}' return drifted");
@@ -15722,11 +15699,10 @@ fn crypto_fn_sigs_exact() {
         ("secure_bytes", vec![Ty::Int], Ty::Bytes),
         ("token_hex", vec![Ty::Int], Ty::Str),
     ];
-    assert_eq!(sig.functions.len(), expected.len(), "std.crypto fn count");
+    assert_eq!(sig.fns().count(), expected.len(), "std.crypto fn count");
     for (name, params, ret) in &expected {
         let fs = sig
-            .functions
-            .get(*name)
+            .certain_fn(*name)
             .unwrap_or_else(|| panic!("std.crypto missing fn '{name}'"));
         assert_eq!(&fs.params, params, "fn '{name}' params drifted");
         assert_eq!(&fs.ret, ret, "fn '{name}' return drifted");
@@ -15740,11 +15716,10 @@ fn uuid_fn_sigs_exact() {
         ("v4", vec![], Ty::Str),
         ("uuid_seed", vec![Ty::Int], Ty::Nil),
     ];
-    assert_eq!(sig.functions.len(), expected.len(), "std.uuid fn count");
+    assert_eq!(sig.fns().count(), expected.len(), "std.uuid fn count");
     for (name, params, ret) in &expected {
         let fs = sig
-            .functions
-            .get(*name)
+            .certain_fn(*name)
             .unwrap_or_else(|| panic!("std.uuid missing fn '{name}'"));
         assert_eq!(&fs.params, params, "fn '{name}' params drifted");
         assert_eq!(&fs.ret, ret, "fn '{name}' return drifted");
@@ -15767,14 +15742,13 @@ fn time_fn_sigs_exact() {
         ("format", vec![Ty::Int], Ty::Str),
     ];
     assert_eq!(
-        sig.functions.len(),
+        sig.fns().count(),
         expected.len(),
         "std.time must export exactly the 5 native fns (timer is NOT a native fn)"
     );
     for (name, params, ret) in &expected {
         let fs = sig
-            .functions
-            .get(*name)
+            .certain_fn(*name)
             .unwrap_or_else(|| panic!("std.time missing fn '{name}'"));
         assert_eq!(&fs.params, params, "fn '{name}' params drifted");
         assert_eq!(&fs.ret, ret, "fn '{name}' return drifted");
@@ -15785,7 +15759,7 @@ fn time_fn_sigs_exact() {
         "std.time module sig must still license `timer`"
     );
     assert!(
-        !sig.functions.contains_key("timer"),
+        sig.member("timer").is_none(),
         "`timer` must NOT be a native fn (it has no runtime member value)"
     );
 }
@@ -23741,7 +23715,7 @@ fn same_named_types_whose_module_names_collide_use_the_full_path() {
 fn extern_fn_reachable_as_module_member() {
     // TICKET-061 W10-14: an extern fn is a module-global callable (docs/syntax.md) and functions
     // export by default, but `capture_sig` has no `StmtKind::Extern` arm, so it never lands in
-    // `sig.functions` — an importer sees "module 'c' has no member 'strlen'" even though `c.chz`
+    // `sig.members` — an importer sees "module 'c' has no member 'strlen'" even though `c.chz`
     // declares `extern fn strlen`.
     files_ok(&[
         ("c.chz", "extern \"libc\":\n    fn strlen(s: str) -> int\n"),
@@ -25974,7 +25948,7 @@ fn module_fn_docs_all_resolve() {
         let bare = module.strip_prefix("std.").unwrap_or(module);
         let sig = native_module_sig_via_graph(bare);
         for (fname, doc) in *docs {
-            let f = sig.functions.get(*fname).unwrap_or_else(|| {
+            let f = sig.certain_fn(*fname).unwrap_or_else(|| {
                 panic!("{module} doc slice lists fn '{fname}' but the module has no such function")
             });
             assert_eq!(

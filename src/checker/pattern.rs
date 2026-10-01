@@ -2466,7 +2466,7 @@ impl Checker {
             return None;
         }
         let msig = self.module_sigs.get(self.imported_modules.get(m)?)?;
-        let sig = msig.functions.get(name)?;
+        let sig = msig.certain_fn(name)?;
         (!sig.type_params.is_empty()).then(|| (format!("{m}.{name}"), sig.clone()))
     }
 
@@ -4131,7 +4131,7 @@ impl Checker {
                     .imported_modules
                     .get(mname)
                     .and_then(|id| self.module_sigs.get(id))
-                    .and_then(|sig| sig.functions.get(name))
+                    .and_then(|sig| sig.certain_fn(name))
                     .map(|f| f.witness_params.clone())
                     .unwrap_or_default();
                 if self.reject_witness_fn_value(name, &wparams, obj.span) {
@@ -4149,23 +4149,8 @@ impl Checker {
                     .imported_modules
                     .get(mname)
                     .and_then(|id| self.module_sigs.get(id))
-                    .map(|sig| {
-                        if let Some(fsig) = sig.functions.get(name) {
-                            // Expose the FULL parameter list plus the optional arity, so both
-                            // `f := request.get; f(url)` and `f(url, 5)` work. This used to TRUNCATE
-                            // to `params[..min_params]`, which made supplying the optional tail
-                            // through a value a spurious "too many arguments".
-                            Some(Ty::Func {
-                                params: fsig.params.clone(),
-                                ret: Box::new(fsig.ret.clone()),
-                                labels: crate::checker::FnLabels::new(fsig.labels.clone())
-                                    .with_min(fsig.min_params)
-                                    .with_variadic(fsig.variadic),
-                            })
-                        } else {
-                            sig.values.get(name).cloned()
-                        }
-                    });
+                    // TICKET-196: the slot's final type (`fn_value_ty` for a `certain_fn`).
+                    .map(|sig| sig.value_ty(name).cloned());
                 match member {
                     Some(Some(ty)) => ty,
                     _ => {

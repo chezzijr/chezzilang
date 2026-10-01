@@ -613,7 +613,7 @@ impl Checker {
                                 .imported_modules
                                 .get(m)
                                 .and_then(|id| self.module_sigs.get(id))
-                                .is_some_and(|sig| sig.functions.contains_key(name))
+                                .is_some_and(|sig| sig.certain_fn(name).is_some())
                     }
                     _ => false,
                 },
@@ -1559,7 +1559,7 @@ impl Checker {
                 .imported_modules
                 .get(m)
                 .and_then(|id| self.module_sigs.get(id))
-                .and_then(|s| s.functions.get(&c.name)),
+                .and_then(|s| s.certain_fn(&c.name)),
         };
         let Some(sig) = sig.filter(|s| !s.witness_params.is_empty()) else {
             return false;
@@ -4295,18 +4295,6 @@ impl Checker {
                     );
                     return;
                 }
-                // A `const` binding is immutable: reject any reassignment of the NAME (covers `=` and
-                // every compound `+=`/`-=`/…, which all route through here). Mutating THROUGH it
-                // (`xs.push(v)`, `xs[i] = v`) is a different arm and stays allowed — const is shallow.
-                // Not fired for a from-imported const (that name is not in `const_decls`; its rebind is
-                // caught by the imported-global guard below, which names const when it is one).
-                if !extends_in_place && self.is_const_decl(name) {
-                    self.error(
-                        target.span,
-                        format!("cannot reassign const binding '{name}'"),
-                    );
-                    return;
-                }
                 // Uniform by-reference capture: a `spawn:` task gets its OWN per-task copy of a
                 // captured LOCAL (the airlock deep-copies its cell), so reassigning it is allowed —
                 // the write mutates the isolated copy and is NOT visible to the parent (design §4 F1,
@@ -4322,7 +4310,7 @@ impl Checker {
                 if self.resolves_at_module_scope(name)
                     && let Some(m) = self.imported_values.get(name).cloned()
                 {
-                    let msg = if self.imported_consts.contains(name) {
+                    let msg = if self.globals.get(name).is_some_and(|g| g.is_const()) {
                         format!("cannot reassign '{name}' — it is declared const in module '{m}'")
                     } else {
                         format!(
@@ -4330,6 +4318,17 @@ impl Checker {
                         )
                     };
                     self.error(target.span, msg);
+                    return;
+                }
+                // A `const` binding is immutable: reject any reassignment of the NAME (covers `=` and
+                // every compound `+=`/`-=`/…, which all route through here). Mutating THROUGH it
+                // (`xs.push(v)`, `xs[i] = v`) is a different arm and stays allowed — const is shallow.
+                // A from-imported name never reaches here: the imported-global guard above owns its message, const or not.
+                if !extends_in_place && self.is_const_decl(name) {
+                    self.error(
+                        target.span,
+                        format!("cannot reassign const binding '{name}'"),
+                    );
                     return;
                 }
                 // Task 1 — reassigning a captured MODULE GLOBAL inside a task (`g = g + 1`) is no longer
@@ -4557,7 +4556,7 @@ impl Checker {
                             .imported_modules
                             .get(mname)
                             .and_then(|id| self.module_sigs.get(id))
-                            .is_some_and(|sig| sig.const_values.contains(name)) =>
+                            .is_some_and(|sig| sig.member(name).is_some_and(|m| m.is_const)) =>
                     {
                         self.error(
                             target.span,

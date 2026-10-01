@@ -164,7 +164,6 @@ impl Checker {
             types_by_name: HashMap::new(),
             imported_poly: std::collections::HashSet::new(),
             imported_values: HashMap::new(),
-            imported_consts: std::collections::HashSet::new(),
             imported_ffi_types: std::collections::HashSet::new(),
             imported_concurrency: std::collections::HashSet::new(),
             imported_time: std::collections::HashSet::new(),
@@ -587,12 +586,7 @@ impl Checker {
         else {
             return Vec::new();
         };
-        let mut names: Vec<String> = sig
-            .functions
-            .keys()
-            .chain(sig.values.keys())
-            .cloned()
-            .collect();
+        let mut names: Vec<String> = sig.members.keys().cloned().collect();
         names.sort();
         names.dedup();
         names
@@ -655,13 +649,12 @@ impl Checker {
     }
 
     /// Every name a module's `sig` exports that `import X from M` can bind: its functions, its
-    /// top-level values, and its declared types — sorted, since `functions`/`values` are
-    /// `HashMap`s and an unsorted list would make a near-miss suggestion depend on hash order.
+    /// top-level values, and its declared types — sorted, since `members` is a `HashMap` and an
+    /// unsorted list would make a near-miss suggestion depend on hash order.
     pub(super) fn sig_member_names(sig: &ModuleSig) -> Vec<String> {
         let mut names: Vec<String> = sig
-            .functions
+            .members
             .keys()
-            .chain(sig.values.keys())
             .chain(sig.types.iter())
             .cloned()
             .collect();
@@ -1004,14 +997,14 @@ impl Checker {
             if let StmtKind::Native(decl) = &s.kind {
                 let fsig = self.harvest_native_fn_sig(decl, false);
                 // `timer` is an opcode-backed BARE-callable builtin (lowers to `Op::NewTimer`, no runtime
-                // value): keep it OUT of `sig.functions` (else the From-import arm binds it as a normal
+                // value): keep it OUT of `sig.members` (else the From-import arm binds it as a normal
                 // callable, breaking bare-callability). Stash its sig for the bare `timer(...)` expr arm;
                 // the license stays in the `native_module_sig` `sig.types` insert. `timer` is a reserved
                 // name declared in exactly one `.chz`, so this name match is unambiguous and self-scoping.
                 if decl.name == "timer" {
                     self.time_timer_sig = Some(fsig);
                 } else {
-                    sig.functions.insert(decl.name.clone(), fsig);
+                    sig.insert_fn(decl.name.clone(), fsig);
                 }
             }
         }
@@ -1024,8 +1017,7 @@ impl Checker {
         // bodied fn may name a sibling native struct in its signature (`-> Reader`).
         for s in &ast.stmts {
             if let StmtKind::Fn(decl) = &s.kind {
-                sig.functions
-                    .insert(decl.name.clone(), self.fn_sig(decl, decl.name_span));
+                sig.insert_fn(decl.name.clone(), self.fn_sig(decl, decl.name_span));
             }
         }
         // Preserve import-gating: drop the transient bare-name visibility.
@@ -1569,7 +1561,6 @@ impl Checker {
         self.imported_alias_ctypes.clear();
         self.imported_poly.clear();
         self.imported_values.clear();
-        self.imported_consts.clear();
         self.imported_ffi_types.clear();
         self.imported_concurrency.clear();
         self.imported_time.clear();
@@ -1614,7 +1605,7 @@ impl Checker {
         self.push_scope();
         // The one record per module slot, built before any body is walked (TICKET-186).
         // `seed_module_globals` and the fn-writes pass read it.
-        self.collect_module_globals(stmts);
+        self.collect_module_globals(stmts, imports);
         // Module-scoped types: record THIS module's id and seed its locally-declared type names into
         // `bare_types` under their runtime key (bare unless disambiguated), so a bare annotation /
         // constructor resolves to the same key the layout is registered under. `bind_import` then adds
@@ -2226,8 +2217,7 @@ impl Checker {
                     // from std.ffi`) — legal un-aliased; it binds no value.
                     let reserved_bind = crate::checker::is_reserved_alias_target(bind)
                         || crate::checker::is_builtin_variant(bind);
-                    let binds_value =
-                        sig.functions.contains_key(member) || sig.values.contains_key(member);
+                    let binds_value = sig.member(member).is_some();
                     if reserved_bind && (alias.as_ref().is_some_and(|a| a != member) || binds_value)
                     {
                         let msg = if alias.is_some() {
@@ -2245,13 +2235,11 @@ impl Checker {
                     // when the member actually exists — a missing member is its own error below, and
                     // shouldn't also claim the name. The bind-name (alias wins) is the collision key,
                     // so `import x as y` + `import z as y` collides while distinct names don't.
-                    let member_exists = sig.functions.contains_key(member)
-                        || sig.values.contains_key(member)
-                        || sig.types.contains(member);
+                    let member_exists = sig.member(member).is_some() || sig.types.contains(member);
                     if member_exists && self.note_import_bind(bind, imp.span) {
                         continue;
                     }
-                    if let Some(fsig) = sig.functions.get(member) {
+                    if let Some(fsig) = sig.certain_fn(member) {
                         self.functions.insert(bind.clone(), fsig.clone());
                         if let Some(&home) = self.module_idx_of.get(&imp.target) {
                             self.fn_homes.insert(bind.clone(), (home, member.clone()));
@@ -2275,20 +2263,16 @@ impl Checker {
                                 fsig.doc.clone(),
                             );
                         }
-                    } else if let Some(vty) = sig.values.get(member) {
+                    } else if let Some(m) = sig.member(member) {
                         // Editor hover (decl-site): record the imported value's type at the bound name.
                         if self.hover_probe.is_some() {
-                            self.hover_record_at(*name_span, vty, HoverKind::Other, None);
+                            self.hover_record_at(*name_span, &m.ty, HoverKind::Other, None);
                         }
-                        self.declare(bind, vty.clone());
+                        self.declare(bind, m.ty.clone());
                         // The bind is a SNAPSHOT copy of the module global — rebinding it is rejected
-                        // in `check_assign` (see `imported_values`).
+                        // in `check_assign` (see `imported_values`). Its const-ness arrives through
+                        // its `GlobalBinding` (`DeclKind::Import`).
                         self.imported_values.insert(bind.clone(), path.join("."));
-                        // Carry the source's const-ness so the rebind guard names it const, not just
-                        // "a snapshot copy" (whose "call a mutator fn" advice is wrong for a const).
-                        if sig.const_values.contains(member) {
-                            self.imported_consts.insert(bind.clone());
-                        }
                     } else if !sig.types.contains(member) {
                         let candidates = Self::sig_member_names(&sig);
                         self.error_help(
@@ -2313,45 +2297,61 @@ impl Checker {
     /// Capture this module's public surface (own top-level fns/values/types) after checking.
     pub(super) fn capture_sig(&self, stmts: &[Stmt]) -> ModuleSig {
         let mut sig = ModuleSig::default();
+        // TICKET-196: one export record per module slot, from its `GlobalBinding`. An extern fn is a
+        // module global exactly like a top-level `fn` (the compiler binds it into the module's global
+        // slot: `src/compiler/mod.rs` reserves the slot and emits `MakeCffi` + `DefineGlobalSlot`), so
+        // it exports the same way — `c.strlen` / `import strlen from c` resolve through `sig.members`
+        // (with `certain_fn` set), never `sig.types` (an extern fn is not a type, so it must not
+        // enter the ctor-shadowing path).
+        for (name, g) in &self.globals {
+            let exported = g.decls.iter().any(|(k, _)| {
+                matches!(
+                    k,
+                    globals::DeclKind::Fn
+                        | globals::DeclKind::Hoisted
+                        | globals::DeclKind::Let
+                        | globals::DeclKind::ConstLet
+                )
+            });
+            if !exported {
+                continue;
+            }
+            let certain_fn = (g.decls.len() == 1
+                && matches!(
+                    g.decls[0].0,
+                    globals::DeclKind::Fn | globals::DeclKind::Hoisted
+                ))
+            .then(|| self.functions.get(name).cloned())
+            .flatten()
+            .map(|mut fsig| {
+                for effect in &mut fsig.summary.writes {
+                    if let fn_writes::WriteRoot::Global(gname) = &effect.root {
+                        effect.global_ty = self.lookup(gname);
+                    }
+                }
+                fsig
+            });
+            let ty = match &certain_fn {
+                Some(f) => Some(fn_value_ty(f)),
+                None => self
+                    .lookup(name)
+                    .or_else(|| self.functions.get(name).map(fn_value_ty)),
+            };
+            let Some(ty) = ty else {
+                continue;
+            };
+            sig.members.insert(
+                name.clone(),
+                MemberSig {
+                    ty,
+                    certain_fn,
+                    is_const: g.is_const(),
+                    redeclared: g.redeclared(),
+                },
+            );
+        }
         for s in stmts {
             match &s.kind {
-                StmtKind::Fn(decl) => {
-                    if let Some(fsig) = self.functions.get(&decl.name) {
-                        let mut fsig = fsig.clone();
-                        for effect in &mut fsig.summary.writes {
-                            if let fn_writes::WriteRoot::Global(name) = &effect.root {
-                                effect.global_ty = self.lookup(name);
-                            }
-                        }
-                        sig.functions.insert(decl.name.clone(), fsig);
-                    }
-                }
-                // An extern fn is a module global exactly like a top-level `fn` (the compiler binds
-                // it into the module's global slot: `src/compiler/mod.rs` reserves the slot and emits
-                // `MakeCffi` + `DefineGlobalSlot`), so it exports the same way — `c.strlen` /
-                // `import strlen from c` resolve through `sig.functions`, never `sig.types`/`values`
-                // (an extern fn is not a type, so it must not enter the ctor-shadowing path).
-                StmtKind::Extern { fns, .. } => {
-                    for ef in fns {
-                        if let Some(fsig) = self.functions.get(&ef.name) {
-                            sig.functions.insert(ef.name.clone(), fsig.clone());
-                        }
-                    }
-                }
-                StmtKind::Let {
-                    names, is_const, ..
-                } => {
-                    for name in names {
-                        if let Some(ty) = self.lookup(name) {
-                            sig.values.insert(name.clone(), ty);
-                            // Export const-ness so an importer's rebind names it const (a `const` let
-                            // is single-name, so this only ever marks the one binding).
-                            if *is_const {
-                                sig.const_values.insert(name.clone());
-                            }
-                        }
-                    }
-                }
                 StmtKind::Struct { name, .. } => {
                     sig.types.insert(name.clone());
                     // The LAYOUT lives under the runtime key (bare unless disambiguated); the sig is
