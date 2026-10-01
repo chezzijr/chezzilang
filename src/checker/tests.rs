@@ -37041,9 +37041,19 @@ fn fn_value_param_named_like_prelude_map_param_is_accepted() {
 /// Run `(name, src, clean)` cells through `check_entry` (std imports resolve); fail listing every
 /// cell whose verdict is wrong (`clean` = no error wanted).
 fn assert_clean_grid(cells: &[(String, String, bool)]) {
+    let cells: Vec<_> = cells
+        .iter()
+        .map(|(n, s, c)| (n.clone(), String::new(), s.clone(), *c))
+        .collect();
+    assert_clean_files_grid(&cells);
+}
+
+/// [`assert_clean_grid`] over a two-module graph: each cell is `(name, lib, main, clean)`, checked
+/// with `lib.chz` beside the entry `main.chz`.
+fn assert_clean_files_grid(cells: &[(String, String, String, bool)]) {
     let mut wrong = Vec::new();
-    for (name, src, clean) in cells {
-        let errs = check_entry(src);
+    for (name, lib, main, clean) in cells {
+        let errs = check_files(&[("lib.chz", lib), ("main.chz", main)]);
         if errs.is_empty() != *clean {
             let msgs: Vec<&str> = errs.iter().map(|e| e.message.as_str()).collect();
             wrong.push(format!("cell {name}: want clean={clean}, got {msgs:?}"));
@@ -37126,4 +37136,110 @@ fn method_type_param_capture_grid() {
         cells.push((n.to_string(), src.to_string(), clean));
     }
     assert_clean_grid(&cells);
+}
+
+#[test]
+fn fn_value_slot_grid() {
+    // A fn value carries its declaration's call slots (`FnLabels.slots`), so a call through a value
+    // certain to hold one fn fills defaults and packs a variadic exactly like a direct call. Shapes x
+    // bindings (top-level, from-import, m.f, nested fn, turbofish) x calls (positional, omitted,
+    // keyword).
+    const WD: &str = "protocol Zero:\n    fn zero() -> Self\nstruct N:\n    v: int\n\n    fn zero() -> N:\n        return N(v=0)\n";
+    const WF: &str = "fn v[T: Zero](x: T) -> T:\n    return T.zero()\n";
+    let wl = format!("{WD}{WF}");
+    let shapes: [(&str, &str, [&str; 3]); 5] = [
+        (
+            "d",
+            "fn v(a: int, b: int = 10) -> int:\n    return a * 100 + b\n",
+            ["w(1, 2)", "w(1)", "w(b=5, a=1)"],
+        ),
+        (
+            "v",
+            "fn v(a: int, ...rest: int) -> int:\n    return a * 100 + rest.len()\n",
+            ["w(1, 2, 3)", "w(1)", "w(a=1)"],
+        ),
+        (
+            "dv",
+            "fn v(a: int, b: int = 10, ...rest: int) -> int:\n    return a * 100 + b + rest.len()\n",
+            ["w(1, 2, 3)", "w(1)", "w(1, b=5)"],
+        ),
+        (
+            "vk",
+            "fn v(...xs: int, tail: int = 3) -> int:\n    return xs.len() * 100 + tail\n",
+            ["w(1, 2)", "w()", "w(1, tail=9)"],
+        ),
+        (
+            "dd",
+            "fn v(a: int = 1, b: int = 2) -> int:\n    return a * 10 + b\n",
+            ["w(1)", "w()", "w(b=5)"],
+        ),
+    ];
+    let indent = |s: &str| s.lines().map(|l| format!("    {l}\n")).collect::<String>();
+    let mut cells: Vec<(String, String, String, bool)> = Vec::new();
+    for (sname, shape, calls) in shapes {
+        for (cname, call) in ["positional", "omitted", "keyword"].iter().zip(calls) {
+            let tf_shape = shape.replacen("fn v(", "fn v[T](x: T, ", 1);
+            let tf_call = if call == "w()" {
+                "w(\"x\")".to_string()
+            } else {
+                call.replacen("w(", "w(\"x\", ", 1)
+            };
+            let bindings = [
+                (
+                    "toplevel",
+                    String::new(),
+                    format!("{shape}w := v\nprint({call})\n"),
+                ),
+                (
+                    "from_import",
+                    shape.to_string(),
+                    format!("import v from lib\nw := v\nprint({call})\n"),
+                ),
+                (
+                    "module_member",
+                    shape.to_string(),
+                    format!("import lib\nw := lib.v\nprint({call})\n"),
+                ),
+                (
+                    "nested",
+                    String::new(),
+                    format!(
+                        "fn outer():\n{}    w := v\n    print({call})\nouter()\n",
+                        indent(shape)
+                    ),
+                ),
+                (
+                    "turbofish",
+                    String::new(),
+                    format!("{tf_shape}w := v[str]\nprint({tf_call})\n"),
+                ),
+            ];
+            for (bname, lib, main) in bindings {
+                cells.push((format!("{sname}_{bname}_{cname}"), lib, main, true));
+            }
+        }
+    }
+    // A witness-taking fn is never a value, in any binding.
+    let witness = [
+        ("toplevel", String::new(), format!("{wl}w := v\n")),
+        (
+            "from_import",
+            wl.clone(),
+            "import v from lib\nw := v\n".to_string(),
+        ),
+        (
+            "module_member",
+            wl.clone(),
+            "import lib\nw := lib.v\n".to_string(),
+        ),
+        (
+            "nested",
+            String::new(),
+            format!("{WD}fn outer():\n{}    w := v\nouter()\n", indent(WF)),
+        ),
+    ];
+    for (bname, lib, main) in witness {
+        cells.push((format!("w_{bname}"), lib, main, false));
+    }
+    assert_clean_files_grid(&cells);
 }

@@ -246,11 +246,12 @@ pub struct FnLabels {
     /// equality-neutrality: two function types that differ only in how many arguments may be OMITTED
     /// are still the same type for assignment, unification, protocol conformance and display.
     pub min: Option<usize>,
-    /// `Some(i)` when the underlying declaration's parameter `i` is variadic (`...xs: T`, typed as
-    /// the collapsed `List[T]`), so a call through a value certain to hold that one function
-    /// (`labels_certain`) packs its surplus positionals there (TICKET-187). Equality-neutral like
-    /// `min`: a function type is not changed by how a call through it may be spelled.
-    pub variadic: Option<usize>,
+    /// The underlying declaration's call slots (`FnSig.slots`), when the value was read from one
+    /// declaration (TICKET-197). A call through a value certain to hold that one function
+    /// (`labels_certain`) binds them, so it fills defaults and packs a variadic like a direct call.
+    /// Equality-neutral like `min`: a function type is not changed by how a call through it may be
+    /// spelled.
+    pub(crate) slots: Option<std::sync::Arc<Vec<crate::desugar::SlotSpec>>>,
 }
 
 impl PartialEq for FnLabels {
@@ -282,7 +283,7 @@ impl FnLabels {
         FnLabels {
             names,
             min: None,
-            variadic: None,
+            slots: None,
         }
     }
 
@@ -292,10 +293,15 @@ impl FnLabels {
         self
     }
 
-    /// Record the declaration's variadic parameter index, if any.
-    pub fn with_variadic(mut self, variadic: Option<usize>) -> FnLabels {
-        self.variadic = variadic;
+    /// Record the declaration's call slots, if it has any.
+    pub(crate) fn with_slots(mut self, slots: Option<Vec<crate::desugar::SlotSpec>>) -> FnLabels {
+        self.slots = slots.map(std::sync::Arc::new);
         self
+    }
+
+    /// The declaration's variadic parameter index, derived from its slots.
+    pub fn variadic(&self) -> Option<usize> {
+        self.slots.as_ref()?.iter().position(|s| s.is_variadic)
     }
 
     /// The fewest arguments a call may supply, given the value's declared parameter count.

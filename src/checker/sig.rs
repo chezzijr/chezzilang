@@ -3037,15 +3037,8 @@ impl Checker {
                     // / `unknown name`). A residual `Unknown` for a purely-recursive un-annotated
                     // nested fn stays permissive — a v1 limit, only its own call sites degrade.
                     if decl.ret.is_none() && matches!(sig.ret, Ty::Unknown) {
-                        self.declare(
-                            &decl.name,
-                            Ty::Func {
-                                params: sig.params.clone(),
-                                ret: Box::new(Ty::Unknown),
-                                labels: crate::checker::FnLabels::new(sig.labels.clone())
-                                    .with_min(sig.min_params),
-                            },
-                        );
+                        // `sig.ret` is `Unknown` here, so this is the provisional `-> ?` type.
+                        self.declare(&decl.name, fn_value_ty(&sig));
                         self.kw_certain.insert(kw_key.clone());
                         let inferred = self.infer_nested_fn_ret(decl, &sig);
                         sig.ret = inferred;
@@ -3053,15 +3046,7 @@ impl Checker {
                     // Nearest-scope binding: the name resolves to THIS nested fn (not a global
                     // namesake) at every call site, and recursion type-checks. Declared BEFORE
                     // `check_fn_body`.
-                    self.declare(
-                        &decl.name,
-                        Ty::Func {
-                            params: sig.params.clone(),
-                            ret: Box::new(sig.ret.clone()),
-                            labels: crate::checker::FnLabels::new(sig.labels.clone())
-                                .with_min(sig.min_params),
-                        },
-                    );
+                    self.declare(&decl.name, fn_value_ty(&sig));
                     self.kw_certain.insert(kw_key.clone());
                     if !kw_was_written {
                         self.kw_written.remove(&kw_key);
@@ -4097,17 +4082,7 @@ impl Checker {
                 .cloned()
                 .map(|t| (t, false))
                 .or_else(|| {
-                    self.functions.get(name).map(|sig| {
-                        (
-                            Ty::Func {
-                                params: sig.params.clone(),
-                                ret: Box::new(sig.ret.clone()),
-                                labels: crate::checker::FnLabels::new(sig.labels.clone())
-                                    .with_min(sig.min_params),
-                            },
-                            true,
-                        )
-                    })
+                    self.functions.get(name).map(|sig| (fn_value_ty(sig), true))
                 })
             && (!from_fn || self.fn_reads.contains(name))
             && (!(self.imported_values.contains_key(name) || matches!(prev, Ty::Module(_)))

@@ -894,15 +894,16 @@ impl ModuleSig {
     }
 }
 
-/// The value type of a named fn: the FULL parameter list plus the optional arity, so both
-/// `f := request.get; f(url)` and `f(url, 5)` work.
+/// The value type of a named fn: the FULL parameter list plus the optional arity and the
+/// declaration's call slots, so `f := request.get; f(url)`, `f(url, 5)` and a keyword or variadic
+/// call through a certain `f` all work. Every fn value type is built here (TICKET-197).
 fn fn_value_ty(f: &FnSig) -> Ty {
     Ty::Func {
         params: f.params.clone(),
         ret: Box::new(f.ret.clone()),
         labels: FnLabels::new(f.labels.clone())
             .with_min(f.min_params)
-            .with_variadic(f.variadic),
+            .with_slots(f.slots.clone()),
     }
 }
 

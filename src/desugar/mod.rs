@@ -116,7 +116,7 @@ fn provider_label(name: &str) -> String {
 /// compiled ONCE, as a zero-arg function in its defining module, and the caller merely calls it. A
 /// provider body therefore resolves — and evaluates — in the DEFINER's namespace (`Obj::Func` carries
 /// its `home`), which is what Python, Ruby and Kotlin all do, and what a spliced clone could not do.
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Dflt {
     /// Cloned inline at the call site (and re-walked there, so it still spends the depth budget).
     Inline(Expr),
@@ -332,7 +332,7 @@ fn tp_names(decl: &crate::ast::FnDecl, extra: &[String]) -> Vec<String> {
 /// here, from the declaration, by [`param_slots`] / [`field_slots`], so every default is classified
 /// by the one classifier [`dflt_for`] that [`synthesize_providers`] also calls; the checker's
 /// `bind_call` is the one reader.
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SlotSpec {
     pub name: Option<String>,
     pub default: Option<Dflt>,

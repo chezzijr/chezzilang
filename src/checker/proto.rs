@@ -4674,7 +4674,7 @@ impl Checker {
         }
         // A STATIC requirement has NO receiver slot, so every declared param is a real argument.
         let expected: Vec<Ty> = msig.params.iter().map(|t| subst(t, &map)).collect();
-        let slots = super::expr::callable_slots(&msig.labels, expected.len(), None, expected.len());
+        let slots = super::expr::callable_slots(&msig.labels, expected.len(), expected.len());
         let Some(bound) = self.bind_call(Some(&slots), method, args, 0, span) else {
             return Ty::Unknown;
         };
@@ -5517,11 +5517,7 @@ impl Checker {
     /// means two distinct pins never launder.
     fn try_pin_generic_fn_value_arg(&mut self, arg: &Expr, want: &Ty, span: Span) -> Option<Ty> {
         let (_, sig) = self.generic_fn_value_sig(arg)?;
-        let declared = Ty::Func {
-            params: sig.params.clone(),
-            ret: Box::new(sig.ret.clone()),
-            labels: FnLabels::new(sig.labels.clone()),
-        };
+        let declared = fn_value_ty(&sig);
         // Accept ONLY the fully-pinned verdict. A slot position that is still a free method param
         // (`.fold` arg1 before `init` binds `U`) or a return-only arg-fn param never pinned leaves the
         // shared derivation at `Undetermined`/`Skip` → bail, arg type unchanged. Reporting an
@@ -5578,11 +5574,7 @@ impl Checker {
             if fn_slot_params_have_unknown(decl) {
                 continue;
             }
-            let declared = Ty::Func {
-                params: sig.params.clone(),
-                ret: Box::new(sig.ret.clone()),
-                labels: FnLabels::new(sig.labels.clone()),
-            };
+            let declared = fn_value_ty(&sig);
             if matches!(
                 pin_generic_fn_value(&sig.type_params, &declared, &subst(decl, map)),
                 FnValuePin::Undetermined
@@ -5593,15 +5585,7 @@ impl Checker {
                 } else {
                     arg.span
                 };
-                self.reject_undetermined_generic_fn_value(
-                    &name,
-                    &sig.type_params,
-                    &sig.params,
-                    &sig.ret,
-                    &sig.labels,
-                    sig.min_params,
-                    at,
-                );
+                self.reject_undetermined_generic_fn_value(&name, &sig, at);
             }
         }
     }

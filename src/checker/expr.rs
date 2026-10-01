@@ -803,7 +803,7 @@ impl Checker {
                 ret,
                 labels,
             } if !named.is_empty()
-                || (labels.variadic.is_some()
+                || (labels.variadic().is_some()
                     && matches!(&callee.kind, ExprKind::Ident(n) if self.labels_certain(n).is_ok())) =>
             {
                 // TICKET-139 (W14-2) — labels are surface-only (equality-neutral, DEC-108), so a
@@ -841,11 +841,14 @@ impl Checker {
                 if !self.generic_arg_prepass && !self.kw_pending.contains(&pending) {
                     self.kw_pending.push(pending);
                 }
-                // A value's slots are its labels; its omitted slots are callee-filled from
-                // `min_params` on, so they must be a trailing run.
+                // A value read from one declaration binds that declaration's slots (TICKET-197),
+                // so it fills defaults and packs a variadic like a direct call. Any other value's
+                // slots are its labels, callee-filled from `min_params` on (a trailing run).
                 let minp = labels.min_or(params.len());
-                let value_slots =
-                    callable_slots(&labels.names, minp, labels.variadic, params.len());
+                let value_slots = match &labels.slots {
+                    Some(slots) => slots.to_vec(),
+                    None => callable_slots(&labels.names, minp, params.len()),
+                };
                 let Some(bound) = self.bind_call(Some(&value_slots), "closure", args, 0, span)
                 else {
                     return *ret;
@@ -3515,7 +3518,6 @@ impl Checker {
                     let slots = callable_slots(
                         msig.labels.get(1..).unwrap_or(&[]),
                         expected.len(),
-                        None,
                         expected.len(),
                     );
                     let Some(bound) = self.bind_call(Some(&slots), method, args, 0, span) else {
@@ -4654,7 +4656,6 @@ impl Checker {
                     let slots = callable_slots(
                         msig.labels.get(1..).unwrap_or(&[]),
                         expected.len(),
-                        None,
                         expected.len(),
                     );
                     let Some(bound) = self.bind_call(Some(&slots), method, args, 0, span) else {
@@ -5531,20 +5532,18 @@ impl Checker {
 
 /// TICKET-187 — the one slot builder for a callee with no declaration to bind against: a protocol
 /// requirement (it binds by the PROTOCOL's parameter names and declares no defaults, so `min` is
-/// its arity) and a fn value (its labels, callee-filled tail from `min`, and variadic slot). Slot
-/// `i` is named `names[i]`, callee-filled from `min` on, and variadic when `i == variadic`.
+/// its arity) and a fn value whose type carries no declaration slots (its labels and callee-filled
+/// tail from `min`). Slot `i` is named `names[i]` and callee-filled from `min` on.
 pub(super) fn callable_slots(
     names: &[Option<String>],
     min: usize,
-    variadic: Option<usize>,
     len: usize,
 ) -> Vec<crate::desugar::SlotSpec> {
     (0..len)
         .map(|i| crate::desugar::SlotSpec {
             name: names.get(i).cloned().flatten(),
-            default: (i >= min && Some(i) != variadic)
-                .then_some(crate::desugar::Dflt::CalleeFilled),
-            is_variadic: Some(i) == variadic,
+            default: (i >= min).then_some(crate::desugar::Dflt::CalleeFilled),
+            is_variadic: false,
         })
         .collect()
 }

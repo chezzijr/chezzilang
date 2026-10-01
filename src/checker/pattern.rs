@@ -2366,15 +2366,7 @@ impl Checker {
             return None;
         }
         let type_params = sig.type_params.clone();
-        let params = sig.params.clone();
-        let ret = sig.ret.clone();
-        let labels = sig.labels.clone();
-        let minp = sig.min_params;
-        let declared = Ty::Func {
-            params: params.clone(),
-            ret: Box::new(ret.clone()),
-            labels: FnLabels::new(labels.clone()),
-        };
+        let declared = fn_value_ty(sig);
         // A hint of `Unknown` DETERMINES NOTHING and must count as no hint at all, or the rule
         // cancels itself on an INFERRED return type (`fn get(): return id`): the
         // return-inference pass reads the body, takes the `Ty::Unknown` this arm returns as the
@@ -2413,15 +2405,7 @@ impl Checker {
                 if !self.generic_fn_value_prepass
                     && hint.as_ref().is_none_or(fn_slot_params_concrete) =>
             {
-                self.reject_undetermined_generic_fn_value(
-                    name,
-                    &type_params,
-                    &params,
-                    &ret,
-                    &labels,
-                    minp,
-                    span,
-                );
+                self.reject_undetermined_generic_fn_value(name, sig, span);
                 return Some(Ty::Unknown);
             }
             // Not this rule's business (see [`FnValuePin::Skip`]) — fall through to the rigid
@@ -2476,34 +2460,23 @@ impl Checker {
     /// check on a generic method's argument ([`Checker::report_undetermined_generic_fn_value_args`]).
     /// One rule, one sentence — the whole point of the extension is that a binding and an argument
     /// stop giving one function two verdicts.
-    #[allow(clippy::too_many_arguments)] // the fn's signature pieces, verbatim, for the advice text
     pub(super) fn reject_undetermined_generic_fn_value(
         &mut self,
         name: &str,
-        type_params: &[TypeParam],
-        params: &[Ty],
-        ret: &Ty,
-        labels: &[Option<String>],
-        min_params: usize,
+        decl: &FnSig,
         span: Span,
     ) {
+        let type_params = &decl.type_params;
         // Render the wanted shape from the fn's OWN signature with each undetermined parameter shown
         // as a `<T>` placeholder, so the advice fits this declaration instead of a made-up one.
-        // `with_min` so a fn with DEFAULTED params does not advertise a stricter arity than a plain fn
-        // read gives (`fn rep[T](x: T, n: int = 2)` — a non-generic `g := rep; g(1)` works, so the
-        // suggested type must permit it too).
+        // `fn_value_ty` so a fn with DEFAULTED params does not advertise a stricter arity than a
+        // plain fn read gives (`fn rep[T](x: T, n: int = 2)` — a non-generic `g := rep; g(1)` works,
+        // so the suggested type must permit it too).
         let holes: HashMap<String, Ty> = type_params
             .iter()
             .map(|tp| (tp.name.clone(), Ty::Param(format!("<{}>", tp.name))))
             .collect();
-        let sig = subst(
-            &Ty::Func {
-                params: params.to_vec(),
-                ret: Box::new(ret.clone()),
-                labels: FnLabels::new(labels.to_vec()).with_min(min_params),
-            },
-            &holes,
-        );
+        let sig = subst(&fn_value_ty(decl), &holes);
         let names = type_params
             .iter()
             .map(|tp| tp.name.as_str())
@@ -2635,12 +2608,8 @@ impl Checker {
             return ty;
         }
         if let Some(sig) = self.functions.get(name) {
+            let sig = sig.clone();
             let type_params = sig.type_params.clone();
-            let params = sig.params.clone();
-            let ret = sig.ret.clone();
-            let labels = sig.labels.clone();
-            let minp = sig.min_params;
-            let variadic = sig.variadic;
             // M24 — the fn-as-value wall, at the BARE read (`g := reset`): both for the Scope-A pin
             // below and for the rigid fallback after it.
             let wparams = sig.witness_params.clone();
@@ -2674,20 +2643,15 @@ impl Checker {
             // Gated on a SAME-MODULE fn (`local_fn_names`) — the identical same-module restriction the
             // turbofish B-path + the compiler's erase set use, so accept ⟺ runtime stays in lockstep
             // (an imported generic-fn-as-value stays the rigid error, a documented v1 limit).
-            if !type_params.is_empty() {
-                let sig = self.functions.get(name).cloned().expect("read above");
-                if let Some(ty) = self.generic_fn_value_ty(name, &sig, span) {
-                    return ty;
-                }
+            if !type_params.is_empty()
+                && let Some(ty) = self.generic_fn_value_ty(name, &sig, span)
+            {
+                return ty;
             }
-            return Ty::Func {
-                params,
-                ret: Box::new(ret),
-                // A user fn's value type carries its param NAMES as labels, so `g := greet` yields a
-                // labelled function value and `g(name="Bob")` resolves through it — and its optional
-                // arity, so `f := g; f()` may omit the trailing defaults the CALLEE fills.
-                labels: FnLabels::new(labels).with_min(minp).with_variadic(variadic),
-            };
+            // A user fn's value type carries its param NAMES as labels, so `g := greet` yields a
+            // labelled function value and `g(name="Bob")` resolves through it — and its call slots,
+            // so `f := g; f()` fills the defaults and packs a variadic like a direct call.
+            return fn_value_ty(&sig);
         }
         // A first-class universe builtin fn used in value position (`f := ord`, HOF arg, bare
         // `defer print(...)`). Typed as the dedicated `Ty::BuiltinFn` from `builtin_sig` — a genuine
@@ -4190,16 +4154,8 @@ impl Checker {
             if is_local_generic && let Some(ty_expr) = self.index_as_type(index) {
                 let r = self.fn_resolution(name);
                 self.record_resolution(obj.id, r, obj.span);
-                let (type_params, params, ret, labels, wparams) = {
-                    let s = &self.functions[name];
-                    (
-                        s.type_params.clone(),
-                        s.params.clone(),
-                        s.ret.clone(),
-                        s.labels.clone(),
-                        s.witness_params.clone(),
-                    )
-                };
+                let sig = self.functions[name].clone();
+                let (type_params, wparams) = (sig.type_params.clone(), sig.witness_params.clone());
                 // M24 — the fn-as-value wall again: pinning the type params does NOT recover the
                 // witness (the pin is checker-only, the runtime value is the same erased function),
                 // so `reset[Counter]` is as unlowerable as a bare `reset`.
@@ -4214,14 +4170,7 @@ impl Checker {
                     // Enforce declared bounds against the binding (`addone[str]` where `str: Add`
                     // fails), then yield the CONCRETE substituted fn type. Runtime is generic-ERASED.
                     self.enforce_bounds(&type_params, &map, obj.span);
-                    return subst(
-                        &Ty::Func {
-                            params,
-                            ret: Box::new(ret),
-                            labels: FnLabels::new(labels),
-                        },
-                        &map,
-                    );
+                    return subst(&fn_value_ty(&sig), &map);
                 }
                 // Arity mismatch (seed_targs already reported) — degrade to Unknown instead of
                 // falling through to the "cannot index into fn" double-report.
