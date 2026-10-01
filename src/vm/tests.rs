@@ -21782,3 +21782,168 @@ main()
     let msg = res.expect_err("expected a fault").message;
     assert!(msg.contains("boom"), "child fault lost, got: {msg}");
 }
+
+/// TICKET-195 C1: an owner cut by a nursery child's panic while it waits in `ex.shutdown()` of an
+/// Executor created OUTSIDE the nursery must not cancel that Executor's running job — CPython lets
+/// it finish (docs/concurrency.md: such an Executor is not cancelled).
+#[test]
+fn outside_executor_job_survives_owner_cut_in_shutdown() {
+    let src = r#"import std.time
+import std.concurrency
+done := Channel[int](1)
+fn job():
+    time.sleep_ms(300)
+    print("job finished its work")
+    done.send(1)
+ex := Executor()
+ex.submit(job)
+fn owner():
+    parallel:
+        spawn:
+            time.sleep_ms(50)
+            panic("boom")
+        ex.shutdown()
+r := recover: owner()
+print(r)
+time.sleep_ms(500)
+print("job done? {done.try_recv()}")
+"#;
+    let entry = write_temp_chz("t195_c1", src);
+    let (out, _err, res, _code) = run_file(&entry);
+    let _ = std::fs::remove_file(&entry);
+    assert!(
+        res.is_ok(),
+        "expected Ok, got: {:?}; out={out:?}",
+        res.err().map(|e| e.message)
+    );
+    assert!(
+        out.contains("job finished its work"),
+        "job was stopped: out={out:?}"
+    );
+    assert!(
+        out.contains("job done? Some(1)"),
+        "job was stopped: out={out:?}"
+    );
+}
+
+/// TICKET-195 C3: an Executor job's fault outranks the deadlock verdict of a main that waits on a
+/// channel the job would have sent. Go prints the job's index panic.
+#[test]
+fn unjoined_job_fault_outranks_a_main_deadlock() {
+    let src = r#"import std.concurrency
+ch := Channel[int](0)
+fn work(xs: List[int]):
+    ch.send(xs[5])
+ex := Executor()
+ex.submit(fn(): work([1, 2]))
+print(ch.recv())
+ex.shutdown()
+"#;
+    let entry = write_temp_chz("t195_c3", src);
+    let (_out, _err, res, _code) = run_file(&entry);
+    let _ = std::fs::remove_file(&entry);
+    let msg = res.expect_err("expected a fault").message;
+    assert!(
+        msg.contains("index 5 out of bounds"),
+        "job fault lost, got: {msg}"
+    );
+    assert!(
+        !msg.contains("deadlock"),
+        "verdict outranked the job fault: {msg}"
+    );
+}
+
+/// TICKET-195 C4: a party cut by a child's fault reports that fault; its own `defer` fault ranks
+/// below the root cause.
+#[test]
+fn cut_owner_defer_fault_ranks_below_the_child_fault() {
+    let src = r#"import std.time
+r := recover:
+    parallel:
+        spawn:
+            time.sleep_ms(20)
+            panic("boom")
+        defer:
+            panic("cleanup failed")
+        time.sleep_ms(1000)
+print(r)
+"#;
+    let entry = write_temp_chz("t195_c4", src);
+    let (out, _err, res, _code) = run_file(&entry);
+    let _ = std::fs::remove_file(&entry);
+    assert!(
+        res.is_ok(),
+        "expected Ok, got: {:?}",
+        res.err().map(|e| e.message)
+    );
+    assert!(
+        out.contains("Err('boom')"),
+        "cut owner's defer fault won: out={out:?}"
+    );
+}
+
+/// TICKET-195 C5: a delivered child fault prints the faulting party's frames, never the receiver's.
+#[test]
+fn cut_owner_trace_is_the_childs_trace() {
+    let src = r#"import std.time
+fn b():
+    panic("boom")
+fn a():
+    time.sleep_ms(50)
+    b()
+fn waiter():
+    time.sleep_ms(1000)
+fn owner():
+    parallel:
+        spawn a()
+        waiter()
+owner()
+"#;
+    let entry = write_temp_chz("t195_c5", src);
+    let (_out, _err, res, _code) = run_file(&entry);
+    let _ = std::fs::remove_file(&entry);
+    let e = res.expect_err("expected a fault");
+    assert!(e.message.contains("boom"), "got: {}", e.message);
+    let names: Vec<&str> = e.trace.iter().map(|f| f.function.as_str()).collect();
+    assert!(names.contains(&"b"), "child's frames missing: {names:?}");
+    assert!(
+        !names.contains(&"waiter") && !names.contains(&"owner"),
+        "receiver's frames: {names:?}"
+    );
+}
+
+/// TICKET-195 step 10: a run that ends in a deadlock verdict still drains its executors, so a job's
+/// buffered output reaches the in-process sink — for a finished job and for one parked forever.
+#[test]
+fn a_verdict_run_still_drains_executor_output() {
+    let finished = r#"import std.concurrency
+import std.time
+ch := Channel[int](0)
+fn job():
+    print("job printed")
+ex := Executor()
+ex.submit(job)
+time.sleep_ms(200)
+print(ch.recv())
+"#;
+    let parked = r#"import std.concurrency
+import std.time
+ch := Channel[int](0)
+jstuck := Channel[int](0)
+fn job():
+    print("job started")
+    print(jstuck.recv())
+ex := Executor()
+ex.submit(job)
+time.sleep_ms(200)
+print(ch.recv())
+"#;
+    for (src, line) in [(finished, "job printed"), (parked, "job started")] {
+        let entry = write_temp_chz("t195_drain", src);
+        let (out, _err, res, _code) = run_file(&entry);
+        let _ = std::fs::remove_file(&entry);
+        let msg = res.expect_err("expected a verdict").message;
+        assert!(msg.contains("deadlock"), "got: {msg}");
+        assert!(out.contains(line), "job output lost: out={out:?}");
+    }
+}
