@@ -195,8 +195,11 @@ fn std_native_fault_in_a_submit_task_job_names_the_users_call() {
         stderr.starts_with("runtime error (main.chz:6:14): submit on a shut-down Executor"),
         "headline must name the user's submit_task call, got:\n{stderr}"
     );
+    // TICKET-195 (Decision 3): the frames below the headline are the faulting JOB's own, and a
+    // `submit_task` job runs inside std (`run_outcome`), so only the headline is checked here.
+    let headline = stderr.lines().next().unwrap_or("");
     assert!(
-        !stderr.contains("<native:std.concurrency>"),
+        !headline.contains("<native:std.concurrency>"),
         "got:\n{stderr}"
     );
 }

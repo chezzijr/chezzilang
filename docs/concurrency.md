@@ -1263,7 +1263,9 @@ fn serve(tok: Token, io: Channel[str]):
 >
 > **A fault delivered from another party is reported as THAT party's fault (TICKET-195).** An
 > `Executor` job's fault that no join has reduced yet is reported instead of a deadlock verdict (Go
-> prints the job's panic); it stays fatal, so `recover:` cannot catch it. A child's or a job's fault
+> prints the job's panic); it stays fatal, so `recover:` cannot catch it. This applies only to an
+> executor no `shutdown()` has started on: a deadlock inside that executor's own join keeps its
+> `deadlock` verdict. A child's or a job's fault
 > prints the faulting party's frames, never the frames of the owner that received it. A run that ends
 > in a deadlock verdict still drains its executors, so a finished job's buffered output is not lost.
 >

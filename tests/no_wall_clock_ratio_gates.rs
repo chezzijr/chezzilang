@@ -323,7 +323,7 @@ fn sleep_synchronised_tests() -> BTreeSet<String> {
 /// rejected it (the walk returns 68). Obtain it by compiling once with an empty array and copying
 /// the "sleeps but is not listed" list `no_new_rust_test_sleeps_to_order_two_events` reports,
 /// verbatim, the same way `stack_trace_reports_call_chain`'s golden was obtained.
-const SLEEP_SYNCHRONISED_TESTS: [&str; 93] = [
+const SLEEP_SYNCHRONISED_TESTS: [&str; 98] = [
     "cousin_fed_recovered_deadlock_is_fatal_not_a_hang_at_two_and_four_workers",
     "a_bailed_join_stops_its_jobs_from_starting_new_work",
     "a_cancelled_siblings_defer_runs_whole_on_both_engines",
@@ -474,6 +474,14 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 93] = [
     // after 50ms while its owner is blocked; the tests assert the owner is cut.
     "child_fault_cuts_owner_blocked_in_socket_read",
     "child_fault_cuts_spawned_owner_in_sleep",
+    // TICKET-195. Same reason as the TICKET-188 entries: every `time.sleep_ms` is inside the fixture
+    // .chz program's SOURCE STRING (a child faults while its owner waits; a job prints before main
+    // deadlocks), never a happens-before edge in the Rust test's own control flow.
+    "a_verdict_run_still_drains_executor_output",
+    "child_fault_survives_owner_stuck_defer",
+    "cut_owner_defer_fault_ranks_below_the_child_fault",
+    "cut_owner_trace_is_the_childs_trace",
+    "outside_executor_job_survives_owner_cut_in_shutdown",
 ];
 
 #[test]
