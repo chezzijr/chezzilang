@@ -1273,8 +1273,11 @@ labeled("dash: ", 4, 5, 6, sep="-")    # keyword-only `sep`
 
 Variadics are allowed on free functions, methods, and `native fn` decls — **not** on closures or
 `extern` (C) functions (the C ABI needs fixed per-arg types; see `docs/ffi-and-packaging.md §5`). Used
-as a first-class **value**, a variadic fn takes the collapsed `List[T]` slot (`g := sum_all; g([1,2,3])`
-works, `g(1,2,3)` does not) — the same fixed-value-form rule as `print`.
+as a first-class **value** through a binding certain to hold that one fn (see "Keyword arguments
+through a function VALUE" below), a variadic fn packs its surplus and fills its defaults exactly like
+a direct call (`g := sum_all; g(1, 2, 3)`, TICKET-197). Any other value — a list slot, a parameter —
+takes the collapsed `List[T]` slot (`fs := [sum_all]; fs[0]([1, 2, 3])`), the same fixed-value-form
+rule as `print`.
 
 **`Any` (the top type).** `Any` is an **empty structural protocol** — zero required methods, so **every**
 type satisfies it (scalars `int`/`float`/`bool`/`str` and `nil` included, not just structs/enums). It
@@ -1290,8 +1293,10 @@ protocol is a general accept-all top type, not a special case keyed on the name 
 **Keyword arguments through a function VALUE (Swift-style labels).** Named arguments also work through a
 first-class **function value**, not just a direct call — a `fn(...)` type carries its parameters'
 **labels**, so a binding that holds **one known function** accepts keyword args (TICKET-139/W14-2):
-that is an unannotated `g := some_fn`, `g := fn(...): ...` (a closure literal) or a nested `fn`'s own
-name, and it is **never written afterwards**:
+that is an unannotated `g := some_fn`, `g := fn(...): ...` (a closure literal), a nested `fn`'s own
+name, an alias of such a binding (`g := v` over a nested `fn v`, then `h := g`), or a turbofish
+instantiation of a generic fn (`g := f[int]`, `g := lib.f[int]`) (TICKET-197), and it is **never
+written afterwards**. An alias is voided by a write to either name:
 
 ```chezzi
 fn greet(name: str, greeting: str):
@@ -1321,12 +1326,14 @@ identical labels is rejected too.
 
 Labels stay **surface-only for typing**: `fn(str) -> nil` and `fn(name: str) -> nil` are the **same
 type** — mutually assignable, so an unlabelled callback flows into a labelled parameter and vice-versa
-(no impact on existing HOF/callback/protocol code). Two limits, both by design: **(1)** a value call
-may omit only a **trailing** run of defaulted parameters — `h := hasdefault; h()` fills the default
-(the CALLEE does it, from the declaration, so the value never had to carry it), and `h(a=1, b=7)` may
-omit a trailing `c`, but a value call cannot leave a HOLE before an argument it does supply
-(`h(1, c=9)` over `fn f(a, b=2, c=3)`), because a short call is exactly "fewer values pushed" and
-cannot express a gap — call the function directly by name for that shape; **(2)**
+(no impact on existing HOF/callback/protocol code). A value call through a binding certain to hold
+one fn binds that fn's own parameter slots (TICKET-197), so it fills every default it can name, a
+hole before a supplied argument included: `h := f; h(1, c=9)` over `fn f(a, b=2, c=3)` passes `b=2`
+(CPython agrees). Two limits, both by design: **(1)** a default that names a type parameter is filled
+by the CALLEE, so a value call may omit it only from the **end** of the call — `h := f[int]; h(1,
+c=9)` over `fn f[T](a: T, b: List[T] = List[T](), c: int = 3)` is refused, because a short call is
+exactly "fewer values pushed" and cannot express a gap; call the function directly by name for that
+shape; **(2)**
 first-class **built-in** function values (`p := ord`) take **no** keyword arguments (labels are a
 user-function surface).
 
@@ -1439,7 +1446,8 @@ undetermined `T` (Go: `cannot infer B`), and `applyg(mk, 5)` cannot match the sh
 One position is deliberately **not** covered, because the concrete type is present but does not reach
 the read: a parameter or field **default value** (`fn run(f: fn(int) -> int = id)`) has a concrete slot
 the checker does not thread into the expected-type hint, so the bare read is refused there and
-`= id[int]` is the spelling that works.
+`= id[int]` is the spelling that works. It works for an imported generic fn too: `= lib.idt[int]`,
+or `= idt[int]` after `import idt from lib` (TICKET-197; Go accepts `lib.Idt[int]`).
 
 **Imported generic fns follow the same rule** (TICKET-187). A from-imported (`import max from
 std.cmp`) or qualified (`cmp.max`) generic fn read as a value pins from the expected type exactly like
@@ -2220,8 +2228,12 @@ methods (`add`/`sub`/`mul`/`div`/`mod`) name their operand `other`, `Index.index
 `Contains.contains` names `item`. So `fn compare(self, o: P) -> int` no longer makes `P`
 `Comparable`; write `fn compare(self, other: P) -> int`. A built-in type conforms through its native
 method's declared names (`str.replace(self, old, new)` satisfies `Rep`), though a direct call to a
-native method still takes no named arguments. `==` is not affected: it dispatches a user `eq` by its
-shape, whatever the operand is called.
+native method still takes no named arguments. The direct hooks follow the same names (TICKET-197):
+an `index`, `set_index`, `contains` or `slice` method that misnames a parameter does not make the
+type indexable, index-assignable, `in`-testable or sliceable, and the operator error says why —
+`cannot index into V (method 'index' parameter 1 is named 'i', but Index declares 'k')`, `cannot
+apply + to W and W (method 'add' parameter 1 is named 'o', but Add declares 'other')`. `==` is not
+affected: it dispatches a user `eq` by its shape, whatever the operand is called.
 
 `Self` is also usable in an **inherent** `struct`/`enum`/`newtype` method's signature and body
 (param type, return type, local annotation), where it names the enclosing type — `fn dup(self) ->

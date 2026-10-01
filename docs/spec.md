@@ -99,8 +99,9 @@ param collects the surplus trailing positional args into a `List[T]`, so it is h
 not carry a default; everything after it is **keyword-only** (a defaulted post-variadic param is an
 optional keyword arg, a defaultless one is required-by-keyword — like Python's `*args`). The collapse
 happens in the desugar pass (a synthesized `List` literal), so the backend sees an ordinary positional
-call. Used as a first-class **value**, a variadic fn takes the collapsed `List[T]` slot (no per-arg
-spread through a value — the same fixed-value-form rule as `print`). Variadic GENERICS (`Foo[T...]`)
+call. Used as a first-class **value** through a binding certain to hold that one fn, a variadic fn
+packs its surplus and fills its defaults like a direct call (TICKET-197); any other value takes the
+collapsed `List[T]` slot (the same fixed-value-form rule as `print`). Variadic GENERICS (`Foo[T...]`)
 remain a **non-goal** — generics are always fixed-arity. The **`Any`** top type (an empty structural
 protocol satisfied by every type, scalars included) is the honest element type of a universal display
 slot (`print(...args: Any)`); it is not dynamic typing (it carries no methods). Empty protocols are a

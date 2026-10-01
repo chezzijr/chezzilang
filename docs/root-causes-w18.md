@@ -68,6 +68,13 @@ extern/native} x fact {labels, defaults, variadic, arity, const, write summary, 
 
 ## Family F2 — type-parameter identity and fn-value shape (N1, N2, N3, N4, N5)
 
+**Status:** fixed by TICKET-197. Four single sources: `instantiate_method` applies one combined map
+to a method signature (N1/N2); a fn value carries its declaration's slots in `FnLabels.slots`, and
+`kw_certain` records the keys an alias's certainty was read from (N3); `infer_index` asks
+`generic_fn_value_sig` and the compiler erases a turbofish on `Resolution::Fn` for an `Ident` or a
+`Field` head (N4); `Checker::hook_impl` asks `param_name_mismatch`, and one `name_mismatch_text`
+renders the reason (N5).
+
 **N1/N2 fact:** which declaration a `Ty::Param` in a method signature refers to. There is one `subst`
 (`src/checker/mod.rs:3389`), keyed on the bare name, but every method-call path applies TWO maps in
 sequence: the receiver map (`struct_param_map`, `expr.rs:3551/3557`, ~3743, ~3843, ~4000, 3156, 4629),

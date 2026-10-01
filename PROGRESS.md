@@ -31,6 +31,23 @@ Single source of truth for "what am I doing next." Update after every work sessi
   reproduces after TICKET-188 (0 of 150 debug runs at T=1; 0 of 210 release runs at T=1/2/0, idle and
   10 at once), so the stage notes stop excusing it.
 
+- **TICKET-197 (2026-10-02): Family F2, type-parameter identity and fn-value shape.** N1/N2: a
+  generic method's signature was substituted twice by bare name (receiver map, then method map), so
+  a caller's `U` merged with the method's `[U]` (`go2(Box(1), "s")` checked as `(T, T)` and faulted
+  at runtime; `xs.map(f)` in `fn h[U, T]` was refused). `instantiate_method` now applies one map
+  with fresh names on a collision, for struct, enum, newtype, native List and handle receivers and
+  RwShared `fold`. N3: a fn value carries its declaration's `FnSig.slots`, so a certain value
+  (top-level, from-import, `m.f`, nested fn, alias, `f[int]`) fills defaults, a middle hole
+  included, and packs a variadic like a direct call (`w := dv; w(1)` is `110`, CPython `110`);
+  `kw_certain` lists the keys an alias was read from, so a write to either name voids it. Only a
+  default naming a type parameter keeps the trailing-only rule. N4: `idt[int]` after
+  `import idt from lib` and `lib.idt[int]` work in value, argument and default position. N5: the
+  `index`/`set_index`/`contains`/`slice` hooks follow the protocol's parameter names, and operator
+  errors name the misnamed parameter; `==` stays outside the rule. Grids:
+  `checker::tests::{method_type_param_capture_grid, fn_value_slot_grid, fn_turbofish_head_grid,
+  hook_param_name_grid}`; runtime `tests/chz/spec/{fn_value_slots_test,
+  generic_fn_turbofish_import_test}.chz`.
+
 - **TICKET-196 (2026-10-01): Family D2, a module exports one record per slot.** `capture_sig`
   exported `fn`s and lets into separate tables, and every importer read the `fn` table first, so a
   slot declared as `fn f` and then rebound (`f := fn(b, a)`) handed other modules the OLD fn's
