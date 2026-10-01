@@ -2487,9 +2487,9 @@ impl Checker {
         // a fix for a single-parameter generic — offering it for two would be advice that cannot work
         // (measured: `pair[int]` → "expects 2 type argument(s), found 1"; `pair[int, str]` → a parse
         // error).
-        // TICKET-187: the value-position turbofish exists for a same-module fn only; an imported one
-        // (`max[int]`, `cmp.max[int]`) is `unknown name 'int'`, so it is not offered there.
-        let turbofish = if type_params.len() == 1 && self.local_fn_names.contains(name) {
+        // TICKET-197: the value-position turbofish works for a same-module, from-imported or `m.f`
+        // head alike (`infer_index` asks `generic_fn_value_sig`).
+        let turbofish = if type_params.len() == 1 {
             format!("instantiate it (`{name}[<{names}>]`), or ")
         } else {
             String::new()
@@ -2639,10 +2639,6 @@ impl Checker {
             // unsatisfiable hint (`g: fn(str) -> int = ident`) binds `T=str` (the param position wins)
             // and we return the CONCRETE `fn(str) -> str` — NEVER `expected` — leaving the existing
             // assignability / arg / return check to reject it against `fn(str) -> int`.
-            //
-            // Gated on a SAME-MODULE fn (`local_fn_names`) — the identical same-module restriction the
-            // turbofish B-path + the compiler's erase set use, so accept ⟺ runtime stays in lockstep
-            // (an imported generic-fn-as-value stays the rigid error, a documented v1 limit).
             if !type_params.is_empty()
                 && let Some(ty) = self.generic_fn_value_ty(name, &sig, span)
             {
@@ -4139,43 +4135,54 @@ impl Checker {
     pub(super) fn infer_index(&mut self, obj: &Expr, index: &Expr) -> Ty {
         // Scope B — turbofish on a generic fn VALUE: `ident[int]` pins the fn's type params from the
         // explicit type arg and yields the CONCRETE `fn(int) -> int` value (`ident[int]` parses as
-        // `Index { Ident(ident), int }`, so it lands here). Gated on a SAME-MODULE generic fn
-        // (`local_fn_names` — the exact set the compiler erases at codegen, keeping checker-accept ⟺
-        // compiler-erase in lockstep) that is NOT shadowed by a local/param binding, indexed by a
-        // type-shaped expression. Runs BEFORE `infer_value(obj)`/inferring the index (which would
-        // wrongly report `int` as an unknown name and "cannot index into fn").
-        if let ExprKind::Ident(name) = &obj.kind {
-            let is_local_generic = self.local_fn_names.contains(name)
-                && self.lookup(name).is_none()
-                && self
-                    .functions
-                    .get(name)
-                    .is_some_and(|s| !s.type_params.is_empty());
-            if is_local_generic && let Some(ty_expr) = self.index_as_type(index) {
-                let r = self.fn_resolution(name);
-                self.record_resolution(obj.id, r, obj.span);
-                let sig = self.functions[name].clone();
-                let (type_params, wparams) = (sig.type_params.clone(), sig.witness_params.clone());
-                // M24 — the fn-as-value wall again: pinning the type params does NOT recover the
-                // witness (the pin is checker-only, the runtime value is the same erased function),
-                // so `reset[Counter]` is as unlowerable as a bare `reset`.
-                if self.reject_witness_fn_value(name, &wparams, obj.span) {
-                    return Ty::Unknown;
+        // `Index { Ident(ident), int }`, so it lands here). TICKET-197: the head is whatever
+        // `generic_fn_value_sig` calls a generic fn value — a same-module or from-imported fn not
+        // shadowed by a local, or `m.f` on a whole-module import — indexed by a type-shaped
+        // expression. The head records `Resolution::Fn`, the one fact the compiler erases on. Runs
+        // BEFORE `infer_value(obj)`/inferring the index (which would wrongly report `int` as an
+        // unknown name and "cannot index into fn").
+        if let Some((display, sig)) = self.generic_fn_value_sig(obj)
+            && let Some(ty_expr) = self.index_as_type(index)
+        {
+            match &obj.kind {
+                ExprKind::Ident(name) => {
+                    let r = self.fn_resolution(name);
+                    self.record_resolution(obj.id, r, obj.span);
                 }
-                let targ = self.resolve_type(&ty_expr, index.span);
-                // `seed_targs` arity-checks the single type arg against the param count and emits the
-                // clean "'name' expects N type argument(s), found 1" error on a mismatch.
-                let map = self.seed_targs(name, &type_params, &[targ], obj.span);
-                if type_params.iter().all(|tp| map.contains_key(&tp.name)) {
-                    // Enforce declared bounds against the binding (`addone[str]` where `str: Add`
-                    // fails), then yield the CONCRETE substituted fn type. Runtime is generic-ERASED.
-                    self.enforce_bounds(&type_params, &map, obj.span);
-                    return subst(&fn_value_ty(&sig), &map);
+                ExprKind::Field { obj: m, name, .. } => {
+                    if let Resolution::ModuleMember { module, name } =
+                        self.member_resolution(m, name)
+                    {
+                        self.record_resolution(obj.id, Resolution::Fn { module, name }, obj.span);
+                    }
+                    // The compiler loads the module head as a value (`Compiler::resolution` (5)).
+                    if let ExprKind::Ident(mn) = &m.kind {
+                        let r = self.value_head_resolution(mn);
+                        self.record_resolution(m.id, r, m.span);
+                    }
                 }
-                // Arity mismatch (seed_targs already reported) — degrade to Unknown instead of
-                // falling through to the "cannot index into fn" double-report.
+                _ => {}
+            }
+            let (type_params, wparams) = (sig.type_params.clone(), sig.witness_params.clone());
+            // M24 — the fn-as-value wall again: pinning the type params does NOT recover the
+            // witness (the pin is checker-only, the runtime value is the same erased function),
+            // so `reset[Counter]` is as unlowerable as a bare `reset`.
+            if self.reject_witness_fn_value(&display, &wparams, obj.span) {
                 return Ty::Unknown;
             }
+            let targ = self.resolve_type(&ty_expr, index.span);
+            // `seed_targs` arity-checks the single type arg against the param count and emits the
+            // clean "'name' expects N type argument(s), found 1" error on a mismatch.
+            let map = self.seed_targs(&display, &type_params, &[targ], obj.span);
+            if type_params.iter().all(|tp| map.contains_key(&tp.name)) {
+                // Enforce declared bounds against the binding (`addone[str]` where `str: Add`
+                // fails), then yield the CONCRETE substituted fn type. Runtime is generic-ERASED.
+                self.enforce_bounds(&type_params, &map, obj.span);
+                return subst(&fn_value_ty(&sig), &map);
+            }
+            // Arity mismatch (seed_targs already reported) — degrade to Unknown instead of
+            // falling through to the "cannot index into fn" double-report.
+            return Ty::Unknown;
         }
         // Map keys are NOT int — infer the object first and check the index against the key type.
         match self.infer_value(obj) {

@@ -1,0 +1,4 @@
+# TICKET-197 (N4): a generic fn another module turbofishes as a value. See
+# `generic_fn_turbofish_import_test.chz`.
+fn idt[T](x: T) -> T:
+    return x

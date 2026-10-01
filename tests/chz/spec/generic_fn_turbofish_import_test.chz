@@ -1,0 +1,23 @@
+# TICKET-197 (N4): a turbofish instantiates a generic fn from another module, reached by a
+# from-import or as `m.f`, in value, argument and parameter-default position (Go: `lib.Idt[int]`).
+import generic_fn_turbofish_import_lib
+import idt from generic_fn_turbofish_import_lib
+
+fn run_i(f: fn(int) -> int = idt[int]) -> int:
+    return f(9)
+
+fn run_s(f: fn(str) -> str = generic_fn_turbofish_import_lib.idt[str]) -> str:
+    return f("s")
+
+test fn a_from_import_turbofish_value_returns_its_argument():
+    i := idt[int]
+    assert i(4) == 4, "got {i(4)}"
+    assert [1, 2].map(idt[int]) == [1, 2], "got {[1, 2].map(idt[int])}"
+    assert run_i() == 9, "got {run_i()}"
+
+test fn a_module_member_turbofish_value_returns_its_argument():
+    j := generic_fn_turbofish_import_lib.idt[str]
+    assert j("x") == "x", "got {j(\"x\")}"
+    m := [1, 2].map(generic_fn_turbofish_import_lib.idt[int])
+    assert m == [1, 2], "got {m}"
+    assert run_s() == "s", "got {run_s()}"

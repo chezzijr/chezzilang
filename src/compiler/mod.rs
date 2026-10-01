@@ -3509,7 +3509,10 @@ impl Compiler {
                     Resolution::Variant { enum_key, variant } => {
                         self.emit_new_enum(fc, &enum_key, &variant, 0, expr.span);
                     }
-                    Resolution::Member | Resolution::ModuleMember { .. } => {
+                    // `Fn`: the head of a value turbofish `m.f[int]`, a member of the module.
+                    Resolution::Member
+                    | Resolution::ModuleMember { .. }
+                    | Resolution::Fn { .. } => {
                         self.compile_expr(fc, obj)?;
                         let ic = self.next_field_ic(name);
                         fc.emit(
@@ -3536,9 +3539,14 @@ impl Compiler {
                 // `fn`-typed Index, so the only fn Index that reaches codegen is exactly this case;
                 // a shadowing local/capture (`xs := [1,2]; xs[0]`) is never in `fn_names`, so a real
                 // index still compiles below.
-                if let ExprKind::Ident(_) = &obj.kind
-                    && matches!(self.resolution(obj)?, Resolution::Fn { .. })
-                {
+                // TICKET-197: the head is an `Ident` or a non-tuple `Field` (`m.f[int]`), and the
+                // checker's `Resolution::Fn` on it is the one fact this erase reads.
+                let named_head = match &obj.kind {
+                    ExprKind::Ident(_) => true,
+                    ExprKind::Field { name, .. } => !crate::ast::is_tuple_index(name),
+                    _ => false,
+                };
+                if named_head && matches!(self.resolution(obj)?, Resolution::Fn { .. }) {
                     self.compile_expr(fc, obj)?;
                     return Ok(());
                 }
@@ -4993,7 +5001,8 @@ impl Compiler {
     /// (1) A call callee `Ident`. (2) A call callee `Field`, and the `Field` inside a callee
     /// `Index { obj: Field }` (`Type[T].m[U](..)`, `Type.m[U](..)`, `m.f[int](..)`). (3) An `Ident`
     /// it compiles as a value. (4) A value `Field`. (5) The `obj` of a `Field` is compiled, and so
-    /// falls under (3), only when that `Field`'s entry is `Member` or `ModuleMember`. It never asks
+    /// falls under (3), only when that `Field`'s entry is `Member`, `ModuleMember` or `Fn`.
+    /// (6) The `Field` head of a value turbofish `Index` (`m.f[int]`), recorded as `Fn`. It never asks
     /// about a type head (`T` in `T.m()`, `E` in `E.V`, `Box` in `Box[int].of()`) or a type
     /// argument, because it never lowers them. No `ast` shape predicate can state this rule:
     /// `xs[i].k` and `Box[int].k` share one shape.

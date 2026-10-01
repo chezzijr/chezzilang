@@ -36725,10 +36725,10 @@ fn t187_generic_fn_value_same_named_param_rejected() {
     );
 }
 
-/// The rejection of an unpinned imported generic value offers only advice that works: a
-/// value-position turbofish (`cmp.max[int]`) does not resolve on an imported fn.
+/// The rejection of an unpinned imported generic value offers only advice that works. TICKET-197:
+/// a value-position turbofish resolves on an imported fn (`cmp.max[int]`), so it is offered.
 #[test]
-fn t187_imported_generic_value_advice_omits_the_turbofish() {
+fn t187_imported_generic_value_advice_offers_the_turbofish() {
     let errs = check_entry("import std.cmp\nf := cmp.max\n");
     let e = errs
         .iter()
@@ -36737,7 +36737,13 @@ fn t187_imported_generic_value_advice_omits_the_turbofish() {
                 .contains("'cmp.max' is generic and T is not determined here")
         })
         .unwrap_or_else(|| panic!("expected the generic-value error, got: {errs:?}"));
-    assert!(!e.message.contains("instantiate it"), "{}", e.message);
+    assert!(
+        e.message.contains("instantiate it (`cmp.max[<T>]`)"),
+        "{}",
+        e.message
+    );
+    let errs = check_entry("import std.cmp\nf := cmp.max[int]\nprint(f(3, 9))\n");
+    assert!(errs.is_empty(), "{errs:?}");
 }
 
 /// Owner answer 2(a): a one-parameter implementor that renames the parameter does not conform.
@@ -37069,6 +37075,79 @@ fn assert_clean_files_grid(cells: &[(String, String, String, bool)]) {
         "{} wrong cell(s):\n{}",
         wrong.len(),
         wrong.join("\n")
+    );
+}
+
+/// TICKET-197 (N4): a turbofish head is a generic fn value wherever `generic_fn_value_sig` finds
+/// one: same module, from-import or `m.f`, in value, call, argument and parameter-default position.
+/// A local that shadows the imported name is indexed as itself.
+#[test]
+fn fn_turbofish_head_grid() {
+    const LIB: &str = "fn idt[T](x: T) -> T:\n    return x\n";
+    let uses = |h: &str| {
+        [
+            ("value", format!("i := {h}[int]\nprint(i(4))\n")),
+            ("call", format!("print({h}[int](4))\n")),
+            ("argument", format!("print([1].map({h}[int]))\n")),
+            (
+                "default",
+                format!(
+                    "fn run(f: fn(int) -> int = {h}[int]) -> int:\n    return f(9)\nprint(run())\n"
+                ),
+            ),
+        ]
+    };
+    let heads = [
+        ("same_module", String::new(), LIB.to_string(), "idt"),
+        (
+            "from_import",
+            LIB.to_string(),
+            "import idt from lib\n".to_string(),
+            "idt",
+        ),
+        (
+            "module_member",
+            LIB.to_string(),
+            "import lib\n".to_string(),
+            "lib.idt",
+        ),
+    ];
+    let mut cells: Vec<(String, String, String, bool)> = Vec::new();
+    for (hname, lib, prefix, head) in heads {
+        for (pname, body) in uses(head) {
+            cells.push((
+                format!("{hname}_{pname}"),
+                lib.clone(),
+                format!("{prefix}{body}"),
+                true,
+            ));
+        }
+    }
+    cells.push((
+        "shadowed".to_string(),
+        LIB.to_string(),
+        "import idt from lib\nfn k(idt: List[int]) -> int:\n    return idt[0]\nprint(k([7]))\n"
+            .to_string(),
+        true,
+    ));
+    cells.push((
+        "shadowed_module".to_string(),
+        LIB.to_string(),
+        "import lib\nstruct S:\n    idt: List[int]\nfn k(lib: S) -> int:\n    return lib.idt[0]\nprint(k(S(idt=[7])))\n"
+            .to_string(),
+        true,
+    ));
+    assert_clean_files_grid(&cells);
+    // A turbofish carries one type argument (`f[int, str]` does not parse), so an imported head's
+    // arity error is a two-parameter fn given one.
+    let errs = check_files(&[
+        ("lib.chz", "fn two[A, B](a: A, b: B) -> A:\n    return a\n"),
+        ("main.chz", "import two from lib\ni := two[int]\n"),
+    ]);
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("expects 2 type argument")),
+        "{errs:?}"
     );
 }
 
