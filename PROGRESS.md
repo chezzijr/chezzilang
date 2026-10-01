@@ -31,6 +31,21 @@ Single source of truth for "what am I doing next." Update after every work sessi
   reproduces after TICKET-188 (0 of 150 debug runs at T=1; 0 of 210 release runs at T=1/2/0, idle and
   10 at once), so the stage notes stop excusing it.
 
+- **TICKET-196 (2026-10-01): Family D2, a module exports one record per slot.** `capture_sig`
+  exported `fn`s and lets into separate tables, and every importer read the `fn` table first, so a
+  slot declared as `fn f` and then rebound (`f := fn(b, a)`) handed other modules the OLD fn's
+  labels, defaults, variadic, arity, write summary, escapes and witnesses (`lib.f(a=1, b=2)` printed
+  `21`, CPython `12`). The per-kind tables `ModuleSig::{functions, values, const_values}` and
+  `Checker::imported_consts` are deleted; `ModuleSig::members` holds one `MemberSig { ty, certain_fn,
+  is_const, redeclared }` per name, built from the home `GlobalBinding`. `certain_fn` is set only for a
+  name declared once as `fn`/extern/native; a redeclared slot is called through its final type and a
+  keyword call through it is denied. A from-import records its home slot's facts in its own
+  `GlobalBinding` (`DeclKind::Import(ImportFacts)`), so `import Y from lib; Y := 7` is the const
+  re-declaration error (also `import pi from std.math; pi := 3.0`). `lib.S(..)` for `struct S` plus
+  `S := fn(..)` now calls the slot. Grid: `checker::tests::module_export_grid` (42 cells) plus cell
+  `g31` in `compiler::gen_frame_tests::generator_slot_privacy_grid`; runtime pair
+  `tests/chz/spec/module_export_slot_test.chz`.
+
 - **TICKET-190 (2026-10-01): Family C2, generator frames read one static mask on every route.**
   A generator frame slot is private when the parent cannot reach its root. The checker decides it
   once per generator decl: a local is private when every single-name `let`/assignment of it is fresh

@@ -290,7 +290,15 @@ ANSWER += 1                   # ✗ every compound form is caught too
   carries its const-ness to importers: `import PI from m; PI = x` and the qualified `m.PI = x` both
   report *"it is declared const in module 'm'"* rather than the generic snapshot/field message. (Note
   that *any* imported global is already read-only — a from-imported value is a snapshot copy — so the
-  const marking sharpens the message, it doesn't add the restriction.)
+  const marking sharpens the message, it doesn't add the restriction.) A from-imported const cannot be
+  re-declared at module scope either: `import PI from m; PI := 9.0` is the same error as a local
+  re-declaration (an inner-scope shadow stays fine). A module slot declared more than once (`fn f`
+  plus `f := ...`) is called through by its final type, so keyword, defaulted and variadic calls
+  through `m.f` / `import f from m` bind no stale labels (TICKET-196). A keyword call through a
+  let-only closure of another module (`g := fn(a, b)` in `m`, then `m.g(a=1, b=2)`) is rejected with
+  "need a binding that holds one known function": the checker cannot see whether `m` rebinds `g`, so
+  it declines (before this, the same call checked OK and then failed to compile with
+  `internal: no call plan recorded`). The same call inside `m` is accepted.
 
 #### The blank identifier `_`
 

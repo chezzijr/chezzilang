@@ -38,6 +38,8 @@ thousands of generated cases (slicing, int parsing, float format, strings, json,
 
 ## Family D2 — the module export (K5x, K6x)
 
+**Status:** fixed by TICKET-196 (ModuleSig::members, one export record per slot).
+
 **Fact:** what module slot X holds once its module has finished initialising (labels, defaults,
 variadic, arity, const-ness). An importer always runs after every declaration in the module.
 

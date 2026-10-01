@@ -88,6 +88,12 @@
   fact (every crossing route, every syntactic position a name can occupy, every receiver kind) and
   make each one an axis. A single source that only some consumers read is a single source for part
   of the grid.
+- **A single source must reach every boundary its fact crosses** (wave 18,
+  `docs/root-causes-w18.md`). TICKET-186 built one record per module slot and left the export
+  (`capture_sig`) reading the old per-kind maps; TICKET-187 unified generic fn values and left the
+  `f[int]` read on `local_fn_names`. When the grid is drawn, add the boundary axis: same module vs
+  another module, value vs call, first stage vs retry. TICKET-196 exported the record
+  (`ModuleSig::members`), and its grid is the other-module side of DEC-186's cells.
 - **A fact pushed for one cause and polled for another is two deciders** (TICKET-188). Derive both
   from one wake set, including the deadlock verdict's registry.
 - **A structural protocol's parameter names are part of its contract** (TICKET-187). A call through
