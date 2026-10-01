@@ -273,3 +273,44 @@ test fn remove_and_overwrite_keep_a_cross_entry_alias_alive():
     _rw_put(b, "b", [5])
     want: Map[str, List[int]] = {"b": [5], "c": [4]}
     assert b.get() == want, str(b.get())
+
+# ---- lookup under a concurrent remove of a colliding key ------------------------------------------
+# Every even `P` hashes alike. One task keeps removing the oldest other colliding key and putting it
+# back, which shifts every later colliding entry. The looker re-appends `P(14)` before each lookup so
+# it sits behind the churned keys; `has`/`get_key` of `P(14)` must never report it missing, since only
+# the looker writes it. Base (a scan, no write generation) missed 1113 / 590 / 174 of 20000 lookups
+# at CHEZZI_THREADS=2 / 0 / 1.
+fn _churn(b: RwShared[Map[P, int]], stop: AtomicInt):
+    i := 0
+    while stop.load() == 0:
+        _rw_del(b, P(i))
+        _rw_put(b, P(i), i)
+        i = (i + 2) % 14
+
+fn _look(b: RwShared[Map[P, int]], stop: AtomicInt, ch: Channel[int]):
+    misses := 0
+    for _ in range(10000):
+        _rw_del(b, P(14))
+        _rw_put(b, P(14), 14)
+        if not b.has(P(14)):
+            misses = misses + 1
+        match b.get_key(P(14)):
+            Some(v):
+                if v != 14:
+                    misses = misses + 1
+            None:
+                misses = misses + 1
+    stop.store(1)
+    ch.send(misses)
+
+test fn colliding_key_lookup_never_misses_under_concurrent_churn():
+    b: RwShared[Map[P, int]] = RwShared({})
+    for i in range(8):
+        _rw_put(b, P(2 * i), 2 * i)
+    stop := AtomicInt(0)
+    ch := Channel[int](1)
+    parallel:
+        spawn _churn(b, stop)
+        spawn _look(b, stop, ch)
+    misses := ch.recv()
+    assert misses == 0, "P(14) reported missing " + str(misses) + " times"
