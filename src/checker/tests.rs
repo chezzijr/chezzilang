@@ -37020,3 +37020,20 @@ fn module_export_grid() {
         wrong.join("\n")
     );
 }
+
+#[test]
+fn method_own_param_does_not_collide_with_receiver_param_by_name() {
+    // `Box[U].pair[T](t)` is `(U, T)`; the receiver's `T` and the method's `U` must be substituted
+    // once, keyed on the declaration, not re-substituted by bare name in a second pass.
+    let src = "struct Box[T]:\n    v: T\n    fn pair[U](self, u: U) -> (T, U):\n        return (self.v, u)\nfn go2[T, U](b: Box[U], t: T) -> (T, T):\n    return b.pair(t)\n";
+    let errs = check_src(src);
+    assert!(
+        !errs.is_empty(),
+        "expected a type error for returning (U, T) as (T, T), got none"
+    );
+}
+
+#[test]
+fn fn_value_param_named_like_prelude_map_param_is_accepted() {
+    ok("fn h[U, T](xs: List[U], f: fn(U) -> T) -> List[T]:\n    return xs.map(f)\n");
+}
