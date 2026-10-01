@@ -754,6 +754,20 @@ impl RwSharedCore {
         self.generation.fetch_add(1, Ordering::Relaxed);
         *g = w;
     }
+
+    /// TICKET-192 — run `f` on the stored map under the write lock, bumping the write generation
+    /// (see [`generation`](Self::generation)). `None` when the stored value is not a `Map`. `f` must
+    /// keep `summary` in step itself ([`WireSummary::adjust`]); it runs under the lock, so it may.
+    pub fn with_map_mut<R>(&self, f: impl FnOnce(&mut super::wire::WireMap) -> R) -> Option<R> {
+        let mut g = self.v.write().unwrap();
+        match &mut *g {
+            WireValue::Map { entries, .. } => {
+                self.generation.fetch_add(1, Ordering::Relaxed);
+                Some(f(entries))
+            }
+            _ => None,
+        }
+    }
 }
 
 /// `Atomic[T]` core: the cross-task atomic box. Like [`SharedCore`] (one boxed wire value behind a
@@ -1709,6 +1723,25 @@ impl WireSummary {
         self.state
             .store(if dirty { WS_DIRTY } else { WS_CLEAN }, Ordering::Relaxed);
     }
+
+    /// TICKET-192 — fold one in-place entry write into the summary: `add_bytes`/`add_dirty` are the
+    /// new pieces' [`wire_summary`], `sub_bytes` the replaced pieces' bytes. Leaves `UNKNOWN` alone
+    /// (the GC still walks and fills it), saturates bytes at zero, and never turns `DIRTY` back into
+    /// `CLEAN`: dropping one dirty piece does not prove the rest clean. Only a whole store cleans.
+    /// Call it under the same write lock as the entry write.
+    pub fn adjust(&self, add_bytes: usize, add_dirty: bool, sub_bytes: usize) {
+        if self.state() == WS_UNKNOWN {
+            return;
+        }
+        let b = self
+            .bytes()
+            .saturating_add(add_bytes)
+            .saturating_sub(sub_bytes);
+        self.bytes.store(b, Ordering::Relaxed);
+        if add_dirty {
+            self.state.store(WS_DIRTY, Ordering::Relaxed);
+        }
+    }
 }
 
 /// W6-7/W6-10 — ONE walk of a stored wire payload yielding both GC facts: `(approximate owned bytes,
@@ -2111,6 +2144,24 @@ pub fn value_core_bytes_structural(
 mod tests {
     use super::*;
     use std::net::{TcpListener, TcpStream};
+
+    /// TICKET-192 — `adjust` keeps UNKNOWN, moves bytes by the delta (saturating), turns CLEAN into
+    /// DIRTY on a dirty piece, and never turns DIRTY into CLEAN.
+    #[test]
+    fn wire_summary_adjust_never_cleans_a_dirty_summary() {
+        let s = WireSummary::default();
+        s.adjust(10, true, 0);
+        assert_eq!((s.state(), s.bytes()), (WS_UNKNOWN, 0));
+        s.store(100, false);
+        s.adjust(5, false, 0);
+        assert_eq!((s.state(), s.bytes()), (WS_CLEAN, 105));
+        s.adjust(10, true, 15);
+        assert_eq!((s.state(), s.bytes()), (WS_DIRTY, 100));
+        s.adjust(0, false, 60);
+        assert_eq!((s.state(), s.bytes()), (WS_DIRTY, 40));
+        s.adjust(0, false, 1000);
+        assert_eq!((s.state(), s.bytes()), (WS_DIRTY, 0));
+    }
 
     /// D6 — every `SocketCore`/`ListenerCore` gets a fresh, distinct poll key (the ABA-avoiding
     /// identity), and a freshly-built core holds its stream `Some` (open).

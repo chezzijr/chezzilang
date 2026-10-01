@@ -3070,6 +3070,185 @@ impl Vm {
         }
     }
 
+    /// TICKET-192 — the ONE single-entry writer of a stored `RwShared[Map[K, V]]`: `set_key`,
+    /// `remove_key`, `get_or_insert`. Takes the update guard exactly as `set`/`write` do (DEC-016),
+    /// probes with [`rwshared_probe`](Self::rwshared_probe), and splices the one entry into the stored
+    /// table instead of re-encoding the map:
+    ///
+    /// 1. Insert serializes key then value in ONE memo seeded at the table's id ceiling, so the new
+    ///    ids never collide with stored ones (a whole `get()` would otherwise tie two entries).
+    /// 2. Overwrite keeps the STORED key (CPython `d[k] = v`) and serializes the value alone.
+    /// 3. Remove and overwrite splice in place only when every stored piece stands alone (`flat`):
+    ///    otherwise another entry may `Backref` into the one replaced, so they decode the whole map,
+    ///    mutate it on the heap and re-encode it (the pre-TICKET-192 cost).
+    ///
+    /// The summary moves by the spliced pieces' bytes and never turns DIRTY into CLEAN.
+    pub(super) fn rwshared_map_write_entry(
+        &mut self,
+        h: GcRef,
+        op: EntryWrite,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        let (name, key, val) = match op {
+            EntryWrite::Put(k, v) => ("set_key", k, v),
+            EntryWrite::Remove(k) => ("remove_key", k, Value::nil()),
+            EntryWrite::GetOrInsert(k, v) => ("get_or_insert", k, v),
+        };
+        // Root the receiver, key and value across a user `hash` (VM re-entry, may GC).
+        let qh = self.hash_key_rooted(key, &[Value::obj(h), key, val], span)?;
+        let core = self.rwshared_core(h);
+        let _guard =
+            self.take_update_guard(Arc::as_ptr(&core) as usize, "a RwShared update guard", span)?;
+        if !matches!(&*core.v.read().unwrap(), WireValue::Map { .. }) {
+            return Err(self.err(format!("RwShared.{name} requires a map element"), span));
+        }
+        self.with_roots(&[Value::obj(h), key, val], |vm| {
+            let with_value = !matches!(op, EntryWrite::Put(..));
+            let probed = vm.rwshared_probe(&core, qh, key, with_value, span)?;
+            let pos = match (op, probed) {
+                (EntryWrite::GetOrInsert(..), Some((_, v))) => {
+                    return Ok(v.expect("get_or_insert probes with the value"));
+                }
+                (EntryWrite::Remove(_), None) => {
+                    return Ok(vm.alloc_enum("Option", "None", vec![]));
+                }
+                (_, p) => p,
+            };
+            // Hold the removed value (a fresh rebuild) rooted until it is returned.
+            let removed = pos.and_then(|(_, v)| v).unwrap_or_else(Value::nil);
+            vm.with_roots(&[removed], |vm| {
+                let (ceiling, flat) = {
+                    let g = core.v.read().unwrap();
+                    match &*g {
+                        WireValue::Map { entries, .. } => (
+                            entries.id_ceiling(),
+                            entries
+                                .flat()
+                                .unwrap_or_else(|| Vm::wire_pieces_are_self_contained(&g)),
+                        ),
+                        _ => unreachable!("the update guard keeps the element a map"),
+                    }
+                };
+                if pos.is_some() && !flat {
+                    vm.rwshared_map_write_entry_slow(&core, op, qh, span)?;
+                } else {
+                    vm.rwshared_map_splice(
+                        &core,
+                        op,
+                        pos.map(|(i, _)| i),
+                        qh,
+                        ceiling,
+                        flat,
+                        span,
+                    )?;
+                }
+                Ok(match op {
+                    EntryWrite::Put(..) => Value::nil(),
+                    EntryWrite::Remove(_) => vm.alloc_enum("Option", "Some", vec![removed]),
+                    EntryWrite::GetOrInsert(_, v) => v,
+                })
+            })
+        })
+    }
+
+    /// The in-place half of [`rwshared_map_write_entry`](Self::rwshared_map_write_entry): `pos` is the
+    /// probed position (`None` = insert). The caller holds the update guard, so `pos` is stable.
+    #[allow(clippy::too_many_arguments)]
+    fn rwshared_map_splice(
+        &mut self,
+        core: &Arc<RwSharedCore>,
+        op: EntryWrite,
+        pos: Option<usize>,
+        qh: u64,
+        ceiling: u32,
+        flat: bool,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        let none = super::fxhash::FxHashMap::<u32, GcRef>::default();
+        let mut memo = super::sched::WireMemo::seeded(ceiling);
+        let (kw, vw) = match (op, pos) {
+            (EntryWrite::Put(k, v) | EntryWrite::GetOrInsert(k, v), None) => {
+                let kw = self.to_wire_crossable_memo(k, span, &mut memo)?;
+                (
+                    Some(kw),
+                    Some(self.to_wire_crossable_memo(v, span, &mut memo)?),
+                )
+            }
+            (EntryWrite::Put(_, v), Some(_)) => {
+                (None, Some(self.to_wire_crossable_memo(v, span, &mut memo)?))
+            }
+            _ => (None, None),
+        };
+        let entry_flat = kw
+            .iter()
+            .chain(vw.iter())
+            .all(|w| w.backrefs_resolvable(&none));
+        let (add_bytes, add_dirty) = kw.iter().chain(vw.iter()).fold((0, false), |acc, w| {
+            let (b, d) = super::core::wire_summary(w);
+            (acc.0 + b, acc.1 | d)
+        });
+        let next_id = memo.next_id();
+        core.with_map_mut(|m| {
+            let sub_bytes = match (kw, vw, pos) {
+                (Some(kw), Some(vw), None) => {
+                    m.push((qh, kw, vw));
+                    0
+                }
+                (None, Some(vw), Some(i)) => super::core::wire_summary(&m.replace_value(i, vw)).0,
+                (None, None, Some(i)) => {
+                    let (_, k, v) = m.remove_at(i);
+                    std::mem::size_of::<u64>()
+                        + super::core::wire_summary(&k).0
+                        + super::core::wire_summary(&v).0
+                }
+                _ => unreachable!("splice: op and position disagree"),
+            };
+            let add_bytes = if pos.is_none() {
+                add_bytes + std::mem::size_of::<u64>()
+            } else {
+                add_bytes
+            };
+            m.raise_ceiling(next_id);
+            m.set_flat(flat && entry_flat);
+            core.summary.adjust(add_bytes, add_dirty, sub_bytes);
+        })
+        .expect("the update guard keeps the element a map");
+        Ok(())
+    }
+
+    /// The decode-mutate-re-encode half of
+    /// [`rwshared_map_write_entry`](Self::rwshared_map_write_entry), for a remove or overwrite on a
+    /// map whose pieces do not all stand alone. The caller holds the update guard and roots the key
+    /// and value.
+    fn rwshared_map_write_entry_slow(
+        &mut self,
+        core: &Arc<RwSharedCore>,
+        op: EntryWrite,
+        qh: u64,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        let w = core.v.read().unwrap().clone();
+        let mv = self.from_wire(w);
+        let mh = mv.as_obj().expect("a stored map rebuilds as a heap map");
+        self.with_roots(&[mv], |vm| {
+            match op {
+                EntryWrite::Put(k, v) => vm.map_upsert_in_heap(mh, qh, k, v, span)?,
+                EntryWrite::Remove(k) => {
+                    if let Some(i) = vm.map_probe(mh, qh, k, span)? {
+                        let Obj::Map(m) = vm.heap.get_mut(mh) else {
+                            unreachable!()
+                        };
+                        m.remove_at(i);
+                    }
+                }
+                EntryWrite::GetOrInsert(..) => unreachable!("an insert never takes the slow path"),
+            }
+            let stored = vm.to_wire_crossable(mv, span)?;
+            core.store(stored);
+            Ok(())
+        })
+    }
+
     /// `RwShared[T]` methods: `get`/`set` (read/write-guarded copy out/in), `read(f)` (SHARED read
     /// guard: clone out, drop guard, run `f`, return its result — NO write-back), `write(f)`
     /// (EXCLUSIVE write guard: a write-locked read-modify-write, the `Shared.update` shape under a
@@ -3119,6 +3298,19 @@ impl Vm {
                 let result = self.guarded(|vm| vm.invoke_value(f, vec![cur], span));
                 self.pop();
                 result
+            }
+            // TICKET-192: the single-entry writers of a `Map` element (update guard, O(1) expected).
+            "set_key" => {
+                self.arity_err("set_key", args, 2, span)?;
+                self.rwshared_map_write_entry(h, EntryWrite::Put(args[0], args[1]), span)
+            }
+            "remove_key" => {
+                self.arity_err("remove_key", args, 1, span)?;
+                self.rwshared_map_write_entry(h, EntryWrite::Remove(args[0]), span)
+            }
+            "get_or_insert" => {
+                self.arity_err("get_or_insert", args, 2, span)?;
+                self.rwshared_map_write_entry(h, EntryWrite::GetOrInsert(args[0], args[1]), span)
             }
             "write" => {
                 self.arity_err("write", args, 1, span)?;
@@ -4097,4 +4289,13 @@ impl Vm {
         }
         Ok(())
     }
+}
+
+/// TICKET-192 — one single-entry write of a `RwShared[Map[K, V]]` (see
+/// [`Vm::rwshared_map_write_entry`]).
+#[derive(Debug, Clone, Copy)]
+pub(super) enum EntryWrite {
+    Put(Value, Value),
+    Remove(Value),
+    GetOrInsert(Value, Value),
 }

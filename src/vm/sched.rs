@@ -38,7 +38,7 @@ use super::*;
 /// definitions per depth-1 subtree to make pieces self-contained: that is O(n²) wire size, the cliff
 /// `rwshared_view_over_shared_bindings_is_not_quadratic` exists to catch.
 #[derive(Default)]
-struct WireMemo {
+pub(super) struct WireMemo {
     /// GcRef of an identity-preserved node (`Closure`/container) currently on the serialize DFS
     /// stack → the `id` assigned on its first visit. A revisit while still in `path` is a true back-edge
     /// → `Backref(id)`. Popped on DFS exit (`WireMemo::exit`) because `try_wire_speculative` asserts
@@ -110,6 +110,20 @@ struct WireMemo {
 }
 
 impl WireMemo {
+    /// TICKET-192 — a fresh memo that mints ids from `next_id` up: an entry spliced into a stored
+    /// wire map serializes with the map's id ceiling here, so its ids never collide with stored ones.
+    pub(super) fn seeded(next_id: u32) -> WireMemo {
+        WireMemo {
+            next_id,
+            ..WireMemo::default()
+        }
+    }
+
+    /// The next id this memo would mint: every id it has minted is below it.
+    pub(super) fn next_id(&self) -> u32 {
+        self.next_id
+    }
+
     /// TICKET-119 — `h` may be about to become a `Backref` target: invalidate every `doom` record
     /// whose recorded sub-walk contains it.
     fn doom_touch(&mut self, h: GcRef) {
@@ -3387,8 +3401,18 @@ impl Vm {
         v: Value,
         span: Span,
     ) -> Result<WireValue, RuntimeError> {
-        let mut memo = WireMemo::default();
-        let w = self.to_wire_memo_at(v, span, &mut memo)?;
+        self.to_wire_crossable_memo(v, span, &mut WireMemo::default())
+    }
+
+    /// [`to_wire_crossable`](Self::to_wire_crossable) through the caller's memo (TICKET-192: a
+    /// [`WireMemo::seeded`] one for an entry spliced into a stored map).
+    pub(super) fn to_wire_crossable_memo(
+        &self,
+        v: Value,
+        span: Span,
+        memo: &mut WireMemo,
+    ) -> Result<WireValue, RuntimeError> {
+        let w = self.to_wire_memo_at(v, span, memo)?;
         self.ensure_crossable(&w, span)?;
         // W6-10 (sampling half) — charge the payload's off-heap bytes against the GC trigger so a
         // live `--max-heap` cap actually gets SAMPLED. `over_cap` is only evaluated in `sweep()`,
