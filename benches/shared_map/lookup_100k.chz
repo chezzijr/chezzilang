@@ -1,0 +1,21 @@
+# TICKET-192 perf cell: 100k `get_key` on a 100k-entry `RwShared[Map[int, int]]`. Release target:
+# under 1 s (O(1) expected per lookup). Prints the hit count, 100000.
+import std.concurrency
+
+fn main():
+    n := 100000
+    m: Map[int, int] = {}
+    i := 0
+    while i < n:
+        m[i] = i
+        i = i + 1
+    box := RwShared(m)
+    hits := 0
+    i = 0
+    while i < n:
+        match box.get_key(i):
+            Some(v): hits = hits + 1
+            None: hits = hits
+        i = i + 1
+    print(hits)
+main()

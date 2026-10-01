@@ -1,0 +1,31 @@
+# TICKET-192 baseline for `memoize_8k.chz`: the pre-TICKET-192 `std.memoize` body, a cache in a
+# captured private `Map`. Same workload, same output, 341269336000.
+fn _memo_get(cache: Map[int, int], f: fn(int) -> int, k: int) -> int:
+    match cache.get(k):
+        Some(v):
+            return v
+        None:
+            v := f(k)
+            cache[k] = v
+            return v
+
+fn memo(f: fn(int) -> int) -> fn(int) -> int:
+    cache: Map[int, int] = {}
+    return fn(k: int) -> int: _memo_get(cache, f, k)
+
+fn sq(x: int) -> int:
+    return x * x
+
+fn main():
+    m := memo(sq)
+    s := 0
+    i := 0
+    while i < 8000:
+        s = s + m(i)
+        i = i + 1
+    i = 0
+    while i < 8000:
+        s = s + m(i)
+        i = i + 1
+    print(s)
+main()

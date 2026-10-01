@@ -1,0 +1,20 @@
+# TICKET-192 perf cell: `std.memoize.memoize1` over 8000 distinct keys, two passes (8000 misses,
+# then 8000 hits). Release target: within 3x of `memoize_8k_private.chz`. Prints 341269336000.
+import memoize1 from std.memoize
+
+fn sq(x: int) -> int:
+    return x * x
+
+fn main():
+    m := memoize1(sq)
+    s := 0
+    i := 0
+    while i < 8000:
+        s = s + m(i)
+        i = i + 1
+    i = 0
+    while i < 8000:
+        s = s + m(i)
+        i = i + 1
+    print(s)
+main()
