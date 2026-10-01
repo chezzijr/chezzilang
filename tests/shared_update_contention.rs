@@ -19,12 +19,17 @@ fn main():
 main()
 ";
 
-/// Runs `SRC` at `threads` workers; returns (stdout, wall time). Kills the run after 40 s.
+/// Runs `SRC` at `threads` workers; returns (stdout, wall time).
 fn run_at(threads: &str) -> (String, Duration) {
-    let dir = std::env::temp_dir().join(format!("chz-t193-{threads}-{}", std::process::id()));
+    run_src(SRC, "su", threads)
+}
+
+/// Runs `src` at `threads` workers; returns (stdout, wall time). Kills the run after 40 s.
+fn run_src(src: &str, tag: &str, threads: &str) -> (String, Duration) {
+    let dir = std::env::temp_dir().join(format!("chz-t193-{tag}-{threads}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let path = dir.join("su.chz");
-    std::fs::write(&path, SRC).expect("write program");
+    std::fs::write(&path, src).expect("write program");
     let start = Instant::now();
     let mut child = Command::new(env!("CARGO_BIN_EXE_chezzi"))
         .arg("run")
@@ -59,4 +64,97 @@ fn contended_shared_update_is_fast_at_every_worker_count() {
             "CHEZZI_THREADS={threads}: 12000 contended Shared.update took {took:?}, ceiling 3s"
         );
     }
+}
+
+/// TICKET-193 grid: op x contention x worker count. `Shared.update` and `RwShared.write` take the
+/// update guard and run a closure (a callback preempt there gates the workers, DEC-141);
+/// `RwShared.read` takes no guard; `Atomic.add` is a Mutex; `ConcurrentMap.set` takes the guard with
+/// no closure. Every cell does 12000 ops in total and must print `12000`.
+const GRID_OPS: [(&str, &str, &str, &str); 5] = [
+    (
+        "Shared.update",
+        "s := Shared[int](0)",
+        "s.update(inc)",
+        "print(s.get())",
+    ),
+    (
+        "RwShared.write",
+        "s := RwShared[int](0)",
+        "s.write(inc)",
+        "print(s.get())",
+    ),
+    (
+        "RwShared.read",
+        "s := RwShared[int](7)\n    c := AtomicInt(0)",
+        "c.add(s.read(peek) - 6)",
+        "print(c.load())",
+    ),
+    (
+        "Atomic.add",
+        "s := Atomic[int](0)",
+        "s.add(1)",
+        "print(s.load())",
+    ),
+    (
+        "ConcurrentMap.set",
+        "m: ConcurrentMap[int, int] = ConcurrentMap(RwShared({}))\n    c := AtomicInt(0)",
+        "m.set(c.add(1), 1)",
+        "print(m.len())",
+    ),
+];
+
+/// Measured 2026-10-01 with the fix: release max 0.06 s, debug max 0.40 s. Base release: 16-22 s at
+/// T=2 for the two closure ops with 6 tasks.
+const GRID_CEILING: Duration = if cfg!(debug_assertions) {
+    Duration::from_secs(3)
+} else {
+    Duration::from_millis(500)
+};
+
+fn grid_src(init: &str, body: &str, fin: &str, tasks: usize) -> String {
+    let per = 12000 / tasks;
+    [
+        "import std.concurrency".to_string(),
+        "import ConcurrentMap from std.concurrency.collection".to_string(),
+        "fn inc(n: int) -> int:".to_string(),
+        "    return n + 1".to_string(),
+        "fn peek(n: int) -> int:".to_string(),
+        "    return n".to_string(),
+        "fn main():".to_string(),
+        format!("    {init}"),
+        "    parallel:".to_string(),
+        format!("        for _ in range({tasks}):"),
+        "            spawn:".to_string(),
+        format!("                for _ in range({per}):"),
+        format!("                    {body}"),
+        format!("    {fin}"),
+        "main()".to_string(),
+        String::new(),
+    ]
+    .join("\n")
+}
+
+#[test]
+fn contended_guard_ops_grid_is_fast_at_every_worker_count() {
+    let mut red = Vec::new();
+    for (op, init, body, fin) in GRID_OPS {
+        for tasks in [6, 2] {
+            let src = grid_src(init, body, fin, tasks);
+            let tag = format!("{}-{tasks}", op.replace('.', "_"));
+            for threads in ["1", "2", "4", "0"] {
+                let (out, took) = run_src(&src, &tag, threads);
+                if out.trim() != "12000" || took >= GRID_CEILING {
+                    red.push(format!(
+                        "{op} x{tasks} T={threads}: printed {:?} in {took:?}",
+                        out.trim()
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        red.is_empty(),
+        "cells over {GRID_CEILING:?} or with a wrong value:\n{}",
+        red.join("\n")
+    );
 }
