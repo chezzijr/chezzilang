@@ -5308,6 +5308,19 @@ impl Checker {
         // a param not already in the map, so an explicit targ wins and a conflicting arg is caught by
         // the per-argument check below.
         let mut mmap: HashMap<String, Ty> = self.seed_targs(method, mtps, targs, span);
+        // Every other param in the instantiated signature is the CALLER's (a receiver arg `Box[B]`
+        // inside `fn go[A, B]`), rigid here: pin it to itself so neither an argument nor the hint
+        // can bind it (`r: (A, A) = b.pair(a)` must not turn the caller's `B` into `A`).
+        let mut rigid = Vec::new();
+        params
+            .iter()
+            .chain([ret])
+            .for_each(|t| ty_collect_params(t, None, &mut rigid));
+        for n in rigid {
+            if !mtps.iter().any(|tp| tp.name == n) {
+                mmap.entry(n.clone()).or_insert(Ty::Param(n));
+            }
+        }
         // A method type param may appear in the receiver position (`fn f[U](u: U)`); bind it from the
         // actual receiver type so it isn't left unresolved.
         unify(receiver, recv_ty, &mut mmap);
@@ -5473,9 +5486,9 @@ impl Checker {
         }
         // M24 Task 5 — half two of the static-witness contract for a MEMBER-declared type param,
         // recorded LAST for the same reason the free-fn path does it last (`recover_return_only_params`
-        // can still bind a param nothing else saw). The receiver's own type args are already
-        // substituted into `params`/`ret` by the caller, so `mmap` holds only the METHOD's params —
-        // which is exactly the set that can be witnessed.
+        // can still bind a param nothing else saw). The caller passes an `instantiate_method` result,
+        // so `mmap`'s non-identity keys are the METHOD's own (possibly renamed) params, and `wparams`
+        // carries the same names — exactly the set that can be witnessed.
         if !wparams.is_empty() {
             self.record_witness_call(
                 method,

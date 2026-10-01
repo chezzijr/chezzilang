@@ -37037,3 +37037,93 @@ fn method_own_param_does_not_collide_with_receiver_param_by_name() {
 fn fn_value_param_named_like_prelude_map_param_is_accepted() {
     ok("fn h[U, T](xs: List[U], f: fn(U) -> T) -> List[T]:\n    return xs.map(f)\n");
 }
+
+/// Run `(name, src, clean)` cells through `check_entry` (std imports resolve); fail listing every
+/// cell whose verdict is wrong (`clean` = no error wanted).
+fn assert_clean_grid(cells: &[(String, String, bool)]) {
+    let mut wrong = Vec::new();
+    for (name, src, clean) in cells {
+        let errs = check_entry(src);
+        if errs.is_empty() != *clean {
+            let msgs: Vec<&str> = errs.iter().map(|e| e.message.as_str()).collect();
+            wrong.push(format!("cell {name}: want clean={clean}, got {msgs:?}"));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "{} wrong cell(s):\n{}",
+        wrong.len(),
+        wrong.join("\n")
+    );
+}
+
+#[test]
+fn method_type_param_capture_grid() {
+    // A generic method's own type params and the receiver's type args are substituted with ONE
+    // map (`instantiate_method`), so a caller param named like the method's never collapses into
+    // it. Receivers x binding (arg, turbofish, hint) x caller names (disjoint, equal, swapped).
+    const BOX: &str = "struct Box[T]:\n    v: T\n    fn pair[U](self, u: U) -> (T, U):\n        return (self.v, u)\n";
+    const ENU: &str = "enum E[T]:\n    A(T)\n    fn pair[U](self, u: U) -> (T, U):\n        match self:\n            E.A(v): return (v, u)\n";
+    const NEW: &str =
+        "newtype W[T] = T:\n    fn pair[U](self, u: U) -> (W[T], U):\n        return (self, u)\n";
+    let recvs = [
+        ("struct", BOX, "Box[Q]", "(Q, P)"),
+        ("enum", ENU, "E[Q]", "(Q, P)"),
+        ("newtype", NEW, "W[Q]", "(W[Q], P)"),
+    ];
+    let mut cells: Vec<(String, String, bool)> = Vec::new();
+    for (rname, decl, ty, want) in recvs {
+        for (p, q) in [("A", "B"), ("T", "U"), ("U", "T")] {
+            let ty = ty.replace('Q', q);
+            let want = want.replace('Q', q).replace('P', p);
+            let head = format!("{decl}fn go[{p}, {q}](b: {ty}, t: {p}) -> {want}:\n");
+            let bodies = [
+                ("arg", "    return b.pair(t)\n".to_string()),
+                ("turbofish", format!("    return b.pair[{p}](t)\n")),
+                ("hint", format!("    r: {want} = b.pair(t)\n    return r\n")),
+            ];
+            for (bname, body) in bodies {
+                cells.push((
+                    format!("{rname}_{p}{q}_{bname}"),
+                    format!("{head}{body}"),
+                    true,
+                ));
+            }
+            let bad = format!(
+                "{decl}fn go[{p}, {q}](b: {ty}, t: {p}) -> ({p}, {p}):\n    return b.pair(t)\n"
+            );
+            cells.push((format!("{rname}_{p}{q}_wrong_return"), bad, false));
+        }
+    }
+    let natives = [
+        (
+            "list_map",
+            "fn h[U, T](xs: List[U], f: fn(U) -> T) -> List[T]:\n    return xs.map(f)\n",
+            true,
+        ),
+        (
+            "list_fold",
+            "fn h[U, T](xs: List[U], init: T, f: fn(T, U) -> T) -> T:\n    return xs.fold(init, f)\n",
+            true,
+        ),
+        (
+            "list_sort_by_key",
+            "fn s[K](xs: List[K], f: fn(K) -> int):\n    xs.sort_by_key(f)\n",
+            true,
+        ),
+        (
+            "rwshared_fold",
+            "import std.concurrency\nfn g[R](s: RwShared[List[R]]) -> int:\n    return s.fold(0, fn(a: int, x: R) -> int: a + 1)\n",
+            true,
+        ),
+        (
+            "list_map_wrong_return",
+            "fn h[U, T](xs: List[U], f: fn(U) -> T) -> List[U]:\n    return xs.map(f)\n",
+            false,
+        ),
+    ];
+    for (n, src, clean) in natives {
+        cells.push((n.to_string(), src.to_string(), clean));
+    }
+    assert_clean_grid(&cells);
+}

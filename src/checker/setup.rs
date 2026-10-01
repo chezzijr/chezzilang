@@ -1431,9 +1431,7 @@ impl Checker {
         let map = struct_param_map(info, targs);
         Some(FnSig {
             summary: fn_writes::FnSummary::default(),
-            params: sig.params.iter().map(|p| subst(p, &map)).collect(),
-            ret: subst(&sig.ret, &map),
-            ..sig.clone()
+            ..instantiate_method(sig, &map)
         })
     }
 

@@ -3560,16 +3560,16 @@ impl Checker {
                 let resolved = self.struct_shape(sname).and_then(|info| {
                     info.methods.get(method).map(|sig| {
                         let map = struct_param_map(info, targs);
-                        let params: Vec<Ty> = sig.params.iter().map(|t| subst(t, &map)).collect();
+                        let inst = instantiate_method(sig, &map);
                         (
-                            params,
+                            inst.params,
                             // the DECLARED (pre-substitution) param types — the widen license (a `T`
                             // slot instantiated at float is erased in the backend, so it cannot widen)
                             sig.params.clone(),
-                            subst(&sig.ret, &map),
-                            sig.type_params.clone(),
+                            inst.ret,
+                            inst.type_params,
                             // M24 Task 5 — the METHOD's own witnessed params (never the struct's)
-                            sig.witness_params.clone(),
+                            inst.witness_params,
                             sig.is_static,
                             // Trailing parameters the CALLEE fills; the receiver slot is dropped
                             // below, so this is compared against `args.len() + 1`.
@@ -3752,15 +3752,15 @@ impl Checker {
                                     .collect()
                             })
                             .unwrap_or_default();
-                        let params: Vec<Ty> = sig.params.iter().map(|t| subst(t, &map)).collect();
+                        let inst = instantiate_method(sig, &map);
                         (
-                            params,
+                            inst.params,
                             // the DECLARED (pre-substitution) param types — see the struct arm.
                             sig.params.clone(),
-                            subst(&sig.ret, &map),
-                            sig.type_params.clone(),
+                            inst.ret,
+                            inst.type_params,
                             // M24 Task 5 — the METHOD's own witnessed params (never the host type's)
-                            sig.witness_params.clone(),
+                            inst.witness_params,
                             sig.is_static,
                             // Trailing parameters the CALLEE fills; the receiver slot is dropped
                             // below, so this is compared against `args.len() + 1`.
@@ -3852,15 +3852,15 @@ impl Checker {
                                     .collect()
                             })
                             .unwrap_or_default();
-                        let params: Vec<Ty> = sig.params.iter().map(|t| subst(t, &map)).collect();
+                        let inst = instantiate_method(sig, &map);
                         (
-                            params,
+                            inst.params,
                             // the DECLARED (pre-substitution) param types — see the struct arm.
                             sig.params.clone(),
-                            subst(&sig.ret, &map),
-                            sig.type_params.clone(),
+                            inst.ret,
+                            inst.type_params,
                             // M24 Task 5 — the METHOD's own witnessed params (never the host type's)
-                            sig.witness_params.clone(),
+                            inst.witness_params,
                             sig.is_static,
                             // Trailing parameters the CALLEE fills; the receiver slot is dropped
                             // below, so this is compared against `args.len() + 1`.
@@ -4256,7 +4256,16 @@ impl Checker {
                 // harvested generic method is. `for_each*`'s closure return is DISCARDED (`Ty::Unknown`
                 // ret), so any return is accepted (a strict `-> nil` would reject `fn(x): acc.add(x)`).
                 let fold_sig = |this: &mut Self, name: &str, elem_params: Vec<Ty>| -> Ty {
-                    let r = Ty::Param("R".to_string());
+                    // `R` is the method's own param: rename it when the receiver mentions a caller's
+                    // `R`, the same rule `instantiate_method` applies to a declared method.
+                    let mut free = Vec::new();
+                    ty_collect_params(&obj_ty, None, &mut free);
+                    let r_name = if free.iter().any(|n| n == "R") {
+                        fresh_param_name("R", &free.into_iter().collect())
+                    } else {
+                        "R".to_string()
+                    };
+                    let r = Ty::Param(r_name.clone());
                     let mut fn_params = vec![r.clone()];
                     fn_params.extend(elem_params);
                     let params = vec![
@@ -4269,7 +4278,7 @@ impl Checker {
                         },
                     ];
                     let tps = vec![TypeParam {
-                        name: "R".to_string(),
+                        name: r_name,
                         name_span: Span::default(),
                         bounds: vec![],
                     }];

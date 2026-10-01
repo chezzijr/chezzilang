@@ -3519,6 +3519,103 @@ fn subst_sig(sig: &FnSig, map: &HashMap<String, Ty>) -> FnSig {
     }
 }
 
+/// The first of `{base}1`, `{base}2`, … that is not in `taken`.
+fn fresh_param_name(base: &str, taken: &std::collections::BTreeSet<String>) -> String {
+    (1..)
+        .map(|n| format!("{base}{n}"))
+        .find(|c| !taken.contains(c))
+        .expect("an unbounded counter finds a free name")
+}
+
+/// Rename every type-param reference in the annotation `t` found in `ren` (a `Named` name or a
+/// `Generic` head). Same five-variant walk as `ty_mentions`.
+fn rename_type_params(t: &Type, ren: &HashMap<String, String>) -> Type {
+    let go = |ts: &[Type]| {
+        ts.iter()
+            .map(|a| rename_type_params(a, ren))
+            .collect::<Vec<_>>()
+    };
+    match t {
+        Type::Named { name, span } => Type::Named {
+            name: ren.get(name).cloned().unwrap_or_else(|| name.clone()),
+            span: *span,
+        },
+        Type::Qualified { module, name, args } => Type::Qualified {
+            module: module.clone(),
+            name: name.clone(),
+            args: go(args),
+        },
+        Type::Generic(head, args, span) => Type::Generic(
+            ren.get(head).cloned().unwrap_or_else(|| head.clone()),
+            go(args),
+            *span,
+        ),
+        Type::Func {
+            params,
+            ret,
+            labels,
+        } => Type::Func {
+            params: go(params),
+            ret: Box::new(rename_type_params(ret, ren)),
+            labels: labels.clone(),
+        },
+        Type::Tuple(items) => Type::Tuple(go(items)),
+    }
+}
+
+/// Instantiate a method signature on a receiver whose type args are `recv_map`, with ONE
+/// substitution keyed on the declaration's own params. A method type param whose name occurs free
+/// in a receiver argument (a generic caller's `U` on `Box[U].pair[U]`) gets a fresh name first, so
+/// the caller's param and the method's never collapse into one. With no collision the result equals
+/// `subst_sig(sig, recv_map)`. Every generic-method dispatch arm calls this; never substitute the
+/// receiver map and then the method map in sequence.
+fn instantiate_method(sig: &FnSig, recv_map: &HashMap<String, Ty>) -> FnSig {
+    let mut free = Vec::new();
+    for v in recv_map.values() {
+        ty_collect_params(v, None, &mut free);
+    }
+    let mut taken: std::collections::BTreeSet<String> = free.iter().cloned().collect();
+    taken.extend(sig.type_params.iter().map(|tp| tp.name.clone()));
+    let mut ren: HashMap<String, String> = HashMap::new();
+    for tp in &sig.type_params {
+        if free.contains(&tp.name) {
+            let new = fresh_param_name(&tp.name, &taken);
+            taken.insert(new.clone());
+            ren.insert(tp.name.clone(), new);
+        }
+    }
+    if ren.is_empty() {
+        return subst_sig(sig, recv_map);
+    }
+    let mut map = recv_map.clone();
+    for (old, new) in &ren {
+        map.insert(old.clone(), Ty::Param(new.clone()));
+    }
+    let rename = |n: &String| ren.get(n).cloned().unwrap_or_else(|| n.clone());
+    FnSig {
+        params: sig.params.iter().map(|t| subst(t, &map)).collect(),
+        ret: subst(&sig.ret, &map),
+        type_params: sig
+            .type_params
+            .iter()
+            .map(|tp| TypeParam {
+                name: rename(&tp.name),
+                name_span: tp.name_span,
+                bounds: tp
+                    .bounds
+                    .iter()
+                    .map(|b| Bound {
+                        name: b.name.clone(),
+                        args: b.args.iter().map(|a| rename_type_params(a, &ren)).collect(),
+                    })
+                    .collect(),
+            })
+            .collect(),
+        witness_params: sig.witness_params.iter().map(rename).collect(),
+        ..sig.clone()
+    }
+}
+
 /// Does the type ANNOTATION `t` mention any of `names` anywhere, at any nesting depth? Used to spot
 /// an owner type param buried inside an embed's type argument (`Contains[List[T]]`), which the
 /// read-only resolver cannot re-spell — see `validate_protocol_embeds`.
