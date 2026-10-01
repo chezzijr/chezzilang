@@ -41,21 +41,34 @@ impl Checker {
         let slots = self.bound_slots(call_id, args, named);
         self.report_named_call_writes(callee, &slots, None, false);
         // TICKET-190: a call that creates a generator stamps its param slots with how each
-        // argument crosses (a fresh argument is private to the new frame).
+        // argument crosses (a fresh argument is private to the new frame). A bare-name callee
+        // stamps only through `labels_certain`, settled at its binding's `pop_scope`: a written
+        // binding may hold another fn at the call, so that call gets no stamp.
         if self.records_node(call_id)
             && self
                 .named_fn_summary(callee)
                 .is_some_and(|(_, s)| s.is_generator)
         {
             let crossing = self.call_crossing(None, &slots);
-            crate::checker::record_call_table_entry(
-                &mut self.gen_crossings.calls,
-                &mut self.table_conflicts,
-                (self.graph_module_idx, call_id.0),
-                crossing,
-                "generator crossing",
-                span,
-            );
+            let call = (self.graph_module_idx, call_id.0);
+            match &callee.kind {
+                ExprKind::Ident(name) => {
+                    if let Ok(key) = self.labels_certain(name) {
+                        let pending = (key, super::globals::KwUse::GenStamp(call, crossing, span));
+                        if !self.kw_pending.contains(&pending) {
+                            self.kw_pending.push(pending);
+                        }
+                    }
+                }
+                _ => crate::checker::record_call_table_entry(
+                    &mut self.gen_crossings.calls,
+                    &mut self.table_conflicts,
+                    call,
+                    crossing,
+                    "generator crossing",
+                    span,
+                ),
+            }
         }
         let consumed = std::mem::replace(&mut self.call_ctx, saved).is_some_and(|c| c.consumed);
         // A call whose named arguments no binder and no refusal consumed: its callee binds none.
@@ -826,8 +839,9 @@ impl Checker {
                 // Settled at the binding's `pop_scope` (a write may come after this call). Nothing
                 // is recorded under the generic-arg prepass, and a closure body inferred more than
                 // once (DEC-025) records each call once.
-                if !self.generic_arg_prepass && !self.kw_pending.contains(&(key.clone(), span)) {
-                    self.kw_pending.push((key, span));
+                let pending = (key, super::globals::KwUse::Keyword(span));
+                if !self.generic_arg_prepass && !self.kw_pending.contains(&pending) {
+                    self.kw_pending.push(pending);
                 }
                 // A value's slots are its labels; its omitted slots are callee-filled from
                 // `min_params` on, so they must be a trailing run.

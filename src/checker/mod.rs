@@ -2703,9 +2703,9 @@ struct Checker {
     kw_written: std::collections::HashSet<(usize, String)>,
     /// TICKET-139 (W14-2) — every accepted keyword call through a `kw_certain` binding, settled at
     /// the binding's `pop_scope` against `kw_written` so the verdict does not depend on whether the
-    /// write comes before or after the call. Deduplicated by `(key, span)` (DEC-025: a closure body
-    /// is inferred more than once).
-    kw_pending: Vec<((usize, String), Span)>,
+    /// write comes before or after the call. Deduplicated by `(key, use)` (DEC-025: a closure body
+    /// is inferred more than once). TICKET-190: a generator creation stamp waits here too.
+    kw_pending: Vec<((usize, String), globals::KwUse)>,
     /// PART B — retroactive hover: when the hover probe lands on an occurrence of a binding whose
     /// recorded type still carries `Unknown`-in-slot (a not-yet-refined empty collection), we stash the
     /// binding's `(owning_scope_idx, name, kind, doc)` here INSTEAD of locking `hover_result`, then at

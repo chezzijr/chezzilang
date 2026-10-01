@@ -46,6 +46,17 @@ pub(super) enum KwDeny {
     Redeclared,
 }
 
+/// What a `kw_pending` entry waits on. Both settle at the binding's `pop_scope` against
+/// `kw_written`, because a write may come after the call.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum KwUse {
+    /// A keyword call through the binding; a written binding makes it a compile error.
+    Keyword(Span),
+    /// A generator creation stamp (TICKET-190), recorded into `gen_crossings.calls` only when the
+    /// binding is never written: a written binding may hold another fn at the call.
+    GenStamp((usize, u32), CallCrossing, Span),
+}
+
 /// The denial for a keyword call through a name that may hold functions with different labels.
 pub(super) fn kw_ambiguous_msg(name: &str) -> String {
     format!(

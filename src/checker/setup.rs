@@ -42,7 +42,7 @@ pub(super) struct DiagMark {
     table_conflicts: Vec<(Span, String)>,
     kw_certain: std::collections::HashSet<(usize, String)>,
     kw_written: std::collections::HashSet<(usize, String)>,
-    kw_pending: Vec<((usize, String), Span)>,
+    kw_pending: Vec<((usize, String), super::globals::KwUse)>,
     fn_write_scopes: Vec<HashMap<String, fn_writes::FnSummary>>,
 }
 
@@ -2483,11 +2483,27 @@ impl Checker {
         // here.
         let top = self.scopes.len().saturating_sub(1);
         let pending = std::mem::take(&mut self.kw_pending);
-        for (key, span) in pending {
+        for (key, kw_use) in pending {
             if key.0 < top {
-                self.kw_pending.push((key, span));
-            } else if self.kw_written.contains(&key) {
-                self.error(span, super::globals::kw_ambiguous_msg(&key.1));
+                self.kw_pending.push((key, kw_use));
+                continue;
+            }
+            let written = self.kw_written.contains(&key);
+            match kw_use {
+                super::globals::KwUse::Keyword(span) if written => {
+                    self.error(span, super::globals::kw_ambiguous_msg(&key.1));
+                }
+                super::globals::KwUse::GenStamp(call, crossing, span) if !written => {
+                    crate::checker::record_call_table_entry(
+                        &mut self.gen_crossings.calls,
+                        &mut self.table_conflicts,
+                        call,
+                        crossing,
+                        "generator crossing",
+                        span,
+                    );
+                }
+                _ => {}
             }
         }
         self.kw_certain.retain(|k| k.0 < top);
@@ -2547,11 +2563,6 @@ impl Checker {
         // (mutable unless `declare_const` re-marks it), so clear any stale const mark first.
         if let Some(set) = self.const_decls.last_mut() {
             set.remove(name);
-        }
-        // Same rule for a nested fn's summary: a re-declaration is a value binding, not that fn
-        // (TICKET-190). A nested fn binds its summary after its own declares.
-        if let Some(scope) = self.fn_write_scopes.last_mut() {
-            scope.remove(name);
         }
         // Same rule for a `from`-imported global: re-declaring it at MODULE scope (`COUNT := COUNT + 1`)
         // hands the name back to this module, so the from-import rebind gate (`imported_values`, keyed

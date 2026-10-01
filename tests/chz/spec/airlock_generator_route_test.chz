@@ -299,3 +299,48 @@ test fn nested_generator_called_with_a_fresh_argument_runs():
     parallel:
         spawn: out.send(t190_cell(g))
     assert out.recv() == "2"
+
+# Review round 3 (TICKET-190): a nested generator's binding that is written anywhere in its scope
+# may hold another function at the call, so the call gets no creation stamp. Three writes: a plain
+# reassignment, a write after the call in a loop, and a write from a nested fn. Each value callee
+# returns `t190_gen2(named)`, whose param stays marked, so the task's second push faults.
+fn t190_written_reassign(named: List[int]) -> Iterator[int]:
+    fn gen(xs: List[int]) -> Iterator[int]:
+        yield xs.len()
+    gen = fn(a: List[int]) -> Iterator[int]: t190_gen2(named)
+    return gen([])
+
+fn t190_written_in_loop(named: List[int]) -> Iterator[int]:
+    fn gen(xs: List[int]) -> Iterator[int]:
+        yield xs.len()
+    g := gen([])
+    for _i in range(2):
+        g = gen([])
+        gen = fn(a: List[int]) -> Iterator[int]: t190_gen2(named)
+    return g
+
+fn t190_written_by_nested_fn(named: List[int]) -> Iterator[int]:
+    fn gen(xs: List[int]) -> Iterator[int]:
+        yield xs.len()
+    fn w():
+        gen = fn(a: List[int]) -> Iterator[int]: t190_gen2(named)
+    w()
+    return gen([])
+
+fn t190_written_cell(shape: str) -> str:
+    named: List[int] = []
+    g := t190_written_reassign(named)
+    if shape == "loop":
+        g = t190_written_in_loop(named)
+    if shape == "nested_fn":
+        g = t190_written_by_nested_fn(named)
+    _ := g.next()
+    out := Channel[str](1)
+    parallel:
+        spawn: out.send(t190_cell(g))
+    return "{out.recv()} {named}"
+
+test fn written_nested_generator_binding_gets_no_stamp():
+    for shape in ["reassign", "loop", "nested_fn"]:
+        cell := t190_written_cell(shape)
+        assert cell == "fault [1]", "{shape}: {cell}"
