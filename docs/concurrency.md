@@ -517,12 +517,12 @@ into each task by value. See `docs/stdlib.md` for signatures.
 Bare `Executor.submit(f)` is fire-and-forget — nothing comes back. The result-returning primitive is
 `Executor.submit_result[T](f: fn() -> T) -> Channel[T]`: submit `f` and get a cap-1 `Channel[T]` you
 `.recv()` for its result after `shutdown()`. `std.concurrency.task` wraps that channel in a
-future-style handle (memoization + readiness poll):
+future-style handle over one shared state core (every copy of the handle, in any task, reads it):
 
 - `submit_task[T](ex, f) -> Task[T]` — submit `f` detached, get a handle (builds over
   `ex.submit_outcome(f, out, err)`). The work starts at the `submit` and is waited for by
   `shutdown()` (or the program-exit join). Read the result AFTER that call.
-- `Task.get() -> T` — block until the result lands, then return it; **memoized** (idempotent). If
+- `Task.get() -> T` — block until the result lands, then return it; idempotent, and the same answer in every task (the outcome lives in one `Shared` core; the task holding the original handle gets the same object back each call, a task holding a copy gets a fresh snapshot). If
   the job faulted, `.get()` re-raises the job's own error message (CPython's `Future.result()`
   shape, measured: `result raised: RuntimeError job failed` / `done= True`) — `shutdown()` still
   raises the job's fault too, and its error keeps the job's own origin (`e.file()`/`line()`/`col()`

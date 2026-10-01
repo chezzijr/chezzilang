@@ -26,6 +26,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   `checker::tests::every_native_container_method_is_classified_by_its_return_type`,
   `tests/chz/spec/airlock_generator_route_test.chz::generator_route_grid`.
 
+- **TICKET-191 (2026-10-01): Family C3, `Task` over one shared core.** `std.concurrency.task` keeps a task's outcome in one `Shared[TaskState[T]]` (`Pending`/`Done`/`Failed`) that every copy of the handle reads, so `Task.get()`/`done()` work from a spawned task or an Executor job and agree with the parent (CPython `Future`). The task holding the original handle gets the same object from every `get()`; a copy gets a snapshot, chosen by the new `concurrency.is_task_copy(v)`, which reads the D4 copy mark (`Heap::is_copied`). Deleted: the by-value `failed` field and the outcome writes that faulted in a task. Grid: caller x state x value kind in `tests/chz/stdlib/task_memoize_shared_state_test.chz`. `memoize1` in a task (A3) moved to TICKET-192.
 - **TICKET-189 (2026-10-01): Family C1, one crossing policy per bound slot.** The checker's
   `crossing_of` decides each spawn operand once; `bound_slots` maps every parameter through
   `bind_call`'s plan, so keyword arguments, default fills and a variadic pack sit in their compiled

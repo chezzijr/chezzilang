@@ -450,6 +450,28 @@ faster than the Mutex-backed `Atomic` on an 8-way counter; see [`benchmarks.md`]
 import gate + reserved name as `Atomic`. Constructed `AtomicInt(v)` (one int arg; `AtomicInt(3.5)` is a
 type error).
 
+### `concurrency.is_task_copy` — is this value an airlock copy?
+`is_task_copy(v) -> bool` (after `import std.concurrency`). `true` when `v` is this task's airlock copy
+of a value another task owns: a spawned task's argument or capture, or an Executor job's capture. A
+write to such a value faults `this value is this task's copy` (D4, `concurrency.md`); `is_task_copy`
+reads the same mark, so std code can choose between writing a value and reading shared state without
+attempting the write. `false` for a value the calling task owns, a value received from a `Channel`,
+and a scalar. Its std caller is `Task.get()` (`std.concurrency.task`). It is `Kind::Inline`: it reads
+the calling task's own heap, so it can never run off-heap on the blocking pool.
+
+```
+fn child(xs: List[int]):
+    print(concurrency.is_task_copy(xs))     # true: the spawned task holds a copy
+
+xs := [1]
+print(concurrency.is_task_copy(xs))         # false: the parent owns xs
+parallel:
+    spawn child(xs)
+```
+
+`spawn print(concurrency.is_task_copy(xs))` prints `false`: a spawn's call arguments run in the
+parent (Go `go f(x)`), so the query runs before the crossing.
+
 ### `Executor` — task pool
 `submit(task: fn() -> _) -> nil` — **starts the job immediately** on the shared pool (detached,
 fire-and-forget), like Python's `ThreadPoolExecutor.submit` ·
@@ -1687,14 +1709,15 @@ resource with it instead of hand-rolling a semaphore each time.
 
 ### `std.concurrency.task` — result handles for `Executor` work
 `import submit_task from std.concurrency.task` (or `import std.concurrency.task`). Pure Chezzi over a
-cap-1 `Channel[T]` (a one-shot result slot), so it runs byte-identically on every engine. Fills the
+cap-1 `Channel[T]` result slot and one `Shared` state core that every copy of the handle reads, so a
+spawned task or an Executor job holding a copy gets the same answer as the parent (CPython `Future`). Fills the
 gap that bare `Executor.submit(f)` is fire-and-forget (returns nothing).
 
 | item | signature | semantics |
 | --- | --- | --- |
 | `submit_task` | `submit_task[T](ex: Executor, f: fn() -> T) -> Task[T]` | submit `f` to `ex` for detached execution and get a handle for its result. The work STARTS at the submit and is waited for by `shutdown()` (or the program-exit join). |
-| `Task.get` | `get(self) -> T` | block until the result is available, then return it, or re-raise the job's own fault message if the job faulted. **Memoized** — idempotent, safe to call repeatedly (a second call returns the cached value or re-raises the cached fault, not a second `recv`). A task `shutdown_now()` cancelled raises `task cancelled: shutdown_now() stopped it before it finished` at once (CPython: `CancelledError`). |
-| `Task.done` | `done(self) -> bool` | `true` once the job has finished, faulted, or been cancelled by `shutdown_now()`. Never blocks. |
+| `Task.get` | `get(self) -> T` | block until the result is available, then return it, or re-raise the job's own fault message if the job faulted (CPython `Future.result()`). Idempotent, and the same answer in every task. **Identity:** in the task that holds the original handle every call returns the same object, so `a := t.get(); a.push(3)` shows in the next `t.get()` (CPython `fut.result() is fut.result()`). A task holding an airlock copy of the handle gets a fresh snapshot per call and never sees the owner's later writes; CPython would, but under D4 every crossing copies. A task `shutdown_now()` cancelled raises `task cancelled: shutdown_now() stopped it before it finished` at once (CPython: `CancelledError`). |
+| `Task.done` | `done(self) -> bool` | `true` once the job has finished, faulted, or been cancelled by `shutdown_now()`, in every task holding a copy of the handle. Never blocks. A faulted job is done; `get()` then re-raises its fault. |
 
 Canonical shape: submit every task, `shutdown()`, then `.get()` each. **Determinism rule:** a `Task`'s
 value is deterministic (it is `f()`); only *when* it runs varies at runtime (the OS-thread workers race)
@@ -1737,6 +1760,7 @@ persists across every call to the wrapped fn; `f` runs at most once per distinct
 the argument tuple: a tuple of Hashable args is a valid key (TICKET-161), so an N-arg wrapper can be
 written that way; until then curry, or pack args into a struct with `hash` and memoize the
 single-arg wrapper.
+**Known limit (TICKET-192):** a `memoize1` wrapper called inside a spawned task or an Executor job faults `this value is this task's copy`, because its cache is a captured `Map`. Call it from the task that built it until TICKET-192 gives it a shared O(1) cache.
 
 ### `std.duration` — Go-like first-class time spans
 Pure-Chezzi (no native seam). `import std.duration`. `Duration` (access as `duration.Duration`) is a
