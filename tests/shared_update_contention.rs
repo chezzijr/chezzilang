@@ -21,20 +21,24 @@ main()
 
 /// Runs `SRC` at `threads` workers; returns (stdout, wall time).
 fn run_at(threads: &str) -> (String, Duration) {
-    run_src(SRC, "su", threads)
+    run_src(SRC, "su", threads, None)
 }
 
-/// Runs `src` at `threads` workers; returns (stdout, wall time). Kills the run after 40 s.
-fn run_src(src: &str, tag: &str, threads: &str) -> (String, Duration) {
+/// Runs `src` at `threads` workers, with `CHEZZI_SCHED_SEED` set to `seed` (removed on `None`);
+/// returns (stdout, wall time). Kills the run after 40 s.
+fn run_src(src: &str, tag: &str, threads: &str, seed: Option<u32>) -> (String, Duration) {
     let dir = std::env::temp_dir().join(format!("chz-t193-{tag}-{threads}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let path = dir.join("su.chz");
     std::fs::write(&path, src).expect("write program");
     let start = Instant::now();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_chezzi"))
-        .arg("run")
-        .arg(&path)
-        .env("CHEZZI_THREADS", threads)
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
+    cmd.arg("run").arg(&path).env("CHEZZI_THREADS", threads);
+    match seed {
+        Some(n) => cmd.env("CHEZZI_SCHED_SEED", n.to_string()),
+        None => cmd.env_remove("CHEZZI_SCHED_SEED"),
+    };
+    let mut child = cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -142,13 +146,51 @@ fn contended_guard_ops_grid_is_fast_at_every_worker_count() {
             let src = grid_src(init, body, fin, tasks);
             let tag = format!("{}-{tasks}", op.replace('.', "_"));
             for threads in ["1", "2", "4", "0"] {
-                let (out, took) = run_src(&src, &tag, threads);
+                let (out, took) = run_src(&src, &tag, threads, None);
                 if out.trim() != "12000" || took >= GRID_CEILING {
                     red.push(format!(
                         "{op} x{tasks} T={threads}: printed {:?} in {took:?}",
                         out.trim()
                     ));
                 }
+            }
+        }
+    }
+    assert!(
+        red.is_empty(),
+        "cells over {GRID_CEILING:?} or with a wrong value:\n{}",
+        red.join("\n")
+    );
+}
+
+/// TICKET-194 (G1): two `Shared` boxes, 6 tasks x 500 iterations of `a.update` then `b.update`.
+/// Seeded mode forces a `callback_preempt` inside about 25% of the update closures; a waiter whose
+/// first guard wait held its width permit then sat out the full 5 ms stage 1. Base debug at T=1:
+/// 9.24-9.76 s (0.04 s unseeded).
+const TWO_BOX_SRC: &str = "import std.concurrency
+a := Shared[int](0)
+b := Shared[int](0)
+parallel:
+    for _ in 0..6:
+        spawn:
+            for _ in 0..500:
+                a.update(fn(x: int) -> int: x + 1)
+                b.update(fn(x: int) -> int: x + 1)
+print(a.get(), b.get())
+";
+
+#[test]
+fn seeded_two_box_update_is_fast_at_every_worker_count() {
+    let mut red = Vec::new();
+    for seed in 1..=4 {
+        for threads in ["1", "2", "4", "0"] {
+            let tag = format!("two-box-{seed}");
+            let (out, took) = run_src(TWO_BOX_SRC, &tag, threads, Some(seed));
+            if out.trim() != "3000 3000" || took >= GRID_CEILING {
+                red.push(format!(
+                    "seed={seed} T={threads}: printed {:?} in {took:?}",
+                    out.trim()
+                ));
             }
         }
     }
