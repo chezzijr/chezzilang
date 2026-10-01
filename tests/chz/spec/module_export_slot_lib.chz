@@ -1,0 +1,8 @@
+fn f(a: int, ...rest: int) -> str:
+    return "old"
+f := fn(a: int, b: int) -> str: "{a}{b}"
+struct S:
+    n: int
+S := fn(n: int) -> int: n * 100
+fn g(a: int, b: int = 5) -> str:
+    return "{a}{b}"

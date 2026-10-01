@@ -1,0 +1,15 @@
+# TICKET-196: a module exports one record per slot. A slot declared more than once is called
+# through its final value from another module (CPython gives the same four values).
+import module_export_slot_lib
+import f from module_export_slot_lib
+
+test fn rebound_variadic_slot_runs_the_final_fn():
+    assert module_export_slot_lib.f(1, 2) == "12"
+    assert f(1, 2) == "12"
+
+test fn rebound_struct_slot_calls_the_slot():
+    assert module_export_slot_lib.S(2) == 200
+
+test fn single_fn_keeps_labels_and_defaults():
+    assert module_export_slot_lib.g(b=2, a=1) == "12"
+    assert module_export_slot_lib.g(1) == "15"
