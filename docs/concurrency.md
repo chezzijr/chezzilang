@@ -1146,8 +1146,10 @@ fn serve(tok: Token, io: Channel[str]):
 >   its child faults, in `main`, in a fn body, in a spawned task and in an Executor job. A nested
 >   nursery inherits its owner's open-nursery flags, so an owner parked at an inner join is freed.
 >   A blocking host call (offload, stdin) is cut at its return: a value that completes together with
->   the fault is dropped. An `Executor` created outside an eager job is not cancelled; its owner is
->   cut at `shutdown()`. At the two CPU checkpoints (loop back-edge, native-HOF re-entry) the owned
+>   the fault is dropped. An `Executor` created outside the nursery is not cancelled: its owner is
+>   cut at `shutdown()` (by a child's fault or a cancel), and the job runs on until a later
+>   `shutdown()` or the exit drain reduces it, as CPython lets it finish; a `--timeout` still stops
+>   it (TICKET-195). At the two CPU checkpoints (loop back-edge, native-HOF re-entry) the owned
 >   half rides the 1-in-1024 sample, so a CPU-bound owner may burn up to that many further
 >   iterations. A `defer` body is never truncated by it, and a `recover:` outside the `parallel:`
 >   still catches the child's fault.
@@ -1218,7 +1220,10 @@ fn serve(tok: Token, io: Channel[str]):
 > it (Go and asyncio surface it too). It ranks BELOW every ordinary fault and above a `deadlock` abort —
 > the cancel's root cause is the more useful report (asyncio `TaskGroup` lists `['boom', 'cleanup
 > failed']`, root cause first). A stuck cleanup's `deadlock` verdict stays swallowed when a sibling's real
-> fault is the cause.
+> fault is the cause. The same ranking holds for a nursery OWNER cut by its child's fault (TICKET-195):
+> the owner reports the child's fault, and its own `defer` fault or stuck cleanup ranks below it (Go
+> prints `panic: boom`), unless a `--timeout` / `--max-heap` halt lands in that cleanup. A party's
+> own fault keeps Go's rule: a `defer` that faults while it unwinds supersedes it.
 >
 > **A `recover:` INSIDE a defer body catches — even while the task is being torn down.** Since no
 > cancellation point fires inside a deferred call, a fault raised *beneath* a `recover:` that the defer
@@ -1248,12 +1253,19 @@ fn serve(tok: Token, io: Channel[str]):
 > something that can never arrive (`ch.recv()` no one will ever answer) leaves the program quiesced —
 > and the deadlock detector still fires (the demoted worker self-detects the quiesce). If a sibling's
 > fault is what cancelled the task, *that* fault is what is reported — the stuck cleanup's own error is
-> swallowed with its cancelled task. The same holds for a `defer` that runs on the `main` thread — a
+> swallowed with its cancelled task, and likewise when the stuck cleanup belongs to an owner whose
+> child faulted (TICKET-195). The same holds for a `defer` that runs on the `main` thread — a
 > `defer` in `main`, at module top level, or in a `parallel:` body (which runs AFTER the join): the
 > process-wide verdict counts a party whose every native re-entry is a `defer` drain, so a cleanup
 > that can never complete faults `deadlock` (fatal) instead of hanging (TICKET-136, W14-11). A pending
 > `os.exit` from another party still outranks that verdict (Go: the exit status). A cleanup a live
 > task WILL feed is not judged: that task keeps `blocked < live`.
+>
+> **A fault delivered from another party is reported as THAT party's fault (TICKET-195).** An
+> `Executor` job's fault that no join has reduced yet is reported instead of a deadlock verdict (Go
+> prints the job's panic); it stays fatal, so `recover:` cannot catch it. A child's or a job's fault
+> prints the faulting party's frames, never the frames of the owner that received it. A run that ends
+> in a deadlock verdict still drains its executors, so a finished job's buffered output is not lost.
 >
 > **Cancelling a scope cancels its nested scopes — at their CHECKPOINTS.** A `parallel:` entered from a
 > task that is then cancelled dies with it: its children observe the enclosing cancel at their own

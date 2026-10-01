@@ -107,6 +107,16 @@ this family's ticket: the hook-dispatch sites read the same `param_name_mismatch
 
 ## Family B2 — whose fault is being unwound (C1, C2, C3, C4, C5)
 
+**Status (2026-10-02): fixed by TICKET-195.** `Vm::cut` (`block::Cut`: `Cancelled` /
+`Delivered { floor }`) is the one record of "own fault or cut", replacing the `cancelled` latch and
+`owner_fault_floor`; `Vm::adopt_child_fault` is its only `Delivered` writer and installs the faulting
+party's trace (carried in `TaskOutcome::Fault` / `Halt::ChildFault`). `Vm::unwind_result` is the one
+defer ranking for an unwind with a cause (the `unwrap_or` rankings are gone). `JoinBail` trips
+`core.cancel` only for a stopped joiner (`--timeout`, the join verdict), never a cut one.
+`QuiesceState::unjoined_job_fault` derives the unjoined job fault from the executor slots (no cell),
+read at `on_step_fault`'s fatal funnel. `Vm::finish_run` is the one driver end and drains on a verdict.
+Grid: `tests/cut_cause_grid.rs`. Deviation: no separate "unjoined job fault" cell (it would be a copy).
+
 **Fact:** a party's unwind is either its OWN fault or a CUT (it is stopping because of someone else:
 cancel, a child's fault, a job's fault), and the cause decides ranking, swallowing, the trace and what
 else is stopped.

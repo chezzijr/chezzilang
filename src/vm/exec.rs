@@ -2000,8 +2000,10 @@ impl Vm {
     /// job's) is about to unwind this party. Installs the faulting party's own trace with
     /// `fault_trace_depth = usize::MAX`, so the capture in [`Vm::on_step_fault`] never replaces it
     /// with this party's frames. A cancel already latched keeps precedence (`halt_of`: cancel first).
+    /// A party running a `defer` is never cut (as in [`Vm::cancel_suppressed`]): a fault a join
+    /// inside the cleanup reduces is the cleanup's own, and supersedes the fault being unwound.
     pub(super) fn adopt_child_fault(&mut self, floor: Option<usize>, trace: Vec<TraceFrame>) {
-        if self.is_cancelled() {
+        if self.is_cancelled() || self.deferring > 0 {
             return;
         }
         self.cut = Some(Cut::Delivered { floor });

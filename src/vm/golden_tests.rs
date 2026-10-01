@@ -8031,8 +8031,13 @@ fn deferred_fault_trace_supersedes_on_both_engines() {
 /// backtrace frames. Previously the cooperative engine drained the submitted task INLINE on the
 /// entry `Vm`, so the task's callee frames survived into `fault_trace` and printed `at boom` /
 /// `at <closure>` / `at main`, while M:N ran each task on an isolated worker `Vm` and discarded that
-/// worker's trace, printing only `at main`. The trace now prints `[main]` — matching a plain
-/// nursery-task panic (already `at main`, asserted by the neighbor guard below).
+/// worker's trace, printing only `at main`. That printed `[main]` — matching a plain
+/// nursery-task panic (also `at main`, the neighbor guard below).
+///
+/// TICKET-195 changed all three to the FAULTING party's frames: the job's `[boom, <closure>]`, the
+/// child's `[boom, <spawned task>]`, at a join or at the exit drain alike (Go prints the panicking
+/// goroutine's stack; CPython the job's traceback). Edge 2 is unchanged: a join INSIDE a `defer`
+/// is the cleanup's own fault, so it supersedes the outer panic and reports the receiver's frames.
 #[test]
 fn executor_task_fault_trace_matches_on_both_engines() {
     let dir = std::env::temp_dir().join("chezzi_b4_executor_trace");
@@ -8048,14 +8053,21 @@ fn executor_task_fault_trace_matches_on_both_engines() {
     let mn = mn.expect_err("M:N should fault");
     let se_names: Vec<&str> = se.trace.iter().map(|f| f.function.as_str()).collect();
     let mn_names: Vec<&str> = mn.trace.iter().map(|f| f.function.as_str()).collect();
-    assert_eq!(se_names, vec!["main"], "Executor trace == [main]");
-    assert_eq!(mn_names, vec!["main"], "M:N Executor trace == [main]");
+    assert_eq!(
+        se_names,
+        vec!["boom", "<closure>"],
+        "Executor trace == the job's"
+    );
+    assert_eq!(
+        mn_names,
+        vec!["boom", "<closure>"],
+        "M:N Executor trace == the job's"
+    );
     // Soundness invariants (message + location) stay identical across engines.
     assert_eq!(se.message, mn.message, "same fault message");
     assert_eq!(se.span, mn.span, "same fault location");
 
-    // Neighbor guard: a plain nursery-task panic (non-Executor) was already `at main` —
-    // the fix must not regress it.
+    // Neighbor guard: a plain nursery-task panic (non-Executor) prints the child's frames too.
     let nu_src = "fn boom():\n    panic(\"kaboom\")\nfn main():\n    parallel:\n        spawn: boom()\nmain()\n";
     let nu_path = dir.join("nu.chz");
     std::fs::write(&nu_path, nu_src).unwrap();
@@ -8065,12 +8077,20 @@ fn executor_task_fault_trace_matches_on_both_engines() {
     let nmn = nmn.expect_err("M:N nursery should fault");
     let nse_names: Vec<&str> = nse.trace.iter().map(|f| f.function.as_str()).collect();
     let nmn_names: Vec<&str> = nmn.trace.iter().map(|f| f.function.as_str()).collect();
-    assert_eq!(nse_names, vec!["main"], "nursery trace unchanged");
-    assert_eq!(nmn_names, vec!["main"], "M:N nursery trace unchanged");
+    assert_eq!(
+        nse_names,
+        vec!["boom", "<spawned task>"],
+        "nursery trace == the child's"
+    );
+    assert_eq!(
+        nmn_names,
+        vec!["boom", "<spawned task>"],
+        "M:N nursery trace == the child's"
+    );
 
     // B4 review edge 1: IMPLICIT end-of-program drain (no `ex.shutdown()`) — the executor is
-    // reaped by `drain_live_executors` AFTER `main` returned, so there is no enclosing `run_until`
-    // to re-capture at: the fault prints with an EMPTY trace.
+    // reaped by `drain_live_executors` AFTER `main` returned. It printed an EMPTY trace (no
+    // enclosing `run_until` to re-capture at); since TICKET-195 the drain's join adopts the job's.
     let im_src = "import std.concurrency\nfn boom():\n    panic(\"kaboom\")\nfn main():\n    ex := Executor()\n    ex.submit(fn(): boom())\nmain()\n";
     let im_path = dir.join("implicit.chz");
     std::fs::write(&im_path, im_src).unwrap();
@@ -8080,11 +8100,15 @@ fn executor_task_fault_trace_matches_on_both_engines() {
     let imn = imn.expect_err("M:N implicit drain should fault");
     let ise_names: Vec<&str> = ise.trace.iter().map(|f| f.function.as_str()).collect();
     let imn_names: Vec<&str> = imn.trace.iter().map(|f| f.function.as_str()).collect();
-    assert_eq!(ise_names, Vec::<&str>::new(), "implicit-drain trace empty");
+    assert_eq!(
+        ise_names,
+        vec!["boom", "<closure>"],
+        "implicit-drain trace == the job's"
+    );
     assert_eq!(
         imn_names,
-        Vec::<&str>::new(),
-        "M:N implicit-drain trace empty"
+        vec!["boom", "<closure>"],
+        "M:N implicit-drain trace == the job's"
     );
 
     // B4 review edge 2 (the medium charge): `defer ex.shutdown()` while `main` is unwinding from
