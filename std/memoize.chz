@@ -5,11 +5,13 @@
 # or an Executor job reads and fills the SAME cache as its creator, as CPython `functools.cache` does
 # from any thread. Lookups and single-entry inserts on it are O(1) expected.
 #
-# Identity (DEC-191): the task that holds the original wrapper also keeps a private alias map, so it
-# gets the SAME object on every call (CPython `f(1) is f(1)`; a mutation of the result stays visible).
-# A task copy of the wrapper (`concurrency.is_task_copy`) never writes that alias and gets a fresh
-# snapshot of the cached value instead. Two tasks missing one key at the same moment may both run `f`;
-# CPython's `functools.cache` does the same.
+# Identity (DEC-191, TICKET-203): the task that holds the original wrapper also keeps a private alias
+# map, so it gets the SAME object on every call (CPython `f(1) is f(1)`; a mutation of the result stays
+# visible). A task copy of the wrapper carries that map as it was at the crossing and reads it first,
+# so it sees the value as of the crossing, like every other captured value; a write to it there faults
+# (D4). A copy never writes the alias (`concurrency.is_task_copy`); a key the owner had not cached
+# reads a fresh snapshot from the shared cache. Two tasks missing one key at the same moment may both
+# run `f`; CPython's `functools.cache` does the same.
 #
 # ponytail: single-argument only — `memoize1(f: fn(K) -> V)`, keyed by the arg (`K: Hashable + Eq`,
 # W7-53: a Map key needs both). A
@@ -22,17 +24,15 @@ import std.concurrency
 # Cache lookup-or-compute, split out because a closure body is a single expression: the returned
 # wrapper delegates here so it can do the `Option` match + compute + store.
 fn _memo_get[K: Hashable + Eq, V](shared: RwShared[Map[K, V]], own: Map[K, V], f: fn(K) -> V, k: K) -> V:
-    owner := not concurrency.is_task_copy(own)
-    if owner:
-        match own.get(k):
-            Some(v):
-                return v
-            None:
-                pass
+    match own.get(k):
+        Some(v):
+            return v
+        None:
+            pass
     v := match shared.get_key(k):
         Some(x): x
         None: _memo_fill(shared, f, k)
-    if owner:
+    if not concurrency.is_task_copy(own):
         own[k] = v
     return v
 

@@ -522,7 +522,7 @@ future-style handle over one shared state core (every copy of the handle, in any
 - `submit_task[T](ex, f) -> Task[T]` — submit `f` detached, get a handle (builds over
   `ex.submit_outcome(f, out, err)`). The work starts at the `submit` and is waited for by
   `shutdown()` (or the program-exit join). Read the result AFTER that call.
-- `Task.get() -> T` — block until the result lands, then return it; idempotent, and the same answer in every task (the outcome lives in one `Shared` core; the task holding the original handle gets the same object back each call, a task holding a copy gets a fresh snapshot). If
+- `Task.get() -> T` — block until the result lands, then return it; idempotent, and the same answer in every task (the outcome lives in one `Shared` core; the task holding the original handle gets the same object back each call, a task holding a copy gets the value as of the crossing, or a fresh snapshot when the owner had not called `get()` before it). If
   the job faulted, `.get()` re-raises the job's own error message (CPython's `Future.result()`
   shape, measured: `result raised: RuntimeError job failed` / `done= True`) — `shutdown()` still
   raises the job's fault too, and its error keeps the job's own origin (`e.file()`/`line()`/`col()`

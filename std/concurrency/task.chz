@@ -22,10 +22,13 @@
 # the program-exit join). The canonical shape is: submit every task, `shutdown()`, then `.get()` each.
 #
 # IDENTITY: the task that holds the original handle caches the value in `cached`, so its repeated
-# `get()` returns the SAME object (CPython `fut.result() is fut.result()`). A task that holds an
-# airlock copy of the handle cannot write `cached` (D4), so each of its `get()` calls returns a fresh
-# snapshot from the core. `concurrency.is_task_copy(self)` decides which case applies; it reads the
-# same predicate as the D4 write check, so `get()` never attempts a write that would fault.
+# `get()` returns the SAME object (CPython `fut.result() is fut.result()`). A copy of the handle (a
+# spawned task's, an Executor job's) carries `cached` as it was at the crossing, so its `get()`
+# returns the value as of the crossing, as every other captured value does (owner decision
+# 2026-10-02, TICKET-203); a write to it there faults (D4), as for any captured value. A copy whose
+# owner had not called `get()` reads a fresh snapshot from the core. `concurrency.is_task_copy(self)`
+# gates only the `cached` write; it reads the same predicate as the D4 write check, so `get()` never
+# attempts a write that would fault.
 
 import std.concurrency
 
@@ -36,7 +39,7 @@ enum TaskState[T]:
     Failed(str)
 
 # A future handle. `core` is the one record of the outcome; `ch`/`err` are the channels
-# `run_outcome` settles; `cached` holds the value object for the task that owns the original handle.
+# `run_outcome` settles; `cached` holds the owner's value object; a copy carries it as of the crossing.
 # Never block inside `core.update`: a guard held across `ch.recv()` turns a deadlock fault into a hang.
 struct Task[T]:
     ch: Channel[T]
@@ -45,16 +48,16 @@ struct Task[T]:
     cached: Option[T]
 
     # Block until the result is available, then return it, or re-raise the job's fault (CPython
-    # `Future.result()`). Idempotent, and every task gets an equal value. In the task that owns the
-    # handle every call returns the same object; in a task holding a copy each call is a fresh snapshot.
+    # `Future.result()`). Idempotent. `cached` answers first in every task: the owner's alias, or in a
+    # copy that alias as it was at the crossing. Only the owner fills it, so a copy whose owner had not
+    # called `get()` before the crossing reads a fresh snapshot from the core on each call.
     fn get(self) -> T:
-        if concurrency.is_task_copy(self):
-            return _outcome(self)
         match self.cached:
             Some(v): return v
             None: pass
         v := _outcome(self)
-        self.cached = Some(v)
+        if not concurrency.is_task_copy(self):
+            self.cached = Some(v)
         return v
 
     # True once the job has finished, faulted or cancelled. Never blocks.

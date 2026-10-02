@@ -1723,7 +1723,7 @@ gap that bare `Executor.submit(f)` is fire-and-forget (returns nothing).
 | item | signature | semantics |
 | --- | --- | --- |
 | `submit_task` | `submit_task[T](ex: Executor, f: fn() -> T) -> Task[T]` | submit `f` to `ex` for detached execution and get a handle for its result. The work STARTS at the submit and is waited for by `shutdown()` (or the program-exit join). |
-| `Task.get` | `get(self) -> T` | block until the result is available, then return it, or re-raise the job's own fault message if the job faulted (CPython `Future.result()`). Idempotent, and the same answer in every task. **Identity:** in the task that holds the original handle every call returns the same object, so `a := t.get(); a.push(3)` shows in the next `t.get()` (CPython `fut.result() is fut.result()`). A task holding an airlock copy of the handle gets a fresh snapshot per call and never sees the owner's later writes; CPython would, but under D4 every crossing copies. A task `shutdown_now()` cancelled raises `task cancelled: shutdown_now() stopped it before it finished` at once (CPython: `CancelledError`). |
+| `Task.get` | `get(self) -> T` | block until the result is available, then return it, or re-raise the job's own fault message if the job faulted (CPython `Future.result()`). Idempotent, and the same answer in every task. **Identity:** in the task that holds the original handle every call returns the same object, so `a := t.get(); a.push(3)` shows in the next `t.get()` (CPython `fut.result() is fut.result()`). A task holding an airlock copy of the handle gets the value as of the crossing: the owner's object as copied with the handle, including the owner's writes before the spawn (CPython: the same object). A write to it in the copy faults `this value is this task's copy` (D4), as for any captured value. A copy whose owner had not called `get()` before the crossing gets a fresh snapshot from the core on each call. A task `shutdown_now()` cancelled raises `task cancelled: shutdown_now() stopped it before it finished` at once (CPython: `CancelledError`). |
 | `Task.done` | `done(self) -> bool` | `true` once the job has finished, faulted, or been cancelled by `shutdown_now()`, in every task holding a copy of the handle. Never blocks. A faulted job is done; `get()` then re-raises its fault. |
 
 Canonical shape: submit every task, `shutdown()`, then `.get()` each. **Determinism rule:** a `Task`'s
@@ -1765,7 +1765,7 @@ result cached (`K: Hashable + Eq` — a map key needs both, `docs/gaps.md` W7-53
 Executor job reads and fills the same cache as its creator, as CPython `functools.cache` does from any
 thread. Lookups and inserts are O(1) expected. The task holding the original wrapper gets the **same
 object** on every call (CPython `f(1) is f(1)`; a mutation of the result stays visible), through a
-private alias map; a task copy of the wrapper gets a fresh snapshot of the cached value
+private alias map; a task copy of the wrapper reads that map as copied at the crossing, so it sees the value as of the crossing and its write to that value faults (D4); a key the owner had not cached gives the copy a fresh snapshot of the shared cache's value
 (`concurrency.is_task_copy`, DEC-191). Two tasks missing one key at the same moment may both run `f`,
 as with CPython's `functools.cache`.
 **v1 limit (not a bug):** single-argument only. A general N-arg cache would key a `Map[(A, B), V]` on

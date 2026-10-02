@@ -21,7 +21,7 @@ the bare-name premise wave 16 named, surviving in three consumers TICKET-186/196
 | C1 | P1 | job's nursery fiber parked in `ln.accept()`/`c.read()`; `ex.shutdown_now()` | hangs forever, no defer runs (recv/sleep/guard parks are cut in ~120 ms) | CPython TaskGroup cancel: defers, then returns |
 | K5 | P1 | `import exit from std.os; exit := fn(c: int): ...`; fn ends with `exit(3)` | check OK, runtime `internal: function 'f' fell off the end` | Rust E0308 |
 | K1 | P1 | `k := 1; fn f(k: int = k)`; `g: fn(int)->int = fn(x: int) -> int: x*2` beside param `x`; `[x for x in ..]` | `default value cannot reference parameter 'k'` | CPython accepts (`1`, `6`) |
-| A1 | P1 (owner) | owner `xs := t.get(); xs.push(99)`; a spawned task reads `xs` and `t.get()` | `captured xs: [1, 99]  t.get(): [1]` (same for `memoize1`) | CPython both `[1, 99]` |
+| A1 | P1 (owner) | owner `xs := t.get(); xs.push(99)`; a spawned task reads `xs` and `t.get()` | `captured xs: [1, 99]  t.get(): [1]` (same for `memoize1`) | CPython both `[1, 99]` — **fixed TICKET-203** |
 | C2 | P2 | `chezzi test --timeout=500`: a job faults at 0 ms, the test then sleeps 3 s | only `TIMED-OUT`; the job's index fault is dropped | Go: the goroutine panic ends the run |
 | K4 | P2 | `p := pair[str, int]` | `expected ']', found ','` (the call form and one-arg `idt[int]` work) | Go accepts |
 | A2 | P2 | `t.0.1` | `expected identifier, found float 0.1` | Rust `2` — **fixed in place 7e0581a3** |
