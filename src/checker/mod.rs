@@ -1026,6 +1026,33 @@ pub fn check_diags_no_memo(
     check_diags_with(module, false)
 }
 
+impl Checker {
+    /// THE end of a check: hand out the errors and warnings, each reported once. A position can be
+    /// checked twice by design — a field default is typed at its declaration and again where a
+    /// constructor call inlines it (DEC-094) — and the same diagnostic at the same span is then one
+    /// finding, not two (W19 S3: `n: int = Self.mk()` printed `unknown name 'Self'` twice).
+    fn finish_diags(&mut self) -> (Result<(), Vec<CheckError>>, Vec<CheckError>) {
+        fn once(v: Vec<CheckError>) -> Vec<CheckError> {
+            // ponytail: O(n^2) over the diagnostics of one run; a run reports a handful.
+            let mut out: Vec<CheckError> = Vec::with_capacity(v.len());
+            for e in v {
+                if !out.contains(&e) {
+                    out.push(e);
+                }
+            }
+            out
+        }
+        let warnings = once(std::mem::take(&mut self.warnings));
+        let errors = once(std::mem::take(&mut self.errors));
+        let res = if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        };
+        (res, warnings)
+    }
+}
+
 #[cfg(test)]
 fn check_diags_with(
     module: &crate::ast::Module,
@@ -1040,13 +1067,7 @@ fn check_diags_with(
         c.seed_native_prelude_sigs();
         c.check_module(&module.stmts, None, &[]);
         c.check_provider_cycles();
-        let warnings = std::mem::take(&mut c.warnings);
-        let res = if c.errors.is_empty() {
-            Ok(())
-        } else {
-            Err(std::mem::take(&mut c.errors))
-        };
-        (res, warnings)
+        c.finish_diags()
     })
 }
 
@@ -1089,13 +1110,7 @@ pub fn check_graph_diags(
         let mut c = Checker::new();
         c.entry_fn = entry_fn.map(str::to_string);
         c.run_graph_pass(graph, false);
-        let warnings = std::mem::take(&mut c.warnings);
-        let res = if c.errors.is_empty() {
-            Ok(())
-        } else {
-            Err(std::mem::take(&mut c.errors))
-        };
-        (res, warnings)
+        c.finish_diags()
     })
 }
 

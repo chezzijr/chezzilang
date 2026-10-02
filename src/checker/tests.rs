@@ -37553,7 +37553,9 @@ fn n3_field_default_naming_self_reports_no_fill_error() {
         let src =
             format!("struct A:\n{fields}    fn mk() -> int:\n        return 41\nprint(A())\n");
         let errs = check_desugared(&src);
-        assert!(!errs.is_empty(), "expected an error for {src:?}");
+        // Exactly one: the default is typed at its declaration and again inlined at `A()`, and the
+        // same diagnostic at the same span is one finding (`finish_diags`).
+        assert_eq!(errs.len(), 1, "expected one error for {src:?}: {errs:?}");
         for e in &errs {
             assert!(
                 e.message.contains("unknown name 'Self'")
